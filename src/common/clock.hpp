@@ -12,8 +12,9 @@
 // the crystal is a known fixture here, not something to discover.
 //
 // No 32.768 kHz crystal is assumed: the RTC/ticker falls back to the internal
-// OSC32K automatically (see init_ticker()); XOSC32K is left untouched so
-// PF0/PF1 stay free for USART2.
+// OSC32K automatically (see init_ticker()); XOSC32K is left untouched
+// (on this board the serial link uses USART2 ALT1 on PF4/PF5, so PF0/PF1 are
+// simply unused).
 //
 // CLKCTRL registers are CCP-protected, hence _PROTECTED_WRITE.
 

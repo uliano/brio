@@ -144,4 +144,5 @@ for both sources.
 
 There is NO 32.768 kHz crystal: the RTC/ticker uses the internal OSC32K -
 init_ticker() falls back to it automatically. Do NOT enable XOSC32K (the
-32 kHz crystal input): its pins are PF0/PF1, which are the USART2 lines.
+32 kHz crystal input, PF0/PF1) unless a 32k crystal is actually fitted; on
+this board the serial link uses USART2 ALT1 on PF4/PF5, so PF0/PF1 are free.
