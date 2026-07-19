@@ -143,9 +143,10 @@ PlatformIO's custom DAP events). Harmless; disable probe-rs per-workspace.
 
 ## Apps
 
-| App       | What it does                                             |
-|-----------|----------------------------------------------------------|
-| `blink`   | Toggles an LED on **PF2** at ~1 Hz (24 MHz internal osc) |
+| App       | What it does                                                               |
+|-----------|----------------------------------------------------------------------------|
+| `blink`   | Toggles an LED on **PF2** at ~1 Hz                                         |
+| `serial`  | USART2 ALT1 **PF4/PF5** -> CH340 @ 460800: timestamped counter, clock source (XTAL/OSCHF) on every line, PF2 in step |
 
 ## Hardware
 
