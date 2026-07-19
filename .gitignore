@@ -1,0 +1,24 @@
+# PlatformIO build output & metadata
+.pio/
+# PlatformIO regenerates these from platformio.ini + the active env:
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+# apps.ini IS committed on purpose: it is the env list (a fresh clone has the
+# apps without first running tools/gen_apps.py).
+
+# Transient linker map in the project root (gen_lst.py moves it into .pio/).
+firmware.map
+
+# Python bytecode cache from tools/
+__pycache__/
+*.pyc
+
+# Vendor datasheets: kept locally, not redistributed.
+*.pdf
+
+# Generated analysis plots (regenerable via tools/adc_stat.py).
+plots/
+*.png
+
+# Captured measurement data (regenerable by re-running the capture firmware/tool).
+*.csv
