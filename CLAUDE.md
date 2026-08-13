@@ -87,8 +87,18 @@ AO kernel decisions taken so far:
   COPIED into per-AO queues - no pools, no reference counting (QP-style
   pools reconsidered only if large events or heavy multicast ever
   materialize). Each AO declares its own event type: a `std::variant` of
-  small trivially-copyable structs (both enforced via static_assert;
-  size target <= 8 bytes). Plain shared structs (e.g. `TempChanged`) are
+  small trivially-copyable structs (enforced via static_assert). The
+  8-byte size target is a GUIDELINE for the event ENVELOPE, not a law
+  (refined 2026-08-13): every slot of a queue pays that AO's largest
+  alternative and the push copies it with interrupts masked (~1 us per
+  8 bytes at 24 MHz), so keep the max alternative small - but per-AO
+  deviations are legal with numbers in hand (the queues are per-AO,
+  nobody else pays). Payloads above the budget travel BY REFERENCE
+  (pointer/span, with an ownership rule) when the data already lives in
+  a structurally necessary buffer (rings, line buffers); BY VALUE when
+  lifetime simplicity is worth the RAM. Nothing is ever chopped into
+  multiple events: one event = one envelope, the cargo stays put.
+  Plain shared structs (e.g. `TempChanged`) are
   the lingua franca between publishers and subscribers - no global
   signal enum, no system-wide event type. `publish()` is layered on top
   of `post()` with compile-time subscriber lists, one copy per
@@ -245,6 +255,32 @@ AO kernel decisions taken so far:
   abstraction (generalize on the second real specimen). Deadline
   arithmetic over wrapping counters (signed difference) is documented
   where it will live: the time-event code.
+- **Serial AO (2026-08-13): bytes below, line events above, ownership
+  by reference.** The Uart driver stays the low level (rings + ISR
+  bodies, untouched roles); `SerialAo<Transport, P, LineSink>`
+  (util/serial_ao.hpp) is the kernel citizen above: Uart::rxc() now
+  returns the RX ring's empty->non-empty EDGE and the app ISR glue
+  posts RxActivity on true (no event flood, no lost wakeup: only
+  draining empties the ring, so the next byte is an edge again).
+  SerialAo drains, feeds two ping-pong LineAssemblers, posts
+  LineReceived{char*} (reference: the 80-byte line never enters a
+  queue; valid and mutable only during the sink's dispatch). With both
+  buffers in flight it stops draining (the ring absorbs - that is its
+  job) and SELF-POSTS RxActivity. SCHEDULING CONTRACT: the line
+  consumer must precede SerialAo in the Kernel pack - the kernel then
+  consumes every posted line before SerialAo runs again, which is why
+  in_flight can reset at dispatch entry and two buffers are exactly
+  sufficient. TX stays the blocking try_put print: the drain side is
+  an ISR (preempts the loop, so the spin always progresses - stall,
+  not deadlock), worst case ~2 ms at 460800, zero when the ring has
+  room; measured cost of write_byte ~45-50 cycles/byte (<10% of the
+  21.7 us wire time). The full-queue policy costs nothing on the
+  non-full path (the check exists anyway), so it is pure failure
+  semantics: RX drops+counts (the world cannot be paused), TX blocks
+  (we can wait, and half-messages are worse than late ones); a
+  message-atomic drop ("say it all or say nothing" + counter) is the
+  noted future option for telemetry. Uart ring defaults resized
+  512/256 -> 64/256 (8-bit indices on both, ~450 bytes RAM back).
 - **Layering (2026-08-13): four strata as directories under
   lib/brio/src/, includes always carry the stratum prefix.** kernel/
   (pure logic, includes nothing of brio), util/ (pure services - may
@@ -465,6 +501,10 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
                            sci wrappers, crlf; extend via print_one + ADL
     timestamp.hpp          TimeStamp value type, ms fraction (produced by
                            the timebase driver, printed by print.hpp)
+    serial_ao.hpp          SerialAo<Transport, P, LineSink>: RX bytes ->
+                           LineReceived events (ping-pong buffers,
+                           self-post backpressure, consumer-above-producer
+                           scheduling contract)
     proto/line_parser.hpp  LineAssembler (push) + console/SCPI parsers +
                            CommandRouter<Sink>
   src/avrdx/             everything that knows avr/io.h

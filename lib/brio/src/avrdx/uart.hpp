@@ -52,8 +52,13 @@ namespace brio {
 /// USART pin routing (PORTMUX). alt1 = the ALT1 position of the instance.
 enum class Route : uint8_t { def = 0, alt1 = 1 };
 
+// Ring defaults sized for console-class traffic AND for cheap indices:
+// both <= 256 keeps Ring's index_t at 8 bits (measured on write_byte: the
+// 512-byte TX ring's 16-bit indices cost ~10 extra cycles per byte). RX 64
+// absorbs ~1.4 ms of full-rate 460800 traffic - plenty against dispatches
+// that last microseconds. Streaming apps may still ask for more.
 template <int usart_num, Route route = Route::def,
-          int rx_size = 256, int tx_size = 512>
+          int rx_size = 64, int tx_size = 256>
 class Uart {
     static_assert(usart_num >= 0 && usart_num <= 5,
                   "usart_num must be 0..5");
@@ -178,10 +183,16 @@ public:
      * RXDATAH (status for the byte at the FIFO head) must be read BEFORE
      * RXDATAL (which advances the FIFO). Corrupted bytes (frame/parity) are
      * counted and dropped; BUFOVF means the hardware already lost bytes.
+     *
+     * @return true when the RX ring transitioned empty -> non-empty: the
+     * edge signal for kernel glue ("post RxActivity to the serial AO on
+     * true"). Every empty->non-empty transition reports true and the
+     * consumer only empties the ring by draining it, so no wakeup is ever
+     * lost. Plain (non-kernel) apps may ignore the return value.
      */
     // always_inline: single call site (the ISR binding) - see ticker.hpp
     // pit() for the register-set rationale.
-    [[gnu::always_inline]] static void rxc() {
+    [[gnu::always_inline]] static bool rxc() {
         const uint8_t status = regs().RXDATAH;
         const uint8_t data = regs().RXDATAL;
 
@@ -191,11 +202,14 @@ public:
         if (status & (USART_FERR_bm | USART_PERR_bm)) {
             if (status & USART_FERR_bm) m_frame_errors = m_frame_errors + 1;
             if (status & USART_PERR_bm) m_parity_errors = m_parity_errors + 1;
-            return;  // drop the corrupted byte
+            return false;  // drop the corrupted byte
         }
+        const bool was_empty = m_rx.empty_from_isr();
         if (!m_rx.try_put_from_isr(data)) {
             m_rx_overruns = m_rx_overruns + 1;
+            return false;  // full ring cannot be empty: no edge
         }
+        return was_empty;
     }
 
     /**
