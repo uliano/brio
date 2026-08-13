@@ -10,6 +10,17 @@ Claude will interact with the user in italian but all the edits in the files, in
 
 Only ASCII <=127 characters will be allowed in the documents.
 
+## Documentation
+
+Design documentation lives in `docs/` (plain Markdown, GitHub-rendered,
+MkDocs-ready; see docs/README.md for the rules). Any change that alters
+a documented design decision updates the matching docs/design/*.md in
+the same change. Headers remain the canonical API reference - docs hold
+the WHY and the contracts, never duplicated signatures. New design
+decisions land in docs/design/ (dated), not as further growth of the
+decision log below; the log below is the historical seed and stays
+authoritative for me until explicitly migrated.
+
 ## Project Overview
 
 Bare-metal C++ experiments on an **AVR128DB48** (48-pin, 128 KB flash, 16 KB
@@ -534,13 +545,15 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
                            sci wrappers, crlf; extend via print_one + ADL
     timestamp.hpp          TimeStamp value type, ms fraction (produced by
                            the timebase driver, printed by print.hpp)
-    serial_ao.hpp          SerialAo<Transport, P, LineSink>: RX bytes ->
+    serial_port.hpp        SerialPort<Transport, P, LineSink>: RX bytes ->
                            LineReceived events (ping-pong buffers,
                            self-post backpressure, consumer-above-producer
-                           scheduling contract)
-    spi_ao.hpp             SpiAo<Bus, P>: SPI bus arbiter - pending FIFO,
+                           scheduling contract; born SerialAo, Ao suffix
+                           dropped 2026-08-13)
+    spi_bus.hpp            SpiBus<Bus, P>: SPI bus arbiter - pending FIFO,
                            reject-when-full, ReplyTo completion, engine
-                           handshake via TransferDone
+                           handshake via TransferDone (born SpiAo, Ao
+                           suffix dropped 2026-08-13)
     proto/line_parser.hpp  LineAssembler (push) + console/SCPI parsers +
                            CommandRouter<Sink>
   src/avrdx/             everything that knows avr/io.h
@@ -558,8 +571,6 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
                            per-byte ISR pump, CS owned by the engine
     ticker.hpp             BasicTicker<tps> static RTC/PIT timebase
                            (alias Ticker = BasicTicker<1024>)
-    timer.hpp              Timer<Millis|Secs|Ticks> callback soft timers
-                           (legacy: superseded by kernel time events)
   src/host/              the test "target"
     platform_host.hpp      HostPlatform: depth-counting critical section,
                            virtual clock, idle/break call recorders
@@ -610,9 +621,9 @@ back-porting): the H/L union word order made ticks() advance by 65536 per
 tick, and millis() ran 0.7% fast because window position 0x00 was not
 skipped. See the NOTE in lib/brio/src/ticker.hpp.
 
-`brio::Timer<Unit>` has no virtual functions (the old TimerBase vtable and the
-operator delete stubs are gone); member callbacks use the compile-time
-trampoline `brio::bind<&Class::method>(&object)`.
+The legacy callback `Timer<Unit>` (avrdx/timer.hpp) and its `brio::bind`
+trampoline were REMOVED on 2026-08-13 together with their last user (the
+pre-kernel `console` app): kernel time events are the one way to wait.
 
 ## Toolchain std gotcha
 

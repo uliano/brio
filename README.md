@@ -17,9 +17,9 @@ avrdude 8.1) and flashed with an **Atmel-ICE** over UPDI. No Arduino framework.
   (monostate) drivers (`brio::Uart<2, brio::Route::alt1>`, `brio::Ticker`,
   `brio::Pin<'F',2>`), C++20 concepts instead of virtual interfaces,
   `brio::print(sink, ...)` variadic formatting, push-based line/command
-  parsing (`proto/`), software timers without vtables
-  (`brio::bind<&Class::method>`). One flat `brio` namespace; family differences
-  handled with device-macro guards.
+  parsing (`proto/`), and a QV-style active-object kernel (event queues,
+  flat state machines, time events). One flat `brio` namespace; family
+  differences handled with device-macro guards. Design docs in `docs/`.
 
 ## Quick start
 
@@ -190,12 +190,12 @@ no `build_src_filter` changes needed.
 
 | App       | What it does                                                               |
 |-----------|----------------------------------------------------------------------------|
-| `blink`   | Toggles an LED on **PF2** at ~1 Hz                                         |
-| `serial`  | USART2 ALT1 **PF4/PF5** -> CH340 @ 460800: timestamped counter, clock source (XTAL/OSCHF) on every line, PF2 in step |
-| `console` | Interactive command console @ 460800 (HELP, LED, UPTIME, ERR): full-stack test of uart + print + proto parser + timers |
-| `ao_blink` | First **brio kernel** firmware: BlinkerAo toggles PF2 on its periodic time event, SupervisorAo cycles the period (500/250/100 ms) every 3 s by posting a command - no delay loops, CPU in IDLE sleep between events |
-| `ao_console` | The console on the **brio kernel**: SerialAo (RX bytes -> line events, ping-pong buffers), ConsoleAo (parse/route/reply), BlinkerAo (heartbeat FSM + LED commands via posted events). Same commands as `console`, zero polling |
-| `spi_loopback` | SPI stack test: jumper **PA4(MOSI) -> PA5(MISO)**, a full-duplex 8-byte transaction per second through SpiAo + the Spi<0> engine, verdict on the serial console (no jumper = FAIL 0xFF, by design) |
+| `blink`   | The minimal kernel app: Blinker toggles **PF2** on its periodic time event, Supervisor cycles the period (500/250/100 ms) every 3 s by posting a command - no delay loops, CPU in IDLE sleep between events |
+| `console` | Interactive command console @ 460800 (HELP, LED, UPTIME, ERR): SerialPort (RX bytes -> line events, ping-pong buffers), Console (parse/route/reply), Blinker (heartbeat FSM + LED commands via posted events), zero polling |
+| `spi_loopback` | SPI stack test: jumper **PA4(MOSI) -> PA5(MISO)**, a full-duplex 8-byte transaction per second through SpiBus + the Spi<0> engine, verdict on the serial console (no jumper = FAIL 0xFF, by design) |
+| `display_id` | Reads the display controller's DCS registers (RDDPM, RDDID, ID4, 0xBF device code) and prints the raw answers: the aliveness/identification probe that unmasked the 3.5" module as an **ILI9481** |
+| `display_fill` | ILI9481 full-screen solid fill cycling red/green/blue (18-bit pixels, CASET/PASET + RAMWR/3C row writes, INVON for the 9481 panel polarity) |
+| `spi_duo` | **Two devices, one arbitrated bus**: ILI9481 fill (960-byte rows @ 6 MHz) + XPT2046 touch polling (3-byte conversions @ 1.5 MHz, T_CS on PD5) through the same SpiBus; touch steers the fill palette, per-request clock switching |
 
 ## Hardware
 
@@ -203,12 +203,17 @@ no `build_src_filter` changes needed.
 - Supply: jumper-selectable **3.3 V / 5 V**; VDDIO2 is powered, so PORTC
   (the MVIO domain) is usable - and could one day talk 3.3 V logic while
   the rest of the chip runs 5 V, no level shifters.
-- Bench (SPI/I2C experiments, 5 V rail): SPI0 on PA4(MOSI)/PA5(MISO)/
+- Bench (SPI/I2C experiments, **3.3 V rail** - the 3.5" module has no
+  level shifter on the display signals): SPI0 on PA4(MOSI)/PA5(MISO)/
   PA6(SCK); PD0=CS display, PD1=RS/DC, PD2=RST display, PD3=CS MCP3550,
-  PD4 reserved for the module's SD_CS; TWI0 reserved on PA2(SDA)/PA3(SCL)
+  PD4 reserved for the module's SD_CS, PD5=T_CS (XPT2046 touch, same
+  shared bus, PEN unused); TWI0 reserved on PA2(SDA)/PA3(SCL)
   with 4.7k pull-ups for the MCP47CVB22 (dual 12-bit DAC, addr 0x60).
-  The 2.4" SPI display (chip-on-glass, ILI9341 suspect) runs at VCC=5 V
-  with its J1 open (on-board LDO).
+  Display: 3.5" red module **HST035003-A**, controller **ILI9481**
+  (320x480, SPI = 18-bit pixels only, panel needs INVON), XPT2046
+  resistive touch on board (its U2; U1 is the LDO), BL tied high.
+  The older 2.4" module (frozen white through every protocol despite
+  verified signals) is parked as defective-suspect.
 - Programmer/debugger: Atmel-ICE over UPDI. **Plug the cable into the Atmel-ICE
   `AVR` port, NOT the `SAM` port.** The SAM port is for ARM/SAM and fails
   silently: avrdude still sees the ICE on USB, but `Vtarget` reads ~1.71 V
