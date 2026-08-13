@@ -267,6 +267,26 @@ AO kernel decisions taken so far:
   Payload fails to compile at the reply_to site. This is the return
   channel every bus AO uses; the bus AO's request QUEUE doubles as the
   bus arbiter (contending clients are serialized by the kernel).
+- **SPI AO (2026-08-13): the bus AO owns arbitration, an internal
+  pending FIFO owns the waiting.** util/spi_ao.hpp is generic over the
+  Bus engine (avrdx-side driver moving bytes under interrupts; a fake
+  in host tests). Design discovery worth remembering: the event queue
+  ALONE cannot arbitrate a bus, because a transaction OUTLIVES the
+  dispatch that starts it (it completes on interrupts later) - while
+  busy the kernel still delivers the next request, which therefore
+  waits in a small internal pending FIFO (main-context only, no
+  critical sections). Full FIFO = immediate SpiDone{spi_rejected}
+  reply + counter: never silent, never blocking. Engine handshake
+  mirrors the uart edge pattern: the app ISR glue posts
+  TransferDone{status} when the engine finishes; the AO replies
+  through the request's ReplyTo capsule and starts the next pending
+  transfer. idle/busy as a real 2-state FSM. The request event
+  (~14-byte descriptor) exceeds the 8-byte envelope guideline: a
+  recorded legal deviation - the request IS the arbitration token.
+  Transaction descriptor (target side, upcoming avrdx/spi.hpp):
+  {cs, dc, cmd span (DC low), tx/rx spans (full-duplex capable)} -
+  covers write-only displays (cmd+data, DC toggling inside one CS
+  window), rx-only ADCs (MCP3550), true loopback (tx+rx), SD cards.
 - **Serial AO (2026-08-13): bytes below, line events above, ownership
   by reference.** The Uart driver stays the low level (rings + ISR
   bodies, untouched roles); `SerialAo<Transport, P, LineSink>`
@@ -518,6 +538,9 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
                            LineReceived events (ping-pong buffers,
                            self-post backpressure, consumer-above-producer
                            scheduling contract)
+    spi_ao.hpp             SpiAo<Bus, P>: SPI bus arbiter - pending FIFO,
+                           reject-when-full, ReplyTo completion, engine
+                           handshake via TransferDone
     proto/line_parser.hpp  LineAssembler (push) + console/SCPI parsers +
                            CommandRouter<Sink>
   src/avrdx/             everything that knows avr/io.h
