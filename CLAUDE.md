@@ -101,6 +101,13 @@ platform-atmelmegaavr fork referenced by `platform =`.
   with it (distorted line-number info).
 - Useful GDB console commands: `monitor info`, `monitor reset`,
   `monitor ioregister <name>` (read/write an I/O register by name).
+- Breakpoints: the UPDI OCD has 2 hardware breakpoints; GDB borrows one for
+  its temporary breakpoints (tbreak main, next over a call, finish), so plan
+  for ONE free user breakpoint. Single-stepping is native OCD, costs nothing.
+  The server runs with `--breakpoints hardware` (set in debug_server): extra
+  breakpoints are refused ("Cannot insert breakpoint") instead of becoming
+  software breakpoints that rewrite flash (1000-cycle endurance on UPDI
+  parts). Session escape hatch: `monitor breakpoints all`.
 
 ### Toolchain DWARF caveat (GCC 16.x vs gdb)
 

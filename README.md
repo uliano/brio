@@ -70,6 +70,8 @@ debug_tool = custom
 debug_port = :40044
 debug_server =
     /home/<user>/.local/bin/pyavrocd
+    --breakpoints
+    hardware
     -s
     nop
     -p
@@ -88,7 +90,8 @@ debug_server =
     2000
 ```
 
-Argument meaning: `-s nop` = do not spawn a GUI; `-p` = GDB server port;
+Argument meaning: `--breakpoints hardware` = hardware breakpoints only (see
+below); `-s nop` = do not spawn a GUI; `-p` = GDB server port;
 `-m all` = let PyAvrOCD manage the relevant fuses; `-d` = MCU
 (`pyavrocd -d '?'` lists all supported ones); `-i` = physical interface;
 `-t` = probe, only needed with several probes attached; `-F` = F_CPU in Hz;
@@ -97,6 +100,27 @@ Argument meaning: `-s nop` = do not spawn a GUI; `-p` = GDB server port;
 plus the `debug_init_cmds` block already present in `platformio.ini`. Once the
 platform fork gains native support, all of this collapses to
 `debug_tool = pyavrocd`.
+
+### Breakpoints: effectively ONE free breakpoint
+
+The UPDI OCD provides **2 hardware breakpoints** and single-stepping is a
+native OCD operation (it consumes neither a breakpoint nor flash). GDB
+however silently borrows one slot for its temporary breakpoints: the
+`tbreak main` that opens every PlatformIO session, `next` over a function
+call, `finish`, run-to-line. The practical rule is therefore:
+
+- **1 breakpoint placed in code + 1 slot left free for GDB**;
+- 2 breakpoints in code are fine only while stepping with `step`/`stepi`
+  or `continue` (no `next` over calls / `finish` in that state).
+
+Extra breakpoints beyond the hardware slots would normally become SOFTWARE
+breakpoints, i.e. flash rewrites on a die whose guaranteed endurance is
+1000 cycles (same budget the uploads come out of). The server is therefore
+started with `--breakpoints hardware`: a breakpoint that does not fit is
+refused (GDB reports "Cannot insert breakpoint" at the next continue/next -
+delete one and go on) instead of silently wearing flash. To allow software
+breakpoints for one session, type `monitor breakpoints all` in the Debug
+Console; `monitor breakpoints` shows the current mode.
 
 ### Making line breakpoints actually bind
 
