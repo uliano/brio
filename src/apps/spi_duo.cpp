@@ -1,20 +1,22 @@
 // spi_duo - TWO devices, ONE SPI bus, arbitration by active objects:
-// the whole point of the Bus design, finally on real silicon.
+// the whole point of the SpiBus design, finally on real silicon.
 //
 //   Filler  - the ILI9481 display client: continuously repaints the
 //             320x480 panel (480 requests of 960 bytes per frame, at
 //             6 MHz) - the bus hog.
-//   Touch - the XPT2046 touch client (same module, own chip select):
+//   Touch   - the XPT2046 touch client (same module, own chip select):
 //             polls at 20 Hz with short 3-byte conversions capped at
 //             1.5 MHz - the latency-sensitive little guy.
 //
 // Neither client knows the other exists. Both post Spi<0>::Request
-// events to the same Bus; the AO's queue + pending FIFO serialize
+// events to the same SpiBus; the AO's queue + pending FIFO serialize
 // them, each request carries its OWN clock rate (per-transaction
 // engine reconfiguration), and every reply finds its way home through
-// the ReplyTo capsule. While a 960-byte row is in flight (~1.5 ms) a
-// touch request simply waits its turn: worst-case touch latency is one
-// row, invisible at 20 Hz.
+// the ReplyTo capsule. The two clients also exercise BOTH completion
+// styles: display rows go POLLED (bulk at wire speed, ~2.2 ms per
+// 960-byte row, completed synchronously inside start()), the touch
+// conversions ride the per-byte ISR pump. A touch request at worst
+// waits out the row in flight - invisible at 20 Hz.
 //
 // Touch feedback on the panel itself: the fill color follows the
 // touched screen half - top half = next color, bottom half = previous.
@@ -227,7 +229,8 @@ private:
             &cur_cmd, 1,
             data, nullptr, n,
             brio::reply_to<Filler, brio::SpiDone>(),
-            brio::SpiClock::div4});            // 6 MHz for the panel
+            brio::SpiClock::div4,              // 6 MHz for the panel
+            SPI_MODE_0_gc, true});             // polled: bulk at wire speed
     }
 
     static void set_window(uint8_t c, uint16_t last) {

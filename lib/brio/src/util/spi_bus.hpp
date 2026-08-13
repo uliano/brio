@@ -23,10 +23,13 @@
  *    copyable and carry a `ReplyTo<SpiDone> reply` member. Buffer
  *    ownership travels with it: the requester must not touch the spans
  *    until its SpiDone arrives (RTC makes this race-free).
- *  - Bus::start(req): begin the transfer (assert CS, first byte). The
- *    engine runs on its ISR; when the transfer ends the app's ISR glue
- *    posts TransferDone{status} to this AO (same pattern as the uart
- *    RxActivity edge).
+ *  - Bus::start(req) -> bool: begin the transfer. FALSE = the engine
+ *    runs on its ISR and the app's ISR glue posts TransferDone{status}
+ *    to this AO when it ends (same pattern as the uart RxActivity
+ *    edge). TRUE = the transaction COMPLETED SYNCHRONOUSLY inside
+ *    start() (polled bulk transfers): the reply is sent right away and
+ *    no TransferDone must follow for it. Both styles interleave freely
+ *    on one bus - the choice travels per-request, like the clock.
  *
  * The request event exceeds the 8-byte envelope guideline (a SPI
  * descriptor is ~14 bytes): a recorded, legal deviation - the request
@@ -83,8 +86,10 @@ private:
     static Status idle(const Event& e) {
         return std::visit(overloaded{
             [](const Request& r) {
-                begin(r);
-                return Base::transition(&busy);
+                if (begin_chain(r)) {
+                    return Base::transition(&busy);
+                }
+                return Base::handled();     // completed synchronously
             },
             [](auto) { return Base::unhandled(); },
         }, e);
@@ -103,8 +108,7 @@ private:
             },
             [](TransferDone d) {
                 active_reply_.send(SpiDone{d.status});
-                if (pending_count_ > 0) {
-                    begin(pending_pop());
+                if (pending_count_ > 0 && begin_chain(pending_pop())) {
                     return Base::handled();     // stay busy on the next one
                 }
                 return Base::transition(&idle);
@@ -113,9 +117,21 @@ private:
         }, e);
     }
 
-    static void begin(const Request& r) {
-        active_reply_ = r.reply;
-        Bus::start(r);
+    /// Start r and keep draining the pending FIFO through synchronous
+    /// completions. Returns true when a transfer went asynchronous
+    /// (its TransferDone will arrive), false when everything finished.
+    static bool begin_chain(Request r) {
+        for (;;) {
+            active_reply_ = r.reply;
+            if (!Bus::start(r)) {
+                return true;
+            }
+            active_reply_.send(SpiDone{spi_ok});
+            if (pending_count_ == 0) {
+                return false;
+            }
+            r = pending_pop();
+        }
     }
 
     // ---- pending FIFO: main-context only, no critical sections ----------

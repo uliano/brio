@@ -71,15 +71,38 @@ the bench already disagreed (a display comfortable at 6 MHz, a touch
 controller capped below 2.5 MHz), and a global init-time clock was a
 latent bug for every multi-device configuration.
 
-## Engine handshake
+## Two completion styles (2026-08-13, late)
 
-The engine pumps one byte per SPI interrupt (no DMA on AVR Dx: one
-interrupt per byte is the honest price). `Spi<n>::isr()` returns true
-exactly when the transaction completed (CS released) - the edge on
-which the app's ISR glue posts `TransferDone{status}` to the bus AO,
-mirroring the uart edge pattern. The AO then replies through the
-active request's capsule and starts the next pending transfer, staying
-`busy` until the FIFO drains.
+`Bus::start(req)` returns bool: FALSE = the transfer runs on the SPI
+interrupt and a `TransferDone` will arrive later; TRUE = it completed
+SYNCHRONOUSLY inside start(). The choice travels per-request in a
+`polled` flag - like the clock, the client knows its transaction.
+
+- **ISR pump** (default): one byte per interrupt (no DMA on AVR Dx).
+  `Spi<n>::isr()` returns true exactly when the transaction completed
+  (CS released) - the edge on which the app's ISR glue posts
+  `TransferDone{status}` to the bus AO, mirroring the uart edge
+  pattern. The kernel keeps dispatching between bytes. Right for slow
+  clocks and short transfers; at fast clocks it inverts: a byte at
+  div4 flies in 32 CPU cycles while an ISR entry alone costs more, so
+  the pump caps the bus near 27% and floods the CPU with interrupt
+  overhead (~5 us/byte measured).
+- **Polled** (`polled = true`): start() pumps the whole transaction in
+  a tight loop and returns done. GLOBAL interrupts stay enabled - only
+  the SPI's own IE is silenced (the bound ISR would steal bytes); what
+  blocks is that one dispatch, bounded and chosen by the client.
+  Measured ~55 cycles/byte at div4 (~2.3 us) with shape-specialized
+  loops - the tx/rx null checks are hoisted out because the per-byte
+  budget IS the loop body. Known next notch: SPI buffered mode
+  (BUFEN + DREIF-gated writes) would close the remaining inter-byte
+  gap toward wire speed.
+
+On a synchronous completion the AO replies immediately and keeps
+draining the pending FIFO through any further synchronous requests
+(`begin_chain`), going `busy` only when a transfer actually stays in
+flight. Both styles interleave freely on one bus. A zero-total-length
+request completes on the spot, wire untouched - the reply still
+arrives (no silent hang).
 
 ## Multi-client rules of thumb
 
@@ -93,13 +116,6 @@ active request's capsule and starts the next pending transfer, staying
   flight (a kilobyte-class transfer at 6 MHz with the ISR pump is a
   few ms) - fine for polling-rate clients; if a client ever needs
   better, that is a scheduling design change, not a FIFO change.
-
-## Known limitation
-
-The per-byte ISR pump costs ~5 us/byte at 24 MHz, roughly 3x the pure
-wire time at 6 MHz. A polled tight-loop bulk-write path for large
-transfers is the obvious next engine feature; per the governing rule
-the engine architecture is up for rewrite if that is what it takes.
 
 Device-specific facts (controllers, wiring, clock caps) live in the
 top-level README bench map and in the header comment of the app that

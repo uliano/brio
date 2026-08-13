@@ -25,8 +25,12 @@
  * CS is ACTIVE LOW and asserted/released by the engine around the whole
  * transaction; dc may be a null PinRef for DC-less devices. Buffer
  * ownership travels with the request (client hands the spans off until
- * its SpiDone comes back). A request with zero total length is a client
- * bug: nothing is started and no completion will ever arrive.
+ * its SpiDone comes back). A zero-total-length request completes on the
+ * spot without touching the wire (SpiDone still arrives).
+ *
+ * Two completion styles, chosen per request by the `polled` flag: the
+ * per-byte ISR pump (default) and the synchronous polled loop for bulk
+ * transfers at fast clocks - see the flag's comment for the tradeoff.
  *
  * ISR wiring (app glue, as usual):
  *   ISR(SPI0_INT_vect) {
@@ -76,6 +80,17 @@ public:
         // register writes between transactions and nothing per byte.
         SpiClock clock = SpiClock::div16;
         uint8_t mode = SPI_MODE_0_gc;
+        // Completion style, also the client's call: false = per-byte
+        // ISR pump (the kernel keeps running between bytes - right for
+        // slow clocks and short transfers); true = POLLED inside
+        // start(), completing synchronously. At fast clocks polling
+        // wins on every axis: a byte at div4 flies in 32 CPU cycles
+        // while an ISR entry alone costs more - the pump caps the bus
+        // near 27% and floods the CPU, the polled loop runs it near
+        // wire speed. The price is that THIS dispatch blocks for the
+        // whole transfer (bounded, chosen here); global interrupts
+        // stay enabled throughout - only the SPI's own IE is silenced.
+        bool polled = false;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
 
@@ -99,14 +114,16 @@ public:
         regs().CTRLA = SPI_MASTER_bm | SPI_ENABLE_bm;
     }
 
-    /// Begin a transaction (called by SpiBus from main context). The
-    /// completion arrives via the ISR returning true.
-    static void start(const Request& r) {
+    /// Begin a transaction (called by SpiBus from main context).
+    /// Returns true when the transaction completed synchronously
+    /// (polled requests, and the degenerate zero-length one); false
+    /// when it runs on the ISR and a TransferDone will follow.
+    static bool start(const Request& r) {
         req_ = r;
         pos_ = 0;
         in_cmd_ = (r.cmd_len > 0);
         if (total_len() == 0) {
-            return;  // client bug, documented: nothing will complete
+            return true;  // nothing to move: complete on the spot
         }
         regs().CTRLB = SPI_SSD_bm | r.mode;
         regs().CTRLA = SPI_MASTER_bm | static_cast<uint8_t>(r.clock) |
@@ -117,7 +134,43 @@ public:
             r.dc.set();
         }
         r.cs.clear();                      // assert, active low
-        regs().DATA = first_byte();        // the ISR pumps the rest
+        if (!r.polled) {
+            regs().DATA = first_byte();    // the ISR pumps the rest
+            return false;
+        }
+        // Polled pump: silence the SPI's own interrupt (the bound ISR
+        // would steal the bytes) - global interrupts STAY ENABLED, so
+        // UART/PIT/anything else preempt this loop freely. The last
+        // xfer() leaves INTFLAGS clear, so re-enabling IE is safe.
+        regs().INTCTRL = 0;
+        for (uint8_t i = 0; i < r.cmd_len; ++i) {
+            xfer(r.cmd[i]);
+        }
+        r.dc.set();                        // data phase (no-op if len == 0)
+        // Shape-specialized loops: the per-byte budget at div4 is 32
+        // cycles, so hoisting the tx/rx null checks out of the loop is
+        // not cosmetics - it is most of the headroom.
+        if (r.rx == nullptr && r.tx != nullptr) {          // bulk write
+            const uint8_t* p = r.tx;
+            for (uint16_t n = r.len; n != 0; --n) {
+                xfer(*p++);
+            }
+        } else if (r.rx != nullptr && r.tx == nullptr) {   // bulk read
+            uint8_t* p = r.rx;
+            for (uint16_t n = r.len; n != 0; --n) {
+                *p++ = xfer(0xFF);
+            }
+        } else {                                           // full duplex / none
+            for (uint16_t i = 0; i < r.len; ++i) {
+                const uint8_t in = xfer((r.tx != nullptr) ? r.tx[i] : 0xFF);
+                if (r.rx != nullptr) {
+                    r.rx[i] = in;
+                }
+            }
+        }
+        r.cs.set();                        // release: transaction done
+        regs().INTCTRL = SPI_IE_bm;
+        return true;
     }
 
     /**
@@ -158,6 +211,14 @@ private:
 
     static uint16_t total_len() {
         return static_cast<uint16_t>(req_.cmd_len) + req_.len;
+    }
+
+    /// One polled byte: write, spin on IF (~1 byte time), read back.
+    /// Reading INTFLAGS (IF set) then DATA is the IF clear sequence.
+    static uint8_t xfer(uint8_t out) {
+        regs().DATA = out;
+        while (!(regs().INTFLAGS & SPI_IF_bm)) {}
+        return regs().DATA;
     }
 
     static uint8_t first_byte() { return in_cmd_ ? req_.cmd[0] : data_byte(0); }

@@ -194,7 +194,8 @@ private:
             &cur_cmd, 1,
             data, nullptr, n,
             brio::reply_to<Filler, brio::SpiDone>(),
-            brio::SpiClock::div4});            // ILI9481 happily at 6 MHz
+            brio::SpiClock::div4,              // ILI9481 happily at 6 MHz
+            SPI_MODE_0_gc, true});             // polled: bulk at wire speed
     }
 
     static void set_window(uint8_t c, uint16_t last) {
