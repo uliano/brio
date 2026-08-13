@@ -39,6 +39,25 @@ arbitration token; the queues are per-AO, nobody else pays.
 
 ## The transaction descriptor (`Spi<n>::Request`)
 
+**The request is the complete script of one bus tenure.** A shared bus
+forces per-transaction context (cs, clock, mode: who you are, how you
+talk) - that much is the definition of a bus. But the descriptor also
+carries protocol STRUCTURE (the D/C flip), and its place there is
+forced by a deeper rule: the request is the ATOMIC unit of
+arbitration, so anything that must happen inside the CS window without
+interleaving must be described in the request. The alternative -
+client-side pin toggling between chained requests with a "hold CS"
+flag - would let the arbiter interleave another client into an open CS
+window, or force it to understand linked tenures (priority inversion
+built in). The two-phase cmd/data script with one optional pin is the
+smallest script covering every device on the bench; the fully general
+form (a segment list with pin actions between segments,
+scatter-gather style) is the known successor, to be built when a real
+device breaks two phases (QSPI-style dummy cycles, three-phase
+protocols). Splitting the descriptor into per-shape request types
+would not even save queue RAM while any display client shares the bus:
+a queue slot pays the largest variant alternative.
+
 Two phases in ONE chip-select window, covering every device class in
 sight:
 
@@ -114,6 +133,21 @@ draining the pending FIFO through any further synchronous requests
 flight. Both styles interleave freely on one bus. A zero-total-length
 request completes on the spot, wire untouched - the reply still
 arrives (no silent hang).
+
+## Transaction economics
+
+The per-request fixed cost is the price of ARBITRATION, not of any
+descriptor field: the event round trip (request copy into the queue,
+dispatch, reply post, requester dispatch) is hundreds of cycles, while
+e.g. the unused-D/C share is ~15. It is paid once per request and is
+invariant to length - so the defense is making requests BIG, not
+fast: batch words into one span (that is why the descriptor speaks
+spans), amortize the round trip. For a device that demands CS-per-word
+framing, the noted engine extension would batch N words into one
+tenure. And a device that owns a bus ALONE can skip the arbiter
+entirely: with `polled = true`, `Spi<n>::start()` is a complete
+synchronous transfer function usable directly by the owning AO - the
+arbitration price is only paid where there is something to arbitrate.
 
 ## Multi-client rules of thumb
 
