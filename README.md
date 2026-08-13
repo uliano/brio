@@ -1,7 +1,7 @@
 # avr128db48_experiments
 
 Bare-metal C++ experiments on an **AVR128DB48**, built with PlatformIO against a
-local self-built **avr-gcc 16.1** toolchain (at `/sw/avr`, with avr-gdb 17.2 and
+local self-built **avr-gcc 16.2** toolchain (at `/sw/avr`, with avr-gdb 17.2 and
 avrdude 8.1) and flashed with an **Atmel-ICE** over UPDI. No Arduino framework.
 
 - General structure and the `lib/core` shared library inherited from
@@ -100,7 +100,7 @@ platform fork gains native support, all of this collapses to
 
 ### Making line breakpoints actually bind
 
-GCC 16.1 emits a DWARF5 line table (duplicate file entry for the main source,
+GCC 16.x emits a DWARF5 line table (duplicate file entry for the main source,
 file switches around inlined code) that both avr-gdb 17.2 and host gdb drop
 parts of: with plain `-Og` (or any -O level above 0) file:line breakpoints
 fail with "No compiled code for line N", while function breakpoints work.

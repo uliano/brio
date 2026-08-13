@@ -71,13 +71,15 @@ be (re)added one by one when the corresponding hardware gets wired up.
 
 ## Toolchain
 
-Self-built avr-gcc 16.1 + avr-libc + avr-gdb 17.2 + avrdude 8.1 (built by
+Self-built avr-gcc 16.2 + avr-libc + avr-gdb 17.2 + avrdude 8.1 (built by
 /sw/src/build-avr.sh), used in place via `symlink://`:
 
-    /sw/avr        (symlink to /sw/avr-16.1)
+    /sw/avr        (symlink to /sw/avr-16.2)
 
-A minimal `package.json` manifest inside /sw/avr-16.1 makes the folder usable
-as a PlatformIO `symlink://` package. PlatformIO's bundled toolchain-atmelavr /
+A minimal `package.json` manifest inside /sw/avr-16.2 makes the folder usable
+as a PlatformIO `symlink://` package; build-avr.sh's finalize stage generates
+it on every (re)build, so toolchain upgrades keep it (without it, PlatformIO
+fails with MissingPackageManifestError). PlatformIO's bundled toolchain-atmelavr /
 avrdude 7.1 are NOT used (too old for AVR-Dx).
 
 ## Debugging (PyAvrOCD + Atmel-ICE over UPDI)
@@ -100,10 +102,11 @@ platform-atmelmegaavr fork referenced by `platform =`.
 - Useful GDB console commands: `monitor info`, `monitor reset`,
   `monitor ioregister <name>` (read/write an I/O register by name).
 
-### Toolchain DWARF caveat (GCC 16.1 vs gdb)
+### Toolchain DWARF caveat (GCC 16.x vs gdb)
 
-GCC 16.1 emits a DWARF5 line table with a duplicate file entry for the main
-source and switches file mid-sequence around inlined code. Both avr-gdb 17.2
+GCC 16.x (verified on 16.1 and 16.2) emits a DWARF5 line table with a
+duplicate file entry for the main source and switches file mid-sequence
+around inlined code. Both avr-gdb 17.2
 and host gdb 15.1 then silently drop part of the line table: file:line
 breakpoints fail to bind ("No compiled code for line N") at ANY -O level
 above 0, while function breakpoints (e.g. `tbreak main`) still work. This is
