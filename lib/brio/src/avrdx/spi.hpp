@@ -73,12 +73,14 @@ public:
     static_assert(std::is_trivially_copyable_v<Request>);
 
     /**
-     * Master mode 0, MSB first, default pins (SPI0: PA4 MOSI, PA5 MISO,
+     * Master, MSB first, default pins (SPI0: PA4 MOSI, PA5 MISO,
      * PA6 SCK; PA7 free - SSD disables the slave-select input). Call
      * after clock init, before sei(). CS/DC pins are configured by
      * their owners (the device clients), not here.
      */
-    static void init(SpiClock clock = SpiClock::div16) {
+    static void init(SpiClock clock = SpiClock::div16,
+                     uint8_t mode = SPI_MODE_0_gc) {
+        mode_ = mode;
         if constexpr (spi_num == 0) {
             PORTA.DIRSET = PIN4_bm | PIN6_bm;  // MOSI, SCK
             PORTA.DIRCLR = PIN5_bm;            // MISO
@@ -86,7 +88,7 @@ public:
             PORTC.DIRSET = PIN0_bm | PIN2_bm;  // MOSI, SCK
             PORTC.DIRCLR = PIN1_bm;            // MISO
         }
-        regs().CTRLB = SPI_SSD_bm | SPI_MODE_0_gc;
+        regs().CTRLB = SPI_SSD_bm | mode_;
         regs().INTCTRL = SPI_IE_bm;
         regs().CTRLA = SPI_MASTER_bm | static_cast<uint8_t>(clock) |
                        SPI_ENABLE_bm;
@@ -163,6 +165,7 @@ private:
     static inline Request req_{};
     static inline uint16_t pos_ = 0;
     static inline bool in_cmd_ = false;
+    static inline uint8_t mode_ = SPI_MODE_0_gc;
 };
 
 } // namespace brio

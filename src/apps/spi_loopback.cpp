@@ -58,6 +58,13 @@ struct TesterAo : brio::Fsm<TesterAo, Kick, brio::SpiDone> {
     static void init() {
         CsPin::set();                              // idle high (inactive)
         CsPin::output();
+        // Shared bus hygiene: DESELECT every real device on the bench
+        // (display CS=PD0, ADC CS=PD3) and keep the display quiet
+        // (RST=PD2 high, DC=PD1 high) while the jumper test runs.
+        brio::Pin<'D', 0>::set(); brio::Pin<'D', 0>::output();
+        brio::Pin<'D', 1>::set(); brio::Pin<'D', 1>::output();
+        brio::Pin<'D', 2>::set(); brio::Pin<'D', 2>::output();
+        brio::Pin<'D', 3>::set(); brio::Pin<'D', 3>::output();
         start(&running);
     }
 
