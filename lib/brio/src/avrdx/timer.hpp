@@ -48,7 +48,7 @@
 
 #include <stdint.h>
 #include <concepts>
-#include "ticker.hpp"
+#include "avrdx/ticker.hpp"
 
 namespace brio {
 

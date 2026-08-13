@@ -34,7 +34,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include "stream.hpp"
+#include "util/stream.hpp"
 
 namespace brio {
 

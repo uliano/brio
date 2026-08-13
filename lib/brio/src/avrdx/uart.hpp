@@ -44,8 +44,8 @@
 #include <avr/interrupt.h>
 #include <util/delay.h>
 #include <stdint.h>
-#include "ring.hpp"
-#include "stream.hpp"
+#include "avrdx/ring.hpp"
+#include "util/stream.hpp"
 
 namespace brio {
 

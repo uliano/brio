@@ -10,8 +10,8 @@
 
 #include <avr/io.h>
 #include <util/delay.h>
-#include "clock.hpp"
-#include "pin.hpp"
+#include "avrdx/clock.hpp"
+#include "avrdx/pin.hpp"
 
 namespace {
 using Led = brio::Pin<'F', 2>;  // PF2

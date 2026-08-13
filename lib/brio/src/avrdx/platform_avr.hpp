@@ -17,8 +17,8 @@
 #include <avr/interrupt.h>
 #include <avr/sleep.h>
 
-#include "platform.hpp"
-#include "ticker.hpp"
+#include "kernel/platform.hpp"
+#include "avrdx/ticker.hpp"
 
 namespace brio {
 

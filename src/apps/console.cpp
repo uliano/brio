@@ -15,13 +15,13 @@
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
-#include "clock.hpp"
-#include "pin.hpp"
-#include "uart.hpp"
-#include "ticker.hpp"
-#include "timer.hpp"
-#include "print.hpp"
-#include "proto/line_parser.hpp"
+#include "avrdx/clock.hpp"
+#include "avrdx/pin.hpp"
+#include "avrdx/uart.hpp"
+#include "avrdx/ticker.hpp"
+#include "avrdx/timer.hpp"
+#include "util/print.hpp"
+#include "util/proto/line_parser.hpp"
 
 namespace {
 

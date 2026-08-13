@@ -35,8 +35,8 @@
 #include <stdint.h>
 #include <stdlib.h>  // ltoa, ultoa, dtostrf, dtostre
 #include <concepts>
-#include "stream.hpp"
-#include "ticker.hpp"  // TimeStamp
+#include "util/stream.hpp"
+#include "util/timestamp.hpp"
 
 namespace brio {
 

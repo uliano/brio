@@ -15,7 +15,7 @@
 
 #include <stdint.h>
 
-#include "platform.hpp"
+#include "kernel/platform.hpp"
 
 namespace brio {
 

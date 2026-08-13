@@ -8,8 +8,8 @@
 #include <stdint.h>
 #include <variant>
 
-#include "event_queue.hpp"
-#include "platform_host.hpp"
+#include "kernel/event_queue.hpp"
+#include "host/platform_host.hpp"
 
 using brio::EventQueue;
 using brio::HostPlatform;

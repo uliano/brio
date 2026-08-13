@@ -52,7 +52,7 @@
  *
  * ## Usage
  * ```cpp
- * #include "ticker.hpp"
+ * #include "avrdx/ticker.hpp"
  *
  * ISR(RTC_PIT_vect) { brio::Ticker::pit(); }   // ISR body: update counters
  *
@@ -72,19 +72,9 @@
 #include <stdint.h>
 #include <bit>
 
-namespace brio {
+#include "util/timestamp.hpp"
 
-/**
- * @struct TimeStamp
- * @brief High-precision timestamp: whole seconds + fractional ticks
- *
- * fraction = ticks / ticks_per_second. Unlike millis(), this representation
- * carries no jitter from the decimal-millisecond correction.
- */
-struct TimeStamp {
-    uint32_t seconds;  ///< Whole seconds elapsed (wraps after ~136 years)
-    uint16_t ticks;    ///< Fractional second in ticks (0 .. ticks_per_second-1)
-};
+namespace brio {
 
 /**
  * @class BasicTicker

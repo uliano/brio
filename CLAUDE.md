@@ -214,6 +214,21 @@ AO kernel decisions taken so far:
   includes outside the platform_avr/driver layer, target-specific facts
   live behind the Platform concept or in the drivers. brio the kernel
   must never know which silicon it runs on.
+- **Layering (2026-08-13): four strata as directories under
+  lib/brio/src/, includes always carry the stratum prefix.** kernel/
+  (pure logic, includes nothing of brio), util/ (pure services - may
+  include kernel/, NEVER a target), avrdx/ (everything that knows
+  avr/io.h: drivers + AvrPlatform; implements kernel/util concepts,
+  depends on them, never the reverse), host/ (the test "target").
+  Two targets never meet in one binary, so a future ch32v00x/ is a
+  sibling of avrdx/ and the flat `brio` namespace stays collision-free.
+  The include prefix (`#include "avrdx/uart.hpp"`) makes an app's
+  portability readable at a glance. One PlatformIO library, NOT one per
+  stratum: discipline comes from this rule, multi-library would add
+  ceremony without enforcement. Shared pure types produced by a target
+  and consumed by util go in util/ (e.g. util/timestamp.hpp, extracted
+  from ticker.hpp when this rule caught print.hpp -> ticker.hpp as a
+  layering violation).
 - **Style rulings (2026-08-13)** (critical re-read of the inherited
   ring.hpp; good choices kept, questionable ones dropped): private
   members use a trailing underscore (head_), not m_; queues speak
@@ -382,35 +397,42 @@ tools/pio_flags.py       per-language AVR flags (build-type aware) +
                          IntelliSense include paths (skips [env:native])
 tools/gen_lst.py         post-build: firmware.lst (disassembly) + firmware.map
                          (skips [env:native])
-src/apps/<app>.cpp       one main() per experiment
+src/apps/<app>.cpp       one main() per experiment (ISR vector bindings
+                         live HERE, not in portable code)
 test/test_*/main.cpp     host unit tests (doctest), run via pio test -e native
 lib/brio/                the brio framework (auto-linked by the LDF), all in
-                         namespace brio, header-only:
-  src/platform.hpp         the Platform concept: what the kernel needs from
+                         namespace brio, header-only, four strata (see the
+                         layering rule; includes carry the stratum prefix):
+  src/kernel/            pure kernel logic - includes NOTHING of brio
+    platform.hpp           the Platform concept: what the kernel needs from
                            the machine (CriticalSection, idle, break_here,
-                           now) - kernel code includes no hardware header
-  src/platform_avr.hpp     AvrPlatform (the one kernel header touching AVR
-                           headers): SREG-save critical section, IDLE sleep
-                           via sei+sleep, BREAK, Ticker-backed now()
-  src/platform_host.hpp    HostPlatform for native tests: depth-counting
-                           critical section, virtual clock, call recorders
-  src/event_queue.hpp      EventQueue<E, depth, Platform> - per-AO MPSC
+                           now)
+    event_queue.hpp        EventQueue<E, depth, Platform> - per-AO MPSC
                            queue, saturating overflow counter, optional pop
-  src/stream.hpp           ByteSink / ByteSource / ByteTransport concepts
-  src/clock.hpp            DA/DB clock init: init_clocks() probing generic +
-                           init_clock_24mhz() deterministic DB crystal path
-  src/pin.hpp              Pin<'A',5> compile-time GPIO (VPORT fast paths)
-  src/ring.hpp             Ring<T,size> SPSC ring (index type auto-derived)
-  src/uart.hpp             Uart<n, Route, rx, tx> static interrupt-driven
-                           byte transport, RXDATAH error counters
-  src/print.hpp            print(sink, ...) variadic formatting, hex/fixed/
+  src/util/              pure services - may include kernel/, never a target
+    stream.hpp             ByteSink / ByteSource / ByteTransport concepts
+    print.hpp              print(sink, ...) variadic formatting, hex/fixed/
                            sci wrappers, crlf; extend via print_one + ADL
-  src/ticker.hpp           BasicTicker<tps> static RTC/PIT timebase
-                           (alias Ticker = BasicTicker<1024>)
-  src/timer.hpp            Timer<Millis|Secs|Ticks> soft timers, no vtables,
-                           member callbacks via brio::bind<&Class::method>
-  src/proto/line_parser.hpp  LineAssembler (push) + console/SCPI parsers +
+    timestamp.hpp          TimeStamp value type (produced by the timebase
+                           driver, printed by print.hpp)
+    proto/line_parser.hpp  LineAssembler (push) + console/SCPI parsers +
                            CommandRouter<Sink>
+  src/avrdx/             everything that knows avr/io.h
+    platform_avr.hpp       AvrPlatform: SREG-save critical section, IDLE
+                           sleep via sei+sleep, BREAK, Ticker-backed now()
+    clock.hpp              DA/DB clock init: init_clocks() probing generic +
+                           init_clock_24mhz() deterministic DB crystal path
+    pin.hpp                Pin<'A',5> compile-time GPIO (VPORT fast paths)
+    ring.hpp               Ring<T,size> SPSC ring (index type auto-derived)
+    uart.hpp               Uart<n, Route, rx, tx> static interrupt-driven
+                           byte transport, RXDATAH error counters
+    ticker.hpp             BasicTicker<tps> static RTC/PIT timebase
+                           (alias Ticker = BasicTicker<1024>)
+    timer.hpp              Timer<Millis|Secs|Ticks> callback soft timers
+                           (legacy: superseded by kernel time events)
+  src/host/              the test "target"
+    platform_host.hpp      HostPlatform: depth-counting critical section,
+                           virtual clock, idle/break call recorders
 ```
 
 ## Build Artifacts

@@ -19,11 +19,11 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
-#include "clock.hpp"
-#include "pin.hpp"
-#include "uart.hpp"
-#include "ticker.hpp"
-#include "print.hpp"
+#include "avrdx/clock.hpp"
+#include "avrdx/pin.hpp"
+#include "avrdx/uart.hpp"
+#include "avrdx/ticker.hpp"
+#include "util/print.hpp"
 
 namespace {
 using Led = brio::Pin<'F', 2>;  // PF2, blinks in step with each printed line

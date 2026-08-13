@@ -30,7 +30,7 @@
 #include <optional>
 #include <type_traits>
 
-#include "platform.hpp"
+#include "kernel/platform.hpp"
 
 namespace brio {
 
