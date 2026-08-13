@@ -18,28 +18,41 @@ import os
 # --- Compiler / linker flags, with correct per-language separation. ----------
 #   CCFLAGS  -> C *and* C++ (and link)     CFLAGS    -> C only
 #   CXXFLAGS -> C++ only                   LINKFLAGS -> link only
+#
+# Optimization is BUILD-TYPE aware: release gets -Os here; debug builds
+# ([env:<app>-debug], build_type = debug) get their whole optimization/debug
+# profile from debug_build_flags in platformio.ini (-Og -g3 -ggdb3
+# -fno-inline) and MUST NOT also receive -Os, so debug concessions never
+# leak into release firmware and vice versa.
+is_debug = env.GetBuildType() == "debug"
+
 COMMON = [
-    "-Os", "-g",                       # debug symbols for source-level .lst
     "-Wall", "-Wextra",
     "-ffunction-sections", "-fdata-sections",
 ]
+if not is_debug:
+    COMMON += ["-Os", "-g"]            # -g: source-level .lst, not in the .hex
+
+LINK = [
+    "-Wl,--gc-sections",
+    "-Wl,-Map,firmware.map",           # moved into the build dir by gen_lst.py
+]
+if not is_debug:
+    LINK += ["-Os", "-g"]
 
 env.Append(
     CCFLAGS=COMMON,
     CFLAGS=["-std=gnu11"],
     CXXFLAGS=[
-        "-std=gnu++20",
+        # gnu++23 is the project standard (gcc 16 implements it fully);
+        # bump to gnu++26 the day a C++26 feature is actually needed.
+        "-std=gnu++23",
         "-fno-exceptions", "-fno-rtti",
         "-fno-threadsafe-statics", "-fno-use-cxa-atexit",
     ],
-    LINKFLAGS=[
-        "-Os", "-g",
-        "-Wl,--gc-sections",
-        "-Wl,-Map,firmware.map",       # moved into the build dir by gen_lst.py
-    ],
-    # src/common is on the include path so apps can #include "pin.hpp" etc.
-    # (src_dir is the project root, so this is NOT added automatically.)
-    CPPPATH=[env.subst("$PROJECT_DIR/src/common")],
+    LINKFLAGS=LINK,
+    # Shared code lives in lib/core: the LDF adds its include path and links
+    # it automatically for every env whose app includes one of its headers.
 )
 
 # --- Feed the AVR toolchain headers to IntelliSense --------------------------

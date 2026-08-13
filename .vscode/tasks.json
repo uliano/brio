@@ -6,12 +6,11 @@
     {
       "label": "PIO: regen apps",
       "type": "shell",
-      // Use PlatformIO Core's bundled Python (penv). A bare `python` hits the
-      // Windows Store alias and fails; penv lives under the user home by default.
-      "command": "${userHome}/.platformio/penv/Scripts/python.exe",
+      // PlatformIO Core's bundled Python (penv, POSIX layout on Linux/macOS).
+      "command": "${userHome}/.platformio/penv/bin/python",
       "args": ["tools/gen_apps.py"],
       "problemMatcher": [],
-      "detail": "Scan src/apps/*.cpp and rewrite apps.ini (one [env:<app>] per app). Afterwards click the refresh icon in the PlatformIO PROJECT TASKS panel (or run 'PlatformIO: Refresh Project Tasks') so the new env's buttons appear."
+      "detail": "Scan src/apps/*.cpp and rewrite apps.ini ([env:<app>] + [env:<app>-debug] per app). Afterwards click the refresh icon in the PlatformIO PROJECT TASKS panel (or run 'PlatformIO: Refresh Project Tasks') so the new env's buttons appear."
     }
   ]
 }

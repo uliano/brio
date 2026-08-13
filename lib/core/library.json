@@ -1,0 +1,10 @@
+{
+  "name": "core",
+  "version": "0.1.0",
+  "description": "Bare-metal C++ core for AVR DA/DB: clock init, GPIO pins, interrupt-driven UART, RTC/PIT ticker, software timers, line/command parsers.",
+  "keywords": ["avr", "avr-dx", "bare-metal"],
+  "authors": [{ "name": "uliano" }],
+  "build": {
+    "srcFilter": "+<*>"
+  }
+}

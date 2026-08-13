@@ -1,3 +1,6 @@
+# Claude Code personal settings (per-user, not shared)
+.claude/settings.local.json
+
 # PlatformIO build output & metadata
 .pio/
 # PlatformIO regenerates these from platformio.ini + the active env:

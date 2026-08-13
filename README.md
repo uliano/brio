@@ -4,13 +4,22 @@ Bare-metal C++ experiments on an **AVR128DB48**, built with PlatformIO against a
 local self-built **avr-gcc 16.1** toolchain (at `/sw/avr`, with avr-gdb 17.2 and
 avrdude 8.1) and flashed with an **Atmel-ICE** over UPDI. No Arduino framework.
 
-- General structure inherited from [AVR-Multislope](https://github.com/uliano/AVR-Multislope)
-  (toolchain wiring, custom board JSON, Atmel-ICE upload, disassembly script).
+- General structure and the `lib/core` shared library inherited from
+  [AVR-Multislope](https://github.com/uliano/AVR-Multislope) (toolchain wiring,
+  custom board JSON, Atmel-ICE upload, disassembly script, clock/uart/ticker/
+  timer/parser modules).
 - Multi-app system inherited from [blackpill-experiments](https://github.com/uliano/blackpill-experiments):
-  one `main()` per `src/apps/<app>.cpp`, each becoming its own `[env:<app>]`.
-- Cloned from [avr128db28_experiments](https://github.com/uliano/avr128db28_experiments)
-  (same structure and debug setup, retargeted to the 48-pin part; apps trimmed
-  down to `blink`).
+  one `main()` per `src/apps/<app>.cpp`, each becoming two envs:
+  `[env:<app>]` (release, `-Os`) and `[env:<app>-debug]` (`-Og -g3
+  -fno-inline`, for debugging only - debug flags never reach release builds).
+- `lib/core` is the **dx framework**: a small modern-C++ bare-metal layer for
+  the AVR **DA/DB** families. Everything resolves at compile time: static
+  (monostate) drivers (`dx::Uart<2, dx::Route::alt1>`, `dx::Ticker`,
+  `dx::Pin<'F',2>`), C++20 concepts instead of virtual interfaces,
+  `dx::print(sink, ...)` variadic formatting, push-based line/command
+  parsing (`proto/`), software timers without vtables
+  (`dx::bind<&Class::method>`). One flat `dx` namespace; family differences
+  handled with device-macro guards.
 
 ## Quick start
 
@@ -20,13 +29,18 @@ pio run
 
 # Build + flash over the Atmel-ICE
 pio run -e blink -t upload
+
+# Debug build of the same app (separate env and build dir)
+pio run -e blink-debug
 ```
 
 ## Debugging (PyAvrOCD + Atmel-ICE over UPDI)
 
 Debug sessions use [PyAvrOCD](https://pyavrocd.io) as GDB server together with
-the toolchain's `avr-gdb`. Start them from the IDE (Run and Debug) or with
-`pio debug -e <app>`.
+the toolchain's `avr-gdb`. Always debug the `<app>-debug` env (the release
+env keeps pure `-Os` production flags): start from the IDE (Run and Debug,
+with the `<app>-debug` project env selected) or with
+`pio debug -e <app>-debug`.
 
 ### One-time host setup
 
@@ -138,8 +152,15 @@ PlatformIO's custom DAP events). Harmless; disable probe-rs per-workspace.
 
 1. Create `src/apps/<name>.cpp` with its own `int main()`.
 2. Regenerate the env list: `python tools/gen_apps.py`
-   (or the VS Code task **PIO: regen apps**), then reload the PlatformIO project.
-3. Build/upload it: `pio run -e <name> -t upload`.
+   (or the VS Code task **PIO: regen apps**), then reload the PlatformIO
+   project. This creates BOTH `[env:<name>]` (release) and
+   `[env:<name>-debug]` (debug).
+3. Build/upload it: `pio run -e <name> -t upload`; debug it:
+   `pio debug -e <name>-debug`.
+
+Shared code goes into `lib/core/src/`: any header included from an app is
+compiled and linked automatically by PlatformIO's Library Dependency Finder,
+no `build_src_filter` changes needed.
 
 ## Apps
 
@@ -147,6 +168,7 @@ PlatformIO's custom DAP events). Harmless; disable probe-rs per-workspace.
 |-----------|----------------------------------------------------------------------------|
 | `blink`   | Toggles an LED on **PF2** at ~1 Hz                                         |
 | `serial`  | USART2 ALT1 **PF4/PF5** -> CH340 @ 460800: timestamped counter, clock source (XTAL/OSCHF) on every line, PF2 in step |
+| `console` | Interactive command console @ 460800 (HELP, LED, UPTIME, ERR): full-stack test of uart + print + proto parser + timers |
 
 ## Hardware
 
