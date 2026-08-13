@@ -10,6 +10,11 @@ Import("env")  # type: ignore
 import os
 import shutil
 
+# Embedded envs only: no disassembly listing for the native host-test build
+# (which inherits extra_scripts from the base [env]).
+if env.get("PIOPLATFORM") == "native":
+    Return()  # noqa: F821 - SCons construct
+
 
 def generate_listing(source, target, env):  # pylint: disable=unused-argument
     """Generate firmware.lst (disassembly + source) and collect firmware.map."""

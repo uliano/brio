@@ -191,17 +191,38 @@ AO kernel decisions taken so far:
 - **Host-testability (2026-08-13): kernel templated on a Platform
   concept, no #ifdef.** Queues, scheduler, FSM contract and time-event
   bookkeeping are pure logic; the only hardware touchpoints are wrapped
-  in a Platform policy declared by a concept: a RAII critical-section
-  type, idle(), break_here(), now(). AvrPlatform implements them with
-  intrinsics and is the default template argument, so apps see nothing;
-  the host platform gives an empty critical section (single-threaded
-  tests), a test-controlled virtual clock and a recording idle() -
-  time becomes deterministic arithmetic in tests. Preprocessor #ifdef
-  branches were rejected: implicit contract, host path rots unseen.
-  Host tests (native env or plain host g++, wiring TBD) first cover
-  what is hard to provoke on silicon: queue overflow + counters,
-  entry/exit ordering, drift-free re-arm, scan priority, MPSC stress
-  with simulated producers.
+  in a Platform policy declared by a concept (platform.hpp): a RAII
+  critical-section type (whose enter/leave are also compiler memory
+  barriers - so shared data needs no volatile), idle(), break_here(),
+  now(). AvrPlatform (platform_avr.hpp - the only kernel-family header
+  allowed to include AVR headers) implements them with intrinsics;
+  HostPlatform (platform_host.hpp) gives a depth-counting critical
+  section (single-threaded tests), a test-controlled virtual clock and
+  recording idle()/break_here() - time becomes deterministic arithmetic
+  in tests. There is NO platform default in kernel templates (a default
+  would hardwire an AVR include - see the generalization rule): the app
+  names its platform once. Preprocessor #ifdef branches were rejected:
+  implicit contract, host path rots unseen. Host tests run in
+  [env:native] (pio test -e native, doctest; test_ignore=* in the base
+  env keeps `pio test` off the probe) and first cover what is hard to
+  provoke on silicon: queue overflow + counters, entry/exit ordering,
+  drift-free re-arm, scan priority, MPSC stress with simulated
+  producers.
+- **Generalization rule (2026-08-13): today it is AVR Dx, tomorrow it
+  could be anything else.** Always leave the door open to porting: no
+  #ifdef where a template/concept boundary can do the job, no AVR
+  includes outside the platform_avr/driver layer, target-specific facts
+  live behind the Platform concept or in the drivers. brio the kernel
+  must never know which silicon it runs on.
+- **Style rulings (2026-08-13)** (critical re-read of the inherited
+  ring.hpp; good choices kept, questionable ones dropped): private
+  members use a trailing underscore (head_), not m_; queues speak
+  push/pop (put/get remains legacy in Ring); no *_from_isr API doubling
+  in the kernel - one always-safe operation, revisit only with
+  measurements; no redundant `inline` on in-class definitions;
+  std::optional returns instead of bool + out-parameter; keep the
+  header-comment style that explains the concurrency model and the
+  WHY of each tradeoff.
 
 The general structure (toolchain wiring, custom board JSON, Atmel-ICE upload,
 the disassembly post-build script) and the `lib/brio` library are inherited
@@ -321,12 +342,17 @@ pio run -e blink -t upload
 # Debug (builds and flashes the -debug env, then attaches)
 pio debug -e blink-debug
 
+# Host unit tests (brio kernel logic, no hardware, doctest)
+pio test -e native
+
 # Clean
 pio run -t clean
 ```
 
-`pio run` (build only) needs NO hardware connected; the Atmel-ICE is only
-touched on `-t upload`.
+`pio run` (build only) and `pio test -e native` need NO hardware connected;
+the Atmel-ICE is only touched on `-t upload`. Tests run ONLY on the native
+env (test_ignore = * in the base [env] keeps a bare `pio test` away from the
+probe: AVR envs just skip).
 
 Upload gotcha: connect the Atmel-ICE **AVR** port (not the SAM port). Wrong port
 -> avrdude still detects the ICE on USB but `Vtarget` reads ~1.71 V and the UPDI
@@ -340,11 +366,23 @@ apps.ini                generated: [env:<app>] + [env:<app>-debug] per app
 boards/AVR128DB48.json   custom bare-metal board (128K flash / 16K RAM)
 tools/gen_apps.py        scans src/apps/*.cpp -> apps.ini
 tools/pio_flags.py       per-language AVR flags (build-type aware) +
-                         IntelliSense include paths
+                         IntelliSense include paths (skips [env:native])
 tools/gen_lst.py         post-build: firmware.lst (disassembly) + firmware.map
+                         (skips [env:native])
 src/apps/<app>.cpp       one main() per experiment
+test/test_*/main.cpp     host unit tests (doctest), run via pio test -e native
 lib/brio/                the brio framework (auto-linked by the LDF), all in
                          namespace brio, header-only:
+  src/platform.hpp         the Platform concept: what the kernel needs from
+                           the machine (CriticalSection, idle, break_here,
+                           now) - kernel code includes no hardware header
+  src/platform_avr.hpp     AvrPlatform (the one kernel header touching AVR
+                           headers): SREG-save critical section, IDLE sleep
+                           via sei+sleep, BREAK, Ticker-backed now()
+  src/platform_host.hpp    HostPlatform for native tests: depth-counting
+                           critical section, virtual clock, call recorders
+  src/event_queue.hpp      EventQueue<E, depth, Platform> - per-AO MPSC
+                           queue, saturating overflow counter, optional pop
   src/stream.hpp           ByteSink / ByteSource / ByteTransport concepts
   src/clock.hpp            DA/DB clock init: init_clocks() probing generic +
                            init_clock_24mhz() deterministic DB crystal path

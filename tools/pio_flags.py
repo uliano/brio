@@ -15,72 +15,80 @@
 Import("env")
 import os
 
-# --- Compiler / linker flags, with correct per-language separation. ----------
-#   CCFLAGS  -> C *and* C++ (and link)     CFLAGS    -> C only
-#   CXXFLAGS -> C++ only                   LINKFLAGS -> link only
-#
-# Optimization is BUILD-TYPE aware: release gets -Os here; debug builds
-# ([env:<app>-debug], build_type = debug) get their whole optimization/debug
-# profile from debug_build_flags in platformio.ini (-Og -g3 -ggdb3
-# -fno-inline) and MUST NOT also receive -Os, so debug concessions never
-# leak into release firmware and vice versa.
-is_debug = env.GetBuildType() == "debug"
+# --- Guard: this script serves the EMBEDDED envs only. -----------------------
+# [env:native] (host unit tests) inherits extra_scripts from the base [env];
+# AVR flags (-fno-exceptions & co.) and avr-libc include paths would poison
+# the host build (glibc vs avr-libc header clashes, doctest without
+# exceptions). The native env declares its own flags in platformio.ini.
+if env.get("PIOPLATFORM") == "native":
+    print("pio_flags: native env, skipping AVR flags")
+else:
+    # --- Compiler / linker flags, with correct per-language separation. ------
+    #   CCFLAGS  -> C *and* C++ (and link)     CFLAGS    -> C only
+    #   CXXFLAGS -> C++ only                   LINKFLAGS -> link only
+    #
+    # Optimization is BUILD-TYPE aware: release gets -Os here; debug builds
+    # ([env:<app>-debug], build_type = debug) get their whole optimization/
+    # debug profile from debug_build_flags in platformio.ini (-Og -g3 -ggdb3
+    # -fno-inline) and MUST NOT also receive -Os, so debug concessions never
+    # leak into release firmware and vice versa.
+    is_debug = env.GetBuildType() == "debug"
 
-COMMON = [
-    "-Wall", "-Wextra",
-    "-ffunction-sections", "-fdata-sections",
-]
-if not is_debug:
-    COMMON += ["-Os", "-g"]            # -g: source-level .lst, not in the .hex
+    common = [
+        "-Wall", "-Wextra",
+        "-ffunction-sections", "-fdata-sections",
+    ]
+    if not is_debug:
+        common += ["-Os", "-g"]        # -g: source-level .lst, not in the .hex
 
-LINK = [
-    "-Wl,--gc-sections",
-    "-Wl,-Map,firmware.map",           # moved into the build dir by gen_lst.py
-]
-if not is_debug:
-    LINK += ["-Os", "-g"]
+    link = [
+        "-Wl,--gc-sections",
+        "-Wl,-Map,firmware.map",       # moved into the build dir by gen_lst.py
+    ]
+    if not is_debug:
+        link += ["-Os", "-g"]
 
-env.Append(
-    CCFLAGS=COMMON,
-    CFLAGS=["-std=gnu11"],
-    CXXFLAGS=[
-        # gnu++23 is the project standard (gcc 16 implements it fully);
-        # bump to gnu++26 the day a C++26 feature is actually needed.
-        "-std=gnu++23",
-        "-fno-exceptions", "-fno-rtti",
-        "-fno-threadsafe-statics", "-fno-use-cxa-atexit",
-    ],
-    LINKFLAGS=LINK,
-    # Shared code lives in lib/brio: the LDF adds its include path and links
-    # it automatically for every env whose app includes one of its headers.
-)
+    env.Append(
+        CCFLAGS=common,
+        CFLAGS=["-std=gnu11"],
+        CXXFLAGS=[
+            # gnu++23 is the project standard (gcc 16 implements it fully);
+            # bump to gnu++26 the day a C++26 feature is actually needed.
+            "-std=gnu++23",
+            "-fno-exceptions", "-fno-rtti",
+            "-fno-threadsafe-statics", "-fno-use-cxa-atexit",
+        ],
+        LINKFLAGS=link,
+        # Shared code lives in lib/brio: the LDF adds its include path and
+        # links it automatically for every env whose app includes its headers.
+    )
 
-# --- Feed the AVR toolchain headers to IntelliSense --------------------------
-# The compiler finds these itself via -mmcu; this block is purely so the editor
-# (clangd / cpptools) can resolve <avr/io.h> and friends.
-toolchain_dir = env.PioPlatform().get_package_dir("toolchain-atmelavr")
-if toolchain_dir:
-    extra_includes = []
-    avr_include = os.path.join(toolchain_dir, "avr", "include")
-    if os.path.isdir(avr_include):
-        extra_includes.append(avr_include)
-    gcc_lib_dir = os.path.join(toolchain_dir, "lib", "gcc", "avr")
-    if os.path.isdir(gcc_lib_dir):
-        for ver in sorted(os.listdir(gcc_lib_dir)):
-            inc = os.path.join(gcc_lib_dir, ver, "include")
-            if os.path.isdir(inc):
-                extra_includes.append(inc)
-                break
-    if extra_includes:
-        env.Append(CPPPATH=extra_includes)
-        print("pio_flags: added toolchain include paths:")
-        for p in extra_includes:
-            print("  ", p)
+    # --- Feed the AVR toolchain headers to IntelliSense ----------------------
+    # The compiler finds these itself via -mmcu; this block is purely so the
+    # editor (clangd / cpptools) can resolve <avr/io.h> and friends.
+    toolchain_dir = env.PioPlatform().get_package_dir("toolchain-atmelavr")
+    if toolchain_dir:
+        extra_includes = []
+        avr_include = os.path.join(toolchain_dir, "avr", "include")
+        if os.path.isdir(avr_include):
+            extra_includes.append(avr_include)
+        gcc_lib_dir = os.path.join(toolchain_dir, "lib", "gcc", "avr")
+        if os.path.isdir(gcc_lib_dir):
+            for ver in sorted(os.listdir(gcc_lib_dir)):
+                inc = os.path.join(gcc_lib_dir, ver, "include")
+                if os.path.isdir(inc):
+                    extra_includes.append(inc)
+                    break
+        if extra_includes:
+            env.Append(CPPPATH=extra_includes)
+            print("pio_flags: added toolchain include paths:")
+            for p in extra_includes:
+                print("  ", p)
 
-# The __AVR_<MCU>__ define is generated by GCC internally from -mmcu, but
-# IntelliSense needs it explicitly to parse the AVR headers (e.g. PORTA).
-mcu = env.BoardConfig().get("build.mcu", "")
-if mcu:
-    mcu_define = "__AVR_%s__" % mcu.upper()
-    env.Append(CPPDEFINES=[mcu_define])
-    print("pio_flags: added MCU define:", mcu_define)
+    # The __AVR_<MCU>__ define is generated by GCC internally from -mmcu, but
+    # IntelliSense needs it explicitly to parse the AVR headers (e.g. PORTA).
+    mcu = env.BoardConfig().get("build.mcu", "")
+    if mcu:
+        mcu_define = "__AVR_%s__" % mcu.upper()
+        env.Append(CPPDEFINES=[mcu_define])
+        print("pio_flags: added MCU define:", mcu_define)
