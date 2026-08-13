@@ -444,6 +444,19 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
                            machines: state = handler function, Entry/Exit
                            reserved variant alternatives, transition
                            chaining, start() = initial entry
+    post.hpp               ActiveObject concept + post<Ao>(ev) (addressed,
+                           reserved events excluded) + publish(Subscribers
+                           <A,B...>{}, ev) fan-out
+    time_event.hpp         TimeEvent<P, Ao, Ev> posts payload to its AO on
+                           expiry; intrusive armed list, drift-free
+                           periodics, wrap-safe deadlines, RAII disarm;
+                           processed by the kernel loop (T2)
+    kernel.hpp             Kernel<P, Aos...>: init_all/step/idle_if_empty/
+                           run - the QV loop (priority = pack order, one
+                           event per turn, race-free IDLE sleep)
+    panic.hpp              panic<P, Reporter>() [[noreturn]] + PanicCode +
+                           HaltReporter + take_panic_record<P>() boot-side
+                           fetch-and-clear
     event_queue.hpp        EventQueue<E, depth, Platform> - per-AO MPSC
                            queue, saturating overflow counter, optional pop
   src/util/              pure services - may include kernel/, never a target
