@@ -200,6 +200,15 @@ no `build_src_filter` changes needed.
 ## Hardware
 
 - MCU: AVR128DB48 (48-pin, 128 KB flash, 16 KB SRAM)
+- Supply: jumper-selectable **3.3 V / 5 V**; VDDIO2 is powered, so PORTC
+  (the MVIO domain) is usable - and could one day talk 3.3 V logic while
+  the rest of the chip runs 5 V, no level shifters.
+- Bench (SPI/I2C experiments, 5 V rail): SPI0 on PA4(MOSI)/PA5(MISO)/
+  PA6(SCK); PD0=CS display, PD1=RS/DC, PD2=RST display, PD3=CS MCP3550,
+  PD4 reserved for the module's SD_CS; TWI0 reserved on PA2(SDA)/PA3(SCL)
+  with 4.7k pull-ups for the MCP47CVB22 (dual 12-bit DAC, addr 0x60).
+  The 2.4" SPI display (chip-on-glass, ILI9341 suspect) runs at VCC=5 V
+  with its J1 open (on-board LDO).
 - Programmer/debugger: Atmel-ICE over UPDI. **Plug the cable into the Atmel-ICE
   `AVR` port, NOT the `SAM` port.** The SAM port is for ARM/SAM and fails
   silently: avrdude still sees the ICE on USB, but `Vtarget` reads ~1.71 V
