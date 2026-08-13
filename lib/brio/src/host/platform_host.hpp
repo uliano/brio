@@ -39,6 +39,10 @@ struct HostPlatform {
     static void break_here() { ++break_calls; }
     static uint32_t now() { return ticks; }
 
+    /// 1000 Hz: the identity case for ms conversions. Tests exercising a
+    /// non-dividing rate define their own local platform (e.g. tps=1024).
+    static constexpr uint32_t ticks_per_second = 1000;
+
     static void reset() {
         ticks = 0;
         idle_calls = 0;

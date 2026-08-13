@@ -53,6 +53,9 @@ struct AvrPlatform {
     static void break_here() { __asm__ __volatile__("break"); }
 
     static uint32_t now() { return Ticker::ticks(); }
+
+    /// Tick rate of the timebase: 1024 Hz, a truth of the 32k PIT dividers.
+    static constexpr uint32_t ticks_per_second = Ticker::ticks_per_second;
 };
 
 static_assert(Platform<AvrPlatform>);

@@ -214,6 +214,26 @@ AO kernel decisions taken so far:
   includes outside the platform_avr/driver layer, target-specific facts
   live behind the Platform concept or in the drivers. brio the kernel
   must never know which silicon it runs on.
+- **Time and tick rate (2026-08-13): the tick is opaque, the rate is a
+  target constant.** The power-of-two tick rates are a truth of the AVR
+  PIT (32768 Hz dividers), not of the world: the next target candidates
+  (STM32G0x0/x1, ATSAMC/D, CH32V00x) tick from SysTick at any rate,
+  canonically 1000 Hz. Therefore: the Platform concept carries
+  `ticks_per_second` as a positive compile-time constant; the kernel
+  reasons in opaque ticks and assumes NOTHING about the rate (no pow2,
+  no 1-tick-=-1-ms); conversions are constexpr in kernel/time.hpp with
+  CEIL semantics ("at least this long" - a timeout never fires early;
+  identity folding when tps=1000). TimeStamp's fraction changed from
+  ticks to MILLISECONDS (0..999): a tick-based fraction would change
+  meaning with the silicon, ms are self-describing; the producing
+  driver converts with its known rate, sub-ms measurement is what raw
+  Platform::now() ticks are for. Printed as "12.045s" (zero-padded).
+  BasicTicker stays declaredly AVR (pow2 asserts, PIT, skip
+  correction) in avrdx/ - future tickers are sibling drivers with
+  their own truths; no preemptive "generic ticker", the concept IS the
+  abstraction (generalize on the second real specimen). Deadline
+  arithmetic over wrapping counters (signed difference) is documented
+  where it will live: the time-event code.
 - **Layering (2026-08-13): four strata as directories under
   lib/brio/src/, includes always carry the stratum prefix.** kernel/
   (pure logic, includes nothing of brio), util/ (pure services - may
@@ -406,15 +426,17 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
   src/kernel/            pure kernel logic - includes NOTHING of brio
     platform.hpp           the Platform concept: what the kernel needs from
                            the machine (CriticalSection, idle, break_here,
-                           now)
+                           now, ticks_per_second)
+    time.hpp               constexpr tick conversions parameterized on the
+                           platform rate (ceil semantics: never early)
     event_queue.hpp        EventQueue<E, depth, Platform> - per-AO MPSC
                            queue, saturating overflow counter, optional pop
   src/util/              pure services - may include kernel/, never a target
     stream.hpp             ByteSink / ByteSource / ByteTransport concepts
     print.hpp              print(sink, ...) variadic formatting, hex/fixed/
                            sci wrappers, crlf; extend via print_one + ADL
-    timestamp.hpp          TimeStamp value type (produced by the timebase
-                           driver, printed by print.hpp)
+    timestamp.hpp          TimeStamp value type, ms fraction (produced by
+                           the timebase driver, printed by print.hpp)
     proto/line_parser.hpp  LineAssembler (push) + console/SCPI parsers +
                            CommandRouter<Sink>
   src/avrdx/             everything that knows avr/io.h

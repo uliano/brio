@@ -21,6 +21,12 @@
  *  - break_here(): drop into the debugger when one is attached, do
  *    nothing otherwise (AVR BREAK is a NOP without an active OCD).
  *  - now(): current tick count of the system timebase.
+ *  - ticks_per_second: the tick rate, a compile-time constant OF THE
+ *    TARGET (1024 on AVR Dx from the 32k PIT dividers, typically 1000
+ *    on SysTick-based targets). The kernel reasons in opaque ticks and
+ *    assumes NOTHING about the rate - no power-of-two, no "1 tick =
+ *    1 ms"; conversions live in kernel/time.hpp parameterized on this
+ *    constant.
  */
 
 #pragma once
@@ -38,6 +44,8 @@ concept Platform =
         { P::idle() } -> std::same_as<void>;
         { P::break_here() } -> std::same_as<void>;
         { P::now() } -> std::same_as<uint32_t>;
+        // must be a positive compile-time constant (usable in constexpr)
+        requires P::ticks_per_second > 0u;
     };
 
 } // namespace brio

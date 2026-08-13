@@ -30,7 +30,8 @@
  *  - ticks():  raw 32-bit tick counter (wraps: 49 days @1024 Hz).
  *  - millis(): approximate milliseconds, long-term exact (wraps ~49.7 days).
  *  - secs():   exact seconds (wraps ~136 years).
- *  - now():    TimeStamp = whole seconds + fractional ticks (no jitter).
+ *  - now():    TimeStamp = whole seconds + millisecond fraction (exact
+ *              seconds; the fraction is floor(ticks*1000/tps), ~1 ms res).
  *
  * ## Millisecond correction
  * 32768 Hz does not divide into decimal milliseconds: at 1024 ticks/s each
@@ -193,10 +194,15 @@ public:
      * are read atomically so they belong to the same instant.
      */
     static void now(TimeStamp &out) {
+        uint16_t frac;
         ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
             out.seconds = m_secs;
-            out.ticks = static_cast<uint16_t>(m_ticks) & mask;
+            frac = static_cast<uint16_t>(m_ticks) & mask;
         }
+        // tick fraction -> milliseconds (0..999): TimeStamp is
+        // target-independent, the tick unit is not (see util/timestamp.hpp).
+        out.millis = static_cast<uint16_t>(
+            (static_cast<uint32_t>(frac) * 1000u) / tps);
     }
 
     /// Raw 32-bit tick count since init() (wraps: 49 days @ 1024 Hz)

@@ -143,13 +143,21 @@ inline void print_one(S s, F value) {
     print_one(s, Sci{static_cast<float>(value), 3});
 }
 
-/// TimeStamp as "<seconds>s.<ticks>t" (same format as the old Uart::print).
+/// TimeStamp as "<seconds>.<millis>s", millis zero-padded to 3 digits
+/// (12.045s) - unambiguous on every target, unlike the old tick-based
+/// "12s.46t" whose unit changed with the silicon.
 template <ByteSink S>
 inline void print_one(S s, const TimeStamp &t) {
     print_one(s, t.seconds);
-    print_one(s, "s.");
-    print_one(s, t.ticks);
-    print_one(s, 't');
+    print_one(s, '.');
+    if (t.millis < 100) {
+        print_one(s, '0');
+    }
+    if (t.millis < 10) {
+        print_one(s, '0');
+    }
+    print_one(s, t.millis);
+    print_one(s, 's');
 }
 
 // ---- the variadic front end -------------------------------------------------
