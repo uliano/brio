@@ -54,10 +54,21 @@ sight:
 | block devices (command protocols) | sequences of plain transfers |
 
 CS is active low, asserted/released by the engine around the whole
-transaction; `dc` may be a null PinRef. Buffer ownership travels with
-the request: the client must not touch the spans until its SpiDone
-arrives (run-to-completion makes this race-free). A request with zero
-total length is a client bug: nothing starts, nothing completes.
+transaction; `dc` may be a null PinRef. Both phases are OPTIONAL: a
+DC-less device is simply a null `dc` plus a phase-2-only transfer, so
+"plain" multibyte transactions (16-bit register devices, delta-sigma
+ADC frames of 24-bit groups) are already just tx/rx spans - no display
+pattern involved. Buffer ownership travels with the request: the
+client must not touch the spans until its SpiDone arrives
+(run-to-completion makes this race-free).
+
+Word semantics live ABOVE the wire, per the "drivers move bytes"
+pillar: `util/wire.hpp` provides constexpr big-endian load/store for
+16/24/32-bit words and the sign-extending `load_be24_signed` for ADC
+channel data - the client formats/parses its byte spans at the edges.
+A device demanding CS-per-word framing would be the one legitimate
+engine extension in this area; noted, not built (no such device on the
+bench - generalize on the second specimen).
 
 ## Per-transaction clock and mode (2026-08-13, evening)
 

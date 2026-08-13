@@ -51,6 +51,7 @@
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
+#include "util/wire.hpp"
 
 using P = brio::AvrPlatform;
 
@@ -337,8 +338,8 @@ private:
     }
 
     static uint16_t value() {
-        return static_cast<uint16_t>(
-            ((static_cast<uint16_t>(rx[1]) << 8 | rx[2]) >> 3) & 0x0FFF);
+        // 12-bit result rides a big-endian 16-bit word, MSB-justified
+        return static_cast<uint16_t>((brio::load_be16(rx + 1) >> 3) & 0x0FFF);
     }
 
     static void convert(uint8_t ctrl) {

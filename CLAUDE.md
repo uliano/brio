@@ -545,6 +545,9 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
                            sci wrappers, crlf; extend via print_one + ADL
     timestamp.hpp          TimeStamp value type, ms fraction (produced by
                            the timebase driver, printed by print.hpp)
+    wire.hpp               constexpr big-endian word load/store (16/24/32
+                           bit + sign-extending be24 for ADC data): word
+                           semantics stay above the byte-moving engines
     serial_port.hpp        SerialPort<Transport, P, LineSink>: RX bytes ->
                            LineReceived events (ping-pong buffers,
                            self-post backpressure, consumer-above-producer
