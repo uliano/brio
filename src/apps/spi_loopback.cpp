@@ -1,7 +1,7 @@
 // spi_loopback - first on-silicon test of the SPI stack: jumper PA4
 // (MOSI) -> PA5 (MISO), and every byte transmitted comes straight back.
 //
-// A TesterAo fires a full-duplex transaction once per second (rolling
+// A Tester fires a full-duplex transaction once per second (rolling
 // 8-byte pattern, CS on PA7 - unconnected, just exercised), gets its
 // SpiDone through the ReplyTo capsule and prints the verdict on the
 // serial console:
@@ -29,7 +29,7 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
-#include "util/spi_ao.hpp"
+#include "util/spi_bus.hpp"
 
 using P = brio::AvrPlatform;
 
@@ -41,14 +41,14 @@ using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
 using SpiHw = brio::Spi<0>;                       // PA4/PA5/PA6
-using SpiBus = brio::SpiAo<SpiHw, P>;
+using Bus = brio::SpiBus<SpiHw, P>;
 using CsPin = brio::Pin<'A', 7>;                  // exercised, not wired
 
 struct Kick {};                                    // Tester heartbeat
 
-struct TesterAo : brio::Fsm<TesterAo, Kick, brio::SpiDone> {
+struct Tester : brio::Fsm<Tester, Kick, brio::SpiDone> {
     static inline brio::EventQueue<Event, 2, P> queue;
-    static inline brio::TimeEvent<P, TesterAo, Kick> cadence{Kick{}};
+    static inline brio::TimeEvent<P, Tester, Kick> cadence{Kick{}};
 
     static constexpr uint8_t pattern_len = 8;
     static inline uint8_t tx[pattern_len];
@@ -80,11 +80,11 @@ struct TesterAo : brio::Fsm<TesterAo, Kick, brio::SpiDone> {
                     tx[i] = static_cast<uint8_t>(round + i * 17);
                     rx[i] = 0;
                 }
-                brio::post<SpiBus>(SpiHw::Request{
+                brio::post<Bus>(SpiHw::Request{
                     CsPin::ref(), {},              // cs, no dc
                     nullptr, 0,                    // no command phase
                     tx, rx, pattern_len,           // full duplex
-                    brio::reply_to<TesterAo, brio::SpiDone>()});
+                    brio::reply_to<Tester, brio::SpiDone>()});
                 return handled();
             },
             [](brio::SpiDone d) {
@@ -125,7 +125,7 @@ private:
 // ---- target glue ------------------------------------------------------------
 ISR(SPI0_INT_vect) {
     if (SpiHw::isr()) {
-        brio::post<SpiBus>(brio::TransferDone{brio::spi_ok});
+        brio::post<Bus>(brio::TransferDone{brio::spi_ok});
     }
 }
 ISR(USART2_RXC_vect) { Serial::rxc(); }            // console is output-only here
@@ -135,7 +135,7 @@ ISR(RTC_PIT_vect)    { brio::Ticker::pit(); }
 int main() {
     brio::init_clock_24mhz();
     Serial::init(460800);
-    SpiHw::init(brio::SpiClock::div16);            // 1.5 MHz, relaxed for wires
+    SpiHw::init();                                 // clock/mode travel per-request
     brio::Ticker::init();
     sei();
 
@@ -143,5 +143,5 @@ int main() {
                 "SPI loopback tester: jumper PA4(MOSI) -> PA5(MISO)",
                 brio::crlf);
 
-    brio::Kernel<P, TesterAo, SpiBus>::run();
+    brio::Kernel<P, Tester, Bus>::run();
 }

@@ -235,7 +235,7 @@ public:
 };
 
 /// The project-wide time base: 1024 ticks/s (~0.977 ms resolution).
-/// Change the rate here; everything (Timer<>, apps) follows the alias.
+/// Change the rate here; everything (time events, apps) follows the alias.
 using Ticker = BasicTicker<1024>;
 
 } // namespace brio

@@ -70,8 +70,8 @@ void publish(Subscribers<Aos...>, const Ev& e) {
  *   struct SpiDone { SpiStatus status; };
  *   struct SpiRequest { ...; brio::ReplyTo<SpiDone> reply; };
  *   ...
- *   post<SpiAo>(SpiRequest{..., brio::reply_to<MyAo, SpiDone>()});
- *   ...                       // in SpiAo, transfer finished:
+ *   post<SpiBus>(SpiRequest{..., brio::reply_to<MyAo, SpiDone>()});
+ *   ...                       // in SpiBus, transfer finished:
  *   req.reply.send(SpiDone{status});
  *
  * A requester whose Event variant cannot hold Payload fails to compile

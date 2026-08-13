@@ -2,7 +2,7 @@
  * spi.hpp
  *
  * SPI master transfer engine for the AVR Dx SPIn peripheral: the
- * target-side half of the SPI stack, driven by util/spi_ao.hpp (which
+ * target-side half of the SPI stack, driven by util/spi_bus.hpp (which
  * owns arbitration and replies). This engine owns the wire: chip
  * select, the D/C line of display-style devices, and the byte pump
  * under the SPI interrupt (no DMA on AVR Dx: one interrupt per byte is
@@ -41,7 +41,7 @@
 
 #include "avrdx/pin.hpp"
 #include "kernel/post.hpp"
-#include "util/spi_ao.hpp"
+#include "util/spi_bus.hpp"
 
 namespace brio {
 
@@ -69,6 +69,13 @@ public:
         uint8_t* rx;           ///< phase 2 in; null = discard
         uint16_t len;          ///< phase 2 length
         ReplyTo<SpiDone> reply;
+        // Per-transaction bus configuration: on a SHARED bus every
+        // device names its own speed and mode in the request (ILI9481
+        // at 6 MHz, XPT2046 capped at ~2.5 MHz, ...); the engine
+        // reprograms the peripheral at each start(), which costs two
+        // register writes between transactions and nothing per byte.
+        SpiClock clock = SpiClock::div16;
+        uint8_t mode = SPI_MODE_0_gc;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
 
@@ -76,11 +83,10 @@ public:
      * Master, MSB first, default pins (SPI0: PA4 MOSI, PA5 MISO,
      * PA6 SCK; PA7 free - SSD disables the slave-select input). Call
      * after clock init, before sei(). CS/DC pins are configured by
-     * their owners (the device clients), not here.
+     * their owners (the device clients), not here; clock and mode
+     * travel per-request.
      */
-    static void init(SpiClock clock = SpiClock::div16,
-                     uint8_t mode = SPI_MODE_0_gc) {
-        mode_ = mode;
+    static void init() {
         if constexpr (spi_num == 0) {
             PORTA.DIRSET = PIN4_bm | PIN6_bm;  // MOSI, SCK
             PORTA.DIRCLR = PIN5_bm;            // MISO
@@ -88,13 +94,12 @@ public:
             PORTC.DIRSET = PIN0_bm | PIN2_bm;  // MOSI, SCK
             PORTC.DIRCLR = PIN1_bm;            // MISO
         }
-        regs().CTRLB = SPI_SSD_bm | mode_;
+        regs().CTRLB = SPI_SSD_bm | SPI_MODE_0_gc;
         regs().INTCTRL = SPI_IE_bm;
-        regs().CTRLA = SPI_MASTER_bm | static_cast<uint8_t>(clock) |
-                       SPI_ENABLE_bm;
+        regs().CTRLA = SPI_MASTER_bm | SPI_ENABLE_bm;
     }
 
-    /// Begin a transaction (called by SpiAo from main context). The
+    /// Begin a transaction (called by SpiBus from main context). The
     /// completion arrives via the ISR returning true.
     static void start(const Request& r) {
         req_ = r;
@@ -103,6 +108,9 @@ public:
         if (total_len() == 0) {
             return;  // client bug, documented: nothing will complete
         }
+        regs().CTRLB = SPI_SSD_bm | r.mode;
+        regs().CTRLA = SPI_MASTER_bm | static_cast<uint8_t>(r.clock) |
+                       SPI_ENABLE_bm;
         if (in_cmd_) {
             r.dc.clear();
         } else {
@@ -165,7 +173,6 @@ private:
     static inline Request req_{};
     static inline uint16_t pos_ = 0;
     static inline bool in_cmd_ = false;
-    static inline uint8_t mode_ = SPI_MODE_0_gc;
 };
 
 } // namespace brio

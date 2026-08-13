@@ -1,4 +1,4 @@
-// Host tests for util/spi_ao.hpp: bus arbitration, FIFO order across
+// Host tests for util/spi_bus.hpp: bus arbitration, FIFO order across
 // clients, rejection policy, engine handshake. Run with: pio test -e native
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -10,7 +10,7 @@
 
 #include "host/platform_host.hpp"
 #include "kernel/kernel.hpp"
-#include "util/spi_ao.hpp"
+#include "util/spi_bus.hpp"
 
 namespace {
 
@@ -30,10 +30,10 @@ struct FakeBus {
     static void start(const Request& r) { started.push_back(r.id); }
 };
 
-using Spi = brio::SpiAo<FakeBus, HostPlatform, 2>;   // tiny FIFO on purpose
+using Spi = brio::SpiBus<FakeBus, HostPlatform, 2>;   // tiny FIFO on purpose
 
 // Requester recording its replies.
-struct ClientAo : brio::Fsm<ClientAo, SpiDone> {
+struct Client : brio::Fsm<Client, SpiDone> {
     static inline brio::EventQueue<Event, 8, HostPlatform> queue;
     static inline std::vector<uint8_t> replies;
     static void init() { start(&only); }
@@ -46,19 +46,19 @@ struct ClientAo : brio::Fsm<ClientAo, SpiDone> {
     }
 };
 
-using K = brio::Kernel<HostPlatform, ClientAo, Spi>;
+using K = brio::Kernel<HostPlatform, Client, Spi>;
 
 void reset() {
     HostPlatform::reset();
     FakeBus::started.clear();
-    ClientAo::replies.clear();
+    Client::replies.clear();
     while (Spi::queue.pop().has_value()) {}
-    while (ClientAo::queue.pop().has_value()) {}
+    while (Client::queue.pop().has_value()) {}
     K::init_all();
 }
 
 FakeBus::Request req(uint8_t id) {
-    return {id, brio::reply_to<ClientAo, SpiDone>()};
+    return {id, brio::reply_to<Client, SpiDone>()};
 }
 
 } // namespace
@@ -69,7 +69,7 @@ TEST_CASE("an idle bus starts the request immediately") {
     while (K::step()) {}
 
     CHECK(FakeBus::started == std::vector<uint8_t>{1});
-    CHECK(ClientAo::replies.empty());          // engine still 'running'
+    CHECK(Client::replies.empty());          // engine still 'running'
 }
 
 TEST_CASE("completion replies to the requester and serves the next in FIFO order") {
@@ -83,14 +83,14 @@ TEST_CASE("completion replies to the requester and serves the next in FIFO order
     brio::post<Spi>(TransferDone{brio::spi_ok});
     while (K::step()) {}
     CHECK(FakeBus::started == std::vector<uint8_t>{1, 2});
-    CHECK(ClientAo::replies == std::vector<uint8_t>{brio::spi_ok});
+    CHECK(Client::replies == std::vector<uint8_t>{brio::spi_ok});
 
     brio::post<Spi>(TransferDone{brio::spi_ok});
     while (K::step()) {}
     brio::post<Spi>(TransferDone{brio::spi_ok});
     while (K::step()) {}
     CHECK(FakeBus::started == std::vector<uint8_t>{1, 2, 3});
-    CHECK(ClientAo::replies == std::vector<uint8_t>(3, brio::spi_ok));
+    CHECK(Client::replies == std::vector<uint8_t>(3, brio::spi_ok));
 }
 
 TEST_CASE("a full pending FIFO rejects immediately, loudly, and recovers") {
@@ -102,7 +102,7 @@ TEST_CASE("a full pending FIFO rejects immediately, loudly, and recovers") {
     while (K::step()) {}
 
     CHECK(FakeBus::started == std::vector<uint8_t>{1});
-    CHECK(ClientAo::replies == std::vector<uint8_t>{brio::spi_rejected});
+    CHECK(Client::replies == std::vector<uint8_t>{brio::spi_rejected});
     CHECK(Spi::rejected_count() == 1);
 
     // the bus still drains correctly afterwards
@@ -111,7 +111,7 @@ TEST_CASE("a full pending FIFO rejects immediately, loudly, and recovers") {
         while (K::step()) {}
     }
     CHECK(FakeBus::started == std::vector<uint8_t>{1, 2, 3});
-    CHECK(ClientAo::replies ==
+    CHECK(Client::replies ==
           std::vector<uint8_t>{brio::spi_rejected, brio::spi_ok, brio::spi_ok,
                                brio::spi_ok});
 }
@@ -123,7 +123,7 @@ TEST_CASE("the engine's status travels through to the requester") {
     brio::post<Spi>(TransferDone{42});         // engine-specific error code
     while (K::step()) {}
 
-    CHECK(ClientAo::replies == std::vector<uint8_t>{42});
+    CHECK(Client::replies == std::vector<uint8_t>{42});
 }
 
 TEST_CASE("back to idle: a later request starts at once") {

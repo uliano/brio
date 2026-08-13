@@ -1,28 +1,112 @@
-// blink - toggles an LED on PF2 at ~1 Hz (500 ms on / 500 ms off).
+// blink - the first brio-kernel firmware: two active objects talking.
 //
-// The board runs at 24 MHz from the external crystal on PA0/PA1 (XOSCHF),
-// set up by brio::init_clock_24mhz(), which falls back to the internal OSCHF
-// if the crystal fails to start (CLK_PER is 24 MHz either way).
-// F_CPU (24000000) comes from boards/AVR128DB48.json and feeds <util/delay.h>.
+// Blinker toggles the LED on PF2, driven by its own periodic time
+// event; Supervisor cycles the blink period (500 -> 250 -> 100 ms)
+// every 3 seconds by POSTING a SetPeriod command to the Blinker - the
+// canonical AO-to-AO addressed message. No delay loops anywhere: between
+// events the CPU is in IDLE sleep, woken by the PIT tick.
 //
-// Wiring: LED from PF2 -> resistor (~330 ohm) -> GND, so set() = on. toggle()
-// blinks regardless of LED polarity, so either orientation is fine here.
+// Wiring: LED from PF2 -> resistor (~330 ohm) -> GND (same as blink).
+//
+// The ISR vector bindings live HERE (target glue by nature); the AOs and
+// the kernel below them are pure logic - see CLAUDE.md, layering rule.
 
-#include <avr/io.h>
-#include <util/delay.h>
+#include <avr/interrupt.h>
+#include <stdint.h>
+#include <variant>
+
 #include "avrdx/clock.hpp"
 #include "avrdx/pin.hpp"
+#include "avrdx/platform_avr.hpp"
+#include "avrdx/ticker.hpp"
+#include "kernel/event_queue.hpp"
+#include "kernel/fsm.hpp"
+#include "kernel/kernel.hpp"
+#include "kernel/time.hpp"
+#include "kernel/time_event.hpp"
+
+using P = brio::AvrPlatform;
 
 namespace {
+
+template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
+
 using Led = brio::Pin<'F', 2>;  // PF2
-}  // namespace
+
+// ---- events -----------------------------------------------------------------
+struct Toggle {};                    // Blinker's own heartbeat
+struct SetPeriod { uint16_t ticks; };  // command: change the blink period
+struct Cycle {};                     // Supervisor's own heartbeat
+
+// ---- the blinker ------------------------------------------------------------
+struct Blinker : brio::Fsm<Blinker, Toggle, SetPeriod> {
+    static inline brio::EventQueue<Event, 4, P> queue;
+    static inline brio::TimeEvent<P, Blinker, Toggle> heartbeat{Toggle{}};
+
+    static void init() {
+        Led::output();
+        start(&running);
+    }
+
+    static Status running(const Event& e) {
+        return std::visit(overloaded{
+            [](brio::Entry) {
+                heartbeat.arm_every(brio::ticks_from_ms<P>(500));
+                return handled();
+            },
+            [](Toggle) {
+                Led::toggle();
+                return handled();
+            },
+            [](SetPeriod p) {
+                heartbeat.arm_every(p.ticks);  // restart with the new cadence
+                return handled();
+            },
+            [](auto) { return unhandled(); },
+        }, e);
+    }
+};
+
+// ---- the supervisor ---------------------------------------------------------
+struct Supervisor : brio::Fsm<Supervisor, Cycle> {
+    static inline brio::EventQueue<Event, 2, P> queue;
+    static inline brio::TimeEvent<P, Supervisor, Cycle> cadence{Cycle{}};
+
+    // periods precomputed to ticks at compile time (no runtime u64 math)
+    static constexpr uint16_t periods[] = {
+        static_cast<uint16_t>(brio::ticks_from_ms<P>(500)),
+        static_cast<uint16_t>(brio::ticks_from_ms<P>(250)),
+        static_cast<uint16_t>(brio::ticks_from_ms<P>(100)),
+    };
+    static inline uint8_t index = 0;
+
+    static void init() { start(&running); }
+
+    static Status running(const Event& e) {
+        return std::visit(overloaded{
+            [](brio::Entry) {
+                cadence.arm_every(brio::ticks_from_secs<P>(3));
+                return handled();
+            },
+            [](Cycle) {
+                index = static_cast<uint8_t>((index + 1) % 3);
+                brio::post<Blinker>(SetPeriod{periods[index]});
+                return handled();
+            },
+            [](auto) { return unhandled(); },
+        }, e);
+    }
+};
+
+} // namespace
+
+// ---- target glue ------------------------------------------------------------
+ISR(RTC_PIT_vect) { brio::Ticker::pit(); }   // timebase tick + idle wakeup
 
 int main() {
-    brio::init_clock_24mhz();  // PA0/PA1 crystal -> CLK_PER = 24 MHz (OSCHF fallback)
-    Led::output();           // PF2 as output (PORTF.DIRSET = PIN2_bm)
+    brio::init_clock_24mhz();   // PA0/PA1 crystal -> CLK_PER = 24 MHz
+    brio::Ticker::init();       // RTC/PIT timebase (runs in IDLE sleep)
+    sei();
 
-    for (;;) {
-        Led::toggle();       // PORTF.OUTTGL = PIN2_bm
-        _delay_ms(500);
-    }
+    brio::Kernel<P, Blinker, Supervisor>::run();  // never returns
 }

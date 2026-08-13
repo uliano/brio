@@ -22,7 +22,7 @@ struct Ping { uint8_t n; };  // payload event, handled in place
 struct Nope {};          // nobody handles this
 
 // A toy AO exercising the whole contract. States record a trace.
-struct ToyAo : brio::Fsm<ToyAo, Go, Bounce, Ping, Nope> {
+struct Toy : brio::Fsm<Toy, Go, Bounce, Ping, Nope> {
     static inline std::vector<std::string> trace;
     static inline uint8_t last_ping = 0;
 
@@ -70,68 +70,68 @@ using Trace = std::vector<std::string>;
 } // namespace
 
 TEST_CASE("start arms the initial state and delivers exactly one Entry") {
-    ToyAo::reset();
-    ToyAo::start(&ToyAo::state_a);
+    Toy::reset();
+    Toy::start(&Toy::state_a);
 
-    CHECK(ToyAo::trace == Trace{"A:entry"});
-    CHECK(ToyAo::current() == &ToyAo::state_a);
+    CHECK(Toy::trace == Trace{"A:entry"});
+    CHECK(Toy::current() == &Toy::state_a);
 }
 
 TEST_CASE("a handled event causes no entry/exit and no state change") {
-    ToyAo::reset();
-    ToyAo::start(&ToyAo::state_a);
-    ToyAo::trace.clear();
+    Toy::reset();
+    Toy::start(&Toy::state_a);
+    Toy::trace.clear();
 
-    ToyAo::dispatch(ToyAo::Event{Ping{42}});
+    Toy::dispatch(Toy::Event{Ping{42}});
 
-    CHECK(ToyAo::trace == Trace{"A:ping"});
-    CHECK(ToyAo::last_ping == 42);
-    CHECK(ToyAo::current() == &ToyAo::state_a);
+    CHECK(Toy::trace == Trace{"A:ping"});
+    CHECK(Toy::last_ping == 42);
+    CHECK(Toy::current() == &Toy::state_a);
 }
 
 TEST_CASE("a transition runs old-exit then new-entry, in that order") {
-    ToyAo::reset();
-    ToyAo::start(&ToyAo::state_a);
-    ToyAo::trace.clear();
+    Toy::reset();
+    Toy::start(&Toy::state_a);
+    Toy::trace.clear();
 
-    ToyAo::dispatch(ToyAo::Event{Go{}});
+    Toy::dispatch(Toy::Event{Go{}});
 
-    CHECK(ToyAo::trace == Trace{"A:go", "A:exit", "B:entry"});
-    CHECK(ToyAo::current() == &ToyAo::state_b);
+    CHECK(Toy::trace == Trace{"A:go", "A:exit", "B:entry"});
+    CHECK(Toy::current() == &Toy::state_b);
 }
 
 TEST_CASE("an entry may chain a transition: pass-through states") {
-    ToyAo::reset();
-    ToyAo::start(&ToyAo::state_a);
-    ToyAo::dispatch(ToyAo::Event{Go{}});          // A -> B
-    ToyAo::trace.clear();
+    Toy::reset();
+    Toy::start(&Toy::state_a);
+    Toy::dispatch(Toy::Event{Go{}});          // A -> B
+    Toy::trace.clear();
 
-    ToyAo::dispatch(ToyAo::Event{Bounce{}});      // B -> P -(entry chains)-> C
+    Toy::dispatch(Toy::Event{Bounce{}});      // B -> P -(entry chains)-> C
 
-    CHECK(ToyAo::trace == Trace{"B:bounce", "B:exit", "P:entry", "P:exit", "C:entry"});
-    CHECK(ToyAo::current() == &ToyAo::state_c);
+    CHECK(Toy::trace == Trace{"B:bounce", "B:exit", "P:entry", "P:exit", "C:entry"});
+    CHECK(Toy::current() == &Toy::state_c);
 }
 
 TEST_CASE("an unhandled event is ignored and changes nothing") {
-    ToyAo::reset();
-    ToyAo::start(&ToyAo::state_a);
-    ToyAo::trace.clear();
+    Toy::reset();
+    Toy::start(&Toy::state_a);
+    Toy::trace.clear();
 
-    ToyAo::dispatch(ToyAo::Event{Nope{}});
+    Toy::dispatch(Toy::Event{Nope{}});
 
-    CHECK(ToyAo::trace.empty());
-    CHECK(ToyAo::current() == &ToyAo::state_a);
+    CHECK(Toy::trace.empty());
+    CHECK(Toy::current() == &Toy::state_a);
 }
 
 TEST_CASE("two AOs with the same alternatives have independent machines") {
-    struct OtherAo : brio::Fsm<OtherAo, Go, Bounce, Ping, Nope> {
+    struct Other : brio::Fsm<Other, Go, Bounce, Ping, Nope> {
         static Status only(const Event&) { return handled(); }
     };
 
-    ToyAo::reset();
-    ToyAo::start(&ToyAo::state_a);
-    OtherAo::start(&OtherAo::only);
+    Toy::reset();
+    Toy::start(&Toy::state_a);
+    Other::start(&Other::only);
 
-    CHECK(ToyAo::current() == &ToyAo::state_a);       // untouched by OtherAo
-    CHECK(OtherAo::current() == &OtherAo::only);
+    CHECK(Toy::current() == &Toy::state_a);       // untouched by Other
+    CHECK(Other::current() == &Other::only);
 }

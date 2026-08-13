@@ -1,7 +1,7 @@
 /*
- * serial_ao.hpp
+ * serial_port.hpp
  *
- * SerialAo: the active object that turns a byte transport into LINE
+ * SerialPort: the active object that turns a byte transport into LINE
  * events - bytes at high rate below (ISR + ring, lock-free), events at
  * low rate above. Pure logic over the transport template parameter:
  * host-testable with a fake transport, target-agnostic (layering rule).
@@ -10,20 +10,20 @@
  *   ISR:      byte -> RX ring (always, lock-free); on the ring's
  *             empty -> non-empty EDGE the app glue posts RxActivity{}
  *             (see Uart::rxc()'s return value)
- *   SerialAo: drains the ring, feeds a LineAssembler; each completed
+ *   SerialPort: drains the ring, feeds a LineAssembler; each completed
  *             line is posted to LineSink as LineReceived{line} - a
  *             REFERENCE, the 80-byte payload never travels in a queue
  *   LineSink: parses/uses the line within its own dispatch
  *
  * Line buffer ownership (ping-pong): two LineAssemblers alternate; a
  * completed line stays untouched in its assembler's buffer while the
- * OTHER one assembles the next line. With both lines in flight SerialAo
+ * OTHER one assembles the next line. With both lines in flight SerialPort
  * stops draining (the ring absorbs, that is its job) and posts
  * RxActivity to ITSELF: "leftover work, reschedule me".
  *
  * SCHEDULING CONTRACT - consumer above producer: LineSink MUST precede
- * SerialAo in the Kernel pack. The kernel then serves every posted
- * LineReceived before SerialAo runs again, so when a SerialAo dispatch
+ * SerialPort in the Kernel pack. The kernel then serves every posted
+ * LineReceived before SerialPort runs again, so when a SerialPort dispatch
  * starts, all its previously posted lines have been consumed and both
  * buffers are free (in_flight resets). The sink may read AND mutate the
  * line (in-place tokenization) during its dispatch only; keeping the
@@ -47,7 +47,7 @@
 
 namespace brio {
 
-/// Posted (by ISR glue or by SerialAo itself) when RX bytes are pending.
+/// Posted (by ISR glue or by SerialPort itself) when RX bytes are pending.
 struct RxActivity {};
 
 /// A completed line, NUL-terminated. Reference semantics: valid (and
@@ -59,9 +59,9 @@ struct LineReceived {
 
 template <typename Transport, Platform P, typename LineSink,
           uint8_t max_line = 80>
-class SerialAo
-    : public Fsm<SerialAo<Transport, P, LineSink, max_line>, RxActivity> {
-    using Base = Fsm<SerialAo<Transport, P, LineSink, max_line>, RxActivity>;
+class SerialPort
+    : public Fsm<SerialPort<Transport, P, LineSink, max_line>, RxActivity> {
+    using Base = Fsm<SerialPort<Transport, P, LineSink, max_line>, RxActivity>;
 
 public:
     using Event = typename Base::Event;
@@ -106,7 +106,7 @@ private:
         if (in_flight_ >= 2) {
             // Both buffers in flight and possibly more bytes in the ring:
             // reschedule ourselves AFTER the sink has consumed.
-            post<SerialAo>(RxActivity{});
+            post<SerialPort>(RxActivity{});
         }
     }
 

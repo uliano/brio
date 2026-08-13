@@ -30,7 +30,7 @@ static_assert(sizeof(brio::ReplyTo<Done>) == sizeof(void (*)()),
               "the capsule is one function pointer wide");
 
 // ---- the service: doubles `work`, replies to whoever asked ------------------
-struct ServiceAo : brio::Fsm<ServiceAo, Request> {
+struct Service : brio::Fsm<Service, Request> {
     static inline brio::EventQueue<Event, 4, HostPlatform> queue;
     static void init() { start(&only); }
     static Status only(const Event& e) {
@@ -46,7 +46,7 @@ struct ServiceAo : brio::Fsm<ServiceAo, Request> {
 };
 
 // ---- two independent requesters --------------------------------------------
-struct AlphaAo : brio::Fsm<AlphaAo, Done> {
+struct Alpha : brio::Fsm<Alpha, Done> {
     static inline brio::EventQueue<Event, 4, HostPlatform> queue;
     static inline std::vector<uint8_t> got;
     static void init() { start(&only); }
@@ -59,7 +59,7 @@ struct AlphaAo : brio::Fsm<AlphaAo, Done> {
     }
 };
 
-struct BetaAo : brio::Fsm<BetaAo, Done> {
+struct Beta : brio::Fsm<Beta, Done> {
     static inline brio::EventQueue<Event, 4, HostPlatform> queue;
     static inline std::vector<uint8_t> got;
     static void init() { start(&only); }
@@ -72,15 +72,15 @@ struct BetaAo : brio::Fsm<BetaAo, Done> {
     }
 };
 
-using K = brio::Kernel<HostPlatform, AlphaAo, BetaAo, ServiceAo>;
+using K = brio::Kernel<HostPlatform, Alpha, Beta, Service>;
 
 void reset() {
     HostPlatform::reset();
-    AlphaAo::got.clear();
-    BetaAo::got.clear();
-    while (ServiceAo::queue.pop().has_value()) {}
-    while (AlphaAo::queue.pop().has_value()) {}
-    while (BetaAo::queue.pop().has_value()) {}
+    Alpha::got.clear();
+    Beta::got.clear();
+    while (Service::queue.pop().has_value()) {}
+    while (Alpha::queue.pop().has_value()) {}
+    while (Beta::queue.pop().has_value()) {}
     K::init_all();
 }
 
@@ -88,35 +88,35 @@ void reset() {
 
 TEST_CASE("the reply reaches the requester with the service's payload") {
     reset();
-    brio::post<ServiceAo>(Request{21, brio::reply_to<AlphaAo, Done>()});
+    brio::post<Service>(Request{21, brio::reply_to<Alpha, Done>()});
     while (K::step()) {}
 
-    CHECK(AlphaAo::got == std::vector<uint8_t>{42});
-    CHECK(BetaAo::got.empty());
+    CHECK(Alpha::got == std::vector<uint8_t>{42});
+    CHECK(Beta::got.empty());
 }
 
 TEST_CASE("the service serves interleaved clients without knowing them") {
     reset();
-    brio::post<ServiceAo>(Request{1, brio::reply_to<AlphaAo, Done>()});
-    brio::post<ServiceAo>(Request{2, brio::reply_to<BetaAo, Done>()});
-    brio::post<ServiceAo>(Request{3, brio::reply_to<AlphaAo, Done>()});
+    brio::post<Service>(Request{1, brio::reply_to<Alpha, Done>()});
+    brio::post<Service>(Request{2, brio::reply_to<Beta, Done>()});
+    brio::post<Service>(Request{3, brio::reply_to<Alpha, Done>()});
     while (K::step()) {}
 
-    CHECK(AlphaAo::got == std::vector<uint8_t>{2, 6});   // queue order kept
-    CHECK(BetaAo::got == std::vector<uint8_t>{4});
+    CHECK(Alpha::got == std::vector<uint8_t>{2, 6});   // queue order kept
+    CHECK(Beta::got == std::vector<uint8_t>{4});
 }
 
 TEST_CASE("a null capsule makes the request fire-and-forget") {
     reset();
-    brio::post<ServiceAo>(Request{99, {}});              // nobody to answer
+    brio::post<Service>(Request{99, {}});              // nobody to answer
     while (K::step()) {}
 
-    CHECK(AlphaAo::got.empty());
-    CHECK(BetaAo::got.empty());                          // and no crash
+    CHECK(Alpha::got.empty());
+    CHECK(Beta::got.empty());                          // and no crash
 }
 
 TEST_CASE("the capsule reports whether it is armed") {
-    constexpr auto armed = brio::reply_to<AlphaAo, Done>();
+    constexpr auto armed = brio::reply_to<Alpha, Done>();
     constexpr brio::ReplyTo<Done> null{};
     static_assert(armed);
     static_assert(!null);

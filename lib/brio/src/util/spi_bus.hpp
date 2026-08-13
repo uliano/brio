@@ -1,7 +1,7 @@
 /*
- * spi_ao.hpp
+ * spi_bus.hpp
  *
- * SpiAo: the bus-owner active object for a SPI master. Generic over the
+ * SpiBus: the bus-owner active object for a SPI master. Generic over the
  * Bus engine (the target-side driver that moves the bytes under
  * interrupts): this layer only owns ARBITRATION and the REPLY channel,
  * which is exactly what makes a shared bus safe - clients post requests,
@@ -60,10 +60,10 @@ struct TransferDone {
 };
 
 template <typename Bus, Platform P, uint8_t pending_depth = 4>
-class SpiAo : public Fsm<SpiAo<Bus, P, pending_depth>,
+class SpiBus : public Fsm<SpiBus<Bus, P, pending_depth>,
                          typename Bus::Request, TransferDone> {
     using Base =
-        Fsm<SpiAo<Bus, P, pending_depth>, typename Bus::Request, TransferDone>;
+        Fsm<SpiBus<Bus, P, pending_depth>, typename Bus::Request, TransferDone>;
     using Request = typename Bus::Request;
 
 public:
