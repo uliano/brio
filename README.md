@@ -195,6 +195,7 @@ no `build_src_filter` changes needed.
 | `console` | Interactive command console @ 460800 (HELP, LED, UPTIME, ERR): full-stack test of uart + print + proto parser + timers |
 | `ao_blink` | First **brio kernel** firmware: BlinkerAo toggles PF2 on its periodic time event, SupervisorAo cycles the period (500/250/100 ms) every 3 s by posting a command - no delay loops, CPU in IDLE sleep between events |
 | `ao_console` | The console on the **brio kernel**: SerialAo (RX bytes -> line events, ping-pong buffers), ConsoleAo (parse/route/reply), BlinkerAo (heartbeat FSM + LED commands via posted events). Same commands as `console`, zero polling |
+| `spi_loopback` | SPI stack test: jumper **PA4(MOSI) -> PA5(MISO)**, a full-duplex 8-byte transaction per second through SpiAo + the Spi<0> engine, verdict on the serial console (no jumper = FAIL 0xFF, by design) |
 
 ## Hardware
 

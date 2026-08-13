@@ -14,6 +14,28 @@
 
 namespace brio {
 
+/// Runtime pin descriptor (3 bytes): lets a pin chosen at compile time
+/// travel inside a request event (e.g. the CS/DC of a SPI transaction,
+/// asserted by the bus AO, not by the client). A null PinRef (default)
+/// means "no such pin": set/clear are no-ops, so optional pins cost one
+/// branch. Build one with Pin<...>::ref().
+struct PinRef {
+    volatile VPORT_t* vport = nullptr;
+    uint8_t mask = 0;
+
+    void set() const {
+        if (vport != nullptr) {
+            vport->OUT |= mask;
+        }
+    }
+    void clear() const {
+        if (vport != nullptr) {
+            vport->OUT &= ~mask;
+        }
+    }
+    constexpr bool valid() const { return vport != nullptr; }
+};
+
 template <char PortLetter, uint8_t PinNum>
 struct Pin {
     static_assert(PortLetter >= 'A' && PortLetter <= 'G', "Invalid port");
@@ -65,6 +87,9 @@ struct Pin {
     static volatile uint8_t& pinctrl() {
         return (&port().PIN0CTRL)[PinNum];
     }
+
+    /// Runtime descriptor of this pin (for request events - see PinRef).
+    static constexpr PinRef ref() { return {&vport(), mask}; }
 
     // Basic I/O
     static void toggle() { port().OUTTGL = mask; }

@@ -548,10 +548,14 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
                            sleep via sei+sleep, BREAK, Ticker-backed now()
     clock.hpp              DA/DB clock init: init_clocks() probing generic +
                            init_clock_24mhz() deterministic DB crystal path
-    pin.hpp                Pin<'A',5> compile-time GPIO (VPORT fast paths)
+    pin.hpp                Pin<'A',5> compile-time GPIO (VPORT fast paths) +
+                           PinRef runtime descriptor (CS/DC in requests)
     ring.hpp               Ring<T,size> SPSC ring (index type auto-derived)
     uart.hpp               Uart<n, Route, rx, tx> static interrupt-driven
                            byte transport, RXDATAH error counters
+    spi.hpp                Spi<n> master engine: two-phase descriptor
+                           (cmd @ DC low, full-duplex data @ DC high),
+                           per-byte ISR pump, CS owned by the engine
     ticker.hpp             BasicTicker<tps> static RTC/PIT timebase
                            (alias Ticker = BasicTicker<1024>)
     timer.hpp              Timer<Millis|Secs|Ticks> callback soft timers
