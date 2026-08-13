@@ -223,6 +223,19 @@ AO kernel decisions taken so far:
   std::optional returns instead of bool + out-parameter; keep the
   header-comment style that explains the concurrency model and the
   WHY of each tradeoff.
+- **ISR binding pattern (2026-08-13): drivers expose the handler BODY,
+  the app binds the vector - and the body is [[gnu::always_inline]].**
+  Vector names (ISR(USART2_RXC_vect), RISC-V attributes...) are
+  irreducibly target-specific glue: they live in the app (or a future
+  board/target file), never in portable code; the driver provides
+  rxc()/dre()/pit() functions. The always_inline attribute is what
+  makes the pattern FREE: an ISR body has exactly one call site by
+  construction, so inlining costs no flash, and with the body visible
+  the compiler saves only the registers actually used instead of the
+  full ABI call-clobbered set. Measured on the serial app: 16 pushes ->
+  8/9 per ISR. Without the attribute, -Os refuses to inline the larger
+  bodies and every interrupt pays ~40 wasted cycles of push/pop.
+  Survives -fno-inline debug builds (like _delay_ms).
 
 The general structure (toolchain wiring, custom board JSON, Atmel-ICE upload,
 the disassembly post-build script) and the `lib/brio` library are inherited

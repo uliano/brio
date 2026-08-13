@@ -179,7 +179,9 @@ public:
      * RXDATAL (which advances the FIFO). Corrupted bytes (frame/parity) are
      * counted and dropped; BUFOVF means the hardware already lost bytes.
      */
-    static void rxc() {
+    // always_inline: single call site (the ISR binding) - see ticker.hpp
+    // pit() for the register-set rationale.
+    [[gnu::always_inline]] static void rxc() {
         const uint8_t status = regs().RXDATAH;
         const uint8_t data = regs().RXDATAL;
 
@@ -202,7 +204,9 @@ public:
      * Feeds the next byte from the TX ring; disables itself when the ring
      * drains (write_byte() re-enables it).
      */
-    static void dre() {
+    // always_inline: single call site (the ISR binding) - see ticker.hpp
+    // pit() for the register-set rationale.
+    [[gnu::always_inline]] static void dre() {
         uint8_t c;
         if (m_tx.get_from_isr(c)) {
             regs().TXDATAL = c;

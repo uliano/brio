@@ -173,7 +173,12 @@ public:
      * Clears the interrupt flag, advances the tick counter, then derives
      * seconds (exact) and milliseconds (skip-corrected, see file header).
      */
-    static void pit() {
+    // always_inline: an ISR body has exactly one call site (the vector
+    // binding in the app), so inlining costs no flash and lets the compiler
+    // save only the registers actually used instead of the full ABI
+    // call-clobbered set (measured on this function: 8 pushes vs 16).
+    // Survives the -fno-inline debug profile like _delay_ms does.
+    [[gnu::always_inline]] static void pit() {
         RTC.PITINTFLAGS = RTC_PI_bm;  // clear interrupt flag
 
         ++m_ticks;
