@@ -11,7 +11,7 @@
  *    enforceAbstract() and a virtual destructor whose only effect was
  *    requiring operator delete stubs. Timer<Unit> is now a standalone class;
  *  - member callbacks use a `template <auto Method>` compile-time trampoline
- *    (dx::bind<&Class::method>(obj)) instead of the memcpy'd
+ *    (brio::bind<&Class::method>(obj)) instead of the memcpy'd
  *    pointer-to-member union;
  *  - time units are enforced with a concept instead of a static_assert on
  *    hand-rolled is_same.
@@ -27,19 +27,19 @@
  * Usage:
  * ```cpp
  * // free function (or capture-less lambda), periodic:
- * dx::Timer<dx::Millis> heartbeat(500, true, +[] { Led::toggle(); });
+ * brio::Timer<brio::Millis> heartbeat(500, true, +[] { Led::toggle(); });
  * heartbeat.start();
  *
  * // member function via compile-time trampoline:
  * struct Logger { void flush(); };
  * Logger logger;
- * dx::Timer<dx::Secs> flusher(10, true, dx::bind<&Logger::flush>(&logger));
+ * brio::Timer<brio::Secs> flusher(10, true, brio::bind<&Logger::flush>(&logger));
  * flusher.start();
  *
  * // main loop:
  * for (;;) {
- *     dx::Timer<dx::Millis>::check_all();
- *     dx::Timer<dx::Secs>::check_all();
+ *     brio::Timer<brio::Millis>::check_all();
+ *     brio::Timer<brio::Secs>::check_all();
  * }
  * ```
  */
@@ -50,7 +50,7 @@
 #include <concepts>
 #include "ticker.hpp"
 
-namespace dx {
+namespace brio {
 
 /// Time-unit tags: which Ticker counter a Timer list runs on.
 struct Ticks {};
@@ -77,7 +77,7 @@ struct member_fn_class<void (C::*)()> {
 } // namespace impl
 
 /**
- * @brief Bind a member function to an object: dx::bind<&Class::method>(&obj)
+ * @brief Bind a member function to an object: brio::bind<&Class::method>(&obj)
  *
  * The trampoline is a capture-less lambda generated per <Method>, converted
  * to a plain function pointer: no memcpy of pointers-to-member, no virtual
@@ -92,7 +92,7 @@ inline BoundCallback bind(typename impl::member_fn_class<decltype(Method)>::type
 /**
  * @class Timer
  * @brief One-shot or periodic software timer, polled via check_all()
- * @tparam Unit dx::Ticks, dx::Millis or dx::Secs
+ * @tparam Unit brio::Ticks, brio::Millis or brio::Secs
  *
  * Timers self-register in a per-unit intrusive list at construction and
  * unlink at destruction. They are neither copyable nor movable (the list
@@ -159,7 +159,7 @@ public:
         link();
     }
 
-    /// Timer with a bound member callback (see dx::bind).
+    /// Timer with a bound member callback (see brio::bind).
     Timer(uint32_t period, bool periodic, BoundCallback callback)
         : m_period(period), m_bound(callback), m_periodic(periodic) {
         link();
@@ -221,4 +221,4 @@ public:
     }
 };
 
-} // namespace dx
+} // namespace brio

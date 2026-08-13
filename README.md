@@ -4,7 +4,7 @@ Bare-metal C++ experiments on an **AVR128DB48**, built with PlatformIO against a
 local self-built **avr-gcc 16.2** toolchain (at `/sw/avr`, with avr-gdb 17.2 and
 avrdude 8.1) and flashed with an **Atmel-ICE** over UPDI. No Arduino framework.
 
-- General structure and the `lib/core` shared library inherited from
+- General structure and the `lib/brio` shared library inherited from
   [AVR-Multislope](https://github.com/uliano/AVR-Multislope) (toolchain wiring,
   custom board JSON, Atmel-ICE upload, disassembly script, clock/uart/ticker/
   timer/parser modules).
@@ -12,13 +12,13 @@ avrdude 8.1) and flashed with an **Atmel-ICE** over UPDI. No Arduino framework.
   one `main()` per `src/apps/<app>.cpp`, each becoming two envs:
   `[env:<app>]` (release, `-Os`) and `[env:<app>-debug]` (`-Og -g3
   -fno-inline`, for debugging only - debug flags never reach release builds).
-- `lib/core` is the **dx framework**: a small modern-C++ bare-metal layer for
+- `lib/brio` is the **brio framework**: a small modern-C++ bare-metal layer for
   the AVR **DA/DB** families. Everything resolves at compile time: static
-  (monostate) drivers (`dx::Uart<2, dx::Route::alt1>`, `dx::Ticker`,
-  `dx::Pin<'F',2>`), C++20 concepts instead of virtual interfaces,
-  `dx::print(sink, ...)` variadic formatting, push-based line/command
+  (monostate) drivers (`brio::Uart<2, brio::Route::alt1>`, `brio::Ticker`,
+  `brio::Pin<'F',2>`), C++20 concepts instead of virtual interfaces,
+  `brio::print(sink, ...)` variadic formatting, push-based line/command
   parsing (`proto/`), software timers without vtables
-  (`dx::bind<&Class::method>`). One flat `dx` namespace; family differences
+  (`brio::bind<&Class::method>`). One flat `brio` namespace; family differences
   handled with device-macro guards.
 
 ## Quick start
@@ -182,7 +182,7 @@ PlatformIO's custom DAP events). Harmless; disable probe-rs per-workspace.
 3. Build/upload it: `pio run -e <name> -t upload`; debug it:
    `pio debug -e <name>-debug`.
 
-Shared code goes into `lib/core/src/`: any header included from an app is
+Shared code goes into `lib/brio/src/`: any header included from an app is
 compiled and linked automatically by PlatformIO's Library Dependency Finder,
 no `build_src_filter` changes needed.
 

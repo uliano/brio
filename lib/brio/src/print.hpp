@@ -1,23 +1,23 @@
 /*
  * print.hpp
  *
- * Text formatting as free variadic functions over any dx::ByteSink - the
+ * Text formatting as free variadic functions over any brio::ByteSink - the
  * replacement for the print() methods that used to live inside the Uart
  * driver (which is byte transport only now).
  *
  * Usage (sink passed as a zero-cost tag instance):
  *
- *   constexpr dx::Uart<2, dx::Route::alt1> serial;
- *   dx::print(serial, "[", ts, "] count = ", count, dx::crlf);
- *   dx::print(serial, "mask = ", dx::hex(0xBEEF), " v = ", dx::fixed(v, 8, 3));
+ *   constexpr brio::Uart<2, brio::Route::alt1> serial;
+ *   brio::print(serial, "[", ts, "] count = ", count, brio::crlf);
+ *   brio::print(serial, "mask = ", brio::hex(0xBEEF), " v = ", brio::fixed(v, 8, 3));
  *
  * Supported argument types: char, C strings, all integer types (decimal;
- * dx::hex() for hexadecimal), bool (as 1/0), float/double (scientific by
- * default, dx::fixed()/dx::sci() to control), dx::TimeStamp, dx::crlf.
+ * brio::hex() for hexadecimal), bool (as 1/0), float/double (scientific by
+ * default, brio::fixed()/brio::sci() to control), brio::TimeStamp, brio::crlf.
  *
  * Extension point: print() dispatches each argument to an unqualified
  * print_one(sink, value) call, so a new type becomes printable by providing
- * a print_one overload for it (in namespace dx or in the type's own
+ * a print_one overload for it (in namespace brio or in the type's own
  * namespace, found via ADL).
  *
  * Delivery policy: print BLOCKS until the sink accepts each byte (spinning
@@ -38,7 +38,7 @@
 #include "stream.hpp"
 #include "ticker.hpp"  // TimeStamp
 
-namespace dx {
+namespace brio {
 
 // ---- tokens and format wrappers ---------------------------------------------
 
@@ -160,4 +160,4 @@ inline void print(S s, const Args &...args) {
     (print_one(s, args), ...);
 }
 
-} // namespace dx
+} // namespace brio

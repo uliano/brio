@@ -20,7 +20,7 @@
 #include <stdint.h>
 #include <concepts>
 
-namespace dx {
+namespace brio {
 
 /// A sink accepts bytes: write_byte() returns false when it cannot (yet).
 template <typename S>
@@ -38,4 +38,4 @@ concept ByteSource = requires(uint8_t &b) {
 template <typename S>
 concept ByteTransport = ByteSink<S> && ByteSource<S>;
 
-} // namespace dx
+} // namespace brio

@@ -8,11 +8,11 @@
 // regular PORT for atomic OUTTGL/DIRSET/DIRCLR operations. Use invert(true)
 // for active-low signals (hardware inversion via INVEN).
 //
-//   using Led = dx::Pin<'A', 5>;   // PA5
+//   using Led = brio::Pin<'A', 5>;   // PA5
 //   Led::output();                 // PORTA.DIRSET = PIN5_bm
 //   Led::toggle();                 // PORTA.OUTTGL = PIN5_bm
 
-namespace dx {
+namespace brio {
 
 template <char PortLetter, uint8_t PinNum>
 struct Pin {
@@ -97,4 +97,4 @@ struct Pin {
     }
 };
 
-} // namespace dx
+} // namespace brio

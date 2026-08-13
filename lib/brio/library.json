@@ -1,0 +1,10 @@
+{
+  "name": "brio",
+  "version": "0.1.0",
+  "description": "brio - modern-C++ bare-metal framework for AVR DA/DB: clock init, GPIO pins, interrupt-driven UART, RTC/PIT ticker, software timers, line/command parsers.",
+  "keywords": ["avr", "avr-dx", "bare-metal"],
+  "authors": [{ "name": "uliano" }],
+  "build": {
+    "srcFilter": "+<*>"
+  }
+}

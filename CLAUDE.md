@@ -16,7 +16,7 @@ Bare-metal C++ experiments on an **AVR128DB48** (48-pin, 128 KB flash, 16 KB
 SRAM), programmed/debugged with an **Atmel-ICE** over UPDI. No Arduino
 framework: just avr-gcc + avr-libc.
 
-Long-term goal: grow `lib/core` into a small **modern-C++ framework covering
+Long-term goal: grow `lib/brio` into a small **modern-C++ framework covering
 at least the AVR DA and DB families**. Design decided on 2026-07-21 (after a
 full critical review of the AVR-Multislope heritage):
 
@@ -26,15 +26,15 @@ full critical review of the AVR-Multislope heritage):
   (`ByteSink`/`ByteSource` in stream.hpp) - NO virtual interfaces, no
   runtime singletons (the old ByteStream base class is gone);
 - **drivers move bytes, they do not format**: text output is
-  `dx::print(sink, ...)` in print.hpp, variadic free functions over any
+  `brio::print(sink, ...)` in print.hpp, variadic free functions over any
   ByteSink; new types become printable via a `print_one(sink, value)`
   overload (found by ADL). print BLOCKS until the sink accepts (no silent
   truncation) - so print only after init + sei();
 - **protocol layer is push-based**: proto/line_parser.hpp's LineAssembler
   is fed bytes and returns completed lines - no reference to any transport,
   host-testable; parsers/router are plain static code;
-- **one flat namespace `dx`**, no nesting (namespaces prevent clashes, they
-  are not architecture); apps may `using namespace dx;`, headers always
+- **one flat namespace `brio`**, no nesting (namespaces prevent clashes, they
+  are not architecture); apps may `using namespace brio;`, headers always
   qualify. Types PascalCase, functions/constants snake_case;
 - **monostate drivers double as zero-cost tags**: `constexpr Serial serial;`
   is an empty object usable as `print(serial, ...)` argument;
@@ -60,7 +60,7 @@ queues, state-machine-based active objects, time events - written from
 scratch (clean room: the concepts from Samek's book, never the QP source,
 which is GPL/commercial), with event-driven non-blocking drivers at least
 for I2C and SPI on top: a kind of modern Arduino. Development happens in
-THIS repo (multi-app system as testbed, lib/core as foundation).
+THIS repo (multi-app system as testbed, lib/brio as foundation).
 
 **Governing rule for that evolution - nothing is settled.** Reusing the
 existing code is fine only as long as it does not limit the design above
@@ -71,14 +71,146 @@ and including the design decisions of 2026-07-21 is up for continuous,
 radical, deep revision, and every stage of the work requires critical
 analysis at ALL levels of the stack, not just the one being added.
 
+AO kernel decisions taken so far:
+
+- **Name (2026-08-13): the framework is `brio`** (from "con brio" -
+  Italian musical marking for liveliness - deliberately not tied to the
+  AVR Dx silicon so nothing prevents generalization to other targets,
+  and deliberately far from QP's q-naming for clean-room distance). One
+  flat namespace `brio` for everything, library folder lib/brio; the
+  former `dx` namespace and lib/core folder were renamed on the same
+  day (cheapest possible moment: eight headers, three apps, no external
+  users). "avr-dx" as a library.json keyword still legitimately refers
+  to the chip family.
+
+- **Events (2026-08-13): value semantics, per-AO variant.** Events are
+  COPIED into per-AO queues - no pools, no reference counting (QP-style
+  pools reconsidered only if large events or heavy multicast ever
+  materialize). Each AO declares its own event type: a `std::variant` of
+  small trivially-copyable structs (both enforced via static_assert;
+  size target <= 8 bytes). Plain shared structs (e.g. `TempChanged`) are
+  the lingua franca between publishers and subscribers - no global
+  signal enum, no system-wide event type. `publish()` is layered on top
+  of `post()` with compile-time subscriber lists, one copy per
+  subscriber ("commands are addressed, facts are published"; a concept
+  checks the subscriber's variant accepts the notification). Queue depth
+  is a per-AO template parameter sized on that AO's real burst; the slot
+  size is that AO's own largest alternative, not a system-wide max.
+  Measured on avr-gcc 16.2 -Os: std::visit on a 4-alternative variant
+  compiles to a plain switch (zero indirect calls), +30 bytes flash and
+  identical RAM vs a hand-tagged union.
+- **Event queues (2026-08-13): one MPSC queue per AO, short critical
+  sections; Ring stays a driver tool.** Under the cooperative QV
+  scheduler the only real concurrency is ISR vs main loop (AVR has no
+  CAS - the honest primitive IS the brief cli section), so the per-AO
+  queue is a ring whose push saves SREG, disables interrupts, copies the
+  event (<= 8 bytes, ~1 us at 24 MHz) and restores; the scheduler's pop
+  protects only the index update. Posting from an ISR must never block.
+  Per-producer SPSC fan-in was rejected (RAM x sources, scheduler scans,
+  loses cross-source event ordering) unless a jitter-critical ISR ever
+  demands it. `Ring` (SPSC, no cli, byte indices) is NOT the event
+  queue: it stays at the BYTE level inside drivers (UART now, I2C/SPI
+  next) - the ISR pushes bytes lock-free, the driver AO condenses them
+  into few events on the MPSC queue (bytes at high rate, events at low
+  rate).
+- **Queue overflow (2026-08-13): count always, policy knob for the
+  reaction.** A full queue is a sizing mistake, not a runtime condition
+  to handle. Per-queue overflow counters are ALWAYS maintained (same
+  pattern as the uart RXDATAH error counters - named static symbols,
+  inspectable from gdb, nearly free in release). The reaction is a
+  kernel compile-time knob: OverflowPolicy::count (drop the event, keep
+  running - the release default) or OverflowPolicy::panic (sensible in
+  -debug envs, where the BREAK inside panic lands gdb right on the
+  undersized queue). post() from ISR never blocks; no bool-returning
+  post spreading untested error branches.
+- **Panic facility (2026-08-13): one hook, stock reporters.**
+  brio::panic(code, ctx) is [[noreturn]]: cli -> breadcrumb (cause +
+  queue/AO id) into a .noinit variable that SURVIVES reset (cross-check
+  RSTCTRL at next boot) -> asm("break") (halts in gdb if the OCD is
+  active, plain NOP otherwise - a free breakpoint that does not consume
+  the 2 hw slots) -> app-pluggable Reporter. The kernel knows no LED:
+  the app plugs one reporter from a small stock library - halt (default:
+  cli+loop), blink_forever<Led> (bench), reset_now (field: watchdog
+  reset, the breadcrumb is reported at next boot by serial print or by
+  blinking the code at startup), blink_then_reset<Led, cycles> - or
+  writes its own. The breadcrumb is written BEFORE any reporter runs,
+  so the information is safe whatever the manifestation does.
+- **Scheduler (2026-08-13): compile-time QV loop.** `Kernel<Ao1, Ao2,
+  ...>`: AOs are monostate classes like the brio drivers, visited via fold
+  expressions - no virtual base (it would also force the global event
+  type rejected above). Priority IS the pack order, first = highest; no
+  separate priority table to keep coherent. One event per iteration:
+  pop the highest-priority non-empty queue, dispatch run-to-completion,
+  rescan from the top (an urgent event arriving during a slow dispatch
+  is served right after it). Starvation of low-priority AOs under fixed
+  priority is by definition a sizing error - the overflow counters make
+  it visible. All queues empty -> IDLE sleep via the cli-check then
+  sei+sleep_cpu idiom (sei takes effect after the following instruction,
+  so the lost-wakeup race is closed by the silicon); IDLE keeps
+  UART/RTC/peripherals alive, deeper sleep modes are app policy, not
+  kernel business.
+- **State machines (2026-08-13): HSM-ready contract, flat (QP-style)
+  implementation.** The dispatch contract is fixed NOW so hierarchy is
+  a later additive extension, never a breaking change: the current
+  state is a handler function `Status handler(Ao&, const Event&)`; the
+  Status outcomes are handled | unhandled | transition(target)
+  (`unhandled` today means "ignore", tomorrow "bubble to parent" - it
+  IS the HSM hook); entry/exit are reserved events the transition
+  machinery delivers systematically (never hand-written at call sites);
+  the kernel delivers an initial `init` event so every AO starts by
+  transitioning into its first real state (no half-initialized states).
+  On this contract the implementation starts FLAT (each state = one
+  readable function, transition = returned to the dispatcher, one
+  2-byte indirect call per dispatch); full HSM (parent pointers, event
+  bubbling, LCA entry/exit chains) gets built only when a real AO
+  demands it - and if the contract then turns out wrong, the governing
+  rule already says the rewrite wins. Trivial AOs may legally keep a
+  plain switch inside one handler. States-as-types (sml-style,
+  compile-time-checked transitions) noted as a possible future probe,
+  rejected as foundation: heaviest machinery, hostile errors, app-author
+  readability drops.
+- **Time events (2026-08-13): timers post events; expiry runs in the
+  loop, not in the ISR.** In the AO world a timer never runs user code:
+  it posts an event to its owner AO ("in 500 ms post EvTimeout to X"),
+  so the logic stays serialized in the AO's dispatch. The old
+  callback-based `Timer<Unit>` is superseded for kernel apps (a
+  callback fires outside the AO serialization - the antithesis of the
+  model); `Ticker` survives as the timebase (RTC/PIT @ 1024 Hz, alive
+  in IDLE sleep). Expiry processing is in the KERNEL LOOP (T2): the PIT
+  ISR just ticks and, by firing, wakes the CPU; each loop turn compares
+  the tick with armed deadlines and posts matured events in main
+  context. The ISR-side alternative (T1) was rejected: a periodic ISR
+  whose duration grows with armed timers is the antithesis of the
+  short-dumb-ISR style, and buys almost no real precision since any
+  posted event waits for the current run-to-completion step anyway.
+  TimeEvents are static objects owned by their AO (arm/disarm explicit,
+  one-shot or periodic), linked into an intrusive list when armed - no
+  allocation. Periodic re-arm is drift-free: next = previous deadline +
+  period, never now + period. Units are Ticker ticks, with constexpr
+  millis/secs conversions.
+- **Host-testability (2026-08-13): kernel templated on a Platform
+  concept, no #ifdef.** Queues, scheduler, FSM contract and time-event
+  bookkeeping are pure logic; the only hardware touchpoints are wrapped
+  in a Platform policy declared by a concept: a RAII critical-section
+  type, idle(), break_here(), now(). AvrPlatform implements them with
+  intrinsics and is the default template argument, so apps see nothing;
+  the host platform gives an empty critical section (single-threaded
+  tests), a test-controlled virtual clock and a recording idle() -
+  time becomes deterministic arithmetic in tests. Preprocessor #ifdef
+  branches were rejected: implicit contract, host path rots unseen.
+  Host tests (native env or plain host g++, wiring TBD) first cover
+  what is hard to provoke on silicon: queue overflow + counters,
+  entry/exit ordering, drift-free re-arm, scan priority, MPSC stress
+  with simulated producers.
+
 The general structure (toolchain wiring, custom board JSON, Atmel-ICE upload,
-the disassembly post-build script) and the `lib/core` library are inherited
+the disassembly post-build script) and the `lib/brio` library are inherited
 from [uliano/AVR-Multislope](https://github.com/uliano/AVR-Multislope).
 
 The **multi-app** system is inherited from
 [uliano/blackpill-experiments](https://github.com/uliano/blackpill-experiments):
 every `src/apps/<app>.cpp` has its own `main()` and becomes its own pair of
-envs `[env:<app>]` / `[env:<app>-debug]`. Shared code lives in `lib/core`
+envs `[env:<app>]` / `[env:<app>-debug]`. Shared code lives in `lib/brio`
 (a PlatformIO private library: the LDF compiles and links it automatically
 for every env whose app includes one of its headers - no src_filter entry).
 
@@ -211,8 +343,8 @@ tools/pio_flags.py       per-language AVR flags (build-type aware) +
                          IntelliSense include paths
 tools/gen_lst.py         post-build: firmware.lst (disassembly) + firmware.map
 src/apps/<app>.cpp       one main() per experiment
-lib/core/                the dx framework (auto-linked by the LDF), all in
-                         namespace dx, header-only:
+lib/brio/                the brio framework (auto-linked by the LDF), all in
+                         namespace brio, header-only:
   src/stream.hpp           ByteSink / ByteSource / ByteTransport concepts
   src/clock.hpp            DA/DB clock init: init_clocks() probing generic +
                            init_clock_24mhz() deterministic DB crystal path
@@ -225,7 +357,7 @@ lib/core/                the dx framework (auto-linked by the LDF), all in
   src/ticker.hpp           BasicTicker<tps> static RTC/PIT timebase
                            (alias Ticker = BasicTicker<1024>)
   src/timer.hpp            Timer<Millis|Secs|Ticks> soft timers, no vtables,
-                           member callbacks via dx::bind<&Class::method>
+                           member callbacks via brio::bind<&Class::method>
   src/proto/line_parser.hpp  LineAssembler (push) + console/SCPI parsers +
                            CommandRouter<Sink>
 ```
@@ -238,7 +370,7 @@ lib/core/                the dx framework (auto-linked by the LDF), all in
 ## Clock note
 
 The board has a **24 MHz crystal on PA0/PA1** (XOSCHF, a DB-family feature;
-PA0/PA1 are therefore not available as GPIO). `lib/core/src/clock.hpp`
+PA0/PA1 are therefore not available as GPIO). `lib/brio/src/clock.hpp`
 (ported from AVR-Multislope's src/clocks.h) offers two entry points:
 
 - `init_clocks()` - generic DA/DB probing init: OSCHF 24 MHz baseline, then
@@ -261,23 +393,23 @@ PF0/PF1 are free.
 
 ## Ticker / timers note
 
-`dx::Ticker` is a STATIC (monostate) class template - `BasicTicker<tps>`
+`brio::Ticker` is a STATIC (monostate) class template - `BasicTicker<tps>`
 with `using Ticker = BasicTicker<1024>` - not a runtime singleton: all state
 is C++17 `static inline` in .bss, all methods are static, header-only, no
 init order issues and no pointer indirection in the ISR. Apps wire it as:
 
-    ISR(RTC_PIT_vect) { dx::Ticker::pit(); }
+    ISR(RTC_PIT_vect) { brio::Ticker::pit(); }
     ...
-    dx::Ticker::init();   // after clock init, before sei()
+    brio::Ticker::init();   // after clock init, before sei()
 
 Two bugs of the original AVR-Multislope ticker are fixed here (worth
 back-porting): the H/L union word order made ticks() advance by 65536 per
 tick, and millis() ran 0.7% fast because window position 0x00 was not
-skipped. See the NOTE in lib/core/src/ticker.hpp.
+skipped. See the NOTE in lib/brio/src/ticker.hpp.
 
-`dx::Timer<Unit>` has no virtual functions (the old TimerBase vtable and the
+`brio::Timer<Unit>` has no virtual functions (the old TimerBase vtable and the
 operator delete stubs are gone); member callbacks use the compile-time
-trampoline `dx::bind<&Class::method>(&object)`.
+trampoline `brio::bind<&Class::method>(&object)`.
 
 ## Toolchain std gotcha
 

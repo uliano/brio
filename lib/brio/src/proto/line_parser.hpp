@@ -11,18 +11,18 @@
  *  - the virtual endpoint layer (IParserEndpoint / StreamParserEndpoint /
  *    ParserHub) is gone: with sinks and sources resolved at compile time
  *    the glue is a few lines in the app's main loop (see below);
- *  - the CommandRouter is templated on the reply sink (dx::ByteSink) so
+ *  - the CommandRouter is templated on the reply sink (brio::ByteSink) so
  *    handlers can answer without any runtime stream indirection.
  *
  * Typical glue in an app:
  *
- *   dx::LineAssembler<80> line_in;
+ *   brio::LineAssembler<80> line_in;
  *   ...
  *   uint8_t b;
  *   while (Serial::read_byte(b)) {
  *       if (char *line = line_in.push(b)) {
  *           Cmd cmd;
- *           if (dx::ConsoleCommandParser<>::parse(line, cmd)) {
+ *           if (brio::ConsoleCommandParser<>::parse(line, cmd)) {
  *               Router::dispatch(cmd, routes, n_routes, serial);
  *           }
  *       }
@@ -36,7 +36,7 @@
 #include <string.h>
 #include "stream.hpp"
 
-namespace dx {
+namespace brio {
 
 // ---- character / number helpers ---------------------------------------------
 
@@ -354,4 +354,4 @@ public:
     }
 };
 
-} // namespace dx
+} // namespace brio

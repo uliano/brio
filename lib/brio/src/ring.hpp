@@ -3,7 +3,7 @@
  *
  * Single-producer / single-consumer circular buffer for ISR <-> main-loop
  * traffic. Ported from uliano/AVR-Multislope; modernized 07/2026:
- * dx namespace, index type derived from the size (one template parameter
+ * brio namespace, index type derived from the size (one template parameter
  * less), std::has_single_bit instead of the hand-rolled check.
  *
  * Concurrency model: one side runs in an ISR (use the *_from_isr methods,
@@ -23,7 +23,7 @@
 #include <type_traits>
 #include <util/atomic.h>
 
-namespace dx {
+namespace brio {
 
 template <typename T, int size>
 class Ring {
@@ -176,4 +176,4 @@ public:
     }
 };
 
-} // namespace dx
+} // namespace brio

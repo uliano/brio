@@ -1,4 +1,4 @@
-// serial - bring-up app for the AVR128DB48 board, on the dx framework.
+// serial - bring-up app for the AVR128DB48 board, on the brio framework.
 //
 // Brings up USART2 on PF4(TXD)/PF5(RXD) (ALT1 position, PORTMUX-routed) at
 // 460800 8N1 and prints an incrementing, RTC-timestamped counter once every
@@ -8,11 +8,11 @@
 // time: `pio device monitor -e serial`.
 //
 // Framework pieces exercised:
-//  - dx::Uart<2, Route::alt1> : static (monostate) interrupt-driven USART
-//  - dx::Ticker               : static RTC/PIT timebase at 1024 Hz
-//  - dx::print(...)           : variadic formatting over any ByteSink
+//  - brio::Uart<2, Route::alt1> : static (monostate) interrupt-driven USART
+//  - brio::Ticker               : static RTC/PIT timebase at 1024 Hz
+//  - brio::print(...)           : variadic formatting over any ByteSink
 //
-// Clock: 24 MHz crystal on PA0/PA1 via dx::init_clock_24mhz(), with
+// Clock: 24 MHz crystal on PA0/PA1 via brio::init_clock_24mhz(), with
 // automatic OSCHF fallback; F_CPU=24000000 (board JSON) sets the UART BAUD
 // divisor and is correct for both sources.
 
@@ -26,32 +26,32 @@
 #include "print.hpp"
 
 namespace {
-using Led = dx::Pin<'F', 2>;  // PF2, blinks in step with each printed line
-using Serial = dx::Uart<2, dx::Route::alt1>;
+using Led = brio::Pin<'F', 2>;  // PF2, blinks in step with each printed line
+using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;      // zero-cost tag for print(serial, ...)
 }  // namespace
 
 ISR(USART2_RXC_vect) { Serial::rxc(); }      // byte received -> RX ring
 ISR(USART2_DRE_vect) { Serial::dre(); }      // TX reg empty  -> next byte from TX ring
-ISR(RTC_PIT_vect)    { dx::Ticker::pit(); }  // 1024 Hz timebase tick
+ISR(RTC_PIT_vect)    { brio::Ticker::pit(); }  // 1024 Hz timebase tick
 
 int main() {
-    const bool xtal = dx::init_clock_24mhz();  // 24 MHz BEFORE Serial::init (BAUD divisor)
+    const bool xtal = brio::init_clock_24mhz();  // 24 MHz BEFORE Serial::init (BAUD divisor)
     const char *clk = xtal ? "XTAL" : "OSCHF";
     Led::output();
     Serial::init(460800);
-    dx::Ticker::init();  // RTC PIT timebase (internal 32.768 kHz oscillator)
+    brio::Ticker::init();  // RTC PIT timebase (internal 32.768 kHz oscillator)
     sei();               // the UART and the ticker are interrupt-driven
 
-    dx::print(serial, dx::crlf,
+    brio::print(serial, brio::crlf,
               "AVR128DB48 serial up: USART2 PF4/PF5, 460800 8N1, 24 MHz, clk=",
-              clk, dx::crlf);
+              clk, brio::crlf);
 
-    dx::TimeStamp ts;
+    brio::TimeStamp ts;
     uint32_t count = 0;
     for (;;) {
-        dx::Ticker::now(ts);
-        dx::print(serial, "[", ts, "] ", clk, " count = ", count, dx::crlf);
+        brio::Ticker::now(ts);
+        brio::print(serial, "[", ts, "] ", clk, " count = ", count, brio::crlf);
 
         Led::toggle();
         _delay_ms(500);

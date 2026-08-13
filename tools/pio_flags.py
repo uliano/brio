@@ -51,7 +51,7 @@ env.Append(
         "-fno-threadsafe-statics", "-fno-use-cxa-atexit",
     ],
     LINKFLAGS=LINK,
-    # Shared code lives in lib/core: the LDF adds its include path and links
+    # Shared code lives in lib/brio: the LDF adds its include path and links
     # it automatically for every env whose app includes one of its headers.
 )
 

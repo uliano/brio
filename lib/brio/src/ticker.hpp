@@ -54,13 +54,13 @@
  * ```cpp
  * #include "ticker.hpp"
  *
- * ISR(RTC_PIT_vect) { dx::Ticker::pit(); }   // ISR body: update counters
+ * ISR(RTC_PIT_vect) { brio::Ticker::pit(); }   // ISR body: update counters
  *
  * int main() {
- *     dx::init_clock_24mhz();                // or init_clocks()
- *     dx::Ticker::init();                    // RTC clock select + PIT config
+ *     brio::init_clock_24mhz();                // or init_clocks()
+ *     brio::Ticker::init();                    // RTC clock select + PIT config
  *     sei();
- *     uint32_t t0 = dx::Ticker::millis();
+ *     uint32_t t0 = brio::Ticker::millis();
  *     ...
  * }
  * ```
@@ -72,7 +72,7 @@
 #include <stdint.h>
 #include <bit>
 
-namespace dx {
+namespace brio {
 
 /**
  * @struct TimeStamp
@@ -237,4 +237,4 @@ public:
 /// Change the rate here; everything (Timer<>, apps) follows the alias.
 using Ticker = BasicTicker<1024>;
 
-} // namespace dx
+} // namespace brio

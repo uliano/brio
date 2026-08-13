@@ -8,8 +8,8 @@
  *  - all state is `static inline` (one per instantiation, .bss, no ctor
  *    running before main): hardware is touched ONLY by the explicit init(),
  *    called after the clock is up;
- *  - no ByteStream base class: the driver satisfies the dx::ByteSink /
- *    dx::ByteSource concepts (stream.hpp) with static try-semantics calls;
+ *  - no ByteStream base class: the driver satisfies the brio::ByteSink /
+ *    brio::ByteSource concepts (stream.hpp) with static try-semantics calls;
  *  - byte transport only - text formatting lives in print.hpp;
  *  - RX hardware error flags (frame / parity / buffer overflow) are read
  *    from RXDATAH and counted; corrupted bytes (FERR/PERR) are dropped.
@@ -18,17 +18,17 @@
  * carries no state and acts as a zero-cost tag so call sites can read
  * naturally, e.g.
  *
- *   using Serial = dx::Uart<2, dx::Route::alt1>;
+ *   using Serial = brio::Uart<2, brio::Route::alt1>;
  *   constexpr Serial serial;                 // tag object (no state)
  *
  *   ISR(USART2_RXC_vect) { Serial::rxc(); }
  *   ISR(USART2_DRE_vect) { Serial::dre(); }
  *
  *   int main() {
- *       dx::init_clock_24mhz();
+ *       brio::init_clock_24mhz();
  *       Serial::init(460800);
  *       sei();
- *       dx::print(serial, "hello", dx::crlf);
+ *       brio::print(serial, "hello", brio::crlf);
  *       ...
  *   }
  *
@@ -47,7 +47,7 @@
 #include "ring.hpp"
 #include "stream.hpp"
 
-namespace dx {
+namespace brio {
 
 /// USART pin routing (PORTMUX). alt1 = the ALT1 position of the instance.
 enum class Route : uint8_t { def = 0, alt1 = 1 };
@@ -259,4 +259,4 @@ public:
 
 static_assert(ByteTransport<Uart<0>>, "Uart must satisfy the transport concepts");
 
-} // namespace dx
+} // namespace brio

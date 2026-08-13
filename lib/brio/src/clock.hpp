@@ -32,7 +32,7 @@
 #include <stdint.h>
 #include <utility>  // std::to_underlying
 
-namespace dx {
+namespace brio {
 
 enum class ClockInitCode : uint8_t {
     MainMask = 0x0F,
@@ -242,4 +242,4 @@ static inline bool init_clock_24mhz(void)
 }
 #endif
 
-} // namespace dx
+} // namespace brio
