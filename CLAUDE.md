@@ -54,6 +54,23 @@ the package) so the same headers build for both; the USART pin/PORTMUX
 table inside uart.hpp is the designated seed of a future per-family device
 header.
 
+Next stage (decided 2026-08-13): evolve the framework toward a QP/QV-style
+**active-object kernel** - cooperative run-to-completion scheduler, event
+queues, state-machine-based active objects, time events - written from
+scratch (clean room: the concepts from Samek's book, never the QP source,
+which is GPL/commercial), with event-driven non-blocking drivers at least
+for I2C and SPI on top: a kind of modern Arduino. Development happens in
+THIS repo (multi-app system as testbed, lib/core as foundation).
+
+**Governing rule for that evolution - nothing is settled.** Reusing the
+existing code is fine only as long as it does not limit the design above
+it: whenever a limitation could be overcome by rewriting the architecture
+of what sits below, the rewrite wins. No layer is taken for granted or
+considered done - clock, pin, ring, uart, ticker, print, everything up to
+and including the design decisions of 2026-07-21 is up for continuous,
+radical, deep revision, and every stage of the work requires critical
+analysis at ALL levels of the stack, not just the one being added.
+
 The general structure (toolchain wiring, custom board JSON, Atmel-ICE upload,
 the disassembly post-build script) and the `lib/core` library are inherited
 from [uliano/AVR-Multislope](https://github.com/uliano/AVR-Multislope).
