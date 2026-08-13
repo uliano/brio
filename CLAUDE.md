@@ -168,7 +168,18 @@ AO kernel decisions taken so far:
   plain switch inside one handler. States-as-types (sml-style,
   compile-time-checked transitions) noted as a possible future probe,
   rejected as foundation: heaviest machinery, hostile errors, app-author
-  readability drops.
+  readability drops. IMPLEMENTED in kernel/fsm.hpp (2026-08-13):
+  `Fsm<Derived, Alts...>` CRTP-monostate base building the AO's Event
+  as std::variant<Entry, Exit, Alts...> - the reserved events are
+  kernel structs PREPENDED to the variant, received through the same
+  visit as ordinary events, empty so queue slots do not grow, delivered
+  synchronously by the transition machinery and never posted. start()
+  arms the initial state and delivers the first Entry (the
+  "kernel-delivered init": Kernel will call start() for every AO before
+  the loop). Entry may chain transition() - pass-through states for
+  free; Exit's return is deliberately ignored (exit is an action, not a
+  decision). Derived exists so two AOs with identical alternatives get
+  distinct machines.
 - **Time events (2026-08-13): timers post events; expiry runs in the
   loop, not in the ISR.** In the AO world a timer never runs user code:
   it posts an event to its owner AO ("in 500 ms post EvTimeout to X"),
@@ -429,6 +440,10 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
                            now, ticks_per_second)
     time.hpp               constexpr tick conversions parameterized on the
                            platform rate (ceil semantics: never early)
+    fsm.hpp                Fsm<Derived, Alts...> HSM-ready flat state
+                           machines: state = handler function, Entry/Exit
+                           reserved variant alternatives, transition
+                           chaining, start() = initial entry
     event_queue.hpp        EventQueue<E, depth, Platform> - per-AO MPSC
                            queue, saturating overflow counter, optional pop
   src/util/              pure services - may include kernel/, never a target
