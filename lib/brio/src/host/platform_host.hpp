@@ -43,11 +43,19 @@ struct HostPlatform {
     /// non-dividing rate define their own local platform (e.g. tps=1024).
     static constexpr uint32_t ticks_per_second = 1000;
 
+    /// On the host a plain static plays the reset-surviving storage;
+    /// reset() clears it like a cold boot would leave it invalid.
+    static PanicRecord& panic_record() {
+        static PanicRecord rec{};
+        return rec;
+    }
+
     static void reset() {
         ticks = 0;
         idle_calls = 0;
         break_calls = 0;
         CriticalSection::depth = 0;
+        panic_record() = PanicRecord{};
     }
 };
 

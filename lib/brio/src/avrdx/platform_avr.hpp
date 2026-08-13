@@ -56,6 +56,17 @@ struct AvrPlatform {
 
     /// Tick rate of the timebase: 1024 Hz, a truth of the 32k PIT dividers.
     static constexpr uint32_t ticks_per_second = Ticker::ticks_per_second;
+
+    /// Panic breadcrumb in .noinit: startup clears only .bss, so this
+    /// survives a (watchdog) reset and can be reported at the next boot.
+    static PanicRecord& panic_record() { return panic_record_; }
+
+private:
+    // NOTE: gcc 16 emits the COMDAT section for an inline variable with a
+    // custom section attribute as `"awG"` WITHOUT the group name, and gas
+    // warns "group name for SHF_GROUP not specified". Harmless (the symbol
+    // lands in .noinit, weak dedup works); candidate upstream bug report.
+    [[gnu::section(".noinit")]] static inline PanicRecord panic_record_;
 };
 
 static_assert(Platform<AvrPlatform>);

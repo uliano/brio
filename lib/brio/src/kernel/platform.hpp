@@ -27,6 +27,10 @@
  *    assumes NOTHING about the rate - no power-of-two, no "1 tick =
  *    1 ms"; conversions live in kernel/time.hpp parameterized on this
  *    constant.
+ *  - panic_record(): reference to a PanicRecord in storage that
+ *    SURVIVES a reset without being zeroed by startup (.noinit on AVR),
+ *    so a panic breadcrumb written just before a watchdog reset can be
+ *    reported at the next boot (see kernel/panic.hpp).
  */
 
 #pragma once
@@ -37,6 +41,15 @@
 
 namespace brio {
 
+/// Panic breadcrumb: written by panic() BEFORE any reporter runs, read
+/// (and cleared) at the next boot via take_panic_record<P>(). Lives in
+/// platform-provided reset-surviving storage.
+struct PanicRecord {
+    uint16_t magic;    ///< panic_magic when the record is valid
+    uint8_t code;      ///< PanicCode of the failure
+    uint8_t context;   ///< producer-defined detail (queue id, AO id, ...)
+};
+
 template <typename P>
 concept Platform =
     std::is_default_constructible_v<typename P::CriticalSection> &&
@@ -44,6 +57,7 @@ concept Platform =
         { P::idle() } -> std::same_as<void>;
         { P::break_here() } -> std::same_as<void>;
         { P::now() } -> std::same_as<uint32_t>;
+        { P::panic_record() } -> std::same_as<PanicRecord&>;
         // must be a positive compile-time constant (usable in constexpr)
         requires P::ticks_per_second > 0u;
     };
