@@ -255,6 +255,18 @@ AO kernel decisions taken so far:
   abstraction (generalize on the second real specimen). Deadline
   arithmetic over wrapping counters (signed difference) is documented
   where it will live: the time-event code.
+- **ReplyTo (2026-08-13): replies return to sender.** The third
+  delivery primitive after post/publish, in kernel/post.hpp:
+  `ReplyTo<Payload>` is a one-function-pointer capsule (2 bytes on AVR,
+  trivially copyable - it travels INSIDE the request event) built at
+  compile time via `reply_to<RequesterAo, Payload>()`, same thunk
+  technique as TimeEvent firing. A service (SPI/I2C bus AO) calls
+  `req.reply.send(payload)` without knowing the requester; a
+  default-constructed capsule is null and send() is a no-op
+  (fire-and-forget for free). A requester whose variant cannot hold
+  Payload fails to compile at the reply_to site. This is the return
+  channel every bus AO uses; the bus AO's request QUEUE doubles as the
+  bus arbiter (contending clients are serialized by the kernel).
 - **Serial AO (2026-08-13): bytes below, line events above, ownership
   by reference.** The Uart driver stays the low level (rings + ISR
   bodies, untouched roles); `SerialAo<Transport, P, LineSink>`
@@ -482,7 +494,8 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
                            chaining, start() = initial entry
     post.hpp               ActiveObject concept + post<Ao>(ev) (addressed,
                            reserved events excluded) + publish(Subscribers
-                           <A,B...>{}, ev) fan-out
+                           <A,B...>{}, ev) fan-out + ReplyTo<Payload>
+                           request/reply return capsule
     time_event.hpp         TimeEvent<P, Ao, Ev> posts payload to its AO on
                            expiry; intrusive armed list, drift-free
                            periodics, wrap-safe deadlines, RAII disarm;
