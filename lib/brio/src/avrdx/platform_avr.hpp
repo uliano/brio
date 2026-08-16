@@ -57,6 +57,9 @@ struct AvrPlatform {
     /// Tick rate of the timebase: 1024 Hz, a truth of the 32k PIT dividers.
     static constexpr uint32_t ticks_per_second = Ticker::ticks_per_second;
 
+    /// 8-bit core: only a single byte moves in one uninterruptible access.
+    static constexpr unsigned atomic_width = 1;
+
     /// Panic breadcrumb in .noinit: startup clears only .bss, so this
     /// survives a (watchdog) reset and can be reported at the next boot.
     static PanicRecord& panic_record() { return panic_record_; }

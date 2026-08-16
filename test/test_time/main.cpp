@@ -22,6 +22,7 @@ struct Fake1024 {
     static void break_here() {}
     static uint32_t now() { return 0; }
     static constexpr uint32_t ticks_per_second = 1024;
+    static constexpr unsigned atomic_width = 1;
     static brio::PanicRecord& panic_record() {
         static brio::PanicRecord rec{};
         return rec;

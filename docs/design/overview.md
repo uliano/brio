@@ -60,7 +60,7 @@ readable at a glance.
 | Stratum | May include | Content |
 |---------|-------------|---------|
 | `kernel/` | nothing of brio | pure logic: queues, scheduler, FSM, time events, panic, delivery |
-| `util/` | `kernel/` | pure services: print, stream concepts, line parser, SerialPort, SpiBus, timestamp |
+| `util/` | `kernel/` | pure services: print, stream concepts, line parser, Ring, SerialPort, SpiBus, timestamp |
 | `avrdx/` | `kernel/`, `util/` | everything that knows `avr/io.h`: drivers + AvrPlatform |
 | `host/` | `kernel/`, `util/` | the test "target": HostPlatform |
 
@@ -80,9 +80,10 @@ pure types produced by a target and consumed by util live in `util/`
   the prose. (Ruled when the suffix had already spread; renamed
   everywhere the same day.)
 - Private members: trailing underscore (`head_`), not `m_`.
-- Queues speak push/pop (`put/get` remains legacy in Ring).
+- Queues speak push/pop (Ring followed on 2026-08-16).
 - No `*_from_isr` API doubling: one always-safe operation, revisit
-  only with measurements.
+  only with measurements (Ring's twins fell on 2026-08-16, see
+  [ring.md](ring.md)).
 - No redundant `inline` on in-class definitions.
 - `std::optional` returns instead of bool + out-parameter.
 - Header comments explain the concurrency model and the WHY of each

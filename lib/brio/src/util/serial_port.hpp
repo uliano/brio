@@ -30,7 +30,7 @@
  * pointer across dispatches is a bug.
  *
  * TX has no AO: print() goes straight to the transport's blocking
- * try_put path - bounded by the wire rate (~2 ms worst case at 460800),
+ * push path - bounded by the wire rate (~2 ms worst case at 460800),
  * naturally atomic between AOs (RTC), revisited only for slow links or
  * hard latency budgets. See CLAUDE.md, "Serial AO" decision.
  */

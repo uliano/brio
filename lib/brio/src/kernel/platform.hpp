@@ -27,6 +27,12 @@
  *    assumes NOTHING about the rate - no power-of-two, no "1 tick =
  *    1 ms"; conversions live in kernel/time.hpp parameterized on this
  *    constant.
+ *  - atomic_width: the widest naturally aligned load/store the CPU
+ *    performs as ONE uninterruptible access, in bytes (1 on AVR, 4 on
+ *    32-bit cores). Lock-free SPSC code (util/ring.hpp) uses it to
+ *    decide whether an index can be shared with an ISR bare or needs a
+ *    CriticalSection; the platform states the fact, generic code
+ *    chooses the path with if constexpr - no #ifdef, no per-use knob.
  *  - panic_record(): reference to a PanicRecord in storage that
  *    SURVIVES a reset without being zeroed by startup (.noinit on AVR),
  *    so a panic breadcrumb written just before a watchdog reset can be
@@ -60,6 +66,7 @@ concept Platform =
         { P::panic_record() } -> std::same_as<PanicRecord&>;
         // must be a positive compile-time constant (usable in constexpr)
         requires P::ticks_per_second > 0u;
+        requires P::atomic_width > 0u;
     };
 
 } // namespace brio

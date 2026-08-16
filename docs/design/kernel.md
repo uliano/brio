@@ -52,7 +52,7 @@ push saves SREG, disables interrupts, copies, restores; pop protects
 only the index update. Posting from an ISR never blocks. Queue depth
 is a per-AO template parameter sized on that AO's real burst.
 
-`Ring` (SPSC, no cli, byte indices) is NOT the event queue: it stays
+`Ring` (SPSC, see [ring.md](ring.md)) is NOT the event queue: it stays
 at the BYTE level inside drivers - the ISR pushes bytes lock-free, the
 driver AO condenses them into few events (bytes at high rate, events
 at low rate).

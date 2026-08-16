@@ -129,11 +129,13 @@ AO kernel decisions taken so far:
   protects only the index update. Posting from an ISR must never block.
   Per-producer SPSC fan-in was rejected (RAM x sources, scheduler scans,
   loses cross-source event ordering) unless a jitter-critical ISR ever
-  demands it. `Ring` (SPSC, no cli, byte indices) is NOT the event
-  queue: it stays at the BYTE level inside drivers (UART now, I2C/SPI
-  next) - the ISR pushes bytes lock-free, the driver AO condenses them
-  into few events on the MPSC queue (bytes at high rate, events at low
-  rate).
+  demands it. `Ring` (SPSC) is NOT the event queue: it stays at the
+  BYTE level inside drivers (UART now, I2C/SPI next) - the ISR pushes
+  bytes lock-free, the driver AO condenses them into few events on the
+  MPSC queue (bytes at high rate, events at low rate). Ring itself was
+  rewritten on 2026-08-16 as util/ring.hpp, `Ring<T, size, P>`: see
+  docs/design/ring.md (lock-free when the index is one atomic access
+  for P, critical section otherwise, one API, host-tested).
 - **Queue overflow (2026-08-13): count always, policy knob for the
   reaction.** A full queue is a sizing mistake, not a runtime condition
   to handle. Per-queue overflow counters are ALWAYS maintained (same
@@ -342,9 +344,10 @@ AO kernel decisions taken so far:
 - **Style rulings (2026-08-13)** (critical re-read of the inherited
   ring.hpp; good choices kept, questionable ones dropped): private
   members use a trailing underscore (head_), not m_; queues speak
-  push/pop (put/get remains legacy in Ring); no *_from_isr API doubling
+  push/pop (Ring followed on 2026-08-16); no *_from_isr API doubling
   in the kernel - one always-safe operation, revisit only with
-  measurements; no redundant `inline` on in-class definitions;
+  measurements (Ring's twins were dropped on 2026-08-16 once the
+  8-bit path became lock-free on both sides); no redundant `inline` on in-class definitions;
   std::optional returns instead of bool + out-parameter; keep the
   header-comment style that explains the concurrency model and the
   WHY of each tradeoff.
@@ -516,7 +519,7 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
   src/kernel/            pure kernel logic - includes NOTHING of brio
     platform.hpp           the Platform concept: what the kernel needs from
                            the machine (CriticalSection, idle, break_here,
-                           now, ticks_per_second)
+                           now, ticks_per_second, atomic_width)
     time.hpp               constexpr tick conversions parameterized on the
                            platform rate (ceil semantics: never early)
     fsm.hpp                Fsm<Derived, Alts...> HSM-ready flat state
@@ -548,6 +551,9 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
     wire.hpp               constexpr big-endian word load/store (16/24/32
                            bit + sign-extending be24 for ADC data): word
                            semantics stay above the byte-moving engines
+    ring.hpp               Ring<T,size,P> SPSC FIFO: lock-free when the
+                           index fits P::atomic_width, critical section
+                           otherwise (if constexpr); one always-safe API
     serial_port.hpp        SerialPort<Transport, P, LineSink>: RX bytes ->
                            LineReceived events (ping-pong buffers,
                            self-post backpressure, consumer-above-producer
@@ -566,7 +572,6 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
                            init_clock_24mhz() deterministic DB crystal path
     pin.hpp                Pin<'A',5> compile-time GPIO (VPORT fast paths) +
                            PinRef runtime descriptor (CS/DC in requests)
-    ring.hpp               Ring<T,size> SPSC ring (index type auto-derived)
     uart.hpp               Uart<n, Route, rx, tx> static interrupt-driven
                            byte transport, RXDATAH error counters
     spi.hpp                Spi<n> master engine: two-phase descriptor

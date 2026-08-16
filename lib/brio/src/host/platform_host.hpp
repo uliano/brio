@@ -43,6 +43,11 @@ struct HostPlatform {
     /// non-dividing rate define their own local platform (e.g. tps=1024).
     static constexpr uint32_t ticks_per_second = 1000;
 
+    /// A 32-bit-class value: on the host every index a brio ring can
+    /// derive is lock-free. Tests of the guarded path define a local
+    /// platform with atomic_width = 1 (see test_ring).
+    static constexpr unsigned atomic_width = 4;
+
     /// On the host a plain static plays the reset-surviving storage;
     /// reset() clears it like a cold boot would leave it invalid.
     static PanicRecord& panic_record() {

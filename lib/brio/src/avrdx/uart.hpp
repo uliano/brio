@@ -44,7 +44,8 @@
 #include <avr/interrupt.h>
 #include <util/delay.h>
 #include <stdint.h>
-#include "avrdx/ring.hpp"
+#include "avrdx/platform_avr.hpp"
+#include "util/ring.hpp"
 #include "util/stream.hpp"
 
 namespace brio {
@@ -52,20 +53,22 @@ namespace brio {
 /// USART pin routing (PORTMUX). alt1 = the ALT1 position of the instance.
 enum class Route : uint8_t { def = 0, alt1 = 1 };
 
-// Ring defaults sized for console-class traffic AND for cheap indices:
-// both <= 256 keeps Ring's index_t at 8 bits (measured on write_byte: the
-// 512-byte TX ring's 16-bit indices cost ~10 extra cycles per byte). RX 64
+// Ring defaults sized for console-class traffic AND for lock-free rings:
+// both <= 256 keeps Ring's index_t at 8 bits, which on AVR (atomic_width
+// 1) means no interrupt masking at all on either side; a 512-byte ring
+// would silently switch to the critical-section path (~10 cycles and
+// added interrupt latency per byte). RX 64
 // absorbs ~1.4 ms of full-rate 460800 traffic - plenty against dispatches
 // that last microseconds. Streaming apps may still ask for more.
 template <int usart_num, Route route = Route::def,
-          int rx_size = 64, int tx_size = 256>
+          uint32_t rx_size = 64, uint32_t tx_size = 256>
 class Uart {
     static_assert(usart_num >= 0 && usart_num <= 5,
                   "usart_num must be 0..5");
 
     // One ring pair per instantiation (static inline -> .bss, no ctor).
-    static inline Ring<uint8_t, rx_size> m_rx{};
-    static inline Ring<uint8_t, tx_size> m_tx{};
+    static inline Ring<uint8_t, rx_size, AvrPlatform> m_rx{};
+    static inline Ring<uint8_t, tx_size, AvrPlatform> m_tx{};
 
     // Error counters, written in ISRs, read from the main loop. uint8_t
     // reads/writes are atomic on AVR; they wrap at 255. Written as
@@ -204,8 +207,8 @@ public:
             if (status & USART_PERR_bm) m_parity_errors = m_parity_errors + 1;
             return false;  // drop the corrupted byte
         }
-        const bool was_empty = m_rx.empty_from_isr();
-        if (!m_rx.try_put_from_isr(data)) {
+        const bool was_empty = m_rx.empty();
+        if (!m_rx.push(data)) {
             m_rx_overruns = m_rx_overruns + 1;
             return false;  // full ring cannot be empty: no edge
         }
@@ -221,10 +224,9 @@ public:
     // always_inline: single call site (the ISR binding) - see ticker.hpp
     // pit() for the register-set rationale.
     [[gnu::always_inline]] static void dre() {
-        uint8_t c;
-        if (m_tx.get_from_isr(c)) {
-            regs().TXDATAL = c;
-            if (m_tx.empty_from_isr()) {
+        if (const auto c = m_tx.pop()) {
+            regs().TXDATAL = *c;
+            if (m_tx.empty()) {
                 regs().CTRLA &= ~USART_DREIE_bm;
             }
         } else {
@@ -236,7 +238,7 @@ public:
 
     /// Try to queue one byte for transmission; false when the TX ring is full.
     static bool write_byte(uint8_t b) {
-        if (!m_tx.try_put(b)) {
+        if (!m_tx.push(b)) {
             return false;
         }
         regs().CTRLA |= USART_DREIE_bm;
@@ -245,7 +247,12 @@ public:
 
     /// Fetch one received byte; false when nothing is pending.
     static bool read_byte(uint8_t &b) {
-        return m_rx.get(b);
+        const auto v = m_rx.pop();
+        if (!v) {
+            return false;
+        }
+        b = *v;
+        return true;
     }
 
     /// Queue as much of the buffer as fits; returns the number queued.
