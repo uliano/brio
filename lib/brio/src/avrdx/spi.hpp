@@ -41,6 +41,7 @@
 #pragma once
 
 #include <avr/io.h>
+#include <util/delay.h>
 #include <stdint.h>
 
 #include "avrdx/pin.hpp"
@@ -91,6 +92,15 @@ public:
         // whole transfer (bounded, chosen here); global interrupts
         // stay enabled throughout - only the SPI's own IE is silenced.
         bool polled = false;
+        // Chip-select setup: microseconds the engine waits between
+        // asserting CS and the first SCK edge. Most devices need tens of
+        // ns (the ~1.5 us the code path takes anyway); a device waking
+        // from shutdown on CS may need much more - the MCP3550 shows RDY
+        // only ~4 us after CS falls and drops the frame if clocked before
+        // it is awake (measured 2026-08-17). Spent spinning in start(),
+        // main context, bounded by this byte: keep it to what the device
+        // datasheet asks.
+        uint8_t cs_setup_us = 0;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
 
@@ -128,12 +138,16 @@ public:
         regs().CTRLB = SPI_SSD_bm | r.mode;
         regs().CTRLA = SPI_MASTER_bm | static_cast<uint8_t>(r.clock) |
                        SPI_ENABLE_bm;
+        park_sck(r.mode);
         if (in_cmd_) {
             r.dc.clear();
         } else {
             r.dc.set();
         }
         r.cs.clear();                      // assert, active low
+        for (uint8_t i = r.cs_setup_us; i != 0; --i) {
+            _delay_us(1);
+        }
         if (!r.polled) {
             regs().DATA = first_byte();    // the ISR pumps the rest
             return false;
@@ -213,6 +227,29 @@ private:
         return static_cast<uint16_t>(req_.cmd_len) + req_.len;
     }
 
+    /// SCK must already sit at the new mode's idle level (CPOL) when CS
+    /// falls: devices that latch their SPI mode from SCK at the CS edge
+    /// (MCP3550: mode 0,0 vs 1,1) otherwise start the transaction in the
+    /// wrong mode. The AVR Dx SPI does NOT move SCK to the new CPOL on
+    /// the CTRLB write - only when the next transfer starts (seen on the
+    /// analyzer: SCK still low 10 us after CS fell on the first mode-3
+    /// request after init). So on a CPOL change one dummy byte goes out
+    /// with NO chip select asserted (every device deselected ignores
+    /// SCK): one byte time, paid only when the polarity changes between
+    /// transactions, nothing otherwise. Polled with the SPI's own
+    /// interrupt silenced so the bound ISR does not see it.
+    static void park_sck(uint8_t mode) {
+        const bool cpol = (mode & SPI_MODE_2_gc) != 0;   // MODE bit 1 = CPOL
+        if (cpol == sck_cpol_) {
+            return;
+        }
+        sck_cpol_ = cpol;
+        const uint8_t ie = regs().INTCTRL;
+        regs().INTCTRL = 0;
+        (void)xfer(0xFF);
+        regs().INTCTRL = ie;
+    }
+
     /// One polled byte: write, spin on IF (~1 byte time), read back.
     /// Reading INTFLAGS (IF set) then DATA is the IF clear sequence.
     static uint8_t xfer(uint8_t out) {
@@ -234,6 +271,7 @@ private:
     static inline Request req_{};
     static inline uint16_t pos_ = 0;
     static inline bool in_cmd_ = false;
+    static inline bool sck_cpol_ = false;   // init() leaves mode 0: SCK low
 };
 
 } // namespace brio

@@ -1,40 +1,59 @@
-// mcp_diag - MCP3550 behaviour probe, bit-banged, no kernel: answers the
-// questions the arbitrated SPI engine needs answered before it can talk
-// to this ADC (CS is owned by the engine and asserted only inside a
-// request, so the ADC's "hold CS low and wait for RDY" idiom is not
-// available as such).
+// mcp_diag - MCP3550 behaviour probe, bit-banged, no kernel, driven one
+// experiment at a time from the serial console so a logic analyzer on
+// CS/SCK/SDO can capture exactly one known sequence per trigger.
 //
-// Wiring as on the bench: CS = PD3, SCK = PA6, SDO/RDY = PA5 (the SPI0
-// pins, used here as plain GPIO - SPI0 stays disabled). The DAC on I2C
-// is not touched; VIN is whatever VOUT0 last was.
+// Why: the arbitrated SPI engine owns CS and asserts it only inside a
+// request, so the ADC's classic "hold CS low and wait for RDY" idiom is
+// not available as such - before writing the ADC client we need to know
+// on the wire how this part behaves with CS toggled, with early clocks,
+// and what its real t_conv is.
 //
-// Experiments, each from a 600 ms CS-high rest, results on the console:
-//  A. classic: CS low, wait for RDY low (t_conv), clock 24 bits, CS high
-//     -> proves the chip and gives t_conv;
-//  B. CS toggle: CS low for 1 ms (starts a conversion), CS HIGH for
-//     150 ms, CS low again: is RDY low at once (result held through the
-//     CS-high period) or high (conversion aborted / restarted)? Then
-//     wait for RDY anyway and read, to see what comes out;
-//  C. clocks during conversion: CS low, 8 SCK pulses immediately (RDY
-//     still high), keep CS low, wait for RDY, read 24 bits: does the
-//     early clocking corrupt the frame?
-//  D. continuous: read, keep CS low, does RDY come again after t_conv?
-//  E. MISO level with the ADC deselected (another driver on the net?);
-//  G. is MISO tied to MOSI (leftover loopback jumper)?
-//  H. two reads back to back after RDY (second must be all ones);
-//  F. RDY trace, one char per 5 ms, CS low, no clocks; then read; then
-//     trace again - the poor man's logic analyzer.
-// SPI mode 1,1: SCK idles high, the device shifts on the falling edge,
-// we latch on the rising edge, MSB first.
+// Wiring: CS = PB0, SCK = PA6, SDO/RDY = PA5 (the SPI0 pins used as
+// plain GPIO - SPI0 stays disabled). SPI mode 1,1: SCK idles high, the
+// device shifts on the falling edge, we latch on the rising edge, MSB
+// first. SCK is deliberately slow (10 us half period, 50 kHz) so a cheap
+// analyzer resolves every edge. The DAC on I2C is not touched: VIN is
+// whatever VOUT0 last was.
 //
-// Bench log 2026-08-17: the chip answers and the value tracks the DAC
-// (0x400dX for DAC 0x200: 262144 expected, +0.08%), but t_conv is
-// random (0..290 ms for a fixed-80-ms part), data read a while after
-// RDY comes back all zeros (F) while an immediate read is valid (H),
-// and RDY sometimes is low at CS fall with empty data. Software cannot
-// produce those: they read as spurious edges on SCK (data shifted out
-// unasked) and on CS (conversions restarted) - wiring/decoupling on
-// the ADC side, to be checked before dac_adc's ADC path is judged.
+// Console @ 460800: press a key, get one experiment (each starts from a
+// 600 ms CS-high rest so the part is in a known state):
+//   a  classic: CS low, wait RDY low (t_conv), 24 clocks, CS high
+//   b  CS toggle: CS low 1 ms, CS high 150 ms, CS low: RDY at once?
+//      then wait RDY anyway, read
+//   c  early clocks: CS low, 8 clocks at once, wait RDY, read
+//   d  continuous: read, keep CS low, does RDY come again? read again
+//   e  MISO level with CS high (another driver on the net?)
+//   g  MOSI -> MISO short (leftover loopback jumper)?
+//   h  double read right after RDY (second must be all ones)
+//   f  RDY trace: one char per 5 ms, CS low, no clocks; read; trace
+//   k  hold: convert to the end with CS low, CS high 200 ms, CS low:
+//      is the result still there?
+//   x  dac_adc's sequence: 8-clock trigger, CS high 120 ms, read
+//   y  same with a bare 30 us CS pulse as trigger
+//   z  the x sequence through the hardware Spi<0> engine (polled), mode 3
+//   Z  same, mode 0
+//   t  timing marker: CS 3 short pulses (find t=0 on the analyzer)
+//   ?  this list
+// Every experiment prints what it did and what it saw.
+//
+// Bench log 2026-08-17 (analyzer on CS/SCK/SDO), what this part does:
+//  - t_conv 81 ms with CS held low; RDY low then valid frame (a, h);
+//    a second read gives all ones (h) - single conversion mode.
+//  - CS raised DURING a conversion: it goes on and the result is HELD
+//    for the next CS fall (b, x, y) - but it then takes ~119 ms from
+//    the trigger, not 81 (measured on the analyzer: RDY at 119.1 ms).
+//  - conversion completed with CS LOW, not read, CS high, CS low: a NEW
+//    conversion starts (k) - the result is held only if CS was high at
+//    completion.
+//  - clocks during the conversion are harmless (c, x).
+//  - after CS falls the device needs a few us before SDO is valid; the
+//    hardware engine clocking 1.5 us after CS lost the frame (0x7FFFFF)
+//    - hence Spi::Request::cs_setup_us.
+//  - the device latches its SPI mode from SCK at CS fall: the engine
+//    must park SCK at CPOL before asserting CS (Spi::park_sck), the AVR
+//    SPI does not move SCK on a CTRLB write.
+//  Earlier chaos (random t_conv, frames decaying to zero) was a PA5
+//  header pin that was not soldered.
 
 #include <avr/interrupt.h>
 #include <util/delay.h>
@@ -42,6 +61,7 @@
 
 #include "avrdx/clock.hpp"
 #include "avrdx/pin.hpp"
+#include "avrdx/spi.hpp"
 #include "avrdx/uart.hpp"
 #include "util/print.hpp"
 
@@ -50,12 +70,16 @@ namespace {
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
-using Cs = brio::Pin<'D', 3>;
+using Cs = brio::Pin<'B', 0>;
 using Sck = brio::Pin<'A', 6>;
 using Sdo = brio::Pin<'A', 5>;
+using Mosi = brio::Pin<'A', 4>;
+
+constexpr uint16_t ready_timeout_ms = 600;
 
 /// Wait for RDY (SDO low) with CS low; returns elapsed ms, or -1 on timeout.
-int16_t wait_ready(uint16_t timeout_ms) {
+int16_t wait_ready(uint16_t timeout_ms = ready_timeout_ms) {
+    _delay_us(50);   // SDO needs a moment after CS falls before it shows RDY
     for (uint16_t ms = 0; ms < timeout_ms; ++ms) {
         for (uint8_t i = 0; i < 10; ++i) {
             if (!Sdo::read()) {
@@ -67,14 +91,15 @@ int16_t wait_ready(uint16_t timeout_ms) {
     return -1;
 }
 
+/// n SCK pulses at 50 kHz, MSB first, latch on the rising edge.
 uint32_t clock_bits(uint8_t n) {
     uint32_t raw = 0;
     for (uint8_t i = 0; i < n; ++i) {
         Sck::clear();
-        _delay_us(2);
+        _delay_us(10);
         Sck::set();
         raw = (raw << 1) | (Sdo::read() ? 1u : 0u);
-        _delay_us(2);
+        _delay_us(10);
     }
     return raw;
 }
@@ -93,19 +118,26 @@ void rest() {
     _delay_ms(600);
 }
 
-void experiment_a() {
-    rest();
-    Cs::clear();
-    const int16_t t = wait_ready(600);
-    brio::print(serial, "A classic:  t_conv=", t, " ms  ");
+void read_and_report(int16_t t) {
+    brio::print(serial, "t=", t, " ms  ");
     if (t >= 0) {
         decode(clock_bits(24));
+    } else {
+        brio::print(serial, "(RDY never came)");
     }
+}
+
+void exp_a() {
+    brio::print(serial, "a classic:   ");
+    rest();
+    Cs::clear();
+    read_and_report(wait_ready());
     Cs::set();
     brio::print(serial, brio::crlf);
 }
 
-void experiment_b() {
+void exp_b() {
+    brio::print(serial, "b CS toggle: ");
     rest();
     Cs::clear();                       // start a conversion
     _delay_ms(1);
@@ -114,104 +146,82 @@ void experiment_b() {
     Cs::clear();
     _delay_us(20);
     const bool ready_at_once = !Sdo::read();
-    const int16_t t = wait_ready(600);
-    brio::print(serial, "B toggle:   RDY low at CS fall=", ready_at_once,
-                "  then t=", t, " ms  ");
-    if (t >= 0) {
-        decode(clock_bits(24));
-    }
+    brio::print(serial, "RDY low at CS fall=", ready_at_once, "  then ");
+    read_and_report(wait_ready());
     Cs::set();
     brio::print(serial, brio::crlf);
 }
 
-void experiment_c() {
+void exp_c() {
+    brio::print(serial, "c early clk: ");
     rest();
     Cs::clear();
     const uint32_t early = clock_bits(8);   // 8 clocks while RDY is high
-    const int16_t t = wait_ready(600);
-    brio::print(serial, "C early clk: early=", brio::hex(early),
-                " t_conv=", t, " ms  ");
-    if (t >= 0) {
-        decode(clock_bits(24));
-    }
+    brio::print(serial, "early=", brio::hex(early), "  then ");
+    read_and_report(wait_ready());
     Cs::set();
     brio::print(serial, brio::crlf);
 }
 
-/// D. continuous: after a read, keep CS low - does RDY rise at once and
-/// fall again after t_conv (free-running conversions), and what does a
-/// second read give?
-void experiment_d() {
+void exp_d() {
+    brio::print(serial, "d contin.:   first ");
     rest();
     Cs::clear();
-    const int16_t t1 = wait_ready(600);
-    const uint32_t r1 = (t1 >= 0) ? clock_bits(24) : 0;
+    read_and_report(wait_ready());
     _delay_us(20);
     const bool high_after_read = Sdo::read();
-    const int16_t t2 = wait_ready(600);
-    const uint32_t r2 = (t2 >= 0) ? clock_bits(24) : 0;
+    brio::print(serial, "  RDY high after read=", high_after_read, "  second ");
+    read_and_report(wait_ready());
     Cs::set();
-    brio::print(serial, "D contin.:  t1=", t1, " ms ");
-    decode(r1);
-    brio::print(serial, "  RDY high after read=", high_after_read,
-                "  t2=", t2, " ms ");
-    decode(r2);
     brio::print(serial, brio::crlf);
 }
 
-/// E. what the MISO net does with the ADC deselected (CS high): a level
-/// count over 100 ms - anything but "floating/high" means another driver.
-void experiment_e() {
+void exp_e() {
     Cs::set();
     uint8_t lows = 0;
     for (uint8_t i = 0; i < 100; ++i) {
         if (!Sdo::read()) ++lows;
         _delay_ms(1);
     }
-    brio::print(serial, "E CS high:  MISO low ", lows, "/100 samples", brio::crlf);
+    brio::print(serial, "e CS high:   MISO low ", lows, "/100 samples", brio::crlf);
 }
 
-/// G. is MISO tied to MOSI (leftover loopback jumper)? Drive PA4 both
-/// ways with the ADC deselected and see whether PA5 follows.
-void experiment_g() {
-    using Mosi = brio::Pin<'A', 4>;
+void exp_g() {
     Cs::set();
     Mosi::clear(); Mosi::output(); _delay_us(10);
     const bool follows_low = !Sdo::read();
     Mosi::set(); _delay_us(10);
     const bool follows_high = Sdo::read();
     Mosi::input();
-    brio::print(serial, "G MOSI->MISO: follows low=", follows_low,
+    brio::print(serial, "g MOSI->MISO: follows low=", follows_low,
                 " high=", follows_high,
                 (follows_low && follows_high) ? "  <- JUMPER PA4-PA5 PRESENT" : "",
                 brio::crlf);
 }
 
-/// H. two reads back to back right after RDY: second one all zeros?
-void experiment_h() {
+void exp_h() {
+    brio::print(serial, "h double:    first ");
     rest();
     Cs::clear();
-    const int16_t t = wait_ready(600);
-    brio::print(serial, "H double read: t=", t, " ms  first ");
-    decode(clock_bits(24));
+    read_and_report(wait_ready());
     brio::print(serial, "  second ");
     decode(clock_bits(24));
     Cs::set();
     brio::print(serial, brio::crlf);
 }
 
-/// F. RDY trace: one char per 5 ms (1 = high/busy, 0 = low/ready), CS
-/// low throughout, no clocks; then a read and a second trace.
 void trace(uint8_t samples) {
     for (uint8_t i = 0; i < samples; ++i) {
         brio::print(serial, Sdo::read() ? '1' : '0');
         _delay_ms(5);
     }
 }
-void experiment_f() {
+
+void exp_f() {
+    brio::print(serial, "f trace (5 ms/char, 1=busy 0=ready), CS low, no clocks:",
+                brio::crlf, "   ");
     rest();
     Cs::clear();
-    brio::print(serial, "F trace CS low, no clocks (5 ms/char):", brio::crlf, "   ");
     trace(60);                          // 300 ms
     brio::print(serial, brio::crlf, "   read: ");
     decode(clock_bits(24));
@@ -221,8 +231,158 @@ void experiment_f() {
     brio::print(serial, brio::crlf);
 }
 
+/// k. hold: convert to completion with CS LOW, no clocks, do NOT read;
+/// CS high 200 ms; CS low again: is the result waiting (RDY low at once,
+/// valid data)? This is the two-tenure scheme a shared bus could use.
+void exp_k() {
+    brio::print(serial, "k hold:      conv ");
+    rest();
+    Cs::clear();
+    const int16_t t = wait_ready();
+    brio::print(serial, "t=", t, " ms, CS high 200 ms, CS low: ");
+    _delay_ms(10);
+    Cs::set();
+    _delay_ms(200);
+    Cs::clear();
+    _delay_us(50);
+    const bool ready_at_once = !Sdo::read();
+    brio::print(serial, "RDY low at once=", ready_at_once, "  ");
+    read_and_report(wait_ready());
+    Cs::set();
+    brio::print(serial, brio::crlf);
+}
+
+/// x. exactly dac_adc's sequence: CS low, 8 clocks, CS high, 120 ms,
+/// CS low, RDY?, 24 clocks. If bit-bang succeeds here the engine path
+/// is at fault; if it fails, the clocked trigger is.
+void exp_x() {
+    brio::print(serial, "x dac_adc seq: ");
+    rest();
+    Cs::clear();
+    const uint32_t early = clock_bits(8);
+    Cs::set();
+    _delay_ms(120);
+    Cs::clear();
+    _delay_us(50);
+    const bool ready_at_once = !Sdo::read();
+    brio::print(serial, "early=", brio::hex(early), " RDY low at once=", ready_at_once, "  ");
+    read_and_report(wait_ready());
+    Cs::set();
+    brio::print(serial, brio::crlf);
+}
+
+/// y. same with a clock-free trigger: CS low 30 us, CS high, 120 ms, read.
+void exp_y() {
+    brio::print(serial, "y bare trig:   ");
+    rest();
+    Cs::clear();
+    _delay_us(30);
+    Cs::set();
+    _delay_ms(120);
+    Cs::clear();
+    _delay_us(50);
+    const bool ready_at_once = !Sdo::read();
+    brio::print(serial, "RDY low at once=", ready_at_once, "  ");
+    read_and_report(wait_ready());
+    Cs::set();
+    brio::print(serial, brio::crlf);
+}
+
+/// z. the same two-request sequence through the hardware Spi<0> engine
+/// (polled, no kernel): mode 3, div64, 1-byte trigger, 120 ms, 3-byte
+/// read. Isolates the engine path from the protocol.
+void exp_z(uint8_t mode, uint16_t trig_len, brio::SpiClock clk, bool prime = false, bool manual_cs = false) {
+    using SpiHw = brio::Spi<0>;
+    brio::print(serial, "z engine trig ", trig_len, " B prime=", prime, " manualCS=", manual_cs, ": ");
+    rest();
+    SpiHw::init();
+    static uint8_t rx[16];
+    if (prime) {
+        // one dummy byte with NO chip select: parks SCK at CPOL (high in
+        // mode 3) so the next CS falling edge finds it there
+        SpiHw::Request dummy{{}, {}, nullptr, 0, nullptr, rx, 1, {}, clk, mode, true};
+        SpiHw::start(dummy);
+        _delay_us(20);
+    }
+    const brio::PinRef cs = manual_cs ? brio::PinRef{} : Cs::ref();
+    SpiHw::Request trig{cs, {}, nullptr, 0, nullptr, rx, trig_len, {},
+                        clk, mode, true};
+    SpiHw::Request read{cs, {}, nullptr, 0, nullptr, rx, 3, {},
+                        clk, mode, true};
+    if (manual_cs) { Cs::clear(); _delay_us(50); }
+    SpiHw::start(trig);
+    if (manual_cs) { Cs::set(); }
+    const uint8_t early = rx[0];
+    _delay_ms(120);
+    if (manual_cs) { Cs::clear(); _delay_us(50); }
+    SpiHw::start(read);
+    if (manual_cs) { Cs::set(); }
+    const uint32_t raw = (static_cast<uint32_t>(rx[0]) << 16) |
+                         (static_cast<uint32_t>(rx[1]) << 8) | rx[2];
+    SPI0.CTRLA = 0;                       // back to GPIO for the other experiments
+    Sck::set(); Sck::output();
+    Sdo::input();
+    Mosi::input();
+    Cs::set();
+    brio::print(serial, "early=", brio::hex(early), "  ");
+    decode(raw);
+    brio::print(serial, brio::crlf);
+}
+
+/// i. the read through the ISR pump (as dac_adc does): SPI0 vector bound
+/// below, non-polled request, wait for completion. Trigger polled.
+volatile bool spi_done = false;
+void exp_i(bool isr_trigger) {
+    using SpiHw = brio::Spi<0>;
+    brio::print(serial, "i ISR pump (trigger via ISR=", isr_trigger, "): ");
+    rest();
+    SpiHw::init();
+    static uint8_t rx[3];
+    SpiHw::Request trig{Cs::ref(), {}, nullptr, 0, nullptr, rx, 1, {},
+                        brio::SpiClock::div64, SPI_MODE_3_gc, !isr_trigger};
+    SpiHw::Request read{Cs::ref(), {}, nullptr, 0, nullptr, rx, 3, {},
+                        brio::SpiClock::div64, SPI_MODE_3_gc, false};
+    spi_done = false;
+    if (!SpiHw::start(trig)) {
+        while (!spi_done) {}
+    }
+    _delay_ms(120);
+    spi_done = false;
+    SpiHw::start(read);
+    while (!spi_done) {}
+    const uint32_t raw = (static_cast<uint32_t>(rx[0]) << 16) |
+                         (static_cast<uint32_t>(rx[1]) << 8) | rx[2];
+    SPI0.CTRLA = 0;
+    Sck::set(); Sck::output();
+    Sdo::input();
+    Mosi::input();
+    Cs::set();
+    decode(raw);
+    brio::print(serial, brio::crlf);
+}
+
+void exp_t() {
+    brio::print(serial, "t marker: 3 x (CS low 100 us, high 100 us)", brio::crlf);
+    Cs::set();
+    for (uint8_t i = 0; i < 3; ++i) {
+        Cs::clear(); _delay_us(100);
+        Cs::set();   _delay_us(100);
+    }
+}
+
+void help() {
+    brio::print(serial,
+        "MCP3550 diag - CS PB0, SCK PA6 (50 kHz), SDO/RDY PA5", brio::crlf,
+        "  a classic  b CS toggle  c early clocks  d continuous", brio::crlf,
+        "  e MISO idle  g jumper?  h double read  f RDY trace", brio::crlf,
+        "  k hold (convert, CS high, read later)  t marker", brio::crlf,
+        "  x dac_adc sequence (8-clock trigger)  y bare CS-pulse trigger", brio::crlf,
+        "  z same through the Spi<0> engine, mode 3  Z ... mode 0", brio::crlf);
+}
+
 } // namespace
 
+ISR(SPI0_INT_vect) { if (brio::Spi<0>::isr()) { spi_done = true; } }
 ISR(USART2_RXC_vect) { Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 
@@ -232,6 +392,7 @@ int main() {
     Cs::set();  Cs::output();
     Sck::set(); Sck::output();         // idles high (mode 1,1)
     Sdo::input();
+    Mosi::input();
     // Deselect the other bus citizens (display PD0, touch PD5), quiet display.
     brio::Pin<'D', 0>::set(); brio::Pin<'D', 0>::output();
     brio::Pin<'D', 1>::set(); brio::Pin<'D', 1>::output();
@@ -239,18 +400,36 @@ int main() {
     brio::Pin<'D', 5>::set(); brio::Pin<'D', 5>::output();
     sei();
 
-    brio::print(serial, brio::crlf, "MCP3550 diag (bit-bang PD3/PA6/PA5)",
-                brio::crlf);
+    brio::print(serial, brio::crlf);
+    help();
     for (;;) {
-        experiment_a();
-        experiment_b();
-        experiment_c();
-        experiment_d();
-        experiment_e();
-        experiment_g();
-        experiment_h();
-        experiment_f();
-        brio::print(serial, brio::crlf);
-        _delay_ms(1000);
+        uint8_t key;
+        if (!Serial::read_byte(key)) {
+            continue;
+        }
+        switch (key) {
+            case 'a': exp_a(); break;
+            case 'b': exp_b(); break;
+            case 'c': exp_c(); break;
+            case 'd': exp_d(); break;
+            case 'e': exp_e(); break;
+            case 'g': exp_g(); break;
+            case 'h': exp_h(); break;
+            case 'f': exp_f(); break;
+            case 'k': exp_k(); break;
+            case 'x': exp_x(); break;
+            case 'y': exp_y(); break;
+            case 'z': exp_z(SPI_MODE_3_gc, 1, brio::SpiClock::div64); break;
+            case 'i': exp_i(false); break;
+            case 'I': exp_i(true); break;
+            case 'u': exp_z(SPI_MODE_3_gc, 1, brio::SpiClock::div64, true, false); break;
+            case 'U': exp_z(SPI_MODE_3_gc, 1, brio::SpiClock::div64, true, true); break;
+            case 'v': exp_z(SPI_MODE_3_gc, 1, brio::SpiClock::div64, false, true); break;
+            case 'Z': exp_z(SPI_MODE_3_gc, 8, brio::SpiClock::div128); break;
+            case 'w': exp_z(SPI_MODE_3_gc, 16, brio::SpiClock::div128); break;
+            case 't': exp_t(); break;
+            case '\r': case '\n': break;
+            default: help(); break;
+        }
     }
 }

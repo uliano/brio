@@ -1,6 +1,6 @@
 // dac_adc - two buses, one signal: the MCP47CVB22 DAC (I2C, TWI0 on
 // PA2/PA3, addr 0x60) drives its VOUT0 into the MCP3550 22-bit ADC
-// (SPI0, CS on PD3, SDO/RDY on MISO PA5). A ramp goes out on the DAC,
+// (SPI0, CS on PB0, SDO/RDY on MISO PA5). A ramp goes out on the DAC,
 // each step is read back over I2C (write-then-read: the register-access
 // idiom) and measured by the ADC, and both codes land on the serial
 // console once per second:
@@ -17,14 +17,20 @@
 // mode is driven with TWO requests per sample -
 //   1. trigger: a 1-byte read - the CS falling edge starts a conversion
 //      (the byte clocked out meanwhile is just RDY high, discarded);
-//   2. read, 120 ms later (t_CONV is ~80 ms on the -50): a 3-byte read -
-//      RDY is already low when CS falls, the 24-bit frame comes out
-//      [OVL][OVH][sign + 22-bit two's complement], SPI mode 1,1.
+//   2. read, 200 ms later: a 3-byte read - RDY is already low when CS
+//      falls, the 24-bit frame comes out [OVL][OVH][sign + 22-bit two's
+//      complement], SPI mode 1,1. If the frame is all ones the device
+//      was still busy (RDY high): the read is retried 20 ms later.
 // This relies on the device keeping its conversion running while CS is
-// high (datasheet: single conversion mode with CS toggling), which is
-// what makes the ADC a good citizen of a shared bus - the display can
-// use SCK/MOSI while it converts. This app is the on-silicon check of
-// exactly that assumption.
+// high (single conversion mode with CS toggling), which is what makes
+// the ADC a good citizen of a shared bus - the display can use SCK/MOSI
+// while it converts. Measured on the bench (2026-08-17, analyzer): with
+// CS held low the conversion ends at 83 ms; with CS HIGH during the
+// conversion RDY comes ~119 ms after the trigger - the part converts
+// slower in shutdown - and a read at 120 ms was on the knife edge. Also
+// seen: after CS falls the ADC needs a few us before SDO shows RDY, and
+// devices latching their SPI mode from SCK at CS-fall need SCK parked
+// at CPOL beforehand (now guaranteed by the engine, Spi::park_sck).
 //
 // One BusDone alternative serves both buses: the FSM state says which
 // bus the reply came from (a client of two buses distinguishes replies
@@ -65,7 +71,8 @@ using I2c = brio::I2cBus<TwiHw, P>;
 using SpiHw = brio::Spi<0>;                        // PA4/PA5/PA6
 using Spi = brio::SpiBus<SpiHw, P>;
 
-using AdcCs = brio::Pin<'D', 3>;                   // MCP3550 CS
+using AdcCs = brio::Pin<'B', 0>;                   // MCP3550 CS (moved from PD3, 2026-08-17)
+constexpr uint8_t adc_cs_setup_us = 10;            // CS-to-first-SCK after wake (see spi.hpp)
 
 // ---- MCP47CVB22 (dual 12-bit DAC, I2C) ---------------------------------------
 // Command byte: [reg addr 7:3][cmd 2:1][x]; cmd 00 = write, 11 = read.
@@ -203,11 +210,12 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
         }, e);
     }
 
-    // converting: t_CONV (~80 ms on the MCP3550-50) with CS high
+    // converting: with CS high the MCP3550 takes ~119 ms (measured), so
+    // 200 ms leaves margin; a not-ready frame is retried anyway
     static Status converting(const Event& e) {
         return std::visit(overloaded{
             [](brio::Entry) {
-                timer.arm(brio::ticks_from_ms<P>(120));
+                timer.arm(brio::ticks_from_ms<P>(200));
                 return handled();
             },
             [](Tick) { return transition(&reading); },
@@ -224,14 +232,20 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                     AdcCs::ref(), {}, nullptr, 0,
                     nullptr, spi_rx, 3,
                     brio::reply_to<Loop, brio::BusDone>(),
-                    brio::SpiClock::div64, SPI_MODE_3_gc});
+                    brio::SpiClock::div64, SPI_MODE_3_gc, false,
+                    adc_cs_setup_us});
                 return handled();
             },
             [](brio::BusDone d) {
                 if (d.status != brio::spi_ok) {
                     return fail("ADC read", d.status);
                 }
+                if (brio::load_be24(spi_rx) == 0xFFFFFFul && retries < 10) {
+                    ++retries;                     // RDY was still high
+                    return transition(&retrying);
+                }
                 report();
+                retries = 0;
                 next_step();
                 return transition(&idle);
             },
@@ -239,6 +253,21 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
             [](auto) { return unhandled(); },
         }, e);
     }
+
+    // retrying: the frame said "busy" - wait a little and read again
+    static Status retrying(const Event& e) {
+        return std::visit(overloaded{
+            [](brio::Entry) {
+                timer.arm(brio::ticks_from_ms<P>(20));
+                return handled();
+            },
+            [](Tick) { return transition(&reading); },
+            [](Kick) { return handled(); },
+            [](auto) { return unhandled(); },
+        }, e);
+    }
+
+    static inline uint8_t retries = 0;
 
 private:
     static void report() {
@@ -250,6 +279,7 @@ private:
         const uint16_t readback = brio::load_be16(i2c_rx) & 0x0FFF;
 
         brio::print(serial, "step ", step, ": DAC ", brio::hex(dac_code),
+                    (retries != 0) ? " (retried)" : "",
                     " (readback ", brio::hex(readback), ")",
                     " -> ADC ", code, " (", brio::hex(raw), ")",
                     " ovh=", ovh, " ovl=", ovl,
@@ -295,7 +325,7 @@ int main() {
     sei();
 
     brio::print(serial, brio::crlf,
-                "DAC -> ADC loop: MCP47CVB22 VOUT0 (I2C 0x60) into MCP3550 (SPI, CS PD3)",
+                "DAC -> ADC loop: MCP47CVB22 VOUT0 (I2C 0x60) into MCP3550 (SPI, CS PB0)",
                 brio::crlf);
 
     brio::Kernel<P, Loop, I2c, Spi>::run();

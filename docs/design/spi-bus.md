@@ -140,6 +140,25 @@ flight. Both styles interleave freely on one bus. A zero-total-length
 request completes on the spot, wire untouched - the reply still
 arrives (no silent hang).
 
+## Two silicon facts the engine now honours (2026-08-17)
+
+Found with the MCP3550 on the analyzer, both general:
+
+- **SCK must sit at the request's CPOL before CS falls.** Devices that
+  latch their SPI mode from the SCK level at the CS edge (the MCP3550:
+  mode 0,0 vs 1,1) otherwise start the transaction in the wrong mode.
+  The AVR Dx SPI does NOT move SCK to a new CPOL on the CTRLB write,
+  only when the next transfer starts, so on a CPOL change the engine
+  sends one dummy byte with NO chip select (every device deselected
+  ignores SCK) before asserting CS: `Spi::park_sck`, one byte time,
+  paid only when the polarity changes between transactions.
+- **CS setup time is a device parameter.** `Request::cs_setup_us`:
+  microseconds between CS assertion and the first SCK edge, spun in
+  start(). Most devices need nothing beyond the ~1.5 us the code path
+  takes; the MCP3550 waking from shutdown needs a few us or it drops
+  the frame. Bounded by a byte, main context, chosen by the client
+  that knows its device.
+
 ## Transaction economics
 
 The per-request fixed cost is the price of ARBITRATION, not of any
