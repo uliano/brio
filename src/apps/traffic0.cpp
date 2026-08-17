@@ -1,9 +1,10 @@
-// traffic - a pedestrian-call traffic light on 4 RGB LEDs and 4 buttons,
+// traffic0 - a pedestrian-call traffic light on 4 RGB LEDs and 4 buttons,
 // built step by step as the LEARNING testbed for the brio AO/FSM model.
 // This file is deliberately over-commented: it explains the framework
 // idioms where they appear, so it can be read top to bottom.
 //
-// STEP 1 (this version): the plumbing only. Buttons samples the 4 keys
+// STEP 0 (this file; later steps are traffic1, traffic2, ... - every
+// step stays as its own app): the plumbing only. Buttons samples the 4 keys
 // every 10 ms, debounces them and PUBLISHES ButtonPressed{id}; Demo
 // subscribes and, on button n, steps the colour of LED n (off -> red ->
 // green -> blue) and traces the event on the console. Nothing waits,
@@ -269,7 +270,7 @@ int main() {
     brio::Ticker::init();          // RTC/PIT timebase, before sei()
     sei();
 
-    brio::print(serial, brio::crlf, "traffic step 1: buttons -> lamps", brio::crlf);
+    brio::print(serial, brio::crlf, "traffic0: buttons -> lamps", brio::crlf);
 
     // Kernel<P, Aos...>::run(): calls init() on every AO (in order),
     // then loops forever: pop the highest-priority non-empty queue,
