@@ -21,6 +21,12 @@ Layering: `SpiBus` is `util/` (pure, host-testable against a fake Bus);
 `Spi<n>` is `avrdx/` (knows the silicon). The app's ISR binds the
 vector, as always.
 
+Since 2026-08-17 `SpiBus` is an alias of `BusMaster<Bus, P>`
+(`util/bus_master.hpp`), the arbiter generalized when I2C arrived as
+the second bus - see [i2c-bus.md](i2c-bus.md). Everything below about
+arbitration reads unchanged; "SpiDone"/"spi_ok" are the SPI names of
+`BusDone`/`bus_ok`.
+
 ## Why the event queue alone cannot arbitrate
 
 Design discovery worth remembering: a SPI transaction OUTLIVES the

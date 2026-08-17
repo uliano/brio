@@ -559,10 +559,15 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
                            self-post backpressure, consumer-above-producer
                            scheduling contract; born SerialAo, Ao suffix
                            dropped 2026-08-13)
-    spi_bus.hpp            SpiBus<Bus, P>: SPI bus arbiter - pending FIFO,
-                           reject-when-full, ReplyTo completion, engine
-                           handshake via TransferDone (born SpiAo, Ao
-                           suffix dropped 2026-08-13)
+    bus_master.hpp         BusMaster<Bus, P>: the bus arbiter - pending
+                           FIFO, reject-when-full, ReplyTo completion,
+                           engine handshake via TransferDone; BusDone,
+                           bus_ok/bus_rejected (born SpiBus 2026-08-13,
+                           generalized on the I2C specimen 2026-08-17)
+    spi_bus.hpp            SPI vocabulary: SpiBus/SpiDone/spi_* aliases
+    i2c_bus.hpp            I2C vocabulary: I2cBus/I2cDone/i2c_* + the
+                           wire outcomes (nack_addr, nack_data, arb_lost,
+                           bus_error)
     proto/line_parser.hpp  LineAssembler (push) + console/SCPI parsers +
                            CommandRouter<Sink>
   src/avrdx/             everything that knows avr/io.h
@@ -577,6 +582,10 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
     spi.hpp                Spi<n> master engine: two-phase descriptor
                            (cmd @ DC low, full-duplex data @ DC high),
                            per-byte ISR pump, CS owned by the engine
+    twi.hpp                Twi<n, Route> I2C master engine: {addr, tx, rx}
+                           one-tenure descriptor (write / read / write-
+                           then-read with repeated START / probe),
+                           per-byte ISR, per-request speed
     ticker.hpp             BasicTicker<tps> static RTC/PIT timebase
                            (alias Ticker = BasicTicker<1024>)
   src/host/              the test "target"

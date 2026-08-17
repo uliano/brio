@@ -196,6 +196,7 @@ no `build_src_filter` changes needed.
 | `display_id` | Reads the display controller's DCS registers (RDDPM, RDDID, ID4, 0xBF device code) and prints the raw answers: the aliveness/identification probe that unmasked the 3.5" module as an **ILI9481** |
 | `display_fill` | ILI9481 full-screen solid fill cycling red/green/blue (18-bit pixels, CASET/PASET + RAMWR/3C row writes, INVON for the 9481 panel polarity) |
 | `spi_duo` | **Two devices, one arbitrated bus**: ILI9481 fill (960-byte rows @ 6 MHz) + XPT2046 touch polling (3-byte conversions @ 1.5 MHz, T_CS on PD5) through the same SpiBus; touch steers the fill palette, per-request clock switching |
+| `i2c_scan` | I2C stack test: address sweep 0x08..0x77 every 2 s on **TWI0 (PA2 SDA / PA3 SCL)** through I2cBus + the Twi<0> engine, one empty probe request per address, ACKs printed as found (expected: 0x60, the MCP47CVB22) |
 
 ## Hardware
 
@@ -207,8 +208,9 @@ no `build_src_filter` changes needed.
   level shifter on the display signals): SPI0 on PA4(MOSI)/PA5(MISO)/
   PA6(SCK); PD0=CS display, PD1=RS/DC, PD2=RST display, PD3=CS MCP3550,
   PD4 reserved for the module's SD_CS, PD5=T_CS (XPT2046 touch, same
-  shared bus, PEN unused); TWI0 reserved on PA2(SDA)/PA3(SCL)
-  with 4.7k pull-ups for the MCP47CVB22 (dual 12-bit DAC, addr 0x60).
+  shared bus, PEN unused); TWI0 on PA2(SDA)/PA3(SCL) with 1.5k
+  pull-ups to 3.3 V, MCP47CVB22 (dual 12-bit DAC, MSOP-10, A0 and
+  LAT/HVC tied to GND -> addr 0x60, LAT transparent).
   Display: 3.5" red module **HST035003-A**, controller **ILI9481**
   (320x480, SPI = 18-bit pixels only, panel needs INVON), XPT2046
   resistive touch on board (its U2; U1 is the LDO), BL tied high.

@@ -1,5 +1,8 @@
-// Host tests for util/spi_bus.hpp: bus arbitration, FIFO order across
-// clients, rejection policy, engine handshake. Run with: pio test -e native
+// Host tests for util/bus_master.hpp through its SPI vocabulary
+// (util/spi_bus.hpp): bus arbitration, FIFO order across clients,
+// rejection policy, engine handshake, status pass-through. I2cBus is the
+// same class under another alias, so this IS its test too.
+// Run with: pio test -e native
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

@@ -11,6 +11,7 @@ decisions, the rationale, the contracts between layers.
 | [design/overview.md](design/overview.md) | Philosophy, governing rules, layering, naming and style |
 | [design/kernel.md](design/kernel.md) | The active-object kernel: events, queues, scheduler, FSM, time, panic |
 | [design/spi-bus.md](design/spi-bus.md) | The shared SPI bus: engine descriptor, AO arbitration, multi-device rules |
+| [design/i2c-bus.md](design/i2c-bus.md) | The I2C bus: BusMaster generalized, the TWI engine descriptor, status vocabulary |
 | [design/serial.md](design/serial.md) | The serial stack: Uart driver below, SerialPort line events above |
 | [design/ring.md](design/ring.md) | Ring: the SPSC FIFO, lock-free where the platform allows, guarded elsewhere |
 
