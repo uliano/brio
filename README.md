@@ -196,6 +196,8 @@ no `build_src_filter` changes needed.
 | `display_id` | Reads the display controller's DCS registers (RDDPM, RDDID, ID4, 0xBF device code) and prints the raw answers: the aliveness/identification probe that unmasked the 3.5" module as an **ILI9481** |
 | `display_fill` | ILI9481 full-screen solid fill cycling red/green/blue (18-bit pixels, CASET/PASET + RAMWR/3C row writes, INVON for the 9481 panel polarity) |
 | `spi_duo` | **Two devices, one arbitrated bus**: ILI9481 fill (960-byte rows @ 6 MHz) + XPT2046 touch polling (3-byte conversions @ 1.5 MHz, T_CS on PD5) through the same SpiBus; touch steers the fill palette, per-request clock switching |
+| `dac_adc` | **Two buses, one signal**: MCP47CVB22 VOUT0 (I2C) into the MCP3550 (SPI, CS PD3) - a 9-step ramp, each step written and read back over I2C (write-then-read, repeated START) and measured by the ADC via two SPI requests (trigger, then read after t_conv). I2C path verified; the ADC path awaits the wiring check logged in mcp_diag |
+| `mcp_diag` | MCP3550 behaviour probe, bit-banged on PD3/PA6/PA5, no kernel: t_conv, CS toggling, early clocks, MISO net, RDY trace - the questions the arbitrated engine needs answered (see its bench log) |
 | `i2c_scan` | I2C stack test: address sweep 0x08..0x77 every 2 s on **TWI0 (PA2 SDA / PA3 SCL)** through I2cBus + the Twi<0> engine, one empty probe request per address, ACKs printed as found (expected: 0x60, the MCP47CVB22) |
 
 ## Hardware
