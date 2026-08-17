@@ -137,10 +137,7 @@ public:
         if (total_len() == 0) {
             return true;  // nothing to move: complete on the spot
         }
-        regs().CTRLB = SPI_SSD_bm | r.mode;
-        regs().CTRLA = SPI_MASTER_bm | static_cast<uint8_t>(r.clock) |
-                       SPI_ENABLE_bm;
-        park_sck(r.mode);
+        apply_mode(r.mode, r.clock);
         if (in_cmd_) {
             r.dc.clear();
         } else {
@@ -232,25 +229,40 @@ private:
     /// SCK must already sit at the new mode's idle level (CPOL) when CS
     /// falls: devices that latch their SPI mode from SCK at the CS edge
     /// (MCP3550: mode 0,0 vs 1,1) otherwise start the transaction in the
-    /// wrong mode. The AVR Dx SPI does NOT move SCK to the new CPOL on
-    /// the CTRLB write - only when the next transfer starts (seen on the
-    /// analyzer: SCK still low 10 us after CS fell on the first mode-3
-    /// request after init). So on a CPOL change one dummy byte goes out
-    /// with NO chip select asserted (every device deselected ignores
-    /// SCK): one byte time, paid only when the polarity changes between
-    /// transactions, nothing otherwise. Polled with the SPI's own
-    /// interrupt silenced so the bound ISR does not see it.
-    static void park_sck(uint8_t mode) {
+    /// wrong mode. The AVR SPI updates the SCK output level when it is
+    /// ENABLED and at every transfer - NOT on a CTRLB write while it is
+    /// enabled (seen on the analyzer: SCK still low 10 us after CS fell
+    /// on the first mode-3 request after init; a known AVR quirk). So a
+    /// CPOL change is applied with the peripheral disabled: preset the
+    /// SCK pin's PORT.OUT to the new idle level (what the pin shows while
+    /// the SPI is off - no glitch), disable, write the mode, re-enable.
+    /// Three register writes, no clock edges on the bus, only when the
+    /// polarity changes between transactions.
+    static void apply_mode(uint8_t mode, SpiClock clock) {
+        const uint8_t ctrla = SPI_MASTER_bm | static_cast<uint8_t>(clock) |
+                              SPI_ENABLE_bm;
         const bool cpol = (mode & SPI_MODE_2_gc) != 0;   // MODE bit 1 = CPOL
-        if (cpol == sck_cpol_) {
-            return;
+        if (cpol != sck_cpol_) {
+            sck_cpol_ = cpol;
+            if (cpol) {
+                sck_port().OUTSET = sck_mask;
+            } else {
+                sck_port().OUTCLR = sck_mask;
+            }
+            regs().CTRLA = ctrla & static_cast<uint8_t>(~SPI_ENABLE_bm);
         }
-        sck_cpol_ = cpol;
-        const uint8_t ie = regs().INTCTRL;
-        regs().INTCTRL = 0;
-        (void)xfer(0xFF);
-        regs().INTCTRL = ie;
+        regs().CTRLB = SPI_SSD_bm | mode;
+        regs().CTRLA = ctrla;
     }
+
+    static constexpr PORT_t& sck_port() {
+        if constexpr (spi_num == 0) {
+            return PORTA;
+        } else {
+            return PORTC;
+        }
+    }
+    static constexpr uint8_t sck_mask = (spi_num == 0) ? PIN6_bm : PIN2_bm;
 
     /// One polled byte: write, spin on IF (~1 byte time), read back.
     /// Reading INTFLAGS (IF set) then DATA is the IF clear sequence.

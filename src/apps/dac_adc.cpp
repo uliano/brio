@@ -30,7 +30,7 @@
 // slower in shutdown - and a read at 120 ms was on the knife edge. Also
 // seen: after CS falls the ADC needs a few us before SDO shows RDY, and
 // devices latching their SPI mode from SCK at CS-fall need SCK parked
-// at CPOL beforehand (now guaranteed by the engine, Spi::park_sck).
+// at CPOL beforehand (now guaranteed by the engine, Spi::apply_mode).
 //
 // One BusDone alternative serves both buses: the FSM state says which
 // bus the reply came from (a client of two buses distinguishes replies

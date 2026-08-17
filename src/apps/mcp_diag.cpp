@@ -50,8 +50,9 @@
 //    hardware engine clocking 1.5 us after CS lost the frame (0x7FFFFF)
 //    - hence Spi::Request::cs_setup_us.
 //  - the device latches its SPI mode from SCK at CS fall: the engine
-//    must park SCK at CPOL before asserting CS (Spi::park_sck), the AVR
-//    SPI does not move SCK on a CTRLB write.
+//    have SCK at CPOL before asserting CS (Spi::apply_mode changes the
+//    mode with the peripheral disabled), the AVR SPI does not move SCK
+//    on a CTRLB write while enabled.
 //  Earlier chaos (random t_conv, frames decaying to zero) was a PA5
 //  header pin that was not soldered.
 // Against the datasheet (DS20001950F): 5.3 confirms "CS rise during

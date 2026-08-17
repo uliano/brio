@@ -147,11 +147,15 @@ Found with the MCP3550 on the analyzer, both general:
 - **SCK must sit at the request's CPOL before CS falls.** Devices that
   latch their SPI mode from the SCK level at the CS edge (the MCP3550:
   mode 0,0 vs 1,1) otherwise start the transaction in the wrong mode.
-  The AVR Dx SPI does NOT move SCK to a new CPOL on the CTRLB write,
-  only when the next transfer starts, so on a CPOL change the engine
-  sends one dummy byte with NO chip select (every device deselected
-  ignores SCK) before asserting CS: `Spi::park_sck`, one byte time,
-  paid only when the polarity changes between transactions.
+  The AVR SPI updates the SCK output level when it is ENABLED and at
+  every transfer, NOT on a CTRLB write while enabled (a known AVR
+  quirk, seen on the analyzer). So the engine applies a CPOL change
+  with the peripheral disabled: preset the SCK pin's PORT.OUT to the
+  new idle level (what the pin shows while the SPI is off - no glitch),
+  disable, write the mode, re-enable - `Spi::apply_mode`, three
+  register writes, no clock edges on the bus, only when the polarity
+  changes between transactions. (A dummy byte without chip select also
+  works and was the first fix; rejected as a side effect on the bus.)
 - **CS setup time is a device parameter.** `Request::cs_setup_us`:
   microseconds between CS assertion and the first SCK edge, spun in
   start(). Most devices need nothing beyond the ~1.5 us the code path
