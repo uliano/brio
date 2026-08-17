@@ -216,8 +216,10 @@ no `build_src_filter` changes needed.
   the MCP3550 input. MCP3550 facts measured with the analyzer: t_conv
   81 ms with CS low, ~119 ms trigger-to-RDY when CS is high during the
   conversion (result held for the next CS fall), needs a few us of CS
-  setup before the first SCK after waking (dac_adc uses 10), latches
-  its SPI mode from SCK at CS fall (mode 1,1 = SCK high).
+  setup before the first SCK after waking (dac_adc uses 10; the
+  datasheet only says "an internal power-up delay must be observed"),
+  latches its SPI mode from SCK at CS fall (mode 1,1 = SCK high, per
+  DS20001950F 5.5), CS low >= 8 us (tCSL).
   Display: 3.5" red module **HST035003-A**, controller **ILI9481**
   (320x480, SPI = 18-bit pixels only, panel needs INVON), XPT2046
   resistive touch on board (its U2; U1 is the LDO), BL tied high.

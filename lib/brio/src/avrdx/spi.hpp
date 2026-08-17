@@ -94,12 +94,14 @@ public:
         bool polled = false;
         // Chip-select setup: microseconds the engine waits between
         // asserting CS and the first SCK edge. Most devices need tens of
-        // ns (the ~1.5 us the code path takes anyway); a device waking
-        // from shutdown on CS may need much more - the MCP3550 shows RDY
-        // only ~4 us after CS falls and drops the frame if clocked before
-        // it is awake (measured 2026-08-17). Spent spinning in start(),
-        // main context, bounded by this byte: keep it to what the device
-        // datasheet asks.
+        // ns (the ~1.5 us the code path takes anyway). A device waking
+        // from shutdown on CS may need more: the MCP3550 datasheet
+        // specifies tRDY <= 50 ns but only says "an internal power-up
+        // delay must be observed" when exiting Shutdown (DS20001950F
+        // 5.2) - MEASURED 2026-08-17: SDO drives ~4 us after CS falls,
+        // and a frame clocked 1.5 us after CS is lost (0x7FFFFF), 3.5 us
+        // is enough, dac_adc uses 10. Spent spinning in start(), main
+        // context, bounded by this byte.
         uint8_t cs_setup_us = 0;
     };
     static_assert(std::is_trivially_copyable_v<Request>);

@@ -54,6 +54,16 @@
 //    SPI does not move SCK on a CTRLB write.
 //  Earlier chaos (random t_conv, frames decaying to zero) was a PA5
 //  header pin that was not soldered.
+// Against the datasheet (DS20001950F): 5.3 confirms "CS rise during
+// tCONV -> conversion completes, then Shutdown; the next CS fall does
+// not restart"; 5.3.1: in single conversion mode RDY is LATCHED at each
+// CS fall and does not update while CS stays low; 5.5: mode 1,1 needs
+// SCK idling high and RDY tested before the first clock edge (mode 0,0
+// = 25 clocks, RDY as first bit); tCSL = 8 us minimum CS low; the first
+// conversion after Shutdown is longer by 144 fOSC periods (~5 ms). NOT
+// in the datasheet: a CS-to-first-SCK setup in us (tRDY <= 50 ns; only
+// "an internal power-up delay must be observed" when exiting Shutdown)
+// and the ~119 ms trigger-to-RDY with CS high - both are bench facts.
 
 #include <avr/interrupt.h>
 #include <util/delay.h>
