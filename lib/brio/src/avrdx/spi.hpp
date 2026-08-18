@@ -41,7 +41,7 @@
 #pragma once
 
 #include <avr/io.h>
-#include <util/delay.h>
+#include "avrdx/delay.hpp"
 #include <stdint.h>
 
 #include "avrdx/pin.hpp"
@@ -111,9 +111,12 @@ public:
      * PA6 SCK; PA7 free - SSD disables the slave-select input). Call
      * after clock init, before sei(). CS/DC pins are configured by
      * their owners (the device clients), not here; clock and mode
-     * travel per-request.
+     * travel per-request. `clock` is the app's brio::Clock tag: the
+     * per-request cs_setup_us delay is timed from Clock::hz.
      */
-    static void init() {
+    template <typename Clock>
+    static void init(Clock) {
+        cycles_per_us_ = cycles_per_us(Clock::hz);
         if constexpr (spi_num == 0) {
             PORTA.DIRSET = PIN4_bm | PIN6_bm;  // MOSI, SCK
             PORTA.DIRCLR = PIN5_bm;            // MISO
@@ -144,8 +147,8 @@ public:
             r.dc.set();
         }
         r.cs.clear();                      // assert, active low
-        for (uint8_t i = r.cs_setup_us; i != 0; --i) {
-            _delay_us(1);
+        if (r.cs_setup_us != 0) {
+            delay_us_runtime(cycles_per_us_, r.cs_setup_us);
         }
         if (!r.polled) {
             regs().DATA = first_byte();    // the ISR pumps the rest
@@ -286,6 +289,7 @@ private:
     static inline uint16_t pos_ = 0;
     static inline bool in_cmd_ = false;
     static inline bool sck_cpol_ = false;   // init() leaves mode 0: SCK low
+    static inline uint8_t cycles_per_us_ = 1;   // from Clock::hz at init()
 };
 
 } // namespace brio

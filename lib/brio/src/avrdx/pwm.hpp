@@ -11,7 +11,7 @@
  * "six dimmable channels" shape an RGB pair or a six-LED bar wants, at
  * the price of 8-bit resolution, which is all a LED needs. Both halves
  * run from the same prescaled clock, so all six channels share the PWM
- * frequency: F_CPU / prescaler / 256 (24 MHz, div16 -> ~5.9 kHz: no
+ * frequency: CLK_PER / prescaler / 256 (24 MHz, div16 -> ~5.9 kHz: no
  * visible flicker, no audible whine).
  *
  * Endpoints: the compare hardware cannot express a clean 0 % or 100 %

@@ -67,14 +67,20 @@
 // and the ~119 ms trigger-to-RDY with CS high - both are bench facts.
 
 #include <avr/interrupt.h>
-#include <util/delay.h>
 #include <stdint.h>
 
 #include "avrdx/clock.hpp"
+#include "avrdx/delay.hpp"
 #include "avrdx/pin.hpp"
 #include "avrdx/spi.hpp"
 #include "avrdx/uart.hpp"
 #include "util/print.hpp"
+
+// The clock: the ONE truth about CLK_PER for every driver of this
+// target (avrdx/clock.hpp). 24 MHz crystal on PA0/PA1, OSCHF fallback at
+// the same rate; `clock` is an empty tag passed to driver inits.
+using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+constexpr SysClock clock;
 
 namespace {
 
@@ -90,13 +96,13 @@ constexpr uint16_t ready_timeout_ms = 600;
 
 /// Wait for RDY (SDO low) with CS low; returns elapsed ms, or -1 on timeout.
 int16_t wait_ready(uint16_t timeout_ms = ready_timeout_ms) {
-    _delay_us(50);   // SDO needs a moment after CS falls before it shows RDY
+    brio::delay_us(clock, 50);   // SDO needs a moment after CS falls before it shows RDY
     for (uint16_t ms = 0; ms < timeout_ms; ++ms) {
         for (uint8_t i = 0; i < 10; ++i) {
             if (!Sdo::read()) {
                 return static_cast<int16_t>(ms);
             }
-            _delay_us(100);
+            brio::delay_us(clock, 100);
         }
     }
     return -1;
@@ -107,10 +113,10 @@ uint32_t clock_bits(uint8_t n) {
     uint32_t raw = 0;
     for (uint8_t i = 0; i < n; ++i) {
         Sck::clear();
-        _delay_us(10);
+        brio::delay_us(clock, 10);
         Sck::set();
         raw = (raw << 1) | (Sdo::read() ? 1u : 0u);
-        _delay_us(10);
+        brio::delay_us(clock, 10);
     }
     return raw;
 }
@@ -126,7 +132,7 @@ void decode(uint32_t raw) {
 /// (-> shutdown): every experiment starts from the same known state.
 void rest() {
     Cs::set();
-    _delay_ms(600);
+    brio::delay_us(clock, 600000);
 }
 
 void read_and_report(int16_t t) {
@@ -151,11 +157,11 @@ void exp_b() {
     brio::print(serial, "b CS toggle: ");
     rest();
     Cs::clear();                       // start a conversion
-    _delay_ms(1);
+    brio::delay_us(clock, 1000);
     Cs::set();                         // ...and leave the bus
-    _delay_ms(150);                    // longer than any t_conv
+    brio::delay_us(clock, 150000);                    // longer than any t_conv
     Cs::clear();
-    _delay_us(20);
+    brio::delay_us(clock, 20);
     const bool ready_at_once = !Sdo::read();
     brio::print(serial, "RDY low at CS fall=", ready_at_once, "  then ");
     read_and_report(wait_ready());
@@ -179,7 +185,7 @@ void exp_d() {
     rest();
     Cs::clear();
     read_and_report(wait_ready());
-    _delay_us(20);
+    brio::delay_us(clock, 20);
     const bool high_after_read = Sdo::read();
     brio::print(serial, "  RDY high after read=", high_after_read, "  second ");
     read_and_report(wait_ready());
@@ -192,16 +198,16 @@ void exp_e() {
     uint8_t lows = 0;
     for (uint8_t i = 0; i < 100; ++i) {
         if (!Sdo::read()) ++lows;
-        _delay_ms(1);
+        brio::delay_us(clock, 1000);
     }
     brio::print(serial, "e CS high:   MISO low ", lows, "/100 samples", brio::crlf);
 }
 
 void exp_g() {
     Cs::set();
-    Mosi::clear(); Mosi::output(); _delay_us(10);
+    Mosi::clear(); Mosi::output(); brio::delay_us(clock, 10);
     const bool follows_low = !Sdo::read();
-    Mosi::set(); _delay_us(10);
+    Mosi::set(); brio::delay_us(clock, 10);
     const bool follows_high = Sdo::read();
     Mosi::input();
     brio::print(serial, "g MOSI->MISO: follows low=", follows_low,
@@ -224,7 +230,7 @@ void exp_h() {
 void trace(uint8_t samples) {
     for (uint8_t i = 0; i < samples; ++i) {
         brio::print(serial, Sdo::read() ? '1' : '0');
-        _delay_ms(5);
+        brio::delay_us(clock, 5000);
     }
 }
 
@@ -251,11 +257,11 @@ void exp_k() {
     Cs::clear();
     const int16_t t = wait_ready();
     brio::print(serial, "t=", t, " ms, CS high 200 ms, CS low: ");
-    _delay_ms(10);
+    brio::delay_us(clock, 10000);
     Cs::set();
-    _delay_ms(200);
+    brio::delay_us(clock, 200000);
     Cs::clear();
-    _delay_us(50);
+    brio::delay_us(clock, 50);
     const bool ready_at_once = !Sdo::read();
     brio::print(serial, "RDY low at once=", ready_at_once, "  ");
     read_and_report(wait_ready());
@@ -272,9 +278,9 @@ void exp_x() {
     Cs::clear();
     const uint32_t early = clock_bits(8);
     Cs::set();
-    _delay_ms(120);
+    brio::delay_us(clock, 120000);
     Cs::clear();
-    _delay_us(50);
+    brio::delay_us(clock, 50);
     const bool ready_at_once = !Sdo::read();
     brio::print(serial, "early=", brio::hex(early), " RDY low at once=", ready_at_once, "  ");
     read_and_report(wait_ready());
@@ -287,11 +293,11 @@ void exp_y() {
     brio::print(serial, "y bare trig:   ");
     rest();
     Cs::clear();
-    _delay_us(30);
+    brio::delay_us(clock, 30);
     Cs::set();
-    _delay_ms(120);
+    brio::delay_us(clock, 120000);
     Cs::clear();
-    _delay_us(50);
+    brio::delay_us(clock, 50);
     const bool ready_at_once = !Sdo::read();
     brio::print(serial, "RDY low at once=", ready_at_once, "  ");
     read_and_report(wait_ready());
@@ -306,26 +312,26 @@ void exp_z(uint8_t mode, uint16_t trig_len, brio::SpiClock clk, bool prime = fal
     using SpiHw = brio::Spi<0>;
     brio::print(serial, "z engine trig ", trig_len, " B prime=", prime, " manualCS=", manual_cs, ": ");
     rest();
-    SpiHw::init();
+    SpiHw::init(clock);
     static uint8_t rx[16];
     if (prime) {
         // one dummy byte with NO chip select: parks SCK at CPOL (high in
         // mode 3) so the next CS falling edge finds it there
         SpiHw::Request dummy{{}, {}, nullptr, 0, nullptr, rx, 1, {}, clk, mode, true};
         SpiHw::start(dummy);
-        _delay_us(20);
+        brio::delay_us(clock, 20);
     }
     const brio::PinRef cs = manual_cs ? brio::PinRef{} : Cs::ref();
     SpiHw::Request trig{cs, {}, nullptr, 0, nullptr, rx, trig_len, {},
                         clk, mode, true};
     SpiHw::Request read{cs, {}, nullptr, 0, nullptr, rx, 3, {},
                         clk, mode, true};
-    if (manual_cs) { Cs::clear(); _delay_us(50); }
+    if (manual_cs) { Cs::clear(); brio::delay_us(clock, 50); }
     SpiHw::start(trig);
     if (manual_cs) { Cs::set(); }
     const uint8_t early = rx[0];
-    _delay_ms(120);
-    if (manual_cs) { Cs::clear(); _delay_us(50); }
+    brio::delay_us(clock, 120000);
+    if (manual_cs) { Cs::clear(); brio::delay_us(clock, 50); }
     SpiHw::start(read);
     if (manual_cs) { Cs::set(); }
     const uint32_t raw = (static_cast<uint32_t>(rx[0]) << 16) |
@@ -347,7 +353,7 @@ void exp_i(bool isr_trigger) {
     using SpiHw = brio::Spi<0>;
     brio::print(serial, "i ISR pump (trigger via ISR=", isr_trigger, "): ");
     rest();
-    SpiHw::init();
+    SpiHw::init(clock);
     static uint8_t rx[3];
     SpiHw::Request trig{Cs::ref(), {}, nullptr, 0, nullptr, rx, 1, {},
                         brio::SpiClock::div64, SPI_MODE_3_gc, !isr_trigger};
@@ -357,7 +363,7 @@ void exp_i(bool isr_trigger) {
     if (!SpiHw::start(trig)) {
         while (!spi_done) {}
     }
-    _delay_ms(120);
+    brio::delay_us(clock, 120000);
     spi_done = false;
     SpiHw::start(read);
     while (!spi_done) {}
@@ -376,8 +382,8 @@ void exp_t() {
     brio::print(serial, "t marker: 3 x (CS low 100 us, high 100 us)", brio::crlf);
     Cs::set();
     for (uint8_t i = 0; i < 3; ++i) {
-        Cs::clear(); _delay_us(100);
-        Cs::set();   _delay_us(100);
+        Cs::clear(); brio::delay_us(clock, 100);
+        Cs::set();   brio::delay_us(clock, 100);
     }
 }
 
@@ -398,8 +404,8 @@ ISR(USART2_RXC_vect) { Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 
 int main() {
-    brio::init_clock_24mhz();
-    Serial::init(460800);
+    SysClock::init();
+    Serial::init(clock, 460800);
     Cs::set();  Cs::output();
     Sck::set(); Sck::output();         // idles high (mode 1,1)
     Sdo::input();

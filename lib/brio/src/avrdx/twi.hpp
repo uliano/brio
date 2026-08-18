@@ -55,7 +55,8 @@
 
 namespace brio {
 
-/// I2C bus speed class; MBAUD is derived from F_CPU at compile time.
+/// I2C bus speed class; MBAUD for each is derived from Clock::hz at
+/// init() and kept in two bytes, selected per request.
 enum class I2cSpeed : uint8_t {
     standard_100k,   ///< Standard-mode, 100 kHz, t_rise budget 1000 ns
     fast_400k,       ///< Fast-mode, 400 kHz, t_rise budget 300 ns
@@ -89,10 +90,15 @@ public:
      * weak for I2C edges); the pins are left to the peripheral, which
      * drives them open-drain by itself.
      */
-    static void init() {
+    template <typename Clock>
+    static void init(Clock) {
+        // Both MBAUD values fold at compile time from Clock::hz; the
+        // per-request choice is a 1-of-2 lookup, no arithmetic on the fly.
+        baud_[0] = baud_for<Clock::hz>(I2cSpeed::standard_100k);
+        baud_[1] = baud_for<Clock::hz>(I2cSpeed::fast_400k);
         route_pins();
         regs().MCTRLA = TWI_RIEN_bm | TWI_WIEN_bm | TWI_ENABLE_bm;
-        regs().MBAUD = baud_for(I2cSpeed::standard_100k);
+        regs().MBAUD = baud_[0];
         regs().MSTATUS = TWI_BUSSTATE_IDLE_gc;   // the bus is ours to declare idle
     }
 
@@ -104,7 +110,7 @@ public:
         req_ = r;
         pos_ = 0;
         status_ = i2c_ok;
-        regs().MBAUD = baud_for(r.speed);
+        regs().MBAUD = baud_[r.speed == I2cSpeed::fast_400k ? 1 : 0];
         if (r.tx_len == 0 && r.rx_len > 0) {
             phase_ = Phase::reading;
             regs().MADDR = static_cast<uint8_t>((r.addr << 1) | 1);
@@ -191,14 +197,17 @@ private:
     /// BAUD with the spec's worst-case rise time for the mode; real
     /// edges with stiff pull-ups are faster, which only slows SCL a
     /// touch below nominal - the safe side.
+    template <uint32_t clk_hz>
     static constexpr uint8_t baud_for(I2cSpeed s) {
         const uint32_t f_scl = (s == I2cSpeed::fast_400k) ? 400000u : 100000u;
         const uint32_t t_rise_ns = (s == I2cSpeed::fast_400k) ? 300u : 1000u;
-        const uint32_t rise_term = (F_CPU / 1000000u) * t_rise_ns / 2000u;
-        const int32_t baud = static_cast<int32_t>(F_CPU / (2u * f_scl)) - 5 -
+        const uint32_t rise_term = (clk_hz / 1000000u) * t_rise_ns / 2000u;
+        const int32_t baud = static_cast<int32_t>(clk_hz / (2u * f_scl)) - 5 -
                              static_cast<int32_t>(rise_term);
         return static_cast<uint8_t>(baud < 1 ? 1 : (baud > 255 ? 255 : baud));
     }
+
+    static inline uint8_t baud_[2] = {0, 0};   // MBAUD for standard / fast
 
     static bool finish(uint8_t code) {
         status_ = code;

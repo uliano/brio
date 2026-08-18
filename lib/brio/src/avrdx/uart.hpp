@@ -24,9 +24,11 @@
  *   ISR(USART2_RXC_vect) { Serial::rxc(); }
  *   ISR(USART2_DRE_vect) { Serial::dre(); }
  *
+ *   using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *   constexpr SysClock clock;
  *   int main() {
- *       brio::init_clock_24mhz();
- *       Serial::init(460800);
+ *       SysClock::init();
+ *       Serial::init(clock, 460800);
  *       sei();
  *       brio::print(serial, "hello", brio::crlf);
  *       ...
@@ -42,7 +44,7 @@
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
-#include <util/delay.h>
+#include "avrdx/delay.hpp"
 #include <stdint.h>
 #include "avrdx/platform_avr.hpp"
 #include "util/ring.hpp"
@@ -162,20 +164,25 @@ public:
     /**
      * @brief Configure pins, PORTMUX, baud rate and enable the USART.
      *
-     * Call AFTER the main clock is set up (the baud divisor is computed from
-     * F_CPU) and before sei(). The RXC interrupt is enabled here; the DRE
-     * interrupt is enabled on demand by write_byte().
+     * Call AFTER the main clock is set up and before sei(); `clock` is
+     * the app's brio::Clock tag (avrdx/clock.hpp): the baud divisor is
+     * derived from Clock::hz, never from F_CPU. With a constant baud the
+     * divisor folds to a constant. The RXC interrupt is enabled here; the
+     * DRE interrupt is enabled on demand by write_byte().
      */
-    static void init(uint32_t baud) {
+    template <typename Clock>
+    static void init(Clock clock, uint32_t baud) {
         setup_pins();
 
-        regs().BAUD = static_cast<uint16_t>((F_CPU * 4UL + baud / 2UL) / baud);
+        regs().BAUD = static_cast<uint16_t>((Clock::hz * 4UL + baud / 2UL) / baud);
         regs().CTRLC = USART_CMODE_ASYNCHRONOUS_gc | USART_PMODE_DISABLED_gc |
                        USART_SBMODE_1BIT_gc | USART_CHSIZE_8BIT_gc;  // 8N1
         regs().CTRLA = USART_RXCIE_bm;
         regs().CTRLB = USART_TXEN_bm | USART_RXEN_bm;
 
-        _delay_ms(10);  // hold TX idle-high so the first start bit is clean
+        // Hold TX idle-high so the first start bit is clean. Pre-kernel
+        // init: the one place a millisecond busy-wait is legitimate.
+        delay_us(clock, 10'000);
     }
 
     // ---- ISR bodies ---------------------------------------------------------

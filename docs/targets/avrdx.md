@@ -60,25 +60,41 @@ if it regresses: "'concept' only available with '-std=c++20'".
 - Do NOT add `-mrelax`: PyAvrOCD refuses ELF files built with it
   (distorted line-number info).
 
-## Clock and timebase
+## Clock, delay and timebase
 
-The bench board has a **24 MHz crystal on PA0/PA1** (XOSCHF, a
-DB-only feature; PA0/PA1 are therefore not GPIO). `avrdx/clock.hpp`
-offers two entry points, one of which every app calls first thing in
-`main()`:
+The main clock is a TYPE, `brio::Clock<source, source_hz, div>`
+(`avrdx/clock.hpp`), and `Clock::hz` is the one truth every driver of
+this target derives its divisors from: `Uart::init(clock, baud)`,
+`Twi::init(clock)`, `Spi::init(clock)`, `delay_us(clock, us)` all take
+the app's clock tag. Sources: `internal` (OSCHF at 1/2/3/4/8/12/16/20/
+24 MHz), `crystal` (XOSCHF on PA0/PA1, DB only), `external` (EXTCLK on
+PA0); `div` is the main prescaler. `Clock::init()` - first line of
+`main()` - brings CLK_PER up and returns true when running from the
+requested source, false when an external source failed and OSCHF runs
+at the SAME rate (which is why an external rate must be one OSCHF can
+produce: `hz` stays true either way). `is_static` is true: no runtime
+clock changes yet.
 
-- `init_clocks()` - generic DA/DB probing init: OSCHF 24 MHz baseline,
-  then probes DB crystal on PA0/PA1, EXTCLK on PA0, a 32k crystal on
-  PF0/PF1 (with OSCHF autotune); returns a `ClockInitCode`. For boards
-  whose clock fixture is unknown.
-- `init_clock_24mhz()` - deterministic DB path: start the crystal
-  (SELHF_XTAL, FRQRANGE 24M, CSUTHF 4k), switch CLK_PER, fall back to
-  the internal OSCHF @ 24 MHz. Returns true when running from the
-  crystal. Does not touch XOSC32K.
+`F_CPU` is still defined by the build (board `f_cpu`, needed by
+avr-libc's `util/delay.h`), and Clock `static_assert`s it equal to
+`hz`: a clock the board file does not expect stops the build with a
+message instead of running the UART at the wrong baud. brio code never
+reads `F_CPU`. The bench board: **24 MHz crystal on PA0/PA1** (PA0/PA1
+therefore not GPIO), `Clock<ClockSource::crystal, 24'000'000>`.
+
+`brio::delay_us(clock, us)` (`avrdx/delay.hpp`) busy-waits AT LEAST
+`us` microseconds: a folded `__builtin_avr_delay_cycles` when `us` is
+a compile-time constant (what `_delay_us` did, minus F_CPU), a 4-cycle
+`_delay_loop_2` loop otherwise (`delay_us_runtime(cycles_per_us, us)`
+for drivers holding a runtime setup time, e.g. `Spi`'s cs_setup_us).
+For hardware setup times in drivers and pre-kernel init only:
+anything measured in milliseconds inside an AO is a time event.
+`_delay_us`/`_delay_ms` are not used anywhere in brio or the apps.
 
 There is NO 32.768 kHz crystal on the bench board: `Ticker::init()`
-picks the RTC clock automatically (XOSC32K only if the clock init
-reports it running, internal OSC32K otherwise). Do not enable XOSC32K
+picks the RTC clock automatically (XOSC32K if MCLKSTATUS reports a
+running 32k crystal, internal OSC32K otherwise; `Clock` never touches
+XOSC32K). Do not enable XOSC32K
 (PF0/PF1) unless a 32k crystal is fitted.
 
 `brio::Ticker` = `BasicTicker<1024>`: RTC/PIT timebase at 1024 Hz

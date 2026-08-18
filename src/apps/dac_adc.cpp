@@ -59,6 +59,12 @@
 
 using P = brio::AvrPlatform;
 
+// The clock: the ONE truth about CLK_PER for every driver of this
+// target (avrdx/clock.hpp). 24 MHz crystal on PA0/PA1, OSCHF fallback at
+// the same rate; `clock` is an empty tag passed to driver inits.
+using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+constexpr SysClock clock;
+
 namespace {
 
 using Serial = brio::Uart<2, brio::Route::alt1>;
@@ -315,10 +321,10 @@ ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect)    { brio::Ticker::pit(); }
 
 int main() {
-    brio::init_clock_24mhz();
-    Serial::init(460800);
-    TwiHw::init();
-    SpiHw::init();
+    SysClock::init();
+    Serial::init(clock, 460800);
+    TwiHw::init(clock);
+    SpiHw::init(clock);
     brio::Ticker::init();
     sei();
 

@@ -58,7 +58,7 @@
  * ISR(RTC_PIT_vect) { brio::Ticker::pit(); }   // ISR body: update counters
  *
  * int main() {
- *     brio::init_clock_24mhz();                // or init_clocks()
+ *     SysClock::init();                        // brio::Clock<...>, avrdx/clock.hpp
  *     brio::Ticker::init();                    // RTC clock select + PIT config
  *     sei();
  *     uint32_t t0 = brio::Ticker::millis();

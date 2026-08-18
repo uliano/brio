@@ -137,15 +137,11 @@ gets its dated home in `docs/design/` when taken.
   Clock as a type (compile-time `hz` truth first, runtime rebase
   fan-out only on demand); per-family device tables and per-board
   claim files on the second target. Nothing of this is a HAL.
-- **Clock type + delay_us (next framework job on AVR).** avrdx/clock.hpp
-  becomes `Clock<source, prescaler>` (parameters, not a frequency list)
-  with constexpr `hz`, `is_static`; `F_CPU` derived from it or asserted
-  equal; every user of F_CPU (uart BAUD, twi baud, pwm comment) migrates
-  to `Clock::hz`; `brio::delay_us<Clock>(us)` (ceil, cycle loop via
-  __builtin_avr_delay_cycles when static, MHz-integer loop when
-  dynamic) replaces `_delay_us`/`_delay_ms` (Uart::init's 10 ms idle
-  becomes a delay_us or a first-Entry time event). Runtime clock change
-  = synchronous rebase fan-out, later, on demand.
+- **Clock: dynamic regime (later, on demand).** `Clock` is static
+  today (`is_static`); a runtime-changing clock is a sibling type with
+  a synchronous rebase fan-out (`Users::rebase(hz)`) coordinated with
+  the bus AOs, and `delay_us` reading a runtime rate. Not before an
+  application asks for it.
 - **Design rule for all AVR work: think the other targets first.**
   Before adding/changing anything in avrdx/, ask what shape it takes
   on Cortex-M0+ (rich clock tree, hardware cycle counters, per-pin
@@ -185,8 +181,9 @@ python tools/gen_apps.py      # after adding/removing src/apps/*.cpp
   flash; line breakpoints need `-fno-inline` (GCC 16 DWARF caveat) -
   hence the debug flags in platformio.ini. `monitor ioregister <name>`
   reads/writes peripheral registers.
-- The bench board: 24 MHz crystal on PA0/PA1 (not GPIO), no 32k
-  crystal (do not enable XOSC32K), serial on USART2 ALT1 PF4/PF5.
+- The bench board: 24 MHz crystal on PA0/PA1 (not GPIO) -
+  `Clock<ClockSource::crystal, 24'000'000>`, F_CPU asserted equal - no
+  32k crystal (do not enable XOSC32K), serial on USART2 ALT1 PF4/PF5.
 - Full detail and rationale: `docs/targets/avrdx.md`,
   `docs/targets/host.md`, `docs/bench.md`.
 
@@ -250,7 +247,10 @@ lib/brio/src/            the framework, four strata:
                            CommandRouter<Sink>
   avrdx/                 everything that knows avr/io.h (AVR DA/DB)
     platform_avr.hpp       AvrPlatform
-    clock.hpp              init_clocks() probing / init_clock_24mhz() DB path
+    clock.hpp              Clock<source, hz, div>: the main clock as a type,
+                           constexpr hz (F_CPU asserted equal), init()
+    delay.hpp              delay_us(clock, us) "at least": folded cycles when
+                           constant, 4-cycle loop otherwise; cycles_per_us
     pin.hpp                Pin<'A',5> compile-time GPIO + PinRef descriptor
     uart.hpp               Uart<n, Route, rx, tx> interrupt-driven transport
     spi.hpp                Spi<n> master engine (two-phase descriptor,

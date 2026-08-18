@@ -79,8 +79,9 @@ is always asynchronous on I2C: every request ends in a `TransferDone`.
 Bus speed travels per request (`I2cSpeed::standard_100k` /
 `fast_400k`), like clock and mode on SPI: a shared bus can carry a
 100 kHz sensor and a 400 kHz DAC, and MBAUD is rewritten at each
-start (one register, nothing per byte). MBAUD is solved at compile
-time from F_CPU with the spec's worst-case rise time for the mode;
+start (one register, nothing per byte). Both MBAUD values are solved
+at compile time from `Clock::hz` (`Twi::init(clock)`) with the spec's
+worst-case rise time for the mode;
 stiffer pull-ups make real edges faster, which only slows SCL a touch
 below nominal - the safe side.
 

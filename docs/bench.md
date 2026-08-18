@@ -73,7 +73,7 @@ linked by the LDF, no filter changes.
 | `spi_duo` | Two devices, one arbitrated bus: ILI9481 fill (960-byte rows @ 6 MHz) + XPT2046 touch polling (3-byte conversions @ 1.5 MHz) through the same SpiBus; touch steers the fill palette, per-request clock switching |
 | `spi_paint` | Touch painting on the ILI9481 through the arbitrated bus |
 | `dac_adc` | Two buses, one signal: MCP47CVB22 VOUT0 (I2C) into the MCP3550 (SPI) - a 9-step ramp, each step written and read back over I2C (write-then-read, repeated START) and measured by the ADC via two SPI requests (trigger, then read 200 ms later, busy-frame retry). ADC code = DAC code * 512 within a few LSB |
-| `mcp_diag` | MCP3550 behaviour probe, bit-banged on PB0/PA6/PA5, one experiment per console key, no kernel: t_conv, CS toggling, early clocks, MISO net, RDY trace |
+| `mcp_diag` | MCP3550 behaviour probe, bit-banged on PB0/PA6/PA5 with `delay_us`, one experiment per console key, no kernel: t_conv, CS toggling, early clocks, MISO net, RDY trace |
 | `i2c_scan` | I2C stack test: address sweep 0x08..0x77 every 2 s on TWI0 through I2cBus + the Twi<0> engine, ACKs printed as found (expected: 0x60) |
 | `traffic0` | The over-commented AO learning testbed: 4 buttons -> 4 RGB lamps, one AO per role, publish for button facts |
 | `traffic1` | The traffic light FSM: timed phases via one re-armed time event, a remembered pedestrian call |

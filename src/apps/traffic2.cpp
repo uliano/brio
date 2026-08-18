@@ -52,6 +52,12 @@
 // here; every kernel template below takes it as its first argument.
 using P = brio::AvrPlatform;
 
+// The clock: the ONE truth about CLK_PER for every driver of this
+// target (avrdx/clock.hpp). 24 MHz crystal on PA0/PA1, OSCHF fallback at
+// the same rate; `clock` is an empty tag passed to driver inits.
+using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+constexpr SysClock clock;
+
 // Anonymous namespace: everything in it is private to this file (the
 // C++ way of saying "static" for types too). Apps keep their AOs here.
 namespace {
@@ -423,8 +429,8 @@ ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect)    { brio::Ticker::pit(); }
 
 int main() {
-    brio::init_clock_24mhz();      // 24 MHz crystal (fallback: internal)
-    Serial::init(460800);
+    SysClock::init();      // 24 MHz crystal (fallback: internal)
+    Serial::init(clock, 460800);
     brio::Ticker::init();          // RTC/PIT timebase, before sei()
     sei();
 
