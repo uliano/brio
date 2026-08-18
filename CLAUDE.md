@@ -141,7 +141,12 @@ gets its dated home in `docs/design/` when taken.
   today (`is_static`); a runtime-changing clock is a sibling type with
   a synchronous rebase fan-out (`Users::rebase(hz)`) coordinated with
   the bus AOs, and `delay_us` reading a runtime rate. Not before an
-  application asks for it.
+  application asks for it. F_CPU guard inverts then: the dynamic type
+  static_asserts F_CPU is NOT defined; remove it with
+  `build_unflags = -DF_CPU` (by name - PlatformIO keeps it as the pair
+  ("F_CPU", "$BOARD_F_CPU"), the valued form does not match). Verified
+  2026-08-18: brio and the apps build clean without F_CPU; only
+  avr-libc's util/delay.h / setbaud.h would break, which is the point.
 - **Design rule for all AVR work: think the other targets first.**
   Before adding/changing anything in avrdx/, ask what shape it takes
   on Cortex-M0+ (rich clock tree, hardware cycle counters, per-pin

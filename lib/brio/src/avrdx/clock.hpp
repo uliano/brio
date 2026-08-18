@@ -40,6 +40,8 @@
  * clock the board file does not expect and the build stops with a
  * message, instead of an UART at the wrong baud. brio code itself never
  * reads F_CPU: it takes Clock (as a tag object) where it needs the rate.
+ * (A future dynamic clock inverts the guard: F_CPU must NOT be defined
+ * - build_unflags = -DF_CPU - so nothing can assume a fixed rate.)
  *
  * Usage:
  *   using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
