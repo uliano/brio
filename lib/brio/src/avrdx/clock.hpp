@@ -242,8 +242,9 @@ constexpr bool clock_follows() {
  * its rate; set<hz>() / set(hz) name the NEW RATE (the app speaks Hz -
  * the prescaler that produces it is this silicon's detail, resolved by
  * div_for; a rate no prescaler reaches is a compile error / a false),
- * fan it out to Users (each a type with `static void rebase(uint32_t
- * hz)`) in list order, synchronously, and THEN reprogram the main
+ * fan it out to Users (each a ClockUser: `static void rebase(uint32_t
+ * hz)`, checked by the concept where the list is written) in list
+ * order, synchronously, and THEN reprogram the main
  * prescaler - so a user can drain what it has in flight at the old rate
  * before adopting the new one. Call set() only when nothing that depends
  * on the rate is mid-transfer: a driver's rebase() may wait for its own
@@ -259,6 +260,15 @@ constexpr bool clock_follows() {
  *   SysClock::init();                 // Boot's init: 24 MHz
  *   SysClock::set<4'000'000>();       // Serial and Twi0 rebased, then 4 MHz
  */
+/// What a driver must offer to be listed among a DynamicClock's users:
+/// a static rebase(hz) that makes it follow the new peripheral clock
+/// (recompute divisors, first draining what it has in flight at the old
+/// rate if it must). Checked where the list is written.
+template <typename U>
+concept ClockUser = requires(uint32_t hz) {
+    { U::rebase(hz) } -> std::same_as<void>;
+};
+
 /// The main prescaler that turns source_hz into hz exactly, or div1
 /// with `ok` false when no prescaler does. Rates are what the app names;
 /// the divider is this silicon's detail.
@@ -276,7 +286,7 @@ constexpr DivFor div_for(uint32_t source_hz, uint32_t hz) {
     return {ClockDiv::div1, false};
 }
 
-template <typename Boot, typename... Users>
+template <typename Boot, ClockUser... Users>
 struct DynamicClock {
     static constexpr ClockSource source = Boot::source;
     static constexpr uint32_t source_hz = Boot::source_hz;

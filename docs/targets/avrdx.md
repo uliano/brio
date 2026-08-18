@@ -104,8 +104,9 @@ at the SAME rate (which is why an external rate must be one OSCHF can
 produce: `hz` stays true either way). `is_static` is true.
 
 The runtime regime is `brio::DynamicClock<Boot, Users...>`: `Boot` is a
-static `Clock<...>` naming the source, `set<hz>()` / `set(hz)` name the
-new RATE (Hz - the prescaler that produces it is the silicon's detail;
+static `Clock<...>` naming the source, `Users` types satisfying the
+`ClockUser` concept (`static void rebase(uint32_t hz)`, checked where
+the list is written); `set<hz>()` / `set(hz)` name the new RATE (Hz - the prescaler that produces it is the silicon's detail;
 an unreachable rate is a compile error / a false) and fan it out to
 every listed user (`Uart`, `Twi`, `Spi` expose `rebase(hz)`; `Uart`
 drains its TX at the old rate first) and THEN reprograms the main

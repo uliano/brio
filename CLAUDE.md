@@ -142,9 +142,11 @@ gets its dated home in `docs/design/` when taken.
   `DynamicClock<Boot, Users...>` (avrdx/clock.hpp): set<hz>()/set(hz)
   (the app speaks Hz, the prescaler is resolved by div_for) fan
   rebase(hz) out to the users, then switch; Uart/Twi/Spi have
-  rebase(); delay_us takes the runtime path; `clock_hz(clock)` reads
-  either kind; a driver init(clock)'d with a DynamicClock that does not
-  list it is a compile error (clock_follows). Coordination with bus AOs (switch only when idle) is
+  rebase(); the users list is constrained by the ClockUser concept
+  (has rebase) and a driver init(clock)'d with a DynamicClock that does
+  not list it is a compile error (clock_follows) - both directions
+  checked; delay_us takes the runtime path; `clock_hz(clock)` reads
+  either kind. Coordination with bus AOs (switch only when idle) is
   the caller's job - a power-manager AO with request/reply is the
   designed shape, not built. `clock_console` is the bench test
   (CLOCK 4M / 2M / 24M at 115200). F_CPU is not defined in this build
