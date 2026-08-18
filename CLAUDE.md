@@ -137,6 +137,20 @@ gets its dated home in `docs/design/` when taken.
   Clock as a type (compile-time `hz` truth first, runtime rebase
   fan-out only on demand); per-family device tables and per-board
   claim files on the second target. Nothing of this is a HAL.
+- **Clock type + delay_us (next framework job on AVR).** avrdx/clock.hpp
+  becomes `Clock<source, prescaler>` (parameters, not a frequency list)
+  with constexpr `hz`, `is_static`; `F_CPU` derived from it or asserted
+  equal; every user of F_CPU (uart BAUD, twi baud, pwm comment) migrates
+  to `Clock::hz`; `brio::delay_us<Clock>(us)` (ceil, cycle loop via
+  __builtin_avr_delay_cycles when static, MHz-integer loop when
+  dynamic) replaces `_delay_us`/`_delay_ms` (Uart::init's 10 ms idle
+  becomes a delay_us or a first-Entry time event). Runtime clock change
+  = synchronous rebase fan-out, later, on demand.
+- **Design rule for all AVR work: think the other targets first.**
+  Before adding/changing anything in avrdx/, ask what shape it takes
+  on Cortex-M0+ (rich clock tree, hardware cycle counters, per-pin
+  AF), RISC-V (mcycle, group remap): that decides what crosses the
+  concept boundary. Written in overview.md "Target strata".
 - **C++ modules: considered, not now.** The real prize would be macro
   isolation (`import brio.avrdx` would not leak `avr/io.h` macros
   above the target stratum - the layering rule made mechanical), not

@@ -115,6 +115,29 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   semantics, fold mechanics, never a queued event that would arrive
   late) coordinated with the bus AOs so nothing changes mid-transfer;
   the RTC-based tick does not move. The kernel never knows the clock.
+- **Clock and delay, concretely.** `Clock` is templated on the
+  PARAMETERS of the tree (source, multiplier, dividers), never on a
+  list of allowed frequencies: `hz` (one per clock domain where the
+  target has several) is constexpr ARITHMETIC on those parameters,
+  with `static_assert`s carrying the datasheet limits (VCO range, max
+  system clock, flash wait states) - the CubeMX-style calculation done
+  by the compiler, with errors instead of red boxes. The complexity of
+  a rich tree stays inside that target's `clock.hpp`. `Clock::is_static`
+  says whether `hz` is a compile-time constant or a runtime value.
+  `delay_us<Clock>(us)` ("at least us microseconds") is a per-target
+  driver of the short-wait role, for hardware setup times inside
+  drivers - never a substitute for time events: a cycle-calibrated loop
+  where the core is deterministic (AVR), a hardware counter (DWT
+  CYCCNT, SysTick, a free timer, mcycle) where pipelines, prefetch and
+  wait states make cycle counting a lottery. Same name and semantics,
+  no shared algorithm.
+- **Every addition to the AVR stratum is designed with the other
+  targets in mind.** Before a new avrdx/ type or a change to one, ask
+  what its shape would be on a Cortex-M0+ with a rich clock tree, on
+  a RISC-V core, on a chip with per-pin alternate functions instead of
+  per-timer routing: the answer decides what goes above the concept
+  boundary (little) and what stays in the target file (most). Nothing
+  written for AVR may make the second target harder than it already is.
 - **Board facts vs device facts.** Which timer reaches which port,
   which USART sits on which pins per route, are facts of the DEVICE
   (today tables inside `pwm.hpp`, `uart.hpp` - the seed of a per-family
