@@ -33,6 +33,14 @@
  * distinct machines. Trivial AOs may legally ignore transition() and
  * keep a plain switch inside one everlasting state.
  *
+ * Handlers dispatch on the Event variant with match(e, lambdas...)
+ * (defined below): subject first, then one lambda per alternative, a
+ * [](auto) catch-all for the rest - the Rust/ML shape, and the shape of
+ * the pattern matching proposed for C++ (P2688, not adopted for C++26:
+ * this is a four-line library stand-in, the code already reads right).
+ * Overloaded is the classic C++17 building block underneath, public for
+ * whoever prefers the bare std::visit idiom.
+ *
  * Pure kernel code: includes nothing of brio, no hardware, host-testable
  * (see test/test_fsm).
  */
@@ -40,9 +48,29 @@
 #pragma once
 
 #include <stdint.h>
+#include <utility>
 #include <variant>
 
 namespace brio {
+
+/// The classic visitor-from-lambdas helper: inherits every lambda and
+/// pulls all their operator() into one overload set, so std::visit picks
+/// the one whose parameter matches the alternative currently held.
+template <class... Ts>
+struct Overloaded : Ts... {
+    using Ts::operator()...;
+};
+
+/// match(variant, lambdas...): visit the variant with the lambda whose
+/// parameter type matches the active alternative. All lambdas must return
+/// the same type; a trailing [](auto) catches unlisted alternatives
+/// (variant dispatch is exhaustive - without it the code does not compile).
+/// Compiles to the same switch as the bare std::visit(Overloaded{...}, v).
+template <class Variant, class... Handlers>
+constexpr decltype(auto) match(Variant&& v, Handlers&&... hs) {
+    return std::visit(Overloaded{std::forward<Handlers>(hs)...},
+                      std::forward<Variant>(v));
+}
 
 struct Entry {};  ///< reserved event: delivered when a state is entered
 struct Exit {};   ///< reserved event: delivered when a state is left

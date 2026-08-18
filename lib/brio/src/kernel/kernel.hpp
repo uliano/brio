@@ -17,13 +17,17 @@
  * a sizing/design error; the per-queue overflow counters make it
  * visible. All AOs run on the single main stack, one at a time.
  *
+ * What an AO must provide to sit in the pack is the ActiveObject
+ * contract (kernel/active_object.hpp); what the machine must provide is
+ * the Platform contract (kernel/platform.hpp).
+ *
  * Host tests drive init_all()/step() directly (run() never returns).
  */
 
 #pragma once
 
+#include "kernel/active_object.hpp"
 #include "kernel/platform.hpp"
-#include "kernel/post.hpp"
 #include "kernel/time_event.hpp"
 
 namespace brio {

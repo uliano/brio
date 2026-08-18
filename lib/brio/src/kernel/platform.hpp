@@ -50,6 +50,12 @@ namespace brio {
 /// Panic breadcrumb: written by panic() BEFORE any reporter runs, read
 /// (and cleared) at the next boot via take_panic_record<P>(). Lives in
 /// platform-provided reset-surviving storage.
+///
+/// Defined HERE and not in kernel/panic.hpp on purpose: it is the one
+/// kernel data type a Platform must host, so the concept below has to
+/// name it, and panic.hpp (which owns the semantics: codes, magic,
+/// panic(), take_panic_record()) sits above the concept in the include
+/// graph. Layout only - the meaning of code/context is panic.hpp's.
 struct PanicRecord {
     uint16_t magic;    ///< panic_magic when the record is valid
     uint8_t code;      ///< PanicCode of the failure

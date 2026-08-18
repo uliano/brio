@@ -1,4 +1,4 @@
-// Host tests for kernel/kernel.hpp + kernel/post.hpp: priority order,
+// Host tests for kernel/kernel.hpp (+ active_object.hpp, post.hpp): priority order,
 // one-event-per-step, init ordering, idle gating, post/publish.
 // Run with: pio test -e native
 
@@ -17,7 +17,6 @@
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
 using brio::HostPlatform;
 
 std::vector<std::string> trace;
@@ -29,12 +28,12 @@ struct High : brio::Fsm<High, Hit, Note> {
     static inline brio::EventQueue<Event, 4, HostPlatform> queue;
     static void init() { trace.push_back("hi:init"); start(&only); }
     static Status only(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { trace.push_back("hi:entry"); return handled(); },
             [](Hit h)  { trace.push_back("hi:hit" + std::to_string(h.n)); return handled(); },
             [](Note n) { trace.push_back("hi:note" + std::to_string(n.n)); return handled(); },
-            [](auto)   { return unhandled(); },
-        }, e);
+            [](auto)   { return unhandled(); }
+        );
     }
 };
 
@@ -42,12 +41,12 @@ struct Low : brio::Fsm<Low, Hit, Note> {
     static inline brio::EventQueue<Event, 4, HostPlatform> queue;
     static void init() { trace.push_back("lo:init"); start(&only); }
     static Status only(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { trace.push_back("lo:entry"); return handled(); },
             [](Hit h)  { trace.push_back("lo:hit" + std::to_string(h.n)); return handled(); },
             [](Note n) { trace.push_back("lo:note" + std::to_string(n.n)); return handled(); },
-            [](auto)   { return unhandled(); },
-        }, e);
+            [](auto)   { return unhandled(); }
+        );
     }
 };
 
@@ -58,7 +57,7 @@ struct PingPong : brio::Fsm<PingPong, Hit> {
     static inline brio::EventQueue<Event, 4, HostPlatform> queue;
     static void init() { start(&only); }
     static Status only(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { return handled(); },
             [](Hit h) {
                 trace.push_back("pp:hit" + std::to_string(h.n));
@@ -67,8 +66,8 @@ struct PingPong : brio::Fsm<PingPong, Hit> {
                 }
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 };
 

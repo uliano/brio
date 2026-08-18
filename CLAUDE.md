@@ -525,11 +525,15 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
     fsm.hpp                Fsm<Derived, Alts...> HSM-ready flat state
                            machines: state = handler function, Entry/Exit
                            reserved variant alternatives, transition
-                           chaining, start() = initial entry
-    post.hpp               ActiveObject concept + post<Ao>(ev) (addressed,
-                           reserved events excluded) + publish(Subscribers
-                           <A,B...>{}, ev) fan-out + ReplyTo<Payload>
-                           request/reply return capsule
+                           chaining, start() = initial entry; match(e,
+                           lambdas...) + Overloaded for variant dispatch
+    active_object.hpp      the ActiveObject concept: what Kernel requires
+                           of every AO in its pack (Event, queue, init,
+                           dispatch) + the informal half of the contract
+    post.hpp               post<Ao>(ev) (addressed, reserved events
+                           excluded) + publish(Subscribers<A,B...>{}, ev)
+                           fan-out + ReplyTo<Payload> request/reply
+                           return capsule
     time_event.hpp         TimeEvent<P, Ao, Ev> posts payload to its AO on
                            expiry; intrusive armed list, drift-free
                            periodics, wrap-safe deadlines, RAII disarm;

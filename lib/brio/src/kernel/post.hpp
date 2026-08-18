@@ -14,26 +14,20 @@
  * post() is safe from ISRs and from any main-loop code alike (the queue
  * push runs in a critical section) and never blocks: a full queue drops
  * the event and increments the queue's saturating overflow counter.
+ *
+ * What a receiver must look like is the ActiveObject contract
+ * (kernel/active_object.hpp); post() itself needs only the two facts it
+ * uses - Ao::Event exists and Ao::queue accepts it - so it requires
+ * exactly those and nothing more.
  */
 
 #pragma once
 
 #include <concepts>
-#include <optional>
 
 #include "kernel/fsm.hpp"
 
 namespace brio {
-
-/// What the kernel requires of an active object (see kernel.hpp for the
-/// full lifecycle): its event type, a queue, init() and dispatch().
-template <typename A>
-concept ActiveObject = requires(const typename A::Event& e) {
-    A::init();
-    A::dispatch(e);
-    { A::queue.pop() } -> std::same_as<std::optional<typename A::Event>>;
-    { A::queue.empty() } -> std::same_as<bool>;
-};
 
 /// Post one event (any alternative of Ao::Event) to one active object.
 template <typename Ao, typename Ev>
