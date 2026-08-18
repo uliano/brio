@@ -1,39 +1,40 @@
-// traffic1 - the traffic light itself: a multi-state FSM with timed
-// phases and a pedestrian call that is REMEMBERED and served later.
-// Read traffic0 first: the plumbing (Buttons, Lamp, the AO contract,
-// match on the event variant, publish) is explained there and not repeated here.
-// Comments in this file focus on what is NEW:
-//   - a state machine with a real cycle: transition() between states,
-//     each state's action in its Entry, one time event re-armed with a
-//     different delay by every phase;
-//   - an event handled by "taking note": ButtonPressed arrives while a
-//     green is running; the state does not react visibly, it sets a
-//     flag that a later state will consume - the request outlives the
-//     dispatch that received it;
-//   - Exit doing real work: the flashing walk phase arms a periodic
-//     blink timer on Entry and DISARMS it on Exit, so no other state
-//     ever sees a stray blink;
-//   - one AO driving four lamps: the AO owns the outputs, the states
-//     paint them.
+// traffic2 - traffic1 with PWM lamps: yellow that is really yellow.
+// Read traffic0 and traffic1 first; the state machine here is traffic1's
+// UNCHANGED (same states, same events, same transitions). What is NEW:
+//   - avrdx/pwm.hpp: TcaPwm<n, port> drives a TCA timer in split mode
+//     as six 8-bit PWM channels on pins 0..5 of one port. Two timers,
+//     twelve channels, four RGB lamps: TCA1 -> PORTB (LED1, LED2),
+//     TCA0 -> PORTC (LED3, LED4);
+//   - Lamp is now three PWM channels and a colour TABLE (an Rgb triple
+//     per Colour) instead of three on/off pins - the mixed colours get
+//     the per-channel levels they need (a green LED is far brighter than
+//     the red one; "yellow" wants a lot less green than red). Tune the
+//     table on the bench, nothing else moves;
+//   - the AOs do not know: they still call LampN::show(Colour). The
+//     actuator changed underneath, the logic did not - the whole point
+//     of keeping "what to show" and "how to show it" apart.
 //
-// Behaviour: N-S green (LED1) 5 s -> yellow 1.5 s -> all red 1 s ->
-// E-W green (LED2) 5 s -> yellow -> all red -> ... Pedestrian lamps
-// (LED3 = N-S crossing, LED4 = E-W crossing) show red. Button 0 or 1
-// = pedestrian call: at the next all-red the walk phase is inserted:
-// both crossings green 5 s, then green FLASHING 3 s, then red, then
-// the vehicle cycle resumes where it was. Calls during a walk phase
-// are ignored (already being served); a call is served once.
-// Every transition is traced on the console with the uptime.
+// Behaviour as traffic1: N-S green (LED1) 5 s -> yellow 1.5 s -> all
+// red 1 s -> E-W green (LED2) 5 s -> yellow -> all red -> ...
+// Pedestrian lamps (LED3 = N-S crossing, LED4 = E-W crossing) show
+// red; button 0 or 1 = pedestrian call served at the next all-red
+// (walk 5 s, flashing walk 3 s). Every transition is traced on the
+// console with the uptime.
 //
-// Wiring as traffic0: LED1 PB0/1/2, LED2 PB3/4/5, LED3 PC0/1/2, LED4
-// PC3/4/5 (common cathode), buttons PA2..PA5 to GND.
+// Wiring (rewired for the PWM step; traffic0/traffic1 follow it too):
+//   LED1 R/G/B  PB0/PB1/PB2   TCA1 WO0-2
+//   LED2 R/G/B  PB3/PB4/PB5   TCA1 WO3-5
+//   LED3 R/G/B  PC0/PC1/PC2   TCA0 WO0-2
+//   LED4 R/G/B  PC3/PC4/PC5   TCA0 WO3-5
+//   buttons 0..3 PA2..PA5 to GND (internal pull-ups; PA0/PA1 = crystal)
+// LEDs common cathode with series resistors.
 
 #include <avr/interrupt.h>
 #include <stdint.h>
 #include <variant>
 
 #include "avrdx/clock.hpp"
-#include "avrdx/pin.hpp"
+#include "avrdx/pwm.hpp"
 #include "avrdx/platform_avr.hpp"
 #include "avrdx/ticker.hpp"
 #include "avrdx/uart.hpp"
@@ -60,33 +61,53 @@ namespace {
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
-// ---- an RGB lamp: three pins, one colour ------------------------------------
-// Not an AO: a plain static actuator. It has no state and no events, it
-// just turns three pins into a colour. AOs call it from their handlers.
+// ---- an RGB lamp: three PWM channels, one colour --------------------------
+// Not an AO: a plain static actuator, exactly as in traffic1 - only the
+// "how" changed. A colour is now a triple of 8-bit levels, looked up in
+// a table; show() writes three duties. The AOs above call show(Colour)
+// exactly as before.
 enum class Colour : uint8_t { off, red, green, blue, yellow, white };
 
-template <typename R, typename G, typename B>     // three brio::Pin<> types
+struct Rgb { uint8_t r, g, b; };
+
+// The palette. Levels are per-channel brightness (0 = off, 255 = full)
+// and are the ONLY thing to tune on the bench: green and blue dies are
+// much more efficient than red at equal current, so a balanced yellow
+// takes far less green than red, and white takes less green/blue too.
+// Starting values, to be judged by eye.
+constexpr Rgb palette[] = {
+    /* off    */ {0, 0, 0},
+    /* red    */ {255, 0, 0},
+    /* green  */ {0, 255, 0},
+    /* blue   */ {0, 0, 255},
+    /* yellow */ {255, 40, 0},
+    /* white  */ {255, 90, 60},
+};
+
+// Pwm is a TcaPwm<n, port> type; r/g/b are its channel numbers (0..5 =
+// pins 0..5 of that port). duty<ch>() is a compile-time channel: three
+// stores per show(), no lookup of the register at run time.
+template <typename Pwm, uint8_t r_ch, uint8_t g_ch, uint8_t b_ch>
 struct Lamp {
-    static void init() {
-        R::clear(); G::clear(); B::clear();       // colours off (common cathode)
-        R::output(); G::output(); B::output();
-    }
+    static void init() {}                    // the timer is initialized once, below
     static void show(Colour c) {
-        const bool r = (c == Colour::red || c == Colour::yellow || c == Colour::white);
-        const bool g = (c == Colour::green || c == Colour::yellow || c == Colour::white);
-        const bool b = (c == Colour::blue || c == Colour::white);
-        if (r) R::set(); else R::clear();
-        if (g) G::set(); else G::clear();
-        if (b) B::set(); else B::clear();
+        const Rgb& v = palette[static_cast<uint8_t>(c)];
+        Pwm::template duty<r_ch>(v.r);
+        Pwm::template duty<g_ch>(v.g);
+        Pwm::template duty<b_ch>(v.b);
     }
 };
 
-// Pin<'A', 2> is a compile-time pin: port letter and number are template
-// arguments, set()/clear() compile to single-instruction VPORT accesses.
-using Lamp1 = Lamp<brio::Pin<'B', 0>, brio::Pin<'B', 1>, brio::Pin<'B', 2>>;
-using Lamp2 = Lamp<brio::Pin<'B', 3>, brio::Pin<'B', 4>, brio::Pin<'B', 5>>;
-using Lamp3 = Lamp<brio::Pin<'C', 0>, brio::Pin<'C', 1>, brio::Pin<'C', 2>>;
-using Lamp4 = Lamp<brio::Pin<'C', 3>, brio::Pin<'C', 4>, brio::Pin<'C', 5>>;
+// Two timers, six channels each. TcaPwm<1, 'B'> = TCA1 routed to PORTB
+// (PB0..PB5), TcaPwm<0, 'C'> = TCA0 routed to PORTC (PC0..PC5). Which
+// timer reaches which port is a fact of the chip; an impossible route
+// is a compile error inside pwm.hpp.
+using PwmB = brio::TcaPwm<1, 'B'>;
+using PwmC = brio::TcaPwm<0, 'C'>;
+using Lamp1 = Lamp<PwmB, 0, 1, 2>;
+using Lamp2 = Lamp<PwmB, 3, 4, 5>;
+using Lamp3 = Lamp<PwmC, 0, 1, 2>;
+using Lamp4 = Lamp<PwmC, 3, 4, 5>;
 
 // ---- the shared fact: somebody pressed a button ----------------------------
 // EVENTS ARE PLAIN STRUCTS. This one is the lingua franca between the
@@ -231,6 +252,7 @@ struct Intersection : brio::Fsm<Intersection, ButtonPressed, PhaseOver, Blink> {
     static inline bool next_is_ns = true;
 
     static void init() {
+        PwmB::init(); PwmC::init();               // both timers: split mode, all dark
         Lamp1::init(); Lamp2::init(); Lamp3::init(); Lamp4::init();
         start(&all_red);         // the initial state: safe by construction
     }
@@ -412,7 +434,7 @@ int main() {
     brio::Ticker::init();          // RTC/PIT timebase, before sei()
     sei();
 
-    brio::print(serial, brio::crlf, "traffic1: the light, with pedestrian call", brio::crlf);
+    brio::print(serial, brio::crlf, "traffic2: the light, with pedestrian call", brio::crlf);
 
     brio::Kernel<P, Intersection, Buttons>::run();
 }

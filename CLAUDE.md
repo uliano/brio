@@ -232,6 +232,8 @@ lib/brio/src/            the framework, four strata:
     spi.hpp                Spi<n> master engine (two-phase descriptor,
                            per-byte ISR pump, CS owned by the engine)
     twi.hpp                Twi<n, Route> I2C master engine
+    pwm.hpp                TcaPwm<n, port>: TCA split mode = six 8-bit PWM
+                           channels on pins 0..5 (duty<ch>(v), 0/255 clean)
     ticker.hpp             BasicTicker<tps> RTC/PIT timebase (Ticker = 1024)
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)

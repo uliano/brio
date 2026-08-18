@@ -13,9 +13,11 @@
 //
 // Wiring (common-cathode RGB: a colour is ON with the pin HIGH; buttons
 // to GND with the internal pull-up: pressed = LOW):
-//   LED1 R/G/B = PA2/PA3/PA4      LED3 R/G/B = PC0/PC1/PC2
-//   LED2 R/G/B = PA5/PA6/PA7      LED4 R/G/B = PC3/PC4/PC5
-//   buttons 0..3 = PB0..PB3
+//   LED1 R/G/B = PB0/PB1/PB2      LED3 R/G/B = PC0/PC1/PC2
+//   LED2 R/G/B = PB3/PB4/PB5      LED4 R/G/B = PC3/PC4/PC5
+//   buttons 0..3 = PA2..PA5
+// (the lamps sit on the TCA0/TCA1 waveform pins so that a later step
+// can dim them with PWM without rewiring)
 // Console @ 460800 on USART2 ALT1 (PF4/PF5). Crystal on PA0/PA1.
 //
 // THE MODEL IN ONE PARAGRAPH. An active object (AO) is a class with an
@@ -84,8 +86,8 @@ struct Lamp {
 
 // Pin<'A', 2> is a compile-time pin: port letter and number are template
 // arguments, set()/clear() compile to single-instruction VPORT accesses.
-using Lamp1 = Lamp<brio::Pin<'A', 2>, brio::Pin<'A', 3>, brio::Pin<'A', 4>>;
-using Lamp2 = Lamp<brio::Pin<'A', 5>, brio::Pin<'A', 6>, brio::Pin<'A', 7>>;
+using Lamp1 = Lamp<brio::Pin<'B', 0>, brio::Pin<'B', 1>, brio::Pin<'B', 2>>;
+using Lamp2 = Lamp<brio::Pin<'B', 3>, brio::Pin<'B', 4>, brio::Pin<'B', 5>>;
 using Lamp3 = Lamp<brio::Pin<'C', 0>, brio::Pin<'C', 1>, brio::Pin<'C', 2>>;
 using Lamp4 = Lamp<brio::Pin<'C', 3>, brio::Pin<'C', 4>, brio::Pin<'C', 5>>;
 
@@ -134,13 +136,11 @@ struct Buttons : brio::Fsm<Buttons, Tick> {
     // what this AO owns, then start(&initial_state): arm the machine
     // and deliver its first Entry - synchronously, right here.
     static void init() {
-        for (uint8_t i = 0; i < count; ++i) {
-            PORTB.DIRCLR = static_cast<uint8_t>(1u << i);   // inputs
-        }
-        PORTB.PIN0CTRL = PORT_PULLUPEN_bm;                  // pull-ups: idle high
-        PORTB.PIN1CTRL = PORT_PULLUPEN_bm;
-        PORTB.PIN2CTRL = PORT_PULLUPEN_bm;
-        PORTB.PIN3CTRL = PORT_PULLUPEN_bm;
+        PORTA.DIRCLR = 0x3C;                                // PA2..PA5 inputs
+        PORTA.PIN2CTRL = PORT_PULLUPEN_bm;                  // pull-ups: idle high
+        PORTA.PIN3CTRL = PORT_PULLUPEN_bm;
+        PORTA.PIN4CTRL = PORT_PULLUPEN_bm;
+        PORTA.PIN5CTRL = PORT_PULLUPEN_bm;
         start(&sampling);
     }
 
@@ -167,8 +167,8 @@ struct Buttons : brio::Fsm<Buttons, Tick> {
             // Tick: the sampler expired and posted this; we are now
             // inside Buttons' own dispatch, main context, no ISR rules.
             [](Tick) {
-                // VPORTB.IN read once; buttons are active-low, invert.
-                const uint8_t raw = static_cast<uint8_t>(~VPORTB.IN & 0x0F);  // 1 = pressed
+                // VPORTA.IN read once; buttons on PA2..PA5, active-low.
+                const uint8_t raw = static_cast<uint8_t>((~VPORTA.IN >> 2) & 0x0F);  // 1 = pressed
                 for (uint8_t i = 0; i < count; ++i) {
                     const bool now = raw & (1u << i);
                     if (now == pressed[i]) {

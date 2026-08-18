@@ -36,7 +36,9 @@ bench runs on the 3.3 V rail.
 | TWI0 SDA / SCL | PA2 / PA3 | 1.5k pull-ups to 3.3 V |
 | MCP47CVB22 | I2C 0x60 | A0 and LAT/HVC to GND (LAT transparent); VOUT0 -> MCP3550 input |
 | LED (blink apps) | PF2 | PF2 -> ~330 ohm -> LED -> GND |
-| Traffic bench | see traffic0.cpp | 4 RGB LEDs + 4 buttons |
+| Traffic bench: LED1 R/G/B, LED2 R/G/B | PB0/1/2, PB3/4/5 | common cathode, TCA1 WO0-5 (PWM from traffic2) |
+| Traffic bench: LED3 R/G/B, LED4 R/G/B | PC0/1/2, PC3/4/5 | common cathode, TCA0 WO0-5 |
+| Traffic bench: buttons 0..3 | PA2..PA5 | to GND, internal pull-ups |
 
 Display: 3.5" red module **HST035003-A**, controller **ILI9481**
 (320x480, SPI = 18-bit pixels only, panel needs INVON), XPT2046
@@ -75,3 +77,4 @@ linked by the LDF, no filter changes.
 | `i2c_scan` | I2C stack test: address sweep 0x08..0x77 every 2 s on TWI0 through I2cBus + the Twi<0> engine, ACKs printed as found (expected: 0x60) |
 | `traffic0` | The over-commented AO learning testbed: 4 buttons -> 4 RGB lamps, one AO per role, publish for button facts |
 | `traffic1` | The traffic light FSM: timed phases via one re-armed time event, a remembered pedestrian call |
+| `traffic2` | traffic1 with PWM lamps (TcaPwm split mode, colour palette): the actuator changes, the AOs do not |
