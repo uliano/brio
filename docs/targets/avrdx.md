@@ -41,7 +41,9 @@ if it regresses: "'concept' only available with '-std=c++20'".
 ## Board and build
 
 - `boards/AVR128DB48.json`: custom bare-metal board (128K flash / 16K
-  RAM, `F_CPU=24000000`).
+  RAM). Its `f_cpu` field is PlatformIO's manifest entry only: the
+  `-DF_CPU` it would produce is unflagged (see below), the clock rate is
+  `brio::Clock<...>::hz`.
 - `platformio.ini`: `platform =` the felias-fogg fork of
   atmelmegaavr (a plain mirror of upstream today, where PyAvrOCD's
   integration will land); toolchain via `symlink://`; Atmel-ICE
@@ -88,7 +90,9 @@ fails to compile at its `init(clock)` (`clock_follows<Clock, Driver>()`)
 - forgetting a user cannot leave it silently at the old rate. Not while a bus transaction is in flight (ask
 the bus AOs); RX bytes during the switch may be garbled. `Uart::
 can_baud(hz, baud)` tells whether a rate can still hit a baud (BAUD >=
-64, i.e. CLK_PER >= 16 x baud). Bench test: the `clock_console` app.
+64, i.e. CLK_PER >= 16 x baud). Bench-verified with the `clock_console`
+app: 24 -> 12 -> 2 MHz under the running console at 115200, 1 MHz
+refused as expected.
 
 `F_CPU` is NOT defined in this project: `platformio.ini` unflags the
 `-DF_CPU` PlatformIO would pass from the board manifest (by name -
