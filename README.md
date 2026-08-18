@@ -104,7 +104,9 @@ and generic code chooses with `if constexpr` or a concept.
 The repo is a PlatformIO project: the framework in `lib/brio/` (a
 private library, auto-linked), one `main()` per `src/apps/<app>.cpp`
 turned into a pair of envs (`<app>` release, `<app>-debug`) by
-`tools/gen_apps.py`, and host unit tests in `test/`.
+`tools/gen_apps.py` (an app may pin env options such as its console
+baud with `// pio: monitor_speed = 115200` header lines), and host unit
+tests in `test/`.
 
 ```bash
 pio test -e native            # host tests: kernel, queues, FSM, time events, buses, ring...

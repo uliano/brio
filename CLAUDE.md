@@ -203,7 +203,8 @@ python tools/gen_apps.py      # after adding/removing src/apps/*.cpp (or a "// p
 platformio.ini          base [env], toolchain, Atmel-ICE upload, debug wiring
 apps.ini                generated: [env:<app>] + [env:<app>-debug] per app
 boards/AVR128DB48.json   custom bare-metal board (128K flash / 16K RAM)
-tools/gen_apps.py        scans src/apps/*.cpp -> apps.ini
+tools/gen_apps.py        scans src/apps/*.cpp -> apps.ini; copies each app's
+                         "// pio: <option> = <value>" header lines into its envs
 tools/pio_flags.py       per-language AVR flags (build-type aware) +
                          IntelliSense include paths (skips [env:native])
 tools/gen_lst.py         post-build: firmware.lst (disassembly) + firmware.map

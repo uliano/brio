@@ -48,6 +48,13 @@ if it regresses: "'concept' only available with '-std=c++20'".
   atmelmegaavr (a plain mirror of upstream today, where PyAvrOCD's
   integration will land); toolchain via `symlink://`; Atmel-ICE
   upload; `debug_tool = custom` wiring (below).
+- `tools/gen_apps.py`: scans `src/apps/*.cpp` into `apps.ini`, two envs
+  per app (`<app>` release, `<app>-debug`). Any `// pio: <option> =
+  <value>` line in an app's header comment is copied verbatim into both
+  of its envs - a generic per-app override for any `[env:]` option
+  (`monitor_speed = 115200`, `monitor_filters = ...`, `build_flags =
+  -DFOO`, ...), one line per option, no validation beyond PlatformIO's
+  own. Rerun after adding/removing an app or such a line.
 - `tools/pio_flags.py`: per-language AVR flags, build-type aware:
   `-Os -g` only on release builds, `-std=gnu++23`, IntelliSense
   include paths (skips `[env:native]`).
