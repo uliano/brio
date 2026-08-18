@@ -59,9 +59,12 @@ SCK at CS fall (mode 1,1 = SCK high, DS20001950F 5.5); CS low >= 8 us
 
 One `src/apps/<app>.cpp` = one `main()` = two envs (`<app>`,
 `<app>-debug`), generated into `apps.ini` by `python tools/gen_apps.py`
-(VS Code task "PIO: regen apps", then reload the project). Shared code
-goes into `lib/brio/src/`; any header an app includes is compiled and
-linked by the LDF, no filter changes.
+(VS Code task "PIO: regen apps", then reload the project). An app may
+carry `// pio: <option> = <value>` lines in its header comment
+(e.g. `// pio: monitor_speed = 115200`): gen_apps.py copies them into
+both of its envs, so app-specific facts stay next to the app. Shared
+code goes into `lib/brio/src/`; any header an app includes is compiled
+and linked by the LDF, no filter changes.
 
 | App | What it does |
 |-----|--------------|

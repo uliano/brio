@@ -172,7 +172,7 @@ pio test -e native            # host tests (doctest); no hardware needed
 pio run -e <app>              # release build (-Os)
 pio run -e <app> -t upload    # flash via Atmel-ICE (UPDI)
 pio debug -e <app>-debug      # ALWAYS debug the -debug env
-python tools/gen_apps.py      # after adding/removing src/apps/*.cpp
+python tools/gen_apps.py      # after adding/removing src/apps/*.cpp (or a "// pio: opt = value" line)
 ```
 
 - Toolchain: self-built avr-gcc 16.2 at `/sw/avr` via `symlink://`;

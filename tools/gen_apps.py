@@ -40,14 +40,34 @@ lines = [
     "; ==========================================================================",
     "",
 ]
+# Per-app env overrides: an app may carry lines like
+#     // pio: monitor_speed = 115200
+# in its header comment; each becomes an option of BOTH its envs. Keeps
+# app-specific facts (a different console baud) next to the app.
+import re
+PIO_LINE = re.compile(r"^//\s*pio:\s*([A-Za-z_]+)\s*=\s*(.+?)\s*$")
+
+def overrides(app):
+    path = os.path.join(APPS_DIR, app + ".cpp")
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            m = PIO_LINE.match(line)
+            if m:
+                out.append("%s = %s" % (m.group(1), m.group(2)))
+    return out
+
 for app in apps:
+    extra = overrides(app)
     lines += [
         "[env:%s]" % app,
         "build_src_filter = ${common.base_src_filter} +<src/apps/%s.cpp>" % app,
+    ] + extra + [
         "",
         "[env:%s-debug]" % app,
         "build_src_filter = ${common.base_src_filter} +<src/apps/%s.cpp>" % app,
         "build_type = debug",
+    ] + extra + [
         "",
     ]
 
