@@ -1,7 +1,7 @@
 # The shared SPI bus
 
 The first multi-client bus in brio, and the proving ground for the
-"bus AO" pattern that TWI/I2C will repeat. Decisions of 2026-08-13.
+"bus AO" pattern that I2C repeats.
 
 ## The stack
 
@@ -21,11 +21,9 @@ Layering: `SpiBus` is `util/` (pure, host-testable against a fake Bus);
 `Spi<n>` is `avrdx/` (knows the silicon). The app's ISR binds the
 vector, as always.
 
-Since 2026-08-17 `SpiBus` is an alias of `BusMaster<Bus, P>`
-(`util/bus_master.hpp`), the arbiter generalized when I2C arrived as
-the second bus - see [i2c-bus.md](i2c-bus.md). Everything below about
-arbitration reads unchanged; "SpiDone"/"spi_ok" are the SPI names of
-`BusDone`/`bus_ok`.
+`SpiBus` is an alias of `BusMaster<Bus, P>` (`util/bus_master.hpp`),
+the arbiter shared with I2C - see [i2c-bus.md](i2c-bus.md).
+"SpiDone"/"spi_ok" are the SPI names of `BusDone`/`bus_ok`.
 
 ## Why the event queue alone cannot arbitrate
 
@@ -95,7 +93,7 @@ A device demanding CS-per-word framing would be the one legitimate
 engine extension in this area; noted, not built (no such device on the
 bench - generalize on the second specimen).
 
-## Per-transaction clock and mode (2026-08-13, evening)
+## Per-transaction clock and mode
 
 On a SHARED bus every device names its own speed and mode: the
 descriptor carries `SpiClock clock` and `uint8_t mode` (defaults
@@ -107,7 +105,7 @@ the bench already disagreed (a display comfortable at 6 MHz, a touch
 controller capped below 2.5 MHz), and a global init-time clock was a
 latent bug for every multi-device configuration.
 
-## Two completion styles (2026-08-13, late)
+## Two completion styles
 
 `Bus::start(req)` returns bool: FALSE = the transfer runs on the SPI
 interrupt and a `TransferDone` will arrive later; TRUE = it completed
@@ -140,7 +138,7 @@ flight. Both styles interleave freely on one bus. A zero-total-length
 request completes on the spot, wire untouched - the reply still
 arrives (no silent hang).
 
-## Two silicon facts the engine now honours (2026-08-17)
+## Two silicon facts the engine honours
 
 Found with the MCP3550 on the analyzer, both general:
 

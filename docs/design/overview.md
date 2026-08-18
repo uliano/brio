@@ -3,9 +3,9 @@
 `brio` (from "con brio", the musical marking - deliberately not tied to
 any silicon) is a modern-C++ bare-metal framework growing on the
 AVR128DB48 testbed, aiming to cover at least the AVR DA/DB families and
-to stay portable beyond them. Since 2026-08-13 it is evolving into a
-QP/QV-style active-object kernel, written clean-room (concepts from
-Samek's book, never the QP source).
+to stay portable beyond them. Its core is a QP/QV-style active-object
+kernel, written clean-room (concepts from Samek's book, never the QP
+source).
 
 ## Governing rule
 
@@ -15,7 +15,7 @@ overcome by rewriting the architecture of what sits below, the rewrite
 wins. Every stage of work requires critical analysis at ALL levels of
 the stack, not just the layer being added.
 
-## Design pillars (2026-07-21, still standing)
+## Design pillars
 
 - **Everything resolves at compile time.** Peripheral drivers are
   static (monostate) class templates (`Uart<2, Route::alt1>`,
@@ -41,7 +41,7 @@ the stack, not just the layer being added.
   "not present on this device" errors, `std::to_underlying` for enum
   codes.
 
-## Generalization rule (2026-08-13)
+## Generalization rule
 
 Today it is AVR Dx, tomorrow it could be anything else (candidate
 targets: STM32G0x0/x1, ATSAMC/D, CH32V00x). No `#ifdef` where a
@@ -51,7 +51,7 @@ concept or in drivers. The kernel must never know which silicon it
 runs on. Family differences inside AVR (DA vs DB, package sizes) are
 handled with device-macro guards so the same headers build everywhere.
 
-## Layering: four strata (2026-08-13)
+## Layering: four strata
 
 Directories under `lib/brio/src/`; includes always carry the stratum
 prefix (`#include "avrdx/uart.hpp"`) so an app's portability is
@@ -71,25 +71,23 @@ rule, multi-library would add ceremony without enforcement. Shared
 pure types produced by a target and consumed by util live in `util/`
 (e.g. `util/timestamp.hpp`).
 
-## Style rulings (2026-08-13)
+## Style rulings
 
 - No `Ao` suffix on active-object class names: in an AO framework
   every service is an active object, so the suffix is noise - name
   the class for WHAT it is (`SpiBus`, `SerialPort`, `Blinker`). The
   term stays where it is information: the `ActiveObject` concept and
-  the prose. (Ruled when the suffix had already spread; renamed
-  everywhere the same day.)
+  the prose.
 - Private members: trailing underscore (`head_`), not `m_`.
-- Queues speak push/pop (Ring followed on 2026-08-16).
+- Queues speak push/pop.
 - No `*_from_isr` API doubling: one always-safe operation, revisit
-  only with measurements (Ring's twins fell on 2026-08-16, see
-  [ring.md](ring.md)).
+  only with measurements (see [ring.md](ring.md)).
 - No redundant `inline` on in-class definitions.
 - `std::optional` returns instead of bool + out-parameter.
 - Header comments explain the concurrency model and the WHY of each
   tradeoff - that comment IS the API documentation.
 
-## ISR binding pattern (2026-08-13)
+## ISR binding pattern
 
 Drivers expose the handler BODY (`rxc()`, `dre()`, `pit()`, `isr()`);
 the app binds the vector (`ISR(USART2_RXC_vect) { Serial::rxc(); }`).

@@ -1,7 +1,6 @@
 # The serial stack
 
-Bytes below, line events above, ownership by reference. Decisions of
-2026-08-13.
+Bytes below, line events above, ownership by reference.
 
 ## Uart driver (`avrdx/uart.hpp`)
 
@@ -10,10 +9,8 @@ transport: SPSC rings on both sides ([ring.md](ring.md)), ISR bodies
 (`rxc()`, `dre()`) bound by the app, RXDATAH error counters (named
 statics, inspectable from gdb). Ring defaults 64/256: 8-bit indices on
 both sides, hence lock-free on AVR - neither the ISRs nor `write_byte`
-mask interrupts (2026-08-16; before that every main-side ring op paid
-an SREG save/cli/restore). The driver
-moves bytes and nothing else; `brio::print` formats on top of any
-ByteSink.
+mask interrupts. The driver moves bytes and nothing else; `brio::print`
+formats on top of any ByteSink.
 
 `rxc()` returns the RX ring's empty -> non-empty EDGE: the app ISR
 glue posts one `RxActivity` event on true. No event flood, no lost
@@ -40,10 +37,10 @@ entry and two buffers are exactly sufficient.
 TX stays the blocking push print: the drain side is an ISR (it
 preempts the loop, so the spin always progresses - a stall, not a
 deadlock), worst case ~2 ms at 460800, zero when the ring has room.
-Measured cost of write_byte: ~45-50 cycles/byte with the old guarded
-ring, under 10% of the 21.7 us wire time per byte; the lock-free ring
-of 2026-08-16 shortens the hot path from 20 to 13 instructions (no
-SREG save/cli/restore) - re-measure when convenient.
+Measured cost of write_byte: ~45-50 cycles/byte with a guarded ring,
+under 10% of the 21.7 us wire time per byte; the lock-free ring
+shortens the hot path from 20 to 13 instructions (no SREG
+save/cli/restore) - re-measure when convenient.
 
 Full-queue semantics cost nothing on the non-full path (the check
 exists anyway), so the policy is pure failure semantics, chosen per

@@ -1,8 +1,6 @@
 # Ring: the SPSC FIFO
 
-`util/ring.hpp` - `Ring<T, size, P>`. Decision of 2026-08-16, born
-from a critical re-read of the inherited AVR-Multislope ring while
-studying the generated code of the uart path.
+`util/ring.hpp` - `Ring<T, size, P>`.
 
 ## What it is for
 
@@ -13,23 +11,22 @@ semantics of the kernel `EventQueue`. It is a general tool, not a
 driver detail: whoever needs a two-party FIFO names the platform and
 uses it, in `avrdx/`, in `util/`, in an app, in a host test.
 
-## The finding that triggered the rewrite
+## Why no interrupt masking
 
-The old `avrdx/ring.hpp` wrapped every main-side operation in
-`ATOMIC_BLOCK` and offered `*_from_isr` twins for the ISR side. But an
+The tempting implementation wraps every main-side operation in
+`ATOMIC_BLOCK` and offers `*_from_isr` twins for the ISR side. But an
 SPSC ring with single-byte indices needs no interrupt masking at all
 on AVR: the producer only writes `head_`, the consumer only writes
 `tail_`, each reads the other's index with one atomic `lds`, and a
 stale read errs on the safe side (the producer underestimates room,
-the consumer underestimates data). The masking was pure cost - a few
-cycles per byte on the print path and, worse, added interrupt latency
-on every `write_byte` - and the API doubling it justified was noise.
-The docs of 2026-08-13 already described Ring as "SPSC, no cli":
-the code did not match the description.
+the consumer underestimates data). The masking would be pure cost - a
+few cycles per byte on the print path and, worse, added interrupt
+latency on every `write_byte` - and the API doubling it justifies is
+noise.
 
 ## The decision: the platform states the atomic width, Ring picks the path
 
-Two candidates were rejected before the final one:
+Two candidates were rejected:
 
 - `static_assert(size <= 256)` and drop the guard entirely - simplest,
   but a hard limit chosen for a case that does not exist today, on a
@@ -43,7 +40,7 @@ service, and the Platform concept gains one constant, `atomic_width`,
 uninterruptible access, in bytes" (1 on AVR Dx, 4 on the 32-bit
 candidates, 4 on the host). Ring derives its index type from `size`
 (`uint8_t` up to 256 slots, `uint16_t` up to 65536, `uint32_t`
-above - the old 16-bit ceiling was an AVR habit, RAM is the only real
+above - a 16-bit ceiling would be an AVR habit, RAM is the only real
 limit) and then decides, with `if constexpr`:
 
 - `sizeof(index_t) <= P::atomic_width` -> **lock-free**: indices are
@@ -52,8 +49,8 @@ limit) and then decides, with `if constexpr`:
   targets) plus a volatile read of the other side's index (never
   hoisted out of a drain loop);
 - otherwise -> **guarded**: every operation runs inside
-  `P::CriticalSection`, exactly the old behaviour, now selected by a
-  fact of the target instead of by hand.
+  `P::CriticalSection`, selected by a fact of the target instead of
+  by hand.
 
 So `Ring<uint8_t, 1024, AvrPlatform>` silently takes the guard and
 `Ring<uint8_t, 1024, SomeArmPlatform>` is lock-free, with the same
@@ -98,7 +95,7 @@ rejection, the 65536-slot ring using all 65535 slots, and a simulated
 producer/consumer interleaving over a small ring are all covered
 without hardware - the point of moving Ring to `util/`.
 
-## Measured on the uart (spi_paint, -Os, avr-gcc 16.2)
+## Measured on the uart driver (-Os, avr-gcc 16.2)
 
 `write_blocking` (print's byte path): 20 -> 13 instructions, no
 SREG save / cli / restore; RXC ISR 41 -> 39, DRE ISR 37 -> 36; flash

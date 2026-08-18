@@ -1,7 +1,7 @@
 # The I2C bus
 
 The second bus in brio, and the specimen that turned the SPI arbiter
-into a generic one. Decisions of 2026-08-17.
+into a generic one.
 
 ## BusMaster: the arbiter generalized
 

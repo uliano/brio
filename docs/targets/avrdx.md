@@ -1,0 +1,220 @@
+# Target: AVR DA/DB (`avrdx/`)
+
+The stratum `lib/brio/src/avrdx/` is everything in brio that knows
+`avr/io.h`: clock init, `Pin`, `Uart`, `Spi`, `Twi`, `BasicTicker`,
+and `AvrPlatform` (the kernel's `Platform` concept implemented with
+AVR intrinsics). Family differences inside DA/DB are handled with
+device-macro guards (`CLKCTRL_XOSCHFCTRLA` exists only on DB;
+`PORTB`/`PORTE`/`PORTG` depend on the package), so the same headers
+build for both. This page is the operational side: toolchain, board,
+probe, debugger, and their quirks. The design side (why the ticker
+is declaredly AVR, the ISR binding pattern, ...) is in
+[../design/](../design/).
+
+Bench MCU: **AVR128DB48** (48-pin, 128 KB flash, 16 KB SRAM),
+programmed and debugged with an **Atmel-ICE** over UPDI. Board wiring
+and external chips: [../bench.md](../bench.md).
+
+## Toolchain
+
+Self-built **avr-gcc 16.2** + avr-libc + avr-gdb 17.2 + avrdude 8.1
+(built by `/sw/src/build-avr.sh`), used in place via `symlink://`:
+
+    /sw/avr        (symlink to /sw/avr-16.2)
+
+A minimal `package.json` manifest inside the folder makes it usable as
+a PlatformIO `symlink://` package; the build script's finalize stage
+regenerates it on every rebuild (without it PlatformIO fails with
+`MissingPackageManifestError`). PlatformIO's bundled toolchain-atmelavr
+and avrdude 7.1 are NOT used: too old for AVR Dx.
+
+The toolchain ships the freestanding libstdc++ (type_traits, concepts,
+bit, span, optional, expected, variant - no chrono/charconv/iostream);
+brio uses it instead of hand-rolled traits.
+
+**`-std` gotcha.** The platform's `_bare.py` appends `-std=gnu++11`
+AFTER the flags added by `extra_scripts` `pre:` scripts, which would
+override the `-std=gnu++23` from `tools/pio_flags.py` (last `-std`
+wins). This is why `build_unflags` also lists `-std=gnu++11`. Symptom
+if it regresses: "'concept' only available with '-std=c++20'".
+
+## Board and build
+
+- `boards/AVR128DB48.json`: custom bare-metal board (128K flash / 16K
+  RAM, `F_CPU=24000000`).
+- `platformio.ini`: `platform =` the felias-fogg fork of
+  atmelmegaavr (a plain mirror of upstream today, where PyAvrOCD's
+  integration will land); toolchain via `symlink://`; Atmel-ICE
+  upload; `debug_tool = custom` wiring (below).
+- `tools/pio_flags.py`: per-language AVR flags, build-type aware:
+  `-Os -g` only on release builds, `-std=gnu++23`, IntelliSense
+  include paths (skips `[env:native]`).
+- `tools/gen_lst.py`: post-build source-interleaved disassembly
+  `firmware.lst` + `firmware.map` in `.pio/build/<env>/`.
+- Release and debug flags are fully separated: `debug_build_flags =
+  -Og -g3 -ggdb3 -fno-inline` applies only to `build_type = debug`,
+  i.e. the generated `[env:<app>-debug]` envs. The one global
+  concession is `build_unflags = -flto -fuse-linker-plugin`: LTO makes
+  the DWARF problem below worse and buys nothing at this firmware
+  size (and yields an unreadable `.lst`).
+- Do NOT add `-mrelax`: PyAvrOCD refuses ELF files built with it
+  (distorted line-number info).
+
+## Clock and timebase
+
+The bench board has a **24 MHz crystal on PA0/PA1** (XOSCHF, a
+DB-only feature; PA0/PA1 are therefore not GPIO). `avrdx/clock.hpp`
+offers two entry points, one of which every app calls first thing in
+`main()`:
+
+- `init_clocks()` - generic DA/DB probing init: OSCHF 24 MHz baseline,
+  then probes DB crystal on PA0/PA1, EXTCLK on PA0, a 32k crystal on
+  PF0/PF1 (with OSCHF autotune); returns a `ClockInitCode`. For boards
+  whose clock fixture is unknown.
+- `init_clock_24mhz()` - deterministic DB path: start the crystal
+  (SELHF_XTAL, FRQRANGE 24M, CSUTHF 4k), switch CLK_PER, fall back to
+  the internal OSCHF @ 24 MHz. Returns true when running from the
+  crystal. Does not touch XOSC32K.
+
+There is NO 32.768 kHz crystal on the bench board: `Ticker::init()`
+picks the RTC clock automatically (XOSC32K only if the clock init
+reports it running, internal OSC32K otherwise). Do not enable XOSC32K
+(PF0/PF1) unless a 32k crystal is fitted.
+
+`brio::Ticker` = `BasicTicker<1024>`: RTC/PIT timebase at 1024 Hz
+(the PIT's power-of-two dividers - a truth of this silicon, which is
+why the kernel tick rate is a platform constant), alive in IDLE
+sleep, monostate, wired by the app as:
+
+    ISR(RTC_PIT_vect) { brio::Ticker::pit(); }
+    ...
+    brio::Ticker::init();   // after clock init, before sei()
+
+ISR vector bindings always live in the app (or a future board file),
+never in portable code: drivers expose `[[gnu::always_inline]]`
+handler bodies (`rxc()`, `dre()`, `pit()`), the app binds the vector.
+
+## Upload (Atmel-ICE, UPDI)
+
+`pio run -e <app> -t upload` drives avrdude 8.1 through the Atmel-ICE.
+
+- Plug the cable into the Atmel-ICE **AVR** port, NOT the SAM port.
+  The SAM port fails silently: avrdude still sees the ICE on USB, but
+  `Vtarget` reads ~1.71 V (parasitic) and the UPDI sign-on returns
+  `0xa0` / "initialization failed".
+- Programming header: standard 6-pin AVR-ISP (2x3, 2.54 mm). UPDI uses
+  three pins: **pin 2 = VCC, pin 5 = UPDI, pin 6 = GND** (1/3/4 unused).
+- Flash endurance on UPDI parts is 1000 cycles: uploads and (avoided,
+  see below) software breakpoints come out of the same budget.
+
+## Debugging (PyAvrOCD + Atmel-ICE)
+
+Debug sessions use [PyAvrOCD](https://pyavrocd.io) as GDB server with
+the toolchain's avr-gdb 17.2. Always debug the `<app>-debug` env
+(the plain env is the pure `-Os` release build): from the IDE (Run and
+Debug with the `<app>-debug` project env selected) or with
+`pio debug -e <app>-debug`.
+
+### One-time host setup
+
+```bash
+# The GDB server (lands in ~/.local/bin/pyavrocd). Installed as a uv tool on
+# a uv-managed CPython pinned to 3.12, so it survives distro Python bumps.
+# Without --python-preference only-managed, uv would silently bind the venv
+# to the DISTRO python if a matching one exists.
+uv tool install --python-preference only-managed --python 3.12 pyavrocd
+# (equivalent, distro-python-bound alternative: pipx install pyavrocd)
+
+# udev rules for the EDBG probes (Atmel-ICE, PICkit 4, Snap, ...),
+# then unplug/replug the probe:
+wget https://pyavrocd.io/99-edbg-debuggers.rules
+sudo cp 99-edbg-debuggers.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+```
+
+### Wiring in platformio.ini
+
+The atmelmegaavr fork does not integrate PyAvrOCD natively yet, so it
+is wired as a custom debug tool:
+
+```ini
+debug_tool = custom
+debug_port = :40044
+debug_server =
+    /home/<user>/.local/bin/pyavrocd
+    --breakpoints hardware   ; hardware breakpoints only (see below)
+    -s nop                   ; no GUI
+    -p 40044                 ; GDB server port
+    -m all                   ; let PyAvrOCD manage the relevant fuses
+    -d avr128db48            ; MCU (pyavrocd -d '?' lists them)
+    -i updi
+    -t atmelice              ; only needed with several probes attached
+    -F 24000000              ; F_CPU in Hz
+    -P 2000                  ; UPDI programming clock in kHz
+```
+
+(one argument per line in the real file) plus the `debug_init_cmds`
+block in `platformio.ini`. Once the fork gains native support this
+collapses to `debug_tool = pyavrocd`.
+
+### Breakpoints: effectively ONE free breakpoint
+
+The UPDI OCD has **2 hardware breakpoints**; single-stepping is native
+(costs neither a breakpoint nor flash). GDB borrows one slot for its
+temporary breakpoints (`tbreak main` opening every session, `next`
+over a call, `finish`, run-to-line). Practical rule: **one breakpoint
+in code + one slot free for GDB**; two in code only while stepping
+with `step`/`stepi` or `continue`.
+
+Extra breakpoints would normally become SOFTWARE breakpoints, i.e.
+flash rewrites. The server therefore runs with `--breakpoints
+hardware`: a breakpoint that does not fit is refused ("Cannot insert
+breakpoint" at the next continue - delete one and go on) instead of
+silently wearing flash. Session escape hatch: `monitor breakpoints
+all`; `monitor breakpoints` shows the mode.
+
+### Making line breakpoints bind (GCC 16.x DWARF caveat)
+
+GCC 16.x (verified 16.1 and 16.2) emits a DWARF5 line table with a
+duplicate file entry for the main source and file switches around
+inlined code; avr-gdb 17.2 and host gdb 15.1 then silently drop part
+of it: at any -O level above 0, file:line breakpoints fail with "No
+compiled code for line N" while function breakpoints work. Fixed by
+two `platformio.ini` lines:
+
+```ini
+build_unflags     = -flto -fuse-linker-plugin
+debug_build_flags = -Og -g3 -ggdb3 -fno-inline
+```
+
+`-fno-inline` removes the mid-function file switches (always_inline
+code such as `_delay_ms` stays inlined and keeps its timing); dropping
+LTO removes the DWARF partitioning that makes it worse. Residual: a
+line whose ONLY content is a call into an always_inline system-header
+function (a bare `_delay_ms(500);`) still cannot take a line
+breakpoint - break on a neighbouring line. Re-test after any
+avr-gcc/avr-gdb rebuild; candidate for an upstream bug report
+(minimal repro: any -O1 build of a blink program).
+
+### Peripheral registers (SVD and monitor commands)
+
+Microchip ships no SVD for AVR; PyAvrOCD generates them from the
+ATDFs. `svd/avr128db48.svd` is committed and wired with
+`debug_svd_path = svd/avr128db48.svd`, which enables the PERIPHERALS
+panel in VS Code (values read while stopped; the panel refresh can be
+flaky - CLion renders the same SVD better). The server side is always
+reliable from the Debug Console:
+
+```
+monitor info
+monitor reset
+monitor ioregister PORTA.OUT          # read, with bitfield breakdown
+monitor ioregister PORTA.OUT 0x20     # write
+monitor ioregister PORTA.*            # whole peripheral
+info registers                        # CPU: r0-r31, SREG, SP, PC
+p/x PORTA                             # via avr/io.h macros (needs -g3)
+```
+
+With the probe-rs VS Code extension enabled, every stop/continue spams
+"unknown custom event" in the Debug Console (it eavesdrops on
+PlatformIO's DAP events). Harmless; disable probe-rs per-workspace.
