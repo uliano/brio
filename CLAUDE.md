@@ -141,7 +141,8 @@ gets its dated home in `docs/design/` when taken.
   `DynamicClock<Boot, Users...>` (avrdx/clock.hpp): set(div) fans
   rebase(hz) out to the users, then switches; Uart/Twi/Spi have
   rebase(); delay_us takes the runtime path; `clock_hz(clock)` reads
-  either kind. Coordination with bus AOs (switch only when idle) is
+  either kind; a driver init(clock)'d with a DynamicClock that does not
+  list it is a compile error (clock_follows). Coordination with bus AOs (switch only when idle) is
   the caller's job - a power-manager AO with request/reply is the
   designed shape, not built. `clock_console` app is the bench test:
   CLOCK <div> at 115200 must keep the console alive and the LED at

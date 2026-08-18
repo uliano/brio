@@ -64,6 +64,7 @@
 
 #include <stdint.h>
 #include <avr/io.h>
+#include <concepts>
 
 namespace brio {
 
@@ -223,6 +224,18 @@ constexpr uint32_t clock_hz(C) {
     }
 }
 
+/// For a clocked driver's init(clock): true when the clock is static
+/// (nothing to follow) or when the dynamic clock lists Driver among the
+/// users it rebases. static_assert(clock_follows<Clock, Driver>()).
+template <typename C, typename Driver>
+constexpr bool clock_follows() {
+    if constexpr (C::is_static) {
+        return true;
+    } else {
+        return C::template rebases<Driver>;
+    }
+}
+
 /**
  * The runtime regime. Boot is a static Clock<...> naming the source and
  * its rate; set(div) fans the new rate out to Users (each a type with
@@ -256,6 +269,12 @@ struct DynamicClock {
 
     static uint32_t hz() { return hz_; }
     static ClockDiv div() { return div_; }
+
+    /// Is U one of the users that set() rebases? Drivers assert this in
+    /// init(clock): a clocked driver forgotten in the list would keep
+    /// running at the old rate in silence - a compile error instead.
+    template <typename U>
+    static constexpr bool rebases = (std::same_as<U, Users> || ...);
 
     /// Boot configuration, then Boot::hz. See Clock::init for the return.
     static bool init() {

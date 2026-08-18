@@ -178,6 +178,10 @@ public:
      */
     template <typename Clock>
     static void init(Clock clock, uint32_t baud) {
+        static_assert(clock_follows<Clock, Uart>(),
+                      "this Uart is initialized with a DynamicClock that does not "
+                      "list it among its Users: it would keep the old baud after "
+                      "a clock change");
         setup_pins();
 
         m_baud = baud;

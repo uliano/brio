@@ -93,6 +93,9 @@ public:
      */
     template <typename Clock>
     static void init(Clock clock) {
+        static_assert(clock_follows<Clock, Twi>(),
+                      "this Twi is initialized with a DynamicClock that does not "
+                      "list it among its Users: MBAUD would go stale on a clock change");
         // Both MBAUD values fold at compile time for a static clock; the
         // per-request choice is a 1-of-2 lookup, no arithmetic on the fly.
         rebase(clock_hz(clock));

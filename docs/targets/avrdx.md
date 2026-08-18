@@ -80,7 +80,10 @@ to every listed user (`Uart`, `Twi`, `Spi` expose `rebase(hz)`; `Uart`
 drains its TX at the old rate first) and THEN reprograms the main
 prescaler; `hz()` is a value, `is_static` false, `clock_hz(clock)`
 reads either kind. `delay_us` takes the runtime path. The RTC/PIT
-timebase does not move. Not while a bus transaction is in flight (ask
+timebase does not move. The subscription is explicit and checked: a
+clocked driver initialized with a DynamicClock that does not list it
+fails to compile at its `init(clock)` (`clock_follows<Clock, Driver>()`)
+- forgetting a user cannot leave it silently at the old rate. Not while a bus transaction is in flight (ask
 the bus AOs); RX bytes during the switch may be garbled. `Uart::
 can_baud(hz, baud)` tells whether a rate can still hit a baud (BAUD >=
 64, i.e. CLK_PER >= 16 x baud). Bench test: the `clock_console` app.

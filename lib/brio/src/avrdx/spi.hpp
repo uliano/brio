@@ -116,6 +116,10 @@ public:
      */
     template <typename Clock>
     static void init(Clock clock) {
+        static_assert(clock_follows<Clock, Spi>(),
+                      "this Spi is initialized with a DynamicClock that does not "
+                      "list it among its Users: cs_setup timing would go stale on a "
+                      "clock change");
         rebase(clock_hz(clock));
         if constexpr (spi_num == 0) {
             PORTA.DIRSET = PIN4_bm | PIN6_bm;  // MOSI, SCK
