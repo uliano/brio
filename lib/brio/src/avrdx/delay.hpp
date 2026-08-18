@@ -13,7 +13,8 @@
  * the CPU may sleep. Only pre-kernel init code (before Kernel::run) may
  * legitimately wait milliseconds here.
  *
- * Two paths, one call:
+ * Two paths, one call (static clocks; a DynamicClock always takes the
+ * runtime path from its current rate):
  *  - `us` known at compile time (the common case): the cycle count is
  *    folded and __builtin_avr_delay_cycles emits the tightest loop -
  *    exactly what avr-libc's _delay_us does, minus F_CPU;
@@ -35,6 +36,8 @@
 
 #include <stdint.h>
 #include <util/delay_basic.h>
+
+#include "avrdx/clock.hpp"
 
 namespace brio {
 
@@ -60,17 +63,21 @@ inline void delay_us_runtime(uint8_t cpu, uint32_t us) {
 
 /// Busy-wait at least `us` microseconds at Clock's rate.
 template <typename Clock>
-[[gnu::always_inline]] inline void delay_us(Clock, uint32_t us) {
-    static_assert(Clock::is_static, "delay_us for dynamic clocks is not implemented yet");
-    if (__builtin_constant_p(us)) {
-        // Folded after inlining: the builtin demands a constant, and the
-        // constant_p guard keeps the runtime path for anything else (and
-        // for -O0, where nothing folds).
-        const uint32_t cycles = static_cast<uint32_t>(
-            (static_cast<uint64_t>(us) * Clock::hz + 999'999u) / 1'000'000u);
-        __builtin_avr_delay_cycles(cycles);
+[[gnu::always_inline]] inline void delay_us(Clock clock, uint32_t us) {
+    if constexpr (Clock::is_static) {
+        if (__builtin_constant_p(us)) {
+            // Folded after inlining: the builtin demands a constant, and
+            // the constant_p guard keeps the runtime path for anything
+            // else (and for -O0, where nothing folds).
+            const uint32_t cycles = static_cast<uint32_t>(
+                (static_cast<uint64_t>(us) * Clock::hz + 999'999u) / 1'000'000u);
+            __builtin_avr_delay_cycles(cycles);
+        } else {
+            delay_us_runtime(cycles_per_us(Clock::hz), us);
+        }
     } else {
-        delay_us_runtime(cycles_per_us(Clock::hz), us);
+        // Dynamic clock: the rate is a value, so is the loop count.
+        delay_us_runtime(cycles_per_us(clock_hz(clock)), us);
     }
 }
 

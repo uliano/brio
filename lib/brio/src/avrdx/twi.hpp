@@ -50,6 +50,7 @@
 #include <avr/io.h>
 #include <stdint.h>
 
+#include "avrdx/clock.hpp"
 #include "kernel/post.hpp"
 #include "util/i2c_bus.hpp"
 
@@ -91,15 +92,22 @@ public:
      * drives them open-drain by itself.
      */
     template <typename Clock>
-    static void init(Clock) {
-        // Both MBAUD values fold at compile time from Clock::hz; the
+    static void init(Clock clock) {
+        // Both MBAUD values fold at compile time for a static clock; the
         // per-request choice is a 1-of-2 lookup, no arithmetic on the fly.
-        baud_[0] = baud_for<Clock::hz>(I2cSpeed::standard_100k);
-        baud_[1] = baud_for<Clock::hz>(I2cSpeed::fast_400k);
+        rebase(clock_hz(clock));
         route_pins();
         regs().MCTRLA = TWI_RIEN_bm | TWI_WIEN_bm | TWI_ENABLE_bm;
         regs().MBAUD = baud_[0];
         regs().MSTATUS = TWI_BUSSTATE_IDLE_gc;   // the bus is ours to declare idle
+    }
+
+    /// The peripheral clock changed (DynamicClock fan-out): recompute
+    /// both MBAUD values. Not while a transaction is in flight - ask the
+    /// bus AO first.
+    static void rebase(uint32_t hz) {
+        baud_[0] = baud_for(hz, I2cSpeed::standard_100k);
+        baud_[1] = baud_for(hz, I2cSpeed::fast_400k);
     }
 
     /// Begin a transaction (called by the bus AO from main context).
@@ -197,8 +205,7 @@ private:
     /// BAUD with the spec's worst-case rise time for the mode; real
     /// edges with stiff pull-ups are faster, which only slows SCL a
     /// touch below nominal - the safe side.
-    template <uint32_t clk_hz>
-    static constexpr uint8_t baud_for(I2cSpeed s) {
+    static constexpr uint8_t baud_for(uint32_t clk_hz, I2cSpeed s) {
         const uint32_t f_scl = (s == I2cSpeed::fast_400k) ? 400000u : 100000u;
         const uint32_t t_rise_ns = (s == I2cSpeed::fast_400k) ? 300u : 1000u;
         const uint32_t rise_term = (clk_hz / 1000000u) * t_rise_ns / 2000u;

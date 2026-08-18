@@ -137,12 +137,15 @@ gets its dated home in `docs/design/` when taken.
   Clock as a type (compile-time `hz` truth first, runtime rebase
   fan-out only on demand); per-family device tables and per-board
   claim files on the second target. Nothing of this is a HAL.
-- **Clock: dynamic regime (later, on demand).** `Clock` is static
-  today (`is_static`); a runtime-changing clock is a sibling type with
-  a synchronous rebase fan-out (`Users::rebase(hz)`) coordinated with
-  the bus AOs, and `delay_us` reading a runtime rate. Not before an
-  application asks for it. F_CPU is already gone from the build (see
-  below), so nothing has to change on that side.
+- **Clock: dynamic regime - built, bench test pending.**
+  `DynamicClock<Boot, Users...>` (avrdx/clock.hpp): set(div) fans
+  rebase(hz) out to the users, then switches; Uart/Twi/Spi have
+  rebase(); delay_us takes the runtime path; `clock_hz(clock)` reads
+  either kind. Coordination with bus AOs (switch only when idle) is
+  the caller's job - a power-manager AO with request/reply is the
+  designed shape, not built. `clock_console` app is the bench test:
+  CLOCK <div> at 115200 must keep the console alive and the LED at
+  1 Hz. F_CPU is not defined in this build (see below).
 - **Design rule for all AVR work: think the other targets first.**
   Before adding/changing anything in avrdx/, ask what shape it takes
   on Cortex-M0+ (rich clock tree, hardware cycle counters, per-pin
@@ -252,7 +255,9 @@ lib/brio/src/            the framework, four strata:
   avrdx/                 everything that knows avr/io.h (AVR DA/DB)
     platform_avr.hpp       AvrPlatform
     clock.hpp              Clock<source, hz, div>: the main clock as a type,
-                           constexpr hz (the ONE rate truth: no F_CPU), init()
+                           constexpr hz (the ONE rate truth: no F_CPU), init();
+                           DynamicClock<Boot, Users...>: set(div) rebases
+                           the users then switches; clock_hz(clock)
     delay.hpp              delay_us(clock, us) "at least": folded cycles when
                            constant, 4-cycle loop otherwise; cycles_per_us
     pin.hpp                Pin<'A',5> compile-time GPIO + PinRef descriptor

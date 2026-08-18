@@ -79,6 +79,12 @@ class Uart {
     static inline volatile uint8_t m_frame_errors = 0;  // FERR: byte dropped
     static inline volatile uint8_t m_parity_errors = 0; // PERR: byte dropped
     static inline volatile uint8_t m_hw_overruns = 0;   // BUFOVF: bytes lost in HW
+    static inline uint32_t m_baud = 0;                   // for rebase()
+
+    /// Normal-speed BAUD register: 64 * f / (16 * baud) = 4 f / baud, rounded.
+    static constexpr uint16_t baud_reg(uint32_t hz, uint32_t baud) {
+        return static_cast<uint16_t>((hz * 4UL + baud / 2UL) / baud);
+    }
 
     /// The USART register block for this instance (compile-time selection).
     static volatile USART_t &regs() {
@@ -174,7 +180,8 @@ public:
     static void init(Clock clock, uint32_t baud) {
         setup_pins();
 
-        regs().BAUD = static_cast<uint16_t>((Clock::hz * 4UL + baud / 2UL) / baud);
+        m_baud = baud;
+        regs().BAUD = baud_reg(clock_hz(clock), baud);
         regs().CTRLC = USART_CMODE_ASYNCHRONOUS_gc | USART_PMODE_DISABLED_gc |
                        USART_SBMODE_1BIT_gc | USART_CHSIZE_8BIT_gc;  // 8N1
         regs().CTRLA = USART_RXCIE_bm;
@@ -183,6 +190,42 @@ public:
         // Hold TX idle-high so the first start bit is clean. Pre-kernel
         // init: the one place a millisecond busy-wait is legitimate.
         delay_us(clock, 10'000);
+    }
+
+    /**
+     * @brief The peripheral clock changed (DynamicClock fan-out): keep
+     * the same baud rate at the new rate.
+     *
+     * Waits for the TX side to go idle first (ring drained by the DRE
+     * ISR, shifter empty: TXCIF), so nothing already queued is sent at
+     * a half-changed rate; a byte being RECEIVED during the switch may
+     * be garbled - the caller picks a quiet moment. Main context only.
+     */
+    static void rebase(uint32_t hz) {
+        // Called BEFORE the clock actually changes (DynamicClock::set
+        // fans out first, then switches), so the drain below runs at the
+        // rate the bytes were queued for.
+        while (!m_tx.empty()) {          // the DRE ISR keeps draining
+        }
+        while ((regs().STATUS & USART_DREIF_bm) == 0) {   // last byte in the shifter
+        }
+        // One frame time (10 bits) at the CURRENT rate, recovered from the
+        // BAUD register, lets the shifter finish. TXCIF is not used: it is
+        // stale-set by any earlier idle period and cannot tell "done" from
+        // "still shifting the last one".
+        const uint32_t old_hz = static_cast<uint32_t>(regs().BAUD) * m_baud / 4u;
+        delay_us_runtime(cycles_per_us(old_hz), 10'000'000u / m_baud + 1u);
+        regs().BAUD = baud_reg(hz, m_baud);
+    }
+
+    /// The minimum usable rate for a baud: BAUD must be >= 64 (16 * baud
+    /// per the normal-speed formula). rebase() to a slower clock than
+    /// this leaves the USART unable to hit the baud - check before.
+    static constexpr uint32_t min_hz_for(uint32_t baud) { return baud * 16u; }
+
+    /// True if the USART can produce `baud` at `hz` (BAUD >= 64).
+    static constexpr bool can_baud(uint32_t hz, uint32_t baud) {
+        return baud_reg(hz, baud) >= 64u;
     }
 
     // ---- ISR bodies ---------------------------------------------------------

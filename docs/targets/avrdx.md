@@ -72,8 +72,18 @@ PA0); `div` is the main prescaler. `Clock::init()` - first line of
 `main()` - brings CLK_PER up and returns true when running from the
 requested source, false when an external source failed and OSCHF runs
 at the SAME rate (which is why an external rate must be one OSCHF can
-produce: `hz` stays true either way). `is_static` is true: no runtime
-clock changes yet.
+produce: `hz` stays true either way). `is_static` is true.
+
+The runtime regime is `brio::DynamicClock<Boot, Users...>`: `Boot` is a
+static `Clock<...>` naming the source, `set(div)` fans the new rate out
+to every listed user (`Uart`, `Twi`, `Spi` expose `rebase(hz)`; `Uart`
+drains its TX at the old rate first) and THEN reprograms the main
+prescaler; `hz()` is a value, `is_static` false, `clock_hz(clock)`
+reads either kind. `delay_us` takes the runtime path. The RTC/PIT
+timebase does not move. Not while a bus transaction is in flight (ask
+the bus AOs); RX bytes during the switch may be garbled. `Uart::
+can_baud(hz, baud)` tells whether a rate can still hit a baud (BAUD >=
+64, i.e. CLK_PER >= 16 x baud). Bench test: the `clock_console` app.
 
 `F_CPU` is NOT defined in this project: `platformio.ini` unflags the
 `-DF_CPU` PlatformIO would pass from the board manifest (by name -

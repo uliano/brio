@@ -115,8 +115,8 @@ public:
      * per-request cs_setup_us delay is timed from Clock::hz.
      */
     template <typename Clock>
-    static void init(Clock) {
-        cycles_per_us_ = cycles_per_us(Clock::hz);
+    static void init(Clock clock) {
+        rebase(clock_hz(clock));
         if constexpr (spi_num == 0) {
             PORTA.DIRSET = PIN4_bm | PIN6_bm;  // MOSI, SCK
             PORTA.DIRCLR = PIN5_bm;            // MISO
@@ -128,6 +128,12 @@ public:
         regs().INTCTRL = SPI_IE_bm;
         regs().CTRLA = SPI_MASTER_bm | SPI_ENABLE_bm;
     }
+
+    /// The peripheral clock changed (DynamicClock fan-out): the SCK
+    /// prescalers travel per request (relative to CLK_PER, so the SPI
+    /// clock scales with it - the client's choice may need revisiting);
+    /// only the cs_setup_us timing base is recomputed here.
+    static void rebase(uint32_t hz) { cycles_per_us_ = cycles_per_us(hz); }
 
     /// Begin a transaction (called by SpiBus from main context).
     /// Returns true when the transaction completed synchronously

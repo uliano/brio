@@ -27,11 +27,16 @@
  * domain, so there is one `hz`; a target with several domains exposes
  * several (hclk, pclk1, ...), one truth each.
  *
- * `is_static` = true: hz is a compile-time constant. A future dynamic
- * clock (runtime prescaler changes for power) is a different type with
- * is_static = false and a synchronous rebase fan-out to every clocked
- * driver - see docs/design/overview.md, "Target strata". Nothing above
- * this file assumes either.
+ * `is_static` = true: hz is a compile-time constant. The runtime regime
+ * is DynamicClock<Boot, Users...> below: same source as the static Boot
+ * configuration, main prescaler changed at run time, `hz()` a value,
+ * and every change fanned out SYNCHRONOUSLY to the listed Users (types
+ * with a static rebase(hz)) before set() returns - publish semantics,
+ * fold mechanics: a queued event would reach a low-priority driver
+ * after it had already run at the wrong rate. Drivers take either kind
+ * through the same init(clock) and read the rate with clock_hz(clock),
+ * constexpr for the static kind. The RTC/PIT timebase (kernel ticks,
+ * time events) never moves.
  *
  * F_CPU. This project does not define it at all (platformio.ini unflags
  * the -DF_CPU PlatformIO would pass from the board manifest): the rate
@@ -204,6 +209,77 @@ private:
         return true;
 #endif
     }
+};
+
+/// The rate of any clock type: a constant for a static Clock, a value
+/// for a DynamicClock. Drivers write `clock_hz(clock)` and get folding
+/// for free when it can fold.
+template <typename C>
+constexpr uint32_t clock_hz(C) {
+    if constexpr (C::is_static) {
+        return C::hz;
+    } else {
+        return C::hz();
+    }
+}
+
+/**
+ * The runtime regime. Boot is a static Clock<...> naming the source and
+ * its rate; set(div) fans the new rate out to Users (each a type with
+ * `static void rebase(uint32_t hz)`) in list order, synchronously, and
+ * THEN reprograms the main prescaler - so a user can drain what it has
+ * in flight at the old rate before adopting the new one. Call set() only when nothing that depends
+ * on the rate is mid-transfer: a driver's rebase() may wait for its own
+ * hardware to go idle (Uart drains TX first), but a bus transaction in
+ * flight is the caller's problem - in an AO system, ask the bus AOs
+ * (idle state) before switching. F_CPU must not be defined for this
+ * type: no rate is fixed any more.
+ *
+ *   using Boot = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *   using SysClock = brio::DynamicClock<Boot, Serial, Twi0>;
+ *   constexpr SysClock clock;
+ *   ...
+ *   SysClock::init();                 // Boot's init: 24 MHz
+ *   SysClock::set(brio::ClockDiv::div6);   // 4 MHz, Serial and Twi0 rebased
+ */
+template <typename Boot, typename... Users>
+struct DynamicClock {
+    static constexpr ClockSource source = Boot::source;
+    static constexpr uint32_t source_hz = Boot::source_hz;
+    static constexpr bool is_static = false;
+    static_assert(Boot::divisor == 1, "DynamicClock: give Boot the source rate with div1; "
+                                      "the prescaler is what set() changes");
+#if defined(F_CPU)
+    static_assert(false, "brio DynamicClock: F_CPU must not be defined with a "
+                         "runtime clock (build_unflags = -DF_CPU)");
+#endif
+
+    static uint32_t hz() { return hz_; }
+    static ClockDiv div() { return div_; }
+
+    /// Boot configuration, then Boot::hz. See Clock::init for the return.
+    static bool init() {
+        const bool ok = Boot::init();
+        hz_ = Boot::hz;
+        div_ = ClockDiv::div1;
+        return ok;
+    }
+
+    /// Rebase every user for the new rate (each may first drain what
+    /// it has in flight at the OLD rate), then switch the prescaler.
+    /// Between a user's rebase and the switch nothing may transmit -
+    /// true in main context, where this must be called.
+    static void set(ClockDiv d) {
+        const uint32_t next = source_hz / clock_divisor(d);
+        (Users::rebase(next), ...);
+        _PROTECTED_WRITE(CLKCTRL.MCLKCTRLB, static_cast<uint8_t>(d));
+        div_ = d;
+        hz_ = next;
+    }
+
+private:
+    static inline uint32_t hz_ = Boot::hz;
+    static inline ClockDiv div_ = ClockDiv::div1;
 };
 
 } // namespace brio
