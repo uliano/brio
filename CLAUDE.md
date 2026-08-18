@@ -131,6 +131,12 @@ gets its dated home in `docs/design/` when taken.
   so the door stays open: AOs share nothing but events (an AO's own
   statics are safe; a global touched by two AOs outside events is a
   one-way race under preemption).
+- **Target strata, positions taken (overview.md "Target strata").**
+  Drivers by role not by peripheral; PwmChannel concept + generic
+  actuators (Lamp shared by pin and PWM lamps - refactor pending);
+  Clock as a type (compile-time `hz` truth first, runtime rebase
+  fan-out only on demand); per-family device tables and per-board
+  claim files on the second target. Nothing of this is a HAL.
 - **C++ modules: considered, not now.** The real prize would be macro
   isolation (`import brio.avrdx` would not leak `avr/io.h` macros
   above the target stratum - the layering rule made mechanical), not

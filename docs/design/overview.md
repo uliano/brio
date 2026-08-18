@@ -71,6 +71,59 @@ rule, multi-library would add ceremony without enforcement. Shared
 pure types produced by a target and consumed by util live in `util/`
 (e.g. `util/timestamp.hpp`).
 
+## Target strata: drivers by role, not a HAL
+
+Pins, timers, PWM, clocks stay files of their target, each with its
+own peculiarities stated in the open. brio does not build a HAL and
+never a multi-platform one: the common factor between targets is HOW a
+driver is made and WHAT it produces upward, not what the peripheral is.
+
+- **A driver is a peripheral in a ROLE.** Types are named for what
+  they do (`Ticker` = timebase, `TcaPwm` = waveform, a future
+  `TcbCapture` = measurement); the peripheral appears in the type only
+  where the app must pick the instance (`TcaPwm<0, 'C'>`). A timer
+  used in a role belongs to that role entirely; "the same timer, half
+  in another role" is another type with another name, not a flag.
+- **What is common lives at the role level and is small**: a timebase
+  is the Platform's `now()`/`ticks_per_second`; a PWM channel is a
+  `PwmChannel` concept (`max` + `duty()`, raw counts, no frequency, no
+  polarity - those belong to the timer instance and the target); a
+  measurement is an EVENT posted by value with its timestamp. Register
+  layouts, modes, clock trees, prescaler sets, event-system wiring are
+  never unified: the target speaks its native vocabulary.
+- **The brio properties every target driver has**: monostate type
+  chosen at compile time, existence and routing checked with
+  `static_assert(false)` in the instantiated branch, one `init()` that
+  owns the WHOLE configuration of the role (no registers touched by
+  halves around the app), ISR handler bodies exposed for the app to
+  bind, the model explained in the header comment.
+- **No driver allocates a resource the app did not name.** The kernel
+  tick runs on the RTC/PIT precisely so that every general-purpose
+  timer stays available to the app; a framework that silently takes a
+  timer for `millis()` is what brio refuses to be.
+- **PWM is an actuator, not a bus.** Continuous state, set and forget,
+  synchronous, no completion, no contention worth an arbiter: rank of
+  `Pin`, called from handlers. Fades and sequences are AOs in `util/`
+  above the channel, never inside the driver.
+- **The clock is a type with two regimes.** Compile-time: `Clock<...>`
+  owns the tree, `Clock::hz` is the ONE truth the same target's drivers
+  derive their divisors from (the board's `F_CPU` is derived from it or
+  asserted equal); "always at maximum" is not a rule, a low rate is a
+  legitimate choice. Runtime (only when an application needs it): a
+  change is a synchronous compile-time fan-out to every clocked driver
+  (`Users::rebase(hz)`, applied to all before the next byte - publish
+  semantics, fold mechanics, never a queued event that would arrive
+  late) coordinated with the bus AOs so nothing changes mid-transfer;
+  the RTC-based tick does not move. The kernel never knows the clock.
+- **Board facts vs device facts.** Which timer reaches which port,
+  which USART sits on which pins per route, are facts of the DEVICE
+  (today tables inside `pwm.hpp`, `uart.hpp` - the seed of a per-family
+  header). Which timer drives which LEDs, which pins are buttons, which
+  vectors bind to which driver bodies, are facts of the BOARD: they
+  belong in a per-board unit that can also list resource claims and
+  reject a double use at compile time. Both are built on the second
+  target, when there is something to compare.
+
 ## Style rulings
 
 - No `Ao` suffix on active-object class names: in an AO framework

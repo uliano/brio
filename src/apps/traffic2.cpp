@@ -78,9 +78,9 @@ struct Rgb { uint8_t r, g, b; };
 constexpr Rgb palette[] = {
     /* off    */ {0, 0, 0},
     /* red    */ {255, 0, 0},
-    /* green  */ {0, 255, 0},
+    /* green  */ {0, 90, 0},
     /* blue   */ {0, 0, 255},
-    /* yellow */ {255, 40, 0},
+    /* yellow */ {90, 60, 0},
     /* white  */ {255, 90, 60},
 };
 
