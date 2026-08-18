@@ -7,15 +7,18 @@
 //
 //   SysClock = DynamicClock<Boot, Serial>: Boot is the static 24 MHz
 //   crystal configuration; Serial is the one clocked user here (a Twi
-//   or Spi engine would be listed too). SysClock::set(div) fans the new
-//   rate out to the users, THEN reprograms the main prescaler.
+//   or Spi engine would be listed too). SysClock::set(hz) fans the new
+//   rate out to the users, THEN reprograms the main prescaler. The
+//   app speaks Hz; which prescaler produces them is the clock's detail.
 //
 // Console @ 115200 (not 460800: the USART needs CLK_PER >= 16 x baud,
-// so 115200 works down to 2 MHz - divs 1..12; 460800 would stop at
-// 8 MHz). CLOCK refuses a divider the USART cannot follow.
+// so 115200 works down to 2 MHz; 460800 would stop at 8 MHz). CLOCK
+// refuses a rate the clock cannot reach or the USART cannot follow.
 //
-// Commands: HELP | LED ON|OFF|TOG | UPTIME | ERR | CLOCK [1|2|4|6|8|10|12]
-// CLOCK alone prints the current rate.
+// Commands: HELP | LED ON|OFF|TOG | UPTIME | ERR | CLOCK [<hz>|<n>M|<n>k]
+// CLOCK alone prints the current rate; CLOCK 4M, CLOCK 500k, CLOCK
+// 24000000 switch. Reachable rates are 24 MHz / {1,2,4,6,8,10,12,16,
+// 24,32,48,64}; the console needs >= 2 MHz at 115200 (see below).
 //
 // A rate change happens INSIDE the Console dispatch, main context, in
 // the middle of nothing: the reply is printed first (so it goes out at
@@ -146,43 +149,59 @@ private:
 
     static void cmd_help(const Cmd&, Serial s) {
         brio::print(s, "commands: HELP | LED ON|OFF|TOG | UPTIME | ERR | "
-                       "CLOCK [1|2|4|6|8|10|12]", brio::crlf);
+                       "CLOCK [<hz>|<n>M|<n>k]", brio::crlf);
     }
 
-    // CLOCK: print the rate; CLOCK <div>: switch CLK_PER to 24 MHz / div.
+    // CLOCK: print the rate; CLOCK <rate>: switch CLK_PER to it. The
+    // rate is Hz, or a number with M/k suffix (4M, 500k). The clock
+    // itself decides whether it can reach it (source / a prescaler);
+    // the app only checks the USART can keep the baud.
     static void cmd_clock(const Cmd& cmd, Serial s) {
         if (cmd.argument_count == 0) {
             brio::print(s, "CLK_PER = ", SysClock::hz(), " Hz", brio::crlf);
             return;
         }
-        struct Choice { const char* name; brio::ClockDiv div; };
-        static constexpr Choice choices[] = {
-            {"1", brio::ClockDiv::div1},   {"2", brio::ClockDiv::div2},
-            {"4", brio::ClockDiv::div4},   {"6", brio::ClockDiv::div6},
-            {"8", brio::ClockDiv::div8},   {"10", brio::ClockDiv::div10},
-            {"12", brio::ClockDiv::div12}, {"16", brio::ClockDiv::div16},
-            {"24", brio::ClockDiv::div24}, {"32", brio::ClockDiv::div32},
-            {"48", brio::ClockDiv::div48}, {"64", brio::ClockDiv::div64},
-        };
-        for (const Choice& c : choices) {
-            if (!brio::command_equals(cmd.arguments[0], c.name)) {
-                continue;
-            }
-            const uint32_t next = SysClock::source_hz / brio::clock_divisor(c.div);
-            if (!Serial::can_baud(next, baud)) {
-                brio::print(s, "refused: ", next, " Hz cannot do ", baud,
-                            " baud (needs >= ", Serial::min_hz_for(baud), ")",
-                            brio::crlf);
-                return;
-            }
-            brio::print(s, "switching to ", next, " Hz", brio::crlf);
-            // Reply is queued at the old rate; set() drains it (Serial::
-            // rebase waits for TX idle), reprograms BAUD, then switches.
-            SysClock::set(c.div);
-            brio::print(s, "now at ", SysClock::hz(), " Hz", brio::crlf);
+        uint32_t next = 0;
+        if (!parse_rate(cmd.arguments[0], next)) {
+            brio::print(s, "usage: CLOCK [<hz>|<n>M|<n>k]  e.g. CLOCK 4M", brio::crlf);
             return;
         }
-        brio::print(s, "usage: CLOCK [1|2|4|6|8|10|12|16|24|32|48|64]", brio::crlf);
+        if (!SysClock::can_run_at(next)) {
+            brio::print(s, "refused: ", next, " Hz is not ", SysClock::source_hz,
+                        " / an available prescaler", brio::crlf);
+            return;
+        }
+        if (!Serial::can_baud(next, baud)) {
+            brio::print(s, "refused: ", next, " Hz cannot do ", baud,
+                        " baud (needs >= ", Serial::min_hz_for(baud), ")",
+                        brio::crlf);
+            return;
+        }
+        brio::print(s, "switching to ", next, " Hz", brio::crlf);
+        // Reply is queued at the old rate; set() drains it (Serial::rebase
+        // waits for TX idle), reprograms BAUD, then switches.
+        SysClock::set(next);
+        brio::print(s, "now at ", SysClock::hz(), " Hz", brio::crlf);
+    }
+
+    // "24000000", "24M", "500k" -> Hz. False on anything else.
+    static bool parse_rate(const char* text, uint32_t& hz) {
+        uint32_t v = 0;
+        const char* p = text;
+        if (*p < '0' || *p > '9') {
+            return false;
+        }
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10u + static_cast<uint32_t>(*p - '0');
+            ++p;
+        }
+        if (*p == 'M' || *p == 'm') { v *= 1'000'000u; ++p; }
+        else if (*p == 'K' || *p == 'k') { v *= 1'000u; ++p; }
+        if (*p != '\0') {
+            return false;
+        }
+        hz = v;
+        return true;
     }
 
     static void cmd_led(const Cmd& cmd, Serial s) {

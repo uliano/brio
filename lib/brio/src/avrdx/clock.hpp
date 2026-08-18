@@ -29,7 +29,8 @@
  *
  * `is_static` = true: hz is a compile-time constant. The runtime regime
  * is DynamicClock<Boot, Users...> below: same source as the static Boot
- * configuration, main prescaler changed at run time, `hz()` a value,
+ * configuration, rate changed at run time (set<hz>() / set(hz), the
+ * prescaler being the detail that produces it), `hz()` a value,
  * and every change fanned out SYNCHRONOUSLY to the listed Users (types
  * with a static rebase(hz)) before set() returns - publish semantics,
  * fold mechanics: a queued event would reach a low-priority driver
@@ -238,10 +239,13 @@ constexpr bool clock_follows() {
 
 /**
  * The runtime regime. Boot is a static Clock<...> naming the source and
- * its rate; set(div) fans the new rate out to Users (each a type with
- * `static void rebase(uint32_t hz)`) in list order, synchronously, and
- * THEN reprograms the main prescaler - so a user can drain what it has
- * in flight at the old rate before adopting the new one. Call set() only when nothing that depends
+ * its rate; set<hz>() / set(hz) name the NEW RATE (the app speaks Hz -
+ * the prescaler that produces it is this silicon's detail, resolved by
+ * div_for; a rate no prescaler reaches is a compile error / a false),
+ * fan it out to Users (each a type with `static void rebase(uint32_t
+ * hz)`) in list order, synchronously, and THEN reprogram the main
+ * prescaler - so a user can drain what it has in flight at the old rate
+ * before adopting the new one. Call set() only when nothing that depends
  * on the rate is mid-transfer: a driver's rebase() may wait for its own
  * hardware to go idle (Uart drains TX first), but a bus transaction in
  * flight is the caller's problem - in an AO system, ask the bus AOs
@@ -253,8 +257,25 @@ constexpr bool clock_follows() {
  *   constexpr SysClock clock;
  *   ...
  *   SysClock::init();                 // Boot's init: 24 MHz
- *   SysClock::set(brio::ClockDiv::div6);   // 4 MHz, Serial and Twi0 rebased
+ *   SysClock::set<4'000'000>();       // Serial and Twi0 rebased, then 4 MHz
  */
+/// The main prescaler that turns source_hz into hz exactly, or div1
+/// with `ok` false when no prescaler does. Rates are what the app names;
+/// the divider is this silicon's detail.
+struct DivFor { ClockDiv div; bool ok; };
+constexpr DivFor div_for(uint32_t source_hz, uint32_t hz) {
+    constexpr ClockDiv all[] = {ClockDiv::div1, ClockDiv::div2, ClockDiv::div4,
+                                ClockDiv::div6, ClockDiv::div8, ClockDiv::div10,
+                                ClockDiv::div12, ClockDiv::div16, ClockDiv::div24,
+                                ClockDiv::div32, ClockDiv::div48, ClockDiv::div64};
+    for (ClockDiv d : all) {
+        if (hz != 0 && source_hz / clock_divisor(d) == hz && source_hz % clock_divisor(d) == 0) {
+            return {d, true};
+        }
+    }
+    return {ClockDiv::div1, false};
+}
+
 template <typename Boot, typename... Users>
 struct DynamicClock {
     static constexpr ClockSource source = Boot::source;
@@ -268,7 +289,6 @@ struct DynamicClock {
 #endif
 
     static uint32_t hz() { return hz_; }
-    static ClockDiv div() { return div_; }
 
     /// Is U one of the users that set() rebases? Drivers assert this in
     /// init(clock): a clocked driver forgotten in the list would keep
@@ -284,19 +304,42 @@ struct DynamicClock {
         return ok;
     }
 
+    /// Can this clock run at `hz` (source_hz / an existing prescaler)?
+    static constexpr bool can_run_at(uint32_t hz) { return div_for(source_hz, hz).ok; }
+
+    /// Switch to a rate known at compile time (checked: unreachable
+    /// rates do not compile).
+    template <uint32_t hz>
+    static void set() {
+        static_assert(can_run_at(hz),
+                      "DynamicClock: this rate is not source_hz divided by an "
+                      "available main prescaler");
+        apply(div_for(source_hz, hz).div, hz);
+    }
+
+    /// Switch to a rate chosen at run time; false (nothing changed) when
+    /// the rate is not reachable.
+    static bool set(uint32_t hz) {
+        const DivFor d = div_for(source_hz, hz);
+        if (!d.ok) {
+            return false;
+        }
+        apply(d.div, hz);
+        return true;
+    }
+
+private:
     /// Rebase every user for the new rate (each may first drain what
     /// it has in flight at the OLD rate), then switch the prescaler.
     /// Between a user's rebase and the switch nothing may transmit -
     /// true in main context, where this must be called.
-    static void set(ClockDiv d) {
-        const uint32_t next = source_hz / clock_divisor(d);
+    static void apply(ClockDiv d, uint32_t next) {
         (Users::rebase(next), ...);
         _PROTECTED_WRITE(CLKCTRL.MCLKCTRLB, static_cast<uint8_t>(d));
         div_ = d;
         hz_ = next;
     }
 
-private:
     static inline uint32_t hz_ = Boot::hz;
     static inline ClockDiv div_ = ClockDiv::div1;
 };
