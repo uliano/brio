@@ -49,12 +49,8 @@ if it regresses: "'concept' only available with '-std=c++20'".
   integration will land); toolchain via `symlink://`; Atmel-ICE
   upload; `debug_tool = custom` wiring (below).
 - `tools/gen_apps.py`: scans `src/apps/*.cpp` into `apps.ini`, two envs
-  per app (`<app>` release, `<app>-debug`). Any `// pio: <option> =
-  <value>` line in an app's header comment is copied verbatim into both
-  of its envs - a generic per-app override for any `[env:]` option
-  (`monitor_speed = 115200`, `monitor_filters = ...`, `build_flags =
-  -DFOO`, ...), one line per option, no validation beyond PlatformIO's
-  own. Rerun after adding/removing an app or such a line.
+  per app (`<app>` release, `<app>-debug`); see "Per-app env options"
+  below for what an app can add to its own envs.
 - `tools/pio_flags.py`: per-language AVR flags, build-type aware:
   `-Os -g` only on release builds, `-std=gnu++23`, IntelliSense
   include paths (skips `[env:native]`).
@@ -68,6 +64,30 @@ if it regresses: "'concept' only available with '-std=c++20'".
   size (and yields an unreadable `.lst`).
 - Do NOT add `-mrelax`: PyAvrOCD refuses ELF files built with it
   (distorted line-number info).
+
+## Per-app env options: `// pio:` header lines
+
+`apps.ini` is generated, so an app cannot be edited into it by hand;
+instead an app declares the `[env:]` options it needs as comment lines
+in its own header:
+
+    // pio: monitor_speed = 115200
+    // pio: monitor_filters = time
+
+`python tools/gen_apps.py` copies every `// pio: <option> = <value>`
+line verbatim into BOTH of that app's envs (`<app>`, `<app>-debug`), so
+an app-specific fact - a console at a different baud, an extra
+`build_flags = -DFOO`, an `upload_speed` - lives next to the code it
+belongs to and travels with it. Rules: one line per option (no
+multi-line values), any option PlatformIO accepts in an env (it is not
+validated here - PlatformIO complains about unknown ones), later lines
+of the same option follow INI semantics (last wins). Rerun gen_apps
+after adding, removing or changing such a line, then reload the
+project (VS Code task "PIO: regen apps").
+
+Then `pio device monitor -e <app>` uses that app's speed;
+`clock_console` is the first user (115200, to keep talking down to
+2 MHz).
 
 ## Clock, delay and timebase
 
@@ -203,6 +223,16 @@ debug_server =
 (one argument per line in the real file) plus the `debug_init_cmds`
 block in `platformio.ini`. Once the fork gains native support this
 collapses to `debug_tool = pyavrocd`.
+
+`-F` and the CPU clock: for a UPDI target `-F` is inert. PyAvrOCD uses
+it only to derive the default JTAG debug clock (megaAVR JTAG sessions)
+and to start simavr; the UPDI session sets its own link speed and
+never reads it. UPDI has its own clock (`UPDICLKSEL`, independent of
+CLK_PER) and reaches memory through the ASI without the CPU, so
+breakpoints and stepping work at any CPU rate - a `DynamicClock` app
+running at 2 MHz debugs exactly like one at 24 MHz. (debugWIRE, on
+classic AVRs, is the interface whose speed is F_CPU/128: that is what
+the option exists for.) 24000000 is kept as the boot rate for tidiness.
 
 ### Breakpoints: effectively ONE free breakpoint
 
