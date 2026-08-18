@@ -44,6 +44,7 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
+#include "util/rgb_lamp.hpp"
 
 // The Platform: everything the kernel needs from the machine (critical
 // section, idle sleep, the tick clock, ticks_per_second...). Named ONCE
@@ -62,26 +63,34 @@ constexpr Serial serial;
 
 // ---- an RGB lamp: three pins, one colour ------------------------------------
 // Not an AO: a plain static actuator. It has no state and no events, it
-// just turns three pins into a colour. AOs call it from their handlers.
+// just turns three outputs into a colour. AOs call it from their
+// handlers. brio::RgbLamp<R, G, B> (util/rgb_lamp.hpp) is generic over
+// three PwmChannel types; a brio::Pin IS a PwmChannel with max = 1 (any
+// non-zero level = on), so here the lamp is on/off - traffic2 plugs PWM
+// channels into the very same lamp and gets real colour mixing.
 enum class Colour : uint8_t { off, red, green, blue, yellow, white };
 
+constexpr brio::Rgb palette[] = {
+    /* off    */ {0, 0, 0},
+    /* red    */ {255, 0, 0},
+    /* green  */ {0, 255, 0},
+    /* blue   */ {0, 0, 255},
+    /* yellow */ {255, 255, 0},     // on/off pins: yellow = red + green, as it comes
+    /* white  */ {255, 255, 255},
+};
+
 template <typename R, typename G, typename B>     // three brio::Pin<> types
-struct Lamp {
+struct Lamp : brio::RgbLamp<R, G, B> {
     static void init() {
         R::clear(); G::clear(); B::clear();       // colours off (common cathode)
         R::output(); G::output(); B::output();
     }
     static void show(Colour c) {
-        const bool r = (c == Colour::red || c == Colour::yellow || c == Colour::white);
-        const bool g = (c == Colour::green || c == Colour::yellow || c == Colour::white);
-        const bool b = (c == Colour::blue || c == Colour::white);
-        if (r) R::set(); else R::clear();
-        if (g) G::set(); else G::clear();
-        if (b) B::set(); else B::clear();
+        brio::RgbLamp<R, G, B>::show(palette[static_cast<uint8_t>(c)]);
     }
 };
 
-// Pin<'A', 2> is a compile-time pin: port letter and number are template
+// Pin<'B', 0> is a compile-time pin: port letter and number are template
 // arguments, set()/clear() compile to single-instruction VPORT accesses.
 using Lamp1 = Lamp<brio::Pin<'B', 0>, brio::Pin<'B', 1>, brio::Pin<'B', 2>>;
 using Lamp2 = Lamp<brio::Pin<'B', 3>, brio::Pin<'B', 4>, brio::Pin<'B', 5>>;

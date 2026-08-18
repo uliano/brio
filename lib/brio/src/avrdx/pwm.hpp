@@ -32,12 +32,19 @@
  *   using Bar = brio::TcaPwm<0, 'C'>;   // TCA0 -> PC0..PC5
  *   Bar::init();                       // split mode, div16, all six on
  *   Bar::duty<2>(64);                  // PC2 at 25 %
+ *
+ * Each channel is also a TYPE, Bar::Channel<2>, satisfying the
+ * util/pwm_channel.hpp PwmChannel concept (max = 255): the currency of
+ * generic actuators such as RgbLamp, which then do not know whether a
+ * timer or a bare pin sits underneath.
  */
 
 #pragma once
 
 #include <stdint.h>
 #include <avr/io.h>
+
+#include "util/pwm_channel.hpp"
 
 namespace brio {
 
@@ -100,6 +107,17 @@ public:
             t.CTRLB |= cmp_enable_bit<ch>();
         }
     }
+
+    /// Channel ch as a PwmChannel type (max 255).
+    template <uint8_t ch>
+    struct Channel {
+        static_assert(ch < channels, "TCA split mode has six channels, WO0..WO5");
+        static constexpr uint16_t max = 255;
+        static void duty(uint16_t v) {
+            TcaPwm::duty<ch>(static_cast<uint8_t>(v));
+        }
+    };
+    static_assert(PwmChannel<Channel<0>>);
 
 private:
     static constexpr uint8_t pin_mask = 0x3F;   // pins 0..5

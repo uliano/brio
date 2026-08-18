@@ -133,7 +133,7 @@ gets its dated home in `docs/design/` when taken.
   one-way race under preemption).
 - **Target strata, positions taken (overview.md "Target strata").**
   Drivers by role not by peripheral; PwmChannel concept + generic
-  actuators (Lamp shared by pin and PWM lamps - refactor pending);
+  actuators (RgbLamp shared by pin and PWM lamps - done);
   Clock as a type (compile-time `hz` truth first, runtime rebase
   fan-out only on demand); per-family device tables and per-board
   claim files on the second target. Nothing of this is a HAL.
@@ -220,6 +220,10 @@ lib/brio/src/            the framework, four strata:
                            extend via print_one + ADL
     timestamp.hpp          TimeStamp (ms fraction)
     wire.hpp               constexpr big-endian load/store (16/24/32, be24s)
+    pwm_channel.hpp        PwmChannel concept: max + duty(v), the role-level
+                           "one dimmable output" (Pin satisfies it, max 1)
+    rgb_lamp.hpp           RgbLamp<R, G, B> over three PwmChannels, levels
+                           scaled per channel max; Rgb triple
     ring.hpp               Ring<T, size, P> SPSC FIFO, lock-free when the
                            index fits P::atomic_width, guarded otherwise
     serial_port.hpp        SerialPort<Transport, P, LineSink>: RX bytes ->
@@ -239,7 +243,8 @@ lib/brio/src/            the framework, four strata:
                            per-byte ISR pump, CS owned by the engine)
     twi.hpp                Twi<n, Route> I2C master engine
     pwm.hpp                TcaPwm<n, port>: TCA split mode = six 8-bit PWM
-                           channels on pins 0..5 (duty<ch>(v), 0/255 clean)
+                           channels on pins 0..5 (duty<ch>(v), 0/255 clean);
+                           Channel<ch> = the PwmChannel type
     ticker.hpp             BasicTicker<tps> RTC/PIT timebase (Ticker = 1024)
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)

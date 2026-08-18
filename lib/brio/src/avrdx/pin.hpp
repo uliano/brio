@@ -1,5 +1,8 @@
 #pragma once
+#include <stdint.h>
 #include <avr/io.h>
+
+#include "util/pwm_channel.hpp"
 
 // Compile-time GPIO pin abstraction for the AVR Dx families, register-level.
 // Ported from uliano/AVR-Multislope (lib/core/src/pin.hpp).
@@ -91,6 +94,12 @@ struct Pin {
     /// Runtime descriptor of this pin (for request events - see PinRef).
     static constexpr PinRef ref() { return {&vport(), mask}; }
 
+    // A pin is the degenerate PwmChannel (max = 1: any non-zero duty is
+    // "on"), so generic actuators written over that concept (RgbLamp)
+    // drive bare pins and timer channels with the same code.
+    static constexpr uint16_t max = 1;
+    static void duty(uint16_t v) { if (v) set(); else clear(); }
+
     // Basic I/O
     static void toggle() { port().OUTTGL = mask; }
     static void set()    { vport().OUT |= mask; }
@@ -121,5 +130,7 @@ struct Pin {
         pinctrl() = (pinctrl() & ~PORT_ISC_gm) | PORT_ISC_INTDISABLE_gc;
     }
 };
+
+static_assert(PwmChannel<Pin<'A', 0>>);
 
 } // namespace brio

@@ -45,6 +45,7 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
+#include "util/rgb_lamp.hpp"
 
 // The Platform: everything the kernel needs from the machine (critical
 // section, idle sleep, the tick clock, ticks_per_second...). Named ONCE
@@ -63,19 +64,18 @@ constexpr Serial serial;
 
 // ---- an RGB lamp: three PWM channels, one colour --------------------------
 // Not an AO: a plain static actuator, exactly as in traffic1 - only the
-// "how" changed. A colour is now a triple of 8-bit levels, looked up in
-// a table; show() writes three duties. The AOs above call show(Colour)
-// exactly as before.
+// "how" changed. brio::RgbLamp<R, G, B> (util/rgb_lamp.hpp) takes three
+// PwmChannel types and writes three duties; here the channels are TCA
+// split-mode outputs (TcaPwm::Channel<ch>, max 255), in traffic1 they
+// are bare pins (max 1) - the SAME lamp code drives both. The colour
+// vocabulary (Colour, the palette) stays in the app, above the lamp.
 enum class Colour : uint8_t { off, red, green, blue, yellow, white };
-
-struct Rgb { uint8_t r, g, b; };
 
 // The palette. Levels are per-channel brightness (0 = off, 255 = full)
 // and are the ONLY thing to tune on the bench: green and blue dies are
 // much more efficient than red at equal current, so a balanced yellow
 // takes far less green than red, and white takes less green/blue too.
-// Starting values, to be judged by eye.
-constexpr Rgb palette[] = {
+constexpr brio::Rgb palette[] = {
     /* off    */ {0, 0, 0},
     /* red    */ {255, 0, 0},
     /* green  */ {0, 90, 0},
@@ -84,30 +84,24 @@ constexpr Rgb palette[] = {
     /* white  */ {255, 90, 60},
 };
 
-// Pwm is a TcaPwm<n, port> type; r/g/b are its channel numbers (0..5 =
-// pins 0..5 of that port). duty<ch>() is a compile-time channel: three
-// stores per show(), no lookup of the register at run time.
-template <typename Pwm, uint8_t r_ch, uint8_t g_ch, uint8_t b_ch>
-struct Lamp {
+template <typename R, typename G, typename B>     // three PwmChannel types
+struct Lamp : brio::RgbLamp<R, G, B> {
     static void init() {}                    // the timer is initialized once, below
     static void show(Colour c) {
-        const Rgb& v = palette[static_cast<uint8_t>(c)];
-        Pwm::template duty<r_ch>(v.r);
-        Pwm::template duty<g_ch>(v.g);
-        Pwm::template duty<b_ch>(v.b);
+        brio::RgbLamp<R, G, B>::show(palette[static_cast<uint8_t>(c)]);
     }
 };
 
 // Two timers, six channels each. TcaPwm<1, 'B'> = TCA1 routed to PORTB
 // (PB0..PB5), TcaPwm<0, 'C'> = TCA0 routed to PORTC (PC0..PC5). Which
 // timer reaches which port is a fact of the chip; an impossible route
-// is a compile error inside pwm.hpp.
+// is a compile error inside pwm.hpp. Channel<n> is pin n of that port.
 using PwmB = brio::TcaPwm<1, 'B'>;
 using PwmC = brio::TcaPwm<0, 'C'>;
-using Lamp1 = Lamp<PwmB, 0, 1, 2>;
-using Lamp2 = Lamp<PwmB, 3, 4, 5>;
-using Lamp3 = Lamp<PwmC, 0, 1, 2>;
-using Lamp4 = Lamp<PwmC, 3, 4, 5>;
+using Lamp1 = Lamp<PwmB::Channel<0>, PwmB::Channel<1>, PwmB::Channel<2>>;
+using Lamp2 = Lamp<PwmB::Channel<3>, PwmB::Channel<4>, PwmB::Channel<5>>;
+using Lamp3 = Lamp<PwmC::Channel<0>, PwmC::Channel<1>, PwmC::Channel<2>>;
+using Lamp4 = Lamp<PwmC::Channel<3>, PwmC::Channel<4>, PwmC::Channel<5>>;
 
 // ---- the shared fact: somebody pressed a button ----------------------------
 // EVENTS ARE PLAIN STRUCTS. This one is the lingua franca between the
