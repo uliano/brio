@@ -55,13 +55,6 @@ using P = brio::AvrPlatform;
 // C++ way of saying "static" for types too). Apps keep their AOs here.
 namespace {
 
-// The little helper that lets std::visit dispatch on a variant with a
-// list of lambdas: it inherits from all of them and pulls in all their
-// operator() so overload resolution picks the one matching the active
-// alternative. Idiomatic C++17; not part of brio, just three lines
-// every app copies.
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-
 // The console. Uart<2, alt1> is a MONOSTATE driver: no object, all
 // static; `constexpr Serial serial;` is an empty tag object so that
 // print(serial, ...) reads naturally and costs nothing.
@@ -156,12 +149,14 @@ struct Buttons : brio::Fsm<Buttons, Tick> {
     // from dispatch(). This AO has a single state; a one-state machine
     // still earns its Entry (below) for free.
     static Status sampling(const Event& e) {
-        // std::visit looks at which alternative `e` currently holds and
-        // calls the lambda whose parameter type matches. Every lambda
-        // must return the same type (Status). The [](auto) at the end
-        // catches every alternative not listed (here Exit) - without it
-        // the code would not compile: variant dispatch is exhaustive.
-        return std::visit(overloaded{
+        // brio::match(e, lambdas...) looks at which alternative `e`
+        // currently holds and calls the lambda whose parameter type
+        // matches (it is std::visit under the hood - see kernel/fsm.hpp).
+        // Every lambda must return the same type (Status). The [](auto)
+        // at the end catches every alternative not listed (here Exit) -
+        // without it the code would not compile: variant dispatch is
+        // exhaustive.
+        return brio::match(e,
             // Entry: delivered once, when this state is entered (here:
             // by start() in init). The natural place to arm timers -
             // "the action of a state lives in its Entry".
@@ -197,8 +192,8 @@ struct Buttons : brio::Fsm<Buttons, Tick> {
                 }
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
 private:
@@ -222,7 +217,7 @@ struct Demo : brio::Fsm<Demo, ButtonPressed> {
     }
 
     static Status running(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             // The lambda receives the event BY VALUE (it is 1 byte); a
             // larger event would be taken as `const T&`.
             [](ButtonPressed b) {
@@ -237,8 +232,8 @@ struct Demo : brio::Fsm<Demo, ButtonPressed> {
                 }
                 return handled();
             },
-            [](auto) { return unhandled(); },     // Entry, Exit: nothing to do
-        }, e);
+            [](auto) { return unhandled(); }     // Entry, Exit: nothing to do
+        );
     }
 
 private:

@@ -16,7 +16,6 @@
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
 using brio::HostPlatform;
 using brio::LineReceived;
 using brio::RxActivity;
@@ -46,11 +45,11 @@ struct Sink : brio::Fsm<Sink, LineReceived> {
     static inline std::vector<std::string> lines;
     static void init() { start(&only); }
     static Status only(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { return handled(); },
             [](LineReceived l) { lines.emplace_back(l.line); return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 };
 

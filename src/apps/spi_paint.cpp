@@ -47,8 +47,6 @@ using P = brio::AvrPlatform;
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
@@ -136,7 +134,7 @@ struct Painter : brio::Fsm<Painter, Tick, Sample, PenUp, brio::SpiDone> {
     static inline uint8_t phase = 0;
 
     static Status waking(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 phase = 0;
                 RstPin::clear();
@@ -172,12 +170,12 @@ struct Painter : brio::Fsm<Painter, Tick, Sample, PenUp, brio::SpiDone> {
                 }
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     static Status clearing(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 phase = 0;
                 set_window(0x2A, 0, width - 1);
@@ -204,8 +202,8 @@ struct Painter : brio::Fsm<Painter, Tick, Sample, PenUp, brio::SpiDone> {
                 }
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // Orientation beacon: a black 60x20 rectangle at PANEL (0,0), long
@@ -215,7 +213,7 @@ struct Painter : brio::Fsm<Painter, Tick, Sample, PenUp, brio::SpiDone> {
     static constexpr uint16_t mark_w = 60, mark_h = 20;
 
     static Status marking(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 phase = 0;
                 for (uint16_t i = 0; i < mark_w * 3; ++i) {
@@ -245,12 +243,12 @@ struct Painter : brio::Fsm<Painter, Tick, Sample, PenUp, brio::SpiDone> {
                 }
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     static Status painting(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 brio::print(serial, "canvas ready - draw!", brio::crlf);
                 pen_down = false;
@@ -306,8 +304,8 @@ struct Painter : brio::Fsm<Painter, Tick, Sample, PenUp, brio::SpiDone> {
                 }
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
 private:
@@ -393,7 +391,7 @@ struct Touch : brio::Fsm<Touch, Poll, brio::SpiDone> {
     }
 
     static Status polling(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 cadence.arm_every(brio::ticks_from_ms<P>(poll_ms));
                 return handled();
@@ -432,8 +430,8 @@ struct Touch : brio::Fsm<Touch, Poll, brio::SpiDone> {
                 }
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
 private:

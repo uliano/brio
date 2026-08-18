@@ -16,7 +16,6 @@
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
 using brio::HostPlatform;
 using TE = brio::TimeEvents<HostPlatform>;
 
@@ -28,11 +27,11 @@ struct Ear : brio::Fsm<Ear, Beep> {
     static inline brio::EventQueue<Event, 8, HostPlatform> queue;
     static void init() { start(&only); }
     static Status only(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { return handled(); },
             [](Beep) { fired_at.push_back(HostPlatform::ticks); return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 };
 
@@ -62,14 +61,14 @@ struct Self : brio::Fsm<Self, Beep> {
     static inline uint8_t count = 0;
     static void init() { start(&only); }
     static Status only(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { return handled(); },
             [](Beep) {
                 if (++count < 3) { te.arm(4); }
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 };
 

@@ -43,8 +43,6 @@ using P = brio::AvrPlatform;
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
@@ -94,7 +92,7 @@ struct Prober : brio::Fsm<Prober, Tick, brio::SpiDone> {
     }
 
     static Status resetting(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 phase = 0;
                 RstPin::clear();
@@ -109,13 +107,13 @@ struct Prober : brio::Fsm<Prober, Tick, brio::SpiDone> {
                 }
                 return transition(&waking);
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // SLPOUT, wait 150 ms, DISPON, wait 25 ms -> probing
     static Status waking(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 phase = 0;
                 send_cmd(0x11);                // SLPOUT
@@ -132,12 +130,12 @@ struct Prober : brio::Fsm<Prober, Tick, brio::SpiDone> {
                 }
                 return transition(&probing);
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     static Status probing(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 idx = 0;
                 start_read();
@@ -158,8 +156,8 @@ struct Prober : brio::Fsm<Prober, Tick, brio::SpiDone> {
                 start_read();
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
 private:

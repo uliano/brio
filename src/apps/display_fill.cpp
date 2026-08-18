@@ -41,8 +41,6 @@ using P = brio::AvrPlatform;
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
@@ -91,7 +89,7 @@ struct Filler : brio::Fsm<Filler, Tick, brio::SpiDone> {
     }
 
     static Status resetting(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 phase = 0;
                 RstPin::clear();
@@ -106,15 +104,15 @@ struct Filler : brio::Fsm<Filler, Tick, brio::SpiDone> {
                 }
                 return transition(&waking);
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // SLPOUT, wait 150 ms, DISPON, wait 25 ms, INVON -> framing.
     // INVON: these ILI9481 panels are wired with inverted polarity and
     // show complementary colors without it (the classic 9481 quirk).
     static Status waking(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 phase = 0;
                 send(0x11, nullptr, 0);        // SLPOUT
@@ -132,13 +130,13 @@ struct Filler : brio::Fsm<Filler, Tick, brio::SpiDone> {
                 send(phase == 1 ? 0x29 : 0x21, nullptr, 0);  // DISPON, INVON
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // full-screen window: CASET then PASET
     static Status framing(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 phase = 0;
                 set_window(0x2A, width - 1);   // CASET 0..319
@@ -151,12 +149,12 @@ struct Filler : brio::Fsm<Filler, Tick, brio::SpiDone> {
                 }
                 return transition(&filling);
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     static Status filling(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 const Rgb& c = colors[color];
                 for (uint16_t i = 0; i < row_bytes; i += 3) {
@@ -182,8 +180,8 @@ struct Filler : brio::Fsm<Filler, Tick, brio::SpiDone> {
                 color = static_cast<uint8_t>((color + 1) % color_count);
                 return transition(&filling);   // re-Entry rebuilds the row
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
 private:

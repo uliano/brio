@@ -14,7 +14,6 @@
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
 
 struct Go {};            // triggers A -> B
 struct Bounce {};        // triggers B -> C via pass-through P
@@ -27,39 +26,39 @@ struct Toy : brio::Fsm<Toy, Go, Bounce, Ping, Nope> {
     static inline uint8_t last_ping = 0;
 
     static Status state_a(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { trace.push_back("A:entry"); return handled(); },
             [](brio::Exit)  { trace.push_back("A:exit");  return handled(); },
             [](Go)          { trace.push_back("A:go");    return transition(&state_b); },
             [](Ping p)      { trace.push_back("A:ping");  last_ping = p.n; return handled(); },
-            [](auto)        { return unhandled(); },
-        }, e);
+            [](auto)        { return unhandled(); }
+        );
     }
 
     static Status state_b(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { trace.push_back("B:entry"); return handled(); },
             [](brio::Exit)  { trace.push_back("B:exit");  return handled(); },
             [](Bounce)      { trace.push_back("B:bounce"); return transition(&state_pass); },
-            [](auto)        { return unhandled(); },
-        }, e);
+            [](auto)        { return unhandled(); }
+        );
     }
 
     // Pass-through: its Entry immediately chains a transition to C.
     static Status state_pass(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { trace.push_back("P:entry"); return transition(&state_c); },
             [](brio::Exit)  { trace.push_back("P:exit");  return handled(); },
-            [](auto)        { return unhandled(); },
-        }, e);
+            [](auto)        { return unhandled(); }
+        );
     }
 
     static Status state_c(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { trace.push_back("C:entry"); return handled(); },
             [](brio::Exit)  { trace.push_back("C:exit");  return handled(); },
-            [](auto)        { return unhandled(); },
-        }, e);
+            [](auto)        { return unhandled(); }
+        );
     }
 
     static void reset() { trace.clear(); last_ping = 0; }

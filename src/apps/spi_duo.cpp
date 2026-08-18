@@ -57,8 +57,6 @@ using P = brio::AvrPlatform;
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
@@ -122,7 +120,7 @@ struct Filler : brio::Fsm<Filler, Tick, brio::SpiDone> {
     }
 
     static Status resetting(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 phase = 0;
                 RstPin::clear();
@@ -137,14 +135,14 @@ struct Filler : brio::Fsm<Filler, Tick, brio::SpiDone> {
                 }
                 return transition(&waking);
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // SLPOUT, wait 150 ms, DISPON, wait 25 ms, INVON (9481 panel
     // polarity quirk) -> framing
     static Status waking(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 phase = 0;
                 send(0x11, nullptr, 0);        // SLPOUT
@@ -162,12 +160,12 @@ struct Filler : brio::Fsm<Filler, Tick, brio::SpiDone> {
                 send(phase == 1 ? 0x29 : 0x21, nullptr, 0);  // DISPON, INVON
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     static Status framing(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 phase = 0;
                 set_window(0x2A, width - 1);
@@ -180,12 +178,12 @@ struct Filler : brio::Fsm<Filler, Tick, brio::SpiDone> {
                 }
                 return transition(&filling);
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     static Status filling(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 const Rgb& c = colors[color];
                 for (uint16_t i = 0; i < row_bytes; i += 3) {
@@ -218,8 +216,8 @@ struct Filler : brio::Fsm<Filler, Tick, brio::SpiDone> {
                     (color + color_count + color_step) % color_count);
                 return transition(&filling);
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
 private:
@@ -269,7 +267,7 @@ struct Touch : brio::Fsm<Touch, Poll, brio::SpiDone> {
     }
 
     static Status polling(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 cadence.arm_every(brio::ticks_from_ms<P>(50));
                 return handled();
@@ -320,8 +318,8 @@ struct Touch : brio::Fsm<Touch, Poll, brio::SpiDone> {
                 }
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
 private:

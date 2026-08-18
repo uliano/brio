@@ -29,8 +29,6 @@ using P = brio::AvrPlatform;
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-
 using Led = brio::Pin<'F', 2>;  // PF2
 
 // ---- events -----------------------------------------------------------------
@@ -49,7 +47,7 @@ struct Blinker : brio::Fsm<Blinker, Toggle, SetPeriod> {
     }
 
     static Status running(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 heartbeat.arm_every(brio::ticks_from_ms<P>(500));
                 return handled();
@@ -62,8 +60,8 @@ struct Blinker : brio::Fsm<Blinker, Toggle, SetPeriod> {
                 heartbeat.arm_every(p.ticks);  // restart with the new cadence
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 };
 
@@ -83,7 +81,7 @@ struct Supervisor : brio::Fsm<Supervisor, Cycle> {
     static void init() { start(&running); }
 
     static Status running(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 cadence.arm_every(brio::ticks_from_secs<P>(3));
                 return handled();
@@ -93,8 +91,8 @@ struct Supervisor : brio::Fsm<Supervisor, Cycle> {
                 brio::post<Blinker>(SetPeriod{periods[index]});
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 };
 

@@ -15,7 +15,6 @@
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
 using brio::HostPlatform;
 
 // ---- a toy service protocol -------------------------------------------------
@@ -34,14 +33,14 @@ struct Service : brio::Fsm<Service, Request> {
     static inline brio::EventQueue<Event, 4, HostPlatform> queue;
     static void init() { start(&only); }
     static Status only(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { return handled(); },
             [](Request r) {
                 r.reply.send(Done{static_cast<uint8_t>(r.work * 2)});
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 };
 
@@ -51,11 +50,11 @@ struct Alpha : brio::Fsm<Alpha, Done> {
     static inline std::vector<uint8_t> got;
     static void init() { start(&only); }
     static Status only(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { return handled(); },
             [](Done d) { got.push_back(d.status); return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 };
 
@@ -64,11 +63,11 @@ struct Beta : brio::Fsm<Beta, Done> {
     static inline std::vector<uint8_t> got;
     static void init() { start(&only); }
     static Status only(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { return handled(); },
             [](Done d) { got.push_back(d.status); return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 };
 

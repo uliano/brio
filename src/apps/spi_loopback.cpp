@@ -35,8 +35,6 @@ using P = brio::AvrPlatform;
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
@@ -69,7 +67,7 @@ struct Tester : brio::Fsm<Tester, Kick, brio::SpiDone> {
     }
 
     static Status running(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 cadence.arm_every(brio::ticks_from_ms<P>(1000));
                 return handled();
@@ -91,8 +89,8 @@ struct Tester : brio::Fsm<Tester, Kick, brio::SpiDone> {
                 report(d);
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
 private:

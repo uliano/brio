@@ -40,8 +40,6 @@ using P = brio::AvrPlatform;
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-
 using Led = brio::Pin<'F', 2>;
 using Serial = brio::Uart<2, brio::Route::alt1>;  // rings 64/256 (defaults)
 constexpr Serial serial;                          // tag for print(serial, ...)
@@ -62,7 +60,7 @@ struct Blinker : brio::Fsm<Blinker, Toggle, SetLed> {
 
     // Heartbeat state: 1 Hz toggle until a manual command takes over.
     static Status beating(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 heartbeat.arm_every(brio::ticks_from_ms<P>(500));
                 return handled();
@@ -79,16 +77,16 @@ struct Blinker : brio::Fsm<Blinker, Toggle, SetLed> {
                 apply(s);
                 return transition(&manual);   // exit disarms the heartbeat
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // Manual state: the LED belongs to the console commands.
     static Status manual(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](SetLed s) { apply(s); return handled(); },
-            [](auto)     { return unhandled(); },
-        }, e);
+            [](auto)     { return unhandled(); }
+        );
     }
 
 private:
@@ -112,14 +110,14 @@ struct Console : brio::Fsm<Console, brio::LineReceived> {
     static void init() { start(&running); }
 
     static Status running(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { return handled(); },
             [](brio::LineReceived l) {
                 handle_line(l.line);
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
 private:

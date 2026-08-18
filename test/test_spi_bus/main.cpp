@@ -17,7 +17,6 @@
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
 using brio::HostPlatform;
 using brio::ReplyTo;
 using brio::SpiDone;
@@ -47,11 +46,11 @@ struct Client : brio::Fsm<Client, SpiDone> {
     static inline std::vector<uint8_t> replies;
     static void init() { start(&only); }
     static Status only(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) { return handled(); },
             [](SpiDone d) { replies.push_back(d.status); return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 };
 

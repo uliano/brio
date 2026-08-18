@@ -36,8 +36,6 @@ using P = brio::AvrPlatform;
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
@@ -60,7 +58,7 @@ struct Scanner : brio::Fsm<Scanner, Kick, brio::I2cDone> {
     static void init() { start(&idle); }
 
     static Status idle(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 cadence.arm_every(brio::ticks_from_ms<P>(2000));
                 return handled();
@@ -72,12 +70,12 @@ struct Scanner : brio::Fsm<Scanner, Kick, brio::I2cDone> {
                 brio::print(serial, "I2C scan #", sweep, ":");
                 return transition(&sweeping);
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     static Status sweeping(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 probe(addr);
                 return handled();
@@ -102,8 +100,8 @@ struct Scanner : brio::Fsm<Scanner, Kick, brio::I2cDone> {
                 return handled();
             },
             [](Kick) { return handled(); },   // a sweep is running: skip
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
 private:

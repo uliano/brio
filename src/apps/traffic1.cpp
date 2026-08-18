@@ -1,7 +1,7 @@
 // traffic1 - the traffic light itself: a multi-state FSM with timed
 // phases and a pedestrian call that is REMEMBERED and served later.
 // Read traffic0 first: the plumbing (Buttons, Lamp, the AO contract,
-// visit/overloaded, publish) is explained there and not repeated here.
+// match on the event variant, publish) is explained there and not repeated here.
 // Comments in this file focus on what is NEW:
 //   - a state machine with a real cycle: transition() between states,
 //     each state's action in its Entry, one time event re-armed with a
@@ -53,13 +53,6 @@ using P = brio::AvrPlatform;
 // Anonymous namespace: everything in it is private to this file (the
 // C++ way of saying "static" for types too). Apps keep their AOs here.
 namespace {
-
-// The little helper that lets std::visit dispatch on a variant with a
-// list of lambdas: it inherits from all of them and pulls in all their
-// operator() so overload resolution picks the one matching the active
-// alternative. Idiomatic C++17; not part of brio, just three lines
-// every app copies.
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
 
 // The console. Uart<2, alt1> is a MONOSTATE driver: no object, all
 // static; `constexpr Serial serial;` is an empty tag object so that
@@ -119,7 +112,8 @@ struct Intersection;
 // label that gives this AO its own private state variable inside Fsm,
 // distinct from any other AO with the same event list.
 struct Buttons : brio::Fsm<Buttons, Tick> {
-    // The AO contract with the kernel needs a member named `queue`:
+    // The AO contract with the kernel (the ActiveObject concept in
+    // kernel/active_object.hpp) needs a member named `queue`:
     // EventQueue<Event, depth, P>. Event is the variant Fsm built for us
     // (std::variant<Entry, Exit, Tick>). Depth 2: at most one Tick can
     // be pending while another is being handled - sized on the real
@@ -156,12 +150,14 @@ struct Buttons : brio::Fsm<Buttons, Tick> {
     // from dispatch(). This AO has a single state; a one-state machine
     // still earns its Entry (below) for free.
     static Status sampling(const Event& e) {
-        // std::visit looks at which alternative `e` currently holds and
-        // calls the lambda whose parameter type matches. Every lambda
-        // must return the same type (Status). The [](auto) at the end
-        // catches every alternative not listed (here Exit) - without it
-        // the code would not compile: variant dispatch is exhaustive.
-        return std::visit(overloaded{
+        // brio::match(e, lambdas...) looks at which alternative `e`
+        // currently holds and calls the lambda whose parameter type
+        // matches (it is std::visit under the hood - see kernel/fsm.hpp).
+        // Every lambda must return the same type (Status). The [](auto)
+        // at the end catches every alternative not listed (here Exit) -
+        // without it the code would not compile: variant dispatch is
+        // exhaustive.
+        return brio::match(e,
             // Entry: delivered once, when this state is entered (here:
             // by start() in init). The natural place to arm timers -
             // "the action of a state lives in its Entry".
@@ -197,8 +193,8 @@ struct Buttons : brio::Fsm<Buttons, Tick> {
                 }
                 return handled();
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
 private:
@@ -246,7 +242,7 @@ struct Intersection : brio::Fsm<Intersection, ButtonPressed, PhaseOver, Blink> {
     // the phase timer and traces; PhaseOver moves on; ButtonPressed just
     // takes note. The [](auto) swallows Exit and Blink.
     static Status ns_green(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 paint(Colour::green, Colour::red);
                 arm_phase(5000, "ns_green");
@@ -254,12 +250,12 @@ struct Intersection : brio::Fsm<Intersection, ButtonPressed, PhaseOver, Blink> {
             },
             [](PhaseOver) { return transition(&ns_yellow); },
             [](ButtonPressed b) { return note_call(b); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     static Status ns_yellow(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 paint(Colour::yellow, Colour::red);
                 arm_phase(1500, "ns_yellow");
@@ -268,12 +264,12 @@ struct Intersection : brio::Fsm<Intersection, ButtonPressed, PhaseOver, Blink> {
             },
             [](PhaseOver) { return transition(&all_red); },
             [](ButtonPressed b) { return note_call(b); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     static Status ew_green(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 paint(Colour::red, Colour::green);
                 arm_phase(5000, "ew_green");
@@ -281,12 +277,12 @@ struct Intersection : brio::Fsm<Intersection, ButtonPressed, PhaseOver, Blink> {
             },
             [](PhaseOver) { return transition(&ew_yellow); },
             [](ButtonPressed b) { return note_call(b); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     static Status ew_yellow(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 paint(Colour::red, Colour::yellow);
                 arm_phase(1500, "ew_yellow");
@@ -295,8 +291,8 @@ struct Intersection : brio::Fsm<Intersection, ButtonPressed, PhaseOver, Blink> {
             },
             [](PhaseOver) { return transition(&all_red); },
             [](ButtonPressed b) { return note_call(b); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // all_red is the hub: the safety gap between any two phases, and
@@ -304,7 +300,7 @@ struct Intersection : brio::Fsm<Intersection, ButtonPressed, PhaseOver, Blink> {
     // expires it decides where to go - the decision is made when it is
     // due, on the state of the flag at that moment.
     static Status all_red(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 paint(Colour::red, Colour::red);
                 arm_phase(1000, "all_red");
@@ -318,13 +314,13 @@ struct Intersection : brio::Fsm<Intersection, ButtonPressed, PhaseOver, Blink> {
                 return transition(next_is_ns ? &ns_green : &ew_green);
             },
             [](ButtonPressed b) { return note_call(b); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // ---- pedestrian phases ---------------------------------------------------
     static Status walk(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 Lamp3::show(Colour::green);
                 Lamp4::show(Colour::green);
@@ -334,8 +330,8 @@ struct Intersection : brio::Fsm<Intersection, ButtonPressed, PhaseOver, Blink> {
             [](PhaseOver) { return transition(&walk_flash); },
             // A call during the walk: nothing to note, it is being served.
             [](ButtonPressed) { return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // The flashing phase: Entry arms the periodic blink timer, Exit
@@ -343,7 +339,7 @@ struct Intersection : brio::Fsm<Intersection, ButtonPressed, PhaseOver, Blink> {
     // - Exit is where a state cleans up after itself, guaranteed to run
     // on every way out (the transition machinery calls it, not us).
     static Status walk_flash(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 lit = true;
                 blink.arm_every(brio::ticks_from_ms<P>(250));
@@ -364,8 +360,8 @@ struct Intersection : brio::Fsm<Intersection, ButtonPressed, PhaseOver, Blink> {
             },
             [](PhaseOver) { return transition(&all_red); },
             [](ButtonPressed) { return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
 private:

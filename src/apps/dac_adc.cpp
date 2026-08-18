@@ -61,8 +61,6 @@ using P = brio::AvrPlatform;
 
 namespace {
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
@@ -112,7 +110,7 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
 
     // idle: waiting for the next step of the ramp
     static Status idle(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 if (step == 0) {
                     cadence.arm_every(brio::ticks_from_ms<P>(1000));
@@ -126,13 +124,13 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                 }
                 return transition(&dac_write);
             },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // dac_write: I2C write of DAC0
     static Status dac_write(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 i2c_tx[0] = static_cast<uint8_t>((dac_reg_out0 << 3) | dac_cmd_write);
                 brio::store_be16(&i2c_tx[1], dac_code);
@@ -149,13 +147,13 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                 return transition(&dac_verify);
             },
             [](Kick) { return handled(); },        // still busy: skip a beat
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // dac_verify: I2C write-then-read of DAC0 (repeated START)
     static Status dac_verify(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 i2c_tx[0] = static_cast<uint8_t>((dac_reg_out0 << 3) | dac_cmd_read);
                 brio::post<I2c>(TwiHw::Request{
@@ -171,26 +169,26 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                 return transition(&settling);
             },
             [](Kick) { return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // settling: let VOUT0 and the ADC input settle before triggering
     static Status settling(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 timer.arm(brio::ticks_from_ms<P>(20));
                 return handled();
             },
             [](Tick) { return transition(&triggering); },
             [](Kick) { return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // triggering: CS falling edge starts a conversion (1 dummy byte)
     static Status triggering(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 brio::post<Spi>(SpiHw::Request{
                     AdcCs::ref(), {}, nullptr, 0,
@@ -206,27 +204,27 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                 return transition(&converting);
             },
             [](Kick) { return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // converting: with CS high the MCP3550 takes ~119 ms (measured), so
     // 200 ms leaves margin; a not-ready frame is retried anyway
     static Status converting(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 timer.arm(brio::ticks_from_ms<P>(200));
                 return handled();
             },
             [](Tick) { return transition(&reading); },
             [](Kick) { return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // reading: the 24-bit frame
     static Status reading(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 brio::post<Spi>(SpiHw::Request{
                     AdcCs::ref(), {}, nullptr, 0,
@@ -250,21 +248,21 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                 return transition(&idle);
             },
             [](Kick) { return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     // retrying: the frame said "busy" - wait a little and read again
     static Status retrying(const Event& e) {
-        return std::visit(overloaded{
+        return brio::match(e,
             [](brio::Entry) {
                 timer.arm(brio::ticks_from_ms<P>(20));
                 return handled();
             },
             [](Tick) { return transition(&reading); },
             [](Kick) { return handled(); },
-            [](auto) { return unhandled(); },
-        }, e);
+            [](auto) { return unhandled(); }
+        );
     }
 
     static inline uint8_t retries = 0;
