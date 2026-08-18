@@ -141,12 +141,8 @@ gets its dated home in `docs/design/` when taken.
   today (`is_static`); a runtime-changing clock is a sibling type with
   a synchronous rebase fan-out (`Users::rebase(hz)`) coordinated with
   the bus AOs, and `delay_us` reading a runtime rate. Not before an
-  application asks for it. F_CPU guard inverts then: the dynamic type
-  static_asserts F_CPU is NOT defined; remove it with
-  `build_unflags = -DF_CPU` (by name - PlatformIO keeps it as the pair
-  ("F_CPU", "$BOARD_F_CPU"), the valued form does not match). Verified
-  2026-08-18: brio and the apps build clean without F_CPU; only
-  avr-libc's util/delay.h / setbaud.h would break, which is the point.
+  application asks for it. F_CPU is already gone from the build (see
+  below), so nothing has to change on that side.
 - **Design rule for all AVR work: think the other targets first.**
   Before adding/changing anything in avrdx/, ask what shape it takes
   on Cortex-M0+ (rich clock tree, hardware cycle counters, per-pin
@@ -177,7 +173,10 @@ python tools/gen_apps.py      # after adding/removing src/apps/*.cpp
 - Toolchain: self-built avr-gcc 16.2 at `/sw/avr` via `symlink://`;
   never PlatformIO's bundled one. Never add `-mrelax` (PyAvrOCD
   refuses the ELF). `build_unflags` must keep `-std=gnu++11` (the
-  platform appends it after our `-std=gnu++23`) and `-flto`.
+  platform appends it after our `-std=gnu++23`), `-flto`, and
+  `-DF_CPU` (by name: the clock rate has one truth, `Clock::hz`;
+  avr-libc's util/delay.h / setbaud.h do not compile here, on purpose -
+  use `brio::delay_us(clock, us)`).
 - Atmel-ICE: cable in the **AVR** port, not SAM (symptom: Vtarget
   ~1.71 V, sign-on `0xa0`).
 - Debugging: PyAvrOCD as GDB server (`debug_tool = custom`, port
@@ -187,8 +186,8 @@ python tools/gen_apps.py      # after adding/removing src/apps/*.cpp
   hence the debug flags in platformio.ini. `monitor ioregister <name>`
   reads/writes peripheral registers.
 - The bench board: 24 MHz crystal on PA0/PA1 (not GPIO) -
-  `Clock<ClockSource::crystal, 24'000'000>`, F_CPU asserted equal - no
-  32k crystal (do not enable XOSC32K), serial on USART2 ALT1 PF4/PF5.
+  `Clock<ClockSource::crystal, 24'000'000>` - no 32k crystal (do not
+  enable XOSC32K), serial on USART2 ALT1 PF4/PF5.
 - Full detail and rationale: `docs/targets/avrdx.md`,
   `docs/targets/host.md`, `docs/bench.md`.
 
@@ -253,7 +252,7 @@ lib/brio/src/            the framework, four strata:
   avrdx/                 everything that knows avr/io.h (AVR DA/DB)
     platform_avr.hpp       AvrPlatform
     clock.hpp              Clock<source, hz, div>: the main clock as a type,
-                           constexpr hz (F_CPU asserted equal), init()
+                           constexpr hz (the ONE rate truth: no F_CPU), init()
     delay.hpp              delay_us(clock, us) "at least": folded cycles when
                            constant, 4-cycle loop otherwise; cycles_per_us
     pin.hpp                Pin<'A',5> compile-time GPIO + PinRef descriptor

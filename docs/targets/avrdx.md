@@ -75,11 +75,16 @@ at the SAME rate (which is why an external rate must be one OSCHF can
 produce: `hz` stays true either way). `is_static` is true: no runtime
 clock changes yet.
 
-`F_CPU` is still defined by the build (board `f_cpu`, needed by
-avr-libc's `util/delay.h`), and Clock `static_assert`s it equal to
-`hz`: a clock the board file does not expect stops the build with a
-message instead of running the UART at the wrong baud. brio code never
-reads `F_CPU`. The bench board: **24 MHz crystal on PA0/PA1** (PA0/PA1
+`F_CPU` is NOT defined in this project: `platformio.ini` unflags the
+`-DF_CPU` PlatformIO would pass from the board manifest (by name -
+`build_unflags = -DF_CPU`; the platform keeps it as the pair
+`("F_CPU", "$BOARD_F_CPU")`, a valued form would not match). The rate
+has one truth, `Clock::hz`; avr-libc's `util/delay.h` and
+`util/setbaud.h`, which need `F_CPU`, therefore do not compile - on
+purpose: nothing may assume a rate the clock type does not state. (In
+a build that still defines `F_CPU`, `Clock` static_asserts it equal to
+`hz`.) The board JSON's `f_cpu` field is only PlatformIO's manifest
+entry. The bench board: **24 MHz crystal on PA0/PA1** (PA0/PA1
 therefore not GPIO), `Clock<ClockSource::crystal, 24'000'000>`.
 
 `brio::delay_us(clock, us)` (`avrdx/delay.hpp`) busy-waits AT LEAST

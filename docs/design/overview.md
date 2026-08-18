@@ -107,9 +107,10 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   above the channel, never inside the driver.
 - **The clock is a type with two regimes.** Compile-time: `Clock<...>`
   owns the tree, `Clock::hz` is the ONE truth the same target's drivers
-  derive their divisors from (the board's `F_CPU` is derived from it or
-  asserted equal); "always at maximum" is not a rule, a low rate is a
-  legitimate choice. Runtime (only when an application needs it): a
+  derive their divisors from (no vendor `F_CPU`-style macro exists in
+  the build: a second truth is unflagged, and vendor headers that need
+  it stop compiling on purpose); "always at maximum" is not a rule, a
+  low rate is a legitimate choice. Runtime (only when an application needs it): a
   change is a synchronous compile-time fan-out to every clocked driver
   (`Users::rebase(hz)`, applied to all before the next byte - publish
   semantics, fold mechanics, never a queued event that would arrive

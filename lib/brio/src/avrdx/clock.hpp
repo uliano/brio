@@ -33,15 +33,14 @@
  * driver - see docs/design/overview.md, "Target strata". Nothing above
  * this file assumes either.
  *
- * F_CPU. The build still defines F_CPU (PlatformIO passes the board's
- * f_cpu; avr-libc's util/delay.h wants it) and legacy code may still
- * read it. To make sure the two truths cannot diverge, Clock
- * static_asserts F_CPU == hz whenever F_CPU is defined: configure a
- * clock the board file does not expect and the build stops with a
- * message, instead of an UART at the wrong baud. brio code itself never
- * reads F_CPU: it takes Clock (as a tag object) where it needs the rate.
- * (A future dynamic clock inverts the guard: F_CPU must NOT be defined
- * - build_unflags = -DF_CPU - so nothing can assume a fixed rate.)
+ * F_CPU. This project does not define it at all (platformio.ini unflags
+ * the -DF_CPU PlatformIO would pass from the board manifest): the rate
+ * has one truth, Clock::hz, and avr-libc's util/delay.h / setbaud.h -
+ * which need F_CPU - therefore do not compile, on purpose: nothing can
+ * assume a rate Clock does not state. brio code never reads F_CPU: it
+ * takes Clock (as a tag object) where it needs the rate. Should brio be
+ * built in a project that still defines F_CPU, the static_assert below
+ * refuses a value different from hz - two truths never diverge silently.
  *
  * Usage:
  *   using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
@@ -131,10 +130,9 @@ struct Clock {
     static_assert(src_hz % divisor == 0, "source rate not divisible by the prescaler");
 #if defined(F_CPU)
     static_assert(hz == F_CPU,
-                  "brio Clock: F_CPU (board_build.f_cpu / build flag) disagrees "
-                  "with Clock::hz. The build's F_CPU must equal the configured "
-                  "clock: fix the board file or the Clock parameters, never "
-                  "leave two truths");
+                  "brio Clock: this build defines F_CPU with a value different "
+                  "from Clock::hz. Either unflag -DF_CPU (this project does) or "
+                  "make it equal: never two truths");
 #endif
 #if !defined(CLKCTRL_XOSCHFCTRLA)
     static_assert(src != ClockSource::crystal,
