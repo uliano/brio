@@ -131,6 +131,15 @@ gets its dated home in `docs/design/` when taken.
   so the door stays open: AOs share nothing but events (an AO's own
   statics are safe; a global touched by two AOs outside events is a
   one-way race under preemption).
+- **C++ modules: considered, not now.** The real prize would be macro
+  isolation (`import brio.avrdx` would not leak `avr/io.h` macros
+  above the target stratum - the layering rule made mechanical), not
+  build speed. Blockers: the language server (PlatformIO's IntelliSense
+  does not follow modules; clangd only partially) and SCons has no
+  module dependency scanning. Not a cure for the ISR glue either: the
+  vector bindings are configuration (which USART, which route, which
+  sink) and would live in a per-board unit under modules exactly as
+  under headers. Revisit with the second target / board files.
 - **Housekeeping.** No LICENSE file yet (repo is public at
   github.com/uliano/brio).
 
