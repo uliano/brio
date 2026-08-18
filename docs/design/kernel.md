@@ -7,9 +7,10 @@ maps every entity to its header. Where a concrete number appears
 below it is a worked example from one platform, marked as such, never
 an assumption of the kernel.
 
-How to read this: sections 1-2 give the model and the contract; 3-9
-follow the life of an event (born, queued, dispatched, replied to,
-timed, lost); 10 is what the machine must provide; 11 is the index.
+How to read this: sections 1-2 give the model and the contract; 3-10
+follow the life of an event (born, carried, queued, dispatched,
+delivered, scheduled, timed, lost); 11 is what the machine must
+provide; 12 is the index.
 Paragraphs marked **C++ note** explain the C++17/20/23 idiom the code
 relies on - brio is deliberately written in modern C++ and those
 idioms are part of the design, not decoration.
@@ -159,48 +160,79 @@ be complete types and, for the queue, trivially copyable -
 `EventQueue` static-asserts this: an event may be copied by an ISR,
 byte-wise, and no destructor will ever run for it.
 
-## 4. Payloads: what travels inside the event
+## 4. Payloads: what travels inside the event (`kernel/borrowed.hpp`)
 
 The event envelope is copied, so what the struct *contains* decides
-the cost. Three cases, all in use today:
+the cost - and, for pointers, the rules. The whole payload rule fits
+in three lines:
 
-- **By value.** The natural case: a code, a small measurement, a
-  status. The receiver owns its copy forever, no lifetime question
-  exists. Preferred whenever the payload fits the guideline.
-- **By reference** (pointer or span inside the struct). Used when the
-  data already lives in a structurally necessary buffer and copying
-  it would duplicate RAM: `SerialPort` posts `LineReceived{char*}`
-  pointing into one of its two line buffers - the 80-byte line never
-  enters a queue. Every reference payload comes with an **ownership
-  rule** stated at the producer: for `LineReceived`, the line is
-  valid and mutable only during the receiver's dispatch, and the
-  scheduling contract (consumer before `SerialPort` in the pack)
-  guarantees the producer will not reuse the buffer before then. The
-  bus request events (`BusMaster`) carry spans of the caller's tx/rx
-  buffers: the caller must keep them alive and untouched until the
-  `BusDone` reply arrives. There is no reference counting anywhere;
-  the rule is the mechanism.
-- **Recorded deviations above the guideline by value.** The bus
-  request descriptor (~14-16 bytes: target pins, spans, reply
-  capsule) is posted by value: the request IS the arbitration token,
-  and its queue is the arbiter, so its size is paid once, in the bus
-  AO's queue, with numbers in hand.
+1. **Copy what is read once** - descriptors, commands, results,
+   facts: by value. Size is a per-AO budget (section 3); deviations
+   are legal with numbers in hand.
+2. **Borrow only what must be shared** - storage that hardware or a
+   producer writes into and that would be absurd to copy: by
+   reference, and every borrow is one of exactly two leases:
+   - `Lease::dispatch` - valid during the receiving dispatch only;
+     correct by construction when the borrower PRECEDES the lender in
+     the Kernel pack;
+   - `Lease::reply` - valid until the borrower posts the agreed
+     completion event; the reply IS the return of the loan.
+3. **Published payloads travel by value** (or by const reference at
+   most): N subscribers see the same struct in N sequential dispatches,
+   a mutable loan would let each modify what the next one sees.
 
-Nothing is ever chopped into several events: one event = one
-envelope, the cargo stays put (in the buffer it references, or in the
-struct itself).
+The case-by-case then reduces to one question per field: is this data
+*read once by one receiver*, or *written by someone else while it is
+in flight*? The first has one answer, the second has two.
+
+**Why the distinction is safe under this kernel.** There is no
+concurrency between AOs, so two AOs can never write the same buffer at
+the same time; the only hazard of a loan is *aliasing in time* - the
+lender reusing storage the borrower still holds. Both leases pin that
+down: for `dispatch` the pack order guarantees the borrower runs
+before the lender is dispatched again (and under a preemptive kernel
+the same order makes the borrower preempt the lender right at the
+post - the rule survives QK unchanged); for `reply` the boundaries are
+two explicit events. At every instant exactly one party has the right
+to write: ownership moves, it is never shared.
+
+**How it is written down.** `Borrowed<T, Lease>` is a plain pointer
+with the lease in its type: zero cost, trivially copyable, and the
+contract becomes readable at the field (`struct LineReceived {
+Borrowed<char, Lease::dispatch> line; }`). The lender of a `dispatch`
+loan declares its borrowers - `using LendsTo = Subscribers<Sink>;` -
+and `Kernel` static_asserts that each precedes it in the pack: the
+scheduling contract of the serial stack is a compile-time fact, not a
+comment. What C++ cannot do is stop a receiver from stashing the raw
+pointer past its window; the planned debug-build addition is a lender
+epoch inside `Borrowed` compared on access (stale loan -> panic on the
+guilty instruction), built when a host test simulating preemption
+needs it. Bus tx/rx buffers are `reply` loans and stay plain spans in
+the request descriptor (a span already is a view type); the
+descriptor's comment states the lease.
+
+**In use today.** `LineReceived` lends the line buffer for one
+dispatch (mutable: in-place tokenization is the point). Bus requests
+copy the ~14-16-byte descriptor by value (read once by the bus AO; the
+request IS the arbitration token, its size is paid once in the bus
+queue) and lend the data buffers until `BusDone` - the borrowed
+surface is the structurally necessary minimum. Nothing is ever
+chopped into several events: one event = one envelope, the cargo
+stays put.
 
 **Fan-out cost.** `publish()` is one `post()` per subscriber: N
 subscribers = N copies of the envelope, in N queues, one critical
 section each. Fine for small notifications; a large published payload
-would be N times wrong, which is why "facts" are small structs and
-large data is referenced. **Replies** (section 6) are ordinary posted
-events too: the service copies the small result struct into the
-requester's queue.
+would be N times wrong, which is why "facts" are small structs.
+**Replies** (section 7) are ordinary posted events too: the service
+copies the small result struct into the requester's queue.
 
-(This section is the condensed statement of the rules; a dedicated
-pass on payload/ownership patterns - naming the rules per producer,
-maybe a `Borrowed<T>` marker type - is an open item.)
+**One more discipline, stated for the future.** AOs share nothing but
+events: an AO's own statics are safe because its dispatch is never
+re-entered, but a global touched by two AOs outside events is safe
+only because this kernel is cooperative - under a preemptive one it is
+a one-way race. The rule costs nothing today and keeps the QK door
+open.
 
 ## 5. Queues (`kernel/event_queue.hpp`)
 
@@ -320,6 +352,10 @@ requirement is local to one function.
 
 `Kernel<P, Ao1, Ao2, ...>`: AOs are the pack, **priority IS the pack
 order**, first = highest; no separate priority table to keep coherent.
+Because the order is a type, the pack answers ordering questions at
+compile time (`Pack<Aos...>::index<Ao>()`), and Kernel uses that to
+enforce the one ordering fact the payload rule needs: every
+`Lease::dispatch` borrower precedes its lender (section 4).
 The loop (`run()`), one turn:
 
 1. `TimeEvents<P>::process()` - post every matured time event (main
@@ -455,7 +491,8 @@ compile error instead of a template failure.
 | `EventQueue<E, depth, P>` | `event_queue.hpp` | per-AO MPSC queue, overflow counter |
 | `Overloaded`, `match`, `Entry`, `Exit`, `Fsm<Derived, Alts...>` | `fsm.hpp` | variant dispatch helpers, state machine base, Event, Status |
 | `post`, `Subscribers`, `publish`, `ReplyTo`, `reply_to` | `post.hpp` | delivery primitives |
-| `Kernel<P, Aos...>` | `kernel.hpp` | the loop: init_all/step/idle_if_empty/run |
+| `Borrowed<T, Lease>`, `Lease` | `borrowed.hpp` | pointer payloads with their lease in the type |
+| `Pack<Aos...>`, `Kernel<P, Aos...>` | `kernel.hpp` | pack ordering questions (index, lends_ok); the loop: init_all/step/idle_if_empty/run |
 | `TimeEvents<P>`, `TimeEvent<P, Ao, Ev>` | `time_event.hpp` | armed list + owned time events |
 | `ticks_from_ms`, `ticks_from_secs` | `time.hpp` | constexpr tick conversions |
 | `PanicCode`, `panic_magic`, `HaltReporter`, `panic`, `take_panic_record` | `panic.hpp` | unrecoverable failures |
@@ -467,8 +504,9 @@ outside `kernel/` and the standard freestanding library):
                            time_event.hpp, kernel.hpp
     fsm.hpp             <- post.hpp
     active_object.hpp   <- kernel.hpp
-    post.hpp            <- time_event.hpp
+    post.hpp            <- time_event.hpp, kernel.hpp
     time_event.hpp      <- kernel.hpp
+    borrowed.hpp        <- (util/ producers of loans; nothing in kernel/)
 
 An app that only posts includes `kernel/post.hpp`; an app that runs
 includes `kernel/kernel.hpp` and gets the contract with it.

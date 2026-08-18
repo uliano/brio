@@ -113,7 +113,7 @@ struct Console : brio::Fsm<Console, brio::LineReceived> {
         return brio::match(e,
             [](brio::Entry) { return handled(); },
             [](brio::LineReceived l) {
-                handle_line(l.line);
+                handle_line(l.line.get());
                 return handled();
             },
             [](auto) { return unhandled(); }

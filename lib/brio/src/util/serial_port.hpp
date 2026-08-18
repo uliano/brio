@@ -25,9 +25,11 @@
  * SerialPort in the Kernel pack. The kernel then serves every posted
  * LineReceived before SerialPort runs again, so when a SerialPort dispatch
  * starts, all its previously posted lines have been consumed and both
- * buffers are free (in_flight resets). The sink may read AND mutate the
- * line (in-place tokenization) during its dispatch only; keeping the
- * pointer across dispatches is a bug.
+ * buffers are free (in_flight resets). The line is a Lease::dispatch loan
+ * (kernel/borrowed.hpp): the sink may read AND mutate it (in-place
+ * tokenization) during its dispatch only; keeping the pointer across
+ * dispatches is a bug. SerialPort declares `LendsTo = Subscribers<
+ * LineSink>` and Kernel refuses a pack that violates the order.
  *
  * TX has no AO: print() goes straight to the transport's blocking
  * push path - bounded by the wire rate (~2 ms worst case at 460800),
@@ -39,6 +41,7 @@
 
 #include <stdint.h>
 
+#include "kernel/borrowed.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
 #include "kernel/platform.hpp"
@@ -50,11 +53,10 @@ namespace brio {
 /// Posted (by ISR glue or by SerialPort itself) when RX bytes are pending.
 struct RxActivity {};
 
-/// A completed line, NUL-terminated. Reference semantics: valid (and
-/// mutable, for in-place tokenization) only during the receiving
-/// dispatch of the sink AO.
+/// A completed line, NUL-terminated, lent for the receiving dispatch
+/// only (mutable: in-place tokenization is the point of the loan).
 struct LineReceived {
-    char* line;
+    Borrowed<char, Lease::dispatch> line;
 };
 
 template <typename Transport, Platform P, typename LineSink,
@@ -71,6 +73,10 @@ public:
     // worst case; a dropped extra RxActivity is harmless (the queued
     // ones already guarantee the drain will happen).
     static inline EventQueue<Event, 2, P> queue;
+
+    /// LineReceived is a Lease::dispatch loan: Kernel checks LineSink
+    /// precedes this AO in the pack.
+    using LendsTo = Subscribers<LineSink>;
 
     static void init() { Base::start(&running); }
 
@@ -98,7 +104,7 @@ private:
         uint8_t byte;
         while (in_flight_ < 2 && Transport::read_byte(byte)) {
             if (char* line = assembler_[active_].push(byte)) {
-                post<LineSink>(LineReceived{line});
+                post<LineSink>(LineReceived{Borrowed<char, Lease::dispatch>{line}});
                 ++in_flight_;
                 active_ = static_cast<uint8_t>(active_ ^ 1);
             }

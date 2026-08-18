@@ -47,7 +47,7 @@ struct Sink : brio::Fsm<Sink, LineReceived> {
     static Status only(const Event& e) {
         return brio::match(e,
             [](brio::Entry) { return handled(); },
-            [](LineReceived l) { lines.emplace_back(l.line); return handled(); },
+            [](LineReceived l) { lines.emplace_back(l.line.get()); return handled(); },
             [](auto) { return unhandled(); }
         );
     }

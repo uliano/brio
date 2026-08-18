@@ -71,6 +71,17 @@ struct PingPong : brio::Fsm<PingPong, Hit> {
     }
 };
 
+// A lender/borrower pair for the pack-order check (Lease::dispatch loans).
+struct Borrower : brio::Fsm<Borrower, Hit> {
+    static inline brio::EventQueue<Event, 2, HostPlatform> queue;
+    static void init() {}
+};
+struct Lender : brio::Fsm<Lender, Hit> {
+    static inline brio::EventQueue<Event, 2, HostPlatform> queue;
+    using LendsTo = brio::Subscribers<Borrower>;
+    static void init() {}
+};
+
 void reset() {
     trace.clear();
     HostPlatform::reset();
@@ -146,4 +157,18 @@ TEST_CASE("publish delivers one copy to every subscriber, in list order") {
     CHECK(Low::queue.size() == 1);
     while (K::step()) {}
     CHECK(trace == Trace{"hi:note5", "lo:note5"});
+}
+
+TEST_CASE("Pack answers ordering questions; a lender's borrowers must precede it") {
+    using Ok = brio::Pack<Borrower, Lender, High>;
+    static_assert(Ok::index<Borrower>() == 0);
+    static_assert(Ok::index<Lender>() == 1);
+    static_assert(Ok::index<Low>() == 3);          // absent: sizeof...(Aos)
+    static_assert(Ok::lends_ok<Lender>());
+    static_assert(Ok::lends_ok<High>());           // no LendsTo: trivially ok
+    static_assert(!brio::Pack<Lender, Borrower>::lends_ok<Lender>());
+    // Kernel<HostPlatform, Lender, Borrower> would fail its static_assert.
+    using K = brio::Kernel<HostPlatform, Borrower, Lender>;
+    K::init_all();
+    CHECK(true);
 }

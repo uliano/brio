@@ -30,7 +30,11 @@ resume later.
 **Scheduling contract**: the line consumer must precede SerialPort in
 the Kernel pack. The kernel then consumes every posted line before
 SerialPort runs again, which is why `in_flight` can reset at dispatch
-entry and two buffers are exactly sufficient.
+entry and two buffers are exactly sufficient. The line is a
+`Lease::dispatch` loan (`Borrowed<char, Lease::dispatch>`, see
+[kernel.md](kernel.md) section 4): SerialPort declares
+`LendsTo = Subscribers<LineSink>` and the Kernel refuses a pack that
+violates the order.
 
 ## TX policy: block, don't drop
 

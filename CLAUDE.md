@@ -538,9 +538,14 @@ lib/brio/                the brio framework (auto-linked by the LDF), all in
                            expiry; intrusive armed list, drift-free
                            periodics, wrap-safe deadlines, RAII disarm;
                            processed by the kernel loop (T2)
-    kernel.hpp             Kernel<P, Aos...>: init_all/step/idle_if_empty/
-                           run - the QV loop (priority = pack order, one
-                           event per turn, race-free IDLE sleep)
+    borrowed.hpp           Borrowed<T, Lease> pointer payloads with the
+                           lease (dispatch | reply) in the type; lenders
+                           declare LendsTo = Subscribers<...>
+    kernel.hpp             Pack<Aos...> (index, lends_ok - pack ordering
+                           facts) + Kernel<P, Aos...>: init_all/step/
+                           idle_if_empty/run - the QV loop (priority =
+                           pack order, one event per turn, race-free IDLE
+                           sleep); static_asserts borrowers before lenders
     panic.hpp              panic<P, Reporter>() [[noreturn]] + PanicCode +
                            HaltReporter + take_panic_record<P>() boot-side
                            fetch-and-clear
