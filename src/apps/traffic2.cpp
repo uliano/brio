@@ -34,6 +34,7 @@
 #include <variant>
 
 #include "avrdx/clock.hpp"
+#include "avrdx/pin.hpp"
 #include "avrdx/pwm.hpp"
 #include "avrdx/platform_avr.hpp"
 #include "avrdx/ticker.hpp"
@@ -117,6 +118,12 @@ using Lamp4 = Lamp<PwmC::Channel<3>, PwmC::Channel<4>, PwmC::Channel<5>>;
 struct ButtonPressed { uint8_t id; };     // 0..3
 
 // ---- Buttons: samples, debounces, publishes ---------------------------------
+// The four buttons as one PinSet (avrdx/pin.hpp): pins on any port,
+// read as a bit mask, configured in one call. Apps never touch PORT
+// registers themselves - that is what the pin driver is for.
+using Keys = brio::PinSet<brio::Pin<'A', 2>, brio::Pin<'A', 3>,
+                          brio::Pin<'A', 4>, brio::Pin<'A', 5>>;
+
 // A private event: Buttons' own heartbeat. Empty struct = zero payload;
 // its TYPE is the information.
 struct Tick {};
@@ -148,7 +155,7 @@ struct Buttons : brio::Fsm<Buttons, Tick> {
     // other. Constructed at static init, disarmed until armed below.
     static inline brio::TimeEvent<P, Buttons, Tick> sampler{Tick{}};
 
-    static constexpr uint8_t count = 4;
+    static constexpr uint8_t count = Keys::count;
     static constexpr uint8_t stable_samples = 3;    // 3 x 10 ms = 30 ms
 
     // init(): the second thing the contract requires. The kernel calls
@@ -156,11 +163,7 @@ struct Buttons : brio::Fsm<Buttons, Tick> {
     // what this AO owns, then start(&initial_state): arm the machine
     // and deliver its first Entry - synchronously, right here.
     static void init() {
-        PORTA.DIRCLR = 0x3C;                                // PA2..PA5 inputs
-        PORTA.PIN2CTRL = PORT_PULLUPEN_bm;                  // pull-ups: idle high
-        PORTA.PIN3CTRL = PORT_PULLUPEN_bm;
-        PORTA.PIN4CTRL = PORT_PULLUPEN_bm;
-        PORTA.PIN5CTRL = PORT_PULLUPEN_bm;
+        Keys::input(true);                                  // inputs, pull-ups: idle high
         start(&sampling);
     }
 
@@ -187,8 +190,9 @@ struct Buttons : brio::Fsm<Buttons, Tick> {
             // Tick: the sampler expired and posted this; we are now
             // inside Buttons' own dispatch, main context, no ISR rules.
             [](Tick) {
-                // VPORTA.IN read once; buttons on PA2..PA5, active-low.
-                const uint8_t raw = static_cast<uint8_t>((~VPORTA.IN >> 2) & 0x0F);  // 1 = pressed
+                // Four single-cycle pin reads into one mask; buttons are
+                // active-low (pull-ups), invert: 1 = pressed.
+                const uint8_t raw = static_cast<uint8_t>(~Keys::read() & Keys::mask);
                 for (uint8_t i = 0; i < count; ++i) {
                     const bool now = raw & (1u << i);
                     if (now == pressed[i]) {

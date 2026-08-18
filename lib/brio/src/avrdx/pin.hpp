@@ -133,4 +133,44 @@ struct Pin {
 
 static_assert(PwmChannel<Pin<'A', 0>>);
 
+/**
+ * PinSet<Pins...>: up to 8 pins, on any ports, handled as one bit mask
+ * (bit i = the i-th pin of the pack). For a row of buttons, a bus of
+ * select lines, a DIP switch. Every operation is a fold over the pack,
+ * so a set on one port costs the same single-cycle VPORT accesses as
+ * writing the port by hand - and the pins need not share a port.
+ *
+ *   using Keys = brio::PinSet<brio::Pin<'A', 2>, brio::Pin<'A', 3>>;
+ *   Keys::input(true);                 // inputs with pull-ups
+ *   const uint8_t raw = ~Keys::read() & Keys::mask;   // active-low
+ */
+template <typename... Pins>
+struct PinSet {
+    static_assert(sizeof...(Pins) >= 1 && sizeof...(Pins) <= 8, "1..8 pins");
+    PinSet() = delete;
+
+    static constexpr uint8_t count = sizeof...(Pins);
+    static constexpr uint8_t mask = static_cast<uint8_t>((1u << count) - 1u);
+
+    static void input(bool pullup = false) {
+        (Pins::input(), ...);
+        (Pins::pullup(pullup), ...);
+    }
+    static void output() { (Pins::output(), ...); }
+
+    /// Bit i = level of pin i.
+    static uint8_t read() {
+        uint8_t v = 0;
+        uint8_t bit = 0;
+        ((v |= static_cast<uint8_t>(Pins::read() ? (1u << bit) : 0u), ++bit), ...);
+        return v;
+    }
+
+    /// Drive pin i to bit i of `value`.
+    static void write(uint8_t value) {
+        uint8_t bit = 0;
+        (((value & (1u << bit)) ? Pins::set() : Pins::clear(), ++bit), ...);
+    }
+};
+
 } // namespace brio

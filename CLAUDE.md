@@ -90,7 +90,9 @@ ISR handler BODIES (`[[gnu::always_inline]]`), the app binds the
 vector - vector names never appear in portable code. No `#ifdef` where
 a template/concept boundary can do the job; no target includes outside
 the target strata; the kernel must never know which silicon it runs
-on. Full text: `docs/design/overview.md`.
+on. Apps never touch registers (PORTx/VPORTx/peripheral structs live
+only in target drivers; the ISR vector binding is the one vendor glue an
+app may contain). Full text: `docs/design/overview.md`.
 
 ## Open items and horizon
 
@@ -269,7 +271,8 @@ lib/brio/src/            the framework, four strata:
                            rebases the users then switches; clock_hz(clock)
     delay.hpp              delay_us(clock, us) "at least": folded cycles when
                            constant, 4-cycle loop otherwise; cycles_per_us
-    pin.hpp                Pin<'A',5> compile-time GPIO + PinRef descriptor
+    pin.hpp                Pin<'A',5> compile-time GPIO (also a PwmChannel,
+                           max 1) + PinRef descriptor + PinSet<Pins...> mask
     uart.hpp               Uart<n, Route, rx, tx> interrupt-driven transport
     spi.hpp                Spi<n> master engine (two-phase descriptor,
                            per-byte ISR pump, CS owned by the engine)

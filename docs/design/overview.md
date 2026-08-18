@@ -164,6 +164,11 @@ driver is made and WHAT it produces upward, not what the peripheral is.
 - `std::optional` returns instead of bool + out-parameter.
 - Header comments explain the concurrency model and the WHY of each
   tradeoff - that comment IS the API documentation.
+- **Apps never touch registers.** `PORTx.`, `VPORTx.`, peripheral
+  structs and vendor bit masks appear only inside the target stratum's
+  drivers; an app that needs an operation the driver lacks adds it to
+  the driver (`Pin::pullup`, `PinSet::read`), never works around it.
+  The only vendor glue an app may contain is the ISR vector binding.
 
 ## ISR binding pattern
 
