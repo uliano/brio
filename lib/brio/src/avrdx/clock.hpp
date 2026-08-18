@@ -65,7 +65,8 @@
 
 #include <stdint.h>
 #include <avr/io.h>
-#include <concepts>
+
+#include "util/clock.hpp"
 
 namespace brio {
 
@@ -213,30 +214,6 @@ private:
     }
 };
 
-/// The rate of any clock type: a constant for a static Clock, a value
-/// for a DynamicClock. Drivers write `clock_hz(clock)` and get folding
-/// for free when it can fold.
-template <typename C>
-constexpr uint32_t clock_hz(C) {
-    if constexpr (C::is_static) {
-        return C::hz;
-    } else {
-        return C::hz();
-    }
-}
-
-/// For a clocked driver's init(clock): true when the clock is static
-/// (nothing to follow) or when the dynamic clock lists Driver among the
-/// users it rebases. static_assert(clock_follows<Clock, Driver>()).
-template <typename C, typename Driver>
-constexpr bool clock_follows() {
-    if constexpr (C::is_static) {
-        return true;
-    } else {
-        return C::template rebases<Driver>;
-    }
-}
-
 /**
  * The runtime regime. Boot is a static Clock<...> naming the source and
  * its rate; set<hz>() / set(hz) name the NEW RATE (the app speaks Hz -
@@ -260,15 +237,6 @@ constexpr bool clock_follows() {
  *   SysClock::init();                 // Boot's init: 24 MHz
  *   SysClock::set<4'000'000>();       // Serial and Twi0 rebased, then 4 MHz
  */
-/// What a driver must offer to be listed among a DynamicClock's users:
-/// a static rebase(hz) that makes it follow the new peripheral clock
-/// (recompute divisors, first draining what it has in flight at the old
-/// rate if it must). Checked where the list is written.
-template <typename U>
-concept ClockUser = requires(uint32_t hz) {
-    { U::rebase(hz) } -> std::same_as<void>;
-};
-
 /// The main prescaler that turns source_hz into hz exactly, or div1
 /// with `ok` false when no prescaler does. Rates are what the app names;
 /// the divider is this silicon's detail.

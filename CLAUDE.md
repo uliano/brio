@@ -22,7 +22,8 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   `overview.md` (philosophy, governing rule, layering, style),
   `kernel.md` (the AO kernel: model, contract, events, payloads,
   queues, FSM, delivery, scheduler, time, panic, platform, index),
-  `serial.md`, `spi-bus.md`, `i2c-bus.md`, `ring.md`.
+  `serial.md`, `spi-bus.md`, `i2c-bus.md`, `ring.md`, `clock.md` (the
+  clock model: rate truth, static/dynamic, rebase fan-out).
 - `docs/targets/*.md` - one operational page per target: toolchain,
   board, probe, debugger and their quirks (`avrdx.md`, `host.md`).
 - `docs/bench.md` - the board, the wiring and the apps as they are
@@ -244,6 +245,8 @@ lib/brio/src/            the framework, four strata:
                            extend via print_one + ADL
     timestamp.hpp          TimeStamp (ms fraction)
     wire.hpp               constexpr big-endian load/store (16/24/32, be24s)
+    clock.hpp              ClockUser concept, clock_hz(clock), clock_follows:
+                           the target-independent clock contracts
     pwm_channel.hpp        PwmChannel concept: max + duty(v), the role-level
                            "one dimmable output" (Pin satisfies it, max 1)
     rgb_lamp.hpp           RgbLamp<R, G, B> over three PwmChannels, levels

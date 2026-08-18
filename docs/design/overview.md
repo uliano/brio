@@ -105,7 +105,8 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   synchronous, no completion, no contention worth an arbiter: rank of
   `Pin`, called from handlers. Fades and sequences are AOs in `util/`
   above the channel, never inside the driver.
-- **The clock is a type with two regimes.** Compile-time: `Clock<...>`
+- **The clock is a type with two regimes** (full model:
+  [clock.md](clock.md)). Compile-time: `Clock<...>`
   owns the tree, `Clock::hz` is the ONE truth the same target's drivers
   derive their divisors from (no vendor `F_CPU`-style macro exists in
   the build: a second truth is unflagged, and vendor headers that need

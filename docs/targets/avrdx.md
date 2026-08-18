@@ -91,6 +91,11 @@ Then `pio device monitor -e <app>` uses that app's speed;
 
 ## Clock, delay and timebase
 
+(The target-independent model - one rate truth, static and dynamic
+regimes, the rebase fan-out and its checks - is
+[../design/clock.md](../design/clock.md); this section is the AVR
+DA/DB realization.)
+
 The main clock is a TYPE, `brio::Clock<source, source_hz, div>`
 (`avrdx/clock.hpp`), and `Clock::hz` is the one truth every driver of
 this target derives its divisors from: `Uart::init(clock, baud)`,

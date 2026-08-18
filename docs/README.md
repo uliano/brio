@@ -18,6 +18,7 @@ the second target, the bench is disposable:
 | [design/spi-bus.md](design/spi-bus.md) | The shared SPI bus: engine descriptor, AO arbitration, multi-device rules |
 | [design/i2c-bus.md](design/i2c-bus.md) | The I2C bus: BusMaster generalized, the TWI engine descriptor, status vocabulary |
 | [design/ring.md](design/ring.md) | Ring: the SPSC FIFO, lock-free where the platform allows, guarded elsewhere |
+| [design/clock.md](design/clock.md) | The clock model: one rate truth, static and dynamic regimes, the synchronous rebase fan-out and its two compile-time checks |
 | [targets/avrdx.md](targets/avrdx.md) | AVR DA/DB: toolchain, board, Atmel-ICE upload, PyAvrOCD debugging and its quirks, clock/timebase |
 | [targets/host.md](targets/host.md) | The native test target: HostPlatform, doctest suites |
 | [bench.md](bench.md) | The board, the wiring and the apps as they are today (volatile) |
