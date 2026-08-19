@@ -294,8 +294,8 @@ lib/brio/src/            the framework, four strata:
                            extend via print_one + ADL
     timestamp.hpp          TimeStamp (ms fraction)
     wire.hpp               constexpr big-endian load/store (16/24/32, be24s)
-    analog.hpp             Ref + ref_mv, adc_mv/adc_mv_signed, dac_code/dac_mv,
-                           temp_kelvin: pure analog arithmetic (host-tested)
+    analog.hpp             adc_mv/adc_mv_signed, dac_code/dac_mv: pure counts<->mV
+                           arithmetic (host-tested); Ref/ref_mv are each target's
     clock.hpp              ClockUser concept, clock_hz(clock), clock_follows:
                            the target-independent clock contracts
     pwm_channel.hpp        PwmChannel concept: max + duty(v), the role-level
@@ -331,7 +331,7 @@ lib/brio/src/            the framework, four strata:
                            channels on pins 0..5 (duty<ch>(v), 0/255 clean);
                            Channel<ch> = the PwmChannel type
     ticker.hpp             BasicTicker<tps> RTC/PIT timebase (Ticker = 1024)
-    vref.hpp               Vref::adc0/dac0/ac(Ref, always_on): the selector
+    vref.hpp               Ref + ref_mv (this silicon's levels) + Vref::adc0/dac0/ac
     dac.hpp                Dac<0>: init(DacConfig), set(code)/set_mv - actuator
     adc.hpp                Adc<0>: init<cfg>()/init(cfg)/reconfigure, AnalogIn<Pin>
                            + AdcInput, select/start/stop/read/result, window,

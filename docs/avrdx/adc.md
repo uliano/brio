@@ -2,7 +2,7 @@
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (ADC
 chapter, electricals 39.18), errata DS80000915F (2.3.1, 2.3.2).
-Driver: `avrdx/adc.hpp`; vocabulary and arithmetic: `util/analog.hpp`
+Driver: `avrdx/adc.hpp`; `Ref` from `avrdx/vref.hpp`, counts <-> mV arithmetic in `util/analog.hpp`
 (host-tested in `test_analog`); event start through `avrdx/evsys.hpp`.
 Reference test: `test_avr_analog` (all 14 tests).
 
@@ -100,9 +100,9 @@ The verbs, by purpose:
 | events | `start_on(EventChannel<n>{})` (a conversion per rising edge of the channel), `start_on_events(bool)`; generator `EvAdc0Ready`, user `EvAdc0Start` (evsys.hpp) |
 | clock | `rebase(hz)` - the `ClockUser` hook a `DynamicClock` calls: keeps the CLK_ADC chosen at init, within range |
 
-Arithmetic (`util/analog.hpp`, pure): `ref_mv(Ref, known_mv)`,
-`adc_mv(counts, steps, ref_mv)`, `adc_mv_signed(...)`,
-`temp_kelvin(result, slope, offset)`; timing: `adc_clock_hz(clk, presc)`,
+Arithmetic: `ref_mv(Ref, known_mv)` (`avrdx/vref.hpp`), `adc_mv(counts,
+steps, ref_mv)`, `adc_mv_signed(...)` (`util/analog.hpp`, pure),
+`Adc<0>::temp_kelvin(result)` (the signature-row formula); timing: `adc_clock_hz(clk, presc)`,
 `adc_conversion_cycles(cfg)`, `adc_presc_for(clk, target_hz)`.
 
 ## How to use it
@@ -232,7 +232,7 @@ A::init(clock, AdcConfig{.reference = Ref::v2048, .prescaler = AdcPresc::div64,
                          .sample_length = 12, .init_delay = AdcInitDelay::cycles64});
 A::select(AdcInput::temp);
 A::flush();                                  // errata 2.3.2: the select came after enable
-const uint16_t kelvin = temp_kelvin(A::read(), SIGROW.TEMPSENSE0, SIGROW.TEMPSENSE1);
+const uint16_t kelvin = A::temp_kelvin(A::read());   // signature-row factors inside
 
 A::select(AdcInput::vdd_div10);              // VDD in mV = adc_mv(read, steps, ref) * 10
 ```

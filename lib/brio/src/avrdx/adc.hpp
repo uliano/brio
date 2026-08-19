@@ -396,6 +396,19 @@ public:
     static void enable_wcmp_interrupt(bool on) { irq(ADC_WCMP_bm, on); }
 
     /// ISR body for ADCn_RESRDY_vect: the result (flags cleared by the read).
+    /// Die temperature in kelvin from a 12-bit single-ended reading of
+    /// AdcInput::temp with the 2.048 V reference (DS40002247B 33.3.3.8:
+    /// T = (offset - result) * slope / 4096, the two factors from the
+    /// signature row). Pure arithmetic over the reading: call it with
+    /// result() / read() of a temp conversion.
+    static uint16_t temp_kelvin(uint16_t result12) {
+        uint32_t t = static_cast<uint32_t>(SIGROW.TEMPSENSE1) - result12;
+        t *= SIGROW.TEMPSENSE0;
+        t += 4096u / 2;
+        t /= 4096u;
+        return static_cast<uint16_t>(t);
+    }
+
     [[gnu::always_inline]] static uint16_t resrdy() { return result(); }
     /// ISR body for ADCn_WCMP_vect: the matching result (flags cleared by the read).
     [[gnu::always_inline]] static uint16_t wcmp() { return result(); }

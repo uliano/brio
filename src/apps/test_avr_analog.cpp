@@ -488,8 +488,8 @@ void t13_internal() {
     A::flush();
     delay_us(clock, 40);
     const uint16_t t = read_avg(8);
-    const uint16_t k = temp_kelvin(t, SIGROW.TEMPSENSE0, SIGROW.TEMPSENSE1);
-    print(serial, "  temp raw ", t, " sigrow slope ", SIGROW.TEMPSENSE0, " offset ", SIGROW.TEMPSENSE1,
+    const uint16_t k = A::temp_kelvin(t);
+    print(serial, "  temp raw ", t,
           " -> ", k, " K = ", static_cast<int16_t>(k - 273), " C", crlf);
     verdict("die temperature plausible (10..50 C)", k > 283 && k < 323);
 }

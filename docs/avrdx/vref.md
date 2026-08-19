@@ -1,9 +1,9 @@
 # VREF - the voltage reference selector (AVR DA/DB)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B,
-errata DS80000915F (no VREF items). Driver: `avrdx/vref.hpp`;
-vocabulary: `util/analog.hpp`. Reference test: `test_avr_analog`
-(test 1, 14).
+errata DS80000915F (no VREF items). Driver: `avrdx/vref.hpp` (the
+`Ref` vocabulary is defined there; the counts <-> mV arithmetic is in
+`util/analog.hpp`). Reference test: `test_avr_analog` (test 1, 14).
 
 ## What the silicon does
 
@@ -45,7 +45,10 @@ Dac<0>::init({.reference = Ref::v2048});                         // sets VREF.DA
 Adc<0>::init(clock, AdcConfig{.reference = Ref::v2048});         // sets VREF.ADC0REF
 ```
 
-Converting counts to millivolts uses the same vocabulary:
+Converting counts to millivolts: `ref_mv()` gives the level, the
+target-independent arithmetic of `util/analog.hpp` does the rest.
+(`Ref` is this silicon's: another target's vref header defines its
+own `brio::Ref` with its levels - same name, never in one binary.)
 
 ```cpp
 #include "util/analog.hpp"

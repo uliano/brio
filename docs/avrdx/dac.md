@@ -2,7 +2,7 @@
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
 (DAC chapter, electricals 39.19), errata DS80000915F (2.6.1). Driver:
-`avrdx/dac.hpp`; vocabulary: `util/analog.hpp`. Reference test:
+`avrdx/dac.hpp`; `Ref` from `avrdx/vref.hpp`, arithmetic in `util/analog.hpp`. Reference test:
 `test_avr_analog` (tests 1-4, 6, 11, 14).
 
 ## What the silicon does

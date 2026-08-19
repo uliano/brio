@@ -10,10 +10,13 @@
  * with an internal main clock, 200 us with an external one; 2 us to
  * change level) for ~40-175 uA.
  *
- * This is a vocabulary, not a device: the enum Ref and ref_mv() live
- * in util/analog.hpp (pure); here only the three setters, called by
- * the consumers' init() - an app names its reference where it
- * configures the ADC or the DAC and never writes VREF itself.
+ * This is a vocabulary plus three setters, not a device: the enum Ref
+ * names this silicon's levels (another target's vref header defines
+ * its own brio::Ref - same name, its levels), ref_mv() gives their
+ * millivolts to whoever converts (util/analog.hpp holds the
+ * target-independent arithmetic); the setters are called by the
+ * consumers' init() - an app names its reference where it configures
+ * the ADC or the DAC and never writes VREF itself.
  */
 
 #pragma once
@@ -24,6 +27,25 @@
 #include "util/analog.hpp"
 
 namespace brio {
+
+/// A voltage reference selection: the internal levels the VREF offers;
+/// `vdd` and `vrefa` are "whatever it is" - the app supplies the
+/// millivolts when it knows them.
+enum class Ref : uint8_t { v1024, v2048, v2500, v4096, vdd, vrefa };
+
+/// Millivolts of a reference. For vdd/vrefa the app's known value is
+/// returned as given (0 = unknown, conversions then yield 0).
+constexpr uint16_t ref_mv(Ref r, uint16_t known_mv = 0) {
+    switch (r) {
+    case Ref::v1024: return 1024;
+    case Ref::v2048: return 2048;
+    case Ref::v2500: return 2500;
+    case Ref::v4096: return 4096;
+    case Ref::vdd:
+    case Ref::vrefa: return known_mv;
+    }
+    return 0;
+}
 
 struct Vref {
     Vref() = delete;
