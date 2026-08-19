@@ -47,7 +47,14 @@
  * throw-away conversion - flush() does exactly that, blocking. 2.3.1
  * (A4): -3 mV typical single-ended offset.
  *
- * Bench facts (analog0, silicon A5): the converter needs its warm-up
+ * The clock: CLK_ADC = CLK_PER / prescaler must stay within 125 kHz ..
+ * 2 MHz - init() refuses (compile time for a static clock) a prescaler
+ * that does not. Adc is a ClockUser: on a DynamicClock change rebase()
+ * re-picks the prescaler to keep the CLK_ADC chosen at init (stopped,
+ * idle, rewritten, free-running resumed); the owner pauses event-
+ * started conversions around the switch.
+ *
+ * Bench facts (test_avr_analog, silicon A5): the converter needs its warm-up
  * (t_ADC_INIT 6 us typ.) after ENABLE before the first conversion is
  * trustworthy - init(clock, cfg) waits for it; INITDLY is paid only for
  * the first conversion after enable (not per start); the UNBUFFERED
@@ -72,6 +79,7 @@
 
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
+#include "util/clock.hpp"
 #include "avrdx/pin.hpp"
 #include "avrdx/vref.hpp"
 #include "util/analog.hpp"
@@ -125,6 +133,30 @@ constexpr bool adc_config_valid(const AdcConfig& c) {
 /// CLK_ADC in Hz for a peripheral clock and a prescaler.
 constexpr uint32_t adc_clock_hz(uint32_t clk_per_hz, AdcPresc p) {
     return clk_per_hz / adc_presc_divisor(p);
+}
+
+/// The CLK_ADC range the silicon supports (TCLK_ADC 0.5 .. 8 us).
+inline constexpr uint32_t adc_clock_min_hz = 125'000;
+inline constexpr uint32_t adc_clock_max_hz = 2'000'000;
+
+constexpr bool adc_clock_in_range(uint32_t clk_per_hz, AdcPresc p) {
+    const uint32_t f = adc_clock_hz(clk_per_hz, p);
+    return f >= adc_clock_min_hz && f <= adc_clock_max_hz;
+}
+
+/// The prescaler giving the CLK_ADC closest to `target_hz` at
+/// `clk_per_hz`, within range (the nearest in-range one otherwise).
+constexpr AdcPresc adc_presc_for(uint32_t clk_per_hz, uint32_t target_hz) {
+    AdcPresc best = AdcPresc::div256;
+    uint32_t best_err = 0xFFFFFFFFu;
+    for (uint8_t i = 0; i < 14; ++i) {
+        const AdcPresc p = static_cast<AdcPresc>(i);
+        if (!adc_clock_in_range(clk_per_hz, p)) continue;
+        const uint32_t f = adc_clock_hz(clk_per_hz, p);
+        const uint32_t err = f > target_hz ? f - target_hz : target_hz - f;
+        if (err < best_err) { best_err = err; best = p; }
+    }
+    return best;
 }
 
 /// Total conversion time in CLK_PER cycles for a configuration (33.3.3.4).
@@ -181,11 +213,16 @@ public:
 
     // ---- configuration ----------------------------------------------------
 
-    /// Compile-time form: the whole configuration as a constant, checked.
+    /// Compile-time form: the whole configuration as a constant, checked
+    /// - including the CLK_ADC range for a static clock.
     template <AdcConfig cfg, typename Clock>
     static void init(Clock clock) {
         static_assert(adc_config_valid(cfg),
                       "AdcConfig: accumulate must be 1,2,4,..,128 and sample_delay <= 15");
+        if constexpr (Clock::is_static) {
+            static_assert(adc_clock_in_range(Clock::hz, cfg.prescaler),
+                          "AdcConfig: CLK_PER / prescaler must stay within 125 kHz .. 2 MHz");
+        }
         init(clock, cfg);
     }
 
@@ -196,7 +233,10 @@ public:
     /// invalid configuration.
     template <typename Clock>
     static bool init(Clock clock, const AdcConfig& cfg) {
-        if (!adc_config_valid(cfg)) {
+        static_assert(clock_follows<Clock, Adc>(),
+                      "this Adc is initialized with a DynamicClock that does not list it "
+                      "among its Users: CLK_ADC would drift out of range on a clock change");
+        if (!adc_config_valid(cfg) || !adc_clock_in_range(clock_hz(clock), cfg.prescaler)) {
             return false;
         }
         auto& r = regs();
@@ -205,6 +245,8 @@ public:
         ref_ = cfg.reference;
         steps_ = cfg.resolution == AdcRes::bits12 ? 4096u : 1024u;
         acc_ = cfg.accumulate;
+        clk_adc_hz_ = adc_clock_hz(clock_hz(clock), cfg.prescaler);   // what rebase() preserves
+        free_running_ = cfg.free_running;
         r.MUXPOS = ADC_MUXPOS_GND_gc;
         r.MUXNEG = ADC_MUXNEG_GND_gc;
         r.CTRLB = sampnum_bits(cfg.accumulate);
@@ -240,6 +282,29 @@ public:
         }
         return init(clock, cfg);
     }
+
+    /// The peripheral clock changed (DynamicClock fan-out): keep CLK_ADC
+    /// as close as possible to the one chosen at init, within range.
+    /// PRESC must not change during a conversion: this stops, waits for
+    /// idle, rewrites, and restarts free-running if it was on. The OWNER
+    /// must have paused event-started conversions (start_on_events(false))
+    /// before the clock switches - a conversion can begin at any time
+    /// otherwise. Sample and init delays are in CLK_ADC cycles: they
+    /// scale with the new CLK_ADC like everything else.
+    static void rebase(uint32_t hz) {
+        const AdcPresc p = adc_presc_for(hz, clk_adc_hz_);
+        stop();
+        while (busy()) {
+        }
+        regs().CTRLC = static_cast<uint8_t>(p);
+        clk_adc_hz_ = adc_clock_hz(hz, p);
+        if (free_running_) {
+            start();
+        }
+    }
+
+    /// CLK_ADC in effect (after init/rebase).
+    static uint32_t clock_hz_adc() { return clk_adc_hz_; }
 
     // ---- input selection --------------------------------------------------
 
@@ -366,6 +431,10 @@ private:
     static inline uint32_t steps_ = 4096;
     static inline uint8_t acc_ = 1;
     static inline bool last_hit_ = false;
+    static inline uint32_t clk_adc_hz_ = 0;
+    static inline bool free_running_ = false;
 };
+
+static_assert(ClockUser<Adc<0>>);
 
 } // namespace brio

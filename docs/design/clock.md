@@ -62,7 +62,9 @@ late. So:
   exactly like the AO pack of the Kernel or a `Subscribers<...>` list;
 - each user satisfies the **`ClockUser` concept**: `static void
   rebase(uint32_t hz)`, checked where the list is written (a type
-  without `rebase` does not compile there);
+  without `rebase` does not compile there). Today's users on AVR DA/DB:
+  `Uart` (drains TX, new BAUD), `Twi` (both MBAUDs), `Spi` (setup
+  timing base), `Adc` (a prescaler keeping CLK_ADC in range);
 - `set()` calls every user's `rebase(next)` **in list order,
   synchronously** - a fold expression over the pack, unrolled by the
   compiler into direct calls, no table, no RAM - and **only then**

@@ -59,8 +59,11 @@ the second target, the bench is disposable:
   the driver header, the reference test suite - no chapter lists, no
   history. Then: *what the silicon does* (the behaviour and the
   physical facts that matter to code, measured ones marked as such),
-  *how to use it* (one example per way of using it - what to write,
-  since readers want the call, not the header), *bench findings* (the
+  *types and verbs* (a systematic inventory of the configuration knobs
+  - name, values, default, effect - the input/resource types, and the
+  verbs by purpose: names and meaning, never signatures), *how to use
+  it* (one example per way of using it - what to write, since readers
+  want the call, not the header), *bench findings* (the
   facts the test suite established, with its name). Tracks, guiding
   applications and history live in CLAUDE.md and memory, never here.
 - **Today's truth only, no change history.** A doc says what is,

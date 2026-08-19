@@ -61,13 +61,56 @@ silicon has a -3 mV single-ended offset (2.3.1). Accuracy (12-bit,
 500 kHz, 3.0 V reference): INL +-1.8, DNL +-1, offset 2.5 typ / 5 max,
 gain +-5 LSB.
 
+## Types and verbs
+
+One type, `Adc<0>` (monostate; the instance number for symmetry with
+targets that have several). Its configuration is a struct whose
+fields carry the datasheet's names:
+
+| `AdcConfig` field | Values | Default | Effect |
+|-------------------|--------|---------|--------|
+| `reference` | `Ref::v1024 / v2048 / v2500 / v4096 / vdd / vrefa` | `vdd` | full scale (selects VREF.ADC0REF) |
+| `reference_always_on` | bool | false | keep the reference powered (no start-up wait) |
+| `resolution` | `AdcRes::bits12 / bits10` | 12 | 0..4095 or 0..1023 per sample |
+| `differential` | bool | false | signed (pos - neg), -2048..2047 |
+| `prescaler` | `AdcPresc::div2 .. div256` (14 values) | div16 | CLK_ADC = CLK_PER / n, must land in 125 kHz .. 2 MHz |
+| `sample_length` | 0..255 | 0 | extra CLK_ADC cycles of sampling (sources > 10 kOhm, the unbuffered DAC, the temperature sensor) |
+| `sample_delay` | 0..15 | 0 | CLK_ADC cycles before sampling (move off a noise harmonic) |
+| `init_delay` | `AdcInitDelay::none / cycles16 .. cycles256` | none | settling before the FIRST conversion after enable |
+| `accumulate` | 1, 2, 4 .. 128 | 1 | samples summed per result (RES = sum, truncated above 16) |
+| `left_adjust` | bool | false | result << 4 (thresholds independent of accumulation) |
+| `free_running` | bool | false | each conversion starts the next |
+| `run_standby` | bool | false | keep converting in standby sleep |
+
+Inputs are types or enumerators: `AnalogIn<Pin<'D', 1>>` (a pin,
+PD0-7 / PE0-7 / PF0-5 - the table is checked, PF0-5 refused as a
+negative input) and `AdcInput::gnd / temp / vdd_div10 / vddio2_div10 /
+dac0 / dacref0..2` (internal; as negative input only `gnd` and `dac0`).
+
+The verbs, by purpose:
+
+| Purpose | Verbs |
+|---------|-------|
+| configure | `init<cfg>(clock)` (constant, checked), `init(clock, cfg)` (value; `false` if invalid), `reconfigure(clock, cfg)` (under a running program: stops, waits idle, applies), `disable()` |
+| what is in effect | `reference()`, `steps()` (4096/1024), `accumulate()`, `result_shift()`, `result_steps()`, `clock_hz_adc()` |
+| select the input | `select(AnalogIn<P>{})`, `select(AdcInput)`, `select(pos, neg)` (differential), `flush()` (one throw-away conversion: errata 2.3.2) |
+| convert | `start()`, `stop()`, `busy()`, `ready()`, `result()`, `result_signed()`, `read()` (start + wait + result, blocking) |
+| window comparator | `window(Window::below/above/inside/outside, low, high)`, `window_off()`, `window_hit()` (about the last result read), `window_flag()` / `clear_window_flag()` (the live flag) |
+| interrupts | `enable_resrdy_interrupt(bool)`, `enable_wcmp_interrupt(bool)`; ISR bodies `resrdy()`, `wcmp()` (return the result; the app binds the vectors and posts) |
+| events | `start_on(EventChannel<n>{})` (a conversion per rising edge of the channel), `start_on_events(bool)`; generator `EvAdc0Ready`, user `EvAdc0Start` (evsys.hpp) |
+| clock | `rebase(hz)` - the `ClockUser` hook a `DynamicClock` calls: keeps the CLK_ADC chosen at init, within range |
+
+Arithmetic (`util/analog.hpp`, pure): `ref_mv(Ref, known_mv)`,
+`adc_mv(counts, steps, ref_mv)`, `adc_mv_signed(...)`,
+`temp_kelvin(result, slope, offset)`; timing: `adc_clock_hz(clk, presc)`,
+`adc_conversion_cycles(cfg)`, `adc_presc_for(clk, target_hz)`.
+
 ## How to use it
 
-The driver is one type, `Adc<0>`, configured by a struct whose fields
-carry the datasheet's names. Two forms, one implementation: a constant
-configuration as a template argument (checked at compile time, every
-register write folded) or a run-time value (the same writes computed
-on the fly).
+Two forms of configuration, one implementation: a constant as a
+template argument (checked at compile time - knobs AND the CLK_ADC
+range for a static clock - every register write folded) or a run-time
+value (the same writes computed on the fly).
 
 ```cpp
 #include "avrdx/adc.hpp"
@@ -200,6 +243,20 @@ for the converter to be idle, applies the new configuration, waits the
 warm-up; the input is back on GND - `select()` again. The meaning of
 the results changes with it (reference, resolution, accumulation):
 convert with the new `steps()` / `result_shift()`.
+
+**When the clock changes** (a `DynamicClock`): CLK_ADC moves with
+CLK_PER, and a prescaler valid at one rate can be out of range at
+another. `Adc<0>` is a `ClockUser`: listed among the clock's users
+(`DynamicClock<Boot, Serial, Adc<0>>` - a dynamic clock that does not
+list it fails the `init` of the ADC), its `rebase(hz)` re-picks the
+prescaler to keep the CLK_ADC chosen at init as close as possible and
+within range: it stops, waits for the converter to be idle, rewrites,
+and resumes free-running if it was on. Sample and init delays are in
+CLK_ADC cycles, so they scale with it. What the owner must do: pause
+event-started conversions (`start_on_events(false)`) before
+`SysClock::set()`, because an event may start a conversion at any
+instant - the general rule of [clock.md](clock.md), here with its
+concrete case.
 
 Ownership: one converter, one owner. An AO that owns it configures it
 in its states and interprets its results; a second consumer asks that

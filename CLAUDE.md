@@ -322,7 +322,8 @@ lib/brio/src/            the framework, four strata:
     dac.hpp                Dac<0>: init(DacConfig), set(code)/set_mv - actuator
     adc.hpp                Adc<0>: init<cfg>()/init(cfg)/reconfigure, AnalogIn<Pin>
                            + AdcInput, select/start/stop/read/result, window,
-                           resrdy()/wcmp() ISR bodies, start_on(channel)
+                           resrdy()/wcmp() ISR bodies, start_on(channel),
+                           ClockUser (rebase keeps CLK_ADC in range)
     evsys.hpp              EVSYS: EventChannel<n> (source/off/pulse), generators
                            EvPitDiv/EvRtcOvf/EvRtcCmp/EvPin (code + legality),
                            users EvOut<Pin> + EventUserBase (listen/unlisten);
