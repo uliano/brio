@@ -42,11 +42,18 @@ struct AvrPlatform {
     /// so no wakeup can slip between the caller's queue check and the
     /// sleep - the lost-wakeup race is closed by the silicon.
     static void idle() {
-        set_sleep_mode(SLEEP_MODE_IDLE);
-        sleep_enable();
+        // One write arms mode + enable, one write disarms. Errata
+        // DS80000915F 2.2.4 (all silicon revisions): a store to an
+        // address >= 64 immediately followed by a write to SLPCTRL.CTRLA
+        // loses that write - a NOP before each CTRLA write is the
+        // documented workaround (avr-libc's set_sleep_mode/sleep_enable
+        // pair would be two back-to-back read-modify-writes of CTRLA).
+        __asm__ __volatile__("nop");
+        SLPCTRL.CTRLA = SLPCTRL_SMODE_IDLE_gc | SLPCTRL_SEN_bm;
         sei();
         sleep_cpu();
-        sleep_disable();
+        __asm__ __volatile__("nop");
+        SLPCTRL.CTRLA = 0;                       // sleep disabled again
     }
 
     /// Halt in the debugger when the OCD is active, plain NOP otherwise.

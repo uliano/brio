@@ -31,6 +31,35 @@ Canonical URLs (redirect to the current revision):
 `https://ww1.microchip.com/downloads/aemDocuments/documents/MCU08/ProductDocuments/DataSheets/AVR128DB28-32-48-64-DataSheet-DS40002247.pdf`,
 `https://ww1.microchip.com/downloads/aemDocuments/documents/MCU08/ProductDocuments/Errata/AVR128DB28-32-48-64-SilConErrataClarif-DS80000915.pdf`.
 
+## Errata DS80000915F: what touches brio (2026-08-19 reading)
+
+Applies to ALL silicon revisions (A4/A5/B0) unless noted:
+- **2.2.4 Write operation lost on consecutive writes** - an ST/STD/STS
+  to an address >= 64 immediately followed by an ST/STD to an address
+  < 64 (VPORT/GPIOR space) or by a write to `SLPCTRL.CTRLA` loses the
+  last write. brio: `Pin` uses SBI/CBI (I/O instructions, not ST) for
+  VPORT, so bare-pin code is unaffected; `AvrPlatform::idle()` writes
+  `SLPCTRL.CTRLA` with the documented NOP before each write (see the
+  comment there). Any future driver storing to VPORT with ST must
+  respect it.
+- **2.3.2 ADC MUX/accumulation delayed update** with `INITDLY != 0`:
+  set MUXPOS/MUXNEG/CTRLB before enabling or changing the reference,
+  or do a dummy conversion - a rule for the ADC driver.
+- **2.15.2 TWI Flush non-functional** - `Twi` must never use MCTRLB
+  FLUSH; recover by ENABLE off/on (it does not use FLUSH today).
+- **2.16.3 USART receiver dead after ISFIF** - only in auto-baud
+  modes, which `Uart` does not use.
+- 2.9.1 PD0 input buffer floating (28/32-pin only) - not our package.
+- A4/A5 only (not B0): 2.3.1 ADC single-ended offset (-3 mV typ.),
+  2.6.1 **DAC output buffer lifetime drift** (keep OUTEN on, or
+  calibrate against the ADC - a rule for the DAC driver), 2.5.x
+  CLKCTRL: EXTS/status bit not set for external sources (A4), PLL
+  items, RUNSTDBY with external clock (A4); TCA restart resets
+  direction, TCB CCMP/CNT 16-bit in 8-bit PWM, SPI1 alt2 on 48 pins,
+  TWI output override, USART open-drain, CCL whole-module disable.
+The device revision is readable at run time (`SYSCFG.REVID`, MAJOR
+0x01 = A, 0x02 = B): worth printing in a console banner once.
+
 Header of record for register names: the toolchain's
 `avr/ioavr128db48.h` (avr-libc); when the datasheet and the header
 disagree on a name, the header wins in code and the datasheet section
