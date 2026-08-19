@@ -24,7 +24,7 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   `kernel.md` (the AO kernel: model, contract, events, payloads,
   queues, FSM, delivery, scheduler, time, panic, platform, index),
   `clock.md` (the clock model), `serial.md`, `spi-bus.md`, `i2c-bus.md`,
-  `ring.md`.
+  `ring.md`, `analog.md` (the sampler usage type + arithmetic).
 - `docs/<target>/` - one folder per target, mirroring
   `lib/brio/src/<target>/` (`avrdx/`, `host/`): `README.md` is the
   operational page (toolchain, board, probe, debugger and their
@@ -171,7 +171,8 @@ gets its dated home in `docs/design/` when taken.
   3.3 V; measures VDD at start, run it at 5 V too) - a suite named
   test_<target>_<subject> is a reference test to keep passing through
   every restructuring; docs vref.md/dac.md/adc.md; 68/68 at 5 V too;
-  next: analog1 = kernel integration of the ADC) -> TCB/TCA/CCL/AC as tasks driven by
+  `sampler` = the ADC inside the kernel via util/analog_sampler.hpp,
+  bench-verified 512 samples/s no drops) -> TCB/TCA/CCL/AC as tasks driven by
   the Multislope app (OneShotPulse<Tcb>, EventCounter<Tcb>,
   CascadedCounter<Tcb,Tcb>, TcaHeartbeat, LUT flip-flops; the
   64-cycle snapshot stays in the ISR body; EventSystem static sugar
@@ -296,6 +297,10 @@ lib/brio/src/            the framework, four strata:
     wire.hpp               constexpr big-endian load/store (16/24/32, be24s)
     analog.hpp             adc_mv/adc_mv_signed, dac_code/dac_mv: pure counts<->mV
                            arithmetic (host-tested); Ref/ref_mv are each target's
+    analog_sampler.hpp     AnalogSampler<Converter, P, Subscribers, inputs...>: the
+                           owner AO walking a list of inputs, Sampled in (ISR glue,
+                           labelled by the converter's selected code), AnalogSample
+                           published; software pace or any hardware generator
     clock.hpp              ClockUser concept, clock_hz(clock), clock_follows:
                            the target-independent clock contracts
     pwm_channel.hpp        PwmChannel concept: max + duty(v), the role-level

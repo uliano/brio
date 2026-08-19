@@ -14,7 +14,7 @@
 // polling), declared outside the AO rules like mcp_diag - it needs
 // waits and ordered steps, and its findings feed the drivers. The
 // kernel integration of the ADC (results as events, event-paced
-// sampling, window hits) is analog1.
+// sampling) is the sampler app over util/analog_sampler.hpp.
 //
 // Wiring: PD6 (DAC0 OUT) -> PD1 (AIN1) and PD6 -> PD7 (VREFA). Nothing
 // else. Console 460800; type a test number, 'a' for all, '?' for the
