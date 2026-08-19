@@ -6,11 +6,11 @@ and states, once and target-independently, how drivers relate to it -
 in particular what happens when the rate changes at run time. This
 page is the model; the shape of a given tree (which oscillators, which
 prescalers or PLL parameters, which rates are reachable) is that
-target's business, documented in `docs/targets/`.
+target's business, documented in that target's folder (`docs/avrdx/`, ...).
 
 Contracts and helpers: `util/clock.hpp` (pure, no hardware). The AVR
 DA/DB realization: `avrdx/clock.hpp` (`Clock`, `DynamicClock` over the
-CLKCTRL resources - see [clkctrl.md](clkctrl.md)) and `avrdx/delay.hpp`
+CLKCTRL resources - see [clkctrl.md](../avrdx/clkctrl.md)) and `avrdx/delay.hpp`
 (`delay_us`).
 
 ## One truth for the rate
@@ -112,4 +112,4 @@ change, all of them before it happens, none of them through a queue.
 | `DynamicClock<Boot, Users...>` | `avrdx/clock.hpp` | AVR DA/DB dynamic clock over a static Boot |
 | `delay_us(clock, us)` | `avrdx/delay.hpp` | AVR DA/DB short wait, "at least" |
 
-Target pages: [../targets/avrdx.md](../targets/avrdx.md).
+Target pages: [../avrdx/README.md](../avrdx/README.md).

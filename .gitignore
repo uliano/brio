@@ -26,5 +26,5 @@ plots/
 # Captured measurement data (regenerable by re-running the capture firmware/tool).
 *.csv
 
-# vendor datasheets: local copies only (see docs/vendor/README.md)
-docs/vendor/*.pdf
+# vendor datasheets: local copies only (see docs/avrdx/vendor/README.md)
+docs/*/vendor/*.pdf

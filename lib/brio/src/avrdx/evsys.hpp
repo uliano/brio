@@ -2,7 +2,7 @@
  * evsys.hpp
  *
  * The AVR DA/DB event system (EVSYS, DS40002247B ch. 16) as brio sees
- * it - see docs/design/events.md for the analysis and the model:
+ * it - see docs/avrdx/evsys.md for the analysis and the model:
  *
  *  - a GENERATOR is a type: its CHANNELn code and the channels it may
  *    legally drive are constexpr facts (EvPitDiv<64>, EvPin<Pin<'A',2>>,

@@ -6,34 +6,57 @@ decisions, the rationale, the contracts between layers.
 
 ## Map
 
-Ordered by stability - the kernel's ideas are settled enough to build
-on, the services and drivers are here to stay but will change with
-the second target, the bench is disposable:
+The directory mirrors the strata of `lib/brio/src/`: `design/` is the
+target-independent framework (kernel, services, the models every
+target realizes); one folder per target (`avrdx/`, `host/`, ...) holds
+that target's operational page (`README.md`), one document per
+peripheral driver, and its vendor documents. Within each, ordered by
+stability - the kernel's ideas are settled enough to build on, the
+services and drivers are here to stay but will change with the second
+target, the bench is disposable.
+
+Target-independent design:
 
 | Document | Content |
 |----------|---------|
 | [design/overview.md](design/overview.md) | Philosophy, governing rules, layering, naming and style |
 | [design/kernel.md](design/kernel.md) | The active-object kernel, by intent: model, AO contract, events and payloads, queues, FSM, delivery, scheduler, time, panic, platform - with C++ notes |
+| [design/clock.md](design/clock.md) | The clock model: one rate truth, static and dynamic regimes, the synchronous rebase fan-out and its two compile-time checks |
 | [design/serial.md](design/serial.md) | The serial stack: Uart driver below, SerialPort line events above |
 | [design/spi-bus.md](design/spi-bus.md) | The shared SPI bus: engine descriptor, AO arbitration, multi-device rules |
 | [design/i2c-bus.md](design/i2c-bus.md) | The I2C bus: BusMaster generalized, the TWI engine descriptor, status vocabulary |
 | [design/ring.md](design/ring.md) | Ring: the SPSC FIFO, lock-free where the platform allows, guarded elsewhere |
-| [design/events.md](design/events.md) | EVSYS (exhaustive): typed vocabulary + run-time connect/disconnect + static allocation as sugar (tables on demand) |
-| [design/clkctrl.md](design/clkctrl.md) | CLKCTRL (exhaustive): oscillators, PLL, main clock mux/prescaler/CLKOUT, clock failure detection as resources; Clock/DynamicClock as tasks |
-| [design/port.md](design/port.md) | PORT (provisional): Pin, PinSet, PinRef; not covered: pin interrupts, slew, thresholds |
-| [design/usart.md](design/usart.md) | USART (provisional): the 8N1 byte transport; not covered: sync, one-wire/RS-485, IrDA, LIN, auto-baud |
-| [design/spi.md](design/spi.md) | SPI (provisional): the host engine; not covered: client mode, buffer mode |
-| [design/twi.md](design/twi.md) | TWI (provisional): the host engine; not covered: client/dual mode, SMBus, FM+ |
-| [design/rtc.md](design/rtc.md) | RTC/PIT (provisional): the PIT as timebase; not covered: the RTC counter |
-| [design/tca.md](design/tca.md) | TCA (provisional): split-mode PWM task; not covered: 16-bit modes, events, the task split |
-| [design/vref.md](design/vref.md) | VREF (exhaustive): the reference selector - levels, headroom, how the ADC/DAC name it |
-| [design/dac.md](design/dac.md) | DAC (exhaustive): the 10-bit actuator - buffered/unbuffered outputs, the slow fall on a bare pin, usage |
-| [design/adc.md](design/adc.md) | ADC (exhaustive): one task with knobs - inputs as types, triggers, accumulation, window, results as events, every usage pattern |
-| [design/clock.md](design/clock.md) | The clock model: one rate truth, static and dynamic regimes, the synchronous rebase fan-out and its two compile-time checks |
-| [targets/avrdx.md](targets/avrdx.md) | AVR DA/DB: toolchain, board, Atmel-ICE upload, PyAvrOCD debugging and its quirks, clock/timebase |
-| [targets/host.md](targets/host.md) | The native test target: HostPlatform, doctest suites |
+| [design/architecture.svg](design/architecture.svg) | The strata diagram |
+
+Target AVR DA/DB (`lib/brio/src/avrdx/`):
+
+| Document | Content |
+|----------|---------|
+| [avrdx/README.md](avrdx/README.md) | Toolchain, board, Atmel-ICE upload, PyAvrOCD debugging and its quirks, clock/timebase |
+| [avrdx/clkctrl.md](avrdx/clkctrl.md) | CLKCTRL (exhaustive): oscillators, PLL, main clock mux/prescaler/CLKOUT, clock failure detection as resources; Clock/DynamicClock as tasks |
+| [avrdx/evsys.md](avrdx/evsys.md) | EVSYS (exhaustive): typed vocabulary + run-time connect/disconnect + static allocation as sugar (tables on demand) |
+| [avrdx/vref.md](avrdx/vref.md) | VREF (exhaustive): the reference selector - levels, headroom, how the ADC/DAC name it |
+| [avrdx/dac.md](avrdx/dac.md) | DAC (exhaustive): the 10-bit actuator - buffered/unbuffered outputs, the slow fall on a bare pin, usage |
+| [avrdx/adc.md](avrdx/adc.md) | ADC (exhaustive): one task with knobs - inputs as types, triggers, accumulation, window, results as events, every usage pattern |
+| [avrdx/port.md](avrdx/port.md) | PORT (provisional): Pin, PinSet, PinRef; not covered: pin interrupts, slew, thresholds |
+| [avrdx/usart.md](avrdx/usart.md) | USART (provisional): the 8N1 byte transport; not covered: sync, one-wire/RS-485, IrDA, LIN, auto-baud |
+| [avrdx/spi.md](avrdx/spi.md) | SPI (provisional): the host engine; not covered: client mode, buffer mode |
+| [avrdx/twi.md](avrdx/twi.md) | TWI (provisional): the host engine; not covered: client/dual mode, SMBus, FM+ |
+| [avrdx/rtc.md](avrdx/rtc.md) | RTC/PIT (provisional): the PIT as timebase; not covered: the RTC counter |
+| [avrdx/tca.md](avrdx/tca.md) | TCA (provisional): split-mode PWM task; not covered: 16-bit modes, events, the task split |
+| [avrdx/vendor/README.md](avrdx/vendor/README.md) | The datasheets/errata the stratum is written against, by document number (PDFs kept local, not in git) |
+
+Target host (`lib/brio/src/host/`):
+
+| Document | Content |
+|----------|---------|
+| [host/README.md](host/README.md) | The native test target: HostPlatform, doctest suites |
+
+The bench:
+
+| Document | Content |
+|----------|---------|
 | [bench.md](bench.md) | The board, the wiring and the apps as they are today (volatile) |
-| [vendor/README.md](vendor/README.md) | Which datasheets/errata the target strata are written against, by document number (PDFs kept local, not in git) |
 
 ## Rules of this directory
 
@@ -45,15 +68,18 @@ the second target, the bench is disposable:
   do not duplicate signatures or parameter lists here, link to the
   header instead. If a browsable API reference is ever wanted, Doxygen
   over the headers generates it without touching this directory.
-- **First principles only in design/.** Design docs state principles,
-  contracts and tradeoffs - they never describe or reference individual
-  apps (apps are disposable and must be free to change without touching
-  the foundations). Apps document themselves in their own header
-  comment and are listed in `bench.md`.
-- **One page per target in targets/.** Everything operational about a
-  target - toolchain, probe, debugger, quirks, clock fixture - lives
-  in `targets/<name>.md`, mirroring `lib/brio/src/<name>/`. Design
-  reasons stay in design/.
+- **First principles only in design/ and the target folders.** They
+  state principles, contracts and tradeoffs - they never describe or
+  reference individual apps (apps are disposable and must be free to
+  change without touching the foundations). Apps document themselves
+  in their own header comment and are listed in `bench.md`.
+- **One folder per target, mirroring `lib/brio/src/<name>/`.** Its
+  `README.md` is the operational page - toolchain, probe, debugger,
+  quirks, clock fixture; next to it one document per peripheral driver
+  and `vendor/` with the datasheets of record. What is
+  target-independent (models every target realizes) stays in design/;
+  a reader of `docs/<target>/` sees at a glance what is that
+  target's.
 - **Plain Markdown, ASCII only, English** (project-wide rules). No
   generator-specific syntax: every file must render on GitHub as-is.
 - **MkDocs-ready by construction.** If/when a website is wanted:

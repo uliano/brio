@@ -6,7 +6,7 @@ Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
 `Xosc32k`, `Xoschf`, `Pll`, `MainClock`, `ClockFailure`; tasks `Clock`,
 `DynamicClock`), `avrdx/delay.hpp`; the target-independent contracts in
 `util/clock.hpp`. The clock MODEL (one rate truth, static and dynamic
-regimes, the rebase fan-out) is [clock.md](clock.md); this page is the
+regimes, the rebase fan-out) is [clock.md](../design/clock.md); this page is the
 peripheral. Reference test: `test_avr_clock` (CLKOUT on PA7 to an
 oscilloscope), `clock_console` (the dynamic regime under a console).
 
@@ -75,7 +75,7 @@ through CCP):
 | `MainClock` | `select(MainSource::oschf/osc32k/xosc32k/extclk)` -> bool (switch completed), `source()`, `switching()`, `prescale(ClockDiv)`, `clkout(bool)` (PA7) |
 | `ClockFailure` | `watch(CfdSource::main/xoschf/xosc32k)`, `stop()`, `interrupt(on, nmi)`, `test(force)`, `failed()`, `clear()`, ISR body `cfd()` -> the main source now in effect |
 
-Tasks - what an application names ([clock.md](clock.md)):
+Tasks - what an application names ([clock.md](../design/clock.md)):
 
 | Task | Verbs |
 |------|-------|

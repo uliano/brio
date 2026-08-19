@@ -10,7 +10,7 @@ only the map.
 ## Board
 
 - MCU: AVR128DB48 (48-pin, 128 KB flash, 16 KB SRAM), see
-  [targets/avrdx.md](targets/avrdx.md) for toolchain, probe and clock.
+  [avrdx/README.md](avrdx/README.md) for toolchain, probe and clock.
 - Supply: jumper-selectable **3.3 V / 5 V**; VDDIO2 is powered, so
   PORTC (the MVIO domain) is usable - and could one day talk 3.3 V
   logic while the rest of the chip runs 5 V, no level shifters.
@@ -71,7 +71,7 @@ One `src/apps/<app>.cpp` = one `main()` = two envs (`<app>`,
 (VS Code task "PIO: regen apps", then reload the project). An app may
 carry `// pio: <option> = <value>` lines in its header comment (e.g.
 `// pio: monitor_speed = 115200`) - see "Per-app env options" in
-[targets/avrdx.md](targets/avrdx.md). Shared code goes into
+[avrdx/README.md](avrdx/README.md). Shared code goes into
 `lib/brio/src/`; any header an app includes is compiled and linked by
 the LDF, no filter changes.
 

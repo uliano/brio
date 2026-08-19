@@ -7,7 +7,7 @@
 > (TWI, electricals 39.16), errata DS80000915F (2.15.1 output pin
 > override on rev A4/A5; 2.15.2 FLUSH non-functional - the driver never
 > flushes, recovery is ENABLE off/on). Driver: `avrdx/twi.hpp`; the
-> arbiter above it: [i2c-bus.md](i2c-bus.md) (`util/bus_master.hpp`,
+> arbiter above it: [i2c-bus.md](../design/i2c-bus.md) (`util/bus_master.hpp`,
 > `util/i2c_bus.hpp`). Reference tests: `i2c_scan`, `dac_adc`.
 
 ## What the driver does today
@@ -31,7 +31,7 @@ PF2/PF3) or ALT2. A `ClockUser`: `rebase` recomputes both MBAUDs.
 ## How to use it
 
 Through the bus AO: `post<I2cBus>(request)` with `reply_to<Me, I2cDone>()`
-- see [i2c-bus.md](i2c-bus.md). Bound once:
+- see [i2c-bus.md](../design/i2c-bus.md). Bound once:
 ```cpp
 using TwiHw = brio::Twi<0>;
 ISR(TWI0_TWIM_vect) { if (TwiHw::isr()) brio::post<Bus>(brio::TransferDone{TwiHw::status()}); }

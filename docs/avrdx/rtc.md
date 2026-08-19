@@ -18,14 +18,14 @@ raises the periodic interrupt at a power-of-two rate 16..1024 Hz; the
 the 1000/1024 correction), and by firing wakes the CPU from idle. It
 is the kernel's `now()` and `ticks_per_second`, alive in idle and
 standby, independent of the CPU clock. The PIT's divided clocks are
-also event generators (`EvPitDiv<n>`, [events.md](events.md)).
+also event generators (`EvPitDiv<n>`, [evsys.md](evsys.md)).
 
 ## Types and verbs
 
 | Entity | Verbs |
 |--------|-------|
 | `BasicTicker<tps>`, `Ticker` | `init()`, `pit()` (ISR body for `RTC_PIT_vect`), `ticks()`, `millis()`, `secs()`, `now(TimeStamp&)`, `pause()` / `resume()` (stop the tick interrupt when the CPU is too slow to serve it - a 32 kHz main clock - time stands still meanwhile); `tps`, `millis_per_tick` |
-| kernel side | `AvrPlatform::now()` = ticks; `ticks_from_ms<P>()`, `TimeEvent` ([kernel.md](kernel.md)) |
+| kernel side | `AvrPlatform::now()` = ticks; `ticks_from_ms<P>()`, `TimeEvent` ([kernel.md](../design/kernel.md)) |
 
 ## How to use it
 

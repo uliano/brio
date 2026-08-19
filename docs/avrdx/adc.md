@@ -255,7 +255,7 @@ and resumes free-running if it was on. Sample and init delays are in
 CLK_ADC cycles, so they scale with it. What the owner must do: pause
 event-started conversions (`start_on_events(false)`) before
 `SysClock::set()`, because an event may start a conversion at any
-instant - the general rule of [clock.md](clock.md), here with its
+instant - the general rule of [clock.md](../design/clock.md), here with its
 concrete case.
 
 Ownership: one converter, one owner. An AO that owns it configures it

@@ -7,7 +7,7 @@
 > (USART, electricals 39.14), errata DS80000915F (2.16.x: open-drain
 > with TXD output, start-of-frame detection in active mode, receiver
 > dead after ISFIF in auto-baud modes - none used). Driver:
-> `avrdx/uart.hpp`; the line service above it: [serial.md](serial.md)
+> `avrdx/uart.hpp`; the line service above it: [serial.md](../design/serial.md)
 > (`util/serial_port.hpp`). Reference tests: `console`, `clock_console`
 > (rebase under a running console), every app's console.
 
@@ -47,7 +47,7 @@ Serial::init(clock, 460800);
 brio::print(serial, "hello ", 42, brio::crlf);
 uint8_t b; if (Serial::read_byte(b)) { ... }
 ```
-Lines and commands: `SerialPort` ([serial.md](serial.md)).
+Lines and commands: `SerialPort` ([serial.md](../design/serial.md)).
 
 ## Bench findings
 

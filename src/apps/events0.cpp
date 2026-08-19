@@ -1,6 +1,6 @@
 // events0 - the event system on the bench: generators routed to EVOUT
 // pins, watched with a logic analyzer (and one with the naked eye).
-// First step of the exhaustive-driver track (docs/design/events.md).
+// First step of the exhaustive-driver track (docs/avrdx/evsys.md).
 //
 // What it shows, without any peripheral other than the EVSYS itself:
 //   - a static route, made once at init and never touched again:

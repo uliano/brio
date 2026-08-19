@@ -1,9 +1,9 @@
 # Vendor documents
 
-The datasheets and errata brio's target strata are written against.
-They are NOT in the repository (Microchip's documents are not
-redistributable, and they are large): `docs/vendor/*.pdf` is
-git-ignored. Keep the files listed below here (downloaded or
+The datasheets and errata the `avrdx/` stratum is written against
+(every target folder has its own `vendor/`). They are NOT in the
+repository (Microchip's documents are not redistributable, and they
+are large): `docs/*/vendor/*.pdf` is git-ignored. Keep the files listed below here (downloaded or
 symlinked), and cite them from code and docs by document number and
 SECTION, never by page ("DS40002247B 16.5.2"): sections survive
 revisions, pages do not.

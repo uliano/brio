@@ -466,7 +466,7 @@ concept has to name it and `panic.hpp` (which owns the semantics)
 sits above the concept in the include graph.
 
 Every target stratum ships its implementation (today
-`avrdx/platform_avr.hpp`, see [../targets/](../targets/));
+`avrdx/platform_avr.hpp`, see [../avrdx/README.md](../avrdx/README.md));
 `HostPlatform` (`host/platform_host.hpp`) gives a depth-counting
 critical section, a test-controlled virtual clock and recording
 idle/break - time becomes deterministic arithmetic in tests

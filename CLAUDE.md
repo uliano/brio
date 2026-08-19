@@ -18,42 +18,45 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
 
 - `README.md` - brio's shopfront: what it is, an application snippet,
   the ideas, layering and the target table. No history, no apps.
-- `docs/design/*.md` - the design, by intent: WHY and contracts
-  (`architecture.svg` = the strata diagram, hand-written SVG).
-  `overview.md` (philosophy, governing rule, layering, style),
+- `docs/design/*.md` - the target-independent design, by intent: WHY
+  and contracts (`architecture.svg` = the strata diagram, hand-written
+  SVG). `overview.md` (philosophy, governing rule, layering, style),
   `kernel.md` (the AO kernel: model, contract, events, payloads,
   queues, FSM, delivery, scheduler, time, panic, platform, index),
-  `serial.md`, `spi-bus.md`, `i2c-bus.md`, `ring.md`, `clock.md` (the
-  clock model), and ONE document per peripheral in the shape
+  `clock.md` (the clock model), `serial.md`, `spi-bus.md`, `i2c-bus.md`,
+  `ring.md`.
+- `docs/<target>/` - one folder per target, mirroring
+  `lib/brio/src/<target>/` (`avrdx/`, `host/`): `README.md` is the
+  operational page (toolchain, board, probe, debugger and their
+  quirks); next to it ONE document per peripheral in the shape
   docs/README.md prescribes (documents of record -> what the silicon
   does -> types and verbs -> how to use it, one example per use ->
   bench findings -> for provisional ones, "Not covered yet"), each
-  saying EXHAUSTIVE (systematic review + bench suite: events.md,
-  vref.md, dac.md, adc.md) or PROVISIONAL (clkctrl.md, port.md,
-  usart.md, spi.md, twi.md, rtc.md, tca.md) - the state of the
-  driver work, readable in the docs map. The Multislope assessment
-  (every acrobatic piece maps to fixed routes + tasks on resources +
-  config structs; the 64-cycle snapshot stays in the ISR body) lives
-  in memory and in the track entry below, not in docs.
-- `docs/targets/*.md` - one operational page per target: toolchain,
-  board, probe, debugger and their quirks (`avrdx.md`, `host.md`).
+  saying EXHAUSTIVE (systematic review + bench suite: clkctrl.md,
+  evsys.md, vref.md, dac.md, adc.md) or PROVISIONAL (port.md,
+  usart.md, spi.md, twi.md, rtc.md, tca.md) - the state of the driver
+  work, readable in the docs map. The Multislope assessment (every
+  acrobatic piece maps to fixed routes + tasks on resources + config
+  structs; the 64-cycle snapshot stays in the ISR body) lives in
+  memory and in the track entry below, not in docs.
 - `docs/bench.md` - the board, the wiring and the apps as they are
   today. The volatile end.
-- `docs/vendor/README.md` - the datasheets/errata by document number
-  and the chapters we use; PDFs are local symlinks (git-ignored),
-  cite by SECTION as "DS40002247B 16.5.2" (pages move between
-  revisions). Documents of record: datasheet DS40002247B (2023) and
-  errata DS80000915F (2025), fetched into docs/vendor/ (git-ignored);
-  the copies in ~/Documenti/Elettronica/AVR/ are the older rev. A of
-  both (and the file named AVR64DB...Errata there IS the AVR128DB
-  errata). Check revisions before trusting a local PDF.
+- `docs/avrdx/vendor/README.md` - the datasheets/errata by document
+  number and the chapters we use; PDFs are local symlinks
+  (git-ignored), cite by SECTION as "DS40002247B 16.5.2" (pages move
+  between revisions). Documents of record: datasheet DS40002247B
+  (2023) and errata DS80000915F (2025), fetched into
+  docs/avrdx/vendor/ (git-ignored); the copies in
+  ~/Documenti/Elettronica/AVR/ are the older rev. A of both (and the
+  file named AVR64DB...Errata there IS the AVR128DB errata). Check
+  revisions before trusting a local PDF.
 - Headers - the canonical API reference; header comments explain the
   concurrency model and the WHY of each tradeoff.
 
 Rules (full text in `docs/README.md`): any change that alters a
 documented decision updates the matching doc in the same change; docs
 say today's truth only (no change history, no dates, no renames);
-design/ and targets/ never reference individual apps; never duplicate
+design/ and the target folders never reference individual apps; never duplicate
 signatures into docs; new decisions go into `docs/design/`, not here.
 This file has no decision log any more: the former log was migrated to
 `docs/design/` and `docs/design/*` is authoritative.
@@ -159,11 +162,11 @@ gets its dated home in `docs/design/` when taken.
   fallback really 4 MHz, status follows the request - in clkctrl.md).
   Remaining provisional: PORT, USART, SPI, TWI, RTC, TCA - each doc's
   "Not covered yet" is the shopping list. Original order:
-  EVSYS (docs/design/events.md; avrdx/evsys.hpp primitives built and
+  EVSYS (docs/avrdx/evsys.md; avrdx/evsys.hpp primitives built and
   `events0` VERIFIED on the scope 2026-08-19: 512 Hz PIT/64 on PD2,
   button level, off, 4 Hz LED with no CPU; EventSystem static sugar
   when an app has several fixed routes) -> VREF, DAC,
-  ADC exhaustively (docs/design/adc.md; vref.hpp, dac.hpp, adc.hpp
+  ADC exhaustively (docs/avrdx/adc.md; vref.hpp, dac.hpp, adc.hpp
   and `test_avr_analog`, the bench test SUITE (54/54 on rev A5 at
   3.3 V; measures VDD at start, run it at 5 V too) - a suite named
   test_<target>_<subject> is a reference test to keep passing through
@@ -243,8 +246,8 @@ python tools/gen_apps.py      # after adding/removing src/apps/*.cpp (or a "// p
 - The bench board: 24 MHz crystal on PA0/PA1 (not GPIO) -
   `Clock<ClockSource::crystal, 24'000'000>` - no 32k crystal (do not
   enable XOSC32K), serial on USART2 ALT1 PF4/PF5.
-- Full detail and rationale: `docs/targets/avrdx.md`,
-  `docs/targets/host.md`, `docs/bench.md`.
+- Full detail and rationale: `docs/avrdx/README.md`,
+  `docs/host/README.md`, `docs/bench.md`.
 
 ## Layout
 
@@ -259,7 +262,7 @@ tools/pio_flags.py       per-language AVR flags (build-type aware) +
 tools/gen_lst.py         post-build: firmware.lst (disassembly) + firmware.map
 src/apps/<app>.cpp       one main() per app (ISR vector bindings live HERE)
 test/test_*/main.cpp     host unit tests (doctest), pio test -e native
-docs/                    README (map + rules), design/, targets/, bench.md
+docs/                    README (map + rules), design/, <target>/ (avrdx/, host/), bench.md
 lib/brio/src/            the framework, four strata:
   kernel/                pure kernel logic - includes NOTHING of brio
     platform.hpp           Platform concept (CriticalSection, idle,

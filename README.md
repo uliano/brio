@@ -97,8 +97,8 @@ and generic code chooses with `if constexpr` or a concept.
 
 | Target | State | Notes |
 |--------|-------|-------|
-| AVR DA/DB (`avrdx/`) | on the bench | AVR128DB48, avr-gcc 16.2, see [docs/targets/avrdx.md](docs/targets/avrdx.md) |
-| host (`host/`) | in use | doctest suites, `pio test -e native`, see [docs/targets/host.md](docs/targets/host.md) |
+| AVR DA/DB (`avrdx/`) | on the bench | AVR128DB48, avr-gcc 16.2, see [docs/avrdx/README.md](docs/avrdx/README.md) |
+| host (`host/`) | in use | doctest suites, `pio test -e native`, see [docs/host/README.md](docs/host/README.md) |
 | STM32G0, ATSAMC/D, CH32V00x | candidates | SysTick timebases (1000 Hz): the reason the kernel tick is opaque |
 
 ## Building and testing
@@ -113,12 +113,12 @@ tests in `test/`.
 ```bash
 pio test -e native            # host tests: kernel, queues, FSM, time events, buses, ring...
 pio run -e <app>              # build one app for the target (release, -Os)
-pio run -e <app> -t upload    # flash it (target-specific probe: see docs/targets/)
+pio run -e <app> -t upload    # flash it (target-specific probe: see docs/<target>/)
 pio debug -e <app>-debug      # debug build + gdb session
 ```
 
 Everything target-specific - toolchain, board, probe, debugger, its
-quirks - is documented per target under [docs/targets/](docs/targets/).
+quirks - is documented per target in each target's folder under [docs/](docs/).
 The apps are the framework's test bench: disposable by design, they
 document themselves in their own header comment, and their current
 wiring lives in [docs/bench.md](docs/bench.md).

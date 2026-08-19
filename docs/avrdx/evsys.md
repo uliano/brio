@@ -79,7 +79,7 @@ involved. (The driver drives the pin as output; verified on the bench
 
 ## The brio representation
 
-Following the position taken in [overview.md](overview.md) ("hardware
+Following the position taken in [overview.md](../design/overview.md) ("hardware
 routing is behaviour, not only config"): typed vocabulary, run-time
 primitives, static allocation as sugar. Names below are proposals.
 

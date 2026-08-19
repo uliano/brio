@@ -3,7 +3,7 @@
 // clock, the clock failure detector - exercised with CLK_PER on the
 // CLKOUT pin (PA7) for an oscilloscope, and the console reporting what
 // to expect and what the status bits say. Reference test of
-// avrdx/clock.hpp (docs/design/clkctrl.md): keep it passing.
+// avrdx/clock.hpp (docs/avrdx/clkctrl.md): keep it passing.
 //
 // Bench diagnostic, NOT a kernel app (sequential, blocking). Console
 // at 9600 baud on purpose: the USART needs CLK_PER >= 16 x baud, so at

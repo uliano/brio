@@ -41,8 +41,8 @@ const uint8_t pressed = ~Keys::read() & Keys::mask;   // active-low buttons
 
 brio::Pin<'D', 1>::disable_digital_input();   // an analog input pin (the ADC driver does it)
 ```
-A pin as an event generator: `EvPin<Pin<'A', 2>>` ([events.md](events.md)).
-A pin inside a request: `Pin<'D', 0>::ref()` ([spi-bus.md](spi-bus.md)).
+A pin as an event generator: `EvPin<Pin<'A', 2>>` ([evsys.md](evsys.md)).
+A pin inside a request: `Pin<'D', 0>::ref()` ([spi-bus.md](../design/spi-bus.md)).
 
 ## Not covered yet
 

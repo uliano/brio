@@ -7,7 +7,7 @@
 > data sheet DS40002247B (SPI, electricals 39.15), errata DS80000915F
 > (2.11.1: SPI1 ALT2 pin position non-functional on 48-pin, rev
 > A4/A5 - not used). Driver: `avrdx/spi.hpp`; the arbiter above it:
-> [spi-bus.md](spi-bus.md) (`util/bus_master.hpp`, `util/spi_bus.hpp`).
+> [spi-bus.md](../design/spi-bus.md) (`util/bus_master.hpp`, `util/spi_bus.hpp`).
 > Reference tests: `spi_loopback` (PA4 -> PA5 jumper), `spi_duo`,
 > `spi_paint`, `dac_adc` (MCP3550).
 
@@ -36,7 +36,7 @@ the client's choice may need revisiting after a clock change).
 ## How to use it
 
 Through the bus AO, never directly from an app: `post<SpiBus>(request)`
-with `reply_to<Me, SpiDone>()` - see [spi-bus.md](spi-bus.md). The
+with `reply_to<Me, SpiDone>()` - see [spi-bus.md](../design/spi-bus.md). The
 engine itself is bound once:
 ```cpp
 using SpiHw = brio::Spi<0>;

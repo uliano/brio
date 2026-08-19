@@ -2,7 +2,7 @@
  * clock.hpp
  *
  * The AVR DA/DB clock controller (CLKCTRL, DS40002247B ch. 12) in two
- * strata, as docs/design/clkctrl.md describes:
+ * strata, as docs/avrdx/clkctrl.md describes:
  *
  *  RESOURCES - one monostate per block of the controller, each a thin
  *  typed view of its registers (CCP-protected writes, status bits):
