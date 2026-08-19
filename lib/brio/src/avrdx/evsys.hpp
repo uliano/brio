@@ -144,6 +144,12 @@ struct EvRtcCmp {
     static constexpr bool legal_on(uint8_t) { return true; }
 };
 
+/// ADC0 result ready (pulse, CLK_PER). All channels.
+struct EvAdc0Ready {
+    static constexpr uint8_t code = 0x24;
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+
 /// A port pin's LEVEL as an event (async; zero if the input driver is
 /// disabled). PORTA/PORTB: channels 0-1; PORTC/PORTD: 2-3; PORTE/PORTF:
 /// 4-5. The two ports of a pair share the code space: 0x40+n for the
@@ -214,6 +220,12 @@ struct EvOut : EventUserBase<EvOut<P>> {
         P::output();                          // the event drives the pin's output
         EventUserBase<EvOut<P>>::listen(ch);
     }
+};
+
+/// ADC0 start-conversion on the channel's rising edge (async). The ADC
+/// driver's start_on() also sets STARTEI; listening alone arms nothing.
+struct EvAdc0Start : EventUserBase<EvAdc0Start> {
+    static volatile uint8_t& reg() { return EVSYS.USERADC0START; }
 };
 
 static_assert(EventGenerator<EvPitDiv<64>>);

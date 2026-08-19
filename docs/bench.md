@@ -40,6 +40,7 @@ bench runs on the 3.3 V rail.
 | Traffic bench: LED3 R/G/B, LED4 R/G/B | PC0/1/2, PC3/4/5 | common cathode, TCA0 WO0-5 |
 | Traffic bench: buttons 0..3 | PA2..PA5 | to GND, internal pull-ups |
 | Event probes (events0) | PD2 (EVOUTD), PC2 (EVOUTC), PF2 (EVOUTF = LED) | logic analyzer on PD2/PC2 |
+| Analog loop (analog0/1) | PD6 (DAC0 OUT) -> PD1 (AIN1), PD6 -> PD7 (VREFA) | two jumper wires |
 
 Display: 3.5" red module **HST035003-A**, controller **ILI9481**
 (320x480, SPI = 18-bit pixels only, panel needs INVON), XPT2046
@@ -81,6 +82,7 @@ the LDF, no filter changes.
 | `mcp_diag` | MCP3550 behaviour probe, bit-banged on PB0/PA6/PA5 with `delay_us`, one experiment per console key, no kernel: t_conv, CS toggling, early clocks, MISO net, RDY trace |
 | `i2c_scan` | I2C stack test: address sweep 0x08..0x77 every 2 s on TWI0 through I2cBus + the Twi<0> engine, ACKs printed as found (expected: 0x60) |
 | `events0` | The event system on the bench (verified): PIT/8192 -> EVOUTF (LED at 4 Hz, no CPU), channel 1 rewired every 10 s by an AO (PIT/64 512 Hz, button PA2 level, off) -> EVOUTD PD2 for the analyzer, software pulses on PC2 |
+| `analog0` | VREF/DAC/ADC self-test suite (bench diagnostic, no kernel): 14 tests knob by knob with PASS/FAIL - references cross-check, ramp, OUTEN, settling, resolution, differential, prescalers, accumulation, sampling knobs, event start, window, errata 2.3.2, internal inputs, VREFA from the DAC. Wire PD6->PD1, PD6->PD7 |
 | `traffic0` | The over-commented AO learning testbed: 4 buttons -> 4 RGB lamps, one AO per role, publish for button facts |
 | `traffic1` | The traffic light FSM: timed phases via one re-armed time event, a remembered pedestrian call |
 | `traffic2` | traffic1 with PWM lamps (TcaPwm split mode, colour palette): the actuator changes, the AOs do not |

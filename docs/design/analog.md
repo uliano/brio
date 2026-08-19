@@ -188,13 +188,20 @@ pretends to understand analog design.
   free for an external reference experiment; the loop is exact when
   both use the same `Ref` (2.048 V: full DAC range 0-2 V, ADC 0.5 mV
   per LSB).
-- Apps, one per step, each verified against the wire and the console:
-  `analog0` VREF + DAC ramp + ADC single readings (both paths, 12/10
-  bit, mV printed); `analog1` event-paced sampling (PIT -> ADC start,
-  first real EVSYS user) with accumulation, results as kernel events;
-  `analog2` window comparator as an event, differential mode (PD1 vs
-  DAC0), free-running; `analog3` temperature and VDD/10, then the
-  errata rules (dummy conversion, OUTEN) shown to matter.
+- Two apps: `analog0`, the self-test SUITE (bench diagnostic, no
+  kernel: 14 tests, one knob group each, PASS/FAIL against the
+  datasheet's tolerances - references cross-check, ramp, OUTEN,
+  settling, resolution, differential, prescalers vs the timing
+  formula, accumulation, sampling knobs, event start from PIT/64,
+  window modes on a ramp, errata 2.3.2 shown then cured by flush(),
+  internal inputs and temperature, VREFA driven by the DAC itself);
+  `analog1`, the kernel integration (results as events from the
+  RESRDY body, event-paced sampling, window hits as events,
+  reconfiguration under a running program). What one wire cannot
+  test: absolute accuracy of the internal references (no trusted
+  meter), the DAC's drive current (taken from the datasheet),
+  RUNSTDBY/ALWAYSON timing, DACREF0-2 (needs the ACs), the RESRDY
+  event as a generator (needs a TCB).
 
 ## The guiding application: Multislope
 

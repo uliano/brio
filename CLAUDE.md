@@ -148,10 +148,9 @@ gets its dated home in `docs/design/` when taken.
   `events0` VERIFIED on the scope 2026-08-19: 512 Hz PIT/64 on PD2,
   button level, off, 4 Hz LED with no CPU; EventSystem static sugar
   when an app has several fixed routes) -> VREF, DAC,
-  ADC exhaustively (analysis DONE: docs/design/analog.md - VREF
-  vocabulary, Dac<0> actuator, Adc<0> one task with a config struct,
-  inputs as types, ISR bodies resrdy/wcmp, event start; wire PD6 ->
-  PD1; next: vref.hpp, dac.hpp, adc.hpp + analog0..3 apps) -> TCB/TCA/CCL/AC as tasks driven by
+  ADC exhaustively (docs/design/analog.md; vref.hpp, dac.hpp, adc.hpp
+  and the analog0 self-test suite BUILT, awaiting the bench run with
+  PD6->PD1 and PD6->PD7; then analog1 = kernel integration) -> TCB/TCA/CCL/AC as tasks driven by
   the Multislope app (OneShotPulse<Tcb>, EventCounter<Tcb>,
   CascadedCounter<Tcb,Tcb>, TcaHeartbeat, LUT flip-flops; the
   64-cycle snapshot stays in the ISR body; EventSystem static sugar
@@ -274,6 +273,8 @@ lib/brio/src/            the framework, four strata:
                            extend via print_one + ADL
     timestamp.hpp          TimeStamp (ms fraction)
     wire.hpp               constexpr big-endian load/store (16/24/32, be24s)
+    analog.hpp             Ref + ref_mv, adc_mv/adc_mv_signed, dac_code/dac_mv,
+                           temp_kelvin: pure analog arithmetic (host-tested)
     clock.hpp              ClockUser concept, clock_hz(clock), clock_follows:
                            the target-independent clock contracts
     pwm_channel.hpp        PwmChannel concept: max + duty(v), the role-level
@@ -308,6 +309,11 @@ lib/brio/src/            the framework, four strata:
                            channels on pins 0..5 (duty<ch>(v), 0/255 clean);
                            Channel<ch> = the PwmChannel type
     ticker.hpp             BasicTicker<tps> RTC/PIT timebase (Ticker = 1024)
+    vref.hpp               Vref::adc0/dac0/ac(Ref, always_on): the selector
+    dac.hpp                Dac<0>: init(DacConfig), set(code)/set_mv - actuator
+    adc.hpp                Adc<0>: init<cfg>()/init(cfg)/reconfigure, AnalogIn<Pin>
+                           + AdcInput, select/start/stop/read/result, window,
+                           resrdy()/wcmp() ISR bodies, start_on(channel)
     evsys.hpp              EVSYS: EventChannel<n> (source/off/pulse), generators
                            EvPitDiv/EvRtcOvf/EvRtcCmp/EvPin (code + legality),
                            users EvOut<Pin> + EventUserBase (listen/unlisten);
