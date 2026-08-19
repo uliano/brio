@@ -185,9 +185,14 @@ void t5_32k() {
     print(serial, "5 OSC32K as the main clock for 2 s (silent): ~32.768 kHz on PA7 (+-10 %)", crlf);
     Serial::rebase(32'768);                 // cannot really make 115200: just drains TX
     Osc32k::run_standby(true);
+    // At 32 kHz a 1024 Hz tick interrupt would never return (32 cycles
+    // per tick): pause it, wait in raw cycles, resume after the return.
+    Ticker::pause();
     (void)MainClock::select(MainSource::osc32k);
-    hold_ms(2000);
+    delay_cycles(2u * 32768u);              // 2 s at 32.768 kHz
     Serial::rebase(24'000'000);
+    (void)SysClock::init();
+    Ticker::resume();
     back_to_boot();
     verdict("back from the 32 kHz main clock", MainClock::source() == MainSource::extclk);
     print(serial, "  XOSC32K: starting the crystal oscillator on PF0/PF1 (none fitted here)...", crlf);

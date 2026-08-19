@@ -61,6 +61,20 @@ inline void delay_us_runtime(uint8_t cpu, uint32_t us) {
     }
 }
 
+/// Busy-wait a raw number of CPU cycles (rounded up to 4): for the
+/// cases where microseconds make no sense because the clock is below
+/// 1 MHz (a 32 kHz main clock).
+inline void delay_cycles(uint32_t cycles) {
+    uint32_t loops = (cycles + 3u) / 4u;
+    while (loops > 0xFFFFu) {
+        _delay_loop_2(0xFFFF);
+        loops -= 0xFFFFu;
+    }
+    if (loops > 0) {
+        _delay_loop_2(static_cast<uint16_t>(loops));
+    }
+}
+
 /// Busy-wait at least `us` microseconds at Clock's rate.
 template <typename Clock>
 [[gnu::always_inline]] inline void delay_us(Clock clock, uint32_t us) {

@@ -193,6 +193,13 @@ public:
      * The most precise representation (no millis jitter); seconds and ticks
      * are read atomically so they belong to the same instant.
      */
+    /// Stop the periodic interrupt without losing the counters: for the
+    /// rare moments when the CPU runs too slowly to serve a 1024 Hz tick
+    /// (a 32 kHz main clock: the ISR would never return). Time stands
+    /// still while paused; resume() picks up from where it was.
+    static void pause() { RTC.PITINTCTRL = 0; }
+    static void resume() { RTC.PITINTCTRL = RTC_PI_bm; }
+
     static void now(TimeStamp &out) {
         uint16_t frac;
         ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {

@@ -24,7 +24,7 @@ also event generators (`EvPitDiv<n>`, [events.md](events.md)).
 
 | Entity | Verbs |
 |--------|-------|
-| `BasicTicker<tps>`, `Ticker` | `init()`, `pit()` (ISR body for `RTC_PIT_vect`), `ticks()`, `millis()`, `secs()`, `now(TimeStamp&)`; `tps`, `millis_per_tick` |
+| `BasicTicker<tps>`, `Ticker` | `init()`, `pit()` (ISR body for `RTC_PIT_vect`), `ticks()`, `millis()`, `secs()`, `now(TimeStamp&)`, `pause()` / `resume()` (stop the tick interrupt when the CPU is too slow to serve it - a 32 kHz main clock - time stands still meanwhile); `tps`, `millis_per_tick` |
 | kernel side | `AvrPlatform::now()` = ticks; `ticks_from_ms<P>()`, `TimeEvent` ([kernel.md](kernel.md)) |
 
 ## How to use it

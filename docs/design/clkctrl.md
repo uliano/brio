@@ -82,7 +82,7 @@ Tasks - what an application names ([clock.md](clock.md)):
 | `Clock<ClockSource, source_hz, ClockDiv>` | `init()` -> bool (running from the requested source), `hz`, `is_static = true`; sources `internal`, `crystal`, `external`, `osc32k`, `xosc32k` |
 | `DynamicClock<Boot, Users...>` | `init()`, `hz()`, `set<hz>()` / `set(hz)` -> bool, `can_run_at(hz)`, `rebases<U>`; `is_static = false` |
 | vocabulary | `ClockDiv`, `clock_divisor()`, `div_for()`, `oschf_frqsel()`, `MainSource`, `CfdSource`, `PllSource`, `PllMultiplier`, `Xosc32kStartup`, `XoschfStartup` |
-| waits | `delay_us(clock, us)`, `delay_us_runtime(cycles_per_us, us)`, `cycles_per_us(hz)` (`avrdx/delay.hpp`) |
+| waits | `delay_us(clock, us)`, `delay_us_runtime(cycles_per_us, us)`, `cycles_per_us(hz)`, `delay_cycles(n)` (raw cycles: for clocks below 1 MHz) (`avrdx/delay.hpp`) |
 
 ## How to use it
 
@@ -102,7 +102,9 @@ parts, the reset rate), `Clock<ClockSource::external, 16'000'000>` (a
 clock on PA0), `Clock<ClockSource::internal, 24'000'000, ClockDiv::div6>`
 (24 MHz oscillator, 4 MHz CLK_PER), `Clock<ClockSource::osc32k, 32'768>`
 (a 32 kHz main clock for a sleepy application - the USART cannot
-follow it, the RTC can).
+follow it, and a 1024 Hz tick interrupt cannot be served at 32 cycles
+per tick: `Ticker::pause()` first, `delay_cycles()` to wait, the RTC
+hardware keeps counting).
 
 **The dynamic regime** (rate changes under a running program):
 
