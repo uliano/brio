@@ -7,7 +7,7 @@
 //     channel 0 <- PIT / 8192 (an EVEN channel, as the table demands)
 //     -> EVOUTF = PF2, the on-board LED. It blinks at 32768 / 8192 =
 //     4 Hz with ZERO CPU involvement, also while the kernel sleeps;
-//   - a route that an active object REWIRES from its states, every 3 s:
+//   - a route that an active object REWIRES from its states, every 10 s:
 //     channel 1 (ODD: PIT / 64 is legal here, PIT / 8192 is not - try
 //     it, it does not compile) -> EVOUTD = PD2 for the analyzer:
 //       phase 1: PIT / 64        -> a 512 Hz square wave on PD2
@@ -123,7 +123,7 @@ private:
         brio::TimeStamp ts;
         brio::Ticker::now(ts);
         brio::print(serial, ts, " ", what, brio::crlf);
-        phase.arm(brio::ticks_from_secs<P>(3));
+        phase.arm(brio::ticks_from_secs<P>(10));
     }
 };
 
@@ -146,7 +146,7 @@ int main() {
 
     brio::print(serial, brio::crlf, "events0 (clk=", xtal ? "XTAL" : "OSCHF",
                 ", silicon rev ", brio::hex(SYSCFG.REVID), ")", brio::crlf,
-                "LED PF2 <- PIT/8192 (4 Hz, no CPU); PD2 <- channel 1, rewired every 3 s",
+                "LED PF2 <- PIT/8192 (4 Hz, no CPU); PD2 <- channel 1, rewired every 10 s",
                 brio::crlf);
 
     brio::Kernel<P, Cycler>::run();
