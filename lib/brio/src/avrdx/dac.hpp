@@ -20,6 +20,16 @@
  * ACs and the OPAMPs internally with OUTEN off, leaving PD6 free.
  * RUNSTDBY keeps it running in standby sleep.
  *
+ * Bench facts (analog0, A5 silicon, bare pin): the buffered output RISES
+ * to a new code within ~10-20 us but FALLS at the sink limit - about
+ * 1 uA into the pin capacitance, i.e. ~20 kV/s: from 2 V to 0 V takes
+ * ~100 us or more, and the last tens of mV much longer. A falling step
+ * that must be fast needs the datasheet's resistor to ground (10 kOhm
+ * sinks 200 uA at 2 V: 100 x faster). Settling after a rising step
+ * shows a ~50 us ring before the last few LSB settle. The buffered
+ * output sits ~13 mV (26 ADC counts at 2.048 V) above the unbuffered
+ * internal path: the buffer's offset (spec +-10 mV).
+ *
  * Errata DS80000915F 2.6.1 (silicon A4/A5): the output buffer's offset
  * drifts over the device's lifetime if the part is powered with OUTEN
  * off. Rule of this driver: `output_pin` defaults to true and, once

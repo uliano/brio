@@ -220,6 +220,13 @@ pretends to understand analog design.
   `window_hit()` reports it).
 - Accumulation above 16 samples truncates RES (32: 1 bit, 64: 2, 128:
   3) - `result_shift()`.
+- The DAC's buffered output RISES in ~10-20 us but FALLS at its sink
+  limit: ~1 uA into the pin capacitance = ~20 kV/s (measured on the
+  bare PD6->PD1 wire: 2 V lost in ~100 us, the last tens of mV much
+  slower). Fast falling edges need the datasheet's resistor to ground.
+  A ~50 us ring follows a rising step. The buffered pin sits ~13 mV
+  above the unbuffered internal path: the buffer's offset (spec
+  +-10 mV).
 - References cross-check within 1-2 % (spec 4 %); prescaler rates
   within 1 % of the timing formula; event start from PIT/64: 513/s;
   VDD/10 reads 3290 mV on a 3300 mV rail; die temperature 27 C from

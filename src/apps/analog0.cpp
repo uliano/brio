@@ -21,7 +21,8 @@
 //   2  DAC ramp on the wire, 12-bit ADC: monotonic, gain, offset;
 //   3  DAC OUTEN off: internal path still exact (with sample_length: the
 //      unbuffered DAC output is high-impedance - measured), wire floats;
-//   4  DAC settling: read 1 us vs 20 us after a full-scale step;
+//   4  DAC settling: read 1 us vs 20 us after a full-scale RISING step
+//      (falling steps are slow on a bare pin: ~1 uA sink - measured);
 //   5  ADC 12 vs 10 bit, LEFTADJ bit patterns, same input;
 //   6  differential: PD1 vs DAC0 internal ~ 0; PD1 vs GND = single-ended;
 //   7  prescalers: free-running rate for each PRESC vs the formula
@@ -160,14 +161,11 @@ void t2_ramp() {
     bool mono = true;
     int32_t worst = 0;
     uint16_t prev = 0;
+    D::set(0);
+    delay_us(clock, 5000);                   // the FALL to 0 V is slow: 1 uA sink into the pin
     for (uint16_t code = 0; code < 1024; code += 64) {
         D::set(code);
-        delay_us(clock, 20);
-        if (code <= 64) {                    // diagnostics: the raw reads
-            print(serial, "  raw @", code, ":");
-            for (uint8_t i = 0; i < 4; ++i) print(serial, " ", A::read());
-            print(serial, crlf);
-        }
+        delay_us(clock, 300);                // rising step: ~50 us ring, then settled
         const uint16_t r = read_avg(4);
         const int32_t exp = static_cast<int32_t>(code) * 4;   // 10 -> 12 bits, same reference
         const int32_t err = static_cast<int32_t>(r) - exp;
@@ -179,6 +177,7 @@ void t2_ramp() {
     }
     verdict("monotonic", mono);
     verdict("|error| <= 60 LSB12 (DAC 10 + ADC 5 LSB, x4, + wire)", worst <= 60);
+    print(serial, "  (falling steps are slow on a bare pin: the buffer sinks ~1 uA - datasheet note 2)", crlf);
 }
 
 // ---- 3: OUTEN off ------------------------------------------------------------------
@@ -256,7 +255,7 @@ void t6_differential() {
     A::select(Wire{}, AdcInput::gnd);
     const int16_t d1 = read_avg_signed(8);
     print(serial, "  wire - dac0 = ", d0, " (exp ~0)   wire - gnd = ", d1, " (exp ~1400)", crlf);
-    verdict("wire - dac0 ~ 0", near(d0, 0, 12));
+    verdict("wire - dac0 = the buffer's offset, within +-20 mV (40 counts)", near(d0, 0, 40));
     verdict("wire - gnd = 700*2 (differential full scale is 2048)", near(d1, 1400, 40));
 }
 
@@ -295,19 +294,16 @@ void t8_accumulation() {
     print(serial, "8 accumulation: mean holds, noise falls", crlf);
     dac_default(Ref::v2048);
     D::set(512);
-    delay_us(clock, 50);
+    delay_us(clock, 300);                    // rising step settles (~50 us ring)
     constexpr uint8_t accs[] = {1, 4, 16, 64, 128};
     for (uint8_t a : accs) {
         A::init(clock, AdcConfig{.reference = Ref::v2048, .accumulate = a});
         A::select(Wire{});
         uint32_t sum = 0, mn = 0xFFFF, mx = 0;
-        if (a == 1) print(serial, "  raw:");
         for (uint8_t i = 0; i < 16; ++i) {
             const uint16_t r = A::read();
-            if (a == 1) print(serial, " ", r);
             sum += r; if (r < mn) mn = r; if (r > mx) mx = r;
         }
-        if (a == 1) print(serial, crlf);
         // RES is the truncated sum: << result_shift() restores the scale
         const uint32_t mean_per_sample = ((sum / 16) << A::result_shift()) / a;
         print(serial, "  acc ", a, ": mean/sample ", mean_per_sample, " (exp ~2048) spread ",
@@ -407,7 +403,7 @@ void t11_window() {
         bool ok = true;
         for (uint8_t i = 0; i < 3; ++i) {
             D::set(codes[i]);
-            delay_us(clock, 30);
+            delay_us(clock, 2000);           // the fall from 875 back to 125 is slow (1 uA sink)
             (void)A::read();                       // result() captures WCMP before RES clears it
             const bool hit = A::window_hit();
             const bool exp = i == 0 ? m.at_500 : i == 1 ? m.at_2000 : m.at_3500;
