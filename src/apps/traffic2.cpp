@@ -1,7 +1,7 @@
 // traffic2 - traffic1 with PWM lamps: yellow that is really yellow.
 // Read traffic0 and traffic1 first; the state machine here is traffic1's
 // UNCHANGED (same states, same events, same transitions). What is NEW:
-//   - avrdx/pwm.hpp: TcaPwm<n, port> drives a TCA timer in split mode
+//   - avrdx/tca.hpp: TcaPwm<n, port> drives a TCA timer in split mode
 //     as six 8-bit PWM channels on pins 0..5 of one port. Two timers,
 //     twelve channels, four RGB lamps: TCA1 -> PORTB (LED1, LED2),
 //     TCA0 -> PORTC (LED3, LED4);
@@ -35,7 +35,7 @@
 
 #include "avrdx/clock.hpp"
 #include "avrdx/pin.hpp"
-#include "avrdx/pwm.hpp"
+#include "avrdx/tca.hpp"
 #include "avrdx/platform_avr.hpp"
 #include "avrdx/ticker.hpp"
 #include "avrdx/uart.hpp"
@@ -102,7 +102,7 @@ struct Lamp : brio::RgbLamp<R, G, B> {
 // Two timers, six channels each. TcaPwm<1, 'B'> = TCA1 routed to PORTB
 // (PB0..PB5), TcaPwm<0, 'C'> = TCA0 routed to PORTC (PC0..PC5). Which
 // timer reaches which port is a fact of the chip; an impossible route
-// is a compile error inside pwm.hpp. Channel<n> is pin n of that port.
+// is a compile error inside tca.hpp. Channel<n> is pin n of that port.
 using PwmB = brio::TcaPwm<1, 'B'>;
 using PwmC = brio::TcaPwm<0, 'C'>;
 using Lamp1 = Lamp<PwmB::Channel<0>, PwmB::Channel<1>, PwmB::Channel<2>>;

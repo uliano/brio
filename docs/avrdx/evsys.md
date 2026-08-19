@@ -92,11 +92,14 @@ primitives, static allocation as sugar. Names below are proposals.
 - a **generator** is a type carrying its code and its channel legality
   as constexpr facts - `EvPitDiv<64>` (`code = 0x0B`, legal on odd
   channels), `EvPin<Pin<'A', 2>>` (`0x42`, channels 0-1),
-  `EvRtcOvf`, `EvAdc0Ready`, `EvTca0Ovf`, `EvTcb0Capt`... - satisfying
-  an `EventGenerator` concept (`code`, `legal_on(ch)`);
+  `EvRtcOvf`, `EvRtcCmp`, `EvAdc0Ready`, `EvTcaOvf<n>`, `EvTcaHunf<n>`,
+  `EvTcaCmp<n, ch>`, `EvTcbCapt<n>`, `EvTcbOvf<n>` - satisfying an
+  `EventGenerator` concept (`code`, `legal_on(ch)`);
 - a **user** is a type carrying the index of its USER register -
   `EvOut<Pin<'D', 2>>` (also knows its PORTMUX bit and pin), `EvAdc0Start`,
-  `EvTcb0Capt`, `EvTca0CountA`... - satisfying an `EventUser` concept;
+  `EvTcaCntA<n>`/`EvTcaCntB<n>`, `EvTcbCaptIn<n>`/`EvTcbCountIn<n>` -
+  satisfying an `EventUser` concept; the timer drivers wrap them
+  (`Tcb<n>::capture_on`, `Tca<n>::event_a_on`);
 - a **channel** is a resource handle, `EventChannel<n>` (0..9,
   existence checked).
 The tables are transcribed only for what a step needs (the PIT
@@ -138,8 +141,8 @@ sync users by itself; the 2-3 cycle latency is documented.
 
 **What the users' peripherals will do with it.** The EVSYS driver
 connects; the meaning of the event on the user side is configured by
-that peripheral's task (`Adc` start-on-event, a `PeriodMeter<Tcb<0>>`
-capturing on event, `TcaPwm` counting on event...). Task types take
+that peripheral's task (`Adc` start-on-event, a `FrequencyMeter<Tcb<0>>`
+capturing on event, an `EventCounter<1>` counting on event...). Task types take
 an `EventChannel<n>` (or a route) as a parameter when they listen -
 the same "named resource" idiom.
 

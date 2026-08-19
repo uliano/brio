@@ -8,7 +8,7 @@
  *    legally drive are constexpr facts (EvPitDiv<64>, EvPin<Pin<'A',2>>,
  *    EvRtcOvf...); the concept EventGenerator names the contract;
  *  - a USER is a type that knows its USERxxx register (EvOut<Pin<'D',2>>,
- *    later EvAdc0Start, EvTcb0Capt...); the concept EventUser;
+ *    EvAdc0Start, EvTcbCaptIn<0>...); the concept EventUser;
  *  - a CHANNEL is a resource handle, EventChannel<n>.
  *
  * Run-time primitives - the layer that IS the peripheral, one register
@@ -150,6 +150,51 @@ struct EvAdc0Ready {
     static constexpr bool legal_on(uint8_t) { return true; }
 };
 
+/// TCA n overflow (normal mode) / low-byte underflow (split mode):
+/// pulse, CLK_PER, all channels. Codes 0x80 (TCA0), 0x88 (TCA1).
+template <uint8_t n>
+struct EvTcaOvf {
+    static_assert(n <= 1, "TCA0 and (48/64-pin parts) TCA1");
+    static constexpr uint8_t code = static_cast<uint8_t>(0x80 + 8 * n);
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+
+/// TCA n high-byte underflow (split mode only). 0x81 / 0x89.
+template <uint8_t n>
+struct EvTcaHunf {
+    static_assert(n <= 1, "TCA0 and (48/64-pin parts) TCA1");
+    static constexpr uint8_t code = static_cast<uint8_t>(0x81 + 8 * n);
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+
+/// TCA n compare channel ch match (normal) / low-byte compare ch
+/// (split): pulse, all channels. 0x84 + ch (TCA0), 0x8C + ch (TCA1).
+template <uint8_t n, uint8_t ch>
+struct EvTcaCmp {
+    static_assert(n <= 1, "TCA0 and (48/64-pin parts) TCA1");
+    static_assert(ch <= 2, "TCA compare channels: 0..2");
+    static constexpr uint8_t code = static_cast<uint8_t>(0x84 + 8 * n + ch);
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+
+/// TCB n CAPT flag set (the condition depends on the mode, tcb.hpp):
+/// pulse, CLK_PER, all channels. 0xA0 + 2n.
+template <uint8_t n>
+struct EvTcbCapt {
+    static_assert(n <= 4, "TCB0..TCB4");
+    static constexpr uint8_t code = static_cast<uint8_t>(0xA0 + 2 * n);
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+
+/// TCB n counter overflow (MAX -> BOTTOM): pulse, all channels. 0xA1 + 2n.
+/// The carry of a 32-bit cascade.
+template <uint8_t n>
+struct EvTcbOvf {
+    static_assert(n <= 4, "TCB0..TCB4");
+    static constexpr uint8_t code = static_cast<uint8_t>(0xA1 + 2 * n);
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+
 /// A port pin's LEVEL as an event (async; zero if the input driver is
 /// disabled). PORTA/PORTB: channels 0-1; PORTC/PORTD: 2-3; PORTE/PORTF:
 /// 4-5. The two ports of a pair share the code space: 0x40+n for the
@@ -228,6 +273,40 @@ struct EvAdc0Start : EventUserBase<EvAdc0Start> {
     static volatile uint8_t& reg() { return EVSYS.USERADC0START; }
 };
 
+/// TCA n event input A: count on edge / while high, or direction from
+/// the level - the action is EVACTA in the TCA (tca.hpp). Sync.
+template <uint8_t n>
+struct EvTcaCntA : EventUserBase<EvTcaCntA<n>> {
+    static_assert(n <= 1, "TCA0 and (48/64-pin parts) TCA1");
+    static volatile uint8_t& reg() { return (&EVSYS.USERTCA0CNTA)[2 * n]; }
+};
+
+/// TCA n event input B: restart on edge / while high, or direction.
+template <uint8_t n>
+struct EvTcaCntB : EventUserBase<EvTcaCntB<n>> {
+    static_assert(n <= 1, "TCA0 and (48/64-pin parts) TCA1");
+    static volatile uint8_t& reg() { return (&EVSYS.USERTCA0CNTB)[2 * n]; }
+};
+
+/// TCB n capture input: start/stop/capture/restart per the TCB's mode
+/// and EDGE bit (tcb.hpp); sync, async in single-shot with ASYNC.
+/// The TCB must also set CAPTEI - listening alone arms nothing.
+template <uint8_t n>
+struct EvTcbCaptIn : EventUserBase<EvTcbCaptIn<n>> {
+    static_assert(n <= 3, "TCB0..TCB3 (TCB4 is a 64-pin part: its user registers follow after a gap)");
+    static volatile uint8_t& reg() { return (&EVSYS.USERTCB0CAPT)[2 * n]; }
+};
+
+/// TCB n count input: the positive edge of the event is the counter
+/// clock (CLKSEL = EVENT in the TCB). Sync.
+template <uint8_t n>
+struct EvTcbCountIn : EventUserBase<EvTcbCountIn<n>> {
+    static_assert(n <= 3, "TCB0..TCB3 (TCB4 is a 64-pin part: its user registers follow after a gap)");
+    static volatile uint8_t& reg() { return (&EVSYS.USERTCB0COUNT)[2 * n]; }
+};
+
+static_assert(EventGenerator<EvTcbCapt<0>>);
+static_assert(EventUser<EvTcbCaptIn<0>>);
 static_assert(EventGenerator<EvPitDiv<64>>);
 static_assert(EventGenerator<EvPin<Pin<'A', 2>>>);
 static_assert(EventUser<EvOut<Pin<'D', 2>>>);

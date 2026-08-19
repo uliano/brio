@@ -160,8 +160,17 @@ gets its dated home in `docs/design/` when taken.
   DAC/ADC, CLKCTRL (clock.hpp rewritten as resources + tasks; `test_avr_clock`
   14/14 on the scope via CLKOUT/PA7: tune curve asymmetric, CFD
   fallback really 4 MHz, status follows the request - in clkctrl.md).
-  Remaining provisional: PORT, USART, SPI, TWI, RTC, TCA - each doc's
-  "Not covered yet" is the shopping list. Original order:
+  TCA/TCB: chapters reviewed, tca.hpp (Tca resource + TcaPwm/TcaPwm16/
+  FrequencyGenerator/Heartbeat/EventCounter) and tcb.hpp (Tcb resource +
+  PeriodicTick/Timeout/OneShotPulse/PulseCounter/CascadedCounter/
+  meters/Pwm8) written, `test_avr_timer` (9 tests, closed loop through
+  EvPin generators, no wires) written and compiled, NOT yet run on the
+  bench (hardware away until the user is back) - docs tca.md/tcb.md
+  stay PROVISIONAL until its first green run. CCL/AC: chapters
+  reviewed (ccl.md, ac.md), drivers next. TCD deferred. Multislope
+  parked until the hardware is back. Remaining provisional: PORT,
+  USART, SPI, TWI, RTC, TCA, TCB, CCL, AC - each doc's "Not covered yet"
+  is the shopping list. Original order:
   EVSYS (docs/avrdx/evsys.md; avrdx/evsys.hpp primitives built and
   `events0` VERIFIED on the scope 2026-08-19: 512 Hz PIT/64 on PD2,
   button level, off, 4 Hz LED with no CPU; EventSystem static sugar
@@ -172,12 +181,12 @@ gets its dated home in `docs/design/` when taken.
   test_<target>_<subject> is a reference test to keep passing through
   every restructuring; docs vref.md/dac.md/adc.md; 68/68 at 5 V too;
   `sampler` = the ADC inside the kernel via util/analog_sampler.hpp,
-  bench-verified 512 samples/s no drops) -> TCB/TCA/CCL/AC as tasks driven by
-  the Multislope app (OneShotPulse<Tcb>, EventCounter<Tcb>,
-  CascadedCounter<Tcb,Tcb>, TcaHeartbeat, LUT flip-flops; the
-  64-cycle snapshot stays in the ISR body; EventSystem static sugar
-  gets its first user there). Datasheet DS40002247B chapters:
-  EVSYS 16, VREF 21, ADC 33, DAC 34 (errata F has ADC and DAC items).
+  bench-verified 512 samples/s no drops) -> TCB/TCA (done as above) ->
+  CCL/AC tasks (LUT flip-flops; EventSystem static sugar gets its first
+  user there) -> the Multislope app (the 64-cycle snapshot stays in the
+  ISR body). Datasheet DS40002247B chapters: EVSYS 16, PORTMUX 17,
+  VREF 21, TCA 23, TCB 24, TCD 25, CCL 31, AC 32, ADC 33, DAC 34
+  (errata F: ADC, DAC, CCL 2.4, TCA 2.12, TCB 2.13, TCD 2.14 items).
 - **Target strata, positions taken (overview.md "Target strata" and
   the diagram docs/design/architecture.svg).** Tasks over resources
   (thin handles + task types named for what they do; explicit handle
@@ -332,9 +341,16 @@ lib/brio/src/            the framework, four strata:
     spi.hpp                Spi<n> master engine (two-phase descriptor,
                            per-byte ISR pump, CS owned by the engine)
     twi.hpp                Twi<n, Route> I2C master engine
-    pwm.hpp                TcaPwm<n, port>: TCA split mode = six 8-bit PWM
-                           channels on pins 0..5 (duty<ch>(v), 0/255 clean);
-                           Channel<ch> = the PwmChannel type
+    tca.hpp                TCA: Tca<n> resource (normal mode: PER, three
+                           buffered CMP, waveform modes, event inputs A/B,
+                           commands, ISR bodies) + tasks TcaPwm<n, port>
+                           (split mode, six 8-bit PwmChannels), TcaPwm16,
+                           FrequencyGenerator, Heartbeat, EventCounter
+    tcb.hpp                TCB: Tcb<n> resource (eight modes, event clock/
+                           capture, cascade, routes) + tasks PeriodicTick,
+                           Timeout, OneShotPulse, PulseCounter,
+                           CascadedCounter, Frequency/PulseWidth/DutyMeter,
+                           Pwm8
     ticker.hpp             BasicTicker<tps> RTC/PIT timebase (Ticker = 1024)
     vref.hpp               Ref + ref_mv (this silicon's levels) + Vref::adc0/dac0/ac
     dac.hpp                Dac<0>: init(DacConfig), set(code)/set_mv - actuator
@@ -343,9 +359,11 @@ lib/brio/src/            the framework, four strata:
                            resrdy()/wcmp() ISR bodies, start_on(channel),
                            ClockUser (rebase keeps CLK_ADC in range)
     evsys.hpp              EVSYS: EventChannel<n> (source/off/pulse), generators
-                           EvPitDiv/EvRtcOvf/EvRtcCmp/EvPin (code + legality),
-                           users EvOut<Pin> + EventUserBase (listen/unlisten);
-                           concepts EventGenerator/EventUser; tables on demand
+                           EvPitDiv/EvRtcOvf/EvRtcCmp/EvPin/EvTcaOvf/EvTcaCmp/
+                           EvTcbCapt/EvTcbOvf (code + legality), users EvOut<Pin>/
+                           EvAdc0Start/EvTcaCntA/B/EvTcbCaptIn/CountIn +
+                           EventUserBase (listen/unlisten); concepts
+                           EventGenerator/EventUser; tables on demand
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
 ```

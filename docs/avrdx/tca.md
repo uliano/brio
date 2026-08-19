@@ -1,16 +1,17 @@
 # TCA - the 16-bit timer/counter type A (AVR DA/DB)
 
-> **PROVISIONAL.** The systematic review of the chapter and errata is
-> done (this page records it); the driver is still one task on the
-> peripheral - six 8-bit PWM channels in split mode - and the
-> `Tca<n>` resource with the other tasks is not written yet. Documents
+> **PROVISIONAL.** The chapter and errata are reviewed and the driver
+> is written against them; the bench suite is written but has not run
+> on silicon yet - the page becomes EXHAUSTIVE with its first green run
+> (the split-mode PWM task is bench-verified by `traffic2`). Documents
 > of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCA chapter
 > 23, PORTMUX 17.3.7, EVSYS 16 generators 0x80-0x8E / users 0x1A-0x1D),
 > errata DS80000915F (2.12.1). Complements: TB3217 "Getting Started
 > with TCA", AN2434 (quadrature decoding with CCL + TCA + TCB) - see
-> [vendor/README.md](vendor/README.md). Driver: `avrdx/pwm.hpp`
-> (`TcaPwm`). Reference tests: `traffic2` (twelve PWM channels on
-> TCA0/PORTC and TCA1/PORTB).
+> [vendor/README.md](vendor/README.md). Driver: `avrdx/tca.hpp` (the
+> `Tca<n>` resource and the tasks), the TCA event vocabulary in
+> `avrdx/evsys.hpp`. Reference tests: `test_avr_timer`; `traffic2`
+> (twelve split-mode PWM channels on TCA0/PORTC and TCA1/PORTB).
 
 ## What the silicon does
 
@@ -88,51 +89,92 @@ engine: PWM in 16 bits, frequency generation, a period that may be
 counted in events, a heartbeat with up to three phase-related outputs
 and an overflow event for the rest of the chip.
 
-## What the driver does today
-
-`TcaPwm<n, port>`: TCA n in SPLIT mode, both 8-bit halves in single-
-slope PWM with PER = 255, routed to one port (PORTMUX: TCA0 to PORTA/
-B/C/D/F, TCA1 to PORTB for six channels), pins 0..5 = WO0..5, one
-shared prescaler (`TcaClock`, div16 -> ~5.9 kHz at 24 MHz). `duty<ch>
-(v)` is one store; 0 and 255 leave the waveform and drive the pin from
-PORT.OUT (clean endpoints, DxCore's policy). `Channel<ch>` is the
-`PwmChannel` type generic actuators use (`RgbLamp`). The task owns the
-whole timer: no other use of that TCA instance coexists.
-
 ## Types and verbs
+
+The resource, `Tca<n>` (n = 0, 1), in normal mode, and the tasks over
+it; split mode is reached by the `TcaPwm` task through the resource's
+`split()` view. All static (monostate); a task owns its instance.
 
 | Entity | Verbs |
 |--------|-------|
-| `TcaPwm<n, port>` | `init(TcaClock)`, `duty<ch>(uint8_t)`, `Channel<ch>` (PwmChannel: `max = 255`, `duty(v)`); `channels = 6` |
-| `TcaClock` | `div1 .. div1024` |
+| `TcaConfig` | `mode` (`TcaMode`: normal, frequency, single_slope, dual_slope_top/both/bottom), `clock` (`TcaClock`: div1..div1024), `period` (PER), `compare0..2`, `outputs` (CMPnEN mask, pins driven as outputs), `route` ('A'..'G', the PORTMUX group), `event_a` (`TcaEventA`: none, count_posedge, count_anyedge, count_while_high, direction), `event_b` (`TcaEventB`: none, direction, restart_posedge/anyedge/while_high), `auto_lock_update`, `count_down`, `run_standby`, `debug_run` |
+| `Tca<n>` | `init<cfg>()` / `init(cfg)` (disable, hard reset, route, drive outputs, configure, clear flags, enable; the compile-time form static_asserts the route), `enable`/`disable`, `clock(c)` (prescaler under run), `route(p)`, `reset` (disable + CMD RESET); `count`/`count(v)`, `period`/`period(v)`, `compare<ch>()`/`compare<ch>(v)` (immediate), `period_buffered(v)`, `compare_buffered<ch>(v)` (land at UPDATE), `update_pending`, `output<ch>(on)`; `restart`, `update`, `direction_down(b)`, `counting_down`, `lock_update(b)`; `ovf_flag`/`cmp_flag<ch>`/`clear_ovf`/`clear_cmp<ch>`, `enable_ovf_interrupt`/`enable_cmp_interrupt<ch>`, `ovf()`/`cmp<ch>()` (ISR bodies, one vector per flag), `take_flags`; `event_a_on(channel)`/`event_b_on(channel)` (the action is in the config); `single()`/`split()` register views, `drive_outputs(port, mask)`, `port_of(p)`; `OvfEvent`/`CmpEvent<ch>` generators, `EventA`/`EventB` users |
+| `TcaPwm<n, port>` | split mode, six 8-bit channels WO0..5 on pins 0..5: `init(TcaClock)`, `clock(c)`, `duty<ch>(uint8_t)` (0/255 from PORT), `Channel<ch>` (PwmChannel, max 255); `channels = 6` |
+| `TcaPwm16<n, port, steps>` | single-slope, three 16-bit channels of one period: `init(TcaClock, outputs)`, `clock(c)`, `duty<ch>(v)` (buffered; 0 = low, steps = high), `Channel<ch>` (PwmChannel, max = steps) |
+| `FrequencyGenerator<n, port>` | FRQ on WO0: `init(clock, hz)`, `set_hz(hz)` (buffered), `actual_hz`, `rebase` (ClockUser), `start`/`stop` |
+| `Heartbeat<n, port>` | a period at a rate with pulses: `init(clock, hz, outputs, interrupt)`, `pulse_us<ch>(us)` (from the start of each period, buffered), `beat` (ISR body), `rebase` (ClockUser), `tick_hz` |
+| `EventCounter<n>` | `init(source_channel, action)`, `direction_on(channel)` (input B level: down while high), `count`, `reset`, `overflowed`, `ovf` (ISR body) |
+| helpers | `tca_divisor(c)`, `tca_route_code(n, p)`, `tca_wo_pin(n, p, wo)`, `tca_pin_mask`, `tca_timing(ticks_at_div1)` (the smallest prescaler that fits), `tca_period_ticks(clk_per, hz)` |
+
+Routes are a fact of the device, checked where the port is a
+template argument (the tasks) and at run time in `init(cfg)`: TCA0 to
+PORTA..PORTF, TCA1 to PORTB (six channels) or PORTC (PC4..PC6 =
+WO0..2). `TcaPwm` offers six channels or nothing.
 
 ## How to use it
 
+Six LED channels (split mode) and a generic actuator over them:
+
 ```cpp
+#include "avrdx/tca.hpp"
 using PwmC = brio::TcaPwm<0, 'C'>;           // TCA0 -> PC0..PC5
-PwmC::init();                                // split mode, div16, all dark
+PwmC::init();                                // split mode, div16 (~5.9 kHz), all dark
 PwmC::duty<2>(64);                           // PC2 at 25 %
 using Lamp3 = brio::RgbLamp<PwmC::Channel<0>, PwmC::Channel<1>, PwmC::Channel<2>>;
 Lamp3::show({255, 40, 0});
 ```
-Clock change: the PWM frequency scales with CLK_PER (not a ClockUser
-today - a fact to decide in the exhaustive pass: keep the frequency, or
-the prescaler?).
+
+A servo (50 Hz, 1..2 ms) with 16-bit resolution, duty changes landing
+at the period boundary:
+
+```cpp
+using Servo = brio::TcaPwm16<1, 'B', 60000>;    // 24 MHz / 8 / 60000 = 50 Hz
+Servo::init(brio::TcaClock::div8, 0x01);        // WO0 on PB0
+Servo::duty<0>(4500);                           // 1.5 ms
+```
+
+A square wave, a heartbeat with a pulse and an event counter:
+
+```cpp
+using Gen = brio::FrequencyGenerator<0, 'D'>;   // WO0 = PD0
+Gen::init(clock, 1000);  Gen::set_hz(440);
+
+using Beat = brio::Heartbeat<0, 'D'>;
+Beat::init(clock, 100, 0x01);                   // 100 Hz, pulse on WO0
+Beat::pulse_us<0>(500);                         // 500 us high from each period start
+ISR(TCA0_OVF_vect) { Beat::beat(); post<Sequencer>(Tick{}); }
+
+using Edges = brio::EventCounter<1>;
+Edges::init(brio::EventChannel<4>{});           // counts the channel's positive edges
+```
+
+The resource directly (a dual-slope PWM with compare interrupts):
+
+```cpp
+using T = brio::Tca<0>;
+T::init<brio::TcaConfig{.mode = brio::TcaMode::dual_slope_both, .clock = brio::TcaClock::div4,
+                        .period = 1000, .compare0 = 250, .outputs = 0x01, .route = 'A'}>();
+T::compare_buffered<0>(500);                    // lands at BOTTOM
+T::enable_cmp_interrupt<0>(true);
+ISR(TCA0_CMP0_vect) { T::cmp<0>(); ... }
+```
+
+Clock change: `FrequencyGenerator` and `Heartbeat` are ClockUsers
+(list them in the DynamicClock); the PWM tasks are not - their
+frequency follows CLK_PER and a LED does not care; an app that does
+calls `clock(c)` itself.
 
 ## Bench findings
 
-- Twelve channels on two timers drive four RGB LEDs; colour mixing is
-  limited by the LEDs' dies, not by the PWM.
+- Twelve split-mode channels on two timers drive four RGB LEDs
+  (`traffic2`); colour mixing is limited by the LEDs' dies, not by the
+  PWM. The rest of the driver awaits the first run of `test_avr_timer`.
 
 ## Not covered yet
 
-In the driver: everything of "What the silicon does" except split-
-mode PWM - the `Tca<n>` resource (normal mode: period and three
-buffered compare channels, FRQ, single- and dual-slope 16-bit PWM,
-the CNTA/CNTB event actions, OVF/CMPn ISR bodies and event
-generators, the commands, RUNSTDBY, the partial TCA1 routes, errata
-2.12.1) and the tasks over it (16-bit PWM channel, frequency
-generator, event counter, heartbeat with an overflow event; `TcaPwm`
-becomes the split-mode task on the same resource), the ClockUser
-question above, the reference suite (`test_avr_timer`, with the TCBs
-measuring what the TCA generates).
+The first bench run of `test_avr_timer`. In the driver: the split
+mode beyond the PWM task (split-mode interrupts LUNF/HUNF/LCMPn as
+bodies, the two halves as independent 8-bit timers - no use yet);
+RUNSTDBY under a real standby; dual-slope PWM as a task (the resource
+does it, no task names it yet); errata 2.12.1 is documented, not
+worked around (no down-counting FRQ user).
