@@ -6,11 +6,14 @@
 // avrdx/clock.hpp (docs/design/clkctrl.md): keep it passing.
 //
 // Bench diagnostic, NOT a kernel app (sequential, blocking). Console
-// at 115200 - the USART needs CLK_PER >= 16 x baud, so the console
-// keeps talking down to 2 MHz; below that a step runs SILENTLY for two
-// seconds (watch the scope) and the console resumes after the return
-// to the boot clock. The Ticker (RTC, OSC32K) times the silent holds:
-// it does not depend on the main clock.
+// at 9600 baud on purpose: the USART needs CLK_PER >= 16 x baud, so at
+// 9600 it keeps talking down to 153.6 kHz - every OSCHF rate, every
+// prescaler (375 kHz included), and the tune sweep (the console is
+// retuned to the EXPECTED tuned rate, within ~1 %). Only the 32 kHz
+// main clock is silent: 1200 baud would fit arithmetically, but the
+// OSC32K is +-10 % and a UART tolerates ~4 %. The RTC-based Ticker
+// times the holds (it does not depend on the main clock); at 32 kHz it
+// is paused (a 1024 Hz ISR cannot be served in 32 cycles).
 //
 // Wiring: scope on PA7 (CLKOUT). Nothing else.
 // Commands: ? | 1 OSCHF sweep | 2 prescalers | 3 tune | 4 crystal vs
@@ -19,12 +22,12 @@
 // Tests:
 //   1  OSCHF at 24/20/16/12/8/4/3/2/1 MHz as the main clock: CLKOUT
 //      shows each (accuracy +-2..5 % calibrated >= 4 MHz, +-6..10 %
-//      below); 1 MHz is silent (USART cannot do 115200 there);
-//   2  the twelve prescalers from the 24 MHz crystal: 24 .. 0.375 MHz
-//      (div16 and below silent);
+//      below), the console follows all of them;
+//   2  the twelve prescalers from the 24 MHz crystal: 24 .. 0.375 MHz,
+//      the console follows all of them;
 //   3  OSCHF manual tune at 16 MHz: -32, -16, 0, +16, +31 steps of
-//      ~0.4 %: 13.95 .. 18.0 MHz on the scope (silent: the baud moves
-//      with the tune; printed before and after);
+//      ~0.4 %: 13.95 .. 18.0 MHz on the scope; the console is retuned
+//      to the expected rate at each step and keeps talking;
 //   4  the 24 MHz crystal vs OSCHF at 24 MHz: same nominal, the scope
 //      tells the accuracy apart (crystal ppm, OSCHF %);
 //   5  OSC32K as the main clock: CLKOUT at ~32 kHz (+-10 %) for two
@@ -43,7 +46,7 @@
 // (needs the TCD), the NMI form of the CFD interrupt (locks the
 // configuration until reset: run once, on purpose, not in a suite).
 
-// pio: monitor_speed = 115200
+// pio: monitor_speed = 9600
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -64,7 +67,7 @@ using namespace brio;
 
 using Serial = Uart<2, Route::alt1>;
 constexpr Serial serial;
-constexpr uint32_t baud = 115200;
+constexpr uint32_t baud = 9600;
 
 uint8_t passed = 0, failed = 0;
 void verdict(const char* name, bool ok) {
@@ -140,16 +143,22 @@ void t2_prescalers() {
 
 // ---- 3: tune ----------------------------------------------------------------------
 void t3_tune() {
-    print(serial, "3 OSCHF manual tune at 16 MHz: steps -32 -16 0 +16 +31 (~0.4 %/step), 2 s each, silent", crlf);
+    print(serial, "3 OSCHF manual tune at 16 MHz: steps -32 -16 0 +16 +31 (~0.4 %/step), 2 s each", crlf);
     print(serial, "  expect ~13.95, 14.98, 16.00, 17.02, 17.98 MHz on PA7", crlf);
     Serial::rebase(16'000'000);
     Oschf::set_hz(16'000'000);
     (void)MainClock::select(MainSource::oschf);
     constexpr int8_t steps[] = {-32, -16, 0, 16, 31};
     for (int8_t s : steps) {
+        // expected rate: 16 MHz * (1 + 0.004 * steps); retune the console to it
+        const uint32_t expected = static_cast<uint32_t>(16'000'000LL + 64'000LL * s);
+        print(serial, "  tune ", static_cast<int16_t>(s), " -> expect ~", expected, " Hz", crlf);
+        Serial::rebase(expected);
         Oschf::tune(s);
         hold_ms(2000);
+        print(serial, "     (console alive at the tuned rate)", crlf);
     }
+    Serial::rebase(16'000'000);
     Oschf::tune(0);
     const int8_t back = Oschf::tune();
     Serial::rebase(24'000'000);
