@@ -134,9 +134,13 @@ driver is made and WHAT it produces upward, not what the peripheral is.
 - **Interrupts condense, DMA is an ISR made of silicon.** An ISR
   body (exposed by the driver, bound by the app) lives in hardware
   time: the minimum bookkeeping - a byte into a ring, one step of an
-  engine - and, on an EDGE only (a line, a transaction done, an
-  error), one `post()`; the AO above lives in kernel time and holds
-  the logic. Bytes at high rate, events at low rate; only the queue
+  engine - PLUS whatever has a deadline measured in cycles (a counter
+  snapshot-and-reset that must land within one heartbeat period, e.g.
+  64 CPU cycles at 375 kHz), and, on an EDGE only (a line, a
+  transaction done, a window end), one `post()`; the AO above lives
+  in kernel time and holds the logic. What has a deadline in cycles
+  never goes through the queue; what has a deadline in milliseconds
+  always does. Bytes at high rate, events at low rate; only the queue
   crosses. A DMA channel does the ISR's byte-moving without the CPU
   and raises the edge itself: it plugs in INSIDE an engine (`start
   (request)` programs the channel with the request's spans - the

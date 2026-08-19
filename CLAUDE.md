@@ -151,8 +151,11 @@ gets its dated home in `docs/design/` when taken.
   ADC exhaustively (analysis DONE: docs/design/analog.md - VREF
   vocabulary, Dac<0> actuator, Adc<0> one task with a config struct,
   inputs as types, ISR bodies resrdy/wcmp, event start; wire PD6 ->
-  PD1; next: vref.hpp, dac.hpp, adc.hpp + analog0..3 apps) -> TCB as tasks (PeriodMeter,
-  OneShotPulse; capture on event). Datasheet DS40002247B chapters:
+  PD1; next: vref.hpp, dac.hpp, adc.hpp + analog0..3 apps) -> TCB/TCA/CCL/AC as tasks driven by
+  the Multislope app (OneShotPulse<Tcb>, EventCounter<Tcb>,
+  CascadedCounter<Tcb,Tcb>, TcaHeartbeat, LUT flip-flops; the
+  64-cycle snapshot stays in the ISR body; EventSystem static sugar
+  gets its first user there). Datasheet DS40002247B chapters:
   EVSYS 16, VREF 21, ADC 33, DAC 34 (errata F has ADC and DAC items).
 - **Target strata, positions taken (overview.md "Target strata" and
   the diagram docs/design/architecture.svg).** Tasks over resources

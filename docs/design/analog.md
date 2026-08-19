@@ -196,6 +196,25 @@ pretends to understand analog design.
   DAC0), free-running; `analog3` temperature and VDD/10, then the
   errata rules (dummy conversion, OUTEN) shown to matter.
 
+## The guiding application: Multislope
+
+uliano/AVR-Multislope (and its SAM-Multislope twin) is the app that
+will drive the timer/CCL/AC tasks after the analog block: TCA0 as a
+375 kHz heartbeat with two waveform outputs, TCB0 single-shot gate,
+TCB1 event counter extended by its OVF interrupt, TCB2->TCB3 cascade
+as the modulo-N window counter (a task over TWO resources), CCL LUTs
+as a synchronising flip-flop and gates, AC1, five fixed event routes
+(the static `EventSystem` sugar's first real user), the ADC started
+by the window-end event. Checked against the model: every piece is a
+fixed route + a task on a resource + a config struct; the CLEAN /
+PREV_CHARGE / NEGATIVE_COUNTS / RESULT_AVAIL state machine that today
+spans two ISRs and a superloop over volatiles becomes one Fsm fed
+`WindowEnd{counts}` and `AdcResult{value}` in order. The one genuine
+timing constraint - snapshot-and-reset of the negative counter within
+one heartbeat period (64 CPU cycles) after the window-end event -
+stays in the ISR body, as the model prescribes; the kernel queue
+carries only the millisecond-scale pair that follows.
+
 ## Later, not now
 
 The DB's OPAMP block (three op amps with resistor ladders, DAC as
