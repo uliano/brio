@@ -24,10 +24,14 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   `kernel.md` (the AO kernel: model, contract, events, payloads,
   queues, FSM, delivery, scheduler, time, panic, platform, index),
   `serial.md`, `spi-bus.md`, `i2c-bus.md`, `ring.md`, `clock.md` (the
-  clock model), `events.md`, and ONE document per peripheral in the
-  shape docs/README.md prescribes (documents of record -> what the
-  silicon does -> how to use it, one example per use -> bench
-  findings): `vref.md`, `dac.md`, `adc.md`. The Multislope assessment
+  clock model), and ONE document per peripheral in the shape
+  docs/README.md prescribes (documents of record -> what the silicon
+  does -> types and verbs -> how to use it, one example per use ->
+  bench findings -> for provisional ones, "Not covered yet"), each
+  saying EXHAUSTIVE (systematic review + bench suite: events.md,
+  vref.md, dac.md, adc.md) or PROVISIONAL (clkctrl.md, port.md,
+  usart.md, spi.md, twi.md, rtc.md, tca.md) - the state of the
+  driver work, readable in the docs map. The Multislope assessment
   (every acrobatic piece maps to fixed routes + tasks on resources +
   config structs; the 64-cycle snapshot stays in the ISR body) lives
   in memory and in the track entry below, not in docs.

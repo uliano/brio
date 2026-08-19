@@ -18,10 +18,17 @@ the second target, the bench is disposable:
 | [design/spi-bus.md](design/spi-bus.md) | The shared SPI bus: engine descriptor, AO arbitration, multi-device rules |
 | [design/i2c-bus.md](design/i2c-bus.md) | The I2C bus: BusMaster generalized, the TWI engine descriptor, status vocabulary |
 | [design/ring.md](design/ring.md) | Ring: the SPSC FIFO, lock-free where the platform allows, guarded elsewhere |
-| [design/events.md](design/events.md) | The event system: what the silicon offers, typed vocabulary + run-time connect/disconnect + static allocation as sugar (design fixed, tables on demand) |
-| [design/vref.md](design/vref.md) | VREF: the reference selector - levels, headroom, how the ADC/DAC name it |
-| [design/dac.md](design/dac.md) | DAC: the 10-bit actuator - buffered/unbuffered outputs, the slow fall on a bare pin, usage |
-| [design/adc.md](design/adc.md) | ADC: one task with knobs - inputs as types, triggers, accumulation, window, results as events, every usage pattern |
+| [design/events.md](design/events.md) | EVSYS (exhaustive): typed vocabulary + run-time connect/disconnect + static allocation as sugar (tables on demand) |
+| [design/clkctrl.md](design/clkctrl.md) | CLKCTRL (provisional): the static/dynamic clock realization; not covered: PLL, autotune, CFD, 32k |
+| [design/port.md](design/port.md) | PORT (provisional): Pin, PinSet, PinRef; not covered: pin interrupts, slew, thresholds |
+| [design/usart.md](design/usart.md) | USART (provisional): the 8N1 byte transport; not covered: sync, one-wire/RS-485, IrDA, LIN, auto-baud |
+| [design/spi.md](design/spi.md) | SPI (provisional): the host engine; not covered: client mode, buffer mode |
+| [design/twi.md](design/twi.md) | TWI (provisional): the host engine; not covered: client/dual mode, SMBus, FM+ |
+| [design/rtc.md](design/rtc.md) | RTC/PIT (provisional): the PIT as timebase; not covered: the RTC counter |
+| [design/tca.md](design/tca.md) | TCA (provisional): split-mode PWM task; not covered: 16-bit modes, events, the task split |
+| [design/vref.md](design/vref.md) | VREF (exhaustive): the reference selector - levels, headroom, how the ADC/DAC name it |
+| [design/dac.md](design/dac.md) | DAC (exhaustive): the 10-bit actuator - buffered/unbuffered outputs, the slow fall on a bare pin, usage |
+| [design/adc.md](design/adc.md) | ADC (exhaustive): one task with knobs - inputs as types, triggers, accumulation, window, results as events, every usage pattern |
 | [design/clock.md](design/clock.md) | The clock model: one rate truth, static and dynamic regimes, the synchronous rebase fan-out and its two compile-time checks |
 | [targets/avrdx.md](targets/avrdx.md) | AVR DA/DB: toolchain, board, Atmel-ICE upload, PyAvrOCD debugging and its quirks, clock/timebase |
 | [targets/host.md](targets/host.md) | The native test target: HostPlatform, doctest suites |
@@ -54,6 +61,13 @@ the second target, the bench is disposable:
   repo root pointing at this directory, `mkdocs serve`. Nothing here
   needs rewriting for that - which is exactly why nothing here may
   depend on it.
+- **Every peripheral driver has its document, and says whether it is
+  exhaustive or provisional.** Exhaustive = written from a systematic
+  review of the data sheet chapter and the errata, with a bench test
+  suite; provisional = covers what the bench needed so far - it opens
+  with a PROVISIONAL banner and closes with "Not covered yet", the
+  chapter's features the driver does not implement. That is the state
+  of the work, readable in one place.
 - **One document per peripheral, in this shape.** First paragraph:
   the documents of record with their revision (data sheet, errata),
   the driver header, the reference test suite - no chapter lists, no
