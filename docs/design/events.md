@@ -2,7 +2,7 @@
 
 Hardware routing between peripherals: a generator's state change
 travels on a channel to any number of users, without the CPU, in every
-sleep mode. On AVR DA/DB it is the EVSYS peripheral (DS40002247A ch.
+sleep mode. On AVR DA/DB it is the EVSYS peripheral (DS40002247B ch.
 16); a sibling exists on SAMD (EVSYS), a partial analogue on STM32
 (TIM TRGO, EXTI, DMAMUX). This page has two parts: what the silicon
 offers (the analysis that decides the shape), and the brio
@@ -71,7 +71,7 @@ bench - the chapter does not spell out the override.)
   disconnecting it).
 - The two legality constraints (PIT dividers by channel parity, pins
   by channel pair) are compile-time knowable facts of the device.
-- Errata DS80000915: no EVSYS items.
+- Errata DS80000915F (2025, silicon A4/A5/B0): no EVSYS items.
 
 ## The brio representation
 

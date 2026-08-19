@@ -31,9 +31,12 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   today. The volatile end.
 - `docs/vendor/README.md` - the datasheets/errata by document number
   and the chapters we use; PDFs are local symlinks (git-ignored),
-  cite as "DS40002247A 16.5.2". Local copies live in
-  ~/Documenti/Elettronica/AVR/ (note: the file named AVR64DB...Errata
-  there IS the AVR128DB errata DS80000915).
+  cite by SECTION as "DS40002247B 16.5.2" (pages move between
+  revisions). Documents of record: datasheet DS40002247B (2023) and
+  errata DS80000915F (2025), fetched into docs/vendor/ (git-ignored);
+  the copies in ~/Documenti/Elettronica/AVR/ are the older rev. A of
+  both (and the file named AVR64DB...Errata there IS the AVR128DB
+  errata). Check revisions before trusting a local PDF.
 - Headers - the canonical API reference; header comments explain the
   concurrency model and the WHY of each tradeoff.
 
@@ -147,8 +150,8 @@ gets its dated home in `docs/design/` when taken.
   ADC exhaustively (one wire PD6 -> ADC pin; ADC start from the PIT
   event as the first real EVSYS user; docs/design/analog.md analysis
   first, then analog0/1/2 apps) -> TCB as tasks (PeriodMeter,
-  OneShotPulse; capture on event). Datasheet chapters: EVSYS 16
-  p.141, VREF 21 p.216, ADC 33 p.494, DAC 34 p.524.
+  OneShotPulse; capture on event). Datasheet DS40002247B chapters:
+  EVSYS 16, VREF 21, ADC 33, DAC 34 (errata F has ADC and DAC items).
 - **Target strata, positions taken (overview.md "Target strata" and
   the diagram docs/design/architecture.svg).** Tasks over resources
   (thin handles + task types named for what they do; explicit handle
