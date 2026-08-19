@@ -19,6 +19,7 @@ the second target, the bench is disposable:
 | [design/i2c-bus.md](design/i2c-bus.md) | The I2C bus: BusMaster generalized, the TWI engine descriptor, status vocabulary |
 | [design/ring.md](design/ring.md) | Ring: the SPSC FIFO, lock-free where the platform allows, guarded elsewhere |
 | [design/events.md](design/events.md) | The event system: what the silicon offers, typed vocabulary + run-time connect/disconnect + static allocation as sugar (design fixed, tables on demand) |
+| [design/analog.md](design/analog.md) | VREF, DAC, ADC: what the silicon offers; VREF as vocabulary, DAC as actuator, ADC as ONE task with knobs (why not several) |
 | [design/clock.md](design/clock.md) | The clock model: one rate truth, static and dynamic regimes, the synchronous rebase fan-out and its two compile-time checks |
 | [targets/avrdx.md](targets/avrdx.md) | AVR DA/DB: toolchain, board, Atmel-ICE upload, PyAvrOCD debugging and its quirks, clock/timebase |
 | [targets/host.md](targets/host.md) | The native test target: HostPlatform, doctest suites |

@@ -148,9 +148,10 @@ gets its dated home in `docs/design/` when taken.
   `events0` VERIFIED on the scope 2026-08-19: 512 Hz PIT/64 on PD2,
   button level, off, 4 Hz LED with no CPU; EventSystem static sugar
   when an app has several fixed routes) -> VREF, DAC,
-  ADC exhaustively (one wire PD6 -> ADC pin; ADC start from the PIT
-  event as the first real EVSYS user; docs/design/analog.md analysis
-  first, then analog0/1/2 apps) -> TCB as tasks (PeriodMeter,
+  ADC exhaustively (analysis DONE: docs/design/analog.md - VREF
+  vocabulary, Dac<0> actuator, Adc<0> one task with a config struct,
+  inputs as types, ISR bodies resrdy/wcmp, event start; wire PD6 ->
+  PD1; next: vref.hpp, dac.hpp, adc.hpp + analog0..3 apps) -> TCB as tasks (PeriodMeter,
   OneShotPulse; capture on event). Datasheet DS40002247B chapters:
   EVSYS 16, VREF 21, ADC 33, DAC 34 (errata F has ADC and DAC items).
 - **Target strata, positions taken (overview.md "Target strata" and
