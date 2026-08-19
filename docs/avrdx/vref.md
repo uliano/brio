@@ -34,15 +34,17 @@ ones; a DAC -> ADC loop is exact only when both are known.
 
 ## How to use it
 
-You rarely touch VREF directly: the ADC and DAC configurations name
-their reference and their `init()` selects it.
+You rarely touch VREF directly: the ADC, DAC and AC configurations
+name their reference and their `init()` selects it.
 
 ```cpp
 #include "avrdx/adc.hpp"
 #include "avrdx/dac.hpp"
+#include "avrdx/ac.hpp"
 
 Dac<0>::init({.reference = Ref::v2048});                         // sets VREF.DAC0REF
 Adc<0>::init(clock, AdcConfig{.reference = Ref::v2048});         // sets VREF.ADC0REF
+Ac<0>::init({.negative = AcNeg::dacref, .reference = Ref::v2048}); // sets VREF.ACREF (DACREF)
 ```
 
 Converting counts to millivolts: `ref_mv()` gives the level, the
@@ -61,7 +63,7 @@ For `vdd` and `vrefa` the level is whatever it is: pass the known
 millivolts (`ref_mv(Ref::vdd, 3300)`) or measure VDD first (VDDDIV10
 against an internal reference - see the ADC document).
 
-Direct use, for the comparators or to keep a reference always on:
+Direct use, to keep a reference always on:
 
 ```cpp
 #include "avrdx/vref.hpp"
