@@ -1,20 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1176" height="790" viewBox="0 0 1176 790" font-family="DejaVu Sans, Verdana, sans-serif" font-size="13">
+  <!-- opaque background: the drawing is a self-contained white card, readable on light and dark pages alike -->
+  <rect x="0" y="0" width="1176" height="790" fill="#ffffff"/>
 
   <text x="24" y="28" font-size="18" font-weight="bold" fill="#111111">brio: strata, contracts and the two directions of traffic</text>
 
   <!-- ===== APP ===== -->
   <rect x="24" y="48" width="840" height="96" fill="#ffffff" stroke="#333333" stroke-width="1.7"/>
   <text x="36" y="68" font-size="15" font-weight="bold" fill="#111111">application</text>
-  <rect x="43.2" y="80" width="180" height="50" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="43.2" y="80" width="180" height="50" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="52.8" y="99" fill="#111111">active objects</text>
   <text x="52.8" y="116" font-size="11" fill="#333333">Fsm-based, own queues</text>
-  <rect x="240" y="80" width="180" height="50" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="240" y="80" width="180" height="50" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="249.6" y="99" fill="#111111">wiring as types</text>
   <text x="249.6" y="116" font-size="11" fill="#333333">Kernel&lt;P, A, B&gt;, Subscribers</text>
-  <rect x="436.8" y="80" width="180" height="50" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="436.8" y="80" width="180" height="50" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="446.4" y="99" fill="#111111">named resources</text>
   <text x="446.4" y="116" font-size="11" fill="#333333">Uart&lt;2,alt1&gt;, TcaPwm&lt;0,'C'&gt;</text>
-  <rect x="633.6" y="80" width="211.2" height="50" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="633.6" y="80" width="211.2" height="50" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="643.2" y="99" fill="#111111">board glue</text>
   <text x="643.2" y="116" font-size="11" fill="#333333">ISR vector bindings, Clock&lt;...&gt;</text>
 
@@ -22,20 +24,20 @@
   <rect x="24" y="160" width="840" height="112" fill="#ffffff" stroke="#333333" stroke-width="1.7"/>
   <text x="36" y="180" font-size="15" font-weight="bold" fill="#111111">util/</text>
   <text x="91.2" y="180" font-size="11" fill="#333333">pure services over the kernel - never a target include</text>
-  <rect x="43.2" y="192" width="180" height="66" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="43.2" y="192" width="180" height="66" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="52.8" y="211" fill="#111111">SerialPort</text>
   <text x="52.8" y="228" font-size="11" fill="#333333">bytes -&gt; LineReceived</text>
   <text x="52.8" y="244" font-size="11" fill="#333333">(Lease::dispatch loan)</text>
-  <rect x="240" y="192" width="180" height="66" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="240" y="192" width="180" height="66" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="249.6" y="211" fill="#111111">BusMaster</text>
   <text x="249.6" y="228" font-size="11" fill="#333333">SPI/I2C arbiter, ReplyTo</text>
   <text x="249.6" y="244" font-size="11" fill="#333333">(Lease::reply loans)</text>
-  <rect x="436.8" y="192" width="180" height="66" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="436.8" y="192" width="180" height="66" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="446.4" y="211" fill="#111111">actuators, print, Ring</text>
   <text x="446.4" y="228" font-size="11" fill="#333333">RgbLamp over PwmChannel</text>
   <text x="446.4" y="244" font-size="11" fill="#333333">print over ByteSink</text>
-  <rect x="633.6" y="192" width="211.2" height="66" fill="none" stroke="#b3541e" stroke-width="1.9" stroke-dasharray="7 4"/>
-  <text x="643.2" y="211" font-size="11" fill="#b3541e">role contracts (concepts)</text>
+  <rect x="633.6" y="192" width="211.2" height="66" fill="none" stroke="#a3450f" stroke-width="1.9" stroke-dasharray="7 4"/>
+  <text x="643.2" y="211" font-size="11" fill="#a3450f">role contracts (concepts)</text>
   <text x="643.2" y="228" font-size="11" fill="#333333">PwmChannel, ByteSink/Source,</text>
   <text x="643.2" y="244" font-size="11" fill="#333333">ClockUser, clock_hz, clock_follows</text>
 
@@ -43,61 +45,61 @@
   <rect x="24" y="288" width="840" height="150" fill="#ffffff" stroke="#333333" stroke-width="1.7"/>
   <text x="36" y="308" font-size="15" font-weight="bold" fill="#111111">kernel/</text>
   <text x="120" y="308" font-size="11" fill="#333333">pure logic, includes nothing of brio, host-testable</text>
-  <rect x="43.2" y="320" width="180" height="50" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="43.2" y="320" width="180" height="50" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="52.8" y="339" fill="#111111">Kernel</text>
   <text x="52.8" y="356" font-size="11" fill="#333333">QV loop, priority = pack</text>
-  <rect x="240" y="320" width="180" height="50" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="240" y="320" width="180" height="50" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="249.6" y="339" fill="#111111">EventQueue</text>
   <text x="249.6" y="356" font-size="11" fill="#333333">per-AO MPSC, counted</text>
-  <rect x="436.8" y="320" width="180" height="50" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="436.8" y="320" width="180" height="50" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="446.4" y="339" fill="#111111">Fsm, match</text>
   <text x="446.4" y="356" font-size="11" fill="#333333">handler = state, Entry/Exit</text>
-  <rect x="633.6" y="320" width="211.2" height="50" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="633.6" y="320" width="211.2" height="50" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="643.2" y="339" fill="#111111">post / publish / ReplyTo</text>
   <text x="643.2" y="356" font-size="11" fill="#333333">addressed, fanned out, returned</text>
-  <rect x="43.2" y="378" width="180" height="46" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="43.2" y="378" width="180" height="46" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="52.8" y="397" fill="#111111">TimeEvent</text>
   <text x="52.8" y="414" font-size="11" fill="#333333">timers post, drift-free</text>
-  <rect x="240" y="378" width="180" height="46" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="240" y="378" width="180" height="46" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="249.6" y="397" fill="#111111">Borrowed, Pack</text>
   <text x="249.6" y="414" font-size="11" fill="#333333">loans, LendsTo checked</text>
-  <rect x="436.8" y="378" width="180" height="46" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="436.8" y="378" width="180" height="46" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="446.4" y="397" fill="#111111">panic</text>
   <text x="446.4" y="414" font-size="11" fill="#333333">breadcrumb, reporter</text>
-  <rect x="633.6" y="378" width="211.2" height="46" fill="none" stroke="#b3541e" stroke-width="1.9" stroke-dasharray="7 4"/>
-  <text x="643.2" y="397" font-size="11" fill="#b3541e">ActiveObject concept</text>
+  <rect x="633.6" y="378" width="211.2" height="46" fill="none" stroke="#a3450f" stroke-width="1.9" stroke-dasharray="7 4"/>
+  <text x="643.2" y="397" font-size="11" fill="#a3450f">ActiveObject concept</text>
   <text x="643.2" y="414" font-size="11" fill="#333333">Event, queue, init, dispatch</text>
 
   <!-- ===== PLATFORM CONCEPT (boundary) ===== -->
-  <rect x="24" y="452" width="840" height="34" fill="none" stroke="#b3541e" stroke-width="1.9" stroke-dasharray="7 4"/>
-  <text x="36" y="474" font-size="11" fill="#b3541e">Platform concept  -  CriticalSection, idle(), break_here(), now(), ticks_per_second, atomic_width, panic_record()</text>
+  <rect x="24" y="452" width="840" height="34" fill="none" stroke="#a3450f" stroke-width="1.9" stroke-dasharray="7 4"/>
+  <text x="36" y="474" font-size="11" fill="#a3450f">Platform concept  -  CriticalSection, idle(), break_here(), now(), ticks_per_second, atomic_width, panic_record()</text>
 
   <!-- ===== TARGETS ===== -->
   <rect x="24" y="500" width="470.4" height="130" fill="#ffffff" stroke="#333333" stroke-width="1.7"/>
   <text x="36" y="520" font-size="15" font-weight="bold" fill="#111111">avrdx/</text>
   <text x="110.4" y="520" font-size="11" fill="#333333">everything that knows avr/io.h</text>
-  <rect x="43.2" y="532" width="132" height="40" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="43.2" y="532" width="132" height="40" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="52.8" y="549" fill="#111111">AvrPlatform</text>
   <text x="52.8" y="564" font-size="11" fill="#333333">Ticker (RTC/PIT)</text>
-  <rect x="184.8" y="532" width="158.4" height="40" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="184.8" y="532" width="158.4" height="40" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="194.4" y="549" fill="#111111">Clock, delay_us</text>
   <text x="194.4" y="564" font-size="11" fill="#333333">one rate truth</text>
-  <rect x="352.8" y="532" width="129.6" height="40" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="352.8" y="532" width="129.6" height="40" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="362.4" y="549" fill="#111111">Pin, PinSet</text>
   <text x="362.4" y="564" font-size="11" fill="#333333">also PwmChannel</text>
-  <rect x="43.2" y="580" width="132" height="40" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="43.2" y="580" width="132" height="40" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="52.8" y="597" fill="#111111">Uart</text>
   <text x="52.8" y="612" font-size="11" fill="#333333">rings + ISR bodies</text>
-  <rect x="184.8" y="580" width="158.4" height="40" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="184.8" y="580" width="158.4" height="40" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="194.4" y="597" fill="#111111">Spi, Twi engines</text>
   <text x="194.4" y="612" font-size="11" fill="#333333">start(req), TransferDone</text>
-  <rect x="352.8" y="580" width="129.6" height="40" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="352.8" y="580" width="129.6" height="40" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="362.4" y="597" fill="#111111">TcaPwm</text>
   <text x="362.4" y="612" font-size="11" fill="#333333">task on a resource</text>
 
   <rect x="513.6" y="500" width="156" height="130" fill="#ffffff" stroke="#333333" stroke-width="1.7"/>
   <text x="525.6" y="520" font-size="15" font-weight="bold" fill="#111111">host/</text>
-  <rect x="532.8" y="532" width="117.6" height="88" fill="#f4f4f4" stroke="#555555" stroke-width="1.2"/>
+  <rect x="532.8" y="532" width="117.6" height="88" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="542.4" y="551" fill="#111111">HostPlatform</text>
   <text x="542.4" y="568" font-size="11" fill="#333333">virtual clock,</text>
   <text x="542.4" y="583" font-size="11" fill="#333333">recording idle,</text>
