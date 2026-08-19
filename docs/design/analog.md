@@ -188,13 +188,15 @@ pretends to understand analog design.
   free for an external reference experiment; the loop is exact when
   both use the same `Ref` (2.048 V: full DAC range 0-2 V, ADC 0.5 mV
   per LSB).
-- Two apps: `analog0`, the self-test SUITE (bench diagnostic, no
-  kernel: 14 tests, one knob group each, PASS/FAIL against the
+- Two apps: `test_avr_analog`, the self-test SUITE (bench diagnostic,
+  no kernel: 14 tests, one knob group each, PASS/FAIL against the
   datasheet's tolerances - references cross-check, ramp, OUTEN,
   settling, resolution, differential, prescalers vs the timing
   formula, accumulation, sampling knobs, event start from PIT/64,
   window modes on a ramp, errata 2.3.2 shown then cured by flush(),
-  internal inputs and temperature, VREFA driven by the DAC itself);
+  internal inputs and temperature, VREFA driven by the DAC itself;
+  the supply is measured at start and the reference set follows it -
+  run at 3.3 V and at 5 V);
   `analog1`, the kernel integration (results as events from the
   RESRDY body, event-paced sampling, window hits as events,
   reconfiguration under a running program). What one wire cannot
@@ -203,7 +205,7 @@ pretends to understand analog design.
   RUNSTDBY/ALWAYSON timing, DACREF0-2 (needs the ACs), the RESRDY
   event as a generator (needs a TCB).
 
-## Bench findings (analog0, silicon A5, 2026-08-19)
+## Bench findings (test_avr_analog, silicon A5, 3.3 V: 54/54)
 
 - The converter's warm-up after ENABLE is real: the first conversion
   without waiting t_ADC_INIT (6 us typ.) is garbage. `Adc::init(clock,

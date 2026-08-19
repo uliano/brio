@@ -1,6 +1,14 @@
-// analog0 - the analog block self-test suite: VREF, DAC, ADC exercised
-// knob by knob against expectations, PASS/FAIL on the console. Second
-// step of the exhaustive-driver track (docs/design/analog.md).
+// test_avr_analog - the analog block self-test SUITE for the AVR DA/DB
+// target: VREF, DAC, ADC exercised knob by knob against expectations,
+// PASS/FAIL on the console. Bench-verified 54/54 on an AVR128DB48 rev
+// A5 at 3.3 V (2026-08-19). It is the reference test of vref.hpp,
+// dac.hpp and adc.hpp: keep it passing through every restructuring
+// (docs/design/analog.md holds the findings it produced).
+//
+// Naming: test_<target>_<subject> marks a bench test suite as opposed
+// to a demo app; suites live in src/apps/ while the multi-app tooling
+// is what it is, and move to a per-target directory when there are
+// enough of them.
 //
 // Bench diagnostic, NOT a kernel app: sequential, blocking (delay_us,
 // polling), declared outside the AO rules like mcp_diag - it needs
@@ -13,6 +21,12 @@
 // list. Every test prints expected / measured and a verdict; the
 // tolerances are the datasheet's (references +-4 %, ADC gain +-5 LSB,
 // DAC +-10 LSB absolute) with the wire's own errors added.
+//
+// Supply-independent: VDD is MEASURED at start (VDDDIV10 against the
+// 2.048 V reference) and everything that depends on it follows -
+// which internal references have headroom (2.048 needs 2.5 V, 2.5
+// needs 2.95 V, 4.096 needs 4.55 V: at 5 V all four are exercised),
+// the VDD/10 expectations. Run it at 3.3 V and at 5 V.
 //
 // What is checked, and how it checks itself with one wire:
 //   1  references: DAC at ref A, code 768; ADC at ref B reads it: the
@@ -76,7 +90,18 @@ using D = Dac<0>;
 using A = Adc<0>;
 using Wire = AnalogIn<Pin<'D', 1>>;            // PD6 -> PD1
 
-constexpr uint16_t vdd_mv = 3300;               // the bench rail (VDD select jumper)
+uint16_t vdd_mv = 0;                            // measured at start (VDDDIV10 vs 2.048 V)
+
+// The internal references this supply has headroom for (VREF specs:
+// 2.048 needs VDD >= 2.5 V, 2.5 needs 2.95 V, 4.096 needs 4.55 V).
+uint8_t usable_refs(Ref* out) {
+    uint8_t n = 0;
+    out[n++] = Ref::v1024;
+    if (vdd_mv >= 2500) out[n++] = Ref::v2048;
+    if (vdd_mv >= 2950) out[n++] = Ref::v2500;
+    if (vdd_mv >= 4550) out[n++] = Ref::v4096;
+    return n;
+}
 
 // ---- tiny test harness ------------------------------------------------------
 uint8_t passed = 0, failed = 0;
@@ -129,13 +154,17 @@ void dac_default(Ref r) {
 // ---- 1: references cross-check ---------------------------------------------------
 void t1_references() {
     print(serial, "1 references: DAC code 768 at ref A, ADC at ref B (internal path and wire)", crlf);
-    constexpr Ref refs[] = {Ref::v1024, Ref::v2048, Ref::v2500};      // 4.096 needs VDD >= 4.55
-    for (Ref ra : refs) {
+    Ref refs[4];
+    const uint8_t nrefs = usable_refs(refs);
+    print(serial, "  VDD ", vdd_mv, " mV: ", nrefs, " internal references usable", crlf);
+    for (uint8_t ia = 0; ia < nrefs; ++ia) {
+        const Ref ra = refs[ia];
         dac_default(ra);
         D::set(768);
         delay_us(clock, 50);
         const uint16_t dac_mv_ = dac_mv(768, D::steps, ref_mv(ra));
-        for (Ref rb : refs) {
+        for (uint8_t ib = 0; ib < nrefs; ++ib) {
+            const Ref rb = refs[ib];
             const uint16_t rb_mv = ref_mv(rb);
             // expected counts, saturating at full scale
             const uint32_t exp = dac_mv_ >= rb_mv ? 4095u : (static_cast<uint32_t>(dac_mv_) * 4096u) / rb_mv;
@@ -446,10 +475,10 @@ void t13_internal() {
     A::select(AdcInput::vddio2_div10);
     const uint16_t v2 = read_avg(8);
     const uint16_t vdd_meas = adc_mv(v, 4096, 2048) * 10;
-    print(serial, "  gnd ", g, "  vdd/10 -> VDD ~ ", vdd_meas, " mV (jumper: ", vdd_mv,
+    print(serial, "  gnd ", g, "  vdd/10 -> VDD ~ ", vdd_meas, " mV (start-up: ", vdd_mv,
           ")  vddio2/10 -> ", adc_mv(v2, 4096, 2048) * 10, " mV", crlf);
     verdict("gnd ~ 0", g < 8);
-    verdict("VDD/10 within 10 % of the rail", near(vdd_meas, vdd_mv, vdd_mv / 10));
+    verdict("VDD/10 repeatable vs the start-up measurement (2 %)", near(vdd_meas, vdd_mv, vdd_mv / 50));
     // temperature: 2.048 V ref, init delay >= 25 us, sample length >= 28 us
     // at CLK_ADC = 24 MHz / 64 = 375 kHz: 1 cycle = 2.67 us -> 32 cycles > 25 us... use
     // 64 for the init delay and sample_length 12 (32 us).
@@ -509,7 +538,7 @@ void run(TestFn fn) {
 }
 
 void help() {
-    print(serial, "analog0: 1 refs | 2 ramp | 3 outen | 4 settling | 5 res | 6 diff | 7 presc | "
+    print(serial, "test_avr_analog: 1 refs | 2 ramp | 3 outen | 4 settling | 5 res | 6 diff | 7 presc | "
                   "8 acc | 9 sampling | 0 event start | w window | e errata | i internal | v vrefa | a all",
           crlf);
 }
@@ -525,9 +554,15 @@ int main() {
     Serial::init(clock, 460800);
     Ticker::init();
     sei();
-    print(serial, crlf, "analog0 - VREF/DAC/ADC self-test (clk=", xtal ? "XTAL" : "OSCHF",
+    // Measure the supply first: VDD/10 against the 2.048 V reference,
+    // sampled long (internal divider), averaged. Everything else follows.
+    A::init(clock, AdcConfig{.reference = Ref::v2048, .sample_length = internal_sample_length});
+    A::select(AdcInput::vdd_div10);
+    A::flush();
+    vdd_mv = static_cast<uint16_t>(adc_mv(read_avg(16), 4096, 2048) * 10);
+    print(serial, crlf, "test_avr_analog - VREF/DAC/ADC self-test suite (clk=", xtal ? "XTAL" : "OSCHF",
           ", silicon rev ", hex(SYSCFG.REVID), ")", crlf,
-          "wire PD6->PD1 and PD6->PD7; VDD assumed ", vdd_mv, " mV", crlf);
+          "wire PD6->PD1 and PD6->PD7; VDD measured ", vdd_mv, " mV", crlf);
     help();
     print(serial, "> ");
     for (;;) {

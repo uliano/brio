@@ -149,11 +149,11 @@ gets its dated home in `docs/design/` when taken.
   button level, off, 4 Hz LED with no CPU; EventSystem static sugar
   when an app has several fixed routes) -> VREF, DAC,
   ADC exhaustively (docs/design/analog.md; vref.hpp, dac.hpp, adc.hpp
-  and the analog0 self-test suite: first bench run gave 38/51 pass and
-  five driver findings (warm-up wait -> init takes clock; WCMP cleared
-  by RES read -> captured in result(); acc>16 truncation ->
-  result_shift(); unbuffered DAC0 needs sample_length; INITDLY paid
-  once) - fixed, second run pending; then analog1 = kernel integration) -> TCB/TCA/CCL/AC as tasks driven by
+  and `test_avr_analog`, the bench test SUITE (54/54 on rev A5 at
+  3.3 V; measures VDD at start, run it at 5 V too) - a suite named
+  test_<target>_<subject> is a reference test to keep passing through
+  every restructuring; findings in analog.md; next: analog1 = kernel
+  integration of the ADC) -> TCB/TCA/CCL/AC as tasks driven by
   the Multislope app (OneShotPulse<Tcb>, EventCounter<Tcb>,
   CascadedCounter<Tcb,Tcb>, TcaHeartbeat, LUT flip-flops; the
   64-cycle snapshot stays in the ISR body; EventSystem static sugar
