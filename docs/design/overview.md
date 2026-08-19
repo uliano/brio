@@ -7,6 +7,12 @@ to stay portable beyond them. Its core is a QP/QV-style active-object
 kernel, written clean-room (concepts from Samek's book, never the QP
 source).
 
+![brio strata](architecture.svg)
+
+*The strata, the contracts (dashed) and the two directions of
+traffic: events up, by value, condensed by ISR bodies; calls down,
+inside a dispatch; the timebase sideways, immune to the CPU clock.*
+
 ## Governing rule
 
 **Nothing is settled.** Reusing existing code is fine only as long as
@@ -17,12 +23,27 @@ the stack, not just the layer being added.
 
 ## Design pillars
 
-- **Everything resolves at compile time.** Peripheral drivers are
-  static (monostate) class templates (`Uart<2, Route::alt1>`,
-  `BasicTicker<1024>`); services are templated on their transport and
-  constrained by concepts. No virtual interfaces, no runtime
-  singletons. Monostate drivers double as zero-cost tags
-  (`constexpr Serial serial;` usable as a `print()` argument).
+- **Everything resolves at compile time: the monostate type is the
+  one idiom.** A peripheral is a singleton by nature (there is one
+  SPI0, one PA2), so a TYPE per instance mirrors reality where an
+  object would model something that does not exist: `Spi<0>` IS SPI0,
+  `Pin<'A', 2>` IS PA2, and its static functions are the access - the
+  compiler folds them to the instruction (`SBI`) or the constant
+  address. The line that matters: **identity and invariants go in the
+  template parameters** (which replica, which route/port, fixed sizes
+  and pins - what never changes and should be checked and folded);
+  **what changes goes in run-time arguments** (a duty, a byte, a rate;
+  also what could be constant but earns no separate type - a baud
+  still folds when the argument is a literal); **state lives in
+  `static inline` members** (a ring, a queue, the dynamic clock's rate:
+  per type, in .bss, no constructor, no init order). Monostate is not
+  stateless: the wiring is compile time, the state is static. AOs, the
+  Kernel, clocks and tasks over resources are the same sentence. No
+  virtual interfaces, no runtime singletons; the empty tag object
+  (`constexpr Serial serial;`, `constexpr SysClock clock;`) is how a
+  type travels as an argument. The one deliberate return to run time
+  is a narrow descriptor a type produces when a request must travel by
+  value (`PinRef` from `Pin<>::ref()`), never a parallel abstraction.
 - **Drivers move bytes, they do not format.** Text output is
   `brio::print(sink, ...)` - variadic free functions over any ByteSink;
   new types become printable via an ADL `print_one` overload. print
@@ -78,12 +99,21 @@ own peculiarities stated in the open. brio does not build a HAL and
 never a multi-platform one: the common factor between targets is HOW a
 driver is made and WHAT it produces upward, not what the peripheral is.
 
-- **A driver is a peripheral in a ROLE.** Types are named for what
-  they do (`Ticker` = timebase, `TcaPwm` = waveform, a future
-  `TcbCapture` = measurement); the peripheral appears in the type only
-  where the app must pick the instance (`TcaPwm<0, 'C'>`). A timer
-  used in a role belongs to that role entirely; "the same timer, half
-  in another role" is another type with another name, not a flag.
+- **A driver is a TASK over a RESOURCE.** Two thin strata: the
+  resource handle - `Tcb<0>`, `Tca<1>`, a `Dma<3>` elsewhere - knows
+  only that it exists (package check), where its registers are, and
+  its identity as a type: no policy, no init; it is the NAME with
+  which the app says "this one is mine". The task - `PeriodMeter<
+  Tcb<0>, Pin<'A', 2>>`, `TcaPwm<0, 'C'>`, `Ticker` - is named for
+  what it does, owns the whole configuration of the peripheral for
+  that use, produces events by value upward (`PeriodMeasured{ticks}`)
+  and takes commands as static calls. The same resource can enter one
+  task at a time; a second task on the same peripheral is another
+  type, not a flag. Task names and their events are the same on every
+  target; resources and implementations are per target. (Today the
+  resource stratum is implicit - `TcaPwm<0, ...>` takes a number; it
+  becomes an explicit handle on the second task over the same
+  peripheral, generalize on the second specimen.)
 - **What is common lives at the role level and is small**: a timebase
   is the Platform's `now()`/`ticks_per_second`; a PWM channel is a
   `PwmChannel` concept (`max` + `duty()`, raw counts, no frequency, no
@@ -101,6 +131,29 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   tick runs on the RTC/PIT precisely so that every general-purpose
   timer stays available to the app; a framework that silently takes a
   timer for `millis()` is what brio refuses to be.
+- **Interrupts condense, DMA is an ISR made of silicon.** An ISR
+  body (exposed by the driver, bound by the app) lives in hardware
+  time: the minimum bookkeeping - a byte into a ring, one step of an
+  engine - and, on an EDGE only (a line, a transaction done, an
+  error), one `post()`; the AO above lives in kernel time and holds
+  the logic. Bytes at high rate, events at low rate; only the queue
+  crosses. A DMA channel does the ISR's byte-moving without the CPU
+  and raises the edge itself: it plugs in INSIDE an engine (`start
+  (request)` programs the channel with the request's spans - the
+  `Lease::reply` loan made physical - and the completion interrupt
+  posts `TransferDone`); nothing above the engine changes, the DMA
+  channel is a resource like a timer, and an RX stream fed by DMA is a
+  ring whose producer index is the hardware counter. Not on AVR Dx;
+  the engine boundary is already where it will go.
+- **Hardware routing (event system) is behaviour, not only config.**
+  Generators, users and their per-channel legality are TYPES (checked
+  at compile time); connecting and disconnecting are run-time
+  primitives callable from a state's Entry/Exit - a rewire is an
+  action of a state, like arming a time event; a static
+  `EventSystem<Route...>` allocating channels at compile time is
+  optional sugar over the same primitives. Contention for a channel
+  rewired at run time is ownership: it belongs to one AO's FSM. Not
+  built; tables grow on demand.
 - **PWM is an actuator, not a bus.** Continuous state, set and forget,
   synchronous, no completion, no contention worth an arbiter: rank of
   `Pin`, called from handlers. Fades and sequences are AOs in `util/`
@@ -169,6 +222,13 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   drivers; an app that needs an operation the driver lacks adds it to
   the driver (`Pin::pullup`, `PinSet::read`), never works around it.
   The only vendor glue an app may contain is the ISR vector binding.
+  This does NOT mean the target stratum abstracts every peripheral in
+  advance: it grows on demand, one operation or one table row at a
+  time, and knob-heavy peripherals (ADC, TCD, CCL) get a `constexpr`
+  config struct with designated initializers, not a meaning-abstracting
+  API. The rule holds as long as adding to the driver stays easier
+  than bypassing it; bench-only probes (`mcp_diag`) are declared
+  outside it, and what they find goes into a driver afterwards.
 
 ## ISR binding pattern
 

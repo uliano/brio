@@ -18,7 +18,8 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
 
 - `README.md` - brio's shopfront: what it is, an application snippet,
   the ideas, layering and the target table. No history, no apps.
-- `docs/design/*.md` - the design, by intent: WHY and contracts.
+- `docs/design/*.md` - the design, by intent: WHY and contracts
+  (`architecture.svg` = the strata diagram, hand-written SVG).
   `overview.md` (philosophy, governing rule, layering, style),
   `kernel.md` (the AO kernel: model, contract, events, payloads,
   queues, FSM, delivery, scheduler, time, panic, platform, index),
@@ -134,12 +135,16 @@ gets its dated home in `docs/design/` when taken.
   so the door stays open: AOs share nothing but events (an AO's own
   statics are safe; a global touched by two AOs outside events is a
   one-way race under preemption).
-- **Target strata, positions taken (overview.md "Target strata").**
-  Drivers by role not by peripheral; PwmChannel concept + generic
-  actuators (RgbLamp shared by pin and PWM lamps - done);
-  Clock as a type (compile-time `hz` truth first, runtime rebase
-  fan-out only on demand); per-family device tables and per-board
-  claim files on the second target. Nothing of this is a HAL.
+- **Target strata, positions taken (overview.md "Target strata" and
+  the diagram docs/design/architecture.svg).** Tasks over resources
+  (thin handles + task types named for what they do; explicit handle
+  stratum on the second task per peripheral); PwmChannel concept +
+  generic actuators (done); Clock as a type (done, both regimes);
+  interrupts condense / DMA inside the engines (not on AVR); event
+  system = typed vocabulary + runtime connect/disconnect primitives +
+  optional static allocation (not built, tables on demand); per-family
+  device tables and per-board claim files on the second target.
+  Nothing of this is a HAL.
 - **Clock: dynamic regime - built and bench-verified (24->12->2 MHz
   under the running console).**
   `DynamicClock<Boot, Users...>` (avrdx/clock.hpp): set<hz>()/set(hz)

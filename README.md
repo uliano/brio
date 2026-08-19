@@ -77,6 +77,8 @@ The full rationale, decision by decision, is in
 
 ## Layering and portability
 
+![brio strata](docs/design/architecture.svg)
+
 `lib/brio/src/` has four strata; the include prefix makes a file's
 portability readable at a glance:
 
