@@ -46,9 +46,8 @@
 //      clocked at CLK_PER for 1 s: 24000000 +-0.2 %; monotonic reads;
 //      reset;
 //   8  PeriodicTick (TCB0) at 1000 Hz: interrupts in 1 s = 1000 +-2;
-//      Timeout (TCB1) of 1 ms watching PD0: with a 100 Hz 50 % square
-//      (5 ms high) CAPT fires each period; with 10 kHz (50 us high) it
-//      never fires;
+//      Timeout (TCB1) of 1 ms watching PD0: with 100 Hz pulses 2 ms
+//      high CAPT fires once per period; with 500 us pulses never;
 //   9  EventCounter (TCA1) counting TCB0 CAPT events (PeriodicTick 1 kHz)
 //      for 200 ms: 200 +-2; direction from PC1 level: counts down.
 //   c  CCL: LUT4 as AND of PB0/PB1 (driven by the test) read back on
@@ -410,17 +409,20 @@ void t8_tick_timeout() {
     ChGen::source(EvPin<GenPin>{});
     tcb1_hook = tcb1_timeout;
     verdict("Timeout init 1 ms", Timeout<T1>::init(clock, 1000, ChGen{}));
-    Gen::init(clock, 100);                       // 100 Hz square: 5 ms high
+    Beat::init(clock, 100, 0x01, false);         // 100 Hz, a pulse on PD0 ...
+    Beat::pulse_us<0>(2000);                     // ... 2 ms high: longer than the time-out
+    hold_ms(15);
     clear_captures();
     hold_ms(105);
     const uint16_t slow = captures;
-    Gen::init(clock, 10000);                     // 50 us high: never times out
+    Beat::pulse_us<0>(500);                      // 500 us high: never times out
+    hold_ms(15);
     clear_captures();
-    hold_ms(50);
+    hold_ms(105);
     const uint16_t fast = captures;
-    print(serial, "  timeouts: 100 Hz -> ", slow, " in 105 ms, 10 kHz -> ", fast, " in 50 ms", crlf);
-    verdict("5 ms highs time out each period (10 +-1)", near(slow, 10, 1));
-    verdict("50 us highs never time out", fast == 0);
+    print(serial, "  timeouts: 2 ms highs -> ", slow, " in 105 ms, 500 us highs -> ", fast, crlf);
+    verdict("2 ms highs time out once per period (10 +-1)", near(slow, 10, 1));
+    verdict("500 us highs never time out", fast == 0);
     quiesce();
 }
 
