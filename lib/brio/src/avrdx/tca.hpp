@@ -583,6 +583,8 @@ public:
         const TcaTiming w = timing(clk_per_, hz);
         if (w.ticks == 0) return false;
         hz_ = hz;
+        div_ = w.clock;
+        ticks_ = w.ticks;
         R::init({.mode = TcaMode::frequency, .clock = w.clock,
                  .compare0 = static_cast<uint16_t>(w.ticks - 1), .outputs = 0x01, .route = PortLetter});
         return true;
@@ -593,6 +595,8 @@ public:
         const TcaTiming w = timing(clk_per_, hz);
         if (w.ticks == 0) return false;
         hz_ = hz;
+        div_ = w.clock;
+        ticks_ = w.ticks;
         R::clock(w.clock);
         R::template compare_buffered<0>(static_cast<uint16_t>(w.ticks - 1));
         return true;
@@ -601,11 +605,12 @@ public:
         clk_per_ = clk_per_hz;
         set_hz(hz_);
     }
-    /// The frequency really produced (prescaler and rounding applied).
+    /// The frequency really produced (prescaler and rounding applied) -
+    /// from the values set, not read back: in FRQ mode CMP0 keeps
+    /// reading the old value after a buffered change the output already
+    /// follows (bench).
     static uint32_t actual_hz() {
-        const uint32_t div = tca_divisor(static_cast<TcaClock>(R::single().CTRLA & TCA_SINGLE_CLKSEL_gm));
-        const uint32_t cmp = R::template compare<0>();
-        return clk_per_ / (2u * div * (cmp + 1u));
+        return clk_per_ / (2u * tca_divisor(div_) * (ticks_));
     }
     static void stop() { R::disable(); }
     static void start() { R::enable(); }
@@ -618,6 +623,8 @@ private:
     }
     static inline uint32_t clk_per_ = 0;
     static inline uint32_t hz_ = 0;
+    static inline TcaClock div_ = TcaClock::div1;
+    static inline uint32_t ticks_ = 1;
 };
 
 /// Heartbeat<n, port>: a period at a rate with an OVF interrupt/event at

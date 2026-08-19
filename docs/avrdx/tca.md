@@ -1,10 +1,8 @@
 # TCA - the 16-bit timer/counter type A (AVR DA/DB)
 
-> **PROVISIONAL.** The chapter and errata are reviewed and the driver
-> is written against them; the bench suite is written but has not run
-> on silicon yet - the page becomes EXHAUSTIVE with its first green run
-> (the split-mode PWM task is bench-verified by `traffic2`). Documents
-> of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCA chapter
+> **EXHAUSTIVE.** Systematic review of the chapter and errata, driver
+> written against them, bench suite passing (the split-mode PWM task
+> also by `traffic2`). Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCA chapter
 > 23, PORTMUX 17.3.7, EVSYS 16 generators 0x80-0x8E / users 0x1A-0x1D),
 > errata DS80000915F (2.12.1). Complements: TB3217 "Getting Started
 > with TCA", AN2434 (quadrature decoding with CCL + TCA + TCB) - see
@@ -168,12 +166,22 @@ calls `clock(c)` itself.
 
 - Twelve split-mode channels on two timers drive four RGB LEDs
   (`traffic2`); colour mixing is limited by the LEDs' dies, not by the
-  PWM. The rest of the driver awaits the first run of `test_avr_timer`.
+  PWM.
+- `test_avr_timer` (A5, 24 MHz crystal), measured by the TCBs against
+  the same crystal: FRQ generation at 500 Hz .. 100 kHz exact to the
+  tick (48000 / 24000 / 2400 / 240); `set_hz` under a running output
+  lands through CMP0BUF at the next TOP - and **CMP0 keeps reading the
+  old value** afterwards even though the output already follows the
+  buffer (FrequencyGenerator::actual_hz computes from what it set, not
+  from the register); single-slope 16-bit PWM (24000 steps) at 25/50/
+  75 % duty exact, endpoints 0 and steps static; Heartbeat at 100 Hz
+  (div4, 60000 ticks) gives 100 OVF per second and a 500 us pulse of
+  exactly 12000 CLK_PER ticks; count-on-event and direction-from-level
+  count 200 up in 200 ms and 100 down in the next 100 ms.
 
 ## Not covered yet
 
-The first bench run of `test_avr_timer`. In the driver: the split
-mode beyond the PWM task (split-mode interrupts LUNF/HUNF/LCMPn as
+The split mode beyond the PWM task (split-mode interrupts LUNF/HUNF/LCMPn as
 bodies, the two halves as independent 8-bit timers - no use yet);
 RUNSTDBY under a real standby; dual-slope PWM as a task (the resource
 does it, no task names it yet); errata 2.12.1 is documented, not

@@ -35,7 +35,13 @@
  *    CAPTEI, and EDGE says which edge does what - per mode (24.5.3);
  *  - reading CCMP clears CAPT (on the low byte): capture() in the ISR
  *    IS the acknowledge; in FRQPW read CNT (period) BEFORE CCMP
- *    (width), the read of CCMP re-arms the sequence. The 16-bit
+ *    (width), the read of CCMP re-arms the sequence; clocked by CLK_PER
+ *    the captured value is the interval minus one tick in FRQ/PW/FRQPW
+ *    (bench, A5: the restart cycle is not counted; exact on CLK_TCA) -
+ *    the meters add one at div1;
+ *  - SYNCUPD restarts the TCB at the clocking TCA's TOP: a capture
+ *    aligned with that TCA's own edge (its FRQ output) reads 0 (bench);
+ *    it is for captures of OTHER signals in phase with the TCA period. The 16-bit
  *    accesses go through the instance's one TEMP register: reads of
  *    CNT/CCMP from the main context while the ISR reads them too want
  *    a critical section (the task bodies below run in the ISR);
@@ -542,19 +548,26 @@ protected:
     template <typename Clock, uint8_t ch>
     static void setup(Clock clock, TcbMode mode, TcbClock tclk, EventChannel<ch> c, bool edge, bool filter) {
         tick_hz_ = tcb_tick_hz(clock_hz(clock), tclk);
+        adjust_ = tclk == TcbClock::div1 ? 1 : 0;       // the restart cycle lost at CLK_PER (bench)
         T::init({.mode = mode, .clock = tclk, .compare = 0,
                  .event_input = true, .edge = edge, .filter = filter});
         T::capture_on(c);
         T::enable_capt_interrupt(true);
     }
     static inline uint32_t tick_hz_ = 0;
+    static inline uint8_t adjust_ = 1;
 };
 
 /// FrequencyMeter<Tcb>: the period of a signal, captured between two
 /// equal edges (rising by default, falling with `falling`), the
 /// counter restarting at each: CAPT fires per period with the period
 /// in ticks. ISR body: period_ticks() (the read clears CAPT); hz()
-/// converts. Range: 65535 ticks of the chosen clock (div2 doubles it;
+/// converts. Bench (A5): clocked by CLK_PER, the captured value is the
+/// interval MINUS ONE (the restart cycle is not counted: 24000 ticks
+/// read 23999) in FRQ, PW and FRQPW alike; clocked by a TCA's prescaled
+/// clock it is exact (the lost CLK_PER cycle is a fraction of a tick).
+/// The meters add one tick at div1 and nothing otherwise (div2: the
+/// half tick lost rounds either way - measure with div1 or a TCA). Range: 65535 ticks of the chosen clock (div2 doubles it;
 /// OVF says "too slow"). The TCB-on-TCA clock (TcbClock::tca0/1)
 /// extends the range to the TCA's prescaler - then hz()/us() do not
 /// know the rate: convert with the TCA's.
@@ -565,7 +578,7 @@ struct FrequencyMeter : CaptureMeterBase<T> {
                      bool falling = false, bool filter = false) {
         CaptureMeterBase<T>::setup(clock, TcbMode::frequency, tclk, source, falling, filter);
     }
-    [[gnu::always_inline]] static uint16_t period_ticks() { return T::capture(); }
+    [[gnu::always_inline]] static uint16_t period_ticks() { return static_cast<uint16_t>(T::capture() + CaptureMeterBase<T>::adjust_); }
 };
 
 /// PulseWidthMeter<Tcb>: the time a signal stays high (restart on the
@@ -578,7 +591,7 @@ struct PulseWidthMeter : CaptureMeterBase<T> {
                      bool low = false, bool filter = false) {
         CaptureMeterBase<T>::setup(clock, TcbMode::pulse_width, tclk, source, low, filter);
     }
-    [[gnu::always_inline]] static uint16_t width_ticks() { return T::capture(); }
+    [[gnu::always_inline]] static uint16_t width_ticks() { return static_cast<uint16_t>(T::capture() + CaptureMeterBase<T>::adjust_); }
 };
 
 /// DutyMeter<Tcb>: period and high time in one sequence (start on a
@@ -601,7 +614,8 @@ struct DutyMeter : CaptureMeterBase<T> {
     [[gnu::always_inline]] static Reading reading() {
         const uint16_t period = T::count();      // BEFORE CCMP: its read re-arms the sequence
         const uint16_t width = T::capture();
-        return {period, width};
+        return {static_cast<uint16_t>(period + CaptureMeterBase<T>::adjust_),
+                static_cast<uint16_t>(width + CaptureMeterBase<T>::adjust_)};   // bench: interval - 1 at CLK_PER
     }
     static uint16_t duty_permille(Reading r) {
         return r.period_ticks ? static_cast<uint16_t>((static_cast<uint32_t>(r.width_ticks) * 1000u + r.period_ticks / 2) / r.period_ticks) : 0;

@@ -1,9 +1,7 @@
 # AC - the analog comparators (AVR DA/DB)
 
-> **PROVISIONAL.** The chapter and errata are reviewed and the driver
-> is written against them; the bench suite is written but has not run
-> on silicon yet - the page becomes EXHAUSTIVE with its first green run.
-> Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (AC
+> **EXHAUSTIVE.** Systematic review of the chapter and errata, driver
+> written against them, bench suite passing. Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (AC
 > chapter 32, electricals 39.17, PORTMUX 17.3.10, EVSYS 16 generators
 > 0x20-0x22, I/O multiplexing chapter 3), errata DS80000915F (no AC
 > item). Complements: TB3211 "Getting Started with AC" (see
@@ -93,13 +91,19 @@ brio::EventChannel<6>::source(C::OutEvent{});
 
 ## Bench findings
 
-None yet.
+`test_avr_timer` test m (A5, 3.3 V), the DAC on PD6 driving AINP3 of
+AC0 and AC2 (no wire: the pin is shared): Threshold at 1000 mV (ref
+2.048 V, DACREF 125, medium hysteresis) reads below at 500 mV and
+above at 1500 mV with one interrupt on the crossing; sweeping the DAC
+1 mV at a time the output **rises at 1007 mV and falls at 990 mV**:
+centre +0.5 mV (DAC + comparator offsets cancel to within the
+DAC's LSB), **hysteresis 17 mV** for the medium setting (spec 25 typ.);
+Window 500..1500 mV on AC0 + AC2 reads below / inside / above at 300 /
+1000 / 1800 mV.
 
 ## Not covered yet
 
-The first bench run of `test_avr_timer` (test m: thresholds, the
-crossings and hysteresis by sweeping the DAC, the window states). In
-the driver: response time and start-up measured (a TCB capturing the
+Response time and start-up measured (a TCB capturing the
 OUT event against a DAC step is swamped by the DAC's own slew - needs
 a faster edge), RUNSTDBY under a real standby, the output pin on PA7
 (CLKOUT's pin) checked, the three power profiles compared on the

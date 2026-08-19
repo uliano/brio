@@ -39,8 +39,13 @@ Waiting in an AO is a `TimeEvent`, never a busy loop.
 
 ## Bench findings
 
-- OSC32K-derived rates within ~0.2 % on this part (513 event-started
-  conversions per second for a nominal 512).
+- The OSC32K on this part runs about +0.9 % fast: `test_avr_timer`
+  measured the Ticker's second at 23.77 M crystal ticks (24 M nominal);
+  an earlier count of 513 event-started conversions per second for a
+  nominal 512 (`sampler`) is the same +0.2..0.9 % seen with coarser
+  means. Inside the +-10 % spec; a timebase that must hold better
+  wants the 32 kHz crystal (not fitted on the bench board) or a TCB
+  `PeriodicTick` from the main crystal.
 - The RTC prescaler is left at 1, so `EvPitDiv<n>` = 32768 / n Hz.
 
 ## Not covered yet

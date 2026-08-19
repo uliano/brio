@@ -160,18 +160,16 @@ gets its dated home in `docs/design/` when taken.
   DAC/ADC, CLKCTRL (clock.hpp rewritten as resources + tasks; `test_avr_clock`
   14/14 on the scope via CLKOUT/PA7: tune curve asymmetric, CFD
   fallback really 4 MHz, status follows the request - in clkctrl.md).
-  TCA/TCB: chapters reviewed, tca.hpp (Tca resource + TcaPwm/TcaPwm16/
-  FrequencyGenerator/Heartbeat/EventCounter) and tcb.hpp (Tcb resource +
+  TCA/TCB/CCL/AC done: tca.hpp (Tca resource + TcaPwm/TcaPwm16/
+  FrequencyGenerator/Heartbeat/EventCounter), tcb.hpp (Tcb resource +
   PeriodicTick/Timeout/OneShotPulse/PulseCounter/CascadedCounter/
-  meters/Pwm8) written, `test_avr_timer` (9 tests, closed loop through
-  EvPin generators, no wires) written and compiled, NOT yet run on the
-  bench (hardware away until the user is back) - docs tca.md/tcb.md
-  stay PROVISIONAL until its first green run. CCL/AC: same state -
-  ccl.hpp (Ccl/Lut<n>/ToggleFlipFlop) and ac.hpp (Ac<n>/Threshold/
-  Window) written, tests c and m in `test_avr_timer`, not run. TCD
-  deferred. Multislope parked until the hardware is back. Remaining
-  provisional: PORT, USART, SPI, TWI, RTC, TCA, TCB, CCL, AC - each
-  doc's "Not covered yet" is the shopping list. Original order:
+  meters/Pwm8), ccl.hpp (Ccl/Lut<n>/ToggleFlipFlop), ac.hpp (Ac<n>/
+  Threshold/Window); `test_avr_timer` 82/82 on A5 (closed loop through
+  EvPin generators, no wires; findings: capture = interval - 1 CLK_PER
+  at div1, SEQCTRL before the even LUT, OSC32K +0.94 %, AC hysteresis
+  17 mV) - docs tca.md/tcb.md/ccl.md/ac.md EXHAUSTIVE. TCD deferred.
+  Multislope next when wanted. Remaining provisional: PORT, USART, SPI,
+  TWI, RTC - each doc's "Not covered yet" is the shopping list. Original order:
   EVSYS (docs/avrdx/evsys.md; avrdx/evsys.hpp primitives built and
   `events0` VERIFIED on the scope 2026-08-19: 512 Hz PIT/64 on PD2,
   button level, off, 4 Hz LED with no CPU; EventSystem static sugar
@@ -182,10 +180,10 @@ gets its dated home in `docs/design/` when taken.
   test_<target>_<subject> is a reference test to keep passing through
   every restructuring; docs vref.md/dac.md/adc.md; 68/68 at 5 V too;
   `sampler` = the ADC inside the kernel via util/analog_sampler.hpp,
-  bench-verified 512 samples/s no drops) -> TCB/TCA (done as above) ->
-  CCL/AC tasks (LUT flip-flops; EventSystem static sugar gets its first
-  user there) -> the Multislope app (the 64-cycle snapshot stays in the
-  ISR body). Datasheet DS40002247B chapters: EVSYS 16, PORTMUX 17,
+  bench-verified 512 samples/s no drops) -> TCB/TCA/CCL/AC (done as
+  above; `test_avr_timer` is their reference suite) -> the Multislope
+  app (the 64-cycle snapshot stays in the ISR body; EventSystem static
+  sugar gets its first user there) -> TCD. Datasheet DS40002247B chapters: EVSYS 16, PORTMUX 17,
   VREF 21, TCA 23, TCB 24, TCD 25, CCL 31, AC 32, ADC 33, DAC 34
   (errata F: ADC, DAC, CCL 2.4, TCA 2.12, TCB 2.13, TCD 2.14 items).
 - **Target strata, positions taken (overview.md "Target strata" and

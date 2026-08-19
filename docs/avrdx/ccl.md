@@ -1,9 +1,7 @@
 # CCL - the configurable custom logic (AVR DA/DB)
 
-> **PROVISIONAL.** The chapter and errata are reviewed and the driver
-> is written against them; the bench suite is written but has not run
-> on silicon yet - the page becomes EXHAUSTIVE with its first green run.
-> Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (CCL
+> **EXHAUSTIVE.** Systematic review of the chapter and errata, driver
+> written against them, bench suite passing. Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (CCL
 > chapter 31, PORTMUX 17.3.2, EVSYS 16 generators 0x10-0x15 / users
 > 0x00-0x0B, I/O multiplexing chapter 3), errata DS80000915F (2.4.1,
 > 2.4.2). Complements: TB3218 "Getting Started with CCL", AN2434, the
@@ -43,7 +41,9 @@ Facts that matter to code:
 
 - **Enable protection**: `LUTnCTRLA/B/C`, `TRUTHn` and `SEQCTRL` can
   be written only while the (even) LUT is disabled - together with
-  ENABLE = 1 in the same write, never together with ENABLE = 0. On
+  ENABLE = 1 in the same write, never together with ENABLE = 0; a
+  `SEQCTRL` written after the even LUT is enabled is silently ignored
+  (bench: the JK never engaged, the LUT output was the bare truth table). On
   top of that, **errata 2.4.1 (A4/A5, our A5)**: reconfiguring ONE
   LUT requires the whole CCL disabled (`CTRLA.ENABLE = 0`), which
   drops every other LUT meanwhile - a driver must build the complete
@@ -89,9 +89,10 @@ Facts that matter to code:
 | `ToggleFlipFlop<pair>` | `init(toggle_channel, output_pin, alt_pin)`: JK on LUT 2p/2p+1, J = K = the event: one toggle per pulse (a divide-by-two, no CPU); `Even`/`Odd` |
 | helpers | `lut_truth(f)`, `lut_config_valid`, `lut_port(n)` |
 
-The protocol, dictated by errata 2.4.1: `Ccl::disable()`, every
-`Lut<n>::init(...)` and `Ccl::sequencer<p>(...)`, `Ccl::enable()` -
-the whole wiring at once. A CCL application is a fixed wiring: the
+The protocol, dictated by errata 2.4.1 and the enable protection:
+`Ccl::disable()`, `Ccl::sequencer<p>(...)` (before the even LUT's
+init - `sequencer` disables that LUT itself), every `Lut<n>::init(...)`,
+`Ccl::enable()` - the whole wiring at once. A CCL application is a fixed wiring: the
 EventSystem static allocation of [evsys.md](evsys.md) is its natural
 companion.
 
@@ -133,12 +134,19 @@ ISR(CCL_CCL_vect) { const uint8_t who = brio::Ccl::take_flags(); ... }
 
 ## Bench findings
 
-None yet.
+`test_avr_timer` test c (A5): LUT4 as AND and then OR of PB0/PB1 on
+PB3 follows the truth table on the pins (reconfigured with the block
+disabled, per 2.4.1); the JK flip-flop on LUT0/1 with J = K = a TCB's
+1 kHz CAPT event toggles exactly once per one-CLK_PER pulse (500 Hz on
+LUT0's output event, measured 48000 ticks); a LUT with sync + edge
+detector on the same event yields one pulse per event (200 in 200 ms,
+counted by a TCB clocked by LUT4's output event - a one-CLK_PER pulse
+is a valid COUNT input); `SEQCTRL` must be written before the even LUT
+is enabled (see above).
 
 ## Not covered yet
 
-The first bench run of `test_avr_timer` (test c). In the driver: the
-other sequencers as tasks (D flip-flop, latches - the resource does
+The other sequencers as tasks (D flip-flop, latches - the resource does
 them, no task names them), LINK chains, the peripheral inputs beyond
 events and pins (TCA/TCB WO, AC, USART, SPI as LUT inputs: the menu is
 typed, no test drives them), the alternate clocks (OSC32K/OSC1K for a

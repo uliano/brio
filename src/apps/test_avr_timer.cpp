@@ -9,7 +9,8 @@
 //
 // Bench diagnostic, NOT a kernel app (sequential, blocking; the ISRs
 // hand captures to the test through volatile cells). Console on USART2
-// ALT1 (PF4/PF5) at 460800.
+// ALT1 (PF4/PF5) at 460800. Holds are counted by delay_us (crystal):
+// the Ticker's OSC32K is +-10 % and is itself measured (test 7).
 //
 // Pins used (bench board): PD0 = TCA0 WO0 (generator), PC0 = TCB2 WO
 // (Pwm8), PB5 = TCB3 WO (one-shot; LED2 blue on the traffic bench - it
@@ -27,7 +28,8 @@
 //   1  FrequencyGenerator (TCA0, PD0) at 500 Hz / 1 kHz / 10 kHz /
 //      100 kHz -> FrequencyMeter (TCB0 via EvPin PD0): period in ticks
 //      = 24 MHz / f within 1 tick; set_hz under a running output; the
-//      TCB clocked by CLK_TCA (div64) and SYNCUPD: ticks scale by 64;
+//      TCB clocked by CLK_TCA (div64): ticks scale by 64; with SYNCUPD
+//      the capture aligned with the TCA's TOP reads the restart (0/1);
 //   2  TcaPwm16 (24000 steps = 1 kHz) duty 25/50/75 % -> DutyMeter
 //      (FRQPW): period 24000, duty within 2 permille; PulseWidthMeter
 //      agrees; endpoints 0 and max: static pin, no capture;
@@ -44,8 +46,9 @@
 //      for 200 ms: 200 +-2; snapshot by software event latches CNT;
 //   7  CascadedCounter (TCB1 + TCB2, carry on ch 4, snapshot on ch 5)
 //      clocked at CLK_PER for 1 s: 24000000 +-0.2 %; monotonic reads;
-//      reset;
-//   8  PeriodicTick (TCB0) at 1000 Hz: interrupts in 1 s = 1000 +-2;
+//      reset; the Ticker's second measured in crystal ticks (finding);
+//   8  PeriodicTick (TCB0) at 1000 Hz: its CAPT event measured by TCB1 =
+//      24000 ticks +-1, interrupts counted over 200 ms;
 //      Timeout (TCB1) of 1 ms watching PD0: with 100 Hz pulses 2 ms
 //      high CAPT fires once per period; with 500 us pulses never;
 //   9  EventCounter (TCA1) counting TCB0 CAPT events (PeriodicTick 1 kHz)
@@ -129,6 +132,7 @@ void tcb0_tick() { PeriodicTick<T0>::tick(); ++irq_count; }
 void tcb1_width() { cap_a = PulseWidthMeter<T1>::width_ticks(); ++captures; }
 void tcb1_timeout() { Timeout<T1>::expired(); ++captures; }
 void tcb1_tick() { PeriodicTick<T1>::tick(); }
+void tcb1_frequency() { cap_a = FrequencyMeter<T1>::period_ticks(); ++captures; }
 
 void clear_captures() {
     cli();
@@ -149,15 +153,20 @@ bool near(int32_t a, int32_t b, int32_t tol) {
     const int32_t d = a > b ? a - b : b - a;
     return d <= tol;
 }
+// Holds are counted in CRYSTAL time (delay_us, a cycle loop), not by
+// the Ticker: the RTC runs from the internal OSC32K (+-10 %; bench:
+// +0.9 % fast on this board) and the suite measures the timers against
+// the crystal they share. A cycle loop is stretched by ISR time, so the
+// PIT is paused for the whole suite and the ISRs of the test under way
+// are the only ones (a few per mille at most).
 void hold_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {}
+    while (ms--) delay_us(clock, 1000);
 }
 // Wait for at least n captures, at most ms milliseconds.
 bool wait_captures(uint16_t n, uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
+    while (ms--) {
         if (captures >= n) return true;
+        delay_us(clock, 1000);
     }
     return false;
 }
@@ -198,19 +207,28 @@ void t1_frequency() {
     clear_captures();
     Gen::set_hz(2000);
     wait_captures(5, 100);
+    print(serial, "  set_hz(2000) under run: period ticks=", cap_a, " expect 12000, actual_hz=", Gen::actual_hz(), crlf);
     verdict("set_hz under run: 2 kHz within 1 tick", near(cap_a, 12000, 1));
-    // the TCB clocked by the TCA's prescaled clock, restarting with it
+    // the TCB clocked by the TCA's prescaled clock
     Gen::stop();
     Tca<0>::init({.mode = TcaMode::frequency, .clock = TcaClock::div64, .compare0 = 374,
                   .outputs = 0x01, .route = 'D'});        // 24e6 / (2*64*375) = 500 Hz
+    tcb0_hook = tcb0_frequency;
+    FrequencyMeter<T0>::init(clock, ChGen{}, TcbClock::tca0);
     clear_captures();
+    wait_captures(3, 100);
+    print(serial, "  CLK_TCA (div64) clocked TCB: period ticks=", cap_a, " expect 750", crlf);
+    verdict("TCB on CLK_TCA: 500 Hz = 750 ticks of CLK_PER/64", near(cap_a, 750, 1));
+    // ... and restarting with the TCA (SYNCUPD): the TCB restarts at
+    // the TCA's TOP, which IS the edge it captures - it reads 0 (bench)
     T0::init({.mode = TcbMode::frequency, .clock = TcbClock::tca0, .compare = 0,
               .event_input = true, .sync_update = true});
     T0::capture_on(ChGen{});
     T0::enable_capt_interrupt(true);
+    clear_captures();
     wait_captures(3, 100);
-    print(serial, "  CLK_TCA (div64) clocked TCB: period ticks=", cap_a, " expect 750", crlf);
-    verdict("TCB on CLK_TCA: 500 Hz = 750 ticks of CLK_PER/64", near(cap_a, 750, 1));
+    print(serial, "  with SYNCUPD (restart at the TCA's TOP = the captured edge): ", cap_a, " (finding: 1 = counter just restarted)", crlf);
+    verdict("SYNCUPD aligned capture reads the restart", cap_a <= 1);
     quiesce();
 }
 
@@ -223,22 +241,27 @@ void t2_pwm16() {
     ChGen::source(EvPin<GenPin>{});
     Pwm16::init(TcaClock::div1, 0x01);
     constexpr uint16_t duties[] = {6000, 12000, 18000};
+    tcb0_hook = tcb0_duty;
+    DutyMeter<T0>::init(clock, ChGen{});
     for (uint16_t d : duties) {
-        tcb0_hook = tcb0_duty;
-        DutyMeter<T0>::init(clock, ChGen{});
         Pwm16::duty<0>(d);
         hold_ms(3);                                   // buffered: lands at BOTTOM
         clear_captures();
-        wait_captures(2, 50);
+        const bool got = wait_captures(2, 50);
         const uint16_t period = cap_a, width = cap_b;
         const uint16_t pm = DutyMeter<T0>::duty_permille({period, width});
-        print(serial, "  duty ", d, "/24000: period=", period, " width=", width, " = ", pm, " permille", crlf);
+        print(serial, "  duty ", d, "/24000: period=", period, " width=", width, " = ", pm, " permille (", captures, " captures", got ? "" : " - TIMED OUT", ")", crlf);
         verdict("period 24000 +-1", near(period, 24000, 1));
         verdict("duty within 2 permille", near(pm, d / 24, 2));
-        tcb0_hook = tcb0_width;
-        PulseWidthMeter<T0>::init(clock, ChGen{});
+    }
+    tcb0_hook = tcb0_width;
+    PulseWidthMeter<T0>::init(clock, ChGen{});
+    for (uint16_t d : duties) {
+        Pwm16::duty<0>(d);
+        hold_ms(3);
         clear_captures();
         wait_captures(2, 50);
+        print(serial, "  duty ", d, ": PulseWidthMeter width=", cap_a, crlf);
         verdict("PulseWidthMeter agrees +-1", near(cap_a, d, 1));
     }
     Pwm16::duty<0>(0);
@@ -264,8 +287,7 @@ void t3_heartbeat() {
     verdict("init", Beat::init(clock, 100, 0x01));
     Beat::pulse_us<0>(500);
     beats = 0;
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < 1000) {}
+    hold_ms(1000);
     const uint16_t b = beats;
     print(serial, "  beats in 1 s: ", b, crlf);
     verdict("100 +-1 OVF interrupts per second", near(b, 100, 1));
@@ -387,6 +409,16 @@ void t7_cascade() {
     print(serial, "  reads: ", a, " ", b, " ", c, " (1 s = 24000000 ticks)", crlf);
     verdict("1 s within 0.2 % (RTC millis vs crystal)", near(static_cast<int32_t>(b - a), 24'000'000, 48'000));
     verdict("monotonic", c >= b && b >= a);
+    // the Ticker (RTC from the internal OSC32K) against the crystal: a finding
+    Ticker::resume();
+    hold_ms(5);
+    Wide::reset();
+    const uint32_t m0 = Ticker::millis();
+    while (Ticker::millis() - m0 < 1000) {}
+    const uint32_t ticker_s = Wide::read();
+    Ticker::pause();
+    const int32_t ppm = static_cast<int32_t>((static_cast<int64_t>(24'000'000) - ticker_s) * 1'000'000 / 24'000'000);
+    print(serial, "  Ticker 1000 ms = ", ticker_s, " crystal ticks: Ticker runs ", ppm >= 0 ? "+" : "", ppm, " ppm (OSC32K; finding, informative)", crlf);
     verdict("crossed 65536: the MSB counted", b > 65535);
     Wide::reset();
     verdict("reset", Wide::read() < 1000);
@@ -399,12 +431,20 @@ void t8_tick_timeout() {
     quiesce();
     tcb0_hook = tcb0_tick;
     verdict("PeriodicTick init 1000 Hz", PeriodicTick<T0>::init(clock, 1000));
+    ChCarry::source(T0::CaptEvent{});                // the tick as an event ...
+    tcb1_hook = tcb1_frequency;
+    FrequencyMeter<T1>::init(clock, ChCarry{});      // ... measured by TCB1 against the same crystal
     clear_captures();
-    hold_ms(1000);
+    wait_captures(3, 100);
+    const uint16_t period = cap_a;
+    irq_count = 0;
+    hold_ms(200);
     const uint16_t n = irq_count;
-    print(serial, "  ticks in 1 s: ", n, crlf);
-    verdict("1000 +-2 (millis granularity)", near(n, 1000, 2));
+    print(serial, "  tick period: ", period, " ticks (expect 24000); ", n, " interrupts in 200 ms", crlf);
+    verdict("tick period 24000 +-1", near(period, 24000, 1));
+    verdict("interrupts arrive (200 +-3)", near(n, 200, 3));
     PeriodicTick<T0>::stop();
+    T1::disable(); tcb1_hook = nullptr; ChCarry::off();
     // Timeout: start on the rising edge of PD0, CAPT if 1 ms passes before the falling
     ChGen::source(EvPin<GenPin>{});
     tcb1_hook = tcb1_timeout;
@@ -607,6 +647,7 @@ int main() {
     const bool xtal = SysClock::init();
     Serial::init(clock, 460800);
     Ticker::init();
+    Ticker::pause();                      // no PIT ISR inflating the crystal-time holds (test 7 resumes it briefly)
     sei();
     print(serial, crlf, "test_avr_timer - TCA/TCB/CCL/AC test suite (clk=", xtal ? "XTAL" : "OSCHF",
           " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);

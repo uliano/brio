@@ -1,9 +1,7 @@
 # TCB - the 16-bit timer/counter type B (AVR DA/DB)
 
-> **PROVISIONAL.** The chapter and errata are reviewed and the driver
-> is written against them; the bench suite is written but has not run
-> on silicon yet - the page becomes EXHAUSTIVE with its first green run.
-> Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCB
+> **EXHAUSTIVE.** Systematic review of the chapter and errata, driver
+> written against them, bench suite passing. Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCB
 > chapter 24, PORTMUX 17.3.8, EVSYS 16 generators 0xA0-0xA9 / users
 > 0x1E-0x27), errata DS80000915F (2.13.1, 2.13.2). Complements: TB3214
 > "Getting Started with TCB" and the Microchip examples
@@ -178,12 +176,40 @@ and OVF share it).
 
 ## Bench findings
 
-None yet.
+`test_avr_timer` (silicon rev A5, 24 MHz crystal, 3.3 V; 82/82), all
+measured against the same crystal:
+
+- **The capture is the interval minus one CLK_PER cycle** in FRQ, PW and
+  FRQPW (24000 ticks read 23999; Pwm8 with CCMPL = 255 reads 255 for
+  its 256-tick period): the restart cycle is not counted. Clocked by a
+  TCA's prescaled clock (div64) the capture is exact (750 for 750) -
+  the lost cycle is a fraction of a tick. The meters add one tick at
+  `div1`, nothing otherwise (at `div2` the half tick rounds either
+  way).
+- **SYNCUPD** restarts the TCB at the clocking TCA's TOP: a capture
+  aligned with that TCA's own edge (its FRQ output) reads 0 - it is
+  for signals in phase with the TCA period, not for the TCA itself.
+- One-shot widths of 10 / 100 / 1000 us measure exactly (240 / 2400 /
+  24000 ticks); `ASYNC` adds four CLK_PER (2404 for 2400): the output
+  rises on the event, the counter starts 2-3 CLK_TCB later, as
+  documented. A second trigger during the pulse is ignored; `RUN` is
+  set two CLK_PER after `fire()`.
+- FRQPW (DutyMeter) at 1 kHz for 25/50/75 % duty: period 24000, width
+  exact; PW agrees; static low/high never capture. Pwm8 duty words
+  written as 16 bits (errata 2.13.1) give period 256 and width = duty.
+- The 32-bit cascade (TCB1 + TCB2, two event channels) counts CLK_PER
+  coherently through a software snapshot: 24017038 in a one-second
+  `delay_us` hold (+0.07 %: the hold is stretched by the test's ISRs).
+  The **Ticker's second** (RTC from the internal OSC32K) measured
+  23774238 crystal ticks: the OSC32K runs **+0.94 % fast** on this
+  board (spec +-10 %).
+- Event counting (COUNT user) and the TIMEOUT mode behave as the
+  datasheet says: 200 events in 200 ms; a 2 ms high times out a 1 ms
+  watch once per period, a 500 us high never.
 
 ## Not covered yet
 
-The first bench run of `test_avr_timer` (the findings column is
-empty until then). In the driver: RUNSTDBY under a real standby
+RUNSTDBY under a real standby
 (no sleeping app yet); `Timeout`, `OneShotPulse`, the meters and
 `Pwm8` are not ClockUsers (a clock change under a running one changes
 its microseconds: the owner re-inits - `PeriodicTick` alone rebases);

@@ -21,8 +21,10 @@
  *    (init does the latter: CTRLB, CTRLC, TRUTH first, then CTRLA with
  *    ENABLE). On silicon A4/A5 (2.4.1) reconfiguring ANY LUT wants the
  *    whole CCL disabled, which drops every other LUT meanwhile - so the
- *    protocol is: Ccl::disable(); Lut<..>::init(...) for each;
- *    Ccl::sequencer<pair>(...); Ccl::enable(). A LUT reconfigured
+ *    protocol is: Ccl::disable(); Ccl::sequencer<pair>(...) (BEFORE the
+ *    even LUT's init: SEQSEL is protected by that LUT's ENABLE - bench:
+ *    written after, silently ignored); Lut<..>::init(...) for each;
+ *    Ccl::enable(). A LUT reconfigured
  *    under a running block is a glitch on all of them, by design of
  *    the silicon, not of this driver;
  *  - inputs: the same menu for the three inputs, but the peripheral
@@ -158,10 +160,13 @@ struct Ccl {
     static bool enabled() { return (CCL.CTRLA & CCL_ENABLE_bm) != 0; }
 
     /// The sequencer of pair p (LUT 2p / 2p+1). Enable-protected by the
-    /// even LUT: set it before the LUTs are enabled (block disabled).
+    /// even LUT: written while LUT 2p is disabled, BEFORE its init()
+    /// (bench: written after, it is silently ignored). Disables the
+    /// even LUT first, to be safe.
     template <uint8_t pair>
     static void sequencer(Sequencer s) {
         static_assert(pair <= 2, "LUT pairs: 0 (LUT0/1), 1 (LUT2/3), 2 (LUT4/5)");
+        (&CCL.LUT0CTRLA)[8 * pair] &= static_cast<uint8_t>(~CCL_ENABLE_bm);   // the even LUT off
         (&CCL.SEQCTRL0)[pair] = static_cast<uint8_t>(s);
     }
 
@@ -282,12 +287,13 @@ struct ToggleFlipFlop {
     /// asked (its OutEvent is always available).
     template <uint8_t ch>
     static void init(EventChannel<ch> toggle, bool output_pin = false, bool alt_pin = false) {
+        Even::disable();                                   // SEQSEL is enable-protected by the even LUT
+        Ccl::sequencer<pair>(Sequencer::jk_flip_flop);
         Even::init({.in0 = LutInput::event_a, .truth = lut_truth([](bool a, bool, bool) { return a; }),
                     .output_pin = output_pin, .alt_pin = alt_pin});
         Odd::init({.in0 = LutInput::event_a, .truth = lut_truth([](bool a, bool, bool) { return a; })});
         Even::event_a_on(toggle);
         Odd::event_a_on(toggle);
-        Ccl::sequencer<pair>(Sequencer::jk_flip_flop);
     }
 };
 
