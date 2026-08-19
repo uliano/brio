@@ -157,7 +157,17 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   `EventSystem<Route...>` allocating channels at compile time is
   optional sugar over the same primitives. Contention for a channel
   rewired at run time is ownership: it belongs to one AO's FSM. Not
-  built; tables grow on demand.
+  built; tables grow on demand. The word "event" is overloaded here
+  and the overload is kept on purpose (both names belong to others:
+  Samek's and the silicon vendors'): a KERNEL event is a value,
+  produced, queued and delivered to an active object in its turn - it
+  lives in software time; a HARDWARE event is an edge on an internal
+  wire from one peripheral to another, no CPU, no datum - it lives in
+  hardware time, and becomes a kernel event only through an ISR that
+  posts. The types never meet: `Event`/`EventQueue`/`TimeEvent` are
+  the kernel's, `EventChannel`/`EvPitDiv`/`EvPin`/... live in the
+  target's evsys header, and the kernel knows none of them. In prose,
+  "hardware event" / "kernel event" where the context does not tell.
 - **PWM is an actuator, not a bus.** Continuous state, set and forget,
   synchronous, no completion, no contention worth an arbiter: rank of
   `Pin`, called from handlers. Fades and sequences are AOs in `util/`

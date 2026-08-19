@@ -7,6 +7,11 @@ generators, EVOUT and ADC-start users; the static allocator is not
 built yet, tables grow with their users). Reference test: `events0`
 (verified on the oscilloscope).
 
+"Event" on this page is the HARDWARE event of the data sheet - an edge
+on an internal wire - not the kernel's queued value; the bridge between
+the two is always an ISR body that posts (overview.md, "Target
+strata").
+
 Hardware routing between peripherals: a generator's state change
 travels on a channel to any number of users, without the CPU, in every
 sleep mode. A sibling exists on SAMD (EVSYS), a partial analogue on
