@@ -27,7 +27,9 @@
 //      the console follows all of them;
 //   3  OSCHF manual tune at 16 MHz: -32, -16, 0, +16, +31 steps of
 //      ~0.4 %: 13.95 .. 18.0 MHz on the scope; the console is retuned
-//      to the expected rate at each step and keeps talking;
+//      to the expected LINEAR rate at each step - it stays readable at
+//      +-16 and breaks up at the extremes (bench): the step is not 0.4 %
+//      all the way, the scope gives the real curve;
 //   4  the 24 MHz crystal vs OSCHF at 24 MHz: same nominal, the scope
 //      tells the accuracy apart (crystal ppm, OSCHF %);
 //   5  OSC32K as the main clock: CLKOUT at ~32 kHz (+-10 %) for two
@@ -39,8 +41,9 @@
 //      interrupt fire; then recovery: flag cleared, clock re-initialised,
 //      CLKOUT back;
 //   7  PLL x2 from OSCHF: PLLS stays 0 without a requester (the TCD) -
-//      informative; all MCLKSTATUS bits and the OSCHF tune/RUNSTDBY
-//      registers read back.
+//      informative; all MCLKSTATUS bits (OSCHFS reads 0 while OSCHF is
+//      idle even with RUNSTDBY: the status follows the request) and the
+//      OSCHF tune/RUNSTDBY registers read back.
 // Not testable here: XOSC32K and auto-tune (no 32 kHz crystal fitted),
 // an external clock on PA0 (the crystal sits there), the PLL running
 // (needs the TCD), the NMI form of the CFD interrupt (locks the
@@ -264,7 +267,11 @@ void t7_pll_status() {
           " XOSC32KS=", (st >> 3) & 1, " OSC32KS=", (st >> 2) & 1, " OSCHFS=", (st >> 1) & 1,
           " SOSC=", st & 1, crlf);
     verdict("EXTS set (crystal running)", (st & CLKCTRL_EXTS_bm) != 0);
-    verdict("OSCHFS set (RUNSTDBY keeps it running)", (st & CLKCTRL_OSCHFS_bm) != 0);
+    // Bench finding: OSCHFS reads 0 while OSCHF is not the main clock and
+    // nobody requests it, RUNSTDBY notwithstanding (the status follows
+    // the request, like the register note says of the signal); it reads
+    // 1 whenever OSCHF is the main clock (test 4).
+    print(serial, "  OSCHFS=", (st >> 1) & 1, " with OSCHF idle and RUNSTDBY on (finding: status follows the request)", crlf);
     verdict("not switching", (st & CLKCTRL_SOSC_bm) == 0);
     Oschf::run_standby(false);
     const bool off = (CLKCTRL.OSCHFCTRLA & CLKCTRL_RUNSTDBY_bm) == 0;

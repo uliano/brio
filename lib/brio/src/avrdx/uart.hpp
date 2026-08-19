@@ -213,12 +213,15 @@ public:
         }
         while ((regs().STATUS & USART_DREIF_bm) == 0) {   // last byte in the shifter
         }
-        // One frame time (10 bits) at the CURRENT rate, recovered from the
-        // BAUD register, lets the shifter finish. TXCIF is not used: it is
-        // stale-set by any earlier idle period and cannot tell "done" from
-        // "still shifting the last one".
+        // TWO frame times (10 bits each) at the CURRENT rate, recovered
+        // from the BAUD register, let the shifter finish: DREIF says the
+        // buffer is empty, the byte in the shifter may have just started
+        // (one frame) and the measure of "now" is loose (the second).
+        // Bench: one frame plus 1 us corrupted the last byte at several
+        // rates. TXCIF is not used: it is stale-set by any earlier idle
+        // period and cannot tell "done" from "still shifting".
         const uint32_t old_hz = static_cast<uint32_t>(regs().BAUD) * m_baud / 4u;
-        delay_us_runtime(cycles_per_us(old_hz), 10'000'000u / m_baud + 1u);
+        delay_us_runtime(cycles_per_us(old_hz), 2u * (10'000'000u / m_baud) + 2u);
         regs().BAUD = baud_reg(hz, m_baud);
     }
 
