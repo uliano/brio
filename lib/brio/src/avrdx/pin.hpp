@@ -44,6 +44,8 @@ struct Pin {
     static_assert(PortLetter >= 'A' && PortLetter <= 'G', "Invalid port");
     static_assert(PinNum <= 7, "Invalid pin number");
 
+    static constexpr char port_letter = PortLetter;   ///< 'A'..'G'
+    static constexpr uint8_t pin_number = PinNum;      ///< 0..7
     static constexpr uint8_t mask = (1 << PinNum);
 
     // Regular PORT for atomic set/clear/toggle registers.

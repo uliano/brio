@@ -6,8 +6,10 @@ sleep mode. On AVR DA/DB it is the EVSYS peripheral (DS40002247B ch.
 16); a sibling exists on SAMD (EVSYS), a partial analogue on STM32
 (TIM TRGO, EXTI, DMAMUX). This page has two parts: what the silicon
 offers (the analysis that decides the shape), and the brio
-representation. Nothing here is built yet; the shape is fixed first,
-the tables grow with the first users (ADC start, TCB capture).
+representation. `avrdx/evsys.hpp` implements the run-time primitives
+and the first tables (RTC/PIT and pin generators, EVOUT users); the
+static allocator is not built yet; the tables grow with the first
+users (ADC start, TCB capture).
 
 ## What the hardware offers (AVR DA/DB, 48-pin)
 
@@ -136,7 +138,7 @@ the same "named resource" idiom.
 
 ## Verification path
 
-`events0` (bench app, next step): route generators to EVOUT pins and
+`events0` (bench app, built): route generators to EVOUT pins and
 watch with the logic analyzer - `EvPitDiv<64>` on an odd channel
 (the "prescaled RTC clock" is CLK_RTC through RTC.CTRLA's prescaler,
 which Ticker leaves at 1: 32768 / 64 = 512 Hz square wave on the pin,

@@ -144,9 +144,10 @@ gets its dated home in `docs/design/` when taken.
   statics are safe; a global touched by two AOs outside events is a
   one-way race under preemption).
 - **Exhaustive-driver track (started 2026-08-19), in this order:**
-  EVSYS (analysis done: docs/design/events.md; next: avrdx/evsys.hpp
-  minimal - channels, EVOUT, PIT/pin generators - and the `events0`
-  bench app verified on the logic analyzer via EVOUT) -> VREF, DAC,
+  EVSYS (docs/design/events.md; avrdx/evsys.hpp built with the
+  primitives, `events0` bench app awaiting the analyzer check: 512 Hz
+  on PD2, 4 Hz LED, button level, off; then EventSystem static sugar
+  when an app has several fixed routes) -> VREF, DAC,
   ADC exhaustively (one wire PD6 -> ADC pin; ADC start from the PIT
   event as the first real EVSYS user; docs/design/analog.md analysis
   first, then analog0/1/2 apps) -> TCB as tasks (PeriodMeter,
@@ -303,6 +304,10 @@ lib/brio/src/            the framework, four strata:
                            channels on pins 0..5 (duty<ch>(v), 0/255 clean);
                            Channel<ch> = the PwmChannel type
     ticker.hpp             BasicTicker<tps> RTC/PIT timebase (Ticker = 1024)
+    evsys.hpp              EVSYS: EventChannel<n> (source/off/pulse), generators
+                           EvPitDiv/EvRtcOvf/EvRtcCmp/EvPin (code + legality),
+                           users EvOut<Pin> + EventUserBase (listen/unlisten);
+                           concepts EventGenerator/EventUser; tables on demand
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
 ```
