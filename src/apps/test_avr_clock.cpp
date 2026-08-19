@@ -18,6 +18,7 @@
 // Wiring: scope on PA7 (CLKOUT). Nothing else.
 // Commands: ? | 1 OSCHF sweep | 2 prescalers | 3 tune | 4 crystal vs
 // OSCHF | 5 32 kHz main clock | 6 clock failure | 7 PLL + status | a all
+// | s step mode (each hold waits for a key: read the scope at leisure)
 //
 // Tests:
 //   1  OSCHF at 24/20/16/12/8/4/3/2/1 MHz as the main clock: CLKOUT
@@ -82,9 +83,24 @@ void verdict(const char* name, bool ok) {
 // The console can follow a rate only if the USART can make the baud.
 bool console_ok(uint32_t hz) { return Serial::can_baud(hz, baud); }
 
-// Hold for ms using the RTC-based Ticker (independent of CLK_PER).
+// Step mode ('s' toggles): every hold waits for a key ('n' or any
+// other) instead of a fixed time, so the scope can be read and noted
+// at leisure - when the console can talk at the current rate; 60 s
+// fallback. Timed otherwise.
+bool step_mode = false;
+uint32_t current_hz = SysClock::hz;      // what the console is tuned for right now
+
+// Hold using the RTC-based Ticker (independent of CLK_PER).
 void hold_ms(uint32_t ms) {
     const uint32_t t0 = Ticker::millis();
+    if (step_mode && console_ok(current_hz)) {
+        print(serial, "     [n] next", crlf);
+        uint8_t c;
+        while (Ticker::millis() - t0 < 60000) {
+            if (Serial::read_byte(c)) return;
+        }
+        return;
+    }
     while (Ticker::millis() - t0 < ms) {}
 }
 
@@ -95,6 +111,7 @@ void before_switch(uint32_t next_hz, const char* what) {
     print(serial, "  -> ", what, " = ", next_hz, " Hz on PA7",
           console_ok(next_hz) ? "" : " (console silent)", crlf);
     Serial::rebase(next_hz);                 // drains TX, then BAUD for the next rate
+    current_hz = next_hz;
 }
 
 // Back on the boot clock: crystal 24 MHz, console retuned.
@@ -103,6 +120,7 @@ void back_to_boot() {
     (void)SysClock::init();
     MainClock::clkout(true);
     Serial::rebase(SysClock::hz);
+    current_hz = SysClock::hz;
 }
 
 // ---- 1: OSCHF sweep -------------------------------------------------------------
@@ -149,6 +167,7 @@ void t3_tune() {
     print(serial, "3 OSCHF manual tune at 16 MHz: steps -32 -16 0 +16 +31 (~0.4 %/step), 2 s each", crlf);
     print(serial, "  expect ~13.95, 14.98, 16.00, 17.02, 17.98 MHz on PA7", crlf);
     Serial::rebase(16'000'000);
+    current_hz = 16'000'000;
     Oschf::set_hz(16'000'000);
     (void)MainClock::select(MainSource::oschf);
     constexpr int8_t steps[] = {-32, -16, 0, 16, 31};
@@ -157,6 +176,7 @@ void t3_tune() {
         const uint32_t expected = static_cast<uint32_t>(16'000'000LL + 64'000LL * s);
         print(serial, "  tune ", static_cast<int16_t>(s), " -> expect ~", expected, " Hz", crlf);
         Serial::rebase(expected);
+        current_hz = expected;
         Oschf::tune(s);
         hold_ms(2000);
         print(serial, "     (console alive at the tuned rate)", crlf);
@@ -195,7 +215,8 @@ void t4_crystal_vs_oschf() {
 // ---- 5: 32 kHz main clock ------------------------------------------------------------
 void t5_32k() {
     print(serial, "5 OSC32K as the main clock for 2 s (silent): ~32.768 kHz on PA7 (+-10 %)", crlf);
-    Serial::rebase(32'768);                 // cannot really make 115200: just drains TX
+    Serial::rebase(32'768);                 // cannot make the baud there: just drains TX
+    current_hz = 32'768;                    // hold() stays timed: the console cannot talk
     Osc32k::run_standby(true);
     // At 32 kHz a 1024 Hz tick interrupt would never return (32 cycles
     // per tick): pause it, wait in raw cycles, resume after the return.
@@ -294,7 +315,7 @@ void run(TestFn fn) {
 
 void help() {
     print(serial, "test_avr_clock: 1 OSCHF sweep | 2 prescalers | 3 tune | 4 crystal vs OSCHF | "
-                  "5 32 kHz main | 6 clock failure | 7 PLL+status | a all   (scope on PA7)", crlf);
+                  "5 32 kHz main | 6 clock failure | 7 PLL+status | a all | s step mode   (scope on PA7)", crlf);
 }
 
 } // namespace
@@ -323,6 +344,10 @@ int main() {
         if (c == '\r' || c == '\n') continue;
         print(serial, static_cast<char>(c), crlf);
         if (c == '?') { help(); }
+        else if (c == 's' || c == 'S') {
+            step_mode = !step_mode;
+            print(serial, "step mode ", step_mode ? "ON: each hold waits for a key" : "OFF: timed holds", crlf);
+        }
         else if (c == 'a' || c == 'A') {
             uint8_t tp = 0, tf = 0;
             for (const Test& t : tests) { run(t.fn); tp += passed; tf += failed; }
