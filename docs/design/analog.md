@@ -61,6 +61,12 @@ ISR(ADC0_RESRDY_vect) { post<Sampler>(Sampled{Adc<0>::resrdy(), Adc<0>::selected
   measurement (bench: 512 samples/s, two subscribers, no drops on AVR
   DA/DB at 24 MHz).
 
+Validated on AVR DA/DB only: the contract carries that silicon's
+shape (one result per interrupt, the selected input readable). A
+sequencer/DMA converter delivers blocks and counts its own position;
+the pace-by-hardware-event idea holds everywhere, the delivery shape
+may not (overview.md, "Authority of util/").
+
 ## What is deliberately not here
 
 - A multi-consumer arbiter (requests `{input, ReplyTo<...>}` served

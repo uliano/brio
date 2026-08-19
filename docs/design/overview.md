@@ -72,6 +72,23 @@ concept or in drivers. The kernel must never know which silicon it
 runs on. Family differences inside AVR (DA vs DB, package sizes) are
 handled with device-macro guards so the same headers build everywhere.
 
+**Authority of util/.** A util type is target-independent by contract
+(it includes no target, it is parametrized on a concept, it runs on
+the host with a fake) - but its concept was written looking at the
+targets that exist, and the authority to call it general is exactly
+the list of those targets. Every util type therefore states, in its
+header, on which targets it has been validated and which assumption
+of theirs its contract may carry (SerialPort: a byte stream with an
+RX edge; BusMaster: a transaction that runs on interrupts and
+completes later; Ring: an index that fits the platform's atomic
+width; AnalogSampler: one result per interrupt with the selected
+input readable). With one target, that line is a warning: the second
+target is expected to force a synthesis - possibly a rewrite of the
+concept - and that is the plan, not a failure: the stability
+hierarchy puts util/ below the kernel's ideas for this reason. Two
+(nearly) complete low-level strata before generalizing is the right
+order; until then, util/ generalizes from one and says so.
+
 ## Layering: four strata
 
 Directories under `lib/brio/src/`; includes always carry the stratum

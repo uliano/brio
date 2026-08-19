@@ -47,6 +47,17 @@
  * not reconfigure), pausing a hardware pace before a dynamic clock
  * change (docs/design/clock.md), and never selecting an input behind
  * the sampler's back.
+ *
+ * Validated on: AVR DA/DB (Adc<0>) and the host fake. The contract
+ * carries that silicon's shape - ONE result per interrupt and the
+ * selected input readable from a register. On a converter with a
+ * hardware sequencer and DMA (ATSAM, STM32) the natural delivery is a
+ * block per interrupt and the selected input is a count the driver
+ * keeps; the walk here becomes vestigial or the type changes. The
+ * pace-by-hardware-event idea survives everywhere (an event system on
+ * ATSAM; a fixed, short list of timer TRGO triggers on STM32/CH32):
+ * the sampler never names the trigger, the app's wiring does and is
+ * target glue. (docs/design/overview.md, "Authority of util/".)
  */
 
 #pragma once

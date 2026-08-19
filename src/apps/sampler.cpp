@@ -87,6 +87,10 @@ using Sampler = brio::AnalogSampler<Adc, P, brio::Subscribers<Monitor, Alarm>,
                                     Loop{}, brio::AdcInput::temp, brio::AdcInput::vdd_div10>;
 
 // ---- the hardware pace: PIT divider -> channel 1 -> ADC start ---------------
+// TARGET GLUE, like the ISR vector bindings below: which generator, which
+// channel, which start input are this silicon's (an EVSYS route here; a
+// TC overflow on ATSAM; one of a short list of timer TRGO triggers on
+// STM32). The sampler never sees any of it.
 using PaceChannel = brio::EventChannel<1>;
 
 struct Pace {

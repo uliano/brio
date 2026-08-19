@@ -32,6 +32,12 @@
  * sides and break the SPSC rule). No overwrite-oldest push either: the
  * producer would have to move tail_, again breaking the rule; a full
  * ring reports false and the caller counts or blocks (its policy).
+ *
+ * Validated on: AVR DA/DB (atomic_width 1) and the host (4). The
+ * lock-free path assumes an index the platform reads/writes
+ * atomically; a target with DMA producers needs a producer index
+ * that IS the hardware counter (docs/design/overview.md, "Authority
+ * of util/").
  */
 
 #pragma once
