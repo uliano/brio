@@ -23,6 +23,9 @@ letter is in the first-page footer (`DS40002247B`, `DS80000915F`).
 | AVR128DA28/32/48/64 Data Sheet | DS40002183A (2020, preliminary) | `AVR128DA28-32-48-64-DataSheet-DS40002183A.pdf` (symlink) | the DA sibling; a newer revision likely exists - check before relying on it |
 | AVR128DA28/32/48/64 Silicon Errata | DS80000882C | `AVR128DA28-32-48-64-SilConErrataClarif-DS80000882C.pdf` (symlink) | check for newer |
 | Technical briefs TB3209 ADC, TB3213 RTC, TB3214 TCB, TB3217 TCA, TB3218 CCL, TB3212 TCD, TB3211 AC | DS9000320x | not copied here (in ~/Documenti/Elettronica/AVR) | Microchip "Getting started" briefs for megaAVR-0/Dx peripherals: useful complements, not authoritative |
+| AN2434 Interfacing Quadrature Encoder using CCL with TCA and TCB | DS00002434C | not copied (`https://ww1.microchip.com/downloads/en/Appnotes/Interf-Quad-Encoder-CCL-w-TCA-TCB-DS00002434C.pdf`) | the one Microchip AN that composes CCL + TCA + TCB on this family; a model for the timer tasks |
+| AN2451 Getting Started with Core Independent Peripherals on AVR | DS00002451 | not copied (`https://www.microchip.com/DS00002451`) | EVSYS/CCL/timer composition patterns; background only |
+| Microchip examples (github.com/microchip-pic-avr-examples): `avr128da48-getting-started-with-tcb-*`, `avr128da48-tcb-frequency-dutycycle-measurement-*` (TCB FRQPW + PIT, 500 Hz..200 kHz), `avr128db48-blink-led-ccl-mplab-mcc` (CCL JK flip-flop toggled by a timer event) | - | online | register-level recipes to compare our drivers against; MCC-generated, not authoritative |
 
 Canonical URLs (redirect to the current revision):
 `https://www.microchip.com/DS40002247` (datasheet),

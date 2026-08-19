@@ -44,7 +44,8 @@ Target AVR DA/DB (`lib/brio/src/avrdx/`):
 | [avrdx/spi.md](avrdx/spi.md) | SPI (provisional): the host engine; not covered: client mode, buffer mode |
 | [avrdx/twi.md](avrdx/twi.md) | TWI (provisional): the host engine; not covered: client/dual mode, SMBus, FM+ |
 | [avrdx/rtc.md](avrdx/rtc.md) | RTC/PIT (provisional): the PIT as timebase; not covered: the RTC counter |
-| [avrdx/tca.md](avrdx/tca.md) | TCA (provisional): split-mode PWM task; not covered: 16-bit modes, events, the task split |
+| [avrdx/tca.md](avrdx/tca.md) | TCA (provisional): chapter reviewed, split-mode PWM task; not covered: the Tca resource, 16-bit modes, events, the other tasks |
+| [avrdx/tcb.md](avrdx/tcb.md) | TCB (provisional): chapter reviewed - the eight modes, event clock/capture, 32-bit cascade, routes, errata; no driver yet |
 | [avrdx/vendor/README.md](avrdx/vendor/README.md) | The datasheets/errata the stratum is written against, by document number (PDFs kept local, not in git) |
 
 Target host (`lib/brio/src/host/`):
