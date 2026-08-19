@@ -24,7 +24,13 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   `kernel.md` (the AO kernel: model, contract, events, payloads,
   queues, FSM, delivery, scheduler, time, panic, platform, index),
   `serial.md`, `spi-bus.md`, `i2c-bus.md`, `ring.md`, `clock.md` (the
-  clock model: rate truth, static/dynamic, rebase fan-out).
+  clock model), `events.md`, and ONE document per peripheral in the
+  shape docs/README.md prescribes (documents of record -> what the
+  silicon does -> how to use it, one example per use -> bench
+  findings): `vref.md`, `dac.md`, `adc.md`. The Multislope assessment
+  (every acrobatic piece maps to fixed routes + tasks on resources +
+  config structs; the 64-cycle snapshot stays in the ISR body) lives
+  in memory and in the track entry below, not in docs.
 - `docs/targets/*.md` - one operational page per target: toolchain,
   board, probe, debugger and their quirks (`avrdx.md`, `host.md`).
 - `docs/bench.md` - the board, the wiring and the apps as they are
@@ -148,12 +154,12 @@ gets its dated home in `docs/design/` when taken.
   `events0` VERIFIED on the scope 2026-08-19: 512 Hz PIT/64 on PD2,
   button level, off, 4 Hz LED with no CPU; EventSystem static sugar
   when an app has several fixed routes) -> VREF, DAC,
-  ADC exhaustively (docs/design/analog.md; vref.hpp, dac.hpp, adc.hpp
+  ADC exhaustively (docs/design/adc.md; vref.hpp, dac.hpp, adc.hpp
   and `test_avr_analog`, the bench test SUITE (54/54 on rev A5 at
   3.3 V; measures VDD at start, run it at 5 V too) - a suite named
   test_<target>_<subject> is a reference test to keep passing through
-  every restructuring; findings in analog.md; next: analog1 = kernel
-  integration of the ADC) -> TCB/TCA/CCL/AC as tasks driven by
+  every restructuring; docs vref.md/dac.md/adc.md; 68/68 at 5 V too;
+  next: analog1 = kernel integration of the ADC) -> TCB/TCA/CCL/AC as tasks driven by
   the Multislope app (OneShotPulse<Tcb>, EventCounter<Tcb>,
   CascadedCounter<Tcb,Tcb>, TcaHeartbeat, LUT flip-flops; the
   64-cycle snapshot stays in the ISR body; EventSystem static sugar

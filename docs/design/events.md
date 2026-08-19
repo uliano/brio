@@ -1,15 +1,17 @@
 # The event system
 
+Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B,
+errata DS80000915F (no EVSYS items). Driver: `avrdx/evsys.hpp`
+(run-time primitives and the tables in use: RTC/PIT, pin and ADC
+generators, EVOUT and ADC-start users; the static allocator is not
+built yet, tables grow with their users). Reference test: `events0`
+(verified on the oscilloscope).
+
 Hardware routing between peripherals: a generator's state change
 travels on a channel to any number of users, without the CPU, in every
-sleep mode. On AVR DA/DB it is the EVSYS peripheral (DS40002247B ch.
-16); a sibling exists on SAMD (EVSYS), a partial analogue on STM32
-(TIM TRGO, EXTI, DMAMUX). This page has two parts: what the silicon
-offers (the analysis that decides the shape), and the brio
-representation. `avrdx/evsys.hpp` implements the run-time primitives
-and the first tables (RTC/PIT and pin generators, EVOUT users); the
-static allocator is not built yet; the tables grow with the first
-users (ADC start, TCB capture).
+sleep mode. A sibling exists on SAMD (EVSYS), a partial analogue on
+STM32 (TIM TRGO, EXTI, DMAMUX). Two parts: what the silicon offers
+(the analysis that decides the shape), and the brio representation.
 
 ## What the hardware offers (AVR DA/DB, 48-pin)
 

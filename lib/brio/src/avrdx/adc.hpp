@@ -2,7 +2,7 @@
  * adc.hpp
  *
  * Adc<n>: the AVR DA/DB 12-bit SAR ADC (DS40002247B ch. 33) as ONE
- * brio task with knobs - see docs/design/analog.md for why not several:
+ * brio task with knobs - see docs/design/adc.md for why not several:
  * every use (single reading, paced stream, oversampled reading, window
  * watch, temperature, supply monitor) is the same sequence - select
  * input, trigger, wait RESRDY, read RES - with different knobs and

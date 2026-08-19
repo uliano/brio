@@ -3,7 +3,7 @@
 // PASS/FAIL on the console. Bench-verified 54/54 on an AVR128DB48 rev
 // A5 at 3.3 V (2026-08-19). It is the reference test of vref.hpp,
 // dac.hpp and adc.hpp: keep it passing through every restructuring
-// (docs/design/analog.md holds the findings it produced).
+// (docs/design/adc.md holds the findings it produced).
 //
 // Naming: test_<target>_<subject> marks a bench test suite as opposed
 // to a demo app; suites live in src/apps/ while the multi-app tooling

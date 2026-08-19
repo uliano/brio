@@ -19,7 +19,9 @@ the second target, the bench is disposable:
 | [design/i2c-bus.md](design/i2c-bus.md) | The I2C bus: BusMaster generalized, the TWI engine descriptor, status vocabulary |
 | [design/ring.md](design/ring.md) | Ring: the SPSC FIFO, lock-free where the platform allows, guarded elsewhere |
 | [design/events.md](design/events.md) | The event system: what the silicon offers, typed vocabulary + run-time connect/disconnect + static allocation as sugar (design fixed, tables on demand) |
-| [design/analog.md](design/analog.md) | VREF, DAC, ADC: what the silicon offers; VREF as vocabulary, DAC as actuator, ADC as ONE task with knobs (why not several) |
+| [design/vref.md](design/vref.md) | VREF: the reference selector - levels, headroom, how the ADC/DAC name it |
+| [design/dac.md](design/dac.md) | DAC: the 10-bit actuator - buffered/unbuffered outputs, the slow fall on a bare pin, usage |
+| [design/adc.md](design/adc.md) | ADC: one task with knobs - inputs as types, triggers, accumulation, window, results as events, every usage pattern |
 | [design/clock.md](design/clock.md) | The clock model: one rate truth, static and dynamic regimes, the synchronous rebase fan-out and its two compile-time checks |
 | [targets/avrdx.md](targets/avrdx.md) | AVR DA/DB: toolchain, board, Atmel-ICE upload, PyAvrOCD debugging and its quirks, clock/timebase |
 | [targets/host.md](targets/host.md) | The native test target: HostPlatform, doctest suites |
@@ -52,6 +54,15 @@ the second target, the bench is disposable:
   repo root pointing at this directory, `mkdocs serve`. Nothing here
   needs rewriting for that - which is exactly why nothing here may
   depend on it.
+- **One document per peripheral, in this shape.** First paragraph:
+  the documents of record with their revision (data sheet, errata),
+  the driver header, the reference test suite - no chapter lists, no
+  history. Then: *what the silicon does* (the behaviour and the
+  physical facts that matter to code, measured ones marked as such),
+  *how to use it* (one example per way of using it - what to write,
+  since readers want the call, not the header), *bench findings* (the
+  facts the test suite established, with its name). Tracks, guiding
+  applications and history live in CLAUDE.md and memory, never here.
 - **Today's truth only, no change history.** A doc says what is,
   never what it used to be, when it was reorganized or what something
   was called before. Rationale and rejected alternatives are welcome
