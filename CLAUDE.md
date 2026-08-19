@@ -29,6 +29,11 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   board, probe, debugger and their quirks (`avrdx.md`, `host.md`).
 - `docs/bench.md` - the board, the wiring and the apps as they are
   today. The volatile end.
+- `docs/vendor/README.md` - the datasheets/errata by document number
+  and the chapters we use; PDFs are local symlinks (git-ignored),
+  cite as "DS40002247A 16.5.2". Local copies live in
+  ~/Documenti/Elettronica/AVR/ (note: the file named AVR64DB...Errata
+  there IS the AVR128DB errata DS80000915).
 - Headers - the canonical API reference; header comments explain the
   concurrency model and the WHY of each tradeoff.
 
@@ -135,6 +140,15 @@ gets its dated home in `docs/design/` when taken.
   so the door stays open: AOs share nothing but events (an AO's own
   statics are safe; a global touched by two AOs outside events is a
   one-way race under preemption).
+- **Exhaustive-driver track (started 2026-08-19), in this order:**
+  EVSYS (analysis done: docs/design/events.md; next: avrdx/evsys.hpp
+  minimal - channels, EVOUT, PIT/pin generators - and the `events0`
+  bench app verified on the logic analyzer via EVOUT) -> VREF, DAC,
+  ADC exhaustively (one wire PD6 -> ADC pin; ADC start from the PIT
+  event as the first real EVSYS user; docs/design/analog.md analysis
+  first, then analog0/1/2 apps) -> TCB as tasks (PeriodMeter,
+  OneShotPulse; capture on event). Datasheet chapters: EVSYS 16
+  p.141, VREF 21 p.216, ADC 33 p.494, DAC 34 p.524.
 - **Target strata, positions taken (overview.md "Target strata" and
   the diagram docs/design/architecture.svg).** Tasks over resources
   (thin handles + task types named for what they do; explicit handle
