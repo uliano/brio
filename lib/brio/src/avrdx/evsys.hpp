@@ -195,6 +195,22 @@ struct EvTcbOvf {
     static constexpr bool legal_on(uint8_t) { return true; }
 };
 
+/// CCL LUT n output LEVEL (async). 0x10 + n.
+template <uint8_t n>
+struct EvLut {
+    static_assert(n <= 5, "LUT0..LUT5");
+    static constexpr uint8_t code = static_cast<uint8_t>(0x10 + n);
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+
+/// Analog comparator n output LEVEL (async). 0x20 + n.
+template <uint8_t n>
+struct EvAcOut {
+    static_assert(n <= 2, "AC0..AC2");
+    static constexpr uint8_t code = static_cast<uint8_t>(0x20 + n);
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+
 /// A port pin's LEVEL as an event (async; zero if the input driver is
 /// disabled). PORTA/PORTB: channels 0-1; PORTC/PORTD: 2-3; PORTE/PORTF:
 /// 4-5. The two ports of a pair share the code space: 0x40+n for the
@@ -307,6 +323,16 @@ struct EvTcbCountIn : EventUserBase<EvTcbCountIn<n>> {
 
 static_assert(EventGenerator<EvTcbCapt<0>>);
 static_assert(EventUser<EvTcbCaptIn<0>>);
+/// CCL LUT n event input A ('A') or B ('B'): the channel's signal
+/// reaches the truth table as is (no detection, async) when the LUT
+/// selects EVENTA/EVENTB on one of its inputs (ccl.hpp). 0x00 + 2n (+1).
+template <uint8_t n, char which>
+struct EvLutIn : EventUserBase<EvLutIn<n, which>> {
+    static_assert(n <= 5, "LUT0..LUT5");
+    static_assert(which == 'A' || which == 'B', "LUT event inputs: 'A' or 'B'");
+    static volatile uint8_t& reg() { return (&EVSYS.USERCCLLUT0A)[2 * n + (which == 'B' ? 1 : 0)]; }
+};
+
 static_assert(EventGenerator<EvPitDiv<64>>);
 static_assert(EventGenerator<EvPin<Pin<'A', 2>>>);
 static_assert(EventUser<EvOut<Pin<'D', 2>>>);

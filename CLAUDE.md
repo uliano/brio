@@ -166,11 +166,12 @@ gets its dated home in `docs/design/` when taken.
   meters/Pwm8) written, `test_avr_timer` (9 tests, closed loop through
   EvPin generators, no wires) written and compiled, NOT yet run on the
   bench (hardware away until the user is back) - docs tca.md/tcb.md
-  stay PROVISIONAL until its first green run. CCL/AC: chapters
-  reviewed (ccl.md, ac.md), drivers next. TCD deferred. Multislope
-  parked until the hardware is back. Remaining provisional: PORT,
-  USART, SPI, TWI, RTC, TCA, TCB, CCL, AC - each doc's "Not covered yet"
-  is the shopping list. Original order:
+  stay PROVISIONAL until its first green run. CCL/AC: same state -
+  ccl.hpp (Ccl/Lut<n>/ToggleFlipFlop) and ac.hpp (Ac<n>/Threshold/
+  Window) written, tests c and m in `test_avr_timer`, not run. TCD
+  deferred. Multislope parked until the hardware is back. Remaining
+  provisional: PORT, USART, SPI, TWI, RTC, TCA, TCB, CCL, AC - each
+  doc's "Not covered yet" is the shopping list. Original order:
   EVSYS (docs/avrdx/evsys.md; avrdx/evsys.hpp primitives built and
   `events0` VERIFIED on the scope 2026-08-19: 512 Hz PIT/64 on PD2,
   button level, off, 4 Hz LED with no CPU; EventSystem static sugar
@@ -337,6 +338,7 @@ lib/brio/src/            the framework, four strata:
                            constant, 4-cycle loop otherwise; cycles_per_us
     pin.hpp                Pin<'A',5> compile-time GPIO (also a PwmChannel,
                            max 1) + PinRef descriptor + PinSet<Pins...> mask
+                           + port_by_letter/pinctrl_of (run-time port lookup)
     uart.hpp               Uart<n, Route, rx, tx> interrupt-driven transport
     spi.hpp                Spi<n> master engine (two-phase descriptor,
                            per-byte ISR pump, CS owned by the engine)
@@ -351,6 +353,12 @@ lib/brio/src/            the framework, four strata:
                            Timeout, OneShotPulse, PulseCounter,
                            CascadedCounter, Frequency/PulseWidth/DutyMeter,
                            Pwm8
+    ccl.hpp                CCL: Ccl (block, sequencers, one vector) + Lut<n>
+                           (three typed inputs, lut_truth(), filter/edge,
+                           clock, pin, sense) + ToggleFlipFlop<pair>
+    ac.hpp                 AC: Ac<n> (inputs, DACREF via Vref::ac, hysteresis,
+                           power, pin/event/interrupt, window) + Threshold,
+                           Window
     ticker.hpp             BasicTicker<tps> RTC/PIT timebase (Ticker = 1024)
     vref.hpp               Ref + ref_mv (this silicon's levels) + Vref::adc0/dac0/ac
     dac.hpp                Dac<0>: init(DacConfig), set(code)/set_mv - actuator
@@ -360,10 +368,11 @@ lib/brio/src/            the framework, four strata:
                            ClockUser (rebase keeps CLK_ADC in range)
     evsys.hpp              EVSYS: EventChannel<n> (source/off/pulse), generators
                            EvPitDiv/EvRtcOvf/EvRtcCmp/EvPin/EvTcaOvf/EvTcaCmp/
-                           EvTcbCapt/EvTcbOvf (code + legality), users EvOut<Pin>/
-                           EvAdc0Start/EvTcaCntA/B/EvTcbCaptIn/CountIn +
-                           EventUserBase (listen/unlisten); concepts
-                           EventGenerator/EventUser; tables on demand
+                           EvTcbCapt/EvTcbOvf/EvLut/EvAcOut (code + legality),
+                           users EvOut<Pin>/EvAdc0Start/EvTcaCntA/B/
+                           EvTcbCaptIn/CountIn/EvLutIn + EventUserBase
+                           (listen/unlisten); concepts EventGenerator/
+                           EventUser; tables on demand
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
 ```

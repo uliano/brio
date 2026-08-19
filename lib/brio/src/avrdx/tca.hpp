@@ -382,24 +382,7 @@ public:
         port.DIRSET = pins;
     }
 
-    static constexpr volatile PORT_t& port_of(char p) {
-        switch (p) {
-            case 'A': return PORTA;
-#ifdef PORTB
-            case 'B': return PORTB;
-#endif
-            case 'C': return PORTC;
-            case 'D': return PORTD;
-#ifdef PORTE
-            case 'E': return PORTE;
-#endif
-            case 'F': return PORTF;
-#ifdef PORTG
-            case 'G': return PORTG;
-#endif
-            default: return PORTA;
-        }
-    }
+    static constexpr volatile PORT_t& port_of(char p) { return port_by_letter(p); }
 
 private:
     template <uint8_t ch>

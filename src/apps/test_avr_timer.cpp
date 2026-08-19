@@ -1,9 +1,11 @@
-// test_avr_timer - the TCA/TCB test SUITE for the AVR DA/DB target:
-// the TCA tasks generate known waveforms, the TCB tasks measure them
-// back through the event system (pin-level generators on the driven
-// pins: no jumper wires), counters count known event rates against
-// the RTC Ticker. Reference test of avrdx/tca.hpp and avrdx/tcb.hpp
-// (docs/avrdx/tca.md, tcb.md): keep it passing.
+// test_avr_timer - the TCA/TCB/CCL/AC test SUITE for the AVR DA/DB
+// target: the TCA tasks generate known waveforms, the TCB tasks measure
+// them back through the event system (pin-level generators on the
+// driven pins: no jumper wires), counters count known event rates
+// against the RTC Ticker; the CCL is checked on pins and with a timer
+// event through a flip-flop, the comparators against the DAC on PD6.
+// Reference test of avrdx/tca.hpp, tcb.hpp, ccl.hpp, ac.hpp
+// (docs/avrdx/tca.md, tcb.md, ccl.md, ac.md): keep it passing.
 //
 // Bench diagnostic, NOT a kernel app (sequential, blocking; the ISRs
 // hand captures to the test through volatile cells). Console on USART2
@@ -11,13 +13,15 @@
 //
 // Pins used (bench board): PD0 = TCA0 WO0 (generator), PC0 = TCB2 WO
 // (Pwm8), PB5 = TCB3 WO (one-shot; LED2 blue on the traffic bench - it
-// flickers), PC1 = a level the test drives for the direction input.
-// Nothing to wire. Event channels: 0 PB5, 1 software, 2 PD0, 3 PC1 or
-// PC0, 4/5 internal generators - re-sourced per test.
+// flickers), PC1 = a level the test drives for the direction input,
+// PB0/PB1 = LUT4 inputs driven by the test, PB3 = LUT4 output (LED1
+// R/G and LED2 R flicker), PD6 = DAC0 -> AC AINP3 (internal to the
+// pin). Nothing to wire. Event channels: 0 PB5, 1 software / LUT4,
+// 2 PD0, 3 PC1 or PC0, 4/5 internal generators - re-sourced per test.
 //
 // Commands: ? | 1 frequency | 2 PWM16 duty | 3 heartbeat | 4 one-shot
 // | 5 Pwm8 | 6 pulse counter | 7 32-bit cascade | 8 tick + timeout
-// | 9 event counter | a all
+// | 9 event counter | c CCL | m comparators | a all
 //
 // Tests:
 //   1  FrequencyGenerator (TCA0, PD0) at 500 Hz / 1 kHz / 10 kHz /
@@ -47,16 +51,32 @@
 //      never fires;
 //   9  EventCounter (TCA1) counting TCB0 CAPT events (PeriodicTick 1 kHz)
 //      for 200 ms: 200 +-2; direction from PC1 level: counts down.
+//   c  CCL: LUT4 as AND of PB0/PB1 (driven by the test) read back on
+//      PB3 - the four input patterns, then OR after a reconfiguration
+//      (whole block disabled: errata 2.4.1); ToggleFlipFlop<0> (LUT0/1)
+//      toggled by TCB1's 1 kHz CAPT event: LUT0's output event measured
+//      by TCB0 = 500 Hz (48000 ticks); LUT4 as a sync + edge detector
+//      on the same event: one-clock pulses counted by TCB2 = 1000/s;
+//   m  AC: DAC0 on PD6 against Threshold<Ac<0>> at 1000 mV (ref 2.048):
+//      below/above states; the up and down crossings found by sweeping
+//      the DAC (offset within 20 mV, the medium hysteresis ~25 mV -
+//      findings); interrupts per crossing; Window<Ac<0>, Ac<2>> 500..
+//      1500 mV: below / inside / above; AC0's event on a channel -> EVOUT
+//      is not checked (no analyzer in the loop).
 // Not testable here: the TCA1 PORTC three-channel route and TCB WO
-// ALT1 pins (console), RUNSTDBY (no sleep in this suite), CCL/AC (their
-// own docs: no driver yet), TCD.
+// ALT1 pins (console), RUNSTDBY (no sleep in this suite), the CCL
+// filter delay in clocks (no capture of it), AC response time (the
+// DAC's slew dominates), TCD.
 
 // pio: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
 
+#include "avrdx/ac.hpp"
+#include "avrdx/ccl.hpp"
 #include "avrdx/clock.hpp"
+#include "avrdx/dac.hpp"
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
@@ -109,6 +129,7 @@ void tcb0_width() { cap_a = PulseWidthMeter<T0>::width_ticks(); ++captures; }
 void tcb0_tick() { PeriodicTick<T0>::tick(); ++irq_count; }
 void tcb1_width() { cap_a = PulseWidthMeter<T1>::width_ticks(); ++captures; }
 void tcb1_timeout() { Timeout<T1>::expired(); ++captures; }
+void tcb1_tick() { PeriodicTick<T1>::tick(); }
 
 void clear_captures() {
     cli();
@@ -430,12 +451,133 @@ void t9_event_counter() {
     quiesce();
 }
 
+// ---- c CCL ---------------------------------------------------------------------
+using LutA = Pin<'B', 0>;
+using LutB = Pin<'B', 1>;
+using LutOut = Pin<'B', 3>;
+
+void tc_ccl() {
+    print(serial, "c CCL: LUT4 AND/OR of PB0/PB1 on PB3; ToggleFlipFlop LUT0/1 by TCB1 events; edge detector", crlf);
+    quiesce();
+    LutA::clear(); LutB::clear();
+    LutA::output(); LutB::output();
+    Ccl::disable();
+    verdict("LUT4 init (AND)", Lut<4>::init({.in0 = LutInput::pin, .in1 = LutInput::pin,
+                                             .truth = lut_truth([](bool a, bool b, bool) { return a && b; }),
+                                             .output_pin = true}));
+    Ccl::enable();
+    bool ok = true;
+    for (uint8_t k = 0; k < 4; ++k) {
+        if (k & 1) LutA::set(); else LutA::clear();
+        if (k & 2) LutB::set(); else LutB::clear();
+        delay_us(clock, 2);
+        const bool out = LutOut::read();
+        ok = ok && (out == (k == 3));
+        print(serial, "  AND ", k & 1, " ", (k >> 1) & 1, " -> ", out, crlf);
+    }
+    verdict("AND truth table on the pins", ok);
+    // reconfigure to OR: the whole block off meanwhile (errata 2.4.1)
+    Ccl::disable();
+    Lut<4>::init({.in0 = LutInput::pin, .in1 = LutInput::pin,
+                  .truth = lut_truth([](bool a, bool b, bool) { return a || b; }), .output_pin = true});
+    Ccl::enable();
+    ok = true;
+    for (uint8_t k = 0; k < 4; ++k) {
+        if (k & 1) LutA::set(); else LutA::clear();
+        if (k & 2) LutB::set(); else LutB::clear();
+        delay_us(clock, 2);
+        ok = ok && (LutOut::read() == (k != 0));
+    }
+    verdict("OR after reconfiguration", ok);
+    // flip-flop toggled by a 1 kHz event: 500 Hz on LUT0's output event
+    Ccl::disable();
+    tcb1_hook = tcb1_tick;
+    PeriodicTick<T1>::init(clock, 1000);
+    ChCarry::source(T1::CaptEvent{});
+    ToggleFlipFlop<0>::init(ChCarry{});
+    // edge detector: LUT4 = sync + edge of the same event, one-clock pulses
+    Lut<4>::init({.in0 = LutInput::event_a, .truth = lut_truth([](bool a, bool, bool) { return a; }),
+                  .filter = LutFilter::sync, .edge_detect = true});
+    Lut<4>::event_a_on(ChCarry{});
+    Ccl::enable();
+    ChSnap::source(Lut<0>::OutEvent{});
+    tcb0_hook = tcb0_frequency;
+    FrequencyMeter<T0>::init(clock, ChSnap{});
+    ChSoft::source(Lut<4>::OutEvent{});
+    PulseCounter<T2>::init(ChSoft{});
+    PulseCounter<T2>::reset();
+    clear_captures();
+    const bool got = wait_captures(3, 100);
+    print(serial, "  flip-flop output period: ", cap_a, " ticks (expect 48000)", crlf);
+    verdict("JK toggles once per event: 500 Hz", got && near(cap_a, 48000, 2));
+    PulseCounter<T2>::reset();
+    hold_ms(200);
+    const uint16_t pulses = PulseCounter<T2>::count();
+    print(serial, "  edge-detector pulses in 200 ms: ", pulses, crlf);
+    verdict("one pulse per event (200 +-2)", near(pulses, 200, 2));
+    Ccl::disable();
+    LutA::input(); LutB::input();
+    quiesce();
+}
+
+// ---- m comparators ----------------------------------------------------------------
+using D = Dac<0>;
+constexpr uint16_t ac_ref_mv = 2048;
+volatile uint16_t ac_irqs = 0;
+
+void tm_comparators() {
+    print(serial, "m AC: DAC0/PD6 -> AC0 AINP3; Threshold 1000 mV, Window 500..1500 mV (ref 2.048)", crlf);
+    quiesce();
+    D::init({.reference = Ref::v2048});
+    D::set_mv(500, ac_ref_mv);
+    verdict("Threshold init", Threshold<Ac<0>>::init(AcPos::ainp3, 1000, Ref::v2048));
+    hold_ms(2);
+    ac_irqs = 0;
+    verdict("500 mV: below", !Threshold<Ac<0>>::above());
+    D::set_mv(1500, ac_ref_mv);
+    hold_ms(2);
+    verdict("1500 mV: above", Threshold<Ac<0>>::above());
+    verdict("one interrupt on the rising crossing", ac_irqs == 1);
+    // sweep up from 900 to find the crossing, then down
+    D::set_mv(900, ac_ref_mv);
+    hold_ms(2);
+    uint16_t up = 0, down = 0;
+    for (uint16_t mv = 900; mv <= 1100; ++mv) {
+        D::set_mv(mv, ac_ref_mv);
+        delay_us(clock, 200);
+        if (Threshold<Ac<0>>::above()) { up = mv; break; }
+    }
+    for (uint16_t mv = 1100; mv >= 900; --mv) {
+        D::set_mv(mv, ac_ref_mv);
+        delay_us(clock, 500);                      // the DAC falls slowly on a bare pin
+        if (!Threshold<Ac<0>>::above()) { down = mv; break; }
+    }
+    print(serial, "  crossings: up at ", up, " mV, down at ", down, " mV (hysteresis ", up - down, " mV) - findings", crlf);
+    verdict("up crossing within 1000 +-30 mV (offset + hysteresis)", near(up, 1000, 30));
+    verdict("hysteresis medium: 10..45 mV", up > down && up - down >= 10 && up - down <= 45);
+    Ac<0>::enable_interrupt(false);
+    // window
+    verdict("Window init", Window<Ac<0>, Ac<2>>::init(AcPos::ainp3, 500, 1500, AcWindowSense::outside, Ref::v2048));
+    D::set_mv(300, ac_ref_mv);  hold_ms(2);
+    const auto s1 = Window<Ac<0>, Ac<2>>::state();
+    D::set_mv(1000, ac_ref_mv); hold_ms(2);
+    const auto s2 = Window<Ac<0>, Ac<2>>::state();
+    D::set_mv(1800, ac_ref_mv); hold_ms(2);
+    const auto s3 = Window<Ac<0>, Ac<2>>::state();
+    print(serial, "  window states: ", static_cast<uint8_t>(s1), " ", static_cast<uint8_t>(s2), " ", static_cast<uint8_t>(s3), " (2 below, 1 inside, 0 above)", crlf);
+    verdict("below / inside / above", s1 == AcWindowState::below && s2 == AcWindowState::inside && s3 == AcWindowState::above);
+    Ac<0>::enable_interrupt(false);
+    Ac<0>::disable(); Ac<2>::disable();
+    D::set(0);
+    quiesce();
+}
+
 using TestFn = void (*)();
 struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
     {'1', t1_frequency}, {'2', t2_pwm16}, {'3', t3_heartbeat}, {'4', t4_one_shot},
     {'5', t5_pwm8}, {'6', t6_pulse_counter}, {'7', t7_cascade}, {'8', t8_tick_timeout},
-    {'9', t9_event_counter},
+    {'9', t9_event_counter}, {'c', tc_ccl}, {'m', tm_comparators},
 };
 
 void run(TestFn fn) {
@@ -446,7 +588,7 @@ void run(TestFn fn) {
 
 void help() {
     print(serial, "test_avr_timer: 1 frequency | 2 PWM16 duty | 3 heartbeat | 4 one-shot | 5 Pwm8 | "
-                  "6 pulse counter | 7 32-bit cascade | 8 tick+timeout | 9 event counter | a all", crlf);
+                  "6 pulse counter | 7 32-bit cascade | 8 tick+timeout | 9 event counter | c CCL | m comparators | a all", crlf);
 }
 
 } // namespace
@@ -457,13 +599,14 @@ ISR(RTC_PIT_vect)    { Ticker::pit(); }
 ISR(TCB0_INT_vect) { if (tcb0_hook) tcb0_hook(); else (void)T0::take_flags(); }
 ISR(TCB1_INT_vect) { if (tcb1_hook) tcb1_hook(); else (void)T1::take_flags(); }
 ISR(TCA0_OVF_vect) { Beat::beat(); ++beats; }
+ISR(AC0_AC_vect) { (void)Ac<0>::cmp(); ++ac_irqs; }
 
 int main() {
     const bool xtal = SysClock::init();
     Serial::init(clock, 460800);
     Ticker::init();
     sei();
-    print(serial, crlf, "test_avr_timer - TCA/TCB test suite (clk=", xtal ? "XTAL" : "OSCHF",
+    print(serial, crlf, "test_avr_timer - TCA/TCB/CCL/AC test suite (clk=", xtal ? "XTAL" : "OSCHF",
           " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
     help();
     print(serial, "> ");

@@ -93,13 +93,15 @@ primitives, static allocation as sugar. Names below are proposals.
   as constexpr facts - `EvPitDiv<64>` (`code = 0x0B`, legal on odd
   channels), `EvPin<Pin<'A', 2>>` (`0x42`, channels 0-1),
   `EvRtcOvf`, `EvRtcCmp`, `EvAdc0Ready`, `EvTcaOvf<n>`, `EvTcaHunf<n>`,
-  `EvTcaCmp<n, ch>`, `EvTcbCapt<n>`, `EvTcbOvf<n>` - satisfying an
+  `EvTcaCmp<n, ch>`, `EvTcbCapt<n>`, `EvTcbOvf<n>`, `EvLut<n>`, `EvAcOut<n>`
+  - satisfying an
   `EventGenerator` concept (`code`, `legal_on(ch)`);
 - a **user** is a type carrying the index of its USER register -
   `EvOut<Pin<'D', 2>>` (also knows its PORTMUX bit and pin), `EvAdc0Start`,
-  `EvTcaCntA<n>`/`EvTcaCntB<n>`, `EvTcbCaptIn<n>`/`EvTcbCountIn<n>` -
-  satisfying an `EventUser` concept; the timer drivers wrap them
-  (`Tcb<n>::capture_on`, `Tca<n>::event_a_on`);
+  `EvTcaCntA<n>`/`EvTcaCntB<n>`, `EvTcbCaptIn<n>`/`EvTcbCountIn<n>`,
+  `EvLutIn<n, 'A'/'B'>` - satisfying an `EventUser` concept; the
+  drivers wrap them (`Tcb<n>::capture_on`, `Tca<n>::event_a_on`,
+  `Lut<n>::event_a_on`);
 - a **channel** is a resource handle, `EventChannel<n>` (0..9,
   existence checked).
 The tables are transcribed only for what a step needs (the PIT

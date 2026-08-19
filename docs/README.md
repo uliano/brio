@@ -46,8 +46,8 @@ Target AVR DA/DB (`lib/brio/src/avrdx/`):
 | [avrdx/rtc.md](avrdx/rtc.md) | RTC/PIT (provisional): the PIT as timebase; not covered: the RTC counter |
 | [avrdx/tca.md](avrdx/tca.md) | TCA (provisional until the suite's first run): the Tca resource (normal mode, buffered compares, event inputs, commands) + tasks TcaPwm/TcaPwm16/FrequencyGenerator/Heartbeat/EventCounter |
 | [avrdx/tcb.md](avrdx/tcb.md) | TCB (provisional until the suite's first run): the Tcb resource (eight modes, event clock/capture, cascade, routes) + tasks PeriodicTick/Timeout/OneShotPulse/PulseCounter/CascadedCounter/meters/Pwm8 |
-| [avrdx/ccl.md](avrdx/ccl.md) | CCL (provisional): chapter reviewed - LUT inputs menu, truth table, filter/edge, sequencers, clocks, pins, the whole-block reconfiguration erratum; no driver yet |
-| [avrdx/ac.md](avrdx/ac.md) | AC (provisional): chapter reviewed - inputs and DACREF, hysteresis/power, output pin/event/interrupt, window mode, the pin table; no driver yet |
+| [avrdx/ccl.md](avrdx/ccl.md) | CCL (provisional until the suite's first run): Ccl + Lut<n> resources (inputs menu, truth table, filter/edge, clocks, pins, the whole-block reconfiguration erratum) + ToggleFlipFlop |
+| [avrdx/ac.md](avrdx/ac.md) | AC (provisional until the suite's first run): the Ac<n> resource (inputs and DACREF, hysteresis/power, pin/event/interrupt, window) + Threshold/Window |
 | [avrdx/vendor/README.md](avrdx/vendor/README.md) | The datasheets/errata the stratum is written against, by document number (PDFs kept local, not in git) |
 
 Target host (`lib/brio/src/host/`):

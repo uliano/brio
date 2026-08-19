@@ -39,6 +39,33 @@ struct PinRef {
     constexpr bool valid() const { return vport != nullptr; }
 };
 
+/// The PORT of a letter chosen at RUN time (for drivers whose pin is a
+/// configuration value: a route's port, a comparator's input). Folds
+/// to one address when the letter is a constant; an absent port (by
+/// package) falls back to PORTA - callers validate the letter first.
+constexpr volatile PORT_t& port_by_letter(char p) {
+    switch (p) {
+#ifdef PORTB
+        case 'B': return PORTB;
+#endif
+        case 'C': return PORTC;
+        case 'D': return PORTD;
+#ifdef PORTE
+        case 'E': return PORTE;
+#endif
+        case 'F': return PORTF;
+#ifdef PORTG
+        case 'G': return PORTG;
+#endif
+        default: return PORTA;
+    }
+}
+
+/// PINnCTRL of (port letter, pin number) at run time.
+inline volatile uint8_t& pinctrl_of(char p, uint8_t n) {
+    return (&port_by_letter(p).PIN0CTRL)[n];
+}
+
 template <char PortLetter, uint8_t PinNum>
 struct Pin {
     static_assert(PortLetter >= 'A' && PortLetter <= 'G', "Invalid port");

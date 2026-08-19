@@ -1,14 +1,16 @@
 # CCL - the configurable custom logic (AVR DA/DB)
 
-> **PROVISIONAL.** The systematic review of the chapter and errata is
-> done (this page records it); the driver and its bench suite are not
-> written yet. Documents of record: AVR128DB28/32/48/64 data sheet
-> DS40002247B (CCL chapter 31, PORTMUX 17.3.2, EVSYS 16 generators
-> 0x10-0x15 / users 0x00-0x0B, I/O multiplexing chapter 3), errata
-> DS80000915F (2.4.1, 2.4.2). Complements: TB3218 "Getting Started
-> with CCL", AN2434, the Microchip example `avr128db48-blink-led-ccl`
-> (see [vendor/README.md](vendor/README.md)). Driver: none yet.
-> Reference test: none yet.
+> **PROVISIONAL.** The chapter and errata are reviewed and the driver
+> is written against them; the bench suite is written but has not run
+> on silicon yet - the page becomes EXHAUSTIVE with its first green run.
+> Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (CCL
+> chapter 31, PORTMUX 17.3.2, EVSYS 16 generators 0x10-0x15 / users
+> 0x00-0x0B, I/O multiplexing chapter 3), errata DS80000915F (2.4.1,
+> 2.4.2). Complements: TB3218 "Getting Started with CCL", AN2434, the
+> Microchip example `avr128db48-blink-led-ccl` (see
+> [vendor/README.md](vendor/README.md)). Driver: `avrdx/ccl.hpp` (`Ccl`,
+> `Lut<n>`, `ToggleFlipFlop<pair>`), the LUT event vocabulary in
+> `avrdx/evsys.hpp`. Reference test: `test_avr_timer` (test c).
 
 ## What the silicon does
 
@@ -79,20 +81,55 @@ Facts that matter to code:
 
 ## Types and verbs
 
-None yet. The intended shape: a resource `Ccl` (enable/disable the
-block, the three sequencers, the interrupt vector body with the
-per-LUT flags) and `Lut<n>` (a config struct: three typed inputs from
-the menu above with the instance checked per input index, the truth
-table as eight bits or a `constexpr` function of three bools, filter,
-edge, clock, output pin, interrupt sense); tasks named for what a
-pair does (a flip-flop or latch between two logic functions, a glitch
-filter/edge detector on an event, an AND/OR/XOR of timer outputs).
-The static-allocation sugar of [evsys.md](evsys.md) (EventSystem)
-gets its first real user here: a CCL application is a fixed wiring.
+| Entity | Verbs |
+|--------|-------|
+| `LutConfig` | `in0`/`in1`/`in2` (`LutInput`: mask, feedback, link, event_a, event_b, pin, ac, zcd, usart_txd, spi0, tca0, tca1, tcb, tcd0 - the instance follows the input index), `truth` (TRUTHn; build it with `lut_truth(lambda of three bools)`), `filter` (`LutFilter`: none, sync, filter), `edge_detect` (needs a filter), `clock` (`LutClock`: clk_per, input2, oschf, osc32k, osc1k), `output_pin`, `alt_pin`, `interrupt` (`LutSense`: none, rising, falling, both) |
+| `Ccl` | `enable(run_standby)`, `disable` (the state every reconfiguration starts from), `enabled`, `sequencer<pair>(Sequencer)` (none, d_flip_flop, jk_flip_flop, d_latch, rs_latch), `take_flags` (ISR body of CCL_CCL_vect: bit n per LUT, cleared) |
+| `Lut<n>` | `init<cfg>()` / `init(cfg)` (block disabled: inputs, truth, route, pin, sense, then CTRLA with ENABLE), `enable`/`disable` (this LUT), `sense(LutSense)`, `flag`/`clear_flag`, `event_a_on(channel)`/`event_b_on(channel)`, the register accessors; `In0`/`In1`/`In2`/`OutDefault`/`OutAlt` pin types, `port`; `OutEvent` generator, `EventA`/`EventB` users |
+| `ToggleFlipFlop<pair>` | `init(toggle_channel, output_pin, alt_pin)`: JK on LUT 2p/2p+1, J = K = the event: one toggle per pulse (a divide-by-two, no CPU); `Even`/`Odd` |
+| helpers | `lut_truth(f)`, `lut_config_valid`, `lut_port(n)` |
+
+The protocol, dictated by errata 2.4.1: `Ccl::disable()`, every
+`Lut<n>::init(...)` and `Ccl::sequencer<p>(...)`, `Ccl::enable()` -
+the whole wiring at once. A CCL application is a fixed wiring: the
+EventSystem static allocation of [evsys.md](evsys.md) is its natural
+companion.
 
 ## How to use it
 
-Nothing to show yet.
+Glue logic on pins - PB3 = PB0 AND PB1 (LUT4's port is PORTB):
+
+```cpp
+#include "avrdx/ccl.hpp"
+using And = brio::Lut<4>;
+brio::Ccl::disable();
+And::init<brio::LutConfig{.in0 = brio::LutInput::pin, .in1 = brio::LutInput::pin,
+                          .truth = brio::lut_truth([](bool a, bool b, bool) { return a && b; }),
+                          .output_pin = true}>();
+brio::Ccl::enable();
+```
+
+A timer event divided by two, on a pin and as an event, with no CPU:
+
+```cpp
+using Half = brio::ToggleFlipFlop<0>;              // LUT0/LUT1, output LUT0 = PA3
+brio::EventChannel<4>::source(brio::EvTcbCapt<1>{});
+brio::Ccl::disable();
+Half::init(brio::EventChannel<4>{}, true);          // JK toggled by TCB1's CAPT
+brio::Ccl::enable();
+brio::EventChannel<5>::source(Half::Even::OutEvent{});   // the square wave as an event
+```
+
+A one-clock pulse from an event's rising edge (sync + edge detector),
+and the CCL interrupt:
+
+```cpp
+using Edge = brio::Lut<2>;
+Edge::init({.in0 = brio::LutInput::event_a, .truth = brio::lut_truth([](bool a, bool, bool) { return a; }),
+            .filter = brio::LutFilter::sync, .edge_detect = true, .interrupt = brio::LutSense::rising});
+Edge::event_a_on(brio::EventChannel<3>{});
+ISR(CCL_CCL_vect) { const uint8_t who = brio::Ccl::take_flags(); ... }
+```
 
 ## Bench findings
 
@@ -100,7 +137,11 @@ None yet.
 
 ## Not covered yet
 
-Everything above; the suite (`test_avr_timer`: a LUT as AND of two
-pins toggled by the test and read back on the OUT pin, a JK flip-flop
-toggled by a TCB event checked with the TCB counting its own output,
-a filter checked against a short pulse); the EVSYS vocabulary for CCL.
+The first bench run of `test_avr_timer` (test c). In the driver: the
+other sequencers as tasks (D flip-flop, latches - the resource does
+them, no task names them), LINK chains, the peripheral inputs beyond
+events and pins (TCA/TCB WO, AC, USART, SPI as LUT inputs: the menu is
+typed, no test drives them), the alternate clocks (OSC32K/OSC1K for a
+low-power filter), RUNSTDBY, the filter delay measured in clocks,
+typed per-input legality of the instance (today: the enum + the doc
+table).
