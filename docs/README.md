@@ -19,7 +19,7 @@ the second target, the bench is disposable:
 | [design/i2c-bus.md](design/i2c-bus.md) | The I2C bus: BusMaster generalized, the TWI engine descriptor, status vocabulary |
 | [design/ring.md](design/ring.md) | Ring: the SPSC FIFO, lock-free where the platform allows, guarded elsewhere |
 | [design/events.md](design/events.md) | EVSYS (exhaustive): typed vocabulary + run-time connect/disconnect + static allocation as sugar (tables on demand) |
-| [design/clkctrl.md](design/clkctrl.md) | CLKCTRL (provisional): the static/dynamic clock realization; not covered: PLL, autotune, CFD, 32k |
+| [design/clkctrl.md](design/clkctrl.md) | CLKCTRL (exhaustive): oscillators, PLL, main clock mux/prescaler/CLKOUT, clock failure detection as resources; Clock/DynamicClock as tasks |
 | [design/port.md](design/port.md) | PORT (provisional): Pin, PinSet, PinRef; not covered: pin interrupts, slew, thresholds |
 | [design/usart.md](design/usart.md) | USART (provisional): the 8N1 byte transport; not covered: sync, one-wire/RS-485, IrDA, LIN, auto-baud |
 | [design/spi.md](design/spi.md) | SPI (provisional): the host engine; not covered: client mode, buffer mode |

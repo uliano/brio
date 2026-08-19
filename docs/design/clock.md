@@ -9,8 +9,9 @@ prescalers or PLL parameters, which rates are reachable) is that
 target's business, documented in `docs/targets/`.
 
 Contracts and helpers: `util/clock.hpp` (pure, no hardware). The AVR
-DA/DB realization: `avrdx/clock.hpp` (`Clock`, `DynamicClock`) and
-`avrdx/delay.hpp` (`delay_us`).
+DA/DB realization: `avrdx/clock.hpp` (`Clock`, `DynamicClock` over the
+CLKCTRL resources - see [clkctrl.md](clkctrl.md)) and `avrdx/delay.hpp`
+(`delay_us`).
 
 ## One truth for the rate
 

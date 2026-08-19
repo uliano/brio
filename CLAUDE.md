@@ -153,7 +153,11 @@ gets its dated home in `docs/design/` when taken.
   so the door stays open: AOs share nothing but events (an AO's own
   statics are safe; a global touched by two AOs outside events is a
   one-way race under preemption).
-- **Exhaustive-driver track (started 2026-08-19), in this order:**
+- **Exhaustive-driver track (started 2026-08-19).** Done: EVSYS, VREF/
+  DAC/ADC, CLKCTRL (clock.hpp rewritten as resources + tasks, the
+  `test_avr_clock` suite on CLKOUT/PA7 awaiting its first scope run).
+  Remaining provisional: PORT, USART, SPI, TWI, RTC, TCA - each doc's
+  "Not covered yet" is the shopping list. Original order:
   EVSYS (docs/design/events.md; avrdx/evsys.hpp primitives built and
   `events0` VERIFIED on the scope 2026-08-19: 512 Hz PIT/64 on PD2,
   button level, off, 4 Hz LED with no CPU; EventSystem static sugar
@@ -306,10 +310,11 @@ lib/brio/src/            the framework, four strata:
                            CommandRouter<Sink>
   avrdx/                 everything that knows avr/io.h (AVR DA/DB)
     platform_avr.hpp       AvrPlatform
-    clock.hpp              Clock<source, hz, div>: the main clock as a type,
-                           constexpr hz (the ONE rate truth: no F_CPU), init();
-                           DynamicClock<Boot, Users...>: set<hz>()/set(hz)
-                           rebases the users then switches; clock_hz(clock)
+    clock.hpp              CLKCTRL: resources Oschf/Osc32k/Xosc32k/Xoschf/Pll/
+                           MainClock/ClockFailure (typed register views) +
+                           tasks Clock<source, hz, div> (constexpr hz, the ONE
+                           rate truth: no F_CPU) and DynamicClock<Boot, Users...>
+                           (set<hz>()/set(hz) rebases the users then switches)
     delay.hpp              delay_us(clock, us) "at least": folded cycles when
                            constant, 4-cycle loop otherwise; cycles_per_us
     pin.hpp                Pin<'A',5> compile-time GPIO (also a PwmChannel,
