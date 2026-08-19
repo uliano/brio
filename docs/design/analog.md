@@ -203,6 +203,29 @@ pretends to understand analog design.
   RUNSTDBY/ALWAYSON timing, DACREF0-2 (needs the ACs), the RESRDY
   event as a generator (needs a TCB).
 
+## Bench findings (analog0, silicon A5, 2026-08-19)
+
+- The converter's warm-up after ENABLE is real: the first conversion
+  without waiting t_ADC_INIT (6 us typ.) is garbage. `Adc::init(clock,
+  cfg)` waits 10 us; that is why it takes the clock.
+- INITDLY is paid ONCE, for the first conversion after enable - not
+  per software start (2240 one-shots/100 ms with INITDLY 256 at 375
+  kHz, i.e. the plain rate).
+- The unbuffered DAC0 input (MUXPOS DAC0) is high-impedance: with the
+  default 2-cycle sampling at 1.5 MHz it reads 3-4 % low; with
+  `sample_length` 32 it reads true. Same for any source above the
+  10 kOhm the datasheet recommends - the knob exists for this.
+- WCMP is cleared by reading RES (33.5.12): a driver that reads the
+  result must capture the window verdict first (`result()` does;
+  `window_hit()` reports it).
+- Accumulation above 16 samples truncates RES (32: 1 bit, 64: 2, 128:
+  3) - `result_shift()`.
+- References cross-check within 1-2 % (spec 4 %); prescaler rates
+  within 1 % of the timing formula; event start from PIT/64: 513/s;
+  VDD/10 reads 3290 mV on a 3300 mV rail; die temperature 27 C from
+  the signature-row factors; errata 2.3.2 reproduced and cured by
+  `flush()`; VREFA driven by the DAC works down to 1.04 V.
+
 ## The guiding application: Multislope
 
 uliano/AVR-Multislope (and its SAM-Multislope twin) is the app that

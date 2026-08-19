@@ -14,7 +14,7 @@
  *   using Meter = brio::Adc<0>;
  *   Meter::init<brio::AdcConfig{.reference = brio::Ref::v2048,
  *                               .prescaler = brio::AdcPresc::div12,
- *                               .accumulate = 16}>();      // checked at compile time
+ *                               .accumulate = 16}>(clock); // checked at compile time
  *   Meter::select(brio::AnalogIn<brio::Pin<'D', 1>>{});   // AIN1
  *   Meter::start();  while (Meter::busy()) {}  auto raw = Meter::result();
  *
@@ -47,6 +47,16 @@
  * throw-away conversion - flush() does exactly that, blocking. 2.3.1
  * (A4): -3 mV typical single-ended offset.
  *
+ * Bench facts (analog0, silicon A5): the converter needs its warm-up
+ * (t_ADC_INIT 6 us typ.) after ENABLE before the first conversion is
+ * trustworthy - init(clock, cfg) waits for it; INITDLY is paid only for
+ * the first conversion after enable (not per start); the UNBUFFERED
+ * DAC0 input (MUXPOS DAC0) is high-impedance and reads 3-4 % low with
+ * the default 2-cycle sampling - give it sample_length (16-32 at
+ * 1.5 MHz) like any source above 10 kOhm; the WCMP flag is cleared by
+ * reading RES (33.5.12) - result() captures it first, window_hit()
+ * tells about the LAST result read.
+ *
  * ISR bodies (the app binds ADC0_RESRDY_vect / ADC0_WCMP_vect and
  * posts what they return - the ISR condenses, the AO decides):
  *   ISR(ADC0_RESRDY_vect) { post<Meter>(AdcResult{Adc<0>::resrdy()}); }
@@ -60,6 +70,7 @@
 #include <stdint.h>
 #include <avr/io.h>
 
+#include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
 #include "avrdx/vref.hpp"
@@ -161,21 +172,30 @@ public:
     static uint32_t steps() { return steps_; }
     static uint8_t accumulate() { return acc_; }
     static Ref reference() { return ref_; }
+    /// RES holds the SUM of the accumulated samples truncated to 16 bits:
+    /// above 16 samples the hardware drops LSBs - 32 -> 1 bit, 64 -> 2,
+    /// 128 -> 3. sum = result() << result_shift().
+    static uint8_t result_shift() { return acc_ <= 16 ? 0 : acc_ == 32 ? 1 : acc_ == 64 ? 2 : 3; }
+    /// Full scale of a RESULT as read (accumulated, truncated).
+    static uint32_t result_steps() { return (steps_ * acc_) >> result_shift(); }
 
     // ---- configuration ----------------------------------------------------
 
     /// Compile-time form: the whole configuration as a constant, checked.
-    template <AdcConfig cfg>
-    static void init() {
+    template <AdcConfig cfg, typename Clock>
+    static void init(Clock clock) {
         static_assert(adc_config_valid(cfg),
                       "AdcConfig: accumulate must be 1,2,4,..,128 and sample_delay <= 15");
-        init(cfg);
+        init(clock, cfg);
     }
 
     /// Run-time form. Writes the mux (GND) and every knob BEFORE enabling
-    /// (errata 2.3.2), then enables. Returns false, touching nothing,
-    /// for an invalid configuration.
-    static bool init(const AdcConfig& cfg) {
+    /// (errata 2.3.2), enables, then waits the converter's warm-up
+    /// (t_ADC_INIT, 6 us typ.: the first conversion before that is
+    /// garbage - measured). Returns false, touching nothing, for an
+    /// invalid configuration.
+    template <typename Clock>
+    static bool init(Clock clock, const AdcConfig& cfg) {
         if (!adc_config_valid(cfg)) {
             return false;
         }
@@ -203,20 +223,22 @@ public:
             (cfg.left_adjust ? ADC_LEFTADJ_bm : 0) |
             (cfg.differential ? ADC_CONVMODE_bm : 0) |
             (cfg.run_standby ? ADC_RUNSTBY_bm : 0));
+        delay_us(clock, 10);                                // t_ADC_INIT (6 us typ.)
         return true;
     }
 
     /// Change the configuration under a running program: stops free-
     /// running, waits for the converter to be idle, then init(cfg).
     /// The mux selection is reset to GND: select() again.
-    static bool reconfigure(const AdcConfig& cfg) {
+    template <typename Clock>
+    static bool reconfigure(Clock clock, const AdcConfig& cfg) {
         if (!adc_config_valid(cfg)) {
             return false;
         }
         stop();
         while (busy()) {
         }
-        return init(cfg);
+        return init(clock, cfg);
     }
 
     // ---- input selection --------------------------------------------------
@@ -269,9 +291,11 @@ public:
     static bool ready() { return (regs().INTFLAGS & ADC_RESRDY_bm) != 0; }
 
     /// The result (RES: a sample, or the SUM of `accumulate` samples,
-    /// right- or left-adjusted as configured); reading clears RESRDY.
+    /// right- or left-adjusted as configured). Reading RES clears both
+    /// RESRDY and WCMP: the window verdict is captured first, see
+    /// window_hit().
     static uint16_t result() {
-        regs().INTFLAGS = ADC_RESRDY_bm;
+        last_hit_ = (regs().INTFLAGS & ADC_WCMP_bm) != 0;
         return regs().RES;
     }
     static int16_t result_signed() { return static_cast<int16_t>(result()); }
@@ -296,21 +320,23 @@ public:
         regs().CTRLE = static_cast<uint8_t>(mode);
     }
     static void window_off() { regs().CTRLE = ADC_WINCM_NONE_gc; }
-    static bool window_hit() { return (regs().INTFLAGS & ADC_WCMP_bm) != 0; }
-    static void clear_window_hit() { regs().INTFLAGS = ADC_WCMP_bm; }
+    /// Did the LAST result read by result()/read() match the window?
+    /// (The hardware flag is cleared by the RES read itself, 33.5.12.)
+    static bool window_hit() { return last_hit_; }
+    /// The live flag, before any RES read (e.g. in a polling loop that
+    /// only wants hits): true when the last conversion matched.
+    static bool window_flag() { return (regs().INTFLAGS & ADC_WCMP_bm) != 0; }
+    static void clear_window_flag() { regs().INTFLAGS = ADC_WCMP_bm; }
 
     // ---- interrupts and events ------------------------------------------------
 
     static void enable_resrdy_interrupt(bool on) { irq(ADC_RESRDY_bm, on); }
     static void enable_wcmp_interrupt(bool on) { irq(ADC_WCMP_bm, on); }
 
-    /// ISR body for ADCn_RESRDY_vect: the result (flag cleared by the read).
+    /// ISR body for ADCn_RESRDY_vect: the result (flags cleared by the read).
     [[gnu::always_inline]] static uint16_t resrdy() { return result(); }
-    /// ISR body for ADCn_WCMP_vect: clears the flag, returns the result.
-    [[gnu::always_inline]] static uint16_t wcmp() {
-        clear_window_hit();
-        return regs().RES;
-    }
+    /// ISR body for ADCn_WCMP_vect: the matching result (flags cleared by the read).
+    [[gnu::always_inline]] static uint16_t wcmp() { return result(); }
 
     /// Start a conversion on every rising edge of the channel's event
     /// (async: works in standby). Pace with EvPitDiv<n> on the channel.
@@ -342,6 +368,7 @@ private:
     static inline Ref ref_ = Ref::vdd;
     static inline uint32_t steps_ = 4096;
     static inline uint8_t acc_ = 1;
+    static inline bool last_hit_ = false;
 };
 
 } // namespace brio

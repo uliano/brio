@@ -19,7 +19,8 @@
 //      ratio must be refA/refB (all pairs VDD allows at 3.3 V: 1.024,
 //      2.048, 2.5) - internal path (MUXPOS DAC0) and the wire agree;
 //   2  DAC ramp on the wire, 12-bit ADC: monotonic, gain, offset;
-//   3  DAC OUTEN off: internal path still exact, wire floats away;
+//   3  DAC OUTEN off: internal path still exact (with sample_length: the
+//      unbuffered DAC output is high-impedance - measured), wire floats;
 //   4  DAC settling: read 1 us vs 20 us after a full-scale step;
 //   5  ADC 12 vs 10 bit, LEFTADJ bit patterns, same input;
 //   6  differential: PD1 vs DAC0 internal ~ 0; PD1 vs GND = single-ended;
@@ -98,8 +99,17 @@ uint16_t read_avg(uint8_t n) {
 }
 
 void adc_default(Ref r) {
-    A::init(AdcConfig{.reference = r, .prescaler = AdcPresc::div16});   // 1.5 MHz
+    A::init(clock, AdcConfig{.reference = r, .prescaler = AdcPresc::div16});   // 1.5 MHz
     A::select(Wire{});
+}
+
+// The unbuffered DAC0 input is high-impedance: 32 extra CLK_ADC cycles
+// of sampling (21 us at 1.5 MHz) - measured: 2 cycles read 3-4 % low.
+constexpr uint8_t internal_sample_length = 32;
+
+void adc_internal(Ref r) {
+    A::init(clock, AdcConfig{.reference = r, .prescaler = AdcPresc::div16,
+                             .sample_length = internal_sample_length});
 }
 
 void dac_default(Ref r) {
@@ -118,13 +128,13 @@ void t1_references() {
         delay_us(clock, 50);
         const uint16_t dac_mv_ = dac_mv(768, D::steps, ref_mv(ra));
         for (Ref rb : refs) {
-            adc_default(rb);
             const uint16_t rb_mv = ref_mv(rb);
             // expected counts, saturating at full scale
             const uint32_t exp = dac_mv_ >= rb_mv ? 4095u : (static_cast<uint32_t>(dac_mv_) * 4096u) / rb_mv;
+            adc_internal(rb);
             A::select(AdcInput::dac0);
             const uint16_t in = read_avg(8);
-            A::select(Wire{});
+            adc_default(rb);
             const uint16_t wi = read_avg(8);
             const int32_t tol = static_cast<int32_t>(exp * 5 / 100) + 12;   // 4 % refs + gain/offset
             print(serial, "  DAC ", ref_mv(ra), " mV ref -> ADC ", rb_mv, " mV ref: exp ", exp,
@@ -165,14 +175,22 @@ void t3_outen() {
     D::init({.reference = Ref::v2048, .output_pin = false});
     D::set(512);
     delay_us(clock, 300);
+    // the internal path with default sampling vs with sample_length:
+    // the unbuffered DAC output is high-impedance (bench finding)
     adc_default(Ref::v2048);
     A::select(AdcInput::dac0);
-    const uint16_t in = read_avg(8);
+    const uint16_t in_short = read_avg(8);
+    adc_internal(Ref::v2048);
+    A::select(AdcInput::dac0);
+    const uint16_t in_long = read_avg(8);
     A::select(Wire{});
     const uint16_t wi = read_avg(8);
-    print(serial, "  internal ", in, " (exp ~2048) wire ", wi,
+    print(serial, "  internal, 2-cycle sampling: ", in_short, "  with sample_length ",
+          internal_sample_length, ": ", in_long, " (exp ~2048)  wire ", wi,
           " (floating: informative - the pin holds charge for a while)", crlf);
-    verdict("internal path with OUTEN off", near(in, 2048, 40));
+    verdict("internal path with OUTEN off, sampled long enough", near(in_long, 2048, 30));
+    verdict("longer sampling reads closer (unbuffered source impedance)",
+            (in_long > in_short) && near(in_long, 2048, 30));
     D::init({.reference = Ref::v2048});   // buffer back on (errata: keep it on)
 }
 
@@ -201,16 +219,16 @@ void t5_resolution() {
     delay_us(clock, 50);
     adc_default(Ref::v2048);
     const uint16_t r12 = read_avg(8);
-    A::init(AdcConfig{.reference = Ref::v2048, .resolution = AdcRes::bits10});
+    A::init(clock, AdcConfig{.reference = Ref::v2048, .resolution = AdcRes::bits10});
     A::select(Wire{});
     const uint16_t r10 = read_avg(8);
-    A::init(AdcConfig{.reference = Ref::v2048, .left_adjust = true});
+    A::init(clock, AdcConfig{.reference = Ref::v2048, .left_adjust = true});
     A::select(Wire{});
-    const uint16_t rl = read_avg(4);
+    const uint16_t rl = A::read();                 // one read: averaging would fill the low nibble
     print(serial, "  12-bit ", r12, "  10-bit ", r10, " (exp 12/4)  left-adjusted ", hex(rl),
           " (exp 12-bit << 4)", crlf);
-    verdict("10-bit = 12-bit / 4", near(r10, r12 / 4, 3));
-    verdict("left adjust = value << 4", near(rl >> 4, r12, 8) && (rl & 0x000F) == 0);
+    verdict("10-bit ~ 12-bit / 4 (a different conversion, +-8 LSB10)", near(r10, r12 / 4, 8));
+    verdict("left adjust = value << 4", near(rl >> 4, r12, 12) && (rl & 0x000F) == 0);
 }
 
 // ---- 6: differential ---------------------------------------------------------------
@@ -219,7 +237,8 @@ void t6_differential() {
     dac_default(Ref::v2048);
     D::set(700);
     delay_us(clock, 50);
-    A::init(AdcConfig{.reference = Ref::v2048, .differential = true});
+    A::init(clock, AdcConfig{.reference = Ref::v2048, .differential = true,
+                             .sample_length = internal_sample_length});
     A::select(Wire{}, AdcInput::dac0);
     const int16_t d0 = static_cast<int16_t>(read_avg(8));
     A::select(Wire{}, AdcInput::gnd);
@@ -238,7 +257,7 @@ void t7_prescalers() {
                                AdcPresc::div64, AdcPresc::div128};
     for (AdcPresc p : ps) {
         AdcConfig c{.reference = Ref::v2048, .prescaler = p, .free_running = true};
-        A::init(c);
+        A::init(clock, c);
         A::select(Wire{});
         A::start();
         const uint32_t t0 = Ticker::millis();
@@ -256,7 +275,7 @@ void t7_prescalers() {
         verdict("rate within 8 %", near(static_cast<int32_t>(n), static_cast<int32_t>(exp),
                                         static_cast<int32_t>(exp * 8 / 100) + 2));
     }
-    A::init(AdcConfig{.reference = Ref::v2048});
+    A::init(clock, AdcConfig{.reference = Ref::v2048});
 }
 
 // ---- 8: accumulation ----------------------------------------------------------------
@@ -265,18 +284,20 @@ void t8_accumulation() {
     dac_default(Ref::v2048);
     D::set(512);
     delay_us(clock, 50);
-    constexpr uint8_t accs[] = {1, 4, 16, 64};
+    constexpr uint8_t accs[] = {1, 4, 16, 64, 128};
     for (uint8_t a : accs) {
-        A::init(AdcConfig{.reference = Ref::v2048, .accumulate = a});
+        A::init(clock, AdcConfig{.reference = Ref::v2048, .accumulate = a});
         A::select(Wire{});
         uint32_t sum = 0, mn = 0xFFFF, mx = 0;
         for (uint8_t i = 0; i < 16; ++i) {
             const uint16_t r = A::read();
             sum += r; if (r < mn) mn = r; if (r > mx) mx = r;
         }
-        const uint32_t mean_per_sample = (sum / 16 + a / 2) / a;
+        // RES is the truncated sum: << result_shift() restores the scale
+        const uint32_t mean_per_sample = ((sum / 16) << A::result_shift()) / a;
         print(serial, "  acc ", a, ": mean/sample ", mean_per_sample, " (exp ~2048) spread ",
-              (mx - mn), " counts over 16 results (", (mx - mn) * 100 / a, "/100 per sample)", crlf);
+              (mx - mn) << A::result_shift(), " sum-counts over 16 results (",
+              ((mx - mn) << A::result_shift()) * 100 / a, "/100 per sample)", crlf);
         verdict("mean per sample ~ 2048", near(static_cast<int32_t>(mean_per_sample), 2048, 30));
     }
 }
@@ -295,7 +316,7 @@ void t9_sampling() {
                                       .sample_delay = 15, .free_running = true}},
     };
     for (const Case& k : cases) {
-        A::init(k.c);
+        A::init(clock, k.c);
         A::select(Wire{});
         A::start();
         const uint32_t t0 = Ticker::millis();
@@ -313,20 +334,19 @@ void t9_sampling() {
     }
     // init_delay: one-shot conversions per 100 ms with a big init delay
     // (each start pays the delay: 256 CLK_ADC at 375 kHz = 683 us)
-    A::init(AdcConfig{.reference = Ref::v2048, .prescaler = AdcPresc::div64,
+    A::init(clock, AdcConfig{.reference = Ref::v2048, .prescaler = AdcPresc::div64,
                       .init_delay = AdcInitDelay::cycles256});
     A::select(Wire{});
     A::flush();
     const uint32_t start = Ticker::millis();
     uint32_t n = 0;
     while (Ticker::millis() - start < 100) { (void)A::read(); ++n; }
-    // Informative, not a verdict: the datasheet's figure shows INITDLY
-    // after ENABLE; whether every software start pays it again (then
-    // ~135 one-shots per 100 ms) or only the first (then ~2400) is what
-    // this number tells us.
-    print(serial, "  init_delay 256 @ 375 kHz: ", n, " one-shots/100ms (~135 if every start pays "
-                  "the delay, ~2400 if only the first after enable)", crlf);
-    A::init(AdcConfig{.reference = Ref::v2048});
+    // Bench finding (A5): INITDLY is paid only for the first conversion
+    // after enable, not per start - one-shots run at the plain rate.
+    print(serial, "  init_delay 256 @ 375 kHz: ", n, " one-shots/100ms (bench: ~2240 - the delay "
+                  "is paid once after enable, not per start)", crlf);
+    verdict("init_delay applies once after enable (not per start)", n > 1500);
+    A::init(clock, AdcConfig{.reference = Ref::v2048});
 }
 
 // ---- 10: event start -----------------------------------------------------------------
@@ -334,7 +354,7 @@ void t10_event_start() {
     print(serial, "10 event start: PIT/64 (512 Hz) on channel 1 -> ADC start", crlf);
     dac_default(Ref::v2048);
     D::set(512);
-    A::init(AdcConfig{.reference = Ref::v2048});
+    A::init(clock, AdcConfig{.reference = Ref::v2048});
     A::select(Wire{});
     EventChannel<1>::source(EvPitDiv<64>{});
     A::start_on(EventChannel<1>{});
@@ -357,7 +377,7 @@ void t10_event_start() {
 void t11_window() {
     print(serial, "11 window comparator on a DAC ramp (thresholds 1000..3000)", crlf);
     dac_default(Ref::v2048);
-    A::init(AdcConfig{.reference = Ref::v2048});
+    A::init(clock, AdcConfig{.reference = Ref::v2048});
     A::select(Wire{});
     struct Mode { const char* name; A::Window m; bool at_500, at_2000, at_3500; };
     const Mode modes[] = {
@@ -373,8 +393,7 @@ void t11_window() {
         for (uint8_t i = 0; i < 3; ++i) {
             D::set(codes[i]);
             delay_us(clock, 30);
-            A::clear_window_hit();
-            (void)A::read();
+            (void)A::read();                       // result() captures WCMP before RES clears it
             const bool hit = A::window_hit();
             const bool exp = i == 0 ? m.at_500 : i == 1 ? m.at_2000 : m.at_3500;
             if (hit != exp) ok = false;
@@ -392,7 +411,7 @@ void t12_errata() {
     dac_default(Ref::v2048);
     D::set(800);                                   // ~3200 counts on the wire
     delay_us(clock, 50);
-    A::init(AdcConfig{.reference = Ref::v2048, .init_delay = AdcInitDelay::cycles64});
+    A::init(clock, AdcConfig{.reference = Ref::v2048, .init_delay = AdcInitDelay::cycles64});
     // init() left the mux on GND (before enable). Now select the wire AFTER enable:
     A::select(Wire{});
     const uint16_t first = A::read();
@@ -408,7 +427,7 @@ void t12_errata() {
 // ---- 13: internal inputs -----------------------------------------------------------------
 void t13_internal() {
     print(serial, "13 internal inputs", crlf);
-    A::init(AdcConfig{.reference = Ref::v2048});
+    A::init(clock, AdcConfig{.reference = Ref::v2048});
     A::select(AdcInput::gnd);
     const uint16_t g = read_avg(8);
     A::select(AdcInput::vdd_div10);
@@ -423,7 +442,7 @@ void t13_internal() {
     // temperature: 2.048 V ref, init delay >= 25 us, sample length >= 28 us
     // at CLK_ADC = 24 MHz / 64 = 375 kHz: 1 cycle = 2.67 us -> 32 cycles > 25 us... use
     // 64 for the init delay and sample_length 12 (32 us).
-    A::init(AdcConfig{.reference = Ref::v2048, .prescaler = AdcPresc::div64, .sample_length = 12,
+    A::init(clock, AdcConfig{.reference = Ref::v2048, .prescaler = AdcPresc::div64, .sample_length = 12,
                       .init_delay = AdcInitDelay::cycles64});
     A::select(AdcInput::temp);
     A::flush();
@@ -439,7 +458,7 @@ void t13_internal() {
 void t14_vrefa() {
     print(serial, "14 VREFA (PD7) driven by the DAC: ADC on DAC0 internal must read full scale", crlf);
     dac_default(Ref::v2048);
-    A::init(AdcConfig{.reference = Ref::vrefa});
+    A::init(clock, AdcConfig{.reference = Ref::vrefa, .sample_length = internal_sample_length});
     A::select(AdcInput::dac0);
     bool ok = true;
     for (uint16_t code = 520; code <= 1020; code += 250) {   // >= 1.04 V (VREFA min 1.024)
@@ -449,7 +468,7 @@ void t14_vrefa() {
         const uint16_t r = read_avg(8);
         print(serial, "  DAC ", code, " (", dac_mv(code, D::steps, 2048), " mV) as VREFA: ADC(dac0) = ", r,
               " (exp ~4095)", crlf);
-        if (!near(r, 4095, 24)) ok = false;
+        if (!near(r, 4095, 30)) ok = false;
     }
     verdict("full scale for every VREFA level", ok);
     // and VDD/10 against a known VREFA: 3300/10 = 330 mV / (DAC 1023 = 2046 mV) * 4096

@@ -149,8 +149,11 @@ gets its dated home in `docs/design/` when taken.
   button level, off, 4 Hz LED with no CPU; EventSystem static sugar
   when an app has several fixed routes) -> VREF, DAC,
   ADC exhaustively (docs/design/analog.md; vref.hpp, dac.hpp, adc.hpp
-  and the analog0 self-test suite BUILT, awaiting the bench run with
-  PD6->PD1 and PD6->PD7; then analog1 = kernel integration) -> TCB/TCA/CCL/AC as tasks driven by
+  and the analog0 self-test suite: first bench run gave 38/51 pass and
+  five driver findings (warm-up wait -> init takes clock; WCMP cleared
+  by RES read -> captured in result(); acc>16 truncation ->
+  result_shift(); unbuffered DAC0 needs sample_length; INITDLY paid
+  once) - fixed, second run pending; then analog1 = kernel integration) -> TCB/TCA/CCL/AC as tasks driven by
   the Multislope app (OneShotPulse<Tcb>, EventCounter<Tcb>,
   CascadedCounter<Tcb,Tcb>, TcaHeartbeat, LUT flip-flops; the
   64-cycle snapshot stays in the ISR body; EventSystem static sugar
