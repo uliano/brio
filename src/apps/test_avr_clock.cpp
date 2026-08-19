@@ -249,13 +249,22 @@ void t6_cfd() {
     ClockFailure::clear();
     ClockFailure::interrupt(true, /*nmi=*/false);
     ClockFailure::watch(CfdSource::main);
-    Serial::rebase(4'000'000);              // the fallback rate: drain TX now, BAUD for 4 MHz
+    // The data sheet says the fallback is OSCHF "changed back to its Reset
+    // frequency" (4 MHz). Bench question: does FRQSEL really move? Capture
+    // OSCHFCTRLA right after the event; the console is retuned for 4 MHz
+    // on the data sheet's word, and this hold is TIMED (no key) because
+    // we cannot know the rate until we read the register back.
+    Serial::rebase(4'000'000);
     ClockFailure::test(true);               // force the failure
+    const bool saved_step = step_mode;
+    step_mode = false;
     hold_ms(500);
+    step_mode = saved_step;
     const MainSource after = MainClock::source();
     const bool flagged = ClockFailure::failed();
     const uint16_t hits = cfd_hits;
     const uint8_t a = CLKCTRL.MCLKCTRLA;
+    const uint8_t oschf_after = CLKCTRL.OSCHFCTRLA;    // FRQSEL bits 5:2: 0x3 = 4 MHz, 0x9 = 24 MHz
     // recovery
     ClockFailure::test(false);
     ClockFailure::interrupt(false);
@@ -266,6 +275,10 @@ void t6_cfd() {
     print(serial, "  after the forced failure: source=", hex(static_cast<uint8_t>(after)),
           " (OSCHF=0)  CLKOUT bit=", (a & CLKCTRL_CLKOUT_bm) ? 1 : 0, "  flag=", flagged,
           "  isr hits=", hits, "  source seen by isr=", hex(cfd_source_seen), crlf);
+    const uint8_t frqsel = static_cast<uint8_t>((oschf_after >> 2) & 0x0F);
+    print(serial, "  OSCHF FRQSEL after the event: ", hex(frqsel),
+          " (0x3 = 4 MHz = the data sheet's reset frequency, 0x9 = 24 MHz = unchanged)", crlf);
+    verdict("OSCHF frequency after CFD fallback recorded (see line above)", true);
     verdict("main clock switched to OSCHF", after == MainSource::oschf);
     verdict("CLKOUT disabled by the CFD event", (a & CLKCTRL_CLKOUT_bm) == 0);
     verdict("CFD interrupt ran at least once", hits >= 1);
