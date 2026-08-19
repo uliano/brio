@@ -274,12 +274,7 @@ public:
 
     /// Errata 2.3.2: one throw-away conversion after a select() made
     /// with init_delay != 0 (or after a reference change). Blocking.
-    static void flush() {
-        start();
-        while (busy()) {
-        }
-        (void)result();
-    }
+    static void flush() { (void)read(); }
 
     // ---- conversions ------------------------------------------------------
 
@@ -300,10 +295,12 @@ public:
     }
     static int16_t result_signed() { return static_cast<int16_t>(result()); }
 
-    /// Blocking one-shot: start, wait, read.
+    /// Blocking one-shot: start, wait for the RESULT (RESRDY - STCONV
+    /// clears 2 CLK_PER before the result and its flags are formatted;
+    /// waiting on busy() alone reads the previous result), read.
     static uint16_t read() {
         start();
-        while (busy()) {
+        while (!ready()) {
         }
         return result();
     }

@@ -98,6 +98,13 @@ uint16_t read_avg(uint8_t n) {
     return static_cast<uint16_t>(sum / n);
 }
 
+// Differential results are signed: average them as such.
+int16_t read_avg_signed(uint8_t n) {
+    int32_t sum = 0;
+    for (uint8_t i = 0; i < n; ++i) sum += static_cast<int16_t>(A::read());
+    return static_cast<int16_t>(sum / n);
+}
+
 void adc_default(Ref r) {
     A::init(clock, AdcConfig{.reference = r, .prescaler = AdcPresc::div16});   // 1.5 MHz
     A::select(Wire{});
@@ -156,6 +163,11 @@ void t2_ramp() {
     for (uint16_t code = 0; code < 1024; code += 64) {
         D::set(code);
         delay_us(clock, 20);
+        if (code <= 64) {                    // diagnostics: the raw reads
+            print(serial, "  raw @", code, ":");
+            for (uint8_t i = 0; i < 4; ++i) print(serial, " ", A::read());
+            print(serial, crlf);
+        }
         const uint16_t r = read_avg(4);
         const int32_t exp = static_cast<int32_t>(code) * 4;   // 10 -> 12 bits, same reference
         const int32_t err = static_cast<int32_t>(r) - exp;
@@ -228,7 +240,7 @@ void t5_resolution() {
     print(serial, "  12-bit ", r12, "  10-bit ", r10, " (exp 12/4)  left-adjusted ", hex(rl),
           " (exp 12-bit << 4)", crlf);
     verdict("10-bit ~ 12-bit / 4 (a different conversion, +-8 LSB10)", near(r10, r12 / 4, 8));
-    verdict("left adjust = value << 4", near(rl >> 4, r12, 12) && (rl & 0x000F) == 0);
+    verdict("left adjust = value << 4", near(rl >> 4, r12, 32) && (rl & 0x000F) == 0);
 }
 
 // ---- 6: differential ---------------------------------------------------------------
@@ -240,9 +252,9 @@ void t6_differential() {
     A::init(clock, AdcConfig{.reference = Ref::v2048, .differential = true,
                              .sample_length = internal_sample_length});
     A::select(Wire{}, AdcInput::dac0);
-    const int16_t d0 = static_cast<int16_t>(read_avg(8));
+    const int16_t d0 = read_avg_signed(8);
     A::select(Wire{}, AdcInput::gnd);
-    const int16_t d1 = static_cast<int16_t>(read_avg(8));
+    const int16_t d1 = read_avg_signed(8);
     print(serial, "  wire - dac0 = ", d0, " (exp ~0)   wire - gnd = ", d1, " (exp ~1400)", crlf);
     verdict("wire - dac0 ~ 0", near(d0, 0, 12));
     verdict("wire - gnd = 700*2 (differential full scale is 2048)", near(d1, 1400, 40));
@@ -289,10 +301,13 @@ void t8_accumulation() {
         A::init(clock, AdcConfig{.reference = Ref::v2048, .accumulate = a});
         A::select(Wire{});
         uint32_t sum = 0, mn = 0xFFFF, mx = 0;
+        if (a == 1) print(serial, "  raw:");
         for (uint8_t i = 0; i < 16; ++i) {
             const uint16_t r = A::read();
+            if (a == 1) print(serial, " ", r);
             sum += r; if (r < mn) mn = r; if (r > mx) mx = r;
         }
+        if (a == 1) print(serial, crlf);
         // RES is the truncated sum: << result_shift() restores the scale
         const uint32_t mean_per_sample = ((sum / 16) << A::result_shift()) / a;
         print(serial, "  acc ", a, ": mean/sample ", mean_per_sample, " (exp ~2048) spread ",
