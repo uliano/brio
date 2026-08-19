@@ -9,6 +9,8 @@ source).
 
 ![brio strata](architecture.svg)
 
+<sub>[open the diagram full size](https://raw.githubusercontent.com/uliano/brio/main/docs/design/architecture.svg) (zoomable in the browser)</sub>
+
 *The strata, the contracts (dashed) and the two directions of
 traffic: events up, by value, condensed by ISR bodies; calls down,
 inside a dispatch; the timebase sideways, immune to the CPU clock.*

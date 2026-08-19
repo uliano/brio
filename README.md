@@ -79,6 +79,8 @@ The full rationale, decision by decision, is in
 
 ![brio strata](docs/design/architecture.svg)
 
+<sub>[open the diagram full size](https://raw.githubusercontent.com/uliano/brio/main/docs/design/architecture.svg) (zoomable in the browser)</sub>
+
 `lib/brio/src/` has four strata; the include prefix makes a file's
 portability readable at a glance:
 
