@@ -337,6 +337,16 @@ public:
         regs().MUXNEG = neg_code(neg);
     }
 
+    /// The positive input code in effect (MUXPOS): what AnalogIn<P>::code
+    /// or AdcInput says for the input selected. Read it in the RESRDY ISR
+    /// body's glue to label a result (util/analog_sampler.hpp).
+    static uint8_t selected() { return regs().MUXPOS; }
+
+    /// The code selected() reports for an input, at compile time.
+    template <typename P>
+    static constexpr uint8_t input_code(AnalogIn<P>) { return AnalogIn<P>::code; }
+    static constexpr uint8_t input_code(AdcInput in) { return static_cast<uint8_t>(in); }
+
     /// Errata 2.3.2: one throw-away conversion after a select() made
     /// with init_delay != 0 (or after a reference change). Blocking.
     static void flush() { (void)read(); }

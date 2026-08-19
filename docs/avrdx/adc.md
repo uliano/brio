@@ -96,7 +96,7 @@ The verbs, by purpose:
 | select the input | `select(AnalogIn<P>{})`, `select(AdcInput)`, `select(pos, neg)` (differential), `flush()` (one throw-away conversion: errata 2.3.2) |
 | convert | `start()`, `stop()`, `busy()`, `ready()`, `result()`, `result_signed()`, `read()` (start + wait + result, blocking) |
 | window comparator | `window(Window::below/above/inside/outside, low, high)`, `window_off()`, `window_hit()` (about the last result read), `window_flag()` / `clear_window_flag()` (the live flag) |
-| interrupts | `enable_resrdy_interrupt(bool)`, `enable_wcmp_interrupt(bool)`; ISR bodies `resrdy()`, `wcmp()` (return the result; the app binds the vectors and posts) |
+| interrupts | `enable_resrdy_interrupt(bool)`, `enable_wcmp_interrupt(bool)`; ISR bodies `resrdy()`, `wcmp()` (return the result; the app binds the vectors and posts); `selected()` (the MUXPOS code in effect, to label a result in the glue), `input_code(input)` constexpr |
 | events | `start_on(EventChannel<n>{})` (a conversion per rising edge of the channel), `start_on_events(bool)`; generator `EvAdc0Ready`, user `EvAdc0Start` (evsys.hpp) |
 | clock | `rebase(hz)` - the `ClockUser` hook a `DynamicClock` calls: keeps the CLK_ADC chosen at init, within range |
 
@@ -167,7 +167,12 @@ const uint16_t mv = adc_mv(sum, A::result_steps(), ref_mv(Ref::v2048));  // or s
 
 **Inside an active object - results as events** (the shape every
 kernel application uses): the RESRDY interrupt body returns the
-result, the app's vector binding posts it, the AO decides.
+result, the app's vector binding posts it, the AO decides. The
+ready-made owner is `AnalogSampler` (`util/analog_sampler.hpp`,
+[analog.md](../design/analog.md)): a list of inputs walked, results
+published, paced by software or by any event generator; `selected()`
+and `input_code()` are the two verbs it needs of this driver. The
+bare form, for an AO with its own logic:
 
 ```cpp
 struct AdcResult { uint16_t value; };
