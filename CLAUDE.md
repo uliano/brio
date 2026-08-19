@@ -144,9 +144,9 @@ gets its dated home in `docs/design/` when taken.
   statics are safe; a global touched by two AOs outside events is a
   one-way race under preemption).
 - **Exhaustive-driver track (started 2026-08-19), in this order:**
-  EVSYS (docs/design/events.md; avrdx/evsys.hpp built with the
-  primitives, `events0` bench app awaiting the analyzer check: 512 Hz
-  on PD2, 4 Hz LED, button level, off; then EventSystem static sugar
+  EVSYS (docs/design/events.md; avrdx/evsys.hpp primitives built and
+  `events0` VERIFIED on the scope 2026-08-19: 512 Hz PIT/64 on PD2,
+  button level, off, 4 Hz LED with no CPU; EventSystem static sugar
   when an app has several fixed routes) -> VREF, DAC,
   ADC exhaustively (one wire PD6 -> ADC pin; ADC start from the PIT
   event as the first real EVSYS user; docs/design/analog.md analysis

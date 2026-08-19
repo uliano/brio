@@ -58,8 +58,8 @@ PD2/PD7, PE2, PF2 - default/alt via `PORTMUX.EVSYSROUTEA`). Any
 generator becomes a signal on a pin: THE test instrument of this
 peripheral - a logic analyzer on an EVOUT verifies a generator, a
 channel constraint, a connect/disconnect, with no other peripheral
-involved. (The pin must be driven as output; to be confirmed on the
-bench - the chapter does not spell out the override.)
+involved. (The driver drives the pin as output; verified on the bench
+- the chapter does not spell out the override.)
 
 **Facts that shape the design.**
 - Routing is register writes; the response is "short and
@@ -138,7 +138,9 @@ the same "named resource" idiom.
 
 ## Verification path
 
-`events0` (bench app, built): route generators to EVOUT pins and
+`events0` (bench app, VERIFIED on the oscilloscope: PIT/64 512 Hz on
+PD2, button level, off, PIT/8192 LED at 4 Hz with no CPU, EVOUT pin
+driven as output by the driver works): route generators to EVOUT pins and
 watch with the logic analyzer - `EvPitDiv<64>` on an odd channel
 (the "prescaled RTC clock" is CLK_RTC through RTC.CTRLA's prescaler,
 which Ticker leaves at 1: 32768 / 64 = 512 Hz square wave on the pin,
