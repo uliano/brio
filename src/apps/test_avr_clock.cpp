@@ -27,10 +27,10 @@
 //   2  the twelve prescalers from the 24 MHz crystal: 24 .. 0.375 MHz,
 //      the console follows all of them;
 //   3  OSCHF manual tune at 16 MHz: -32, -16, 0, +16, +31 steps of
-//      ~0.4 %: 13.95 .. 18.0 MHz on the scope; the console is retuned
-//      to the expected LINEAR rate at each step - it stays readable at
-//      +-16 and breaks up at the extremes (bench): the step is not 0.4 %
-//      all the way, the scope gives the real curve;
+//      nominal 0.4 %; bench (A5, scope): 14.56 / 15.22 / 15.97 / ~17.0 /
+//      17.96 MHz - about 0.28 %/step downward, 0.4 %/step upward; the
+//      console is retuned to the MEASURED rate at each step and keeps
+//      talking;
 //   4  the 24 MHz crystal vs OSCHF at 24 MHz: same nominal, the scope
 //      tells the accuracy apart (crystal ppm, OSCHF %);
 //   5  OSC32K as the main clock: CLKOUT at ~32 kHz (+-10 %) for two
@@ -165,16 +165,24 @@ void t2_prescalers() {
 // ---- 3: tune ----------------------------------------------------------------------
 void t3_tune() {
     print(serial, "3 OSCHF manual tune at 16 MHz: steps -32 -16 0 +16 +31 (~0.4 %/step), 2 s each", crlf);
-    print(serial, "  expect ~13.95, 14.98, 16.00, 17.02, 17.98 MHz on PA7", crlf);
+    print(serial, "  bench (A5): 14.56, 15.22, 15.97, ~17.0, 17.96 MHz on PA7 - asymmetric, not 0.4 %/step", crlf);
     Serial::rebase(16'000'000);
     current_hz = 16'000'000;
     Oschf::set_hz(16'000'000);
     (void)MainClock::select(MainSource::oschf);
-    constexpr int8_t steps[] = {-32, -16, 0, 16, 31};
-    for (int8_t s : steps) {
-        // expected rate: 16 MHz * (1 + 0.004 * steps); retune the console to it
-        const uint32_t expected = static_cast<uint32_t>(16'000'000LL + 64'000LL * s);
-        print(serial, "  tune ", static_cast<int16_t>(s), " -> expect ~", expected, " Hz", crlf);
+    // The console is retuned to the rate each step REALLY gives on this
+    // part (bench, rev A5, scope): the curve is not 0.4 %/step - about
+    // 0.28 %/step downward, 0.4 %/step upward. The data sheet's linear
+    // 0.4 % is printed next to it for reference.
+    struct Step { int8_t steps; uint32_t measured_hz; };
+    constexpr Step table[] = {{-32, 14'560'000}, {-16, 15'220'000}, {0, 15'970'000},
+                              {16, 17'020'000}, {31, 17'960'000}};
+    for (const Step& st : table) {
+        const int8_t s = st.steps;
+        const uint32_t linear = static_cast<uint32_t>(16'000'000LL + 64'000LL * s);
+        const uint32_t expected = st.measured_hz;
+        print(serial, "  tune ", static_cast<int16_t>(s), " -> bench ~", expected, " Hz (0.4 %/step would be ",
+              linear, ")", crlf);
         Serial::rebase(expected);
         current_hz = expected;
         Oschf::tune(s);

@@ -152,11 +152,34 @@ ISR(CLKCTRL_CFD_vect) { brio::post<Supervisor>(ClockLost{ClockFailure::cfd()}); 
 PllSource::oschf, PllMultiplier::x2)` with OSCHF at 16-24 MHz; it runs
 when the TCD requests it.
 
-## Bench findings (`test_avr_clock`, rev A5)
+## Bench findings (`test_avr_clock`, rev A5, CLKOUT on PA7, 14/14)
 
-First run pending. Expected and to be recorded here: every OSCHF rate
-and every prescaler on the scope, the tune range (16 MHz +-12 %),
-crystal vs OSCHF accuracy, the 32 kHz main clock, the forced clock
-failure (CLKOUT flat, OSCHF 4 MHz, flag, interrupt rate), recovery.
-Already known from `clock_console`: prescaler changes under a running
-console 24 -> 12 -> 2 MHz.
+- Every OSCHF rate (24, 20, 16, 12, 8, 4, 3, 2, 1 MHz) and every main
+  prescaler (24 MHz / 1 .. 64, down to 375 kHz) appears on CLKOUT as
+  expected; the console (9600 baud, retuned before each switch)
+  follows all of them.
+- The 24 MHz crystal reads 23.995 MHz on the bench scope (the
+  instrument's 200 ppm, not the crystal's).
+- OSCHF manual tune at 16 MHz is NOT 0.4 %/step over the range: -32 ->
+  14.56 MHz (-8.8 %), -16 -> 15.22 (-4.7 %), 0 -> 15.97 (-0.2 %), +31 ->
+  17.96 (+12.4 %): about 0.28 %/step downward, 0.4 %/step upward (the
+  data sheet's "0.4 % typ." holds upward). The suite retunes its
+  console to these measured rates and stays readable at every step.
+- OSC32K as the main clock runs (and the Ticker must be paused: a
+  1024 Hz ISR cannot be served at 32 cycles per tick).
+- XOSC32K correctly never reports stable on this board (no 32 kHz
+  crystal).
+- Clock failure, forced with the test bit while watching the main
+  clock: CLKSEL falls back to OSCHF AND the OSCHF frequency is reset to
+  4 MHz (FRQSEL reads 0x3 afterwards - the data sheet's "Reset
+  frequency" is literal), CLKOUT is disabled by hardware, the regular
+  interrupt fires every 305 us (= 10 OSC32K cycles: 1638 hits in 500
+  ms) while the condition holds; clearing the test bit, the flag, and
+  re-initialising the clock recovers fully.
+- MCLKSTATUS: OSCHFS reads 0 while OSCHF is not the main clock and
+  nobody requests it, RUNSTDBY notwithstanding - the status follows the
+  REQUEST, as the register note says of the signal; it reads 1 whenever
+  OSCHF is the main clock. PLLS stays 0 without a requester (the TCD).
+- `Uart::rebase` needs TWO frame times after DREIF before the clock may
+  change: one frame plus 1 us corrupted the last byte (the line feed)
+  at several rates.

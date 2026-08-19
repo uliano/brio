@@ -48,7 +48,13 @@
  *    sets with RUNSTDBY and no requester (2.5.3, A4/A5); it does not
  *    run from an XOSCHF crystal, only from an external clock (2.5.4);
  *  - OSCHF accuracy: calibrated +-2..5 % at >= 4 MHz over VDD and
- *    temperature, 1-3 MHz +-6..10 %; tune step 0.4 %; OSC32K +-10 %.
+ *    temperature, 1-3 MHz +-6..10 %; OSC32K +-10 %. The manual tune is
+ *    not 0.4 %/step across its range (bench, A5, at 16 MHz: -32 steps =
+ *    -8.8 %, +31 steps = +12.4 %: ~0.28 %/step down, 0.4 %/step up);
+ *  - MCLKSTATUS follows the REQUEST: OSCHFS reads 0 while OSCHF is not
+ *    the main clock and nobody asks for it, RUNSTDBY notwithstanding
+ *    (bench); a CFD fallback really resets OSCHF to 4 MHz (FRQSEL 0x3)
+ *    and its interrupt re-fires every 10 OSC32K cycles (305 us, bench).
  *
  * The RTC's own clock (CLK_RTC: OSC32K or XOSC32K) is selected by the
  * RTC driver (Ticker); CLKCTRL only provides the oscillators - start

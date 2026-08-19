@@ -154,8 +154,9 @@ gets its dated home in `docs/design/` when taken.
   statics are safe; a global touched by two AOs outside events is a
   one-way race under preemption).
 - **Exhaustive-driver track (started 2026-08-19).** Done: EVSYS, VREF/
-  DAC/ADC, CLKCTRL (clock.hpp rewritten as resources + tasks, the
-  `test_avr_clock` suite on CLKOUT/PA7 awaiting its first scope run).
+  DAC/ADC, CLKCTRL (clock.hpp rewritten as resources + tasks; `test_avr_clock`
+  14/14 on the scope via CLKOUT/PA7: tune curve asymmetric, CFD
+  fallback really 4 MHz, status follows the request - in clkctrl.md).
   Remaining provisional: PORT, USART, SPI, TWI, RTC, TCA - each doc's
   "Not covered yet" is the shopping list. Original order:
   EVSYS (docs/design/events.md; avrdx/evsys.hpp primitives built and
