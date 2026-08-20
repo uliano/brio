@@ -34,11 +34,12 @@
  *
  * Facts worth remembering (16.3.2): a pin generator is the pin LEVEL
  * (the user's edge detection makes the edge; the pin's input driver
- * must be enabled); PIT_DIVn are levels - the prescaled RTC clock
- * divided, a free square wave (32768 / n Hz with the RTC prescaler at
- * 1, as Ticker leaves it); software events need CLK_PER (not in
- * standby); async users respond in standby without a clock. Errata
- * DS80000915F: no EVSYS items.
+ * must be enabled); PIT_DIVn are levels - a free square wave off the
+ * RTC's prescaler chain, n cycles of CLK_RTC per period (32768 / n Hz
+ * on a 32.768 kHz source), independent of the RTC counter's own
+ * PRESCALER (rtc.hpp); software events need CLK_PER (not in standby);
+ * async users respond in standby without a clock. Errata DS80000915F:
+ * no EVSYS items.
  */
 
 #pragma once

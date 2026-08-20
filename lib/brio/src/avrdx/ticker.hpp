@@ -21,8 +21,11 @@
  *
  * ## Hardware foundation
  * The PIT is part of the RTC peripheral and counts a 32.768 kHz clock
- * (internal OSC32K or a 32k crystal, see init()). Supported tick rates map
- * onto the PIT period dividers:
+ * (internal OSC32K or a 32k crystal, see init()). The silicon is driven
+ * through the `Pit` and `RtcClock` resources of avrdx/rtc.hpp; this class
+ * is the tick arithmetic above them, and it OWNS the block's one clock
+ * select (the counter half, `Rtc`, shares whatever init() picked).
+ * Supported tick rates map onto the PIT period dividers:
  *
  *   1024 Hz (~0.977 ms) ... 16 Hz (~62.5 ms), powers of two only.
  *
@@ -73,6 +76,7 @@
 #include <stdint.h>
 #include <bit>
 
+#include "avrdx/rtc.hpp"
 #include "util/timestamp.hpp"
 
 namespace brio {
@@ -110,16 +114,17 @@ private:
     static inline uint32_t m_millis = 0;
     static inline uint32_t m_secs = 0;
 
-    /// PIT period divider bits for the requested tick rate (compile time)
-    static constexpr uint8_t pit_period_bits() {
+    /// PIT period for the requested tick rate (compile time), counting
+    /// cycles of a 32.768 kHz CLK_RTC
+    static constexpr PitPeriod pit_period() {
         switch (tps) {
-            case 16:   return RTC_PERIOD_CYC2048_gc;  // ~62.5 ms
-            case 32:   return RTC_PERIOD_CYC1024_gc;  // ~31.25 ms
-            case 64:   return RTC_PERIOD_CYC512_gc;   // ~15.625 ms
-            case 128:  return RTC_PERIOD_CYC256_gc;   // ~7.813 ms
-            case 256:  return RTC_PERIOD_CYC128_gc;   // ~3.906 ms
-            case 512:  return RTC_PERIOD_CYC64_gc;    // ~1.953 ms
-            default:   return RTC_PERIOD_CYC32_gc;    // 1024 -> ~0.977 ms
+            case 16:   return PitPeriod::cyc2048;  // ~62.5 ms
+            case 32:   return PitPeriod::cyc1024;  // ~31.25 ms
+            case 64:   return PitPeriod::cyc512;   // ~15.625 ms
+            case 128:  return PitPeriod::cyc256;   // ~7.813 ms
+            case 256:  return PitPeriod::cyc128;   // ~3.906 ms
+            case 512:  return PitPeriod::cyc64;    // ~1.953 ms
+            default:   return PitPeriod::cyc32;    // 1024 -> ~0.977 ms
         }
     }
 
@@ -132,30 +137,31 @@ public:
     /**
      * @brief Configure the RTC clock source and start the PIT interrupt
      *
-     * Selects XOSC32K when the clock init found a running 32k crystal
-     * (MCLKSTATUS flag), the internal OSC32K otherwise; resets all counters;
-     * programs the PIT period for ticks_per_second and enables its interrupt.
+     * The Ticker OWNS the RTC block's one clock select (rtc.hpp): it
+     * takes XOSC32K when the clock init found a running 32k crystal, the
+     * internal OSC32K otherwise. Resets all counters, programs the PIT
+     * period for ticks_per_second and enables its interrupt. The RTC
+     * counter half (brio::Rtc) is left alone and shares whatever source
+     * is selected here.
      *
      * Call once after clock init and before sei(). The RTC_PIT_vect ISR
      * must call pit().
      */
-    static void init() {
+    static void init() { init(RtcClock::preferred()); }
+
+    /// The same, with the CLK_RTC source named: an application that
+    /// knows its board (a crystal, an external clock, the 1.024 kHz
+    /// OSC1K for a slow tick) says so instead of letting init() guess.
+    /// The tick rate then follows the source: tps counts cycles of a
+    /// 32.768 kHz CLK_RTC, so OSC1K divides every rate by 32.
+    static void init(RtcSource source) {
         m_ticks = 0;
         m_millis = 0;
         m_secs = 0;
 
-        while (RTC.STATUS > 0) {}  // wait for register synchronization
-
-        // 32k crystal if the clock init started one, internal OSC32K otherwise.
-        if (CLKCTRL.MCLKSTATUS & CLKCTRL_XOSC32KS_bm) {
-            RTC.CLKSEL = RTC_CLKSEL_XOSC32K_gc;
-        } else {
-            RTC.CLKSEL = RTC_CLKSEL_OSC32K_gc;
-        }
-
-        while (RTC.PITSTATUS > 0) {}  // wait for PIT register synchronization
-        RTC.PITCTRLA = pit_period_bits() | RTC_PITEN_bm;
-        RTC.PITINTCTRL = RTC_PI_bm;   // enable the periodic interrupt
+        (void)Rtc::sync();            // no configuration write in flight
+        RtcClock::select(source);
+        Pit::init(pit_period());
     }
 
     /**
@@ -170,7 +176,7 @@ public:
     // call-clobbered set (measured on this function: 8 pushes vs 16).
     // Survives the -fno-inline debug profile like _delay_ms does.
     [[gnu::always_inline]] static void pit() {
-        RTC.PITINTFLAGS = RTC_PI_bm;  // clear interrupt flag
+        Pit::clear_flag();
 
         ++m_ticks;
         const uint16_t low = static_cast<uint16_t>(m_ticks);
@@ -197,8 +203,8 @@ public:
     /// rare moments when the CPU runs too slowly to serve a 1024 Hz tick
     /// (a 32 kHz main clock: the ISR would never return). Time stands
     /// still while paused; resume() picks up from where it was.
-    static void pause() { RTC.PITINTCTRL = 0; }
-    static void resume() { RTC.PITINTCTRL = RTC_PI_bm; }
+    static void pause() { Pit::enable_interrupt(false); }
+    static void resume() { Pit::enable_interrupt(true); }
 
     static void now(TimeStamp &out) {
         uint16_t frac;

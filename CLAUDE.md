@@ -310,12 +310,32 @@ gets its dated home in `docs/design/` when taken.
   the last value); errata 2.9.1 (PD0 floating on DB 28/32)
   documented, deliberately NOT wrapped (user ruling: silicon kludges
   stay visible); port.md rewritten to shape; family TU pin.cpp + 3
-  negatives (INLVL on DA refused). -> CCL -> AC ->
+  negatives (INLVL on DA refused). RTC DONE 2026-08-20 - new
+  avrdx/rtc.hpp with three resources (RtcClock owns the CLKSEL both
+  functions share - in a brio program the Ticker is its owner; Rtc the
+  counter; Pit the periodic timer), BasicTicker migrated onto Pit with
+  its public API unchanged (test_avr_timer still 159/159), the whole
+  chapter-26 register description exposed, a negative CALIB trim at
+  DIV1 refused at compile time and at run time; NEW SUITE test_avr_rtc
+  78/78, no wires (a TCB cascade at CLK_PER latched by the RTC's own
+  OVF/CMP events is the stopwatch). Findings: the compare fires exactly
+  CMP + 1 ticks after the overflow; the busy flags live ~2.8 CLK_RTC
+  (2005..2107 crystal ticks); the first PIT interrupt after an enable
+  falls at 4845..15902 of a 23424-tick period with the prescaler free
+  and 14484..16525 with it stopped; PIT_DIV64 does not move with the
+  counter's PRESCALER (evsys.hpp's comment corrected); exactly 1024 PIT
+  ticks per 32768-cycle counter period; OSC32K +9000..+9800 ppm and
+  wandering 100..300 ppm, which is the noise floor of everything here;
+  the +-127 ppm trim measures +105..+148 / -110..-150 ppm and is
+  GRANULAR (one whole CLK_RTC cycle every 1e6/ERROR cycles), so it
+  shows up only by alternating trimmed and untrimmed periods and
+  averaging. Tasks (alarm, slow periodic) deliberately NOT built: born
+  with their first user. -> CCL -> AC ->
   ADC/DAC/VREF -> CLKCTRL (DA must compile) -> EVSYS tables. Phase 2,
-  never-reviewed: PORT (pin interrupts; buttons as the test) -> USART
+  never-reviewed: USART
   (jumper cross-loopback, new suite test_avr_serial) -> SPI (host ->
   client on SPI0/SPI1, 4 jumpers) -> TWI (host -> client TWI0/TWI1) ->
-  RTC (the counter proper) -> delay/platform sweep. Jumper tests
+  delay/platform sweep. Jumper tests
   always check bench.md collisions first. TCD stays deferred.
   USART/SPI/TWI re-planned (2026-08-20) as the MULTI-BOARD protocol
   campaign: more boards arrive 2026-08-22; board A = DUT suite,
@@ -521,7 +541,13 @@ lib/brio/src/            the framework, four strata:
     ac.hpp                 AC: Ac<n> (inputs, DACREF via Vref::ac, hysteresis,
                            power, pin/event/interrupt, window) + Threshold,
                            Window
-    ticker.hpp             BasicTicker<tps> RTC/PIT timebase (Ticker = 1024)
+    rtc.hpp                RTC: RtcClock (the CLKSEL both functions share),
+                           Rtc counter (prescaler, PER/CMP/CNT with the busy
+                           waits, OVF/CMP flags + ISR body, CALIB trim with the
+                           DIV2 rule, RUNSTDBY/DBGRUN) + Pit (PERIOD, PITEN,
+                           PI flag + ISR body)
+    ticker.hpp             BasicTicker<tps> timebase over Pit (Ticker = 1024);
+                           owns the block's clock select
     vref.hpp               Ref + ref_mv (this silicon's levels) + Vref::adc0/dac0/ac
     dac.hpp                Dac<0>: init(DacConfig), set(code)/set_mv - actuator
     adc.hpp                Adc<0>: init<cfg>()/init(cfg)/reconfigure, AnalogIn<Pin>

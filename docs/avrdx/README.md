@@ -166,8 +166,10 @@ anything measured in milliseconds inside an AO is a time event.
 There is NO 32.768 kHz crystal on the bench board: `Ticker::init()`
 picks the RTC clock automatically (XOSC32K if MCLKSTATUS reports a
 running 32k crystal, internal OSC32K otherwise; `Clock` never touches
-XOSC32K). Do not enable XOSC32K
-(PF0/PF1) unless a 32k crystal is fitted.
+XOSC32K), and `Ticker::init(source)` names it instead. Do not enable
+XOSC32K (PF0/PF1) unless a 32k crystal is fitted. The Ticker owns that
+clock select for the whole RTC block - the counter half (`brio::Rtc`,
+[rtc.md](rtc.md)) shares it.
 
 `brio::Ticker` = `BasicTicker<1024>`: RTC/PIT timebase at 1024 Hz
 (the PIT's power-of-two dividers - a truth of this silicon, which is

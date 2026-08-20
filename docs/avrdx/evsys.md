@@ -141,8 +141,9 @@ brio::EventChannel<3>::pulse();
 ## Bench findings
 
 - `EvPitDiv<64>` on an odd channel measures 512 Hz on an EVOUT pin,
-  `EvPitDiv<8192>` on an even one 4 Hz (scope; RTC prescaler at 1, as
-  `Ticker` leaves it: 32768 / div).
+  `EvPitDiv<8192>` on an even one 4 Hz: the dividers count CLK_RTC
+  cycles (32768 / div), and the RTC counter's own prescaler does not
+  move them ([rtc.md](rtc.md)).
 - `EvOut::listen` driving the pin as output works; the chapter does
   not spell out a port override for EVOUT, so the driver sets DIR.
 - Connect and disconnect at run time behave as ordinary register
