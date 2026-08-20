@@ -7,8 +7,9 @@
  * 2.048 needs VDD >= 2.5 V, 2.5 needs 2.95 V, 4.096 needs 4.55 V), VDD,
  * or the external VREFA pin (PD7, 1.024 V .. VDD). A source turns on
  * when its consumer needs it; ALWAYSON keeps it on (start-up 10 us
- * with an internal main clock, 200 us with an external one; 2 us to
- * change level) for ~40-175 uA.
+ * with a high-frequency main clock - OSCHF or EXTCLK/XOSCHF - and
+ * 200 us with a 32.768 kHz one, Table 39-17; 2 us to change level)
+ * for ~40-175 uA.
  *
  * This is a vocabulary plus three setters, not a device: the enum Ref
  * names this silicon's levels (another target's vref header defines

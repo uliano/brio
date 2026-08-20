@@ -64,6 +64,7 @@
 #include <avr/interrupt.h>
 #include <stdint.h>
 
+#include "avrdx/ac.hpp"
 #include "avrdx/adc.hpp"
 #include "avrdx/clock.hpp"
 #include "avrdx/dac.hpp"
@@ -522,6 +523,73 @@ void t14_vrefa() {
     verdict("VDD/10 vs VREFA", near(v, static_cast<int32_t>(exp), static_cast<int32_t>(exp / 8)));
 }
 
+// ---- 15: extras (dacref inputs, signed window, DAC readback, live rebase) --------
+using DynClock = DynamicClock<SysClock, Serial, A>;
+
+void t15_extras() {
+    print(serial, "x extras: dacref0..2 inputs (30 us), signed window, DAC readback, live rebase", crlf);
+
+    dac_default(Ref::v2048);
+    D::set(512);
+    verdict("DAC DATA readback", D::code() == 512);
+
+    // the three AC DACREFs as ADC inputs: tADC_DACREF = 30 us wants a
+    // long sample (64 CLK_ADC at 1.5 MHz = 43 us)
+    (void)Ac<0>::init({.positive = AcPos::ainp3, .negative = AcNeg::dacref,
+                       .reference = Ref::v2048, .dacref = ac_dacref_code(500, 2048)});
+    (void)Ac<1>::init({.positive = AcPos::ainp3, .negative = AcNeg::dacref,
+                       .reference = Ref::v2048, .dacref = ac_dacref_code(1000, 2048)});
+    (void)Ac<2>::init({.positive = AcPos::ainp3, .negative = AcNeg::dacref,
+                       .reference = Ref::v2048, .dacref = ac_dacref_code(1500, 2048)});
+    A::init(clock, AdcConfig{.reference = Ref::v2048, .prescaler = AdcPresc::div16,
+                             .sample_length = 64});
+    const uint16_t exp[3] = {1000, 2000, 3000};    // counts at 2.048 V
+    const AdcInput in[3] = {AdcInput::dacref0, AdcInput::dacref1, AdcInput::dacref2};
+    for (uint8_t k = 0; k < 3; ++k) {
+        A::select(in[k]);
+        A::flush();
+        const uint16_t v = read_avg(8);
+        print(serial, "  dacref", k, " reads ", v, " counts (expect ", exp[k], ")", crlf);
+        verdict("dacref within 40 counts (~20 mV)", near(v, exp[k], 40));
+    }
+    Ac<0>::disable(); Ac<1>::disable(); Ac<2>::disable();
+
+    // the signed window in differential mode: GND - DAC0(700) ~ -1400
+    D::set(700);
+    delay_us(clock, 50);
+    A::init(clock, AdcConfig{.reference = Ref::v2048, .differential = true,
+                             .sample_length = internal_sample_length});
+    verdict("enum-negative select accepted", A::select(AdcInput::gnd, AdcInput::dac0));
+    verdict("invalid negative refused", !A::select(AdcInput::gnd, AdcInput::temp));
+    (void)A::select(AdcInput::gnd, AdcInput::dac0);
+    A::window_signed(A::Window::below, -1000, 0);
+    A::flush();
+    (void)A::read();
+    verdict("signed below -1000 hits at ~-1400", A::window_hit());
+    A::window_signed(A::Window::below, -2000, 0);
+    (void)A::read();
+    verdict("signed below -2000 does not hit", !A::window_hit());
+    A::window_off();
+
+    // live rebase: the conversion result must not move with CLK_PER
+    verdict("DynamicClock init", DynClock::init());
+    (void)A::init(DynClock{}, AdcConfig{.reference = Ref::v2048, .prescaler = AdcPresc::div16,
+                                        .sample_length = 64});
+    (void)Ac<1>::init({.positive = AcPos::ainp3, .negative = AcNeg::dacref,
+                       .reference = Ref::v2048, .dacref = ac_dacref_code(1000, 2048)});
+    A::select(AdcInput::dacref1);
+    A::flush();
+    const uint16_t at24 = read_avg(8);
+    verdict("switch to 12 MHz", DynClock::set(12'000'000u));
+    A::flush();
+    const uint16_t at12 = read_avg(8);
+    verdict("back to 24 MHz", DynClock::set(24'000'000u));
+    print(serial, "  dacref1: ", at24, " counts at 24 MHz, ", at12, " at 12 MHz", crlf);
+    verdict("the reading does not move across the switch (+-8)", near(at12, at24, 8));
+    verdict("CLK_ADC stayed in range (clock_ok)", A::clock_ok());
+    Ac<1>::disable(); D::set(0);
+}
+
 using TestFn = void (*)();
 struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
@@ -529,6 +597,7 @@ constexpr Test tests[] = {
     {'5', t5_resolution}, {'6', t6_differential}, {'7', t7_prescalers},
     {'8', t8_accumulation}, {'9', t9_sampling}, {'0', t10_event_start},
     {'w', t11_window}, {'e', t12_errata}, {'i', t13_internal}, {'v', t14_vrefa},
+    {'x', t15_extras},
 };
 
 void run(TestFn fn) {
@@ -539,7 +608,7 @@ void run(TestFn fn) {
 
 void help() {
     print(serial, "test_avr_analog: 1 refs | 2 ramp | 3 outen | 4 settling | 5 res | 6 diff | 7 presc | "
-                  "8 acc | 9 sampling | 0 event start | w window | e errata | i internal | v vrefa | a all",
+                  "8 acc | 9 sampling | 0 event start | w window | e errata | i internal | v vrefa | x extras | a all",
           crlf);
 }
 

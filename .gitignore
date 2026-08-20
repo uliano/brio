@@ -28,3 +28,4 @@ plots/
 
 # vendor datasheets: local copies only (see docs/avrdx/vendor/README.md)
 docs/*/vendor/*.pdf
+docs/*/vendor/extracts/

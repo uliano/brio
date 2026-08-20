@@ -42,9 +42,9 @@ TX stays the blocking push print: the drain side is an ISR (it
 preempts the loop, so the spin always progresses - a stall, not a
 deadlock), worst case ~2 ms at 460800, zero when the ring has room.
 Measured cost of write_byte: ~45-50 cycles/byte with a guarded ring,
-under 10% of the 21.7 us wire time per byte; the lock-free ring
-shortens the hot path from 20 to 13 instructions (no SREG
-save/cli/restore) - re-measure when convenient.
+under 10% of the 21.7 us wire time per byte; with the lock-free ring
+the hot path is 13 instructions vs 20 for a guarded one (no SREG
+save/cli/restore).
 
 Full-queue semantics cost nothing on the non-full path (the check
 exists anyway), so the policy is pure failure semantics, chosen per

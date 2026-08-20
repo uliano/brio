@@ -70,10 +70,25 @@ concept EventUser = requires {
 
 // ---- channels ---------------------------------------------------------------
 
-/// Number of event channels on this device (CHANNEL0..9 on 48/64-pin
-/// DA/DB; 28/32-pin parts have 8 - a fact for the device table when it
-/// exists).
+/// Number of event channels on this device: CHANNEL0..9 with the
+/// software events split SWEVENTA/SWEVENTB on 48/64-pin DA/DB;
+/// 8 channels and SWEVENTA only on 28/32-pin parts (the device header
+/// is the authority).
+#ifdef EVSYS_SWEVENTB_gm
 inline constexpr uint8_t event_channels = 10;
+#else
+inline constexpr uint8_t event_channels = 8;
+#endif
+
+/// Software event on a channel chosen at RUN time (for drivers that
+/// store their channel as a value: a one-shot's trigger, a cascade's
+/// snapshot). The compile-time form is EventChannel<n>::pulse().
+inline void evsys_pulse(uint8_t ch) {
+#ifdef EVSYS_SWEVENTB_gm
+    if (ch >= 8) { EVSYS.SWEVENTB = static_cast<uint8_t>(1u << (ch - 8)); return; }
+#endif
+    EVSYS.SWEVENTA = static_cast<uint8_t>(1u << ch);
+}
 
 /// Resource handle for event channel n (also usable as an empty tag).
 template <uint8_t n>
@@ -102,9 +117,12 @@ struct EventChannel {
     static void pulse() {
         if constexpr (n < 8) {
             EVSYS.SWEVENTA = static_cast<uint8_t>(1u << n);
-        } else {
+        }
+#ifdef EVSYS_SWEVENTB_gm
+        else {
             EVSYS.SWEVENTB = static_cast<uint8_t>(1u << (n - 8));
         }
+#endif
     }
 
 private:
@@ -150,6 +168,72 @@ struct EvAdc0Ready {
     static constexpr bool legal_on(uint8_t) { return true; }
 };
 
+/// UPDI SYNCH character seen (pulse). All channels. 0x01.
+struct EvUpdiSynch {
+    static constexpr uint8_t code = 0x01;
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+
+#ifdef MVIO
+/// MVIO VDDIO2 OK level (async, DB only). All channels. 0x05.
+struct EvMvioOk {
+    static constexpr uint8_t code = 0x05;
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+#endif
+
+/// ZCD n zero-cross output LEVEL (async). All channels. 0x30 + n.
+template <uint8_t n>
+struct EvZcdOut {
+    static_assert(n <= 2, "ZCD0..ZCD2");
+    static constexpr uint8_t code = static_cast<uint8_t>(0x30 + n);
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+
+#ifdef OPAMP
+/// OPAMP n ready (DB only). All channels. 0x34 + n.
+template <uint8_t n>
+struct EvOpampReady {
+    static_assert(n <= 2, "OPAMP0..OPAMP2");
+    static constexpr uint8_t code = static_cast<uint8_t>(0x34 + n);
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+#endif
+
+/// How many USART instances this package has (the device header is
+/// the authority): 3 on 28/32-pin, 5 on 48, 6 on 64.
+#if defined(USART5)
+inline constexpr uint8_t usart_count = 6;
+#elif defined(USART3)
+inline constexpr uint8_t usart_count = 5;
+#else
+inline constexpr uint8_t usart_count = 3;
+#endif
+
+/// USART n XCK LEVEL (sync host mode). All channels. 0x60 + n.
+template <uint8_t n>
+struct EvUsartXck {
+    static_assert(n < usart_count, "no such USART on this package");
+    static constexpr uint8_t code = static_cast<uint8_t>(0x60 + n);
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+
+/// SPI n SCK LEVEL (host mode). All channels. 0x68 + n.
+template <uint8_t n>
+struct EvSpiSck {
+    static_assert(n <= 1, "SPI0..SPI1");
+    static constexpr uint8_t code = static_cast<uint8_t>(0x68 + n);
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+
+#ifdef TCD0
+/// TCD0 compare events (async). All channels. 0xB0..0xB3.
+struct EvTcdCmpBClr { static constexpr uint8_t code = 0xB0; static constexpr bool legal_on(uint8_t) { return true; } };
+struct EvTcdCmpASet { static constexpr uint8_t code = 0xB1; static constexpr bool legal_on(uint8_t) { return true; } };
+struct EvTcdCmpBSet { static constexpr uint8_t code = 0xB2; static constexpr bool legal_on(uint8_t) { return true; } };
+struct EvTcdProgEv  { static constexpr uint8_t code = 0xB3; static constexpr bool legal_on(uint8_t) { return true; } };
+#endif
+
 /// TCA n overflow (normal mode) / low-byte underflow (split mode):
 /// pulse, CLK_PER, all channels. Codes 0x80 (TCA0), 0x88 (TCA1).
 template <uint8_t n>
@@ -177,11 +261,21 @@ struct EvTcaCmp {
     static constexpr bool legal_on(uint8_t) { return true; }
 };
 
+/// How many TCB instances this package has (the device header is the
+/// authority): 3 on 28/32-pin, 4 on 48, 5 on 64.
+#if defined(TCB4)
+inline constexpr uint8_t tcb_count = 5;
+#elif defined(TCB3)
+inline constexpr uint8_t tcb_count = 4;
+#else
+inline constexpr uint8_t tcb_count = 3;
+#endif
+
 /// TCB n CAPT flag set (the condition depends on the mode, tcb.hpp):
 /// pulse, CLK_PER, all channels. 0xA0 + 2n.
 template <uint8_t n>
 struct EvTcbCapt {
-    static_assert(n <= 4, "TCB0..TCB4");
+    static_assert(n < tcb_count, "no such TCB on this package");
     static constexpr uint8_t code = static_cast<uint8_t>(0xA0 + 2 * n);
     static constexpr bool legal_on(uint8_t) { return true; }
 };
@@ -190,15 +284,23 @@ struct EvTcbCapt {
 /// The carry of a 32-bit cascade.
 template <uint8_t n>
 struct EvTcbOvf {
-    static_assert(n <= 4, "TCB0..TCB4");
+    static_assert(n < tcb_count, "no such TCB on this package");
     static constexpr uint8_t code = static_cast<uint8_t>(0xA1 + 2 * n);
     static constexpr bool legal_on(uint8_t) { return true; }
 };
 
+/// How many CCL LUTs this package has (the device header is the
+/// authority: the LUT4 register macros exist on 48/64-pin parts only).
+#ifdef CCL_LUT4CTRLA
+inline constexpr uint8_t lut_count = 6;
+#else
+inline constexpr uint8_t lut_count = 4;
+#endif
+
 /// CCL LUT n output LEVEL (async). 0x10 + n.
 template <uint8_t n>
 struct EvLut {
-    static_assert(n <= 5, "LUT0..LUT5");
+    static_assert(n < lut_count, "no such CCL LUT on this package");
     static constexpr uint8_t code = static_cast<uint8_t>(0x10 + n);
     static constexpr bool legal_on(uint8_t) { return true; }
 };
@@ -219,11 +321,12 @@ template <typename P>
 struct EvPin {
     static constexpr char port = P::port_letter;
     static constexpr uint8_t pin = P::pin_number;
-    static_assert(port >= 'A' && port <= 'F', "pin events: PORTA..PORTF");
+    static_assert(port >= 'A' && port <= 'G', "pin events: PORTA..PORTG");
+    static_assert(port_exists(port), "this port does not exist on this package");
     static constexpr uint8_t code =
         static_cast<uint8_t>(((port - 'A') % 2 == 0 ? 0x40 : 0x48) + pin);
     static constexpr bool legal_on(uint8_t ch) {
-        const uint8_t pair = static_cast<uint8_t>((port - 'A') / 2);   // A/B=0, C/D=1, E/F=2
+        const uint8_t pair = static_cast<uint8_t>((port - 'A') / 2);   // A/B=0, C/D=1, E/F=2, G=3
         return ch / 2 == pair;
     }
 };
@@ -251,10 +354,13 @@ template <typename P>
 struct EvOut : EventUserBase<EvOut<P>> {
     static constexpr char port = P::port_letter;
     static constexpr uint8_t pin = P::pin_number;
-    static_assert(port >= 'A' && port <= 'F', "EVOUT: PORTA..PORTF");
-    static_assert(pin == 2 || (pin == 7 && (port == 'A' || port == 'C' || port == 'D')),
-                  "EVOUT pins: Px2 on every port, Px7 (ALT1) on PORTA/PORTC/PORTD "
-                  "(48-pin: PB7/PE7 absent, PF7 not an EVOUT)");
+    static_assert(port >= 'A' && port <= 'G', "EVOUT: PORTA..PORTG");
+    static_assert(port_exists(port), "this port does not exist on this package");
+    static_assert(pin == 2 || (pin == 7 && port != 'F'),
+                  "EVOUT pins: Px2 in the default position on every port, Px7 "
+                  "(ALT1) on every port except PORTF (17.5.1; whether THIS "
+                  "package bonds pin 7 of an existing port is a pin-level "
+                  "fact for the device tables)");
 
     static volatile uint8_t& reg() {
         if constexpr (port == 'A') return EVSYS.USEREVSYSEVOUTA;
@@ -267,6 +373,9 @@ struct EvOut : EventUserBase<EvOut<P>> {
         else if constexpr (port == 'E') return EVSYS.USEREVSYSEVOUTE;
 #endif
         else if constexpr (port == 'F') return EVSYS.USEREVSYSEVOUTF;
+#ifdef PORTG
+        else if constexpr (port == 'G') return EVSYS.USEREVSYSEVOUTG;
+#endif
         else static_assert(false, "EVOUT: this port is not present on this device");
     }
 
@@ -280,6 +389,17 @@ struct EvOut : EventUserBase<EvOut<P>> {
         }
         P::output();                          // the event drives the pin's output
         EventUserBase<EvOut<P>>::listen(ch);
+    }
+
+    /// Disconnect AND tear down what listen() set up: the pin back to
+    /// an input, the PORTMUX position back to default (the "Entry
+    /// routes, Exit disconnects" idiom leaves no trace).
+    static void unlisten() {
+        EventUserBase<EvOut<P>>::unlisten();
+        P::input();
+        if constexpr (pin == 7) {
+            PORTMUX.EVSYSROUTEA &= static_cast<uint8_t>(~(1u << (port - 'A')));
+        }
     }
 };
 
@@ -309,7 +429,8 @@ struct EvTcaCntB : EventUserBase<EvTcaCntB<n>> {
 /// The TCB must also set CAPTEI - listening alone arms nothing.
 template <uint8_t n>
 struct EvTcbCaptIn : EventUserBase<EvTcbCaptIn<n>> {
-    static_assert(n <= 3, "TCB0..TCB3 (TCB4 is a 64-pin part: its user registers follow after a gap)");
+    static_assert(n < tcb_count, "no such TCB on this package");
+    // USER registers 0x1E..0x27 are contiguous through TCB4 (16.5.3).
     static volatile uint8_t& reg() { return (&EVSYS.USERTCB0CAPT)[2 * n]; }
 };
 
@@ -317,7 +438,7 @@ struct EvTcbCaptIn : EventUserBase<EvTcbCaptIn<n>> {
 /// clock (CLKSEL = EVENT in the TCB). Sync.
 template <uint8_t n>
 struct EvTcbCountIn : EventUserBase<EvTcbCountIn<n>> {
-    static_assert(n <= 3, "TCB0..TCB3 (TCB4 is a 64-pin part: its user registers follow after a gap)");
+    static_assert(n < tcb_count, "no such TCB on this package");
     static volatile uint8_t& reg() { return (&EVSYS.USERTCB0COUNT)[2 * n]; }
 };
 
@@ -328,13 +449,47 @@ static_assert(EventUser<EvTcbCaptIn<0>>);
 /// selects EVENTA/EVENTB on one of its inputs (ccl.hpp). 0x00 + 2n (+1).
 template <uint8_t n, char which>
 struct EvLutIn : EventUserBase<EvLutIn<n, which>> {
-    static_assert(n <= 5, "LUT0..LUT5");
+    static_assert(n < lut_count, "no such CCL LUT on this package");
     static_assert(which == 'A' || which == 'B', "LUT event inputs: 'A' or 'B'");
     static volatile uint8_t& reg() { return (&EVSYS.USERCCLLUT0A)[2 * n + (which == 'B' ? 1 : 0)]; }
 };
 
+/// EVOUT on PORTG's pins (64-pin parts): the same EvOut, its port
+/// gated above. USART n IRDA event input (sync). 0x14 + n.
+template <uint8_t n>
+struct EvUsartIrda : EventUserBase<EvUsartIrda<n>> {
+    static_assert(n < usart_count, "no such USART on this package");
+    static volatile uint8_t& reg() { return (&EVSYS.USERUSART0IRDA)[n]; }
+};
+
+#ifdef TCD0
+/// TCD0 event inputs A and B (the action is in the TCD's config).
+struct EvTcdInputA : EventUserBase<EvTcdInputA> {
+    static volatile uint8_t& reg() { return EVSYS.USERTCD0INPUTA; }
+};
+struct EvTcdInputB : EventUserBase<EvTcdInputB> {
+    static volatile uint8_t& reg() { return EVSYS.USERTCD0INPUTB; }
+};
+#endif
+
+#ifdef OPAMP
+/// OPAMP n event-driven controls (DB only): enable, disable, dump the
+/// integrator, drive the output. Four users per instance, contiguous.
+enum class OpampAction : uint8_t { enable = 0, disable = 1, dump = 2, drive = 3 };
+template <uint8_t n, OpampAction a>
+struct EvOpampCtl : EventUserBase<EvOpampCtl<n, a>> {
+    static_assert(n <= 2, "OPAMP0..OPAMP2");
+    static volatile uint8_t& reg() {
+        return (&EVSYS.USEROPAMP0ENABLE)[4 * n + static_cast<uint8_t>(a)];
+    }
+};
+#endif
+
 static_assert(EventGenerator<EvPitDiv<64>>);
 static_assert(EventGenerator<EvPin<Pin<'A', 2>>>);
+static_assert(EventGenerator<EvUpdiSynch>);
+static_assert(EventGenerator<EvZcdOut<0>>);
 static_assert(EventUser<EvOut<Pin<'D', 2>>>);
+static_assert(EventUser<EvUsartIrda<0>>);
 
 } // namespace brio

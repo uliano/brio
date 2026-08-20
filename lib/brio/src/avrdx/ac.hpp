@@ -20,7 +20,8 @@
  *    Window<Ac, Ac>    "the input is above / inside / below": two
  *                      comparators on one pin, WINSEL, the state
  *
- * Facts that shape the code (32.3, 39.17; errata F has no AC item):
+ * Facts that shape the code (32.3, 39.17; no AC silicon erratum -
+ * the errata document's clarification 3.7.4 adds tDACREF = 25 us):
  *  - V_DACREF = DACREF x V_ACREF / 256 (8-bit); offset +-5 mV typ.,
  *    hysteresis 0 / 10 / 25 / 50 mV, response 85 / 250 / 460 ns by
  *    power profile; the AC and (if internal) the reference take their
@@ -52,6 +53,7 @@
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
 #include "avrdx/vref.hpp"
+#include "util/analog.hpp"
 
 namespace brio {
 
@@ -104,14 +106,14 @@ struct AcConfig {
 };
 
 /// The DACREF code nearest to `mv` for a reference of `ref_mv`
-/// millivolts (255 at and above the reference).
+/// millivolts (255 at and above the reference). Thin names over the
+/// one home of counts<->mV arithmetic (util/analog.hpp, host-tested);
+/// the DACREF is an 8-bit divider, steps = 256.
 constexpr uint8_t ac_dacref_code(uint16_t mv, uint16_t ref_mv) {
-    if (ref_mv == 0) return 0;
-    const uint32_t c = (static_cast<uint32_t>(mv) * 256u + ref_mv / 2) / ref_mv;
-    return c > 255 ? 255 : static_cast<uint8_t>(c);
+    return static_cast<uint8_t>(dac_code(mv, 256, ref_mv));
 }
 constexpr uint16_t ac_dacref_mv(uint8_t code, uint16_t ref_mv) {
-    return static_cast<uint16_t>((static_cast<uint32_t>(code) * ref_mv + 128) / 256);
+    return dac_mv(code, 256, ref_mv);
 }
 
 /// The pin (port letter, pin number) of an input on this package
@@ -136,6 +138,19 @@ constexpr AcPin ac_neg_pin(uint8_t n, AcNeg p) {
     return {0, 0};
 }
 
+/// Are the selected inputs' pins on a port this package bonds? The
+/// PORTE positives (AC0 AINP1/AINP2, AC2 AINP2) do not exist on
+/// 28/32-pin parts and init refuses them. Pin-level absences within a
+/// bonded port (PD0 = AINN1 on DB 28/32, PC6 = the ALT1 output on
+/// 28/32) await the device tables - the table above is the 48/64-pin
+/// column, identical on both families.
+constexpr bool ac_config_valid(uint8_t n, const AcConfig& c) {
+    if (!port_exists(ac_pos_pin(n, c.positive).port)) return false;
+    if (c.negative != AcNeg::dacref &&
+        !port_exists(ac_neg_pin(n, c.negative).port)) return false;
+    return true;
+}
+
 // ---- the resource ---------------------------------------------------------------
 
 template <uint8_t n>
@@ -151,12 +166,19 @@ public:
     using OutEvent = EvAcOut<n>;      ///< generator: the comparator output level
 
     template <AcConfig cfg>
-    static void init() { init(cfg); }
+    static void init() {
+        static_assert(ac_config_valid(n, cfg),
+                      "this package does not bond the selected input's pin "
+                      "(the PORTE positives exist on 48/64-pin parts only)");
+        (void)init(cfg);
+    }
 
     /// Disables, sets the shared reference, turns the chosen pins into
     /// analog inputs, writes MUX/DACREF/sense/route, enables. The
-    /// interrupt stays off (enable_interrupt).
-    static void init(const AcConfig& cfg) {
+    /// interrupt stays off (enable_interrupt). False, touching
+    /// nothing, when an input's pin is not bonded on this package.
+    static bool init(const AcConfig& cfg) {
+        if (!ac_config_valid(n, cfg)) return false;
         auto& a = regs();
         a.CTRLA = 0;
         a.INTCTRL = 0;
@@ -177,12 +199,14 @@ public:
         a.CTRLA = static_cast<uint8_t>(
             AC_ENABLE_bm | static_cast<uint8_t>(cfg.hysteresis) | static_cast<uint8_t>(cfg.power) |
             (cfg.output_pin ? AC_OUTEN_bm : 0) | (cfg.run_standby ? AC_RUNSTDBY_bm : 0));
+        return true;
     }
 
     static void enable() { regs().CTRLA |= AC_ENABLE_bm; }
     static void disable() { regs().CTRLA &= static_cast<uint8_t>(~AC_ENABLE_bm); }
 
-    /// The comparator output (after INVERT): positive above negative.
+    /// The comparator output, after INVERT (without it: positive above
+    /// negative; with it: the opposite).
     static bool state() { return (regs().STATUS & AC_CMPSTATE_bm) != 0; }
 
     /// DACREF as a code, or as millivolts of the reference named at init.
@@ -251,8 +275,9 @@ struct Threshold {
                      bool interrupt = true) {
         ref_mv_ = ref_mv(ref, ref_known_mv);
         if (ref_mv_ == 0 || mv > ref_mv_) return false;
-        A::init({.positive = pin, .negative = AcNeg::dacref, .reference = ref,
-                 .dacref = ac_dacref_code(mv, ref_mv_), .hysteresis = hyst, .sense = sense});
+        if (!A::init({.positive = pin, .negative = AcNeg::dacref, .reference = ref,
+                      .dacref = ac_dacref_code(mv, ref_mv_), .hysteresis = hyst, .sense = sense}))
+            return false;
         A::enable_interrupt(interrupt);
         return true;
     }
@@ -281,9 +306,9 @@ struct Window {
                      AcHysteresis hyst = AcHysteresis::medium, bool interrupt = true) {
         const uint16_t r = ref_mv(ref, ref_known_mv);
         if (r == 0 || high_mv > r || low_mv > high_mv) return false;
-        Upper::init({.positive = pin, .negative = AcNeg::dacref, .reference = ref,
+        (void)Upper::init({.positive = pin, .negative = AcNeg::dacref, .reference = ref,
                      .dacref = ac_dacref_code(high_mv, r), .hysteresis = hyst});
-        Lower::init({.positive = pin, .negative = AcNeg::dacref, .reference = ref,
+        (void)Lower::init({.positive = pin, .negative = AcNeg::dacref, .reference = ref,
                      .dacref = ac_dacref_code(low_mv, r), .hysteresis = hyst});
         Lower::template window<Upper::index>(when);
         Lower::enable_interrupt(interrupt);

@@ -22,7 +22,9 @@
 //
 // Commands: ? | 1 frequency | 2 PWM16 duty | 3 heartbeat | 4 one-shot
 // | 5 Pwm8 | 6 pulse counter | 7 32-bit cascade | 8 tick + timeout
-// | 9 event counter | c CCL | m comparators | a all
+// | 9 event counter | c CCL | m comparators | n timeout duration
+// | o meter variants | r live rebase | s TCA split escape
+// | d centered PWM | l CCL logic | i CCL inputs | w AC extras | a all
 //
 // Tests:
 //   1  FrequencyGenerator (TCA0, PD0) at 500 Hz / 1 kHz / 10 kHz /
@@ -65,9 +67,9 @@
 //      findings); interrupts per crossing; Window<Ac<0>, Ac<2>> 500..
 //      1500 mV: below / inside / above; AC0's event on a channel -> EVOUT
 //      is not checked (no analyzer in the loop).
-// Not testable here: the TCA1 PORTC three-channel route and TCB WO
-// ALT1 pins (console), RUNSTDBY (no sleep in this suite), the CCL
-// filter delay in clocks (no capture of it), AC response time (the
+// Not testable here: the TCA1 PORTC three-channel route and the
+// TCB0/TCB1 ALT1 pins (they are the console; TCB2's ALT1 = PB4 is
+// tested), RUNSTDBY (no sleep in this suite), AC response time (the
 // DAC's slew dominates), TCD.
 
 // pio: monitor_speed = 460800
@@ -614,12 +616,572 @@ void tm_comparators() {
     quiesce();
 }
 
+// ---- n Timeout duration ----------------------------------------------------------
+// Does Timeout's CAPT fire exactly TOP ticks after the start edge ("at
+// least us")? Measured all-internally: T0 free-runs on CLK_PER and
+// stamps CNT twice through the same sync CAPT-in user - on the start
+// edge (ChGen) and on the DUT's CAPT event (ChCarry); the difference
+// is the duration. The event topology is identical for the one-shot,
+// whose width is known exact (test 4): its measured offset calibrates
+// the fixed event/sync skew, and the timeout must show the SAME offset
+// over its own TOP.
+volatile uint16_t stamp_start = 0, stamp_end = 0;
+volatile uint8_t stamp_phase = 0;
+void tcb0_stamp() {
+    const uint16_t v = T0::capture();
+    if (stamp_phase == 0) { stamp_start = v; T0::capture_on(ChCarry{}); stamp_phase = 1; }
+    else { stamp_end = v; stamp_phase = 2; T0::capture_on_events(false); }
+}
+
+uint16_t measure_duration() {                    // 0xFFFF = stamps missed
+    // Arm only while PD0 is LOW: a sync CAPT-in enabled on a channel
+    // already high sees a spurious rising edge (its edge detector
+    // starts from 0) and the stamps pair with the wrong events.
+    for (uint16_t i = 0; i < 30000 && GenPin::read(); ++i) {}
+    T1::clear_capt(); T3::clear_capt();
+    stamp_phase = 0;
+    T0::init({.mode = TcbMode::capture, .clock = TcbClock::div1, .compare = 0,
+              .event_input = true});
+    T0::capture_on(ChGen{});
+    T0::enable_capt_interrupt(true);
+    for (uint8_t i = 0; i < 40 && stamp_phase != 2; ++i) hold_ms(1);
+    T0::disable();
+    return stamp_phase == 2 ? static_cast<uint16_t>(stamp_end - stamp_start) : 0xFFFF;
+}
+
+void tn_timeout_exact() {
+    print(serial, "n Timeout duration: T0 stamps the PD0 edge and the CAPT event; the one-shot calibrates the path", crlf);
+    quiesce();
+    tcb0_hook = tcb0_stamp;
+    ChGen::source(EvPin<GenPin>{});
+    Beat::init(clock, 100, 0x01, false);         // rising edge on PD0 every 10 ms ...
+    Beat::pulse_us<0>(2000);                     // ... high for 2 ms
+
+    verdict("one-shot init 100 us", Shot::init(clock, 100, ChGen{}));
+    ChCarry::source(T3::CaptEvent{});
+    const uint16_t d1 = measure_duration(), d2 = measure_duration(), d3 = measure_duration();
+    print(serial, "  one-shot 2400 ticks: measured ", d1, " ", d2, " ", d3, crlf);
+    verdict("deterministic (three equal)", d1 == d2 && d2 == d3 && d1 != 0xFFFF);
+    const int32_t c = static_cast<int32_t>(d1) - 2400;
+    print(serial, "  event-path offset c = ", c, " ticks", crlf);
+    verdict("offset small (0..8 ticks)", c >= 0 && c <= 8);
+
+    // the noise canceler measured: FILTER on the DUT's start path only
+    // (the stamp path stays bare), so the whole measurement shifts by
+    // the canceler's delay.
+    verdict("one-shot init (filter)", Shot::init(clock, 100, ChGen{}, {.filter = true}));
+    const uint16_t df1 = measure_duration(), df2 = measure_duration();
+    print(serial, "  filtered: measured ", df1, " ", df2, " = bare + ", static_cast<int32_t>(df1) - static_cast<int32_t>(d1), crlf);
+    // Four identical samples decide; the first coincides with the bare
+    // sync path's sampling instant, so the DIFFERENTIAL delay is 3
+    // (the datasheet's "four clock cycles" counts from the event).
+    verdict("noise canceler adds 3 CLK_PER over the bare path",
+            df1 == df2 && static_cast<int32_t>(df1) - static_cast<int32_t>(d1) == 3);
+    T3::disable();
+
+    for (const uint32_t us : {1000u, 500u}) {
+        verdict("Timeout init", Timeout<T1>::init(clock, us, ChGen{}));
+        ChCarry::source(T1::CaptEvent{});
+        const uint16_t d = measure_duration();
+        const int32_t top = static_cast<int32_t>(us) * 24;
+        print(serial, "  timeout ", us, " us (TOP ", top, "): measured ", d,
+              " = TOP + ", static_cast<int32_t>(d) - top, crlf);
+        verdict("fires TOP ticks after the start (offset = c)",
+                static_cast<int32_t>(d) - top == c);
+        T1::disable();
+    }
+
+    // edge = true: start on the falling edge, stop on the rising. With
+    // the stop edge 9.5 ms away and TOP = 1 ms the counter FREE-RUNS
+    // past TOP and CAPT re-fires at every wrap through TOP (found on
+    // the bench: 24000, then every 65536 ticks -> 4 per 9.5 ms low).
+    tcb1_hook = tcb1_timeout;
+    Beat::pulse_us<0>(500);
+    verdict("Timeout init (edge = true)", Timeout<T1>::init(clock, 1000, ChGen{}, true));
+    hold_ms(15); clear_captures(); hold_ms(105);
+    print(serial, "  reversed edges: ", captures, " timeouts in 105 ms (4 per period: TOP, then each CNT wrap)", crlf);
+    verdict("lows time out; CAPT re-fires at each wrap through TOP (40 +-3)", near(captures, 40, 3));
+    quiesce();
+}
+
+// ---- o meter variants, OVF safety net, capture gate ------------------------------
+void to_meter_variants() {
+    print(serial, "o meter variants (falling/low/inverted), OVF safety net, the CAPT gate", crlf);
+    quiesce();
+    ChGen::source(EvPin<GenPin>{});
+    Beat::init(clock, 1000, 0x01, false);        // 1 kHz on PD0 ...
+    Beat::pulse_us<0>(300);                      // ... 300 us high, 700 us low
+
+    tcb0_hook = tcb0_width;
+    PulseWidthMeter<T0>::init(clock, ChGen{}, TcbClock::div1, /*low=*/true);
+    clear_captures(); wait_captures(3, 20);
+    print(serial, "  low time: ", cap_a, " ticks (expect 16800)", crlf);
+    verdict("PW low = 700 us (16800 +-2)", near(cap_a, 16800, 2));
+    T0::disable();
+
+    tcb0_hook = tcb0_frequency;
+    FrequencyMeter<T0>::init(clock, ChGen{}, TcbClock::div1, /*falling=*/true);
+    clear_captures(); wait_captures(3, 20);
+    print(serial, "  period between falling edges: ", cap_a, " ticks", crlf);
+    verdict("FRQ falling = 24000 +-1", near(cap_a, 24000, 1));
+    T0::disable();
+
+    tcb0_hook = tcb0_duty;
+    DutyMeter<T0>::init(clock, ChGen{}, TcbClock::div1, /*inverted=*/true);
+    clear_captures(); wait_captures(3, 20);
+    print(serial, "  inverted: period ", cap_a, ", width (low) ", cap_b, crlf);
+    verdict("inverted period 24000 +-1", near(cap_a, 24000, 1));
+    verdict("inverted width = low time (16800 +-2)", near(cap_b, 16800, 2));
+    T0::disable();
+
+    // div2 and CLK_TCA1 as counter clocks, same 1 kHz signal
+    tcb0_hook = tcb0_frequency;
+    FrequencyMeter<T0>::init(clock, ChGen{}, TcbClock::div2);
+    clear_captures(); wait_captures(3, 20);
+    print(serial, "  div2 period: ", cap_a, " ticks (expect 12000)", crlf);
+    verdict("div2 period 12000 +-1", near(cap_a, 12000, 1));
+    T0::disable();
+    Tca<1>::init({.mode = TcaMode::normal, .clock = TcaClock::div8, .period = 0xFFFF});
+    FrequencyMeter<T0>::init(clock, ChGen{}, TcbClock::tca1);
+    clear_captures(); wait_captures(3, 20);
+    print(serial, "  CLK_TCA1 (div8, 3 MHz) period: ", cap_a, " ticks (expect 3000)", crlf);
+    verdict("tca1-clocked period 3000 exact", cap_a == 3000);
+    verdict("tick_hz unknown on a TCA clock (0)", FrequencyMeter<T0>::tick_hz() == 0);
+    T0::disable(); Tca<1>::disable();
+
+    // CCMPINIT: the idle WO level in the modes without one of their own
+    T2::init({.mode = TcbMode::capture, .clock = TcbClock::div1,
+              .output = true, .output_init_high = true});
+    delay_us(clock, 2);
+    verdict("CCMPINIT high on PC0", Pwm8Pin::read());
+    T2::init({.mode = TcbMode::capture, .clock = TcbClock::div1, .output = true});
+    delay_us(clock, 2);
+    verdict("CCMPINIT low on PC0", !Pwm8Pin::read());
+    T2::disable();
+
+    // the ALT1 route, on an instance whose ALT1 is NOT the console:
+    // TCB2 -> PB4 (a traffic LED, harmless), read back through EvPin
+    ChShot::source(EvPin<Pin<'B', 4>>{});
+    FrequencyMeter<T0>::init(clock, ChShot{});
+    verdict("Pwm8 on the ALT1 pin accepted", Pwm8<T2>::init(TcbClock::div1, /*alt_pin=*/true));
+    Pwm8<T2>::duty(128);
+    clear_captures(); wait_captures(3, 20);
+    print(serial, "  ALT1 (PB4) period: ", cap_a, " ticks (expect 256)", crlf);
+    verdict("ALT1 route outputs (period 256 +-1)", near(cap_a, 256, 1));
+    Pwm8<T2>::duty(0); T2::disable(); T0::disable(); ChShot::off(); tcb0_hook = nullptr;
+
+    // OVF safety net: TOP lowered below a running CNT (polled flags)
+    T1::init({.mode = TcbMode::periodic, .clock = TcbClock::div1, .compare = 60000});
+    while (T1::count() < 40000) {}
+    T1::compare(1000);                           // TOP below CNT: to MAX first, OVF, then restart
+    hold_ms(3);
+    verdict("OVF fired (counter ran to MAX)", T1::ovf_flag());
+    T1::clear_ovf(); T1::clear_capt();
+    hold_ms(1);
+    verdict("periodic resumed at the new TOP", T1::capt_flag());
+    T1::disable();
+
+    // the CAPT gate: capture_on_events(false) silences a Timeout
+    Beat::init(clock, 100, 0x01, false);
+    Beat::pulse_us<0>(2000);
+    tcb1_hook = tcb1_timeout;
+    verdict("Timeout init 1 ms", Timeout<T1>::init(clock, 1000, ChGen{}));
+    hold_ms(15); clear_captures(); hold_ms(50);
+    const uint16_t armed = captures;
+    T1::capture_on_events(false);
+    clear_captures(); hold_ms(50);
+    const uint16_t gated = captures;
+    T1::capture_on_events(true);
+    clear_captures(); hold_ms(50);
+    const uint16_t rearmed = captures;
+    print(serial, "  timeouts: armed ", armed, ", gated ", gated, ", re-armed ", rearmed, crlf);
+    verdict("armed counts (5 +-1)", near(armed, 5, 1));
+    verdict("gated counts zero", gated == 0);
+    verdict("re-armed counts again (5 +-1)", near(rearmed, 5, 1));
+    quiesce();
+}
+
+// ---- r live rebase ---------------------------------------------------------------
+// The whole clock fan-out under fire: a DynamicClock rebases the
+// console, the signal source (Heartbeat keeps its 1 kHz) and the
+// meter (its conversions follow), then the prescaler switches. The
+// ticks must track CLK_PER while the microseconds stand still.
+// Holds run on the static `clock`, so real time doubles at 12 MHz -
+// harmless here.
+using DynClock = DynamicClock<SysClock, Serial, Beat, FrequencyMeter<T0>>;
+
+void tr_rebase_live() {
+    print(serial, "r live rebase: 24 -> 12 -> 24 MHz under a running Heartbeat + FrequencyMeter", crlf);
+    quiesce();
+    ChGen::source(EvPin<GenPin>{});
+    tcb0_hook = tcb0_frequency;
+    verdict("DynamicClock init (boot = the crystal)", DynClock::init());
+    Beat::init(DynClock{}, 1000, 0x01, false);
+    Beat::pulse_us<0>(300);
+    FrequencyMeter<T0>::init(DynClock{}, ChGen{});
+    clear_captures(); wait_captures(3, 20);
+    const uint16_t t24 = cap_a;
+    const uint32_t us24 = FrequencyMeter<T0>::us(cap_a);
+    verdict("at 24 MHz: 24000 ticks", near(t24, 24000, 1));
+    verdict("switch to 12 MHz", DynClock::set(12'000'000u));
+    clear_captures(); wait_captures(3, 40);
+    const uint16_t t12 = cap_a;
+    const uint32_t us12 = FrequencyMeter<T0>::us(cap_a);
+    print(serial, "  24 MHz: ", t24, " ticks = ", us24, " us; 12 MHz: ", t12, " ticks = ", us12, " us", crlf);
+    verdict("ticks follow CLK_PER (12000 +-2)", near(t12, 12000, 2));
+    verdict("microseconds stand still (1000 +-1)", near(us12, 1000, 1));
+    verdict("back to 24 MHz", DynClock::set(24'000'000u));
+    clear_captures(); wait_captures(3, 20);
+    verdict("restored (24000 +-1)", near(cap_a, 24000, 1));
+    quiesce();
+}
+
+// ---- s TCA split escape, CTRLC, HUNF ---------------------------------------------
+// The RESET command must carry CMDEN to work FROM split mode (23.7.6):
+// without it a TcaPwm cannot hand the instance back to a normal-mode
+// task. Then the split-only HUNF flag/event and the CTRLC parking.
+void ts_tca_split() {
+    print(serial, "s TCA: split -> normal escape (RESET with CMDEN), HUNF, CTRLC parking", crlf);
+    quiesce();
+    using PwmC = TcaPwm<0, 'C'>;
+    PwmC::init();                                  // split, div16
+    PwmC::duty<0>(128);                            // PC0 at 50 %
+    ChC::source(EvPin<Pwm8Pin>{});
+    tcb0_hook = tcb0_frequency;
+    FrequencyMeter<T0>::init(clock, ChC{});
+    clear_captures(); wait_captures(3, 20);
+    print(serial, "  split PWM period: ", cap_a, " ticks (expect 4096)", crlf);
+    verdict("split mode runs (256 x div16)", near(cap_a, 4096, 1));
+    T0::disable();
+
+    Tca<0>::clear_hunf();
+    hold_ms(1);
+    verdict("HUNF flag sets in split mode", Tca<0>::hunf_flag());
+    ChCarry::source(Tca<0>::HunfEvent{});
+    PulseCounter<T1>::init(ChCarry{});
+    PulseCounter<T1>::reset();
+    hold_ms(20);
+    const uint16_t hunfs = PulseCounter<T1>::count();
+    print(serial, "  HUNF events in 20 ms: ", hunfs, " (expect 117)", crlf);
+    verdict("HUNF event rate (117 +-2)", near(hunfs, 117, 2));
+    T1::disable();
+
+    // the escape: a normal-mode task right after split
+    using Gen = FrequencyGenerator<0, 'D'>;
+    verdict("FrequencyGenerator init after split", Gen::init(clock, 1000));
+    ChGen::source(EvPin<GenPin>{});
+    FrequencyMeter<T0>::init(clock, ChGen{});
+    clear_captures(); wait_captures(3, 20);
+    print(serial, "  after the escape: period ", cap_a, " ticks (expect 24000)", crlf);
+    verdict("normal mode works after split (24000 +-1)", near(cap_a, 24000, 1));
+    T0::disable(); tcb0_hook = nullptr;
+
+    // CTRLC: park WO0 while the timer is DISABLED (CMP0EN stays from
+    // the generator's init, so the parked value owns the pin)
+    Tca<0>::disable();
+    Tca<0>::output_value<0>(true);
+    delay_us(clock, 2);
+    verdict("CTRLC parks WO0 high while disabled", GenPin::read());
+    Tca<0>::output_value<0>(false);
+    delay_us(clock, 2);
+    verdict("CTRLC parks WO0 low", !GenPin::read());
+    quiesce();
+}
+
+// ---- d centered PWM --------------------------------------------------------------
+void td_pwm_centered() {
+    print(serial, "d TcaPwmCentered (dual-slope) on PD0: width, buffered duty, OVF at the pulse centre", crlf);
+    quiesce();
+    using C = TcaPwmCentered<0, 'D', 12000>;      // 24 MHz / (2 x 12000) = 1 kHz
+    ChGen::source(EvPin<GenPin>{});
+    tcb0_hook = tcb0_duty;
+    DutyMeter<T0>::init(clock, ChGen{});
+    verdict("init (event at bottom)", C::init(TcaClock::div1, 0x01, C::EventAt::bottom));
+    C::duty<0>(3000);
+    clear_captures(); wait_captures(3, 20);
+    print(serial, "  duty 3000/12000: period ", cap_a, ", width ", cap_b, crlf);
+    verdict("period = 2 x steps (24000 +-1)", near(cap_a, 24000, 1));
+    verdict("width = 2 x CMP (6000 +-2)", near(cap_b, 6000, 2));
+    C::duty<0>(6000);
+    hold_ms(3); clear_captures(); wait_captures(3, 20);
+    verdict("buffered duty lands at BOTTOM (width 12000 +-2)", near(cap_b, 12000, 2));
+    T0::disable();
+
+    // the claim that names the task: OVF sits at the pulse CENTRE -
+    // stamp rising edge -> OVF event; the distance must be CMP (+ the
+    // constant event-path offset), at both duties.
+    tcb0_hook = tcb0_stamp;
+    ChCarry::source(Tca<0>::OvfEvent{});
+    C::duty<0>(3000); hold_ms(3);
+    const uint16_t e1 = measure_duration();
+    C::duty<0>(6000); hold_ms(3);
+    const uint16_t e2 = measure_duration();
+    print(serial, "  rising -> OVF: ", e1, " (CMP 3000), ", e2, " (CMP 6000)", crlf);
+    // The centring proof is the SCALING: the distance grows by exactly
+    // delta-CMP; the constant skew is small and negative (bench: -3 -
+    // the rising edge is stamped through the PIN's input synchronizer,
+    // the OVF event is internal).
+    verdict("OVF at the pulse centre (distance scales as CMP, small constant skew)",
+            static_cast<uint16_t>(e2 - e1) == 3000 && near(e1, 3000, 5));
+    quiesce();
+}
+
+// ---- l / i CCL extras ------------------------------------------------------------
+void ccl_quiesce() {
+    Ccl::disable();
+    Ccl::sequencer<0>(Sequencer::none);
+    Ccl::sequencer<1>(Sequencer::none);
+    Ccl::sequencer<2>(Sequencer::none);
+    Lut<0>::disable(); Lut<1>::disable(); Lut<2>::disable();
+    Lut<3>::disable(); Lut<4>::disable(); Lut<5>::disable();
+}
+
+void tl_ccl_logic() {
+    print(serial, "l CCL: LINK chain, DFF and RS sequencers, LUT1 ALT1 on PC6, pin release", crlf);
+    quiesce(); ccl_quiesce();
+
+    // LINK: LUT4's link input is LUT5's output (no wires, no pins on
+    // LUT5 needed - it lives on internal signals even on 48-pin parts)
+    Ccl::disable();
+    Lut<5>::init({.in0 = LutInput::mask, .truth = 0x01});      // constant 1
+    Lut<4>::init({.in0 = LutInput::link, .truth = 0xAA, .output_pin = true});
+    Ccl::enable();
+    delay_us(clock, 5);
+    verdict("LINK passes LUT5 = 1 to PB3", Pin<'B', 3>::read());
+    Ccl::disable();
+    Lut<5>::init({.in0 = LutInput::mask, .truth = 0x00});      // constant 0
+    Lut<4>::init({.in0 = LutInput::link, .truth = 0xAA, .output_pin = true});
+    Ccl::enable();
+    delay_us(clock, 5);
+    verdict("LINK passes LUT5 = 0", !Pin<'B', 3>::read());
+
+    // DFF on pair 1: D = LUT2 (a 1 kHz square via event), EN = LUT3
+    // (constant 1), clocked by CLK_PER - the output follows D
+    using Gen = FrequencyGenerator<0, 'D'>;
+    Gen::init(clock, 1000);
+    ChGen::source(EvPin<GenPin>{});
+    Ccl::disable();
+    Ccl::sequencer<1>(Sequencer::d_flip_flop);
+    Lut<2>::init({.in0 = LutInput::event_a, .truth = 0xAA});
+    Lut<2>::event_a_on(ChGen{});
+    Lut<3>::init({.in0 = LutInput::mask, .truth = 0x01});      // EN = 1
+    Ccl::enable();
+    ChCarry::source(Lut<2>::OutEvent{});                       // the pair's output
+    tcb0_hook = tcb0_frequency;
+    FrequencyMeter<T0>::init(clock, ChCarry{});
+    clear_captures(); wait_captures(3, 20);
+    print(serial, "  DFF output period: ", cap_a, " ticks (expect 24000)", crlf);
+    verdict("DFF follows D at 1 kHz (24000 +-2)", near(cap_a, 24000, 2));
+    T0::disable(); tcb0_hook = nullptr; Gen::stop();
+
+    // RS latch on pair 1: S = LUT2 (software pulses), R = LUT3;
+    // the pair's output shown on LUT2's pin (PD3)
+    Ccl::disable();
+    Ccl::sequencer<1>(Sequencer::rs_latch);
+    Lut<2>::init({.in0 = LutInput::event_a, .truth = 0xAA, .output_pin = true});
+    Lut<2>::event_a_on(ChSoft{});
+    Lut<3>::init({.in0 = LutInput::event_a, .truth = 0xAA});
+    Lut<3>::event_a_on(ChSnap{});
+    Ccl::enable();
+    delay_us(clock, 5);
+    ChSoft::pulse(); delay_us(clock, 5);
+    verdict("RS latch sets on S (PD3 = 1)", Pin<'D', 3>::read());
+    ChSnap::pulse(); delay_us(clock, 5);
+    verdict("RS latch resets on R", !Pin<'D', 3>::read());
+
+    // ALT1 on an instance that has one: LUT1 -> PC6; then the release
+    Ccl::disable();
+    Ccl::sequencer<1>(Sequencer::none);
+    Lut<2>::disable(); Lut<3>::disable();
+    Lut<1>::init({.in0 = LutInput::mask, .truth = 0x01, .output_pin = true, .alt_pin = true});
+    Ccl::enable();
+    delay_us(clock, 5);
+    verdict("LUT1 ALT1 drives PC6 high", Pin<'C', 6>::read());
+    Ccl::disable();
+    Lut<1>::init({.in0 = LutInput::mask, .truth = 0x01});      // no pin any more
+    Ccl::enable();
+    verdict("re-init releases PC6 (direction back to input)",
+            (port_by_letter('C').DIR & (1u << 6)) == 0);
+    ccl_quiesce(); quiesce();
+}
+
+void ti_ccl_inputs() {
+    print(serial, "i CCL: TCA WO and AC as LUT inputs; the filter delays measured", crlf);
+    quiesce(); ccl_quiesce();
+
+    // TCA0 WO0 as a LUT input - the INTERNAL signal, any route
+    using Gen = FrequencyGenerator<0, 'D'>;
+    Gen::init(clock, 1000);
+    Ccl::disable();
+    Lut<2>::init({.in0 = LutInput::tca0, .truth = 0xAA});
+    Ccl::enable();
+    ChCarry::source(Lut<2>::OutEvent{});
+    tcb0_hook = tcb0_frequency;
+    FrequencyMeter<T0>::init(clock, ChCarry{});
+    clear_captures(); wait_captures(3, 20);
+    print(serial, "  WO0 through the LUT: ", cap_a, " ticks", crlf);
+    verdict("TCA0 WO0 as LUT input (24000 +-1)", near(cap_a, 24000, 1));
+    T0::disable(); tcb0_hook = nullptr; Gen::stop();
+
+    // AC0 as a LUT input: DAC crossings counted through the LUT
+    D::init({.reference = Ref::v2048});
+    D::set_mv(500, ac_ref_mv);
+    Threshold<Ac<0>>::init(AcPos::ainp3, 1000, Ref::v2048);
+    Ccl::disable();
+    Lut<2>::init({.in0 = LutInput::ac, .truth = 0xAA});
+    Ccl::enable();
+    ChCarry::source(Lut<2>::OutEvent{});
+    PulseCounter<T1>::init(ChCarry{});
+    hold_ms(2);
+    PulseCounter<T1>::reset();
+    for (uint8_t k = 0; k < 3; ++k) {
+        D::set_mv(1500, ac_ref_mv); hold_ms(2);
+        D::set_mv(500, ac_ref_mv);  hold_ms(3);
+    }
+    const uint16_t crossings = PulseCounter<T1>::count();
+    print(serial, "  AC0 through the LUT: ", crossings, " rising crossings (expect 3)", crlf);
+    verdict("AC as LUT input (3 crossings)", crossings == 3);
+    T1::disable(); Ac<0>::disable(); D::set(0);
+
+    // the filter delays, measured with the stamp technique (test n):
+    // start = PD0 edge, end = the LUT's output event; bare vs sync vs
+    // filter is the LUT's own differential delay
+    Beat::init(clock, 100, 0x01, false);
+    Beat::pulse_us<0>(2000);
+    ChGen::source(EvPin<GenPin>{});
+    tcb0_hook = tcb0_stamp;
+    uint16_t d[3];
+    const LutFilter variants[3] = {LutFilter::none, LutFilter::sync, LutFilter::filter};
+    for (uint8_t k = 0; k < 3; ++k) {
+        Ccl::disable();
+        Lut<4>::init({.in0 = LutInput::event_a, .truth = 0xAA, .filter = variants[k]});
+        Lut<4>::event_a_on(ChGen{});
+        Ccl::enable();
+        ChCarry::source(Lut<4>::OutEvent{});
+        d[k] = measure_duration();
+    }
+    // The pass-through LUT's edge coincides with the start, so the
+    // stamp catches the NEXT period (the absolute wraps); the LUT's
+    // delay shifts that edge too, so the DIFFERENTIALS are exact.
+    print(serial, "  LUT differential delay: sync +", static_cast<uint16_t>(d[1] - d[0]),
+          ", filter +", static_cast<uint16_t>(d[2] - d[0]), " CLK_PER", crlf);
+    verdict("sync adds 2 LUT clocks", static_cast<uint16_t>(d[1] - d[0]) == 2);
+    verdict("filter adds 4 LUT clocks", static_cast<uint16_t>(d[2] - d[0]) == 4);
+
+    // the same filter on OSC32K: a low-power debouncer (2..5 cycles
+    // of ~732 CLK_PER each, the domain crossing quantizes)
+    Osc32k::run_standby(true);
+    Ccl::disable();
+    Lut<4>::init({.in0 = LutInput::event_a, .truth = 0xAA,
+                  .filter = LutFilter::filter, .clock = LutClock::osc32k});
+    Lut<4>::event_a_on(ChGen{});
+    Ccl::enable();
+    ChCarry::source(Lut<4>::OutEvent{});
+    hold_ms(5);                                   // let the slow domain settle
+    // ONE fresh measurement: a repeat through the stamp re-arm races
+    // the slow domain (a back-to-back second read returned the
+    // spurious re-arm stamp) - the protocol, not the silicon; a
+    // slow-domain-proof stamp is an open bench refinement.
+    const uint16_t d32 = measure_duration();
+    Osc32k::run_standby(false);
+    print(serial, "  filtered on OSC32K: ", d32, " ticks (~", static_cast<uint16_t>((d32 + 366) / 732),
+          " cycles of ~732) - finding", crlf);
+    verdict("OSC32K filter delay in 2..5 cycles", d32 >= 1400 && d32 <= 3800);
+    ccl_quiesce(); quiesce();
+}
+
+// ---- w AC extras -----------------------------------------------------------------
+// Pin-vs-pin without wires: the positive is AINP3 = PD6, the DAC's own
+// pin; the negative is a GPIO the test drives (AC0: PD3 = AINN0;
+// AC1: PD5 = AINN0). Then INVERT, the OUT pins (PA7 and PC6), the OUT
+// event consumed by a counter, and the window senses.
+void tw_ac_extras() {
+    print(serial, "w AC: pin-vs-pin (GPIO negative), AC1, INVERT, OUT pins, window senses", crlf);
+    quiesce();
+    D::init({.reference = Ref::v2048});
+    D::set_mv(1500, ac_ref_mv);
+    hold_ms(2);
+
+    // AC0: PD6 (1500 mV) against PD3 driven low / high
+    Pin<'D', 3>::output(); Pin<'D', 3>::clear();
+    verdict("AC0 pin-vs-pin init", Ac<0>::init({.positive = AcPos::ainp3, .negative = AcNeg::ainn0}));
+    hold_ms(1);
+    verdict("N low: P > N (state 1)", Ac<0>::state());
+    Pin<'D', 3>::set();                            // N = VDD > 1.5 V
+    hold_ms(1);
+    verdict("N high: P < N (state 0)", !Ac<0>::state());
+
+    // INVERT flips the same comparison
+    verdict("AC0 re-init inverted", Ac<0>::init({.positive = AcPos::ainp3, .negative = AcNeg::ainn0, .invert = true}));
+    hold_ms(1);
+    verdict("inverted: N high reads 1", Ac<0>::state());
+    Pin<'D', 3>::clear();
+    hold_ms(1);
+    verdict("inverted: N low reads 0", !Ac<0>::state());
+    Ac<0>::disable(); Pin<'D', 3>::input();
+
+    // AC1 (never exercised before) + its OUT event counted by a TCB
+    Pin<'D', 5>::output(); Pin<'D', 5>::set();     // N high: state 0
+    verdict("AC1 pin-vs-pin init", Ac<1>::init({.positive = AcPos::ainp3, .negative = AcNeg::ainn0}));
+    ChCarry::source(Ac<1>::OutEvent{});
+    PulseCounter<T1>::init(ChCarry{});
+    hold_ms(1);
+    PulseCounter<T1>::reset();
+    for (uint8_t k = 0; k < 3; ++k) {
+        Pin<'D', 5>::clear(); hold_ms(1);          // P > N: rising OUT
+        Pin<'D', 5>::set();   hold_ms(1);
+    }
+    const uint16_t edges = PulseCounter<T1>::count();
+    print(serial, "  AC1 OUT events counted: ", edges, " (expect 3)", crlf);
+    verdict("AC1 works and its OUT event is consumed (3 risings)", edges == 3);
+    T1::disable(); Ac<1>::disable(); Pin<'D', 5>::input();
+
+    // the OUT pins: AC0 -> PA7 (default; CLKOUT is off here), then
+    // AC2 -> PC6 (ALT1)
+    verdict("AC0 out on PA7 init", Ac<0>::init({.positive = AcPos::ainp3, .negative = AcNeg::dacref,
+                                                .reference = Ref::v2048, .dacref = ac_dacref_code(1000, ac_ref_mv),
+                                                .output_pin = true}));
+    D::set_mv(500, ac_ref_mv); hold_ms(2);
+    const bool pa7_low = !Pin<'A', 7>::read();
+    D::set_mv(1500, ac_ref_mv); hold_ms(2);
+    verdict("PA7 follows the comparison", pa7_low && Pin<'A', 7>::read());
+    Ac<0>::disable();
+    verdict("AC2 out on PC6 (ALT1) init", Ac<2>::init({.positive = AcPos::ainp3, .negative = AcNeg::dacref,
+                                                       .reference = Ref::v2048, .dacref = ac_dacref_code(1000, ac_ref_mv),
+                                                       .output_pin = true, .alt_pin = true}));
+    D::set_mv(500, ac_ref_mv); hold_ms(2);
+    const bool pc6_low = !Pin<'C', 6>::read();
+    D::set_mv(1500, ac_ref_mv); hold_ms(2);
+    verdict("PC6 (ALT1) follows the comparison", pc6_low && Pin<'C', 6>::read());
+    Ac<2>::disable();
+
+    // the window senses: an interrupt on entering each chosen state
+    for (uint8_t k = 0; k < 3; ++k) {
+        const AcWindowSense when = k == 0 ? AcWindowSense::below
+                                 : k == 1 ? AcWindowSense::inside : AcWindowSense::above;
+        const uint16_t target = k == 0 ? 300 : k == 1 ? 1000 : 1800;
+        D::set_mv(k == 0 ? 1000 : 300, ac_ref_mv);         // start OUTSIDE the chosen state
+        verdict("Window init", Window<Ac<0>, Ac<2>>::init(AcPos::ainp3, 500, 1500, when, Ref::v2048));
+        hold_ms(2);
+        ac_irqs = 0;
+        D::set_mv(target, ac_ref_mv);
+        hold_ms(2);
+        print(serial, "  sense ", k == 0 ? "below" : k == 1 ? "inside" : "above",
+              ": irqs on entering = ", ac_irqs, crlf);
+        verdict("interrupt fires on entering the chosen state", ac_irqs >= 1);
+    }
+    Ac<0>::disable(); Ac<2>::disable(); D::set(0);
+    quiesce();
+}
+
 using TestFn = void (*)();
 struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
     {'1', t1_frequency}, {'2', t2_pwm16}, {'3', t3_heartbeat}, {'4', t4_one_shot},
     {'5', t5_pwm8}, {'6', t6_pulse_counter}, {'7', t7_cascade}, {'8', t8_tick_timeout},
     {'9', t9_event_counter}, {'c', tc_ccl}, {'m', tm_comparators},
+    {'n', tn_timeout_exact}, {'o', to_meter_variants}, {'r', tr_rebase_live},
+    {'s', ts_tca_split}, {'d', td_pwm_centered}, {'l', tl_ccl_logic}, {'i', ti_ccl_inputs}, {'w', tw_ac_extras},
 };
 
 void run(TestFn fn) {
@@ -630,7 +1192,8 @@ void run(TestFn fn) {
 
 void help() {
     print(serial, "test_avr_timer: 1 frequency | 2 PWM16 duty | 3 heartbeat | 4 one-shot | 5 Pwm8 | "
-                  "6 pulse counter | 7 32-bit cascade | 8 tick+timeout | 9 event counter | c CCL | m comparators | a all", crlf);
+                  "6 pulse counter | 7 32-bit cascade | 8 tick+timeout | 9 event counter | c CCL | m comparators | "
+                  "n timeout duration | o meter variants | r live rebase | s TCA split escape | d centered PWM | l CCL logic | i CCL inputs | w AC extras | a all", crlf);
 }
 
 } // namespace

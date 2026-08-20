@@ -1,7 +1,10 @@
 # TCB - the 16-bit timer/counter type B (AVR DA/DB)
 
-> **EXHAUSTIVE.** Systematic review of the chapter and errata, driver
-> written against them, bench suite passing. Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCB
+> **PROVISIONAL.** The resource covers the chapter's full option
+> space on every instance of every package (TCB4 included, gated by
+> the device header), the microsecond-speaking tasks honor the clock
+> contract (ClockUsers), and the whole set is bench-verified on
+> TCB0..TCB3; what remains is in "Not covered yet". Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCB
 > chapter 24, PORTMUX 17.3.8, EVSYS 16 generators 0xA0-0xA9 / users
 > 0x1E-0x27), errata DS80000915F (2.13.1, 2.13.2). Complements: TB3214
 > "Getting Started with TCB" and the Microchip examples
@@ -42,11 +45,26 @@ Facts that matter to code:
   which edge does what (the table in 24.5.3 is mode-dependent:
   TIMEOUT start/stop, CAPT/FRQ which edge captures, PW/FRQPW which
   edge restarts, SINGLE positive-only or any edge). The event must
-  last at least one CLK_PER (two in PW/FRQPW: minimum edge
+  last at least one CLK_PER (in PW the datasheet asks a minimum edge
   separation of two clock cycles); a `FILTER` (four equal samples at
-  CLK_PER, +4 cycles of delay) is available. In SINGLE mode `ASYNC`
+  CLK_PER) is available - measured: it adds 3 CLK_PER over the bare
+  synchronous path (the fourth sample decides, three cycles after
+  the first; the datasheet's four count from the event). In SINGLE mode `ASYNC`
   drives WO high on the event itself (before the counter starts,
   2-3 CLK_TCB later) and the event may be shorter than one CLK_PER.
+- **TIMEOUT mode fires at TOP ticks and re-fires at every wrap**
+  (bench, A5): CAPT fires when CNT reaches TOP - exactly TOP tick
+  periods after the synchronized start edge (measured: TOP + a
+  constant 2-tick event-path offset, identical to single-shot's) -
+  and if the stop edge has not arrived the counter FREE-RUNS past
+  TOP, wraps, and CAPT fires again at every pass through TOP (every
+  65536 ticks): a watch on a long-silent signal keeps shouting, once
+  per wrap.
+- **Arming a synchronous CAPT-in on a channel already high reads a
+  spurious rising edge** (bench, A5): the user's edge detector starts
+  from zero, so enabling CAPTEI while the event level is 1 detects an
+  edge that never happened on the wire. Arm while the channel is low
+  (or discard the first capture).
 - **Reading a capture clears `CAPT`** (on the LOW byte of CCMP):
   read CCMP in the ISR and the flag is gone; in FRQPW read CNT
   (period) BEFORE CCMP (width), since reading CCMP re-arms the
@@ -65,10 +83,10 @@ Facts that matter to code:
   output); `CCMPINIT` is the idle level in the modes that do not
   define one (not PWM8, not SINGLE). Routes (PORTMUX `TCBROUTEA`, one
   bit per instance): TCB0 PA2 / PF4, TCB1 PA3 / PF5, TCB2 PC0 / PB4,
-  TCB3 PB5 / PC1 (TCB4 PG3 / PC6 - the ALT1 is dead, errata 2.13.2,
-  not our package). Note the collisions with the bench: TCB0/TCB1 ALT1
-  sit on PF4/PF5 = the console USART2; TCB2 default on PC0 = TCA0
-  PORTC WO0.
+  TCB3 PB5 / PC1, TCB4 PG3 / PC6 (the TCB4 ALT1 is dead on every
+  silicon revision, errata 2.13.2). TCB2's default PC0 collides with
+  TCA0's PORTC WO0 route; the board-level collisions are in
+  [bench.md](../bench.md).
 - **32-bit capture**: two TCBs, the LSB one clocked from the source
   with `CASCADE = 0`, the MSB one clocked from the LSB's `OVF` event
   (`COUNT` user) with `CASCADE = 1` (delays its CAPT input by one
@@ -90,8 +108,8 @@ Facts that matter to code:
 
 As event generator: `TCBn CAPT` (0xA0 + 2n) and `TCBn OVF` (0xA1 +
 2n), one CLK_PER pulses, same conditions as the flags. As event user:
-`TCBn CAPT` (0x1E + 2n, edge, both sync and async) and `TCBn COUNT`
-(0x1F + 2n, sync).
+`TCBn CAPT` (0x1E + 2n, edge; synchronous - asynchronous too only in
+single-shot, 24.3.4) and `TCBn COUNT` (0x1F + 2n, sync).
 
 What TCB is NOT: there is one compare register, so no PWM with an
 independent period and duty beyond 8 bits, no dual-slope, no
@@ -101,7 +119,14 @@ one-channel tool: measure, count, pulse, tick.
 
 ## Types and verbs
 
-The resource, `Tcb<n>` (n = 0..3 on 48 pins), and the tasks over it.
+The resource, `Tcb<n>` (n up to the package's instances: 2 on
+28/32-pin, 3 on 48, 4 on 64 - the device header decides, one past the
+end is a compile error), and the tasks over it. A pin POSITION the
+package does not bond (TCB2's ALT1 is PB4, absent on 28/32-pin) does
+not disable the instance: `has_default_pin`/`has_alt_pin` say what is
+bonded, the compile-time `init<cfg>` refuses a config asking for a
+missing position, the run-time `init(cfg)` returns false for it
+(programming nothing) and true otherwise.
 All static (monostate); a task owns its instance.
 
 | Entity | Verbs |
@@ -109,14 +134,14 @@ All static (monostate); a task owns its instance.
 | `TcbConfig` | `mode` (`TcbMode`: periodic, timeout, capture, frequency, pulse_width, frequency_pulse_width, single_shot, pwm8), `clock` (`TcbClock`: div1, div2, tca0, tca1, event), `compare` (CCMP: TOP / pulse width / PWM word), `event_input` (CAPTEI), `edge` (EDGE, meaning per mode), `filter`, `async`, `cascade`, `sync_update`, `output` (CCMPEN, the pin driven as output), `output_init_high`, `alt_pin` (PORTMUX), `run_standby`, `debug_run` |
 | `Tcb<n>` | `init<cfg>()` / `init(cfg)` (disable, route, configure, park CNT, clear flags, enable); `enable`/`disable`/`enabled`; `count`/`count(v)`, `compare`/`compare(v)`, `capture` (CCMP read: clears CAPT), `running` (STATUS.RUN); `capt_flag`/`ovf_flag`/`clear_capt`/`clear_ovf`; `enable_capt_interrupt`/`enable_ovf_interrupt`; `take_flags` (the ISR body of the one vector: both flags, cleared); `capture_on(channel)` (CAPT user + CAPTEI), `capture_on_events(on)`, `count_on(channel)` (COUNT user); `OutDefault`/`OutAlt` pin types; `CaptEvent`/`OvfEvent` generators, `CaptIn`/`CountIn` users |
 | `PeriodicTick<Tcb>` | `init(clock, hz)`, `init_us(clock, us)` (div1 or div2 picked to fit, false if neither), `rebase` (ClockUser), `tick` (ISR body), `start`/`stop` |
-| `Timeout<Tcb>` | `init(clock, us, channel, edge, filter)` (start on one edge, stop on the next, CAPT if us elapse first), `expired` (ISR body), `pending` |
-| `OneShotPulse<Tcb>` | `init(clock, width_us, trigger_channel, {any_edge, async, alt_pin, filter})`, `init_ticks(clock, ticks, ...)`, `width_ticks(t)`, `fire` (a software event on the trigger channel), `busy`, `pulse_done` (ISR body) |
-| `PulseCounter<Tcb>` | `init(source_channel)` (clock = event, free-running capture mode), `snapshot_on(channel)`, `count`, `reset`, `overflowed`, `captured` (the latched value; ISR body) |
+| `Timeout<Tcb>` | `init(clock, us, channel, edge, filter)` (start on one edge, stop on the next, CAPT if us elapse first - TOP = ticks, never early), `rebase` (ClockUser), `expired` (ISR body), `pending` |
+| `OneShotPulse<Tcb>` | `init(clock, width_us, trigger_channel, {any_edge, async, alt_pin, filter})` (this form is a ClockUser: `rebase` keeps the width), `init_ticks(clock, ticks, ...)` (tick domain, rebase leaves it alone), `width_ticks(t)`, `fire` (a software event on the trigger channel), `busy`, `pulse_done` (ISR body) |
+| `PulseCounter<Tcb>` | `init(source_channel)` (clock = event, free-running capture mode), `snapshot_on(channel, falling, filter)`, `count`, `reset`, `overflowed`, `captured` (the latched value; ISR body) |
 | `CascadedCounter<Lsb, Msb>` | `init(source_clock, carry_channel, snapshot_channel)`, `count_on(channel)`, `reset`, `read` (software snapshot + the two captures: 32 bits), `captured` (ISR body after an external snapshot event) |
-| `FrequencyMeter<Tcb>` | `init(clock, source_channel, tcb_clock, falling, filter)`, `period_ticks` (ISR body), `hz(ticks)`, `us(ticks)`, `tick_hz`, `overflowed` |
+| `FrequencyMeter<Tcb>` | `init(clock, source_channel, tcb_clock, falling, filter)`, `period_ticks` (ISR body), `hz(ticks)`, `us(ticks)`, `tick_hz`, `overflowed`, `rebase` (ClockUser: the conversions follow, the divisor stays) |
 | `PulseWidthMeter<Tcb>` | `init(clock, source_channel, tcb_clock, low, filter)`, `width_ticks` (ISR body), the same helpers |
 | `DutyMeter<Tcb>` | `init(clock, source_channel, tcb_clock, inverted, filter)`, `reading` (ISR body: period then width, in that order), `duty_permille(reading)`, the same helpers |
-| `Pwm8<Tcb, period>` | `init(tcb_clock, alt_pin)`, `duty(v)` (PwmChannel, `max` = period; max = static high from PORT) |
+| `Pwm8<Tcb, period>` | `init(tcb_clock, alt_pin)`, `duty(v)` (PwmChannel, `max` = period; max = static high from PORT); ratiometric on purpose, NOT a ClockUser: the duty survives a clock change, only the frequency moves |
 | helpers | `tcb_tick_hz(clk_per, clock)`, `tcb_ticks_for_us(tick_hz, us)`, `tcb_timing_for_us/hz(clk_per, x)` (the div1/div2 choice) |
 
 The conversions speak the application's units (a clock, microseconds,
@@ -206,14 +231,51 @@ measured against the same crystal:
 - Event counting (COUNT user) and the TIMEOUT mode behave as the
   datasheet says: 200 events in 200 ms; a 2 ms high times out a 1 ms
   watch once per period, a 500 us high never.
+- **Timeout duration measured to the tick** (T0 free-running stamps
+  the start edge and the CAPT event through the same sync user; the
+  one-shot, exact by test 4, calibrates the path): the event-path
+  offset is a constant 2 ticks, deterministic across runs; the
+  timeout then reads TOP + 2 at both 12000 and 24000 - CAPT fires
+  exactly TOP ticks after the start. With the stop edge 9.5 ms away
+  and TOP = 1 ms, CAPT re-fires at every CNT wrap through TOP (42
+  in 105 ms = 4 per period).
+- The meter variants are exact like their defaults: PW low = 16800,
+  FRQ falling = 24000, inverted duty = 24000/16800 on a 1 kHz, 300 us
+  high signal. The OVF safety net works: TOP lowered below a running
+  CNT -> OVF at MAX, then the periodic resumes at the new TOP.
+  `capture_on_events(false)` silences a Timeout and re-arming
+  restores it.
+- The other counter clocks are as stated: `div2` reads 12000 - 1 on
+  the 1 kHz signal (the half tick rounds down there), a TCA1 CLK_TCA
+  at div8 reads 3000 exact (and `tick_hz()` honestly 0). `CCMPINIT`
+  drives the idle WO level both ways (read back from the pin). The
+  ALT1 route verified on TCB2 -> PB4 (Pwm8 at 256 ticks measured
+  through EvPin); TCB0/TCB1 ALT1 sit on the console and stay
+  unverified.
+- **Live rebase** (DynamicClock 24 -> 12 -> 24 MHz under a running
+  Heartbeat + FrequencyMeter, console rebased too): the ticks track
+  CLK_PER (24000 -> 12000 -> 24000), the microseconds stand still
+  (1000 at every step) - the whole fan-out works under fire.
 
 ## Not covered yet
 
-RUNSTDBY under a real standby
-(no sleeping app yet); `Timeout`, `OneShotPulse`, the meters and
-`Pwm8` are not ClockUsers (a clock change under a running one changes
-its microseconds: the owner re-inits - `PeriodicTick` alone rebases);
-the noise canceler is a flag, not a measured delay; TCB4 (64-pin
-parts); event-paced captures inside the kernel (an AO owning a meter
-and publishing readings, the way AnalogSampler owns the ADC) when an
-app needs it.
+Driver gaps (the chapter's features the driver does not implement,
+or implements wrongly):
+
+- Pin-level bonding within an existing port is not modeled (the
+  guards are port-level): on the 28-pin part PORTF exists but
+  PF4/PF5 (TCB0/TCB1 ALT1) are not bonded, and `alt_pin` there
+  compiles and programs a mute position. Deferred to the family
+  device tables.
+Implemented but not bench-verified:
+
+- RUNSTDBY under a real standby (no sleeping app yet); DBGRUN under
+  a halt; TCB4 and the 28/32-pin builds (compile-verified for every
+  package, no such part on the bench).
+- The ALT1 positions of TCB0/TCB1 (PF4/PF5 are the console; the ALT1
+  mechanism itself is verified on TCB2 - moving the console to free
+  them is a wiring job, queued).
+- Event-paced captures inside the kernel (an AO owning a meter and
+  publishing Hz/period/duty readings as events, the way AnalogSampler
+  owns the ADC) - queued as a util/ usage type for when an app needs
+  it.

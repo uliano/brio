@@ -1,10 +1,16 @@
 # ADC - the 12-bit analog-to-digital converter (AVR DA/DB)
 
+> **PROVISIONAL.** The conversion machinery, DBGRUN, the signed
+> window, the DACREF inputs and the live rebase are covered and
+> bench-verified, and the DB-only inputs are gated by the device
+> header; what remains is pin-level input legality and the standby
+> paths - the gaps are in "Not covered yet".
+
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (ADC
 chapter, electricals 39.18), errata DS80000915F (2.3.1, 2.3.2).
 Driver: `avrdx/adc.hpp`; `Ref` from `avrdx/vref.hpp`, counts <-> mV arithmetic in `util/analog.hpp`
 (host-tested in `test_analog`); event start through `avrdx/evsys.hpp`.
-Reference test: `test_avr_analog` (all 14 tests).
+Reference test: `test_avr_analog` (15 tests).
 
 ## What the silicon does
 
@@ -76,16 +82,20 @@ fields carry the datasheet's names:
 | `prescaler` | `AdcPresc::div2 .. div256` (14 values) | div16 | CLK_ADC = CLK_PER / n, must land in 125 kHz .. 2 MHz |
 | `sample_length` | 0..255 | 0 | extra CLK_ADC cycles of sampling (sources > 10 kOhm, the unbuffered DAC, the temperature sensor) |
 | `sample_delay` | 0..15 | 0 | CLK_ADC cycles before sampling (move off a noise harmonic) |
-| `init_delay` | `AdcInitDelay::none / cycles16 .. cycles256` | none | settling before the FIRST conversion after enable |
+| `debug_run` | bool | false | DBGRUN: keep converting while the CPU is halted |
+| `init_delay` | `AdcInitDelay::none / cycles16 .. cycles256` | none | settling before the FIRST conversion after enable (long enough to cover the reference start-up: 10 us with a high-frequency main clock, 200 us with a 32k one - [vref.md](vref.md)) |
 | `accumulate` | 1, 2, 4 .. 128 | 1 | samples summed per result (RES = sum, truncated above 16) |
-| `left_adjust` | bool | false | result << 4 (thresholds independent of accumulation) |
+| `left_adjust` | bool | false | MSB-aligned result; the shift depends on the accumulation count (Table 33-1) and the driver's result helpers assume right adjustment |
 | `free_running` | bool | false | each conversion starts the next |
 | `run_standby` | bool | false | keep converting in standby sleep |
 
 Inputs are types or enumerators: `AnalogIn<Pin<'D', 1>>` (a pin,
 PD0-7 / PE0-7 / PF0-5 - the table is checked, PF0-5 refused as a
 negative input) and `AdcInput::gnd / temp / vdd_div10 / vddio2_div10 /
-dac0 / dacref0..2` (internal; as negative input only `gnd` and `dac0`).
+dac0 / dacref0..2` (internal; as negative input only `gnd` and `dac0` - `adc_neg_valid` is the fact, and the enum-negative `select` overloads return false for anything else;
+`vdd_div10`/`vddio2_div10` exist on the DB only - the DA reserves
+those mux codes; the `dacref0..2` inputs need ~30 us of sampling,
+tADC_DACREF, errata document clarification 3.7.5).
 
 The verbs, by purpose:
 
@@ -95,10 +105,10 @@ The verbs, by purpose:
 | what is in effect | `reference()`, `steps()` (4096/1024), `accumulate()`, `result_shift()`, `result_steps()`, `clock_hz_adc()` |
 | select the input | `select(AnalogIn<P>{})`, `select(AdcInput)`, `select(pos, neg)` (differential), `flush()` (one throw-away conversion: errata 2.3.2) |
 | convert | `start()`, `stop()`, `busy()`, `ready()`, `result()`, `result_signed()`, `read()` (start + wait + result, blocking) |
-| window comparator | `window(Window::below/above/inside/outside, low, high)`, `window_off()`, `window_hit()` (about the last result read), `window_flag()` / `clear_window_flag()` (the live flag) |
+| window comparator | `window(Window::below/above/inside/outside, low, high)` (single-ended format), `window_signed(mode, low, high)` (the differential two's-complement format, 33.5.16), `window_off()`, `window_hit()` (about the last result read), `window_flag()` / `clear_window_flag()` (the live flag) |
 | interrupts | `enable_resrdy_interrupt(bool)`, `enable_wcmp_interrupt(bool)`; ISR bodies `resrdy()`, `wcmp()` (return the result; the app binds the vectors and posts); `selected()` (the MUXPOS code in effect, to label a result in the glue), `input_code(input)` constexpr |
 | events | `start_on(EventChannel<n>{})` (a conversion per rising edge of the channel), `start_on_events(bool)`; generator `EvAdc0Ready`, user `EvAdc0Start` (evsys.hpp) |
-| clock | `rebase(hz)` - the `ClockUser` hook a `DynamicClock` calls: keeps the CLK_ADC chosen at init, within range |
+| clock | `rebase(hz)` - the `ClockUser` hook a `DynamicClock` calls: keeps the CLK_ADC chosen at init, within range; `clock_ok()` says whether the last rebase FOUND an in-range prescaler (rebase itself stays void and best-effort by the ClockUser contract) |
 
 Arithmetic: `ref_mv(Ref, known_mv)` (`avrdx/vref.hpp`), `adc_mv(counts,
 steps, ref_mv)`, `adc_mv_signed(...)` (`util/analog.hpp`, pure),
@@ -293,3 +303,26 @@ AO (request/reply), it does not touch the registers.
 - VDD/10 reads 3280 mV on a 3.3 V rail and 5170 on a 5 V one; die
   temperature 27-28 C from the signature-row factors; GND reads 5-6
   counts (the offset).
+- The three `dacref0..2` inputs read their AC's DACREF within 7
+  counts (64 CLK_ADC of sampling covers tADC_DACREF); the signed
+  window hits below -1000 on a -1400 differential result and not
+  below -2000; a live 24 -> 12 MHz rebase moves a dacref reading by
+  3 counts and `clock_ok()` stays true.
+
+## Not covered yet
+
+Driver gaps:
+
+- `left_adjust` stays write-only by choice: the result helpers
+  assume right adjustment and say so (the shift varies with the
+  accumulation count, Table 33-1) - left-adjust-aware helpers only
+  if a user appears.
+- Per-package input legality (PE/PF pins on 28/32-pin parts, PD0 on
+  DB 28/32) - deferred to the family device tables.
+
+Implemented but not bench-verified:
+
+- `run_standby` (an event-started conversion in standby; queued, LOW
+  priority); the 200 us reference start-up case (32.768 kHz main
+  clock: the console cannot follow it, so it waits for a sleepy
+  app); `debug_run` (needs a debugger session).

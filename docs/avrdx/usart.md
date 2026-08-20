@@ -8,8 +8,8 @@
 > with TXD output, start-of-frame detection in active mode, receiver
 > dead after ISFIF in auto-baud modes - none used). Driver:
 > `avrdx/uart.hpp`; the line service above it: [serial.md](../design/serial.md)
-> (`util/serial_port.hpp`). Reference tests: `console`, `clock_console`
-> (rebase under a running console), every app's console.
+> (`util/serial_port.hpp`). Reference tests: every app's console
+> (including rebase under a running console).
 
 ## What the driver does today
 
@@ -54,6 +54,9 @@ Lines and commands: `SerialPort` ([serial.md](../design/serial.md)).
 - `write_byte` ~45-50 cycles/byte; the lock-free ring path is 13
   instructions; TX worst-case stall ~2 ms at 460800 (ring full).
 - Rebase under a running console verified 24 -> 12 -> 2 MHz at 115200.
+- `rebase` must wait TWO frame times after DREIF before the clock
+  changes: one frame plus 1 us corrupts the last byte at several
+  rates (the shift register is still emptying when DREIF sets).
 
 ## Not covered yet
 

@@ -8,8 +8,8 @@
 > (2.11.1: SPI1 ALT2 pin position non-functional on 48-pin, rev
 > A4/A5 - not used). Driver: `avrdx/spi.hpp`; the arbiter above it:
 > [spi-bus.md](../design/spi-bus.md) (`util/bus_master.hpp`, `util/spi_bus.hpp`).
-> Reference tests: `spi_loopback` (PA4 -> PA5 jumper), `spi_duo`,
-> `spi_paint`, `dac_adc` (MCP3550).
+> Bench-exercised against a display, a touch controller and the
+> MCP3550 ADC on a shared bus (the apps are mapped in bench.md).
 
 ## What the driver does today
 

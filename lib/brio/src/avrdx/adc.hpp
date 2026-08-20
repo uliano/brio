@@ -120,6 +120,7 @@ struct AdcConfig {
     bool left_adjust = false;
     bool free_running = false;
     bool run_standby = false;
+    bool debug_run = false;        ///< DBGRUN: keep converting while the CPU is halted
 };
 
 /// What the compile-time form static_asserts and the run-time form
@@ -171,9 +172,19 @@ constexpr uint32_t adc_conversion_cycles(const AdcConfig& c) {
 
 /// Internal inputs (MUXPOS codes; MUXNEG accepts gnd and dac0 only).
 enum class AdcInput : uint8_t {
-    gnd = 0x40, temp = 0x42, vdd_div10 = 0x44, vddio2_div10 = 0x45,
+    gnd = 0x40, temp = 0x42,
+#ifdef MVIO
+    // DB only: the DA reserves these mux codes (no MVIO there).
+    vdd_div10 = 0x44, vddio2_div10 = 0x45,
+#endif
     dac0 = 0x48, dacref0 = 0x49, dacref1 = 0x4A, dacref2 = 0x4B
 };
+
+/// The negatives the differential mux accepts among the internal
+/// codes: GND and DAC0 (the AIN negatives go through AnalogIn pins).
+constexpr bool adc_neg_valid(AdcInput in) {
+    return in == AdcInput::gnd || in == AdcInput::dac0;
+}
 
 /// A pin as an analog input: AIN0-7 = PD0-7, AIN8-15 = PE0-7, AIN16-21
 /// = PF0-5 (the device's mapping - a seed of the per-family table).
@@ -216,14 +227,14 @@ public:
     /// Compile-time form: the whole configuration as a constant, checked
     /// - including the CLK_ADC range for a static clock.
     template <AdcConfig cfg, typename Clock>
-    static void init(Clock clock) {
+    static bool init(Clock clock) {
         static_assert(adc_config_valid(cfg),
                       "AdcConfig: accumulate must be 1,2,4,..,128 and sample_delay <= 15");
         if constexpr (Clock::is_static) {
             static_assert(adc_clock_in_range(Clock::hz, cfg.prescaler),
                           "AdcConfig: CLK_PER / prescaler must stay within 125 kHz .. 2 MHz");
         }
-        init(clock, cfg);
+        return init(clock, cfg);      // a DynamicClock's current rate can still refuse
     }
 
     /// Run-time form. Writes the mux (GND) and every knob BEFORE enabling
@@ -265,6 +276,7 @@ public:
             (cfg.left_adjust ? ADC_LEFTADJ_bm : 0) |
             (cfg.differential ? ADC_CONVMODE_bm : 0) |
             (cfg.run_standby ? ADC_RUNSTBY_bm : 0));
+        r.DBGCTRL = cfg.debug_run ? ADC_DBGRUN_bm : 0;
         delay_us(clock, 10);                                // t_ADC_INIT (6 us typ.)
         return true;
     }
@@ -291,8 +303,14 @@ public:
     /// before the clock switches - a conversion can begin at any time
     /// otherwise. Sample and init delays are in CLK_ADC cycles: they
     /// scale with the new CLK_ADC like everything else.
+    /// clock_ok() tells whether the last rebase found an in-range
+    /// prescaler: rebase() itself must stay void (the ClockUser
+    /// contract) and best-effort, but a CLK_PER too slow for
+    /// 125 kHz .. 2 MHz must not fail in silence.
+    static bool clock_ok() { return clock_ok_; }
     static void rebase(uint32_t hz) {
         const AdcPresc p = adc_presc_for(hz, clk_adc_hz_);
+        clock_ok_ = adc_clock_in_range(hz, p);
         stop();
         while (busy()) {
         }
@@ -328,13 +346,17 @@ public:
         regs().MUXNEG = AnalogIn<Pn>::code;
     }
     template <typename Pp>
-    static void select(AnalogIn<Pp> p, AdcInput neg) {
+    static bool select(AnalogIn<Pp> p, AdcInput neg) {
+        if (!adc_neg_valid(neg)) return false;
         select(p);
         regs().MUXNEG = neg_code(neg);
+        return true;
     }
-    static void select(AdcInput pos, AdcInput neg) {
+    static bool select(AdcInput pos, AdcInput neg) {
+        if (!adc_neg_valid(neg)) return false;
         select(pos);
         regs().MUXNEG = neg_code(neg);
+        return true;
     }
 
     /// The positive input code in effect (MUXPOS): what AnalogIn<P>::code
@@ -390,6 +412,11 @@ public:
         regs().WINLT = low;
         regs().WINHT = high;
         regs().CTRLE = static_cast<uint8_t>(mode);
+    }
+    /// The thresholds in the DIFFERENTIAL conversion's format (33.5.16:
+    /// two's complement) - the unsigned form above is for single-ended.
+    static void window_signed(Window mode, int16_t low, int16_t high) {
+        window(mode, static_cast<uint16_t>(low), static_cast<uint16_t>(high));
     }
     static void window_off() { regs().CTRLE = ADC_WINCM_NONE_gc; }
     /// Did the LAST result read by result()/read() match the window?
@@ -456,6 +483,7 @@ private:
     static inline bool last_hit_ = false;
     static inline uint32_t clk_adc_hz_ = 0;
     static inline bool free_running_ = false;
+    static inline bool clock_ok_ = true;
 };
 
 static_assert(ClockUser<Adc<0>>);

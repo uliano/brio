@@ -51,9 +51,12 @@
  *    on positive/any edge or while high, or direction (ORed with A);
  *    level actions need the event slower than the timer clock;
  *  - routes (PORTMUX.TCAROUTEA, the whole group moves): TCA0 -> PORTA/
- *    B/C/D/E/F pins 0..5 (PORTE only PE0..3 on 48 pins); TCA1 -> PORTB
- *    pins 0..5, or PORTC PC4/PC5/PC6 = WO0..2 only. WOn drives the pin
- *    only if CMPnEN and the pin is an output (PORT INVEN inverts it).
+ *    B/C/D/E/F (and PORTG on 64-pin) pins 0..5 (PORTE only PE0..3 on
+ *    48 pins); TCA1 -> PORTB or PORTG (64-pin) pins 0..5, or the
+ *    three-channel PORTC/PORTE (64-pin) with WO0..2 on pins 4..6; the
+ *    device header defines exactly this package's codes and
+ *    tca_route_code() mirrors it. WOn drives the pin only if CMPnEN
+ *    and the pin is an output (PORT INVEN inverts it).
  */
 
 #pragma once
@@ -141,17 +144,32 @@ struct TcaConfig {
     bool debug_run = false;
 };
 
-/// PORTMUX code for "TCA n to port p", or 0xFF when that route does not
-/// exist on the family (TCA0: A..F; TCA1: B (six channels), C (three)).
+/// PORTMUX code for "TCA n to port p", or 0xFF when that route does
+/// not exist on THIS package - the device header is the authority
+/// (it defines exactly the codes each package routes: e.g. TCA0 ->
+/// PORTG and TCA1 -> PORTE/PORTG on 64-pin parts only, no PORTB/
+/// PORTE codes at all on 28/32-pin). TCA1 on PORTC and PORTE are
+/// three-channel routes (WO0..2 on pins 4..6).
 constexpr uint8_t tca_route_code(uint8_t n, char p) {
+    // The gates are the PORT instance macros (the route codes are
+    // enumerators, not macros): a package routes a TCA to exactly the
+    // ports it bonds, and PORTG doubles as the 64-pin marker (the
+    // three-channel TCA1 -> PORTE exists on 64-pin parts only).
     if (n == 0) {
         switch (p) {
             case 'A': return PORTMUX_TCA0_PORTA_gc;
+#ifdef PORTB
             case 'B': return PORTMUX_TCA0_PORTB_gc;
+#endif
             case 'C': return PORTMUX_TCA0_PORTC_gc;
             case 'D': return PORTMUX_TCA0_PORTD_gc;
+#ifdef PORTE
             case 'E': return PORTMUX_TCA0_PORTE_gc;
+#endif
             case 'F': return PORTMUX_TCA0_PORTF_gc;
+#ifdef PORTG
+            case 'G': return PORTMUX_TCA0_PORTG_gc;
+#endif
             default: return 0xFF;
         }
     }
@@ -159,17 +177,22 @@ constexpr uint8_t tca_route_code(uint8_t n, char p) {
     switch (p) {
         case 'B': return PORTMUX_TCA1_PORTB_gc;
         case 'C': return PORTMUX_TCA1_PORTC_gc;
+#ifdef PORTG
+        case 'E': return PORTMUX_TCA1_PORTE_gc;
+        case 'G': return PORTMUX_TCA1_PORTG_gc;
+#endif
         default: return 0xFF;
     }
 #else
+    (void)p;
     return 0xFF;
 #endif
 }
 
-/// The pin number of WO wo on that route: pin wo, except TCA1 on PORTC
-/// where WO0..2 are PC4..PC6.
+/// The pin number of WO wo on that route: pin wo, except TCA1's
+/// three-channel routes (PORTC, PORTE) where WO0..2 sit on pins 4..6.
 constexpr uint8_t tca_wo_pin(uint8_t n, char p, uint8_t wo) {
-    return (n == 1 && p == 'C') ? static_cast<uint8_t>(4 + wo) : wo;
+    return (n == 1 && (p == 'C' || p == 'E')) ? static_cast<uint8_t>(4 + wo) : wo;
 }
 
 /// The port pin mask of a WO mask (bits 0..5) on that route.
@@ -212,6 +235,7 @@ public:
 
     /// The event vocabulary of this instance (evsys.hpp).
     using OvfEvent = EvTcaOvf<n>;                    ///< generator: overflow (normal) / LUNF (split)
+    using HunfEvent = EvTcaHunf<n>;                  ///< generator: high-half underflow (split)
     template <uint8_t ch> using CmpEvent = EvTcaCmp<n, ch>;
     using EventA = EvTcaCntA<n>;                     ///< user: count / direction
     using EventB = EvTcaCntB<n>;                     ///< user: restart / direction
@@ -222,8 +246,8 @@ public:
     template <TcaConfig cfg>
     static void init() {
         static_assert(tca_config_valid(n, cfg),
-                      "TcaConfig: outputs is a 3-bit mask; TCA0 routes to PORTA..PORTF, "
-                      "TCA1 to PORTB (six channels) or PORTC (PC4..PC6)");
+                      "TcaConfig: outputs is a 3-bit mask; the route must be one this "
+                      "package's PORTMUX has (the device header lists its TCAROUTEA codes)");
         init(cfg);
     }
 
@@ -234,8 +258,7 @@ public:
     static bool init(const TcaConfig& cfg) {
         if (!tca_config_valid(n, cfg)) return false;
         auto& t = single();
-        t.CTRLA = 0;
-        t.CTRLESET = TCA_SINGLE_CMD_RESET_gc;           // all registers to reset, normal mode
+        reset();                                        // works from split mode too (CMDEN)
         if (cfg.route) route(cfg.route);
         if (cfg.outputs && cfg.route) {
             drive_outputs(cfg.route, cfg.outputs);
@@ -272,16 +295,29 @@ public:
     }
 
     /// PORTMUX: move the WO group to port p (no check: init() checks).
+    static void split_irq(uint8_t bit, bool on) {
+        if (on) split().INTCTRL |= bit; else split().INTCTRL &= static_cast<uint8_t>(~bit);
+    }
+
     static void route(char p) {
+#ifdef TCA1
         constexpr uint8_t mask = n == 0 ? PORTMUX_TCA0_gm : PORTMUX_TCA1_gm;
+#else
+        constexpr uint8_t mask = PORTMUX_TCA0_gm;
+#endif
         PORTMUX.TCAROUTEA = static_cast<uint8_t>(
             (PORTMUX.TCAROUTEA & ~mask) | tca_route_code(n, p));
     }
 
     /// Disable + hard reset: the way into split mode (TcaPwm) or back.
+    /// The command goes through the SPLIT view with CMDEN = both: in
+    /// split mode a RESET without CMDEN is silently ignored (23.7.6),
+    /// and the CMDEN bits are don't-care in normal mode - one write
+    /// works from either side.
     static void reset() {
-        single().CTRLA = 0;
-        single().CTRLESET = TCA_SINGLE_CMD_RESET_gc;
+        split().CTRLA = 0;
+        split().CTRLESET = static_cast<uint8_t>(static_cast<uint8_t>(TCA_SPLIT_CMD_RESET_gc) |
+                                                static_cast<uint8_t>(TCA_SPLIT_CMDEN_BOTH_gc));
     }
 
     // ---- the counter ------------------------------------------------------
@@ -308,6 +344,23 @@ public:
         static_assert(ch <= 2, "TCA compare channels: 0..2");
         constexpr uint8_t bit = static_cast<uint8_t>(TCA_SINGLE_CMP0EN_bm << ch);
         if (on) single().CTRLB |= bit; else single().CTRLB &= static_cast<uint8_t>(~bit);
+    }
+
+    /// CTRLC: WOn's output VALUE - readable any time, writable only
+    /// while the timer is disabled (23.5.3): the one handle to park a
+    /// waveform pin high or low between runs. Toward the CCL the
+    /// output bypasses CMPnEN: a parked value feeds a LUT too. The
+    /// split-mode twins (LCMPnOV/HCMPnOV) are reachable via split().
+    template <uint8_t ch>
+    static void output_value(bool high) {
+        static_assert(ch <= 2, "TCA compare channels: 0..2");
+        constexpr uint8_t bit = static_cast<uint8_t>(TCA_SINGLE_CMP0OV_bm << ch);
+        if (high) single().CTRLC |= bit; else single().CTRLC &= static_cast<uint8_t>(~bit);
+    }
+    template <uint8_t ch>
+    static bool output_value() {
+        static_assert(ch <= 2, "TCA compare channels: 0..2");
+        return (single().CTRLC & static_cast<uint8_t>(TCA_SINGLE_CMP0OV_bm << ch)) != 0;
     }
 
     // ---- commands, direction ----------------------------------------------
@@ -349,6 +402,38 @@ public:
         return {(f & TCA_SINGLE_OVF_bm) != 0, (f & TCA_SINGLE_CMP0_bm) != 0,
                 (f & TCA_SINGLE_CMP1_bm) != 0, (f & TCA_SINGLE_CMP2_bm) != 0};
     }
+
+    // ---- split-mode flags and interrupts (23.7.7 / 23.7.8) ----------------
+    // The low half underflow shares the OVF vector (TCAn_OVF_vect =
+    // LUNF), the high half has its own (TCAn_HUNF_vect); the LCMPn
+    // flags share the CMPn vectors. Only the low half has compare
+    // interrupts in split mode.
+
+    static bool lunf_flag() { return (split().INTFLAGS & TCA_SPLIT_LUNF_bm) != 0; }
+    static bool hunf_flag() { return (split().INTFLAGS & TCA_SPLIT_HUNF_bm) != 0; }
+    template <uint8_t ch>
+    static bool lcmp_flag() {
+        static_assert(ch <= 2, "split low-half compare channels: 0..2");
+        return (split().INTFLAGS & static_cast<uint8_t>(TCA_SPLIT_LCMP0_bm << ch)) != 0;
+    }
+    static void clear_lunf() { split().INTFLAGS = TCA_SPLIT_LUNF_bm; }
+    static void clear_hunf() { split().INTFLAGS = TCA_SPLIT_HUNF_bm; }
+    template <uint8_t ch>
+    static void clear_lcmp() { split().INTFLAGS = static_cast<uint8_t>(TCA_SPLIT_LCMP0_bm << ch); }
+
+    static void enable_lunf_interrupt(bool on) { split_irq(TCA_SPLIT_LUNF_bm, on); }
+    static void enable_hunf_interrupt(bool on) { split_irq(TCA_SPLIT_HUNF_bm, on); }
+    template <uint8_t ch>
+    static void enable_lcmp_interrupt(bool on) {
+        static_assert(ch <= 2, "split low-half compare channels: 0..2");
+        split_irq(static_cast<uint8_t>(TCA_SPLIT_LCMP0_bm << ch), on);
+    }
+
+    /// Split-mode ISR bodies (vectors as above).
+    [[gnu::always_inline]] static void lunf() { clear_lunf(); }
+    [[gnu::always_inline]] static void hunf() { clear_hunf(); }
+    template <uint8_t ch>
+    [[gnu::always_inline]] static void lcmp() { clear_lcmp<ch>(); }
 
     // ---- events -----------------------------------------------------------
 
@@ -447,8 +532,11 @@ constexpr uint64_t tca_period_ticks(uint32_t clk_per_hz, uint32_t hz) {
 template <uint8_t n, char PortLetter>
 class TcaPwm {
     using R = Tca<n>;
-    static_assert(tca_route_code(n, PortLetter) != 0xFF && !(n == 1 && PortLetter == 'C'),
-                  "TcaPwm six-channel routes: TCA0 -> PORTA/B/C/D/F (PORTE has only four pins on 48-pin parts), TCA1 -> PORTB");
+    static_assert(tca_route_code(n, PortLetter) != 0xFF
+                      && !(n == 1 && (PortLetter == 'C' || PortLetter == 'E')),
+                  "TcaPwm needs a six-channel route: any route of this package except "
+                  "TCA1 -> PORTC/PORTE (three channels on pins 4..6). Caveat: TCA0 -> "
+                  "PORTE on 48-pin parts has only PE0..PE3 bonded (WO4/5 land nowhere)");
 
 public:
     TcaPwm() = delete;
@@ -557,6 +645,80 @@ public:
     struct Channel {
         static constexpr uint16_t max = steps;
         static void duty(uint16_t v) { TcaPwm16::duty<ch>(v); }
+    };
+    static_assert(PwmChannel<Channel<0>>);
+};
+
+/// TcaPwmCentered<n, port, steps>: three 16-bit CENTER-ALIGNED PWM
+/// channels (WO0..2) in dual-slope mode. The counter runs 0 -> steps
+/// -> 0; WOn is set at the match while counting down and cleared at
+/// the match while counting up, so the pulse is symmetric around
+/// BOTTOM: changing the duty moves both edges and the pulse centre
+/// stands still (f = CLK_PER / N / (2 steps), duty = v / steps, width
+/// = 2 v ticks of the timer clock). The OVF event is this task's
+/// point: `EventAt` places it at the centre of the pulse (bottom),
+/// the centre of the low time (top), or both - the electrically
+/// quiet instants, made to pace an ADC with no CPU (EvTcaOvf ->
+/// EvAdc0Start: the AnalogSampler's hardware pace measuring a
+/// PWM-driven load away from its switching edges). Duty writes are
+/// BUFFERED (land at BOTTOM, glitch-free); the endpoints leave the
+/// waveform and drive the pin from PORT, like TcaPwm. Only channels
+/// in init's `outputs` mask have their pins driven. Ratiometric -
+/// NOT a ClockUser: the duty survives a clock change, the frequency
+/// follows CLK_PER. Works on the three-channel TCA1 routes too
+/// (WO0..2 on pins 4..6).
+template <uint8_t n, char PortLetter, uint16_t steps = 0xFFFF>
+class TcaPwmCentered {
+    using R = Tca<n>;
+    static_assert(steps >= 4, "TcaPwmCentered: at least two bits of resolution (steps >= 4)");
+    static_assert(tca_route_code(n, PortLetter) != 0xFF,
+                  "TcaPwmCentered: no such TCA route on this package");
+
+public:
+    TcaPwmCentered() = delete;
+
+    static constexpr uint16_t max = steps;
+
+    /// Where the OVF interrupt/event falls in the period.
+    enum class EventAt : uint8_t { top, both, bottom };
+
+    static bool init(TcaClock clock = TcaClock::div1, uint8_t outputs = 0x01,
+                     EventAt event_at = EventAt::bottom) {
+        const TcaMode m = event_at == EventAt::top    ? TcaMode::dual_slope_top
+                        : event_at == EventAt::both   ? TcaMode::dual_slope_both
+                                                      : TcaMode::dual_slope_bottom;
+        return R::init({.mode = m, .clock = clock, .period = steps,
+                        .outputs = static_cast<uint8_t>(outputs & 0x7),
+                        .route = PortLetter});
+    }
+
+    /// Change the shared prescaler (all frequencies move, duties hold).
+    static void clock(TcaClock c) { R::clock(c); }
+
+    /// Duty v/steps on WOn, buffered; 0 and max leave the waveform and
+    /// drive the pin from PORT (clean rails).
+    template <uint8_t ch>
+    static void duty(uint16_t v) {
+        static_assert(ch <= 2, "TCA compare channels: 0..2");
+        volatile PORT_t& port = R::port_of(PortLetter);
+        constexpr uint8_t pin = static_cast<uint8_t>(1u << tca_wo_pin(n, PortLetter, ch));
+        if (v == 0) {
+            R::template output<ch>(false);
+            port.OUTCLR = pin;
+        } else if (v >= max) {
+            R::template output<ch>(false);
+            port.OUTSET = pin;
+        } else {
+            R::template compare_buffered<ch>(v);
+            R::template output<ch>(true);
+        }
+    }
+
+    /// Channel ch as a PwmChannel type (max = steps).
+    template <uint8_t ch>
+    struct Channel {
+        static constexpr uint16_t max = steps;
+        static void duty(uint16_t v) { TcaPwmCentered::duty<ch>(v); }
     };
     static_assert(PwmChannel<Channel<0>>);
 };

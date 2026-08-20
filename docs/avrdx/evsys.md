@@ -1,175 +1,177 @@
-# The event system
+# EVSYS - the event system (AVR DA/DB)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B,
-errata DS80000915F (no EVSYS items). Driver: `avrdx/evsys.hpp`
-(run-time primitives and the tables in use: RTC/PIT, pin and ADC
-generators, EVOUT and ADC-start users; the static allocator is not
-built yet, tables grow with their users). Reference test: `events0`
-(verified on the oscilloscope).
+> **PROVISIONAL.** The typed vocabulary now covers the chapter's
+> full generator and user tables (the instance counts and DB-only
+> rows gated by the device header); what remains unverified is the
+> vocabulary no driver exercises yet, and the static allocator is
+> still sugar-to-be - see "Not covered yet". Documents of record: AVR128DB28/32/48/64 data
+> sheet DS40002247B (EVSYS chapter 16, PORTMUX 17.5.1), errata
+> DS80000915F (no EVSYS items). Driver: `avrdx/evsys.hpp`. Reference
+> test: `test_avr_timer` (TCB capture and count by event, CCL LUT
+> routing, AC OUT as generator).
 
-"Event" on this page is the HARDWARE event of the data sheet - an edge
-on an internal wire - not the kernel's queued value; the bridge between
-the two is always an ISR body that posts (overview.md, "Target
-strata").
+"Event" on this page is the HARDWARE event of the data sheet - a
+signal on an internal wire - not the kernel's queued value; the bridge
+between the two is always an ISR body that posts.
 
-Hardware routing between peripherals: a generator's state change
-travels on a channel to any number of users, without the CPU, in every
-sleep mode. A sibling exists on SAMD (EVSYS), a partial analogue on
-STM32 (TIM TRGO, EXTI, DMAMUX). Two parts: what the silicon offers
-(the analysis that decides the shape), and the brio representation.
+## What the silicon does
 
-## What the hardware offers (AVR DA/DB, 48-pin)
+Hardware routing between peripherals: a change in one peripheral (the
+generator) travels on a channel to any number of users, without the
+CPU, in every sleep mode. Each channel is driven by ONE generator
+(`CHANNELn` = a code from 16.5.2, `0x00` = off) and listened to by any
+number of users (`USERxxx` = n + 1, `0` = disconnected, 16.5.3). Both
+are ordinary registers, rewritable at any time: a channel can be
+re-sourced and a user connected or disconnected while running.
 
-**Channels.** 10 (`CHANNEL0..9`), each driven by ONE generator
-(`CHANNELn = code`, `0x00` = off) and listened to by ANY number of
-users (`USERxxx = n + 1`, `0` = disconnected). Every channel has two
+**Channels.** 10 (`CHANNEL0..9`) on 48/64-pin parts; 8 on 28/32-pin
+parts, which also have no `SWEVENTB` register. Every channel has two
 subchannels: asynchronous (the generator's signal as is) and
-synchronous (the same, synchronised to CLK_PER, 2-3 cycles later);
-which one a user sees is a fixed property of the user, and the EVSYS
-picks it - nothing to configure.
+synchronous (the same, synchronized to CLK_PER, two to three cycles
+later); which one a user sees is a fixed property of the user and the
+EVSYS picks it by itself (16.3.2.5).
 
-**Generators** (16.5.2, ~50 codes). Grouped:
-- RTC: `OVF`, `CMP` (pulses, CLK_RTC); `PIT_DIV8192/4096/2048/1024`
-  on EVEN channels only, `PIT_DIV512/256/128/64` on ODD channels only
-  (levels: the prescaled RTC clock divided - a free square wave with
-  no CPU, the natural pacer for ADC sampling);
-- PORT pins: `PORTx.PINn` = the pin LEVEL (not an edge; the user's
-  edge detection makes the edge). PORTA/PORTB only on channels 0-1,
-  PORTC/PORTD on 2-3, PORTE/PORTF on 4-5 (PORTG 6-7, absent on 48
-  pins). Zero if the pin's input driver is disabled;
-- peripherals: `CCL LUTn` out (level), `ACn OUT` (level), `ZCDn OUT`,
-  `ADC0 RESRDY` (pulse), `OPAMPn READY`, `USARTn XCK`, `SPIn SCK`
-  (levels), `TCAn OVF/HUNF/CMPn` (pulses), `TCBn CAPT/OVF` (pulses),
-  `TCD0 CMPBCLR/CMPASET/CMPBSET/PROGEV`, `MVIO VDDIO2OK`, `UPDI SYNCH`
-  - all on all channels;
-- software: `SWEVENTA/B` bit n = one-CLK_PER pulse on channel n
-  (needs CLK_PER: not in standby).
-Pulse vs level and sync vs async are per generator (table 16-2); a
-level generator into an edge-detecting user gives one event per
-transition.
+**Generators** (16.5.2). Grouped; pulse vs level and sync vs async are
+per generator:
 
-**Users** (16.5.3, 54 registers on the 48-pin: `USERCCLLUT0A..5B`,
-`USERADC0START`, `USEREVSYSEVOUTA..F`, `USERUSARTnIRDA`,
-`USERTCAnCNTA/CNTB`, `USERTCBnCAPT/COUNT`, `USERTCD0INPUTA/B`,
-`USEROPAMPn ENABLE/DISABLE/DUMP/DRIVE`). What a user DOES with the
-event is configured in the user's own peripheral (TCB CAPT means
-capture, restart, single-shot... per its mode; TCA CNTA count on edge
-or level, direction control...): the EVSYS only connects. Detection
-(edge/level) and sync/async are per user (table 16-4): async users
-(ADC start, EVOUT, CCL, TCD, TCB CAPT in some modes) work in standby
-with no clock; sync users (TCA, TCB COUNT, USART IRDA) need CLK_PER.
+- RTC: `OVF`, `CMP` (pulses, CLK_RTC); `PIT_DIV8192/4096/2048/1024` on
+  EVEN channels only, `PIT_DIV512/256/128/64` on ODD channels only.
+  The two families share codes 0x08-0x0B: the parity of the channel
+  picks the family. These are levels - the prescaled RTC clock
+  divided, a free square wave with no CPU;
+- PORT pins: the pin LEVEL (not an edge; the user's edge detection
+  makes the edge), zero if the pin's input driver is disabled.
+  PORTA/PORTB only on channels 0-1, PORTC/PORTD on 2-3, PORTE/PORTF
+  on 4-5, PORTG on 6-7 (64-pin parts). The two ports of a pair share
+  the code space: 0x40+n for the first, 0x48+n for the second;
+- peripherals, all on all channels: `CCL LUTn` out (level, async),
+  `ACn OUT` (level, async), `ADC0 RESRDY` (pulse, sync), `TCAn
+  OVF_LUNF/HUNF/CMPn` (sync), `TCBn CAPT/OVF` (sync), `TCD0
+  CMPBCLR/CMPASET/CMPBSET/PROGEV` (async), `ZCDn OUT` (level, async),
+  `USARTn XCK` and `SPIn SCK` (levels, sync), `UPDI SYNCH` (sync),
+  and on the DB family only `MVIO VDDIO2OK` (async) and `OPAMPn
+  READY` (sync). The codes shared by DA and DB are identical;
+- software: writing bit n of `SWEVENTA` (`SWEVENTB` for channels 8-9)
+  INVERTS the channel's signal for one CLK_PER cycle (16.3.2.6) - a
+  high pulse on an idle channel, a low pulse on a channel a level
+  generator holds high. Needs CLK_PER: not in standby.
 
-**EVOUT.** Six pin outputs (`EVOUTA..F`), each a user like any other:
-the channel's signal appears on the pin (PA2/PA7, PB2, PC2/PC7,
-PD2/PD7, PE2, PF2 - default/alt via `PORTMUX.EVSYSROUTEA`). Any
-generator becomes a signal on a pin: THE test instrument of this
-peripheral - a logic analyzer on an EVOUT verifies a generator, a
-channel constraint, a connect/disconnect, with no other peripheral
-involved. (The driver drives the pin as output; verified on the bench
-- the chapter does not spell out the override.)
+**Users** (16.5.3, table 16-4). What a user DOES with the event is
+configured in the user's own peripheral (TCB CAPT means capture,
+restart, single-shot... per its mode; TCA CNTA counts on edge or
+level or takes direction from the level): the EVSYS only connects.
+Detection (edge/level/none) and sync/async are per user: async users
+(ADC start, EVOUT, CCL, TCD, TCB CAPT in some modes) respond in
+standby without a clock; sync users (TCA, TCB COUNT, USART IRDA) need
+CLK_PER. The full user map is 54 registers (0x00-0x35); smaller
+packages lack the instances they do not bond out.
 
-**Facts that shape the design.**
-- Routing is register writes; the response is "short and
-  predictable" (a few CLK_PER for sync users, none for async ones);
-  it works in idle and standby.
-- Configuration is not only initial: `CHANNELn` and `USERxxx` are
-  ordinary registers, rewritable at any time - a channel can be
-  re-sourced, a user connected and disconnected while running. Some
-  designs use this deliberately (route the ADC start to the PIT in
-  one state, to a pin edge in another; silence a user by
-  disconnecting it).
-- The two legality constraints (PIT dividers by channel parity, pins
-  by channel pair) are compile-time knowable facts of the device.
-- Errata DS80000915F (2025, silicon A4/A5/B0): no EVSYS items.
+**EVOUT.** One user per port: the channel's signal appears on a pin,
+`Px2` in the default position on every port present, `Px7` (ALT1 via
+`PORTMUX.EVSYSROUTEA`, 17.5.1) on PORTA/B/C/D/E/G where that pin
+exists; EVOUTF has no ALT1 on any package. Any generator becomes a
+signal on a pin: the test instrument of this peripheral.
 
-## The brio representation
+## Types and verbs
 
-Following the position taken in [overview.md](../design/overview.md) ("hardware
-routing is behaviour, not only config"): typed vocabulary, run-time
-primitives, static allocation as sugar. Names below are proposals.
+The model: a GENERATOR is a type carrying its `CHANNELn` code and its
+channel legality as constexpr facts; a USER is a type that knows its
+`USERxxx` register; a CHANNEL is a resource handle. The compiler
+checks LEGALITY (this generator on this channel, this pin as an
+EVOUT); it does not check EXCLUSIVITY of a channel several states
+rewire - that is ownership, the business of one AO's FSM. A generator
+or user missing from the vocabulary is added here, three lines, never
+worked around with a raw register write.
 
-**Vocabulary as types** (`avrdx/evsys.hpp`, growing on demand):
-- a **generator** is a type carrying its code and its channel legality
-  as constexpr facts - `EvPitDiv<64>` (`code = 0x0B`, legal on odd
-  channels), `EvPin<Pin<'A', 2>>` (`0x42`, channels 0-1),
-  `EvRtcOvf`, `EvRtcCmp`, `EvAdc0Ready`, `EvTcaOvf<n>`, `EvTcaHunf<n>`,
-  `EvTcaCmp<n, ch>`, `EvTcbCapt<n>`, `EvTcbOvf<n>`, `EvLut<n>`, `EvAcOut<n>`
-  - satisfying an
-  `EventGenerator` concept (`code`, `legal_on(ch)`);
-- a **user** is a type carrying the index of its USER register -
-  `EvOut<Pin<'D', 2>>` (also knows its PORTMUX bit and pin), `EvAdc0Start`,
-  `EvTcaCntA<n>`/`EvTcaCntB<n>`, `EvTcbCaptIn<n>`/`EvTcbCountIn<n>`,
-  `EvLutIn<n, 'A'/'B'>` - satisfying an `EventUser` concept; the
-  drivers wrap them (`Tcb<n>::capture_on`, `Tca<n>::event_a_on`,
-  `Lut<n>::event_a_on`);
-- a **channel** is a resource handle, `EventChannel<n>` (0..9,
-  existence checked).
-The tables are transcribed only for what a step needs (the PIT
-dividers, the pins, EVOUT, ADC start, then TCB/TCA as their tasks
-arrive); a generator or user missing from the table is added, three
-lines, when a driver or an app needs it - never worked around with a
-raw register write.
+| Type | Meaning |
+|------|---------|
+| `EventChannel<n>` | channel handle (existence checked): `source(G{})` routes generator G (legality static_asserted), `off()` idles the channel, `pulse()` fires a software event |
+| `EvPitDiv<div>` | prescaled RTC clock / div; 1024..8192 legal on even channels, 64..512 on odd |
+| `EvRtcOvf`, `EvRtcCmp` | RTC overflow / compare match, all channels |
+| `EvPin<Pin>` | the pin's level; legal on the port pair's two channels |
+| `EvAdc0Ready` | ADC0 result ready, all channels |
+| `EvTcaOvf<n>`, `EvTcaHunf<n>`, `EvTcaCmp<n, ch>` | TCA overflow / high-byte underflow / compare match, all channels |
+| `EvTcbCapt<n>`, `EvTcbOvf<n>` | TCB CAPT flag / counter overflow (the 32-bit cascade carry), all channels; n gated by the package's TCB count (TCB4 on 64-pin) |
+| `EvLut<n>` | CCL LUT output level, all channels |
+| `EvUpdiSynch`, `EvMvioOk` (DB), `EvZcdOut<n>`, `EvOpampReady<n>` (DB), `EvUsartXck<n>`, `EvSpiSck<n>`, `EvTcdCmpBClr/ASet/BSet/ProgEv` (TCD parts) | the rest of the generator table (16.5.2), codes verified against the device header's enums; instance counts gated per package |
+| `EvAcOut<n>` | comparator output level, all channels |
+| `EvOut<Pin>` | the channel's signal on a pin: Px2 default on every port present, Px7 ALT1 on every port but PORTF; `listen` selects the PORTMUX position, drives the pin as output, connects; `unlisten` tears it all down (pin back to input, PORTMUX back to default) |
+| `EvAdc0Start` | ADC0 start on event (the ADC's `start_on()` also sets STARTEI; listening alone arms nothing) |
+| `EvTcaCntA<n>`, `EvTcaCntB<n>` | TCA event inputs A and B; the action is EVACTA/EVACTB in the TCA |
+| `EvTcbCaptIn<n>`, `EvTcbCountIn<n>` | TCB capture input (the TCB must also set CAPTEI) and count input |
+| `EvLutIn<n, 'A'/'B'>` | CCL LUT n event input A or B |
+| `EvUsartIrda<n>`, `EvTcdInputA/B` (TCD parts), `EvOpampCtl<n, OpampAction::enable/disable/dump/drive>` (DB) | the rest of the user table (16.5.3); `usart_count` gates the instances per package |
+| `EventUserBase` | `listen(brio::EventChannel<n>{})` / `unlisten()` for every user |
+| concepts | `EventGenerator` (code, per-channel legality), `EventUser` (the USER register, unlisten) |
+| helpers | `event_channels` (8 or 10, from the device header), `evsys_pulse(ch)` (software event on a run-time channel - what a driver holding its channel as a value uses) |
 
-**Run-time primitives** (the layer that IS the peripheral):
-- `EventChannel<n>::source(EvPitDiv<64>{})` - `static_assert` legality
-  of that generator on that channel, write `CHANNELn`; `off()`; 
-  `pulse()` (software event, needs CLK_PER);
-- `EvAdc0Start::listen(EventChannel<3>{})` - write `USERADC0START =
-  4`; `EvAdc0Start::unlisten()`; for `EvOut<Pin>` `listen` also sets
-  the PORTMUX position and drives the pin as output.
-Each is one register write, callable from any handler: a rewire is an
-action of a state (Entry routes, Exit disconnects), exactly like
-arming a time event; the fact that it is a run-time operation is what
-lets an FSM own a piece of hardware routing.
+The peripheral drivers wrap the users (`Tcb<n>::capture_on`,
+`Tca<n>::event_a_on`, `Lut<n>::event_a_on`, `Adc<0>::start_on`): an
+application usually names only the channel and the generator.
 
-**Static allocation as sugar** (`EventSystem<Route...>`): a route is a
-generator plus its users, `EventRoute<EvPitDiv<64>, EvAdc0Start,
-EvOut<Pin<'D', 2>>>`; `EventSystem<R1, R2, ...>` assigns channels at
-compile time (lowest legal free channel per route, `static_assert`
-when the constraints cannot be met - two odd-only routes plus a pin
-route on channels 0-1 is a real puzzle the compiler solves or refuses),
-`init()` calls the primitives for every route, `R1::channel` is a
-constexpr the app can name (to `pulse()` it, to hand it to a task).
-Sugar: it does nothing the primitives cannot; it exists so the routes
-that never change are declared once, in one place, checked as a whole.
+## How to use it
 
-**What stays the app's (or the owning AO's) responsibility.**
-Contention for a channel rewired at run time: the compiler checks
-legality, not exclusivity - a channel that changes with state belongs
-to one AO's FSM, and that FSM is where "who drives it when" is
-decided (ownership, as with borrowed buffers; no locks). Sync/async is
-a fact to know, not a constraint to check: the EVSYS synchronises for
-sync users by itself; the 2-3 cycle latency is documented.
+**A fixed route owned by a state** - Entry routes, Exit disconnects,
+exactly like arming a time event:
 
-**What the users' peripherals will do with it.** The EVSYS driver
-connects; the meaning of the event on the user side is configured by
-that peripheral's task (`Adc` start-on-event, a `FrequencyMeter<Tcb<0>>`
-capturing on event, an `EventCounter<1>` counting on event...). Task types take
-an `EventChannel<n>` (or a route) as a parameter when they listen -
-the same "named resource" idiom.
+```cpp
+// Entry: ADC paced by the PIT at 512 Hz, mirrored on a pin.
+brio::EventChannel<1>::source(brio::EvPitDiv<64>{});     // odd channel: 512 Hz
+brio::EvAdc0Start::listen(brio::EventChannel<1>{});
+brio::EvOut<brio::Pin<'D', 2>>::listen(brio::EventChannel<1>{});
+// Exit:
+brio::EvOut<brio::Pin<'D', 2>>::unlisten();
+brio::EvAdc0Start::unlisten();
+brio::EventChannel<1>::off();
+```
 
-## Verification path
+**A pin into a timer** (the capture path of the TCB meters):
 
-`events0` (bench app, VERIFIED on the oscilloscope: PIT/64 512 Hz on
-PD2, button level, off, PIT/8192 LED at 4 Hz with no CPU, EVOUT pin
-driven as output by the driver works): route generators to EVOUT pins and
-watch with the logic analyzer - `EvPitDiv<64>` on an odd channel
-(the "prescaled RTC clock" is CLK_RTC through RTC.CTRLA's prescaler,
-which Ticker leaves at 1: 32768 / 64 = 512 Hz square wave on the pin,
-`EvPitDiv<8192>` = 4 Hz - both trivially measured), `EvPitDiv<8192>`
-on an even one, a button pin on channel 0, a
-software `pulse()` from a console command; connect/disconnect from
-an FSM's Entry/Exit and see the signal appear and vanish; the compile
-errors for an illegal channel. First real user: ADC start from the PIT
-(the analog step). Then TCB capture (the timer step).
+```cpp
+brio::EventChannel<0>::source(brio::EvPin<brio::Pin<'A', 2>>{});  // A/B pair: channels 0-1
+brio::EvTcbCaptIn<0>::listen(brio::EventChannel<0>{});            // Tcb<0> mode + CAPTEI arm it
+```
 
-## Cross-target note
+**A software event** (test stimulus, one CLK_PER inversion):
 
-SAMD's EVSYS maps onto this shape one to one (channels, generators
-with per-channel constraints, users; pin output through the CCL or a
-timer, to check). STM32 has no channel matrix: the
-"route" idea survives as typed connect/disconnect on the specific
-trigger muxes (TIM TRGO -> ADC EXTSEL, DMAMUX request generator);
-the primitives are the portable part, `EventSystem` allocation is
-AVR/SAMD-specific sugar. Which is why the primitives are the layer
-that IS the peripheral, and the static allocation is only sugar.
+```cpp
+brio::EventChannel<3>::pulse();
+```
+
+## Bench findings
+
+- `EvPitDiv<64>` on an odd channel measures 512 Hz on an EVOUT pin,
+  `EvPitDiv<8192>` on an even one 4 Hz (scope; RTC prescaler at 1, as
+  `Ticker` leaves it: 32768 / div).
+- `EvOut::listen` driving the pin as output works; the chapter does
+  not spell out a port override for EVOUT, so the driver sets DIR.
+- Connect and disconnect at run time behave as ordinary register
+  writes: the signal appears and vanishes on the pin.
+- Illegal pairings (a PIT divider on the wrong parity, a pin on the
+  wrong channel pair, a non-EVOUT pin) are refused at compile time.
+- `test_avr_timer` (82/82) closes its loops through this peripheral
+  with no wires: `EvPin` generators feed TCB capture and count users,
+  LUT outputs and event inputs route through channels, AC OUT drives
+  a channel as a generator.
+
+## Not covered yet
+
+Driver gaps:
+
+- pin-level bonding of an EVOUT ALT1 pin within an existing port
+  (whether THIS package bonds Px7) - deferred to the device tables;
+- the static allocator (`EventSystem<Route...>`: routes declared once,
+  channels assigned at compile time) - sugar over the primitives,
+  which are the peripheral.
+
+Implemented but not bench-verified:
+
+- the freshly filled vocabulary (UPDI/MVIO/ZCD/OPAMP/USART/SPI/TCD
+  generators, IRDA/TCD/OPAMP users): codes verified against the
+  device header's own enums, no driver exercises them yet;
+- the software event's inversion-on-level behavior (a low pulse on a
+  channel held high);
+- asynchronous delivery in standby (an async user with no clock);
+- the EVOUT ALT1 positions;
+- the two-to-three cycle latency of the synchronous subchannel
+  (documented, never measured).

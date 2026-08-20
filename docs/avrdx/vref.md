@@ -22,8 +22,10 @@ selects one of:
 
 Internal levels are +-4 % untrimmed over temperature; measured on the
 bench they agree with each other within 1-2 %. A source turns on by
-itself when its consumer asks for it (start-up 10 us from an internal
-main clock, 200 us from an external one; 2 us to change level);
+itself when its consumer asks for it (start-up 10 us when the main
+clock is a high-frequency one - internal OSCHF or external
+EXTCLK/XOSCHF - and 200 us when it is a 32.768 kHz one, internal or
+crystal: Table 39-17 keys on MCLKCTRLA.CLKSEL; 2 us to change level);
 `always_on` keeps it powered for ~40-175 uA so the consumer never
 waits. VREFA loads the external source with ~50 kOhm (the ADC's
 ladder). There is no other behaviour: VREF is a selector.

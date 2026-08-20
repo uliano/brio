@@ -64,6 +64,13 @@ if it regresses: "'concept' only available with '-std=c++20'".
   size (and yields an unreadable `.lst`).
 - Do NOT add `-mrelax`: PyAvrOCD refuses ELF files built with it
   (distorted line-number info).
+- **Family compile check**: `tools/check_family.sh` compiles every
+  smoke TU in `test/family/` for all eight AVR128 DA/DB packages
+  (28/32/48/64 pins, both families) and requires every
+  `test/family/neg/` TU to FAIL for the MCUs its `// mcu:` line
+  names. Seconds, no hardware; part of every driver's definition of
+  done - the bench chip alone masks missing ports, instances,
+  registers and enum values of the other packages.
 
 ## Per-app env options: `// pio:` header lines
 
@@ -85,9 +92,8 @@ of the same option follow INI semantics (last wins). Rerun gen_apps
 after adding, removing or changing such a line, then reload the
 project (VS Code task "PIO: regen apps").
 
-Then `pio device monitor -e <app>` uses that app's speed;
-`clock_console` is the first user (115200, to keep talking down to
-2 MHz).
+Then `pio device monitor -e <app>` uses that app's speed (e.g.
+115200 for an app that must keep talking down to 2 MHz).
 
 ## Clock, delay and timebase
 
@@ -110,7 +116,7 @@ produce: `hz` stays true either way). `is_static` is true.
 
 The runtime regime is `brio::DynamicClock<Boot, Users...>`: `Boot` is a
 static `Clock<...>` naming the source, `Users` types satisfying the
-`ClockUser` concept (`static void rebase(uint32_t hz)`, checked where
+`ClockUser` concept (a static `rebase(hz)`, checked where
 the list is written); `set<hz>()` / `set(hz)` name the new RATE (Hz - the prescaler that produces it is the silicon's detail;
 an unreachable rate is a compile error / a false) and fan it out to
 every listed user (`Uart`, `Twi`, `Spi` expose `rebase(hz)`; `Uart`
@@ -123,9 +129,8 @@ fails to compile at its `init(clock)` (`clock_follows<Clock, Driver>()`)
 - forgetting a user cannot leave it silently at the old rate. Not while a bus transaction is in flight (ask
 the bus AOs); RX bytes during the switch may be garbled. `Uart::
 can_baud(hz, baud)` tells whether a rate can still hit a baud (BAUD >=
-64, i.e. CLK_PER >= 16 x baud). Bench-verified with the `clock_console`
-app: 24 -> 12 -> 2 MHz under the running console at 115200, 1 MHz
-refused as expected.
+64, i.e. CLK_PER >= 16 x baud). Bench-verified: 24 -> 12 -> 2 MHz
+under a running 115200 console, 1 MHz refused as expected.
 
 `F_CPU` is NOT defined in this project: `platformio.ini` unflags the
 `-DF_CPU` PlatformIO would pass from the board manifest (by name -

@@ -1,25 +1,23 @@
 # The I2C bus
 
-The second bus in brio, and the specimen that turned the SPI arbiter
-into a generic one.
+The I2C bus, served by the same generic arbiter as SPI.
 
 ## BusMaster: the arbiter generalized
 
-`SpiBus` never looked at a byte: it owned the pending FIFO, the
+The arbiter never looks at a byte: it owns the pending FIFO, the
 reject-when-full policy, the ReplyTo return channel and the engine
-handshake (`Bus::start` -> `TransferDone`). The only SPI thing about
-it was its name. When I2C needed exactly the same object, the
-"generalize on the second real specimen" rule fired: the class is now
+handshake (`Bus::start` -> `TransferDone`). Nothing in that is
+bus-specific, so one class serves both buses:
 `BusMaster<Bus, P, pending_depth>` in `util/bus_master.hpp`, with
 `BusDone{status}`, `bus_ok`, `bus_rejected` and `TransferDone` as its
 own vocabulary.
 
-The per-bus names survive as zero-cost aliases, on purpose:
+The per-bus names are zero-cost aliases, on purpose:
 `util/spi_bus.hpp` (`SpiBus`, `SpiDone`, `spi_ok`, `spi_rejected`) and
 `util/i2c_bus.hpp` (`I2cBus`, `I2cDone`, `i2c_*`). A display client
 that reads `SpiDone` says which wire its bytes took; a `BusDone` in
 the same place would be less information for no gain. Measured: the
-SPI apps' flash is byte-identical before and after.
+aliases cost zero flash.
 
 Status codes are one byte, split by ownership: `bus_ok = 0` and
 `bus_rejected = 1` are the arbiter's; every value from

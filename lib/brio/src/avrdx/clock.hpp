@@ -109,11 +109,16 @@ struct Oschf {
 
     /// Set the output frequency (one oschf_frqsel() can produce); keeps
     /// the RUNSTDBY and AUTOTUNE bits. Takes effect immediately, also
-    /// while OSCHF is the main clock.
-    static void set_hz(uint32_t hz) {
+    /// while OSCHF is the main clock. False, touching nothing, for a
+    /// rate OSCHF does not produce (a runtime verb must not write a
+    /// reserved FRQSEL).
+    static bool set_hz(uint32_t hz) {
+        const uint8_t sel = oschf_frqsel(hz);
+        if (sel == 0xFF) return false;
         const uint8_t keep = static_cast<uint8_t>(CLKCTRL.OSCHFCTRLA &
                                                   (CLKCTRL_RUNSTDBY_bm | CLKCTRL_AUTOTUNE_bm));
-        _PROTECTED_WRITE(CLKCTRL.OSCHFCTRLA, static_cast<uint8_t>(oschf_frqsel(hz) | keep));
+        _PROTECTED_WRITE(CLKCTRL.OSCHFCTRLA, static_cast<uint8_t>(sel | keep));
+        return true;
     }
     static void run_standby(bool on) { flag(CLKCTRL_RUNSTDBY_bm, on); }
 
@@ -165,9 +170,13 @@ enum class Xosc32kStartup : uint8_t { cycles1k = 0, cycles16k = 1, cycles32k = 2
 struct Xosc32k {
     Xosc32k() = delete;
 
-    /// Crystal on PF0/PF1.
+    /// Crystal on PF0/PF1. CSUT/SEL are read-only while ENABLE (or the
+    /// oscillator is in use): a start on an enabled oscillator stops it
+    /// first, so the new configuration always lands (the restart pays
+    /// the start-up time again).
     static void start_crystal(Xosc32kStartup sut = Xosc32kStartup::cycles64k,
                               bool low_power = false, bool run_standby = false) {
+        if (enabled()) stop();
         _PROTECTED_WRITE(CLKCTRL.XOSC32KCTRLA, static_cast<uint8_t>(
             CLKCTRL_ENABLE_bm |
             (static_cast<uint8_t>(sut) << CLKCTRL_CSUT_gp) |
@@ -176,6 +185,7 @@ struct Xosc32k {
     }
     /// External 32.768 kHz clock on PF0 (start-up two cycles).
     static void start_external(bool run_standby = false) {
+        if (enabled()) stop();                     // SEL is latched while enabled
         _PROTECTED_WRITE(CLKCTRL.XOSC32KCTRLA, static_cast<uint8_t>(
             CLKCTRL_ENABLE_bm | CLKCTRL_SEL_bm | (run_standby ? CLKCTRL_RUNSTDBY_bm : 0)));
     }
@@ -209,8 +219,12 @@ struct Xoschf {
     }
 
     /// Crystal on PA0/PA1 at `hz`; start-up 4k cycles by default.
+    /// SELHF/FRQRANGE/CSUTHF are read-only while ENABLE (or EXTS): a
+    /// start on an enabled oscillator stops it first, so a
+    /// crystal-to-external (or range) change always lands.
     static void start_crystal(uint32_t hz, XoschfStartup sut = XoschfStartup::cycles4k,
                               bool run_standby = true) {
+        if (enabled()) stop();
         _PROTECTED_WRITE(CLKCTRL.XOSCHFCTRLA, static_cast<uint8_t>(
             CLKCTRL_ENABLE_bm | static_cast<uint8_t>(CLKCTRL_SELHF_XTAL_gc) | range_for(hz) |
             (static_cast<uint8_t>(sut) << CLKCTRL_CSUTHF_gp) |
@@ -218,6 +232,7 @@ struct Xoschf {
     }
     /// External clock on PA0 (start-up two cycles).
     static void start_external(uint32_t hz, bool run_standby = true) {
+        if (enabled()) stop();                     // the config is latched while enabled
         _PROTECTED_WRITE(CLKCTRL.XOSCHFCTRLA, static_cast<uint8_t>(
             CLKCTRL_ENABLE_bm | static_cast<uint8_t>(CLKCTRL_SELHF_EXTCLOCK_gc) | range_for(hz) |
             (run_standby ? CLKCTRL_RUNSTDBY_bm : 0)));
@@ -355,6 +370,9 @@ struct MainClock {
 };
 
 // ---- clock failure detection ----------------------------------------------------
+// The CFD exists on the DB only; on the DA the whole block is compiled
+// out (the device header is the authority: no CLKCTRL_CFDEN_bm there).
+#ifdef CLKCTRL_CFDEN_bm
 
 enum class CfdSource : uint8_t {
     main = CLKCTRL_CFDSRC_CLKMAIN_gc,
@@ -408,6 +426,8 @@ struct ClockFailure {
     }
 };
 
+#endif // CLKCTRL_CFDEN_bm
+
 // =============================================================================
 // Tasks
 // =============================================================================
@@ -445,8 +465,9 @@ struct Clock {
                   "make it equal: never two truths");
 #endif
 #if !defined(CLKCTRL_XOSCHFCTRLA)
-    static_assert(src != ClockSource::crystal && src != ClockSource::external,
-                  "brio Clock: XOSCHF exists only on the DB family");
+    static_assert(src != ClockSource::crystal,
+                  "brio Clock: the HF crystal (XOSCHF) exists on the DB only; the DA "
+                  "takes an external CLOCK on PA0 directly (ClockSource::external)");
 #endif
 
     /// Bring CLK_PER to `hz`. Returns true when running from the
@@ -457,7 +478,7 @@ struct Clock {
     static bool init() {
         if constexpr (hf) {
             // Baseline and fallback: OSCHF at the target rate, prescaled.
-            Oschf::set_hz(src_hz);
+            (void)Oschf::set_hz(src_hz);          // rate static_asserted above
             Oschf::run_standby(true);
             MainClock::prescale(div);
             (void)MainClock::select(MainSource::oschf);
@@ -481,7 +502,20 @@ struct Clock {
                 }
                 return true;
 #else
-                return false;
+                // DA: EXTCLK is a direct input on PA0 - nothing to
+                // enable. Wait for EXTS (the clock seen) BEFORE
+                // selecting: a selected source that never toggles
+                // leaves a switch pending that only a reset clears.
+                // Datasheet-trusted (DS40002183A 10.3.4): no DA part
+                // on the bench yet.
+                if (!clkctrl_wait(CLKCTRL_EXTS_bm, 0xFFFFu)) {
+                    return false;                   // stay on the OSCHF fallback
+                }
+                if (!MainClock::select(MainSource::extclk)) {
+                    (void)MainClock::select(MainSource::oschf);
+                    return false;
+                }
+                return true;
 #endif
             }
         } else {

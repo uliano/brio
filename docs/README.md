@@ -1,8 +1,8 @@
 # brio documentation
 
 Design documentation for the `brio` framework and the multi-app testbed
-around it. This directory is the narrative companion to the code: the
-decisions, the rationale, the contracts between layers.
+around it. This directory is the reference companion to the code: the
+rationale and the contracts between layers, as they are today.
 
 ## Map
 
@@ -34,20 +34,20 @@ Target AVR DA/DB (`lib/brio/src/avrdx/`):
 | Document | Content |
 |----------|---------|
 | [avrdx/README.md](avrdx/README.md) | Toolchain, board, Atmel-ICE upload, PyAvrOCD debugging and its quirks, clock/timebase |
-| [avrdx/clkctrl.md](avrdx/clkctrl.md) | CLKCTRL (exhaustive): oscillators, PLL, main clock mux/prescaler/CLKOUT, clock failure detection as resources; Clock/DynamicClock as tasks |
-| [avrdx/evsys.md](avrdx/evsys.md) | EVSYS (exhaustive): typed vocabulary + run-time connect/disconnect + static allocation as sugar (tables on demand) |
-| [avrdx/vref.md](avrdx/vref.md) | VREF (exhaustive): the reference selector - levels, headroom, how the ADC/DAC name it |
-| [avrdx/dac.md](avrdx/dac.md) | DAC (exhaustive): the 10-bit actuator - buffered/unbuffered outputs, the slow fall on a bare pin, usage |
-| [avrdx/adc.md](avrdx/adc.md) | ADC (exhaustive): one task with knobs - inputs as types, triggers, accumulation, window, results as events, every usage pattern |
-| [avrdx/port.md](avrdx/port.md) | PORT (provisional): Pin, PinSet, PinRef; not covered: pin interrupts, slew, thresholds |
+| [avrdx/clkctrl.md](avrdx/clkctrl.md) | CLKCTRL (provisional): oscillators, PLL, main clock mux/prescaler/CLKOUT, clock failure detection (DB) as resources; Clock/DynamicClock as tasks, DA external clock datasheet-trusted; not covered: the unbenched paths (XOSC32K, PLL, DA silicon) |
+| [avrdx/evsys.md](avrdx/evsys.md) | EVSYS (provisional): the full typed vocabulary (generators and users, package-gated) + run-time connect/disconnect; not covered: static allocation, the vocabulary no driver exercises yet |
+| [avrdx/vref.md](avrdx/vref.md) | VREF: the reference selector - levels, headroom, how the ADC/DAC name it |
+| [avrdx/dac.md](avrdx/dac.md) | DAC: the 10-bit actuator - buffered/unbuffered outputs, the slow fall on a bare pin, usage |
+| [avrdx/adc.md](avrdx/adc.md) | ADC (provisional): one task with knobs - inputs as types, triggers, accumulation, window (signed too), results as events, DB-only inputs gated; not covered: pin-level input legality, the standby paths |
+| [avrdx/port.md](avrdx/port.md) | PORT (provisional): Port<L> resource, Pin (one-store PinConfig, senses, flags), PinSet across ports on the multi-pin engine, PinRef; not covered: INLVL/slew measurements, the fully-async wake |
 | [avrdx/usart.md](avrdx/usart.md) | USART (provisional): the 8N1 byte transport; not covered: sync, one-wire/RS-485, IrDA, LIN, auto-baud |
 | [avrdx/spi.md](avrdx/spi.md) | SPI (provisional): the host engine; not covered: client mode, buffer mode |
 | [avrdx/twi.md](avrdx/twi.md) | TWI (provisional): the host engine; not covered: client/dual mode, SMBus, FM+ |
 | [avrdx/rtc.md](avrdx/rtc.md) | RTC/PIT (provisional): the PIT as timebase; not covered: the RTC counter |
-| [avrdx/tca.md](avrdx/tca.md) | TCA (exhaustive): the Tca resource (normal mode, buffered compares, event inputs, commands) + tasks TcaPwm/TcaPwm16/FrequencyGenerator/Heartbeat/EventCounter |
-| [avrdx/tcb.md](avrdx/tcb.md) | TCB (exhaustive): the Tcb resource (eight modes, event clock/capture, cascade, routes) + tasks PeriodicTick/Timeout/OneShotPulse/PulseCounter/CascadedCounter/meters/Pwm8 |
-| [avrdx/ccl.md](avrdx/ccl.md) | CCL (exhaustive): Ccl + Lut<n> resources (inputs menu, truth table, filter/edge, clocks, pins, the whole-block reconfiguration erratum) + ToggleFlipFlop |
-| [avrdx/ac.md](avrdx/ac.md) | AC (exhaustive): the Ac<n> resource (inputs and DACREF, hysteresis/power, pin/event/interrupt, window) + Threshold/Window |
+| [avrdx/tca.md](avrdx/tca.md) | TCA (provisional): the Tca resource (normal mode, buffered compares, event inputs, commands) + tasks TcaPwm/TcaPwm16/FrequencyGenerator/Heartbeat/EventCounter; not covered: the split halves' counters as verbs |
+| [avrdx/tcb.md](avrdx/tcb.md) | TCB (provisional): the Tcb resource (eight modes, event clock/capture, cascade, routes) + tasks PeriodicTick/Timeout/OneShotPulse/PulseCounter/CascadedCounter/meters/Pwm8; not covered: pin-level bonding within a port |
+| [avrdx/ccl.md](avrdx/ccl.md) | CCL (provisional): Ccl + Lut<n> resources (inputs menu, truth table, filter/edge, clocks, pins, the whole-block reconfiguration erratum) + ToggleFlipFlop; not covered: typed per-input instance legality |
+| [avrdx/ac.md](avrdx/ac.md) | AC (provisional): the Ac<n> resource (inputs and DACREF, hysteresis/power, pin/event/interrupt, window) + Threshold/Window; not covered: pin-level bonding (PD0, PC6 on small packages) |
 | [avrdx/vendor/README.md](avrdx/vendor/README.md) | The datasheets/errata the stratum is written against, by document number (PDFs kept local, not in git) |
 
 Target host (`lib/brio/src/host/`):
@@ -91,13 +91,14 @@ The bench:
   repo root pointing at this directory, `mkdocs serve`. Nothing here
   needs rewriting for that - which is exactly why nothing here may
   depend on it.
-- **Every peripheral driver has its document, and says whether it is
-  exhaustive or provisional.** Exhaustive = written from a systematic
-  review of the data sheet chapter and the errata, with a bench test
-  suite; provisional = covers what the bench needed so far - it opens
-  with a PROVISIONAL banner and closes with "Not covered yet", the
-  chapter's features the driver does not implement. That is the state
-  of the work, readable in one place.
+- **Every peripheral driver has its document; only incomplete ones
+  are marked.** A driver that does not yet cover its chapter's full
+  option space opens with a PROVISIONAL banner and closes with "Not
+  covered yet" - the chapter's features the driver does not implement
+  (driver gaps) kept distinct from what is implemented but not yet
+  bench-verified. A complete doc carries no banner and no gap list:
+  absence of the banner IS the statement of completeness. Never mark
+  a doc complete while it still lists gaps.
 - **One document per peripheral, in this shape.** First paragraph:
   the documents of record with their revision (data sheet, errata),
   the driver header, the reference test suite - no chapter lists, no

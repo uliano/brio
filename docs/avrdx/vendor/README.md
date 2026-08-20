@@ -11,7 +11,7 @@ revisions, pages do not.
 Check the revision before trusting a local copy: Microchip republishes
 both datasheets and errata (the errata grow with each silicon
 revision), and file names in the wild are unreliable (a file named
-"AVR64DB...Errata" turned out to be the AVR128DB errata). The revision
+"AVR64DB...Errata" may in fact be the AVR128DB errata). The revision
 letter is in the first-page footer (`DS40002247B`, `DS80000915F`).
 
 ## AVR DA/DB (`lib/brio/src/avrdx/`)
@@ -29,12 +29,11 @@ letter is in the first-page footer (`DS40002247B`, `DS80000915F`).
 
 Canonical URLs (redirect to the current revision):
 `https://www.microchip.com/DS40002247` (datasheet),
-`https://www.microchip.com/DS80000915` (errata). Direct files fetched
-2026-08-19:
+`https://www.microchip.com/DS80000915` (errata). Direct file URLs:
 `https://ww1.microchip.com/downloads/aemDocuments/documents/MCU08/ProductDocuments/DataSheets/AVR128DB28-32-48-64-DataSheet-DS40002247.pdf`,
 `https://ww1.microchip.com/downloads/aemDocuments/documents/MCU08/ProductDocuments/Errata/AVR128DB28-32-48-64-SilConErrataClarif-DS80000915.pdf`.
 
-## Errata DS80000915F: what touches brio (2026-08-19 reading)
+## Errata DS80000915F: what touches brio
 
 Applies to ALL silicon revisions (A4/A5/B0) unless noted:
 - **2.2.4 Write operation lost on consecutive writes** - an ST/STD/STS

@@ -5,7 +5,7 @@
 ## What it is for
 
 A bounded FIFO between exactly two parties: one producer, one
-consumer. Driver byte rings (UART today, I2C/SPI next), sample
+consumer. Driver byte rings (UART), sample
 buffers, logs - anything that needs a queue but not the MPSC
 semantics of the kernel `EventQueue`. It is a general tool, not a
 driver detail: whoever needs a two-party FIFO names the platform and
@@ -70,7 +70,8 @@ service reads it from there.
   full, nothing written), `pop() -> std::optional<T>`, `count()`,
   `empty()`, `full()`, `capacity()`. No `*_from_isr` twins (style
   ruling honoured; measured on the uart ISRs: `std::optional` folds
-  away completely, the DRE/RXC bodies got one instruction shorter).
+  away completely and the DRE/RXC bodies are one instruction shorter
+  than the bool + out-param form).
 - `clear()` is the ONE non-concurrent operation: it rewrites both
   indices and is legal only while the other party is quiescent (init,
   or after masking its interrupt). Documented, not guarded.
@@ -97,6 +98,6 @@ without hardware - the point of moving Ring to `util/`.
 
 ## Measured on the uart driver (-Os, avr-gcc 16.2)
 
-`write_blocking` (print's byte path): 20 -> 13 instructions, no
-SREG save / cli / restore; RXC ISR 41 -> 39, DRE ISR 37 -> 36; flash
-7056 -> 7034 bytes; RAM identical.
+Lock-free vs guarded ring: `write_blocking` (print's byte path) 13
+vs 20 instructions (no SREG save / cli / restore); RXC ISR 39 vs 41,
+DRE ISR 36 vs 37; 22 bytes of flash; RAM identical.

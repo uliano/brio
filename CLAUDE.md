@@ -31,11 +31,12 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   quirks); next to it ONE document per peripheral in the shape
   docs/README.md prescribes (documents of record -> what the silicon
   does -> types and verbs -> how to use it, one example per use ->
-  bench findings -> for provisional ones, "Not covered yet"), each
-  saying EXHAUSTIVE (systematic review + bench suite: clkctrl.md,
-  evsys.md, vref.md, dac.md, adc.md) or PROVISIONAL (port.md,
-  usart.md, spi.md, twi.md, rtc.md, tca.md) - the state of the driver
-  work, readable in the docs map. The Multislope assessment (every
+  bench findings -> for provisional ones, "Not covered yet"). Only
+  INCOMPLETE docs are marked: PROVISIONAL banner + closing "Not
+  covered yet" (driver gaps kept distinct from implemented-but-not-
+  bench-verified); a complete doc has NO banner and no gap list -
+  never mark a doc complete while it still lists gaps. The state of
+  the driver work is readable in the docs map. The Multislope assessment (every
   acrobatic piece maps to fixed routes + tasks on resources + config
   structs; the 64-cycle snapshot stays in the ISR body) lives in
   memory and in the track entry below, not in docs.
@@ -96,6 +97,47 @@ disturb:
 - **apps** - incidental test tools; they will not survive in their
   current form. Nothing in the foundations or their docs may depend on
   an app; apps document themselves in their own header comment.
+
+## Working discipline (read this first, every session)
+
+The documented failure mode of past sessions is EFFORT PARSIMONY:
+solving the one concrete problem on the bench chip instead of building
+the framework. It produced drivers that did not compile on half the
+family, docs marked complete that listed their own gaps, and false
+comments justifying wrong restrictions. The antidote, in practice:
+
+- **Framework, not application.** The target is the whole AVR DA/DB
+  range (and future targets), the AVR128DB48 is only the test vehicle.
+  Cover the chapter's FULL option space - every instance, mode, route
+  from the register description, both errata documents (DB
+  DS80000915F and DA DS80000882C differ). Leave something out only
+  knowingly and declare it in the doc's "Not covered yet".
+- **Definition of done for a driver**: (1) systematic pass over the
+  chapter's register description + errata; (2) a smoke TU compiled for
+  every package - `avr-g++ -mmcu=avr128d{a,b}{28,48,64} -std=gnu++23
+  -Os -c -I lib/brio/src` takes seconds, no hardware; (3) negative
+  tests: what must be refused must FAIL to compile; (4) the
+  `test_<target>_<subject>` suite on the bench. The bench chip alone
+  masks half the family (SWEVENTB, TCA1, PORTB proved it).
+- **Package variability pattern** (full rule: overview.md "Target
+  strata"; model code: tcb.hpp/pin.hpp/evsys.hpp): device header =
+  authority. Missing instance -> `#if defined(TCB4)` tiers. Missing
+  pin POSITION -> instance stays usable: `port_exists` +
+  `if constexpr` compile the branch out (a runtime `if` on a missing
+  Pin kills the instance), `init<cfg>` static_asserts, `init(cfg)`
+  returns false. Missing register/enum -> gate on its header symbol.
+  Pin-level bonding inside an existing port -> device tables (open).
+- **Never state what is not enforced**: a fact in a doc or comment
+  either has a guard in the code or sits in "Not covered yet".
+- **Docs are a reference for the CURRENT version** (rules:
+  docs/README.md): no history, no dates, no work narrative, no app
+  names (test suites excepted); only INCOMPLETE docs are marked
+  (PROVISIONAL + "Not covered yet", driver gaps separate from
+  implemented-but-not-bench-verified); doc and code move in the same
+  change. Never mark a doc complete while it lists gaps.
+- **When the user refines the method, write it to memory in the same
+  session** - the next context must start from the agreed method, not
+  regress to the instinctive minimum.
 
 ## Standing style rulings
 
@@ -158,7 +200,7 @@ gets its dated home in `docs/design/` when taken.
   one-way race under preemption).
 - **Exhaustive-driver track (started 2026-08-19).** Done: EVSYS, VREF/
   DAC/ADC, CLKCTRL (clock.hpp rewritten as resources + tasks; `test_avr_clock`
-  14/14 on the scope via CLKOUT/PA7: tune curve asymmetric, CFD
+  15/15 on the scope via CLKOUT/PA7: tune curve asymmetric, CFD
   fallback really 4 MHz, status follows the request - in clkctrl.md).
   TCA/TCB/CCL/AC done: tca.hpp (Tca resource + TcaPwm/TcaPwm16/
   FrequencyGenerator/Heartbeat/EventCounter), tcb.hpp (Tcb resource +
@@ -167,9 +209,20 @@ gets its dated home in `docs/design/` when taken.
   Threshold/Window); `test_avr_timer` 82/82 on A5 (closed loop through
   EvPin generators, no wires; findings: capture = interval - 1 CLK_PER
   at div1, SEQCTRL before the even LUT, OSC32K +0.94 %, AC hysteresis
-  17 mV) - docs tca.md/tcb.md/ccl.md/ac.md EXHAUSTIVE. TCD deferred.
-  Multislope next when wanted. Remaining provisional: PORT, USART, SPI,
-  TWI, RTC - each doc's "Not covered yet" is the shopping list. Original order:
+  17 mV). TCD deferred. Multislope next when wanted. A 2026-08-20
+  family-completeness review (all drivers vs their chapters, both
+  errata docs, the device headers of every package) found real gaps
+  and a few bugs; only VREF and DAC came out complete. Everything
+  else is PROVISIONAL and each doc's "Not covered yet" (driver gaps
+  kept distinct from bench gaps) is the shopping list; the code fixes
+  are listed there too (TCA RESET-from-split without CMDEN, tasks
+  missing rebase/clock_follows, CCL LUT3-ALT and per-package gating,
+  ADC rebase failure path, AC package legality). Fixed 2026-08-20:
+  TCB4 end-to-end, Tcb usable on every package (port_exists in
+  pin.hpp + if constexpr on missing pin positions - the pattern for
+  the other drivers), event_channels/SWEVENTB/TcbClock::tca1 gated by
+  the device header, evsys_pulse(ch) helper; compile-verified for
+  db28/32/48/64 and da28/64, test_avr_timer to re-run at the bench. Original order:
   EVSYS (docs/avrdx/evsys.md; avrdx/evsys.hpp primitives built and
   `events0` VERIFIED on the scope 2026-08-19: 512 Hz PIT/64 on PD2,
   button level, off, 4 Hz LED with no CPU; EventSystem static sugar
@@ -186,6 +239,84 @@ gets its dated home in `docs/design/` when taken.
   sugar gets its first user there) -> TCD. Datasheet DS40002247B chapters: EVSYS 16, PORTMUX 17,
   VREF 21, TCA 23, TCB 24, TCD 25, CCL 31, AC 32, ADC 33, DAC 34
   (errata F: ADC, DAC, CCL 2.4, TCA 2.12, TCB 2.13, TCD 2.14 items).
+- **Low-level review track (planned 2026-08-20, full plan in memory
+  low-level-review-plan).** Everything in avrdx/ gets the Working
+  discipline treatment, device by device. Phase 0 DONE 2026-08-20:
+  family-compile fixture (tools/check_family.sh, all 8 DA/DB
+  packages, negatives included) and bench baseline re-run after the
+  TCB edits - test_avr_timer 82/82, test_avr_analog 68/68 at 5 V
+  (VDD measured 5190 mV), test_avr_clock 15/15 (the old "14/14" note
+  lagged a suite addition).
+  Phase 1, the ex-EXHAUSTIVE set (findings in each doc's "Not covered
+  yet"): TCB DONE 2026-08-20 (tasks are ClockUsers, Timeout TOP =
+  ticks bench-proven exact +2-tick constant path offset, snapshot_on
+  edge/filter, 0x10000 truncation fixed, CFD block header-gated so
+  clock.hpp compiles on DA; suite now 14 tests, 117/117 incl. live
+  rebase 24->12->24 under a running meter, noise canceler = +3
+  CLK_PER differential, ALT1 verified on TCB2/PB4, CCMPINIT, div2/
+  tca1 clocks; findings: TIMEOUT re-fires CAPT at every CNT wrap
+  through TOP, arming a sync CAPT-in on a high channel reads a
+  spurious edge. Queued: util/ meter-AO usage type; console move to
+  free PF4/PF5 for TCB0/1 ALT1; RUNSTDBY bench pass, LOW priority,
+  needs a sleeping app) -> TCA DONE 2026-08-20 (reset carries CMDEN
+  through the split view - the escape bench-proven by test s; routes
+  = exactly the device header's codes, PORTG/TCA1-PORTE on 64-pin,
+  gated by PORT instance macros; CTRLC output_value verbs; split
+  flags/interrupts/ISR bodies + HunfEvent; PORTMUX_TCA1_gm and the
+  enum-OR latents fixed; suite 15 tests 124/124; TcaPwm16 PER=MAX
+  restated as the deliberate endpoint policy; PLUS TcaPwmCentered -
+  dual-slope center-aligned task, OVF-at-centre bench-proven by the
+  stamp technique, suite 16 tests 129/129. MeterSampler (meter AO,
+  util/) APPROVED by the user, scheduled for the util pass) -> CCL
+  DONE 2026-08-20 (lut_count/has_pins from the device header - LUT5
+  works pinless on 48-pin, another dead-instance latent like Tcb<2>;
+  LUT3-ALT refused; pin release on re-init; INTCTRL1 gated; DFF
+  comment/doc corrected: clocked, the latch is the transparent one;
+  suite tests l+i, 18 tests 141/141; findings: LINK/DFF/RS verified,
+  ALT1 on PC6 + release, TCA WO and AC as LUT inputs, filter delays
+  sync +2 / filter +4 CLK_PER differential, OSC32K filter ~4 cycles
+  = 2871 ticks; open: slow-domain-proof stamp protocol) -> AC DONE
+  2026-08-20 (ac_config_valid + port_exists refuse the PORTE
+  positives on small packages, runtime init returns false;
+  ac_dacref_* delegate to util/analog.hpp; state() comment fixed;
+  suite test w, 19 tests 159/159: pin-vs-pin with a GPIO negative -
+  no wires, AC1 + its OUT event consumed, INVERT, PA7 and PC6 OUT
+  pins, one interrupt per window-sense entry) -> ADC/DAC/VREF, CLKCTRL,
+  EVSYS DONE 2026-08-20, closing Phase 1: ADC gained debug_run,
+  window_signed, adc_neg_valid (enum-negative selects return false),
+  clock_ok() after rebase, init<cfg> returns bool, vdd_div10/
+  vddio2_div10 gated by #ifdef MVIO (DA reserves the codes); DAC
+  code() readback; test_avr_analog test x, 15 tests 81/81 (dacref
+  inputs +-7 counts, signed window, live rebase 24->12 within 3
+  counts). CLKCTRL: set_hz -> bool guard, config latches handled
+  (start_* stop an enabled oscillator first), DA external clock
+  implemented DATASHEET-TRUSTED (EXTS waited before selecting), task
+  restrictions documented as deliberate; test_avr_clock still 15/15.
+  EVSYS: the whole generator/user table filled (UPDI/MVIO/ZCD/OPAMP/
+  USART XCK/SPI SCK/TCD0 gens; IRDA/TCD/OPAMP users; EVOUTG; PORTG
+  pins; codes verified against the header's own enums; usart_count
+  tiers), EvOut family ALT1 rule + full unlisten teardown;
+  test_avr_timer still 159/159. Family fixture now 7 TUs x 8 MCUs +
+  20 negatives, all green. Phase 2: PORT DONE 2026-08-20 - Port<L>
+  resource (take_flags ISR body, slew, mask verbs, multi-pin engine),
+  PinConfig one-store configure (dodges the INVEN/ISC same-cycle
+  hazards), PinSense incl. level_low/input_disable, INLVL gated
+  (#ifdef PORT_INLVL_bm, DB only), Pin::flag/clear_flag with the W1C
+  plain-store discipline, fully_async fact (Px2/Px6),
+  PinSet::configure grouped by port at compile time; NEW SUITE
+  test_avr_pin 22/22 (findings: W1C clear lands one cycle after the
+  store - back-to-back read sees old flags; level_low re-fires
+  continuously; INVEN inverts the sense; input_disable freezes IN at
+  the last value); errata 2.9.1 (PD0 floating on DB 28/32)
+  documented, deliberately NOT wrapped (user ruling: silicon kludges
+  stay visible); port.md rewritten to shape; family TU pin.cpp + 3
+  negatives (INLVL on DA refused). -> CCL -> AC ->
+  ADC/DAC/VREF -> CLKCTRL (DA must compile) -> EVSYS tables. Phase 2,
+  never-reviewed: PORT (pin interrupts; buttons as the test) -> USART
+  (jumper cross-loopback, new suite test_avr_serial) -> SPI (host ->
+  client on SPI0/SPI1, 4 jumpers) -> TWI (host -> client TWI0/TWI1) ->
+  RTC (the counter proper) -> delay/platform sweep. Jumper tests
+  always check bench.md collisions first. TCD stays deferred.
 - **Target strata, positions taken (overview.md "Target strata" and
   the diagram docs/design/architecture.svg).** Tasks over resources
   (thin handles + task types named for what they do; explicit handle
@@ -231,6 +362,8 @@ gets its dated home in `docs/design/` when taken.
 
 ```bash
 pio test -e native            # host tests (doctest); no hardware needed
+tools/check_family.sh [name]  # every avrdx smoke TU compiles for all 8 DA/DB
+                              # packages; neg/ TUs must FAIL (definition of done)
 pio run -e <app>              # release build (-Os)
 pio run -e <app> -t upload    # flash via Atmel-ICE (UPDI)
 pio debug -e <app>-debug      # ALWAYS debug the -debug env
@@ -264,6 +397,7 @@ python tools/gen_apps.py      # after adding/removing src/apps/*.cpp (or a "// p
 platformio.ini          base [env], toolchain, Atmel-ICE upload, debug wiring
 apps.ini                generated: [env:<app>] + [env:<app>-debug] per app
 boards/AVR128DB48.json   custom bare-metal board (128K flash / 16K RAM)
+tools/check_family.sh    family compile check over test/family/ (see above)
 tools/gen_apps.py        scans src/apps/*.cpp -> apps.ini; copies each app's
                          "// pio: <option> = <value>" header lines into its envs
 tools/pio_flags.py       per-language AVR flags (build-type aware) +

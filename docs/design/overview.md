@@ -234,6 +234,31 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   belong in a per-board unit that can also list resource claims and
   reject a double use at compile time. Both are built on the second
   target, when there is something to compare.
+- **A driver covers its family, not its bench chip.** brio is a
+  framework: the target is the whole device range (every instance,
+  every mode, every routing option of the chapter's register
+  description, both families' errata), not the subset today's app
+  exercises. What is knowingly left out is declared in the doc's "Not
+  covered yet" - never silently absent. A driver is done only when it
+  compiles for EVERY package of the family - a smoke translation unit
+  per package, plus negative tests proving that what must be refused
+  fails to compile - and its `test_<target>_<subject>` suite passes on
+  the bench. The family compile costs seconds and needs no hardware;
+  the bench chip alone masks half the family.
+- **Package variability, the pattern.** The device header is the
+  authority, at three granularities. A missing INSTANCE is compiled
+  out in tiers on its header symbol (`#if defined(TCB4)`). An instance
+  whose pin POSITION the package does not bond stays fully usable:
+  `port_exists` + `if constexpr` compile the missing branch out (a
+  run-time `if` on a missing `Pin` kills the whole instance at
+  compile time), the compile-time `init<cfg>` refuses the config with
+  a static_assert, the run-time `init(cfg)` returns false and
+  programs nothing. A missing REGISTER or enum value is gated on its
+  header symbol (`EVSYS_SWEVENTB_gm`, `TCA1`). Pin-level bonding
+  inside an existing port waits for the device tables. Corollary: a
+  fact stated in a doc or header comment ("this LUT has no ALT1")
+  either has a guard in the code or is listed as a driver gap -
+  knowledge the code does not enforce is a bug deferred.
 
 ## Style rulings
 
@@ -260,7 +285,7 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   time, and knob-heavy peripherals (ADC, TCD, CCL) get a `constexpr`
   config struct with designated initializers, not a meaning-abstracting
   API. The rule holds as long as adding to the driver stays easier
-  than bypassing it; bench-only probes (`mcp_diag`) are declared
+  than bypassing it; bench-only probes are declared
   outside it, and what they find goes into a driver afterwards.
 
 ## ISR binding pattern

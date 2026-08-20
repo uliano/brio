@@ -1,7 +1,11 @@
 # CCL - the configurable custom logic (AVR DA/DB)
 
-> **EXHAUSTIVE.** Systematic review of the chapter and errata, driver
-> written against them, bench suite passing. Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (CCL
+> **PROVISIONAL.** The register option space is fully exposed with
+> the package and legality guards in place (LUT counts and pin
+> existence from the device header, LUT3-ALT refused), and the
+> sequencers, LINK, peripheral inputs and filter delays are
+> bench-verified; the typed per-input instance legality is not - the
+> gaps are in "Not covered yet". Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (CCL
 > chapter 31, PORTMUX 17.3.2, EVSYS 16 generators 0x10-0x15 / users
 > 0x00-0x0B, I/O multiplexing chapter 3), errata DS80000915F (2.4.1,
 > 2.4.2). Complements: TB3218 "Getting Started with CCL", AN2434, the
@@ -13,7 +17,8 @@
 ## What the silicon does
 
 One CCL with six look-up tables (LUT0..LUT5 on 48/64-pin parts,
-LUT0..3 on 28/32) grouped in three pairs (0-1, 2-3, 4-5), each pair
+LUT0..3 on 28/32 - the driver takes the count from the device
+header) grouped in three pairs (0-1, 2-3, 4-5), each pair
 owning one sequencer. A LUT is: three inputs chosen from a menu, an
 8-bit truth table (`TRUTHn[k]` = the output for input pattern k, IN2
 the MSB), then optionally a synchronizer or a glitch filter, then
@@ -43,13 +48,16 @@ Facts that matter to code:
   be written only while the (even) LUT is disabled - together with
   ENABLE = 1 in the same write, never together with ENABLE = 0; a
   `SEQCTRL` written after the even LUT is enabled is silently ignored
-  (bench: the JK never engaged, the LUT output was the bare truth table). On
-  top of that, **errata 2.4.1 (A4/A5, our A5)**: reconfiguring ONE
+  (measured: the JK never engages, the LUT outputs the bare truth
+  table). On top of that, **errata 2.4.1 (DB rev A4/A5; fixed on B0;
+  the DA has no such erratum)**: reconfiguring ONE
   LUT requires the whole CCL disabled (`CTRLA.ENABLE = 0`), which
   drops every other LUT meanwhile - a driver must build the complete
   configuration first and enable once; a runtime change of one LUT is
   a glitch on all of them. Changing a clock source also wants the CCL
-  disabled.
+  disabled. On A4/A5 the CCL interrupt wakes the device from standby
+  only when the LUT path is fully asynchronous (no filter, no edge
+  detector - the errata document's sleep clarification).
 - **Clock (`CLKSRC`)** per LUT, used by the filter, the edge detector
   and (from the even LUT) the sequencer: CLK_PER, the LUT's own
   TRUTHSEL[2] input (then input 2 is seen as low in the truth table),
@@ -61,20 +69,26 @@ Facts that matter to code:
   detector REQUIRES a filter option. Disabling a LUT clears its
   filter/edge logic one clock later.
 - **Sequencer (`SEQSEL`)** per pair, clocked with the even LUT: D
-  flip-flop (D = even, G = odd: transparent when G = 1), JK (J = even,
-  K = odd, toggles on 1/1), D latch (D = even, G = odd), RS latch (S =
-  even, R = odd, 1/1 forbidden). Disabling the even LUT clears the
+  flip-flop (D = even, EN = odd, CLOCKED by the even LUT's clock),
+  JK (J = even, K = odd, toggles on 1/1), D latch (D = even, G =
+  odd: the TRANSPARENT one), RS latch (S = even, R = odd, 1/1
+  forbidden). Disabling the even LUT clears the
   flip-flop asynchronously (reset held one clock). The sequencer
   output is what FEEDBACK returns and what the pair's output carries.
 - **Pins** (PORTMUX `CCLROUTEA`, one bit per LUT moves only the
   OUT): LUTn inputs IN0/IN1/IN2 are pins 0/1/2 and OUT is pin 3
   (ALT1: pin 6) of port A/C/D/F/B/G for LUT0/1/2/3/4/5; LUT3 has no
-  ALT1 (PF6 is RESET). Note the bench collisions: LUT0 owns PA0..PA3
-  (PA0/PA1 are the crystal), LUT3 PF0..PF3, LUT1 PC0..PC3 = TCA0 PORTC
-  WO0..3, LUT2 PD0..PD3 (PD1/PD2 are the analog suite's wires). `OUTEN`
+  ALT1 (PF6 is RESET) and the driver refuses it; LUT5's port is
+  PORTG (64-pin only) - elsewhere the LUT works on internal signals
+  and events, and the driver refuses only its pin faces
+  (`has_pins`/`has_alt_pin` are the facts; a re-init away from
+  `output_pin` releases the previously taken pin). LUT1's pins PC0..PC3 coincide with TCA0's
+  PORTC route WO0..3 (the board-level collisions are in
+  [bench.md](../bench.md)). `OUTEN`
   drives the pin; the pin's direction must be set by PORT.
-- **Errata 2.4.2** (A4 and 28/32-pin only): LINK into LUT3 dead - not
-  our silicon.
+- **Errata 2.4.2**: LINK into LUT3 dead - on DB only rev A4 and the
+  28/32-pin parts; on DA the same item is never fixed on 28/32-pin
+  parts (all revisions).
 - The CCL is a level generator (0x10 + n) for the event system, async;
   its event users take the channel without detection (a level or a
   pulse reaches the truth table as is).
@@ -85,7 +99,7 @@ Facts that matter to code:
 |--------|-------|
 | `LutConfig` | `in0`/`in1`/`in2` (`LutInput`: mask, feedback, link, event_a, event_b, pin, ac, zcd, usart_txd, spi0, tca0, tca1, tcb, tcd0 - the instance follows the input index), `truth` (TRUTHn; build it with `lut_truth(lambda of three bools)`), `filter` (`LutFilter`: none, sync, filter), `edge_detect` (needs a filter), `clock` (`LutClock`: clk_per, input2, oschf, osc32k, osc1k), `output_pin`, `alt_pin`, `interrupt` (`LutSense`: none, rising, falling, both) |
 | `Ccl` | `enable(run_standby)`, `disable` (the state every reconfiguration starts from), `enabled`, `sequencer<pair>(Sequencer)` (none, d_flip_flop, jk_flip_flop, d_latch, rs_latch), `take_flags` (ISR body of CCL_CCL_vect: bit n per LUT, cleared) |
-| `Lut<n>` | `init<cfg>()` / `init(cfg)` (block disabled: inputs, truth, route, pin, sense, then CTRLA with ENABLE), `enable`/`disable` (this LUT), `sense(LutSense)`, `flag`/`clear_flag`, `event_a_on(channel)`/`event_b_on(channel)`, the register accessors; `In0`/`In1`/`In2`/`OutDefault`/`OutAlt` pin types, `port`; `OutEvent` generator, `EventA`/`EventB` users |
+| `Lut<n>` | `init<cfg>()` / `init(cfg)` (block disabled: inputs, truth, route, pin, sense, then CTRLA with ENABLE), `enable`/`disable` (this LUT), `sense(LutSense)`, `flag`/`clear_flag`, `event_a_on(channel)`/`event_b_on(channel)`, the register accessors; `In0`/`In1`/`In2`/`OutDefault`/`OutAlt` pin types, `port`, `has_pins`/`has_alt_pin` (this package's facts); `OutEvent` generator, `EventA`/`EventB` users |
 | `ToggleFlipFlop<pair>` | `init(toggle_channel, output_pin, alt_pin)`: JK on LUT 2p/2p+1, J = K = the event: one toggle per pulse (a divide-by-two, no CPU); `Even`/`Odd` |
 | helpers | `lut_truth(f)`, `lut_config_valid`, `lut_port(n)` |
 
@@ -134,6 +148,17 @@ ISR(CCL_CCL_vect) { const uint8_t who = brio::Ccl::take_flags(); ... }
 
 ## Bench findings
 
+`test_avr_timer` tests l and i (A5): LINK verified (LUT4 passes
+LUT5's constant both ways onto PB3); the DFF follows a 1 kHz D
+exactly (EN high, CLK_PER clock); the RS latch sets and resets from
+two software channels, read on LUT2's pin; LUT1's ALT1 drives PC6
+and a re-init without the pin releases its direction. TCA0 WO0 as a
+LUT input reads 24000 ticks exact; AC0 as a LUT input counts 3 DAC
+crossings; the filter delays measured DIFFERENTIALLY (the stamp
+technique): sync +2, filter +4 CLK_PER exact, and the same filter on
+OSC32K delays ~4 cycles (2871 CLK_PER measured) - the low-power
+debouncer is real.
+
 `test_avr_timer` test c (A5): LUT4 as AND and then OR of PB0/PB1 on
 PB3 follows the truth table on the pins (reconfigured with the block
 disabled, per 2.4.1); the JK flip-flop on LUT0/1 with J = K = a TCB's
@@ -146,10 +171,19 @@ is enabled (see above).
 
 ## Not covered yet
 
-The other sequencers as tasks (D flip-flop, latches - the resource does
-them, no task names them), LINK chains, the peripheral inputs beyond
-events and pins (TCA/TCB WO, AC, USART, SPI as LUT inputs: the menu is
-typed, no test drives them), the alternate clocks (OSC32K/OSC1K for a
-low-power filter), RUNSTDBY, the filter delay measured in clocks,
-typed per-input legality of the instance (today: the enum + the doc
-table).
+Driver gaps:
+
+- Typed per-input legality of the peripheral instances (today: the
+  enum + the table above).
+
+Implemented but not bench-verified:
+
+- The D latch as a sequencer (DFF, JK and RS are bench-verified);
+  FEEDBACK as an input; the D-latch/DFF distinction under a slow LUT
+  clock.
+- The peripheral inputs beyond events, pins, TCA WO and AC (TCB WO,
+  USART, SPI: the menu is typed, no test drives them).
+- `LutClock::input2` and OSC1K; RUNSTDBY (queued, LOW priority -
+  including the A4/A5 wake-only-if-asynchronous clarification).
+- A slow-domain-proof stamp protocol (the OSC32K delay measurement
+  is single-shot today: a back-to-back repeat races the re-arm).

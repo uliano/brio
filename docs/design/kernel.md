@@ -35,7 +35,7 @@ ISRs are allowed to do exactly one kernel thing: `post()` an event
 (a few bytes copied inside a brief critical section).
 
 This is the "QV" flavor of active objects (cooperative, one stack,
-priority by scan order) described in Samek's book, rewritten from
+priority by scan order) described in Samek's book, written from
 scratch (clean room: concepts only, never the QP source).
 
 Everything is a **monostate**: AOs, drivers, queues' owners, the
@@ -154,8 +154,9 @@ it inherits from all the lambdas and pulls all their `operator()`
 into one overload set, so `std::visit(Overloaded{...}, e)` dispatches
 by overload resolution at compile time (class template argument
 deduction + pack expansion of using-declarations). `match` forwards
-to exactly that and compiles to the same switch (measured: identical
-flash before and after the switch on two bench apps). `std::variant` needs its alternatives to
+to exactly that and compiles to the same switch (measured on two
+bench apps: flash identical to spelling out the `std::visit` +
+`Overloaded` dispatch by hand). `std::variant` needs its alternatives to
 be complete types and, for the queue, trivially copyable -
 `EventQueue` static-asserts this: an event may be copied by an ISR,
 byte-wise, and no destructor will ever run for it.
@@ -294,9 +295,9 @@ the CRTP-monostate base an AO derives from; it gives the AO its
   state.
 
 Full HSM (parent pointers, bubbling, LCA entry/exit chains) gets
-built only when a real AO demands it; states-as-types (sml-style) was
-noted as a possible probe and rejected as foundation (heaviest
-machinery, hostile errors, readability drops).
+built only when a real AO demands it; states-as-types (sml-style) is
+rejected as foundation (heaviest machinery, hostile errors,
+readability drops).
 
 **C++ note - CRTP monostate.** `struct Buttons : brio::Fsm<Buttons,
 Tick>`: the derived class passes *itself* as the first template
@@ -389,8 +390,8 @@ a static object declared next to its owner AO holding a payload; when
 it matures, the payload is `post`ed to that AO. The tick ISR only
 advances the counter and, by firing, wakes the CPU; `process()`, once
 per loop turn, compares `P::now()` with the armed deadlines and posts
-matured events in main context (the "T2" decision; the ISR-side
-alternative was rejected: an ISR whose duration grows with armed
+matured events in main context (the ISR-side
+alternative is rejected: an ISR whose duration grows with armed
 timers is the antithesis of short-dumb-ISR, and buys no precision
 since a posted event waits for the current RTC step anyway).
 

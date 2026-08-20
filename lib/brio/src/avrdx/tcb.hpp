@@ -61,8 +61,7 @@
  *  - errata 2.13.1 (A4/A5): in PWM8 CCMP and CNT are 16-bit only -
  *    Pwm8 writes CCMP as one word (period and duty together);
  *  - routes (PORTMUX.TCBROUTEA, one bit per instance): TCB0 PA2 /
- *    PF4, TCB1 PA3 / PF5, TCB2 PC0 / PB4, TCB3 PB5 / PC1. On the bench
- *    board PF4/PF5 are the console: TCB0/TCB1 output on PA2/PA3.
+ *    PF4, TCB1 PA3 / PF5, TCB2 PC0 / PB4, TCB3 PB5 / PC1.
  */
 
 #pragma once
@@ -97,7 +96,9 @@ enum class TcbClock : uint8_t {
     div1 = TCB_CLKSEL_DIV1_gc,     ///< CLK_PER
     div2 = TCB_CLKSEL_DIV2_gc,     ///< CLK_PER / 2
     tca0 = TCB_CLKSEL_TCA0_gc,     ///< CLK_TCA of TCA0 (its prescaled clock)
-    tca1 = TCB_CLKSEL_TCA1_gc,     ///< CLK_TCA of TCA1
+#ifdef TCA1
+    tca1 = TCB_CLKSEL_TCA1_gc,     ///< CLK_TCA of TCA1 (48/64-pin parts)
+#endif
     event = TCB_CLKSEL_EVENT_gc,   ///< positive edges of the COUNT event input
 };
 
@@ -143,7 +144,9 @@ constexpr uint32_t tcb_ticks_for_us(uint32_t tick_hz, uint32_t us) {
 
 template <uint8_t n>
 class Tcb {
-#ifdef TCB3
+#if defined(TCB4)
+    static_assert(n <= 4, "AVR DA/DB 64-pin: TCB0..TCB4");
+#elif defined(TCB3)
     static_assert(n <= 3, "AVR DA/DB 48-pin: TCB0..TCB3 (TCB4 on 64 pins only)");
 #else
     static_assert(n <= 2, "AVR DA/DB 28/32-pin: TCB0..TCB2");
@@ -154,15 +157,28 @@ public:
 
     static constexpr uint8_t index = n;
 
-    /// The waveform output pin in the two PORTMUX positions.
+    /// The waveform output pin in the two PORTMUX positions (family
+    /// table, 17.3.8; whether THIS package bonds a position is
+    /// `has_default_pin`/`has_alt_pin` below).
     using OutDefault =
         std::conditional_t<n == 0, Pin<'A', 2>,
         std::conditional_t<n == 1, Pin<'A', 3>,
-        std::conditional_t<n == 2, Pin<'C', 0>, Pin<'B', 5>>>>;
+        std::conditional_t<n == 2, Pin<'C', 0>,
+        std::conditional_t<n == 3, Pin<'B', 5>, Pin<'G', 3>>>>>;
     using OutAlt =
         std::conditional_t<n == 0, Pin<'F', 4>,
         std::conditional_t<n == 1, Pin<'F', 5>,
-        std::conditional_t<n == 2, Pin<'B', 4>, Pin<'C', 1>>>>;
+        std::conditional_t<n == 2, Pin<'B', 4>,
+        std::conditional_t<n == 3, Pin<'C', 1>, Pin<'C', 6>>>>>;
+
+    /// Port-level bonding facts of this package (e.g. TCB2's ALT1 is
+    /// PB4 and 28/32-pin parts have no PORTB: the instance stays fully
+    /// usable, only `alt_pin` is refused). Pin-level absence within an
+    /// existing port (PF4/PF5 on 28-pin) awaits the device tables.
+    /// Note: TCB4's ALT1 (PC6) is dead on every silicon revision,
+    /// errata 2.13.2 - bonded is not working.
+    static constexpr bool has_default_pin = port_exists(OutDefault::port_letter);
+    static constexpr bool has_alt_pin = port_exists(OutAlt::port_letter);
 
     /// The event vocabulary of this instance (evsys.hpp).
     using CaptEvent = EvTcbCapt<n>;      ///< generator: CAPT flag set
@@ -172,21 +188,32 @@ public:
 
     // ---- configuration ----------------------------------------------------
 
-    /// Compile-time form: every register value folded.
+    /// Compile-time form: every register value folded, the pin
+    /// positions this package lacks refused here.
     template <TcbConfig cfg>
-    static void init() { init(cfg); }
+    static void init() {
+        static_assert(!cfg.alt_pin || has_alt_pin,
+                      "this package does not bond this TCB's ALT1 position");
+        static_assert(!cfg.output || cfg.alt_pin || has_default_pin,
+                      "this package does not bond this TCB's default position");
+        init(cfg);
+    }
 
     /// Run-time form. Disables, routes and drives the output pin if asked,
     /// writes mode/event/compare, parks CNT (at TOP for single-shot: no
     /// spurious pulse on enable), clears the flags, enables with the
     /// clock. Interrupts stay off: the task or the app enables them.
-    static void init(const TcbConfig& cfg) {
+    /// False (and nothing programmed) when the config asks for a pin
+    /// position this package does not bond.
+    static bool init(const TcbConfig& cfg) {
+        if constexpr (!has_alt_pin) { if (cfg.alt_pin) return false; }
+        if constexpr (!has_default_pin) { if (cfg.output && !cfg.alt_pin) return false; }
         auto& t = regs();
         t.CTRLA = 0;                                   // never change mode while enabled
         t.INTCTRL = 0;
         route(cfg.alt_pin);
         if (cfg.output) {
-            if (cfg.alt_pin) OutAlt::output(); else OutDefault::output();
+            drive_output(cfg.alt_pin);
         }
         t.CTRLB = static_cast<uint8_t>(
             static_cast<uint8_t>(cfg.mode) |
@@ -207,6 +234,7 @@ public:
             (cfg.sync_update ? TCB_SYNCUPD_bm : 0) |
             (cfg.run_standby ? TCB_RUNSTDBY_bm : 0) |
             TCB_ENABLE_bm);
+        return true;
     }
 
     static void enable() { regs().CTRLA |= TCB_ENABLE_bm; }
@@ -267,8 +295,25 @@ public:
         else if constexpr (n == 1) return TCB1;
         else if constexpr (n == 2) return TCB2;
 #ifdef TCB3
-        else return TCB3;
+        else if constexpr (n == 3) return TCB3;
 #endif
+#ifdef TCB4
+        else return TCB4;
+#endif
+    }
+
+    /// Drive the selected WO position as an output. The branch for a
+    /// position this package lacks is compiled OUT (a runtime `if`
+    /// would instantiate the missing Pin and kill the whole instance);
+    /// init() has already refused such a config.
+    static void drive_output(bool alt) {
+        if constexpr (has_alt_pin && has_default_pin) {
+            if (alt) OutAlt::output(); else OutDefault::output();
+        } else if constexpr (has_default_pin) {
+            (void)alt; OutDefault::output();
+        } else if constexpr (has_alt_pin) {
+            (void)alt; OutAlt::output();
+        }
     }
 
 private:
@@ -360,6 +405,10 @@ private:
 /// than" detector (edge = false: start on the rising edge, stop on the
 /// falling - CAPT = held longer than us; edge = true: the reverse).
 /// After the stop edge the counter freezes until the next start edge.
+/// TOP = ticks: CAPT fires when CNT reaches TOP, i.e. `ticks` periods
+/// after the (synchronized) start edge - never before `us` ("at
+/// least"; same comparison as single-shot, bench-measured exact).
+/// A ClockUser: rebase() keeps the microseconds on a clock change.
 /// ISR body: expired() clears CAPT.
 template <typename T>
 struct Timeout {
@@ -368,18 +417,31 @@ struct Timeout {
     template <typename Clock, uint8_t ch>
     static bool init(Clock clock, uint32_t us, EventChannel<ch> c,
                      bool edge = false, bool filter = false) {
-        const TcbTiming w = tcb_timing_for_us(clock_hz(clock), us);
-        if (w.ticks == 0) return false;
-        T::init({.mode = TcbMode::timeout, .clock = w.clock,
-                 .compare = static_cast<uint16_t>(w.ticks - 1),
-                 .event_input = true, .edge = edge, .filter = filter});
+        static_assert(clock_follows<Clock, Timeout>(),
+                      "Timeout on a DynamicClock that does not list it: its microseconds would go stale");
+        us_ = us; edge_ = edge; filter_ = filter;
+        if (!set(clock_hz(clock))) return false;
         T::capture_on(c);
-        T::enable_capt_interrupt(true);
         return true;
     }
+    static void rebase(uint32_t clk_per_hz) { (void)set(clk_per_hz); }
     [[gnu::always_inline]] static void expired() { T::clear_capt(); }
     /// Still between the start edge and the stop edge.
     static bool pending() { return T::running(); }
+
+private:
+    static bool set(uint32_t clk_per_hz) {
+        const TcbTiming w = tcb_timing_for_us(clk_per_hz, us_);
+        if (w.ticks == 0 || w.ticks > 0xFFFFu) return false;   // TOP is the ticks themselves here
+        T::init({.mode = TcbMode::timeout, .clock = w.clock,
+                 .compare = static_cast<uint16_t>(w.ticks),
+                 .event_input = true, .edge = edge_, .filter = filter_});
+        T::enable_capt_interrupt(true);
+        return true;
+    }
+    static inline uint32_t us_ = 0;
+    static inline bool edge_ = false;
+    static inline bool filter_ = false;
 };
 
 /// OneShotPulse<Tcb>: a pulse of a width on WO, started by an event
@@ -400,22 +462,42 @@ struct OneShotPulse {
         bool filter = false;
     };
 
-    /// Width in microseconds ("at least"); false if it does not fit.
+    /// Width in microseconds ("at least"); false if it does not fit
+    /// or the package does not bond the requested pin position.
+    /// This form makes the task a ClockUser: rebase() keeps the width.
     template <typename Clock, uint8_t ch>
     static bool init(Clock clock, uint32_t width_us, EventChannel<ch> trigger, Options o = {}) {
+        static_assert(clock_follows<Clock, OneShotPulse>(),
+                      "OneShotPulse on a DynamicClock that does not list it: its width would go stale");
         const TcbTiming w = tcb_timing_for_us(clock_hz(clock), width_us);
-        if (w.ticks == 0) return false;
-        init_ticks(w.clock, static_cast<uint16_t>(w.ticks), trigger, o);
+        if (w.ticks == 0 || w.ticks > 0xFFFFu) return false;
+        if (!init_ticks(w.clock, static_cast<uint16_t>(w.ticks), trigger, o)) return false;
+        width_us_ = width_us; options_ = o;
         return true;
     }
-    /// Width in ticks of the chosen clock (div1/div2/a TCA's clock).
+    /// Width in ticks of the chosen clock (div1/div2/a TCA's clock) -
+    /// the tick domain is the caller's, so rebase() leaves it alone.
+    /// False when this package does not bond the requested pin position.
     template <uint8_t ch>
-    static void init_ticks(TcbClock clock, uint16_t width_ticks, EventChannel<ch> trigger, Options o = {}) {
+    static bool init_ticks(TcbClock clock, uint16_t width_ticks, EventChannel<ch> trigger, Options o = {}) {
+        width_us_ = 0;
         channel_ = ch;
-        T::init({.mode = TcbMode::single_shot, .clock = clock, .compare = width_ticks,
-                 .event_input = true, .edge = o.any_edge, .filter = o.filter,
-                 .async = o.async, .output = true, .alt_pin = o.alt_pin});
+        if (!T::init({.mode = TcbMode::single_shot, .clock = clock, .compare = width_ticks,
+                      .event_input = true, .edge = o.any_edge, .filter = o.filter,
+                      .async = o.async, .output = true, .alt_pin = o.alt_pin})) return false;
         T::capture_on(trigger);
+        return true;
+    }
+    /// Recompute the microsecond width on the new CLK_PER (best effort,
+    /// like PeriodicTick: an unexpressible width keeps the old pulse).
+    static void rebase(uint32_t clk_per_hz) {
+        if (width_us_ == 0) return;                  // tick-domain init: the owner converts
+        const TcbTiming w = tcb_timing_for_us(clk_per_hz, width_us_);
+        if (w.ticks == 0 || w.ticks > 0xFFFFu) return;
+        (void)T::init({.mode = TcbMode::single_shot, .clock = w.clock,
+                       .compare = static_cast<uint16_t>(w.ticks),
+                       .event_input = true, .edge = options_.any_edge, .filter = options_.filter,
+                       .async = options_.async, .output = true, .alt_pin = options_.alt_pin});
     }
     /// Change the width for the NEXT pulse (takes effect at once: do it
     /// while idle).
@@ -423,15 +505,14 @@ struct OneShotPulse {
 
     /// Software trigger: a pulse on the trigger channel (ORed with the
     /// channel's generator, so it works on a pin-sourced channel too).
-    static void fire() {
-        if (channel_ < 8) EVSYS.SWEVENTA = static_cast<uint8_t>(1u << channel_);
-        else EVSYS.SWEVENTB = static_cast<uint8_t>(1u << (channel_ - 8));
-    }
+    static void fire() { evsys_pulse(channel_); }
     static bool busy() { return T::running(); }
     [[gnu::always_inline]] static void pulse_done() { T::clear_capt(); }
 
 private:
     static inline uint8_t channel_ = 0;
+    static inline uint32_t width_us_ = 0;
+    static inline Options options_{};
 };
 
 /// PulseCounter<Tcb>: counts the positive edges of an event (a pin, a
@@ -450,8 +531,16 @@ struct PulseCounter {
         T::init({.mode = TcbMode::capture, .clock = TcbClock::event, .compare = 0});
         T::count_on(source);
     }
+    /// Another event latches CNT into CCMP; `falling`/`filter` shape
+    /// the snapshot edge (EVCTRL rewritten, a flag set by the change is
+    /// cleared).
     template <uint8_t ch>
-    static void snapshot_on(EventChannel<ch> c) { T::capture_on(c); }
+    static void snapshot_on(EventChannel<ch> c, bool falling = false, bool filter = false) {
+        T::capture_on(c);
+        T::regs().EVCTRL = static_cast<uint8_t>(TCB_CAPTEI_bm |
+            (falling ? TCB_EDGE_bm : 0) | (filter ? TCB_FILTER_bm : 0));
+        T::clear_capt();
+    }
 
     static uint16_t count() { return T::count(); }
     static void reset() { T::count(0); T::clear_ovf(); }
@@ -503,8 +592,7 @@ struct CascadedCounter {
     /// the two captures. Bounded wait: a miswired pair returns stale
     /// values instead of hanging.
     static uint32_t read() {
-        if (snapshot_ < 8) EVSYS.SWEVENTA = static_cast<uint8_t>(1u << snapshot_);
-        else EVSYS.SWEVENTB = static_cast<uint8_t>(1u << (snapshot_ - 8));
+        evsys_pulse(snapshot_);
         for (uint8_t i = 0; i < 16 && !(Lsb::capt_flag() && Msb::capt_flag()); ++i) {
         }
         return captured();
@@ -544,9 +632,15 @@ struct CaptureMeterBase {
         return o;
     }
 
+    /// ClockUser: on a CLK_PER change only the conversion arithmetic
+    /// moves (hz()/us()/tick_hz()); the counter keeps its divisor and
+    /// a capture in flight across the switch is the caller's garbage.
+    static void rebase(uint32_t clk_per_hz) { tick_hz_ = tcb_tick_hz(clk_per_hz, tclk_); }
+
 protected:
     template <typename Clock, uint8_t ch>
     static void setup(Clock clock, TcbMode mode, TcbClock tclk, EventChannel<ch> c, bool edge, bool filter) {
+        tclk_ = tclk;
         tick_hz_ = tcb_tick_hz(clock_hz(clock), tclk);
         adjust_ = tclk == TcbClock::div1 ? 1 : 0;       // the restart cycle lost at CLK_PER (bench)
         T::init({.mode = mode, .clock = tclk, .compare = 0,
@@ -556,6 +650,7 @@ protected:
     }
     static inline uint32_t tick_hz_ = 0;
     static inline uint8_t adjust_ = 1;
+    static inline TcbClock tclk_ = TcbClock::div1;
 };
 
 /// FrequencyMeter<Tcb>: the period of a signal, captured between two
@@ -576,6 +671,8 @@ struct FrequencyMeter : CaptureMeterBase<T> {
     template <typename Clock, uint8_t ch>
     static void init(Clock clock, EventChannel<ch> source, TcbClock tclk = TcbClock::div1,
                      bool falling = false, bool filter = false) {
+        static_assert(clock_follows<Clock, FrequencyMeter>(),
+                      "FrequencyMeter on a DynamicClock that does not list it: hz()/us() would go stale");
         CaptureMeterBase<T>::setup(clock, TcbMode::frequency, tclk, source, falling, filter);
     }
     [[gnu::always_inline]] static uint16_t period_ticks() { return static_cast<uint16_t>(T::capture() + CaptureMeterBase<T>::adjust_); }
@@ -589,6 +686,8 @@ struct PulseWidthMeter : CaptureMeterBase<T> {
     template <typename Clock, uint8_t ch>
     static void init(Clock clock, EventChannel<ch> source, TcbClock tclk = TcbClock::div1,
                      bool low = false, bool filter = false) {
+        static_assert(clock_follows<Clock, PulseWidthMeter>(),
+                      "PulseWidthMeter on a DynamicClock that does not list it: hz()/us() would go stale");
         CaptureMeterBase<T>::setup(clock, TcbMode::pulse_width, tclk, source, low, filter);
     }
     [[gnu::always_inline]] static uint16_t width_ticks() { return static_cast<uint16_t>(T::capture() + CaptureMeterBase<T>::adjust_); }
@@ -609,6 +708,8 @@ struct DutyMeter : CaptureMeterBase<T> {
     template <typename Clock, uint8_t ch>
     static void init(Clock clock, EventChannel<ch> source, TcbClock tclk = TcbClock::div1,
                      bool inverted = false, bool filter = false) {
+        static_assert(clock_follows<Clock, DutyMeter>(),
+                      "DutyMeter on a DynamicClock that does not list it: hz()/us() would go stale");
         CaptureMeterBase<T>::setup(clock, TcbMode::frequency_pulse_width, tclk, source, inverted, filter);
     }
     [[gnu::always_inline]] static Reading reading() {
@@ -627,6 +728,9 @@ struct DutyMeter : CaptureMeterBase<T> {
 /// (period + 1)). duty(v): high for v ticks of period + 1; v = 0 is a
 /// clean low, v = max overrides the pin high from PORT (the hardware's
 /// best is period / (period + 1)), the same endpoint policy as TcaPwm.
+/// Ratiometric on purpose - NOT a ClockUser: the duty survives a clock
+/// change, only the PWM frequency moves with CLK_PER (a LED does not
+/// care; an app that does re-inits).
 /// Errata 2.13.1: CCMP written as one 16-bit word.
 template <typename T, uint8_t period = 255>
 struct Pwm8 {
@@ -635,15 +739,16 @@ struct Pwm8 {
 
     static constexpr uint16_t max = period;
 
-    static void init(TcbClock clock = TcbClock::div1, bool alt_pin = false) {
+    /// False when this package does not bond the requested pin position.
+    static bool init(TcbClock clock = TcbClock::div1, bool alt_pin = false) {
         alt_ = alt_pin;
-        T::init({.mode = TcbMode::pwm8, .clock = clock,
-                 .compare = static_cast<uint16_t>(period), .output = true, .alt_pin = alt_pin});
+        return T::init({.mode = TcbMode::pwm8, .clock = clock,
+                        .compare = static_cast<uint16_t>(period), .output = true, .alt_pin = alt_pin});
     }
     static void duty(uint16_t v) {
         if (v >= max) {
             T::regs().CTRLB &= static_cast<uint8_t>(~TCB_CCMPEN_bm);
-            if (alt_) T::OutAlt::set(); else T::OutDefault::set();
+            set_pin();
             return;
         }
         T::compare(static_cast<uint16_t>((v << 8) | period));   // one word: errata 2.13.1
@@ -651,6 +756,18 @@ struct Pwm8 {
     }
 
 private:
+    /// Pin high from PORT; the position this package lacks is compiled
+    /// out (init() has already refused it, alt_ cannot select it).
+    static void set_pin() {
+        if constexpr (T::has_alt_pin && T::has_default_pin) {
+            if (alt_) T::OutAlt::set(); else T::OutDefault::set();
+        } else if constexpr (T::has_default_pin) {
+            T::OutDefault::set();
+        } else if constexpr (T::has_alt_pin) {
+            T::OutAlt::set();
+        }
+    }
+
     static inline bool alt_ = false;
 };
 

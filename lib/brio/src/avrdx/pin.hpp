@@ -4,16 +4,27 @@
 
 #include "util/pwm_channel.hpp"
 
-// Compile-time GPIO pin abstraction for the AVR Dx families, register-level.
-// Ported from uliano/AVR-Multislope (lib/core/src/pin.hpp).
+// The AVR DA/DB I/O pins (PORT, DS40002247B ch. 18), register-level:
 //
-// Uses VPORT for single-cycle SBI/CBI instructions on set/clear/read, and the
-// regular PORT for atomic OUTTGL/DIRSET/DIRCLR operations. Use invert(true)
-// for active-low signals (hardware inversion via INVEN).
+//  Port<'C'>       the port RESOURCE - what a pin does not possess:
+//                  the shared interrupt's flags (one vector per port,
+//                  take_flags() is the ISR body), the port-wide slew
+//                  limit, the multi-pin configuration engine, native
+//                  mask operations;
+//  Pin<'A', 5>     the per-pin face: direction/value on VPORT (SBI/
+//                  CBI), configure(PinConfig) as ONE PINnCTRL store
+//                  (invert, pullup, input level, sense), the single-
+//                  field RMW verbs, flag()/clear_flag(); a PwmChannel
+//                  (max 1) and a PinRef factory;
+//  PinSet<...>     up to 8 pins on any ports as one bit mask; its
+//                  configure() groups by port at compile time and
+//                  rides the multi-pin engine.
 //
 //   using Led = brio::Pin<'A', 5>;   // PA5
 //   Led::output();                 // PORTA.DIRSET = PIN5_bm
 //   Led::toggle();                 // PORTA.OUTTGL = PIN5_bm
+//   Led::configure({.pullup = true, .sense = brio::PinSense::falling});
+//   ISR(PORTA_PORT_vect) { const uint8_t who = brio::Port<'A'>::take_flags(); ... }
 
 namespace brio {
 
@@ -38,6 +49,30 @@ struct PinRef {
     }
     constexpr bool valid() const { return vport != nullptr; }
 };
+
+/// Whether this package bonds out the port at all: 28/32-pin parts
+/// lack PORTB and PORTE, PORTG exists on 64-pin only (the device
+/// header is the authority, hence the #ifdefs). Port-level only -
+/// a pin missing from an EXISTING port (e.g. PF4 on 28-pin parts)
+/// is the per-family device tables' job. Drivers use this to keep an
+/// instance usable when only one of its pin POSITIONS is absent
+/// (an `if constexpr` on the missing branch), and to refuse a config
+/// that asks for it.
+constexpr bool port_exists(char p) {
+    switch (p) {
+        case 'A': case 'C': case 'D': case 'F': return true;
+#ifdef PORTB
+        case 'B': return true;
+#endif
+#ifdef PORTE
+        case 'E': return true;
+#endif
+#ifdef PORTG
+        case 'G': return true;
+#endif
+        default: return false;
+    }
+}
 
 /// The PORT of a letter chosen at RUN time (for drivers whose pin is a
 /// configuration value: a route's port, a comparator's input). Folds
@@ -66,6 +101,136 @@ inline volatile uint8_t& pinctrl_of(char p, uint8_t n) {
     return (&port_by_letter(p).PIN0CTRL)[n];
 }
 
+// ---- pin configuration vocabulary (18.5.16) ---------------------------------
+
+/// ISC: what the input stage does. `none` = buffer on, no interrupt
+/// (the reset state); the edge/level senses raise the PORT's one
+/// interrupt (vector PORTx_PORT_vect, flags by pin in INTFLAGS);
+/// `level_low` re-fires for as long as the pin reads low;
+/// `input_disable` turns the digital input buffer OFF - IN freezes,
+/// interrupts and events from the pin die, the pad keeps feeding the
+/// analog mux (what ADC/AC inputs want: no mid-rail current, no
+/// digital noise).
+enum class PinSense : uint8_t {
+    none = PORT_ISC_INTDISABLE_gc,
+    both = PORT_ISC_BOTHEDGES_gc,
+    rising = PORT_ISC_RISING_gc,
+    falling = PORT_ISC_FALLING_gc,
+    input_disable = PORT_ISC_INPUT_DISABLE_gc,
+    level_low = PORT_ISC_LEVEL_gc,
+};
+
+#ifdef PORT_INLVL_bm
+/// Input threshold (DB only): Schmitt from the supply, or TTL levels
+/// (an MVIO companion). Change it only with the pin's interrupts and
+/// peripherals quiet: the switch can fake a transition (18.3.3).
+enum class PinLevel : uint8_t { schmitt = 0, ttl = PORT_INLVL_bm };
+#endif
+
+/// The whole PINnCTRL as one value, written in ONE store by
+/// `Pin::configure` / the multi-pin paths: the datasheet warns that
+/// INVEN toggled in the same cycle as an ISC change does not raise
+/// the inversion edge's interrupt - for configuration that is exactly
+/// the desired quietness (and single fields keep their RMW verbs).
+struct PinConfig {
+    bool invert = false;
+    bool pullup = false;      ///< only effective while the pin is an input
+#ifdef PORT_INLVL_bm
+    PinLevel input_level = PinLevel::schmitt;
+#endif
+    PinSense sense = PinSense::none;
+};
+
+constexpr uint8_t pin_ctrl_byte(const PinConfig& c) {
+    return static_cast<uint8_t>(
+        (c.invert ? PORT_INVEN_bm : 0) |
+        (c.pullup ? PORT_PULLUPEN_bm : 0) |
+#ifdef PORT_INLVL_bm
+        static_cast<uint8_t>(c.input_level) |
+#endif
+        static_cast<uint8_t>(c.sense));
+}
+
+// ---- the port resource ------------------------------------------------------
+
+/// Port<'C'>: the typed view of ONE port's own registers - what a pin
+/// does not possess: the interrupt flags of the shared PORTx_PORT_vect
+/// (several pins can fire together: the ISR reads the MASK), the
+/// port-wide slew-rate limit, the multi-pin configuration engine and
+/// the native mask operations. Pin<letter, n> stays the per-pin face
+/// and delegates its register access here.
+template <char L>
+struct Port {
+    Port() = delete;
+    static_assert(L >= 'A' && L <= 'G', "ports: 'A'..'G'");
+    static_assert(port_exists(L), "this port does not exist on this device");
+
+    static constexpr char letter = L;
+
+    static constexpr volatile PORT_t& regs() {
+        if constexpr (L == 'A') return PORTA;
+#ifdef PORTB
+        else if constexpr (L == 'B') return PORTB;
+#endif
+        else if constexpr (L == 'C') return PORTC;
+        else if constexpr (L == 'D') return PORTD;
+#ifdef PORTE
+        else if constexpr (L == 'E') return PORTE;
+#endif
+        else if constexpr (L == 'F') return PORTF;
+#ifdef PORTG
+        else if constexpr (L == 'G') return PORTG;
+#endif
+    }
+    static constexpr volatile VPORT_t& vregs() {
+        if constexpr (L == 'A') return VPORTA;
+#ifdef VPORTB
+        else if constexpr (L == 'B') return VPORTB;
+#endif
+        else if constexpr (L == 'C') return VPORTC;
+        else if constexpr (L == 'D') return VPORTD;
+#ifdef VPORTE
+        else if constexpr (L == 'E') return VPORTE;
+#endif
+        else if constexpr (L == 'F') return VPORTF;
+#ifdef VPORTG
+        else if constexpr (L == 'G') return VPORTG;
+#endif
+    }
+
+    // Mask operations (bit n = pin n).
+    static uint8_t in() { return vregs().IN; }
+    static void dir_set(uint8_t m) { regs().DIRSET = m; }
+    static void dir_clear(uint8_t m) { regs().DIRCLR = m; }
+    static void out_set(uint8_t m) { regs().OUTSET = m; }
+    static void out_clear(uint8_t m) { regs().OUTCLR = m; }
+    static void out_toggle(uint8_t m) { regs().OUTTGL = m; }
+
+    // Interrupt flags: write-1-to-clear - ALWAYS plain stores (an RMW
+    // or an SBI would read every pending flag back as 1 and clear the
+    // lot).
+    static uint8_t flags() { return vregs().INTFLAGS; }
+    static void clear_flags(uint8_t m) { regs().INTFLAGS = m; }
+    /// ISR body for PORTx_PORT_vect: which pins fired (bit n), cleared.
+    [[gnu::always_inline]] static uint8_t take_flags() {
+        const uint8_t f = regs().INTFLAGS;
+        regs().INTFLAGS = f;
+        return f;
+    }
+
+    /// PORTCTRL.SRL: slew-rate limitation for EVERY pin of this port.
+    static void slew_limit(bool on) { regs().PORTCTRL = on ? PORT_SRL_bm : 0; }
+    static bool slew_limit() { return (regs().PORTCTRL & PORT_SRL_bm) != 0; }
+
+    /// Multi-pin configuration (18.3.2.4): the PINnCTRL of every pin
+    /// in `pins` written to `cfg` in one operation (PINCONFIG is
+    /// mirrored across ports; the update mask is this port's).
+    static void configure_mask(uint8_t pins, const PinConfig& cfg) {
+        regs().PINCONFIG = pin_ctrl_byte(cfg);
+        regs().PINCTRLUPD = pins;
+    }
+};
+
 template <char PortLetter, uint8_t PinNum>
 struct Pin {
     static_assert(PortLetter >= 'A' && PortLetter <= 'G', "Invalid port");
@@ -80,40 +245,16 @@ struct Pin {
     // 28/32-pin parts, PORTG only on 64-pin), hence the #ifdef guards.
     // Requesting a port the package lacks is a compile error (C++23
     // static_assert(false) fires only in the instantiated branch).
-    static constexpr volatile PORT_t& port() {
-        if constexpr (PortLetter == 'A') return PORTA;
-#ifdef PORTB
-        else if constexpr (PortLetter == 'B') return PORTB;
-#endif
-        else if constexpr (PortLetter == 'C') return PORTC;
-        else if constexpr (PortLetter == 'D') return PORTD;
-#ifdef PORTE
-        else if constexpr (PortLetter == 'E') return PORTE;
-#endif
-        else if constexpr (PortLetter == 'F') return PORTF;
-#ifdef PORTG
-        else if constexpr (PortLetter == 'G') return PORTG;
-#endif
-        else static_assert(false, "this port does not exist on this device");
-    }
+    static constexpr volatile PORT_t& port() { return Port<PortLetter>::regs(); }
 
     // Virtual PORT for single-cycle bit access (SBI/CBI)
-    static constexpr volatile VPORT_t& vport() {
-        if constexpr (PortLetter == 'A') return VPORTA;
-#ifdef VPORTB
-        else if constexpr (PortLetter == 'B') return VPORTB;
-#endif
-        else if constexpr (PortLetter == 'C') return VPORTC;
-        else if constexpr (PortLetter == 'D') return VPORTD;
-#ifdef VPORTE
-        else if constexpr (PortLetter == 'E') return VPORTE;
-#endif
-        else if constexpr (PortLetter == 'F') return VPORTF;
-#ifdef VPORTG
-        else if constexpr (PortLetter == 'G') return VPORTG;
-#endif
-        else static_assert(false, "this port does not exist on this device");
-    }
+    static constexpr volatile VPORT_t& vport() { return Port<PortLetter>::vregs(); }
+
+    /// Px2 and Px6 sense FULLY asynchronously (I/O mux note 2): they
+    /// wake from every sleep mode on every sense, catch sub-CLK_PER
+    /// pulses and have no three-cycle dead-time; the other pins need
+    /// CLK_PER (or BOTHEDGES/LEVEL held long enough) to wake.
+    static constexpr bool fully_async = PinNum == 2 || PinNum == 6;
 
     // Access PINnCTRL register for this pin
     static volatile uint8_t& pinctrl() {
@@ -136,6 +277,27 @@ struct Pin {
     static void output() { port().DIRSET = mask; }
     static void input()  { port().DIRCLR = mask; }
     static bool read()   { return vport().IN & mask; }
+
+    /// The whole PINnCTRL in ONE store (invert + pullup + input level
+    /// + sense): the way to (re)configure - no intermediate states,
+    /// no INVEN/ISC same-cycle surprises. The single-field verbs
+    /// below RMW the same register: main-vs-ISR discipline is the
+    /// caller's (like every shared register).
+    static void configure(const PinConfig& cfg) { pinctrl() = pin_ctrl_byte(cfg); }
+
+    /// ISC alone (sense or input_disable), keeping INVEN/PULLUPEN.
+    /// The datasheet's caveat: changing ISC while an interrupt is
+    /// synchronizing can fire a spurious one or miss one - change it
+    /// with the pin quiet, or clear_flag() after.
+    static void sense(PinSense s) {
+        pinctrl() = static_cast<uint8_t>((pinctrl() & ~PORT_ISC_gm) | static_cast<uint8_t>(s));
+    }
+
+    /// This pin's bit in the port's interrupt flags (write-1-to-clear:
+    /// clear_flag is a plain store, never an SBI - an RMW would clear
+    /// every pending flag of the port).
+    static bool flag() { return (vport().INTFLAGS & mask) != 0; }
+    static void clear_flag() { port().INTFLAGS = mask; }
 
     // Hardware inversion (INVEN) - inverts both input and output
     static void invert(bool enable) {
@@ -187,6 +349,27 @@ struct PinSet {
     }
     static void output() { (Pins::output(), ...); }
 
+    /// One PinConfig into every pin's PINnCTRL through the multi-pin
+    /// engine (18.3.2.4): the pins are grouped BY PORT at compile
+    /// time, PINCONFIG is written once (mirrored across ports) and
+    /// each involved port gets one PINCTRLUPD mask - the set behaves
+    /// like a single register even when its pins span ports, and the
+    /// pins of one port change in the same cycle.
+    static void configure(const PinConfig& cfg) {
+        Port<'A'>::regs().PINCONFIG = pin_ctrl_byte(cfg);   // mirrored everywhere
+        apply_update<'A'>(); apply_update<'B'>(); apply_update<'C'>();
+        apply_update<'D'>(); apply_update<'E'>(); apply_update<'F'>();
+        apply_update<'G'>();
+    }
+
+    /// The pins of this set living on port L, as that port's mask.
+    template <char L>
+    static constexpr uint8_t port_mask() {
+        uint8_t m = 0;
+        ((m |= (Pins::port_letter == L ? Pins::mask : 0)), ...);
+        return m;
+    }
+
     /// Bit i = level of pin i.
     static uint8_t read() {
         uint8_t v = 0;
@@ -199,6 +382,14 @@ struct PinSet {
     static void write(uint8_t value) {
         uint8_t bit = 0;
         (((value & (1u << bit)) ? Pins::set() : Pins::clear(), ++bit), ...);
+    }
+
+private:
+    template <char L>
+    static void apply_update() {
+        if constexpr (port_mask<L>() != 0) {
+            Port<L>::regs().PINCTRLUPD = port_mask<L>();
+        }
     }
 };
 

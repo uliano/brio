@@ -16,8 +16,10 @@
  * (VREF.DAC0REF); the buffered output on the DAC pin (PD6, `OUTEN`;
  * the pin's digital input must be disabled in PORT) sources 1 mA, sinks
  * ~1 uA (add a resistor to ground if it must sink), settles in ~7-10 us
- * full scale; the UNBUFFERED output feeds the ADC (MUXPOS DAC0), the
- * ACs and the OPAMPs internally with OUTEN off, leaving PD6 free.
+ * full scale; the UNBUFFERED output feeds the ADC (MUXPOS DAC0) and
+ * the ACs internally with OUTEN off, leaving PD6 free - the OPAMPs
+ * instead tap the buffered output (34.3.2.3): feeding them needs
+ * OUTEN on, and PD6 is then taken.
  * RUNSTDBY keeps it running in standby sleep.
  *
  * Bench facts (analog0, A5 silicon, bare pin): the buffered output RISES
@@ -85,6 +87,9 @@ public:
 
     /// Output code 0..1023 (clamped). One 16-bit write, DATAL then
     /// DATAH: the output updates on the high byte.
+    /// The code currently in DATA (what set() last wrote).
+    static uint16_t code() { return static_cast<uint16_t>(regs().DATA >> 6); }
+
     static void set(uint16_t code) {
         if (code > steps - 1) {
             code = steps - 1;

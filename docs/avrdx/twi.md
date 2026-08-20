@@ -8,7 +8,8 @@
 > override on rev A4/A5; 2.15.2 FLUSH non-functional - the driver never
 > flushes, recovery is ENABLE off/on). Driver: `avrdx/twi.hpp`; the
 > arbiter above it: [i2c-bus.md](../design/i2c-bus.md) (`util/bus_master.hpp`,
-> `util/i2c_bus.hpp`). Reference tests: `i2c_scan`, `dac_adc`.
+> `util/i2c_bus.hpp`). Bench-exercised against the MCP47CVB22 DAC
+> (the apps are mapped in bench.md).
 
 ## What the driver does today
 
@@ -40,8 +41,8 @@ TwiHw::init(clock);
 
 ## Bench findings
 
-- `i2c_scan` finds the MCP47CVB22 at 0x60; `dac_adc` writes and reads
-  it back with the repeated-START sequence at 100 and 400 kHz.
+- An address sweep finds the MCP47CVB22 at 0x60; write-then-read with
+  the repeated-START sequence verified at 100 and 400 kHz.
 
 ## Not covered yet
 

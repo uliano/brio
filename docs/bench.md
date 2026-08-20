@@ -32,7 +32,7 @@ bench runs on the 3.3 V rail.
 | Display CS / RS(DC) / RST | PD0 / PD1 / PD2 | ILI9481 |
 | SD_CS (module) | PD4 | reserved, unused |
 | T_CS (touch) | PD5 | XPT2046, same bus, PEN unused |
-| MCP3550 CS | PB0 | was PD3 |
+| MCP3550 CS | PB0 | |
 | TWI0 SDA / SCL | PA2 / PA3 | 1.5k pull-ups to 3.3 V |
 | MCP47CVB22 | I2C 0x60 | A0 and LAT/HVC to GND (LAT transparent); VOUT0 -> MCP3550 input |
 | LED (blink apps) | PF2 | PF2 -> ~330 ohm -> LED -> GND |
@@ -42,6 +42,11 @@ bench runs on the 3.3 V rail.
 | Event probes (events0) | PD2 (EVOUTD), PC2 (EVOUTC), PF2 (EVOUTF = LED) | logic analyzer on PD2/PC2 |
 | CLKOUT (test_avr_clock) | PA7 | scope: CLK_PER |
 | Analog loop (test_avr_analog, sampler) | PD6 (DAC0 OUT) -> PD1 (AIN1), PD6 -> PD7 (VREFA) | two jumper wires |
+
+CCL collisions on this board: LUT0 owns PA0..PA3 (PA0/PA1 are the
+crystal), LUT1 PC0..PC3 (traffic LEDs = TCA0 PORTC WO0..3), LUT2
+PD0..PD3 (display wires), LUT3 PF0..PF3; TCB0/TCB1 ALT1 sit on
+PF4/PF5 = the console USART2.
 
 Display: 3.5" red module **HST035003-A**, controller **ILI9481**
 (320x480, SPI = 18-bit pixels only, panel needs INVON), XPT2046
@@ -81,7 +86,7 @@ the LDF, no filter changes.
 | `clock_console` | The console on a runtime-variable clock (`DynamicClock<Boot, Serial>` @ 115200): `CLOCK 4M` (Hz, or nM/nk) switches CLK_PER under the running program; the console surviving = the rebase fan-out works, the 1 Hz LED = the RTC timebase never noticed |
 | `console` | Interactive command console @ 460800 (HELP, LED, UPTIME, ERR): SerialPort (RX bytes -> line events), Console (parse/route/reply), Blinker (heartbeat FSM + LED commands via posted events), zero polling |
 | `spi_loopback` | SPI stack test: jumper PA4(MOSI) -> PA5(MISO), a full-duplex 8-byte transaction per second through SpiBus + the Spi<0> engine, verdict on the console (no jumper = FAIL 0xFF, by design) |
-| `display_id` | Reads the display controller's DCS registers (RDDPM, RDDID, ID4, 0xBF device code) and prints the raw answers: the probe that unmasked the 3.5" module as an ILI9481 |
+| `display_id` | Reads the display controller's DCS registers (RDDPM, RDDID, ID4, 0xBF device code) and prints the raw answers: the probe that identifies the display controller (the 3.5" module answers as an ILI9481) |
 | `display_fill` | ILI9481 full-screen solid fill cycling red/green/blue (18-bit pixels, CASET/PASET + RAMWR/3C row writes, INVON) |
 | `spi_duo` | Two devices, one arbitrated bus: ILI9481 fill (960-byte rows @ 6 MHz) + XPT2046 touch polling (3-byte conversions @ 1.5 MHz) through the same SpiBus; touch steers the fill palette, per-request clock switching |
 | `spi_paint` | Touch painting on the ILI9481 through the arbitrated bus |

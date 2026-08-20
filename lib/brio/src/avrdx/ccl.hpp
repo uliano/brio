@@ -71,7 +71,7 @@ namespace brio {
 enum class LutInput : uint8_t {
     mask = 0x0,        ///< tied low
     feedback = 0x1,    ///< the pair's sequencer output
-    link = 0x2,        ///< LUT[n+1] output (LUT0 takes the last LUT)
+    link = 0x2,        ///< LUT[n+1] output (the last LUT takes LUT0)
     event_a = 0x3,     ///< EVSYS user LUTnA
     event_b = 0x4,     ///< EVSYS user LUTnB
     pin = 0x5,         ///< the LUT's own pin INx
@@ -104,7 +104,7 @@ enum class LutSense : uint8_t { none = 0, rising = 1, falling = 2, both = 3 };
 
 enum class Sequencer : uint8_t {
     none = CCL_SEQSEL_DISABLE_gc,
-    d_flip_flop = CCL_SEQSEL_DFF_gc,    ///< D = even LUT, G = odd (transparent while G)
+    d_flip_flop = CCL_SEQSEL_DFF_gc,    ///< D = even LUT, EN = odd, CLOCKED by the even LUT's clock
     jk_flip_flop = CCL_SEQSEL_JK_gc,    ///< J = even, K = odd (1/1 toggles)
     d_latch = CCL_SEQSEL_LATCH_gc,      ///< D = even, G = odd
     rs_latch = CCL_SEQSEL_RS_gc,        ///< S = even, R = odd (1/1 forbidden)
@@ -134,11 +134,6 @@ constexpr uint8_t lut_truth(F f) {
     return t;
 }
 
-constexpr bool lut_config_valid(const LutConfig& c) {
-    if (c.edge_detect && c.filter == LutFilter::none) return false;   // 31.3.1.6
-    return true;
-}
-
 /// The port letter of LUT n's pins: A, C, D, F, B, G.
 constexpr char lut_port(uint8_t n) {
     constexpr char p[] = {'A', 'C', 'D', 'F', 'B', 'G'};
@@ -165,7 +160,8 @@ struct Ccl {
     /// even LUT first, to be safe.
     template <uint8_t pair>
     static void sequencer(Sequencer s) {
-        static_assert(pair <= 2, "LUT pairs: 0 (LUT0/1), 1 (LUT2/3), 2 (LUT4/5)");
+        static_assert(2 * pair + 1 < lut_count,
+                      "no such LUT pair on this package (pair 2 = LUT4/5, 48/64-pin parts)");
         (&CCL.LUT0CTRLA)[8 * pair] &= static_cast<uint8_t>(~CCL_ENABLE_bm);   // the even LUT off
         (&CCL.SEQCTRL0)[pair] = static_cast<uint8_t>(s);
     }
@@ -179,17 +175,29 @@ struct Ccl {
     }
 };
 
+constexpr bool lut_config_valid(uint8_t n, const LutConfig& c) {
+    if (c.edge_detect && c.filter == LutFilter::none) return false;   // 31.3.1.6
+    if (c.output_pin && !port_exists(lut_port(n))) return false;      // LUT5's pins are PORTG (64-pin)
+    if (c.alt_pin && n == 3) return false;      // LUT3 has no ALT1: the CCLROUTEA bit is reserved, PF6 is RESET
+    return true;
+}
+
 // ---- one look-up table ------------------------------------------------------------
 
 template <uint8_t n>
 class Lut {
-    static_assert(n <= 5, "CCL: LUT0..LUT5 (LUT4/5 on 48/64-pin parts)");
+    static_assert(n < lut_count, "no such CCL LUT on this package (LUT4/5 on 48/64-pin parts)");
 
 public:
     Lut() = delete;
 
     static constexpr uint8_t index = n;
     static constexpr char port = lut_port(n);
+    /// This package bonds the LUT's port (LUT5's is PORTG, 64-pin
+    /// only): without it the LUT still works on events - only the pin
+    /// faces are gone. LUT3 additionally has no ALT1 on any package.
+    static constexpr bool has_pins = port_exists(port);
+    static constexpr bool has_alt_pin = has_pins && n != 3;
 
     using In0 = Pin<port, 0>;
     using In1 = Pin<port, 1>;
@@ -204,7 +212,10 @@ public:
     /// Compile-time form.
     template <LutConfig cfg>
     static void init() {
-        static_assert(lut_config_valid(cfg), "LutConfig: the edge detector needs a filter option (sync or filter)");
+        static_assert(lut_config_valid(n, cfg),
+                      "LutConfig: the edge detector needs a filter option (sync or "
+                      "filter); the output pin needs a port this package bonds; "
+                      "LUT3 has no ALT1 (reserved route, PF6 is RESET)");
         init(cfg);
     }
 
@@ -213,15 +224,13 @@ public:
     /// CTRLA with ENABLE = 1 (the enable-protected fields land together
     /// with the enable). False, touching nothing, for an invalid config.
     static bool init(const LutConfig& cfg) {
-        if (!lut_config_valid(cfg)) return false;
+        if (!lut_config_valid(n, cfg)) return false;
         ctrla() = 0;                                          // disabled: the protected registers open
         ctrlb() = static_cast<uint8_t>(static_cast<uint8_t>(cfg.in0) | (static_cast<uint8_t>(cfg.in1) << 4));
         ctrlc() = static_cast<uint8_t>(cfg.in2);
         truth() = cfg.truth;
         route(cfg.alt_pin);
-        if (cfg.output_pin) {
-            if (cfg.alt_pin) OutAlt::output(); else OutDefault::output();
-        }
+        drive_pin(cfg);
         sense(cfg.interrupt);
         ctrla() = static_cast<uint8_t>(
             CCL_ENABLE_bm |
@@ -239,7 +248,11 @@ public:
 
     /// The interrupt sense on this LUT's output (INTCTRL0/1).
     static void sense(LutSense s) {
+#ifdef CCL_LUT4CTRLA
         volatile uint8_t& r = n < 4 ? CCL.INTCTRL0 : CCL.INTCTRL1;
+#else
+        volatile uint8_t& r = CCL.INTCTRL0;      // 4 LUTs: no INTCTRL1
+#endif
         const uint8_t shift = static_cast<uint8_t>(2 * (n % 4));
         r = static_cast<uint8_t>((r & ~(0x03u << shift)) | (static_cast<uint8_t>(s) << shift));
     }
@@ -253,6 +266,29 @@ public:
     template <uint8_t ch>
     static void event_b_on(EventChannel<ch> c) { EventB::listen(c); }
 
+    /// Drive (and release) the output pin per the config. The branches
+    /// for a port this package lacks are compiled OUT (a runtime `if`
+    /// would instantiate the missing Pin and kill the whole LUT -
+    /// LUT5's port is PORTG); lut_config_valid has already refused a
+    /// config asking for them. A position taken by a previous init and
+    /// abandoned by this one goes back to input.
+    static void drive_pin(const LutConfig& cfg) {
+        if constexpr (has_pins) {
+            const uint8_t want = cfg.output_pin ? (cfg.alt_pin ? 2u : 1u) : 0u;
+            if (owned_ == 1 && want != 1) OutDefault::input();
+            if constexpr (has_alt_pin) {
+                if (owned_ == 2 && want != 2) OutAlt::input();
+                if (want == 2) OutAlt::output();
+            }
+            if (want == 1) OutDefault::output();
+            owned_ = static_cast<uint8_t>(want);
+        } else {
+            (void)cfg;
+        }
+    }
+    static inline uint8_t owned_ = 0;
+
+public:
     static volatile uint8_t& ctrla() { return (&CCL.LUT0CTRLA)[4 * n]; }
     static volatile uint8_t& ctrlb() { return (&CCL.LUT0CTRLB)[4 * n]; }
     static volatile uint8_t& ctrlc() { return (&CCL.LUT0CTRLC)[4 * n]; }
@@ -278,7 +314,8 @@ private:
 template <uint8_t pair>
 struct ToggleFlipFlop {
     ToggleFlipFlop() = delete;
-    static_assert(pair <= 2, "LUT pairs: 0, 1, 2");
+    static_assert(2 * pair + 1 < lut_count,
+                  "no such LUT pair on this package (pair 2 = LUT4/5, 48/64-pin parts)");
 
     using Even = Lut<2 * pair>;
     using Odd = Lut<2 * pair + 1>;

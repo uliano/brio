@@ -15,13 +15,17 @@ voltage between GND and the selected reference (`Ref`, see
   sinks only ~1 uA, 0.1 V .. VDD-0.1 V, settles in ~10 us full scale
   when rising;
 - the **unbuffered** internal output, always available to the ADC
-  (input `AdcInput::dac0`), the comparators and the op amps, also
-  with the pin output off (then PD6 stays a GPIO).
+  (input `AdcInput::dac0`) and the comparators, also with the pin
+  output off (then PD6 stays a GPIO). The op amps are the exception:
+  they tap the DAC at the OUTPUT BUFFER (34.3.2.3, 35.3.2), so an
+  op amp fed by the DAC needs `output_pin` on - and PD6 is then not
+  free.
 
 There are no events, no interrupts, no modes: the only way to change
 the output is to write `DATA`, and the output follows. `run_standby`
 keeps it running in standby sleep. Accuracy (ref 3.0 V): INL +-2.3,
-DNL +-0.7, offset +-5, gain +-3 LSB, specified for codes 0x030..0x3D0.
+DNL +-0.7, offset +-5, gain -3.3..+1.3 LSb, specified for codes
+0x030..0x3D0.
 
 Two physical facts to design with (both measured on the bench):
 
@@ -31,7 +35,8 @@ Two physical facts to design with (both measured on the bench):
   that needs fast falling edges wants the datasheet's resistor to
   ground (10 kOhm sinks 200 uA at 2 V: 100 x faster);
 - the buffered pin sits ~13 mV above the unbuffered internal path:
-  the buffer's offset (spec +-10 mV).
+  the buffer's offset (spec EOFF +-5 LSb, i.e. +-10 mV at the
+  2.048 V reference).
 
 Errata 2.6.1 (silicon A4/A5): the buffer's offset drifts over the
 device's lifetime if the part is powered with the buffer OFF. The

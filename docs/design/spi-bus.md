@@ -1,7 +1,7 @@
 # The shared SPI bus
 
-The first multi-client bus in brio, and the proving ground for the
-"bus AO" pattern that I2C repeats.
+The multi-client SPI bus: the "bus AO" pattern in its reference
+form ([i2c-bus.md](i2c-bus.md) shares the same arbiter).
 
 ## The stack
 
@@ -27,7 +27,7 @@ the arbiter shared with I2C - see [i2c-bus.md](i2c-bus.md).
 
 ## Why the event queue alone cannot arbitrate
 
-Design discovery worth remembering: a SPI transaction OUTLIVES the
+A SPI transaction OUTLIVES the
 dispatch that starts it - it completes on interrupts later. While the
 bus is busy the kernel happily delivers the next request event, which
 therefore needs a place to wait: a small internal pending FIFO in the
@@ -99,8 +99,8 @@ On a SHARED bus every device names its own speed and mode: the
 descriptor carries `SpiClock clock` and `uint8_t mode` (defaults
 div16 / mode 0), and the engine reprograms CTRLA/CTRLB at each
 `start()` - two register writes between transactions, nothing per
-byte. `Spi<n>::init()` lost its clock/mode parameters: pins, interrupt
-enable, master enable only. Rationale: the first two real clients on
+byte. `Spi<n>::init()` takes pins, interrupt enable and master
+enable only - no clock, no mode. Rationale: the first two real clients on
 the bench already disagreed (a display comfortable at 6 MHz, a touch
 controller capped below 2.5 MHz), and a global init-time clock was a
 latent bug for every multi-device configuration.
@@ -153,7 +153,7 @@ Found with the MCP3550 on the analyzer, both general:
   disable, write the mode, re-enable - `Spi::apply_mode`, three
   register writes, no clock edges on the bus, only when the polarity
   changes between transactions. (A dummy byte without chip select also
-  works and was the first fix; rejected as a side effect on the bus.)
+  works; rejected: a side effect on the bus.)
 - **CS setup time is a device parameter.** `Request::cs_setup_us`:
   microseconds between CS assertion and the first SCK edge, spun in
   start(). Most devices need nothing beyond the ~1.5 us the code path

@@ -1,5 +1,12 @@
 # CLKCTRL - the clock controller (AVR DA/DB)
 
+> **PROVISIONAL.** Complete and bench-verified on the DB (the CFD
+> block, DB-only silicon, is compiled out on the DA by its header
+> symbol); the DA's direct external clock input is implemented
+> DATASHEET-TRUSTED (no DA part on the bench yet), the configuration
+> latches are handled and the task's restrictions are deliberate -
+> what remains is in "Not covered yet".
+
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
 (CLKCTRL chapter, electricals 39.10 and 39.3), errata DS80000915F
 (2.5.1-2.5.4). Driver: `avrdx/clock.hpp` (resources `Oschf`, `Osc32k`,
@@ -8,7 +15,8 @@ Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
 `util/clock.hpp`. The clock MODEL (one rate truth, static and dynamic
 regimes, the rebase fan-out) is [clock.md](../design/clock.md); this page is the
 peripheral. Reference test: `test_avr_clock` (CLKOUT on PA7 to an
-oscilloscope), `clock_console` (the dynamic regime under a console).
+oscilloscope); the dynamic regime is bench-verified under a running
+console (24 -> 12 -> 2 MHz at 115200).
 
 ## What the silicon does
 
@@ -67,10 +75,10 @@ through CCP):
 
 | Resource | Verbs |
 |----------|-------|
-| `Oschf` | `set_hz(hz)` (one of the nine rates; immediate, also while it is the main clock), `run_standby(bool)`, `autotune(bool)` (needs a running XOSC32K), `tune(-32..31)` / `tune()`, `stable()` |
+| `Oschf` | `set_hz(hz)` (one of the nine rates; immediate, also while it is the main clock; false, touching nothing, for a rate OSCHF does not produce), `run_standby(bool)`, `autotune(bool)` (needs a running XOSC32K), `tune(-32..31)` / `tune()`, `stable()` |
 | `Osc32k` | `run_standby(bool)`, `stable()` |
-| `Xosc32k` | `start_crystal(Xosc32kStartup, low_power, run_standby)`, `start_external(run_standby)`, `stop()`, `enabled()`, `stable()`, `wait_stable(spins)` |
-| `Xoschf` (DB) | `start_crystal(hz, XoschfStartup, run_standby)`, `start_external(hz, run_standby)`, `stop()`, `enabled()`, `stable()`, `wait_stable(spins)`, `range_for(hz)` |
+| `Xosc32k` | `start_crystal(Xosc32kStartup, low_power, run_standby)`, `start_external(run_standby)` (both stop a running oscillator first: CSUT/SEL are latched while enabled, so the new configuration always lands - at the price of the start-up time again), `stop()`, `enabled()`, `stable()`, `wait_stable(spins)` |
+| `Xoschf` (DB) | `start_crystal(hz, XoschfStartup, run_standby)`, `start_external(hz, run_standby)` (both stop first: SELHF/FRQRANGE/CSUTHF are latched while enabled), `stop()`, `enabled()`, `stable()`, `wait_stable(spins)`, `range_for(hz)` |
 | `Pll` | `start(PllSource::oschf/xoschf, PllMultiplier::x2/x3, run_standby)`, `stop()`, `locked()` |
 | `MainClock` | `select(MainSource::oschf/osc32k/xosc32k/extclk)` -> bool (switch completed), `source()`, `switching()`, `prescale(ClockDiv)`, `clkout(bool)` (PA7) |
 | `ClockFailure` | `watch(CfdSource::main/xoschf/xosc32k)`, `stop()`, `interrupt(on, nmi)`, `test(force)`, `failed()`, `clear()`, ISR body `cfd()` -> the main source now in effect |
@@ -79,7 +87,7 @@ Tasks - what an application names ([clock.md](../design/clock.md)):
 
 | Task | Verbs |
 |------|-------|
-| `Clock<ClockSource, source_hz, ClockDiv>` | `init()` -> bool (running from the requested source), `hz`, `is_static = true`; sources `internal`, `crystal`, `external`, `osc32k`, `xosc32k` |
+| `Clock<ClockSource, source_hz, ClockDiv>` | `init()` -> bool (running from the requested source), `hz`, `is_static = true`; sources `internal`, `crystal` (DB), `external` (DB via XOSCHF; DA directly on PA0, EXTS waited for BEFORE selecting - datasheet-trusted), `osc32k`, `xosc32k` |
 | `DynamicClock<Boot, Users...>` | `init()`, `hz()`, `set<hz>()` / `set(hz)` -> bool, `can_run_at(hz)`, `rebases<U>`; `is_static = false` |
 | vocabulary | `ClockDiv`, `clock_divisor()`, `div_for()`, `oschf_frqsel()`, `MainSource`, `CfdSource`, `PllSource`, `PllMultiplier`, `Xosc32kStartup`, `XoschfStartup` |
 | waits | `delay_us(clock, us)`, `delay_us_runtime(cycles_per_us, us)`, `cycles_per_us(hz)`, `delay_cycles(n)` (raw cycles: for clocks below 1 MHz) (`avrdx/delay.hpp`) |
@@ -180,6 +188,32 @@ when the TCD requests it.
   nobody requests it, RUNSTDBY notwithstanding - the status follows the
   REQUEST, as the register note says of the signal; it reads 1 whenever
   OSCHF is the main clock. PLLS stays 0 without a requester (the TCD).
-- `Uart::rebase` needs TWO frame times after DREIF before the clock may
-  change: one frame plus 1 us corrupted the last byte (the line feed)
-  at several rates.
+- `Uart::rebase` needs TWO frame times after DREIF before the clock
+  may change (measured: one frame plus 1 us corrupts the last byte at
+  several rates) - the contract is stated in [usart.md](usart.md).
+
+The task's two restrictions are DELIBERATE positions, not gaps: it
+accepts only source rates OSCHF can also produce, so the CFD
+fallback keeps `Clock::hz` true (a 7.3728/11.0592/14.7456 MHz UART
+crystal goes through the resources - `Xoschf::start_crystal(hz)`
+takes any 4-24 MHz - at the price of a false fallback rate); and it
+hard-wires RUNSTDBY on for OSCHF/OSC32K, trading standby power for
+no start-up wait - an opt-out knob appears when a sleepy application
+asks for it.
+
+## Not covered yet
+
+Driver gaps:
+
+- Errata 2.5.1 (A4 silicon): `Clock<external>::init` waits for EXTS
+  before anything requests the source, which on A4 never sets - the
+  init as shipped always falls back to OSCHF there (documented
+  above, not worked around; B0 and A5 unaffected).
+
+Implemented but not bench-verified:
+
+- The XOSC32K crystal path (no 32k crystal on the bench board) and
+  autotune; `ClockSource::external` on both families (the DA path is
+  datasheet-trusted end to end); the PLL (`locked()`, x2/x3 - needs
+  the TCD as requester); A4 silicon (the bench is A5); the DA family
+  entirely (compile-verified on all four DA packages).
