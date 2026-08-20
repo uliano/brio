@@ -21,6 +21,55 @@ only the map.
 - Programmer/debugger: Atmel-ICE over UPDI, AVR port, 6-pin ISP header
   (pin 2 VCC, 5 UPDI, 6 GND).
 
+## Multi-board bench
+
+The protocol work (USART/SPI/TWI) needs two chips talking: **board A =
+the DUT** running a `test_avr_*` suite, **board B = a scriptable
+instrument peer** (clock stretching, NACK injection, arbitration, a
+foreign sender for auto-baud). The CH340 consoles are **observability
+only** - firmware always goes in over UPDI.
+
+Three concerns, deliberately kept apart:
+
+1. **Build** - one PlatformIO env per app x board **TYPE**, generated
+   into `apps.ini` by `tools/gen_apps.py`. An app that must build for
+   more than the bench chip says so in its header:
+   `// pio: boards = db28,db32,db48`, and gets `[env:<app>-db28]` +
+   `[env:<app>-db28-debug]` per extra type (`db48` is the default and
+   stays the bare `[env:<app>]`; env names may only contain
+   `[A-Za-z0-9_-]`, hence the `-db28` suffix). Board files:
+   `boards/AVR128DB28.json`, `AVR128DB32.json`, `AVR128DB48.json`.
+   Never an env per physical board. `family_probe` is the carrier of
+   the matrix and the first firmware to flash onto a new board.
+2. **Identity** - `tools/bench_boards.py`, the bench **manifest**: a
+   plain dict naming each board on the desk ("A", "B" = desk
+   positions), its board type, its console and its programmer.
+3. **Orchestration** - `tools/bench.py`, which resolves 1 against 2.
+
+Consoles are addressed by **`/dev/serial/by-path`**: these CH340
+bridges carry no unique USB serial number (`iSerial` = 0, so every one
+of them appears as `usb-1a86_USB_Serial-if00-port0` under
+`by-id` and a second board would collide), while the by-path name
+encodes the USB topology and is therefore stable per physical socket.
+The manifest thus documents the desk's wiring; re-plugging a board into
+another socket means editing it. Programmers are the opposite case:
+EDBG-class probes do have serials (the Atmel-ICE here is
+`J42700049508`), needed as `-P usb:<serial>` only when two such tools
+are attached; SerialUPDI adapters are addressed by their by-path port.
+
+```bash
+PY=~/.platformio/penv/bin/python        # pyserial lives in PlatformIO's venv
+$PY tools/bench.py list                 # devices, probes, manifest (console present?)
+$PY tools/bench.py flash A test_avr_pin # pio run -e <env> + avrdude over UPDI
+$PY tools/bench.py run A a              # drive the console, judge "ALL: N pass, M fail"
+$PY tools/bench.py console A            # print device path + speed (attach a monitor)
+$PY tools/bench.py duo A:a B:script.txt # instrument peer scripted, then the DUT
+```
+
+`run` exits nonzero on a timeout or a nonzero fail count, so a suite is
+usable from a script. `duo` is the campaign's shape and is **untested
+pending the second board**.
+
 ## Wiring (SPI/I2C experiments, 3.3 V rail)
 
 The 3.5" module has no level shifter on the display signals, so the
@@ -72,7 +121,9 @@ drivers they cover and must keep passing through every restructuring
 (they move to a per-target directory when there are enough of them).
 
 One `src/apps/<app>.cpp` = one `main()` = two envs (`<app>`,
-`<app>-debug`), generated into `apps.ini` by `python tools/gen_apps.py`
+`<app>-debug`) on the default board, plus one such pair per extra board
+type it names (see "Multi-board bench" above), generated into
+`apps.ini` by `python tools/gen_apps.py`
 (VS Code task "PIO: regen apps", then reload the project). An app may
 carry `// pio: <option> = <value>` lines in its header comment (e.g.
 `// pio: monitor_speed = 115200`) - see "Per-app env options" in
@@ -82,6 +133,7 @@ the LDF, no filter changes.
 
 | App | What it does |
 |-----|--------------|
+| `family_probe` | The smallest firmware meant to run on EVERY package: PA7 toggling at ~2 Hz on the internal oscillator. Carrier of the board matrix (`// pio: boards = db28,db32,db48`) and the first thing flashed onto a new board - PA7 alive means chip, UPDI link and fuses are sane |
 | `blink` | The minimal kernel app: Blinker toggles PF2 on its periodic time event, Supervisor cycles the period (500/250/100 ms) every 3 s by posting a command - no delay loops, CPU in IDLE sleep between events |
 | `clock_console` | The console on a runtime-variable clock (`DynamicClock<Boot, Serial>` @ 115200): `CLOCK 4M` (Hz, or nM/nk) switches CLK_PER under the running program; the console surviving = the rebase fan-out works, the 1 Hz LED = the RTC timebase never noticed |
 | `console` | Interactive command console @ 460800 (HELP, LED, UPTIME, ERR): SerialPort (RX bytes -> line events), Console (parse/route/reply), Blinker (heartbeat FSM + LED commands via posted events), zero polling |

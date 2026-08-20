@@ -40,8 +40,10 @@ if it regresses: "'concept' only available with '-std=c++20'".
 
 ## Board and build
 
-- `boards/AVR128DB48.json`: custom bare-metal board (128K flash / 16K
-  RAM). Its `f_cpu` field is PlatformIO's manifest entry only: the
+- `boards/AVR128DB{28,32,48}.json`: custom bare-metal boards (128K
+  flash / 16K RAM each; the 48-pin one is the `[env]` default, the
+  others are selected by the app's `boards` line below).
+  Their `f_cpu` field is PlatformIO's manifest entry only: the
   `-DF_CPU` it would produce is unflagged (see below), the clock rate is
   `brio::Clock<...>::hz`.
 - `platformio.ini`: `platform =` the felias-fogg fork of
@@ -49,8 +51,8 @@ if it regresses: "'concept' only available with '-std=c++20'".
   integration will land); toolchain via `symlink://`; Atmel-ICE
   upload; `debug_tool = custom` wiring (below).
 - `tools/gen_apps.py`: scans `src/apps/*.cpp` into `apps.ini`, two envs
-  per app (`<app>` release, `<app>-debug`); see "Per-app env options"
-  below for what an app can add to its own envs.
+  per app and board type (`<app>` release, `<app>-debug`); see
+  "Per-app env options" below for what an app can add to its own envs.
 - `tools/pio_flags.py`: per-language AVR flags, build-type aware:
   `-Os -g` only on release builds, `-std=gnu++23`, IntelliSense
   include paths (skips `[env:native]`).
@@ -94,6 +96,14 @@ project (VS Code task "PIO: regen apps").
 
 Then `pio device monitor -e <app>` uses that app's speed (e.g.
 115200 for an app that must keep talking down to 2 MHz).
+
+One key is RESERVED and consumed by the generator instead of being
+copied: `// pio: boards = db28,db32,db48` declares the board TYPES the
+app is built for, and yields one more env pair per type beyond the
+default 48-pin board, named `[env:<app>-db28]` / `[env:<app>-db28-debug]`
+(PlatformIO env names accept only `[A-Za-z0-9_-]`). An env is a build,
+never a physical board: the boards on the desk live in the bench
+manifest, see [../bench.md](../bench.md).
 
 ## Clock, delay and timebase
 

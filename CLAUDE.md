@@ -317,6 +317,14 @@ gets its dated home in `docs/design/` when taken.
   client on SPI0/SPI1, 4 jumpers) -> TWI (host -> client TWI0/TWI1) ->
   RTC (the counter proper) -> delay/platform sweep. Jumper tests
   always check bench.md collisions first. TCD stays deferred.
+  USART/SPI/TWI re-planned (2026-08-20) as the MULTI-BOARD protocol
+  campaign: more boards arrive 2026-08-22; board A = DUT suite,
+  board B = scriptable instrument peer (clock stretching, NACK
+  injection, multi-master arbitration, bus recovery, auto-baud
+  against a foreign sender); two-port orchestrator script; desk work
+  (chapter reviews, client-mode driver surfaces, family TUs,
+  single-board halves) can precede the boards. Full plan in memory
+  low-level-review-plan.
 - **Target strata, positions taken (overview.md "Target strata" and
   the diagram docs/design/architecture.svg).** Tasks over resources
   (thin handles + task types named for what they do; explicit handle
@@ -368,7 +376,24 @@ pio run -e <app>              # release build (-Os)
 pio run -e <app> -t upload    # flash via Atmel-ICE (UPDI)
 pio debug -e <app>-debug      # ALWAYS debug the -debug env
 python tools/gen_apps.py      # after adding/removing src/apps/*.cpp (or a "// pio: opt = value" line)
+
+PY=~/.platformio/penv/bin/python         # pyserial + pio live in PlatformIO's venv
+$PY tools/bench.py list                  # serial devices, USB probes, the bench manifest
+$PY tools/bench.py flash A test_avr_pin  # build the app's env + avrdude over UPDI
+$PY tools/bench.py run A a               # drive the console, judge "ALL: N pass, M fail"
+$PY tools/bench.py console A             # device path + speed, for your own monitor
+$PY tools/bench.py duo A:a B:script.txt  # instrument peer scripted, then the DUT
 ```
+
+- The multi-board bench, three separate concerns (detail:
+  `docs/bench.md`): BUILD = one env per app x board TYPE
+  (`// pio: boards = db28,db32,db48` in the app header -> also
+  `[env:<app>-db28]`; `db48` is the bare `[env:<app>]`), IDENTITY = the
+  manifest `tools/bench_boards.py` (which board sits where, its console
+  by `/dev/serial/by-path` because the CH340s have no USB serial, its
+  programmer), ORCHESTRATION = `tools/bench.py`. Never an env per
+  physical board. `family_probe` carries the matrix and is the first
+  firmware for a new board.
 
 - Toolchain: self-built avr-gcc 16.2 at `/sw/avr` via `symlink://`;
   never PlatformIO's bundled one. Never add `-mrelax` (PyAvrOCD
@@ -396,10 +421,15 @@ python tools/gen_apps.py      # after adding/removing src/apps/*.cpp (or a "// p
 ```
 platformio.ini          base [env], toolchain, Atmel-ICE upload, debug wiring
 apps.ini                generated: [env:<app>] + [env:<app>-debug] per app
-boards/AVR128DB48.json   custom bare-metal board (128K flash / 16K RAM)
+boards/AVR128DB{28,32,48}.json  custom bare-metal boards (128K flash / 16K RAM)
 tools/check_family.sh    family compile check over test/family/ (see above)
 tools/gen_apps.py        scans src/apps/*.cpp -> apps.ini; copies each app's
-                         "// pio: <option> = <value>" header lines into its envs
+                         "// pio: <option> = <value>" header lines into its envs;
+                         "// pio: boards = db28,..." adds the board-type envs
+tools/bench_boards.py    the bench MANIFEST: the physical boards on the desk
+                         (type, console by-path, programmer) - not an env list
+tools/bench.py           the bench orchestrator: list / flash / run / console /
+                         duo, over the manifest and the generated envs
 tools/pio_flags.py       per-language AVR flags (build-type aware) +
                          IntelliSense include paths (skips [env:native])
 tools/gen_lst.py         post-build: firmware.lst (disassembly) + firmware.map

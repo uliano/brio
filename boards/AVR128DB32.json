@@ -1,0 +1,21 @@
+{
+  "build": {
+    "extra_flags": "-DAVR128DB32",
+    "f_cpu": "24000000L",
+    "mcu": "avr128db32"
+  },
+  "frameworks": [],
+  "name": "AVR128DB32 (Bare Metal)",
+  "upload": {
+    "maximum_ram_size": 16384,
+    "maximum_size": 131072,
+    "protocol": "atmelice_updi",
+    "protocols": [
+      "atmelice_updi",
+      "serialupdi",
+      "custom"
+    ]
+  },
+  "url": "https://www.microchip.com/en-us/product/AVR128DB32",
+  "vendor": "Microchip"
+}
