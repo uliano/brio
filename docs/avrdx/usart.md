@@ -219,13 +219,14 @@ bus (6/6 on the shared-line desk; it skips itself on the crossed pair).
 
 ### The two boards, and what they cost the measurements
 
-- **Board B's 24 MHz crystal does not start.** Its rates come from OSCHF
-  instead, and the DUT measures the difference in its own crystal time:
-  a stream of 0xFF frames at 9600 puts the start bit - the only low
-  pulse on the line - at **2493-2494 CLK_PER ticks against a nominal
-  2500**, so board B runs **+0.24 to +0.28 %** fast. Auto-baud sees the
-  same number from the other side (below). Every cross-board rate figure
-  carries it.
+- **The two boards' clocks agree to the tick**: a stream of 0xFF frames
+  at 9600 puts board B's start bit - the only low pulse on the line - at
+  **2500 CLK_PER ticks against a nominal 2500**, measured in board A's
+  crystal time. The auto-baud findings below were measured against a
+  genuinely foreign clock: board B on its internal OSCHF, **+0.24 to
+  +0.28 % fast** - the offset every learned BAUD reproduced. (Running a
+  board on OSCHF - deliberately, or via `xtal_probe` when a crystal is
+  in doubt - recreates that condition at will.)
 - **The link topology is discovered, not assumed, and never latched.**
   The apps support two wirings - the crossed full-duplex pair and a
   single wire between the two TXD pads - and find out which one the desk
@@ -319,8 +320,9 @@ bus (6/6 on the shared-line desk; it skips itself on the crossed pair).
   and an odd 123 456 baud, from its own oscillator. Both GENAUTO (with
   WFB armed) and LINAUTO learned the rate, and the BAUD they wrote was
   consistently **-0.17 to -0.25 %** away from the value board A computes
-  for the same nominal rate - which is board B's clock offset and
-  nothing else. The payload then arrived clean at the learned rate.
+  for the same nominal rate - exactly the sender's OSCHF offset measured
+  above, and nothing else. The payload then arrived clean at the learned
+  rate.
 - **BDF must be latched, not read afterwards.** The break-detected flag
   is cleared by the next DATA frame, and in a real auto-baud frame the
   payload follows the sync field immediately: a test that reads BDF

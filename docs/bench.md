@@ -18,17 +18,12 @@ in their banner, so a console names its own board.
 - MCU: AVR128DB48 (48-pin, 128 KB flash, 16 KB SRAM), silicon rev A5
   on both, see [avrdx/README.md](avrdx/README.md) for toolchain, probe
   and clock.
-- **Board B's 24 MHz crystal does not start**: `Clock<crystal, 24 MHz>`
-  falls back to OSCHF at the same rate and `SysClock::init()` returns
-  false, which the peer prints in its banner. Measured against board A's
-  crystal, board B then runs **+0.24 % fast** (`test_avr_serial` test
-  `j`, and the same figure comes back out of auto-baud). Every
-  cross-board rate measurement carries that offset; a crystal that
-  started would remove it. `xtal_probe` swept every FRQRANGE (the
-  range code also sets the oscillator's drive - 32M is the maximum) x
-  every CSUTHF start-up time: the crystal **never oscillates in any
-  combination**, so the fault is on the board (joint, load capacitor
-  or the crystal itself), not in the start-up margins.
+- Both 24 MHz crystals run, and the two boards **agree to the tick**
+  (`test_avr_serial` test `j`: board B's start bit at 9600 measures
+  2500/2500 CLK_PER ticks in board A's crystal time). A board whose
+  crystal is in doubt gets `xtal_probe` (below); the suites and the
+  peer print XTAL/OSCHF in their banner at every reset, so a clock
+  fallback is never silent.
 - Supply: jumper-selectable **3.3 V / 5 V**; VDDIO2 is powered, so
   PORTC (the MVIO domain) is usable - and could one day talk 3.3 V
   logic while the rest of the chip runs 5 V, no level shifters.
@@ -210,7 +205,7 @@ stays honest because nothing under `lib/brio/src/` knows it exists.
 | App | What it does |
 |-----|--------------|
 | `family_probe` | The smallest firmware meant to run on EVERY package: PA7 toggling at ~2 Hz on the internal oscillator. Carrier of the board matrix (`// pio: boards = db28,db32,db48`) and the first thing flashed onto a new board - PA7 alive means chip, UPDI link and fuses are sane |
-| `xtal_probe` | The crystal diagnosis probe, for a board whose 24 MHz crystal will not start: the main clock stays on OSCHF while XOSCHF is started and observed (MCLKSTATUS.EXTS) across every FRQRANGE (the range code also sets the oscillator's drive) x every CSUTHF start-up time, reporting spins-to-stable per combo on the console; `r` repeats. A "never" everywhere - board B's verdict - means the fault is on the board, not in the start-up margins |
+| `xtal_probe` | The crystal diagnosis probe, for a board whose 24 MHz crystal will not start: the main clock stays on OSCHF while XOSCHF is started and observed (MCLKSTATUS.EXTS) across every FRQRANGE (the range code also sets the oscillator's drive) x every CSUTHF start-up time, reporting spins-to-stable per combo on the console; `r` repeats, so it stays on the board through a repair session. A "never" everywhere means the fault is on the board, not in the start-up margins (board B's dead joint was found and fixed this way); a healthy crystal starts in tens-to-hundreds of spins in every combination |
 | `blink` | The minimal kernel app: Blinker toggles PF2 on its periodic time event, Supervisor cycles the period (500/250/100 ms) every 3 s by posting a command - no delay loops, CPU in IDLE sleep between events |
 | `clock_console` | The console on a runtime-variable clock (`DynamicClock<Boot, Serial>` @ 115200): `CLOCK 4M` (Hz, or nM/nk) switches CLK_PER under the running program; the console surviving = the rebase fan-out works, the 1 Hz LED = the RTC timebase never noticed |
 | `console` | Interactive command console @ 460800 (HELP, LED, UPTIME, ERR): SerialPort (RX bytes -> line events), Console (parse/route/reply), Blinker (heartbeat FSM + LED commands via posted events), zero polling |
