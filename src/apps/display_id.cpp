@@ -52,7 +52,7 @@ namespace {
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
-using SpiHw = brio::Spi<0>;
+using SpiHw = brio::SpiHost<0>;
 using Bus = brio::SpiBus<SpiHw, P>;
 
 using CsPin = brio::Pin<'D', 0>;

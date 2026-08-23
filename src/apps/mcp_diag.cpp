@@ -30,7 +30,7 @@
 //      is the result still there?
 //   x  dac_adc's sequence: 8-clock trigger, CS high 120 ms, read
 //   y  same with a bare 30 us CS pulse as trigger
-//   z  the x sequence through the hardware Spi<0> engine (polled), mode 3
+//   z  the x sequence through the hardware SpiHost<0> engine (polled), mode 3
 //   Z  same, mode 0
 //   t  timing marker: CS 3 short pulses (find t=0 on the analyzer)
 //   ?  this list
@@ -305,11 +305,11 @@ void exp_y() {
     brio::print(serial, brio::crlf);
 }
 
-/// z. the same two-request sequence through the hardware Spi<0> engine
+/// z. the same two-request sequence through the hardware SpiHost<0> engine
 /// (polled, no kernel): mode 3, div64, 1-byte trigger, 120 ms, 3-byte
 /// read. Isolates the engine path from the protocol.
-void exp_z(uint8_t mode, uint16_t trig_len, brio::SpiClock clk, bool prime = false, bool manual_cs = false) {
-    using SpiHw = brio::Spi<0>;
+void exp_z(brio::SpiMode mode, uint16_t trig_len, brio::SpiClock clk, bool prime = false, bool manual_cs = false) {
+    using SpiHw = brio::SpiHost<0>;
     brio::print(serial, "z engine trig ", trig_len, " B prime=", prime, " manualCS=", manual_cs, ": ");
     rest();
     SpiHw::init(clock);
@@ -350,15 +350,15 @@ void exp_z(uint8_t mode, uint16_t trig_len, brio::SpiClock clk, bool prime = fal
 /// below, non-polled request, wait for completion. Trigger polled.
 volatile bool spi_done = false;
 void exp_i(bool isr_trigger) {
-    using SpiHw = brio::Spi<0>;
+    using SpiHw = brio::SpiHost<0>;
     brio::print(serial, "i ISR pump (trigger via ISR=", isr_trigger, "): ");
     rest();
     SpiHw::init(clock);
     static uint8_t rx[3];
     SpiHw::Request trig{Cs::ref(), {}, nullptr, 0, nullptr, rx, 1, {},
-                        brio::SpiClock::div64, SPI_MODE_3_gc, !isr_trigger};
+                        brio::SpiClock::div64, brio::SpiMode::mode3, !isr_trigger};
     SpiHw::Request read{Cs::ref(), {}, nullptr, 0, nullptr, rx, 3, {},
-                        brio::SpiClock::div64, SPI_MODE_3_gc, false};
+                        brio::SpiClock::div64, brio::SpiMode::mode3, false};
     spi_done = false;
     if (!SpiHw::start(trig)) {
         while (!spi_done) {}
@@ -394,12 +394,12 @@ void help() {
         "  e MISO idle  g jumper?  h double read  f RDY trace", brio::crlf,
         "  k hold (convert, CS high, read later)  t marker", brio::crlf,
         "  x dac_adc sequence (8-clock trigger)  y bare CS-pulse trigger", brio::crlf,
-        "  z same through the Spi<0> engine, mode 3  Z ... mode 0", brio::crlf);
+        "  z same through the SpiHost<0> engine, mode 3  Z ... mode 0", brio::crlf);
 }
 
 } // namespace
 
-ISR(SPI0_INT_vect) { if (brio::Spi<0>::isr()) { spi_done = true; } }
+ISR(SPI0_INT_vect) { if (brio::SpiHost<0>::isr()) { spi_done = true; } }
 ISR(USART2_RXC_vect) { Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 
@@ -436,14 +436,14 @@ int main() {
             case 'k': exp_k(); break;
             case 'x': exp_x(); break;
             case 'y': exp_y(); break;
-            case 'z': exp_z(SPI_MODE_3_gc, 1, brio::SpiClock::div64); break;
+            case 'z': exp_z(brio::SpiMode::mode3, 1, brio::SpiClock::div64); break;
             case 'i': exp_i(false); break;
             case 'I': exp_i(true); break;
-            case 'u': exp_z(SPI_MODE_3_gc, 1, brio::SpiClock::div64, true, false); break;
-            case 'U': exp_z(SPI_MODE_3_gc, 1, brio::SpiClock::div64, true, true); break;
-            case 'v': exp_z(SPI_MODE_3_gc, 1, brio::SpiClock::div64, false, true); break;
-            case 'Z': exp_z(SPI_MODE_3_gc, 8, brio::SpiClock::div128); break;
-            case 'w': exp_z(SPI_MODE_3_gc, 16, brio::SpiClock::div128); break;
+            case 'u': exp_z(brio::SpiMode::mode3, 1, brio::SpiClock::div64, true, false); break;
+            case 'U': exp_z(brio::SpiMode::mode3, 1, brio::SpiClock::div64, true, true); break;
+            case 'v': exp_z(brio::SpiMode::mode3, 1, brio::SpiClock::div64, false, true); break;
+            case 'Z': exp_z(brio::SpiMode::mode3, 8, brio::SpiClock::div128); break;
+            case 'w': exp_z(brio::SpiMode::mode3, 16, brio::SpiClock::div128); break;
             case 't': exp_t(); break;
             case '\r': case '\n': break;
             default: help(); break;

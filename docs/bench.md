@@ -113,7 +113,7 @@ bench runs on the 3.3 V rail.
 | Event probes (events0) | PD2 (EVOUTD), PC2 (EVOUTC), PF2 (EVOUTF = LED) | logic analyzer on PD2/PC2 |
 | CLKOUT (test_avr_clock) | PA7 | scope: CLK_PER |
 | Analog loop (test_avr_analog, sampler) | PD6 (DAC0 OUT) -> PD1 (AIN1), PD6 -> PD7 (VREFA) | two jumper wires, NOT fitted at the moment: the wire-dependent half of test_avr_analog (36 of 81) is expected to fail until they return |
-| Board-to-board serial link (test_avr_serial + usart_peer) | **today: A.PE0 - B.PE1, A.PE1 - B.PE0, A.PE2 - B.PE2**, GND - GND (the crossed pair) | measured by the wiring probe, see below |
+| Board-to-board PORTE link (test_avr_serial + usart_peer, and the SPI campaign) | **today: A.PE0 - B.PE0, A.PE1 - B.PE1, A.PE2 - B.PE2, A.PE3 - B.PE3**, GND - GND (straight through, all four) | measured by the wiring probe, see below |
 
 ### The board-to-board link, and its two wirings
 
@@ -130,9 +130,18 @@ alternates its command-mode configuration until a frame arrives):
   everything else, half duplex, at every rate the register can express,
   and it is the only wiring test `w` can run on.
 
-**What the desk carries today is the crossed pair.** PE3 (XDIR) is
-unconnected on both boards, which is what the RS-485 test wants: XDIR
-stays a DUT-local signal a TCB measures.
+**What the desk carries today is a STRAIGHT-THROUGH four-wire link**:
+`A.PEn - B.PEn` for n = 0..3. For the USART campaign that is the shared
+wiring - A.PE0 and B.PE0 are the two TXD pads tied together - so the
+suite runs `w` (6/6) and `q`, the synchronous roles, skips itself; `y`
+is then 103 verdicts instead of the crossed pair's 110. PE3 is wired
+too, which the RS-485 test does not want (it wants XDIR DUT-local) but
+does not currently disturb, since XDIR only drives into the other
+board's input.
+
+For the SPI campaign the same four wires are exactly what a host and a
+client need on SPI0 ALT1: MOSI PE0, MISO PE1, SCK PE2, SS PE3, straight
+across.
 
 **Moving between the two is a live operation.** Neither firmware latches
 what it found: the peer believes a topology only while the command
@@ -148,10 +157,10 @@ for six seconds and listens for six more, and the EDGE COUNT on a pin
 names which pin of the other board it is tied to:
 
 ```
-  A.PE0: 46 edges -> B.PE1
-  A.PE1: 23 edges -> B.PE0
-  A.PE2: 93 edges -> B.PE2
-  A.PE3: 0 edges -> nothing
+  A.PE0: 23 edges -> B.PE0
+  A.PE1: 45 edges -> B.PE1
+  A.PE2: 90 edges -> B.PE2
+  A.PE3: 179 edges -> B.PE3
 ```
 
 Moving between the two costs three jumpers and nothing in the firmware.
@@ -223,7 +232,8 @@ stays honest because nothing under `lib/brio/src/` knows it exists.
 | `test_avr_timer` | **Bench test suite** (keep passing): TCA/TCB/CCL/AC, 11 tests / 82 verdicts, 82/82 on rev A5 at 3.3 V - FrequencyGenerator/TcaPwm16/Heartbeat on PD0 measured back by the TCB meters through EvPin, OneShotPulse on PB5, Pwm8 on PC0, PulseCounter, 32-bit cascade vs the Ticker, PeriodicTick, Timeout, EventCounter with direction from PC1; CCL LUT4 on PB0/PB1 -> PB3 and a JK flip-flop by timer events; AC thresholds/window against the DAC on PD6. Nothing to wire (PB0/1/3/5 = traffic LEDs flicker). Holds in crystal time (PIT paused): the Ticker's OSC32K measured +0.94 % fast |
 | `test_avr_pin` | **Bench test suite** (keep passing): PORT - the pin senses counted on self-driven edges, level_low, INVEN, input_disable, the W1C flag discipline, the multi-pin engine across two ports, the Port mask verbs and the slew bit. 22/22 on rev A5. Nothing to wire |
 | `test_avr_rtc` | **Bench test suite** (keep passing): RTC/PIT, 8 tests / 78 verdicts, 78/78 on rev A5 - the counter's period at three prescalers, the compare phase (CMP + 1 ticks), crystal error correction at +-127 ppm, the synchronization busy flags, the first tick after an enable, the PIT and the counter running together, OSC1K as CLK_RTC. A TCB cascade at CLK_PER is the stopwatch and the RTC's own OVF/CMP events latch it: nothing to wire. Takes about two minutes (the correction is measured by averaging) |
-| `test_avr_serial` | **Bench test suite** (keep passing), in two halves. `z` = SINGLE BOARD, 9 tests / 108 verdicts, 108/108 on rev A5 at 5 V: instances and routes including the pinless NONE and the teardown, the whole 36-combination frame-format matrix in loop-back on USART4, the receive FIFO's overflow, the MPCM filter, DRE vs TXC over the three-deep transmit path, the baud generator measured on PE0 through EvPin + a TCB pulse-width meter, a 24 -> 12 -> 24 MHz rebase under traffic, GENAUTO/LINAUTO auto-baud with the errata 2.16.3 recovery, and Host SPI in loop-back. `y` = TWO BOARDS, 12 tests / 110 verdicts, 110/110 on the crossed pair with `usart_peer` on board B: the baud and frame matrices across the wire, injected parity/rate/overflow/break errors, bit-banged waveforms (glitch widths, a uniform rate error, one distorted cell, the four ABW windows), auto-baud against board B's own oscillator, MPCM in both flavours, both synchronous roles on a real XCK with the client's CLK_PER/4 ceiling, RS-485's XDIR guard time, IRCOM pulses and the RXPL filter, a clock rebase under real traffic, and the LBME pad probe. Also three tools outside `y`: `v` = the wiring probe (with board B's console `2`), `w` = the one-wire bus (6/6 when the shared wire is fitted; the first two depend on how the desk is jumpered - `w` skips itself on the crossed pair and `q`, the synchronous roles, skips itself on the shared wire), and `x` = the clock comparison: the peer's 0x00 frames put nine hardware-timed bit times of low on the wire, the DUT's pulse-width meter averages sixteen of them (~60000 ticks each, one-tick spread, the div1 short-read corrected), resolving the two crystals' ratio to a few ppm - the boards measure +161..169 ppm apart. On a SHARED line `z` asks board B to stay quiet, re-armed per test - there the peer sits on the DUT's own loop-back; on the crossed pair it cannot disturb a loop-back measurement and nothing is armed |
+| `test_avr_serial` | **Bench test suite** (keep passing), in two halves. `z` = SINGLE BOARD, 9 tests / 108 verdicts, 108/108 on rev A5 at 5 V: instances and routes including the pinless NONE and the teardown, the whole 36-combination frame-format matrix in loop-back on USART4, the receive FIFO's overflow, the MPCM filter, DRE vs TXC over the three-deep transmit path, the baud generator measured on PE0 through EvPin + a TCB pulse-width meter, a 24 -> 12 -> 24 MHz rebase under traffic, GENAUTO/LINAUTO auto-baud with the errata 2.16.3 recovery, and Host SPI in loop-back. `y` = TWO BOARDS, 12 tests / 110 verdicts, 110/110 when the desk carries the crossed pair; 103/103 on the straight-through wiring the desk has today, where `q` (the synchronous roles) skips itself: the baud and frame matrices across the wire, injected parity/rate/overflow/break errors, bit-banged waveforms (glitch widths, a uniform rate error, one distorted cell, the four ABW windows), auto-baud against board B's own oscillator, MPCM in both flavours, both synchronous roles on a real XCK with the client's CLK_PER/4 ceiling, RS-485's XDIR guard time, IRCOM pulses and the RXPL filter, a clock rebase under real traffic, and the LBME pad probe. Also three tools outside `y`: `v` = the wiring probe (with board B's console `2`), `w` = the one-wire bus (6/6 when the shared wire is fitted; the first two depend on how the desk is jumpered - `w` skips itself on the crossed pair and `q`, the synchronous roles, skips itself on the shared wire), and `x` = the clock comparison: the peer's 0x00 frames put nine hardware-timed bit times of low on the wire, the DUT's pulse-width meter averages sixteen of them (~60000 ticks each, one-tick spread, the div1 short-read corrected), resolving the two crystals' ratio to a few ppm - the boards measure +161..169 ppm apart. On a SHARED line `z` asks board B to stay quiet, re-armed per test - there the peer sits on the DUT's own loop-back; on the crossed pair it cannot disturb a loop-back measurement and nothing is armed |
+| `test_avr_spi` | **Bench test suite** (keep passing): SPI, 10 tests / 148 verdicts, 148/148 on rev A5 at 5 V, single board, NOTHING TO WIRE - routes and teardown including the pinless NONE and the two refusals (SPI1 ALT2 by errata 2.11.1, a pinless host watching SS by DA errata 2.10.1), all seven bit rates measured on SCK through the SPI's own SCK event into a TCB frequency meter (exact, CLK_PER/2 included), the data path with MISO driven by the board's own PORT and MOSI counted through EvPin, the four transfer modes' idle levels, WRCOL and the two clear disciplines, buffer mode's four flags (DREIF's two levels, TXCIF, BUFOVF's deferred rise), host demotion forced through the SS pin's own INVEN, both ISR bodies, a 24 -> 12 -> 24 MHz rebase under a 1.5 MHz SCK ceiling, and the SpiHost engine with both completion styles. Everything runs on SPI0 ALT1 (PE0-PE3) - SPI0's DEFAULT route is the 3.3 V display/MCP3550 cabling and must never be driven at 5 V, and SPI1's positions are the traffic LEDs, so SPI1 is exercised on route NONE only. Board B must be INERT (flash `family_probe`) |
 | `usart_peer` | The INSTRUMENT half of the USART campaign, for board B: one blocking loop that decodes a command frame off the link, acknowledges it and becomes for a bounded moment whatever the DUT needs on the other end - echo, silent sink, generator, full-rate flood, break, foreign auto-baud sender, cycle-counted bit-banger (a stretched bit cell, sub-bit glitches), one-wire responder. Every mode-changing command carries a frame count and a deadline after which the peer restores command mode by itself. Console (observability only): `?` help, `i` status and counters, `0` command mode, `1` one-wire standby, `2` wiring probe, `3` command trace |
 | `sampler` | The ADC inside the kernel: `AnalogSampler` over ADC0 walking PD1 (the DAC loop), die temperature and VDD/10, published to a Monitor (one line a second) and an Alarm (LED PF2 above a threshold); console DAC/PACE HW|SW|OFF/ALARM/CLOCK/STAT. Bench: 512 samples/s (PIT/64) with no queue drops, 128/s default, CLK_ADC follows CLOCK 4M/24M under sampling |
 | `traffic0` | The over-commented AO learning testbed: 4 buttons -> 4 RGB lamps, one AO per role, publish for button facts |

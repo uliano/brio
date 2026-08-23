@@ -44,7 +44,7 @@ namespace {
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
-using SpiHw = brio::Spi<0>;                       // PA4/PA5/PA6
+using SpiHw = brio::SpiHost<0>;                       // PA4/PA5/PA6
 using Bus = brio::SpiBus<SpiHw, P>;
 using CsPin = brio::Pin<'A', 7>;                  // exercised, not wired
 

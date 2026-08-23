@@ -72,7 +72,7 @@ constexpr Serial serial;
 
 using TwiHw = brio::Twi<0>;                        // PA2 SDA / PA3 SCL
 using I2c = brio::I2cBus<TwiHw, P>;
-using SpiHw = brio::Spi<0>;                        // PA4/PA5/PA6
+using SpiHw = brio::SpiHost<0>;                        // PA4/PA5/PA6
 using Spi = brio::SpiBus<SpiHw, P>;
 
 using AdcCs = brio::Pin<'B', 0>;                   // MCP3550 CS (moved from PD3, 2026-08-17)
@@ -200,7 +200,7 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                     AdcCs::ref(), {}, nullptr, 0,
                     nullptr, spi_rx, 1,
                     brio::reply_to<Loop, brio::BusDone>(),
-                    brio::SpiClock::div64, SPI_MODE_3_gc});
+                    brio::SpiClock::div64, brio::SpiMode::mode3});
                 return handled();
             },
             [](brio::BusDone d) {
@@ -236,7 +236,7 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                     AdcCs::ref(), {}, nullptr, 0,
                     nullptr, spi_rx, 3,
                     brio::reply_to<Loop, brio::BusDone>(),
-                    brio::SpiClock::div64, SPI_MODE_3_gc, false,
+                    brio::SpiClock::div64, brio::SpiMode::mode3, false,
                     adc_cs_setup_us});
                 return handled();
             },

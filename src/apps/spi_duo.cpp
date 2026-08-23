@@ -8,7 +8,7 @@
 //             polls at 20 Hz with short 3-byte conversions capped at
 //             1.5 MHz - the latency-sensitive little guy.
 //
-// Neither client knows the other exists. Both post Spi<0>::Request
+// Neither client knows the other exists. Both post SpiHost<0>::Request
 // events to the same SpiBus; the AO's queue + pending FIFO serialize
 // them, each request carries its OWN clock rate (per-transaction
 // engine reconfiguration), and every reply finds its way home through
@@ -66,7 +66,7 @@ namespace {
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
-using SpiHw = brio::Spi<0>;
+using SpiHw = brio::SpiHost<0>;
 using Bus = brio::SpiBus<SpiHw, P>;
 
 // display client pins (README bench map)
@@ -235,7 +235,7 @@ private:
             data, nullptr, n,
             brio::reply_to<Filler, brio::SpiDone>(),
             brio::SpiClock::div4,              // 6 MHz for the panel
-            SPI_MODE_0_gc, true});             // polled: bulk at wire speed
+            brio::SpiMode::mode0, true});             // polled: bulk at wire speed
     }
 
     static void set_window(uint8_t c, uint16_t last) {

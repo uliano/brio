@@ -375,7 +375,32 @@ gets its dated home in `docs/design/` when taken.
   bug (collect live - the 3-deep FIFO made the ceiling test pass
   vacuously). USART campaign closed but for the declared deferrals:
   MSPI electrical (SPI campaign), SFD from standby (sleep pass),
-  DBGRUN, IREI, the LIN protocol layer. -> CCL -> AC ->
+  DBGRUN, IREI, the LIN protocol layer. SPI phase S1 DONE (single-board
+  half): spi.hpp REBUILT from chapter 28 - Spi<n> resource (the route
+  table per package with the FIRST errata-beats-header gate: SPI1 ALT2
+  refused on 48 pins, DB 2.11.1; a pinless host must set SSD, DA 2.10.1;
+  both roles, the seven rates + the spi_clock_for chooser, both INTFLAGS
+  layouts with their differing clear disciplines, the host demotion
+  readback and re-arm, two ISR bodies, full pin teardown) + tasks
+  SpiHost<n, route> (the old engine's public behaviour intact: two-phase
+  descriptors, ISR pump vs polled, CS/DC, cs_setup_us, the CPOL preset
+  applied with the peripheral disabled; new: an optional SCK ceiling that
+  rebase re-resolves) and SpiClient<n, route> (polled surface + the ISR
+  bodies, ClockUser for the CLK_PER/6 ceiling). Apps and spi-bus.md
+  follow the rename Spi -> SpiHost, and SpiMode replaces the raw
+  SPI_MODE_x_gc apps were passing. NEW SUITE test_avr_spi 148/148 (10
+  tests, no wires, SPI0 ALT1 only - DEFAULT is the 3.3 V display
+  cabling). Findings: all seven rates exact on SCK (CLK_PER/2 included);
+  a host's MISO direction override is LATCHED AT ENABLE (a DIRSET under a
+  running SPI does nothing); MOSI parks HIGH between transfers; a W1C
+  store to IF leaves WRCOL standing (only the read-then-DATA sequence
+  clears it) and a store to DREIF does not clear it; BUFOVF waits for the
+  NEXT transfer; an SS pin driven low as an OUTPUT does not demote (table
+  28-2) - the suite forces the demotion with the pin's own INVEN. DESK
+  CHANGE found by the wiring probe: PORTE is now wired STRAIGHT THROUGH
+  (A.PEn - B.PEn, n = 0..3), not crossed - so test_avr_serial y is
+  103/103 with q skipping itself, w is 6/6, and S2's host/client link
+  needs no re-jumpering. -> CCL -> AC ->
   ADC/DAC/VREF -> CLKCTRL (DA must compile) -> EVSYS tables. Phase 2,
   never-reviewed: USART
   (jumper cross-loopback, new suite test_avr_serial) -> SPI (host ->
@@ -572,8 +597,13 @@ lib/brio/src/            the framework, four strata:
                            tasks Uart<n, Route, rx, tx> (interrupt-driven
                            transport), OneWire, Rs485, SyncHost/SyncClient,
                            MspiHost, IrdaLink, AutoBaud
-    spi.hpp                Spi<n> master engine (two-phase descriptor,
-                           per-byte ISR pump, CS owned by the engine)
+    spi.hpp                SPI: Spi<n> resource (the per-package route table
+                           with the errata gate, both roles incl. the host
+                           demotion, the seven rates and their chooser, both
+                           INTFLAGS layouts, two ISR bodies) + tasks
+                           SpiHost<n, route> (two-phase descriptor, per-byte
+                           ISR pump or polled, CS owned by the engine,
+                           optional SCK ceiling) and SpiClient<n, route>
     twi.hpp                Twi<n, Route> I2C master engine
     tca.hpp                TCA: Tca<n> resource (normal mode: PER, three
                            buffered CMP, waveform modes, event inputs A/B,

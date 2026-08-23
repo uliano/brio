@@ -56,7 +56,7 @@ namespace {
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
-using SpiHw = brio::Spi<0>;
+using SpiHw = brio::SpiHost<0>;
 using Bus = brio::SpiBus<SpiHw, P>;
 
 using CsPin = brio::Pin<'D', 0>;
@@ -357,7 +357,7 @@ private:
             data, nullptr, n,
             brio::reply_to<Painter, brio::SpiDone>(),
             brio::SpiClock::div4,
-            SPI_MODE_0_gc, true});             // polled bulk
+            brio::SpiMode::mode0, true});             // polled bulk
     }
 
     static void set_window(uint8_t c, uint16_t first, uint16_t last) {

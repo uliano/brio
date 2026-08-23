@@ -1,62 +1,281 @@
-# SPI - the serial peripheral interface engine (AVR DA/DB)
+# SPI - the serial peripheral interface (AVR DA/DB)
 
-> **PROVISIONAL.** Not the result of a systematic review of the SPI
-> chapter and errata; the driver is the host-mode engine the bus AO
-> needed for the display, the touch controller and the MCP3550. The
-> exhaustive pass is pending. Documents consulted: AVR128DB28/32/48/64
-> data sheet DS40002247B (SPI, electricals 39.15), errata DS80000915F
-> (2.11.1: SPI1 ALT2 pin position non-functional on 48-pin, rev
-> A4/A5 - not used). Driver: `avrdx/spi.hpp`; the arbiter above it:
-> [spi-bus.md](../design/spi-bus.md) (`util/bus_master.hpp`, `util/spi_bus.hpp`).
-> Bench-exercised against a display, a touch controller and the
-> MCP3550 ADC on a shared bus (the apps are mapped in bench.md).
+> **PROVISIONAL.** The chapter's register description is covered in full
+> and the single-board half is bench-verified: routes and teardown, all
+> seven bit rates measured on SCK, the data path, the four transfer
+> modes' idle levels, the write collision, buffer mode's four flags, the
+> host demotion, both ISR bodies, a clock rebase under an SCK ceiling and
+> the transfer engine. What is missing is everything that needs a SECOND
+> device on the wire - a real client, mode and bit-order mismatches, SS
+> mid-byte, multi-host arbitration - plus the routes this desk cannot
+> reach. The list is in "Not covered yet".
 
-## What the driver does today
+Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (SPI
+chapter 28, PORTMUX chapter 17, electricals 39.15), errata DS80000915F
+(2.11.1 and clarifications 3.5.1, 3.5.2, 3.7.3) and, for the DA parts,
+DS80000882C (2.10.1). Three items shape the code:
 
-`Spi<n>`: host mode, MSB first, default pins (SPI0 PA4/PA5/PA6, SPI1
-PC0/PC1/PC2), SSD (no client-select input). One transaction = a
-`Request` descriptor: CS and DC as `PinRef`, a command phase (DC low)
-and a data phase (DC high, full duplex: tx and rx spans), per-request
-clock (`SpiClock` div4/16/64/128 of CLK_PER) and mode (CPOL/CPHA),
-`cs_setup_us` before the first SCK (MCP3550), `park_sck` level, and a
-completion style: per-byte ISR pump (`isr()` body) or a polled loop
-for bulk at fast clocks. CS is asserted and released by the engine
-around the whole transaction. A `ClockUser`: `rebase` re-derives the
-cs_setup timing base (the SCK prescalers are relative to CLK_PER:
-the client's choice may need revisiting after a clock change).
+- **DB 2.11.1, SPI1 ALT2 on 48-pin devices**: the position is
+  NON-FUNCTIONAL there (rev. A4/A5; fixed in B0). The 48-pin device
+  headers still list it, with MOSI on PB4 and MISO on PB5 and no SCK or
+  SS position at all - so the driver refuses it on every 48-pin part of
+  both families, at compile time and at run time. This is the first
+  place in `avrdx/` where an erratum beats the device header.
+- **DA 2.10.1, SSD with the pinless route**: with PORTMUX.SPIROUTE at
+  NONE the Client Select line must be disabled (CTRLB.SSD = 1) or Host
+  mode does not survive. It is listed for every DA revision and not at
+  all for the DB, but the configuration it forbids - a pinless host
+  still watching an SS input no pin can hold high - has no use, so it is
+  refused on both families.
+- **clarification 3.7.3, the timing tables**: the host's SCK ceiling is
+  f_CLK_PER/2 and a client's is f_CLK_PER/6 (the chapter's own "two
+  peripheral clock periods per SCK phase" would say /4; the tighter
+  table wins). `spi_max_host_sck_hz` / `spi_max_client_sck_hz`.
+- **clarification 3.5.2** also warns that a client in buffer mode near
+  its maximum SCK may not set up data in time for the first sample edge
+  of a back-to-back transfer.
+
+Driver: `avrdx/spi.hpp`. The arbiter above it:
+[spi-bus.md](../design/spi-bus.md) (`util/bus_master.hpp`,
+`util/spi_bus.hpp`). Reference test: `test_avr_spi`.
+
+## What the silicon does
+
+One 8-bit shift register shifting out and in at the same time, a clock
+generator used only in host mode, and two roles:
+
+- **host** - a write to DATA starts a transfer; the host drives SCK,
+  MOSI and (if it wants to) SS, and reads MISO;
+- **client** - SS, SCK and MOSI are inputs and the host sets the pace;
+  MISO is driven only while SS is low, the pad tri-stating itself when
+  the client is deselected, and the SS pin's rising edge RESETS the
+  client's state machine (a partial byte is lost).
+
+Both roles run in one of two buffering regimes, chosen by CTRLB.BUFEN,
+and the regime decides which of the TWO INTFLAGS layouts the same
+register address carries:
+
+| | normal mode | buffer mode |
+|---|---|---|
+| transmit | single-buffered: a write during a transfer is IGNORED and sets WRCOL | double: DATA + a transmit buffer, DREIF says there is room |
+| receive | double-buffered: read before the next transfer ends or lose it | a two-deep FIFO plus the shifter; BUFOVF marks the loss |
+| flags | IF, WRCOL | RXCIF, TXCIF, DREIF, SSIF, BUFOVF |
+| clearing | IF: write one to it, or read INTFLAGS then access DATA. WRCOL: ONLY that read-then-DATA sequence | TXCIF/SSIF/BUFOVF: write one. RXCIF and BUFOVF also clear by reading DATA; DREIF clears by WRITING DATA and by nothing else |
+
+A host with CTRLB.SSD = 0 watches its SS pin: an SS INPUT driven low by
+somebody else clears CTRLA.MASTER, the instance becomes a client, and IF
+(normal) or SSIF (buffer) is raised. Nothing but the application puts it
+back. An SS pin configured as an OUTPUT is not watched at all (table
+28-2), and with SSD = 1 the pin is free for any other use - which is
+what a bus with software chip selects wants.
+
+Seven bit rates: PRESC divides CLK_PER by 4, 16, 64 or 128 and CLK2X
+halves that. CLK_PER/64 is reachable twice (PRESC DIV64 alone, PRESC
+DIV128 doubled); `SpiClock` names the seven distinct divisions and
+`spi_presc_bits` picks the canonical encoding.
+
+The routes are PORTMUX.SPIROUTEA, two bits per instance. Both instances
+exist on every package of the family; what varies is how many positions
+a package bonds:
+
+| | 28/32 pins | 48 pins | 64 pins |
+|---|---|---|---|
+| SPI0 DEFAULT | PA4-PA7 | PA4-PA7 | PA4-PA7 |
+| SPI0 ALT1 | - | PE0-PE3 | PE0-PE3 |
+| SPI0 ALT2 | - | - | PG4-PG7 |
+| SPI1 DEFAULT | PC0-PC3 | PC0-PC3 | PC0-PC3 |
+| SPI1 ALT1 | - | PC4-PC7 | PC4-PC7 |
+| SPI1 ALT2 | - | refused (errata 2.11.1) | PB4-PB7 |
+| NONE | pinless | pinless | pinless |
+
+The signals are always in the order MOSI, MISO, SCK, SS. The pinless
+route leaves an instance running with no pins: the shift register, the
+flags and the host's SCK event generator all work.
+
+The SPI has one interrupt vector for both layouts, one event generator
+(the host's SCK level, `EvSpiSck`), no event users, and no DBGRUN or
+RUNSTDBY control of its own.
 
 ## Types and verbs
 
-| Entity | Verbs |
-|--------|-------|
-| `Spi<n>` | `init(clock)`, `rebase(hz)`, `start(const Request&)` -> bool (true = completed synchronously), `isr()` -> bool (done; the app posts TransferDone), `status()` |
-| `Spi<n>::Request` | `cs`, `dc` (PinRef), `cmd`/`cmd_len`, `tx`, `rx`, `len`, `reply` (ReplyTo<SpiDone>), `clock`, `mode`, `polled`, `cs_setup_us`, `park_sck` |
-| `SpiClock` | `div4` (6 MHz at 24 MHz) .. `div128` |
+| Entity | What it is |
+|--------|------------|
+| `SpiRoute`, `SpiSignal`, `SpiPin` | the route vocabulary; `spi_route_exists`, `spi_pin`, `spi_package_pins` are the per-package table |
+| `SpiRole`, `SpiMode`, `SpiClock` | host/client, the four transfer modes (with `spi_cpol`/`spi_cpha`), the seven divisions |
+| `spi_division`, `spi_sck_hz`, `spi_presc_bits`, `spi_clock_of` | the rate arithmetic, both directions |
+| `spi_clock_for(clk_per, max_sck)` | the chooser: the fastest division that does not exceed a device's limit |
+| `spi_max_host_sck_hz`, `spi_max_client_sck_hz` | the two ceilings of the timing tables |
+| `SpiConfig`, `spi_config_valid<n>` | the whole configuration, and what this package and the errata allow |
+| `Spi<n>` | the RESOURCE: `init<cfg>()`/`init(cfg)`/`release()`, enable, role and demotion, rate, mode, SSD, buffer mode, DATA, both flag sets with their clear verbs, the interrupt enables, `take_normal()`/`take_buffer()` ISR bodies, `routed()` |
+| `SpiHost<n, route>` | the transfer ENGINE: `Request` descriptors, `start()`, `isr()`, an optional SCK ceiling, `rebase()` |
+| `SpiClient<n, route>` | the client side: `selected()`, `preload()`, `exchange()`, the buffer-mode readbacks, the ISR bodies, `max_sck_hz()` |
+
+Both tasks are `ClockUser`s. The engine's `rebase` recomputes the
+`cs_setup_us` timing base and re-picks the division that honours its
+ceiling; the client's only records the peripheral clock, because the
+fastest SCK it can follow is CLK_PER/6. Neither may be rebased with a
+transfer in flight.
 
 ## How to use it
 
-Through the bus AO, never directly from an app: `post<SpiBus>(request)`
-with `reply_to<Me, SpiDone>()` - see [spi-bus.md](../design/spi-bus.md). The
-engine itself is bound once:
+**A bus, through the arbiter** - the normal way, and the only way an
+application should touch a shared bus (see
+[spi-bus.md](../design/spi-bus.md)):
+
 ```cpp
-using SpiHw = brio::Spi<0>;
-ISR(SPI0_INT_vect) { if (SpiHw::isr()) brio::post<Bus>(brio::TransferDone{SpiHw::status()}); }
-SpiHw::init(clock);
+using SpiHw = brio::SpiHost<0>;                 // DEFAULT route
+using Bus = brio::SpiBus<SpiHw, P>;
+ISR(SPI0_INT_vect) { if (SpiHw::isr()) brio::post<Bus>(brio::TransferDone{brio::spi_ok}); }
+SpiHw::init(clock);                             // optionally: init(clock, max_sck_hz)
+brio::post<Bus>(SpiHw::Request{
+    Cs::ref(), Dc::ref(), cmd, 1, data, nullptr, len,
+    brio::reply_to<Me, brio::SpiDone>(),
+    brio::SpiClock::div4, brio::SpiMode::mode0, /*polled=*/true});
+```
+
+**One instance by hand** - a bare host on a route of its own:
+
+```cpp
+using S = brio::Spi<0>;
+S::init<brio::SpiConfig{.route = brio::SpiRoute::alt1,
+                        .clock = brio::SpiClock::div16,
+                        .mode = brio::SpiMode::mode3}>();
+const auto in = S::transfer(0x9F);              // one polled byte
+```
+
+**A client** - the answer prepared before the host clocks it out:
+
+```cpp
+using C = brio::SpiClient<1>;
+C::init({.mode = brio::SpiMode::mode0, .buffer_mode = true, .buffer_wait = true});
+if (C::selected()) { const auto cmd = C::exchange(status_byte); }
+```
+
+**A device's datasheet limit in hertz** - the chooser instead of a
+guessed division:
+
+```cpp
+const auto c = brio::spi_clock_for(brio::clock_hz(clock), 2'500'000u);  // XPT2046
 ```
 
 ## Bench findings
 
-- Per-byte ISR pump costs too much at 6 MHz for 960-byte rows: the
-  polled completion style exists for that (the DMA's slot on other
-  targets).
-- MCP3550: needs `cs_setup_us` and the SPI mode latched at CS fall
-  (mode 1,1 = SCK parked high): `park_sck`; a CPOL change is applied
-  with the peripheral disabled.
+Measured on rev. A5 at 5 V, CLK_PER 24 MHz, SPI0 on ALT1 (PE0-PE3), with
+nothing wired to the SPI but the campaign's crossed pair to an inert
+second board. `test_avr_spi`, `z` = 148 verdicts.
+
+**The bit rates are exact.** All seven divisions measured through the
+SPI's own SCK event into a TCB frequency meter (period between rising
+edges, CLK_PER ticks):
+
+| division | SCK at 24 MHz | measured period |
+|---|---|---|
+| CLK_PER/2 | 12 MHz | 2 ticks |
+| CLK_PER/4 | 6 MHz | 4 ticks |
+| CLK_PER/8 | 3 MHz | 8 ticks |
+| CLK_PER/16 | 1.5 MHz | 16 ticks |
+| CLK_PER/32 | 750 kHz | 32 ticks |
+| CLK_PER/64 | 375 kHz | 64 ticks |
+| CLK_PER/128 | 187.5 kHz | 128 ticks |
+
+Exact at every rate, the 12 MHz one included - a two-tick period still
+reaches a TCB through the event system, though the capture ISR then
+catches only about one period per byte (the minimum of a burst is the
+measurement).
+
+**A host's MISO direction is overridden, and the override is latched at
+ENABLE.** With the SPI running, a PORT.DIRSET on the MISO position does
+nothing to the pad; the same DIRSET performed while the instance is
+disabled drives the pin, and it keeps driving across the next enable.
+The driver's ordering (pins first, CTRLA.ENABLE last) is what makes a
+client's MISO an output at all.
+
+**MOSI parks HIGH between transfers** - not at the last bit sent and not
+at the byte received. A stream of zero bytes therefore costs exactly one
+rising edge per byte on the wire.
+
+**The write collision.** A write to DATA during a transfer is ignored,
+sets WRCOL, and does not disturb the byte in flight. The two clear
+disciplines of the normal layout are NOT interchangeable: a plain store
+of one to IF clears IF and leaves WRCOL standing; only the documented
+read-INTFLAGS-then-access-DATA sequence clears both.
+
+**Buffer mode.** DREIF is up on an idle transmitter, survives the first
+write (straight into the shifter) and falls on the second (into the
+buffer): two levels, as the chapter says. A store of one to DREIF does
+NOT clear it - it follows DATA alone. TXCIF is left clear by `init` and
+rises when shifter and buffer are both empty; it is write-one-to-clear,
+and it is a CONDITION, so it must be cleared before a burst if it is to
+mean "this burst finished". BUFOVF is not raised by the third undrained
+byte, which waits in the shifter: it appears when the NEXT transfer
+starts, exactly as the register description says. BUFWR changes nothing
+in host mode.
+
+**Host demotion.** An SS pin driven low as an OUTPUT does not demote
+anything (table 28-2). An SS INPUT seen low does: MASTER clears, IF
+(normal) or SSIF (buffer) is raised, and the instance stays a client
+until the application re-arms it - mid-byte as well as between bytes.
+With SSD = 1 the pin is ignored. The desk has no second driver on the SS
+position, so the "seen low" half of the test is produced by the pin's own
+INVEN: the pad stays an input held high by its pull-up while the
+peripheral reads a low. After a demotion the instance has been a client,
+and a client owns the MISO pad - a recovery therefore has to re-establish
+the pin roles (an ENABLE cycle), not just write MASTER back.
+
+**The interrupt.** One vector, one interrupt per byte in normal mode,
+with the body's INTFLAGS-then-DATA read clearing IF. In buffer mode the
+body must write one to TXCIF/SSIF/BUFOVF and read DATA for RXCIF, or the
+vector re-enters immediately; with both halves in place a burst of eight
+bytes produces eight interrupts and then silence.
+
+**The engine.** Both completion styles move the same bytes, the chip
+select comes back high after each transaction, a command phase reaches
+the wire, a zero-length request completes without touching it, and a
+request faster than the engine's ceiling is slowed to the ceiling. Under
+a 24 -> 12 -> 24 MHz rebase a 1.5 MHz ceiling re-picks CLK_PER/16 ->
+CLK_PER/8 -> CLK_PER/16 and the measured SCK stays at 1.5 MHz.
+
+**A caveat of the self-driven-MISO technique** (this desk, not the
+silicon as far as this half can tell): with MISO held HIGH by PORT and a
+TOGGLING pattern on MOSI, what comes back is the pattern rather than
+0xFF - the two halves of the crossed pair run side by side for 20 cm
+into an inert board. A MISO held LOW is immune, and a constant MOSI is
+immune, so every byte-level check in the suite either holds MISO low or
+sends a constant byte. Which of coupling or silicon it is, the second
+board will say.
 
 ## Not covered yet
 
-Client mode, LSB first, buffer mode (BUFEN, BUFWR), the remaining
-prescalers and double speed (CLK2X), write-collision flag, the SS
-input (SSD off), wake-up from idle, the pin routing alternatives
-(PORTMUX ALT1/ALT2 beyond the default), the electricals' timing table,
-DMA-shaped engine boundary on targets that have it.
+**Driver gaps** (what the code does not do):
+
+- no client-side ISR-driven service: `SpiClient` is a polled surface plus
+  the resource's ISR bodies, and the AO that would sit on it (the mirror
+  of `BusMaster` for a client) is not written - it will be born with its
+  first user;
+- no wake-from-idle path: the chapter lists it as a feature, this driver
+  has no sleep story and neither has the rest of `avrdx/` yet;
+- the engine's SCK ceiling clamps a request DOWN silently; it does not
+  report that it did.
+
+**Implemented but not bench-verified:**
+
+- everything a second device is needed for: a real client on the wire
+  (both buffer regimes, BUFWR's dummy first byte, the client's
+  CLK_PER/6 ceiling), CPHA against a foreign host, the bit order
+  (`DORD`) - which single-board instrumentation cannot see at all,
+  since a reversed byte carries exactly as many edges - SS deasserted
+  mid-byte resetting a client, multi-host arbitration through a real
+  demotion, and the USART's own Host SPI mode (`MspiHost`) cross-checked
+  against this peripheral;
+- SPI1 electrically: its pin positions (PC0-PC3, PC4-PC7) are the
+  traffic LEDs of this bench, so SPI1 is exercised on route NONE only -
+  the register work, not a wire;
+- SPI0 DEFAULT and ALT2 electrically: DEFAULT (PA4-PA7) is cabled on
+  this desk to a 3.3 V display module and an MCP3550 while the desk runs
+  at 5 V, and ALT2 needs a 64-pin package this bench does not have;
+- the errata refusals are proven by what the driver REFUSES, not by what
+  the silicon does: nobody has watched SPI1 ALT2 fail on a 48-pin part,
+  or a pinless DA host lose Host mode with SSD = 0;
+- the electricals of 39.15 / clarification 3.7.3 as timing (setup and
+  hold windows, the client's tSOS) - only the frequency ceilings are in
+  the code.

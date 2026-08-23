@@ -12,13 +12,13 @@ form ([i2c-bus.md](i2c-bus.md) shares the same arbiter).
      SpiBus<Bus, P>          util/spi_bus.hpp   arbitration + replies
          |  Bus::start(req)
          v
-     Spi<n> engine          avrdx/spi.hpp     CS/DC, per-byte ISR pump
+     SpiHost<n> engine      avrdx/spi.hpp     CS/DC, per-byte ISR pump
          |
      ISR glue in the app    posts TransferDone{status} on completion
 ```
 
 Layering: `SpiBus` is `util/` (pure, host-testable against a fake Bus);
-`Spi<n>` is `avrdx/` (knows the silicon). The app's ISR binds the
+`SpiHost<n>` is `avrdx/` (knows the silicon). The app's ISR binds the
 vector, as always.
 
 `SpiBus` is an alias of `BusMaster<Bus, P>` (`util/bus_master.hpp`),
@@ -41,7 +41,7 @@ The request event (~16-byte descriptor) exceeds the 8-byte envelope
 guideline: a recorded, legal deviation - the request IS the
 arbitration token; the queues are per-AO, nobody else pays.
 
-## The transaction descriptor (`Spi<n>::Request`)
+## The transaction descriptor (`SpiHost<n>::Request`)
 
 **The request is the complete script of one bus tenure.** A shared bus
 forces per-transaction context (cs, clock, mode: who you are, how you
@@ -96,11 +96,12 @@ bench - generalize on the second specimen).
 ## Per-transaction clock and mode
 
 On a SHARED bus every device names its own speed and mode: the
-descriptor carries `SpiClock clock` and `uint8_t mode` (defaults
+descriptor carries `SpiClock clock` and `SpiMode mode` (defaults
 div16 / mode 0), and the engine reprograms CTRLA/CTRLB at each
 `start()` - two register writes between transactions, nothing per
-byte. `Spi<n>::init()` takes pins, interrupt enable and master
-enable only - no clock, no mode. Rationale: the first two real clients on
+byte. `SpiHost<n>::init()` takes the clock tag and an optional SCK
+CEILING for the whole bus - no per-transaction rate, no mode; a
+request that asks for more than the ceiling is slowed to it. Rationale: the first two real clients on
 the bench already disagreed (a display comfortable at 6 MHz, a touch
 controller capped below 2.5 MHz), and a global init-time clock was a
 latent bug for every multi-device configuration.
@@ -113,7 +114,7 @@ SYNCHRONOUSLY inside start(). The choice travels per-request in a
 `polled` flag - like the clock, the client knows its transaction.
 
 - **ISR pump** (default): one byte per interrupt (no DMA on AVR Dx).
-  `Spi<n>::isr()` returns true exactly when the transaction completed
+  `SpiHost<n>::isr()` returns true exactly when the transaction completed
   (CS released) - the edge on which the app's ISR glue posts
   `TransferDone{status}` to the bus AO, mirroring the uart edge
   pattern. The kernel keeps dispatching between bytes. Right for slow
@@ -172,7 +173,7 @@ fast: batch words into one span (that is why the descriptor speaks
 spans), amortize the round trip. For a device that demands CS-per-word
 framing, the noted engine extension would batch N words into one
 tenure. And a device that owns a bus ALONE can skip the arbiter
-entirely: with `polled = true`, `Spi<n>::start()` is a complete
+entirely: with `polled = true`, `SpiHost<n>::start()` is a complete
 synchronous transfer function usable directly by the owning AO - the
 arbitration price is only paid where there is something to arbitrate.
 
