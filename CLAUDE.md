@@ -366,9 +366,16 @@ gets its dated home in `docs/design/` when taken.
   TXCIF by half a bit (turnaround guard documented), board B's 24 MHz
   crystal does not start (runs OSCHF +0.24 %). Driver fixes: Uart::
   init drains stale rings/counters, wait_line_idle re-commented (one
-  call per burst). Open: sync roles + client CLK_PER/4 ceiling (test
-  q skips itself until the desk carries the crossed pair), MSPI
-  electrical (SPI campaign), SFD from standby, DBGRUN, IREI. -> CCL -> AC ->
+  call per burst). Crossed pair refitted: sync roles VERIFIED (exact
+  at 100 kHz and 1 MHz, both INVEN phases - host and client invert
+  TOGETHER; the client's CLK_PER/4 ceiling is real, 12 MHz garbles
+  every run), y 110/110; the fix round killed the peer's topology
+  latch (un-latches after 3 s of silence, discovery drives nothing
+  until proven, console 0 = manual escape) and q's FIFO-drain suite
+  bug (collect live - the 3-deep FIFO made the ceiling test pass
+  vacuously). USART campaign closed but for the declared deferrals:
+  MSPI electrical (SPI campaign), SFD from standby (sleep pass),
+  DBGRUN, IREI, the LIN protocol layer. -> CCL -> AC ->
   ADC/DAC/VREF -> CLKCTRL (DA must compile) -> EVSYS tables. Phase 2,
   never-reviewed: USART
   (jumper cross-loopback, new suite test_avr_serial) -> SPI (host ->

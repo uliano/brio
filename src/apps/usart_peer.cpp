@@ -69,9 +69,14 @@ constexpr uint16_t firmware_version = 0x0201;
 
 bool crystal_ok = false;
 /// Which wiring the desk turns out to have (usart_link.hpp Topology).
-/// The peer alternates until a command frame arrives, then stays.
+/// The peer alternates until a command frame arrives, believes that
+/// answer while the channel keeps working, and goes back to alternating
+/// once it has been silent for link::rediscover_ms. Nothing here is ever
+/// latched for good: a desk that gets re-jumpered under two running
+/// firmwares has to converge by itself, and a topology that is believed
+/// for ever cannot.
 link::Topology topo = link::Topology::full_duplex;
-bool topo_locked = false;
+bool proven = false;
 link::Decoder decoder;
 link::Report last_report;
 uint32_t commands = 0, naks = 0, actions = 0;
@@ -84,6 +89,8 @@ bool one_wire_standby = false;
 /// already listening in the new configuration.
 uint32_t ack_ms = 0;
 uint32_t last_byte_ms = 0;
+uint32_t last_frame_ms = 0;   ///< when a whole command frame last decoded
+uint32_t last_flip_ms = 0;    ///< when the discovery last changed topology
 uint32_t standby_until = 0;   ///< mute until this millisecond (0 = answering)
 
 void settle() {
@@ -135,9 +142,15 @@ void set_inven(char port, uint8_t pin, bool on) {
 /// True while the link is a single wire between the two TXD pads.
 bool shared() { return topo == link::Topology::shared; }
 
-/// Turnaround on a shared line: take the wire (receiver off so the
-/// loop-back echo is not decoded, pin driven, transmitter on). A no-op
-/// on the full-duplex wiring.
+/// May the transmitter sit enabled BETWEEN frames? Only on the crossed
+/// pair, where this board's TXD wire reaches nothing but the other
+/// board's RXD - and only once the topology has been PROVEN by a
+/// decoded frame. While discovery is still guessing, the peer drives
+/// nothing at all: a probe that idled its TXD high would, on a shared
+/// desk, fight the other board's transmitter for as long as it guessed
+/// wrong.
+bool tx_idle_on() { return !shared() && proven; }
+
 /// Half-duplex turnaround guard. RXCIF is raised at the MIDDLE of the
 /// stop bit - half a bit BEFORE the sender's TXCIF - so an end that
 /// answers at once starts its start bit while the other end is still
@@ -151,14 +164,18 @@ void turnaround_guard() {
     delay_cycles(4u * (bit_cycles ? bit_cycles : 1u));
 }
 
+/// Take the line to answer. On a shared wire that also means muting the
+/// receiver, which LBME would otherwise feed with our own echo. The pin
+/// and the transmitter are claimed UNCONDITIONALLY: they are already
+/// ours whenever tx_idle_on(), and the one case that needs the claim is
+/// answering out of a non-driving discovery configuration - where
+/// command_mode() deliberately left the transmitter off.
 void line_talk() {
     turnaround_guard();
-    if (shared()) {
-        Link::enable_rx(false);
-        PORTE.OUTSET = LinePin::mask;
-        PORTE.DIRSET = LinePin::mask;
-        Link::enable_tx(true);
-    }
+    if (shared()) Link::enable_rx(false);
+    PORTE.OUTSET = LinePin::mask;
+    PORTE.DIRSET = LinePin::mask;
+    Link::enable_tx(true);
     Link::clear_txc();          // so line_listen waits for THIS burst
 }
 
@@ -168,12 +185,15 @@ void line_talk() {
 /// and then calls this would spin out its whole budget deaf.
 void line_listen(bool wait = true) {
     if (wait) (void)Link::wait_line_idle(200'000u);
-    if (!shared()) return;
-    Link::enable_tx(false);
-    PORTE.DIRCLR = LinePin::mask;
-    pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
-    Link::flush_rx();
-    Link::enable_rx(true);
+    if (!tx_idle_on()) {
+        Link::enable_tx(false);
+        PORTE.DIRCLR = LinePin::mask;
+        pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
+    }
+    if (shared()) {
+        Link::flush_rx();
+        Link::enable_rx(true);
+    }
 }
 
 /// Command mode: async 8N1 at link::command_baud. On the full-duplex
@@ -184,9 +204,9 @@ bool command_mode() {
     set_inven('E', 2, false);
     const bool ok = Link::init({.route = UsartRoute::def,
                                 .baud = usart_baud_reg(SysClock::hz, link::command_baud),
-                                .tx = !shared(),
+                                .tx = tx_idle_on(),
                                 .loop_back = shared()});
-    if (shared()) {
+    if (shared() || !proven) {
         PORTE.DIRCLR = LinePin::mask;
         pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
     } else {
@@ -577,7 +597,11 @@ bool trace = false;
 void handle(const link::Frame& f) {
     ++commands;
     const Op op = f.op;
-    if (trace) print(console, "  [cmd op=", hex(link::byte_of(op)), " len=", f.len, "]", crlf);
+    if (trace) {
+        print(console, "  [cmd op=", hex(link::byte_of(op)), " len=", f.len,
+              " topo=", shared() ? "sh" : "fd", " proven=", proven ? 1 : 0,
+              " standby=", standby_until != 0 ? 1 : 0, "]", crlf);
+    }
 
     // STAND-OFF. On a SHARED line this peer sits on the DUT's own
     // loop-back, so while the DUT runs its single-board half the one
@@ -695,7 +719,7 @@ void help() {
 void status() {
     print(console, "  topology=", shared() ? "shared line (PE0-PE0)"
                                            : "full duplex (crossed pair)",
-          topo_locked ? " LOCKED" : " searching", crlf);
+          proven ? " PROVEN" : " searching", crlf);
     print(console, "  link route=", static_cast<uint8_t>(Link::routed()),
           " BAUD=", Link::baud_reg(), " mode=", static_cast<uint8_t>(Link::mode()),
           one_wire_standby ? " (one-wire standby)" : "", crlf);
@@ -814,6 +838,8 @@ int main() {
                        "board comes from OSCHF", crlf);
     }
     (void)command_mode();
+    last_frame_ms = Ticker::millis();
+    last_flip_ms = last_frame_ms;
     help();
     print(console, "> ");
 
@@ -824,7 +850,17 @@ int main() {
                 print(console, static_cast<char>(c), crlf);
                 if (c == '?') help();
                 else if (c == 'i') status();
-                else if (c == '0') { (void)command_mode(); print(console, "  command mode", crlf); }
+                else if (c == '0') {
+                    // The manual way back: forget the topology, drop any
+                    // stand-off, and start looking again from scratch.
+                    proven = false;
+                    standby_until = 0;
+                    one_wire_standby = false;
+                    decoder.reset();
+                    (void)command_mode();
+                    last_flip_ms = Ticker::millis();
+                    print(console, "  command mode, discovery restarted", crlf);
+                }
                 else if (c == '1') one_wire_standby_mode();
                 else if (c == '2') wire_probe();
                 else if (c == '3') { trace = !trace; print(console, trace ? "  trace on" : "  trace off", crlf); }
@@ -833,15 +869,31 @@ int main() {
             }
         }
         if (one_wire_standby) continue;      // the DUT owns the line now
-        // RENDEZVOUS. Until a command frame has actually been decoded,
-        // alternate the two wirings: a desk that is not jumpered the way
-        // the campaign assumes then still finds its peer, and says which
-        // topology it found.
-        if (!topo_locked && Ticker::millis() - last_byte_ms > link::rendezvous_ms) {
-            topo = topo == link::Topology::full_duplex ? link::Topology::shared
-                                                       : link::Topology::full_duplex;
-            (void)command_mode();
-            last_byte_ms = Ticker::millis();
+
+        const uint32_t now = Ticker::millis();
+        if (standby_until != 0 && now >= standby_until) standby_until = 0;
+
+        // RENDEZVOUS, and RE-rendezvous. A topology is believed only
+        // while the command channel keeps proving it: once it has been
+        // silent for link::rediscover_ms the peer stops believing and
+        // goes back to alternating the two wirings until a frame decodes
+        // again. That is what lets a desk be re-jumpered under two
+        // running firmwares. A stand-off is the one silence that is
+        // expected, so it suspends all of this - flipping topology under
+        // a DUT that asked for quiet is exactly what the stand-off is
+        // there to prevent.
+        if (standby_until == 0) {
+            if (proven && now - last_frame_ms > link::rediscover_ms) {
+                proven = false;
+                last_flip_ms = now;
+                (void)command_mode();    // stop driving: the wiring is unknown again
+            }
+            if (!proven && now - last_flip_ms > link::rendezvous_ms) {
+                topo = topo == link::Topology::full_duplex ? link::Topology::shared
+                                                           : link::Topology::full_duplex;
+                (void)command_mode();
+                last_flip_ms = now;
+            }
         }
         // A frame that stops half way (a desync, a reconfiguration in the
         // middle of it) must not eat the next one: a quiet line for longer
@@ -859,9 +911,10 @@ int main() {
             }
             switch (decoder.feed(static_cast<uint8_t>(f.data))) {
                 case link::Decoder::Result::frame:
-                    topo_locked = true;
+                    proven = true;
                     handle(decoder.frame());
                     last_byte_ms = Ticker::millis();
+                    last_frame_ms = last_byte_ms;
                     break;
                 case link::Decoder::Result::bad_checksum:
                     ack(decoder.pending_op(), decoder.frame().sum, false);

@@ -817,6 +817,11 @@ bool command(link::Op op, const uint8_t* p = no_payload, uint8_t len = 0,
     for (uint8_t i = 0; i < first_n; ++i) print(serial, " ", hex(first_seen[i]));
     print(serial, " (CTRLA=", hex(U4::regs().CTRLA), " CTRLB=", hex(U4::regs().CTRLB),
           " BAUD=", U4::baud_reg(), ")", crlf);
+    if (first_edges == 0) {
+        print(serial, "      no edges at all: board B is not transmitting. It re-enters "
+                      "discovery by itself after ", link::rediscover_ms,
+              " ms of quiet; '0' on its console forces it.", crlf);
+    }
     (void)link_command_mode();
     delay_us(clock, 70'000);
     return false;
@@ -831,9 +836,16 @@ bool query(link::Op op, link::Frame& data, uint16_t ms = 80) {
 /// last used, then in the other one. The peer alternates its own
 /// command-mode configuration meanwhile, so one of the two dwells lands.
 bool ensure_link() {
+    // The whole of discovery is quiet: a probe that misses because the
+    // peer happened to be looking at the other wiring is not a failure,
+    // and printing it as one would bury the real ones.
+    link_quiet = true;
     if (topo_known) {
         (void)link_command_mode();
-        if (command(link::Op::ping)) return true;
+        if (command(link::Op::ping)) {
+            link_quiet = false;
+            return true;
+        }
     }
     // The SHARED topology is probed FIRST, and on purpose: in it the DUT
     // only drives the line while it is transmitting, so a desk that turns
@@ -843,11 +855,15 @@ bool ensure_link() {
     // answer the peer tries to send.
     const link::Topology order[2] = {link::Topology::shared,
                                      link::Topology::full_duplex};
-    link_quiet = true;
+    // Each dwell must outlast several of the peer's rendezvous periods,
+    // because BOTH ends are searching at once: the peer alternates every
+    // link::rendezvous_ms and the DUT must sit still long enough for one
+    // of those visits to land. Three command() calls is about 1.4 s per
+    // topology, three peer flips.
     for (link::Topology t : order) {
         topo = t;
         (void)link_command_mode();
-        for (uint8_t k = 0; k < 2; ++k) {
+        for (uint8_t k = 0; k < 3; ++k) {
             if (command(link::Op::ping)) {
                 topo_known = true;
                 link_quiet = false;
@@ -857,6 +873,9 @@ bool ensure_link() {
     }
     link_quiet = false;
     topo_known = false;
+    print(serial, "  the peer did not answer in either wiring. If board B has been "
+                  "running across a re-jumpering it should re-converge by itself within "
+                  "a few seconds; pressing '0' on its console forces it.", crlf);
     return false;
 }
 
@@ -957,6 +976,11 @@ bool dut_link(const link::Cfg& c, bool rx = true, bool tx = true) {
     if (one_line && rx) {
         TxPin::input();
         pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
+    } else {
+        // On the crossed pair the peer's TXD is undriven between answers
+        // while its discovery is still guessing: hold RXD up so a
+        // floating pin never invents a start bit.
+        pinctrl_of('E', 1) |= PORT_PULLUPEN_bm;
     }
     U4::flush_rx();
     return true;
@@ -1996,9 +2020,12 @@ void tq_sync() {
         a.ms = bound_ms(xck, 60);
         a.value = 0x60;
         if (!peer_act(link::Op::send, a)) { (void)link_command_mode(); continue; }
+        // The client has to be listening before the host's first edge,
+        // and it has to READ AS IT GOES: eight frames do not fit in a
+        // three-deep FIFO, so draining after the fact loses five of them
+        // whatever the wire did.
         const bool up = SyncC::init();
-        quiet(static_cast<uint16_t>(a.ms + 40));
-        const Drain d = drain();
+        const Drain d = collect(static_cast<uint16_t>(a.ms + 40));
         uint16_t want = 0;
         for (uint8_t i = 0; i < 8; ++i) want = static_cast<uint16_t>(want + 0x60 + i);
         print(serial, "  client at ", xck, " Hz: frames=", d.frames, " sum=", hex(d.sum),
@@ -2021,8 +2048,7 @@ void tq_sync() {
         a.value = 0x60;
         const bool sent = peer_act(link::Op::send, a);
         (void)SyncC::init();
-        quiet(240);
-        const Drain d = drain();
+        const Drain d = collect(240);
         uint16_t want = 0;
         for (uint8_t i = 0; i < 8; ++i) want = static_cast<uint16_t>(want + 0x60 + i);
         const bool clean = d.frames == 8 && d.sum == want && d.ferr == 0;
@@ -2423,11 +2449,19 @@ void help() {
     print(serial, "  z = all single-board, y = all two-board", crlf);
 }
 
-/// The single-board half runs on the DUT's own loop-back, which on a
-/// SHARED-line desk is a wire the peer is sitting on too: it can
-/// recognize a run of test bytes as a command frame and answer, driving
-/// the line in the middle of a measurement. Ask it to let go first. On
-/// the crossed wiring, and with no peer at all, this costs one ping.
+/// The single-board half runs on the DUT's own loop-back. On a SHARED
+/// line that is a wire the peer sits on too: it can recognize a run of
+/// test bytes as a command frame and answer, driving the line in the
+/// middle of a measurement. So it is asked to stay mute - but ONLY
+/// there. On the crossed pair the peer's transmitter reaches nothing but
+/// the DUT's RXD and cannot disturb a loop-back measurement at all, so
+/// nothing is armed and an interrupted run leaves nothing behind.
+///
+/// The window is short and RE-ARMED before every test rather than
+/// covering the whole set: a run that dies half way then costs at most
+/// one window of muteness, not a minute of it.
+inline constexpr uint16_t stand_off_ms = 12'000;
+
 uint8_t stand_off_buf[link::max_payload];
 const uint8_t* stand_off_payload(uint16_t ms) {
     link::Params a{};
@@ -2437,11 +2471,10 @@ const uint8_t* stand_off_payload(uint16_t ms) {
     return stand_off_buf;
 }
 
-void ask_peer_to_stand_off(uint16_t ms) {
-    if (!ensure_link()) return;
-    if (command(link::Op::standby, stand_off_payload(ms), link::params_size)) {
-        print(serial, "  (board B asked to stay quiet for ", ms, " ms)", crlf);
-    }
+bool ask_peer_to_stand_off(uint16_t ms) {
+    if (!ensure_link()) return false;
+    if (!shared_line()) return false;          // nothing to protect against
+    return command(link::Op::standby, stand_off_payload(ms), link::params_size);
 }
 
 /// End it early: the single-board half is over, the peer may answer again.
@@ -2450,11 +2483,18 @@ void end_peer_stand_off() {
     (void)command(link::Op::standby, stand_off_payload(0), link::params_size);
 }
 
-void run_set(const char* keys) {
+void run_set(const char* keys, bool renew_stand_off = false) {
     uint16_t tp = 0, tf = 0;
     for (const char* k = keys; *k != 0; ++k) {
         for (const Test& t : tests) {
-            if (t.key == *k) { run(t.fn); tp += passed; tf += failed; }
+            if (t.key != *k) continue;
+            if (renew_stand_off) {
+                (void)command(link::Op::standby, stand_off_payload(stand_off_ms),
+                              link::params_size);
+            }
+            run(t.fn);
+            tp += passed;
+            tf += failed;
         }
     }
     print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
@@ -2491,9 +2531,13 @@ int main() {
         print(serial, static_cast<char>(c), crlf);
         if (c == '?') { help(); }
         else if (c == 'z' || c == 'Z') {
-            ask_peer_to_stand_off(65'000);
-            run_set(single_board);
-            end_peer_stand_off();
+            const bool guarded = ask_peer_to_stand_off(stand_off_ms);
+            if (guarded) {
+                print(serial, "  (shared line: board B asked to stay quiet, ",
+                      stand_off_ms, " ms re-armed per test)", crlf);
+            }
+            run_set(single_board, guarded);
+            if (guarded) end_peer_stand_off();
         }
         else if (c == 'y' || c == 'Y') { run_set(two_board); }
         // 'w' is a SET of its own (the shared-wire block, outside y/z):

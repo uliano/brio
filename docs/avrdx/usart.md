@@ -2,11 +2,11 @@
 
 > **PROVISIONAL.** The chapter's register description is covered in full
 > and almost everything is now bench-verified against a second board -
-> cross frame formats, injected errors, a foreign auto-baud sender,
-> RS-485 drive-enable timing, IrDA pulses, MPCM and the one-wire pad. Two
-> things are still unmeasured: the SYNCHRONOUS roles on a real XCK (the
-> desk has no wire between the two XCK pins today) and Host SPI against a
-> real client. The list is in "Not covered yet".
+> cross frame formats, injected errors, a foreign auto-baud sender, both
+> synchronous roles on a real XCK, RS-485 drive-enable timing, IrDA
+> pulses, MPCM and the one-wire bus. What is still unmeasured is Host SPI
+> against a real client, standby operation, and a handful of routes. The
+> list is in "Not covered yet".
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (USART
 chapter 27, PORTMUX chapter 17, electricals 39.14), errata
@@ -226,12 +226,19 @@ bus (6/6 on the shared-line desk; it skips itself on the crossed pair).
   2500**, so board B runs **+0.24 to +0.28 %** fast. Auto-baud sees the
   same number from the other side (below). Every cross-board rate figure
   carries it.
-- **The link topology is discovered, not assumed.** The apps support two
-  wirings - the crossed full-duplex pair and a single wire between the
-  two TXD pads - and find out which one the desk has by alternating
-  their command-mode configuration until a frame arrives. The bench
-  today carries the SHARED line, so the two-board figures below were all
-  taken half duplex through one wire, with LBME at both ends.
+- **The link topology is discovered, not assumed, and never latched.**
+  The apps support two wirings - the crossed full-duplex pair and a
+  single wire between the two TXD pads - and find out which one the desk
+  has by alternating their command-mode configuration until a frame
+  arrives. A topology is believed only while the command channel keeps
+  proving it: after `rediscover_ms` (3 s) of silence the peer stops
+  believing and goes back to alternating, which is what lets the desk be
+  re-jumpered under two running firmwares. While it is still guessing
+  the peer drives NOTHING - a probe that idled its TXD high would, on a
+  shared desk, fight the other board's transmitter for as long as it
+  guessed wrong. The figures below were taken on the crossed pair;
+  everything except the synchronous roles was also measured half duplex
+  through the single shared wire, with LBME at both ends.
 
 ### Facts the campaign measured
 
@@ -392,6 +399,27 @@ bus (6/6 on the shared-line desk; it skips itself on the crossed pair).
   transmitters, seen exactly where 27.3.3.2.6 says to look for it. A
   responder cannot collide with the frame that triggered it: it only
   knows a frame began once it has all of it.
+- **Both synchronous roles work on a real XCK.** With the DUT as
+  SyncHost driving XCK on PE2 and board B as a client, eight frames
+  arrived with an exact checksum and zero errors at **100 kHz and
+  1 MHz**, in **both INVEN phases** (host and client must invert
+  together: INVEN on the host's output inverts the physical waveform, so
+  a client that does not follow samples on the wrong edge). With the
+  roles reversed - board B driving XCK, the DUT as SyncClient - the same
+  eight frames arrived exactly at both rates. **The client's CLK_PER/4
+  ceiling is real**: at an XCK of 12 MHz, twice the 6 MHz ceiling at
+  CLK_PER = 24 MHz, the DUT reads seven or eight frames whose checksum
+  is wrong every time (0x351, 0x452, 0x2b7 against an expected 0x31c) -
+  corrupted, never clean, run after run. Note that 12 MHz is the only
+  rate above the ceiling this clock can produce: with S = 2 the host's
+  divisor is an integer, so the achievable XCK rates near the top are
+  CLK_PER/2 = 12 MHz, CLK_PER/4 = 6 MHz, CLK_PER/6 = 4 MHz.
+- **A synchronous client has to read as it goes.** Eight frames do not
+  fit in a three-deep receive FIFO, and in synchronous mode they arrive
+  as fast as the host clocks them: draining after the fact returns three
+  frames whatever the wire did. This is not a silicon fact, it is the
+  FIFO depth above - but it is the one that made the client direction
+  look broken until the suite collected live.
 - **Rebase is transparent, under real traffic too.** 24 -> 12 -> 24 MHz
   with the USART among a `DynamicClock`'s users: loop-back traffic stays
   clean across every switch and the bit time holds at 8.7 us (208
@@ -444,12 +472,6 @@ Driver gaps (not implemented):
 Implemented and compile-checked for all eight DA/DB packages, but NOT
 bench-verified:
 
-- **the synchronous roles on a real XCK**, in both host and client
-  direction and both INVEN phases, and the client's CLK_PER/4 ceiling.
-  A synchronous link needs XCK wired between the boards AND data on a
-  crossed pair; today's desk carries a single shared wire, so the
-  suite's test `q` reports itself SKIPPED rather than inventing a
-  verdict. It runs as written the moment the crossed pair is fitted;
 - **Host SPI electrically** - deferred to the SPI campaign, where a real
   client will compare it against `avrdx/spi.hpp`;
 - **start-of-frame detection from a real standby** (needs a sleeping

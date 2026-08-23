@@ -78,6 +78,15 @@ enum class Topology : uint8_t {
 /// the other, while no frame has arrived.
 inline constexpr uint16_t rendezvous_ms = 400;
 
+/// How long a PROVEN topology may stay silent before the peer stops
+/// believing in it and goes back to alternating. This is what makes a
+/// re-jumpered desk converge on its own: the wiring changes, the
+/// command channel goes quiet, and after this long the peer starts
+/// looking again. Long enough that no gap inside a running test set
+/// reaches it (the longest bounded action is two seconds), short enough
+/// that a human moving three wires does not have to think about it.
+inline constexpr uint16_t rediscover_ms = 3000;
+
 /// The peer reconfigures right after its ack has left the line; the DUT
 /// waits this long before doing the same, so the peer is always ready
 /// first.
