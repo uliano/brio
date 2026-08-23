@@ -104,7 +104,7 @@ bench runs on the 3.3 V rail.
 | Traffic bench: buttons 0..3 | PA2..PA5 | to GND, internal pull-ups |
 | Event probes (events0) | PD2 (EVOUTD), PC2 (EVOUTC), PF2 (EVOUTF = LED) | logic analyzer on PD2/PC2 |
 | CLKOUT (test_avr_clock) | PA7 | scope: CLK_PER |
-| Analog loop (test_avr_analog, sampler) | PD6 (DAC0 OUT) -> PD1 (AIN1), PD6 -> PD7 (VREFA) | two jumper wires |
+| Analog loop (test_avr_analog, sampler) | PD6 (DAC0 OUT) -> PD1 (AIN1), PD6 -> PD7 (VREFA) | two jumper wires, NOT fitted at the moment: the wire-dependent half of test_avr_analog (36 of 81) is expected to fail until they return |
 | Board-to-board serial link (test_avr_serial, USART campaign) | A.PE0 - B.PE1, A.PE1 - B.PE0, A.PE2 - B.PE2, GND - GND | four jumper wires; board B must hold PORTE as inputs (flash it with `family_probe`) |
 
 CCL collisions on this board: LUT0 owns PA0..PA3 (PA0/PA1 are the
