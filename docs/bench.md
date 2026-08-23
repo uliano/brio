@@ -7,10 +7,17 @@ nothing in `docs/design/` or in the target pages depends on them.
 Every app documents itself in its own header comment - this table is
 only the map.
 
-## Board
+## Boards
 
-- MCU: AVR128DB48 (48-pin, 128 KB flash, 16 KB SRAM), see
-  [avrdx/README.md](avrdx/README.md) for toolchain, probe and clock.
+Two boards of the same model sit on the desk, indistinguishable by
+hardware (same chip, serial-less CH340): each carries its name in its
+USERROW ([avrdx/userrow.md](avrdx/userrow.md)) - **A = `brio-a`**, the
+DUT; **B = `brio-b`**, the instrument peer. The suites print the label
+in their banner, so a console names its own board.
+
+- MCU: AVR128DB48 (48-pin, 128 KB flash, 16 KB SRAM), silicon rev A5
+  on both, see [avrdx/README.md](avrdx/README.md) for toolchain, probe
+  and clock.
 - Supply: jumper-selectable **3.3 V / 5 V**; VDDIO2 is powered, so
   PORTC (the MVIO domain) is usable - and could one day talk 3.3 V
   logic while the rest of the chip runs 5 V, no level shifters.
@@ -18,8 +25,9 @@ only the map.
   (no 32 kHz crystal, PF0/PF1 free).
 - Serial link: CH340 on **USART2 ALT1, PF4/PF5**, 460800 baud in the
   console apps.
-- Programmer/debugger: Atmel-ICE over UPDI, AVR port, 6-pin ISP header
-  (pin 2 VCC, 5 UPDI, 6 GND).
+- Programmer/debugger: one Atmel-ICE per board over UPDI, AVR port,
+  6-pin ISP header (pin 2 VCC, 5 UPDI, 6 GND); A's probe is
+  `J42700049508`, B's `J42700051207`.
 
 ## Multi-board bench
 
@@ -43,7 +51,8 @@ Three concerns, deliberately kept apart:
    the matrix and the first firmware to flash onto a new board.
 2. **Identity** - `tools/bench_boards.py`, the bench **manifest**: a
    plain dict naming each board on the desk ("A", "B" = desk
-   positions), its board type, its console and its programmer.
+   positions), its board type, the USERROW label it is expected to
+   carry (`id`), its console and its programmer.
 3. **Orchestration** - `tools/bench.py`, which resolves 1 against 2.
 
 Consoles are addressed by **`/dev/serial/by-path`**: these CH340
@@ -53,9 +62,13 @@ of them appears as `usb-1a86_USB_Serial-if00-port0` under
 encodes the USB topology and is therefore stable per physical socket.
 The manifest thus documents the desk's wiring; re-plugging a board into
 another socket means editing it. Programmers are the opposite case:
-EDBG-class probes do have serials (the Atmel-ICE here is
-`J42700049508`), needed as `-P usb:<serial>` only when two such tools
-are attached; SerialUPDI adapters are addressed by their by-path port.
+EDBG-class probes do have serials, passed as `-P usb:<serial>` -
+mandatory with two identical probes attached, or avrdude takes
+whichever enumerates first; SerialUPDI adapters would be addressed by
+their by-path port. The probe-to-board pairing is the UPDI cable, so
+it survives any USB re-plug and changes only when a cable moves - and
+the USERROW label in the suite banner is the cross-check that catches
+a miswired desk by eye.
 
 ```bash
 PY=~/.platformio/penv/bin/python        # pyserial lives in PlatformIO's venv
@@ -67,8 +80,9 @@ $PY tools/bench.py duo A:a B:script.txt # instrument peer scripted, then the DUT
 ```
 
 `run` exits nonzero on a timeout or a nonzero fail count, so a suite is
-usable from a script. `duo` is the campaign's shape and is **untested
-pending the second board**.
+usable from a script. `duo` is the campaign's shape and is **not yet
+exercised** (board B is on the desk, still running its delivery
+firmware).
 
 ## Wiring (SPI/I2C experiments, 3.3 V rail)
 
@@ -91,6 +105,7 @@ bench runs on the 3.3 V rail.
 | Event probes (events0) | PD2 (EVOUTD), PC2 (EVOUTC), PF2 (EVOUTF = LED) | logic analyzer on PD2/PC2 |
 | CLKOUT (test_avr_clock) | PA7 | scope: CLK_PER |
 | Analog loop (test_avr_analog, sampler) | PD6 (DAC0 OUT) -> PD1 (AIN1), PD6 -> PD7 (VREFA) | two jumper wires |
+| Board-to-board serial link (test_avr_serial, USART campaign) | A.PE0 - B.PE1, A.PE1 - B.PE0, A.PE2 - B.PE2, GND - GND | four jumper wires; board B must hold PORTE as inputs (flash it with `family_probe`) |
 
 CCL collisions on this board: LUT0 owns PA0..PA3 (PA0/PA1 are the
 crystal), LUT1 PC0..PC3 (traffic LEDs = TCA0 PORTC WO0..3), LUT2
@@ -151,6 +166,7 @@ the LDF, no filter changes.
 | `test_avr_timer` | **Bench test suite** (keep passing): TCA/TCB/CCL/AC, 11 tests / 82 verdicts, 82/82 on rev A5 at 3.3 V - FrequencyGenerator/TcaPwm16/Heartbeat on PD0 measured back by the TCB meters through EvPin, OneShotPulse on PB5, Pwm8 on PC0, PulseCounter, 32-bit cascade vs the Ticker, PeriodicTick, Timeout, EventCounter with direction from PC1; CCL LUT4 on PB0/PB1 -> PB3 and a JK flip-flop by timer events; AC thresholds/window against the DAC on PD6. Nothing to wire (PB0/1/3/5 = traffic LEDs flicker). Holds in crystal time (PIT paused): the Ticker's OSC32K measured +0.94 % fast |
 | `test_avr_pin` | **Bench test suite** (keep passing): PORT - the pin senses counted on self-driven edges, level_low, INVEN, input_disable, the W1C flag discipline, the multi-pin engine across two ports, the Port mask verbs and the slew bit. 22/22 on rev A5. Nothing to wire |
 | `test_avr_rtc` | **Bench test suite** (keep passing): RTC/PIT, 8 tests / 78 verdicts, 78/78 on rev A5 - the counter's period at three prescalers, the compare phase (CMP + 1 ticks), crystal error correction at +-127 ppm, the synchronization busy flags, the first tick after an enable, the PIT and the counter running together, OSC1K as CLK_RTC. A TCB cascade at CLK_PER is the stopwatch and the RTC's own OVF/CMP events latch it: nothing to wire. Takes about two minutes (the correction is measured by averaging) |
+| `test_avr_serial` | **Bench test suite** (keep passing): USART, 9 tests / 108 verdicts, 108/108 on rev A5 at 5 V - instances and routes including the pinless NONE and the teardown, the whole 36-combination frame-format matrix in loop-back on USART4, the receive FIFO's overflow, the MPCM filter, DRE vs TXC, the baud generator measured on PE0 through EvPin + a TCB pulse-width meter (9600 / 115200 / 460800 / 1 Mbaud and CLK2X), a 24 -> 12 -> 24 MHz rebase under traffic, GENAUTO/LINAUTO auto-baud with the errata 2.16.3 recovery, and Host SPI in loop-back. Nothing to wire; drives PE0/PE2 (the link to board B, which must be holding them as inputs), and briefly PA4, PC0, PB4 for the per-instance smoke. Menu letter per test, `z` runs them all |
 | `sampler` | The ADC inside the kernel: `AnalogSampler` over ADC0 walking PD1 (the DAC loop), die temperature and VDD/10, published to a Monitor (one line a second) and an Alarm (LED PF2 above a threshold); console DAC/PACE HW|SW|OFF/ALARM/CLOCK/STAT. Bench: 512 samples/s (PIT/64) with no queue drops, 128/s default, CLK_ADC follows CLOCK 4M/24M under sampling |
 | `traffic0` | The over-commented AO learning testbed: 4 buttons -> 4 RGB lamps, one AO per role, publish for button facts |
 | `traffic1` | The traffic light FSM: timed phases via one re-armed time event, a remembered pedestrian call |

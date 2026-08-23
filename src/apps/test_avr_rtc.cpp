@@ -62,7 +62,8 @@
 #include "avrdx/rtc.hpp"
 #include "avrdx/tcb.hpp"
 #include "avrdx/ticker.hpp"
-#include "avrdx/uart.hpp"
+#include "avrdx/usart.hpp"
+#include "avrdx/userrow.hpp"
 #include "util/print.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
@@ -657,7 +658,10 @@ int main() {
     Ticker::pause();                      // the RTC is the device under test
     stopwatch_init();
     sei();
-    print(serial, crlf, "test_avr_rtc - RTC/PIT test suite (clk=", xtal ? "XTAL" : "OSCHF",
+    auto board = board_id();
+    if (board.empty()) board = "?";
+    print(serial, crlf, "test_avr_rtc - RTC/PIT test suite (board ", board,
+          ", clk=", xtal ? "XTAL" : "OSCHF",
           " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
     help();
     print(serial, "> ");

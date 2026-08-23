@@ -24,7 +24,8 @@
 #include "avrdx/clock.hpp"
 #include "avrdx/delay.hpp"
 #include "avrdx/pin.hpp"
-#include "avrdx/uart.hpp"
+#include "avrdx/usart.hpp"
+#include "avrdx/userrow.hpp"
 #include "util/print.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
@@ -276,7 +277,10 @@ int main() {
     const bool xtal = SysClock::init();
     Serial::init(clock, 460800);
     sei();
-    print(serial, crlf, "test_avr_pin - PORT test suite (clk=", xtal ? "XTAL" : "OSCHF",
+    auto board = board_id();
+    if (board.empty()) board = "?";
+    print(serial, crlf, "test_avr_pin - PORT test suite (board ", board,
+          ", clk=", xtal ? "XTAL" : "OSCHF",
           " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
     help();
     print(serial, "> ");

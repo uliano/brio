@@ -43,7 +43,7 @@
 #include "avrdx/platform_avr.hpp"
 #include "avrdx/spi.hpp"
 #include "avrdx/ticker.hpp"
-#include "avrdx/uart.hpp"
+#include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
 #include "kernel/kernel.hpp"

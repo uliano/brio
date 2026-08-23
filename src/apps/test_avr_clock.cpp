@@ -59,7 +59,8 @@
 #include "avrdx/delay.hpp"
 #include "avrdx/pin.hpp"
 #include "avrdx/ticker.hpp"
-#include "avrdx/uart.hpp"
+#include "avrdx/usart.hpp"
+#include "avrdx/userrow.hpp"
 #include "util/print.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
@@ -355,7 +356,10 @@ int main() {
     Ticker::init();
     MainClock::clkout(true);              // CLK_PER on PA7
     sei();
-    print(serial, crlf, "test_avr_clock - CLKCTRL test suite (boot clk=", xtal ? "XTAL" : "OSCHF",
+    auto board = board_id();
+    if (board.empty()) board = "?";
+    print(serial, crlf, "test_avr_clock - CLKCTRL test suite (board ", board,
+          ", boot clk=", xtal ? "XTAL" : "OSCHF",
           " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ", CLKOUT on PA7)", crlf);
     help();
     print(serial, "> ");

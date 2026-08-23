@@ -277,6 +277,9 @@ struct Pin {
     static void output() { port().DIRSET = mask; }
     static void input()  { port().DIRCLR = mask; }
     static bool read()   { return vport().IN & mask; }
+    /// This pin's DIR bit: driven by PORT or by a peripheral that took
+    /// the position (a route's teardown is checked with it).
+    static bool is_output() { return vport().DIR & mask; }
 
     /// The whole PINnCTRL in ONE store (invert + pullup + input level
     /// + sense): the way to (re)configure - no intermediate states,

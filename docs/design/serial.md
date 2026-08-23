@@ -2,7 +2,7 @@
 
 Bytes below, line events above, ownership by reference.
 
-## Uart driver (`avrdx/uart.hpp`)
+## Uart driver (`avrdx/usart.hpp`)
 
 `Uart<n, Route, rx_size, tx_size>` - static interrupt-driven byte
 transport: SPSC rings on both sides ([ring.md](ring.md)), ISR bodies

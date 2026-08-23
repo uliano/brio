@@ -71,7 +71,7 @@ namespace `brio`; four strata under `lib/brio/src/` - `kernel/` (pure
 logic, includes nothing of brio), `util/` (services over the kernel),
 `avrdx/` (everything that knows `avr/io.h`, the only target today:
 AVR DA/DB, bench chip AVR128DB48), `host/` (the native test target).
-Includes carry the stratum prefix (`#include "avrdx/uart.hpp"`). The
+Includes carry the stratum prefix (`#include "avrdx/usart.hpp"`). The
 repo is a PlatformIO project: one `main()` per `src/apps/<app>.cpp`
 becomes envs `<app>` (release) and `<app>-debug`; host tests in
 `test/` run on `[env:native]`.
@@ -330,7 +330,24 @@ gets its dated home in `docs/design/` when taken.
   GRANULAR (one whole CLK_RTC cycle every 1e6/ERROR cycles), so it
   shows up only by alternating trimmed and untrimmed periods and
   averaging. Tasks (alarm, slow periodic) deliberately NOT built: born
-  with their first user. -> CCL -> AC ->
+  with their first user. USART phase U1 DONE (single-board half):
+  uart.hpp REPLACED by usart.hpp - Usart<n> resource (per-package route
+  table incl. the pinless NONE + full teardown, every frame format and
+  receiver mode, the baud arithmetic with actual_baud, STATUS W1C, the
+  three errata as code: ODME pin direction, SFD as arm/disarm verbs,
+  recover_from_isf) + tasks Uart (same public API, every app's console)
+  / OneWire / Rs485 / SyncHost / SyncClient / MspiHost / IrdaLink /
+  AutoBaud; NEW SUITE test_avr_serial 108/108 (menu letters a..i, z runs
+  all). Findings: LBME is taken at the TXD PAD - a pinless loop-back
+  receives nothing, now refused by the driver; the baud generator
+  measures exact to the tick at 9600/115200/460800/1M and CLK2X; the RX
+  FIFO keeps three frames and the third is the NEWEST, BUFOVF marking it
+  alone; GENAUTO writes a BAUD value directly (+0.06 % at 19200),
+  LINAUTO needs a real >= 12-bit break (produced by driving TXD from
+  PORT with TXEN off), errata 2.16.3 confirmed; STATUS.WFB is
+  write-only. Two-board half (cross formats, error injection, foreign
+  auto-baud, sync roles, one-wire on the wire, RS-485 XDIR timing,
+  IrDA) is the next phase. -> CCL -> AC ->
   ADC/DAC/VREF -> CLKCTRL (DA must compile) -> EVSYS tables. Phase 2,
   never-reviewed: USART
   (jumper cross-loopback, new suite test_avr_serial) -> SPI (host ->
@@ -521,7 +538,12 @@ lib/brio/src/            the framework, four strata:
     pin.hpp                Pin<'A',5> compile-time GPIO (also a PwmChannel,
                            max 1) + PinRef descriptor + PinSet<Pins...> mask
                            + port_by_letter/pinctrl_of (run-time port lookup)
-    uart.hpp               Uart<n, Route, rx, tx> interrupt-driven transport
+    usart.hpp              USART: Usart<n> resource (routes incl. NONE with
+                           full teardown, every frame format, receiver modes,
+                           the baud arithmetic, STATUS W1C, ISR bodies) +
+                           tasks Uart<n, Route, rx, tx> (interrupt-driven
+                           transport), OneWire, Rs485, SyncHost/SyncClient,
+                           MspiHost, IrdaLink, AutoBaud
     spi.hpp                Spi<n> master engine (two-phase descriptor,
                            per-byte ISR pump, CS owned by the engine)
     twi.hpp                Twi<n, Route> I2C master engine
@@ -548,6 +570,8 @@ lib/brio/src/            the framework, four strata:
                            PI flag + ISR body)
     ticker.hpp             BasicTicker<tps> timebase over Pit (Ticker = 1024);
                            owns the block's clock select
+    userrow.hpp            board_id(): the USERROW identity label (written
+                           once over UPDI, survives chip erase)
     vref.hpp               Ref + ref_mv (this silicon's levels) + Vref::adc0/dac0/ac
     dac.hpp                Dac<0>: init(DacConfig), set(code)/set_mv - actuator
     adc.hpp                Adc<0>: init<cfg>()/init(cfg)/reconfigure, AnalogIn<Pin>

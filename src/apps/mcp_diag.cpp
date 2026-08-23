@@ -73,7 +73,7 @@
 #include "avrdx/delay.hpp"
 #include "avrdx/pin.hpp"
 #include "avrdx/spi.hpp"
-#include "avrdx/uart.hpp"
+#include "avrdx/usart.hpp"
 #include "util/print.hpp"
 
 // The clock: the ONE truth about CLK_PER for every driver of this

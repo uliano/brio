@@ -94,7 +94,7 @@ order; until then, util/ generalizes from one and says so.
 ## Layering: four strata
 
 Directories under `lib/brio/src/`; includes always carry the stratum
-prefix (`#include "avrdx/uart.hpp"`) so an app's portability is
+prefix (`#include "avrdx/usart.hpp"`) so an app's portability is
 readable at a glance.
 
 | Stratum | May include | Content |
@@ -228,7 +228,7 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   written for AVR may make the second target harder than it already is.
 - **Board facts vs device facts.** Which timer reaches which port,
   which USART sits on which pins per route, are facts of the DEVICE
-  (today tables inside `tca.hpp`, `uart.hpp` - the seed of a per-family
+  (today tables inside `tca.hpp`, `usart.hpp` - the seed of a per-family
   header). Which timer drives which LEDs, which pins are buttons, which
   vectors bind to which driver bodies, are facts of the BOARD: they
   belong in a per-board unit that can also list resource claims and

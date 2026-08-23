@@ -73,7 +73,8 @@
 #include "avrdx/pin.hpp"
 #include "avrdx/platform_avr.hpp"
 #include "avrdx/ticker.hpp"
-#include "avrdx/uart.hpp"
+#include "avrdx/usart.hpp"
+#include "avrdx/userrow.hpp"
 #include "util/analog.hpp"
 #include "util/print.hpp"
 
@@ -629,7 +630,10 @@ int main() {
     A::select(AdcInput::vdd_div10);
     A::flush();
     vdd_mv = static_cast<uint16_t>(adc_mv(read_avg(16), 4096, 2048) * 10);
-    print(serial, crlf, "test_avr_analog - VREF/DAC/ADC self-test suite (clk=", xtal ? "XTAL" : "OSCHF",
+    auto board = board_id();
+    if (board.empty()) board = "?";
+    print(serial, crlf, "test_avr_analog - VREF/DAC/ADC self-test suite (board ", board,
+          ", clk=", xtal ? "XTAL" : "OSCHF",
           ", silicon rev ", hex(SYSCFG.REVID), ")", crlf,
           "wire PD6->PD1 and PD6->PD7; VDD measured ", vdd_mv, " mV", crlf);
     help();
