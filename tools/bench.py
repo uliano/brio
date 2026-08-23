@@ -240,7 +240,8 @@ def cmd_list(args):
         else:
             how = prog["type"] + (" usb:%s" % prog["serial"]
                                   if prog.get("serial") else " (only one attached)")
-        print("  %-4s type %-5s  %s  console %s" % (name, entry["board"], mark, console))
+        print("  %-4s type %-5s  id %-8s %s  console %s"
+              % (name, entry["board"], entry.get("id") or "-", mark, console))
         print("       programmer %s" % how)
     return 0
 

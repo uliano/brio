@@ -35,6 +35,7 @@
 #include <stdint.h>
 #include <stdlib.h>  // ltoa, ultoa, dtostrf, dtostre
 #include <concepts>
+#include <string_view>
 #include "util/stream.hpp"
 #include "util/timestamp.hpp"
 
@@ -94,6 +95,11 @@ inline void print_one(S s, const char *text) {
         write_blocking(s, static_cast<uint8_t>(*text));
         ++text;
     }
+}
+
+template <ByteSink S>
+inline void print_one(S s, std::string_view text) {
+    for (const char c : text) write_blocking(s, static_cast<uint8_t>(c));
 }
 
 template <ByteSink S>

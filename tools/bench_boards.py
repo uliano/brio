@@ -39,9 +39,20 @@
 #      -> avrdude -c serialupdi -P <port> -b <baud>. Their USB-serial chips are
 #      addressed by /dev/serial/by-path for exactly the reason above.
 #
-#  TODAY'S REALITY IS DEGENERATE: one board, one probe, one console. Board "B"
-#  below is commented out - it is the shape the second board takes when it
-#  arrives, not a claim that it exists.
+#  IDENTITY IN THE CHIP. The boards themselves are indistinguishable (same
+#  chip, serial-less CH340), so each carries a label in its USERROW: 32
+#  bytes of NVM that survive chip erase, written ONCE per board over UPDI:
+#      avrdude -c atmelice_updi -p avr128db48 -P usb:<probe-serial> \
+#              -U userrow:w:0x62,0x72,0x69,0x6f,0x2d,0x61,0x00:m   # "brio-a"
+#  The bench suites read it back (avrdx/userrow.hpp board_id()) and print
+#  it in their banner, so a console names its own board. The "id" field
+#  below is the label this desk position is EXPECTED to carry - the human
+#  (or a future bench.py check) compares banner against manifest.
+#
+#  TODAY'S REALITY: two AVR128DB48 boards, each with its own Atmel-ICE and its
+#  CH340 console on a hub (usb-0:1.1 / usb-0:1.2). With two probes of the same
+#  kind attached, the "serial" field is mandatory - without it avrdude picks
+#  whichever enumerates first.
 # ============================================================================
 
 # The board types known to the build: keys of tools/gen_apps.py's BOARDS.
@@ -53,20 +64,19 @@ BOARDS = {
         # The original bench board: AVR128DB48, 24 MHz crystal on PA0/PA1,
         # CH340 on USART2 ALT1 (PF4/PF5). See docs/bench.md.
         "board": "db48",
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:2:1.0-port0",
-        "programmer": {"type": "atmelice_updi", "serial": None},
+        "id": "brio-a",
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1:1.0-port0",
+        "programmer": {"type": "atmelice_updi", "serial": "J42700049508"},
     },
-    # "B": {
-    #     # The instrument peer, from 2026-08-22: a 28-pin part driven by a
-    #     # SerialUPDI adapter, its own CH340 console on another USB socket.
-    #     "board": "db28",
-    #     "console": "/dev/serial/by-path/<fill in from bench.py list>",
-    #     "programmer": {
-    #         "type": "serialupdi",
-    #         "port": "/dev/serial/by-path/<fill in from bench.py list>",
-    #         "baud": 230400,
-    #     },
-    # },
+    "B": {
+        # The instrument peer: a second AVR128DB48 board with its own
+        # Atmel-ICE. Mapping verified by holding the chip in programming
+        # mode and watching this console pause.
+        "board": "db48",
+        "id": "brio-b",
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0",
+        "programmer": {"type": "atmelice_updi", "serial": "J42700051207"},
+    },
 }
 
 # Console speed used when the app's env does not set monitor_speed.
