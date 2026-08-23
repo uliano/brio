@@ -1,13 +1,12 @@
 # USART - the serial port (AVR DA/DB)
 
-> **PROVISIONAL.** The chapter's register description is covered in
-> full and the asynchronous side is bench-verified, but half of what a
-> USART does needs a SECOND device on the wire: cross frame formats,
-> deliberate error injection, a foreign auto-baud sender, the
-> synchronous roles, a real one-wire bus, RS-485 drive-enable timing,
-> IrDA pulses. All of that is implemented and compile-checked for the
-> whole family, and none of it is measured. The list is in "Not
-> covered yet".
+> **PROVISIONAL.** The chapter's register description is covered in full
+> and almost everything is now bench-verified against a second board -
+> cross frame formats, injected errors, a foreign auto-baud sender,
+> RS-485 drive-enable timing, IrDA pulses, MPCM and the one-wire pad. Two
+> things are still unmeasured: the SYNCHRONOUS roles on a real XCK (the
+> desk has no wire between the two XCK pins today) and Host SPI against a
+> real client. The list is in "Not covered yet".
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (USART
 chapter 27, PORTMUX chapter 17, electricals 39.14), errata
@@ -209,19 +208,46 @@ U::disarm_start_of_frame();         // first thing on the way back
 
 ## Bench findings
 
-`test_avr_serial` (AVR128DB48 rev. A5, 24 MHz crystal, 5 V; 9 tests,
-108 verdicts, 108/108). No wires: the loop-back tests run on USART4 at
-its default position with LBME, and the baud measurement reads TXD
-(PE0) back through the event system into a TCB pulse-width meter.
+Two suites, one driver. `test_avr_serial` runs on board A (`brio-a`,
+AVR128DB48 rev. A5, 24 MHz crystal, 5 V) and has two halves: `z` is the
+SINGLE-BOARD set (9 tests, 108 verdicts, 108/108, nothing to wire) and
+`y` is the TWO-BOARD set (12 tests, 103 verdicts, 103/103) against board
+B running `usart_peer`, an instrument driven IN BAND over the very link
+under test. Two more commands stand outside `y` because they depend on
+how the desk is jumpered: `v`, the wiring probe, and `w`, the one-wire
+bus (6/6 on the shared-line desk; it skips itself on the crossed pair).
 
-- **The loop-back is taken at the TXD PAD.** With PORTMUX at NONE the
-  peripheral still transmits - DREIF, TXCIF and the timing all behave -
-  but LBME delivers nothing at all: every frame of the format matrix
-  failed until the instance was routed. The driver now refuses
-  loop-back and open drain on a pinless route.
+### The two boards, and what they cost the measurements
+
+- **Board B's 24 MHz crystal does not start.** Its rates come from OSCHF
+  instead, and the DUT measures the difference in its own crystal time:
+  a stream of 0xFF frames at 9600 puts the start bit - the only low
+  pulse on the line - at **2493-2494 CLK_PER ticks against a nominal
+  2500**, so board B runs **+0.24 to +0.28 %** fast. Auto-baud sees the
+  same number from the other side (below). Every cross-board rate figure
+  carries it.
+- **The link topology is discovered, not assumed.** The apps support two
+  wirings - the crossed full-duplex pair and a single wire between the
+  two TXD pads - and find out which one the desk has by alternating
+  their command-mode configuration until a frame arrives. The bench
+  today carries the SHARED line, so the two-board figures below were all
+  taken half duplex through one wire, with LBME at both ends.
+
+### Facts the campaign measured
+
+- **The loop-back is taken at the TXD PAD, and it hears the OUTSIDE.**
+  With PORTMUX at NONE the peripheral still transmits - DREIF, TXCIF and
+  the timing all behave - but LBME delivers nothing at all, so the driver
+  refuses loop-back and open drain on a pinless route. And with the
+  instance routed, a receiver in loop-back reads frames that ANOTHER
+  BOARD drives onto that pad: board B bit-banged 0x5A onto board A's TXD
+  while board A held the pin as an input under its pull-up (the errata
+  2.16.1 open-drain discipline) and every frame arrived clean. One-wire
+  collision detection is therefore electrically real, not just a
+  register feature.
 - **The baud generator is exact to the tick.** Measuring the start bit
-  of a stream of 0xFF frames (the only low pulse on the line) against
-  the divisor's own nominal `S x BAUD / 64` CLK_PER cycles:
+  of a stream of 0xFF frames against the divisor's own nominal
+  `S x BAUD / 64` CLK_PER cycles:
 
   | requested | BAUD | actual | nominal ticks | measured |
   |-----------|------|--------|---------------|----------|
@@ -233,54 +259,166 @@ its default position with LBME, and the baud measurement reads TXD
 
   Every measurement is the truncation of the nominal value: the
   fractional part never showed up as a wandering pulse width at these
-  rates. The suite's tolerance is +-2 ticks.
-- **Every frame format round-trips.** All 36 combinations of 5, 6, 7,
-  8, 9BITL and 9BITH data bits x no/even/odd parity x one/two stop bits
-  carry 0x000, all-ones, 0x155 and 0x0AA masked to the size, and the
-  ninth bit, with FERR, PERR and BUFOVF clean throughout.
+  rates.
+- **The rate floor is the register's, not the protocol's.** At
+  CLK_PER = 24 MHz, 300 baud is unreachable: BAUD would be 320000,
+  nearly five times what the register holds. The slowest expressible
+  asynchronous rate at this clock is **1465 baud**.
+- **Every rate the register can express works across the wire.** 2400,
+  9600, 115 200, 230 400, 460 800, 921 600 and 1 000 000 in normal mode,
+  and 2 000 000 in double speed (BAUD 96, the only way to reach it at
+  24 MHz): every frame echoed back matched, with zero FERR, PERR and
+  BUFOVF at BOTH ends.
+- **Every frame format works across the wire too.** 5N1, 6O2, 7E1, 8O2,
+  8E2, 9N1 in both nine-bit orders and **9E1** - parity IS available
+  with nine data bits - all round-trip clean at 115 200. And SBMODE is a
+  transmitter setting only: one board sending two stop bits into a
+  receiver configured for one, and the reverse, are both clean, because
+  the receiver never looks past the first stop bit.
+- **Where FERR really begins.** Table 27-4 recommends -4.19/+4.14 % for
+  D = 9 (8N1). With board B's USART deliberately off rate and sending
+  0x00 - the frame whose stop bit has the least margin - board A stayed
+  clean at +4 % and -5 % and flagged FERR on every frame from **+5 %**
+  and **-6 %**. Bit-banged from board B with a four-bit idle between
+  frames, the negative side matched (**clean to -4 %, FERR from -5 %**)
+  and the positive side never flagged at all up to +6 %: a sender that
+  is too FAST finishes early, so the stop-bit sample lands on the idle
+  line, which is high anyway. Only a slow sender pushes a low data bit
+  under that sample.
+- **A start bit has to last most of a bit.** Board B put low pulses of
+  6, 30, 150, 625, 1250, 1562, 1875 and 2500 CPU cycles on an otherwise
+  idle line, against a 9600 receiver whose bit is 2500 cycles. Nothing
+  at or below **625 cycles (a quarter bit)** was ever taken as a start
+  bit; the boundary sits at **half a bit**, where it is marginal -
+  across runs the narrowest accepted pulse was sometimes 1250 cycles and
+  sometimes 1562. That is the majority vote of samples 8, 9 and 10 of 16
+  seen from outside.
+- **One displaced bit boundary is not a rate error.** Stretching a
+  single data cell of a bit-banged frame shifts everything after it by
+  that much and nothing else: the frame survived +40 % and broke at
+  **+50 %**, half a cell, which is exactly where the stop bit's sample
+  point crosses into its neighbour. Ten times the tolerance of a
+  UNIFORM rate error, and a useful reminder that the operational-range
+  tables are about the accumulated error, not about jitter.
+- **The auto-baud window (CTRLD.ABW) measures a bit PAIR.** In LINAUTO,
+  with one cell of the 0x55 sync field stretched (which moves the
+  interval between two edges by half that percentage), the acceptance
+  edge sat between +28 and +32 % for WDW1, +32 and +36 % for WDW0, +40
+  and +44 % for WDW2, and beyond +44 % for WDW3. Halved, that is
+  14-16 %, 16-18 %, 20-22 % and >22 % of a bit pair - the documented
+  15 %, 18 %, 21 % and 25 % windows, measured.
+- **Auto-baud against a foreign clock works, and measures it.** Board B
+  sent a break, a 0x55 sync field and payload at 9600, 57 600, 230 400
+  and an odd 123 456 baud, from its own oscillator. Both GENAUTO (with
+  WFB armed) and LINAUTO learned the rate, and the BAUD they wrote was
+  consistently **-0.17 to -0.25 %** away from the value board A computes
+  for the same nominal rate - which is board B's clock offset and
+  nothing else. The payload then arrived clean at the learned rate.
+- **BDF must be latched, not read afterwards.** The break-detected flag
+  is cleared by the next DATA frame, and in a real auto-baud frame the
+  payload follows the sync field immediately: a test that reads BDF
+  after the payload always reads zero. Poll for it.
+- **LINAUTO is constrained to the BAUD already in force.** ABW compares
+  the sync field against the current divisor, so LIN auto-baud only
+  accepts a sender within its window: with BAUD at 19 200 and a 9600
+  sync field, BDF never set and ISFIF did. GENAUTO has no such tie - it
+  learned every rate from a 19 200 fallback. A LIN receiver's fallback
+  must therefore start near the bus rate; a generic one need not.
+- **The documented BAUD floor is not enforced.** 27.3.3.2.5 says a sync
+  field is only accepted when it measures 0x0064-0xFFFF. A sync field at
+  1.2 Mbaud measures BAUD 80, well under 0x0064, and was accepted: BDF
+  set and BAUD read back 80.
+- **A sync character that is not 0x55 sets ISFIF in LINAUTO** and leaves
+  BDF clear; after `recover()` (errata 2.16.3's RXEN toggle) the very
+  next sync field is learned.
+- **A break from outside is a frame error with data zero.** Twenty bit
+  times of low from board B's PORT arrive at a normal receiver as one
+  frame with FERR and 0x00.
 - **The receive FIFO keeps three frames, and the third is the NEWEST.**
-  Six frames sent with nothing read leave exactly three readable: the
-  two oldest (the buffer) and then the LAST frame on the line, not the
-  third one sent - the shift register keeps taking new frames while the
-  buffer stays full. BUFOVF marks that third frame and only it, and
-  draining is the whole recovery.
-- **DRE and TXC mean different things.** Two frames written back to
-  back leave DREIF low for only a few instructions (three slots:
-  TXDATA, the buffer, the shifter) and it returns while the line is
-  still busy; TXCIF stays low until the last frame has left - at 9600
-  about 2300 polling iterations later.
-- **MPCM filters silently.** In nine-bit mode a data frame (bit 8 = 0)
-  never sets RXCIF; an address frame (bit 8 = 1) arrives; clearing MPCM
-  opens the flow to data frames and setting it again closes it.
-- **Auto-baud measures a BAUD register value directly.** GENAUTO with
-  WFB armed accepts a plain 0x00 frame as the break: at a sender's
-  19200 baud (BAUD 5000) the sync field wrote 5003, +0.06 %, with BDF
-  set and no error - so the counter's result is a BAUD value, not the
-  eight bit times it was measured over. Since transmitter and receiver
-  share BAUD, the link keeps round-tripping at the new rate.
-- **The receiver must be put in loop-back in the SAME store.**
-  Configuring auto-baud first and adding LBME afterwards leaves the
-  receiver listening to a floating RXD pin for a moment, and a noise
-  edge there consumes the armed WFB: about half the runs saw no break
-  at all. Setting `loop_back` in the config that starts the instance is
-  deterministic.
-- **LINAUTO wants a real break.** A 0x00 frame (nine low bit times) is
-  not enough: nothing is detected. Holding TXD low for sixteen bit
-  times from PORT with the transmitter disabled IS accepted, and then a
-  sync character other than 0x55 sets ISFIF, as documented.
-- **Errata 2.16.3 confirmed.** With ISFIF set, clearing the flag,
-  restoring RXMODE and restoring BAUD still leave the receiver
-  completely deaf; writing RXEN 0 then 1 brings it back on the next
-  frame.
-- **Rebase is transparent.** 24 -> 12 -> 24 MHz with the USART among a
-  `DynamicClock`'s users: loop-back traffic stays clean across every
-  switch and the bit time holds at 8.7 us (208 CLK_PER ticks at 24 MHz,
-  104 at 12 MHz).
+  Eight frames flooded at full rate with nothing read leave exactly
+  three readable: the two oldest and then the LAST frame on the line,
+  not the third one sent - the shift register keeps taking new frames
+  while the buffer stays full. BUFOVF marks that third frame and only
+  it, and draining is the whole recovery. Measured both in loop-back and
+  from the other board.
+- **Parity errors are counted, not delivered.** Board B sending odd
+  parity into a receiver configured for even flags PERR on every frame,
+  and the data is still readable in the resource's `UsartFrame`; through
+  the `Uart` task the same six frames arrive as six parity errors and
+  zero delivered bytes.
+- **The transmit path is three deep and its stages are microseconds
+  apart.** With TXDATA, the buffer and the shift register all loaded,
+  DREIF stays low for a whole frame (1021 polling iterations at 9600)
+  and TXCIF for two (2095); DREIF returns while the line is still busy.
+  With only TWO frames loaded the "TXDATA full" state lasts a few dozen
+  CPU cycles - long enough to read once, far too short to survive an
+  interrupt - so a measurement of it is a race, not a fact.
+- **MPCM filters silently, in both flavours.** With nine data bits the
+  ninth marks the address frame: only address frames set RXCIF, clearing
+  MPCM opens the flow to that address's data frames, and setting it
+  again catches the next group's address. The 5..8-bit flavour of
+  27.3.4.3 behaves identically - but only the RECEIVER can be configured
+  for it. A transmitter with five to eight data bits sends ones in both
+  stop positions and so can only ever produce address frames; the sender
+  has to use NINE data bits, and its ninth bit lands in the receiver's
+  first stop-bit slot.
+- **RS-485's XDIR is exactly guard + frame.** Measured on PE3 with a TCB
+  pulse-width meter through the event system, with board B receiving the
+  frames: **27 500 CLK_PER ticks at 9600** against an expected 27 500
+  (one baud clock of guard plus ten frame bits, exact) and **2290-2291
+  at 115 200** against an expected 2288.
+- **IRCOM works on a wire, and TXPL is a TRANSMITTER knob only.** Both
+  ends in IRCOM at 115 200 round-trip cleanly with the default 3/16
+  pulses and with a fixed 60-CLK_PER pulse. With TXPL = 0xFF the
+  transmitter really does become plain asynchronous - a normal
+  asynchronous receiver on the other board read all six frames clean -
+  but the IRCOM RECEIVER still expects pulses, and a plain asynchronous
+  sender is NOT readable by it. A pulse-coded transmitter into a plain
+  receiver is not readable either.
+- **RXPL counts PERIPHERAL CLOCK cycles, not receiver samples.** At
+  115 200 on a 24 MHz CLK_PER a bit is 208 peripheral clocks and the
+  3/16 pulse is 39 of them. Sweeping the DUT's RXPL against that pulse:
+  0, 6 and 20 pass; **40, 60, 100 and 127 block completely**. Rejection
+  starts exactly where RXPL + 1 exceeds the pulse width in CLK_PER, not
+  where it exceeds three of sixteen samples.
+- **The one-wire bus works, collision detection included.** With the two
+  TXD pads jumpered and both boards in LBME + ODME (pads left as inputs
+  under their pull-ups, errata 2.16.1), the DUT and board B exchanged
+  frames half duplex at 19 200 with an explicit talk/listen turnaround:
+  every frame came back through the DUT's own echo path and board B
+  answered each one. Then, with board B commanded to transmit into the
+  DUT's NEXT frame 150 us after the trigger, the echo of an all-ones
+  frame differed from what was sent - the open-drain wired-AND of two
+  transmitters, seen exactly where 27.3.3.2.6 says to look for it. A
+  responder cannot collide with the frame that triggered it: it only
+  knows a frame began once it has all of it.
+- **Rebase is transparent, under real traffic too.** 24 -> 12 -> 24 MHz
+  with the USART among a `DynamicClock`'s users: loop-back traffic stays
+  clean across every switch and the bit time holds at 8.7 us (208
+  CLK_PER ticks at 24 MHz, 104 at 12 MHz). Streaming 96 counted bytes
+  through the `Uart` task across the same two switches, the other board
+  received all 96 with an exact checksum and zero FERR, PERR and BUFOVF.
 - **Host SPI runs in loop-back in all four phase/order combinations**
   and the rate is exactly CLK_PER / (2 x BAUD[15:6]).
 - **`release()` really releases**: PORTMUX reads NONE again and the TXD
   pin's direction bit is back to input, so another peripheral can take
   the position.
+
+### Two facts about the flags that shape half-duplex code
+
+- **RXCIF is raised half a bit BEFORE the sender's TXCIF** - at the
+  middle of the stop bit, where the receiver samples it, while the
+  transmitter only reports done at the end. A responder that answers the
+  instant it has the frame therefore starts its start bit while the
+  other end is still transmitting, and any scheme that stops listening
+  while it talks loses the beginning of that answer: two bits were
+  swallowed at 2400 baud and the receiver locked onto a later low. A
+  turnaround guard of a few bit times fixes it, and `OneWire`'s header
+  comment now says so.
+- **`wait_line_idle()` CLEARS TXCIF**, so two calls in a row do not both
+  return at once: the second spins out its whole budget. A half-duplex
+  turnaround that waited twice stayed deaf for 60 ms and lost the
+  answer every time.
 
 ## Not covered yet
 
@@ -296,34 +434,28 @@ Driver gaps (not implemented):
   bounded spins. An interrupt-driven or kernel-resident version of any
   of them is born with its first user, as is an MPCM address-matching
   layer over the resource's filter.
+- **No turnaround guard in `OneWire`.** The half-bit lead of RXCIF over
+  TXCIF is documented in the task's header comment and measured above,
+  but `talk()` does not wait: a responder built on this task must add
+  the guard itself until a real half-duplex user says how long it wants.
 - **No RUNSTDBY**: the peripheral has none. Standby operation is
   SFDEN's business, and that is a verb, not a mode.
 
 Implemented and compile-checked for all eight DA/DB packages, but NOT
-bench-verified (most of it waits for the second board of the protocol
-campaign):
+bench-verified:
 
-- everything that needs a foreign device: cross frame formats, framing
-  and parity errors injected on purpose, a break received from outside,
-  a real auto-baud sender, double-speed RECEPTION (only the generator
-  was measured), the operational-range tables of 27.3.3.2.3;
-- the synchronous roles on a real XCK, in both host and client
-  direction and both INVEN phases, and the client's CLK_PER/4 ceiling;
-- Host SPI electrically - deferred to the SPI campaign, where a real
+- **the synchronous roles on a real XCK**, in both host and client
+  direction and both INVEN phases, and the client's CLK_PER/4 ceiling.
+  A synchronous link needs XCK wired between the boards AND data on a
+  crossed pair; today's desk carries a single shared wire, so the
+  suite's test `q` reports itself SKIPPED rather than inventing a
+  verdict. It runs as written the moment the crossed pair is fitted;
+- **Host SPI electrically** - deferred to the SPI campaign, where a real
   client will compare it against `avrdx/spi.hpp`;
-- one-wire on an actual shared line (two drivers, collision detection
-  through the echo) and the errata 2.16.1 pin-direction work around as
-  a measured fact rather than a configured one;
-- RS-485: the XDIR guard time and its fall after the stop bit, on a
-  scope;
-- IRCOM entirely: the 3/16 and fixed pulse shapes, the RXPL filter, the
-  event-channel input;
-- start-of-frame detection from a real standby (needs a sleeping app),
-  and with it the RXSIF path;
-- `CTRLD.ABW`, the LIN auto-baud tolerance window: written, never
-  exercised, and the 0x0064 lower bound the data sheet gives for an
-  accepted sync field is not checked by the driver either;
-- `DBGCTRL.DBGRUN`;
-- routes: only USART0 ALT1, USART1 default, USART3 ALT1 and USART4
+- **start-of-frame detection from a real standby** (needs a sleeping
+  app), and with it the RXSIF path;
+- **`DBGCTRL.DBGRUN`**;
+- **the IRCOM receiver fed from an event channel** (`EVCTRL.IREI`);
+- **routes**: USART0 ALT1, USART1 default, USART3 ALT1 and USART4
   default were driven, on 48-pin silicon only. USART2 is the bench
-  console and the suite never reconfigures it.
+  console and the suites never reconfigure it.

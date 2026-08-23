@@ -18,6 +18,13 @@ in their banner, so a console names its own board.
 - MCU: AVR128DB48 (48-pin, 128 KB flash, 16 KB SRAM), silicon rev A5
   on both, see [avrdx/README.md](avrdx/README.md) for toolchain, probe
   and clock.
+- **Board B's 24 MHz crystal does not start**: `Clock<crystal, 24 MHz>`
+  falls back to OSCHF at the same rate and `SysClock::init()` returns
+  false, which the peer prints in its banner. Measured against board A's
+  crystal, board B then runs **+0.24 % fast** (`test_avr_serial` test
+  `j`, and the same figure comes back out of auto-baud). Every
+  cross-board rate measurement carries that offset; a crystal that
+  started would remove it.
 - Supply: jumper-selectable **3.3 V / 5 V**; VDDIO2 is powered, so
   PORTC (the MVIO domain) is usable - and could one day talk 3.3 V
   logic while the rest of the chip runs 5 V, no level shifters.
@@ -80,9 +87,11 @@ $PY tools/bench.py duo A:a B:script.txt # instrument peer scripted, then the DUT
 ```
 
 `run` exits nonzero on a timeout or a nonzero fail count, so a suite is
-usable from a script. `duo` is the campaign's shape and is **not yet
-exercised** (board B is on the desk, still running its delivery
-firmware).
+usable from a script. `duo` (console-scripting the peer) is **still
+unexercised**: the USART campaign commands its peer IN-BAND over the
+link under test (`src/apps/usart_link.hpp`), so the whole matrix runs
+as a plain `run A`. `duo` stays for a campaign whose bus cannot carry
+its own commands.
 
 ## Wiring (SPI/I2C experiments, 3.3 V rail)
 
@@ -105,7 +114,42 @@ bench runs on the 3.3 V rail.
 | Event probes (events0) | PD2 (EVOUTD), PC2 (EVOUTC), PF2 (EVOUTF = LED) | logic analyzer on PD2/PC2 |
 | CLKOUT (test_avr_clock) | PA7 | scope: CLK_PER |
 | Analog loop (test_avr_analog, sampler) | PD6 (DAC0 OUT) -> PD1 (AIN1), PD6 -> PD7 (VREFA) | two jumper wires, NOT fitted at the moment: the wire-dependent half of test_avr_analog (36 of 81) is expected to fail until they return |
-| Board-to-board serial link (test_avr_serial, USART campaign) | A.PE0 - B.PE1, A.PE1 - B.PE0, A.PE2 - B.PE2, GND - GND | four jumper wires; board B must hold PORTE as inputs (flash it with `family_probe`) |
+| Board-to-board serial link (test_avr_serial + usart_peer) | **today: A.PE0 - B.PE0, A.PE1 - B.PE2, A.PE2 - B.PE1**, GND - GND | measured by the wiring probe, see below |
+
+### The board-to-board link, and its two wirings
+
+The USART campaign supports two ways of jumpering PORTE, and the two
+apps FIND OUT which one is on the desk instead of assuming (each
+alternates its command-mode configuration until a frame arrives):
+
+- **the crossed full-duplex pair** - `A.PE0 - B.PE1`, `A.PE1 - B.PE0`,
+  `A.PE2 - B.PE2`: TXD into RXD each way plus XCK across. This is the
+  only wiring that can carry the SYNCHRONOUS roles, and the suite's
+  test `q` skips itself without it;
+- **one shared wire** - `A.PE0 - B.PE0`, the two TXD pads tied together:
+  the one-wire bus of 27.3.3.2.6. With LBME at both ends it carries
+  everything else, half duplex, at every rate the register can express.
+
+**What the desk carries today is the shared wire**, plus `A.PE1 - B.PE2`
+and `A.PE2 - B.PE1`, which connect two INPUTS to each other and are
+therefore inert. PE3 (XDIR) is unconnected on both boards, which is what
+the RS-485 test wants: XDIR stays a DUT-local signal a TCB measures.
+
+To see the wiring for yourself rather than trust this page, run the
+probe on both boards at once - board B's console command `2` and board
+A's suite command `v`. Each drives its own PE0..PE3 at 2, 4, 8 and 16 Hz
+for six seconds and listens for six more, and the EDGE COUNT on a pin
+names which pin of the other board it is tied to:
+
+```
+  A.PE0: 23 edges -> B.PE0
+  A.PE1: 93 edges -> B.PE2
+  A.PE2: 46 edges -> B.PE1
+  A.PE3: 0 edges -> nothing
+```
+
+Moving to the crossed pair costs three jumpers and nothing in the
+firmware: both apps discover the change on the next command.
 
 CCL collisions on this board: LUT0 owns PA0..PA3 (PA0/PA1 are the
 crystal), LUT1 PC0..PC3 (traffic LEDs = TCA0 PORTC WO0..3), LUT2
@@ -142,9 +186,16 @@ type it names (see "Multi-board bench" above), generated into
 (VS Code task "PIO: regen apps", then reload the project). An app may
 carry `// pio: <option> = <value>` lines in its header comment (e.g.
 `// pio: monitor_speed = 115200`) - see "Per-app env options" in
-[avrdx/README.md](avrdx/README.md). Shared code goes into
-`lib/brio/src/`; any header an app includes is compiled and linked by
-the LDF, no filter changes.
+[avrdx/README.md](avrdx/README.md).
+
+Shared code goes into `lib/brio/src/`; any header an app includes is
+compiled and linked by the LDF, no filter changes. What does NOT belong
+there is bench tooling two apps happen to share - a wire protocol
+between a DUT and its instrument is not framework. That kind of header
+sits next to the apps in `src/apps/` and is included by its plain name
+(`#include "usart_link.hpp"`), which the compiler resolves against the
+including file's own directory: no build change, and the layering rule
+stays honest because nothing under `lib/brio/src/` knows it exists.
 
 | App | What it does |
 |-----|--------------|
@@ -166,7 +217,8 @@ the LDF, no filter changes.
 | `test_avr_timer` | **Bench test suite** (keep passing): TCA/TCB/CCL/AC, 11 tests / 82 verdicts, 82/82 on rev A5 at 3.3 V - FrequencyGenerator/TcaPwm16/Heartbeat on PD0 measured back by the TCB meters through EvPin, OneShotPulse on PB5, Pwm8 on PC0, PulseCounter, 32-bit cascade vs the Ticker, PeriodicTick, Timeout, EventCounter with direction from PC1; CCL LUT4 on PB0/PB1 -> PB3 and a JK flip-flop by timer events; AC thresholds/window against the DAC on PD6. Nothing to wire (PB0/1/3/5 = traffic LEDs flicker). Holds in crystal time (PIT paused): the Ticker's OSC32K measured +0.94 % fast |
 | `test_avr_pin` | **Bench test suite** (keep passing): PORT - the pin senses counted on self-driven edges, level_low, INVEN, input_disable, the W1C flag discipline, the multi-pin engine across two ports, the Port mask verbs and the slew bit. 22/22 on rev A5. Nothing to wire |
 | `test_avr_rtc` | **Bench test suite** (keep passing): RTC/PIT, 8 tests / 78 verdicts, 78/78 on rev A5 - the counter's period at three prescalers, the compare phase (CMP + 1 ticks), crystal error correction at +-127 ppm, the synchronization busy flags, the first tick after an enable, the PIT and the counter running together, OSC1K as CLK_RTC. A TCB cascade at CLK_PER is the stopwatch and the RTC's own OVF/CMP events latch it: nothing to wire. Takes about two minutes (the correction is measured by averaging) |
-| `test_avr_serial` | **Bench test suite** (keep passing): USART, 9 tests / 108 verdicts, 108/108 on rev A5 at 5 V - instances and routes including the pinless NONE and the teardown, the whole 36-combination frame-format matrix in loop-back on USART4, the receive FIFO's overflow, the MPCM filter, DRE vs TXC, the baud generator measured on PE0 through EvPin + a TCB pulse-width meter (9600 / 115200 / 460800 / 1 Mbaud and CLK2X), a 24 -> 12 -> 24 MHz rebase under traffic, GENAUTO/LINAUTO auto-baud with the errata 2.16.3 recovery, and Host SPI in loop-back. Nothing to wire; drives PE0/PE2 (the link to board B, which must be holding them as inputs), and briefly PA4, PC0, PB4 for the per-instance smoke. Menu letter per test, `z` runs them all |
+| `test_avr_serial` | **Bench test suite** (keep passing), in two halves. `z` = SINGLE BOARD, 9 tests / 108 verdicts, 108/108 on rev A5 at 5 V: instances and routes including the pinless NONE and the teardown, the whole 36-combination frame-format matrix in loop-back on USART4, the receive FIFO's overflow, the MPCM filter, DRE vs TXC over the three-deep transmit path, the baud generator measured on PE0 through EvPin + a TCB pulse-width meter, a 24 -> 12 -> 24 MHz rebase under traffic, GENAUTO/LINAUTO auto-baud with the errata 2.16.3 recovery, and Host SPI in loop-back. `y` = TWO BOARDS, 12 tests / 103 verdicts, 103/103 with `usart_peer` on board B: the baud and frame matrices across the wire, injected parity/rate/overflow/break errors, bit-banged waveforms (glitch widths, a uniform rate error, one distorted cell, the four ABW windows), auto-baud against board B's own oscillator, MPCM in both flavours, RS-485's XDIR guard time, IRCOM pulses and the RXPL filter, a clock rebase under real traffic, and the LBME pad probe. Also `v` = the wiring probe (with board B's console `2`) and `w` = the one-wire bus, 6/6 on today's shared wire. Neither is part of `y`, because both depend on how the desk is jumpered: `w` skips itself on the crossed pair and `q`, the synchronous roles, skips itself on the shared wire. `z` asks board B to stay quiet for the duration first - on a shared line the peer sits on the DUT's own loop-back |
+| `usart_peer` | The INSTRUMENT half of the USART campaign, for board B: one blocking loop that decodes a command frame off the link, acknowledges it and becomes for a bounded moment whatever the DUT needs on the other end - echo, silent sink, generator, full-rate flood, break, foreign auto-baud sender, cycle-counted bit-banger (a stretched bit cell, sub-bit glitches), one-wire responder. Every mode-changing command carries a frame count and a deadline after which the peer restores command mode by itself. Console (observability only): `?` help, `i` status and counters, `0` command mode, `1` one-wire standby, `2` wiring probe, `3` command trace |
 | `sampler` | The ADC inside the kernel: `AnalogSampler` over ADC0 walking PD1 (the DAC loop), die temperature and VDD/10, published to a Monitor (one line a second) and an Alarm (LED PF2 above a threshold); console DAC/PACE HW|SW|OFF/ALARM/CLOCK/STAT. Bench: 512 samples/s (PIT/64) with no queue drops, 128/s default, CLK_ADC follows CLOCK 4M/24M under sampling |
 | `traffic0` | The over-commented AO learning testbed: 4 buttons -> 4 RGB lamps, one AO per role, publish for button facts |
 | `traffic1` | The traffic light FSM: timed phases via one re-armed time event, a remembered pedestrian call |

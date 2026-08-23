@@ -345,9 +345,30 @@ gets its dated home in `docs/design/` when taken.
   alone; GENAUTO writes a BAUD value directly (+0.06 % at 19200),
   LINAUTO needs a real >= 12-bit break (produced by driving TXD from
   PORT with TXEN off), errata 2.16.3 confirmed; STATUS.WFB is
-  write-only. Two-board half (cross formats, error injection, foreign
-  auto-baud, sync roles, one-wire on the wire, RS-485 XDIR timing,
-  IrDA) is the next phase. -> CCL -> AC ->
+  write-only. USART phase U2 DONE (two-board half): usart_peer on B
+  driven IN-BAND over the link (src/apps/usart_link.hpp: magic/opcode/
+  checksum, ack-before-act, bounded actions with autonomous return to
+  command mode 8N1/115200); both apps DISCOVER the wiring topology
+  (crossed pair vs one shared TXD-TXD wire - the desk turned out to
+  carry the shared wire, caught by the edge-count probe, suite v /
+  peer console 2); test_avr_serial grew j..u/v/w, sets y 103/103 and
+  w 6/6 (both close with the ALL: line), z still 108/108. Findings in
+  usart.md: FERR onset +5/-6 % vs table 27-4's ~4 %, glitch rejection
+  at half a bit, ABW windows measured at 14-16/16-18/20-22/>22 % (doc
+  15/18/21/25), auto-baud learns a foreign clock to its real offset
+  and accepts BAUD 80 below the documented 0x64 floor, LINAUTO only
+  re-locks near the BAUD in force while GENAUTO learns anything, MPCM
+  5..8-bit flavour is receiver-only, RS-485 XDIR = 1 baud-clock guard
+  + frame (exact), RXPL counts CLK_PER cycles not samples, TXPL=0xFF
+  makes only the TRANSMITTER plain async, an LBME receiver DOES hear
+  an external driver on its TXD pad (one-wire collision detection is
+  real, proven with a bench collision), RXCIF leads the sender's
+  TXCIF by half a bit (turnaround guard documented), board B's 24 MHz
+  crystal does not start (runs OSCHF +0.24 %). Driver fixes: Uart::
+  init drains stale rings/counters, wait_line_idle re-commented (one
+  call per burst). Open: sync roles + client CLK_PER/4 ceiling (test
+  q skips itself until the desk carries the crossed pair), MSPI
+  electrical (SPI campaign), SFD from standby, DBGRUN, IREI. -> CCL -> AC ->
   ADC/DAC/VREF -> CLKCTRL (DA must compile) -> EVSYS tables. Phase 2,
   never-reviewed: USART
   (jumper cross-loopback, new suite test_avr_serial) -> SPI (host ->

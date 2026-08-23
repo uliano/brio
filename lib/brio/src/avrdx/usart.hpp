@@ -711,8 +711,12 @@ public:
         }
         return receive();
     }
-    /// Wait (bounded) for the line to go idle: clears TXCIF first, so
-    /// what it reports is THIS transmission finishing, not a stale flag.
+    /// Wait (bounded) for the line to go idle, then CLEAR TXCIF - so
+    /// what a later call reports is the NEXT transmission finishing, not
+    /// this one. Two calls in a row therefore do not both return at
+    /// once: the second spins out its whole budget (bench: a half-duplex
+    /// turnaround that waited here twice stayed deaf for 60 ms and lost
+    /// the answer). One call per burst.
     static bool wait_line_idle(uint32_t spins = 500'000u) {
         while (!txc_flag()) {
             if (spins-- == 0) return false;
@@ -975,6 +979,16 @@ public:
                       "list it among its Users: it would keep the old baud after "
                       "a clock change");
         m_baud = baud;
+        // init() STARTS the transport: whatever a previous life of this
+        // instance left in the rings and the counters is not this one's
+        // traffic. (Bench: a suite that re-init'ed the same Uart after
+        // driving the resource directly read a stale byte as the first
+        // one of the new session.)
+        while (m_rx.pop()) {
+        }
+        while (m_tx.pop()) {
+        }
+        clear_errors();
         U::template init<UsartConfig{.route = route}>();
         U::baud_reg(usart_baud_reg(clock_hz(clock), baud));
         U::enable_rxc_interrupt(true);
@@ -1177,6 +1191,14 @@ protected:
  * a collision with another device on the line (27.3.3.2.6). The
  * turnaround is explicit: talk() before transmitting, listen() after
  * the line goes idle.
+ *
+ * TURNAROUND GUARD. RXCIF is raised at the MIDDLE of the stop bit, half
+ * a bit BEFORE the sender's own TXCIF. A device that answers the instant
+ * it has the frame therefore starts its start bit while the other end is
+ * still transmitting - and any half-duplex scheme that stops listening
+ * while it talks loses the beginning of that answer (bench: two bits
+ * swallowed at 2400 baud, the receiver then locking onto a later low).
+ * A responder must wait a few bit times before taking the line.
  */
 template <uint8_t n, UsartRoute route = UsartRoute::def>
 struct OneWire : UsartTaskBase<n, route, UsartMode::async> {
