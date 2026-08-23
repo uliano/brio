@@ -1134,6 +1134,77 @@ void watch_incoming() {
     Meter::init(clock, ChTx{}, TcbClock::div1, /*low=*/true);
 }
 
+// ---- x: the clock comparison ---------------------------------------------------
+// Not part of `y`: it is metrology, not a pass/fail of the USART. The
+// peer transmits 0x00 frames - START plus eight zero bits = nine bit
+// times of continuous low, timed by ITS baud generator, i.e. by ITS
+// crystal with no software in the path - and the DUT's pulse-width
+// meter reads each pulse in ITS own crystal time. At 3600 baud the
+// pulse is ~60000 ticks (17 ppm per tick); sixteen pulses averaged
+// resolve a few ppm. Both boards compute the same BAUD register value
+// for the rate, so the expected width is exactly 9 x reg / 4 ticks
+// (S = 16) and the ratio measured/expected is the ratio of the two
+// clocks, nothing else. Each capture reads one tick short at div1
+// (test_avr_timer's finding: capture = interval - 1 CLK_PER), which
+// at 60000 ticks would masquerade as 17 ppm - corrected below.
+
+void tx_clocks() {
+    print(serial, "x clock comparison: board B's 9-bit low pulses in board A's crystal time", crlf);
+    quiesce();
+    if (!ensure_link()) { verdict("the peer is reachable", false); return; }
+    constexpr uint32_t rate = 3600;
+    const uint16_t reg = usart_baud_reg(SysClock::hz, rate);
+    link::Params a{};
+    a.cfg.rate = rate;
+    a.count = 40;
+    a.ms = bound_ms(rate, 40);
+    a.value = 0x00;
+    a.pattern = link::pattern_fixed;
+    if (!peer_act(link::Op::send, a)) {
+        verdict("the peer accepts SEND", false);
+        (void)link_command_mode();
+        return;
+    }
+    verdict("the peer accepts SEND", true);
+    watch_incoming();
+    clear_captures();
+    uint32_t sum = 0;
+    uint16_t seen = 0, wmin = 0xFFFF, wmax = 0, discard = 2;
+    uint16_t last_n = captures;
+    for (uint16_t guard = 0; guard < 400 && seen < 16; ++guard) {
+        delay_us(clock, 1000);
+        const uint16_t n = captures;
+        if (n == last_n) continue;
+        last_n = n;
+        const uint16_t w = static_cast<uint16_t>(last_width + 1);   // the div1 short-read
+        if (discard) { --discard; continue; }                       // mode-switch edges
+        sum += w;
+        if (w < wmin) wmin = w;
+        if (w > wmax) wmax = w;
+        ++seen;
+    }
+    T0::enable_capt_interrupt(false);
+    T0::disable();
+    verdict("16 pulses captured", seen == 16);
+    if (seen == 16) {
+        const int64_t expected4 = 16LL * 9 * reg;                   // 4 x expected sum
+        const int64_t ppm = ((4LL * static_cast<int64_t>(sum) - expected4) * 1'000'000LL)
+                            / expected4;                            // + = B slow
+        const int64_t b_fast = -ppm;
+        print(serial, "  pulse mean ", sum / 16u, ".", (sum % 16u) * 10u / 16u,
+              " ticks (nominal ", static_cast<uint32_t>(expected4 / 64u), ".",
+              static_cast<uint32_t>((expected4 % 64u) * 10u / 64u),
+              "), spread ", wmin, "..", wmax, crlf);
+        print(serial, "  board B runs ", b_fast >= 0 ? "+" : "-",
+              static_cast<uint32_t>(b_fast >= 0 ? b_fast : -b_fast),
+              " ppm against board A's crystal (single tick = 17 ppm)", crlf);
+        verdict("the two clocks agree within 200 ppm",
+                b_fast > -200 && b_fast < 200);
+    }
+    quiesce();
+    (void)link_command_mode();
+}
+
 // ---- v: the wiring probe -------------------------------------------------------
 // Not part of `y`: it needs board B's console command '2' started at the
 // same time, and it is the answer to "is the desk wired the way the
@@ -2425,7 +2496,7 @@ constexpr Test tests[] = {
     {'j', tj_link}, {'k', tk_baud}, {'l', tl_frames_cross}, {'m', tm_errors},
     {'n', tn_waveforms}, {'o', to_autobaud_foreign}, {'p', tp_mpcm_cross},
     {'q', tq_sync}, {'r', tr_rs485}, {'s', ts_irda}, {'t', tt_rebase_traffic},
-    {'u', tu_lbme_pad}, {'v', tv_wiring}, {'w', tw_onewire},
+    {'u', tu_lbme_pad}, {'v', tv_wiring}, {'w', tw_onewire}, {'x', tx_clocks},
 };
 constexpr char single_board[] = "abcdefghi";
 constexpr char two_board[] = "jklmnopqrstu";
@@ -2445,7 +2516,8 @@ void help() {
                   "p mpcm | q sync roles | r rs-485 | s ircom | t rebase | u lbme pad",
           crlf);
     print(serial, "  v wiring probe (with board B's '2') | w one-wire (needs the "
-                  "PE0-PE0 jumper); neither is in y", crlf);
+                  "PE0-PE0 jumper) | x clock comparison (ppm); none of these is in y",
+          crlf);
     print(serial, "  z = all single-board, y = all two-board", crlf);
 }
 
