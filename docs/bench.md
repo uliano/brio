@@ -154,8 +154,8 @@ DEFAULT's dual pair), so TWI1 can join the same bus electrically. The
 suite probes for this tap and prints its verdict rather than assuming
 (`test_avr_twi h`); it currently measures PRESENT.
 
-The grounds meet through the two USB cables; the dedicated GND wire came
-off with the PORTE link.
+A dedicated GND wire ties the two boards directly (besides the path
+through the two USB cables) - the short return the bus needs at 1 MHz.
 
 ### The board-to-board link, and its two wirings
 
