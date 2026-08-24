@@ -30,10 +30,23 @@
 // protocol violation on its own bus. TWI1's dual pair PB2/PB3 would be a
 // third tap; this desk does not fit it, and test h says so out loud
 // instead of assuming either way. TWI1 stays DISABLED throughout.
-// Board B (running `spi_peer`) is on the same node and TWI-inert: its
-// PA2/PA3 are high-Z.
 //
-// Commands: ? for the menu, z = the whole single-board half.
+// TWO BOARDS (k..s, `y`): board B runs `twi_peer` and taps the same node
+// with its own PA2/PA3. The DUT drives it IN BAND over the bus itself -
+// a write tenure to `twilink::command_addr` carries one command frame, a
+// read tenure collects the answer (src/apps/twi_link.hpp) - and then
+// measures what a SECOND, independent chip does to the wire: clock
+// stretching, an injected address or data NACK, multi-host arbitration
+// with both boards combined, the collision case S4 with two clients on
+// one address, a really stuck SDA against `Twi<0>::unstick()`, a General
+// Call answered by two chips, the three bus speeds and a clock rebase.
+// The peer's command-mode client answers ONE address exactly, with no
+// General Call, no mask, no PMEN and no PIEN, so the single-board half
+// above cannot see it at all - which is why `z` scores its full count
+// with board B attached and running.
+//
+// Commands: ? for the menu, z = the single-board half, y = the two-board
+// half.
 
 // pio: monitor_speed = 460800
 
@@ -51,6 +64,8 @@
 #include "kernel/active_object.hpp"
 #include "kernel/event_queue.hpp"
 #include "util/print.hpp"
+
+#include "twi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
 constexpr SysClock clock;
@@ -92,6 +107,15 @@ using SclFreq = FrequencyMeter<Meter>;
 using SclLow = PulseWidthMeter<Meter>;
 using Stopwatch = Tcb<1>;
 using SclCount = PulseCounter<Stopwatch>;
+// The two-board half needs a stopwatch longer than a TCB's 2.7 ms: a
+// millisecond of clock stretch per byte runs a transaction well past
+// that. TCB2 + TCB3 as one 32-bit counter at CLK_PER (178 s at 24 MHz),
+// on two channels of their own.
+using WatchLo = Tcb<2>;
+using WatchHi = Tcb<3>;
+using Watch = CascadedCounter<WatchLo, WatchHi>;
+using ChCarry = EventChannel<2>;
+using ChSnap = EventChannel<3>;
 
 // The arbiter that rides the engine (util/i2c_bus.hpp).
 using Bus = I2cBus<Host, P>;
@@ -137,6 +161,7 @@ volatile bool cl_saw_nack = false;
 uint8_t cl_nack_after = 0xFF;      ///< NACK the n-th data byte received (1-based)
 uint8_t cl_tx_seed = 0xA0;         ///< the client answers seed, seed+1, ...
 bool cl_read_address = false;      ///< read SDATA at the address match (test d)
+bool cl_fixed_tx = false;          ///< answer cl_tx_seed every time (test o)
 
 void cl_reset() {
     cl_addr_hits = 0;
@@ -178,7 +203,7 @@ void service_client() {
             C::complete();
             return;
         }
-        C::transmit(static_cast<uint8_t>(cl_tx_seed + cl_sent));
+        C::transmit(cl_fixed_tx ? cl_tx_seed : static_cast<uint8_t>(cl_tx_seed + cl_sent));
         ++cl_sent;
         return;
     }
@@ -188,6 +213,11 @@ void service_client() {
     if (cl_rx_n < 16) cl_rx[cl_rx_n] = v;
     ++cl_rx_n;
 }
+
+/// MSTATUS as it stood on the pass that completed the last request -
+/// the only place RXACK and the bus state of a failure can be READ, since
+/// the engine's isr() clears what it acts on.
+uint8_t last_mstatus = 0;
 
 /// Pump both halves until the HOST raises a flag; returns MSTATUS (0 on
 /// a time-out).
@@ -212,6 +242,7 @@ uint8_t run_request(const Host::Request& r, bool with_client = true,
     for (uint32_t i = 0; i < spins; ++i) {
         if (with_client) service_client<C>();
         const uint8_t s = T::host_status();
+        if ((s & (TWI_RIF_bm | TWI_WIF_bm | TWI_ARBLOST_bm | TWI_BUSERR_bm))) last_mstatus = s;
         if ((s & (TWI_RIF_bm | TWI_WIF_bm | TWI_ARBLOST_bm | TWI_BUSERR_bm)) &&
             Host::isr()) {
             // Let the client see the STOP that just went out.
@@ -297,12 +328,14 @@ void inject_start_stop() {
 // ---- instruments -------------------------------------------------------------
 
 volatile uint16_t meter_min = 0xFFFF;
+volatile uint16_t meter_max = 0;
 volatile uint16_t meter_caps = 0;
 volatile uint8_t meter_mode = 0;        // 0 = period, 1 = low width
 
 void meter_reset() {
     cli();
     meter_min = 0xFFFF;
+    meter_max = 0;
     meter_caps = 0;
     sei();
 }
@@ -318,11 +351,16 @@ void quiesce() {
     T1::release();
     meter_stop();
     Stopwatch::disable();
+    WatchLo::disable();
+    WatchHi::disable();
     ChScl::off();
+    ChCarry::off();
+    ChSnap::off();
     inj_park();
     cl_reset();
     cl_nack_after = 0xFF;
     cl_read_address = false;
+    cl_fixed_tx = false;
     cl_tx_seed = 0xA0;
 }
 
@@ -1299,6 +1337,850 @@ void tj_rebase() {
     quiesce();
 }
 
+// ==== TWO BOARDS (k..s): board B runs twi_peer ================================
+//
+// The command channel is the bus itself: a WRITE tenure to
+// twilink::command_addr carries one command frame, a READ tenure of
+// twilink::response_bytes collects the answer. Ack before act - the peer
+// prepares its acknowledgement and enters the commanded action only when
+// that read has completed, so the DUT knows it is armed before it puts a
+// measured edge on the wire.
+
+using twilink::Op;
+
+uint8_t link_tx[twilink::max_payload + 4];
+uint8_t link_rx[twilink::response_bytes];
+twilink::Decoder link_dec;
+twilink::Frame link_ans{};
+uint16_t link_naks = 0;
+
+void wait_ms(uint16_t ms) { delay_us(clock, static_cast<uint32_t>(ms) * 1000u); }
+
+/// One READ tenure, decoded into `link_ans`.
+bool link_collect() {
+    for (uint8_t i = 0; i < twilink::response_bytes; ++i) link_rx[i] = 0;
+    if (run_request<Client>({twilink::command_addr, nullptr, 0, link_rx,
+                             twilink::response_bytes, {}}) != i2c_ok) {
+        return false;
+    }
+    link_dec.reset();
+    for (uint8_t i = 0; i < twilink::response_bytes; ++i) {
+        if (link_dec.feed(link_rx[i]) == twilink::Decoder::Result::frame) {
+            link_ans = link_dec.frame();
+            return true;
+        }
+    }
+    return false;
+}
+
+/// One command: the frame out, the answer back. RAW - no retry, no
+/// verdict on what came back (test k needs the nak as an answer).
+bool link_once(Op op, const uint8_t* p, uint8_t len) {
+    uint8_t n = 0;
+    twilink::write_frame(
+        [&](uint8_t b) {
+            if (n < sizeof link_tx) link_tx[n++] = b;
+        },
+        op, p, len);
+    if (run_request<Client>({twilink::command_addr, link_tx, n, nullptr, 0, {}}) != i2c_ok) {
+        return false;
+    }
+    wait_ms(1);
+    return link_collect();
+}
+
+/// A command that must be acknowledged, retried three times (a peer
+/// still finishing a previous action's deadline is the normal reason a
+/// first attempt is not heard).
+bool link_cmd(Op op, const uint8_t* p = nullptr, uint8_t len = 0) {
+    for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+        if (link_once(op, p, len) && link_ans.op == Op::ack &&
+            link_ans.len >= 1 && link_ans.data[0] == twilink::byte_of(op)) {
+            return true;
+        }
+        wait_ms(20);
+    }
+    return false;
+}
+
+/// Command an action and give the peer its arming margin.
+bool peer_action(Op op, const twilink::Params& a) {
+    uint8_t p[twilink::params_size];
+    twilink::put_params(p, a);
+    if (!link_cmd(op, p, twilink::params_size)) return false;
+    wait_ms(twilink::arm_ms);
+    return true;
+}
+
+/// What the peer saw. The ack comes first, the data frame with a second
+/// read.
+bool peer_report(twilink::Report& out) {
+    if (!link_cmd(Op::report)) return false;
+    wait_ms(2);
+    if (!link_collect() || link_ans.op != Op::report_data) return false;
+    out = twilink::get_report(link_ans.data);
+    return true;
+}
+
+void print_report(const twilink::Report& r) {
+    print(serial, "    peer: op=", hex(r.op), " count=", r.count, " (rx ", r.aux0,
+          " tx ", r.aux1, ") hits=", r.addr_hits, " stops=", r.stops, " flags=",
+          hex(r.flags), " sum=", hex(r.sum), " first=", hex(r.first), " lastaddr=",
+          hex(r.last_addr), " SSTATUS=", hex(r.sstatus), " MSTATUS=", hex(r.mstatus),
+          " ms=", r.ms, crlf);
+}
+
+/// The peer back in command mode after an action that ended early.
+void peer_settle() { wait_ms(12); }
+
+/// The two-board standing configuration: this board's host, polled, at
+/// 100 kHz, with the command channel proven alive.
+bool link_up() {
+    if (!host_polled()) return false;
+    return link_cmd(Op::ping);
+}
+
+// ---- k: bring-up over the wire -----------------------------------------------
+
+void tk_bringup() {
+    print(serial, "k the command channel: ping, ident, a corrupted frame, a truncated "
+                  "one, and the retry", crlf);
+    quiesce();
+    verdict("host init", host_polled());
+    verdict("the peer answers a ping", link_cmd(Op::ping));
+
+    verdict("ident acknowledged", link_cmd(Op::ident));
+    bool got = link_collect() && link_ans.op == Op::ident_data;
+    twilink::Ident d{};
+    if (got) d = twilink::get_ident(link_ans.data);
+    print(serial, "  peer ident: label=", d.label[0], d.label[1], d.label[2], d.label[3],
+          d.label[4], d.label[5], " xtal=", d.xtal, " sanity=", hex(d.sanity),
+          " fw=", hex(d.version), crlf);
+    verdict("the ident frame came back", got);
+    verdict("its sanity byte says twi_peer", d.sanity == twilink::ident_sanity);
+    verdict("the peer names itself brio-b",
+            d.label[0] == 'b' && d.label[1] == 'r' && d.label[2] == 'i' &&
+            d.label[3] == 'o' && d.label[4] == '-' && d.label[5] == 'b');
+    verdict("the peer's 24 MHz crystal started (its byte turnaround is the "
+            "crystal's)", d.xtal == 1);
+
+    // A frame whose checksum does not match must be NAKed by op, and the
+    // channel must be usable straight afterwards.
+    uint8_t n = 0;
+    twilink::write_frame(
+        [&](uint8_t b) {
+            if (n < sizeof link_tx) link_tx[n++] = b;
+        },
+        Op::ping, nullptr, 0);
+    link_tx[n - 1] ^= 0xFFu;                  // the checksum, ruined
+    bool naked = false;
+    if (run_request<Client>({twilink::command_addr, link_tx, n, nullptr, 0, {}}) == i2c_ok) {
+        wait_ms(1);
+        naked = link_collect() && link_ans.op == Op::nak && link_ans.len >= 1 &&
+                link_ans.data[0] == twilink::byte_of(Op::ping);
+    }
+    verdict("a corrupted frame is NAKed, naming the op it claimed", naked);
+    verdict("and the channel still works", link_cmd(Op::ping));
+
+    // Half a frame, then a STOP: the peer resets its decoder at every
+    // address packet, so the next command cannot be eaten by it.
+    link_tx[0] = 0xC3;
+    link_tx[1] = twilink::byte_of(Op::ping);
+    link_tx[2] = 0;
+    const uint8_t st = run_request<Client>({twilink::command_addr, link_tx, 3,
+                                            nullptr, 0, {}});
+    verdict("a truncated frame is accepted on the wire", st == i2c_ok);
+    verdict("and does not wedge the channel: the next ping is answered",
+            link_cmd(Op::ping));
+
+    // An op the peer does not have: NAKed by name, not obeyed.
+    uint8_t p[1] = {0};
+    const bool answered = link_once(static_cast<Op>(0x7Eu), p, 1);
+    verdict("an unknown op is NAKed by name, never acknowledged",
+            answered && link_ans.op == Op::nak && link_ans.len >= 1 &&
+            link_ans.data[0] == 0x7Eu);
+    verdict("and the channel is alive after it", link_cmd(Op::ping));
+
+    quiesce();
+}
+
+// ---- l: clock stretching by a foreign client ---------------------------------
+
+struct Stretch {
+    uint32_t ticks = 0;      ///< the whole tenure, CLK_PER ticks
+    uint16_t low_max = 0;    ///< the longest SCL low, CLK_PER ticks
+    uint16_t low_min = 0;
+    uint8_t status = 0xFE;
+    bool clkhold = false;    ///< the HOST held the clock while its own flag stood
+    bool owner = false;
+};
+
+constexpr uint8_t stretch_bytes = 6;
+
+Stretch stretch_round(uint16_t hold_us) {
+    Stretch res{};
+    twilink::Params a{};
+    a.count = stretch_bytes;
+    a.ms = 400;
+    a.addr = twilink::command_addr;
+    a.hold_us = hold_us;
+    a.flags = twilink::flag_stop_interrupt;
+    if (!peer_action(Op::serve, a)) return res;
+
+    for (uint8_t i = 0; i < stretch_bytes; ++i) tx_buf[i] = static_cast<uint8_t>(0x50 + i);
+    meter_mode = 1;
+    SclLow::init(clock, ChScl{}, TcbClock::div1, true);
+    meter_reset();
+    Watch::reset();
+    Host::start({twilink::command_addr, tx_buf, stretch_bytes, nullptr, 0, {}});
+    for (uint32_t i = 0; i < 4'000'000u; ++i) {
+        const uint8_t s = T::host_status();
+        if (s & (TWI_RIF_bm | TWI_WIF_bm)) {
+            if (s & TWI_CLKHOLD_bm) res.clkhold = true;
+            if ((s & TWI_BUSSTATE_gm) == TWI_BUSSTATE_OWNER_gc) res.owner = true;
+        }
+        if ((s & (TWI_RIF_bm | TWI_WIF_bm | TWI_ARBLOST_bm | TWI_BUSERR_bm)) &&
+            Host::isr()) {
+            break;
+        }
+    }
+    res.ticks = Watch::read();
+    meter_stop();
+    res.low_max = meter_max;
+    res.low_min = meter_min;
+    res.status = Host::status();
+    peer_settle();
+    return res;
+}
+
+void tl_stretch() {
+    print(serial, "l clock stretching: the peer holds DIF for a commanded time per "
+                  "byte, and the wire shows it", crlf);
+    quiesce();
+    verdict("link up", link_up());
+    ChScl::source(EvPin<Scl>{});
+    Watch::init(TcbClock::div1, ChCarry{}, ChSnap{});
+
+    const uint16_t tiers[4] = {0, 100, 1000, 0};
+    const char* names[4] = {"no hold", "100 us/byte", "1 ms/byte", "no hold again"};
+    Stretch r[4];
+    for (uint8_t i = 0; i < 4; ++i) {
+        r[i] = stretch_round(tiers[i]);
+        print(serial, "  ", names[i], ": ", r[i].ticks, " ticks = ", r[i].ticks / 24u,
+              " us for ", stretch_bytes, " bytes; SCL low min ", r[i].low_min,
+              " max ", r[i].low_max, " ticks (", r[i].low_max / 24u,
+              " us); status ", r[i].status, crlf);
+        verdict("the stretched write still lands exactly ", names[i],
+                r[i].status == i2c_ok);
+    }
+
+    // The elongation is the peer's hold times the number of data bytes:
+    // the address packet is answered from APIF, which this action does
+    // not hold.
+    const uint32_t base = r[0].ticks;
+    for (uint8_t i = 1; i <= 2; ++i) {
+        const uint32_t want = static_cast<uint32_t>(tiers[i]) * stretch_bytes * 24u;
+        const uint32_t got = r[i].ticks > base ? r[i].ticks - base : 0;
+        print(serial, "  elongation at ", names[i], ": ", got, " ticks, model ", want,
+              " (", stretch_bytes, " bytes x ", tiers[i], " us)", crlf);
+        verdict("the tenure grows by count x hold ", names[i],
+                got > want - want / 5u && got < want + want / 5u + 3000u);
+        verdict("and the longest SCL low is that hold, not the divider's ", names[i],
+                r[i].low_max > static_cast<uint16_t>(tiers[i] * 20u));
+    }
+
+    verdict("the HOST holds the clock while its own flag stands (CLKHOLD)",
+            r[0].clkhold && r[2].clkhold);
+    verdict("the bus reads Owner throughout", r[0].owner && r[2].owner);
+    print(serial, "  the peer's own software turnaround, unstretched: SCL low up to ",
+          r[0].low_max, " ticks = ", r[0].low_max * 1000ul / 24ul, " ns (the register's "
+          "own low time is ", twi_low_ticks(T::baud()), " ticks)", crlf);
+    verdict("an unstretched exchange right after the 1 ms one is back to nominal",
+            r[3].low_max < r[2].low_max / 4u && r[3].ticks < base * 2u);
+
+    twilink::Report rep{};
+    if (peer_report(rep)) print_report(rep);
+    verdict("the peer took all six bytes", rep.aux0 == stretch_bytes);
+    quiesce();
+}
+
+// ---- m: NACK injection -------------------------------------------------------
+
+void tm_nacks() {
+    print(serial, "m the two NACKs a host can meet, injected by a board that is alive "
+                  "and listening", crlf);
+    quiesce();
+    verdict("link up", link_up());
+
+    // (1) ADDRESS NACK: the peer parks its client where nobody sends.
+    twilink::Params a{};
+    a.ms = 250;
+    a.flags = twilink::flag_deaf | twilink::flag_stop_interrupt;
+    verdict("the peer commanded deaf (its address parked elsewhere)",
+            peer_action(Op::serve, a));
+    last_mstatus = 0;
+    uint8_t st = run_request<Client>({twilink::command_addr, tx_buf, 2, nullptr, 0, {}});
+    print(serial, "  a write to a deaf board: engine says ", st, " (i2c_nack_addr = ",
+          i2c_nack_addr, "), MSTATUS at the failure = ", hex(last_mstatus), crlf);
+    verdict("the engine reports nack_addr", st == i2c_nack_addr);
+    verdict("MSTATUS shows WIF with RXACK: nobody acknowledged the address",
+            (last_mstatus & TWI_WIF_bm) && (last_mstatus & TWI_RXACK_bm));
+    wait_ms(280);
+    twilink::Report rep{};
+    if (peer_report(rep)) print_report(rep);
+    verdict("the peer matched nothing at all while it was deaf", rep.addr_hits == 0);
+    verdict("and it is answering its own address again", link_cmd(Op::ping));
+
+    // (2) DATA NACK at a commanded byte.
+    const uint8_t nack_at = 3;
+    a = twilink::Params{};
+    a.ms = 300;
+    a.addr = twilink::command_addr;
+    a.count = nack_at;
+    a.nack_at = nack_at;
+    a.flags = twilink::flag_stop_interrupt;
+    verdict("the peer armed to NACK its third byte", peer_action(Op::serve, a));
+    for (uint8_t i = 0; i < 6; ++i) tx_buf[i] = static_cast<uint8_t>(0x91 + i);
+    last_mstatus = 0;
+    st = run_request<Client>({twilink::command_addr, tx_buf, 6, nullptr, 0, {}});
+    print(serial, "  a six-byte write into that: engine says ", st, " (i2c_nack_data = ",
+          i2c_nack_data, "), MSTATUS = ", hex(last_mstatus), crlf);
+    verdict("the engine reports nack_data", st == i2c_nack_data);
+    verdict("MSTATUS shows RXACK on a DATA byte, not on the address",
+            (last_mstatus & TWI_WIF_bm) && (last_mstatus & TWI_RXACK_bm));
+    peer_settle();
+    if (peer_report(rep)) print_report(rep);
+    verdict("the peer accepted exactly the three bytes it acknowledged",
+            rep.aux0 == nack_at);
+    verdict("and says it NACKed on purpose", (rep.flags & twilink::report_nacked) != 0);
+    verdict("the bytes it kept are the ones that were sent",
+            rep.first == 0x91 &&
+            rep.sum == static_cast<uint16_t>(0x91 + 0x92 + 0x93));
+
+    // (3) The host's own closing NACK, seen from the client side.
+    a = twilink::Params{};
+    a.ms = 300;
+    a.addr = twilink::command_addr;
+    a.count = 4;
+    a.seed = 0x64;
+    a.flags = twilink::flag_stop_interrupt;
+    verdict("the peer armed to serve four bytes", peer_action(Op::serve, a));
+    for (uint8_t i = 0; i < 8; ++i) rx_buf[i] = 0;
+    st = run_request<Client>({twilink::command_addr, nullptr, 0, rx_buf, 4, {}});
+    bool exact = st == i2c_ok;
+    for (uint8_t i = 0; i < 4; ++i) exact = exact && rx_buf[i] == static_cast<uint8_t>(0x64 + i);
+    verdict("four bytes read back exactly from the peer", exact);
+    peer_settle();
+    if (peer_report(rep)) print_report(rep);
+    print(serial, "  the peer's SSTATUS at the host's closing NACK = ",
+          hex(rep.mstatus), " (RXACK = ", (rep.mstatus & TWI_RXACK_bm) ? 1 : 0, ")", crlf);
+    verdict("the client saw the host's closing NACK as RXACK",
+            (rep.mstatus & TWI_RXACK_bm) != 0);
+
+    quiesce();
+}
+
+// ---- n: multi-host arbitration -----------------------------------------------
+
+/// One arbitration round, made DETERMINISTIC by the silicon itself.
+///
+/// A software rendezvous cannot put two STARTs on a bus inside the
+/// hundred nanoseconds a genuine race needs. The hardware can: a host
+/// told to start while the bus is BUSY holds its START and releases it
+/// by itself the moment the bus goes Idle (29.3.2.2.3). So the injector
+/// makes the bus Busy with a foreign START and a whole frame, BOTH
+/// boards arm a START into that, and the injected STOP releases the two
+/// of them on the same edge. Which one wins is then pure wired-AND: the
+/// smaller address byte survives the first differing bit - so aiming the
+/// two hosts at addresses in either order chooses the loser.
+struct ArbRound {
+    uint8_t status = 0xFE;      ///< this board's engine verdict
+    uint8_t mstatus = 0;        ///< MSTATUS on the pass that ended it
+    uint8_t state = 0;          ///< BUSSTATE the instant the round ended
+    uint8_t rx_n = 0;           ///< bytes THIS board's client received
+    uint8_t rx0 = 0;
+    uint16_t hits = 0;
+};
+
+ArbRound arb_round(uint8_t a_target, uint16_t t_us) {
+    ArbRound r{};
+    cl_reset();
+    inject_start_and_byte();               // the bus is Busy for BOTH boards
+    if (T::bus_state() != TwiBusState::busy) {
+        inject_stop();
+        return r;
+    }
+    T::clear_host_flags(TWI_ARBLOST_bm | TWI_BUSERR_bm | TWI_WIF_bm | TWI_RIF_bm);
+    for (uint8_t i = 0; i < 5; ++i) tx_buf[i] = static_cast<uint8_t>(0xD0 + i);
+    (void)Host::start({a_target, tx_buf, 5, nullptr, 0, {}});   // held: the bus is Busy
+    delay_us(clock, t_us);                 // the peer arms into the same Busy bus
+    inject_stop();                         // both held STARTs go out together
+
+    for (uint32_t i = 0; i < 1'000'000u; ++i) {
+        service_client<Client>();
+        const uint8_t s = T::host_status();
+        if (!(s & (TWI_RIF_bm | TWI_WIF_bm | TWI_ARBLOST_bm | TWI_BUSERR_bm))) continue;
+        r.mstatus = s;
+        r.state = static_cast<uint8_t>(s & TWI_BUSSTATE_gm);
+        if (Host::isr()) break;
+    }
+    r.status = Host::status();
+    // Whoever won, the loser's client is about to be written to.
+    for (uint32_t k = 0; k < 200'000u; ++k) service_client<Client>();
+    r.rx_n = cl_rx_n;
+    r.rx0 = cl_rx[0];
+    r.hits = cl_addr_hits;
+    return r;
+}
+
+void tn_arbitration() {
+    print(serial, "n multi-host arbitration: both boards combined, both STARTs released "
+                  "by the same edge", crlf);
+    quiesce();
+    verdict("link up", link_up());
+    verdict("this board's client joins its host (combined)",
+            client_polled(twilink::dut_addr));
+
+    const uint16_t offsets[5] = {60, 120, 250, 500, 900};
+    uint8_t a_lost = 0, b_lost = 0, rounds = 0, a_won_clean = 0;
+
+    for (uint8_t dir = 0; dir < 2; ++dir) {
+        // dir 0: this board aims at the HIGHER address and must lose.
+        // dir 1: it aims at the LOWER one and must win.
+        const uint8_t peer_client = dir == 0 ? twilink::command_addr : twilink::low_addr;
+        const uint8_t a_target = peer_client;
+        print(serial, "  round set ", dir == 0 ? "A->0x6B vs B->0x2C (A must lose)"
+                                               : "A->0x11 vs B->0x2C (B must lose)", crlf);
+        for (uint8_t k = 0; k < 5; ++k) {
+            twilink::Params a{};
+            a.ms = 600;
+            a.addr = peer_client;
+            a.target = twilink::dut_addr;
+            a.count = 4;
+            a.seed = 0x40;
+            a.flags = twilink::flag_stop_interrupt;
+            a.aux16 = 0;
+            if (!peer_action(Op::arb, a)) {
+                verdict("the peer accepted the arbitration command", false);
+                continue;
+            }
+            const ArbRound r = arb_round(a_target, offsets[k]);
+            twilink::Report rep{};
+            const bool got = peer_report(rep);
+            ++rounds;
+            const bool a_arb = r.status == i2c_arb_lost;
+            const bool b_arb = got && (rep.flags & twilink::report_arblost) != 0;
+            if (a_arb) ++a_lost;
+            if (b_arb) ++b_lost;
+            if (!a_arb && r.status == i2c_ok) ++a_won_clean;
+            print(serial, "    T=", offsets[k], " us: A status=", r.status,
+                  " MSTATUS=", hex(r.mstatus), " state=", r.state, " A rx=", r.rx_n,
+                  " (", hex(r.rx0), ") | B flags=", hex(rep.flags), " rx=", rep.aux0,
+                  " sent=", rep.aux1, " hits=", rep.addr_hits, crlf);
+
+            if (dir == 0) {
+                verdict("A lost the bus: the engine reports arb_lost", a_arb);
+                verdict("A's MSTATUS carries ARBLOST with WIF",
+                        (r.mstatus & TWI_ARBLOST_bm) && (r.mstatus & TWI_WIF_bm));
+                verdict("A's bus went Busy: it belongs to the winner now",
+                        r.state == TWI_BUSSTATE_BUSY_gc);
+                verdict("A's transaction did NOT land: the peer's client saw nothing",
+                        got && rep.addr_hits == 0);
+                verdict("the winner's four bytes reached A's client intact",
+                        r.rx_n == 4 && r.rx0 == 0x40 && r.hits == 1);
+                verdict("and the peer says its own host completed",
+                        got && (rep.flags & twilink::report_host_ok) != 0);
+            } else {
+                verdict("A won the bus: its write completed", r.status == i2c_ok);
+                verdict("B lost it: the peer reports ARBLOST", b_arb);
+                verdict("nothing of B's write reached A's client", r.rx_n == 0);
+                verdict("A's five bytes reached the peer's client intact",
+                        got && rep.aux0 == 5 && rep.first == 0xD0 && rep.addr_hits == 1);
+            }
+            // The loser's retry on an Idle bus must simply work.
+            wait_ms(5);
+            const uint8_t retry = run_request<Client>({twilink::command_addr, tx_buf, 2,
+                                                       nullptr, 0, {}});
+            verdict("the loser's retry on the idle bus succeeds", retry == i2c_ok);
+            peer_settle();
+        }
+    }
+    print(serial, "  tally over ", rounds, " rounds: A lost ", a_lost, ", B lost ",
+          b_lost, ", A won cleanly ", a_won_clean, crlf);
+    verdict("ARBLOST was positively observed on BOTH boards", a_lost >= 5 && b_lost >= 5);
+    quiesce();
+}
+
+// ---- o: the client collision, case S4 ----------------------------------------
+
+void to_collision() {
+    print(serial, "o case S4: two clients on ONE address, one host reading - the wire is "
+                  "the AND of the two answers", crlf);
+    quiesce();
+    verdict("link up", link_up());
+    verdict("this board's client takes the shared address",
+            client_polled(twilink::shared_addr));
+    cl_fixed_tx = true;
+
+    // The client whose byte has a HIGH bit where the other's is low
+    // cannot drive it: that one collides, the other does not.
+    const uint8_t mine[2] = {0xFF, 0x55};
+    const uint8_t theirs[2] = {0x55, 0xFF};
+    for (uint8_t round = 0; round < 2; ++round) {
+        cl_tx_seed = mine[round];
+        T::clear_client_flags(TWI_COLL_bm);
+        twilink::Params a{};
+        a.ms = 300;
+        a.addr = twilink::shared_addr;
+        a.seed = theirs[round];
+        a.count = 4;
+        a.flags = twilink::flag_stop_interrupt;
+        verdict("the peer's client joined the shared address", peer_action(Op::coll, a));
+
+        for (uint8_t i = 0; i < 8; ++i) rx_buf[i] = 0;
+        const uint8_t st = run_request<Client>({twilink::shared_addr, nullptr, 0,
+                                                rx_buf, 4, {}});
+        const bool a_coll = T::collision();
+        const uint16_t served = cl_sent;
+        const uint16_t a_hits = cl_addr_hits;   // the report command resets these
+        twilink::Report rep{};
+        peer_settle();
+        const bool got = peer_report(rep);
+        const bool b_coll = got && (rep.flags & twilink::report_coll) != 0;
+        print(serial, "  A serves ", hex(mine[round]), ", B serves ", hex(theirs[round]),
+              ": host read ", hex(rx_buf[0]), " ", hex(rx_buf[1]), " ", hex(rx_buf[2]),
+              " ", hex(rx_buf[3]), " (status ", st, "); A COLL=", a_coll ? 1 : 0,
+              " matched ", a_hits, " served ", served, " | B COLL=", b_coll ? 1 : 0,
+              " matched ", rep.addr_hits, " served ", rep.aux0, crlf);
+        verdict("both clients acknowledged the address", st == i2c_ok && a_hits == 1 &&
+                got && rep.addr_hits >= 1);
+        verdict("the host read the wired-AND of the two answers",
+                rx_buf[0] == static_cast<uint8_t>(mine[round] & theirs[round]));
+        if (mine[round] == 0xFF) {
+            verdict("A raised COLL: it could not put a high bit against B's low", a_coll);
+            verdict("B did not: every bit it sent survived", !b_coll);
+        } else {
+            verdict("B raised COLL: it could not put a high bit against A's low", b_coll);
+            verdict("A did not: every bit it sent survived", !a_coll);
+        }
+    }
+
+    // COLL clears on any Start condition (29.5.12) - so a collision that
+    // is not read before the next START is gone.
+    cl_tx_seed = 0xFF;
+    T::clear_client_flags(TWI_COLL_bm);
+    twilink::Params a{};
+    a.ms = 300;
+    a.addr = twilink::shared_addr;
+    a.seed = 0x55;
+    a.count = 4;
+    a.flags = twilink::flag_stop_interrupt;
+    verdict("one more collision armed", peer_action(Op::coll, a));
+    (void)run_request<Client>({twilink::shared_addr, nullptr, 0, rx_buf, 4, {}});
+    const bool coll_now = T::collision();
+    (void)run_request<Client>({twilink::shared_addr, nullptr, 0, rx_buf, 2, {}});
+    const bool coll_after = T::collision();
+    print(serial, "  COLL after the colliding read = ", coll_now ? 1 : 0,
+          ", after the NEXT Start condition = ", coll_after ? 1 : 0, crlf);
+    verdict("COLL stood after the collision", coll_now);
+    verdict("and cleared itself on the next Start condition", !coll_after);
+    peer_settle();
+    quiesce();
+}
+
+// ---- p: bus recovery, the WIRE and not the peripheral -------------------------
+
+void tp_recovery() {
+    print(serial, "p unstick(): nine clocks and a STOP against a client that is really "
+                  "holding SDA down", crlf);
+    quiesce();
+    verdict("link up", link_up());
+
+    // The negative arm first: what the remedy costs on a healthy bus.
+    const uint8_t healthy = T::unstick();
+    print(serial, "  unstick() on a healthy idle bus returned ", healthy,
+          " pulses (SDA was already high)", crlf);
+    verdict("unstick() on a healthy bus needs no pulse at all", healthy == 0);
+    verdict("it leaves the bus Idle", T::bus_state() == TwiBusState::idle);
+    verdict("and the channel still works after it", link_cmd(Op::ping));
+
+    // The stuck arm: the peer holds SDA low from PORT and lets go after
+    // a commanded number of SCL falling edges - which is exactly what a
+    // client interrupted mid-byte does, and what makes the pulse count a
+    // measurement rather than a hope.
+    const uint8_t release_after = 4;
+    twilink::Params a{};
+    a.ms = 500;
+    a.aux8 = release_after;
+    verdict("the peer commanded to hold SDA low", peer_action(Op::hold_sda, a));
+    wait_ms(2);
+    const bool sda_low = !Sda::read();
+    const bool scl_high = Scl::read();
+    print(serial, "  with the peer holding: SDA reads ", sda_low ? 0 : 1, ", SCL reads ",
+          scl_high ? 1 : 0, crlf);
+    verdict("SDA is held low while SCL is free", sda_low && scl_high);
+
+    // A host cannot even produce a START on that bus.
+    T::clear_host_flags(TWI_WIF_bm | TWI_RIF_bm | TWI_BUSERR_bm | TWI_ARBLOST_bm);
+    T::address_write(twilink::command_addr);
+    bool went_out = false;
+    for (uint16_t i = 0; i < 2000; ++i) {
+        delay_us(clock, 1);
+        if (T::write_flag()) { went_out = true; break; }
+    }
+    print(serial, "  a host told to start on it: MSTATUS=", hex(T::host_status()),
+          " after 2 ms, WIF=", went_out ? 1 : 0, crlf);
+    verdict("the address never goes out while SDA is held", !went_out);
+
+    const uint8_t pulses = T::unstick();
+    const bool freed = Sda::read();
+    print(serial, "  unstick() took ", pulses, " SCL pulses (the peer was told to let go "
+          "after ", release_after, "); SDA now reads ", freed ? 1 : 0, crlf);
+    verdict("unstick() clocked the line free", pulses != T::unstick_failed && freed);
+    verdict("and it took no more than nine pulses", pulses <= 9);
+    verdict("the peer released on the clock it was told to",
+            pulses == release_after || pulses == release_after + 1);
+    verdict("the bus is Idle again", T::bus_state() == TwiBusState::idle);
+    wait_ms(20);
+    verdict("and a normal exchange runs on it", link_cmd(Op::ping));
+
+    // The unrecoverable arm: a line held by something that is not
+    // counting clocks. unstick() must SAY so rather than pretend.
+    a = twilink::Params{};
+    a.ms = 400;
+    a.aux8 = 0;                          // only the deadline releases it
+    verdict("the peer commanded to hold SDA until its deadline",
+            peer_action(Op::hold_sda, a));
+    wait_ms(2);
+    const uint8_t failed = T::unstick();
+    print(serial, "  unstick() against a line nothing will release returned ", failed,
+          " (unstick_failed = ", T::unstick_failed, "), SDA reads ",
+          Sda::read() ? 1 : 0, crlf);
+    verdict("unstick() reports failure instead of claiming success",
+            failed == T::unstick_failed);
+    verdict("SDA is still down, which is the honest answer", !Sda::read());
+    wait_ms(450);
+    verdict("once the peer lets go, SDA is back up", Sda::read());
+    verdict("the bus works again", link_cmd(Op::ping));
+
+    verdict("unstick() left the route's pins inputs with OUT = 0 (errata hygiene)",
+            !Sda::is_output() && !Scl::is_output());
+    quiesce();
+}
+
+// ---- q: the General Call, answered by two chips ------------------------------
+
+void tq_general_call() {
+    print(serial, "q the General Call across two boards, and a quick command a real "
+                  "second chip acknowledges", crlf);
+    quiesce();
+    verdict("link up", link_up());
+    verdict("this board's client answers 0x2C and the General Call",
+            client_polled(twilink::dut_addr, {.general_call = true}));
+    cl_read_address = true;
+
+    twilink::Params a{};
+    a.ms = 400;
+    a.addr = twilink::command_addr;
+    a.count = 3;
+    a.flags = twilink::flag_general_call | twilink::flag_stop_interrupt;
+    verdict("the peer's client answers the General Call too",
+            peer_action(Op::serve, a));
+    for (uint8_t i = 0; i < 3; ++i) tx_buf[i] = static_cast<uint8_t>(0x71 + i);
+    uint8_t st = run_request<Client>({0x00, tx_buf, 3, nullptr, 0, {}});
+    const uint8_t local_n = cl_rx_n;
+    const uint8_t local_addr = cl_last_addr;
+    const uint8_t local0 = cl_rx[0];
+    peer_settle();
+    twilink::Report rep{};
+    bool got = peer_report(rep);
+    if (got) print_report(rep);
+    print(serial, "  general call: status ", st, "; this board took ", local_n,
+          " bytes on address ", hex(local_addr), crlf);
+    verdict("the general call is acknowledged", st == i2c_ok);
+    verdict("THIS board's client received it", local_n == 3 && local0 == 0x71 &&
+                                               local_addr == 0x00);
+    verdict("and so did the peer's, at the same time",
+            got && rep.aux0 == 3 && rep.first == 0x71 && rep.last_addr == 0x00);
+
+    // General Call OFF at the peer: the same call must miss it while its
+    // own address still answers - both inside ONE action, so there is no
+    // doubt the client was alive throughout.
+    a = twilink::Params{};
+    a.ms = 500;
+    a.addr = twilink::command_addr;
+    a.count = 3;
+    a.flags = twilink::flag_stop_interrupt;      // no flag_general_call
+    verdict("the peer commanded General Call OFF", peer_action(Op::serve, a));
+    st = run_request<Client>({0x00, tx_buf, 3, nullptr, 0, {}});
+    const uint8_t gc_local = cl_rx_n;
+    wait_ms(3);
+    for (uint8_t i = 0; i < 3; ++i) tx_buf[i] = static_cast<uint8_t>(0x81 + i);
+    const uint8_t st2 = run_request<Client>({twilink::command_addr, tx_buf, 3,
+                                             nullptr, 0, {}});
+    peer_settle();
+    got = peer_report(rep);
+    if (got) print_report(rep);
+    verdict("the general call is still acknowledged - by THIS board's client",
+            st == i2c_ok && gc_local == 3);
+    verdict("the exact address still reaches the peer", st2 == i2c_ok);
+    verdict("but the peer heard ONLY the exact address, not the general call",
+            got && rep.addr_hits == 1 && rep.last_addr == twilink::command_addr &&
+            rep.aux0 == 3 && rep.first == 0x81);
+
+    // A quick command with a real chip at the other end.
+    a = twilink::Params{};
+    a.ms = 300;
+    a.addr = twilink::command_addr;
+    a.count = 0;
+    a.flags = twilink::flag_stop_interrupt;
+    verdict("the peer armed to answer address packets", peer_action(Op::serve, a));
+    ChScl::source(EvPin<Scl>{});
+    Host::quick_command(true);
+    const uint16_t edges = count_edges_of([] {
+        (void)run_request<Client>({twilink::command_addr, tx_buf, 4, nullptr, 0, {}});
+    });
+    const uint8_t qst = Host::status();
+    last_mstatus = 0;
+    const uint8_t qabsent = run_request<Client>({absent_addr, nullptr, 0, nullptr, 0, {}});
+    Host::quick_command(false);
+    print(serial, "  quick command to a real second chip: ", edges, " SCL rising edges, "
+          "status ", qst, "; to an address nobody holds: ", qabsent, crlf);
+    verdict("a quick command across the wire is one frame plus the STOP's rise",
+            edges == 10 && qst == i2c_ok);
+    verdict("and one to an empty address is a nack_addr", qabsent == i2c_nack_addr);
+    wait_ms(320);
+    quiesce();
+}
+
+// ---- r: the three speeds against a real client -------------------------------
+
+void speed_round(TwiSpeed s, const char* name) {
+    twilink::Params a{};
+    a.ms = 400;
+    a.addr = twilink::command_addr;
+    // The action must span BOTH tenures below - the write-then-read and
+    // the plain read - or it ends at the first STOP and the second read
+    // is answered by the command-mode client instead: four written plus
+    // eight served.
+    a.count = 12;
+    a.seed = 0x20;
+    a.flags = twilink::flag_stop_interrupt;
+    if (!peer_action(Op::serve, a)) {
+        verdict("the peer armed for ", name, false);
+        return;
+    }
+    for (uint8_t i = 0; i < 4; ++i) tx_buf[i] = static_cast<uint8_t>(0xB1 + i);
+    for (uint8_t i = 0; i < 8; ++i) rx_buf[i] = 0;
+
+    meter_mode = 0;
+    SclFreq::init(clock, ChScl{}, TcbClock::div1);
+    meter_reset();
+    const uint8_t st = run_request<Client>({twilink::command_addr, tx_buf, 4,
+                                            rx_buf, 4, {}, s});
+    const uint16_t period = meter_min;
+    meter_stop();
+    const uint8_t baud = T::baud();
+
+    meter_mode = 1;
+    SclLow::init(clock, ChScl{}, TcbClock::div1, true);
+    meter_reset();
+    const uint8_t st2 = run_request<Client>({twilink::command_addr, nullptr, 0,
+                                             rx_buf + 4, 4, {}, s});
+    const uint16_t low_max = meter_max;
+    const uint16_t low_min = meter_min;
+    meter_stop();
+
+    bool exact = st == i2c_ok && st2 == i2c_ok;
+    for (uint8_t i = 0; i < 4; ++i) exact = exact && rx_buf[i] == static_cast<uint8_t>(0x20 + i);
+    for (uint8_t i = 0; i < 4; ++i) {
+        exact = exact && rx_buf[4 + i] == static_cast<uint8_t>(0x24 + i);
+    }
+    const uint32_t hz = period ? SysClock::hz / period : 0;
+    const uint16_t floor_ticks = static_cast<uint16_t>(twi_period_ticks(SysClock::hz, baud, 0));
+    print(serial, "  ", name, ": MBAUD=", baud, " min period ", period, " ticks = ", hz,
+          " Hz (register floor ", floor_ticks, "); SCL low min ", low_min, " max ",
+          low_max, " ticks = ", low_max * 1000ul / 24ul, " ns", crlf);
+    print(serial, "    write-then-read (", st, ") gave ", hex(rx_buf[0]), " ",
+          hex(rx_buf[1]), " ", hex(rx_buf[2]), " ", hex(rx_buf[3]), ", the read (", st2,
+          ") gave ", hex(rx_buf[4]), " ", hex(rx_buf[5]), " ", hex(rx_buf[6]), " ",
+          hex(rx_buf[7]), crlf);
+    verdict("the exchange is exact against the peer at ", name, exact);
+    verdict("SCL never runs faster than the register allows at ", name,
+            period >= floor_ticks);
+    verdict("nor above the mode's nominal rate at ", name, hz <= twi_scl_hz(s));
+    const uint16_t nominal_low = twi_low_ticks(baud);
+    print(serial, "    the peer's turnaround stretches the longest SCL low to ",
+          low_max, " ticks against the register's ", nominal_low, crlf);
+    peer_settle();
+}
+
+void tr_speeds() {
+    print(serial, "r the three bus speeds against a REAL client on the other board", crlf);
+    quiesce();
+    verdict("link up", link_up());
+    ChScl::source(EvPin<Scl>{});
+    speed_round(TwiSpeed::standard_100k, "Sm 100 kHz");
+    speed_round(TwiSpeed::fast_400k, "Fm 400 kHz");
+    speed_round(TwiSpeed::fast_plus_1m, "Fm+ 1 MHz");
+    verdict("the host is back at 100 kHz for the command channel",
+            link_cmd(Op::ping));
+    quiesce();
+}
+
+// ---- s: a clock rebase under two-board traffic -------------------------------
+
+bool two_board_step(uint32_t hz, const char* what) {
+    twilink::Params a{};
+    a.ms = 400;
+    a.addr = twilink::command_addr;
+    a.count = 8;
+    a.seed = static_cast<uint8_t>(hz / 1'000'000u);
+    a.flags = twilink::flag_stop_interrupt;
+    if (!peer_action(Op::serve, a)) {
+        verdict("the peer answered ", what, false);
+        return false;
+    }
+    for (uint8_t i = 0; i < 4; ++i) tx_buf[i] = static_cast<uint8_t>(0xE1 + i);
+    for (uint8_t i = 0; i < 8; ++i) rx_buf[i] = 0;
+    const uint8_t st = run_request<Client>({twilink::command_addr, tx_buf, 4,
+                                            rx_buf, 4, {}});
+    bool exact = st == i2c_ok;
+    for (uint8_t i = 0; i < 4; ++i) {
+        exact = exact && rx_buf[i] == static_cast<uint8_t>(a.seed + i);
+    }
+    const uint8_t baud = T::baud();
+    print(serial, "  ", what, ": CLK_PER = ", hz, " Hz, MBAUD = ", baud,
+          ", actual_scl_hz(0) = ", Host::actual_scl_hz(0), " Hz, actual_scl_hz(166 ns) = ",
+          Host::actual_scl_hz(166), " Hz; exchange status ", st, crlf);
+    verdict("the exchange across the wire is exact ", what, exact);
+    verdict("MBAUD was re-derived for this clock ", what,
+            Host::actual_scl_hz(0) <= 100'000u && Host::actual_scl_hz(0) > 80'000u);
+    peer_settle();
+    return exact;
+}
+
+void ts_rebase() {
+    print(serial, "s 24 -> 12 -> 24 MHz with the command channel and the peer's client "
+                  "live on the wire", crlf);
+    quiesce();
+    verdict("DynamicClock init (boot = the crystal)", DynClock::init());
+    verdict("host init on the dynamic clock", Host::init(DynClock{}));
+    T::enable_read_interrupt(false);
+    T::enable_write_interrupt(false);
+    verdict("the peer answers at 24 MHz", link_cmd(Op::ping));
+
+    (void)two_board_step(24'000'000u, "at 24 MHz");
+    verdict("switch to 12 MHz", DynClock::set(12'000'000u));
+    verdict("the command channel survived the switch", link_cmd(Op::ping));
+    (void)two_board_step(12'000'000u, "at 12 MHz");
+    verdict("back to 24 MHz", DynClock::set(24'000'000u));
+    verdict("the command channel survived the switch back", link_cmd(Op::ping));
+    (void)two_board_step(24'000'000u, "back at 24 MHz");
+
+    quiesce();
+}
+
 // ---- the menu ----------------------------------------------------------------
 
 using TestFn = void (*)();
@@ -1307,8 +2189,12 @@ constexpr Test tests[] = {
     {'a', ta_routes}, {'b', tb_speeds}, {'c', tc_loops}, {'d', td_addresses},
     {'e', te_cases}, {'f', tf_smart}, {'g', tg_quick}, {'h', th_busstate},
     {'i', ti_interrupts}, {'j', tj_rebase},
+    {'k', tk_bringup}, {'l', tl_stretch}, {'m', tm_nacks}, {'n', tn_arbitration},
+    {'o', to_collision}, {'p', tp_recovery}, {'q', tq_general_call}, {'r', tr_speeds},
+    {'s', ts_rebase},
 };
 constexpr char single_board[] = "abcdefghij";
+constexpr char two_board[] = "klmnopqrs";
 
 void run(TestFn fn) {
     passed = failed = 0;
@@ -1334,10 +2220,15 @@ void help() {
                   "d address match | e the chapter's cases | f smart modes | "
                   "g quick command | h bus state and the injector | i isr bodies | "
                   "j rebase and the arbiter    -> z = all of a..j", crlf);
-    print(serial, "  ONE open-drain bus, two taps of this board: PA2/PA3 (the host and "
-                  "the combined client) and PC2/PC3 (the DUAL client, and the bit-bang "
-                  "injector of test h while Dual mode is off). 1.5k pull-ups to +5 V; "
-                  "TWI1 stays disabled.", crlf);
+    print(serial, "  TWO BOARDS (board B running twi_peer): k bring-up | l clock "
+                  "stretching | m NACK injection | n multi-host arbitration | "
+                  "o collision S4 | p bus recovery | q general call | r the three "
+                  "speeds | s rebase    -> y = all of k..s", crlf);
+    print(serial, "  ONE open-drain bus, three taps of this board: PA2/PA3 (the host and "
+                  "the combined client), PC2/PC3 (the DUAL client, and the bit-bang "
+                  "injector of tests h and n while Dual mode is off) and PB2/PB3; board "
+                  "B taps it with its own PA2/PA3. 1.5k pull-ups to +5 V; TWI1 stays "
+                  "disabled.", crlf);
 }
 
 } // namespace
@@ -1365,7 +2256,9 @@ ISR(TWI0_TWIS_vect) { service_client<Client>(); }
 ISR(TCB0_INT_vect) {
     const uint16_t t = meter_mode == 0 ? SclFreq::period_ticks() : SclLow::width_ticks();
     ++meter_caps;
-    if (meter_caps > 2 && t < meter_min) meter_min = t;
+    if (meter_caps <= 2) return;        // the arming capture is not traffic
+    if (t < meter_min) meter_min = t;
+    if (t > meter_max) meter_max = t;
 }
 
 int main() {
@@ -1387,6 +2280,7 @@ int main() {
         print(serial, static_cast<char>(c), crlf);
         if (c == '?') { help(); }
         else if (c == 'z' || c == 'Z') { run_set(single_board); }
+        else if (c == 'y' || c == 'Y') { run_set(two_board); }
         else {
             bool found = false;
             for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }

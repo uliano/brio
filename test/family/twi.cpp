@@ -211,6 +211,9 @@ void use_resource() {
     T0::host_command(TwiHostCmd::recv_trans, TwiAck::nack);
     T0::ack_action(TwiAck::ack);
     T0::recover();
+    (void)T0::unstick();
+    (void)T0::unstick(4);
+    (void)T0::unstick_failed;
     (void)T0::host_status();
     (void)T0::read_flag();
     (void)T0::write_flag();
@@ -297,6 +300,7 @@ void use_tasks() {
     Host0::quick_command(true);
     (void)Host0::quick_command();
     Host0::recover();
+    (void)Host0::unstick();
     (void)Host0::bus_state();
     Host0::release();
 

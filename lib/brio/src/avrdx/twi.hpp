@@ -51,6 +51,12 @@
  *        host stuck in the Unknown bus state. This resource does not
  *        expose FLUSH AT ALL - recover() is the documented work-around
  *        (an ENABLE cycle on the host) followed by force_idle();
+ *  - recover() and unstick() fix DIFFERENT things and neither replaces
+ *    the other: recover() puts this PERIPHERAL back into a known state,
+ *    unstick() bit-bangs the WIRE free of a client that is holding SDA
+ *    low (the classic nine-clocks-and-a-STOP remedy). The policy above
+ *    them - noticing a stuck transaction at all - is the bus AO's and is
+ *    not built (design/i2c-bus.md);
  *      * DA 2.14.2 (every DA rev., DA only): the SDAHOLD 50 ns and
  *        300 ns SELECTIONS are swapped in the silicon. TwiSdaHold names
  *        TRUE nanoseconds and twi_sdahold_bits() swaps the encoding on
@@ -93,6 +99,7 @@
 #include <type_traits>
 #include <avr/io.h>
 
+#include "avrdx/delay.hpp"
 #include "avrdx/pin.hpp"
 #include "kernel/post.hpp"
 #include "util/clock.hpp"
@@ -695,6 +702,95 @@ public:
         force_idle();
     }
 
+    // ---- the stuck WIRE (not the peripheral) -------------------------------
+
+    /// What unstick() returns when SDA never came back high.
+    static constexpr uint8_t unstick_failed = 0xFF;
+    /// The half period of unstick()'s bit-banged SCL, in microseconds
+    /// (100 kHz - slow enough for any client that is worth recovering).
+    static constexpr uint8_t unstick_half_us = 5;
+
+    /**
+     * The CLASSIC bus recovery, and the one thing recover() cannot do.
+     *
+     * recover() fixes this peripheral's own state machine. It cannot fix
+     * the WIRE: a client interrupted in the middle of a byte (a reset
+     * host, a glitch) goes on holding SDA low waiting for the clock
+     * edges that would let it finish, and while SDA is low no host on
+     * the bus can even produce a START. The remedy every I2C note gives
+     * is mechanical - clock SCL up to nine times, which is one whole
+     * byte plus its acknowledge, so the stuck client runs out of bits
+     * and releases the line, then issue a STOP to put every device back
+     * into a defined state.
+     *
+     * Both halves are taken down first, so the pins belong to PORT
+     * again, and the bit-bang is open drain BY HAND: DIRSET over a clear
+     * OUT bit pulls a line down, DIRCLR lets the pull-up take it back. A
+     * line is never driven high - this is a shared bus. The pins are
+     * left inputs with OUT = 0 (errata 2.15.1 / 2.14.1 hygiene) and the
+     * halves are put back exactly as they were, with the bus declared
+     * Idle again when the host is among them.
+     *
+     * Returns how many SCL pulses SDA needed (0 when it was already
+     * high - the healthy case, which costs only the closing STOP) or
+     * `unstick_failed` when it never came back inside `max_pulses`: a
+     * line held low by something that is not counting clocks (a shorted
+     * wire, a dead driver) is not a recoverable condition and the caller
+     * has to be told so.
+     *
+     * The POLICY above this - noticing that a transaction is stuck at
+     * all, and deciding to call this - belongs to the bus AO and is not
+     * built (design/i2c-bus.md).
+     */
+    static uint8_t unstick(uint8_t max_pulses = 9) {
+        const TwiPin sda_p = twi_pin(n, route_, TwiSignal::sda);
+        const TwiPin scl_p = twi_pin(n, route_, TwiSignal::scl);
+        if (!sda_p.bonded || !scl_p.bonded) return unstick_failed;
+        if (!port_exists(sda_p.port) || !port_exists(scl_p.port)) return unstick_failed;
+
+        const uint8_t m = regs().MCTRLA;
+        const uint8_t s = regs().SCTRLA;
+        regs().MCTRLA = static_cast<uint8_t>(m & ~TWI_ENABLE_bm);
+        regs().SCTRLA = static_cast<uint8_t>(s & ~TWI_ENABLE_bm);
+
+        volatile PORT_t& sda_port = port_by_letter(sda_p.port);
+        volatile PORT_t& scl_port = port_by_letter(scl_p.port);
+        const uint8_t sda_bm = static_cast<uint8_t>(1u << sda_p.pin);
+        const uint8_t scl_bm = static_cast<uint8_t>(1u << scl_p.pin);
+        sda_port.OUTCLR = sda_bm;           // the low level of every pull below
+        scl_port.OUTCLR = scl_bm;
+        sda_port.DIRCLR = sda_bm;           // released: the pull-up owns the line
+        scl_port.DIRCLR = scl_bm;
+
+        const uint8_t cpu = cycles_per_us(clk_per_hz_ ? clk_per_hz_ : 1'000'000u);
+        uint8_t pulses = 0;
+        while ((sda_port.IN & sda_bm) == 0 && pulses < max_pulses) {
+            scl_port.DIRSET = scl_bm;       // SCL low
+            delay_us_runtime(cpu, unstick_half_us);
+            scl_port.DIRCLR = scl_bm;       // and back to the pull-up
+            delay_us_runtime(cpu, unstick_half_us);
+            ++pulses;
+        }
+        const bool freed = (sda_port.IN & sda_bm) != 0;
+
+        // The closing STOP: SDA taken low while SCL is LOW (a data bit,
+        // not a START), then SCL released, then SDA released - the SDA
+        // rise against a high SCL that every device reads as Stop.
+        scl_port.DIRSET = scl_bm;
+        delay_us_runtime(cpu, unstick_half_us);
+        sda_port.DIRSET = sda_bm;
+        delay_us_runtime(cpu, unstick_half_us);
+        scl_port.DIRCLR = scl_bm;
+        delay_us_runtime(cpu, unstick_half_us);
+        sda_port.DIRCLR = sda_bm;
+        delay_us_runtime(cpu, unstick_half_us);
+
+        regs().SCTRLA = s;
+        regs().MCTRLA = m;
+        if (m & TWI_ENABLE_bm) force_idle();
+        return freed ? pulses : unstick_failed;
+    }
+
     // ---- MSTATUS (29.5.6) ------------------------------------------------
 
     static uint8_t host_status() { return regs().MSTATUS; }
@@ -1101,9 +1197,11 @@ private:
  * CHANGE costs an ENABLE cycle and a force-idle - paid at start(), only
  * when the speed actually moves, and never per byte.
  *
- * NOT covered (noted, not built): a stuck-bus watchdog (a client that
- * holds SDA low forever leaves the transaction in flight - recovery by
- * clocking SCL nine times is the classic remedy), 10-bit addressing.
+ * NOT covered (noted, not built): a stuck-bus WATCHDOG - the mechanical
+ * remedy is Twi<n>::unstick() (and this task's `unstick()` below), but
+ * noticing that a transaction is stuck and deciding to call it is a
+ * policy for the bus AO, which has no per-request timeout yet. Also not
+ * covered: 10-bit addressing.
  *
  * ISR wiring (app glue, as usual):
  *   ISR(TWI0_TWIM_vect) {
@@ -1327,6 +1425,11 @@ public:
     /// The errata's work-around for a wedged host (FLUSH is not usable:
     /// DB 2.15.2 / DA 2.14.3): an ENABLE cycle, then the bus idle again.
     static void recover() { T::recover(); }
+    /// The other half of recovery: the WIRE, not the peripheral. See
+    /// Twi<n>::unstick() - up to `max_pulses` bit-banged SCL pulses
+    /// until a stuck client releases SDA, then a STOP. Returns the pulse
+    /// count, or Twi<n>::unstick_failed.
+    static uint8_t unstick(uint8_t max_pulses = 9) { return T::unstick(max_pulses); }
     static TwiBusState bus_state() { return T::bus_state(); }
 
     /// Hand the route's pins back (the resource's teardown).

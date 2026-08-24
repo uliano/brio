@@ -101,13 +101,23 @@ times are arguments rather than assumptions, belongs to the engine:
 
 ## Not built, noted
 
-- **Stuck-bus watchdog.** A client holding SDA low forever leaves the
-  transaction in flight: the kernel keeps running (nothing blocks) but
-  the bus AO stays busy and later requests pile up in the pending
-  FIFO until they are rejected - loud, not silent, but not recovered.
-  The classic remedy (clock SCL nine times, then STOP) plus a
-  per-request timeout via a TimeEvent in the bus AO is the known next
-  step, to be built when a real device makes it necessary.
+- **Stuck-bus watchdog - the POLICY half.** A client holding SDA low
+  forever leaves the transaction in flight: the kernel keeps running
+  (nothing blocks) but the bus AO stays busy and later requests pile up
+  in the pending FIFO until they are rejected - loud, not silent, but
+  not recovered. The MECHANICAL half now exists at engine level:
+  `Twi<n>::unstick()` (and `TwiHost<n>::unstick()`) clocks SCL up to
+  nine times until the stuck client releases SDA, issues a STOP and
+  reports how many pulses it took - see [twi.md](../avrdx/twi.md). What
+  is still missing is the part that belongs HERE: a per-request timeout
+  (a TimeEvent in the bus AO) to notice that a transaction is stuck, and
+  a policy for what to do after the recovery - retry, fail the request,
+  or take the bus out of service. To be built when a real device makes
+  it necessary.
+- **Multi-host policy.** The engine reports `i2c_arb_lost` and the
+  arbiter passes it to the requester untouched. A bus AO that knows it
+  shares the wire - retrying a lost tenure, backing off, refusing to
+  start while another host is mid-transaction - is not designed.
 - 10-bit addressing (the arbiter's descriptor has no shape for it).
 - A DAC/sensor client AO with word semantics: `util/wire.hpp` already
   gives the big-endian load/store; the MCP47CVB22 driver is the first

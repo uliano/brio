@@ -1,19 +1,22 @@
 # TWI - the two-wire interface (AVR DA/DB)
 
 > **PROVISIONAL.** The chapter's register description is covered in full
-> and the single-board bench half passes: the route table and its
+> and both bench halves pass. Single board: the route table and its
 > refusals, the three bus speeds measured against the chapter's own baud
 > equations, a host talking to a client of the same instance on the same
 > pins (combined) and on the route's second pin pair (dual), the whole
 > address-match space, the host cases M1..M3 and the client cases
 > S1..S3, both Smart modes, Quick Command counted in SCL edges, the bus
 > state machine driven by a bit-bang injector, both ISR bodies and a
-> clock rebase under traffic. What is left needs a SECOND, independent
-> device on the wire - clock stretching by a foreign client, injected
-> NACKs, multi-host arbitration, the collision case S4, bus recovery -
-> plus 10-bit addressing beyond the recognition note, the sleep and
-> debug-run paths, SMBus input levels as an electrical fact, and the
-> timings of 39.16. The list is in "Not covered yet".
+> clock rebase under traffic. Two boards: clock stretching by a foreign
+> client, injected address and data NACKs, multi-host arbitration with
+> ARBLOST positively observed on both sides, the collision case S4, bus
+> recovery against a really stuck SDA, a General Call answered by two
+> chips, and the three speeds against a real device. What is left is
+> 10-bit addressing beyond the recognition note, the sleep and debug-run
+> paths, SMBus input levels as an electrical fact, the timings of 39.16,
+> and multi-host as a driver POLICY - arbitration is measured, a policy
+> layer is not designed. The list is in "Not covered yet".
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TWI
 chapter 29, PORTMUX chapter 17, electricals 39.16), errata DS80000915F
@@ -192,6 +195,7 @@ The route table as constants (`sda`, `scl`, `dual_sda`, `dual_scl`,
 | DBGCTRL | `debug_run` |
 | MCTRLA | `host_enable`, `enable_read_interrupt`, `enable_write_interrupt`, `quick_command`, `timeout`, `host_smart` |
 | MCTRLB | `host_command(cmd, ack)` - ACKACT and MCMD in one store, as the register description allows - and `ack_action` alone. **No FLUSH**: `recover()` is the errata's ENABLE cycle plus `force_idle()` |
+| (the wire) | `unstick(max_pulses = 9)` - the classic recovery, which `recover()` cannot do: both halves down, then up to nine bit-banged SCL pulses over the route's own pins until a stuck client lets SDA go, then a STOP, then the halves back and the bus Idle. Returns the pulse count, or `unstick_failed` when the line never came back |
 | MSTATUS | `host_status` and the flags one by one, `clear_host_flags(mask)` as a plain store, `bus_state`, `force_idle` |
 | MBAUD | `set_baud` (which performs the disable/write/enable/force-idle dance the register demands), `baud`, and above it `set_speed`, `bus_timing`, `actual_scl_hz`, `rebase`, `clock_ok` |
 | MADDR / MDATA | `address_write`, `address_read`, raw `maddr`, `host_write`, `host_read` |
@@ -290,14 +294,29 @@ C::init(clock, {.address = 0x42, .promiscuous = true});                     // e
 if (TwiHw::bus_state() == brio::TwiBusState::unknown) TwiHw::recover();
 ```
 
+**A wedged WIRE** - a different fault and a different remedy. `recover()`
+puts the peripheral back in a known state; it cannot make a client that
+is holding SDA low let go. Only clocks can:
+
+```cpp
+const uint8_t pulses = TwiHw::unstick();          // <= 9 SCL pulses, then a STOP
+if (pulses == brio::Twi<0>::unstick_failed) { /* the line is not clocked free */ }
+```
+
+Deciding WHEN to call it - noticing that a transaction is stuck at all -
+is a policy for the bus AO and is not built ([i2c-bus.md](../design/i2c-bus.md)).
+
 ## Bench findings
 
 Measured on rev. A5 at 5 V, CLK_PER 24 MHz, TWI0 on its DEFAULT route,
 one open-drain bus with 1.5k pull-ups. `test_avr_twi`: `z` = the
-single-board half, 175 verdicts. The desk gives that bus two taps of the
-same chip - PA2/PA3 (the host and the combined client) and PC2/PC3 (the
-dual client, and a plain-GPIO bit-bang injector whenever Dual mode is
-off) - so a host, a client and a foreign agitator all sit on one wire.
+single-board half, 175 verdicts; `y` = the two-board half, 174 verdicts,
+with a second AVR128DB48 on the same node running the campaign's
+instrument firmware. The desk gives that bus three taps of the DUT -
+PA2/PA3 (the host and the combined client), PC2/PC3 (the dual client,
+and a plain-GPIO bit-bang injector whenever Dual mode is off) and
+PB2/PB3 - plus the second board's own PA2/PA3, so a host, several
+clients, a second host and a foreign agitator all sit on one wire.
 
 **The errata's OUT bits are real work, not ceremony.** With `PORTA.OUT`
 bits 2 and 3 deliberately set before `init`, the driver clears them and
@@ -403,9 +422,122 @@ exchange exact. The `I2cBus`/`BusMaster` stack rides the engine
 unchanged: one arbitrated write-then-read against the instance's own
 client replied `i2c_ok` with the right bytes in both directions.
 
+### With a second chip on the wire
+
+**Clock stretching is exactly what the client's flag costs.** A foreign
+client that delays clearing DIF by a commanded time per byte lengthens
+the whole tenure by that time times the number of DATA bytes - the
+address packet is answered from APIF, which this experiment does not
+hold. A six-byte write at 100 kHz:
+
+| the client's hold | the tenure | the longest SCL low |
+|---|---|---|
+| none | 16892..17123 ticks (703..713 us) | 208..248 ticks (8.7..10.3 us) |
+| 100 us/byte | 32171 ticks (1340 us) | 2712..2739 ticks (113..114 us) |
+| 1 ms/byte | 162092..162143 ticks (6753..6755 us) | 24314..24335 ticks (1013 us) |
+
+The elongation measured 14841..15279 ticks against a model of 14400 and
+145140..145260 against 144000, i.e. the commanded hold plus the client's
+own software turnaround, five to nine microseconds a byte on a polled
+loop. The register's own SCL low time is 120 ticks (5 us), so **even an
+unstretched exchange with a polled client runs at the client's speed,
+not the divider's**: 208 ticks instead of 120. The host meanwhile
+reports CLKHOLD whenever ITS own flag stands and the bus reads Owner
+throughout - the two holds are different things and both are visible.
+An unstretched exchange immediately after a stretched one is back to
+nominal.
+
+**Both NACKs, injected by a board that is alive and listening.** A peer
+that parks its address elsewhere produces an ADDRESS NACK: the engine
+reports `i2c_nack_addr` and MSTATUS reads 0x72 (WIF, CLKHOLD, RXACK, bus
+Owner), while the peer's own report says it matched nothing at all. A
+peer told to NACK its third byte turns a six-byte write into
+`i2c_nack_data` with the same 0x72, and it kept exactly the three bytes
+it acknowledged. From the client side the host's closing NACK on a read
+is SSTATUS 0xB3 sampled AT that instant (DIF, CLKHOLD, RXACK, DIR, AP) -
+RXACK is a live bit and a copy taken after the transaction carries
+whatever the last one left behind.
+
+**Multi-host arbitration, made deterministic by the silicon's own
+rule.** A software rendezvous cannot put two STARTs on a bus inside the
+hundred nanoseconds a genuine race needs; the hardware can. A host told
+to start while the bus is Busy HOLDS its START and releases it by itself
+when the bus goes Idle (29.3.2.2.3) - so both boards arm a START into a
+bus the bit-bang injector has made Busy, and the injected STOP releases
+the two of them on the same edge. What follows is real wired-AND
+arbitration and the winner is simply the smaller address byte, which is
+what lets the experiment choose the loser:
+
+- the loser reads MSTATUS **0x4B** - WIF with ARBLOST, and BUSSTATE
+  Busy: the bus belongs to the winner now. Its transaction did not land
+  (the addressed client saw no match at all) and the engine reports
+  `i2c_arb_lost`;
+- the winner reads **0x62** (WIF, CLKHOLD, bus Owner) and its bytes
+  arrive intact at the client it addressed;
+- the loser's retry on the idle bus simply works.
+
+Over 40 rounds (four runs of ten, with the gap between the two arming
+points swept 60/120/250/500/900 us) the tally was 20 losses each way and
+not one exception: **ARBLOST positively observed on both boards**, and
+the outcome decided by the addresses rather than by timing.
+
+**The collision case S4 is the wired-AND read.** Two clients at ONE
+address both acknowledge the same read and both put a byte on SDA, so
+the host reads the AND of the two. The client that tried a high bit
+against the other's low cannot drive it: it raises COLL and un-drives,
+the other does not. With the DUT serving 0xFF against the peer's 0x55
+the host reads 0x55 and the DUT collides; swap the two bytes and the
+peer collides while the DUT does not - three runs, no exception. COLL
+stands after the collision and **clears itself on the next Start
+condition**, so a collision that is not read before the next START is
+gone.
+
+**A stuck wire needs clocks, not an ENABLE cycle.** With the peer
+holding SDA low from PORT, the DUT's host reads MSTATUS 0x03 - BUSSTATE
+Busy, because a falling SDA against a high SCL IS a Start condition to
+the state machine - and the address it was told to send never goes out,
+2 ms of waiting later. `unstick()` then:
+
+| the bus | result |
+|---|---|
+| healthy and idle | **0 pulses** (SDA was already high), bus Idle after, next exchange fine |
+| a client released by the 4th SCL falling edge | **4 pulses**, SDA high again, bus Idle, next exchange fine |
+| a line nothing will release | **`unstick_failed`**, SDA still down - the honest answer |
+
+and it leaves both pins inputs with OUT = 0, which is what errata 2.15.1
+wants of the next owner.
+
+**A General Call is answered by every client that enabled it, at the
+same time.** One write to 0x00 reached both boards' clients in the same
+tenure, each reporting the match as address 0x00. With the peer's
+SADDR[0] cleared the same call misses it entirely while its exact
+address still answers - proven inside ONE action, so there is no doubt
+the client was alive throughout. And a **Quick Command against a real
+second chip** is the same 10 SCL rising edges as against the instance's
+own client, with `i2c_ok`; to an address nobody holds it is
+`i2c_nack_addr`.
+
+**Board B costs the bus nothing electrically, and everything in
+latency.** With the peer's client enabled on the same node the minimum
+SCL period is 244 / 82 / 34 ticks at Sm / Fm / Fm+ - the same numbers
+the bus measures with the DUT alone, so the extra tap adds no rise time
+this meter can see. What a two-board exchange really pays is the peer's
+polled turnaround: on a read tenure the longest SCL low measured 1683 /
+3021 / 3413 ticks (70 / 126 / 142 us) at the three speeds. **The data is
+exact at all three speeds anyway** - which is the protocol working as
+designed: stretching costs time, never correctness. (During those
+stretched reads the low-width meter also caught pulses as short as 5
+ticks, 208 ns, which the period floor rules out as a clock period; the
+mechanism was not isolated and no verdict rests on it.)
+
+**A clock rebase does not notice the second board either.** Across
+24 -> 12 -> 24 MHz with the command channel and the peer's client live,
+MBAUD moved 115 -> 55 -> 115, `actual_scl_hz` stayed at 100 kHz, and
+every exchange across the wire was exact.
+
 **A desk fact, not a silicon one**: TWI1's dual pair PB2/PB3 would make
-a third tap of this bus and is NOT wired to it - the suite drives PB2
-low, sees its own pin go low and the SDA node stay high, and says so.
+a third tap of this bus - the suite drives PB2 low and prints whether the
+SDA node follows, instead of assuming either way.
 
 ## Not covered yet
 
@@ -416,25 +548,23 @@ implement):
   byte when SADDR[7:3] is 0b11110 and the second byte is software's job
   (29.3.3.6); neither the client task nor the host's `Request` has a
   shape for it.
-- **A stuck-bus watchdog.** A client holding SDA low forever leaves a
-  transaction in flight. The classic remedy - clock SCL nine times from
-  PORT, then a STOP - is not built; `recover()` only fixes the
-  peripheral's own state, not the wire.
+- **A stuck-bus WATCHDOG.** The mechanical remedy is `unstick()` (above,
+  and bench-measured below); what is missing is the POLICY - noticing
+  that a transaction is stuck at all. That needs a per-request timeout
+  in the bus AO ([i2c-bus.md](../design/i2c-bus.md)).
+- **Multi-host as a policy.** Arbitration is measured and the engine
+  reports `i2c_arb_lost`, but nothing above the engine decides what to
+  do with it: a retry policy, a back-off, a bus AO that knows it shares
+  the wire. `i2c_arb_lost` reaches the requester and stops there.
 - **A client-side AO.** The client task is a polled/ISR surface; the
   kernel-level usage type (an AO that owns an address and answers
   register reads) is not built.
 
-**Implemented but not bench-verified** (all of it needs a second,
-independent device on the wire, which is phase T2 of this campaign):
+**Implemented but not bench-verified**:
 
-- clock stretching by a FOREIGN client, and the SDASETUP knob that
-  shapes it;
-- injected NACKs from a foreign client, and multi-host ARBITRATION -
-  so MSTATUS.ARBLOST, the host case M4 and the engine's `i2c_arb_lost`
-  path are exercised only by the bus-error route today;
-- the client collision case S4 (SSTATUS.COLL) and the Address
-  Resolution Protocol it exists for;
-- a General Call answered by several clients at once;
+- CTRLA.SDASETUP: the knob that shapes the client's own setup-time
+  stretch is exposed and written, but its two settings are not measured
+  apart on the wire;
 - SMBus as an ELECTRICAL fact: CTRLA/DUALCTRL.INPUTLVL is exposed and
   written, but the input transition level itself is not measured;
 - DBGCTRL.DBGRUN, and the sleep behaviour of 29.3.5 (the address match

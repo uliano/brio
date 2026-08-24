@@ -462,12 +462,40 @@ gets its dated home in `docs/design/` when taken.
   owns the shared CTRLA). Family TUs twi.cpp + 5 negatives (TWI1 on
   28-pin, TWI1 ALT2 at 32 - ALT1 exists on da48, the header beat the
   plan - dual on pinless pairs, FM+ without FMPEN, host not in the
-  DynamicClock users). serial z 108 and spi z 148 re-verified; end
-  state A = test_avr_twi, B = spi_peer. T2 next: twi_peer commanded
-  in-band over TWI (a client address is a natural command channel),
-  k..s/y - clock stretching, NACK injection, multi-master ARBLOST,
-  COLL/S4, bus recovery, general call to two clients, FM+ two-board.
-  -> CCL -> AC ->
+  DynamicClock users). serial z 108 and spi z 148 re-verified. TWI
+  phase T2 DONE (two-board half): twi_peer on B commanded IN-BAND over
+  TWI itself (src/apps/twi_link.hpp, magic 0xC3, command address 0x6B
+  - an I2C client is inherently dark, a write carries the command and
+  a read serves the response; bounded actions, autonomous restore);
+  test_avr_twi grew k..s, y = 174/174, z = 175/175 WITH the peer
+  attached. Findings in twi.md: commanded clock stretching lands
+  within model + the peer's 5..9 us/byte polled turnaround (even
+  unstretched, a polled client paces the bus: SCL low 208 ticks vs
+  the register's 120); address/data NACK injected at a commanded byte
+  report nack_addr/nack_data with MSTATUS 0x72 and the client-side
+  RXACK is only valid SAMPLED AT THE CLOSING NACK (a later copy
+  carries the previous tenure's); multi-master arbitration made
+  DETERMINISTIC - both hosts hold a START into a Busy bus, the
+  injected STOP releases them on one hardware edge and the lower
+  address byte wins: loser MSTATUS 0x4B (WIF+ARBLOST, Busy, nothing
+  landed), winner 0x62, retry-after-idle works, 20+20 losses over the
+  T sweep with zero exceptions; COLL/S4 both ways with two clients on
+  one address (wire = AND, only the loser raises COLL, cleared by the
+  next Start); NEW resource verb Twi<n>::unstick() - the classic
+  nine-clocks-and-a-STOP, open-drain by hand, returns the pulse count
+  (0 healthy / 4 when the peer released on the 4th falling edge /
+  unstick_failed against a line nothing releases; recover() fixes the
+  PERIPHERAL, unstick() the WIRE, the noticing POLICY stays not built
+  per i2c-bus.md, which also now names the multi-host policy gap);
+  with SDA held low the state machine reads Busy (a falling SDA under
+  high SCL IS a Start); general call reaches both clients in one
+  tenure and SADDR[0]=0 makes the peer deaf to it while its exact
+  address still answers; the three speeds with B attached measure the
+  SAME min SCL periods as solo T1 (244/82/34 ticks - the second tap
+  adds no measurable rise), the cost is latency (longest SCL low 70/
+  126/142 us on read tenures); rebase 24->12->24 exact under two-board
+  traffic. End state: A = test_avr_twi, B = twi_peer; serial/spi y
+  need the PORTE jumpers AND their peer firmware back. -> CCL -> AC ->
   ADC/DAC/VREF -> CLKCTRL (DA must compile) -> EVSYS tables. Phase 2,
   never-reviewed: USART
   (jumper cross-loopback, new suite test_avr_serial) -> SPI (host ->
