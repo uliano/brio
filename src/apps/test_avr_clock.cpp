@@ -300,7 +300,7 @@ void t6_cfd() {
 void t7_pll_status() {
     print(serial, "7 PLL x2 from OSCHF 24 MHz (no requester: PLLS expected 0 - needs the TCD), status bits", crlf);
     Oschf::set_hz(24'000'000);              // OSCHF is not the main clock now: free to use as PLL input
-    Pll::start(PllSource::oschf, PllMultiplier::x2);
+    (void)Pll::start(PllSource::oschf, PllMultiplier::x2);
     hold_ms(5);
     const bool locked = Pll::locked();
     Pll::stop();

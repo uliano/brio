@@ -257,20 +257,62 @@ enum class PllMultiplier : uint8_t {
 /// The PLL: 16-24 MHz in, 32-48 MHz out, lock ~10 us. It clocks the TCD
 /// only (CLK_TCD); it cannot be the main clock. It runs only when the
 /// TCD requests it: PLLS is not observable without a requester (and
-/// never sets with RUNSTDBY and no requester: errata 2.5.3, A4/A5);
-/// it does not run from an XOSCHF crystal, only from an external clock
-/// on PA0 (2.5.4, A4/A5).
+/// never sets with RUNSTDBY and no requester: errata 2.5.3 A4/A5, DA
+/// 2.4.1 every revision).
+///
+/// ERRATA 2.5.4 AS CODE (DB A4/A5): with SOURCE = XOSCHF the PLL runs
+/// only if XOSCHF is configured for an external CLOCK (SELHF = 1) - it
+/// does not work with a crystal, and there is no workaround. start()
+/// therefore REFUSES that combination and writes nothing: a bench
+/// crystal on PA0/PA1 cannot feed the PLL, and a driver that pretended
+/// otherwise would leave the TCD without a clock and its ENRDY closed
+/// forever. The DA errata has no twin item and needs none: the DA has
+/// no XOSCHF crystal oscillator at all (no CLKCTRL.XOSCHFCTRLA in its
+/// header), so SOURCE = 1 there IS the external clock and the check
+/// compiles out.
 struct Pll {
     Pll() = delete;
-    static void start(PllSource src, PllMultiplier mul, bool run_standby = false) {
+
+    /// False (writing nothing) when the source cannot drive the PLL on
+    /// this silicon: see errata 2.5.4 above.
+    static bool start(PllSource src, PllMultiplier mul, bool run_standby = false) {
+        if (!source_ok(src)) return false;
         _PROTECTED_WRITE(CLKCTRL.PLLCTRLA, static_cast<uint8_t>(
             static_cast<uint8_t>(mul) |
             (src == PllSource::xoschf ? CLKCTRL_SOURCE_bm : 0) |
             (run_standby ? CLKCTRL_RUNSTDBY_bm : 0)));
+        return true;
+    }
+    /// Can this source drive the PLL as the block stands right now?
+    static bool source_ok(PllSource src) {
+#if defined(CLKCTRL_XOSCHFCTRLA)
+        if (src == PllSource::xoschf) {
+            return (CLKCTRL.XOSCHFCTRLA & CLKCTRL_SELHF_bm) != 0;   // external clock only
+        }
+#else
+        (void)src;
+#endif
+        return true;
     }
     static void stop() { _PROTECTED_WRITE(CLKCTRL.PLLCTRLA, 0); }
     static bool locked() { return (CLKCTRL.MCLKSTATUS & CLKCTRL_PLLS_bm) != 0; }
+    /// The multiplier in force (off when the PLL is disabled).
+    static PllMultiplier multiplier() {
+        return static_cast<PllMultiplier>(CLKCTRL.PLLCTRLA & CLKCTRL_MULFAC_gm);
+    }
+    static PllSource source() {
+        return (CLKCTRL.PLLCTRLA & CLKCTRL_SOURCE_bm) ? PllSource::xoschf : PllSource::oschf;
+    }
 };
+
+/// What the PLL makes of an input rate (39.10.5: 16-24 MHz in, 32-48
+/// MHz out); 0 when the combination is out of specification.
+constexpr uint32_t pll_output_hz(uint32_t in_hz, PllMultiplier mul) {
+    if (in_hz < 16'000'000u || in_hz > 24'000'000u) return 0;
+    const uint32_t out = mul == PllMultiplier::x2 ? in_hz * 2u
+                       : mul == PllMultiplier::x3 ? in_hz * 3u : 0u;
+    return out > 48'000'000u ? 0u : out;
+}
 
 // ---- main clock -------------------------------------------------------------
 

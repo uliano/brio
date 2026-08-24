@@ -209,7 +209,7 @@ gets its dated home in `docs/design/` when taken.
   Threshold/Window); `test_avr_timer` 82/82 on A5 (closed loop through
   EvPin generators, no wires; findings: capture = interval - 1 CLK_PER
   at div1, SEQCTRL before the even LUT, OSC32K +0.94 %, AC hysteresis
-  17 mV). TCD deferred. Multislope next when wanted. A 2026-08-20
+  17 mV). TCD done (see below). Multislope next when wanted. A 2026-08-20
   family-completeness review (all drivers vs their chapters, both
   errata docs, the device headers of every package) found real gaps
   and a few bugs; only VREF and DAC came out complete. Everything
@@ -539,13 +539,48 @@ gets its dated home in `docs/design/` when taken.
   ACCUMULATES history and take_flags() is the read-and-clear boot
   verb. New doc avrdx/platform.md (PROVISIONAL: standby/power-down +
   VREGCTRL belong to a future sleep pass, break_here's with-OCD half,
-  three unreachable reset flags). -> CCL -> AC ->
+  three unreachable reset flags). TCD DONE (the last never-built
+  driver - the low-level review has now covered EVERY chapter the
+  framework claims): avrdx/tcd.hpp NEW - Tcd<0> resource with the
+  three sync disciplines first-class (ENABLE under ENRDY, CTRLE
+  strobes/AUPDATE under CMDRDY, static registers only disabled),
+  FAULTCTRL under CCP, capture read-L-then-H (the H read releases the
+  buffer - a fresh sequence needs one discarded read, it returns a
+  STALE value), the input-mode-vs-wgmode validity table as compile-
+  time refusals, blanking XOR PROGEV, route table header-gated
+  (DEFAULT PA4-7; ALT1 PB4/5 on 48-pin with WOC/WOD pinless, PB4-7 on
+  64; ALT2 PF0-3, PF0/1 only on 28-pin - the 32-pin headers bond all
+  four; ALT3 PG4-7 64-pin) + task TcdPwm (complementary pair with
+  dead time; other usage types wait for Multislope). NEW SUITE
+  test_avr_tcd 250/250 x5, wireless. Findings: DUAL SLOPE IS
+  2x(CMPBCLR+1), one tick longer than the chapter's printed formula
+  (WOB = 2x(CMPBCLR-CMPBSET+1) likewise); PWMACTA/B watch the
+  WAVEFORM GENERATOR, not the pad (set even while a fault holds the
+  pins still); pin-event capture offset = +3 counter ticks on both
+  captures so the PWM-capture example is exact; ASYNC override
+  latency is -3 CLK_PER vs +14 sync (= the chapter's 2-3 SYNC
+  cycles); all cycle formulas and the prescaler products exact;
+  dither DITHER=8 -> 32 cycles sum +16 exactly, dead-time placement
+  adds 0 and shortens the neighbour per table 25-7; TCD on OSCHF is
+  IMMUNE to a CLK_PER rebase, on CLK_PER it follows. THE PLL GAP
+  CLOSED: multipliers measured x1000 = 2000/2999/2001 (OSCHF 16x2,
+  16x3, 24x2 - 48 MHz on the counter), PLLS sets only with TCD
+  requesting (errata 2.5.3 observed), Pll::start -> bool REFUSES the
+  XOSCHF-crystal source (2.5.4; DA has no twin, gated); errata 2.14.2
+  POSITIVELY observed (ALT2 + CMPBEN alone = 0 edges, + CMPAEN = 402);
+  2.14.1 and 2.14.3 NOT REPRODUCED after systematic sweeps (refusals
+  and comments stand, tcd.md records the negatives honestly).
+  Suite-glue lesson: an unbound vector is a RESET LOOP (jmp 0), not a
+  crash - the suite binds all four TCB vectors as a net. Family 15
+  TUs x 8 + 58 negatives (8 new); baselines re-run twi 175, platform
+  96, clock 15 (Pll surface grew: source_ok/multiplier/pll_output_hz).
+  End state: A = test_avr_tcd, B = twi_peer. -> CCL -> AC ->
   ADC/DAC/VREF -> CLKCTRL (DA must compile) -> EVSYS tables. Phase 2,
   never-reviewed: USART
   (jumper cross-loopback, new suite test_avr_serial) -> SPI (host ->
   client on SPI0/SPI1, 4 jumpers) -> TWI (host -> client TWI0/TWI1) ->
   delay/platform sweep. Jumper tests
-  always check bench.md collisions first. TCD stays deferred.
+  always check bench.md collisions first.
   USART/SPI/TWI re-planned (2026-08-20) as the MULTI-BOARD protocol
   campaign: more boards arrive 2026-08-22; board A = DUT suite,
   board B = scriptable instrument peer (clock stretching, NACK
@@ -767,6 +802,13 @@ lib/brio/src/            the framework, four strata:
                            Timeout, OneShotPulse, PulseCounter,
                            CascadedCounter, Frequency/PulseWidth/DutyMeter,
                            Pwm8
+    tcd.hpp                TCD: Tcd<0> resource (the whole chapter with its three
+                           synchronization disciplines enforced by the verbs, the
+                           per-package route table, the input-mode validity table
+                           and the errata refusals, 12-bit compares/captures,
+                           delay block, dither, two ISR bodies) + task
+                           TcdPwm<route> (the complementary pair with dead time;
+                           the PLL's only consumer)
     ccl.hpp                CCL: Ccl (block, sequencers, one vector) + Lut<n>
                            (three typed inputs, lut_truth(), filter/edge,
                            clock, pin, sense) + ToggleFlipFlop<pair>

@@ -36,7 +36,7 @@ the BOD's, the TCD's). All clock-control registers are protected
 | OSC32K | internal 32.768 kHz ULP | 32.768 kHz | 29.5 .. 36 kHz (+-10 %); also feeds RTC/WDT/BOD; 950 us start-up from power-down |
 | XOSC32K | crystal on PF0/PF1, or a 32.768 kHz clock on PF0 | 32.768 kHz | start-up 1k..64k cycles selectable (300 ms typ., 1 s in low-power mode); load 18 pF (8 pF low-power); the RTC's precise clock and OSCHF's auto-tune reference |
 | XOSCHF | crystal on PA0/PA1 (DB only), or a clock on PA0 | crystal 4-24 MHz, clock up to 32 MHz | frequency-range setting (drive), start-up 256/1k/4k cycles; the pins leave the PORT while enabled |
-| PLL | x2 or x3 from OSCHF or XOSCHF | in 16-24 MHz, out 32-48 MHz | lock ~10 us; clocks the TCD ONLY - it is not a main-clock source; runs only while the TCD requests it |
+| PLL | x2 or x3 from OSCHF or XOSCHF | in 16-24 MHz, out 32-48 MHz | lock ~10 us; clocks the TCD ONLY - it is not a main-clock source; runs only while the TCD requests it. With SOURCE = XOSCHF it runs only from an external CLOCK, never a crystal (errata 2.5.4): `Pll::start` refuses that combination |
 
 **Main clock.** `CLKSEL` picks OSCHF / OSC32K / XOSC32K / EXTCLK (the
 XOSCHF block: crystal or external clock per its source bit); the
@@ -79,7 +79,7 @@ through CCP):
 | `Osc32k` | `run_standby(bool)`, `stable()` |
 | `Xosc32k` | `start_crystal(Xosc32kStartup, low_power, run_standby)`, `start_external(run_standby)` (both stop a running oscillator first: CSUT/SEL are latched while enabled, so the new configuration always lands - at the price of the start-up time again), `stop()`, `enabled()`, `stable()`, `wait_stable(spins)` |
 | `Xoschf` (DB) | `start_crystal(hz, XoschfStartup, run_standby)`, `start_external(hz, run_standby)` (both stop first: SELHF/FRQRANGE/CSUTHF are latched while enabled), `stop()`, `enabled()`, `stable()`, `wait_stable(spins)`, `range_for(hz)` |
-| `Pll` | `start(PllSource::oschf/xoschf, PllMultiplier::x2/x3, run_standby)`, `stop()`, `locked()` |
+| `Pll` | `start(PllSource::oschf/xoschf, PllMultiplier::x2/x3, run_standby)` -> bool (false, writing nothing, when the source cannot drive the PLL on this silicon: errata 2.5.4), `source_ok(PllSource)`, `stop()`, `locked()`, `multiplier()`, `source()`; the arithmetic `pll_output_hz(in_hz, mul)` (0 outside the specified 16-24 MHz in / 32-48 MHz out) |
 | `MainClock` | `select(MainSource::oschf/osc32k/xosc32k/extclk)` -> bool (switch completed), `source()`, `switching()`, `prescale(ClockDiv)`, `clkout(bool)` (PA7) |
 | `ClockFailure` | `watch(CfdSource::main/xoschf/xosc32k)`, `stop()`, `interrupt(on, nmi)`, `test(force)`, `failed()`, `clear()`, ISR body `cfd()` -> the main source now in effect |
 
@@ -156,11 +156,20 @@ ISR(CLKCTRL_CFD_vect) { brio::post<Supervisor>(ClockLost{ClockFailure::cfd()}); 
 // rebase or re-init, or degrade gracefully; the kernel tick (RTC) is unaffected.
 ```
 
-**The PLL** (for the TCD, when that driver exists): `Pll::start(
-PllSource::oschf, PllMultiplier::x2)` with OSCHF at 16-24 MHz; it runs
-when the TCD requests it.
+**The PLL** - the TCD is its only consumer on this silicon, and the
+only way to clock a timer above CLK_MAIN's 24 MHz ceiling. Set OSCHF
+to 16-24 MHz first (it is the PLL's input, not the main clock's), then
+start the PLL and point the TCD at it ([tcd.md](tcd.md)):
 
-## Bench findings (`test_avr_clock`, rev A5, CLKOUT on PA7, 14/14)
+```cpp
+Oschf::set_hz(24'000'000);                                    // the PLL's input
+Pll::start(PllSource::oschf, PllMultiplier::x2);              // 48 MHz out
+TcdPwm<TcdRoute::def>::init(clock, {.clock = TcdClock::pll, .source_hz = 48'000'000,
+                                    .hz = 100'000, .dead_time_ticks = 24});
+// PLLS sets as soon as the TCD requests it; it stays 0 until then.
+```
+
+## Bench findings (`test_avr_clock`, rev A5, CLKOUT on PA7, 15/15)
 
 - Every OSCHF rate (24, 20, 16, 12, 8, 4, 3, 2, 1 MHz) and every main
   prescaler (24 MHz / 1 .. 64, down to 375 kHz) appears on CLKOUT as
@@ -192,6 +201,19 @@ when the TCD requests it.
   may change (measured: one frame plus 1 us corrupts the last byte at
   several rates) - the contract is stated in [usart.md](usart.md).
 
+**The PLL, measured through its only consumer** (`test_avr_tcd` test
+`f`, rev A5): a TCD cycle of 3200 counter ticks, timed in CLK_PER
+ticks against the 24 MHz crystal, gives OSCHF 16 MHz 4808 ticks, x2
+2404, x3 1603, and OSCHF 24 MHz 3205, x2 1602. Because every leg runs
+from the same oscillator the ratios ARE the multipliers, free of
+OSCHF's own error: 2x measures 2.000 and 2.001, 3x measures 2.999, and
+16 MHz x3 lands on the same 48 MHz as 24 MHz x2. PLLS sets within one
+read of the TCD being enabled on the PLL. Errata 2.5.3 observed
+directly: with RUNSTDBY = 1 and no requester, PLLS stays 0 through
+65535 polls. Errata 2.5.4 observed as a refusal: with this board's
+XOSCHF in crystal mode `Pll::source_ok(xoschf)` is false and
+`Pll::start(xoschf, ...)` returns false with PLLCTRLA untouched.
+
 The task's two restrictions are DELIBERATE positions, not gaps: it
 accepts only source rates OSCHF can also produce, so the CFD
 fallback keeps `Clock::hz` true (a 7.3728/11.0592/14.7456 MHz UART
@@ -214,6 +236,9 @@ Implemented but not bench-verified:
 
 - The XOSC32K crystal path (no 32k crystal on the bench board) and
   autotune; `ClockSource::external` on both families (the DA path is
-  datasheet-trusted end to end); the PLL (`locked()`, x2/x3 - needs
-  the TCD as requester); A4 silicon (the bench is A5); the DA family
-  entirely (compile-verified on all four DA packages).
+  datasheet-trusted end to end); the PLL from XOSCHF (errata 2.5.4
+  makes it need an external CLOCK on PA0, which this desk does not
+  have - the OSCHF source is bench-verified, see above); `run_standby`
+  on the PLL beyond the 2.5.3 observation; A4 silicon (the bench is
+  A5); the DA family entirely (compile-verified on all four DA
+  packages).
