@@ -244,9 +244,11 @@ void ta_folded() {
 }
 
 // ---- b the runtime path --------------------------------------------------------
-// A volatile defeats __builtin_constant_p, so delay_us falls back on
-// delay_us_runtime(cycles_per_us(hz), us): loops = (us*cpu + 3) / 4,
-// each loop 4 cycles of _delay_loop_2.
+// A volatile defeats __builtin_constant_p, so delay_us takes the
+// fixed-point branch of delay_us_at<hz>: loops = ceil(us * mult / 2^12)
+// with mult = ceil(hz/4e6 in Q4.12) folded from the static rate - a
+// 16x16 multiply and a shift, never a division. Nominal is unchanged
+// (ceil to whole 4-cycle loops).
 void tb_runtime() {
     print(serial, "b delay_us, runtime path (the 4-cycle loop)", crlf);
     quiesce();
@@ -289,12 +291,16 @@ void tb_runtime() {
 }
 
 // ---- c across a clock rebase -----------------------------------------------------
-// A DynamicClock always takes the runtime path, from a rate that is a
-// VALUE. The delay must stay honest in microseconds at each rate, and
-// the ceil in cycles_per_us must overshoot - never undershoot - where a
-// rate is not a whole number of MHz.
+// A DynamicClock's rate is one of a DISCRETE set the type knows
+// (source_hz over the twelve prescalers), so delay_us dispatches on the
+// current rate INDEX into per-rate branches folded at compile time: no
+// division ever runs at wait time, and the per-rate Q4.12 factor makes
+// the microsecond arithmetic exact even at sub-MHz rates. The delay
+// must stay honest at each rate, the fixed cost must be small (the
+// ceiling verdict bars the old runtime division from coming back), and
+// at 1.5 MHz the old whole-cycles-per-us 4/3 overshoot must be GONE.
 void tc_rebase() {
-    print(serial, "c delay_us under DynamicClock, 24 -> 12 -> 24 MHz and the ceil", crlf);
+    print(serial, "c delay_us under DynamicClock: the index dispatch, 24 -> 12 -> 24 MHz and 1.5 MHz exact", crlf);
     quiesce();
     const bool dyn_ok = DynClock::init();
     console_drain();                  // the console is about to be re-owned
@@ -351,18 +357,34 @@ void tc_rebase() {
     verdict("1000 us stays at least 1000 us at every rate", honest);
     verdict("the per-us cost is exact at every whole-MHz rate", slope_exact);
     verdict("the fixed call cost does not depend on the rate", fixed_same);
-    print(serial, "  that fixed cost is the price of a rate that is a VALUE: "
-                  "cycles_per_us() divides by 1e6 at run time on this path, where a "
-                  "static Clock folds it to a constant.", crlf);
+    print(serial, "  that fixed cost is the index dispatch plus the shared "
+                  "fixed-point tail - no division runs at wait time.", crlf);
+    verdict("the fixed cost stays under 200 cycles (the runtime division "
+            "must not come back)", fixed0 < 200u);
 
-    // The rounding fact. 1.5 MHz is 24 MHz / 16, a rate the prescaler
-    // really reaches; cycles_per_us(1'500'000) is ceil(1.5) = 2, so every
-    // delay runs 4/3 of its nominal length. The console cannot survive
-    // 1.5 MHz (BAUD would have to go below its floor of 64), so the leg
-    // is measured in silence and printed after the climb back.
+    // A CONSTANT us under the dynamic clock: each dispatch branch folds
+    // its own exact loop, so the only runtime cost is the index chain.
+    const uint32_t k1000 = cycles_of(cost, [] { delay_us(DynClock{}, 1000); });
+    print(serial, "  constant 1000 us at 24 MHz through the dispatch: ", k1000,
+          " cycles (nominal 24000)", crlf);
+    verdict("a constant us under DynamicClock is at least nominal", k1000 >= 24000u);
+    verdict("and its overhead is the dispatch alone, under 100 cycles",
+            k1000 - 24000u < 100u);
+
+    // The sub-MHz honesty. 1.5 MHz is 24 MHz / 16, a rate the prescaler
+    // really reaches. The old whole-cycles-per-us rounding (still what
+    // the stored-byte helper does: cycles_per_us(1.5 MHz) = 2) ran every
+    // delay at 4/3 of nominal; the dispatch's Q4.12 factor for this rate
+    // is exact (1536/4096 = 0.375 loops/us), so the slope must now be
+    // 1000 us, not 1333. The console cannot survive 1.5 MHz (BAUD would
+    // have to go below its floor of 64), so the leg is measured in
+    // silence and printed after the climb back.
     verdict("the driver knows 460800 is unreachable at 1.5 MHz",
             !Serial::can_baud(1'500'000u, 460800u));
-    verdict("cycles_per_us rounds 1.5 up to 2", cycles_per_us(1'500'000u) == 2);
+    verdict("cycles_per_us still rounds 1.5 up to 2 (the stored-byte helper)",
+            cycles_per_us(1'500'000u) == 2);
+    verdict("the dispatch's Q4.12 factor for 1.5 MHz is exact",
+            delay_mult(1'500'000u) == 1536u);
     console_drain();
     uint32_t s1 = 0, s2 = 0;
     bool slow_ok = DynClock::set(1'500'000u);
@@ -379,10 +401,10 @@ void tc_rebase() {
     const uint32_t slope_us = ((s2 - s1) * 1'000'000u) / 1'500'000u;
     print(serial, "  at 1500000 Hz: 1000 us -> ", s1, " cycles (", slow_us,
           " us), per-1000-us slope ", s2 - s1, " cycles = ", slope_us,
-          " us: the ceil (2 cycles/us instead of 1.5) makes every delay 4/3 long", crlf);
-    verdict("the overshoot is long, never short", slow_us >= 1000u);
-    verdict("and it is the ceil's 4/3, not something else",
-            near(static_cast<int32_t>(slope_us), 1333, 10));
+          " us: the per-rate factor is exact, the old 4/3 overshoot is gone", crlf);
+    verdict("1000 us at 1.5 MHz is at least 1000 us", slow_us >= 1000u);
+    verdict("and the slope is the exact 1000 us, not the old ceil's 1333",
+            near(static_cast<int32_t>(slope_us), 1000, 10));
     quiesce();
 }
 

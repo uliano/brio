@@ -111,12 +111,20 @@ the concept let a program (and the suite) check what the others did:
 reads `SREG.I`.
 
 `avrdx/delay.hpp` is the short-wait role: `delay_us(clock, us)` reads
-the rate from the `Clock` type and never from `F_CPU`,
-`delay_us_runtime(cycles_per_us, us)` is the loop under it for code
-that holds a rate but not a clock type, `delay_cycles(n)` counts raw
-cycles for rates below 1 MHz, and `cycles_per_us(hz)` is the
-rounded-up conversion all of them share. Both paths round UP: a setup
-time is "no less than".
+the rate from the `Clock` type and never from `F_CPU`, and NO DIVISION
+EVER RUNS AT WAIT TIME. A static clock's rate folds; a `DynamicClock`
+can only run at one of the discrete rates its type enumerates
+(`rate_count` / `rate_hz(i)` / `rate_index()`, from the twelve main
+prescalers), so `delay_us` dispatches on the current rate's INDEX into
+per-rate branches expanded at compile time: a constant `us` folds to
+the exact loop inside its branch, a runtime `us` picks the rate's
+Q4.12 loops-per-us factor (`delay_mult`, rounded up at compile time)
+and runs one shared 16x16-multiply tail - exact at every reachable
+rate, sub-MHz included. `delay_us_runtime(cycles_per_us, us)` stays as
+the stored-byte pattern for code that holds a rate but not a clock
+type (whole cycles per us: gross below 1 MHz), `delay_cycles(n)`
+counts raw cycles for rates below 1 MHz. Every path rounds UP: a setup
+time is "no less than", by construction and not by a tuned constant.
 
 `avrdx/reset.hpp` has two resources. `Reset` reads why we are running
 - `flags()` peeks, `take_flags()` reads and clears in one verb (the
@@ -139,7 +147,7 @@ brio::delay_us(clock, 10);            // folded to an exact cycle loop
 **Wait by an amount computed at run time**, or under a `DynamicClock`:
 
 ```cpp
-brio::delay_us(clock, cs_setup_us);   // the 4-cycle loop
+brio::delay_us(clock, cs_setup_us);   // fixed-point loops, no division
 brio::delay_cycles(200);              // when the clock is below 1 MHz
 ```
 
@@ -219,25 +227,33 @@ subtracted and interrupts masked.
   overhead, at 1, 2, 5, 10, 50 and 100 us alike: 24, 48, 120, 240,
   1200, 2400 cycles. The compiler emits an in-line down-counting loop
   (`ldi r24,0x08 / dec / brne` for 1 us) - no call, no arithmetic.
-- **The runtime path costs a constant 95 cycles**, whatever the
-  length: 119, 143, 215, 335, 1295, 2495 cycles for the same six
-  waits, i.e. nominal + 95 every time. Both paths honour "at least" at
-  every length tested. `delay_us_runtime(24, 1)` called directly is
-  111 cycles, of which the loop is the nominal 24.
-- **A dynamic clock costs 693 cycles per call**, and the figure does
-  not move with the rate (measured identical at 24, 12 and 1.5 MHz).
-  That is `cycles_per_us()` dividing by 1e6 at run time, where a
-  static `Clock` folds the same expression to a constant. The
-  per-microsecond cost stays exact: 24000 cycles per 1000 us at
-  24 MHz, 12000 at 12 MHz. A one-microsecond setup delay under a
-  `DynamicClock` therefore blocks for about 29 us - the "at least"
-  contract holds, the cost does not scale down.
-- **The ceil overshoots, and only upwards.** At 1.5 MHz (24 MHz
-  divided by 16, a rate the prescaler really reaches),
-  `cycles_per_us(1'500'000)` is 2 instead of 1.5, so every delay runs
-  4/3 long: 2002 cycles per 1000 us asked, measured 1334 us. Rounding
-  up is the contract, and this is its price at a rate that is not a
-  whole number of MHz.
+- **The runtime path costs a constant 122 cycles** at a static rate,
+  whatever the length: nominal + 122 at 1, 2, 5, 10, 50 and 100 us
+  alike - the Q4.12 multiply, the slice bookkeeping and the one extra
+  loop turn that replaces an exact ceil. `delay_us_runtime(24, 1)`
+  called directly (the out-of-line stored-byte tail) is 171 cycles, of
+  which the loop is the nominal 24. Every path honours "at least" at
+  every length tested.
+- **A dynamic clock costs 157 cycles per call with a runtime `us`, and
+  SIX with a constant one.** The rate is dispatched by INDEX into
+  branches folded per rate, so no arithmetic derives the rate at wait
+  time: a constant `us` lands in its branch's exact folded loop (24006
+  measured for a nominal 24000 - the six cycles are the index chain),
+  a runtime `us` selects the branch's Q4.12 factor into the shared
+  tail (157..160 cycles, identical at 24, 12 and 1.5 MHz; the suite
+  caps it at 200 so the old runtime division - it cost 693 - cannot
+  come back unnoticed). The per-microsecond cost stays exact: 24000
+  cycles per 1000 us at 24 MHz, 12000 at 12 MHz.
+- **Sub-MHz rates are exact now, not 4/3 long.** At 1.5 MHz (24 MHz
+  divided by 16, a rate the prescaler really reaches) the per-rate
+  factor is exactly 0.375 loops/us (1536 in Q4.12): 1000 us measures a
+  1502-cycle slope = 1001 us. The old whole-cycles-per-us rounding
+  (`cycles_per_us(1'500'000)` = 2, still what the stored-byte helper
+  does) ran every delay 4/3 long. What no arithmetic fixes at such
+  rates is granularity and overhead in TIME: one loop turn is 4 cycles
+  and the 157-cycle dispatch is ~105 us of them - below roughly 1 MHz
+  a microsecond-denominated busy-wait is out of its domain, and the
+  honest tools are the folded path and `delay_cycles`.
 - **`delay_cycles` rounds up to a multiple of four and costs 39
   cycles** on top: 43, 47, 139, 1039 cycles for 4, 8, 100, 1000.
   Crossing the 16-bit chunk boundary is honest - 262152 cycles (65538

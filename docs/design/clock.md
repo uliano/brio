@@ -43,7 +43,14 @@ same idiom as `print(serial, ...)`.
   error) or `set(hz)` (run time: `false`, nothing changed, when
   unreachable) switch under the running program. The app speaks Hz;
   which prescaler or PLL setting produces them is the target's detail,
-  never the caller's.
+  never the caller's. A dynamic clock's rate is nevertheless one of a
+  DISCRETE SET the type knows in full (the boot rate over the target's
+  prescalers), and the type says so: `rate_count`, `rate_hz(i)` and
+  the runtime `rate_index()` expose the set and the current position
+  in it. That is what lets rate-derived arithmetic be expanded per
+  rate at compile time and selected by an index byte at run time -
+  the target's `delay_us` dispatches this way and never divides at
+  wait time - instead of being recomputed from `hz()` as a value.
 
 The two are sibling types with the same driver-facing surface: a
 driver written for `init(clock)` + `clock_hz(clock)` serves both, and

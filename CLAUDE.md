@@ -505,15 +505,25 @@ gets its dated home in `docs/design/` when taken.
   1.024 kHz domain - and the FIRST WDR after enabling window mode only
   ACTIVATES the window, 22.3.3.2); AvrPlatform gained sleep_armed()/
   interrupts_enabled() readbacks; delay.hpp UNTOUCHED - nothing
-  falsified. NEW SUITE test_avr_platform 92/92 (a..i, z; test i spans
+  falsified. NEW SUITE test_avr_platform 96/96 (a..i, z; test i spans
   FOUR real resets - WDT timeout, WDT window violation, SW reset from
   a panic reporter, plain SW reset - with a .noinit phase token, and
-  bench.py's judge survives the reboots). Measured: folded delay_us =
-  0 cycles overhead (exact at every length), runtime path +95 cycles,
-  DynamicClock path +693 cycles (a 32-bit division per call in
-  cycles_per_us - QUEUED: cache it in DynamicClock::set(), a clock.hpp
-  design change), delay_cycles +39 (+10 crossing the 0xFFFF chunk),
-  the 1.5 MHz ceil overshoot +33.4% and never short, CriticalSection
+  bench.py's judge survives the reboots). The DynamicClock delay was
+  then REDESIGNED (same session): a dynamic clock's rate is one of a
+  discrete set the TYPE knows (boot rate over the twelve prescalers),
+  so DynamicClock exposes rate_count/rate_hz(i)/rate_index() (the
+  discrete-rate surface, now in design/clock.md) and delay_us
+  dispatches on the index into per-rate branches folded at compile
+  time - no division ever runs at wait time, and each branch's Q4.12
+  loops-per-us factor (delay_mult, rounded up at compile time) makes
+  runtime-us waits exact at every rate incl. sub-MHz. Measured after
+  the redesign: folded delay_us = 0 cycles overhead (exact at every
+  length), static-rate runtime us +122 constant, DynamicClock +157
+  runtime us (was +693; suite caps at 200 to bar the division's
+  return) and +6 with a constant us, the old 1.5 MHz 4/3 ceil
+  overshoot GONE (slope exact 1001 us; cycles_per_us keeps the
+  whole-cycle rounding for the stored-byte pattern only),
+  delay_cycles +39 (+10 crossing the 0xFFFF chunk), CriticalSection
   3 cycles (8 nested), IDLE wake = 6 cycles exactly per 13.3.3.2 with
   the sleep proven (loop counter frozen 32 ticks), Ring 50000 elements
   at 20 kHz ISR-producer clean with the overrun holding exactly
@@ -714,9 +724,13 @@ lib/brio/src/            the framework, four strata:
                            MainClock/ClockFailure (typed register views) +
                            tasks Clock<source, hz, div> (constexpr hz, the ONE
                            rate truth: no F_CPU) and DynamicClock<Boot, Users...>
-                           (set<hz>()/set(hz) rebases the users then switches)
-    delay.hpp              delay_us(clock, us) "at least": folded cycles when
-                           constant, 4-cycle loop otherwise; cycles_per_us
+                           (set<hz>()/set(hz) rebases the users then switches;
+                           discrete-rate surface rate_count/rate_hz/rate_index)
+    delay.hpp              delay_us(clock, us) "at least", never a division at
+                           wait time: folded cycles when constant, per-rate
+                           Q4.12 fixed point otherwise (dynamic clocks
+                           dispatched by rate index); delay_cycles,
+                           delay_us_runtime (stored-byte), cycles_per_us
     reset.hpp              RSTCTRL + WDT: Reset (RSTFR flags read-and-clear,
                            software reset) and Watchdog (PERIOD/WINDOW, WDR,
                            SYNCBUSY, the one-way LOCK)

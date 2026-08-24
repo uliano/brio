@@ -308,15 +308,31 @@ constexpr uint32_t clock_divisor(ClockDiv d) {
     return 0;
 }
 
+/// Every main prescaler, in one canonical order. This array is the
+/// DISCRETE SET behind the runtime regime: a DynamicClock can only ever
+/// run at source_hz divided by one of these, so its current rate is an
+/// INDEX into this list - which is what lets avrdx/delay.hpp expand
+/// per-rate arithmetic at compile time and dispatch on the index
+/// (division-free delays at every reachable rate).
+inline constexpr ClockDiv clock_divs[] = {
+    ClockDiv::div1,  ClockDiv::div2,  ClockDiv::div4,  ClockDiv::div6,
+    ClockDiv::div8,  ClockDiv::div10, ClockDiv::div12, ClockDiv::div16,
+    ClockDiv::div24, ClockDiv::div32, ClockDiv::div48, ClockDiv::div64};
+inline constexpr uint8_t clock_div_count = sizeof(clock_divs) / sizeof(clock_divs[0]);
+
+/// Position of a prescaler in clock_divs (the index delay dispatch uses).
+constexpr uint8_t clock_div_index(ClockDiv d) {
+    for (uint8_t i = 0; i < clock_div_count; ++i) {
+        if (clock_divs[i] == d) return i;
+    }
+    return 0;
+}
+
 /// The main prescaler that turns source_hz into hz exactly, or div1
 /// with `ok` false when no prescaler does.
 struct DivFor { ClockDiv div; bool ok; };
 constexpr DivFor div_for(uint32_t source_hz, uint32_t hz) {
-    constexpr ClockDiv all[] = {ClockDiv::div1, ClockDiv::div2, ClockDiv::div4,
-                                ClockDiv::div6, ClockDiv::div8, ClockDiv::div10,
-                                ClockDiv::div12, ClockDiv::div16, ClockDiv::div24,
-                                ClockDiv::div32, ClockDiv::div48, ClockDiv::div64};
-    for (ClockDiv d : all) {
+    for (ClockDiv d : clock_divs) {
         if (hz != 0 && source_hz / clock_divisor(d) == hz && source_hz % clock_divisor(d) == 0) {
             return {d, true};
         }
@@ -575,6 +591,17 @@ struct DynamicClock {
 
     static uint32_t hz() { return hz_; }
 
+    /// The DISCRETE-RATE surface (what avrdx/delay.hpp dispatches on).
+    /// A dynamic clock only ever runs at source_hz / clock_divs[i]: the
+    /// whole set is known from the TYPE, so per-rate arithmetic can be
+    /// expanded and folded per index at compile time, and the one
+    /// runtime fact is WHICH index is current - a byte, not a division.
+    static constexpr uint8_t rate_count = clock_div_count;
+    static constexpr uint32_t rate_hz(uint8_t i) {
+        return source_hz / clock_divisor(clock_divs[i]);
+    }
+    static uint8_t rate_index() { return idx_; }
+
     /// Is U one of the users that set() rebases? Drivers assert this in
     /// init(clock): a clocked driver forgotten in the list would keep
     /// running at the old rate in silence - a compile error instead.
@@ -585,6 +612,7 @@ struct DynamicClock {
     static bool init() {
         const bool ok = Boot::init();
         hz_ = Boot::hz;
+        idx_ = 0;
         return ok;
     }
 
@@ -619,9 +647,11 @@ private:
         (Users::rebase(next), ...);
         MainClock::prescale(d);
         hz_ = next;
+        idx_ = clock_div_index(d);
     }
 
     static inline uint32_t hz_ = Boot::hz;
+    static inline uint8_t idx_ = 0;
 };
 
 } // namespace brio
