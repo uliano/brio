@@ -140,8 +140,8 @@ rail (PORTC, the MVIO domain, is therefore usable at bus level):
 
 | Node | Taps |
 |------|------|
-| SDA | A.PA2 + A.PC2 + B.PA2 |
-| SCL | A.PA3 + A.PC3 + B.PA3 |
+| SDA | A.PA2 + A.PC2 + A.PB2 + B.PA2 |
+| SCL | A.PA3 + A.PC3 + A.PB3 + B.PA3 |
 
 A.PA2/PA3 is TWI0's DEFAULT (and ALT1) pin pair - the host, and the
 client of the combined loop. A.PC2/PC3 is that route's DUAL pair, so the
@@ -149,9 +149,10 @@ same instance's client can be moved onto it while the host keeps the main
 pair; with Dual mode off that pair is plain GPIO on the same node, which
 is what `test_avr_twi h` bit-bangs as a foreign agitator. Board B is
 TWI-inert (`spi_peer` never touches PA2/PA3) and just shares the wire.
-A third tap on TWI1's dual pair (A.PB2/PB3) would let TWI1 join the same
-bus; it is **not fitted**, and the suite probes for it and says so rather
-than assuming.
+A.PB2/PB3 is the third tap: TWI1 ALT2's primary pair (and TWI1
+DEFAULT's dual pair), so TWI1 can join the same bus electrically. The
+suite probes for this tap and prints its verdict rather than assuming
+(`test_avr_twi h`); it currently measures PRESENT.
 
 The grounds meet through the two USB cables; the dedicated GND wire came
 off with the PORTE link.
