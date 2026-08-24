@@ -43,16 +43,18 @@ can observe:
      I2cBus<Bus, P>          util/i2c_bus.hpp   = BusMaster: arbitration + replies
          |  Bus::start(req)
          v
-     Twi<n> engine           avrdx/twi.hpp     START/Sr/STOP, ACK policy, per-byte ISR
+     TwiHost<n> engine       avrdx/twi.hpp     START/Sr/STOP, ACK policy, per-byte ISR
          |
      ISR glue in the app     posts TransferDone{TwiHw::status()} on completion
 ```
 
 Layering as for SPI: `I2cBus`/`BusMaster` are `util/` (pure, tested on
-the host through the SPI alias in `test_spi_bus` - same class); `Twi<n>`
-is `avrdx/`. The app's ISR binds `TWIn_TWIM_vect`.
+the host through the SPI alias in `test_spi_bus` - same class);
+`TwiHost<n>` is `avrdx/` (a task over the `Twi<n>` resource, which also
+carries the client half - see [twi.md](../avrdx/twi.md)). The app's ISR
+binds `TWIn_TWIM_vect`.
 
-## The transaction descriptor (`Twi<n>::Request`)
+## The transaction descriptor (`TwiHost<n>::Request`)
 
 `{addr, tx span, rx span, reply, speed}` - 9 bytes, one over the
 envelope guideline, the same recorded deviation as SPI (the request IS
@@ -74,14 +76,14 @@ what a scanner sends and, unlike the SPI zero-length request, it does
 touch the wire (its address phase IS the transaction), so `start()`
 is always asynchronous on I2C: every request ends in a `TransferDone`.
 
-Bus speed travels per request (`I2cSpeed::standard_100k` /
-`fast_400k`), like clock and mode on SPI: a shared bus can carry a
-100 kHz sensor and a 400 kHz DAC, and MBAUD is rewritten at each
-start (one register, nothing per byte). Both MBAUD values are solved
-at compile time from `Clock::hz` (`Twi::init(clock)`) with the spec's
-worst-case rise time for the mode;
-stiffer pull-ups make real edges faster, which only slows SCL a touch
-below nominal - the safe side.
+Bus speed travels per request (`TwiSpeed::standard_100k` /
+`fast_400k` / `fast_plus_1m`), like clock and mode on SPI: a shared bus
+can carry a 100 kHz sensor and a 400 kHz DAC. MBAUD may only be written
+with the host disabled, so a speed CHANGE costs an ENABLE cycle and a
+force-idle at `start()` - paid only when the speed actually moves,
+never per byte. How MBAUD is solved, and why the bus's rise and fall
+times are arguments rather than assumptions, belongs to the engine:
+[twi.md](../avrdx/twi.md).
 
 ## Engine behaviour on the wire
 
@@ -90,8 +92,9 @@ below nominal - the safe side.
 - Arbitration lost: the flag is cleared, no STOP (the other master
   owns the bus), `i2c_arb_lost` reported.
 - Bus error: flag cleared and bus state forced to idle, `i2c_bus_error`.
-- ACK policy is explicit (no Smart Mode): each received byte is
-  answered by the ISR with ACK + receive-next or NACK + STOP.
+- ACK policy is the engine's: each received byte is answered with
+  ACK + receive-next or NACK + STOP. Smart Mode is an option of the
+  engine (the acknowledge then rides the data read), invisible here.
 - Pull-ups are external (1.5 k on the bench): the internal ones are
   far too weak for I2C edges. The peripheral drives the pins
   open-drain by itself; init only routes them (PORTMUX).
@@ -105,7 +108,7 @@ below nominal - the safe side.
   The classic remedy (clock SCL nine times, then STOP) plus a
   per-request timeout via a TimeEvent in the bus AO is the known next
   step, to be built when a real device makes it necessary.
-- 10-bit addressing, Fast-mode Plus (FMPEN, 1 MHz), client mode.
+- 10-bit addressing (the arbiter's descriptor has no shape for it).
 - A DAC/sensor client AO with word semantics: `util/wire.hpp` already
   gives the big-endian load/store; the MCP47CVB22 driver is the first
   candidate.

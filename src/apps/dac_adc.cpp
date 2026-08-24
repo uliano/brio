@@ -70,7 +70,7 @@ namespace {
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
-using TwiHw = brio::Twi<0>;                        // PA2 SDA / PA3 SCL
+using TwiHw = brio::TwiHost<0>;                        // PA2 SDA / PA3 SCL
 using I2c = brio::I2cBus<TwiHw, P>;
 using SpiHw = brio::SpiHost<0>;                        // PA4/PA5/PA6
 using Spi = brio::SpiBus<SpiHw, P>;
@@ -143,7 +143,7 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                 brio::post<I2c>(TwiHw::Request{
                     dac_addr, i2c_tx, 3, nullptr, 0,
                     brio::reply_to<Loop, brio::BusDone>(),
-                    brio::I2cSpeed::fast_400k});
+                    brio::TwiSpeed::fast_400k});
                 return handled();
             },
             [](brio::BusDone d) {
@@ -165,7 +165,7 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                 brio::post<I2c>(TwiHw::Request{
                     dac_addr, i2c_tx, 1, i2c_rx, 2,
                     brio::reply_to<Loop, brio::BusDone>(),
-                    brio::I2cSpeed::fast_400k});
+                    brio::TwiSpeed::fast_400k});
                 return handled();
             },
             [](brio::BusDone d) {

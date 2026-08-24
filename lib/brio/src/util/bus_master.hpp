@@ -46,7 +46,7 @@
  * would add an ownership protocol for zero RAM at queue depths this
  * small.
  *
- * Validated on: AVR DA/DB (Spi<n>, Twi<n, Route>) and the host fake.
+ * Validated on: AVR DA/DB (SpiHost<n>, TwiHost<n>) and the host fake.
  * The contract assumes a transaction that runs on interrupts and
  * completes later with a status only (buffers travel in the request);
  * a DMA engine or a peripheral with hardware chip-select/queues may

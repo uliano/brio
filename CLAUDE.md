@@ -429,7 +429,45 @@ gets its dated home in `docs/design/` when taken.
   MspiHost::release now clears the XCK INVEN that invert_sck set (a
   PORT bit the resource teardown cannot know; bench-proven to invert
   the next owner's SCK). serial z 108/108 after the edit; family +
-  native green. End state: A = test_avr_spi, B = spi_peer. -> CCL -> AC ->
+  native green. TWI phase T1 DONE (driver rewrite +
+  single-board half, on the office I2C bus: SDA = A.PA2+A.PC2+B.PA2,
+  SCL = A.PA3+A.PC3+B.PA3, 1.5k to +5V, VDDIO2 = 5 V; the PORTB tap is
+  wired but measured NOT on the node; the PORTE link is GONE, so the
+  serial/spi y halves need re-jumpering): twi.hpp REBUILT as Twi<n>
+  resource (full ch.29 register description, per-package route table
+  with the dual pairs - TWI1 absent on 28-pin, ALT2 absent at 32, dual
+  pinless where the header says so; THREE errata as code: DA 2.14.2
+  SDAHOLD 50/300 SWAPPED so TwiSdaHold speaks true ns and the encoding
+  swaps on DA (family told by MVIO), FLUSH never exposed with recover()
+  = ENABLE cycle, OUT=0 before enable; the chapter's baud three-step
+  29-3/-4/-5 with rise AND fall as arguments - the bench proved a
+  rise-only budget lands tLOW below the spec floor by exactly tOF;
+  actual_scl readback; both halves, both ISR bodies) + tasks
+  TwiHost<n, route> (the old engine's Request/start/isr/status intact,
+  I2cBus/BusMaster unchanged, TwiSpeed {100k,400k,1M} replaces
+  I2cSpeed, MBAUD written only with the host disabled per 29.5.7) and
+  TwiClient<n, route, on_dual_pins> (NEW: address/general call/mask or
+  second address/PMEN, smart mode, S1..S4 verbs, dual via DUALCTRL,
+  refused where the dual pair is pinless). NEW SUITE test_avr_twi
+  175/175 (a..j, z = all; k..s/y reserved for T2). Findings in twi.md:
+  tR 166 ns on this bus at every speed while FMPEN's x10 drive
+  collapses tOF from 125 ns to <42 ns; timeouts react at 32/81/183 us
+  for the 50/100/200 settings; a STOP injected MID-BYTE is a BUSERR
+  and the held START waits, after a clean frame it is legal; a host
+  asked to start on a Busy bus holds the START until STOP/timeout/
+  force-idle; smart mode reads 4 bytes on 1 MCMD strobe vs 4; a quick
+  command is 10 SCL rises = one 9-bit frame + the STOP's own rise
+  (writes are 9N+1); six-byte write = 7 host / 8 client interrupts,
+  idle bus = zero; combined mode is order-independent (the later init
+  owns the shared CTRLA). Family TUs twi.cpp + 5 negatives (TWI1 on
+  28-pin, TWI1 ALT2 at 32 - ALT1 exists on da48, the header beat the
+  plan - dual on pinless pairs, FM+ without FMPEN, host not in the
+  DynamicClock users). serial z 108 and spi z 148 re-verified; end
+  state A = test_avr_twi, B = spi_peer. T2 next: twi_peer commanded
+  in-band over TWI (a client address is a natural command channel),
+  k..s/y - clock stretching, NACK injection, multi-master ARBLOST,
+  COLL/S4, bus recovery, general call to two clients, FM+ two-board.
+  -> CCL -> AC ->
   ADC/DAC/VREF -> CLKCTRL (DA must compile) -> EVSYS tables. Phase 2,
   never-reviewed: USART
   (jumper cross-loopback, new suite test_avr_serial) -> SPI (host ->
@@ -633,7 +671,13 @@ lib/brio/src/            the framework, four strata:
                            SpiHost<n, route> (two-phase descriptor, per-byte
                            ISR pump or polled, CS owned by the engine,
                            optional SCK ceiling) and SpiClient<n, route>
-    twi.hpp                Twi<n, Route> I2C master engine
+    twi.hpp                TWI: Twi<n> resource (the per-package route table
+                           with its dual pin pairs, the three errata as code,
+                           the chapter's baud arithmetic with the bus edges as
+                           arguments, host and client halves, two ISR bodies)
+                           + tasks TwiHost<n, route> (the I2C transfer engine
+                           driven by util/i2c_bus.hpp) and TwiClient<n, route,
+                           on_dual_pins>
     tca.hpp                TCA: Tca<n> resource (normal mode: PER, three
                            buffered CMP, waveform modes, event inputs A/B,
                            commands, ISR bodies) + tasks TcaPwm<n, port>

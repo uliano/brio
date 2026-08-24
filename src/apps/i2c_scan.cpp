@@ -45,7 +45,7 @@ namespace {
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
-using TwiHw = brio::Twi<0>;                        // PA2 SDA / PA3 SCL
+using TwiHw = brio::TwiHost<0>;                        // PA2 SDA / PA3 SCL
 using I2c = brio::I2cBus<TwiHw, P>;
 
 struct Kick {};                                    // start a sweep
