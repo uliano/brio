@@ -495,7 +495,41 @@ gets its dated home in `docs/design/` when taken.
   adds no measurable rise), the cost is latency (longest SCL low 70/
   126/142 us on read tenures); rebase 24->12->24 exact under two-board
   traffic. End state: A = test_avr_twi, B = twi_peer; serial/spi y
-  need the PORTE jumpers AND their peer firmware back. -> CCL -> AC ->
+  need the PORTE jumpers AND their peer firmware back. delay/platform
+  sweep DONE, CLOSING PHASE 2 of the low-level review (only TCD's own
+  track remains untouched): NEW avrdx/reset.hpp (RSTCTRL + WDT - the
+  campaign proved panic.hpp asked apps to cross-check the reset cause
+  with no verb in the stratum; Reset::take_flags/software, Watchdog
+  arm/sync/lock with the two bench-proven WDT facts: arm()'s config is
+  NOT in force until sync() - the CTRLA write crosses into the
+  1.024 kHz domain - and the FIRST WDR after enabling window mode only
+  ACTIVATES the window, 22.3.3.2); AvrPlatform gained sleep_armed()/
+  interrupts_enabled() readbacks; delay.hpp UNTOUCHED - nothing
+  falsified. NEW SUITE test_avr_platform 92/92 (a..i, z; test i spans
+  FOUR real resets - WDT timeout, WDT window violation, SW reset from
+  a panic reporter, plain SW reset - with a .noinit phase token, and
+  bench.py's judge survives the reboots). Measured: folded delay_us =
+  0 cycles overhead (exact at every length), runtime path +95 cycles,
+  DynamicClock path +693 cycles (a 32-bit division per call in
+  cycles_per_us - QUEUED: cache it in DynamicClock::set(), a clock.hpp
+  design change), delay_cycles +39 (+10 crossing the 0xFFFF chunk),
+  the 1.5 MHz ceil overshoot +33.4% and never short, CriticalSection
+  3 cycles (8 nested), IDLE wake = 6 cycles exactly per 13.3.3.2 with
+  the sleep proven (loop counter frozen 32 ticks), Ring 50000 elements
+  at 20 kHz ISR-producer clean with the overrun holding exactly
+  capacity oldest-first, timebase +8843 ppm (OSC32K, matches RTC).
+  Chapter corrections: SLPCTRL is ch. 13 / RSTCTRL 14 / WDT 22 (9/11/
+  12 is tinyAVR numbering); errata 2.2.4 verified verbatim and it has
+  a SECOND half (a following store below 0x40 is lost too - all built
+  images emit none, dodged by construction) and NO DA twin (the DA
+  errata doc predates the item; the NOP is deliberate on both);
+  SLPCTRL.CTRLA is NOT under CCP, SWRR and WDT.CTRLA/LOCK are; SRAM
+  survival is promised NOWHERE (table 14-1 lists no SRAM domain) so
+  the breadcrumb's magic word is necessary, not prudent; RSTFR
+  ACCUMULATES history and take_flags() is the read-and-clear boot
+  verb. New doc avrdx/platform.md (PROVISIONAL: standby/power-down +
+  VREGCTRL belong to a future sleep pass, break_here's with-OCD half,
+  three unreachable reset flags). -> CCL -> AC ->
   ADC/DAC/VREF -> CLKCTRL (DA must compile) -> EVSYS tables. Phase 2,
   never-reviewed: USART
   (jumper cross-loopback, new suite test_avr_serial) -> SPI (host ->
@@ -683,6 +717,9 @@ lib/brio/src/            the framework, four strata:
                            (set<hz>()/set(hz) rebases the users then switches)
     delay.hpp              delay_us(clock, us) "at least": folded cycles when
                            constant, 4-cycle loop otherwise; cycles_per_us
+    reset.hpp              RSTCTRL + WDT: Reset (RSTFR flags read-and-clear,
+                           software reset) and Watchdog (PERIOD/WINDOW, WDR,
+                           SYNCBUSY, the one-way LOCK)
     pin.hpp                Pin<'A',5> compile-time GPIO (also a PwmChannel,
                            max 1) + PinRef descriptor + PinSet<Pins...> mask
                            + port_by_letter/pinctrl_of (run-time port lookup)
