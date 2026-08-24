@@ -1428,6 +1428,22 @@ struct MspiHost : UsartTaskBase<n, route, UsartMode::mspi> {
         if (!f) return {};
         return static_cast<uint8_t>(f->data);
     }
+
+    /// Hand the position back. `invert_sck` is the ONE thing this task
+    /// puts in a PORT register rather than in the peripheral, so it is
+    /// also the one thing the resource's own release cannot undo: a pin
+    /// given back to PORT with its INVEN still set inverts whatever
+    /// takes the position next (bench: an SPI host on the same pin
+    /// clocked the opposite polarity and its client stopped decoding).
+    static void release() {
+        if constexpr (available) {
+            constexpr UsartPin x = usart_pin(n, route, UsartSignal::xck);
+            if constexpr (x.bonded) {
+                pinctrl_of(x.port, x.pin) &= static_cast<uint8_t>(~PORT_INVEN_bm);
+            }
+        }
+        Base::release();
+    }
 };
 
 /**

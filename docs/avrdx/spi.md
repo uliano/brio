@@ -1,14 +1,16 @@
 # SPI - the serial peripheral interface (AVR DA/DB)
 
 > **PROVISIONAL.** The chapter's register description is covered in full
-> and the single-board half is bench-verified: routes and teardown, all
-> seven bit rates measured on SCK, the data path, the four transfer
+> and both bench halves pass: the single-board one (routes and teardown,
+> all seven bit rates measured on SCK, the data path, the transfer
 > modes' idle levels, the write collision, buffer mode's four flags, the
-> host demotion, both ISR bodies, a clock rebase under an SCK ceiling and
-> the transfer engine. What is missing is everything that needs a SECOND
-> device on the wire - a real client, mode and bit-order mismatches, SS
-> mid-byte, multi-host arbitration - plus the routes this desk cannot
-> reach. The list is in "Not covered yet".
+> host demotion, both ISR bodies, a clock rebase under an SCK ceiling,
+> the transfer engine) and the two-board one against a real client
+> (every mode, bit order and buffering regime, the client's SCK ceiling,
+> deliberate mismatches, SS mid-byte, client-side loss, a real multi-host
+> demotion, the USART's Host SPI mode). What is left is a client-side AO,
+> sleep, the routes this desk cannot reach and the electricals as timing.
+> The list is in "Not covered yet".
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (SPI
 chapter 28, PORTMUX chapter 17, electricals 39.15), errata DS80000915F
@@ -160,9 +162,12 @@ const auto c = brio::spi_clock_for(brio::clock_hz(clock), 2'500'000u);  // XPT20
 
 ## Bench findings
 
-Measured on rev. A5 at 5 V, CLK_PER 24 MHz, SPI0 on ALT1 (PE0-PE3), with
-nothing wired to the SPI but the campaign's crossed pair to an inert
-second board. `test_avr_spi`, `z` = 148 verdicts.
+Measured on rev. A5 at 5 V, CLK_PER 24 MHz, SPI0 on ALT1 (PE0-PE3).
+`test_avr_spi`: `z` = the single board, 148 verdicts; `y` = the same
+four pins against a second AVR128DB48 running `spi_peer` as a real
+client, 92 verdicts. The desk wires PORTE straight through (A.PEn -
+B.PEn), so MOSI, MISO, SCK and SS are one four-wire bus between the two
+boards.
 
 **The bit rates are exact.** All seven divisions measured through the
 SPI's own SCK event into a TCB frequency meter (period between rising
@@ -236,13 +241,122 @@ a 24 -> 12 -> 24 MHz rebase a 1.5 MHz ceiling re-picks CLK_PER/16 ->
 CLK_PER/8 -> CLK_PER/16 and the measured SCK stays at 1.5 MHz.
 
 **A caveat of the self-driven-MISO technique** (this desk, not the
-silicon as far as this half can tell): with MISO held HIGH by PORT and a
-TOGGLING pattern on MOSI, what comes back is the pattern rather than
-0xFF - the two halves of the crossed pair run side by side for 20 cm
-into an inert board. A MISO held LOW is immune, and a constant MOSI is
-immune, so every byte-level check in the suite either holds MISO low or
-sends a constant byte. Which of coupling or silicon it is, the second
-board will say.
+silicon): with MISO held HIGH by PORT and a TOGGLING pattern on MOSI,
+what comes back is the pattern rather than 0xFF - the two wires run side
+by side for 20 cm. It is COUPLING, not the peripheral: with a real
+client driving MISO the same reads are exact at every rate inside the
+client's ceiling (test `l`, `m`). A MISO held LOW is immune and a
+constant MOSI is immune, so every byte-level check in the single-board
+half either holds MISO low or sends a constant byte.
+
+### Two boards, one four-wire bus
+
+**Every combination of the client's configuration is exact, both
+directions.** Four transfer modes x two bit orders x all three
+buffering regimes, at CLK_PER/32, with each end checking a deterministic
+stream against what the other end generated (test `l`, 24 combinations).
+CPHA is therefore verified on the wire, not only as an idle level.
+
+**The bit order is an EXACT two-way reversal.** An MSb-first host
+against an LSb-first client reads the bit-reverse of every byte the
+client sent, and the client reads the bit-reverse of every byte the host
+sent - zero mismatches in twelve bytes each way (test `n`). This is the
+check single-board instrumentation cannot make at all, since a reversed
+byte carries exactly as many edges.
+
+**In buffer mode WITHOUT BUFWR the answer stream is led by a DUMMY**,
+and the dummy is the shift register's leftover: over the eight
+combinations of test `l` that used the regime it measured 0x00 every
+time, because `init` leaves the shifter clear. With BUFWR the client's
+first write goes straight to the shifter and byte 0 of the window is
+already the answer.
+
+**The client's rate ceiling is real, and it is the errata's.** Exact at
+CLK_PER/8, /16, /32, /64 and /128 (3 MHz down to 187.5 kHz) against a
+client whose own CLK_PER is 24 MHz. At CLK_PER/4 (6 MHz, above the
+CLK_PER/6 = 4 MHz ceiling of clarification 3.7.3 though inside the
+chapter's own /4) the client miscounted all twelve bytes and the host
+three of twelve; at CLK_PER/2 both directions were wrong in all twelve
+(test `m`). The failure is asymmetric: the client mis-samples MOSI long
+before the host mis-samples MISO.
+
+**A mismatch in CPOL or in CPHA corrupts everything**, twelve bytes of
+twelve in both directions for each (test `n`) - neither degrades
+gracefully.
+
+**The SS rising edge resets the client mid-byte, and the pad stops
+driving with it.** With three clean bytes clocked at CLK_PER/128 and the
+select wire raised half way through the fourth, the client kept exactly
+the three and never saw the fourth (28.3.2.2.3), while the host's own
+byte completed - it is the clock, and SS is only a GPIO to it. What the
+host read for that byte was the top bits of the client's loaded answer
+and then the released line (0xBF where the answer was 0xB6): MISO is
+driven only while SS is low. Test `o`.
+
+**What a client that never drains keeps** (gapless bursts of eight,
+DATA untouched, test `p`):
+
+| regime | retained | which |
+|---|---|---|
+| normal | 1 | the LAST byte - a new one overwrites the unread one |
+| buffer | 3 | the FIRST two (the FIFO) plus the LAST (the shifter) |
+
+**BUFOVF needs the client to have transmit data.** The same eight-byte
+flood with the client's transmitter idle raised no BUFOVF at all - five
+bytes lost in silence - and with the transmitter kept fed it raised it
+(test `p`). That is 28.5.5's own clause, "if there is no transmit data,
+the Buffer Overflow will not be set before the start of a new serial
+transfer", and it means a receive-only client in buffer mode cannot use
+the flag to detect its own losses.
+
+**WRCOL is about the BOUNDARY, not about writing twice.** The same
+client writing the same marker over the answer it had already loaded
+gets opposite results on the two sides of one byte: in the gap the host
+leaves between bytes the write is an ordinary write and is OBEYED - the
+marker goes out in place of the answer - while a write made after SCK
+has left its idle level is IGNORED, the loaded answer goes out intact,
+and WRCOL comes up. With constant streams (host 0x5A, client 0xA5) and
+marker 0x3C the host reads `A5 A5 3C A5 A5 A5 A5 A5`, the marker sitting
+only where the gap write landed (test `p`, byte-identical over five
+runs). A client is therefore never protected by WRCOL from its own
+mistimed writes; it is only protected from writing *into* a transfer.
+
+That also makes the flag hard to CATCH rather than hard to raise:
+reading INTFLAGS and then accessing DATA is the documented clear
+sequence, so any poll loop erases its own evidence - WRCOL has to be
+sampled between the write that caused it and the next DATA access. A
+spin that mixes flag reads with DATA writes can even clear IF the same
+way and lose a whole byte's completion.
+
+**A client that MISSES its load sends back the byte it just received.**
+The shift register is shared between the two directions, so a client
+that writes nothing after a byte has the incoming byte still in it when
+the next transfer starts. With constant streams (host 0x5A, client 0xA5)
+the host read `A5 A5 A5 A5 5A A5 A5 A5` for a load skipped after byte 3
+(test `p`). This is the failure mode of a client too slow for the host's
+inter-byte gap, and it is silent unless the host checks the data.
+
+**A REAL host demotion, and what re-arming needs.** With SSD = 0 and the
+SS pin an input on its pull-up, the other board driving the shared wire
+low cleared MASTER and raised IF (INTFLAGS 0x80), and MASTER stayed
+clear. The demotion follows the LEVEL, not an edge: `restore_host()`
+called while the other board was still holding the wire down left MASTER
+at 0, and only stuck once the wire was released (measured 19 ms later,
+against the peer's 20 ms hold). A post-recovery exchange was exact.
+Test `q`.
+
+**The command channel is a DIVISION of CLK_PER and follows a rebase by
+itself.** Across 24 -> 12 -> 24 MHz on the host with the client left at
+24 MHz, the SCK period measured 32 CLK_PER ticks at every step (750 kHz,
+375 kHz, 750 kHz) and every exchange stayed exact (test `s`).
+
+**The USART's own Host SPI mode talks to this peripheral exactly**, in
+all four phase/polarity combinations and in both bit orders, twelve
+bytes each way at 750 kHz (test `r`). `MspiHost`'s `sample_trailing`
+(UCPHA) and `invert_sck` (the XCK pin's INVEN) map onto `SpiMode`'s CPHA
+and CPOL bit for bit: mode 0..3 = `{invert_sck, sample_trailing}`, and
+`lsb_first` (UDORD) onto DORD. Host SPI has no client select, so the
+client selects itself with INVEN on its own pulled-up SS pin.
 
 ## Not covered yet
 
@@ -259,14 +373,10 @@ board will say.
 
 **Implemented but not bench-verified:**
 
-- everything a second device is needed for: a real client on the wire
-  (both buffer regimes, BUFWR's dummy first byte, the client's
-  CLK_PER/6 ceiling), CPHA against a foreign host, the bit order
-  (`DORD`) - which single-board instrumentation cannot see at all,
-  since a reversed byte carries exactly as many edges - SS deasserted
-  mid-byte resetting a client, multi-host arbitration through a real
-  demotion, and the USART's own Host SPI mode (`MspiHost`) cross-checked
-  against this peripheral;
+- MULTI-HOST arbitration as a protocol: the demotion mechanism is
+  measured on the wire (above), but two hosts actually contending for
+  one bus - and the driver's part in resolving it - is not written and
+  not tested;
 - SPI1 electrically: its pin positions (PC0-PC3, PC4-PC7) are the
   traffic LEDs of this bench, so SPI1 is exercised on route NONE only -
   the register work, not a wire;
@@ -278,4 +388,6 @@ board will say.
   or a pinless DA host lose Host mode with SSD = 0;
 - the electricals of 39.15 / clarification 3.7.3 as timing (setup and
   hold windows, the client's tSOS) - only the frequency ceilings are in
-  the code.
+  the code, and clarification 3.5.2's buffer-mode setup warning near the
+  maximum SCK has not been provoked: the two-board half runs the client
+  well inside its ceiling.

@@ -33,7 +33,10 @@ in their banner, so a console names its own board.
   console apps.
 - Programmer/debugger: one Atmel-ICE per board over UPDI, AVR port,
   6-pin ISP header (pin 2 VCC, 5 UPDI, 6 GND); A's probe is
-  `J42700049508`, B's `J42700051207`.
+  `J42700051207`, B's `J42700049508`. The probe-to-board pairing is the
+  UPDI cable and the console-to-board pairing the USB socket, so both
+  are facts about the desk, not about the chips: `tools/bench_boards.py`
+  is the truth and the USERROW label in each banner is the cross-check.
 
 ## Multi-board bench
 
@@ -87,10 +90,17 @@ $PY tools/bench.py duo A:a B:script.txt # instrument peer scripted, then the DUT
 
 `run` exits nonzero on a timeout or a nonzero fail count, so a suite is
 usable from a script. `duo` (console-scripting the peer) is **still
-unexercised**: the USART campaign commands its peer IN-BAND over the
-link under test (`src/apps/usart_link.hpp`), so the whole matrix runs
-as a plain `run A`. `duo` stays for a campaign whose bus cannot carry
-its own commands.
+unexercised**: both protocol campaigns command their peer IN-BAND over
+the link under test (`src/apps/usart_link.hpp`,
+`src/apps/spi_link.hpp`), so the whole matrix runs as a plain `run A`.
+`duo` stays for a campaign whose bus cannot carry its own commands.
+
+**Today's end state: board A runs `test_avr_spi`, board B runs
+`spi_peer`.** The two SPI halves are meant to coexist - `spi_peer` is a
+dark listener that drives nothing until a checksummed frame has decoded,
+so `test_avr_spi z` scores its full 148 with the peer attached and
+running. Only the USART campaign needs the boards reflashed
+(`test_avr_serial` + `usart_peer`).
 
 ## Wiring (SPI/I2C experiments, 3.3 V rail)
 
@@ -141,7 +151,12 @@ board's input.
 
 For the SPI campaign the same four wires are exactly what a host and a
 client need on SPI0 ALT1: MOSI PE0, MISO PE1, SCK PE2, SS PE3, straight
-across.
+across - no re-jumpering between the two campaigns, and no topology to
+discover either, since an SPI bus is not symmetric. The same three pins
+carry USART4's Host SPI mode (TXD PE0 = MOSI, RXD PE1 = MISO, XCK PE2 =
+SCK), which is how `test_avr_spi r` cross-checks the two peripherals
+against each other; that mode has no client select, so board B's client
+selects itself with INVEN on its own pulled-up PE3.
 
 **Moving between the two is a live operation.** Neither firmware latches
 what it found: the peer believes a topology only while the command
@@ -233,7 +248,8 @@ stays honest because nothing under `lib/brio/src/` knows it exists.
 | `test_avr_pin` | **Bench test suite** (keep passing): PORT - the pin senses counted on self-driven edges, level_low, INVEN, input_disable, the W1C flag discipline, the multi-pin engine across two ports, the Port mask verbs and the slew bit. 22/22 on rev A5. Nothing to wire |
 | `test_avr_rtc` | **Bench test suite** (keep passing): RTC/PIT, 8 tests / 78 verdicts, 78/78 on rev A5 - the counter's period at three prescalers, the compare phase (CMP + 1 ticks), crystal error correction at +-127 ppm, the synchronization busy flags, the first tick after an enable, the PIT and the counter running together, OSC1K as CLK_RTC. A TCB cascade at CLK_PER is the stopwatch and the RTC's own OVF/CMP events latch it: nothing to wire. Takes about two minutes (the correction is measured by averaging) |
 | `test_avr_serial` | **Bench test suite** (keep passing), in two halves. `z` = SINGLE BOARD, 9 tests / 108 verdicts, 108/108 on rev A5 at 5 V: instances and routes including the pinless NONE and the teardown, the whole 36-combination frame-format matrix in loop-back on USART4, the receive FIFO's overflow, the MPCM filter, DRE vs TXC over the three-deep transmit path, the baud generator measured on PE0 through EvPin + a TCB pulse-width meter, a 24 -> 12 -> 24 MHz rebase under traffic, GENAUTO/LINAUTO auto-baud with the errata 2.16.3 recovery, and Host SPI in loop-back. `y` = TWO BOARDS, 12 tests / 110 verdicts, 110/110 when the desk carries the crossed pair; 103/103 on the straight-through wiring the desk has today, where `q` (the synchronous roles) skips itself: the baud and frame matrices across the wire, injected parity/rate/overflow/break errors, bit-banged waveforms (glitch widths, a uniform rate error, one distorted cell, the four ABW windows), auto-baud against board B's own oscillator, MPCM in both flavours, both synchronous roles on a real XCK with the client's CLK_PER/4 ceiling, RS-485's XDIR guard time, IRCOM pulses and the RXPL filter, a clock rebase under real traffic, and the LBME pad probe. Also three tools outside `y`: `v` = the wiring probe (with board B's console `2`), `w` = the one-wire bus (6/6 when the shared wire is fitted; the first two depend on how the desk is jumpered - `w` skips itself on the crossed pair and `q`, the synchronous roles, skips itself on the shared wire), and `x` = the clock comparison: the peer's 0x00 frames put nine hardware-timed bit times of low on the wire, the DUT's pulse-width meter averages sixteen of them (~60000 ticks each, one-tick spread, the div1 short-read corrected), resolving the two crystals' ratio to a few ppm - the boards measure +161..169 ppm apart. On a SHARED line `z` asks board B to stay quiet, re-armed per test - there the peer sits on the DUT's own loop-back; on the crossed pair it cannot disturb a loop-back measurement and nothing is armed |
-| `test_avr_spi` | **Bench test suite** (keep passing): SPI, 10 tests / 148 verdicts, 148/148 on rev A5 at 5 V, single board, NOTHING TO WIRE - routes and teardown including the pinless NONE and the two refusals (SPI1 ALT2 by errata 2.11.1, a pinless host watching SS by DA errata 2.10.1), all seven bit rates measured on SCK through the SPI's own SCK event into a TCB frequency meter (exact, CLK_PER/2 included), the data path with MISO driven by the board's own PORT and MOSI counted through EvPin, the four transfer modes' idle levels, WRCOL and the two clear disciplines, buffer mode's four flags (DREIF's two levels, TXCIF, BUFOVF's deferred rise), host demotion forced through the SS pin's own INVEN, both ISR bodies, a 24 -> 12 -> 24 MHz rebase under a 1.5 MHz SCK ceiling, and the SpiHost engine with both completion styles. Everything runs on SPI0 ALT1 (PE0-PE3) - SPI0's DEFAULT route is the 3.3 V display/MCP3550 cabling and must never be driven at 5 V, and SPI1's positions are the traffic LEDs, so SPI1 is exercised on route NONE only. Board B must be INERT (flash `family_probe`) |
+| `test_avr_spi` | **Bench test suite** (keep passing), in two halves, NOTHING TO WIRE beyond the desk's PORTE link. `z` = SINGLE BOARD, 10 tests / 148 verdicts, 148/148 on rev A5 at 5 V: routes and teardown including the pinless NONE and the two refusals (SPI1 ALT2 by errata 2.11.1, a pinless host watching SS by DA errata 2.10.1), all seven bit rates measured on SCK through the SPI's own SCK event into a TCB frequency meter (exact, CLK_PER/2 included), the data path with MISO driven by the board's own PORT and MOSI counted through EvPin, the four transfer modes' idle levels, WRCOL and the two clear disciplines, buffer mode's four flags (DREIF's two levels, TXCIF, BUFOVF's deferred rise), host demotion forced through the SS pin's own INVEN, both ISR bodies, a 24 -> 12 -> 24 MHz rebase under a 1.5 MHz SCK ceiling, and the SpiHost engine with both completion styles. `y` = TWO BOARDS, 9 tests / 92 verdicts, 92/92, with board B running `spi_peer` as a real client driven in band over the bus itself: the bring-up and the nak, the client matrix (4 transfer modes x 2 bit orders x 3 buffering regimes, exact both ways), the rates inside the client's CLK_PER/6 ceiling and the corruption above it, CPOL/CPHA mismatches and the bit order as an exact two-way reversal, the select wire raised mid-byte, a client that never drains (the normal-mode survivor, buffer mode's BUFOVF condition, the client's WRCOL, the echo a missed load produces), a REAL host demotion driven by board B, USART4's Host SPI mode against this peripheral, and a rebase under two-board traffic. `z` passes with the peer attached: `spi_peer` is dark until addressed. Everything runs on SPI0 ALT1 (PE0-PE3) - SPI0's DEFAULT route is the 3.3 V display/MCP3550 cabling and must never be driven at 5 V, and SPI1's positions are the traffic LEDs, so SPI1 is exercised on route NONE only |
+| `spi_peer` | The INSTRUMENT half of the SPI campaign, for board B: one blocking loop that shifts whatever the DUT clocks, decodes a command frame off SPI0 ALT1, acknowledges it and becomes for a bounded moment whatever the DUT needs at the other end - a client in any transfer mode, bit order and buffering regime; a client that never drains, or one that misses a load on purpose; a second driver on the shared select wire (the only way to demote a real host); a self-selecting client for USART Host SPI. It is a DARK LISTENER: it drives MISO for exactly one answer window, entered only after a frame that checked out, so it can stay on the desk while the DUT runs its single-board half. Console (observability only): `?` help, `i` status and counters, `0` back to the dark client, `3` command trace |
 | `usart_peer` | The INSTRUMENT half of the USART campaign, for board B: one blocking loop that decodes a command frame off the link, acknowledges it and becomes for a bounded moment whatever the DUT needs on the other end - echo, silent sink, generator, full-rate flood, break, foreign auto-baud sender, cycle-counted bit-banger (a stretched bit cell, sub-bit glitches), one-wire responder. Every mode-changing command carries a frame count and a deadline after which the peer restores command mode by itself. Console (observability only): `?` help, `i` status and counters, `0` command mode, `1` one-wire standby, `2` wiring probe, `3` command trace |
 | `sampler` | The ADC inside the kernel: `AnalogSampler` over ADC0 walking PD1 (the DAC loop), die temperature and VDD/10, published to a Monitor (one line a second) and an Alarm (LED PF2 above a threshold); console DAC/PACE HW|SW|OFF/ALARM/CLOCK/STAT. Bench: 512 samples/s (PIT/64) with no queue drops, 128/s default, CLK_ADC follows CLOCK 4M/24M under sampling |
 | `traffic0` | The over-commented AO learning testbed: 4 buttons -> 4 RGB lamps, one AO per role, publish for button facts |

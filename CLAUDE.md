@@ -400,7 +400,36 @@ gets its dated home in `docs/design/` when taken.
   CHANGE found by the wiring probe: PORTE is now wired STRAIGHT THROUGH
   (A.PEn - B.PEn, n = 0..3), not crossed - so test_avr_serial y is
   103/103 with q skipping itself, w is 6/6, and S2's host/client link
-  needs no re-jumpering. -> CCL -> AC ->
+  needs no re-jumpering. SPI phase S2 DONE (two-board half): spi_peer
+  on B driven IN-BAND over the SPI bus itself (src/apps/spi_link.hpp:
+  magic 0xB8, checksum, bounded actions; the peer is a DARK LISTENER -
+  MISO driven only for one answer window after a checksummed frame
+  decodes, so test_avr_spi z scores its 148 with the peer attached);
+  test_avr_spi grew k..s, y = 92/92. Findings in spi.md: the client
+  matrix (4 modes x dord x 3 regimes) exact both ways at div32; the
+  buffer-no-BUFWR dummy is the shifter (0x00 after init); the client
+  ceiling is the errata's CLK_PER/6 with OBSERVED asymmetric
+  corruption at /4 and /2 (client mis-samples first); CPOL/CPHA
+  mismatches corrupt totally, DORD mismatch = exact two-way bit
+  reversal; SS raised mid-byte resets the client and un-drives its
+  pad; an undrained normal-mode client keeps the LAST byte, buffer
+  keeps FIFO-first-two + shifter-last; BUFOVF needs transmit data
+  (28.5.5) so a receive-only buffered client cannot see its losses; a
+  missed load echoes the received byte (shared shifter); WRCOL is
+  about the BOUNDARY - a mid-transfer write is ignored (WRCOL, frame
+  intact), an in-gap write is accepted (a race first seen as a flaky
+  verdict, pinned by having the peer watch its own SCK leave the CPOL
+  idle before writing; NB a spin mixing INTFLAGS reads with DATA
+  writes clears IF and loses completions); a REAL demotion by B
+  driving shared SS follows the LEVEL (restore_host does not stick
+  while the wire is held); MspiHost vs a real SPI client exact in all
+  four modes and both orders (SpiMode = {invert_sck, sample_trailing}
+  bit for bit) - usart.md's MSPI deferral closed; rebase 24->12->24
+  under two-board traffic exact. One driver fix, usart.hpp:
+  MspiHost::release now clears the XCK INVEN that invert_sck set (a
+  PORT bit the resource teardown cannot know; bench-proven to invert
+  the next owner's SCK). serial z 108/108 after the edit; family +
+  native green. End state: A = test_avr_spi, B = spi_peer. -> CCL -> AC ->
   ADC/DAC/VREF -> CLKCTRL (DA must compile) -> EVSYS tables. Phase 2,
   never-reviewed: USART
   (jumper cross-loopback, new suite test_avr_serial) -> SPI (host ->

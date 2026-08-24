@@ -63,19 +63,22 @@ BOARDS = {
     "A": {
         # The original bench board: AVR128DB48, 24 MHz crystal on PA0/PA1,
         # CH340 on USART2 ALT1 (PF4/PF5). See docs/bench.md.
+        # Office desk mapping (probe/console pairs verified by resetting the
+        # chip over UPDI and watching which console prints its boot banner:
+        # the banner names the board by its USERROW id).
         "board": "db48",
         "id": "brio-a",
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1:1.0-port0",
-        "programmer": {"type": "atmelice_updi", "serial": "J42700049508"},
+        "console": "/dev/serial/by-path/pci-0000:67:00.3-usb-0:1:1.0-port0",
+        "programmer": {"type": "atmelice_updi", "serial": "J42700051207"},
     },
     "B": {
         # The instrument peer: a second AVR128DB48 board with its own
-        # Atmel-ICE. Mapping verified by holding the chip in programming
-        # mode and watching this console pause.
+        # Atmel-ICE. Same verification as A; note the probes swapped
+        # boards in the office move - trust the banner, not habit.
         "board": "db48",
         "id": "brio-b",
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0",
-        "programmer": {"type": "atmelice_updi", "serial": "J42700051207"},
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:2:1.0-port0",
+        "programmer": {"type": "atmelice_updi", "serial": "J42700049508"},
     },
 }
 

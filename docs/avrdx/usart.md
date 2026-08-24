@@ -4,9 +4,9 @@
 > and almost everything is now bench-verified against a second board -
 > cross frame formats, injected errors, a foreign auto-baud sender, both
 > synchronous roles on a real XCK, RS-485 drive-enable timing, IrDA
-> pulses, MPCM and the one-wire bus. What is still unmeasured is Host SPI
-> against a real client, standby operation, and a handful of routes. The
-> list is in "Not covered yet".
+> pulses, MPCM and the one-wire bus, and Host SPI against a real SPI
+> client. What is still unmeasured is standby operation and a handful of
+> routes. The list is in "Not covered yet".
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (USART
 chapter 27, PORTMUX chapter 17, electricals 39.14), errata
@@ -105,7 +105,7 @@ tasks speak hertz and are `ClockUser`s.
 | `OneWire<n, route>` | `available`, `init(clock, baud, fmt)`, `talk()`/`listen()`, `line()`, `echo_matches(sent)` |
 | `Rs485<n, route>` | `available`, `init(clock, baud, fmt, one_wire)`, `drive_enable()`, `guard_bits` |
 | `SyncHost<n, route>` / `SyncClient<n, route>` | `available`, `init(...)`, `clock_pin()`, `invert_xck(bool)` (host), `max_xck_hz(hz)` (client) |
-| `MspiHost<n, route>` | `available`, `init(clock, sck_hz, {lsb_first, sample_trailing, invert_sck})`, `transfer(byte)` |
+| `MspiHost<n, route>` | `available`, `init(clock, sck_hz, {lsb_first, sample_trailing, invert_sck})`, `transfer(byte)`, `release()` (the resource's, plus the XCK pin's INVEN) |
 | `IrdaLink<n, route>` | `init(clock, baud, tx_pulse, rx_pulse, fmt)`, `receive_on(channel)`, `max_baud` |
 | `AutoBaud<n, route>` | `init(clock, fallback, Kind, window, fmt)`, `arm_break()`, `break_detected`/`clear_break`, `sync_error()`, `recover()`, `measured_baud_reg`/`measured_baud(hz)`, `poll()` |
 
@@ -430,9 +430,21 @@ bus (6/6 on the shared-line desk; it skips itself on the crossed pair).
   received all 96 with an exact checksum and zero FERR, PERR and BUFOVF.
 - **Host SPI runs in loop-back in all four phase/order combinations**
   and the rate is exactly CLK_PER / (2 x BAUD[15:6]).
-- **`release()` really releases**: PORTMUX reads NONE again and the TXD
-  pin's direction bit is back to input, so another peripheral can take
-  the position.
+- **Host SPI talks to a real SPI client exactly**, in all four
+  phase/polarity combinations and in both bit orders, twelve bytes each
+  way at 750 kHz - `MspiHost` on USART4 (TXD PE0, RXD PE1, XCK PE2)
+  against `avrdx/spi.hpp`'s client on SPI0 ALT1, straight across the
+  desk's PORTE link (`test_avr_spi` test `r`). `sample_trailing` (UCPHA)
+  and `invert_sck` map onto the SPI chapter's CPHA and CPOL bit for bit,
+  so `SpiMode` 0..3 = `{invert_sck, sample_trailing}`, and `lsb_first`
+  (UDORD) onto DORD. There is no client select in this mode: the client
+  at the other end has to select itself.
+- **`release()` really releases**: PORTMUX reads NONE again, the TXD
+  pin's direction bit is back to input, and `MspiHost::release()` also
+  clears the INVEN `invert_sck` put on the XCK PIN - a PORT bit the
+  resource's own teardown cannot know about. Measured the hard way: with
+  it left set, an SPI host that took the same position afterwards
+  clocked the opposite polarity and its client stopped decoding.
 
 ### Two facts about the flags that shape half-duplex code
 
@@ -474,8 +486,6 @@ Driver gaps (not implemented):
 Implemented and compile-checked for all eight DA/DB packages, but NOT
 bench-verified:
 
-- **Host SPI electrically** - deferred to the SPI campaign, where a real
-  client will compare it against `avrdx/spi.hpp`;
 - **start-of-frame detection from a real standby** (needs a sleeping
   app), and with it the RXSIF path;
 - **`DBGCTRL.DBGRUN`**;
