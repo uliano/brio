@@ -99,9 +99,14 @@ Facts that matter to code:
   Periodic interrupt with TOP lowered below CNT: the counter goes on
   to MAX, OVF fires, restarts - an OVF ISR is the safety net when TOP
   is changed on the fly.
-- `RUNSTDBY` keeps it counting in standby; `DBGRUN` keeps it running
-  under a debugger halt (default: halted and blind to events - a
-  single-shot under PyAvrOCD stops with the CPU).
+- `RUNSTDBY` keeps it counting in standby, and that ONE bit is the
+  whole chain: the request it makes keeps CLK_PER - and the oscillator
+  behind it - running through the sleep, whatever the oscillator's own
+  `RUNSTDBY` says, and a TCB interrupt then wakes the CPU by itself.
+  Without it the counter freezes however the clock is configured
+  (measured both ways: [platform.md](platform.md)). `DBGRUN` keeps it
+  running under a debugger halt (default: halted and blind to events -
+  a single-shot under PyAvrOCD stops with the CPU).
 - **Errata 2.13.1 (A4/A5)**: in PWM8 the CCMP and CNT bytes are not
   independent - write CCMP as one 16-bit value (period and duty
   together), never byte-wise.
@@ -269,9 +274,8 @@ or implements wrongly):
   device tables.
 Implemented but not bench-verified:
 
-- RUNSTDBY under a real standby (no sleeping app yet); DBGRUN under
-  a halt; TCB4 and the 28/32-pin builds (compile-verified for every
-  package, no such part on the bench).
+- DBGRUN under a halt; TCB4 and the 28/32-pin builds
+  (compile-verified for every package, no such part on the bench).
 - The ALT1 positions of TCB0/TCB1 (PF4/PF5 are the console; the ALT1
   mechanism itself is verified on TCB2 - moving the console to free
   them is a wiring job, queued).

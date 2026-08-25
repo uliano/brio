@@ -4,9 +4,10 @@
 > and almost everything is now bench-verified against a second board -
 > cross frame formats, injected errors, a foreign auto-baud sender, both
 > synchronous roles on a real XCK, RS-485 drive-enable timing, IrDA
-> pulses, MPCM and the one-wire bus, and Host SPI against a real SPI
-> client. What is still unmeasured is standby operation and a handful of
-> routes. The list is in "Not covered yet".
+> pulses, MPCM and the one-wire bus, Host SPI against a real SPI client,
+> and start-of-frame detection out of a real standby. What is still
+> unmeasured is a handful of routes and two DBGRUN-class knobs; the LIN
+> protocol layer is not built. The list is in "Not covered yet".
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (USART
 chapter 27, PORTMUX chapter 17, electricals 39.14), errata
@@ -197,7 +198,9 @@ if (Ab::sync_error()) Ab::recover();          // errata 2.16.3
 else if (Ab::break_detected()) rate = Ab::measured_baud(brio::clock_hz(clock));
 ```
 
-Waking from standby on a start bit (the SFDEN erratum's discipline):
+Waking from standby on a start bit (the SFDEN erratum's discipline).
+The rate has to be slow enough that the line is still LOW when the main
+clock is back - see the bench findings, which measure exactly that:
 
 ```cpp
 U::arm_start_of_frame();            // ONLY just before sleeping
@@ -446,6 +449,56 @@ bus (6/6 on the shared-line desk; it skips itself on the crossed pair).
   it left set, an SPI host that took the same position afterwards
   clocked the opposite polarity and its client stopped decoding.
 
+### Start-of-frame detection out of a real standby
+
+Measured by `test_avr_sleep` (set `y`, 10 verdicts on this alone) rather
+than by `test_avr_serial`: it needs a device that is genuinely asleep,
+and that suite owns the sleep modes. Board B sends one commanded byte at
+a commanded rate on the shared one-wire link while board A waits in
+Standby with `SFDEN` armed and `RXSIE` on. Three main-clock restart
+times are swept - a crystal (1.77 ms), OSCHF with the regulator asleep
+(313 us) and OSCHF with `PMODE = FULL` (23.6 us), all measured in
+platform.md.
+
+- **It works through LBME.** The detector listens to whatever the
+  receiver listens to, so on this desk - one wire between the two TXD
+  pads - it is the TXD PAD that wakes the device. That is a fact of this
+  wiring, not a promise of chapter 27.
+- **With the main clock kept alive, a start bit wakes the device at
+  every rate and the WAKING FRAME survives**: 9600, 115200 and 460800
+  all wake and all deliver the byte intact.
+- **THE DETECTOR DOES NOT LATCH AN EDGE. It needs the line still LOW
+  when the peripheral clock comes back.** 27.3.4.2 says the transition
+  "powers the oscillator up" and that the frame can be received
+  "provided that the baud rate is slow enough concerning the oscillator
+  start-up time"; the bench splits that into two independent facts by
+  sending 0xFF (which holds the line low for the start bit ALONE) and
+  0x00 (nine bit times of low) against each restart time:
+
+  | restart | rate | low time | 0xFF | 0x00 |
+  |---|---|---|---|---|
+  | 23.6 us | 115200 | 8.7 us / 78 us | no wake | WAKES |
+  | 313 us | 9600 | 104 us / 938 us | no wake | WAKES |
+  | 1.77 ms | 2400 | 417 us / 3.75 ms | no wake | WAKES |
+
+  So a slow-restarting device wakes or not depending on the BYTE's own
+  bit pattern - `RXSIF` is set when the clock returns onto a line that
+  is still low, whether that low is the start bit or a run of zero data
+  bits. A frame of all ones at a fast rate never wakes it at all.
+- **The frame survives only if the clock is back before the MIDDLE of
+  the start bit**, where the receiver takes its sample: 23.6 us against
+  a 52 us half-bit at 9600 gives an intact byte, while every wake that
+  landed later delivered a garbled one (0xE0 for a transmitted 0x00).
+- **From IDLE, `RXSIF` never fires.** 27.5.5 says the flag is set when
+  the device is in Standby, and it means it: the same leg from Idle
+  wakes on nothing and simply receives the byte normally through
+  `RXCIF`. Start-of-frame detection buys nothing in Idle, where the
+  receiver is running anyway.
+- **`SFDEN` is a verb, and the discipline holds**: armed immediately
+  before the sleep, disarmed as the first thing after it, with no
+  `RXDATA` read in between (errata 2.16.2). The frame is read only once
+  the flag is down.
+
 ### Two facts about the flags that shape half-duplex code
 
 - **RXCIF is raised half a bit BEFORE the sender's TXCIF** - at the
@@ -486,8 +539,6 @@ Driver gaps (not implemented):
 Implemented and compile-checked for all eight DA/DB packages, but NOT
 bench-verified:
 
-- **start-of-frame detection from a real standby** (needs a sleeping
-  app), and with it the RXSIF path;
 - **`DBGCTRL.DBGRUN`**;
 - **the IRCOM receiver fed from an event channel** (`EVCTRL.IREI`);
 - **routes**: USART0 ALT1, USART1 default, USART3 ALT1 and USART4

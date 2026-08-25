@@ -55,9 +55,10 @@ Facts that matter to code:
   drops every other LUT meanwhile - a driver must build the complete
   configuration first and enable once; a runtime change of one LUT is
   a glitch on all of them. Changing a clock source also wants the CCL
-  disabled. On A4/A5 the CCL interrupt wakes the device from standby
-  only when the LUT path is fully asynchronous (no filter, no edge
-  detector - the errata document's sleep clarification).
+  disabled. The errata document's sleep clarification adds that the CCL
+  interrupt wakes the device from POWER-DOWN only when the LUT path is
+  fully asynchronous (no filter, no edge detector); the bench refines
+  that into a statement about the LUT's CLOCK - see the findings.
 - **Clock (`CLKSRC`)** per LUT, used by the filter, the edge detector
   and (from the even LUT) the sequencer: CLK_PER, the LUT's own
   TRUTHSEL[2] input (then input 2 is seen as low in the truth table),
@@ -169,6 +170,26 @@ counted by a TCB clocked by LUT4's output event - a one-CLK_PER pulse
 is a valid COUNT input); `SEQCTRL` must be written before the even LUT
 is enabled (see above).
 
+### The CCL as a wake-up source
+
+`test_avr_sleep` test n (A5, no wires): a PIT divider through the event
+system is the one signal that survives every sleep mode, so a LUT fed
+from it and interrupting on its own output edge is a wake-up source the
+board builds for itself. A 1 s PIT interrupt is the backstop, and which
+source ENDED each sleep is read off the counts taken inside the sleep.
+
+- **From STANDBY, a clocked and FILTERED LUT wakes the device** with
+  `Ccl::enable(true)` (RUNSTDBY): the backstop never fires.
+- **From POWER-DOWN, the fully asynchronous path wakes it** - FILTSEL =
+  0, EDGEDET = 0 - which is the errata clarification's own case.
+- **AND SO DOES A FILTERED LUT CLOCKED FROM OSC32K.** The restriction is
+  really about which clock the LUT was given: the 32 kHz domain is
+  exactly what power-down keeps running for the PIT, so a filter on it
+  keeps filtering. The same LUT clocked from CLK_PER does NOT wake -
+  that clock is gone and the backstop ends the sleep, with one CCL
+  interrupt following once CLK_PER is back and the frozen filter catches
+  up.
+
 ## Not covered yet
 
 Driver gaps:
@@ -183,7 +204,7 @@ Implemented but not bench-verified:
   clock.
 - The peripheral inputs beyond events, pins, TCA WO and AC (TCB WO,
   USART, SPI: the menu is typed, no test drives them).
-- `LutClock::input2` and OSC1K; RUNSTDBY (queued, LOW priority -
-  including the A4/A5 wake-only-if-asynchronous clarification).
+- `LutClock::input2` and OSC1K. (RUNSTDBY and the wake-up clarification
+  are bench-verified above.)
 - A slow-domain-proof stamp protocol (the OSC32K delay measurement
   is single-shot today: a back-to-back repeat races the re-arm).

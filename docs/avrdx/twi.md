@@ -12,11 +12,12 @@
 > client, injected address and data NACKs, multi-host arbitration with
 > ARBLOST positively observed on both sides, the collision case S4, bus
 > recovery against a really stuck SDA, a General Call answered by two
-> chips, and the three speeds against a real device. What is left is
-> 10-bit addressing beyond the recognition note, the sleep and debug-run
-> paths, SMBus input levels as an electrical fact, the timings of 39.16,
-> and multi-host as a driver POLICY - arbitration is measured, a policy
-> layer is not designed. The list is in "Not covered yet".
+> chips, the three speeds against a real device, and a client that wakes
+> its chip on the address match. What is left is 10-bit addressing beyond
+> the recognition note, the debug-run path, SMBus input levels as an
+> electrical fact, the timings of 39.16, and multi-host as a driver
+> POLICY - arbitration is measured, a policy layer is not designed. The
+> list is in "Not covered yet".
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TWI
 chapter 29, PORTMUX chapter 17, electricals 39.16), errata DS80000915F
@@ -551,6 +552,28 @@ mechanism was not isolated and no verdict rests on it.)
 MBAUD moved 115 -> 55 -> 115, `actual_scl_hz` stayed at 100 kHz, and
 every exchange across the wire was exact.
 
+**A CLIENT WAKES ITS CHIP ON THE ADDRESS MATCH, AND THE WIRE PAYS FOR
+IT.** Measured by `test_avr_sleep` test m, which owns the sleep modes:
+this board is a client at 0x42 on the same office bus while board B
+writes three bytes at 100 kHz, and B times the whole tenure on its own
+32-bit counter. Awake, the tenure is **418.7 us**. Out of STANDBY with
+the main clock kept alive it is **418.7 us again** - the wake costs
+1.8 us and an SCL bit at 100 kHz is 10 us, so it is invisible on the
+wire. Out of POWER-DOWN with a crystal main clock it is **2197 us**,
+which is that same 418.7 us plus the 1.78 ms the crystal takes to
+restart (platform.md measures it independently on a pin). The frame
+arrives intact in all three cases: 29.3.5's promise that the address
+match logic runs in every sleep mode and stretches the clock during
+wake-up is exactly what the numbers show, and the stretch is paid by the
+HOST, on the bus, for as long as the client's chip takes to come back.
+
+The other half of the same finding is a rule for anything that sleeps
+with a client enabled: **only the ADDRESS MATCH is a wake-up source**.
+The data interrupts that carry the rest of the frame are not, so a
+program that goes back to sleep after servicing the match stalls the
+tenure with the host holding SCL - observed as a host timeout with two
+of three bytes delivered. Stay awake from the match to the closing STOP.
+
 **A desk fact, not a silicon one**: TWI1's dual pair PB2/PB3 would make
 a third tap of this bus - the suite drives PB2 low and prints whether the
 SDA node follows, instead of assuming either way.
@@ -583,9 +606,7 @@ implement):
   apart on the wire;
 - SMBus as an ELECTRICAL fact: CTRLA/DUALCTRL.INPUTLVL is exposed and
   written, but the input transition level itself is not measured;
-- DBGCTRL.DBGRUN, and the sleep behaviour of 29.3.5 (the address match
-  logic runs in every sleep mode and stretches the clock during
-  wake-up);
+- DBGCTRL.DBGRUN;
 - the timings of electricals 39.16 as numbers;
 - TWI1, and every route other than TWI0 DEFAULT/ALT1/ALT2, are compiled
   for all eight packages and refused where they must be, but only TWI0's

@@ -197,6 +197,18 @@ TcdPwm<TcdRoute::def>::init(clock, {.clock = TcdClock::pll, .source_hz = 48'000'
   nobody requests it, RUNSTDBY notwithstanding - the status follows the
   REQUEST, as the register note says of the signal; it reads 1 whenever
   OSCHF is the main clock. PLLS stays 0 without a requester (the TCD).
+- **An oscillator's RUNSTDBY, measured through sleep** (`test_avr_sleep`,
+  numbers in [platform.md](platform.md)): with the bit CLEAR the
+  oscillator really does run only when requested, so an enabled XOSCHF
+  whose RUNSTDBY is 0 never reports stable while another source drives
+  CLK_PER - selecting it IS the request, and the switch is what starts
+  it. With the bit SET it costs nothing to wake from a standby sleep;
+  with it clear the restart costs 1.45 ms on this board's 24 MHz
+  crystal and 302 us on OSCHF - of which ~270 us is the voltage
+  regulator, not the oscillator (`SLPCTRL.VREGCTRL.PMODE = FULL`
+  removes it and leaves the data sheet's 24-30 us). That is what the
+  task's hard-wired RUNSTDBY buys, and what it costs is standby
+  current.
 - `Uart::rebase` needs TWO frame times after DREIF before the clock
   may change (measured: one frame plus 1 us corrupts the last byte at
   several rates) - the contract is stated in [usart.md](usart.md).

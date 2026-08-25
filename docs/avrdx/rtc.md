@@ -1,11 +1,12 @@
 # RTC / PIT - the real-time counter and periodic interrupt timer (AVR DA/DB)
 
 > **PROVISIONAL.** The chapter's register description is covered in
-> full and bench-verified on the internal oscillator; what remains is
-> what this bench cannot reach - the 32.768 kHz crystal and the
-> external clock (neither is fitted on the board), the standby and
-> debug-run paths (no sleeping app, no halted CPU in a suite). The
-> list is in "Not covered yet".
+> full and bench-verified on the internal oscillator, standby and
+> power-down included; what remains is what this bench cannot reach -
+> the 32.768 kHz crystal and the external clock (neither is fitted on
+> the board), the debug-run paths (no halted CPU in a suite) and the
+> tasks that would drive an application through a sleep. The list is
+> in "Not covered yet".
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (RTC
 chapter 26), errata DS80000915F and, for the DA parts, DS80000882C -
@@ -16,7 +17,8 @@ standby-running RTC on the crystal needs another user of that clock.
 Drivers: `avrdx/rtc.hpp` (`RtcClock`, `Rtc`, `Pit`) and
 `avrdx/ticker.hpp` (`BasicTicker`, `Ticker`). Reference test:
 `test_avr_rtc`; the PIT dividers as event generators are also
-exercised by `test_avr_timer`.
+exercised by `test_avr_timer`, and both halves in sleep by
+`test_avr_sleep`.
 
 ## What the silicon does
 
@@ -69,9 +71,15 @@ Facts that matter to code:
   config form and with a `false` at run time.
 - **Sleep**: the counter runs in idle, and in standby only with
   RUNSTDBY; the PIT runs in every sleep mode, power-down included
-  (26.9). Under a halted CPU each half keeps running only with its own
-  DBGRUN; with the PIT's clear, a break taken while its output is high
-  costs one extra interrupt on resume (26.11).
+  (26.9). Both halves are bench-proven there, and so is the asymmetry:
+  in POWER-DOWN the counter stops even with RUNSTDBY set while its PIT
+  goes on interrupting. One trap comes with it - CNT read at the
+  INSTANT of a wake still carries the value it had at the SLEEP
+  instruction, because the read is synchronized into CLK_PER (26.10)
+  and that path needs the clock back plus a CLK_RTC edge; a millisecond
+  later it is right. Under a halted CPU each half keeps running only
+  with its own DBGRUN; with the PIT's clear, a break taken while its
+  output is high costs one extra interrupt on resume (26.11).
 - **Events** (26.7): the counter's OVF and CMP are pulses on the
   conditions that raise the flags; the PIT's divided clocks
   (PIT_DIV64..DIV8192) are free-running levels off the same chain. Both
@@ -222,9 +230,12 @@ Implemented but not bench-verified:
   carries the 24 MHz crystal), so both codes are driver surface and
   family-compile coverage only. `Ticker::preferred()` picks the crystal
   when CLKCTRL reports one running - that branch has never fired here.
-- `RUNSTDBY` on the counter and the PIT as a power-down wake-up: the
-  bits read back as written, no suite sleeps yet (queued with the
-  standby pass).
+- The counter's `RUNSTDBY` and the PIT as a wake-up source are proven
+  in standby and in power-down by `test_avr_sleep` (findings in
+  [platform.md](platform.md)); what no suite has staged is the RTC
+  driving an application THROUGH a sleep - an alarm or a slow periodic
+  that survives standby is a task this driver deliberately does not
+  have yet.
 - `DBGCTRL` / `PITDBGCTRL`: the bits read back as written; the extra
   PIT interrupt on resuming from a break with DBGRUN clear (26.11) is
   a debugger-in-the-loop experiment, not a suite verdict.

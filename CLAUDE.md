@@ -239,6 +239,26 @@ gets its dated home in `docs/design/` when taken.
   sugar gets its first user there) -> TCD. Datasheet DS40002247B chapters: EVSYS 16, PORTMUX 17,
   VREF 21, TCA 23, TCB 24, TCD 25, CCL 31, AC 32, ADC 33, DAC 34
   (errata F: ADC, DAC, CCL 2.4, TCA 2.12, TCB 2.13, TCD 2.14 items).
+- **Sleep pass DONE 2026-08-25** (both phases in one day, B's dead
+  crystal notwithstanding - the peer runs on OSCHF): avrdx/sleep.hpp
+  (Sleep arm/disarm/sleep/enter with the errata-2.2.4 NOP; Vreg PMODE
+  under CCP, HTLLEN refusing while TWI client/CCL are enabled) + NEW
+  SUITE test_avr_sleep z 72/72 (single-board) and y 49/49 (two-board,
+  sleep_peer on B: PE0 one-wire commands, PE2 stimulus, PE3 echo into
+  B's hardware TCB capture). Findings in platform.md: the peripheral's
+  RUNSTDBY alone revives its whole clock chain; an oscillator's
+  RUNSTDBY buys wake latency only; the regulator is a separate ~290 us
+  bill and AUTO drops it only when OSC32K is the last clock left (so
+  PMODE moves nothing beside a live crystal, everything in PD: 313 vs
+  24 us OSCHF); crystal restart 1.77 ms in both deep modes; RTC.CNT
+  stale ~1 ms at wake; SFD does not latch (line must still be low when
+  the clock returns; the frame survives only if the clock is back by
+  mid-start-bit; RXSIF never fires from Idle) - usart.md's deferral
+  closed; TWI: only the ADDRESS MATCH wakes, a standby client's
+  tenure is not measurably stretched, PD adds the crystal restart;
+  CCL PD wake follows the LUT's CLOCK (OSC32K-clocked filtered LUT
+  wakes). Remaining (platform.md "Not covered yet"): MVIO/BOD-VLM
+  wakes, sleep current, the power-manager AO (util pass).
 - **Low-level review track (planned 2026-08-20, full plan in memory
   low-level-review-plan).** Everything in avrdx/ gets the Working
   discipline treatment, device by device. Phase 0 DONE 2026-08-20:
@@ -769,6 +789,11 @@ lib/brio/src/            the framework, four strata:
     reset.hpp              RSTCTRL + WDT: Reset (RSTFR flags read-and-clear,
                            software reset) and Watchdog (PERIOD/WINDOW, WDR,
                            SYNCBUSY, the one-way LOCK)
+    sleep.hpp              SLPCTRL: Sleep (arm/disarm/sleep/enter, the three
+                           modes, the errata-2.2.4 NOP discipline) and Vreg
+                           (PMODE under CCP, HTLLEN with the TWI/CCL
+                           interlock enforced) - mechanism only, policy is a
+                           future power-manager AO's
     pin.hpp                Pin<'A',5> compile-time GPIO (also a PwmChannel,
                            max 1) + PinRef descriptor + PinSet<Pins...> mask
                            + port_by_letter/pinctrl_of (run-time port lookup)

@@ -1,11 +1,13 @@
 # Platform - what the kernel stands on (AVR DA/DB)
 
-> **PROVISIONAL.** The three blocks this page covers - SLPCTRL,
-> RSTCTRL and the WDT - are described in full and every claim below is
-> measured, but only ONE of the three sleep modes is exposed: `idle()`
-> uses IDLE, and Standby / Power-Down (with the voltage regulator knobs
-> that go with them) belong to a power-management pass that does not
-> exist yet. The list is in "Not covered yet".
+> **PROVISIONAL.** The four blocks this page covers - SLPCTRL, its
+> voltage regulator, RSTCTRL and the WDT - are described in full and
+> every claim below is measured, wake-up latencies included. What is
+> missing is not mechanism but POLICY and the measurements this desk
+> cannot make: the power-manager active object that would decide when
+> an application may stop its clocks, the BOD's voltage-level monitor
+> and MVIO as wake-up sources, and the sleep CURRENT, which needs a
+> bench supply and not a stopwatch. The list is in "Not covered yet".
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B -
 SLPCTRL chapter 13, RSTCTRL chapter 14, WDT chapter 22, the CPU's
@@ -15,8 +17,9 @@ of those chapters' tables) and, for the DA parts, DS80000882C, which
 lists no SLPCTRL, WDT or CPU item at all. Drivers:
 `avrdx/platform_avr.hpp` (`AvrPlatform`, this target's realization of
 the kernel's `Platform` concept), `avrdx/delay.hpp` (the short-wait
-role) and `avrdx/reset.hpp` (`Reset`, `Watchdog`). Reference test:
-`test_avr_platform`.
+role), `avrdx/sleep.hpp` (`Sleep`, `Vreg`) and `avrdx/reset.hpp`
+(`Reset`, `Watchdog`). Reference tests: `test_avr_platform` and
+`test_avr_sleep`.
 
 These are not peripheral drivers in the tasks-over-resources sense:
 they are the services the kernel names in `kernel/platform.hpp` and
@@ -30,13 +33,49 @@ the next boot finds out why.
 **Sleep (SLPCTRL, 13).** One register arms it: `CTRLA.SMODE` picks
 IDLE / STANDBY / PDOWN and `CTRLA.SEN` enables the SLEEP instruction.
 Arming alone does nothing - "the SLEEP instruction must be executed to
-make the device go to sleep" (13.3.1). In IDLE the CPU stops and
-nothing else does: every peripheral runs and every interrupt source
-wakes (13.3.3.1). Waking costs six CLK_PER cycles (13.3.3.2, measured
-below). `CTRLA` is **not** under CCP - only `VREGCTRL` is (13.3.5).
-The register file and SRAM are kept through sleep (13.2), and a
-debugger break wakes the device whether or not an interrupt is pending
-(13.3.4).
+make the device go to sleep" (13.3.1), and the wake-up sources must be
+configured and enabled, with global interrupts on, BEFORE it runs: with
+no enabled interrupt that reaches the armed mode, only a reset comes
+back. `CTRLA` is **not** under CCP - only `VREGCTRL` is (13.3.5). The
+register file and SRAM are kept through sleep (13.2), and a debugger
+break wakes the device whether or not an interrupt is pending (13.3.4)
+- which is why a sleep observed under a debug session is not the sleep
+the silicon does on its own.
+
+The three modes differ in what keeps its clock and in what may wake it.
+**Tables 13-2, 13-3 and 13-4 are rewritten by errata DS80000915F
+clarification 3.4.1**; what follows is the clarified version.
+
+| | IDLE | STANDBY | POWER-DOWN |
+|---|---|---|---|
+| Runs | everything but the CPU | WDT, BOD, EVSYS, NVM always; RTC, CCL, AC, ADC, DAC, OPAMP, TCA, TCB only with their own `RUNSTDBY`; never the TCD's clock | PIT, WDT, sampled BOD, EVSYS - and nothing else, the RTC's COUNTER included |
+| Main clock | runs | only if something requests it | stopped |
+| Wakes on | any interrupt | PORT pin (async configuration), BOD VLM, MVIO, RTC (counter functions with `RUNSTDBY`), TWI address match, CCL (`RUNSTDBY`), USART start-of-frame, TCA/TCB/ADC/AC left running | PORT pin, BOD VLM, MVIO, PIT, TWI address match, CCL only when fully asynchronous (`FILTSEL` = 0, `EDGEDET` = 0) |
+| Wake time | 6 CLK_PER cycles | + oscillator and regulator start-up | + the longer power-down start-ups |
+
+`VREGCTRL.HTLLEN` (high-temperature low leakage, Power-Down only) cuts
+that last column further, to the PORT pin, BOD VLM, MVIO and the PIT:
+chapter 13 requires the TWI address-match and CCL wake-ups to be
+disabled while it is set, "to avoid unpredictable behavior".
+`VREGCTRL.PMODE` chooses the regulator's profile - AUTO ("Normal": the
+regulator drops to low power in standby and power-down, and whenever
+OSC32K is the only clock running) or FULL ("Performance": full drive in
+every mode, so no regulator start-up on the way out).
+
+**RUNSTDBY: the peripheral's flag is the one that decides.** Two
+different bits carry that name - a peripheral's, and each oscillator's -
+and the bench says they do different jobs. A peripheral's `RUNSTDBY` is
+a REQUEST: it keeps that peripheral clocked in standby and, through the
+request, keeps the main clock and the oscillator behind it running,
+whatever the oscillator's own flag says. An oscillator's `RUNSTDBY`
+keeps that oscillator running when NOTHING requests it - which never
+makes a stopped peripheral count, and buys exactly one thing: no
+start-up time on the way out of the sleep (measured below, and it is
+worth 1.5 ms on this board's crystal). The corollary for a driver
+writer: a peripheral that must survive standby needs its OWN
+`RUNSTDBY`; an oscillator with the bit clear is not even startable
+while something else drives CLK_PER, because it only runs when
+requested - selecting it as the main clock IS the request.
 
 The one erratum that reaches into ordinary code lives here.
 **DS80000915F 2.2.4**, all silicon revisions: a store to an address
@@ -126,6 +165,31 @@ type (whole cycles per us: gross below 1 MHz), `delay_cycles(n)`
 counts raw cycles for rates below 1 MHz. Every path rounds UP: a setup
 time is "no less than", by construction and not by a tuned constant.
 
+`avrdx/sleep.hpp` is the mechanism of chapter 13, and only the
+mechanism. `SleepMode` names the three modes; `Sleep` arms one
+(`arm`), disarms (`disarm`), reads back what is armed (`armed`,
+`armed_mode`), executes the instruction (`sleep`) and offers the
+bounded verb an application usually wants, `enter(mode)` = arm + sleep
++ disarm. The pair exists as separate verbs for the callers that must
+close the lost-wake-up window themselves: arm first, then mask, test
+the condition and put `sei` and `sleep` back to back - which is exactly
+the sequence `AvrPlatform::idle()` emits for IDLE. `Vreg` covers
+`VREGCTRL` through its CCP key: `power(VregPower)` / `power()` for the
+regulator profile, `high_temp_low_leakage(bool)` / `()` for HTLLEN -
+and **enabling HTLLEN returns false, writing nothing, while any TWI
+client or the CCL is enabled**. That refusal IS chapter 13's warning:
+a rule stated in a comment and not enforced is a rule the next program
+breaks.
+
+The POLICY is deliberately absent. The kernel sleeps by itself in IDLE
+and only in IDLE, because there the wake-up list is complete and "no
+events queued" is enough to know. Standby and power-down gate clock
+domains and shorten that list, so entering them is a decision about the
+whole application - which peripherals must survive, which oscillator
+must stay up for them, what is allowed to wake the program. That
+belongs to a power-manager active object, which does not exist yet;
+this header is what it will be built on.
+
 `avrdx/reset.hpp` has two resources. `Reset` reads why we are running
 - `flags()` peeks, `take_flags()` reads and clears in one verb (the
 one to call first at boot), `clear_flags()` wipes - and `software()`
@@ -214,6 +278,25 @@ if (nothing_to_do()) {
     sei();
 }
 ```
+
+**Sleep deeper than IDLE, deliberately.** The shape is: arm what must
+wake you, make sure its clock survives the mode, then enter. A standby
+sleep around a PIT wake-up, with a TCB that has to go on counting
+through it:
+
+```cpp
+brio::Pit::init(brio::PitPeriod::cyc4096);        // 125 ms, interrupt on
+brio::Tcb<1>::init({.mode = brio::TcbMode::capture,
+                    .clock = brio::TcbClock::div1,
+                    .run_standby = true});        // ITS OWN flag: the request
+brio::Sleep::enter(brio::SleepMode::standby);     // interrupts on, wake armed
+```
+
+Nothing else is needed to keep CLK_PER alive: the TCB's request does
+it. Set the oscillator's own `RUNSTDBY` when the point is a fast
+wake-up instead (`brio::Oschf::run_standby(true)`), and keep
+`Vreg::power(VregPower::performance)` for the case where even the
+regulator's start-up matters.
 
 ## Bench findings
 
@@ -312,24 +395,179 @@ subtracted and interrupts masked.
 - **A UPDI flash shows as `RSTFR` 0x20**, which is how a fresh boot
   after `bench.py flash` is told apart from every other start.
 
+### The sleep modes
+
+Established by `test_avr_sleep`, whose single-board set `z` is 72
+verdicts on rev A5 at 5 V with nothing wired. Two instruments carry
+every number below: a 32-bit TCB pair counting
+CLK_PER says whether the main clock ran, and the RTC counter says
+whether the 32 kHz domain did, both read across one PIT period of 4096
+CLK_RTC cycles. The two rulers measure the same interval, which is what
+makes the third number possible: 4096 CLK_RTC cycles measure 2966514
+CLK_PER ticks against the 24 MHz crystal, so this board's OSC32K runs
+at 33137 Hz - **+11 000 ppm**, one tick being 30.18 us.
+
+- **The erratum's NOP is where it must be.** Every store to
+  `SLPCTRL.CTRLA` in a built image is preceded by the NOP, with only
+  `ldi`/`mov`/`ori` ever between the two - never another store, which
+  is what 2.2.4 forbids. A deliberate high-address store immediately
+  before `arm()` still arms.
+- **HTLLEN is refused, not merely deprecated.** With the CCL enabled,
+  and again with a TWI client enabled, `high_temp_low_leakage(true)`
+  returns false and `VREGCTRL` is untouched; with both off it is
+  accepted; disabling is never refused. `PMODE` survives an HTLLEN
+  write and vice versa (they share one CCP-protected byte).
+- **`Sleep::enter(idle)` is the platform's `idle()` under application
+  control.** Sixteen sleeps on a 2 ms TCB alarm return only after the
+  interrupt, leave `SEN` clear and interrupts enabled; a counter that
+  only turns while the CPU runs turns 16 times across those sixteen
+  periods and 23937 times over the same span awake.
+- **Standby really stops CLK_PER.** Over one 125 ms PIT period the
+  stopwatch counts 2972823 ticks awake and **178 asleep** - the 7 us of
+  code between the wake-up and the read. The PIT interrupt is what
+  comes back, and `SLPCTRL` is disarmed on the way out.
+- **The peripheral's RUNSTDBY is the whole chain.** Same sleep, four
+  configurations, CLK_PER ticks counted through it: crystal with the
+  TCB's flag clear **178**; crystal with it set **2970833** (its own
+  oscillator flag on) and **2971371** (that flag off); OSCHF with it
+  set **2966515** (oscillator flag off) and **2967628** (on). The
+  oscillator's own `RUNSTDBY` changes nothing while a peripheral is
+  requesting; without the peripheral's flag, nothing counts. The two
+  sources are told apart by the count itself - this board's OSCHF is
+  ~0.15 % slower than its crystal.
+- **A TCB wakes the CPU from standby by itself** when its chain is
+  complete: its 2 ms period ends the sleep after 47909 CLK_PER ticks
+  (nominal 48000, the missing 91 being the counter's restart). The same
+  TCB with `RUNSTDBY` clear never fires - the PIT has to end that sleep.
+- **A pin wakes from standby AND from power-down, with no wire.** EVSYS
+  is alive in every sleep mode, so a PIT divider routed to `EVOUT` on
+  PD2 drives that pad while the CPU sleeps and PD2's own (fully
+  asynchronous) edge sense picks it up. One pad interrupt ends the
+  sleep in both modes, with the stopwatch frozen at 176 / 161 ticks and
+  a 1 s PIT backstop that never gets to fire. The event system
+  therefore keeps ROUTING while every clock but the 32 kHz one is
+  stopped.
+- **Power-down stops the RTC counter and keeps its PIT.** With
+  `RUNSTDBY` set on the counter: across a standby sleep it advances
+  4129 CLK_RTC ticks (the PIT period), across a power-down sleep **33**
+  - which is the 1 ms of settling after the wake, i.e. nothing at all
+  during the sleep. CLK_PER is dead in power-down whatever any
+  `RUNSTDBY` says (162 ticks, the post-wake tail), and the PIT
+  interrupt still arrives.
+- **`RTC.CNT` read at the instant of a wake is STALE.** It returns the
+  value it had when the SLEEP instruction ran, in both deep modes; read
+  1 ms later it is right. The read is synchronized into CLK_PER (26.10)
+  and that path needs the clock back and a CLK_RTC edge. Anything
+  timing a sleep by the RTC counter must settle first - the suite does.
+- **What an oscillator's RUNSTDBY buys is the wake-up.** Measured as
+  CLK_RTC ticks (30.18 us) between the PIT's own edge and the woken
+  program, with a spinning baseline subtracted: crystal with its
+  `RUNSTDBY` set **0 ticks**, cleared **+48**; OSCHF with it set **0**,
+  cleared **+10**. The second board's 41.7 ns ruler puts real numbers
+  on those three classes below.
+- **`PMODE` shortens the OSCHF restart in that sweep** (+10 ticks in
+  Normal against **+1 in Performance**) and changes nothing on the
+  crystal (+48 either way). WHY it helps there and not always is the
+  next section's finding. With HTLLEN set, the PIT still wakes the
+  device from power-down.
+
+### Wake-up latency, measured from a second board
+
+A sleeping chip cannot time its own return: the only clock power-down
+leaves running is the PIT's, and the counter that would measure the
+restart is the one the mode stops. So the ruler is off-chip.
+`test_avr_sleep`'s two-board set `y` (49 verdicts) drives board B
+(`sleep_peer`) over a one-wire link: B zeroes a 32-bit CLK_PER
+stopwatch and raises a stimulus pin in the same instruction pair, this
+board's PORT ISR raises an echo pin as its first statement, and that
+edge CAPTURES the stopwatch through B's event system. One tick is
+41.7 ns (B's OSCHF at 24 MHz nominal, a per-cent-class reference -
+ample for these figures). Medians of eight shots.
+
+- **The fixed cost of the measurement is 23 ticks - 958 ns.** That is
+  the AWAKE baseline: B's zero-to-edge gap, the wire, this chip's
+  interrupt latency and the ISR prologue up to the store. Every number
+  below includes it and is read against it.
+- **IDLE costs 30 ticks, 7 more than awake** - 292 ns against the six
+  CLK_PER cycles (250 ns) 13.3.3.2 promises and `test_avr_platform` f
+  counts on-chip.
+- **STANDBY, five clock configurations** (medians, and the whole point
+  is the last two):
+
+  | main clock | other oscillators | `PMODE` | ticks | us |
+  |---|---|---|---|---|
+  | crystal, its `RUNSTDBY` clear | - | Normal | 42452 | 1768 |
+  | crystal, its `RUNSTDBY` set | - | Normal | 43 | 1.8 |
+  | OSCHF | crystal still oscillating | Normal | 567 | 23.6 |
+  | OSCHF | crystal still oscillating | Performance | 567 | 23.6 |
+  | OSCHF | all stopped | Normal | 7510 | 313 |
+  | OSCHF | all stopped | Performance | 568 | 23.7 |
+
+- **THE REGULATOR IS PAID FOR SEPARATELY, AND ONLY WHEN THE DEVICE
+  REALLY LETS GO.** `VREGCTRL`'s AUTO profile drops to low power "in
+  Standby and Power-Down, and whenever OSC32K is the only clock
+  running" (13.3.5) - and the bench reads that sentence strictly: an
+  oscillator left running by its own `RUNSTDBY` keeps the regulator at
+  full drive EVEN WHEN IT IS NOT THE MAIN CLOCK SOURCE. Beside a
+  running crystal, an OSCHF restart out of standby is 23.6 us and
+  `PMODE` moves it by nothing; stop the crystal and the same restart
+  becomes 313 us, of which `PMODE = FULL` removes 290. The 24-30 us of
+  table 13-5 is the oscillator; the other 290 us is the regulator.
+- **A crystal main clock costs 1.77 ms to restart**, in standby and in
+  power-down alike, and no regulator profile touches it: its own
+  start-up buries everything else. Kept alive by its `RUNSTDBY` it
+  costs 43 ticks - 20 ticks, 833 ns, over the awake baseline, which is
+  standby's own six cycles plus the synchronization.
+- **POWER-DOWN has no oscillator to hold the regulator up**, so the
+  Performance profile earns its keep unconditionally there:
+
+  | main clock | `PMODE` | ticks | us |
+  |---|---|---|---|
+  | crystal | Normal | 42615 | 1775 |
+  | OSCHF | Normal | 7518 | 313 |
+  | OSCHF | Performance | 567 | 23.6 |
+
+  Same three classes as standby, and the OSCHF figures are the same
+  313 us / 23.6 us: power-down is not slower than a standby that has
+  been allowed to drop everything - it is that same case, made
+  unavoidable.
+- **A pin edge wakes from power-down every time.** The stimulus arrives
+  on a Px2 pin, one of the two fully asynchronous positions of every
+  port (port.md), which is what makes an edge a wake-up source with
+  every clock in the device stopped. Eight shots per configuration,
+  three configurations, no misses.
+- **A TWI address match wakes from both deep modes, and the wire pays.**
+  This board as a client at 0x42 on the office bus, board B writing
+  three bytes at 100 kHz: the tenure lasts 418.7 us with this board
+  awake, **418.7 us out of standby** with the main clock kept alive
+  (the 1.8 us wake is invisible under a 10 us SCL bit) and **2197 us
+  out of power-down** - exactly the 1.78 ms crystal restart measured
+  above, held on SCL by the client from the address match until the
+  first serviced byte. The frame arrives intact in all three cases.
+  Only the ADDRESS MATCH is a wake-up source: the data interrupts that
+  carry the rest of the frame are not, so a program that goes back to
+  sleep after the match stalls the tenure with the host holding SCL.
+- **A USART start bit wakes from standby, and what it costs the frame
+  is a rule** - see usart.md, whose start-of-frame section this suite
+  closes.
+- **The CCL wakes from standby when it has RUNSTDBY, and from
+  power-down when its clock survives the mode** - see ccl.md.
+
 ## Not covered yet
 
 Driver gaps:
 
-- **Standby and Power-Down.** `idle()` arms IDLE only. The deeper
-  modes gate clock domains and shrink the wake-up list (tables 13-2
-  and 13-4, both corrected by errata 3.4.1), which makes entering them
-  a power-management decision an application takes deliberately - not
-  something the kernel's "nothing to do" hook may do behind its back.
-  There is no verb for them yet, and no `RUNSTDBY` policy across the
-  drivers that would need one.
-- **`SLPCTRL.VREGCTRL`.** `PMODE` (AUTO / FULL regulator drive) and
-  `HTLLEN` (the high-temperature low-leakage bit, Power-Down only,
-  incompatible with TWI address-match and CCL wake-up) are not
-  exposed. They belong with the sleep modes that give them meaning.
+- **The power-management POLICY.** There is mechanism for all three
+  modes and none of the deciding: no power-manager AO, no
+  `RUNSTDBY` policy across the drivers, no protocol by which the bus
+  active objects agree that the program may stop its clocks. The
+  kernel's own hook stays IDLE-only on purpose.
 - **`FUSE.WDTCFG`.** The driver reads the consequences (`LOCK`,
   `CTRLA`'s reset value) but writes no fuse: fuse programming is a
   UPDI-time concern, not a runtime one.
+- **The BOD**, and with it the voltage-level monitor that tables 13-4
+  lists as a wake-up source in both deep modes. Chapter 15 has no
+  driver at all yet.
 
 Implemented but not bench-verified:
 
@@ -341,7 +579,17 @@ Implemented but not bench-verified:
   SWRF and (through the programmer) UPDIRF only. A power cycle and a
   RESET-pin pulse are desk actions, not verdicts.
 - **The watchdog through sleep and a clock failure.** 22.2 promises
-  both; neither has been staged here (they wait on the sleep pass).
+  both; neither has been staged here.
+- **The two wake-up sources no second board can produce**: MVIO and the
+  BOD's voltage-level monitor. The suites prove the PORT pin, the PIT,
+  a TCB, the CCL, a USART start bit and a TWI address match.
+- **HTLLEN's other half.** That a TWI address match and the CCL STOP
+  waking the device once HTLLEN is set is an ABSENCE, and the driver
+  refuses the combination that would need it - asserted in situ, with
+  a client really enabled, rather than measured.
+- **The sleep CURRENT.** Every figure here is about time, not
+  microamps: what `PMODE`, `HTLLEN` and a stopped oscillator actually
+  save is a bench-supply measurement this desk cannot make.
 - **Every WDT period but 8 ms, 64 ms and 8 s**, and the timing of a
   time-out itself: the encoding is exercised through `arm()`'s
   readback and `wdt_time_us()`'s arithmetic, but only the three used
