@@ -179,7 +179,20 @@ gets its dated home in `docs/design/` when taken.
 - **Second target.** Candidates STM32G0x0/x1, ATSAMC/D, CH32V00x
   (SysTick timebases at 1000 Hz). It will exercise the Platform
   concept, the per-target ticker/driver strata and the layering rule
-  for real; expect radical revision of util/ and drivers then.
+  for real; expect radical revision of util/ and drivers then. The
+  build tooling is part of this milestone: PlatformIO is already
+  stretched past its design use case; the keep-or-replace analysis is
+  scheduled with the second target (CMake the only named candidate so
+  far). The EDITOR half moved early
+  (2026-08-25, forced): cpptools' clang-based parser (1.33+) is
+  structurally unable to parse the AVR-configured libstdc++ (x86-64
+  model + gcc-only types __int24/_Float32), so the editor is clangd
+  over compile_commands.json already - `pio run -e <app> -t compiledb`,
+  --query-driver for include paths and target, the pio_flags.py -mmcu
+  define-delta feeding the device macros clang lacks, test/.clangd for
+  the host tests (detail in docs/avrdx/README.md). The delta feed is
+  an AVR peculiarity (device-specs macros; other targets select the
+  device with an explicit -D) and goes away with the second target.
 - **QK-style preemption (far horizon, probably not on AVR).** A
   preemptive non-blocking kernel (higher-priority AO preempts a
   lower one mid-dispatch, single stack, LIFO nesting) would be an
@@ -657,6 +670,8 @@ pio test -e native            # host tests (doctest); no hardware needed
 tools/check_family.sh [name]  # every avrdx smoke TU compiles for all 8 DA/DB
                               # packages; neg/ TUs must FAIL (definition of done)
 pio run -e <app>              # release build (-Os)
+pio run -e <app> -t compiledb # refresh compile_commands.json (clangd, the
+                              # editor engine; any app env, they share flags)
 pio run -e <app> -t upload    # flash via Atmel-ICE (UPDI)
 pio debug -e <app>-debug      # ALWAYS debug the -debug env
 python tools/gen_apps.py      # after adding/removing src/apps/*.cpp (or a "// pio: opt = value" line)
@@ -714,8 +729,9 @@ tools/bench_boards.py    the bench MANIFEST: the physical boards on the desk
                          (type, console by-path, programmer) - not an env list
 tools/bench.py           the bench orchestrator: list / flash / run / console /
                          duo, over the manifest and the generated envs
-tools/pio_flags.py       per-language AVR flags (build-type aware) +
-                         IntelliSense include paths (skips [env:native])
+tools/pio_flags.py       per-language AVR flags (build-type aware) + the
+                         -mmcu macro delta as -Ds (feeds clangd; skips
+                         [env:native])
 tools/gen_lst.py         post-build: firmware.lst (disassembly) + firmware.map
 src/apps/<app>.cpp       one main() per app (ISR vector bindings live HERE)
 test/test_*/main.cpp     host unit tests (doctest), pio test -e native

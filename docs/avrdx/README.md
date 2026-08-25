@@ -54,8 +54,24 @@ if it regresses: "'concept' only available with '-std=c++20'".
   per app and board type (`<app>` release, `<app>-debug`); see
   "Per-app env options" below for what an app can add to its own envs.
 - `tools/pio_flags.py`: per-language AVR flags, build-type aware:
-  `-Os -g` only on release builds, `-std=gnu++23`, IntelliSense
-  include paths (skips `[env:native]`).
+  `-Os -g` only on release builds, `-std=gnu++23`, plus the -mmcu
+  macro delta made explicit (asks avr-gcc for its predefines with and
+  without `-mmcu` and appends the `__AVR*` difference as `-D`s - same
+  values the real compile already implies). Skips `[env:native]`.
+- Editor: clangd over the compilation database. `pio run -e <app> -t
+  compiledb` writes `compile_commands.json` in the project root (any
+  app env will do - they share the flags; regenerate after a toolchain
+  or flag change); `.vscode/settings.json` enables clangd with
+  `--query-driver` pointed at the cross compiler, which supplies the
+  include search path and the `avr` target, while the `-D` delta above
+  supplies the device macros clang does not define (`__AVR_DEVICE_
+  NAME__` drives avr-libc's computed `<avr/io.h>`). `test/.clangd`
+  rewrites the inferred command for the host tests (host g++, doctest,
+  AVR flags stripped). cpptools' own engine is disabled in the same
+  file: its clang-based parser (1.33+) runs in an x86-64 model against
+  the full gcc macro set, and the AVR-configured libstdc++ then
+  demands gcc-only types (`__int24`, `_Float32`) it cannot have -
+  structurally unparsable, no define feed can fix it.
 - `tools/gen_lst.py`: post-build source-interleaved disassembly
   `firmware.lst` + `firmware.map` in `.pio/build/<env>/`.
 - Release and debug flags are fully separated: `debug_build_flags =

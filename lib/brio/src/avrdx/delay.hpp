@@ -154,7 +154,14 @@ template <uint32_t rate_hz, bool from_dispatch = false>
         // else (and for -O0, where nothing folds).
         const uint32_t cycles = static_cast<uint32_t>(
             (static_cast<uint64_t>(us) * rate_hz + 999'999u) / 1'000'000u);
+#if __has_builtin(__builtin_avr_delay_cycles)
         __builtin_avr_delay_cycles(cycles);
+#else
+        // A frontend without the gcc-only builtin (clang, parsing this
+        // stratum for the editor): same "at least" contract through the
+        // loop pair, only the sub-4-cycle exactness is lost.
+        delay_cycles(cycles);
+#endif
     } else if constexpr (from_dispatch) {
         delay_us_fixed(delay_mult(rate_hz), us);
     } else {

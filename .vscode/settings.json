@@ -1,26 +1,24 @@
 {
-    // --- C/C++: cpptools is the engine in this project (driven by the
-    //     PlatformIO-generated c_cpp_properties.json). clangd is turned off
-    //     explicitly so the repo does not depend on the machine's global
-    //     default (~/projects/c++ is the inverse case: clangd on, cpptools
-    //     off). Note: this stops the clangd *server*, not the extension's
-    //     activation - PlatformIO's "conflicted extensions" popup checks
-    //     activation and may still appear after an extension restart; it is
-    //     a false positive, dismiss it with "Remind later". ---
-    "clangd.enable": false,
-
-    // --- Host tests (test/test_*/main.cpp) include <doctest.h>, which needs
-    //     <ostream>/<signal.h>: absent from the AVR freestanding libstdc++
-    //     that the PlatformIO-generated configuration parses with. Kept
-    //     out of the IntelliSense index so cpptools never picks a test as
-    //     the owning translation unit of a kernel header (the symptom was
-    //     "#include errors detected... squiggles disabled" on panic.hpp).
-    //     Files stay visible and editable; only IntelliSense skips them.
-    //     Native builds are checked by `pio test -e native`, not by the
-    //     editor. ---
-    "C_Cpp.files.exclude": {
-        "test/**": true
-    },
+    // --- C/C++: clangd is the engine in this project, over the
+    //     compilation database (compile_commands.json in the project
+    //     root, regenerated with `pio run -e <app> -t compiledb`): every
+    //     TU parses with its real command line, and --query-driver pulls
+    //     the include search path and the target from the real cross
+    //     compiler. cpptools' own engine is disabled: its clang-based
+    //     parser (1.33+) runs in an x86-64 model against the full gcc
+    //     macro set of the compiler query, and the AVR-configured
+    //     libstdc++ then demands gcc-only types (__int24, _Float32) no
+    //     define can provide - structurally unparsable there. test/ has
+    //     its own .clangd fragment (host g++, doctest, AVR flags
+    //     stripped). Both clangd.enable and the PlatformIO extension's
+    //     "conflicted extensions" check are read at activation: changing
+    //     this needs a window reload, and the popup is a false positive
+    //     to dismiss with "Remind later". ---
+    "clangd.enable": true,
+    "clangd.arguments": [
+        "--query-driver=/sw/avr*/bin/avr-g++,/sw/gcc*/bin/g++"
+    ],
+    "C_Cpp.intelliSenseEngine": "disabled",
 
     // --- Outline as the bird's-eye view of the file (the breadcrumbs
     //     picker became a collapse-one-node-at-a-time tree): keep the

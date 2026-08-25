@@ -6,6 +6,8 @@
 # PlatformIO regenerates these from platformio.ini + the active env:
 .vscode/c_cpp_properties.json
 .vscode/launch.json
+# clangd's compilation database: pio run -e <app> -t compiledb
+compile_commands.json
 # apps.ini IS committed on purpose: it is the env list (a fresh clone has the
 # apps without first running tools/gen_apps.py).
 
