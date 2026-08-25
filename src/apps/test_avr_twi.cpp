@@ -1147,8 +1147,21 @@ void th_busstate() {
     for (uint16_t k = 0; k < 4000; ++k) service_client<Client>();
 
     // The other legal way out of a bus somebody else left Busy: the
-    // inactive-bus time-out (29.3.2.2.2) releases the held transaction
-    // without any software help at all.
+    // inactive-bus time-out (29.3.2.2.2) returns the bus to Idle without
+    // any software help. What happens to a transaction HELD across that
+    // release is NOT a contract: at the maturation instant the pending
+    // launch races the bus-state logic, and the bench observes both
+    // outcomes - a clean launch, or the launch dying in a NAKED BUSERR
+    // (no WIF, no ARBLOST, unlike the chapter's M4 signature; nothing on
+    // the wire, the client silent, and CLKHOLD can be left standing, so
+    // a flags-clear is NOT enough - recover() is). Which one comes out
+    // is deterministic per build and desk (the phase of the last bus
+    // edge decides), so a single-outcome verdict here is a coin promoted
+    // to a contract. The reliable half - and the verdicts below - is
+    // that the time-out DID release the bus and that the address goes
+    // out on it, immediately or on the recover-and-retry; software must
+    // treat a naked BUSERR after a held start as "recover and retry",
+    // not "bus dead".
     Host::recover();
     delay_us(clock, 500);
     inject_start_and_byte();
@@ -1157,10 +1170,24 @@ void th_busstate() {
     T::address_write(client_addr);
     T::timeout(TwiTimeout::us200);
     const uint8_t after2 = pump_to_host_flag<Client>();
+    const bool clean_launch = (after2 & TWI_WIF_bm) && !(after2 & TWI_RXACK_bm) &&
+                              cl_addr_hits == 1;
+    const bool naked_buserr = (after2 & TWI_BUSERR_bm) && !(after2 & TWI_WIF_bm) &&
+                              cl_addr_hits == 0;
     print(serial, "  after the 200 us time-out: MSTATUS=", hex(after2),
-          ", client matches=", cl_addr_hits, crlf);
-    verdict("the time-out released the bus and the held address went out",
-            (after2 & TWI_WIF_bm) && !(after2 & TWI_RXACK_bm) && cl_addr_hits == 1);
+          ", client matches=", cl_addr_hits,
+          clean_launch ? " (clean launch)"
+                       : naked_buserr ? " (naked BUSERR: the launch lost the race)" : "",
+          crlf);
+    verdict("the time-out released the bus: a clean launch or the naked-BUSERR race",
+            clean_launch || naked_buserr);
+    if (clean_launch) T::host_command(TwiHostCmd::stop);
+    else Host::recover();
+    cl_reset();
+    T::address_write(client_addr);
+    const uint8_t again = pump_to_host_flag<Client>();
+    verdict("and the address goes out on the released bus",
+            (again & TWI_WIF_bm) && !(again & TWI_RXACK_bm) && cl_addr_hits == 1);
     T::host_command(TwiHostCmd::stop);
     T::timeout(TwiTimeout::disabled);
     for (uint16_t k = 0; k < 4000; ++k) service_client<Client>();

@@ -68,17 +68,17 @@ BOARDS = {
         # the banner names the board by its USERROW id).
         "board": "db48",
         "id": "brio-a",
-        "console": "/dev/serial/by-path/pci-0000:67:00.3-usb-0:1:1.0-port0",
-        "programmer": {"type": "atmelice_updi", "serial": "J42700051207"},
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0",
+        "programmer": {"type": "atmelice_updi", "serial": "J42700049508"},
     },
     "B": {
         # The instrument peer: a second AVR128DB48 board with its own
-        # Atmel-ICE. Same verification as A; note the probes swapped
-        # boards in the office move - trust the banner, not habit.
+        # Atmel-ICE. Same verification as A; the probes have swapped
+        # boards more than once - trust the USERROW readback, not habit.
         "board": "db48",
         "id": "brio-b",
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:2:1.0-port0",
-        "programmer": {"type": "atmelice_updi", "serial": "J42700049508"},
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1:1.0-port0",
+        "programmer": {"type": "atmelice_updi", "serial": "J42700051207"},
     },
 }
 

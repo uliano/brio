@@ -310,7 +310,7 @@ is a policy for the bus AO and is not built ([i2c-bus.md](../design/i2c-bus.md))
 
 Measured on rev. A5 at 5 V, CLK_PER 24 MHz, TWI0 on its DEFAULT route,
 one open-drain bus with 1.5k pull-ups. `test_avr_twi`: `z` = the
-single-board half, 175 verdicts; `y` = the two-board half, 174 verdicts,
+single-board half, 176 verdicts; `y` = the two-board half, 174 verdicts,
 with a second AVR128DB48 on the same node running the campaign's
 instrument firmware. The desk gives that bus three taps of the DUT -
 PA2/PA3 (the host and the combined client), PC2/PC3 (the dual client,
@@ -394,10 +394,26 @@ measured **32 us at the 50 us setting, 81 us at 100 us and 183 us at
 followed by a STOP raises BUSERR on the host half AND on the client
 half.
 
-**A host told to start on a Busy bus really does hold, and the START
-survives the wait.** Its address had not reached the client after 2 ms;
-forcing the bus Idle sent it out at once, and so did the 200 us
-inactive-bus time-out.
+**A host told to start on a Busy bus really does hold.** Its address
+had not reached the client after 2 ms, and forcing the bus Idle sent it
+out at once, reliably.
+
+**The time-out release of a HELD transaction is a race, not a
+contract.** When the inactive-bus time-out itself matures with a
+transaction held, the pending launch races the bus-state logic at the
+maturation instant and BOTH outcomes are observed on the bench: a clean
+launch (address out, ACK, WIF), or the launch dying in a **naked
+BUSERR** - BUSERR with NO WIF and NO ARBLOST (unlike the chapter's M4
+signature), nothing on the wire, the client silent, and CLKHOLD
+possibly left standing so a flags-clear alone does not reopen the road.
+Which outcome comes out is DETERMINISTIC for a given firmware image and
+desk - the phase of the last bus edge against the launcher decides -
+which is how a suite can promote one lucky outcome to a false contract
+and then "break" when a wire moves. Neither errata document has an item
+for this. The reliable half, bench-proven: the time-out DOES release
+the bus, and after `recover()` the retried address goes out at once.
+Software must treat a naked BUSERR after a held start as "recover and
+retry", never as "bus dead".
 
 **Where the bus is left matters.** A STOP injected in the MIDDLE of a
 byte is itself a protocol violation: the host raises BUSERR and the
