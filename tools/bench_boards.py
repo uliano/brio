@@ -49,10 +49,13 @@
 #  below is the label this desk position is EXPECTED to carry - the human
 #  (or a future bench.py check) compares banner against manifest.
 #
-#  TODAY'S REALITY: two AVR128DB48 boards, each with its own Atmel-ICE and its
-#  CH340 console on a hub (usb-0:1.1 / usb-0:1.2). With two probes of the same
-#  kind attached, the "serial" field is mandatory - without it avrdude picks
-#  whichever enumerates first.
+#  TODAY'S REALITY: ONE AVR128DB48 board is on the desk. Board A holds the
+#  only hub socket in use (usb-0:1.1) and the only Atmel-ICE that is plugged
+#  in; board B and its probe are unplugged. B's entry is kept because it is
+#  the desk position, not the cable: plug it back in and check which socket it
+#  landed on before trusting the path below. Verified the only way that can be
+#  trusted - reset the chip over UPDI and watch which console prints the boot
+#  banner, which names the board by its USERROW id.
 # ============================================================================
 
 # The board types known to the build: keys of tools/gen_apps.py's BOARDS.
@@ -68,16 +71,19 @@ BOARDS = {
         # the banner names the board by its USERROW id).
         "board": "db48",
         "id": "brio-a",
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0",
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1:1.0-port0",
         "programmer": {"type": "atmelice_updi", "serial": "J42700049508"},
     },
     "B": {
         # The instrument peer: a second AVR128DB48 board with its own
-        # Atmel-ICE. Same verification as A; the probes have swapped
-        # boards more than once - trust the USERROW readback, not habit.
+        # Atmel-ICE. NOT ON THE DESK at the moment - neither its console
+        # nor its probe is plugged in, and the path below is the socket
+        # board A now occupies. Re-verify both before using B again:
+        # the probes have swapped boards more than once, so trust the
+        # USERROW readback and not habit.
         "board": "db48",
         "id": "brio-b",
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1:1.0-port0",
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0",
         "programmer": {"type": "atmelice_updi", "serial": "J42700051207"},
     },
 }

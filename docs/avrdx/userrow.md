@@ -16,9 +16,12 @@ properties make it an identity store:
   its stated purpose); reading it back over UPDI requires the part to
   be unlocked.
 
-The CPU could also write it through the NVMCTRL flash path; brio
-deliberately does not drive that path - a label is provisioning, not a
-run-time act, and the programmer already owns the write.
+The CPU can also write it through the NVMCTRL Flash commands - the
+row is erased and written as Flash, one byte at a time, with the erase
+taking all 32 bytes at once ([nvm.md](nvm.md), `Nvm::userrow_write` and
+`Nvm::userrow_erase`). `board_id()` stays a READ: a label is
+provisioning, not a run-time act, and the programmer already owns the
+write.
 
 Related but different: SIGROW (DS40002247B 8.6) carries a factory
 serial number, unique per chip and read-only. It identifies the die;

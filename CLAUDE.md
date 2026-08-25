@@ -272,6 +272,64 @@ gets its dated home in `docs/design/` when taken.
   CCL PD wake follows the LUT's CLOCK (OSC32K-clocked filtered LUT
   wakes). Remaining (platform.md "Not covered yet"): MVIO/BOD-VLM
   wakes, sleep current, the power-manager AO (util pass).
+- **NVMCTRL campaign DONE 2026-08-25** (board A only, no wires):
+  avrdx/nvm.hpp NEW - Nvm resource over the whole ch. 11 (CCP-SPM
+  command discipline with NOCMD between commands; flash read = ELPM,
+  write = SPM with 24-bit addresses, NEVER the FLMAP data-space window
+  - DA errata 2.7.1 inapplicable by construction; page/multi-page
+  erase with a WHOLE-RANGE protection guard because both families'
+  2.7.x errata make the silicon check only the FIRST page - POSITIVELY
+  OBSERVED via erase_ignoring_protection: a 2-page erase over an
+  APPDATAWP'd page erases it with NO error; EEPROM
+  EEWR/EEERWR/EEBER/EEMBER, EEREADY as the LEVEL flag it is + ISR
+  body; USERROW runtime writes (flash commands + ST); SIGROW typed
+  view; FlashLayout<boot,code> compile-time geometry claim +
+  matches_fuses(); scratch_region() = the hole in the MIDDLE of the
+  part, 65536..98304 under the bench geometry, because gcc puts
+  .rodata at 96K and code low; one-way protection verbs;
+  vectors_in_boot()) + EepromStore backend; util/ NEW: crc.hpp,
+  nv_record.hpp (magic+version+CRC-16 record, store() writes ONLY
+  changed bytes - 0 for an unchanged value, host-tested),
+  nv_writer.hpp (writer AO, one byte per EEREADY interrupt, BusMaster
+  shape), persistent_panic.hpp (polled panic Reporter + boot-side
+  take()). TWO BUILD INVARIANTS now in every image:
+  src/glue/ivsel_boot.cpp ([common] base_src_filter) arms
+  CPUINT.IVSEL in .init3 (with BOOTSIZE != 0 the default vector
+  location is the APP section start - every ISR would jump into
+  erased flash; the store is correct under both geometries) and
+  pio_flags.py links -Wl,--defsym,__flmap_lock=1 (FLMAPLOCK set by
+  crt; per-app escape `// pio: custom_flmap_lock = 0`). Fuse policy:
+  board A BOOTSIZE=128 (all code in BOOT), CODESIZE=0, written by the
+  NEW bench.py `fuses` verb - fuses are UPDI-only (11.3.1.5). NEW
+  SUITE test_avr_nvm z 112/112 (a..f; u USERROW 9/9 and g
+  APPDATA+erratum 11/11 sit OUTSIDE z: each costs wear or a fuse
+  round-trip), re-runnable in one power-on (letter a skips its
+  FLMAP-mobility half when the one-way lock stands from a prior run).
+  Findings (nvm.md): flash word write measures 83-84 us, ABOVE the
+  datasheet's 75 us max; a page erase halts the CPU for the full
+  10.1 ms - interrupt latency through it 9078 us, and a 1024 Hz
+  software timebase advances ONE tick across it, not ten (the PIT
+  interrupt is serviced once); an EEPROM write does NOT halt the CPU
+  (10476 polling turns observed during one); multi-byte/multi-page
+  erases cost single-unit time; CMD is 6 implemented bits drawn as 7
+  (0x7F reads back 0x3F) and a store with NO command selected is the
+  only way to see invalid_command; ERROR has 5 codes in the headers
+  vs 3 in the datasheet; DB errata 2.7.2's "EEWP" bit does not exist
+  - this family's EEPROM has NO write protection at all; EESAVE
+  verified both ways over UPDI (chip erases leave fuses and USERROW
+  intact); NVMCTRL is byte-identical across all 8 device headers (no
+  package gating needed). CHER/EECHER and software fuse writes
+  deliberately not exposed. Family 16 TUs x 8 + 69 negatives (10 new),
+  native 15 suites (test_nv_record NEW); regressions under the new
+  fuses/glue/defsym re-verified by hand: platform z 96, sleep z 72;
+  twi z DEFERRED until the office I2C bus is re-jumpered. nvm.md
+  PROVISIONAL: bootloader not built (door open: BOOTSIZE=1 fits
+  Optiboot-DX), flash journaling/wear-leveling policy waits for its
+  first user, DA silicon facts datasheet-trusted, power-loss
+  mid-write unexercised. End state: A = test_avr_nvm (fuses
+  BOOTSIZE=128 CODESIZE=0), B = sleep_peer but UNPLUGGED from the
+  desk (manifest notes it; console by-path re-verified: A moved to
+  the hub socket the manifest gave to B).
 - **Low-level review track (planned 2026-08-20, full plan in memory
   low-level-review-plan).** Everything in avrdx/ gets the Working
   discipline treatment, device by device. Phase 0 DONE 2026-08-20:
@@ -682,6 +740,8 @@ $PY tools/bench.py flash A test_avr_pin  # build the app's env + avrdude over UP
 $PY tools/bench.py run A a               # drive the console, judge "ALL: N pass, M fail"
 $PY tools/bench.py console A             # device path + speed, for your own monitor
 $PY tools/bench.py duo A:a B:script.txt  # instrument peer scripted, then the DUT
+$PY tools/bench.py fuses A bootsize=128  # read/write fuses over UPDI (fuses are
+                                         # provisioning: UPDI-only, survive reflash)
 ```
 
 - The multi-board bench, three separate concerns (detail:
@@ -734,6 +794,9 @@ tools/pio_flags.py       per-language AVR flags (build-type aware) + the
                          [env:native])
 tools/gen_lst.py         post-build: firmware.lst (disassembly) + firmware.map
 src/apps/<app>.cpp       one main() per app (ISR vector bindings live HERE)
+src/glue/                build invariants compiled into EVERY image via
+                         [common] base_src_filter (today: ivsel_boot.cpp,
+                         the .init3 IVSEL store - vectors at BOOT start)
 test/test_*/main.cpp     host unit tests (doctest), pio test -e native
 docs/                    README (map + rules), design/, <target>/ (avrdx/, host/), bench.md
 lib/brio/src/            the framework, four strata:
@@ -779,6 +842,15 @@ lib/brio/src/            the framework, four strata:
                            "one dimmable output" (Pin satisfies it, max 1)
     rgb_lamp.hpp           RgbLamp<R, G, B> over three PwmChannels, levels
                            scaled per channel max; Rgb triple
+    crc.hpp                crc16_byte/crc16: the record checksum (bitwise,
+                           no table)
+    nv_record.hpp          NvStore/NvPacedStore concepts + NvRecord<T, S>
+                           (magic+version+CRC-16 header, store() writes
+                           only changed bytes)
+    nv_writer.hpp          NvWriter AO: one byte per ready interrupt,
+                           BusMaster-style pending FIFO + ReplyTo
+    persistent_panic.hpp   PersistentPanic<S>: panic Reporter into an
+                           NvStore + boot-side take()
     ring.hpp               Ring<T, size, P> SPSC FIFO, lock-free when the
                            index fits P::atomic_width, guarded otherwise
     serial_port.hpp        SerialPort<Transport, P, LineSink>: RX bytes ->
@@ -805,6 +877,11 @@ lib/brio/src/            the framework, four strata:
     reset.hpp              RSTCTRL + WDT: Reset (RSTFR flags read-and-clear,
                            software reset) and Watchdog (PERIOD/WINDOW, WDR,
                            SYNCBUSY, the one-way LOCK)
+    nvm.hpp                NVMCTRL: Nvm (flash ELPM/SPM 24-bit, page/multi-
+                           page erase with the whole-range errata guard,
+                           EEPROM writes + EEREADY ISR body, USERROW,
+                           protections, vectors_in_boot), FlashLayout,
+                           Sigrow, EepromStore (the util NvStore backend)
     sleep.hpp              SLPCTRL: Sleep (arm/disarm/sleep/enter, the three
                            modes, the errata-2.2.4 NOP discipline) and Vreg
                            (PMODE under CCP, HTLLEN with the TWI/CCL

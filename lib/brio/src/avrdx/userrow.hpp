@@ -11,8 +11,12 @@
 //  terminated inside the row ("brio-a"). An erased row (0xFF) is an
 //  unlabeled board. The label is provisioning, not a run-time act: it
 //  is written once per board over UPDI
-//  (avrdude -U userrow:w:0x62,...,0x00:m) and firmware only READS it -
-//  the NVMCTRL write path is deliberately not driven from here.
+//  (avrdude -U userrow:w:0x62,...,0x00:m) and this header only READS
+//  it. The write path exists - the row is erased and written with the
+//  FLASH commands, byte by byte, the erase taking all 32 bytes at once
+//  (avrdx/nvm.hpp: Nvm::userrow_write, userrow_write_block,
+//  userrow_erase) - it is simply not something an identity label
+//  should be reached through.
 //
 //  board_id() validates instead of trusting: a row that does not follow
 //  the convention (erased, no terminator, non-printable bytes) comes

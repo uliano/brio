@@ -10,6 +10,8 @@
 #      ~/.platformio/penv/bin/python tools/bench.py run A a
 #      ~/.platformio/penv/bin/python tools/bench.py console A
 #      ~/.platformio/penv/bin/python tools/bench.py duo A:a B:scripts/peer.txt
+#      ~/.platformio/penv/bin/python tools/bench.py fuses A
+#      ~/.platformio/penv/bin/python tools/bench.py fuses A bootsize=128 codesize=0
 #
 #  Three concerns, kept apart on purpose:
 #    1. BUILD   - one PlatformIO env per app x board TYPE (apps.ini, generated
@@ -256,19 +258,9 @@ def pio_exe():
 
 
 def avrdude_args(prog, mcu, hexfile):
-    argv = [manifest.AVRDUDE, "-p", mcu, "-c", prog["type"]]
-    if prog["type"] == "serialupdi":
-        port = prog.get("port")
-        if not port:
-            die("serialupdi programmer without a 'port' in the manifest")
-        if not os.path.exists(port):
-            die("serialupdi port %s does not exist (bench.py list)" % port)
-        argv += ["-P", port, "-b", str(prog.get("baud", 230400))]
-    elif prog.get("serial"):
-        # Only needed when two probes of the same kind are attached.
-        argv += ["-P", "usb:" + prog["serial"]]
-    argv += ["-U", "flash:w:%s:i" % hexfile]
-    return argv
+    if prog["type"] == "serialupdi" and not os.path.exists(prog.get("port") or ""):
+        die("serialupdi port %s does not exist (bench.py list)" % prog.get("port"))
+    return avrdude_base(prog, mcu) + ["-U", "flash:w:%s:i" % hexfile]
 
 
 def cmd_flash(args):
@@ -287,6 +279,127 @@ def cmd_flash(args):
     if rc == 0:
         state_write(args.name, args.app)
     return rc
+
+
+# ---------------------------------------------------------------------------
+#  fuses
+#
+#  Fuses are PROVISIONING, not build output: they are a property of the chip
+#  on the desk, they survive every reflash, and only the programmer can write
+#  them (the CPU can read them and nothing more - DS40002247B 11.3.1.5). They
+#  therefore belong here, next to the manifest that says which chip is which,
+#  and not in an env.
+#
+#  The names are avrdude's own memory names, which are also the data sheet's
+#  register names in FUSE. The values are bytes: decimal, or 0x-prefixed.
+#  Every write is read back and reported, because a fuse written wrong is a
+#  board that no longer boots the way its firmware expects.
+# ---------------------------------------------------------------------------
+
+FUSES = {
+    "wdtcfg":   "watchdog PERIOD/WINDOW at boot (0 = off, and unlocked)",
+    "bodcfg":   "brown-out detector level and sampling mode",
+    "osccfg":   "start-up oscillator select and its frequency",
+    "syscfg0":  "EESAVE (bit 0), RESET pin mode, CRC source",
+    "syscfg1":  "start-up time",
+    "codesize": "APPEND in 512-byte blocks (0 = APPCODE runs to FLASHEND)",
+    "bootsize": "BOOTEND in 512-byte blocks (0 = the whole Flash is BOOT)",
+}
+
+
+def avrdude_base(prog, mcu):
+    argv = [manifest.AVRDUDE, "-p", mcu, "-c", prog["type"]]
+    if prog["type"] == "serialupdi":
+        port = prog.get("port")
+        if not port:
+            die("serialupdi programmer without a 'port' in the manifest")
+        argv += ["-P", port, "-b", str(prog.get("baud", 230400))]
+    elif prog.get("serial"):
+        argv += ["-P", "usb:" + prog["serial"]]
+    return argv
+
+
+def fuse_read(prog, mcu, names):
+    """{name: byte} straight from the chip."""
+    argv = avrdude_base(prog, mcu)
+    for name in names:
+        argv += ["-U", "%s:r:-:h" % name]
+    out = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
+    if out.returncode != 0:
+        sys.stderr.write(out.stderr)
+        die("avrdude could not read the fuses of this board")
+    # avrdude writes each value to stdout, one per -U, in order.
+    values = [v.strip() for v in out.stdout.split() if v.strip()]
+    if len(values) != len(names):
+        sys.stderr.write(out.stdout + out.stderr)
+        die("expected %d fuse value(s), got %d" % (len(names), len(values)))
+    return dict(zip(names, (int(v, 0) for v in values)))
+
+
+def cmd_fuses(args):
+    entry = board_entry(args.name)
+    prog = entry["programmer"]
+    # The MCU of the board TYPE: fuses are the chip's, so the board JSON of
+    # any env for that type answers it. env_board_json wants an env, and
+    # every board type has at least family_probe; take the type's board file
+    # directly instead.
+    board = BOARDS[entry["board"]]
+    path = os.path.join(ROOT, "boards", board + ".json")
+    if not os.path.isfile(path):
+        die("board file %s not found" % path)
+    with open(path, encoding="ascii") as f:
+        mcu = json.load(f)["build"]["mcu"]
+
+    writes = {}
+    for spec in args.assignment:
+        if "=" not in spec:
+            die("a fuse assignment is <name>=<value>, got '%s'" % spec)
+        name, value = spec.split("=", 1)
+        name = name.strip().lower()
+        if name not in FUSES:
+            die("unknown fuse '%s' (known: %s)" % (name, ", ".join(sorted(FUSES))))
+        try:
+            writes[name] = int(value.strip(), 0) & 0xFF
+        except ValueError:
+            die("fuse %s: '%s' is not a byte" % (name, value))
+
+    if writes:
+        before = fuse_read(prog, mcu, sorted(writes))
+        argv = avrdude_base(prog, mcu)
+        for name in sorted(writes):
+            argv += ["-U", "%s:w:%d:m" % (name, writes[name])]
+        print("bench: " + " ".join(argv))
+        rc = subprocess.call(argv, cwd=ROOT)
+        if rc != 0:
+            return rc
+        after = fuse_read(prog, mcu, sorted(writes))
+        bad = 0
+        for name in sorted(writes):
+            ok = after[name] == writes[name]
+            bad += 0 if ok else 1
+            print("  %-9s 0x%02X -> 0x%02X  %s"
+                  % (name, before[name], after[name], "ok" if ok else "MISMATCH"))
+        if bad:
+            die("%d fuse(s) did not take the value asked for" % bad)
+
+    names = sorted(FUSES)
+    values = fuse_read(prog, mcu, names)
+    print("board %s (%s):" % (args.name, mcu))
+    for name in names:
+        print("  %-9s 0x%02X  %s" % (name, values[name], FUSES[name]))
+    boot = values["bootsize"]
+    code = values["codesize"]
+    print("  -> BOOT %s" % ("the whole Flash (nothing is writable from software)"
+                            if boot == 0 else "0x00000..0x%05X" % (boot * 512 - 1)))
+    if boot != 0:
+        print("     APPCODE %s"
+              % ("0x%05X..FLASHEND" % (boot * 512) if code == 0 else
+                 ("none" if code <= boot else
+                  "0x%05X..0x%05X" % (boot * 512, code * 512 - 1))))
+    print("     EESAVE %s (EEPROM %s a chip erase)"
+          % ("set" if values["syscfg0"] & 1 else "clear",
+             "survives" if values["syscfg0"] & 1 else "is erased by"))
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +577,12 @@ def main():
     p.add_argument("--expect", default="ALL:", help="marker line ending the capture")
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("fuses", help="read (and optionally write) a board's fuses")
+    p.add_argument("name", help="board name from the manifest")
+    p.add_argument("assignment", nargs="*", metavar="name=value",
+                   help="fuses to write first, e.g. bootsize=128 codesize=0")
+    p.set_defaults(func=cmd_fuses)
 
     p = sub.add_parser("console", help="print the console device path and speed")
     p.add_argument("name")

@@ -74,6 +74,36 @@ if it regresses: "'concept' only available with '-std=c++20'".
   structurally unparsable, no define feed can fix it.
 - `tools/gen_lst.py`: post-build source-interleaved disassembly
   `firmware.lst` + `firmware.map` in `.pio/build/<env>/`.
+- **`src/glue/`: compiled into every image**, through
+  `[common] base_src_filter = -<*> +<src/glue/>` which every generated
+  env re-uses (`[env:native]` overrides it - the files are AVR startup
+  code). It holds build invariants that must hold before any app code
+  runs and that no app may be trusted to remember. Today that is one
+  file, `ivsel_boot.cpp`: a four-instruction `.init3` fragment that
+  sets `CPUINT.CTRLA.IVSEL` under CCP, so the interrupt vector table is
+  looked for at address 0. Without it, any image on a chip whose
+  `BOOTSIZE` fuse is not 0 jumps into erased Flash on its first
+  interrupt - a reset loop, not a crash. Setting it is correct under
+  every geometry, because the BOOT section always starts at 0. Details
+  and the run-time twin: [nvm.md](nvm.md).
+- **FLMAPLOCK is set in every image.** gcc 16 places `.rodata` in a
+  32 KB Flash section reached through the data-space window and emits
+  a write of `NVMCTRL.CTRLB.FLMAP` in `.init`; the linker script ORs
+  the lock bit into that write when the symbol `__flmap_lock` is
+  non-zero, and `tools/pio_flags.py` appends
+  `-Wl,--defsym,__flmap_lock=1` to every AVR link. brio's Flash verbs
+  never use the window (ELPM/SPM with a 24-bit address only), so the
+  window is a mode nothing uses - and a mode nothing uses can only
+  change by accident. An app that must exercise the field opts out
+  with `// pio: custom_flmap_lock = 0` in its header.
+- **Fuses are provisioning, not build output.** The CPU can read them
+  and nothing more; only the programmer writes them, so they are a
+  property of the chip on the desk and live behind
+  `tools/bench.py fuses <board> [name=value ...]` (see
+  [../bench.md](../bench.md) for the standing geometry). The one that
+  matters to the build is `BOOTSIZE`: with its shipping default of 0
+  the whole Flash is one BOOT section and no software can write any
+  Flash at all.
 - Release and debug flags are fully separated: `debug_build_flags =
   -Og -g3 -ggdb3 -fno-inline` applies only to `build_type = debug`,
   i.e. the generated `[env:<app>-debug]` envs. The one global

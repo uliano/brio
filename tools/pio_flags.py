@@ -48,6 +48,33 @@ else:
     if not is_debug:
         link += ["-Os", "-g"]
 
+    # --- FLMAP, and locking it. ---------------------------------------------
+    # gcc 16 puts .rodata in a 32 KB Flash SECTION reached through the
+    # data-space window, and emits a write of NVMCTRL.CTRLB.FLMAP in .init to
+    # select it. The linker script (avrxmega4_flmap.xn) computes that value as
+    # __flmap_value_with_lock and ORs in NVMCTRL.FLMAPLOCK when the symbol
+    # __flmap_lock is non-zero - it is weakly defined as 0, so by default the
+    # window stays movable for the whole life of the program.
+    #
+    # brio locks it. The window is a MODE, and a mode that no code in the
+    # framework uses is a mode that can only be changed by accident: every
+    # flash verb in avrdx/nvm.hpp goes through ELPM/SPM with a 24-bit address
+    # and never through the window (which is also what makes the DA's
+    # FLMAP-vs-protection erratum inapplicable by construction). Locking is
+    # one-way until reset, so it also removes the one way a runaway write
+    # could move .rodata out from under the program.
+    #
+    # Per-env escape hatch, for an app that must exercise the field itself:
+    #     // pio: custom_flmap_lock = 0
+    # in the app's header (gen_apps.py copies "// pio:" lines into its envs).
+    flmap_lock = str(env.GetProjectOption("custom_flmap_lock", "1")).strip()
+    if flmap_lock not in ("0", "1"):
+        print("pio_flags: custom_flmap_lock must be 0 or 1, got %r - using 1"
+              % flmap_lock)
+        flmap_lock = "1"
+    link += ["-Wl,--defsym,__flmap_lock=" + flmap_lock]
+    print("pio_flags: __flmap_lock = " + flmap_lock)
+
     env.Append(
         CCFLAGS=common,
         CFLAGS=["-std=gnu11"],

@@ -9,10 +9,11 @@ only the map.
 
 ## Boards
 
-Two boards of the same model sit on the desk, indistinguishable by
+Two boards of the same model belong to the desk, indistinguishable by
 hardware (same chip, serial-less CH340): each carries its name in its
 USERROW ([avrdx/userrow.md](avrdx/userrow.md)) - **A = `brio-a`**, the
-DUT; **B = `brio-b`**, the instrument peer. The suites print the label
+DUT; **B = `brio-b`**, the instrument peer. Only A is plugged in
+today. The suites print the label
 in their banner, so a console names its own board.
 
 - MCU: AVR128DB48 (48-pin, 128 KB flash, 16 KB SRAM), silicon rev A5
@@ -86,6 +87,7 @@ $PY tools/bench.py flash A test_avr_pin # pio run -e <env> + avrdude over UPDI
 $PY tools/bench.py run A a              # drive the console, judge "ALL: N pass, M fail"
 $PY tools/bench.py console A            # print device path + speed (attach a monitor)
 $PY tools/bench.py duo A:a B:script.txt # instrument peer scripted, then the DUT
+$PY tools/bench.py fuses A              # read the fuses; name=value pairs write them
 ```
 
 `run` exits nonzero on a timeout or a nonzero fail count, so a suite is
@@ -95,24 +97,53 @@ the link under test (`src/apps/usart_link.hpp`,
 `src/apps/spi_link.hpp`), so the whole matrix runs as a plain `run A`.
 `duo` stays for a campaign whose bus cannot carry its own commands.
 
-**Today's end state: board A runs `test_avr_sleep` (z 72/72, y 49/49),
-board B runs `sleep_peer` with its bus taps ON**; the PORTE link is
-fitted, STRAIGHT THROUGH (`A.PEn - B.PEn`, n = 0..3, verified by the
-wiring probe `v`/`2` in both directions), which is what the sleep
-campaign uses: PE0 the shared one-wire command channel, PE2 the peer's
-stimulus into the DUT, PE3 the DUT's echo into the peer's hardware
-capture. The USART, SPI and TWI `y` halves only need their own peer
-firmware back on B (`usart_peer`, `spi_peer`, `twi_peer`); the single
-board `z` halves all pass with `sleep_peer` attached - `test_avr_twi z`
-scored 176/176 with it on the bus. Board B's 24 MHz
-crystal is DEAD after its load capacitors were reworked (`xtal_probe`
-read "never" in every FRQRANGE x CSUTHF combination - the same
-dead-joint signature as the first time); the board runs on OSCHF,
-which its banner declares, and that is fine for every role where B is
-a stimulus or a peer - only the crystal-accuracy measurement
-(`test_avr_serial x`) waits for the resolder. The rebuilt I2C bus
-measures exactly like the old one (tR 166 ns, tOF 125 ns, both rails
-5.14 V).
+### Fuses
+
+Fuses are provisioning, not build output: the CPU can read them and
+nothing more (DS40002247B 11.3.1.5), they survive every reflash, and
+only the programmer writes them. `bench.py fuses <board>` reads the
+seven named fuses and spells out the Flash geometry and the EESAVE
+state they produce; `bench.py fuses <board> name=value ...` writes
+them, reading each one back and reporting the before/after pair.
+
+```bash
+$PY tools/bench.py fuses A                        # read, with the geometry spelt out
+$PY tools/bench.py fuses A bootsize=128 codesize=0
+```
+
+**The standing geometry of board A is `BOOTSIZE = 128`, `CODESIZE = 0`,
+`SYSCFG0 = 0xC8`**: BOOT is the first 64 KB, where all the code lives,
+and APPCODE is everything above it, which is what makes the Flash
+writable from software at all (with the shipping default `BOOTSIZE = 0`
+the whole Flash is BOOT and nothing can write any of it). Every image
+sets `CPUINT.CTRLA.IVSEL` in `.init3` and is therefore correct under
+both geometries - see [avrdx/README.md](avrdx/README.md) and
+[avrdx/nvm.md](avrdx/nvm.md). EESAVE is CLEAR, so a chip erase wipes
+the EEPROM; `test_avr_nvm` verified both settings and put it back.
+Board B has not been touched: it is still on the shipping default.
+
+### End state
+
+**Today's end state: board A runs `test_avr_nvm` (z 112/112) under the
+standing fuse geometry; board B is OFF THE DESK** - neither its console
+nor its Atmel-ICE is plugged in, and board A now holds the hub socket
+(`usb-0:1.1`) the manifest used to give to B. No wires are fitted: the
+PORTE link is gone with B, and the I2C bus taps are unused. The
+manifest was corrected to match, but a returning board B needs both its
+console socket and its probe re-verified the only way that can be
+trusted - reset the chip over UPDI and watch which console prints the
+boot banner, which names the board by its USERROW label.
+
+The USART, SPI and TWI `y` halves and `test_avr_sleep y` all need board
+B back, with the PORTE link refitted STRAIGHT THROUGH (`A.PEn - B.PEn`,
+n = 0..3) and their own peer firmware (`usart_peer`, `spi_peer`,
+`twi_peer`, `sleep_peer`). Board B's 24 MHz crystal is DEAD after its
+load capacitors were reworked (`xtal_probe` read "never" in every
+FRQRANGE x CSUTHF combination - the same dead-joint signature as the
+first time); the board runs on OSCHF, which its banner declares, and
+that is fine for every role where B is a stimulus or a peer - only the
+crystal-accuracy measurement (`test_avr_serial x`) waits for the
+resolder.
 
 ## Wiring
 
@@ -307,6 +338,7 @@ stays honest because nothing under `lib/brio/src/` knows it exists.
 | `test_avr_twi` | **Bench test suite** (keep passing), in two halves, NOTHING TO WIRE beyond the desk's I2C bus - the two-board half commands board B in band over that same bus. `z` = SINGLE BOARD, 10 tests / 176 verdicts, 176/176 on rev A5 at 5 V: the route table and its refusals with the errata's PORT.OUT hygiene observed on purpose, the three bus speeds measured on SCL against equations 29-2..29-5 through a pin event into two TCB capture meters (period and low width, so the bus's own rise and fall times come out as numbers), the COMBINED loop (a host and a client of the same instance on PA2/PA3) and the DUAL loop (the client moved to PC2/PC3 through DUALCTRL) with every Request shape both ways, the whole address-match space proven by who ACKs, the chapter's cases M1..M3 and S1..S3 with both NACK verdicts, both Smart modes counted in MCMD strobes, Quick Command counted in SCL edges, the bus state machine driven by a bit-bang injector on the dual pair (foreign START/STOP, the three inactive-bus time-outs, BUSERR, a host held on a Busy bus), both ISR bodies with exact interrupt counts, and a 24 -> 12 -> 24 MHz rebase under traffic with one arbitrated request through I2cBus. `y` = TWO BOARDS, 9 tests / 174 verdicts, 174/174, with board B running `twi_peer` as a real second device driven in band over the bus (a write tenure carries a command frame to the peer's address, a read tenure collects the answer - `src/apps/twi_link.hpp`): the bring-up and the nak, clock stretching at 100 us and 1 ms a byte measured on the wire and in a 32-bit TCB stopwatch, an injected address NACK and a data NACK at a chosen byte, multi-host arbitration in BOTH directions (both boards combined, both STARTs released by the same edge, the winner chosen by the smaller address), the collision case S4 with the two boards' clients on one address, `unstick()` against a really stuck SDA and against a healthy bus, a General Call answered by two chips plus a quick command a real chip acknowledges, the three bus speeds against the peer's client, and a rebase under two-board traffic. `z` passes with the peer attached: its command-mode client answers ONE address exactly, with no general call, no mask, no PMEN and no PIEN |
 | `test_avr_tcd` | **Bench test suite** (keep passing): TCD, 11 tests / 250 verdicts, 250/250 on rev A5 at 5 V, NOTHING TO WIRE. WOA..WOD sit on the DEFAULT route PA4..PA7 and are read back as pin EVENTS into TCB meters; the TCD's own CMPBCLR event is the cycle counter; PD3/PD4 driven from PORT are the two input-event sources. Clocked from CLK_PER with both prescalers at DIV1, one counter tick IS one CLK_PER tick, so the chapter's four cycle formulas and both on-times come out in whole ticks (all exact, zero spread - and dual slope measures 2 x (CMPBCLR + 1), one more than the chapter prints). Also: the three synchronization disciplines observed (ENRDY, CMDRDY, the static-register refusal), the per-route pin claim and teardown, the dead-times isolated on a pin through CMPOVR + CTRLD, `TcdPwm`'s complementary pair exact at every duty, the prescaler product, a 24 -> 12 -> 24 MHz rebase with a TCD on OSCHF (immune) and on CLK_PER (following), the PLL's multipliers measured as 2.000/2.999/2.001 against their own oscillator with PLLS locking only when the TCD requests it, the software and event captures with the chapter's PWM-capture example, six input modes with the async/filter/blanking qualifiers, dithering to the tick, the output plumbing (CTRLD, WOC/WOD selection, the fault levels, DISEOC, AUPDATE) and both interrupt vectors. Errata: 2.14.2 MEASURED on ALT2 (a WOB-only configuration drives nothing until CMPAEN is set), CLKCTRL 2.5.3 and 2.5.4 measured, 2.14.1 and 2.14.3 NOT REPRODUCED on this die (both recorded as such in [avrdx/tcd.md](avrdx/tcd.md)). PF0..PF3 (the ALT2 route) are claimed only inside test `a`; PF4/PF5 (the console) are never touched |
 | `test_avr_sleep` | **Bench test suite** (keep passing), in two halves. `z` = SINGLE BOARD, 8 tests / 72 verdicts, 72/72 on rev A5 at 5 V, NOTHING TO WIRE - but PD1/PD2 must be FREE of the bus jumpers, because test `e` drives PD2 from the event system and senses its own edge on the pad. The register surface with the erratum 2.2.4 NOP and the HTLLEN interlock refused both ways (the CCL, and a TWI client raised on TWI1 - PF2/PF3 go nowhere on this board); IDLE through `Sleep::enter`; STANDBY proven real by a 32-bit TCB stopwatch frozen at 178 CLK_PER ticks where awake it counts 2.97 million; the RUNSTDBY matrix (two sources x the oscillator's flag x the peripheral's - only the PERIPHERAL's decides) and a TCB waking the CPU by itself; a PORT pin waking from standby AND from power-down with the pad driven by the device's own EVSYS through a PIT divider; power-down stopping the RTC counter while its PIT still interrupts (and the CNT read at the instant of a wake coming back STALE); the wake-up delay in CLK_RTC ticks; and test `n`, the CCL as a wake-up source - a clocked, filtered LUT wakes from standby, and from power-down whenever its CLOCK is one that mode keeps (OSC32K yes, CLK_PER no). `y` = TWO BOARDS, 6 tests / 49 verdicts, 49/49, with board B running `sleep_peer` over the PORTE link: the awake baseline is 23 ticks of B's 41.7 ns stopwatch, IDLE adds 7 (the data sheet's six cycles), and standby and power-down are swept against every clock configuration - a kept-alive crystal costs 43 ticks, a restarting one 1.77 ms, OSCHF 23.6 us beside a running crystal but 313 us once every oscillator is stopped, of which `PMODE = FULL` removes 290 (the REGULATOR, paid for only when the device really lets go). Also USART start-of-frame out of standby (the detector needs the line still LOW when the clock returns, so the byte's own bit pattern decides) and a TWI address match out of both deep modes, timed by the peer as a stretch on the wire. Every power-down sleep is bracketed by a watchdog and a `.noinit` token, so a mode that failed to wake would say so at the next boot instead of hanging the bench. Owns the RTC block (no Ticker: the PIT period IS the instrument) and event channels 0, 1, 4 and 5 |
+| `test_avr_nvm` | **Bench test suite** (keep passing): NVMCTRL and the services over it, 6 tests / 112 verdicts, 112/112 on rev A5 at 5 V, NOTHING TO WIRE - but it NEEDS THE FUSE GEOMETRY above (`bootsize=128 codesize=0`), and says so and skips the Flash legs without it. The Signature Row and the whole geometry incl. the scratch region the driver computes from the linker symbols (65536..98304, 64 pages - gcc puts .rodata in Flash section 3, so the free Flash is a hole in the MIDDLE of the part), FLMAP moved through all four sections and then locked one-way; the EEPROM's two write commands, its byte and multi-byte erases and their times against table 39-7 (65 us a bare write, 10087 us an erase-and-write, and erasing 32 bytes costs exactly what erasing one costs); the typed record with its only-changed-bytes policy (an unchanged store writes ZERO bytes) and the EEREADY-paced writer AO (one interrupt per byte, 14064 main-loop turns and 84 timebase ticks during an 80 ms transfer); Flash erase, word write, ELPM read-back and all five multi-page spans in the scratch region; what an operation costs the system (a page erase halts the CPU for its whole 10 ms, delays an interrupt by 9078 us, and costs the 1024 Hz software timebase nine of its ten ticks); and test `f`, which RESETS THE BOARD THREE TIMES on purpose to prove APPCODEWP, BOOTRP and a panic record stored in the EEPROM, carrying its verdicts across them in a `.noinit` token so `z` still closes with one ALL: line. Outside `z` because each costs more than a test should cost per run: `u` the User Row write path (9/9, one erase cycle of the row - it saves the label, wipes the row and puts it back) and `g` (11/11) which needs a temporary `codesize=223` and OBSERVES errata DS80000915F 2.7.1 - a two-page erase straddling a protected APPDATA boundary raises no error and erases the protected page, while the single-page erase of the same page is refused. The declared wear budget is in [avrdx/nvm.md](avrdx/nvm.md) |
 | `spi_peer` | The INSTRUMENT half of the SPI campaign, for board B: one blocking loop that shifts whatever the DUT clocks, decodes a command frame off SPI0 ALT1, acknowledges it and becomes for a bounded moment whatever the DUT needs at the other end - a client in any transfer mode, bit order and buffering regime; a client that never drains, or one that misses a load on purpose; a second driver on the shared select wire (the only way to demote a real host); a self-selecting client for USART Host SPI. It is a DARK LISTENER: it drives MISO for exactly one answer window, entered only after a frame that checked out, so it can stay on the desk while the DUT runs its single-board half. Console (observability only): `?` help, `i` status and counters, `0` back to the dark client, `3` command trace |
 | `sleep_peer` | The INSTRUMENT half of the SLEEP campaign, for board B, and the only ruler that can time a wake-up: a sleeping chip cannot, because the mode stops the very counter that would. One blocking loop decodes a command frame off the shared PE0 wire (`src/apps/sleep_link.hpp`) and becomes for a bounded moment whatever the DUT needs - a train of stimulus edges on PE2, each zeroing a 32-bit CLK_PER stopwatch that the DUT's echo on PE3 CAPTURES through the event system (no software in the measurement path); one byte at a commanded baud on the same wire, for the DUT's start-of-frame wake; or one host write tenure on the office I2C bus against the DUT's TWI client, timed end to end. Its 24 MHz crystal is dead, so it counts on OSCHF - a per-cent-class reference, ample for microsecond-to-millisecond figures, and its banner and its `ident` answer both say so. Console (observability only): `?` help, `i` status, counters and the stored shot times, `0` back to command mode, `3` command trace |
 | `twi_peer` | The INSTRUMENT half of the TWI campaign, for board B: one blocking loop around the polled TwiClient surface that answers one address, decodes a command frame off the bus, acknowledges it and becomes for a bounded moment whatever the DUT needs - a client that clock-stretches by a commanded time per byte, one that NACKs the n-th byte or is not there at all, one that answers the General Call or stops answering it, a second HOST racing the DUT for the wire, a second client sharing one address (so a read is served by two devices and one of them collides), or a stuck client holding SDA low from PORT until enough SCL edges have gone by. Every action carries a count and a deadline after which the peer restores its command-mode client by itself. Console (observability only): `?` help, `i` status and counters, `0` back to command mode, `3` command trace |
