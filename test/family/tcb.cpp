@@ -52,8 +52,11 @@ void tcb_common() {
     (void)EvMvioOk::code;
 #endif
 #ifdef OPAMP
-    (void)EvOpampReady<0>::code;
-    EvOpampCtl<2, OpampAction::drive>::listen(EventChannel<1>{});
+    // The last op amp of THIS package: OP1 at 28/32 pins, OP2 at 48/64.
+    // Its four EVSYS user registers are the ones that do not exist on
+    // the smaller parts (the struct simply ends earlier).
+    (void)EvOpampReady<opamp_count - 1>::code;
+    EvOpampCtl<opamp_count - 1, OpampAction::drive>::listen(EventChannel<1>{});
 #endif
 #ifdef TCD0
     (void)EvTcdProgEv::code;

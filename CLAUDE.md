@@ -353,6 +353,59 @@ gets its dated home in `docs/design/` when taken.
   CODESIZE=0. nv-heap.md PROVISIONAL: ring/log journaling, payload
   wear levelling, per-image flag, zone hint, silicon power-loss
   atomicity (host-swept only), second target.
+- **OPAMP campaign DONE 2026-08-26** (board B only, no wires; the last
+  unclaimed low-level chapter): avrdx/opamp.hpp NEW - `OpampSystem`
+  (the block: the one ENABLE, TIMEBASE = ceil(CLK_PER/1 MHz) - 1, and
+  the chapter's single ClockUser hook so a settle time keeps meaning
+  microseconds across a rebase; PWRCTRL/IRSEL, DBGCTRL) + `Opamp<n>`
+  (both input muxes with their PER-INSTANCE link codes refused
+  otherwise, the 16R ladder as eight EXACT rationals - naming 16/15
+  "1" would be a lie - the output driver, the three enable regimes of
+  35.3.2.7 as one enum, the internal timer, the four event users and
+  the offset trim; pads claimed and released by hand) + tasks
+  `OpampFollower`/`OpampPga`/`OpampInvertingPga`/`InstrumentationAmp`
+  (the integrator deliberately NOT built: it needs an external R and C
+  and a DUMP policy, and is born with Multislope). DB-ONLY: the whole
+  header is gated on the device header's OPAMP symbol and the NEW
+  `opamp_count` in evsys.hpp (a concept over `OPAMP_t::OP2CTRLA` - a
+  requires-expression on a non-dependent type is a hard error, so it
+  had to be a concept), which also FIXED a latent evsys bug:
+  `EvOpampReady<2>`/`EvOpampCtl<2, ...>` indexed past the EVSYS struct
+  on 28/32-pin parts and now refuse. NEW SUITE test_avr_opamp z 96/96
+  on B, WIRELESS - the DAC's buffered output is the source, the ADC
+  reads every OUT pad, a TCB latches READY through EVSYS, PD0 supplies
+  the LEVEL the DUMP/DRIVE users need, and both converters on VDD make
+  it ratiometric. Findings in opamp.md: the follower tracks its source
+  to 0 mV over a nine-point sweep and the NON-INVERTING ladder is exact
+  to a permille at all eight wipers, while the INVERTING one (its
+  bottom driven by the DAC buffer) runs up to 5 % high in the middle;
+  ONE SETTLE UNIT IS EXACTLY ONE TIMEBASE MICROSECOND (deltas 723/960/
+  1128 against 720/960/1128 CLK_PER ticks) but the WARM-UP on a cold
+  ENABLE is 365 ticks = 15 us where 39-27's TON is 1 us, and a
+  restart() of a running op amp pays only 21; READY is issued in
+  EVENT_ENABLED mode ONLY (35.3.2.6 is exact where 35.3.3 reads wider,
+  measured both ways); a RUNNING op amp HOLDS its OUT pad against a
+  pull-up even with OUTMODE OFF, and DRIVE raises the driver on top of
+  that; OUTMODE is ONE implemented bit drawn as two (0x3 reads back
+  0x4) and OPnINMUX's bits 3 and 7 do not exist (0xFF -> 0x77); CAL's
+  step measures 594 uV vs 500 and its DIRECTION is the opposite of the
+  plain reading of 35.5.10 (a rising CAL lowers the output), the
+  production 0x81 trimmed to 0x80 taking the residual from -490 uV to
+  ~100; IRSEL is WRITABLE on A5, so errata 2.8.2 is confirmed rev.-A4
+  only; the instrumentation recipe makes all seven of table 35-14's
+  gains and only seven exist (both R1 values must be wiper positions);
+  and the DUMP switch turns the floating INN pad into a visible
+  integrator - the node keeps the dumped charge for milliseconds and
+  then walks away. Family 18 TUs x 8 + 78 negatives (6 new: OP2 on a
+  32-pin part, any Opamp on DA, MUXPOS LINKOUT on OP0, LINKWIP on OP1,
+  MUXBOT LINKOUT on OP0 without OP2, OpampSystem not rebased); native
+  16 suites green. LESSON RE-LEARNED THE HARD WAY: `int` is SIXTEEN
+  bits here - `4096u * 16u` is 0 and gcc turned the whole suite into
+  one `abort()`, which showed up only as a 2.7 KB image. The bench
+  suites are not built with -Wall; that is worth revisiting.
+  End state: B = test_avr_opamp with test_avr_nvheap's five blocks
+  intact (verified by its letter v after the campaign's five
+  reflashes), A untouched on test_avr_serial.
 - **Low-level review track (planned 2026-08-20, full plan in memory
   low-level-review-plan).** Everything in avrdx/ gets the Working
   discipline treatment, device by device. Phase 0 DONE 2026-08-20:

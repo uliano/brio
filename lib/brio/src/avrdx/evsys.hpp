@@ -191,11 +191,27 @@ struct EvZcdOut {
     static constexpr bool legal_on(uint8_t) { return true; }
 };
 
+/// How many op amps this package has: none on the DA family (no OPAMP
+/// peripheral at all), two on the 28/32-pin DB parts, three on 48 and
+/// 64 pins. The device header is the authority - the OP2 registers are
+/// simply absent from the OPAMP_t of the smaller packages, and that is
+/// what the detection below asks about.
+#ifdef OPAMP
+/// The concept is what makes the member lookup a substitution rather
+/// than a hard error: a requires-expression over a NON-dependent type
+/// is checked immediately and would not compile where OP2 is absent.
+template <typename T>
+concept HasOpamp2Registers = requires(T& o) { o.OP2CTRLA; };
+inline constexpr uint8_t opamp_count = HasOpamp2Registers<OPAMP_t> ? 3 : 2;
+#else
+inline constexpr uint8_t opamp_count = 0;
+#endif
+
 #ifdef OPAMP
 /// OPAMP n ready (DB only). All channels. 0x34 + n.
 template <uint8_t n>
 struct EvOpampReady {
-    static_assert(n <= 2, "OPAMP0..OPAMP2");
+    static_assert(n < opamp_count, "no such op amp on this package (OP2 on 48/64 pins)");
     static constexpr uint8_t code = static_cast<uint8_t>(0x34 + n);
     static constexpr bool legal_on(uint8_t) { return true; }
 };
@@ -476,10 +492,13 @@ struct EvTcdInputB : EventUserBase<EvTcdInputB> {
 #ifdef OPAMP
 /// OPAMP n event-driven controls (DB only): enable, disable, dump the
 /// integrator, drive the output. Four users per instance, contiguous.
+/// ENABLEn and DISABLEn are EDGE-detected, DUMPn and DRIVEn are LEVELS
+/// (table 35-2): a channel driving a dump or a drive must HOLD its
+/// level, a software pulse does nothing there.
 enum class OpampAction : uint8_t { enable = 0, disable = 1, dump = 2, drive = 3 };
 template <uint8_t n, OpampAction a>
 struct EvOpampCtl : EventUserBase<EvOpampCtl<n, a>> {
-    static_assert(n <= 2, "OPAMP0..OPAMP2");
+    static_assert(n < opamp_count, "no such op amp on this package (OP2 on 48/64 pins)");
     static volatile uint8_t& reg() {
         return (&EVSYS.USEROPAMP0ENABLE)[4 * n + static_cast<uint8_t>(a)];
     }
