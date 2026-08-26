@@ -75,6 +75,44 @@ else:
     link += ["-Wl,--defsym,__flmap_lock=" + flmap_lock]
     print("pio_flags: __flmap_lock = " + flmap_lock)
 
+    # --- The build id every image carries. -----------------------------------
+    # avrdx/nvm_flash.hpp records it in every map version of a flash NvHeap
+    # (util/nv_heap.hpp), where it is a DIAGNOSTIC and nothing else: a stored
+    # block is judged by its checksum, never by which build wrote it. A defsym
+    # rather than a -D because the value belongs to the LINK, the way
+    # __flmap_lock does; the symbol is read as four relocation bytes and never
+    # dereferenced (a pointer is 16 bits wide on this part).
+    #
+    # IT IS THE NEWEST SOURCE TIMESTAMP, NOT THE TIME OF THE LINK, and that is
+    # a bench requirement rather than a preference: `bench.py flash` writes
+    # with avrdude -D, which on this part does NOT erase the pages it writes -
+    # it programs into them, and programming only clears bits. Reflashing is
+    # therefore safe only while the image is byte-identical to the one already
+    # in the chip, which a wall-clock build id would break for every app in
+    # the project at every relink. Derived from the sources, an unchanged tree
+    # relinks to the same bytes, and an image whose code really did change
+    # gets a new id (and needs the chip erase anyway).
+    #
+    # An image that never names NvHeap never references the symbol, so the
+    # defsym costs it nothing - not even a byte.
+    def newest_source_epoch(roots):
+        newest = 0
+        for root in roots:
+            for path, dirs, files in os.walk(os.path.join(env["PROJECT_DIR"], root)):
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+                for name in files:
+                    if name.endswith((".cpp", ".hpp", ".c", ".h", ".S")):
+                        try:
+                            newest = max(newest,
+                                         int(os.path.getmtime(os.path.join(path, name))))
+                        except OSError:
+                            pass
+        return newest
+
+    build_id = newest_source_epoch(["lib/brio/src", "src"])
+    link += ["-Wl,--defsym,__nvheap_build_id=%d" % build_id]
+    print("pio_flags: __nvheap_build_id = %d (newest source timestamp)" % build_id)
+
     env.Append(
         CCFLAGS=common,
         CFLAGS=["-std=gnu11"],

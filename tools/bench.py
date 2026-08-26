@@ -258,17 +258,31 @@ def pio_exe():
 
 
 def avrdude_args(prog, mcu, hexfile, chip_erase=False):
-    # -D by default: the flash endurance of these parts is 1k erase/write
-    # cycles (DS40002247B table 39-7 - lowered from 10k "based on validation
-    # data"), and a chip erase spends one cycle on EVERY page at every
-    # reflash. Without it avrdude erases only the pages it writes, so a
-    # 12 KB app costs ~24 page cycles instead of 256. The price: pages
-    # beyond the new image keep the previous image's bytes (execution never
-    # reaches them) and the EEPROM is left alone regardless of EESAVE.
-    # --erase restores the full chip erase when a virgin part matters.
+    # THREE ERASE REGIMES, and only two of them are reachable from here.
+    # MEASURED on this bench (AVR128DB48 over UPDI, avrdude 8.1), because the
+    # option names invite exactly the wrong assumption:
+    #
+    #   default (what this tool does)  avrdude PAGE-ERASES each page it is
+    #       about to write and leaves every other page of the part exactly as
+    #       it was. A 12 KB app therefore costs ~24 page cycles out of the
+    #       1000 the flash has (DS40002247B table 39-7, lowered from 10k
+    #       "based on validation data") instead of the 256 a chip erase would
+    #       spend, and anything living outside the image - an NvHeap's blocks
+    #       and its map pages under FLASHEND (docs/design/nv-heap.md) -
+    #       SURVIVES the reflash. The EEPROM is untouched regardless of
+    #       EESAVE.
+    #   -D  disables that erase ENTIRELY: the image is programmed into pages
+    #       that were never erased, and programming can only clear bits. It is
+    #       safe ONLY when the bytes already in the chip are the ones being
+    #       written (reflashing an unchanged image); anything else silently
+    #       ANDs the two images together and avrdude reports a verification
+    #       mismatch. Not used here.
+    #   -e  the real chip erase: every page, the EEPROM too (EESAVE clear on
+    #       this bench). That is what --erase asks for and what it now passes;
+    #       nothing else wipes an NvHeap.
     if prog["type"] == "serialupdi" and not os.path.exists(prog.get("port") or ""):
         die("serialupdi port %s does not exist (bench.py list)" % prog.get("port"))
-    erase = [] if chip_erase else ["-D"]
+    erase = ["-e"] if chip_erase else []
     return avrdude_base(prog, mcu) + erase + ["-U", "flash:w:%s:i" % hexfile]
 
 
@@ -282,6 +296,8 @@ def cmd_flash(args):
     hexfile = os.path.join(".pio", "build", env, "firmware.hex")
     if not os.path.isfile(os.path.join(ROOT, hexfile)):
         die("no %s after the build" % hexfile)
+    nvheap_preflight(board_entry(args.name)["programmer"], mcu, hexfile,
+                     chip_erase=args.erase)
     argv = avrdude_args(board_entry(args.name)["programmer"], mcu, hexfile,
                         chip_erase=args.erase)
     print("bench: " + " ".join(argv))
@@ -289,6 +305,166 @@ def cmd_flash(args):
     if rc == 0:
         state_write(args.name, args.app)
     return rc
+
+
+# ---------------------------------------------------------------------------
+#  NvHeap preflight: what is about to be overwritten
+#
+#  A flash NvHeap (util/nv_heap.hpp, docs/design/nv-heap.md) keeps its map in
+#  the last erase units of the part and its blocks in the free flash between
+#  and above the image's sections. Nothing in the toolchain knows that: the
+#  linker places code and read-only data wherever they fit, and the first sign
+#  that a grown image has landed on a stored block is the loss report at the
+#  next mount.
+#
+#  So before writing, read the chip, find the current map version if there is
+#  one, and say plainly which stored blocks the new image would take down.
+#  This WARNS AND NEVER BLOCKS - it is information, not a policy, and the
+#  application is the one that decides whether losing a table matters. When
+#  the chip holds no valid map (the usual case) it says nothing at all.
+#
+#  The map layout below mirrors util/nv_heap.hpp and must move with it. Two of
+#  the heap's template parameters are not recorded in the map, so both are
+#  searched rather than assumed: the rotation is looked for in the last few
+#  pages, and the entry-table width is whatever makes the checksum come out.
+# ---------------------------------------------------------------------------
+
+NVHEAP_MAGIC = 0x5048564E          # "NVHP", little-endian
+NVHEAP_FORMAT = 1
+NVHEAP_HEADER = 16
+NVHEAP_ENTRY = 14
+NVHEAP_PAGE = 512                  # the erase unit of every AVR128DA/DB
+NVHEAP_SEARCH_PAGES = 8            # map_pages is a template parameter: look
+NVHEAP_MAX_BLOCKS = 35             # ... and so is max_blocks (35 fills a page)
+
+
+def crc16_ccitt(data):
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 \
+                else (crc << 1) & 0xFFFF
+    return crc
+
+
+def nvheap_version(page):
+    """The map version in this page, or None. Returns (seq, entries) with
+    entries as (record_id, first_page, size_pages, payload_len)."""
+    if len(page) < NVHEAP_HEADER + NVHEAP_ENTRY + 2:
+        return None
+    magic, fmt, count = (int.from_bytes(page[0:4], "little"), page[4], page[5])
+    if magic != NVHEAP_MAGIC or fmt != NVHEAP_FORMAT:
+        return None
+    for blocks in range(1, NVHEAP_MAX_BLOCKS + 1):
+        size = NVHEAP_HEADER + NVHEAP_ENTRY * blocks + 2
+        if size > len(page):
+            break
+        if count > blocks:
+            continue          # this table is too narrow to hold that count
+        if crc16_ccitt(page[:size - 2]) != int.from_bytes(page[size - 2:size],
+                                                          "little"):
+            continue
+        entries = []
+        for i in range(count):
+            at = NVHEAP_HEADER + i * NVHEAP_ENTRY
+            entries.append((int.from_bytes(page[at:at + 2], "little"),
+                            int.from_bytes(page[at + 2:at + 4], "little"),
+                            int.from_bytes(page[at + 4:at + 6], "little"),
+                            int.from_bytes(page[at + 6:at + 10], "little")))
+        return int.from_bytes(page[8:12], "little"), entries
+    return None
+
+
+def nvheap_current(flash):
+    """The live blocks of the newest map version in the chip, or None."""
+    best = None
+    for i in range(1, NVHEAP_SEARCH_PAGES + 1):
+        base = len(flash) - i * NVHEAP_PAGE
+        if base < 0:
+            break
+        found = nvheap_version(flash[base:base + NVHEAP_PAGE])
+        if found and (best is None or found[0] > best[0]):
+            best = found
+    return best
+
+
+def hex_pages(path):
+    """The flash PAGES an Intel HEX file writes - which is exactly what
+    avrdude erases. Handles both extended-address record types; an AVR image
+    is two chunks with a hole between them, so the page set matters and the
+    span from zero would be a lie."""
+    pages = set()
+    base = 0
+    with open(path, encoding="ascii") as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith(":"):
+                continue
+            raw = bytes.fromhex(line[1:])
+            count, offset, kind = raw[0], (raw[1] << 8) | raw[2], raw[3]
+            if kind == 0:
+                start = base + offset
+                for page in range(start // NVHEAP_PAGE,
+                                  (start + count - 1) // NVHEAP_PAGE + 1):
+                    pages.add(page)
+            elif kind == 2:
+                base = ((raw[4] << 8) | raw[5]) << 4
+            elif kind == 4:
+                base = ((raw[4] << 8) | raw[5]) << 16
+    return pages
+
+
+def read_flash(prog, mcu):
+    """The whole flash of the chip, or None if it cannot be read."""
+    out = os.path.join(ROOT, ".pio", "bench_flash.bin")
+    try:
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        argv = avrdude_base(prog, mcu) + ["-q", "-q",
+                                          "-U", "flash:r:%s:r" % out]
+        if subprocess.call(argv, cwd=ROOT) != 0:
+            return None
+        with open(out, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def nvheap_preflight(prog, mcu, hexfile, chip_erase=False):
+    """Warn about stored blocks this flash would destroy. Never blocks."""
+    flash = read_flash(prog, mcu)
+    if flash is None:
+        return
+    # avrdude trims trailing erased bytes off a raw read.
+    size = NVHEAP_PAGE * ((len(flash) + NVHEAP_PAGE - 1) // NVHEAP_PAGE)
+    flash = flash.ljust(size, b"\xff")
+    current = nvheap_current(flash)
+    if current is None:
+        return                       # no heap in this chip: nothing to say
+    seq, entries = current
+    if not entries:
+        return
+    if chip_erase:
+        print("bench: WARNING - the chip holds an NvHeap map (seq %d) with %d "
+              "live block(s): %s" %
+              (seq, len(entries), ", ".join("id 0x%04X" % e[0] for e in entries)))
+        print("bench:           --erase wipes the whole flash: ALL of them go, "
+              "map included.")
+        return
+    pages = hex_pages(os.path.join(ROOT, hexfile))
+    hit = [e for e in entries
+           if any(p in pages for p in range(e[1], e[1] + e[2]))]
+    if hit:
+        print("bench: WARNING - this image lands on %d stored block(s) of the "
+              "NvHeap map (seq %d):" % (len(hit), seq))
+        for rid, first, span, length in hit:
+            print("bench:           id 0x%04X at 0x%05X, %d page(s), %d bytes"
+                  % (rid, first * NVHEAP_PAGE, span, length))
+        print("bench:           they will fail their checksum at the next "
+              "mount and be reported lost.")
+    else:
+        print("bench: preflight - %d live NvHeap block(s) (map seq %d), none "
+              "in this image's pages." % (len(entries), seq))
 
 
 # ---------------------------------------------------------------------------
@@ -578,8 +754,9 @@ def main():
     p.add_argument("name", help="board name from the manifest")
     p.add_argument("app", help="app name (src/apps/<app>.cpp)")
     p.add_argument("--erase", action="store_true",
-                   help="full chip erase first (default writes with -D and "
-                        "erases only the pages of the image: 1k-cycle flash)")
+                   help="real chip erase first, EEPROM included - the only "
+                        "way to wipe a flash heap (the default erases just "
+                        "the pages of the image: 1k-cycle flash)")
     p.set_defaults(func=cmd_flash)
 
     p = sub.add_parser("run", help="send a console command and judge the summary")

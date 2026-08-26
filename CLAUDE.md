@@ -24,7 +24,9 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   `kernel.md` (the AO kernel: model, contract, events, payloads,
   queues, FSM, delivery, scheduler, time, panic, platform, index),
   `clock.md` (the clock model), `serial.md`, `spi-bus.md`, `i2c-bus.md`,
-  `ring.md`, `analog.md` (the sampler usage type + arithmetic).
+  `ring.md`, `analog.md` (the sampler usage type + arithmetic),
+  `nv-heap.md` (the flash block allocator: FlashMedia contract, map
+  pair, survival-aware mount).
 - `docs/<target>/` - one folder per target, mirroring
   `lib/brio/src/<target>/` (`avrdx/`, `host/`): `README.md` is the
   operational page (toolchain, board, probe, debugger and their
@@ -330,6 +332,27 @@ gets its dated home in `docs/design/` when taken.
   BOOTSIZE=128 CODESIZE=0), B = sleep_peer but UNPLUGGED from the
   desk (manifest notes it; console by-path re-verified: A moved to
   the hub socket the manifest gave to B).
+- **NvHeap DONE 2026-08-26** (design in design/nv-heap.md, full story
+  in memory flash-alloc-design): util/nv_heap.hpp (FlashMedia concept
+  + the allocator: ping-pong map pair in the last 2 pages, headerless
+  blocks, survival-aware mount judging by CRC not build-id,
+  alloc/append/seal/rewrite/find, max-clearance placement, no free) +
+  host/sim_flash.hpp + avrdx/nvm_flash.hpp; suites test_nv_heap
+  (host, 44 cases / 2656 assertions, power-cut sweep at every write
+  boundary, both 512/2 and 2048/8 geometries) and test_avr_nvheap
+  (bench, on BOARD B for wear rebalancing, z 51/51 + the reflash
+  choreography: blocks survive a default reflash, --erase wipes
+  clean). THE ERASE-REGIME REVERSAL, measured twice: avrdude's
+  DEFAULT is the page-selective erase (only the image's pages), `-D`
+  disables erasing entirely and ANDs the image into old bytes (a
+  trap), `--erase` now passes a real `-e`; bench.md carries the
+  measured three-regime table, bench.py flash gained the NvHeap
+  preflight (reads the chip's map, warns which blocks the new image
+  lands on, never blocks). __nvheap_build_id defsym = newest source
+  mtime (deterministic rebuilds). B provisioned BOOTSIZE=128
+  CODESIZE=0. nv-heap.md PROVISIONAL: ring/log journaling, payload
+  wear levelling, per-image flag, zone hint, silicon power-loss
+  atomicity (host-swept only), second target.
 - **Low-level review track (planned 2026-08-20, full plan in memory
   low-level-review-plan).** Everything in avrdx/ gets the Working
   discipline treatment, device by device. Phase 0 DONE 2026-08-20:
@@ -849,6 +872,11 @@ lib/brio/src/            the framework, four strata:
                            only changed bytes)
     nv_writer.hpp          NvWriter AO: one byte per ready interrupt,
                            BusMaster-style pending FIFO + ReplyTo
+    nv_heap.hpp            FlashMedia concept + NvHeap<Media, max_blocks,
+                           map_pages>: flash block allocator - ping-pong
+                           map pair under FLASHEND, headerless payload
+                           blocks, survival-aware mount, alloc/append/
+                           seal/rewrite/find, no free
     persistent_panic.hpp   PersistentPanic<S>: panic Reporter into an
                            NvStore + boot-side take()
     ring.hpp               Ring<T, size, P> SPSC FIFO, lock-free when the
@@ -882,6 +910,10 @@ lib/brio/src/            the framework, four strata:
                            EEPROM writes + EEREADY ISR body, USERROW,
                            protections, vectors_in_boot), FlashLayout,
                            Sigrow, EepromStore (the util NvStore backend)
+    nvm_flash.hpp          NvmFlash: the FlashMedia backend over Nvm -
+                           zones from the *_load_* linker symbols with the
+                           BOOT-section floor, build id from the link
+                           defsym (pio_flags.py)
     sleep.hpp              SLPCTRL: Sleep (arm/disarm/sleep/enter, the three
                            modes, the errata-2.2.4 NOP discipline) and Vreg
                            (PMODE under CCP, HTLLEN with the TWI/CCL
@@ -957,6 +989,9 @@ lib/brio/src/            the framework, four strata:
                            EventUser; tables on demand
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
+    sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests
+                           (configurable geometry, power-cut injection,
+                           simulated reflash, wear counters)
 ```
 
 ## Build artifacts

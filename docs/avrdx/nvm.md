@@ -31,8 +31,9 @@ The Flash figure deserves a second look: 1000 cycles is NOT the 10k
 of the older AVR families - the DB datasheet lowered it to 1k "based
 on validation data" (table 39-7; no typical value is published). A
 chip erase spends one of those cycles on every page at once, which is
-why the bench flashes with avrdude's `-D` (page-selective erase) by
-default - see docs/bench.md.
+why the bench reflashes page-selectively (avrdude's default on these
+parts) and reserves the chip erase for `bench.py flash --erase` - the
+three measured erase regimes are in docs/bench.md.
 
 That table is the whole division of labour. Flash is for big,
 re-provisionable payloads - a font, a table, anything the programmer
@@ -304,9 +305,64 @@ The row holds the board's identity label
 ([userrow.md](userrow.md)), so an erase wipes that too - read the row
 first and write it back.
 
+### `NvmFlash` - this flash as a block store
+
+[`avrdx/nvm_flash.hpp`](../../lib/brio/src/avrdx/nvm_flash.hpp) presents
+the Flash as the `FlashMedia` the target-independent block allocator
+runs on ([design/nv-heap.md](../design/nv-heap.md)). It is four verbs
+over the driver above - read is `flash_read`, program is `write_block`
+(FLWR selected once), erase is `erase` with its whole-range protection
+check - plus the two things the allocator cannot work out for itself:
+
+**The granularities are different numbers.** `erase_size` is 512 and
+`write_cell` is 2: a page is erased, a WORD is programmed, and a word
+may be programmed once between erases.
+
+**The zones, and where their bounds come from.** gcc puts code and the
+`.data` initializers low and `.rodata` in a flash section reached
+through the FLMAP window, so a linked image leaves TWO bands of free
+flash rather than one remainder at the top:
+
+| Zone | Ceiling | Floor |
+|------|---------|-------|
+| middle | `__rodata_load_start`, rounded down to a page | `__data_load_end` rounded up to a page, RAISED to `Nvm::boot_end()` |
+| tail | the end of the Flash (the heap carves its own map home out of the top) | `__rodata_load_end`, rounded up to a page |
+
+Two things about that table are load-bearing. The symbols are the LOAD
+addresses, which on this toolchain are real flash addresses; their
+run-time twins (`__rodata_start` and friends) are data-space aliases
+based at 0x800000 and would be nonsense as flash addresses. And the
+middle floor is raised to the BOOT boundary because **SPM cannot write
+inside BOOT whatever the fuses say** - under the bench geometry
+(BOOTSIZE = 128) all the code is in BOOT anyway, so the boundary is
+what the zone starts at.
+
+**The build id** is a link-time constant: `tools/pio_flags.py` passes
+`-Wl,--defsym,__nvheap_build_id=<epoch>` to every image, the way it
+locks FLMAP. It is read as the symbol's four relocation bytes and never
+dereferenced - the value is a number, and a pointer is 16 bits wide on
+this part. The heap records it in every map version as a diagnostic; a
+block's validity is its checksum's business, never its build's.
+
+Storing a table that survives the next reflash:
+
+```c++
+brio::NvHeap<brio::NvmFlash> heap;          // RAM only until it is mounted
+
+const auto& r = heap.mount();               // read-only: no cycle spent
+if (!r.mounted()) { /* the image has grown over the map home */ }
+
+if (const auto block = heap.find(cal_id)) { // came through
+    block->read(0, std::span<uint8_t>(table, block->length));
+} else if (auto w = heap.alloc(cal_id, sizeof table)) {
+    w->append(std::span<const uint8_t>(table, sizeof table));
+    w->seal();                              // the commit point
+}
+```
+
 ## The build invariants every image carries
 
-Two things about NVMCTRL are settled once, for every image, and not
+Three things about NVMCTRL are settled once, for every image, and not
 left to each app:
 
 - **`src/glue/ivsel_boot.cpp`** is compiled into every env (through
@@ -323,6 +379,14 @@ left to each app:
   no brio verb uses, and a mode nothing uses can only change by
   accident. An app that must exercise the field says
   `// pio: custom_flmap_lock = 0` in its header.
+- **A build id is defsym'd into the link**: the same script appends
+  `-Wl,--defsym,__nvheap_build_id=<epoch>`, read back by `NvmFlash`
+  above. It is the NEWEST SOURCE TIMESTAMP rather than the time of the
+  link, and that is a bench requirement, not a preference: an unchanged
+  tree must relink to the same bytes or reflashing it stops being safe
+  (see [bench.md](../bench.md) on the three erase regimes). An image
+  that never names the heap never references the symbol and pays
+  nothing for it.
 
 ## Bench findings (`test_avr_nvm`, AVR128DB48 rev A5, 24 MHz, 5 V)
 
@@ -463,9 +527,12 @@ Driver gaps - the chapter's features this driver does not implement:
 - **No bootloader.** Nothing here writes BOOT (nothing can), and no
   boot loader is built. The door is left open at zero cost: BOOTSIZE 1
   is 512 bytes, which is what an Optiboot-DX fits in.
-- **No flash policy.** Journaling, wear levelling, a log structure, a
-  second copy - none of it exists. What exists is the mechanism plus a
-  region provider; a policy needs a user with real numbers behind it.
+- **No flash JOURNAL.** Wear levelling of payload pages, a log or ring
+  structure, a second copy - none of it exists, and a policy of that
+  kind needs a user with real numbers behind it. What does exist is a
+  block store: `NvmFlash` above carries the allocator described in
+  [design/nv-heap.md](../design/nv-heap.md), which covers "a table that
+  survives" and deliberately not "a log that grows".
 - **No fuse writing**, because the silicon has none from software; and
   no chip-erase commands, deliberately (above).
 - **`NVMCTRL.DATA` and `NVMCTRL.ADDR` are not exposed.** They report
