@@ -55,6 +55,7 @@
 #include "avrdx/userrow.hpp"
 #include "avrdx/vref.hpp"
 #include "util/print.hpp"
+#include "util/testbench.hpp"
 
 namespace {
 
@@ -101,20 +102,18 @@ using Op2 = Opamp<2>;
 
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
-// ---- tiny test harness ----------------------------------------------------------
-uint16_t passed = 0, failed = 0;
+// ---- the test harness -------------------------------------------------------------
+// The letter registry, the verdict lines and the two tallies bench.py
+// reads all live in util/testbench.hpp; these two are the shorthand the
+// tests below call.
+TestBench<Serial> bench;
+
 uint16_t vdd_mv_ = 5000;          ///< measured once at boot, for the mV columns
 uint8_t cal_at_boot[3] = {0, 0, 0};
 uint8_t timebase_at_boot = 0;
 
-void verdict(const char* name, bool ok) {
-    if (ok) ++passed; else ++failed;
-    print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
-}
-void verdict(const char* a, const char* b, bool ok) {
-    if (ok) ++passed; else ++failed;
-    print(serial, "  ", ok ? "PASS" : "FAIL", "  ", a, b, crlf);
-}
+void verdict(const char* name, bool ok) { bench.verdict(name, ok); }
+void verdict(const char* a, const char* b, bool ok) { bench.verdict(a, b, ok); }
 bool near(int32_t a, int32_t b, int32_t tol) {
     const int32_t d = a > b ? a - b : b - a;
     return d <= tol;
@@ -1119,41 +1118,23 @@ void ti_events() {
 
 // ---- the menu ----------------------------------------------------------------------
 
-using TestFn = void (*)();
-struct Test { char key; TestFn fn; };
-constexpr Test tests[] = {
-    {'a', ta_block},   {'b', tb_follower},       {'c', tc_noninverting},
-    {'d', td_inverting}, {'e', te_links},        {'f', tf_instrumentation},
-    {'g', tg_timer},   {'h', th_calibration},    {'i', ti_events},
-};
-constexpr char all_keys[] = "abcdefghi";
-
-void run(TestFn fn) {
-    passed = failed = 0;
-    fn();
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
-}
-
-void run_set(const char* keys) {
-    uint16_t tp = 0, tf = 0;
-    for (const char* k = keys; *k != 0; ++k) {
-        for (const Test& t : tests) {
-            if (t.key != *k) continue;
-            run(t.fn);
-            tp = static_cast<uint16_t>(tp + passed);
-            tf = static_cast<uint16_t>(tf + failed);
-        }
-    }
-    print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
+/// Registered once at startup. A false return would be a programming
+/// error (a duplicate key or a full table), not a runtime condition.
+void register_tests() {
+    bench.letter('a', "the block, the registers and IRSEL", ta_block);
+    bench.letter('b', "the voltage follower", tb_follower);
+    bench.letter('c', "the non-inverting gain table", tc_noninverting);
+    bench.letter('d', "the inverting gain table", td_inverting);
+    bench.letter('e', "internal sources and op-to-op links", te_links);
+    bench.letter('f', "the instrumentation amplifier", tf_instrumentation);
+    bench.letter('g', "the internal timer, READY and a rebase", tg_timer);
+    bench.letter('h', "offset calibration", th_calibration);
+    bench.letter('i', "the four event users", ti_events);
 }
 
 void help() {
-    print(serial, "test_avr_opamp: a the block, the registers and IRSEL | b the "
-                  "voltage follower | c the non-inverting gain table | d the "
-                  "inverting gain table | e internal sources and op-to-op links | "
-                  "f the instrumentation amplifier | g the internal timer, READY "
-                  "and a rebase | h offset calibration | i the four event users"
-                  "    -> z = all of a..i", crlf);
+    print(serial, "test_avr_opamp:", crlf);
+    bench.menu();
 }
 
 }  // namespace
@@ -1193,20 +1174,19 @@ int main() {
           ", clk=", xtal ? "XTAL" : "OSCHF", " 24 MHz, silicon rev ",
           hex(SYSCFG.REVID), ", VDD ", vdd_mv_, " mV, ", opamp_count,
           " op amps)", crlf);
+    register_tests();
     help();
-    print(serial, "> ");
+    bench.prompt();
     for (;;) {
         uint8_t c;
         if (!Serial::read_byte(c)) continue;
         if (c == '\r' || c == '\n') continue;
         print(serial, static_cast<char>(c), crlf);
-        if (c == '?') { help(); }
-        else if (c == 'z' || c == 'Z') { run_set(all_keys); }
-        else {
-            bool found = false;
-            for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }
-            if (!found) print(serial, "? for help", crlf);
+        if (c == '?') {
+            help();
+        } else if (!bench.handle(static_cast<char>(c))) {
+            print(serial, "? for help", crlf);
         }
-        print(serial, "> ");
+        bench.prompt();
     }
 }

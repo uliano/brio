@@ -237,7 +237,7 @@ void nvm_util() {
 
     static const uint8_t payload[3] = {1, 2, 3};
     Writer::init();
-    post<Writer>(NvWrite{32, payload, sizeof payload, ReplyTo<NvDone>{}});
+    post<Writer>(NvWrite{32, lend<Lease::reply>(payload), sizeof payload, ReplyTo<NvDone>{}});
     nvm_sink = Writer::rejected_count();
     while (const std::optional<Writer::Event> e = Writer::queue.pop()) {
         Writer::dispatch(*e);

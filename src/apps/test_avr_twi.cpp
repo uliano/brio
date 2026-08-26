@@ -643,7 +643,7 @@ template <typename C>
 void shape_matrix(const char* where) {
     // write
     for (uint8_t i = 0; i < 5; ++i) tx_buf[i] = static_cast<uint8_t>(0x31 + i);
-    uint8_t st = run_request<C>({client_addr, tx_buf, 5, nullptr, 0, {}});
+    uint8_t st = run_request<C>({client_addr, lend<Lease::reply>(tx_buf), 5, {}, 0, {}});
     bool ok = st == i2c_ok && cl_rx_n == 5 && cl_addr_hits == 1;
     for (uint8_t i = 0; i < 5; ++i) ok = ok && cl_rx[i] == tx_buf[i];
     if (!ok) {
@@ -656,7 +656,7 @@ void shape_matrix(const char* where) {
     // read
     cl_tx_seed = 0x50;
     for (uint8_t i = 0; i < 8; ++i) rx_buf[i] = 0;
-    st = run_request<C>({client_addr, nullptr, 0, rx_buf, 4, {}});
+    st = run_request<C>({client_addr, {}, 0, lend<Lease::reply>(rx_buf), 4, {}});
     ok = st == i2c_ok && cl_addr_hits == 1 && cl_dir_read;
     for (uint8_t i = 0; i < 4; ++i) ok = ok && rx_buf[i] == static_cast<uint8_t>(0x50 + i);
     if (!ok) {
@@ -671,7 +671,7 @@ void shape_matrix(const char* where) {
     tx_buf[0] = 0x11;
     tx_buf[1] = 0x22;
     for (uint8_t i = 0; i < 8; ++i) rx_buf[i] = 0;
-    st = run_request<C>({client_addr, tx_buf, 2, rx_buf, 3, {}});
+    st = run_request<C>({client_addr, lend<Lease::reply>(tx_buf), 2, lend<Lease::reply>(rx_buf), 3, {}});
     ok = st == i2c_ok && cl_rx_n == 2 && cl_rx[0] == 0x11 && cl_rx[1] == 0x22 &&
          cl_addr_hits == 2;
     for (uint8_t i = 0; i < 3; ++i) ok = ok && rx_buf[i] == static_cast<uint8_t>(0x80 + i);
@@ -683,10 +683,10 @@ void shape_matrix(const char* where) {
     verdict("write-then-read: one tenure, two address packets ", where, ok);
 
     // probe
-    st = run_request<C>({client_addr, nullptr, 0, nullptr, 0, {}});
+    st = run_request<C>({client_addr, {}, 0, {}, 0, {}});
     verdict("probe: the address alone, ACKed ", where,
             st == i2c_ok && cl_addr_hits == 1 && cl_rx_n == 0);
-    st = run_request<C>({absent_addr, nullptr, 0, nullptr, 0, {}});
+    st = run_request<C>({absent_addr, {}, 0, {}, 0, {}});
     verdict("probe of an address nobody holds: nack_addr ", where,
             st == i2c_nack_addr && cl_addr_hits == 0);
 }
@@ -717,7 +717,7 @@ void tc_loops() {
 /// Probe an address and say whether anybody ACKed.
 template <typename C>
 bool acked(uint8_t addr) {
-    return run_request<C>({addr, nullptr, 0, nullptr, 0, {}}) == i2c_ok;
+    return run_request<C>({addr, {}, 0, {}, 0, {}}) == i2c_ok;
 }
 
 void td_addresses() {
@@ -814,13 +814,13 @@ void te_cases() {
 
     // The engine's two NACK verdicts.
     verdict("the engine reports nack_addr for an absent device",
-            run_request<Client>({absent_addr, tx_buf, 2, nullptr, 0, {}}) == i2c_nack_addr);
+            run_request<Client>({absent_addr, lend<Lease::reply>(tx_buf), 2, {}, 0, {}}) == i2c_nack_addr);
 
     // A client that NACKs the second data byte: the host must call it
     // nack_data, and the wire must carry only what was accepted.
     cl_nack_after = 2;
     for (uint8_t i = 0; i < 5; ++i) tx_buf[i] = static_cast<uint8_t>(0xC0 + i);
-    const uint8_t nd = run_request<Client>({client_addr, tx_buf, 5, nullptr, 0, {}});
+    const uint8_t nd = run_request<Client>({client_addr, lend<Lease::reply>(tx_buf), 5, {}, 0, {}});
     print(serial, "  client NACK after 2 bytes: engine says ", nd, " (i2c_nack_data = ",
           i2c_nack_data, "), client took ", cl_rx_n, " bytes", crlf);
     verdict("the engine reports nack_data", nd == i2c_nack_data);
@@ -832,7 +832,7 @@ void te_cases() {
     // RXACK on the client side: after the host's last read byte.
     cl_reset();
     cl_tx_seed = 0x70;
-    (void)run_request<Client>({client_addr, nullptr, 0, rx_buf, 3, {}});
+    (void)run_request<Client>({client_addr, {}, 0, lend<Lease::reply>(rx_buf), 3, {}});
     verdict("RXACK on the client: it saw the host's closing NACK", cl_saw_nack);
 
     quiesce();
@@ -904,7 +904,7 @@ void tf_smart() {
     // a host Smart-mode WRITE behaves exactly like the explicit one.
     T::host_smart(true);
     for (uint8_t i = 0; i < 3; ++i) tx_buf[i] = static_cast<uint8_t>(0xE0 + i);
-    const uint8_t w = run_request<Client>({client_addr, tx_buf, 3, nullptr, 0, {}});
+    const uint8_t w = run_request<Client>({client_addr, lend<Lease::reply>(tx_buf), 3, {}, 0, {}});
     bool wok = w == i2c_ok && cl_rx_n == 3;
     for (uint8_t i = 0; i < 3; ++i) wok = wok && cl_rx[i] == tx_buf[i];
     verdict("Smart mode does not disturb a host WRITE (ACKACT is not sent on a "
@@ -943,7 +943,7 @@ void tf_smart() {
 
     // And a whole exchange through the task's Smart-mode path.
     verdict("client Smart mode moves a whole write",
-            run_request<Client>({client_addr, tx_buf, 3, nullptr, 0, {}}) == i2c_ok &&
+            run_request<Client>({client_addr, lend<Lease::reply>(tx_buf), 3, {}, 0, {}}) == i2c_ok &&
             cl_rx_n == 3 && cl_rx[0] == 0xE0);
     quiesce();
 }
@@ -980,11 +980,11 @@ void tg_quick() {
     tx_buf[0] = 0x5A;
     tx_buf[1] = 0xA5;
     uint16_t edges = count_edges_of([] {
-        (void)run_request<Client>({client_addr, tx_buf, 1, nullptr, 0, {}});
+        (void)run_request<Client>({client_addr, lend<Lease::reply>(tx_buf), 1, {}, 0, {}});
     });
     const uint16_t two_frames = edges;
     edges = count_edges_of([] {
-        (void)run_request<Client>({client_addr, tx_buf, 2, nullptr, 0, {}});
+        (void)run_request<Client>({client_addr, lend<Lease::reply>(tx_buf), 2, {}, 0, {}});
     });
     const uint16_t three_frames = edges;
     print(serial, "  a one-byte write: ", two_frames, " SCL rising edges; a two-byte "
@@ -999,7 +999,7 @@ void tg_quick() {
     verdict("QCEN is set", T::quick_command());
     uint8_t st = 0;
     edges = count_edges_of([] {
-        (void)run_request<Client>({client_addr, tx_buf, 4, nullptr, 0, {}});
+        (void)run_request<Client>({client_addr, lend<Lease::reply>(tx_buf), 4, {}, 0, {}});
     });
     st = Host::status();
     print(serial, "  a quick command (W): ", edges, " SCL rising edges - one 9-bit "
@@ -1027,7 +1027,7 @@ void tg_quick() {
 
     Host::quick_command(false);
     verdict("QCEN off again, an ordinary write moves its byte",
-            run_request<Client>({client_addr, tx_buf, 1, nullptr, 0, {}}) == i2c_ok &&
+            run_request<Client>({client_addr, lend<Lease::reply>(tx_buf), 1, {}, 0, {}}) == i2c_ok &&
             cl_rx_n == 1 && cl_rx[0] == 0x5A);
     quiesce();
 }
@@ -1197,7 +1197,7 @@ void th_busstate() {
     verdict("recover() (an ENABLE cycle, not FLUSH) leaves the bus Idle",
             T::bus_state() == TwiBusState::idle && T::host_enabled());
     verdict("and the bus still works after it",
-            run_request<Client>({client_addr, tx_buf, 1, nullptr, 0, {}}) == i2c_ok);
+            run_request<Client>({client_addr, lend<Lease::reply>(tx_buf), 1, {}, 0, {}}) == i2c_ok);
 
     quiesce();
     verdict("the injector pins are parked as inputs with OUT = 0 (errata hygiene for "
@@ -1233,7 +1233,7 @@ void ti_interrupts() {
     sei();
 
     for (uint8_t i = 0; i < 6; ++i) tx_buf[i] = static_cast<uint8_t>(0x21 + i);
-    bool started = !Host::start({client_addr, tx_buf, 6, nullptr, 0, {}});
+    bool started = !Host::start({client_addr, lend<Lease::reply>(tx_buf), 6, {}, 0, {}});
     for (uint32_t i = 0; i < 400'000u && !host_done; ++i) {}
     delay_us(clock, 2000);
     const uint16_t hi = host_ints;
@@ -1285,7 +1285,7 @@ struct Sink {
 
 bool rebase_step(uint32_t hz, const char* what) {
     for (uint8_t i = 0; i < 4; ++i) tx_buf[i] = static_cast<uint8_t>(hz / 1'000'000u + i);
-    const uint8_t st = run_request<Client>({client_addr, tx_buf, 4, nullptr, 0, {}});
+    const uint8_t st = run_request<Client>({client_addr, lend<Lease::reply>(tx_buf), 4, {}, 0, {}});
     bool ok = st == i2c_ok && cl_rx_n == 4;
     for (uint8_t i = 0; i < 4; ++i) ok = ok && cl_rx[i] == tx_buf[i];
     verdict("the exchange is exact ", what, ok);
@@ -1339,7 +1339,8 @@ void tj_rebase() {
     T::enable_write_interrupt(true);
     sei();
     tx_buf[0] = 0x7B;
-    post<Bus>(Host::Request{client_addr, tx_buf, 1, rx_buf, 2, reply_to<Sink, I2cDone>()});
+    post<Bus>(Host::Request{client_addr, lend<Lease::reply>(tx_buf), 1, lend<Lease::reply>(rx_buf), 2,
+                            reply_to<Sink, I2cDone>()});
     bool replied = false;
     uint8_t status = 0xFF;
     for (uint32_t i = 0; i < 800'000u && !replied; ++i) {
@@ -1386,7 +1387,7 @@ void wait_ms(uint16_t ms) { delay_us(clock, static_cast<uint32_t>(ms) * 1000u); 
 /// One READ tenure, decoded into `link_ans`.
 bool link_collect() {
     for (uint8_t i = 0; i < twilink::response_bytes; ++i) link_rx[i] = 0;
-    if (run_request<Client>({twilink::command_addr, nullptr, 0, link_rx,
+    if (run_request<Client>({twilink::command_addr, {}, 0, lend<Lease::reply>(link_rx),
                              twilink::response_bytes, {}}) != i2c_ok) {
         return false;
     }
@@ -1409,7 +1410,7 @@ bool link_once(Op op, const uint8_t* p, uint8_t len) {
             if (n < sizeof link_tx) link_tx[n++] = b;
         },
         op, p, len);
-    if (run_request<Client>({twilink::command_addr, link_tx, n, nullptr, 0, {}}) != i2c_ok) {
+    if (run_request<Client>({twilink::command_addr, lend<Lease::reply>(link_tx), n, {}, 0, {}}) != i2c_ok) {
         return false;
     }
     wait_ms(1);
@@ -1501,7 +1502,7 @@ void tk_bringup() {
         Op::ping, nullptr, 0);
     link_tx[n - 1] ^= 0xFFu;                  // the checksum, ruined
     bool naked = false;
-    if (run_request<Client>({twilink::command_addr, link_tx, n, nullptr, 0, {}}) == i2c_ok) {
+    if (run_request<Client>({twilink::command_addr, lend<Lease::reply>(link_tx), n, {}, 0, {}}) == i2c_ok) {
         wait_ms(1);
         naked = link_collect() && link_ans.op == Op::nak && link_ans.len >= 1 &&
                 link_ans.data[0] == twilink::byte_of(Op::ping);
@@ -1514,8 +1515,8 @@ void tk_bringup() {
     link_tx[0] = 0xC3;
     link_tx[1] = twilink::byte_of(Op::ping);
     link_tx[2] = 0;
-    const uint8_t st = run_request<Client>({twilink::command_addr, link_tx, 3,
-                                            nullptr, 0, {}});
+    const uint8_t st = run_request<Client>({twilink::command_addr, lend<Lease::reply>(link_tx), 3,
+                                            {}, 0, {}});
     verdict("a truncated frame is accepted on the wire", st == i2c_ok);
     verdict("and does not wedge the channel: the next ping is answered",
             link_cmd(Op::ping));
@@ -1559,7 +1560,7 @@ Stretch stretch_round(uint16_t hold_us) {
     SclLow::init(clock, ChScl{}, TcbClock::div1, true);
     meter_reset();
     Watch::reset();
-    Host::start({twilink::command_addr, tx_buf, stretch_bytes, nullptr, 0, {}});
+    Host::start({twilink::command_addr, lend<Lease::reply>(tx_buf), stretch_bytes, {}, 0, {}});
     for (uint32_t i = 0; i < 4'000'000u; ++i) {
         const uint8_t s = T::host_status();
         if (s & (TWI_RIF_bm | TWI_WIF_bm)) {
@@ -1646,7 +1647,7 @@ void tm_nacks() {
     verdict("the peer commanded deaf (its address parked elsewhere)",
             peer_action(Op::serve, a));
     last_mstatus = 0;
-    uint8_t st = run_request<Client>({twilink::command_addr, tx_buf, 2, nullptr, 0, {}});
+    uint8_t st = run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 2, {}, 0, {}});
     print(serial, "  a write to a deaf board: engine says ", st, " (i2c_nack_addr = ",
           i2c_nack_addr, "), MSTATUS at the failure = ", hex(last_mstatus), crlf);
     verdict("the engine reports nack_addr", st == i2c_nack_addr);
@@ -1669,7 +1670,7 @@ void tm_nacks() {
     verdict("the peer armed to NACK its third byte", peer_action(Op::serve, a));
     for (uint8_t i = 0; i < 6; ++i) tx_buf[i] = static_cast<uint8_t>(0x91 + i);
     last_mstatus = 0;
-    st = run_request<Client>({twilink::command_addr, tx_buf, 6, nullptr, 0, {}});
+    st = run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 6, {}, 0, {}});
     print(serial, "  a six-byte write into that: engine says ", st, " (i2c_nack_data = ",
           i2c_nack_data, "), MSTATUS = ", hex(last_mstatus), crlf);
     verdict("the engine reports nack_data", st == i2c_nack_data);
@@ -1693,7 +1694,7 @@ void tm_nacks() {
     a.flags = twilink::flag_stop_interrupt;
     verdict("the peer armed to serve four bytes", peer_action(Op::serve, a));
     for (uint8_t i = 0; i < 8; ++i) rx_buf[i] = 0;
-    st = run_request<Client>({twilink::command_addr, nullptr, 0, rx_buf, 4, {}});
+    st = run_request<Client>({twilink::command_addr, {}, 0, lend<Lease::reply>(rx_buf), 4, {}});
     bool exact = st == i2c_ok;
     for (uint8_t i = 0; i < 4; ++i) exact = exact && rx_buf[i] == static_cast<uint8_t>(0x64 + i);
     verdict("four bytes read back exactly from the peer", exact);
@@ -1739,7 +1740,7 @@ ArbRound arb_round(uint8_t a_target, uint16_t t_us) {
     }
     T::clear_host_flags(TWI_ARBLOST_bm | TWI_BUSERR_bm | TWI_WIF_bm | TWI_RIF_bm);
     for (uint8_t i = 0; i < 5; ++i) tx_buf[i] = static_cast<uint8_t>(0xD0 + i);
-    (void)Host::start({a_target, tx_buf, 5, nullptr, 0, {}});   // held: the bus is Busy
+    (void)Host::start({a_target, lend<Lease::reply>(tx_buf), 5, {}, 0, {}});   // held: the bus is Busy
     delay_us(clock, t_us);                 // the peer arms into the same Busy bus
     inject_stop();                         // both held STARTs go out together
 
@@ -1826,8 +1827,8 @@ void tn_arbitration() {
             }
             // The loser's retry on an Idle bus must simply work.
             wait_ms(5);
-            const uint8_t retry = run_request<Client>({twilink::command_addr, tx_buf, 2,
-                                                       nullptr, 0, {}});
+            const uint8_t retry = run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 2,
+                                                       {}, 0, {}});
             verdict("the loser's retry on the idle bus succeeds", retry == i2c_ok);
             peer_settle();
         }
@@ -1865,8 +1866,8 @@ void to_collision() {
         verdict("the peer's client joined the shared address", peer_action(Op::coll, a));
 
         for (uint8_t i = 0; i < 8; ++i) rx_buf[i] = 0;
-        const uint8_t st = run_request<Client>({twilink::shared_addr, nullptr, 0,
-                                                rx_buf, 4, {}});
+        const uint8_t st = run_request<Client>({twilink::shared_addr, {}, 0,
+                                                lend<Lease::reply>(rx_buf), 4, {}});
         const bool a_coll = T::collision();
         const uint16_t served = cl_sent;
         const uint16_t a_hits = cl_addr_hits;   // the report command resets these
@@ -1903,9 +1904,9 @@ void to_collision() {
     a.count = 4;
     a.flags = twilink::flag_stop_interrupt;
     verdict("one more collision armed", peer_action(Op::coll, a));
-    (void)run_request<Client>({twilink::shared_addr, nullptr, 0, rx_buf, 4, {}});
+    (void)run_request<Client>({twilink::shared_addr, {}, 0, lend<Lease::reply>(rx_buf), 4, {}});
     const bool coll_now = T::collision();
-    (void)run_request<Client>({twilink::shared_addr, nullptr, 0, rx_buf, 2, {}});
+    (void)run_request<Client>({twilink::shared_addr, {}, 0, lend<Lease::reply>(rx_buf), 2, {}});
     const bool coll_after = T::collision();
     print(serial, "  COLL after the colliding read = ", coll_now ? 1 : 0,
           ", after the NEXT Start condition = ", coll_after ? 1 : 0, crlf);
@@ -2014,7 +2015,7 @@ void tq_general_call() {
     verdict("the peer's client answers the General Call too",
             peer_action(Op::serve, a));
     for (uint8_t i = 0; i < 3; ++i) tx_buf[i] = static_cast<uint8_t>(0x71 + i);
-    uint8_t st = run_request<Client>({0x00, tx_buf, 3, nullptr, 0, {}});
+    uint8_t st = run_request<Client>({0x00, lend<Lease::reply>(tx_buf), 3, {}, 0, {}});
     const uint8_t local_n = cl_rx_n;
     const uint8_t local_addr = cl_last_addr;
     const uint8_t local0 = cl_rx[0];
@@ -2039,12 +2040,12 @@ void tq_general_call() {
     a.count = 3;
     a.flags = twilink::flag_stop_interrupt;      // no flag_general_call
     verdict("the peer commanded General Call OFF", peer_action(Op::serve, a));
-    st = run_request<Client>({0x00, tx_buf, 3, nullptr, 0, {}});
+    st = run_request<Client>({0x00, lend<Lease::reply>(tx_buf), 3, {}, 0, {}});
     const uint8_t gc_local = cl_rx_n;
     wait_ms(3);
     for (uint8_t i = 0; i < 3; ++i) tx_buf[i] = static_cast<uint8_t>(0x81 + i);
-    const uint8_t st2 = run_request<Client>({twilink::command_addr, tx_buf, 3,
-                                             nullptr, 0, {}});
+    const uint8_t st2 = run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 3,
+                                             {}, 0, {}});
     peer_settle();
     got = peer_report(rep);
     if (got) print_report(rep);
@@ -2065,11 +2066,11 @@ void tq_general_call() {
     ChScl::source(EvPin<Scl>{});
     Host::quick_command(true);
     const uint16_t edges = count_edges_of([] {
-        (void)run_request<Client>({twilink::command_addr, tx_buf, 4, nullptr, 0, {}});
+        (void)run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 4, {}, 0, {}});
     });
     const uint8_t qst = Host::status();
     last_mstatus = 0;
-    const uint8_t qabsent = run_request<Client>({absent_addr, nullptr, 0, nullptr, 0, {}});
+    const uint8_t qabsent = run_request<Client>({absent_addr, {}, 0, {}, 0, {}});
     Host::quick_command(false);
     print(serial, "  quick command to a real second chip: ", edges, " SCL rising edges, "
           "status ", qst, "; to an address nobody holds: ", qabsent, crlf);
@@ -2103,8 +2104,8 @@ void speed_round(TwiSpeed s, const char* name) {
     meter_mode = 0;
     SclFreq::init(clock, ChScl{}, TcbClock::div1);
     meter_reset();
-    const uint8_t st = run_request<Client>({twilink::command_addr, tx_buf, 4,
-                                            rx_buf, 4, {}, s});
+    const uint8_t st = run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 4,
+                                            lend<Lease::reply>(rx_buf), 4, {}, s});
     const uint16_t period = meter_min;
     meter_stop();
     const uint8_t baud = T::baud();
@@ -2112,8 +2113,8 @@ void speed_round(TwiSpeed s, const char* name) {
     meter_mode = 1;
     SclLow::init(clock, ChScl{}, TcbClock::div1, true);
     meter_reset();
-    const uint8_t st2 = run_request<Client>({twilink::command_addr, nullptr, 0,
-                                             rx_buf + 4, 4, {}, s});
+    const uint8_t st2 = run_request<Client>({twilink::command_addr, {}, 0,
+                                             lend<Lease::reply>(rx_buf + 4), 4, {}, s});
     const uint16_t low_max = meter_max;
     const uint16_t low_min = meter_min;
     meter_stop();
@@ -2170,8 +2171,8 @@ bool two_board_step(uint32_t hz, const char* what) {
     }
     for (uint8_t i = 0; i < 4; ++i) tx_buf[i] = static_cast<uint8_t>(0xE1 + i);
     for (uint8_t i = 0; i < 8; ++i) rx_buf[i] = 0;
-    const uint8_t st = run_request<Client>({twilink::command_addr, tx_buf, 4,
-                                            rx_buf, 4, {}});
+    const uint8_t st = run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 4,
+                                            lend<Lease::reply>(rx_buf), 4, {}});
     bool exact = st == i2c_ok;
     for (uint8_t i = 0; i < 4; ++i) {
         exact = exact && rx_buf[i] == static_cast<uint8_t>(a.seed + i);

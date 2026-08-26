@@ -289,7 +289,7 @@ void use_tasks() {
                                    .sda_hold = TwiSdaHold::ns300,
                                    .smart = true});
     (void)Host0::start(typename Host0::Request{
-        0x60, tx_buf, 2, rx_buf, 4, {}, TwiSpeed::standard_100k});
+        0x60, lend<Lease::reply>(tx_buf), 2, lend<Lease::reply>(rx_buf), 4, {}, TwiSpeed::standard_100k});
     (void)Host0::isr();
     (void)Host0::status();
     Host0::rebase(12'000'000u);

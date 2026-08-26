@@ -208,9 +208,13 @@ comment. What C++ cannot do is stop a receiver from stashing the raw
 pointer past its window; the planned debug-build addition is a lender
 epoch inside `Borrowed` compared on access (stale loan -> panic on the
 guilty instruction), built when a host test simulating preemption
-needs it. Bus tx/rx buffers are `reply` loans and stay plain spans in
-the request descriptor (a span already is a view type); the
-descriptor's comment states the lease.
+needs it. `lend<Lease::reply>(buf)` is the maker that names a loan at
+the call site, spelled like `reply_to<Ao, Payload>()` - the lease is
+the explicit argument, the pointee type is deduced; a field left out
+(or `{}`) is a null loan. Bus tx/rx/command buffers and the source
+bytes of a nonvolatile write are `reply` loans and say so in their
+field types; the engine that walks such a buffer calls `.get()` and
+indexes the raw pointer, because a loan is a view and not a container.
 
 **In use today.** `LineReceived` lends the line buffer for one
 dispatch (mutable: in-place tokenization is the point). Bus requests

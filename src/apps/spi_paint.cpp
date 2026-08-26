@@ -353,8 +353,8 @@ private:
         cur_cmd = c;
         brio::post<Bus>(SpiHw::Request{
             CsPin::ref(), DcPin::ref(),
-            &cur_cmd, 1,
-            data, nullptr, n,
+            brio::lend<brio::Lease::reply>(&cur_cmd), 1,
+            brio::lend<brio::Lease::reply>(data), {}, n,
             brio::reply_to<Painter, brio::SpiDone>(),
             brio::SpiClock::div4,
             brio::SpiMode::mode0, true});             // polled bulk
@@ -505,8 +505,8 @@ private:
     static void post_xfer(uint16_t n) {
         brio::post<Bus>(SpiHw::Request{
             TcsPin::ref(), {},
-            nullptr, 0,
-            tx, rx, n,
+            {}, 0,
+            brio::lend<brio::Lease::reply>(tx), brio::lend<brio::Lease::reply>(rx), n,
             brio::reply_to<Touch, brio::SpiDone>(),
             brio::SpiClock::div16});           // 1.5 MHz, ISR path
     }

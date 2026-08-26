@@ -346,7 +346,7 @@ slink::Report run_twi_write(const slink::Params& a) {
 
     free_run_capture();
     watch_zero();
-    (void)Host::start({a.addr, tx, n, nullptr, 0, {}, speed});
+    (void)Host::start({a.addr, lend<Lease::reply>(tx), n, {}, 0, {}, speed});
     uint8_t status = 0xFE;
     const uint32_t ts = Ticker::millis();
     while (Ticker::millis() - ts < a.deadline_ms) {

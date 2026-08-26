@@ -101,6 +101,7 @@
 
 #include "avrdx/delay.hpp"
 #include "avrdx/pin.hpp"
+#include "kernel/borrowed.hpp"
 #include "kernel/post.hpp"
 #include "util/clock.hpp"
 #include "util/i2c_bus.hpp"
@@ -1224,9 +1225,13 @@ public:
 
     struct Request {
         uint8_t addr;          ///< 7-bit client address (unshifted)
-        const uint8_t* tx;     ///< bytes written after START (may be null if tx_len == 0)
+        /// Bytes written after START, LENT until the reply lands (may be
+        /// null if tx_len == 0).
+        Borrowed<const uint8_t, Lease::reply> tx;
         uint8_t tx_len;
-        uint8_t* rx;           ///< bytes read after the (repeated) START+R
+        /// Where the bytes read after the (repeated) START+R are put;
+        /// LENT until the reply lands.
+        Borrowed<uint8_t, Lease::reply> rx;
         uint8_t rx_len;
         ReplyTo<I2cDone> reply;
         TwiSpeed speed = TwiSpeed::standard_100k;
@@ -1383,7 +1388,7 @@ public:
                                   ? i2c_nack_addr : i2c_nack_data);
             }
             if (!quick_ && phase_ == Phase::writing && pos_ < req_.tx_len) {
-                T::host_write(req_.tx[pos_++]);
+                T::host_write(req_.tx.get()[pos_++]);
                 return false;
             }
             if (!quick_ && req_.rx_len > 0) {   // repeated START, direction read
@@ -1406,12 +1411,12 @@ public:
                 // MDATA read, so ACKACT is armed FIRST and no receive
                 // command follows - only the STOP after the last byte.
                 T::ack_action(last ? TwiAck::nack : TwiAck::ack);
-                req_.rx[pos_++] = T::host_read();
+                req_.rx.get()[pos_++] = T::host_read();
                 if (!last) return false;
                 T::host_command(TwiHostCmd::stop, TwiAck::nack);
                 return finish(i2c_ok);
             }
-            req_.rx[pos_++] = T::host_read();
+            req_.rx.get()[pos_++] = T::host_read();
             if (!last) {
                 T::host_command(TwiHostCmd::recv_trans, TwiAck::ack);
                 return false;

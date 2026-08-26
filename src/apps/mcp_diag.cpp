@@ -317,14 +317,14 @@ void exp_z(brio::SpiMode mode, uint16_t trig_len, brio::SpiClock clk, bool prime
     if (prime) {
         // one dummy byte with NO chip select: parks SCK at CPOL (high in
         // mode 3) so the next CS falling edge finds it there
-        SpiHw::Request dummy{{}, {}, nullptr, 0, nullptr, rx, 1, {}, clk, mode, true};
+        SpiHw::Request dummy{{}, {}, {}, 0, {}, brio::lend<brio::Lease::reply>(rx), 1, {}, clk, mode, true};
         SpiHw::start(dummy);
         brio::delay_us(clock, 20);
     }
     const brio::PinRef cs = manual_cs ? brio::PinRef{} : Cs::ref();
-    SpiHw::Request trig{cs, {}, nullptr, 0, nullptr, rx, trig_len, {},
+    SpiHw::Request trig{cs, {}, {}, 0, {}, brio::lend<brio::Lease::reply>(rx), trig_len, {},
                         clk, mode, true};
-    SpiHw::Request read{cs, {}, nullptr, 0, nullptr, rx, 3, {},
+    SpiHw::Request read{cs, {}, {}, 0, {}, brio::lend<brio::Lease::reply>(rx), 3, {},
                         clk, mode, true};
     if (manual_cs) { Cs::clear(); brio::delay_us(clock, 50); }
     SpiHw::start(trig);
@@ -355,9 +355,9 @@ void exp_i(bool isr_trigger) {
     rest();
     SpiHw::init(clock);
     static uint8_t rx[3];
-    SpiHw::Request trig{Cs::ref(), {}, nullptr, 0, nullptr, rx, 1, {},
+    SpiHw::Request trig{Cs::ref(), {}, {}, 0, {}, brio::lend<brio::Lease::reply>(rx), 1, {},
                         brio::SpiClock::div64, brio::SpiMode::mode3, !isr_trigger};
-    SpiHw::Request read{Cs::ref(), {}, nullptr, 0, nullptr, rx, 3, {},
+    SpiHw::Request read{Cs::ref(), {}, {}, 0, {}, brio::lend<brio::Lease::reply>(rx), 3, {},
                         brio::SpiClock::div64, brio::SpiMode::mode3, false};
     spi_done = false;
     if (!SpiHw::start(trig)) {

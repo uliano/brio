@@ -86,8 +86,8 @@ struct Tester : brio::Fsm<Tester, Kick, brio::SpiDone> {
                 }
                 brio::post<Bus>(SpiHw::Request{
                     CsPin::ref(), {},              // cs, no dc
-                    nullptr, 0,                    // no command phase
-                    tx, rx, pattern_len,           // full duplex
+                    {}, 0,                         // no command phase
+                    brio::lend<brio::Lease::reply>(tx), brio::lend<brio::Lease::reply>(rx), pattern_len,  // full duplex
                     brio::reply_to<Tester, brio::SpiDone>()});
                 return handled();
             },

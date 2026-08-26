@@ -195,8 +195,8 @@ private:
         cur_cmd = c;
         brio::post<Bus>(SpiHw::Request{
             CsPin::ref(), DcPin::ref(),
-            &cur_cmd, 1,
-            data, nullptr, n,
+            brio::lend<brio::Lease::reply>(&cur_cmd), 1,
+            brio::lend<brio::Lease::reply>(data), {}, n,
             brio::reply_to<Filler, brio::SpiDone>(),
             brio::SpiClock::div4,              // ILI9481 happily at 6 MHz
             brio::SpiMode::mode0, true});             // polled: bulk at wire speed

@@ -24,10 +24,10 @@
  * flight wait in a small FIFO; a full FIFO answers immediately with
  * nv_rejected rather than blocking or dropping.
  *
- * OWNERSHIP. The bytes travel as a pointer inside the request and are
- * read one at a time as the writer advances: the requester must keep
- * them alive and unchanged until its NvDone arrives. A static buffer or
- * a member of the requesting AO is the normal answer.
+ * OWNERSHIP. The bytes travel as a Borrowed<..., Lease::reply> inside
+ * the request and are read one at a time as the writer advances: the
+ * requester must keep them alive and unchanged until its NvDone arrives.
+ * A static buffer or a member of the requesting AO is the normal answer.
  *
  * ISR GLUE the app must provide (the vector name never appears in
  * portable code):
@@ -43,6 +43,7 @@
 #include <stdint.h>
 #include <variant>
 
+#include "kernel/borrowed.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
 #include "kernel/platform.hpp"
@@ -67,7 +68,9 @@ inline constexpr uint8_t nv_refused = 3;    ///< the store refused a byte
 /// in the reply is normally smaller than `len`.
 struct NvWrite {
     uint16_t addr;
-    const uint8_t* data;
+    /// The source bytes, read one at a time as the writer advances:
+    /// LENT until the reply lands.
+    Borrowed<const uint8_t, Lease::reply> data;
     uint16_t len;
     ReplyTo<NvDone> reply;
 };
@@ -171,7 +174,7 @@ private:
     static Step step() {
         while (next_ < active_.len) {
             const uint16_t addr = static_cast<uint16_t>(active_.addr + next_);
-            const uint8_t want = active_.data[next_];
+            const uint8_t want = active_.data.get()[next_];
             ++next_;
             if (Store::read(addr) == want) {
                 continue;

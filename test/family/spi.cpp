@@ -171,7 +171,7 @@ void use_tasks() {
     (void)Host0::init(SysClock{});
     (void)Pinless::init(SysClock{});
     (void)Host0::start(typename Host0::Request{
-        PinRef{}, PinRef{}, nullptr, 0, nullptr, rx_buf, 4, {},
+        PinRef{}, PinRef{}, {}, 0, {}, lend<Lease::reply>(rx_buf), 4, {},
         SpiClock::div64, SpiMode::mode3, true, 10});
     (void)Host0::isr();
     Host0::rebase(12'000'000u);

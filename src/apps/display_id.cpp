@@ -171,8 +171,8 @@ private:
         cur_cmd = c;
         brio::post<Bus>(SpiHw::Request{
             CsPin::ref(), DcPin::ref(),
-            &cur_cmd, 1,
-            nullptr, nullptr, 0,
+            brio::lend<brio::Lease::reply>(&cur_cmd), 1,
+            {}, {}, 0,
             brio::reply_to<Prober, brio::SpiDone>()});
     }
 
@@ -183,8 +183,8 @@ private:
         }
         brio::post<Bus>(SpiHw::Request{
             CsPin::ref(), DcPin::ref(),
-            &cur_cmd, 1,
-            nullptr, buf, probes[idx].len,     // rx-only data phase
+            brio::lend<brio::Lease::reply>(&cur_cmd), 1,
+            {}, brio::lend<brio::Lease::reply>(buf), probes[idx].len,     // rx-only data phase
             brio::reply_to<Prober, brio::SpiDone>()});
     }
 

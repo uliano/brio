@@ -177,9 +177,17 @@ gets its dated home in `docs/design/` when taken.
   free) and is compared on every access - a stale loan panics on the
   guilty instruction. To be built together with the first host test
   that simulates preemption; not before.
-- **Payload/ownership pass.** kernel.md section 4 states the rule in
-  three lines; a dedicated pass over util/ producers (naming the lease
-  at every field, spans of `reply` loans) is pending.
+- **Payload/ownership pass DONE.** Every reply-class pointer payload
+  now names its lease in the field type: `NvWrite::data`,
+  `TwiHost::Request::tx/rx` and `SpiHost::Request::cmd/tx/rx` are
+  `Borrowed<..., Lease::reply>`, built at the call sites with the new
+  `lend<Lease::reply>(buf)` maker in kernel/borrowed.hpp (spelled like
+  `reply_to<>`; `{}` is the null loan, and a loan converts to the same
+  loan over a more qualified pointee so a writable buffer lends to a
+  read-only field with no ceremony). Borrowed is a zero-cost typed
+  pointer: the release images of test_avr_twi / test_avr_spi /
+  test_avr_nvm / bus_mv are BYTE-IDENTICAL before and after, which is
+  how the retyping was verified.
 - **HSM.** The FSM contract is HSM-ready (`unhandled` = future
   bubble-to-parent); parent pointers, bubbling and LCA entry/exit
   chains get built only when a real AO demands them.
@@ -947,6 +955,10 @@ lib/brio/src/            the framework, four strata:
                            NvStore + boot-side take()
     ring.hpp               Ring<T, size, P> SPSC FIFO, lock-free when the
                            index fits P::atomic_width, guarded otherwise
+    testbench.hpp          TestBench<Sink, max_letters>: the bench suite
+                           grammar in one place - letter registry, verdict
+                           lines, per-letter tally and the ALL: total
+                           tools/bench.py parses
     serial_port.hpp        SerialPort<Transport, P, LineSink>: RX bytes ->
                            LineReceived (Lease::dispatch loan, LendsTo)
     bus_master.hpp         BusMaster<Bus, P>: bus arbiter (pending FIFO,

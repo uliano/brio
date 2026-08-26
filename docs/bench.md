@@ -92,7 +92,10 @@ $PY tools/bench.py fuses A              # read the fuses; name=value pairs write
 ```
 
 `run` exits nonzero on a timeout or a nonzero fail count, so a suite is
-usable from a script.
+usable from a script. The grammar it parses - the letter menu, the
+`PASS`/`FAIL` lines, the per-letter `-> N pass, M fail` and the closing
+`ALL:` total - has ONE implementation, `util/testbench.hpp`: a suite
+registers its letters with it and prints only its own measurements.
 
 **The three erase regimes, MEASURED on this desk** (AVR128DB48 over
 UPDI, avrdude 8.1), because the option names invite exactly the wrong

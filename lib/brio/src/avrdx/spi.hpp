@@ -89,6 +89,7 @@
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
+#include "kernel/borrowed.hpp"
 #include "kernel/post.hpp"
 #include "util/clock.hpp"
 #include "util/spi_bus.hpp"
@@ -815,10 +816,13 @@ public:
     struct Request {
         PinRef cs;             ///< asserted low around the transaction
         PinRef dc;             ///< display D/C line; null = no such pin
-        const uint8_t* cmd;    ///< phase 1, sent with DC low
+        /// Phase 1, sent with DC low; LENT until the reply lands.
+        Borrowed<const uint8_t, Lease::reply> cmd;
         uint8_t cmd_len;
-        const uint8_t* tx;     ///< phase 2 out; null = 0xFF dummies
-        uint8_t* rx;           ///< phase 2 in; null = discard
+        /// Phase 2 out, null = 0xFF dummies; LENT until the reply lands.
+        Borrowed<const uint8_t, Lease::reply> tx;
+        /// Phase 2 in, null = discard; LENT until the reply lands.
+        Borrowed<uint8_t, Lease::reply> rx;
         uint16_t len;          ///< phase 2 length
         ReplyTo<SpiDone> reply;
         // Per-transaction bus configuration: on a SHARED bus every
@@ -940,28 +944,30 @@ public:
         // UART/PIT/anything else preempt this loop freely. The last
         // xfer() leaves INTFLAGS clear, so re-enabling IE is safe.
         S::enable_interrupt(false);
+        // The loans are VIEWS: .get() hands out the raw pointer the
+        // loops index (Borrowed is not a container).
         for (uint8_t i = 0; i < r.cmd_len; ++i) {
-            xfer(r.cmd[i]);
+            xfer(r.cmd.get()[i]);
         }
         r.dc.set();                        // data phase (no-op if len == 0)
         // Shape-specialized loops: the per-byte budget at div4 is 32
         // cycles, so hoisting the tx/rx null checks out of the loop is
         // not cosmetics - it is most of the headroom.
-        if (r.rx == nullptr && r.tx != nullptr) {          // bulk write
-            const uint8_t* p = r.tx;
+        if (r.rx.get() == nullptr && r.tx.get() != nullptr) {   // bulk write
+            const uint8_t* p = r.tx.get();
             for (uint16_t k = r.len; k != 0; --k) {
                 xfer(*p++);
             }
-        } else if (r.rx != nullptr && r.tx == nullptr) {   // bulk read
-            uint8_t* p = r.rx;
+        } else if (r.rx.get() != nullptr && r.tx.get() == nullptr) {  // bulk read
+            uint8_t* p = r.rx.get();
             for (uint16_t k = r.len; k != 0; --k) {
                 *p++ = xfer(0xFF);
             }
         } else {                                           // full duplex / none
             for (uint16_t i = 0; i < r.len; ++i) {
-                const uint8_t in = xfer((r.tx != nullptr) ? r.tx[i] : 0xFF);
-                if (r.rx != nullptr) {
-                    r.rx[i] = in;
+                const uint8_t in = xfer((r.tx.get() != nullptr) ? r.tx.get()[i] : 0xFF);
+                if (r.rx.get() != nullptr) {
+                    r.rx.get()[i] = in;
                 }
             }
         }
@@ -978,8 +984,8 @@ public:
     [[gnu::always_inline]] static bool isr() {
         const uint8_t in = S::take_normal().data;   // INTFLAGS then DATA: the IF clear sequence
 
-        if (!in_cmd_ && req_.rx != nullptr) {
-            req_.rx[pos_] = in;
+        if (!in_cmd_ && req_.rx.get() != nullptr) {
+            req_.rx.get()[pos_] = in;
         }
         ++pos_;
 
@@ -1049,14 +1055,14 @@ private:
         return S::read();
     }
 
-    static uint8_t first_byte() { return in_cmd_ ? req_.cmd[0] : data_byte(0); }
+    static uint8_t first_byte() { return in_cmd_ ? req_.cmd.get()[0] : data_byte(0); }
 
     static uint8_t next_byte() {
-        return in_cmd_ ? req_.cmd[pos_] : data_byte(pos_);
+        return in_cmd_ ? req_.cmd.get()[pos_] : data_byte(pos_);
     }
 
     static uint8_t data_byte(uint16_t i) {
-        return (req_.tx != nullptr) ? req_.tx[i] : 0xFF;
+        return (req_.tx.get() != nullptr) ? req_.tx.get()[i] : 0xFF;
     }
 
     static inline Request req_{};

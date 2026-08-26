@@ -76,6 +76,10 @@ what a scanner sends and, unlike the SPI zero-length request, it does
 touch the wire (its address phase IS the transaction), so `start()`
 is always asynchronous on I2C: every request ends in a `TransferDone`.
 
+The tx and rx buffers are `Lease::reply` loans and say so in their
+field types: the requester keeps them alive and untouched until its
+I2cDone arrives.
+
 Bus speed travels per request (`TwiSpeed::standard_100k` /
 `fast_400k` / `fast_plus_1m`), like clock and mode on SPI: a shared bus
 can carry a 100 kHz sensor and a 400 kHz DAC. MBAUD may only be written

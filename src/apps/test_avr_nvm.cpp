@@ -621,7 +621,7 @@ void tc_services() {
     const uint32_t t_start = cycles_now();
     const uint32_t tick_start = P::now();
     uint32_t loop_turns = 0;
-    post<Writer>(NvWrite{writer_base, payload, sizeof payload,
+    post<Writer>(NvWrite{writer_base, lend<Lease::reply>(payload), sizeof payload,
                          reply_to<Requester, NvDone>()});
     // The main loop the kernel would be running: it must keep turning
     // for the whole transfer, and every byte must arrive on an
@@ -664,7 +664,7 @@ void tc_services() {
     // no interrupt is needed at all.
     Requester::init();
     nvm_interrupts = 0;
-    post<Writer>(NvWrite{writer_base, payload, sizeof payload,
+    post<Writer>(NvWrite{writer_base, lend<Lease::reply>(payload), sizeof payload,
                          reply_to<Requester, NvDone>()});
     for (uint32_t guard = 0; guard < 100000u && Requester::replies == 0; ++guard) {
         if (const std::optional<Writer::Event> e = Writer::queue.pop()) {
@@ -680,7 +680,7 @@ void tc_services() {
 
     // A request that leaves the store is answered, not attempted.
     Requester::init();
-    post<Writer>(NvWrite{static_cast<uint16_t>(eeprom_size - 2), payload, 8,
+    post<Writer>(NvWrite{static_cast<uint16_t>(eeprom_size - 2), lend<Lease::reply>(payload), 8,
                          reply_to<Requester, NvDone>()});
     for (uint32_t guard = 0; guard < 100000u && Requester::replies == 0; ++guard) {
         if (const std::optional<Writer::Event> e = Writer::queue.pop()) {

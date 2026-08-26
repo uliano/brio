@@ -81,8 +81,9 @@ transaction; `dc` may be a null PinRef. Both phases are OPTIONAL: a
 DC-less device is simply a null `dc` plus a phase-2-only transfer, so
 "plain" multibyte transactions (16-bit register devices, delta-sigma
 ADC frames of 24-bit groups) are already just tx/rx spans - no display
-pattern involved. Buffer ownership travels with the request: the
-client must not touch the spans until its SpiDone arrives
+pattern involved. Buffer ownership travels with the request, and the
+cmd/tx/rx fields name it: they are `Lease::reply` loans, so the client
+must not touch the buffers until its SpiDone arrives
 (run-to-completion makes this race-free).
 
 Word semantics live ABOVE the wire, per the "drivers move bytes"

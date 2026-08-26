@@ -27,19 +27,78 @@
  * sink is initialized and interrupts are enabled, or the spin never ends.
  *
  * Number-to-text conversion uses avr-libc (ltoa/ultoa/dtostrf/dtostre):
- * <charconv> is not part of this freestanding libstdc++.
+ * <charconv> is not part of this freestanding libstdc++. Those four are
+ * an AVR-libc extension, not standard C, so a HOSTED build (the native
+ * test target, which drives print through a capture sink) gets snprintf
+ * equivalents below - this is util/, and a service here must parse
+ * wherever the framework is compiled. Same names, same call shapes, and
+ * on AVR nothing but avr-libc is called.
  */
 
 #pragma once
 
 #include <stdint.h>
-#include <stdlib.h>  // ltoa, ultoa, dtostrf, dtostre
+#include <stdlib.h>  // ltoa, ultoa, dtostrf, dtostre (AVR-libc)
 #include <concepts>
 #include <string_view>
 #include "util/stream.hpp"
 #include "util/timestamp.hpp"
 
+#if !defined(__AVR__)
+#include <stdio.h>
+#endif
+
 namespace brio {
+
+#if defined(__AVR__)
+using ::dtostre;
+using ::dtostrf;
+using ::ltoa;
+using ::ultoa;
+#else
+/// The AVR-libc conversions the hosted C library does not ship. Only
+/// base 10 and 16 are ever asked for here; a longer buffer than the
+/// call sites give is impossible for the widths brio prints.
+inline char* ultoa(unsigned long value, char* buffer, int base) {
+    char digits[24];
+    uint8_t n = 0;
+    do {
+        const unsigned long d = value % static_cast<unsigned long>(base);
+        digits[n++] = static_cast<char>(d < 10 ? '0' + d : 'A' + (d - 10));
+        value /= static_cast<unsigned long>(base);
+    } while (value != 0);
+    for (uint8_t i = 0; i < n; ++i) {
+        buffer[i] = digits[n - 1 - i];
+    }
+    buffer[n] = '\0';
+    return buffer;
+}
+
+inline char* ltoa(long value, char* buffer, int base) {
+    if (value < 0 && base == 10) {
+        buffer[0] = '-';
+        // Negate through the unsigned type so LONG_MIN is not UB.
+        (void)ultoa(0UL - static_cast<unsigned long>(value), buffer + 1, base);
+        return buffer;
+    }
+    return ultoa(static_cast<unsigned long>(value), buffer, base);
+}
+
+inline char* dtostrf(double value, signed char width, unsigned char precision,
+                     char* buffer) {
+    (void)snprintf(buffer, 20, "%*.*f", static_cast<int>(width),
+                   static_cast<int>(precision), value);
+    return buffer;
+}
+
+inline char* dtostre(double value, char* buffer, unsigned char precision,
+                     unsigned char /*flags*/) {
+    (void)snprintf(buffer, 16, "%+.*e", static_cast<int>(precision), value);
+    return buffer;
+}
+
+inline constexpr unsigned char DTOSTR_ALWAYS_SIGN = 0x01;
+#endif
 
 // ---- tokens and format wrappers ---------------------------------------------
 
@@ -61,8 +120,10 @@ inline constexpr Hex hex(uint32_t value) { return {value}; }
 // parses with a host-like data model where sizeof(double) is 8 and would
 // flag a sizeof-based assert as failed, while macros are queried from the
 // real avr-g++ and evaluate correctly in both worlds.)
+#if defined(__AVR__)
 static_assert(__SIZEOF_DOUBLE__ == __SIZEOF_FLOAT__,
               "toolchain built with -mdouble=64: revisit print.hpp float handling");
+#endif
 
 struct Fixed { float value; int8_t width; uint8_t precision; };
 /// Fixed-point float: print(s, fixed(3.1415f, 8, 3)) -> "   3.142"

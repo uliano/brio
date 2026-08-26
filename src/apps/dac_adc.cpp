@@ -141,7 +141,7 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                 i2c_tx[0] = static_cast<uint8_t>((dac_reg_out0 << 3) | dac_cmd_write);
                 brio::store_be16(&i2c_tx[1], dac_code);
                 brio::post<I2c>(TwiHw::Request{
-                    dac_addr, i2c_tx, 3, nullptr, 0,
+                    dac_addr, brio::lend<brio::Lease::reply>(i2c_tx), 3, {}, 0,
                     brio::reply_to<Loop, brio::BusDone>(),
                     brio::TwiSpeed::fast_400k});
                 return handled();
@@ -163,7 +163,7 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
             [](brio::Entry) {
                 i2c_tx[0] = static_cast<uint8_t>((dac_reg_out0 << 3) | dac_cmd_read);
                 brio::post<I2c>(TwiHw::Request{
-                    dac_addr, i2c_tx, 1, i2c_rx, 2,
+                    dac_addr, brio::lend<brio::Lease::reply>(i2c_tx), 1, brio::lend<brio::Lease::reply>(i2c_rx), 2,
                     brio::reply_to<Loop, brio::BusDone>(),
                     brio::TwiSpeed::fast_400k});
                 return handled();
@@ -197,8 +197,8 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
         return brio::match(e,
             [](brio::Entry) {
                 brio::post<Spi>(SpiHw::Request{
-                    AdcCs::ref(), {}, nullptr, 0,
-                    nullptr, spi_rx, 1,
+                    AdcCs::ref(), {}, {}, 0,
+                    {}, brio::lend<brio::Lease::reply>(spi_rx), 1,
                     brio::reply_to<Loop, brio::BusDone>(),
                     brio::SpiClock::div64, brio::SpiMode::mode3});
                 return handled();
@@ -233,8 +233,8 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
         return brio::match(e,
             [](brio::Entry) {
                 brio::post<Spi>(SpiHw::Request{
-                    AdcCs::ref(), {}, nullptr, 0,
-                    nullptr, spi_rx, 3,
+                    AdcCs::ref(), {}, {}, 0,
+                    {}, brio::lend<brio::Lease::reply>(spi_rx), 3,
                     brio::reply_to<Loop, brio::BusDone>(),
                     brio::SpiClock::div64, brio::SpiMode::mode3, false,
                     adc_cs_setup_us});

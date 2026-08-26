@@ -113,7 +113,7 @@ struct Scanner : brio::Fsm<Scanner, Kick, brio::I2cDone> {
 private:
     static void probe(uint8_t a) {
         brio::post<I2c>(TwiHw::Request{
-            a, nullptr, 0, nullptr, 0,             // empty: address only
+            a, {}, 0, {}, 0,                       // empty: address only
             brio::reply_to<Scanner, brio::I2cDone>()});
     }
 };

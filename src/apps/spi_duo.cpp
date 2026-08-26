@@ -231,8 +231,8 @@ private:
         cur_cmd = c;
         brio::post<Bus>(SpiHw::Request{
             CsPin::ref(), DcPin::ref(),
-            &cur_cmd, 1,
-            data, nullptr, n,
+            brio::lend<brio::Lease::reply>(&cur_cmd), 1,
+            brio::lend<brio::Lease::reply>(data), {}, n,
             brio::reply_to<Filler, brio::SpiDone>(),
             brio::SpiClock::div4,              // 6 MHz for the panel
             brio::SpiMode::mode0, true});             // polled: bulk at wire speed
@@ -352,8 +352,8 @@ private:
         tx[2] = 0;
         brio::post<Bus>(SpiHw::Request{
             TcsPin::ref(), {},                 // no DC on the XPT2046
-            nullptr, 0,
-            tx, rx, 3,
+            {}, 0,
+            brio::lend<brio::Lease::reply>(tx), brio::lend<brio::Lease::reply>(rx), 3,
             brio::reply_to<Touch, brio::SpiDone>(),
             brio::SpiClock::div16});           // 1.5 MHz, XPT2046 limit
     }

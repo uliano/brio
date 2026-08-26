@@ -266,11 +266,12 @@ ISR(NVMCTRL_EE_vect) {                    // the app binds the vector
     brio::post<Writer>(brio::NvReady{});
 }
 ...
-brio::post<Writer>(brio::NvWrite{addr, bytes, len,
+brio::post<Writer>(brio::NvWrite{addr, brio::lend<brio::Lease::reply>(bytes), len,
                                  brio::reply_to<MyAo, brio::NvDone>()});
 ```
 
-The bytes must stay alive and unchanged until `NvDone` arrives. A
+The bytes are lent, not given: the field's `Lease::reply` says they
+must stay alive and unchanged until `NvDone` arrives. A
 second request while one is in flight waits in a small FIFO; a full
 FIFO is answered at once with `nv_rejected`.
 

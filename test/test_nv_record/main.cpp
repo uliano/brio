@@ -326,7 +326,7 @@ TEST_CASE("the writer commits a run of bytes one dispatch at a time") {
     Writer::init();
 
     static const uint8_t payload[5] = {1, 2, 3, 4, 5};
-    post<Writer>(NvWrite{16, payload, sizeof payload,
+    post<Writer>(NvWrite{16, lend<Lease::reply>(payload), sizeof payload,
                          reply_to<Requester, NvDone>()});
     const uint16_t steps = pump();
 
@@ -349,14 +349,14 @@ TEST_CASE("bytes that already match are skipped, and an unchanged run "
     Requester::init();
     Writer::init();
     static const uint8_t payload[4] = {9, 9, 9, 9};
-    post<Writer>(NvWrite{0, payload, sizeof payload,
+    post<Writer>(NvWrite{0, lend<Lease::reply>(payload), sizeof payload,
                          reply_to<Requester, NvDone>()});
     (void)pump();
     CHECK(Requester::last.written == 4);
 
     FakeStore::writes = 0;
     Requester::init();
-    post<Writer>(NvWrite{0, payload, sizeof payload,
+    post<Writer>(NvWrite{0, lend<Lease::reply>(payload), sizeof payload,
                          reply_to<Requester, NvDone>()});
     (void)pump();
     CHECK(Requester::replies == 1);
@@ -370,7 +370,7 @@ TEST_CASE("a request that leaves the store is answered, not attempted") {
     Requester::init();
     Writer::init();
     static const uint8_t payload[4] = {1, 2, 3, 4};
-    post<Writer>(NvWrite{FakeStore::bytes - 2, payload, sizeof payload,
+    post<Writer>(NvWrite{FakeStore::bytes - 2, lend<Lease::reply>(payload), sizeof payload,
                          reply_to<Requester, NvDone>()});
     (void)pump();
     CHECK(Requester::replies == 1);
@@ -390,11 +390,11 @@ TEST_CASE("requests queue behind the one in flight, and a full FIFO "
 
     // All four arrive before any of them can finish: one goes in
     // flight, two wait in the FIFO (depth 2), the fourth is rejected.
-    post<Writer>(NvWrite{0, a, 3, reply_to<Requester, NvDone>()});
+    post<Writer>(NvWrite{0, lend<Lease::reply>(a), 3, reply_to<Requester, NvDone>()});
     Writer::dispatch(*Writer::queue.pop());        // starts the first
-    post<Writer>(NvWrite{4, b, 3, reply_to<Requester, NvDone>()});
-    post<Writer>(NvWrite{8, c, 3, reply_to<Requester, NvDone>()});
-    post<Writer>(NvWrite{12, d, 3, reply_to<Requester, NvDone>()});
+    post<Writer>(NvWrite{4, lend<Lease::reply>(b), 3, reply_to<Requester, NvDone>()});
+    post<Writer>(NvWrite{8, lend<Lease::reply>(c), 3, reply_to<Requester, NvDone>()});
+    post<Writer>(NvWrite{12, lend<Lease::reply>(d), 3, reply_to<Requester, NvDone>()});
     (void)pump();
 
     CHECK(Requester::replies == 4);
@@ -413,7 +413,7 @@ TEST_CASE("a store that refuses a byte ends the request with nv_refused") {
     Writer::init();
     static const uint8_t payload[4] = {1, 2, 3, 4};
     FakeStore::refuse_next = true;
-    post<Writer>(NvWrite{0, payload, sizeof payload,
+    post<Writer>(NvWrite{0, lend<Lease::reply>(payload), sizeof payload,
                          reply_to<Requester, NvDone>()});
     (void)pump();
     CHECK(Requester::replies == 1);

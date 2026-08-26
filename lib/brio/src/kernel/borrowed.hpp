@@ -33,12 +33,28 @@
  * one (planned, not built: an 8-bit lender epoch compared on access,
  * panic on a stale loan).
  *
- * Spans of bytes lent until reply (bus tx/rx) stay plain spans/pointers
- * in the request descriptor: std::span already IS a view type, wrapping
- * it would only add noise; the descriptor's comment states the lease.
+ * A request descriptor names its loans in its FIELDS: the tx/rx/cmd
+ * buffers of a bus transfer and the source bytes of a nonvolatile write
+ * are all `Borrowed<..., Lease::reply>`, so the rule ("valid until the
+ * reply lands") is read off the type instead of a comment. The engine
+ * that walks such a buffer calls `.get()` once and indexes the raw
+ * pointer: Borrowed is a view, not a container.
+ *
+ * `lend<L>(p)` is the maker, deliberately spelled like `reply_to<Ao, P>()`
+ * - the lease is the explicit template argument, the pointee type is
+ * deduced:
+ *
+ *     post<Bus>(Bus::Request{..., .tx = lend<Lease::reply>(buf), ...});
+ *
+ * A null loan is a default-constructed Borrowed: `{}` in a positional
+ * list, or simply the field left out of a designated one. Lending a
+ * writable buffer to a read-only field needs no ceremony either - a loan
+ * converts to the same loan over a more qualified pointee.
  */
 
 #pragma once
+
+#include <type_traits>
 
 namespace brio {
 
@@ -57,6 +73,16 @@ public:
     constexpr Borrowed() = default;                     // null loan
     constexpr explicit Borrowed(T* p) : p_(p) {}
 
+    /// A loan of the SAME lease over a less qualified pointee converts
+    /// in: lending a writable buffer as read-only bytes is the ordinary
+    /// case (a tx buffer the app fills, a field that only reads it), and
+    /// without this every such call site would have to spell the pointee
+    /// type. Only qualification conversions pass - U* to T* must be
+    /// implicit, so nothing derived-to-base or unrelated slips through.
+    template <typename U>
+        requires (!std::is_same_v<U, T> && std::is_convertible_v<U*, T*>)
+    constexpr Borrowed(Borrowed<U, L> other) : p_(other.get()) {}
+
     constexpr T* get() const { return p_; }
     constexpr T& operator*() const { return *p_; }
     constexpr T* operator->() const { return p_; }
@@ -65,5 +91,12 @@ public:
 private:
     T* p_ = nullptr;
 };
+
+/// Name a loan at the call site: `lend<Lease::reply>(buf)`. The lease is
+/// spelled, the pointee type is deduced.
+template <Lease L, typename T>
+constexpr Borrowed<T, L> lend(T* p) {
+    return Borrowed<T, L>{p};
+}
 
 } // namespace brio

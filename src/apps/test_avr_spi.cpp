@@ -813,7 +813,7 @@ void tj_engine() {
 
     // Polled bulk read.
     for (uint8_t i = 0; i < 8; ++i) eng_rx[i] = 0;
-    bool ok = run_engine({Ss::ref(), {}, nullptr, 0, nullptr, eng_rx, 8, {},
+    bool ok = run_engine({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {},
                           SpiClock::div16, SpiMode::mode0, true, 0});
     bool all_ff = ok;
     for (uint8_t i = 0; i < 8; ++i) all_ff = all_ff && eng_rx[i] == 0xFF;
@@ -822,7 +822,7 @@ void tj_engine() {
 
     // The ISR pump.
     for (uint8_t i = 0; i < 8; ++i) eng_rx[i] = 0;
-    ok = run_engine({Ss::ref(), {}, nullptr, 0, nullptr, eng_rx, 8, {},
+    ok = run_engine({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {},
                      SpiClock::div64, SpiMode::mode0, false, 0});
     bool pumped = ok;
     for (uint8_t i = 0; i < 8; ++i) pumped = pumped && eng_rx[i] == 0xFF;
@@ -837,7 +837,7 @@ void tj_engine() {
     ChMosi::source(EvPin<Mosi>{});
     MosiCount::init(ChMosi{});
     MosiCount::reset();
-    ok = run_engine({{}, Ss::ref(), eng_cmd, 3, nullptr, nullptr, 0, {},
+    ok = run_engine({{}, Ss::ref(), lend<Lease::reply>(eng_cmd), 3, {}, {}, 0, {},
                      SpiClock::div16, SpiMode::mode0, true, 0});
     // 0x11, 0x22, 0x33 back to back from a line that PARKS HIGH between
     // bytes (test c). 0x11 = 0,0,0,1,0,0,0,1: two rises, ends high, the
@@ -851,11 +851,11 @@ void tj_engine() {
     verdict("DC ends in the data phase (high)", Ss::read());
 
     // cs_setup_us and the degenerate request.
-    ok = run_engine({Ss::ref(), {}, nullptr, 0, nullptr, eng_rx, 1, {},
+    ok = run_engine({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 1, {},
                      SpiClock::div16, SpiMode::mode3, true, 10});
     verdict("a request with a chip-select setup delay still runs", ok);
     verdict("a mode-3 request leaves SCK idle high", Sck::read());
-    ok = Host::start({{}, {}, nullptr, 0, nullptr, nullptr, 0, {}});
+    ok = Host::start({{}, {}, {}, 0, {}, {}, 0, {}});
     verdict("a zero-length request completes on the spot without the wire", ok);
 
     // The ceiling clamps a too-fast request.
@@ -868,7 +868,7 @@ void tj_engine() {
     captures = 0;
     min_ticks = 0xFFFF;
     sei();
-    (void)run_engine({Ss::ref(), {}, nullptr, 0, nullptr, eng_rx, 8, {},
+    (void)run_engine({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {},
                       SpiClock::div4, SpiMode::mode0, true, 0});
     const uint16_t clamped = min_ticks;
     print(serial, "  a CLK_PER/4 request under a 400 kHz ceiling ran at CLK_PER/",
