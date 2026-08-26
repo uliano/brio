@@ -96,14 +96,18 @@
  * clock domains and shorten the wake-up list, so entering them is a
  * decision about the whole application: which peripherals must survive,
  * which oscillator must stay up for them, what is allowed to wake the
- * program. That decision belongs to a power-manager active object, and
- * this header is the mechanism it will be built on - not a policy.
+ * program. That decision belongs to a power-manager active object
+ * (util/power.hpp), and this header is the mechanism it is built on -
+ * not a policy. `AvrSleepSite` at the end is the two-way adapter between
+ * them: it maps the model's depth ladder onto SMODE and nothing more.
  */
 
 #pragma once
 
 #include <stdint.h>
 #include <avr/io.h>
+
+#include "util/power.hpp"
 
 namespace brio {
 
@@ -238,5 +242,68 @@ private:
 
     static bool ccl_enabled() { return (CCL.CTRLA & CCL_ENABLE_bm) != 0; }
 };
+
+/**
+ * The SleepSite of this target: the depth ladder of util/power.hpp
+ * expressed in SMODE.
+ *
+ *   none    -> nothing armed; the kernel's idle hook behaves as always
+ *   light   -> IDLE       standby -> STANDBY       deep -> PDOWN
+ *
+ * This family realizes every rung, so the "map an absent rung to the
+ * nearest shallower one" rule of the model is the identity here and
+ * armed() reads back exactly what was asked. A target with fewer modes
+ * is where that rule earns its keep.
+ *
+ * IT ONLY ARMS. The SLEEP instruction is still the kernel loop's:
+ * AvrPlatform::idle() leaves an already-armed deeper mode standing and
+ * takes it instead of imposing IDLE, which is what makes a power manager
+ * possible with no new kernel hook. Everything the chapter warns about
+ * therefore still applies to the caller - above all that the wake-up
+ * source must be configured, enabled and REACHABLE IN THE ARMED MODE
+ * before the round is accepted: standby and power-down have short
+ * wake-up lists (see the file header), and arming a mode nothing on the
+ * list can leave is how a program stops for good.
+ */
+struct AvrSleepSite {
+    AvrSleepSite() = delete;
+
+    static bool arm(SleepDepth d) {
+        switch (d) {
+        case SleepDepth::none:
+            Sleep::disarm();
+            return true;
+        case SleepDepth::light:
+            Sleep::arm(SleepMode::idle);
+            return true;
+        case SleepDepth::standby:
+            Sleep::arm(SleepMode::standby);
+            return true;
+        case SleepDepth::deep:
+            Sleep::arm(SleepMode::power_down);
+            return true;
+        }
+        return false;
+    }
+
+    static void disarm() { Sleep::disarm(); }
+
+    static SleepDepth armed() {
+        if (!Sleep::armed()) {
+            return SleepDepth::none;
+        }
+        switch (Sleep::armed_mode()) {
+        case SleepMode::idle:
+            return SleepDepth::light;
+        case SleepMode::standby:
+            return SleepDepth::standby;
+        case SleepMode::power_down:
+            return SleepDepth::deep;
+        }
+        return SleepDepth::none;
+    }
+};
+
+static_assert(SleepSite<AvrSleepSite>);
 
 } // namespace brio

@@ -1,11 +1,14 @@
 // Host tests for kernel/time_event.hpp: one-shot exactness, drift-free
-// periodics, catch-up after lag, disarm, re-arm from fire, counter wrap.
+// periodics, catch-up after lag, disarm, re-arm from fire, counter wrap,
+// and ticks_to_next() (the question a power manager asks before it
+// decides how deeply to stop).
 // Run with: pio test -e native
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>
 
 #include <cstdint>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -137,6 +140,66 @@ TEST_CASE("a one-shot may re-arm itself from its own firing") {
     }
     CHECK(Self::count == 3);        // 3 chained one-shots, then quiet
     CHECK_FALSE(Self::te.armed());
+}
+
+TEST_CASE("ticks_to_next: nothing armed, nothing to say") {
+    reset();
+    CHECK_FALSE(TE::ticks_to_next().has_value());
+}
+
+TEST_CASE("ticks_to_next: one armed event counts down to its deadline") {
+    reset();
+    brio::TimeEvent<HostPlatform, Ear, Beep> te{Beep{6}};
+
+    te.arm(10);
+    CHECK(TE::ticks_to_next() == std::optional<uint32_t>{10});
+    run_ticks(4);
+    CHECK(TE::ticks_to_next() == std::optional<uint32_t>{6});
+    run_ticks(6);                       // fired and consumed
+    CHECK_FALSE(TE::ticks_to_next().has_value());
+}
+
+TEST_CASE("ticks_to_next: several armed events, the nearest wins") {
+    reset();
+    brio::TimeEvent<HostPlatform, Ear, Beep> far{Beep{7}};
+    brio::TimeEvent<HostPlatform, Ear, Beep> near{Beep{8}};
+    brio::TimeEvent<HostPlatform, Ear, Beep> mid{Beep{9}};
+
+    far.arm(100);
+    CHECK(TE::ticks_to_next() == std::optional<uint32_t>{100});
+    near.arm(3);
+    CHECK(TE::ticks_to_next() == std::optional<uint32_t>{3});
+    mid.arm(20);                        // arming behind the nearest changes nothing
+    CHECK(TE::ticks_to_next() == std::optional<uint32_t>{3});
+    near.disarm();
+    CHECK(TE::ticks_to_next() == std::optional<uint32_t>{20});
+}
+
+TEST_CASE("ticks_to_next: an overdue deadline clamps to 0") {
+    reset();
+    brio::TimeEvent<HostPlatform, Ear, Beep> te{Beep{10}};
+
+    te.arm_every(5);                    // periodic: stays armed while overdue
+    HostPlatform::ticks += 17;          // the loop stalled past three deadlines
+    CHECK(TE::ticks_to_next() == std::optional<uint32_t>{0});
+    TE::process();                      // one firing per turn, deadline now 10
+    while (auto e = Ear::queue.pop()) { Ear::dispatch(*e); }
+    CHECK(TE::ticks_to_next() == std::optional<uint32_t>{0});   // still behind
+}
+
+TEST_CASE("ticks_to_next: the answer is a distance, across the wrap too") {
+    reset();
+    brio::TimeEvent<HostPlatform, Ear, Beep> te{Beep{11}};
+
+    HostPlatform::ticks = UINT32_MAX - 3;     // 4 ticks to the wrap
+    te.arm(10);                               // deadline is 6, past the wrap
+    CHECK(TE::ticks_to_next() == std::optional<uint32_t>{10});
+    run_ticks(6);                             // now at UINT32_MAX - 3 + 6 = 2
+    CHECK(HostPlatform::ticks == 2);
+    CHECK(TE::ticks_to_next() == std::optional<uint32_t>{4});
+    run_ticks(4);
+    CHECK(fired_at.size() == 1);
+    CHECK_FALSE(TE::ticks_to_next().has_value());
 }
 
 TEST_CASE("deadlines survive the 32-bit counter wrap") {

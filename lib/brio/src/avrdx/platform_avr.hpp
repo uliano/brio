@@ -46,12 +46,23 @@ struct AvrPlatform {
     /// so no wakeup can slip between the caller's queue check and the
     /// sleep - the lost-wakeup race is closed by the silicon.
     ///
-    /// IDLE only: the CPU stops, every peripheral and every interrupt
-    /// source stays alive (13.3.3.1), and waking costs six CLK_PER
-    /// cycles (13.3.3.2). The deeper modes gate clocks and shrink the
-    /// wake-up list, which is a power-management decision an AO system
-    /// must take deliberately - not something the kernel's "nothing to
-    /// do" hook may do behind the app's back.
+    /// IDLE BY DEFAULT: the CPU stops, every peripheral and every
+    /// interrupt source stays alive (13.3.3.1), and waking costs six
+    /// CLK_PER cycles (13.3.3.2). The deeper modes gate clocks and
+    /// shrink the wake-up list, which is a power-management decision an
+    /// AO system must take deliberately - not something the kernel's
+    /// "nothing to do" hook may do behind the app's back.
+    ///
+    /// BUT AN ALREADY-ARMED MODE STANDS. If SEN is set when this runs,
+    /// something above the kernel armed a mode on purpose - a power
+    /// manager (util/power.hpp) through avrdx/sleep.hpp's AvrSleepSite,
+    /// which arms and returns, leaving the sleeping to this hook. That
+    /// split is the whole reason the power model needs no new kernel
+    /// hook, and re-arming IDLE here would silently undo the decision
+    /// every stakeholder just voted on. The arming is then also the
+    /// manager's to CLEAR: it disarms on the first event it dispatches
+    /// after the wake, so a mode survives a wake that had nothing to say
+    /// to it and the program stops again on the next empty turn.
     static void idle() {
         // One write arms mode + enable, one write disarms. Errata
         // DS80000915F 2.2.4 (all silicon revisions): a store to an
@@ -63,6 +74,11 @@ struct AvrPlatform {
         // has no twin; the NOP costs one cycle and is emitted on both
         // families rather than trusting that silence.
         // SLPCTRL.CTRLA is NOT under CCP (13.3.5): only VREGCTRL is.
+        if ((SLPCTRL.CTRLA & SLPCTRL_SEN_bm) != 0) {
+            sei();
+            sleep_cpu();
+            return;                              // the arming is not ours
+        }
         __asm__ __volatile__("nop");
         SLPCTRL.CTRLA = SLPCTRL_SMODE_IDLE_gc | SLPCTRL_SEN_bm;
         sei();

@@ -383,8 +383,11 @@ The loop (`run()`), one turn:
 turn. Host tests drive `init_all()`/`step()` directly - `run()` never
 returns. Starvation of low-priority AOs under fixed priority is by
 definition a sizing/design error; the overflow counters make it
-visible. IDLE keeps peripherals alive; deeper sleep modes are app
-policy, not kernel business.
+visible. The shallowest sleep keeps peripherals alive; deeper modes are
+app policy, not kernel business - negotiated ABOVE the kernel by the
+power model ([power.md](power.md)), which arms a mode and lets this same
+hook take it, so the loop is unchanged and a program without a power
+manager pays nothing.
 
 ## 9. Time (`kernel/time.hpp`, `kernel/time_event.hpp`)
 
@@ -411,6 +414,14 @@ since a posted event waits for the current RTC step anyway).
   `(int32_t)(now - deadline) >= 0` works across the 32-bit wrap.
 - RAII: a dying `TimeEvent` disarms itself (free on target, where
   they are static and never die; matters in host tests).
+- `TimeEvents<P>::ticks_to_next()` asks the armed list the one question
+  the list can answer and nobody else can: how long until the next
+  thing this program has to do - 0 when something is already due,
+  nothing at all when nothing is armed, the same wrap-safe arithmetic
+  `process()` uses. It is a QUESTION and changes no state; the loop
+  still fires the events. Its reason to exist is the power model
+  ([power.md](power.md)): a stop that costs more to leave than the wait
+  it saves is a bad trade, and only the armed list knows the wait.
 
 **The tick is opaque, the rate is a platform constant.** Any given
 timebase peripheral has its own natural rates (a 32 kHz-derived
@@ -498,7 +509,7 @@ compile error instead of a template failure.
 | `post`, `Subscribers`, `publish`, `ReplyTo`, `reply_to` | `post.hpp` | delivery primitives |
 | `Borrowed<T, Lease>`, `Lease` | `borrowed.hpp` | pointer payloads with their lease in the type |
 | `Pack<Aos...>`, `Kernel<P, Aos...>` | `kernel.hpp` | pack ordering questions (index, lends_ok); the loop: init_all/step/idle_if_empty/run |
-| `TimeEvents<P>`, `TimeEvent<P, Ao, Ev>` | `time_event.hpp` | armed list + owned time events |
+| `TimeEvents<P>` (incl. `ticks_to_next`), `TimeEvent<P, Ao, Ev>` | `time_event.hpp` | armed list + owned time events |
 | `ticks_from_ms`, `ticks_from_secs` | `time.hpp` | constexpr tick conversions |
 | `PanicCode`, `panic_magic`, `HaltReporter`, `panic`, `take_panic_record` | `panic.hpp` | unrecoverable failures |
 

@@ -29,6 +29,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <optional>
 
 #include "kernel/platform.hpp"
 #include "kernel/post.hpp"
@@ -100,6 +101,35 @@ public:
                 link = &te.next_;
             }
         }
+    }
+
+    /**
+     * Ticks from now to the NEAREST armed deadline: 0 when one is
+     * already mature, empty when nothing is armed.
+     *
+     * The same wrap-safe signed difference process() uses, read the
+     * other way round - `(int32_t)(deadline - now)`, so a deadline
+     * across the 32-bit wrap answers with its true distance and an
+     * overdue one answers with a non-positive value that clamps to 0.
+     *
+     * Why it exists: a power manager must know how long the program is
+     * ALLOWED to stop before it decides how deeply to stop (a deep mode
+     * that costs more to leave than the wait it saves is a bad trade -
+     * util/power.hpp). It is a QUESTION, not a scheduling decision: the
+     * loop still fires the events, and calling this changes nothing.
+     * Main-loop context only, like the rest of this class.
+     */
+    static std::optional<uint32_t> ticks_to_next() {
+        const uint32_t now = P::now();
+        std::optional<uint32_t> best;
+        for (const Base* te = head_; te != nullptr; te = te->next_) {
+            const int32_t left = static_cast<int32_t>(te->deadline_ - now);
+            const uint32_t ticks = left > 0 ? static_cast<uint32_t>(left) : 0;
+            if (!best.has_value() || ticks < *best) {
+                best = ticks;
+            }
+        }
+        return best;
     }
 
     /// Tests / diagnostics: drop every armed event.

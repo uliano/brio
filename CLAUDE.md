@@ -26,7 +26,9 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   `clock.md` (the clock model), `serial.md`, `spi-bus.md`, `i2c-bus.md`,
   `ring.md`, `analog.md` (the sampler usage type + arithmetic),
   `nv-heap.md` (the flash block allocator: FlashMedia contract, map
-  pair, survival-aware mount).
+  pair, survival-aware mount), `power.md` (the sleep-depth ladder, the
+  site that only arms, the vote round, standing locks, the deadline
+  guard, the first-event-after-wake contract).
 - `docs/<target>/` - one folder per target, mirroring
   `lib/brio/src/<target>/` (`avrdx/`, `host/`): `README.md` is the
   operational page (toolchain, board, probe, debugger and their
@@ -427,6 +429,39 @@ gets its dated home in `docs/design/` when taken.
   End state: B = test_avr_opamp with test_avr_nvheap's five blocks
   intact (verified by its letter v after the campaign's five
   reflashes), A untouched on test_avr_serial.
+- **Util pass (2026-08-26, six steps agreed; 0-2 DONE).** Step 0,
+  payload/ownership: lend<L>() maker + Borrowed converting ctor, the
+  six reply-class raw pointers typed (NvWrite/TwiHost/SpiHost
+  requests), 80 call sites, byte-identity proof on six images (the
+  gate caught one +10-byte hoisting). Step 1: util/testbench.hpp -
+  the suite grammar's ONE implementation + host suite test_testbench
+  (bench.py's own regex re-run on the emitted bytes), test_avr_opamp
+  migrated as exemplar (z 96/96 unchanged); others migrate when
+  touched. Step 2, PowerManager: kernel gained
+  TimeEvents::ticks_to_next() (wrap-safe, host-tested);
+  util/power.hpp - SleepDepth ladder {none,light,standby,deep} with
+  the never-deeper mapping rule, SleepSite concept (arm/disarm/
+  armed), PowerLock RAII ceilings, PrepareSleep/SleepVote unanimity
+  round, WakeReport delivered opportunistically (if constexpr on the
+  voter's variant - publish would tax every queue); BusMaster is a
+  voter (ok iff idle+empty; +1 queue slot so a dropped vote cannot
+  hang unanimity; measured cost +48 flash/+11 RAM where a bus is
+  actually arbitrated, ZERO elsewhere - spi image byte-identical);
+  AvrSleepSite in sleep.hpp; THE ONE MANDATORY DEVIATION:
+  AvrPlatform::idle() was unconditionally re-arming IDLE and
+  overwrote any armed mode - it now honors a standing SEN (armed
+  above = sei+sleep+return, the arming is the manager's to clear;
+  a managerless program pays one bit-test per idle). Contract:
+  the FIRST EVENT AFTER WAKE disarms and reports. NEW SUITE
+  test_avr_power on B, z 44/44 twice (standby round through the
+  kernel 157 us with two voters; 32 turns asleep over 32 PIT ticks
+  vs ~13400 awake; standby wake +10..12 cycles - crystal kept alive
+  by the RUNSTDBY stopwatch; deadline guard refuses deep with no
+  voter asked; unanimity not first-no; nested locks shallowest-wins);
+  design/power.md NEW; platform.md gaps updated (sleep current stays
+  a manual bench task; a PDOWN round and an ISR-taken PowerLock
+  unexercised). Remaining steps: 3 MeterSampler, 4 trace, 5
+  InputScanner, 6 BusMaster policy hook.
 - **Low-level review track (planned 2026-08-20, full plan in memory
   low-level-review-plan).** Everything in avrdx/ gets the Working
   discipline treatment, device by device. Phase 0 DONE 2026-08-20:
@@ -915,7 +950,9 @@ lib/brio/src/            the framework, four strata:
                            pointer payloads with the lease in the type
     time.hpp               constexpr tick conversions (ceil, never early)
     time_event.hpp         TimeEvents<P> armed list + TimeEvent<P, Ao, Ev>
-                           (drift-free periodics, wrap-safe, RAII disarm)
+                           (drift-free periodics, wrap-safe, RAII disarm);
+                           ticks_to_next() = how long until the next
+                           deadline, the power model's one kernel question
     kernel.hpp             Pack<Aos...> (index, lends_ok) + Kernel<P, Aos...>:
                            init_all/step/idle_if_empty/run, static_asserts
                            borrowers before lenders
@@ -935,6 +972,11 @@ lib/brio/src/            the framework, four strata:
                            published; software pace or any hardware generator
     clock.hpp              ClockUser concept, clock_hz(clock), clock_follows:
                            the target-independent clock contracts
+    power.hpp              the power model: SleepDepth ladder, SleepSite
+                           concept (arm only - the kernel loop's idle path
+                           still does the sleeping), PowerManager AO with
+                           the vote round, PowerLock standing restrictions,
+                           the ticks_to_next deadline guard, WakeReport
     pwm_channel.hpp        PwmChannel concept: max + duty(v), the role-level
                            "one dimmable output" (Pin satisfies it, max 1)
     rgb_lamp.hpp           RgbLamp<R, G, B> over three PwmChannels, levels
@@ -968,7 +1010,8 @@ lib/brio/src/            the framework, four strata:
     proto/line_parser.hpp  LineAssembler + console/SCPI parsers +
                            CommandRouter<Sink>
   avrdx/                 everything that knows avr/io.h (AVR DA/DB)
-    platform_avr.hpp       AvrPlatform
+    platform_avr.hpp       AvrPlatform (idle() sleeps in IDLE unless a
+                           deeper mode is already armed - see sleep.hpp)
     clock.hpp              CLKCTRL: resources Oschf/Osc32k/Xosc32k/Xoschf/Pll/
                            MainClock/ClockFailure (typed register views) +
                            tasks Clock<source, hz, div> (constexpr hz, the ONE
@@ -993,10 +1036,10 @@ lib/brio/src/            the framework, four strata:
                            BOOT-section floor, build id from the link
                            defsym (pio_flags.py)
     sleep.hpp              SLPCTRL: Sleep (arm/disarm/sleep/enter, the three
-                           modes, the errata-2.2.4 NOP discipline) and Vreg
+                           modes, the errata-2.2.4 NOP discipline), Vreg
                            (PMODE under CCP, HTLLEN with the TWI/CCL
-                           interlock enforced) - mechanism only, policy is a
-                           future power-manager AO's
+                           interlock enforced) and AvrSleepSite, the
+                           util/power.hpp adapter (depth ladder -> SMODE)
     pin.hpp                Pin<'A',5> compile-time GPIO (also a PwmChannel,
                            max 1) + PinRef descriptor + PinSet<Pins...> mask
                            + port_by_letter/pinctrl_of (run-time port lookup)

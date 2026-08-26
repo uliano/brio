@@ -62,6 +62,7 @@
 #include "kernel/fsm.hpp"
 #include "kernel/platform.hpp"
 #include "kernel/post.hpp"
+#include "util/power.hpp"
 
 namespace brio {
 
@@ -79,19 +80,32 @@ struct TransferDone {
     uint8_t status;
 };
 
+/**
+ * The arbiter, and - because it is the one object that knows whether the
+ * wire is quiet - a power-management VOTER (util/power.hpp): it answers
+ * a PrepareSleep with ok only when nothing is in flight and nothing is
+ * waiting. A transfer runs on interrupts the deep modes may gate, and it
+ * outlives the dispatch that started it, so it is precisely the kind of
+ * fact the requester of a sleep cannot have. The vote costs a variant
+ * alternative three bytes wide, which no bus request comes close to, and
+ * two lambdas.
+ */
 template <typename Bus, Platform P, uint8_t pending_depth = 4>
 class BusMaster : public Fsm<BusMaster<Bus, P, pending_depth>,
-                             typename Bus::Request, TransferDone> {
+                             typename Bus::Request, TransferDone, PrepareSleep> {
     using Base = Fsm<BusMaster<Bus, P, pending_depth>,
-                     typename Bus::Request, TransferDone>;
+                     typename Bus::Request, TransferDone, PrepareSleep>;
     using Request = typename Bus::Request;
 
 public:
     using Event = typename Base::Event;
     using Status = typename Base::Status;
 
-    // pending_depth requests can wait + one in flight + one TransferDone.
-    static inline EventQueue<Event, pending_depth + 2, P> queue;
+    // pending_depth requests can wait + one in flight + one TransferDone
+    // + one PrepareSleep. The vote's slot is not optional: a dropped
+    // PrepareSleep is a vote that never comes back, and the manager waits
+    // for unanimity rather than timing out.
+    static inline EventQueue<Event, pending_depth + 3, P> queue;
 
     static void init() { Base::start(&idle); }
     static void dispatch(const Event& e) { Base::dispatch(e); }
@@ -107,6 +121,14 @@ private:
                     return Base::transition(&busy);
                 }
                 return Base::handled();     // completed synchronously
+            },
+            [](const PrepareSleep& p) {
+                // Idle means idle: nothing in flight, and the FIFO is
+                // empty by construction (this state is only reached once
+                // it has drained). Checked anyway - a vote is a claim
+                // about the machine, not about the state chart.
+                p.reply.send(SleepVote{pending_count_ == 0});
+                return Base::handled();
             },
             [](auto) { return Base::unhandled(); },
         }, e);
@@ -129,6 +151,12 @@ private:
                     return Base::handled();     // stay busy on the next one
                 }
                 return Base::transition(&idle);
+            },
+            [](const PrepareSleep& p) {
+                // A transfer is in flight: its completion interrupt is
+                // exactly what a gated clock domain would swallow.
+                p.reply.send(SleepVote{false});
+                return Base::handled();
             },
             [](auto) { return Base::unhandled(); },
         }, e);

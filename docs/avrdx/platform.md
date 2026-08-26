@@ -147,7 +147,9 @@ masked), `idle()`, `break_here()`, `now()` and the compile-time
 `panic_record()` - a `PanicRecord` in `.noinit`. Two readbacks beyond
 the concept let a program (and the suite) check what the others did:
 `sleep_armed()` reads `SLPCTRL.CTRLA.SEN`, `interrupts_enabled()`
-reads `SREG.I`.
+reads `SREG.I`. `idle()` sleeps in IDLE unless a deeper mode is already
+armed, in which case it takes that one instead - see `AvrSleepSite`
+below.
 
 `avrdx/delay.hpp` is the short-wait role: `delay_us(clock, us)` reads
 the rate from the `Clock` type and never from `F_CPU`, and NO DIVISION
@@ -181,14 +183,30 @@ client or the CCL is enabled**. That refusal IS chapter 13's warning:
 a rule stated in a comment and not enforced is a rule the next program
 breaks.
 
-The POLICY is deliberately absent. The kernel sleeps by itself in IDLE
-and only in IDLE, because there the wake-up list is complete and "no
-events queued" is enough to know. Standby and power-down gate clock
-domains and shorten that list, so entering them is a decision about the
-whole application - which peripherals must survive, which oscillator
-must stay up for them, what is allowed to wake the program. That
-belongs to a power-manager active object, which does not exist yet;
-this header is what it will be built on.
+`AvrSleepSite`, in the same header, is this target's `SleepSite` (the
+power model of [../design/power.md](../design/power.md)): it maps the
+model's depth ladder onto SMODE - `none` disarms, `light` = IDLE,
+`standby` = STANDBY, `deep` = PDOWN - and does nothing else. This family
+realizes every rung, so the model's "map an absent rung to the nearest
+shallower one" rule is the identity here and `armed()` reads back
+exactly what was asked.
+
+**The site only ARMS; the SLEEP instruction stays the kernel loop's.**
+That is why `AvrPlatform::idle()` is IDLE by DEFAULT rather than IDLE
+only: if `SEN` is already set when it runs, something above the kernel
+armed a mode on purpose, so `idle()` leaves that arming alone and takes
+it - `sei` + `SLEEP`, and no disarming store on the way out, because the
+arming is the power manager's to clear (it does so on the first event it
+dispatches after the wake). With nothing armed it behaves exactly as
+before: arm IDLE, sleep, disarm. This one branch is the whole of what
+the power model needs from the target; there is no new kernel hook.
+
+The POLICY otherwise stays out of this header. Standby and power-down
+gate clock domains and shorten the wake-up list, so entering them is a
+decision about the whole application - which peripherals must survive,
+which oscillator must stay up for them, what is allowed to wake the
+program. That negotiation is `util/power.hpp`'s; this header is the
+mechanism underneath it.
 
 `avrdx/reset.hpp` has two resources. `Reset` reads why we are running
 - `flags()` peeks, `take_flags()` reads and clears in one verb (the
@@ -297,6 +315,27 @@ it. Set the oscillator's own `RUNSTDBY` when the point is a fast
 wake-up instead (`brio::Oschf::run_standby(true)`), and keep
 `Vreg::power(VregPower::performance)` for the case where even the
 regulator's start-up matters.
+
+**Sleep deeper than IDLE, under a kernel.** `Sleep::enter` is for code
+that owns the moment. An active-object program instead asks its power
+manager, which asks everyone else - the negotiation is
+[../design/power.md](../design/power.md); what belongs to this target is
+one type name in the declaration and one branch in `idle()`:
+
+```cpp
+using Pm = brio::PowerManager<brio::AvrPlatform, brio::AvrSleepSite,
+                              brio::PowerConfig{}, Bus, Sensors>;
+using K = brio::Kernel<brio::AvrPlatform, Sensors, Bus, Pm>;
+...
+brio::post<Pm>(brio::SleepRequested{brio::SleepDepth::standby,
+                                    brio::reply_to<Supervisor, brio::SleepVote>()});
+```
+
+The wake source is still armed by the application, and it must be one
+the armed mode can reach: the manager negotiates whether the program may
+stop, not whether it can come back. The kernel loop's `idle()` then
+takes the armed mode by itself, and the manager disarms on the first
+event it dispatches afterwards.
 
 ## Bench findings
 
@@ -553,15 +592,72 @@ ample for these figures). Medians of eight shots.
 - **The CCL wakes from standby when it has RUNSTDBY, and from
   power-down when its clock survives the mode** - see ccl.md.
 
+### The power manager on this target
+
+Established by `test_avr_power`, 5 letters / 44 verdicts on board B at
+5 V with nothing wired. It is the only suite here that runs the KERNEL:
+the object under test is an active object, so the rounds go through real
+queues and real dispatch, and only the loop is the suite's.
+
+- **The ladder maps one-to-one onto SMODE.** `SLPCTRL.CTRLA` reads
+  0x00, 0x01, 0x03, 0x05 for `none`, `light`, `standby`, `deep`, and
+  the site and the manager both read back the depth that was asked -
+  this family has every rung, so the model's map-it-shallower rule is
+  the identity here.
+- **The kernel's own idle hook takes the armed mode.** With `standby`
+  armed by the manager and nothing else changed, `Kernel::idle_if_empty()`
+  stops the CPU for real: over 32 ticks a counter that only turns while
+  the CPU runs turns ~13500 times awake and **exactly 32 times asleep**,
+  one per PIT wake. The mode STAYS armed across a wake that says nothing
+  to the manager, so the program stops again on the next empty turn.
+- **A standby wake beside a clock the sleeper keeps alive costs 10-12
+  CLK_PER cycles.** Measured as a whole PIT period from a stamp taken
+  with interrupts masked to the wake ISR's own stamp: 23052 cycles
+  asleep against 23042 spinning. The stopwatch has `RUNSTDBY` on both
+  halves - which is what lets it time the sleep at all, and which by
+  the chain rule above keeps the crystal running - so this is the
+  "kept alive" row of the latency table (1.8 us there includes a wire
+  and a second board's ISR), not a cold restart.
+- **A full round costs 3771 CLK_PER cycles - 157 us** from the `post()`
+  of the request to the site being armed, with two voters answering
+  through the kernel. That is the price of the negotiation, and it is
+  paid once per sleep, not once per wake.
+- **The deadline guard works on the real timebase.** With a periodic
+  time event one tick away, a `deep` request is refused and no voter is
+  even asked; the same request with the nearest deadline 1000 ticks away
+  is accepted, as is one with nothing armed at all. A `light` request is
+  never guarded.
+- **A `BusMaster` mid-transfer really refuses.** With a transfer in
+  flight the round aborts and nothing is armed; the other stakeholder is
+  still asked first, because the manager waits for unanimity rather than
+  stopping at the first no. Posting the engine's completion makes the
+  identical request succeed.
+- **Restrictions clamp, and the voters see the clamp.** Under
+  `restrict(light)` a `deep` request arms `SLPCTRL.CTRLA` = 0x01 and the
+  voters are asked at `light`, not at `deep`. Nested locks: the
+  shallowest live one wins, releasing it falls back to the other,
+  releasing twice does not release someone else's, and a moved lock
+  keeps the right alive until the mover's scope ends.
+- **The first event after a wake disarms and reports.** `CTRLA` returns
+  to 0x00, `sleep_armed()` reads false, the manager forgets the round
+  and `WakeReport{standby}` reaches the stakeholders that declare it -
+  and the `SleepRequested{none}` that carried the wake still replies ok.
+- **The timebase's own error shows up in the sleeping window.** The
+  RUNSTDBY stopwatch counts 743000-744000 CLK_PER ticks across 32 PIT
+  ticks where 1024 Hz exactly would be 749984: OSC32K running ~0.8 %
+  fast, the same +8000-to-+11000 ppm this desk measures everywhere else.
+
 ## Not covered yet
 
 Driver gaps:
 
-- **The power-management POLICY.** There is mechanism for all three
-  modes and none of the deciding: no power-manager AO, no
-  `RUNSTDBY` policy across the drivers, no protocol by which the bus
-  active objects agree that the program may stop its clocks. The
-  kernel's own hook stays IDLE-only on purpose.
+- **Idle detection and the `RUNSTDBY` policy.** The power manager
+  (`util/power.hpp`, `AvrSleepSite`) is built and the negotiation runs,
+  but nothing decides WHEN a program has nothing left to do - something
+  has to post the request - and no driver-wide policy says which
+  peripherals must survive which depth. Both are application knowledge
+  by design ([../design/power.md](../design/power.md), "What is
+  deliberately not here").
 - **`FUSE.WDTCFG`.** The driver reads the consequences (`LOCK`,
   `CTRLA`'s reset value) but writes no fuse: fuse programming is a
   UPDI-time concern, not a runtime one.
@@ -589,7 +685,18 @@ Implemented but not bench-verified:
   a client really enabled, rather than measured.
 - **The sleep CURRENT.** Every figure here is about time, not
   microamps: what `PMODE`, `HTLLEN` and a stopped oscillator actually
-  save is a bench-supply measurement this desk cannot make.
+  save is a bench-supply measurement this desk cannot make. It is the
+  one thing the power manager cannot be judged on from inside the chip.
+- **A power-manager round into POWER-DOWN.** The manager arms PDOWN and
+  the register readback proves it, but no letter of `test_avr_power`
+  then executes the sleep: from power-down the only wake sources are
+  the PIT, a pin and a TWI match, and the suite's own stopwatch stops
+  there, so the round is verified up to the arming and the sleeping
+  itself is `test_avr_sleep`'s.
+- **A `PowerLock` taken from a real ISR.** The counters are guarded and
+  the verbs are exercised from the main context; that an interrupt may
+  take and release one mid-burst is asserted by construction, not
+  measured.
 - **Every WDT period but 8 ms, 64 ms and 8 s**, and the timing of a
   time-out itself: the encoding is exercised through `arm()`'s
   readback and `wdt_time_us()`'s arithmetic, but only the three used
