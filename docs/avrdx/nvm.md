@@ -27,6 +27,13 @@ suites: `test_avr_nvm` on the bench, `test_nv_record` on the host.
 | User Row | 32 B | the whole row / byte | Flash class | always |
 | Signature Row | 64 B | read only | - | always |
 
+The Flash figure deserves a second look: 1000 cycles is NOT the 10k
+of the older AVR families - the DB datasheet lowered it to 1k "based
+on validation data" (table 39-7; no typical value is published). A
+chip erase spends one of those cycles on every page at once, which is
+why the bench flashes with avrdude's `-D` (page-selective erase) by
+default - see docs/bench.md.
+
 That table is the whole division of labour. Flash is for big,
 re-provisionable payloads - a font, a table, anything the programmer
 can put back. EEPROM with EESAVE set is for settings, which must

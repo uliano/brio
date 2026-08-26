@@ -66,25 +66,23 @@ BOARDS = {
     "A": {
         # The original bench board: AVR128DB48, 24 MHz crystal on PA0/PA1,
         # CH340 on USART2 ALT1 (PF4/PF5). See docs/bench.md.
-        # Office desk mapping (probe/console pairs verified by resetting the
-        # chip over UPDI and watching which console prints its boot banner:
-        # the banner names the board by its USERROW id).
+        # Office desk mapping. The desk is re-rigged daily, so every pair
+        # below is re-verified at session start: the probe by USERROW
+        # readback (the id names the board), the console by resetting the
+        # chip over UPDI and watching which port emits the boot traffic.
         "board": "db48",
         "id": "brio-a",
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1:1.0-port0",
-        "programmer": {"type": "atmelice_updi", "serial": "J42700049508"},
+        "console": "/dev/serial/by-path/pci-0000:67:00.3-usb-0:1.1:1.0-port0",
+        "programmer": {"type": "atmelice_updi", "serial": "J42700051207"},
     },
     "B": {
         # The instrument peer: a second AVR128DB48 board with its own
-        # Atmel-ICE. NOT ON THE DESK at the moment - neither its console
-        # nor its probe is plugged in, and the path below is the socket
-        # board A now occupies. Re-verify both before using B again:
-        # the probes have swapped boards more than once, so trust the
-        # USERROW readback and not habit.
+        # Atmel-ICE. The probes have swapped boards more than once, so
+        # trust the USERROW readback and not habit.
         "board": "db48",
         "id": "brio-b",
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0",
-        "programmer": {"type": "atmelice_updi", "serial": "J42700051207"},
+        "console": "/dev/serial/by-path/pci-0000:67:00.3-usb-0:1.4:1.0-port0",
+        "programmer": {"type": "atmelice_updi", "serial": "J42700049508"},
     },
 }
 

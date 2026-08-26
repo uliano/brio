@@ -257,10 +257,19 @@ def pio_exe():
     return exe if os.path.isfile(exe) else "pio"
 
 
-def avrdude_args(prog, mcu, hexfile):
+def avrdude_args(prog, mcu, hexfile, chip_erase=False):
+    # -D by default: the flash endurance of these parts is 1k erase/write
+    # cycles (DS40002247B table 39-7 - lowered from 10k "based on validation
+    # data"), and a chip erase spends one cycle on EVERY page at every
+    # reflash. Without it avrdude erases only the pages it writes, so a
+    # 12 KB app costs ~24 page cycles instead of 256. The price: pages
+    # beyond the new image keep the previous image's bytes (execution never
+    # reaches them) and the EEPROM is left alone regardless of EESAVE.
+    # --erase restores the full chip erase when a virgin part matters.
     if prog["type"] == "serialupdi" and not os.path.exists(prog.get("port") or ""):
         die("serialupdi port %s does not exist (bench.py list)" % prog.get("port"))
-    return avrdude_base(prog, mcu) + ["-U", "flash:w:%s:i" % hexfile]
+    erase = [] if chip_erase else ["-D"]
+    return avrdude_base(prog, mcu) + erase + ["-U", "flash:w:%s:i" % hexfile]
 
 
 def cmd_flash(args):
@@ -273,7 +282,8 @@ def cmd_flash(args):
     hexfile = os.path.join(".pio", "build", env, "firmware.hex")
     if not os.path.isfile(os.path.join(ROOT, hexfile)):
         die("no %s after the build" % hexfile)
-    argv = avrdude_args(board_entry(args.name)["programmer"], mcu, hexfile)
+    argv = avrdude_args(board_entry(args.name)["programmer"], mcu, hexfile,
+                        chip_erase=args.erase)
     print("bench: " + " ".join(argv))
     rc = subprocess.call(argv, cwd=ROOT)
     if rc == 0:
@@ -567,6 +577,9 @@ def main():
     p = sub.add_parser("flash", help="build an app for a board and flash it over UPDI")
     p.add_argument("name", help="board name from the manifest")
     p.add_argument("app", help="app name (src/apps/<app>.cpp)")
+    p.add_argument("--erase", action="store_true",
+                   help="full chip erase first (default writes with -D and "
+                        "erases only the pages of the image: 1k-cycle flash)")
     p.set_defaults(func=cmd_flash)
 
     p = sub.add_parser("run", help="send a console command and judge the summary")

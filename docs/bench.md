@@ -91,7 +91,19 @@ $PY tools/bench.py fuses A              # read the fuses; name=value pairs write
 ```
 
 `run` exits nonzero on a timeout or a nonzero fail count, so a suite is
-usable from a script. `duo` (console-scripting the peer) is **still
+usable from a script. `flash` writes with avrdude's `-D` (page-selective
+erase) by default: the flash of these parts is rated **1k erase/write
+cycles** (DS40002247B 39-7, lowered from 10k "based on validation
+data") and a chip erase spends one cycle on every page at each reflash,
+so the default erases only the pages of the image; pages beyond it keep
+the previous image's bytes (execution never reaches them) and the
+EEPROM is untouched regardless of EESAVE. `--erase` restores the full
+chip erase when a virgin part matters. Bench regression policy under
+the same budget: native + `tools/check_family.sh` at every change
+(free); after a change to a driver, its own suite; after a
+cross-cutting change, ONE canary suite whose mechanism is nearest the
+change; every other baseline re-runs opportunistically, when its
+wiring is next on the desk anyway. `duo` (console-scripting the peer) is **still
 unexercised**: both protocol campaigns command their peer IN-BAND over
 the link under test (`src/apps/usart_link.hpp`,
 `src/apps/spi_link.hpp`), so the whole matrix runs as a plain `run A`.
@@ -124,26 +136,36 @@ Board B has not been touched: it is still on the shipping default.
 
 ### End state
 
-**Today's end state: board A runs `test_avr_nvm` (z 112/112) under the
-standing fuse geometry; board B is OFF THE DESK** - neither its console
-nor its Atmel-ICE is plugged in, and board A now holds the hub socket
-(`usb-0:1.1`) the manifest used to give to B. No wires are fitted: the
-PORTE link is gone with B, and the I2C bus taps are unused. The
-manifest was corrected to match, but a returning board B needs both its
-console socket and its probe re-verified the only way that can be
-trusted - reset the chip over UPDI and watch which console prints the
-boot banner, which names the board by its USERROW label.
+**Today's end state: board A runs `test_avr_serial` (under the
+standing fuse geometry), board B runs `usart_peer`, both on the
+desk.** The desk is re-rigged daily, so the console/probe mapping is
+re-verified at session start the only way that can be trusted: the
+probe by USERROW readback (the id names the board), the console by
+resetting the chip over UPDI and watching which port emits the boot
+banner. Today's verified mapping (the manifest matches): A = console
+`usb-0:1.1` / probe J42700051207, B = console `usb-0:1.4` / probe
+J42700049508 (the two ICEs had swapped boards again, caught by the
+USERROW readback). Wires fitted: ONE jumper `A.PE0 -
+B.PE0` (the shared TXD line) plus the dedicated GND - enough for
+`test_avr_serial x` and `w`. The full PORTE link (`A.PEn - B.PEn`,
+n = 0..3) that `test_avr_serial y` and the SPI/TWI/sleep two-board
+halves need is NOT fitted, and those halves also need their own peer
+firmware back on B (`spi_peer`, `twi_peer`, `sleep_peer`).
 
-The USART, SPI and TWI `y` halves and `test_avr_sleep y` all need board
-B back, with the PORTE link refitted STRAIGHT THROUGH (`A.PEn - B.PEn`,
-n = 0..3) and their own peer firmware (`usart_peer`, `spi_peer`,
-`twi_peer`, `sleep_peer`). Board B's 24 MHz crystal is DEAD after its
-load capacitors were reworked (`xtal_probe` read "never" in every
-FRQRANGE x CSUTHF combination - the same dead-joint signature as the
-first time); the board runs on OSCHF, which its banner declares, and
-that is fine for every role where B is a stimulus or a peer - only the
-crystal-accuracy measurement (`test_avr_serial x`) waits for the
-resolder.
+Board B's 24 MHz crystal is ALIVE: the crystal was replaced and the
+10 pF load capacitors refitted with parts verified by measurement
+(the earlier "dead crystal" verdicts were 100 nF parts from a
+contaminated 10 pF drawer RF-grounding the pins - a fault invisible
+to every DC check). B's banner declares `clk=XTAL 24 MHz`.
+`test_avr_serial x` measures board B **+152..+153 ppm fast against
+board A** (three runs, 1..2-tick spread). The offset is a property of
+the crystal SPECIES, not of an individual part: B's two crystals
+(same purchase) read +165 and +152 against A, while load-capacitor
+asymmetry between the identical boards is bounded at ~15-20 ppm/pF
+of pull and cannot produce it - consistent with A's crystal being a
+different fit with a different rated C_L. An absolute per-board
+measurement against the host's NTP-disciplined clock is the designed
+follow-up if the A-vs-B split ever matters.
 
 ## Wiring
 
