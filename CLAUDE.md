@@ -28,7 +28,9 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   `nv-heap.md` (the flash block allocator: FlashMedia contract, map
   pair, survival-aware mount), `power.md` (the sleep-depth ladder, the
   site that only arms, the vote round, standing locks, the deadline
-  guard, the first-event-after-wake contract).
+  guard, the first-event-after-wake contract), `meters.md` (the
+  MeterLatch bridge out of a capture ISR and the MeterSampler that
+  paces publication, not capture - a stale source publishes nothing).
 - `docs/<target>/` - one folder per target, mirroring
   `lib/brio/src/<target>/` (`avrdx/`, `host/`): `README.md` is the
   operational page (toolchain, board, probe, debugger and their
@@ -460,8 +462,30 @@ gets its dated home in `docs/design/` when taken.
   voter asked; unanimity not first-no; nested locks shallowest-wins);
   design/power.md NEW; platform.md gaps updated (sleep current stays
   a manual bench task; a PDOWN round and an ISR-taken PowerLock
-  unexercised). Remaining steps: 3 MeterSampler, 4 trace, 5
-  InputScanner, 6 BusMaster policy hook.
+  unexercised). Steps 3-6 DONE same day: util/meter_sampler.hpp
+  (MeterLatch<T, P, id> ISR bridge + MeterSampler AO - the AO paces
+  PUBLICATION, capture-rate events would flood queues; design/
+  meters.md NEW; suite test_avr_meter on B z 38/38 twice, wireless:
+  1/5/20 kHz to the tick, ~19989 ISR captures vs 8 published per
+  1024 ticks, missed+published accounts for every capture, dual
+  source labeled by pack order; suite development also re-observed
+  tcb.md's arming-edge fact), util/trace.hpp (stamp/dump ring,
+  disabled specialization PROVEN zero storage - an object, not
+  statics, exactly so that proof is real), util/input_scanner.hpp
+  (N-consecutive debounce, power-on establishes state without an
+  edge; bench waits for the traffic testbed's buttons),
+  bus_master.hpp policy hook (BusAction pass/retry, attempt counter,
+  BusPassThrough::never_retries compiles the whole branch out - twi/
+  spi/power hexes byte-identical; a retrying master votes not-ok to
+  PrepareSleep; the I2C recovery ladder and multi-host backoff stay
+  on demand per i2c-bus.md) + NEW host suites test_meter_sampler/
+  test_trace/test_input_scanner/test_bus_master (native = 22).
+  Follow-up fix found by the new suite and applied at review:
+  BusMaster::init() now resets FIFO/tallies/reply like every other
+  AO's init (+24 bytes where a bus is arbitrated). AO inits that
+  need runtime config default their init() args - Kernel::init_all
+  needs the no-arg form; the app arms them after. THE UTIL PASS IS
+  CLOSED.
 - **Low-level review track (planned 2026-08-20, full plan in memory
   low-level-review-plan).** Everything in avrdx/ gets the Working
   discipline treatment, device by device. Phase 0 DONE 2026-08-20:
@@ -970,6 +994,19 @@ lib/brio/src/            the framework, four strata:
                            owner AO walking a list of inputs, Sampled in (ISR glue,
                            labelled by the converter's selected code), AnalogSample
                            published; software pace or any hardware generator
+    meter_sampler.hpp      MeterLatch<T, P, id> (the one-cell bridge out of a
+                           capture ISR: store/take/missed) + MeterSource
+                           concept + MeterSampler<P, Subscribers, Sources...>:
+                           the AO that paces PUBLICATION, not capture -
+                           MeterSample per FRESH source, a stale one is silent
+    input_scanner.hpp      ScannedInput concept (read() = active) +
+                           InputScanner<P, Subscribers, ScanConfig, Inputs...>:
+                           periodic poll, N-sample debounce, InputEdge on each
+                           flip, silent at startup; polarity is the input's
+    trace.hpp              Trace<N, P, enabled>: ring of {t, tag, arg} stamps
+                           from ISRs or the loop, overwrite-oldest, dump(sink);
+                           the disabled specialization is EMPTY - no storage,
+                           no code
     clock.hpp              ClockUser concept, clock_hz(clock), clock_follows:
                            the target-independent clock contracts
     power.hpp              the power model: SleepDepth ladder, SleepSite
@@ -1003,8 +1040,12 @@ lib/brio/src/            the framework, four strata:
                            tools/bench.py parses
     serial_port.hpp        SerialPort<Transport, P, LineSink>: RX bytes ->
                            LineReceived (Lease::dispatch loan, LendsTo)
-    bus_master.hpp         BusMaster<Bus, P>: bus arbiter (pending FIFO,
-                           reject-when-full, ReplyTo completion, BusDone)
+    bus_master.hpp         BusMaster<Bus, P, depth, Policy>: bus arbiter
+                           (pending FIFO, reject-when-full, ReplyTo
+                           completion, BusDone, PrepareSleep voter) + the
+                           completion-policy hook (BusAction pass/retry,
+                           BusPassThrough default declaring never_retries -
+                           the opt-out that makes the hook cost zero)
     spi_bus.hpp            SPI vocabulary: SpiBus/SpiDone/spi_*
     i2c_bus.hpp            I2C vocabulary: I2cBus/I2cDone/i2c_* + outcomes
     proto/line_parser.hpp  LineAssembler + console/SCPI parsers +

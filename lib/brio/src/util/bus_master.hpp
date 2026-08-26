@@ -40,6 +40,16 @@
  *    (see i2c_bus.hpp) and travels untouched from TransferDone to the
  *    requester's BusDone.
  *
+ * WHAT HAPPENS ON A FAILURE is a POLICY, and it is the `Policy`
+ * template argument's - see BusPassThrough below. The arbiter is the
+ * only object that knows a transfer failed AND still holds the request
+ * that failed, so it is the only place a retry can be decided without
+ * every client writing one; but WHICH failures are worth retrying, and
+ * how often, is knowledge about the devices on the wire that no generic
+ * arbiter has. The default answers "none", at compile time and for
+ * free: the images of every existing bus are byte-identical with the
+ * hook in place.
+ *
  * The request event exceeds the 8-byte envelope guideline (a SPI
  * descriptor is ~16 bytes, an I2C one 9): a recorded, legal deviation -
  * the request IS the arbitration token, splitting it into a reference
@@ -56,6 +66,8 @@
 #pragma once
 
 #include <stdint.h>
+#include <concepts>
+#include <type_traits>
 #include <variant>
 
 #include "kernel/event_queue.hpp"
@@ -80,6 +92,56 @@ struct TransferDone {
     uint8_t status;
 };
 
+// ---- the completion policy ---------------------------------------------------
+
+/**
+ * What the arbiter does with a finished transfer. `pass` = answer the
+ * requester with the status the engine reported (what a bus has always
+ * done); `retry` = start the SAME request again and say nothing yet.
+ */
+enum class BusAction : uint8_t {
+    pass,
+    retry,
+};
+
+/**
+ * The default: every completion goes straight back to the requester.
+ *
+ * `never_retries` is the opt-out that makes this hook FREE. A policy
+ * that declares it is answering `pass` at compile time, so the arbiter
+ * neither calls on_done() nor keeps the copy of the in-flight request a
+ * retry would need - and the generated code is, byte for byte, the code
+ * that existed before the hook. Any other policy is assumed to retry
+ * and pays for the copy.
+ *
+ * A policy that DOES retry writes on_done(status, attempt) -> BusAction:
+ * `status` is the engine's, `attempt` counts the retries already spent
+ * on this request (0 at its first completion) and resets with each new
+ * request. It is called in the arbiter's dispatch, main context, and
+ * must be a pure decision - the place for a recovery ladder's ACTIONS
+ * (a bus reset, a clock pulse train) is the engine, not here.
+ *
+ * Note that the hook sees ASYNCHRONOUS completions only: a transfer the
+ * engine finishes inside start() reported bus_ok by that very fact, and
+ * there is nothing for a policy to judge.
+ */
+struct BusPassThrough {
+    static constexpr bool never_retries = true;
+    static constexpr BusAction on_done(uint8_t, uint8_t) { return BusAction::pass; }
+};
+
+/// True unless the policy declares itself retry-free. Absent = assume it
+/// may retry: the safe half of the guess costs a copy, the other half
+/// would lose a request.
+template <typename Policy>
+constexpr bool bus_policy_may_retry() {
+    if constexpr (requires { { Policy::never_retries } -> std::convertible_to<bool>; }) {
+        return !Policy::never_retries;
+    } else {
+        return true;
+    }
+}
+
 /**
  * The arbiter, and - because it is the one object that knows whether the
  * wire is quiet - a power-management VOTER (util/power.hpp): it answers
@@ -89,13 +151,28 @@ struct TransferDone {
  * fact the requester of a sleep cannot have. The vote costs a variant
  * alternative three bytes wide, which no bus request comes close to, and
  * two lambdas.
+ *
+ * A RETRYING MASTER IS BUSY. When the policy asks for a retry the
+ * arbiter stays in its busy state, which is also the state that votes
+ * NOT-OK on a PrepareSleep: a request whose completion is still owed is
+ * exactly the fact a sleep must not be taken against, and it stays true
+ * across as many attempts as the policy spends.
  */
-template <typename Bus, Platform P, uint8_t pending_depth = 4>
-class BusMaster : public Fsm<BusMaster<Bus, P, pending_depth>,
+template <typename Bus, Platform P, uint8_t pending_depth = 4,
+          typename Policy = BusPassThrough>
+class BusMaster : public Fsm<BusMaster<Bus, P, pending_depth, Policy>,
                              typename Bus::Request, TransferDone, PrepareSleep> {
-    using Base = Fsm<BusMaster<Bus, P, pending_depth>,
+    using Base = Fsm<BusMaster<Bus, P, pending_depth, Policy>,
                      typename Bus::Request, TransferDone, PrepareSleep>;
     using Request = typename Bus::Request;
+
+    /// Whether the retry machinery exists at all in this instantiation.
+    static constexpr bool may_retry = bus_policy_may_retry<Policy>();
+
+    /// The held copy of the request in flight - present only where a
+    /// retry could ask for it back.
+    struct NoHold {};
+    using Held = std::conditional_t<may_retry, Request, NoHold>;
 
 public:
     using Event = typename Base::Event;
@@ -107,11 +184,27 @@ public:
     // for unanimity rather than timing out.
     static inline EventQueue<Event, pending_depth + 3, P> queue;
 
-    static void init() { Base::start(&idle); }
+    /// Full reset, like every other AO's init(): the pending FIFO, the
+    /// rejection tally, the retry counter and the active reply all go
+    /// back to power-on state, so a re-init cannot replay a stale
+    /// request (found by the host suite; PowerManager and AnalogSampler
+    /// already followed this rule).
+    static void init() {
+        pending_head_ = 0;
+        pending_count_ = 0;
+        rejected_ = 0;
+        attempt_ = 0;
+        active_reply_ = {};
+        Base::start(&idle);
+    }
     static void dispatch(const Event& e) { Base::dispatch(e); }
 
     /// Requests answered with bus_rejected because the FIFO was full.
     static uint8_t rejected_count() { return rejected_; }
+
+    /// Retries the policy has spent on the request in flight (0 when it
+    /// has not asked for any, and after every completion that passed).
+    static uint8_t attempt() { return attempt_; }
 
 private:
     static Status idle(const Event& e) {
@@ -146,6 +239,23 @@ private:
                 return Base::handled();
             },
             [](TransferDone d) {
+                if constexpr (may_retry) {
+                    if (Policy::on_done(d.status, attempt_) == BusAction::retry) {
+                        ++attempt_;
+                        if (!Bus::start(held_)) {
+                            return Base::handled();     // the retry is in flight
+                        }
+                        // The retry finished inside start(): bus_ok by
+                        // that fact, and the request is answered.
+                        attempt_ = 0;
+                        active_reply_.send(BusDone{bus_ok});
+                        if (pending_count_ > 0 && begin_chain(pending_pop())) {
+                            return Base::handled();
+                        }
+                        return Base::transition(&idle);
+                    }
+                    attempt_ = 0;
+                }
                 active_reply_.send(BusDone{d.status});
                 if (pending_count_ > 0 && begin_chain(pending_pop())) {
                     return Base::handled();     // stay busy on the next one
@@ -167,6 +277,10 @@ private:
     /// (its TransferDone will arrive), false when everything finished.
     static bool begin_chain(Request r) {
         for (;;) {
+            if constexpr (may_retry) {
+                held_ = r;              // the copy a retry would start again
+                attempt_ = 0;           // attempts are counted per request
+            }
             active_reply_ = r.reply;
             if (!Bus::start(r)) {
                 return true;
@@ -209,6 +323,11 @@ private:
     static inline uint8_t pending_count_ = 0;
     static inline uint8_t rejected_ = 0;
     static inline ReplyTo<BusDone> active_reply_{};
+
+    // The retry state. With the default policy Held is an empty struct
+    // and attempt_ is never read or written, so both fold away.
+    static inline Held held_{};
+    static inline uint8_t attempt_ = 0;
 };
 
 } // namespace brio

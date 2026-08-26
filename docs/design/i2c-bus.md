@@ -105,6 +105,12 @@ times are arguments rather than assumptions, belongs to the engine:
 
 ## Not built, noted
 
+The arbiter now carries the HOOK a recovery policy would hang from -
+`BusMaster`'s `Policy` template argument, whose `on_done(status,
+attempt)` can ask for the same request to be started again (see
+`util/bus_master.hpp`); the concrete I2C ladder below and the
+multi-host backoff remain on demand.
+
 - **Stuck-bus watchdog - the POLICY half.** A client holding SDA low
   forever leaves the transaction in flight: the kernel keeps running
   (nothing blocks) but the bus AO stays busy and later requests pile up
