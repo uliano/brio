@@ -401,8 +401,16 @@ gets its dated home in `docs/design/` when taken.
   MUXBOT LINKOUT on OP0 without OP2, OpampSystem not rebased); native
   16 suites green. LESSON RE-LEARNED THE HARD WAY: `int` is SIXTEEN
   bits here - `4096u * 16u` is 0 and gcc turned the whole suite into
-  one `abort()`, which showed up only as a 2.7 KB image. The bench
-  suites are not built with -Wall; that is worth revisiting.
+  one `abort()`, which showed up only as a 2.7 KB image. The builds
+  DID carry -Wall -Wextra all along (pio_flags.py, since the first
+  kernel commit): unsigned wrap is DEFINED behavior and NO warning
+  level reports it, so the only defenses are 32-bit literals (UL) and
+  suspicion of a suddenly tiny image. What the sweep DID fix
+  (2026-08-26, user-approved): -Werror added to pio_flags common and
+  [env:native] (80/80 envs + native measured zero-warning first), and
+  build_unflags now strips the platform-injected -fpermissive and
+  -Wno-error=narrowing, so ill-formed code and narrowing fail the
+  build as house rules demand.
   End state: B = test_avr_opamp with test_avr_nvheap's five blocks
   intact (verified by its letter v after the campaign's five
   reflashes), A untouched on test_avr_serial.

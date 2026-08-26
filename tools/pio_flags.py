@@ -35,7 +35,11 @@ else:
     is_debug = env.GetBuildType() == "debug"
 
     common = [
-        "-Wall", "-Wextra",
+        # -Werror keeps the fleet's measured zero-warning state enforced
+        # (check_family.sh already builds with it). NB the warning set is
+        # not a net for everything: unsigned wrap is DEFINED behavior and
+        # no -W level reports it - a 16-bit `4096u * 16u` is silently 0.
+        "-Wall", "-Wextra", "-Werror",
         "-ffunction-sections", "-fdata-sections",
     ]
     if not is_debug:
