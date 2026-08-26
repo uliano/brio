@@ -426,5 +426,6 @@ Implemented but not bench-verified:
 - **DBGRUN and FAULTDET.** Both need a CPU halted in an OCD session;
   neither is reachable from a running suite.
 - **Sleep.** The TCD runs in Idle and stops in Standby and Power-Down
-  (25.3.6); the sleep pass will cover it, together with RUNSTDBY on
-  the clock sources the TCD requests.
+  (25.3.6); the sleep campaign measured other peripherals and did not
+  exercise the TCD, so this remains datasheet-trusted, including
+  RUNSTDBY on the clock sources the TCD requests.
