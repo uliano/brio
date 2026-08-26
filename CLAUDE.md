@@ -151,7 +151,12 @@ definitions; concepts instead of virtual interfaces; use the
 freestanding libstdc++ (variant, optional, span, concepts, bit,
 expected...) instead of hand-rolled traits; C++26 features already in
 gcc 16 may be used when genuinely needed (bump the -std flag then).
-Handlers dispatch with `brio::match(e, lambdas...)`. Drivers expose
+Explicit-size integer types for every stored or exchanged value;
+arithmetic that can exceed 16 bits names its width (UL literal,
+explicit-width accumulator, cast on an OPERAND never on the result) -
+`int`/`auto` stay fine for ephemeral locals; native tests run under
+non-recovering UBSan. Handlers dispatch with `brio::match(e,
+lambdas...)`. Drivers expose
 ISR handler BODIES (`[[gnu::always_inline]]`), the app binds the
 vector - vector names never appear in portable code. No `#ifdef` where
 a template/concept boundary can do the job; no target includes outside

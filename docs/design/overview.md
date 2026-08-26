@@ -275,6 +275,23 @@ driver is made and WHAT it produces upward, not what the peripheral is.
 - `std::optional` returns instead of bool + out-parameter.
 - Header comments explain the concurrency model and the WHY of each
   tradeoff - that comment IS the API documentation.
+- **Integer widths.** `int` is whatever the target ABI says (16 bits
+  on AVR, 32 on the other candidate targets), and the language's
+  integer promotions reintroduce it invisibly into every expression -
+  so the rules are about DATA and ARITHMETIC, not about banning a
+  keyword: (1) every stored or exchanged value - struct fields, event
+  payloads, register values, protocol bytes - uses an explicit-size
+  type (`uint8_t`, `int16_t`, ...); (2) any arithmetic whose result
+  can exceed 16 bits names its width itself: a `UL` suffix on the
+  literal, an explicit-width accumulator, or a cast ON AN OPERAND
+  (`uint32_t{a} * b` - never on the result, which wraps before the
+  cast reaches it). Unsigned wrap is DEFINED behavior: no warning
+  level reports it, so only this rule and the host/AVR double-width
+  builds stand between a 16-bit product and a silent zero. Plain
+  `int`/`auto` stay welcome for ephemeral locals and loop indices,
+  where a ban would be noise the promotions bypass anyway. The native
+  test build runs under UBSan (`-fsanitize=undefined`, non-recovering)
+  so the SIGNED flavors of this mistake fail the test run loudly.
 - **Apps never touch registers.** `PORTx.`, `VPORTx.`, peripheral
   structs and vendor bit masks appear only inside the target stratum's
   drivers; an app that needs an operation the driver lacks adds it to
