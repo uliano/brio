@@ -7,8 +7,8 @@ rather than the toolchain's gift, and the target that proved the
 kernel and util strata compile UNCHANGED on a second architecture.
 
 Peripheral documents live next to this page (`platform.md`,
-`clock.md`, `port.md`, `sercom.md`, `dmac.md`); the datasheets of
-record are in
+`clock.md`, `port.md`, `sercom.md`, `dmac.md`, `ac.md`); the
+datasheets of record are in
 [vendor/README.md](vendor/README.md) together with the targeted
 errata pass and the bench chip's identity (silicon rev F, DSU DID
 read over SWD).

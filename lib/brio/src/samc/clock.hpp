@@ -213,6 +213,12 @@ enum class GclkSource : uint8_t {
 struct GclkConfig {
     GclkSource source = GclkSource::osc48m;
     uint16_t div = 0;
+    /// DIVSEL. NOT "2^(DIV+1)" as SAMD-era folklore has it: on this
+    /// family the divisor becomes 2^(N+1) where N is the WIDTH of the
+    /// generator's DIV field (16.8.3) - a FIXED 512 for the 8-bit
+    /// generators, 131072 for generator 1 - and DIV's value is ignored.
+    /// Bench-measured on generator 4: DIV = 11 with this bit set gave
+    /// exactly /512. For any other ratio use the linear divider.
     bool div_pow2 = false;
     bool improve_duty = false;   ///< IDC: 50 % duty for an odd divider (16.6.2.8)
     bool output_enable = false;  ///< OE: the generator on its GCLK_IO pad

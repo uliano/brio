@@ -276,6 +276,24 @@ gets its dated home in `docs/design/` when taken.
   is the trap). Deliberately not built (dmac.md): CRC engine, linked
   lists, event hooks (no EVSYS driver), RUNSTDBY/standby, non-SERCOM
   trigger codes.
+  **AC sync-latency probe DONE (2026-08-27, user's curiosity,
+  answered same day).** samc/ac.hpp NEW (minimal by design: Ac block
+  + AcComparator<n>, config enable-protected per comparator, the
+  probe's surface only - window/events/sleep wait for the full
+  campaign) + probe app ac_sync_probe (7 letters, 30/30 twice,
+  wireless: GPIO-driven PA04 vs the comparator's own VDD scaler,
+  CMP0 pad read back, GCLK_AC at 11.7 kHz, SysTick stopwatch). THE
+  ANSWER ch. 40 never gives: a synchronized output edge costs the
+  fraction to the next GCLK_AC edge + TWO whole periods (the user's
+  bench intuition confirmed; staircase + 1000 randomized shots +
+  independent OSCULP32K all agree). Also measured: STATE is the
+  sampled path even with OUT=ASYNC; INTFLAG fires on the SAME
+  period as the flip; a mid-stream edge through the majority filter
+  pays (N-1)/2 periods (the chapter's N-1 is the from-idle cost);
+  single-shot START->READY 5.1..6.5 periods; and a GCLK fact now in
+  clock.hpp's GclkConfig: DIVSEL divides by 2^(field_width+1) FIXED
+  (512 on the 8-bit generators, DIV ignored) - not the SAMD-era
+  2^(DIV+1). Docs: docs/samc/ac.md (PROVISIONAL).
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
