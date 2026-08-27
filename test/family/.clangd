@@ -1,0 +1,9 @@
+# The AVR family smoke TUs are compiled by tools/check_family.sh alone
+# (no CMake project, so no database entry of their own). Pointing clangd
+# at the AVR project's database makes it INFER their flags from that
+# database's own TUs - the same transfer heuristic that serves headers -
+# so they parse as avr-g++ instead of inheriting test/'s host fragment.
+# Variant-specific negatives parse as the bench chip; good enough for
+# editing, the script stays the judge.
+CompileFlags:
+  CompilationDatabase: ../../build-cmake/avr128db48-release

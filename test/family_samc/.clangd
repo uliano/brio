@@ -1,0 +1,8 @@
+# The samc family smoke TUs are compiled by tools/check_samc.sh alone
+# (no CMake project, so no database entry of their own). Same routing
+# rationale as test/family/.clangd: the SAM database's TUs lend their
+# flags, so these parse as arm-none-eabi instead of inheriting test/'s
+# host fragment. The E/G-variant negatives parse as the J18A; the
+# script stays the judge.
+CompileFlags:
+  CompilationDatabase: ../../build-cmake/samc21j-release

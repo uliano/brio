@@ -1,0 +1,22 @@
+# Repo-wide clangd tuning (fragments in deeper directories add the
+# per-architecture CompilationDatabase routing on top of this).
+#
+# The build's judge is gcc under -Werror, and it is CLEAN. clangd parses
+# with clang, which carries a few diagnostics gcc does not have, and it
+# inherits -Werror from the real compile commands - so a clang-only
+# false positive renders as a hard editor error on code the real
+# compiler accepts. Suppressed HERE, at the editor layer, never by
+# bending the code:
+#  - unneeded-internal-declaration: fires on the AOs' `static inline
+#    ... queue` members inside an app's anonymous namespace (they are
+#    used through the kernel templates, and every running image's .bss
+#    proves them emitted);
+#  - unused-const-variable: fires on the uniform `constexpr X tag;`
+#    driver-tag idiom when an app happens not to pass that tag anywhere.
+# sam.h is the DFP's device-dispatching umbrella: including the device
+# header directly instead is exactly what the include-cleaner keeps
+# suggesting and exactly what the code must not do.
+Diagnostics:
+  Suppress: [unneeded-internal-declaration, unused-const-variable]
+  Includes:
+    IgnoreHeader: [sam.h]
