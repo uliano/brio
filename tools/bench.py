@@ -104,7 +104,7 @@ def resolve_app(name, app):
             % (name, btype, ", ".join(sorted(MCU_OF_BOARD))))
     apps = apps_manifest()
     if app not in apps:
-        die("no app '%s' under src/apps/ (known to the last cmake configure)" % app)
+        die("no app '%s' under avrdx/src/apps/ (known to the last cmake configure)" % app)
     info = apps[app]
     if btype not in info["boards"]:
         hint = ("" if btype == "db48" else
@@ -278,12 +278,17 @@ def cmd_flash(args):
     preset = BOARD_PRESET[btype]
     print("bench: board %s -> preset %s, target %s" % (args.name, preset, args.app))
     # Cheap (a fresh manifest too, in case an app's "// build:" lines or the
-    # app roster itself changed since the last configure).
-    rc = subprocess.call(["cmake", "--preset", preset], cwd=ROOT)
+    # app roster itself changed since the last configure). Presets resolve
+    # against their own CMakePresets.json, so cmake runs from the AVR
+    # project directory (avrdx/), not the repo root - the root is not a
+    # CMake project any more.
+    rc = subprocess.call(["cmake", "--preset", preset],
+                         cwd=os.path.join(ROOT, "avrdx"))
     if rc != 0:
         return rc
     rc = subprocess.call(["cmake", "--build", "--preset", preset,
-                          "--target", args.app], cwd=ROOT)
+                          "--target", args.app],
+                         cwd=os.path.join(ROOT, "avrdx"))
     if rc != 0:
         return rc
     mcu = MCU_OF_BOARD[btype]

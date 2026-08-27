@@ -42,7 +42,7 @@ ships none, so the CMSIS device headers ARE in the repository
 - `third_party/cmsis-core/` - the 5 CMSIS-Core headers the device
   header includes (ARM CMSIS_5 5.9.0: core_cm0plus, cmsis_compiler,
   cmsis_gcc, cmsis_version, mpu_armv7).
-- `samc21/svd/ATSAMC21J18A.svd` - from the same DFP, for the debug
+- `samc/svd/ATSAMC21J18A.svd` - from the same DFP, for the debug
   Peripheral Viewer.
 
 Pack source: `https://packs.download.microchip.com/`

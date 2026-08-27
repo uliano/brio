@@ -15,7 +15,7 @@ differ is the pin BONDING and the SERCOM count (four on the E, six on
 the G and J) - so this fixture is a smaller net today. It grows with
 each driver campaign, exactly as the AVR one did.
 
-Neither `test/CMakeLists.txt` nor `samc21/CMakeLists.txt` sees this
+Neither `test/CMakeLists.txt` nor `samc/CMakeLists.txt` sees this
 directory: the host project only globs `test_*/main.cpp`, and the samc21
 project only globs its own `src/apps/*.cpp`. These files are built by
 the script alone.

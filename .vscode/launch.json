@@ -15,7 +15,7 @@
     // `monitor reset`, `load`, a breakpoint hit with a correct backtrace
     // through the whole AO kernel chain, `monitor ioregister PORTF.DIR`
     // style peripheral reads (the mcu-debug Peripheral Viewer's read path,
-    // confirmed against svd/avr128db48.svd). "svdPath" below is exactly
+    // confirmed against avrdx/svd/avr128db48.svd). "svdPath" below is exactly
     // the key the Peripheral Viewer extension reads from the active debug
     // session's launch config (its svdPathConfig setting defaults to
     // trying "svdPath" then "svdFile" - confirmed in the extension's own
@@ -51,7 +51,7 @@
     // session free-runs past it. Set true to actually land on main().
     // End-to-end VERIFIED on board A: connect, monitor reset, load,
     // stopAtEntry on main(), Peripheral Viewer reading live CLKCTRL/PORTF
-    // register values against svd/avr128db48.svd.
+    // register values against avrdx/svd/avr128db48.svd.
     "version": "0.2.0",
     "configurations": [
         {
@@ -61,7 +61,7 @@
             "cwd": "${workspaceFolder}",
             "program": "${command:cmake.launchTargetPath}",
             "stopAtEntry": true,
-            "svdPath": "${workspaceFolder}/svd/avr128db48.svd",
+            "svdPath": "${workspaceFolder}/avrdx/svd/avr128db48.svd",
             "miMode": "gdb",
             "miDebuggerPath": "/sw/avr/bin/avr-gdb",
             "debugServerPath": "/usr/bin/env",
@@ -81,7 +81,7 @@
             // SAM C21 board over the second Atmel-ICE (CMSIS-DAP/SWD),
             // cortex-debug launching OpenOCD itself (no PyAvrOCD-style
             // buffering shims needed - cortex-debug parses OpenOCD's
-            // stderr natively). CMake Tools' Active Folder must be samc21/
+            // stderr natively). CMake Tools' Active Folder must be samc/
             // and its launch target the app to debug, same
             // ${command:cmake.launchTargetPath} contract as the AVR entry.
             // "adapter serial" goes through openOCDPreConfigLaunchCommands
@@ -107,7 +107,7 @@
                 "interface/cmsis-dap.cfg",
                 "target/at91samdXX.cfg"
             ],
-            "svdPath": "${workspaceFolder}/samc21/svd/ATSAMC21J18A.svd",
+            "svdPath": "${workspaceFolder}/samc/svd/ATSAMC21J18A.svd",
             "runToEntryPoint": "main"
         }
     ]

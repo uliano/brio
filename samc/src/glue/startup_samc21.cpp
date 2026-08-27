@@ -83,7 +83,7 @@ void HardFault_Handler()
 // proving that branch dead (-Os does; -Og does not, which is how this
 // surfaced). newlib's own abort() goes through raise()/_exit() and would
 // drag in the whole syscall stub set, defeating the deliberate "no
-// nosys.specs" rule in samc21/CMakeLists.txt - a rule worth keeping,
+// nosys.specs" rule in samc/CMakeLists.txt - a rule worth keeping,
 // because it is what makes an accidental _sbrk or _write fail the link
 // instead of failing silently at run time.
 //

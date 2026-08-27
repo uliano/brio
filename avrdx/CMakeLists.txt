@@ -143,9 +143,9 @@ set(AVR_PROBE_SERIAL "J42700051207" CACHE STRING "Atmel-ICE serial to flash/debu
 #     the symbol, so this costs it nothing, not even a byte.
 set(AVR_NVHEAP_BUILD_ID 0)
 file(GLOB_RECURSE _nvheap_id_sources CONFIGURE_DEPENDS
-    "${CMAKE_SOURCE_DIR}/lib/brio/src/*.cpp" "${CMAKE_SOURCE_DIR}/lib/brio/src/*.hpp"
-    "${CMAKE_SOURCE_DIR}/lib/brio/src/*.c"   "${CMAKE_SOURCE_DIR}/lib/brio/src/*.h"
-    "${CMAKE_SOURCE_DIR}/lib/brio/src/*.S"
+    "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.cpp" "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.hpp"
+    "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.c"   "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.h"
+    "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.S"
     "${CMAKE_SOURCE_DIR}/src/*.cpp" "${CMAKE_SOURCE_DIR}/src/*.hpp"
     "${CMAKE_SOURCE_DIR}/src/*.c"   "${CMAKE_SOURCE_DIR}/src/*.h"
     "${CMAKE_SOURCE_DIR}/src/*.S"
@@ -174,7 +174,7 @@ function(avr_add_app name)
         ${A_UNPARSED_ARGUMENTS}
     )
 
-    target_include_directories(${name} PRIVATE lib/brio/src)
+    target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/../lib/brio/src)
     target_compile_definitions(${name} PRIVATE ${AVR_MCU_DEFINES})
 
     target_compile_options(${name} PRIVATE
@@ -296,5 +296,5 @@ endforeach()
 # Package-agnostic (a scan of source comments, not of what THIS configure
 # happens to build) - tools/bench.py reads this instead of parsing apps.ini/
 # platformio.ini. Regenerated identically by any one configure/preset.
-file(WRITE "${CMAKE_SOURCE_DIR}/build-cmake/apps_manifest.json"
+file(WRITE "${CMAKE_SOURCE_DIR}/../build-cmake/apps_manifest.json"
     "{\n  \"apps\": {\n    ${_manifest_entries}\n  }\n}\n")

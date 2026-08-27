@@ -1,0 +1,7 @@
+# The avrdx stratum parses against the AVR project's database (the
+# bench-chip release preset): headers here include <avr/io.h> and need
+# the avr-g++ driver plus the -mmcu device-macro delta the AVR
+# CMakeLists bakes into compile_commands.json. Overrides the framework
+# default (lib/brio/src/.clangd, host flags). Path relative to this file.
+CompileFlags:
+  CompilationDatabase: ../../../../build-cmake/avr128db48-release

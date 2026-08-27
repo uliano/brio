@@ -1,0 +1,6 @@
+# clangd config for the AVR project: avrdx/ is its OWN CMake project
+# (avrdx/CMakeLists.txt) with its own compile_commands.json emitted at
+# ../build-cmake/<preset> - point clangd straight at the bench-chip
+# release database (same pattern as samc/.clangd and test/.clangd).
+CompileFlags:
+  CompilationDatabase: ../build-cmake/avr128db48-release

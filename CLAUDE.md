@@ -898,15 +898,21 @@ gets its dated home in `docs/design/` when taken.
 ## Build, test, debug (the must-knows)
 
 ```bash
-ctest --preset host                                                # host tests (doctest); no hardware needed
+# Three sibling CMake projects, PEERS (none is the repo root): avrdx/,
+# samc/, test/. cmake presets resolve against their own project dir -
+# run cmake FROM that dir (or let tools/bench.py do it).
+(cd test  && ctest --preset host)                                  # host tests (doctest); no hardware needed
 tools/check_family.sh [name]                                       # every avrdx smoke TU compiles for all 8 DA/DB
                                                                     # packages; neg/ TUs must FAIL (definition of done)
-cmake --build --preset avr128db48-release --target <app>           # release build (-Os)
-cmake --build --preset avr128db48-release --target <app>-upload    # flash via Atmel-ICE (UPDI)
-cmake --build --preset avr128db48-debug --target <app>             # debug build, then F5 (.vscode/launch.json)
-# apps are auto-discovered from src/apps/*.cpp at every configure - no
-# generation step; a new/removed app or a changed "// build: opt = value"
-# line takes effect on the next configure
+tools/check_samc.sh [name]                                         # same for the samc stratum (E/G/J 18A headers)
+(cd avrdx && cmake --build --preset avr128db48-release --target <app>)         # AVR release build (-Os)
+(cd avrdx && cmake --build --preset avr128db48-release --target <app>-upload)  # flash via Atmel-ICE (UPDI)
+(cd avrdx && cmake --build --preset avr128db48-debug --target <app>)           # AVR debug build, then F5
+(cd samc  && cmake --build --preset samc21j-release --target <app>)            # SAM release build
+(cd samc  && cmake --build --preset samc21j-release --target <app>-upload)     # flash via OpenOCD (SWD)
+# apps are auto-discovered from <project>/src/apps/*.cpp at every
+# configure - no generation step; a new/removed app or a changed
+# "// build: opt = value" line takes effect on the next configure
 
 python3 tools/bench.py list                  # serial devices, USB probes, the bench manifest
 python3 tools/bench.py flash A test_avr_pin  # cmake --build --target <app> + avrdude over UPDI
@@ -955,38 +961,57 @@ python3 tools/bench.py fuses A bootsize=128  # read/write fuses over UPDI (fuses
 ## Layout
 
 ```
-CMakeLists.txt           app auto-discovery ("// build:" header comments),
-                         avr_predefines() (clangd's -mmcu macro delta),
-                         avr_add_app() (flags, .hex/.lst/.map, per-app
-                         -upload target, FLMAPLOCK/build-id defsyms)
-CMakePresets.json        one configure+build preset pair per AVR128DB
-                         package x {release, debug}
-cmake/toolchain-avr.cmake  the cross toolchain file (avr-gcc 16.2 at /sw/avr)
-cmake/avr-mcus.cmake     package -> mcu name table (128K flash / 16K RAM each)
+avrdx/                   the AVR build project (a PEER of samc/ and test/ -
+                         the repo root is not a CMake project):
+  CMakeLists.txt           app auto-discovery ("// build:" header comments),
+                           avr_predefines() (clangd's -mmcu macro delta),
+                           avr_add_app() (flags, .hex/.lst/.map, per-app
+                           -upload target, FLMAPLOCK/build-id defsyms)
+  CMakePresets.json        one configure+build preset pair per AVR128DB
+                           package x {release, debug}; binaryDir under the
+                           shared ../build-cmake/
+  cmake/toolchain-avr.cmake  the cross toolchain file (avr-gcc 16.2 at /sw/avr)
+  cmake/avr-mcus.cmake     package -> mcu name table (128K flash / 16K RAM each)
+  src/apps/<app>.cpp       one main() per app (ISR vector bindings live HERE);
+                           "// build: <option> = <value>" header lines
+                           ("boards = db28,..." gates which package builds it,
+                           default db48 only; "flmap_lock = 0" opts out of the
+                           FLMAPLOCK default; anything else is just metadata
+                           for tools/bench.py, e.g. "monitor_speed = 115200")
+  src/glue/                build invariants compiled into EVERY image (every
+                           avr_add_app() call lists ivsel_boot.cpp alongside
+                           the app's own source - the .init3 IVSEL store,
+                           vectors at BOOT start)
+  svd/avr128db48.svd       the debug Peripheral Viewer's register map
+samc/                    the SAM C21 build project, same shape (CMakeLists +
+                         presets + cmake/toolchain-arm.cmake + ld/ linker
+                         script + src/apps + src/glue startup crt + svd/) -
+                         its own header comments are the reference
+test/CMakeLists.txt      the host test project (independent - one CMake
+                         configure has exactly one compiler):
+                         one executable + ctest entry per test_*/main.cpp
+test/CMakePresets.json   the "host" configure/build/test preset (native g++, UBSan)
+test/test_*/main.cpp     host unit tests (doctest), cd test && ctest --preset host
+test/family_samc/        samc family smoke TUs + neg/, tools/check_samc.sh runs them
 third_party/doctest/     vendored doctest.h (MIT, upstream doctest/doctest)
+third_party/samc21-dfp/  vendored Microchip.SAMC21_DFP include tree (Apache-2.0)
+third_party/cmsis-core/  vendored ARM CMSIS-Core headers (Apache-2.0)
 tools/check_family.sh    family compile check over test/family/ (see above) -
                          zero CMake coupling, calls avr-g++ directly
+tools/check_samc.sh      the samc twin over test/family_samc/
 tools/bench_boards.py    the bench MANIFEST: the physical boards on the desk
                          (type, console by-path, programmer) - not a target list
 tools/bench.py           the bench orchestrator: list / flash / run / console /
                          duo, over the manifest and build-cmake/apps_manifest.json
                          (the app roster CMake writes at every configure)
-src/apps/<app>.cpp       one main() per app (ISR vector bindings live HERE);
-                         "// build: <option> = <value>" header lines
-                         ("boards = db28,..." gates which package builds it,
-                         default db48 only; "flmap_lock = 0" opts out of the
-                         FLMAPLOCK default; anything else is just metadata
-                         for tools/bench.py, e.g. "monitor_speed = 115200")
-src/glue/                build invariants compiled into EVERY image (every
-                         avr_add_app() call lists ivsel_boot.cpp alongside
-                         the app's own source - the .init3 IVSEL store,
-                         vectors at BOOT start)
-test/CMakeLists.txt      the host test project (independent from the root AVR
-                         build - one CMake configure has exactly one compiler):
-                         one executable + ctest entry per test_*/main.cpp
-test/CMakePresets.json   the "host" configure/build/test preset (native g++, UBSan)
-test/test_*/main.cpp     host unit tests (doctest), ctest --preset host
-docs/                    README (map + rules), design/, <target>/ (avrdx/, host/), bench.md
+docs/                    README (map + rules), design/, <target>/ (avrdx/, samc/,
+                         host/), bench.md
+lib/brio/src/.clangd     per-stratum clangd routing: the framework default is
+                         the host database; avrdx/.clangd and samc/.clangd
+                         (in lib AND in each project dir) override with their
+                         own architecture's database, so a header always
+                         parses with its own compiler regardless of CMake
+                         Tools' active project
 lib/brio/src/            the framework, four strata:
   kernel/                pure kernel logic - includes NOTHING of brio
     platform.hpp           Platform concept (CriticalSection, idle,

@@ -288,7 +288,7 @@ PyAvrOCD is launched by cppdbg itself (`debugServerPath` +
     "type": "cppdbg",
     "request": "launch",
     "program": "${command:cmake.launchTargetPath}",
-    "svdPath": "${workspaceFolder}/svd/avr128db48.svd",
+    "svdPath": "${workspaceFolder}/avrdx/svd/avr128db48.svd",
     "miMode": "gdb",
     "miDebuggerPath": "/sw/avr/bin/avr-gdb",
     "debugServerPath": "/home/<user>/.local/bin/pyavrocd",
@@ -358,7 +358,7 @@ avr-gcc/avr-gdb rebuild; candidate for an upstream bug report
 ### Peripheral registers (SVD and monitor commands)
 
 Microchip ships no SVD for AVR; PyAvrOCD generates them from the
-ATDFs. `svd/avr128db48.svd` is committed and wired via `svdPath` in
+ATDFs. `avrdx/svd/avr128db48.svd` is committed and wired via `svdPath` in
 `.vscode/launch.json` (above), which the mcu-debug Peripheral Viewer
 extension reads to populate its PERIPHERALS panel (values read while
 stopped; the panel refresh can be flaky - CLion renders the same SVD

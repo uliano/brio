@@ -1,5 +1,5 @@
 # ============================================================================
-#  samc21/CMakeLists.txt - the SAM C21 build: brio's second hardware target,
+#  samc/CMakeLists.txt - the SAM C21 build: brio's second hardware target,
 #  a SIBLING CMake project (own toolchain file, own presets) exactly as the
 #  root CMakeLists.txt's header comment prescribes - the same pattern test/
 #  already is, with nothing shared: one CMake configure has exactly one
@@ -7,7 +7,7 @@
 #  second real instance proving the shape (this file IS that instance; if a
 #  third target ever makes the factoring obvious, it happens then).
 #
-#  One executable target per app: every samc21/src/apps/*.cpp with a main()
+#  One executable target per app: every samc/src/apps/*.cpp with a main()
 #  is discovered at configure time (CONFIGURE_DEPENDS) from its own
 #  "// build:" header comment, mirroring the AVR project's grammar. One
 #  configure targets exactly ONE chip variant (SAMC_MCU cache var, one
@@ -142,7 +142,7 @@ function(sam_add_app name)
     )
 endfunction()
 
-# --- App discovery: every samc21/src/apps/<app>.cpp becomes a target, gated
+# --- App discovery: every samc/src/apps/<app>.cpp becomes a target, gated
 #     by its own "// build: boards = ..." header comment (default: c21j -
 #     the one board type that exists; the grammar is the AVR project's, the
 #     board names are this family's). Other keys (monitor_speed, ...) are
