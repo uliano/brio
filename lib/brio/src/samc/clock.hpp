@@ -57,8 +57,6 @@
 
 #include "sam.h"
 
-#include "util/clock.hpp"
-
 namespace brio {
 
 // =============================================================================
@@ -78,10 +76,10 @@ inline bool clock_wait(const volatile uint32_t& reg, uint32_t mask, bool want_se
     return false;
 }
 
-/// The flash read wait states. They belong to NVMCTRL (ch. 25), not to
+/// The flash read wait states. They belong to NVMCTRL (ch. 27), not to
 /// the clock controller - but they are a FUNCTION of the CPU frequency
 /// and nothing may raise that frequency without setting them first, so
-/// they live here until samc/nvm.hpp is born and takes them over (ch. 27).
+/// they live here until samc/nvm.hpp is born and takes them over.
 struct FlashWaitStates {
     FlashWaitStates() = delete;
 

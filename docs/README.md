@@ -58,6 +58,17 @@ Target AVR DA/DB (`lib/brio/src/avrdx/`):
 | [avrdx/opamp.md](avrdx/opamp.md) | OPAMP (provisional, **DB only**): the `OpampSystem` block (the one ENABLE, the TIMEBASE that makes a settle time mean microseconds, and the ClockUser hook that keeps it true across a rebase) + `Opamp<n>` - both input multiplexers with their per-instance link codes, the 16R ladder and its eight exact gains, the output driver, the three enable regimes, the internal timer and READY, the four event users and the offset trim - plus the tasks `OpampFollower`, `OpampPga`, `OpampInvertingPga` and the chapter's three-op-amp `InstrumentationAmp`; not covered: the integrator usage type (external R and C, and a DUMP policy), RUNSTBY, IRSEL's electrical effect |
 | [avrdx/vendor/README.md](avrdx/vendor/README.md) | The datasheets/errata the stratum is written against, by document number (PDFs kept local, not in git) |
 
+Target SAM C21 (`lib/brio/src/samc/`):
+
+| Document | Content |
+|----------|---------|
+| [samc/README.md](samc/README.md) | Toolchain (vendored DFP/CMSIS, no device headers in arm-none-eabi-gcc), board, OpenOCD upload over SWD, cortex-debug, the clangd routing, the family smoke check |
+| [samc/platform.md](samc/platform.md) | Platform (provisional): `SamPlatform` (PRIMASK critical section, WFI-then-enable idle, BKPT and its ARMv6-M caveat, the `.noinit` breadcrumb, atomic_width 4), `BasicTicker` over SysTick (rates dividing 1000, exact millis, the visibility clause), `Nvic`, and the hand-written crt (47-entry vector table, app-binds-the-vector, the abort() story); not covered: the sleep and reset halves |
+| [samc/clock.md](samc/clock.md) | Clock (provisional): OSCCTRL/GCLK/MCLK resources with bounded waits and the two OSC48M errata as code, flash wait states ordered around the change, `Clock<internal, hz>` over the exact OSC48M ratios; not covered: every other root of the tree (XOSC, 32 kHz, FDPLL), DynamicClock |
+| [samc/port.md](samc/port.md) | PORT (provisional): two groups on every variant, the off-by-default input buffer, the directional pull, the PMUX handoff, WRCONFIG; not covered: the EIC (senses and pin interrupts are another peripheral), PORT events |
+| [samc/sercom.md](samc/sercom.md) | SERCOM USART (provisional): the one-vector reality and the INTFLAG-AND-INTENSET discipline, pads vs pins (TxD on PAD0/PAD2 only), the LSB-first default and its measured cautionary tale, enable-protection and both sync waits, the 16x-arithmetic baud math byte-exact on the wire, `Uart` with the AVR edge-return contract; not covered: the SPI/I2C personalities, the USART long tail, DMA |
+| [samc/vendor/README.md](samc/vendor/README.md) | The datasheets/errata the stratum is written against, the bench chip's silicon revision, the targeted errata pass (PDFs kept local, not in git) |
+
 Target host (`lib/brio/src/host/`):
 
 | Document | Content |

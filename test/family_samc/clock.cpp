@@ -4,6 +4,7 @@
 // task's compile-time arithmetic and every resource verb instantiate
 // from the device header alone.
 #include "samc/clock.hpp"
+#include "util/clock.hpp"   // clock_hz: the contract the task satisfies
 
 using namespace brio;
 

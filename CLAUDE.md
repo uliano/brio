@@ -32,7 +32,7 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   MeterLatch bridge out of a capture ISR and the MeterSampler that
   paces publication, not capture - a stale source publishes nothing).
 - `docs/<target>/` - one folder per target, mirroring
-  `lib/brio/src/<target>/` (`avrdx/`, `host/`): `README.md` is the
+  `lib/brio/src/<target>/` (`avrdx/`, `samc/`, `host/`): `README.md` is the
   operational page (toolchain, board, probe, debugger and their
   quirks); next to it ONE document per peripheral in the shape
   docs/README.md prescribes (documents of record -> what the silicon
@@ -73,17 +73,27 @@ This file has no decision log any more: the former log was migrated to
 `brio` (`lib/brio/`) is a header-only C++23 (gnu++23) framework for
 bare-metal MCUs built around a cooperative active-object kernel,
 written clean-room after Samek's book (never the QP source). One flat
-namespace `brio`; four strata under `lib/brio/src/` - `kernel/` (pure
+namespace `brio`; five strata under `lib/brio/src/` - `kernel/` (pure
 logic, includes nothing of brio), `util/` (services over the kernel),
-`avrdx/` (everything that knows `avr/io.h`, the only target today:
-AVR DA/DB, bench chip AVR128DB48), `host/` (the native test target).
-Includes carry the stratum prefix (`#include "avrdx/usart.hpp"`). The
-repo is a CMake project (`CMakePresets.json`, Ninja): one `main()` per
-`src/apps/<app>.cpp` is auto-discovered at configure time from its own
-`// build:` header comment and becomes one executable target per (app x
-AVR128DB package); host tests in `test/` are an independent CMake
-project (own `CMakeLists.txt`/`CMakePresets.json`, host g++, no cross
-toolchain), run via `ctest`.
+`avrdx/` (everything that knows `avr/io.h`: AVR DA/DB, bench chip
+AVR128DB48), `samc/` (everything that knows `sam.h`: SAM C21,
+Cortex-M0+, bench chip ATSAMC21J18A), `host/` (the native test
+target). Includes carry the stratum prefix
+(`#include "avrdx/usart.hpp"`). The builds are three sibling CMake
+projects, PEERS - the repo root is not a CMake project: `avrdx/` and
+`samc/` (each with its own toolchain file and presets, Ninja,
+emitting into the shared `build-cmake/`) auto-discover one `main()`
+per `src/apps/<app>.cpp` at configure time from its own `// build:`
+header comment; host tests in `test/` are the third project (host
+g++, no cross toolchain), run via `ctest`. ONE NAME PER ARCHITECTURE,
+the same key on three axes: `lib/brio/src/<arch>/` (stratum),
+`docs/<arch>/` (docs), `<arch>/` (build project); chip precision
+lives in preset names, per-chip ld/svd files and the `*_MCU` cache
+variables. Names are claims, extended only when a real chip extends
+the family - the known landing names, never used early: avrdx ->
+avrxt (Microchip's sigla for the modern-AVR core) when an EA/mega0
+part proves it shares the stratum; samc -> sam0 if a D21 arrives; an
+`armv6m/` core stratum factored at the SECOND ARM family.
 
 ## Governing rule and stability hierarchy
 
@@ -198,15 +208,35 @@ gets its dated home in `docs/design/` when taken.
 - **HSM.** The FSM contract is HSM-ready (`unhandled` = future
   bubble-to-parent); parent pointers, bubbling and LCA entry/exit
   chains get built only when a real AO demands them.
-- **Second target: ATSAM C decided (2026-08-27, corrected from an
-  earlier CH32V006 pick)**, Cortex-M0+ (STM32G0x0/x1 also considered
-  for later). It will exercise the Platform concept, the per-target
-  ticker/driver strata and the layering rule for real; expect radical
-  revision of util/ and drivers then. It will be built as another
-  sibling CMake project (its own `CMakeLists.txt`/`CMakePresets.json`/
-  toolchain file) - the same pattern `test/` already is, not a branch
-  inside the root `CMakeLists.txt`; no shared "app discovery" module is
-  factored out ahead of that second real instance.
+- **Second target: SAM C21 - bring-up step 1 DONE (2026-08-27).**
+  The samc/ stratum (nvic, clock, pin, ticker over SysTick at
+  1000 Hz, platform_sam) and the samc/ build project (own toolchain
+  file, presets, hand-written crt: 47-entry vector table +
+  ld script with NOLOAD .noinit; OpenOCD upload over SWD,
+  cortex-debug) exist and are live-verified on the user's C21J rev
+  1.1 board (ATSAMC21J18A, silicon rev F): kernel blink under time
+  events, and a full SERCOM5 console at 115200 driven end-to-end
+  over the CH340 - byte-exact baud (BAUD 63019, actual_baud readback
+  115219 = the arithmetic to the hertz), tick coherent with the wall
+  clock. THE PROMISE HELD: kernel/ and util/ compiled UNTOUCHED on
+  the second architecture (ring's lock-free path, print's hosted
+  branch, serial_port, line_parser, the clock contracts - first real
+  exercise for each). Docs: docs/samc/*.md (all PROVISIONAL with
+  honest gap lists), vendor pass in docs/samc/vendor/README.md.
+  Findings that cost blood and are now pinned by asserts: SERCOM has
+  ONE interrupt vector (isr() masks INTFLAG with INTENSET - DRE is a
+  level), CTRLA.DORD resets MSB-first while a UART is LSB-first (the
+  first banner arrived bit-reversed; family static_assert guards the
+  default), TxD exists only on PAD0/PAD2, PORT_GROUPS = 2 on every
+  variant, the ticker's getters need volatile reads (gcc -Os DELETED
+  a bare polling loop), -Og keeps abort() alive so the crt must
+  define it. Deliberately still open (each doc's "Not covered yet"):
+  the E/G variants are compile-only, bench.py knows no SAM, sleep/
+  reset/EIC/DMA are future passes. NEXT CAMPAIGN AGREED: DMAC (see
+  memory dmac-campaign-direction) - TX-DMA + tick-paced-harvest
+  RX-DMA on the serial, both engines optional compiling to zero,
+  errata 1.10.x matrix first. STM32G0x0/x1 remains the candidate
+  third target.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -227,8 +257,13 @@ gets its dated home in `docs/design/` when taken.
   `avr_predefines()` supplying the `-mmcu` device-macro delta clang
   lacks, `test/.clangd` pointing at the host project's own database
   (detail in docs/avrdx/README.md). The delta feed is an AVR
-  peculiarity (device-specs macros; other targets select the device
-  with an explicit -D) and goes away with the second target.
+  peculiarity (device-specs macros) - confirmed by the second target:
+  samc selects the device with a plain -D__SAMC21J18A__ and needs
+  none of it. clangd routing is now per-stratum .clangd fragments
+  (framework default = host DB; avrdx/samc override with their own
+  database), fully decoupled from CMake Tools' Active Folder, with
+  the repo-root .clangd suppressing the two clang-only diagnostics
+  -Werror would turn into editor errors on gcc-clean code.
 - **QK-style preemption (far horizon, probably not on AVR).** A
   preemptive non-blocking kernel (higher-priority AO preempts a
   lower one mid-dispatch, single stack, LIFO nesting) would be an
@@ -934,9 +969,11 @@ python3 tools/bench.py fuses A bootsize=128  # read/write fuses over UPDI (fuses
   Never a target per physical board. `family_probe` carries the matrix
   and is the first firmware for a new board.
 
-- Toolchain: self-built avr-gcc 16.2 at `/sw/avr`, pointed at directly
-  by absolute path in `cmake/toolchain-avr.cmake`; never a
-  system-packaged one. Never add `-mrelax` (PyAvrOCD refuses the ELF).
+- Toolchains: self-built avr-gcc 16.2 at `/sw/avr`
+  (`avrdx/cmake/toolchain-avr.cmake`) and arm-none-eabi-gcc 16.2 at
+  `/sw/arm-none-eabi` (`samc/cmake/toolchain-arm.cmake`), each pointed
+  at by absolute path; never a system-packaged one. Never add
+  `-mrelax` on AVR (PyAvrOCD refuses the ELF).
   No `-flto` (never added, so nothing to strip) and no `-DF_CPU` (never
   added either: the clock rate has one truth, `Clock::hz`; avr-libc's
   util/delay.h / setbaud.h do not compile here, on purpose - use

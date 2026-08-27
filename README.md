@@ -7,9 +7,10 @@ functions, nothing resolved at run time that the compiler could resolve
 first. Written in C++23 (gnu++23), header-only, in one flat namespace
 `brio` ("con brio" - the musical marking for liveliness).
 
-The kernel knows nothing about the silicon it runs on. Today it runs on
-**AVR DA/DB** (the bench target, an AVR128DB48); the design keeps the
-door open, by construction, to whatever comes next.
+The kernel knows nothing about the silicon it runs on. Today it runs
+on **AVR DA/DB** (an AVR128DB48 on the bench) and on **SAM C21**
+(Cortex-M0+, an ATSAMC21J18A) - the second architecture compiled the
+kernel and its services unchanged, which was the design's promise.
 
 ## What an application looks like
 
@@ -89,6 +90,7 @@ portability readable at a glance:
 | `kernel/` | queues, scheduler, FSM, delivery, time events, panic - pure logic | nothing of brio |
 | `util/` | services on top of the kernel: `SerialPort`, `BusMaster` (SPI/I2C arbiter), `print`, `Ring`, line parsers | `kernel/` |
 | `avrdx/` | everything that knows `avr/io.h`: clock, pins, UART, SPI, TWI, ticker, `AvrPlatform` | `kernel/`, `util/` |
+| `samc/` | everything that knows `sam.h` (Cortex-M0+): clock tree, pins, SERCOM UART, SysTick ticker, `SamPlatform` | `kernel/`, `util/` |
 | `host/` | `HostPlatform`: the native test "target" (virtual clock, recording idle/break) | `kernel/` |
 
 Targets are siblings, never meet in one binary, and are the only place
@@ -100,24 +102,25 @@ and generic code chooses with `if constexpr` or a concept.
 | Target | State | Notes |
 |--------|-------|-------|
 | AVR DA/DB (`avrdx/`) | on the bench | AVR128DB48, avr-gcc 16.2, see [docs/avrdx/README.md](docs/avrdx/README.md) |
-| host (`host/`) | in use | doctest suites, `ctest --preset host`, see [docs/host/README.md](docs/host/README.md) |
-| ATSAM C (Cortex-M0+) | decided, next | STM32G0x0/x1 also considered; SysTick timebases (1000 Hz): the reason the kernel tick is opaque |
+| SAM C21 (`samc/`) | on the bench, bring-up | ATSAMC21J18A, arm-none-eabi-gcc 16.2, SysTick tick at 1000 Hz (vs the AVR's 1024: the kernel tick's opacity, exercised for real), see [docs/samc/README.md](docs/samc/README.md) |
+| host (`host/`) | in use | doctest suites, `cd test && ctest --preset host`, see [docs/host/README.md](docs/host/README.md) |
 
 ## Building and testing
 
-The repo is a CMake project: the framework in `lib/brio/` (header-only,
-included directly), one `main()` per `src/apps/<app>.cpp` auto-discovered
-at configure time and turned into one executable target per (app x AVR128DB
-package) - an app may pin build options such as its console baud with
-`// build: monitor_speed = 115200` header lines - and host unit tests in
-`test/` (an independent CMake project, since a configure has exactly one
-compiler).
+The framework in `lib/brio/` is header-only, included directly. The
+builds are three sibling CMake projects, one per toolchain, all peers
+(the repo root is not a CMake project): `avrdx/` and `samc/` each
+auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
+- an app may pin build options such as its console baud with
+`// build: monitor_speed = 115200` header lines - and `test/` holds
+the host unit tests (a configure has exactly one compiler).
 
 ```bash
-ctest --preset host                                        # host tests: kernel, queues, FSM, time events, buses, ring...
-cmake --build --preset avr128db48-release --target <app>          # build one app for the target (release, -Os)
-cmake --build --preset avr128db48-release --target <app>-upload   # flash it (target-specific probe: see docs/<target>/)
-cmake --build --preset avr128db48-debug --target <app>             # debug build, then F5 (.vscode/launch.json)
+(cd test  && ctest --preset host)                                       # host tests: kernel, queues, FSM, time events, buses, ring...
+(cd avrdx && cmake --build --preset avr128db48-release --target <app>)  # build one AVR app (release, -Os)
+(cd avrdx && cmake --build --preset avr128db48-release --target <app>-upload)   # flash it over UPDI
+(cd samc  && cmake --build --preset samc21j-release --target <app>)     # build one SAM app
+(cd samc  && cmake --build --preset samc21j-release --target <app>-upload)      # flash it over SWD
 ```
 
 Everything target-specific - toolchain, board, probe, debugger, its
@@ -130,8 +133,11 @@ wiring lives in [docs/bench.md](docs/bench.md).
 
 Bench-tested on the AVR128DB48: kernel loop, time events, serial
 console over `SerialPort`, arbitrated SPI (display + touch on one bus)
-and I2C (DAC written and read back, ADC measured through SPI). Under
-continuous, deliberately radical revision: nothing below the kernel
-contract is considered done (see the governing rule in
+and I2C (DAC written and read back, ADC measured through SPI).
+Bench-tested on the ATSAMC21J18A: the same kernel and the same
+services, recompiled untouched - blink under time events and a full
+serial console at 115200, byte-exact on the wire. Under continuous,
+deliberately radical revision: nothing below the kernel contract is
+considered done (see the governing rule in
 [overview.md](docs/design/overview.md)). Clean-room with respect to
 QP: the concepts come from Samek's book, never the QP source.

@@ -9,12 +9,15 @@ only the map.
 
 ## Boards
 
-Two boards of the same model belong to the desk, indistinguishable by
-hardware (same chip, serial-less CH340): each carries its name in its
-USERROW ([avrdx/userrow.md](avrdx/userrow.md)) - **A = `brio-a`**, the
-DUT; **B = `brio-b`**, the instrument peer (and, since the flash
-suites, a DUT in its own right). Both are plugged in today. The suites
-print the label in their banner, so a console names its own board.
+Three boards belong to the desk: two AVR boards of the same model,
+indistinguishable by hardware (same chip, serial-less CH340), each
+carrying its name in its USERROW
+([avrdx/userrow.md](avrdx/userrow.md)) - **A = `brio-a`**, the DUT;
+**B = `brio-b`**, the instrument peer (and, since the flash suites, a
+DUT in its own right) - and the **SAM C21 board** (its own section
+below). The suites print the label in their banner, so a console
+names its own board; which consoles are actually plugged in is a
+per-session fact (the CH340 by-path names move with the USB socket).
 
 - MCU: AVR128DB48 (48-pin, 128 KB flash, 16 KB SRAM), silicon rev A5
   on both, see [avrdx/README.md](avrdx/README.md) for toolchain, probe
@@ -32,13 +35,39 @@ print the label in their banner, so a console names its own board.
   (no 32 kHz crystal, PF0/PF1 free).
 - Serial link: CH340 on **USART2 ALT1, PF4/PF5**, 460800 baud in the
   console apps.
-- Programmer/debugger: one Atmel-ICE per board over UPDI, AVR port,
-  6-pin ISP header (pin 2 VCC, 5 UPDI, 6 GND); A's probe is
-  `J42700051207`, B's `J42700049508` (re-verified by reading each
-  board's USERROW label through its own probe). The probe-to-board pairing is the
-  UPDI cable and the console-to-board pairing the USB socket, so both
-  are facts about the desk, not about the chips: `tools/bench_boards.py`
-  is the truth and the USERROW label in each banner is the cross-check.
+- Programmer/debugger: Atmel-ICE over UPDI, AVR port, 6-pin ISP
+  header (pin 2 VCC, 5 UPDI, 6 GND); A's probe is `J42700051207`.
+  The second ICE, `J42700049508`, has MOVED to the SAM board's SWD -
+  flashing board B needs it back on B's UPDI first (and
+  `tools/bench_boards.py` updated if the move becomes standing). The
+  probe-to-board pairing is the cable and the console-to-board
+  pairing the USB socket, so both are facts about the desk, not
+  about the chips: `tools/bench_boards.py` is the truth and the
+  USERROW label in each banner is the cross-check.
+
+## The SAM C21 board
+
+The user's own C21J rev 1.1 (custom KiCad board, not the Xplained
+Pro): ATSAMC21J18A, silicon rev F (DSU DID 0x11010500, read over
+SWD). No wires - everything the bring-up uses is on the board.
+
+- CPU on the internal OSC48M at 48 MHz; the 24 MHz crystal on
+  PA14/PA15 is present and deliberately unused (first consumer arms
+  it). Toolchain, upload and debug:
+  [samc/README.md](samc/README.md).
+- LED **PB23**, button **PB22** (unused so far).
+- Console: CH340 on **PB30/PB31 = SERCOM5 PAD0/PAD1** (function D),
+  115200 8N1. Like every CH340 here it has no USB serial number:
+  identify its `/dev/serial/by-path` entry by listening on the
+  candidates during an OpenOCD `reset run` and seeing which one
+  prints the boot banner.
+- Programmer/debugger: Atmel-ICE `J42700049508` on SWD (PA30/PA31) -
+  the ICE that used to sit on AVR board B's UPDI. Flashing needs the
+  cortex-debug session closed (the ICE is single-client).
+- Firmware today: the kernel console (banner
+  `SAMC21J18A brio console (clk=OSC48M, tick=SysTick)`, commands
+  HELP / LED ON|OFF|TOG / UPTIME / ERR), 1 Hz LED heartbeat until a
+  LED command takes over.
 
 ## Multi-board bench
 
