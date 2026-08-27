@@ -27,16 +27,17 @@ priority, MPSC stress with simulated producers, wrap-around deadlines.
 ## Running
 
 ```bash
-pio test -e native            # all suites
-pio test -e native -f test_fsm    # one suite
+ctest --preset host                 # all suites
+ctest --preset host -R test_fsm     # one suite
 ```
 
-- Framework: [doctest](https://github.com/doctest/doctest), one
-  `test/test_<subject>/main.cpp` per suite, each with
-  `DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN`.
-- `[env:native]` is defined in `platformio.ini`; the base `[env]` has
-  `test_ignore = *` so a bare `pio test` never touches the probe (AVR
-  envs just skip). `tools/pio_flags.py` and `tools/gen_lst.py` skip
-  the native env.
+- Framework: [doctest](https://github.com/doctest/doctest) (vendored,
+  `third_party/doctest/`), one `test/test_<subject>/main.cpp` per
+  suite, each with `DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN`.
+- `test/CMakeLists.txt` is an entirely separate CMake project from the
+  repo root's AVR build (its own `CMakePresets.json`, host g++, no
+  cross toolchain - a CMake configure has exactly one compiler), so
+  there is no AVR build to accidentally touch a probe from in the
+  first place.
 - No hardware needed; the host compiler must speak gnu++23 (the same
   standard as the target build - the code is identical).

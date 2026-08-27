@@ -1,5 +1,5 @@
 // Host tests for util/wire.hpp: big-endian word helpers, in particular
-// the sign extension of 24-bit ADC words. Run with: pio test -e native
+// the sign extension of 24-bit ADC words. Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

@@ -14,7 +14,7 @@
 // Console: USART2 ALT1 (PF4/PF5) 460800. Any key prints nothing new -
 // the loop is the interface.
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>

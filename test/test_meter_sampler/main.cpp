@@ -2,7 +2,7 @@
 // capture interrupt to the loop (freshness, overwrite counting), and the
 // sampler that paces PUBLICATION rather than capture - fresh values
 // published in pack order, stale ones silent, widths widened.
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

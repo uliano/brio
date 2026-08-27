@@ -48,7 +48,7 @@
 // Commands: ? for the menu, z = the single-board half, y = the two-board
 // half.
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -141,11 +141,6 @@ void verdict(const char* a, const char* b, bool ok) {
     if (ok) ++passed; else ++failed;
     print(serial, "  ", ok ? "PASS" : "FAIL", "  ", a, b, crlf);
 }
-bool near(int32_t a, int32_t b, int32_t tol) {
-    const int32_t d = a > b ? a - b : b - a;
-    return d <= tol;
-}
-
 // ---- the client half, serviced by polling (and by the vector in test i) ------
 
 volatile uint16_t cl_addr_hits = 0;
@@ -181,22 +176,22 @@ template <typename C>
 void service_client() {
     const auto s = C::isr();
     if (s.address_or_stop()) {
-        ++cl_ints;
+        cl_ints = cl_ints + 1;
         if (s.is_address()) {
-            ++cl_addr_hits;
+            cl_addr_hits = cl_addr_hits + 1;
             cl_dir_read = s.host_reading();
             cl_sent = 0;
             if (cl_read_address) cl_last_addr = C::last_address();
             C::respond(TwiAck::ack);
         } else {
-            ++cl_stops;
+            cl_stops = cl_stops + 1;
             C::complete();
         }
         return;
     }
     if (!s.data()) return;
-    ++cl_ints;
-    ++cl_data_events;
+    cl_ints = cl_ints + 1;
+    cl_data_events = cl_data_events + 1;
     if (s.host_reading()) {
         if (cl_sent != 0 && s.nack()) {
             cl_saw_nack = true;
@@ -204,14 +199,14 @@ void service_client() {
             return;
         }
         C::transmit(cl_fixed_tx ? cl_tx_seed : static_cast<uint8_t>(cl_tx_seed + cl_sent));
-        ++cl_sent;
+        cl_sent = cl_sent + 1;
         return;
     }
     const bool nack = cl_nack_after != 0xFF &&
                       static_cast<uint8_t>(cl_rx_n + 1) >= cl_nack_after;
     const uint8_t v = C::receive(nack ? TwiAck::nack : TwiAck::ack);
     if (cl_rx_n < 16) cl_rx[cl_rx_n] = v;
-    ++cl_rx_n;
+    cl_rx_n = cl_rx_n + 1;
 }
 
 /// MSTATUS as it stood on the pass that completed the last request -
@@ -922,7 +917,7 @@ void tf_smart() {
     for (uint32_t i = 0; i < 200'000u && st == 0; ++i) {
         const auto s = Client::isr();
         if (s.address_or_stop() && s.is_address()) {
-            ++cl_addr_hits;
+            cl_addr_hits = cl_addr_hits + 1;
             Client::respond(TwiAck::ack);
         }
         st = T::host_status() & (TWI_WIF_bm | TWI_RIF_bm);
@@ -1380,7 +1375,6 @@ uint8_t link_tx[twilink::max_payload + 4];
 uint8_t link_rx[twilink::response_bytes];
 twilink::Decoder link_dec;
 twilink::Frame link_ans{};
-uint16_t link_naks = 0;
 
 void wait_ms(uint16_t ms) { delay_us(clock, static_cast<uint32_t>(ms) * 1000u); }
 
@@ -2265,7 +2259,7 @@ ISR(USART2_RXC_vect) { (void)Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 
 ISR(TWI0_TWIM_vect) {
-    ++host_ints;
+    host_ints = host_ints + 1;
     if (!isr_mode) {
         // Never expected: the polled tests keep RIEN/WIEN down. Silence
         // the source rather than storm.
@@ -2283,7 +2277,7 @@ ISR(TWI0_TWIS_vect) { service_client<Client>(); }
 
 ISR(TCB0_INT_vect) {
     const uint16_t t = meter_mode == 0 ? SclFreq::period_ticks() : SclLow::width_ticks();
-    ++meter_caps;
+    meter_caps = meter_caps + 1;
     if (meter_caps <= 2) return;        // the arming capture is not traffic
     if (t < meter_min) meter_min = t;
     if (t > meter_max) meter_max = t;

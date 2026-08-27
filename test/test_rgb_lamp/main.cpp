@@ -1,6 +1,6 @@
 // Host tests for util/rgb_lamp.hpp + util/pwm_channel.hpp: the PwmChannel
 // concept, per-channel scaling (8-bit identity, on/off, 16-bit ceil).
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

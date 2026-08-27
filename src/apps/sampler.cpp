@@ -7,7 +7,7 @@
 // Wiring: PD6 (DAC0 OUT) -> PD1 (AIN1), the jumper of test_avr_analog.
 // Console @ 115200 on USART2 ALT1 (PF4/PF5). LED PF2.
 //
-// pio: monitor_speed = 115200
+// build: monitor_speed = 115200
 //
 // Commands:
 //   DAC <mv>              source voltage on PD6 (0..2047 mV, 2.048 V ref)

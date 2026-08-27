@@ -11,5 +11,6 @@ discipline"): the bench chip alone masks half the family - a missing
 port, instance, register or enum value only shows up on the package
 that lacks it. Each driver review adds its TU and its negatives here.
 
-PlatformIO ignores this directory (`pio test` only discovers `test_*`
-folders); these files are built only by the script.
+`test/CMakeLists.txt` ignores this directory (it only globs `test_*/
+main.cpp`, and this one is named `family`, not `test_family`); these
+files are built only by the script.

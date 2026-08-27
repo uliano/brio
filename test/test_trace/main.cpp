@@ -1,7 +1,7 @@
 // Host tests for util/trace.hpp: order, the overwrite-oldest ring, the
 // total-vs-held count, clear(), the dump format read back through a
 // capture sink, and the proof that the disabled trace costs NOTHING.
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

@@ -45,7 +45,7 @@
 // Commands: ? for the menu, z = the single-board half, y = the two-board
 // half.
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -1986,19 +1986,19 @@ ISR(SPI0_INT_vect) {
         isr_flags = S0::take_buffer();      // TXCIF/SSIF/BUFOVF written one
         const uint8_t d = S0::read();       // RXCIF follows the data
         if (isr_flags & SPI_RXCIF_bm) isr_data = d;
-        if (isr_idx < 12) { isr_bytes[isr_idx] = d; isr_flag_log[isr_idx] = isr_flags; ++isr_idx; }
+        if (isr_idx < 12) { isr_bytes[isr_idx] = d; isr_flag_log[isr_idx] = isr_flags; isr_idx = isr_idx + 1; }
     } else {
         const auto r = S0::take_normal();   // INTFLAGS then DATA: the clear sequence
         isr_flags = r.flags;
         isr_data = r.data;
     }
-    ++isr_count;
+    isr_count = isr_count + 1;
 }
 
 ISR(TCB0_INT_vect) {
     const uint16_t t = SckMeter::period_ticks();
     last_ticks = t;
-    ++captures;
+    captures = captures + 1;
     if (captures > 2 && t < min_ticks) min_ticks = t;
 }
 

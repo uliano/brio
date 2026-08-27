@@ -50,14 +50,15 @@ only** - firmware always goes in over UPDI.
 
 Three concerns, deliberately kept apart:
 
-1. **Build** - one PlatformIO env per app x board **TYPE**, generated
-   into `apps.ini` by `tools/gen_apps.py`. An app that must build for
-   more than the bench chip says so in its header:
-   `// pio: boards = db28,db32,db48`, and gets `[env:<app>-db28]` +
-   `[env:<app>-db28-debug]` per extra type (`db48` is the default and
-   stays the bare `[env:<app>]`; env names may only contain
-   `[A-Za-z0-9_-]`, hence the `-db28` suffix). Board files:
-   `boards/AVR128DB28.json`, `AVR128DB32.json`, `AVR128DB48.json`.
+1. **Build** - one CMake target per app x board **TYPE**, auto-discovered
+   from each app's own header comment at configure time
+   (`CMakeLists.txt`). An app that must build for more than the bench
+   chip says so directly: `// build: boards = db28,db32,db48` (`db48`
+   is the default when the line is absent). A configure targets exactly
+   one package (`AVR_MCU`, one value per configurePreset in
+   `CMakePresets.json`) - switching preset switches the board, and only
+   the apps whose allow-list includes it become targets. Package facts:
+   `cmake/avr-mcus.cmake`.
    Never an env per physical board. `family_probe` is the carrier of
    the matrix and the first firmware to flash onto a new board.
 2. **Identity** - `tools/bench_boards.py`, the bench **manifest**: a
@@ -82,13 +83,13 @@ the USERROW label in the suite banner is the cross-check that catches
 a miswired desk by eye.
 
 ```bash
-PY=~/.platformio/penv/bin/python        # pyserial lives in PlatformIO's venv
-$PY tools/bench.py list                 # devices, probes, manifest (console present?)
-$PY tools/bench.py flash A test_avr_pin # pio run -e <env> + avrdude over UPDI
-$PY tools/bench.py run A a              # drive the console, judge "ALL: N pass, M fail"
-$PY tools/bench.py console A            # print device path + speed (attach a monitor)
-$PY tools/bench.py duo A:a B:script.txt # instrument peer scripted, then the DUT
-$PY tools/bench.py fuses A              # read the fuses; name=value pairs write them
+# any python3 with pyserial installed (pip install --user pyserial)
+python3 tools/bench.py list                 # devices, probes, manifest (console present?)
+python3 tools/bench.py flash A test_avr_pin # cmake --build --target <app> + avrdude over UPDI
+python3 tools/bench.py run A a              # drive the console, judge "ALL: N pass, M fail"
+python3 tools/bench.py console A            # print device path + speed (attach a monitor)
+python3 tools/bench.py duo A:a B:script.txt # instrument peer scripted, then the DUT
+python3 tools/bench.py fuses A              # read the fuses; name=value pairs write them
 ```
 
 `run` exits nonzero on a timeout or a nonzero fail count, so a suite is
@@ -353,14 +354,13 @@ Two kinds of app share `src/apps/`: demos/steps (`traffic0`, `events0`,
 drivers they cover and must keep passing through every restructuring
 (they move to a per-target directory when there are enough of them).
 
-One `src/apps/<app>.cpp` = one `main()` = two envs (`<app>`,
-`<app>-debug`) on the default board, plus one such pair per extra board
-type it names (see "Multi-board bench" above), generated into
-`apps.ini` by `python tools/gen_apps.py`
-(VS Code task "PIO: regen apps", then reload the project). An app may
-carry `// pio: <option> = <value>` lines in its header comment (e.g.
-`// pio: monitor_speed = 115200`) - see "Per-app env options" in
-[avrdx/README.md](avrdx/README.md).
+One `src/apps/<app>.cpp` = one `main()` = one target on the default
+board (`db48`), plus that same target on every extra board type it
+names (see "Multi-board bench" above) - all of it auto-discovered by
+`CMakeLists.txt` at configure time, no generation step and no file to
+regenerate. An app may carry `// build: <option> = <value>` lines in
+its header comment (e.g. `// build: monitor_speed = 115200`) - see
+"Per-app build options" in [avrdx/README.md](avrdx/README.md).
 
 Shared code goes into `lib/brio/src/`; any header an app includes is
 compiled and linked by the LDF, no filter changes. What does NOT belong
@@ -373,7 +373,7 @@ stays honest because nothing under `lib/brio/src/` knows it exists.
 
 | App | What it does |
 |-----|--------------|
-| `family_probe` | The smallest firmware meant to run on EVERY package: PA7 toggling at ~2 Hz on the internal oscillator. Carrier of the board matrix (`// pio: boards = db28,db32,db48`) and the first thing flashed onto a new board - PA7 alive means chip, UPDI link and fuses are sane |
+| `family_probe` | The smallest firmware meant to run on EVERY package: PA7 toggling at ~2 Hz on the internal oscillator. Carrier of the board matrix (`// build: boards = db28,db32,db48`) and the first thing flashed onto a new board - PA7 alive means chip, UPDI link and fuses are sane |
 | `xtal_probe` | The crystal diagnosis probe, for a board whose 24 MHz crystal will not start: the main clock stays on OSCHF while XOSCHF is started and observed (MCLKSTATUS.EXTS) across every FRQRANGE (the range code also sets the oscillator's drive) x every CSUTHF start-up time, reporting spins-to-stable per combo on the console; `r` repeats, so it stays on the board through a repair session. A "never" everywhere means the fault is on the board, not in the start-up margins (board B's dead joint was found and fixed this way); a healthy crystal starts in tens-to-hundreds of spins in every combination |
 | `bus_mv` | The bench voltmeter, for a desk without a multimeter: board A measures its own VDD and VDDIO2 through the internal dividers against the 2.048 V reference (no wires), and two jumpers - PD1 (AIN1) and PD2 (AIN2) onto any two nodes - read those nodes in mV against VDD twice a second, alongside the digital state of the I2C taps (PA2/PA3/PC2/PC3). Poke the wires and watch: it found the pull-ups on a LED pin and two jumpers on the wrong pins in one session |
 | `blink` | The minimal kernel app: Blinker toggles PF2 on its periodic time event, Supervisor cycles the period (500/250/100 ms) every 3 s by posting a command - no delay loops, CPU in IDLE sleep between events |

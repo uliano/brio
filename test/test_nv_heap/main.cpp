@@ -9,7 +9,7 @@
 // swept across EVERY program unit of a mutation to prove the heap comes
 // back as either entirely the old thing or entirely the new one.
 //
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

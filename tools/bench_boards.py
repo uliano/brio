@@ -3,8 +3,10 @@
 #  bench_boards.py - THE BENCH MANIFEST: which physical board is which.
 #
 #  Three separate concerns, and this file is the middle one:
-#    1. BUILD      - a PlatformIO env per app x board TYPE (apps.ini, written
-#                    by tools/gen_apps.py). Never an env per physical board.
+#    1. BUILD      - a CMake target per app x board TYPE, auto-discovered
+#                    from each app's own "// build: boards = ..." header
+#                    comment (CMakeLists.txt). Never a target per physical
+#                    board.
 #    2. IDENTITY   - this file: the boards actually on the desk, each with its
 #                    board type, its console and its programmer.
 #    3. ORCHESTRATION - tools/bench.py, which reads this manifest, resolves an
@@ -58,9 +60,10 @@
 #  banner, which names the board by its USERROW id.
 # ============================================================================
 
-# The board types known to the build: keys of tools/gen_apps.py's BOARDS.
-# A board type other than db48 needs the app to carry a "// pio: boards" line,
-# otherwise there is no env to flash (bench.py says so).
+# The board types known to the build: keys of tools/bench.py's
+# BOARD_PRESET/MCU_OF_BOARD, mirroring cmake/avr-mcus.cmake. A board type
+# other than db48 needs the app to carry a "// build: boards" line, otherwise
+# there is no target to flash (bench.py says so).
 
 BOARDS = {
     "A": {
@@ -86,9 +89,10 @@ BOARDS = {
     },
 }
 
-# Console speed used when the app's env does not set monitor_speed.
+# Console speed used when the app does not set monitor_speed.
 DEFAULT_MONITOR_SPEED = 460800
 
-# The avrdude that talks to AVR-Dx over UPDI (the self-built 8.x; PlatformIO's
-# bundled 7.1 is too old). Same binary the upload_command in platformio.ini uses.
+# The avrdude that talks to AVR-Dx over UPDI (the self-built 8.x - any
+# system-packaged one is likely too old for AVR Dx). Same binary
+# CMakeLists.txt's avr_add_app() uses for the <app>-upload targets.
 AVRDUDE = "/sw/avr/bin/avrdude"

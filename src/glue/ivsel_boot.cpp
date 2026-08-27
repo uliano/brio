@@ -1,9 +1,9 @@
 // ============================================================================
 //  ivsel_boot.cpp - the interrupt vector table belongs at address 0.
 //
-//  THIS FILE IS COMPILED INTO EVERY IMAGE (platformio.ini's
-//  [common] base_src_filter adds src/glue/ to every env). It is not an
-//  app and it has no main(); it is one build invariant expressed as
+//  THIS FILE IS COMPILED INTO EVERY IMAGE (CMakeLists.txt's
+//  avr_add_app() lists it alongside every app's own source). It is not
+//  an app and it has no main(); it is one build invariant expressed as
 //  four instructions.
 //
 //  WHY IT EXISTS. The AVR DA/DB splits the Flash into a BOOT section and

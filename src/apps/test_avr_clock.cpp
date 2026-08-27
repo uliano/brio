@@ -50,7 +50,7 @@
 // (needs the TCD), the NMI form of the CFD interrupt (locks the
 // configuration until reset: run once, on purpose, not in a suite).
 
-// pio: monitor_speed = 9600
+// build: monitor_speed = 9600
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -347,7 +347,7 @@ ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect)    { Ticker::pit(); }
 ISR(CLKCTRL_CFD_vect) {
     cfd_source_seen = static_cast<uint8_t>(ClockFailure::cfd());   // clears the flag
-    if (cfd_hits != 0xFFFF) ++cfd_hits;
+    if (cfd_hits != 0xFFFF) cfd_hits = cfd_hits + 1;
 }
 
 int main() {

@@ -1,5 +1,5 @@
 // Host tests for kernel/time.hpp conversions: ceil semantics ("at least
-// this long") across tick rates. Run with: pio test -e native
+// this long") across tick rates. Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

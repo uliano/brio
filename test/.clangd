@@ -1,14 +1,8 @@
-# clangd config for the host tests (doctest, [env:native]).
-#
-# The project compilation database only has AVR entries, so clangd would
-# transfer an avr-g++ command onto these files. This fragment rewrites
-# it into the native one: the host g++ (same one PlatformIO's native env
-# uses via PATH), the AVR device macros and -mmcu stripped, doctest's
-# include dir added. Paths are relative to the compile command's
-# directory, which is the project root.
+# clangd config for the host tests: test/ is its OWN CMake project
+# (test/CMakeLists.txt), with its own compile_commands.json emitted at
+# ../build-cmake/host - point clangd straight at it instead of rewriting
+# AVR flags borrowed from the root database (the old approach, needed only
+# because there used to be one shared PlatformIO compilation database with
+# no native entries of its own).
 CompileFlags:
-  Compiler: /sw/gcc/bin/g++
-  Remove: [-mmcu=*, -D__AVR*, -DAVR128DB48, -fpermissive, -I/sw/avr*,
-           -fno-exceptions, -fno-rtti, -fno-threadsafe-statics,
-           -fno-use-cxa-atexit]
-  Add: [-I.pio/libdeps/native/doctest/doctest, -Itest]
+  CompilationDatabase: ../build-cmake/host

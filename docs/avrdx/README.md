@@ -18,84 +18,86 @@ and external chips: [../bench.md](../bench.md).
 ## Toolchain
 
 Self-built **avr-gcc 16.2** + avr-libc + avr-gdb 17.2 + avrdude 8.1
-(built by `/sw/src/build-avr.sh`), used in place via `symlink://`:
-
-    /sw/avr        (symlink to /sw/avr-16.2)
-
-A minimal `package.json` manifest inside the folder makes it usable as
-a PlatformIO `symlink://` package; the build script's finalize stage
-regenerates it on every rebuild (without it PlatformIO fails with
-`MissingPackageManifestError`). PlatformIO's bundled toolchain-atmelavr
-and avrdude 7.1 are NOT used: too old for AVR Dx.
+(built by `/sw/src/build-avr.sh`), pointed at directly by absolute path
+in `cmake/toolchain-avr.cmake` (`AVR_TOOLCHAIN_DIR`, default `/sw/avr`,
+a symlink to `/sw/avr-16.2`) - no package manifest or download step
+needed, unlike a build-tool-managed toolchain package.
 
 The toolchain ships the freestanding libstdc++ (type_traits, concepts,
 bit, span, optional, expected, variant - no chrono/charconv/iostream);
 brio uses it instead of hand-rolled traits.
 
-**`-std` gotcha.** The platform's `_bare.py` appends `-std=gnu++11`
-AFTER the flags added by `extra_scripts` `pre:` scripts, which would
-override the `-std=gnu++23` from `tools/pio_flags.py` (last `-std`
-wins). This is why `build_unflags` also lists `-std=gnu++11`. Symptom
-if it regresses: "'concept' only available with '-std=c++20'".
+`-std=gnu++23` is set once, explicitly, in `CMakeLists.txt`'s
+`avr_add_app()` - nothing else in this build adds a competing `-std`
+flag, so there is no "last one wins" hazard to guard against.
 
 ## Board and build
 
-- `boards/AVR128DB{28,32,48}.json`: custom bare-metal boards (128K
-  flash / 16K RAM each; the 48-pin one is the `[env]` default, the
-  others are selected by the app's `boards` line below).
-  Their `f_cpu` field is PlatformIO's manifest entry only: the
-  `-DF_CPU` it would produce is unflagged (see below), the clock rate is
-  `brio::Clock<...>::hz`.
-- `platformio.ini`: `platform =` the felias-fogg fork of
-  atmelmegaavr (a plain mirror of upstream today, where PyAvrOCD's
-  integration will land); toolchain via `symlink://`; Atmel-ICE
-  upload; `debug_tool = custom` wiring (below).
-- `tools/gen_apps.py`: scans `src/apps/*.cpp` into `apps.ini`, two envs
-  per app and board type (`<app>` release, `<app>-debug`); see
-  "Per-app env options" below for what an app can add to its own envs.
-- `tools/pio_flags.py`: per-language AVR flags, build-type aware:
-  `-Os -g` only on release builds, `-std=gnu++23`, plus the -mmcu
-  macro delta made explicit (asks avr-gcc for its predefines with and
-  without `-mmcu` and appends the `__AVR*` difference as `-D`s - same
-  values the real compile already implies). Skips `[env:native]`.
-- Editor: clangd over the compilation database. `pio run -e <app> -t
-  compiledb` writes `compile_commands.json` in the project root (any
-  app env will do - they share the flags; regenerate after a toolchain
-  or flag change); `.vscode/settings.json` enables clangd with
-  `--query-driver` pointed at the cross compiler, which supplies the
-  include search path and the `avr` target, while the `-D` delta above
-  supplies the device macros clang does not define (`__AVR_DEVICE_
-  NAME__` drives avr-libc's computed `<avr/io.h>`). `test/.clangd`
-  rewrites the inferred command for the host tests (host g++, doctest,
-  AVR flags stripped). cpptools' own engine is disabled in the same
-  file: its clang-based parser (1.33+) runs in an x86-64 model against
-  the full gcc macro set, and the AVR-configured libstdc++ then
+- `cmake/avr-mcus.cmake`: package -> avr-gcc mcu name table (128K
+  flash / 16K RAM each; `avr128db48` is the default board when an app
+  names none, the others are selected by the app's `boards` line
+  below). No `-DF_CPU` is ever produced - the clock rate is
+  `brio::Clock<...>::hz`, see below.
+- `CMakePresets.json`: one configure + build preset pair per AVR128DB
+  package x {release, debug} (`avr128db48-release`, `avr128db48-debug`,
+  `avr128db28-release`, ...); each points `AVR_MCU` and the toolchain
+  file (`cmake/toolchain-avr.cmake`) at that package. Atmel-ICE upload
+  is a per-app `<app>-upload` target (`CMakeLists.txt`); debug wiring
+  is `.vscode/launch.json` (below).
+- App discovery (`CMakeLists.txt`): every `src/apps/*.cpp` with a
+  `main()` becomes an executable target, auto-discovered at configure
+  time (`file(GLOB ... CONFIGURE_DEPENDS ...)` - a new or removed app
+  is picked up on the next configure, no generation step); see
+  "Per-app build options" below for what an app can add to its own
+  header comment.
+- `CMakeLists.txt`'s `avr_add_app()`: per-language AVR flags,
+  build-type aware (`-Os -g` only on the Release config, `-std=gnu++23`
+  plus `-fno-exceptions -fno-rtti -fno-threadsafe-statics
+  -fno-use-cxa-atexit`), plus the -mmcu macro delta made explicit
+  (`avr_predefines()`: asks avr-gcc for its predefines with and without
+  `-mmcu` and appends the `__AVR*` difference as `-D`s - same values
+  the real compile already implies). The host project under `test/` is
+  an entirely separate CMake project (its own `CMakeLists.txt`/
+  `CMakePresets.json`, host g++, no cross toolchain - a CMake configure
+  has exactly one compiler).
+- Editor: clangd over each CMake project's own compile_commands.json
+  (`CMAKE_EXPORT_COMPILE_COMMANDS`, regenerated automatically on every
+  configure - no manual step); `.vscode/settings.json` enables clangd
+  with `--query-driver` pointed at the cross compiler, which supplies
+  the include search path and the `avr` target, while the `-D` delta
+  above supplies the device macros clang does not define
+  (`__AVR_DEVICE_NAME__` drives avr-libc's computed `<avr/io.h>`).
+  `test/.clangd` points straight at the host project's own database
+  instead of the root AVR one. cpptools' own engine is disabled in the
+  same file: its clang-based parser (1.33+) runs in an x86-64 model
+  against the full gcc macro set, and the AVR-configured libstdc++ then
   demands gcc-only types (`__int24`, `_Float32`) it cannot have -
   structurally unparsable, no define feed can fix it.
-- `tools/gen_lst.py`: post-build source-interleaved disassembly
-  `firmware.lst` + `firmware.map` in `.pio/build/<env>/`.
-- **`src/glue/`: compiled into every image**, through
-  `[common] base_src_filter = -<*> +<src/glue/>` which every generated
-  env re-uses (`[env:native]` overrides it - the files are AVR startup
-  code). It holds build invariants that must hold before any app code
-  runs and that no app may be trusted to remember. Today that is one
-  file, `ivsel_boot.cpp`: a four-instruction `.init3` fragment that
-  sets `CPUINT.CTRLA.IVSEL` under CCP, so the interrupt vector table is
+- `avr_add_app()`'s post-build step: source-interleaved disassembly
+  `<app>.lst`, the linker map `firmware-<app>.map` and `<app>.hex`, all
+  written directly into that target's own build dir
+  (`build-cmake/<preset>/`).
+- **`src/glue/ivsel_boot.cpp`: compiled into every image** (every
+  `avr_add_app()` call lists it alongside the app's own source - see
+  `CMakeLists.txt`). It holds build invariants that must hold before
+  any app code runs and that no app may be trusted to remember. Today
+  that is one file: a four-instruction `.init3` fragment that sets
+  `CPUINT.CTRLA.IVSEL` under CCP, so the interrupt vector table is
   looked for at address 0. Without it, any image on a chip whose
   `BOOTSIZE` fuse is not 0 jumps into erased Flash on its first
   interrupt - a reset loop, not a crash. Setting it is correct under
   every geometry, because the BOOT section always starts at 0. Details
   and the run-time twin: [nvm.md](nvm.md).
-- **FLMAPLOCK is set in every image.** gcc 16 places `.rodata` in a
-  32 KB Flash section reached through the data-space window and emits
-  a write of `NVMCTRL.CTRLB.FLMAP` in `.init`; the linker script ORs
-  the lock bit into that write when the symbol `__flmap_lock` is
-  non-zero, and `tools/pio_flags.py` appends
-  `-Wl,--defsym,__flmap_lock=1` to every AVR link. brio's Flash verbs
-  never use the window (ELPM/SPM with a 24-bit address only), so the
-  window is a mode nothing uses - and a mode nothing uses can only
-  change by accident. An app that must exercise the field opts out
-  with `// pio: custom_flmap_lock = 0` in its header.
+- **FLMAPLOCK is set in every image, by default.** gcc 16 places
+  `.rodata` in a 32 KB Flash section reached through the data-space
+  window and emits a write of `NVMCTRL.CTRLB.FLMAP` in `.init`; the
+  linker script ORs the lock bit into that write when the symbol
+  `__flmap_lock` is non-zero, and `avr_add_app()` appends
+  `-Wl,--defsym,__flmap_lock=<value>` (default 1) to every AVR link.
+  brio's Flash verbs never use the window (ELPM/SPM with a 24-bit
+  address only), so the window is a mode nothing uses - and a mode
+  nothing uses can only change by accident. An app that must exercise
+  the field opts out with `// build: flmap_lock = 0` in its header.
 - **Fuses are provisioning, not build output.** The CPU can read them
   and nothing more; only the programmer writes them, so they are a
   property of the chip on the desk and live behind
@@ -104,12 +106,13 @@ if it regresses: "'concept' only available with '-std=c++20'".
   matters to the build is `BOOTSIZE`: with its shipping default of 0
   the whole Flash is one BOOT section and no software can write any
   Flash at all.
-- Release and debug flags are fully separated: `debug_build_flags =
-  -Og -g3 -ggdb3 -fno-inline` applies only to `build_type = debug`,
-  i.e. the generated `[env:<app>-debug]` envs. The one global
-  concession is `build_unflags = -flto -fuse-linker-plugin`: LTO makes
-  the DWARF problem below worse and buys nothing at this firmware
-  size (and yields an unreadable `.lst`).
+- Release and debug flags are fully separated in `avr_add_app()`
+  (`$<$<CONFIG:Release>:-Os -g>` / `$<$<CONFIG:Debug>:-Og -g3 -ggdb3
+  -fno-inline>` generator expressions - each configurePreset picks one
+  `CMAKE_BUILD_TYPE`, so the two profiles never mix). LTO is never
+  added in the first place (no flag to unflag): it makes the DWARF
+  problem below worse and buys nothing at this firmware size (and
+  yields an unreadable `.lst`).
 - Do NOT add `-mrelax`: PyAvrOCD refuses ELF files built with it
   (distorted line-number info).
 - **Family compile check**: `tools/check_family.sh` compiles every
@@ -120,36 +123,36 @@ if it regresses: "'concept' only available with '-std=c++20'".
   done - the bench chip alone masks missing ports, instances,
   registers and enum values of the other packages.
 
-## Per-app env options: `// pio:` header lines
+## Per-app build options: `// build:` header lines
 
-`apps.ini` is generated, so an app cannot be edited into it by hand;
-instead an app declares the `[env:]` options it needs as comment lines
-in its own header:
+There is no generated file to hand-edit: `CMakeLists.txt` scans every
+`src/apps/<app>.cpp` itself at configure time for comment lines of the
+shape
 
-    // pio: monitor_speed = 115200
-    // pio: monitor_filters = time
+    // build: monitor_speed = 115200
 
-`python tools/gen_apps.py` copies every `// pio: <option> = <value>`
-line verbatim into BOTH of that app's envs (`<app>`, `<app>-debug`), so
-an app-specific fact - a console at a different baud, an extra
-`build_flags = -DFOO`, an `upload_speed` - lives next to the code it
-belongs to and travels with it. Rules: one line per option (no
-multi-line values), any option PlatformIO accepts in an env (it is not
-validated here - PlatformIO complains about unknown ones), later lines
-of the same option follow INI semantics (last wins). Rerun gen_apps
-after adding, removing or changing such a line, then reload the
-project (VS Code task "PIO: regen apps").
+Any key other than `boards` (below) and `flmap_lock` (see FLMAPLOCK
+above) is collected as metadata and written into
+`build-cmake/apps_manifest.json` at every configure - `tools/bench.py`
+reads it instead of a build-tool manifest, e.g. to pick a console's
+`monitor_speed` (a console fact, not a compiler flag: nothing in
+`CMakeLists.txt` interprets it beyond passing it through). Rules: one
+line per key, any key name (unrecognized ones just become manifest
+metadata nothing currently reads - there is no validation to complain
+about an unknown one). No regeneration step: adding, removing or
+editing such a line takes effect on the next configure (CMake Tools
+reconfigures automatically on save; `cmake --preset ...` by hand
+otherwise).
 
-Then `pio device monitor -e <app>` uses that app's speed (e.g.
-115200 for an app that must keep talking down to 2 MHz).
-
-One key is RESERVED and consumed by the generator instead of being
-copied: `// pio: boards = db28,db32,db48` declares the board TYPES the
-app is built for, and yields one more env pair per type beyond the
-default 48-pin board, named `[env:<app>-db28]` / `[env:<app>-db28-debug]`
-(PlatformIO env names accept only `[A-Za-z0-9_-]`). An env is a build,
-never a physical board: the boards on the desk live in the bench
-manifest, see [../bench.md](../bench.md).
+One key is RESERVED and consumed directly instead of being passed
+through: `// build: boards = db28,db32,db48` declares the board TYPES
+the app is built for (default, if absent: `db48` only). A CMake
+configure targets exactly one package (`AVR_MCU`, one value per
+configurePreset) - the app becomes a target only when the currently
+configured package is in its list, so switching configurePreset in the
+CMake Tools status bar switches which apps show up in the Target
+dropdown. A target is a build, never a physical board: the boards on
+the desk live in the bench manifest, see [../bench.md](../bench.md).
 
 ## Clock, delay and timebase
 
@@ -188,16 +191,14 @@ can_baud(hz, baud)` tells whether a rate can still hit a baud (BAUD >=
 64, i.e. CLK_PER >= 16 x baud). Bench-verified: 24 -> 12 -> 2 MHz
 under a running 115200 console, 1 MHz refused as expected.
 
-`F_CPU` is NOT defined in this project: `platformio.ini` unflags the
-`-DF_CPU` PlatformIO would pass from the board manifest (by name -
-`build_unflags = -DF_CPU`; the platform keeps it as the pair
-`("F_CPU", "$BOARD_F_CPU")`, a valued form would not match). The rate
-has one truth, `Clock::hz`; avr-libc's `util/delay.h` and
+`F_CPU` is NOT defined in this project: nothing in `CMakeLists.txt`
+ever adds a `-DF_CPU`, since flags here are built up from scratch
+rather than inherited from a framework default that would produce one.
+The rate has one truth, `Clock::hz`; avr-libc's `util/delay.h` and
 `util/setbaud.h`, which need `F_CPU`, therefore do not compile - on
 purpose: nothing may assume a rate the clock type does not state. (In
 a build that still defines `F_CPU`, `Clock` static_asserts it equal to
-`hz`.) The board JSON's `f_cpu` field is only PlatformIO's manifest
-entry. The bench board: **24 MHz crystal on PA0/PA1** (PA0/PA1
+`hz`.) The bench board: **24 MHz crystal on PA0/PA1** (PA0/PA1
 therefore not GPIO), `Clock<ClockSource::crystal, 24'000'000>`.
 
 `brio::delay_us(clock, us)` (`avrdx/delay.hpp`) busy-waits AT LEAST
@@ -232,7 +233,11 @@ handler bodies (`rxc()`, `dre()`, `pit()`), the app binds the vector.
 
 ## Upload (Atmel-ICE, UPDI)
 
-`pio run -e <app> -t upload` drives avrdude 8.1 through the Atmel-ICE.
+`cmake --build --preset <pkg>-release --target <app>-upload` drives
+avrdude 8.1 through the Atmel-ICE (`avr_add_app()` in `CMakeLists.txt`;
+`-P usb:<serial>` disambiguates when more than one Atmel-ICE is
+attached, see `AVR_PROBE_SERIAL`). `tools/bench.py flash <board> <app>`
+does the same, resolved against the bench manifest.
 
 - Plug the cable into the Atmel-ICE **AVR** port, NOT the SAM port.
   The SAM port fails silently: avrdude still sees the ICE on USB, but
@@ -246,10 +251,15 @@ handler bodies (`rxc()`, `dre()`, `pit()`), the app binds the vector.
 ## Debugging (PyAvrOCD + Atmel-ICE)
 
 Debug sessions use [PyAvrOCD](https://pyavrocd.io) as GDB server with
-the toolchain's avr-gdb 17.2. Always debug the `<app>-debug` env
-(the plain env is the pure `-Os` release build): from the IDE (Run and
-Debug with the `<app>-debug` project env selected) or with
-`pio debug -e <app>-debug`.
+the toolchain's avr-gdb 17.2, driven by VS Code's generic `cppdbg`
+debug adapter (ms-vscode.cpptools) - not a target-specific debug
+extension: PyAvrOCD speaks the standard GDB remote protocol, so any
+GDB-driving frontend works. Always debug a `*-debug` build (the
+release configs are the pure `-Os` build): build the preset
+(`cmake --build --preset avr128db48-debug --target <app>`), pick
+`<app>` as CMake Tools' launch target, then F5 (`.vscode/launch.json`'s
+one generic entry, using `${command:cmake.launchTargetPath}` to follow
+whichever target is selected).
 
 ### One-time host setup
 
@@ -268,30 +278,37 @@ sudo cp 99-edbg-debuggers.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 ```
 
-### Wiring in platformio.ini
+### Wiring in .vscode/launch.json
 
-The atmelmegaavr fork does not integrate PyAvrOCD natively yet, so it
-is wired as a custom debug tool:
+PyAvrOCD is launched by cppdbg itself (`debugServerPath` +
+`debugServerArgs`), no separate step needed:
 
-```ini
-debug_tool = custom
-debug_port = :40044
-debug_server =
-    /home/<user>/.local/bin/pyavrocd
-    --breakpoints hardware   ; hardware breakpoints only (see below)
-    -s nop                   ; no GUI
-    -p 40044                 ; GDB server port
-    -m all                   ; let PyAvrOCD manage the relevant fuses
-    -d avr128db48            ; MCU (pyavrocd -d '?' lists them)
-    -i updi
-    -t atmelice              ; only needed with several probes attached
-    -F 24000000              ; F_CPU in Hz
-    -P 2000                  ; UPDI programming clock in kHz
+```jsonc
+{
+    "type": "cppdbg",
+    "request": "launch",
+    "program": "${command:cmake.launchTargetPath}",
+    "svdPath": "${workspaceFolder}/svd/avr128db48.svd",
+    "miMode": "gdb",
+    "miDebuggerPath": "/sw/avr/bin/avr-gdb",
+    "debugServerPath": "/home/<user>/.local/bin/pyavrocd",
+    "debugServerArgs": "--breakpoints hardware -s nop -p 40044 -m all -d avr128db48 -i updi -t atmelice -u <probe serial> -F 24000000 -P 2000",
+    "serverStarted": "Listening on port",
+    "miDebuggerServerAddress": "localhost:40044",
+    "setupCommands": [{ "text": "monitor reset" }]
+}
 ```
 
-(one argument per line in the real file) plus the `debug_init_cmds`
-block in `platformio.ini`. Once the fork gains native support this
-collapses to `debug_tool = pyavrocd`.
+(the flags mean the same as before: hardware breakpoints only, no GUI,
+GDB server port, let PyAvrOCD manage the relevant fuses, MCU -
+`pyavrocd -d '?'` lists them, UPDI, `-t`/`-u` needed with more than one
+probe attached, UPDI programming clock in kHz). `-F` (below) stays
+inert for a UPDI target either way. `svdPath` is read directly by the
+mcu-debug Peripheral Viewer extension from the active session's launch
+config (its `svdPathConfig` setting defaults to trying `svdPath` then
+`svdFile`, confirmed in the extension's own `package.json`) - the same
+mechanism Cortex-Debug's `svdFile` used to provide before it moved SVD
+support out to this same extension.
 
 `-F` and the CPU clock: for a UPDI target `-F` is inert. PyAvrOCD uses
 it only to derive the default JTAG debug clock (megaAVR JTAG sessions)
@@ -325,13 +342,9 @@ GCC 16.x (verified 16.1 and 16.2) emits a DWARF5 line table with a
 duplicate file entry for the main source and file switches around
 inlined code; avr-gdb 17.2 and host gdb 15.1 then silently drop part
 of it: at any -O level above 0, file:line breakpoints fail with "No
-compiled code for line N" while function breakpoints work. Fixed by
-two `platformio.ini` lines:
-
-```ini
-build_unflags     = -flto -fuse-linker-plugin
-debug_build_flags = -Og -g3 -ggdb3 -fno-inline
-```
+compiled code for line N" while function breakpoints work. Fixed in
+`avr_add_app()` (`CMakeLists.txt`): LTO is never added (see "Board and
+build" above) and the Debug config is `-Og -g3 -ggdb3 -fno-inline`.
 
 `-fno-inline` removes the mid-function file switches (always_inline
 code such as `_delay_ms` stays inlined and keeps its timing); dropping
@@ -345,11 +358,11 @@ avr-gcc/avr-gdb rebuild; candidate for an upstream bug report
 ### Peripheral registers (SVD and monitor commands)
 
 Microchip ships no SVD for AVR; PyAvrOCD generates them from the
-ATDFs. `svd/avr128db48.svd` is committed and wired with
-`debug_svd_path = svd/avr128db48.svd`, which enables the PERIPHERALS
-panel in VS Code (values read while stopped; the panel refresh can be
-flaky - CLion renders the same SVD better). The server side is always
-reliable from the Debug Console:
+ATDFs. `svd/avr128db48.svd` is committed and wired via `svdPath` in
+`.vscode/launch.json` (above), which the mcu-debug Peripheral Viewer
+extension reads to populate its PERIPHERALS panel (values read while
+stopped; the panel refresh can be flaky - CLion renders the same SVD
+better). The server side is always reliable from the Debug Console:
 
 ```
 monitor info
@@ -361,6 +374,7 @@ info registers                        # CPU: r0-r31, SREG, SP, PC
 p/x PORTA                             # via avr/io.h macros (needs -g3)
 ```
 
-With the probe-rs VS Code extension enabled, every stop/continue spams
-"unknown custom event" in the Debug Console (it eavesdrops on
-PlatformIO's DAP events). Harmless; disable probe-rs per-workspace.
+With the probe-rs VS Code extension enabled, every stop/continue may
+spam "unknown custom event" in the Debug Console (it eavesdrops on DAP
+custom events regardless of debug adapter type). Harmless; disable
+probe-rs per-workspace if it does.

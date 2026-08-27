@@ -2,20 +2,24 @@
 # ============================================================================
 #  bench.py - the multi-board bench ORCHESTRATOR: build, flash, drive.
 #
-#  RUN IT WITH PLATFORMIO'S PYTHON (it is the interpreter that has pyserial and
-#  the `pio` command next to it):
+#  Run with any Python 3 that has pyserial installed (pip install --user
+#  pyserial):
 #
-#      ~/.platformio/penv/bin/python tools/bench.py list
-#      ~/.platformio/penv/bin/python tools/bench.py flash A test_avr_pin
-#      ~/.platformio/penv/bin/python tools/bench.py run A a
-#      ~/.platformio/penv/bin/python tools/bench.py console A
-#      ~/.platformio/penv/bin/python tools/bench.py duo A:a B:scripts/peer.txt
-#      ~/.platformio/penv/bin/python tools/bench.py fuses A
-#      ~/.platformio/penv/bin/python tools/bench.py fuses A bootsize=128 codesize=0
+#      python3 tools/bench.py list
+#      python3 tools/bench.py flash A test_avr_pin
+#      python3 tools/bench.py run A a
+#      python3 tools/bench.py console A
+#      python3 tools/bench.py duo A:a B:scripts/peer.txt
+#      python3 tools/bench.py fuses A
+#      python3 tools/bench.py fuses A bootsize=128 codesize=0
 #
 #  Three concerns, kept apart on purpose:
-#    1. BUILD   - one PlatformIO env per app x board TYPE (apps.ini, generated
-#                 by tools/gen_apps.py). Never an env per physical board.
+#    1. BUILD   - one CMake target per app x board TYPE, auto-discovered from
+#                 each app's own "// build: boards = ..." header comment
+#                 (CMakeLists.txt); a configure also (re)writes
+#                 build-cmake/apps_manifest.json, which this file reads
+#                 instead of parsing apps.ini/platformio.ini (both gone).
+#                 Never a target per physical board.
 #    2. IDENTITY- tools/bench_boards.py, the bench manifest: which board sits
 #                 where, on which console, behind which programmer.
 #    3. THIS    - resolves 1 against 2 and drives the hardware.
@@ -29,7 +33,6 @@
 #  `duo` is that shape; with one board on the desk it cannot yet be exercised.
 # ============================================================================
 import argparse
-import configparser
 import json
 import os
 import re
@@ -42,13 +45,18 @@ ROOT = os.path.dirname(TOOLS)
 sys.path.insert(0, TOOLS)
 
 import bench_boards as manifest          # noqa: E402
-from gen_apps import BOARDS, env_name    # noqa: E402
 
 try:
     import serial                        # pyserial
 except ImportError:
-    sys.exit("bench: pyserial is missing - run this with "
-             "~/.platformio/penv/bin/python tools/bench.py ...")
+    sys.exit("bench: pyserial is missing - run this with a Python 3 that has "
+             "it installed (pip install --user pyserial)")
+
+# Package -> (release configurePreset, avr-gcc mcu name), mirroring
+# cmake/avr-mcus.cmake by hand - keep both in sync.
+BOARD_PRESET = {"db28": "avr128db28-release", "db32": "avr128db32-release",
+                "db48": "avr128db48-release"}
+MCU_OF_BOARD = {"db28": "avr128db28", "db32": "avr128db32", "db48": "avr128db48"}
 
 PROMPT = "> "
 DEFAULT_TIMEOUT = 60.0
@@ -71,60 +79,44 @@ def board_entry(name):
     return entry
 
 
-def apps_config():
-    cfg = configparser.RawConfigParser()
-    read = cfg.read([os.path.join(ROOT, "apps.ini")])
-    if not read:
-        die("apps.ini not found - run python tools/gen_apps.py")
-    return cfg
+def apps_manifest():
+    """The app roster CMake discovered at its last configure - written fresh
+    by any one `cmake --preset ...` regardless of which package it targets
+    (the scan is of source comments, not of what that configure happens to
+    build). {app: {"boards": [...], "monitor_speed": int|None,
+    "flmap_lock": 0|1}}."""
+    path = os.path.join(ROOT, "build-cmake", "apps_manifest.json")
+    if not os.path.isfile(path):
+        die("build-cmake/apps_manifest.json not found - run a cmake configure "
+            "first, e.g. `cmake --preset avr128db48-release`")
+    with open(path, encoding="ascii") as f:
+        return json.load(f)["apps"]
 
 
-def resolve_env(name, app):
-    """(env, board type) for an app on a physical board; a clear error if the
-    app was never built for that board type (no '// pio: boards' line)."""
+def resolve_app(name, app):
+    """(app info, board type) for an app on a physical board; a clear error
+    if the app was never built for that board type (no
+    '// build: boards' line naming it)."""
     entry = board_entry(name)
     btype = entry["board"]
-    if btype not in BOARDS:
+    if btype not in MCU_OF_BOARD:
         die("board '%s' has an unknown board type '%s' (known: %s)"
-            % (name, btype, ", ".join(sorted(BOARDS))))
-    env = env_name(app, btype)
-    cfg = apps_config()
-    if not cfg.has_section("env:" + env):
+            % (name, btype, ", ".join(sorted(MCU_OF_BOARD))))
+    apps = apps_manifest()
+    if app not in apps:
+        die("no app '%s' under src/apps/ (known to the last cmake configure)" % app)
+    info = apps[app]
+    if btype not in info["boards"]:
         hint = ("" if btype == "db48" else
-                " - add a '// pio: boards = %s' line to src/apps/%s.cpp "
-                "and re-run tools/gen_apps.py" % (btype, app))
-        die("no env '%s' for app '%s' on board '%s' (type %s)%s"
-            % (env, app, name, btype, hint))
-    return env, btype
+                " - add a '// build: boards = %s' line to src/apps/%s.cpp "
+                "and reconfigure" % (btype, app))
+        die("app '%s' is not built for board '%s' (type %s)%s"
+            % (app, name, btype, hint))
+    return info, btype
 
 
-def env_option(env, option, default=None):
-    cfg = apps_config()
-    section = "env:" + env
-    if cfg.has_option(section, option):
-        return cfg.get(section, option)
-    return default
-
-
-def env_board_json(env):
-    """The board JSON of an env: its own 'board' line, else [env] in
-    platformio.ini (the default board of the whole project)."""
-    board = env_option(env, "board")
-    if board is None:
-        pio = configparser.RawConfigParser()
-        pio.read([os.path.join(ROOT, "platformio.ini")])
-        board = pio.get("env", "board", fallback=None)
-    if board is None:
-        die("cannot tell which board env '%s' builds for" % env)
-    path = os.path.join(ROOT, "boards", board + ".json")
-    if not os.path.isfile(path):
-        die("board file %s not found" % path)
-    with open(path, encoding="ascii") as f:
-        return json.load(f)
-
-
-def env_speed(env):
-    return int(env_option(env, "monitor_speed", manifest.DEFAULT_MONITOR_SPEED))
+def env_speed(info):
+    return int(info.get("monitor_speed") or manifest.DEFAULT_MONITOR_SPEED)
 
 
 # Which app was last flashed onto which board: written by `flash`, read by the
@@ -132,7 +124,7 @@ def env_speed(env):
 # being told again. It is a convenience cache, not identity - --app overrides
 # it, and a board never flashed by this tool falls back to the manifest's
 # DEFAULT_MONITOR_SPEED.
-STATE = os.path.join(ROOT, ".pio", "bench_last.json")
+STATE = os.path.join(ROOT, "build-cmake", "bench_last.json")
 
 
 def state_read():
@@ -160,8 +152,8 @@ def speed_for(name, app):
     app = app or state_read().get(name)
     if not app:
         return manifest.DEFAULT_MONITOR_SPEED
-    env, _ = resolve_env(name, app)
-    return env_speed(env)
+    info, _ = resolve_app(name, app)
+    return env_speed(info)
 
 
 def console_path(name):
@@ -252,11 +244,6 @@ def cmd_list(args):
 #  flash
 # ---------------------------------------------------------------------------
 
-def pio_exe():
-    exe = os.path.join(os.path.dirname(sys.executable), "pio")
-    return exe if os.path.isfile(exe) else "pio"
-
-
 def avrdude_args(prog, mcu, hexfile, chip_erase=False):
     # THREE ERASE REGIMES, and only two of them are reachable from here.
     # MEASURED on this bench (AVR128DB48 over UPDI, avrdude 8.1), because the
@@ -287,13 +274,20 @@ def avrdude_args(prog, mcu, hexfile, chip_erase=False):
 
 
 def cmd_flash(args):
-    env, _ = resolve_env(args.name, args.app)
-    print("bench: board %s -> env %s" % (args.name, env))
-    rc = subprocess.call([pio_exe(), "run", "-e", env], cwd=ROOT)
+    info, btype = resolve_app(args.name, args.app)
+    preset = BOARD_PRESET[btype]
+    print("bench: board %s -> preset %s, target %s" % (args.name, preset, args.app))
+    # Cheap (a fresh manifest too, in case an app's "// build:" lines or the
+    # app roster itself changed since the last configure).
+    rc = subprocess.call(["cmake", "--preset", preset], cwd=ROOT)
     if rc != 0:
         return rc
-    mcu = env_board_json(env)["build"]["mcu"]
-    hexfile = os.path.join(".pio", "build", env, "firmware.hex")
+    rc = subprocess.call(["cmake", "--build", "--preset", preset,
+                          "--target", args.app], cwd=ROOT)
+    if rc != 0:
+        return rc
+    mcu = MCU_OF_BOARD[btype]
+    hexfile = os.path.join("build-cmake", preset, args.app + ".hex")
     if not os.path.isfile(os.path.join(ROOT, hexfile)):
         die("no %s after the build" % hexfile)
     nvheap_preflight(board_entry(args.name)["programmer"], mcu, hexfile,
@@ -417,7 +411,7 @@ def hex_pages(path):
 
 def read_flash(prog, mcu):
     """The whole flash of the chip, or None if it cannot be read."""
-    out = os.path.join(ROOT, ".pio", "bench_flash.bin")
+    out = os.path.join(ROOT, "build-cmake", "bench_flash.bin")
     try:
         os.makedirs(os.path.dirname(out), exist_ok=True)
         argv = avrdude_base(prog, mcu) + ["-q", "-q",
@@ -525,16 +519,12 @@ def fuse_read(prog, mcu, names):
 def cmd_fuses(args):
     entry = board_entry(args.name)
     prog = entry["programmer"]
-    # The MCU of the board TYPE: fuses are the chip's, so the board JSON of
-    # any env for that type answers it. env_board_json wants an env, and
-    # every board type has at least family_probe; take the type's board file
-    # directly instead.
-    board = BOARDS[entry["board"]]
-    path = os.path.join(ROOT, "boards", board + ".json")
-    if not os.path.isfile(path):
-        die("board file %s not found" % path)
-    with open(path, encoding="ascii") as f:
-        mcu = json.load(f)["build"]["mcu"]
+    # The MCU of the board TYPE: fuses are the chip's, not any one app's.
+    btype = entry["board"]
+    if btype not in MCU_OF_BOARD:
+        die("board '%s' has an unknown board type '%s' (known: %s)"
+            % (args.name, btype, ", ".join(sorted(MCU_OF_BOARD))))
+    mcu = MCU_OF_BOARD[btype]
 
     writes = {}
     for spec in args.assignment:

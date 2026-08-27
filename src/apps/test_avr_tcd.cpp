@@ -26,7 +26,7 @@
 //
 // Commands: ? for the menu, z runs a..k.
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -1824,13 +1824,13 @@ ISR(TCB3_INT_vect) { (void)brio::Tcb<3>::take_flags(); }
 
 ISR(TCD0_OVF_vect) {
     brio::Tcd<0>::ovf();
-    ++ovf_hits;
+    ovf_hits = ovf_hits + 1;
 }
 
 ISR(TCD0_TRIG_vect) {
     const auto t = brio::Tcd<0>::take_triggers();
-    if (t.a) ++trig_a_hits;
-    if (t.b) ++trig_b_hits;
+    if (t.a) trig_a_hits = trig_a_hits + 1;
+    if (t.b) trig_b_hits = trig_b_hits + 1;
 }
 
 int main() {

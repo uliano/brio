@@ -11,7 +11,7 @@
 //   rate out to the users, THEN reprograms the main prescaler. The
 //   app speaks Hz; which prescaler produces them is the clock's detail.
 //
-// pio: monitor_speed = 115200
+// build: monitor_speed = 115200
 //
 // Console @ 115200 (not 460800: the USART needs CLK_PER >= 16 x baud,
 // so 115200 works down to 2 MHz; 460800 would stop at 8 MHz). CLOCK

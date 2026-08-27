@@ -59,7 +59,7 @@
 // from the datasheet), RUNSTDBY/ALWAYSON (sleep timing), DACREF0-2
 // (needs the ACs), the RESRDY event as a generator (needs a TCB).
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>

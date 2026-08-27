@@ -42,7 +42,7 @@
 // Every single-letter run also closes with an ALL: line, so bench.py
 // judges any of them with its default marker.
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>

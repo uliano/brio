@@ -1,0 +1,81 @@
+{
+    // Hand-authored (PlatformIO used to auto-generate this file per active
+    // env; that's gone). ONE generic entry serves every AVR app: CMake
+    // Tools' launch-target dropdown picks which built ELF
+    // ${command:cmake.launchTargetPath} resolves to, and the *-debug
+    // configurePreset (avr128db48-debug/avr128db28-debug/avr128db32-debug)
+    // must be the active one so the ELF has -Og -g3 -fno-inline debug info.
+    //
+    // Mirrors PyAvrOCD's wiring 1:1 (see cmake/toolchain-avr.cmake and
+    // CMakeLists.txt's AVR_PROBE_SERIAL): hardware breakpoints only (no
+    // flash wear - the UPDI OCD has 2, GDB borrows one for its own
+    // temporaries, so budget ONE user breakpoint), board = avr128db48 over
+    // UPDI via Atmel-ICE. VERIFIED end-to-end this session (2026-08-27) by
+    // driving avr-gdb against PyAvrOCD directly on board A: connect,
+    // `monitor reset`, `load`, a breakpoint hit with a correct backtrace
+    // through the whole AO kernel chain, `monitor ioregister PORTF.DIR`
+    // style peripheral reads (the mcu-debug Peripheral Viewer's read path,
+    // confirmed against svd/avr128db48.svd). "svdPath" below is exactly
+    // the key the Peripheral Viewer extension reads from the active debug
+    // session's launch config (its svdPathConfig setting defaults to
+    // trying "svdPath" then "svdFile" - confirmed in the extension's own
+    // package.json) - no cortex-debug needed for this to work with cppdbg.
+    //
+    // -d/-u below assume db48/board A (today's actual daily driver, two
+    // Atmel-ICEs on this desk needing -u to disambiguate - tools/bench.py
+    // list). For board B or a db28/db32 session, duplicate this entry with
+    // -u <board B's serial> or -d avr128db28/avr128db32.
+    //
+    // GUI VALIDATION FINDINGS (2026-08-27), found by enabling
+    // "logging":{"engineLogging":true,"trace":true,"traceResponse":true}
+    // and reading the raw MI dialogue in the Debug Console:
+    // (1) pyavrocd's own "Listening on port" line is a plain print() that
+    // does not flush under a pipe (launched BY cppdbg, stdout is a pipe,
+    // not the TTY the earlier CLI-only check used) - PYTHONUNBUFFERED=1
+    // through /usr/bin/env fixes it.
+    // (2) cppdbg/MIEngine runs "setupCommands" IMMEDIATELY after
+    // "-gdb-set mi-async on", BEFORE its own standard sequence (pagination
+    // off, file-exec-and-symbols from "program", a temp breakpoint at
+    // main, and - only if "miDebuggerServerAddress" is set - its OWN
+    // "-target-select remote"). setupCommands therefore cannot assume a
+    // target is already selected: "file" and "target remote" must be the
+    // first two entries by hand.
+    // (3) "miDebuggerServerAddress" must NOT be set alongside a manual
+    // "target remote" in setupCommands: MIEngine's automatic
+    // "-target-select remote" still fires afterwards, a second connect
+    // pyavrocd's single-shot server does not survive (it tears itself down,
+    // gdb then sees "Connection reset by peer"). Connecting by hand in
+    // setupCommands is the only connect there is here.
+    // (4) "stopAtEntry" defaults to false: MIEngine's temp breakpoint at
+    // main is then just an internal sync point, not a UI stop - the
+    // session free-runs past it. Set true to actually land on main().
+    // End-to-end VERIFIED on board A: connect, monitor reset, load,
+    // stopAtEntry on main(), Peripheral Viewer reading live CLKCTRL/PORTF
+    // register values against svd/avr128db48.svd.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "cppdbg",
+            "request": "launch",
+            "name": "Debug (PyAvrOCD, db48/board A)",
+            "cwd": "${workspaceFolder}",
+            "program": "${command:cmake.launchTargetPath}",
+            "stopAtEntry": true,
+            "svdPath": "${workspaceFolder}/svd/avr128db48.svd",
+            "miMode": "gdb",
+            "miDebuggerPath": "/sw/avr/bin/avr-gdb",
+            "debugServerPath": "/usr/bin/env",
+            "debugServerArgs": "PYTHONUNBUFFERED=1 /home/uliano/.local/bin/pyavrocd --breakpoints hardware -s nop -p 40044 -m all -d avr128db48 -i updi -t atmelice -u J42700051207 -F 24000000 -P 2000",
+            "serverLaunchTimeout": 10000,
+            "serverStarted": "Listening on port",
+            "setupCommands": [
+                { "text": "file ${command:cmake.launchTargetPath}" },
+                { "text": "target remote localhost:40044" },
+                { "text": "monitor reset" },
+                { "text": "load" },
+                { "text": "set breakpoint always-inserted off" }
+            ],
+            "internalConsoleOptions": "openOnSessionStart"
+        }
+    ]
+}

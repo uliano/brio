@@ -1,0 +1,30 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "host",
+            "displayName": "Host tests (native g++, UBSan)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/host",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_CXX_COMPILER": "/sw/gcc/bin/g++"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "host",
+            "configurePreset": "host"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "host",
+            "configurePreset": "host",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
+    ]
+}

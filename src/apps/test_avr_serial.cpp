@@ -41,7 +41,7 @@
 //
 // Commands: ? for the menu, z = all single-board, y = all two-board.
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -2257,10 +2257,6 @@ void ts_irda() {
     {
         link::Cfg pc{};
         pc.rate = 115'200;                               // the peer stays ASYNC
-        link::Cfg dc{};
-        dc.mode = link::Mode::ircom;
-        dc.rate = 115'200;
-        dc.txpl = 0xFF;
         link::Params a{};
         a.cfg = pc;
         a.count = 6;
@@ -2288,9 +2284,6 @@ void ts_irda() {
     {
         link::Cfg pc{};
         pc.rate = 115'200;
-        link::Cfg dc{};
-        dc.mode = link::Mode::ircom;
-        dc.rate = 115'200;
         link::Params a{};
         a.cfg = pc;
         a.count = 6;
@@ -2580,7 +2573,7 @@ ISR(USART4_RXC_vect) { (void)U4Tx::rxc(); }
 ISR(USART4_DRE_vect) { U4Tx::dre(); }
 ISR(TCB0_INT_vect) {
     last_width = Meter::width_ticks();
-    ++captures;
+    captures = captures + 1;
 }
 ISR(RTC_PIT_vect) { Ticker::pit(); }
 

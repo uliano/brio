@@ -1,6 +1,6 @@
 // Host tests for util/serial_port.hpp: line assembly, ping-pong ownership,
 // backpressure with self-post, consumer-above-producer scheduling.
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

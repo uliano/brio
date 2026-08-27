@@ -1,5 +1,5 @@
 // Host tests for brio::EventQueue (MPSC per-AO queue) on HostPlatform.
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

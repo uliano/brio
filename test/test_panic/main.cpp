@@ -1,6 +1,6 @@
 // Host tests for kernel/panic.hpp: breadcrumb write ordering, the
 // debugger hook, and the boot-side fetch-and-clear.
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 //
 // panic() never returns; on the host we escape it with a reporter that
 // throws (the native build keeps exceptions on). Everything panic() does

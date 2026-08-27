@@ -42,7 +42,7 @@
  * part and would silently lose the top of the memory.
  *
  * THE BUILD ID is a link-time constant, not a compile-time one:
- * tools/pio_flags.py passes -Wl,--defsym,__nvheap_build_id=<newest
+ * CMakeLists.txt's avr_add_app() passes -Wl,--defsym,__nvheap_build_id=<newest
  * source mtime> to every image, the same way it locks FLMAP (a
  * wall-clock id would make every relink a different image and defeat
  * reflashing an unchanged one). It is read as a 32-bit
@@ -64,7 +64,7 @@
 #include "util/nv_heap.hpp"
 
 extern "C" {
-/// The epoch of the link, injected by tools/pio_flags.py. Declared as an
+/// The epoch of the link, injected by CMakeLists.txt's avr_add_app(). Declared as an
 /// array so that no code can be tempted to dereference it: it is a
 /// VALUE, and only its relocation bytes are ever read.
 extern const char __nvheap_build_id[];

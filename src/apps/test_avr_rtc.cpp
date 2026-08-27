@@ -51,7 +51,7 @@
 // power-down wake-up (no sleep in this suite), DBGRUN (needs a halted
 // CPU).
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -170,7 +170,8 @@ void quiesce() {
     RtcClock::select(RtcSource::osc32k);
     Ticker::init();                    // PIT back at 1024 Hz ...
     Ticker::pause();                   // ... with its interrupt masked
-    rtc_ovf_irqs = rtc_cmp_irqs = 0;
+    rtc_cmp_irqs = 0;
+    rtc_ovf_irqs = rtc_cmp_irqs;
     captures = 0;
     stopwatch_init();
 }
@@ -204,7 +205,8 @@ void t1_verbs() {
     Rtc::init({.prescaler = RtcPrescaler::div32, .period = 1023, .compare = 511});
     Rtc::enable_ovf_interrupt(true);
     Rtc::enable_cmp_interrupt(true);
-    rtc_ovf_irqs = rtc_cmp_irqs = 0;
+    rtc_cmp_irqs = 0;
+    rtc_ovf_irqs = rtc_cmp_irqs;
     hold_ms(3100);                        // 3 periods of 1 s, plus slack
     print(serial, "  in 3.1 s: ", rtc_ovf_irqs, " OVF, ", rtc_cmp_irqs, " CMP interrupts", crlf);
     verdict("OVF interrupts (3 +-1)", near(rtc_ovf_irqs, 3, 1));
@@ -643,11 +645,11 @@ ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect)    { Ticker::pit(); }
 ISR(RTC_CNT_vect) {
     const auto f = brio::Rtc::take_flags();
-    if (f.ovf) ++rtc_ovf_irqs;
-    if (f.cmp) ++rtc_cmp_irqs;
+    if (f.ovf) rtc_ovf_irqs = rtc_ovf_irqs + 1;
+    if (f.cmp) rtc_cmp_irqs = rtc_cmp_irqs + 1;
 }
 ISR(TCB0_INT_vect) {
-    if (meter_on) { cap_a = brio::FrequencyMeter<T0>::period_ticks(); ++captures; }
+    if (meter_on) { cap_a = brio::FrequencyMeter<T0>::period_ticks(); captures = captures + 1; }
     else (void)T0::take_flags();
 }
 

@@ -2,7 +2,7 @@
 // standing restrictions, the deadline guard and the first-event-after-
 // wake contract - driven through a real Kernel pack, so the AO contract
 // is exercised and not simulated.
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

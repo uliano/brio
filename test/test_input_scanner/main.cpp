@@ -1,7 +1,7 @@
 // Host tests for util/input_scanner.hpp: the debounce rule (a bounce
 // shorter than N absorbed, a clean press = exactly two edges), the
 // silent startup, N = 1 as raw sampling, and several inputs kept apart.
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

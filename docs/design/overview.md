@@ -66,8 +66,8 @@ the stack, not just the layer being added.
 
 ## Generalization rule
 
-Today it is AVR Dx, tomorrow it could be anything else (candidate
-targets: STM32G0x0/x1, ATSAMC/D, CH32V00x). No `#ifdef` where a
+Today it is AVR Dx, tomorrow ATSAM C (Cortex-M0+, decided next;
+STM32G0x0/x1 also considered for later). No `#ifdef` where a
 template/concept boundary can do the job; no AVR includes outside the
 platform/driver layer; target-specific facts live behind the Platform
 concept or in drivers. The kernel must never know which silicon it
@@ -104,10 +104,10 @@ readable at a glance.
 | `avrdx/` | `kernel/`, `util/` | everything that knows `avr/io.h`: drivers + AvrPlatform |
 | `host/` | `kernel/`, `util/` | the test "target": HostPlatform |
 
-Two targets never meet in one binary, so a future `ch32v00x/` is a
-sibling of `avrdx/` and the flat namespace stays collision-free. One
-PlatformIO library, not one per stratum: discipline comes from this
-rule, multi-library would add ceremony without enforcement. Shared
+Two targets never meet in one binary, so the second target's stratum
+is a sibling of `avrdx/` and the flat namespace stays collision-free.
+One library, not one per stratum: discipline comes from this rule,
+multi-library would add ceremony without enforcement. Shared
 pure types produced by a target and consumed by util live in `util/`
 (e.g. `util/timestamp.hpp`).
 

@@ -1,5 +1,5 @@
 // Host tests for ReplyTo: the request/reply return channel that SPI and
-// I2C bus AOs will use. Run with: pio test -e native
+// I2C bus AOs will use. Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

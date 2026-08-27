@@ -2,7 +2,7 @@
 // periodics, catch-up after lag, disarm, re-arm from fire, counter wrap,
 // and ticks_to_next() (the question a power manager asks before it
 // decides how deeply to stop).
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

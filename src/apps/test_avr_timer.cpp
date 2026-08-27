@@ -72,7 +72,7 @@
 // tested), RUNSTDBY (no sleep in this suite), AC response time (the
 // DAC's slew dominates), TCD.
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -128,18 +128,19 @@ volatile uint16_t cap_a = 0, cap_b = 0;      // last capture(s)
 volatile uint16_t captures = 0;              // how many
 volatile uint16_t irq_count = 0;             // periodic interrupts
 
-void tcb0_frequency() { cap_a = FrequencyMeter<T0>::period_ticks(); ++captures; }
-void tcb0_duty() { const auto r = DutyMeter<T0>::reading(); cap_a = r.period_ticks; cap_b = r.width_ticks; ++captures; }
-void tcb0_width() { cap_a = PulseWidthMeter<T0>::width_ticks(); ++captures; }
-void tcb0_tick() { PeriodicTick<T0>::tick(); ++irq_count; }
-void tcb1_width() { cap_a = PulseWidthMeter<T1>::width_ticks(); ++captures; }
-void tcb1_timeout() { Timeout<T1>::expired(); ++captures; }
+void tcb0_frequency() { cap_a = FrequencyMeter<T0>::period_ticks(); captures = captures + 1; }
+void tcb0_duty() { const auto r = DutyMeter<T0>::reading(); cap_a = r.period_ticks; cap_b = r.width_ticks; captures = captures + 1; }
+void tcb0_width() { cap_a = PulseWidthMeter<T0>::width_ticks(); captures = captures + 1; }
+void tcb0_tick() { PeriodicTick<T0>::tick(); irq_count = irq_count + 1; }
+void tcb1_width() { cap_a = PulseWidthMeter<T1>::width_ticks(); captures = captures + 1; }
+void tcb1_timeout() { Timeout<T1>::expired(); captures = captures + 1; }
 void tcb1_tick() { PeriodicTick<T1>::tick(); }
-void tcb1_frequency() { cap_a = FrequencyMeter<T1>::period_ticks(); ++captures; }
+void tcb1_frequency() { cap_a = FrequencyMeter<T1>::period_ticks(); captures = captures + 1; }
 
 void clear_captures() {
     cli();
-    cap_a = cap_b = 0;
+    cap_b = 0;
+    cap_a = cap_b;
     captures = 0;
     irq_count = 0;
     sei();
@@ -1204,8 +1205,8 @@ ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect)    { Ticker::pit(); }
 ISR(TCB0_INT_vect) { if (tcb0_hook) tcb0_hook(); else (void)T0::take_flags(); }
 ISR(TCB1_INT_vect) { if (tcb1_hook) tcb1_hook(); else (void)T1::take_flags(); }
-ISR(TCA0_OVF_vect) { Beat::beat(); ++beats; }
-ISR(AC0_AC_vect) { (void)Ac<0>::cmp(); ++ac_irqs; }
+ISR(TCA0_OVF_vect) { Beat::beat(); beats = beats + 1; }
+ISR(AC0_AC_vect) { (void)Ac<0>::cmp(); ac_irqs = ac_irqs + 1; }
 
 int main() {
     const bool xtal = SysClock::init();

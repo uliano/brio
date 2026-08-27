@@ -1,24 +1,53 @@
 {
-    // --- C/C++: clangd is the engine in this project, over the
-    //     compilation database (compile_commands.json in the project
-    //     root, regenerated with `pio run -e <app> -t compiledb`): every
-    //     TU parses with its real command line, and --query-driver pulls
-    //     the include search path and the target from the real cross
+    // --- C/C++: clangd is the engine in this project, over each CMake
+    //     project's own compile_commands.json (CMAKE_EXPORT_COMPILE_COMMANDS,
+    //     regenerated automatically on every configure - no manual step):
+    //     every TU parses with its real command line, and --query-driver
+    //     pulls the include search path and the target from the real cross
     //     compiler. cpptools' own engine is disabled: its clang-based
     //     parser (1.33+) runs in an x86-64 model against the full gcc
     //     macro set of the compiler query, and the AVR-configured
     //     libstdc++ then demands gcc-only types (__int24, _Float32) no
     //     define can provide - structurally unparsable there. test/ has
-    //     its own .clangd fragment (host g++, doctest, AVR flags
-    //     stripped). Both clangd.enable and the PlatformIO extension's
-    //     "conflicted extensions" check are read at activation: changing
-    //     this needs a window reload, and the popup is a false positive
-    //     to dismiss with "Remind later". ---
+    //     its own .clangd fragment (pointing at the host project's own
+    //     database instead of the root AVR one). ---
     "clangd.enable": true,
     "clangd.arguments": [
         "--query-driver=/sw/avr*/bin/avr-g++,/sw/gcc*/bin/g++"
     ],
     "C_Cpp.intelliSenseEngine": "disabled",
+
+    // --- CMake Tools: two independent CMake projects share this workspace
+    //     folder - the root AVR build and test/ (host g++, no cross
+    //     toolchain, since one CMake configure has exactly one compiler).
+    //     This shows an Active Folder picker in the status bar alongside
+    //     the usual configure-preset/target pickers; no multi-root
+    //     workspace needed. ---
+    "cmake.sourceDirectory": [
+        "${workspaceFolder}",
+        "${workspaceFolder}/test"
+    ],
+
+    // CMake Tools 1.23+ defaults cmake.options.statusBarVisibility to
+    // "hidden" (it now favors its own sidebar Project view); this repo
+    // still drives configure/build/test from the status bar, so force
+    // it back on.
+    "cmake.options.statusBarVisibility": "visible",
+    // Neither project defines packagePresets/workflowPresets - CPack and
+    // Run Workflow would be dead buttons, hidden alongside them. Launch
+    // and Debug are CMake Tools' OWN run/debug integration, unused here
+    // on purpose: flashing goes through each app's <name>-upload target,
+    // debugging through the hand-authored cppdbg config in launch.json
+    // (see its own header comment) - CTest stays visible, it is the one
+    // GUI entry point this repo actually uses from the test/ folder.
+    "cmake.options.advanced": {
+        "cpack": { "statusBarVisibility": "hidden" },
+        "packagePreset": { "statusBarVisibility": "hidden" },
+        "workflow": { "statusBarVisibility": "hidden" },
+        "workflowPreset": { "statusBarVisibility": "hidden" },
+        "launch": { "statusBarVisibility": "hidden" },
+        "debug": { "statusBarVisibility": "hidden" }
+    },
 
     // --- Outline as the bird's-eye view of the file (the breadcrumbs
     //     picker became a collapse-one-node-at-a-time tree): keep the
@@ -29,5 +58,7 @@
 
     // Pin the enclosing scopes (namespace/class/function) at the top of
     // the editor while scrolling.
-    "editor.stickyScroll.enabled": true
+    "editor.stickyScroll.enabled": true,
+
+    "vscode-serial-monitor.customBaudRates": [460800]
 }

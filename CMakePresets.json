@@ -1,0 +1,97 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "avr128db48-release",
+            "displayName": "AVR128DB48 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-cmake/avr128db48-release",
+            "toolchainFile": "${sourceDir}/cmake/toolchain-avr.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "AVR_MCU": "avr128db48"
+            }
+        },
+        {
+            "name": "avr128db48-debug",
+            "displayName": "AVR128DB48 (debug, -Og -g3, PyAvrOCD)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-cmake/avr128db48-debug",
+            "toolchainFile": "${sourceDir}/cmake/toolchain-avr.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "AVR_MCU": "avr128db48"
+            }
+        },
+        {
+            "name": "avr128db28-release",
+            "displayName": "AVR128DB28 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-cmake/avr128db28-release",
+            "toolchainFile": "${sourceDir}/cmake/toolchain-avr.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "AVR_MCU": "avr128db28"
+            }
+        },
+        {
+            "name": "avr128db28-debug",
+            "displayName": "AVR128DB28 (debug, -Og -g3, PyAvrOCD)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-cmake/avr128db28-debug",
+            "toolchainFile": "${sourceDir}/cmake/toolchain-avr.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "AVR_MCU": "avr128db28"
+            }
+        },
+        {
+            "name": "avr128db32-release",
+            "displayName": "AVR128DB32 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-cmake/avr128db32-release",
+            "toolchainFile": "${sourceDir}/cmake/toolchain-avr.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "AVR_MCU": "avr128db32"
+            }
+        },
+        {
+            "name": "avr128db32-debug",
+            "displayName": "AVR128DB32 (debug, -Og -g3, PyAvrOCD)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-cmake/avr128db32-debug",
+            "toolchainFile": "${sourceDir}/cmake/toolchain-avr.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "AVR_MCU": "avr128db32"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "avr128db48-release",
+            "configurePreset": "avr128db48-release"
+        },
+        {
+            "name": "avr128db48-debug",
+            "configurePreset": "avr128db48-debug"
+        },
+        {
+            "name": "avr128db28-release",
+            "configurePreset": "avr128db28-release"
+        },
+        {
+            "name": "avr128db28-debug",
+            "configurePreset": "avr128db28-debug"
+        },
+        {
+            "name": "avr128db32-release",
+            "configurePreset": "avr128db32-release"
+        },
+        {
+            "name": "avr128db32-debug",
+            "configurePreset": "avr128db32-debug"
+        }
+    ]
+}

@@ -43,8 +43,8 @@
 // g the APPDATA legs and the multi-page-erase erratum, which need a
 //   temporary CODESIZE fuse (see the message the test prints)
 
-// pio: monitor_speed = 460800
-// pio: custom_flmap_lock = 0
+// build: monitor_speed = 460800
+// build: flmap_lock = 0
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -1290,7 +1290,7 @@ ISR(RTC_PIT_vect)    { Ticker::pit(); }
 /// stops the vector re-entering forever (11.5.4).
 ISR(NVMCTRL_EE_vect) {
     brio::Nvm::eeready();
-    ++nvm_interrupts;
+    nvm_interrupts = nvm_interrupts + 1;
     brio::post<Writer>(brio::NvReady{});
 }
 

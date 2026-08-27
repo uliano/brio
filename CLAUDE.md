@@ -78,9 +78,12 @@ logic, includes nothing of brio), `util/` (services over the kernel),
 `avrdx/` (everything that knows `avr/io.h`, the only target today:
 AVR DA/DB, bench chip AVR128DB48), `host/` (the native test target).
 Includes carry the stratum prefix (`#include "avrdx/usart.hpp"`). The
-repo is a PlatformIO project: one `main()` per `src/apps/<app>.cpp`
-becomes envs `<app>` (release) and `<app>-debug`; host tests in
-`test/` run on `[env:native]`.
+repo is a CMake project (`CMakePresets.json`, Ninja): one `main()` per
+`src/apps/<app>.cpp` is auto-discovered at configure time from its own
+`// build:` header comment and becomes one executable target per (app x
+AVR128DB package); host tests in `test/` are an independent CMake
+project (own `CMakeLists.txt`/`CMakePresets.json`, host g++, no cross
+toolchain), run via `ctest`.
 
 ## Governing rule and stability hierarchy
 
@@ -195,23 +198,37 @@ gets its dated home in `docs/design/` when taken.
 - **HSM.** The FSM contract is HSM-ready (`unhandled` = future
   bubble-to-parent); parent pointers, bubbling and LCA entry/exit
   chains get built only when a real AO demands them.
-- **Second target.** Candidates STM32G0x0/x1, ATSAMC/D, CH32V00x
-  (SysTick timebases at 1000 Hz). It will exercise the Platform
-  concept, the per-target ticker/driver strata and the layering rule
-  for real; expect radical revision of util/ and drivers then. The
-  build tooling is part of this milestone: PlatformIO is already
-  stretched past its design use case; the keep-or-replace analysis is
-  scheduled with the second target (CMake the only named candidate so
-  far). The EDITOR half moved early
-  (2026-08-25, forced): cpptools' clang-based parser (1.33+) is
-  structurally unable to parse the AVR-configured libstdc++ (x86-64
-  model + gcc-only types __int24/_Float32), so the editor is clangd
-  over compile_commands.json already - `pio run -e <app> -t compiledb`,
-  --query-driver for include paths and target, the pio_flags.py -mmcu
-  define-delta feeding the device macros clang lacks, test/.clangd for
-  the host tests (detail in docs/avrdx/README.md). The delta feed is
-  an AVR peculiarity (device-specs macros; other targets select the
-  device with an explicit -D) and goes away with the second target.
+- **Second target: ATSAM C decided (2026-08-27, corrected from an
+  earlier CH32V006 pick)**, Cortex-M0+ (STM32G0x0/x1 also considered
+  for later). It will exercise the Platform concept, the per-target
+  ticker/driver strata and the layering rule for real; expect radical
+  revision of util/ and drivers then. It will be built as another
+  sibling CMake project (its own `CMakeLists.txt`/`CMakePresets.json`/
+  toolchain file) - the same pattern `test/` already is, not a branch
+  inside the root `CMakeLists.txt`; no shared "app discovery" module is
+  factored out ahead of that second real instance.
+  **Build tooling is DONE, not part of this milestone any more**
+  (2026-08-27): PlatformIO was stretched past its design use case (the
+  env-per-app-x-board list would only have grown worse per family) and
+  the whole repo migrated to CMake - `CMakePresets.json` (one configure
+  + build preset pair per package x {release, debug}), app
+  auto-discovery from `// build:` header comments
+  (`CMakeLists.txt`, no generation step), the independent host-test
+  project under `test/`, `tools/bench.py` retargeted, every PlatformIO
+  file removed. Verified byte-identical `.hex` output against the old
+  PlatformIO build before committing to the migration. The EDITOR half
+  moved early (2026-08-25, forced, and unaffected by the later
+  migration): cpptools' clang-based parser (1.33+) is structurally
+  unable to parse the AVR-configured libstdc++ (x86-64 model +
+  gcc-only types __int24/_Float32), so the editor is clangd over
+  `compile_commands.json` - regenerated automatically on every CMake
+  configure now (`CMAKE_EXPORT_COMPILE_COMMANDS`, no manual step),
+  --query-driver for include paths and target, `CMakeLists.txt`'s
+  `avr_predefines()` supplying the `-mmcu` device-macro delta clang
+  lacks, `test/.clangd` pointing at the host project's own database
+  (detail in docs/avrdx/README.md). The delta feed is an AVR
+  peculiarity (device-specs macros; other targets select the device
+  with an explicit -D) and goes away with the second target.
 - **QK-style preemption (far horizon, probably not on AVR).** A
   preemptive non-blocking kernel (higher-priority AO preempts a
   lower one mid-dispatch, single stack, LIFO nesting) would be an
@@ -868,9 +885,10 @@ gets its dated home in `docs/design/` when taken.
 - **C++ modules: considered, not now.** The real prize would be macro
   isolation (`import brio.avrdx` would not leak `avr/io.h` macros
   above the target stratum - the layering rule made mechanical), not
-  build speed. Blockers: the language server (PlatformIO's IntelliSense
-  does not follow modules; clangd only partially) and SCons has no
-  module dependency scanning. Not a cure for the ISR glue either: the
+  build speed. Blocker: the language server (clangd follows modules
+  only partially) - CMake itself has grown C++20 module dependency
+  scanning since the SCons-based build (untested here, and clangd's own
+  gap is unrelated to the build system). Not a cure for the ISR glue either: the
   vector bindings are configuration (which USART, which route, which
   sink) and would live in a per-board unit under modules exactly as
   under headers. Revisit with the second target / board files.
@@ -880,51 +898,54 @@ gets its dated home in `docs/design/` when taken.
 ## Build, test, debug (the must-knows)
 
 ```bash
-pio test -e native            # host tests (doctest); no hardware needed
-tools/check_family.sh [name]  # every avrdx smoke TU compiles for all 8 DA/DB
-                              # packages; neg/ TUs must FAIL (definition of done)
-pio run -e <app>              # release build (-Os)
-pio run -e <app> -t compiledb # refresh compile_commands.json (clangd, the
-                              # editor engine; any app env, they share flags)
-pio run -e <app> -t upload    # flash via Atmel-ICE (UPDI)
-pio debug -e <app>-debug      # ALWAYS debug the -debug env
-python tools/gen_apps.py      # after adding/removing src/apps/*.cpp (or a "// pio: opt = value" line)
+ctest --preset host                                                # host tests (doctest); no hardware needed
+tools/check_family.sh [name]                                       # every avrdx smoke TU compiles for all 8 DA/DB
+                                                                    # packages; neg/ TUs must FAIL (definition of done)
+cmake --build --preset avr128db48-release --target <app>           # release build (-Os)
+cmake --build --preset avr128db48-release --target <app>-upload    # flash via Atmel-ICE (UPDI)
+cmake --build --preset avr128db48-debug --target <app>             # debug build, then F5 (.vscode/launch.json)
+# apps are auto-discovered from src/apps/*.cpp at every configure - no
+# generation step; a new/removed app or a changed "// build: opt = value"
+# line takes effect on the next configure
 
-PY=~/.platformio/penv/bin/python         # pyserial + pio live in PlatformIO's venv
-$PY tools/bench.py list                  # serial devices, USB probes, the bench manifest
-$PY tools/bench.py flash A test_avr_pin  # build the app's env + avrdude over UPDI
-$PY tools/bench.py run A a               # drive the console, judge "ALL: N pass, M fail"
-$PY tools/bench.py console A             # device path + speed, for your own monitor
-$PY tools/bench.py duo A:a B:script.txt  # instrument peer scripted, then the DUT
-$PY tools/bench.py fuses A bootsize=128  # read/write fuses over UPDI (fuses are
-                                         # provisioning: UPDI-only, survive reflash)
+python3 tools/bench.py list                  # serial devices, USB probes, the bench manifest
+python3 tools/bench.py flash A test_avr_pin  # cmake --build --target <app> + avrdude over UPDI
+python3 tools/bench.py run A a               # drive the console, judge "ALL: N pass, M fail"
+python3 tools/bench.py console A             # device path + speed, for your own monitor
+python3 tools/bench.py duo A:a B:script.txt  # instrument peer scripted, then the DUT
+python3 tools/bench.py fuses A bootsize=128  # read/write fuses over UPDI (fuses are
+                                             # provisioning: UPDI-only, survive reflash)
 ```
 
 - The multi-board bench, three separate concerns (detail:
-  `docs/bench.md`): BUILD = one env per app x board TYPE
-  (`// pio: boards = db28,db32,db48` in the app header -> also
-  `[env:<app>-db28]`; `db48` is the bare `[env:<app>]`), IDENTITY = the
-  manifest `tools/bench_boards.py` (which board sits where, its console
-  by `/dev/serial/by-path` because the CH340s have no USB serial, its
-  programmer), ORCHESTRATION = `tools/bench.py`. Never an env per
-  physical board. `family_probe` carries the matrix and is the first
-  firmware for a new board.
+  `docs/bench.md`): BUILD = one CMake target per app x board TYPE
+  (`// build: boards = db28,db32,db48` in the app header; `db48` is the
+  default when the line is absent; a configure targets exactly one
+  package, so switching `configurePreset` switches which apps' targets
+  exist), IDENTITY = the manifest `tools/bench_boards.py` (which board
+  sits where, its console by `/dev/serial/by-path` because the CH340s
+  have no USB serial, its programmer), ORCHESTRATION = `tools/bench.py`.
+  Never a target per physical board. `family_probe` carries the matrix
+  and is the first firmware for a new board.
 
-- Toolchain: self-built avr-gcc 16.2 at `/sw/avr` via `symlink://`;
-  never PlatformIO's bundled one. Never add `-mrelax` (PyAvrOCD
-  refuses the ELF). `build_unflags` must keep `-std=gnu++11` (the
-  platform appends it after our `-std=gnu++23`), `-flto`, and
-  `-DF_CPU` (by name: the clock rate has one truth, `Clock::hz`;
-  avr-libc's util/delay.h / setbaud.h do not compile here, on purpose -
-  use `brio::delay_us(clock, us)`).
+- Toolchain: self-built avr-gcc 16.2 at `/sw/avr`, pointed at directly
+  by absolute path in `cmake/toolchain-avr.cmake`; never a
+  system-packaged one. Never add `-mrelax` (PyAvrOCD refuses the ELF).
+  No `-flto` (never added, so nothing to strip) and no `-DF_CPU` (never
+  added either: the clock rate has one truth, `Clock::hz`; avr-libc's
+  util/delay.h / setbaud.h do not compile here, on purpose - use
+  `brio::delay_us(clock, us)`).
 - Atmel-ICE: cable in the **AVR** port, not SAM (symptom: Vtarget
   ~1.71 V, sign-on `0xa0`).
-- Debugging: PyAvrOCD as GDB server (`debug_tool = custom`, port
+- Debugging: PyAvrOCD as GDB server, launched by cppdbg itself
+  (`.vscode/launch.json`'s `debugServerPath`/`debugServerArgs`, port
   40044); effectively ONE free hardware breakpoint (GDB borrows the
   second); `--breakpoints hardware` refuses extras instead of wearing
   flash; line breakpoints need `-fno-inline` (GCC 16 DWARF caveat) -
-  hence the debug flags in platformio.ini. `monitor ioregister <name>`
-  reads/writes peripheral registers.
+  hence the Debug config's flags in `CMakeLists.txt`'s `avr_add_app()`.
+  `monitor ioregister <name>` reads/writes peripheral registers; the
+  same SVD also drives the mcu-debug Peripheral Viewer extension's
+  panel (`svdPath` in `launch.json`).
 - The bench board: 24 MHz crystal on PA0/PA1 (not GPIO) -
   `Clock<ClockSource::crystal, 24'000'000>` - no 32k crystal (do not
   enable XOSC32K), serial on USART2 ALT1 PF4/PF5.
@@ -934,26 +955,37 @@ $PY tools/bench.py fuses A bootsize=128  # read/write fuses over UPDI (fuses are
 ## Layout
 
 ```
-platformio.ini          base [env], toolchain, Atmel-ICE upload, debug wiring
-apps.ini                generated: [env:<app>] + [env:<app>-debug] per app
-boards/AVR128DB{28,32,48}.json  custom bare-metal boards (128K flash / 16K RAM)
-tools/check_family.sh    family compile check over test/family/ (see above)
-tools/gen_apps.py        scans src/apps/*.cpp -> apps.ini; copies each app's
-                         "// pio: <option> = <value>" header lines into its envs;
-                         "// pio: boards = db28,..." adds the board-type envs
+CMakeLists.txt           app auto-discovery ("// build:" header comments),
+                         avr_predefines() (clangd's -mmcu macro delta),
+                         avr_add_app() (flags, .hex/.lst/.map, per-app
+                         -upload target, FLMAPLOCK/build-id defsyms)
+CMakePresets.json        one configure+build preset pair per AVR128DB
+                         package x {release, debug}
+cmake/toolchain-avr.cmake  the cross toolchain file (avr-gcc 16.2 at /sw/avr)
+cmake/avr-mcus.cmake     package -> mcu name table (128K flash / 16K RAM each)
+third_party/doctest/     vendored doctest.h (MIT, upstream doctest/doctest)
+tools/check_family.sh    family compile check over test/family/ (see above) -
+                         zero CMake coupling, calls avr-g++ directly
 tools/bench_boards.py    the bench MANIFEST: the physical boards on the desk
-                         (type, console by-path, programmer) - not an env list
+                         (type, console by-path, programmer) - not a target list
 tools/bench.py           the bench orchestrator: list / flash / run / console /
-                         duo, over the manifest and the generated envs
-tools/pio_flags.py       per-language AVR flags (build-type aware) + the
-                         -mmcu macro delta as -Ds (feeds clangd; skips
-                         [env:native])
-tools/gen_lst.py         post-build: firmware.lst (disassembly) + firmware.map
-src/apps/<app>.cpp       one main() per app (ISR vector bindings live HERE)
-src/glue/                build invariants compiled into EVERY image via
-                         [common] base_src_filter (today: ivsel_boot.cpp,
-                         the .init3 IVSEL store - vectors at BOOT start)
-test/test_*/main.cpp     host unit tests (doctest), pio test -e native
+                         duo, over the manifest and build-cmake/apps_manifest.json
+                         (the app roster CMake writes at every configure)
+src/apps/<app>.cpp       one main() per app (ISR vector bindings live HERE);
+                         "// build: <option> = <value>" header lines
+                         ("boards = db28,..." gates which package builds it,
+                         default db48 only; "flmap_lock = 0" opts out of the
+                         FLMAPLOCK default; anything else is just metadata
+                         for tools/bench.py, e.g. "monitor_speed = 115200")
+src/glue/                build invariants compiled into EVERY image (every
+                         avr_add_app() call lists ivsel_boot.cpp alongside
+                         the app's own source - the .init3 IVSEL store,
+                         vectors at BOOT start)
+test/CMakeLists.txt      the host test project (independent from the root AVR
+                         build - one CMake configure has exactly one compiler):
+                         one executable + ctest entry per test_*/main.cpp
+test/CMakePresets.json   the "host" configure/build/test preset (native g++, UBSan)
+test/test_*/main.cpp     host unit tests (doctest), ctest --preset host
 docs/                    README (map + rules), design/, <target>/ (avrdx/, host/), bench.md
 lib/brio/src/            the framework, four strata:
   kernel/                pure kernel logic - includes NOTHING of brio
@@ -1075,7 +1107,7 @@ lib/brio/src/            the framework, four strata:
     nvm_flash.hpp          NvmFlash: the FlashMedia backend over Nvm -
                            zones from the *_load_* linker symbols with the
                            BOOT-section floor, build id from the link
-                           defsym (pio_flags.py)
+                           defsym (CMakeLists.txt's avr_add_app())
     sleep.hpp              SLPCTRL: Sleep (arm/disarm/sleep/enter, the three
                            modes, the errata-2.2.4 NOP discipline), Vreg
                            (PMODE under CCP, HTLLEN with the TWI/CCL
@@ -1158,5 +1190,8 @@ lib/brio/src/            the framework, four strata:
 
 ## Build artifacts
 
-`.pio/build/<env>/`: ELF / HEX / MAP / `firmware.lst` (source-
-interleaved disassembly from tools/gen_lst.py).
+`build-cmake/<preset>/`: `<app>.elf` / `<app>.hex` / `firmware-<app>.map`
+/ `<app>.lst` (source-interleaved disassembly), all written directly by
+`avr_add_app()`'s post-build step - one set per app, in the preset's own
+build dir. Host test binaries and `apps_manifest.json` live in
+`build-cmake/host/` and `build-cmake/` respectively.

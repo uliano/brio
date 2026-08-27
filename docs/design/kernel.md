@@ -486,7 +486,7 @@ Every target stratum ships its implementation (today
 `HostPlatform` (`host/platform_host.hpp`) gives a depth-counting
 critical section, a test-controlled virtual clock and recording
 idle/break - time becomes deterministic arithmetic in tests
-(`pio test -e native`), which is why the host tests cover first what
+(`ctest --preset host`), which is why the host tests cover first what
 is hard to provoke on real hardware: queue overflow, entry/exit
 ordering, drift-free re-arm, scan priority, MPSC stress.
 

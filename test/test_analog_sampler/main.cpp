@@ -1,6 +1,6 @@
 // Host tests for util/analog_sampler.hpp: the input walk, attribution by
 // the converter's reported input code, publication to the subscribers,
-// the software pace, unknown codes. Run with: pio test -e native
+// the software pace, unknown codes. Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

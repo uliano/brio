@@ -24,7 +24,7 @@
 // Commands: ? | a a known signal, latched and paced | b staleness and
 // the overwrite count | c two sources in one sampler | z = a..c
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -422,11 +422,11 @@ ISR(RTC_PIT_vect) { brio::Ticker::pit(); }
 // the whole of the interrupt's dealings with the loop.
 ISR(TCB0_INT_vect) {
     PeriodLatch::store(brio::FrequencyMeter<T0>::period_ticks());
-    ++captures0;
+    captures0 = captures0 + 1;
 }
 ISR(TCB1_INT_vect) {
     WidthLatch::store(brio::PulseWidthMeter<T1>::width_ticks());
-    ++captures1;
+    captures1 = captures1 + 1;
 }
 // The other two vectors are bound as a net: an unbound vector on this
 // core is a jump to 0, i.e. a silent reset loop.

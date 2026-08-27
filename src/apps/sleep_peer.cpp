@@ -36,7 +36,7 @@
 // Console: USART2 ALT1 (PF4/PF5) at 460800, observability only.
 //   ? help | i status and counters | 0 back to command mode | 3 trace
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>

@@ -100,23 +100,24 @@ and generic code chooses with `if constexpr` or a concept.
 | Target | State | Notes |
 |--------|-------|-------|
 | AVR DA/DB (`avrdx/`) | on the bench | AVR128DB48, avr-gcc 16.2, see [docs/avrdx/README.md](docs/avrdx/README.md) |
-| host (`host/`) | in use | doctest suites, `pio test -e native`, see [docs/host/README.md](docs/host/README.md) |
-| STM32G0, ATSAMC/D, CH32V00x | candidates | SysTick timebases (1000 Hz): the reason the kernel tick is opaque |
+| host (`host/`) | in use | doctest suites, `ctest --preset host`, see [docs/host/README.md](docs/host/README.md) |
+| ATSAM C (Cortex-M0+) | decided, next | STM32G0x0/x1 also considered; SysTick timebases (1000 Hz): the reason the kernel tick is opaque |
 
 ## Building and testing
 
-The repo is a PlatformIO project: the framework in `lib/brio/` (a
-private library, auto-linked), one `main()` per `src/apps/<app>.cpp`
-turned into a pair of envs (`<app>` release, `<app>-debug`) by
-`tools/gen_apps.py` (an app may pin env options such as its console
-baud with `// pio: monitor_speed = 115200` header lines), and host unit
-tests in `test/`.
+The repo is a CMake project: the framework in `lib/brio/` (header-only,
+included directly), one `main()` per `src/apps/<app>.cpp` auto-discovered
+at configure time and turned into one executable target per (app x AVR128DB
+package) - an app may pin build options such as its console baud with
+`// build: monitor_speed = 115200` header lines - and host unit tests in
+`test/` (an independent CMake project, since a configure has exactly one
+compiler).
 
 ```bash
-pio test -e native            # host tests: kernel, queues, FSM, time events, buses, ring...
-pio run -e <app>              # build one app for the target (release, -Os)
-pio run -e <app> -t upload    # flash it (target-specific probe: see docs/<target>/)
-pio debug -e <app>-debug      # debug build + gdb session
+ctest --preset host                                        # host tests: kernel, queues, FSM, time events, buses, ring...
+cmake --build --preset avr128db48-release --target <app>          # build one app for the target (release, -Os)
+cmake --build --preset avr128db48-release --target <app>-upload   # flash it (target-specific probe: see docs/<target>/)
+cmake --build --preset avr128db48-debug --target <app>             # debug build, then F5 (.vscode/launch.json)
 ```
 
 Everything target-specific - toolchain, board, probe, debugger, its

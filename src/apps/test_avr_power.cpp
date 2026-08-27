@@ -30,7 +30,7 @@
 // | c the deadline guard | d the voters | e the standing restrictions
 // | z = a..e
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -607,7 +607,7 @@ ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect) {
     pit_stamp = Watch::read();
     brio::Ticker::pit();
-    ++pit_irqs;
+    pit_irqs = pit_irqs + 1;
     pit_ran = true;
 }
 

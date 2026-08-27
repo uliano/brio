@@ -66,7 +66,7 @@
 //   k power-down, timed from outside | l start-of-frame | m a TWI
 //   address match | y = all of h..m
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -343,9 +343,15 @@ void quiesce() {
     RtcClock::select(RtcSource::osc32k);
     Pit::init(pit_period);            // enabled, interrupt on: the waker
     watch_init(false);
-    pit_irqs = pad_irqs = waker_irqs = rtc_irqs = 0;
-    wake_irqs = ccl_irqs = sfd_irqs = 0;
-    twis_addr = twis_stops = 0;
+    rtc_irqs = 0;
+    waker_irqs = rtc_irqs;
+    pad_irqs = waker_irqs;
+    pit_irqs = pad_irqs;
+    sfd_irqs = 0;
+    ccl_irqs = sfd_irqs;
+    wake_irqs = ccl_irqs;
+    twis_stops = 0;
+    twis_addr = twis_stops;
     twis_n = 0;
     sei();
 }
@@ -1669,7 +1675,8 @@ void tl_sfd() {
 // enforced by construction and never entered by accident.
 bool twi_tenure(SleepMode m, bool sleeping, uint8_t first, slink::Report& r) {
     cli();
-    twis_addr = twis_stops = 0;
+    twis_stops = 0;
+    twis_addr = twis_stops;
     twis_n = 0;
     sei();
     slink::Params a{};
@@ -1937,15 +1944,15 @@ ISR(USART2_DRE_vect) { Serial::dre(); }
 
 ISR(RTC_PIT_vect) {
     (void)Pit::take_flag();
-    ++pit_irqs;
+    pit_irqs = pit_irqs + 1;
 }
 ISR(RTC_CNT_vect) {
     (void)Rtc::take_flags();
-    ++rtc_irqs;
+    rtc_irqs = rtc_irqs + 1;
 }
 ISR(PORTD_PORT_vect) {
     (void)Port<'D'>::take_flags();
-    ++pad_irqs;
+    pad_irqs = pad_irqs + 1;
 }
 
 /// THE WAKE-UP ISR OF THE TWO-BOARD HALF, and the one place in this
@@ -1957,7 +1964,7 @@ ISR(PORTD_PORT_vect) {
 ISR(PORTE_PORT_vect) {
     EchoPin::set();
     (void)Port<'E'>::take_flags();
-    ++wake_irqs;
+    wake_irqs = wake_irqs + 1;
 }
 
 /// USART4's RXC vector carries RXSIF too (27.5.6): with SFDEN armed and
@@ -1967,7 +1974,7 @@ ISR(PORTE_PORT_vect) {
 ISR(USART4_RXC_vect) {
     if (U4::rxs_flag()) {
         U4::clear_rxs();
-        ++sfd_irqs;
+        sfd_irqs = sfd_irqs + 1;
     }
 }
 
@@ -1979,11 +1986,11 @@ ISR(TWI0_TWIS_vect) {
     const auto s = Client::isr();
     if (s.address_or_stop()) {
         if (s.is_address()) {
-            ++twis_addr;
+            twis_addr = twis_addr + 1;
             twis_n = 0;
             Client::respond(TwiAck::ack);
         } else {
-            ++twis_stops;
+            twis_stops = twis_stops + 1;
             Client::complete();
         }
     } else if (s.data()) {
@@ -1991,14 +1998,17 @@ ISR(TWI0_TWIS_vect) {
             Client::transmit(0x5A);
         } else {
             const uint8_t v = Client::receive(TwiAck::ack);
-            if (twis_n < 8) twis_rx[twis_n++] = v;
+            if (twis_n < 8) {
+                twis_rx[twis_n] = v;
+                twis_n = twis_n + 1;
+            }
         }
     }
 }
 
 ISR(CCL_CCL_vect) {
     (void)Ccl::take_flags();
-    ++ccl_irqs;
+    ccl_irqs = ccl_irqs + 1;
 }
 
 // All four TCB vectors are bound as a net: an unbound vector on this
@@ -2006,7 +2016,7 @@ ISR(CCL_CCL_vect) {
 // here are exactly the place where a stray flag would find one.
 ISR(TCB0_INT_vect) {
     (void)Waker::take_flags();
-    ++waker_irqs;
+    waker_irqs = waker_irqs + 1;
 }
 ISR(TCB1_INT_vect) { (void)WatchLo::take_flags(); }
 ISR(TCB2_INT_vect) { (void)WatchHi::take_flags(); }

@@ -33,7 +33,7 @@
 // auto-baud and error-tolerance tests are measured against, so its
 // quality is itself a bench fact.
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>

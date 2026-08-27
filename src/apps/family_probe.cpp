@@ -5,7 +5,7 @@
 // on all of them.
 //
 // Two jobs. On the desk it is the carrier of the board matrix (the
-// "// pio: boards" line below): a build of it for every board TYPE
+// "// build: boards" line below): a build of it for every board TYPE
 // proves the matrix, no hardware needed. On the bench it is the first
 // thing flashed onto a NEW board: an LED (or a scope) on PA7 says the
 // chip runs, the UPDI link works and the fuses are sane, before any
@@ -13,7 +13,7 @@
 //
 // Wiring: PA7 -> ~330 ohm -> LED -> GND (or a probe on PA7).
 
-// pio: boards = db28,db32,db48
+// build: boards = db28,db32,db48
 
 #include "avrdx/clock.hpp"
 #include "avrdx/delay.hpp"

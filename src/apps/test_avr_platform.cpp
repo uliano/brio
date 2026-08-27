@@ -29,7 +29,7 @@
 // queue on the silicon | h timebase | i panic breadcrumb across real
 // resets | z = all
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -192,7 +192,9 @@ void quiesce() {
     Ticker::init();
     stopwatch_init();
     ring.clear();
-    produce_seq = produce_limit = produce_rejects = 0;
+    produce_rejects = 0;
+    produce_limit = produce_rejects;
+    produce_seq = produce_limit;
 }
 
 // ---- a the folded path ---------------------------------------------------------

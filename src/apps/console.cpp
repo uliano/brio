@@ -12,7 +12,8 @@
 // precede SerialPort (line producer) so the ping-pong buffers are always
 // free when SerialPort runs - see the scheduling contract in serial_port.hpp.
 //
-// Connect with `pio device monitor -e console` (460800 8N1) and type:
+// Connect at 460800 8N1 (`tools/bench.py console <board>` names the
+// device, any serial monitor - incl. VSCode's built-in one - works) and type:
 //   HELP | LED ON|OFF|TOG | UPTIME | ERR
 //
 // Between keystrokes the CPU sleeps in IDLE, woken by the PIT tick or

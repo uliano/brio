@@ -3,7 +3,7 @@
 // styles) and the completion-policy hook (pass-through by default, a
 // retry ladder, the per-request attempt counter, and a retrying master
 // voting NOT-OK on a PrepareSleep).
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

@@ -8,7 +8,7 @@
 // it is an array with a counter on it. What runs on the silicon is the
 // same source with avrdx/nvm.hpp's EepromStore in its place.
 //
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

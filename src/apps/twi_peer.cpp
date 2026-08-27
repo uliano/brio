@@ -52,7 +52,7 @@
 // client can turn a byte around before it starts stretching, so its
 // clock is itself a bench fact and the DUT asks for it with `ident`.
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>

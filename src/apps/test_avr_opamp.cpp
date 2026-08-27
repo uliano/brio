@@ -37,7 +37,7 @@
 // a clock rebase | h offset calibration | i the four event users
 // | z = a..i
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>

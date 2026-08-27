@@ -1,7 +1,7 @@
 // Host tests for util/testbench.hpp: the bench suite GRAMMAR, which is
 // not decoration but the contract tools/bench.py parses. Every check
 // here is about characters on the wire and about the counters behind
-// them. Run with: pio test -e native
+// them. Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>

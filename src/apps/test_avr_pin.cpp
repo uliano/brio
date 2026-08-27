@@ -16,7 +16,7 @@
 // levels / a scope), the fully-async wake (needs standby - queued
 // with RUNSTDBY), the buttons PA2..PA5 (a human extra).
 
-// pio: monitor_speed = 460800
+// build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -46,7 +46,9 @@ volatile uint16_t d3_irqs = 0, c6_irqs = 0, c7_irqs = 0;
 
 void clear_irqs() {
     cli();
-    d3_irqs = c6_irqs = c7_irqs = 0;
+    c7_irqs = 0;
+    c6_irqs = c7_irqs;
+    d3_irqs = c6_irqs;
     sei();
 }
 
@@ -55,11 +57,6 @@ void verdict(const char* name, bool ok) {
     if (ok) ++passed; else ++failed;
     print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
 }
-bool near(int32_t a, int32_t b, int32_t tol) {
-    const int32_t d = a > b ? a - b : b - a;
-    return d <= tol;
-}
-
 /// n edges >= 4 CLK_PER apart (the partially-async dead-time is 3).
 void toggle_d3(uint8_t n) {
     for (uint8_t i = 0; i < n; ++i) {
@@ -240,7 +237,6 @@ void t8_port() {
     quiesce();
 }
 
-uint8_t run_all_pass = 0;
 using TestFn = void (*)();
 struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
@@ -265,12 +261,12 @@ ISR(USART2_RXC_vect) { (void)Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(PORTD_PORT_vect) {
     const uint8_t f = brio::Port<'D'>::take_flags();
-    if (f & 0x08) ++d3_irqs;
+    if (f & 0x08) d3_irqs = d3_irqs + 1;
 }
 ISR(PORTC_PORT_vect) {
     const uint8_t f = brio::Port<'C'>::take_flags();
-    if (f & 0x40) ++c6_irqs;
-    if (f & 0x80) ++c7_irqs;
+    if (f & 0x40) c6_irqs = c6_irqs + 1;
+    if (f & 0x80) c7_irqs = c7_irqs + 1;
 }
 
 int main() {

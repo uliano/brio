@@ -1,6 +1,6 @@
 // Host tests for kernel/fsm.hpp: the HSM-ready contract on the flat
 // implementation - entry/exit ordering, transitions, pass-through chains.
-// Run with: pio test -e native
+// Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>
