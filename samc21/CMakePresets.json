@@ -1,0 +1,35 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "samc21j-release",
+            "displayName": "SAMC21J18A (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/samc21j-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "SAMC_MCU": "samc21j18a"
+            }
+        },
+        {
+            "name": "samc21j-debug",
+            "displayName": "SAMC21J18A (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/samc21j-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SAMC_MCU": "samc21j18a"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "samc21j-release",
+            "configurePreset": "samc21j-release"
+        },
+        {
+            "name": "samc21j-debug",
+            "configurePreset": "samc21j-debug"
+        }
+    ]
+}

@@ -76,6 +76,39 @@
                 { "text": "set breakpoint always-inserted off" }
             ],
             "internalConsoleOptions": "openOnSessionStart"
+        },
+        {
+            // SAM C21 board over the second Atmel-ICE (CMSIS-DAP/SWD),
+            // cortex-debug launching OpenOCD itself (no PyAvrOCD-style
+            // buffering shims needed - cortex-debug parses OpenOCD's
+            // stderr natively). CMake Tools' Active Folder must be samc21/
+            // and its launch target the app to debug, same
+            // ${command:cmake.launchTargetPath} contract as the AVR entry.
+            // "adapter serial" goes through openOCDPreConfigLaunchCommands
+            // (two Atmel-ICEs on this desk - the serial select is
+            // mandatory; serverArgs would append AFTER the -f configs,
+            // which still works, but pre-config is where it belongs).
+            // svdPath: the key mcu-debug.peripheral-viewer reads (same as
+            // the AVR entry); cortex-debug's own svdFile is its deprecated
+            // twin. probe-rs is NOT used (no SAM support in its chip DB).
+            "type": "cortex-debug",
+            "request": "launch",
+            "name": "Debug SAM (OpenOCD, C21J board)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${command:cmake.launchTargetPath}",
+            "servertype": "openocd",
+            "serverpath": "/sw/oss-cad-suite/bin/openocd",
+            "gdbPath": "/sw/arm-none-eabi/bin/arm-none-eabi-gdb",
+            "objdumpPath": "/sw/arm-none-eabi/bin/arm-none-eabi-objdump",
+            "openOCDPreConfigLaunchCommands": [
+                "adapter serial J42700049508"
+            ],
+            "configFiles": [
+                "interface/cmsis-dap.cfg",
+                "target/at91samdXX.cfg"
+            ],
+            "svdPath": "${workspaceFolder}/samc21/svd/ATSAMC21J18A.svd",
+            "runToEntryPoint": "main"
         }
     ]
 }
