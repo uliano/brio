@@ -33,7 +33,6 @@
 // build: boards = c21j
 
 #include <stdint.h>
-#include <variant>
 
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
