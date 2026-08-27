@@ -27,6 +27,17 @@
  * indices and is legal only while the other party is quiescent (init,
  * or after masking its interrupt).
  *
+ * TWO GRANULARITIES, ONE CONTRACT. push()/pop() move one element and
+ * suit an ISR handed one byte at a time; read_span()/consume() and
+ * write_span()/publish() hand a party the CONTIGUOUS RUN it already owns
+ * so it can move the whole thing at once - a DMA block, a memcpy, a
+ * bulk write. The spans change nothing about the concurrency model:
+ * each side still writes only its own index and reads only the other's,
+ * and the run a side is given is exactly the memory the SPSC invariant
+ * already made private to it. A span never wraps (it stops at the end of
+ * the buffer and the rest comes on the next call), and it stays valid
+ * until its own side's next operation.
+ *
  * Capacity is (size - 1): one slot is sacrificed to distinguish full from
  * empty without a shared counter (a counter would be written by both
  * sides and break the SPSC rule). No overwrite-oldest push either: the
@@ -42,10 +53,12 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <atomic>
 #include <bit>
 #include <optional>
+#include <span>
 #include <type_traits>
 
 #include "kernel/platform.hpp"
@@ -83,7 +96,7 @@ public:
                 return false;
             }
             slots_[head] = value;
-            publish(head_, next);
+            store_index(head_, next);
             return true;
         });
     }
@@ -96,8 +109,109 @@ public:
                 return std::nullopt;
             }
             const T value = slots_[tail];
-            publish(tail_, static_cast<index_t>((tail + 1) & mask));
+            store_index(tail_, static_cast<index_t>((tail + 1) & mask));
             return value;
+        });
+    }
+
+    // ---- bulk access: the contiguous run each side owns right now ---------
+    //
+    // push() and pop() move one element per call, which is what an ISR
+    // that is handed one byte at a time wants. A party that can move
+    // MANY at once - a DMA engine given a block, a memcpy, a write()
+    // that takes a buffer - wants instead to be told where its own run
+    // of the buffer is and how long it is, do the work itself, and then
+    // say how much of it it used.
+    //
+    // THE SPSC CONTRACT IS UNCHANGED, and that is the whole design:
+    //  - the CONSUMER's run is the slots from tail_ up to head_, which
+    //    only the consumer may read and only the consumer's consume()
+    //    releases;
+    //  - the PRODUCER's run is the free slots from head_ up to one
+    //    before tail_, which only the producer may write and only the
+    //    producer's publish() hands over.
+    // Each side still writes only its own index and reads only the
+    // other's, so the lock-free path stays exactly as correct as it was
+    // for push/pop, and the guarded path wraps the same computation.
+    //
+    // A SPAN NEVER WRAPS. It stops at the end of the buffer, so a ring
+    // whose data straddles the wrap reports the first part and offers
+    // the rest on the next call. That is deliberate: a caller handing
+    // the run to a DMA block or a memcpy needs ONE contiguous region,
+    // and two calls are cheaper than the alternative of pretending.
+    //
+    // A span is valid until its OWN side's next operation on the ring;
+    // the other side cannot invalidate it (it can only make it more
+    // conservative than it needs to be, which is safe).
+
+    /// The contiguous run of elements ready to be read, starting at the
+    /// tail. Empty when the ring is empty. Consumer side only.
+    std::span<const T> read_span() const {
+        return guarded([&]() -> std::span<const T> {
+            const index_t tail = tail_;
+            const index_t head = load_other(head_);
+            if (tail == head) {
+                return {};
+            }
+            // Stop at head when the data does not wrap, at the end of
+            // the buffer when it does. THE WIDTH IS NAMED: `size` is one
+            // more than the largest index_t value at the two boundary
+            // sizes (256, 65536), so casting it down would turn the
+            // whole-buffer run into a zero-length one.
+            const uint32_t end = (head > tail) ? static_cast<uint32_t>(head) : size;
+            return {&slots_[tail], static_cast<size_t>(end - tail)};
+        });
+    }
+
+    /// Release `n` elements the consumer has finished with, oldest
+    /// first. Clamped to what is actually queued, so an over-long
+    /// release cannot walk the tail past the head. Consumer side only.
+    void consume(index_t n) {
+        guarded([&] {
+            const index_t tail = tail_;
+            const index_t available =
+                static_cast<index_t>((load_other(head_) - tail) & mask);
+            const index_t take = (n < available) ? n : available;
+            store_index(tail_, static_cast<index_t>((tail + take) & mask));
+        });
+    }
+
+    /// The contiguous run of free slots the producer may fill, starting
+    /// at the head. Empty when the ring is full. Producer side only.
+    std::span<T> write_span() {
+        return guarded([&]() -> std::span<T> {
+            const index_t head = head_;
+            const index_t tail = load_other(tail_);
+            // 32-bit throughout, for the same reason read_span() names
+            // its width: at size 65536 the whole-buffer run does not fit
+            // in index_t.
+            uint32_t room;
+            if (tail > head) {
+                // The free run ends one slot short of the tail: that
+                // spare slot is what tells full from empty.
+                room = static_cast<uint32_t>(tail) - head - 1u;
+            } else {
+                // Up to the end of the buffer - and one short of it when
+                // the tail sits at zero, for the same reason.
+                room = size - head - (tail == 0u ? 1u : 0u);
+            }
+            if (room == 0u) {
+                return {};
+            }
+            return {&slots_[head], static_cast<size_t>(room)};
+        });
+    }
+
+    /// Hand `n` freshly written elements to the consumer. Clamped to the
+    /// free room, so an over-long publish cannot walk the head into the
+    /// tail and make a full ring read as empty. Producer side only.
+    void publish(index_t n) {
+        guarded([&] {
+            const index_t head = head_;
+            const index_t free_room =
+                static_cast<index_t>((load_other(tail_) - head - 1u) & mask);
+            const index_t give = (n < free_room) ? n : free_room;
+            store_index(head_, static_cast<index_t>((head + give) & mask));
         });
     }
 
@@ -145,7 +259,7 @@ private:
     }
 
     /// Publish our own index after the slot access it covers is complete.
-    static void publish(index_t& idx, index_t value) {
+    static void store_index(index_t& idx, index_t value) {
         std::atomic_signal_fence(std::memory_order_release);
         *const_cast<volatile index_t*>(&idx) = value;
     }

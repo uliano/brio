@@ -232,11 +232,50 @@ gets its dated home in `docs/design/` when taken.
   a bare polling loop), -Og keeps abort() alive so the crt must
   define it. Deliberately still open (each doc's "Not covered yet"):
   the E/G variants are compile-only, bench.py knows no SAM, sleep/
-  reset/EIC/DMA are future passes. NEXT CAMPAIGN AGREED: DMAC (see
-  memory dmac-campaign-direction) - TX-DMA + tick-paced-harvest
-  RX-DMA on the serial, both engines optional compiling to zero,
-  errata 1.10.x matrix first. STM32G0x0/x1 remains the candidate
+  reset/EIC are future passes. STM32G0x0/x1 remains the candidate
   third target.
+  **DMAC campaign DONE (2026-08-27, Opus delegation, hand-verified
+  after the session hosting the agent crashed between code and docs -
+  the docs were reconstructed from the agent transcript plus a fresh
+  bench pass).** samc/dmac.hpp NEW - Dmac block (CHID select-then-use
+  guarded structurally: with_channel private, DmaChannel the only
+  friend; INTPEND take_pending() as the selector-free ISR dispatch;
+  the two 384-byte SRAM descriptor tables), DmaDescriptor/
+  dma_descriptor() (start + beats in, END-ADDRESS arithmetic out -
+  constexpr, fixture-pinned, and the datasheet disagrees with itself:
+  25.6.2.7 is right, the register descriptions' "+ 1" is not),
+  DmaChannel<n> (bounded disable wait because SWRST is IGNORED
+  silently while ENABLE drains; harvest() = suspend/read/resume in
+  ONE critical section, every write-back reading VALIDATED against
+  the loaded copy and refused on mismatch - the erratum 1.10.4
+  answer, since its workaround forbids the concurrency a duplex port
+  IS), DmaTxEngine/DmaRxEngine (peripheral-agnostic: data address +
+  trigger code handed in at arm). Uart gained two OPTIONAL engine
+  template slots (NoDmaEngine default, if constexpr throughout,
+  sercom.hpp never includes dmac.hpp): TX drains the ring's
+  read_span in blocks from the DMAC completion, RX fills write_span
+  and is published by the harvest() VERB - pacing is the port
+  owner's, per-byte error attribution traded away and said so.
+  util/ring.hpp gained the span/commit bulk API (read_span/consume,
+  write_span/publish; spans never wrap, clamped commits, SPSC
+  contract unchanged - design/ring.md). Zero-cost PROVEN: SAM
+  blink/console/probe and all 40 AVR hexes byte-identical. NEW SUITE
+  test_samc_dma z 112/112 (agent x5 + hand x2; runner-driven r 7/7,
+  i 9/9), first testbench.hpp user on SAM. Bench facts in dmac.md:
+  1.10.4 CAUGHT (340 corrupted write-backs refused in 210852
+  readings under engined churn, a MIXTURE of two channels' fields;
+  zero at low trigger density; transfers byte-exact throughout), a
+  bus-errored channel deterministically loses the FIRST beat of its
+  next block (documented nowhere), the device header's LVLEN
+  group-vs-per-level macro trap (levels 1-3 silently never enabled),
+  take_pending() could steal SUSP from a concurrent harvest (~1 per
+  70k - hence the one critical section), DMA buffers need volatile
+  BOTH directions (gcc sank a zeroing store past the transfer),
+  m2m 12 MB/s, chains 59700 blocks/s, harvest ~10 us. Errata: 1.10.4
+  live on rev F; 1.10.1..3 NOT this chip (the matrix's N-family row
+  is the trap). Deliberately not built (dmac.md): CRC engine, linked
+  lists, event hooks (no EVSYS driver), RUNSTDBY/standby, non-SERCOM
+  trigger codes.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and

@@ -2,20 +2,21 @@
 
 > **PROVISIONAL.** The asynchronous, internal-clock, 16x-arithmetic
 > USART is implemented and bench-verified end to end - the console
-> personality. The SERCOM's other three personalities (SPI host and
-> client, I2C host and client) and the USART chapter's own long tail
-> (fractional baud, synchronous mode, handshaking, LIN, IrDA,
-> auto-baud, DMA) are declared, not built. The list is in "Not
-> covered yet".
+> personality - including the two OPTIONAL DMA engines (transmit and
+> receive, each compiling to zero when not named). The SERCOM's other
+> three personalities (SPI host and client, I2C host and client) and
+> the USART chapter's own long tail (fractional baud, synchronous
+> mode, handshaking, LIN, IrDA, auto-baud) are declared, not built.
+> The list is in "Not covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M - SERCOM
 common ch. 30 (the baud generator, 30.6.2.3 table 30-2), USART
 ch. 31 - and errata DS80000740S items 1.17.15 and 1.17.16, both
 encoded in code (1.17.4 and 1.17.14 are named where their fields
 live). Driver: `samc/sercom.hpp` (`Sercom<n>` resource +
-`Uart<n, pads, rx, tx>` task). The family fixture is
-`test/family_samc/sercom.cpp` plus two negatives under
-`tools/check_samc.sh`.
+`Uart<n, pads, rx, tx, TxEngine, RxEngine>` task, the engine slots
+optional). The family fixture is `test/family_samc/sercom.cpp` plus
+its negatives under `tools/check_samc.sh`.
 
 ## What the silicon does
 
@@ -97,18 +98,81 @@ whatever drives it.
   the device header's own `MUX_...` constants.
 - **`UartFormat`** - bits (5..9), parity (one enum, because FORM and
   PMODE must agree), stop bits, and the LSB-first default above.
-- **`Uart<n, pads, rx_size, tx_size>`** - the task: two SPSC rings
-  (lock-free at any size here - `atomic_width` 4 - so 64/256 are
-  console-class defaults, not a ceiling), `init(clock, baud, format)`
-  speaking hertz off the clock tag, `isr()` as the ONE handler body
-  with the AVR's edge-return contract intact (true on the RX ring's
-  empty-to-non-empty transition - the kernel wakeup), try-semantics
-  `write_byte`, `read_byte`, error counters, `rebase(hz)` for the day
-  a dynamic clock exists, `release()`. Init order is deliberate:
-  clocks, reset, configure, enable, and only THEN the pads to the
-  SERCOM - the transmitter idles high before the pad leaves PORT, so
-  no glitch start bit reaches the wire. `ByteTransport` and
-  `ClockUser` are static_asserted.
+- **`Uart<n, pads, rx_size, tx_size, TxEngine, RxEngine>`** - the
+  task: two SPSC rings (lock-free at any size here - `atomic_width` 4
+  - so 64/256 are console-class defaults, not a ceiling),
+  `init(clock, baud, format)` speaking hertz off the clock tag,
+  `isr()` as the ONE handler body with the AVR's edge-return contract
+  intact (true on the RX ring's empty-to-non-empty transition - the
+  kernel wakeup), try-semantics `write_byte`, `read_byte`, error
+  counters, `rebase(hz)` for the day a dynamic clock exists,
+  `release()`. Init order is deliberate: clocks, reset, configure,
+  enable, and only THEN the pads to the SERCOM - the transmitter
+  idles high before the pad leaves PORT, so no glitch start bit
+  reaches the wire. `ByteTransport` and `ClockUser` are
+  static_asserted. The two engine slots default to `NoDmaEngine` -
+  see "The optional DMA engines" below.
+- **The resource's DMA constants** - `Sercom<n>::dma_rx_trigger()` /
+  `dma_tx_trigger()` (table 25-2's codes, read off the device header
+  per instance beside the GCLK id and APB mask - the family fixture
+  static_asserts them against `samc/dmac.hpp`'s own spelling so the
+  two cannot drift) and `data_address()`, the one register a transfer
+  ever touches.
+
+## The optional DMA engines
+
+An application that wants DMA on a direction includes `samc/dmac.hpp`
+alongside this header and names an engine with its channel:
+
+```cpp
+using Serial = brio::Uart<5, console_pads, 64, 256,
+                          brio::DmaTxEngine<0>, brio::DmaRxEngine<1>>;
+```
+
+The engines are POLICIES, not features of the task:
+
+- **Zero when absent.** `NoDmaEngine` (the default) is a tag with
+  `present = false`; every engine branch sits behind `if constexpr`,
+  so a Uart that names no engine carries no test, no state, no code -
+  measured, not asserted: the release images of the engine-less apps
+  are byte-identical to the ones built before the parameters existed.
+  sercom.hpp never includes dmac.hpp (the engines live THERE), so a
+  program with a serial port does not carry descriptor tables.
+- **The trigger replaces the interrupt.** DRE for the transmitter and
+  RXC for the receiver are the SAME condition as the DMA trigger, so
+  whichever direction has an engine does not arm its interrupt -
+  both armed would serve every byte twice. The two directions are
+  independent: one engine is a legal shape (DMA on the bulk
+  direction, the RXC interrupt's exact per-character error
+  attribution on the other), and the two must name DIFFERENT channels
+  (compile-time refused - a channel moves bytes one way).
+- **TX drains the ring in blocks.** `write_byte`/`print` are
+  unchanged; the engine is handed the ring's contiguous run
+  (`read_span`, design/ring.md) and its completion interrupt consumes
+  exactly the block it carried and starts the next - a wrapped ring
+  goes out in two blocks. The app's DMAC handler routes completions
+  with `dma_isr(channel)`, which answers false for channels that are
+  not this transport's.
+- **RX fills the ring's free run and is HARVESTED on the caller's
+  clock.** A receive block completes only when the buffer fills -
+  on an idle line, never - so arrival is not an event anyone is told
+  about: `harvest()` suspends the channel, reads the validated
+  write-back (erratum 1.10.4, see dmac.md), publishes the fresh
+  bytes, and returns the same empty-to-non-empty edge `isr()` has, so
+  the same kernel glue works. Pacing is WHOEVER OWNS THE PORT's
+  policy - a kernel TimeEvent every few ticks is the shape brio
+  expects - and each harvest costs ~10 us of masked interrupts.
+- **What is traded away, and cannot be given back:** per-byte error
+  attribution. With RXC armed, STATUS is read before each DATA and a
+  corrupted byte is dropped precisely; with the channel consuming
+  RXC, STATUS is read once per harvest and its errors are counted
+  against the harvested run, not a byte. A protocol with its own
+  framing does not care; a console that wants exact frame-error
+  attribution should not take an RX engine.
+
+`brio::Dmac::init()` comes before the engined `init()`: the engines
+configure their channels into a block that must already own its
+descriptor tables.
 
 ## How to use it
 
@@ -149,6 +213,13 @@ int main() {
 - The enable-clears-TXEN/RXEN clause and the pull-down-only clause
   were both verified against the data sheet text verbatim - neither
   is folklore.
+- The engined transport, live on the console's own SERCOM5: print()
+  through the TX engine is byte-exact on the wire (a six-line banner
+  went out as seven DMA blocks - the ring wrap served as two spans,
+  exactly as designed); the RX engine with a tick-paced harvest
+  served a typed burst unchanged with the RXC interrupt never armed;
+  both engines at once survived the erratum-1.10.4 stress with zero
+  violations on their own channels (the full account is in dmac.md).
 
 ## Not covered yet
 
@@ -159,8 +230,6 @@ Driver gaps (not built):
   detection, auto-baud, start-of-frame/RXS wake, 9-bit data uses,
   DBGCTRL policy (1.17.4: DBGSTOP does not actually halt
   transmission - the field is exposed, the erratum named).
-- DMA triggers - the next campaign's subject, with the TX and RX
-  engines planned as options that compile to zero when absent.
 - A per-package pad table (which pins reach which pads): the same
   device-table job the PORT driver leaves open.
 

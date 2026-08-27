@@ -75,6 +75,28 @@ service reads it from there.
 - `clear()` is the ONE non-concurrent operation: it rewrites both
   indices and is legal only while the other party is quiescent (init,
   or after masking its interrupt). Documented, not guarded.
+- **Two granularities, one contract.** `push`/`pop` move one element -
+  the shape an ISR handed one byte at a time wants. The bulk half -
+  `read_span()`/`consume(n)` for the consumer, `write_span()`/
+  `publish(n)` for the producer - hands a party the CONTIGUOUS run the
+  SPSC invariant already made private to it, so a whole block can be
+  moved at once: a DMA transfer, a memcpy, a bulk write. Nothing about
+  the concurrency model changes - each side still writes only its own
+  index and reads only the other's - and the DMA case is the shape
+  that motivated it: a hardware channel writes the slots while only
+  the software side ever moves an index. Three rules make it safe:
+  - a span NEVER wraps: it stops at the end of the buffer and the
+    rest comes on the next call - a caller handing the run to a DMA
+    block needs ONE contiguous region, and two calls are cheaper than
+    pretending otherwise;
+  - a span is valid until its OWN side's next operation; the other
+    side can only make it more conservative than it needed to be;
+  - `consume`/`publish` CLAMP to what is actually available, so an
+    over-long release cannot walk an index past the other side's.
+  Nothing is visible to the consumer until `publish(n)` - written
+  slots before that are the producer's private business. The index
+  arithmetic is 32-bit where it must be: at the 65536-slot boundary
+  the whole-buffer run does not fit the index type.
 - No overwrite-oldest push: it would make the producer move `tail_`
   and break the SPSC rule that makes the lock-free path correct. A
   full ring says false; dropping and counting, or blocking, is the
@@ -94,7 +116,14 @@ never touch the critical section and that wider ones wrap every
 operation and leave the guard released. FIFO order, wrap-around, full
 rejection, the 65536-slot ring using all 65535 slots, and a simulated
 producer/consumer interleaving over a small ring are all covered
-without hardware - the point of moving Ring to `util/`.
+without hardware - the point of moving Ring to `util/`. The span half
+has its own cases: the never-wraps rule (a straddling ring served in
+two calls, both sides), the spare slot never handed out, publish and
+consume clamping, spans interleaved with push/pop without losing
+order, the guarded path wrapping the span operations too, and the
+whole-buffer span at the 65536-slot boundary where the index-width
+trap lives. The first hardware consumer is the SAM C21 Uart's DMA TX
+engine (`test_samc_dma` at the bench).
 
 ## Measured on the uart driver (-Os, avr-gcc 16.2)
 

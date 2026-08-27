@@ -70,8 +70,23 @@ Encoded in code (each with its comment citing the item):
 - **1.17.16 SERCOM Software Reset** - CTRLA.SWRST does nothing while
   CTRLA.ENABLE=0. The sercom.hpp release/recover discipline must
   never rely on SWRST from the disabled state.
+- **1.10.4 DMAC Concurrent channels triggers** (the summary table
+  files it under "Linked Descriptors") - concurrent channel triggers
+  may corrupt WRITE-BACK descriptors; E/G/J at revisions E, F and H,
+  so LIVE on this chip and positively observed at the bench. The
+  workaround Microchip offers (single channel, linked descriptors)
+  forbids concurrency itself, which a duplex serial port cannot
+  honour - dmac.hpp instead validates every write-back reading
+  against the loaded descriptor and refuses inconsistent ones
+  (dmac.md carries the measurements).
 
 NOT applicable to rev F (rev B..E items - do not code around them):
+- 1.10.1 DMAC CRCDATAIN two-instruction hazard - rev B only (and the
+  CRC engine is not built).
+- 1.10.2 / 1.10.3 DMAC linked-descriptor items - for the E/G/J family
+  these mark revisions B..D only. THE TRAP: each item's matrix also
+  carries an N-family row, and it is the N row that is marked under E
+  and F - read the row, not the column.
 - 1.2.1 System Reset (the "do not exceed 4 MHz" cap) - rev B only.
 - 1.8.1 Idle Sleep + FDPLL keeps AHB/APB running - rev B only (and
   no FDPLL in this design yet).

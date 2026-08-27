@@ -1,0 +1,295 @@
+# DMAC (SAM C21)
+
+> **PROVISIONAL.** The block, the twelve channels, memory-to-memory
+> transfers, mid-block harvesting with the erratum-1.10.4 validation,
+> and the two optional serial engines are implemented and
+> bench-verified. The CRC engine, linked descriptor lists, the event
+> system hooks and the standby sequence are declared, not built. The
+> list is in "Not covered yet".
+
+Documents of record: SAM C20/C21 data sheet DS60001479M ch. 25 - NOT
+ch. 19, where an older revision's numbering put it - and errata
+DS80000740S items 1.10.1..1.10.4, the whole matrix re-read against
+this chip (E/G/J family, silicon rev F): 1.10.4 is LIVE and measured
+here, the other three are not this silicon (see "What the silicon
+does"). Driver: `samc/dmac.hpp` (`Dmac` block + `DmaDescriptor` /
+`dma_descriptor()` + `DmaChannel<n>` + the `DmaTxEngine<ch>` /
+`DmaRxEngine<ch>` engines `samc/sercom.hpp`'s Uart takes as options).
+Family fixture `test/family_samc/dmac.cpp` plus negatives under
+`tools/check_samc.sh`; the bench suite is `test_samc_dma`.
+
+## What the silicon does
+
+**The channel registers sit behind a selector.** CHCTRLA, CHCTRLB,
+CHINTENCLR/SET, CHINTFLAG and CHSTATUS are ONE register set, not
+twelve: they talk to whatever channel was last written to CHID
+(25.8.17), so every channel access is a non-atomic select-then-use
+pair. An interrupt handler that re-arms channels (the TX engine does)
+would silently redirect main context's pair, so every CHID access in
+the driver goes through one private door that holds the PRIMASK
+critical section across both halves - structurally: `DmaChannel` is
+`Dmac`'s only friend and nothing else can name CHID at all.
+
+**INTPEND is the dispatch, and it needs no selector.** One 16-bit
+register carries the LOWEST pending channel number together with that
+channel's TERR/TCMPL/SUSP flags, and a write of {flags, id} clears
+those flags for that id (25.8.10). One read answers "which channel and
+why", one store acknowledges exactly what was read - no CHID, no
+critical section, which is what lets the handler run without fighting
+main context for the selector. Several channels pending means several
+reads: the handler loops until nothing is reported.
+
+**Descriptor memory is the driver's to provide.** BASEADDR points at
+the array of first descriptors, WRBADDR at the write-back array where
+the controller keeps each channel's ongoing state (25.6.2.3): two
+static tables of 12 x 16 bytes, 384 bytes of .bss, 16-byte aligned (a
+superset of the required 8: the stride is 0x10, so the whole array
+inherits the first entry's alignment). Both registers are
+enable-protected - a write while the block runs is DISCARDED, not
+refused - so `Dmac::init()` writes them into a stopped controller.
+The tables exist only in an image that reaches them (`gc-sections`),
+which is half of the zero-when-absent proof below.
+
+**The end-address quirk.** For an INCREMENTING side, the descriptor's
+SRCADDR/DSTADDR holds the address one beat PAST the last one - start
+plus the whole length in bytes - while a static side (a peripheral's
+DATA register) holds the plain address (25.6.2.7). Get it wrong and
+the transfer runs over the wrong memory silently. The driver never
+lets a caller near that arithmetic: `DmaTransfer` takes a start
+pointer and a BEAT count, `dma_descriptor()` computes the words, and
+the computation is constexpr so the family fixture pins it without a
+chip. The data sheet disagrees with itself here: 25.6.2.7 prints
+`+ BTCNT x BEATSIZE x 2^STEPSIZE`, the register descriptions 25.10.3
+and 25.10.4 print a stray "+ 1" that their own definition of BEATSIZE
+(bytes per beat) makes meaningless. The driver implements 25.6.2.7
+and the bench decided it by moving bytes and looking where they
+landed: a deliberately naive start-address descriptor is shown moving
+the decoy buffer that sits below the payload.
+
+**Disabling is not instantaneous, and everything behind it is
+silent.** A '0' written to CHCTRLA.ENABLE during a transfer does not
+clear until the internal buffer drains (25.8.18, 25.6.3.6) - and
+until it clears, CHCTRLB is still enable-protected and CHCTRLA.SWRST
+is still IGNORED, both silently: the SWRST bit never reads back set,
+so a wait for it to clear succeeds instantly having reset nothing.
+The driver's `enable(false)` therefore waits, bounded, and `reset()`
+refuses when the disable did not complete - see the bench findings
+for how this was caught.
+
+**Suspend is the only window into progress.** The controller keeps
+BTCNT internally and spills it to the write-back only when the
+channel loses arbitration, suspends, or disables (25.10.2). So
+mid-block progress cannot be polled - `harvest()` suspends the
+channel, reads the write-back, resumes. Two silent edges live inside
+that handshake: a SUSPEND command on a disabled channel is dropped
+(25.6.3.2), and the block can END between the enabled-test and the
+command landing - so the wait accepts "channel no longer enabled" as
+the answer it is. A RESUME on a channel that is not suspended is not
+a no-op either: it skips the next suspend action (25.6.3.3).
+
+**Erratum 1.10.4 is live on this silicon, and the write-back is
+therefore checked, never believed.** "Concurrent channels triggers"
+(the summary table files it under "Linked Descriptors"): when several
+channels are triggered concurrently, write-back descriptors may be
+corrupted - E/G/J at revisions E, F and H. Microchip's workaround
+(sequence everything through linked descriptors on a single channel)
+amounts to not using concurrent channels, which a full-duplex serial
+port cannot honour. The driver takes the other road: every field of a
+write-back except BTCNT and VALID is invariant (copied from the
+fetched descriptor, never rewritten), so `harvest()` compares them
+all against the copy it loaded, bounds-checks BTCNT, and DISCARDS a
+reading that fails, counting it in `violations()`. The corruption is
+real and was caught in the act - see the bench findings. The TX
+engine never reads a write-back at all: programmed length plus TCMPL
+is the whole truth on that side. The rest of the 1.10.x matrix:
+1.10.1 (CRC data port) is rev B only; 1.10.2 and 1.10.3 (linked
+descriptor fetch items) mark revisions B..D for E/G/J - the trap is
+that each item's matrix also has an N-family row, and for those two
+it is the N row that carries the marks under E and F. Read the row,
+not the column.
+
+**The device header's LVLEN trap.** `DMAC_CTRL_LVLEN(v)` is the group
+macro (all four level-enable bits); `DMAC_CTRL_LVLEN0(v)` masks to a
+single bit, so feeding the per-level macro a four-bit mask silently
+enables level 0 alone - and a channel whose priority level is not
+enabled is not slow, it is INVISIBLE to the arbiter (25.8.1).
+
+**Clocks are almost nothing.** The DMAC has no GCLK channel at all -
+CLK_DMAC_AHB is the whole story (25.5.3), and its AHBMASK bit is set
+out of reset. `init()` sets it anyway: "the block is clocked" is a
+promise, not an inheritance from whatever a debugger left behind.
+
+## Types and verbs
+
+- **The vocabulary** - `DmaBeat` (with `dma_beat_bytes()`: the code is
+  not the width), `DmaStep`/`DmaStepSide` (one step size per
+  descriptor, owned by the side STEPSEL names; the other side always
+  advances one beat), `DmaBlockAction` (note the clause behind
+  `none`: it suppresses TCMPL outright), `DmaEventOut`,
+  `DmaTriggerAction` (`beat` is the serial shape - one trigger, one
+  beat; `block` the memory-to-memory one), `DmaPriority`,
+  `DmaEventAction`, `DmaFlag`/`DmaStatus` masks.
+- **Triggers** - read off the device header per instance, never
+  computed: `dma_trigger_sercom_rx/tx<n>()` here (statically checked
+  against `Sercom<n>::dma_rx/tx_trigger()` in the family fixture, so
+  the two spellings cannot drift), `dma_trigger_none` for
+  software-triggered channels. Other peripherals' codes arrive with
+  the drivers that own them.
+- **`DmaTransfer` / `dma_descriptor()`** - start pointers plus beat
+  count in, register words out; zero beats or a null end yields an
+  invalid all-zero descriptor, `dma_transfer_valid()` is the
+  static_assertable predicate. `DmaDescriptor` mirrors the device
+  header's layout bit for bit (static_asserted) and is a plain
+  comparable value - which is what lets a channel keep the loaded
+  copy that judges the write-back.
+- **`Dmac`** - the block resource: `init(DmacConfig)` (reset, tables,
+  arbitration - all four levels enabled by default, round-robin and
+  DBGRUN opt-in), `take_pending()` (the INTPEND dispatch: one
+  `DmaInterrupt` per call, flags already cleared, nullopt when done),
+  block-level readbacks (INTSTATUS/BUSYCH/PENDCH/ACTIVE),
+  `descriptor(id)`/`write_back(id)`/`read_write_back(id)` (the
+  write-back is evidence, and a suite must be able to look at it),
+  `release()`.
+- **`DmaChannel<n>`** - one channel: `configure(DmaChannelConfig)`
+  (disables first: CHCTRLB is enable-protected), `load()` (descriptor
+  into the slot, copy remembered), `enable()` with the bounded
+  disable wait, `reset()` (refuses when the disable failed; clears
+  both table slots and the copy), `trigger()`/`trigger_lost()` (the
+  SWTRIGCTRL readback semantics: the bit reads set exactly when the
+  trigger was LOST to an already-pending one), `suspend()`/`resume()`,
+  flags/arming/status verbs, `harvest()` -> `DmaProgress` with the
+  1.10.4 validation, `violations()`/`suspend_timeouts()` counters.
+  Everything channel-addressed pays the CHID guard uniformly.
+- **`DmaTxEngine<ch>` / `DmaRxEngine<ch>`** - the optional Uart
+  engines (see sercom.md for the task-side contract). They know
+  nothing of SERCOMs: `arm(data_address, trigger)` takes any
+  peripheral's DATA address and trigger code, so a DAC or an SPI
+  would be served unchanged. The channel number is refused at the
+  spelling site (a static_assert in the engine, instantiated by the
+  Uart where it is named).
+
+## How to use it
+
+Memory to memory, software triggered:
+
+```cpp
+brio::Dmac::init();
+using Copy = brio::DmaChannel<0>;
+Copy::configure({});                       // no trigger: software, TRIGACT block
+Copy::load(brio::DmaTransfer{
+    .source = src, .destination = dst, .beats = 256,
+    .beat = brio::DmaBeat::byte,
+});
+Copy::arm(brio::DmaFlag::complete | brio::DmaFlag::transfer_error, true);
+Copy::enable(true);
+Copy::trigger();                           // one trigger runs the block
+```
+
+The block's one vector, dispatched by INTPEND:
+
+```cpp
+extern "C" void DMAC_Handler() {
+    while (const auto irq = brio::Dmac::take_pending()) {
+        (void)Serial::dma_isr(irq->channel);   // the engined Uart's channels
+        // ... the app's own channels dispatch on irq->channel here
+    }
+}
+```
+
+Mid-block progress, checked against 1.10.4:
+
+```cpp
+if (const auto p = Copy::harvest()) {
+    // p->done beats have landed; p->complete when the block ended
+} else {
+    // reading refused: a write-back inconsistency (counted in
+    // violations()) or the suspend timed out - ask again next time
+}
+```
+
+`Dmac::init()` comes before any engined Uart's `init()`: the engines
+configure their channels at arm time, into a block that must already
+own its tables.
+
+## Bench findings
+
+- The end-address arithmetic decided by data: the naive start-address
+  descriptor moved the DECOY buffer (payload[0]=0x50, decoy[0]=0xA0,
+  naive dst[0]=0xA0) - the "+ 1" of 25.10.3/25.10.4 is wrong and
+  25.6.2.7 is the truth.
+- Throughput at 48 MHz: a 256-byte word-beat block in 971 cycles (20
+  us, ~12 MB/s including setup); software-linked chains re-armed from
+  the TCMPL handler run 804 cycles/block (~59700 blocks/s back to
+  back). A harvest measures ~525 cycles (~10 us), which is why its
+  pacing is the caller's policy.
+- **Erratum 1.10.4 caught in the act**, twice over: under five
+  concurrent channels with the engined Uart running, 340 corrupted
+  write-backs were refused out of 210852 readings in one four-second
+  window - every one on the heavily-churned channel, and the captured
+  bad write-back is a MIXTURE: another channel's SRCADDR and BTCTRL
+  with the victim's own DSTADDR. Every transfer still landed
+  byte-exact: the corruption is in the REPORTING, and validation
+  turns it from wrong answers into refused readings. Under trigger
+  densities an order of magnitude lower (the raw-channel stress:
+  ~69000 harvest rounds, ~8600 churn blocks), violations stay ZERO -
+  the counter is the measurement, and it scales with concurrency.
+- **A channel that took a bus error loses the first beat of its next
+  block** - deterministically (the block right after the error fails
+  every time, 32 consecutive blocks after it are byte-exact), even
+  though the channel was reset, the descriptor is correct and the
+  write-back reports BTCNT=0. Documented nowhere in ch. 25. A channel
+  recovering from TERR must spend one block and discard it; the
+  driver deliberately does not hide that.
+- The LVLEN trap was caught exactly as the header comment records it:
+  two channels at level 1 sat still for four seconds while the
+  level-0 ones ran nine thousand blocks - the per-level macro had
+  masked the group write down to level 0.
+- The silent-SWRST edge was caught by data too: a 16-beat block on a
+  channel "reset" out of a still-draining disable lost its first
+  beat, fifteen bytes correct, write-back cheerfully reporting zero
+  remaining. Hence the bounded disable wait and the refusing reset.
+- The harvest handshake had a measured race worth its critical
+  section: `take_pending()` acknowledging INTPEND mid-harvest could
+  steal the SUSP flag the wait was watching - roughly one loss per
+  70000 harvests under load, exactly rare enough to be mistaken for
+  silicon. The whole suspend-read-resume now sits in one critical
+  section (~10 us of masked interrupts per harvest).
+- A DMA buffer must be volatile in BOTH directions: gcc sank a plain
+  zeroing store past the transfer that was supposed to overwrite it,
+  so the check read pre-transfer values. The compiler cannot see a
+  DMA store; both sides of shared buffers are volatile in the suite.
+- INTPEND dispatch with two channels pending serves them lowest
+  first, one loop turn each; an invalid-descriptor fetch raises
+  CHSTATUS.FERR with TERR AND SUSP together, as 25.8.22's clause
+  says (that FERR clears only on the RESUME command is 25.8.23's
+  text, encoded but not separately measured).
+- Zero when absent, measured not asserted: the release images of the
+  apps that name no DMA (blink, console, probe) are byte-identical
+  before and after this header and the Uart's engine parameters
+  existed - and the 40 AVR hexes are byte-identical after ring.hpp
+  gained the span API the TX engine drains through.
+
+## Not covered yet
+
+Driver gaps (not built):
+- The CRC engine (CRCCTRL/CRCDATAIN/CRCCHKSUM/CRCSTATUS): util/crc.hpp
+  already serves this repo's polynomials; the hardware engine (with
+  its rev-B-only data-port erratum) waits for a consumer.
+- Linked descriptor lists: legal on rev F, but 1.10.4 makes
+  software-linked chains (TCMPL re-arms the next block) the honest
+  default, and nothing has needed a chain they could not build.
+- The event system hooks: EVACT/EVIE/EVOE/EVOSEL are written as parts
+  of the words they live in, but no EVSYS driver exists on this
+  target to route events, so every value but `none` is untested
+  silicon from here.
+- QOSCTRL (left at reset), RUNSTDBY and the 25.6.7 standby sequence
+  (the power pass owns sleep on this target).
+- Trigger codes beyond the two SERCOM pairs - each arrives with the
+  driver that owns its peripheral.
+
+Implemented but not bench-verified:
+- Step sizes beyond x1 and STEPSEL=source (the arithmetic is
+  fixture-pinned, no bench letter walks a strided buffer).
+- Round-robin arbitration and DBGRUN (`DmacConfig` writes them; no
+  letter measures them).
+- The E and G variants (compile-checked by the family fixture only).
