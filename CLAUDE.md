@@ -295,10 +295,13 @@ gets its dated home in `docs/design/` when taken.
   sampled path even with OUT=ASYNC; INTFLAG fires on the SAME
   period as the flip; a mid-stream edge through the majority filter
   pays (N-1)/2 periods (the chapter's N-1 is the from-idle cost);
-  single-shot START->READY 5.1..6.5 periods; and a GCLK fact now in
-  clock.hpp's GclkConfig: DIVSEL divides by 2^(field_width+1) FIXED
-  (512 on the 8-bit generators, DIV ignored) - not the SAMD-era
-  2^(DIV+1). Docs: docs/samc/ac.md (PROVISIONAL).
+  single-shot START->READY 5.1..6.5 periods. (A GCLK claim this probe
+  also made - that DIVSEL divides by a FIXED 2^(field_width+1) - was
+  CORRECTED on 2026-08-28 by test_samc_clock letter f: it is
+  2^(DIV+1), the DIV value counts, and the probe's own OSC48M/4096 is
+  what that gives for DIV = 11. The probe's measurements are
+  unaffected; the explanation was wrong.) Docs: docs/samc/ac.md
+  (PROVISIONAL).
   **Peripheral + util campaign PLANNED AND PART-EXECUTED 2026-08-28,
   REVIEWED AND COMMITTED the same day**: Fable re-ran every gate and
   every suite by hand (incl. platform letter i across its six resets)
@@ -455,9 +458,12 @@ gets its dated home in `docs/design/` when taken.
   generator other than 0 on silicon (clock.md updated). THREE FINDINGS:
   (1) the CROSS-CHECK - OSCULP32K measured here against OSC48M reads
   32957 Hz while test_samc_platform letter c, through the watchdog and
-  SysTick, implies 32960; two witnesses sharing no mechanism, 3 Hz
-  apart, and OSCULP32K runs 5-6 per mille fast (every watchdog timeout
-  inherits that); (2) CFGA HAS NO DIVREF whatever 44.8.3 draws - the bit
+  SysTick, implies 32960, 3 Hz apart (CORRECTED 2026-08-28 by the clock
+  campaign: the two routes SHARED the OSC48M scale after all - SysTick
+  rides CLK_MAIN - so the agreement proves the chains' consistency, not
+  the frequency; on the crystal's scale both readings become ~32907 Hz),
+  and OSCULP32K runs fast of nominal (every watchdog timeout inherits
+  that); (2) CFGA HAS NO DIVREF whatever 44.8.3 draws - the bit
   does not even stay written (CFGA reads back 0x0001) and changes no
   measurement, so the device header's 8-bit CFGA_Msk is right and the
   chapter's 16-bit drawing is not; the driver REFUSES a config asking
@@ -781,6 +787,95 @@ gets its dated home in `docs/design/` when taken.
   needs ~30 periods, so a 100 Hz waveform wants ten times the samples a
   1 kHz one does. Doc: docs/samc/tcc.md (PROVISIONAL: DMA, sleep, the
   debug fault, the advanced capture modes, and 1.21.7/1.21.8 not judged).
+  **XOSC + FDPLL96M DONE 2026-08-28 (ch. 20) - PHASE E's FIRST HALF, and
+  THE BOARD FINALLY HAS A SCALE. NOT COMMITTED; awaiting Fable's
+  review.** samc/clock.hpp GREW rather than gained a neighbour, closing
+  its own declared gap: Oscctrl (the block - the STATUS register all
+  three roots report into, the seven interrupt sources behind the shared
+  IRQ 0, the CFD's event output with its published EVSYS code), Xosc
+  (crystal or external clock, the GAIN 20.8.5 makes mandatory in crystal
+  mode and which xosc_gain_for() derives from the frequency the caller
+  states, AMPGC, the STARTUP masking counter, ONDEMAND/RUNSTDBY, and the
+  clock failure detector with its safe-clock prescaler and SWBEN) and
+  Fdpll (three references, dpll_ratio_for() choosing LDR/LDRFRAC in
+  SIXTEENTHS of the reference with an exact/inexact answer,
+  dco_hz/output_hz, the output prescaler, CLKRDY as the bit that matters,
+  the on-the-fly ratio change and the lock timer's OWN GCLK channel).
+  Both have a compile-time init<cfg>() twin whose static_asserts name the
+  rule a configuration broke (four new negatives). ERRATA AS CODE, all
+  live on rev F: 1.25.1 (spurious unlocks below 25 C gate the output
+  clock away, so FdpllConfig::lock_bypass DEFAULTS TRUE - the erratum's
+  own workaround), 1.3.3 (ratio_updated() reads INTFLAG because
+  STATUS.DPLLLDRTO does not rise) and 1.3.4 (lock_timer_clock() is the
+  verb, and set_ratio() states the obligation it cannot enforce); 1.22.1
+  verified NOT this silicon by the row AND by behaviour. NEW SUITE
+  test_samc_clock z 108/108 three times, wireless. THE HEADLINE: THE
+  24 MHz CRYSTAL RAN FOR THE FIRST TIME on this board (start-up
+  554..576 us with STARTUP = 4) and weighed against it OSC48M IS
+  47.755 MHz - 5100 ppm SLOW, inside table 45-57 and a SCALE that
+  corrects every absolute frequency this stratum ever reported, all of
+  which were ratios against OSC48M multiplied by a nominal 48 MHz
+  (OSCULP32K: 33074 Hz that way, 32907 Hz against the crystal - and
+  test_samc_platform's watchdog figure rides SysTick, so those "two
+  witnesses sharing no mechanism" shared one after all). Also: A REAL
+  CLOCK FAILURE INDUCED WITH NO WIRE - clearing XTALEN leaves XIN a
+  digital input nothing drives - with XOSCFAIL, the latched INTFLAG and
+  the safe-clock switch all observed and recovered through SWBEN; the
+  DPLL's ratios EXACT to the count (127500 for LDR 23 = 48 MHz, 130156
+  for LDR 23 + 8/16 = 49 MHz, 63750 for a 96 MHz DCO divided by four),
+  lock in ~40 us, erratum 1.3.3 seen in one reading (INTFLAG 1,
+  STATUS 0), and INTFLAG.DPLLLTO PROVEN NOT TO MEAN WHAT ITS NAME SAYS
+  (with LTIME = 8 ms the loop comes up with CLKRDY = 1, LOCK = 1 and the
+  flag SET - it marks the timer finishing, which in that mode is how the
+  output is released). THE CPU RAN FROM THE CRYSTAL-LOCKED DPLL and came
+  back, console alive throughout - a proof, not a policy: Clock<> still
+  implements ClockSource::internal only, because which root CLK_MAIN
+  takes is the DynamicClock design decision, reserved. AND A CORRECTION:
+  GENCTRL's DIVSEL divides by 2^(DIV+1), NOT by a fixed 2^(field
+  width+1) - measured by counting generator 5 against generator 0 with
+  both fed by OSC48M (2, 16, 512 for DIV 0, 3, 8) and confirmed on the
+  16-bit generator 1 (512 for the same DIV 8); the AC campaign's note in
+  GclkConfig, ac.md and ac_sync_probe's comments are corrected, the
+  probe's own measurements unaffected. Docs: docs/samc/clock.md grown
+  (still PROVISIONAL: the main-clock TASK, DynamicClock, external-clock
+  mode, sleep).
+  **SUPC DONE 2026-08-28 (ch. 22) - PHASE E's SECOND HALF. NOT
+  COMMITTED.** samc/supc.hpp NEW: Supc (the block, the six flags
+  including the three BODCORE ones the chapter does not draw), BodVdd
+  (level/action/hysteresis, continuous or sampled, the enable-protection
+  AND write-synchronization dance in one verb, matches_fuses() against
+  nvm.hpp's user row - which GREW a bodvdd_hysteresis() accessor for bit
+  41), BodCore (READ-ONLY BY DESIGN: 22.6.3.4 and table 9-4 both say its
+  calibration must not change, so there is no setter to call), Vreg (no
+  enable verb at all - 22.8.6 forbids the change - only RUNSTDBY, which
+  erratum 1.8.14 makes a workaround) and Vref (the bandgap: three levels
+  out of sixteen codes, and VREFOE, which is what docs/samc/ac.md's gap
+  list was waiting for). NEW SUITE test_samc_supc z 44/44 three times,
+  wireless AND NOTHING FORCED - every threshold carries ACTION = none, so
+  STATUS.BODVDDDET still tracks and a sweep is a measurement rather than
+  a reboot. THE MEASUREMENTS: THIS BOARD RUNS AT ~5.1 V, located three
+  ways through the AC's own VDD scaler against INTREF (5251/5141/5090 mV
+  at 1.024/2.048/4.096 V, the crossing step doubling with the reference
+  as a real voltage must) - the first supply measurement here, and the
+  closing of ac.md's bandgap gap; THE BODVDD LEVEL STEP IS 48.7 mV,
+  settling table 45-18 against itself (it STATES 60 mV while its own
+  three anchors imply 47.5); enable-protection observed both ways, and
+  the finding that cost a restore: A STORE CARRYING CONFIGURATION AND
+  ENABLE = 1 TOGETHER SETS THE BIT AND LEAVES THE PROTECTED FIELDS ALONE,
+  so the protection is judged on the value being WRITTEN (configure()
+  now sets ENABLE on its own); a sampled detector NEVER reports ready
+  (22.8.4, at 20 ms with a 512 Hz sampling clock); SUPC_BODCORE reads
+  0x0028000A - enabled, action RESET - at an offset ch. 22's summary
+  marks Reserved, with its two undrawn status bits set, so the device
+  header was right and the chapter is incomplete; and ERRATUM 1.5.6 IS
+  REAL (a spurious COMP flag on a bandgap enable, seen at the 2.048 V
+  reference). The fuse row and the register agree field by field, and the
+  boot BODVDD is restored bit for bit. Doc: docs/samc/supc.md
+  (PROVISIONAL: nothing forces a brown-out, standby, BODCORE stays
+  read-only).
+  **RTC (ch. 24) NOT ATTEMPTED** - phase E's fourth chapter was reached
+  at the session's wind-down and deliberately not opened. Nothing of it
+  exists in the tree.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -1801,8 +1896,16 @@ brio/                    the framework, four strata:
     platform_sam.hpp       SamPlatform (WFI-then-enable idle, BKPT, .noinit
                            breadcrumb, atomic_width 4)
     ticker.hpp             BasicTicker<tps> over SysTick (Ticker = 1000 Hz)
-    clock.hpp              OSCCTRL/GCLK/MCLK resources + Clock<internal, hz>;
-                           calls nvm.hpp's FlashWaitStates around a change
+    clock.hpp              OSCCTRL/GCLK/MCLK: Oscctrl (the block, the shared
+                           IRQ 0, the CFD event code), Osc48m, Xosc (crystal
+                           or external clock, the mandatory gain, the startup
+                           counter, the clock failure detector + safe clock),
+                           Fdpll (three references, dpll_ratio_for in
+                           sixteenths, dco_hz/output_hz, the lock timer's own
+                           channel, three live errata as code), Gclk<n> +
+                           GclkChannel + Mclk, and the task Clock<internal,
+                           hz>; calls nvm.hpp's FlashWaitStates around a
+                           change
     nvm.hpp                NVMCTRL: Nvm (both arrays, the CMDEX command
                            discipline, erase-by-row/program-by-page with the
                            page-buffer rules, region locks, PARAM geometry) +
@@ -1872,6 +1975,14 @@ brio/                    the framework, four strata:
                            force_reset()), ResetReporter and
                            hard_fault_reset<P>() (the HardFault body an app
                            binds; it never clobbers a record panic() wrote)
+    supc.hpp               SUPC: Supc block + BodVdd (level/action/hysteresis,
+                           continuous or sampled, the enable-protection AND
+                           synchronization dance, matches_fuses() against
+                           nvm.hpp's user row) + BodCore (READ-ONLY by design:
+                           its calibration is a production value) + Vreg (no
+                           enable verb - 22.8.6 forbids the change) + Vref
+                           (the bandgap, and the VREFOE the AC's bandgap input
+                           needs)
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

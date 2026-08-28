@@ -753,10 +753,15 @@ struct NvmUserRow {
         return static_cast<uint32_t>(eeprom_rows()) * Nvm::row_size;
     }
 
-    /// SUPC.BODVDD mirrors, in force from power-on.
+    /// SUPC.BODVDD mirrors, in force from power-on (samc/supc.hpp reads
+    /// the same four fields from the register end, and its
+    /// `BodVdd::matches_fuses()` compares them).
     constexpr uint8_t bodvdd_level() const { return static_cast<uint8_t>((word0 >> 8) & 0x3Fu); }
     constexpr bool bodvdd_disabled() const { return ((word0 >> 14) & 0x1u) != 0u; }
     constexpr uint8_t bodvdd_action() const { return static_cast<uint8_t>((word0 >> 15) & 0x3u); }
+    /// Bit 41, and so the ninth bit of the SECOND word - the one field
+    /// of table 9-4 that sits away from its three companions.
+    constexpr bool bodvdd_hysteresis() const { return ((word1 >> 9) & 0x1u) != 0u; }
 
     /// WDT.CTRLA / WDT.CONFIG mirrors, in force from power-on.
     constexpr bool wdt_enabled() const { return ((word0 >> 26) & 0x1u) != 0u; }

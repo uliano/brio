@@ -76,8 +76,10 @@ using brio::crlf;
 using brio::print;
 
 // The slow sampling clock: generator 1, the only one whose LINEAR
-// divider reaches 4096 (Table 16-3: DIV[15:0]; the 8-bit generators
-// stop at 255 - and their DIVSEL path is a FIXED 512, see GclkConfig).
+// divider reaches 4096 (table 16-3: DIV[15:0]; the 8-bit generators
+// stop at 255). The DIVSEL path would reach it too - it divides by
+// 2^(DIV+1), so DIV = 11 is the same 4096 - but the linear divider says
+// the ratio in the source.
 constexpr uint8_t ac_generator = 1;
 constexpr uint32_t period = 4096;         // CPU cycles per GCLK_AC period
 constexpr uint32_t ulp_period = 1465;     // ~48e6 / 32768, nominal
@@ -566,9 +568,8 @@ int main() {
     const bool tick_ok = brio::Ticker::init(clock);
     Led::output();
 
-    // The slow sampling clock, before any letter runs. LINEAR divider:
-    // the DIVSEL path is a fixed /512 on this family (measured; the
-    // GclkConfig comment carries the clause).
+    // The slow sampling clock, before any letter runs. The LINEAR
+    // divider, so the ratio is written where a reader can see it.
     const bool gen_ok = brio::Gclk<ac_generator>::configure(
         {.source = brio::GclkSource::osc48m, .div = 4096});
 

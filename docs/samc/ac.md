@@ -54,9 +54,10 @@ exists: a synchronized output edge costs the fraction of a period to
 the next GCLK_AC edge PLUS TWO WHOLE PERIODS** - a two-stage
 synchronizer, in the classic shape. Measured as a phase-anchored
 64-step staircase (a clean sawtooth spanning exactly one period) and
-as 1000 randomized shots, on three different clockings: OSC48M/4096
-on the 16-bit generator, the fixed /512 the 8-bit generators' DIVSEL
-turns out to be, and OSCULP32K (a clock the CPU does not share).
+as 1000 randomized shots, on two independent clockings: OSC48M/4096
+on generator 1 (reached with the linear divider, and with DIVSEL and
+DIV = 11, which is the same 4096) and OSCULP32K, a clock the CPU does
+not share.
 Floor 2.05 periods, ceiling 3.03, the ~0.05 being the measurement
 chain's own constant (~210 CPU cycles, bounded by the ASYNC control
 run). Both edges behave identically.
@@ -142,13 +143,12 @@ CTRLA.SWRST/ENABLE and WINCTRL. Disabling the whole block
 (CTRLA.ENABLE = 0) stops every comparator but leaves their
 COMPCTRLn.ENABLE bits standing.
 
-**A GCLK fact found on the way** (recorded in `samc/clock.hpp` where
-the config lives): GENCTRL.DIVSEL does NOT mean "divide by
-2^(DIV+1)" on this family - the divisor becomes 2^(N+1) where N is
-the WIDTH of that generator's DIV field, a FIXED 512 for the 8-bit
-generators (measured exactly: DIV = 11 with DIVSEL set gave /512),
-131072 for generator 1. Any other ratio needs the linear divider,
-and only generator 1's reaches past 255 (table 16-3).
+**A GCLK fact this probe needed** (it lives in
+[clock.md](clock.md) and in `samc/clock.hpp`, where the config is):
+GENCTRL.DIVSEL divides by **2^(DIV+1)** - the DIV value counts, and
+the width of the field does not. The linear divisor is what this
+probe uses, and only generator 1's linear field reaches past 255
+(table 16-3).
 
 ## Types and verbs
 

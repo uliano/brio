@@ -130,7 +130,11 @@ BOARDS = {
         "board": "c21j",
         "id": None,
         "die_serial": "f9e78960-51574841-59202020-ff160321",
-        "console": "/dev/serial/by-path/pci-0000:67:00.3-usb-0:1:1.0-port0",
+        # Re-plugged 2026-08-28 (second session): the board moved from the
+        # 67:00.3 controller's direct socket to 67:00.0 port 1.2. Verified
+        # the documented way - an OpenOCD `reset run` with this console
+        # open printed the running suite's boot banner.
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0",
         "programmer": {"type": "openocd_cmsisdap", "serial": "J42700049508"},
     },
 }

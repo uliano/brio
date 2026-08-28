@@ -300,8 +300,22 @@ void tc_roots() {
         //
         // What IS assertable is that both trimmed oscillators are near
         // nominal, which is the claim an application actually depends on.
-        bench.verdict("both trimmed oscillators land within 1% of nominal",
-                      per_mille_off(*osc) < 10u && per_mille_off(*ulp) < 10u);
+        //
+        // THE BAND IS 3%, NOT 1%, AND THE REFERENCE IS WHY. This number
+        // is a ratio against OSC48M times a NOMINAL 48 MHz, and OSC48M
+        // is itself an RC: measured 5100 ppm SLOW on this die
+        // (test_samc_clock, against the crystal) with a +-5% standard
+        // calibration spec and a thermal wander of its own. The first
+        // version's 1% band was therefore mostly consumed by the
+        // REFERENCE's error - it passed at +9.3 per mille one power-on
+        // and failed at +11.5 the next, with the oscillator under test
+        // blameless both times. 3% still fails an untrimmed OSC32K
+        // (+44%) by an order of magnitude, which is this verdict's
+        // actual job; the crystal-scale truth about these oscillators
+        // lives in test_samc_clock and docs/samc/clock.md.
+        bench.verdict("both trimmed oscillators land within 3% of nominal "
+                      "(measured through OSC48M, whose own error dominates)",
+                      per_mille_off(*osc) < 30u && per_mille_off(*ulp) < 30u);
         print(serial, "  the two are within ",
               per_mille_off(*osc) > per_mille_off(*ulp)
                   ? per_mille_off(*osc) - per_mille_off(*ulp)

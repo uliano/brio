@@ -134,16 +134,22 @@ and this suite could not need wires in principle: every clock it
 measures is inside the chip. It is also the first thing in this stratum
 to run a GCLK generator other than 0 on silicon.
 
-- **The measurement agrees with an independent one to three parts in
-  ten thousand.** OSCULP32K measured here against OSC48M reads
-  **32957 Hz**; `test_samc_platform` letter c measured the same
-  oscillator by an entirely different route - the watchdog's early
-  warning timed against SysTick - and implies 32960 Hz. The two share no
-  mechanism, and they differ by 3 Hz. Neither calibrates the other; they
-  are two witnesses.
-- **OSCULP32K runs about 5 to 6 per mille fast** of its nominal
-  32768 Hz. Every timeout built on it - the watchdog above all -
-  inherits that.
+- **The measurement agrees with a second route to three parts in ten
+  thousand - but the two routes SHARE THE SCALE.** OSCULP32K measured
+  here against OSC48M reads **32957 Hz**; `test_samc_platform` letter c
+  measured the same oscillator through the watchdog's early warning
+  timed against SysTick and implies 32960 Hz, 3 Hz apart. This page
+  first read that as two witnesses sharing no mechanism. IT IS NOT:
+  SysTick runs on CLK_MAIN, which is OSC48M, so both numbers are ratios
+  against the SAME RC times a nominal 48 MHz. What the 3 Hz agreement
+  proves is the CONSISTENCY of the two measurement chains, not the
+  frequency - and the crystal, measured later, says OSC48M is about
+  5100 ppm SLOW on this die ([clock.md](clock.md)), which rescales both
+  readings to about **32907 Hz**.
+- **OSCULP32K runs fast of its nominal 32768 Hz** - about 5 to 6 per
+  mille on the OSC48M-nominal scale these suites report in, about 4 per
+  mille on the crystal's scale ([clock.md](clock.md)). Every timeout
+  built on it - the watchdog above all - inherits that.
 - **CFGA has no DIVREF, twice over.** Written with bit 15 set and
   REFNUM 1, CFGA **reads back 0x0001** - the bit does not even stay
   written - and setting it changes no measurement. The register is eight

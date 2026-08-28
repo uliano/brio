@@ -128,6 +128,17 @@ Osc32k::stop();
 From `test_samc_osc32k` (3 letters, 32 verdicts, 32/32), measured with
 `samc/freqm.hpp` against OSC48M. Nothing to wire.
 
+**THE SCALE, first.** Every absolute frequency below is a ratio against
+OSC48M multiplied by a NOMINAL 48 MHz - and OSC48M, weighed against the
+crystal after this page was first written, is about **5100 ppm SLOW on
+this die** with a +-5% calibration spec and a thermal wander of its own
+([clock.md](clock.md)). So these numbers overread by about half a per
+cent, they move a little between power-ons, and the suite's near-nominal
+verdict carries a 3% band for exactly that reason - the band covers the
+REFERENCE more than the oscillator under test. The per-step and
+percent-class findings below are unaffected; the crystal-scale values
+live in [clock.md](clock.md).
+
 - **The production trim is worth 44%.** OSC32K started with CALIB at
   zero - what a caller who never read 21.5.9 gets - measures
   **47312 Hz** against a nominal 32768. Retrimmed with the production
@@ -145,8 +156,10 @@ From `test_samc_osc32k` (3 letters, 32 verdicts, 32/32), measured with
   stability and accuracy") is about stability across conditions, and a
   single measurement at room temperature cannot see it; a verdict that
   asserted the ordering was a coin toss and has been removed. The
-  OSCULP32K figures are consistent with the two independent measurements
-  in [freqm.md](freqm.md) and [reset.md](reset.md).
+  OSCULP32K figures are consistent with the measurements in
+  [freqm.md](freqm.md) and [reset.md](reset.md) - which, as freqm.md
+  now records, all share the OSC48M scale rather than witnessing it
+  independently.
 - **A missing crystal is a false return, not a hang.** XOSC32K started
   on a board with no 32 kHz crystal never raises its ready flag, and the
   bounded wait reports that instead of spinning.
