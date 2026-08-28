@@ -202,6 +202,18 @@ witness.
 - **Two READSYNC'd reads of a running counter differ**, and the raw
   accessor afterwards returns exactly what the command fetched - which is
   what makes the two names worth having.
+- **A synchronized read is ONE BEHIND**, which the pair of names above
+  does not warn about. Measured by `test_samc_sleep` letter c, on a pair
+  clocked at 32 kHz where the effect is big enough to see: four
+  consecutive `count32()` calls on a counter that had been running for
+  six milliseconds returned **0, 196, 201, 205**. `read_sync()`'s waits
+  return before the value THIS command latched is readable, so what comes
+  back is the value the PREVIOUS one latched. The lag is one read
+  interval - invisible in a stopwatch read every few microseconds, and
+  the whole interval when reads are milliseconds apart or separated by a
+  sleep. A caller that needs the count at a MOMENT reads twice and keeps
+  the second; a caller measuring the interval between two reads of its
+  own is unaffected, because the lag cancels.
 - **PWM measured two ways at once.** On the LED's own waveform output
   (PB23 = TC3/WO1), TOP 199 at /256: duty 0 reads **0** per mille high on
   the pad, duty 199 reads **994**, duty 100 reads **488** and duty 50
@@ -249,9 +261,17 @@ Driver gaps (deliberate):
 - **DMA-driven operation.** The trigger ids are published
   (`dma_trigger_overflow`, `dma_trigger_match`), and nothing wires them
   to a `DmaChannel`; the first user is what builds that.
-- **Sleep.** `run_standby` and `on_demand` are configuration fields;
-  35.6.7's clock-request behaviour (ONDEMAND stops requesting the clock
-  while STATUS.STOP is set) has no owner until the power pass.
+- **Sleep, half of it.** `CTRLA.RUNSTDBY` is now exercised and it is
+  the load-bearing bit of the whole clock chain (`platform.md`): a TC
+  with it set counts through a standby, with its generator's and its
+  source's own RUNSTDBY clear. `on_demand` is still only a field -
+  35.6.7's clock-request behaviour, ONDEMAND stopping the request while
+  STATUS.STOP is set, has no owner.
+- **Whether `read_sync()` should wait for SYNCBUSY.COUNT to be SET
+  before waiting for it to clear.** That is the candidate fix for the
+  one-behind read above; it is not made here, because the measurement
+  that found it belongs to another chapter's suite and the change wants
+  its own pass through this one.
 - **The double-buffer surface beyond the two setters.** `CTRLA.ALOCK`,
   the UPDATE command and the buffer-valid flags are all exposed, but no
   task uses `lock_update` to stage a coordinated multi-channel update.

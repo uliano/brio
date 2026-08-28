@@ -780,6 +780,13 @@ struct FdpllConfig {
     /// jitter (20.6.5.1.5).
     bool low_power = false;
 
+    /// DPLLCTRLA.RUNSTDBY: keep the loop running through a PM standby
+    /// (samc/sleep.hpp). Clear - the reset value - lets it stop there,
+    /// and anything sourced from the DPLL then pays the whole lock time
+    /// at the next wake. ONDEMAND is never set by this driver whatever
+    /// this bit says: erratum 1.25.2 makes it non-functional in standby.
+    bool run_standby = false;
+
     /// LBYPASS: the lock signal stops gating the output clock.
     ///
     /// DEFAULT TRUE, AND THAT IS ERRATUM 1.25.1, live on every silicon
@@ -1041,9 +1048,12 @@ struct Fdpll {
 
         // ONDEMAND is cleared: a loop that stops whenever nothing asks
         // for it cannot be measured, and erratum 1.25.2 makes ONDEMAND
-        // non-functional in standby anyway. RUNSTDBY is left clear -
-        // this file takes no position on sleep.
-        OSCCTRL_REGS->OSCCTRL_DPLLCTRLA = OSCCTRL_DPLLCTRLA_ENABLE_Msk;
+        // non-functional in standby anyway. RUNSTDBY is the caller's -
+        // it decides whether the loop survives a standby or pays its
+        // lock time again at the next wake (samc/sleep.hpp).
+        OSCCTRL_REGS->OSCCTRL_DPLLCTRLA =
+            OSCCTRL_DPLLCTRLA_ENABLE_Msk |
+            (cfg.run_standby ? OSCCTRL_DPLLCTRLA_RUNSTDBY_Msk : 0u);
         if (!wait_sync(OSCCTRL_DPLLSYNCBUSY_ENABLE_Msk, spins)) {
             return false;
         }

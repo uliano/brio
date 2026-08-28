@@ -51,6 +51,24 @@
  * never moves when CLK_PER does. init()'s clock_follows assertion below
  * is what will refuse to compile on that day, which is the point.
  *
+ * ## The same caveat, in its second half: STANDBY FREEZES THIS TIMEBASE
+ * Being clocked from the CPU clock has a consequence beyond rebasing:
+ * in the PM's STANDBY sleep mode the CPU clock stops, so SysTick stops
+ * and KERNEL TIME STANDS STILL for exactly as long as the sleep lasts.
+ * Time events do not fire late by a little - they fire late by the
+ * whole slept duration, and `millis()` under-reports the wall clock by
+ * the same amount. This does NOT travel from the AVR, where the tick is
+ * the RTC's PIT on a 32 kHz oscillator and runs through every sleep
+ * mode the part has. IDLE is unaffected: MCLK and GCLK0 keep running
+ * there.
+ *
+ * The policy that follows is stated in samc/sleep.hpp and enforced
+ * nowhere in this file: standby is legitimate when the kernel has no
+ * armed time event (`TimeEvents<P>::ticks_to_next()` empty). Lifting
+ * that restriction means resynchronizing this counter from a clock that
+ * survives standby - the RTC - after every wake, and that is designed
+ * work, not a patch.
+ *
  * ## Usage
  * ```cpp
  * #include "samc/ticker.hpp"
@@ -204,6 +222,41 @@ public:
     static void resume() {
         SysTick->CTRL = SysTick->CTRL | SysTick_CTRL_TICKINT_Msk;
     }
+};
+
+/**
+ * Hold the SysTick INTERRUPT off for a scope, and put it back exactly as
+ * it was found.
+ *
+ * This exists for one reason: ERRATUM 1.8.13 (DS80000740S, live on every
+ * E/G/J revision including this one). With the standby back-bias option
+ * set - STDBYCFG.BBIASHS, whose RESET value is 1 - a SysTick interrupt
+ * that coincides exactly with a standby entry can raise a hard fault,
+ * and the workaround is to disable that interrupt before entering
+ * standby and re-enable it after. Both preconditions are the default
+ * state of a brio program, since the SysTick interrupt IS the kernel
+ * tick.
+ *
+ * It lives here rather than in samc/sleep.hpp because this file owns the
+ * SysTick register; `SamPlatform::idle()` and `Pm::sleep()` are its two
+ * users. It costs nothing in ticks: the counter is frozen across a
+ * standby whether or not its interrupt is enabled (see the caveat in
+ * this file's header).
+ *
+ * Restoring rather than unconditionally setting is what makes it safe to
+ * nest inside a `pause()`d ticker.
+ */
+struct SysTickInterruptGuard {
+    SysTickInterruptGuard() : saved_(SysTick->CTRL & SysTick_CTRL_TICKINT_Msk) {
+        SysTick->CTRL = SysTick->CTRL & ~SysTick_CTRL_TICKINT_Msk;
+    }
+    ~SysTickInterruptGuard() { SysTick->CTRL = SysTick->CTRL | saved_; }
+
+    SysTickInterruptGuard(const SysTickInterruptGuard&) = delete;
+    SysTickInterruptGuard& operator=(const SysTickInterruptGuard&) = delete;
+
+private:
+    uint32_t saved_;
 };
 
 /// The project-wide time base on this target: 1000 ticks/s (1 ms).

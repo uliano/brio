@@ -951,6 +951,80 @@ gets its dated home in `docs/design/` when taken.
   date). Doc docs/samc/rtc.md (PROVISIONAL: no tasks, sleep, the
   overflow event through EVSYS, the intermediate alarm masks, the
   12-hour rollover, XOSC1K/XOSC32K).
+  **PM + SleepSite DONE 2026-08-28 (ch. 19) - PHASE E CLOSED. NOT
+  COMMITTED.** samc/sleep.hpp NEW, the avrdx/sleep.hpp twin: `Pm` over
+  the whole of chapter 19 (which is TWO registers - SLEEPCFG's three
+  implemented modes IDLE0/IDLE2/STANDBY with the Reserved codes refused
+  both ways, STDBYCFG's VREGSMOD and BBIASHS, the readback rule spent on
+  every arming, and the one-way bus clock stated rather than hidden) and
+  `SamSleepSite`, which gives util/power.hpp its SECOND SILICON WITH NOT
+  ONE LINE CHANGED - the victory condition, and it held. THE LADDER
+  MAPPING IS THIS TARGET'S OWN DECISION and the first place brio's
+  never-deeper rule is not the identity: none -> IDLE0, light -> IDLE2,
+  standby AND deep -> STANDBY, with armed() reporting standby for a deep
+  request. `light` is IDLE2 rather than IDLE0 because there is no SEN bit
+  here: IDLE0 is both a mode and the reset value, so armed() could not
+  stay a pure read of the silicon otherwise (the price is a CAN wake from
+  light, and brio has no CAN driver). platform_sam.hpp's ONE MANDATORY
+  DEVIATION turned out to be nearly free - idle() ALREADY took whatever
+  SLEEPCFG held, because this family selects the depth there and not in
+  SCR.SLEEPDEEP, which is never written - so what it gained is a DSB and
+  a SLEEPCFG read that buys ERRATUM 1.8.13's workaround (a SysTick
+  interrupt coinciding with standby entry can hard fault while BBIASHS is
+  set, and BBIASHS is SET AT RESET): the new SysTickInterruptGuard in
+  ticker.hpp - the file that owns the register - is held across a standby
+  WFI in both idle() and Pm::sleep(). Cost measured: +52 bytes on blink,
+  +44 on console, the other twelve SAM images BYTE-IDENTICAL. THE TICK
+  RULE, this campaign's central position: SysTick rides the CPU clock and
+  the CPU clock stops, so KERNEL TIME STANDS STILL across a standby and
+  the v1 policy is HONEST RESTRICTION - standby is legitimate when
+  TimeEvents::ticks_to_next() is empty; the doc, ticker.hpp's grown
+  caveat and the suite show the pattern, and an RTC-backed resync that
+  would lift it is named as future work, not built. clock.hpp gained
+  FdpllConfig::run_standby (defaulting false, so every image but
+  test_samc_clock stayed byte-identical) and reset.hpp gained
+  Watchdog::irq(), without which the early-warning interrupt the driver
+  already had could not reach the NVIC. NEW SUITE test_samc_sleep z
+  87/87 three times, eight letters, wireless, 6 s; every sleeping letter
+  arms the WATCHDOG first so a lost wake costs a reboot and a banner
+  rather than a mute board (it fired once, exactly as designed). THE
+  NUMBERS: the SLEEPCFG bridge latency 19.6.3.3 warns about is ~5 us on a
+  48 MHz CPU (so the readback rule is not a formality); leaving IDLE0
+  costs NOTHING measurable over a polled wait while IDLE2 costs 3.5..4.4
+  us more, repeatably, on a board with no CAN traffic - which chapter 19
+  does not mention; leaving STANDBY costs 16.6..17.8 us, and SIX
+  combinations of VREGSMOD x SUPC.VREG.RUNSTDBY x BBIASHS spread 2.1 us
+  against 1.4 us of scatter in the same measurement repeated, so THIS
+  FAMILY HAS NO SEPARATE REGULATOR BILL (the AVR's was a distinct 290 us
+  item); a 499 ms standby advanced the kernel tick by 0 ms and a time
+  event 50 ms away slept over for 249 ms matured 199 ms late; THE
+  PERIPHERAL'S OWN RUNSTDBY IS THE WHOLE CLOCK REQUEST (a TC counted all
+  1024 ticks of a standby with its generator's RUNSTDBY clear, with its
+  SOURCE's clear, and on OSCULP32K which has no such bit at all - and
+  counted 13 with its own clear); XOSC KEEPS RUNNING THROUGH A STANDBY
+  whatever RUNSTDBY says and whoever is or is not asking, measured on the
+  crystal's own counter in three arrangements with a deliberate-stop
+  control, where table 19-2 says it should stop - so a standby here costs
+  NO crystal restart against the AVR's 1.77 ms; and the watchdog runs
+  through standby with its early warning as a second wake source (123 ms
+  for a 128-cycle offset). METROLOGY LESSON WORTH KEEPING: the obvious
+  wake measurement - N rounds of arm/sleep/wake differenced between IDLE
+  and STANDBY on the RTC - MEASURES NOTHING, because the loop locks to
+  the RTC and 512 rounds took 10240 ticks in both modes to the tick; a
+  sub-tick overhead is quantized away, and the answer had to be timed
+  single-shot on a through-standby crystal counter (which is itself
+  sleepwalking, hence "the bill with the supply already up", said in
+  print). A TC.HPP DEFECT FOUND ON THE WAY, documented in tc.md and
+  tc.hpp and NOT fixed here: a synchronized COUNT read is ONE BEHIND -
+  four consecutive count32() calls on a counter running for six
+  milliseconds returned 0, 196, 201, 205 - so read_sync()'s waits return
+  before the value THIS command latched is readable. Family fixture
+  test/family_samc/sleep.cpp + two negatives (a Reserved SLEEPMODE code,
+  the Reserved VREGSMOD code). Docs: platform.md GROWS its stopping half
+  and keeps PROVISIONAL (sleep CURRENT is the big gap - no meter on this
+  bench - plus the RTC-backed timebase, EIC wake, PAC, SLEEPONEXIT);
+  design/power.md records the second target holding the contract
+  unchanged; tc.md gains the one-behind read.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -1968,9 +2042,14 @@ brio/                    the framework, four strata:
                            EventUser; tables on demand
   samc/                  everything that knows sam.h (SAM C21, Cortex-M0+)
     nvic.hpp               InterruptGuard (PRIMASK) + Nvic (enable/pend/priority)
-    platform_sam.hpp       SamPlatform (WFI-then-enable idle, BKPT, .noinit
+    platform_sam.hpp       SamPlatform (idle takes whatever PM.SLEEPCFG holds -
+                           SCR.SLEEPDEEP is never written - with erratum
+                           1.8.13's guard around a standby WFI; BKPT, .noinit
                            breadcrumb, atomic_width 4)
-    ticker.hpp             BasicTicker<tps> over SysTick (Ticker = 1000 Hz)
+    ticker.hpp             BasicTicker<tps> over SysTick (Ticker = 1000 Hz) +
+                           SysTickInterruptGuard, erratum 1.8.13's workaround
+                           in the file that owns the register. THE TICK STOPS
+                           IN STANDBY: SysTick rides the CPU clock
     clock.hpp              OSCCTRL/GCLK/MCLK: Oscctrl (the block, the shared
                            IRQ 0, the CFD event code), Osc48m, Xosc (crystal
                            or external clock, the mandatory gain, the startup
@@ -2068,6 +2147,12 @@ brio/                    the framework, four strata:
                            clock select - that is osc32kctrl.hpp's RTCCTRL -
                            and erratum 1.16.3 is answered structurally: no
                            verb writes COUNT or CLOCK in pieces
+    sleep.hpp              PM: Pm (the three sleep modes with SLEEPCFG's
+                           readback rule, STDBYCFG's regulator and RAM
+                           back-bias, the guarded WFI) + SamSleepSite, the
+                           util/power.hpp adapter - and the first place the
+                           model's never-deeper rule is NOT the identity:
+                           deep maps to standby because nothing is deeper
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

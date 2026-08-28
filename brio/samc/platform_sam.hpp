@@ -12,9 +12,15 @@
  * no priority-limited critical section to be had on this core.
  *
  * The other half of the panic breadcrumb - which reset actually happened
- * and how to cause one (RSTC/WDT, the avrdx/reset.hpp analog) - is not
- * built for this target yet; this header only provides the storage the
- * record lives in, and the linker script the .noinit section it needs.
+ * and how to cause one - is samc/reset.hpp (RSTC, the watchdog,
+ * `ResetReporter` and the HardFault body); this header provides the
+ * storage the record lives in, and the linker script the .noinit section
+ * it needs.
+ *
+ * The STOPPING half is samc/sleep.hpp (PM) plus util/power.hpp's
+ * manager. Only one thing about it lands here: `idle()` takes whatever
+ * PM.SLEEPCFG holds, so a depth armed above stands - see the comment on
+ * idle() for that and for the erratum it carries.
  */
 
 #pragma once
@@ -43,15 +49,39 @@ struct SamPlatform {
     /// pending between the caller's queue check and the WFI does not put
     /// the core to sleep at all.
     ///
-    /// SCR.SLEEPDEEP IS NOT TOUCHED. Out of reset it is 0, so this is
-    /// plain sleep: the CPU stops, every peripheral and every interrupt
-    /// source stays alive. Whatever depth is armed above stands - the
-    /// exact analog of the AVR idle() honoring a standing SEN, and the
-    /// reason the future power manager will need no new kernel hook.
-    /// Arming (SCR.SLEEPDEEP + PM.SLEEPCFG) is that pass's job, not the
-    /// kernel's "nothing to do" hook's.
+    /// THE ARMED MODE STANDS. This family selects the sleep depth in
+    /// PM.SLEEPCFG, not in SCR.SLEEPDEEP, and the WFI instruction is the
+    /// same one whatever depth is selected - so honoring a mode armed
+    /// above (samc/sleep.hpp's `SamSleepSite`, driven by
+    /// util/power.hpp's manager) costs this hook no arming logic at all.
+    /// SCR.SLEEPDEEP is deliberately never written: chapter 19 does not
+    /// use it, and out of reset it is 0. With SLEEPCFG at ITS reset value
+    /// - IDLE0 - this is plain idle sleep: the CPU stops and every
+    /// peripheral and interrupt source stays alive.
+    ///
+    /// THE ONE TEST A MANAGERLESS PROGRAM PAYS FOR is the SLEEPCFG read
+    /// below, and it buys erratum 1.8.13's workaround: with the standby
+    /// back-bias option set (STDBYCFG.BBIASHS, whose reset value is 1) a
+    /// SysTick interrupt coinciding exactly with a standby entry can
+    /// hard fault, so the kernel tick's interrupt is held off across the
+    /// WFI whenever the armed mode is STANDBY. The register is read
+    /// rather than a flag kept, because SLEEPCFG IS the state: it is what
+    /// the WFI will obey. The guard costs no ticks - SysTick is clocked
+    /// from the CPU clock, so it is frozen across a standby either way
+    /// (samc/ticker.hpp's caveat, and samc/sleep.hpp's tick rule).
+    ///
+    /// The DSB is the ARM recommendation for WFI: it retires the posted
+    /// writes - the SLEEPCFG store above all - before the core stops.
     static void idle() {
-        __WFI();
+        if ((PM_REGS->PM_SLEEPCFG & PM_SLEEPCFG_SLEEPMODE_Msk) ==
+            PM_SLEEPCFG_SLEEPMODE_STANDBY) {
+            SysTickInterruptGuard guard;   // erratum 1.8.13
+            __DSB();
+            __WFI();
+        } else {
+            __DSB();
+            __WFI();
+        }
         __enable_irq();
     }
 

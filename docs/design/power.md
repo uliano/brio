@@ -11,8 +11,23 @@ it - is each target's, documented in that target's folder
 (`docs/avrdx/platform.md`).
 
 Contracts and services: `util/power.hpp`. The kernel question it needs:
-`TimeEvents<P>::ticks_to_next()` (`kernel/time_event.hpp`). The AVR
-DA/DB realization: `AvrSleepSite` over `Sleep` in `avrdx/sleep.hpp`.
+`TimeEvents<P>::ticks_to_next()` (`kernel/time_event.hpp`). The
+realizations: `AvrSleepSite` over `Sleep` in `avrdx/sleep.hpp`, and
+`SamSleepSite` over `Pm` in `samc/sleep.hpp`.
+
+**The model has a second silicon under it, and it needed no change.**
+On the SAM C21 the vote round, the unanimity rule, the `PowerLock`
+ceilings, the deadline guard and the first-event-after-wake contract
+all run on the real kernel with two voters, with `util/power.hpp`
+untouched. Two things the second target did do is prove out: the
+never-deeper mapping is no longer the identity (that family's deepest
+stop is STANDBY, so `deep` maps to it and `armed()` reports what was
+really taken), and the duty the section below places on a platform's
+idle path turned out to cost nothing there - PM.SLEEPCFG already IS
+the armed mode, so the hook takes it by not touching it. What the
+second target adds is a target-level restriction the model does not
+express: its kernel tick stops in standby, so an application there may
+only ask for standby with no time event armed (`docs/samc/platform.md`).
 
 ## The ladder
 

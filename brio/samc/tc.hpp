@@ -540,6 +540,22 @@ public:
     //
     // READING COUNT IS A COMMAND (35.6.8): READSYNC, then the two waits,
     // then the load. `*_raw()` skips it and says so.
+    //
+    // AND THE READ IS ONE BEHIND. Measured (test_samc_sleep letter c, on
+    // a pair clocked at 32 kHz where the effect is large enough to see):
+    // four consecutive count32() calls on a counter that had been
+    // running for six milliseconds returned 0, 196, 201, 205. The waits
+    // below return before the value this command latched is readable, so
+    // what comes back is the value the PREVIOUS read_sync latched. The
+    // lag is therefore ONE READ INTERVAL - invisible in a stopwatch read
+    // every few microseconds, and the whole interval when reads are
+    // milliseconds apart or separated by a sleep. A caller that needs
+    // the count AT A MOMENT reads twice and keeps the second; a caller
+    // measuring an interval between two reads of its own is unaffected,
+    // because the lag cancels. docs/samc/tc.md carries this, and whether
+    // read_sync() should instead wait for SYNCBUSY.COUNT to be SET
+    // before waiting for it to clear is an open question for the TC's
+    // own pass - it is not fixed here on a measurement made by another.
 
     static bool read_sync(uint32_t spins = 0xFFFFu) {
         return command(TcCommand::read_sync, spins) &&

@@ -256,6 +256,13 @@ struct Watchdog {
     /// enable it - the verb exists for a power pass that wants it off.
     static void bus_clock(bool on) { Mclk::apb_a(MCLK_APBAMASK_WDT_Msk, on); }
 
+    /// The watchdog's own interrupt line - the early warning's, since a
+    /// time-out resets rather than interrupts. It is not shared. The
+    /// early warning is also a WAKE-UP SOURCE from every sleep mode
+    /// (23.5.2: the counter runs wherever OSCULP32K does, which is
+    /// everywhere), which is what makes this verb worth having.
+    static constexpr IRQn_Type irq() { return WDT_IRQn; }
+
     // ---- synchronization --------------------------------------------------
 
     static constexpr uint32_t sync_mask =
