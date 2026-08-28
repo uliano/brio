@@ -791,7 +791,7 @@ gets its dated home in `docs/design/` when taken.
   1 kHz one does. Doc: docs/samc/tcc.md (PROVISIONAL: DMA, sleep, the
   debug fault, the advanced capture modes, and 1.21.7/1.21.8 not judged).
   **XOSC + FDPLL96M DONE 2026-08-28 (ch. 20) - PHASE E's FIRST HALF, and
-  THE BOARD FINALLY HAS A SCALE. NOT COMMITTED; awaiting Fable's
+  THE BOARD FINALLY HAS A SCALE. REVIEWED BY FABLE next session and COMMITTED (3d7d2e6), all eight judgment calls accepted - the review's canary re-run caught and fixed the osc32k 1% verdict the rescaling had doomed (details: memory samc-session-2026-08-28-clocks); the rest of Fable's
   review.** samc/clock.hpp GREW rather than gained a neighbour, closing
   its own declared gap: Oscctrl (the block - the STATUS register all
   three roots report into, the seven interrupt sources behind the shared
@@ -1027,7 +1027,7 @@ gets its dated home in `docs/design/` when taken.
   unchanged; tc.md gains the one-behind read.
   **ADC DONE 2026-08-28 (ch. 38, BOTH converters) - PHASE G's first
   chapter, and util/analog.hpp + analog_sampler.hpp VALIDATED UNCHANGED
-  on their second architecture. NOT COMMITTED.** samc/adc.hpp NEW over
+  on their second architecture. REVIEWED BY FABLE same day and COMMITTED (a79e039), all seven judgment calls accepted; two false claims caught at review - the build-id determinism holds, and VREFOE-vs-REFSEL-INTREF was an open gap later CLOSED by the DAC campaign.** samc/adc.hpp NEW over
   the whole chapter: `Adc<n>` for two instances that are the same
   peripheral at two addresses but NOT a symmetric pair (the device
   header's ADCn_MASTER_SLAVE_MODE gives ADC0 the host role and DUALSEL,
@@ -1113,7 +1113,7 @@ gets its dated home in `docs/design/` when taken.
   pair, the sequencer, sleep, differential mode, VREFA and everything
   needing a voltage that is not a rail, which the DAC campaign owns.
   **DAC DONE 2026-08-28 (ch. 41) - PHASE G's SECOND CHAPTER AND THE
-  SESSION THAT CLOSES THE ANALOG LOOP. NOT COMMITTED.** samc/dac.hpp NEW:
+  SESSION THAT CLOSES THE ANALOG LOOP. REVIEWED BY FABLE same day and COMMITTED (f2d550f): JC1 ruled no-code-change (init()'s false IS the truth where 1.4.10 kills ADC0), and the review hunted down the suite's one flaky verdict (letter h's one-count knife edge, rewritten).** samc/dac.hpp NEW:
   the whole small chapter as a MONOSTATE `Dac` (one instance on every
   variant - the Rtc precedent, against Adc<n>'s two), with its OWN
   reference enum `DacRef` (adc.hpp keeps `Ref` for its own REFSEL - the
@@ -1184,6 +1184,96 @@ gets its dated home in `docs/design/` when taken.
   the voltage pump, sleep, LEFTADJ on silicon, the interrupts through the
   NVIC, the SDADC's share). THREE JUDGMENT CALLS QUEUED - see memory
   samc-session-2026-08-28-dac.
+  **SDADC DONE 2026-08-28 (ch. 39) - PHASE G's THIRD CHAPTER, THE
+  CONVERTER THE MULTISLOPE WORK WILL LEAN ON. REVIEWED BY FABLE same day and COMMITTED (see memory samc-session-2026-08-28-sdadc for the rulings).**
+  samc/sdadc.hpp NEW: the whole chapter as a MONOSTATE `Sdadc` (the Rtc
+  and Dac precedent) with its OWN `SdadcRef` - four codes and NONE
+  Reserved, the only reference field of the three converters with no
+  illegal value. A 16-bit sigma-delta over THREE DIFFERENTIAL PAD PAIRS
+  (the most package-dependent map in the stratum: the E bonds pair 0
+  alone, the G adds pair 1, only the J carries pair 2) behind a
+  THIRD-ORDER SINC DECIMATION FILTER, and almost everything that
+  surprises follows from the filter rather than from a converter.
+  THE FIRST DESIGN POSITION IS THE BUS ERROR: 39.6.8 says a synchronized
+  write made while its busy bit stands is "discarded AND A BUS ERROR IS
+  GENERATED" where the ADC's and the DAC's chapters promise a silent
+  discard - a bus error on this core is a HardFault - so EVERY
+  synchronized write in this file WAITS BEFORE STORING and reports, which
+  is why `select()` is a bool where adc.hpp's is a void store.
+  THE CENTRAL MEASUREMENT, and it changed the driver: THE DATAPATH IS
+  TWENTY-FOUR BITS WIDE and 39.8.19's "left-adjusted" is NOT eight bits
+  of padding - RESULT saturates at 0x7FFFFF/0x800000 and not at a shifted
+  +/-2^15; the corrections of 39.6.3.4 act in RAW 24-BIT UNITS (an
+  OFFSETCORR of 25600 moves the reading by EXACTLY 100 counts of the
+  specified datum, and GAINCORR 2/2^0, 4/2^1, 3/2^1, 1/2^1 all land
+  within tens of raw units of the formula); and the eight bits under the
+  specified datum are REAL FILTER OUTPUT - they move where the datum is
+  bit-exact. So the driver has three result verbs (result / result24 /
+  result_raw) and `sdadc_corrected()` works in raw units.
+  MEASURED: THE PRESCALER IS LINEAR, 2 x (P + 1) - PRESCALER 3/4/7/23
+  give period ratios 1000/1249/2000/5999 against the datasheet's
+  1000/1250/2000/6000 and the DEVICE HEADER'S SAM D21 power-of-two
+  enumerators' 1000/2000/16000, which are simply wrong here; the
+  free-running period is OSR x 4 CLK_SDADC cycles EXACT (the uniform
+  +0.49 % being OSC48M's 5100 ppm against the crystal that timed it);
+  SKPCNT costs a whole decimation window each, so table 45-26's
+  single-conversion row DIVIDES where it should multiply, and 39.6.2.3's
+  "the first valid sample is the third" is LITERAL (a full-scale
+  differential reads 5478 / 27623 / 32767 at SKPCNT 0 / 1 / 2 - the SINC
+  step response caught in the act, and the reason the driver REFUSES a
+  single conversion skipping fewer than two); CTRLC and ANACTRL are NOT
+  enable-protected though 39.6.2.1 lists them, while REFCTRL is (and has
+  NO SYNCBUSY bit though 39.6.8's prose lists it); REFCTRL.REFRANGE is a
+  REAL FIELD CHAPTER 39 NEVER MENTIONS; ANACTRL's bias field is six bits
+  as the header says and not five as 39.8.21 draws.
+  THE NOISE NUMBERS THE MULTISLOPE WANTS: on a shorted differential the
+  SPECIFIED SIXTEEN BITS ARE ALL NOISE-FREE from OSR 128 up (64
+  consecutive conversions bit-identical), so the noise is only visible in
+  the raw byte below - 14/16/17/18/18 noise-free bits of 24 over the OSR
+  ladder, rms 224 -> 55 -> 30 -> 19 -> 15, an improvement per octave that
+  FLATTENS onto a thermal floor rather than a quantization one; at the
+  1.024 V bandgap the rms is 17 uV, five times quieter than table 45-27's
+  0.08 mVrms. THE OFFSET IS COMMON-MODE DRIVEN (-13.9 mV with both pads
+  at GND, +17.0 at VDD, a 44 dB common-mode rejection, and 0.6 mV at
+  mid-supply) and the chopper takes a third off it.
+  THE LINEARITY SWEEP HAD TO BE INVENTED, because the DAC cannot reach an
+  SDADC input at all (it is a REFERENCE here and nothing else): TCC1's
+  WO0 and WO1 ARE PA06 and PA07, i.e. this pair's own two pads, so two
+  PWM waveforms give a swept differential at a fixed mid-supply common
+  mode with the converter's own SINC as the reconstruction filter - and
+  at OSR 1024 the decimation window is EXACTLY 64 PWM periods, so the
+  fundamental and every harmonic land on a filter zero. Fifteen points:
+  monotonic throughout, best-fit slope 65.132 counts per duty step
+  against 64.000 ideal (a gain of +1.7 %, inside table 45-27's +/-3.4 %
+  max), intercept 4 counts, and a WORST RESIDUAL OF 4 COUNTS OF 32768
+  where 45-27 allows an INL of +/-11 LSB - reported as the COMBINED
+  nonlinearity of a duty ratio and a decimation filter and not
+  apportioned. THE +/-0.7 x VREF LIMIT DID NOT BITE at 0.875 of VREF
+  (10 counts of deviation, not a collapse), consistent with erratum
+  1.18.2 being marked revisions B..E and not F.
+  THE CROSS-CHECK between the two architectures is a RATIO and not a
+  voltage, there being no voltage both can see: the SDADC's reference
+  multiplexer puts 4.096 V / VDDANA at 791 per mille and the SAR's input
+  multiplexer at 788 - THREE PARTS IN A THOUSAND, sharing nothing but the
+  bandgap. Also: the same input against four references agrees to 0.8 %,
+  the bandgap's levels come out 1987 and 1996 per mille against 2000
+  nominal, and REFSEL = VREFB with PA04 driven to the supply reads 4171
+  where VDDANA reads 4172 - one count.
+  ERRATA: exactly ONE applies at rev F and it REPRODUCES WITH A CONTROL -
+  1.8.10 (the DAC as this converter's reference) makes the DAC's pad
+  spread go 1 -> 108 counts with ONREFBUF clear, 1 with it set, and 1
+  with the same converter running against VDDANA; the driver REQUIRES the
+  buffer for both internal references (39.8.2's own Note), so the bit was
+  cleared by hand to see it. 1.8.7's SleepWalking obligation on SWTRIG is
+  stated. 1.18.1, 1.18.2, 1.18.3 and 1.18.4 are all B or B..E - and THIS
+  REVISION'S PRINTED RESET VALUES (GAINCORR 1, SKPCNT 2) ARE 1.18.3'S OWN
+  WORKAROUND baked into the silicon.
+  NEW SUITE test_samc_sdadc z 101/101 (twice warm, once cold), 11
+  letters, WIRELESS; family fixture test/family_samc/sdadc.cpp + TEN
+  negatives; canaries dac z 108 and adc z 97; md5 gate on the reserve's
+  growth: ALL 21 pre-existing SAM images BYTE-IDENTICAL. docs/samc/
+  sdadc.md NEW PROVISIONAL, dac.md's 1.8.10 and SDADC gap lines closed.
+  JUDGMENT CALLS QUEUED - see memory samc-session-2026-08-28-sdadc.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -2334,6 +2424,19 @@ brio/                    the framework, four strata:
                            plain store that never waits, because
                            SYNCBUSY.DATABUF stands until a start event
                            consumes the value
+    sdadc.hpp              SDADC: `Sdadc`, a MONOSTATE 16-bit sigma-delta over
+                           THREE DIFFERENTIAL PAD PAIRS behind a third-order
+                           SINC decimation filter, with its OWN SdadcRef (four
+                           codes, none Reserved), the three-stage clock
+                           (GCLK / 2(P+1) / 4 / OSR), OSR and SKPCNT, the
+                           SIGNED result in all three of its widths
+                           (result() / result24() / result_raw() - the datapath
+                           is 24 bits and the corrections speak those units),
+                           the window, the post-processing, the sequencer, both
+                           event directions and the DMA trigger; every
+                           synchronized write WAITS BEFORE STORING, because
+                           39.6.8 threatens a BUS ERROR where the ADC's and the
+                           DAC's chapters promise a silent discard
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

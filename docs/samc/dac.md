@@ -191,9 +191,13 @@ is the trap this document set repeatedly.
   driver cannot know that a wake happened, so the obligation is stated
   on `empty()`. **Reproduced**, with its own control, below.
 - **1.8.10 DAC Output Reference Selection** (every revision) is live on
-  this row and inapplicable here by absence: it is about the SDADC,
-  which has no driver in this stratum. Its workaround, if one is ever
-  written, is `REFCTRL.ONREFBUF = 1` on the SDADC's side.
+  this row and belongs to the OTHER side of the same pair of pins: with
+  the SDADC converting against `REFCTRL.REFSEL = DAC`, this DAC's own
+  output goes noisy. **Reproduced with a control** by the SDADC campaign
+  (a pad spread of 1 count becoming 108 with the reference buffer off,
+  and 1 again with it on or with the SDADC running against VDDANA) - see
+  [sdadc.md](sdadc.md). Its workaround, `REFCTRL.ONREFBUF = 1`, is
+  enforced in `samc/sdadc.hpp`, not here.
 - **NOT this silicon**: 1.9.1 (dithering with right-adjusted data giving
   16 LSB of INL) is **revision B only**, so `left_adjust` is not forced
   here.
@@ -368,8 +372,12 @@ Driver gaps:
 - **The interrupts.** `EMPTY` and `UNDERRUN` are read, cleared and used
   as verdicts; neither has ever driven the NVIC, and `isr()` is
   compile-verified only.
-- **The SDADC side of everything** (41.6.8.1's third consumer, and
-  erratum 1.8.10): there is no SDADC driver in this stratum.
+- **The SDADC's use of `CTRLB.IOEN` as a REFERENCE** (41.6.8.1's third
+  consumer) is now built and measured on the other side -
+  [sdadc.md](sdadc.md) - including erratum 1.8.10. What is still not
+  measured here is what the DAC's output does electrically while the
+  SDADC loads it: the disturbance was seen through the ADC watching the
+  pad, and the load itself was not characterised.
 
 Implemented but not bench-verified:
 - **`DBGCTRL.DBGRUN`** is written and read back at the offset the device

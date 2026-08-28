@@ -45,9 +45,14 @@
  *    once, PB08 is ADC0/AIN2 and ADC1/AIN4 - and the E bonds no PORT B
  *    pad to either converter at all, which leaves ADC1 there with
  *    exactly AIN10 and AIN11.
+ *  - SDADC differential pairs: three PAIRS of pads, and the package
+ *    variation is the whole map - the E bonds pair 0 alone (PA06/PA07),
+ *    the G adds pair 1 (PB08/PB09), only the J carries pair 2
+ *    (PB06/PB07). The external reference pad VREFB (PA04) is on every
+ *    variant.
  *
  * Consumers: samc/eic.hpp, samc/tc.hpp, samc/tcc.hpp, samc/ac.hpp,
- * samc/adc.hpp, samc/dac.hpp. Each declares the MEANING of its numbers
+ * samc/adc.hpp, samc/dac.hpp, samc/sdadc.hpp. Each declares the MEANING of its numbers
  * (what an EXTINT line is, what a WO pad does); this file only says
  * which numbers exist on this device.
  */
@@ -1370,5 +1375,207 @@ template <char L, uint8_t N>
 constexpr bool dac_vout_pad_exists = dac_vout_code(L, N) >= 0;
 template <char L, uint8_t N>
 constexpr bool dac_vrefa_pad_exists = dac_vrefa_code(L, N) >= 0;
+
+// =============================================================================
+// SDADC: the single instance's parameters and its three PAD PAIRS
+// =============================================================================
+//
+// One instance on every C21 variant (ch. 39 is titled "SAM C21 only"), so
+// nothing here is keyed by number - but the pads are keyed by PAIR and by
+// POLARITY, because an SDADC input is not a pad, it is two pads. The
+// device header spells them INN<k> / INP<k> where the datasheet's own
+// signal table says AINN<k> / AINP<k>; the symbols are the header's.
+//
+// THE PACKAGE VARIATION IS THE WHOLE MAP: pair 0 (PA06/PA07) is on every
+// variant, pair 1 (PB08/PB09) is absent on the E, pair 2 (PB06/PB07)
+// exists on the J alone. So a suite that converts on pair 2 compiles for
+// exactly one package, and `sdadc_pair_exists()` is what says so.
+
+/// How many SDADC instances this device has: one on every C21, none on a
+/// C20 (whose headers this repository does not vendor - the probe is
+/// what makes that a compile-time fact rather than an assumption).
+constexpr uint8_t sdadc_count() {
+#if defined(SDADC_REGS)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/// `SDADC_EXT_CHANNELS`: how many differential pairs the MUXSEL field can
+/// NAME. It is the code space and not the bonding - which pairs a package
+/// actually carries is `sdadc_pair_exists()` below.
+constexpr uint8_t sdadc_channels() {
+#ifdef SDADC_EXT_CHANNELS
+    return SDADC_EXT_CHANNELS;
+#else
+    return 0;
+#endif
+}
+
+/// GCLK_SDADC's peripheral channel.
+constexpr uint8_t sdadc_gclk_id() {
+#ifdef SDADC_GCLK_ID
+    return SDADC_GCLK_ID;
+#else
+    return 0xFF;
+#endif
+}
+
+/// The DMAC trigger id of the one DMA request this peripheral has
+/// (RESRDY, 39.6.4).
+constexpr uint8_t sdadc_dma_resrdy_id() {
+#ifdef SDADC_DMAC_ID_RESRDY
+    return SDADC_DMAC_ID_RESRDY;
+#else
+    return 0;
+#endif
+}
+
+/// EVSYS generator: a conversion result is available.
+constexpr uint8_t sdadc_resrdy_generator() {
+#ifdef EVENT_ID_GEN_SDADC_RESRDY
+    return EVENT_ID_GEN_SDADC_RESRDY;
+#else
+    return 0;
+#endif
+}
+
+/// EVSYS generator: the window monitor's condition matched.
+constexpr uint8_t sdadc_winmon_generator() {
+#ifdef EVENT_ID_GEN_SDADC_WINMON
+    return EVENT_ID_GEN_SDADC_WINMON;
+#else
+    return 0;
+#endif
+}
+
+/// EVSYS user: start a conversion. 39.6.6 says the SDADC uses only
+/// ASYNCHRONOUS events.
+constexpr uint8_t sdadc_start_user() {
+#ifdef EVENT_ID_USER_SDADC_START
+    return EVENT_ID_USER_SDADC_START;
+#else
+    return 0;
+#endif
+}
+
+/// EVSYS user: flush the pipeline and restart. Same path restriction.
+constexpr uint8_t sdadc_flush_user() {
+#ifdef EVENT_ID_USER_SDADC_FLUSH
+    return EVENT_ID_USER_SDADC_FLUSH;
+#else
+    return 0;
+#endif
+}
+
+// -----------------------------------------------------------------------------
+// The pads. A pad is encoded the way every switch key in this file is -
+// (port - 'A') * 32 + pin - so ONE int carries the whole coordinate and
+// the caller unpacks it with the two helpers below.
+
+/// Unpack a packed pad coordinate into its port letter.
+constexpr char sdadc_pad_port(int pad) {
+    return pad < 0 ? '\0' : static_cast<char>('A' + pad / 32);
+}
+/// Unpack a packed pad coordinate into its pin number.
+constexpr uint8_t sdadc_pad_pin(int pad) {
+    return pad < 0 ? 0xFFu : static_cast<uint8_t>(pad % 32);
+}
+
+/// Which pad is the NEGATIVE input of a pair on this package, packed, or
+/// -1 if this package does not bond it.
+constexpr int sdadc_negative_pad(uint8_t pair) {
+    switch (pair) {
+#ifdef PIN_PA06B_SDADC_INN0
+    case 0: return 0 * 32 + 6;
+#endif
+#ifdef PIN_PB08B_SDADC_INN1
+    case 1: return 1 * 32 + 8;
+#endif
+#ifdef PIN_PB06B_SDADC_INN2
+    case 2: return 1 * 32 + 6;
+#endif
+    default: return -1;
+    }
+}
+
+/// The same for the POSITIVE input of a pair.
+constexpr int sdadc_positive_pad(uint8_t pair) {
+    switch (pair) {
+#ifdef PIN_PA07B_SDADC_INP0
+    case 0: return 0 * 32 + 7;
+#endif
+#ifdef PIN_PB09B_SDADC_INP1
+    case 1: return 1 * 32 + 9;
+#endif
+#ifdef PIN_PB07B_SDADC_INP2
+    case 2: return 1 * 32 + 7;
+#endif
+    default: return -1;
+    }
+}
+
+/// A pair is usable only if BOTH its pads are bonded - derived from the
+/// two maps rather than probed a third time, so the answers cannot
+/// disagree.
+constexpr bool sdadc_pair_exists(uint8_t pair) {
+    return sdadc_negative_pad(pair) >= 0 && sdadc_positive_pad(pair) >= 0;
+}
+
+/// The peripheral FUNCTION a pad needs to be an SDADC negative input (B
+/// on this family, taken from the header's own MUX_ symbol), or -1 if it
+/// is not one on this package.
+constexpr int sdadc_inn_code(char port, uint8_t pin) {
+    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
+#ifdef PIN_PA06B_SDADC_INN0
+    case 0 * 32 + 6: return static_cast<int>(MUX_PA06B_SDADC_INN0);
+#endif
+#ifdef PIN_PB08B_SDADC_INN1
+    case 1 * 32 + 8: return static_cast<int>(MUX_PB08B_SDADC_INN1);
+#endif
+#ifdef PIN_PB06B_SDADC_INN2
+    case 1 * 32 + 6: return static_cast<int>(MUX_PB06B_SDADC_INN2);
+#endif
+    default: return -1;
+    }
+}
+
+/// The same for a positive input.
+constexpr int sdadc_inp_code(char port, uint8_t pin) {
+    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
+#ifdef PIN_PA07B_SDADC_INP0
+    case 0 * 32 + 7: return static_cast<int>(MUX_PA07B_SDADC_INP0);
+#endif
+#ifdef PIN_PB09B_SDADC_INP1
+    case 1 * 32 + 9: return static_cast<int>(MUX_PB09B_SDADC_INP1);
+#endif
+#ifdef PIN_PB07B_SDADC_INP2
+    case 1 * 32 + 7: return static_cast<int>(MUX_PB07B_SDADC_INP2);
+#endif
+    default: return -1;
+    }
+}
+
+/// The external reference pad. The datasheet's signal table and REFCTRL
+/// call it VREFB; the device header calls the pad symbol VREFP. Same pad
+/// (PA04), and it is bonded on every variant.
+constexpr int sdadc_vrefb_code(char port, uint8_t pin) {
+    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
+#ifdef PIN_PA04B_SDADC_VREFP
+    case 4: return static_cast<int>(MUX_PA04B_SDADC_VREFP);
+#endif
+    default: return -1;
+    }
+}
+
+template <uint8_t Pair>
+constexpr bool sdadc_pair_bonded = sdadc_pair_exists(Pair);
+template <char L, uint8_t N>
+constexpr bool sdadc_inn_pad_exists = sdadc_inn_code(L, N) >= 0;
+template <char L, uint8_t N>
+constexpr bool sdadc_inp_pad_exists = sdadc_inp_code(L, N) >= 0;
+template <char L, uint8_t N>
+constexpr bool sdadc_vrefb_pad_exists = sdadc_vrefb_code(L, N) >= 0;
 
 } // namespace brio
