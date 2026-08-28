@@ -213,6 +213,11 @@ Implemented but not bench verified:
   proves atomicity at every program unit runs on the simulated media,
   where the power switch is exact. On silicon the same code has been
   crashed only by a software reset, which is a clean boundary.
-- **A second target.** The two-granularity contract is exercised by two
-  geometries on the host (512/2 and 2048/8), but no second silicon has
-  run it yet.
+- **Power loss on a second silicon.** The heap now runs on two real
+  targets - the AVR DA/DB main array (512/2) and the SAM C21 RWWEE array
+  (256/64, `samc/nvm_flash.hpp`), where it mounted, allocated, sealed and
+  re-found a block with no change to this header - so the
+  two-granularity contract has been exercised by silicon and not only by
+  the host's two simulated geometries. What the second target has not
+  added is a power-cut sweep: on both, the only crash boundary exercised
+  in hardware is a software reset.

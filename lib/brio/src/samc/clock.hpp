@@ -57,6 +57,8 @@
 
 #include "sam.h"
 
+#include "samc/nvm.hpp"
+
 namespace brio {
 
 // =============================================================================
@@ -76,33 +78,11 @@ inline bool clock_wait(const volatile uint32_t& reg, uint32_t mask, bool want_se
     return false;
 }
 
-/// The flash read wait states. They belong to NVMCTRL (ch. 27), not to
-/// the clock controller - but they are a FUNCTION of the CPU frequency
-/// and nothing may raise that frequency without setting them first, so
-/// they live here until samc/nvm.hpp is born and takes them over.
-struct FlashWaitStates {
-    FlashWaitStates() = delete;
-
-    static uint8_t get() {
-        return static_cast<uint8_t>(
-            (NVMCTRL_REGS->NVMCTRL_CTRLB & NVMCTRL_CTRLB_RWS_Msk) >>
-            NVMCTRL_CTRLB_RWS_Pos);
-    }
-
-    static void set(uint8_t rws) {
-        NVMCTRL_REGS->NVMCTRL_CTRLB =
-            (NVMCTRL_REGS->NVMCTRL_CTRLB & ~NVMCTRL_CTRLB_RWS_Msk) |
-            NVMCTRL_CTRLB_RWS(rws);
-    }
-
-    /// Wait states the flash needs at `hz` (table 45-41, VDD > 2.7 V:
-    /// the conservative column - the 5 V one only buys 1 MHz at 0 WS).
-    static constexpr uint8_t for_hz(uint32_t hz) {
-        if (hz <= 19'000'000UL) return 0;
-        if (hz <= 38'000'000UL) return 1;
-        return 2;
-    }
-};
+// The flash read wait states used below are `FlashWaitStates`, and they
+// live in samc/nvm.hpp: CTRLB.RWS is NVMCTRL's register. The QUESTION is
+// this file's, because nothing may raise the CPU frequency without
+// answering it first - so the type is included here and called here, and
+// owned there.
 
 /// OSC48M output divider ratio -> the OSC48MDIV.DIV field (n divides by
 /// n + 1). Only ratios that divide 48 MHz EXACTLY are named: Clock::hz is

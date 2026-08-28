@@ -64,8 +64,10 @@ SWD). No wires - everything the bring-up uses is on the board.
 - Programmer/debugger: Atmel-ICE `J42700049508` on SWD (PA30/PA31) -
   the ICE that used to sit on AVR board B's UPDI. Flashing needs the
   cortex-debug session closed (the ICE is single-client).
-- Firmware today: `ac_sync_probe` (the AC sync-latency probe - see
-  the Apps table).
+- Desk position **C** in the manifest, driven by `tools/bench.py` like
+  any other board (`flash`/`run`/`console`); its die serial is
+  recorded there as the identity an AVR board has to be given by hand.
+- Firmware today: `test_samc_dma`.
 
 ## Multi-board bench
 
@@ -73,7 +75,7 @@ The protocol work (USART/SPI/TWI) needs two chips talking: **board A =
 the DUT** running a `test_avr_*` suite, **board B = a scriptable
 instrument peer** (clock stretching, NACK injection, arbitration, a
 foreign sender for auto-baud). The CH340 consoles are **observability
-only** - firmware always goes in over UPDI.
+only** - firmware never goes in through them.
 
 Three concerns, deliberately kept apart:
 
@@ -89,10 +91,30 @@ Three concerns, deliberately kept apart:
    Never an env per physical board. `family_probe` is the carrier of
    the matrix and the first firmware to flash onto a new board.
 2. **Identity** - `tools/bench_boards.py`, the bench **manifest**: a
-   plain dict naming each board on the desk ("A", "B" = desk
-   positions), its board type, the USERROW label it is expected to
-   carry (`id`), its console and its programmer.
+   plain dict naming each board on the desk ("A", "B", "C" = desk
+   positions, not chips), its board type, the USERROW label it is
+   expected to carry (`id`, AVR only), its console and its programmer.
 3. **Orchestration** - `tools/bench.py`, which resolves 1 against 2.
+
+**The board TYPE is what carries the architecture.** `db28`/`db32`/
+`db48` mean an AVR-Dx built by the `avrdx/` project and written by
+avrdude over UPDI; `c21j` means a SAM C21 built by `samc/` and written
+by OpenOCD over SWD. Everything above that line is one story on both -
+the same console protocol, the same `ALL: N pass, M fail` verdict
+grammar, the same campaign shape. Each project writes its own app
+roster at configure time (`build-cmake/apps_avrdx.json`,
+`build-cmake/apps_samc.json`) and the board type picks which to read:
+they must be separate files because app NAMES COLLIDE across the two
+source trees (`blink`, `console` and `probe` exist in both), so an app
+name alone never identifies an app.
+
+Identity works differently on the two families, and the SAM has it
+easier: an AVR-Dx board must be labelled by hand (a string written
+once into its USERROW) because nothing else about it is unique, while
+every SAM die carries a factory 128-bit serial number no chip erase
+can touch. The manifest records the SAM board's serial; comparing it
+back needs a driver that reads it, which does not exist yet, so
+today the check is the SWD readback spelt out in the manifest.
 
 Consoles are addressed by **`/dev/serial/by-path`**: these CH340
 bridges carry no unique USB serial number (`iSerial` = 0, so every one
@@ -113,11 +135,21 @@ a miswired desk by eye.
 # any python3 with pyserial installed (pip install --user pyserial)
 python3 tools/bench.py list                 # devices, probes, manifest (console present?)
 python3 tools/bench.py flash A test_avr_pin # cmake --build --target <app> + avrdude over UPDI
-python3 tools/bench.py run A a              # drive the console, judge "ALL: N pass, M fail"
+python3 tools/bench.py flash C test_samc_dma # ... or + OpenOCD over SWD, by board type
+python3 tools/bench.py run C z              # drive the console, judge "ALL: N pass, M fail"
 python3 tools/bench.py console A            # print device path + speed (attach a monitor)
 python3 tools/bench.py duo A:a B:script.txt # instrument peer scripted, then the DUT
 python3 tools/bench.py fuses A              # read the fuses; name=value pairs write them
 ```
+
+`flash` and `run` are architecture-blind at the command line: the board
+name resolves to a type, the type to a project and a flash mechanism.
+`fuses` is the exception and says so - it is AVR-Dx UPDI provisioning,
+and it refuses a SAM board rather than pretend (that family's
+equivalent non-volatile configuration is the NVM User Row, reached
+through NVMCTRL, for which no driver exists yet). `--erase` is
+likewise refused on SAM, where `program ... verify` erases exactly the
+sectors it writes.
 
 `run` exits nonzero on a timeout or a nonzero fail count, so a suite is
 usable from a script. The grammar it parses - the letter menu, the
@@ -431,7 +463,13 @@ stays honest because nothing under `lib/brio/src/` knows it exists.
 | `test_avr_nvheap` | **Bench test suite** (keep passing): the flash BLOCK ALLOCATOR - `util/nv_heap.hpp` over `avrdx/nvm_flash.hpp` - 4 tests / 51 verdicts, 51/51 on board B, NOTHING TO WIRE, but it NEEDS THE FUSE GEOMETRY (`bootsize=128 codesize=0`). Runs on BOARD B by design (wear rebalancing) and its blocks are MEANT to still be there afterwards. `a` mounts, prints the geometry the linker left (middle zone 0x10000..0x18000 = 64 pages, tail 0x19000..0x20000 = 56 pages of which 54 free, map home 0x1fc00..0x20000, one map version 130 bytes of 512) and round-trips a one-page block and a two-page block with an odd tail; `b` supersedes a block by id and proves the old one is served until the very seal, then watches the two map pages take turns; `c` rewrites a block in place (same address, new length and contents); `d` RESETS THE BOARD and finds the block, the map sequence and the build id intact, carrying its verdicts across the reset in a `.noinit` token so `z` still closes with one ALL: line. Outside `z`: `v`, the reflash choreography's judge - it prints per-id survived/lost and passes on either coherent state, `tables present` (5 of 5 EXACT after a default reflash, twice: page-selective erase and a `-D` rewrite of the identical image) or `clean slate` (all absent, heap empty and mountable, after `--erase`). The wear is about a dozen page erases per `z` run |
 | `test_avr_opamp` | **Bench test suite** (keep passing): OPAMP, the DB-only analog signal conditioning block - 9 tests / 96 verdicts, 96/96 on board B at 5 V, NOTHING TO WIRE, because the whole instrument is inside the chip: the DAC's buffered output on PD6 is the source, the ADC reads every op amp OUT pad (PD2, PD5, PE2), a TCB latches the READY event through EVSYS and PD0 supplies the LEVEL the DUMP and DRIVE event users need. Both converters run on VDD, so a DAC code c aims at ADC count 4c whatever the rail is. The register faces and the errata (IRSEL measured WRITABLE on this A5 die: 2.8.2 is rev. A4 only); the voltage follower over a nine-point sweep (0 mV of error at every point); the whole non-inverting ladder, exact to a permille at all eight wipers, and the whole inverting ladder about VDD/2 with its input on MUXBOT = DAC; VDD/2, ground, both op-to-op links (LINKOUT and OP0's LINKWIP) and a two-stage cascade; the chapter's three-op-amp instrumentation amplifier at all seven gains of table 35-14; the internal timer measured ENABLE-event to READY-event in hardware (one SETTLE unit = one TIMEBASE microsecond to the tick, 15 us of warm-up on a cold enable and 21 ticks on a restart, READY issued in EVENT_ENABLED mode ONLY) with a 24 -> 12 -> 24 MHz rebase proving TIMEBASE follows; the offset trim measured, stepped and improved from -490 uV to ~100 uV; and all four event users, including a RUNNING op amp holding its OUT pad against a pull-up with OUTMODE OFF and the DUMP switch turning the floating INN pad into a visible integrator. Claims all of PORTD plus PE1/PE2/PE3; PE0, the wire to the other board, is never touched |
 | `ac_sync_probe` | The AC sync-latency probe on the SAM C21 board (7 letters, 30 verdicts, wireless: PA04 GPIO-driven into COMP0 against its own VDD scaler, the CMP0 pad on PA12 read back through PORT.IN, GCLK_AC slowed to 11.7 kHz so a SysTick stopwatch resolves 1/4000 of a sampling period). Measured: the synchronized output costs the fraction to the next GCLK_AC edge + 2 whole periods (staircase + 1000 randomized shots + the independent OSCULP32K clock agree); findings in [samc/ac.md](samc/ac.md) |
-| `test_samc_dma` | **Bench test suite** (keep passing), the FIRST on the SAM C21 board and the first user of `util/testbench.hpp` on that target: the DMAC - `samc/dmac.hpp` (block, channels, harvest with the erratum-1.10.4 validation) and the Uart's two OPTIONAL DMA engines - 9 letters in `z` / 112 verdicts, 112/112, NOTHING TO WIRE (the console's own SERCOM5 is the peripheral under test; two letters that need the runner to type sit outside `z`). The end-address quirk decided by data (a naive start-address descriptor shown moving the decoy buffer); the memory-to-memory matrix; software-linked chains at ~59700 blocks/s; harvest at ~10 us with scribbled write-backs REFUSED; TCMPL/TERR/INTPEND dispatch including a real bus error and the first-beat loss that follows it; the console transmitting and receiving through DMA channels; the erratum-1.10.4 hunt (five concurrent channels, the violation counters as the verdict - zero at low trigger density, hundreds refused and zero suffered under the engined stress). Flash via the `-upload` target, console driven by hand (`tools/bench.py` knows no SAM yet) |
+| `test_samc_evsys` | **Bench test suite** (keep passing) for the SAM C21 event system - `samc/evsys.hpp` - 4 letters / 37 verdicts, 37/37, NOTHING TO WIRE: the software event supplies the stimulus and `samc/dmac.hpp` supplies the user. The measurement is A DMA TRANSFER THAT HAPPENED - a channel armed with no hardware trigger at all, so only an event can move its bytes. Letter d holds the finding the chapter does not have: a SOFTWARE event does not cross an asynchronous channel (eight of them move nothing, where one on a clocked path moves a block). Findings in [samc/evsys.md](samc/evsys.md) |
+| `test_samc_osc32k` | **Bench test suite** (keep passing) for the SAM C21 32 kHz oscillators - `samc/osc32kctrl.hpp` - 3 letters / 32 verdicts, 32/32, NOTHING TO WIRE. Its instrument is `samc/freqm.hpp`, so it could not have been written before that driver existed, and letter b is where three drivers meet: nvm.hpp reads the production trim out of the NVM calibration area, osc32kctrl.hpp writes it into the oscillator and freqm.hpp says what it was worth - **47312 Hz untrimmed against 32995 trimmed**, which is 21.5.9's insistence measured. Also measures OSCULP32K's trim as a ~900 Hz-per-step knob (the watchdog rides on it) and shows a missing crystal reported rather than hung on. Findings in [samc/osc32kctrl.md](samc/osc32kctrl.md) |
+| `test_samc_freqm` | **Bench test suite** (keep passing) for the SAM C21 frequency meter - `samc/freqm.hpp` - 4 letters / 25 verdicts, 25/25, NOTHING TO WIRE (every clock it measures is inside the chip). Also the first thing in this stratum to run a GCLK generator other than 0 on silicon. Its crown is letter d: OSCULP32K measured here against OSC48M reads 32957 Hz while `test_samc_platform` letter c, through the watchdog and SysTick, implies 32960 - two witnesses sharing no mechanism, 3 Hz apart. Letter c settles a documentation dispute by data (CFGA has no DIVREF: the bit does not even stay written) and measures the reference RC's short-term wander. Findings in [samc/freqm.md](samc/freqm.md) |
+| `serial_speed` | A PROBE (not a suite) for the SAM C21 console link: how fast it really goes and what it costs. Menu-driven at any of eight rates from 115200 to 3 Mbaud, with the transport switchable between the plain interrupt path and the DMA engines, a 64 KB transmit burst fed per-byte or in bulk, the same burst RAW (polled DRE, no ring/irq/DMA - the link's own ceiling) and an echo window. The host script checks every byte. Findings in [samc/sercom.md](samc/sercom.md): the wire is good to 3 Mbaud, 2.5 M is a divisor hole, and the per-byte API was the real limit |
+| `test_samc_platform` | **Bench test suite** (keep passing) for the SAM C21 reset controller and watchdog - `samc/reset.hpp` - 3 letters in `z` / 34 verdicts, 34/34, NOTHING TO WIRE. The boot story with RCAUSE read as the exclusive one-cause register it is, and the watchdog's power-on state checked field by field against the NVM User Row that supplied it (two drivers describing the same fuses from opposite ends); the watchdog as a configurable timer with nothing allowed to expire; and OSCULP32K measured BY DIFFERENCE through the early-warning interrupt - 1030.4 Hz against a nominal 1024, with the 3 ms arming cost that a single measurement would have hidden. Letter `i` sits OUTSIDE `z` because it reboots the board six times: a wrong CLEAR key with the watchdog stopped and then running, a panic through `ResetReporter`, a deliberate HardFault, a time-out and a window violation - 20/20, with the breadcrumb proven to cross a system reset. Run it with `bench.py run C i --expect="->"`. Findings in [samc/reset.md](samc/reset.md) |
+| `test_samc_nvm` | **Bench test suite** (keep passing) for the SAM C21 NVMCTRL - `samc/nvm.hpp` and `samc/nvm_flash.hpp` - 6 letters in `z` / 52 verdicts, 52/52, NOTHING TO WIRE. Geometry and the fuse row against PARAM and the factory areas (the die serial it prints is the one the manifest records for board C); the RWWEE erase/program round trip with every malformed request refused; THE PAGE-BUFFER ORDERING RULE decided by data (ascending and descending both exact, even-then-odd loses all eight low words - so the rule is 'one 64-bit section at a time', not 'ascending'); the cost and the no-stall claim (RWWEE row erase 989 us with ~3950 CPU polling turns inside it); `util/nv_heap.hpp` mounting and round-tripping a block on the RWWEE array, its second silicon; region locks refusing an erase and STATUS.PROGE from an invalid command. Letter `m` sits OUTSIDE `z` because it costs one row of main-array endurance: it measures the other side of the stall (ONE polling turn) and why a stalled operation cannot be timed from flash-resident code. Findings in [samc/nvm.md](samc/nvm.md) |
+| `test_samc_dma` | **Bench test suite** (keep passing), the FIRST on the SAM C21 board and the first user of `util/testbench.hpp` on that target: the DMAC - `samc/dmac.hpp` (block, channels, harvest with the erratum-1.10.4 validation) and the Uart's two OPTIONAL DMA engines - 9 letters in `z` / 112 verdicts, 112/112, NOTHING TO WIRE (the console's own SERCOM5 is the peripheral under test; two letters that need the runner to type sit outside `z`). The end-address quirk decided by data (a naive start-address descriptor shown moving the decoy buffer); the memory-to-memory matrix; software-linked chains at ~59700 blocks/s; harvest at ~10 us with scribbled write-backs REFUSED; TCMPL/TERR/INTPEND dispatch including a real bus error and the first-beat loss that follows it; the console transmitting and receiving through DMA channels; the erratum-1.10.4 hunt (five concurrent channels, the violation counters as the verdict - zero at low trigger density, hundreds refused and zero suffered under the engined stress). Driven by `tools/bench.py` like any AVR suite (`flash C test_samc_dma`, `run C z`) |
 | `test_avr_power` | **Bench test suite** (keep passing): the POWER MANAGER - `util/power.hpp`, `AvrSleepSite`, `TimeEvents::ticks_to_next()` and the one branch of `AvrPlatform::idle()` that makes them work - 5 tests / 44 verdicts, 44/44 on board B at 5 V, NOTHING TO WIRE and no pin claimed but the console. THE ONLY SUITE HERE THAT RUNS THE KERNEL: the object under test is an active object, so the rounds go through real queues, real dispatch and a real `Kernel<P, Probe, Bus, Pm>` pack - only the loop is the suite's, and where a sleep is the point it calls the kernel's own `idle_if_empty()`. A TCB pair cascaded at CLK_PER with `RUNSTDBY` on both halves is the stopwatch (it counts through the standby it is timing), the PIT is both the 1024 Hz timebase and the wake source, and a fake bus engine gives the `BusMaster` something to be busy with. `a` the ladder against `SLPCTRL.CTRLA` at every rung; `b` a real standby round - the loop frozen at exactly 32 turns over 32 ticks where awake it turns ~13500, the mode staying armed across a wake that says nothing, the 10-12 cycle wake, the 157 us round, and the first event afterwards disarming and publishing its `WakeReport`; `c` the deadline guard refusing `deep` one tick from a deadline and accepting it 1000 away; `d` the voters, with a transfer in flight aborting the round and its completion making the same request succeed; `e` the standing restrictions, nested, moved and released. Re-runnable indefinitely: it writes no nonvolatile memory and leaves nothing armed |
 | `spi_peer` | The INSTRUMENT half of the SPI campaign, for board B: one blocking loop that shifts whatever the DUT clocks, decodes a command frame off SPI0 ALT1, acknowledges it and becomes for a bounded moment whatever the DUT needs at the other end - a client in any transfer mode, bit order and buffering regime; a client that never drains, or one that misses a load on purpose; a second driver on the shared select wire (the only way to demote a real host); a self-selecting client for USART Host SPI. It is a DARK LISTENER: it drives MISO for exactly one answer window, entered only after a frame that checked out, so it can stay on the desk while the DUT runs its single-board half. Console (observability only): `?` help, `i` status and counters, `0` back to the dark client, `3` command trace |
 | `sleep_peer` | The INSTRUMENT half of the SLEEP campaign, for board B, and the only ruler that can time a wake-up: a sleeping chip cannot, because the mode stops the very counter that would. One blocking loop decodes a command frame off the shared PE0 wire (`src/apps/sleep_link.hpp`) and becomes for a bounded moment whatever the DUT needs - a train of stimulus edges on PE2, each zeroing a 32-bit CLK_PER stopwatch that the DUT's echo on PE3 CAPTURES through the event system (no software in the measurement path); one byte at a commanded baud on the same wire, for the DUT's start-of-frame wake; or one host write tenure on the office I2C bus against the DUT's TWI client, timed end to end. Its 24 MHz crystal is dead, so it counts on OSCHF - a per-cent-class reference, ample for microsecond-to-millisecond figures, and its banner and its `ident` answer both say so. Console (observability only): `?` help, `i` status, counters and the stored shot times, `0` back to command mode, `3` command trace |

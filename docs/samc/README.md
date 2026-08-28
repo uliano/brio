@@ -7,7 +7,8 @@ rather than the toolchain's gift, and the target that proved the
 kernel and util strata compile UNCHANGED on a second architecture.
 
 Peripheral documents live next to this page (`platform.md`,
-`clock.md`, `port.md`, `sercom.md`, `dmac.md`, `ac.md`); the
+`clock.md`, `port.md`, `sercom.md`, `dmac.md`, `ac.md`, `nvm.md`,
+`reset.md`, `freqm.md`, `osc32kctrl.md`, `evsys.md`); the
 datasheets of record are in
 [vendor/README.md](vendor/README.md) together with the targeted
 errata pass and the bench chip's identity (silicon rev F, DSU DID
@@ -67,8 +68,12 @@ tools/check_samc.sh [name]                                        # family smoke
 
 Build outputs land in the shared `build-cmake/samc21j-{release,debug}`
 at the repo root: `<app>.elf/.bin/.hex`, `firmware-<app>.map`,
-`<app>.lst`. `tools/bench.py` does not know SAM yet (its flash verb is
-avrdude-specific); the `-upload` target is the flash path.
+`<app>.lst`. A configure also writes this project's app roster,
+`build-cmake/apps_samc.json`, which `tools/bench.py` reads: the board's
+TYPE (`c21j`) is what tells that tool to build here and to flash
+through OpenOCD instead of avrdude, so a SAM suite is driven exactly
+like an AVR one (`bench.py flash C <app>`, `bench.py run C z`). The
+`-upload` target remains the flash path that needs no manifest.
 
 ## Upload (OpenOCD, SWD)
 

@@ -184,6 +184,16 @@ public:
     /// before it prints its half of the verdicts.
     void reset_tally() { passed_ = failed_ = 0; }
 
+    /// Restore a tally banked before a reset. The other half of
+    /// end_letter()'s reason to be public: a test that reboots the board
+    /// keeps its counts in reset-surviving storage and hands them back
+    /// here when it resumes, so the letter's closing line counts the
+    /// verdicts from BEFORE the reset as well as after.
+    void resume_tally(uint16_t pass, uint16_t fail) {
+        passed_ = pass;
+        failed_ = fail;
+    }
+
     /// How many letters are registered, and whether one is.
     uint8_t letter_count() const { return count_; }
     bool has_letter(char key) const { return find(key) != nullptr; }

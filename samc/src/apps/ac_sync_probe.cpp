@@ -38,6 +38,7 @@
 //      CPU does not share, so the phase is naturally uniform
 //
 // build: boards = c21j
+// build: monitor_speed = 115200
 
 #include <stdint.h>
 

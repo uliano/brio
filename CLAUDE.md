@@ -294,6 +294,241 @@ gets its dated home in `docs/design/` when taken.
   clock.hpp's GclkConfig: DIVSEL divides by 2^(field_width+1) FIXED
   (512 on the 8-bit generators, DIV ignored) - not the SAMD-era
   2^(DIV+1). Docs: docs/samc/ac.md (PROVISIONAL).
+  **Peripheral + util campaign PLANNED AND PART-EXECUTED 2026-08-28,
+  REVIEWED AND COMMITTED the same day**: Fable re-ran every gate and
+  every suite by hand (incl. platform letter i across its six resets)
+  and ACCEPTED all seven judgment calls the session had queued (index:
+  memory samc-session-2026-08-28). The plan itself is in memory
+  samc-peripheral-plan. The chapters split in two and the sequence alternates
+  them: chapters that give a util contract its SECOND implementation
+  and thereby validate it (NVMCTRL -> FlashMedia/NvHeap, SERCOM SPI+
+  I2C -> spi_bus/i2c_bus/BusMaster, TC/TCC -> PwmChannel +
+  MeterSource, ADC/SDADC -> analog/AnalogSampler, PM -> SleepSite),
+  and chapters where the AVR shape is simply wrong and brio must grow
+  (EVSYS is a 12-CHANNEL ALLOCATOR with numeric generator/user ids,
+  three propagation paths and a per-channel GCLK, not the AVR's
+  per-generator types; per-peripheral GCLK channels make
+  DynamicClock's "one rate for everything" an AVR assumption; the
+  NVIC's four priority levels against a flat kernel; PAC has no brio
+  concept at all; CAN has no util vocabulary). Phases: A bench
+  tooling for SAM (bench.py is avrdude-only, so test_samc_dma is not
+  re-runnable and no SAM suite can be judged - and the app roster
+  must become per-project because names COLLIDE across avrdx/ and
+  samc/: blink, console, probe exist in both); B nvm.hpp + nvm_flash
+  (also taking back the flash wait-state verb clock.hpp squats on)
+  and reset.hpp + a real HardFault breadcrumb; C EVSYS + EIC (SAM's
+  pin interrupts live in the EIC, PORT has none) and then AC's event/
+  window gaps; D TC then TCC; E OSC32KCTRL/XOSC/FDPLL96M/SUPC/RTC,
+  then the DynamicClock question and PM's SleepSite (erratum 1.8.13
+  is that phase's landmine); F SERCOM SPI and I2C, whose two-board
+  halves should use an AVR128DB as the peer - spi_peer and twi_peer
+  already exist, so the bus vocabulary gets a CROSS-ARCHITECTURE
+  proof for free; G ADC/DAC/SDADC/TSENS; H CCL, FREQM, DSU, PAC,
+  DIVAS, MTB and CAN last (new vocabulary plus a second C21 node).
+  **Phase A DONE 2026-08-28: the bench tool speaks both
+  architectures.** bench.py's BOARD_TYPES maps a board type to its
+  project, preset, mcu and flash mechanism (db* -> avrdx/avrdude/UPDI,
+  c21j -> samc/OpenOCD/SWD), so flash/run/console are
+  architecture-blind at the command line while `fuses` and `--erase`
+  refuse a SAM board and say why. The app roster became PER PROJECT
+  (apps_avrdx.json + apps_samc.json) because names collide across the
+  trees. The SAM board is desk position C in the manifest, with its
+  factory 128-bit die serial recorded as the identity an AVR board has
+  to be GIVEN by hand (no USERROW provisioning on this family).
+  Regression through the new path: test_samc_dma z 112/112. NB the
+  environment's python had NO pyserial - installed into the venv that
+  `python3` already resolves to, so the documented invocation works.
+  **Phase B1 DONE 2026-08-28: NVMCTRL, and the heap's second
+  silicon.** samc/nvm.hpp NEW (the whole of ch. 27: both arrays behind
+  one page buffer and one command register, the CMDEX key discipline
+  with sticky-error reporting, erase-by-row/program-by-page, region
+  locks, PARAM geometry cross-checked against the device header, and
+  the read-only factory views - NvmUserRow IS this family's fuse row,
+  NvmCalibration/NvmTemperatureCalibration are what future ADC/OSC32K/
+  OSC48M/TSENS drivers must copy into their peripherals, DeviceSerial
+  is board identity); FlashWaitStates MOVED here out of clock.hpp,
+  closing that file's own declared squat. samc/nvm_flash.hpp NEW:
+  RwweeFlash, and the design choice IS the RWWEE array - writing it
+  does not stall the CPU (measured: ~3950 polling turns survive a row
+  erase there against ONE on the main array), it is 4x more durable
+  (100k vs 25k cycles), and its zone is a CONSTANT because no linker
+  section can reach it, which deletes the AVR backend's hardest
+  problem. util/nv_heap.hpp compiled and ran UNCHANGED on it: the
+  erase_size/write_cell split (256/64 here vs 512/2 on AVR) is exactly
+  what made that work, and design/nv-heap.md's "second target" gap is
+  closed. NEW SUITE test_samc_nvm z 52/52 plus letter m 8/8 outside z
+  (it costs one main-array row of endurance). Findings in nvm.md: ADDR
+  is section-relative half-words (measured over SWD before a line was
+  written, then again from firmware); THE PAGE-BUFFER RULE IS NARROWER
+  THAN THE CHAPTER'S - not "write ascending" but "write both words of
+  a 64-bit section back to back", proven by descending loads coming
+  out exact while even-then-odd loses all eight low words; RWWEE row
+  erase 989 us / page write 190 us against the 6 ms / 2.5 ms maxima;
+  table 45-42's footnote limits a row to 8 consecutive writes before
+  an erase is mandatory (nowhere in ch. 27); and a stalled operation
+  CANNOT be timed by the software clock - where the tempting
+  explanation is wrong, since eight erases report eight milliseconds
+  of ticks, so no tick is lost and the counter is merely STALE for one
+  reading after a stall. NVMCTRL has NO errata (1.14.1 is Reserved,
+  its one historical item deprecated as resolved). Deliberately not
+  built: writing the user row (it is the fuses, survives chip erase,
+  carries WDT ALWAYSON - provisioning, wanting a bench.py verb over
+  SWD), the SSB security bit (one-way), the header's two undocumented
+  commands SF/WL, a main-array FlashMedia backend.
+  **Phase B2 DONE 2026-08-28: RSTC + WDT + the fault breadcrumb,
+  closing platform.md's "failing half".** samc/reset.hpp NEW: Reset
+  (RCAUSE decoded as the EXCLUSIVE one-cause register it is - the AVR's
+  accumulating RSTFR habit does NOT travel here - plus table 18-1's two
+  groups and software()), Watchdog (the whole of ch. 23: the shared
+  8<<n period encoding for PER/WINDOW/EWOFFSET, enable-protection vs
+  synchronization, the early-warning interrupt, clear() and
+  force_reset() spelled apart), ResetReporter (a panic Reporter that
+  resets so the breadcrumb is read at the next boot) and
+  hard_fault_reset<P>() (the HardFault BODY an app binds - it does NOT
+  go through panic(), because a BKPT taken from inside HardFault is a
+  LOCKUP, and it does NOT overwrite a valid record, because a fault
+  after a panic is a consequence of something already diagnosed).
+  util/testbench.hpp gained resume_tally() - the other half of the
+  already-public end_letter(), which its own comment promised
+  reset-spanning tests and never gave them a way back. NEW SUITE
+  test_samc_platform z 34/34 plus letter i 20/20 outside z (it reboots
+  the board six times). Findings in reset.md: the fuse row and the WDT
+  registers agree field by field (nvm.hpp and reset.hpp describing the
+  same fuses from opposite ends); OSCULP32K measures 1030.4 Hz BY
+  DIFFERENCE, the two-point method being what removes the constant 3 ms
+  arming cost a single measurement hides; A WRONG CLEAR KEY RESETS
+  WHETHER THE WATCHDOG RUNS OR NOT (23.6.2.4's sentence sits in the
+  Normal-mode section and reads narrower than the silicon) and is NOT
+  immediate - CLEAR is write-synchronized, and the first version of the
+  test ran past its own trigger into the next leg; the breadcrumb
+  survives a system reset, code and context intact; SYST and WDT are
+  distinguishable so two intentions cross a reset with no RAM at all.
+  THREE THINGS BIT AND ARE NOW FIXED: the crt's HardFault_Handler was
+  NOT weak although its own comment said so (an app binding it failed
+  to link); an unaligned volatile load does NOT fault, because gcc
+  emits four byte loads with shifts - only UDF is beyond the
+  compiler's reach; and THE BKPT HAZARD - a core with DHCSR.C_DEBUGEN
+  set HALTS on a BKPT instead of faulting, so break_here() stops the
+  board silently, and table 18-1 makes it STICKY (the debug logic is
+  reset only by a power-on or external reset, never by a watchdog or
+  system reset), so bench.py now clears C_DEBUGEN as the last step of
+  every SAM flash.
+  **Serial-speed probe DONE 2026-08-28 (the user's curiosity, answered
+  the same day; full story in memory samc-serial-speed).** New probe app
+  serial_speed. THE WIRE (ADuM1201 isolator + CH340) IS GOOD TO 3 MBAUD
+  - the SERCOM's own 16x ceiling at 48 MHz - proven by a raw polled
+  transmit moving 64 KB byte-exact at 299251 B/s, 99.75% of nominal and
+  6.5x the AVR bench's 460800. 2.5 Mbaud is a HOLE and not a ceiling
+  (both neighbours work; the bridge has no exact divisor for it and the
+  nearest is ~4% off). THE LIMIT WAS OUR OWN API: write()/write_byte()
+  nudges the transport PER BYTE - arm DRE, or pump_tx() - and plateaus
+  at 98.4 kB/s at every rate from 1 Mbaud up; fed that way the DMA
+  engines are SLOWER than the interrupt (57-64 kB/s at 92% CPU, a block
+  started for one byte). SO sercom.hpp GAINED write_bulk()/read_bulk(),
+  which fill or drain the ring's own contiguous run (util/ring.hpp's
+  span/commit API, added by the DMAC campaign and never exposed) and
+  nudge ONCE: at 3 Mbaud the engines then deliver 297890 B/s - 99.3% of
+  the wire - at 9% CPU, against 169343 B/s at 75% through the interrupt;
+  at 1 Mbaud they saturate the wire at 5% CPU against 70%. Echo is
+  lossless to 1 Mbaud through the interrupt transport both ways, and
+  above it loses in the SOFTWARE ring (hw_overruns stays 0). Console
+  policy this suggests: 1 Mbaud as the safe default, 3 Mbaud for
+  transmit-heavy work with DMA + bulk. OPEN AND LOOKS LIKE A REAL BUG:
+  the RX engine in FULL DUPLEX loses most of the stream and can wedge
+  the transport (print blocked on a TX ring that stops draining, the
+  halted core in Ring::push) - while TX-only through the engine is
+  flawless and test_samc_dma's duplex letter passes 112/112, so one of
+  the two shapes misses it. Not isolated; sercom.md records it.
+  **FREQM DONE 2026-08-28 (ch. 44, a one-hour peripheral).**
+  samc/freqm.hpp NEW: the hardware ratio counter, f_msr = VALUE/REFNUM x
+  f_ref between two GCLK generators, with the 24-bit overflow budget
+  (refnum_for) and erratum 1.24.1 AS CODE - reading CTRLB is a PAC
+  protection error on EVERY silicon revision with no workaround, so
+  START is written and never read and BUSY/DONE are the only evidence a
+  measurement began. NEW SUITE test_samc_freqm 25/25, wireless by
+  construction, and the first thing in this stratum to run a GCLK
+  generator other than 0 on silicon (clock.md updated). THREE FINDINGS:
+  (1) the CROSS-CHECK - OSCULP32K measured here against OSC48M reads
+  32957 Hz while test_samc_platform letter c, through the watchdog and
+  SysTick, implies 32960; two witnesses sharing no mechanism, 3 Hz
+  apart, and OSCULP32K runs 5-6 per mille fast (every watchdog timeout
+  inherits that); (2) CFGA HAS NO DIVREF whatever 44.8.3 draws - the bit
+  does not even stay written (CFGA reads back 0x0001) and changes no
+  measurement, so the device header's 8-bit CFGA_Msk is right and the
+  chapter's 16-bit drawing is not; the driver REFUSES a config asking
+  for it; (3) A REAL ORDERING BUG, caught on the bench: resetting the
+  block before its GCLK channels are connected leaves SYNCBUSY.SWRST
+  standing forever (SWRST synchronizes into a domain those channels
+  feed) - every measurement returned nothing until init() was reordered
+  to route first. Also measured: REFNUM scales the count to 6 parts in
+  10000 at REFNUM 64/128, while a 4-cycle window misses by 0..34 parts
+  in 10000 between runs - the reference RC's short-term wander, so a
+  ratio test is immune to the reference's absolute error but NOT to its
+  drift between the two measurements.
+  **OSC32KCTRL DONE 2026-08-28 (ch. 21, measured with the meter built
+  an hour earlier).** samc/osc32kctrl.hpp NEW: the three 32 kHz roots
+  (Osculp32k always-on and only trimmable, Osc32k off-at-reset and
+  needing its production trim, Xosc32k with the clock-failure detector),
+  the RTC's clock select - which lives in THIS chapter and not in the
+  RTC - and the shared IRQ 0 caveat. NEW SUITE test_samc_osc32k 32/32,
+  wireless, using samc/freqm.hpp as its instrument: LETTER B IS WHERE
+  THREE DRIVERS MEET - nvm.hpp reads the production trim out of the NVM
+  calibration area, osc32kctrl.hpp writes it into the oscillator and
+  freqm.hpp says what it was worth. THE ANSWER: 47312 Hz untrimmed
+  against 32995 trimmed, i.e. an OSC32K enabled without reading 21.5.9
+  runs 44% FAST. Also measured: OSCULP32K's trim is a ~900 Hz-per-step
+  knob (and the WATCHDOG rides on that oscillator, so trimming it moves
+  every timeout); both internal RCs land six per mille high once
+  trimmed, OSC32K marginally closer as 21.6.5 implies; a missing crystal
+  is a false return and not a hang. ONE MORE ORDERING RULE LEARNED THE
+  HARD WAY, and it belongs to GCLK rather than to this chapter: A
+  GENERATOR CANNOT BE MOVED OFF A STOPPED SOURCE (16.6.2.6 releases the
+  old source only once the new one is ready), so stopping an oscillator
+  while a generator still points at it leaves that generator unroutable
+  forever - point it somewhere running FIRST. Errata: NEITHER item
+  touching ch. 21 applies here (1.1.1 is rev B only, 1.22.1 is the
+  N-family row) - the read-the-row trap again.
+  **EVSYS DONE 2026-08-28 (ch. 29) - PHASE C's FIRST HALF, and the
+  adaptation the plan was built around.** samc/evsys.hpp NEW, and THE
+  DESIGN POSITION IS THE POINT: on the AVR the event system is a typed
+  table (per-generator types, compile-time legality); here it is an
+  ALLOCATOR - twelve identical channels, numeric codes from tables of 95
+  generators and 47 users, a GCLK per channel. Reproducing the AVR shape
+  would mean 95 types encoding a table this header has no business
+  owning, so THIS DRIVER OWNS THE FABRIC AND NOT THE VOCABULARY: a
+  peripheral that generates events publishes its generator codes, one
+  that consumes them publishes its user index. That is what keeps the
+  file short and is the thing for Fable to accept or overrule. Built:
+  the three paths with the path/edge legality enforced BOTH ways, the
+  user multiplexer's channel+1 hidden in two lines, connect() taking
+  user AND channel together so 29.6.2.3's ordering cannot be got wrong,
+  the status surface, and THREE LIVE ERRATA as code (1.12.1 refuses a
+  synchronous channel with a free-running clock - spurious overruns;
+  1.12.3 and 1.12.4 are waits the caller must spend and the header says
+  so, since it cannot know the channel clock's rate; 1.12.2 is not this
+  silicon). NEW SUITE test_samc_evsys 37/37, wireless, WITH THE DMAC AS
+  ITS EVENT USER: a DMA channel armed with NO hardware trigger, so the
+  only thing that can move its bytes is an event - the transfer is the
+  witness, which also retires dmac.md's caveat that every EVACT value
+  but none was untested silicon. THE FINDING THE CHAPTER DOES NOT HAVE:
+  A SOFTWARE EVENT DOES NOT CROSS AN ASYNCHRONOUS CHANNEL. 29.6.2.12
+  says a software event "can be serviced as any event generator" with no
+  mention of the path; measured, EIGHT of them on an async channel move
+  nothing while ONE on a clocked path moves a block - the async path has
+  no clock and no edge detector, and a register write has no width to
+  propagate. Deliberately NOT claimed: anything about a hardware
+  generator on the async path, which this suite has none to test.
+  SEVEN JUDGMENT CALLS from this session were REVIEWED AND ACCEPTED
+  at commit (none was forced by the code; full note in memory
+  samc-peripheral-plan): EVSYS owning the fabric and not the
+  vocabulary; write_bulk/read_bulk added to sercom.hpp on measurement
+  rather than on request; testbench.hpp's resume_tally() as
+  end_letter()'s reset-spanning other half; and the four below: the
+  NvHeap living in the RWWEE array; the SAM board took
+  desk position "C" (letters stay positions, so a second C21 is "D");
+  the AVR roster was RENAMED apps_manifest.json -> apps_avrdx.json for
+  symmetry with apps_samc.json; and nvm.hpp's refusal to expose user-row
+  writes means BOOTPROT and the EEPROM-emulation size are readable only.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -1007,8 +1242,10 @@ tools/check_samc.sh [name]                                         # same for th
 # "// build: opt = value" line takes effect on the next configure
 
 python3 tools/bench.py list                  # serial devices, USB probes, the bench manifest
-python3 tools/bench.py flash A test_avr_pin  # cmake --build --target <app> + avrdude over UPDI
-python3 tools/bench.py run A a               # drive the console, judge "ALL: N pass, M fail"
+python3 tools/bench.py flash A test_avr_pin  # cmake --build --target <app>, then avrdude/UPDI
+python3 tools/bench.py flash C test_samc_dma # ... or OpenOCD/SWD - the BOARD TYPE decides both
+                                             # the project to build in and the flash mechanism
+python3 tools/bench.py run C z               # drive the console, judge "ALL: N pass, M fail"
 python3 tools/bench.py console A             # device path + speed, for your own monitor
 python3 tools/bench.py duo A:a B:script.txt  # instrument peer scripted, then the DUT
 python3 tools/bench.py fuses A bootsize=128  # read/write fuses over UPDI (fuses are
@@ -1096,8 +1333,15 @@ tools/check_samc.sh      the samc twin over test/family_samc/
 tools/bench_boards.py    the bench MANIFEST: the physical boards on the desk
                          (type, console by-path, programmer) - not a target list
 tools/bench.py           the bench orchestrator: list / flash / run / console /
-                         duo, over the manifest and build-cmake/apps_manifest.json
-                         (the app roster CMake writes at every configure)
+                         duo / fuses, over the manifest and the per-project app
+                         rosters build-cmake/apps_{avrdx,samc}.json (each project
+                         writes its own at every configure - separate files
+                         because app NAMES COLLIDE across the trees: blink,
+                         console and probe exist in both). BOARD_TYPES maps a
+                         board type to its project, preset, mcu and flash
+                         mechanism (db* -> avrdx/avrdude/UPDI, c21j ->
+                         samc/OpenOCD/SWD); `fuses` and --erase are AVR-only
+                         and refuse a SAM board instead of pretending
 docs/                    README (map + rules), design/, <target>/ (avrdx/, samc/,
                          host/), bench.md
 lib/brio/src/.clangd     per-stratum clangd routing: the framework default is
@@ -1300,6 +1544,50 @@ lib/brio/src/            the framework, four strata:
                            EvTcbCaptIn/CountIn/EvLutIn + EventUserBase
                            (listen/unlisten); concepts EventGenerator/
                            EventUser; tables on demand
+  samc/                  everything that knows sam.h (SAM C21, Cortex-M0+)
+    nvic.hpp               InterruptGuard (PRIMASK) + Nvic (enable/pend/priority)
+    platform_sam.hpp       SamPlatform (WFI-then-enable idle, BKPT, .noinit
+                           breadcrumb, atomic_width 4)
+    ticker.hpp             BasicTicker<tps> over SysTick (Ticker = 1000 Hz)
+    clock.hpp              OSCCTRL/GCLK/MCLK resources + Clock<internal, hz>;
+                           calls nvm.hpp's FlashWaitStates around a change
+    nvm.hpp                NVMCTRL: Nvm (both arrays, the CMDEX command
+                           discipline, erase-by-row/program-by-page with the
+                           page-buffer rules, region locks, PARAM geometry) +
+                           FlashWaitStates + the read-only factory views
+                           (NvmUserRow = this family's fuses, NvmCalibration,
+                           NvmTemperatureCalibration, DeviceSerial)
+    nvm_flash.hpp          RwweeFlash: the FlashMedia backend over the RWWEE
+                           array - writing it does not stall the CPU, and the
+                           zone is a constant because no linker section reaches
+                           there
+    pin.hpp                Pin<'A',5>, PinConfig, the WRCONFIG multi-pin engine
+    sercom.hpp             Sercom<n> resource + Uart task with two OPTIONAL
+                           DMA engine slots
+    dmac.hpp               Dmac block + DmaDescriptor + DmaChannel<n> +
+                           DmaTxEngine/DmaRxEngine
+    ac.hpp                 Ac block + AcComparator<n> (minimal by design)
+    evsys.hpp              EVSYS: the event fabric - twelve channels, the
+                           three paths, the user multiplexer (channel+1 hidden),
+                           the software event, three live errata as code. Owns
+                           the FABRIC, not the generator/user tables: each
+                           peripheral publishes its own codes
+    osc32kctrl.hpp         OSC32KCTRL: the three 32 kHz roots (Osculp32k,
+                           Osc32k with factory_calib() closing the loop to
+                           nvm.hpp, Xosc32k + its failure detector), the RTC's
+                           clock select, the shared IRQ 0
+    freqm.hpp              FREQM: the hardware ratio counter between two GCLK
+                           generators (refnum_for = the 24-bit overflow budget,
+                           to_hz, measure); CTRLB written and NEVER read
+                           (erratum 1.24.1), CFGA.DIVREF refused (absent on
+                           this silicon), channels routed BEFORE the reset
+    reset.hpp              RSTC + WDT: Reset (RCAUSE as ONE cause, not a
+                           history; software() through SYSRESETREQ), Watchdog
+                           (the shared period encoding, enable-protection vs
+                           synchronization, early warning, clear() vs
+                           force_reset()), ResetReporter and
+                           hard_fault_reset<P>() (the HardFault body an app
+                           binds; it never clobbers a record panic() wrote)
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests
@@ -1312,5 +1600,7 @@ lib/brio/src/            the framework, four strata:
 `build-cmake/<preset>/`: `<app>.elf` / `<app>.hex` / `firmware-<app>.map`
 / `<app>.lst` (source-interleaved disassembly), all written directly by
 `avr_add_app()`'s post-build step - one set per app, in the preset's own
-build dir. Host test binaries and `apps_manifest.json` live in
-`build-cmake/host/` and `build-cmake/` respectively.
+build dir (the SAM project's `sam_add_app()` does the same, plus a
+`.bin`). Host test binaries live in `build-cmake/host/`, and the
+per-project app rosters `apps_avrdx.json` / `apps_samc.json` in
+`build-cmake/` itself.

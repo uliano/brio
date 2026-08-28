@@ -16,17 +16,24 @@
 #  Three concerns, kept apart on purpose:
 #    1. BUILD   - one CMake target per app x board TYPE, auto-discovered from
 #                 each app's own "// build: boards = ..." header comment
-#                 (CMakeLists.txt); a configure also (re)writes
-#                 build-cmake/apps_manifest.json, which this file reads
-#                 instead of parsing apps.ini/platformio.ini (both gone).
-#                 Never a target per physical board.
+#                 (each project's CMakeLists.txt); a configure also (re)writes
+#                 that project's build-cmake/apps_<project>.json, which this
+#                 file reads instead of parsing apps.ini/platformio.ini (both
+#                 gone). Never a target per physical board.
 #    2. IDENTITY- tools/bench_boards.py, the bench manifest: which board sits
 #                 where, on which console, behind which programmer.
 #    3. THIS    - resolves 1 against 2 and drives the hardware.
 #
+#  TWO ARCHITECTURES SHARE THIS TOOL. The board's TYPE decides everything
+#  that differs (BOARD_TYPES below): db* is an AVR-Dx built by avrdx/ and
+#  written by avrdude over UPDI, c21j is a SAM C21 built by samc/ and written
+#  by OpenOCD over SWD. Everything above that line - the console protocol,
+#  the "ALL: N pass, M fail" verdict grammar, the campaign shape - is one
+#  story on both, which is the point.
+#
 #  A board NAME ("A", "B") is a desk position from the manifest. The consoles
-#  are OBSERVABILITY ONLY: firmware always goes in over UPDI (avrdude), the
-#  console only carries the suite's verdicts back.
+#  are OBSERVABILITY ONLY: firmware never goes in through them, they only
+#  carry the suite's verdicts back.
 #
 #  The campaign shape: board A = the DUT running a test suite, board B = a
 #  scriptable instrument peer (clock stretching, NACK injection, arbitration).
@@ -52,11 +59,33 @@ except ImportError:
     sys.exit("bench: pyserial is missing - run this with a Python 3 that has "
              "it installed (pip install --user pyserial)")
 
-# Package -> (release configurePreset, avr-gcc mcu name), mirroring
-# cmake/avr-mcus.cmake by hand - keep both in sync.
-BOARD_PRESET = {"db28": "avr128db28-release", "db32": "avr128db32-release",
-                "db48": "avr128db48-release"}
-MCU_OF_BOARD = {"db28": "avr128db28", "db32": "avr128db32", "db48": "avr128db48"}
+# BOARD TYPE -> everything that follows from it. A board type names a chip
+# package, and the chip package is what decides which of the sibling CMake
+# projects builds for it, which release preset that project uses, which
+# app roster to read, and how firmware gets in. Mirrors avrdx/cmake/
+# avr-mcus.cmake and samc/CMakePresets.json by hand - keep them in sync.
+#
+# "project" is also why the rosters are per project: app names COLLIDE
+# across the source trees (blink, console and probe exist in both avrdx/
+# and samc/), so an app name alone never identifies an app.
+BOARD_TYPES = {
+    "db28": {"project": "avrdx", "preset": "avr128db28-release",
+             "mcu": "avr128db28", "flash": "avrdude"},
+    "db32": {"project": "avrdx", "preset": "avr128db32-release",
+             "mcu": "avr128db32", "flash": "avrdude"},
+    "db48": {"project": "avrdx", "preset": "avr128db48-release",
+             "mcu": "avr128db48", "flash": "avrdude"},
+    "c21j": {"project": "samc", "preset": "samc21j-release",
+             "mcu": "samc21j18a", "flash": "openocd"},
+}
+
+
+def board_type(btype):
+    spec = BOARD_TYPES.get(btype)
+    if spec is None:
+        die("unknown board type '%s' (known: %s) - a new type needs an entry "
+            "in bench.py's BOARD_TYPES" % (btype, ", ".join(sorted(BOARD_TYPES))))
+    return spec
 
 PROMPT = "> "
 DEFAULT_TIMEOUT = 60.0
@@ -79,16 +108,17 @@ def board_entry(name):
     return entry
 
 
-def apps_manifest():
-    """The app roster CMake discovered at its last configure - written fresh
-    by any one `cmake --preset ...` regardless of which package it targets
-    (the scan is of source comments, not of what that configure happens to
-    build). {app: {"boards": [...], "monitor_speed": int|None,
-    "flmap_lock": 0|1}}."""
-    path = os.path.join(ROOT, "build-cmake", "apps_manifest.json")
+def apps_manifest(project):
+    """One project's app roster as CMake discovered it at its last configure -
+    written fresh by any one `cmake --preset ...` of THAT project, regardless
+    of which chip variant it targets (the scan is of source comments, not of
+    what that configure happens to build). {app: {"boards": [...],
+    "monitor_speed": int|None, ...}}."""
+    path = os.path.join(ROOT, "build-cmake", "apps_%s.json" % project)
     if not os.path.isfile(path):
-        die("build-cmake/apps_manifest.json not found - run a cmake configure "
-            "first, e.g. `cmake --preset avr128db48-release`")
+        die("build-cmake/apps_%s.json not found - configure the %s/ project "
+            "first (cd %s && cmake --preset <a release preset>)"
+            % (project, project, project))
     with open(path, encoding="ascii") as f:
         return json.load(f)["apps"]
 
@@ -99,17 +129,17 @@ def resolve_app(name, app):
     '// build: boards' line naming it)."""
     entry = board_entry(name)
     btype = entry["board"]
-    if btype not in MCU_OF_BOARD:
-        die("board '%s' has an unknown board type '%s' (known: %s)"
-            % (name, btype, ", ".join(sorted(MCU_OF_BOARD))))
-    apps = apps_manifest()
+    spec = board_type(btype)
+    apps = apps_manifest(spec["project"])
     if app not in apps:
-        die("no app '%s' under avrdx/src/apps/ (known to the last cmake configure)" % app)
+        die("no app '%s' under %s/src/apps/ (known to the last cmake configure "
+            "of that project)" % (app, spec["project"]))
     info = apps[app]
     if btype not in info["boards"]:
-        hint = ("" if btype == "db48" else
-                " - add a '// build: boards = %s' line to src/apps/%s.cpp "
-                "and reconfigure" % (btype, app))
+        default = "db48" if spec["project"] == "avrdx" else "c21j"
+        hint = ("" if btype == default else
+                " - add a '// build: boards = %s' line to %s/src/apps/%s.cpp "
+                "and reconfigure" % (btype, spec["project"], app))
         die("app '%s' is not built for board '%s' (type %s)%s"
             % (app, name, btype, hint))
     return info, btype
@@ -234,9 +264,12 @@ def cmd_list(args):
         else:
             how = prog["type"] + (" usb:%s" % prog["serial"]
                                   if prog.get("serial") else " (only one attached)")
+        spec = BOARD_TYPES.get(entry["board"])
+        origin = "%s/ via %s" % (spec["project"], spec["flash"]) if spec \
+                 else "UNKNOWN TYPE"
         print("  %-4s type %-5s  id %-8s %s  console %s"
               % (name, entry["board"], entry.get("id") or "-", mark, console))
-        print("       programmer %s" % how)
+        print("       %-24s programmer %s" % (origin, how))
     return 0
 
 
@@ -273,32 +306,81 @@ def avrdude_args(prog, mcu, hexfile, chip_erase=False):
     return avrdude_base(prog, mcu) + erase + ["-U", "flash:w:%s:i" % hexfile]
 
 
+def openocd_args(prog, elffile):
+    """OpenOCD driving a CMSIS-DAP probe over SWD, the same invocation
+    samc/CMakeLists.txt's <app>-upload target uses - except that the probe
+    is named by THE MANIFEST, not by the CMake cache. Identity is the
+    manifest's concern (a second SAM board means a second probe), and this
+    mirrors the AVR path, which calls avrdude itself rather than leaning on
+    the project's upload target.
+
+    `program ... verify` writes and reads back; the reset then leaves the
+    chip RUNNING - the AVR path's end state too, so `run` right after
+    `flash` means the same thing on both architectures. The at91samd
+    flash driver probes the geometry from the DSU DID, so nothing here
+    names a part.
+
+    AND THEN DEBUG IS TURNED OFF AGAIN, which is not cosmetic. Attaching
+    a probe sets DHCSR.C_DEBUGEN, and a core with halting debug enabled
+    HALTS on a BKPT instead of faulting on it - so `break_here()`, which
+    every panic() ends in, stops the board dead with no output instead of
+    escalating to HardFault_Handler. Worse, it is sticky: table 18-1 of
+    DS60001479M lists the debug logic as reset by a power-on or an
+    external reset and NOT by a watchdog reset or a system reset request,
+    so once a flash has enabled it every later software reset inherits
+    it. Measured the hard way - a suite that reached a panic simply went
+    quiet, and the halted core was found parked on the BKPT.
+
+    The write below is DHCSR with its 0xA05F key and every control bit
+    zero, which is what a board with no probe attached looks like."""
+    argv = [manifest.OPENOCD, "-f", "interface/cmsis-dap.cfg"]
+    if prog.get("serial"):
+        argv += ["-c", "adapter serial %s" % prog["serial"]]
+    argv += ["-f", "target/at91samdXX.cfg",
+             "-c", "program %s verify" % elffile,
+             "-c", "reset run",
+             "-c", "mww 0xE000EDF0 0xA05F0000",
+             "-c", "exit"]
+    return argv
+
+
 def cmd_flash(args):
     info, btype = resolve_app(args.name, args.app)
-    preset = BOARD_PRESET[btype]
-    print("bench: board %s -> preset %s, target %s" % (args.name, preset, args.app))
-    # Cheap (a fresh manifest too, in case an app's "// build:" lines or the
-    # app roster itself changed since the last configure). Presets resolve
-    # against their own CMakePresets.json, so cmake runs from the AVR
-    # project directory (avrdx/), not the repo root - the root is not a
-    # CMake project any more.
-    rc = subprocess.call(["cmake", "--preset", preset],
-                         cwd=os.path.join(ROOT, "avrdx"))
+    spec = board_type(btype)
+    project, preset = spec["project"], spec["preset"]
+    # Refuse an impossible request BEFORE spending a build on it.
+    if args.erase and spec["flash"] != "avrdude":
+        die("--erase is an avrdude option: on SAM, `program ... verify` "
+            "erases exactly the sectors it writes, and there is no NvHeap "
+            "on this target yet to protect from a chip erase")
+    print("bench: board %s -> %s/ preset %s, target %s"
+          % (args.name, project, preset, args.app))
+    # Cheap (a fresh roster too, in case an app's "// build:" lines or the
+    # app list itself changed since the last configure). Presets resolve
+    # against their own CMakePresets.json, so cmake runs from the owning
+    # project's directory - the repo root is not a CMake project.
+    projdir = os.path.join(ROOT, project)
+    rc = subprocess.call(["cmake", "--preset", preset], cwd=projdir)
     if rc != 0:
         return rc
     rc = subprocess.call(["cmake", "--build", "--preset", preset,
-                          "--target", args.app],
-                         cwd=os.path.join(ROOT, "avrdx"))
+                          "--target", args.app], cwd=projdir)
     if rc != 0:
         return rc
-    mcu = MCU_OF_BOARD[btype]
-    hexfile = os.path.join("build-cmake", preset, args.app + ".hex")
-    if not os.path.isfile(os.path.join(ROOT, hexfile)):
-        die("no %s after the build" % hexfile)
-    nvheap_preflight(board_entry(args.name)["programmer"], mcu, hexfile,
-                     chip_erase=args.erase)
-    argv = avrdude_args(board_entry(args.name)["programmer"], mcu, hexfile,
-                        chip_erase=args.erase)
+
+    prog = board_entry(args.name)["programmer"]
+    if spec["flash"] == "openocd":
+        elffile = os.path.join("build-cmake", preset, args.app + ".elf")
+        if not os.path.isfile(os.path.join(ROOT, elffile)):
+            die("no %s after the build" % elffile)
+        argv = openocd_args(prog, elffile)
+    else:
+        hexfile = os.path.join("build-cmake", preset, args.app + ".hex")
+        if not os.path.isfile(os.path.join(ROOT, hexfile)):
+            die("no %s after the build" % hexfile)
+        nvheap_preflight(prog, spec["mcu"], hexfile, chip_erase=args.erase)
+        argv = avrdude_args(prog, spec["mcu"], hexfile, chip_erase=args.erase)
+
     print("bench: " + " ".join(argv))
     rc = subprocess.call(argv, cwd=ROOT)
     if rc == 0:
@@ -526,10 +608,18 @@ def cmd_fuses(args):
     prog = entry["programmer"]
     # The MCU of the board TYPE: fuses are the chip's, not any one app's.
     btype = entry["board"]
-    if btype not in MCU_OF_BOARD:
-        die("board '%s' has an unknown board type '%s' (known: %s)"
-            % (args.name, btype, ", ".join(sorted(MCU_OF_BOARD))))
-    mcu = MCU_OF_BOARD[btype]
+    tspec = board_type(btype)
+    if tspec["flash"] != "avrdude":
+        # This verb is AVR-Dx provisioning over UPDI. The SAM's equivalent
+        # non-volatile configuration is the NVM User Row (DS60001479M
+        # 27.6.5), a flash row written by the NVMCTRL - a different memory,
+        # a different tool, and a verb that belongs to the samc nvm driver
+        # when it exists. Refuse rather than pretend.
+        die("board '%s' is type %s: `fuses` is AVR-Dx UPDI provisioning and "
+            "has no meaning here (the SAM's analog is the NVM User Row, "
+            "written through NVMCTRL - no driver for it yet)"
+            % (args.name, btype))
+    mcu = tspec["mcu"]
 
     writes = {}
     for spec in args.assignment:

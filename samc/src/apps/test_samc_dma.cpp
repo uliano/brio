@@ -33,6 +33,7 @@
 // for a burst and says so.
 //
 // build: boards = c21j
+// build: monitor_speed = 115200
 
 #include <stdint.h>
 

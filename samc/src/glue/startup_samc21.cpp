@@ -30,8 +30,9 @@
 // Default_Handler: on ARMv6-M the core cannot ask whether a debugger is
 // attached (DHCSR is debugger-access-only, unlike v7-M), so a BKPT with no
 // debugger escalates here - a distinct symbol makes the wreck legible in a
-// backtrace. The full panic-breadcrumb-then-reset story is a later platform
-// pass (docs/samc/platform.md gap list).
+// backtrace. An app that would rather record the wreck than spin on it
+// binds the vector to samc/reset.hpp's hard_fault_reset(), which writes
+// the panic breadcrumb and resets.
 
 #include <stdint.h>
 
@@ -69,7 +70,13 @@ void Default_Handler()
     for (;;) {}
 }
 
-void HardFault_Handler()
+// WEAK, and it has to be said explicitly here: every peripheral handler
+// below is a weak ALIAS to Default_Handler, which an app overrides by
+// defining the alias's own name, but this one is a DEFINITION - without
+// the attribute it is a strong symbol and an app that binds
+// HardFault_Handler fails to link with a multiple-definition error.
+// samc/reset.hpp's hard_fault_reset() exists precisely to be bound here.
+__attribute__((weak)) void HardFault_Handler()
 {
     for (;;) {}
 }

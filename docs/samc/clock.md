@@ -31,9 +31,10 @@ left behind.
 **Flash wait states bound the frequency** (table 45-41, the
 conservative VDD > 2.7 V column): 19 MHz at 0 WS, 38 at 1, 64 at 2 -
 and NVMCTRL 27.5.2 orders them adapted BEFORE a rise and after a
-fall. They are NVMCTRL's register, but nothing may raise the
-frequency without them, so the verb lives here until a samc nvm
-driver takes it over.
+fall. The register is NVMCTRL's and so is the verb - `FlashWaitStates`
+lives in `samc/nvm.hpp` ([nvm.md](nvm.md)) - but the QUESTION is this
+driver's, because nothing may raise the frequency without answering it
+first. `init()` and `set()` call it on the correct side of the change.
 
 **Synchronization is per-register and real.** The OSC48M divider
 write crosses clock domains (OSC48MSYNCBUSY), each generator's
@@ -121,15 +122,21 @@ int main() {
 Driver gaps (vocabulary without code, each refused at compile time):
 - XOSC (the board's 24 MHz crystal on PA14/PA15, deliberately
   unused), its clock-failure detection, and external-clock mode.
-- OSC32K / XOSC32K / OSCULP32K as selectable sources; the RTC's clock.
+- OSC32KCTRL (ch. 21) is now its OWN driver and document
+  ([osc32kctrl.md](osc32kctrl.md)): all three 32 kHz roots, the RTC's
+  clock select and the crystal's failure detector. What remains missing
+  from THIS file is only the relationship - nothing tells a driver that
+  a generator it uses changed source or rate.
 - FDPLL96M.
 - A `DynamicClock` for this target - and with it the ticker's
   ClockUser question (`samc/ticker.hpp` documents the caveat and
   refuses the combination mechanically).
 
 Implemented but not bench-verified:
-- Generators 1..8 and their dividers/IDC/output pads (the verbs are
-  family-compiled; only generator 0 has run on silicon).
+- Generators 1..8 have now RUN: `test_samc_freqm` builds generators 5
+  and 6 on OSCULP32K (one of them divided) and measures through them,
+  so `configure()`, `enable()` and the linear divider are silicon-tested
+  outside generator 0. Their IDC and output pads are not.
 - `GclkChannel::lock`, `Osc48m::run_standby`, `Osc48m::startup`,
   rates other than 48 MHz (the arithmetic is compile-checked; only
   the undivided rate has run).

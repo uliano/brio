@@ -19,9 +19,13 @@
 #  - avr_predefines(): clang parses -mcpu=cortex-m0plus directly, and the
 #    device is selected by an ordinary -D define - no device-specs macro
 #    delta exists to feed clangd.
-#  - FLMAP/NVHEAP link defsyms and the ivsel_boot glue: AVR-Dx build
-#    invariants with no SAM analog. The glue slot here is the startup file
-#    (vector table + reset path), which every image needs instead.
+#  - The FLMAP defsym and the ivsel_boot glue: AVR-Dx build invariants
+#    with no SAM analog (there is no flash-mapping window here, and the
+#    vector table is the crt's). The glue slot on this side is the
+#    startup file (vector table + reset path), which every image links
+#    instead. The NVHEAP build-id defsym, by contrast, IS shared - it is
+#    a property of util/nv_heap.hpp and not of either architecture, and
+#    both projects compute it the same way.
 # ============================================================================
 
 cmake_minimum_required(VERSION 3.21)
@@ -75,6 +79,31 @@ find_program(ARM_OBJDUMP arm-none-eabi-objdump PATHS "${ARM_TOOLCHAIN_DIR}/bin" 
 set(SAMC_OPENOCD "/sw/oss-cad-suite/bin/openocd" CACHE FILEPATH "OpenOCD with CMSIS-DAP + at91samd support")
 set(SAMC_PROBE_SERIAL "J42700049508" CACHE STRING "Atmel-ICE serial to flash/debug through")
 
+# --- The build id every image carries: samc/nvm_flash.hpp records it in
+#     every map version of a flash NvHeap, where it is a DIAGNOSTIC and
+#     nothing else - a stored block is judged by its checksum, never by
+#     which build wrote it. It is the NEWEST SOURCE TIMESTAMP and not the
+#     time of the link, for the same reason as on the AVR side: an
+#     unchanged tree must relink to the same bytes, or every reflash of an
+#     unchanged app would look like a different image. Passed to every
+#     app's link unconditionally - an image that never names NvHeap never
+#     references the symbol, so this costs it nothing, not even a byte.
+set(SAMC_NVHEAP_BUILD_ID 0)
+file(GLOB_RECURSE _nvheap_id_sources CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.cpp" "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.hpp"
+    "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.c"   "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.h"
+    "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.S"
+    "${CMAKE_SOURCE_DIR}/src/*.cpp" "${CMAKE_SOURCE_DIR}/src/*.hpp"
+    "${CMAKE_SOURCE_DIR}/src/*.c"   "${CMAKE_SOURCE_DIR}/src/*.h"
+    "${CMAKE_SOURCE_DIR}/src/*.S"
+)
+foreach(_f IN LISTS _nvheap_id_sources)
+    file(TIMESTAMP "${_f}" _ts "%s")
+    if(_ts GREATER SAMC_NVHEAP_BUILD_ID)
+        set(SAMC_NVHEAP_BUILD_ID "${_ts}")
+    endif()
+endforeach()
+
 # --- One app -> one executable target, one .bin/.hex, one -upload target.
 function(sam_add_app name)
     add_executable(${name}
@@ -114,6 +143,7 @@ function(sam_add_app name)
         -T${CMAKE_SOURCE_DIR}/ld/${SAMC_MCU}.ld
         -Wl,--gc-sections
         -Wl,-Map,$<TARGET_FILE_DIR:${name}>/firmware-${name}.map
+        -Wl,--defsym,__nvheap_build_id=${SAMC_NVHEAP_BUILD_ID}
     )
     set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
         ${CMAKE_SOURCE_DIR}/ld/${SAMC_MCU}.ld)
@@ -145,17 +175,21 @@ endfunction()
 # --- App discovery: every samc/src/apps/<app>.cpp becomes a target, gated
 #     by its own "// build: boards = ..." header comment (default: c21j -
 #     the one board type that exists; the grammar is the AVR project's, the
-#     board names are this family's). Other keys (monitor_speed, ...) are
-#     tolerated as metadata; no manifest is emitted yet - tools/bench.py
-#     integration for SAM is deferred until it is needed.
+#     board names are this family's). monitor_speed is carried through to
+#     the roster below so tools/bench.py opens a console at the speed the
+#     app itself declares; other keys are tolerated as metadata.
 set(SAMC_BOARD "c21j")
 
 file(GLOB APP_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/apps/*.cpp")
+
+set(_manifest_entries "")
 
 foreach(_app_path IN LISTS APP_SOURCES)
     get_filename_component(_app "${_app_path}" NAME_WE)
 
     set(_boards c21j)
+    set(_monitor_speed "")
+
     file(STRINGS "${_app_path}" _build_lines REGEX "^// build:")
     foreach(_line IN LISTS _build_lines)
         if(_line MATCHES "^// build:[ \t]*([A-Za-z_]+)[ \t]*=[ \t]*(.+)$")
@@ -168,11 +202,46 @@ foreach(_app_path IN LISTS APP_SOURCES)
                     string(STRIP "${_b}" _b)
                     list(APPEND _boards "${_b}")
                 endforeach()
+            elseif(_key STREQUAL "monitor_speed")
+                set(_monitor_speed "${_value}")
             endif()
         endif()
     endforeach()
+
+    if(_monitor_speed STREQUAL "")
+        set(_speed_json "null")
+    else()
+        set(_speed_json "${_monitor_speed}")
+    endif()
+    set(_boards_json "")
+    foreach(_b IN LISTS _boards)
+        if(_boards_json STREQUAL "")
+            set(_boards_json "\"${_b}\"")
+        else()
+            set(_boards_json "${_boards_json},\"${_b}\"")
+        endif()
+    endforeach()
+    set(_entry "\"${_app}\":{\"boards\":[${_boards_json}],\"monitor_speed\":${_speed_json}}")
+    if(_manifest_entries STREQUAL "")
+        set(_manifest_entries "${_entry}")
+    else()
+        set(_manifest_entries "${_manifest_entries},\n    ${_entry}")
+    endif()
 
     if(SAMC_BOARD IN_LIST _boards)
         sam_add_app(${_app} src/apps/${_app}.cpp)
     endif()
 endforeach()
+
+# This project's app roster for tools/bench.py - the twin of the AVR
+# project's apps_avrdx.json, and a SEPARATE FILE on purpose: app names
+# collide across the two source trees (blink, console, probe exist in
+# both), so only a per-project roster can say which tree, which toolchain
+# and which flash mechanism an app name means. Variant-agnostic, exactly
+# like the AVR one: it is a scan of source comments, not of what this
+# configure happens to build.
+#
+# No flmap_lock field: that key is an AVR-Dx build invariant (FLMAPLOCK)
+# with no SAM analog, and bench.py reads it only for db* boards.
+file(WRITE "${CMAKE_SOURCE_DIR}/../build-cmake/apps_samc.json"
+    "{\n  \"apps\": {\n    ${_manifest_entries}\n  }\n}\n")

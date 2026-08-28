@@ -3,14 +3,15 @@
 > **PROVISIONAL.** What exists is the waking half of the platform:
 > the critical section, the idle hook, the SysTick timebase, the NVIC
 > verbs and the crt that carries them - each bench-verified as far as
-> a bring-up exercises it. What is missing is the whole stopping and
-> failing half: the deeper sleep modes and their SleepSite, the
-> reset/watchdog story, the BKPT-with-no-debugger path. The list is
-> in "Not covered yet".
+> a bring-up exercises it. The FAILING half now has its own document,
+> [reset.md](reset.md): RSTC, the watchdog and the panic breadcrumb
+> across a real reset. What is still missing is the STOPPING half -
+> the deeper sleep modes and their SleepSite. The list is in "Not
+> covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M - the
 Cortex-M0+ processor summary ch. 4 with ARM's ARMv6-M ARM behind it,
-PM (power manager) ch. 12, RSTC ch. 18 - and errata DS80000740S
+PM (power manager) ch. 19 - and errata DS80000740S
 (1.8.13, SysTick + standby back-bias, is recorded for the power pass:
 the kernel tick IS SysTick). Drivers: `samc/platform_sam.hpp`
 (`SamPlatform`, this target's realization of the kernel's `Platform`
@@ -53,9 +54,11 @@ must either become a ClockUser or move to the RTC (`ticker.hpp`
 refuses to compile with a dynamic clock that does not list it - the
 caveat is mechanical, not a comment).
 
-**SRAM survival is promised nowhere.** RSTC's reset table (18) has no
-SRAM row for any reset cause - exactly the AVR situation - so the
-panic breadcrumb's magic word is necessary, not merely prudent.
+**SRAM survival is promised nowhere.** RSTC's reset table (18-1) has
+no SRAM row for any reset cause - exactly the AVR situation - so the
+panic breadcrumb's magic word is necessary, not merely prudent. That
+it survives in practice is measured in [reset.md](reset.md), which
+also owns the reset causes themselves.
 
 ## Types and verbs
 
@@ -152,15 +155,18 @@ Driver gaps (not built):
 - The stopping half: STANDBY (PM.SLEEPCFG, SCR.SLEEPDEEP), the
   SleepSite adapter for util/power.hpp, performance levels, and
   erratum 1.8.13's SysTick-vs-standby interaction - the power pass.
-- The failing half: RSTC reset-cause verbs, the WDT, a HardFault
-  handler that writes the panic breadcrumb and resets - the samc
-  analog of avrdx/reset.hpp.
-- MTB trace, the MPU, DIVAS (the memory-mapped divider; gcc emits
-  software division unless taught otherwise).
+- MTB trace and the MPU.
+- DIVAS (the memory-mapped divider; gcc emits software division
+  unless taught otherwise).
 
 Implemented but not bench-verified:
-- `break_here()` with no debugger attached (documented to escalate to
-  the HardFault spin; never provoked deliberately).
+- `break_here()` with no debugger attached. It is now REACHED
+  deliberately - `test_samc_platform` letter i runs a panic() through
+  it - but what it does depends on DHCSR.C_DEBUGEN: with a probe
+  attached the core HALTS on the BKPT instead of faulting, and that
+  bit survives every software reset (table 18-1 resets the debug logic
+  only on a power-on or external reset). See [reset.md](reset.md),
+  "the BKPT hazard".
 - `Nvic::set_pending` as a software interrupt source; priorities
   other than the reset default (every line runs at 0 today, so
   handler-vs-handler preemption is unexercised).

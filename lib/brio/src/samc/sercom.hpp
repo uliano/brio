@@ -109,6 +109,8 @@
 #pragma once
 
 #include <stdint.h>
+
+#include <span>
 #include <optional>
 
 #include "sam.h"
@@ -1244,6 +1246,81 @@ public:
             ++written;
         }
         return written;
+    }
+
+    /**
+     * Queue a run of bytes in BULK: copy straight into the ring's own
+     * free run and nudge the transport ONCE, instead of once per byte.
+     * Returns how many were queued (short of `src.size()` when the ring
+     * filled).
+     *
+     * WHY THIS EXISTS, measured rather than assumed. write_byte() ends
+     * in a nudge - arming DRE on the plain transport, pump_tx() on the
+     * engined one - and paying that per byte is what a link faster than
+     * about 1 Mbaud runs out of CPU for. The probe app `serial_speed`
+     * measured a hard plateau at 98 kB/s through write()/write_byte() at
+     * EVERY rate from 1 Mbaud up, while the same wire polled bare
+     * reached 299 kB/s at 3 Mbaud: the ceiling was this API, not the
+     * silicon and not the cable. Worse, the DMA engine came out SLOWER
+     * than the interrupt (64 kB/s), because a pump_tx() per byte starts
+     * a fresh block for one byte and the engine never gets a run to move.
+     *
+     * The ring already had the two halves this needs (write_span() +
+     * publish(), util/ring.hpp): a producer may fill the contiguous run
+     * it already owns and then publish it, which is exactly one index
+     * store. Nothing about the concurrency model changes - this side
+     * still writes only its own index - so the engine or the handler
+     * draining the other end needs no cooperation.
+     */
+    static uint32_t write_bulk(std::span<const uint8_t> src) {
+        uint32_t done = 0;
+        while (done < src.size()) {
+            const auto room = m_tx.write_span();
+            if (room.empty()) {
+                break;
+            }
+            const uint32_t want = static_cast<uint32_t>(src.size()) - done;
+            const uint32_t take =
+                want < room.size() ? want : static_cast<uint32_t>(room.size());
+            for (uint32_t i = 0; i < take; ++i) {
+                room[i] = src[done + i];
+            }
+            m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
+            done += take;
+        }
+        if (done != 0u) {
+            // ONE nudge for the whole run - the entire point.
+            if constexpr (has_tx_engine) {
+                pump_tx();
+            } else {
+                S::enable_dre_interrupt(true);
+            }
+        }
+        return done;
+    }
+
+    /**
+     * Take a run of received bytes in BULK, the mirror of write_bulk():
+     * copy out of the ring's own ready run and consume it with one index
+     * store, instead of a pop() per byte. Returns how many were taken.
+     */
+    static uint32_t read_bulk(std::span<uint8_t> dst) {
+        uint32_t done = 0;
+        while (done < dst.size()) {
+            const auto run = m_rx.read_span();
+            if (run.empty()) {
+                break;
+            }
+            const uint32_t want = static_cast<uint32_t>(dst.size()) - done;
+            const uint32_t take =
+                want < run.size() ? want : static_cast<uint32_t>(run.size());
+            for (uint32_t i = 0; i < take; ++i) {
+                dst[done + i] = run[i];
+            }
+            m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(take));
+            done += take;
+        }
+        return done;
     }
 
     // ---- introspection -----------------------------------------------------

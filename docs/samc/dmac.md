@@ -278,10 +278,11 @@ Driver gaps (not built):
 - Linked descriptor lists: legal on rev F, but 1.10.4 makes
   software-linked chains (TCMPL re-arms the next block) the honest
   default, and nothing has needed a chain they could not build.
-- The event system hooks: EVACT/EVIE/EVOE/EVOSEL are written as parts
-  of the words they live in, but no EVSYS driver exists on this
-  target to route events, so every value but `none` is untested
-  silicon from here.
+- The event system hooks, PARTLY RETIRED: an EVSYS driver now exists
+  ([evsys.md](evsys.md)) and `test_samc_evsys` drives a DMA channel
+  with EVACT `trigger` and EVIE set from a software event, so that
+  path is silicon-tested. EVOE and EVOSEL - the DMAC as an event
+  GENERATOR - and the other EVACT values remain untested from here.
 - QOSCTRL (left at reset), RUNSTDBY and the 25.6.7 standby sequence
   (the power pass owns sleep on this target).
 - Trigger codes beyond the two SERCOM pairs - each arrives with the

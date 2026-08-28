@@ -221,10 +221,69 @@ int main() {
   both engines at once survived the erratum-1.10.4 stress with zero
   violations on their own channels (the full account is in dmac.md).
 
+**How fast the link really goes, and what it costs** (probe app
+`serial_speed`, which reports throughput while the host checks every
+byte). The measurements are of the BENCH LINK - an ADuM1201 isolator and
+a CH340 bridge between the pads and the PC - as much as of the driver.
+
+- **3 Mbaud works**, which is the generator's own ceiling at 48 MHz
+  (16x oversampling, BAUD 0). A raw polled transmit - no ring, no
+  interrupt, no DMA - moved 64 KB byte-exact at 299251 B/s, 99.75% of
+  nominal. So neither the isolator nor the bridge is the limit.
+- **2.5 Mbaud is a hole, not a ceiling**: it fails while both 2 M and
+  3 M are byte-exact. The bridge's divisor arithmetic has no exact
+  2.5 M and the nearest is some 4% off, outside what a UART tolerates.
+  A failure at one rate says nothing about the rate above it.
+- **The per-byte API is what limits a fast link.** `write()` loops over
+  `write_byte()`, and every byte pays a transport nudge - arming DRE, or
+  `pump_tx()` with an engine. That plateaus at 98.4 kB/s (about 1 Mbaud
+  equivalent) at EVERY rate from 1 Mbaud up, the wire idling while the
+  CPU catches up. Fed this way the DMA engines are SLOWER than the
+  interrupt, 57-64 kB/s at 92% CPU, because a pump_tx() per byte starts
+  a block for one byte.
+- **`write_bulk()` is what makes the engines worth having.** The same
+  64 KB at 3 Mbaud: 169343 B/s at 75% CPU through the interrupt
+  transport, and 297890 B/s - 99.3% of the wire - at 9% CPU through the
+  engines. At 1 Mbaud the engines saturate the wire at 5% CPU against
+  70% for the per-byte interrupt path.
+- **With the engines, transmit is limited by the BAUD GENERATOR and
+  nothing else.** Measured across four rates, the engined bulk path
+  costs 4% of the CPU at 46 kB/s, 5% at 100 kB/s and 8% at 298 kB/s -
+  a straight line whose slope is **7.6 CPU cycles per byte**, about
+  1.6% per 100 kB/s, over a fixed ~3% that belongs to the measuring
+  loop rather than the transport. Extrapolated, the CPU would not
+  saturate until roughly 6 MB/s, some twenty times what this peripheral
+  can emit at all. And those 7.6 cycles are the COPY INTO THE RING, not
+  the DMA: a path that handed the engine the application's own buffer
+  would not pay them either.
+- **Round trip, and it has a different ceiling from transmit.** Echoing
+  through the interrupt transport is lossless to 1 Mbaud when the ring
+  is drained a byte at a time, and to **2 Mbaud** when `read_bulk()`
+  drains it - both directions at once, zero loss. The two ceilings fail
+  differently, and the difference names the cause: the per-byte consumer
+  loses in the SOFTWARE ring (`rx_overruns` climbs, `hw_overruns` stays
+  0), while at 3 Mbaud the bulk consumer loses in the HARDWARE
+  (`hw_overruns` 143, `rx_overruns` 0). Bulk fixes the consumer; what
+  breaks at 3 Mbaud is the FILLER, which is still one RXC interrupt per
+  byte - 300000 a second, more than the two-deep FIFO survives. CPU
+  during the echo sits at 55-61% at every rate from 1 to 3 Mbaud, so it
+  is the interrupt RATE that gives way and not the total work.
+  (The ~50-58 kB/s each way these runs report is the HOST's USB
+  turnaround, not the board's: the meaningful measurement here is where
+  loss begins, not the rate achieved.)
+- **At 115200 the console alone costs 11% of the CPU** through the
+  per-byte interrupt path and 6% through the engines - worth knowing,
+  since every bench suite prints.
+
 ## Not covered yet
 
 Driver gaps (not built):
 - The SPI and I2C personalities - their own future drivers.
+- A BULK RECEIVE PATH THAT PACES ITSELF. `read_bulk()` exists, but the
+  RX engine only publishes what `harvest()` takes, and how often to call
+  it is left entirely to the port owner - which at 3 Mbaud means every
+  hundred microseconds or so. Nothing in the driver helps a caller get
+  that right, and getting it wrong loses bytes silently.
 - Within USART: fractional and 3x-arithmetic baud, synchronous mode
   and XCK, RTS/CTS handshaking, RS-485/TE, LIN, IrDA, collision
   detection, auto-baud, start-of-frame/RXS wake, 9-bit data uses,
@@ -234,6 +293,12 @@ Driver gaps (not built):
   device-table job the PORT driver leaves open.
 
 Implemented but not bench-verified:
+- **The RX engine in FULL DUPLEX.** Transmitting through the TX engine is
+  flawless at every rate measured, but an echo that runs both engines at
+  once loses most of the stream and can leave the transport wedged (a
+  blocked `print()` on a TX ring that stops draining). `test_samc_dma`'s
+  duplex letter passes, so either that suite's shape or the probe's
+  misses the condition; it is not isolated.
 - Frame formats other than 8N1 (parity, 5..7/9 bits, two stop);
   `rebase()` (no dynamic clock exists on this target to drive it);
   instances other than SERCOM5; `release()`; operation on the E/G

@@ -31,7 +31,22 @@
 #  The consoles are OBSERVABILITY ONLY: firmware is never loaded through them,
 #  they carry the suite's verdicts.
 #
-#  PROGRAMMERS. Two families, both driven by avrdude (/sw/avr/bin/avrdude):
+#  PROGRAMMERS, first cut: WHICH ARCHITECTURE. The board's "board" type is
+#  the only statement of what chip sits at a desk position, and bench.py
+#  derives from it which project builds for it and how firmware gets in:
+#  db28/db32/db48 are AVR-Dx written by avrdude over UPDI, c21j is a SAM C21
+#  written by OpenOCD over SWD. The desk-position LETTERS stay pure positions
+#  - A and B happen to hold AVR boards today and C a SAM one, and that is a
+#  fact about the desk, not about the letters.
+#
+#  SAM boards: {"type": "openocd_cmsisdap", "serial": ...} -> OpenOCD driving
+#  the Atmel-ICE as a CMSIS-DAP probe. The ICE is SINGLE-CLIENT, so flashing
+#  fails while a debug session holds it. Note that an Atmel-ICE can drive
+#  either family: which one a probe is wired to is a fact about the cable,
+#  which is why the serial is recorded per desk position and re-checked at
+#  session start like everything else here.
+#
+#  AVR PROGRAMMERS. Two families, both driven by avrdude (/sw/avr/bin/avrdude):
 #    - EDBG-class probes over UPDI: {"type": "atmelice_updi"} or
 #      {"type": "pickit4_updi"}. These DO have USB serial numbers (the bench
 #      Atmel-ICE is J42700049508), but avrdude only needs to be told which one
@@ -51,13 +66,16 @@
 #  below is the label this desk position is EXPECTED to carry - the human
 #  (or a future bench.py check) compares banner against manifest.
 #
-#  TODAY'S REALITY: ONE AVR128DB48 board is on the desk. Board A holds the
-#  only hub socket in use (usb-0:1.1) and the only Atmel-ICE that is plugged
-#  in; board B and its probe are unplugged. B's entry is kept because it is
-#  the desk position, not the cable: plug it back in and check which socket it
-#  landed on before trusting the path below. Verified the only way that can be
-#  trusted - reset the chip over UPDI and watch which console prints the boot
-#  banner, which names the board by its USERROW id.
+#  TODAY'S REALITY: ONE board is on the desk and it is the SAM - position C,
+#  on the direct socket (usb-0:1, not the hub position A uses), with the
+#  Atmel-ICE serial J42700049508 wired to it and no jumper wires anywhere.
+#  Both AVR boards and their probes are unplugged; A and B are kept because
+#  an entry is a desk position, not a cable. NOTE that the probe serial in
+#  B's entry is the SAME ICE that now drives C - the probes have moved
+#  between boards more than once, which is exactly why every pairing here is
+#  re-verified at session start rather than remembered: an AVR board by
+#  resetting it over UPDI and watching which console prints the USERROW
+#  banner, a SAM board by reading its DSU DID and die serial over SWD.
 # ============================================================================
 
 # The board types known to the build: keys of tools/bench.py's
@@ -87,6 +105,34 @@ BOARDS = {
         "console": "/dev/serial/by-path/pci-0000:67:00.3-usb-0:1.4:1.0-port0",
         "programmer": {"type": "atmelice_updi", "serial": "J42700049508"},
     },
+    "C": {
+        # The SAM C21 board: the user's C21J rev 1.1 (ATSAMC21J18A, silicon
+        # rev F), console CH340 on PB30/PB31 = SERCOM5 PAD0/PAD1 at 115200,
+        # SWD on PA30/PA31. See docs/samc/README.md.
+        #
+        # IDENTITY COMES FREE ON THIS FAMILY. Where an AVR-Dx board has to be
+        # LABELLED by hand (a string written once into its USERROW, because
+        # the CH340s carry no serial), this die carries a factory-programmed
+        # 128-bit serial number in the NVM software calibration area
+        # (DS60001479M 11.5 / 27.x: word 0 at 0x0080A00C, words 1..3 at
+        # 0x0080A040..48) that no chip erase can touch. The value below was
+        # read over SWD from the board at this position, together with DSU
+        # DID 0x11010500 (DEVSEL 0x00 = C21J18A, revision 5 = rev F).
+        #
+        # It is recorded, NOT yet checked: reading it needs a samc/dsu.hpp
+        # (or a plain memory read) that no app performs, so unlike the AVR
+        # "id" this string is not compared against any banner. The SWD
+        # readback is the way to verify it by hand:
+        #   openocd -f interface/cmsis-dap.cfg -c "adapter serial <s>" \
+        #           -f target/at91samdXX.cfg \
+        #           -c "init" -c "reset halt" -c "mdw 0x0080A00C" \
+        #           -c "mdw 0x0080A040 3" -c "reset run" -c "exit"
+        "board": "c21j",
+        "id": None,
+        "die_serial": "f9e78960-51574841-59202020-ff160321",
+        "console": "/dev/serial/by-path/pci-0000:67:00.3-usb-0:1:1.0-port0",
+        "programmer": {"type": "openocd_cmsisdap", "serial": "J42700049508"},
+    },
 }
 
 # Console speed used when the app does not set monitor_speed.
@@ -94,5 +140,10 @@ DEFAULT_MONITOR_SPEED = 460800
 
 # The avrdude that talks to AVR-Dx over UPDI (the self-built 8.x - any
 # system-packaged one is likely too old for AVR Dx). Same binary
-# CMakeLists.txt's avr_add_app() uses for the <app>-upload targets.
+# avrdx/CMakeLists.txt's avr_add_app() uses for the <app>-upload targets.
 AVRDUDE = "/sw/avr/bin/avrdude"
+
+# The OpenOCD that talks to SAM over SWD: the oss-cad-suite build, which
+# drives the Atmel-ICE as a CMSIS-DAP probe flawlessly where others do not.
+# Same binary samc/CMakeLists.txt's SAMC_OPENOCD defaults to.
+OPENOCD = "/sw/oss-cad-suite/bin/openocd"

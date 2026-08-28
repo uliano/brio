@@ -1,0 +1,178 @@
+# EVSYS - the Event System (SAM C21)
+
+> **PROVISIONAL.** The fabric is built and bench-verified end to end.
+> What is deliberately NOT here is the vocabulary - the tables of 95
+> generators and 47 users - and SleepWalking. The list is in "Not covered
+> yet".
+
+Documents of record: SAM C20/C21 data sheet DS60001479M ch. 29 - and
+errata DS80000740S items 1.12.1, 1.12.3 and 1.12.4, **all three live on
+every silicon revision including this one** (1.12.2 is revisions B..E and
+not this chip). Driver: `samc/evsys.hpp`. Family fixture
+`test/family_samc/evsys.cpp` plus one negative under
+`tools/check_samc.sh`; the bench suite is `test_samc_evsys`, which uses
+`samc/dmac.hpp` as its event user.
+
+## What the silicon does
+
+**This is where the AVR shape does not transfer**, and it is worth
+saying before any verb. On the AVR the event system is a small fixed
+table: a channel is a typed thing, a generator is a type, and legality is
+answered at compile time. Here it is an **allocator** - twelve identical
+channels, numeric generator and user codes drawn from tables ninety-five
+and forty-seven rows long, and a generic clock per channel. Reproducing
+the AVR's per-generator types would mean ninety-five of them, encoding a
+table this driver has no business owning.
+
+So the driver owns the **fabric** and not the vocabulary: it moves
+channels, users, paths and edges, while a peripheral that generates
+events publishes its generator codes and one that consumes them publishes
+its user index. That division is what keeps this header from growing a
+table for every chapter in the book.
+
+**The user multiplexer is written before the channel** - "the user
+multiplexer must always be configured before the channel" (29.6.2.3).
+
+**USER.CHANNEL is the channel plus one**: zero means "no channel output
+selected", and channel *m* is chosen by writing *m+1* (29.8.9's own
+note).
+
+**Three paths, and the path decides everything else.** Asynchronous is
+straight through - no clock, no latency, and no status at all: both
+interrupt flags and the whole channel status read zero (29.6.2.9, .10,
+.11), and the edge detector "must be disabled by software". Synchronous
+costs one GCLK_EVSYS_CHANNEL_n cycle and requires the generator to share
+the channel's clock generator. Resynchronized costs three and is what to
+use when they do not. Both clocked paths **require** edge detection
+(29.6.2.7).
+
+**A software event can be raised on any channel** (29.6.2.12), serviced
+as a generator's would be - which is what makes the whole subsystem
+testable without a wire. See "Bench findings" for the qualification the
+chapter does not give.
+
+## The errata, which are unusually heavy for twenty pages
+
+- **1.12.1** (all revisions): a **synchronous** channel whose generic
+  clock never stops (ONDEMAND = 0) can raise **spurious overrun
+  interrupts**. ONDEMAND = 1 is the documented workaround, so it is the
+  default here and a synchronous configuration that clears it is
+  refused. The resynchronized path is not affected.
+- **1.12.3** (all revisions): a software event on a **resynchronized**
+  path does not set CHBUSY immediately, and a second event inside that
+  window is **lost with no overrun flag** - the worst kind of silence.
+  Three channel-clock cycles is the remedy, and it is the caller's to
+  spend: the driver does not know that clock's rate.
+- **1.12.4** (all revisions): a freshly configured and enabled channel is
+  busy for one channel-clock tick **without CHBUSY showing it**, so a
+  trigger issued immediately can be swallowed. Visible when the EVSYS
+  clock is slower than the CPU - which is the interesting case.
+- **1.12.2 is not this silicon** (E/G/J revisions B..E only).
+
+## Types and verbs
+
+**`EventPath`** - `asynchronous`, `synchronous`, `resynchronized`.
+**`EventEdge`** - `none`, `rising`, `falling`, `both`.
+
+**`EventChannelConfig`** - `generator` (a numeric code, 0 = none, which
+is what a software-only channel wants), `path`, `edge`, `on_demand`
+(default **true**, for erratum 1.12.1) and `run_standby`.
+`Evsys::config_valid()` refuses a generator past the seven-bit field, an
+asynchronous channel with an edge, a clocked channel without one, and a
+synchronous channel with a free-running clock.
+
+**`Evsys`** - the fabric, monostate. `channel_count` (12), `user_count`
+(47), `gclk_id(channel)` (contiguous from the header's own first
+constant), `bus_clock`, `reset`.
+
+- *Channels*: `configure`, `channel_reg`, `release_channel`.
+- *Users*: **`connect(user, channel, cfg)`** is the one verb that takes
+  both, precisely so 29.6.2.3's ordering cannot be got wrong;
+  `attach(user, channel)` adds a second user to a channel someone else
+  configured (several users may share one); `disconnect`;
+  `user_channel(user)` decodes the off-by-one back to a plain number,
+  answering `channel_count` for "none".
+- *Status* (clocked paths only): `channel_status`, `busy`,
+  `users_ready`, `flags`, `armed`, `arm`, `disarm`, `clear_flags`,
+  `overrun_flag`, `detected_flag`, `overrun`, `detected`, `isr`.
+- *Software event*: `trigger(channel)`, one store into the write-only
+  SWEVT.
+
+## How to use it
+
+**Route an event to a peripheral** - the user first, which `connect()`
+enforces:
+
+```cpp
+Evsys::bus_clock(true);
+GclkChannel::connect(Evsys::gclk_id(0), /* generator */ 5);   // clocked paths only
+Evsys::connect(/* user */ 5, /* channel */ 0, EventChannelConfig{
+    .generator = some_peripheral_generator_code,
+    .path = EventPath::synchronous,
+    .edge = EventEdge::rising,
+});
+```
+
+**Raise one from software**, remembering the two waits the errata ask
+for - one channel-clock tick after configuring, three after a software
+event on a resynchronized path:
+
+```cpp
+Evsys::trigger(0);
+```
+
+## Bench findings
+
+From `test_samc_evsys` (4 letters, 37 verdicts, 37/37). Nothing to wire:
+the software event supplies the stimulus and the DMAC supplies the user.
+
+- **An event moves bytes with no CPU in the path.** A DMA channel armed
+  with *no hardware trigger* (`dma_trigger_none`, EVACT trigger, EVIE
+  set) copies its block when - and only when - a software event reaches
+  it through EVSYS. That also retires `dmac.md`'s own caveat that every
+  EVACT value but `none` was untested silicon.
+- **A SOFTWARE EVENT DOES NOT CROSS AN ASYNCHRONOUS CHANNEL**, and the
+  chapter does not say so: 29.6.2.12 says a software event "can be
+  serviced as any event generator" without qualifying by path. Measured,
+  **eight** back-to-back software events on an asynchronous channel move
+  nothing, while **one** on a synchronous or resynchronized channel moves
+  a whole block. The reading that fits: the asynchronous path has no
+  clock and no edge detector, and a register write has no width of its
+  own to propagate. NOTE what is not claimed - this says nothing about a
+  hardware generator on the asynchronous path, which this suite has no
+  generator to test.
+- **Both clocked paths work and both raise EVD**, the event-detected flag
+  that only they have.
+- **The asynchronous path really is silent.** After eight events its
+  overrun and event-detected flags are both zero, and CHSTATUS reports
+  the channel neither busy nor ready - while the *unused* channels
+  report ready (CHSTATUS reads 0xFFE, every channel but this one). Code
+  that polls any of these to pace an asynchronous channel is polling a
+  constant.
+- **The off-by-one is real**: a user connected to channel 3 through the
+  driver's plain-number verb leaves 4 in USER[m].
+
+## Not covered yet
+
+Driver gaps (deliberate):
+
+- **The generator and user tables.** Ninety-five generator codes and
+  forty-seven user indices belong to the peripherals that offer and
+  consume them, not to this header - a driver publishes its own codes and
+  hands them over. This is the position the whole design rests on, and
+  the reason the file is short.
+- **SleepWalking** (29.2's feature list): the power pass owns it.
+- **The channel interrupt as a program's event hook.** `isr()` and the
+  flags exist and are exercised, but nothing in the framework yet turns
+  an EVSYS interrupt into a kernel event.
+
+Implemented but not bench-verified:
+
+- **Every real generator.** Every event in this suite is a software one,
+  so `CHANNELn.EVGEN` has only ever been written as zero on silicon, and
+  the edge selection has only ever seen a software pulse. The first
+  driver to publish a generator code is what tests that.
+- Falling and both-edge detection; `run_standby`; `overrun` actually
+  being raised (provoking one needs a generator faster than its user).
+- Operation on the E and G variants: compile-checked only. Nothing in
+  this chapter varies by package.
