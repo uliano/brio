@@ -873,9 +873,81 @@ gets its dated home in `docs/design/` when taken.
   boot BODVDD is restored bit for bit. Doc: docs/samc/supc.md
   (PROVISIONAL: nothing forces a brown-out, standby, BODCORE stays
   read-only).
-  **RTC (ch. 24) NOT ATTEMPTED** - phase E's fourth chapter was reached
-  at the session's wind-down and deliberately not opened. Nothing of it
-  exists in the tree.
+  **RTC DONE 2026-08-28 (ch. 24) - PHASE E's DRIVER HALF CLOSED. NOT
+  COMMITTED.** samc/rtc.hpp NEW: one counter wearing three faces
+  (COUNT32 with one 32-bit compare, COUNT16 with PER as its top and two
+  compares, the CLOCK/calendar with its masked alarm) over the THREE
+  OVERLAID REGISTER VIEWS, handled the way tc.hpp handles COUNT8/16/32 -
+  the control surface written once against MODE0, the width-carrying
+  verbs in explicit flavours, nothing dispatching at run time on a mode
+  the caller chose at compile time. THE DESIGN POSITION HELD: the driver
+  NEVER writes the clock select - OSC32KCTRL.RTCCTRL is osc32kctrl.hpp's
+  register and rtc.hpp only states 21.6.7's disable-first obligation and
+  takes the chosen RATE where arithmetic needs one. No TASKS built, the
+  avrdx/rtc.hpp precedent (alarm clocks and slow periodics are policies,
+  born with their first user); the kernel Ticker stays on SysTick and
+  ticker.hpp was not touched, nor was one line of util/ or kernel/.
+  Erratum 1.16.3 (write corruption on a partial access, LIVE on every
+  revision) is answered STRUCTURALLY - there is no verb that writes
+  COUNT or CLOCK in pieces - while 1.16.1 (rev B) and 1.16.2 (rev B..E,
+  its F and H marks belonging to the N-family row) are named and the
+  second is DISPROVED BY BEHAVIOUR at the bench. NEW SUITE test_samc_rtc
+  z 125/125, eight letters, wireless, 40 s. THE INSTRUMENT IS THE
+  CRYSTAL: a TC0+TC1 pair as a 32-bit stopwatch clocked from generator 2
+  off the 24 MHz crystal, and FREQM measuring the RTC's source against
+  the same crystal, so this is the first suite in the stratum whose
+  every absolute frequency is on a non-RC scale. Findings in rtc.md:
+  THE COUNTER COUNTS ITS SOURCE tick for tick on all four clock selects
+  (90..730 ppm, and the residue is the RC's own wander between the two
+  instruments' windows, printed as a spread of 350..1100 ppm); the
+  prescaler exact to 70..300 ppm across DIV2/DIV32/DIV1024, measurable
+  at all only because the rate windows are EDGE-ALIGNED at both ends;
+  PRESCALER = OFF divides by one AND SILENCES every periodic event
+  (24.8.1's sentence, and the reason both codes are named); a COMP0
+  event and a PER3 event each moving a DMA block over an ASYNCHRONOUS
+  channel; MATCHCLR raising the compare AND THE OVERFLOW together
+  (INTFLAG 0x81FF on a counter that never approaches its top); MODE 1's
+  PERIOD IS PER + 1 SOURCE TICKS (1001 measured against 999+1, with the
+  counter never seen above 998) and A MODE CHANGE DOES NOT CLEAR COUNT -
+  a 16-bit counter left above PER never meets it and runs to 0xFFFF, a
+  trap nowhere in the chapter that cost the suite a letter, and beside it
+  A REAL DRIVER BUG THE BENCH CAUGHT - the device header's compare-EVENT
+  group mask is ONE bit in the mode 0 view and TWO in the mode 1 view at
+  the same position, so writing the shared control surface through the
+  natural mode-0 macro silently drops CMPEO1 (fixed, with a verdict and a
+  family static_assert on both widths); the
+  calendar's every boundary in one second, its leap rule as the CHAPTER
+  states it (YEAR[1:0] == 0 - 29 February in year+0, 1 March in year+1)
+  and the year-63 wrap with OVF; THE ALARM ARRIVES A WHOLE COUNTER
+  PERIOD AFTER ITS MATCH (989 ms measured on a 1 Hz counter - 24.6.2.5
+  says so in a sentence easy to read past, and the first version of the
+  letter reported a working alarm as broken); and CLKREP is a READING
+  and not a format, the same CLOCK word being 11 PM or hour 27. THE
+  READ-SYNCHRONIZATION ANSWER: a synchronized COUNT read costs 2.2 us
+  against 0.19 us raw (so COUNTSYNC is background synchronization and
+  not a per-read handshake into the 32 kHz domain), the readable value
+  trails the counter by a CONSTANT four ticks - exactly four on all
+  eight repetitions, which is the fact that matters - an unsynchronized
+  read is FROZEN rather than wrong, toggling the bit costs ~5 ms, and a
+  COUNT write takes ~190 us to appear in the shadow. TWO THINGS
+  DECLINED, both printed: FREQCORR's per-step linearity, because THE
+  TRIM'S WHOLE RANGE (129 ppm) IS SMALLER THAN THE WANDER OF EVERY CLOCK
+  THIS BOARD CAN GIVE THE RTC (both selects are internal RCs moving
+  100..300 ppm between windows) - a lock-in of seven ABBA blocks with a
+  MEDIAN estimator does establish the sign and put the FULL SWING at
+  415..620 ppm where 24.6.8.2's formula predicts 258, a factor of
+  1.6..2.4 that the doc records and the driver does NOT bake in; and
+  what one "count in the prescaler" is worth, since the DIV16 control
+  moves with the window length too. Also found: 24.6.5 names a PERD
+  event that no register summary, no register description and no header
+  symbol implements. Family fixture test/family_samc/rtc.cpp + SEVEN
+  negatives (MATCHCLR in COUNT16 - through the compile-time
+  configure<cfg> twin - CLKREP outside mode 2, a Reserved prescaler
+  code, a periodic event with the prescaler OFF, a compare event past
+  the mode's channel count, the Reserved alarm mask, an impossible
+  date). Doc docs/samc/rtc.md (PROVISIONAL: no tasks, sleep, the
+  overflow event through EVSYS, the intermediate alarm masks, the
+  12-hour rollover, XOSC1K/XOSC32K).
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -1983,6 +2055,16 @@ brio/                    the framework, four strata:
                            enable verb - 22.8.6 forbids the change) + Vref
                            (the bandgap, and the VREFOE the AC's bandgap input
                            needs)
+    rtc.hpp                RTC: one counter wearing three faces (COUNT32,
+                           COUNT16 with PER, the CLOCK/calendar with its
+                           masked alarm) over three overlaid register views,
+                           the prescaler that is also the periodic-event
+                           source, the read synchronization COUNT and CLOCK
+                           need, FREQCORR, the event codes this peripheral
+                           publishes and the one vector. It NEVER writes the
+                           clock select - that is osc32kctrl.hpp's RTCCTRL -
+                           and erratum 1.16.3 is answered structurally: no
+                           verb writes COUNT or CLOCK in pieces
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests
