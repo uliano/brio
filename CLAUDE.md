@@ -525,13 +525,16 @@ gets its dated home in `docs/design/` when taken.
   only thing that can move its bytes is an event - the transfer is the
   witness, which also retires dmac.md's caveat that every EVACT value
   but none was untested silicon. THE FINDING THE CHAPTER DOES NOT HAVE:
-  A SOFTWARE EVENT DOES NOT CROSS AN ASYNCHRONOUS CHANNEL. 29.6.2.12
-  says a software event "can be serviced as any event generator" with no
-  mention of the path; measured, EIGHT of them on an async channel move
-  nothing while ONE on a clocked path moves a block - the async path has
-  no clock and no edge detector, and a register write has no width to
-  propagate. Deliberately NOT claimed: anything about a hardware
-  generator on the async path, which this suite has none to test.
+  A SOFTWARE EVENT ON AN ASYNCHRONOUS CHANNEL DOES NOT REACH THE DMAC.
+  29.6.2.12 says a software event "can be serviced as any event
+  generator" with no mention of the path; measured, EIGHT of them on an
+  async channel move nothing while ONE on a clocked path moves a block.
+  (The first reading - that the async PATH drops what has no width -
+  was CORRECTED by the CCL campaign on 2026-08-29: the limit is the
+  USER's input stage. A CCL LUT's edge-detecting event input catches
+  16/16 software events on the same async channel; the DMAC's trigger
+  stage is what a register write has no width for. evsys.md carries
+  the reconciliation.)
   SEVEN JUDGMENT CALLS from this session were REVIEWED AND ACCEPTED
   at commit (none was forced by the code; full note in memory
   samc-peripheral-plan): EVSYS owning the fabric and not the
@@ -588,7 +591,9 @@ gets its dated home in `docs/design/` when taken.
   CROSS AN ASYNCHRONOUS EVSYS CHANNEL - an EXTINT edge on an async
   channel moves a whole DMA block where eight software events move
   nothing, which ANSWERS the question evsys.md explicitly declined
-  (the async path carries what has WIDTH; a register write has none);
+  (a claim the CCL campaign later sharpened: the async path carries a
+  software event too - it is the DMAC's own trigger stage that needs
+  width, evsys.md);
   (3) EVERY LINE IS AN EVENT GENERATOR, not the "EXTINT0-7" of 26.6.7's
   prose - EXTINT9 (code 0x17) moves a block, and clearing EVCTRL.EXTINTEO
   is the gate, not the line number; (4) A TRAP IN OUR OWN CRT, found by
@@ -1345,6 +1350,77 @@ gets its dated home in `docs/design/` when taken.
   truncate a capture, because "  -> " ends with the prompt "> ".
   docs/samc/tsens.md NEW PROVISIONAL. JUDGMENT CALLS QUEUED - see memory
   samc-session-2026-08-28-tsens.
+  **CCL DONE 2026-08-29 (ch. 37) - PHASE H's FIRST CHAPTER, and the one
+  that CLOSES AC.MD'S OPEN LEAD. NOT COMMITTED awaiting Fable's review
+  (see memory samc-session-2026-08-29-ccl).**
+  samc/ccl.hpp NEW: the whole chapter in the AVR's own two strata,
+  because for once the two families really do have the same peripheral -
+  `Ccl` (one ENABLE, one software reset, ONE generic clock for every
+  filter/edge/sequencer in the block, the two sequencer selectors, the
+  EVSYS codes it publishes) and `Lut<n>` (three input multiplexers, an
+  eight-bit TRUTH table built by `lut_truth()` on the AVR's own IN[0]-is-
+  the-LSB convention, the synchronizer/filter, the edge detector, both
+  event enables), plus `CclIn<Pin>`/`CclOut<Pin>` over six new reserve
+  probes. NO INTERRUPT AND NO DMA AT ALL here (37.5.4 and 37.5.5 are both
+  "Not applicable"), so the only ways out are a pad and an event. THE
+  PACKAGE FACT: LUT3's four pads are the J's ALONE, so on the E and the G
+  that LUT exists (CCL_LUT_NUM is 4 everywhere) with NO PIN OF ITS OWN,
+  reachable only through events, a link or a sequencer - `if constexpr`
+  on `Lut<3>::has_output_pad`, two negatives, and the E bonds no PORT B
+  pad to the CCL at all. THE ENABLE-PROTECTION STORY IS THE DESIGN, and
+  it was settled RAW against three documents that disagree (37.6.2.1 says
+  LUTCTRLn.ENABLE, 37.8.2 says CTRL.ENABLE, erratum 1.7.3 says the
+  silicon swapped them): four cells of a truth table say IT IS AN AND -
+  a LUTCTRL write lands only with BOTH bits clear - so every configuring
+  verb refuses while the block is up, and reconfiguring one LUT drops
+  every other LUT's output (bench-proven, the AVR errata-2.4.1 protocol
+  reached by another road). THE BENCH CAUGHT A REAL DRIVER BUG THERE: a
+  store into an ENABLED LUT is dropped IN COMPLETE SILENCE, so
+  configure() and truth() now clear LUTCTRLn.ENABLE in a store of their
+  own first (37.6.2.1 forbids writing the protected bits together with
+  ENABLE = 0), and 37.6.2.1's one-store escape is separately proven. THE
+  HEADLINE, and the answer ac-sync-latency's open lead asked for, on
+  ac_sync_probe's own instrument (GCLK_AC and GCLK_CCL both at
+  OSC48M/4096 = 11.719 kHz, one period = 4096 CPU cycles, 52 shots per
+  row): a COMBINATIONAL LUT costs 0.05 periods (207 cycles, eight above
+  the comparator's own ASYNC pad - 40.8.13's note is about COMPCTRL.OUT
+  and not about a pad, so a LUT dodges the AC's sampler entirely), a LUT
+  PAIR AS A DFF costs the fraction to the next edge and NO WHOLE PERIOD,
+  ONE LUT with FILTSEL=SYNCH costs the fraction + 1, THE AC'S OWN
+  SYNCHRONIZED OUTPUT - the fraction + 2 - IS THE SLOWEST CLOCKED PATH OF
+  THE FOUR, and FILTSEL=FILTER costs the fraction + 3 (so 37.6.2.5's "two
+  to five GCLK cycles" is a range over the two OPTIONS and each option's
+  own cost is exact). The application the AC killed does not revive as
+  "no CCL at all" - the +2 is silicon - but the CCL is strictly cheaper
+  than it, which is the answer with numbers. TWO MORE DOCUMENTARY
+  DISPUTES SETTLED BY EXPERIMENT: INSEL 0x8 (TCC) HAS NO ENUMERATOR IN
+  ANY DEVICE HEADER of this pack though 37.8.3 lists it for every variant
+  - written as a literal it works, with TCC0's own pad as the control -
+  and ERRATUM 1.8.3 IS REVISION B (TC0 drives the default TC input and
+  TC4 does not, two controls). ERRATA: 1.7.1 confirmed revision B (the RS
+  latch's reset works), 1.7.2 REPRODUCED WITH A CONTROL ON BOTH SIDES and
+  its workaround coded (Lut<n>::enable(true) on an EVEN LUT re-states
+  CTRL.ENABLE), 1.7.3 as above, 1.7.4 CONFIRMED - CTRL.SWRST really does
+  raise PAC INTFLAGC bit 23, which is the OPPOSITE of what TSENS's 1.19.1
+  did (that one was silent). Also measured: the edge strobe is one
+  GCLK_CCL period to half a per cent (4086..4108 cycles against 4096);
+  37.5.3 is exact (a combinational LUT decodes with GCLK_CCL
+  DISCONNECTED, a synchronized one passes nothing); tables 37-2..37-5 all
+  four, with the lesson that THE GATE MUST COME DOWN FIRST when both
+  stimuli are pull-driven pads; FEEDBACK proven by a difference; and A
+  SOFTWARE EVENT *DOES* CROSS AN ASYNCHRONOUS CHANNEL - sixteen of
+  sixteen into a LUT, with a disconnected-user control and a DMA block
+  moved through the LUT as a second witness - which CORRECTS what
+  test_samc_evsys concluded from the DMAC alone: the limit is the USER's
+  input stage, not the path, so evsys.hpp's comment and evsys.md's
+  finding were rewritten (the one comment-only change to another driver).
+  NEW SUITE test_samc_ccl z 141/141 (three warm, one cold; about two
+  seconds), 7 letters, WIRELESS; family fixture test/family_samc/ccl.cpp
+  + TEN negatives; canaries tsens z 168, evsys z 37, ac z 94; md5 gate on
+  the reserve's growth with source mtimes PINNED: all 23 pre-existing SAM
+  images BYTE-IDENTICAL. docs/samc/ccl.md NEW PROVISIONAL, ac.md's open
+  lead CLOSED, evsys.md's software-event finding corrected. JUDGMENT
+  CALLS QUEUED - see memory samc-session-2026-08-29-ccl.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -2520,6 +2596,18 @@ brio/                    the framework, four strata:
                            rate (both taking it as a caller argument), a zero
                            GAIN is REFUSED because it is 2^24 and not none,
                            and every synchronized write waits before storing
+    ccl.hpp                CCL: `Ccl` (the block - one ENABLE, one software
+                           reset, ONE generic clock for every filter, edge
+                           detector and sequencer in it, the two sequencer
+                           selectors) + `Lut<n>` (three input multiplexers,
+                           the TRUTH table from `lut_truth()`, the
+                           synchronizer/filter, the edge detector, both event
+                           enables) + `CclIn<Pin>`/`CclOut<Pin>`. No
+                           interrupt and no DMA exist here. Every configuring
+                           verb refuses while the BLOCK is enabled and drops
+                           LUTCTRLn.ENABLE for the store, because the two
+                           enable gates are an AND (measured) and a write
+                           into an enabled LUT is dropped in silence
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

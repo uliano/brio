@@ -323,13 +323,19 @@ struct Evsys {
      * makes a channel with no generator useful and what makes this
      * whole subsystem testable without a single wire.
      *
-     * ON A CLOCKED PATH ONLY, and the chapter does not say so: measured,
-     * a software event on an ASYNCHRONOUS channel moves NOTHING (eight
-     * back to back reached no user, where one on a synchronous or
-     * resynchronized path moved a DMA block - docs/samc/evsys.md). The
-     * reading that fits: the async path has no clock and no edge
-     * detector, and a register write has no width to propagate. A
-     * channel meant for software events needs a clocked path.
+     * WHAT AN ASYNCHRONOUS CHANNEL DOES WITH ONE IS THE USER'S
+     * BUSINESS, not the path's - measured twice, from opposite ends.
+     * Eight back-to-back software events on an asynchronous channel move
+     * nothing through a DMA channel, where one on a clocked path moves a
+     * whole block (docs/samc/evsys.md); but sixteen of sixteen single
+     * ones reach a CCL LUT on that same asynchronous path, with a
+     * disconnected-user control catching none and one of them moving a
+     * DMA block THROUGH the LUT (docs/samc/ccl.md). A register write has
+     * no width for the DMAC's trigger stage; the CCL's event input has
+     * an edge detector of its own and catches every one. So a channel
+     * meant for software events needs a clocked path FOR THE DMAC, and
+     * nothing here can promise more than that about a user it has never
+     * seen.
      *
      * SWEVT IS WRITE-ONLY (the device header declares it `__O`), so
      * there is nothing to read back and no read-modify-write to get

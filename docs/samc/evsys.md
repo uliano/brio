@@ -131,18 +131,21 @@ the software event supplies the stimulus and the DMAC supplies the user.
   set) copies its block when - and only when - a software event reaches
   it through EVSYS. That also retires `dmac.md`'s own caveat that every
   EVACT value but `none` was untested silicon.
-- **A SOFTWARE EVENT DOES NOT CROSS AN ASYNCHRONOUS CHANNEL**, and the
-  chapter does not say so: 29.6.2.12 says a software event "can be
-  serviced as any event generator" without qualifying by path. Measured,
-  **eight** back-to-back software events on an asynchronous channel move
-  nothing, while **one** on a synchronous or resynchronized channel moves
-  a whole block. The reading that fits: the asynchronous path has no
-  clock and no edge detector, and a register write has no width of its
-  own to propagate. **The other half of that reading is now measured
-  too**, by `test_samc_eic`: a HARDWARE generator - an EIC line's edge -
-  *does* cross an asynchronous channel and moves a whole DMA block. The
-  asynchronous path carries what has width; a register write has none.
-  See [eic.md](eic.md).
+- **A SOFTWARE EVENT ON AN ASYNCHRONOUS CHANNEL DOES NOT REACH THE
+  DMAC** - and what that means took two suites to pin down. Measured
+  here, **eight** back-to-back software events on an asynchronous channel
+  move nothing through a DMA channel, while **one** on a synchronous or
+  resynchronized channel moves a whole block; 29.6.2.12 says a software
+  event "can be serviced as any event generator" and never qualifies by
+  path. **But the limit belongs to the USER and not to the path.**
+  `test_samc_ccl` puts a *different* user on the same asynchronous
+  channel - a CCL LUT, whose event input has an edge detector of its own
+  - and **sixteen of sixteen single software events arrive**, with a
+  disconnected-user control catching none, and with one of them moving a
+  DMA block through the LUT as a second witness. So the asynchronous path
+  really does carry a software event; what a register write has no width
+  for is the DMAC's own trigger stage. A hardware generator crosses that
+  path for every user tried (`test_samc_eic`, [eic.md](eic.md)).
 - **Both clocked paths work and both raise EVD**, the event-detected flag
   that only they have.
 - **The asynchronous path really is silent.** After eight events its

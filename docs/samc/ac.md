@@ -62,6 +62,18 @@ Floor 2.05 periods, ceiling 3.03, the ~0.05 being the measurement
 chain's own constant (~210 CPU cycles, bounded by the ASYNC control
 run). Both edges behave identically.
 
+**AND THE CCL IS STRICTLY CHEAPER**, which is what an application
+wanting a clock-synchronized comparator should do instead. 40.8.13's
+note - "for internal use of the comparison results by the CCL, this bit
+must be 0x1 or 0x2" - is about COMPCTRL.OUT and not about a pad, so a
+LUT can take the comparator's **asynchronous** flavour and dodge this
+sampler entirely. Measured on the same instrument at the same 11.719
+kHz ([ccl.md](ccl.md)): a combinational LUT costs **0.05 periods**
+(eight CPU cycles above the comparator's own ASYNC pad), a LUT with
+FILTSEL = SYNCH costs the **fraction + 1**, a LUT PAIR as a D flip-flop
+costs the **fraction + 0**, and this chapter's own synchronized output -
+the fraction + 2 - is the slowest clocked path of the four.
+
 **STATUSA.STATE is the sampled output too, whatever OUT says.** With
 the pad routed ASYNC, the STATE readback still pays the same
 fraction + 2 periods. STATE is declared valid only while

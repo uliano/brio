@@ -51,8 +51,16 @@
  *    (PB06/PB07). The external reference pad VREFB (PA04) is on every
  *    variant.
  *
+ *  - CCL pads: the whole map is a package fact and one LUT of the four
+ *    disappears from the pads entirely - LUT3's IN[9..11] and OUT[3]
+ *    are bonded on the J alone, so on the E and the G that LUT exists
+ *    (CCL_LUT_NUM is 4 everywhere) with NO pin of its own and must be
+ *    reached through events or a link. Two pads also carry the SAME
+ *    input: PA04 and PA16 are both CCL0/IN[0], PA08 and PA30 are both
+ *    CCL1/IN[3].
+ *
  * Consumers: samc/eic.hpp, samc/tc.hpp, samc/tcc.hpp, samc/ac.hpp,
- * samc/adc.hpp, samc/dac.hpp, samc/sdadc.hpp. Each declares the MEANING of its numbers
+ * samc/adc.hpp, samc/dac.hpp, samc/sdadc.hpp, samc/ccl.hpp. Each declares the MEANING of its numbers
  * (what an EXTINT line is, what a WO pad does); this file only says
  * which numbers exist on this device.
  */
@@ -1651,5 +1659,283 @@ constexpr uint16_t tsens_pac_id() {
     return 0xFFFF;
 #endif
 }
+
+// =============================================================================
+// CCL: instance parameters, the EVSYS vocabulary, and the pad maps
+// =============================================================================
+
+/// How many look-up tables this device implements (`CCL_LUT_NUM`).
+constexpr uint8_t ccl_lut_count() {
+#ifdef CCL_LUT_NUM
+    return CCL_LUT_NUM;
+#else
+    return 0;
+#endif
+}
+
+/// How many sequential sub-modules (`CCL_SEQ_NUM`): one per LUT PAIR.
+constexpr uint8_t ccl_seq_count() {
+#ifdef CCL_SEQ_NUM
+    return CCL_SEQ_NUM;
+#else
+    return 0;
+#endif
+}
+
+/// How many LUT input LINES the peripheral has (`CCL_IO_NUM`) - three
+/// per LUT, numbered IN[0..11] across the whole block, which is the
+/// numbering the pad map below speaks.
+constexpr uint8_t ccl_io_count() {
+#ifdef CCL_IO_NUM
+    return CCL_IO_NUM;
+#else
+    return 0;
+#endif
+}
+
+/// GCLK_CCL's peripheral channel - ONE channel for the whole block, so
+/// every filter, edge detector and sequencer in it runs at one rate.
+constexpr uint8_t ccl_gclk_id() {
+#ifdef CCL_GCLK_ID
+    return CCL_GCLK_ID;
+#else
+    return 0xFF;
+#endif
+}
+
+/// The PAC peripheral identifier (bridge = id / 32, STATUS bit = id %
+/// 32). Erratum 1.7.4 is about this number: writing CTRL.SWRST is said
+/// to raise a PAC protection error on every revision of this family.
+constexpr uint16_t ccl_pac_id() {
+#ifdef ID_CCL
+    return ID_CCL;
+#else
+    return 0xFFFF;
+#endif
+}
+
+/// EVSYS generator: LUT n's output value.
+constexpr uint8_t ccl_lutout_generator(uint8_t n) {
+    switch (n) {
+#ifdef EVENT_ID_GEN_CCL_LUTOUT_0
+    case 0: return EVENT_ID_GEN_CCL_LUTOUT_0;
+#endif
+#ifdef EVENT_ID_GEN_CCL_LUTOUT_1
+    case 1: return EVENT_ID_GEN_CCL_LUTOUT_1;
+#endif
+#ifdef EVENT_ID_GEN_CCL_LUTOUT_2
+    case 2: return EVENT_ID_GEN_CCL_LUTOUT_2;
+#endif
+#ifdef EVENT_ID_GEN_CCL_LUTOUT_3
+    case 3: return EVENT_ID_GEN_CCL_LUTOUT_3;
+#endif
+    default: return 0;
+    }
+}
+
+/// EVSYS user: LUT n's one event input line. Table 29-3 marks all four
+/// ASYNCHRONOUS PATH ONLY.
+constexpr uint8_t ccl_lutin_user(uint8_t n) {
+    switch (n) {
+#ifdef EVENT_ID_USER_CCL_LUTIN_0
+    case 0: return EVENT_ID_USER_CCL_LUTIN_0;
+#endif
+#ifdef EVENT_ID_USER_CCL_LUTIN_1
+    case 1: return EVENT_ID_USER_CCL_LUTIN_1;
+#endif
+#ifdef EVENT_ID_USER_CCL_LUTIN_2
+    case 2: return EVENT_ID_USER_CCL_LUTIN_2;
+#endif
+#ifdef EVENT_ID_USER_CCL_LUTIN_3
+    case 3: return EVENT_ID_USER_CCL_LUTIN_3;
+#endif
+    default: return 0;
+    }
+}
+
+/// Whether this device header knows INSEL's two N-variant-only codes
+/// (37.8.3): ALT2TC = 0xA and ASYNCEVENT = 0xB. Both are absent from
+/// the E/G/J headers, which is the one question no template can ask -
+/// and the answer the driver's refusals are built on.
+constexpr bool ccl_has_alt2_tc() {
+#ifdef CCL_LUTCTRL_INSEL0_ALT2TC_Val
+    return true;
+#else
+    return false;
+#endif
+}
+
+constexpr bool ccl_has_async_event() {
+#ifdef CCL_LUTCTRL_INSEL0_ASYNCEVENT_Val
+    return true;
+#else
+    return false;
+#endif
+}
+
+// -----------------------------------------------------------------------------
+// pad -> CCL input line, and pad -> CCL output
+//
+// UNLIKE THE EIC AND TC MAPS, THE VALUE IS IN THE SYMBOL'S NAME and not
+// in what it expands to: `PIN_PA04I_CCL_IN0` holds the PAD's number (4),
+// where `PIN_PA04A_EIC_EXTINT_NUM` holds the LINE's. So each entry below
+// states its index literally and the `#ifdef` answers the only question
+// left - whether this package bonds that pad to that function at all.
+// Which is still a probe and still cannot go stale: a package that drops
+// a pad drops its symbol, and the entry disappears with it.
+//
+// The input line numbering runs across the whole block: IN[3k..3k+2] are
+// LUT k's inputs 0, 1 and 2 (37.4's IN[11:0] against four LUTs of three).
+
+#define BRIO_CCL_IN(letter, number, index) \
+    case (static_cast<int>(letter) - 'A') * 32 + (number): return (index);
+
+/// This pad's CCL input line, or -1 if this device does not bond one.
+constexpr int ccl_in_line(char port, uint8_t pin) {
+    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
+#ifdef PIN_PA04I_CCL_IN0
+    BRIO_CCL_IN('A', 4, 0)
+#endif
+#ifdef PIN_PA05I_CCL_IN1
+    BRIO_CCL_IN('A', 5, 1)
+#endif
+#ifdef PIN_PA06I_CCL_IN2
+    BRIO_CCL_IN('A', 6, 2)
+#endif
+#ifdef PIN_PA08I_CCL_IN3
+    BRIO_CCL_IN('A', 8, 3)
+#endif
+#ifdef PIN_PA09I_CCL_IN4
+    BRIO_CCL_IN('A', 9, 4)
+#endif
+#ifdef PIN_PA10I_CCL_IN5
+    BRIO_CCL_IN('A', 10, 5)
+#endif
+#ifdef PIN_PA16I_CCL_IN0
+    BRIO_CCL_IN('A', 16, 0)
+#endif
+#ifdef PIN_PA17I_CCL_IN1
+    BRIO_CCL_IN('A', 17, 1)
+#endif
+#ifdef PIN_PA18I_CCL_IN2
+    BRIO_CCL_IN('A', 18, 2)
+#endif
+#ifdef PIN_PA22I_CCL_IN6
+    BRIO_CCL_IN('A', 22, 6)
+#endif
+#ifdef PIN_PA23I_CCL_IN7
+    BRIO_CCL_IN('A', 23, 7)
+#endif
+#ifdef PIN_PA24I_CCL_IN8
+    BRIO_CCL_IN('A', 24, 8)
+#endif
+#ifdef PIN_PA30I_CCL_IN3
+    BRIO_CCL_IN('A', 30, 3)
+#endif
+#ifdef PIN_PB00I_CCL_IN1
+    BRIO_CCL_IN('B', 0, 1)
+#endif
+#ifdef PIN_PB01I_CCL_IN2
+    BRIO_CCL_IN('B', 1, 2)
+#endif
+#ifdef PIN_PB06I_CCL_IN6
+    BRIO_CCL_IN('B', 6, 6)
+#endif
+#ifdef PIN_PB07I_CCL_IN7
+    BRIO_CCL_IN('B', 7, 7)
+#endif
+#ifdef PIN_PB08I_CCL_IN8
+    BRIO_CCL_IN('B', 8, 8)
+#endif
+#ifdef PIN_PB10I_CCL_IN5
+    BRIO_CCL_IN('B', 10, 5)
+#endif
+#ifdef PIN_PB14I_CCL_IN9
+    BRIO_CCL_IN('B', 14, 9)
+#endif
+#ifdef PIN_PB15I_CCL_IN10
+    BRIO_CCL_IN('B', 15, 10)
+#endif
+#ifdef PIN_PB16I_CCL_IN11
+    BRIO_CCL_IN('B', 16, 11)
+#endif
+#ifdef PIN_PB22I_CCL_IN0
+    BRIO_CCL_IN('B', 22, 0)
+#endif
+    default: return -1;
+    }
+}
+
+/// This pad's CCL output - which IS the LUT's own number (OUT[3:0]) -
+/// or -1 if this device does not bond one.
+constexpr int ccl_out_lut(char port, uint8_t pin) {
+    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
+#ifdef PIN_PA07I_CCL_OUT0
+    BRIO_CCL_IN('A', 7, 0)
+#endif
+#ifdef PIN_PA11I_CCL_OUT1
+    BRIO_CCL_IN('A', 11, 1)
+#endif
+#ifdef PIN_PA19I_CCL_OUT0
+    BRIO_CCL_IN('A', 19, 0)
+#endif
+#ifdef PIN_PA25I_CCL_OUT2
+    BRIO_CCL_IN('A', 25, 2)
+#endif
+#ifdef PIN_PA31I_CCL_OUT1
+    BRIO_CCL_IN('A', 31, 1)
+#endif
+#ifdef PIN_PB02I_CCL_OUT0
+    BRIO_CCL_IN('B', 2, 0)
+#endif
+#ifdef PIN_PB09I_CCL_OUT2
+    BRIO_CCL_IN('B', 9, 2)
+#endif
+#ifdef PIN_PB11I_CCL_OUT1
+    BRIO_CCL_IN('B', 11, 1)
+#endif
+#ifdef PIN_PB17I_CCL_OUT3
+    BRIO_CCL_IN('B', 17, 3)
+#endif
+#ifdef PIN_PB23I_CCL_OUT0
+    BRIO_CCL_IN('B', 23, 0)
+#endif
+    default: return -1;
+    }
+}
+
+#undef BRIO_CCL_IN
+
+/// Whether a LUT has ANY input pad on this package, and whether it has
+/// its output pad. On the E and the G, LUT3 has neither: it exists in
+/// silicon and is reachable only through events, a link or a sequencer.
+constexpr bool ccl_lut_has_input_pad(uint8_t lut) {
+    for (int port = 0; port < 2; ++port) {
+        for (uint8_t pin = 0; pin < 32; ++pin) {
+            const int line = ccl_in_line(static_cast<char>('A' + port), pin);
+            if (line >= 0 && static_cast<uint8_t>(line / 3) == lut) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+constexpr bool ccl_lut_has_output_pad(uint8_t lut) {
+    for (int port = 0; port < 2; ++port) {
+        for (uint8_t pin = 0; pin < 32; ++pin) {
+            if (ccl_out_lut(static_cast<char>('A' + port), pin) ==
+                static_cast<int>(lut)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+template <char L, uint8_t N>
+constexpr bool ccl_in_exists = ccl_in_line(L, N) >= 0;
+template <char L, uint8_t N>
+constexpr bool ccl_out_exists = ccl_out_lut(L, N) >= 0;
 
 } // namespace brio
