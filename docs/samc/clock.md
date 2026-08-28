@@ -305,8 +305,13 @@ Driver gaps:
 - **The main-clock TASK is still OSC48M only.** `Clock<crystal, hz>`
   and `Clock<dpll, hz>` are vocabulary that refuses to compile,
   deliberately: the resources exist and the switch is proven, but
-  which root CLK_MAIN takes belongs with the `DynamicClock` design -
-  the discrete-rate surface, the rebase fan-out, and the ticker's
+  which root CLK_MAIN takes belongs with the main-clock design. THAT
+  DESIGN IS RULED DEFERRED (2026-08-28): no `DynamicClock` on this
+  target for now - on a family where every peripheral has its own
+  generic clock channel, "one rate for everything" is an AVR
+  assumption, and no real need for run-time rescaling has appeared.
+  The question reopens with its first genuine consumer, together with
+  the discrete-rate surface, the rebase fan-out and the ticker's
   ClockUser question (`samc/ticker.hpp` documents that caveat and
   refuses the combination mechanically).
 - Nothing tells a driver that a generator it uses changed source or

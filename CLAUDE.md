@@ -327,8 +327,11 @@ gets its dated home in `docs/design/` when taken.
   and reset.hpp + a real HardFault breadcrumb; C EVSYS + EIC (SAM's
   pin interrupts live in the EIC, PORT has none) and then AC's event/
   window gaps; D TC then TCC; E OSC32KCTRL/XOSC/FDPLL96M/SUPC/RTC,
-  then the DynamicClock question and PM's SleepSite (erratum 1.8.13
-  is that phase's landmine); F SERCOM SPI and I2C, whose two-board
+  then the DynamicClock question (RULED 2026-08-28: DEFERRED - no
+  DynamicClock on this target for now, Clock<> stays static; per-
+  peripheral GCLK channels make "one rate for everything" an AVR
+  assumption, and the question reopens with its first real consumer)
+  and PM's SleepSite (erratum 1.8.13 is that phase's landmine); F SERCOM SPI and I2C, whose two-board
   halves should use an AVR128DB as the peer - spi_peer and twi_peer
   already exist, so the bus vocabulary gets a CROSS-ARCHITECTURE
   proof for free; G ADC/DAC/SDADC/TSENS; H CCL, FREQM, DSU, PAC,
