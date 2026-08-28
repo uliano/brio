@@ -1274,6 +1274,77 @@ gets its dated home in `docs/design/` when taken.
   growth: ALL 21 pre-existing SAM images BYTE-IDENTICAL. docs/samc/
   sdadc.md NEW PROVISIONAL, dac.md's 1.8.10 and SDADC gap lines closed.
   JUDGMENT CALLS QUEUED - see memory samc-session-2026-08-28-sdadc.
+  **TSENS DONE 2026-08-28 (ch. 43) - PHASE G's FOURTH AND LAST CHAPTER,
+  and the one that is NOT a converter. NOT COMMITTED awaiting Fable's
+  review (see memory samc-session-2026-08-28-tsens).**
+  samc/tsens.hpp NEW: the whole chapter as a MONOSTATE `Tsens` (the Rtc /
+  Dac / Sdadc precedent - one instance on every C21 variant, and NO PADS
+  AT ALL, 43.5.1 being "Not applicable"). THE DESIGN POSITION IS THAT
+  THIS IS A CLOCK RATIO AND NOT AN ADC CHANNEL: a temperature-dependent
+  oscillator is counted against GCLK_TSENS, so THE GENERIC CLOCK IS THE
+  MEASUREMENT'S RULER and the factory GAIN/OFFSET belong to one
+  particular rate (43.6.1's note: OSC48M undivided). Under that clock
+  VALUE IS CENTI-DEGREES CELSIUS - 43.8.10's own example, 2500 = 25 C -
+  which is the unit the header speaks throughout with no float anywhere;
+  under any other rate the two escapes are `tsens_gain_for()` on the way
+  in and `tsens_rescale()` on the way out, BOTH TAKING THE RATE AS A
+  CALLER ARGUMENT (the freqm reference_hz pattern - a ratio meter cannot
+  know what its own reference is worth). `TsensCalibration::factory()`
+  reads GAIN/OFFSET/TCAL/FCAL out of samc/nvm.hpp's
+  NvmTemperatureCalibration, KEEPING THE PROMISE that file's comment has
+  carried since phase B1 (the adc.hpp load_calibration precedent). Every
+  synchronized write WAITS BEFORE STORING and returns bool - 43.6.7
+  threatens a BUS ERROR in the same words 39.6.8 does, the sdadc position
+  taken again. THE CENTRAL MEASUREMENT, and one no other chapter in this
+  stratum could offer a bench with no thermometer: THE SAME DIE READ ON
+  TWO REFERENCES. FREQM weighs OSC48M against the board's crystal in the
+  same letter (47759811 Hz, 5003 ppm SLOW), a crystal-locked DPLL
+  supplies a true 48 MHz, and an INTERLEAVED A-B-B-A comparison repeated
+  four times with a MEDIAN estimator (the test_samc_rtc FREQCORR
+  technique - a linear drift of the die's own temperature cancels exactly
+  out of four equally spaced batches) measures a median of -35 centi-C
+  against -37 PREDICTED, with a cycle-to-cycle spread of 7 where a single
+  reading's own spread is 42. AND THE ERROR RIDES ON THE SPAN FROM THE
+  OFFSET, not on the temperature: 5000 ppm of a 26 C reading would be
+  0.13 centi-C, and it is 35. The 1/f law itself is confirmed structurally
+  (24 MHz with the factory GAIN reads -4667 against -4673 predicted) and
+  both escapes land within 5 centi-C. OTHER FINDINGS: GAIN'S RESET VALUE
+  IS 2^24 AND NOT ZERO - the field is 24 bits, so an uncalibrated TSENS
+  does not report a benign zero but waits 699 ms (2 x 2^24 periods at
+  48 MHz, TO THE MILLISECOND) and hands back the gain term amplified two
+  hundredfold, looking like -16000 C, which is why config_valid() refuses
+  it; a measurement costs 2 x GAIN + 2020 GCLK periods, a CONVERSION TIME
+  CH. 43 STATES NOWHERE, the constant identical across a fourfold GAIN
+  range once the reference's error is taken out; the VALUE rail is at
+  -2^23 located to 250 counts in eight million (convicting 43.6.4's "more
+  than 16 bits" against 43.8.7's "more than 24") and AN OVERFLOWED VALUE
+  WRAPS RATHER THAN SATURATING - a plausible number of the WRONG SIGN,
+  the opposite of what sdadc.hpp's converter does; WINMODE OUTSIDE is the
+  COMPLEMENT of INSIDE, settling the device header against 43.8.3's
+  printed "WINUT < VALUE < WINLT"; CAL.TCAL/FCAL are worth 10.08 C; the
+  gain term is NEGATIVE at room temperature (the OFFSET sits above the
+  reading), which the chapter never says. THE EVENT FINDING: table 29-3
+  grants THIS user - user 0 - all three propagation paths where the DAC's
+  and the SDADC's are asynchronous-only, and all three move DMA blocks -
+  BUT A SAMPLED PATH SAMPLES, and with the pacer's rate held at 1 kHz and
+  only the pulse width and the channel clock changed, a 21 ns event
+  reaches an asynchronous channel clocked at 32 kHz while a synchronous
+  one keeps it only at the GENERATOR'S OWN RATE (24 MHz against 48 is no
+  better than 32 kHz), and widening the pulse does not save a slow
+  synchronous channel either. ERRATUM 1.19.1 REPRODUCED AND WORSE THAN
+  ITS OWN SENTENCE: with PAC write protection set for the TSENS a CTRLB
+  write starts nothing AND raises no PAC interrupt flag, so it is dropped
+  in COMPLETE SILENCE - and it does NOT fault this core, so 11.5.2.4's
+  "access error" is not a bus error here. NEW SUITE test_samc_tsens z
+  168/168 (three warm, two cold), 10 letters plus `p` outside z (8/8),
+  WIRELESS; family fixture test/family_samc/tsens.cpp + FIVE negatives;
+  canary sdadc z 101; md5 gate on the reserve's growth: ALL 22
+  pre-existing SAM images BYTE-IDENTICAL. Two traps this suite paid for
+  and that belong to other drivers: TC2 AND TC3 SHARE GCLK CHANNEL 31, so
+  Tc<2>::release() silently stops TC3; and bench.py's --expect="->" can
+  truncate a capture, because "  -> " ends with the prompt "> ".
+  docs/samc/tsens.md NEW PROVISIONAL. JUDGMENT CALLS QUEUED - see memory
+  samc-session-2026-08-28-tsens.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -2437,6 +2508,18 @@ brio/                    the framework, four strata:
                            synchronized write WAITS BEFORE STORING, because
                            39.6.8 threatens a BUS ERROR where the ADC's and the
                            DAC's chapters promise a silent discard
+    tsens.hpp              TSENS: `Tsens`, a MONOSTATE temperature sensor that
+                           is NOT an ADC channel - it counts a temperature-
+                           dependent oscillator against GCLK_TSENS, so the
+                           GENERIC CLOCK IS THE RULER and VALUE is a signed
+                           24-bit datum in CENTI-DEGREES CELSIUS only on the
+                           48 MHz the factory calibration assumes;
+                           TsensCalibration::factory() copies GAIN/OFFSET/
+                           TCAL/FCAL out of nvm.hpp, tsens_gain_for() and
+                           tsens_rescale() are the two escapes for any other
+                           rate (both taking it as a caller argument), a zero
+                           GAIN is REFUSED because it is 2^24 and not none,
+                           and every synchronized write waits before storing
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

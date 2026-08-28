@@ -426,6 +426,15 @@ public:
         return reset(spins);
     }
 
+    /// Hand everything back - AND MIND THE SHARED CLOCK CHANNEL. TC0/TC1
+    /// share one generic clock channel and TC2/TC3 share another (the
+    /// header's TCn_GCLK_ID, stated at the top of this file), so the
+    /// disconnect below STOPS THE SIBLING TOO: Tc<2>::release() silently
+    /// halts a running TC3, which cost the TSENS campaign half a letter
+    /// before it was understood. This driver cannot know whether the
+    /// sibling is in use - a caller releasing one half of a shared pair
+    /// while the other must keep running should skip release() and tear
+    /// down by hand (reset + bus_clock), leaving the channel connected.
     static void release(uint32_t spins = 0xFFFFu) {
         Nvic::disable(irq());
         (void)reset(spins);

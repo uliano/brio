@@ -27,7 +27,12 @@ are worth reading before writing any code.
 - **TC0 and TC1 share generic clock channel 30; TC2 and TC3 share 31;
   TC4 has 32 to itself.** 35.5.3 warns that two instances sharing a
   channel "cannot be set to different clock frequencies", and
-  `Tc<n>::gclk_id` is what says which do.
+  `Tc<n>::gclk_id` is what says which do. THE SHARP EDGE OF THE SHARING
+  is `release()`: it disconnects the shared channel, so releasing one
+  half of a pair SILENTLY STOPS THE OTHER (the TSENS campaign paid half
+  a letter to learn it). A caller keeping the sibling alive tears down
+  by hand - reset plus bus_clock - and leaves the channel connected;
+  the verb's own comment says so.
 - **`TCn_MASTER_SLAVE_MODE` is 1 for a pair master, 2 for a client and 0
   for an instance that cannot pair.** TC0+TC1 and TC2+TC3 pair into a
   32-bit counter, TC4 does not - which is exactly 35.6.2.4's sentence,

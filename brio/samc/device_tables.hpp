@@ -1578,4 +1578,78 @@ constexpr bool sdadc_inp_pad_exists = sdadc_inp_code(L, N) >= 0;
 template <char L, uint8_t N>
 constexpr bool sdadc_vrefb_pad_exists = sdadc_vrefb_code(L, N) >= 0;
 
+// =============================================================================
+// TSENS: the single instance's parameters
+// =============================================================================
+//
+// One instance on every C21 variant (ch. 43 is a C21-only chapter, and
+// table 1-1's note adds that TSENS is absent from the AEC-Q100 qualified
+// part numbers - a marking difference the device headers do not express,
+// so the probe below answers only "does this header declare the block").
+// There are NO PADS: 43.5.1 is "Not applicable", the sensor is entirely
+// on the die.
+
+/// How many TSENS instances this device has.
+constexpr uint8_t tsens_count() {
+#if defined(TSENS_REGS)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/// GCLK_TSENS's peripheral channel. UNLIKE EVERY OTHER PERIPHERAL CHANNEL
+/// IN THIS FILE, the generator behind it is part of the measurement's
+/// arithmetic and not merely its pace - see samc/tsens.hpp.
+constexpr uint8_t tsens_gclk_id() {
+#ifdef TSENS_GCLK_ID
+    return TSENS_GCLK_ID;
+#else
+    return 0xFF;
+#endif
+}
+
+/// The DMAC trigger id of the one DMA request this peripheral has
+/// (RESRDY, 43.6.3).
+constexpr uint8_t tsens_dma_resrdy_id() {
+#ifdef TSENS_DMAC_ID_RESRDY
+    return TSENS_DMAC_ID_RESRDY;
+#else
+    return 0;
+#endif
+}
+
+/// EVSYS generator: the window monitor's condition matched.
+constexpr uint8_t tsens_winmon_generator() {
+#ifdef EVENT_ID_GEN_TSENS_WINMON
+    return EVENT_ID_GEN_TSENS_WINMON;
+#else
+    return 0;
+#endif
+}
+
+/// EVSYS user: start a measurement. It is USER 0 - the first row of
+/// table 29-3 - and that row grants all three propagation paths, where
+/// the DAC's and the SDADC's START users are asynchronous-only.
+constexpr uint8_t tsens_start_user() {
+#ifdef EVENT_ID_USER_TSENS_START
+    return EVENT_ID_USER_TSENS_START;
+#else
+    return 0;
+#endif
+}
+
+/// The PAC peripheral identifier (PAC.WRCTRL.PERID). Erratum 1.19.1 is
+/// about this number: with write protection set for it, TSENS.CTRLB
+/// writes stop working although 43.5.8 lists CTRLB as unprotectable.
+/// There is no PAC driver in this stratum yet; the id is published so
+/// the pass that writes one inherits the fact.
+constexpr uint16_t tsens_pac_id() {
+#ifdef ID_TSENS
+    return ID_TSENS;
+#else
+    return 0xFFFF;
+#endif
+}
+
 } // namespace brio

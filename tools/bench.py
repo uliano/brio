@@ -695,7 +695,16 @@ def wake(ser, settle=0.4):
 
 
 def capture(ser, marker, timeout, echo=True):
-    """Read until the marker line has been seen AND the prompt is back."""
+    """Read until the marker line has been seen AND the prompt is back.
+
+    MIND THE MARKER'S TAIL: the stop condition is text.endswith(PROMPT),
+    checked as soon as the marker has been seen - so a marker whose own
+    text ends with the prompt string can stop the capture EARLY,
+    truncated mid-line. The concrete trap: --expect="->" for a single
+    letter's "  -> N pass" tally ("-> " ends with "> ", the prompt), so
+    a read boundary right after the arrow ends the capture before the
+    tally. Prefer a marker with no "> " suffix - "fail" matches every
+    tally line and is safe."""
     text = ""
     seen = marker == ""
     deadline = time.time() + timeout
