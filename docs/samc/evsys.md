@@ -138,9 +138,11 @@ the software event supplies the stimulus and the DMAC supplies the user.
   nothing, while **one** on a synchronous or resynchronized channel moves
   a whole block. The reading that fits: the asynchronous path has no
   clock and no edge detector, and a register write has no width of its
-  own to propagate. NOTE what is not claimed - this says nothing about a
-  hardware generator on the asynchronous path, which this suite has no
-  generator to test.
+  own to propagate. **The other half of that reading is now measured
+  too**, by `test_samc_eic`: a HARDWARE generator - an EIC line's edge -
+  *does* cross an asynchronous channel and moves a whole DMA block. The
+  asynchronous path carries what has width; a register write has none.
+  See [eic.md](eic.md).
 - **Both clocked paths work and both raise EVD**, the event-detected flag
   that only they have.
 - **The asynchronous path really is silent.** After eight events its
@@ -168,10 +170,12 @@ Driver gaps (deliberate):
 
 Implemented but not bench-verified:
 
-- **Every real generator.** Every event in this suite is a software one,
-  so `CHANNELn.EVGEN` has only ever been written as zero on silicon, and
-  the edge selection has only ever seen a software pulse. The first
-  driver to publish a generator code is what tests that.
+- **Most real generators.** Every event in *this* suite is a software
+  one, so `CHANNELn.EVGEN` is only ever written as zero here. The first
+  driver to publish generator codes was the EIC, and `test_samc_eic`
+  exercises EVGEN, the resynchronized and asynchronous paths and rising
+  edge detection with a real hardware generator - the other ninety-odd
+  codes wait for their own drivers.
 - Falling and both-edge detection; `run_standby`; `overrun` actually
   being raised (provoking one needs a generator faster than its user).
 - Operation on the E and G variants: compile-checked only. Nothing in

@@ -3,8 +3,8 @@
 > **PROVISIONAL.** Direction, value, pulls, drive strength, the
 > peripheral-function handoff and the multi-pin engine are
 > implemented; what a pin CANNOT do here by design - sense edges and
-> raise interrupts - belongs to the EIC, a separate peripheral this
-> stratum does not have yet. The list is in "Not covered yet".
+> raise interrupts - belongs to the EIC, a separate peripheral with its
+> own driver ([eic.md](eic.md)). The list is in "Not covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M, PORT ch. 28
 (the EIC, for contrast, is ch. 26). Driver: `samc/pin.hpp`. The
@@ -50,8 +50,17 @@ PINCFG.
 
 **No senses, no flags.** Edge/level detection and pin interrupts are
 the EIC's (ch. 26), reached through PMUX function A - a different
-peripheral with its own clocking and its own future driver. PORT's
-event outputs (EVCTRL) are equally out of scope here.
+peripheral with its own clocking and its own driver, `samc/eic.hpp`
+([eic.md](eic.md)). PORT's event outputs (EVCTRL) are still out of scope
+here.
+
+**And PMUXEN takes the pad away from the output driver**, measured while
+building that driver: with the mux selecting an input-only function,
+writing DIR and OUT moves nothing at the pad, while PINCFG.PULLEN and the
+OUT bit that gives the pull its direction keep working. 28.6.1's
+"override the connection between the PORT and that I/O pin" reaches the
+driver and not the pull - which is what makes a pad-driven bench test
+possible with no wire at all (see [eic.md](eic.md)).
 
 ## Types and verbs
 
@@ -101,9 +110,9 @@ brio::Pin<'B', 31>::function(brio::PinFunction::d, {.input_enable = true});
 ## Not covered yet
 
 Driver gaps (not built):
-- The EIC entirely: senses, pin interrupts, wake - its own driver,
-  its own chapter (26).
-- PORT event outputs (EVCTRL).
+- PORT event outputs (EVCTRL). (Pin senses and interrupts are not a gap
+  here at all: they are the EIC's, ch. 26, and they are built -
+  [eic.md](eic.md).)
 - A `PinSet` analog (the AVR's cross-port mask type has no user here
   yet) and the per-package pin-bonding tables.
 

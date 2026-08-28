@@ -126,9 +126,16 @@ __attribute__((weak)) void HardFault_Handler()
     for (;;) {}   // a returning main() parks here
 }
 
-// Core exceptions.
-void NMI_Handler()        __attribute__((weak, alias("Default_Handler")));
-void SVC_Handler()        __attribute__((weak, alias("Default_Handler")));
+// Core exceptions, SPELLED THE WAY THE DEVICE HEADER DECLARES THEM
+// (samc21j18a.h's "CORTEX-M0PLUS exception handlers" block), because the
+// header is what every app includes and the thirty-one peripheral names
+// below already agree with it. The CMSIS-classic spellings NMI_Handler
+// and SVC_Handler are NOT used here: an app that binds a name this table
+// does not reference compiles and links happily and its exception lands
+// in Default_Handler, which on this target is a silent spin - found at
+// the bench, by an NMI that fired exactly as designed into nothing.
+void NonMaskableInt_Handler() __attribute__((weak, alias("Default_Handler")));
+void SVCall_Handler()     __attribute__((weak, alias("Default_Handler")));
 void PendSV_Handler()     __attribute__((weak, alias("Default_Handler")));
 void SysTick_Handler()    __attribute__((weak, alias("Default_Handler")));
 
@@ -178,11 +185,11 @@ __attribute__((section(".vectors"), used))
 constexpr Handler vector_table[] = {
     __stack_top,                               // 0: initial SP
     Reset_Handler,                             // 1: reset
-    NMI_Handler,                               // 2
+    NonMaskableInt_Handler,                    // 2
     HardFault_Handler,                         // 3
     nullptr, nullptr, nullptr, nullptr,        // 4..7 reserved on v6-M
     nullptr, nullptr, nullptr,                 // 8..10 reserved
-    SVC_Handler,                               // 11
+    SVCall_Handler,                            // 11
     nullptr, nullptr,                          // 12..13 reserved
     PendSV_Handler,                            // 14
     SysTick_Handler,                           // 15

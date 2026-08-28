@@ -529,6 +529,178 @@ gets its dated home in `docs/design/` when taken.
   the AVR roster was RENAMED apps_manifest.json -> apps_avrdx.json for
   symmetry with apps_samc.json; and nvm.hpp's refusal to expose user-row
   writes means BOOTPROT and the EEPROM-emulation size are readable only.
+  **EIC DONE 2026-08-28 (ch. 26) - PHASE C CLOSED.** samc/eic.hpp NEW:
+  the peripheral where this family keeps its PIN INTERRUPTS (PORT has
+  none), sixteen lines plus the unmaskable NMI, the five senses, the
+  majority filter, asynchronous detection, EVCTRL, one NVIC vector for
+  all sixteen (26.6.6 describes per-line request lines; the device
+  header gives EIC_IRQn, and the header wins - the SERCOM shape again),
+  every configuration register enable-protected so every verb touching
+  one RETURNS FALSE while enabled rather than storing into a register
+  the silicon ignores. THE PAD-TO-LINE MAP IS THE DEVICE HEADER'S OWN
+  TABLE and nothing else: PIN_P<pad>A_EIC_EXTINT_NUM, one #ifdef-guarded
+  case per pad (51 on the J, 37 on the G, 25 on the E), because the map
+  is IRREGULAR (PA16 -> 0, PA24 -> 12, PA27 -> 15, PB30 -> 14) and no
+  formula can stand in for it; ExtInt<Pin> refuses to compile on a pad
+  the package does not bond, which is the per-package gate with no
+  hand-kept table behind it, and ExtNmi<Pin> is the same for PA08.
+  ERRATA, AND THIS IS THE CHAPTER WHERE READING THE ROW MATTERS MOST:
+  FIVE OF SIX ARE NOT THIS SILICON (1.11.1/1.11.2 rev B only,
+  1.11.3/1.11.4 revs B..E, and 1.11.5 - the one everybody would apply -
+  is the N FAMILY ONLY); the single live item is 1.11.6, asynchronous
+  edge detection in Standby catching only the FIRST edge on every E/G/J
+  revision, which the driver cannot enforce (it does not know if the app
+  sleeps) and therefore carries as a stated obligation on
+  EicLineConfig::asynchronous. NEW SUITE test_samc_eic z 85/85 twice,
+  plus n 9/9 (the NMI) and u 4/4 (the button) outside z - WIRELESS on a
+  chapter whose subject is EXTERNAL pins, and letter b is where that
+  technique is ESTABLISHED rather than assumed: PMUXEN takes a pad away
+  from PORT's OUTPUT DRIVER (driving OUT under the mux moves nothing)
+  but NOT from its INTERNAL PULL, whose direction is still the OUT bit
+  (28.6.3.2) - so a pad first proven electrically free walks between the
+  rails on its own and every sense, filter and event path sees a real
+  edge on a real pin. FOUR FINDINGS THE CHAPTER DOES NOT HAVE: (1) THE
+  ENABLE NEEDS THE CLOCK ITS LINES ASKED FOR - 26.6.3 says the EIC
+  requests GCLK_EIC/CLK_ULP32K in the sampled modes and CTRLA.ENABLE
+  synchronizes against THAT clock, so with GCLK_EIC disconnected a block
+  of clockless lines enables/detects/disables perfectly while ONE line
+  asking to be sampled leaves CTRLA.ENABLE written, readable and
+  SYNCBUSY.ENABLE standing forever, with nothing detected; the write is
+  PENDING not lost (connecting the channel afterwards, CTRLA untouched,
+  completes it and the line starts detecting), and enable() returning
+  false is the only warning there is; (2) A HARDWARE GENERATOR DOES
+  CROSS AN ASYNCHRONOUS EVSYS CHANNEL - an EXTINT edge on an async
+  channel moves a whole DMA block where eight software events move
+  nothing, which ANSWERS the question evsys.md explicitly declined
+  (the async path carries what has WIDTH; a register write has none);
+  (3) EVERY LINE IS AN EVENT GENERATOR, not the "EXTINT0-7" of 26.6.7's
+  prose - EXTINT9 (code 0x17) moves a block, and clearing EVCTRL.EXTINTEO
+  is the gate, not the line number; (4) A TRAP IN OUR OWN CRT, found by
+  the first NMI: the device header declares NonMaskableInt_Handler and
+  SVCall_Handler while startup_samc21.cpp spelled them the CMSIS way
+  (NMI_Handler, SVC_Handler) although all 31 PERIPHERAL names already
+  matched the header - an app binding the header's name compiled, linked
+  and left the vector at Default_Handler, a silent spin; the crt now
+  spells both the header's way (a JUDGMENT CALL - shared build glue
+  changed on a bench finding - ACCEPTED at Fable's review, with the
+  header verified as the declaring authority and the tree grepped clean
+  of the old names). Also measured: the filter is a real low-pass (a
+  few-hundred-cycle excursion is rejected at a ~32 kHz EIC clock, a
+  settled one passes), a cleared LEVEL flag comes straight back while an
+  edge flag does not, an unarmed line flags without interrupting, the
+  NMI fires with the EIC DISABLED (26.6.4.1) and sense NONE is the only
+  way to turn one off, and PB22 on this board does NOT follow its own
+  internal pull (it rests LOW with the pull-up on). Doc:
+  docs/samc/eic.md (PROVISIONAL: the N-variant debouncer, sleep/wake).
+  Regressions after the crt edit: test_samc_dma z 112/112,
+  test_samc_platform z 34/34 and i 20/20, check_samc OK, host 22/22.
+  **AC COMPLETED 2026-08-28 (ch. 40) - PHASE C CLOSED FOR GOOD.**
+  samc/ac.hpp grew from the probe's minimal surface to the whole
+  chapter bar sleep: AcWindow<w> (the comparator PAIRS - WINCTRL is
+  write-synchronized but NOT enable-protected, so a window turns on
+  under a running block; WSTATE above/inside/below, the four WINTSEL
+  conditions, and pair_consistent() asking the SILICON the two things
+  40.6.4 requires and no register enforces - same measurement mode,
+  same positive input); the whole EVENT SURFACE both ways with the
+  codes PUBLISHED HERE per the accepted EVSYS ruling (COMP0..3 gens
+  0x49..0x4C, WIN0/1 gens 0x4D/0x4E, SOC0..3 users 34..37 which table
+  29-3 marks ASYNCHRONOUS PATH ONLY), EVCTRL refused while the block
+  is enabled; and PER-PACKAGE INPUT LEGALITY, where the finding is
+  that THE PAIR OWNS THE PADS - the same pin2 code means AIN2 on COMP0
+  and AIN6 on COMP2, and AIN6/AIN7 (PB05/PB06) are J-only, so
+  ac_config_valid() takes the COMPARATOR INDEX as an argument and the
+  device header's own PIN_P<pad>B_AC_AIN<k> symbols are the authority.
+  Two more chapter rules became refusals: hysteresis is continuous-mode
+  only (40.6.6) and the end-of-comparison interrupt is single-shot only
+  (40.8.12). ERRATA on the E/G/J row at rev F: only TWO of seven apply
+  and neither is fixable in a register - 1.5.3 (AC and PTC share pads)
+  and 1.5.6 (a spurious COMP flag when enabling with MUXNEG = bandgap,
+  the caller's to clear; the driver does not refuse a real input) -
+  while 1.5.2 makes low-power WITH hysteresis LEGAL here, and the
+  device-level 1.8.2 (GCLK_AC not functional, borrow GCLK_ADC1) is
+  REVISION B ONLY. NEW SUITE test_samc_ac z 94/94 THREE TIMES,
+  wireless; ac_sync_probe stays a PROBE and is untouched. THE TEST
+  DESIGN PROBLEM AND ITS ANSWER: a window needs a signal that sits
+  BETWEEN two limits and this board has no analog source (no DAC
+  driver, and the bandgap needs SUPC.VREF which nothing here turns
+  on), so the ROLES ARE SWAPPED - the SIGNAL is each comparator's VDD
+  scaler (both at step 31, so the pair sees one level) and the two
+  LIMITS are the two rail-driven pads, which reaches all three WSTATE
+  values; the chapter's own shared-input-PIN shape is exercised too and
+  reaches the two states a rail can. Measured: STATE and the CMP0 pad
+  follow the driven pad both ways and the 64-step ladder is a real
+  divider; all four WINTSEL conditions fire on their own transition and
+  stay silent otherwise; a COMPARATOR FLIP and a WINDOW TRANSITION each
+  move a DMA block, the window's event generated from the
+  inside/outside state whatever WINTSEL says (40.6.13 confirmed); and
+  letter f closes the loop with eic.hpp - A PIN EDGE STARTS A
+  SINGLE-SHOT COMPARISON through SOC0 on the asynchronous path, with
+  EVCTRL.COMPEI as the proven gate. TWO INCIDENTAL FINDINGS: PA04 and
+  PA05 do NOT follow their own weak internal pull on this board though
+  they reach both rails under PORT (so the suite's precondition is
+  "does the pad go where PORT drives it"); and RE-POINTING AN EVENT
+  CHANNEL AT A NEW GENERATOR LEAVES AN EVENT STANDING - reproducibly,
+  the first DMA arming after Evsys::connect() moves a block the window
+  never asked for, which reads as the re-route looking like an edge
+  while the not-yet-ready user makes the channel HOLD it (29.2's
+  USRRDY handshake); the suite arms twice, rests its verdict on the
+  second and prints the first. Doc: docs/samc/ac.md (still PROVISIONAL:
+  sleep, the DAC/bandgap inputs, COMP2/3 and window 1 on silicon).
+  **TC DONE 2026-08-28 (ch. 35) - PHASE D OPENS, and it is the campaign's
+  "assecondare" case: util's contracts get their SECOND implementation
+  and are validated by it.** samc/tc.hpp NEW: five instances, the three
+  counter resolutions, four waveform modes, capture with all its event
+  actions, commands, buffered registers, status, flags, ISR body - plus
+  TcWo<Pin>, TcPwm/TcPwm8 (both PwmChannel) and TcPeriodMeter/
+  TcPulseWidthMeter (the shapes MeterSource is fed from). THE GEOMETRY IS
+  THE DEVICE HEADER'S, ALL OF IT, and two facts of it matter: TC0/TC1
+  SHARE generic clock channel 30 and TC2/TC3 share 31 (35.5.3: a shared
+  pair "cannot be set to different clock frequencies"), and
+  TCn_MASTER_SLAVE_MODE says which instances PAIR into a 32-bit counter -
+  TC0+TC1, TC2+TC3, never TC4 - so a 32-bit mode on a client is a
+  compile-time refusal read out of the header rather than out of
+  35.6.2.4's sentence. The pad-to-(TC,WO) map is the same story as the
+  EIC's: 26 pads on the J, 18 on the G, 8 on the E, PA22/PB08/PB12 all
+  TC0/WO0, PB23 the board's LED = TC3/WO1, one #ifdef-guarded case per
+  pad. READING COUNT IS A COMMAND (READSYNC then two waits, 35.6.8) and
+  the raw accessors are spelled raw. ERRATA: 1.20.1 and 1.20.2 are
+  REVISION B ONLY (1.20.2 - "input capture on I/O pins does not work" -
+  is the trap); 1.20.3 is EVERY revision and is code, clear_buffer_valid()
+  writing the flag TWICE as the erratum's own workaround demands. NEW
+  SUITE test_samc_tc z 77/77 THREE TIMES, wireless. LETTER F IS THE POINT:
+  a MeterSampler AO inside a REAL KERNEL, fed by a MeterLatch that TC2's
+  capture ISR fills from a pin edge routed EIC -> EVSYS -> TC - 41 ISR
+  captures, 19 samples published, 19 received, last value 2344 ticks
+  against 2343 exact, 21 overwrites counted - which is meter_sampler.hpp's
+  whole design (the AO paces PUBLICATION, not capture) measured on a
+  second architecture with NOT ONE LINE OF util/ CHANGED. Also measured:
+  the prescaler ratio exactly 4.00x (and /1024 within 0.4% of exact over
+  a SysTick-timed window); COUNT32 advancing 9587352 counts in 200 ms,
+  146 wraps past a 16-bit range, with TC1 reporting STATUS.SLAVE; one-shot
+  stopping itself; PWM on the LED with duty 0/199/100/50 reading
+  0/994/488/255 per mille off the pad AND ITS FREQUENCY READ BY A SECOND
+  TIMER COUNTING ITS OVERFLOW EVENTS (937 in one second against 937.5 Hz -
+  a timer counting a timer is a frequency meter with no wire in it);
+  capture through an EIC line sensed on a LEVEL (so its event is a COPY
+  of the pad) exact at 2344/937 ticks; and READING CCx PROVEN TO BE THE
+  ACKNOWLEDGEMENT - four unread periods raise INTFLAG.ERR and lose
+  captures, four drained ones raise nothing. TWO PIN FACTS that complete
+  the picture the other suites started: A PAD HANDED TO A DRIVING
+  PERIPHERAL FUNCTION DOES NOT MOVE UNDER ITS OWN PULL (function E takes
+  the output driver, where the EIC's input-only function A leaves the
+  pull in charge), and A PAD LEFT UNDER PORT IS NOT SEEN BY A DIGITAL
+  CAPTURE INPUT (where the AC's ANALOG input reaches the pad with no mux
+  at all). Those two together are why THE SUITE DECLINES TO JUDGE ERRATUM
+  1.20.2: no controlled edge can reach a muxed WO pad from inside the
+  chip, so it prints what it can (CC0 did not stay zero after the
+  handover) and claims nothing - one wire would settle it. A LESSON WORTH
+  KEEPING: a bench.verdict() line is ~4 ms of console at 115200, and the
+  first version of letter b measured 4849 ticks where 4687 were due
+  because a print sat inside the measurement window; a window is now
+  opened and closed by two reads with nothing between them, and it is
+  sized to fit the counter that reads it (at /256 a 16-bit counter wraps
+  in 350 ms). Doc: docs/samc/tc.md (PROVISIONAL: the N-variant capture
+  modes, DMA, sleep, and 1.20.2 unjudged).
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
