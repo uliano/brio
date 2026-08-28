@@ -103,9 +103,8 @@
  *
  * NOT BUILT YET (docs/samc/ac.md carries the list): sleep (RUNSTDBY is
  * a config field, the 40.6.14 sequences have no owner - the power pass
- * does), and the two internal negative inputs that need a peripheral
- * this stratum has not got: the DAC, and the bandgap, whose INTREF
- * output has to be turned on in SUPC.VREF first (22.6.2.2).
+ * does), and the bandgap negative input, whose INTREF output has to be
+ * turned on in SUPC.VREF first (22.6.2.2).
  */
 
 #pragma once
@@ -148,6 +147,10 @@ enum class AcNegative : uint8_t {
     /// this negative input can raise a SPURIOUS COMPn flag, so clear
     /// that flag after the enable and before arming the interrupt.
     bandgap = AC_COMPCTRL_MUXNEG_BANDGAP_Val,
+    /// The DAC's internal output (samc/dac.hpp, CTRLB.IOEN). Bench-
+    /// verified: the crossings track the comparator's own VDD scaler
+    /// step for step, and differencing two of them cancels the
+    /// comparator's offset (docs/samc/dac.md).
     dac = AC_COMPCTRL_MUXNEG_DAC_Val,
 };
 

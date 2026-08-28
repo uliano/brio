@@ -145,8 +145,7 @@
  *    having to borrow GCLK_ADC1 because GCLK_AC is dead - is revision B
  *    only, which is why samc/ac.hpp uses AC_GCLK_ID. 1.8.9 (the DAC
  *    output as MUXPOS makes both the DAC and the reading noisy, all
- *    revisions) is live but has no consumer here: there is no DAC driver
- *    in this stratum yet.
+ *    revisions) is live and measured - see `AdcInput::dac`.
  *
  * ---------------------------------------------------------------------
  * THE HOST/CLIENT PAIR (38.6.3.1) is real and typed: ADC1 is the only
@@ -157,10 +156,9 @@
  *
  * NOT BUILT (docs/samc/adc.md carries the list): sleep behaviour beyond
  * the two CTRLA bits (the 38.6.7 table has an owner in util/power.hpp
- * but no bench leg here), the DAC as a reference or as an input (no DAC
- * driver), VREFA (needs a pin this board does not drive), and the
- * temperature sensor, which is the separate TSENS peripheral (ch. 43) on
- * this family and not an ADC channel.
+ * but no bench leg here), VREFA (needs a pin this board does not drive),
+ * and the temperature sensor, which is the separate TSENS peripheral
+ * (ch. 43) on this family and not an ADC channel.
  */
 
 #pragma once
@@ -196,12 +194,12 @@ namespace brio {
  */
 enum class Ref : uint8_t {
     /// INTREF: the SUPC bandgap, whose LEVEL is chosen in SUPC.VREF.SEL
-    /// (samc/supc.hpp's `VrefLevel`) and not here. NOTE what is measured
-    /// and what is not: the bandgap as an INPUT (MUXPOS INTREF) reads a
-    /// flat ZERO until SUPC.VREF.VREFOE is set - measured, and neither
-    /// chapter states the link - while the bandgap as a REFERENCE (this
-    /// code) has NOT been exercised on the bench at all (docs/samc/adc.md,
-    /// "Not covered yet"). Until it is, set VREFOE before trusting it.
+    /// (samc/supc.hpp's `VrefLevel`) and not here. THE TWO PATHS DIFFER
+    /// AND BOTH ARE MEASURED: the bandgap as an INPUT (MUXPOS INTREF)
+    /// reads a flat ZERO until SUPC.VREF.VREFOE is set - neither chapter
+    /// states that link - while the bandgap as a REFERENCE (this code)
+    /// does NOT need the bit at all, the reference multiplexer taking it
+    /// internally (docs/samc/dac.md).
     intref = ADC_REFCTRL_REFSEL_INTREF_Val,
     /// 1/1.6 of VDDANA.
     vddana_div1p6 = ADC_REFCTRL_REFSEL_INTVCC0_Val,
@@ -210,7 +208,8 @@ enum class Ref : uint8_t {
     vddana_div2 = ADC_REFCTRL_REFSEL_INTVCC1_Val,
     /// The VREFA pin.
     vrefa = ADC_REFCTRL_REFSEL_AREFA_Val,
-    /// The DAC's output. No DAC driver exists in this stratum yet.
+    /// The DAC's output (samc/dac.hpp). Bench-verified and ratiometric:
+    /// the reading falls exactly as one over the DAC's code.
     dac = ADC_REFCTRL_REFSEL_DAC_Val,
     /// VDDANA itself (the register calls it INTVCC2).
     vddana = ADC_REFCTRL_REFSEL_INTVCC2_Val,
@@ -388,13 +387,17 @@ enum class AdcInput : uint8_t {
     /// the cheapest self-check the converter has.
     scaled_supply = ADC_INPUTCTRL_MUXPOS_SCALEDIOVCC_Val,
     /**
-     * The DAC output. THE DOCUMENTS DISAGREE and the device header
-     * wins by house rule: 38.8.9's MUXPOS table marks 0x1C..0x1F
-     * Reserved, while the header declares
-     * `ADC_INPUTCTRL_MUXPOS_DAC_Val` = 0x1C and erratum 1.8.9 - filed
-     * against the E/G/J row at every revision - describes exactly this
-     * selection misbehaving, which no Reserved code could. There is no
-     * DAC driver in this stratum, so nothing here can validate it.
+     * The DAC output. THE DOCUMENTS DISAGREE and the device header wins
+     * by house rule: 38.8.9's MUXPOS table marks 0x1C..0x1F Reserved,
+     * while the header declares `ADC_INPUTCTRL_MUXPOS_DAC_Val` = 0x1C.
+     * MEASURED: it reads the DAC, agreeing with the same voltage taken
+     * through the pad to one count in 4096 - the table is wrong.
+     * ERRATUM 1.8.9 (E/G/J, every revision) is real and it is the
+     * OUTPUT that suffers: while a converter samples this channel the
+     * DAC's own pad shakes by about 100 mV, where the same converter
+     * free-running on another input leaves it alone. Reading through
+     * the DAC's VOUT pad instead is the erratum's own workaround, and
+     * on this family that pad IS an AIN pad (docs/samc/dac.md).
      */
     dac = ADC_INPUTCTRL_MUXPOS_DAC_Val,
 };

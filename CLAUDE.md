@@ -1112,6 +1112,78 @@ gets its dated home in `docs/design/` when taken.
   adc.md new PROVISIONAL, with the honest gap list - the host/client
   pair, the sequencer, sleep, differential mode, VREFA and everything
   needing a voltage that is not a rail, which the DAC campaign owns.
+  **DAC DONE 2026-08-28 (ch. 41) - PHASE G's SECOND CHAPTER AND THE
+  SESSION THAT CLOSES THE ANALOG LOOP. NOT COMMITTED.** samc/dac.hpp NEW:
+  the whole small chapter as a MONOSTATE `Dac` (one instance on every
+  variant - the Rtc precedent, against Adc<n>'s two), with its OWN
+  reference enum `DacRef` (adc.hpp keeps `Ref` for its own REFSEL - the
+  ADC campaign's accepted judgment call 1 applied), table 41-1's four
+  data placements as `dac_data_word()` arithmetic, both outputs, the
+  START/EMPTY event pair and the DMA trigger published as codes, and the
+  refusals that are the chapter's rules (a Reserved REFSEL; DITHERING
+  WITHOUT A START EVENT, since 41.6.8.3 makes the sixteen sub-conversions
+  the event's job). THE GEOMETRIC GIFT: PA02 is DAC/VOUT, ADC0/AIN0 and
+  the AC's AIN4 AT ONCE, so erratum 1.8.9's "wire the DAC VOUT pin
+  externally to an ADC AINx pin input" is a wire of ZERO LENGTH and the
+  suite is wireless - which is also what let three drivers' unvalidated
+  enumerators finally be measured. NEW SUITE test_samc_dac z 108/108
+  (three cold runs from a fresh flash, six warm), 11 letters. MEASURED:
+  the device header's `INT1V` name for REFSEL 0 is the SAM D21's and
+  WRONG here - the reference follows SUPC.VREF.SEL (996/2011/4057 mV at
+  its three levels); NEITHER the DAC's nor the ADC's reference path needs
+  SUPC.VREF.VREFOE, which closes the open gap Fable's review of the ADC
+  campaign left (the ADC's bandgap INPUT channel is dead without it, the
+  REFERENCE path reads 2991 vs 2990 counts with the bit clear and set);
+  `Ref::dac` converts and is ratiometric to half a per cent, putting
+  1/4 VDDANA at 1286 mV against 1287; `AdcInput::dac` reads the DAC to
+  one count in 4096 though 38.8.9's table marks the code Reserved, and
+  41.6.8.1's "the output buffer must be enabled" is NOT true on this
+  silicon; ERRATUM 1.8.9's OUTPUT half is real and large AND ISOLATED BY
+  A CONTROL (the pad's spread goes 3 -> 71..87 counts while another
+  converter samples MUXPOS = DAC, and back to 3 with that converter
+  free-running on any other input) while its READING half is DECLINED as
+  beneath this board's noise floor; `AcNegative::dac` flips a comparator
+  at 255/512/769 against 255/511/767 predicted with gaps of EXACTLY 257
+  and 257 (differencing cancels the comparator's offset); the transfer
+  curve is monotonic with a worst residual of 2.5 ADC counts from the
+  best-fit line, reported as the two converters' COMBINED nonlinearity
+  and DELIBERATELY NOT APPORTIONED (and the same measurement declines the
+  1023-vs-1024 scaling question, whose 0.1 % is smaller than the pair's
+  gain error); startup ENABLE-to-READY 5.9 us; a full-scale step crosses
+  mid-supply FASTER THAN A COMPARATOR POLL CAN RESOLVE (an upper bound of
+  a few hundred ns against the 2857 ns the 350 ksps rate implies - a rate
+  is not a settling time), measured as a 1000-crossing DIFFERENCE because
+  a single shot costs 4 us in synchronized stopwatch reads alone; the
+  no-CPU waveform runs (timer event -> START, DMAC -> DATABUF on EMPTY, a
+  second timer counting EMPTY) with UNDERRUN when it runs dry and nothing
+  moving when the pacer stops; and TWO DOCUMENTARY DISPUTES SETTLED BY
+  EXPERIMENT - EVCTRL IS enable-protected (41.6.2.1's list is right,
+  41.8.3's property line is missing a property) and DBGCTRL IS AT OFFSET
+  0x14 (the device header's, not the register summary's 0x18).
+  THE FINDING THAT CHANGED THE DRIVER: SYNCBUSY.DATABUF IS NOT A BUS
+  CROSSING - it stands until a START EVENT CONSUMES the value, SYNCBUSY.
+  DATA stands with it, and every later write to either register is
+  discarded (41.6.7), so one DATABUF write in a DAC with no start event
+  wedges the data path until a start event or a reset. `buffer()` is
+  therefore a plain void store that never waits and `buffer_sync()` the
+  separate verb - exactly the shape adc.hpp's `select()` has over its
+  double-buffered INPUTCTRL, and neither chapter says so. Erratum 1.9.2
+  REPRODUCES with a control on both sides (half a second awake leaves
+  EMPTY clear, the same half second in standby sets it, and RUNSTDBY = 1
+  leaves it clear). AND A CROSS-CAMPAIGN CORRECTION: ERRATUM 1.4.10 IS
+  LIVE AND WORSE THAN ITS OWN SENTENCE - the ADC campaign's narrow probe
+  saw nothing, but once ADC1 has been enabled in a power cycle
+  ADC0.SYNCBUSY.ENABLE is stuck at one, ADC0 WILL NOT ENABLE AT ALL
+  (Adc<0>::init() returns false and the converter reads zero) and a
+  software reset does not clear it; the errata's own order (ADC1 up
+  first, ADC0 second) is the way out and the suite spends it visibly.
+  adc.hpp's and ac.hpp's comments were corrected from these measurements
+  (comment-only, the established precedent); their docs lost exactly the
+  gap lines this closed. Family fixture test/family_samc/dac.cpp + FIVE
+  negatives; docs/samc/dac.md new PROVISIONAL (gaps: dithering, VREFA,
+  the voltage pump, sleep, LEFTADJ on silicon, the interrupts through the
+  NVIC, the SDADC's share). THREE JUDGMENT CALLS QUEUED - see memory
+  samc-session-2026-08-28-dac.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -2254,6 +2326,14 @@ brio/                    the framework, four strata:
                            calibration copied by init() and erratum 1.4.4 as
                            code (an ADC event user takes the asynchronous
                            path or nothing)
+    dac.hpp                DAC: `Dac`, a MONOSTATE resource (one instance on
+                           every variant), with its OWN reference enum
+                           DacRef, table 41-1's four data placements as
+                           dac_data_word(), both outputs, the START/EMPTY
+                           event pair and the DMA trigger - and buffer() a
+                           plain store that never waits, because
+                           SYNCBUSY.DATABUF stands until a start event
+                           consumes the value
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

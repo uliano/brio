@@ -2,13 +2,11 @@
 
 > **PROVISIONAL.** Both converters are implemented over the whole
 > chapter and bench-verified, and `util/analog_sampler.hpp` runs on top
-> of them unchanged. What is NOT here is everything that needs a
-> voltage this board cannot make: there is no DAC driver, so no ramp and
-> no arbitrary mid-rail source exists, and with it go the transfer
-> curve, INL/DNL, and the DAC as a reference or as an input. VREFA needs
-> a pin nothing drives. The host/client pair, sleep and the automatic
-> sequencer are written and never exercised. The list is in "Not covered
-> yet".
+> of them unchanged. The reference selections and `AdcInput::dac` are
+> exercised against the DAC on the same die ([dac.md](dac.md)). What is
+> NOT here: VREFA needs a pin nothing drives, and the host/client pair,
+> sleep, differential mode and the automatic sequencer are written and
+> never exercised. The list is in "Not covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 38, the ADC
 characteristics of table 45-22, the NVM software calibration area of
@@ -228,10 +226,13 @@ does about it:
   conversion of a sequence exiting standby. Stated on
   `sequence_state()`; there is nothing to write.
 - **1.4.10 Syncbusy Enable** - enabling ADC1 while ADC0 is disabled can
-  leave ADC0.SYNCBUSY.ENABLE stuck at one. Each instance waits on its
-  own bit, which the item does not touch, so nothing here can hang; the
-  obligation on a caller reading ADC0's is stated on `enable()`. **It
-  did not reproduce on this die** - see the findings.
+  leave ADC0.SYNCBUSY.ENABLE stuck at one, and the workaround is
+  "enable ADC0 before ADC1 or disregard the bit". **It DOES reproduce
+  on this die, and it is worse than the item's sentence** - see the
+  findings. `enable()` waits on that bit, so `Adc<0>::init()` FAILS and
+  leaves the converter disabled once the state is entered. The
+  enumerator's comment is not enough here; the sequencing obligation
+  falls on the application.
 
 Not this silicon, and deliberately not coded around: **1.4.1** (START
 never clearing), **1.4.2** (the LSB stuck at zero at 8 and 10 bits) and
@@ -241,8 +242,10 @@ never clearing), **1.4.2** (the LSB stuck at zero at 8 and 10 bits) and
 **1.8.2**, which says GCLK_AC is dead and the AC must borrow GCLK_ADC1's
 channel, is revision B only - which is why `ac.hpp` uses AC_GCLK_ID.
 **1.8.9** (the DAC output as MUXPOS making both the DAC and the reading
-noisy) is live at every revision but has no consumer here: there is no
-DAC driver in this stratum.
+noisy) is live at every revision and is now measured: see
+[dac.md](dac.md), where the output half is large and the reading half is
+declined, and where the workaround's "external wire" turns out to have
+zero length because PA02 is DAC/VOUT and ADC0/AIN0 at once.
 
 ## Bench findings
 
@@ -254,10 +257,9 @@ From `test_samc_adc`, 9 letters / 97 verdicts, 97/97 four times
   4096** with it set. 22.8.7 words VREFOE as routing the reference "to an
   ADC input channel" and chapter 38 never mentions it at all, so the
   connection between the two chapters is a bench fact rather than a
-  documented one. Whether REFSEL = INTREF - the bandgap as a REFERENCE,
-  a different path - needs the bit too is NOT known: no letter has run
-  that reference (see "Not covered yet"), and after this finding the
-  safe assumption is that it might.
+  documented one. **The REFERENCE path is a different matter and does
+  NOT need the bit**: a conversion against REFSEL = INTREF reads 2991
+  counts with VREFOE clear and 2990 with it set ([dac.md](dac.md)).
 - **VDD LOCATED FROM THE ADC'S SIDE, and it agrees with the AC's.**
   Against VDDANA, INTREF at 1.024 / 2.048 / 4.096 V reads 795 / 1603 /
   3226 counts, which puts VDDANA at **5276 / 5233 / 5201 mV**. The SUPC
@@ -352,11 +354,16 @@ From `test_samc_adc`, 9 letters / 97 verdicts, 97/97 four times
   a target with a hardware sequencer and DMA; the answer is that it
   does, because the sequencer and the DMA are not what the sampler
   uses.
-- **Erratum 1.4.10 did not reproduce.** With ADC1 enabled and ADC0
-  disabled, ADC0.SYNCBUSY reads 0x0000 - the item's own bit clear.
-  Recorded as an observation on one die, not as a claim that the item is
-  wrong; the driver's discipline (each instance waits on its own bit)
-  makes it unable to hang either way.
+- **ERRATUM 1.4.10 REPRODUCES, AND IT IS WORSE THAN ITS OWN SENTENCE.**
+  A narrow probe sees nothing: with ADC1 enabled and ADC0 disabled,
+  ADC0.SYNCBUSY reads 0x0000. Running the two converters in earnest is
+  what shows it ([dac.md](dac.md)). Once ADC1 has been enabled in a
+  power cycle, ADC0.SYNCBUSY.ENABLE is stuck at one and STAYS stuck,
+  ADC0 will not enable at all - `Adc<0>::init()` returns false and the
+  converter reads zero - and a software reset does not clear it, SWRST's
+  own busy bit joining the stuck one. The errata's order is the way out:
+  bring ADC1 up FIRST and ADC0 second, after which ADC0 converts and
+  keeps converting even when ADC1 is released again.
 - **The INTREF sampling rule is real but small here.** At 1.5 MHz,
   INTREF read with SAMPLEN 14 (10.0 us, the table's minimum) gives 795
   counts and with SAMPLEN 0 (0.67 us) gives 791..792 - four or five per
@@ -378,18 +385,9 @@ Driver gaps:
 - **Sleep**: `run_standby` and `on_demand` are config fields with
   table 38-4 behind them and no owner - the ADC has never been a wake
   source or a sleepwalking peripheral here.
-- **INTREF as a REFERENCE** (`Ref::intref`): every letter that touched
-  the bandgap read it as an INPUT against VDDANA; no conversion has run
-  with REFSEL = INTREF. Given that the input path is dead without
-  SUPC.VREF.VREFOE (above), whether the reference path shares that
-  dependence is an open bench question - set VREFOE before relying on
-  it.
-- **VREFA and the DAC as references** (`Ref::vrefa`, `Ref::dac`) are
-  encodable and unreachable: VREFA needs a pin nothing on this board
-  drives, and there is no DAC driver in this stratum. `AdcInput::dac` is
-  the same, and it carries its own documentary problem - 38.8.9's table
-  marks the code Reserved while the device header declares it and
-  erratum 1.8.9 describes it misbehaving.
+- **VREFA** (`Ref::vrefa`) is encodable and unreachable: the pin is PA03
+  and nothing on this board drives it inside table 45-30's range. Needs
+  a wire.
 - **No temperature reading.** On this family the sensor is the separate
   TSENS peripheral (ch. 43), not an ADC channel; `samc/nvm.hpp` already
   reads its calibration and its driver is a future pass.
@@ -414,7 +412,11 @@ Implemented but not bench-verified:
 - **`AdcInput::intref` as a MUXPOS at a fast CLK_ADC**, where table
   45-22's 10 us sampling rule should bite harder than the four per mille
   measured at 1.5 MHz.
-- **Everything about accuracy that needs a source this board has not
-  got**: the transfer curve, INL, DNL, the offset and gain errors of
-  table 45-23, and any use of the correction registers to cancel them.
-  These wait for the DAC campaign, or for a wire.
+- **INL and DNL as this converter's own numbers.** What is measured is
+  the transfer of this converter and the DAC IN SERIES - monotonic, with
+  a worst residual of about 2.5 counts from a best-fit line - and that
+  residual is deliberately not apportioned between the two
+  ([dac.md](dac.md)). Separating them needs a source more accurate than
+  either, which this board has not got; so does any use of the
+  correction registers to cancel the offset and gain errors of table
+  45-24.

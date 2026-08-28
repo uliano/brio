@@ -272,6 +272,17 @@ scaler.
   driver - so the suite's precondition is "does the pad go where PORT
   drives it", which is the right question for an analog input anyway.
 
+### `AcNegative::dac`, from `test_samc_dac`
+
+With COMP0's positive input on its own 64-step VDD scaler and its
+negative on the DAC's internal output, the comparator flips at DAC code
+**255 / 512 / 769** for scaler steps 15 / 31 / 47, against 255 / 511 /
+767 predicted by the two dividers. The **gaps are 257 and 257 codes**
+against 256 predicted, and differencing them cancels the comparator's
+own offset - so that pair is the two ladders agreeing and nothing else.
+The comparator also follows the DAC to both ends of its range. Details
+in [dac.md](dac.md).
+
 ### From `ac_sync_probe` (a PROBE, not a suite)
 
 The numbers behind the timing statements above, all
@@ -305,11 +316,10 @@ Driver gaps (not built):
   sequences (continuous and single-shot measurement during sleep, and
   the SleepWalking they enable) have no owner until the power pass,
   which is also where `util/power.hpp`'s SleepSite arrives.
-- **The two internal negative inputs that need another peripheral**:
-  the DAC (no DAC driver here) and the bandgap, whose INTREF output
-  has to be turned on in SUPC.VREF first (22.6.2.2) and whose level is
-  selected there too - and which is the input erratum 1.5.6 is about,
-  so that erratum is stated and not exercised.
+- **The bandgap as a negative input**, whose INTREF output has to be
+  turned on in SUPC.VREF first (22.6.2.2) and whose level is selected
+  there too - and which is the input erratum 1.5.6 is about, so that
+  erratum is stated and not exercised here.
 - **Offset compensation via SWAP as a procedure** (40.6.10): the SWAP
   bit is a config field, the two-measurement recipe is not built.
 - **DBGCTRL policy.**

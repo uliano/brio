@@ -37,6 +37,9 @@
  *    and TCC1/WO2 under function F - so that map is keyed by pad AND
  *    function where the TC's is keyed by pad alone.
  *  - AC analog inputs: AIN6/AIN7 (PB05/PB06) exist on the J alone.
+ *  - DAC analog pads: VOUT on PA02 (which is ADC0/AIN0 and AC/AIN4 at
+ *    the same time) and VREFA on PA03; one instance, and the C20 half
+ *    of the family has no DAC at all.
  *  - ADC analog inputs: TWO maps over OVERLAPPING pads, so that one is
  *    keyed by INSTANCE and pad - PA08 is ADC0/AIN8 and ADC1/AIN10 at
  *    once, PB08 is ADC0/AIN2 and ADC1/AIN4 - and the E bonds no PORT B
@@ -44,9 +47,9 @@
  *    exactly AIN10 and AIN11.
  *
  * Consumers: samc/eic.hpp, samc/tc.hpp, samc/tcc.hpp, samc/ac.hpp,
- * samc/adc.hpp. Each declares the MEANING of its numbers (what an EXTINT
- * line is, what a WO pad does); this file only says which numbers exist
- * on this device.
+ * samc/adc.hpp, samc/dac.hpp. Each declares the MEANING of its numbers
+ * (what an EXTINT line is, what a WO pad does); this file only says
+ * which numbers exist on this device.
  */
 
 #pragma once
@@ -1276,5 +1279,96 @@ constexpr bool adc_ain_exists(uint8_t instance, uint8_t ain) {
 
 template <uint8_t I, char L, uint8_t N>
 constexpr bool adc_ain_pad_exists = adc_ain_code(I, L, N) >= 0;
+
+// =============================================================================
+// DAC: the single instance's parameters and its two analog pads
+// =============================================================================
+//
+// One instance on every C21 variant, so nothing here is keyed by number;
+// the probes exist because the C20 half of the family has no DAC at all
+// (ch. 41 is titled "SAM C21 only") and because a driver must never copy
+// a clock id or a trigger code out of a datasheet table by hand.
+
+/// How many DAC instances this device has: one on every C21, none on a
+/// C20 (whose headers this repository does not vendor - the probe is
+/// what makes that a compile-time fact rather than an assumption).
+constexpr uint8_t dac_count() {
+#if defined(DAC_REGS)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/// GCLK_DAC's peripheral channel.
+constexpr uint8_t dac_gclk_id() {
+#ifdef DAC_GCLK_ID
+    return DAC_GCLK_ID;
+#else
+    return 0xFF;
+#endif
+}
+
+/// The DMAC trigger id of the one DMA request this peripheral has
+/// (EMPTY, 41.6.3).
+constexpr uint8_t dac_dma_empty_id() {
+#ifdef DAC_DMAC_ID_EMPTY
+    return DAC_DMAC_ID_EMPTY;
+#else
+    return 0;
+#endif
+}
+
+/// EVSYS generator: the data buffer became empty.
+constexpr uint8_t dac_empty_generator() {
+#ifdef EVENT_ID_GEN_DAC_EMPTY
+    return EVENT_ID_GEN_DAC_EMPTY;
+#else
+    return 0;
+#endif
+}
+
+/// EVSYS user: start a conversion from DATABUF. Table 29-3 marks it
+/// ASYNCHRONOUS PATH ONLY.
+constexpr uint8_t dac_start_user() {
+#ifdef EVENT_ID_USER_DAC_START
+    return EVENT_ID_USER_DAC_START;
+#else
+    return 0;
+#endif
+}
+
+// -----------------------------------------------------------------------------
+// The two analog pads. `PIN_P<pad>B_DAC_VOUT` and `..._DAC_VREFP` exist
+// for exactly the pads a package bonds, and the matching `MUX_` symbol is
+// the peripheral FUNCTION the pad must be given (B on this family). The
+// return is that function index, or -1 for a pad that is not the one.
+//
+// Both are on PORT A pads every variant bonds - PA02 and PA03 - so no
+// package variation is expected here; the probes are what makes that a
+// re-read fact instead of a claim.
+
+constexpr int dac_vout_code(char port, uint8_t pin) {
+    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
+#ifdef PIN_PA02B_DAC_VOUT
+    case 2: return static_cast<int>(MUX_PA02B_DAC_VOUT);
+#endif
+    default: return -1;
+    }
+}
+
+constexpr int dac_vrefa_code(char port, uint8_t pin) {
+    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
+#ifdef PIN_PA03B_DAC_VREFP
+    case 3: return static_cast<int>(MUX_PA03B_DAC_VREFP);
+#endif
+    default: return -1;
+    }
+}
+
+template <char L, uint8_t N>
+constexpr bool dac_vout_pad_exists = dac_vout_code(L, N) >= 0;
+template <char L, uint8_t N>
+constexpr bool dac_vrefa_pad_exists = dac_vrefa_code(L, N) >= 0;
 
 } // namespace brio
