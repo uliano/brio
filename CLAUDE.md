@@ -1025,6 +1025,93 @@ gets its dated home in `docs/design/` when taken.
   bench - plus the RTC-backed timebase, EIC wake, PAC, SLEEPONEXIT);
   design/power.md records the second target holding the contract
   unchanged; tc.md gains the one-behind read.
+  **ADC DONE 2026-08-28 (ch. 38, BOTH converters) - PHASE G's first
+  chapter, and util/analog.hpp + analog_sampler.hpp VALIDATED UNCHANGED
+  on their second architecture. NOT COMMITTED.** samc/adc.hpp NEW over
+  the whole chapter: `Adc<n>` for two instances that are the same
+  peripheral at two addresses but NOT a symmetric pair (the device
+  header's ADCn_MASTER_SLAVE_MODE gives ADC0 the host role and DUALSEL,
+  ADC1 the client role and SLAVEEN, and a knob on the wrong instance is
+  a compile error), both input muxes with every internal channel, the
+  six reference codes, the prescaler and sampling arithmetic with table
+  45-22's cycle counts as constexpr, all four resolutions, the
+  accumulation/averaging/oversampling unit, free-running, the window
+  monitor, the offset and gain corrections, the sequencer, both event
+  directions, the DMA trigger and the one vector - with THE FOUR
+  REGISTER DISCIPLINES SPELLED PER REGISTER (enable-protected,
+  write-synchronized, DOUBLE-BUFFERED as well, and neither), because
+  the mixture is where this chapter's traps are: a double-buffered
+  write made mid-conversion holds its SYNCBUSY for the whole
+  conversion, which is why select() is a void store with no wait and
+  select_sync() is a separate verb. THE PAD MAPS WENT INTO THE RESERVE
+  and needed TWO of them keyed by INSTANCE, because they OVERLAP: PA08
+  is ADC0/AIN8 and ADC1/AIN10 at once, PB08 is ADC0/AIN2 and ADC1/AIN4
+  - and the E bonds NO PORT B pad to either converter, leaving ADC1
+  there with AIN10 and AIN11 and nothing else (device_tables.hpp grew
+  eleven ADC probes; the growth is proven a pure addition - 18 of 19
+  pre-existing SAM images byte-identical, the nineteenth being
+  test_samc_nvm, whose newest-source-mtime defsym changes by design).
+  THE RESSEL/AVGCTRL TRAP IS REFUSED: accumulation above one sample
+  requires RESSEL = 16BIT, which three separate Notes say and nothing
+  enforces, and the full-scale arithmetic that falls out of tables 38-1
+  and 38-2 IS util/analog.hpp's `steps` argument, computed at compile
+  time by adc_result_steps() and at run time by result_steps().
+  CALIBRATION IS NOT OPTIONAL and init() copies it, keeping the promise
+  nvm.hpp's comment has carried since phase B1. This target's
+  `brio::Ref` + `ref_mv()` live in adc.hpp rather than in a vref header,
+  because on this family there is no shared reference block - ADC, DAC
+  and SDADC each have their own REFSEL vocabulary. Errata: FIVE of the
+  ten are live at rev F and 1.4.4 IS CODE (start_on()/flush_on() refuse
+  a non-asynchronous channel, since a synchronized event during a
+  conversion stalls the whole channel), 1.4.5 is why start() waits for
+  nothing, 1.4.6 is the five conversions init() discards, 1.4.9 is a
+  stated caveat, 1.4.10 is an obligation - and it DID NOT REPRODUCE;
+  1.4.1/1.4.2/1.4.3 are rev B and 1.4.7/1.4.8 are rev B..E (the
+  read-the-row trap again). NEW SUITE test_samc_adc z 97/97 four times,
+  9 letters, wireless, ~25 s. THE FINDINGS: the BANDGAP CHANNEL IS DEAD
+  WITHOUT SUPC.VREF.VREFOE - MUXPOS INTREF reads a FLAT ZERO until that
+  bit is set and 795 counts of 4096 after, a connection between chapters
+  22 and 38 that neither states; VDD from the ADC's side is 5276/5233/
+  5201 mV at the three bandgap levels where the COMPARATOR independently
+  said 5251/5141/5090 (two peripherals, no shared mechanism, agreeing to
+  under 2 % and sloping the same way with the level, which puts the
+  slope on the bandgap and not on either instrument); ADC0 and ADC1 read
+  a shared pad EXACTLY alike at both rails and differ by 5..6 counts of
+  4096 on an internal divider; CONVERSION TIME IS EXACT TO THE
+  STOPWATCH TICK in six configurations ruled by the crystal (13/33/10/
+  16/13/208 CLK_ADC cycles predicted, every one measured to the tick, so
+  table 45-22's four rows are right and the accumulation multiplies
+  exactly); THE WINDOW MONITOR'S MODE4 IS THE COMPLEMENT OF MODE3, which
+  settles the device header against 38.8.10's own table (with WINLT
+  below WINUT the table's reading is an empty band that can never fire
+  and the header's must fire at both rails - it fires at both rails);
+  and 38.6.2.14's PER-CONVERSION 13-CYCLE correction latency IS NOT
+  OBSERVED (117 ticks uncorrected against 119 corrected, at either
+  offset, where thirteen cycles would be 104) although the correction is
+  demonstrably in the path, an OFFSETCORR of 100 taking exactly 100
+  counts off - so adc_conversion_cycles() keeps charging the 13 in
+  single mode deliberately, a pacing prediction being safe when
+  generous. The no-CPU chain runs BOTH WAYS AT ONCE (a TC overflow
+  starting the conversion over an asynchronous channel, the DMAC taking
+  RESULT one beat per conversion, a second TC counting the result-ready
+  events - and nothing moving at all with the pacer stopped), and it
+  caught that THE DMA REQUEST IS THE RESRDY FLAG: 38.6.4's "cleared when
+  the RESULT register is read" means clearing the flag is not enough and
+  a stale result moves a stale beat. Letter i is the campaign's point:
+  AnalogSampler INSIDE A REAL KERNEL walking an internal channel and a
+  rail-driven pad, 49 interrupts, 49 events received, zero mislabelled,
+  with NOT ONE LINE of util/ changed - the file's own comment doubted
+  the shape would survive a target with a sequencer and DMA, and the
+  answer is that it does because the sampler uses neither. The averaging
+  letter MEASURES THE NOISE BEFORE CLAIMING ANYTHING ABOUT IT (three
+  internal sources spanning 1, 4 and 5 counts over 64 readings; the
+  noisiest is the measurand and the reduction verdict is declined in
+  print if even that one spans under four counts). Family fixture
+  test/family_samc/adc.cpp + NINE negatives; suite regressions sleep z
+  87, tc z 77, supc z 44; check_samc, check_family, host 22/22. Docs:
+  adc.md new PROVISIONAL, with the honest gap list - the host/client
+  pair, the sequencer, sleep, differential mode, VREFA and everything
+  needing a voltage that is not a rail, which the DAC campaign owns.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -2153,6 +2240,20 @@ brio/                    the framework, four strata:
                            util/power.hpp adapter - and the first place the
                            model's never-deeper rule is NOT the identity:
                            deep maps to standby because nothing is deeper
+    adc.hpp                ADC: Adc<n> over both converters (the same
+                           peripheral at two addresses, with the header's own
+                           host/client roles enforced), the two input muxes,
+                           the six reference codes behind THIS TARGET'S Ref +
+                           ref_mv() (util/analog.hpp's vocabulary; there is no
+                           shared reference block on this family), the
+                           prescaler and sampling arithmetic, the
+                           RESSEL/AVGCTRL interplay whose full scale IS
+                           util/analog.hpp's `steps`, the window monitor, the
+                           digital corrections, the sequencer, both event
+                           directions and the DMA trigger - with the factory
+                           calibration copied by init() and erratum 1.4.4 as
+                           code (an ADC event user takes the asynchronous
+                           path or nothing)
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

@@ -37,10 +37,16 @@
  *    and TCC1/WO2 under function F - so that map is keyed by pad AND
  *    function where the TC's is keyed by pad alone.
  *  - AC analog inputs: AIN6/AIN7 (PB05/PB06) exist on the J alone.
+ *  - ADC analog inputs: TWO maps over OVERLAPPING pads, so that one is
+ *    keyed by INSTANCE and pad - PA08 is ADC0/AIN8 and ADC1/AIN10 at
+ *    once, PB08 is ADC0/AIN2 and ADC1/AIN4 - and the E bonds no PORT B
+ *    pad to either converter at all, which leaves ADC1 there with
+ *    exactly AIN10 and AIN11.
  *
- * Consumers: samc/eic.hpp, samc/tc.hpp, samc/tcc.hpp, samc/ac.hpp. Each
- * declares the MEANING of its numbers (what an EXTINT line is, what a
- * WO pad does); this file only says which numbers exist on this device.
+ * Consumers: samc/eic.hpp, samc/tc.hpp, samc/tcc.hpp, samc/ac.hpp,
+ * samc/adc.hpp. Each declares the MEANING of its numbers (what an EXTINT
+ * line is, what a WO pad does); this file only says which numbers exist
+ * on this device.
  */
 
 #pragma once
@@ -993,5 +999,282 @@ constexpr bool ac_ain_exists(uint8_t ain) {
     default: return false;
     }
 }
+
+// =============================================================================
+// ADC: instance parameters, and (instance, pad) -> analog input number
+// =============================================================================
+//
+// The two converters are NOT copies: ADC0 is the host of the host/client
+// pair and ADC1 the client, and their pad maps are DIFFERENT MAPS OVER
+// OVERLAPPING PADS - PA08 is ADC0/AIN8 and ADC1/AIN10 at the same time,
+// PB08 is ADC0/AIN2 and ADC1/AIN4. So this map is keyed by INSTANCE and
+// pad, the way the TCC's is keyed by function and pad, and for the same
+// reason: a lookup on the pad alone would have to guess.
+
+/// How many ADC instances this device has.
+constexpr uint8_t adc_count() {
+#if defined(ADC1_REGS)
+    return 2;
+#elif defined(ADC0_REGS)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/// `ADCn_MASTER_SLAVE_MODE`: 1 = the HOST of the pair (38.6.3.1, the one
+/// that owns DUALSEL), 2 = the CLIENT (the one that may set
+/// CTRLA.SLAVEEN), 0 = neither.
+constexpr uint8_t adc_pair_role(uint8_t n) {
+    switch (n) {
+#ifdef ADC0_MASTER_SLAVE_MODE
+    case 0: return ADC0_MASTER_SLAVE_MODE;
+#endif
+#ifdef ADC1_MASTER_SLAVE_MODE
+    case 1: return ADC1_MASTER_SLAVE_MODE;
+#endif
+    default: return 0;
+    }
+}
+
+/// `ADCn_EXTCHANNEL_MSB` + 1: how many EXTERNAL channels (AIN codes) the
+/// mux can name. It is the CODE SPACE and not the bonding - which pads a
+/// package actually carries is `adc_ain_code()` below.
+constexpr uint8_t adc_external_channels(uint8_t n) {
+    switch (n) {
+#ifdef ADC0_EXTCHANNEL_MSB
+    case 0: return static_cast<uint8_t>(ADC0_EXTCHANNEL_MSB + 1);
+#endif
+#ifdef ADC1_EXTCHANNEL_MSB
+    case 1: return static_cast<uint8_t>(ADC1_EXTCHANNEL_MSB + 1);
+#endif
+    default: return 0;
+    }
+}
+
+/// `ADCn_LOAD_CALIB`: the header's own statement that this instance's
+/// CALIB register has to be loaded from the NVM software calibration row
+/// (38.5.10). It reads 1 on both instances of this family, and the
+/// driver's init() refuses to run uncalibrated where it does.
+constexpr bool adc_loads_calibration(uint8_t n) {
+    switch (n) {
+#ifdef ADC0_LOAD_CALIB
+    case 0: return ADC0_LOAD_CALIB != 0;
+#endif
+#ifdef ADC1_LOAD_CALIB
+    case 1: return ADC1_LOAD_CALIB != 0;
+#endif
+    default: return false;
+    }
+}
+
+/// This instance's generic clock channel (GCLK_ADCn).
+constexpr uint8_t adc_gclk_id(uint8_t n) {
+    switch (n) {
+#ifdef ADC0_GCLK_ID
+    case 0: return ADC0_GCLK_ID;
+#endif
+#ifdef ADC1_GCLK_ID
+    case 1: return ADC1_GCLK_ID;
+#endif
+    default: return 0xFF;
+    }
+}
+
+/// The DMAC trigger id of this instance's one DMA request (RESRDY).
+constexpr uint8_t adc_dma_resrdy_id(uint8_t n) {
+    switch (n) {
+#ifdef ADC0_DMAC_ID_RESRDY
+    case 0: return ADC0_DMAC_ID_RESRDY;
+#endif
+#ifdef ADC1_DMAC_ID_RESRDY
+    case 1: return ADC1_DMAC_ID_RESRDY;
+#endif
+    default: return 0;
+    }
+}
+
+// ---- the EVSYS codes, from the device header's own constants ----------------
+
+constexpr uint8_t adc_resrdy_generator(uint8_t n) {
+    switch (n) {
+#ifdef EVENT_ID_GEN_ADC0_RESRDY
+    case 0: return EVENT_ID_GEN_ADC0_RESRDY;
+#endif
+#ifdef EVENT_ID_GEN_ADC1_RESRDY
+    case 1: return EVENT_ID_GEN_ADC1_RESRDY;
+#endif
+    default: return 0;
+    }
+}
+
+constexpr uint8_t adc_winmon_generator(uint8_t n) {
+    switch (n) {
+#ifdef EVENT_ID_GEN_ADC0_WINMON
+    case 0: return EVENT_ID_GEN_ADC0_WINMON;
+#endif
+#ifdef EVENT_ID_GEN_ADC1_WINMON
+    case 1: return EVENT_ID_GEN_ADC1_WINMON;
+#endif
+    default: return 0;
+    }
+}
+
+constexpr uint8_t adc_start_user(uint8_t n) {
+    switch (n) {
+#ifdef EVENT_ID_USER_ADC0_START
+    case 0: return EVENT_ID_USER_ADC0_START;
+#endif
+#ifdef EVENT_ID_USER_ADC1_START
+    case 1: return EVENT_ID_USER_ADC1_START;
+#endif
+    default: return 0;
+    }
+}
+
+/// The FLUSH event user. The chapter calls this input FLUSH (38.6.6 and
+/// EVCTRL.FLUSHEI) and table 29-3's own row calls it "ADCn SYNC / Flush
+/// ADC" - the device header follows the table, so the SYMBOL is
+/// `EVENT_ID_USER_ADCn_SYNC` and the MEANING is flush.
+constexpr uint8_t adc_flush_user(uint8_t n) {
+    switch (n) {
+#ifdef EVENT_ID_USER_ADC0_SYNC
+    case 0: return EVENT_ID_USER_ADC0_SYNC;
+#endif
+#ifdef EVENT_ID_USER_ADC1_SYNC
+    case 1: return EVENT_ID_USER_ADC1_SYNC;
+#endif
+    default: return 0;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// `PIN_P<pad>B_ADC<n>_AIN<k>` exists for exactly the pads a package bonds
+// to a converter's analog input, and its presence is the only authority
+// on which AIN codes a variant can actually reach. The E bonds NO PORT B
+// pad to either converter, so ADC1 there has AIN10 and AIN11 and nothing
+// else; the G bonds six of ADC1's twelve; only the J bonds them all.
+
+#define BRIO_ADC_AIN_PAD(letter, number, ain) \
+    case (static_cast<int>(letter) - 'A') * 32 + (number): \
+        return (ain);
+
+constexpr int adc0_ain_code(char port, uint8_t pin) {
+    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
+#ifdef PIN_PA02B_ADC0_AIN0
+    BRIO_ADC_AIN_PAD('A', 2, 0)
+#endif
+#ifdef PIN_PA03B_ADC0_AIN1
+    BRIO_ADC_AIN_PAD('A', 3, 1)
+#endif
+#ifdef PIN_PB08B_ADC0_AIN2
+    BRIO_ADC_AIN_PAD('B', 8, 2)
+#endif
+#ifdef PIN_PB09B_ADC0_AIN3
+    BRIO_ADC_AIN_PAD('B', 9, 3)
+#endif
+#ifdef PIN_PA04B_ADC0_AIN4
+    BRIO_ADC_AIN_PAD('A', 4, 4)
+#endif
+#ifdef PIN_PA05B_ADC0_AIN5
+    BRIO_ADC_AIN_PAD('A', 5, 5)
+#endif
+#ifdef PIN_PA06B_ADC0_AIN6
+    BRIO_ADC_AIN_PAD('A', 6, 6)
+#endif
+#ifdef PIN_PA07B_ADC0_AIN7
+    BRIO_ADC_AIN_PAD('A', 7, 7)
+#endif
+#ifdef PIN_PA08B_ADC0_AIN8
+    BRIO_ADC_AIN_PAD('A', 8, 8)
+#endif
+#ifdef PIN_PA09B_ADC0_AIN9
+    BRIO_ADC_AIN_PAD('A', 9, 9)
+#endif
+#ifdef PIN_PA10B_ADC0_AIN10
+    BRIO_ADC_AIN_PAD('A', 10, 10)
+#endif
+#ifdef PIN_PA11B_ADC0_AIN11
+    BRIO_ADC_AIN_PAD('A', 11, 11)
+#endif
+    default:
+        return -1;
+    }
+}
+
+constexpr int adc1_ain_code(char port, uint8_t pin) {
+    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
+#ifdef PIN_PB00B_ADC1_AIN0
+    BRIO_ADC_AIN_PAD('B', 0, 0)
+#endif
+#ifdef PIN_PB01B_ADC1_AIN1
+    BRIO_ADC_AIN_PAD('B', 1, 1)
+#endif
+#ifdef PIN_PB02B_ADC1_AIN2
+    BRIO_ADC_AIN_PAD('B', 2, 2)
+#endif
+#ifdef PIN_PB03B_ADC1_AIN3
+    BRIO_ADC_AIN_PAD('B', 3, 3)
+#endif
+#ifdef PIN_PB08B_ADC1_AIN4
+    BRIO_ADC_AIN_PAD('B', 8, 4)
+#endif
+#ifdef PIN_PB09B_ADC1_AIN5
+    BRIO_ADC_AIN_PAD('B', 9, 5)
+#endif
+#ifdef PIN_PB04B_ADC1_AIN6
+    BRIO_ADC_AIN_PAD('B', 4, 6)
+#endif
+#ifdef PIN_PB05B_ADC1_AIN7
+    BRIO_ADC_AIN_PAD('B', 5, 7)
+#endif
+#ifdef PIN_PB06B_ADC1_AIN8
+    BRIO_ADC_AIN_PAD('B', 6, 8)
+#endif
+#ifdef PIN_PB07B_ADC1_AIN9
+    BRIO_ADC_AIN_PAD('B', 7, 9)
+#endif
+#ifdef PIN_PA08B_ADC1_AIN10
+    BRIO_ADC_AIN_PAD('A', 8, 10)
+#endif
+#ifdef PIN_PA09B_ADC1_AIN11
+    BRIO_ADC_AIN_PAD('A', 9, 11)
+#endif
+    default:
+        return -1;
+    }
+}
+
+#undef BRIO_ADC_AIN_PAD
+
+/// The two maps behind one lookup: which AIN code this pad is FOR THIS
+/// CONVERTER, or -1 if this package does not bond it to that one.
+constexpr int adc_ain_code(uint8_t instance, char port, uint8_t pin) {
+    if (instance == 0u) {
+        return adc0_ain_code(port, pin);
+    }
+    if (instance == 1u) {
+        return adc1_ain_code(port, pin);
+    }
+    return -1;
+}
+
+/// Whether an AIN code of an instance reaches any pad on THIS device -
+/// derived from the map above rather than probed a second time, so the
+/// two answers cannot disagree.
+constexpr bool adc_ain_exists(uint8_t instance, uint8_t ain) {
+    for (uint8_t p = 0; p < 2u; ++p) {
+        const char port = static_cast<char>('A' + p);
+        for (uint8_t i = 0; i < 32u; ++i) {
+            if (adc_ain_code(instance, port, i) == static_cast<int>(ain)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+template <uint8_t I, char L, uint8_t N>
+constexpr bool adc_ain_pad_exists = adc_ain_code(I, L, N) >= 0;
 
 } // namespace brio
