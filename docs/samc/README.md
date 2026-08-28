@@ -9,7 +9,7 @@ kernel and util strata compile UNCHANGED on a second architecture.
 Peripheral documents live next to this page (`platform.md`,
 `clock.md`, `port.md`, `sercom.md`, `dmac.md`, `ac.md`, `nvm.md`,
 `reset.md`, `freqm.md`, `osc32kctrl.md`, `evsys.md`, `eic.md`,
-`tc.md`); the
+`tc.md`, `tcc.md`); the
 datasheets of record are in
 [vendor/README.md](vendor/README.md) together with the targeted
 errata pass and the bench chip's identity (silicon rev F, DSU DID

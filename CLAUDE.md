@@ -709,6 +709,78 @@ gets its dated home in `docs/design/` when taken.
   sized to fit the counter that reads it (at /256 a 16-bit counter wraps
   in 350 ms). Doc: docs/samc/tc.md (PROVISIONAL: the N-variant capture
   modes, DMA, sleep, and 1.20.2 unjudged).
+  **TCC DONE 2026-08-28 (ch. 36) - PHASE D CLOSED, the family's richest
+  timer and the first driver BORN under the ifdef-reserve rule.**
+  samc/tcc.hpp NEW, with all of its per-instance and per-pad data probed
+  in samc/device_tables.hpp and NOT ONE vendor-macro #ifdef in the driver
+  itself. THE POINT OF THE CHAPTER IS THAT THE THREE INSTANCES ARE NOT
+  COPIES OF EACH OTHER, where the TC's five differ only in which pads
+  they reach: TCC0 is 24-bit with 4 channels, 8 outputs and all five
+  extension units, TCC1 is 24-bit with 2/4 and only pattern + dithering,
+  TCC2 is 16-bit with 2/2 and nothing - every number a TCCn_* constant,
+  and TCCn_EXT confirmed to be exactly those five bits (31/24/0). TCC0
+  and TCC1 SHARE gclk channel 28. AND THE PAD MAP NEEDS TWO KEYS: PA08 is
+  TCC0/WO0 under function E and TCC1/WO2 under function F, so TccWo<Pin,
+  function> takes the function and the reserve keeps two maps. Built: the
+  whole register surface, seven waveform modes, RAMP1/2/2A (RAMP2C
+  refused as variant-L, which also puts erratum 1.21.11 out of reach),
+  dithering with tcc_dither() packing the shared low bits, the four
+  waveform-extension stages, both fault systems, and tasks TccPwm
+  (PwmChannel with a caller-chosen max, util's THIRD implementation) and
+  TccPairPwm (the complementary pair - the TcdPwm analog in scale).
+  ERRATA: eleven items, SEVEN LIVE, the most of any chapter here - 1.21.10
+  is a COMPILE-TIME REFUSAL (ALOCK is not functional and has no
+  workaround), 1.21.6 is code (clear the buffer-valid flag twice),
+  1.21.11 unreachable by construction, 1.21.5/7/9 stated caller
+  obligations, and 1.21.8 DID NOT REPRODUCE. NEW SUITE test_samc_tcc z
+  143/143 THREE TIMES, wireless: five of TCC0's outputs land on free pads
+  (PA08/PA09 on function E, PA22/PA12 on F), PA16 is the EIC fault
+  stimulus, a TC at 3 MHz is the stopwatch and another counts events.
+  TWO FINDINGS NO CHAPTER CARRIES, both of which CHANGED THE DRIVER'S API:
+  (1) A BUFFERED WRITE'S SYNCBUSY BIT STANDS UNTIL THE UPDATE CONSUMES
+  THE BUFFER - waiting it out took 256/480/1299 us of a 1333 us period on
+  three runs and NEVER returned with LUPD set, and a second write inside
+  that window is DISCARDED by the silicon - so set_cc_buffer/
+  set_period_buffer/pattern_buffer REFUSE instead of waiting and return
+  at once (a waiting duty() would have put a whole PWM period inside a
+  PwmChannel); (2) A READ OF CCx OR PER WHILE A BUFFERED WRITE IS PENDING
+  RETURNS THE BUFFERED VALUE, not the one the waveform is using - the
+  register and the pad disagree and the pad is right, which is exactly
+  the trap that makes erratum 1.21.8 look real. A THIRD found the same
+  way: THE TWO HALVES OF CTRLB ARE NOT A SET/CLEAR PAIR FOR THE COMMAND
+  FIELDS (writing zero has no effect on either), so a command is issued
+  through CTRLBSET and cancelled only through CTRLBCLR - caught by a
+  RAMP2 index held forever. Also measured: the two dead times exact at
+  899/2701 stopwatch ticks against 900/2700 AND UNMOVED by a fourfold
+  prescaler change (36.8.7's "GCLK_TCC cycles" confirmed against the
+  obvious alternative); a complementary pair never both high in 400000
+  paired samples, the two duties summing to 888 where 880 is the dead
+  time removed; THE DUAL-SLOPE PERIOD IS EXACTLY 2 x PER (942 overflows
+  in 2 s against 942 predicted, where 2 x (PER+1) gives 937) - the AVR
+  TCD's printed formula was off by that one and this chapter's is not;
+  dithering delivering a fractional period (938/933/928 against
+  937/932/928); the output matrix and a LIVE swap (WAVE is the one
+  configuration register this chapter does not enable-protect); pattern
+  generation beating every upstream stage, with STATUS.PATTBUFV LAGGING
+  its own write where CCBUFVx does not; a pin level through the EIC and
+  an ASYNCHRONOUS channel clamping an output, halting the counter in both
+  halt modes and timestamping itself, with EVCTRL.MCEIx PROVEN to be the
+  gate 36.6.3.5 never names; ERRATUM 1.21.9 MEASURED (the same generator
+  on a SYNCHRONOUS channel does nothing at all); a non-recoverable fault
+  stopping the counter and forcing every enabled output to its NRV level,
+  the state a LATCH and not a level; RAMP2's two interleaved cycles seen
+  as duty (242/243 per mille from a 50 % compare) and IDX toggling at 504
+  per mille; PPW capture exact at 2344/938 ticks; and CTRLA.MSYNC MOVING
+  THE CHANNELS AND NOT COUNT - the client's matches jump 47 -> 937 a
+  second while its own overflows stay at 47, which is what 36.6.4 says
+  and not what a reader expecting two counters to track would guess. ONE
+  MEASUREMENT LESSON, twice: at 1 kHz a counter wraps every millisecond,
+  so TWO READS OF COUNT ARE NOT A WITNESS for "is it halted" (a halted
+  counter gave 0 then 116, READSYNC being a command that must cross the
+  domain the halt stopped) - the OVERFLOW FLAG is; and the pad sampler
+  needs ~30 periods, so a 100 Hz waveform wants ten times the samples a
+  1 kHz one does. Doc: docs/samc/tcc.md (PROVISIONAL: DMA, sleep, the
+  debug fault, the advanced capture modes, and 1.21.7/1.21.8 not judged).
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -1744,9 +1816,10 @@ brio/                    the framework, four strata:
     pin.hpp                Pin<'A',5>, PinConfig, the WRCONFIG multi-pin engine
     device_tables.hpp      THE RESERVE: the one file where vendor-macro
                            #ifdef probing is allowed - pad/instance facts
-                           (EIC pad->line, TC WO pads + instance ids, AC
-                           AIN bonding) read from the device header's own
-                           symbols and exported as constexpr data
+                           (EIC pad->line, TC WO pads + instance ids, TCC
+                           instance geometry + its pad map keyed by pad AND
+                           FUNCTION, AC AIN bonding) read from the device
+                           header's own symbols and exported as constexpr data
     sercom.hpp             Sercom<n> resource + Uart task with two OPTIONAL
                            DMA engine slots
     dmac.hpp               Dmac block + DmaDescriptor + DmaChannel<n> +
@@ -1761,6 +1834,19 @@ brio/                    the framework, four strata:
                            ways, erratum 1.20.3 as code) + TcWo<Pin> + tasks
                            TcPwm/TcPwm8 (PwmChannel) and TcPeriodMeter/
                            TcPulseWidthMeter (MeterSource feeders)
+    tcc.hpp                TCC: Tcc<n> resource over the whole of ch. 36 -
+                           three instances that are NOT copies of each other
+                           (width, channels, outputs and five optional
+                           extension units all per instance, from the
+                           reserve), seven waveform modes, ramps, dithering,
+                           the waveform extension (output matrix, dead time,
+                           swap, pattern) and BOTH fault systems, whose
+                           inputs ARE the event inputs; buffered setters
+                           REFUSE instead of waiting, because SYNCBUSY stands
+                           until the update takes the buffer. + TccWo<Pin,
+                           function> (the map needs both) + tasks TccPwm
+                           (PwmChannel) and TccPairPwm (the complementary
+                           pair with dead time)
     ac.hpp                 AC: Ac block + AcComparator<n> + AcWindow<w>
                            (window mode, the event surface both ways with
                            published codes, per-package input legality where

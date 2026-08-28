@@ -32,11 +32,15 @@
  *    the J.
  *  - TC waveform outputs: PA22 = TC0/WO0 and PB12 = TC0/WO0 again;
  *    8 pads on the E, 18 on the G, 26 on the J.
+ *  - TCC waveform outputs: the same pad carries TWO of them, on two
+ *    different peripheral functions - PA08 is TCC0/WO0 under function E
+ *    and TCC1/WO2 under function F - so that map is keyed by pad AND
+ *    function where the TC's is keyed by pad alone.
  *  - AC analog inputs: AIN6/AIN7 (PB05/PB06) exist on the J alone.
  *
- * Consumers: samc/eic.hpp, samc/tc.hpp, samc/ac.hpp. Each declares the
- * MEANING of its numbers (what an EXTINT line is, what a WO pad does);
- * this file only says which numbers exist on this device.
+ * Consumers: samc/eic.hpp, samc/tc.hpp, samc/tcc.hpp, samc/ac.hpp. Each
+ * declares the MEANING of its numbers (what an EXTINT line is, what a
+ * WO pad does); this file only says which numbers exist on this device.
  */
 
 #pragma once
@@ -454,6 +458,503 @@ constexpr int tc_wo_code(char port, uint8_t pin) {
 
 template <char L, uint8_t N>
 constexpr bool tc_wo_exists = tc_wo_code(L, N) >= 0;
+
+// =============================================================================
+// TCC: instance parameters, and (pad, function) -> waveform output
+// =============================================================================
+//
+// The TCC instances are NOT copies of each other the way the TCs are:
+// they differ in counter width, in channel count, in output count and in
+// which of the five waveform-extension units they implement. Every one
+// of those differences is a `TCCn_*` constant of the device header, and
+// every one of them is probed here.
+
+/// How many TCC instances this device has.
+constexpr uint8_t tcc_count() {
+#if defined(TCC2_REGS)
+    return 3;
+#elif defined(TCC1_REGS)
+    return 2;
+#elif defined(TCC0_REGS)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/// `TCCn_CC_NUM`: compare/capture channels (4 on TCC0, 2 on TCC1/TCC2).
+constexpr uint8_t tcc_cc_count(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_CC_NUM
+    case 0: return TCC0_CC_NUM;
+#endif
+#ifdef TCC1_CC_NUM
+    case 1: return TCC1_CC_NUM;
+#endif
+#ifdef TCC2_CC_NUM
+    case 2: return TCC2_CC_NUM;
+#endif
+    default: return 0;
+    }
+}
+
+/// `TCCn_OW_NUM`: waveform outputs (8/4/2). Always at least the channel
+/// count, and the output matrix is what fills the difference.
+constexpr uint8_t tcc_wo_count(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_OW_NUM
+    case 0: return TCC0_OW_NUM;
+#endif
+#ifdef TCC1_OW_NUM
+    case 1: return TCC1_OW_NUM;
+#endif
+#ifdef TCC2_OW_NUM
+    case 2: return TCC2_OW_NUM;
+#endif
+    default: return 0;
+    }
+}
+
+/// `TCCn_SIZE`: the counter's width in BITS - 24 on TCC0 and TCC1, 16 on
+/// TCC2. 36.8.15 says the excess bits of a 16-bit instance read zero.
+constexpr uint8_t tcc_size(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_SIZE
+    case 0: return TCC0_SIZE;
+#endif
+#ifdef TCC1_SIZE
+    case 1: return TCC1_SIZE;
+#endif
+#ifdef TCC2_SIZE
+    case 2: return TCC2_SIZE;
+#endif
+    default: return 0;
+    }
+}
+
+/// This instance's generic clock channel. TCC0 and TCC1 SHARE one
+/// (36.5.3 says so in one sentence), TCC2 has its own.
+constexpr uint8_t tcc_gclk_id(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_GCLK_ID
+    case 0: return TCC0_GCLK_ID;
+#endif
+#ifdef TCC1_GCLK_ID
+    case 1: return TCC1_GCLK_ID;
+#endif
+#ifdef TCC2_GCLK_ID
+    case 2: return TCC2_GCLK_ID;
+#endif
+    default: return 0xFF;
+    }
+}
+
+/// `TCCn_MASTER_SLAVE_MODE`: 1 = can be the HOST of a host/client pair,
+/// 2 = is somebody's client (the one that may set CTRLA.MSYNC), 0 =
+/// neither (36.6.4).
+constexpr uint8_t tcc_pair_role(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_MASTER_SLAVE_MODE
+    case 0: return TCC0_MASTER_SLAVE_MODE;
+#endif
+#ifdef TCC1_MASTER_SLAVE_MODE
+    case 1: return TCC1_MASTER_SLAVE_MODE;
+#endif
+#ifdef TCC2_MASTER_SLAVE_MODE
+    case 2: return TCC2_MASTER_SLAVE_MODE;
+#endif
+    default: return 0;
+    }
+}
+
+// ---- the five optional waveform-extension units -----------------------------
+//
+// 36.6.1: "the following independent units are implemented in some of
+// the TCC instances as optional and successive units". Each has its own
+// header constant, and a driver asking an instance for one it does not
+// have is a compile error rather than a store into a reserved bit.
+
+/// `TCCn_DTI`: dead-time insertion (36.6.3.7).
+constexpr bool tcc_has_dead_time(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_DTI
+    case 0: return TCC0_DTI != 0;
+#endif
+#ifdef TCC1_DTI
+    case 1: return TCC1_DTI != 0;
+#endif
+#ifdef TCC2_DTI
+    case 2: return TCC2_DTI != 0;
+#endif
+    default: return false;
+    }
+}
+
+/// `TCCn_OTMX`: the output matrix (WEXCTRL.OTMX, table 36-4).
+constexpr bool tcc_has_output_matrix(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_OTMX
+    case 0: return TCC0_OTMX != 0;
+#endif
+#ifdef TCC1_OTMX
+    case 1: return TCC1_OTMX != 0;
+#endif
+#ifdef TCC2_OTMX
+    case 2: return TCC2_OTMX != 0;
+#endif
+    default: return false;
+    }
+}
+
+/// `TCCn_SWAP`: the DTI output-pair swap (WAVE.SWAPx).
+constexpr bool tcc_has_swap(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_SWAP
+    case 0: return TCC0_SWAP != 0;
+#endif
+#ifdef TCC1_SWAP
+    case 1: return TCC1_SWAP != 0;
+#endif
+#ifdef TCC2_SWAP
+    case 2: return TCC2_SWAP != 0;
+#endif
+    default: return false;
+    }
+}
+
+/// `TCCn_PG`: pattern generation (PATT/PATTBUF).
+constexpr bool tcc_has_pattern(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_PG
+    case 0: return TCC0_PG != 0;
+#endif
+#ifdef TCC1_PG
+    case 1: return TCC1_PG != 0;
+#endif
+#ifdef TCC2_PG
+    case 2: return TCC2_PG != 0;
+#endif
+    default: return false;
+    }
+}
+
+/// `TCCn_DITHERING`: the CTRLA.RESOLUTION dithering modes (36.6.3.3).
+constexpr bool tcc_has_dithering(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_DITHERING
+    case 0: return TCC0_DITHERING != 0;
+#endif
+#ifdef TCC1_DITHERING
+    case 1: return TCC1_DITHERING != 0;
+#endif
+#ifdef TCC2_DITHERING
+    case 2: return TCC2_DITHERING != 0;
+#endif
+    default: return false;
+    }
+}
+
+/// `TCCn_EXT`, the header's own one-word summary of the five units
+/// above. It is exported RAW: the five booleans are the authority a
+/// driver refuses on, and this is the number they can be cross-checked
+/// against (docs/samc/tcc.md carries the decoding the bench confirmed).
+constexpr uint8_t tcc_ext_code(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_EXT
+    case 0: return TCC0_EXT;
+#endif
+#ifdef TCC1_EXT
+    case 1: return TCC1_EXT;
+#endif
+#ifdef TCC2_EXT
+    case 2: return TCC2_EXT;
+#endif
+    default: return 0;
+    }
+}
+
+// ---- the DMAC trigger ids and the EVSYS codes -------------------------------
+//
+// dmac.hpp owns the channels and not the trigger table, and evsys.hpp
+// owns the fabric and not the vocabulary - so both tables live with the
+// peripheral that raises them, probed from the device header's own
+// constants rather than counted out by hand. The TCC's generator codes
+// are NOT evenly spaced (TCC0 spends seven, TCC1 and TCC2 five each),
+// which is exactly why they are read and not computed.
+
+constexpr uint8_t tcc_dma_overflow_id(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_DMAC_ID_OVF
+    case 0: return TCC0_DMAC_ID_OVF;
+#endif
+#ifdef TCC1_DMAC_ID_OVF
+    case 1: return TCC1_DMAC_ID_OVF;
+#endif
+#ifdef TCC2_DMAC_ID_OVF
+    case 2: return TCC2_DMAC_ID_OVF;
+#endif
+    default: return 0;
+    }
+}
+
+constexpr uint8_t tcc_dma_match0_id(uint8_t n) {
+    switch (n) {
+#ifdef TCC0_DMAC_ID_MC0
+    case 0: return TCC0_DMAC_ID_MC0;
+#endif
+#ifdef TCC1_DMAC_ID_MC0
+    case 1: return TCC1_DMAC_ID_MC0;
+#endif
+#ifdef TCC2_DMAC_ID_MC0
+    case 2: return TCC2_DMAC_ID_MC0;
+#endif
+    default: return 0;
+    }
+}
+
+/// Generator: overflow/underflow. The three counter generators of one
+/// instance are consecutive (OVF, TRG, CNT) and the channel generators
+/// follow them, so one anchor per instance is enough.
+constexpr uint8_t tcc_overflow_generator(uint8_t n) {
+    switch (n) {
+#ifdef EVENT_ID_GEN_TCC0_OVF
+    case 0: return EVENT_ID_GEN_TCC0_OVF;
+#endif
+#ifdef EVENT_ID_GEN_TCC1_OVF
+    case 1: return EVENT_ID_GEN_TCC1_OVF;
+#endif
+#ifdef EVENT_ID_GEN_TCC2_OVF
+    case 2: return EVENT_ID_GEN_TCC2_OVF;
+#endif
+    default: return 0;
+    }
+}
+
+/// Generator: match or capture on channel 0.
+constexpr uint8_t tcc_match0_generator(uint8_t n) {
+    switch (n) {
+#ifdef EVENT_ID_GEN_TCC0_MC_0
+    case 0: return EVENT_ID_GEN_TCC0_MC_0;
+#endif
+#ifdef EVENT_ID_GEN_TCC1_MC_0
+    case 1: return EVENT_ID_GEN_TCC1_MC_0;
+#endif
+#ifdef EVENT_ID_GEN_TCC2_MC_0
+    case 2: return EVENT_ID_GEN_TCC2_MC_0;
+#endif
+    default: return 0;
+    }
+}
+
+/// User: the first of this instance's two counter event inputs (EV0).
+constexpr uint8_t tcc_event0_user(uint8_t n) {
+    switch (n) {
+#ifdef EVENT_ID_USER_TCC0_EV_0
+    case 0: return EVENT_ID_USER_TCC0_EV_0;
+#endif
+#ifdef EVENT_ID_USER_TCC1_EV_0
+    case 1: return EVENT_ID_USER_TCC1_EV_0;
+#endif
+#ifdef EVENT_ID_USER_TCC2_EV_0
+    case 2: return EVENT_ID_USER_TCC2_EV_0;
+#endif
+    default: return 0;
+    }
+}
+
+/// User: this instance's channel-0 event input (MC0) - which is also
+/// recoverable Fault A's source (36.6.3.5).
+constexpr uint8_t tcc_match0_user(uint8_t n) {
+    switch (n) {
+#ifdef EVENT_ID_USER_TCC0_MC_0
+    case 0: return EVENT_ID_USER_TCC0_MC_0;
+#endif
+#ifdef EVENT_ID_USER_TCC1_MC_0
+    case 1: return EVENT_ID_USER_TCC1_MC_0;
+#endif
+#ifdef EVENT_ID_USER_TCC2_MC_0
+    case 2: return EVENT_ID_USER_TCC2_MC_0;
+#endif
+    default: return 0;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// `PIN_P<pad><fn>_TCC<n>_WO<k>` exists for exactly the (pad, peripheral
+// function) pairs a package bonds to a TCC waveform output. UNLIKE the
+// TC's map this one needs the FUNCTION as a key: PA08 carries TCC0/WO0
+// under function E and TCC1/WO2 under function F, and a driver that
+// took only the pad would have to guess which. The return packs the
+// instance and the output into one value ((tcc << 4) | wo), -1 for a
+// pair that carries none.
+
+#define BRIO_TCC_WO_PAD(letter, number, tcc, wo) \
+    case (static_cast<int>(letter) - 'A') * 32 + (number): \
+        return ((tcc) << 4) | (wo);
+
+constexpr int tcc_wo_code_e(char port, uint8_t pin) {
+    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
+#ifdef PIN_PA00E_TCC2_WO0
+    BRIO_TCC_WO_PAD('A', 0, 2, 0)
+#endif
+#ifdef PIN_PA01E_TCC2_WO1
+    BRIO_TCC_WO_PAD('A', 1, 2, 1)
+#endif
+#ifdef PIN_PA04E_TCC0_WO0
+    BRIO_TCC_WO_PAD('A', 4, 0, 0)
+#endif
+#ifdef PIN_PA05E_TCC0_WO1
+    BRIO_TCC_WO_PAD('A', 5, 0, 1)
+#endif
+#ifdef PIN_PA06E_TCC1_WO0
+    BRIO_TCC_WO_PAD('A', 6, 1, 0)
+#endif
+#ifdef PIN_PA07E_TCC1_WO1
+    BRIO_TCC_WO_PAD('A', 7, 1, 1)
+#endif
+#ifdef PIN_PA08E_TCC0_WO0
+    BRIO_TCC_WO_PAD('A', 8, 0, 0)
+#endif
+#ifdef PIN_PA09E_TCC0_WO1
+    BRIO_TCC_WO_PAD('A', 9, 0, 1)
+#endif
+#ifdef PIN_PA10E_TCC1_WO0
+    BRIO_TCC_WO_PAD('A', 10, 1, 0)
+#endif
+#ifdef PIN_PA11E_TCC1_WO1
+    BRIO_TCC_WO_PAD('A', 11, 1, 1)
+#endif
+#ifdef PIN_PA12E_TCC2_WO0
+    BRIO_TCC_WO_PAD('A', 12, 2, 0)
+#endif
+#ifdef PIN_PA13E_TCC2_WO1
+    BRIO_TCC_WO_PAD('A', 13, 2, 1)
+#endif
+#ifdef PIN_PA16E_TCC2_WO0
+    BRIO_TCC_WO_PAD('A', 16, 2, 0)
+#endif
+#ifdef PIN_PA17E_TCC2_WO1
+    BRIO_TCC_WO_PAD('A', 17, 2, 1)
+#endif
+#ifdef PIN_PA30E_TCC1_WO0
+    BRIO_TCC_WO_PAD('A', 30, 1, 0)
+#endif
+#ifdef PIN_PA31E_TCC1_WO1
+    BRIO_TCC_WO_PAD('A', 31, 1, 1)
+#endif
+#ifdef PIN_PB30E_TCC0_WO0
+    BRIO_TCC_WO_PAD('B', 30, 0, 0)
+#endif
+#ifdef PIN_PB31E_TCC0_WO1
+    BRIO_TCC_WO_PAD('B', 31, 0, 1)
+#endif
+    default:
+        return -1;
+    }
+}
+
+constexpr int tcc_wo_code_f(char port, uint8_t pin) {
+    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
+#ifdef PIN_PA08F_TCC1_WO2
+    BRIO_TCC_WO_PAD('A', 8, 1, 2)
+#endif
+#ifdef PIN_PA09F_TCC1_WO3
+    BRIO_TCC_WO_PAD('A', 9, 1, 3)
+#endif
+#ifdef PIN_PA10F_TCC0_WO2
+    BRIO_TCC_WO_PAD('A', 10, 0, 2)
+#endif
+#ifdef PIN_PA11F_TCC0_WO3
+    BRIO_TCC_WO_PAD('A', 11, 0, 3)
+#endif
+#ifdef PIN_PA12F_TCC0_WO6
+    BRIO_TCC_WO_PAD('A', 12, 0, 6)
+#endif
+#ifdef PIN_PA13F_TCC0_WO7
+    BRIO_TCC_WO_PAD('A', 13, 0, 7)
+#endif
+#ifdef PIN_PA14F_TCC0_WO4
+    BRIO_TCC_WO_PAD('A', 14, 0, 4)
+#endif
+#ifdef PIN_PA15F_TCC0_WO5
+    BRIO_TCC_WO_PAD('A', 15, 0, 5)
+#endif
+#ifdef PIN_PA16F_TCC0_WO6
+    BRIO_TCC_WO_PAD('A', 16, 0, 6)
+#endif
+#ifdef PIN_PA17F_TCC0_WO7
+    BRIO_TCC_WO_PAD('A', 17, 0, 7)
+#endif
+#ifdef PIN_PA18F_TCC0_WO2
+    BRIO_TCC_WO_PAD('A', 18, 0, 2)
+#endif
+#ifdef PIN_PA19F_TCC0_WO3
+    BRIO_TCC_WO_PAD('A', 19, 0, 3)
+#endif
+#ifdef PIN_PA20F_TCC0_WO6
+    BRIO_TCC_WO_PAD('A', 20, 0, 6)
+#endif
+#ifdef PIN_PA21F_TCC0_WO7
+    BRIO_TCC_WO_PAD('A', 21, 0, 7)
+#endif
+#ifdef PIN_PA22F_TCC0_WO4
+    BRIO_TCC_WO_PAD('A', 22, 0, 4)
+#endif
+#ifdef PIN_PA23F_TCC0_WO5
+    BRIO_TCC_WO_PAD('A', 23, 0, 5)
+#endif
+#ifdef PIN_PA24F_TCC1_WO2
+    BRIO_TCC_WO_PAD('A', 24, 1, 2)
+#endif
+#ifdef PIN_PA25F_TCC1_WO3
+    BRIO_TCC_WO_PAD('A', 25, 1, 3)
+#endif
+#ifdef PIN_PB10F_TCC0_WO4
+    BRIO_TCC_WO_PAD('B', 10, 0, 4)
+#endif
+#ifdef PIN_PB11F_TCC0_WO5
+    BRIO_TCC_WO_PAD('B', 11, 0, 5)
+#endif
+#ifdef PIN_PB12F_TCC0_WO6
+    BRIO_TCC_WO_PAD('B', 12, 0, 6)
+#endif
+#ifdef PIN_PB13F_TCC0_WO7
+    BRIO_TCC_WO_PAD('B', 13, 0, 7)
+#endif
+#ifdef PIN_PB16F_TCC0_WO4
+    BRIO_TCC_WO_PAD('B', 16, 0, 4)
+#endif
+#ifdef PIN_PB17F_TCC0_WO5
+    BRIO_TCC_WO_PAD('B', 17, 0, 5)
+#endif
+#ifdef PIN_PB30F_TCC1_WO2
+    BRIO_TCC_WO_PAD('B', 30, 1, 2)
+#endif
+#ifdef PIN_PB31F_TCC1_WO3
+    BRIO_TCC_WO_PAD('B', 31, 1, 3)
+#endif
+    default:
+        return -1;
+    }
+}
+
+#undef BRIO_TCC_WO_PAD
+
+/// The two maps behind one lookup. `function` is the PMUX letter in
+/// lower case ('e' or 'f'); anything else has no TCC output by
+/// definition, because no other function carries one on this family.
+constexpr int tcc_wo_code(char port, uint8_t pin, char function) {
+    if (function == 'e') {
+        return tcc_wo_code_e(port, pin);
+    }
+    if (function == 'f') {
+        return tcc_wo_code_f(port, pin);
+    }
+    return -1;
+}
+
+template <char L, uint8_t N, char F>
+constexpr bool tcc_wo_exists = tcc_wo_code(L, N, F) >= 0;
 
 // =============================================================================
 // AC: which analog inputs this package bonds
