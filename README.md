@@ -82,7 +82,7 @@ The full rationale, decision by decision, is in
 
 <sub>[open the diagram full size](https://raw.githubusercontent.com/uliano/brio/main/docs/design/architecture.svg) (zoomable in the browser)</sub>
 
-`lib/brio/src/` has four strata; the include prefix makes a file's
+`brio/` has four strata; the include prefix makes a file's
 portability readable at a glance:
 
 | Stratum | Contains | Depends on |
@@ -107,7 +107,7 @@ and generic code chooses with `if constexpr` or a concept.
 
 ## Building and testing
 
-The framework in `lib/brio/` is header-only, included directly. The
+The framework in `brio/` is header-only, included directly. The
 builds are three sibling CMake projects, one per toolchain, all peers
 (the repo root is not a CMake project): `avrdx/` and `samc/` each
 auto-discover one `main()` per `src/apps/<app>.cpp` at configure time

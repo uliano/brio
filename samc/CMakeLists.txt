@@ -90,9 +90,9 @@ set(SAMC_PROBE_SERIAL "J42700049508" CACHE STRING "Atmel-ICE serial to flash/deb
 #     references the symbol, so this costs it nothing, not even a byte.
 set(SAMC_NVHEAP_BUILD_ID 0)
 file(GLOB_RECURSE _nvheap_id_sources CONFIGURE_DEPENDS
-    "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.cpp" "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.hpp"
-    "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.c"   "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.h"
-    "${CMAKE_SOURCE_DIR}/../lib/brio/src/*.S"
+    "${CMAKE_SOURCE_DIR}/../brio/*.cpp" "${CMAKE_SOURCE_DIR}/../brio/*.hpp"
+    "${CMAKE_SOURCE_DIR}/../brio/*.c"   "${CMAKE_SOURCE_DIR}/../brio/*.h"
+    "${CMAKE_SOURCE_DIR}/../brio/*.S"
     "${CMAKE_SOURCE_DIR}/src/*.cpp" "${CMAKE_SOURCE_DIR}/src/*.hpp"
     "${CMAKE_SOURCE_DIR}/src/*.c"   "${CMAKE_SOURCE_DIR}/src/*.h"
     "${CMAKE_SOURCE_DIR}/src/*.S"
@@ -112,7 +112,7 @@ function(sam_add_app name)
     )
 
     target_include_directories(${name} PRIVATE
-        ${CMAKE_SOURCE_DIR}/../lib/brio/src
+        ${CMAKE_SOURCE_DIR}/../brio
         ${CMAKE_SOURCE_DIR}/../third_party/samc21-dfp/include
         ${CMAKE_SOURCE_DIR}/../third_party/cmsis-core
     )

@@ -1,5 +1,5 @@
 // Host tests for the flash block allocator: util/nv_heap.hpp over
-// lib/brio/src/host/sim_flash.hpp.
+// brio/host/sim_flash.hpp.
 //
 // Nothing here knows what an AVR is. The allocator sees a FlashMedia and
 // the media is RAM with counters on it, which is what makes the two

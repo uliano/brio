@@ -6,4 +6,4 @@
 # regardless of which project CMake Tools happens to have active. Paths
 # are relative to this file.
 CompileFlags:
-  CompilationDatabase: ../../../build-cmake/host
+  CompilationDatabase: ../build-cmake/host

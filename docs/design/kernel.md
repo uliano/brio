@@ -1,6 +1,6 @@
 # The active-object kernel
 
-Headers: `lib/brio/src/kernel/`. Everything in this stratum is pure
+Headers: `brio/kernel/`. Everything in this stratum is pure
 logic, templated on a `Platform` and never on a specific machine -
 host-testable, no target includes; the reference index at the end
 maps every entity to its header. Where a concrete number appears

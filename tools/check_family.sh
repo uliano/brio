@@ -14,7 +14,7 @@ set -u
 cd "$(dirname "$0")/.."
 
 CXX=/sw/avr/bin/avr-g++
-FLAGS="-std=gnu++23 -Os -Wall -Wextra -Werror -c -Ilib/brio/src"
+FLAGS="-std=gnu++23 -Os -Wall -Wextra -Werror -c -Ibrio"
 MCUS="avr128db28 avr128db32 avr128db48 avr128db64 \
       avr128da28 avr128da32 avr128da48 avr128da64"
 FILTER="${1:-}"

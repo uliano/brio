@@ -13,7 +13,7 @@ republishes both datasheets and errata (the errata grow with each
 silicon revision). The revision letter is in the first-page footer
 (`DS60001479M`, `DS80000740S`).
 
-## SAM C20/C21 (`lib/brio/src/samc/`)
+## SAM C20/C21 (`brio/samc/`)
 
 | Document | Number / revision of record | File name here | Notes |
 |----------|-----------------------------|----------------|-------|

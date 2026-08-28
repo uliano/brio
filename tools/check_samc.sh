@@ -21,7 +21,7 @@ cd "$(dirname "$0")/.."
 CXX=/sw/arm-none-eabi/bin/arm-none-eabi-g++
 FLAGS="-mcpu=cortex-m0plus -mthumb -mfloat-abi=soft -std=gnu++23 -Os \
        -Wall -Wextra -Werror -fno-exceptions -fno-rtti -c \
-       -Ilib/brio/src -Ithird_party/samc21-dfp/include -Ithird_party/cmsis-core"
+       -Ibrio -Ithird_party/samc21-dfp/include -Ithird_party/cmsis-core"
 MCUS="samc21e18a samc21g18a samc21j18a"
 FILTER="${1:-}"
 fail=0

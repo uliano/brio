@@ -1,9 +1,9 @@
 # The samc stratum parses against the SAM project's database: headers
 # here include "sam.h" and need the arm-none-eabi driver and the
 # __SAMC21J18A__ device select. Overrides the framework default
-# (lib/brio/src/.clangd, host flags) - without this fragment these
+# (brio/.clangd, host flags) - without this fragment these
 # headers had NO database mapping at all and clangd guessed avr-gcc,
 # which is exactly the failure the re-leveling fixed. Path relative to
 # this file.
 CompileFlags:
-  CompilationDatabase: ../../../../build-cmake/samc21j-release
+  CompilationDatabase: ../../build-cmake/samc21j-release

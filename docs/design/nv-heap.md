@@ -5,12 +5,12 @@
 > is listed in "Not covered yet" at the end.
 
 The target-independent design of the flash block allocator:
-[`util/nv_heap.hpp`](../../lib/brio/src/util/nv_heap.hpp) (the allocator
+[`util/nv_heap.hpp`](../../brio/util/nv_heap.hpp) (the allocator
 and the `FlashMedia` contract), with
-[`util/crc.hpp`](../../lib/brio/src/util/crc.hpp) underneath it and
-[`host/sim_flash.hpp`](../../lib/brio/src/host/sim_flash.hpp) as the
+[`util/crc.hpp`](../../brio/util/crc.hpp) underneath it and
+[`host/sim_flash.hpp`](../../brio/host/sim_flash.hpp) as the
 media the host tests run it on. The AVR DA/DB backend is
-[`avrdx/nvm_flash.hpp`](../../lib/brio/src/avrdx/nvm_flash.hpp),
+[`avrdx/nvm_flash.hpp`](../../brio/avrdx/nvm_flash.hpp),
 described in [avrdx/nvm.md](../avrdx/nvm.md). Reference test suites:
 `test_nv_heap` on the host, `test_avr_nvheap` on the bench.
 
@@ -22,7 +22,7 @@ two very different needs, and one storage class each.
 A handful of small values, rewritten often - a calibration offset, a
 mode, a counter - belong in the EEPROM: byte-granular, 100k cycles, and
 a record layout that writes only the bytes that changed
-([nv_record](../../lib/brio/src/util/nv_record.hpp)).
+([nv_record](../../brio/util/nv_record.hpp)).
 
 A table belongs somewhere else. A thermocouple linearization, a font, a
 captured waveform, a lookup grid: kilobytes, written once in a while,

@@ -1,6 +1,6 @@
 # Target: AVR DA/DB (`avrdx/`)
 
-The stratum `lib/brio/src/avrdx/` is everything in brio that knows
+The stratum `brio/avrdx/` is everything in brio that knows
 `avr/io.h`: clock init, `Pin`, `Uart`, `Spi`, `Twi`, `BasicTicker`,
 and `AvrPlatform` (the kernel's `Platform` concept implemented with
 AVR intrinsics). Family differences inside DA/DB are handled with

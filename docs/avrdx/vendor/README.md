@@ -14,7 +14,7 @@ revision), and file names in the wild are unreliable (a file named
 "AVR64DB...Errata" may in fact be the AVR128DB errata). The revision
 letter is in the first-page footer (`DS40002247B`, `DS80000915F`).
 
-## AVR DA/DB (`lib/brio/src/avrdx/`)
+## AVR DA/DB (`brio/avrdx/`)
 
 | Document | Number / revision of record | File name here | Notes |
 |----------|-----------------------------|----------------|-------|

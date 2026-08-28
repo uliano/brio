@@ -32,7 +32,7 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   MeterLatch bridge out of a capture ISR and the MeterSampler that
   paces publication, not capture - a stale source publishes nothing).
 - `docs/<target>/` - one folder per target, mirroring
-  `lib/brio/src/<target>/` (`avrdx/`, `samc/`, `host/`): `README.md` is the
+  `brio/<target>/` (`avrdx/`, `samc/`, `host/`): `README.md` is the
   operational page (toolchain, board, probe, debugger and their
   quirks); next to it ONE document per peripheral in the shape
   docs/README.md prescribes (documents of record -> what the silicon
@@ -70,10 +70,10 @@ This file has no decision log any more: the former log was migrated to
 
 ## The project in one paragraph
 
-`brio` (`lib/brio/`) is a header-only C++23 (gnu++23) framework for
+`brio` (`brio/`) is a header-only C++23 (gnu++23) framework for
 bare-metal MCUs built around a cooperative active-object kernel,
 written clean-room after Samek's book (never the QP source). One flat
-namespace `brio`; five strata under `lib/brio/src/` - `kernel/` (pure
+namespace `brio`; five strata under `brio/` - `kernel/` (pure
 logic, includes nothing of brio), `util/` (services over the kernel),
 `avrdx/` (everything that knows `avr/io.h`: AVR DA/DB, bench chip
 AVR128DB48), `samc/` (everything that knows `sam.h`: SAM C21,
@@ -86,7 +86,7 @@ emitting into the shared `build-cmake/`) auto-discover one `main()`
 per `src/apps/<app>.cpp` at configure time from its own `// build:`
 header comment; host tests in `test/` are the third project (host
 g++, no cross toolchain), run via `ctest`. ONE NAME PER ARCHITECTURE,
-the same key on three axes: `lib/brio/src/<arch>/` (stratum),
+the same key on three axes: `brio/<arch>/` (stratum),
 `docs/<arch>/` (docs), `<arch>/` (build project); chip precision
 lives in preset names, per-chip ld/svd files and the `*_MCU` cache
 variables. Names are claims, extended only when a real chip extends
@@ -134,7 +134,7 @@ comments justifying wrong restrictions. The antidote, in practice:
 - **Definition of done for a driver**: (1) systematic pass over the
   chapter's register description + errata; (2) a smoke TU compiled for
   every package - `avr-g++ -mmcu=avr128d{a,b}{28,48,64} -std=gnu++23
-  -Os -c -I lib/brio/src` takes seconds, no hardware; (3) negative
+  -Os -c -I brio` takes seconds, no hardware; (3) negative
   tests: what must be refused must FAIL to compile; (4) the
   `test_<target>_<subject>` suite on the bench. The bench chip alone
   masks half the family (SWEVENTB, TCA1, PORTB proved it).
@@ -1344,13 +1344,13 @@ tools/bench.py           the bench orchestrator: list / flash / run / console /
                          and refuse a SAM board instead of pretending
 docs/                    README (map + rules), design/, <target>/ (avrdx/, samc/,
                          host/), bench.md
-lib/brio/src/.clangd     per-stratum clangd routing: the framework default is
+brio/.clangd             per-stratum clangd routing: the framework default is
                          the host database; avrdx/.clangd and samc/.clangd
-                         (in lib AND in each project dir) override with their
-                         own architecture's database, so a header always
+                         (in brio/ AND in each project dir) override with
+                         their own architecture's database, so a header always
                          parses with its own compiler regardless of CMake
                          Tools' active project
-lib/brio/src/            the framework, four strata:
+brio/                    the framework, four strata:
   kernel/                pure kernel logic - includes NOTHING of brio
     platform.hpp           Platform concept (CriticalSection, idle,
                            break_here, now, ticks_per_second, atomic_width,

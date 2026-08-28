@@ -4,7 +4,7 @@
 //
 // APP-LEVEL BENCH TOOLING, not framework. It sits next to the two apps
 // that share it and is included by its plain name; nothing in
-// lib/brio/src knows it exists, and nothing here touches a register -
+// brio knows it exists, and nothing here touches a register -
 // it is pure encoding, so both apps can compile it and the host could
 // too.
 //

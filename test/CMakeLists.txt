@@ -1,6 +1,6 @@
 # ============================================================================
 #  test/CMakeLists.txt - the host test project: brio's kernel is pure logic
-#  behind the Platform concept (lib/brio/src/platform.hpp), so it compiles
+#  behind the Platform concept (brio/platform.hpp), so it compiles
 #  and runs on the machine itself with the self-built host g++ (/sw/gcc,
 #  same GCC version as avr-gcc: identical language features on both sides).
 #
@@ -49,7 +49,7 @@ foreach(_main IN LISTS SUITE_MAINS)
 
     add_executable(${_suite} ${_main})
     target_include_directories(${_suite} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/brio/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../brio
         ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/doctest
         ${CMAKE_CURRENT_SOURCE_DIR}
     )

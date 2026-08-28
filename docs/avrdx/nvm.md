@@ -8,12 +8,12 @@ Documents of record: data sheet **DS40002247B** chapter 11 (NVMCTRL),
 chapter 15 (CPUINT, for the vector-table bit) and section 39.8 (the
 memory programming times); errata **DS80000915F** 2.7.1 / 2.7.2 (AVR
 DB) and **DS80000882C** 2.7.1 / 2.7.2 / 2.17.1 (AVR DA). Driver:
-[`lib/brio/src/avrdx/nvm.hpp`](../../lib/brio/src/avrdx/nvm.hpp), with
+[`brio/avrdx/nvm.hpp`](../../brio/avrdx/nvm.hpp), with
 the target-independent services over it in
-[`util/nv_record.hpp`](../../lib/brio/src/util/nv_record.hpp),
-[`util/nv_writer.hpp`](../../lib/brio/src/util/nv_writer.hpp),
-[`util/persistent_panic.hpp`](../../lib/brio/src/util/persistent_panic.hpp)
-and [`util/crc.hpp`](../../lib/brio/src/util/crc.hpp). Reference test
+[`util/nv_record.hpp`](../../brio/util/nv_record.hpp),
+[`util/nv_writer.hpp`](../../brio/util/nv_writer.hpp),
+[`util/persistent_panic.hpp`](../../brio/util/persistent_panic.hpp)
+and [`util/crc.hpp`](../../brio/util/crc.hpp). Reference test
 suites: `test_avr_nvm` on the bench, `test_nv_record` on the host.
 
 ## What the silicon does
@@ -308,7 +308,7 @@ first and write it back.
 
 ### `NvmFlash` - this flash as a block store
 
-[`avrdx/nvm_flash.hpp`](../../lib/brio/src/avrdx/nvm_flash.hpp) presents
+[`avrdx/nvm_flash.hpp`](../../brio/avrdx/nvm_flash.hpp) presents
 the Flash as the `FlashMedia` the target-independent block allocator
 runs on ([design/nv-heap.md](../design/nv-heap.md)). It is four verbs
 over the driver above - read is `flash_read`, program is `write_block`

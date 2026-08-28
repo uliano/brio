@@ -54,7 +54,7 @@
 //  is where the same claim is checked for the sleep driver.
 //
 //  The run-time twin of these four instructions is
-//  brio::Nvm::vectors_in_boot() (lib/brio/src/avrdx/nvm.hpp), with
+//  brio::Nvm::vectors_in_boot() (brio/avrdx/nvm.hpp), with
 //  vectors_in_boot_armed() as its readback; the two must stay the same
 //  store. This one exists because .init3 has no C++ available yet.
 // ============================================================================

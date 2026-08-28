@@ -6,7 +6,7 @@ rationale and the contracts between layers, as they are today.
 
 ## Map
 
-The directory mirrors the strata of `lib/brio/src/`: `design/` is the
+The directory mirrors the strata of `brio/`: `design/` is the
 target-independent framework (kernel, services, the models every
 target realizes); one folder per target (`avrdx/`, `host/`, ...) holds
 that target's operational page (`README.md`), one document per
@@ -32,7 +32,7 @@ Target-independent design:
 | [design/meters.md](design/meters.md) | Meters in the kernel: the MeterLatch that bridges a capture interrupt to the loop (last value wins, overwrites counted) and the MeterSampler that paces PUBLICATION instead of capture - a stale source publishes nothing |
 | [design/architecture.svg](design/architecture.svg) | The strata diagram |
 
-Target AVR DA/DB (`lib/brio/src/avrdx/`):
+Target AVR DA/DB (`brio/avrdx/`):
 
 | Document | Content |
 |----------|---------|
@@ -58,7 +58,7 @@ Target AVR DA/DB (`lib/brio/src/avrdx/`):
 | [avrdx/opamp.md](avrdx/opamp.md) | OPAMP (provisional, **DB only**): the `OpampSystem` block (the one ENABLE, the TIMEBASE that makes a settle time mean microseconds, and the ClockUser hook that keeps it true across a rebase) + `Opamp<n>` - both input multiplexers with their per-instance link codes, the 16R ladder and its eight exact gains, the output driver, the three enable regimes, the internal timer and READY, the four event users and the offset trim - plus the tasks `OpampFollower`, `OpampPga`, `OpampInvertingPga` and the chapter's three-op-amp `InstrumentationAmp`; not covered: the integrator usage type (external R and C, and a DUMP policy), RUNSTBY, IRSEL's electrical effect |
 | [avrdx/vendor/README.md](avrdx/vendor/README.md) | The datasheets/errata the stratum is written against, by document number (PDFs kept local, not in git) |
 
-Target SAM C21 (`lib/brio/src/samc/`):
+Target SAM C21 (`brio/samc/`):
 
 | Document | Content |
 |----------|---------|
@@ -76,7 +76,7 @@ Target SAM C21 (`lib/brio/src/samc/`):
 | [samc/freqm.md](samc/freqm.md) | FREQM (provisional): the hardware ratio counter - f_msr = VALUE/REFNUM x f_ref between two GCLK generators - with erratum 1.24.1 as code (reading CTRLB is a PAC error on every revision, so START is written and never read), the 24-bit overflow budget, and two documentation findings decided by data: CFGA has no DIVREF whatever 44.8.3 draws, and the channels must be routed BEFORE the software reset or its synchronization never completes. Cross-checks OSCULP32K against the watchdog measurement to 3 Hz; not covered: the DONE interrupt as a wake source, GCLK_IO inputs |
 | [samc/vendor/README.md](samc/vendor/README.md) | The datasheets/errata the stratum is written against, the bench chip's silicon revision, the targeted errata pass (PDFs kept local, not in git) |
 
-Target host (`lib/brio/src/host/`):
+Target host (`brio/host/`):
 
 | Document | Content |
 |----------|---------|
@@ -103,7 +103,7 @@ The bench:
   reference individual apps (apps are disposable and must be free to
   change without touching the foundations). Apps document themselves
   in their own header comment and are listed in `bench.md`.
-- **One folder per target, mirroring `lib/brio/src/<name>/`.** Its
+- **One folder per target, mirroring `brio/<name>/`.** Its
   `README.md` is the operational page - toolchain, probe, debugger,
   quirks, clock fixture; next to it one document per peripheral driver
   and `vendor/` with the datasheets of record. What is

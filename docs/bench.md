@@ -421,14 +421,14 @@ regenerate. An app may carry `// build: <option> = <value>` lines in
 its header comment (e.g. `// build: monitor_speed = 115200`) - see
 "Per-app build options" in [avrdx/README.md](avrdx/README.md).
 
-Shared code goes into `lib/brio/src/`; any header an app includes is
+Shared code goes into `brio/`; any header an app includes is
 compiled and linked by the LDF, no filter changes. What does NOT belong
 there is bench tooling two apps happen to share - a wire protocol
 between a DUT and its instrument is not framework. That kind of header
 sits next to the apps in `src/apps/` and is included by its plain name
 (`#include "usart_link.hpp"`), which the compiler resolves against the
 including file's own directory: no build change, and the layering rule
-stays honest because nothing under `lib/brio/src/` knows it exists.
+stays honest because nothing under `brio/` knows it exists.
 
 | App | What it does |
 |-----|--------------|

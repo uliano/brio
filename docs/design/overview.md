@@ -93,7 +93,7 @@ order; until then, util/ generalizes from one and says so.
 
 ## Layering: four strata
 
-Directories under `lib/brio/src/`; includes always carry the stratum
+Directories under `brio/`; includes always carry the stratum
 prefix (`#include "avrdx/usart.hpp"`) so an app's portability is
 readable at a glance.
 

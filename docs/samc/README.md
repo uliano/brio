@@ -112,8 +112,8 @@ serial line in one pass where guessing host baud rates went nowhere.
 
 clangd routes every file to its own architecture through `.clangd`
 fragments, independent of which project CMake Tools has active:
-`lib/brio/src/.clangd` sends the framework default (kernel/, util/,
-host/) to the host database, `lib/brio/src/samc/.clangd` and
+`brio/.clangd` sends the framework default (kernel/, util/,
+host/) to the host database, `brio/samc/.clangd` and
 `samc/.clangd` send the samc stratum and project to
 `build-cmake/samc21j-release`, `test/family_samc/.clangd` lets the
 script-compiled family TUs borrow flags from that same database. The
