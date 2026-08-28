@@ -26,10 +26,11 @@
  *    12, PA27 is line 15, PB30 is line 14: any "pin number modulo 16"
  *    rule is wrong on this family. The device header carries one
  *    `PIN_P<pad>A_EIC_EXTINT_NUM` per bonded pad and that is the whole
- *    authority - the table at the bottom of this file is those symbols
- *    and nothing else, each entry guarded by its own `#ifdef`, so a pad
- *    that a smaller package does not bond simply has no entry and
- *    `ExtInt<>` on it fails to compile with a message that says why.
+ *    authority - probed, symbol by symbol, in samc/device_tables.hpp
+ *    (the one file where vendor-macro `#ifdef` walls are allowed to
+ *    live), so a pad that a smaller package does not bond simply has
+ *    no entry and `ExtInt<>` on it fails to compile with a message
+ *    that says why.
  *
  * 2. ONE NVIC VECTOR FOR ALL SIXTEEN LINES. 26.6.6 says "The EIC has
  *    one interrupt request line for each external interrupt (EXTINTx)",
@@ -121,6 +122,7 @@
 #include "sam.h"
 
 #include "samc/clock.hpp"
+#include "samc/device_tables.hpp"
 #include "samc/nvic.hpp"
 #include "samc/pin.hpp"
 
@@ -504,205 +506,14 @@ public:
 };
 
 // =============================================================================
-// Pad to line: the device header's own table, and nothing else
+// Pad to line: samc/device_tables.hpp is the authority
 // =============================================================================
 //
-// `PIN_P<pad>A_EIC_EXTINT_NUM` exists for exactly the pads a given
-// package bonds to the EIC, and its value is that pad's EXTINT number.
-// The mapping is irregular (PA16 -> 0, PA24 -> 12, PA27 -> 15,
-// PB30 -> 14), so no arithmetic can stand in for it, and it is
-// per-package (the E variant has 25 such pads, the G 37, the J 51), so
-// no fixed list can either. Hence: one guarded case per pad, generated
-// from the header symbols themselves.
-//
-// The return is `int` so that "this pad has no external interrupt on
-// this device" has a value of its own (-1) that a static_assert can
-// name.
-
-#define BRIO_EIC_PAD(letter, number, sym) \
-    case (static_cast<int>(letter) - 'A') * 32 + (number): \
-        return static_cast<int>(PIN_##sym##A_EIC_EXTINT_NUM);
-
-constexpr int eic_extint_line(char port, uint8_t pin) {
-    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
-#ifdef PIN_PA00A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 0, PA00)
-#endif
-#ifdef PIN_PA01A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 1, PA01)
-#endif
-#ifdef PIN_PA02A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 2, PA02)
-#endif
-#ifdef PIN_PA03A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 3, PA03)
-#endif
-#ifdef PIN_PA04A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 4, PA04)
-#endif
-#ifdef PIN_PA05A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 5, PA05)
-#endif
-#ifdef PIN_PA06A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 6, PA06)
-#endif
-#ifdef PIN_PA07A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 7, PA07)
-#endif
-#ifdef PIN_PA09A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 9, PA09)
-#endif
-#ifdef PIN_PA10A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 10, PA10)
-#endif
-#ifdef PIN_PA11A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 11, PA11)
-#endif
-#ifdef PIN_PA12A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 12, PA12)
-#endif
-#ifdef PIN_PA13A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 13, PA13)
-#endif
-#ifdef PIN_PA14A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 14, PA14)
-#endif
-#ifdef PIN_PA15A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 15, PA15)
-#endif
-#ifdef PIN_PA16A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 16, PA16)
-#endif
-#ifdef PIN_PA17A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 17, PA17)
-#endif
-#ifdef PIN_PA18A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 18, PA18)
-#endif
-#ifdef PIN_PA19A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 19, PA19)
-#endif
-#ifdef PIN_PA20A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 20, PA20)
-#endif
-#ifdef PIN_PA21A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 21, PA21)
-#endif
-#ifdef PIN_PA22A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 22, PA22)
-#endif
-#ifdef PIN_PA23A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 23, PA23)
-#endif
-#ifdef PIN_PA24A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 24, PA24)
-#endif
-#ifdef PIN_PA25A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 25, PA25)
-#endif
-#ifdef PIN_PA27A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 27, PA27)
-#endif
-#ifdef PIN_PA28A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 28, PA28)
-#endif
-#ifdef PIN_PA30A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 30, PA30)
-#endif
-#ifdef PIN_PA31A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('A', 31, PA31)
-#endif
-#ifdef PIN_PB00A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 0, PB00)
-#endif
-#ifdef PIN_PB01A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 1, PB01)
-#endif
-#ifdef PIN_PB02A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 2, PB02)
-#endif
-#ifdef PIN_PB03A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 3, PB03)
-#endif
-#ifdef PIN_PB04A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 4, PB04)
-#endif
-#ifdef PIN_PB05A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 5, PB05)
-#endif
-#ifdef PIN_PB06A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 6, PB06)
-#endif
-#ifdef PIN_PB07A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 7, PB07)
-#endif
-#ifdef PIN_PB08A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 8, PB08)
-#endif
-#ifdef PIN_PB09A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 9, PB09)
-#endif
-#ifdef PIN_PB10A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 10, PB10)
-#endif
-#ifdef PIN_PB11A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 11, PB11)
-#endif
-#ifdef PIN_PB12A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 12, PB12)
-#endif
-#ifdef PIN_PB13A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 13, PB13)
-#endif
-#ifdef PIN_PB14A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 14, PB14)
-#endif
-#ifdef PIN_PB15A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 15, PB15)
-#endif
-#ifdef PIN_PB16A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 16, PB16)
-#endif
-#ifdef PIN_PB17A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 17, PB17)
-#endif
-#ifdef PIN_PB22A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 22, PB22)
-#endif
-#ifdef PIN_PB23A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 23, PB23)
-#endif
-#ifdef PIN_PB30A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 30, PB30)
-#endif
-#ifdef PIN_PB31A_EIC_EXTINT_NUM
-    BRIO_EIC_PAD('B', 31, PB31)
-#endif
-    default:
-        return -1;
-    }
-}
-
-#undef BRIO_EIC_PAD
-
-/// Whether a pad is the NMI pad on THIS device, from the same
-/// authority (`PIN_P<pad>A_EIC_NMI`). It is PA08 on every variant of
-/// this family - but it is the header symbol that says so, not this
-/// file.
-constexpr bool eic_nmi_pad(char port, uint8_t pin) {
-    (void)port;
-    (void)pin;
-#ifdef PIN_PA08A_EIC_NMI
-    if (port == 'A' && pin == 8u) {
-        return true;
-    }
-#endif
-    return false;
-}
-
-/// Whether a pad carries an external interrupt line on THIS device.
-template <char L, uint8_t N>
-constexpr bool extint_exists = eic_extint_line(L, N) >= 0;
+// `eic_extint_line(port, pin)`, `eic_nmi_pad(port, pin)` and the
+// `extint_exists<L, N>` probe live in the reserve (device_tables.hpp),
+// generated symbol by symbol from the device header's own
+// `PIN_P<pad>A_EIC_EXTINT_NUM` / `PIN_PA08A_EIC_NMI` constants - see
+// that file for why they are probes and not per-variant tables.
 
 /**
  * One EIC line reached through the pad that carries it.

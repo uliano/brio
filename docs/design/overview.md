@@ -74,6 +74,19 @@ concept or in drivers. The kernel must never know which silicon it
 runs on. Family differences inside AVR (DA vs DB, package sizes) are
 handled with device-macro guards so the same headers build everywhere.
 
+The preprocessor's one legitimate question is whether a vendor macro
+EXISTS - the question no template can ask - and even that is split by
+what the answer produces. A probe whose product is a VALUE (a pad's
+line number, an instance's clock id, a trigger code, a bonding fact)
+belongs in the family's DEVICE-TABLES header (`samc/device_tables.hpp`
+is the first), quarantined one entry per header symbol and exported as
+plain constexpr data: probes rather than per-variant tables, because a
+probe re-reads the vendor header at every compile and cannot drift,
+where a copied table can. A driver keeps an `#ifdef` only where it
+selects CODE that genuinely differs per instance - a register-struct
+reference, an if-constexpr tier - which no constexpr table can hold.
+Everything else is C++.
+
 **Authority of util/.** A util type is target-independent by contract
 (it includes no target, it is parametrized on a concept, it runs on
 the host with a fake) - but its concept was written looking at the

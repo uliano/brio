@@ -109,6 +109,7 @@
 #include "sam.h"
 
 #include "samc/clock.hpp"
+#include "samc/device_tables.hpp"
 #include "samc/nvic.hpp"
 #include "samc/pin.hpp"
 #include "util/pwm_channel.hpp"
@@ -259,71 +260,13 @@ struct TcEventConfig {
     uint8_t match_out = 0;       ///< MCEOx, bit x = channel x
 };
 
-// ---- geometry, straight out of the device header ----------------------------
-
-/// How many TC instances this device has.
-constexpr uint8_t tc_count() {
-#if defined(TC7_REGS)
-    return 8;
-#elif defined(TC5_REGS)
-    return 6;
-#elif defined(TC4_REGS)
-    return 5;
-#elif defined(TC2_REGS)
-    return 3;
-#else
-    return 0;
-#endif
-}
-
-/// `TCn_MASTER_SLAVE_MODE`: 1 = can be the master of a 32-bit pair,
-/// 2 = is somebody's client, 0 = cannot pair (35.6.2.4).
-constexpr uint8_t tc_pair_role(uint8_t n) {
-    switch (n) {
-#ifdef TC0_MASTER_SLAVE_MODE
-    case 0: return TC0_MASTER_SLAVE_MODE;
-#endif
-#ifdef TC1_MASTER_SLAVE_MODE
-    case 1: return TC1_MASTER_SLAVE_MODE;
-#endif
-#ifdef TC2_MASTER_SLAVE_MODE
-    case 2: return TC2_MASTER_SLAVE_MODE;
-#endif
-#ifdef TC3_MASTER_SLAVE_MODE
-    case 3: return TC3_MASTER_SLAVE_MODE;
-#endif
-#ifdef TC4_MASTER_SLAVE_MODE
-    case 4: return TC4_MASTER_SLAVE_MODE;
-#endif
-    default: return 0;
-    }
-}
-
-constexpr bool tc_can_pair(uint8_t n) { return tc_pair_role(n) == 1u; }
-
-/// This instance's generic clock channel. TC0/TC1 share one, TC2/TC3
-/// share another, TC4 has its own - which is why 35.5.3 warns that two
-/// instances "cannot be set to different clock frequencies".
-constexpr uint8_t tc_gclk_id(uint8_t n) {
-    switch (n) {
-#ifdef TC0_GCLK_ID
-    case 0: return TC0_GCLK_ID;
-#endif
-#ifdef TC1_GCLK_ID
-    case 1: return TC1_GCLK_ID;
-#endif
-#ifdef TC2_GCLK_ID
-    case 2: return TC2_GCLK_ID;
-#endif
-#ifdef TC3_GCLK_ID
-    case 3: return TC3_GCLK_ID;
-#endif
-#ifdef TC4_GCLK_ID
-    case 4: return TC4_GCLK_ID;
-#endif
-    default: return 0xFF;
-    }
-}
+// ---- geometry: samc/device_tables.hpp is the authority -----------------------
+//
+// `tc_count()`, `tc_pair_role(n)` / `tc_can_pair(n)`, `tc_gclk_id(n)`
+// and the DMAC trigger ids `tc_dma_overflow_id(n)` /
+// `tc_dma_match0_id(n)` live in the reserve (device_tables.hpp),
+// probed from the header's own `TCn_*` constants - see that file for
+// why they are probes and not per-variant tables.
 
 /// A configuration's legality for THIS instance.
 ///
@@ -370,51 +313,6 @@ constexpr bool tc_event_config_valid(const TcConfig& c, const TcEventConfig& e) 
         }
     }
     return true;
-}
-
-/// The DMAC trigger ids of one instance, from the device header's own
-/// `TCn_DMAC_ID_*` - published here because `dmac.hpp` owns the channels
-/// and not the trigger table.
-constexpr uint8_t tc_dma_overflow_id(uint8_t n) {
-    switch (n) {
-#ifdef TC0_DMAC_ID_OVF
-    case 0: return TC0_DMAC_ID_OVF;
-#endif
-#ifdef TC1_DMAC_ID_OVF
-    case 1: return TC1_DMAC_ID_OVF;
-#endif
-#ifdef TC2_DMAC_ID_OVF
-    case 2: return TC2_DMAC_ID_OVF;
-#endif
-#ifdef TC3_DMAC_ID_OVF
-    case 3: return TC3_DMAC_ID_OVF;
-#endif
-#ifdef TC4_DMAC_ID_OVF
-    case 4: return TC4_DMAC_ID_OVF;
-#endif
-    default: return 0;
-    }
-}
-
-constexpr uint8_t tc_dma_match0_id(uint8_t n) {
-    switch (n) {
-#ifdef TC0_DMAC_ID_MC0
-    case 0: return TC0_DMAC_ID_MC0;
-#endif
-#ifdef TC1_DMAC_ID_MC0
-    case 1: return TC1_DMAC_ID_MC0;
-#endif
-#ifdef TC2_DMAC_ID_MC0
-    case 2: return TC2_DMAC_ID_MC0;
-#endif
-#ifdef TC3_DMAC_ID_MC0
-    case 3: return TC3_DMAC_ID_MC0;
-#endif
-#ifdef TC4_DMAC_ID_MC0
-    case 4: return TC4_DMAC_ID_MC0;
-#endif
-    default: return 0;
-    }
 }
 
 // =============================================================================
@@ -840,109 +738,13 @@ private:
 };
 
 // =============================================================================
-// Pad to waveform output: the device header's own table, and nothing else
+// Pad to waveform output: samc/device_tables.hpp is the authority
 // =============================================================================
 //
-// `PIN_P<pad>E_TC<n>_WO<k>` exists for exactly the pads a package bonds
-// to a timer's waveform output, and each pad carries exactly one of
-// them. The map is per-package (26 pads on the J, 18 on the G, 8 on the
-// E) and irregular, so it is those symbols and nothing else. The return
-// packs the instance and the output into one value, -1 for a pad that
-// carries neither.
-
-#define BRIO_TC_WO_PAD(letter, number, tc, wo) \
-    case (static_cast<int>(letter) - 'A') * 32 + (number): \
-        return ((tc) << 4) | (wo);
-
-constexpr int tc_wo_code(char port, uint8_t pin) {
-    switch ((static_cast<int>(port) - 'A') * 32 + static_cast<int>(pin)) {
-#ifdef PIN_PA14E_TC4_WO0
-    BRIO_TC_WO_PAD('A', 14, 4, 0)
-#endif
-#ifdef PIN_PA15E_TC4_WO1
-    BRIO_TC_WO_PAD('A', 15, 4, 1)
-#endif
-#ifdef PIN_PA18E_TC4_WO0
-    BRIO_TC_WO_PAD('A', 18, 4, 0)
-#endif
-#ifdef PIN_PA19E_TC4_WO1
-    BRIO_TC_WO_PAD('A', 19, 4, 1)
-#endif
-#ifdef PIN_PA20E_TC3_WO0
-    BRIO_TC_WO_PAD('A', 20, 3, 0)
-#endif
-#ifdef PIN_PA21E_TC3_WO1
-    BRIO_TC_WO_PAD('A', 21, 3, 1)
-#endif
-#ifdef PIN_PA22E_TC0_WO0
-    BRIO_TC_WO_PAD('A', 22, 0, 0)
-#endif
-#ifdef PIN_PA23E_TC0_WO1
-    BRIO_TC_WO_PAD('A', 23, 0, 1)
-#endif
-#ifdef PIN_PA24E_TC1_WO0
-    BRIO_TC_WO_PAD('A', 24, 1, 0)
-#endif
-#ifdef PIN_PA25E_TC1_WO1
-    BRIO_TC_WO_PAD('A', 25, 1, 1)
-#endif
-#ifdef PIN_PB00E_TC3_WO0
-    BRIO_TC_WO_PAD('B', 0, 3, 0)
-#endif
-#ifdef PIN_PB01E_TC3_WO1
-    BRIO_TC_WO_PAD('B', 1, 3, 1)
-#endif
-#ifdef PIN_PB02E_TC2_WO0
-    BRIO_TC_WO_PAD('B', 2, 2, 0)
-#endif
-#ifdef PIN_PB03E_TC2_WO1
-    BRIO_TC_WO_PAD('B', 3, 2, 1)
-#endif
-#ifdef PIN_PB08E_TC0_WO0
-    BRIO_TC_WO_PAD('B', 8, 0, 0)
-#endif
-#ifdef PIN_PB09E_TC0_WO1
-    BRIO_TC_WO_PAD('B', 9, 0, 1)
-#endif
-#ifdef PIN_PB10E_TC1_WO0
-    BRIO_TC_WO_PAD('B', 10, 1, 0)
-#endif
-#ifdef PIN_PB11E_TC1_WO1
-    BRIO_TC_WO_PAD('B', 11, 1, 1)
-#endif
-#ifdef PIN_PB12E_TC0_WO0
-    BRIO_TC_WO_PAD('B', 12, 0, 0)
-#endif
-#ifdef PIN_PB13E_TC0_WO1
-    BRIO_TC_WO_PAD('B', 13, 0, 1)
-#endif
-#ifdef PIN_PB14E_TC1_WO0
-    BRIO_TC_WO_PAD('B', 14, 1, 0)
-#endif
-#ifdef PIN_PB15E_TC1_WO1
-    BRIO_TC_WO_PAD('B', 15, 1, 1)
-#endif
-#ifdef PIN_PB16E_TC2_WO0
-    BRIO_TC_WO_PAD('B', 16, 2, 0)
-#endif
-#ifdef PIN_PB17E_TC2_WO1
-    BRIO_TC_WO_PAD('B', 17, 2, 1)
-#endif
-#ifdef PIN_PB22E_TC3_WO0
-    BRIO_TC_WO_PAD('B', 22, 3, 0)
-#endif
-#ifdef PIN_PB23E_TC3_WO1
-    BRIO_TC_WO_PAD('B', 23, 3, 1)
-#endif
-    default:
-        return -1;
-    }
-}
-
-#undef BRIO_TC_WO_PAD
-
-template <char L, uint8_t N>
-constexpr bool tc_wo_exists = tc_wo_code(L, N) >= 0;
+// `tc_wo_code(port, pin)` ((tc << 4) | wo, -1 for a pad that carries
+// none) and the `tc_wo_exists<L, N>` probe live in the reserve
+// (device_tables.hpp), generated symbol by symbol from the device
+// header's own `PIN_P<pad>E_TC<n>_WO<k>` constants.
 
 /**
  * One waveform output reached through its pad.

@@ -115,6 +115,7 @@
 #include "sam.h"
 
 #include "samc/clock.hpp"
+#include "samc/device_tables.hpp"
 #include "samc/nvic.hpp"
 
 namespace brio {
@@ -212,36 +213,9 @@ constexpr uint8_t ac_ain_of(uint8_t comparator, uint8_t pin) {
     return static_cast<uint8_t>((comparator < 2u ? 0u : 4u) + pin);
 }
 
-/// Whether this device bonds a given AIN pad at all.
-constexpr bool ac_ain_exists(uint8_t ain) {
-    switch (ain) {
-#ifdef PIN_PA04B_AC_AIN0
-    case 0: return true;
-#endif
-#ifdef PIN_PA05B_AC_AIN1
-    case 1: return true;
-#endif
-#ifdef PIN_PA06B_AC_AIN2
-    case 2: return true;
-#endif
-#ifdef PIN_PA07B_AC_AIN3
-    case 3: return true;
-#endif
-#ifdef PIN_PA02B_AC_AIN4
-    case 4: return true;
-#endif
-#ifdef PIN_PA03B_AC_AIN5
-    case 5: return true;
-#endif
-#ifdef PIN_PB05B_AC_AIN6
-    case 6: return true;
-#endif
-#ifdef PIN_PB06B_AC_AIN7
-    case 7: return true;
-#endif
-    default: return false;
-    }
-}
+// `ac_ain_exists(ain)` - whether this device bonds a given AIN pad at
+// all - lives in the reserve (samc/device_tables.hpp), probed from the
+// header's own `PIN_P<pad>B_AC_AIN<k>` symbols.
 
 /// The MUXPOS/MUXNEG pin codes are the same four values; this turns one
 /// into the pin index, or 0xFF for a code that is not a pin at all.

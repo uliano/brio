@@ -176,7 +176,12 @@ non-recovering UBSan. Handlers dispatch with `brio::match(e,
 lambdas...)`. Drivers expose
 ISR handler BODIES (`[[gnu::always_inline]]`), the app binds the
 vector - vector names never appear in portable code. No `#ifdef` where
-a template/concept boundary can do the job; no target includes outside
+a template/concept boundary can do the job - and where only the
+preprocessor can ask (does this vendor macro exist?), a probe that
+yields a VALUE lives in the family's device-tables header
+(samc/device_tables.hpp), never in a driver; a driver keeps `#ifdef`
+only to select per-instance CODE (ruling 2026-08-28, full text in
+overview.md "Generalization rule"); no target includes outside
 the target strata; the kernel must never know which silicon it runs
 on. Apps never touch registers (PORTx/VPORTx/peripheral structs live
 only in target drivers; the ISR vector binding is the one vendor glue an
@@ -538,9 +543,11 @@ gets its dated home in `docs/design/` when taken.
   every configuration register enable-protected so every verb touching
   one RETURNS FALSE while enabled rather than storing into a register
   the silicon ignores. THE PAD-TO-LINE MAP IS THE DEVICE HEADER'S OWN
-  TABLE and nothing else: PIN_P<pad>A_EIC_EXTINT_NUM, one #ifdef-guarded
-  case per pad (51 on the J, 37 on the G, 25 on the E), because the map
-  is IRREGULAR (PA16 -> 0, PA24 -> 12, PA27 -> 15, PB30 -> 14) and no
+  TABLE and nothing else: PIN_P<pad>A_EIC_EXTINT_NUM, one guarded probe
+  per pad (51 on the J, 37 on the G, 25 on the E; since the 2026-08-28
+  sanitation the probes live in samc/device_tables.hpp, the one file
+  where vendor-macro #ifdef walls are allowed), because the map is
+  IRREGULAR (PA16 -> 0, PA24 -> 12, PA27 -> 15, PB30 -> 14) and no
   formula can stand in for it; ExtInt<Pin> refuses to compile on a pad
   the package does not bond, which is the per-package gate with no
   hand-kept table behind it, and ExtNmi<Pin> is the same for PA08.
@@ -661,8 +668,9 @@ gets its dated home in `docs/design/` when taken.
   compile-time refusal read out of the header rather than out of
   35.6.2.4's sentence. The pad-to-(TC,WO) map is the same story as the
   EIC's: 26 pads on the J, 18 on the G, 8 on the E, PA22/PB08/PB12 all
-  TC0/WO0, PB23 the board's LED = TC3/WO1, one #ifdef-guarded case per
-  pad. READING COUNT IS A COMMAND (READSYNC then two waits, 35.6.8) and
+  TC0/WO0, PB23 the board's LED = TC3/WO1, one guarded probe per pad
+  (in samc/device_tables.hpp since the sanitation, with the TC instance
+  data - gclk/pairing/DMAC ids - beside it). READING COUNT IS A COMMAND (READSYNC then two waits, 35.6.8) and
   the raw accessors are spelled raw. ERRATA: 1.20.1 and 1.20.2 are
   REVISION B ONLY (1.20.2 - "input capture on I/O pins does not work" -
   is the trap); 1.20.3 is EVERY revision and is code, clear_buffer_valid()
@@ -1734,11 +1742,29 @@ brio/                    the framework, four strata:
                            zone is a constant because no linker section reaches
                            there
     pin.hpp                Pin<'A',5>, PinConfig, the WRCONFIG multi-pin engine
+    device_tables.hpp      THE RESERVE: the one file where vendor-macro
+                           #ifdef probing is allowed - pad/instance facts
+                           (EIC pad->line, TC WO pads + instance ids, AC
+                           AIN bonding) read from the device header's own
+                           symbols and exported as constexpr data
     sercom.hpp             Sercom<n> resource + Uart task with two OPTIONAL
                            DMA engine slots
     dmac.hpp               Dmac block + DmaDescriptor + DmaChannel<n> +
                            DmaTxEngine/DmaRxEngine
-    ac.hpp                 Ac block + AcComparator<n> (minimal by design)
+    eic.hpp                EIC: the family's pin interrupts - Eic block
+                           (per-line sense/filter/async, the optional clock
+                           and the enable that synchronizes against it,
+                           EVSYS generators published here) + ExtInt<Pin> /
+                           ExtNmi<Pin> reached through the pad
+    tc.hpp                 TC: Tc<n> resource (three widths incl. the paired
+                           COUNT32, READSYNC discipline, capture, events both
+                           ways, erratum 1.20.3 as code) + TcWo<Pin> + tasks
+                           TcPwm/TcPwm8 (PwmChannel) and TcPeriodMeter/
+                           TcPulseWidthMeter (MeterSource feeders)
+    ac.hpp                 AC: Ac block + AcComparator<n> + AcWindow<w>
+                           (window mode, the event surface both ways with
+                           published codes, per-package input legality where
+                           the PAIR owns the pads)
     evsys.hpp              EVSYS: the event fabric - twelve channels, the
                            three paths, the user multiplexer (channel+1 hidden),
                            the software event, three live errata as code. Owns
