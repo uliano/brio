@@ -10,7 +10,8 @@ Peripheral documents live next to this page (`platform.md`,
 `clock.md`, `port.md`, `sercom.md`, `dmac.md`, `ac.md`, `nvm.md`,
 `reset.md`, `freqm.md`, `osc32kctrl.md`, `evsys.md`, `eic.md`,
 `tc.md`, `tcc.md`, `supc.md`, `rtc.md`, `adc.md`, `dac.md`,
-`sdadc.md`, `tsens.md`, `ccl.md`; PM lives in
+`sdadc.md`, `tsens.md`, `ccl.md`, `pac.md`, `dsu.md`, `divas.md`,
+`mtb.md`; PM lives in
 `platform.md` with the rest of what the kernel stands on); the
 datasheets of record are in
 [vendor/README.md](vendor/README.md) together with the targeted

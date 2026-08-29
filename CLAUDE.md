@@ -1278,10 +1278,11 @@ gets its dated home in `docs/design/` when taken.
   negatives; canaries dac z 108 and adc z 97; md5 gate on the reserve's
   growth: ALL 21 pre-existing SAM images BYTE-IDENTICAL. docs/samc/
   sdadc.md NEW PROVISIONAL, dac.md's 1.8.10 and SDADC gap lines closed.
-  JUDGMENT CALLS QUEUED - see memory samc-session-2026-08-28-sdadc.
+  All seven judgment calls RULED AND ACCEPTED at Fable's review (memory samc-session-2026-08-28-sdadc).
   **TSENS DONE 2026-08-28 (ch. 43) - PHASE G's FOURTH AND LAST CHAPTER,
-  and the one that is NOT a converter. NOT COMMITTED awaiting Fable's
-  review (see memory samc-session-2026-08-28-tsens).**
+  and the one that is NOT a converter. REVIEWED BY FABLE and COMMITTED
+  (b65fa51), all seven judgment calls accepted (memory
+  samc-session-2026-08-28-tsens).**
   samc/tsens.hpp NEW: the whole chapter as a MONOSTATE `Tsens` (the Rtc /
   Dac / Sdadc precedent - one instance on every C21 variant, and NO PADS
   AT ALL, 43.5.1 being "Not applicable"). THE DESIGN POSITION IS THAT
@@ -1351,8 +1352,8 @@ gets its dated home in `docs/design/` when taken.
   docs/samc/tsens.md NEW PROVISIONAL. JUDGMENT CALLS QUEUED - see memory
   samc-session-2026-08-28-tsens.
   **CCL DONE 2026-08-29 (ch. 37) - PHASE H's FIRST CHAPTER, and the one
-  that CLOSES AC.MD'S OPEN LEAD. NOT COMMITTED awaiting Fable's review
-  (see memory samc-session-2026-08-29-ccl).**
+  that CLOSES AC.MD'S OPEN LEAD. COMMITTED 931211f (see memory
+  samc-session-2026-08-29-ccl).**
   samc/ccl.hpp NEW: the whole chapter in the AVR's own two strata,
   because for once the two families really do have the same peripheral -
   `Ccl` (one ENABLE, one software reset, ONE generic clock for every
@@ -1421,6 +1422,88 @@ gets its dated home in `docs/design/` when taken.
   images BYTE-IDENTICAL. docs/samc/ccl.md NEW PROVISIONAL, ac.md's open
   lead CLOSED, evsys.md's software-event finding corrected. JUDGMENT
   CALLS QUEUED - see memory samc-session-2026-08-29-ccl.
+  **PHASE H'S TAIL DONE 2026-08-29 - PAC (11), DSU (13), DIVAS (14) and
+  MTB (10.3) in one session, WHICH CLOSES EVERY WIRELESS CHAPTER OF THE
+  PLAN. REVIEWED BY FABLE and COMMITTED same day, all eight judgment
+  calls accepted (memory samc-session-2026-08-29-debug).**
+  Four small chapters, four new headers, ONE suite - test_samc_debug,
+  because three of the four meet each other: the DSU comes out of reset
+  PAC-protected, DIVAS's only error report is a bit in the PAC's AHB flag
+  register, and the MTB's PAC identifier is a number only the PAC's
+  register map states. samc/pac.hpp NEW and THE POSITION IS MECHANISM
+  ONLY - the keyed word-wise WRCTRL, PERID = 32 x bridge + index, the
+  four flag banks, the ACCERR event, the shared IRQ 0 - with NO guard
+  type, NO policy and NO util concept, for three reasons stated in the
+  header: nothing in brio protects anything yet, 11.5.2.6's balance rule
+  (a double set or a double clear is itself an error) makes a nestable
+  guard a design decision rather than a detail, and erratum 1.13.3 proves
+  the guarantee is not uniform. samc/dsu.hpp NEW (DID decoded, the
+  hardware CRC32, MBIST, the CoreSight ROM, the two debug channels; chip
+  erase DELIBERATELY not exposed, the AVR CHER precedent). samc/divas.hpp
+  NEW (both buses, the AHB's wait-state read and the IOBUS's mandatory
+  poll). samc/mtb.hpp NEW (the four registers 10.3 names before deferring
+  to a TRM this project does not have - so the DEVICE HEADER is the only
+  local authority on the layout). THE CAMPAIGN'S HEADLINE is letter b's
+  CONTRAST MAP: sixteen peripherals across all three bridges, each
+  written back to itself with protection off (the control) and on, and
+  ALL SIXTEEN REPORT - which relocates erratum 1.19.1's silence onto
+  TSENS.CTRLB rather than TSENS (CTRLA flags in the same run) and leaves
+  erratum 1.7.4's flag-with-no-protection on the CCL as the opposite
+  pole, so AN ABSENT FLAG IS NOT EVIDENCE AND A PRESENT ONE IS NOT PROOF.
+  Also measured: protection IS off out of reset except the DSU, which
+  alone comes up protected (STATUSB reset 0x2, table 12-3's one Y); and
+  STATUSC COMES UP WITH BIT 25 SET - PERID 89, outside 11.7.12's drawing
+  AND outside the header's own PAC_STATUSC_Msk, past ID_PERIPH_MAX 87 -
+  which answers WRCTRL like any other protection bit, so this device
+  protects something at reset that no document names. Erratum 1.13.2
+  CONFIRMED WITH A CONTROL (the same illegal access flags on the MCLK and
+  raises nothing on the PORT) and erratum 1.13.3 CONFIRMED with controls
+  both sides (the same DIRTGL write lands through the IOBUS unflagged and
+  is dropped and flagged through the APB) - and the IOBUS window turns
+  out NOT to be a plain mirror: DIR and OUT read through it, IN and CTRL
+  read zero. Erratum 1.23.1 names MCLK.CTRLA, a register THIS FAMILY DOES
+  NOT IMPLEMENT (ch. 17 opens at INTENCLR, the header reserves offset
+  0x00) - and a read of that unimplemented byte DOES raise the illegal-
+  access error 11.5.2.4 promises. THE LOCK: 11.5.2.5's "only a hardware
+  reset" and table 18-1's silence left it open, and a SYSTEM reset AND a
+  watchdog reset each CLEAR IT - a PAC lock lasts until the next reset of
+  any kind, and letter c is re-runnable because of it. DSU: the die
+  serial and DID match tools/bench_boards.py's record for board C (that
+  manifest comment's "recorded, NOT yet checked" now names the letter
+  that checks it); the CRC32 is the standard reflected-0xEDB88320 answer
+  over flash and SRAM, chains through a raw seed, refuses a bus error,
+  and costs 6 cycles per word against 387 for a bitwise software
+  reference (55x); LENGTH is written as a BYTE count and is a working
+  COUNTER the engine consumes to zero, which 13.14.5 never says; MBIST
+  costs 1165 cycles per word and provably destroys its buffer; and the
+  CoreSight ROM's two entries resolve to 0xE00FF000 (the M0+'s own table)
+  and 0x41008000 - THE MTB, so ch. 13 and 10.3 are one debug system -
+  which also settles 13.14.10's two self-contradicting EPRES sentences at
+  "1 means present". DIVAS against gcc's own division as reference:
+  0xFFFFFFFF/7 costs 332 cycles in software and 19.5 through the engine
+  (17x), 683 against 22.6 with the remainder (30x); THE IOBUS IS NOT THE
+  FASTER PATH (its mandatory BUSY poll costs more than the AHB's
+  wait-state stall); DLZ=0 gives 8.3 cycles for a small dividend against
+  20.8 full width and DLZ=1 gives 20.8 for both; a square root costs
+  20.8; and 14.5.8's unnamed "error" for an operand write while busy IS
+  PAC.INTFLAGAHB.DIVAS and nothing else. ADOPTING DIVAS AS THE
+  TOOLCHAIN'S DIVISION IS NAMED OPEN AND NOT TAKEN (re-entrancy, clocking
+  and 14.5.2's "will not operate in any sleep mode" make it a
+  whole-image decision). MTB: a self-hosted trace with NO PROBE ATTACHED
+  - 12 packets from a known chain, all three functions' linked addresses
+  in the decoded destinations; bit 0 of the DESTINATION word marks the
+  START OF TRACE (one packet of twelve, the first) and the source word's
+  is set on none; WRAP and AUTOSTOP both exact; THE DEVICE HEADER'S
+  EVENT-USER NUMBERS ARE RIGHT AND TABLE 12-3'S ARE NOT (only user 45
+  starts a trace and 46 stops one, 44 does nothing); and neither AUTOHALT
+  nor HALTREQ stops a core whose DHCSR.C_DEBUGEN bench.py has cleared.
+  SUITE test_samc_debug z 117/117 five times after the last fix (one cold, four warm - the runs before it caught a flaky DLZ verdict in letter h, an ordering comparison between two measurements that are EQUAL), plus
+  c 11/11 (two real resets) and k 2/2 outside z; family fixtures
+  pac/dsu/divas/mtb + SEVEN negatives; the reserve grew five probes
+  (pac/dsu/mtb ids, the bridge count, the two MTB event users). Docs
+  pac.md / dsu.md / divas.md / mtb.md NEW PROVISIONAL; the board-C
+  comment in tools/bench_boards.py updated (comment only). JUDGMENT CALLS
+  QUEUED - see memory samc-session-2026-08-29-debug.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -2608,6 +2691,38 @@ brio/                    the framework, four strata:
                            LUTCTRLn.ENABLE for the store, because the two
                            enable gates are an AND (measured) and a write
                            into an enabled LUT is dropped in silence
+    pac.hpp                PAC: `Pac`, MECHANISM AND NO CONCEPT - set/clear/
+                           lock a peripheral's write protection by the id it
+                           publishes (the keyed WORD-WISE WRCTRL store,
+                           PERID = 32 x bridge + index), the per-bridge
+                           status, the four read-and-clear flag banks, the
+                           ACCERR event and the shared IRQ 0. No RAII guard
+                           and no util contract: 11.5.2.6's balance rule
+                           makes nesting a design decision, and erratum
+                           1.13.3 means "protected" is not uniform
+    dsu.hpp                DSU: `Dsu` - DID decoded (the fields the errata
+                           matrix is keyed by), the hardware CRC32 over
+                           anything the bus matrix reaches (chainable through
+                           crc32_raw), MBIST WHICH DESTROYS WHAT IT TESTS,
+                           the CoreSight ROM and the two debug channels. It
+                           is the one peripheral that comes up PAC-protected,
+                           so init() clears that through pac.hpp and
+                           release() puts it back. Chip erase deliberately
+                           absent
+    divas.hpp              DIVAS: `Divas` - 32-bit signed/unsigned division
+                           and unsigned square root, on TWO buses (the AHB,
+                           whose RESULT read stalls, and the IOBUS alias at
+                           0x60000200 that only the DATA SHEET names, whose
+                           caller must poll). The operation starts on the
+                           operand write; divide-by-zero does not trap
+    mtb.hpp                MTB: `Mtb` - the Cortex-M0+ Micro Trace Buffer
+                           pointed at a buffer of the program's own, so the
+                           CPU reads its OWN hardware backtrace with no
+                           debugger; MASTER.MASK as log2(bytes) - 4, POSITION
+                           and FLOW as offsets from BASE, `MtbPacket` with
+                           bit 0 of each word left an unnamed flag (10.3
+                           defers to a TRM this project has not got, so the
+                           device header is the only local authority)
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

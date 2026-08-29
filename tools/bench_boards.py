@@ -119,10 +119,14 @@ BOARDS = {
         # read over SWD from the board at this position, together with DSU
         # DID 0x11010500 (DEVSEL 0x00 = C21J18A, revision 5 = rev F).
         #
-        # It is recorded, NOT yet checked: reading it needs a samc/dsu.hpp
-        # (or a plain memory read) that no app performs, so unlike the AVR
-        # "id" this string is not compared against any banner. The SWD
-        # readback is the way to verify it by hand:
+        # IT IS CHECKED ON THE BOARD: test_samc_debug letter d reads the DID
+        # through samc/dsu.hpp and the four serial words through
+        # samc/nvm.hpp's DeviceSerial, prints them in exactly the format
+        # below, and verdicts them against these two constants. bench.py
+        # still does not compare them itself (unlike the AVR "id", which a
+        # banner carries), so this remains a by-hand check - just one that
+        # now has a suite letter instead of an openocd incantation. The SWD
+        # readback stays the fallback for a board with no firmware on it:
         #   openocd -f interface/cmsis-dap.cfg -c "adapter serial <s>" \
         #           -f target/at91samdXX.cfg \
         #           -c "init" -c "reset halt" -c "mdw 0x0080A00C" \

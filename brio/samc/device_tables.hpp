@@ -60,7 +60,8 @@
  *    CCL1/IN[3].
  *
  * Consumers: samc/eic.hpp, samc/tc.hpp, samc/tcc.hpp, samc/ac.hpp,
- * samc/adc.hpp, samc/dac.hpp, samc/sdadc.hpp, samc/ccl.hpp. Each declares the MEANING of its numbers
+ * samc/adc.hpp, samc/dac.hpp, samc/sdadc.hpp, samc/ccl.hpp,
+ * samc/pac.hpp, samc/dsu.hpp, samc/mtb.hpp. Each declares the MEANING of its numbers
  * (what an EXTINT line is, what a WO pad does); this file only says
  * which numbers exist on this device.
  */
@@ -1937,5 +1938,92 @@ template <char L, uint8_t N>
 constexpr bool ccl_in_exists = ccl_in_line(L, N) >= 0;
 template <char L, uint8_t N>
 constexpr bool ccl_out_exists = ccl_out_lut(L, N) >= 0;
+
+// =============================================================================
+// The debug-class blocks: PAC, DSU, MTB
+// =============================================================================
+//
+// No pads, no instances, no per-package variation - so the only data
+// these three need out of the device header is their PAC peripheral
+// identifier and, for the PAC itself, how many peripheral bridges this
+// device's register map actually has. DIVAS is absent from this section
+// on purpose: it is an AHB client, not a peripheral on a bridge, so it
+// has no `ID_` macro and no write protection at all.
+
+/// PAC.WRCTRL.PERID for the PAC itself (it can protect its own
+/// registers, which is why 11.4.8 has to except WRCTRL and the flag
+/// banks by name).
+constexpr uint16_t pac_pac_id() {
+#ifdef ID_PAC
+    return ID_PAC;
+#else
+    return 0xFFFF;
+#endif
+}
+
+constexpr uint16_t dsu_pac_id() {
+#ifdef ID_DSU
+    return ID_DSU;
+#else
+    return 0xFFFF;
+#endif
+}
+
+/// The MTB's PAC identifier, AND A GAP THE DATA SHEET LEAVES: table 12-3
+/// prints no PAC index for the MTB row at all, while the device header
+/// gives ID_MTB and PAC.STATUSB/INTFLAGB both carry an MTB bit. The
+/// header is the authority and it is the only document that states this
+/// number.
+constexpr uint16_t mtb_pac_id() {
+#ifdef ID_MTB
+    return ID_MTB;
+#else
+    return 0xFFFF;
+#endif
+}
+
+/// How many peripheral bridges the PAC's register map covers. The E/G/J
+/// register map stops at bridge C; the C21N adds a bridge D (STATUSD /
+/// INTFLAGD at 0x40 / 0x20), whose header is not vendored here.
+constexpr uint8_t pac_bridge_count() {
+#ifdef PAC_STATUSD_Msk
+    return 4;
+#else
+    return 3;
+#endif
+}
+
+/// EVSYS generator: the PAC's access-error event (table 12-3's "86:
+/// ACCERR"). evsys.hpp owns the fabric, each peripheral its own codes.
+constexpr uint8_t pac_accerr_generator() {
+#ifdef EVENT_ID_GEN_PAC_ACCERR
+    return EVENT_ID_GEN_PAC_ACCERR;
+#else
+    return 0;
+#endif
+}
+
+/// EVSYS users: the MTB's trace start and stop inputs.
+///
+/// THE TWO DOCUMENTS DISAGREE ON THE NUMBER. Table 12-3 prints "44:
+/// START / 45: STOP"; the device header says 45 and 46, leaving 44
+/// unassigned. Both cannot be right and the difference is one
+/// connection, so the bench decides - see docs/samc/mtb.md. These
+/// probes hand back the HEADER's numbers, per the house rule that the
+/// header wins where both documents speak.
+constexpr uint8_t mtb_start_user() {
+#ifdef EVENT_ID_USER_MTB_START
+    return EVENT_ID_USER_MTB_START;
+#else
+    return 0xFF;
+#endif
+}
+constexpr uint8_t mtb_stop_user() {
+#ifdef EVENT_ID_USER_MTB_STOP
+    return EVENT_ID_USER_MTB_STOP;
+#else
+    return 0xFF;
+#endif
+}
 
 } // namespace brio
