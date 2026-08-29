@@ -388,6 +388,19 @@ flags together. 24.6.2.3's note is exact.
   unevenly inside the 240-period correction cycle. The number is
   printed by the suite and not verdicted.
 
+
+- **As a wake source** (the transversal sleep pass -
+  [platform.md](platform.md)): all three of this chapter's interrupts
+  wake the device from STANDBY and none needs a RUNSTDBY bit, this
+  block having none and riding OSC32KCTRL rather than a generator. A
+  COMP0 compare 1000 ticks ahead woke it in 30177 us against 30312 us
+  asked, four of four; a periodic interrupt woke it inside one of its
+  own periods (7679 us against 7744 us measured awake); and a mode-2
+  ALARM woke it where the calendar said, to the resolution the calendar
+  can be read at. Its periodic outputs are also what paces every
+  sleepwalking chain in this stratum, over an asynchronous EVSYS
+  channel whose CHANNELn.RUNSTDBY is set.
+
 ## Not covered yet
 
 Driver gaps:
@@ -397,9 +410,9 @@ Driver gaps:
 - **The RTC is not the kernel timebase and this pass did not make it
   one.** `samc/ticker.hpp` stays on SysTick and says why; the RTC is
   what the power pass will want when SysTick stops in standby.
-- **Sleep and wake**, in every form: RTC interrupts as wake sources,
-  SleepWalking, and erratum 1.8.7's caveat that a DMA write to
-  RTC.COUNT during standby may not land. The power pass owns them.
+- **Erratum 1.8.7's caveat** - that a DMA write to RTC.COUNT during
+  standby SleepWalking may not land - is stated and unexercised: it
+  needs the DMAC across a sleep, which is [dmac.md](dmac.md)'s own gap.
 - **PERD** (24.6.5's "Periodic Daily" event) is not offered, because no
   register in the chapter and no symbol in the device header
   implements it.

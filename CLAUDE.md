@@ -1684,6 +1684,86 @@ gets its dated home in `docs/design/` when taken.
   host all green. Deliberately absent and stated in the design doc: a
   playback AO, one-shot burst vocabulary, gap policy, the AVR
   implementation (born with its first user).
+  **THE TRANSVERSAL SLEEP/SLEEPWALKING PASS DONE 2026-08-29 (Opus
+  delegation, REVIEWED BY FABLE and COMMITTED same day, all six
+  judgment calls accepted plus one supervisor comment alignment;
+  memory samc-session-2026-08-29-sleepwalk).** The gap FIFTEEN chapter
+  docs deferred to "the power pass": what every peripheral does while
+  the CPU is stopped (the PLATFORM half stays test_samc_sleep's). NEW
+  SUITE test_samc_sleepwalk z 76/76 (agent x5 + Fable x3, cold runs
+  both hands; ~6 s) + letter p 5/5 outside z. THE INSTRUMENT IS ITSELF
+  A FINDING: a pad cannot be pull-walked by a sleeping CPU, so the
+  stimulus is HARDWARE - TC on OSCULP32K -> combinational CCL LUT ->
+  asynchronous EVSYS -> PORT EVENT INPUT with EVACT=OUT, the one
+  action 28.6.4 says survives a standby (28.6.5 separated and
+  measured: OUT bypasses the OUT register and moves the pad even under
+  PMUXEN; TGL writes the OUT bit - the pull's direction - at half rate
+  awake and DEAD in standby, which doubles as the suite's
+  APB-is-really-down control). samc/pin.hpp GREW the PORT event-user
+  surface port.md had declared a gap (PortEventAction/Config,
+  event_user published per the EVSYS ruling, evsys.hpp NOT included -
+  table 29-3's async-only rule a stated obligation, the ac.hpp SOC
+  precedent); 2 negatives; all 28 pre-existing images BYTE-IDENTICAL
+  (re-proven by Fable's worktree gate). THE HEADLINES: (1) ERRATUM
+  1.11.6 REFUTED AT REV F against a matrix that marks every revision -
+  an ASYNCHRONOUS EXTINT detected 100 edges of 100 inside ONE standby
+  (counted by its own event generator into a RUNSTDBY TC, interrupt
+  disarmed so the window was one sleep; kernel tick frozen and the TGL
+  row dead as controls) and with the interrupt armed all 100 WOKE the
+  device; eic.hpp's comments now carry claim AND measurement (Fable's
+  alignment - the sampled fallback stays documented for silicon where
+  it bites). (2) THE FDPLL DOES NOT STOP IN STANDBY for a peripheral
+  that asks, RUNSTDBY clear or set - count across the sleep = count
+  awake tick for tick (1414 vs 1413), platform.md's open question
+  answered OPPOSITE to its guess; CLKRDY/LOCK read set at wake either
+  way so neither is evidence. (3) CHANNELn.RUNSTDBY GATES THE
+  ASYNCHRONOUS EVSYS PATH TOO (32 crossings with, 0 without) - table
+  29-1's three SYNC rows invite the wrong reading, and this was the
+  bug that stalled the suite's first version. (4) 19.5.2's "can only
+  be re-enabled by a system reset" is about the clock INSIDE the
+  block, not MCLK's mask: Pm::bus_clock(false) comes back (letter p,
+  outside z because the chapter's claim could become true on other
+  silicon). TABLES ENTERED: ADC 38-4 with a REAL SleepWalking chain
+  (RTC periodic event, async channel per 1.4.4, 31/32 conversions in a
+  30 ms standby, no CPU; erratum 1.4.5 DOES NOT REPRODUCE), SDADC 39-1
+  (89/87/1; 1.8.7 sidestepped by free-running, its own escape), TSENS
+  43-1 (4/4/0, and THE WITNESS HAD TO BE WINMON - TSENS publishes no
+  result-ready generator), TCC 36.6.6 (16/15/0), CCL 37.6.4 EXACT BOTH
+  HALVES (combinational 100/100 with GCLK_CCL not running; filtered/
+  synched 1 = the wake's seam, 100 with RUNSTDBY), AC 40.6.14 both
+  sequences (continuous RUNSTDBY wakes 8/8 at ~14 ms vs a 91 ms
+  backstop; RUNSTDBY clear wakes NOTHING even with GCLK_AC force-fed -
+  the bit gates the COMPARATOR, not its clock; one stray wake in 32
+  recorded, not rounded away; single-shot SleepWalking via RTC->SOC0
+  runs), DAC 41.6.6 (pad holds 2030/4096 across standby; 1.9.2
+  reproduces WITH control). MORE: EXTINT wakes in 7 us; the EIC has NO
+  RUNSTDBY bit and detects sampled edges in standby even on a
+  generator with RUNSTDBY CLEAR (its clock request is honoured, not
+  what table 19-4 predicts); a peripheral's own RUNSTDBY carries the
+  whole chain (OSC48M/OSC32K/DPLL measured, ONDEMAND changes nothing
+  when something asks); FREQM finishes a measurement ASLEEP and DONE
+  wakes (reference on OSCULP32K, the meter's roles inverted); RTC
+  compare/periodic/alarm all wake with no RUNSTDBY anywhere. NOT
+  STAGEABLE, said so: BODVDD as wake - INTFLAG.BODVDDDET is a
+  TRANSITION not a level (a standing condition cannot re-fire, not
+  even to a sampling detector), so a detection needs a supply
+  crossing; the unrequested-clock question (every witness is itself a
+  request); sleep current (no meter). ERRATA: 1.9.2 live+reproduced;
+  1.11.6 and 1.4.5 refuted; 1.25.2 unreachable by construction (no
+  ONDEMAND verb); 1.3.1 declined twice over (rev B AND a consumption
+  claim); 1.4.4/1.8.13/1.2.3 applied as code. METROLOGY: an unbound
+  vector is a WATCHDOG RESET mid-letter (AC_Handler missing - the
+  banner saying WDT with the watchdog "disabled" was the clue);
+  APBCMASK resets to ZERO here (Evsys::bus_clock(true) is not
+  optional); a free-running stimulus makes a wake test a coin toss
+  (retrigger a slow wave right before each sleep, judge
+  nothing-woke-it legs by the SLEEP'S LENGTH never by interrupt
+  counts); the backstop belongs in the sleep primitive (an RTC compare
+  in standby_until_wake, the watchdog only where the compare register
+  IS the alarm register). Canaries sleep z 87, eic z 85, ccl z 141
+  (both hands); check_samc/check_family/host green. Docs: platform.md
+  gained "Sleep, peripheral by peripheral"; port.md + 14 chapter docs
+  each lost exactly the gap this closed; bench.md row + firmware line.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and

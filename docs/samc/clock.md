@@ -299,6 +299,35 @@ measurand.
   GENEN, CPUDIV = 1, RWS = 2, and the SERCOM baud generator
   programmed from `Clock::hz` produces a byte-exact 115200 console.
 
+## Sleep
+
+Measured in the transversal sleep pass; the shape all three roots share
+is in [platform.md](platform.md), "Sleep, peripheral by peripheral".
+
+- **A peripheral's own RUNSTDBY is the whole clock request, and it
+  carries the chain.** A TC with RUNSTDBY set counted 1410 ticks of an
+  OSC48M generator across a standby against 1409 awake, with the
+  GENERATOR's RUNSTDBY clear throughout - and 6 with the counter's own
+  bit cleared. Setting OSC48MCTRL.ONDEMAND changed nothing (1413): a
+  request is a request. OSC32K behaves identically (1011 across a
+  standby against 1009 awake, with OSC32K.RUNSTDBY set and with it
+  clear).
+- **THE FDPLL DOES NOT STOP AND RELOCK.** With DPLLCTRLA.RUNSTDBY
+  CLEAR, a TC on a DPLL-fed generator counted 1414 across a standby
+  against 1413 awake - tick for tick, where a loop that had stopped
+  would have lost the whole 30 ms window and paid a relock on top.
+  Setting RUNSTDBY changes nothing measurable when something is already
+  asking. CLKRDY and LOCK both read SET at that wake either way, so
+  neither is evidence: [platform.md](platform.md) says the same of
+  XOSCRDY.
+- **Erratum 1.25.2** ("the FDPLL96M On Demand mode is not functional in
+  Standby Sleep mode", every revision) is UNREACHABLE BY CONSTRUCTION:
+  this driver never sets DPLLCTRLA.ONDEMAND and offers no verb that
+  could, which is asserted rather than provoked.
+- **Erratum 1.3.1** (the FDPLL running in standby even unrequested) is
+  revision B and is a CONSUMPTION claim; both halves put it out of this
+  bench's reach - see "Not covered yet".
+
 ## Not covered yet
 
 Driver gaps:
@@ -326,11 +355,14 @@ Driver gaps:
   published, but no letter routes it to a user.
 - OSC48M's CAL48M calibration register is not exposed. Erratum 1.8.12
   (the accuracy that needs it) is revisions B..E, not this silicon.
-- Sleep behaviour of all three oscillators - RUNSTDBY, ONDEMAND, the
-  DPLL's erratum 1.25.2 - belongs to the power pass.
+- Whether any of these clocks runs in standby with NOTHING requesting
+  it. The measurements below all use a peripheral clocked from the
+  clock under test, and that peripheral IS the request; the
+  unrequested case has no witness on this board, which is also why
+  erratum 1.3.1 stays unjudged.
 
 Implemented but not bench-verified:
-- `GclkChannel::lock`, `Osc48m::run_standby`, `Osc48m::startup`,
+- `GclkChannel::lock`, `Osc48m::startup`,
   `Gclk`'s IDC and its output to a GCLK_IO pad.
 - Rates other than 48 MHz for the main clock (the arithmetic is
   compile-checked; only the undivided rate has run).

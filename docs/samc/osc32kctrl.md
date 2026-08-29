@@ -186,8 +186,10 @@ Implemented but not bench-verified:
   exercised on this board, which has no 32 kHz crystal. Its startup
   codes, the external-clock mode (XTALEN clear), the failure detector
   and `switch_back()` are all in that state.
-- `run_standby` and `on_demand` on either internal oscillator: set and
-  read back, never observed across a sleep - the power pass owns that.
+- `on_demand` on either internal oscillator: set and read back, never
+  observed to gate anything. (`run_standby` on OSC32K IS observed
+  across a standby, both ways - [clock.md](clock.md) records what a
+  peripheral's request does with and without it.)
 - `lock()` on any of the three: writing it would freeze the
   configuration until someone unplugged the board, so no test sets it.
 - Operation on the E and G variants: compile-checked only. Nothing in

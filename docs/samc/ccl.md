@@ -394,6 +394,16 @@ shots per row, minimum of three per step.
   pair buys fraction + 0, and a bare LUT buys no synchronization at all
   for eight CPU cycles.
 
+**37.6.4 is exact, both halves.** With a timer's square wave through a
+LUT and the LUT's own output event counted by a timer that runs in
+standby: a COMBINATIONAL LUT decoded 100 of 100 offered edges through a
+standby with GCLK_CCL not running at all, while the same LUT with
+FILTSEL = SYNCH or FILTSEL = FILTER produced 1 - the wake's own seam -
+and 100 again once CTRL.RUNSTDBY was set. The chain and the EVSYS bit
+it depends on are in [platform.md](platform.md), "Sleep, peripheral by
+peripheral"; this LUT is also the source of the standby pad stimulus
+every other sleep measurement in that section uses.
+
 ## Not covered yet
 
 Driver gaps (not built):
@@ -409,11 +419,11 @@ Driver gaps (not built):
   ASYNCEVENT's five-step procedure in 37.6.2.4 is unwritten.
 
 Implemented but not bench-verified:
-- **Standby.** CTRL.RUNSTDBY is written and read back and its
-  enable-protection is proven, but no LUT has been watched across a
-  sleep, so 37.6.4's promise - a combinational LUT keeps working while a
-  filtered, edged or sequential one has its output **forced to zero** -
-  is datasheet-trusted. It belongs with the power pass.
+- **The EDGE DETECTOR and the SEQUENTIAL sub-modules across a
+  standby.** 37.6.4 names three things it forces to zero and the sleep
+  pass measured two of them (the synchronizer and the filter - see
+  "Bench findings"); an edged LUT and a flip-flop pair in a standby are
+  the same sentence and are not separately witnessed.
 - **The E and G variants**, compile-only: the pad map is asserted per
   variant out of the device header (`test/family_samc/ccl.cpp`) and two
   negatives refuse the pads those packages lack, but no such board

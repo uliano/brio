@@ -58,3 +58,27 @@ void port_resource() {
     PA::function_mask(0x00C0'0000u, PinFunction::c, {.input_enable = true});
     static_assert(Port<'B'>::group == 1);
 }
+
+void port_event_user() {
+    using PA = Port<'A'>;
+    static_assert(PA::event_input_count == 4);
+    static_assert(PA::event_user(0) == 1);
+    static_assert(PA::event_user(3) == 4);
+    // Both groups reach the same four EVSYS users; which group acts is
+    // decided by which group's EVCTRL enables the input.
+    static_assert(Port<'B'>::event_user(0) == PA::event_user(0));
+
+    static_assert(port_event_config_valid(PortEventConfig{.pin = 31}));
+    static_assert(!port_event_config_valid(PortEventConfig{.pin = 32}));
+
+    (void)PA::configure_event(0, PortEventConfig{.pin = 16,
+                                                 .action = PortEventAction::out,
+                                                 .enable = true});
+    (void)PA::configure_event<1, PortEventConfig{.pin = 9,
+                                                 .action = PortEventAction::toggle,
+                                                 .enable = true}>();
+    (void)PA::configure_event(4, PortEventConfig{});   // no such input: false
+    (void)PA::event_config(0);
+    (void)PA::evctrl();
+    PA::release_events();
+}

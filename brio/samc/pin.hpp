@@ -30,7 +30,11 @@
  *    through PMUX function A. Hence no PinSense vocabulary and no
  *    take_flags() in this file: an EIC driver will own them, and
  *    inventing half of one here would be a promise with no code behind
- *    it. Port events (EVCTRL) are the same story.
+ *    it. What PORT does have is the OPPOSITE direction: it is an event
+ *    USER (EVCTRL, 28.6.4), four inputs per group that set, clear,
+ *    toggle or FOLLOW one pin each - and the follow ("out") action is
+ *    the only one that survives a standby, which is what makes a pad
+ *    move while the CPU is stopped.
  *
  * ONE PACKAGE FACT, EXHAUSTIVELY. This family has exactly TWO port
  * groups, A and B, on every variant (E/G/J alike): the device header's
@@ -108,6 +112,40 @@ enum class PinFunction : uint8_t {
     i = PORT_PMUX_PMUXE_I_Val,
 };
 
+// ---- the PORT as an event USER (28.6.4, EVCTRL 28.8.12) ---------------------
+
+/// EVCTRL.EVACTm: what an incoming event does to the pin it names.
+///
+/// `out` is the one action with NO clock in its path - 28.6.4 says the
+/// output event "is sent to the pin without any internal latency",
+/// where set/clear/toggle "will be executed up to three clock cycles
+/// after a rising edge" - and it is therefore the ONLY action the same
+/// section says survives a standby: "In Standby mode, only the Out
+/// action is possible, and the Set, Clear, and Toggle actions are not
+/// available."
+enum class PortEventAction : uint8_t {
+    out = PORT_EVCTRL_EVACT0_OUT_Val,      ///< the pin FOLLOWS the event level
+    set = PORT_EVCTRL_EVACT0_SET_Val,      ///< set OUT on a rising event edge
+    clear = PORT_EVCTRL_EVACT0_CLR_Val,    ///< clear OUT on a rising event edge
+    toggle = PORT_EVCTRL_EVACT0_TGL_Val,   ///< toggle OUT on a rising event edge
+};
+
+/// One of the four event inputs of one PORT group: which pin of the
+/// group it addresses (PIDm), what it does (EVACTm), and whether it is
+/// listening at all (PORTEIm). Each input addresses exactly one pin;
+/// one pin may be addressed by up to four inputs, and table 28-3 is the
+/// priority when several act at once.
+struct PortEventConfig {
+    uint8_t pin = 0;                                 ///< PIDm, 0..31 within the group
+    PortEventAction action = PortEventAction::out;   ///< EVACTm
+    bool enable = false;                             ///< PORTEIm
+};
+
+/// PID is five bits, so only the pin number can be out of range.
+constexpr bool port_event_config_valid(const PortEventConfig& c) {
+    return c.pin < 32u;
+}
+
 /// The whole PINCFG as one value. PMUXEN is NOT here: it is decided by
 /// WHICH verb is called (configure() gives the pad to PORT, function()
 /// hands it to a peripheral), never by a flag a caller could set
@@ -167,6 +205,75 @@ struct Port {
         write_config(pins, pin_cfg_byte(cfg, true), static_cast<uint8_t>(fn), true);
         apply_pull(pins, cfg.pull);
     }
+
+    // ---- the group as an event USER (28.6.4) --------------------------------
+    //
+    // Four inputs per group, each addressing one pin. THE EVSYS USER
+    // INDICES ARE PUBLISHED HERE and the wiring is the caller's, per the
+    // rule samc/evsys.hpp states: that driver owns the fabric, every
+    // peripheral owns its own vocabulary. Table 29-3 marks all four of
+    // these users ASYNCHRONOUS PATH ONLY - an obligation on the caller's
+    // EventChannelConfig, which this file cannot see and does not
+    // pretend to check.
+
+    static constexpr uint8_t event_input_count = PORT_EV_NUM;
+
+    /// The EVSYS user index of event input `m` of THIS group. The four
+    /// PORT users are a property of the peripheral and not of the group:
+    /// the header declares exactly four, so both groups' EVCTRL
+    /// registers are reached through the same four users, and which
+    /// group a user acts on is decided by which group's EVCTRL has
+    /// PORTEIm set.
+    static constexpr uint8_t event_user(uint8_t m) {
+        return static_cast<uint8_t>(EVENT_ID_USER_PORT_EV_0 + m);
+    }
+
+    static uint32_t evctrl() { return regs().PORT_EVCTRL; }
+
+    /// Read back input `m`.
+    static PortEventConfig event_config(uint8_t m) {
+        if (m >= event_input_count) {
+            return {};
+        }
+        const uint32_t shift = static_cast<uint32_t>(m) * 8u;
+        const uint32_t field = (evctrl() >> shift) & 0xFFu;
+        return PortEventConfig{
+            .pin = static_cast<uint8_t>(field & 0x1Fu),
+            .action = static_cast<PortEventAction>((field >> 5) & 0x3u),
+            .enable = (field & 0x80u) != 0u,
+        };
+    }
+
+    /// Write input `m`, leaving the other three alone. False - and
+    /// nothing written - for an input index or a pin number outside the
+    /// register.
+    static bool configure_event(uint8_t m, const PortEventConfig& c) {
+        if (m >= event_input_count || !port_event_config_valid(c)) {
+            return false;
+        }
+        const uint32_t shift = static_cast<uint32_t>(m) * 8u;
+        const uint32_t field = static_cast<uint32_t>(c.pin) |
+                               (static_cast<uint32_t>(c.action) << 5) |
+                               (c.enable ? 0x80u : 0u);
+        regs().PORT_EVCTRL =
+            (evctrl() & ~(0xFFu << shift)) | (field << shift);
+        return true;
+    }
+
+    /// The compile-time twin, so a pin number outside the group is a
+    /// compile error rather than a false at run time.
+    template <uint8_t m, PortEventConfig c>
+    static bool configure_event() {
+        static_assert(m < event_input_count,
+                      "brio Port: this family has four PORT event inputs per group "
+                      "(EVCTRL, 28.8.12)");
+        static_assert(port_event_config_valid(c),
+                      "brio Port: EVCTRL.PIDm is five bits - a PORT group has 32 pins");
+        return configure_event(m, c);
+    }
+
+    /// Stop listening on all four inputs of this group.
+    static void release_events() { regs().PORT_EVCTRL = 0; }
 
 private:
     /// The pull direction lives in OUT, so it is written only when a

@@ -170,6 +170,17 @@ wired and nothing forced.
   letter that moves it, so `z` is re-runnable in one power-on and the
   board is left protected exactly as it was found.
 
+**INTFLAG.BODVDDDET IS A TRANSITION AND NOT A LEVEL**, and that is why
+this block could not be made a standby wake source here. With the level
+set to 63 - above this board's ~5.1 V - STATUS.BODVDDDET reads 1 and
+stays 1, and the detector reports READY; but clearing the flag under
+that standing condition does NOT bring it back, awake or across a
+standby, and NOT EVEN TO A SAMPLING DETECTOR configured to sample in
+standby at the fastest prescaler. So a detection is a crossing, and
+nothing on this board can make one with the CPU stopped. ACTION = none
+throughout, so nothing was ever forced, and the board's boot BODVDD
+word is restored bit for bit.
+
 ## Not covered yet
 
 Driver gaps:
@@ -178,10 +189,16 @@ Driver gaps:
   that needs a supply this program does not control. The BODVDD
   interrupt has an arm/disarm surface and an ISR body it shares with
   the block, and no letter has ever seen it fire.
-- **Standby**, for all three blocks: `BodVddConfig::run_standby` and
-  `sampled_in_standby`, `Vreg::run_standby` (erratum 1.8.14's
-  workaround), `VrefConfig::run_standby` and `on_demand`. The power
-  pass owns them.
+- **The BODVDD as a standby WAKE SOURCE**, and with it any effect of
+  `run_standby` / `sampled_in_standby`: a detection is a SUPPLY
+  CROSSING and nothing on this board can make one while the CPU is
+  stopped. What that costs is measured rather than assumed - see "Bench
+  findings" - and forcing a brown-out stays out of scope.
+- **`Vreg::run_standby`** (erratum 1.8.14's workaround) and
+  `VrefConfig::run_standby` / `on_demand` (table 22-1): all written and
+  read back, none observed across a sleep. The regulator's own bit is
+  exercised for a different purpose in [platform.md](platform.md),
+  where it moved nothing measurable.
 - **BODCORE is read-only by design** and will stay so: its calibration
   is a production value the user row marks DO NOT CHANGE.
 - No level-to-millivolt conversion is offered, because the datasheet's

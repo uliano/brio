@@ -437,6 +437,12 @@ read of finding 2 looks exactly like it.
 and does nothing: CTRLB.LUPD is still 0 after nine overflows, which is
 the one thing 36.8.1 says ALOCK should change.
 
+**36.6.6, which is one sentence and one bit.** TCC0 on OSCULP32K, its
+overflow published as an event and counted by a timer that runs in
+standby, made 16 overflows in a 30 ms window awake, 15 in the same
+window spent in STANDBY with CTRLA.RUNSTDBY set, and 0 with it clear.
+See [platform.md](platform.md), "Sleep, peripheral by peripheral".
+
 ## Not covered yet
 
 Driver gaps (deliberate):
@@ -445,8 +451,9 @@ Driver gaps (deliberate):
   (`dma_trigger_overflow`, `dma_trigger_match`) and nothing wires them to
   a `DmaChannel`; the circular-buffer DMA choreography of 36.6.5.1 waits
   for its first user. CTRLA.DMAOS is a configuration field only.
-- **Sleep.** `run_standby` is a field; 36.6.6 has no owner until the
-  power pass.
+- **The TCC as a WAKE source.** 36.6.6's counting half is measured (see
+  "Bench findings"); no TCC interrupt has ever left a sleep, and the
+  fault inputs in a standby are untouched.
 - **The debug fault.** `fault_on_debug()` sets DBGCTRL.FDDBD and
   `debug_fault_state()` reads STATUS.DFS, but staging a halted debugger
   is not something a console suite can do.

@@ -96,16 +96,18 @@
  *  - 1.11.5 Edge Detection (SYNCBUSY.ENABLE released three EIC clocks
  *    before edge detection actually works): the N FAMILY ONLY. This is
  *    the item most likely to be applied by mistake on this part.
- *  - 1.11.6 Edge Detection in Standby: EVERY REVISION OF E/G/J, so LIVE
- *    HERE. With ASYNCH set and the device in Standby only the FIRST
- *    edge is detected; the rest are ignored until the device wakes.
- *    Microchip's workaround for this family is blunt - "asynchronous
- *    edge detection doesn't work, instead use the synchronous edge
- *    detection" - and the cheap clock for that is CLK_ULP32K. This
- *    driver cannot enforce it, because it does not know whether the
- *    application ever sleeps: `asynchronous` is legal and useful while
- *    the device is awake, and `EicLineConfig::asynchronous` carries the
- *    obligation in its own comment. The power pass owns the rest.
+ *  - 1.11.6 Edge Detection in Standby: the matrix marks EVERY REVISION
+ *    of E/G/J ("only the first edge will be detected"), and the bench
+ *    REFUTED it at rev F (test_samc_sleepwalk letter a): an
+ *    asynchronous line detected 100 edges of 100 offered inside ONE
+ *    standby - counted by its own event generator into a RUNSTDBY
+ *    timer, with the interrupt disarmed so the window really was one
+ *    sleep - and with the interrupt armed all 100 woke the device.
+ *    The claim and the measurement are both stated because they
+ *    disagree; Microchip's prescribed fallback (synchronous detection,
+ *    CLK_ULP32K the cheap clock) remains documented on
+ *    `EicLineConfig::asynchronous` for silicon where the item does
+ *    bite. docs/samc/eic.md carries the numbers.
  *
  * NOT BUILT (docs/samc/eic.md carries the list): the debouncer
  * (DEBOUNCEN/DPRESCALER/PINSTATE - SAM C20/C21 N variants only, and the
@@ -179,13 +181,16 @@ struct EicLineConfig {
      * set directly by the pad rather than by comparing two samples, so
      * a pulse of any width is caught and no EIC clock is needed.
      *
-     * ERRATUM 1.11.6, EVERY REVISION OF THIS FAMILY: in STANDBY only
-     * the first such edge is detected and the rest are lost until the
-     * device wakes. A line that must wake the device repeatedly from
-     * standby has to use SYNCHRONOUS edge detection instead (leave this
-     * false and give the block a clock - CLK_ULP32K is the cheap one).
-     * While the device is awake this bit is the fast, clockless path
-     * and there is nothing wrong with it.
+     * ERRATUM 1.11.6 says that in STANDBY only the first such edge is
+     * detected, on every revision of this family - and the bench
+     * REFUTED it at rev F: an asynchronous line detected and woke on
+     * every one of 100 edges inside one standby (test_samc_sleepwalk
+     * letter a; the block's errata note above has the controls). The
+     * matrix's claim stands in print, so a design that must survive
+     * other silicon keeps Microchip's fallback available: SYNCHRONOUS
+     * detection (this bit false, the block clocked - CLK_ULP32K is the
+     * cheap one) detects every standby edge too, measured in the same
+     * letter. Awake, this bit is the fast, clockless path either way.
      */
     bool asynchronous = false;
 

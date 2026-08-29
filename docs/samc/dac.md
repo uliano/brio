@@ -372,6 +372,15 @@ board's 24 MHz crystal.
   when ADC1 is released again. The bench suite spends that workaround
   visibly, printing a line each time.
 
+**41.6.6 through a standby.** The DAC's own pad, read by ADC0 on PA02
+- the zero-length wire erratum 1.8.9's workaround asks for - holds 2030
+counts of 4096 at code 512 before a standby and the same 2030 after,
+with CTRLA.RUNSTDBY set. **Erratum 1.9.2 reproduces with its own
+control**: with RUNSTDBY CLEAR and DATABUF written and unconsumed,
+INTFLAG.EMPTY comes back SET from the sleep; with RUNSTDBY set, in the
+same window with the same buffer write, it does not. See
+[platform.md](platform.md), "Sleep, peripheral by peripheral".
+
 ## Not covered yet
 
 Driver gaps:
@@ -392,10 +401,9 @@ Driver gaps:
   can be observed here. 41.6.8.3's "GCLK_DAC at least four times the
   sampling rate" is stated and unenforceable - the header knows neither
   rate.
-- **Sleep beyond `CTRLA.RUNSTDBY`**: the bit is exercised as erratum
-  1.9.2's control and nothing else. 41.6.6's promise that the output
-  buffer keeps its value through a standby is not measured, and the DAC
-  has never been a wake source.
+- **The DAC as a WAKE source**: EMPTY and UNDERRUN have never driven
+  the NVIC out of a sleep. (41.6.6's promise about the output buffer IS
+  measured - see "Bench findings".)
 - **`CTRLB.LEFTADJ`** is implemented in `dac_data_word()` and
   fixture-pinned; no bench letter writes a left-adjusted value.
 - **The interrupts.** `EMPTY` and `UNDERRUN` are read, cleared and used

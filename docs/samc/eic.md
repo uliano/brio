@@ -289,6 +289,19 @@ therefore asserts only what the header and the block guarantee, prints
 what the pad does, and offers a ten-second window whose result is
 printed and not judged - a suite must not fail for want of a finger.
 
+
+- **In standby** (measured in the transversal sleep pass -
+  [platform.md](platform.md), "Sleep, peripheral by peripheral", where
+  the hardware stimulus that makes it possible is described): an EXTINT
+  wakes the device from STANDBY in 7 us; a SAMPLED line detects every
+  edge of a standby on CLK_ULP32K **and** on a GCLK_EIC whose generator
+  has RUNSTDBY clear, because this block has no RUNSTDBY bit of its own
+  to ask with and its clock request is honoured in there anyway; and
+  **ERRATUM 1.11.6 DOES NOT REPRODUCE** at revision F - an asynchronous
+  line detected 100 edges of 100 offered inside ONE standby, exactly as
+  a sampled one did, and with the interrupt armed all 100 woke the
+  device.
+
 ## Not covered yet
 
 Driver gaps (deliberate):
@@ -298,11 +311,6 @@ Driver gaps (deliberate):
   declare the registers at all, so there is nothing to gate and nothing
   to write. It is also the N family's workaround for erratum 1.11.6,
   which this family answers differently.
-- **Sleep and wake** (26.5.2, 26.6.8): an EXTINT wakes the device from
-  standby when its condition matches and its INTENSET bit is set, and
-  erratum 1.11.6 restricts *how* on this family. Both belong with
-  `util/power.hpp`'s SleepSite and the power pass; nothing here arms a
-  wake.
 - **A kernel event out of a pin.** `isr()` gives an app the mask; nothing
   in the framework yet turns an EIC line into a posted event the way
   `util/input_scanner.hpp` turns a polled pin into one.

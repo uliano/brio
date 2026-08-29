@@ -613,14 +613,24 @@ so the bit was cleared by hand to measure it.
 - **The reset values are erratum 1.18.3's own workaround**: out of a
   software reset CTRLB reads 0x2000 (SKPCNT 2) and GAINCORR reads 1.
 
+**Table 39-1, in standby.** Free-running at OSR 64 the converter made
+89 conversions in a 30 ms window awake, 87 in the same window spent in
+STANDBY with CTRLA.RUNSTDBY set, and 1 with it clear - the table's rows
+1 and 3, and the 1 is the wake's own seam. The witness is the RESRDY
+event counted by a timer, so nothing in the measurement is the CPU's.
+See [platform.md](platform.md), "Sleep, peripheral by peripheral".
+
 ## Not covered yet
 
 Driver gaps:
 
-- **Sleep.** `CTRLA.RUNSTDBY` and `CTRLA.ONDEMAND` are written and read
-  back; table 39-1's four combinations have never been entered, the
-  converter has never been a wake source, and erratum 1.8.7's
-  SleepWalking obligation on SWTRIG is stated and unexercised.
+- **The converter as a WAKE source**, and erratum 1.8.7's SleepWalking
+  obligation on SWTRIG: exercising the second needs a DMA write during
+  a standby, which is [dmac.md](dmac.md)'s own gap - the sleep
+  measurement below sidesteps it by free-running, which is the
+  erratum's own escape (a free-running converter writes no trigger).
+  `CTRLA.ONDEMAND` is written and read back and nothing distinguishes
+  it here.
 - **`ANACTRL.CTLSDADC` and `ANACTRL.BUFTEST`.** The first is
   "Debug/Characterization" with no values given, the second has no
   description at all. Both are writable through `SdadcConfig`, both were

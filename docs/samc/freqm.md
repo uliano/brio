@@ -175,15 +175,21 @@ to run a GCLK generator other than 0 on silicon.
   is exactly how the first version of this driver failed here. SWRST is
   synchronized into a clock domain those channels feed.
 
+
+- **A measurement finishes while the CPU sleeps.** This block has no
+  RUNSTDBY bit and does not need one: with the measured clock on the
+  crystal generator and the REFERENCE on OSCULP32K - the opposite of
+  every other use of the meter here, and the point, since the window is
+  REFNUM *reference* periods - a measurement started awake ran through
+  a STANDBY and its DONE interrupt was the wake. REFNUM 128 gives a
+  3878 us window; the sleep lasted 3895 us and the answer (24004949 Hz)
+  agreed with the same measurement taken awake (23987157 Hz). Details
+  in [platform.md](platform.md), "Sleep, peripheral by peripheral".
+
 ## Not covered yet
 
 Driver gaps (not built):
 
-- **The DONE interrupt as a wake source.** The flags, the enables and an
-  ISR body all exist, but nothing waits on the interrupt: every
-  measurement here is polled, which suits the short ones this serves.
-  44.5.2 makes it an idle-sleep wake source, and the power pass owns
-  that.
 - **GCLK_IO pins as measurement inputs** (44.5.1): measuring an external
   clock needs a pin claim this header does not make.
 - **A `DynamicClock` consumer.** The obvious use of this block is to

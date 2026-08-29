@@ -404,6 +404,19 @@ From `test_samc_adc`, 9 letters / 97 verdicts, 97/97 four times
   witnesses to VDD, so it is the one to use; how far the rule bites at a
   faster CLK_ADC or a higher source impedance is not measured.
 
+**Table 38-4, all four rows, with a real SleepWalking conversion.**
+An RTC periodic event on an ASYNCHRONOUS channel starts the conversions
+and the DMAC is not involved, so the CPU is out of the loop entirely:
+in a 30 ms window the converter ran 32 times awake, 31 or 32 times in a
+STANDBY with CTRLA.RUNSTDBY set (both ONDEMAND values), and once or not
+at all with it clear (both ONDEMAND values). The result read at the
+wake is the quarter of full scale the internal divider owes. **ERRATUM
+1.4.5** - "ADC SYNCBUSY.SWTRIG becomes stuck to one after wake-up from
+Standby Sleep mode", marked live on every revision - **DOES NOT
+REPRODUCE**: SYNCBUSY reads zero at every such wake. The chain and the
+EVSYS bit it depends on are in [platform.md](platform.md), "Sleep,
+peripheral by peripheral".
+
 ## Not covered yet
 
 Driver gaps:
@@ -415,9 +428,9 @@ Driver gaps:
 - **The automatic sequence** (38.6.2.12): `sequence()` writes SEQCTRL
   and `sequence_state()` reads SEQSTATUS, and nothing has ever run a
   sequence. It needs several bonded pads to be worth testing.
-- **Sleep**: `run_standby` and `on_demand` are config fields with
-  table 38-4 behind them and no owner - the ADC has never been a wake
-  source or a sleepwalking peripheral here.
+- **The ADC as a WAKE source**: RESRDY, WINMON and OVERRUN have never
+  driven the NVIC out of a sleep. Table 38-4 itself is measured (see
+  "Bench findings"); what is missing is the interrupt half.
 - **VREFA** (`Ref::vrefa`) is encodable and unreachable: the pin is PA03
   and nothing on this board drives it inside table 45-30's range. Needs
   a wire.

@@ -6,7 +6,9 @@
 > the FAILING half has its own document, [reset.md](reset.md). What
 > remains is in "Not covered yet" - above all a measurement this bench
 > cannot make (sleep current) and the RTC-backed timebase that would
-> lift the standby restriction stated below.
+> lift the standby restriction stated below. "Sleep, peripheral by
+> peripheral" is the transversal half: what the rest of the die does
+> while the core is stopped.
 
 Documents of record: SAM C20/C21 data sheet DS60001479M - the
 Cortex-M0+ processor summary ch. 4 with ARM's ARMv6-M ARM behind it,
@@ -348,6 +350,138 @@ Stopping:
   DSB cost **+52 bytes on blink and +44 on console**; the other twelve
   SAM images that do not use `idle()` are byte-identical.
 
+## Sleep, peripheral by peripheral
+
+Everything above is the CPU's side of a standby. THIS SECTION IS THE
+OTHER SIDE - what the rest of the die does while the core is stopped -
+and it is the transversal answer every chapter's own "Not covered yet"
+used to defer to "the power pass". Each chapter's document carries its
+own numbers; what belongs here is the shape they all share.
+
+**THE RULE, in one line: a peripheral's own RUNSTDBY is a CLOCK
+REQUEST, and a request is what carries a whole chain through a
+standby.** A TC with RUNSTDBY set keeps counting a generator whose
+RUNSTDBY is CLEAR, off a source whose RUNSTDBY is clear too - measured
+on OSC48M (1410 counts across a standby against 1409 awake, and 6 with
+the counter's own bit cleared), on OSC32K (1011 against 1009, with and
+without the oscillator's bit), and on the FDPLL. Setting ONDEMAND on
+OSC48M changes none of it: a request is a request.
+
+**AND THE FDPLL DOES NOT STOP.** With DPLLCTRLA.RUNSTDBY CLEAR and a TC
+counting a DPLL-fed generator through a standby, the count across the
+sleep equals the count awake tick for tick (1414 against 1413) - a loop
+that had stopped would have lost the whole window and paid a relock on
+top. So the open question this document used to record is answered: for
+a peripheral that asks, the loop runs through. Its CLKRDY reads set at
+that wake either way, so the status bit remains no evidence. Whether it
+also runs UNREQUESTED - erratum 1.3.1, revision B, and a CONSUMPTION
+claim - is out of reach here twice over: the only witness of a running
+loop is a peripheral clocked from it, which is itself a request, and
+this bench has no supply meter.
+
+**Table after table says the same thing about the blocks that convert.**
+The ADC's table 38-4, the SDADC's 39-1, the TSENS's 43-1 and the TCC's
+one-line 36.6.6 all reduce to "RUNSTDBY or nothing", and all four were
+entered: paced by an RTC periodic event over an asynchronous channel
+with no CPU in the loop, the ADC converts 31 or 32 times in a 30 ms
+standby with RUNSTDBY set (against 32 awake) and once or not at all
+with it clear, and ONDEMAND moves neither row; the SDADC free-running
+gives 87 against 89 awake, and 1 asleep without the bit; the TSENS 4
+against 4, and 0; the TCC 15 overflows against 16, and 0.
+
+**But the EVSYS channel has to be asked as well, ASYNCHRONOUS PATH
+INCLUDED.** Table 29-1 prints four rows of which three are SYNC/RESYNC,
+which invites the reading that CHANNELn.RUNSTDBY is a
+synchronous-path concern - the asynchronous path having no clock to
+keep alive. It is not. 29.6.4's own sentence says a channel needs the
+bit "to be able to run in Standby mode", the table's single ASYNC row
+reads "Disabled in Standby Sleep mode", and measured with nothing else
+in the chain moving, a hardware event over an asynchronous channel
+crosses 32 times in a standby with the bit set and NOT ONCE without it.
+Every sleepwalking chain in this stratum depends on that bit.
+
+**THE THREE EXCEPTIONS, and each is a different reason.**
+
+- The **EIC** has no RUNSTDBY bit at all (26.8.1 is SWRST, ENABLE and
+  CKSEL), and it does not need one: a sampled line detects every edge
+  of a standby on CLK_ULP32K, and also on a GCLK_EIC whose GENERATOR's
+  RUNSTDBY is clear. The EIC's clock request is honoured in there
+  unconditionally, which is 26.5.2's "all interrupts are available down
+  to STANDBY sleep mode" turned into a clock request and is not what
+  table 19-4 would predict.
+- The **RTC** has none either, and rides OSC32KCTRL rather than a GCLK
+  generator: it counts through every sleep by construction, and its
+  compare, its periodic intervals and its calendar alarm are all wake
+  sources ([rtc.md](rtc.md)).
+- The **FREQM** has none, and inherits its two generators': with the
+  measured clock and the reference both on generators that survive a
+  standby, a measurement started awake FINISHES ASLEEP and its DONE
+  interrupt is the wake ([freqm.md](freqm.md)).
+
+**A PAD CAN BE MOVED WHILE THE CPU IS STOPPED, and only one way.** The
+pull-walking that makes this stratum's pin tests wireless
+([eic.md](eic.md)) is a CPU store and is therefore unavailable in a
+standby; the DMAC's own standby sequence is another chapter's (25.6.7).
+What is left is the PORT as an EVENT USER with EVACT = OUT, the one
+action 28.6.4 says survives a standby - and it does. The chain that
+every pin-driven sleep measurement here is built on:
+
+    TC (OSCULP32K, RUNSTDBY)  a square wave that survives standby
+      = CCL LUT, combinational   its OUTPUT VALUE is an event
+      = EVSYS, asynchronous, CHANNELn.RUNSTDBY set
+      = PORT event input, action OUT, on the pad
+      = the pad walks between the rails on its own.
+
+**What that chain proved about the EIC.** An EXTINT line wakes the
+device from standby in 7 us; and ERRATUM 1.11.6 - which the errata
+matrix marks LIVE ON EVERY REVISION of E/G/J, "with the asynchronous
+edge detection enabled and the system in Standby mode, only the first
+edge will be detected" - DOES NOT REPRODUCE at revision F. Inside one
+standby of a hundred offered edges an asynchronous line detected a
+hundred, exactly as a sampled one did, and with the interrupt armed a
+hundred of them woke the device as fast as it could be put back to
+sleep. Three controls make that safe to say: the interrupt was disarmed
+for the counting run, so the window really was one standby; the SysTick
+timebase advanced 1 ms across 96 ms, so the device really was asleep;
+and the PORT's TGL action, measured in the same window, made 50 edges
+awake and NONE asleep, which is a positive witness that the APB side of
+the die was down.
+
+**The analog blocks keep what they were holding.** 41.6.6's promise is
+real: a DAC with RUNSTDBY set reads the same 2030 counts on its own pad
+before and after a standby (erratum 1.9.2 is the other setting, and it
+reproduces with its own control - [dac.md](dac.md)). And the AC's two
+sequences of 40.6.14 both run: a continuous comparator with RUNSTDBY
+wakes the device on its own edge every round, a single-shot one is
+started DURING a standby by an RTC event on the asynchronous path and
+its flag is read at the wake. With RUNSTDBY clear the comparator is off
+in there whether GCLK_AC stops with the CPU or is force-fed by a
+generator that runs in standby - so that bit gates the COMPARATOR and
+not just its clock, bar a rare stray wake (one in thirty-two rounds).
+
+**And the CCL's 37.6.4 is exact.** A COMBINATIONAL LUT keeps decoding
+through a standby with no clock at all (100 output events of 100
+offered); a SYNCHRONIZED or FILTERED one has its output forced to zero
+(1 of 100, which is the wake's own seam) unless CTRL.RUNSTDBY is set,
+and then it is 100 again.
+
+**Two errata this pass could judge, both live on paper.** ADC erratum
+1.4.5 - "SYNCBUSY.SWTRIG becomes stuck to one after wake-up from
+Standby Sleep mode" - DOES NOT REPRODUCE: the register reads zero at
+every wake of a sleepwalking converter. DAC erratum 1.9.2 DOES, with
+its own control. Erratum 1.25.2 (the FDPLL's ONDEMAND not functional in
+standby) is unreachable by construction, `samc/clock.hpp` never setting
+that bit and offering no verb that could.
+
+**One more sentence of chapter 19 turned out narrower than the
+silicon.** 19.5.2 makes CLK_PM_APB one-way - "can only be re-enabled by
+a system reset". Measured, `Pm::bus_clock(false)` clears MCLK's mask
+bit and `Pm::bus_clock(true)` puts it back, SLEEPCFG reads and writes
+as before, and a real standby still works afterwards with no reset in
+between. The one-way sentence is about the CLOCK inside the block and
+not about the mask that gates it; the driver's comment stands as a
+warning and the measurement is what a caller can rely on.
+
 ## Not covered yet
 
 Driver gaps (not built):
@@ -358,10 +492,6 @@ Driver gaps (not built):
   moving the kernel tick to the RTC, or resynchronizing SysTick's
   counters from the RTC after every wake - designed work, not a patch,
   and deliberately not hidden inside `sleep.hpp`.
-- **EIC as a standby wake source** is compile-only: erratum 1.11.6
-  (with asynchronous edge detection in standby only the FIRST edge
-  wakes) is stated in `eic.hpp`, and exercising either the wake or the
-  erratum needs an external edge this wireless bench cannot make.
 - **PAC.** Chapter 19's registers are optionally PAC write-protected
   (19.5.7) and brio has no PAC driver, so the protection is left as
   reset leaves it - off.
@@ -390,16 +520,22 @@ Implemented but not bench-verified:
   what BBIASHS, VREGSMOD and erratum 1.8.5 do to it - is a manual
   measurement with an ammeter in the supply, and nothing here claims
   it.
-- **`Pm::bus_clock(false)`**, deliberately not exercised: 19.5.2 makes
-  it one-way (only a system reset turns CLK_PM_APB back on), so a
-  suite that tried it would spend a reboot to learn what the chapter
-  states.
-- **Whether the FDPLL stops in standby.** Its CLKRDY reads set at
-  every wake with RUNSTDBY clear and nothing requesting it, but this
-  suite counts no DPLL-derived clock and the crystal above showed
-  exactly what such a flag is worth after a wake. Consistent with
-  erratum 1.3.1 (which marks that behaviour revision B); not evidence
-  for it.
+- **Sleep current, again**, and it is the biggest gap in the section
+  above: every "keeps running" there is a COUNT and never a microamp.
+  Erratum 1.3.1 and erratum 1.8.5 are both consumption claims and both
+  are therefore out of reach.
+- **The DMAC across a standby** (25.6.7 and erratum 1.8.7's list of
+  registers a SleepWalking DMA write may not reach). Nothing here
+  streams DMA through a sleep; [dmac.md](dmac.md) still owns that gap.
+- **Whether a clock runs in standby with NOTHING requesting it.** Every
+  measurement in the section above uses a peripheral clocked from the
+  clock under test, and that peripheral is itself the request. The
+  unrequested case has no witness on this board.
+- **The BODVDD as a wake source.** A detection is a supply crossing,
+  and nothing here can make one while the CPU is stopped; INTFLAG.
+  BODVDDDET was measured to be a TRANSITION and not a level, so a
+  standing condition cannot be re-fired, not even to a SAMPLING
+  detector ([supc.md](supc.md)).
 - **Sleeping under a debugger.** 19.5.6 says the power domains are not
   turned off then; everything here was measured with C_DEBUGEN
   cleared, and the debug-attached behaviour is trusted to the chapter.

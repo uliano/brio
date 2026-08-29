@@ -472,14 +472,23 @@ is the number that pass will need.
   single letter with `--expect="fail"` avoids it; `z` is judged on `ALL:`
   and is unaffected.
 
+**Table 43-1, in standby, and a witness this chapter forces.** Free-
+running, the block measured 4 times in a 30 ms window awake, 4 in the
+same window spent in STANDBY with CTRLA.RUNSTDBY set, and 0 with it
+clear - the table's rows 4 and 2. THE WITNESS HAD TO BE THE WINDOW
+MONITOR: unlike every other converter in this stratum the TSENS
+publishes NO result-ready event generator (43.6.5 lists WINMON alone),
+so a window whose lower limit sits below the datum's rail matches on
+every measurement and its event is the count. See
+[platform.md](platform.md), "Sleep, peripheral by peripheral".
+
 ## Not covered yet
 
 Driver gaps (not built):
 
-- **Sleep.** CTRLA.RUNSTDBY is written and read back; table 43-1's four
-  rows have never been entered, the block has never been a wake source,
-  and 43.5.2's claim that a connected event can trigger work without
-  leaving sleep is untested. The power pass owns it.
+- **The block as a WAKE source.** RESRDY, WINMON, OVERRUN and OVF have
+  never driven the NVIC out of a sleep; table 43-1's rows are measured
+  (see "Bench findings") through an event witness and not an interrupt.
 - **A `MeterSource` or sampler adapter.** `util/analog_sampler.hpp`'s
   converter concept wants an unsigned reading and a `void select()`; this
   block has neither a channel to select nor an unsigned datum. Whether the

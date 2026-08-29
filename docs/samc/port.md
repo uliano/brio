@@ -51,8 +51,18 @@ PINCFG.
 **No senses, no flags.** Edge/level detection and pin interrupts are
 the EIC's (ch. 26), reached through PMUX function A - a different
 peripheral with its own clocking and its own driver, `samc/eic.hpp`
-([eic.md](eic.md)). PORT's event outputs (EVCTRL) are still out of scope
-here.
+([eic.md](eic.md)).
+
+**But the PORT is an event USER** (EVCTRL, 28.6.4): four event inputs
+per group, each naming one pin of that group and one of four actions -
+SET, CLR and TGL act on the pin's OUT REGISTER, while OUT makes "the
+output pin follow the event input signal, INDEPENDENTLY OF THE OUT
+REGISTER VALUE" (28.6.5). Those are two different places and the
+difference is everything: under PMUXEN the OUT register is still the
+internal pull's direction while the output driver belongs to the
+peripheral. 28.6.4 also says only the OUT action survives a standby -
+SET, CLR and TGL want up to three clock cycles the PORT does not have
+there. All three sentences are measured, in "Bench findings".
 
 **And PMUXEN takes the pad away from the output driver**, measured while
 building that driver: with the mux selecting an input-only function,
@@ -82,8 +92,21 @@ possible with no wire at all (see [eic.md](eic.md)).
   offers is the package's I/O multiplexing table - the device
   header's `MUX_P<pin><fn>_<peripheral>` constants let an application
   static_assert its own claim.
-- **`Port<letter>`** - the 32-bit mask verbs, and
-  `configure_mask`/`function_mask` over WRCONFIG.
+- **`Port<letter>`** - the 32-bit mask verbs,
+  `configure_mask`/`function_mask` over WRCONFIG, and the group's four
+  EVENT INPUTS: `event_input_count`, `event_user(m)` (the EVSYS user
+  index this peripheral publishes - the four PORT users are the
+  peripheral's and not the group's, and which group an input acts on is
+  decided by which group's EVCTRL enables it), `configure_event(m,
+  PortEventConfig)` with its compile-time twin, `event_config(m)`,
+  `evctrl()` and `release_events()`. Table 29-3 marks all four users
+  ASYNCHRONOUS PATH ONLY; that is an obligation on the caller's
+  `EventChannelConfig`, which this file does not see.
+- **`PortEventConfig`** - the pin the input addresses (PIDm), the
+  `PortEventAction` it takes (EVACTm: `out`, `set`, `clear`, `toggle`)
+  and whether it is listening (PORTEIm). `port_event_config_valid()` is
+  the five-bit pin field, and nothing else in the register can be
+  wrong.
 
 ## How to use it
 
@@ -104,19 +127,43 @@ brio::Pin<'B', 31>::function(brio::PinFunction::d, {.input_enable = true});
 - Output drive and toggle: the board's LED on PB23, from the raw
   bring-up probe through the kernel heartbeat, at every firmware
   since.
+- **The four event actions, separated.** A square wave carried to
+  PORT event input 0 over an asynchronous channel, with the same pad
+  read back: EVACT = OUT moves the pad whether it is PORT's own output
+  or handed to the EIC under PMUXEN, and EVACT = TGL moves it under
+  PMUXEN too - at HALF the rate, because one toggle of the OUT bit is a
+  whole pad period. So OUT reaches the pad and TGL reaches the OUT
+  register that is the pull's direction, exactly as 28.6.5 separates
+  them.
+- **28.6.4's standby note, measured.** Across one standby of a hundred
+  wave periods the OUT action kept driving the pad (a hundred EXTINT
+  detections of it) and the TGL action produced NONE. "In Standby mode,
+  only the Out action is possible" holds.
+- **This is what makes a pad move while the CPU is stopped**, which is
+  the one thing the pull-walking of [eic.md](eic.md) cannot do (its
+  every step is a CPU store). The chain is in
+  [platform.md](platform.md), "Sleep, peripheral by peripheral".
 - The peripheral handoff: PB30/PB31 given to SERCOM5 through function
   D carry a byte-exact 115200 console both ways (see `sercom.md`).
 
 ## Not covered yet
 
 Driver gaps (not built):
-- PORT event outputs (EVCTRL). (Pin senses and interrupts are not a gap
-  here at all: they are the EIC's, ch. 26, and they are built -
-  [eic.md](eic.md).)
 - A `PinSet` analog (the AVR's cross-port mask type has no user here
   yet) and the per-package pin-bonding tables.
+- **CTRL's continuous input sampling** (28.8.1), which 28.6.5 requires
+  for a pin read through the IOBUS. Nothing here reads a pin that way.
+- **The IOBUS window itself.** Reached in [dsu.md](dsu.md)'s campaign
+  for erratum 1.13.3 and found NOT to be a plain mirror (DIR and OUT
+  read through it, IN and CTRL read zero); this driver uses the APB
+  addresses only.
 
 Implemented but not bench-verified:
 - Pulls (up and down), `strong_drive`, `configure_mask`/
   `function_mask` over WRCONFIG, `release()` - all family-compiled,
   none observed electrically yet.
+- **Event inputs 1..3 and the SET / CLEAR actions**: input 0 carries the
+  OUT and TGL measurements and input 1 the AC's stimulus, both with
+  EVACT = OUT; SET and CLR are written, read back and never watched.
+  Nor has one pin been addressed by several inputs at once, which is
+  where table 28-3's priority rule would show.

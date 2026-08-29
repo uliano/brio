@@ -157,6 +157,18 @@ the software event supplies the stimulus and the DMAC supplies the user.
 - **The off-by-one is real**: a user connected to channel 3 through the
   driver's plain-number verb leaves 4 in USER[m].
 
+**CHANNELn.RUNSTDBY REACHES THE ASYNCHRONOUS PATH TOO**, which table
+29-1's own layout hides: three of its four rows are SYNC/RESYNC, which
+invites the reading that the bit is a synchronous-path concern - the
+asynchronous path having no clock to keep alive. It is not. 29.6.4's
+sentence says a channel needs the bit "to be able to run in Standby
+mode", the table's single ASYNC row reads "Disabled in Standby Sleep
+mode", and measured with nothing else in the chain moving, a HARDWARE
+event over an ASYNCHRONOUS channel crossed 32 times in a 30 ms standby
+with the bit set and NOT ONCE without it (32 awake). Every sleepwalking
+chain in this stratum depends on that bit -
+[platform.md](platform.md), "Sleep, peripheral by peripheral".
+
 ## Not covered yet
 
 Driver gaps (deliberate):
@@ -166,7 +178,9 @@ Driver gaps (deliberate):
   consume them, not to this header - a driver publishes its own codes and
   hands them over. This is the position the whole design rests on, and
   the reason the file is short.
-- **SleepWalking** (29.2's feature list): the power pass owns it.
+- **The channel INTERRUPT as a wake source.** CHANNELn.RUNSTDBY is
+  measured on the propagation path (see "Bench findings"); an EVSYS
+  overrun or detection interrupt leaving a standby is not.
 - **The channel interrupt as a program's event hook.** `isr()` and the
   flags exist and are exercised, but nothing in the framework yet turns
   an EVSYS interrupt into a kernel event.
@@ -179,7 +193,7 @@ Implemented but not bench-verified:
   exercises EVGEN, the resynchronized and asynchronous paths and rising
   edge detection with a real hardware generator - the other ninety-odd
   codes wait for their own drivers.
-- Falling and both-edge detection; `run_standby`; `overrun` actually
-  being raised (provoking one needs a generator faster than its user).
+- Falling and both-edge detection; `overrun` actually being raised
+  (provoking one needs a generator faster than its user).
 - Operation on the E and G variants: compile-checked only. Nothing in
   this chapter varies by package.

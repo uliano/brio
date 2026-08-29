@@ -321,13 +321,29 @@ period = 4096 CPU cycles at 48 MHz, stopwatch = SysTick):
 - The GPIO-driven-pad proof and the scaler threshold sanity pass on
   every run; two consecutive full runs at 30/30.
 
+**40.6.14, both sequences.** With a pad walked by hardware while the
+CPU is stopped (the chain is in [platform.md](platform.md), "Sleep,
+peripheral by peripheral") and the comparator's own VDD scaler at half
+supply as the threshold: a CONTINUOUS comparator with RUNSTDBY set woke
+the device from STANDBY on its own edge in eight rounds of eight, at
+about 14 ms - the moment the pad was due to move - against a 91 ms RTC
+backstop. With RUNSTDBY CLEAR it woke nothing, in eight rounds of
+eight, **whether GCLK_AC stopped with the CPU or was force-fed by a
+generator that runs in standby**: COMPCTRL.RUNSTDBY gates the
+COMPARATOR and not merely its clock. The force-fed arrangement did
+produce ONE stray wake in thirty-two rounds across four runs, recorded
+here and not rounded away. And 40.6.14.2's single-shot SleepWalking
+runs: an RTC periodic event on the ASYNCHRONOUS path - all table 29-3
+grants the SOC users - starts a comparison DURING a standby and its
+INTFLAG is read at the wake.
+
 ## Not covered yet
 
 Driver gaps (not built):
-- **Sleep**: RUNSTDBY is a config field and nothing more; the 40.6.14
-  sequences (continuous and single-shot measurement during sleep, and
-  the SleepWalking they enable) have no owner until the power pass,
-  which is also where `util/power.hpp`'s SleepSite arrives.
+- **The window monitor in sleep.** 40.6.14's two sequences are measured
+  for a single comparator (see "Bench findings"); a WINDOW across a
+  standby, and 40.6.14's rule that both comparators of a pair must
+  share RUNSTDBY, are stated and unexercised.
 - **The bandgap as a negative input**, whose INTREF output has to be
   turned on in SUPC.VREF first (22.6.2.2) and whose level is selected
   there too - and which is the input erratum 1.5.6 is about, so that
