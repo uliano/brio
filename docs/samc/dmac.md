@@ -544,12 +544,13 @@ Driver gaps (not built):
   is also why there is NO HARDWARE CIRCULAR MODE here - a self-linked
   descriptor is the only one chapter 25 offers - and why
   `DmaLoopEngine` closes its loop from the interrupt.
-- A util-level streaming service: an active object owning a ping-pong
-  stream and publishing filled buffers as events. brio's rule is that
-  a usage type is born with its first user; these two engines are two
-  days old and the first real consumer (the Multislope work) will say
-  what the AO's contract has to be. The engines are the mechanism, the
-  policy waits.
+- (The util-level contract these engines satisfy is
+  `util/block_stream.hpp` - `BlockSource`/`BlockPlayer` plus the
+  `BlockRelay` AO, design/block-stream.md. Both engines are
+  concept-checked in the family fixture and the relay runs over this
+  chain in `test_samc_analog_dma`'s kernel letter; the contract speaks
+  blocks, not DMA, and exists as the fixed point the next platform's
+  stream machinery is measured against.)
 - An automatic recovery ladder. The bench established that a channel
   the erratum has left unable to clear ENABLE cannot be reclaimed at
   the channel level and needs `Dmac::init()`, and the suite spends

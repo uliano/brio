@@ -30,6 +30,7 @@ Target-independent design:
 | [design/ring.md](design/ring.md) | Ring: the SPSC FIFO, lock-free where the platform allows, guarded elsewhere |
 | [design/analog.md](design/analog.md) | Analog in the kernel: the AnalogSampler usage type (converter concept, attribution by reported code, two paces, owner's duties) and the counts <-> mV arithmetic |
 | [design/meters.md](design/meters.md) | Meters in the kernel: the MeterLatch that bridges a capture interrupt to the loop (last value wins, overwrites counted) and the MeterSampler that paces PUBLICATION instead of capture - a stale source publishes nothing |
+| [design/block-stream.md](design/block-stream.md) | Block streams: the BlockSource/BlockPlayer concepts (caller-owned buffers, the accounting IS the API, blocks not DMA) and the BlockRelay AO that lends filled blocks for one dispatch - built BEFORE the second implementation on purpose, as the fixed point the next platform is measured against |
 | [design/architecture.svg](design/architecture.svg) | The strata diagram |
 
 Target AVR DA/DB (`brio/avrdx/`):

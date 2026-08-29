@@ -27,6 +27,11 @@
 #include "samc/sdadc.hpp"
 #include "samc/tsens.hpp"
 
+// And the util contract the streaming engines satisfy
+// (design/block-stream.md): the concepts speak blocks, not DMA, and
+// this is where the two vocabularies are held in step at compile time.
+#include "util/block_stream.hpp"
+
 using namespace brio;
 
 // ---- what the device header says --------------------------------------------
@@ -358,3 +363,14 @@ static_assert(Adc<1>::dma_trigger_resrdy != Adc<0>::dma_trigger_resrdy);
 static_assert(Dac::dma_trigger_empty != dma_trigger_none);
 static_assert(Sdadc::dma_trigger_resrdy != dma_trigger_none);
 static_assert(Tsens::dma_trigger_resrdy != dma_trigger_none);
+
+// ---- the block-stream contract ---------------------------------------------
+// DmaPingPongEngine is a BlockSource and DmaLoopEngine a BlockPlayer at
+// every element width, which is what lets util/block_stream.hpp's
+// BlockRelay take them unchanged - and what the next platform's stream
+// machinery has to match.
+static_assert(BlockSource<DmaPingPongEngine<6, uint16_t>>);
+static_assert(BlockSource<DmaPingPongEngine<7, uint32_t>>);
+static_assert(BlockSource<DmaPingPongEngine<8>>);
+static_assert(BlockPlayer<DmaLoopEngine<9, uint16_t>>);
+static_assert(BlockPlayer<DmaLoopEngine<10>>);

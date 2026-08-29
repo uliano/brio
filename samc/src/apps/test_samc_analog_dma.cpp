@@ -82,7 +82,10 @@
 #include "samc/sercom.hpp"
 #include "samc/tc.hpp"
 #include "samc/ticker.hpp"
+#include "samc/platform_sam.hpp"
 #include "samc/tsens.hpp"
+#include "kernel/kernel.hpp"
+#include "util/block_stream.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
@@ -1899,6 +1902,142 @@ void tj_tsens() {
 }
 
 // =============================================================================
+// k - the util contract, live: BlockRelay inside a running kernel
+// =============================================================================
+//
+// The block-stream vocabulary (util/block_stream.hpp,
+// design/block-stream.md) run on the silicon that shaped it: the same
+// DAC-to-ADC chain as letter c, but the blocks now travel as
+// Lease::dispatch loans through a REAL kernel - StreamSink (the
+// borrower) before BlockRelay (the lender) in the pack, the DMAC
+// completion posting the wakeup, and every buffer returned to the
+// engine by the relay's next dispatch. The sink does letter c's whole
+// verification INSIDE the loan window, which is the point: a block is
+// consumed during one dispatch, and nothing is copied anywhere.
+
+/// The DMAC handler posts to the relay only while this letter runs -
+/// the other letters drain the engine by hand and a queue nobody pumps
+/// would merely count overflows, but a suite should not manufacture
+/// noise to ignore.
+volatile bool relay_live = false;
+
+struct StreamSink : Fsm<StreamSink, BlockReady<uint16_t>> {
+    using Base = Fsm<StreamSink, BlockReady<uint16_t>>;
+    using Event = typename Base::Event;
+    using Status = typename Base::Status;
+    static inline EventQueue<Event, 4, SamPlatform> queue;
+
+    static constexpr uint8_t max_blocks = 16;
+    static inline uint8_t seen = 0;
+    static inline uint16_t offsets[max_blocks];
+    static inline uint32_t worst_fit = 0;
+    static inline uint16_t lengths_ok = 0;
+
+    static void init() {
+        seen = 0;
+        worst_fit = 0;
+        lengths_ok = 0;
+        Base::start(&only);
+    }
+    static void dispatch(const Event& e) { Base::dispatch(e); }
+    static Status only(const Event& e) {
+        return match(e,
+            [](Entry) { return Base::handled(); },
+            [](Exit) { return Base::handled(); },
+            [](BlockReady<uint16_t> b) {
+                // The whole verification happens HERE, inside the loan's
+                // window - after this dispatch returns, the relay hands
+                // the buffer back and the engine refills it.
+                if (b.data && b.length == block_len &&
+                    lengths_ok != UINT16_MAX) {
+                    ++lengths_ok;
+                }
+                if (b.data && seen < max_blocks) {
+                    uint32_t best_err = 0;
+                    uint32_t worst_err = 0;
+                    offsets[seen] =
+                        best_offset(b.data.get(), best_err, worst_err);
+                    if (best_err > worst_fit) {
+                        worst_fit = best_err;
+                    }
+                    ++seen;
+                }
+                return Base::handled();
+            });
+    }
+};
+
+using Relay = BlockRelay<SamPlatform, Subscribers<StreamSink>, AdcStream>;
+using StreamKernel = Kernel<SamPlatform, StreamSink, Relay>;
+
+void tk_relay() {
+    if (!calibrated && !calibrate()) {
+        bench.verdict("the calibration pass runs", false);
+        return;
+    }
+    // EVERY MEASUREMENT FIRST, EVERY PRINT AFTER - the suite's own
+    // lesson, and here it is load-bearing: chain_up() starts the 5 kHz
+    // stream, a print is milliseconds (and BLOCKS while the console
+    // ring, still full of the previous letters' output in a z run,
+    // drains at 115200), and the engine's whole slack is two blocks =
+    // 9.6 ms. The first version printed the chain verdict between the
+    // start and the pump and overran once, deterministically, in every
+    // z run - and never when the letter ran alone with an empty ring.
+    const bool up = chain_up();
+
+    constexpr uint8_t blocks = 12;
+    StreamKernel::init_all();
+    relay_live = true;
+
+    const uint32_t t0 = Ticker::millis();
+    while (StreamSink::seen < blocks && Ticker::millis() - t0 < 500u) {
+        (void)StreamKernel::step();
+    }
+    (void)Pacer::enable(false);
+    // Drain the tail: blocks already in flight when the pacer stopped
+    // still arrive, and the last loans must come home.
+    while (StreamKernel::step()) {
+    }
+    relay_live = false;
+
+    const uint8_t seen = StreamSink::seen;
+    bench.verdict("the chain comes up: pacer, fabric, both converters, both "
+                  "engines", up);
+    print(serial, "  ", seen, " blocks through the kernel (", blocks,
+          " asked; the tail is blocks already in flight at the stop); worst "
+          "residual ", StreamSink::worst_fit, " counts, band ", band(), crlf);
+    print(serial, "  relay published ", Relay::published(), ", engine laps ",
+          AdcStream::laps(), ", overruns ", AdcStream::overruns(),
+          ", pending at the end ", AdcStream::pending(), crlf);
+
+    bench.verdict("the relay delivered the stream through a real kernel",
+                  seen >= blocks && seen <= blocks + 3u &&
+                      StreamSink::lengths_ok == seen);
+    bench.verdict("EVERY BLOCK IS EXACT INSIDE ITS OWN LOAN WINDOW - letter "
+                  "c's verification, done during the dispatch",
+                  seen >= blocks && StreamSink::worst_fit <= band());
+    bool arithmetic = seen >= blocks;
+    for (uint8_t i = 1; i < seen; ++i) {
+        const uint16_t want = static_cast<uint16_t>(
+            (StreamSink::offsets[i - 1] + block_len) % table_len);
+        if (StreamSink::offsets[i] != want) {
+            arithmetic = false;
+        }
+    }
+    bench.verdict("the phase arithmetic holds block after block: the kernel "
+                  "path loses nothing either",
+                  arithmetic);
+    bench.verdict("every loan came home: no buffer is still pending and the "
+                  "engine never skipped a lap - the kernel consumer kept up",
+                  AdcStream::pending() == 0u && AdcStream::overruns() == 0u);
+    bench.verdict("the relay's accounting is the source's, passed through",
+                  Relay::published() == seen &&
+                      Relay::laps(0) == AdcStream::laps() &&
+                      Relay::overruns(0) == AdcStream::overruns());
+    chain_down();
+}
+
+// =============================================================================
 // The menu
 // =============================================================================
 void banner() {
@@ -1929,7 +2068,14 @@ extern "C" void DMAC_Handler() {
         }
         switch (irq->channel) {
         case ch_dac: (void)DacLoop::complete(); break;
-        case ch_adc: (void)AdcStream::complete(); break;
+        case ch_adc:
+            (void)AdcStream::complete();
+            // Letter k routes completions into the kernel: the relay's
+            // wakeup is the engine's own completion, posted from here.
+            if (relay_live) {
+                brio::post<Relay>(brio::BlockDone{});
+            }
+            break;
         case ch_wide: (void)WideStream::complete(); break;
         default: break;
         }
@@ -1960,6 +2106,8 @@ int main() {
     bench.letter('h', "a dead block abandoned, counted, resumed", th_abandon);
     bench.letter('i', "the SDADC on WORD beats", ti_sdadc);
     bench.letter('j', "TSENS on the same word engine", tj_tsens);
+    bench.letter('k', "the util contract live: BlockRelay in a real kernel",
+                 tk_relay);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

@@ -238,12 +238,14 @@
  * value); RUNSTDBY and the standby sequence of 25.6.7 (the power pass
  * owns sleep on this target).
  *
- * AND ONE LEVEL UP, deliberately not built: a util/ streaming service -
- * an active object owning a ping-pong stream and publishing filled
- * buffers as events. brio's rule is that a usage type is born with its
- * first user, the shapes here are two days old, and the first real
- * consumer (the Multislope work) will say what the AO's contract has to
- * be. The engines are the mechanism; the policy waits.
+ * AND ONE LEVEL UP: the target-independent contract these engines
+ * satisfy is util/block_stream.hpp (design/block-stream.md) -
+ * DmaPingPongEngine is a BlockSource and DmaLoopEngine a BlockPlayer,
+ * checked in the family fixture, and BlockRelay is the AO that hands a
+ * source's filled blocks to subscribers as Lease::dispatch loans. The
+ * contract deliberately speaks BLOCKS and not DMA, so the next
+ * platform's stream machinery (or an interrupt-fed implementation on a
+ * machine with none) has a fixed point to be measured against.
  */
 
 #pragma once

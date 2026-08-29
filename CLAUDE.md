@@ -30,7 +30,12 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   site that only arms, the vote round, standing locks, the deadline
   guard, the first-event-after-wake contract), `meters.md` (the
   MeterLatch bridge out of a capture ISR and the MeterSampler that
-  paces publication, not capture - a stale source publishes nothing).
+  paces publication, not capture - a stale source publishes nothing),
+  `block-stream.md` (block streams: BlockSource/BlockPlayer concepts
+  over caller-owned buffers - blocks, not DMA - and the BlockRelay AO
+  lending each filled block for one dispatch; built BEFORE its second
+  implementation as the fixed point the next platform is measured
+  against).
 - `docs/<target>/` - one folder per target, mirroring
   `brio/<target>/` (`avrdx/`, `samc/`, `host/`): `README.md` is the
   operational page (toolchain, board, probe, debugger and their
@@ -1639,6 +1644,46 @@ gets its dated home in `docs/design/` when taken.
   cross-checks the four analog trigger codes. Docs: dmac.md grown,
   dac.md/adc.md/sdadc.md each gained a "Streaming via DMA" section,
   bench.md row + board C firmware line.
+  **BLOCK-STREAM CONTRACT DONE 2026-08-29 (same day, BY FABLE'S OWN
+  HAND on the user's ruling): the util level the streaming campaign had
+  deferred was OVERRULED - brio must be versatile beyond Multislope,
+  and the contract built BEFORE its second implementation is the FIXED
+  POINT the stm32g0x1 platform will be measured against, so friction
+  shows up as "this concept does not fit" instead of silent
+  divergence.** util/block_stream.hpp NEW: BlockSource/BlockPlayer
+  concepts that speak BLOCKS AND NOT DMA (caller-owned buffers,
+  overruns skip laps, the accounting IS the API; satisfiable by an
+  interrupt handler on a machine with no DMA - stated, not built) and
+  BlockRelay<P, Subs, Sources...>, the event-driven AO that is
+  MeterSampler's opposite economy (every block delivered exactly once
+  where the meter discards stale): each filled block travels as a
+  Lease::dispatch loan (LendsTo-checked - borrowers precede the relay
+  in the pack), is verified/consumed INSIDE the receiving dispatch, and
+  is returned to its source on the relay's NEXT dispatch, whose
+  self-post also guarantees the restart of a stalled source
+  (SerialPort's two-buffer contract, generalized). design/
+  block-stream.md NEW records the inverted doctrine. NEW HOST SUITE
+  test_block_stream (host 23/23 total): a scripted ping-pong source
+  honest to the SAM engine's contract - loan timing, storage reused
+  only after release, stall drained oldest-first with release
+  restarting, coalesced wakeups neither lose nor duplicate, accounting
+  passed through. SILICON: test_samc_analog_dma grew letter k (z now
+  78/78, four runs incl. one cold) - the SAME DAC-to-ADC chain through
+  a REAL kernel, 12 blocks, worst residual 3 of band 10, every loan
+  home, zero engine overruns, DmaPingPongEngine/DmaLoopEngine
+  concept-checked in the family fixture at every width plus a negative
+  (DmaTxEngine refused as a BlockSource). THE LETTER RE-TAUGHT THE
+  PRINT LESSON at a new scale: a verdict printed between chain_up()
+  and the pump overran the engine ONCE, DETERMINISTICALLY, in every z
+  run and never solo - the console ring full of the previous letters'
+  output blocks print() for milliseconds and the engine's slack is two
+  blocks (9.6 ms), so the letter measures everything first and prints
+  after. Zero-cost held: 26 pre-existing SAM images byte-identical
+  (test_samc_nvm's build-id defsym moved because new FILES entered the
+  tree - the standing by-design exception); check_samc, check_family,
+  host all green. Deliberately absent and stated in the design doc: a
+  playback AO, one-shot burst vocabulary, gap policy, the AVR
+  implementation (born with its first user).
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -2508,6 +2553,14 @@ brio/                    the framework, four strata:
                            concept + MeterSampler<P, Subscribers, Sources...>:
                            the AO that paces PUBLICATION, not capture -
                            MeterSample per FRESH source, a stale one is silent
+    block_stream.hpp       BlockSource/BlockPlayer concepts (blocks, not
+                           DMA: caller-owned buffers, overruns skip laps,
+                           the accounting IS the API) + BlockRelay<P, Subs,
+                           Sources...>: the event-driven AO that lends each
+                           filled block for ONE dispatch (Lease::dispatch,
+                           LendsTo-checked) and returns it on its next -
+                           every block delivered exactly once, the opposite
+                           economy of MeterSampler's discard-stale
     input_scanner.hpp      ScannedInput concept (read() = active) +
                            InputScanner<P, Subscribers, ScanConfig, Inputs...>:
                            periodic poll, N-sample debounce, InputEdge on each
