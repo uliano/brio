@@ -567,8 +567,13 @@ public:
     // ~117 single), unmeasurably small at 48 MHz. A caller measuring an
     // interval between two of its own reads never needed the fix (the
     // lag cancelled) and now simply pays the double crossing; `*_raw()`
-    // still skips everything and says so. docs/samc/tc.md carries the
-    // numbers.
+    // still skips everything and says so. AND THE PIPELINE IS NEVER
+    // PRIMED - measured, because it was worth refuting: after a double
+    // read, a later SINGLE command returns the PREVIOUS read's second
+    // snapshot, stale by the whole inter-read gap (233 against a true
+    // 464 after a 6 ms gap; identical on the TCC). Two commands per
+    // call, always - no first-read-double-then-singles shortcut
+    // exists. docs/samc/tc.md carries the numbers.
 
     static bool read_sync(uint32_t spins = 0xFFFFu) {
         return command(TcCommand::read_sync, spins) &&

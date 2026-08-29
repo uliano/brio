@@ -224,7 +224,12 @@ witness.
   setup, the first value finally current. The price: **~242 us** per
   read at a 32.768 kHz counter clock against ~117 single-command,
   unmeasurably small at 48 MHz. The TCC's `read_sync()` has the same
-  silicon and carries the same fix.
+  silicon and carries the same fix. And **there is no priming** - the
+  refutation was run on purpose: after a double read, a later
+  single-command read returns the previous read's second snapshot,
+  stale by the whole inter-read gap (**233 against a true 464** after
+  a 6 ms gap, identical on the TCC), so every synchronized read pays
+  its own two commands and no cheaper protocol exists.
 - **PWM measured two ways at once.** On the LED's own waveform output
   (PB23 = TC3/WO1), TOP 199 at /256: duty 0 reads **0** per mille high on
   the pad, duty 199 reads **994**, duty 100 reads **488** and duty 50

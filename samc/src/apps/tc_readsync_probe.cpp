@@ -256,6 +256,65 @@ int main() {
         print(serial, "   fixed x4: ", r1, " ", r2, " ", r3, " ", r4, crlf);
     }
 
+    // ---- F: n+1 or n+2 - does the double read PRIME the pipeline? ----
+    //
+    // After a double read, the second command's snapshot lands shortly
+    // after the read returned. If that landing PRIMED the pipeline, a
+    // later SINGLE-command read would return a current value (n+1). If
+    // there is no priming, the single read returns that old landed
+    // snapshot - stale by the inter-read gap (n+2: every read needs its
+    // own two commands).
+    print(serial, "F  priming: double read, 6 ms gap, then ONE command:", crlf);
+    (void)watch_up(gen_slow);
+    wait_ms(6);
+    {
+        const uint32_t d1 = fixed_read_tc();       // double: current (~196+)
+        wait_ms(6);
+        // one single-command read, the driver's OLD shape:
+        Watch::regs().TC_CTRLBSET =
+            TC_CTRLBSET_CMD(TC_CTRLBSET_CMD_READSYNC_Val);
+        uint32_t f = 400000u;
+        while ((Watch::regs().TC_SYNCBUSY &
+                (TC_SYNCBUSY_CTRLB_Msk | TC_SYNCBUSY_COUNT_Msk)) != 0u &&
+               f-- != 0u) {
+        }
+        const uint32_t s1 = Watch::count32_raw();
+        const uint32_t d2 = fixed_read_tc();       // double again: truth
+        print(serial, "   double=", d1, "  single(after 6 ms)=", s1,
+              "  double=", d2, crlf);
+        print(serial, "   verdict: single-after-gap is ",
+              (s1 + 60u < d2) ? "STALE (no priming: n+2, two commands "
+                                "per read, always)"
+                              : "CURRENT (priming exists: n+1)",
+              crlf);
+    }
+    // the same question on the TCC
+    print(serial, "   TCC:", crlf);
+    Wave::release();
+    (void)Wave::init(gen_slow);
+    (void)Wave::configure(brio::TccConfig{});
+    (void)Wave::wave(brio::TccWaveConfig{});
+    (void)Wave::enable(true);
+    wait_ms(6);
+    {
+        const uint32_t d1 = fixed_read_tcc();
+        wait_ms(6);
+        Wave::regs().TCC_CTRLBSET = TCC_CTRLBSET_CMD_READSYNC;
+        uint32_t f = 400000u;
+        while ((Wave::regs().TCC_SYNCBUSY &
+                (TCC_SYNCBUSY_CTRLB_Msk | TCC_SYNCBUSY_COUNT_Msk)) != 0u &&
+               f-- != 0u) {
+        }
+        const uint32_t s1 = Wave::count_raw();
+        const uint32_t d2 = fixed_read_tcc();
+        print(serial, "   double=", d1, "  single(after 6 ms)=", s1,
+              "  double=", d2, crlf);
+        print(serial, "   verdict: ",
+              (s1 + 60u < d2) ? "STALE - n+2 on the TCC too"
+                              : "CURRENT - priming on the TCC",
+              crlf);
+    }
+
     print(serial, "DONE", crlf);
     for (;;) {
         P::idle();
