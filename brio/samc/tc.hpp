@@ -96,9 +96,8 @@
  *
  * NOT BUILT (docs/samc/tc.md carries the list): the minimum and maximum
  * capture modes (SAM C20/C21 N variants only - this family's device
- * header does not declare CTRLA.CAPTMODE at all), DMA-driven operation
- * (the trigger ids are published, nothing wires them), and sleep, which
- * the power pass owns together with CTRLA.ONDEMAND's clock-request
+ * header does not declare CTRLA.CAPTMODE at all), and sleep, which the
+ * power pass owns together with CTRLA.ONDEMAND's clock-request
  * behaviour.
  */
 
@@ -711,6 +710,14 @@ public:
      * what empties the FIFO stage and lets CCBUFx move up (35.6.2.8), so
      * a handler that clears MCx without reading CCx throws the reading
      * away.
+     *
+     * AND THE OTHER HALF OF THE SAME FACT, measured
+     * (test_samc_timer_dma, docs/samc/tc.md): because CCx has CCBUFx
+     * behind it, ONE read taken after the signal under test has changed
+     * hands back a value the PREVIOUS arrangement captured. A reader
+     * that has just reconfigured something drains both stages and then
+     * takes a whole fresh capture; a reader keeping up with a running
+     * stream never notices.
      */
     [[gnu::always_inline]] static uint8_t isr() {
         const uint8_t p = static_cast<uint8_t>(flags() & armed());

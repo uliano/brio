@@ -1,19 +1,19 @@
 # TCC - Timer/Counter for Control Applications (SAM C21)
 
 > **PROVISIONAL.** The whole chapter is built and bench-verified except
-> DMA-driven operation, the debug-fault state and sleep. Two things the
-> suite deliberately does NOT claim are listed too: erratum 1.21.7, which
-> is a caller obligation nothing here can stage, and erratum 1.21.8,
-> which did not reproduce and is left standing rather than called
-> disproved. The list is in "Not covered yet".
+> the advanced capture actions, the debug-fault state and sleep. Two
+> errata are recorded as UNREPRODUCED rather than disproved - 1.21.7 and
+> 1.21.8 - and 1.21.5 is stated and not exercised. The list is in "Not
+> covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 36 - and
 errata DS80000740S items 1.21.1 to 1.21.11, of which **seven are this
 silicon**, the largest live errata list of any chapter this stratum has
 touched. Driver: `samc/tcc.hpp`, with its per-instance and per-pad data
 in `samc/device_tables.hpp`. Family fixture `test/family_samc/tcc.cpp`
-plus eight negatives under `tools/check_samc.sh`; the bench suite is
-`test_samc_tcc`.
+plus eight negatives under `tools/check_samc.sh`; the bench suites are
+`test_samc_tcc` and - for DMA-driven operation, the circular buffers and
+the advanced modes - `test_samc_timer_dma`.
 
 ## What the silicon does
 
@@ -443,14 +443,112 @@ standby, made 16 overflows in a 30 ms window awake, 15 in the same
 window spent in STANDBY with CTRLA.RUNSTDBY set, and 0 with it clear.
 See [platform.md](platform.md), "Sleep, peripheral by peripheral".
 
+## Bench findings, DMA and the advanced modes
+
+From `test_samc_timer_dma` (10 letters, **101 verdicts, 101/101 three
+times - twice warm and once cold**). Wireless: TCC0's WO[0] reaches a TC
+capture channel through a combinational CCL LUT and an asynchronous
+EVSYS channel, with no pad in the path at all, and `tc.md` carries the
+capture side's own findings.
+
+**THE ROUND TRIP, which is what the whole letter set is built around.**
+One DMA channel plays an eight-entry duty table into TCC0's CCBUF0 on
+the OVF trigger; two more drain the capture meter's CC0 and CC1. Over
+**192 judged samples of each stream** the captured widths were the
+played table, in order, with a **worst error of ZERO ticks** and a phase
+that held across every lap boundary of the loop engine and every block
+boundary of the two ping-pong streams - which is what says not one beat
+was lost anywhere. The period did not move by a single tick throughout,
+no stream overran, and no write-back reading was refused (erratum
+1.10.4).
+
+- **A TCC COMPARE REGISTER IS A WORD AND A DUTY STREAM'S BEAT MUST BE
+  ONE.** CCBUF is 32 bits on a 24-bit counter, and a HALFWORD write
+  lands in the low half alone: 0x00ABCDEF followed by a halfword 0x1234
+  reads back **0x00AB1234**. So the element type is `uint32_t`, not
+  because the value needs the width but because the register does.
+- **One DMA beat per waveform period is exactly one write per update
+  window**, which is why the round trip works at all: fact 8's
+  SYNCBUSY.CCx stands from a buffered write until the update consumes
+  it, and a beat delivered per OVF lands in a window the update has just
+  emptied. The beats moved and the periods captured agreed to within a
+  block over the whole run.
+- **When the DMA outruns the update, the DMAC sees nothing wrong.**
+  Flooded with software triggers, the loop played **1229 laps in 20 ms
+  against 25** paced by the TCC alone - and `faults()` and the erratum
+  1.10.4 refusal count both stayed at zero, because every beat the
+  controller moved, it moved. The loss is the peripheral's, in a store
+  the silicon discarded. **A discarded buffered write loses a value, it
+  does not corrupt one**: the waveform was still playing a table entry
+  afterwards, just not the one the beat count named.
+- **The hardware circular buffer plays two values for ever with no CPU
+  and no DMA.** WAVE.CICCEN0 set UNDER A RUNNING TIMER (WAVE is
+  write-synchronized and not enable-protected) made sixteen consecutive
+  captured widths alternate between 1200 and 3600 with **nothing
+  elsewhere**; **WAVE.CIPEREN** did the same for the PERIOD, alternating
+  4800 and 2400 ticks. The same two values through the DMA loop cost
+  **one interrupt per lap** - 122 laps in 20 ms, one every two waveform
+  periods - and reach exactly the same waveform. So the circular buffer
+  wins at two values and loses at three, which is the whole trade.
+- **NFRQ toggles on the PERIOD and not on a compare**: PER = 2399 gave a
+  captured **4799**, and moving CC0 from 600 to 1800 changed **nothing**
+  at all. **MFRQ** makes CC0 the top instead - the same move changed the
+  period from 2399 to 3599, both twice CC0 + 1 to the tick, with PER
+  left four times too big and ignored.
+- **DUAL-SLOPE CRITICAL gives one output two independent edges**, and
+  the arithmetic 36.6.2.5.7 does not print is
+  **width = (PER - CC0) + (PER - CC2)**: exact to the tick at all three
+  settings measured (2399 at 600/1800, 2099 at 600/2100, 1799 at
+  900/2100), on a period of exactly 2 x PER.
+- **RAMP2A pairs two counter cycles into one waveform cycle.** With
+  every register left alone, the captured period **doubled** (2399 to
+  4799) while the pulse width did not move - so WO[0] is driven in one
+  ramp of the two and idle in the other, not, as the name invites, given
+  two duties.
+- **Recoverable fault B is the mirror of A**, on channel 1's event
+  input, and a pulse on it is a valid fault.
+- **FCTRLn.FILTERVAL COUNTS GCLK_TCC CYCLES, NOT PRESCALED ONES** - the
+  dead-time unit's story again, and not what 36.8.5's wording or this
+  driver's own comment said. On one 93 kHz generic clock, the shortest
+  pulse that still made a valid fault was **20 us with FILTERVAL 0 and
+  160 us with FILTERVAL 15**, and **a sixty-fourfold prescaler change
+  left it at 160** - where fifteen cycles of that clock are 160.9 us.
+  The stimulus was calibrated against a 750 kHz stopwatch before it was
+  used, and the generator's rate measured rather than computed.
+- **A blanking window gates the input, not its edge.** With the pad held
+  high for 150 ms, a fault valid with no window was still valid with a
+  5.4 ms one, because the window closes long before the period does.
+- **FCTRLn.QUAL ties the fault to the waveform, and to THE FAULT'S OWN
+  CHANNEL.** Fault B qualifies on channel 1's output: with CC1 at zero
+  the same held input raised nothing, and with CC1 at half the period it
+  raised a fault. The first version of the letter moved CC0 and measured
+  a qualified fault that never fired at any duty - correct behaviour of
+  a wrong setup.
+- **EVACT0 = INCREMENT counts events and nothing else**: twenty pin
+  pulses gave **COUNT = 20** exactly, with the counter's own clock
+  slowed to 45.8 Hz so it could not contribute. **EVACT0 = COUNT** turns
+  the counter into a gate: 20 ms with the line low advanced it **0**
+  counts and 20 ms with it high advanced it **1863** against 1864 at the
+  measured generator rate.
+- **ERRATUM 1.21.7 DID NOT REPRODUCE.** Dithering is a very sharp
+  witness - a dithered duty of 200 + 32/64 shows as **exactly two pulse
+  widths**, 199 and 200 - and in the one arrangement where the erratum
+  can be told apart from a retrigger's own truncation (a periodic
+  hardware RETRIGGER arriving constantly at a rate that never cuts into
+  the pulse) the dithered waveform still showed **exactly those two and
+  no third**, over forty captures three times over. **And the instrument
+  is proved sensitive**: with the retrigger moved to a rate whose
+  landing point walks through the pulse, the distinct-width count rose
+  at once - from 1 to 2 undithered and from 2 to 3 dithered - which is a
+  retrigger's own doing and not the erratum's. Recorded as unreproduced,
+  not disproved.
+
 ## Not covered yet
 
 Driver gaps (deliberate):
 
-- **DMA-driven operation.** The trigger ids are published
-  (`dma_trigger_overflow`, `dma_trigger_match`) and nothing wires them to
-  a `DmaChannel`; the circular-buffer DMA choreography of 36.6.5.1 waits
-  for its first user. CTRLA.DMAOS is a configuration field only.
+- **CTRLA.DMAOS**, the one-shot DMA trigger of 36.6.5.1: a configuration
+  field only. The per-cycle trigger is bench-verified (above).
 - **The TCC as a WAKE source.** 36.6.6's counting half is measured (see
   "Bench findings"); no TCC interrupt has ever left a sleep, and the
   fault inputs in a standby are untouched.
@@ -460,16 +558,15 @@ Driver gaps (deliberate):
 - **`TccPwm`'s wider periods.** `PwmChannel` scales against a 16-bit
   `max`, so a period past 65535 on a 24-bit instance has to be driven
   through the resource's own `set_cc_buffer()`.
-- **The circular buffers** (WAVE.CIPEREN and CICCENx) are exposed and
-  refused per instance, and no task uses them; they are meant for RAMP2,
-  RAMP2A and DSBOTH together with DMA.
+- **A task over the circular buffers.** WAVE.CIPEREN and CICCENx are
+  bench-verified (above) and no task wraps them.
 
 Not judged, and deliberately so:
 
 - **Erratum 1.21.7** (dithering plus external RETRIGGER events distorts
-  pulses) is a caller obligation this suite cannot stage: nothing here
-  retriggers a dithering TCC, and the retrigger the erratum means may
-  arrive on an event channel the driver cannot see.
+  pulses) was STAGED and DID NOT REPRODUCE - see "Bench findings" for
+  the arrangement, and for the control that shows the instrument would
+  have seen it. Recorded as unreproduced, not disproved.
 - **Erratum 1.21.8** - see above. Recorded as unreproduced, not
   disproved.
 - **Erratum 1.21.5** (advance capture modes needing the upper channels)
@@ -478,21 +575,14 @@ Not judged, and deliberately so:
 
 Implemented but not bench-verified:
 
-- **The frequency waveform modes** (NFRQ toggling, MFRQ with CC0 as the
-  period) beyond NFRQ's use as an overflow source in letter d.
-- **Dual-slope critical PWM** (`dual_slope_critical`), where CCx and
-  CC(x + CC_NUM/2) control the two edges, and **RAMP2A**.
-- **The fault filters, blanking and qualification** (FCTRLn.FILTERVAL,
-  BLANK/BLANKVAL, QUAL) and the `alternate` fault source: configured and
-  refused where illegal, never given a stimulus fast or noisy enough to
-  need them.
+- **The `alternate` fault source** (FCTRLn.SRC = ALTFAULT, one fault
+  taking the other's state at the end of the previous period).
 - **The advanced capture actions** (CAPTMIN/CAPTMAX/LOCMIN/LOCMAX/
   DERIV0/CAPTMARK) - see erratum 1.21.5 above.
-- **The second recoverable fault (B) and the second non-recoverable input
-  (TCE1)**: the vocabulary is symmetric and only the A/TCE0 half has run
-  on silicon.
-- **`TccEvent0Action`'s `increment`, `count_while_active` and `stamp`,
-  and `TccEvent1Action`'s `direction`, `stop` and `decrement`**: only
-  `count`, `fault` and the PPW capture have run.
+- **The second non-recoverable fault input (TCE1)**: only the TCE0 half
+  has run. Recoverable fault B is bench-verified (above).
+- **`TccEvent0Action`'s `stamp`, and `TccEvent1Action`'s `direction`,
+  `stop` and `decrement`**: `increment`, `count_while_active`, `count`,
+  `retrigger`, `fault` and the PPW capture have all run.
 - **The count event output** (EVCTRL.CNTEO with its four CNTSEL choices)
   and the retrigger event output.

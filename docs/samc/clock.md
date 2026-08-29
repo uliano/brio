@@ -103,6 +103,14 @@ sixteen on generator 1, eight everywhere else) - bits written past
 the range are ignored, so a linear divisor above 255 means something
 on generator 1 alone.
 
+**And in the DIVSEL regime the width is also a CEILING**, measured by
+`test_samc_timer_dma` letter i, which counts generator 7 against the
+SysTick wall clock: **DIV = 8 and DIV = 9 give the SAME divisor of 512
+= 2^9** on that eight-bit field. So the rule is 2^(DIV+1) SATURATED at
+2^(width+1), and a DIV past the field's width buys nothing. The two
+measurements agree where they overlap - both put DIV = 8 at 512 - and
+only the extrapolation past it was ever in question.
+
 **A generator source change is glitch-free on the fly** (16.6.2.6):
 the old source is released only once the new one is ready - which is
 what lets init re-state generator 0 while executing from it, and what

@@ -595,7 +595,15 @@ struct GclkConfig {
     /// both fed by OSC48M, so the count IS the divisor and no reference
     /// error can enter - and gets 2, 16 and 512 for DIV = 0, 3 and 8.
     /// Generator 1, the sixteen-bit one, gives 512 for the same DIV = 8,
-    /// so the field's WIDTH plays no part at all.
+    /// so the field's WIDTH plays no part in the FORMULA.
+    ///
+    /// IT DOES PLAY A PART IN THE CEILING, though, and that is measured
+    /// too (test_samc_timer_dma letter i): on generator 7, whose DIV
+    /// field is eight bits, DIV = 8 and DIV = 9 give the SAME divisor of
+    /// 512 = 2^9. So the rule is 2^(DIV+1) SATURATED AT 2^(width+1), and
+    /// a DIV past the field's width buys nothing. The two measurements
+    /// agree at DIV = 8 and only the extrapolation past it was ever in
+    /// doubt.
     bool div_pow2 = false;
     bool improve_duty = false;   ///< IDC: 50 % duty for an odd divider (16.6.2.8)
     bool output_enable = false;  ///< OE: the generator on its GCLK_IO pad

@@ -1764,6 +1764,119 @@ gets its dated home in `docs/design/` when taken.
   (both hands); check_samc/check_family/host green. Docs: platform.md
   gained "Sleep, peripheral by peripheral"; port.md + 14 chapter docs
   each lost exactly the gap this closed; bench.md row + firmware line.
+  **TIMER DMA + THE TIMERS' ADVANCED MODES DONE 2026-08-29 (Opus
+  delegation, REVIEWED BY FABLE and COMMITTED same day, all six
+  judgment calls accepted): the trigger ids both timer drivers had
+  published and nothing had ever used, and the gaps tc.md and tcc.md had
+  been carrying since their own campaigns.** NEW SUITE
+  test_samc_timer_dma z 101/101 THREE TIMES (twice warm, once cold from a
+  fresh flash) plus a fourth green run after the canaries, 10 letters,
+  under four seconds, WIRELESS - and NOT ONE LINE OF DRIVER CODE
+  CHANGED: every edit to brio/ in this pass is a COMMENT, the md5 gate
+  showing all 29 pre-existing SAM release images byte-identical with the
+  new suite the only addition. THE INSTRUMENT IS THE FIRST FINDING: a
+  TCC or TC waveform reaches a capture channel through a COMBINATIONAL
+  CCL LUT published as an EVSYS generator, so both its edges are delayed
+  alike and a period and a pulse width come out untouched - Lut<0>'s
+  INSEL "TC" is TC0's WO[0] and its "TCC" is TCC0's, so one fabric
+  carries either, with no pad, no pull and no wire (the sleepwalk
+  campaign's stimulus technique, reused as a MEASURING instrument).
+  THE HEADLINE is the ROUND TRIP: a DmaLoopEngine plays an eight-entry
+  duty table into TCC0's CCBUF0 on the OVF trigger while TWO
+  DmaPingPongEngines drain the capture meter's CC0 and CC1, and over 192
+  judged samples of each stream the captured widths ARE the played table,
+  in order, with a WORST ERROR OF ZERO TICKS and a phase holding across
+  every lap boundary of the loop and every block boundary of both streams
+  - the period not moving by a single tick, no overrun, no 1.10.4
+  refusal. So the streaming engines have their THIRD peripheral family
+  and util/'s stream contract was not touched. THE DOCTRINE THE TIMERS
+  QUALIFY: 25.8.8 makes a DMA trigger the RISE of a request the
+  peripheral holds up, which is why a SERCOM's TX engine needs kick() and
+  why the ADC stream drains RESULT before arming - but A TC CAPTURE'S
+  REQUEST IS NOT A LEVEL WAITING TO BE RE-RISEN. A stream armed with
+  INTFLAG.MCx already standing filled two whole blocks in fifty periods,
+  and - the half that rules out "selecting TRIGSRC over a high level
+  looked like a rise" - a stream STALLED to a dead stop and re-enabled
+  with CHCTRLB UNTOUCHED and the flag still up picked straight up again.
+  Every capture asks again, read or not; and a DMA beat is the
+  acknowledgement a CPU read would have been (eight blocks each on both
+  channels with INTFLAG.ERR never rising, where thirty unread periods
+  raised it). THE OTHER MEASUREMENTS, driver by driver. TC: the captured
+  period is the waveform's LESS ONE TICK every time (the capture edge
+  both latches COUNT and clears it); MFRQ toggles on every match (4799
+  captured for CC0 = 2399, pad 499 per mille); MPWM SPENDS CC0 AS THE
+  PERIOD AND CHANNEL 0'S OWN OUTPUT DEGENERATES - WO[0] matches only at
+  TOP and is high for all but one tick, pad 999 per mille and the LUT
+  agreeing, while WO[1] on PA23 carries the duty at 250 against 250; the
+  16-bit TcPwm task runs (242 per mille, captured period 65535); INVEN
+  inverts (757); PWP is PPW with the two registers exchanged and PW needs
+  one channel where PPW needs two; STAMP walks the counter by 18 or 19
+  counts against 4800/256 = 18.75; PRESCSYNC = GCLK STARTS THE COUNTER A
+  WHOLE PRESCALED TICK EARLIER than either prescaler-synchronized option
+  (means 17.96 / 16.90 / 17.10 over 300 retrigger phases, reproducible to
+  a hundredth of a tick) while PRESC and RESYNC are DECLINED as
+  indistinguishable from the CPU, since a RETRIGGER through CTRLBSET is
+  itself taken on a prescaled clock; and CTRLA.ALOCK holds a buffered
+  write until the UPDATE command, with the LED pad as the witness (247 ->
+  754 free, 245 -> 245 -> 745 locked). TCC: a COMPARE REGISTER IS A WORD
+  AND A DUTY STREAM'S BEAT MUST BE ONE (a halfword write into CCBUF lands
+  in the low half alone - 0x00ABCDEF then 0x1234 reads 0x00AB1234); a
+  flooded loop ran 1229 laps in 20 ms against 25 paced by the TCC and
+  reported NOTHING wrong, because the loss is a STORE the peripheral
+  discarded and a discarded buffered write loses a value without
+  corrupting one; THE HARDWARE CIRCULAR BUFFER (WAVE.CICCEN0, set under a
+  running timer) plays two values for ever with no CPU and no DMA, and
+  CIPEREN does the same for the PERIOD, against the software loop's one
+  interrupt per lap - so the circular buffer wins at two values and loses
+  at three; NFRQ toggles on the PERIOD and CC0 moves nothing at all,
+  where MFRQ makes CC0 the top; DUAL-SLOPE CRITICAL's arithmetic, which
+  36.6.2.5.7 never prints, is width = (PER - CC0) + (PER - CC2), exact to
+  the tick at three settings; RAMP2A PAIRS TWO COUNTER CYCLES (the period
+  doubles, the width does not move) and does NOT give two duties as its
+  name invites; recoverable fault B is A's mirror on channel 1's event
+  input; FCTRLn.FILTERVAL COUNTS GCLK_TCC CYCLES AND NOT PRESCALED ONES -
+  the dead-time unit's story again and NOT what 36.8.5 or the driver's
+  own comment said - measured as a THRESHOLD on one 93 kHz generator (20
+  us bare, 160 us at FILTERVAL 15, UNMOVED by a sixty-fourfold prescaler
+  change, where fifteen cycles of that clock are 160.9); a blanking
+  window gates the INPUT and not its edge; FCTRLn.QUAL ties the fault to
+  THE FAULT'S OWN CHANNEL output (CC1 for fault B, and the first version
+  moved CC0 and measured a qualifier that never fired at any duty);
+  EVACT0 = INCREMENT gives COUNT = 20 for twenty pulses exactly and
+  EVACT0 = COUNT turns the counter into a gate (0 counts low, 1863
+  against 1864 high). ERRATUM 1.21.7 STAGED AND DID NOT REPRODUCE: a
+  dithered duty shows as EXACTLY TWO pulse widths, and under a periodic
+  hardware RETRIGGER arriving at a rate that never cuts into the pulse it
+  still showed exactly those two - with a CONTROL proving the instrument
+  sensitive (move the retrigger so its landing point walks through the
+  pulse and the distinct-width count rises at once, dithered and
+  undithered alike, which is a retrigger's own doing). Recorded as
+  unreproduced, not disproved - the standing 1.21.8 already has. 1.21.5
+  (advanced capture) is DELIBERATELY NOT ATTEMPTED and stays stated: it
+  is a property of the whole channel set and wants a varying capture
+  stimulus this letter set has no free channel for. A CLOCK CORRECTION
+  FELL OUT ON THE WAY, and it reconciles rather than overturns: DIVSEL's
+  divisor is 2^(DIV+1) SATURATED AT 2^(field width + 1) - on generator 7,
+  whose DIV field is eight bits, DIV = 8 and DIV = 9 give the SAME 512 -
+  which agrees with test_samc_clock letter f where the two overlap and
+  fixes only the extrapolation past the width. TWO METHOD LESSONS PAID
+  FOR IN FAILED VERDICTS: a TC CAPTURE REGISTER IS TWO REGISTERS, so one
+  read taken after the signal under test has been reconfigured hands back
+  the PREVIOUS arrangement's capture (the first waveform-mode letter
+  "measured" MPWM's period as MFRQ's), and A VERDICT LINE IS FOUR
+  MILLISECONDS OF CONSOLE where a block of this stream is two and a half,
+  so a print between arming a stream and draining it overruns the engine
+  - which passed alone and failed inside z, the worst way to find it.
+  Docs: tc.md and tcc.md lose exactly the gap lines this pass closes and
+  gain the numbers, dmac.md gains the trigger-doctrine qualification and
+  the timers as the engines' third family, clock.md gains the DIVSEL
+  ceiling, bench.md gains the suite row and board C's firmware. Canaries
+  re-run by hand: tc z 77/77, tcc z 143/143, analog_dma z 78/78,
+  sleepwalk z 76/76, dma z 112/112 (agent AND Fable - the reviewer also
+  re-proved the comment-only claim by worktree md5, 29/29, and ran the
+  new suite's cold z); check_samc OK, check_family OK, host 23/23. All
+  six judgment calls ACCEPTED at review (the DIVSEL ceiling verified
+  measured, not inferred); memory samc-session-2026-08-29-timer-dma.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and

@@ -2,16 +2,17 @@
 
 > **PROVISIONAL.** The whole chapter is built and bench-verified except
 > the N-variant capture modes (which this family's device header does not
-> even declare), DMA-driven operation and sleep. One measurement the
-> suite deliberately DECLINES to make is listed too: capture on an I/O
-> pin cannot be given a controlled edge on a board with no wires. The
-> list is in "Not covered yet".
+> even declare) and sleep. One measurement the suite deliberately
+> DECLINES to make is listed too: capture on an I/O pin cannot be given a
+> controlled edge on a board with no wires. The list is in "Not covered
+> yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 35 - and
 errata DS80000740S items 1.20.1 to 1.20.3, of which **one is this
 silicon**. Driver: `samc/tc.hpp`. Family fixture
 `test/family_samc/tc.cpp` plus four negatives under
-`tools/check_samc.sh`; the bench suite is `test_samc_tc`.
+`tools/check_samc.sh`; the bench suites are `test_samc_tc` and - for
+DMA-driven operation and the advanced modes - `test_samc_timer_dma`.
 
 ## What the silicon does
 
@@ -266,6 +267,81 @@ witness.
   PUBLICATION, not capture - and **not one line of `util/` changed** to
   make it work.
 
+## Bench findings, DMA and the advanced modes
+
+From `test_samc_timer_dma` (10 letters, **101 verdicts, 101/101 three
+times - twice warm and once cold from a fresh flash**, under four
+seconds). Nothing to wire, and the instrument is the finding it rests
+on: a TCC or TC waveform reaches a capture channel through a
+COMBINATIONAL CCL LUT published as an EVSYS generator, so both its edges
+are delayed by the same handful of cycles and both a period and a pulse
+width come out untouched. `Lut<0>`'s INSEL "TC" source is TC0's WO[0]
+and its "TCC" source is TCC0's WO[0], so one fabric carries either.
+
+- **A TC CAPTURE'S DMA REQUEST IS NOT A LEVEL WAITING TO BE RE-RISEN.**
+  25.8.8 makes a trigger the RISE of a peripheral's request, and
+  35.6.2.8 makes reading CCx the only thing that clears INTFLAG.MCx - so
+  an unread capture looks exactly like the standing request that wedges
+  a SERCOM's transmit engine or an ADC's stream. It does not behave like
+  one: a ping-pong stream **armed with MC0 already standing filled two
+  whole blocks in fifty waveform periods**, and - the discriminating
+  half - a stream stalled to a dead stop and then **re-enabled without
+  CHCTRLB being touched at all** picked up again with the flag still up.
+  Every capture asks again, read or not. `dmac.md` carries the same
+  finding from the controller's side.
+- **A DMA beat is the acknowledgement a CPU read would have been.** With
+  both capture channels streamed, **eight blocks each drained with
+  INTFLAG.ERR never rising** - where thirty periods with nothing read
+  raised it in the same letter.
+- **A capture register is TWO registers, and one read after a change is
+  stale.** CCx has CCBUFx behind it, so a reading taken after the signal
+  under test has been reconfigured hands back what the PREVIOUS
+  arrangement captured. The first version of the waveform-mode letter
+  "measured" MPWM's period as MFRQ's and INVEN's width as the run before
+  it. Draining both stages and then taking a whole fresh capture is what
+  makes a reading current; a reader keeping up with a running stream
+  never notices.
+- **The captured period is the waveform's LESS ONE TICK**, every sample
+  of it: the capture edge both latches COUNT and clears it, so 4800 ticks
+  read as **4799**, and 192 consecutive streamed samples were 4799 with
+  no exception.
+- **MFRQ toggles on every match**, so one waveform period is two counter
+  periods: CC0 = 2399 gave a captured **4799** against 2 x (CC0+1) - 1
+  exactly, half the width, and **499 per mille** on PA22.
+- **MPWM spends CC0 as the period and channel 0's own output
+  degenerates**: WO[0] matches only at TOP, so it is high for all but one
+  tick of every period (**captured period 2399, width 2398, pad 999 per
+  mille** - the pad and the LUT agreeing), and it is **WO[1] on PA23 at
+  250 per mille against CC1/(CC0+1) = 250** that carries the duty.
+- **The 16-bit `TcPwm` task** runs: duty 16384 of 65535 read **242 per
+  mille** on the pad with a captured period of **65535**, which is what
+  NPWM in COUNT16 fixes TOP at.
+- **DRVCTRL.INVEN inverts the output**: the same 25 % waveform read
+  **757 per mille**.
+- **PWP is PPW with the two registers exchanged** and nothing else:
+  CC0 = 4799 / CC1 = 2398 became CC0 = 2398 / CC1 = 4799. **PW** put the
+  same width in CC0 with one channel where PPW needs two.
+- **STAMP walks the counter by a fixed step.** An 8-bit counter with
+  PER = 199 at /256, stamped by a 4800-tick waveform, advanced **18 or
+  19 counts** per event against 4800/256 = 18.75 - and the counter has
+  to be put back to zero by hand after a mode change, because a COUNT
+  left above the new PER runs all the way to 0xFF (the trap
+  `test_samc_rtc` found in the RTC's mode 1, and it is the TC's too).
+- **PRESCSYNC = GCLK starts the counter a whole prescaled tick earlier**
+  than either prescaler-synchronized option. Over 300 retrigger phases
+  spanning one tick at /1024, the mean count after a fixed wait was
+  **17.96 for GCLK against 16.90 for PRESC and 17.10 for RESYNC**,
+  reproducible to a hundredth of a tick. **PRESC and RESYNC are not
+  distinguishable from the CPU** and the suite declines the distinction
+  in print: RESYNC's extra act is resetting the prescaler, and a
+  RETRIGGER issued through CTRLBSET is itself taken on the next prescaled
+  clock, so the reset has nothing left to move.
+- **CTRLA.ALOCK holds a buffered write until the UPDATE command**, with
+  the pad as the witness: with ALOCK clear a CCBUF write moved the LED
+  from **247 to 754** per mille at the next update; with it set the same
+  write left the pad at **245** and the UPDATE command released it to
+  **745**.
+
 ## Not covered yet
 
 Driver gaps (deliberate):
@@ -274,18 +350,15 @@ Driver gaps (deliberate):
   C20/C21 **N** variants only, and this family's device header does not
   declare CTRLA.CAPTMODE at all, so there is nothing to gate and nothing
   to write.
-- **DMA-driven operation.** The trigger ids are published
-  (`dma_trigger_overflow`, `dma_trigger_match`), and nothing wires them
-  to a `DmaChannel`; the first user is what builds that.
 - **Sleep, half of it.** `CTRLA.RUNSTDBY` is now exercised and it is
   the load-bearing bit of the whole clock chain (`platform.md`): a TC
   with it set counts through a standby, with its generator's and its
   source's own RUNSTDBY clear. `on_demand` is still only a field -
   35.6.7's clock-request behaviour, ONDEMAND stopping the request while
   STATUS.STOP is set, has no owner.
-- **The double-buffer surface beyond the two setters.** `CTRLA.ALOCK`,
-  the UPDATE command and the buffer-valid flags are all exposed, but no
-  task uses `lock_update` to stage a coordinated multi-channel update.
+- **A coordinated multi-channel update.** `CTRLA.ALOCK` and the UPDATE
+  command are bench-verified (above), but no task uses `lock_update` to
+  stage two channels changing together.
 
 Not judged, and deliberately so:
 
@@ -300,13 +373,11 @@ Not judged, and deliberately so:
 
 Implemented but not bench-verified:
 
-- **The 16-bit `TcPwm` task** and the match waveform modes (MFRQ/MPWM):
-  the bench PWM is `TcPwm8` in NPWM, where TOP is the period register.
-- **`TcPulseWidthMeter`** (EVACT = PW) and the `stamp` and `pulse_width_
-  period` actions: only PPW has run on silicon.
-- **TC1 and TC4 as counters in their own right**, `PRESCSYNC` other than
-  `gclk`, `count_down` with a capture action, `invert` (DRVCTRL.INVEN) on
-  a waveform output, and `debug_run`.
+- **TC1 alone as a counter in its own right**: it has run only as the
+  client half of a 32-bit pair.
+- **`count_down` with a capture action**, and **`debug_run`** beyond the
+  bit being writable - a halted debugger is out of a console suite's
+  reach.
 - **Operation on the E and G variants**: compile-checked only. The block
   is identical across the family; what differs is which pads carry a
   waveform output, and that is exactly what the family fixture asserts

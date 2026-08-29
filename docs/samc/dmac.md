@@ -18,8 +18,10 @@ does"). Driver: `samc/dmac.hpp` (`Dmac` block + `DmaDescriptor` /
 `DmaLoopEngine` / `DmaPingPongEngine`, the two streaming shapes).
 Family fixture `test/family_samc/dmac.cpp` plus negatives under
 `tools/check_samc.sh`; the bench suites are `test_samc_dma` (the block,
-the channel, the serial engines) and `test_samc_analog_dma` (the
-streaming engines and the element-type generalization).
+the channel, the serial engines), `test_samc_analog_dma` (the streaming
+engines and the element-type generalization) and `test_samc_timer_dma`
+(the same two engines on the timers, and the peripheral that does NOT
+present its request the way 25.8.8 leads one to expect).
 
 ## What the silicon does
 
@@ -439,7 +441,47 @@ and the switch says so.
   gained the span API the TX engine drains through. The element-type
   generalization and the two streaming engines were held to the same
   gate: all 27 pre-existing SAM release images are byte-identical
-  after them.
+  after them, and all 29 after the timers' pass, which added a suite and
+  changed no line of code in this header.
+
+From `test_samc_timer_dma` (10 letters, 101 verdicts, wireless), which
+is the streaming engines' THIRD peripheral family and the one that
+qualifies the trigger doctrine:
+
+- **NOT EVERY PERIPHERAL PRESENTS ITS DMA REQUEST AS A LEVEL, and a TC
+  CAPTURE CHANNEL DOES NOT.** 25.8.8 makes a trigger the RISE of a
+  request the peripheral holds up, which is why `DmaTxEngine` needs
+  `kick()` when a SERCOM's DRE already stands and why the ADC stream
+  drains RESULT before arming. A TC capture's flag is INTFLAG.MCx and
+  35.6.2.8 makes reading CCx the only thing that clears it, so an unread
+  capture looks identical to a standing request - and it does not
+  behave like one. Measured two ways: a `DmaPingPongEngine` **armed with
+  MC0 already set filled two whole blocks in fifty waveform periods**,
+  and - the half that rules out "selecting TRIGSRC over a high level
+  looked like a rise" - a stream STALLED to a dead stop and then
+  re-enabled by `release()`, **with CHCTRLB untouched and the flag still
+  up**, picked straight up again. Every capture asks again, read or not.
+  So `kick()` is harmless where it is unnecessary and necessary where it
+  is not, and the rule that covers both is the one the engines already
+  state: arm with the request drained, and the first beat is a fresh one
+  either way.
+- **A DMA beat is the acknowledgement a CPU read would have been.** Two
+  ping-pong streams on one capture timer's CC0 and CC1 drained eight
+  blocks each with **INTFLAG.ERR never rising**, where thirty periods
+  with nothing read raised it in the same letter.
+- **A `DmaLoopEngine` feeding a double-buffered peripheral register is
+  one write per update window**, which is the whole reason it works: 192
+  streamed captures matched the played duty table with a **worst error
+  of zero ticks** and a phase that held across every lap and block
+  boundary. Flooded with software triggers the same engine ran **1229
+  laps in 20 ms against 25** paced by the peripheral - and reported
+  nothing wrong, because every beat it moved, it moved: what was lost
+  was a STORE the peripheral discarded, which is the owner's to know
+  and not the controller's.
+- **The element type must be as wide as the REGISTER, not as wide as the
+  value.** A TCC compare register is 32 bits on a 24-bit counter, and a
+  halfword write lands in the low half alone (0x00ABCDEF then a halfword
+  0x1234 reads back **0x00AB1234**), so a duty stream's beat is a WORD.
 
 From `test_samc_analog_dma` (10 letters in `z`, 72 verdicts, wireless -
 PA02 is the DAC's VOUT pad and ADC0's AIN0 at once), on a chain where a

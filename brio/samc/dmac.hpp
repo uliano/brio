@@ -50,6 +50,16 @@
  *               One software trigger closes the hole, and doubling is
  *               impossible by construction (one pending bit, raised only
  *               if clear), so a kick racing a real trigger is LOST.
+ *               BUT NOT EVERY PERIPHERAL PRESENTS ITS REQUEST THAT WAY,
+ *               and the owner is the only thing that can know: a SERCOM's
+ *               DRE and an ADC's RESRDY do, a TC CAPTURE CHANNEL DOES NOT
+ *               - a capture stream armed with INTFLAG.MCx already
+ *               standing starts anyway, and resumes from a dead stop with
+ *               the flag up and TRIGSRC untouched (test_samc_timer_dma
+ *               letter b, docs/samc/dmac.md). kick() is harmless where it
+ *               is unnecessary and necessary where it is not; arming with
+ *               the request drained is what makes the first beat a fresh
+ *               one either way.
  *   abandon()   THE CALLER DECIDES A BLOCK IS DEAD, never the engine:
  *               only the peripheral's owner can read the flags that make
  *               "dead" a fact rather than a timeout. What the

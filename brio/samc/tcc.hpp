@@ -166,8 +166,7 @@
  *  1.21.1 Circular Buffer in standby, 1.21.2 RAMP2 double restart,
  *  1.21.3 CAPTMARK, 1.21.4 Capture Overflow within 3+3 clocks.
  *
- * NOT BUILT (docs/samc/tcc.md carries the list): DMA-driven operation
- * (the trigger ids are published, nothing wires them), the debug-fault
+ * NOT BUILT (docs/samc/tcc.md carries the list): the debug-fault
  * state as an exercised path (FDDBD is exposed, a halted debugger is
  * not something a bench suite can stage), and sleep, which the power
  * pass owns together with RUNSTDBY.
@@ -607,9 +606,21 @@ struct TccFaultConfig {
     TccFaultBlank blank = TccFaultBlank::period_start;
     uint8_t blank_value = 0;
 
-    /// FCTRLn.FILTERVAL, in prescaled clocks; a pulse shorter than this
-    /// is discarded and a valid one is delayed by it. MUST be zero for a
-    /// synchronous event source - which erratum 1.21.9 forbids anyway.
+    /**
+     * FCTRLn.FILTERVAL: a pulse shorter than this is discarded and a
+     * valid one is delayed by it. MUST be zero for a synchronous event
+     * source - which erratum 1.21.9 forbids anyway.
+     *
+     * IT COUNTS GCLK_TCC CYCLES, NOT PRESCALED ONES, and that is
+     * MEASURED (test_samc_timer_dma letter i, docs/samc/tcc.md): with
+     * one generic clock and two prescalers sixty-four apart, the
+     * shortest pulse that still makes a valid fault does not move, and
+     * it lands where fifteen cycles of the GENERIC clock put it - 160 us
+     * on a 93 kHz generator against 160 us measured. 36.8.5 says
+     * "prescaled clocks" and so did this comment; the dead-time unit
+     * (36.8.7) reads exactly the same way and was caught being generic
+     * clocks by the TCC campaign, so this chapter has form.
+     */
     uint8_t filter_value = 0;
 };
 
