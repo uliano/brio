@@ -162,6 +162,31 @@ The engines are POLICIES, not features of the task:
   the same kernel glue works. Pacing is WHOEVER OWNS THE PORT's
   policy - a kernel TimeEvent every few ticks is the shape brio
   expects - and each harvest costs ~10 us of masked interrupts.
+  `harvest()` hands the channel a new run whenever the SILICON says it
+  is not running one, not only when the engine's own beat count says
+  the buffer filled: a reading that was refused leaves that count
+  behind, and a re-arm rule that trusted it alone would never fire
+  again.
+- **THE STANDING REQUEST, and it is the load-bearing detail of both
+  engines.** A peripheral asserts its DMA request as a LEVEL - "my
+  transmit buffer is free", "I have a character" - and the DMAC turns
+  that level into a pending trigger when it RISES. A block armed while
+  the level is ALREADY HIGH is therefore waiting for an edge that has
+  already happened: the channel sits enabled, CHSTATUS empty, the
+  peripheral's own flag standing, and not one beat moves. Both
+  `pump_tx()` and the receive re-arm therefore ask the SERCOM whether
+  its flag is already set and, if it is, give the channel one software
+  trigger. It cannot double a byte: a channel has exactly one pending
+  bit and SWTRIGCTRL raises it only if it was clear (25.8.8), so a kick
+  that races a real trigger is lost rather than served twice.
+- **A REFUSED BYTE STILL NUDGES.** `write_byte()` returning false is
+  the state in which nothing is draining the ring, and `print()`
+  answers that false by trying again for ever - so the refusal path
+  arms DRE (or pumps the engine) instead of returning silently, and
+  `write_bulk()` does the same when nothing fitted. An EMPTY run
+  through `write_bulk()` is a legal call for exactly this: it queues
+  nothing and takes the same path, which is how a loop waiting for the
+  ring to drain still gives the transport its push.
 - **What is traded away, and cannot be given back:** per-byte error
   attribution. With RXC armed, STATUS is read before each DATA and a
   corrupted byte is dropped precisely; with the channel consuming
@@ -220,6 +245,47 @@ int main() {
   served a typed burst unchanged with the RXC interrupt never armed;
   both engines at once survived the erratum-1.10.4 stress with zero
   violations on their own channels (the full account is in dmac.md).
+
+**THE FOUR SHAPES, BYTE FOR BYTE** (suite `test_samc_uart` with
+`tools/uart_stress.py` at the other end; the pattern is a 32-bit
+xorshift both ends generate, so a lost byte is located and not merely
+counted). Every combination of interrupt and DMA on each direction was
+run as a 1.2 s echo at 115200, twice:
+
+  | transport      | received | echoed back | notes                    |
+  |----------------|----------|-------------|--------------------------|
+  | irq TX + irq RX| 11840    | 11840       | byte-exact both ways     |
+  | DMA TX + irq RX| 11840    | 11840       | byte-exact both ways     |
+  | irq TX + DMA RX| 11813    | 11813       | gaps at block boundaries |
+  | DMA TX + DMA RX| 11827    | 7431        | gaps, plus ring pressure |
+
+  The interrupt receiver is exact; the DMA receiver loses a few bytes
+  per window, and WHERE it loses them is its contract rather than a
+  defect - a block that fills has no run to continue into until a
+  harvest re-arms the channel, so whatever arrives in that gap is gone.
+  It is measured, not hidden: the suite prints the position of the first
+  missing byte.
+
+- **Rates, through the interrupt transport, echoing:** 115200 and
+  1 Mbaud are byte-exact; 3 Mbaud loses, and the loss is ACCOUNTED FOR
+  in `hw_overruns` rather than silent - one RXC interrupt per byte is
+  300000 a second, which the two-deep FIFO does not survive.
+- **Frame formats, against a host that can speak them:** 8E1, 8O1, 8N2,
+  7E1 and 7N2 all carried the stream byte-exact both directions with no
+  receive error raised. Frames narrower than eight bits carry only their
+  low bits, and both ends mask accordingly.
+- **The error paths, provoked and counted.** A host at 57600 into a
+  115200 receiver raises framing errors (47 in a 1135-character window)
+  and the stream comes back byte-exact at the right rate afterwards.
+  THE FRAME MISMATCH IS ASYMMETRIC, which the chapter does not say: a
+  host at 8E1 into an 8N1 receiver raises framing errors freely (198 in
+  1210 characters - the extra parity bit lands where the receiver's stop
+  bit belongs), while the reverse - a host at 8N1 into an 8E1 receiver -
+  raises NOTHING AT ALL: 2432 characters arrived with frame and parity
+  counters both zero. The receiver reads the sender's stop bit as the
+  parity bit and finds the idle line where its own stop bit belongs, and
+  nothing about that is illegal. A UART cannot be trusted to notice that
+  its peer is missing a bit; it notices an extra one.
 
 **How fast the link really goes, and what it costs** (probe app
 `serial_speed`, which reports throughput while the host checks every
@@ -283,7 +349,14 @@ Driver gaps (not built):
   RX engine only publishes what `harvest()` takes, and how often to call
   it is left entirely to the port owner - which at 3 Mbaud means every
   hundred microseconds or so. Nothing in the driver helps a caller get
-  that right, and getting it wrong loses bytes silently.
+  that right, and getting it wrong loses bytes.
+- A RECEIVE PATH WITH NO GAP AT ALL. The engine is idle between a block
+  filling and the next harvest re-arming it, and everything that arrives
+  in that window is lost. Two descriptors alternating on one channel
+  would close it; linked descriptors are legal on this silicon revision
+  but sit inside erratum 1.10.4's blast radius, so the shape is named
+  and not built. A caller that cannot afford the gap should take the
+  interrupt receiver, which has none.
 - Within USART: fractional and 3x-arithmetic baud, synchronous mode
   and XCK, RTS/CTS handshaking, RS-485/TE, LIN, IrDA, collision
   detection, auto-baud, start-of-frame/RXS wake, 9-bit data uses,
@@ -293,13 +366,7 @@ Driver gaps (not built):
   device-table job the PORT driver leaves open.
 
 Implemented but not bench-verified:
-- **The RX engine in FULL DUPLEX.** Transmitting through the TX engine is
-  flawless at every rate measured, but an echo that runs both engines at
-  once loses most of the stream and can leave the transport wedged (a
-  blocked `print()` on a TX ring that stops draining). `test_samc_dma`'s
-  duplex letter passes, so either that suite's shape or the probe's
-  misses the condition; it is not isolated.
-- Frame formats other than 8N1 (parity, 5..7/9 bits, two stop);
-  `rebase()` (no dynamic clock exists on this target to drive it);
-  instances other than SERCOM5; `release()`; operation on the E/G
-  variants (compile-checked only).
+- `rebase()` (no dynamic clock exists on this target to drive it);
+  nine-bit frames (this transport's rings are bytes); instances other
+  than SERCOM5; `release()` beyond the suite's own transport handovers;
+  operation on the E/G variants (compile-checked only).

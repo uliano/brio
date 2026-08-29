@@ -444,12 +444,73 @@ gets its dated home in `docs/design/` when taken.
   lossless to 1 Mbaud through the interrupt transport both ways, and
   above it loses in the SOFTWARE ring (hw_overruns stays 0). Console
   policy this suggests: 1 Mbaud as the safe default, 3 Mbaud for
-  transmit-heavy work with DMA + bulk. OPEN AND LOOKS LIKE A REAL BUG:
-  the RX engine in FULL DUPLEX loses most of the stream and can wedge
-  the transport (print blocked on a TX ring that stops draining, the
-  halted core in Ring::push) - while TX-only through the engine is
-  flawless and test_samc_dma's duplex letter passes 112/112, so one of
-  the two shapes misses it. Not isolated; sercom.md records it.
+  transmit-heavy work with DMA + bulk. The duplex bug this probe found
+  is DIAGNOSED AND FIXED - see the UART campaign entry below.
+  **UART TRANSPORT CAMPAIGN DONE 2026-08-29 (Opus delegation, NOT
+  COMMITTED): the duplex wedge diagnosed, fixed and fenced, and the
+  transport matrix given a suite.** THE MECHANISM, in one paragraph:
+  a DMA-fed SERCOM direction stops dead when its channel is armed
+  while the peripheral's own request LEVEL is already high - a trigger
+  is latched on the RISE (25.6.2 / 25.8.8), so the channel sits enabled
+  with CHSTATUS empty, the peripheral's DRE (or RXC) standing, and not
+  one beat moving; on top of that, erratum 1.10.4 is not a bad READING
+  but a destroyed TRANSFER, because 25.6.2.6 makes the write-back the
+  controller's LIVE descriptor for an ongoing block, so a corrupted one
+  leaves the channel running someone else's transfer for ever. Either
+  way DmaTxEngine::busy() stayed true, pump_tx() returned at its first
+  line every time, the ring filled, and print() spun in Ring::push with
+  the board silent - the exact wedge serial_speed reported. CAUGHT IN
+  THE ACT three times over the halt-and-dump and the suite's own
+  snapshot: the transmit channel enabled, DRE and TXC both set, and its
+  write-back holding the RX channel's descriptor (BTCTRL 0x809, SRCADDR
+  = the SERCOM's DATA register, where its own says 0x409 and a RAM
+  address). THE FIX, three pieces, each named to its measurement:
+  dmac.hpp's engines gained kick() (one software trigger, safe by
+  construction - a channel has one pending bit and SWTRIGCTRL raises it
+  only if clear, so a kick racing a real trigger is LOST, never
+  doubled), DmaTxEngine::abandon()/faults() (throw away a block the
+  silicon has stopped running; what it loses is stated, not pretended
+  away) and a harvest that answers "nothing started" instead of
+  suspending a channel whose write-back is still the zeros reset() put
+  there - because 25.6.2.8's second clause sets FERR when a RESUME
+  fetches a next descriptor with a null DESCADDR, which every
+  single-block descriptor here has, and the first version of the
+  recovery livelocked on exactly that. sercom.hpp asks the SERCOM
+  whether its flag is already standing and kicks; makes a REFUSED byte
+  still nudge (write_byte's false is the state in which nothing is
+  draining, and print() answers it by trying for ever); re-arms the
+  receiver when the SILICON says the channel is not running rather than
+  when the engine's beat count says so; and exposes dma_faults().
+  THREE GUESSED FIXES WERE REFUTED BY THE DATA before the right one
+  stood: that the completed write-back's addresses are rewritten (they
+  are not - the case that looked like it was two different blocks), that
+  consistent() was giving false positives (it was not - the refusals
+  were the symptom of a dead channel), and that a repeated-refusal
+  give-up would recover it (it made things deterministically worse).
+  THE ISOLATION that settled it: with only ONE engine and one unrelated
+  churning channel the same death appears, so "the two engines interact"
+  was never the point - two concurrently triggered channels are enough,
+  and test_samc_dma letter j passes because nothing is being RECEIVED
+  during it, so its RX channel takes no triggers at all. NEW SUITE
+  test_samc_uart (z 27/27; eleven host letters, 62 verdicts, green twice
+  over) + NEW TOOL tools/uart_stress.py. Measured there: all four
+  transports carry 11840 bytes byte-exact except at the RX engine's
+  block boundaries (11813..11827, and WHERE it loses is its contract -
+  a filled block has no run to continue into until a harvest re-arms
+  it); 8E1/8O1/8N2/7E1/7N2 all byte-exact; 3 Mbaud echo loses in the
+  HARDWARE and the loss is accounted for, never silent; and A FRAME
+  MISMATCH IS ASYMMETRIC - a host at 8E1 into an 8N1 receiver raises
+  198 framing errors in 1210 characters, while a host at 8N1 into an
+  8E1 receiver raises NOTHING (2432 characters, both counters zero: the
+  receiver reads the sender's stop bit as parity and finds the idle line
+  where its stop bit belongs). COST, measured: +4 bytes on every
+  engineless console image (the refusal path's one branch), +292 on
+  serial_speed and +600 on test_samc_dma, blink and probe unchanged.
+  The headline throughput is UNTAXED - raw 3 Mbaud 299251 B/s, DMA+bulk
+  297890 B/s at 9% CPU, 1 Mbaud DMA+bulk 99902 B/s at 5% - identical to
+  the recorded figures. Canaries: test_samc_dma z 112/112 (the erratum
+  still caught and refused, 280 in 153654), check_samc OK, check_family
+  OK. JUDGMENT CALLS QUEUED: see memory samc-session-2026-08-29-uart.
   **FREQM DONE 2026-08-28 (ch. 44, a one-hour peripheral).**
   samc/freqm.hpp NEW: the hardware ratio counter, f_msr = VALUE/REFNUM x
   f_ref between two GCLK generators, with the 24-bit overflow budget
@@ -2311,6 +2372,10 @@ tools/check_family.sh    family compile check over test/family/ (see above) -
 tools/check_samc.sh      the samc twin over test/family_samc/
 tools/bench_boards.py    the bench MANIFEST: the physical boards on the desk
                          (type, console by-path, programmer) - not a target list
+tools/uart_stress.py     the host end of test_samc_uart: the same xorshift the
+                         firmware generates, plus the baud and frame changes only
+                         an OUTSIDE sender can make - the suite's streaming
+                         letters cannot be run without it
 tools/bench.py           the bench orchestrator: list / flash / run / console /
                          duo / fuses, over the manifest and the per-project app
                          rosters build-cmake/apps_{avrdx,samc}.json (each project

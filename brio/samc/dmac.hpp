@@ -126,12 +126,45 @@
  *    RX engines ARE two channels triggered by two independent peripheral
  *    events. So this driver takes the other road: IT NEVER TRUSTS A
  *    WRITE-BACK READ. Every field of a write-back descriptor except BTCNT
- *    and VALID is INVARIANT - the controller copies it from the fetched
- *    descriptor and never rewrites it - so harvest() compares all of them
+ *    and VALID is invariant WHILE THE BLOCK RUNS - the controller copies
+ *    it from the fetched descriptor and, until the block ends, writes back
+ *    only the beat counter (25.10.2) - so harvest() compares all of them
  *    against the copy this driver loaded, bounds-checks BTCNT against the
  *    programmed length, and DISCARDS a reading that fails, counting it.
- *    The TX side never reads a write-back at all: the block length it
- *    programmed plus TCMPL is the whole truth there.
+ *
+ *    THE READING IS NOT THE DAMAGE, and that is the correction this
+ *    header carries after the bench went hunting for a wedged serial port
+ *    (docs/samc/dmac.md, docs/samc/sercom.md). 25.6.2.6: "For an ongoing
+ *    block transfer, the descriptor will be fetched from the WRITE-BACK
+ *    memory section (WRBADDR)." The write-back is therefore not a report
+ *    the driver may take or leave - it is the controller's LIVE COPY of
+ *    the descriptor it is running. When 1.10.4 corrupts it, the transfer
+ *    itself is destroyed: the channel stops moving bytes, raises no
+ *    interrupt, and sits there enabled for ever. Caught in the act with
+ *    two engines on one SERCOM: the transmit channel enabled, its
+ *    peripheral's DRE and TXC both set (the transmitter idle and asking),
+ *    CHSTATUS all zeros, no flag anywhere - and its write-back holding
+ *    the OTHER channel's descriptor (BTCTRL 0x809 with SRCADDR = the
+ *    SERCOM's DATA register, where its own says 0x409 and a RAM address).
+ *    On the receive side the same corruption shows as CHSTATUS.FERR,
+ *    which 25.6.2.8 raises when an invalid descriptor is fetched, and
+ *    which is cleared only by a software RESUME.
+ *
+ *    So validating the reading is NECESSARY AND NOT SUFFICIENT, and the
+ *    two engines below carry the other half: abandon(), which throws away
+ *    a block the silicon has stopped running and hands the channel back
+ *    ready for the next one. WHAT IS LOST when it fires cannot be
+ *    recovered and is not pretended otherwise - an unknown tail of one
+ *    transmit block, or one receive block's worth of arrival count - so
+ *    every abandonment is COUNTED and the count is public. WHO decides a
+ *    block is dead is the peripheral's owner, never this file: only the
+ *    owner knows what its peripheral's own flags mean (see
+ *    samc/sercom.hpp's dead-block predicate, which is one line of SERCOM
+ *    truth: a transmit block cannot be in flight while DRE and TXC are
+ *    both set).
+ *
+ *    The TX side still never reads a write-back for its PROGRESS: the
+ *    block length it programmed plus TCMPL is the whole truth there.
  *
  *  - 1.10.1 (CRCDATAIN written in two consecutive instructions) is rev B
  *    only. The CRC engine is not built here anyway.
@@ -1173,7 +1206,35 @@ public:
     static bool pending() { return (status() & DmaStatus::pending) != 0u; }
     /// An invalid descriptor was fetched. Cleared only by a software
     /// RESUME command (25.8.23) - not by writing anything.
+    ///
+    /// It is not an exotic state. 25.6.2.8 raises it whenever the
+    /// controller fetches a descriptor with VALID = 0, and the ONGOING
+    /// descriptor is fetched from the write-back section (25.6.2.6) -
+    /// which is exactly what erratum 1.10.4 corrupts. A channel that has
+    /// it is suspended, keeps collecting triggers in CHSTATUS.PEND, and
+    /// never transfers again until somebody notices.
     static bool fetch_error() { return (status() & DmaStatus::fetch_error) != 0u; }
+
+    /// Clear a fetch error: 25.8.23 says the bit "is cleared when a
+    /// software resume command is executed", and nothing else clears it.
+    static void clear_fetch_error() { resume(); }
+
+    /**
+     * Is the ONGOING descriptor still this channel's own?
+     *
+     * The cheap, non-invasive half of harvest(): it reads the write-back
+     * and judges it, without suspending anything. It cannot say how far
+     * a block has got - only whether the controller is still running the
+     * transfer that was programmed. False after erratum 1.10.4 has
+     * scribbled the live copy.
+     *
+     * MEANINGLESS BEFORE THE CONTROLLER HAS SPILLED: a freshly started
+     * block whose write-back still holds the previous one's descriptor
+     * (or zeros, after reset()) answers false with nothing wrong. So
+     * this is a question to ask about a block that has had TIME, and the
+     * caller supplies that judgment - see the engines' abandon().
+     */
+    static bool write_back_ok() { return consistent(Dmac::read_write_back(n)); }
 
     // ---- progress -----------------------------------------------------------
 
@@ -1226,6 +1287,25 @@ public:
         // It is one more reason harvest() states that its PACING is the
         // caller's policy - a tight loop over it is not free.
         typename SamPlatform::CriticalSection cs;
+
+        // NOTHING TO SUSPEND, AND SUSPENDING IT IS NOT FREE. When the
+        // controller has not written this slot since reset() zeroed it,
+        // the block has not started: there is no progress to force out,
+        // and the suspend/resume pair is a real risk rather than a waste.
+        // 25.6.2.8: "when the channel is resumed and the DMA fetches the
+        // next descriptor with null address (DESCADDR = 0x00000000) ...
+        // the channel operation is suspended and CHSTATUS.FERR is set" -
+        // and every descriptor this driver builds for a single block has
+        // DESCADDR = 0. Measured: harvesting a just-armed receive channel
+        // in a tight loop killed it with a fetch error, deterministically,
+        // and the recovery re-armed it straight into the same wall.
+        if (Dmac::read_write_back(n) == DmaDescriptor{}) {
+            return DmaProgress{
+                .remaining = loaded_.btcnt,
+                .done = 0,
+                .complete = false,
+            };
+        }
 
         // A channel that has already finished is disabled (BLOCKACT
         // none/interrupt disable it at the end of the last block), and a
@@ -1369,15 +1449,48 @@ public:
     static void arm(volatile void* data, uint8_t trigger,
                     DmaPriority priority = DmaPriority::level0) {
         data_ = data;
-        (void)Channel::reset();
-        (void)Channel::configure({
-            .trigger = trigger,
-            .action = DmaTriggerAction::beat,
-            .priority = priority,
-        });
-        Channel::arm(DmaFlag::complete | DmaFlag::transfer_error, true);
+        trigger_ = trigger;
+        priority_ = priority;
+        claim();
         Nvic::enable(Dmac::irq());
     }
+
+    /**
+     * @brief Throw away a block the silicon has stopped running, and hand
+     * the channel back ready for the next one.
+     *
+     * THE CALLER DECIDES THAT THE BLOCK IS DEAD, not this engine: only
+     * the peripheral's owner knows what its own flags mean (samc/
+     * sercom.hpp's Uart asks whether DRE and TXC are both set, which no
+     * live transmit block can allow). This verb is the consequence, and
+     * it is deliberately blunt - the channel is reset, reconfigured and
+     * re-armed from scratch, because after erratum 1.10.4 the controller's
+     * live descriptor copy is not something to reason about.
+     *
+     * WHAT IS LOST: an unknown tail of the abandoned block. The engine
+     * told its owner `length` beats were in flight and cannot say how
+     * many of them reached the wire, so the owner's ring is left as it
+     * was and those bytes are simply gone. There is no honest alternative
+     * - the one field that would say is the corrupted one.
+     *
+     * @return true when a block was abandoned (and faults() incremented);
+     * false when nothing was in flight.
+     */
+    static bool abandon() {
+        if (!busy_) {
+            return false;
+        }
+        ++faults_;
+        claim();
+        in_flight_ = 0;
+        busy_ = false;
+        return true;
+    }
+
+    /// How many blocks have been abandoned - the erratum's running bill,
+    /// zero on silicon where 1.10.4 does not apply.
+    static uint32_t faults() { return faults_; }
+    static void clear_faults() { faults_ = 0; }
 
     /**
      * Send one contiguous run. False when a block is already in flight or
@@ -1405,6 +1518,28 @@ public:
         return true;
     }
 
+
+    /**
+     * @brief Raise ONE software trigger on the channel.
+     *
+     * THE STANDING REQUEST. A peripheral asserts its DMA request as a
+     * LEVEL - "my transmit buffer is free", "I have a character" - and the
+     * DMAC turns that level into a pending trigger when it RISES. A block
+     * armed while the level is ALREADY HIGH therefore waits for an edge
+     * that has already happened and may never happen again: the channel
+     * sits enabled, CHSTATUS empty, the peripheral's own flag standing,
+     * and not one beat moves. The owner, which is the only thing that can
+     * read the peripheral's flag, gives the channel the missing edge with
+     * this.
+     *
+     * Safe against doubling by construction: SWTRIGCTRL raises the
+     * pending bit only if it was not already set (25.8.8), and the
+     * channel has exactly one, so a kick that races a real hardware
+     * trigger is simply LOST (readable through trigger_lost()) rather
+     * than moving a second beat.
+     */
+    static void kick() { Channel::trigger(); }
+
     /// Beats of the block currently in flight (0 when idle).
     static uint16_t in_flight() { return busy_ ? in_flight_ : 0u; }
     static bool busy() { return busy_; }
@@ -1431,8 +1566,24 @@ public:
     }
 
 private:
+    /// Take the channel from whatever state it is in: reset (which also
+    /// clears both descriptor tables), configure, arm. arm() and
+    /// abandon() are the same act with a different reason.
+    static void claim() {
+        (void)Channel::reset();
+        (void)Channel::configure({
+            .trigger = trigger_,
+            .action = DmaTriggerAction::beat,
+            .priority = priority_,
+        });
+        Channel::arm(DmaFlag::complete | DmaFlag::transfer_error, true);
+    }
+
     static inline volatile void* data_ = nullptr;
+    static inline uint8_t trigger_ = dma_trigger_none;
+    static inline DmaPriority priority_ = DmaPriority::level0;
     static inline uint16_t in_flight_ = 0;
+    static inline uint32_t faults_ = 0;
     static inline bool busy_ = false;
 };
 
@@ -1479,15 +1630,18 @@ public:
     static void arm(volatile void* data, uint8_t trigger,
                     DmaPriority priority = DmaPriority::level0) {
         data_ = data;
-        (void)Channel::reset();
-        (void)Channel::configure({
-            .trigger = trigger,
-            .action = DmaTriggerAction::beat,
-            .priority = priority,
-        });
-        Channel::arm(DmaFlag::complete | DmaFlag::transfer_error, true);
+        trigger_ = trigger;
+        priority_ = priority;
+        claim();
         Nvic::enable(Dmac::irq());
     }
+
+    /// True while the channel is not running a block at all - it
+    /// finished, or was never started. The owner must hand it a new run,
+    /// whatever the engine's own beat arithmetic says: a reading that was
+    /// refused leaves `taken_` behind, and a re-arm rule that trusted
+    /// only `full()` would then never fire again.
+    static bool idle() { return !Channel::enabled(); }
 
     /// Point the channel at a run of free buffer and start filling it.
     static bool start(uint8_t* buffer, uint16_t length) {
@@ -1528,6 +1682,29 @@ public:
         return fresh;
     }
 
+
+
+    /**
+     * @brief Raise ONE software trigger on the channel.
+     *
+     * THE STANDING REQUEST. A peripheral asserts its DMA request as a
+     * LEVEL - "my transmit buffer is free", "I have a character" - and the
+     * DMAC turns that level into a pending trigger when it RISES. A block
+     * armed while the level is ALREADY HIGH therefore waits for an edge
+     * that has already happened and may never happen again: the channel
+     * sits enabled, CHSTATUS empty, the peripheral's own flag standing,
+     * and not one beat moves. The owner, which is the only thing that can
+     * read the peripheral's flag, gives the channel the missing edge with
+     * this.
+     *
+     * Safe against doubling by construction: SWTRIGCTRL raises the
+     * pending bit only if it was not already set (25.8.8), and the
+     * channel has exactly one, so a kick that races a real hardware
+     * trigger is simply LOST (readable through trigger_lost()) rather
+     * than moving a second beat.
+     */
+    static void kick() { Channel::trigger(); }
+
     /// True once the block filled the whole run: the owner must hand over
     /// a new one (start()) or the channel stays idle with its trigger
     /// piling up losses in the peripheral.
@@ -1544,7 +1721,20 @@ public:
     }
 
 private:
+    /// See DmaTxEngine::claim() - the same act, the same two reasons.
+    static void claim() {
+        (void)Channel::reset();
+        (void)Channel::configure({
+            .trigger = trigger_,
+            .action = DmaTriggerAction::beat,
+            .priority = priority_,
+        });
+        Channel::arm(DmaFlag::complete | DmaFlag::transfer_error, true);
+    }
+
     static inline volatile void* data_ = nullptr;
+    static inline uint8_t trigger_ = dma_trigger_none;
+    static inline DmaPriority priority_ = DmaPriority::level0;
     static inline uint16_t capacity_ = 0;
     static inline uint16_t taken_ = 0;
 };

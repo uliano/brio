@@ -899,6 +899,11 @@ class Uart {
     static inline volatile uint8_t m_frame_errors = 0;  // FERR: byte dropped
     static inline volatile uint8_t m_parity_errors = 0; // PERR: byte dropped
     static inline volatile uint8_t m_hw_overruns = 0;   // BUFOVF: bytes lost in HW
+    /// DMA blocks abandoned because the silicon had stopped running them
+    /// (erratum 1.10.4 - see nudge_blocked_tx() and harvest()). Touched
+    /// only from inside `if constexpr (has_*_engine)` branches, so an
+    /// engineless Uart never odr-uses it and does not carry the byte.
+    static inline volatile uint8_t m_dma_faults = 0;
     static inline uint32_t m_baud = 0;                  // for rebase()
 
 public:
@@ -1202,7 +1207,20 @@ public:
             // time: the bytes are in the buffer either way, only the
             // count was doubted.
 
-            if (RxEngine::full() || RxEngine::capacity() == 0u) {
+            // WHEN TO HAND THE CHANNEL A NEW RUN. The obvious answer -
+            // "when the engine's own count says the block filled up" -
+            // has a hole big enough to kill the stream: take() publishes
+            // nothing when a reading is REFUSED, so `taken_` stops
+            // advancing, `full()` never becomes true, and a channel that
+            // has meanwhile finished (or died) is never re-armed. Every
+            // harvest after that reads the same stale write-back, refuses
+            // it again, and not one more byte is ever published. That is
+            // the shape a receive stream was found dead in.
+            //
+            // So the SILICON is asked first and the arithmetic second: a
+            // channel that is not running gets a new run whatever the
+            // count says.
+            if (RxEngine::idle() || RxEngine::full() || RxEngine::capacity() == 0u) {
                 rearm_rx();
             }
             return was_empty && !m_rx.empty();
@@ -1219,6 +1237,12 @@ public:
     /// blocks on a full ring and returns when the bytes are queued.
     static bool write_byte(uint8_t b) {
         if (!m_tx.push(b)) {
+            // A REFUSED BYTE STILL NUDGES. print() answers a false here
+            // by trying again for ever, so if this path can leave the
+            // transport unpoked the program stops - and it could: the
+            // ring is full precisely when nothing is draining it. See
+            // nudge_blocked_tx().
+            nudge_blocked_tx();
             return false;
         }
         if constexpr (has_tx_engine) {
@@ -1295,6 +1319,8 @@ public:
             } else {
                 S::enable_dre_interrupt(true);
             }
+        } else {
+            nudge_blocked_tx();   // nothing fitted: see write_byte()
         }
         return done;
     }
@@ -1333,11 +1359,26 @@ public:
     static uint8_t parity_errors() { return m_parity_errors; }
     static uint8_t hw_overruns() { return m_hw_overruns; }
 
+    /// DMA blocks this transport had to throw away because the silicon
+    /// had stopped running them - erratum 1.10.4's running bill, and the
+    /// number to watch when both engines are named. Always 0, and free,
+    /// without an engine.
+    static uint8_t dma_faults() {
+        if constexpr (has_tx_engine || has_rx_engine) {
+            return m_dma_faults;
+        } else {
+            return 0;
+        }
+    }
+
     static void clear_errors() {
         m_rx_overruns = 0;
         m_frame_errors = 0;
         m_parity_errors = 0;
         m_hw_overruns = 0;
+        if constexpr (has_tx_engine || has_rx_engine) {
+            m_dma_faults = 0;
+        }
     }
 
     /// Stop the transport and hand everything back: the engines and
@@ -1374,6 +1415,47 @@ private:
      * end of the buffer, so a wrapped ring goes out in two blocks and
      * the second is started by the first one's completion.
      */
+    /**
+     * The producer has been refused: the transmit ring is full, which is
+     * exactly the state in which nothing is draining it. Repair whatever
+     * is repairable, then nudge.
+     *
+     * THE DEAD-BLOCK PREDICATE, and it is one line of SERCOM truth. The
+     * engine says a block is in flight; the peripheral says its transmit
+     * buffer is EMPTY (DRE) and its shifter has finished (TXC). Those two
+     * cannot both be true of a live block - a DMA channel with beats left
+     * fills DATA within one beat of DRE rising, which clears both flags.
+     * So the block is not slow, it is dead, and the only thing to do is
+     * throw it away and start the next one. No timer, no rate, no guess:
+     * the contradiction IS the evidence.
+     *
+     * What kills a block that way is erratum 1.10.4 - a concurrently
+     * triggered second channel corrupting this one's write-back, which
+     * 25.6.2.6 makes the controller's LIVE descriptor and not a report
+     * (samc/dmac.hpp's errata note carries the captured state). Before
+     * this existed the transport simply stopped: DmaTxEngine::busy()
+     * stayed true for ever, pump_tx() returned at its first line every
+     * time, the ring filled, and print() spun in Ring::push with the
+     * board silent.
+     *
+     * WITHOUT an engine there is nothing to repair and the nudge is the
+     * ordinary one - arming DRE, which write_byte() would have done
+     * anyway had the byte fitted.
+     */
+    static void nudge_blocked_tx() {
+        if constexpr (has_tx_engine) {
+            constexpr uint8_t idle_transmitter = SercomFlag::dre | SercomFlag::txc;
+            if (TxEngine::busy() && (S::flags() & idle_transmitter) == idle_transmitter) {
+                if (TxEngine::abandon()) {
+                    m_dma_faults = m_dma_faults + 1;
+                }
+            }
+            pump_tx();
+        } else {
+            S::enable_dre_interrupt(true);
+        }
+    }
+
     static void pump_tx() {
         if constexpr (has_tx_engine) {
             typename SamPlatform::CriticalSection cs;
@@ -1384,7 +1466,19 @@ private:
             if (run.empty()) {
                 return;
             }
-            (void)TxEngine::start(run.data(), static_cast<uint16_t>(run.size()));
+            if (TxEngine::start(run.data(), static_cast<uint16_t>(run.size()))) {
+                // THE STANDING REQUEST (samc/dmac.hpp's kick()). DRE is a
+                // LEVEL and the DMAC latches it on the RISE, so a block
+                // armed while the transmit buffer is already free waits
+                // for an edge that has been and gone. The engine then
+                // sits enabled with DRE and TXC both set and moves
+                // nothing, which is exactly how a transmitter was found
+                // dead. Whether that edge is still to come is a question
+                // only this file can ask.
+                if (S::dre_flag()) {
+                    TxEngine::kick();
+                }
+            }
         }
     }
 
@@ -1407,7 +1501,15 @@ private:
                 m_rx_overruns = m_rx_overruns + 1;
                 return;
             }
-            (void)RxEngine::start(room.data(), static_cast<uint16_t>(room.size()));
+            if (RxEngine::start(room.data(), static_cast<uint16_t>(room.size()))) {
+                // The receiver's twin of pump_tx()'s standing request: a
+                // character that arrived while the channel had no run to
+                // fill has already raised RXC, and the rise the DMAC
+                // needed is in the past.
+                if (S::rxc_flag()) {
+                    RxEngine::kick();
+                }
+            }
         }
     }
 

@@ -85,7 +85,24 @@ that handshake: a SUSPEND command on a disabled channel is dropped
 (25.6.3.2), and the block can END between the enabled-test and the
 command landing - so the wait accepts "channel no longer enabled" as
 the answer it is. A RESUME on a channel that is not suspended is not
-a no-op either: it skips the next suspend action (25.6.3.3).
+a no-op either: it skips the next suspend action (25.6.3.3) - and on a
+channel that has not started, it is worse than that: 25.6.2.8 says a
+resume that makes the controller fetch a next descriptor with a null
+DESCADDR sets CHSTATUS.FERR and suspends the channel, and every
+single-block descriptor this driver builds has DESCADDR = 0. So a
+harvest of a channel whose write-back is still the zeros `reset()` put
+there does not suspend anything at all: it answers "no beats done",
+which is both true and the only safe reply.
+
+**A TRIGGER IS AN EDGE, NOT A LEVEL.** A peripheral asserts its DMA
+request while its condition holds; the DMAC latches a pending trigger
+when the request RISES. A block armed while the condition is already
+true is therefore waiting for an edge that has already gone by, and
+the channel sits enabled with nothing pending and nothing moving. The
+engines expose `kick()` for it - one software trigger, which the owner
+issues when it can see the peripheral's flag already standing.
+SWTRIGCTRL raises the single pending bit only if it was clear
+(25.8.8), so a kick that races a real trigger is lost, never doubled.
 
 **Erratum 1.10.4 is live on this silicon, and the write-back is
 therefore checked, never believed.** "Concurrent channels triggers"
@@ -95,13 +112,39 @@ corrupted - E/G/J at revisions E, F and H. Microchip's workaround
 (sequence everything through linked descriptors on a single channel)
 amounts to not using concurrent channels, which a full-duplex serial
 port cannot honour. The driver takes the other road: every field of a
-write-back except BTCNT and VALID is invariant (copied from the
-fetched descriptor, never rewritten), so `harvest()` compares them
+write-back except BTCNT and VALID is invariant WHILE THE BLOCK RUNS
+(copied from the fetched descriptor, and until the block ends only the
+beat counter is written back - 25.10.2), so `harvest()` compares them
 all against the copy it loaded, bounds-checks BTCNT, and DISCARDS a
 reading that fails, counting it in `violations()`. The corruption is
-real and was caught in the act - see the bench findings. The TX
-engine never reads a write-back at all: programmed length plus TCMPL
-is the whole truth on that side. The rest of the 1.10.x matrix:
+real and was caught in the act - see the bench findings.
+
+**THE READING IS NOT THE DAMAGE.** Validating what is read is
+necessary and NOT sufficient, and that correction cost a wedged serial
+port to learn. 25.6.2.6: "For an ongoing block transfer, the
+descriptor will be fetched from the WRITE-BACK memory section
+(WRBADDR)." The write-back is not a report a driver may take or leave
+- it is the controller's LIVE COPY of the descriptor it is running -
+so when 1.10.4 scribbles it, the transfer itself is destroyed. The
+channel stops moving bytes, raises no interrupt and sits there
+enabled. On the receive side the same corruption shows as
+CHSTATUS.FERR, which 25.6.2.8 raises when an invalid descriptor is
+fetched and which only a software RESUME clears. Two consequences the
+driver now carries: an ENGINE'S OWNER can declare a block dead and
+`abandon()` it (the channel is reset, reconfigured and re-armed, and
+the count is public in `faults()`), and a harvest of a channel whose
+write-back the driver itself zeroed reports "nothing started" instead
+of suspending it - because 25.6.2.8's OTHER clause raises the same
+fetch error when a RESUME makes the controller fetch a next descriptor
+whose address is null, which every single-block descriptor here has.
+WHO decides a block is dead is never this driver: only the
+peripheral's owner can read the peripheral's own flags (samc/
+sercom.md's dead-block predicate is one line of SERCOM truth - a
+transmit block cannot be in flight while DRE and TXC are both set).
+
+The TX engine still never reads a write-back for its PROGRESS:
+programmed length plus TCMPL is the whole truth on that side. The rest
+of the 1.10.x matrix:
 1.10.1 (CRC data port) is rev B only; 1.10.2 and 1.10.3 (linked
 descriptor fetch items) mark revisions B..D for E/G/J - the trap is
 that each item's matrix also has an N-family row, and for those two
@@ -222,6 +265,19 @@ own its tables.
   the TCMPL handler run 804 cycles/block (~59700 blocks/s back to
   back). A harvest measures ~525 cycles (~10 us), which is why its
   pacing is the caller's policy.
+- **Erratum 1.10.4 does not merely give a bad READING - it kills the
+  TRANSFER**, and that is what a wedged console eventually proved. A
+  transmit channel was caught enabled with its peripheral's DRE and TXC
+  both set (the transmitter idle and asking), CHSTATUS all zeros, no
+  flag anywhere - and its write-back holding the OTHER channel's
+  descriptor: BTCTRL 0x809 with SRCADDR = the SERCOM's DATA register,
+  where its own says 0x409 and a RAM address. Since 25.6.2.6 makes the
+  write-back the ongoing descriptor, that channel was running someone
+  else's transfer and never finished it; `DmaTxEngine::busy()` stayed
+  true, the owner's pump did nothing every time it was called, the
+  transmit ring filled and `print()` spun in `Ring::push` with the
+  board silent. The fingerprint was identical across three independent
+  reproductions.
 - **Erratum 1.10.4 caught in the act**, twice over: under five
   concurrent channels with the engined Uart running, 340 corrupted
   write-backs were refused out of 210852 readings in one four-second
