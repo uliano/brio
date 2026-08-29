@@ -247,6 +247,39 @@ noisy) is live at every revision and is now measured: see
 declined, and where the workaround's "external wire" turns out to have
 zero length because PA02 is DAC/VOUT and ADC0/AIN0 at once.
 
+## Streaming via DMA
+
+A sampled stream is `DmaPingPongEngine<ch, uint16_t>` armed on
+`Adc<n>::dma_trigger_resrdy` with RESULT as its source: the engine fills
+one caller-owned buffer while the caller drains the other, and the
+accounting - laps, overruns, stalls - IS the API. The contract and the
+hardening are in [dmac.md](dmac.md); three things belong to THIS
+chapter.
+
+**The element is a halfword** because RESULT is 16 bits, whatever the
+resolution and however much of it the accumulation uses.
+
+**THE DMA REQUEST IS THE RESRDY FLAG, and reading RESULT is what takes
+it down** (38.6.4). Two consequences: clearing the flag by writing it is
+not enough - a stale RESULT moves a stale beat - and the request stands
+as a LEVEL, so a conversion left unread before the stream starts is a
+request the channel will serve. That conversion is a real one but NOT
+one of the stream's (the five warm-up conversions `init()` spends for
+erratum 1.4.6 are the usual source), so an owner arming a stream should
+**drain** it - read RESULT - rather than `kick()` past it. Measured:
+kicked instead, it lands in slot zero and shifts the whole capture by a
+sample.
+
+**Who reports a lost sample.** A stalled stream moves nothing, so the
+engine can count the STALL and not the loss; the count of samples that
+arrived unserved is INTFLAG.OVERRUN, here, and nowhere else.
+
+Measured in `test_samc_analog_dma`: at 5 kHz, event-started from a
+timer, 1992 samples in 400 ms (4980/s against 5000 nominal, inside a
+1 kHz tick's own quantization of the window), every block complete and
+every sample matching a static calibration of the source within 3..6
+counts.
+
 ## Bench findings
 
 From `test_samc_adc`, 9 letters / 97 verdicts, 97/97 four times

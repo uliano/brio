@@ -202,6 +202,35 @@ is the trap this document set repeatedly.
   16 LSB of INL) is **revision B only**, so `left_adjust` is not forced
   here.
 
+## Streaming via DMA
+
+A waveform is `DmaLoopEngine<ch, uint16_t>` armed on
+`Dac::dma_trigger_empty` with DATABUF as its destination: one
+caller-owned table, played for ever, one interrupt per LAP and none per
+sample. The contract, the hardening and the shape of the handler are in
+[dmac.md](dmac.md); two things belong to THIS chapter.
+
+**The pacing is a START event and not a rate.** 41.6.2.4 gives the
+converter no done flag, so nothing in the data path decides when the
+next value is due - a periodic event into the START user does, and the
+DMA request is only what refills DATABUF behind it. Without a start
+event the first DATABUF write stands for ever (see SYNCBUSY.DATABUF
+above) and the stream never moves at all.
+
+**INTFLAG.EMPTY is an EVENT, not a state**, and a DMA-fed DAC is where
+that bites: on a converter just enabled, whose DATABUF has never been
+written, EMPTY reads **zero** even though the buffer is empty - the flag
+marks the buffer BECOMING empty. So an owner that waits for the flag
+before giving the channel its first software trigger never starts, and
+pays an UNDERRUN and one lost period to discover it. What makes that
+first `kick()` right is the owner's own knowledge that it has just reset
+the converter, not the flag. Measured in `test_samc_analog_dma`.
+
+Streamed at 5 kHz against ADC0 on the shared PA02 pad, a 32-entry table
+came back **exact to 3..6 ADC counts** - the converter pair's own noise
+floor, against a table step of 120 - with no sample lost at any lap
+boundary over thousands of laps.
+
 ## Bench findings
 
 Board C, ATSAMC21J18A rev F, VDD about 5.15 V, wireless. Voltages are

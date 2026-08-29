@@ -353,6 +353,34 @@ document sets over and over:
   outside specification here whatever the errata say.
 - **1.18.4** (power consumption): revisions B..E.
 
+## Streaming via DMA
+
+A sampled stream is `DmaPingPongEngine<ch, uint32_t>` armed on
+`Sdadc::dma_trigger_resrdy` with RESULT as its source. The contract and
+the hardening are in [dmac.md](dmac.md); the one thing that belongs to
+THIS chapter is the ELEMENT TYPE, and it follows from the central
+measurement above.
+
+**THE ELEMENT IS A WORD, AND A HALFWORD WOULD NOT BE A NARROWER
+READING - IT WOULD BE A DIFFERENT NUMBER.** RESULT is a 32-bit register
+holding a 24-bit datum whose TOP sixteen bits are the specified
+conversion, so a halfword beat carries RESULT[15:0]: the eight bits
+below the specified datum plus half of it. `uint32_t` is the only honest
+element, and `sdadc_result_of()` / `sdadc_raw_signed()` are what turn a
+streamed word into a reading afterwards.
+
+Measured in `test_samc_analog_dma`, free-running on pair 0 with the pads
+under PORT: at a rail differential the raw value is 8388607 - which does
+not fit a halfword at all - and every streamed word matched the CPU's
+reading exactly. With the pair shorted at ground, where the datum is
+live and its low bits move, sixteen streamed readings spanned 102..305
+raw units around a CPU mean near -34600, inside the spread the CPU
+itself showed over eight readings. **The SINC filter's step response is
+part of the measurement**: after moving a pad, the first conversions are
+the filter refilling (39.6.2.3, which is what SKPCNT exists for), and
+six discarded conversions took the CPU's own spread from 19189 raw units
+down to 139.
+
 ## Bench findings
 
 Board C, ATSAMC21J18A rev F, VDD about 5.15 V (the suite refines it to

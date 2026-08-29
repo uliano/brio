@@ -171,9 +171,16 @@ The engines are POLICIES, not features of the task:
   engines.** A peripheral asserts its DMA request as a LEVEL - "my
   transmit buffer is free", "I have a character" - and the DMAC turns
   that level into a pending trigger when it RISES. A block armed while
-  the level is ALREADY HIGH is therefore waiting for an edge that has
-  already happened: the channel sits enabled, CHSTATUS empty, the
-  peripheral's own flag standing, and not one beat moves. Both
+  the level is ALREADY HIGH can therefore be waiting for an edge that
+  has already happened: the channel sits enabled, CHSTATUS empty, the
+  peripheral's own flag standing, and not one beat moves. CAN, not
+  MUST - the streaming campaign later measured two arrangements on the
+  ADC's RESRDY where a late arm is rescued by the silicon itself
+  (selecting TRIGSRC onto a standing request is itself a rise, and a
+  rise during a disable is latched; dmac.md), and every wedge this
+  suite caught in the act carried a corrupted write-back (erratum
+  1.10.4) in hand. The kick is therefore insurance whose cost is one
+  never-doubling store, kept on both paths. Both
   `pump_tx()` and the receive re-arm therefore ask the SERCOM whether
   its flag is already set and, if it is, give the channel one software
   trigger. It cannot double a byte: a channel has exactly one pending

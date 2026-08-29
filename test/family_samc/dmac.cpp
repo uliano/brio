@@ -17,6 +17,16 @@
 // landed.
 #include "samc/dmac.hpp"
 
+// The analog drivers are here for ONE static_assert block at the bottom:
+// dmac.hpp owns the channels and never table 25-2, so each peripheral
+// states its own trigger id and this is the file where all of them are
+// legitimately in scope at once (the same arrangement that holds
+// dma_sercom_count and sercom.hpp's sercom_count in step).
+#include "samc/adc.hpp"
+#include "samc/dac.hpp"
+#include "samc/sdadc.hpp"
+#include "samc/tsens.hpp"
+
 using namespace brio;
 
 // ---- what the device header says --------------------------------------------
@@ -249,3 +259,102 @@ void engine_verbs() {
     (void)DmaRxEngine<1>::taken();
     DmaRxEngine<1>::stop();
 }
+
+// ---- the element type IS the beat ----------------------------------------------
+// One `sizeof` feeds both BEATSIZE and the end-address arithmetic, so
+// the two cannot disagree. The default is a byte, which is what every
+// existing spelling of the two serial engines means.
+static_assert(dma_beat_of<uint8_t>() == DmaBeat::byte);
+static_assert(dma_beat_of<uint16_t>() == DmaBeat::hword);
+static_assert(dma_beat_of<uint32_t>() == DmaBeat::word);
+static_assert(dma_beat_of<int32_t>() == DmaBeat::word);
+static_assert(dma_beat_bytes(dma_beat_of<uint16_t>()) == 2u);
+static_assert(dma_beat_bytes(dma_beat_of<uint32_t>()) == 4u);
+
+static_assert(DmaTxEngine<0>::beat == DmaBeat::byte);
+static_assert(DmaRxEngine<1>::beat == DmaBeat::byte);
+static_assert(DmaTxEngine<0, uint16_t>::beat == DmaBeat::hword);
+static_assert(DmaRxEngine<1, uint32_t>::beat == DmaBeat::word);
+static_assert(DmaLoopEngine<2, uint16_t>::beat == DmaBeat::hword);
+static_assert(DmaPingPongEngine<3, uint32_t>::beat == DmaBeat::word);
+
+// A widened engine is still the same engine to sercom.hpp's tests: the
+// tags and the channel are where they were, so `uart_engines_distinct`
+// and the Uart's `if constexpr` branches see no difference.
+static_assert(DmaTxEngine<0, uint16_t>::present);
+static_assert(DmaTxEngine<4, uint32_t>::channel == 4);
+static_assert(DmaLoopEngine<5, uint16_t>::channel == 5);
+static_assert(DmaPingPongEngine<Dmac::channel_count - 1>::channel == 11);
+
+// A widened descriptor's end address counts BYTES: 16 halfwords past a
+// start is 32 bytes past it, which is the whole reason `Elem` and
+// BEATSIZE are one decision and not two.
+constexpr DmaDescriptor hword_block =
+    dma_descriptor_at(0x2000'0100u, 0x4200'0018u,
+                      DmaTransfer{.beats = 16,
+                                  .beat = DmaBeat::hword,
+                                  .source_increment = true,
+                                  .destination_increment = false});
+static_assert(hword_block.srcaddr == 0x2000'0120u);
+static_assert(hword_block.dstaddr == 0x4200'0018u);
+constexpr DmaDescriptor word_block =
+    dma_descriptor_at(0x4200'1000u, 0x2000'0200u,
+                      DmaTransfer{.beats = 64,
+                                  .beat = DmaBeat::word,
+                                  .source_increment = false,
+                                  .destination_increment = true});
+static_assert(word_block.srcaddr == 0x4200'1000u);
+static_assert(word_block.dstaddr == 0x2000'0300u);
+
+// ---- the two streaming engines --------------------------------------------------
+void loop_engine_verbs() {
+    volatile uint16_t data = 0;
+    using Loop = DmaLoopEngine<2, uint16_t>;
+    static const uint16_t table[8] = {};
+    Loop::arm(&data, 0x40u);
+    (void)Loop::start(table, 8);
+    (void)Loop::running();
+    (void)Loop::laps();
+    (void)Loop::length();
+    (void)Loop::progress();
+    (void)Loop::complete();
+    Loop::kick();
+    (void)Loop::abandon();
+    (void)Loop::faults();
+    Loop::clear_faults();
+    Loop::stop();
+}
+
+void ping_pong_engine_verbs() {
+    volatile uint32_t data = 0;
+    using Stream = DmaPingPongEngine<3, uint32_t>;
+    static uint32_t a[4];
+    static uint32_t b[4];
+    Stream::arm(&data, 0x41u);
+    (void)Stream::start(a, b, 4);
+    (void)Stream::complete();
+    (void)Stream::ready();
+    (void)Stream::ready_length();
+    (void)Stream::release();
+    (void)Stream::laps();
+    (void)Stream::overruns();
+    (void)Stream::stalled();
+    (void)Stream::pending();
+    (void)Stream::progress();
+    Stream::kick();
+    (void)Stream::abandon();
+    (void)Stream::faults();
+    Stream::clear_faults();
+    Stream::stop();
+}
+
+// ---- the codes the analog peripherals publish ------------------------------------
+// dmac.hpp owns the CHANNELS and never the table: each converter states
+// its own trigger id, which is the accepted division of labour (the
+// EVSYS ruling applied to table 25-2). Held in step here, where all the
+// headers are legitimately in scope.
+static_assert(Adc<0>::dma_trigger_resrdy != dma_trigger_none);
+static_assert(Adc<1>::dma_trigger_resrdy != Adc<0>::dma_trigger_resrdy);
+static_assert(Dac::dma_trigger_empty != dma_trigger_none);
+static_assert(Sdadc::dma_trigger_resrdy != dma_trigger_none);
+static_assert(Tsens::dma_trigger_resrdy != dma_trigger_none);

@@ -2,10 +2,10 @@
 
 > **PROVISIONAL.** The block, the twelve channels, memory-to-memory
 > transfers, mid-block harvesting with the erratum-1.10.4 validation,
-> and the two optional serial engines are implemented and
-> bench-verified. The CRC engine, linked descriptor lists, the event
-> system hooks and the standby sequence are declared, not built. The
-> list is in "Not covered yet".
+> and the four engines - two serial, two streaming - are implemented
+> and bench-verified. The CRC engine, linked descriptor lists, the
+> event system hooks and the standby sequence are declared, not built.
+> The list is in "Not covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 25 - NOT
 ch. 19, where an older revision's numbering put it - and errata
@@ -13,10 +13,13 @@ DS80000740S items 1.10.1..1.10.4, the whole matrix re-read against
 this chip (E/G/J family, silicon rev F): 1.10.4 is LIVE and measured
 here, the other three are not this silicon (see "What the silicon
 does"). Driver: `samc/dmac.hpp` (`Dmac` block + `DmaDescriptor` /
-`dma_descriptor()` + `DmaChannel<n>` + the `DmaTxEngine<ch>` /
-`DmaRxEngine<ch>` engines `samc/sercom.hpp`'s Uart takes as options).
+`dma_descriptor()` + `DmaChannel<n>` + four engines: `DmaTxEngine` /
+`DmaRxEngine`, which `samc/sercom.hpp`'s Uart takes as options, and
+`DmaLoopEngine` / `DmaPingPongEngine`, the two streaming shapes).
 Family fixture `test/family_samc/dmac.cpp` plus negatives under
-`tools/check_samc.sh`; the bench suite is `test_samc_dma`.
+`tools/check_samc.sh`; the bench suites are `test_samc_dma` (the block,
+the channel, the serial engines) and `test_samc_analog_dma` (the
+streaming engines and the element-type generalization).
 
 ## What the silicon does
 
@@ -203,13 +206,71 @@ promise, not an inheritance from whatever a debugger left behind.
   flags/arming/status verbs, `harvest()` -> `DmaProgress` with the
   1.10.4 validation, `violations()`/`suspend_timeouts()` counters.
   Everything channel-addressed pays the CHID guard uniformly.
-- **`DmaTxEngine<ch>` / `DmaRxEngine<ch>`** - the optional Uart
-  engines (see sercom.md for the task-side contract). They know
-  nothing of SERCOMs: `arm(data_address, trigger)` takes any
-  peripheral's DATA address and trigger code, so a DAC or an SPI
-  would be served unchanged. The channel number is refused at the
-  spelling site (a static_assert in the engine, instantiated by the
-  Uart where it is named).
+- **The four engines** - `DmaTxEngine<ch, Elem>`,
+  `DmaRxEngine<ch, Elem>`, `DmaLoopEngine<ch, Elem>` and
+  `DmaPingPongEngine<ch, Elem>`. All four are peripheral-agnostic by
+  construction: `arm(data_address, trigger)` takes any peripheral's
+  DATA address and trigger code, so the same engine serves a SERCOM, a
+  DAC, either ADC, the SDADC or TSENS unchanged. The channel number is
+  refused at the spelling site (a static_assert in the engine,
+  instantiated where it is named).
+- **`Elem` IS THE BEAT**, through `dma_beat_of<Elem>()`: one `sizeof`
+  feeds both BEATSIZE and the end-address arithmetic, so the two
+  cannot disagree, and a width the silicon does not implement is a
+  compile error (25.10.1 has three, and the fourth code is Reserved).
+  It defaults to `uint8_t` - what a SERCOM moves - so every existing
+  spelling means what it always did. Alignment is NOT checked, because
+  the descriptor has no field for it: a misaligned buffer is a bus
+  error (CHINTFLAG.TERR), which is why the engines take a typed
+  pointer and not a `void*`.
+- **The hardening all four inherit**, and the reason they are one
+  family: `kick()` (one software trigger for a request that is already
+  standing - see "a trigger is an edge" below; un-doublable by
+  construction, since a channel has one pending bit and SWTRIGCTRL
+  raises it only if clear), `abandon()`/`faults()` (the caller decides
+  a block is dead, never the engine - only the peripheral's owner can
+  read the flags that make "dead" a fact rather than a timeout; what
+  the abandonment loses is stated, not pretended away), and mid-block
+  progress through `DmaChannel::harvest()` and nowhere else, so every
+  write-back reading is validated against the loaded descriptor.
+- **`DmaTxEngine` / `DmaRxEngine`** - the optional Uart engines (see
+  sercom.md for the task-side contract): drain a buffer into a
+  peripheral, and fill a buffer from one. The receive side's asymmetry
+  is its own: arrival is not an event anyone is told about, so
+  `take()` asks by harvesting and the PACING is the caller's.
+- **`DmaLoopEngine`** - one caller-owned table played into a
+  peripheral for ever. `start(table, length)`, `complete()` from the
+  handler (counts the lap, re-arms the same block), `laps()`,
+  `progress()`, `stop()`. **There is no hardware circular mode on this
+  controller**: 25.6.3.1 offers only a self-linked descriptor, and
+  linked descriptors are deliberately not built here because 1.10.4
+  corrupts the write-back that 25.6.2.6 makes the LIVE descriptor - a
+  self-linked chain has no second copy to judge the first against. So
+  the lap boundary is a TCMPL interrupt, which costs one interrupt per
+  TABLE and not per sample.
+- **`DmaPingPongEngine`** - two caller-owned buffers, the engine
+  filling one while the caller drains the other.
+  `start(first, second, length)`, `complete()` from the handler,
+  `ready()`/`ready_length()`/`release()`, and the accounting that IS
+  the API: `laps()`, `overruns()`, `stalled()`, `pending()`. On an
+  overrun - the caller still holding both buffers - the engine SKIPS
+  the lap rather than write into the buffer being read: that trades
+  samples for integrity, so everything handed over is a complete,
+  untorn block. What it does NOT count is how many samples were lost
+  during a stall; a stalled channel moves nothing, so the loss is the
+  peripheral's to report (a converter's OVERRUN flag) and the engine
+  says so rather than inventing a number.
+- **Neither streaming engine kicks on its re-arm, and that is a
+  correctness rule.** The beat that ended the block is the one that
+  SERVED the peripheral's request, so the request is down; a kick
+  there would move a beat the peripheral never asked for - the next
+  table entry over a value not yet consumed, or a duplicate sample out
+  of a data register holding nothing new. `kick()` is the owner's verb
+  for the first arm and for the arm after an `abandon()`.
+- **Both streaming engines take `volatile` buffer pointers.** The
+  controller reads and writes this memory where the compiler cannot
+  see it, and gcc has already been caught on this target sinking a
+  store past a transfer. A plain array still converts for free.
 
 ## How to use it
 
@@ -253,6 +314,58 @@ if (const auto p = Copy::harvest()) {
 `Dmac::init()` comes before any engined Uart's `init()`: the engines
 configure their channels at arm time, into a block that must already
 own its tables.
+
+A waveform played out of RAM and a sampled stream read back into it,
+with the CPU in neither sample path:
+
+```cpp
+using Play = brio::DmaLoopEngine<0, uint16_t>;      // halfword beats
+using Grab = brio::DmaPingPongEngine<1, uint16_t>;
+
+Play::arm(&brio::Dac::regs().DAC_DATABUF, brio::Dac::dma_trigger_empty);
+Grab::arm(&Adc0::regs().ADC_RESULT, Adc0::dma_trigger_resrdy);
+
+Play::start(wave, 32);            // the table, played for ever
+Grab::start(buf_a, buf_b, 24);    // two buffers, alternating
+
+// THE OWNER'S ONE JOB AT THE FIRST ARM: a request that is already
+// standing needs an edge, and only the owner can read its peripheral's
+// flag. The DAC's "DATABUF is empty" is a request the stream WANTS
+// served, so it is kicked; the ADC's "a result is waiting" is a
+// conversion from before the stream existed, so it is DRAINED.
+Play::kick();
+if (Adc0::ready()) { (void)Adc0::result(); }
+```
+
+```cpp
+extern "C" void DMAC_Handler() {
+    while (const auto irq = brio::Dmac::take_pending()) {
+        if (!irq->complete()) { continue; }   // an error is not a completion
+        switch (irq->channel) {
+        case 0: (void)Play::complete(); break;
+        case 1: (void)Grab::complete(); break;
+        default: break;
+        }
+    }
+}
+```
+
+Draining, with the accounting the engine gives:
+
+```cpp
+if (const volatile uint16_t* block = Grab::ready()) {
+    // Grab::ready_length() elements, complete and untorn
+    consume(block, Grab::ready_length());
+    Grab::release();          // restarts the stream if it had stalled
+}
+// Grab::overruns() counts the times both buffers were held; how many
+// SAMPLES that lost is the converter's OVERRUN flag, not this counter.
+```
+
+An engine is a static-only class, so its state is shared across every
+use of the same instantiation: a handler that tells the WRONG engine a
+block finished reprograms a running channel. One channel, one engine,
+and the switch says so.
 
 ## Bench findings
 
@@ -323,7 +436,101 @@ own its tables.
   apps that name no DMA (blink, console, probe) are byte-identical
   before and after this header and the Uart's engine parameters
   existed - and the 40 AVR hexes are byte-identical after ring.hpp
-  gained the span API the TX engine drains through.
+  gained the span API the TX engine drains through. The element-type
+  generalization and the two streaming engines were held to the same
+  gate: all 27 pre-existing SAM release images are byte-identical
+  after them.
+
+From `test_samc_analog_dma` (10 letters in `z`, 72 verdicts, wireless -
+PA02 is the DAC's VOUT pad and ADC0's AIN0 at once), on a chain where a
+timer's overflow starts the DAC and its CC0 match starts the ADC, one
+sample of each per 200 us period at 5 kHz:
+
+- **A SOFTWARE-CLOSED LOOP LOSES NOTHING AT ITS SEAMS.** With a
+  32-entry table and 24-sample blocks - chosen not to divide each
+  other, so a lost sample cannot hide in a coincidence - the table
+  entry each captured block starts on stepped by exactly 24 (mod 32)
+  through every block of every run: 31, 23, 15, 7, 31, ... over 12
+  blocks and 9 laps, and 166 blocks under churn. The worst residual
+  against a static calibration of the same 32 codes was **3 to 6
+  counts** where the ADC's own noise over eight readings was 4 to 6 and
+  one table step is 120. So the TCMPL re-arm costs no sample at a lap
+  boundary, at a block boundary, or between them - at this rate.
+- **The rate is the pacer's**: 1992 samples in 400 ms, 4980/s against
+  5000 nominal, inside the 2.5 parts per thousand a 1 kHz tick
+  quantizes a 400 ms window by at each end. Both rulers are OSC48M
+  here (the TC counts GCLK0 and SysTick the CPU clock), so this checks
+  the divider arithmetic and NOT the oscillator - which the clock
+  campaign put 5100 ppm slow against the board's crystal.
+- **The two engines stay in step by construction**: 12 ADC blocks x 24
+  and 9 DAC laps x 32 are 288 samples each, exactly, because one timer
+  paces both.
+- **The overrun contract, measured**: with the drainer asleep for
+  60 ms the stream filled both buffers, counted one overrun, set
+  `stalled()`, and STOPPED - and both held blocks still fitted the
+  table within 2 and 4 counts, i.e. neither was torn. The ADC's own
+  OVERRUN flag was set, which is where the count of LOST SAMPLES
+  lives; the engine's counter is the count of STALLS. `release()`
+  restarted it and the lap count moved again.
+- **INTFLAG.EMPTY IS AN EVENT, NOT A STATE.** On a DAC that has just
+  been enabled and whose DATABUF has never been written, EMPTY reads
+  ZERO - the flag marks the buffer BECOMING empty, not being empty. A
+  DMA-fed DAC that waited for the flag before its first kick therefore
+  never starts, and pays an UNDERRUN and a lost period to find out.
+  What makes the first kick right is the owner's own knowledge that it
+  has just reset the converter, not the flag.
+- **A TRIGGER IS AN EDGE, AND SELECTING TRIGSRC IS ONE.** With a
+  conversion left unread so the ADC's DMA request stood as a level, a
+  bare channel CONFIGURED onto it took the trigger immediately, with
+  no software trigger at all: writing CHCTRLB.TRIGSRC moves the
+  multiplexer's output from the DISABLE code's constant zero to the
+  standing request, and that transition is the rise. Nothing in ch. 25
+  says so. And a rise arriving while the channel was DISABLED with its
+  trigger already selected was ALSO latched and served on the next
+  enable. So neither arrangement wedged here - `kick()` is insurance
+  at a first arm on this peripheral rather than a demonstrated
+  necessity, and the sercom.md wedge is not contradicted (it was
+  caught with a corrupted write-back in hand, which is a different
+  fact).
+- **Erratum 1.10.4 reached again, and the density that reaches it is
+  the concurrency and not the traffic.** Two memory-to-memory channels
+  re-armed with a BOUNDED WAIT for each block ran 43000 blocks
+  alongside the live analog chain with **not one refused reading**;
+  the same two channels SPRAYED - triggered without waiting, so they
+  are genuinely concurrent with the analog pair - reached **2733 and
+  2744 refused readings out of ~36000 harvests** in a 300 ms window on
+  two runs of four. Every one was refused, never believed, and every
+  analog block handed over still fitted the table. Whether it fires is
+  the arbiter's weather, so the suite verdicts the invariant (refused
+  == violations + timeouts) and never that a corruption happened.
+- **`abandon()` IS NOT ALWAYS ENOUGH.** On the runs where the erratum
+  struck hardest the analog stream did not come back from an
+  abandonment: `abandon()` reclaims a channel by resetting and
+  reconfiguring it, and **CHCTRLA.SWRST is ignored silently while
+  ENABLE is still set** (25.8.18) while ENABLE itself does not clear
+  until the internal buffer drains - so a channel the corruption has
+  left unable to go down has nothing at the CHANNEL level left to try.
+  A reset of the BLOCK (`Dmac::init()`) brought it back. The recovery
+  ladder is therefore two rungs, and a program that streams under
+  concurrency needs the second one.
+- **The tight harvest loop is itself a stressor.** `harvest()`
+  suspends the channel inside a critical section, so spinning on it is
+  a concurrency contributor and not a neutral observation - one paced
+  to about one per millisecond and one spun on differ by an order of
+  magnitude in what they provoke. Pacing is the caller's policy for
+  this reason as much as for the 10 us it costs.
+- **A 24-bit datum needs a WORD beat, and the bench can show why.**
+  SDADC.RESULT is a 32-bit register with 24 bits of data whose TOP
+  sixteen are the specified conversion, so a halfword beat would carry
+  RESULT[15:0] - not the reading at all. Driven to a rail differential
+  the raw value is 8388607, which does not fit a halfword; streamed
+  through `DmaPingPongEngine<ch, uint32_t>` every word matched the
+  CPU's reading exactly. With the pair shorted at ground - where the
+  datum is live and its low bits move - the streamed sixteen readings
+  spanned 102 to 305 raw units around a CPU mean of about -34600, i.e.
+  the same quantity inside the spread the CPU itself showed. TSENS,
+  whose VALUE is the same shape, streamed through the same engine at
+  2490..2527 centi-C against a CPU reading of 2507.
 
 ## Not covered yet
 
@@ -333,7 +540,22 @@ Driver gaps (not built):
   its rev-B-only data-port erratum) waits for a consumer.
 - Linked descriptor lists: legal on rev F, but 1.10.4 makes
   software-linked chains (TCMPL re-arms the next block) the honest
-  default, and nothing has needed a chain they could not build.
+  default, and nothing has needed a chain they could not build. This
+  is also why there is NO HARDWARE CIRCULAR MODE here - a self-linked
+  descriptor is the only one chapter 25 offers - and why
+  `DmaLoopEngine` closes its loop from the interrupt.
+- A util-level streaming service: an active object owning a ping-pong
+  stream and publishing filled buffers as events. brio's rule is that
+  a usage type is born with its first user; these two engines are two
+  days old and the first real consumer (the Multislope work) will say
+  what the AO's contract has to be. The engines are the mechanism, the
+  policy waits.
+- An automatic recovery ladder. The bench established that a channel
+  the erratum has left unable to clear ENABLE cannot be reclaimed at
+  the channel level and needs `Dmac::init()`, and the suite spends
+  that rung by hand - but no verb here escalates on its own, because
+  resetting the block stops every OTHER channel too and that is a
+  program-wide decision, not a driver's.
 - The event system hooks, PARTLY RETIRED: an EVSYS driver now exists
   ([evsys.md](evsys.md)) and `test_samc_evsys` drives a DMA channel
   with EVACT `trigger` and EVIE set from a software event, so that

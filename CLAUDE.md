@@ -446,8 +446,8 @@ gets its dated home in `docs/design/` when taken.
   policy this suggests: 1 Mbaud as the safe default, 3 Mbaud for
   transmit-heavy work with DMA + bulk. The duplex bug this probe found
   is DIAGNOSED AND FIXED - see the UART campaign entry below.
-  **UART TRANSPORT CAMPAIGN DONE 2026-08-29 (Opus delegation, NOT
-  COMMITTED): the duplex wedge diagnosed, fixed and fenced, and the
+  **UART TRANSPORT CAMPAIGN DONE 2026-08-29 (Opus delegation, REVIEWED
+  BY FABLE and COMMITTED f6fdd8c): the duplex wedge diagnosed, fixed and fenced, and the
   transport matrix given a suite.** THE MECHANISM, in one paragraph:
   a DMA-fed SERCOM direction stops dead when its channel is armed
   while the peripheral's own request LEVEL is already high - a trigger
@@ -1569,6 +1569,76 @@ gets its dated home in `docs/design/` when taken.
   pac.md / dsu.md / divas.md / mtb.md NEW PROVISIONAL; the board-C
   comment in tools/bench_boards.py updated (comment only). JUDGMENT CALLS
   QUEUED - see memory samc-session-2026-08-29-debug.
+  **ANALOG STREAMING DMA DONE 2026-08-29 (Opus delegation, the user's
+  own question "il dma possiamo usarlo anche per dac e adc?", REVIEWED
+  BY FABLE and COMMITTED same day, all seven judgment calls accepted
+  plus one supervisor fix; memory samc-session-2026-08-29-analog-dma).**
+  samc/dmac.hpp GREW: the element type IS the beat (dma_beat_of -
+  one sizeof feeds BEATSIZE and the end-address arithmetic so they
+  cannot disagree; DmaTx/RxEngine<ch, Elem = uint8_t>, every existing
+  spelling unchanged, all 27 pre-existing SAM images BYTE-IDENTICAL -
+  the gate re-run by Fable's own worktree comparison) and TWO NEW
+  streaming engines, same monostate shape, same kick/abandon/faults/
+  harvest hardening: DmaLoopEngine (one caller-owned table played for
+  ever, re-armed from TCMPL because THIS CONTROLLER HAS NO HARDWARE
+  CIRCULAR MODE - 25.6.3.1 offers only a self-linked descriptor and
+  1.10.4 corrupts the write-back that 25.6.2.6 makes the LIVE
+  descriptor, so a self-linked chain has no second copy to judge the
+  first against) and DmaPingPongEngine (two caller-owned buffers, THE
+  ACCOUNTING IS THE API - laps/overruns/stalled/pending; an overrun
+  SKIPS the lap rather than write into the buffer the caller holds, so
+  everything handed over is untorn, and the count of LOST samples is
+  the peripheral's OVERRUN flag, never the engine's). NEITHER STREAMING
+  ENGINE KICKS ON ITS RE-ARM - a correctness rule: the beat that ended
+  the block SERVED the request, so a kick there overwrites an
+  unconsumed value or duplicates a sample; kick() is the OWNER's verb
+  for the first arm and the arm after abandon(). NEW SUITE
+  test_samc_analog_dma z 72/72 (agent x5, Fable x3 incl. one cold), 10
+  letters, WIRELESS - the chain has no CPU in the sample path: TC0
+  overflow -> EVSYS -> DAC START while one channel refills DATABUF,
+  TC0 CC0 -> EVSYS -> ADC0 START on the SHARED PA02 PAD while another
+  drains RESULT, 5 kHz. THE HEADLINE: a SOFTWARE-CLOSED LOOP LOSES
+  NOTHING AT ITS SEAMS - table 32 and block 24 chosen not to divide
+  each other, the entry each block starts on steps by exactly 24 (mod
+  32) through every block of every run, worst residual 3..6 counts
+  where the ADC's own noise is 4..6 and a table step is 120. FINDINGS
+  NO CHAPTER CARRIES: INTFLAG.EMPTY IS AN EVENT, NOT A STATE (a
+  freshly enabled DAC with an empty DATABUF reads EMPTY = 0, so a
+  stream that waits for the flag never starts - the owner's knowledge
+  that it just reset the converter is what makes the first kick
+  right); kick() ONLY WHERE THE STANDING REQUEST BELONGS TO THE STREAM
+  (the ADC's is an erratum-1.4.6 warm-up conversion and must be
+  DRAINED - kicked, it lands in slot zero and shifts the whole
+  capture); SELECTING TRIGSRC IS ITSELF AN EDGE (the mux output rises
+  from the DISABLE code's zero, and a rise during a disable is
+  latched) so neither late-arm arrangement wedged on RESRDY - which
+  WEAKENED sercom.md's categorical wedge sentence to "can, not must"
+  (Fable's reconciliation; every wedge the UART suite caught in the
+  act carried a corrupted write-back in hand, and the kick stays as
+  never-doubling insurance); 1.10.4'S DENSITY IS THE CONCURRENCY, NOT
+  THE TRAFFIC (bounded-wait churn 43000 blocks, ZERO refusals; sprayed
+  churn 2733/2744 refused in ~36000 harvests, every one refused and
+  never believed, samples exact throughout); abandon() IS NOT ALWAYS
+  ENOUGH - SWRST is ignored SILENTLY while ENABLE stands (25.8.18) and
+  ENABLE does not clear until the buffer drains, so the recovery
+  ladder is TWO RUNGS and the second (Dmac::init()) is deliberately
+  not automated - resetting the block stops every other channel, a
+  program-wide decision; A 24-BIT DATUM NEEDS A WORD BEAT (SDADC
+  RESULT[15:0] is a DIFFERENT NUMBER, not a narrower reading - at a
+  rail the raw 8388607 does not fit a halfword at all; TSENS streamed
+  on the same word engine). SUPERVISOR FIX at review: laps_/overruns_
+  are ISR-written and thread-polled, so they became volatile reads
+  (the ticker doctrine - gcc -Os deleted a bare polling loop once);
+  re-verified at the bench after the edit. Rate 4980/s against 5000
+  nominal, both rulers OSC48M (checks the arithmetic, not the
+  oscillator). DELIBERATELY NOT BUILT and said where: a util streaming
+  AO (born-with-users - Multislope will dictate the contract), linked
+  descriptors, automatic ladder escalation. Canaries test_samc_dma z
+  112/112 and test_samc_uart z 27/27 (agent AND Fable); check_samc,
+  check_family, host green; 2 new negatives; family dmac.cpp now
+  cross-checks the four analog trigger codes. Docs: dmac.md grown,
+  dac.md/adc.md/sdadc.md each gained a "Streaming via DMA" section,
+  bench.md row + board C firmware line.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
