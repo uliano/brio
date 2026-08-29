@@ -1,12 +1,12 @@
 # DAC - Digital-to-Analog Converter (SAM C21)
 
 > **PROVISIONAL.** The whole of chapter 41 is implemented and most of it
-> is bench-verified through the ADC and the AC on the same die. What is
-> NOT verified is dithering (built, refused without the start event the
-> chapter requires, never run), the external reference VREFA (the pin is
-> on PA03 and nothing on this board drives it within table 45-30's
-> range), and the voltage pump, which switches itself at a supply this
-> board never visits. The list is in "Not covered yet".
+> is bench-verified through the ADC and the AC on the same die,
+> dithering and both interrupts included. What is NOT verified is the
+> external reference VREFA (the pin is on PA03 and nothing on this board
+> drives it within table 45-30's range) and the voltage pump, which
+> switches itself at a supply this board never visits. The list is in
+> "Not covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 41, the DAC
 characteristics of tables 45-30, 45-31 and 45-32, and the event tables
@@ -18,7 +18,8 @@ own 1.9.2 (the EMPTY flag across a standby) are live, while 1.9.1
 `samc/dac.hpp`, over the reserve's DAC entries in
 `samc/device_tables.hpp`. The family fixture is
 `test/family_samc/dac.cpp` plus five negatives under
-`tools/check_samc.sh`; the bench suite is `test_samc_dac`.
+`tools/check_samc.sh`; the bench suites are `test_samc_dac` and, for
+dithering and the interrupts, `test_samc_analog` (letters e and f).
 
 ## What the silicon does
 
@@ -88,7 +89,7 @@ Two bits decide it together (table 41-1), which is why
 | 1 | 0 | DATA[13:4] | DATA[3:0] |
 | 1 | 1 | DATA[15:6] | DATA[5:2] |
 
-**Dithering is not a mode a CPU-driven converter can use.** 41.6.8.3
+**Dithering is not a mode a CPU-driven converter can use.** 41.6.8.4
 requires a periodic START event generating sixteen events per value,
 with DATABUF reloaded every sixteen; `dac_config_valid()` refuses
 dithering without `EVCTRL.STARTEI` for that reason.
@@ -381,15 +382,62 @@ INTFLAG.EMPTY comes back SET from the sleep; with RUNSTDBY set, in the
 same window with the same buffer write, it does not. See
 [platform.md](platform.md), "Sleep, peripheral by peripheral".
 
+## Dithering, LEFTADJ, and the two interrupts
+
+From `test_samc_analog` letters e and f, 23 verdicts.
+
+**Dithering delivers sub-LSB means, and the design of the measurement
+is most of the result.** 41.6.8.4 makes the sixteen sub-conversions the
+EVENT'S job, so the chain is a TC overflow into the START user with the
+DMAC refilling DATABUF; the witness has to average over WHOLE dither
+periods, and the numbers were chosen so that it does exactly:
+
+| stage | setting | period |
+| --- | --- | --- |
+| pacer | TC2, count8, div1, PER 255 | one event / 256 CPU cycles |
+| dither | 16 events per value | one period / 4096 cycles |
+| ADC | div32, SAMPLEN 5 | one sample / 576 cycles |
+| average | 1024 samples | 589824 cycles = **144 periods** |
+
+576/256 = 9/4 and 9 is coprime with 64, so the 1024 samples land on each
+of the sixteen sub-conversion slots exactly 64 times: the mean is the
+dithered mean and not a phase artefact. At 1024 accumulated 12-bit
+samples with ADJRES 0 the result is 16 bits wide, so **one DAC LSB is 64
+counts and one sixteenth of one is 4** - the effect is under the ADC's
+own LSB and only the accumulation can see it.
+
+Six repeats of one dithered value span **1 count**, measured before any
+band was chosen. Then, at base code 512:
+
+| DATA[3:0] | 0 | 4 | 8 | 12 | 15 |
+| --- | --- | --- | --- | --- | --- |
+| mean | 32487 | 32504 | 32520 | 32535 | 32548 |
+
+Every step is above the last and the whole swing is **61 counts where
+fifteen sixteenths of an LSB is 60** - i.e. about 4.1 counts per dither
+bit against 4.0 exact. The control is the same converter with dithering
+off: codes 512 and 513 read 32487 and 32552, **one whole LSB apart with
+nothing between them**.
+
+**CTRLB.LEFTADJ is a placement and not a scale**, on silicon at last:
+code 512 reads 32487 right-adjusted and 32488 left-adjusted, and the
+left-adjusted dither staircase (32487 / 32504 / 32519 / 32535 / 32547,
+swing 60) is the right-adjusted one. **ERRATUM 1.9.1** - dithering with
+right-adjusted data giving an INL of 16 LSB - is **revision B alone** on
+the E/G/J row, and the bench agrees with the row: a 16 LSB nonlinearity
+in one of the two arrangements could not hide in a swing of one.
+
+**Both interrupts drive the NVIC**, under the vector name the device
+header declares (`DAC_Handler`). Forty milliseconds of start events at
+about 1 kHz with the handler refilling DATABUF give **40 vector entries,
+40 EMPTY, 0 UNDERRUN**; with the handler no longer feeding it, **19
+UNDERRUN interrupts** in twenty milliseconds. The ISR body's own
+contract holds as written: it clears UNDERRUN, because nothing else
+carries that information, and leaves EMPTY to whoever feeds the buffer.
+
 ## Not covered yet
 
 Driver gaps:
-- **Dithering** (41.6.8.3): `DacConfig::dither` is written, table 41-1's
-  14-bit placement is implemented and fixture-pinned, and the
-  configuration is refused without the start event the chapter requires
-   - but no sixteen-event sequence has ever run. It needs a pacer at a
-  rate chosen against the conversion time and a witness slower than the
-  dither period.
 - **VREFA** (`DacRef::vrefa`): the pin is PA03 and `claim_vrefa<P>()`
   hands it over, but nothing on this board drives it, and driving it
   from PORT would put it at VDD - outside table 45-30's
@@ -404,11 +452,6 @@ Driver gaps:
 - **The DAC as a WAKE source**: EMPTY and UNDERRUN have never driven
   the NVIC out of a sleep. (41.6.6's promise about the output buffer IS
   measured - see "Bench findings".)
-- **`CTRLB.LEFTADJ`** is implemented in `dac_data_word()` and
-  fixture-pinned; no bench letter writes a left-adjusted value.
-- **The interrupts.** `EMPTY` and `UNDERRUN` are read, cleared and used
-  as verdicts; neither has ever driven the NVIC, and `isr()` is
-  compile-verified only.
 - **The SDADC's use of `CTRLB.IOEN` as a REFERENCE** (41.6.8.1's third
   consumer) is now built and measured on the other side -
   [sdadc.md](sdadc.md) - including erratum 1.8.10. What is still not

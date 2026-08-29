@@ -1,12 +1,13 @@
 # AC (SAM C21)
 
-> **PROVISIONAL.** The block, the four comparators in continuous and
-> single-shot mode, the VDD scaler, filters, both output routings,
-> flags, WINDOW MODE, both event directions and per-package input
-> legality are built and bench-verified. What remains is sleep, which
-> belongs to the power pass, and the two internal negative inputs that
-> need a peripheral this stratum has not got. The list is in "Not
-> covered yet".
+> **PROVISIONAL.** The block, all four comparators in continuous and
+> single-shot mode, the VDD scaler, filters, hysteresis, the DAC and
+> bandgap negative inputs, both output routings, flags and interrupts,
+> BOTH WINDOWS, both event directions with their inversion, the 40.6.10
+> offset procedure and per-package input legality are built and
+> bench-verified. What remains is a window across a sleep, DBGCTRL
+> policy, and the two J-only pad inputs of the COMP2/3 pair. The list is
+> in "Not covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 40 and
 the electrical characteristics table 45-34 (whose note 4 states the
@@ -15,10 +16,11 @@ covers ONLY the analog path - the digital path's cost in cycles is
 stated nowhere, which is what the probe below measured). Driver:
 `samc/ac.hpp` (`Ac` block + `AcComparator<n>` + `AcWindow<w>`).
 Family fixture `test/family_samc/ac.cpp` plus four negatives under
-`tools/check_samc.sh`. Two bench programs, and the distinction
-matters: the SUITE is `test_samc_ac` (6 letters, 94 verdicts,
-wireless), while `ac_sync_probe` remains a PROBE - it answered one
-timing question and is not a reference test.
+`tools/check_samc.sh`. Two bench SUITES and one probe, and the
+distinction matters: `test_samc_ac` (6 letters, 94 verdicts, wireless)
+is the chapter's own, `test_samc_analog` carries what needed the DAC as
+a swept source (letters g to j), and `ac_sync_probe` remains a PROBE -
+it answered one timing question and is not a reference test.
 
 The errata, read on the E/G/J row at silicon revision F: of six AC
 items plus one device-level one, **two apply** and neither is
@@ -337,6 +339,103 @@ runs: an RTC periodic event on the ASYNCHRONOUS path - all table 29-3
 grants the SOC users - starts a comparison DURING a standby and its
 INTFLAG is read at the wake.
 
+## COMP2, COMP3, window 1, the bandgap and the hysteresis
+
+From `test_samc_analog` letters g to j, 41 verdicts, with the DAC on
+PA02 as the swept source - PA02 being AIN4, which is COMP2/3's PIN0.
+
+**COMP2 and COMP3 run, and window 1 gets the arrangement 40.6.4
+actually describes.** Where `test_samc_ac` had to swap the roles (the
+scaler as the signal, two rail-driven pads as the limits) because no pad
+on this board can sit between the rails, the DAC IS a signal between
+them: both comparators share PA02 as the positive input and their own
+VDD scalers - steps 16/64 and 40/64 - are the two limits.
+
+| DAC code | COMP2 / COMP3 STATE | WSTATE1 |
+|---|---|---|
+| 100 | no / no | below |
+| 500 | yes / no | inside |
+| 900 | yes / yes | above |
+
+`pair_consistent()` holds, WINCTRL takes the window under a running
+block, WINTSEL = INSIDE fires on entering the band and stays silent on
+leaving it upward, and the two comparators keep their own STATE
+throughout.
+
+**THE BANDGAP AS A NEGATIVE INPUT WORKS, AND IT DOES NOT NEED
+SUPC.VREF.VREFOE.** The comparator flips at DAC code **203 with the bit
+clear and 203 with it set**: 22.6.2.2's sentence is about routing the
+reference to an ADC INPUT CHANNEL, which is the one path that really is
+dead without it ([adc.md](adc.md)), while the AC's negative multiplexer
+takes the bandgap internally exactly as the ADC's and the DAC's
+REFERENCE paths do ([dac.md](dac.md)). `ac.hpp`'s own comment said
+otherwise and is corrected.
+
+Weighed by the DAC, the three SUPC levels cross at codes **203 / 405 /
+812**, i.e. 1044 / 2083 / 4178 mV against a supply this suite locates at
+5269 mV - a THIRD independent route to the same bandgap, after the AC's
+own scaler and the ADC.
+
+**ERRATUM 1.5.6 reproduces, rarely, with its own workaround as the
+control.** Sixty-four enables of both the block and the comparator, with
+the DAC held far below the threshold so the output cannot legitimately
+change: MUXNEG = bandgap raised **1** COMP flag with STATE still clear;
+MUXNEG = the VDD scaler at the same level raised **0**. Some runs see
+zero on both. So the item is real and infrequent on this die, and the
+driver's stated obligation - clear the flag after enabling, before
+arming - is a real one.
+
+**THE HYSTERESIS, in DAC codes and then in millivolts** (one DAC code is
+about 5.1 mV here), sweeping the DAC on MUXNEG against the comparator's
+own scaler at mid supply. Four repeats of one sweep land on the same
+code, so the gaps below are signal:
+
+| | up-flip | down-flip | gap |
+|---|---|---|---|
+| high speed, HYSTEN 0 | 513 | 512 | 1 code = 5 mV |
+| high speed, HYSTEN 1 | 524 | 501 | 23 codes = **118 mV** |
+| low power, HYSTEN 1 | 525 | 503 | 22 codes = **113 mV** |
+
+Both are inside table 45-34's own bands (29..190 and 25..248, typical
+100). **ERRATUM 1.5.1** - hysteresis present only for a falling
+transition - is **revision B alone** on the E/G/J row and the bench
+agrees with the row: against the hysteresis-free crossing at 513 the two
+edges move out by **11 and 12 codes**, both of them. **ERRATUM 1.5.2**
+makes the low-power/hysteresis pairing legal at this revision (it is
+marked B..E) and the pairing behaves. **ERRATUM 1.5.4** - the
+hysteresis specification itself being wrong - is B..E too, so table
+45-34 as printed is the right band to judge against.
+
+**40.6.10'S SWAP PROCEDURE RUNS, AND WHAT IT RETURNS IS A BOUND.**
+Swapping the terminals inverts the output as well, so the two cancel and
+the SENSE of the output is unchanged - which is what makes the recipe an
+offset measurement rather than a polarity change, and what the first
+version of this test got wrong. Unswapped and swapped, the crossing is
+the same code (513, spread 0 on four repeats each), midpoint 513 against
+a nominal 512: **half the difference is under one DAC code, so this
+comparator's input offset is smaller than the 5 mV step of the only
+source that can sweep it** - consistent with table 45-34's typical
+-0.1/+1 mV, and the honest outcome of a procedure run with an instrument
+coarser than the quantity.
+
+**The directed INTSEL flavours are directed**: rising fires on the
+output's rise and stays silent on its fall, falling does the opposite,
+toggle takes both.
+
+**INVEIx inverts a real event**, and like TSENS's STARTINV it needs a
+LEVEL to be measurable at all. COMP0's output is one; COMP2 in
+single-shot mode is started by it through SOC2 on the asynchronous path:
+
+| | the level rises | the level falls |
+|---|---|---|
+| INVEI clear | a comparison starts | nothing |
+| INVEI set | nothing | a comparison starts |
+
+**`Ac::take_flags()` runs from a real handler.** The AC vector is bound
+under the name the device header declares (`AC_Handler`); eight
+crossings of the bandgap threshold produce eight vector entries and the
+read-and-clear body returns the comparator's own bit.
+
 ## Not covered yet
 
 Driver gaps (not built):
@@ -344,25 +443,11 @@ Driver gaps (not built):
   for a single comparator (see "Bench findings"); a WINDOW across a
   standby, and 40.6.14's rule that both comparators of a pair must
   share RUNSTDBY, are stated and unexercised.
-- **The bandgap as a negative input**, whose INTREF output has to be
-  turned on in SUPC.VREF first (22.6.2.2) and whose level is selected
-  there too - and which is the input erratum 1.5.6 is about, so that
-  erratum is stated and not exercised here.
-- **Offset compensation via SWAP as a procedure** (40.6.10): the SWAP
-  bit is a config field, the two-measurement recipe is not built.
 - **DBGCTRL policy.**
 
 Implemented but not bench-verified:
-- **Comparators 2 and 3, and window 1**: COMP0 and COMP1 carry every
-  measured fact. The pair is symmetric in the registers and the
-  per-package legality of COMP2/3's inputs is compile-asserted per
-  variant, but no silicon has run window 1.
-- **Hysteresis, low-power speed and SWAP** (erratum 1.5.2 makes the
-  low-power/hysteresis pairing legal on this revision, which is worth
-  measuring one day), and the rising/falling INTSEL flavours - toggle
-  and end-of-comparison are exercised.
-- **`Ac::take_flags()` from a real handler**: both bench programs
-  poll, and the AC vector is never bound.
-- **INVEIx**, the event-input inversion: written and read back, never
-  used to invert a real event.
+- **AIN6 and AIN7** (PB05 and PB06), the two J-only inputs of the
+  COMP2/3 pair: their per-package legality is compile-asserted per
+  variant and neither pad has ever carried a comparison - the pair's
+  measured facts all come through AIN4, which is the DAC's own pad.
 - **Operation on the E and G variants**: compile-checked only.

@@ -6,8 +6,8 @@
 > (it reaches this converter only as a REFERENCE), so every non-rail
 > input here is a PWM waveform averaged by the converter's own decimation
 > filter. What that cannot answer, plus sleep, the external reference at
-> anything but a rail, the interrupts through the NVIC and the analog
-> control's undocumented fields, is in "Not covered yet".
+> anything but a rail and the analog control's undocumented fields, is in
+> "Not covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 39, the SDADC
 characteristics of tables 45-26, 45-27, 45-28 and 45-29, and the event
@@ -16,7 +16,9 @@ revision F**, where exactly ONE item applies: the device-level 1.8.10
 (the DAC as this converter's reference). Driver: `samc/sdadc.hpp`, over
 the reserve's SDADC entries in `samc/device_tables.hpp`. The family
 fixture is `test/family_samc/sdadc.cpp` plus ten negatives under
-`tools/check_samc.sh`; the bench suite is `test_samc_sdadc`.
+`tools/check_samc.sh`; the bench suites are `test_samc_sdadc` and, for
+the flush, the window event and the interrupts, `test_samc_analog`
+(letter k).
 
 ## What the silicon does
 
@@ -620,6 +622,54 @@ STANDBY with CTRLA.RUNSTDBY set, and 1 with it clear - the table's rows
 event counted by a timer, so nothing in the measurement is the CPU's.
 See [platform.md](platform.md), "Sleep, peripheral by peripheral".
 
+## The flush, the window event, and the three interrupts
+
+From `test_samc_analog` letter k, 17 verdicts, with the pair's two pads
+driven to opposite rails and the crystal as the ruler.
+
+**A free-running result arrives every decimation window and nothing
+else.** Timed across thirty-two consecutive results in one stopwatch
+window: **1028 crystal ticks** against the 1024 that 4 x OSR CLK_SDADC
+cycles predict at OSR 64 and GCLK/8. (Timing ONE result at a time gives
+782 and is a phase artefact - the clear-and-wait measures a partial
+window.)
+
+**A SINGLE `SWTRIG.FLUSH` DOES NOT COST A DECIMATION WINDOW.** After
+one, the next four results arrive 181, 920, 1027 and 1029 ticks apart:
+one result still lands a fifth of a window after the flush and the
+stream then carries on at its own rate. 39.8.17's "flush the pipeline
+and restart the SDADC clock" would suggest otherwise.
+
+**But `EVCTRL.FLUSHEI` shows what a flush really does, through a
+NEGATIVE witness.** With flush events arriving every 20 us - inside the
+43 us a decimation window takes - **not one result appears in ten
+milliseconds where two hundred were due**, and the same converter
+delivers again the moment the pacer stops. So a flush does throw the
+window away; what a single one costs a stream is what the timing above
+declines to reconcile. `flush_on()` refuses a synchronous channel and
+takes an asynchronous one, as it must.
+
+**What a flush DISCARDS is declined**, with the reason: this pad pair
+makes a differential at the converter's own rail, where a filter still
+filling and a filter full both report 0x7FFF. Seeing 39.6.2.3's step
+response needs a mid-scale source, which is what the SKPCNT measurement
+above used.
+
+**`EVCTRL.WINMONEO` moves something real, with a control that moves
+nothing.** Routed to a TC counting events: **447 events in 20 ms** with
+the condition matching - one per conversion, matching the result rate -
+and **0** in the same 20 ms with a condition this reading cannot meet.
+(The control has to be a condition and not a threshold: nothing is above
+a reading sitting at the positive rail, so "RESULT < a large negative
+number" is what the negative case had to be.)
+
+**All three interrupts drive the NVIC**, under the vector name the
+device header declares (`SDADC_Handler`): ten milliseconds of
+free-running conversions with RESRDY armed give **214 vector entries**
+with the handler reading RESULT (which is what clears the flag), and
+with RESRDY disarmed and nothing reading RESULT the OVERRUN bit reaches
+the same vector.
+
 ## Not covered yet
 
 Driver gaps:
@@ -631,21 +681,16 @@ Driver gaps:
   erratum's own escape (a free-running converter writes no trigger).
   `CTRLA.ONDEMAND` is written and read back and nothing distinguishes
   it here.
-- **`ANACTRL.CTLSDADC` and `ANACTRL.BUFTEST`.** The first is
-  "Debug/Characterization" with no values given, the second has no
-  description at all. Both are writable through `SdadcConfig`, both were
-  proven to stay written, and NOTHING here says what either does.
+- **`ANACTRL.CTLSDADC` and `ANACTRL.BUFTEST` stay DECLINED, and this is
+  the reason rather than an omission.** 39.8.21 calls the first
+  "Debug/Characterization" and lists no values for it, and gives the
+  second no description at all. Both are writable through `SdadcConfig`
+  and both were proven to stay written; a reading taken by poking them
+  would be a number with nothing to compare it against, so no letter
+  does.
 - **`REFCTRL.REFRANGE`** is exposed and proven to be a real field, and
   no document of record says what it selects. No measurement has looked
   for an effect.
-- **The interrupts through the NVIC.** All three flags are read, cleared
-  and used as verdicts; none has ever driven a vector, and `isr()` is
-  compile-verified only.
-- **`EVCTRL.FLUSHEI` and `SWTRIG.FLUSH`.** Both are implemented,
-  `flush_on()` refuses a synchronous channel like `start_on()`, and no
-  bench letter has flushed a conversion in flight.
-- **`EVCTRL.WINMONEO`.** The window monitor's OUTPUT event is written and
-  never routed anywhere.
 - **The E and G packages** are compile-only, as everywhere in this
   stratum: only the J has a board.
 

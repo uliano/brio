@@ -101,10 +101,12 @@
  *    AC must borrow GCLK_ADC1's channel - REVISION B ONLY, so `clock()`
  *    uses AC_GCLK_ID as the header declares.
  *
- * NOT BUILT YET (docs/samc/ac.md carries the list): sleep (RUNSTDBY is
- * a config field, the 40.6.14 sequences have no owner - the power pass
- * does), and the bandgap negative input, whose INTREF output has to be
- * turned on in SUPC.VREF first (22.6.2.2).
+ * SLEEP IS MEASURED, not built here: the 40.6.14 sequences ran in the
+ * transversal sleep pass (test_samc_sleepwalk letter h - a continuous
+ * comparator with RUNSTDBY wakes the device on its own edge, and
+ * COMPCTRL.RUNSTDBY gates the COMPARATOR, not merely its clock;
+ * docs/samc/ac.md carries the numbers). What remains not covered is in
+ * ac.md's own list.
  */
 
 #pragma once
@@ -141,11 +143,20 @@ enum class AcNegative : uint8_t {
     pin3 = AC_COMPCTRL_MUXNEG_PIN3_Val,
     ground = AC_COMPCTRL_MUXNEG_GND_Val,
     vscale = AC_COMPCTRL_MUXNEG_VSCALE_Val,
-    /// INTREF, supplied by the bandgap - and it needs SUPC.VREF.VREFOE
-    /// turned on first (22.6.2.2), which no driver in this stratum does
-    /// yet. ERRATUM 1.5.6, EVERY REVISION: enabling a comparator with
+    /// INTREF, supplied by the bandgap, whose LEVEL is SUPC.VREF.SEL
+    /// (samc/supc.hpp's `VrefLevel`) and not a knob of this peripheral.
+    /// IT DOES NOT NEED SUPC.VREF.VREFOE - measured, with the bit clear
+    /// and set, on the same comparator against the same swept source:
+    /// the crossing does not move. 22.6.2.2's sentence is about routing
+    /// the reference to an ADC INPUT CHANNEL, which is the one path that
+    /// really is dead without the bit; the AC's negative multiplexer
+    /// takes the bandgap internally, exactly as the ADC's and the DAC's
+    /// REFERENCE paths do (docs/samc/ac.md, docs/samc/dac.md).
+    /// ERRATUM 1.5.6, EVERY REVISION: enabling a comparator with
     /// this negative input can raise a SPURIOUS COMPn flag, so clear
-    /// that flag after the enable and before arming the interrupt.
+    /// that flag after the enable and before arming the interrupt -
+    /// bench-reproduced, rarely (about one enable in sixty-four), with
+    /// the erratum's own workaround as the control at zero.
     bandgap = AC_COMPCTRL_MUXNEG_BANDGAP_Val,
     /// The DAC's internal output (samc/dac.hpp, CTRLB.IOEN). Bench-
     /// verified: the crossings track the comparator's own VDD scaler

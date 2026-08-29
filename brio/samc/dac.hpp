@@ -88,7 +88,7 @@
  *      1       0      DATA[13:4]                DATA[3:0]
  *      1       1      DATA[15:6]                DATA[5:2]
  *
- * DITHERING (41.6.8.3) makes 16 sub-conversions of DATA[13:4] or
+ * DITHERING (41.6.8.4) makes 16 sub-conversions of DATA[13:4] or
  * DATA[13:4] + 1 so the average carries 14 bits, and it is NOT a mode a
  * CPU-driven converter can use: the chapter requires a periodic START
  * event (EVCTRL.STARTEI = 1) generating sixteen events per value, with
@@ -248,7 +248,7 @@ struct DacConfig {
     /// CTRLB.LEFTADJ: where the ten bits sit in DATA (table 41-1).
     bool left_adjust = false;
     /// CTRLB.DITHER: 14-bit dithering, which needs a periodic START
-    /// event and is refused without one (41.6.8.3).
+    /// event and is refused without one (41.6.8.4).
     bool dither = false;
     /// CTRLB.VPD: the voltage pump is switched automatically by the
     /// operating voltage and this bit turns it off, which saves power
@@ -279,7 +279,7 @@ constexpr bool dac_config_valid(const DacConfig& c) {
     if (!dac_ref_valid(c.reference)) {
         return false;
     }
-    // 41.6.8.3: dithering IS the event-driven mode - sixteen START
+    // 41.6.8.4: dithering IS the event-driven mode - sixteen START
     // events per value, DATABUF reloaded every sixteen. Without
     // STARTEI there is no way to make the sixteen sub-conversions
     // happen, so the configuration asks for something the silicon
@@ -292,7 +292,7 @@ constexpr bool dac_config_valid(const DacConfig& c) {
 
 /// The full scale of the converter: ten bits.
 inline constexpr uint32_t dac_steps = 1024;
-/// The full scale of a DITHERED value: fourteen bits (41.6.8.3).
+/// The full scale of a DITHERED value: fourteen bits (41.6.8.4).
 inline constexpr uint32_t dac_dither_steps = 16384;
 
 /**
@@ -490,7 +490,7 @@ public:
         static_assert(dac_config_valid(cfg),
                       "brio DacConfig: see dac_config_valid() - the Reserved "
                       "REFSEL code, dithering without the START event input "
-                      "(41.6.8.3), or an inverted event input nothing listens "
+                      "(41.6.8.4), or an inverted event input nothing listens "
                       "to");
         return init(generator, cfg, spins);
     }

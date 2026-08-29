@@ -1877,6 +1877,67 @@ gets its dated home in `docs/design/` when taken.
   new suite's cold z); check_samc OK, check_family OK, host 23/23. All
   six judgment calls ACCEPTED at review (the DIVSEL ceiling verified
   measured, not inferred); memory samc-session-2026-08-29-timer-dma.
+  **THE ANALOG COMPLETION DONE 2026-08-29 (Opus delegation, REVIEWED BY
+  FABLE and COMMITTED same day, all judgment calls accepted; memory
+  samc-session-2026-08-29-analog).** One suite for five chapters -
+  test_samc_analog z 136/136 (agent x8 incl. two cold, Fable x3 incl.
+  one cold), 12 letters, ~3.5 s, WIRELESS, and again NOT ONE LINE OF
+  DRIVER CODE: the two brio/ edits are measurement-anchored comments
+  (30/30 pre-existing images byte-identical by the reviewer's worktree
+  gate). THE HOST/CLIENT ADC PAIR run for real: one host trigger starts
+  both converters, agreeing to ZERO counts on the shared pad - and THE
+  CLIENT'S OWN ENABLE BIT DOES NOT STAND (ADC1.CTRLA reads 0x20, init()
+  writes ENABLE and it does not stick, the converter converts anyway -
+  38.6.3.1's "enabled by accessing the CTRLA register of Host ADC" is
+  literal and Adc<1>::enabled() lies); INTERLEAVE buys the RATE OF ONE
+  SIGNAL (2495 results for 2500 triggers = exactly twice what one
+  converter sustains) where BOTH buys two inputs at the old lateness;
+  A MISSED TRIGGER IS NOT AN OVERRUN (a converter drops half its
+  triggers with the flag CLEAR - 38.6.5 is about an unread RESULT, so
+  OVERRUN is no witness for over-pacing); and ONLY ONE OF 38.6.3.1'S
+  THREE RESTART OPTIONS RESTARTS ANYTHING - trigger parity is the
+  witness (software triggers alternate strictly), FLUSH and a
+  disable/enable cycle both carry the parity straight through, only a
+  SOFTWARE RESET defines it. The SEQUENCE walked over known-distinct
+  inputs; DIFFERENTIAL finally measured with the DAC as the swept
+  mid-scale source; NEITHER R2R NOR OFFCOMP MOVES THE READING (worst 2
+  counts of 4096; the 1.3 mV floor stated, not an absence claimed) and
+  OFFCOMP IS SHORTER - it REPLACES SAMPLEN (28 ticks saved). DAC
+  DITHERING RUN AT LAST: 1024 samples hitting each of the 16 sub-slots
+  exactly 64 times, means 32487 -> 32548, SWING 61 WHERE 15/16 LSB IS
+  60 (4.1 counts per bit vs 4.0 ideal), the undithered control stepping
+  a whole LSB; LEFTADJ on silicon; EMPTY/UNDERRUN through a real
+  handler. THE AC COMPLETED: COMP2/COMP3 and WINDOW 1 on silicon at
+  last; THE HYSTERESIS MEASURED - 118 mV high-speed / 113 mV low-power
+  (both inside table 45-34, both edges moving, erratum 1.5.2's pairing
+  legal and behaving); THE BANDGAP NEGATIVE INPUT DOES NOT NEED VREFOE
+  (measured both ways - ac.hpp's own comment corrected: 22.6.2.2 is
+  about the ADC INPUT CHANNEL path, the one that really is dead
+  without the bit) and the bandgap weighed by the DAC lands 1044/2083/
+  4178 mV, a third independent route; ERRATUM 1.5.6 REPRODUCES RARELY
+  (1 enable in 64, the workaround as the control at zero -
+  pass-as-declined); THE SWAP RECIPE RETURNS A BOUND, NOT A NUMBER
+  (SWAP inverts terminals AND output so the sense is unchanged -
+  gotten backwards it produced a nonsense 246 mV; corrected: offset
+  under one DAC code). SDADC: WINMONEO moves a real witness; ONE
+  SWTRIG.FLUSH COSTS NO WINDOW but FLUSHEI events every 20 us stop
+  every result dead (recorded, deliberately not reconciled);
+  ANACTRL's CTLSDADC/BUFTEST DECLINED with the reason (factory/test
+  bits). TSENS: STARTINV needs a LEVEL (a comparator output - same
+  fact as the AC's INVEIx); the window hysteresis DECLINED (one-way
+  self-heating is no stimulus). A DEVIATION THE SILICON FORCED: this
+  family's COMPCTRL has HYSTEN only, NO HYSTSEL, so "both hysteresis
+  levels" became both SPEEDS. Errata re-read by the row: 1.4.10 spent
+  visibly (the ADC1-first order again), 1.5.1/1.9.1/1.4.7/1.5.4 not
+  this silicon by row AND measurement where reachable. A citation fix:
+  the DAC's dithering is 41.6.8.4, not .3 (dac.hpp's comments). At
+  review Fable also retired ac.hpp's stale sleep line (the 40.6.14
+  sequences ARE measured - sleepwalk letter h). Canaries adc 97 / dac
+  108 / ac 94 / sdadc 101 / tsens 168 both hands; check_samc,
+  check_family, host green; adc.md/dac.md/ac.md/sdadc.md/tsens.md
+  moved in the same change, bench.md row + board C firmware. Still
+  open by honest necessity: VREFA (a wire), the voltage pump (the
+  supply), the util adapters (born with Multislope).
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and

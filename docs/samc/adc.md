@@ -3,10 +3,12 @@
 > **PROVISIONAL.** Both converters are implemented over the whole
 > chapter and bench-verified, and `util/analog_sampler.hpp` runs on top
 > of them unchanged. The reference selections and `AdcInput::dac` are
-> exercised against the DAC on the same die ([dac.md](dac.md)). What is
-> NOT here: VREFA needs a pin nothing drives, and the host/client pair,
-> sleep, differential mode and the automatic sequencer are written and
-> never exercised. The list is in "Not covered yet".
+> exercised against the DAC on the same die ([dac.md](dac.md)), and so
+> are the host/client pair, the automatic sequence, differential mode and
+> the two input-stage knobs. What is
+> NOT here: VREFA needs a pin nothing drives, sleep belongs to the power
+> pass, and none of the three interrupts has driven the vector. The list
+> is in "Not covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 38, the ADC
 characteristics of table 45-22, the NVM software calibration area of
@@ -17,7 +19,9 @@ section 1.4, read on the **E/G/J row at revision F**: items 1.4.4,
 revisions B..E. Driver: `samc/adc.hpp`, over the reserve's ADC entries
 in `samc/device_tables.hpp`. The family fixture is
 `test/family_samc/adc.cpp` plus nine negatives under
-`tools/check_samc.sh`; the bench suite is `test_samc_adc`.
+`tools/check_samc.sh`; the bench suites are `test_samc_adc` and, for
+what needed the DAC as a swept mid-scale source, `test_samc_analog`
+(letters a to d).
 
 ## What the silicon does
 
@@ -417,20 +421,117 @@ REPRODUCE**: SYNCBUSY reads zero at every such wake. The chain and the
 EVSYS bit it depends on are in [platform.md](platform.md), "Sleep,
 peripheral by peripheral".
 
+## The host/client pair, the sequence, differential mode
+
+From `test_samc_analog` letters a to d, 47 verdicts.
+
+**One trigger on the host really does start both converters, and the
+client's own ENABLE bit is not how it is turned on.** With
+ADC1.CTRLA.SLAVEEN set, sixteen software triggers on ADC0 give sixteen
+PAIRS of results, and on a shared pad - PA08 is ADC0/AIN8 and
+ADC1/AIN10 at once - the two agree to **zero counts** at VDD and read 0
+and 0 at ground. But ADC1.CTRLA reads **0x20**: the ENABLE bit is
+written by `init()` and does not stand, only SLAVEEN is left, and the
+converter converts anyway. 38.6.3.1's "the Client ADC is enabled by
+accessing the CTRLA register of Host ADC" is meant literally, and a
+caller watching `Adc<1>::enabled()` would conclude the converter was
+off.
+
+**What INTERLEAVE buys is the RATE OF ONE SIGNAL, and BOTH does not buy
+it.** Paced by a TC event every 8.0 us - shorter than the 12.0 us one
+conversion takes at CLK_ADC 1.5 MHz with SAMPLEN 5 - over 20 ms (2500
+triggers):
+
+| arrangement | results | OVERRUN |
+| --- | --- | --- |
+| ADC0 alone | 1238 | no |
+| DUALSEL = BOTH | 2384 | no |
+| DUALSEL = INTERLEAVE | 2495 | no |
+
+Interleaved, **one result per trigger**, i.e. exactly twice what one
+converter can sustain; BOTH gives twice the count too, but as
+simultaneous samples of two INPUTS, each converter still as late as one
+alone. **And a single converter's OVERRUN flag stays CLEAR while it
+drops half the triggers**: 38.6.5's OVERRUN is about a RESULT nobody
+read, not about a trigger nobody took, so it is no witness at all for a
+converter being over-paced.
+
+**ONLY ONE OF 38.6.3.1'S THREE RESTART OPTIONS RESTARTS ANYTHING.**
+Software triggers alternate strictly (eight of them give `1 0 1 0 1 0 1
+0`), so the parity is observable; applying each restart option from the
+two different parities and comparing the eight answers that follow:
+
+| option | the sequence afterwards |
+| --- | --- |
+| SWTRIG.FLUSH on the host | the parity carries straight through |
+| a disable/enable cycle of the host | the parity carries straight through |
+| a software reset of the host | defined, the same from either parity |
+
+The chapter lists the flush FIRST and it is the only one of the three
+that costs no reconfiguration - and it restarts nothing.
+
+**The automatic sequence walks six inputs in one trigger and labels
+every one.** With SEQCTRL bits set for AIN0 (the DAC at code 700), AIN1
+(a pad at GND), AIN4 (a pad at VDD), the bandgap, VDDCORE/4 and
+VDDANA/4 - six values whose closest pair is **222 counts apart**, so a
+swap could not hide - one software trigger returns `2785 0 4087 799 231
+1019` against the `2784 0 4086 797 232 1019` the same six give one at a
+time, and SEQSTATUS.SEQSTATE reports `0 1 4 25 26 27`: the MUXPOS codes
+themselves, in ascending order, exactly as 38.6.2.12 states. SEQBUSY
+stands throughout and is clear at the end, and with SEQCTRL cleared the
+conversion follows MUXPOS again. **It is also CHEAPER**: 384
+conversions cost 9577 us one software trigger at a time and 8637 us
+inside sequences of six - 24.9 us against 22.5 us each, the saving
+being the trigger and the input change the sequencer does itself.
+
+**Differential mode, with a source that is neither a rail nor zero.**
+The DAC on PA02 is AIN0, so MUXPOS = AIN0 against MUXNEG = AIN1 (a
+driven pad) reads **+1395** with that pad at GND and **-649** with it at
+VDD, against +1392 and -651 predicted from the same two nodes read
+single-ended: **a differential result is HALF the single-ended
+difference**, which is what a signed full scale of +/-VREF means, and
+the sign is the difference's own. Sweeping the DAC against the INTERNAL
+VDDANA/4 channel as the positive input gives a real zero crossing -
+511, 313, 113, 1, -87, -286, -683 at DAC codes 0..600 - **vanishing at
+code 256, which IS a quarter of the supply**, so the internal divider is
+a witness and not merely a level. 38.6.2.13's signed thresholds are
+signed: WINMODE "RESULT > WINLT" with **WINLT = -200** fires at a
+difference of +313 and stays silent at -683, two results that are
+indistinguishable read unsigned.
+
+**NEITHER CTRLC.R2R NOR SAMPCTRL.OFFCOMP CHANGES THE READING ON THIS
+DIE.** The same differential measured at three common modes - about
+0.5 V, about 1.8 V (VREF/2, where 38.6.3.2 says the plain converter is
+at its best) and about 4.6 V - plain, with offset compensation, and with
+both:
+
+| common mode | plain | +OFFCOMP | +OFFCOMP+R2R |
+| --- | --- | --- | --- |
+| near GND | 396 | 397 | 398 |
+| mid supply | 1395 | 1396 | 1397 |
+| near VDD | -402 | -401 | -401 |
+
+The largest shift either knob produces is **2 counts of 4096** against a
+per-reading spread of up to 4 - so what is measured is that the effect
+is BELOW one count (1.3 mV here) and not that it is zero. At 5.15 V with
+VREF = VDDANA there is little for a rail-to-rail input stage to fix.
+**And offset compensation is SHORTER, not longer**: it REPLACES SAMPLEN
+with a fixed four-cycle sample, so against SAMPLEN 5 it saves the two
+CLK_ADC cycles `adc_conversion_cycles()` predicts (28 crystal ticks a
+conversion measured, 32 predicted); R2R on top of it costs nothing
+further, changing the input stage and not the timing.
+
+**Erratum 1.4.7** - differential and single-ended electrical
+characteristics out of specification - is marked **revisions B..E** on
+the E/G/J row and is not this silicon.
+
 ## Not covered yet
 
 Driver gaps:
-- **The host/client pair** (38.6.3.1): `AdcConfig::client_enable` and
-  `AdcConfig::dual` are written, refused on the wrong instance and read
-  back, but no letter runs the two converters as a pair. Simultaneous
-  and interleaved dual-mode triggering, and the flush/disable/reset
-  restart options, are untouched silicon from here.
-- **The automatic sequence** (38.6.2.12): `sequence()` writes SEQCTRL
-  and `sequence_state()` reads SEQSTATUS, and nothing has ever run a
-  sequence. It needs several bonded pads to be worth testing.
 - **The ADC as a WAKE source**: RESRDY, WINMON and OVERRUN have never
   driven the NVIC out of a sleep. Table 38-4 itself is measured (see
-  "Bench findings"); what is missing is the interrupt half.
+  "Bench findings"); what is missing is the interrupt half - and none of
+  the three has ever driven the vector at all, awake or asleep.
 - **VREFA** (`Ref::vrefa`) is encodable and unreachable: the pin is PA03
   and nothing on this board drives it inside table 45-30's range. Needs
   a wire.
@@ -441,20 +542,23 @@ Driver gaps:
   generic clock channel and a main-clock change does not move CLK_ADC.
 
 Implemented but not bench-verified:
-- **Differential mode.** `DIFFMODE`, the negative multiplexer and the
-  signed window thresholds are all written and refused correctly, and
-  nothing has converted a differential pair - two pads at two different
-  driven levels would only ever give a full-scale or a zero difference,
-  which is not a test of anything.
-- **Rail-to-rail** (`CTRLC.R2R`) and its offset-compensation
-  requirement: the pairing is enforced, the mode never measured.
-- **`CTRLC.LEFTADJ`**, written and never read back.
+- **`CTRLC.LEFTADJ`**, written and never read back. (The DAC's own
+  LEFTADJ is measured - [dac.md](dac.md) - and this one is a different
+  register in a different chapter.)
 - **The gain correction.** `GAINCORR` is written, range-checked and
   read back; only the OFFSET half was measured against a reading.
-- **The FLUSH event input** (`flush_on()`) and `flush()` itself: both
-  are exercised for their refusals, neither for its effect.
+- **The FLUSH event input** (`flush_on()`): exercised for its refusal of
+  a synchronous channel, never for its effect. `flush()` itself now has
+  one measured effect and it is a NEGATIVE one - it does not restart an
+  interleaved sequence (see above) - and what it costs a conversion in
+  flight is unmeasured here. (The SDADC's flush is measured both ways -
+  [sdadc.md](sdadc.md).)
 - **The WINMON and OVERRUN interrupts.** Both flags are read and
   cleared; only RESRDY has ever driven the NVIC.
+- **The dual pair beyond one shared pad.** The two converters are proven
+  simultaneous on ONE node; nothing here samples two DIFFERENT nodes at
+  one instant, which is what DUALSEL = BOTH is for, and nothing measures
+  the skew between them.
 - **`AdcInput::intref` as a MUXPOS at a fast CLK_ADC**, where table
   45-22's 10 us sampling rule should bite harder than the four per mille
   measured at 1.5 MHz.

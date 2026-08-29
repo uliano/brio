@@ -11,7 +11,8 @@ Documents of record: SAM C20/C21 data sheet DS60001479M ch. 43, table 9-6
 - and errata DS80000740S item **1.19.1, live on every silicon revision
 including this one**, which is reproduced below. Driver: `samc/tsens.hpp`.
 Family fixture `test/family_samc/tsens.cpp` plus five negatives under
-`tools/check_samc.sh`; the bench suite is `test_samc_tsens`.
+`tools/check_samc.sh`; the bench suites are `test_samc_tsens` and, for
+the inverted start event, `test_samc_analog` (letter l).
 
 The chapter is C21-only, and table 1-1's own note adds that TSENS is
 absent from the AEC-Q100 qualified part numbers - a marking difference the
@@ -482,6 +483,27 @@ so a window whose lower limit sits below the datum's rail matches on
 every measurement and its event is the count. See
 [platform.md](platform.md), "Sleep, peripheral by peripheral".
 
+## The inverted start event
+
+From `test_samc_analog` letter l, 8 verdicts.
+
+**`EVCTRL.STARTINV` inverts a real start event**, and it takes a LEVEL
+to show it: a pulse carries both edges, so nothing about polarity can be
+read off one. A comparator output IS a level (40.6.13 calls it "a copy
+of the comparator status"), so COMP0 watching a pad driven under PORT is
+the stimulus and TSENS the user, on an asynchronous channel:
+
+| | the level rises | the level falls |
+|---|---|---|
+| STARTINV clear | a measurement starts | nothing |
+| STARTINV set | nothing | a measurement starts |
+
+and what the inverted edge started is a real measurement - **2765
+hundredths of a degree Celsius**, a plausible die temperature and not an
+empty trigger. `Tsens::event_config()` and `start_on()` both refuse
+while the block is enabled, 43.6.2.1's enable protection as a refusal
+rather than a dropped store.
+
 ## Not covered yet
 
 Driver gaps (not built):
@@ -502,11 +524,14 @@ Implemented but not bench-verified:
   or a plausibility band, and table 45-37's -11.3 .. +6.2 C is untested
   and untestable here.
 - **The hysteresis window modes' hysteresis**, which needs the die to
-  cross a threshold and come back.
+  cross a threshold and COME BACK. Declined with the reason rather than
+  attempted: the only stimulus this bench can apply to the die's own
+  temperature is this chip's self-heating, which is a slow ONE-WAY drift
+  of a few tenths of a degree - a threshold placed in it is crossed once
+  and never returns, so the hysteresis would never be the thing measured
+  and a verdict would be about the crossing instead.
 - **The positive overflow rail**, unreachable on this die (the gain term
   is negative and OFFSET's field stops at +2^23 - 1).
-- **EVCTRL.STARTINV**, the inverted start event: implemented, and no
-  chain here needed a falling edge.
 - **43.6.7's bus error.** Every synchronized write in the driver waits
   before storing on the strength of that sentence, and the sentence has
   never been provoked - deliberately, since proving it costs a HardFault.
