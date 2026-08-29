@@ -98,9 +98,29 @@ step and would say nothing new.
 - **Restart and gap policy** - `release()` restarting a stalled source
   is the source's contract; whether the gap warrants an app response is
   the subscriber's business, told by the overrun count.
-- **An AVR implementation** - the concepts are satisfiable from an
-  interrupt handler and the shape was designed so, but nothing on that
-  target asks for one yet; it is born with its first user.
+- **An AVR implementation, and the two halves part ways there.**
+  `BlockSource` is the plausible half: an ADC interrupt filling
+  ping-pong buffers at a few ksps is realistic, the concept was
+  designed to allow it, and it is born with its first user.
+  `BlockPlayer` is NOT: an interrupt reloading a DAC costs microseconds
+  per sample on that core, and - more to the point - a waveform is not
+  that family's shape at all. There a waveform is hardware (the timers'
+  PWM, already `PwmChannel`) and the DAC serves LEVELS; a degraded
+  interrupt player would be an emulation of the wrong platform, and a
+  concept is not a HAL - a target that cannot meet it implements
+  nothing, and a program that names it there fails to compile, which is
+  the honest answer.
+- **A sequencer** - a table of LEVELS walked at a slow pace (an
+  envelope, a profile, a staircase), which is what a machine with no
+  stream machinery does instead of playback. It is a different
+  vocabulary, not a degraded player: a TimeEvent plus a table plus an
+  actuator the concepts already name, i.e. pure util over existing
+  contracts, portable by construction. That is exactly why it is NOT
+  built early: the block-stream contract was, because every platform
+  implements it with its own machinery and the fixed point is what
+  measures the friction - a sequencer has no per-target half to
+  measure, so pre-building buys nothing and it is born with its first
+  user.
 
 ## Validation
 
