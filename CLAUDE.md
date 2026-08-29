@@ -995,13 +995,17 @@ gets its dated home in `docs/design/` when taken.
   rather than a mute board (it fired once, exactly as designed). THE
   NUMBERS: the SLEEPCFG bridge latency 19.6.3.3 warns about is ~5 us on a
   48 MHz CPU (so the readback rule is not a formality); leaving IDLE0
-  costs NOTHING measurable over a polled wait while IDLE2 costs 3.5..4.4
-  us more, repeatably, on a board with no CAN traffic - which chapter 19
-  does not mention; leaving STANDBY costs 16.6..17.8 us, and SIX
-  combinations of VREGSMOD x SUPC.VREG.RUNSTDBY x BBIASHS spread 2.1 us
-  against 1.4 us of scatter in the same measurement repeated, so THIS
-  FAMILY HAS NO SEPARATE REGULATOR BILL (the AVR's was a distinct 290 us
-  item); a 499 ms standby advanced the kernel tick by 0 ms and a time
+  costs NOTHING measurable over a polled wait while IDLE2 costs more -
+  ORIGINALLY 3.5..4.4 us, CORRECTED 2026-08-29 to 24..30 us (the
+  original was measured through tc.hpp's one-behind READSYNC defect,
+  whose deep_leg differences telescoped onto the arming time; the
+  double-READSYNC fix and the mechanism are in tc.md) - on a board with
+  no CAN traffic, which chapter 19 does not mention; leaving STANDBY
+  costs ~106 us (originally 16.6..17.8 through the same defect), and
+  SIX combinations of VREGSMOD x SUPC.VREG.RUNSTDBY x BBIASHS still
+  spread under 2 us inside the repeat's own scatter, so THIS FAMILY HAS
+  NO SEPARATE REGULATOR BILL holds with the corrected absolute (the
+  AVR's was a distinct 290 us item); a 499 ms standby advanced the kernel tick by 0 ms and a time
   event 50 ms away slept over for 249 ms matured 199 ms late; THE
   PERIPHERAL'S OWN RUNSTDBY IS THE WHOLE CLOCK REQUEST (a TC counted all
   1024 ticks of a standby with its generator's RUNSTDBY clear, with its

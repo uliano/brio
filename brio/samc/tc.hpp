@@ -550,24 +550,30 @@ public:
     // READING COUNT IS A COMMAND (35.6.8): READSYNC, then the two waits,
     // then the load. `*_raw()` skips it and says so.
     //
-    // AND THE READ IS ONE BEHIND. Measured (test_samc_sleep letter c, on
-    // a pair clocked at 32 kHz where the effect is large enough to see):
-    // four consecutive count32() calls on a counter that had been
-    // running for six milliseconds returned 0, 196, 201, 205. The waits
-    // below return before the value this command latched is readable, so
-    // what comes back is the value the PREVIOUS read_sync latched. The
-    // lag is therefore ONE READ INTERVAL - invisible in a stopwatch read
-    // every few microseconds, and the whole interval when reads are
-    // milliseconds apart or separated by a sleep. A caller that needs
-    // the count AT A MOMENT reads twice and keeps the second; a caller
-    // measuring an interval between two reads of its own is unaffected,
-    // because the lag cancels. docs/samc/tc.md carries this, and whether
-    // read_sync() should instead wait for SYNCBUSY.COUNT to be SET
-    // before waiting for it to clear is an open question for the TC's
-    // own pass - it is not fixed here on a measurement made by another.
+    // AND THE COMMAND IS ISSUED TWICE, because the silicon gives no
+    // other honest way. Measured (tc_readsync_probe, designed from
+    // test_samc_sleep's one-behind finding): after a READSYNC,
+    // SYNCBUSY.CTRLB stands for the command's own crossing and falls -
+    // and the COUNT shadow lands about HALF A COUNTER-CLOCK PERIOD
+    // LATER, with NO SYNCBUSY bit advertising it (SYNCBUSY.COUNT never
+    // rises for a READSYNC; it is the WRITE's bit). A single-command
+    // read therefore returns the PREVIOUS command's snapshot: four
+    // consecutive reads of a 32 kHz pair that had run six milliseconds
+    // gave 0, 216, 221, 225. The second command's own crossing covers
+    // the first's landing gap, so the double-command read below returns
+    // the count AT THIS CALL'S ENTRY - measured 224, 233, 241, 249 on
+    // the same setup, the first value finally current. THE PRICE is two
+    // crossings per read: ~242 us at a 32.768 kHz counter clock (vs
+    // ~117 single), unmeasurably small at 48 MHz. A caller measuring an
+    // interval between two of its own reads never needed the fix (the
+    // lag cancelled) and now simply pays the double crossing; `*_raw()`
+    // still skips everything and says so. docs/samc/tc.md carries the
+    // numbers.
 
     static bool read_sync(uint32_t spins = 0xFFFFu) {
         return command(TcCommand::read_sync, spins) &&
+               sync_wait(TC_SYNCBUSY_COUNT_Msk, spins) &&
+               command(TcCommand::read_sync, spins) &&
                sync_wait(TC_SYNCBUSY_COUNT_Msk, spins);
     }
 

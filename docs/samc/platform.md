@@ -285,25 +285,33 @@ Stopping:
   the device header's own register mask, and its reset value is
   0x0400 - back-bias ON, regulator AUTO.
 - **Waking from IDLE0 costs nothing measurable** over a polled wait on
-  the same RTC compare: -250 to +916 ns across runs, i.e. a WFI and an
-  exception entry. **IDLE2 costs 3.5 to 4.4 us more than IDLE0**,
-  repeatably, on a board with no CAN traffic at all - chapter 19
+  the same RTC compare: under a microsecond either way across runs,
+  i.e. a WFI and an exception entry. **IDLE2 costs 24 to 30 us more
+  than IDLE0** on a board with no CAN traffic at all - chapter 19
   presents IDLE2 as IDLE0 with one more clock gated and says nothing
-  about paying for it at the wake.
-- **Waking from STANDBY costs 16.6 to 17.8 us** more than waking from
-  IDLE0 (mean of 64 single wakes on the crystal ruler). That is the
+  about paying for it at the wake. (THE ABSOLUTES HERE WERE CORRECTED
+  on 2026-08-29: the campaign's original 3.5..4.4 us was measured
+  through tc.hpp's one-behind READSYNC defect, whose differences
+  telescoped onto the inter-round ARMING time instead of the wait
+  window - tc.md carries the mechanism and the fix. Every structural
+  conclusion below survived the correction; the absolute bills did
+  not.)
+- **Waking from STANDBY costs about 106 us** more than waking from
+  IDLE0 (mean of 64 single wakes on the crystal ruler; originally
+  reported as 16.6..17.8 us through the same defect). That is the
   whole bill: **nothing in STDBYCFG or SUPC.VREG moves it**. Six
   combinations of VREGSMOD (AUTO / PERFORMANCE / LP) x SUPC.VREG.
-  RUNSTDBY x BBIASHS spread 2.1 us, against 1.4 us of scatter between
+  RUNSTDBY x BBIASHS spread under 2 us, inside twice the scatter of
   the same measurement repeated first and last. This family therefore
   has NO separate regulator bill, unlike AVR DA/DB where the regulator
-  was a distinct ~290 us item on top of the oscillator's.
+  was a distinct ~290 us item on top of the oscillator's - and even
+  the corrected 106 us is far below the AVR's 290 us + 1.77 ms
+  crystal restart.
 - Erratum 1.8.14's predicted fingerprint - PERFORMANCE alone keeping
   GCLK0 requested, hence a cheap wake - **is not visible in the wake
-  time** (AUTO 14.9 us against PERFORMANCE 17.0 us). Reported, not
-  claimed: the erratum is about which regulator is used and about a
-  clock left requested, and only the second of those could show up
-  here.
+  time**. Reported, not claimed: the erratum is about which regulator
+  is used and about a clock left requested, and only the second of
+  those could show up here.
 - **The kernel tick freezes, exactly.** A standby of 499 ms of wall
   clock advanced `Ticker::ticks()` by 0 ms; the same sleep in IDLE0
   advanced it by 496. A time event 50 ms away, slept over for 249 ms,

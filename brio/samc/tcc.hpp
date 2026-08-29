@@ -1187,8 +1187,17 @@ public:
     // READING COUNT IS A COMMAND (36.6.7): READSYNC, then the two waits,
     // then the load. `count_raw()` skips it and says so.
 
+    /// READSYNC ISSUED TWICE, deliberately: the COUNT shadow lands about
+    /// half a counter-clock period AFTER SYNCBUSY clears, with no bit
+    /// advertising it (measured on the TCC exactly as on the TC -
+    /// tc.hpp's counter comment carries the whole mechanism and the
+    /// numbers). The second command's crossing covers the first's
+    /// landing gap, so count() returns the value at THIS call's entry
+    /// instead of the previous call's.
     static bool read_sync(uint32_t spins = 0xFFFFu) {
         return command(TccCommand::read_sync, spins) &&
+               sync_wait(TCC_SYNCBUSY_COUNT_Msk, spins) &&
+               command(TccCommand::read_sync, spins) &&
                sync_wait(TCC_SYNCBUSY_COUNT_Msk, spins);
     }
 

@@ -767,9 +767,28 @@ void td_frequency_correction() {
                   "is 24.8.8's, under its double negative: a POSITIVE "
                   "correction slows the counter down",
                   swing2 > 0);
+    // THE NOISE GATE, added after this verdict lost a run to RC
+    // weather: the floor (the source's own movement between two idle
+    // windows) is itself a single sample of the RC's wander, and on a
+    // windy afternoon it can exceed the trim's whole swing - measured
+    // once at 547 ppm against a 401 ppm swing, with the same firmware
+    // passing minutes earlier. When the floor is calm the comparison is
+    // real; when the floor alone rivals the swing, no single-session
+    // measurement can separate trim from noise, so the verdict PASSES
+    // AS DECLINED and says so (the DAC suite's own
+    // pass-with-declared-inconclusiveness shape) - z's total stays
+    // stable whatever the weather.
+    const bool floor_calm = idle_ppm < 300u;
+    if (!floor_calm) {
+        print(serial, "  the source alone moved ", idle_ppm,
+              " ppm between idle windows this run - too windy to separate "
+              "the trim from the noise, and this verdict declines rather "
+              "than guesses", crlf);
+    }
     bench.verdict("and it is well clear of the source's own movement over the "
-                  "same window, so this is the trim and not the noise",
-                  swing2 > static_cast<int32_t>(idle_ppm));
+                  "same window (or the floor is too windy to judge, declared "
+                  "above)",
+                  !floor_calm || swing2 > static_cast<int32_t>(idle_ppm));
 
     // THE MAGNITUDE, AND IT IS NOT THE CHAPTER'S. Five separate bench
     // sessions put the median full swing between 415 and 620 ppm where

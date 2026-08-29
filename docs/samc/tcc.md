@@ -53,8 +53,14 @@ dual-slope flavours differing only in where the interrupt and event land.
 
 **Reading COUNT is a command, not a load** - CTRLBSET.CMD = READSYNC,
 then wait out SYNCBUSY.CTRLB and SYNCBUSY.COUNT, then read (36.6.7),
-exactly as in the TC. `count()` does it; `count_raw()` skips it and says
-so.
+exactly as in the TC - AND ISSUED TWICE, exactly as in the TC: the
+COUNT shadow lands about half a counter-clock period after SYNCBUSY
+clears with no bit advertising it (measured on both timers by
+`tc_readsync_probe`; the mechanism and the numbers are in
+[tc.md](tc.md)), so a single-command read returns the PREVIOUS
+command's snapshot and `read_sync()` pays the second crossing to
+return the count at the call's entry. `count()` does it; `count_raw()`
+skips it and says so.
 
 **Enable-protection and write-synchronization split differently here
 than in the TC, and the difference is useful.** Enable-protected

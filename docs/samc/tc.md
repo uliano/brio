@@ -207,18 +207,24 @@ witness.
 - **Two READSYNC'd reads of a running counter differ**, and the raw
   accessor afterwards returns exactly what the command fetched - which is
   what makes the two names worth having.
-- **A synchronized read is ONE BEHIND**, which the pair of names above
-  does not warn about. Measured by `test_samc_sleep` letter c, on a pair
-  clocked at 32 kHz where the effect is big enough to see: four
-  consecutive `count32()` calls on a counter that had been running for
-  six milliseconds returned **0, 196, 201, 205**. `read_sync()`'s waits
-  return before the value THIS command latched is readable, so what comes
-  back is the value the PREVIOUS one latched. The lag is one read
-  interval - invisible in a stopwatch read every few microseconds, and
-  the whole interval when reads are milliseconds apart or separated by a
-  sleep. A caller that needs the count at a MOMENT reads twice and keeps
-  the second; a caller measuring the interval between two reads of its
-  own is unaffected, because the lag cancels.
+- **A synchronized read pays TWO READSYNC commands, and here is why.**
+  `test_samc_sleep` letter c found a single-command read ONE BEHIND
+  (four consecutive `count32()` calls on a 32 kHz pair that had run six
+  milliseconds returned **0, 216, 221, 225**), and the dedicated probe
+  `tc_readsync_probe` then watched the crossing itself: after a
+  READSYNC, SYNCBUSY.CTRLB stands for the command's crossing and falls,
+  and the COUNT shadow lands about **half a counter-clock period
+  later, with no SYNCBUSY bit advertising it** - SYNCBUSY.COUNT never
+  rises for a READSYNC (it is the write's bit), so there is nothing to
+  wait on. The waiting-for-the-rise candidate fix was tried and DOES
+  NOT work (the reads stayed one behind); what works is a SECOND
+  READSYNC, whose own crossing covers the first's landing gap.
+  `read_sync()` now issues it, so a synchronized read returns the count
+  at the CALL's entry - measured **224, 233, 241, 249** on the same
+  setup, the first value finally current. The price: **~242 us** per
+  read at a 32.768 kHz counter clock against ~117 single-command,
+  unmeasurably small at 48 MHz. The TCC's `read_sync()` has the same
+  silicon and carries the same fix.
 - **PWM measured two ways at once.** On the LED's own waveform output
   (PB23 = TC3/WO1), TOP 199 at /256: duty 0 reads **0** per mille high on
   the pad, duty 199 reads **994**, duty 100 reads **488** and duty 50
@@ -272,11 +278,6 @@ Driver gaps (deliberate):
   source's own RUNSTDBY clear. `on_demand` is still only a field -
   35.6.7's clock-request behaviour, ONDEMAND stopping the request while
   STATUS.STOP is set, has no owner.
-- **Whether `read_sync()` should wait for SYNCBUSY.COUNT to be SET
-  before waiting for it to clear.** That is the candidate fix for the
-  one-behind read above; it is not made here, because the measurement
-  that found it belongs to another chapter's suite and the change wants
-  its own pass through this one.
 - **The double-buffer surface beyond the two setters.** `CTRLA.ALOCK`,
   the UPDATE command and the buffer-valid flags are all exposed, but no
   task uses `lock_update` to stage a coordinated multi-channel update.

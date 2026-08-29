@@ -771,13 +771,22 @@ void tb_idle() {
                   b0 > -2000 && b0 < 2000);
     // A FINDING THE CHAPTER DOES NOT HAVE. 19.6.3.3.1 presents IDLE2 as
     // IDLE0 with the CAN clock gated and nothing else - and there is no
-    // CAN traffic on this board at all - yet leaving it costs several
-    // microseconds more, every time, over three runs.
+    // CAN traffic on this board at all - yet leaving it costs tens of
+    // microseconds more, every time.
+    //
+    // THE BAND WAS RECALIBRATED when tc.hpp's one-behind read was fixed
+    // (tc_readsync_probe): with the defective read, deep_leg()'s
+    // differences TELESCOPED onto the inter-round arming time instead
+    // of the wait window, and this letter's original "3.5..4.4 us" was
+    // that artifact. Measured through the FIXED read the bill is
+    // 24..30 us across runs (and STANDBY's, letter e, moved from ~17 us
+    // to ~106 us the same way - the docs carry the correction). The
+    // structural conclusions all survived; the absolutes did not.
     print(serial, "  IDLE2 therefore costs ", b2 - b0,
           " ns more to leave than IDLE0, on a board with no CAN traffic", crlf);
-    bench.verdict("IDLE2 IS NOT FREE: gating one more clock domain costs "
-                  "microseconds at the wake, which chapter 19 does not say",
-                  b2 - b0 > 1500 && b2 - b0 < 20000);
+    bench.verdict("IDLE2 IS NOT FREE: gating one more clock domain costs tens "
+                  "of microseconds at the wake, which chapter 19 does not say",
+                  b2 - b0 > 5000 && b2 - b0 < 80000);
 
     watchdog_backstop(false);
     quiesce();
@@ -806,19 +815,14 @@ bool slow_watch_up(GclkSource src, bool gen_standby, bool tc_standby) {
     return SlowWatch::enable(true);
 }
 
-/// TWO reads of the pair, and the first is thrown away.
-///
-/// MEASURED HERE, and it is a fact about samc/tc.hpp rather than about
-/// sleep: the FIRST `Tc::count32()` after a counter is started returns
-/// the readable shadow's PREVIOUS content - zero - because READSYNC's
-/// result lands after `read_sync()`'s wait has already returned. Four
-/// consecutive reads of a pair that had been running for six
-/// milliseconds gave 0, 196, 201, 205. From the second read on the lag
-/// is one read-duration and constant, so differences are honest; a
-/// single first read is not, and would have credited this letter's whole
-/// awake set-up to the standby it is trying to measure.
+/// One read of the pair. This helper USED to read twice and throw the
+/// first away - the workaround for the one-behind defect this suite
+/// found in samc/tc.hpp's read_sync() - and the driver now pays the
+/// double READSYNC itself (tc.hpp's counter comment carries the
+/// measured mechanism: the shadow lands half a counter-clock period
+/// after SYNCBUSY clears, unadvertised), so a single call returns the
+/// current count.
 uint32_t slow_count() {
-    (void)SlowWatch::count32();
     return SlowWatch::count32();
 }
 
