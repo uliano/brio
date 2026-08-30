@@ -62,12 +62,11 @@
  * mode the part has. IDLE is unaffected: MCLK and GCLK0 keep running
  * there.
  *
- * The policy that follows is stated in samc/sleep.hpp and enforced
- * nowhere in this file: standby is legitimate when the kernel has no
- * armed time event (`TimeEvents<P>::ticks_to_next()` empty). Lifting
- * that restriction means resynchronizing this counter from a clock that
- * survives standby - the RTC - after every wake, and that is designed
- * work, not a patch.
+ * The two answers are stated in samc/sleep.hpp and enforced nowhere in
+ * this file: `SamSleepSite` keeps the v1 restriction (standby only with
+ * no armed time event), and `SamTimedSleepSite` lifts it by
+ * resynchronizing this counter from the RTC after every wake - the
+ * `advance()` verb below is that resync's landing point.
  *
  * ## Usage
  * ```cpp
@@ -209,6 +208,32 @@ public:
 
     /// Exact seconds since init() (wraps after ~136 years)
     static uint32_t secs() { return read_shared(m_secs); }
+
+    /**
+     * Advance kernel time by `n` ticks IN ONE STEP - the resync verb the
+     * standby caveat above calls designed work, and the timed sleep site
+     * (samc/sleep.hpp, SamTimedSleepSite) is its one intended caller: it
+     * measures on the RTC how long the counters stood still and hands
+     * the frozen span back here, so millis() stays honest against the
+     * wall clock and time events matured during the standby are seen as
+     * due on the very next loop pass (TimeEvents compares wrap-safe
+     * differences, so a jump needs no kernel cooperation).
+     *
+     * Thread context only, under the guard so the handler's own tick
+     * cannot interleave a half-updated second boundary. The caller is
+     * responsible for `n` being the FROZEN span, not the whole slept
+     * span - SysTick keeps counting whenever the CPU is awake, and
+     * advancing time the handler already counted would mature events
+     * EARLY, which brio's time contract (kernel/time.hpp: at least,
+     * never early) forbids.
+     */
+    static void advance(uint32_t n) {
+        InterruptGuard guard;
+        m_ticks += n;
+        const uint32_t f = static_cast<uint32_t>(m_frac) + n;
+        m_secs += f / tps;
+        m_frac = static_cast<uint16_t>(f % tps);
+    }
 
     /// Stop the periodic interrupt without losing the counters. Time
     /// stands still while paused; resume() picks up where it was. The

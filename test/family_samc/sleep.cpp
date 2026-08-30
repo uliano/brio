@@ -125,3 +125,29 @@ void manager_verbs() {
     PowerLock lock = Pmgr::restrict(SleepDepth::light);
     lock.release();
 }
+
+// ---- the timed site ---------------------------------------------------------
+// The v2 site: the RTC as alarm and witness, the power MODEL untouched -
+// the same PowerManager must take it through the same concept with no
+// new member, which is this instantiation's whole claim.
+using TimedSite = SamTimedSleepSite<SamPlatform>;
+static_assert(SleepSite<TimedSite>);
+
+using TimedPmgr = PowerManager<SamPlatform, TimedSite>;
+
+void timed_site_verbs() {
+    (void)TimedSite::init();
+    (void)TimedSite::arm(SleepDepth::standby);
+    (void)TimedSite::alarm_armed();
+    (void)TimedSite::last_advance();
+    TimedSite::disarm();
+    TimedPmgr::init();
+}
+
+// A measured-rate configuration compiles at any plausible 32 kHz value.
+constexpr TimedSleepConfig measured{.rtc_hz = 32907, .clock = RtcClock::ulp_32k};
+using MeasuredSite = SamTimedSleepSite<SamPlatform, measured>;
+static_assert(SleepSite<MeasuredSite>);
+
+// And the ticker's resync verb exists at every rate the family builds.
+void advance_verb() { Ticker::advance(123u); }

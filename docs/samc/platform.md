@@ -494,14 +494,32 @@ warning and the measurement is what a caller can rely on.
 
 ## Not covered yet
 
+**The timebase that survives standby: BUILT** (`SamTimedSleepSite`,
+samc/sleep.hpp; suite `test_samc_timebase`). The RTC on OSCULP32K is
+the ALARM (a COMP0 wake placed on `ticks_to_next()`, rounded UP) and
+the WITNESS (the frozen span, converted DOWN against a rate the caller
+must not under-state, handed to `Ticker::advance()` at the first event
+after the wake - or right in the alarm's own ISR). SysTick stays the
+ticker; the power MODEL is untouched - everything fits inside
+arm()/disarm(). Measured on the crystal: a 500 ms time event through a
+standby matures at 507 ms of wall (the band is nominal + 3.5%, the
+default rate being a deliberate over-estimate), a resync of ~473 ticks,
+millis() within the stated bias of the wall (502 over 510), six 150 ms
+rounds all at 152 ms and NOT ONE EARLY, and a foreign wake mid-sleep
+(the watchdog's early warning) re-placed the alarm for the remainder
+with the deadline still met. THE FINDING THAT COST THE FIRST VERSION A
+WEDGE: the never-early bias GUARANTEES kernel time is still short of
+the deadline at the alarm, so the alarm's ISR must do three things -
+acknowledge, resync, and HAND THE MACHINE BACK TO A TICKING SLEEP
+(SLEEPCFG to IDLE0); with only the first two, the loop re-entered the
+still-armed standby behind a spent alarm and nothing ever ended it
+(caught by RAM dump: advance 490 against a deadline 491 ticks out).
+The model's after-a-wake convention (speak to the manager, even with
+`SleepRequested{none}`) is LOAD-BEARING with this site and stated on
+it. `SamSleepSite` remains the v1 site for programs that want the
+plain restriction.
+
 Driver gaps (not built):
-- **A timebase that survives standby.** The v1 policy is an honest
-  restriction and not a correction: standby is legitimate when the
-  kernel has no armed time event, and `TimeEvents<P>::ticks_to_next()`
-  is the question that answers it. Lifting the restriction means
-  moving the kernel tick to the RTC, or resynchronizing SysTick's
-  counters from the RTC after every wake - designed work, not a patch,
-  and deliberately not hidden inside `sleep.hpp`.
 - **PAC.** Chapter 19's registers are optionally PAC write-protected
   (19.5.7) and brio has no PAC driver, so the protection is left as
   reset leaves it - off.

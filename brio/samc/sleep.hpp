@@ -50,15 +50,20 @@
  *   KERNEL TIME STOPS FOR EXACTLY AS LONG AS THE STANDBY LASTS, and
  *   every armed time event matures LATE by that amount.
  *
- * The v1 policy is an honest restriction rather than a correction:
- * standby is legitimate when the kernel has NO armed time event, and
- * `TimeEvents<P>::ticks_to_next()` is the question that answers it -
- * empty means nothing is waiting and nothing will be late. An
- * application that arms periodics and also wants standby needs a
- * timebase that survives standby (the RTC does, samc/rtc.hpp) and a
- * resynchronization of the tick counter after every wake; that is
- * designed work, it is named in docs/samc/platform.md's gap list, and
- * it is deliberately NOT hidden inside this header.
+ * TWO SITES ANSWER IT, and the choice is the application's:
+ *
+ *  - `SamSleepSite` keeps the v1 honest restriction: standby is
+ *    legitimate when the kernel has NO armed time event
+ *    (`TimeEvents<P>::ticks_to_next()` empty - nothing waiting,
+ *    nothing late), and a deadline-less standby still under-reports
+ *    millis() by the slept span.
+ *  - `SamTimedSleepSite` (end of this file) LIFTS it: the RTC on an
+ *    always-on 32 kHz clock is the alarm and the witness - a COMP0
+ *    wake placed on the next deadline, and the frozen span handed to
+ *    `Ticker::advance()` at the first event after the wake - so a
+ *    program with armed periodics sleeps deep and still meets them,
+ *    and millis() stays honest whether or not anything was due. The
+ *    power MODEL is untouched: everything fits inside arm()/disarm().
  *
  * IDLE is not affected: MCLK and GCLK0 keep running, so SysTick keeps
  * counting and time events mature on time.
@@ -138,8 +143,8 @@
  * reset (19.5.4 is about the interrupt CONTROLLER, 19.6.6 and 19.6.7
  * say "Not applicable", 19.6.3.2 says "always enabled and can not be
  * reset"). Its registers are optionally PAC write-protected (19.5.7);
- * brio has no PAC driver yet, so nothing here writes PAC and the
- * protection is left as reset leaves it - off.
+ * samc/pac.hpp exists (mechanism only, per its own ruling) and nothing
+ * here writes it - the protection is left as reset leaves it, off.
  *
  * ITS BUS CLOCK IS ONE-WAY. 19.5.2: "If this clock is disabled, it can
  * only be re-enabled by a system reset." `bus_clock(false)` is
@@ -192,7 +197,10 @@
 #include "sam.h"
 
 #include "samc/clock.hpp"
+#include "samc/osc32kctrl.hpp"
+#include "samc/rtc.hpp"
 #include "samc/ticker.hpp"
+#include "kernel/time_event.hpp"
 #include "util/power.hpp"
 
 namespace brio {
@@ -472,5 +480,227 @@ struct SamSleepSite {
 };
 
 static_assert(SleepSite<SamSleepSite>);
+
+// ---- the timed site: standby without stopping the clock on the wall ---------
+
+/**
+ * SamTimedSleepSite's knobs.
+ *
+ * `rtc_hz` is the rate of the clock the RTC counts, AND THE RULE IS
+ * DIRECTIONAL: give a value NOT BELOW the true rate. Both conversions
+ * lean on it the same safe way - the alarm is placed by rounding UP
+ * (waking a shade late is the contract's "at least"; waking early would
+ * only burn a vote round) and the resync span is computed by rounding
+ * DOWN against this rate, so an over-estimated rate UNDER-advances and
+ * a time event can never mature early. The default is a deliberate
+ * over-estimate of OSCULP32K, which this bench has measured between
+ * 32907 and 33074 Hz depending on scale and trim; an application that
+ * wants the slack back measures its own board (samc/freqm.hpp is the
+ * instrument) and states what it found.
+ */
+struct TimedSleepConfig {
+    uint32_t rtc_hz = 33500;
+    RtcClock clock = RtcClock::ulp_32k;
+};
+
+constexpr bool timed_sleep_config_valid(const TimedSleepConfig& c) {
+    // Slower than 1 kHz makes the resync granularity coarser than the
+    // kernel tick itself; the four 32 kHz-ish selects all pass.
+    return c.rtc_hz >= 1024u;
+}
+
+/**
+ * The sleep site that LIFTS the standby restriction: kernel time no
+ * longer stands still on the wall across a standby, and a program with
+ * ARMED TIME EVENTS may sleep deep and still meet them.
+ *
+ * THE DESIGN POSITION (docs/design/power.md): the power MODEL did not
+ * change - no new concept member, no new manager hook. Everything the
+ * lift needs fits inside the two verbs the SleepSite concept always
+ * had, because the manager already does the right things at the right
+ * moments: arm() is called exactly once per round, before the machine
+ * stops, and disarm() is called on the FIRST EVENT AFTER THE WAKE -
+ * which are precisely "set the alarm" and "catch the clock up".
+ *
+ *  - arm(deep): after handing the depth to SamSleepSite, records the
+ *    RTC count and the tick count. If the kernel has an armed time
+ *    event (TimeEvents<P>::ticks_to_next()), a COMP0 alarm is placed on
+ *    the deadline - rounded UP in RTC counts - and its interrupt armed:
+ *    the CPU wakes WHEN NEEDED, not every tick (the AVR's PIT pays one
+ *    wake per millisecond of every standby; this pays one per
+ *    deadline). No deadline, no alarm - the resync below still runs, so
+ *    even a deadline-less standby keeps millis() honest.
+ *  - disarm(): returns the alarm, then advances the ticker by the
+ *    FROZEN span only: RTC-elapsed converted DOWN, minus what SysTick
+ *    itself counted between arm and now (the CPU is awake before the
+ *    WFI and after the wake, and that time was already ticked - handing
+ *    it to advance() twice would mature events early). The subtraction
+ *    is what makes multiple naps inside one armed round, and rounds
+ *    that never slept at all, come out right with no special case.
+ *
+ * WHAT IT OWNS: the RTC, whole. Mode 0, COUNT32, prescaler off, on the
+ * always-on clock the config names, COMP0 as the alarm. An application
+ * using this site must not drive samc/rtc.hpp elsewhere, and the app
+ * binds the vector: `extern "C" void RTC_Handler() { Site::isr(); }`.
+ *
+ * HONESTY OF THE RESYNC, stated once: the wall error of a slept span is
+ * bounded by the rate over-estimate (under-advance, so LATE maturation
+ * - allowed) plus one RTC count of quantization per round. With the
+ * default over-estimate that is about 1.5% of the slept time; a
+ * measured rate takes it to the oscillator's own wander (100..300 ppm
+ * between windows, this bench's number). The promise is the kernel's
+ * own: AT LEAST, never early.
+ */
+template <Platform P, TimedSleepConfig cfg = TimedSleepConfig{}>
+struct SamTimedSleepSite {
+    static_assert(timed_sleep_config_valid(cfg),
+                  "brio SamTimedSleepSite: the RTC rate must be at least 1024 Hz, "
+                  "or the resync granularity is coarser than the kernel tick");
+
+    SamTimedSleepSite() = delete;
+
+    /**
+     * Route the RTC's clock, reset and start the counter, enable the
+     * NVIC line. Call once, after the clock init, before the manager's
+     * first round. False = the RTC refused (a synchronization that never
+     * settled); nothing is armed in that case and the site still works
+     * as a plain SamSleepSite - minus every timed property, which is
+     * why the caller must look at the answer.
+     */
+    static bool init() {
+        (void)Rtc::enable(false);
+        Osc32kctrl::rtc_clock(cfg.clock);
+        if (!Rtc::init()) {
+            return false;
+        }
+        const RtcConfig rc{.mode = RtcMode::count32,
+                           .prescaler = RtcPrescaler::div1};
+        if (!Rtc::configure(rc) || !Rtc::enable(true)) {
+            return false;
+        }
+        Nvic::enable(Rtc::irq());
+        ready_ = true;
+        return true;
+    }
+
+    static bool arm(SleepDepth d) {
+        if (!SamSleepSite::arm(d)) {
+            return false;
+        }
+        if (!ready_ || !is_deep_mode(SamSleepSite::armed())) {
+            return true;   // shallow modes tick on their own
+        }
+        rtc_at_arm_ = Rtc::count32();
+        tick_at_arm_ = Ticker::ticks();
+        resync_armed_ = true;
+        const std::optional<uint32_t> next = TimeEvents<P>::ticks_to_next();
+        if (next.has_value()) {
+            // ticks -> RTC counts, rounded UP: a shade late is "at
+            // least", a shade early is a wasted vote round.
+            const uint64_t counts =
+                (static_cast<uint64_t>(*next) * cfg.rtc_hz +
+                 P::ticks_per_second - 1u) /
+                P::ticks_per_second;
+            Rtc::clear_flags(RtcFlag::compare0);
+            if (Rtc::set_comp32(rtc_at_arm_ + static_cast<uint32_t>(counts))) {
+                Rtc::arm(RtcFlag::compare0);
+                alarm_armed_ = true;
+            }
+        }
+        return true;
+    }
+
+    static void disarm() {
+        SamSleepSite::disarm();
+        if (alarm_armed_) {
+            Rtc::disarm(RtcFlag::compare0);
+            Rtc::clear_flags(RtcFlag::compare0);
+            alarm_armed_ = false;
+        }
+        resync();
+    }
+
+    static SleepDepth armed() { return SamSleepSite::armed(); }
+
+    /// Catch kernel time up by the FROZEN span: RTC-elapsed converted
+    /// DOWN, minus what SysTick itself counted since arm(). Consumes the
+    /// baseline exactly once - isr() and disarm() both call it, and a
+    /// round that never slept advances by zero because the two rulers
+    /// agree. The critical section is what makes the once-ness true
+    /// against an alarm landing inside a disarm().
+    static void resync() {
+        typename P::CriticalSection cs;
+        if (!resync_armed_) {
+            return;
+        }
+        resync_armed_ = false;
+        const uint32_t counts = Rtc::count32() - rtc_at_arm_;   // wrap-safe
+        const uint32_t span = static_cast<uint32_t>(
+            static_cast<uint64_t>(counts) * P::ticks_per_second /
+            cfg.rtc_hz);                                         // floor
+        const uint32_t awake = Ticker::ticks() - tick_at_arm_;   // wrap-safe
+        if (span > awake) {
+            last_advance_ = span - awake;
+            Ticker::advance(last_advance_);
+        } else {
+            last_advance_ = 0;
+        }
+    }
+
+    /**
+     * The ISR body the app's RTC_Handler binds: acknowledge the alarm,
+     * RESYNC, and HAND THE MACHINE BACK TO A TICKING SLEEP. All three
+     * are load-bearing, and the third was learned at the bench: the
+     * resync alone is NOT enough, because the never-early bias
+     * GUARANTEES that kernel time is still short of the deadline at the
+     * alarm (measured: one tick short, deterministically - advance 490
+     * against a deadline 491 ticks out). An RTC compare posts nothing
+     * to any queue, so with the standby still armed and the alarm now
+     * spent the loop would re-enter a sleep nothing ends. Downgrading
+     * SLEEPCFG to IDLE0 here is the escape: the residual ticks the bias
+     * left mature on SysTick within milliseconds, at idle current, and
+     * TimeEvents::process() posts the deadline on its own clock.
+     *
+     * A FOREIGN wake (an EIC edge, a watchdog warning - any interrupt
+     * that posts to its own AO) does not run this body; its progress is
+     * its own event, the resync happens at disarm() instead, and the
+     * standby stays armed WITH the alarm still standing - a program
+     * that ignores the convention below and idles again is still woken
+     * by its deadline. The baseline is consumed ONCE, under the guard,
+     * whichever side gets there first.
+     *
+     * AND THE MODEL'S CONVENTION BECOMES LOAD-BEARING with this site:
+     * util/power.hpp's file header says a wake path with nothing to say
+     * sends SleepRequested{none}. On the AVR, ignoring that is benign -
+     * the PIT tick keeps waking the machine. Here a woken program that
+     * idles again WITHOUT speaking to the manager re-enters the
+     * still-armed standby with no alarm behind it: after any wake,
+     * request again or send none. The suites demonstrate both.
+     */
+    [[gnu::always_inline]] static void isr() {
+        (void)Rtc::isr();
+        Rtc::disarm(RtcFlag::compare0);
+        alarm_armed_ = false;
+        resync();
+        // The third act (see above): a spent alarm must not guard a
+        // still-armed standby. Back to the sleep that ticks.
+        SamSleepSite::disarm();
+    }
+
+    // ---- readbacks the suites and a status console want --------------------
+    static bool ready() { return ready_; }
+    static bool alarm_armed() { return alarm_armed_; }
+    /// Ticks the last disarm() handed to Ticker::advance() (0 when the
+    /// round never slept, or slept less than it stayed awake).
+    static uint32_t last_advance() { return last_advance_; }
+
+private:
+    static inline bool ready_ = false;
+    static inline bool alarm_armed_ = false;
+    static inline bool resync_armed_ = false;
+    static inline uint32_t rtc_at_arm_ = 0;
+    static inline uint32_t tick_at_arm_ = 0;
+    static inline uint32_t last_advance_ = 0;
+};
 
 } // namespace brio

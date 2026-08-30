@@ -2050,6 +2050,52 @@ gets its dated home in `docs/design/` when taken.
   gains its trace sibling, reset.md points at the composition.
   Canary test_samc_debug z 117/117 both hands; check_samc,
   check_family, host 24/24.
+  **THE STANDBY-SURVIVING TIMEBASE DONE 2026-08-30 (BY FABLE'S OWN
+  HAND on the user's blessing - group 5's last item, WHICH CLOSES THE
+  SINGLE-BOARD ROSTER ENTIRELY; what remains needs hardware).** The
+  design the user blessed, minus one piece that proved unnecessary:
+  the RTC is the ALARM and the WITNESS while SysTick stays the ticker
+  - and the SleepSite concept trait proposed alongside was NOT needed,
+  because the manager's deadline guard already admits far deadlines
+  and everything else fits inside arm()/disarm(): THE POWER MODEL IS
+  UNTOUCHED, which design/power.md now records as the second
+  same-target validation (a site can LIFT a target restriction with
+  the model unchanged). samc/ticker.hpp grew advance(n) (the resync's
+  landing point, guard-held, with the caller owing the FROZEN span
+  only); samc/sleep.hpp grew SamTimedSleepSite<P, cfg> - arm() places
+  a COMP0 alarm on ticks_to_next() rounded UP, disarm()/isr() hand the
+  frozen span (RTC-elapsed converted DOWN minus what SysTick itself
+  counted) to advance(), the baseline consumed once under the guard,
+  and the rate rule is DIRECTIONAL (state a rate not below the true
+  one; the default 33500 over-estimates OSCULP32K so every error lands
+  LATE - the kernel's own "at least"). THE FINDING THAT COST THE FIRST
+  VERSION A WEDGE, caught by halt-and-dump plus a RAM read of the
+  counters: the never-early bias GUARANTEES kernel time is still short
+  of the deadline at the alarm (advance 490 against a deadline 491
+  ticks out, deterministically), so resync alone re-entered the
+  still-armed standby behind a spent alarm - THE ALARM'S ISR MUST DO
+  THREE THINGS: acknowledge, resync, and HAND THE MACHINE BACK TO A
+  TICKING SLEEP (SLEEPCFG to IDLE0; the residual ticks mature on
+  SysTick in milliseconds). A foreign wake leaves the alarm STANDING,
+  and the model's after-a-wake convention (speak to the manager, even
+  with SleepRequested{none}) is LOAD-BEARING with this site - stated
+  on it. NEW SUITE test_samc_timebase z 15/15 x5 (one cold), 4
+  letters, wireless, inside a REAL kernel with the crystal TC pair as
+  the judge: the alarm arithmetic EXACT (16750 counts for 500 ms at
+  the stated rate); a 500 ms event through a standby matures at 507 ms
+  of wall (band nominal..+3.5%), resync ~473 ticks, millis() honest
+  against the crystal (502 over 510); the watchdog's early warning as
+  a mid-sleep intruder, the convention re-requesting and the alarm
+  re-placed for the remainder, deadline still met; six 150 ms rounds
+  all at 152 ms and NOT ONE EARLY. A suite lesson: the pump must DRAIN
+  the convention's tail before judging counters (the wake report and
+  the reply are still queued when the blip lands). 33/33 pre-existing
+  images byte-identical (the additive claim proven by worktree gate);
+  canaries sleep z 87, sleepwalk z 76, platform z 34; check_samc (new
+  family coverage + a negative: a sub-1024 Hz rate refused),
+  check_family, host 24/24. platform.md's timebase gap CLOSED,
+  power.md carries the model-unchanged finding, ticker.hpp's and
+  sleep.hpp's standing caveats rewritten to the two-site truth.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -3097,9 +3143,11 @@ brio/                    the framework, four strata:
                            1.8.13's guard around a standby WFI; BKPT, .noinit
                            breadcrumb, atomic_width 4)
     ticker.hpp             BasicTicker<tps> over SysTick (Ticker = 1000 Hz) +
+                           advance(n), the standby resync's landing point +
                            SysTickInterruptGuard, erratum 1.8.13's workaround
-                           in the file that owns the register. THE TICK STOPS
-                           IN STANDBY: SysTick rides the CPU clock
+                           in the file that owns the register. The tick stops
+                           in standby (SysTick rides the CPU clock) and the
+                           TIMED SITE in sleep.hpp is what lifts that
     clock.hpp              OSCCTRL/GCLK/MCLK: Oscctrl (the block, the shared
                            IRQ 0, the CFD event code), Osc48m, Xosc (crystal
                            or external clock, the mandatory gain, the startup
@@ -3204,7 +3252,12 @@ brio/                    the framework, four strata:
                            back-bias, the guarded WFI) + SamSleepSite, the
                            util/power.hpp adapter - and the first place the
                            model's never-deeper rule is NOT the identity:
-                           deep maps to standby because nothing is deeper
+                           deep maps to standby because nothing is deeper -
+                           and SamTimedSleepSite, the v2 site that LIFTS the
+                           standby restriction (the RTC as alarm on
+                           ticks_to_next() and as witness for the resync,
+                           the model untouched, the after-a-wake convention
+                           load-bearing)
     adc.hpp                ADC: Adc<n> over both converters (the same
                            peripheral at two addresses, with the header's own
                            host/client roles enforced), the two input muxes,

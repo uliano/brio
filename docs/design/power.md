@@ -177,6 +177,21 @@ it has a say in the decision, which is not the same as wanting the news
 afterwards, and forcing the alternative into every voter's variant would
 make a bus engine pay queue slots for a fact it has no use for.
 
+**And a second finding from the same target, one campaign later: a
+site can LIFT a target restriction with the model still unchanged.**
+The SAM's v1 restriction - standby only with no armed time event,
+because its tick freezes there - fell entirely INSIDE the two verbs the
+concept always had: the timed site (`SamTimedSleepSite`) places an RTC
+alarm on `ticks_to_next()` in `arm()` and catches the tick counter up
+in `disarm()` (or in the alarm's own ISR), and the manager never
+learned a new word. The one thing the site DOES lean on is already in
+this file: the after-a-wake convention - a wake path with nothing to
+say sends `SleepRequested{none}` - which on the AVR is a courtesy (the
+PIT tick re-wakes the machine regardless) and with a timed site is
+LOAD-BEARING, since a woken program that idles again without speaking
+re-enters a standby whose alarm may already be spent. The site's own
+documentation carries that obligation.
+
 ## What is deliberately not here
 
 - **No idle detection.** Nothing in the model decides *when* the
