@@ -1,10 +1,11 @@
 /*
  * nvm_flash.hpp
  *
- * The SAM C21 flash as a FlashMedia (util/nv_heap.hpp): the backend that
- * lets the target-independent block allocator run on this silicon, and
- * the second implementation of that contract - the first one written
- * against an architecture the concept was not designed on.
+ * The SAM C21 flash as a FlashMedia (util/nv_heap.hpp): the backends that
+ * let the target-independent block allocator and the target-independent
+ * value journal run on this silicon, and the second implementation of
+ * that contract - the first one written against an architecture the
+ * concept was not designed on.
  *
  * IT LIVES IN THE RWWEE ARRAY, and that choice is the whole design.
  *
@@ -28,8 +29,24 @@
  * main-array heap could reach, and reads that miss the cache because the
  * RWWEE array is not cached (27.6.4.2). For a heap holding calibration,
  * counters and panic records, that is the right trade; a main-array
- * backend is a separate type when something needs the room (see
- * docs/samc/nvm.md, "Not covered yet").
+ * backend is deliberately not built (docs/samc/nvm.md says why).
+ *
+ * THE ARRAY IS PARTITIONED, because this family has two storage classes
+ * and only one nonvolatile array to put them in. The 32 rows split as
+ *
+ *   rows 0..27   RwweeFlash        7 KB   blocks (util/nv_heap.hpp),
+ *                                         its map pair in rows 26..27
+ *   rows 28..31  RwweeJournalZone  1 KB   small values
+ *                                         (util/nv_journal.hpp), two
+ *                                         512-byte halves
+ *
+ * Both bounds stay CONSTANTS - that is the property the RWWEE choice
+ * bought and the partition must not spend. Nothing the linker places can
+ * reach either region, so the split is a decision made here once and not
+ * a build-dependent edge. It is anchored at the TOP of the array so that
+ * each user's own home is anchored to the silicon in turn: the heap's map
+ * pair sits at the top of the heap's share, the journal's halves at the
+ * top of the part.
  *
  * THE GRANULARITIES ARE NOT THE SAME NUMBER, which is what the concept's
  * erase_size / write_cell split is for: here an erase takes down a ROW of
@@ -73,20 +90,42 @@ extern const char __nvheap_build_id[];
 
 namespace brio {
 
-/// The RWWEE array behind the FlashMedia contract. All static: there is
-/// one flash, and it is a piece of hardware.
+/// Where the line between the two storage classes is drawn. One place,
+/// read by both media below and by anything that wants to state the
+/// geometry (a suite, a console) without repeating the arithmetic.
+struct RwweePartition {
+    RwweePartition() = delete;
+
+    /// Rows of the array's top given to the journal. Four rows is two
+    /// 512-byte halves, which is what a journal of six 32-byte values
+    /// plus its panic reserve needs.
+    static constexpr uint32_t journal_rows = 4;
+    static constexpr uint32_t journal_bytes = journal_rows * Nvm::row_size;
+    /// First byte of the journal's region, and one past the heap's last.
+    static constexpr uint32_t journal_base = Nvm::rwwee_end - journal_bytes;
+    static constexpr uint32_t heap_end = journal_base;
+
+    static_assert(journal_base > Nvm::rwwee_base,
+                  "the journal would swallow the array");
+    static_assert(journal_base % Nvm::row_size == 0,
+                  "both regions must start on an erase unit");
+};
+
+/// The heap's share of the RWWEE array behind the FlashMedia contract.
+/// All static: there is one flash, and it is a piece of hardware.
 struct RwweeFlash {
     RwweeFlash() = delete;
 
     static constexpr uint32_t erase_size = Nvm::row_size;    // 256
     static constexpr uint32_t write_cell = Nvm::page_size;   // 64
-    static constexpr uint32_t flash_end = Nvm::rwwee_end;
+    static constexpr uint32_t flash_end = RwweePartition::heap_end;
     static constexpr uint8_t zone_count = 1;
 
-    /// The one zone: the whole array. Constant, unlike every zone on the
-    /// AVR side - nothing the linker places can reach in here, so there
-    /// is no image edge to round and no build that can move it. The heap
-    /// carves its own map home out of the top of this by itself.
+    /// The one zone: rows 0..27. Constant, unlike every zone on the AVR
+    /// side - nothing the linker places can reach in here, so there is
+    /// no image edge to round and no build that can move it. The heap
+    /// carves its own map home out of the top of this by itself, which
+    /// with the default two map pages is rows 26..27.
     static std::array<FlashZone, zone_count> zones() {
         return std::array<FlashZone, zone_count>{
             FlashZone{flash_end, Nvm::rwwee_base}};
@@ -144,5 +183,47 @@ static_assert(RwweeFlash::flash_end % RwweeFlash::erase_size == 0u,
 static_assert(RwweeFlash::flash_end / RwweeFlash::erase_size <= 0xFFFFu,
               "NvHeap numbers erase units in a uint16_t, and RWWEE addresses "
               "are absolute - the array must not sit past page 65535");
+
+/**
+ * The journal's share of the RWWEE array: the attic, rows 28..31.
+ *
+ * A second FlashMedia rather than a parameter on the first one, because
+ * the contract is a whole MEMORY and both users anchor their own home to
+ * their media's flash_end. Two media over one array is what keeps that
+ * true for both without either knowing the other exists.
+ *
+ * The mechanics are RwweeFlash's, verbatim - same array, same row and
+ * page granularities, same commands - so they are delegated rather than
+ * copied. Only the bounds differ.
+ */
+struct RwweeJournalZone {
+    RwweeJournalZone() = delete;
+
+    static constexpr uint32_t erase_size = Nvm::row_size;    // 256
+    static constexpr uint32_t write_cell = Nvm::page_size;   // 64
+    static constexpr uint32_t flash_end = Nvm::rwwee_end;
+    static constexpr uint8_t zone_count = 1;
+
+    /// The attic and nothing else. A journal with the default two-row
+    /// halves fills it exactly, so its own geometry check - no zone
+    /// floor above the journal home - is satisfied on the boundary.
+    static std::array<FlashZone, zone_count> zones() {
+        return std::array<FlashZone, zone_count>{
+            FlashZone{flash_end, RwweePartition::journal_base}};
+    }
+
+    static void read(uint32_t addr, std::span<uint8_t> dst) {
+        RwweeFlash::read(addr, dst);
+    }
+    static bool program(uint32_t addr, std::span<const uint8_t> src) {
+        return RwweeFlash::program(addr, src);
+    }
+    static bool erase(uint32_t addr) { return RwweeFlash::erase(addr); }
+    static uint32_t build_id() { return RwweeFlash::build_id(); }
+};
+
+static_assert(FlashMedia<RwweeJournalZone>);
+static_assert(RwweeJournalZone::flash_end % RwweeJournalZone::erase_size == 0u,
+              "the journal's halves are anchored to flash_end");
 
 } // namespace brio

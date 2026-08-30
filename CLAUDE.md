@@ -26,7 +26,11 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   `clock.md` (the clock model), `serial.md`, `spi-bus.md`, `i2c-bus.md`,
   `ring.md`, `analog.md` (the sampler usage type + arithmetic),
   `nv-heap.md` (the flash block allocator: FlashMedia contract, map
-  pair, survival-aware mount), `power.md` (the sleep-depth ladder, the
+  pair, survival-aware mount), `nv-journal.md` (the small-value store
+  over the SAME contract: two halves that ping-pong wholesale, seq
+  decides and CRC judges, read-only mount, the panic reserve, and the
+  ruling that NvRecord and NvJournal stay two spellings), `power.md`
+  (the sleep-depth ladder, the
   site that only arms, the vote round, standing locks, the deadline
   guard, the first-event-after-wake contract), `meters.md` (the
   MeterLatch bridge out of a capture ISR and the MeterSampler that
@@ -1938,6 +1942,73 @@ gets its dated home in `docs/design/` when taken.
   moved in the same change, bench.md row + board C firmware. Still
   open by honest necessity: VREFA (a wire), the voltage pump (the
   supply), the util adapters (born with Multislope).
+  **NVJOURNAL + THE FUSES VERB DONE 2026-08-30 (Opus delegation with
+  the explicit util carve-out - the campaign's SUBJECT was a new util
+  file, the NvHeap precedent - REVIEWED BY FABLE and COMMITTED same
+  day, all nine judgment calls accepted; memory
+  samc-session-2026-08-30-journal).** THE SAM'S EEPROM CLASS EXISTS
+  NOW: util/nv_journal.hpp NEW - NvJournal<Media, max_ids,
+  max_payload, half_pages> over the SAME FlashMedia concept as NvHeap,
+  two halves at the media's top ping-ponging WHOLESALE, entries
+  appended cell-granular with seq + CRC-16, HIGHEST-SEQ-WITH-VALID-CRC
+  WINS and the newer half is a collection's destination - two rules
+  that resolve ALL FOUR power-cut positions (torn append, torn
+  collection, torn source erase, torn DESTINATION erase) with no
+  special case in the code. Mount READ-ONLY (a boot costs no cycle,
+  158 us measured). THE PANIC RESERVE is the centerpiece: an ordinary
+  save collects EARLY so room for one max-size entry always stands in
+  pre-erased cells - save_reserved() does no GC and no erase, one
+  bounded polled program, legal from a panic handler; JournalPanic +
+  take() give the SAM the breadcrumb that survives a POWER LOSS (the
+  .noinit one survives only resets). THE GEOMETRY INVARIANT IS
+  (max_ids + 2) x entry <= half - the agent CORRECTED the brief's
+  max_ids + 1, one term short (the entry being written), and the
+  reviewer verified the arithmetic before accepting. NEW HOST SUITE
+  test_nv_journal (host now 24/24): 59 cases / 51567 assertions over
+  THREE geometries - 256/64 (RWWEE), 2048/8 (THE STM32G0'S DOUBLE-WORD
+  FLASH - the journal validated on the third target's geometry before
+  that target exists, the block-stream doctrine applied to storage),
+  512/2 (the one shape where a header spans cells) - with power cuts
+  at EVERY program unit of a save and of a collection, and the reserve
+  guarantee across 3000 randomized saves. THE RWWEE PARTITIONED ONCE
+  (RwweePartition: rows 0..27 the heap, 28..31 the journal's attic;
+  the old on-chip map reported lost by the survival-aware mount, WHICH
+  IS THE DESIGN WORKING - test_samc_nvm's letter e adapted, the sole
+  md5 mover). NEW BENCH SUITE test_samc_journal z 58/58 (agent x3 +
+  Fable x3 incl. cold), p 11/11 across a REAL panic + reset, v 6/6
+  across a reflash of blink and back (Fable re-ran the whole
+  choreography by hand). NUMBERS: a save 347..357 us (the delta over
+  the bare 190 us page program is the entry image and the bitwise
+  CRC), a collection 5.8 ms, NO STALL (~2500 polling turns inside one
+  991 us row erase), coexistence proven (a 300-byte heap block
+  byte-exact while the journal collects over it), wear 168..184 row
+  erases per z run. THE PANIC FINDING: break_here()'s BKPT escalates
+  to HardFault BEFORE any reporter runs on a board whose C_DEBUGEN
+  bench.py cleared, so the breadcrumb is written by the HardFault
+  BODY, not the reporter - the suite binds both and records which ran.
+  bench.py's `fuses` verb LEARNED THE SAM: read/decode of the 32-byte
+  user row (BOOTPROT, EEPROM size, BODVDD, WDT, LOCK - dangerous
+  fields marked [guarded]), write via hand-driven EAR + WAP with
+  WHOLE-ROW read-modify-write always (factory bits preserved
+  bit-exact), old row printed before any write, read-back verify,
+  refusal of unknown fields and of WDT-always-on/BOOTPROT without
+  explicit acknowledgement; validated by a write-identical round trip
+  and a real bodvdd_hysteresis flip confirmed in SUPC after reset, the
+  row back at production default. nvm.md's user-row gap CLOSED; the
+  main-array FlashMedia backend RULED not-built (born with its first
+  user - the RWWEE serves both storage classes; the stall, the 25k
+  endurance and the linker-zone problem stay deleted);
+  design/nv-journal.md NEW records the two-spellings ruling (NvRecord
+  speaks real EEPROM, NvJournal speaks flash - unification waits for
+  the G0 or a cross-target app). A METHOD TRAP FOR THE MD5 GATE, now
+  on record: pinning mtimes makes sources OLDER than existing objects
+  and ninja relinks stale ones - the gate is valid only with the build
+  dir wiped after pinning (the reviewer's worktree gate always did).
+  At review Fable also retired nvm.md's stale wish for DSU/PAC drivers
+  (both exist since the debug campaign). Gates: md5 30/30 + the
+  declared mover, check_samc (1 positive + 4 negative TUs),
+  check_family, host 24/24, canary test_samc_nvm z 52/52 - agent AND
+  Fable.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -2846,6 +2917,19 @@ brio/                    the framework, four strata:
                            map pair under FLASHEND, headerless payload
                            blocks, survival-aware mount, alloc/append/
                            seal/rewrite/find, no free
+    nv_journal.hpp         NvJournal<Media, max_ids, max_payload,
+                           half_pages> over the SAME FlashMedia: small
+                           values in flash where there is no EEPROM -
+                           two halves ping-ponging wholesale, entries
+                           appended cell by cell with a seq and a CRC,
+                           latest-seq-wins, a READ-ONLY mount that only
+                           reports a torn tail or an unfinished
+                           collection, and the PANIC RESERVE an ordinary
+                           save always leaves so save_reserved() is one
+                           bounded program with no erase; + JournalPanic
+                           (the reporter over it, reaching the journal
+                           through a reference template parameter
+                           because a journal is an object)
     persistent_panic.hpp   PersistentPanic<S>: panic Reporter into an
                            NvStore + boot-side take()
     ring.hpp               Ring<T, size, P> SPSC FIFO, lock-free when the
@@ -2991,10 +3075,12 @@ brio/                    the framework, four strata:
                            FlashWaitStates + the read-only factory views
                            (NvmUserRow = this family's fuses, NvmCalibration,
                            NvmTemperatureCalibration, DeviceSerial)
-    nvm_flash.hpp          RwweeFlash: the FlashMedia backend over the RWWEE
-                           array - writing it does not stall the CPU, and the
-                           zone is a constant because no linker section reaches
-                           there
+    nvm_flash.hpp          RwweePartition (the array's 32 rows split once:
+                           0..27 blocks, 28..31 the journal's attic) +
+                           RwweeFlash and RwweeJournalZone, the two
+                           FlashMedia backends over it - writing the RWWEE
+                           array does not stall the CPU, and BOTH bounds are
+                           constants because no linker section reaches there
     pin.hpp                Pin<'A',5>, PinConfig, the WRCONFIG multi-pin engine
     device_tables.hpp      THE RESERVE: the one file where vendor-macro
                            #ifdef probing is allowed - pad/instance facts

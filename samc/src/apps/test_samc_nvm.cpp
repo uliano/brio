@@ -83,9 +83,11 @@ using brio::NvmError;
 //
 // THE RWWEE ARRAY IS ENTIRELY OURS: no linker section can reach it, so
 // any row of it is fair game. The suite works at the BOTTOM of the array
-// and the heap of letter e at the top, so the two never meet - the map
-// home is the last two rows and the block lands as high as it can below
-// them, while `scratch_row` is row zero.
+// and the heap of letter e at the top of the heap's SHARE of it, so the
+// two never meet - the map home is the last two rows of that share and
+// the block lands as high as it can below them, while `scratch_row` is
+// row zero. The array's top four rows are the journal's attic
+// (samc/nvm_flash.hpp's RwweePartition) and nothing here touches them.
 //
 // THE MAIN ARRAY IS NOT. Letter m touches exactly one row, the LAST of
 // the part: the image is tens of kilobytes and gcc places nothing near
@@ -547,13 +549,20 @@ void te_heap() {
 
     // The zone is a constant on this target - no linker symbol reaches
     // into the RWWEE array - which is worth asserting because it is the
-    // whole difference from the AVR backend.
+    // whole difference from the AVR backend. It is the heap's SHARE of
+    // the array: the top four rows are the journal's attic
+    // (samc/nvm_flash.hpp's RwweePartition), and that bound is a
+    // constant for exactly the same reason.
     const auto zones = brio::RwweeFlash::zones();
     print(serial, "  zone: ", brio::hex(zones[0].floor), " .. ",
-          brio::hex(zones[0].ceiling), " = ", zones[0].size(), " bytes", crlf);
-    bench.verdict("the zone is the whole array",
+          brio::hex(zones[0].ceiling), " = ", zones[0].size(), " bytes",
+          " (attic from ", brio::hex(brio::RwweePartition::journal_base), ")",
+          crlf);
+    bench.verdict("the zone is the heap's share of the array",
                   zones[0].floor == Nvm::rwwee_base &&
-                      zones[0].ceiling == Nvm::rwwee_end);
+                      zones[0].ceiling == brio::RwweePartition::heap_end &&
+                      brio::RwweePartition::journal_base == Nvm::rwwee_end -
+                          brio::RwweePartition::journal_bytes);
 
     // A block, written through the allocator's own Writer.
     constexpr uint32_t payload = 200;

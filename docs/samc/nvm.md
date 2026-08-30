@@ -2,9 +2,8 @@
 
 > **PROVISIONAL.** The chapter's programming, protection and description
 > surfaces are built and bench-verified; what is deliberately left out is
-> either provisioning (writing the fuse row), a one-way hazard (the
-> security bit) or waits for another driver. The list is in "Not covered
-> yet".
+> either a one-way hazard (the security bit) or waits for another driver.
+> The list is in "Not covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 27, with the
 memory map and the factory areas in ch. 9 (9.3 user row, 9.4 and 9.5
@@ -16,9 +15,12 @@ ever carried ("EEPROM Cache") was deprecated due to resolution. Code
 written against older SAMD/SAMC examples may still carry a cache
 workaround around RWWEE access; it is not needed here. Drivers:
 `samc/nvm.hpp` (`Nvm` + `FlashWaitStates` + the factory views) and
-`samc/nvm_flash.hpp` (`RwweeFlash`, the `util/nv_heap.hpp` backend).
-Family fixture `test/family_samc/nvm.cpp` plus two negatives under
-`tools/check_samc.sh`; the bench suite is `test_samc_nvm`.
+`samc/nvm_flash.hpp` (`RwweePartition`, `RwweeFlash` the
+`util/nv_heap.hpp` backend, and `RwweeJournalZone` the
+`util/nv_journal.hpp` one). Family fixtures `test/family_samc/nvm.cpp`
+and `test/family_samc/journal.cpp` plus their negatives under
+`tools/check_samc.sh`; the bench suites are `test_samc_nvm` and
+`test_samc_journal`.
 
 ## What the silicon does
 
@@ -104,6 +106,21 @@ calibration area at 0x00806030 holds TSENS's. The die's 128-bit serial
 number is four words at 0x0080A00C and 0x0080A040..48, unique only when
 all 128 bits are used.
 
+**The user row is written by the bench tool and not from firmware, on
+purpose.** The commands exist - Erase Auxiliary Row (EAR) and Write
+Auxiliary Page (WAP) - and this driver deliberately exposes neither. The
+row IS the fuses: it survives a chip erase, and it carries the watchdog's
+power-on ALWAYSON bit, the brown-out level and BOOTPROT, so a wrong word
+is not undone by reflashing and an application has no business writing
+one. Provisioning belongs to the programmer, which on the AVR side means
+`tools/bench.py fuses` over UPDI and here means the same verb over SWD:
+it reads and decodes every field of table 9-4, and a write is a whole-row
+read-modify-write through EAR + WAP with the core halted, the old row
+printed first, the new one read back and diffed, the BODCORE calibration
+and Reserved bits carried across untouched, no raw bit escape, and
+BOOTPROT, LOCK and ALWAYS-ON behind an acknowledgement flag. Nothing on
+either side reaches the security bit. See [../bench.md](../bench.md).
+
 Note that the device header's `NVMCTRL_USER_PAGE_OFFSET` is 0x00800000,
 the base of the whole auxiliary space, and NOT the user row: the two
 differ by 0x4000, and confusing them reads calibration data as fuses.
@@ -170,11 +187,28 @@ BEFORE a rise and after a fall. `samc/clock.hpp` is the caller.
 and constexpr accessors, so a decoding can be asserted in a fixture
 without hardware.
 
-**`RwweeFlash`** (`samc/nvm_flash.hpp`) - the FlashMedia realization:
-`erase_size` 256, `write_cell` 64, `flash_end` 0x00402000, one zone
-covering the whole array, `read`/`program`/`erase`/`build_id`. The zone
-is a CONSTANT, unlike every zone on the AVR side, because nothing the
-linker places can reach into the RWWEE array.
+**`RwweePartition`** (`samc/nvm_flash.hpp`) - where the line between the
+two storage classes is drawn, in one place. The 8 KB array's 32 rows
+split as
+
+| Rows | Bytes | Whose | |
+|------|-------|-------|--|
+| 0..27 | 7168 | `RwweeFlash` | blocks (`util/nv_heap.hpp`), its map pair in rows 26..27 |
+| 28..31 | 1024 | `RwweeJournalZone` | small values (`util/nv_journal.hpp`), two 512-byte halves |
+
+Both bounds are CONSTANTS, unlike every zone on the AVR side, because
+nothing the linker places can reach into the RWWEE array - that is the
+property the RWWEE choice bought and the partition does not spend it. The
+split is anchored at the TOP of the array so that each user's own home is
+in turn anchored to the silicon: the heap's map pair at the top of the
+heap's share, the journal's halves at the top of the part.
+
+**`RwweeFlash`** and **`RwweeJournalZone`** - the two FlashMedia
+realizations over it: `erase_size` 256 and `write_cell` 64 on both,
+`flash_end` 0x00401C00 and 0x00402000, one zone each,
+`read`/`program`/`erase`/`build_id`. The journal zone delegates the
+mechanics to `RwweeFlash` - same array, same commands - and differs only
+in its bounds.
 
 ## How to use it
 
@@ -209,6 +243,17 @@ if (auto w = heap.alloc(record_id, sizeof settings)) {
 if (auto block = heap.find(record_id)) {
     block->read(0, std::span<uint8_t>(bytes, sizeof settings));
 }
+```
+
+**Keep a handful of small values in the attic**, which is the other
+storage class and the other partition - the two coexist over one array
+and neither knows the other exists:
+
+```cpp
+NvJournal<RwweeJournalZone, 6, 32> journal;   // six ids of up to 32 bytes
+journal.mount();
+journal.save<Calibration>(cal_id, cal);
+if (const auto back = journal.load<Calibration>(cal_id)) { /* ... */ }
 ```
 
 **Read what the factory left**, before configuring a converter or an
@@ -275,12 +320,48 @@ wire: everything under test is inside the chip.
   STATUS.PROGE, and `take_status()` reports it and leaves the status
   clean.
 - **`util/nv_heap.hpp` runs unmodified on this target.** It mounts on the
-  RWWEE array, places a 200-byte block at 0x401D00 - immediately below
-  the two-row map home at the top of the array, as its top-down placement
-  intends - seals it, reads it back byte-exact, and finds it again after
-  a fresh mount that re-reads the map from flash. The concept's
-  `erase_size`/`write_cell` split is what made this fit: the two numbers
-  are 256 and 64 here against 512 and 2 on the AVR.
+  heap's share of the RWWEE array, places a 200-byte block immediately
+  below the two-row map home at the top of that share, as its top-down
+  placement intends - seals it, reads it back byte-exact, and finds it
+  again after a fresh mount that re-reads the map from flash. The
+  concept's `erase_size`/`write_cell` split is what made this fit: the
+  two numbers are 256 and 64 here against 512 and 2 on the AVR.
+- **`util/nv_journal.hpp` runs unmodified on it too, in the attic beside
+  the heap** (`test_samc_journal`, 58 verdicts in `z`, plus `p` and `v`
+  outside it). The measurements:
+  - a **bare RWWEE page program is 190 us** and a **journal save is 347
+    to 357 us** over five, the difference being the journal's own work -
+    building a 64-byte entry image and its BITWISE CRC-16 (`util/crc.hpp`
+    trades flash for speed on purpose, and this is what that costs where
+    the payload is small);
+  - **a collection is 5.8 ms**: four row erases (both halves, two rows
+    each) plus one page program per live id, and the meter confirms
+    exactly that count;
+  - the CPU is **not stalled**, measured the way `test_samc_nvm` letter
+    `d` measures it - about 2500 polling turns inside one RWWEE row erase
+    - and the software timebase keeps up with the cycle stopwatch through
+    three consecutive collections (18 ms against 17.5 ms), which is the
+    thing a main-array operation makes impossible;
+  - **the panic reserve holds on silicon**: after every completed save
+    `save_reserved()` of a maximum-size value succeeded and **cost no
+    erase**, run against the real page program;
+  - **mounting costs no erase and no program**, and takes 158 us for the
+    two 512-byte halves;
+  - **the coexistence is real**: a 300-byte heap block stays byte-exact
+    at the same address while the journal collects repeatedly over it,
+    and the heap re-mounts with nothing lost;
+  - a **z run spends 168 to 184 row erases** in the four attic rows,
+    about 46 cycles of each - which is the price of running the journal
+    at the maximum `max_ids` the geometry allows, where a collection
+    falls due at every second save.
+- **The repartition is a one-time break of on-chip data, and the mount
+  says so rather than hiding it.** Moving the heap's ceiling down to
+  0x00401C00 moved its map home from rows 30..31 to rows 26..27, so the
+  first boot after the change found no map, reported an empty heap, and
+  left the old blocks unreadable - the survival-aware mount working as
+  designed. The journal's first mount over the same rows found the old
+  map bytes, recognized none of them as entries (a different magic), and
+  treated them as dirty cells to collect past.
 - **This board's fuses are at production defaults**: no bootloader area,
   no EEPROM emulation area, BODVDD level 8, watchdog off. The calibration
   area is programmed (OSC32K CALIB 65, CAL48M 3V3 2229025, 5V 2229024;
@@ -297,13 +378,6 @@ wire: everything under test is inside the chip.
 
 Driver gaps (not built):
 
-- **Writing the NVM User Row** (the EAR and WAP commands). On this family
-  the user row IS the fuses, it survives a chip erase, and it carries the
-  watchdog's power-on ALWAYSON bit and the brown-out level - so a wrong
-  word is not undone by reflashing. It is read and typed here; writing it
-  is provisioning, which on the AVR side lives in the bench tool and goes
-  over UPDI, and which here wants a `tools/bench.py` verb over SWD. That
-  tool currently refuses `fuses` on a SAM board and says why.
 - **The SSB command** (Set Security Bit). One-way - only a debugger chip
   erase clears it - and its entire effect is to lock the part against the
   debugger. `security_bit()` reads the state; nothing sets it. Same
@@ -311,16 +385,24 @@ Driver gaps (not built):
 - **The two commands the device header carries and chapter 27's command
   table does not list**: SF (0xA, "Security Flow") and WL (0xF, "Write
   lockbits"). Undocumented, and WL is permanent.
-- **A main-array FlashMedia backend.** `RwweeFlash` is the only one, and
-  8 KB is its ceiling. A main-array heap would need the AVR backend's
-  linker-symbol zone arithmetic and would stall the CPU on every write;
-  it waits for something that needs the room.
+- **A main-array FlashMedia backend, and this one is a RULING and not a
+  gap.** The RWWEE array serves BOTH storage classes - blocks in rows
+  0..27, small values in rows 28..31 - so nothing is waiting for room,
+  and a main-array backend would import back the three things the RWWEE
+  choice deleted: the stall (the CPU completes ONE polling turn inside a
+  main-array row erase against about 2500 inside an RWWEE one), a quarter
+  of the endurance (25k cycles against 100k, 45-43 and 45-44), and the
+  AVR backend's linker-symbol zone arithmetic with the reflash preflight
+  that goes with it. It is built when something genuinely needs more than
+  8 KB of nonvolatile storage, and not before.
 - **The EEPROM emulation area** as a first-class region: the driver reads
   its size out of the fuses but has no verbs that treat those rows
   specially (they are writable regardless of region lock).
-- **A DSU driver** (ch. 13) for chip erase and the CRC32 engine, and a
-  **PAC driver** (ch. 11) for the write protection these registers
-  advertise.
+- (Both once-wished neighbours now exist: `samc/dsu.hpp` carries the
+  CRC32 engine - chip erase deliberately absent there too, the same
+  ruling as this file's - and `samc/pac.hpp` the write protection;
+  see [dsu.md](dsu.md) and [pac.md](pac.md). Nothing here uses either
+  yet.)
 
 Implemented but not bench-verified:
 

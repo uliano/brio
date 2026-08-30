@@ -75,7 +75,7 @@ SWD). No wires - everything the bring-up uses is on the board.
 - Desk position **C** in the manifest, driven by `tools/bench.py` like
   any other board (`flash`/`run`/`console`); its die serial is
   recorded there as the identity an AVR board has to be given by hand.
-- Firmware today: `test_samc_analog`.
+- Firmware today: `test_samc_journal`.
 
 ## Multi-board bench
 
@@ -148,15 +148,13 @@ python3 tools/bench.py run C z              # drive the console, judge "ALL: N p
 python3 tools/bench.py console A            # print device path + speed (attach a monitor)
 python3 tools/bench.py duo A:a B:script.txt # instrument peer scripted, then the DUT
 python3 tools/bench.py fuses A              # read the fuses; name=value pairs write them
+python3 tools/bench.py fuses C              # ... the SAM's NVM User Row, same verb
 ```
 
-`flash` and `run` are architecture-blind at the command line: the board
-name resolves to a type, the type to a project and a flash mechanism.
-`fuses` is the exception and says so - it is AVR-Dx UPDI provisioning,
-and it refuses a SAM board rather than pretend (that family's
-equivalent non-volatile configuration is the NVM User Row, reached
-through NVMCTRL, for which no driver exists yet). `--erase` is
-likewise refused on SAM, where `program ... verify` erases exactly the
+`flash`, `run` and `fuses` are architecture-blind at the command line:
+the board name resolves to a type, the type to a project and a
+mechanism. `--erase` is the exception and says so - it is an avrdude
+option, refused on SAM where `program ... verify` erases exactly the
 sectors it writes.
 
 `run` exits nonzero on a timeout or a nonzero fail count, so a suite is
@@ -207,12 +205,21 @@ the link under test (`src/apps/usart_link.hpp`,
 
 ### Fuses
 
-Fuses are provisioning, not build output: the CPU can read them and
-nothing more (DS40002247B 11.3.1.5), they survive every reflash, and
-only the programmer writes them. `bench.py fuses <board>` reads the
-seven named fuses and spells out the Flash geometry and the EESAVE
-state they produce; `bench.py fuses <board> name=value ...` writes
-them, reading each one back and reporting the before/after pair.
+Fuses are provisioning, not build output: they survive every reflash,
+and they are the programmer's to write. Both architectures have them
+and `bench.py fuses <board>` is one verb over both - it reads and
+decodes with no arguments, and writes with `name=value` pairs. What
+the board TYPE decides is the memory underneath and therefore the
+field names; a name belonging to the other family is refused BY NAME,
+because "unknown fuse" would be the wrong diagnosis.
+
+#### AVR-Dx: the FUSE bytes over UPDI
+
+On AVR-Dx the CPU can read the fuses and nothing more (DS40002247B
+11.3.1.5). `fuses <board>` reads the seven named bytes and spells out
+the Flash geometry and the EESAVE state they produce; a write goes in
+over UPDI and each byte is read back and reported as a before/after
+pair.
 
 ```bash
 $PY tools/bench.py fuses A                        # read, with the geometry spelt out
@@ -234,6 +241,87 @@ written for `test_avr_nvheap`: without it the whole flash is BOOT, SPM
 writes nothing and the heap's middle zone is empty. Putting the flash
 suites on B is also deliberate wear rebalancing - A has spent the
 project's page cycles so far.
+
+#### SAM C21: the NVM User Row over SWD
+
+On SAM C21 the fuses are a flash row like any other: the **NVM User
+Row**, read at `0x00804000`, whose first 64 bits table 9-4 of
+DS60001479M maps to BOOTPROT, the EEPROM emulation size, the BODVDD
+detector, the watchdog and the region LOCK word. The peripherals load
+those bits at power-on and at a user reset, so **a change takes effect
+at the next reset and not before**, and the row **survives a chip
+erase** - a wrong word is not undone by reflashing, which is exactly
+why this is provisioning.
+
+```bash
+$PY tools/bench.py fuses C                        # read, every field decoded
+$PY tools/bench.py fuses C bodvdd_hysteresis=1    # write, then reset, then read back
+$PY tools/bench.py fuses C --rewrite              # write the row back unchanged
+```
+
+The fields, by their names here:
+`bootprot`, `eeprom`, `bodvdd_level`, `bodvdd_disable`,
+`bodvdd_action`, `bodvdd_hysteresis`, `wdt_enable`, `wdt_always_on`,
+`wdt_period`, `wdt_window`, `wdt_ewoffset`, `wdt_wen`, `lock`. They
+are the same fields `samc/nvm.hpp`'s `NvmUserRow` reads from the
+firmware side, which is where their meanings are documented
+([samc/nvm.md](samc/nvm.md), [samc/reset.md](samc/reset.md),
+[samc/supc.md](samc/supc.md)); the two must move together.
+
+**The write is chapter 27's own sequence, driven by hand over SWD with
+the core halted**: Erase Auxiliary Row (`CMD 0x05`), then per page Page
+Buffer Clear, 32-bit ascending stores into the row's address range to
+load the page buffer, and Write Auxiliary Page (`CMD 0x06`) - every
+command carrying the `0xA5` CMDEX key in the same 16-bit store as CMD
+and every one followed by a wait on `INTFLAG.READY` and a read of
+`STATUS`. `ADDR` is a half-word offset from the auxiliary section base
+`0x00800000`, so the user row is `ADDR 0x2000`. The shipped OpenOCD's
+`at91samd nvmuserrow` helper is NOT used to write: its interface is 64
+bits wide while the erase takes a whole 256-byte row, so nothing in its
+contract says what becomes of the rest of that row - and the same
+command group carries `chip-erase` and `set-security`, which this tool
+must never be one typo away from. Its READ half agrees with this one,
+which is how the address and the layout were cross-checked.
+
+**The safety rules**, all of them enforced:
+
+- the whole **256-byte row** is read, modified and written back,
+  because that is the unit the erase takes; pages that come out
+  all-`0xFF` are left as the erase made them, and the tool says which
+  pages it wrote;
+- the old row is printed in full **before** anything is written;
+- the row is read back after the write and **diffed** against what was
+  intended; a mismatch is a nonzero exit;
+- **only the decoded fields can be written.** The BODCORE calibration
+  bits table 9-4 marks DO NOT CHANGE, and every Reserved bit, are
+  carried across untouched, and **there is no raw bit escape** - a
+  field the tool does not decode is a field it does not write;
+- nothing here reaches the security bit or a chip erase in either
+  direction;
+- `bootprot`, `lock` and setting `wdt_always_on` need
+  `--i-know-what-this-does`, because each can hand back a board that no
+  longer takes firmware the ordinary way. Only a CHANGE is guarded:
+  restating what is already there needs no ceremony.
+
+`--rewrite` erases and writes the row back even when no field changes.
+That is the end-to-end proof of the erase/write path at zero risk, and
+it is what a new board or a new probe should be greeted with.
+
+Every write ends the session with `reset run` (so the silicon is
+running under what the row now says) and then clears
+`DHCSR.C_DEBUGEN`, exactly as `flash` does; a read never halts the core
+at all and clears the same bit on its way out, so the board is left as
+it was found.
+
+**Board C's row is the production default**, `0xB15088FF
+0xFFFFF8BB` and `0xFF` for the remaining 248 bytes: no boot
+protection, no EEPROM emulation area, BODVDD enabled at level 8 with
+action RESET and no hysteresis, the watchdog off, every region
+unlocked. The decode was verified against the row's own production
+column, and `bodvdd_hysteresis` was taken to 1 and back with
+`SUPC.BODVDD` read over SWD after each reset (`0x0008000A` ->
+`0x0008000E` -> `0x0008000A`), which is the proof that the row really
+is loaded into the peripheral at reset.
 
 ### End state
 
@@ -494,6 +582,7 @@ stays honest because nothing under `brio/` knows it exists.
 | `serial_speed` | A PROBE (not a suite) for the SAM C21 console link: how fast it really goes and what it costs. Menu-driven at any of eight rates from 115200 to 3 Mbaud, with the transport switchable between the plain interrupt path and the DMA engines, a 64 KB transmit burst fed per-byte or in bulk, the same burst RAW (polled DRE, no ring/irq/DMA - the link's own ceiling) and an echo window. The host script checks every byte. Findings in [samc/sercom.md](samc/sercom.md): the wire is good to 3 Mbaud, 2.5 M is a divisor hole, and the per-byte API was the real limit |
 | `test_samc_platform` | **Bench test suite** (keep passing) for the SAM C21 reset controller and watchdog - `samc/reset.hpp` - 3 letters in `z` / 34 verdicts, 34/34, NOTHING TO WIRE. The boot story with RCAUSE read as the exclusive one-cause register it is, and the watchdog's power-on state checked field by field against the NVM User Row that supplied it (two drivers describing the same fuses from opposite ends); the watchdog as a configurable timer with nothing allowed to expire; and OSCULP32K measured BY DIFFERENCE through the early-warning interrupt - 1030.4 Hz against a nominal 1024, with the 3 ms arming cost that a single measurement would have hidden. Letter `i` sits OUTSIDE `z` because it reboots the board six times: a wrong CLEAR key with the watchdog stopped and then running, a panic through `ResetReporter`, a deliberate HardFault, a time-out and a window violation - 20/20, with the breadcrumb proven to cross a system reset. Run it with `bench.py run C i --expect="->"`. Findings in [samc/reset.md](samc/reset.md) |
 | `test_samc_nvm` | **Bench test suite** (keep passing) for the SAM C21 NVMCTRL - `samc/nvm.hpp` and `samc/nvm_flash.hpp` - 6 letters in `z` / 52 verdicts, 52/52, NOTHING TO WIRE. Geometry and the fuse row against PARAM and the factory areas (the die serial it prints is the one the manifest records for board C); the RWWEE erase/program round trip with every malformed request refused; THE PAGE-BUFFER ORDERING RULE decided by data (ascending and descending both exact, even-then-odd loses all eight low words - so the rule is 'one 64-bit section at a time', not 'ascending'); the cost and the no-stall claim (RWWEE row erase 989 us with ~3950 CPU polling turns inside it); `util/nv_heap.hpp` mounting and round-tripping a block on the RWWEE array, its second silicon; region locks refusing an erase and STATUS.PROGE from an invalid command. Letter `m` sits OUTSIDE `z` because it costs one row of main-array endurance: it measures the other side of the stall (ONE polling turn) and why a stalled operation cannot be timed from flash-resident code. Findings in [samc/nvm.md](samc/nvm.md) |
+| `test_samc_journal` | **Bench test suite** (keep passing) for the SMALL-VALUE FLASH JOURNAL - `util/nv_journal.hpp` over `samc/nvm_flash.hpp`'s `RwweeJournalZone` - 7 letters in `z` / 58 verdicts, 58/58 (one cold, two warm), NOTHING TO WIRE. It is the other half of `test_samc_nvm`: the RWWEE array is PARTITIONED, rows 0..27 for the block heap and rows 28..31 for the journal's two ping-pong halves, and letter `e` runs BOTH AT ONCE - a 300-byte heap block stays byte-exact at the same address while the journal collects repeatedly over it, which is the partition's whole point and the thing no host test can say anything about. Letter `a` proves the mount COSTS NO ERASE AND NO PROGRAM (158 us for two 512-byte halves); `b` the byte core, the typed twin, latest-wins and the refusals, with a refused save proven to write nothing at all; `c` the halves ping-ponging on silicon with every value carried through and a fresh mount to prove it; `d` the cost, weighing a JOURNAL SAVE (347..357 us) against a BARE PAGE PROGRAM (190 us) measured in the same window - the difference is the entry image and its bitwise CRC-16 - plus the no-stall claim (about 2500 CPU polling turns inside one RWWEE row erase) and the software timebase keeping up through three collections; `f` THE PANIC RESERVE on real flash, where `save_reserved()` of a maximum-size value succeeds after every completed save and costs NO erase; `w` prints the run's wear (168..184 row erases in four rows, about 46 cycles of each) against a declared budget and zeroes the meter so the letter is re-runnable. OUTSIDE `z`: `p` reboots the board - a real `panic()` whose reporter writes the breadcrumb through the reserve, then a reset, then `take()` at the next boot (11/11), and it records WHICH path wrote it, which on a board with `DHCSR.C_DEBUGEN` cleared is the HardFault body, because `break_here()`'s BKPT escalates before any reporter runs; `v` verifies the survivors after a reflash (6/6 after flashing `blink` over the top and coming back - the journal's sequence number unchanged). Findings in [samc/nvm.md](samc/nvm.md), design in [design/nv-journal.md](design/nv-journal.md) |
 | `test_samc_uart` | **Bench test suite** (keep passing) for the SERCOM USART transport - `samc/sercom.hpp` in all FOUR of its shapes, interrupt or DMA on each direction independently - 4 letters in `z` / 27 verdicts, 27/27, plus ELEVEN letters outside `z` that need a peer on the other end of the console wire and are driven by `tools/uart_stress.py`: the transport matrix (e..h), receive-only and transmit-only sustained (i, j), 115200 / 1 M / 3 Mbaud (k), the frame-format matrix (l), a deliberately MISMATCHED frame and the recovery (m), ring pressure at an eager and a lazy harvest cadence (n), and bursty traffic with idle gaps (p) - 62 verdicts, all green twice over. NOTHING TO WIRE: the console itself is the peripheral under test, which is also why most letters need the host - this SERCOM has no second port and this silicon has no loop-back bit, so a byte can only be checked against something outside the chip, and only an outside sender can speak a frame the receiver is not using. The pattern is a 32-bit xorshift both ends generate, so a lost byte is LOCATED and not merely counted. It is the suite that diagnosed the duplex wedge (see [samc/dmac.md](samc/dmac.md)'s erratum-1.10.4 note) and it is what keeps the fix honest. Its z letters are self-contained: the baud arithmetic against half a BAUD step at any rate, every frame format written and read back, the transmit ring's refusal contract, and the engines' register facts | 
 | `test_samc_dma` | **Bench test suite** (keep passing), the FIRST on the SAM C21 board and the first user of `util/testbench.hpp` on that target: the DMAC - `samc/dmac.hpp` (block, channels, harvest with the erratum-1.10.4 validation) and the Uart's two OPTIONAL DMA engines - 9 letters in `z` / 112 verdicts, 112/112, NOTHING TO WIRE (the console's own SERCOM5 is the peripheral under test; two letters that need the runner to type sit outside `z`). The end-address quirk decided by data (a naive start-address descriptor shown moving the decoy buffer); the memory-to-memory matrix; software-linked chains at ~59700 blocks/s; harvest at ~10 us with scribbled write-backs REFUSED; TCMPL/TERR/INTPEND dispatch including a real bus error and the first-beat loss that follows it; the console transmitting and receiving through DMA channels; the erratum-1.10.4 hunt (five concurrent channels, the violation counters as the verdict - zero at low trigger density, hundreds refused and zero suffered under the engined stress). Driven by `tools/bench.py` like any AVR suite (`flash C test_samc_dma`, `run C z`) |
 | `test_samc_analog` | **Bench test suite** (keep passing) for THE ANALOG COMPLETION - the gaps chapters 38 (ADC), 39 (SDADC), 40 (AC), 41 (DAC) and 43 (TSENS) still carried after their own campaigns and that became testable once the DAC on PA02 was a real swept mid-scale source, `samc/supc.hpp` had the bandgap and the TC event pacers existed - 12 letters in `z` / 136 verdicts, 136/136 four times (one from a fresh flash), about three seconds, NOTHING TO WIRE, and NOT ONE LINE of driver code needed for it. Letter `a` runs the ADC HOST/CLIENT PAIR (38.6.3.1) on silicon for the first time: one trigger on the host gives two results agreeing to zero counts on the pad both converters bond, the CLIENT'S OWN ENABLE BIT DOES NOT STAND (CTRLA reads 0x20 and it converts anyway - 38.6.3.1's "enabled by accessing the CTRLA register of Host ADC" meant literally), interleaving delivers one result per trigger where one converter delivers half of them WITH ITS OVERRUN FLAG CLEAR (a missed trigger is not an overrun), and ONLY ONE OF THE CHAPTER'S THREE RESTART OPTIONS RESTARTS ANYTHING - the parity carries straight through both a SWTRIG.FLUSH and a disable/enable cycle, and only a software reset sets it. Letter `b` walks a six-input SEQUENCE whose slots are 222 counts apart at the closest, all six labelled by SEQSTATE and cheaper per conversion than six triggers; `c` measures DIFFERENTIAL mode against the DAC (half the single-ended difference to three counts, a real zero crossing at the code that IS a quarter of the supply, a NEGATIVE signed WINLT separating two legal results); `d` finds NEITHER R2R NOR OFFCOMP moving the reading by more than 2 counts of 4096 at any of three common modes, and offset compensation SHORTER than the SAMPLEN it replaces. Letter `e` is the campaign's showpiece: DAC DITHERING with the pacer, the ADC accumulation and the sample rate chosen so 1024 samples land on each of the sixteen sub-conversion slots exactly 64 times - the dithered mean then steps 4.1 counts per dither bit where one sixteenth of an LSB is 4.0, against an undithered control that steps a whole LSB with nothing between, and erratum 1.9.1 confirmed revision-B-only by running the staircase in both data placements. Letters `g` to `j` finish the AC: COMP2, COMP3 and WINDOW 1 on a signal that really sits between the limits; THE BANDGAP AS A NEGATIVE INPUT, which turns out NOT to need SUPC.VREF.VREFOE and corrects `ac.hpp`'s own comment; erratum 1.5.6 reproduced rarely with its workaround as the control; THE HYSTERESIS MEASURED at 118 mV high-speed and 113 mV low-power with BOTH edges moving (erratum 1.5.1 confirmed revision-B-only); and 40.6.10's SWAP procedure returning a BOUND rather than a number. Letter `k` closes the SDADC's flush (a negative witness: flush events faster than a decimation window stop every result dead), its window event and its three interrupts; `l` the TSENS inverted start event, both driven by a comparator OUTPUT because only a LEVEL can tell an inversion apart from a pulse. Findings in [samc/adc.md](samc/adc.md), [samc/dac.md](samc/dac.md), [samc/ac.md](samc/ac.md), [samc/sdadc.md](samc/sdadc.md) and [samc/tsens.md](samc/tsens.md) |
