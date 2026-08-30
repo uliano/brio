@@ -63,6 +63,16 @@ panic breadcrumb's magic word is necessary, not merely prudent. That
 it survives in practice is measured in [reset.md](reset.md), which
 also owns the reset causes themselves.
 
+**The breadcrumb has a sibling on this target, and it is not part of
+it.** The kernel's PanicRecord says WHAT died - a code and a context
+byte; `samc/postmortem.hpp` puts the last branches before the disaster
+in `.noinit` beside it, checksummed, by freezing the Micro Trace Buffer
+in the fault body and copying its tail. It is a separate samc type and
+not an extension of the kernel record, because a hardware trace is
+silicon this stratum happens to have and the next target may answer
+differently or not at all. The mechanism, the two entry paths and what
+they cost are in [mtb.md](mtb.md).
+
 **The PM has three sleep modes and no interrupt.** Chapter 19 is two
 registers. SLEEPCFG.SLEEPMODE selects what the next WFI takes -
 **IDLE0** (0x0, the reset value: the CPU stops, MCLK and generator 0

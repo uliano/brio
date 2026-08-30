@@ -2009,6 +2009,47 @@ gets its dated home in `docs/design/` when taken.
   declared mover, check_samc (1 positive + 4 negative TUs),
   check_family, host 24/24, canary test_samc_nvm z 52/52 - agent AND
   Fable.
+  **MTB INTO THE POST-MORTEM DONE 2026-08-30 (Opus delegation,
+  REVIEWED BY FABLE and COMMITTED same day, all eight judgment calls
+  accepted; memory samc-session-2026-08-30-postmortem). Group 5's
+  second item, and the DIVAS ruling (359396a) closed its third the
+  same day.** samc/postmortem.hpp NEW: MtbPostMortem<trace_bytes,
+  keep_packets> - a rolling MTB buffer in .bss and a SEPARATE .noinit
+  record (magic + CRC-16 + count + source + packets) that crosses the
+  reset, written by capture() which FREEZES FIRST and refuses to
+  overwrite a standing record (hard_fault_reset's own rule), read once
+  by take(). The two entry paths are PURE COMPOSITION - TracingReporter
+  <Store, source, Next> and hard_fault_trace_reset<P, Store>() - with
+  NOT ONE LINE of reset.hpp, platform_sam.hpp, kernel/ or util/
+  changed; mtb.hpp grew freeze() and the oldest-first snapshot()
+  additively (32/32 pre-existing images byte-identical, Fable's
+  worktree gate). NEW SUITE test_samc_postmortem z 36/36 (agent x4 +
+  Fable x3 incl. cold) with the reboot letters f 13/13 and p 10/10
+  OUTSIDE z. THE PROOF: a UDF three calls deep is LEGIBLE AFTER THE
+  RESET - 6..7 packets, the three calls in the order made, the
+  exception entry last, the PanicRecord and the trace read side by
+  side; the entry packet's source is +8 bytes into the dying leaf and
+  its destination the HardFault handler's linked address. A NEW
+  SILICON FINDING: BIT 0 OF THE SOURCE WORD MARKS THE EXCEPTION ENTRY
+  - exactly one packet per fault trace carries it, settling what the
+  debug campaign's letter could only report as absent. The capture
+  itself costs 2 packets; FREEZE-FIRST is measured, not asserted (read
+  stopped: 9 packets, 3/3 chain leaves; read running: zero packets in
+  common with the stopped read and a run of 4 identical packets - the
+  copy loop's own backward branch flooding the tail); one three-deep
+  chain costs 9 packets, which is the measured justification for
+  keeping 16 of the 32-packet buffer (136 bytes of .noinit).
+  THE ORDERLY-PANIC PATH IS THE FAULT PATH ON THIS BOARD (BKPT
+  escalates with C_DEBUGEN cleared - the journal campaign's finding
+  confirmed): an app that wants a trace must bind the fault body, and
+  the reporter's own capture is proven separately against a
+  non-resetting Next. The journal letter was DECLINED WITH ARITHMETIC
+  (136 bytes needs 3 cells and (1+2)x3 = 9 > the attic half's 8 -
+  recorded in mtb.md's gaps; Fable re-checked the numbers). Docs:
+  mtb.md's integration-with-panic gap CLOSED, platform.md's breadcrumb
+  gains its trace sibling, reset.md points at the composition.
+  Canary test_samc_debug z 117/117 both hands; check_samc,
+  check_family, host 24/24.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
@@ -3254,7 +3295,23 @@ brio/                    the framework, four strata:
                            and FLOW as offsets from BASE, `MtbPacket` with
                            bit 0 of each word left an unnamed flag (10.3
                            defers to a TRM this project has not got, so the
-                           device header is the only local authority)
+                           device header is the only local authority);
+                           `freeze()` and `snapshot()` are the post-mortem
+                           pair - stop the trace BEFORE reading it, then
+                           copy its tail oldest-first, bounded and legal
+                           with interrupts dead
+    postmortem.hpp         WHERE the program died, beside WHAT killed it:
+                           `MtbPostMortem<bytes, keep>` freezes the MTB,
+                           copies its last packets into a CRC-16'd .noinit
+                           record and hands them to the next boot once
+                           (`take()`), refusing to overwrite a diagnosis
+                           that already stands; `TracingReporter` and
+                           `hard_fault_trace_reset<P, Store>()` are the two
+                           entry paths, composed with reset.hpp and
+                           kernel/panic.hpp without touching either. A
+                           SIBLING of the kernel's PanicRecord and not an
+                           extension of it - a hardware trace is silicon
+                           this stratum happens to have
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

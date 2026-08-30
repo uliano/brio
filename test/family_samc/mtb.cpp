@@ -8,6 +8,7 @@
 // header being the only local authority - and the packet decode.
 
 #include <stdint.h>
+#include <span>
 
 #include "samc/mtb.hpp"
 
@@ -82,4 +83,16 @@ void verbs() {
 
     Mtb::release();
     (void)Mtb::regs().MTB_BASE;
+}
+
+// The post-mortem pair: the freeze that must come first, and the
+// bounded oldest-first copy of the tail.
+void tail() {
+    (void)Mtb::freeze();
+
+    MtbPacket kept[8]{};
+    (void)Mtb::snapshot(trace_buffer, sizeof(trace_buffer),
+                        std::span<MtbPacket>(kept, 8));
+    (void)Mtb::snapshot(trace_buffer, sizeof(trace_buffer),
+                        std::span<MtbPacket>(kept, 0));
 }

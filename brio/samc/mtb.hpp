@@ -71,18 +71,26 @@
  *
  * NO ERRATA. DS80000740S has no MTB section.
  *
+ * READING THE TAIL BACK IS A RACE AGAINST THE READER ITSELF. The MTB
+ * traces the CPU that is reading it, so every branch the reading code
+ * takes is another packet over the oldest thing still in the buffer.
+ * `freeze()` is therefore the FIRST verb of any post-mortem path - not
+ * an optimization but the difference between a trace and a picture of
+ * the trace reader - and `snapshot()` is the bounded, allocation-free
+ * copy of the last N packets a frozen buffer holds. Both are legal with
+ * interrupts dead, which is what makes samc/postmortem.hpp possible.
+ *
  * NOT BUILT (docs/samc/mtb.md carries the list): any decoder above the
  * packet pair - reconstructing a call chain wants the image's symbols
- * and belongs on the host; the CoreSight management registers at 0xF00
- * and above (claim tags, lock access, the authentication status), which
- * are a probe's business; and any integration with panic() - a fault
- * handler that dumps the last branches is exactly what this enables, and
- * it will be built with its first user.
+ * and belongs on the host; and the CoreSight management registers at
+ * 0xF00 and above (claim tags, lock access, the authentication status),
+ * which are a probe's business.
  */
 
 #pragma once
 
 #include <stdint.h>
+#include <span>
 
 #include "sam.h"
 
@@ -311,6 +319,83 @@ struct Mtb {
         const volatile uint32_t* w =
             static_cast<const volatile uint32_t*>(buffer) + index * 2u;
         return MtbPacket{w[0], w[1]};
+    }
+
+    // ---- the post-mortem pair ------------------------------------------------
+
+    /**
+     * STOP THE TRACE, AND STOP IT FIRST. Clears MASTER.EN and leaves
+     * everything else in MASTER alone; returns whether the trace was
+     * running.
+     *
+     * This is `enable(false)` under a name that says why it is the first
+     * line of a fault handler rather than a step in one. The MTB traces
+     * the processor that reads it, so every branch spent deciding to
+     * read - the handler's own prologue, a validity test, a print - is
+     * another packet written over the oldest packet still there. Read a
+     * running buffer and what comes back is the reader's own history;
+     * the suite measures exactly that.
+     *
+     * Nothing here waits, allocates, or takes a lock: one load, one
+     * store. Legal with interrupts dead and legal from a fault handler.
+     */
+    [[gnu::always_inline]] static bool freeze() {
+        const uint32_t m = MTB_REGS->MTB_MASTER;
+        MTB_REGS->MTB_MASTER = m & ~MTB_MASTER_EN_Msk;
+        return (m & MTB_MASTER_EN_Msk) != 0u;
+    }
+
+    /**
+     * Copy the LAST packets the buffer holds into `out`, OLDEST FIRST,
+     * and return how many were copied.
+     *
+     * The write pointer names the NEXT slot, so the newest packet is the
+     * one before it and the walk runs backwards from there - modulo the
+     * buffer when POSITION.WRAP says the pointer has been round, which
+     * is the only case where the oldest surviving packet is not the
+     * first slot. A buffer that has not wrapped yet simply holds fewer
+     * packets than asked for and the answer is short; a caller reads the
+     * count, not the span's size.
+     *
+     * `out` is the caller's storage and is never exceeded: with room for
+     * fewer packets than the buffer holds, the OLDEST are the ones
+     * dropped, which is the right end to lose in a post-mortem.
+     *
+     * Bounded and allocation-free - `out.size()` iterations of two loads
+     * - and it does not touch the block's registers except to read
+     * POSITION. It does NOT stop the trace: call freeze() first, or
+     * measure the reader instead of the program.
+     *
+     * Zero for a span with no room, for a geometry that is not a trace
+     * buffer's, and for a POSITION that does not point inside `buffer`
+     * at all - the last being the "somebody else's buffer" case, which
+     * is worth a zero rather than a wild read.
+     */
+    static uint32_t snapshot(const void* buffer, uint32_t bytes,
+                             std::span<MtbPacket> out) {
+        if (out.empty() || !geometry_valid(bytes)) {
+            return 0;
+        }
+        const uint32_t start =
+            reinterpret_cast<uint32_t>(buffer) - sram_base();
+        const uint32_t now = write_offset();
+        if (now < start || now >= start + bytes) {
+            return 0;
+        }
+        const uint32_t total = packets_for(bytes);
+        const uint32_t next = (now - start) / packet_bytes;
+        const uint32_t available = wrapped() ? total : next;
+        const uint32_t room = static_cast<uint32_t>(out.size());
+        const uint32_t n = available < room ? available : room;
+        if (n == 0u) {
+            return 0;
+        }
+        uint32_t index = (next + total - n) % total;
+        for (uint32_t i = 0; i < n; ++i) {
+            out[i] = packet(buffer, index);
+            index = index + 1u == total ? 0u : index + 1u;
+        }
+        return n;
     }
 };
 

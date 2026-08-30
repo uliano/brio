@@ -150,6 +150,14 @@ reset. And it does not overwrite an existing valid record: a fault that
 follows a panic is a consequence of something already diagnosed, so the
 original code and context stand.
 
+Both the reporter and the body COMPOSE with the trace half of the
+post-mortem, which lives in `samc/postmortem.hpp` and changes nothing
+here: `TracingReporter<Store>` captures and then chains to
+`ResetReporter`, and `hard_fault_trace_reset<P, Store>()` captures and
+then calls this body. What the trace is worth, and why on a board with
+DHCSR.C_DEBUGEN clear the fault body is the path that runs even for an
+orderly panic, are in [mtb.md](mtb.md).
+
 ## How to use it
 
 **Ask why you are here**, once, at boot:
