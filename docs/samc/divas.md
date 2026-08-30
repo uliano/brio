@@ -196,16 +196,18 @@ full-width division.
 
 Driver gaps - features of ch. 14 not built:
 
-- **Adopting the block as the toolchain's division.** gcc lets
-  `__aeabi_uidiv` and `__aeabi_idiv` be overridden, and the numbers above
-  are the input to that decision - but it is a whole-image decision this
-  driver cannot own: the replacements would have to be re-entrant against
-  interrupts (the block has ONE set of operand registers, so a division
-  in an ISR corrupts one in progress below it), the block would have to
-  be clocked and idle at every point a division can happen including
-  before `main()`, and 14.5.2's "will not operate in any sleep mode"
-  would become a constraint on the whole program. **Open, with these
-  numbers as its input.**
+- **Adopting the block as the toolchain's division: RULED OUT
+  (2026-08-30).** gcc lets `__aeabi_uidiv`/`__aeabi_idiv` be
+  overridden and the numbers above were the decision's input - and the
+  decision is NO. A global override is a whole-image invariant whose
+  one hazard - the block has ONE set of operand registers, so a
+  division taken in an interrupt corrupts one in progress below it -
+  could be held off only by discipline (or by paying a critical
+  section on every division, eating the gain exactly where divisions
+  are short), and brio's house rule is that a guarantee is enforced or
+  it is not stated. The gain matters only in division-heavy code,
+  which can spend it deliberately: `Divas`'s explicit verbs are the
+  offer, and the mechanism-not-policy split stands.
 - **16-bit operation.** The chapter's cycle counts mention it (14.6.2.6)
   and no register ever does: the operands are one 32-bit width, and the
   "16-bit division" of that sentence is a 32-bit division whose dividend
