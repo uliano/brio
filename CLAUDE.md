@@ -2123,6 +2123,27 @@ gets its dated home in `docs/design/` when taken.
   database), fully decoupled from CMake Tools' Active Folder, with
   the repo-root .clangd suppressing the two clang-only diagnostics
   -Werror would turn into editor errors on gcc-clean code.
+- **Energy experiment - experiments/ tier born, first map point DONE
+  2026-08-31 (by Fable's own hand at the office bench, one day from
+  question to data).** The question: was deferring DynamicClock on the
+  SAM right? NEW top-level `experiments/` (ruled: not "examples" - no
+  maintenance promise), self-contained per-experiment dirs globbed by
+  both build projects; experiments/energy/ holds the whole thing and
+  DOCUMENTS ITSELF (README = rationale, pre-registered predictions,
+  wiring, instrument constants, results). The SAM C21 is world + judge
+  + meter for an AVR DUT: DAC seeded stimulus, witness on an AC
+  comparator (C21 VIH = 0.7xVDD rules out the EIC at 3.3 V), SDADC
+  free-running energy windows (R_shunt 10.18 ohm ratio-calibrated
+  in place, offset zero-cal, zero overruns). FIRST POINT: prediction
+  refuted then repaired - the naive free-running watcher loses to
+  DynamicClock pace by 22%, the frugal one-conversion-per-tick watch
+  beats pace by 27% (168.6 vs 232.4 mJ) - HOW you watch is worth 1.7x,
+  more than any clock choice; the SAM deferral HOLDS on this point.
+  Board facts: floating input buffers 0.49 mA, crystal 0.51 mA, the
+  AliExpress ADuM clone ~2 mA quiescent (the board rev 1.2 list lives
+  in memory). Open: run.py + two-layer logs, the map sweep, brackets,
+  the cap instance. Full story: experiments/energy/README.md + memory
+  power-experiment-brief.
 - **QK-style preemption (far horizon, probably not on AVR).** A
   preemptive non-blocking kernel (higher-priority AO preempts a
   lower one mid-dispatch, single stack, LIFO nesting) would be an
@@ -2804,9 +2825,11 @@ tools/check_samc.sh [name]                                         # same for th
 (cd avrdx && cmake --build --preset avr128db48-debug --target <app>)           # AVR debug build, then F5
 (cd samc  && cmake --build --preset samc21j-release --target <app>)            # SAM release build
 (cd samc  && cmake --build --preset samc21j-release --target <app>-upload)     # flash via OpenOCD (SWD)
-# apps are auto-discovered from <project>/src/apps/*.cpp at every
-# configure - no generation step; a new/removed app or a changed
-# "// build: opt = value" line takes effect on the next configure
+# apps are auto-discovered from <project>/src/apps/*.cpp - plus
+# experiments/*/{avrdx,samc}/*.cpp, each experiment's per-arch app
+# halves - at every configure; no generation step; a new/removed app
+# or a changed "// build: opt = value" line takes effect on the next
+# configure
 
 python3 tools/bench.py list                  # serial devices, USB probes, the bench manifest
 python3 tools/bench.py flash A test_avr_pin  # cmake --build --target <app>, then avrdude/UPDI
@@ -2913,6 +2936,19 @@ tools/bench.py           the bench orchestrator: list / flash / run / console /
                          mechanism (db* -> avrdx/avrdude/UPDI, c21j ->
                          samc/OpenOCD/SWD); `fuses` and --erase are AVR-only
                          and refuse a SAM board instead of pretending
+experiments/             one SELF-CONTAINED directory per cross-cutting bench
+                         experiment (ruled 2026-08-31; deliberately not
+                         "examples" - no maintenance promise): both
+                         architectures' app halves (<name>/avrdx/*.cpp and
+                         <name>/samc/*.cpp, globbed by the respective build
+                         projects; app names unique per arch), the shared
+                         wire-protocol header beside them, its own README
+                         (rationale, pre-registered predictions, wiring,
+                         protocol, log format - docs/ never references it),
+                         python driver + analysis, logs/ git-ignored.
+                         energy/ = the clock-strategy energy experiment
+                         (DynamicClock-deferral verdict; the SAM as
+                         stimulus + judge + meter for an AVR DUT)
 docs/                    README (map + rules), design/, <target>/ (avrdx/, samc/,
                          host/), bench.md
 brio/.clangd             per-stratum clangd routing: the framework default is

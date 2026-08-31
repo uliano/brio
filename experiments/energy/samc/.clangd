@@ -1,0 +1,6 @@
+# clangd config for the SAM half of this experiment: these TUs are
+# compiled by the samc/ CMake project (its CMakeLists globs
+# ../experiments/*/samc/*.cpp), so point clangd at that project's
+# database - same pattern as samc/.clangd, path adjusted for depth.
+CompileFlags:
+  CompilationDatabase: ../../../build-cmake/samc21j-release

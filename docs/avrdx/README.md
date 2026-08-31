@@ -49,7 +49,11 @@ flag, so there is no "last one wins" hazard to guard against.
   time (`file(GLOB ... CONFIGURE_DEPENDS ...)` - a new or removed app
   is picked up on the next configure, no generation step); see
   "Per-app build options" below for what an app can add to its own
-  header comment.
+  header comment. The glob also covers `../experiments/*/avrdx/*.cpp`:
+  a top-level experiment directory holds both architectures' app
+  halves plus their shared protocol header and documents itself in its
+  own README (same `// build:` grammar, names unique within the
+  architecture).
 - `CMakeLists.txt`'s `avr_add_app()`: per-language AVR flags,
   build-type aware (`-Os -g` only on the Release config, `-std=gnu++23`
   plus `-fno-exceptions -fno-rtti -fno-threadsafe-statics

@@ -172,7 +172,9 @@ function(sam_add_app name)
     )
 endfunction()
 
-# --- App discovery: every samc/src/apps/<app>.cpp becomes a target, gated
+# --- App discovery: every samc/src/apps/<app>.cpp - plus every
+#     ../experiments/*/samc/<app>.cpp, the per-experiment app slot
+#     (mirroring the AVR project) - becomes a target, gated
 #     by its own "// build: boards = ..." header comment (default: c21j -
 #     the one board type that exists; the grammar is the AVR project's, the
 #     board names are this family's). monitor_speed is carried through to
@@ -180,7 +182,9 @@ endfunction()
 #     app itself declares; other keys are tolerated as metadata.
 set(SAMC_BOARD "c21j")
 
-file(GLOB APP_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/apps/*.cpp")
+file(GLOB APP_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/src/apps/*.cpp"
+    "${CMAKE_SOURCE_DIR}/../experiments/*/samc/*.cpp")
 
 set(_manifest_entries "")
 
@@ -229,7 +233,7 @@ foreach(_app_path IN LISTS APP_SOURCES)
     endif()
 
     if(SAMC_BOARD IN_LIST _boards)
-        sam_add_app(${_app} src/apps/${_app}.cpp)
+        sam_add_app(${_app} ${_app_path})
     endif()
 endforeach()
 

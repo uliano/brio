@@ -54,7 +54,9 @@ LED PB23, SWD on PA30/PA31.
 `samc/` is its own CMake project, a sibling and peer of `avrdx/` and
 `test/` (one configure has exactly one compiler; the repo root is not
 a CMake project). Apps are auto-discovered from
-`samc/src/apps/*.cpp` by their `// build:` header comment - the same
+`samc/src/apps/*.cpp` - plus `experiments/*/samc/*.cpp`, the SAM half
+of any top-level experiment directory (which documents itself in its
+own README) - by their `// build:` header comment - the same
 grammar as the AVR project, board names of this family (`boards =
 c21j`; c21j is also the default). One configure targets one chip
 variant (`SAMC_MCU`); only the J18A has a preset today - the E/G

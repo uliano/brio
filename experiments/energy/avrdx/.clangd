@@ -1,0 +1,6 @@
+# clangd config for the AVR half of this experiment: these TUs are
+# compiled by the avrdx/ CMake project (its CMakeLists globs
+# ../experiments/*/avrdx/*.cpp), so point clangd at that project's
+# database - same pattern as avrdx/.clangd, path adjusted for depth.
+CompileFlags:
+  CompilationDatabase: ../../../build-cmake/avr128db48-release

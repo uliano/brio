@@ -229,7 +229,10 @@ function(avr_add_app name)
     )
 endfunction()
 
-# --- App discovery: every src/apps/<app>.cpp with a main() becomes a
+# --- App discovery: every src/apps/<app>.cpp - plus every
+#     ../experiments/*/avrdx/<app>.cpp, the per-experiment app slot (an
+#     experiment is a self-contained dir holding both architectures'
+#     halves and their shared protocol header) - with a main() becomes a
 #     target, gated by its own "// build: boards = ..." header comment
 #     (grammar: any "// build: <key> = <value>" line in the file; "boards"
 #     is a comma-separated allow-list, default {db48} if absent - matching
@@ -237,7 +240,9 @@ endfunction()
 #     collected as per-app metadata for tools/bench.py, via the JSON
 #     manifest below, EXCEPT "flmap_lock" which also feeds avr_add_app()'s
 #     link flags directly).
-file(GLOB APP_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/apps/*.cpp")
+file(GLOB APP_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/src/apps/*.cpp"
+    "${CMAKE_SOURCE_DIR}/../experiments/*/avrdx/*.cpp")
 
 set(_manifest_entries "")
 
@@ -289,7 +294,7 @@ foreach(_app_path IN LISTS APP_SOURCES)
     endif()
 
     if(AVR_BOARD IN_LIST _boards)
-        avr_add_app(${_app} FLMAP_LOCK ${_flmap_lock} src/apps/${_app}.cpp)
+        avr_add_app(${_app} FLMAP_LOCK ${_flmap_lock} ${_app_path})
     endif()
 endforeach()
 

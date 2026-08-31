@@ -27,6 +27,10 @@ plots/
 # Captured measurement data (regenerable by re-running the capture firmware/tool).
 *.csv
 
+# Experiment run logs (raw console transcripts + parsed JSONL, one file
+# per run - see experiments/*/README.md): bench data, not source.
+experiments/*/logs/
+
 # vendor datasheets: local copies only (see docs/avrdx/vendor/README.md)
 docs/*/vendor/*.pdf
 docs/*/vendor/extracts/
