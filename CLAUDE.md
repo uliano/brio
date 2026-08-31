@@ -2096,6 +2096,77 @@ gets its dated home in `docs/design/` when taken.
   check_family, host 24/24. platform.md's timebase gap CLOSED,
   power.md carries the model-unchanged finding, ticker.hpp's and
   sleep.hpp's standing caveats rewritten to the two-site truth.
+  **SERCOM SPI DONE 2026-08-31 (PHASE F's FIRST HALF, and the first
+  CROSS-ARCHITECTURE campaign: an Opus delegation the user stopped
+  mid-flight, taken over and finished BY FABLE'S OWN HAND - four suite
+  defects diagnosed at the bench, one driver verb added, the peer
+  hardened). COMMITTED same day.** samc/spi.hpp NEW: the whole of ch. 32
+  in the two strata - Spi<n> (both roles over ONE register view, SPIM =
+  SPIS asserted field by field against the header's own SPIS macros;
+  every enable-protection and all three SYNCBUSY bits spelled per
+  register, incl. 32.8.2's enable-raises-SYNCBUSY.CTRLB trap; DOPO
+  refused as the TRIPLE it is - four rows, and WHICH SIGNAL IS WHICH
+  DEPENDS ON THE ROLE, so one harness is a host on row 0x0 and a client
+  on row 0x2, both proven on the same seven wires) + SpiHost (the avrdx
+  Request shape verbatim - cs/dc PinRefs, two-phase cmd + full-duplex
+  data, Borrowed reply loans, per-request BAUD/mode, polled or ISR pump
+  on RXC-never-DRE - so THE VICTORY CONDITION HELD: util/spi_bus.hpp =
+  BusMaster ran the kernel letter with NOT ONE LINE of util/ or kernel/
+  changed) + SpiClient (preload, SSDE, address match, the dark-listener
+  drive_output). sercom.hpp grew instance()/spi_regs() additively;
+  spi_link.hpp/spi_peer grew host_burst (THE ROLES INVERT: the
+  instrument becomes the bus host so the DUT's client half is
+  exercisable at all - old ops untouched). NEW SUITE test_samc_spi z
+  61/61 x TEN consecutive (cold + nine warm) on the SEVEN-WIRE bench
+  this session verified conductor by conductor over SWD + UPDI. THE
+  BENCH FINDINGS: errata 1.17.16 AND 1.17.19 both NOT REPRODUCED at rev
+  F in SPI mode (SWRST resets from the disabled state - measured from
+  three states incl. really-clockless, where it lands once the channel
+  returns - and DBGCTRL survives SWRST; both disciplines KEPT, one
+  enable of cost); A MODE CHANGE IS A CPOL FLIP ON THE WIRE - flipped
+  inside an open select window it is one extra edge and a selected
+  client counts it: an exact ONE-BIT SLIP both directions, modes 2/3
+  only, which is why the engine applies before its own cs falls and why
+  SpiHost::prime() now exists for callers framing CS by hand; THE
+  THREE-SCK-CYCLE RULE'S CYCLES ELAPSE ONLY WHILE SCK RUNS, so a client
+  answering on RXC (in the gap) is ONE CHARACTER LATE every time and
+  the working pump is ONE AHEAD (preload b0, park b1, write next+1 per
+  RXC - the peer then read 12/12 from the first character, PLOADEN's
+  whole promise); CTRLB.MSSEN measured raising SS between EVERY
+  character (4 rises in a 4-char burst - hardware SS frames a character,
+  never a transaction, hence the GPIO chip select); the receive buffer
+  is TWO deep with BUFOVF/IBON behaving per 32.6.2.7; loop-back through
+  the pad and nine-bit characters loop whole; all four modes x both
+  orders byte-exact both ways, a DORD mismatch an exact two-way bit
+  reversal; back-to-back characters (no gap - one engine request) bind
+  at the PEER'S POLLED TURNAROUND, not its CLK_PER/6 electrical ceiling
+  (exact to 500 kHz always, 1 MHz a measured coin toss - 4/10 runs -
+  2 MHz never: a 10 us byte against a 5..9 us loop). FOUR SUITE DEFECTS
+  FIXED BY HAND: a function-local static made MSSEN's letter flaky on
+  every second run; the 1.17.16 control read PCHCTRL.CHEN one
+  instruction after disconnect() and measured its own race (CHEN is
+  write-synchronized - the suite now waits, and clock.hpp's
+  fire-and-forget disconnect() is a caveat to know); the boundary
+  verdict claimed the peer's electrical ceiling where the binding limit
+  is its software turnaround; and THE PEER'S SELECT-WAIT WEDGE - about
+  once in five z-runs, persistent until board A reset, the peer's
+  exchange window spun on a select READ that never fired while its SPI
+  hardware demonstrably shifted (preloads + echo on the wire, the pad
+  reading LOW over SWD even in the wedged state's own status) -
+  NEUTRALIZED by making run_exchange poll RXC directly (the wait added
+  only the mechanism that failed; a byte can only arrive selected) with
+  the select kept as Report TELEMETRY (aux1..aux3) so a recurrence
+  names itself; the mechanism stays unhunted, an avrdx-side question
+  for an AVR bench. Family fixture + SEVEN negatives; gates: worktree
+  md5 33/35 byte-identical + the two declared build-id movers (2 and 4
+  bytes, same sizes), check_samc, check_family, host 24/24; canaries
+  test_samc_uart z 27/27 (sercom.hpp moved) and test_samc_dma z
+  112/112. Docs: spi.md NEW PROVISIONAL (gaps: DMA engines, sleep,
+  SSDE/address-match on silicon, 1.17.3's dummy, the wedge's cause),
+  sercom.md's SPI gap closed, bench.md's desk truth rewritten (the
+  seven-wire table, A = spi_peer, C = test_samc_spi). JUDGMENT CALLS
+  QUEUED - see memory samc-session-2026-08-31-spi. I2C (ch. 33) is
+  phase F's open half.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and

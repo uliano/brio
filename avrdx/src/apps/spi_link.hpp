@@ -72,6 +72,26 @@
 // the shared select wire never floats low while the host leaves its end
 // an input.
 //
+// THE ROLES INVERT: host_burst
+//
+// Every op above has the instrument as the bus CLIENT, because that is
+// what the AVR campaign needed: the DUT was the host. A DUT whose own
+// CLIENT half must be exercised needs the opposite, and there is no way
+// to get it from a client - SPI is host-clocked, so somebody has to
+// clock. `host_burst` is that somebody: after an ack and a stated
+// LEAD-IN (aux8 milliseconds, long enough for the DUT to reconfigure
+// itself as a client and preload its first answer), the instrument
+// becomes the bus HOST, drives the shared select wire low from its own
+// SS pin as an ordinary chip select, clocks `count` characters of the
+// seed_a stream while reading the DUT's seed_b stream back, releases the
+// wire and restores the DARK client by itself. Its Report carries what
+// it READ - i.e. the DUT's answers - so the burst is judged
+// independently at both ends, exactly as an exchange is.
+//
+// Nothing about the other ops moves: an instrument that does not know
+// this op drops it in silence like any other unknown one, which is what
+// makes the addition safe for firmware that predates it.
+//
 // THE RECOVERY GUARANTEE
 //
 // Every action op carries a frame count and a millisecond deadline; the
@@ -140,6 +160,7 @@ enum class Op : uint8_t {
     sink_slow = 0x11,   ///< receive without draining: the loss semantics
     ss_pulse = 0x12,    ///< drive the shared SS wire low from PORT (a real demotion)
     mspi = 0x13,        ///< self-selected client against the DUT's USART Host SPI
+    host_burst = 0x14,  ///< THE ROLES INVERT: the instrument becomes the bus HOST
 
     ack = 0x40,
     nak = 0x41,
@@ -160,7 +181,8 @@ constexpr bool is_command(Op op) {
         case Op::exchange:
         case Op::sink_slow:
         case Op::ss_pulse:
-        case Op::mspi: return true;
+        case Op::mspi:
+        case Op::host_burst: return true;
         default: return false;
     }
 }
@@ -356,6 +378,15 @@ inline constexpr uint8_t wrcol_marker = 0x3C;
 ///              deadline, cfg = the regime whose loss is being measured
 ///   ss_pulse   aux8 = milliseconds to wait after the ack window before
 ///              taking the wire, aux16 = microseconds to hold SS low
+///   host_burst THE ROLES INVERT - see below. count = characters the
+///              INSTRUMENT clocks as HOST, ms = deadline, seed_a = the
+///              stream the instrument SENDS, seed_b = the stream it
+///              EXPECTS BACK from the DUT (now the client), pattern for
+///              both; cfg.mode/cfg.dord are what the INSTRUMENT runs as
+///              host and cfg.regime is unused; aux8 = the LEAD-IN in
+///              milliseconds before the burst starts, and aux16 = the
+///              instrument's SCK division of its own CLK_PER (4, 8, 16,
+///              32, 64 or 128; 0 means 32)
 ///   mspi       count/ms/seeds/pattern as for exchange; cfg.mode mirrors
 ///              the host's UCPHA (bit 0) and the SCK inversion its
 ///              PORT.INVEN puts on XCK (bit 1), cfg.dord its UDORD;
@@ -448,7 +479,12 @@ inline constexpr uint8_t report_bufovf = 0x10;      ///< BUFOVF was seen (buffer
 /// What the client saw while it was not in command mode. The four `aux`
 /// bytes are per-op raw evidence:
 ///
-///   exchange   aux0 = INTFLAGS at the end of the burst
+///   exchange   aux0 = INTFLAGS at the end of the burst, aux1 = ms from
+///              the window opening to the FIRST received byte (255 =
+///              none came), aux2 = select-pin telemetry (bit0: the
+///              select read low at that first byte; bit1: it read low
+///              at least once in the window), aux3 = INTFLAGS right
+///              after the preloads
 ///   mspi       aux0 = INTFLAGS at the end of the burst
 ///   sink_slow  count = bytes still RETAINED when the burst was over,
 ///              sum = the OR of every INTFLAGS sampled DURING it (a flag

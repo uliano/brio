@@ -10,9 +10,11 @@
 // three buffering regimes; a client that never drains, so the loss
 // semantics can be measured; a second driver on the shared select wire,
 // which is the only way to demote a real host; a client for the USART's
-// own Host SPI mode. Every action carries a byte count and a
-// millisecond deadline, after which the peer restores its dark
-// command-mode client BY ITSELF.
+// own Host SPI mode; and - for a DUT whose own CLIENT half needs
+// exercising - the bus HOST itself, clocking a bounded burst after a
+// stated lead-in (spilink::Op::host_burst). Every action carries a byte
+// count and a millisecond deadline, after which the peer restores its
+// dark command-mode client BY ITSELF.
 //
 // THE DARK LISTENER - the one thing to understand before touching this
 // file. The four wires are PORTE straight through (A.PEn - B.PEn), and
@@ -281,16 +283,41 @@ spilink::Report run_exchange(const spilink::Params& a) {
     // into the transmit buffer and the shifter's leftover leads.
     Raw::write(s.out.next());
     if (bufwr) Raw::write(s.out.next());
+    r.aux3 = Raw::flags();   // INTFLAGS right after the preloads
 
+    // NO WAIT-FOR-SELECT. This loop used to spin on Client::selected()
+    // before counting, and that wait is where a RARE WEDGE lived: a
+    // state (entered about once in five z-runs of the SAM campaign,
+    // persistent until this board resets) in which the select READ
+    // never fires while the SPI hardware demonstrably shifts - the host
+    // read the preloads above and then the echo, this loop read nothing
+    // and burned its whole window. The wait added nothing the poll
+    // cannot give: apply_cfg() just re-initialized the client, so the
+    // buffers hold no stale bytes, and a byte can only ARRIVE while the
+    // host holds the select low - polling RXC is therefore the same
+    // "wait for the burst" with one less mechanism in the loop.
+    // selected() is still SAMPLED, as telemetry: aux1 carries the
+    // milliseconds to the first received byte (255 = none came), aux2
+    // bit0 whether the select read true at that byte, bit1 whether it
+    // read true at any point of the window - so if the wedge's cause
+    // ever surfaces again, the report itself says what the select pin
+    // was doing.
     const uint32_t t0 = Ticker::millis();
-    while (!Client::selected() && Ticker::millis() - t0 < a.ms) {
-    }
+    bool any_selected = false;
+    r.aux1 = 255;
     const bool cpol_idle = spi_cpol(mode_of(a.cfg.mode));
     const bool collide = !buffered && (a.flags & spilink::flag_wrcol) != 0;
     bool skipped = false;
     while (r.count < a.count && Ticker::millis() - t0 < a.ms) {
+        const bool sel_now = Client::selected();
+        any_selected = any_selected || sel_now;
         const auto v = Raw::poll();
         if (!v) continue;
+        if (r.aux1 == 255) {
+            const uint32_t dt = Ticker::millis() - t0;
+            r.aux1 = dt > 254u ? 254u : static_cast<uint8_t>(dt);
+            if (sel_now) r.aux2 |= 0x01;
+        }
         const uint16_t i = r.count;             // the byte just received
         const uint8_t want = s.next_expected();
         if ((a.flags & spilink::flag_skip_write) != 0 && !skipped &&
@@ -330,6 +357,7 @@ spilink::Report run_exchange(const spilink::Params& a) {
     }
     if (r.count < a.count) r.flags |= spilink::report_timed_out;
     r.aux0 = Raw::flags();
+    if (any_selected) r.aux2 |= 0x02;
     if (!buffered && Raw::write_collision()) r.flags |= spilink::report_wrcol;
     if (buffered && Raw::overflow_flag()) r.flags |= spilink::report_bufovf;
     return r;
@@ -404,6 +432,89 @@ spilink::Report run_ss_pulse(const spilink::Params& a) {
     hold_ss_up();
     r.aux0 = 1;
     r.count = 1;
+    return r;
+}
+
+/// THE ROLES INVERT: this end becomes the bus HOST for a bounded burst,
+/// so that a DUT's own CLIENT half can be exercised at all. SPI is
+/// host-clocked and a client cannot clock, so somebody has to - and
+/// there is nobody else on this wire.
+///
+/// The choreography is the LEAD-IN and nothing cleverer: the ack for
+/// this command has already been served, so both boards are counting the
+/// same milliseconds, and at the end of them the DUT is a client with
+/// its first answer preloaded and this end starts clocking. The select
+/// wire is driven low from THIS board's SS pin for the whole burst -
+/// which is what makes the burst one transaction, the thing hardware SS
+/// control could not give either side.
+///
+/// The Report carries what this end READ, i.e. the DUT's answers
+/// (seed_b), while the DUT checks what it received against seed_a. Two
+/// independent judgements of one burst, exactly as an exchange has.
+spilink::Report run_host_burst(const spilink::Params& a) {
+    spilink::Report r{};
+    const uint8_t cpu = cycles_per_us(SysClock::hz);
+
+    // Hand the SPI back first: the role is a whole re-init, and the
+    // select wire must stay HIGH (this board's own pull-up) while the
+    // pins change hands.
+    Raw::release();
+    hold_ss_up();
+
+    const uint32_t lead = a.aux8 ? a.aux8 : 20u;
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < lead) {
+    }
+
+    const uint16_t div = a.aux16 ? a.aux16 : spilink::command_division;
+    SpiClock rate = SpiClock::div32;
+    switch (div) {
+        case 4: rate = SpiClock::div4; break;
+        case 8: rate = SpiClock::div8; break;
+        case 16: rate = SpiClock::div16; break;
+        case 64: rate = SpiClock::div64; break;
+        case 128: rate = SpiClock::div128; break;
+        default: rate = SpiClock::div32; break;
+    }
+
+    if (!Raw::init({.route = SpiRoute::alt1,
+                    .role = SpiRole::host,
+                    .mode = mode_of(a.cfg.mode),
+                    .clock = rate,
+                    .lsb_first = a.cfg.dord != 0,
+                    .client_select_disable = true})) {
+        r.flags |= spilink::report_cfg_failed;
+        (void)go_dark();
+        return r;
+    }
+
+    // The chip select, by hand: SSD = 1 leaves the pin to PORT, which is
+    // the same arrangement the DUT's own host uses.
+    SsPin::invert(false);
+    SsPin::pullup(false);
+    SsPin::set();
+    SsPin::output();
+    delay_us_runtime(cpu, 200u);
+
+    spilink::Stream out(a.pattern, a.seed_a);      // what THIS end sends
+    spilink::Stream want(a.pattern, a.seed_b);     // what the client owes
+
+    SsPin::clear();                                 // select, for the whole burst
+    delay_us_runtime(cpu, spilink::gap_us);
+    while (r.count < a.count && Ticker::millis() - t0 < lead + a.ms) {
+        const auto v = Raw::transfer(out.next(), 200'000u);
+        if (!v) break;
+        account(r, *v, want.next());
+        delay_us_runtime(cpu, spilink::gap_us);
+    }
+    SsPin::set();
+    r.aux0 = Raw::flags();
+    if (r.count < a.count) r.flags |= spilink::report_timed_out;
+
+    // Whatever happened, this board goes back to being the dark client
+    // and gives the select wire back to its own pull-up.
+    Raw::release();
+    (void)go_dark();
     return r;
 }
 
@@ -492,6 +603,7 @@ void handle(const spilink::Frame& f) {
         case Op::sink_slow: r = run_sink_slow(a); break;
         case Op::ss_pulse: r = run_ss_pulse(a); break;
         case Op::mspi: r = run_mspi(a); break;
+        case Op::host_burst: r = run_host_burst(a); break;
         default: r.flags |= spilink::report_cfg_failed; break;
     }
     if ((r.flags & spilink::report_cfg_failed) == 0) r.flags |= spilink::report_ran;

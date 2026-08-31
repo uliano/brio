@@ -21,8 +21,11 @@
  *
  * SCOPE, honestly. USART mode only, asynchronous, internal clock, 16x
  * ARITHMETIC oversampling - what a console needs, and no more. The
- * SERCOM's other three personalities (SPI host/client, I2C host/client)
- * are whole chapters of their own and get their own headers; inside
+ * SERCOM's other personalities are whole chapters of their own and get
+ * their own headers - SPI host/client is ch. 32 in samc/spi.hpp, which
+ * reaches the registers through Sercom<n>::spi_regs() and shares this
+ * class's per-instance facts (clocks, NVIC line, DMAC triggers); I2C
+ * host/client is ch. 33 and is not built. Inside
  * USART mode the fractional and 3x baud regimes, the synchronous role
  * with XCK, hardware handshaking (RTS/CTS), RS485/TE, LIN, IrDA,
  * collision detection, auto-baud, start-of-frame detection and the DMA
@@ -435,25 +438,48 @@ public:
 
     // ---- where this instance lives ---------------------------------------
 
-    static sercom_usart_int_registers_t& regs() {
-        if constexpr (n == 0) return SERCOM0_REGS->USART_INT;
+    /**
+     * The instance itself - the UNION of the SERCOM's four personalities
+     * (the device header's `sercom_registers_t`: I2CM, I2CS, SPIS, SPIM,
+     * USART_EXT, USART_INT at one address).
+     *
+     * The address ladder lives here, once, and each personality's header
+     * picks its own member off it: this file takes USART_INT below,
+     * samc/spi.hpp takes SPIM. Everything that is a fact of the INSTANCE
+     * rather than of a mode - the two clocks, the NVIC line, the DMAC
+     * trigger codes - stays a member of this class and is shared by all
+     * of them, which is what keeps a second personality from becoming a
+     * second source of truth about which channel SERCOM5 is on.
+     */
+    static sercom_registers_t& instance() {
+        if constexpr (n == 0) return *SERCOM0_REGS;
 #if defined(SERCOM1_REGS)
-        else if constexpr (n == 1) return SERCOM1_REGS->USART_INT;
+        else if constexpr (n == 1) return *SERCOM1_REGS;
 #endif
 #if defined(SERCOM2_REGS)
-        else if constexpr (n == 2) return SERCOM2_REGS->USART_INT;
+        else if constexpr (n == 2) return *SERCOM2_REGS;
 #endif
 #if defined(SERCOM3_REGS)
-        else if constexpr (n == 3) return SERCOM3_REGS->USART_INT;
+        else if constexpr (n == 3) return *SERCOM3_REGS;
 #endif
 #if defined(SERCOM4_REGS)
-        else if constexpr (n == 4) return SERCOM4_REGS->USART_INT;
+        else if constexpr (n == 4) return *SERCOM4_REGS;
 #endif
 #if defined(SERCOM5_REGS)
-        else if constexpr (n == 5) return SERCOM5_REGS->USART_INT;
+        else if constexpr (n == 5) return *SERCOM5_REGS;
 #endif
-        else return SERCOM0_REGS->USART_INT;
+        else return *SERCOM0_REGS;
     }
+
+    static sercom_usart_int_registers_t& regs() { return instance().USART_INT; }
+
+    /// The same instance seen as an SPI HOST register set - the view
+    /// samc/spi.hpp works through. SPIM and SPIS have IDENTICAL layouts
+    /// in this device header (the same offsets, the same field positions
+    /// under two name prefixes), so ONE view serves both roles and the
+    /// role is CTRLA.MODE and nothing else; spi.hpp static_asserts that
+    /// agreement rather than trusting it.
+    static sercom_spim_registers_t& spi_regs() { return instance().SPIM; }
 
     /// The GCLK peripheral channel that feeds this instance's core
     /// clock. NOT a formula: the device header gives SERCOM0..4 the

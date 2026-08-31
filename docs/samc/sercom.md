@@ -3,11 +3,13 @@
 > **PROVISIONAL.** The asynchronous, internal-clock, 16x-arithmetic
 > USART is implemented and bench-verified end to end - the console
 > personality - including the two OPTIONAL DMA engines (transmit and
-> receive, each compiling to zero when not named). The SERCOM's other
-> three personalities (SPI host and client, I2C host and client) and
-> the USART chapter's own long tail (fractional baud, synchronous
-> mode, handshaking, LIN, IrDA, auto-baud) are declared, not built.
-> The list is in "Not covered yet".
+> receive, each compiling to zero when not named). The SPI personality
+> (host and client) is BUILT and lives in its own header and page
+> ([spi.md](spi.md)); it reaches the registers through
+> `Sercom<n>::spi_regs()` and shares this class's per-instance facts.
+> The I2C personality and the USART chapter's own long tail (fractional
+> baud, synchronous mode, handshaking, LIN, IrDA, auto-baud) are
+> declared, not built. The list is in "Not covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M - SERCOM
 common ch. 30 (the baud generator, 30.6.2.3 table 30-2), USART
@@ -351,7 +353,8 @@ a CH340 bridge between the pads and the PC - as much as of the driver.
 ## Not covered yet
 
 Driver gaps (not built):
-- The SPI and I2C personalities - their own future drivers.
+- The I2C personality - its own future driver (the SPI one exists:
+  [spi.md](spi.md)).
 - A BULK RECEIVE PATH THAT PACES ITSELF. `read_bulk()` exists, but the
   RX engine only publishes what `harvest()` takes, and how often to call
   it is left entirely to the port owner - which at 3 Mbaud means every
