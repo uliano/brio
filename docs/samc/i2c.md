@@ -1,0 +1,228 @@
+# SERCOM I2C (SAM C21)
+
+> **PROVISIONAL.** Both register sets are built, the HOST role is
+> bench-verified end to end against a real second board and util's bus
+> vocabulary runs over it unchanged; the CLIENT role is verified at the
+> register level and against a bit-banged host, and DECLINED against a
+> full-speed foreign host on this desk's wire - the whole story is in
+> the findings, and the gaps in "Not covered yet".
+
+Documents of record: SAM C20/C21 data sheet DS60001479M ch. 33 (over
+the shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
+`samc/i2c.hpp` over `Sercom<n>`'s instance facts (sercom.md owns the
+address ladder; this campaign added `i2cm_regs()`/`i2cs_regs()` and
+`gclk_slow_id()` beside the SPI view). Family fixture
+`test/family_samc/i2c.cpp` + six negatives; bench suite `test_samc_i2c`
+(10 letters, 39 verdicts, two-board: board A runs `twi_peer`, commanded
+in band over the bus under test with the AVR campaign's own
+`twi_link.hpp` - one source file, two architectures).
+
+## THE HEADLINE: this peripheral has no input filter, and a wire can
+## make that matter
+
+The C21's I2C logic - the host's bus monitor and the client's
+Start/Stop/address machinery alike - samples SDA and SCL on
+GCLK_SERCOMx_CORE with NO glitch filter. The AVR's TWI filters its
+inputs (its SMBus-grade suppression is why the AVR campaign ran this
+very node at 1 MHz); the C21 believes every nanosecond of the wire.
+On a clean short bus that is free speed. On THIS desk - the I2C pair
+rides a SEVEN-WIRE BUNDLE between the boards - per-edge crosstalk
+(~100 ns class, SCL's driven edges coupling into the released SDA)
+reads as false Start/Stop conditions, and the consequences were
+measured from three sides:
+
+- **The host's glitch wall is a CORE-RATE wall, not an SCL wall.** A
+  hand-driven tenure (SWD only, no driver code in the loop) dies with
+  BUSERR+ARBLOST on its FIRST address at 48, 24 and 12 MHz core - at
+  every SCL rate tried, including 25 kHz - while a 6 MHz core is clean
+  six-for-six at SCL 400 kHz, and at a 32 kHz core the whole address
+  was watched crossing the wire pin by pin and the peer ACKed it. Same
+  registers, same wire, only the sampling rate moved: the fine core
+  SEES the glitches, the coarse one steps over them.
+- **The suite therefore runs SERCOM3's core from generator 6 = OSC48M/8
+  = 6 MHz** - a notch above its top SCL and no more - and `I2cHost`
+  grew the two knobs that make that expressible: the `generator`
+  template argument (which the driver already had) and `init(clock,
+  rise_ns, core_hz)`'s stated core rate (the freqm reference_hz
+  pattern: a divided generator's rate is the caller's claim). Fm+
+  (1 MHz) needs a 12 MHz core and is therefore UNREACHABLE on this
+  desk: `speed_ok()` says so and a Request naming it is answered
+  `i2c_rejected` without moving a byte - never run slow in silence.
+- **The client cannot dodge the wall by slowing down, because it does
+  not own the edges.** As a CLIENT the same silicon matched a
+  bit-banged address (seconds per edge, driven from the AVR's PORT over
+  UPDI) perfectly - AMATCH up, SCL stretched, registers identical to
+  the failing case - and stayed DEAF to the peer's real 100 kHz host at
+  BOTH 6 and 48 MHz core, while that host read a clean address NACK
+  (MSTATUS 0x72, the AVR campaign's own nobody-home signature). A
+  client must follow foreign edges wherever they land; per-edge
+  glitches reset its machinery every time. THE FIX IS THE WIRE: take
+  the I2C pair out of the bundle (short, separated, or twisted with
+  ground). Until then the suite's client letter DECLINES its data
+  verdicts and says why.
+
+## What the silicon does
+
+**Two register sets, really different.** Unlike the SPI's SPIM/SPIS
+pair, I2CM and I2CS differ at the same offsets (the client has no BAUD
+and no bus state; AMATCH/DRDY/PREC against MB/SB; different STATUS
+bits) - so `samc/i2c.hpp` carries TWO resources, `I2cm<n>` and
+`I2cs<n>`, and the role picks which one speaks the truth.
+
+**The host's third SYNCBUSY bit.** Beside SWRST and ENABLE the host
+has SYSOP, raised by writing CTRLB.CMD, STATUS.BUSSTATE, ADDR or DATA
+while enabled (33.6.6). Every such store in the driver WAITS FIRST
+(the sdadc discipline).
+
+**The bus state machine and its exits.** A freshly enabled host is
+UNKNOWN and leaves it by a Stop, by the INACTOUT time-out, or by
+software forcing IDLE (33.6.2.3). Measured: with no time-out the state
+sits in UNKNOWN until `force_idle()`; whether INACTOUT walks it out BY
+ITSELF came out BOTH WAYS on this bench (IDLE on one run, still
+UNKNOWN on the next, same code) - the suite records the observation
+and relies on `force_idle()`, which the engine's init always spends.
+
+**MB/SB hold SCL.** Both host flags stretch the clock until software
+answers with DATA, ADDR, a command or a flag clear - unlimited time to
+respond, the AVR TWI's own design. STATUS.CLKHOLD says so, and ERRATUM
+1.17.8 (live) makes that bit WRITABLE against the datasheet - writing
+it corrupts the clock hold, so both resources' W1C masks exclude bit 7
+BY CONSTRUCTION (`I2cmStatus::w1c_all` / `I2csStatus::w1c_all` cannot
+express it).
+
+**One wire fault raises MB AND ERROR together** (measured, the hard
+way: the engine's first ISR consumed MB, left ERROR standing, and the
+level stormed the vector with main starved - caught by halt-and-dump,
+IPSR = the SERCOM's IRQ, INTFLAG = 0x80). The engine's every exit now
+sweeps all flags and W1C statuses (`finish()`), and a flag arriving
+with no tenure in flight is swept by the idle guard rather than
+returned to.
+
+**A tenure into a busy bus parks in hardware.** Writing ADDR while
+another agent holds the wire parks the START until the bus idles
+(33.6.2.4.2) - the AVR's held-START behaviour, met from the second
+architecture. Measured with the peer pinning SDA low: the bus reads
+BUSY for the hold's whole length and not one byte moves; ON THIS
+SILICON the parked START did NOT fire when the hold released (the
+phantom Start keeps the state machine BUSY and even the configured
+INACTOUT did not walk it back) - recovery took the engine's own
+re-init. The suite's timeline print is the record.
+
+**Writing ADDR is the clear ceremony.** BUSERR, ARBLOST, LENERR and
+the time-out statuses auto-clear on the next tenure's ADDR write
+(33.10.7), which is why the engine starts a tenure with no ceremony.
+
+**Erratum 1.17.16 NOT REPRODUCED in I2C mode either**: SWRST from the
+disabled state reset the block with its synchronization completing
+(0x30200014 -> 0), matching the SPI-mode measurement. The enable-first
+discipline is kept in both resources - the sheet marks every revision
+and the cost is one enable.
+
+**The rest of the errata as code.** 1.17.10 (10-bit client addressing
+dead): `I2csConfig` has no ten-bit knob at all. 1.17.11 (client error
+bits not cleared with AMATCH): `I2cs::clear_errors()` writes them by
+hand and `answer_address()` spends it on every match. 1.17.13 (quick
+command + SCLSM=1 = bus error): the pair is refused at compile and run
+time. 1.17.21 (AACKEN broken on repeated start): no AACKEN knob - an
+AMATCH handler is the workaround's own prescription and `I2cClient` IS
+one. 1.17.22 (client RXNACK invalid at the first DRDY): the software
+flag the workaround prescribes is `I2cClient::first_drdy()`, armed by
+the acknowledged AMATCH. 1.17.6/7/9 (repeated starts in 10-bit and
+High-speed): the engine's only repeated start is the 7-bit
+write-to-read turn, which none of them touches; HS itself is refused
+by `i2cm_config_valid()` (both its repeated-start halves are broken
+with no workaround, and no bench wire here could carry 3.4 MHz).
+
+## Types and verbs
+
+- **`I2cm<n>` / `I2cs<n>`** - the two resources: full register
+  surfaces, enable-protected configuration written disabled, bounded
+  synchronization waits, the SYSOP discipline (host), the CLKHOLD-free
+  W1C masks, `force_idle()`, the erratum sweeps.
+- **`i2c_baud_for(gclk_hz, scl_hz, rise_ns, fast_plus)`** - the
+  chapter's own formula solved for BAUD/BAUDLOW, the RISE TIME an
+  argument exactly as on the AVR (a budget that ignores it lands T_LOW
+  under the specification floor), the Fm+ 1:2 split per the chapter's
+  note, rounding that never lands above the request, and
+  `i2c_scl_hz()` as the readback. Pinned by static_asserts.
+- **`I2cHost<n, pads, generator>`** - the engine `util/i2c_bus.hpp`
+  (= BusMaster) drives: the avrdx TwiHost Request verbatim ({addr, tx,
+  tx_len, rx, rx_len, ReplyTo<I2cDone>, speed}; one tenure = write,
+  read, or write-then-read on a repeated START; the empty request is
+  the address probe), ALWAYS asynchronous, one interrupt per byte
+  (MB/SB), the i2c_* status vocabulary on the wire
+  (nack_addr/nack_data/arb_lost/bus_error), per-speed register pairs
+  cached with `speed_ok()` and the refused-not-slowed rule, and
+  `unstick()` - nine open-drain pulses and a Stop by hand, the avrdx
+  verb's twin, which leaves a HEALTHY wire untouched (SDA read first;
+  zero pulses is the answer and the action).
+- **`I2cClient<n, pads, generator>`** - the polled surface plus the ISR
+  body (the SpiClient position: a client is a protocol and the
+  protocol is the application's), with the erratum discipline built
+  in: `answer_address()` sweeps 1.17.11's leftovers and arms
+  1.17.22's `first_drdy()` gate; `take()`/`give()` ride CTRLB.CMD 0x3
+  with the acknowledge action.
+
+## How to use
+
+    using I2cHw = brio::I2cHost<3, my_pads>;          // generator 0 on a clean wire
+    using I2c = brio::I2cBus<I2cHw, P>;
+    // main: I2cHw::init(clock, measured_rise_ns); kernel.init_all(); ...
+    extern "C" void SERCOM3_Handler() {
+        if (I2cHw::isr()) { brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
+    }
+    // from an AO: {addr, tx spans as lend<Lease::reply>(...), rx, reply,
+    // speed} posted to I2c; the I2cDone reply carries i2c_ok or the
+    // wire's own answer (i2c_nack_addr is the address-scanner's probe
+    // result).
+
+## Bench findings (beyond the headline)
+
+- The command channel itself is the proof of the host: every twi_link
+  command is TWO tenures of the engine under test (a write carrying
+  the frame, a read collecting the answer), and letters b..k ran
+  hundreds of them.
+- The tenure shapes: write, read and write-then-read all i2c_ok; the
+  peer saw the combined tenure as TWO address matches on one tenure
+  (the repeated start from the client's side) and accounted all 24
+  bytes; a GENERAL CALL write reached the peer at address 0x00.
+- The vocabulary on the wire: a deaf peer answers the write AND the
+  empty probe with i2c_nack_addr; a commanded NACK on the 3rd data
+  byte comes back i2c_nack_data with the peer's own report_nacked
+  beside it.
+- Clock stretching is flow control: a client holding every data byte
+  2 ms stretched an 8-byte tenure to exactly 16 ms, data intact,
+  i2c_ok.
+- The speeds: 25 tenures x 16 bytes in 41 ms at 100 kHz and 14 ms at
+  400 kHz (the peer's polled turnaround rides on top of the divisor -
+  the AVR campaign's own pacing, seen from the other side).
+- unstick(): 0 pulses on a healthy wire (and no pulses SPENT - the
+  early SDA read is the fix the first version needed), exactly 4
+  against the peer releasing on the 4th falling edge, the AVR twin's
+  own number.
+- THE KERNEL LETTER: four tenures queued in one dispatch came back
+  through their own ReplyTo in order over the real wire, the one aimed
+  at an empty address answered i2c_nack_addr IN ITS PLACE; an
+  over-full arbiter rejected immediately; an idle bus voted ok on
+  PrepareSleep and a busy one refused - NOT ONE LINE of
+  util/i2c_bus.hpp, util/bus_master.hpp or kernel/ changed. The bus
+  vocabulary now has its cross-architecture proof on BOTH buses.
+
+## Not covered yet
+
+- THE CLIENT AGAINST A FULL-SPEED FOREIGN HOST: declined on this desk
+  (the headline). The letter tightens back into its three data
+  verdicts the day the I2C pair leaves the bundle.
+- Multi-host arbitration with both hosts LIVE (the AVR campaign's
+  deterministic race needed a third tap this desk does not have; the
+  parked-START and the ARBLOST/BUSERR classification are measured, a
+  real two-host collision is not).
+- The SMBus time-outs on silicon (LOWTOUT/SEXT/MEXT are surface +
+  config; they count the SHARED GCLK_SERCOM_SLOW channel at
+  32.768 kHz, which no letter routes to a 32 kHz source yet).
+- Smart mode and quick command on silicon; DMA (the trigger codes are
+  published; engines wait for a user); 4-wire PINOUT; High-speed mode
+  (refused - errata); 10-bit HOST addressing (register surface only);
+  sleep/RUNSTDBY (the power pass owns the address-match wake).
+- `SercomPadPin`'s pin-reaches-pad claim and table 6-7's I2C-capable
+  list both remain the caller's stated obligations.

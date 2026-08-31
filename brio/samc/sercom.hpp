@@ -481,6 +481,42 @@ public:
     /// agreement rather than trusting it.
     static sercom_spim_registers_t& spi_regs() { return instance().SPIM; }
 
+    /// The instance seen as an I2C HOST and as an I2C CLIENT - the two
+    /// views samc/i2c.hpp works through. UNLIKE the SPI pair these are
+    /// genuinely DIFFERENT register sets (the client has no BAUD and no
+    /// bus state, the host no AMATCH machinery; STATUS and INTFLAG carry
+    /// different bits at the same offsets), so both views exist and the
+    /// role decides which one speaks the truth.
+    static sercom_i2cm_registers_t& i2cm_regs() { return instance().I2CM; }
+    static sercom_i2cs_registers_t& i2cs_regs() { return instance().I2CS; }
+
+    /// The GCLK peripheral channel feeding this instance's SLOW clock -
+    /// the one the I2C's three SMBus time-outs count on (33.6.3.1: it
+    /// must run at 32.768 kHz). IT IS SHARED: SERCOM0..4 all sit on
+    /// channel 18 and only SERCOM5 has its own (24), so routing it for
+    /// one instance's time-outs routes it for every colleague's - a fact
+    /// of the clock tree, stated here because this accessor is where a
+    /// caller finds the channel.
+    static constexpr uint8_t gclk_slow_id() {
+        if constexpr (n == 0) return SERCOM0_GCLK_ID_SLOW;
+#if defined(SERCOM1_REGS)
+        else if constexpr (n == 1) return SERCOM1_GCLK_ID_SLOW;
+#endif
+#if defined(SERCOM2_REGS)
+        else if constexpr (n == 2) return SERCOM2_GCLK_ID_SLOW;
+#endif
+#if defined(SERCOM3_REGS)
+        else if constexpr (n == 3) return SERCOM3_GCLK_ID_SLOW;
+#endif
+#if defined(SERCOM4_REGS)
+        else if constexpr (n == 4) return SERCOM4_GCLK_ID_SLOW;
+#endif
+#if defined(SERCOM5_REGS)
+        else if constexpr (n == 5) return SERCOM5_GCLK_ID_SLOW;
+#endif
+        else return SERCOM0_GCLK_ID_SLOW;
+    }
+
     /// The GCLK peripheral channel that feeds this instance's core
     /// clock. NOT a formula: the device header gives SERCOM0..4 the
     /// channels 19..23 but SERCOM5 the channel 25 (24 being its own

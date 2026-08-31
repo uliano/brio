@@ -2167,6 +2167,80 @@ gets its dated home in `docs/design/` when taken.
   seven-wire table, A = spi_peer, C = test_samc_spi). JUDGMENT CALLS
   QUEUED - see memory samc-session-2026-08-31-spi. I2C (ch. 33) is
   phase F's open half.
+  **SERCOM I2C DONE 2026-08-31 (PHASE F CLOSED - BY FABLE'S OWN HAND,
+  same day as the SPI half). COMMITTED.** samc/i2c.hpp NEW: ch. 33 as
+  TWO resources, because unlike the SPI's views I2CM and I2CS really
+  differ - I2cm<n> (bus state machine, the THIRD SYNCBUSY bit SYSOP
+  with the wait-before-store discipline, force_idle as the dependable
+  UNKNOWN exit, BAUD with the chapter's rise-time arithmetic solved
+  both ways and pinned by static_asserts, Fm+ split 1:2 per the note)
+  and I2cs<n> (AMATCH/DRDY/PREC, the three address modes, GENCEN) -
+  plus I2cHost (the avrdx TwiHost Request VERBATIM, always
+  asynchronous, one interrupt per byte, the i2c_* vocabulary produced
+  ON THE WIRE, per-speed cached register pairs with speed_ok() and the
+  refused-never-slowed rule, and unstick() - the avrdx verb's twin
+  that now leaves a healthy wire untouched) and I2cClient (the
+  erratum discipline built in: answer_address() sweeps 1.17.11's
+  leftovers and arms 1.17.22's first_drdy() gate). Errata as code:
+  1.17.8 - the W1C masks CANNOT NAME CLKHOLD by construction; 1.17.10
+  - no ten-bit client knob exists; 1.17.13 refused both ways; 1.17.21
+  - no AACKEN knob (the workaround IS an AMATCH handler and I2cClient
+  is one); 1.17.16 NOT REPRODUCED in I2C mode either; HS refused
+  (1.17.7/9 break its repeated starts with no workaround). sercom.hpp
+  grew i2cm_regs()/i2cs_regs()/gclk_slow_id() additively. NEW SUITE
+  test_samc_i2c z 39/39 FIVE TIMES incl. cold, 10 letters, every
+  command itself TWO tenures of the engine under test (twi_link
+  included by relative path, the spi_link ruling). THE CAMPAIGN'S
+  HEADLINE IS A WIRE FINDING WITH A LADDER: the C21's I2C - host
+  monitor AND client machinery - samples the wire on GCLK_CORE with NO
+  input filter, and the phase F seven-wire bundle's per-edge crosstalk
+  (~100 ns) reads as false Starts/Stops: a hand-driven SWD tenure dies
+  BUSERR+ARBLOST at 48/24/12 MHz core AT EVERY SCL RATE, is clean
+  six-for-six at 6 MHz, and at a 32 kHz core the address was WATCHED
+  crossing the wire and the peer ACKed - so the suite runs the core
+  from generator 6 (OSC48M/8) and I2cHost::init gained the stated
+  core_hz (the freqm reference_hz pattern), with Fm+ therefore
+  unreachable-and-refused on this desk; the CLIENT, which cannot slow
+  edges it does not own, matched a bit-banged address perfectly
+  (AMATCH + stretch, registers identical) and stayed DEAF to the
+  peer's real 100 kHz at BOTH 6 and 48 MHz core while that host read
+  the AVR campaign's own nobody-home signature (MSTATUS 0x72) - the
+  client letter DECLINES its data verdicts with the finding printed
+  (the TC-1.20.2 precedent) and the standing fix is PHYSICAL: take the
+  I2C pair out of the bundle. The AVR's filtered TWI ran this very
+  node at 1 MHz - the filter, not the wire, was the difference all
+  along. ALSO MEASURED: one wire fault raises MB AND ERROR TOGETHER
+  and the engine's first version left the second standing - an ISR
+  storm caught by halt-and-dump (IPSR = the SERCOM's IRQ, main
+  starved), now structurally over (finish() sweeps every exit, the
+  idle guard sweeps stray levels); a tenure into a held-low wire PARKS
+  (BUSSTATE busy for the hold's whole length, not a byte moved) and ON
+  THIS SILICON the parked START does NOT fire when the phantom-Start
+  hold releases - recovery is the engine's re-init, the suite prints
+  the timeline; whether INACTOUT walks UNKNOWN->IDLE by itself came
+  out BOTH WAYS (recorded, not judged; force_idle is the dependable
+  exit); the repeated start of a write-then-read tenure is TWO address
+  matches from the client's side (addr_hits 4 for 2 combined tenures);
+  commanded 2 ms/byte stretching = exactly 16 ms for 8 bytes, data
+  intact; deaf peer answers write AND empty probe i2c_nack_addr, a
+  commanded 3rd-byte refusal answers i2c_nack_data; unstick 0 clean /
+  4 at the peer's 4th-edge release; the kernel letter ran I2cBus (=
+  BusMaster) over the REAL wire - ordered replies, the NACK delivered
+  IN ITS PLACE as a reply, immediate rejection, both sleep votes - so
+  BOTH bus vocabularies now hold cross-architecture WITH NOT ONE LINE
+  of util/ or kernel/ changed. Suite-craft paid for: a serve ended by
+  exact count cuts a combined tenure in half (deadline + settle is the
+  clean instrument exit); a mid-letter peer_act under a kernel-mode
+  handler starves the bare spin wrapper (one serve per letter);
+  tenure()'s deadline path re-inits the engine so no letter inherits a
+  parked START. Family fixture + SIX negatives; gates: worktree md5
+  34/36 byte-identical + the two declared build-id movers (the
+  identity of every pre-existing image doubling as the sercom.hpp
+  canary), check_samc, check_family, host 24/24. Docs: i2c.md NEW with
+  the headline, sercom.md's I2C gap closed, bench.md's bundle finding
+  + suite row. JUDGMENT CALLS QUEUED - see memory
+  samc-session-2026-08-31-i2c. PHASE F IS CLOSED; of the whole SAM
+  plan only CAN (a second C21) remains.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and
