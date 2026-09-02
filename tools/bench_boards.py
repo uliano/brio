@@ -66,8 +66,10 @@
 #  below is the label this desk position is EXPECTED to carry - the human
 #  (or a future bench.py check) compares banner against manifest.
 #
-#  TODAY'S REALITY (2026-09-02): the desk is TWO SAM C21 boards behind a
-#  USB hub - positions C and D, one Atmel-ICE each, no jumper wires yet.
+#  TODAY'S REALITY (2026-09-02): the desk is TWO SAM C21 boards -
+#  positions C and D, one Atmel-ICE each on the PC's own USB ports
+#  (the hub desyncs their bulk transport under load - docs/bench.md),
+#  their CH340 consoles behind the hub, the five-wire SPI link fitted.
 #  Both AVR boards are unplugged; A and B are kept because an entry is a
 #  desk position, not a cable. NOTE that both ICE serials now appear on
 #  SAM positions while A's and B's entries still name them - the probes

@@ -85,17 +85,21 @@ holds for both except where a board is named.
   GCLK_SERCOM_SLOW for the I2C SMBus time-outs, OSCULP32K
   cross-checks.
 - Firmware today: C = `spi_peer` (the samc port), D = `test_samc_spi`.
-- **THE HUB AND THE PROBES (2026-09-02, operational).** Behind the USB
-  hub the Atmel-ICEs' default usb_bulk CMSIS-DAP transport
-  desynchronizes by one packet under sustained traffic (every command
-  gets the previous command's answer; programming dies mid-flash), and
-  the state survives soft resets. `tools/bench.py` therefore drives
-  OpenOCD with `cmsis-dap backend hid` on every SAM invocation; a
-  wedged probe is recovered by two USBDEVFS_RESET ioctls five seconds
-  apart, or a replug. Flashing can still take retries on a bad day -
-  ALWAYS check for `** Verified OK **`, because a failed program leaves
-  a partly erased image that may still print another app's banner or
-  nothing at all.
+- **THE HUB AND THE PROBES (2026-09-02, operational).** The desk's USB
+  hub desynchronizes the Atmel-ICEs' default usb_bulk CMSIS-DAP
+  transport under sustained traffic (every command gets the previous
+  command's answer; programming dies mid-flash), and the state
+  survives soft resets - so THE TWO ICEs NOW SIT ON THE PC'S OWN
+  PORTS, only the CH340 consoles stay on the hub (they carry 115200
+  and do not care), and both probes flash first-try again. No manifest
+  edit was needed: probes are addressed by their own serial, consoles
+  by by-path, and only the latter is topology. `tools/bench.py` keeps
+  `cmsis-dap backend hid` on every OpenOCD invocation (measured no
+  worse anywhere, materially better behind a hub); a wedged probe is
+  recovered by two USBDEVFS_RESET ioctls five seconds apart, or a
+  replug. And the standing rule either way: ALWAYS check for
+  `** Verified OK **`, because a failed program leaves a partly erased
+  image that may still print another app's banner or nothing at all.
 
 ## Multi-board bench
 
