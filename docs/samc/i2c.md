@@ -240,9 +240,19 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   bus as the injector). The parked-START behaviour and the
   ARBLOST/BUSERR classification are measured; a live collision is not.
 - The SMBus time-outs on silicon (LOWTOUT/SEXT/MEXT are surface +
-  config; they count the SHARED GCLK_SERCOM_SLOW channel at
-  32.768 kHz). Board D's 32.768 kHz crystal (bench.md) is the
-  designated real source the letter would run XOSC32K against.
+  config; they count the SHARED GCLK_SERCOM_SLOW channel, whose rate
+  the counters assume is 32.768 kHz). AN INTERNAL 32 kHz ROOT
+  SUFFICES: the spec windows are watchdog-coarse (LOWTOUT 25..35 ms)
+  and the internal roots' measured errors (OSCULP32K ~+0.4%, a TRIMMED
+  OSC32K +6 per mille - untrimmed it is 44% fast, the one real trap)
+  are noise against them, with the 24 MHz crystal TC as the verifying
+  ruler as always. Board D's 32.768 kHz crystal is the OCCASION, not a
+  prerequisite: the same letter could bring up XOSC32K for real (the
+  driver's only unexercised source) and feed the time-outs from it,
+  two gaps on one run. NOTE the payoff either way: a verified LOWTOUT
+  is the HARDWARE answer to "BusMaster has no timeout" - a physically
+  hung bus becomes an ERROR flag the engine can turn into a reply
+  status, no software timer and no policy invented.
 - Smart mode and quick command on silicon; DMA (the trigger codes are
   published; engines wait for a user); 4-wire PINOUT; High-speed mode
   (refused - errata); 10-bit HOST addressing (register surface only);
