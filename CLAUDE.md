@@ -235,6 +235,21 @@ gets its dated home in `docs/design/` when taken.
   memory stm32g0-bringup-plan, BY FABLE'S OWN HAND in one session,
   from the plan to a console answering on the third architecture).**
   PHASE 4 DONE the same evening: the armv6m/ factoring (above).
+  PHASE 5 RUNNING autonomously the same night (the user away, their
+  instruction: everything the single board allows; Opus delegations
+  per chapter, Fable's brief, re-verification by hand and commit; the
+  campaign order and status live in memory stm32g0-peripheral-plan):
+  campaign 1 reset/IWDG/WWDG/breadcrumb/delay DONE (test_stm32_platform
+  z 53/53 + i 26/26 over six reboots; THE IWDG IS STOPPED BY THE RESET
+  IT CAUSES, its keyed registers do not update until started, LSI
+  32536 Hz, the EWI interrupt needs WDGA); campaign 2 FLASH DONE
+  (flash.hpp grown to ch. 3 bar the one-way writes, BANK 2 = the storage
+  attic with the ld narrowed to bank 1, NvHeap + NvJournal UNCHANGED on
+  their third silicon at 2048/8: test_stm32_nvm z 85/85, test_stm32_
+  journal z 52/52; EOP does not rise with EOPIE clear, an orphan first
+  word wedges CFGBSY until reset, fast row 21 us/dword, RWW 174260 loop
+  turns inside an erase). Next in order: EXTI, TIM, DMA+DMAMUX,
+  ADC/DAC/COMP/VREFBUF, RTC+PWR.
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device
