@@ -640,4 +640,286 @@ constexpr uint32_t exti_vector_lines(IRQn_Type irq) {
     return 0u;
 }
 
+// ---- TIM instances (RM0444 ch. 21..25) --------------------------------------
+//
+// WHAT THE HEADER CAN ANSWER AND WHAT IT CANNOT, stated here because this
+// chapter is the first in the stratum where the two halves are really
+// different:
+//  - WHICH TIMERS EXIST is the header's, three ways over: TIMn_BASE, the
+//    RCC enable/reset masks, and the IRQn enumerators. The G0B1/G0C1 has
+//    TIM1, 2, 3, 4, 6, 7, 14, 15, 16, 17; the G071 class has all of those
+//    but TIM4; the G031 class has 1, 2, 3, 14, 16, 17 and neither basic
+//    timer nor TIM15 - every one of those statements is a probe below and
+//    not a list.
+//  - WHAT A TIMER IS - counter width, how many channels, whether it has a
+//    slave controller, a break/dead-time unit, a repetition counter,
+//    centre-aligned counting - IS NOT IN THE DEVICE HEADER AT ALL. There
+//    is ONE TIM_TypeDef for every instance (every register is a member on
+//    every timer), so a driver naming TIM14->SMCR compiles and writes a
+//    hole. Those facts are the DOCUMENTS' (DS13560 table 7, RM0444 21.2 /
+//    22.2 / 23.2 / 24.2 / 25.2) and they are spelled out below as what
+//    they are: a small table keyed by instance number, uniform across the
+//    whole STM32G0 family, and reached only for an instance the HEADER
+//    says exists. That is the honest shape - the alternative is a driver
+//    that silently writes registers the silicon does not implement.
+//  - THE PAD MAP IS THE DATASHEET'S TOO (DS13560 tables 13..24) and is
+//    not here for the reason stm32g0/pin.hpp gives once for the whole
+//    stratum: no symbol of this device header carries it, so a driver's
+//    AF claim can be checked at the bench and nowhere else. A timer pad
+//    is therefore named by the caller as a PinSel, never derived.
+
+/// Register block base of TIMn, 0 when the device does not have it.
+constexpr uint32_t tim_base(uint8_t n) {
+    switch (n) {
+#if defined(TIM1_BASE)
+        case 1: return TIM1_BASE;
+#endif
+#if defined(TIM2_BASE)
+        case 2: return TIM2_BASE;
+#endif
+#if defined(TIM3_BASE)
+        case 3: return TIM3_BASE;
+#endif
+#if defined(TIM4_BASE)
+        case 4: return TIM4_BASE;
+#endif
+#if defined(TIM6_BASE)
+        case 6: return TIM6_BASE;
+#endif
+#if defined(TIM7_BASE)
+        case 7: return TIM7_BASE;
+#endif
+#if defined(TIM14_BASE)
+        case 14: return TIM14_BASE;
+#endif
+#if defined(TIM15_BASE)
+        case 15: return TIM15_BASE;
+#endif
+#if defined(TIM16_BASE)
+        case 16: return TIM16_BASE;
+#endif
+#if defined(TIM17_BASE)
+        case 17: return TIM17_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool tim_present(uint8_t n) { return tim_base(n) != 0u; }
+
+/// Which APB enable/reset register carries TIMn, and which bit of each.
+/// TIM1 and TIM14..TIM17 are the APB2 instances of this family; TIM2, 3,
+/// 4, 6 and 7 sit on APB1. `mask` 0 means "no such instance".
+struct TimBusClock {
+    bool apb2 = false;
+    uint32_t enable_mask = 0;
+    uint32_t reset_mask = 0;
+};
+
+constexpr TimBusClock tim_bus_clock(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APBENR2_TIM1EN)
+        case 1: return {true, RCC_APBENR2_TIM1EN, RCC_APBRSTR2_TIM1RST};
+#endif
+#if defined(RCC_APBENR1_TIM2EN)
+        case 2: return {false, RCC_APBENR1_TIM2EN, RCC_APBRSTR1_TIM2RST};
+#endif
+#if defined(RCC_APBENR1_TIM3EN)
+        case 3: return {false, RCC_APBENR1_TIM3EN, RCC_APBRSTR1_TIM3RST};
+#endif
+#if defined(RCC_APBENR1_TIM4EN)
+        case 4: return {false, RCC_APBENR1_TIM4EN, RCC_APBRSTR1_TIM4RST};
+#endif
+#if defined(RCC_APBENR1_TIM6EN)
+        case 6: return {false, RCC_APBENR1_TIM6EN, RCC_APBRSTR1_TIM6RST};
+#endif
+#if defined(RCC_APBENR1_TIM7EN)
+        case 7: return {false, RCC_APBENR1_TIM7EN, RCC_APBRSTR1_TIM7RST};
+#endif
+#if defined(RCC_APBENR2_TIM14EN)
+        case 14: return {true, RCC_APBENR2_TIM14EN, RCC_APBRSTR2_TIM14RST};
+#endif
+#if defined(RCC_APBENR2_TIM15EN)
+        case 15: return {true, RCC_APBENR2_TIM15EN, RCC_APBRSTR2_TIM15RST};
+#endif
+#if defined(RCC_APBENR2_TIM16EN)
+        case 16: return {true, RCC_APBENR2_TIM16EN, RCC_APBRSTR2_TIM16RST};
+#endif
+#if defined(RCC_APBENR2_TIM17EN)
+        case 17: return {true, RCC_APBENR2_TIM17EN, RCC_APBRSTR2_TIM17RST};
+#endif
+        default: return {};
+    }
+}
+
+/// Counter width in BITS (DS13560 table 7): TIM2 is the family's one
+/// 32-bit counter, every other timer is 16-bit. 0 for an instance this
+/// device does not have.
+constexpr uint8_t tim_counter_bits(uint8_t n) {
+    if (!tim_present(n)) {
+        return 0;
+    }
+    return n == 2u ? 32u : 16u;
+}
+
+/// The largest ARR/CNT/CCR value the counter holds.
+constexpr uint32_t tim_max_period(uint8_t n) {
+    return tim_counter_bits(n) == 32u ? 0xFFFFFFFFUL
+                                      : (tim_counter_bits(n) == 16u ? 0xFFFFUL : 0UL);
+}
+
+/// Capture/compare channels (DS13560 table 7). The basic timers have
+/// none at all - they are a time base and a TRGO, which is why the
+/// driver's channel verbs refuse on them rather than writing a CCMR
+/// that is not implemented.
+constexpr uint8_t tim_channels(uint8_t n) {
+    switch (n) {
+        case 1: case 2: case 3: case 4: return tim_present(n) ? 4u : 0u;
+        case 15: return tim_present(n) ? 2u : 0u;
+        case 14: case 16: case 17: return tim_present(n) ? 1u : 0u;
+        default: return 0u;   // TIM6, TIM7 and anything absent
+    }
+}
+
+/// COMPLEMENTARY outputs (CCxN): three on TIM1 (channels 1..3), one on
+/// TIM15/16/17 (channel 1). A pair needs the break/dead-time unit, which
+/// is exactly the set of timers that have one.
+constexpr uint8_t tim_complementary_channels(uint8_t n) {
+    switch (n) {
+        case 1: return tim_present(n) ? 3u : 0u;
+        case 15: case 16: case 17: return tim_present(n) ? 1u : 0u;
+        default: return 0u;
+    }
+}
+
+/// TIMx_SMCR - the slave controller (external clock mode 1, reset,
+/// gated, trigger and the combined modes, and the ITRx multiplexer).
+/// TIM14, TIM16 and TIM17 have no SMCR at all (24.4, 25.6), the basic
+/// timers have none either (23.4).
+constexpr bool tim_has_slave_mode(uint8_t n) {
+    switch (n) {
+        case 1: case 2: case 3: case 4: case 15: return tim_present(n);
+        default: return false;
+    }
+}
+
+/// TIMx_CR2.MMS - the master mode that drives TRGO. The basic timers
+/// have it (that is what they are FOR: 23.4.2's MMS feeds the DAC and
+/// the other timers); TIM14, TIM16 and TIM17 have no CR2.MMS - 25.4.24
+/// says so in words and offers OC1 as the trigger instead.
+constexpr bool tim_has_master_mode(uint8_t n) {
+    switch (n) {
+        case 1: case 2: case 3: case 4: case 6: case 7: case 15:
+            return tim_present(n);
+        default: return false;
+    }
+}
+
+/// TIMx_BDTR - break inputs, the dead-time generator, MOE and the off
+/// states. Exactly the timers with a complementary output (21.4.18,
+/// 25.5.16, 25.6.14).
+constexpr bool tim_has_break(uint8_t n) { return tim_complementary_channels(n) != 0u; }
+
+/// TIMx_RCR - the repetition counter (an update event every RCR + 1
+/// periods). The same four timers again.
+constexpr bool tim_has_repetition(uint8_t n) { return tim_has_break(n); }
+
+/// CR1.DIR and CR1.CMS: up/down and centre-aligned counting. DS13560
+/// table 7's "counter type" column - only TIM1..TIM4 count anything but
+/// up.
+constexpr bool tim_has_direction(uint8_t n) {
+    switch (n) {
+        case 1: case 2: case 3: case 4: return tim_present(n);
+        default: return false;
+    }
+}
+constexpr bool tim_has_center_aligned(uint8_t n) { return tim_has_direction(n); }
+
+/// TIMx_TISEL, the input multiplexer that makes a capture channel
+/// reachable with no pad at all (an internal clock, a comparator). Every
+/// timer with a channel has one; the basic timers have no input.
+constexpr bool tim_has_tisel(uint8_t n) { return tim_channels(n) != 0u; }
+
+/// TIMx_DCR/TIMx_DMAR, the DMA burst engine (DS13560 table 7's "DMA
+/// request generation"): everything but TIM14.
+constexpr bool tim_has_dma_burst(uint8_t n) {
+    switch (n) {
+        case 1: case 2: case 3: case 4: case 6: case 7: case 15: case 16: case 17:
+            return tim_present(n);
+        default: return false;
+    }
+}
+
+/// TIMx_ETR, the external trigger input (SMCR's ECE/ETP/ETPS/ETF half).
+/// The timers with a slave controller have it; TIM15 does not (25.5.3
+/// gives it ITRx and the TI inputs and no ETR).
+constexpr bool tim_has_external_trigger(uint8_t n) {
+    switch (n) {
+        case 1: case 2: case 3: case 4: return tim_present(n);
+        default: return false;
+    }
+}
+
+/// The NVIC line TIMn's UPDATE, capture/compare, trigger and break
+/// events reach. SHARED LINES ARE THE RULE HERE (table 61): TIM3 shares
+/// with TIM4 on the G0B1 class, TIM6 with the DAC and LPTIM1, TIM7 with
+/// LPTIM2, TIM16 and TIM17 with the two FDCAN interrupt lines - and TIM1
+/// alone has TWO vectors, the capture/compare one being separate (see
+/// tim_cc_irq). IRQn values are enumerators the preprocessor cannot
+/// probe, so this reads the DEVICE SELECT macro, exactly as usart_irq()
+/// does; a wrong line here is a silent Default_Handler spin, which is
+/// what the family fixture instantiating every present instance on every
+/// header is for.
+constexpr IRQn_Type tim_irq(uint8_t n) {
+#if defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G0B0xx)
+    switch (n) {
+        case 1: return TIM1_BRK_UP_TRG_COM_IRQn;
+        case 2: return TIM2_IRQn;
+        case 3: case 4: return TIM3_TIM4_IRQn;
+        case 6: return TIM6_DAC_LPTIM1_IRQn;
+        case 7: return TIM7_LPTIM2_IRQn;
+        case 14: return TIM14_IRQn;
+        case 15: return TIM15_IRQn;
+        case 16: return TIM16_FDCAN_IT0_IRQn;
+        default: return TIM17_FDCAN_IT1_IRQn;
+    }
+#elif defined(STM32G071xx) || defined(STM32G081xx) || defined(STM32G070xx)
+    switch (n) {
+        case 1: return TIM1_BRK_UP_TRG_COM_IRQn;
+        case 2: return TIM2_IRQn;
+        case 3: return TIM3_IRQn;
+        case 6: return TIM6_DAC_LPTIM1_IRQn;
+        case 7: return TIM7_LPTIM2_IRQn;
+        case 14: return TIM14_IRQn;
+        case 15: return TIM15_IRQn;
+        case 16: return TIM16_IRQn;
+        default: return TIM17_IRQn;
+    }
+#else
+    // G031/G041/G030/G051/G061/G050: TIM1, TIM2, TIM3, TIM14, TIM16,
+    // TIM17, each on a line of its own (LPTIM1/LPTIM2 take positions 17
+    // and 18, where the bigger parts put TIM6 and TIM7).
+    switch (n) {
+        case 1: return TIM1_BRK_UP_TRG_COM_IRQn;
+        case 2: return TIM2_IRQn;
+        case 3: return TIM3_IRQn;
+        case 14: return TIM14_IRQn;
+        case 16: return TIM16_IRQn;
+        default: return TIM17_IRQn;
+    }
+#endif
+}
+
+/// TIM1's SECOND vector, the capture/compare one (table 61 position 14).
+/// Every other timer of this family reports everything on one line, so
+/// this equals tim_irq(n) there - which is what lets a handler bind both
+/// without asking whether they are two.
+constexpr IRQn_Type tim_cc_irq(uint8_t n) {
+    return n == 1u ? TIM1_CC_IRQn : tim_irq(n);
+}
+
+/// Do TIMn's update/trigger/break and its capture/compare events reach
+/// two DIFFERENT vectors? True for TIM1 alone.
+constexpr bool tim_has_split_vector(uint8_t n) { return n == 1u && tim_present(n); }
+
 } // namespace brio

@@ -297,6 +297,28 @@ struct Rcc {
         RCC->APBENR2 = on ? (RCC->APBENR2 | mask) : (RCC->APBENR2 & ~mask);
         (void)RCC->APBENR2;
     }
+    static bool apb2_clock(uint32_t mask) { return (RCC->APBENR2 & mask) == mask; }
+
+    // ---- peripheral resets (5.4.15, 5.4.16) ---------------------------------
+    // RCC_APBRSTRx holds a peripheral in reset while its bit stands, so a
+    // reset is a PULSE and not a store: set, read back (the same
+    // two-cycle stall the enables pay), clear. This is the STM32's
+    // equivalent of the SAM's CTRLA.SWRST and the only way a driver gets
+    // a peripheral to a documented state without writing every register
+    // of it by hand - which is what a driver over a block with three
+    // dozen registers would otherwise have to promise.
+    static void apb1_reset(uint32_t mask) {
+        RCC->APBRSTR1 |= mask;
+        (void)RCC->APBRSTR1;
+        RCC->APBRSTR1 &= ~mask;
+        (void)RCC->APBRSTR1;
+    }
+    static void apb2_reset(uint32_t mask) {
+        RCC->APBRSTR2 |= mask;
+        (void)RCC->APBRSTR2;
+        RCC->APBRSTR2 &= ~mask;
+        (void)RCC->APBRSTR2;
+    }
 
     // ---- kernel-clock multiplexers (5.4.21) ---------------------------------------
     /// A two-bit CCIPR field at `pos`: the codes are the field's own

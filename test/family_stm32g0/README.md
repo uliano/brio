@@ -11,7 +11,10 @@ What differs across these three, and what this fixture therefore
 exercises: the GPIO port set (E only on the G0B1 class), the USART
 instance count (2 / 4 / 6), the vector sharing (`USART2_LPUART2_IRQn`
 on the G0B1 against `USART2_IRQn` elsewhere), the kernel-clock
-multiplexers (USART2SEL absent on the G031) and the FLASH's SECOND BANK
+multiplexers (USART2SEL absent on the G031), the TIMER SET (TIM4 on the
+G0B1 class alone, neither basic timer nor TIM15 on the G031 class) with
+its own vector sharing (`TIM3_TIM4_IRQn` against `TIM3_IRQn`,
+`TIM16_FDCAN_IT0_IRQn` against `TIM16_IRQn`) and the FLASH's SECOND BANK
 - the G0B1 declares FLASH_CR.BKER/MER2, FLASH_SR.BSY2, the two bank-2
 option bits and the bank-2 ECC and protection registers, while the
 G071 and G031 declare none of them and do not even carry `ECC2R` as a
