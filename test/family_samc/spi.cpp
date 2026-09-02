@@ -370,6 +370,7 @@ void host_verbs() {
     const Host::Request r{
         .cs = Pin<'B', 0>::ref(),
         .dc = {},
+        .cs_setup_us = 4,
         .cmd = lend<Lease::reply>(static_cast<const uint8_t*>(cmd)),
         .cmd_len = 2,
         .tx = lend<Lease::reply>(static_cast<const uint8_t*>(out)),

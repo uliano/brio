@@ -1286,6 +1286,40 @@ void tf_wireless() {
                   "THROUGH THE PAD (32.6.3.4)",
                   echo_mism == 0);
 
+    // THE CHIP-SELECT SETUP, timed on the crystal: the same 16-byte
+    // polled request with cs_setup_us 0 and 100, and the difference
+    // must be the setup - which proves the engine spends it, and
+    // spends it inside the transaction. (The pin itself is null here -
+    // the field alone drives the wait, exactly as on the AVR, where a
+    // caller may own the CS and still want the engine's pacing.)
+    if (ruler_ok) {
+        auto timed = [&](uint8_t setup) {
+            Loop::Request r{
+                .cs = {}, .dc = {}, .cs_setup_us = setup,
+                .cmd = {}, .cmd_len = 0,
+                .tx = lend<Lease::reply>(static_cast<const uint8_t*>(lb_tx)),
+                .rx = lend<Lease::reply>(lb_rx),
+                .len = 16, .reply = {},
+                .baud = command_baud, .mode = SpiMode::mode0, .polled = true,
+            };
+            const uint32_t t0 = wall();
+            (void)Loop::start(r);
+            return (wall() - t0) / (crystal_hz / 1000000u);
+        };
+        const uint32_t bare = timed(0);
+        const uint32_t with_setup = timed(100);
+        const uint32_t delta = with_setup > bare ? with_setup - bare : 0u;
+        print(serial, "  cs_setup_us: 16 bytes in ", bare, " us bare, ", with_setup,
+              " us with 100 us of setup (delta ", delta, ")", crlf);
+        bench.verdict("Request.cs_setup_us is spent between the CS assertion and "
+                      "the first clock - at least the asked microseconds, and not "
+                      "wildly more (the avrdx field, verbatim)",
+                      delta >= 100u && delta <= 130u);
+    } else {
+        bench.verdict("the crystal ruler is available for the cs_setup measurement",
+                      false);
+    }
+
     // The SCK ladder, timed on the CRYSTAL. A burst of N characters at
     // BAUD b takes N x 8 SCK periods plus this pump's own per-character
     // overhead, so the measurement is reported as both: the total and

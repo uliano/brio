@@ -187,10 +187,14 @@ item a reader would apply without checking the row.
   `util/spi_bus.hpp` (= `BusMaster`) drives: the avrdx Request shape
   (cs/dc `PinRef`s, two-phase cmd + full-duplex data, `Borrowed<...,
   Lease::reply>` spans, `ReplyTo<SpiDone>`, per-request BAUD value and
-  `SpiMode`, `polled` completion style), `start()`/`isr()` per the
-  bus_master contract, `baud_for()`/`sck_hz()` and the optional
-  bus-wide SCK ceiling that `rebase()` re-resolves, `prime()` for
-  callers that frame CS by hand. Configuration changes are cached: a
+  `SpiMode`, `polled` completion style, and `cs_setup_us` - the avrdx
+  field verbatim: microseconds between the CS assertion and the first
+  clock, spent spinning in start() in main context on samc/delay.hpp's
+  rate, which `rebase()` keeps current so it follows a clock change
+  exactly as on the AVR; measured spending 100 asked as 101..103),
+  `start()`/`isr()` per the bus_master contract,
+  `baud_for()`/`sck_hz()` and the optional bus-wide SCK ceiling that
+  `rebase()` re-resolves, `prime()` for callers that frame CS by hand. Configuration changes are cached: a
   run of requests to one device costs no disable/enable pair at all.
   THE TWO ENGINE SLOTS default to `NoDmaEngine` (an engineless build is
   byte-identical - the Uart's shape); named, they take the DATA PHASE

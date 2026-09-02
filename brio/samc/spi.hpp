@@ -127,6 +127,7 @@
 #include "sam.h"
 
 #include "samc/clock.hpp"
+#include "samc/delay.hpp"
 #include "samc/nvic.hpp"
 #include "samc/pin.hpp"
 #include "samc/sercom.hpp"
@@ -901,14 +902,18 @@ public:
  * must be enabled even for a write-only transfer, which costs the DI
  * pad and nothing else.
  *
- * NO PER-REQUEST CHIP-SELECT DELAY - YET. avrdx/spi.hpp's Request
- * carries cs_setup_us, timed by avrdx/delay.hpp; samc/delay.hpp exists
- * now (SysTick-timed, capped below a tick), but the Request field is a
- * driver-behaviour change that gets built with its FIRST DEVICE that
- * needs it, not speculatively. Until then a device that needs settling
- * time after CS falls spends it in its own AO (a time event, or
- * brio::delay_us before posting), and a caller framing CS by hand has
- * the whole toolbox.
+ * THE PER-REQUEST CHIP-SELECT DELAY IS THE AVRDX'S, VERBATIM: the
+ * Request carries cs_setup_us, spent spinning in start() (main
+ * context, bounded by the byte) between the CS assertion and the first
+ * clock, timed by samc/delay.hpp on a rate init()/rebase() keep
+ * current - so it follows a clock change exactly as the avrdx one
+ * does, and a device client written for one architecture reads
+ * unchanged on the other. It is served ONLY while a Ticker runs
+ * (delay_us's own contract; with SysTick stopped the wait is skipped
+ * and the transaction proceeds), and on a program whose tick period is
+ * SHORTER than the requested setup the cap skips it too - both stated
+ * here, neither reachable on the standard 1000 Hz ticker with a
+ * uint8_t of microseconds.
  *
  * THE TWO OPTIONAL DMA ENGINE SLOTS (the Uart's shape, for the same
  * reason: an engineless build must stay byte-identical, so the slots
@@ -1026,6 +1031,11 @@ public:
     struct Request {
         PinRef cs;   ///< asserted low around the transaction
         PinRef dc;   ///< display D/C line; null = no such pin
+        /// Microseconds between the CS assertion and the first clock -
+        /// what a device's datasheet calls CS setup (the avrdx Request's
+        /// own field, byte for byte). Spent spinning in start(), main
+        /// context; 0 = none.
+        uint8_t cs_setup_us = 0;
         /// Phase 1, sent with DC low; LENT until the reply lands.
         Borrowed<const uint8_t, Lease::reply> cmd;
         uint8_t cmd_len;
@@ -1087,8 +1097,8 @@ public:
     static bool init(Clock clock, uint32_t max_sck_hz = 0) {
         static_assert(clock_follows<Clock, SpiHost>(),
                       "this SpiHost is initialized with a DynamicClock that does not "
-                      "list it among its Users: its SCK ceiling would go stale on a "
-                      "clock change");
+                      "list it among its Users: its SCK ceiling and its cs_setup "
+                      "timing would go stale on a clock change");
 
         Nvic::disable(S::irq());
         ceiling_hz_ = max_sck_hz;
@@ -1150,6 +1160,9 @@ public:
     static void rebase(uint32_t hz) {
         ref_hz_ = hz;
         ceiling_ = ceiling_hz_ ? spi_baud_reg(hz, ceiling_hz_) : std::optional<uint8_t>{};
+        // The cs_setup timing follows the clock too - the one division
+        // of delay_rate() is paid here, never at wait time.
+        cs_rate_ = delay_rate(hz);
     }
 
     /// The BAUD value that produces at most `hz` of SCK at the core
@@ -1209,6 +1222,13 @@ public:
             r.dc.set();
         }
         r.cs.clear();   // assert, active low
+        if (r.cs_setup_us != 0u) {
+            // The device's CS setup, spent here in main context for
+            // BOTH completion styles (the engines and the pump start
+            // only below). Skipped by delay_us's own contract when no
+            // Ticker runs - see the class comment.
+            (void)delay_us(cs_rate_, r.cs_setup_us);
+        }
         S::flush_rx();  // a stale character would be captured as this one's
 
         if constexpr (has_engines) {
@@ -1557,6 +1577,7 @@ private:
     static inline uint32_t ref_hz_ = 0;
     static inline uint32_t ceiling_hz_ = 0;
     static inline std::optional<uint8_t> ceiling_{};
+    static inline DelayRate cs_rate_{};
 };
 
 // =============================================================================

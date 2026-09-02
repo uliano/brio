@@ -39,12 +39,19 @@
  * microseconds through clock_hz(clock) - the one truth about the rate,
  * as everywhere in brio - with the cycles-per-microsecond factor
  * rounded UP so every conversion error lands LATE (the kernel's own
- * "at least"). NO DIVISION RUNS AT WAIT TIME with a compile-time
- * Clock: the M0+ has no high multiply, so gcc calls __aeabi_uidiv
- * even for a CONSTANT divisor (~4 us a call - measured, the DIVAS
- * arithmetic), and the first version of this file paid it on every
- * entry; both quotients below fold to constants instead, and what is
- * left at run time is one multiply and two compares.
+ * "at least"). NO DIVISION RUNS AT WAIT TIME, EVER: the M0+ has no
+ * high multiply, so gcc calls __aeabi_uidiv even for a CONSTANT
+ * divisor (~4 us a call - measured, the DIVAS arithmetic), and the
+ * first version of this file paid it on every entry. The ONE division
+ * lives in delay_rate() - folded to a constant with a compile-time
+ * Clock, paid once per clock change by a caller that only has a
+ * runtime rate (the SpiHost's rebase shape) - and the cap check runs
+ * entirely in 32 bits, because the M0+ taxes WIDTH too: a 64-bit
+ * product is another libcall (~4 us, measured when the second version
+ * of this file tried one). The 32-bit product cannot wrap: the Ticker
+ * refuses rates below 1024 Hz, so no legal tick period reaches 65536
+ * microseconds, and behind that gate us * cycles_per_us stays under
+ * 2^29.
  *
  * WHAT THIS FILE DOES NOT SERVE, stated: a program with no running
  * Ticker (SysTick disabled) gets false, not a fallback loop - a
@@ -66,6 +73,20 @@
 
 namespace brio {
 
+/// The cycles-per-microsecond factor, precomputed. delay_us(clock, us)
+/// folds it at compile time; a caller with only a RUNTIME rate (a
+/// driver rebased by a DynamicClock) stores one of these at each
+/// clock change and never divides at wait time.
+struct DelayRate {
+    uint32_t cycles_per_us = 0;
+};
+
+/// Ceil: a 48.000001 MHz claim pays 49 cycles per microsecond and
+/// lands late, never early - the at-least direction.
+constexpr DelayRate delay_rate(uint32_t hz) {
+    return {(hz + 999'999UL) / 1'000'000UL};
+}
+
 /**
  * @brief Busy-wait AT LEAST `us` microseconds on the SysTick counter.
  *
@@ -80,28 +101,21 @@ namespace brio {
  * mid-wait lengthens the wait, which is the only honest reading of
  * "at least" on a machine with interrupts.
  */
-template <typename Clock>
-[[nodiscard]] bool delay_us(Clock clock, uint32_t us) {
-    const uint32_t hz = clock_hz(clock);
-    // Ceil: a 48.000001 MHz claim pays 49 cycles per us and lands late,
-    // never early. Folds to a constant with a compile-time Clock.
-    const uint32_t per_us = (hz + 999'999UL) / 1'000'000UL;
-
+[[nodiscard]] inline bool delay_us(DelayRate rate, uint32_t us) {
     if ((SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) == 0u) {
         return false;   // no Ticker: nothing here can count time
     }
     const uint32_t period = SysTick->LOAD + 1u;   // one tick, in CPU cycles
 
-    // The cap, in two division-free steps. First the overflow guard:
-    // past this bound us * per_us would wrap uint32_t into a small
-    // cycle count and the real cap below would wave it through. The
-    // quotient folds to a constant with a compile-time Clock.
-    if (us > 0xFFFFFFFFu / per_us) {
+    // The cap, in 32 bits and nothing wider (the header comment says
+    // why width costs here). A zero rate has nothing to count with; no
+    // legal tick period reaches 65536 us (the Ticker refuses sub-1024
+    // Hz rates), so past that gate the product cannot wrap - and then
+    // a whole tick or more is TimeEvent territory, refused.
+    if (rate.cycles_per_us == 0u || us >= 65'536u) {
         return false;
     }
-    const uint32_t cycles = us * per_us;
-    // Then the cap itself: a whole tick or more is TimeEvent territory
-    // (period never exceeds 2^24, the RELOAD field's width).
+    const uint32_t cycles = us * rate.cycles_per_us;
     if (cycles >= period) {
         return false;
     }
@@ -118,6 +132,11 @@ template <typename Clock>
         last = now;
     }
     return true;
+}
+
+template <typename Clock>
+[[nodiscard]] bool delay_us(Clock clock, uint32_t us) {
+    return delay_us(delay_rate(clock_hz(clock)), us);
 }
 
 } // namespace brio

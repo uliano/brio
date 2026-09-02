@@ -224,12 +224,17 @@ Ticker's in writing), accumulates deltas with the reload wrap folded
 in - so it is exact across tick boundaries and inside
 SysTickInterruptGuard windows alike - and converts through
 clock_hz(clock) with the cycles-per-microsecond factor rounded UP, the
-kernel's own at-least. NO DIVISION RUNS AT WAIT TIME with a
-compile-time Clock: the M0+ has no high multiply, so gcc calls
-__aeabi_uidiv even for a constant divisor (~4 us a call, measured -
-the first version paid it on every entry), and both quotients fold to
-constants instead. With SysTick not running (a program with no Ticker)
-the answer is false, not a fallback loop. Measured by test_samc_platform
+kernel's own at-least. NO DIVISION RUNS AT WAIT TIME, EVER,
+and nothing wider than 32 bits either: the M0+ has no high multiply,
+so gcc calls __aeabi_uidiv even for a constant divisor (~4 us a call)
+and a 64-bit product is another libcall of the same size (~4 us) -
+both measured on early versions of this file and both removed. The one
+division lives in `delay_rate()`: folded with a compile-time Clock, or
+paid ONCE per clock change by a caller holding a runtime rate as a
+`DelayRate` (the SpiHost's cs_setup timing is that caller); the
+overflow guard is the Ticker's own sub-1024 Hz refusal, which bounds
+every legal tick period under 65536 us. With SysTick not running (a
+program with no Ticker) the answer is false, not a fallback loop. Measured by test_samc_platform
 letter d against a TC ruler: 5..900 us all served at least and within
 ~1 us of call overhead once the measurement bracket's own ~6 us is
 subtracted; 200 waits of 50 us with NOT ONE EARLY; the 1000 us cap
