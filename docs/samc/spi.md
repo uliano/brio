@@ -106,6 +106,27 @@ every rate; without it the stream is byte-exact). So `SpiHost`'s DMA
 launch kicks nothing; the trigger doctrine is PER SERCOM MODE, not per
 controller ([dmac.md](dmac.md) carries the qualification).
 
+**Table 45-59 agrees with the bench, and it is the STRICTER of the
+two.** The SPI timing table (simulation values, note 1: not covered by
+production test) prices the four directions at VDD > 4.5 V: host
+TRANSMISSION tSCK >= 2 x (tMOV 17.1 ns + the device's input setup) -
+about 29 MHz against an ideal device, so the 24 MHz TX stream the
+wire ladder certified is in spec; host RECEPTION tSCK >= 2 x (tMIS
+50.7 ns + the device's output delay) - about 9.9 MHz against an IDEAL
+device and 6..7 MHz against a real one, so the loop-back's measured
+12 MHz exact EXCEEDS the paper (bench-true on this die at room
+temperature, not a design number) and the 24 MHz loop-back failure is
+attributed: 101 ns of receiver requirement against a 41 ns period is
+the RECEIVER, by the datasheet's own arithmetic. A CLIENT's response
+path carries tSOSS (~41 ns) plus the far end's setup plus TWO APB
+PERIODS (41.7 ns at 48 MHz), which lands the paper ceiling for client
+transmission at a few MHz - exactly where the wire ladder measured
+the DMA-fed answer's 6 MHz. DESIGN GUIDANCE, then: writes to a device
+up to 24 MHz, reads from a real device at 6..8 MHz by the paper
+(12 MHz is what this die did), a SAM client's responses ~6 MHz - and
+a fast SPI client is an FPGA's job, the two bus cycles in every
+answer being construction, not tuning.
+
 **The DMA data phase is real and it is fast.** With the two engine
 slots named, a request's data phase rides the DMAC: RX drains DATA on
 the RXC trigger (its completion IS the transaction's - the last
