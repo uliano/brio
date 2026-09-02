@@ -334,8 +334,19 @@ def openocd_args(prog, elffile):
     quiet, and the halted core was found parked on the BKPT.
 
     The write below is DHCSR with its 0xA05F key and every control bit
-    zero, which is what a board with no probe attached looks like."""
-    argv = [manifest.OPENOCD, "-f", "interface/cmsis-dap.cfg"]
+    zero, which is what a board with no probe attached looks like.
+
+    THE HID BACKEND IS NOT COSMETIC EITHER (every OpenOCD invocation in
+    this file carries it). Behind the desk's USB hub (2026-09-02) the
+    Atmel-ICE's default usb_bulk transport desynchronizes by one packet
+    under sustained traffic - every command then receives the PREVIOUS
+    command's response ("CMSIS-DAP command mismatch ... received 0x12"),
+    programming dies mid-flash, and the state survives soft recovery
+    attempts; the HID transport ran the same flashes clean on the first
+    try. A wedged probe is recovered by two USBDEVFS_RESET ioctls five
+    seconds apart (or a replug)."""
+    argv = [manifest.OPENOCD, "-f", "interface/cmsis-dap.cfg",
+            "-c", "cmsis-dap backend hid"]
     if prog.get("serial"):
         argv += ["-c", "adapter serial %s" % prog["serial"]]
     argv += ["-f", "target/at91samdXX.cfg",
@@ -891,7 +902,8 @@ def openocd_batch(prog, commands, timeout=180.0):
     """Run one OpenOCD session over the manifest's probe. Returns
     (returncode, all output) - OpenOCD logs and command output both land on
     stderr, so the two streams are joined and parsed together."""
-    argv = [manifest.OPENOCD, "-f", "interface/cmsis-dap.cfg"]
+    argv = [manifest.OPENOCD, "-f", "interface/cmsis-dap.cfg",
+            "-c", "cmsis-dap backend hid"]
     if prog.get("serial"):
         argv += ["-c", "adapter serial %s" % prog["serial"]]
     argv += ["-f", "target/at91samdXX.cfg"]
@@ -1013,7 +1025,8 @@ def sam_write_row(prog, row, pages):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="ascii") as f:
         f.write(sam_write_script(row, pages))
-    argv = [manifest.OPENOCD, "-f", "interface/cmsis-dap.cfg"]
+    argv = [manifest.OPENOCD, "-f", "interface/cmsis-dap.cfg",
+            "-c", "cmsis-dap backend hid"]
     if prog.get("serial"):
         argv += ["-c", "adapter serial %s" % prog["serial"]]
     argv += ["-f", "target/at91samdXX.cfg", "-f", path]

@@ -8,16 +8,21 @@
 // it drives avrdx/spi.hpp's.
 //
 // THE BENCH, and it is a TWO-BOARD bench. Board C (this one) is the DUT;
-// board A is an AVR128DB48 running `spi_peer`, the scriptable instrument
-// client the AVR SPI campaign built, commanded IN BAND over the very bus
-// under test (the protocol is avrdx/src/apps/spi_link.hpp, included here
-// BY RELATIVE PATH - one source, two architectures, never a copy).
+// the peer board runs `spi_peer`, the scriptable instrument client,
+// commanded IN BAND over the very bus under test (the protocol is
+// avrdx/src/apps/spi_link.hpp, included here BY RELATIVE PATH - one
+// source of truth for the wire format, never a copy). TWO peers speak
+// it: the AVR campaign's avrdx spi_peer (board A, the cross-architecture
+// bench this suite was born on) and the samc port (board D, the SAM-SAM
+// bench of the speed campaign) - the suite asks ident and does not care.
 //
-//   SAM PA16 = SERCOM1/PAD[0], function C  ->  A.PE0   MOSI
-//   SAM PA17 = SERCOM1/PAD[1], function C  ->  A.PE2   SCK
-//   SAM PA18 = SERCOM1/PAD[2], function C  ->  A.PE3   SS
-//   SAM PA19 = SERCOM1/PAD[3], function C  <-  A.PE1   MISO
-//   plus a common GND. Both boards at 5 V.
+// Today's desk is the SAM-SAM five-wire link, STRAIGHT THROUGH:
+//
+//   C.PA16 = SERCOM1/PAD[0], function C  <->  D.PA16   MOSI
+//   C.PA17 = SERCOM1/PAD[1], function C  <->  D.PA17   SCK
+//   C.PA18 = SERCOM1/PAD[2], function C  <->  D.PA18   SS
+//   C.PA19 = SERCOM1/PAD[3], function C  <->  D.PA19   MISO
+//   plus a dedicated GND.
 //
 // THE SAME FOUR WIRES CARRY BOTH ROLES, ON TWO DIFFERENT DOPO ROWS, and
 // that is one of the things this suite demonstrates rather than asserts.
@@ -69,6 +74,7 @@
 #include <stdint.h>
 
 #include "samc/clock.hpp"
+#include "samc/dmac.hpp"
 #include "samc/nvic.hpp"
 #include "samc/pin.hpp"
 #include "samc/platform_sam.hpp"
@@ -169,6 +175,13 @@ using Bus = SpiHost<link_sercom, host_pads>;
 using Loop = SpiHost<link_sercom, loopback_pads>;
 using Peer = SpiClient<link_sercom, client_pads>;
 using Raw = Spi<link_sercom>;
+
+/// The engined host on the wire pads - letter d's full-DMA climb (both
+/// ends of the link on engines) and nothing else. Same two channels as
+/// letter h's loop-back twin; the two are never up at once, and each
+/// init() re-claims.
+using DmaBus = SpiHost<link_sercom, host_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>>;
+volatile bool dma_bus_live = false;   ///< routes DMAC_Handler to DmaBus
 
 using Cs = Pin<'A', 18>;
 using SckPin = Pin<'A', 17>;
@@ -412,8 +425,8 @@ bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
     if (first_n == 0) print(serial, " nothing");
     for (uint8_t i = 0; i < first_n; ++i) print(serial, " ", hex(first_seen[i]));
     print(serial, crlf,
-          "      board A must be running `spi_peer` (bench.py flash A spi_peer); its "
-          "console '0' forces the dark client back.",
+          "      the peer board must be running `spi_peer` (bench.py flash D "
+          "spi_peer); its console '0' forces the dark client back.",
           crlf);
     (void)link_command_mode();
     return false;
@@ -469,9 +482,9 @@ bool ensure_link() {
     }
     link_quiet = false;
     print(serial,
-          "  THE PEER DID NOT ANSWER. Board A must be running `spi_peer` "
-          "(python3 tools/bench.py flash A spi_peer); its console '0' forces the "
-          "dark client back. Check the seven wires in this file's header.",
+          "  THE PEER DID NOT ANSWER. The peer board must be running `spi_peer` "
+          "(python3 tools/bench.py flash D spi_peer); its console '0' forces the "
+          "dark client back. Check the five wires in this file's header.",
           crlf);
     return false;
 }
@@ -482,7 +495,7 @@ bool need_peer() {
     if (ensure_link()) {
         return true;
     }
-    bench.verdict("the peer answers a ping (board A running spi_peer)", false);
+    bench.verdict("the peer answers a ping (the peer board running spi_peer)", false);
     return false;
 }
 
@@ -499,7 +512,9 @@ struct Exchange {
     uint8_t seed_b = 0x57;
     uint8_t pattern = spilink::pattern_prbs;
     uint8_t flags = 0;
+    uint8_t spare = 0;   ///< spilink::spare_polled_pump forces the peer's polled loop
     uint16_t ms = 400;
+    bool dma_host = false;   ///< move THIS end's data phase onto the engines too
 };
 
 constexpr uint8_t max_exchange = 16;
@@ -516,6 +531,7 @@ bool do_exchange(const Exchange& e) {
     a.seed_b = e.seed_b;
     a.pattern = e.pattern;
     a.flags = e.flags;
+    a.spare = e.spare;
     // A bit-order mismatch is not a shrug: told about it, the client
     // checks the exact bit-reverse of what this end sent, and this end
     // checks the exact bit-reverse of what the client answered.
@@ -543,6 +559,29 @@ bool do_exchange(const Exchange& e) {
     }
     settle();
     const uint16_t n = e.count < max_exchange ? e.count : max_exchange;
+    if (e.dma_host) {
+        // BOTH ends on engines: this end's data phase rides DmaBus (a
+        // polled request whose spin still completes through
+        // DMAC_Handler), the peer's serve rides its own two channels.
+        (void)DmaBus::init(clock);
+        dma_bus_live = true;
+        DmaBus::prime(e.host_mode, e.baud);
+        Cs::clear();
+        link_hold();
+        DmaBus::Request r{
+            .cs = {}, .dc = {}, .cmd = {}, .cmd_len = 0,
+            .tx = lend<Lease::reply>(static_cast<const uint8_t*>(xtx)),
+            .rx = lend<Lease::reply>(xrx),
+            .len = n, .reply = {},
+            .baud = e.baud, .mode = e.host_mode, .polled = true,
+        };
+        (void)DmaBus::start(r);
+        link_hold();
+        Cs::set();
+        dma_bus_live = false;
+        (void)link_command_mode();
+        return true;
+    }
     if (e.host_lsb) {
         // The engine's own apply() would re-state CTRLA without DORD, so
         // this leg drives the transaction with CS by hand and the raw
@@ -885,11 +924,12 @@ void tb_link() {
     bench.verdict("ident comes back and it IS spi_peer (the sanity byte)",
                   got && d.sanity == spilink::ident_sanity);
     bench.verdict("the peer names a board label", got && d.label[0] != 0);
-    // The peer's clock sets its own CLK_PER/6 client ceiling, so its
-    // quality is a bench fact of this suite and not just of that board.
+    // The peer's clock quality is a bench fact of this suite and not
+    // just of that board (an AVR peer's client ceiling and a SAM peer's
+    // reload margin both ride on it).
     if (got && !d.xtal) {
-        print(serial, "  NOTE: the peer runs OSCHF, not its crystal - its client "
-                      "ceiling is OSCHF/6",
+        print(serial, "  NOTE: the peer's crystal did not start - its clock is "
+                      "its internal RC",
               crlf);
     }
 
@@ -996,60 +1036,84 @@ void td_rates() {
                   !Bus::ceiling_baud().has_value() && Bus::sck_hz(0) ==
                                                           spi_max_sck_hz(SysClock::hz));
 
-    // Now the wire. Climb until the peer stops answering exactly - its
-    // CLIENT ceiling is CLK_PER/6 of its own 24 MHz clock, i.e. 4 MHz,
-    // and where the exactness really breaks is a BENCH FACT.
+    // Now the wire, up to the generator's own top. These characters run
+    // back to back (one engine request, no inter-byte gap), so what the
+    // climb finds is the PEER'S RELOAD BOUNDARY: its client must land
+    // the next-plus-one answer at least three SCK cycles before a
+    // character boundary (32.6.2.6.2), and a polled loop's turnaround
+    // sets where that stops holding. The SAM peer's precomputed pump
+    // holds to 2 MHz; the AVR peer's polled loop held to 500 kHz with
+    // 1 MHz a coin toss. WHERE it lands is the print; the verdict
+    // claims only the floor both peers clear.
     static const uint32_t rates[] = {200'000UL, 500'000UL, 1'000'000UL, 2'000'000UL,
-                                     3'000'000UL, 4'000'000UL, 6'000'000UL};
-    uint32_t last_good = 0;
-    uint32_t first_bad = 0;
-    for (uint8_t i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
-        const auto b = Bus::baud_for(rates[i]);
-        if (!b) continue;
-        Exchange e{};
-        e.baud = *b;
-        e.count = 8;
-        e.seed_a = 0x21;
-        e.seed_b = 0x84;
-        Verify v{};
-        spilink::Report r{};
-        const bool ok = exchange_exact(e, v, r);
-        const uint32_t real = spi_sck_hz(SysClock::hz, *b);
-        print(serial, "  SCK ", real / 1000u, " kHz (BAUD ", *b, "): ",
-              ok ? "exact both ways" : "NOT exact", "  host mism=", v.mism,
-              " client mism=", r.mism, " client count=", r.count, crlf);
-        if (ok) {
-            last_good = real;
-        } else if (first_bad == 0) {
-            first_bad = real;
+                                     3'000'000UL, 4'000'000UL, 6'000'000UL,
+                                     8'000'000UL, 12'000'000UL, 24'000'000UL};
+    struct Climb {
+        uint32_t last_good = 0;
+        uint32_t first_bad = 0;
+        spilink::Report bad_r{};
+    };
+    // The DMA climb needs the controller up; letter h may not have run.
+    (void)Dmac::init();
+    Climb climbs[2];
+    for (uint8_t leg = 0; leg < 2; ++leg) {
+        const bool dma = leg == 1;
+        print(serial, dma ? "  -- both ends on DMA engines --"
+                          : "  -- both ends on polled pumps --", crlf);
+        Climb& c = climbs[leg];
+        for (uint8_t i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
+            const auto b = Bus::baud_for(rates[i]);
+            if (!b) continue;
+            Exchange e{};
+            e.baud = *b;
+            e.count = 8;
+            e.seed_a = 0x21;
+            e.seed_b = 0x84;
+            e.spare = dma ? 0u : spilink::spare_polled_pump;
+            e.dma_host = dma;
+            Verify v{};
+            spilink::Report r{};
+            const bool ok = exchange_exact(e, v, r);
+            const uint32_t real = spi_sck_hz(SysClock::hz, *b);
+            print(serial, "  SCK ", real / 1000u, " kHz (BAUD ", *b, "): ",
+                  ok ? "exact both ways" : "NOT exact", "  host mism=", v.mism,
+                  " client mism=", r.mism, " client count=", r.count,
+                  " serve=", (r.aux2 & 0x04) != 0 ? "dma" : "pump", crlf);
+            if (ok && c.first_bad == 0) {
+                c.last_good = real;
+            } else if (!ok && c.first_bad == 0) {
+                c.first_bad = real;
+                c.bad_r = r;
+            }
         }
+        print(serial, "  ", dma ? "on engines" : "on pumps", " the link held to ",
+              c.last_good / 1000u, " kHz back to back");
+        if (c.first_bad != 0) {
+            print(serial, " and broke at ", c.first_bad / 1000u, " kHz");
+        }
+        print(serial, crlf);
     }
-    print(serial, "  the peer (an AVR128DB48 at 24 MHz) held to ",
-          last_good / 1000u, " kHz");
-    if (first_bad != 0) {
-        print(serial, " and broke at ", first_bad / 1000u, " kHz");
-    }
-    print(serial, crlf);
-    // The 1 MHz leg is MARGINAL BY CONSTRUCTION: a byte there is 10 us
-    // against the peer's 5..9 us polled turnaround, so which side of the
-    // boundary it lands on wobbles with the peer's loop phase (observed
-    // both ways). The verdict therefore only claims 500 kHz - 2.5x the
-    // command rate - and the print says where the climb really stopped.
-    bench.verdict("the link is exact at the command rate and at least 2.5 times "
-                  "faster",
-                  last_good >= 500'000UL);
-    // The boundary is the PEER'S and it is SOFTWARE: these characters
-    // run back to back (one engine request, no inter-byte gap), so what
-    // binds first is the peer's polled per-byte turnaround (5..9 us,
-    // twi.md's own figure for the same loop shape) - a 2 MHz character
-    // is 4 us - and its CLK_PER/6 = 4 MHz ELECTRICAL ceiling is not even
-    // reachable this way. The verdict only pins the boundary below that
-    // ceiling: where it lands exactly is the print, and it is a fact
-    // about the instrument, not about this driver.
-    bench.verdict("and the boundary is the peer's own (its polled turnaround under "
-                  "back-to-back characters), below its CLK_PER/6 electrical ceiling "
-                  "- it does not survive an arbitrarily fast host",
-                  last_good <= 4'000'000UL);
+    bench.verdict("the polled link is exact at the command rate and at least 2.5 "
+                  "times faster",
+                  climbs[0].last_good >= 500'000UL);
+    // THE SIGNATURE OF THE POLLED BOUNDARY: at the first rung that is
+    // not exact, the peer still RECEIVED every character byte-exact
+    // (its count full, its mismatches zero) while what the HOST read
+    // back broke - so the failure lives in the ANSWER path (the reload
+    // missing the three-cycle window), not in the wire and not in
+    // reception. The day a peer holds the whole ladder this verdict is
+    // vacuous and says so.
+    bench.verdict("wherever the polled climb breaks, the peer still hears every "
+                  "byte exact there - the boundary is its ANSWER RELOAD, not the "
+                  "wire",
+                  climbs[0].first_bad == 0 ||
+                      (climbs[0].bad_r.count == 8 && climbs[0].bad_r.mism == 0));
+    // The engines lift the reload boundary: with BOTH ends on DMA the
+    // link must clear at least what the polled loops could, and where
+    // it really stops is the print - the silicon's own answer.
+    bench.verdict("with BOTH ends on DMA engines the climb reaches at least "
+                  "2 MHz, above the polled loops",
+                  climbs[1].last_good >= 2'000'000UL);
 
     (void)link_command_mode();
     bench.verdict("the command channel survives the climb", command(Op::ping));
@@ -1117,7 +1181,8 @@ void te_client() {
     a.seed_b = 0x71;
     a.pattern = spilink::pattern_prbs;
     a.aux8 = 40;             // lead-in ms: time for this end to become a client
-    a.aux16 = 32;            // the peer's host division: CLK_PER/32 = 750 kHz
+    a.aux16 = 32;            // the peer's host SCK: its own clock / 32 (the SAM
+                             // peer at 48 MHz clocks 1.5 MHz, the AVR one 750 kHz)
     a.cfg.apply = 1;
     a.cfg.mode = 0;
     a.cfg.dord = 0;
@@ -1599,6 +1664,207 @@ void tg_kernel() {
                   true);
 }
 
+// ===========================================================================
+// h - THE DMA HOST: the data phase on the two DMAC engines (WIRELESS)
+// ===========================================================================
+
+namespace dh {
+
+/// The loop-back host again, with the data phase on channels 0 and 1.
+/// Wireless: what the engines move is read back through the pad, so a
+/// missing byte, a swapped byte or a phase slip is a data mismatch and
+/// not an interpretation.
+using DmaLoop = SpiHost<link_sercom, loopback_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>>;
+
+volatile bool request_done = false;
+volatile bool host_live = false;   ///< routes SERCOM1_Handler to DmaLoop::isr()
+
+uint8_t tx[64];
+uint8_t rx[64];
+const uint8_t cmd3[3] = {0x5A, 0x0F, 0x33};
+
+bool polled_req(const uint8_t* txp, uint8_t* rxp, uint16_t len, uint8_t baud) {
+    DmaLoop::Request r{
+        .cs = {}, .dc = {}, .cmd = {}, .cmd_len = 0,
+        .tx = lend<Lease::reply>(txp),
+        .rx = lend<Lease::reply>(rxp),
+        .len = len, .reply = {},
+        .baud = baud, .mode = SpiMode::mode0, .polled = true,
+    };
+    return DmaLoop::start(r);
+}
+
+}   // namespace dh
+
+void th_dma() {
+    using dh::DmaLoop;
+    // The DMAC BLOCK is the app's to initialize, once - the engines arm
+    // CHANNELS of a controller somebody else owns (the Uart's own
+    // contract, and the reason SpiHost::init cannot do it: a shared
+    // block re-initialized per transport would stop every other
+    // channel).
+    const bool dmac_ok = Dmac::init();
+    bench.verdict("the DMA loop-back host comes up (Dmac::init once, then "
+                  "DmaTxEngine<0> + DmaRxEngine<1> on SERCOM1's own trigger codes)",
+                  dmac_ok && DmaLoop::init(clock));
+    DmaTxEngine<0>::clear_faults();
+
+    for (uint8_t i = 0; i < 64; ++i) {
+        dh::tx[i] = static_cast<uint8_t>(0x23u + i * 5u);
+        if (dh::tx[i] == spilink::magic) dh::tx[i] = 0x5Au;
+        dh::rx[i] = 0xEE;
+    }
+
+    // 1. The polled full-duplex request: the whole data phase moved by
+    // the two channels, the CPU spinning on the DMAC's completion.
+    bool ok = dh::polled_req(dh::tx, dh::rx, 48, 23) && DmaLoop::status() == spi_ok;
+    uint16_t mism = 0;
+    for (uint8_t i = 0; i < 48; ++i) {
+        if (dh::rx[i] != dh::tx[i]) ++mism;
+    }
+    print(serial, "  polled DMA loop-back, 48 bytes at 1 MHz: mism=", mism,
+          " status=", DmaLoop::status(), crlf);
+    bench.verdict("a POLLED request's data phase rides the two channels byte-exact "
+                  "(RX drains on the RXC trigger, TX feeds on DRE, NO kick - the "
+                  "enable under the standing level fires the first beat itself)",
+                  ok && mism == 0);
+
+    // 2. Two phases: the command bytes on the byte pump, the data on the
+    // engines - the handover inside one chip-select window.
+    for (uint8_t i = 0; i < 16; ++i) dh::rx[i] = 0xEE;
+    {
+        DmaLoop::Request r{
+            .cs = {}, .dc = {},
+            .cmd = lend<Lease::reply>(static_cast<const uint8_t*>(dh::cmd3)),
+            .cmd_len = 3,
+            .tx = lend<Lease::reply>(static_cast<const uint8_t*>(dh::tx)),
+            .rx = lend<Lease::reply>(dh::rx),
+            .len = 16, .reply = {},
+            .baud = command_baud, .mode = SpiMode::mode0, .polled = true,
+        };
+        ok = DmaLoop::start(r) && DmaLoop::status() == spi_ok;
+    }
+    mism = 0;
+    for (uint8_t i = 0; i < 16; ++i) {
+        if (dh::rx[i] != dh::tx[i]) ++mism;
+    }
+    bench.verdict("a TWO-PHASE polled request hands over from the byte pump to the "
+                  "engines mid-window, and rx captures the DATA phase alone",
+                  ok && mism == 0);
+
+    // 3. A null tx feeds dummies from a held source: in loop-back every
+    // received byte must be exactly 0xFF.
+    for (uint8_t i = 0; i < 16; ++i) dh::rx[i] = 0;
+    ok = dh::polled_req(nullptr, dh::rx, 16, command_baud) && DmaLoop::status() == spi_ok;
+    mism = 0;
+    for (uint8_t i = 0; i < 16; ++i) {
+        if (dh::rx[i] != 0xFFu) ++mism;
+    }
+    bench.verdict("a null tx sends 0xFF dummies from a HELD source address "
+                  "(increment off - one descriptor bit)",
+                  ok && mism == 0);
+
+    // 4. A null rx drains into the held sink - the completion still
+    // needs every byte RECEIVED, nobody keeps them.
+    ok = dh::polled_req(dh::tx, nullptr, 16, command_baud) && DmaLoop::status() == spi_ok;
+    bench.verdict("a null rx completes through the discard sink, spi_ok",
+                  ok);
+
+    // 5. The ISR-style request: the command phase pumped by
+    // SERCOM1_Handler, the handover made INSIDE the interrupt, the
+    // completion posted by DMAC_Handler - both vectors in one request.
+    for (uint8_t i = 0; i < 24; ++i) dh::rx[i] = 0xEE;
+    dh::request_done = false;
+    dh::host_live = true;
+    {
+        DmaLoop::Request r{
+            .cs = {}, .dc = {},
+            .cmd = lend<Lease::reply>(static_cast<const uint8_t*>(dh::cmd3)),
+            .cmd_len = 3,
+            .tx = lend<Lease::reply>(static_cast<const uint8_t*>(dh::tx)),
+            .rx = lend<Lease::reply>(dh::rx),
+            .len = 24, .reply = {},
+            .baud = command_baud, .mode = SpiMode::mode0, .polled = false,
+        };
+        ok = !DmaLoop::start(r);   // asynchronous: false = running on the ISRs
+    }
+    {
+        const uint32_t t0 = Ticker::millis();
+        while (!dh::request_done && Ticker::millis() - t0 < 100u) {
+        }
+    }
+    dh::host_live = false;
+    mism = 0;
+    for (uint8_t i = 0; i < 24; ++i) {
+        if (dh::rx[i] != dh::tx[i]) ++mism;
+    }
+    print(serial, "  ISR-style request: done=", dh::request_done, " mism=", mism,
+          " status=", DmaLoop::status(), crlf);
+    bench.verdict("an ISR-style request runs the command phase on the SERCOM vector, "
+                  "hands over to the engines inside the interrupt, and completes "
+                  "through the DMAC vector with spi_ok",
+                  ok && dh::request_done && mism == 0 && DmaLoop::status() == spi_ok);
+
+    // 6. The ladder to the generator's top, timed on the crystal. The
+    // point of the engines: back-to-back characters with the CPU out of
+    // the byte path, all the way to BAUD 0 = f_ref/2.
+    if (!ruler_ok) {
+        bench.verdict("the crystal ruler is available for the DMA rate ladder", false);
+    } else {
+        static const uint8_t bauds[] = {5, 2, 1, 0};   // 4, 8, 12, 24 MHz
+        bool exact_to_12m = true;
+        uint16_t mism_24m = 0;
+        bool none_short = true;
+        for (uint8_t k = 0; k < sizeof bauds; ++k) {
+            constexpr uint16_t n = 64;
+            for (uint8_t i = 0; i < n; ++i) dh::rx[i] = 0xEE;
+            const uint32_t t0 = wall();
+            (void)dh::polled_req(dh::tx, dh::rx, n, bauds[k]);
+            const uint32_t took = wall() - t0;
+            const uint32_t sck = spi_sck_hz(SysClock::hz, bauds[k]);
+            const uint32_t due = static_cast<uint32_t>(n) * 8u * (crystal_hz / sck);
+            mism = 0;
+            for (uint8_t i = 0; i < n; ++i) {
+                if (dh::rx[i] != dh::tx[i]) ++mism;
+            }
+            const uint32_t over_us =
+                (took > due ? took - due : 0u) / (crystal_hz / 1000000u);
+            print(serial, "  BAUD ", bauds[k], " = ", sck / 1000u, " kHz: 64 bytes in ",
+                  took, " crystal ticks (bits alone ", due, ", overhead ", over_us,
+                  " us for the WHOLE phase), mism=", mism, crlf);
+            if (bauds[k] == 0) {
+                mism_24m = mism;
+            } else if (mism != 0) {
+                exact_to_12m = false;
+            }
+            if (took < due) none_short = false;
+        }
+        bench.verdict("the DMA data phase is byte-exact THROUGH THE PAD to 12 MHz "
+                      "(f_ref/4) - back-to-back, no CPU in the byte path",
+                      exact_to_12m);
+        // The top rung is a LOOP-BACK SAMPLING boundary, not judged: at
+        // f_ref/2 the pad round trip meets the input sampler inside one
+        // 333 ns character, and what breaks cannot be attributed
+        // between the transmit and receive halves from one board. The
+        // wired SAM-SAM ladder is the instrument that can.
+        print(serial, "  the 24 MHz rung read ", 64 - mism_24m,
+              " of 64 correct - recorded, not judged (loop-back sampling at "
+              "f_ref/2)", crlf);
+        bench.verdict("and never faster than the arithmetic says (the bits are "
+                      "really on the wire)",
+                      none_short);
+    }
+
+    print(serial, "  engine faults across the letter: ", DmaTxEngine<0>::faults(), crlf);
+    bench.verdict("no 1.10.4-class fault was seen (two channels, low trigger "
+                  "density - the erratum's own density law)",
+                  DmaTxEngine<0>::faults() == 0);
+
+    DmaLoop::release();
+    Cs::set();
+    Cs::output();
+}
+
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -1612,6 +1878,14 @@ extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 /// or the protocol's. Both are SpiHost instantiations over the same
 /// Spi<1>, and only one of them ever has RXC armed at a time.
 extern "C" void SERCOM1_Handler() {
+    if (dh::host_live) {
+        // Letter h's ISR-style request: the command phase pumped here,
+        // the handover to the engines made inside this very interrupt.
+        if (dh::DmaLoop::isr()) {
+            dh::request_done = true;
+        }
+        return;
+    }
     if (bus_ao_live) {
         if (Loop::isr()) {
             isr_completions = isr_completions + 1;
@@ -1626,6 +1900,18 @@ extern "C" void SERCOM1_Handler() {
 }
 
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
+
+/// The engines' completions and faults - letter h's loop-back twin or
+/// letter d's on-the-wire one, whichever is live.
+extern "C" void DMAC_Handler() {
+    while (const auto irq = brio::Dmac::take_pending()) {
+        if (dma_bus_live) {
+            (void)DmaBus::dma_isr(irq->channel, irq->flags);
+        } else if (dh::DmaLoop::dma_isr(irq->channel, irq->flags)) {
+            dh::request_done = true;
+        }
+    }
+}
 
 int main() {
     SysClock::init();
@@ -1643,8 +1929,8 @@ int main() {
     print(serial, "  SERCOM1 function C: PA16 PAD0 (MOSI/DO), PA17 PAD1 (SCK), "
                   "PA18 PAD2 (SS, a GPIO chip select), PA19 PAD3 (MISO/DI)",
           crlf);
-    print(serial, "  peer: board A running spi_peer, commanded in band over the same "
-                  "four wires; the crystal ruler is ",
+    print(serial, "  peer: the other board running spi_peer (board D today), "
+                  "commanded in band over the same four wires; the crystal ruler is ",
           ruler_ok ? "up" : "DOWN", crlf);
     print(serial, "  the protocol holds its own chip select ", hold_spins,
           " spins = ", hold_us, " us around each window - see link_hold()'s comment "
@@ -1659,6 +1945,7 @@ int main() {
                  te_client);
     bench.letter('f', "loop-back, the SCK ladder, nine bits, BUFOVF and MSSEN", tf_wireless);
     bench.letter('g', "THE KERNEL: SpiBus over SpiHost, util unchanged", tg_kernel);
+    bench.letter('h', "THE DMA HOST: the data phase on the two engines", th_dma);
 
     bench.menu();
     bench.prompt();

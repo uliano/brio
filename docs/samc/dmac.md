@@ -99,15 +99,24 @@ harvest of a channel whose write-back is still the zeros `reset()` put
 there does not suspend anything at all: it answers "no beats done",
 which is both true and the only safe reply.
 
-**A TRIGGER IS AN EDGE, NOT A LEVEL.** A peripheral asserts its DMA
-request while its condition holds; the DMAC latches a pending trigger
-when the request RISES. A block armed while the condition is already
-true is therefore waiting for an edge that has already gone by, and
-the channel sits enabled with nothing pending and nothing moving. The
-engines expose `kick()` for it - one software trigger, which the owner
-issues when it can see the peripheral's flag already standing.
-SWTRIGCTRL raises the single pending bit only if it was clear
-(25.8.8), so a kick that races a real trigger is lost, never doubled.
+**A TRIGGER IS AN EDGE, NOT A LEVEL - PER REQUEST SHAPE, AND THE SHAPE
+IS THE PERIPHERAL MODE'S.** A peripheral asserts its DMA request while
+its condition holds; the DMAC latches a pending trigger when the
+request RISES. A block armed while the condition is already true is
+therefore waiting for an edge that has already gone by, and the
+channel sits enabled with nothing pending and nothing moving - the
+USART transmit measurement, and the reason the engines expose `kick()`:
+one software trigger, which the owner issues when it can see the
+peripheral's flag already standing. SWTRIGCTRL raises the single
+pending bit only if it was clear (25.8.8), so a kick that races a real
+trigger is lost, never doubled. BUT THE SAME SERCOM IN SPI HOST MODE
+MEASURES THE OTHER WAY: enabling a channel with DRE already standing
+fires the first beat by itself, and a kick on top of that start is one
+extra beat whose byte a full transmit buffer discards in silence
+(exactly one early character vanishes from the wire, at every rate;
+spi.md). So the kick is the OWNER's judgement about ITS peripheral's
+request shape - USART TX kicks, SPI's launch does not, a TC capture
+needs neither (below) - and the engine stays the mechanism.
 
 **Erratum 1.10.4 is live on this silicon, and the write-back is
 therefore checked, never believed.** "Concurrent channels triggers"
@@ -443,6 +452,17 @@ and the switch says so.
   gate: all 27 pre-existing SAM release images are byte-identical
   after them, and all 29 after the timers' pass, which added a suite and
   changed no line of code in this header.
+
+From `test_samc_spi` letters d and h (the serial engines' second
+SERCOM personality, and the block-request engines' own speed record):
+`start_fixed()`/`start_discard()` are the two sibling verbs the SPI
+host's null buffers wanted (one element sent `length` times, `length`
+elements drained into one cell - each differs from start() by one
+descriptor bit, and they are SIBLINGS rather than flags so every
+pre-existing call site stays byte-identical); the full-duplex pair
+moves a data phase byte-exact through 12 MHz in loop-back and carries
+a two-board link exact to 6 MHz with both ends on engines - and the
+SPI-mode kick inversion above is this campaign's finding.
 
 From `test_samc_timer_dma` (10 letters, 101 verdicts, wireless), which
 is the streaming engines' THIRD peripheral family and the one that

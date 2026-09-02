@@ -1,20 +1,23 @@
 # SERCOM SPI (SAM C21)
 
 > **PROVISIONAL.** Both roles are built and bench-verified against a
-> real second board (an AVR128DB48 peer - the cross-architecture bench),
-> and util's bus vocabulary runs over the host engine unchanged. What is
-> deliberately still open is listed under "Not covered yet".
+> real second board - first the AVR128DB48 peer (the cross-architecture
+> bench), then a second SAM C21 (the speed campaign's bench, where the
+> DMA engines were born) - and util's bus vocabulary runs over the host
+> engine unchanged. What is deliberately still open is listed under
+> "Not covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 32 (over the
 shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 `samc/spi.hpp` over `Sercom<n>`'s instance facts ([sercom.md](sercom.md)
 owns the address ladder, the clocks, the NVIC line and the DMAC trigger
 codes - one table, shared by every personality). Family fixture
-`test/family_samc/spi.cpp` + seven negatives; bench suite
-`test_samc_spi` (7 letters, 61 verdicts, two-board: board A runs
-`spi_peer`, commanded in band over the bus under test with the AVR
-campaign's own `spi_link.hpp` protocol - one source file, two
-architectures).
+`test/family_samc/spi.cpp` + ten negatives; bench suite `test_samc_spi`
+(8 letters, 71 verdicts, two-board: the peer board runs `spi_peer` -
+the avrdx original or its samc port, the suite asks ident and does not
+care - commanded in band over the bus under test with the AVR
+campaign's own `spi_link.hpp` protocol: one source file, two
+architectures and now two peers).
 
 ## What the silicon does
 
@@ -89,6 +92,36 @@ DO drives (32.6.3.4): a host then reads its own transmit line back -
 32 of 32 bytes identical on the bench, and nine-bit characters
 (CTRLB.CHSIZE = 9) loop 0x1FF and 0x100 back whole.
 
+**The DMA request shapes are NOT the USART's, and the kick doctrine
+inverts.** The UART campaign measured that a DMA channel armed while
+the peripheral's request LEVEL is already high sees no beat (the
+trigger latches on the RISE) and must be kicked once. In SPI HOST mode
+the TX request behaves as the OPPOSITE: enabling the channel with DRE
+already standing fires the first beat by itself, the chain sustains on
+the per-character rises, and a kick on top of that start is one EXTRA
+beat whose byte lands in a full transmit buffer and is DISCARDED in
+silence - measured three ways on the loop-back bench (with the kick,
+exactly one early character vanishes from the wire, the kick's own, at
+every rate; without it the stream is byte-exact). So `SpiHost`'s DMA
+launch kicks nothing; the trigger doctrine is PER SERCOM MODE, not per
+controller ([dmac.md](dmac.md) carries the qualification).
+
+**The DMA data phase is real and it is fast.** With the two engine
+slots named, a request's data phase rides the DMAC: RX drains DATA on
+the RXC trigger (its completion IS the transaction's - the last
+character is on the wire until it has been shifted back in), TX feeds
+DATA on DRE, and both back-to-back with no CPU in the byte path. In
+loop-back the phase is byte-exact through 12 MHz (f_ref/4); the 24 MHz
+rung reads 1 of 64 correct and is recorded, not judged - at f_ref/2
+the pad round trip meets the input sampler inside one 333 ns character
+and one board cannot attribute the breakage. ON THE WIRE, with both
+boards' ends on engines, the link is exact to 6 MHz back to back and
+breaks at 8 - where the peer still hears every byte exact, so even the
+hardware boundary is the ANSWER RELOAD (a DRE-triggered beat must land
+three SCK cycles before a character boundary, and at 8 MHz that window
+is under 625 ns of bus arbitration); the client's RECEIVE side stayed
+byte-exact to 24 MHz on the same climbs.
+
 **There is no event surface.** 32.5.6 and 32.6.4.3 are both "Not
 applicable" - the first peripheral in this stratum with nothing to
 publish under the EVSYS ruling. There is no runtime host demotion
@@ -129,15 +162,27 @@ item a reader would apply without checking the row.
   can). Role legality is checked IN THE ROLE (`spi_role_probe`), because
   the same harness is legal as a host and illegal as a client on the
   same row.
-- **`SpiHost<n, pads, generator>`** - the engine `util/spi_bus.hpp` (=
-  `BusMaster`) drives: the avrdx Request shape (cs/dc `PinRef`s,
-  two-phase cmd + full-duplex data, `Borrowed<..., Lease::reply>` spans,
-  `ReplyTo<SpiDone>`, per-request BAUD value and `SpiMode`, `polled`
-  completion style), `start()`/`isr()` per the bus_master contract,
-  `baud_for()`/`sck_hz()` and the optional bus-wide SCK ceiling that
-  `rebase()` re-resolves, `prime()` for callers that frame CS by hand.
-  Configuration changes are cached: a run of requests to one device
-  costs no disable/enable pair at all.
+- **`SpiHost<n, pads, generator, TxEngine, RxEngine>`** - the engine
+  `util/spi_bus.hpp` (= `BusMaster`) drives: the avrdx Request shape
+  (cs/dc `PinRef`s, two-phase cmd + full-duplex data, `Borrowed<...,
+  Lease::reply>` spans, `ReplyTo<SpiDone>`, per-request BAUD value and
+  `SpiMode`, `polled` completion style), `start()`/`isr()` per the
+  bus_master contract, `baud_for()`/`sck_hz()` and the optional
+  bus-wide SCK ceiling that `rebase()` re-resolves, `prime()` for
+  callers that frame CS by hand. Configuration changes are cached: a
+  run of requests to one device costs no disable/enable pair at all.
+  THE TWO ENGINE SLOTS default to `NoDmaEngine` (an engineless build is
+  byte-identical - the Uart's shape); named, they take the DATA PHASE
+  onto the DMAC, both or neither (the completion is the receive
+  block's), byte elements only, a null tx feeding 0xFF dummies from a
+  held source (`start_fixed`) and a null rx draining into a held sink
+  (`start_discard`). The command phase stays on the byte pump with the
+  handover made inside `isr()`; `dma_isr(channel, flags)` is the
+  DMAC-vector body and `status()` the completion's word - `spi_ok`, or
+  `spi_dma_fault` (the first engine-defined BusDone code) when a
+  transfer error or a bounded-timeout abandon ended the request. The
+  DMAC BLOCK is the app's: `Dmac::init()` once, before any engined
+  `init()`.
 - **`SpiClient<n, pads>`** - the polled surface plus ISR bodies:
   preload, SSDE, address recognition (FORM = 0x2 with AMODE/ADDR),
   `drive_output()` for a dark listener on a shared harness,
@@ -168,24 +213,31 @@ A client answering a stream (the one-ahead pump):
 
 ## Bench findings
 
-- The seven-wire cross-architecture bench: SAM SERCOM1 function C
-  (PA16 MOSI, PA17 SCK, PA18 SS, PA19 MISO) against the AVR peer's SPI0
-  ALT1 (PE0-PE3), both boards at 5 V. The same wires carry the SAM as
-  host (DOPO row 0x0) and as client (row 0x2).
+- TWO benches carried this driver. First the seven-wire
+  cross-architecture bench: SAM SERCOM1 function C (PA16 MOSI, PA17
+  SCK, PA18 SS, PA19 MISO) against the AVR peer's SPI0 ALT1 (PE0-PE3),
+  both boards at 5 V. Then the SAM-SAM five-wire bench (both boards'
+  PA16..PA19 straight through plus GND, [bench.md](bench.md)), where
+  the same suite scores 71/71 against the samc `spi_peer` and the DMA
+  findings below were measured. On either desk the same wires carry a
+  board as host (DOPO row 0x0) and as client (row 0x2).
 - All four transfer modes x both bit orders byte-exact in both
   directions; a deliberate DORD mismatch is an EXACT two-way bit
   reversal at both ends.
 - The rate ladder against the crystal: every BAUD really clocks its
   bits, never short (64-character bursts at 93 kHz to 4 MHz, polled-pump
   overhead 2.6..6.5 us per character, falling with rate).
-- Back-to-back characters (no inter-byte gap - one engine request) are
-  exact against the peer to 500 kHz always and to 1 MHz on most runs,
-  and break by 2 MHz: the boundary is the PEER'S POLLED TURNAROUND
-  (5..9 us per byte; a 1 MHz character is 10 us - marginal by
-  construction, observed landing on both sides of it - and a 2 MHz one
-  is 4 us), well below its CLK_PER/6 = 4 MHz electrical ceiling. The
-  AVR campaign's own suites reach that ceiling only by spending an
-  inter-byte gap.
+- Back-to-back characters (no inter-byte gap - one engine request)
+  bind at the PEER'S ANSWER RELOAD, and the ladder now has three
+  measured boundaries. The AVR peer's polled loop: exact to 500 kHz
+  always, 1 MHz a coin toss (its 5..9 us polled turnaround against a
+  10 us character), well below its CLK_PER/6 electrical ceiling. The
+  SAM peer's polled loop (precomputed stream, one-ahead reload): exact
+  to 2..3 MHz - and at the first failing rung the peer still HEARS
+  every byte exact, so the boundary is the reload, not the wire. BOTH
+  ENDS ON DMA ENGINES: exact to 6 MHz, breaking at 8 with the client
+  still hearing every byte - the hardware reload's own limit - and the
+  client's receive side byte-exact to 24 MHz throughout.
 - The kernel letter: four requests queued in one dispatch come back
   through their own ReplyTo in order; an over-full arbiter answers
   bus_rejected immediately; an idle bus votes ok on PrepareSleep, a busy
@@ -194,8 +246,6 @@ A client answering a stream (the one-ahead pump):
 
 ## Not covered yet
 
-- DMA-driven SPI (the trigger codes are published by `Sercom<n>`;
-  engines wait for a real streaming user - the UART's precedent).
 - Sleep: RUNSTDBY on silicon, SSDE as a wake source, erratum 1.17.20's
   standby cost (the power pass owns them).
 - On silicon: SSDE/SSL, address recognition (FORM = 0x2 - refusals are
@@ -204,6 +254,13 @@ A client answering a stream (the one-ahead pump):
   travelling overflow flavour.
 - Erratum 1.17.3's dummy-first-character (needs a host that RAISES SS
   mid-transmission on purpose; the peer holds it low, correctly).
+- A DMA-engined request under the kernel arbiter on the WIRE (letter g
+  runs the arbiter over the byte pump, letter h the engines ISR-style
+  in loop-back; the composition of the two is exercised, the product
+  is not).
+- The 24 MHz loop-back rung's attribution (transmit vs receive
+  sampling at f_ref/2) - the wired ladder brackets it between 6 and
+  8 MHz for the full link, but the single-board question stands.
 - `SercomPadPin`'s pin-reaches-pad claim is still the caller's
   (sercom.md's open device-table question, unchanged here).
 - THE PEER'S SELECT-WAIT WEDGE, neutralized but not explained: the

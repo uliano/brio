@@ -2241,6 +2241,68 @@ gets its dated home in `docs/design/` when taken.
   + suite row. JUDGMENT CALLS QUEUED - see memory
   samc-session-2026-08-31-i2c. PHASE F IS CLOSED; of the whole SAM
   plan only CAN (a second C21) remains.
+  **SAM-SAM SPI DMA CAMPAIGN DONE 2026-09-02 (by Fable's own hand on
+  the user's blessing - the two-C21 desk's first campaign, run
+  autonomously).** The desk became TWO SAM boards behind a USB hub
+  (positions C and D, manifest re-verified; D carries a 32.768 kHz
+  crystal on PA00/PA01, recorded for a future 32 kHz pass) with the
+  five-wire straight-through SPI link verified conductor by conductor
+  over SWD alone. samc/src/apps/spi_peer.cpp NEW - the avrdx peer
+  ported over the SAME spi_link.hpp (one wire format, two
+  architectures, two peers): dark listener, one-ahead pumps, raw-host
+  host_burst, regimes mapped onto PLOADEN, ident label = die serial -
+  and exchanges SERVED THROUGH ITS OWN DMA ENGINES by default, the new
+  protocol bit spilink::spare_polled_pump forcing the polled loop so
+  both boundaries stay measurable (the AVR peer ignores the bit by
+  construction). samc/spi.hpp: SpiHost grew TWO OPTIONAL DMA ENGINE
+  SLOTS (the Uart shape, NoDmaEngine default, engineless build
+  byte-identical): the DATA PHASE rides the DMAC - RX drains on RXC
+  and its block's completion IS the transaction's, TX feeds on DRE, a
+  null tx sends 0xFF from a held source, a null rx drains into a held
+  sink - the command phase stays on the byte pump with the handover
+  inside isr(), dma_isr(channel, flags) on the DMAC vector, status()
+  carrying spi_ok or spi_dma_fault (the first engine-defined BusDone
+  code, target-local), the polled spin bounded with abandon-and-report,
+  engines both-or-neither/byte-only/distinct-channels (three new
+  negatives), Dmac::init() the app's. dmac.hpp grew start_fixed()/
+  start_discard() as SIBLING VERBS - a defaulted argument was tried
+  first and MOVED three pre-existing images; the worktree gate caught
+  it and the siblings restored byte-identity, which is the ruling:
+  byte-identity outranks API economy. THE HEADLINE FINDING INVERTS THE
+  KICK DOCTRINE PER SERCOM MODE: in SPI host mode, enabling a TX
+  channel with DRE already standing FIRES THE FIRST BEAT BY ITSELF,
+  and a kick on top is one extra beat whose byte the full transmit
+  buffer discards in silence - measured three ways with the lost byte
+  moving exactly as the model predicts (the OPPOSITE of the UART
+  campaign's rise-latch wedge; dmac.md carries the qualification, the
+  SPI launch kicks nothing). Also paid for: stop() disarms a channel's
+  interrupts, so every error path that stops an engine re-arms it.
+  test_samc_spi grew to 8 letters / 71 verdicts, z 71/71 THREE TIMES
+  (two warm, one cold): letter d is now a TWO-LEG ladder to 24 MHz -
+  polled pumps exact to 2..3 MHz (the peer's answer reload; at the
+  first failing rung the peer still hears every byte exact), BOTH ENDS
+  ON ENGINES exact to 6 MHz breaking at 8 STILL in the reload, the
+  client's receive side clean to 24 MHz - and letter h is the DMA host
+  wireless (polled + ISR-style, the mid-window handover, dummies and
+  discard, loop-back exact to 12 MHz with the 24 MHz rung recorded not
+  judged). AN OPERATIONAL FINDING WITH TEETH: behind the hub the
+  Atmel-ICEs' usb_bulk CMSIS-DAP transport desynchronizes by one
+  packet under sustained traffic - bench.py now forces `cmsis-dap
+  backend hid` on every OpenOCD invocation, recovery is two
+  USBDEVFS_RESET ioctls 5 s apart or a replug, and a failed program
+  leaves PARTIAL FLASH: always check "Verified OK" (a silent failure
+  ran one z against stale firmware before the rule was learned).
+  Gates: md5 worktree 34/37 byte-identical + the two declared build-id
+  movers (uart/dma/serial_speed provably identical = the canaries' job
+  done by the gate), check_samc, check_family, host 24/24, avrdx
+  test_avr_spi/spi_peer compile with the grown protocol. Docs: spi.md
+  (DMA sections, the three-boundary ladder, gaps moved), dmac.md (the
+  per-mode doctrine + sibling verbs), bench.md (the two-board desk,
+  the hub finding, both rows). Nine judgment calls in memory
+  samc-session-2026-09-02-spi-dma. Deliberately not built: SpiClient
+  engine slots (the peer uses raw engines - a driver slot waits for a
+  device-shaped user), erratum 1.17.3's staging (now possible, not
+  done), SSDE/SSL and address-match on silicon (gaps stand).
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and

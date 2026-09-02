@@ -362,6 +362,15 @@ inline constexpr uint8_t flag_feed_tx = 0x08;
 /// Which received byte `flag_skip_write` refuses to answer.
 inline constexpr uint8_t skip_at = 3;
 
+/// `Params::spare` bit 0: serve this exchange with the POLLED PUMP even
+/// when the instrument has a faster engine. The SAM peer answers an
+/// exchange through its DMA engines by default (its polled loop's
+/// reload boundary is ~3 MHz, its engines' is the silicon's); this bit
+/// asks for the polled loop so a suite can measure BOTH boundaries.
+/// The AVR peer has no engines and ignores the bit - its pump is
+/// always the polled one, which is exactly what the bit names.
+inline constexpr uint8_t spare_polled_pump = 0x01;
+
 /// The two sides of the write-collision boundary, and the byte the
 /// client writes over its own answer at each of them.
 inline constexpr uint8_t wrcol_gap_at = 1;

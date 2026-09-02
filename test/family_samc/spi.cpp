@@ -8,6 +8,7 @@
 // per-package pad table. The board's own SERCOM1 on PA16..PA19 is an
 // app-level fact and is not compiled here.
 #include "samc/clock.hpp"
+#include "samc/dmac.hpp"
 #include "samc/spi.hpp"
 
 using namespace brio;
@@ -309,6 +310,43 @@ void resource_verbs() {
 // ---- the tasks -----------------------------------------------------------------
 using Host = SpiHost<0, host_pads>;
 using Peer = SpiClient<0, client_pads>;
+
+// The ENGINED host: the data phase on two DMAC channels. The engineless
+// default must stay byte-identical (the md5 gate's claim); this
+// instantiation proves the DMA half of the template compiles on every
+// package, dma_isr() included. Its negatives live in neg/ (same channel
+// twice, one engine alone, a halfword element).
+#include "samc/dmac.hpp"
+using EnginedHost = SpiHost<0, host_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>>;
+static_assert(EnginedHost::has_engines);
+static_assert(!Host::has_engines);
+static_assert(std::is_trivially_copyable_v<EnginedHost::Request>);
+
+void engined_verbs() {
+    constexpr SysClock clock;
+    (void)Dmac::init();
+    (void)EnginedHost::init(clock);
+    static uint8_t out[4] = {1, 2, 3, 4};
+    static uint8_t in[4] = {};
+    const EnginedHost::Request r{
+        .cs = Pin<'B', 0>::ref(),
+        .dc = {},
+        .cmd = {},
+        .cmd_len = 0,
+        .tx = lend<Lease::reply>(static_cast<const uint8_t*>(out)),
+        .rx = lend<Lease::reply>(in),
+        .len = 4,
+        .reply = {},
+        .baud = 23,
+        .mode = SpiMode::mode0,
+        .polled = true,
+    };
+    (void)EnginedHost::start(r);
+    (void)EnginedHost::isr();
+    (void)EnginedHost::dma_isr(0, 0x2);
+    (void)EnginedHost::status();
+    EnginedHost::release();
+}
 
 // The Request is the bus arbiter's token and must be copyable into its
 // pending FIFO (util/bus_master.hpp).

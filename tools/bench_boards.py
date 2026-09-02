@@ -66,16 +66,16 @@
 #  below is the label this desk position is EXPECTED to carry - the human
 #  (or a future bench.py check) compares banner against manifest.
 #
-#  TODAY'S REALITY: ONE board is on the desk and it is the SAM - position C,
-#  on the direct socket (usb-0:1, not the hub position A uses), with the
-#  Atmel-ICE serial J42700049508 wired to it and no jumper wires anywhere.
-#  Both AVR boards and their probes are unplugged; A and B are kept because
-#  an entry is a desk position, not a cable. NOTE that the probe serial in
-#  B's entry is the SAME ICE that now drives C - the probes have moved
-#  between boards more than once, which is exactly why every pairing here is
-#  re-verified at session start rather than remembered: an AVR board by
-#  resetting it over UPDI and watching which console prints the USERROW
-#  banner, a SAM board by reading its DSU DID and die serial over SWD.
+#  TODAY'S REALITY (2026-09-02): the desk is TWO SAM C21 boards behind a
+#  USB hub - positions C and D, one Atmel-ICE each, no jumper wires yet.
+#  Both AVR boards are unplugged; A and B are kept because an entry is a
+#  desk position, not a cable. NOTE that both ICE serials now appear on
+#  SAM positions while A's and B's entries still name them - the probes
+#  have moved between boards more than once, which is exactly why every
+#  pairing here is re-verified at session start rather than remembered:
+#  an AVR board by resetting it over UPDI and watching which console
+#  prints the USERROW banner, a SAM board by reading its DSU DID and die
+#  serial over SWD and by the reset-provokes-banner check on its console.
 # ============================================================================
 
 # The board types known to the build: keys of tools/bench.py's
@@ -138,13 +138,41 @@ BOARDS = {
         "board": "c21j",
         "id": None,
         "die_serial": "f9e78960-51574841-59202020-ff160321",
-        # Re-plugged 2026-08-31 (the energy experiment's office bench):
-        # the old 1.2 port now belongs to board A's CH340 - the stale
-        # match LOOKED ok in `bench.py list`, which is exactly why the
-        # banner check is the rule. Verified by flashing energy_meter
-        # over SWD and finding its HELP answering on this port.
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:2:1.0-port0",
+        # Re-plugged 2026-09-02: a USB hub entered the chain (the
+        # alternative was unpowering the desk), so every by-path below
+        # it changed - the console now sits behind the hub at 1.1.2.
+        # The stale-match lesson of the 2026-08-31 re-plug stands: the
+        # pairing is re-verified by resetting the chip over SWD and
+        # watching this port emit the firmware's banner.
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1.2:1.0-port0",
         "programmer": {"type": "openocd_cmsisdap", "serial": "J42700049508"},
+    },
+    "D": {
+        # The second SAM C21 board (2026-09-02): same C21J rev 1.1 design
+        # as position C - ATSAMC21J18A, DSU DID 0x11010500 (DEVSEL 0x00 =
+        # C21J18A, revision 5 = rev F), console CH340 on PB30/PB31 =
+        # SERCOM5 at 115200, SWD on PA30/PA31. Driven by the Atmel-ICE
+        # that used to sit on position A.
+        #
+        # UNLIKE BOARD C, this board carries a 32.768 kHz CRYSTAL on
+        # PA00/PA01 (XOSC32K) - so far unexercised anywhere in this
+        # stratum (every 32 kHz measurement to date used the internal
+        # RCs). A future pass gets a real 32 kHz reference from it:
+        # XOSC32K bring-up, RTC on a crystal, GCLK_SERCOM_SLOW for the
+        # I2C SMBus time-outs, watchdog/OSCULP32K cross-checks.
+        #
+        # The die serial below was read over SWD at this position (word 0
+        # at 0x0080A00C, words 1..3 at 0x0080A040..48 - the same factory
+        # identity mechanism as C's, untouchable by chip erase). The
+        # console pairing was verified causally: a reset issued through
+        # THIS probe provoked traffic on THIS port (the firmware it
+        # shipped with speaks an unknown baud; the first brio flash
+        # replaces it and the banner check becomes the usual one).
+        "board": "c21j",
+        "id": None,
+        "die_serial": "3a39fd67-51574841-59202020-ff160311",
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1.1:1.0-port0",
+        "programmer": {"type": "openocd_cmsisdap", "serial": "J42700051207"},
     },
 }
 

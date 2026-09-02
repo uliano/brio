@@ -1620,6 +1620,35 @@ public:
         return true;
     }
 
+    /**
+     * Send ONE element `length` times - the source address held still.
+     * The SPI host's dummy-fill for a read-only transfer, where a null
+     * tx means "0xFF on every character". A SIBLING VERB rather than a
+     * flag on start(): a defaulted argument re-compiles every existing
+     * call site, and the pre-existing images' byte-identity is a gate
+     * this stratum keeps (the descriptor differs by exactly one bit).
+     */
+    static bool start_fixed(const Elem* one, uint16_t length) {
+        if (busy_ || one == nullptr || length == 0u) {
+            return false;
+        }
+        if (!Channel::load(DmaTransfer{
+                .source = one,
+                .destination = data_,
+                .beats = length,
+                .beat = beat,
+                .source_increment = false,
+                .destination_increment = false,
+                .block_action = DmaBlockAction::interrupt,
+            })) {
+            return false;
+        }
+        in_flight_ = length;
+        busy_ = true;
+        Channel::enable(true);
+        return true;
+    }
+
 
     /**
      * @brief Raise ONE software trigger on the channel.
@@ -1765,6 +1794,33 @@ public:
                 .beat = beat,
                 .source_increment = false,
                 .destination_increment = true,
+                .block_action = DmaBlockAction::interrupt,
+            })) {
+            return false;
+        }
+        capacity_ = length;
+        taken_ = 0;
+        Channel::enable(true);
+        return true;
+    }
+
+    /// Drain `length` elements into ONE cell - the destination held
+    /// still. The SPI host's discard sink for a write-only transfer,
+    /// where the completion still needs every character RECEIVED (the
+    /// last one is on the wire until it is) but nobody wants the bytes.
+    /// A sibling verb, not a flag, for start_fixed()'s own reason.
+    static bool start_discard(Elem* sink, uint16_t length) {
+        if (sink == nullptr || length == 0u) {
+            return false;
+        }
+        (void)Channel::enable(false);
+        if (!Channel::load(DmaTransfer{
+                .source = data_,
+                .destination = sink,
+                .beats = length,
+                .beat = beat,
+                .source_increment = false,
+                .destination_increment = false,
                 .block_action = DmaBlockAction::interrupt,
             })) {
             return false;

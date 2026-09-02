@@ -909,14 +909,87 @@ public:
  * a zero-length request before the real one); the day a SAM device
  * really needs microseconds, samc/delay.hpp is the file that gets built.
  *
+ * THE TWO OPTIONAL DMA ENGINE SLOTS (the Uart's shape, for the same
+ * reason: an engineless build must stay byte-identical, so the slots
+ * default to NoDmaEngine and every DMA branch folds away under
+ * `if constexpr`). With DmaTxEngine/DmaRxEngine named, the DATA PHASE
+ * of every request runs on the DMAC: the RX channel drains DATA on the
+ * RXC trigger, the TX channel feeds it on DRE, and the transaction is
+ * complete when the RECEIVE block completes - the last character is on
+ * the wire until it has been shifted back in, so RX completion is the
+ * only edge that means "done", exactly the reason the byte pump arms
+ * RXC and never DRE. The command phase stays on the byte pump (it is a
+ * few bytes with a DC flip at its end); a null tx feeds 0xFF dummies
+ * from a held source address, a null rx drains into a held sink cell.
+ *
+ * THE DMAC BLOCK IS THE APP'S: Dmac::init() once, before any engined
+ * init() - the engines arm CHANNELS of a controller somebody else owns,
+ * and a driver that reset the shared block would stop every other
+ * channel in the program (the Uart's own contract, restated).
+ *
+ * THE KICK DOCTRINE INVERTS IN SPI MODE, and it was measured, not
+ * assumed. The UART campaign's finding was that a channel armed while
+ * the peripheral's request LEVEL is already high sees no beat (the
+ * trigger latches on the RISE) and must be kicked. THIS mode's TX
+ * request behaves as the opposite: ENABLING the channel with DRE
+ * already standing fires the first beat by itself, the chain then
+ * sustains on the per-character rises - and a kick on top of that
+ * start is one EXTRA beat whose byte lands in a full transmit buffer
+ * and is DISCARDED in silence (measured three ways on the loop-back
+ * bench: with the kick, exactly one early character vanishes from the
+ * wire - the kick's own - at every rate; without it the stream is
+ * byte-exact). So launch_dma() starts the two channels and kicks
+ * NOTHING; on silicon where the SPI request ever behaved the UART way
+ * the bounded fault path below is what would fire, and the kick
+ * question would reopen with that measurement in hand. RXC starts
+ * clear (flushed) and is a clean rise under either reading. Both
+ * engines' completions arrive on the DMAC's own vector, so AN APP THAT
+ * NAMES ENGINES BINDS DMAC_Handler TOO (below) - polled requests
+ * included: the spin waits on a flag that handler sets.
+ *
+ * A DMA TRANSFER ERROR (erratum 1.10.4's class) is the one failure this
+ * otherwise ACK-less bus can detect: the request completes with
+ * spi_dma_fault in status() instead of pretending, the engines'
+ * faults() counters carry the bill, and CS is raised so the bus is
+ * released either way.
+ *
  * ISR wiring (app glue, as usual - one vector for the whole SERCOM):
  *   extern "C" void SERCOM1_Handler() {
- *       if (SpiHw::isr()) { brio::post<SpiBus>(brio::TransferDone{brio::spi_ok}); }
+ *       if (SpiHw::isr()) { brio::post<SpiBus>(brio::TransferDone{SpiHw::status()}); }
+ *   }
+ *   // engine users bind the DMAC's vector as well:
+ *   extern "C" void DMAC_Handler() {
+ *       while (const auto irq = brio::Dmac::take_pending()) {
+ *           if (SpiHw::dma_isr(irq->channel, irq->flags)) {
+ *               brio::post<SpiBus>(brio::TransferDone{SpiHw::status()});
+ *           }
+ *       }
  *   }
  */
-template <uint8_t n, SpiPads pads, uint8_t generator = 0>
+
+/// The DMA transfer error as a BusDone status - the first engine-defined
+/// code the bus_master contract reserves (bus_engine_status). SPI has no
+/// wire-level failure, so on an engineless host status() is spi_ok by
+/// construction and this code is unreachable.
+inline constexpr uint8_t spi_dma_fault = bus_engine_status;
+
+template <uint8_t n, SpiPads pads, uint8_t generator = 0,
+          typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine>
 class SpiHost {
     using S = Spi<n>;
+
+    static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
+                  "the engine slots must name a complete type: a DmaTxEngine / "
+                  "DmaRxEngine from samc/dmac.hpp, or NoDmaEngine (the default)");
+    // BOTH OR NEITHER: the transaction's completion is the RECEIVE
+    // block's (see the class comment), so a TX engine alone has no edge
+    // to complete on, and an RX engine alone would race the byte pump
+    // for DATA.
+    static_assert(TxEngine::present == RxEngine::present,
+                  "brio SpiHost: name both DMA engines or neither - the data phase "
+                  "is full-duplex and its completion is the RECEIVE block's");
+    static_assert(uart_engines_distinct<TxEngine, RxEngine>(),
+                  "the two engines must ride two different DMA channels");
 
     static_assert(spi_pads_valid(pads),
                   "these SERCOM pads cannot carry an SPI host: CTRLA.DOPO fixes the "
@@ -945,6 +1018,9 @@ public:
     /// and Clock::hz is that rate), which is what lets init() derive the
     /// baud divisor from the app's Clock tag alone.
     static constexpr uint8_t core_generator = generator;
+
+    /// Whether the data phase rides the DMAC (the two engine slots).
+    static constexpr bool has_engines = TxEngine::present;
 
     struct Request {
         PinRef cs;   ///< asserted low around the transaction
@@ -1035,6 +1111,14 @@ public:
         if (!S::enable(true)) {
             return false;
         }
+        if constexpr (has_engines) {
+            // Claim the two channels for this SERCOM's data register and
+            // trigger codes. arm() also enables the DMAC's NVIC line -
+            // the app's DMAC_Handler binding is part of taking engines.
+            TxEngine::arm(S::data_address(), S::dma_tx_trigger());
+            RxEngine::arm(S::data_address(), S::dma_rx_trigger());
+        }
+        status_ = spi_ok;
 
         // The pads go to the SERCOM only now, with the peripheral
         // already enabled and SCK sitting at its configured idle level:
@@ -1113,6 +1197,7 @@ public:
         req_ = r;
         pos_ = 0;
         in_cmd_ = (r.cmd_len > 0);
+        status_ = spi_ok;
         if (total_len() == 0) {
             return true;   // nothing to move: complete on the spot
         }
@@ -1124,6 +1209,35 @@ public:
         }
         r.cs.clear();   // assert, active low
         S::flush_rx();  // a stale character would be captured as this one's
+
+        if constexpr (has_engines) {
+            if (!r.polled) {
+                if (in_cmd_) {
+                    // The command phase runs on the byte pump; isr()
+                    // hands over to the engines at its end.
+                    S::enable_rxc_interrupt(true);
+                    S::data(req_.cmd.get()[0]);
+                    return false;
+                }
+                launch_dma();
+                return false;   // dma_isr() is the completion edge
+            }
+            // Polled with engines: the command phase spins per byte,
+            // the data phase spins on the DMAC's completion - which
+            // still arrives through DMAC_Handler / dma_isr(), so the
+            // binding is not optional for polled requests either.
+            S::enable_rxc_interrupt(false);
+            for (uint8_t i = 0; i < r.cmd_len; ++i) {
+                (void)xfer(r.cmd.get()[i]);
+            }
+            r.dc.set();
+            if (r.len != 0) {
+                launch_dma();
+                spin_dma();
+            }
+            r.cs.set();
+            return true;
+        }
 
         if (!r.polled) {
             S::enable_rxc_interrupt(true);
@@ -1180,6 +1294,28 @@ public:
         }
         const uint8_t in = static_cast<uint8_t>(S::data());
 
+        if constexpr (has_engines) {
+            // Only the COMMAND phase ever runs on this pump: at its end
+            // the engines take the data phase and this interrupt goes
+            // quiet. The received byte is the command's echo - discarded,
+            // as the engineless path discards it too.
+            (void)in;
+            ++pos_;
+            if (pos_ >= req_.cmd_len) {
+                in_cmd_ = false;
+                S::enable_rxc_interrupt(false);
+                req_.dc.set();
+                if (req_.len == 0) {
+                    req_.cs.set();   // a command-only request: done here
+                    return true;
+                }
+                launch_dma();
+                return false;        // dma_isr() is the completion edge
+            }
+            S::data(req_.cmd.get()[pos_]);
+            return false;
+        }
+
         if (!in_cmd_ && req_.rx.get() != nullptr) {
             req_.rx.get()[pos_] = in;
         }
@@ -1199,8 +1335,58 @@ public:
         return false;
     }
 
+    /**
+     * @brief DMAC interrupt body - call from DMAC_Handler() with each
+     * take_pending() result (engine builds only; on an engineless host
+     * this compiles away).
+     *
+     * @return true when the transaction just completed (CS released):
+     * the edge on which the glue posts TransferDone{status()}.
+     *
+     * A TRANSFER ERROR ON EITHER CHANNEL ENDS THE TRANSACTION with
+     * spi_dma_fault: a TX block the silicon stopped running starves the
+     * receive side for ever (the UART campaign's wedge, met here as a
+     * bounded failure instead), and an RX error means the count can no
+     * longer be trusted. Both channels are put away, CS is raised, and
+     * the fault is REPORTED rather than retried - retry policy is the
+     * bus AO's, not the engine's.
+     */
+    [[gnu::always_inline]] static bool dma_isr(uint8_t channel, uint8_t flags) {
+        if constexpr (has_engines) {
+            // take_pending() aligns the flags to bit 0 = TERR, the same
+            // layout CHINTFLAG has - so the device header's own mask
+            // asks the question without this file including dmac.hpp.
+            const bool error = (flags & DMAC_CHINTFLAG_TERR_Msk) != 0u;
+            if (channel == TxEngine::channel) {
+                if (error) {
+                    (void)TxEngine::abandon();
+                    return finish_dma(spi_dma_fault);
+                }
+                (void)TxEngine::complete();
+                return false;   // the transmit side never completes a transaction
+            }
+            if (channel == RxEngine::channel) {
+                if (!dma_active_) {
+                    return false;
+                }
+                return finish_dma(error ? spi_dma_fault : spi_ok);
+            }
+        }
+        (void)channel;
+        (void)flags;
+        return false;
+    }
+
+    /// The engine's completion status, read by the app glue for the
+    /// TransferDone payload. Always spi_ok on an engineless host.
+    static uint8_t status() { return status_; }
+
     /// Hand the pins back, then the peripheral.
     static void release() {
+        if constexpr (has_engines) {
+            TxEngine::stop();
+            RxEngine::stop();
+        }
         Nvic::disable(S::irq());
         S::release();
         DoPin::release();
@@ -1211,6 +1397,82 @@ public:
     }
 
 private:
+    // The engines carry BYTES: the Request is byte-oriented and the
+    // beat is the element (dmac.hpp). Checked here so a wider engine is
+    // refused at ITS spelling, not at a pointer mismatch three screens
+    // down.
+    static_assert([] {
+        if constexpr (TxEngine::present) {
+            return std::is_same_v<typename TxEngine::element, uint8_t> &&
+                   std::is_same_v<typename RxEngine::element, uint8_t>;
+        } else {
+            return true;
+        }
+    }(), "brio SpiHost: the DMA engines must carry uint8_t elements - the "
+         "Request's buffers are bytes");
+
+    /// Start the data phase on the two channels. The RECEIVE channel
+    /// goes first (its trigger is a rise that has not happened yet);
+    /// the transmit one starts SECOND AND IS NOT KICKED - in SPI mode
+    /// the standing DRE level fires the first beat at the enable
+    /// itself, and a kick would add a beat the full transmit buffer
+    /// discards (the class comment carries the measurement).
+    static void launch_dma() {
+        dma_done_ = false;
+        dma_active_ = true;
+        if (req_.rx.get() != nullptr) {
+            (void)RxEngine::start(req_.rx.get(), req_.len);
+        } else {
+            (void)RxEngine::start_discard(&rx_sink_, req_.len);
+        }
+        if (req_.tx.get() != nullptr) {
+            (void)TxEngine::start(req_.tx.get(), req_.len);
+        } else {
+            (void)TxEngine::start_fixed(&tx_dummy_, req_.len);
+        }
+    }
+
+    /// One exit for the data phase, from either flavour of dma_isr().
+    /// @return true when the ISR-style caller should post completion.
+    static bool finish_dma(uint8_t st) {
+        if (st != spi_ok) {
+            status_ = st;
+            (void)TxEngine::abandon();   // re-claims: interrupts re-armed
+            RxEngine::stop();
+            // stop() disarms the channel's interrupts with it; the next
+            // transaction needs the claim back.
+            RxEngine::arm(S::data_address(), S::dma_rx_trigger());
+        }
+        dma_active_ = false;
+        dma_done_ = true;
+        if (!req_.polled) {
+            req_.cs.set();
+            return true;
+        }
+        return false;
+    }
+
+    /// The polled request's wait on the DMAC completion - bounded, like
+    /// every wait in this stratum (the slowest character is 512 x 9
+    /// core-clock cycles, and the budget scales with the length).
+    static void spin_dma() {
+        uint32_t spins = 200000u + 6000u * static_cast<uint32_t>(req_.len);
+        while (!dma_done_ && spins-- != 0u) {
+        }
+        if (!dma_done_) {
+            // Nothing completed inside a generous bound: the 1.10.4
+            // class of death, or a clock that stopped. Put both
+            // channels away and REPORT - never hang the dispatch.
+            // abandon() re-claims by itself; the stopped receive
+            // channel gets its claim (interrupts included) re-armed.
+            (void)TxEngine::abandon();
+            RxEngine::stop();
+            RxEngine::arm(S::data_address(), S::dma_rx_trigger());
+            dma_active_ = false;
+            status_ = spi_dma_fault;
+        }
+    }
+
     /// A slower BAUD is a LARGER register value, so the ceiling clamps
     /// from below.
     static uint8_t clamp(uint8_t b) {
@@ -1277,6 +1539,17 @@ private:
     static inline Request req_{};
     static inline uint16_t pos_ = 0;
     static inline bool in_cmd_ = false;
+    /// The last completion's status (spi_ok / spi_dma_fault). Plain: it
+    /// is written before the completion edge and read after it.
+    static inline uint8_t status_ = spi_ok;
+    /// ISR-written, thread-polled (the polled DMA spin): volatile, the
+    /// ticker doctrine.
+    static inline volatile bool dma_done_ = false;
+    static inline volatile bool dma_active_ = false;
+    /// The write-only transfer's discard cell and the read-only one's
+    /// dummy source (see launch_dma).
+    static inline uint8_t rx_sink_ = 0;
+    static constexpr uint8_t tx_dummy_ = 0xFF;
     /// The configuration really in the registers - the cache `apply()`
     /// compares against, and the thing a re-init overwrites wholesale.
     static inline SpiConfig applied_{};
