@@ -58,17 +58,24 @@ measured from three sides:
   (MSTATUS 0x72, the AVR campaign's own nobody-home signature). A
   client must follow foreign edges wherever they land; per-edge
   glitches reset its machinery every time.
-- **AND THE FIX WAS MEASURED, NOT JUST NAMED.** The SAM-SAM desk wired
-  the I2C pair SHORT AND SEPARATE (bench.md), and the wall went with
-  the bundle: the whole suite runs with BOTH ends' cores at 48 MHz -
+- **AND THE FIX WAS MEASURED, NOT JUST NAMED - with its confound
+  stated.** The SAM-SAM desk wired the I2C pair SHORT AND SEPARATE
+  (bench.md), and the wall went with the old wiring: the whole suite
+  runs with BOTH ends' cores at 48 MHz -
   the samc peer's client serves the command channel at the very rate
   that was stone deaf on the bundle, the DUT's client letter takes the
   foreign 100 kHz host's burst byte-exact and TIGHTENS BACK into the
   data verdicts it used to decline, and fast-mode-plus (unreachable at
   the bundle's forced 6 MHz core) runs 25 tenures x 16 bytes in 6 ms,
-  all i2c_ok - this stratum's first Fm+ on a wire. The original ladder
-  stands as the measured hazard of a bundled pair; the clean pair is
-  the measured absence of it.
+  all i2c_ok - this stratum's first Fm+ on a wire. TWO KNOBS CHANGED
+  TOGETHER, though, and the experiment does not split them: the new
+  pair is both shorter AND out of the bundle. Since the identified
+  aggressor was largely SCL's own edges coupling into the released SDA
+  - and SDA and SCL are still adjacent, being a pair - the LENGTH of
+  the parallel run (which mutual capacitance scales with) is plausibly
+  the dominant knob and the bundle its multiplier. What is measured:
+  the long bundled pair dies above a 6 MHz core; the short separated
+  pair is clean at 48. The split between length and separation is not.
 
 ## What the silicon does
 
