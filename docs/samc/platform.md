@@ -16,8 +16,10 @@ PM (power manager) ch. 19 - and errata DS80000740S (1.8.13, 1.8.14,
 1.8.7 and 1.8.5 all touch this chapter; see "What the silicon does").
 Drivers: `samc/platform_sam.hpp` (`SamPlatform`, this target's
 realization of the kernel's `Platform` concept), `samc/nvic.hpp`
-(`InterruptGuard`, `Nvic`), `samc/ticker.hpp` (`BasicTicker`,
-`SysTickInterruptGuard`), `samc/delay.hpp` (`delay_us`, the capped
+and `samc/ticker.hpp` (this family's includes of the core stratum's
+`armv6m/nvic.hpp` - `InterruptGuard`, `Nvic` - and
+`armv6m/ticker.hpp` - `BasicTicker` - plus the SAM's own
+`SysTickInterruptGuard` and `Ticker` alias; [../armv6m/README.md](../armv6m/README.md)), `samc/delay.hpp` (`delay_us`, the capped
 microsecond busy-wait over SysTick), `samc/sleep.hpp` (`Pm`,
 `SamSleepSite`); the
 target-independent power model above the last of these is

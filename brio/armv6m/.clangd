@@ -1,0 +1,6 @@
+# The armv6m core stratum has no database of its own (it is included by
+# the samc and stm32g0 strata, each after its own device header); parse
+# it against the SAM project's database, the older of its two users, so
+# the CMSIS core symbols resolve. Path relative to this file.
+CompileFlags:
+  CompilationDatabase: ../../build-cmake/samc21j-release

@@ -13,7 +13,10 @@ stratum deliberately does not touch yet) - and errata ES0548 Rev 3
 (no item touches this chapter on revision Z). Drivers:
 `stm32g0/platform_stm32.hpp` (`Stm32Platform`, this target's
 realization of the kernel's `Platform` concept), `stm32g0/nvic.hpp`
-(`InterruptGuard`, `Nvic`), `stm32g0/ticker.hpp` (`BasicTicker`). The
+and `stm32g0/ticker.hpp` (this family's includes of the core stratum's
+`armv6m/nvic.hpp` - `InterruptGuard`, `Nvic` - and `armv6m/ticker.hpp`
+- `BasicTicker` - plus the `Ticker` alias;
+[../armv6m/README.md](../armv6m/README.md)). The
 crt is `stm32g0/src/glue/startup_stm32g0b1.cpp` +
 `stm32g0/ld/stm32g0b1re.ld` in the build project. The family fixture
 is `test/family_stm32g0/platform.cpp` under `tools/check_stm32g0.sh`.
@@ -70,7 +73,8 @@ BKPT with no debugger escalates to the crt's distinct
   `now()`/`ticks_per_second` (the ticker's), `atomic_width` 4,
   `panic_record()` in `.noinit`.
 - `InterruptGuard`, `enable_interrupts()`, `disable_interrupts()`,
-  `interrupts_enabled()`, `irq_priority_levels` (4) - nvic.hpp.
+  `interrupts_enabled()`, `irq_priority_levels` (4) - armv6m/nvic.hpp
+  through stm32g0/nvic.hpp.
 - `Nvic` - `enable`/`disable`/`enabled`, `set_pending`/`clear_pending`/
   `pending`, `priority` (refuses a level the core does not have), by
   the header's IRQn value.

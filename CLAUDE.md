@@ -82,8 +82,10 @@ This file has no decision log any more: the former log was migrated to
 `brio` (`brio/`) is a header-only C++23 (gnu++23) framework for
 bare-metal MCUs built around a cooperative active-object kernel,
 written clean-room after Samek's book (never the QP source). One flat
-namespace `brio`; six strata under `brio/` - `kernel/` (pure
+namespace `brio`; seven strata under `brio/` - `kernel/` (pure
 logic, includes nothing of brio), `util/` (services over the kernel),
+`armv6m/` (the CORE stratum both Cortex-M0+ families include after
+their device header: NVIC + PRIMASK guard, the SysTick ticker),
 `avrdx/` (everything that knows `avr/io.h`: AVR DA/DB, bench chip
 AVR128DB48), `samc/` (everything that knows `sam.h`: SAM C21,
 Cortex-M0+, bench chip ATSAMC21J18A), `stm32g0/` (everything that
@@ -105,9 +107,11 @@ the family - the known landing names, never used early: avrdx ->
 avrxt (Microchip's sigla for the modern-AVR core) when an EA/mega0
 part proves it shares the stratum; samc -> sam0 if a D21 arrives; stm32g0 shares its name with
 the G0x0 value line if a chip ever proves it; an `armv6m/` core
-stratum factored at the SECOND ARM family - which is NOW (stm32g0 is
-it), and the factoring is its own pass AFTER the bring-up, with both
-implementations in hand and a byte-identity gate on every samc image.
+stratum factored at the SECOND ARM family - DONE 2026-09-02 the day
+the stm32g0 arrived: brio/armv6m/{nvic,ticker}.hpp, the two families'
+nvic/ticker headers reduced to device-include + core-include + their
+own extras, every one of the 42 samc + stm32g0 images byte-identical
+before and after (worktree gate with pinned mtimes).
 
 ## Governing rule and stability hierarchy
 
@@ -230,6 +234,7 @@ gets its dated home in `docs/design/` when taken.
 - **THIRD TARGET: STM32G0 - BRING-UP DONE 2026-09-02 (phases 0-3 of
   memory stm32g0-bringup-plan, BY FABLE'S OWN HAND in one session,
   from the plan to a console answering on the third architecture).**
+  PHASE 4 DONE the same evening: the armv6m/ factoring (above).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device
@@ -3602,13 +3607,13 @@ brio/                    the framework, four strata:
                            (listen/unlisten); concepts EventGenerator/
                            EventUser; tables on demand
   samc/                  everything that knows sam.h (SAM C21, Cortex-M0+)
-    nvic.hpp               InterruptGuard (PRIMASK) + Nvic (enable/pend/priority)
+    nvic.hpp               "sam.h" + armv6m/nvic.hpp (the guard and Nvic live there)
     platform_sam.hpp       SamPlatform (idle takes whatever PM.SLEEPCFG holds -
                            SCR.SLEEPDEEP is never written - with erratum
                            1.8.13's guard around a standby WFI; BKPT, .noinit
                            breadcrumb, atomic_width 4)
-    ticker.hpp             BasicTicker<tps> over SysTick (Ticker = 1000 Hz) +
-                           advance(n), the standby resync's landing point +
+    ticker.hpp             armv6m/ticker.hpp's BasicTicker (Ticker = 1000 Hz,
+                           advance(n) the standby resync's landing point) +
                            SysTickInterruptGuard, erratum 1.8.13's workaround
                            in the file that owns the register. The tick stops
                            in standby (SysTick rides the CPU clock) and the
@@ -3830,14 +3835,20 @@ brio/                    the framework, four strata:
                            SIBLING of the kernel's PanicRecord and not an
                            extension of it - a hardware trace is silicon
                            this stratum happens to have
+  armv6m/                the CORE stratum: what both Cortex-M0+ families share
+    nvic.hpp               InterruptGuard (PRIMASK) + Nvic + irq_priority_levels
+                           - reads CMSIS-Core only, #errors if included before
+                           a device header (the family's nvic.hpp does both)
+    ticker.hpp             BasicTicker<tps> over SysTick with advance/pause/
+                           resume; each family's ticker.hpp adds its alias
+                           and its own guards
   stm32g0/               everything that knows stm32g0xx.h (STM32G0, Cortex-M0+)
     device_tables.hpp      THE RESERVE: GPIO ports, USART instances, APB
                            enables, CCIPR multiplexers and the SHARED
                            VECTORS, read off the device header (the last
                            off the device-select macro)
-    nvic.hpp               InterruptGuard (PRIMASK) + Nvic - samc's twin
-    ticker.hpp             BasicTicker over SysTick (1000 Hz) + advance -
-                           samc's twin; both are the armv6m/ candidates
+    nvic.hpp               "stm32g0xx.h" + armv6m/nvic.hpp
+    ticker.hpp             armv6m/ticker.hpp + the Ticker alias (1000 Hz)
     platform_stm32.hpp     Stm32Platform (WFI = Sleep mode, SLEEPDEEP never
                            written; BKPT; .noinit breadcrumb; atomic_width 4)
     flash.hpp              FlashWaitStates (table 13, the read-back rule),

@@ -92,8 +92,9 @@ portability readable at a glance:
 | `kernel/` | queues, scheduler, FSM, delivery, time events, panic - pure logic | nothing of brio |
 | `util/` | services on top of the kernel: `SerialPort`, `BusMaster` (SPI/I2C arbiter), `print`, `Ring`, line parsers | `kernel/` |
 | `avrdx/` | everything that knows `avr/io.h`: clock, pins, UART, SPI, TWI, ticker, `AvrPlatform` | `kernel/`, `util/` |
-| `samc/` | everything that knows `sam.h` (Cortex-M0+): clock tree, pins, SERCOM UART, SysTick ticker, `SamPlatform` | `kernel/`, `util/` |
-| `stm32g0/` | everything that knows `stm32g0xx.h` (Cortex-M0+): RCC/PLL, GPIO, USART, SysTick ticker, `Stm32Platform` | `kernel/`, `util/` |
+| `armv6m/` | what ARM designed into every Cortex-M0/M0+ and both ARM families share: NVIC + PRIMASK guard, the SysTick ticker | `util/` (and the including family's device header) |
+| `samc/` | everything that knows `sam.h` (Cortex-M0+): clock tree, pins, SERCOM UART, `SamPlatform`; its NVIC and ticker are `armv6m/`'s | `kernel/`, `util/`, `armv6m/` |
+| `stm32g0/` | everything that knows `stm32g0xx.h` (Cortex-M0+): RCC/PLL, GPIO, USART, `Stm32Platform`; its NVIC and ticker are `armv6m/`'s | `kernel/`, `util/`, `armv6m/` |
 | `host/` | `HostPlatform`: the native test "target" (virtual clock, recording idle/break) | `kernel/` |
 
 Targets are siblings, never meet in one binary, and are the only place

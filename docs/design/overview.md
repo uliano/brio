@@ -239,6 +239,17 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   per-timer routing: the answer decides what goes above the concept
   boundary (little) and what stays in the target file (most). Nothing
   written for AVR may make the second target harder than it already is.
+- **A core stratum sits between util/ and the families that share
+  a core.** `armv6m/` holds what ARM designed and every Cortex-M0/M0+
+  vendor ships unchanged - the NVIC and PRIMASK guard, the SysTick
+  ticker - and nothing of any vendor: it reads CMSIS-Core symbols only
+  and refuses to be included before a family's device header, which
+  is what brings those symbols. Factored at the second ARM family with
+  both copies in hand and every image of both families byte-identical
+  before and after; the Platform, the clock, the pins, the crt and the
+  errata stay per family, because that is where they differ. A RISC-V
+  family would get its own core stratum the same way, at its second
+  member, never earlier.
 - **Board facts vs device facts.** Which timer reaches which port,
   which USART sits on which pins per route, are facts of the DEVICE
   (today tables inside `tca.hpp`, `usart.hpp` - the seed of a per-family
