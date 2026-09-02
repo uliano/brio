@@ -2371,6 +2371,34 @@ gets its dated home in `docs/design/` when taken.
   measured hazard, the clean pair as the measured absence), bench.md
   wiring + rows + end state. Judgment calls in memory
   samc-session-2026-09-02-i2c.
+  **THE SMBUS TIME-OUT LETTER DONE 2026-09-02 (same desk-day's third
+  campaign, user-prompted) - AND THE OBVIOUS READING OVERTURNED.**
+  test_samc_i2c grew letter j (z 39 -> 47; 47/47 x3 incl. cold): the
+  meter is OSC32K with its factory trim on a generator of its own,
+  WEIGHED ON FREQM before being trusted (32.59 kHz), the shared SLOW
+  channel moved with the PCHCTRL.CHEN synchronization waited out (the
+  fire-and-forget disconnect() race, met again and coded around).
+  THREE FINDINGS, none in the chapter: (1) the host's SMBus time-outs
+  POLICE THE HOST'S OWN CLOCK HOLD, NOT THE WIRE - 80 ms of client
+  stretch under both enables completes i2c_ok with no time-out bit
+  ever rising (the CTRLA descriptions foretell it: every remedy is an
+  automatic STOP, physically impossible under a client's hold), while
+  the host's own unserviced MB trips LOWTOUT at a measured 30 ms
+  (25..35 window to the letter) with the exact documented signature
+  (STATUS.LOWTOUT+BUSERR, INTFLAG.ERROR beside the standing MB);
+  (2) THE COUNTER ARMS AT configure() - enables left in CTRLA by an
+  earlier configuration time nothing until a fresh
+  disable/write/enable cycle; (3) A WRONG-RATE METER IS MUTE, NOT
+  SCALED - with the SLOW channel at 48 MHz the same hold never trips
+  at all (a clock-domain limit), which is why the letter weighs its
+  meter first. CONSEQUENCE, stated in i2c.md: a bus hung BY A CLIENT
+  stays software's to bound (deadline + unstick) - the hardware
+  time-outs bound only this host's own software, a case a live ISR
+  never produces; the earlier doc line that promised LOWTOUT as "the
+  hardware answer to BusMaster's no-timeout" was falsified by the
+  bench and rewritten. Gates: md5 36/39 + the two build-id movers +
+  the suite, check_samc, host 24/24. Docs i2c.md (findings + the gap
+  closed, MEXT stated) and bench.md moved in the same change.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and

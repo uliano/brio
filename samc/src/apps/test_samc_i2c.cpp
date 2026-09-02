@@ -29,8 +29,10 @@
 #include <stdint.h>
 
 #include "samc/clock.hpp"
+#include "samc/freqm.hpp"
 #include "samc/i2c.hpp"
 #include "samc/nvic.hpp"
+#include "samc/osc32kctrl.hpp"
 #include "samc/pin.hpp"
 #include "samc/platform_sam.hpp"
 #include "samc/sercom.hpp"
@@ -972,6 +974,263 @@ void ti_unstick() {
                   command(Op::ping));
 }
 
+
+// ===========================================================================
+// j - THE SMBUS TIME-OUTS: a hung bus becomes a STATUS, on a real meter
+// ===========================================================================
+
+/// The generator the SLOW channel borrows for this letter.
+constexpr uint8_t slow_gen = 4;
+
+/// Move the shared SLOW channel to a generator, WITH the wait the
+/// fire-and-forget disconnect() does not give: PCHCTRL.CHEN is
+/// write-synchronized (16.6.3.3), and a connect() issued while the
+/// clear is still crossing is discarded - the SPI campaign measured
+/// that exact race, and the first version of this letter re-ran it:
+/// the channel ended up DISCONNECTED and no time-out ever counted, at
+/// any meter rate.
+bool move_slow(uint8_t generator) {
+    GclkChannel::disconnect(Sercom<3>::gclk_slow_id());
+    bool clear = false;
+    for (uint32_t k = 0; k < 100000u && !clear; ++k) {
+        clear = !GclkChannel::connected(Sercom<3>::gclk_slow_id());
+    }
+    return clear && GclkChannel::connect(Sercom<3>::gclk_slow_id(), generator);
+}
+
+/// The engine's own configuration plus the time-out enables, written
+/// through the proper configure() while disabled. The SPEED stays the
+/// engine's cached standard_100k, so its apply() will not rewrite
+/// CTRLA underneath these bits on same-speed tenures.
+bool timeouts_on(bool low, bool sext) {
+    I2cmConfig c{};
+    c.pads = bus_pads;
+    c.speed = I2cSpeed::standard_100k;
+    c.baud = I2cHw::baud_of(I2cSpeed::standard_100k);
+    c.inactive_timeout = I2cInactiveTimeout::us205;
+    c.scl_low_timeout = low;
+    c.client_extend_timeout = sext;
+    if (!Raw::configure(c) || !Raw::enable(true)) return false;
+    return Raw::force_idle();
+}
+
+/// One tenure with the STATUS register sampled LIVE while it runs: the
+/// engine's finish() sweeps the W1C bits, so which time-out fired can
+/// only be seen before the completion - the letter-g technique, turned
+/// on the flags instead of the bus state.
+struct TimedTenure {
+    uint8_t status = 0xEE;
+    uint32_t ms = 0;
+    uint16_t status_seen = 0;   ///< every STATUS bit that rose in the window
+};
+
+TimedTenure timed_write(uint8_t addr, uint8_t n, uint16_t deadline_ms) {
+    TimedTenure t{};
+    for (uint8_t i = 0; i < n; ++i) txbuf[i] = static_cast<uint8_t>(0x21u + i);
+    xfer_done = false;
+    const uint32_t t0 = Ticker::millis();
+    if (I2cHw::start({.addr = addr,
+                      .tx = lend<Lease::reply>(static_cast<const uint8_t*>(txbuf)),
+                      .tx_len = n,
+                      .rx = {},
+                      .rx_len = 0,
+                      .reply = {},
+                      .speed = I2cSpeed::standard_100k})) {
+        t.status = I2cHw::status();
+        return t;
+    }
+    while (!xfer_done && Ticker::millis() - t0 < deadline_ms) {
+        t.status_seen = static_cast<uint16_t>(t.status_seen | Raw::status());
+    }
+    t.ms = Ticker::millis() - t0;
+    if (xfer_done) {
+        t.status = xfer_status;
+    } else {
+        I2cHw::release();
+        (void)engine_up();
+    }
+    return t;
+}
+
+void tj_timeouts() {
+    if (!engine_up()) {
+        bench.verdict("the engine comes up", false);
+        return;
+    }
+    if (!need_peer()) return;
+
+    // THE METER: OSC32K with its factory trim (the 21.5.9 coupling -
+    // untrimmed this RC is 44% fast) on a generator of its own, and
+    // the SHARED SLOW channel moved onto it. An internal root is
+    // enough: the spec windows are watchdog-coarse (25..35 ms) and
+    // +6 per mille of trimmed RC is noise against them.
+    const uint8_t trim = Osc32k::factory_calib();
+    const bool meter_up =
+        Osc32k::init({.calib = trim}) &&
+        Gclk<slow_gen>::configure(GclkConfig{.source = GclkSource::osc32k}) &&
+        Gclk<slow_gen>::enable(true);
+    const bool routed = move_slow(slow_gen);
+    // THE METER WEIGHED, not assumed: FREQM with generator 0 as the
+    // measurand and the new 32 kHz generator as the REFERENCE - 32
+    // reference periods of a dead reference never complete, and a live
+    // one prices itself through the known 48 MHz.
+    uint32_t slow_hz = 0;
+    {
+        const bool fq = Freqm::init({.measured_generator = 0,
+                                     .reference_generator = slow_gen,
+                                     .refnum = 32});
+        if (fq) {
+            const auto v = Freqm::measure();
+            if (v && *v != 0u) {
+                slow_hz = static_cast<uint32_t>(
+                    (32ULL * 48'000'000ULL) / *v);
+            }
+        }
+        Freqm::release();
+    }
+    print(serial, "  OSC32K up with factory trim ", trim,
+          ", GCLK_SERCOM_SLOW moved to generator ", slow_gen,
+          "; the meter weighs ", slow_hz, " Hz on FREQM", crlf);
+    bench.verdict("the 32.768 kHz meter comes up (OSC32K, factory-trimmed) and "
+                  "the shared SLOW channel routes to it",
+                  meter_up && routed);
+
+    // CONTROL: the same 40 ms stretch with the time-outs OFF completes
+    // i2c_ok at the stretch's own pace - patience is the default.
+    twilink::Params a{};
+    a.count = 64;
+    a.ms = 700;
+    a.addr = twilink::dut_addr;
+    a.hold_us = 40000;
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the stretched serve", false);
+        return;
+    }
+    const TimedTenure base = timed_write(twilink::dut_addr, 2, 900);
+    settle_ms(750);
+    print(serial, "  time-outs OFF: 2 bytes at 40 ms/byte -> status=", hex(base.status),
+          " in ", base.ms, " ms", crlf);
+    bench.verdict("with the time-outs off a 40 ms-per-byte client is TOLERATED: "
+                  "the tenure completes i2c_ok at the stretch's own pace",
+                  base.status == i2c_ok && base.ms >= 40u);
+
+    // THE OBVIOUS READING, MEASURED AND OVERTURNED. 33.6.3.1 invites
+    // "enable LOWTOUT/SEXT and a client that hangs the bus becomes a
+    // status" - so both enables go in and the same 40 ms-per-byte
+    // client serves again. NOTHING COUNTS: the tenure completes i2c_ok
+    // at the stretch's own pace with not one time-out bit rising in
+    // the live-sampled STATUS. The tell is in the remedy each CTRLA
+    // description prescribes - "the HOST will release ITS clock hold
+    // ... a STOP will automatically be transmitted" - a STOP that is
+    // PHYSICALLY IMPOSSIBLE while a client holds SCL low; and indeed
+    // during the client's stretch the host's CLKHOLD never rises and
+    // the counters never start. THESE TIME-OUTS POLICE THE HOST'S OWN
+    // SIDE, not the wire.
+    bench.verdict("LOWTOUTEN and SEXTTOEN both go in through configure()",
+                  timeouts_on(true, true));
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the second stretched serve", false);
+        return;
+    }
+    const TimedTenure held = timed_write(twilink::dut_addr, 2, 900);
+    settle_ms(750);
+    print(serial, "  both time-outs armed, client stretching 40 ms/byte: status=",
+          hex(held.status), " in ", held.ms, " ms, STATUS bits seen live=",
+          hex(held.status_seen), crlf);
+    bench.verdict("A CLIENT HOLDING SCL DOES NOT TRIP THEM: 80 ms of client "
+                  "stretch under both enables completes i2c_ok with no time-out "
+                  "bit ever rising - the host's SMBus time-outs police the "
+                  "HOST'S OWN clock hold, not the wire (the remedy the chapter "
+                  "prescribes, an automatic STOP, would be physically impossible "
+                  "under a client's hold - and the counters never start)",
+                  held.status == i2c_ok && held.ms >= 40u &&
+                      (held.status_seen &
+                       (I2cmStatus::low_timeout | I2cmStatus::sext_timeout)) == 0u);
+
+    // WHAT THEY DO POLICE, measured: the host's OWN hold. MB left
+    // unserviced (the NVIC line down) is the host stretching for
+    // software that never comes - the watchdog case - and LOWTOUT
+    // fires inside its 25..35 ms window, with the chapter's exact
+    // signature: STATUS.LOWTOUT + BUSERR, INTFLAG.ERROR beside the
+    // still-standing MB. THE COUNTER ARMS AT configure(): a fresh
+    // timeouts_on() (disable, write CTRLA, enable, force_idle) is what
+    // starts it - leaning on the enables a completed tenure left in
+    // CTRLA does NOT (measured: the counter never fires without the
+    // re-arm, the letter's own first failure).
+    (void)timeouts_on(true, false);
+    Nvic::disable(I2cHw::Resource::irq());
+    uint16_t seen = 0;
+    (void)I2cm<3>::start_address(twilink::command_addr, false);
+    const uint32_t t0 = Ticker::millis();
+    uint32_t fired_at = 0;
+    while (Ticker::millis() - t0 < 60u) {
+        const uint16_t st = I2cm<3>::status();
+        seen = static_cast<uint16_t>(seen | st);
+        if ((st & I2cmStatus::low_timeout) != 0u && fired_at == 0u) {
+            fired_at = Ticker::millis() - t0;
+        }
+    }
+    const uint8_t flags_after = I2cm<3>::flags();
+    print(serial, "  the host's OWN unserviced hold: STATUS bits over 60 ms=",
+          hex(seen), " INTFLAG=", hex(flags_after), " LOWTOUT at ", fired_at,
+          " ms", crlf);
+    bench.verdict("the host's own unserviced clock hold IS bounded: LOWTOUT "
+                  "fires inside the 25..35 ms window on the 32 kHz meter, with "
+                  "STATUS.LOWTOUT + BUSERR and INTFLAG.ERROR - the watchdog on "
+                  "this host's software, exactly as the CTRLA description's "
+                  "remedy implies",
+                  fired_at >= 25u && fired_at <= 35u &&
+                      (seen & I2cmStatus::low_timeout) != 0u &&
+                      (seen & I2cmStatus::bus_error) != 0u &&
+                      (flags_after & I2cmFlag::error) != 0u);
+    Nvic::enable(I2cHw::Resource::irq());
+    (void)engine_up();
+
+    // THE WRONG METER, on the case that counts - and the answer is
+    // WORSE than scaling: with the SLOW channel on generator 0 the
+    // same unserviced hold never trips the time-out AT ALL. A 48 MHz
+    // "slow" clock does not shrink the window to microseconds, it
+    // SILENTLY DISABLES the counter (a clock-domain limit the chapter
+    // never states), which is precisely why this letter WEIGHS its
+    // meter on FREQM before trusting it.
+    bench.verdict("the SLOW channel moves to generator 0 (48 MHz) with the "
+                  "synchronization waited out",
+                  move_slow(0) && timeouts_on(true, false));
+    Nvic::disable(I2cHw::Resource::irq());
+    uint16_t fast_seen = 0;
+    (void)I2cm<3>::start_address(twilink::command_addr, false);
+    const uint32_t t1 = Ticker::millis();
+    uint32_t fast_fired = 0xFFFFu;
+    while (Ticker::millis() - t1 < 20u) {
+        const uint16_t st = I2cm<3>::status();
+        fast_seen = static_cast<uint16_t>(fast_seen | st);
+        if ((st & I2cmStatus::low_timeout) != 0u && fast_fired == 0xFFFFu) {
+            fast_fired = Ticker::millis() - t1;
+        }
+    }
+    print(serial, "  the 48 MHz meter: LOWTOUT at ", fast_fired,
+          " ms (65535 = never), STATUS bits=", hex(fast_seen), crlf);
+    bench.verdict("with the meter at 48 MHz the same hold NEVER TRIPS: the wrong "
+                  "rate does not scale the window, it silently DISABLES the "
+                  "counter - worse than wrong, MUTE - so a design that enables "
+                  "these time-outs must WEIGH its slow clock, not assume it",
+                  fast_fired == 0xFFFFu &&
+                      (fast_seen & I2cmStatus::low_timeout) == 0u);
+    Nvic::enable(I2cHw::Resource::irq());
+    (void)engine_up();
+
+    // The meter given back: the channel already left generator 4 (a
+    // generator cannot be moved off a stopped source - route first,
+    // then stop), so the RC and the generator go down and the engine's
+    // own configuration is restored.
+    Osc32k::stop();
+    (void)Gclk<slow_gen>::enable(false);
+    const bool engine_back = engine_up();
+    bench.verdict("the meter is handed back and the engine restored: a command "
+                  "round trip is clean",
+                  engine_back && command(Op::ping));
+}
+
 // ===========================================================================
 // k - THE KERNEL LETTER: util/i2c_bus.hpp over this engine, unchanged
 // ===========================================================================
@@ -1245,6 +1504,8 @@ int main() {
     bench.letter('g', "the held wire: a real loss as a status (peer)", tg_arbitration);
     bench.letter('h', "THE CLIENT ROLE: the peer's host writes here (peer)", th_client);
     bench.letter('i', "the stuck bus and unstick() (peer)", ti_unstick);
+    bench.letter('j', "the SMBus time-outs: a hung bus as a STATUS (peer)",
+                 tj_timeouts);
     bench.letter('k', "THE KERNEL: I2cBus over I2cHost, util unchanged (peer)",
                  tk_kernel);
 

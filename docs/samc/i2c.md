@@ -14,7 +14,7 @@ the shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 address ladder; this campaign added `i2cm_regs()`/`i2cs_regs()` and
 `gclk_slow_id()` beside the SPI view). Family fixture
 `test/family_samc/i2c.cpp` + six negatives; bench suite `test_samc_i2c`
-(10 letters, 39 verdicts, two-board: the peer board runs `twi_peer` -
+(11 letters, 47 verdicts, two-board: the peer board runs `twi_peer` -
 the avrdx original or its samc port, one `twi_link.hpp` wire format
 between them - commanded in band over the bus under test).
 
@@ -128,6 +128,30 @@ re-init. The suite's timeline print is the record.
 the time-out statuses auto-clear on the next tenure's ADDR write
 (33.10.7), which is why the engine starts a tenure with no ceremony.
 
+**The SMBus time-outs police THIS HOST, not the wire - measured three
+ways.** The obvious reading of 33.6.3.1 (enable LOWTOUT/SEXT and a
+client that hangs the bus becomes a status) is OVERTURNED at the
+bench: 80 ms of client stretch under both enables completes i2c_ok
+with no time-out bit ever rising - during a client's hold the host's
+CLKHOLD never rises and the counters never start, which the CTRLA
+descriptions themselves foretell (every remedy is "the HOST releases
+ITS clock hold... a STOP will automatically be transmitted", a STOP
+that is physically impossible under a client's hold). What they DO
+bound is the host's OWN unserviced hold: MB left unserviced trips
+LOWTOUT at 30 ms measured (the 25..35 ms window to the letter), with
+the chapter's exact signature - STATUS.LOWTOUT + BUSERR and
+INTFLAG.ERROR beside the still-standing MB. TWO OPERATIONAL RULES the
+chapter does not state: THE COUNTER ARMS AT configure() - the enables
+left in CTRLA by an earlier configuration time nothing until a fresh
+disable/write/enable cycle - and A WRONG-RATE METER IS MUTE, not
+scaled: with GCLK_SERCOM_SLOW at 48 MHz the same hold never trips at
+all (a clock-domain limit), so a design that enables these time-outs
+must WEIGH its slow clock (the suite prices its OSC32K meter on FREQM,
+32.59 kHz with the factory trim). CONSEQUENCE FOR THE ENGINE'S USERS:
+a bus hung BY A CLIENT stays software's to bound (a deadline, then
+unstick()/re-init) - the hardware time-outs bound only this host's own
+software, a case a live ISR never produces.
+
 **Erratum 1.17.16 NOT REPRODUCED in I2C mode either**: SWRST from the
 disabled state reset the block with its synchronization completing
 (0x30200014 -> 0), matching the SPI-mode measurement. The enable-first
@@ -239,20 +263,12 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   absent. A real race here wants a third node (or the AVR back on the
   bus as the injector). The parked-START behaviour and the
   ARBLOST/BUSERR classification are measured; a live collision is not.
-- The SMBus time-outs on silicon (LOWTOUT/SEXT/MEXT are surface +
-  config; they count the SHARED GCLK_SERCOM_SLOW channel, whose rate
-  the counters assume is 32.768 kHz). AN INTERNAL 32 kHz ROOT
-  SUFFICES: the spec windows are watchdog-coarse (LOWTOUT 25..35 ms)
-  and the internal roots' measured errors (OSCULP32K ~+0.4%, a TRIMMED
-  OSC32K +6 per mille - untrimmed it is 44% fast, the one real trap)
-  are noise against them, with the 24 MHz crystal TC as the verifying
-  ruler as always. Board D's 32.768 kHz crystal is the OCCASION, not a
-  prerequisite: the same letter could bring up XOSC32K for real (the
-  driver's only unexercised source) and feed the time-outs from it,
-  two gaps on one run. NOTE the payoff either way: a verified LOWTOUT
-  is the HARDWARE answer to "BusMaster has no timeout" - a physically
-  hung bus becomes an ERROR flag the engine can turn into a reply
-  status, no software timer and no policy invented.
+- MEXTTOEN on silicon (the host's own cumulative-extend flavour;
+  LOWTOUT and SEXT are measured - see the findings - and MEXT shares
+  their machinery and their host-side-only scope by the same CTRLA
+  wording). XOSC32K remains the one unexercised 32 kHz source (board
+  D's crystal is its occasion); the letter runs on a FREQM-weighed
+  OSC32K with the factory trim.
 - Smart mode and quick command on silicon; DMA (the trigger codes are
   published; engines wait for a user); 4-wire PINOUT; High-speed mode
   (refused - errata); 10-bit HOST addressing (register surface only);
