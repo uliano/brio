@@ -2303,6 +2303,33 @@ gets its dated home in `docs/design/` when taken.
   engine slots (the peer uses raw engines - a driver slot waits for a
   device-shaped user), erratum 1.17.3's staging (now possible, not
   done), SSDE/SSL and address-match on silicon (gaps stand).
+  **samc/delay.hpp BORN 2026-09-02 (same session's tail, user-prompted):
+  the microsecond busy-wait over SysTick VAL - "at least" never early,
+  and CAPPED BELOW ONE KERNEL TICK by contract (a tick or more is
+  TimeEvent territory and is REFUSED with false and no time spent; the
+  boundary avrdx/delay.hpp never had, drawn right at birth). Reads VAL
+  only (SysTick stays the Ticker's in writing), delta accumulation with
+  the wrap folded in, correct inside SysTickInterruptGuard windows; NO
+  DIVISION AT WAIT TIME with a compile-time Clock - the M0+ has no high
+  multiply, so gcc soft-divides even by constants (~4 us/call, measured:
+  the first version paid it every entry) and both quotients fold
+  instead. test_samc_platform grew letter d (z 34 -> 39, 39/39 x4 warm +
+  cold, letter i 20/20 across its six reboots): 5..900 us at-least with
+  ~1 us of true call overhead, 200 x 50 us not one early, the cap and
+  the no-Ticker refusals at bracket cost. TWO SUITE DEFECTS FOUND AND
+  FIXED ON THE WAY: a warm second z failed letter a because letters b
+  AND c reprogram WDT CONFIG/EWCTRL and nothing restored the fuse-loaded
+  values (restore now shared, called by both, AFTER the disable's sync -
+  an unsynchronized store there is discarded); and the measurement
+  bracket of two back-to-back synchronized TC reads costs ~6..10 us of
+  its own, which the letter's first version charged to the delay (zero
+  measured first, min-vs-min for the refusal legs). SpiHost's
+  cs_setup_us Request knob stays future growth with its first device
+  user; the bench suites keep their proven calibrated spins (comments
+  updated to say the facility now exists). Family TU delay.cpp; gates:
+  md5 worktree 35/38 + the two build-id movers + the platform suite
+  (the declared mover), check_samc, check_family, host 24/24, spi
+  canary z 71/71.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and

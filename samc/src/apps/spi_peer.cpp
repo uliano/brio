@@ -165,10 +165,11 @@ bool engaged() { return engaged_until != 0 && Ticker::millis() < engaged_until; 
 
 // ---- microsecond waits ----------------------------------------------------------
 //
-// This stratum has no delay facility and this app does not invent one
-// inside a driver: an APP-LOCAL spin, calibrated once against the
-// SysTick millisecond at boot (the test_samc_spi link_hold precedent,
-// with the ticker as the ruler so the crystal is not a dependency).
+// An APP-LOCAL spin, calibrated once against the SysTick millisecond
+// at boot (the test_samc_spi link_hold precedent). samc/delay.hpp was
+// born AFTER this app and could replace it; the calibrated spin stays
+// because it is proven at the bench and the swap would re-verify the
+// whole suite for cosmetics.
 
 volatile uint32_t spins_per_ms = 4000;   ///< blind default, overwritten at boot
 

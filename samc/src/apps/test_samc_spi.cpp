@@ -274,11 +274,11 @@ bool link_command_mode() {
  * release is 20 us behind the wire - a hold time it gets by accident.
  *
  * So the PROTOCOL owns the chip select here, and the engine's Request
- * carries a null PinRef for these windows. That is a real limitation of
- * both engines and it is named rather than papered over: neither has a
- * per-request chip-select hold, because neither stratum has a delay
- * facility to spend one with. `link_cs_window()` below is what a device
- * that needs one has to do today.
+ * carries a null PinRef for these windows. Neither engine has a
+ * per-request chip-select hold yet; samc/delay.hpp exists now (born
+ * after this suite's spins were calibrated), and the Request knob is
+ * declared future growth with its first device user - this suite keeps
+ * its own measured spin, which predates the facility and is proven.
  */
 volatile uint32_t hold_spins = 0;
 uint32_t hold_us = 0;

@@ -40,6 +40,8 @@
 #include <optional>
 
 #include "samc/clock.hpp"
+#include "samc/delay.hpp"
+#include "samc/tc.hpp"
 #include "samc/nvic.hpp"
 #include "samc/nvm.hpp"
 #include "samc/pin.hpp"
@@ -223,6 +225,26 @@ void ta_boot() {
 // =============================================================================
 // b - the watchdog as a configurable timer (nothing times out)
 // =============================================================================
+// RE-RUNNABILITY: letter a compares the WDT registers against the user
+// row, and at boot they agree because the silicon loaded them from it -
+// but letters b AND c reprogram CONFIG and EWCTRL, so a second z in the
+// same power cycle found letter a failing on exactly the fields the
+// armings change (the first fix restored in b alone and letter c
+// re-clobbered them straight after). The boot values are captured once
+// in main(), and every arming letter ends by putting them back - AFTER
+// the disable's synchronization, because a store made while ENABLE's
+// clear is still crossing is discarded (measured: the unsynchronized
+// first version restored nothing).
+uint8_t wdt_boot_config = 0;
+uint8_t wdt_boot_ewctrl = 0;
+
+void restore_wdt_boot_regs() {
+    (void)Watchdog::sync();
+    WDT_REGS->WDT_CONFIG = wdt_boot_config;
+    WDT_REGS->WDT_EWCTRL = wdt_boot_ewctrl;
+    (void)Watchdog::sync();
+}
+
 void tb_watchdog() {
     // A long period throughout: every arming below is undone well before
     // anything can expire.
@@ -280,6 +302,7 @@ void tb_watchdog() {
 
     (void)Watchdog::disable();
     bench.verdict("the board is left with the watchdog off", !Watchdog::enabled());
+    restore_wdt_boot_regs();
 }
 
 // =============================================================================
@@ -405,6 +428,7 @@ void tc_oscillator() {
                       window_cycles < t512 + t512 / 10u);
 
     bench.verdict("the board is left with the watchdog off", !Watchdog::enabled());
+    restore_wdt_boot_regs();
 }
 
 // =============================================================================
@@ -611,6 +635,125 @@ void banner() {
     bench.menu();
 }
 
+
+// ===========================================================================
+// d - delay_us: the SysTick microsecond wait (samc/delay.hpp)
+// ===========================================================================
+
+/// The ruler is a TC0+TC1 pair at CLK_MAIN undivided - the same
+/// oscillator SysTick rides, deliberately: what this letter judges is
+/// the ARITHMETIC and the wrap handling (an error there is cycles or
+/// whole periods, visible on any shared scale), not the oscillator.
+void td_delay() {
+    using Ruler = Tc<0>;
+    (void)Ruler::enable(false);
+    bool ruler_ok = Ruler::init(0) &&
+                    Ruler::configure(TcConfig{.mode = TcMode::count32,
+                                              .prescaler = TcPrescaler::div1}) &&
+                    Ruler::enable(true);
+    bench.verdict("the TC ruler comes up on generator 0", ruler_ok);
+    if (!ruler_ok) {
+        return;
+    }
+    constexpr uint32_t per_us = SysClock::hz / 1'000'000UL;   // 48
+
+    // THE BRACKET'S OWN ZERO, measured first: two back-to-back
+    // count32() reads are not free (each is a READSYNC command and its
+    // waits), and the first version of this letter charged that cost
+    // to the delay - every span came out a constant ~11 us "late" and
+    // even a REFUSAL "took" 10. The empty bracket is sampled eight
+    // times; its MAX bounds what measurement overhead can add, and the
+    // at-least verdicts below deliberately use the RAW reading (the
+    // bracket only ever adds, so raw >= true is a safe witness).
+    uint32_t zero_min = 0xFFFFFFFFu;
+    uint32_t zero_max = 0;
+    for (uint8_t k = 0; k < 8; ++k) {
+        const uint32_t t0 = Ruler::count32();
+        const uint32_t b = (Ruler::count32() - t0) / per_us;
+        if (b < zero_min) zero_min = b;
+        if (b > zero_max) zero_max = b;
+    }
+    print(serial, "  empty measurement bracket: ", zero_min, "..", zero_max,
+          " us of its own", crlf);
+
+    // Exactness across the range the cap allows. The upper band pays
+    // the bracket plus the call's own overhead (folded conversion, one
+    // division by a folded constant, poll granularity) plus at most
+    // one tick interrupt per millisecond of wait.
+    static const uint32_t spans[] = {5, 30, 100, 500, 900};
+    bool all_exact = true;
+    for (uint8_t i = 0; i < sizeof(spans) / sizeof(spans[0]); ++i) {
+        const uint32_t t0 = Ruler::count32();
+        const bool ok = delay_us(clock, spans[i]);
+        const uint32_t took = (Ruler::count32() - t0) / per_us;
+        print(serial, "  delay_us(", spans[i], ") -> ", took, " us measured", crlf);
+        if (!ok || took < spans[i] || took > spans[i] + zero_max + 10u) all_exact = false;
+    }
+    bench.verdict("delay_us serves 5..900 us AT LEAST and within the bracket's "
+                  "zero plus 10 us on the TC ruler",
+                  all_exact);
+
+    // Never early, statistically: two hundred waits landing at whatever
+    // SysTick phase the loop reaches them in - the wrap path is walked
+    // many times over.
+    uint32_t min_took = 0xFFFFFFFFu;
+    uint32_t max_took = 0;
+    for (uint16_t k = 0; k < 200; ++k) {
+        const uint32_t t0 = Ruler::count32();
+        (void)delay_us(clock, 50u);
+        const uint32_t took = (Ruler::count32() - t0) / per_us;
+        if (took < min_took) min_took = took;
+        if (took > max_took) max_took = took;
+    }
+    print(serial, "  200 x delay_us(50): min ", min_took, " max ", max_took, " us", crlf);
+    bench.verdict("two hundred 50 us waits: NOT ONE EARLY, whatever the counter "
+                  "phase (the wrap arithmetic walked at every offset)",
+                  min_took >= 50u);
+
+    // The cap: one tick period or more is refused, and refusing costs
+    // nothing measurable. MIN OVER FOUR tries against the bracket's own
+    // MIN: a tick interrupt landing inside any single bracket inflates
+    // it by its handler, and min-vs-min is what filters that noise out
+    // (a refusal is side-effect free, so repeating it is free too).
+    uint32_t refusal_us = 0xFFFFFFFFu;
+    bool refused = true;
+    for (uint8_t k = 0; k < 4; ++k) {
+        const uint32_t t0 = Ruler::count32();
+        refused = refused && !delay_us(clock, 1000u);
+        const uint32_t r = (Ruler::count32() - t0) / per_us;
+        if (r < refusal_us) refusal_us = r;
+    }
+    const bool served_999 = delay_us(clock, 999u);
+    print(serial, "  delay_us(1000) refused=", refused, " in ", refusal_us,
+          " us (min of 4); delay_us(999) served=", served_999, crlf);
+    bench.verdict("the CAP is real: a whole tick (1000 us) is REFUSED spending "
+                  "nothing beyond the bracket's own zero - TimeEvent territory - "
+                  "while 999 us is served",
+                  refused && refusal_us <= zero_min + 3u && served_999);
+
+    // No Ticker, no time: with SysTick stopped the answer is false, at
+    // once. The counter holds its VAL across the pause, so the tick
+    // slips by only the microseconds of this leg.
+    SysTick->CTRL = SysTick->CTRL & ~SysTick_CTRL_ENABLE_Msk;
+    uint32_t stopped_us = 0xFFFFFFFFu;
+    bool refused_stopped = true;
+    for (uint8_t k = 0; k < 4; ++k) {
+        const uint32_t t1 = Ruler::count32();
+        refused_stopped = refused_stopped && !delay_us(clock, 100u);
+        const uint32_t r = (Ruler::count32() - t1) / per_us;
+        if (r < stopped_us) stopped_us = r;
+    }
+    SysTick->CTRL = SysTick->CTRL | SysTick_CTRL_ENABLE_Msk;
+    print(serial, "  SysTick stopped: refused=", refused_stopped, " in ",
+          stopped_us, " us (min of 4)", crlf);
+    bench.verdict("with SysTick not running delay_us answers false and spends "
+                  "nothing beyond the bracket (a program with no Ticker has no "
+                  "clock to count on)",
+                  refused_stopped && stopped_us <= zero_min + 3u);
+
+    Ruler::release();
+}
+
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
@@ -643,6 +786,8 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
+    wdt_boot_config = WDT_REGS->WDT_CONFIG;
+    wdt_boot_ewctrl = WDT_REGS->WDT_EWCTRL;
     Led::output();
 
     brio::Nvic::enable(WDT_IRQn);
@@ -651,6 +796,7 @@ int main() {
     bench.letter('a', "the boot story and the watchdog's fuses", ta_boot);
     bench.letter('b', "the watchdog as a configurable timer", tb_watchdog);
     bench.letter('c', "what OSCULP32K really runs at", tc_oscillator);
+    bench.letter('d', "delay_us on the SysTick counter (samc/delay.hpp)", td_delay);
     bench.letter('i', "SIX REAL RESETS (reboots the board)", ti_resets, false);
 
     // A pending token means a leg of letter i is waiting to be judged:

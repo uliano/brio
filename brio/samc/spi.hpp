@@ -901,13 +901,14 @@ public:
  * must be enabled even for a write-only transfer, which costs the DI
  * pad and nothing else.
  *
- * NO PER-REQUEST CHIP-SELECT DELAY. avrdx/spi.hpp's Request carries
- * cs_setup_us, timed by avrdx/delay.hpp. This stratum HAS no delay
- * facility, and inventing one inside a driver is not where it belongs -
- * so the field is absent rather than approximated. A device that needs
- * settling time after CS falls spends it in its own AO (a time event, or
- * a zero-length request before the real one); the day a SAM device
- * really needs microseconds, samc/delay.hpp is the file that gets built.
+ * NO PER-REQUEST CHIP-SELECT DELAY - YET. avrdx/spi.hpp's Request
+ * carries cs_setup_us, timed by avrdx/delay.hpp; samc/delay.hpp exists
+ * now (SysTick-timed, capped below a tick), but the Request field is a
+ * driver-behaviour change that gets built with its FIRST DEVICE that
+ * needs it, not speculatively. Until then a device that needs settling
+ * time after CS falls spends it in its own AO (a time event, or
+ * brio::delay_us before posting), and a caller framing CS by hand has
+ * the whole toolbox.
  *
  * THE TWO OPTIONAL DMA ENGINE SLOTS (the Uart's shape, for the same
  * reason: an engineless build must stay byte-identical, so the slots

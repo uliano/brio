@@ -17,7 +17,9 @@ PM (power manager) ch. 19 - and errata DS80000740S (1.8.13, 1.8.14,
 Drivers: `samc/platform_sam.hpp` (`SamPlatform`, this target's
 realization of the kernel's `Platform` concept), `samc/nvic.hpp`
 (`InterruptGuard`, `Nvic`), `samc/ticker.hpp` (`BasicTicker`,
-`SysTickInterruptGuard`), `samc/sleep.hpp` (`Pm`, `SamSleepSite`); the
+`SysTickInterruptGuard`), `samc/delay.hpp` (`delay_us`, the capped
+microsecond busy-wait over SysTick), `samc/sleep.hpp` (`Pm`,
+`SamSleepSite`); the
 target-independent power model above the last of these is
 [design/power.md](../design/power.md). The crt is `samc/src/glue/
 startup_samc21.cpp` + `samc/ld/samc21j18a.ld` in the build project.
@@ -211,6 +213,30 @@ libstdc++ compiles throw sites into `abort()` calls that `-Og` cannot
 prove dead, and newlib's abort would defeat the no-syscalls rule - so
 the crt defines `abort()` as a spin (not a BKPT: with no debugger a
 BKPT becomes a HardFault and the frame that got there is gone).
+
+**`delay_us(clock, us)`** (samc/delay.hpp) - the microsecond busy-wait,
+timed on SysTick's own counter and CAPPED BELOW ONE KERNEL TICK by
+contract: a wait of a tick or more is TimeEvent territory, and the call
+REFUSES it (false, no time spent) instead of serving a latency bug -
+the boundary avrdx/delay.hpp never had, drawn right on the second
+target from birth. It reads VAL only (no side effect; SysTick stays the
+Ticker's in writing), accumulates deltas with the reload wrap folded
+in - so it is exact across tick boundaries and inside
+SysTickInterruptGuard windows alike - and converts through
+clock_hz(clock) with the cycles-per-microsecond factor rounded UP, the
+kernel's own at-least. NO DIVISION RUNS AT WAIT TIME with a
+compile-time Clock: the M0+ has no high multiply, so gcc calls
+__aeabi_uidiv even for a constant divisor (~4 us a call, measured -
+the first version paid it on every entry), and both quotients fold to
+constants instead. With SysTick not running (a program with no Ticker)
+the answer is false, not a fallback loop. Measured by test_samc_platform
+letter d against a TC ruler: 5..900 us all served at least and within
+~1 us of call overhead once the measurement bracket's own ~6 us is
+subtracted; 200 waits of 50 us with NOT ONE EARLY; the 1000 us cap
+refused at the bracket's own cost; 999 us served. The measurement
+lesson the letter paid for: two back-to-back synchronized TC reads
+cost ~6..10 us of their own, and the first version charged that
+bracket to the delay.
 
 ## How to use it
 
