@@ -245,6 +245,33 @@ struct Rcc {
         return (RCC->CFGR & (RCC_CFGR_HPRE_Msk | RCC_CFGR_PPRE_Msk)) == 0u;
     }
 
+    // ---- LSI, the low-speed RC (5.2.6, 5.2.14) --------------------------------
+    //
+    // It lives in RCC_CSR, a register whose TOP BYTE belongs to the
+    // reset chapter (stm32g0/reset.hpp's flags and RMVF); both owners
+    // read-modify-write and neither touches the other's bits. LSI is
+    // the IWDG's clock and one of the RTC's, and nothing else here uses
+    // it - it is not offered as a SYSCLK root (the task's enum refuses
+    // that, see the file header).
+    //
+    // 5.2.14: starting the IWDG FORCES LSI on whatever LSION says, and
+    // it "cannot be disabled" afterwards - so lsi_ready() standing with
+    // lsi_enabled() clear is the witness that something else (the IWDG,
+    // the RTC, the CSS on LSE) is asking for it.
+    static void lsi_enable(bool on) {
+        RCC->CSR = on ? (RCC->CSR | RCC_CSR_LSION) : (RCC->CSR & ~RCC_CSR_LSION);
+    }
+    static bool lsi_enabled() { return (RCC->CSR & RCC_CSR_LSION) != 0u; }
+    static bool lsi_ready() { return (RCC->CSR & RCC_CSR_LSIRDY) != 0u; }
+    static bool lsi_wait_ready() {
+        for (uint32_t spins = 0; spins < ready_spins; ++spins) {
+            if (lsi_ready()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // ---- peripheral clock enables (5.2.17) ----------------------------------------
     // Each verb reads its register back after the store: that read is
     // the two-cycle stall the chapter asks the software to account for,
@@ -265,6 +292,7 @@ struct Rcc {
         RCC->APBENR1 = on ? (RCC->APBENR1 | mask) : (RCC->APBENR1 & ~mask);
         (void)RCC->APBENR1;
     }
+    static bool apb1_clock(uint32_t mask) { return (RCC->APBENR1 & mask) == mask; }
     static void apb2_clock(uint32_t mask, bool on) {
         RCC->APBENR2 = on ? (RCC->APBENR2 | mask) : (RCC->APBENR2 & ~mask);
         (void)RCC->APBENR2;

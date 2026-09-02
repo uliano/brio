@@ -86,8 +86,22 @@ caveat for the sleep site.
   `pll_configure(PllConfig)` (refused while the PLL runs or outside
   the limits), `sysclk_select`/`sysclk_status`/`sysclk_wait`
   (`SysclkSource`), `bus_prescalers_unity`, the enables `io_clock(port,
-  on)`, `ahb_clock`/`apb1_clock`/`apb2_clock(mask, on)`, the
-  multiplexer `kernel_clock(pos, code)`.
+  on)`, `ahb_clock`/`apb1_clock`/`apb2_clock(mask, on)` with an
+  `apb1_clock(mask)` readback, the multiplexer `kernel_clock(pos,
+  code)`, and the LSI root - `lsi_enable(on)`, `lsi_enabled()`,
+  `lsi_ready()`, `lsi_wait_ready()`.
+- **LSI lives in RCC_CSR, a register with two owners.** Bits 1..0 are
+  the oscillator's and belong here; bits 31..23 are the reset flags and
+  RMVF, and belong to [reset.md](reset.md). Each side
+  read-modify-writes and neither touches the other's bits. LSI is not
+  offered as a SYSCLK root (`ClockSource::lsi` is refused); it exists
+  because the IWDG and the RTC are clocked from it. Two facts worth
+  carrying: 5.2.14 says STARTING THE IWDG forces LSI on whatever LSION
+  says, and 5.4.24 says LSIRDY may stand with LSION clear whenever the
+  IWDG, the RTC or the CSS on LSE asks - on the bench board the RTC
+  does exactly that (RCC_BDCR reads 0x8200: RTCEN set, RTCSEL = LSI,
+  and the RTC domain is not reset by a system reset), so LSIRDY is no
+  witness for a running watchdog.
 - `PllConfig {m, n, r}`, `pll_config_valid`, `pll_output_hz`,
   `pll_config_for(hz)`, `hsidiv_for(hz)` - constexpr, fixture-pinned.
 - `Pwr::range()` - 1 or 2, read only.
