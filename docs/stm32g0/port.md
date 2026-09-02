@@ -3,12 +3,13 @@
 > **PROVISIONAL.** Mode, value, pull, output type, speed and the
 > alternate-function handoff are implemented, with the port clock
 > opened by every configuring verb; what a pin CANNOT do here by
-> design - sense edges and raise interrupts - belongs to the EXTI, a
-> separate peripheral with no driver yet. The list is in "Not covered
-> yet".
+> design - sense edges and raise interrupts - belongs to the EXTI, and
+> that peripheral now has its own driver and its own document
+> ([exti.md](exti.md)). What is still missing is in "Not covered yet".
 
-Documents of record: RM0444 Rev 6, GPIO ch. 7 (the EXTI, for contrast,
-is ch. 13; the AF-number-to-signal tables are the DATASHEET's,
+Documents of record: RM0444 Rev 6, GPIO ch. 7 (the EXTI is ch. 13 and
+has its own driver and document; the AF-number-to-signal tables are the
+DATASHEET's,
 DS13560 tables 13..24), errata ES0548 Rev 3 item 2.3.1 (GPIO after a
 Standby wake-up; Standby is not entered yet). Driver:
 `stm32g0/pin.hpp`; the port-presence facts come from
@@ -62,9 +63,15 @@ set/clear twins: configuring two pins of one port from two contexts
 can lose a field, which is why the configuring verbs are for setup and
 kernel-time FSM actions.
 
-**There is no pin interrupt in GPIO** - edge and level senses are the
-EXTI's, reached through SYSCFG's port multiplexer; an EXTI driver will
-own them.
+**There is no pin interrupt in GPIO** - edges are the EXTI's
+([exti.md](exti.md)), reached through THE EXTI'S OWN port multiplexer
+(`EXTI_EXTICRx`, 13.5.11: on this family SYSCFG has nothing to do with
+it, unlike the older STM32 lines), and there is no level sense
+anywhere. What a pad keeps is its mode: the EXTI watches the port's
+INPUT, which stays live in input, output and alternate modes alike
+(7.3.1), so a line can watch a pad that an application drives or that a
+peripheral owns - measured. Only ANALOG mode, with the input buffer
+off, hides a pad from its line.
 
 ## Types and verbs
 
@@ -111,10 +118,22 @@ the console answered through them (usart.md). Port A's reset values
 read as the chapter states them (MODER 0xEBFFFFFF, OSPEEDR
 0x0C000000, PUPDR 0x24000000).
 
+An input pad with nothing attached FOLLOWS ITS OWN PULL, which is what
+makes a wireless bench possible on this board: PA0, PB0, PB3, PB7 and
+PA8 each read high under an internal pull-up and low under a pull-down
+(`test_stm32_exti` letter b), and a pad driven in OUTPUT mode is
+readable by another peripheral through the same input path (7.3.1),
+where analog mode turns that path off. PC13 (the user button B1) is the
+one pad of the survey that does NOT follow: the board holds it high
+with an external pull-up stronger than the internal pull-down, so a
+press is a falling edge. Bonding, measured over SWD on the LQFP64:
+every pin of ports A, B and C answers, port D answers on 0..6, 8 and 9,
+and port F only on 0 and 1.
+
 ## Not covered yet
 
-Driver gaps: the EXTI (every edge/level sense and the wake-up lines),
-the port lock (GPIOx_LCKR), the alternate-function tables as data (a
+Driver gaps: the port lock (GPIOx_LCKR), the alternate-function tables
+as data (a
 per-package pin table, the SAM device-tables shape), the analog switch
 control and the 5 V-tolerance map (DS13560's FT pins - read the table
 before a mixed-voltage bench, never assume), erratum 2.3.1 (a

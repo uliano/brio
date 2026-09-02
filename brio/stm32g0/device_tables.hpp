@@ -30,6 +30,11 @@
  *    control bits, status bit, ECC register and protection registers;
  *    every smaller part declares none of them, and ECC2R is not even a
  *    member of that part's FLASH_TypeDef.
+ *  - The EXTI's lines: sixteen GPIO lines everywhere, but which of the
+ *    peripheral lines above them exist - and which of those are
+ *    configurable rather than direct - is per part, and so is the
+ *    second register group (RTSR2 and its four neighbours are members
+ *    on the G0B1/G0C1 only, IMR2/EMR2 from the G071 class up).
  */
 
 #pragma once
@@ -359,6 +364,280 @@ inline volatile uint32_t* flash_pcrop2b_end() {
 #else
     return nullptr;
 #endif
+}
+
+// ---- EXTI (RM0444 ch. 13) ---------------------------------------------------
+//
+// WHAT DIFFERS ACROSS THE FAMILY here is WHICH LINES EXIST and WHICH OF
+// THEM ARE CONFIGURABLE - and the device header states both, so nothing
+// below is a copied table:
+//  - EXTI_IMR1_IM_Msk is a PER-VARIANT mask and not a blanket one
+//    (0xF2A9FFFF on the G031, 0xFEAFFFFF on the G071, 0xFFFFFFFF on the
+//    G0B1), which makes it the authority on which of lines 0..31 the
+//    part implements at all; EXTI_IMR2_IM_Msk is its twin for lines
+//    32..36 and does not exist where there is no second group.
+//  - a CONFIGURABLE line (13.3, table 64) is one with a trigger
+//    selection bit, so the RTSR masks are what say which lines those
+//    are; a DIRECT line has no RTSR/FTSR/SWIER/RPR/FPR bit at all and
+//    is enabled in the peripheral that owns it.
+//  - the second register group is a STRUCT MEMBER question, the
+//    FLASH_ECC2R situation again: RTSR2/FTSR2/SWIER2/RPR2/FPR2 are
+//    members on the G0B1/G0C1 only, IMR2/EMR2 from the G071 class up,
+//    and a driver naming EXTI->IMR2 would not compile on a G031. They
+//    are exported as POINTERS, null where the register does not exist.
+// The GPIO half is uniform: EXTICR is four registers of four 8-bit
+// fields on every part, so there are always sixteen GPIO lines, and
+// they are always lines 0..15.
+
+/// Sixteen, read off the header's own EXTICR array rather than from
+/// 13.3.3's prose: four registers, four port-selection fields each.
+constexpr uint8_t exti_gpio_lines =
+    static_cast<uint8_t>(sizeof(EXTI_TypeDef::EXTICR) / sizeof(uint32_t) * 4u);
+
+/// Which of lines 0..31 this device implements (EXTI_IMR1_IM_Msk).
+constexpr uint32_t exti_implemented_mask1 = EXTI_IMR1_IM_Msk;
+
+/// Which of lines 32..63 it implements, bit 0 = line 32. Zero where the
+/// part has no second group at all.
+constexpr uint32_t exti_implemented_mask2 =
+#if defined(EXTI_IMR2_IM_Msk)
+    EXTI_IMR2_IM_Msk;
+#else
+    0u;
+#endif
+
+/// Which of lines 0..31 are CONFIGURABLE (they have a rising-trigger
+/// bit); the rest are direct lines, or nothing at all.
+constexpr uint32_t exti_configurable_mask1 = 0u
+#if defined(EXTI_RTSR1_RT0_Msk)
+    | EXTI_RTSR1_RT0_Msk
+#endif
+#if defined(EXTI_RTSR1_RT1_Msk)
+    | EXTI_RTSR1_RT1_Msk
+#endif
+#if defined(EXTI_RTSR1_RT2_Msk)
+    | EXTI_RTSR1_RT2_Msk
+#endif
+#if defined(EXTI_RTSR1_RT3_Msk)
+    | EXTI_RTSR1_RT3_Msk
+#endif
+#if defined(EXTI_RTSR1_RT4_Msk)
+    | EXTI_RTSR1_RT4_Msk
+#endif
+#if defined(EXTI_RTSR1_RT5_Msk)
+    | EXTI_RTSR1_RT5_Msk
+#endif
+#if defined(EXTI_RTSR1_RT6_Msk)
+    | EXTI_RTSR1_RT6_Msk
+#endif
+#if defined(EXTI_RTSR1_RT7_Msk)
+    | EXTI_RTSR1_RT7_Msk
+#endif
+#if defined(EXTI_RTSR1_RT8_Msk)
+    | EXTI_RTSR1_RT8_Msk
+#endif
+#if defined(EXTI_RTSR1_RT9_Msk)
+    | EXTI_RTSR1_RT9_Msk
+#endif
+#if defined(EXTI_RTSR1_RT10_Msk)
+    | EXTI_RTSR1_RT10_Msk
+#endif
+#if defined(EXTI_RTSR1_RT11_Msk)
+    | EXTI_RTSR1_RT11_Msk
+#endif
+#if defined(EXTI_RTSR1_RT12_Msk)
+    | EXTI_RTSR1_RT12_Msk
+#endif
+#if defined(EXTI_RTSR1_RT13_Msk)
+    | EXTI_RTSR1_RT13_Msk
+#endif
+#if defined(EXTI_RTSR1_RT14_Msk)
+    | EXTI_RTSR1_RT14_Msk
+#endif
+#if defined(EXTI_RTSR1_RT15_Msk)
+    | EXTI_RTSR1_RT15_Msk
+#endif
+#if defined(EXTI_RTSR1_RT16_Msk)
+    | EXTI_RTSR1_RT16_Msk
+#endif
+#if defined(EXTI_RTSR1_RT17_Msk)
+    | EXTI_RTSR1_RT17_Msk
+#endif
+#if defined(EXTI_RTSR1_RT18_Msk)
+    | EXTI_RTSR1_RT18_Msk
+#endif
+#if defined(EXTI_RTSR1_RT19_Msk)
+    | EXTI_RTSR1_RT19_Msk
+#endif
+#if defined(EXTI_RTSR1_RT20_Msk)
+    | EXTI_RTSR1_RT20_Msk
+#endif
+#if defined(EXTI_RTSR1_RT21_Msk)
+    | EXTI_RTSR1_RT21_Msk
+#endif
+#if defined(EXTI_RTSR1_RT22_Msk)
+    | EXTI_RTSR1_RT22_Msk
+#endif
+#if defined(EXTI_RTSR1_RT23_Msk)
+    | EXTI_RTSR1_RT23_Msk
+#endif
+#if defined(EXTI_RTSR1_RT24_Msk)
+    | EXTI_RTSR1_RT24_Msk
+#endif
+#if defined(EXTI_RTSR1_RT25_Msk)
+    | EXTI_RTSR1_RT25_Msk
+#endif
+#if defined(EXTI_RTSR1_RT26_Msk)
+    | EXTI_RTSR1_RT26_Msk
+#endif
+#if defined(EXTI_RTSR1_RT27_Msk)
+    | EXTI_RTSR1_RT27_Msk
+#endif
+#if defined(EXTI_RTSR1_RT28_Msk)
+    | EXTI_RTSR1_RT28_Msk
+#endif
+#if defined(EXTI_RTSR1_RT29_Msk)
+    | EXTI_RTSR1_RT29_Msk
+#endif
+#if defined(EXTI_RTSR1_RT30_Msk)
+    | EXTI_RTSR1_RT30_Msk
+#endif
+#if defined(EXTI_RTSR1_RT31_Msk)
+    | EXTI_RTSR1_RT31_Msk
+#endif
+    ;
+
+/// The same for lines 32..63, bit 0 = line 32.
+constexpr uint32_t exti_configurable_mask2 = 0u
+#if defined(EXTI_RTSR2_RT32_Msk)
+    | EXTI_RTSR2_RT32_Msk
+#endif
+#if defined(EXTI_RTSR2_RT33_Msk)
+    | EXTI_RTSR2_RT33_Msk
+#endif
+#if defined(EXTI_RTSR2_RT34_Msk)
+    | EXTI_RTSR2_RT34_Msk
+#endif
+#if defined(EXTI_RTSR2_RT35_Msk)
+    | EXTI_RTSR2_RT35_Msk
+#endif
+#if defined(EXTI_RTSR2_RT36_Msk)
+    | EXTI_RTSR2_RT36_Msk
+#endif
+    ;
+
+constexpr bool exti_line_implemented(uint8_t line) {
+    if (line < 32u) {
+        return (exti_implemented_mask1 & (1u << line)) != 0u;
+    }
+    return line < 64u &&
+           (exti_implemented_mask2 & (1u << (line - 32u))) != 0u;
+}
+
+constexpr bool exti_line_configurable(uint8_t line) {
+    if (line < 32u) {
+        return (exti_configurable_mask1 & (1u << line)) != 0u;
+    }
+    return line < 64u &&
+           (exti_configurable_mask2 & (1u << (line - 32u))) != 0u;
+}
+
+/// The EXTICR code that selects port `letter` as the source of a GPIO
+/// line: 0 for A up to 5 for F (13.5.11), and 0xFF for a port this
+/// device does not bond - the presence question is the header's
+/// (gpio_port_base), the ENCODING is the manual's, there being no
+/// per-port enumerator in the header to read it off.
+constexpr uint8_t exti_port_code(char letter) {
+    if (!gpio_port_present(letter) || letter < 'A' || letter > 'F') {
+        return 0xFFu;
+    }
+    return static_cast<uint8_t>(letter - 'A');
+}
+
+/// The second register group as pointers, null where the register is
+/// not a member of this part's EXTI_TypeDef (see the note above).
+inline volatile uint32_t* exti_rtsr2() {
+#if defined(EXTI_RTSR2_RT34_Msk)
+    return &EXTI->RTSR2;
+#else
+    return nullptr;
+#endif
+}
+inline volatile uint32_t* exti_ftsr2() {
+#if defined(EXTI_FTSR2_FT34_Msk)
+    return &EXTI->FTSR2;
+#else
+    return nullptr;
+#endif
+}
+inline volatile uint32_t* exti_swier2() {
+#if defined(EXTI_SWIER2_SWI34_Msk)
+    return &EXTI->SWIER2;
+#else
+    return nullptr;
+#endif
+}
+inline volatile uint32_t* exti_rpr2() {
+#if defined(EXTI_RPR2_RPIF34_Msk)
+    return &EXTI->RPR2;
+#else
+    return nullptr;
+#endif
+}
+inline volatile uint32_t* exti_fpr2() {
+#if defined(EXTI_FPR2_FPIF34_Msk)
+    return &EXTI->FPR2;
+#else
+    return nullptr;
+#endif
+}
+inline volatile uint32_t* exti_imr2() {
+#if defined(EXTI_IMR2_IM_Msk)
+    return &EXTI->IMR2;
+#else
+    return nullptr;
+#endif
+}
+inline volatile uint32_t* exti_emr2() {
+#if defined(EXTI_EMR2_EM_Msk)
+    return &EXTI->EMR2;
+#else
+    return nullptr;
+#endif
+}
+
+/// The NVIC line a GPIO EXTI line interrupts on. Three vectors serve
+/// the sixteen (table 61: EXTI0_1, EXTI2_3, EXTI4_15), and all three
+/// exist on every part of the family - but IRQn values are ENUMERATORS
+/// and the preprocessor cannot probe them, so this lives here with
+/// usart_irq() and not in a driver. Lines ABOVE 15 have no EXTI vector
+/// of their own at all: a direct line interrupts through the vector of
+/// the peripheral that owns it, and the configurable non-GPIO lines
+/// share one too (PVD_VDDIO2 for 16 and 34, ADC1_COMP for 17/18/20) -
+/// which is why this verb is spelled `gpio`.
+constexpr IRQn_Type exti_gpio_irq(uint8_t line) {
+    if (line < 2u) {
+        return EXTI0_1_IRQn;
+    }
+    if (line < 4u) {
+        return EXTI2_3_IRQn;
+    }
+    return EXTI4_15_IRQn;
+}
+
+/// The lines one of those three vectors serves, as a mask - what an ISR
+/// body is handed so that a handler answers for its own lines only.
+constexpr uint32_t exti_vector_lines(IRQn_Type irq) {
+    if (irq == EXTI0_1_IRQn) {
+        return 0x0003u;
+    }
+    if (irq == EXTI2_3_IRQn) {
+        return 0x000Cu;
+    }
+    if (irq == EXTI4_15_IRQn) {
+        return 0xFFF0u;
+    }
+    return 0u;
 }
 
 } // namespace brio
