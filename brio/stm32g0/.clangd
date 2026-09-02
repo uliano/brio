@@ -1,0 +1,7 @@
+# The stm32g0 stratum parses against the STM32G0 project's database:
+# headers here include "stm32g0xx.h" and need the arm-none-eabi driver
+# and the STM32G0B1xx device select. Overrides the framework default
+# (brio/.clangd, host flags) - the same routing brio/samc/.clangd does
+# for its architecture. Path relative to this file.
+CompileFlags:
+  CompilationDatabase: ../../build-cmake/stm32g0b1re-release

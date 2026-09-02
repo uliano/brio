@@ -1,0 +1,7 @@
+# The stm32g0 family smoke TUs are compiled by tools/check_stm32g0.sh
+# alone (no CMake project, so no database entry of their own). The STM32G0
+# database's TUs lend their flags, so these parse as arm-none-eabi instead
+# of inheriting test/'s host fragment. The G071/G031 variants parse as the
+# G0B1; the script stays the judge.
+CompileFlags:
+  CompilationDatabase: ../../build-cmake/stm32g0b1re-release

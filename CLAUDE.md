@@ -82,27 +82,32 @@ This file has no decision log any more: the former log was migrated to
 `brio` (`brio/`) is a header-only C++23 (gnu++23) framework for
 bare-metal MCUs built around a cooperative active-object kernel,
 written clean-room after Samek's book (never the QP source). One flat
-namespace `brio`; five strata under `brio/` - `kernel/` (pure
+namespace `brio`; six strata under `brio/` - `kernel/` (pure
 logic, includes nothing of brio), `util/` (services over the kernel),
 `avrdx/` (everything that knows `avr/io.h`: AVR DA/DB, bench chip
 AVR128DB48), `samc/` (everything that knows `sam.h`: SAM C21,
-Cortex-M0+, bench chip ATSAMC21J18A), `host/` (the native test
+Cortex-M0+, bench chip ATSAMC21J18A), `stm32g0/` (everything that
+knows `stm32g0xx.h`: STM32G0, Cortex-M0+, bench chip STM32G0B1RE on
+a Nucleo-64), `host/` (the native test
 target). Includes carry the stratum prefix
-(`#include "avrdx/usart.hpp"`). The builds are three sibling CMake
-projects, PEERS - the repo root is not a CMake project: `avrdx/` and
-`samc/` (each with its own toolchain file and presets, Ninja,
-emitting into the shared `build-cmake/`) auto-discover one `main()`
-per `src/apps/<app>.cpp` at configure time from its own `// build:`
-header comment; host tests in `test/` are the third project (host
-g++, no cross toolchain), run via `ctest`. ONE NAME PER ARCHITECTURE,
+(`#include "avrdx/usart.hpp"`). The builds are four sibling CMake
+projects, PEERS - the repo root is not a CMake project: `avrdx/`,
+`samc/` and `stm32g0/` (each with its own toolchain file and presets,
+Ninja, emitting into the shared `build-cmake/`) auto-discover one
+`main()` per `src/apps/<app>.cpp` at configure time from its own
+`// build:` header comment; host tests in `test/` are the fourth
+project (host g++, no cross toolchain), run via `ctest`. ONE NAME PER ARCHITECTURE,
 the same key on three axes: `brio/<arch>/` (stratum),
 `docs/<arch>/` (docs), `<arch>/` (build project); chip precision
 lives in preset names, per-chip ld/svd files and the `*_MCU` cache
 variables. Names are claims, extended only when a real chip extends
 the family - the known landing names, never used early: avrdx ->
 avrxt (Microchip's sigla for the modern-AVR core) when an EA/mega0
-part proves it shares the stratum; samc -> sam0 if a D21 arrives; an
-`armv6m/` core stratum factored at the SECOND ARM family.
+part proves it shares the stratum; samc -> sam0 if a D21 arrives; stm32g0 shares its name with
+the G0x0 value line if a chip ever proves it; an `armv6m/` core
+stratum factored at the SECOND ARM family - which is NOW (stm32g0 is
+it), and the factoring is its own pass AFTER the bring-up, with both
+implementations in hand and a byte-identity gate on every samc image.
 
 ## Governing rule and stability hierarchy
 
@@ -222,6 +227,56 @@ gets its dated home in `docs/design/` when taken.
 - **HSM.** The FSM contract is HSM-ready (`unhandled` = future
   bubble-to-parent); parent pointers, bubbling and LCA entry/exit
   chains get built only when a real AO demands them.
+- **THIRD TARGET: STM32G0 - BRING-UP DONE 2026-09-02 (phases 0-3 of
+  memory stm32g0-bringup-plan, BY FABLE'S OWN HAND in one session,
+  from the plan to a console answering on the third architecture).**
+  brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
+  GPIO ports, USART instances, their APB enables, their CCIPR
+  multiplexers and their SHARED VECTORS, the last read off the device
+  select macro because IRQn values are enumerators the preprocessor
+  cannot probe), nvic.hpp + ticker.hpp (the samc files' twins line for
+  line - the armv6m/ factoring candidates, deliberately NOT factored
+  yet), platform_stm32.hpp (`Stm32Platform`: WFI = Sleep mode,
+  SLEEPDEEP never written), flash.hpp (FlashWaitStates with the
+  read-back rule and Range-1 table 13, FlashAccel with PRFTEN left at
+  reset because of erratum 2.2.10), clock.hpp (THE THIRD CLOCK MODEL:
+  one SYSCLK, shared HPRE/PPRE pinned at 1 with `pclk_hz` stated
+  beside `hz`, per-peripheral enable bits with the readback stall,
+  CCIPR multiplexers; `Clock<internal, hz>` = HSI16/HSIDIV and
+  `Clock<pll, hz>` = HSI16 x PLL with the exact ratio searched at
+  compile time - 64 MHz is M1/N8/R2), pin.hpp (a port has a CLOCK and
+  it is off at reset, so every configuring verb opens it; analog is
+  the reset state; AF numbers are the DATASHEET's with no header
+  table to check them against; BSRR/BRR atomic values), usart.hpp
+  (`Usart<n>` + `Uart<n, pins>` with the SAME public surface as the
+  other two targets' Uart; non-FIFO view; the integer baud divisor;
+  ORE cleared through ICR or the handler storms). stm32g0/ build
+  project NEW (the samc shape; `STM32G0_MCU` = full part number ->
+  device define STM32G0B1xx + ld/<part>.ld + startup_<header>.cpp;
+  the crt's handler NAMES come from ST's startup template because the
+  header declares none; OpenOCD stlink.cfg + stm32g0x.cfg + the DHCSR
+  clear). third_party/cmsis-device-g0/ (v1.4.5, Apache-2.0) + the SVD
+  vendored. Apps probe/blink/console; test/family_stm32g0/ (4 TUs x
+  g0b1/g071/g031 + 8 negatives) + tools/check_stm32g0.sh green;
+  bench.py grew the g0b1re board type and the openocd_stlink probe
+  kind (the SAM argv proven unchanged), manifest position E by-id.
+  THE VICTORY CONDITION HELD FOR THE THIRD TIME: kernel/ and util/
+  untouched - blink under time events (PA5 sampled over SWD at both
+  cadences), console over the ST-LINK VCP (300 lines byte-exact, all
+  counters zero, baud 115107 = 64e6/556, tick +0.24 % vs the PC).
+  Findings: PWR is behind an APB enable and its range register read
+  the right reset value THROUGH THE CLOSED GATE once (luck, not a
+  contract - init opens it); SWD reads through the ST-LINK's HLA
+  transport are UNRELIABLE while the core sleeps in WFI (halt first);
+  bench.py `run` speaks the suites' letter grammar, not the console's
+  lines. Docs: docs/stm32g0/{README,platform,clock,port,usart}.md all
+  PROVISIONAL with honest gap lists, vendor/README.md (RM0444 Rev 6,
+  DS13560 Rev 5, ES0548 Rev 3 - revision Z, the errata pass). NEXT:
+  phase 4 = the armv6m/ factoring pass (its own session), then phase 5
+  = the campaign plan (FLASH -> NvJournal on its pre-validated
+  geometry, EXTI, DMA+DMAMUX as block-stream's second implementation,
+  TIM, ADC/DAC, PWR, the buses against a SAM peer at 3.3 V, RTC,
+  watchdogs, FDCAN). Session memory: stm32g0-session-2026-09-02.
 - **Second target: SAM C21 - bring-up step 1 DONE (2026-08-27).**
   The samc/ stratum (nvic, clock, pin, ticker over SysTick at
   1000 Hz, platform_sam) and the samc/ build project (own toolchain
@@ -3190,6 +3245,9 @@ tools/check_samc.sh [name]                                         # same for th
 (cd avrdx && cmake --build --preset avr128db48-debug --target <app>)           # AVR debug build, then F5
 (cd samc  && cmake --build --preset samc21j-release --target <app>)            # SAM release build
 (cd samc  && cmake --build --preset samc21j-release --target <app>-upload)     # flash via OpenOCD (SWD)
+(cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)          # STM32G0 release build
+(cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash via OpenOCD (ST-LINK)
+tools/check_stm32g0.sh [name]                                      # same for the stm32g0 stratum (g0b1/g071/g031 headers)
 # apps are auto-discovered from <project>/src/apps/*.cpp - plus
 # experiments/*/{avrdx,samc}/*.cpp, each experiment's per-arch app
 # halves - at every configure; no generation step; a new/removed app
@@ -3199,6 +3257,7 @@ tools/check_samc.sh [name]                                         # same for th
 python3 tools/bench.py list                  # serial devices, USB probes, the bench manifest
 python3 tools/bench.py flash A test_avr_pin  # cmake --build --target <app>, then avrdude/UPDI
 python3 tools/bench.py flash C test_samc_dma # ... or OpenOCD/SWD - the BOARD TYPE decides both
+python3 tools/bench.py flash E console       # ... or OpenOCD/ST-LINK (the Nucleo-G0B1RE, position E)
                                              # the project to build in and the flash mechanism
 python3 tools/bench.py run C z               # drive the console, judge "ALL: N pass, M fail"
 python3 tools/bench.py console A             # device path + speed, for your own monitor
@@ -3273,6 +3332,9 @@ samc/                    the SAM C21 build project, same shape (CMakeLists +
                          presets + cmake/toolchain-arm.cmake + ld/ linker
                          script + src/apps + src/glue startup crt + svd/) -
                          its own header comments are the reference
+stm32g0/                 the STM32G0 build project, same shape again (the
+                         part number selects define + ld + crt; ST-LINK
+                         upload target; svd/STM32G0B1.svd)
 test/CMakeLists.txt      the host test project (independent - one CMake
                          configure has exactly one compiler):
                          one executable + ctest entry per test_*/main.cpp
@@ -3281,6 +3343,8 @@ test/test_*/main.cpp     host unit tests (doctest), cd test && ctest --preset ho
 test/family_samc/        samc family smoke TUs + neg/, tools/check_samc.sh runs them
 third_party/doctest/     vendored doctest.h (MIT, upstream doctest/doctest)
 third_party/samc21-dfp/  vendored Microchip.SAMC21_DFP include tree (Apache-2.0)
+third_party/cmsis-device-g0/  vendored ST cmsis-device-g0 v1.4.5 Include/ (Apache-2.0)
+test/family_stm32g0/     stm32g0 family smoke TUs + neg/, tools/check_stm32g0.sh
 third_party/cmsis-core/  vendored ARM CMSIS-Core headers (Apache-2.0)
 tools/check_family.sh    family compile check over test/family/ (see above) -
                          zero CMake coupling, calls avr-g++ directly
@@ -3766,6 +3830,29 @@ brio/                    the framework, four strata:
                            SIBLING of the kernel's PanicRecord and not an
                            extension of it - a hardware trace is silicon
                            this stratum happens to have
+  stm32g0/               everything that knows stm32g0xx.h (STM32G0, Cortex-M0+)
+    device_tables.hpp      THE RESERVE: GPIO ports, USART instances, APB
+                           enables, CCIPR multiplexers and the SHARED
+                           VECTORS, read off the device header (the last
+                           off the device-select macro)
+    nvic.hpp               InterruptGuard (PRIMASK) + Nvic - samc's twin
+    ticker.hpp             BasicTicker over SysTick (1000 Hz) + advance -
+                           samc's twin; both are the armv6m/ candidates
+    platform_stm32.hpp     Stm32Platform (WFI = Sleep mode, SLEEPDEEP never
+                           written; BKPT; .noinit breadcrumb; atomic_width 4)
+    flash.hpp              FlashWaitStates (table 13, the read-back rule),
+                           FlashAccel, flash_size_kb - the FLASH campaign's
+                           future home
+    clock.hpp              Rcc (HSI16/HSIDIV, the PLL, SYSCLK switch, bus
+                           prescalers, the per-peripheral ENABLES, CCIPR),
+                           Pwr::range, Clock<internal|pll, hz> with the
+                           compile-time PLL ratio search - the third clock
+                           model
+    pin.hpp                Pin<'A',5> / Port<'A'> / PinRef over GPIOx: the
+                           port clock opened by every configuring verb,
+                           MODER/OTYPER/OSPEEDR/PUPDR/AFR, BSRR/BRR values
+    usart.hpp              Usart<n> resource + Uart<n, pins> task, the
+                           other two targets' Uart surface verbatim
   host/                  the test target
     platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

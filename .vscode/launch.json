@@ -109,6 +109,32 @@
             ],
             "svdPath": "${workspaceFolder}/samc/svd/ATSAMC21J18A.svd",
             "runToEntryPoint": "main"
+        },
+        {
+            // The third target: the Nucleo-G0B1RE through its on-board
+            // ST-LINK/V2.1 - same cortex-debug + OpenOCD shape as the SAM
+            // entry, the ST-LINK interface script instead of CMSIS-DAP,
+            // ST's stm32g0x target script, and the SVD vendored from ST's
+            // pack (stm32g0/svd/STM32G0B1.svd). CMake Tools' Active Folder
+            // must be stm32g0/ and its launch target the app to debug.
+            "type": "cortex-debug",
+            "request": "launch",
+            "name": "Debug STM32G0 (OpenOCD, Nucleo-G0B1RE)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${command:cmake.launchTargetPath}",
+            "servertype": "openocd",
+            "serverpath": "/sw/oss-cad-suite/bin/openocd",
+            "gdbPath": "/sw/arm-none-eabi/bin/arm-none-eabi-gdb",
+            "objdumpPath": "/sw/arm-none-eabi/bin/arm-none-eabi-objdump",
+            "openOCDPreConfigLaunchCommands": [
+                "adapter serial 0670FF534871754867182752"
+            ],
+            "configFiles": [
+                "interface/stlink.cfg",
+                "target/stm32g0x.cfg"
+            ],
+            "svdPath": "${workspaceFolder}/stm32g0/svd/STM32G0B1.svd",
+            "runToEntryPoint": "main"
         }
     ]
 }

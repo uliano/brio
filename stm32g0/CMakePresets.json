@@ -1,0 +1,35 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "stm32g0b1re-release",
+            "displayName": "STM32G0B1RE (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32g0b1re-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "STM32G0_MCU": "stm32g0b1re"
+            }
+        },
+        {
+            "name": "stm32g0b1re-debug",
+            "displayName": "STM32G0B1RE (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32g0b1re-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "STM32G0_MCU": "stm32g0b1re"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "stm32g0b1re-release",
+            "configurePreset": "stm32g0b1re-release"
+        },
+        {
+            "name": "stm32g0b1re-debug",
+            "configurePreset": "stm32g0b1re-debug"
+        }
+    ]
+}

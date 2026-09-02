@@ -101,6 +101,43 @@ holds for both except where a board is named.
   `** Verified OK **`, because a failed program leaves a partly erased
   image that may still print another app's banner or nothing at all.
 
+## The Nucleo-G0B1RE
+
+The third architecture's board: an ST **Nucleo-G0B1RE** (MB1360) with
+an STM32G0B1RE - Cortex-M0+, 512 KB dual-bank flash, 144 KB SRAM,
+silicon revision Z (DBGMCU_IDCODE 0x10016467, read over SWD before
+any firmware). Desk position **E**, on a direct USB port. Everything
+below was verified at the bench, not copied from the user manual.
+
+- CPU on **HSI16 through the PLL at 64 MHz** (the kernel apps'
+  default; the part boots on HSI16 at 16 MHz). No HSE crystal is
+  fitted on a Nucleo-64 by default and the HSE root is unbuilt; the
+  LSE 32.768 kHz crystal the board ships with is still unexercised.
+- **Target voltage 3.23 V**, and this is the fact that moved the whole
+  desk: the SAM boards' supply jumpers went to 3.3 V the same day
+  (the C21's VIH is 0.7 x VDD, so a 3.3 V G0 output could not drive a
+  5 V C21 input reliably). Every SAM figure recorded above was
+  measured AT 5 V; a SAM suite re-run at 3.3 V may move analog numbers
+  and that is not a regression. The I2C node's pull-ups now pull to
+  3.3 V, fine for both parties.
+- LED **LD4 on PA5** (driven over SWD first, then by `probe` and the
+  kernel apps); button B1 on PC13 (not yet exercised).
+- Console: the ST-LINK's **virtual COM port on USART2, PA2 (TX) / PA3
+  (RX), AF1**, 115200 8N1 - and, for once, addressed by
+  `/dev/serial/by-id`: the ST-LINK carries a real USB serial
+  (0670FF534871754867182752), so the console never moves with the
+  socket.
+- Programmer/debugger: the on-board **ST-LINK/V2.1** (firmware
+  V2J46M31) through OpenOCD's `interface/stlink.cfg` +
+  `target/stm32g0x.cfg`; the same serial names it. Single-client.
+  KNOWN CAVEAT: SWD memory reads through the HLA transport are
+  UNRELIABLE while the core sleeps in WFI (registers that cannot be
+  zero read zero, FLASH_ACR read 0xffffffb7) - halt first, read,
+  resume.
+- Identity: the 96-bit UID at 0x1FFF7590 is recorded in
+  `tools/bench_boards.py` (no suite letter checks it yet).
+- Firmware today: `console` (stm32g0).
+
 ## Multi-board bench
 
 The protocol work (USART/SPI/TWI) needs two chips talking: **board A =
@@ -349,7 +386,11 @@ is loaded into the peripheral at reset.
 
 ### End state
 
-**Today's end state (2026-09-02): the desk is the TWO-SAM bench.**
+**Today's end state (2026-09-02, evening): the Nucleo-G0B1RE is
+position E on a direct USB port, running `console` (stm32g0) - the
+third architecture's bring-up day; the SAM boards are as described
+below (now at 3.3 V), with C's probe temporarily unplugged.**
+Earlier the same day: the desk was the TWO-SAM bench.
 Boards C and D sit behind a USB hub (which re-shuffled every console
 by-path - the manifest was re-verified board by board: probe pairing
 by SWD die-serial readback, console pairing by resetting the chip
@@ -640,6 +681,9 @@ stays honest because nothing under `brio/` knows it exists.
 | `test_samc_platform` | **Bench test suite** (keep passing) for the SAM C21 reset controller and watchdog - `samc/reset.hpp` - 3 letters in `z` / 34 verdicts, 34/34, NOTHING TO WIRE. The boot story with RCAUSE read as the exclusive one-cause register it is, and the watchdog's power-on state checked field by field against the NVM User Row that supplied it (two drivers describing the same fuses from opposite ends); the watchdog as a configurable timer with nothing allowed to expire; and OSCULP32K measured BY DIFFERENCE through the early-warning interrupt - 1030.4 Hz against a nominal 1024, with the 3 ms arming cost that a single measurement would have hidden. Letter `i` sits OUTSIDE `z` because it reboots the board six times: a wrong CLEAR key with the watchdog stopped and then running, a panic through `ResetReporter`, a deliberate HardFault, a time-out and a window violation - 20/20, with the breadcrumb proven to cross a system reset. Run it with `bench.py run C i --expect="->"`. Findings in [samc/reset.md](samc/reset.md) |
 | `test_samc_nvm` | **Bench test suite** (keep passing) for the SAM C21 NVMCTRL - `samc/nvm.hpp` and `samc/nvm_flash.hpp` - 6 letters in `z` / 52 verdicts, 52/52, NOTHING TO WIRE. Geometry and the fuse row against PARAM and the factory areas (the die serial it prints is the one the manifest records for board C); the RWWEE erase/program round trip with every malformed request refused; THE PAGE-BUFFER ORDERING RULE decided by data (ascending and descending both exact, even-then-odd loses all eight low words - so the rule is 'one 64-bit section at a time', not 'ascending'); the cost and the no-stall claim (RWWEE row erase 989 us with ~3950 CPU polling turns inside it); `util/nv_heap.hpp` mounting and round-tripping a block on the RWWEE array, its second silicon; region locks refusing an erase and STATUS.PROGE from an invalid command. Letter `m` sits OUTSIDE `z` because it costs one row of main-array endurance: it measures the other side of the stall (ONE polling turn) and why a stalled operation cannot be timed from flash-resident code. Findings in [samc/nvm.md](samc/nvm.md) |
 | `test_samc_journal` | **Bench test suite** (keep passing) for the SMALL-VALUE FLASH JOURNAL - `util/nv_journal.hpp` over `samc/nvm_flash.hpp`'s `RwweeJournalZone` - 7 letters in `z` / 58 verdicts, 58/58 (one cold, two warm), NOTHING TO WIRE. It is the other half of `test_samc_nvm`: the RWWEE array is PARTITIONED, rows 0..27 for the block heap and rows 28..31 for the journal's two ping-pong halves, and letter `e` runs BOTH AT ONCE - a 300-byte heap block stays byte-exact at the same address while the journal collects repeatedly over it, which is the partition's whole point and the thing no host test can say anything about. Letter `a` proves the mount COSTS NO ERASE AND NO PROGRAM (158 us for two 512-byte halves); `b` the byte core, the typed twin, latest-wins and the refusals, with a refused save proven to write nothing at all; `c` the halves ping-ponging on silicon with every value carried through and a fresh mount to prove it; `d` the cost, weighing a JOURNAL SAVE (347..357 us) against a BARE PAGE PROGRAM (190 us) measured in the same window - the difference is the entry image and its bitwise CRC-16 - plus the no-stall claim (about 2500 CPU polling turns inside one RWWEE row erase) and the software timebase keeping up through three collections; `f` THE PANIC RESERVE on real flash, where `save_reserved()` of a maximum-size value succeeds after every completed save and costs NO erase; `w` prints the run's wear (168..184 row erases in four rows, about 46 cycles of each) against a declared budget and zeroes the meter so the letter is re-runnable. OUTSIDE `z`: `p` reboots the board - a real `panic()` whose reporter writes the breadcrumb through the reserve, then a reset, then `take()` at the next boot (11/11), and it records WHICH path wrote it, which on a board with `DHCSR.C_DEBUGEN` cleared is the HardFault body, because `break_here()`'s BKPT escalates before any reporter runs; `v` verifies the survivors after a reflash (6/6 after flashing `blink` over the top and coming back - the journal's sequence number unchanged). Findings in [samc/nvm.md](samc/nvm.md), design in [design/nv-journal.md](design/nv-journal.md) |
+| `probe` (stm32g0) | The smallest firmware for the Nucleo-G0B1RE: raw-register HSI16 -> PLL -> 64 MHz and a PA5 blink at about 1 Hz, zero brio code - the stm32g0 twin of the samc `probe`, the chain-prover (toolchain, ld, crt, vector table, ST-LINK flash) and the first thing to flash on a new G0 board; the blink rate is the timing witness (4x slower = still on HSI16) |
+| `blink` (stm32g0) | The kernel blink on the third architecture: Blinker toggles LD4 on its periodic time event, Supervisor cycles the period (500/250/100 ms) every 3 s by posting - the AVR and SAM app's source with only the glue lines changed; PA5 sampled over SWD at 100 ms shows both cadences |
+| `console` (stm32g0) | The kernel console on the third architecture over the ST-LINK VCP (USART2 PA2/PA3) at 115200: HELP, LED ON|OFF|TOG, UPTIME, ERR - `SerialPort` + `line_parser` + `print` untouched; 300 command lines answered byte-exact with every counter at zero, a 280-byte unpaced burst losing three lines in the 64-byte SOFTWARE ring with 21 overruns counted and 0 in hardware, tick +0.24 % against the PC over 10 s |
 | `test_samc_postmortem` | **Bench test suite** (keep passing) for the POST-MORTEM TRACE - `samc/postmortem.hpp` over `samc/mtb.hpp`'s new `freeze()`/`snapshot()` pair: the Micro Trace Buffer frozen at the disaster and its tail carried across the reset in a checksummed `.noinit` record, so the next boot reads not only WHAT died (the kernel's PanicRecord) but WHERE FROM - 3 letters in `z` / 36 verdicts, 36/36 three times (one cold from a fresh flash, two warm), a couple of seconds, NOTHING TO WIRE. Letter `a` is the record itself (capture, the CRC-16 catching a flipped bit, `take()` once, and a second capture over a standing record REFUSED - the rule `hard_fault_reset()` already applies to the PanicRecord); `b` measures why `freeze()` is `capture()`'s first line and not a step in it - the same window read stopped gives 9 packets and all three of the chain's leaves, read RUNNING gives 16 packets, 2 leaves, nothing in common with the frozen read and a run of 4 identical packets that is the copy loop's own backward branch; `c` walks the buffer wrapped and young and proves the order is oldest-first (every leaf-to-leaf step advancing a -> b -> c after 64 chains have wrapped a 32-packet buffer). OUTSIDE `z`, both rebooting the board: `f` executes UDF three calls deep - the one instruction on this core beyond the compiler's reach - and reads back, after the reset, the three calls in the order they were made plus the exception entry whose SOURCE is the UDF itself (13/13); `p` does the same through an orderly `panic()` and finds THE FAULT BODY IS WHAT RUNS, because `break_here()`'s BKPT escalates before any reporter on a board whose `DHCSR.C_DEBUGEN` `bench.py` has cleared - the PanicRecord still carries the code `panic()` was given (10/10). Findings in [samc/mtb.md](samc/mtb.md) |
 | `test_samc_timebase` | **Bench test suite** (keep passing) for the standby-surviving timebase - `samc/sleep.hpp`'s `SamTimedSleepSite` + `samc/ticker.hpp`'s `advance()` - 4 letters in `z` / 15 verdicts, 15/15, NOTHING TO WIRE, inside a REAL kernel (Probe AO + PowerManager over the timed site) with the TC2+TC3 crystal pair as the wall-clock judge. `a` the alarm arithmetic exact (16750 counts for 500 ms at the stated rate); `b` THE ROUND TRIP - a 500 ms time event through a standby matures at 507 ms of wall, resync ~473 ticks, millis() honest; `c` a foreign wake (watchdog early warning) mid-sleep, the convention re-requests and the alarm is re-placed for the remainder; `d` six 150 ms rounds all at 152 ms, NOT ONE EARLY - the lower bound is the kernel's own promise. The suite that caught the never-early/wake-to-progress contradiction (the alarm's ISR must hand the machine back to a ticking sleep) - findings in [samc/platform.md](samc/platform.md) |
 | `test_samc_spi` | **Bench test suite** (keep passing) for the SERCOM in SPI mode - `samc/spi.hpp`, both roles and the two DMA engine slots - born as THE FIRST CROSS-ARCHITECTURE SUITE (board C vs the AVR `spi_peer`, 61/61) and grown by the SAM-SAM speed campaign: the DUT runs against either peer (`spi_peer`, avrdx or samc - the suite asks ident), commanded in band over the bus under test with `spi_link.hpp` (one source file, two architectures, two peers). 8 letters / 71 verdicts, 71/71 on the C-D five-wire link (see Wiring). Letters: the register surface with errata 1.17.16 and 1.17.19 both NOT REPRODUCED at rev F in SPI mode; the command channel; the four-mode x two-order matrix byte-exact both ways plus the DORD mismatch as an exact two-way bit reversal; THE TWO-LEG RATE LADDER - both ends on polled pumps (exact to 2..3 MHz, the peer's answer-reload boundary, the peer still hearing every byte exact at the first failing rung) and BOTH ENDS ON DMA ENGINES (exact to 6 MHz, breaking at 8 still in the reload, the client's receive side clean to 24 MHz); THE CLIENT ROLE via `host_burst` - the DUT as client on the OTHER DOPO row, PLOADEN's first character exact and the ONE-AHEAD pump the three-SCK-cycle rule forces; loop-back through the pad, the SCK ladder against the crystal, nine-bit characters, the two-deep receive buffer with BUFOVF/IBON, and CTRLB.MSSEN measured raising SS between EVERY character; THE KERNEL LETTER - SpiBus (= BusMaster) over SpiHost, NOT ONE LINE of util/ or kernel/ changed; and THE DMA HOST letter - the data phase on the two engines, polled and ISR-style, the pump-to-engine handover inside one select window, null-tx dummies and null-rx discard, byte-exact in loop-back to 12 MHz with the 24 MHz rung recorded not judged, and the SPI-mode KICK INVERSION measured (the enable under a standing DRE fires the first beat itself; a kick costs exactly one discarded character). Findings in [samc/spi.md](samc/spi.md) |

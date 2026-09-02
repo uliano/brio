@@ -8,9 +8,11 @@ first. Written in C++23 (gnu++23), header-only, in one flat namespace
 `brio` ("con brio" - the musical marking for liveliness).
 
 The kernel knows nothing about the silicon it runs on. Today it runs
-on **AVR DA/DB** (an AVR128DB48 on the bench) and on **SAM C21**
-(Cortex-M0+, an ATSAMC21J18A) - the second architecture compiled the
-kernel and its services unchanged, which was the design's promise.
+on **AVR DA/DB** (an AVR128DB48 on the bench), on **SAM C21**
+(Cortex-M0+, an ATSAMC21J18A) and on **STM32G0** (Cortex-M0+ from the
+other vendor, an STM32G0B1RE on a Nucleo-64) - the second and the
+third architecture each compiled the kernel and its services
+unchanged, which was the design's promise.
 
 ## What an application looks like
 
@@ -91,6 +93,7 @@ portability readable at a glance:
 | `util/` | services on top of the kernel: `SerialPort`, `BusMaster` (SPI/I2C arbiter), `print`, `Ring`, line parsers | `kernel/` |
 | `avrdx/` | everything that knows `avr/io.h`: clock, pins, UART, SPI, TWI, ticker, `AvrPlatform` | `kernel/`, `util/` |
 | `samc/` | everything that knows `sam.h` (Cortex-M0+): clock tree, pins, SERCOM UART, SysTick ticker, `SamPlatform` | `kernel/`, `util/` |
+| `stm32g0/` | everything that knows `stm32g0xx.h` (Cortex-M0+): RCC/PLL, GPIO, USART, SysTick ticker, `Stm32Platform` | `kernel/`, `util/` |
 | `host/` | `HostPlatform`: the native test "target" (virtual clock, recording idle/break) | `kernel/` |
 
 Targets are siblings, never meet in one binary, and are the only place
@@ -102,15 +105,16 @@ and generic code chooses with `if constexpr` or a concept.
 | Target | State | Notes |
 |--------|-------|-------|
 | AVR DA/DB (`avrdx/`) | on the bench | AVR128DB48, avr-gcc 16.2, see [docs/avrdx/README.md](docs/avrdx/README.md) |
-| SAM C21 (`samc/`) | on the bench, bring-up | ATSAMC21J18A, arm-none-eabi-gcc 16.2, SysTick tick at 1000 Hz (vs the AVR's 1024: the kernel tick's opacity, exercised for real), see [docs/samc/README.md](docs/samc/README.md) |
+| SAM C21 (`samc/`) | on the bench | ATSAMC21J18A, arm-none-eabi-gcc 16.2, SysTick tick at 1000 Hz (vs the AVR's 1024: the kernel tick's opacity, exercised for real), see [docs/samc/README.md](docs/samc/README.md) |
+| STM32G0 (`stm32g0/`) | on the bench, bring-up | STM32G0B1RE (Nucleo-G0B1RE), arm-none-eabi-gcc 16.2, HSI16 x PLL at 64 MHz, the third clock model (shared bus prescalers + per-peripheral enables), see [docs/stm32g0/README.md](docs/stm32g0/README.md) |
 | host (`host/`) | in use | doctest suites, `cd test && ctest --preset host`, see [docs/host/README.md](docs/host/README.md) |
 
 ## Building and testing
 
 The framework in `brio/` is header-only, included directly. The
-builds are three sibling CMake projects, one per toolchain, all peers
-(the repo root is not a CMake project): `avrdx/` and `samc/` each
-auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
+builds are four sibling CMake projects, one per toolchain, all peers
+(the repo root is not a CMake project): `avrdx/`, `samc/` and
+`stm32g0/` each auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
 - an app may pin build options such as its console baud with
 `// build: monitor_speed = 115200` header lines - and `test/` holds
 the host unit tests (a configure has exactly one compiler).
@@ -121,6 +125,8 @@ the host unit tests (a configure has exactly one compiler).
 (cd avrdx && cmake --build --preset avr128db48-release --target <app>-upload)   # flash it over UPDI
 (cd samc  && cmake --build --preset samc21j-release --target <app>)     # build one SAM app
 (cd samc  && cmake --build --preset samc21j-release --target <app>-upload)      # flash it over SWD
+(cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)  # build one STM32G0 app
+(cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash it over the ST-LINK
 ```
 
 Everything target-specific - toolchain, board, probe, debugger, its
@@ -136,7 +142,9 @@ console over `SerialPort`, arbitrated SPI (display + touch on one bus)
 and I2C (DAC written and read back, ADC measured through SPI).
 Bench-tested on the ATSAMC21J18A: the same kernel and the same
 services, recompiled untouched - blink under time events and a full
-serial console at 115200, byte-exact on the wire. Under continuous,
+serial console at 115200, byte-exact on the wire. Bench-tested on the
+STM32G0B1RE: the same two apps, recompiled untouched again, on the
+third clock model and the third crt. Under continuous,
 deliberately radical revision: nothing below the kernel contract is
 considered done (see the governing rule in
 [overview.md](docs/design/overview.md)). Clean-room with respect to

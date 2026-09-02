@@ -1,0 +1,7 @@
+# clangd config for the STM32G0 project: stm32g0/ is its OWN CMake project
+# (stm32g0/CMakeLists.txt) with its own compile_commands.json emitted at
+# ../build-cmake/stm32g0b1re-release - point clangd straight at it (the
+# samc/.clangd pattern). clang parses -mcpu=cortex-m0plus natively and the
+# device is a plain -D define (STM32G0B1xx), so no macro-delta machinery.
+CompileFlags:
+  CompilationDatabase: ../build-cmake/stm32g0b1re-release

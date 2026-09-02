@@ -46,6 +46,13 @@
 #  which is why the serial is recorded per desk position and re-checked at
 #  session start like everything else here.
 #
+#  STM32 boards: {"type": "openocd_stlink", "serial": ...} -> OpenOCD driving
+#  a Nucleo's ON-BOARD ST-LINK/V2.1 (interface/stlink.cfg). The probe and
+#  the console are ONE USB device here - the ST-LINK is a composite of
+#  debug + virtual COM port - and it carries a real USB serial, so the
+#  console can be addressed by /dev/serial/by-id (stable across sockets,
+#  unlike the CH340s) and the probe by the same serial. Single-client too.
+#
 #  AVR PROGRAMMERS. Two families, both driven by avrdude (/sw/avr/bin/avrdude):
 #    - EDBG-class probes over UPDI: {"type": "atmelice_updi"} or
 #      {"type": "pickit4_updi"}. These DO have USB serial numbers (the bench
@@ -66,7 +73,9 @@
 #  below is the label this desk position is EXPECTED to carry - the human
 #  (or a future bench.py check) compares banner against manifest.
 #
-#  TODAY'S REALITY (2026-09-02): the desk is TWO SAM C21 boards -
+#  TODAY'S REALITY (2026-09-02, evening): the Nucleo-G0B1RE joined the
+#  desk as position E (a direct USB port, not the hub) and is the board
+#  under bring-up; the two SAM boards below stayed as they were -
 #  positions C and D, one Atmel-ICE each on the PC's own USB ports
 #  (the hub desyncs their bulk transport under load - docs/bench.md),
 #  their CH340 consoles behind the hub, the five-wire SPI link fitted.
@@ -86,6 +95,29 @@
 # there is no target to flash (bench.py says so).
 
 BOARDS = {
+    "E": {
+        # The third architecture (2026-09-02): an ST Nucleo-G0B1RE
+        # (MB1360) - STM32G0B1RE, Cortex-M0+, 512 KB dual-bank flash,
+        # 144 KB SRAM, DBGMCU_IDCODE 0x10016467 (DEV_ID 0x467 = G0B1/G0C1,
+        # REV_ID 0x1001 = silicon revision Z in ES0548's table 2), read
+        # over SWD before a line of brio ran on it. LD4 on PA5, B1 on
+        # PC13, the ST-LINK's virtual COM port on USART2 PA2/PA3 at
+        # 115200 (the console apps' declared speed). Target voltage
+        # 3.23 V - the whole desk runs at 3.3 V now (the SAM boards'
+        # supply jumpers were moved for it: docs/bench.md).
+        #
+        # IDENTITY: the 96-bit unique device ID at 0x1FFF7590 (RM0444
+        # 41.1), read over SWD at this position - the STM32's answer to
+        # the SAM die serial and the AVR USERROW label. Not yet checked
+        # by any suite letter (there is no stm32g0 suite yet):
+        #   openocd -f interface/stlink.cfg -c "adapter serial <s>" \
+        #           -f target/stm32g0x.cfg -c init -c "mdw 0x1FFF7590 3" -c exit
+        "board": "g0b1re",
+        "id": None,
+        "device_uid": "0042004c-56305016-20333343",
+        "console": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_0670FF534871754867182752-if02",
+        "programmer": {"type": "openocd_stlink", "serial": "0670FF534871754867182752"},
+    },
     "A": {
         # The original bench board: AVR128DB48, 24 MHz crystal on PA0/PA1,
         # CH340 on USART2 ALT1 (PF4/PF5). See docs/bench.md.

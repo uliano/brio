@@ -78,7 +78,14 @@ BOARD_TYPES = {
     "db48": {"project": "avrdx", "preset": "avr128db48-release",
              "mcu": "avr128db48", "flash": "avrdude"},
     "c21j": {"project": "samc", "preset": "samc21j-release",
-             "mcu": "samc21j18a", "flash": "openocd"},
+             "mcu": "samc21j18a", "flash": "openocd",
+             "target_cfg": "target/at91samdXX.cfg"},
+    # The Nucleo-G0B1RE: STM32G0B1RE behind its on-board ST-LINK/V2.1 -
+    # OpenOCD again, but the ST-LINK interface and the stm32g0x target
+    # script (the stm32l4x flash driver underneath, which serves the G0).
+    "g0b1re": {"project": "stm32g0", "preset": "stm32g0b1re-release",
+               "mcu": "stm32g0b1re", "flash": "openocd",
+               "target_cfg": "target/stm32g0x.cfg"},
 }
 
 
@@ -206,6 +213,7 @@ def console_path(name):
 USB_PROGRAMMERS = {
     "03eb": "Atmel",
     "04d8": "Microchip",
+    "0483": "STMicro",     # the Nucleo boards' on-board ST-LINK
 }
 
 
@@ -308,8 +316,10 @@ def avrdude_args(prog, mcu, hexfile, chip_erase=False):
     return avrdude_base(prog, mcu) + erase + ["-U", "flash:w:%s:i" % hexfile]
 
 
-def openocd_args(prog, elffile):
-    """OpenOCD driving a CMSIS-DAP probe over SWD, the same invocation
+def openocd_args(prog, elffile, target_cfg):
+    """OpenOCD over SWD: the probe KIND is the manifest's ("openocd_cmsisdap"
+    = an Atmel-ICE, "openocd_stlink" = a Nucleo's on-board ST-LINK), the
+    target script the board TYPE's (BOARD_TYPES). Otherwise the same invocation
     samc/CMakeLists.txt's <app>-upload target uses - except that the probe
     is named by THE MANIFEST, not by the CMake cache. Identity is the
     manifest's concern (a second SAM board means a second probe), and this
@@ -345,15 +355,29 @@ def openocd_args(prog, elffile):
     attempts; the HID transport ran the same flashes clean on the first
     try. A wedged probe is recovered by two USBDEVFS_RESET ioctls five
     seconds apart (or a replug)."""
-    argv = [manifest.OPENOCD, "-f", "interface/cmsis-dap.cfg",
-            "-c", "cmsis-dap backend hid"]
-    if prog.get("serial"):
-        argv += ["-c", "adapter serial %s" % prog["serial"]]
-    argv += ["-f", "target/at91samdXX.cfg",
+    argv = [manifest.OPENOCD] + openocd_interface(prog)
+    argv += ["-f", target_cfg,
              "-c", "program %s verify" % elffile,
              "-c", "reset run",
              "-c", "mww 0xE000EDF0 0xA05F0000",
              "-c", "exit"]
+    return argv
+
+
+def openocd_interface(prog):
+    """The `-f interface/... -c adapter serial ...` half of an OpenOCD
+    command line, from the manifest's programmer entry. The HID backend
+    is the Atmel-ICE's (see openocd_args); an ST-LINK has one transport
+    and is addressed by its real USB serial."""
+    kind = prog["type"]
+    if kind == "openocd_cmsisdap":
+        argv = ["-f", "interface/cmsis-dap.cfg", "-c", "cmsis-dap backend hid"]
+    elif kind == "openocd_stlink":
+        argv = ["-f", "interface/stlink.cfg"]
+    else:
+        die("programmer type '%s' is not an OpenOCD probe" % kind)
+    if prog.get("serial"):
+        argv += ["-c", "adapter serial %s" % prog["serial"]]
     return argv
 
 
@@ -363,9 +387,10 @@ def cmd_flash(args):
     project, preset = spec["project"], spec["preset"]
     # Refuse an impossible request BEFORE spending a build on it.
     if args.erase and spec["flash"] != "avrdude":
-        die("--erase is an avrdude option: on SAM, `program ... verify` "
-            "erases exactly the sectors it writes, and there is no NvHeap "
-            "on this target yet to protect from a chip erase")
+        die("--erase is an avrdude option: on an OpenOCD target, `program "
+            "... verify` erases exactly the sectors it writes, and there is "
+            "no NvHeap on the SAM or the STM32 yet to protect from a chip "
+            "erase")
     print("bench: board %s -> %s/ preset %s, target %s"
           % (args.name, project, preset, args.app))
     # Cheap (a fresh roster too, in case an app's "// build:" lines or the
@@ -386,7 +411,7 @@ def cmd_flash(args):
         elffile = os.path.join("build-cmake", preset, args.app + ".elf")
         if not os.path.isfile(os.path.join(ROOT, elffile)):
             die("no %s after the build" % elffile)
-        argv = openocd_args(prog, elffile)
+        argv = openocd_args(prog, elffile, spec["target_cfg"])
     else:
         hexfile = os.path.join("build-cmake", preset, args.app + ".hex")
         if not os.path.isfile(os.path.join(ROOT, hexfile)):
@@ -630,6 +655,11 @@ def cmd_fuses(args):
     # The MCU of the board TYPE: fuses are the chip's, not any one app's.
     btype = entry["board"]
     tspec = board_type(btype)
+    if tspec["project"] == "stm32g0":
+        die("the STM32G0's option bytes (nBOOT, RDP, BOR, WDG...) have no "
+            "bench verb yet - read them with OpenOCD (`stm32l4x option_read 0 "
+            "0x20`) until one exists; `fuses` speaks AVR fuses and the SAM's "
+            "user row only")
     if tspec["flash"] == "openocd":
         return sam_cmd_fuses(args, prog, tspec)
     return avr_cmd_fuses(args, prog, tspec)
