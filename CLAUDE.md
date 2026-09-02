@@ -248,8 +248,20 @@ gets its dated home in `docs/design/` when taken.
   their third silicon at 2048/8: test_stm32_nvm z 85/85, test_stm32_
   journal z 52/52; EOP does not rise with EOPIE clear, an orphan first
   word wedges CFGBSY until reset, fast row 21 us/dword, RWW 174260 loop
-  turns inside an erase). Next in order: EXTI, TIM, DMA+DMAMUX,
-  ADC/DAC/COMP/VREFBUF, RTC+PWR.
+  turns inside an erase); campaign 3 EXTI DONE (test_stm32_exti z
+  89/89; the EXTI sees a pad its owner drives, a pending bit exists
+  only for an unmasked interrupt, IMR1 resets to implemented &
+  ~configurable, PC13 has an EXTERNAL PULL-UP - a press is a falling
+  edge); campaign 4 TIM DONE (tim.hpp over all ten timers with eight
+  tasks, test_stm32_tim z 105/105; the geometry is a table in the
+  reserve because one TIM_TypeDef serves ten timers; centre-aligned
+  period = 2 x ARR; PwmChannel + MeterSource on their third silicon);
+  campaign 5 DMA+DMAMUX DONE (dma.hpp, test_stm32_dma z 54/54; THE
+  BLOCK-STREAM FIXED POINT ANSWERED - BlockPlayer fits the hardware
+  circular mode, BlockSource cannot (skip-rather-tear is undecidable
+  after the edge), nothing in util/ changed; a request is a LEVEL served
+  on enable, the SAM's opposite; the VCP ceiling is 921600). Next in
+  order: ADC/DAC/COMP/VREFBUF, RTC+PWR.
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device
