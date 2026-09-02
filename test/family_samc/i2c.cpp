@@ -124,6 +124,7 @@ void client_turnaround() {
     if (Client::data_ready()) {
         if (Client::host_reads()) {
             Client::give(0x5A);
+            Client::end_transaction();
             (void)Client::first_drdy();   // erratum 1.17.22's gate
         } else {
             (void)Client::take(true);

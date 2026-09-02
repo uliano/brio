@@ -2330,6 +2330,47 @@ gets its dated home in `docs/design/` when taken.
   md5 worktree 35/38 + the two build-id movers + the platform suite
   (the declared mover), check_samc, check_family, host 24/24, spi
   canary z 71/71.
+  **SAM-SAM I2C CAMPAIGN DONE 2026-09-02 (by Fable's own hand,
+  autonomous, same desk-day as the SPI campaign): THE FILTERLESS-I2C
+  FINDING CLOSED FROM BOTH SIDES.** The I2C pair got its own short
+  separated wires with external pull-ups (verified present and stronger
+  than an internal pull-down by the SWD wire check - continuity and
+  isolation open-drain style, no firmware). samc/src/apps/twi_peer.cpp
+  NEW - the avrdx peer ported over the same twi_link.hpp: polled client
+  on the samc verbs (AMATCH resets the decoder, DRDY moves bytes, the
+  closing NACK gated past 1.17.22's first-DRDY blind spot), commanded
+  stretch = the wait before answering (this silicon stretches by
+  construction), serve/coll/hold_sda/quiet/arb - the last a MODE SWITCH
+  because one SERCOM is host OR client, never the AVR's combined both -
+  ident label = die serial, AND THE BET IN ITS BANNER: core at 48 MHz.
+  THE BET WON: on the clean pair the peer's client serves the command
+  channel at the very rate the bundle deafened, so the suite was
+  promoted - core_gen 6 -> 0, BOTH ends at 48 MHz, z 39/39 three times
+  incl. cold - and the two doors the bundle had closed opened at once:
+  letter h TIGHTENED BACK into its data verdicts (the foreign 100 kHz
+  host's 10-byte burst byte-exact through the 48 MHz-core client), and
+  letter f ran FAST-MODE-PLUS ON THE WIRE - 25 tenures x 16 bytes in
+  6 ms at 1 MHz, the stratum's first Fm+, with the refused-never-slowed
+  rule keeping its proof on a throwaway 6 MHz core claim. samc/i2c.hpp
+  grew ONE additive verb, I2cs/I2cClient::end_transaction() (table
+  33-3's CMD 0x2: after the host's closing NACK of a read the client
+  goes back to waiting for a start) - born because the samc peer is the
+  stratum's FIRST CLIENT-TRANSMIT user (nothing had ever SERVED a read
+  before), and the md5 gate proves the growth pure (every pre-existing
+  image but the edited suite byte-identical). THE ARBITRATION GAP GOT
+  ITS REASONED WALL instead of a letter: the AVR's deterministic race
+  armed held STARTs against a bit-banged Busy and released them on one
+  edge, but this silicon's parked START DOES NOT FIRE on a phantom
+  release (letter g's measured timeline) - the rendezvous primitive is
+  absent, a live race wants a third node; i2c.md says so. SMBus
+  time-outs still open, with board D's 32 kHz crystal named as their
+  designated future source. Gates: md5 worktree 35/38 + the two
+  build-id movers + the suite, twi_peer new, check_samc (the family
+  fixture covers the new verb), check_family, host 24/24. Docs: i2c.md
+  headline gains its second half (the bundle ladder stands as the
+  measured hazard, the clean pair as the measured absence), bench.md
+  wiring + rows + end state. Judgment calls in memory
+  samc-session-2026-09-02-i2c.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and

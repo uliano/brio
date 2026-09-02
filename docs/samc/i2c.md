@@ -1,11 +1,12 @@
 # SERCOM I2C (SAM C21)
 
-> **PROVISIONAL.** Both register sets are built, the HOST role is
-> bench-verified end to end against a real second board and util's bus
-> vocabulary runs over it unchanged; the CLIENT role is verified at the
-> register level and against a bit-banged host, and DECLINED against a
-> full-speed foreign host on this desk's wire - the whole story is in
-> the findings, and the gaps in "Not covered yet".
+> **PROVISIONAL.** Both register sets are built and BOTH roles are
+> bench-verified end to end against a real second board - the client
+> first against the AVR peer's bit-banged host (the bundle desk), then
+> in full against the samc peer's real 100 kHz host on the clean pair,
+> where the whole suite runs with BOTH cores at 48 MHz and
+> fast-mode-plus on the wire. util's bus vocabulary runs over the host
+> engine unchanged. What remains open is in "Not covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 33 (over
 the shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
@@ -13,12 +14,12 @@ the shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 address ladder; this campaign added `i2cm_regs()`/`i2cs_regs()` and
 `gclk_slow_id()` beside the SPI view). Family fixture
 `test/family_samc/i2c.cpp` + six negatives; bench suite `test_samc_i2c`
-(10 letters, 39 verdicts, two-board: board A runs `twi_peer`, commanded
-in band over the bus under test with the AVR campaign's own
-`twi_link.hpp` - one source file, two architectures).
+(10 letters, 39 verdicts, two-board: the peer board runs `twi_peer` -
+the avrdx original or its samc port, one `twi_link.hpp` wire format
+between them - commanded in band over the bus under test).
 
-## THE HEADLINE: this peripheral has no input filter, and a wire can
-## make that matter
+## THE HEADLINE: this peripheral has no input filter, and the WIRE
+## decides everything - measured from both sides now
 
 The C21's I2C logic - the host's bus monitor and the client's
 Start/Stop/address machinery alike - samples SDA and SCL on
@@ -56,10 +57,18 @@ measured from three sides:
   BOTH 6 and 48 MHz core, while that host read a clean address NACK
   (MSTATUS 0x72, the AVR campaign's own nobody-home signature). A
   client must follow foreign edges wherever they land; per-edge
-  glitches reset its machinery every time. THE FIX IS THE WIRE: take
-  the I2C pair out of the bundle (short, separated, or twisted with
-  ground). Until then the suite's client letter DECLINES its data
-  verdicts and says why.
+  glitches reset its machinery every time.
+- **AND THE FIX WAS MEASURED, NOT JUST NAMED.** The SAM-SAM desk wired
+  the I2C pair SHORT AND SEPARATE (bench.md), and the wall went with
+  the bundle: the whole suite runs with BOTH ends' cores at 48 MHz -
+  the samc peer's client serves the command channel at the very rate
+  that was stone deaf on the bundle, the DUT's client letter takes the
+  foreign 100 kHz host's burst byte-exact and TIGHTENS BACK into the
+  data verdicts it used to decline, and fast-mode-plus (unreachable at
+  the bundle's forced 6 MHz core) runs 25 tenures x 16 bytes in 6 ms,
+  all i2c_ok - this stratum's first Fm+ on a wire. The original ladder
+  stands as the measured hazard of a bundled pair; the clean pair is
+  the measured absence of it.
 
 ## What the silicon does
 
@@ -138,7 +147,11 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
 - **`I2cm<n>` / `I2cs<n>`** - the two resources: full register
   surfaces, enable-protected configuration written disabled, bounded
   synchronization waits, the SYSOP discipline (host), the CLKHOLD-free
-  W1C masks, `force_idle()`, the erratum sweeps.
+  W1C masks, `force_idle()`, the erratum sweeps - and the client's
+  `end_transaction()` (table 33-3's CMD 0x2: after the host's closing
+  NACK of a read tenure the machinery goes back to waiting for a start
+  instead of stretching for a byte nobody wants; born with the samc
+  peer, the first thing in this stratum to SERVE reads).
 - **`i2c_baud_for(gclk_hz, scl_hz, rise_ns, fast_plus)`** - the
   chapter's own formula solved for BAUD/BAUDLOW, the RISE TIME an
   argument exactly as on the AVR (a budget that ignores it lands T_LOW
@@ -210,16 +223,19 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
 
 ## Not covered yet
 
-- THE CLIENT AGAINST A FULL-SPEED FOREIGN HOST: declined on this desk
-  (the headline). The letter tightens back into its three data
-  verdicts the day the I2C pair leaves the bundle.
-- Multi-host arbitration with both hosts LIVE (the AVR campaign's
-  deterministic race needed a third tap this desk does not have; the
-  parked-START and the ARBLOST/BUSERR classification are measured, a
-  real two-host collision is not).
+- Multi-host arbitration with both hosts LIVE - and the two-node C21
+  desk has a REASONED wall in front of it: the AVR campaign's
+  deterministic race armed both held STARTs against a bit-banged Busy
+  and released them on one edge, but ON THIS SILICON a START parked
+  behind a phantom-Start hold DOES NOT FIRE when the hold releases
+  (measured, letter g's timeline) - the rendezvous primitive itself is
+  absent. A real race here wants a third node (or the AVR back on the
+  bus as the injector). The parked-START behaviour and the
+  ARBLOST/BUSERR classification are measured; a live collision is not.
 - The SMBus time-outs on silicon (LOWTOUT/SEXT/MEXT are surface +
   config; they count the SHARED GCLK_SERCOM_SLOW channel at
-  32.768 kHz, which no letter routes to a 32 kHz source yet).
+  32.768 kHz). Board D's 32.768 kHz crystal (bench.md) is the
+  designated real source the letter would run XOSC32K against.
 - Smart mode and quick command on silicon; DMA (the trigger codes are
   published; engines wait for a user); 4-wire PINOUT; High-speed mode
   (refused - errata); 10-bit HOST addressing (register surface only);

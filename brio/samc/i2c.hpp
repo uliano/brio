@@ -802,6 +802,20 @@ public:
     /// holds for the client's DRDY too).
     static void give(uint8_t v) { regs().SERCOM_DATA = v; }
 
+    /// CMD 0x2 (table 33-3): complete the transaction in response to a
+    /// DRDY - in a host READ, after the host's closing NACK, this is
+    /// what releases the machinery to "wait for any start" instead of
+    /// stretching for a byte nobody wants; in a host WRITE it executes
+    /// the acknowledge action first. The command clears every flag by
+    /// itself, and 1.17.11's leftovers are swept like answer_address's.
+    static void end_transaction(bool ack = true) {
+        clear_errors();
+        regs().SERCOM_CTRLB = (regs().SERCOM_CTRLB &
+                               ~(SERCOM_I2CS_CTRLB_CMD_Msk | SERCOM_I2CS_CTRLB_ACKACT_Msk)) |
+                              SERCOM_I2CS_CTRLB_CMD(0x2u) |
+                              (ack ? 0u : SERCOM_I2CS_CTRLB_ACKACT_Msk);
+    }
+
     [[gnu::always_inline]] static uint8_t data() {
         return static_cast<uint8_t>(regs().SERCOM_DATA);
     }
@@ -1364,6 +1378,10 @@ public:
     static uint8_t take(bool ack = true) { return S::take(ack); }
     /// Host read: hand the next byte out (releases the stretch).
     static void give(uint8_t v) { S::give(v); }
+    /// After the host's closing NACK of a read tenure: complete it
+    /// (CMD 0x2 - the machinery goes back to waiting for a start
+    /// instead of stretching for a byte nobody wants).
+    static void end_transaction(bool ack = true) { S::end_transaction(ack); }
     /// Host read, after DRDY with the byte sent: did the host NACK it
     /// (tenure over)? INVALID at the first DRDY - gate with
     /// first_drdy().

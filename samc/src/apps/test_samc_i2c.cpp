@@ -79,22 +79,18 @@ constexpr I2cPads bus_pads{
     .scl_pin = {'A', 23, PinFunction::c},
 };
 
-/// THE CORE RUNS SLOW ON THIS DESK, AND THAT IS A MEASURED DECISION.
-/// The C21's I2C bus monitor samples the wire on GCLK_SERCOMx_CORE
-/// with NO input filter, and this desk's bus is two conductors of a
-/// SEVEN-WIRE BUNDLE: crosstalk glitches (~100 ns class) that the
-/// AVR's filtered TWI never saw - the same node carried the AVR
-/// campaign at 1 MHz - read here as false Start/Stop conditions. The
-/// hand-driven ladder (SWD, no driver code in the loop): a 48, 24 or
-/// 12 MHz core dies with BUSERR+ARBLOST on the FIRST tenure at every
-/// SCL rate tried; a 6 MHz core is clean six-for-six at SCL 400 kHz;
-/// at 32 kHz core the whole address was watched crossing the wire and
-/// the peer ACKed. So SERCOM3's core is generator 6 = OSC48M / 8, the
-/// notch above the top SCL this bench uses and no more. Fm+ (1 MHz)
-/// is thereby UNREACHABLE HERE - the physical fix (separate or
-/// shorten the I2C pair) is named in the doc, not pretended away.
-constexpr uint8_t core_gen = 6;
-constexpr uint32_t core_hz = 6'000'000;
+/// THE CORE RUNS AT FULL SPEED ON THIS DESK, AND THAT TOO IS A
+/// MEASURED DECISION - the other half of the filterless-I2C story.
+/// The C21's I2C machinery samples the wire on GCLK_SERCOMx_CORE with
+/// NO input filter, and on the phase F seven-wire BUNDLE its ~100 ns
+/// crosstalk read as false Start/Stop at any core above 6 MHz (the
+/// SWD-driven ladder in samc/i2c.md). THIS desk's I2C pair is short
+/// and separate, and the wall is GONE WITH THE BUNDLE: a 48 MHz core
+/// serves the whole suite clean - both the peer's client (its own
+/// declared bet) and this DUT - which pins the original finding as a
+/// WIRE fact and reopens Fm+ (letter f runs it on the wire).
+constexpr uint8_t core_gen = 0;
+constexpr uint32_t core_hz = 0;   // generator 0 = the CPU clock, the default claim
 
 using I2cHw = I2cHost<3, bus_pads, core_gen>;
 using Raw = I2cm<3>;
@@ -235,8 +231,8 @@ bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
     }
     if (!link_quiet) {
         print(serial, "    LINK FAILURE op ", hex(twilink::byte_of(op)),
-              ": board A must be running `twi_peer` (python3 tools/bench.py flash "
-              "A twi_peer); check the two I2C wires and the pull-ups.",
+              ": the peer board must be running `twi_peer` (python3 tools/bench.py "
+              "flash C twi_peer); check the two I2C wires and the pull-ups.",
               crlf);
     }
     return false;
@@ -269,9 +265,8 @@ bool peer_report(twilink::Report& r) {
 
 /// Every letter but `a` runs over the engine; bringing it up is cheap
 /// (a reset and a configure), so each letter starts from a known state.
-/// The 6 MHz core is generator 6's rate, stated as the caller's claim -
-/// the engine cannot know what a divided generator produces.
-bool engine_up() { return I2cHw::init(clock, bus_rise_ns, core_hz); }
+/// Generator 0 = the CPU clock, so the default core claim serves.
+bool engine_up() { return I2cHw::init(clock, bus_rise_ns); }
 
 bool ensure_link() {
     link_quiet = true;
@@ -283,9 +278,9 @@ bool ensure_link() {
     }
     link_quiet = false;
     print(serial,
-          "  THE PEER DID NOT ANSWER. Board A must be running `twi_peer` "
-          "(python3 tools/bench.py flash A twi_peer). Check the desk's two I2C "
-          "wires (PA22-PA2, PA23-PA3), the 1.5k pull-ups and the GND.",
+          "  THE PEER DID NOT ANSWER. The peer board must be running `twi_peer` "
+          "(python3 tools/bench.py flash C twi_peer). Check the desk's two I2C "
+          "wires (PA22-PA22, PA23-PA23), the pull-ups and the GND.",
           crlf);
     return false;
 }
@@ -674,11 +669,16 @@ void tf_speeds() {
     }
     if (!need_peer()) return;
 
-    static const I2cSpeed speeds[] = {I2cSpeed::standard_100k, I2cSpeed::fast_400k};
-    static const char* const names[] = {"100k", "400k"};
-    uint32_t took[2] = {};
+    // ALL THREE SPEEDS NOW, Fm+ included: the clean pair gave the core
+    // its 48 MHz back, and with it the megahertz divisor the bundle
+    // had put out of reach. The Fm+ tenures below are this stratum's
+    // first fast-mode-plus ON THE WIRE.
+    static const I2cSpeed speeds[] = {I2cSpeed::standard_100k, I2cSpeed::fast_400k,
+                                      I2cSpeed::fast_plus_1m};
+    static const char* const names[] = {"100k", "400k", "1M"};
+    uint32_t took[3] = {};
     bool all_ok = true;
-    for (uint8_t s = 0; s < 2; ++s) {
+    for (uint8_t s = 0; s < 3; ++s) {
         twilink::Params a{};
         a.count = 900;   // never reached; the deadline ends the serve
         a.ms = 600;
@@ -701,23 +701,28 @@ void tf_speeds() {
               " ms (the divisor says SCL = ", I2cHw::scl_hz(speeds[s]) / 1000u,
               " kHz)", crlf);
     }
-    bench.verdict("all 50 tenures across the two reachable speeds complete i2c_ok "
-                  "- the peer's polled client paces the bus by STRETCHING, never "
-                  "by corruption (the AVR campaign's finding, met from the other "
-                  "side)",
+    bench.verdict("all 75 tenures across the THREE speeds - fast-mode-plus "
+                  "included, this stratum's first on the wire - complete i2c_ok: "
+                  "the peer's polled client paces the bus by STRETCHING, never by "
+                  "corruption",
                   all_ok);
-    bench.verdict("and the wall time falls as the divisor shrinks: 100k > 400k",
-                  took[0] > took[1]);
-    // Fm+ ON THIS DESK: the 6 MHz core the bundle forces cannot make a
-    // megahertz (the arithmetic needs 12 MHz and the glitch wall sits
-    // at 12 - the file-top comment). The engine says so honestly, and
-    // a request naming the speed is REFUSED, never run slow in silence.
-    bench.verdict("fast-plus is declared UNREACHABLE at this core (speed_ok false) "
-                  "and a request naming it comes back i2c_rejected without moving "
-                  "a byte",
-                  !I2cHw::speed_ok(I2cSpeed::fast_plus_1m) &&
-                      write_tenure(twilink::dut_addr, txbuf, 2,
-                                   I2cSpeed::fast_plus_1m) == i2c_rejected);
+    bench.verdict("and the wall time falls as the divisor shrinks: 100k > 400k > 1M",
+                  took[0] > took[1] && took[1] > took[2]);
+    // THE REFUSED-NEVER-SLOWED RULE still has its proof: a core CLAIMED
+    // at 6 MHz (a throwaway re-init - the claim drives the baud table,
+    // and no tenure at another speed follows it) cannot make the
+    // megahertz, so speed_ok says no and the request is rejected
+    // WITHOUT TOUCHING THE WIRE - which is what makes the mismatched
+    // claim safe to state at all.
+    const bool low_up = I2cHw::init(clock, bus_rise_ns, 6'000'000UL);
+    const bool low_refuses = !I2cHw::speed_ok(I2cSpeed::fast_plus_1m) &&
+                             write_tenure(twilink::dut_addr, txbuf, 2,
+                                          I2cSpeed::fast_plus_1m) == i2c_rejected;
+    (void)engine_up();
+    bench.verdict("on a core that CANNOT make the megahertz (a claimed 6 MHz) the "
+                  "speed is UNREACHABLE and a request naming it is i2c_rejected "
+                  "without moving a byte - refused, never run slow in silence",
+                  low_up && low_refuses);
 }
 
 // ===========================================================================
@@ -1209,16 +1214,12 @@ int main() {
     Ticker::init(clock);
     brio::enable_interrupts();
 
-    // The I2C core's own generator: OSC48M / 8 = 6 MHz, the measured
-    // clean notch on this desk's bundled wire (the core_gen comment).
-    (void)Gclk<core_gen>::configure({.source = GclkSource::osc48m, .div = 8});
-    (void)Gclk<core_gen>::enable(true);
-    // And GCLK_SERCOM_SLOW (channel 18, SHARED by SERCOM0..4): 33.5.3
-    // says "these two clocks must be configured and enabled before
-    // using the I2C" and only hedges the slow one to "certain
-    // functions" - routed here while the client half's need for it is
-    // established at the bench.
-    (void)GclkChannel::connect(Sercom<3>::gclk_slow_id(), core_gen);
+    // GCLK_SERCOM_SLOW (channel shared by SERCOM0..4): 33.5.3 says
+    // "these two clocks must be configured and enabled before using
+    // the I2C" and only hedges the slow one to "certain functions" -
+    // routed to generator 0 while nothing here uses the SMBus
+    // time-outs it would pace.
+    (void)GclkChannel::connect(Sercom<3>::gclk_slow_id(), 0);
 
     print(serial, crlf, crlf,
           "test_samc_i2c - SERCOM I2C (ch. 33) and util's bus vocabulary on its "
@@ -1227,9 +1228,10 @@ int main() {
     print(serial, "  SERCOM3 function C: PA22 PAD0 (SDA), PA23 PAD1 (SCL); the "
                   "desk's 1.5k node, both boards at 5 V",
           crlf);
-    print(serial, "  peer: board A running twi_peer, commanded in band over the "
-                  "same two wires; the I2C core runs at 6 MHz from generator 6 "
-                  "(the bundle's glitch wall - see the comment at core_gen)",
+    print(serial, "  peer: the other board running twi_peer (board C today, the "
+                  "samc port), commanded in band over the same two wires; BOTH "
+                  "cores at 48 MHz - the clean pair took the glitch wall away "
+                  "with the bundle (the comment at core_gen)",
           crlf);
 
     bench.letter('a', "the block, its registers and the bus state machine", ta_block);
