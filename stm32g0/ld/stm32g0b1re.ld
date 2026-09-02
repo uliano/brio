@@ -22,11 +22,35 @@
  * toward .bss/.noinit with no hardware guard. No heap region: brio
  * allocates nothing, and anything that drags _sbrk in should fail the
  * link loudly.
+ *
+ * ROM IS BANK 1 ONLY - 256 K of the part's 512, and the reason is not
+ * that the image is small. The upper 256 K is physical BANK 2 (RM0444
+ * table 11), and brio/stm32g0/nvm_flash.hpp gives it to the NvHeap and
+ * the NvJournal:
+ *
+ *   - programming or erasing bank 2 leaves reads of bank 1 running
+ *     (RM0444 3.3.9, read-while-write), so a record can be stored from
+ *     the main loop without stopping the CPU - inside one bank the read
+ *     would stall for the whole 22..40 ms of a page erase;
+ *   - erratum ES0548 2.2.10 says the prefetch may fail when the CPU
+ *     BRANCHES ACROSS BANKS, with no workaround, and its own note lists
+ *     "EEPROM emulation or other data storage in bank 2" as the safe
+ *     use. Code must therefore stay in one bank; data in the other is
+ *     the vendor's sanctioned arrangement;
+ *   - and it makes the storage bounds CONSTANTS rather than linker
+ *     symbols that move with every build - the property the samc's
+ *     RWWEE array has for free and the AVR backend has to work for.
+ *
+ * NO SECTION MAY BE PLACED IN BANK 2. `__brio_rom_end` below is how
+ * nvm_flash.hpp checks that at run time: it must stop at 0x0804 0000,
+ * and a script edited back to 512 K closes the storage (both mounts
+ * answer bad_geometry and write nothing) instead of letting an image
+ * grow over stored data.
  * ==========================================================================*/
 
 MEMORY
 {
-    rom (rx)  : ORIGIN = 0x08000000, LENGTH = 512K
+    rom (rx)  : ORIGIN = 0x08000000, LENGTH = 256K
     ram (rwx) : ORIGIN = 0x20000000, LENGTH = 144K
 }
 
@@ -83,4 +107,9 @@ SECTIONS
     } > ram
 
     __stack_top = ORIGIN(ram) + LENGTH(ram);
+
+    /* One past the last byte the linker may place. brio/stm32g0/
+       nvm_flash.hpp reads it as a value and refuses to open the storage
+       in bank 2 unless it stops at the bank boundary. */
+    __brio_rom_end = ORIGIN(rom) + LENGTH(rom);
 }

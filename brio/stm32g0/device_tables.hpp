@@ -26,6 +26,10 @@
  *  - The USART kernel-clock multiplexer (RCC_CCIPR.USARTnSEL) exists for
  *    USART1 everywhere, for USART2 on the G071 class and up, for USART3
  *    on the G0B1 class; the other instances run on PCLK with no choice.
+ *  - The FLASH's second bank: the G0B1/G0C1 headers declare the bank-2
+ *    control bits, status bit, ECC register and protection registers;
+ *    every smaller part declares none of them, and ECC2R is not even a
+ *    member of that part's FLASH_TypeDef.
  */
 
 #pragma once
@@ -211,6 +215,149 @@ constexpr IRQn_Type usart_irq(uint8_t n) {
 #else
     // G031/G041/G030/G051/G061/G050: USART1 and USART2 only, one line each.
     return n == 1 ? USART1_IRQn : USART2_IRQn;
+#endif
+}
+
+// ---- FLASH ------------------------------------------------------------------
+//
+// What differs across the family in chapter 3 is the SECOND BANK and the
+// two protection units that come with the bigger parts. The device header
+// says so three ways and all three are probed here rather than in
+// flash.hpp: a feature macro (FLASH_DBANK_SUPPORT and friends), the
+// presence of a bit mask (FLASH_CR_BKER exists only where a bank may be
+// selected), and - the one a mask cannot express - the presence of a
+// STRUCT MEMBER: FLASH_TypeDef carries ECC2R and the four bank-2
+// protection registers on dual-bank parts only, so a driver naming
+// FLASH->ECC2R would not compile on a G031 at all. Those are exported as
+// POINTERS, null where the register does not exist, which is the value
+// form of "does this exist" and keeps the driver free of #ifdef.
+
+/// Dual-bank capability: the 512 KB parts always run in two banks, the
+/// 256 KB ones can, and no smaller part has a second bank at all.
+constexpr bool flash_dual_bank_capable =
+#if defined(FLASH_DBANK_SUPPORT)
+    true;
+#else
+    false;
+#endif
+
+/// Proprietary code readout protection areas (PCROP), read-only here.
+constexpr bool flash_pcrop_capable =
+#if defined(FLASH_PCROP_SUPPORT)
+    true;
+#else
+    false;
+#endif
+
+/// The securable memory area (FLASH_SECR.SEC_SIZE + FLASH_CR.SEC_PROT).
+constexpr bool flash_securable_capable =
+#if defined(FLASH_SECURABLE_MEMORY_SUPPORT)
+    true;
+#else
+    false;
+#endif
+
+/// FLASH_CR.BKER - which physical bank an erase acts on. Absent (0) on
+/// single-bank parts, where 3.7.5 says the bit "has no effect".
+constexpr uint32_t flash_cr_bank_select =
+#if defined(FLASH_CR_BKER)
+    FLASH_CR_BKER;
+#else
+    0u;
+#endif
+
+/// FLASH_CR.MER2 - mass erase of bank 2.
+constexpr uint32_t flash_cr_mass_erase2 =
+#if defined(FLASH_CR_MER2)
+    FLASH_CR_MER2;
+#else
+    0u;
+#endif
+
+/// FLASH_SR.BSY2 - bank 2 busy.
+constexpr uint32_t flash_sr_bank2_busy =
+#if defined(FLASH_SR_BSY2)
+    FLASH_SR_BSY2;
+#else
+    0u;
+#endif
+
+/// FLASH_OPTR.DUAL_BANK - the option bit that puts a 256 KB part in two
+/// banks (and reads as configured, but without effect, on a 512 KB one).
+constexpr uint32_t flash_optr_dual_bank =
+#if defined(FLASH_OPTR_DUAL_BANK)
+    FLASH_OPTR_DUAL_BANK;
+#else
+    0u;
+#endif
+
+/// FLASH_OPTR.nSWAP_BANK - 1 = no swap (physical bank 1 at 0x08000000).
+constexpr uint32_t flash_optr_swap_bank =
+#if defined(FLASH_OPTR_nSWAP_BANK)
+    FLASH_OPTR_nSWAP_BANK;
+#else
+    0u;
+#endif
+
+/// FLASH_SECR.SEC_SIZE2 - the securable area of bank 2.
+constexpr uint32_t flash_secr_sec_size2 =
+#if defined(FLASH_SECR_SEC_SIZE2)
+    FLASH_SECR_SEC_SIZE2;
+#else
+    0u;
+#endif
+
+/// FLASH_ECC2R, the bank-2 ECC register - a STRUCT MEMBER that only the
+/// dual-bank headers declare. Null where there is no second bank.
+inline volatile uint32_t* flash_ecc2r() {
+#if defined(FLASH_ECC2R_ECCC)
+    return &FLASH->ECC2R;
+#else
+    return nullptr;
+#endif
+}
+
+/// The four bank-2 protection registers, same story as ECC2R.
+inline volatile uint32_t* flash_wrp2ar() {
+#if defined(FLASH_WRP2AR_WRP2A_STRT)
+    return &FLASH->WRP2AR;
+#else
+    return nullptr;
+#endif
+}
+inline volatile uint32_t* flash_wrp2br() {
+#if defined(FLASH_WRP2BR_WRP2B_STRT)
+    return &FLASH->WRP2BR;
+#else
+    return nullptr;
+#endif
+}
+inline volatile uint32_t* flash_pcrop2a_start() {
+#if defined(FLASH_PCROP2ASR_PCROP2A_STRT)
+    return &FLASH->PCROP2ASR;
+#else
+    return nullptr;
+#endif
+}
+inline volatile uint32_t* flash_pcrop2a_end() {
+#if defined(FLASH_PCROP2AER_PCROP2A_END)
+    return &FLASH->PCROP2AER;
+#else
+    return nullptr;
+#endif
+}
+inline volatile uint32_t* flash_pcrop2b_start() {
+#if defined(FLASH_PCROP2BSR_PCROP2B_STRT)
+    return &FLASH->PCROP2BSR;
+#else
+    return nullptr;
+#endif
+}
+inline volatile uint32_t* flash_pcrop2b_end() {
+#if defined(FLASH_PCROP2BER_PCROP2B_END)
+    return &FLASH->PCROP2BER;
+#else
+    return nullptr;
 #endif
 }
 

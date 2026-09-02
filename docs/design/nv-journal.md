@@ -159,18 +159,24 @@ Unifying them under one concept is deliberately NOT done. A common
 things a caller has to know - what a write costs, whether it can block,
 whether there is a bounded path safe from a panic handler - and brio does
 not yet have a consumer that needs the same source to run over both. The
-question reopens when the STM32G0 arrives or when a real cross-target
-application asks it; until then two spellings, each honest about its
-silicon, is the smaller lie.
+question is OPEN now that the STM32G0 runs the journal too, and it
+stays a question until a real cross-target application asks it; until
+then two spellings, each honest about its silicon, is the smaller lie.
 
 ## What a second target inherits
 
 Nothing here is target-specific, so a new part gets the journal by
-writing its own `FlashMedia` and nothing else. The STM32G0's geometry -
-2 KB erase unit, an ECC-guarded 8-byte double word programmed once - is
-already one of the three the host suite sweeps, next to the SAM C21's
-RWWEE array (256/64) and an AVR Dx-shaped one (512/2, where a single
-entry header spans six program units).
+writing its own `FlashMedia` and nothing else - a claim that became a
+measurement when the STM32G0 arrived: its geometry (2 KB erase unit, an
+ECC-guarded 8-byte double word programmed once) was one of the three
+the host suite swept BEFORE that silicon existed, next to the SAM
+C21's RWWEE array (256/64) and an AVR Dx-shaped one (512/2, where a
+single entry header spans six program units), and
+`stm32g0/nvm_flash.hpp`'s journal zone in the part's second flash bank
+mounted, saved, collected and kept its panic reserve with no change to
+this header (docs/stm32g0/nvm.md). Its bank-2 attic is the third
+place the read-while-write property was measured: a save from the
+loop stalls nothing.
 
 ## Wear
 
@@ -214,5 +220,3 @@ Implemented but not bench-verified:
   between program units, so the states a half-erased half leaves are
   built by hand in the host suite and reasoned about here; no real part
   has been cut mid-erase.
-- **The second target the geometry was built for.** The STM32G0 shape
-  runs in the host suite; there is no STM32G0.
