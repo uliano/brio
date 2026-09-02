@@ -50,6 +50,39 @@
  * free: the images of every existing bus are byte-identical with the
  * hook in place.
  *
+ * WHAT HAPPENS ON A TRANSFER THAT NEVER ANSWERS is the `timeout_ticks`
+ * template argument's, and the arbiter is again the only honest home:
+ * it is the one object that knows a completion is OWED, and it lives in
+ * a kernel that has TimeEvents - the engine is interrupt-driven and
+ * owns no clock, and the silicon's own time-outs (where they exist at
+ * all: SMBus mode on the SAM SERCOM) police the HOST'S OWN clock hold,
+ * not a wire a client wedged (measured, docs/samc/i2c.md). With
+ * timeout_ticks != 0 every transfer that goes asynchronous arms a
+ * one-shot TimeEvent; if it matures first, the engine is declared dead:
+ * Bus::recover() puts the PERIPHERAL back where start() is legal, the
+ * requester is answered bus_timeout IN ITS PLACE like every reply, and
+ * the queue moves on. THE WIRE STAYS THE APPLICATION'S: whether to
+ * unstick(), power-cycle a client, or re-probe the whole bus is a
+ * recovery ladder no arbiter can own (ruling 2026-09-02) - what the
+ * timeout guarantees is only that the bus AO and its queue survive to
+ * be asked. A timeout is NOT a completion: the retry policy is not
+ * consulted (the engine never spoke), and stretching below the limit
+ * is legal flow control, so the value must be generous - a whole
+ * transaction's worth at the slowest device, not a byte's.
+ *
+ * THE RACE WITH THE REAL COMPLETION is closed by construction, both
+ * ways. A TransferDone already QUEUED when the timeout event is served
+ * is detected by a per-transfer sequence number the timeout carries
+ * (stale = dropped, counted); a TransferDone posted DURING the timeout
+ * dispatch (the engine finishing in the very window recover() closes)
+ * necessarily enters the queue BEFORE the BusFlushed marker the
+ * handler posts after recover() returns - recover() silences the
+ * engine, so nothing can post later - and is therefore drained in the
+ * one state that expects it, before the next request starts. With
+ * timeout_ticks == 0 (the default) none of this exists: no extra
+ * variant alternatives, no timer, no states - byte-identical images,
+ * the never_retries discipline again.
+ *
  * The request event exceeds the 8-byte envelope guideline (a SPI
  * descriptor is ~16 bytes, an I2C one 9): a recorded, legal deviation -
  * the request IS the arbitration token, splitting it into a reference
@@ -74,23 +107,54 @@
 #include "kernel/fsm.hpp"
 #include "kernel/platform.hpp"
 #include "kernel/post.hpp"
+#include "kernel/time_event.hpp"
 #include "util/power.hpp"
 
 namespace brio {
 
 /// Reply payload of every bus transaction.
 struct BusDone {
-    uint8_t status;   ///< bus_ok, bus_rejected, or an engine code
+    uint8_t status;   ///< bus_ok, bus_rejected, bus_timeout, or an engine code
 };
 
 inline constexpr uint8_t bus_ok = 0;
 inline constexpr uint8_t bus_rejected = 1;      ///< pending FIFO was full
 inline constexpr uint8_t bus_engine_status = 2; ///< first engine-defined code
+/// The transfer never answered inside the arbiter's timeout_ticks: the
+/// engine was recover()ed and this reply stands in for the completion
+/// that never came. TOP OF THE RANGE, deliberately: engine vocabularies
+/// grow UP from bus_engine_status (i2c_bus.hpp holds four already) and
+/// must never collide with an arbiter code.
+inline constexpr uint8_t bus_timeout = 255;
 
 /// Posted by the app's ISR glue when the engine finishes a transfer.
 struct TransferDone {
     uint8_t status;
 };
+
+/// Posted to a TIMED arbiter by its own TimeEvent: the transfer whose
+/// sequence number this carries never completed. Exists in a bus AO's
+/// event set only when timeout_ticks != 0.
+struct BusTimeout {
+    uint8_t seq;
+};
+
+/// Self-posted by a timed arbiter right after a timeout recovery: when
+/// it arrives, everything the dead transfer could still have queued (a
+/// TransferDone posted in the window recover() was closing) has been
+/// seen and drained - the FIFO order of the AO queue is the guarantee.
+struct BusFlushed {};
+
+namespace detail {
+/// The arbiter's Fsm base: the two timeout alternatives exist only in a
+/// timed instantiation, so an untimed bus keeps today's exact variant
+/// (and its exact code - the byte-identity discipline).
+template <bool timed, typename Self, typename Request>
+using BusMasterFsm = std::conditional_t<
+    timed,
+    Fsm<Self, Request, TransferDone, PrepareSleep, BusTimeout, BusFlushed>,
+    Fsm<Self, Request, TransferDone, PrepareSleep>>;
+} // namespace detail
 
 // ---- the completion policy ---------------------------------------------------
 
@@ -156,15 +220,31 @@ constexpr bool bus_policy_may_retry() {
  * arbiter stays in its busy state, which is also the state that votes
  * NOT-OK on a PrepareSleep: a request whose completion is still owed is
  * exactly the fact a sleep must not be taken against, and it stays true
- * across as many attempts as the policy spends.
+ * across as many attempts as the policy spends. A DRAINING master (the
+ * dispatch after a timeout recovery) is busy in the same sense.
+ *
+ * `timeout_ticks` is PER BUS and in KERNEL TICKS (ticks_from_ms<P>()
+ * converts): one wedged device on a shared bus starves every other
+ * client of that bus, so the limit is a property of the wire, not of a
+ * request (ruling 2026-09-02). 0 = no timeout, and no timeout code.
  */
 template <typename Bus, Platform P, uint8_t pending_depth = 4,
-          typename Policy = BusPassThrough>
-class BusMaster : public Fsm<BusMaster<Bus, P, pending_depth, Policy>,
-                             typename Bus::Request, TransferDone, PrepareSleep> {
-    using Base = Fsm<BusMaster<Bus, P, pending_depth, Policy>,
-                     typename Bus::Request, TransferDone, PrepareSleep>;
+          typename Policy = BusPassThrough, uint32_t timeout_ticks = 0>
+class BusMaster
+    : public detail::BusMasterFsm<timeout_ticks != 0,
+                                  BusMaster<Bus, P, pending_depth, Policy, timeout_ticks>,
+                                  typename Bus::Request> {
+    /// Whether the timeout machinery exists at all in this instantiation.
+    static constexpr bool timed = timeout_ticks != 0;
+
+    using Base = detail::BusMasterFsm<timed, BusMaster, typename Bus::Request>;
     using Request = typename Bus::Request;
+
+    static_assert(!timed || requires { Bus::recover(); },
+                  "a timed BusMaster needs Bus::recover(): the verb that puts a dead "
+                  "engine back where start() is legal again (avrdx/twi.hpp's is the "
+                  "model). The WIRE is not its job - unstick() and the recovery "
+                  "ladder stay the application's");
 
     /// Whether the retry machinery exists at all in this instantiation.
     static constexpr bool may_retry = bus_policy_may_retry<Policy>();
@@ -174,6 +254,31 @@ class BusMaster : public Fsm<BusMaster<Bus, P, pending_depth, Policy>,
     struct NoHold {};
     using Held = std::conditional_t<may_retry, Request, NoHold>;
 
+    /// The timeout state, instantiated only when timed (the Held
+    /// discipline again): the one-shot timer - a raw TimeEvents node
+    /// with its own firing glue, because the posted payload must carry
+    /// the sequence number AT FIRE TIME, which a TimeEvent's
+    /// construction-time payload cannot - plus the per-transfer sequence
+    /// and the stale-event tally.
+    struct TimedState {
+        struct Node : TimeEvents<P>::Base {
+            constexpr Node() : TimeEvents<P>::Base(&fire) {}
+
+        private:
+            static void fire(typename TimeEvents<P>::Base&) {
+                // Main context (TimeEvents<P>::process), so seq is
+                // exactly the armed transfer's: the timer is disarmed
+                // at every completion BEFORE seq moves on.
+                post<BusMaster>(BusTimeout{seq});
+            }
+        };
+        static inline Node timer{};
+        static inline uint8_t seq = 0;    ///< counts wire transfers, not requests
+        static inline uint8_t stale = 0;  ///< dropped stale events (saturating)
+    };
+    struct NoTimedState {};
+    using TState = std::conditional_t<timed, TimedState, NoTimedState>;
+
 public:
     using Event = typename Base::Event;
     using Status = typename Base::Status;
@@ -181,8 +286,10 @@ public:
     // pending_depth requests can wait + one in flight + one TransferDone
     // + one PrepareSleep. The vote's slot is not optional: a dropped
     // PrepareSleep is a vote that never comes back, and the manager waits
-    // for unanimity rather than timing out.
-    static inline EventQueue<Event, pending_depth + 3, P> queue;
+    // for unanimity rather than timing out. A timed bus adds headroom
+    // for its own events: a BusTimeout or two (a stale one can coexist
+    // with the next transfer's) and the BusFlushed marker.
+    static inline EventQueue<Event, pending_depth + (timed ? 6 : 3), P> queue;
 
     /// Full reset, like every other AO's init(): the pending FIFO, the
     /// rejection tally, the retry counter and the active reply all go
@@ -195,6 +302,11 @@ public:
         rejected_ = 0;
         attempt_ = 0;
         active_reply_ = {};
+        if constexpr (timed) {
+            TimeEvents<P>::disarm(TState::timer);
+            TState::seq = 0;
+            TState::stale = 0;
+        }
         Base::start(&idle);
     }
     static void dispatch(const Event& e) { Base::dispatch(e); }
@@ -205,6 +317,18 @@ public:
     /// Retries the policy has spent on the request in flight (0 when it
     /// has not asked for any, and after every completion that passed).
     static uint8_t attempt() { return attempt_; }
+
+    /// Timed buses only: events dropped as stale - a BusTimeout that
+    /// lost the race with its own transfer's completion, or the dead
+    /// transfer's TransferDone drained after a recovery. A diagnostic,
+    /// not an error: each one is a race CLOSED correctly.
+    static uint8_t stale_events() {
+        if constexpr (timed) {
+            return TState::stale;
+        } else {
+            return 0;
+        }
+    }
 
 private:
     static Status idle(const Event& e) {
@@ -223,6 +347,12 @@ private:
                 p.reply.send(SleepVote{pending_count_ == 0});
                 return Base::handled();
             },
+            [](BusTimeout) {
+                // Stale by definition: idle owes nobody a completion (a
+                // timeout that lost the race with a synchronous drain).
+                count_stale();
+                return Base::handled();
+            },
             [](auto) { return Base::unhandled(); },
         }, e);
     }
@@ -239,10 +369,18 @@ private:
                 return Base::handled();
             },
             [](TransferDone d) {
+                // Every TransferDone seen here is the CURRENT transfer's:
+                // a dead transfer's straggler can only exist between a
+                // timeout recovery and its BusFlushed marker, and that
+                // window is the draining state, not this one.
+                if constexpr (timed) {
+                    TimeEvents<P>::disarm(TState::timer);
+                }
                 if constexpr (may_retry) {
                     if (Policy::on_done(d.status, attempt_) == BusAction::retry) {
                         ++attempt_;
                         if (!Bus::start(held_)) {
+                            arm_timeout();              // a new wire transfer
                             return Base::handled();     // the retry is in flight
                         }
                         // The retry finished inside start(): bus_ok by
@@ -268,6 +406,75 @@ private:
                 p.reply.send(SleepVote{false});
                 return Base::handled();
             },
+            [](BusTimeout t) {
+                if constexpr (timed) {
+                    if (t.seq != TState::seq) {
+                        // An earlier transfer's, overtaken by its own
+                        // completion while both sat in the queue.
+                        count_stale();
+                        return Base::handled();
+                    }
+                    // The transfer in flight never answered. The ENGINE
+                    // is declared dead and put back where start() is
+                    // legal; the WIRE's health is the application's to
+                    // judge from this very reply. Not a completion: the
+                    // retry policy is not consulted.
+                    Bus::recover();
+                    if constexpr (may_retry) {
+                        attempt_ = 0;
+                    }
+                    active_reply_.send(BusDone{bus_timeout});
+                    // Anything the dying transfer still posted entered
+                    // the queue before this marker will (recover()
+                    // silenced the engine): drain it before the next
+                    // request can be confused with it.
+                    post<BusMaster>(BusFlushed{});
+                    return Base::transition(&draining);
+                } else {
+                    return Base::handled();   // unreachable: never posted
+                }
+            },
+            [](auto) { return Base::unhandled(); },
+        }, e);
+    }
+
+    /// The dispatch after a timeout recovery (timed instantiations
+    /// only): between the recovery and its BusFlushed marker, so the one
+    /// place a dead transfer's straggler is EXPECTED. Busy in every
+    /// other respect: requests wait or are rejected, sleep is refused.
+    static Status draining(const Event& e) {
+        return std::visit(overloaded{
+            [](const Request& r) {
+                if (!pending_push(r)) {
+                    if (rejected_ != UINT8_MAX) {
+                        ++rejected_;
+                    }
+                    r.reply.send(BusDone{bus_rejected});
+                }
+                return Base::handled();
+            },
+            [](TransferDone) {
+                // The dead transfer's own completion, posted in the
+                // window recover() was closing: its requester was
+                // already answered bus_timeout - drop it, count it.
+                count_stale();
+                return Base::handled();
+            },
+            [](BusTimeout) {
+                count_stale();      // stale by definition here
+                return Base::handled();
+            },
+            [](BusFlushed) {
+                if (pending_count_ > 0 && begin_chain(pending_pop())) {
+                    return Base::transition(&busy);
+                }
+                return Base::transition(&idle);
+            },
+            [](const PrepareSleep& p) {
+                // A recovery is in progress and requests may be waiting.
+                p.reply.send(SleepVote{false});
+                return Base::handled();
+            },
             [](auto) { return Base::unhandled(); },
         }, e);
     }
@@ -283,6 +490,7 @@ private:
             }
             active_reply_ = r.reply;
             if (!Bus::start(r)) {
+                arm_timeout();
                 return true;
             }
             active_reply_.send(BusDone{bus_ok});
@@ -290,6 +498,23 @@ private:
                 return false;
             }
             r = pending_pop();
+        }
+    }
+
+    /// A transfer just went asynchronous: give it its sequence number
+    /// and start the clock. Folded away entirely on an untimed bus.
+    static void arm_timeout() {
+        if constexpr (timed) {
+            ++TState::seq;
+            TimeEvents<P>::arm(TState::timer, timeout_ticks, 0);
+        }
+    }
+
+    static void count_stale() {
+        if constexpr (timed) {
+            if (TState::stale != UINT8_MAX) {
+                ++TState::stale;
+            }
         }
     }
 

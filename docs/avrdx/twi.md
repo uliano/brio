@@ -587,10 +587,14 @@ implement):
   byte when SADDR[7:3] is 0b11110 and the second byte is software's job
   (29.3.3.6); neither the client task nor the host's `Request` has a
   shape for it.
-- **A stuck-bus WATCHDOG.** The mechanical remedy is `unstick()` (above,
-  and bench-measured below); what is missing is the POLICY - noticing
-  that a transaction is stuck at all. That needs a per-request timeout
-  in the bus AO ([i2c-bus.md](../design/i2c-bus.md)).
+- **The timed bus on THIS silicon.** The stuck-bus watchdog now exists
+  where it belongs: `I2cBus`'s per-bus `timeout_ticks` notices a tenure
+  that never answers, calls this engine's `recover()` (the errata's
+  ENABLE cycle - exactly the verb the contract names as its model) and
+  replies `i2c_timeout` ([i2c-bus.md](../design/i2c-bus.md)). It is
+  host-tested and compile-proven over `TwiHost` on every package; no
+  AVR bench has staged the wedge yet - the SAM I2C suite's letter l is
+  the mechanism's silicon witness.
 - **Multi-host as a policy.** Arbitration is measured and the engine
   reports `i2c_arb_lost`, but nothing above the engine decides what to
   do with it: a retry policy, a back-off, a bus AO that knows it shares

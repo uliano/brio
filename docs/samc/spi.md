@@ -207,7 +207,12 @@ item a reader would apply without checking the row.
   `spi_dma_fault` (the first engine-defined BusDone code) when a
   transfer error or a bounded-timeout abandon ended the request. The
   DMAC BLOCK is the app's: `Dmac::init()` once, before any engined
-  `init()`.
+  `init()`. `recover()` is the verb a TIMED SpiBus calls on a
+  transaction that never answered (util/bus_master.hpp): CS deasserted
+  first, engines put away and re-claimed, the SERCOM reset and
+  reconfigured to the applied state - the wedge it targets is an
+  ISR-style completion that never posts (the 1.10.4 class of death
+  with no fault flag to see).
 - **`SpiClient<n, pads>`** - the polled surface plus ISR bodies:
   preload, SSDE, address recognition (FORM = 0x2 with AMODE/ADDR),
   `drive_output()` for a dark listener on a shared harness,
@@ -283,6 +288,11 @@ A client answering a stream (the one-ahead pump):
   runs the arbiter over the byte pump, letter h the engines ISR-style
   in loop-back; the composition of the two is exercised, the product
   is not).
+- The timed-bus path on THIS wire: `SpiBus`'s per-bus timeout and
+  `recover()` are host-tested (deterministic race legs included) and
+  compile-proven here, but no SPI wedge has been STAGED on silicon -
+  the I2C letter l is the mechanism's silicon witness (a held wire is
+  stageable; a dead DMA channel on demand is not).
 - The 24 MHz loop-back rung's attribution (transmit vs receive
   sampling at f_ref/2) - the wired ladder brackets it between 6 and
   8 MHz for the full link, but the single-board question stands.

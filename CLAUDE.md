@@ -2399,6 +2399,68 @@ gets its dated home in `docs/design/` when taken.
   bench and rewritten. Gates: md5 36/39 + the two build-id movers +
   the suite, check_samc, host 24/24. Docs i2c.md (findings + the gap
   closed, MEXT stated) and bench.md moved in the same change.
+  **THE PER-BUS TIMEOUT DONE 2026-09-02 (same desk-day's fourth
+  campaign, the letter-j consequence built where it belongs - a util/
+  change BY FABLE'S OWN HAND, ruled per-bus by the user with the
+  post-fault client re-verification left to the application).**
+  util/bus_master.hpp grew `timeout_ticks` (fifth template argument,
+  default 0 = today's arbiter BYTE FOR BYTE - the never_retries
+  discipline again, and the gate PROVED it: 36/39 samc + 40/41 avrdx
+  images byte-identical, the only movers the new letter and the three
+  standing build-id defsyms at their usual 2/4-byte signature, so
+  test_samc_spi/uart/dma's identity doubles as the canary): every
+  transfer that goes asynchronous arms a ONE-SHOT TimeEvent (a raw
+  TimeEvents<P>::Base node with its own fire glue, because the posted
+  BusTimeout must carry the SEQUENCE NUMBER at fire time - kernel/
+  untouched); if it matures first the engine is declared dead,
+  Bus::recover() (static_asserted at the spelling; a new samc neg TU
+  refuses an engine without it) puts the PERIPHERAL back where
+  start() is legal, the requester is answered bus_timeout (255, top
+  of range - engine codes grow UP from 2 and can never collide) IN
+  ITS PLACE, and the queue moves on; the retry Policy is NOT
+  consulted (the engine never spoke). THE RACE WITH THE REAL
+  COMPLETION IS CLOSED BY CONSTRUCTION both ways: a stale BusTimeout
+  is dropped by seq mismatch, and a straggler TransferDone posted in
+  the window recover() closes necessarily precedes the self-posted
+  BusFlushed marker in the queue (recover() silences the engine), so
+  a DRAINING state between them is deterministic, not probabilistic -
+  both halves staged exactly there in the host suite (the fake posts
+  the straggler FROM INSIDE recover(); test_bus_master 18/18, host
+  24/24). ENGINES: avrdx TwiHost's recover() already existed (the
+  errata's ENABLE cycle - reused untouched, and it is the verb the
+  contract names as its model); samc I2cHost::recover() re-runs the
+  init() tail from the cached config as its OWN body (no init()
+  refactor - an uncalled template verb costs nothing, byte-identity
+  over code economy) because a parked START never fires on release
+  and re-init is the only exit; samc SpiHost::recover() closes the
+  select window FIRST, puts the engines away and re-claims them,
+  resets and reconfigures; avrdx SpiHost::recover() is NEW (silence +
+  IF clear, restore_host() for the mid-transfer demotion, CS up) -
+  both avrdx verbs compile-proven on every package and STATED as
+  not-bench-run in their docs. SILICON WITNESS test_samc_i2c letter l
+  (z 47 -> 52, 52/52 x3 incl. cold): a tenure into the peer's 60 ms
+  SDA hold - the wedge letter j proved the silicon cannot see - came
+  back i2c_timeout AT 35 MS EXACTLY (the arbiter's own limit) WITH
+  THE SDA PAD STILL LOW AT THE REPLY (the pad is the witness;
+  recover()'s force_idle has just rewritten the monitor), zero stale,
+  and the SAME bus AO carried the next tenure i2c_ok after the
+  release; a 1 ms/byte stretcher completed i2c_ok in 9 ms under the
+  same limit (stretching is flow control - the limit sits above the
+  tenure by design). TWO LETTER LESSONS: the timed_ao_live flag is
+  raised ONLY around the kernel pumps (the peer commands ride the
+  bare engine path, and the first version starved them into a link
+  failure); and the wedge witness is the PAD, never the monitor.
+  I2cBus/SpiBus aliases pass Policy + timeout through; i2c_timeout/
+  spi_timeout name the code per vocabulary. Family: timed
+  instantiations in all four bus TUs (avrdx twi/spi x8 packages, samc
+  i2c/spi x3 headers) + the neg; check_family, check_samc green.
+  Docs: design/i2c-bus.md's "still missing" paragraph became "The
+  per-bus timeout" (three rulings recorded), design/spi-bus.md points
+  at it (the SPI wedge is a dead engine, not a wire), samc/i2c.md's
+  consequence line now names the mechanism and letter l, samc/spi.md
+  + avrdx twi.md/spi.md state their recover() and the not-staged
+  gaps, bench.md's suite row moved. Judgment calls in memory
+  samc-session-2026-09-02-timeout.
   **Build tooling is DONE, not part of this milestone any more**
   (2026-08-27): PlatformIO was stretched past its design use case (the
   env-per-app-x-board list would only have grown worse per family) and

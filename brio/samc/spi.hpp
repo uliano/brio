@@ -1403,6 +1403,43 @@ public:
     static uint8_t status() { return status_; }
 
     /// Hand the pins back, then the peripheral.
+    /**
+     * @brief Put the ENGINE back where start() is legal: engines put
+     * away and re-claimed, the peripheral reset and reconfigured to the
+     * applied state, the select window closed. Clocks, pads and the
+     * ceiling arithmetic are untouched (a SERCOM software reset reaches
+     * none of them), so no Clock is needed.
+     *
+     * The verb a timed SpiBus calls on a transaction that never
+     * answered (util/bus_master.hpp) - here that means an ISR-style
+     * completion that never posted: a DMA channel the 1.10.4 class of
+     * death stopped with no fault flag to see, a lost interrupt. The
+     * in-flight request's CS is deasserted FIRST: its device sees the
+     * transaction end, however garbled, rather than a select held for
+     * ever.
+     *
+     * @return false when a synchronization never settled (the bounded
+     * waits' honesty: a false engine is refusing, not hanging).
+     */
+    static bool recover() {
+        req_.cs.set();
+        if constexpr (has_engines) {
+            (void)TxEngine::abandon();   // re-claims: interrupts re-armed
+            RxEngine::stop();
+            RxEngine::arm(S::data_address(), S::dma_rx_trigger());
+        }
+        Nvic::disable(S::irq());
+        in_cmd_ = false;
+        dma_active_ = false;
+        dma_done_ = false;
+        bool ok = S::reset();
+        ok = S::configure(applied_) && ok;
+        ok = S::enable(true) && ok;
+        S::flush_rx();
+        Nvic::enable(S::irq());
+        return ok;
+    }
+
     static void release() {
         if constexpr (has_engines) {
             TxEngine::stop();

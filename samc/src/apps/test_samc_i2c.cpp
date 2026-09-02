@@ -41,6 +41,7 @@
 #include "kernel/fsm.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/post.hpp"
+#include "kernel/time.hpp"
 #include "util/i2c_bus.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
@@ -114,6 +115,7 @@ volatile bool xfer_done = false;
 volatile uint8_t xfer_status = i2c_ok;
 volatile uint32_t isr_completions = 0;
 bool bus_ao_live = false;
+bool timed_ao_live = false;   ///< letter l's TIMED arbiter takes the completions
 
 // ---------------------------------------------------------------------------
 // Synchronous tenures for the bare letters
@@ -1445,6 +1447,198 @@ void tk_kernel() {
                   true);
 }
 
+// ===========================================================================
+// l - THE TIMED BUS: a wedged tenure as a reply, on the arbiter's clock
+// ===========================================================================
+//
+// Letter j measured that the silicon's SMBus time-outs police the
+// HOST'S OWN clock hold and cannot see a wire a client wedged; this
+// letter runs the answer that CAN - util/bus_master.hpp's per-bus
+// timeout (ruling 2026-09-02) - against the same two stagings letter j
+// used: legal stretching (must pass untouched) and the held wire (must
+// come back i2c_timeout on the arbiter's clock, the engine recover()ed
+// in the same dispatch).
+
+namespace tl {
+
+/// 35 ms: comfortably above a whole stretched tenure (~10 ms at 1 ms
+/// per byte, leg 1's own measurement) and comfortably below the 60 ms
+/// hold, so the reply provably lands while the wire is STILL HELD.
+constexpr uint32_t timeout_ms = 35;
+using TimedBus = I2cBus<I2cHw, P, 3, BusPassThrough, ticks_from_ms<P>(timeout_ms)>;
+
+struct Send {};
+
+class Driver : public Fsm<Driver, I2cDone, Send> {
+public:
+    static inline EventQueue<Event, 8, P> queue;
+    static inline uint8_t replies = 0;
+    static inline uint8_t last_status = 0xEE;
+    static inline uint32_t last_at = 0;
+    static inline uint8_t tx_len = 8;
+
+    static void init() {
+        replies = 0;
+        last_status = 0xEE;
+        last_at = 0;
+        start(&running);
+    }
+    static void dispatch(const Event& e) { Fsm::dispatch(e); }
+
+private:
+    static Status running(const Event& e) {
+        return brio::match(
+            e,
+            [](const Send&) {
+                post<TimedBus>(I2cHw::Request{
+                    .addr = twilink::dut_addr,
+                    .tx = lend<Lease::reply>(static_cast<const uint8_t*>(txbuf)),
+                    .tx_len = tx_len,
+                    .rx = {},
+                    .rx_len = 0,
+                    .reply = reply_to<Driver, I2cDone>(),
+                    .speed = I2cSpeed::standard_100k,
+                });
+                return handled();
+            },
+            [](const I2cDone& d) {
+                ++replies;
+                last_status = d.status;
+                last_at = Ticker::millis();
+                return handled();
+            },
+            [](auto) { return unhandled(); });
+    }
+};
+
+using TimedKernel = Kernel<P, Driver, TimedBus>;
+
+/// The kernel loop's turn, faithfully: the timeout matures in
+/// TimeEvents<P>::process(), exactly where Kernel::run() has it.
+void pump_until(uint8_t replies, uint32_t deadline_ms) {
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < deadline_ms) {
+        TimeEvents<P>::process();
+        while (TimedKernel::step()) {
+        }
+        if (Driver::replies >= replies) {
+            break;
+        }
+    }
+}
+
+} // namespace tl
+
+void tl_timed() {
+    if (!engine_up()) {
+        bench.verdict("the engine comes up", false);
+        return;
+    }
+    if (!need_peer()) return;
+
+    // Leg 1: LEGAL STRETCHING UNDER A TIMED ARBITER. The peer stretches
+    // every data byte by 1 ms - ten times a byte's own time - and the
+    // tenure must still complete i2c_ok: stretching is flow control,
+    // and the per-bus limit is sized ABOVE a whole worst-case tenure
+    // precisely so this leg cannot trip it.
+    twilink::Params st{};
+    st.count = 64;
+    st.ms = 400;
+    st.addr = twilink::dut_addr;
+    st.hold_us = 1000;
+    if (!peer_act(Op::serve, st)) {
+        bench.verdict("the peer accepted the stretched serve", false);
+        return;
+    }
+    for (uint8_t i = 0; i < 8; ++i) txbuf[i] = static_cast<uint8_t>(0x11u * (i + 1u));
+    tl::TimedKernel::init_all();
+    // The flag is raised ONLY around the kernel pumps: the peer_act
+    // round trips ride the BARE engine path (xfer_done), and the first
+    // version of this letter left it up across one - every command
+    // completion went to the arbiter and the link "failed".
+    timed_ao_live = true;
+    post<tl::Driver>(tl::Send{});
+    uint32_t t0 = Ticker::millis();
+    tl::pump_until(1, 400);
+    timed_ao_live = false;
+    const uint32_t stretched_ms = tl::Driver::last_at - t0;
+    const bool stretch_ok = tl::Driver::replies == 1 && tl::Driver::last_status == i2c_ok;
+    settle_ms(450);   // the serve's own deadline restores the peer
+    print(serial, "  stretched tenure (1 ms/byte, 8 bytes) under a ", tl::timeout_ms,
+          " ms arbiter: status=", hex(tl::Driver::last_status), " in ", stretched_ms,
+          " ms", crlf);
+    bench.verdict("a client stretching every byte completes i2c_ok UNDER the timed "
+                  "arbiter - stretching is flow control and the per-bus limit sits "
+                  "above the whole tenure",
+                  stretch_ok && stretched_ms >= 8u && stretched_ms < tl::timeout_ms);
+
+    // Leg 2: THE WEDGE. The peer pins SDA low for 60 ms; a tenure
+    // started into it PARKS IN HARDWARE (letter g's finding) and the
+    // engine's completion interrupt never fires. Letter j proved the
+    // silicon's time-outs cannot see this; the arbiter's clock can.
+    twilink::Params h{};
+    h.ms = 400;
+    h.aux16 = 60000;   // hold SDA low for 60 ms
+    h.aux8 = 0;
+    if (!peer_act(Op::hold_sda, h)) {
+        bench.verdict("the peer accepted the hold_sda command", false);
+        return;
+    }
+    settle_ms(twilink::arm_ms + 2);   // the hold is on
+    tl::Driver::init();
+    timed_ao_live = true;
+    post<tl::Driver>(tl::Send{});
+    t0 = Ticker::millis();
+    tl::pump_until(1, 200);
+    timed_ao_live = false;
+    const uint32_t reply_ms = tl::Driver::last_at - t0;
+    const uint8_t wedge_status = tl::Driver::last_status;
+    // Sampled right at the reply's pump exit: the hold has ~25 ms
+    // left, and the witness is the SDA PAD ITSELF (input_enable is on
+    // under the mux) - recover()'s force_idle has just rewritten the
+    // monitor's BUSSTATE, so the monitor is no witness here.
+    const bool still_held =
+        !Pin<bus_pads.sda_pin.port, bus_pads.sda_pin.pin>::read();
+    print(serial, "  tenure into the held wire: status=", hex(wedge_status), " at ",
+          reply_ms, " ms (limit ", tl::timeout_ms, ", hold 60), SDA low at reply=",
+          still_held, ", stale=", tl::TimedBus::stale_events(), crlf);
+    bench.verdict("the wedged tenure comes back i2c_timeout ON THE ARBITER'S CLOCK "
+                  "- a reply in its place, never a hang",
+                  tl::Driver::replies == 1 && wedge_status == i2c_timeout &&
+                      reply_ms >= tl::timeout_ms && reply_ms < 55u);
+    bench.verdict("and it lands while the wire is STILL HELD - the diagnosis is the "
+                  "timeout's, not the release's (letter j's silicon could never)",
+                  still_held);
+
+    // Leg 3: THE GIVE-BACK. recover() ran inside the arbiter's own
+    // dispatch during the hold; once the wire frees, the SAME bus AO
+    // must carry a clean tenure with no hand on the engine.
+    settle_ms(500);   // hold over, the peer's command client restored
+    twilink::Params a{};
+    a.count = 16;
+    a.ms = 400;
+    a.addr = twilink::dut_addr;
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the give-back serve", false);
+        return;
+    }
+    tl::Driver::init();
+    timed_ao_live = true;
+    post<tl::Driver>(tl::Send{});
+    tl::pump_until(1, 400);
+    timed_ao_live = false;
+    settle_ms(450);
+    print(serial, "  after the release: status=", hex(tl::Driver::last_status),
+          ", stale=", tl::TimedBus::stale_events(), crlf);
+    bench.verdict("the bus SURVIVED its own diagnosis: the recover()ed engine "
+                  "carries the next tenure i2c_ok through the same arbiter",
+                  tl::Driver::replies == 1 && tl::Driver::last_status == i2c_ok);
+    bench.verdict("no stale event on this wedge - the parked tenure never completed, "
+                  "so there was no straggler to drain (the race legs are the host "
+                  "suite's, deterministic on the virtual clock)",
+                  tl::TimedBus::stale_events() == 0);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -1455,7 +1649,9 @@ extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
 extern "C" void SERCOM3_Handler() {
     if (I2cHw::isr()) {
-        if (bus_ao_live) {
+        if (timed_ao_live) {
+            brio::post<tl::TimedBus>(brio::TransferDone{I2cHw::status()});
+        } else if (bus_ao_live) {
             isr_completions = isr_completions + 1;
             brio::post<kl::I2cArb>(brio::TransferDone{I2cHw::status()});
         } else {
@@ -1508,6 +1704,7 @@ int main() {
                  tj_timeouts);
     bench.letter('k', "THE KERNEL: I2cBus over I2cHost, util unchanged (peer)",
                  tk_kernel);
+    bench.letter('l', "THE TIMED BUS: a wedged tenure as a reply (peer)", tl_timed);
 
     bench.menu();
     bench.prompt();

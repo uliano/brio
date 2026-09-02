@@ -178,6 +178,22 @@ entirely: with `polled = true`, `SpiHost<n>::start()` is a complete
 synchronous transfer function usable directly by the owning AO - the
 arbitration price is only paid where there is something to arbitrate.
 
+## The per-bus timeout
+
+`SpiBus` surfaces `BusMaster`'s `timeout_ticks` (the full design and
+its rulings in [i2c-bus.md](i2c-bus.md) - one mechanism, both
+vocabularies). On SPI the plausible wedge is not a wire - the host
+clocks itself - but a DEAD ENGINE whose ISR-style completion never
+posts: an AVR host demoted mid-transfer by its SS pin, a DMA channel
+stopped by the 1.10.4 class of death. A wedged transaction then comes
+back `spi_timeout` on the arbiter's clock, `SpiHost::recover()` having
+silenced the stale interrupt, re-armed a demoted host (AVR) or put the
+DMA channels away and reset the SERCOM (SAM), and closed the select
+window so the device sees the transaction END. Size the limit to the
+longest legal transaction; polled requests complete inside `start()`
+and never arm it. With `timeout_ticks = 0` (the default) the arbiter
+is byte-identical to the untimed one.
+
 ## Multi-client rules of thumb
 
 - Each client owns its CS pin (configures it, idles it high) and any

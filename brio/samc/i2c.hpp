@@ -1202,6 +1202,40 @@ public:
         return released_at == 0xFF ? 0u : released_at;
     }
 
+    /**
+     * @brief Put the ENGINE back where start() is legal: the init()
+     * tail re-run from the cached configuration. Clocks and pads are
+     * untouched - a SERCOM software reset reaches neither GCLK routing
+     * nor PORT - and the baud table stands, so no Clock is needed.
+     *
+     * The verb a timed I2cBus calls on a tenure that never answered
+     * (util/bus_master.hpp): a START parked into a held wire does NOT
+     * fire on this silicon when the hold releases (measured, letter g),
+     * so a re-init is the ONLY way out of a park. THE WIRE IS NOT ITS
+     * JOB: a client still holding SDA makes the next tenure report -
+     * a bus error, another timeout - and unstick() is the wire's verb.
+     *
+     * @return false when a synchronization never settled (the bounded
+     * waits' honesty: a false engine is refusing, not hanging).
+     */
+    static bool recover() {
+        Nvic::disable(S::irq());
+        phase_ = Phase::idle;
+        bool ok = S::reset();
+        applied_ = I2cSpeed::standard_100k;
+        I2cmConfig c{};
+        c.pads = pads;
+        c.speed = applied_;
+        c.baud = table_[0];
+        c.inactive_timeout = I2cInactiveTimeout::us205;
+        ok = S::configure(c) && ok;
+        ok = S::enable(true) && ok;
+        ok = S::force_idle() && ok;
+        S::enable_interrupt(I2cmFlag::all, true);
+        Nvic::enable(S::irq());
+        return ok;
+    }
+
     static void release() {
         Nvic::disable(S::irq());
         S::release();

@@ -4,7 +4,10 @@
 // device header but by an erratum (SPI1 ALT2 on 48 pins).
 #include "avrdx/clock.hpp"
 #include "avrdx/evsys.hpp"
+#include "avrdx/platform_avr.hpp"
 #include "avrdx/spi.hpp"
+#include "kernel/time.hpp"
+#include "util/spi_bus.hpp"
 
 using namespace brio;
 
@@ -196,4 +199,19 @@ void use_tasks() {
     (void)Client1::max_sck_hz();
     (void)Client1::can_follow(1'000'000u);
     Client1::release();
+}
+
+// ---- the per-bus timeout instantiates over this engine ---------------------
+// A timed SpiBus static_asserts Bus::recover(); SpiHost's clears the
+// interrupt, re-arms a demoted host and closes the select window.
+// Compile proof on every package (the pinless host included); the
+// timed path itself has not run on AVR silicon yet (docs/avrdx/spi.md).
+using TimedSpiBus = SpiBus<Host0, AvrPlatform, 4, BusPassThrough,
+                           ticks_from_ms<AvrPlatform>(100)>;
+
+void timed_bus_surface() {
+    TimedSpiBus::init();
+    (void)TimedSpiBus::rejected_count();
+    (void)TimedSpiBus::stale_events();
+    Pinless::recover();
 }

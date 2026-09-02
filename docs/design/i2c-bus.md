@@ -103,27 +103,61 @@ times are arguments rather than assumptions, belongs to the engine:
   far too weak for I2C edges. The peripheral drives the pins
   open-drain by itself; init only routes them (PORTMUX).
 
+## The per-bus timeout
+
+A client holding SDA low forever leaves a tenure in flight: the kernel
+keeps running (nothing blocks) but the bus AO stays busy and later
+requests pile up until rejected - loud, but not recovered. And no
+silicon fixes this: the SAM SERCOM's SMBus time-outs police the HOST'S
+OWN clock hold, not a wire a client wedged (measured -
+[i2c.md](../samc/i2c.md)); the AVR's TWI has none at all. So the
+timeout is the ARBITER'S - the one object that knows a completion is
+owed, living in the kernel that has TimeEvents.
+
+`BusMaster`'s `timeout_ticks` template argument (surfaced here as
+`I2cBus`'s) arms a one-shot TimeEvent for every tenure that goes
+asynchronous. If it matures first, the engine is declared dead:
+`Bus::recover()` puts the PERIPHERAL back where `start()` is legal
+(`TwiHost`'s ENABLE-cycle errata work-around, `I2cHost`'s cached
+re-init), the requester is answered `i2c_timeout` in its place, and
+the queue moves on. The races with the real completion are closed by
+construction (a sequence number and a drain state - the whole story in
+`util/bus_master.hpp`, staged deterministically in the host suite).
+
+Three decisions worth their line (ruling 2026-09-02):
+
+- **Per BUS, not per request.** One wedged device starves every client
+  of the wire, so the limit is a property of the bus. It must sit
+  ABOVE legal clock stretching - flow control, not a fault - so size
+  it to a whole worst-case tenure at the slowest device, and convert
+  with `ticks_from_ms<P>()`.
+- **The WIRE stays the application's.** The timeout guarantees only
+  that the bus AO and its queue survive to be asked; whether to
+  `unstick()`, power-cycle a client or re-probe the bus is the
+  recovery ladder below, still policy. After a fault, re-verifying
+  the clients one by one is the application's decision.
+- **A timeout is not a completion**: the retry `Policy` is never
+  consulted (the engine never spoke).
+
+With `timeout_ticks = 0` (the default) none of this exists - the
+generated code is byte-identical to the untimed arbiter's, the
+`never_retries` discipline again.
+
 ## Not built, noted
 
-The arbiter now carries the HOOK a recovery policy would hang from -
+The arbiter carries the HOOK a recovery policy would hang from -
 `BusMaster`'s `Policy` template argument, whose `on_done(status,
 attempt)` can ask for the same request to be started again (see
 `util/bus_master.hpp`); the concrete I2C ladder below and the
 multi-host backoff remain on demand.
 
-- **Stuck-bus watchdog - the POLICY half.** A client holding SDA low
-  forever leaves the transaction in flight: the kernel keeps running
-  (nothing blocks) but the bus AO stays busy and later requests pile up
-  in the pending FIFO until they are rejected - loud, not silent, but
-  not recovered. The MECHANICAL half now exists at engine level:
-  `Twi<n>::unstick()` (and `TwiHost<n>::unstick()`) clocks SCL up to
-  nine times until the stuck client releases SDA, issues a STOP and
-  reports how many pulses it took - see [twi.md](../avrdx/twi.md). What
-  is still missing is the part that belongs HERE: a per-request timeout
-  (a TimeEvent in the bus AO) to notice that a transaction is stuck, and
-  a policy for what to do after the recovery - retry, fail the request,
-  or take the bus out of service. To be built when a real device makes
-  it necessary.
+- **The recovery LADDER.** The mechanical verbs exist at engine level
+  (`unstick()` clocks SCL up to nine times until a stuck client
+  releases SDA - see [twi.md](../avrdx/twi.md)) and the timeout above
+  notices the wedge and reports it; the POLICY connecting them - when
+  to unstick, when to retry, when to take the bus out of service - is
+  the application's, or a future policy type's, born with the device
+  that needs it.
 - **Multi-host policy.** The engine reports `i2c_arb_lost` and the
   arbiter passes it to the requester untouched. A bus AO that knows it
   shares the wire - retrying a lost tenure, backing off, refusing to

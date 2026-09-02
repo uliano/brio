@@ -13,8 +13,10 @@ the shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 `samc/i2c.hpp` over `Sercom<n>`'s instance facts (sercom.md owns the
 address ladder; this campaign added `i2cm_regs()`/`i2cs_regs()` and
 `gclk_slow_id()` beside the SPI view). Family fixture
-`test/family_samc/i2c.cpp` + six negatives; bench suite `test_samc_i2c`
-(11 letters, 47 verdicts, two-board: the peer board runs `twi_peer` -
+`test/family_samc/i2c.cpp` + six negatives (the per-bus timeout adds a
+seventh at the util level: an engine without `recover()` refused);
+bench suite `test_samc_i2c`
+(12 letters, 52 verdicts, two-board: the peer board runs `twi_peer` -
 the avrdx original or its samc port, one `twi_link.hpp` wire format
 between them - commanded in band over the bus under test).
 
@@ -148,9 +150,13 @@ scaled: with GCLK_SERCOM_SLOW at 48 MHz the same hold never trips at
 all (a clock-domain limit), so a design that enables these time-outs
 must WEIGH its slow clock (the suite prices its OSC32K meter on FREQM,
 32.59 kHz with the factory trim). CONSEQUENCE FOR THE ENGINE'S USERS:
-a bus hung BY A CLIENT stays software's to bound (a deadline, then
-unstick()/re-init) - the hardware time-outs bound only this host's own
-software, a case a live ISR never produces.
+a bus hung BY A CLIENT stays software's to bound - the hardware
+time-outs bound only this host's own software, a case a live ISR never
+produces. The software bound EXISTS: `I2cBus`'s per-bus `timeout_ticks`
+(util/bus_master.hpp, the letter-l measurement below) answers a wedged
+tenure with `i2c_timeout` on the kernel's clock and `recover()`s the
+engine; the WIRE - unstick(), re-probing the clients - stays the
+application's recovery ladder (docs/design/i2c-bus.md).
 
 **Erratum 1.17.16 NOT REPRODUCED in I2C mode either**: SWRST from the
 disabled state reset the block with its synchronization completing
@@ -196,10 +202,15 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   the address probe), ALWAYS asynchronous, one interrupt per byte
   (MB/SB), the i2c_* status vocabulary on the wire
   (nack_addr/nack_data/arb_lost/bus_error), per-speed register pairs
-  cached with `speed_ok()` and the refused-not-slowed rule, and
+  cached with `speed_ok()` and the refused-not-slowed rule,
   `unstick()` - nine open-drain pulses and a Stop by hand, the avrdx
   verb's twin, which leaves a HEALTHY wire untouched (SDA read first;
-  zero pulses is the answer and the action).
+  zero pulses is the answer and the action) - and `recover()`, the
+  init() tail re-run from the cached configuration: what a timed
+  I2cBus calls on a tenure that never answered, and the ONLY way out
+  of a parked START on this silicon (the release does not fire it -
+  letter g). recover() fixes the PERIPHERAL; unstick() fixes the wire;
+  neither replaces the other (the avrdx twi.hpp doctrine, held here).
 - **`I2cClient<n, pads, generator>`** - the polled surface plus the ISR
   body (the SpiClient position: a client is a protocol and the
   protocol is the application's), with the erratum discipline built
@@ -251,6 +262,15 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   PrepareSleep and a busy one refused - NOT ONE LINE of
   util/i2c_bus.hpp, util/bus_master.hpp or kernel/ changed. The bus
   vocabulary now has its cross-architecture proof on BOTH buses.
+- THE TIMED BUS (letter l): a tenure into the peer's 60 ms SDA hold -
+  the wedge letter j proved the silicon's time-outs cannot see - came
+  back `i2c_timeout` on the arbiter's 35 ms clock WITH THE WIRE STILL
+  HELD, the engine recover()ed inside the same dispatch, and the same
+  bus AO carried the next tenure i2c_ok after the release; a client
+  stretching every byte 1 ms completed i2c_ok under the same limit
+  (stretching is flow control - the limit sits above the tenure). The
+  race legs (a stale timeout, a straggler completion) are the host
+  suite's, deterministic on the virtual clock.
 
 ## Not covered yet
 

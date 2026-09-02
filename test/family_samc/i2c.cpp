@@ -9,6 +9,9 @@
 // is. The board's own pads are an app-level fact and not compiled here.
 #include "samc/clock.hpp"
 #include "samc/i2c.hpp"
+#include "samc/platform_sam.hpp"
+#include "kernel/time.hpp"
+#include "util/i2c_bus.hpp"
 
 using namespace brio;
 
@@ -139,3 +142,18 @@ uint8_t client_isr_body() { return Client::isr(); }
 
 // The bus-state vocabulary is the host resource's.
 I2cBusState state_now() { return I2cm<0>::bus_state(); }
+
+// ---- the per-bus timeout instantiates over this engine ---------------------
+// A timed I2cBus static_asserts Bus::recover(); this engine's re-runs
+// the init() tail from the cached configuration, because a START
+// parked into a held wire never fires on this silicon and only a
+// re-init gets out (util/bus_master.hpp, docs/samc/i2c.md).
+using TimedI2cBus = I2cBus<Host, SamPlatform, 4, BusPassThrough,
+                           ticks_from_ms<SamPlatform>(250)>;
+
+void timed_bus_surface() {
+    TimedI2cBus::init();
+    (void)TimedI2cBus::rejected_count();
+    (void)TimedI2cBus::stale_events();
+    (void)Host::recover();
+}

@@ -1002,6 +1002,28 @@ public:
         return false;
     }
 
+    /// The work-around for a wedged host: a demotion mid-transfer (SS
+    /// driven low with SSD clear stops the ISR pump dead, 28.3.2.1.3 -
+    /// bench-measured on the shared-SS letter) or a lost completion.
+    /// The interrupt is silenced and its flag cleared by the
+    /// INTFLAGS-then-DATA sequence, the Host role the hardware dropped
+    /// is re-armed, the select window closed; start() reprograms mode
+    /// and clock per request, so nothing else needs saving. The verb a
+    /// timed SpiBus calls (util/bus_master.hpp). COMPILE-VERIFIED
+    /// against the bench suites' engine only: the timed path itself has
+    /// not run on AVR silicon yet (docs/avrdx/spi.md).
+    static void recover() {
+        if constexpr (available) {
+            S::enable_interrupt(false);
+            (void)S::take_normal();
+            if (S::demoted()) {
+                S::restore_host();
+            }
+            req_.cs.set();
+            in_cmd_ = false;
+        }
+    }
+
     /// Hand the route's pins back (the resource's teardown).
     static void release() { S::release(); }
 

@@ -27,8 +27,19 @@ using SpiDone = BusDone;
 
 inline constexpr uint8_t spi_ok = bus_ok;
 inline constexpr uint8_t spi_rejected = bus_rejected;
+/// The transaction never answered inside the arbiter's per-bus timeout:
+/// the engine was recover()ed and the requester is told here. On SPI
+/// the plausible wedge is not a wire (the host clocks itself) but a
+/// dead engine - a demoted AVR host mid-transfer, a DMA channel the
+/// 1.10.4 class of death stopped - and the ISR-style completion that
+/// therefore never posts.
+inline constexpr uint8_t spi_timeout = bus_timeout;
 
-template <typename Bus, Platform P, uint8_t pending_depth = 4>
-using SpiBus = BusMaster<Bus, P, pending_depth>;
+/// `timeout_ticks` is PER BUS; size it to the longest legal transaction
+/// (a polled request completes inside start() and never arms it - only
+/// ISR-style completions are on this clock). ticks_from_ms<P>() converts.
+template <typename Bus, Platform P, uint8_t pending_depth = 4,
+          typename Policy = BusPassThrough, uint32_t timeout_ticks = 0>
+using SpiBus = BusMaster<Bus, P, pending_depth, Policy, timeout_ticks>;
 
 } // namespace brio

@@ -9,7 +9,10 @@
 // app-level fact and is not compiled here.
 #include "samc/clock.hpp"
 #include "samc/dmac.hpp"
+#include "samc/platform_sam.hpp"
 #include "samc/spi.hpp"
+#include "kernel/time.hpp"
+#include "util/spi_bus.hpp"
 
 using namespace brio;
 
@@ -431,3 +434,22 @@ void client_verbs() {
 // event code at all. What the SERCOM DOES have, the two DMAC triggers,
 // comes from Sercom<n> and is checked above.
 
+
+// ---- the per-bus timeout instantiates over this engine ---------------------
+// A timed SpiBus static_asserts Bus::recover(); this engine's puts the
+// DMA channels away and re-claims them, resets and reconfigures the
+// SERCOM to the applied state, and closes the select window
+// (util/bus_master.hpp). Both flavours compile: bare and engined.
+using TimedSpiBus = SpiBus<SpiHost<0, host_pads>, SamPlatform, 4, BusPassThrough,
+                           ticks_from_ms<SamPlatform>(100)>;
+using TimedEnginedBus = SpiBus<EnginedHost, SamPlatform, 4, BusPassThrough,
+                               ticks_from_ms<SamPlatform>(100)>;
+
+void timed_bus_surface() {
+    TimedSpiBus::init();
+    (void)TimedSpiBus::stale_events();
+    TimedEnginedBus::init();
+    (void)TimedEnginedBus::stale_events();
+    (void)SpiHost<0, host_pads>::recover();
+    (void)EnginedHost::recover();
+}

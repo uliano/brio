@@ -35,8 +35,19 @@ inline constexpr uint8_t i2c_nack_addr = bus_engine_status + 0;  ///< no ACK on 
 inline constexpr uint8_t i2c_nack_data = bus_engine_status + 1;  ///< no ACK on a written byte
 inline constexpr uint8_t i2c_arb_lost = bus_engine_status + 2;   ///< lost to another master
 inline constexpr uint8_t i2c_bus_error = bus_engine_status + 3;  ///< protocol violation on the wire
+/// The tenure never answered inside the arbiter's per-bus timeout: the
+/// engine was recover()ed, and the WIRE is now the application's to
+/// judge (unstick(), re-probe - the recovery ladder). Arbiter's code,
+/// not the engine's: see bus_master.hpp on why a client-wedged wire has
+/// no silicon timeout on any engine here (docs/samc/i2c.md, measured).
+inline constexpr uint8_t i2c_timeout = bus_timeout;
 
-template <typename Bus, Platform P, uint8_t pending_depth = 4>
-using I2cBus = BusMaster<Bus, P, pending_depth>;
+/// `timeout_ticks` is PER BUS (one wedged client starves every other
+/// device of the wire) and must sit ABOVE legal clock stretching, which
+/// is flow control, not a fault: a whole worst-case tenure at the
+/// slowest device on the bus, not a byte. ticks_from_ms<P>() converts.
+template <typename Bus, Platform P, uint8_t pending_depth = 4,
+          typename Policy = BusPassThrough, uint32_t timeout_ticks = 0>
+using I2cBus = BusMaster<Bus, P, pending_depth, Policy, timeout_ticks>;
 
 } // namespace brio

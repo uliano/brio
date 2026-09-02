@@ -109,7 +109,7 @@ RUNSTDBY control of its own.
 | `spi_max_host_sck_hz`, `spi_max_client_sck_hz` | the two ceilings of the timing tables |
 | `SpiConfig`, `spi_config_valid<n>` | the whole configuration, and what this package and the errata allow |
 | `Spi<n>` | the RESOURCE: `init<cfg>()`/`init(cfg)`/`release()`, enable, role and demotion, rate, mode, SSD, buffer mode, DATA, both flag sets with their clear verbs, the interrupt enables, `take_normal()`/`take_buffer()` ISR bodies, `routed()` |
-| `SpiHost<n, route>` | the transfer ENGINE: `Request` descriptors, `start()`, `isr()`, an optional SCK ceiling, `rebase()` |
+| `SpiHost<n, route>` | the transfer ENGINE: `Request` descriptors, `start()`, `isr()`, an optional SCK ceiling, `rebase()`, and `recover()` - the verb a timed `SpiBus` calls on a transaction that never answered (util/bus_master.hpp): interrupt silenced and cleared, a demoted host re-armed, the select window closed |
 | `SpiClient<n, route>` | the client side: `selected()`, `preload()`, `exchange()`, the buffer-mode readbacks, the ISR bodies, `max_sck_hz()` |
 
 Both tasks are `ClockUser`s. The engine's `rebase` recomputes the
@@ -369,7 +369,12 @@ client selects itself with INVEN on its own pulled-up SS pin.
 - no wake-from-idle path: the chapter lists it as a feature, this driver
   has no sleep story and neither has the rest of `avrdx/` yet;
 - the engine's SCK ceiling clamps a request DOWN silently; it does not
-  report that it did.
+  report that it did;
+- `recover()` and the timed `SpiBus` over it are host-tested and
+  compile-proven on every package, but no wedge has been staged on AVR
+  silicon (a demotion mid-transfer is the staging that would do it -
+  the demotion itself is bench-measured, the timed recovery over it is
+  not).
 
 **Implemented but not bench-verified:**
 

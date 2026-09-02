@@ -3,7 +3,10 @@
 // the ROUTE table and, above all, which routes bond a DUAL pin pair -
 // the pair a Dual mode client needs.
 #include "avrdx/clock.hpp"
+#include "avrdx/platform_avr.hpp"
 #include "avrdx/twi.hpp"
+#include "kernel/time.hpp"
+#include "util/i2c_bus.hpp"
 
 using namespace brio;
 
@@ -338,4 +341,18 @@ void use_tasks() {
 
     (void)DualClient0::init(SysClock{}, {.address = 0x50});
     DualClient0::release();
+}
+
+// ---- the per-bus timeout instantiates over this engine ---------------------
+// A timed I2cBus static_asserts Bus::recover(), and TwiHost's - the
+// errata's ENABLE-cycle work-around - is the verb it names as the
+// model (util/bus_master.hpp). Compile proof on every package; the
+// timed path itself has not run on AVR silicon yet (docs/avrdx/twi.md).
+using TimedTwiBus = I2cBus<Host0, AvrPlatform, 4, BusPassThrough,
+                           ticks_from_ms<AvrPlatform>(250)>;
+
+void timed_bus_surface() {
+    TimedTwiBus::init();
+    (void)TimedTwiBus::rejected_count();
+    (void)TimedTwiBus::stale_events();
 }
