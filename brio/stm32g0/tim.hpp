@@ -695,6 +695,83 @@ public:
     static constexpr uint32_t trigger_dma = TIM_DIER_TDE;
     static constexpr uint32_t compare_dma(uint8_t ch) { return TIM_DIER_CC1DE << ch; }
 
+    /**
+     * THE DMAMUX REQUEST LINES THIS INSTANCE PUBLISHES (RM0444 table 55),
+     * to be handed to a stm32g0/dma.hpp engine's arm(). DIER's UDE/TDE/
+     * CCxDE bits above are what makes the timer ASSERT them; these
+     * numbers are what makes a channel LISTEN.
+     *
+     * They live here rather than in stm32g0/device_tables.hpp for the
+     * reason the samc EVSYS campaign settled and this stratum has kept
+     * for TISEL and for the EXTI's lines above 15: no device header of
+     * this pack declares one of them (the DMAMUX_REQ_* spellings are ST's
+     * HAL/LL, not vendored), and a fabric driver owns the fabric while a
+     * peripheral owns its own vocabulary.
+     *
+     * TIM14 HAS NO DMA AT ALL - DS13560 table 7's "DMA request
+     * generation" column, which is also what tim_has_dma_burst() reads -
+     * so every verb here answers `dma_request_none` for it, and a channel
+     * pointed at that moves nothing rather than moving something else.
+     */
+    static constexpr bool has_dma_request = tim_has_dma_burst(n);
+
+    static constexpr uint8_t dma_update_request() {
+        switch (n) {
+            case 1: return 25;
+            case 2: return 31;
+            case 3: return 37;
+            case 4: return 73;
+            case 6: return 38;
+            case 7: return 39;
+            case 15: return 43;
+            case 16: return 46;
+            case 17: return 49;
+            default: return 0;   // TIM14: no request line of any kind
+        }
+    }
+
+    /// The capture/compare request of channel `ch` (0-based, as every
+    /// channel verb in this file is). Zero where the channel or the
+    /// timer has none.
+    static constexpr uint8_t dma_compare_request(uint8_t ch) {
+        if (ch >= channels) {
+            return 0;
+        }
+        switch (n) {
+            case 1: return static_cast<uint8_t>(20u + ch);
+            case 2: return static_cast<uint8_t>(26u + ch);
+            case 3: return static_cast<uint8_t>(32u + ch);
+            case 4: return static_cast<uint8_t>(68u + ch);
+            case 15: return static_cast<uint8_t>(40u + ch);
+            case 16: return 44;
+            case 17: return 47;
+            default: return 0;   // the basic timers have no channel, TIM14 no request
+        }
+    }
+
+    /// The trigger request - and on the three one-channel timers table 55
+    /// calls the same row COM (commutation) instead, which is why this is
+    /// one verb and not two: it is one request line either way.
+    static constexpr uint8_t dma_trigger_request() {
+        switch (n) {
+            case 1: return 24;
+            case 2: return 30;
+            case 3: return 36;
+            case 4: return 72;
+            case 15: return 42;
+            case 16: return 45;
+            case 17: return 48;
+            default: return 0;
+        }
+    }
+
+    /// Where a DMA channel writes a duty into, and reads a capture from:
+    /// CCRx itself. The address arithmetic is ccr_ref()'s, so a stream and
+    /// a CPU write cannot disagree about which register a channel is.
+    static volatile void* ccr_address(uint8_t ch) {
+        return ch < channels ? &ccr_ref(ch) : nullptr;
+    }
+
     static void interrupts(uint32_t mask, bool on) {
         TIM_TypeDef& t = regs();
         t.DIER = on ? (t.DIER | mask) : (t.DIER & ~mask);

@@ -130,3 +130,19 @@ loan timing, stall drain, coalesced wakeups, accounting pass-through).
 Silicon: `test_samc_analog_dma`'s kernel letter runs the relay over the
 live DAC-to-ADC chain with `DmaPingPongEngine` as the source; the
 family fixture concept-checks both SAM engines against both concepts.
+
+The second implementation: the STM32G0's `stm32g0/dma.hpp`, over a
+controller with a HARDWARE CIRCULAR MODE the SAM's lacks - and that is
+where the fixed point earned its keep. `BlockPlayer` fits the circular
+channel exactly and gains by it (the lap interrupt only counts; there
+is no re-arm window). `BlockSource` does NOT fit it, and the reason is
+this doctrine and not the API: a circular channel never stops, so
+"skip rather than tear" can only be decided AFTER the edge, by which
+time the controller is already writing the half the caller holds -
+measured, 0 to 6 elements had landed before a handler whose whole body
+was disable-and-read could act. So that engine stops itself at every
+block, and nothing above it changed: `test_stm32_dma` runs the relay
+over a timer-paced capture stream in a real kernel, and the family
+fixture concept-checks both engines. The contract is about blocks and
+not about DMA, proven the hard way - the controller's natural
+streaming mode is the one the contract cannot use for a source.

@@ -7,15 +7,17 @@
 > long tail (the FIFOs, the prescaler, the other kernel clocks and the
 > wake-up from Stop they enable, synchronous mode, flow control,
 > single-wire, LIN, IrDA, smartcard, Modbus, auto-baud, the receiver
-> time-out, DMA, the LPUARTs) stays declared, not built. The list is
-> in "Not covered yet".
+> time-out, the LPUARTs) stays declared, not built. The list is in "Not
+> covered yet". DMA is no longer among them: the task carries two
+> OPTIONAL engine slots (docs/stm32g0/dma.md).
 
 Documents of record: RM0444 Rev 6 - USART ch. 33 (the implementation
 tables 183/184, the baud generator 33.5.7, the FIFOs 33.5.4, the
 registers 33.8) - and errata ES0548 Rev 3 items 2.11.1 (stated: the
 noise counter exists for it) and 2.11.2 (applied: the prescaler is
 not written). Driver: `stm32g0/usart.hpp` (`Usart<n>` resource +
-`Uart<n, pins, rx, tx>` task); the instance, vector and bus-clock
+`Uart<n, pins, rx, tx, TxEngine, RxEngine>` task); the instance, vector
+and bus-clock
 facts come from `stm32g0/device_tables.hpp`. The family fixture is
 `test/family_stm32g0/usart.cpp` plus three negatives under
 `tools/check_stm32g0.sh`.
@@ -115,6 +117,54 @@ using Aux = brio::Uart<1, aux_pins, 128, 512>;
 Aux::init(clock, 9600, {.parity = brio::UartParity::even, .stop_bits = 2});
 ```
 
+## The two optional DMA engine slots
+
+`Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine>` takes a
+`stm32g0/dma.hpp` `DmaTxEngine` and/or `DmaRxEngine`; both default to
+`NoDmaEngine`, which is a TAG and not a base class - `present` is all the
+task asks about and it asks with `if constexpr`, so every engine branch
+disappears from a transport that names none. The measured proof is the
+one that counts: with the slots added, six of this project's eight
+STM32G0 release images are BYTE-IDENTICAL to the ones built before they
+existed, the two movers being the standing `__nvheap_build_id` defsym
+(four and eight bytes, same sizes).
+
+`NoDmaEngine` and `uart_engines_distinct()` live in THIS header rather
+than in `dma.hpp`, which is the whole point of an optional slot: usart.hpp
+must not include the DMA driver, or every program with a console would
+carry it. The task reaches its engines only through names THEY publish -
+`service()`, `flag_complete`, `flag_error`, `channel`, `controller` - and
+never spells a `DmaChannel` or a `DmaFlag`.
+
+What changes when a slot is filled:
+
+- **CR3.DMAT / CR3.DMAR** are set in `init()` before the enable (they are
+  UE-protected like every other frame field), and the matching INTERRUPT
+  is NOT armed: the request and the interrupt are the same condition, so
+  arming both would have the channel and the handler each serve one byte.
+- **`dma_isr()`** is the body of whichever channel vector the engines
+  report on. Each engine reads only its own channel's four flag bits, so
+  it is safe on a shared line that also serves other people's channels.
+- **`harvest()`** is how received bytes are published: a receive block
+  completes only when the buffer fills, which on an idle line may be
+  never, so the owner ASKS rather than waits. On this silicon the asking
+  is one CNDTR read - the SAM had to suspend a channel and validate a
+  write-back against an erratum.
+- **`dma_faults()`** counts blocks abandoned because the controller
+  stopped running them (a transfer error disables a channel in hardware).
+- **What is traded away** is per-byte error attribution: nobody reads
+  ISR per character any more, so `harvest()` reads it once and counts
+  what it finds. That is the honest resolution of the mode.
+- **`write_byte()` still nudges on a refusal** when a TX engine is
+  present, because `print()` answers a false by trying for ever and the
+  ring is full precisely when nothing is draining it. Without an engine
+  it does not, and does not need to - the push that filled the ring
+  already armed TXE.
+
+`set_baud(hz, baud)` is `rebase()`'s mirror - the clock stays put and the
+LINK moves - and exists because a streaming test has to walk a ladder of
+rates.
+
 ## Bench findings
 
 USART2 through the Nucleo-G0B1RE's ST-LINK virtual COM port, the
@@ -148,11 +198,20 @@ Driver gaps:
 - Synchronous mode, hardware flow control (RTS/CTS, driver enable),
   single-wire half-duplex, LIN, IrDA, smartcard, Modbus, auto-baud,
   the receiver time-out, character match, the swap/invert options,
-  the break request, DMA, the LPUARTs (their own baud arithmetic:
+  the break request, the LPUARTs (their own baud arithmetic:
   256 x the clock).
 - A pin-table check of the AF claim (the header has no such table).
 
 Implemented, not bench-verified: 7- and 9-bit words, parity, 2 stop
-bits, `rebase`, `release`, `write_bulk`/`read_bulk`, `Usart::reset`,
-any instance but USART2, the frame/parity/noise counters ever
-counting (every run so far was clean).
+bits, `rebase`, `release`, `Usart::reset`, the frame/parity/noise
+counters ever counting (every run so far was clean).
+
+The DMA half is bench-verified in `test_stm32_dma`, whose own console
+carries both engines - so every verdict line of that suite left the chip
+through a `DmaTxEngine` and every letter arrived through a `DmaRxEngine`.
+Measured there: a kilobyte at 115200 costs what 115200 costs (11508 B/s
+in bulk, 11510 B/s fed byte by byte, against 11520 nominal), with zero
+DMA faults and zero hardware overruns; and, through `tools/uart_stress.py`,
+byte-exact streaming in BOTH directions up to 921600 baud, the ST-LINK
+virtual COM port - not the USART - being what fails at 2 Mbaud
+(docs/stm32g0/dma.md has the table).

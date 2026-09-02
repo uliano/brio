@@ -922,4 +922,258 @@ constexpr IRQn_Type tim_cc_irq(uint8_t n) {
 /// two DIFFERENT vectors? True for TIM1 alone.
 constexpr bool tim_has_split_vector(uint8_t n) { return n == 1u && tim_present(n); }
 
+// ---- DMA and DMAMUX (RM0444 ch. 10, 11) --------------------------------------
+
+/// Register block base of DMAn (n = 1, 2), 0 when the device does not
+/// have it. Only the G0B1/G0C1 class carries a second controller.
+constexpr uint32_t dma_base(uint8_t n) {
+    switch (n) {
+#if defined(DMA1_BASE)
+        case 1: return DMA1_BASE;
+#endif
+#if defined(DMA2_BASE)
+        case 2: return DMA2_BASE;
+#endif
+        default: return 0u;
+    }
+}
+
+constexpr bool dma_present(uint8_t n) { return dma_base(n) != 0u; }
+
+/// Register block base of channel `ch` (1-based, as the silicon and the
+/// manual number them) of DMAn; 0 when that channel does not exist. The
+/// header spells one macro per channel, so each is probed by name - and
+/// the probe is what says the G031 class has five channels where the
+/// G071 class has seven.
+constexpr uint32_t dma_channel_base(uint8_t n, uint8_t ch) {
+    if (n == 1u) {
+        switch (ch) {
+#if defined(DMA1_Channel1_BASE)
+            case 1: return DMA1_Channel1_BASE;
+#endif
+#if defined(DMA1_Channel2_BASE)
+            case 2: return DMA1_Channel2_BASE;
+#endif
+#if defined(DMA1_Channel3_BASE)
+            case 3: return DMA1_Channel3_BASE;
+#endif
+#if defined(DMA1_Channel4_BASE)
+            case 4: return DMA1_Channel4_BASE;
+#endif
+#if defined(DMA1_Channel5_BASE)
+            case 5: return DMA1_Channel5_BASE;
+#endif
+#if defined(DMA1_Channel6_BASE)
+            case 6: return DMA1_Channel6_BASE;
+#endif
+#if defined(DMA1_Channel7_BASE)
+            case 7: return DMA1_Channel7_BASE;
+#endif
+            default: return 0u;
+        }
+    }
+    if (n == 2u) {
+        switch (ch) {
+#if defined(DMA2_Channel1_BASE)
+            case 1: return DMA2_Channel1_BASE;
+#endif
+#if defined(DMA2_Channel2_BASE)
+            case 2: return DMA2_Channel2_BASE;
+#endif
+#if defined(DMA2_Channel3_BASE)
+            case 3: return DMA2_Channel3_BASE;
+#endif
+#if defined(DMA2_Channel4_BASE)
+            case 4: return DMA2_Channel4_BASE;
+#endif
+#if defined(DMA2_Channel5_BASE)
+            case 5: return DMA2_Channel5_BASE;
+#endif
+            default: return 0u;
+        }
+    }
+    return 0u;
+}
+
+constexpr bool dma_channel_present(uint8_t n, uint8_t ch) {
+    return dma_channel_base(n, ch) != 0u;
+}
+
+/// How many channels DMAn has, counted by the probes above (7 and 5 on
+/// the G0B1 class, 7 and none on the G071 class, 5 and none on the G031
+/// class). Counting rather than tabulating is the point: a variant the
+/// pack adds tomorrow is described by its own header.
+constexpr uint8_t dma_channels(uint8_t n) {
+    uint8_t count = 0;
+    for (uint8_t ch = 1; ch <= 8u; ++ch) {
+        if (dma_channel_present(n, ch)) {
+            count = ch;
+        }
+    }
+    return count;
+}
+
+/// RCC_AHBENR bit that clocks DMAn - and, with it, the DMAMUX: 17.4.2
+/// says the multiplexer is clocked as long as at least one DMA is.
+constexpr uint32_t dma_clock_mask(uint8_t n) {
+    switch (n) {
+#if defined(RCC_AHBENR_DMA1EN)
+        case 1: return RCC_AHBENR_DMA1EN;
+#endif
+#if defined(RCC_AHBENR_DMA2EN)
+        case 2: return RCC_AHBENR_DMA2EN;
+#endif
+        default: return 0u;
+    }
+}
+
+/// RCC_AHBRSTR bit that resets DMAn (and the DMAMUX with it - the reset
+/// bit's own description says so, which is why a driver that resets one
+/// controller while the other is streaming would be wrong).
+constexpr uint32_t dma_reset_mask(uint8_t n) {
+    switch (n) {
+#if defined(RCC_AHBRSTR_DMA1RST)
+        case 1: return RCC_AHBRSTR_DMA1RST;
+#endif
+#if defined(RCC_AHBRSTR_DMA2RST)
+        case 2: return RCC_AHBRSTR_DMA2RST;
+#endif
+        default: return 0u;
+    }
+}
+
+/// The NVIC line a DMA channel interrupts on. THREE VECTORS SERVE ALL
+/// TWELVE (table 61): channel 1 alone, channels 2 and 3 together, and
+/// one line for everything else - DMA1's channels 4..7, every DMA2
+/// channel, AND the DMAMUX overrun. IRQn values are enumerators the
+/// preprocessor cannot probe, so this reads the DEVICE SELECT macro,
+/// exactly as usart_irq() and tim_irq() do; the spelling of the third
+/// line differs on all three headers, which is the whole reason this
+/// verb exists.
+constexpr IRQn_Type dma_channel_irq(uint8_t n, uint8_t ch) {
+    if (n == 1u && ch == 1u) {
+        return DMA1_Channel1_IRQn;
+    }
+    if (n == 1u && (ch == 2u || ch == 3u)) {
+        return DMA1_Channel2_3_IRQn;
+    }
+#if defined(STM32G0B1xx) || defined(STM32G0C1xx)
+    return DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn;
+#elif defined(STM32G071xx) || defined(STM32G081xx) || defined(STM32G051xx) || \
+    defined(STM32G061xx) || defined(STM32G070xx)
+    return DMA1_Ch4_7_DMAMUX1_OVR_IRQn;
+#else
+    return DMA1_Ch4_5_DMAMUX1_OVR_IRQn;
+#endif
+}
+
+/// The DMAMUX overrun interrupt shares the third channel vector; named
+/// separately because an application binding it is answering for the
+/// multiplexer and not for a channel.
+constexpr IRQn_Type dmamux_irq() { return dma_channel_irq(1u, 4u); }
+
+/// Register block base of DMAMUX request-multiplexer channel x (0-based,
+/// as 11.6.1 numbers them); 0 past the count.
+constexpr uint32_t dmamux_channel_base(uint8_t x) {
+    switch (x) {
+#if defined(DMAMUX1_Channel0_BASE)
+        case 0: return DMAMUX1_Channel0_BASE;
+#endif
+#if defined(DMAMUX1_Channel1_BASE)
+        case 1: return DMAMUX1_Channel1_BASE;
+#endif
+#if defined(DMAMUX1_Channel2_BASE)
+        case 2: return DMAMUX1_Channel2_BASE;
+#endif
+#if defined(DMAMUX1_Channel3_BASE)
+        case 3: return DMAMUX1_Channel3_BASE;
+#endif
+#if defined(DMAMUX1_Channel4_BASE)
+        case 4: return DMAMUX1_Channel4_BASE;
+#endif
+#if defined(DMAMUX1_Channel5_BASE)
+        case 5: return DMAMUX1_Channel5_BASE;
+#endif
+#if defined(DMAMUX1_Channel6_BASE)
+        case 6: return DMAMUX1_Channel6_BASE;
+#endif
+#if defined(DMAMUX1_Channel7_BASE)
+        case 7: return DMAMUX1_Channel7_BASE;
+#endif
+#if defined(DMAMUX1_Channel8_BASE)
+        case 8: return DMAMUX1_Channel8_BASE;
+#endif
+#if defined(DMAMUX1_Channel9_BASE)
+        case 9: return DMAMUX1_Channel9_BASE;
+#endif
+#if defined(DMAMUX1_Channel10_BASE)
+        case 10: return DMAMUX1_Channel10_BASE;
+#endif
+#if defined(DMAMUX1_Channel11_BASE)
+        case 11: return DMAMUX1_Channel11_BASE;
+#endif
+        default: return 0u;
+    }
+}
+
+/// How many request-multiplexer channels this device has: twelve on the
+/// G0B1 class, seven on the G071 class, five on the G031 class - table
+/// 54's own three numbers, counted off the header instead of copied.
+constexpr uint8_t dmamux_channels() {
+    uint8_t count = 0;
+    for (uint8_t x = 0; x < 12u; ++x) {
+        if (dmamux_channel_base(x) != 0u) {
+            count = static_cast<uint8_t>(x + 1u);
+        }
+    }
+    return count;
+}
+
+/// Which DMAMUX channel drives DMAn's channel `ch` (11.3.2: DMAMUX
+/// channels 0..6 are DMA1's channels 1..7, channels 7..11 are DMA2's
+/// 1..5). 0xFF for a channel this device does not have - the mapping is
+/// hardwired, so it is arithmetic and not a table, but the PRESENCE
+/// question is still the header's.
+constexpr uint8_t dmamux_channel_of(uint8_t n, uint8_t ch) {
+    if (!dma_channel_present(n, ch)) {
+        return 0xFF;
+    }
+    return n == 1u ? static_cast<uint8_t>(ch - 1u) : static_cast<uint8_t>(6u + ch);
+}
+
+/// Register block base of DMAMUX request-generator channel x; 0 past the
+/// count. Four on every part of the family (table 54).
+constexpr uint32_t dmamux_generator_base(uint8_t x) {
+    switch (x) {
+#if defined(DMAMUX1_RequestGenerator0_BASE)
+        case 0: return DMAMUX1_RequestGenerator0_BASE;
+#endif
+#if defined(DMAMUX1_RequestGenerator1_BASE)
+        case 1: return DMAMUX1_RequestGenerator1_BASE;
+#endif
+#if defined(DMAMUX1_RequestGenerator2_BASE)
+        case 2: return DMAMUX1_RequestGenerator2_BASE;
+#endif
+#if defined(DMAMUX1_RequestGenerator3_BASE)
+        case 3: return DMAMUX1_RequestGenerator3_BASE;
+#endif
+        default: return 0u;
+    }
+}
+
+constexpr uint8_t dmamux_generators() {
+    uint8_t count = 0;
+    for (uint8_t x = 0; x < 4u; ++x) {
+        if (dmamux_generator_base(x) != 0u) {
+            count = static_cast<uint8_t>(x + 1u);
+        }
+    }
+    return count;
+}
+
+/// The two DMAMUX status blocks, which the header declares as their own
+/// structures at fixed offsets (0x080 and 0x140).
+constexpr uint32_t dmamux_channel_status_base() { return DMAMUX1_ChannelStatus_BASE; }
+constexpr uint32_t dmamux_generator_status_base() { return DMAMUX1_RequestGenStatus_BASE; }
+
 } // namespace brio

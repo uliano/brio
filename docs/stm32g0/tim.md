@@ -362,11 +362,35 @@ their reasons and not staged - 2.7.1 needs a trigger placed exactly at
 CNT = ARR of a cascaded master, 2.7.3 needs an ocref_clr source (ETR or a
 comparator) this stratum has neither a wire nor a driver for.
 
+## The DMA requests a timer publishes
+
+`TIMx_DIER`'s `UDE`, `TDE` and `CCxDE` bits are what makes a timer ASSERT
+a DMA request; the NUMBER a channel has to listen for is RM0444 table
+55's, and `Tim<n>` publishes it - `dma_update_request()`,
+`dma_compare_request(ch)`, `dma_trigger_request()`, with
+`ccr_address(ch)` for the register a stream writes into or reads out of.
+The numbers live here and not in `stm32g0/device_tables.hpp` because no
+device header of this pack declares one (the `DMAMUX_REQ_*` spellings are
+ST's HAL/LL), and because of the standing ruling this stratum keeps for
+TISEL and for the EXTI's lines above 15: a fabric driver owns the fabric,
+a peripheral owns its own vocabulary. **TIM14 has no DMA request of any
+kind** (DS13560 table 7), so every verb answers `dma_request_none` for it
+and `has_dma_request` is false.
+
+Measured in `test_stm32_dma` (which is where the numbers and the
+arithmetic are pinned): an eight-entry duty table played into TIM2's CCR1
+on its own update request, at a 16 kHz PWM, reads 521..522 per mille off
+LD4's pad against the table's mean of 525, with the CPU touching not one
+compare value; and TIM16's capture of the LSI - reached through TISEL
+with no pad - streamed out by a ping-pong engine, four blocks of 32 with
+every consecutive pair 30 us apart. A timer update at 32 MHz is also what
+that suite uses to over-request the DMA's arbiter.
+
 ## Not covered yet
 
-Driver gaps: DMA - both the burst engine (`DCR`/`DMAR`) and a `TIMx_DIER`
-request feeding a stream, which wait for a DMA driver in this stratum;
-encoder and hall-sensor modes (`SMS` 1..3 are spelled and refused
+Driver gaps: the DMA BURST engine (`DCR`/`DMAR`, the one that walks
+several registers off one request) - the plain `TIMx_DIER` requests are
+built and measured, see below; encoder and hall-sensor modes (`SMS` 1..3 are spelled and refused
 nowhere, but no task builds them and no bench signal exists for one);
 the EXTERNAL trigger half of the slave controller (`SMCR`'s
 `ECE`/`ETP`/`ETPS`/`ETF` and `TIMx_AF1`'s `ETRSEL`), which needs a pad or
