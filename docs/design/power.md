@@ -12,8 +12,10 @@ it - is each target's, documented in that target's folder
 
 Contracts and services: `util/power.hpp`. The kernel question it needs:
 `TimeEvents<P>::ticks_to_next()` (`kernel/time_event.hpp`). The
-realizations: `AvrSleepSite` over `Sleep` in `avrdx/sleep.hpp`, and
-`SamSleepSite` over `Pm` in `samc/sleep.hpp`.
+realizations: `AvrSleepSite` over `Sleep` in `avrdx/sleep.hpp`,
+`SamSleepSite` and `SamTimedSleepSite` over `Pm` in `samc/sleep.hpp`,
+and `Stm32SleepSite` and `Stm32TimedSleepSite` over `Pwr` in
+`stm32g0/sleep.hpp`.
 
 **The model has a second silicon under it, and it needed no change.**
 On the SAM C21 the vote round, the unanimity rule, the `PowerLock`
@@ -28,6 +30,29 @@ the armed mode, so the hook takes it by not touching it. What the
 second target adds is a target-level restriction the model does not
 express: its kernel tick stops in standby, so an application there may
 only ask for standby with no time event armed (`docs/samc/platform.md`).
+
+**And a third silicon, still with no change.** On the STM32G0 the
+`SleepSite`'s two verbs absorbed everything that family asks of a
+sleeper - a SYSCLK restore after a Stop (the part comes back on
+HSI16, 5.3 of its manual) and a kernel-ticker pause across it - with
+no new member of the concept; the vote round, the deadline guard and
+the first-event-after-wake contract ran unmodified, and that last
+convention is more load-bearing there than anywhere: without the
+wake path's `SleepRequested{none}` the clock would stay at 16 MHz and
+the tick paused. Two frictions the third target recorded, neither a
+contradiction: the never-deeper rule can COLLAPSE two rungs onto one
+silicon state (`light` maps to Sleep like `none`, because the only
+mode between Sleep and Stop wants the whole program at 2 MHz), and
+`armed()` then reports the shallower truth; and a mode the silicon
+has can be UNREPRESENTABLE in the ladder not because it is too deep
+but because the program does not resume from it - Standby and
+Shutdown come back through the reset vector, so no site can honour
+the first-event-after-wake contract for them, and they stay reachable
+only as a deliberate act outside the model (`docs/stm32g0/pwr.md`).
+The timed site over the RTC's wake-up timer lifts the tick-stops
+restriction there as it does on the SAM: a 500 ms deadline through a
+Stop matures at 723 ms of wall with the plain site and at 501 with the
+timed one, never early.
 
 ## The ladder
 

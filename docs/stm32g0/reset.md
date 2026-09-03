@@ -189,7 +189,11 @@ reboots the board six times and resumes from a `.noinit` token.
 - **The IWDG's time-out, measured: 940 ms** against 955 ms nominal, so
   **LSI = 32536 Hz** (a second run: 940 ms, 32536 Hz; an earlier
   arrangement at /4 gave 504 ms and 32507 Hz) - inside DS13560 table
-  46's 29.5..34 kHz, about 1.7% above the 32 kHz nominal. The setting
+  46's 29.5..34 kHz, about 1.7% above the 32 kHz nominal. **CONFIRMED
+  LATER BY A SECOND ROUTE**: `test_stm32_rtc` weighs LSI as a PERIOD, on
+  a TIM16 capture against the core clock, and reads 32586 Hz - the two
+  agree to 1.5 per mille, which is more than a watchdog's coarse reset
+  and a period capture had any right to. The setting
   is deliberately not the reset one, so the time-out itself proves the
   configuration landed: an unconfigured watchdog would have taken
   512 ms.

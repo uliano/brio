@@ -42,12 +42,13 @@ running at **3.3 V**. Verified at the bench, each by its own
 experiment and not by the user manual: LD4 on **PA5** (driven over
 SWD before a line of firmware, then by `probe`), the ST-LINK virtual
 COM port on **USART2 PA2 (TX) / PA3 (RX), AF1** (the console answers
-through it), the CPU on **HSI16 through the PLL at 64 MHz**. NOT yet
-verified: the LSE 32.768 kHz crystal the Nucleo-64 ships with (no
-consumer yet), the user button B1 on PC13, and the absence of an HSE
-crystal (X3 is not fitted by default and the ST-LINK's 8 MHz MCO
-reaches HSE only through solder bridges - the HSE root is unbuilt
-anyway).
+through it), the CPU on **HSI16 through the PLL at 64 MHz**, and the **LSE
+32.768 kHz crystal fitted and running** (X2 is populated on this board:
+LSERDY rises and the period measures 32703 Hz against the core, which is
+the core's own 1 % trim and not the crystal's - [rtc.md](rtc.md)). NOT
+yet verified: the user button B1 on PC13, and the absence of an HSE
+crystal (X3 is not fitted by default and the ST-LINK's 8 MHz MCO reaches
+HSE only through solder bridges - the HSE root is unbuilt anyway).
 
 `stm32g0/` is its own CMake project, a sibling and peer of `avrdx/`,
 `samc/` and `test/`. Apps are auto-discovered from

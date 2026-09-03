@@ -266,9 +266,16 @@ gets its dated home in `docs/design/` when taken.
   conversion time exact to the cycle, the DAC reaches the ADC only
   through PA4, VREFBUF sits behind SYSCFG's clock gate, pulls are
   disabled in analog mode so the comparator's stimulus is a precharged
-  pad; Ref/ref_mv live in vref.hpp - one shared VREF+ rail). Next:
-  RTC+PWR (the sleep model's third silicon), then the fillers (CRC,
-  LPTIM, the USART tail) and what needs a peer or wires.
+  pad; Ref/ref_mv live in vref.hpp - one shared VREF+ rail); campaign 7
+  RTC+PWR DONE (rtc.hpp with RCC_BDCR, pwr.hpp, sleep.hpp with the two
+  sites; test_stm32_rtc z 77/77, test_stm32_sleep z 50/50 + Standby/
+  Shutdown reboot letters; the ladder none/light -> Sleep, standby ->
+  Stop 0, deep -> Stop 1, Standby/Shutdown OFF it because the program
+  does not resume; the LSE crystal is fitted and runs; util/power.hpp
+  unchanged on its third silicon). THE WIRELESS SINGLE-BOARD ROSTER IS
+  CLOSED; what remains is the fillers (CRC, LPTIM, IRTIM, the USART
+  tail) and what needs a peer or wires (the buses against a SAM at
+  3.3 V, FDCAN, USB, UCPD, the option-byte bench verb).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device

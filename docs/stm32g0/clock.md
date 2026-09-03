@@ -11,9 +11,14 @@
 Documents of record: RM0444 Rev 6 - RCC ch. 5 (the tree 5.2, the
 registers 5.4), FLASH 3.3.4 (the latency table 13 and the ordering
 rule), PWR 4.1.4 (voltage scaling) - and errata ES0548 Rev 3 item
-2.2.4, a stated caveat. Drivers: `stm32g0/clock.hpp` (`Rcc`, `Pwr`,
-the `Clock<source, hz>` task), `stm32g0/flash.hpp`
-(`FlashWaitStates`, `FlashAccel`). The family fixture is
+2.2.4, a stated caveat. Drivers: `stm32g0/clock.hpp` (`Rcc` and the
+`Clock<source, hz>` task), `stm32g0/flash.hpp` (`FlashWaitStates`,
+`FlashAccel`), and `stm32g0/pwr.hpp` for the one thing this chapter
+borrows from chapter 4 - `Pwr::range()`, because the latency table is
+indexed by the voltage range. ONE CHAPTER, ONE OWNER: chapter 4 lives
+in [pwr.md](pwr.md) and RCC_BDCR - LSE, RTCSEL, RTCEN, BDRST - lives in
+[rtc.md](rtc.md), because that register is unreachable without the RTC
+domain's own write gate and its choices are one-way. The family fixture is
 `test/family_stm32g0/clock.cpp` plus three negatives under
 `tools/check_stm32g0.sh`.
 
@@ -101,10 +106,12 @@ caveat for the sleep site.
   IWDG, the RTC or the CSS on LSE asks - on the bench board the RTC
   does exactly that (RCC_BDCR reads 0x8200: RTCEN set, RTCSEL = LSI,
   and the RTC domain is not reset by a system reset), so LSIRDY is no
-  witness for a running watchdog.
+  witness for a running watchdog. LSI itself measures **32586 Hz** on
+  this die, weighed by a TIM16 capture against the core ([rtc.md](rtc.md))
+  and agreeing with the 32536 Hz that [reset.md](reset.md) derived from
+  an IWDG time-out by a wholly different route.
 - `PllConfig {m, n, r}`, `pll_config_valid`, `pll_output_hz`,
   `pll_config_for(hz)`, `hsidiv_for(hz)` - constexpr, fixture-pinned.
-- `Pwr::range()` - 1 or 2, read only.
 - `FlashWaitStates` - `get`, `set(ws)` (waits for the readback, refuses
   > 2), `for_hz(hz)` (Range 1), `for_hz_range2(hz)` (declared);
   `FlashAccel` - `prefetch`/`instruction_cache` readback and setters;
@@ -151,12 +158,18 @@ Driver gaps:
 - The other roots as SYSCLK: HSE (crystal, or the ST-LINK's MCO in
   bypass through the Nucleo's solder bridges), LSI, LSE, and HSI48
   (the G0B1/G0C1's USB clock, with its CRS); the PLL's P and Q
-  outputs and its HSE input.
+  outputs and its HSE input. LSE now RUNS on this board and is
+  measured (32703 Hz against the core - [rtc.md](rtc.md)); what is
+  missing is only the path that would make it SYSCLK, and the day it is
+  built the task must ASK `RtcDomain` for a running crystal rather than
+  start one behind the RTC's back.
 - HPRE and PPRE other than 1 (a bus-dividing task, and `pclk_hz`
   becoming a real second rate); MCO/MCO2; the CSS and LSECSS; the
   RCC interrupts; the peripheral RESET registers beyond the USART's
   own verb; the sleep-mode clock enables (IOPSMENR and friends).
-- Range 2 (the low-power regulator range) and `Pwr` beyond a readback.
+- Range 2 (the low-power regulator range) as a TASK - the setter and
+  its two ordering sequences now exist in [pwr.md](pwr.md), and what is
+  missing here is a `Clock<>` that knows the Range 2 latency column.
 - `DynamicClock` - the same deferral as on the SAM, for the same
   reason: which root SYSCLK takes at run time and who is told is a
   design decision, opened by a real consumer.

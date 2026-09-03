@@ -45,6 +45,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "stm32g0xx.h"
@@ -1415,5 +1416,145 @@ constexpr uint32_t vrefbuf_base() {
 }
 
 constexpr bool vrefbuf_present() { return vrefbuf_base() != 0u; }
+
+// ---- PWR: what the low-power chapter's option space costs per part ---------
+//
+// Chapter 4 is the first in this stratum whose OWN register fields are
+// per-variant, rather than a peripheral being present or absent:
+//  - the six wake-up pins WKUPx are a SPARSE set (the G031 bonds 1, 2, 4
+//    and 6; the G071 adds 5; only the G0B1/G0C1 has all six), and a
+//    missing one has no EWUPx bit, no WPx polarity bit, no WUFx flag and
+//    no CWUFx clear - four registers agreeing, so one probe answers for
+//    all four;
+//  - the Standby pull-up/pull-down registers follow the GPIO bonding
+//    (PWR_PUCRE/PWR_PDCRE are the G0B1/G0C1's alone, exactly as GPIOE is),
+//    and they are STRUCT MEMBERS: a part without them cannot even have
+//    the address taken, which is why the accessor below returns a pointer;
+//  - VDDIO2 exists only where the second I/O supply does.
+
+/// Which of WKUP1..6 this part bonds, as a mask with bit 0 = WKUP1 -
+/// the shape PWR_CR3.EWUPx, PWR_CR4.WPx, PWR_SR1.WUFx and PWR_SCR.CWUFx
+/// all share.
+constexpr uint8_t pwr_wakeup_pin_mask = 0u
+#if defined(PWR_CR3_EWUP1)
+    | (1u << 0)
+#endif
+#if defined(PWR_CR3_EWUP2)
+    | (1u << 1)
+#endif
+#if defined(PWR_CR3_EWUP3)
+    | (1u << 2)
+#endif
+#if defined(PWR_CR3_EWUP4)
+    | (1u << 3)
+#endif
+#if defined(PWR_CR3_EWUP5)
+    | (1u << 4)
+#endif
+#if defined(PWR_CR3_EWUP6)
+    | (1u << 5)
+#endif
+    ;
+
+/// Is WKUPn (n = 1..6) bonded on this part?
+constexpr bool pwr_wakeup_pin_present(uint8_t n) {
+    return n >= 1u && n <= 6u &&
+           (pwr_wakeup_pin_mask & (1u << (n - 1u))) != 0u;
+}
+
+/// How many of them there are (for a sweep that must not walk past the
+/// end of the part).
+constexpr uint8_t pwr_wakeup_pin_count() {
+    uint8_t n = 0;
+    for (uint8_t i = 1; i <= 6u; ++i) {
+        if (pwr_wakeup_pin_present(i)) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+/// PWR_PUCRx for port `letter`, null where the part has no such
+/// register. A POINTER and not a mask, because these are struct members
+/// and the absent ones cannot be named at all (4.4.8 and its
+/// neighbours: x = A, B, C, D, E, F, with E the G0B1/G0C1's alone).
+inline volatile uint32_t* pwr_pullup_reg(char letter) {
+    switch (letter) {
+#if defined(GPIOA_BASE)
+        case 'A': return &PWR->PUCRA;
+#endif
+#if defined(GPIOB_BASE)
+        case 'B': return &PWR->PUCRB;
+#endif
+#if defined(GPIOC_BASE)
+        case 'C': return &PWR->PUCRC;
+#endif
+#if defined(GPIOD_BASE)
+        case 'D': return &PWR->PUCRD;
+#endif
+#if defined(GPIOE_BASE)
+        case 'E': return &PWR->PUCRE;
+#endif
+#if defined(GPIOF_BASE)
+        case 'F': return &PWR->PUCRF;
+#endif
+        default: return nullptr;
+    }
+}
+
+/// PWR_PDCRx for port `letter`, null where absent.
+inline volatile uint32_t* pwr_pulldown_reg(char letter) {
+    switch (letter) {
+#if defined(GPIOA_BASE)
+        case 'A': return &PWR->PDCRA;
+#endif
+#if defined(GPIOB_BASE)
+        case 'B': return &PWR->PDCRB;
+#endif
+#if defined(GPIOC_BASE)
+        case 'C': return &PWR->PDCRC;
+#endif
+#if defined(GPIOD_BASE)
+        case 'D': return &PWR->PDCRD;
+#endif
+#if defined(GPIOE_BASE)
+        case 'E': return &PWR->PDCRE;
+#endif
+#if defined(GPIOF_BASE)
+        case 'F': return &PWR->PDCRF;
+#endif
+        default: return nullptr;
+    }
+}
+
+/// Does this part carry the second I/O supply, and with it PWR_CR2's
+/// VDDIO2 monitor and PWR_SR2's flag for it (4.4.2, note on
+/// PVM_VDDIO2)?
+constexpr bool pwr_vddio2_present() {
+#if defined(PWR_CR2_PVM_VDDIO2)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// The EXTI lines the RTC and the TAMP raise (table 65: 19 and 21, both
+/// DIRECT - no trigger selection and no pending bit in the EXTI). The
+/// NUMBERS are the manual's, like comp_exti_line()'s, which is why they
+/// live here.
+constexpr uint8_t rtc_exti_line = 19;
+constexpr uint8_t tamp_exti_line = 21;
+
+/// The vector both of them arrive on (table 61: one line for the whole
+/// RTC domain).
+constexpr IRQn_Type rtc_irq() { return RTC_TAMP_IRQn; }
+
+/// How many TAMP backup registers this part implements: BKP0R..BKP4R on
+/// every G0, counted off the struct rather than asserted.
+constexpr uint8_t tamp_backup_registers() {
+    return static_cast<uint8_t>(
+        (sizeof(TAMP_TypeDef) - offsetof(TAMP_TypeDef, BKP0R)) /
+        sizeof(uint32_t));
+}
 
 } // namespace brio

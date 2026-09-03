@@ -11,8 +11,10 @@
  *             prescalers, the PERIPHERAL CLOCK ENABLES (one bit per
  *             peripheral in IOPENR/AHBENR/APBENR1/APBENR2) and the
  *             per-peripheral kernel-clock multiplexers (CCIPR)
- *    Pwr      only its voltage range today (PWR_CR1.VOS): the flash
- *             latency table depends on it and the task asserts Range 1
+ *    (`Pwr`, the whole of chapter 4, lives in stm32g0/pwr.hpp: the
+ *    task below reads PWR_CR1.VOS from it, because the flash latency
+ *    table is indexed by the voltage range, and opens the PWR block's
+ *    bus clock on the way. One chapter, one owner.)
  *
  *  TASK - what an application names:
  *    Clock<source, hz>   the static main clock: ONE constexpr truth `hz`
@@ -74,6 +76,7 @@
 
 #include "stm32g0/device_tables.hpp"
 #include "stm32g0/flash.hpp"
+#include "stm32g0/pwr.hpp"
 #include "util/clock.hpp"
 
 namespace brio {
@@ -263,6 +266,11 @@ struct Rcc {
     }
     static bool lsi_enabled() { return (RCC->CSR & RCC_CSR_LSION) != 0u; }
     static bool lsi_ready() { return (RCC->CSR & RCC_CSR_LSIRDY) != 0u; }
+    /// TIM16_TISEL's code for LSI on TI1 (25.6.18). The timer owns the
+    /// multiplexer, this block owns the signal - the stratum's rule
+    /// again, and what lets a suite weigh this oscillator with no wire.
+    static constexpr uint8_t lsi_tim16_ti1_code = 1;
+
     static bool lsi_wait_ready() {
         for (uint32_t spins = 0; spins < ready_spins; ++spins) {
             if (lsi_ready()) {
@@ -329,19 +337,6 @@ struct Rcc {
     }
     static uint8_t kernel_clock(uint8_t pos) {
         return static_cast<uint8_t>((RCC->CCIPR >> pos) & 0x3u);
-    }
-};
-
-/// PWR, voltage scaling only (4.1.4): the range is what the flash
-/// latency table is indexed by. Range 1 is the reset value and the only
-/// one this stratum runs in; the setter arrives with the low-power pass.
-struct Pwr {
-    Pwr() = delete;
-
-    /// 1 or 2 (the two codes the field can hold; 0 and 3 are forbidden
-    /// by hardware and never read back).
-    static uint8_t range() {
-        return static_cast<uint8_t>((PWR->CR1 & PWR_CR1_VOS_Msk) >> PWR_CR1_VOS_Pos);
     }
 };
 
@@ -415,7 +410,7 @@ struct Clock {
         // value through the closed gate once, which is luck and not a
         // contract, so the gate is opened first and left open (the sleep
         // site will want it anyway).
-        Rcc::apb1_clock(RCC_APBENR1_PWREN, true);
+        Pwr::bus_clock(true);
         if (Pwr::range() != 1u) {
             return false;
         }

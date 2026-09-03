@@ -1,17 +1,18 @@
 # Platform - what the kernel stands on (STM32G0)
 
-> **PROVISIONAL.** The WAKING half is here and bench-verified - the
-> critical section, the idle hook, the SysTick timebase, the NVIC, the
-> crt - and so is the FAILING half, which lives next door in
+> **PROVISIONAL.** All three halves are here and bench-verified: the
+> WAKING half below (the critical section, the idle hook, the SysTick
+> timebase, the NVIC, the crt), the FAILING half next door in
 > [reset.md](reset.md) (which reset happened, both watchdogs, the
-> HardFault breadcrumb across a real reset). What is not built is the
-> STOPPING half: PWR's Sleep / Low-power sleep / Stop 0/1 / Standby /
-> Shutdown ladder and the `SleepSite` over it. The list is in "Not
-> covered yet".
+> HardFault breadcrumb across a real reset), and the STOPPING half in
+> [pwr.md](pwr.md) (PWR's mode ladder, the two `SleepSite`s and the
+> RTC-backed timebase that survives a Stop). What is left is small and
+> listed in "Not covered yet".
 
 Documents of record: RM0444 Rev 6 - the Cortex-M0+ summary ch. 12
-(NVIC) with ARM's ARMv6-M ARM behind it, PWR ch. 4 (for what this
-stratum deliberately does not touch yet) - and errata ES0548 Rev 3
+(NVIC) with ARM's ARMv6-M ARM behind it, and PWR ch. 4 for what a WFI
+here really enters ([pwr.md](pwr.md) owns that chapter) - and errata
+ES0548 Rev 3
 (no item touches this chapter on revision Z). Drivers:
 `stm32g0/platform_stm32.hpp` (`Stm32Platform`, this target's
 realization of the kernel's `Platform` concept), `stm32g0/delay.hpp`
@@ -47,15 +48,29 @@ on this core and is not written.
 
 **WFI wakes on a pending interrupt even under PRIMASK**, so the idle
 hook sleeps first and unmasks after, closing the lost-wakeup window by
-construction. What the WFI enters is SLEEP MODE and nothing deeper:
-SCR.SLEEPDEEP is 0 out of reset and this stratum never writes it, so
-HCLK, SysTick and every peripheral keep running (5.3). The deeper
-modes are PWR's and arrive with the sleep site.
+construction. What the WFI enters is WHATEVER IS ARMED: SCR.SLEEPDEEP is
+0 out of reset and this file never writes it, so a bare WFI is Sleep -
+HCLK, SysTick and every peripheral keep running (5.3) - and with
+`stm32g0/sleep.hpp`'s site having armed a Stop, the same WFI is that
+Stop. **THIS FILE NEEDED NO CHANGE FOR THE SLEEP CAMPAIGN**, and that is
+worth stating beside the other two targets: the AVR's `idle()` had to
+learn to honour a standing SEN bit and the SAM's had to grow an erratum
+guard, while this hook was already right, because this silicon selects
+the depth in SCR.SLEEPDEEP and PWR_CR1.LPMS and it writes neither. The
+proof is a byte-identity gate: all ten pre-existing STM32G0 images are
+unchanged by the campaign that added the sites.
 
 **SysTick rides HCLK.** The reload is `Clock::hz / 1000 - 1`
-(63999 at 64 MHz, read back over SWD); in Stop the core clocks stop
-and so does the kernel's time - the samc standby situation, with the
-same two answers waiting for the PWR pass (ticker.hpp).
+(63999 at 64 MHz, read back over SWD); in Stop the core clocks stop and
+so does the kernel's time - the samc standby situation, and it has the
+same two answers here: `Stm32SleepSite` keeps the honest restriction and
+`Stm32TimedSleepSite` LIFTS it, resynchronizing from the RTC through
+`advance()` ([pwr.md](pwr.md)). AND THE TICK IS ITSELF WHAT DEFEATS A
+DEEP SLEEP: 4.3.3 makes a WFI a no-op with any interrupt pending, so a
+Stop asked for with a 1 kHz SysTick armed lasts 0..3 ms of the 250 that
+were wanted (measured). The site pauses the ticker for the deep rungs
+and resumes it on disarm, which costs nothing because kernel time was
+going to stand still anyway.
 
 **SRAM survival across a reset is promised nowhere**, and the SRAM has
 a PARITY CHECK the factory option byte leaves DISABLED
@@ -84,9 +99,10 @@ BKPT with no debugger escalates to the crt's distinct
   the header's IRQn value.
 - `BasicTicker<tps>` / `Ticker` (1000 Hz) - `init(clock)` (false when
   the reload does not fit 24 bits), `tick()` (the ISR body), `ticks`/
-  `millis`/`secs`/`now`, `advance(n)` (the future resync's landing
-  point), `pause`/`resume`. A rate that does not divide 1000 is
-  refused at compile time.
+  `millis`/`secs`/`now`, `advance(n)` (the RTC resync's landing point -
+  `Stm32TimedSleepSite` is its user), `pause`/`resume` (which the same
+  site calls around every deep sleep). A rate that does not divide 1000
+  is refused at compile time.
 - `delay_us(clock, us)` / `delay_us(DelayRate, us)` +
   `delay_rate(hz)` - stm32g0/delay.hpp: a busy-wait of AT LEAST `us`
   microseconds on SysTick's VAL, CAPPED BELOW ONE KERNEL TICK by
@@ -167,9 +183,6 @@ read caveat in README.md was found.
 ## Not covered yet
 
 Driver gaps (this chapter's option space the stratum does not touch):
-- The STOPPING half: PWR's five modes, SLEEPDEEP + LPMS, the wake-up
-  pins, the voltage-range setter (Range 2), the `SleepSite` adapter and
-  the RTC-backed timebase resync - `advance()` exists for it.
 - VTOR relocation; NVIC priorities are exposed but nothing assigns one.
 - A per-package pin-bonding table.
 - `stm32g0/delay.hpp` and `samc/delay.hpp` are the same file but for
@@ -177,7 +190,6 @@ Driver gaps (this chapter's option space the stratum does not touch):
   factored into `armv6m/`, which is where the pair belongs once a
   reviewer says so.
 
-Implemented, not bench-verified: `Nvic::priority`, `advance()`,
-`pause()`/`resume()`, `abort()`'s and `HardFault_Handler`'s spins
+Implemented, not bench-verified: `Nvic::priority`, `abort()`'s and `HardFault_Handler`'s spins
 (the fault VECTOR is exercised, by `hard_fault_reset` - reset.md),
 the cortex-debug launch entry.

@@ -10,13 +10,18 @@
  * intrinsics behind it carry the "memory" clobbers the concept asks for.
  * ARMv6-M has no BASEPRI, so this is all-or-nothing masking.
  *
- * The other halves are not built yet and are named so nobody looks for
- * them here: which reset happened and how to cause one (RCC_CSR's reset
- * flags, SYSRESETREQ, the IWDG/WWDG) is a future stm32g0/reset.hpp; the
- * STOPPING half (PWR's Sleep/Stop/Standby/Shutdown ladder and the
- * util/power.hpp site over it) is a future stm32g0/sleep.hpp. This
- * header provides the storage the panic record lives in, and the linker
- * script the .noinit section it needs.
+ * The other halves live next door: which reset happened and how to cause
+ * one is stm32g0/reset.hpp, and the STOPPING half - PWR's
+ * Sleep/Stop/Standby/Shutdown ladder and the util/power.hpp sites over
+ * it - is stm32g0/pwr.hpp plus stm32g0/sleep.hpp. THIS FILE NEEDED NO
+ * CHANGE FOR EITHER, and that is a fact about the family worth stating:
+ * this silicon selects the sleep depth in SCB->SCR.SLEEPDEEP and
+ * PWR_CR1.LPMS, and idle() writes neither, so a WFI here has always
+ * taken whatever somebody else armed. (The AVR's idle() had to learn to
+ * honour a standing SEN bit, and the SAM's had to grow an erratum guard;
+ * on this target the hook was already right.) This header provides the
+ * storage the panic record lives in, and the linker script the .noinit
+ * section it needs.
  */
 
 #pragma once
@@ -44,13 +49,15 @@ struct Stm32Platform {
     /// pending between the caller's queue check and the WFI does not put
     /// the core to sleep at all.
     ///
-    /// SLEEP MODE, AND ONLY SLEEP MODE. This family selects the deeper
-    /// modes with SCR.SLEEPDEEP plus PWR_CR1.LPMS (RM0444 4.3), and this
-    /// hook never writes either: out of reset SLEEPDEEP is 0, so a WFI
-    /// here is Sleep - the CPU clock stops, HCLK, SysTick and every
-    /// peripheral keep running (5.3). The future sleep site arms the
-    /// deeper modes above this hook, which then takes whatever is armed,
-    /// exactly as the samc hook does with PM.SLEEPCFG.
+    /// WHATEVER IS ARMED. This family selects the deeper modes with
+    /// SCR.SLEEPDEEP plus PWR_CR1.LPMS (RM0444 4.3), and this hook never
+    /// writes either: out of reset SLEEPDEEP is 0, so a WFI here is
+    /// Sleep - the CPU clock stops, HCLK, SysTick and every peripheral
+    /// keep running (5.3) - and with stm32g0/sleep.hpp's site having
+    /// armed a Stop, the same WFI is that Stop. The site arms above this
+    /// hook and the hook takes what it finds, exactly as the samc hook
+    /// does with PM.SLEEPCFG. KERNEL TIME STOPS in a Stop (SysTick rides
+    /// HCLK), which is what Stm32TimedSleepSite exists to repair.
     ///
     /// The DSB is the ARM recommendation for WFI: it retires the posted
     /// writes before the core stops.
