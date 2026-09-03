@@ -73,11 +73,24 @@ Encoded in code or stated where the code cannot enforce it:
   until a measurement says otherwise (flash.hpp).
 - **2.2.4 Wakeup from Stop not effective** with HSIDIV != 0 (no
   workaround): a divided `ClockSource::internal` rate is a stated
-  caveat for the future sleep site (clock.hpp).
+  caveat on the clock task and on the sleep sites (clock.hpp).
+  **STAGED TWICE, WITH OPPOSITE ANSWERS, AND THE DIFFERENCE IS THE
+  ERRATUM'S OWN WORDING.** It does NOT reach an RTC wake (a 250 ms Stop
+  at HSIDIV = /4 woken by the RTC lasted its full length - rtc.md), and
+  it DOES reach a USART wake (the same divider, a byte on the receive
+  line, WUF never rising and the RTC backstop ending the sleep -
+  usart.md): the item is about CLOCK-REQUEST-CAPABLE peripherals, and a
+  serial port makes a request where a counter on LSE makes none. Setting
+  RCC_CR.HSIKERON so no request is needed does NOT rescue it, which is
+  measured and not explained.
 - **2.11.1 Data corruption due to noisy receive line** (no
   workaround): a sub-half-bit glitch inside the second half of a stop
   bit corrupts the byte; the noise flag NE is counted separately by
-  the Uart task for exactly that reason (usart.hpp).
+  the Uart task for exactly that reason (usart.hpp). **STAGED AND
+  REPRODUCED, WITH ITS CONTROL**: a quarter-bit glitch to zero placed by
+  software in the second half of a stop bit at 2400 baud spoiled 8 of 8
+  frames - 0x96 read back as 0xCB with NO error flag at all - while the
+  identical glitch in the FIRST half spoiled none (usart.md).
 - **2.8.1 Device may remain stuck in LPTIM interrupt when entering Stop
   mode** (no workaround but a SUBSTITUTION): clearing `CR.ENABLE` near
   an LPTIM interrupt can freeze the wake-up signal active, after which
@@ -99,7 +112,10 @@ Encoded in code or stated where the code cannot enforce it:
 - 2.2.8 (boot select after a debug connection) and 2.11.2 (the USART
   prescaler exists only on some instances) are documentation errata,
   read and applied: the crt's boot assumptions and RM0444 table 183
-  respectively.
+  respectively. 2.11.2's subject is MEASURED and is worse than a missing
+  divider: a BASIC instance TAKES a PRESC value and reads it back, and
+  then transmits nothing at all - so `prescaler()` refuses on such an
+  instance rather than trusting the readback (usart.md).
 
 Read and NOT applicable to this bring-up (the peripheral is not
 driven yet): 2.2.1 (LSI), 2.2.2 (PWR wake-up flags), 2.2.3 (a flash

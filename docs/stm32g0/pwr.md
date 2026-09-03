@@ -434,6 +434,46 @@ clock in the chip stopped.
 - **A deadline-less round places no alarm at all**, and a round that
   never slept advances kernel time by at most one tick.
 
+### The USART and the LPUART as Stop wake sources (test_stm32_serial w, v)
+
+The serial chapters' own suite sleeps too, and what it found belongs
+here beside the rest of the Stop story.
+
+- **A serial port is a CLOCK-REQUEST peripheral and that is a different
+  mechanism from HSIKERON.** 33.5.21: when `usart_pclk` is gated the
+  interface asks for its KERNEL clock back on the falling edge of its RX
+  line (`usart_ker_ck_req`), the oscillator is started ON DEMAND, the
+  frame is received on it, and if the wake-up event is not verified the
+  clock is released again and the core never wakes. `RCC_CR.HSIKERON`
+  (`Rcc::hsi_kernel_request()`, clock.md) is the other thing entirely:
+  it keeps HSI16 running unconditionally, which costs current and buys
+  the start-up time back.
+- **All three of 33.5.21's wake sources bring this part out of Stop 0**
+  through USART2 on HSI16, from a byte a host sent while the core was
+  down: start bit at 9600 and at 115200, RXNE at 9600, address match at
+  9600 - WUF seen once each, the RTC backstop never firing, the Stop
+  lasting exactly as long as it took the poke to arrive.
+- **THE BYTES SURVIVE**, all four of them at both rates, first byte
+  0xA5. A start-bit wake at these rates loses nothing.
+- **An LPUART on the 32768 Hz crystal wakes it out of Stop 1** and keeps
+  the character too (lpuart.md) - the arrangement the peripheral exists
+  for.
+- **ES0548 2.2.4 REPRODUCES HERE**, which it did not on the RTC. With
+  HSIDIV = /4 the same poke did not wake the same Stop - WUF never rose
+  - and the sleep ran to the RTC wake-up timer's full length, with that
+  timer as the control that the Stop itself was working. The difference
+  from the RTC campaign's negative result is exactly the one the erratum
+  names: a USART makes a clock request and the RTC makes none. **And
+  HSIKERON does not rescue it**: the same leg with HSI16 kept running
+  still did not wake, so 2.2.4 reaches further than the request path.
+  Recorded as measured, not explained.
+- **WUF IS A LEVEL LIKE ORE**, and a handler that leaves it standing
+  with WUFIE set re-enters until the watchdog reboots the board. Caught
+  by halt-and-dump on this very campaign: IPSR 44, ISR bit 20 standing,
+  the wake counter frozen at one. The `Uart` task clears it when the
+  wake option is named; anything arming the wake through the RESOURCE
+  under a task that was not compiled for it owes the clear itself.
+
 Three suite-craft lessons paid for here, all of them the samc bench's
 own in new dress: a console DRAIN placed between arming a deadline and
 stamping the wall puts tens of milliseconds INSIDE the measurement (it
@@ -470,6 +510,11 @@ the family fixture compiles and the negatives fence, but no letter has
 slept on them; and the once-a-lap wake that consequence 1 predicts (a
 standing compare firing 64 seconds after a deadline-less round) is
 argued from the registers and has not been sat out on the bench.
+
+The serial wake's own gaps: only USART2 has been used as a wake source
+(the EXTI lines of USART1 and USART3 are published and never armed), and
+only Stop 0 for a USART and Stop 1 for an LPUART - neither has been
+crossed with the other.
 
 Not stageable on this desk, and said so rather than left silent: the PVD
 crossing and the wake-up PINS (both want a supply or a wire this bench

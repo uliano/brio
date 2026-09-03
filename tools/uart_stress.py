@@ -10,7 +10,7 @@ THE PROTOCOL, printed by the board and parsed here:
 
     HOST <op> <mode> <baud> <format> <window_ms> <count>
 
-      op       echo | sink | source | burst
+      op       echo | sink | source | burst | poke
       mode     0 irqTX+irqRX, 1 dmaTX+irqRX, 2 irqTX+dmaRX, 3 dmaTX+dmaRX
       baud     the rate the board is about to switch to
       format   e.g. 8N1, 8E1, 7O2 - bits, parity, stop bits
@@ -22,6 +22,12 @@ its port to the announced rate and frame, runs the op for LESS than the
 window - the wire must be quiet before the board speaks again, or its
 report is read as payload - then goes back to 115200 8N1 and keeps reading
 the console.
+
+`poke` is the STM32G0 suite's addition and the one op whose TIMING is the
+point: the script waits out HALF the window, sends `count` bytes at the
+announced rate, and then waits out the rest. It is what a board that is
+ASLEEP needs - the bytes have to arrive while it is in Stop, not before
+it gets there and not after it has given up.
 
 THE PATTERN is a 32-bit xorshift, low byte per step, seeded 0x12345678:
 the same three shifts the firmware runs, so either end can verify the
@@ -42,6 +48,14 @@ USE
 
     python3 tools/uart_stress.py --letters h --repeat 5
     python3 tools/uart_stress.py --port /dev/ttyUSB0 --letters k
+
+ON THE STM32G0 (board E, test_stm32_serial), whose console is the
+ST-LINK's own virtual COM port and is therefore addressed by-id:
+
+    python3 tools/bench.py flash E test_stm32_serial
+    python3 tools/uart_stress.py --letters ywv \
+        --port /dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_\
+0670FF534871754867182752-if02
 """
 import argparse
 import sys
@@ -123,7 +137,23 @@ class Board:
         got = bytearray()
         sent = 0
         payload = b""
-        if op in ("echo", "sink", "burst"):
+        if op == "poke":
+            # THE TIMING IS THE OP: the board is asleep in the middle of
+            # its own window, so the bytes go out at half of it and the
+            # rest of the window is spent waiting, quietly.
+            time.sleep(pump_s / 2.0)
+            payload = lfsr_stream(max(count, 1), mask)
+            self.ser.write(payload)
+            self.ser.flush()
+            sent = len(payload)
+            t0 = time.time()
+            while time.time() - t0 < pump_s / 2.0:
+                n = self.ser.in_waiting
+                if n:
+                    got += self.ser.read(n)
+                else:
+                    time.sleep(0.005)
+        elif op in ("echo", "sink", "burst"):
             payload = lfsr_stream(int(baud / 10 * pump_s * 1.1) + 256, mask)
             chunk = max(64, baud // 2000)
             t0 = time.time()
@@ -147,7 +177,9 @@ class Board:
 
         result = {"op": op, "mode": mode, "baud": baud, "format": fmt,
                   "host_sent": sent, "host_got": len(got), "first_bad": None}
-        if op == "source":
+        if op == "poke":
+            result["host_got"] = len(got)
+        elif op == "source":
             expect = lfsr_stream(max(count, len(got)), mask)
             result["host_got"] = len(got)
             for i in range(min(len(got), len(expect))):
@@ -194,7 +226,11 @@ def main():
     ap.add_argument("--port", default=DEFAULT_PORT,
                     help="the board's console (default: bench board C)")
     ap.add_argument("--letters", default="efghijklmnp",
-                    help="which suite letters to drive, in order")
+                    help="which suite letters to drive, in order (the "
+                         "default is the SAM's test_samc_uart, which is what "
+                         "DEFAULT_PORT points at; the STM32G0's "
+                         "test_stm32_serial wants 'ywv' and test_stm32_dma "
+                         "wants 'u', both with an explicit --port)")
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("-q", "--quiet", action="store_true",
                     help="do not echo the board's console")

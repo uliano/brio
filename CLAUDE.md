@@ -309,8 +309,50 @@ gets its dated home in `docs/design/` when taken.
   and the site's ticker pause stays as the discipline that makes a Stop
   last in both states. Open: the rtc suite's letter c is flaky inside z
   (76/77 twice, 77/77 once; 11/11 alone) - a minima comparison of LSI
-  captures, not this campaign's. What remains is 8b (the USART tail,
-  the LPUARTs, IRTIM - brief written) and what needs a peer or wires (the buses against a SAM at
+  captures, not this campaign's. Campaign 8b THE USART'S LONG TAIL + THE LPUARTs + IRTIM
+  DONE 2026-09-03 (Opus delegation, stopped by three 529s and an office
+  closing, finished by a fresh agent reviewing the first one's tree,
+  re-verified by Fable's own hand - test_stm32_serial z 88/88 warm and
+  cold, y/w/v 2/2 each through uart_stress.py, the md5 gate 14/14 in
+  Fable's worktree, canaries sleep 50/50, lptim 68/68, dma 54/54 - and
+  committed): usart.hpp grown to ch. 33 WHOLE in both register views
+  (every UE-protected field a verb that refuses, both baud encodings,
+  PRESC, the four kernel clocks, FIFOs and thresholds, HDSEL, mute
+  mode, character match, RTO/BLEN, LIN, synchronous, smartcard, IrDA,
+  auto-baud, the wake from Stop with its EXTI line, RQR, HSIKERON in
+  clock.hpp), UartTask<Res, pins, ...> with UartOptions as ONE TRAILING
+  NTTP if-constexpr'd to nothing by default (the console image
+  byte-identical is the proof) named by Uart, Rs485 and lpuart.hpp's
+  LpUart (the 20-bit LPUARTDIV, the 3x..4096x window, the LP feature
+  column), tasks SyncHost/IrdaLink/AutoBaud/Smartcard, irtim.hpp (a
+  monostate over SYSCFG's three bits), the reserve's usart_is_full/
+  exti_line/lpuart_*/irtim_second_usart, uart_stress.py's poke op.
+  THE INSTRUMENT: HDSEL single-wire half-duplex on PA9 as this family's
+  loop-back (13 of 13 frame formats byte-exact, 2 Mbaud ceiling on the
+  loop) and the RX pad's PUPDR as a bit-banged transmitter (auto-baud
+  learned 21294..21328 against 21333, tolerance rows meeting tables
+  188/189, LIN 13.0-bit break, RZI decoded, the smartcard NACK with no
+  card, three retries counted). FINDINGS: ONE ROW OF TABLE 184 IS NOT
+  THE FULL/BASIC SPLIT (synchronous mode is every USART's and no
+  LPUART's - CLKEN sticks on all six, on neither LPUART; the first
+  agent had it wrong); A BASIC INSTANCE'S PRESC IS WORSE THAN ABSENT
+  (it sticks and the transmitter emits nothing); WUF IS A LEVEL like
+  ORE (an uncleared one storms until the watchdog); the IRTIM USART
+  envelope is ACTIVE LOW; USARTn_RTS_DE_CK is one pad with three jobs;
+  the address-match wake keeps one byte; LPUART1's DMAMUX rows are
+  14/15 (the first agent wrote TIM1's 22/23 - caught by review, nothing
+  on the bench would have). ERRATA: 2.11.1 REPRODUCED with its control
+  (8/8 corrupted in the stop bit's second half, 0/8 in the first, no
+  flag); 2.11.2 measured; 2.2.4 REPRODUCED ON A USART WAKE (HSIDIV /4:
+  the poke did not wake, the RTC control did) AND HSIKERON DOES NOT
+  RESCUE IT. Declined with reasons: the synchronous data path and
+  slave (a peer), smartcard block mode (a card), a LIN network. AND A
+  DESK FACT WITH A SUITE FIX: the RTC domain's move to LSE took LSI down
+  with it (5.4.24: nothing asks any more), so test_stm32_dma letter i
+  scored 53/54 until it started the clock it captures - the one-line
+  fix applied by Fable AFTER the gate, the commit's one declared mover.
+  usart.md rewritten, lpuart.md + irtim.md NEW. What remains needs a
+  peer or wires (the buses against a SAM at
   3.3 V, FDCAN, USB, UCPD, the option-byte bench verb).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR

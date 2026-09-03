@@ -257,6 +257,27 @@ struct Rcc {
     // it - it is not offered as a SYSCLK root (the task's enum refuses
     // that, see the file header).
     //
+    /**
+     * RCC_CR.HSIKERON (5.4.1): keep HSI16 running for a KERNEL-CLOCK
+     * consumer even when the system does not need it - through a Stop
+     * mode, and in Run when SYSCLK is on something else.
+     *
+     * IT IS NOT THE SAME MECHANISM as a peripheral's own clock request.
+     * 33.5.21: a USART whose kernel clock is gated in Stop asks for it
+     * back on the falling edge of its RX line (usart_ker_ck_req) and
+     * releases it again if the wake-up event is not verified - the
+     * oscillator is started ON DEMAND and for as long as the frame
+     * lasts. HSIKERON instead keeps it running unconditionally, which
+     * costs current and buys latency (no startup time in the path). A
+     * wake from Stop works with the request alone; this bit is the
+     * escape for a consumer that cannot afford the start-up, and for
+     * measuring the difference.
+     */
+    static void hsi_kernel_request(bool on) {
+        RCC->CR = on ? (RCC->CR | RCC_CR_HSIKERON) : (RCC->CR & ~RCC_CR_HSIKERON);
+    }
+    static bool hsi_kernel_request() { return (RCC->CR & RCC_CR_HSIKERON) != 0u; }
+
     // 5.2.14: starting the IWDG FORCES LSI on whatever LSION says, and
     // it "cannot be disabled" afterwards - so lsi_ready() standing with
     // lsi_enabled() clear is the witness that something else (the IWDG,

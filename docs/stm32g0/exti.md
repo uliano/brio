@@ -267,10 +267,11 @@ should.
 ## Not covered yet
 
 Driver gaps: the direct lines whose peripheral this stratum has not
-built - the I2Cs, the LPUARTs, CEC, UCPD, USB - so their line numbers
-are published by nobody. The lines that DO have an owner are the RTC's
-19 and TAMP's 21 ([rtc.md](rtc.md)), the comparators' 17/18/20
-([comp.md](comp.md)) and the LPTIMs' 29/30 ([lptim.md](lptim.md)).
+built - the I2Cs, CEC, UCPD, USB - so their line numbers are published
+by nobody. The lines that DO have an owner are the RTC's 19 and TAMP's
+21 ([rtc.md](rtc.md)), the comparators' 17/18/20 ([comp.md](comp.md)),
+the USARTs' 24/25/26 and the LPUARTs' 28/35 ([usart.md](usart.md),
+[lpuart.md](lpuart.md)) and the LPTIMs' 29/30 ([lptim.md](lptim.md)).
 Still open: the configurable non-GPIO lines PVD 16 and VDDIO2 34,
 reachable through `Exti` today but with no driver to publish their
 numbers or their vectors; and `SEVONPEND`, which changes what returns a
@@ -278,8 +279,9 @@ WFE and belongs to a kernel pass rather than to this chapter.
 
 Wake-up from **Stop** through a direct line is no longer open: an LPTIM
 compare match leaves both Stop 0 and Stop 1 through line 29, measured in
-`test_stm32_lptim` letter g, and an RTC alarm does the same through line
-19 ([pwr.md](pwr.md)). What a direct line contributes there is exactly
+`test_stm32_lptim` letter g, an RTC alarm does the same through line 19
+([pwr.md](pwr.md)), a USART's WUF leaves Stop 0 through line 26 and an
+LPUART's leaves Stop 1 through line 28 ([usart.md](usart.md)). What a direct line contributes there is exactly
 its IMR bit - it has no edge selection and no pending bit of its own,
 the peripheral's own flag being the pending state.
 

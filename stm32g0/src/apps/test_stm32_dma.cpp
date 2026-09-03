@@ -1424,6 +1424,14 @@ void ti_timer_round_trip() {
     // ticks, which is what makes each block self-checking.
     T16::init();
     (void)T16::configure({.prescaler = 63, .period = 0xFFFF});   // 1 MHz counter
+    // LSI IS NOT FREE ANY MORE. 5.4.24: LSIRDY stands whenever the IWDG,
+    // the RTC or the LSE's CSS asks for it, whatever LSION says - and
+    // while this board's RTC domain ran on LSI every program got the
+    // oscillator for nothing. With the domain on the LSE crystal (the
+    // RTC campaign's end state) nobody asks, so this letter drained 0
+    // blocks and scored 53/54 until it started the clock it captures.
+    Rcc::lsi_enable(true);
+    (void)Rcc::lsi_wait_ready();
     (void)T16::input_select(0, 1);   // TISEL: LSI as TI1 (the tim campaign's letter e)
     (void)T16::capture_channel(0, {.select = TimChannelSelect::direct,
                                    .polarity = TimCapturePolarity::rising});

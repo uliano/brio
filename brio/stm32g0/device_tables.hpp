@@ -230,6 +230,155 @@ constexpr IRQn_Type usart_irq(uint8_t n) {
 #endif
 }
 
+/// Whether USARTn carries the FULL feature set of table 183/184 - the
+/// FIFOs, the PRESC prescaler, the kernel-clock multiplexer and the wake
+/// from Stop, synchronous mode, smartcard, IrDA, LIN, auto-baud, the
+/// receiver time-out and Modbus. A BASIC instance has none of them and
+/// the rest of the chapter alike.
+///
+/// THIS IS A STATED TABLE AND NOT A HEADER PROBE, and the reason is that
+/// the device header expresses the split as POINTER-COMPARISON macros -
+/// IS_UART_FIFO_INSTANCE(x), IS_UART_AUTOBAUDRATE_DETECTION_INSTANCE(x)
+/// and their kin, each of them `((x) == USART1)` and none of them a
+/// constant expression. So this mirrors table 183 off the DEVICE SELECT
+/// macro, exactly as usart_irq() and tim_geometry() do, and the SILICON
+/// is the check: test_stm32_serial's letter a writes FIFOEN and PRESC on
+/// every present instance and compares what sticks against this
+/// function. (ES0548 2.11.2 is the documentation erratum saying some
+/// manual revisions omit the prescaler's own per-instance split; the
+/// implementation section carries it and so does this table.)
+constexpr bool usart_is_full(uint8_t n) {
+    if (!usart_present(n)) {
+        return false;
+    }
+#if defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G0B0xx)
+    return n <= 3;      // USART1..3 FULL, USART4..6 BASIC
+#elif defined(STM32G071xx) || defined(STM32G081xx) || defined(STM32G070xx)
+    return n <= 2;      // USART1..2 FULL, USART3..4 BASIC
+#else
+    return n == 1;      // USART1 FULL, USART2 BASIC
+#endif
+}
+
+/// The EXTI line USARTn's wake-up event raises (table 65: 24, 25 and 26
+/// for USART3, USART1 and USART2, all DIRECT - no trigger selection, no
+/// pending bit of the EXTI's own, the peripheral's WUF being the pending
+/// state). 0xFF for an instance with no wake at all - which is every
+/// BASIC one, table 184's last row. The NUMBERS are the MANUAL'S, like
+/// lptim_exti_line()'s and rtc_exti_line's.
+constexpr uint8_t usart_exti_line(uint8_t n) {
+    if (!usart_is_full(n)) {
+        return 0xFF;
+    }
+    switch (n) {
+        case 1: return 25;
+        case 2: return 26;
+        case 3: return 24;
+        default: return 0xFF;
+    }
+}
+
+// ---- LPUART instances -------------------------------------------------------
+//
+// A DIFFERENT PERIPHERAL sharing the USART's register layout (the header
+// gives both a USART_TypeDef): chapter 34 is chapter 33 minus the
+// synchronous, smartcard, IrDA, LIN, Modbus, receiver-timeout and
+// auto-baud halves, minus OVER8 - and PLUS a baud generator of its own
+// (256 x fck / LPUARTDIV, 34.4.7), which is why it gets its own driver
+// and its own probes rather than a template argument of the USART's.
+
+/// Register block base of LPUARTn (n = 1..2), 0 when absent. LPUART1 is
+/// on every G0; LPUART2 is the G0B1/G0C1's alone.
+constexpr uint32_t lpuart_base(uint8_t n) {
+    switch (n) {
+#if defined(LPUART1_BASE)
+        case 1: return LPUART1_BASE;
+#endif
+#if defined(LPUART2_BASE)
+        case 2: return LPUART2_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool lpuart_present(uint8_t n) { return lpuart_base(n) != 0u; }
+
+/// Which APB enable register carries LPUARTn, and which bit. BOTH sit on
+/// APBENR1 on this family (LPUART1 at bit 20, LPUART2 at bit 7) - the
+/// header is the authority and the answer is not what the USART's
+/// APB2/APB1 split invites one to guess.
+constexpr UsartBusClock lpuart_bus_clock(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APBENR1_LPUART1EN)
+        case 1: return {false, RCC_APBENR1_LPUART1EN};
+#endif
+#if defined(RCC_APBENR1_LPUART2EN)
+        case 2: return {false, RCC_APBENR1_LPUART2EN};
+#endif
+        default: return {};
+    }
+}
+
+/// Position of LPUARTn's kernel-clock select field in RCC_CCIPR
+/// (LPUART1SEL at bit 10, LPUART2SEL at bit 8), or 0xFF when absent.
+/// EVERY LPUART HAS ONE - unlike the USARTs, where only the FULL
+/// instances do.
+constexpr uint8_t lpuart_clock_select_pos(uint8_t n) {
+    switch (n) {
+#if defined(RCC_CCIPR_LPUART1SEL_Pos)
+        case 1: return RCC_CCIPR_LPUART1SEL_Pos;
+#endif
+#if defined(RCC_CCIPR_LPUART2SEL_Pos)
+        case 2: return RCC_CCIPR_LPUART2SEL_Pos;
+#endif
+        default: return 0xFF;
+    }
+}
+
+/// The NVIC line of LPUARTn. Read off the DEVICE SELECT macro for the
+/// same reason usart_irq() is: IRQn_Type values are enumerators. On the
+/// G0B1 class LPUART1 shares USART3..6's line and LPUART2 shares
+/// USART2's; on the G071 class LPUART1 shares USART3/4's; on the G031
+/// class LPUART1 has a line of its own.
+constexpr IRQn_Type lpuart_irq(uint8_t n) {
+#if defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G0B0xx)
+    return n == 2 ? USART2_LPUART2_IRQn : USART3_4_5_6_LPUART1_IRQn;
+#elif defined(STM32G071xx) || defined(STM32G081xx) || defined(STM32G070xx)
+    (void)n;
+    return USART3_4_LPUART1_IRQn;
+#else
+    (void)n;
+    return LPUART1_IRQn;
+#endif
+}
+
+/// The EXTI line LPUARTn's wake-up event raises (table 65: 28 for
+/// LPUART1, 35 for LPUART2 - the second one in the SECOND register
+/// group, which only the G0B1 class has). The manual's numbers again.
+constexpr uint8_t lpuart_exti_line(uint8_t n) {
+    if (!lpuart_present(n)) {
+        return 0xFF;
+    }
+    return n == 1 ? 28 : 35;
+}
+
+// ---- IRTIM (ch. 27) ---------------------------------------------------------
+
+/// Which USART instance SYSCFG_CFGR1.IR_MOD code 10 selects as the
+/// infrared modulation envelope: USART4 on the G071/G081/G0B1/G0C1,
+/// USART2 on the G031/G041/G051/G061 (ch. 27's own note, repeated in
+/// 6.1.3's IR_MOD description). 0 where the part has neither - which
+/// cannot happen, every G0 having at least USART2. Code 01 is USART1
+/// everywhere and needs no table.
+constexpr uint8_t irtim_second_usart() {
+#if defined(STM32G071xx) || defined(STM32G081xx) || defined(STM32G070xx) || \
+    defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G0B0xx)
+    return 4;
+#else
+    return 2;
+#endif
+}
+
 // ---- FLASH ------------------------------------------------------------------
 //
 // What differs across the family in chapter 3 is the SECOND BANK and the

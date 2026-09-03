@@ -83,7 +83,27 @@ rule, never an approximation.
 with the divider at anything but 1 the part cannot enter Stop when
 SYSCLK is HSE, and clock-request-capable peripherals cannot wake it
 from Stop. A divided `internal` rate is legal here and stated as a
-caveat for the sleep site.
+caveat for the sleep site. THIS HALF OF THE ERRATUM IS NOW MEASURED and
+it is real: a USART on HSI16 with its wake armed does NOT come out of
+Stop 0 at HSIDIV = /4, where the RTC does (usart.md, pwr.md).
+
+**The KERNEL clocks are the other half of RCC_CCIPR and they are what a
+serial port really divides.** USARTnSEL picks PCLK / SYSCLK / HSI16 /
+LSE for USART1..3 and for both LPUARTs (5.4.21), and a port on HSI16 or
+LSE does not move when SYSCLK does - which is what makes `rebase()` a
+no-op for it, on purpose. `kernel_clock(pos, code)` is the one verb, and
+each peripheral publishes its own field position from the reserve.
+
+**RCC_CR.HSIKERON is NOT the same mechanism as a peripheral's clock
+REQUEST**, and the difference matters wherever Stop does. 33.5.21: a
+USART whose kernel clock is gated in Stop asks for it back on the
+falling edge of its RX line and releases it again if the wake-up event
+is not verified - the oscillator starts ON DEMAND and only for as long
+as the frame lasts. HSIKERON instead keeps HSI16 running
+unconditionally, which costs current and buys the start-up time back. A
+wake from Stop works with the request alone; the bit is the escape for a
+consumer that cannot afford the start-up, and the way to MEASURE the
+difference. (It is also NOT a way round 2.2.4 - measured, usart.md.)
 
 ## Types and verbs
 
@@ -100,7 +120,7 @@ caveat for the sleep site.
   (`SysclkSource`), `bus_prescalers_unity`, the enables `io_clock(port,
   on)`, `ahb_clock`/`apb1_clock`/`apb2_clock(mask, on)` with an
   `apb1_clock(mask)` readback, the multiplexer `kernel_clock(pos,
-  code)`, and the LSI root - `lsi_enable(on)`, `lsi_enabled()`,
+  code)`, `hsi_kernel_request(on)` (RCC_CR.HSIKERON), and the LSI root - `lsi_enable(on)`, `lsi_enabled()`,
   `lsi_ready()`, `lsi_wait_ready()`.
 - **LSI lives in RCC_CSR, a register with two owners.** Bits 1..0 are
   the oscillator's and belong here; bits 31..23 are the reset flags and
@@ -190,3 +210,9 @@ Implemented, not bench-verified: `ClockSource::internal` at any rate
 but 16 MHz (the divider write under a running core), `pll_configure`'s
 refusal while running, `FlashWaitStates::set`'s bounded wait on a
 DECREASE (every init so far raised), `FlashAccel`'s setters.
+
+The kernel-clock multiplexer is bench-driven for all four codes on
+USART2 and on both LPUARTs ([usart.md](usart.md), [lpuart.md](lpuart.md))
+- including a console that kept talking at 115200 while its own clock
+moved under it. HSIKERON is written, read back and slept on; what it
+COSTS in current is the meter question this stratum keeps deferring.
