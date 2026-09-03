@@ -186,7 +186,7 @@ extern "C" void RTC_TAMP_IRQHandler() { (void)brio::Rtc::isr(); }
 ## Bench findings
 
 The reference suite is `test_stm32_rtc` (ten letters in `z`, 77
-verdicts, **77/77 cold and warm, three runs**; letter `v` outside it
+verdicts, **77/77 cold and warm, five runs**; letter `v` outside it
 reboots the board once). NOTHING IS WIRED: TIM16's input multiplexer
 reaches LSI, LSE and the RTC's own wake-up signal (25.6.18), so a 64 MHz
 capture channel weighs all three against the core clock with no pad.
@@ -203,13 +203,28 @@ capture channel weighs all three against the core clock with no pad.
   completely different route - a period capture against a watchdog's
   coarse reset. The two agree to 1.5 per mille.
 - **AN UNFILTERED CAPTURE OF AN INTERNAL CLOCK LINE IS NOT A
-  MEASUREMENT.** With ICyF = 0 the intervals scatter wildly in both
-  directions (1080..46004 ticks against a 1960-tick period, run to run);
-  with ICyF = 8 they sit inside 1960..1968 with 63 of 64 samples in a
-  1.5 % band. The two settings agree on the PERIOD to a few hundred ppm,
-  so what the filter buys is robustness and not a different number - and
-  it is needed on the CRYSTAL too, which is why this is a fact about the
+  MEASUREMENT, AND ITS ERROR IS TWO-SIDED.** With ICyF = 0 the intervals
+  scatter in BOTH directions against a 1965-tick period; with ICyF = 8
+  they sit at 1968 with 63 of 64 samples in a narrow band. The two
+  settings agree on the PERIOD to 1524..2032 ppm over five runs, so what
+  the filter buys is robustness and not a different number - and it is
+  needed on the CRYSTAL too, which is why this is a fact about the
   capture path and NOT about ES0548 2.2.1.
+
+  **The two tails are different mechanisms and the second one is not
+  obvious.** A missed edge - the capture flag standing while a polling
+  loop that also serves a console is elsewhere, the next capture
+  overwriting CCR - hands back the distance between edges that are not
+  neighbours, and LENGTHENS an interval: seen at up to 62188 ticks on
+  the filtered leg. But the BARE leg also OVER-captures, and an extra
+  edge SHORTENS one: across five z runs the bare leg's shortest interval
+  sat 4, 5, 49, 353 and 754 ticks below the filtered median. So the
+  shortest sample is NOT "the period seen from below", and neither a
+  mean (dragged up by the long tail) nor a minimum (dragged down by the
+  short one) estimates this period. **The MEDIAN does** - it is the one
+  statistic both tails have to outnumber - and it is stable to a tick
+  run to run where the extremes move by tens of thousands. This is what
+  the suite quotes and what its band is anchored on.
 - **WHAT TISEL CALLS "RTC WAKE-UP" IS THE MASKED INTERRUPT LINE, NOT A
   PULSE.** It rises with WUTF and stays up until the flag is
   acknowledged, so a capture channel sees exactly one edge per

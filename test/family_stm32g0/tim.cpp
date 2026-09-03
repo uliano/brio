@@ -222,4 +222,18 @@ void family_stm32g0_tim_tasks() {
     (void)Pulse3::arm(TimTrigger::itr1);
     Pulse3::fire();
     (void)Pulse3::busy();
+
+    // The DMA burst engine (TIMx_DCR/TIMx_DMAR): every verb on a timer
+    // that has it and on one that has not, so both branches compile on
+    // every header of the family.
+    static_assert(brio::Tim<3>::has_dma_burst);
+    static_assert(!brio::Tim<14>::has_dma_burst);
+    (void)brio::Tim<3>::dma_burst(brio::TimBurstBase::arr, 4);
+    (void)brio::Tim<3>::dma_burst(brio::TimBurstBase::ccr1, 2);
+    (void)brio::Tim<3>::burst_base();
+    (void)brio::Tim<3>::burst_length();
+    (void)brio::Tim<3>::dmar_address();
+    brio::Tim<3>::dma_burst_off();
+    (void)brio::Tim<14>::dma_burst(brio::TimBurstBase::arr, 4);
+    (void)brio::Tim<14>::dmar_address();
 }

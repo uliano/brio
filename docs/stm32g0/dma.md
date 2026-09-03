@@ -14,7 +14,7 @@ on the bench chip's revision Z column, where all five apply. Driver:
 from `stm32g0/device_tables.hpp`, and the REQUEST IDS from the
 peripherals that publish them (`Usart<n>::dma_tx_request()`,
 `Tim<n>::dma_update_request()` and their kin). Bench suite:
-`test_stm32_dma` (10 letters in `z`, 54 verdicts, wireless; letter `u`
+`test_stm32_dma` (12 letters in `z`, 64 verdicts, wireless; letter `u`
 outside `z` needs `tools/uart_stress.py`). Family fixture
 `test/family_stm32g0/dma.cpp` plus seven negatives under
 `tools/check_stm32g0.sh`.
@@ -379,16 +379,55 @@ every leg and then reports "no tally". The board is not stuck - it prints
 its tally and answers its prompt immediately afterwards; the letter is
 outside `z` and the suite's score does not depend on it.
 
+### The synchronization block (letter `k`)
+
+dma.md carried this as built-but-never-run since the DMA campaign, and
+what it wanted was a stimulus that was already on the board: **table
+57's synchronization input 22 is TIM14_OC**, the same signal table 56
+offers the request generator as trigger input 22 and the same signal
+letter f already produces with no pad at all. So TIM3's update event is
+the REQUEST at 20 kHz and TIM14's OC1REF is the SYNC at 1 kHz.
+
+In a five-millisecond window:
+
+| arrangement | words moved |
+|---|---|
+| unsynchronized (the control) | 64 - the whole transfer |
+| SE, NBREQ 4, rising | 18 |
+| SE, NBREQ 4, falling | 20 |
+| SE, NBREQ 4, **both** | 39 |
+| SE, NBREQ 1, rising | 5 |
+
+Five sync edges times four requests is twenty words where the same
+channel unsynchronized saturates. `SPOL` is a real selector - either
+single edge serves the same count and BOTH serves twice as many, which
+is the only reading of 11.6.1's three codes a square wave can tell
+apart - and **NBREQ is the count and not the count minus one**, which is
+what `DmaMuxSync::requests` claims and this measures.
+
+**A SYNCHRONIZATION OVERRUN IS REAL AND REPORTED.** With eight requests
+asked for per edge and only about half a request arriving between edges,
+`SOF` for that multiplexer channel stands and `CFR` clears it; with
+`SOIE` set the same arrangement delivered **7 interrupts** on the third
+NVIC line. TWO LEGS, and the reason is that line: the flag is read with
+the interrupt off and the shared handler's sweep GATED, because a
+handler that clears `SOFx` is the thing that would hide it.
+
+**AND THE VECTOR IS NOT THIS LETTER'S TO ARM.** The DMAMUX overrun
+shares the third line with DMA1's channels 4..7, which is where this
+suite's own console engines live: enabling it is a no-op and disabling
+it afterwards takes the console's transmitter down with it. The first
+version of the letter did exactly that and the board went silent
+mid-letter.
+
+**The request generator's other two polarities**, which this document
+also listed: over ten TIM14 periods, rising moved 10 words, falling 10,
+both 20.
+
 ## Not covered yet
 
 Driver gaps:
 
-- **The synchronization block is built but not bench-run.**
-  `DmaMux::request_synchronized()` writes the whole CxCR word with
-  ES0548 2.5.4's invariant built in, and the family fixture instantiates
-  it, but no letter drives a synchronized channel and no SOFx has been
-  seen to rise. It wants the same stimulus the software-trigger finding
-  above is missing.
 - **Peripheral-to-peripheral transfers** in the sense of 10.4.5's first
   bullet (a peripheral's request pacing a transfer between two OTHER
   registers) are reachable through the existing verbs and exercised by
@@ -410,10 +449,6 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- the request generator's `both`-edge and falling polarities (only
-  rising is staged);
-- `DmaMux::request_counted()`'s overrun interrupt (SOIE) and the
-  DMAMUX's own NVIC line, which shares the third channel vector;
 - the widths on DMA2, and every channel of DMA1 above 5 except as the
   console's own two engines.
 

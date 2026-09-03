@@ -211,6 +211,23 @@ enum class TimCapturePolarity : uint8_t { rising = 0, falling = 1, both = 3 };
 /// CCMRx.ICyPSC - capture one edge in 1, 2, 4 or 8 (21.4.7).
 enum class TimCapturePrescaler : uint8_t { every = 0, every2 = 1, every4 = 2, every8 = 3 };
 
+/**
+ * TIMx_DCR.DBA - the DMA burst engine's base, as a WORD OFFSET from
+ * TIMx_CR1 (21.4.20's own example list). Named rather than computed,
+ * because the offsets are the register map's and an application that
+ * arithmetics them itself has written a bug no header can catch.
+ *
+ * The list is the FULL timer's; a smaller instance simply has fewer of
+ * these registers implemented, and a burst that walks past its last one
+ * reads zero and writes nowhere - the silicon's answer, not this
+ * driver's, and `dma_burst()` refuses only what the FIELD cannot hold.
+ */
+enum class TimBurstBase : uint8_t {
+    cr1 = 0, cr2 = 1, smcr = 2, dier = 3, sr = 4, egr = 5,
+    ccmr1 = 6, ccmr2 = 7, ccer = 8, cnt = 9, psc = 10, arr = 11,
+    rcr = 12, ccr1 = 13, ccr2 = 14, ccr3 = 15, ccr4 = 16, bdtr = 17,
+};
+
 /// The time base. `period` is ARR and is REFUSED at zero: 21.4.12 says a
 /// null auto-reload leaves the counter blocked, which is a stopped timer
 /// wearing the face of a running one.
@@ -771,6 +788,62 @@ public:
     static volatile void* ccr_address(uint8_t ch) {
         return ch < channels ? &ccr_ref(ch) : nullptr;
     }
+
+    // ---- the DMA BURST engine (TIMx_DCR, TIMx_DMAR) -------------------------
+    //
+    // ONE REQUEST, SEVERAL REGISTERS. The plain requests above move one
+    // datum into one register; the burst engine turns each request into
+    // a WALK of `length` consecutive registers starting at `base`, all
+    // through the single address TIMx_DMAR - so a DMA channel whose
+    // peripheral address never changes writes ARR, then CCR1, then CCR2,
+    // and starts again at the next update event. 21.4.19/21.4.20 (and
+    // the same pair in every other timer chapter) describe it; nothing
+    // in this driver had a verb for it until a caller wanted a whole
+    // waveform updated atomically per period.
+    //
+    // THE BASE IS A WORD OFFSET FROM TIMx_CR1 and not an address, which
+    // is why the offsets are named rather than computed: an application
+    // that says `TimBurstBase::arr` cannot get the arithmetic wrong, and
+    // a timer whose register map skips one (the basic timers have no
+    // CCMR at all) is refused by `has_dma_burst` before it can.
+
+    /// Point the burst engine at `length` registers starting at `base`.
+    /// 21.4.20's DBL is the length MINUS ONE and this argument is the
+    /// LENGTH, so nobody has to remember which - the ES0548-shaped
+    /// mistake that off-by-one would be.
+    static bool dma_burst(TimBurstBase base, uint8_t length) {
+        if (!has_dma_burst || length < 1u || length > 18u) {
+            return false;
+        }
+        const uint8_t dba = static_cast<uint8_t>(base);
+        if (dba > 31u) {
+            return false;
+        }
+        regs().DCR = (static_cast<uint32_t>(dba) << TIM_DCR_DBA_Pos) |
+                     (static_cast<uint32_t>(length - 1u) << TIM_DCR_DBL_Pos);
+        return true;
+    }
+
+    /// What the engine is pointed at, as the pair that was written.
+    static TimBurstBase burst_base() {
+        return static_cast<TimBurstBase>((regs().DCR & TIM_DCR_DBA_Msk) >>
+                                         TIM_DCR_DBA_Pos);
+    }
+    static uint8_t burst_length() {
+        return static_cast<uint8_t>(((regs().DCR & TIM_DCR_DBL_Msk) >>
+                                     TIM_DCR_DBL_Pos) + 1u);
+    }
+
+    /// The ONE address a burst channel is pointed at: every access to it
+    /// lands on `base + index` and the index is the controller's own
+    /// (21.4.19). Null where this timer has no burst engine.
+    static volatile void* dmar_address() {
+        return has_dma_burst ? static_cast<volatile void*>(&regs().DMAR) : nullptr;
+    }
+
+    /// The burst engine off: DBL and DBA back to zero, which is CR1 with
+    /// a length of one and is also the reset value.
+    static void dma_burst_off() { regs().DCR = 0; }
 
     static void interrupts(uint32_t mask, bool on) {
         TIM_TypeDef& t = regs();

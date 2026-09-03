@@ -386,8 +386,41 @@ gets its dated home in `docs/design/` when taken.
   informational console line in letter k (recorded, unexplained, no
   verdict on it); and PA8 INTERMITTENTLY FAILS ITS OWN PULL-UP (tim and
   exti letter a's precondition 2 of 3, an SWD pull-up read low 1 of 3 at
-  10 ms) - the desk, not the code; the user is to look at D7/PA8. What
-  remains needs a peer or wires (the buses against a SAM at
+  10 ms) - the desk, not the code; the user is to look at D7/PA8. Campaign 10 THE TAILS, FIRST PASS,
+  DONE 2026-09-03 night (Opus, re-verified by Fable's hand: analog z
+  118/118 cold, dma z 64/64 cold, rtc z 77/77 x3 incl. cold with the
+  once-flaky letter c now on a MEDIAN estimator - an unfiltered capture
+  of an internal clock line errs in BOTH directions, over-capturing by
+  up to 754 ticks below the filtered median; the gate 13/16 with exactly
+  the three grown suites as movers and test_stm32_tim BYTE-IDENTICAL
+  although tim.hpp gained the burst engine; committed). Closed: the DAC
+  wave generators (the triangle turns AT the top, period 2 x amplitude,
+  64 ADC counts for 63 codes; the noise mask 15 and 489 codes at MAMP 3
+  and 8), sample-and-hold (WITH LSI STOPPED IT DEGRADES TO PLAIN BUFFERED
+  IN SILENCE - no bit says so; dac.hpp's comment corrected), the user
+  offset calibration (CAL_FLAG crosses at OTRIM 14 where the factory trim
+  is 7), the DAC as a comparator threshold on silicon, the window's
+  INSIDE state at last, both propagation delays (high-speed 687..1062 ns,
+  the medium-speed gap 406..484 ns against table 68's 270), COMP2/COMP3
+  on their own pads, COMP1_OUT on PA6, three more blanking sources; the
+  DMAMUX SYNCHRONIZATION block (NBREQ is the count, SPOL a real
+  selector: 18/20/39 words for rising/falling/both at NBREQ 4 against 64
+  unsynchronized) and the TIM DMA BURST engine (tim.hpp dma_burst with
+  TimBurstBase as NAMED word offsets from CR1 - the map has HOLES: ARR,
+  CCR1, CCR2 is a burst of FOUR because offset 12 is a repetition
+  counter TIM2 has not got). DECLINED on measurement: the comparator's
+  offset and hysteresis - a released pad on this board holds at ~1.22 V,
+  a third of the supply, a sawtooth kept up by the conversions that read
+  it, and the up/down band reads 88..93 mV with HYST clear where table 68
+  prices the largest hysteresis at 30 - one wire from PA4 to PA1 settles
+  it. NOT CLOSED and still on the doc lists: the ADC tail (other inputs,
+  WAIT/AUTOFF, discontinuous, TOVS, the async clock, seven triggers), the
+  DAC underrun and its eight triggers, DMA2's channels / p2p / sleep,
+  RTC_REFIN, tamper, SHIFTR and the timestamp, LPTIM2 on silicon, the
+  USART/LPUART and TIM unverified lists; and uart_stress.py's race on the
+  dma suite's letter u tally (the tool gained two principled fixes, the
+  3 Mbaud sink leg still loses the tally - three unproven repairs tried
+  and REVERTED, recorded). What remains needs a peer or wires (the buses against a SAM at
   3.3 V, FDCAN, USB, UCPD, the option-byte bench verb).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR

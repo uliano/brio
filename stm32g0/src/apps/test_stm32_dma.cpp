@@ -59,6 +59,12 @@
 //   i  the timer round trip: a duty table played into a PWM and read off
 //      the pad, and a capture stream drained by a ping-pong engine
 //   j  BlockRelay inside a REAL KERNEL over the ping-pong engine
+//   k  the SYNCHRONIZATION block: a channel's requests held back until
+//      an edge on TIM14_OC, NBREQ of them let through per edge, both
+//      single polarities and BOTH, and SOFx with its interrupt
+//   l  the timer's DMA BURST engine: four registers walked off ONE
+//      update request through TIMx_DMAR, with a control that changes
+//      one field of DCR and nothing else
 //   u  (outside z) tools/uart_stress.py: byte-exact streaming both ways
 //      through the engines, and the VCP's own ceiling
 //
@@ -1664,6 +1670,359 @@ void tj_relay() {
     quiet_everything();
 }
 
+
+// ---- k: THE SYNCHRONIZATION BLOCK --------------------------------------------
+//
+// dma.md has carried this as a driver gap since the DMA campaign:
+// `DmaMux::request_synchronized()` writes the whole CxCR word with
+// ES0548 2.5.4's invariant built in, the family fixture instantiates it,
+// and no letter had ever driven a synchronized channel or seen a SOFx
+// rise. What it wanted was a stimulus, and the stimulus was already on
+// this board: table 57's synchronization input 22 is TIM14_OC, the same
+// signal table 56 offers the request GENERATOR as trigger input 22 and
+// the same signal letter f already produces with no pad at all.
+//
+// So the arrangement is: TIM3's update event is the REQUEST, arriving
+// twenty thousand times a second, and TIM14's OC1REF is the SYNC, once
+// a millisecond. A synchronized channel serves NBREQ of the first for
+// every edge of the second, and the count of words it moved in a known
+// window is the measurement. The control is the same channel with the
+// synchronization off, which saturates.
+
+/// Table 57: TIM14_OC is synchronization input 22, exactly as table 56
+/// makes it trigger input 22. One signal, two tables, and the driver
+/// takes the number because 11.6.1's field is a number.
+constexpr uint8_t sync_tim14_oc = 22;
+
+volatile uint32_t dmamux_overrun_calls = 0;
+/// The shared handler must NOT sweep SOFx while the letter is trying to
+/// read it - and the letter cannot mask the line, because the console's
+/// own engines are on it. So the sweep is gated by the letter instead.
+volatile bool dmamux_service = false;
+
+/// TIM14 producing OC1REF at `hz`, with no pin claimed - letter f's own
+/// stimulus, hoisted so two letters share it.
+void sync_source_start(uint32_t hz) {
+    T14::init();
+    const uint32_t div = SysClock::hz / (64u * hz);
+    (void)T14::configure({.prescaler = 63, .period = div - 1u});
+    (void)T14::output_channel(0, {.mode = TimOutputMode::pwm1,
+                                  .compare = div / 2u});
+    T14::enable(true);
+}
+
+/// How many words a synchronized channel moves in `ms`, armed fresh.
+uint16_t sync_window(const DmaMuxSync& s, uint32_t ms) {
+    ChE::stop();
+    (void)arm_generated(64);
+    (void)DmaMux::request_synchronized(ChE::mux_channel, T3::dma_update_request(), s);
+    DmaMux::clear_overrun(0xFFFFFFFFu);
+    (void)ChE::enable(true);
+    spin_cycles(SysClock::hz / 1000u * ms);
+    const uint16_t moved = generated_so_far(64);
+    ChE::stop();
+    (void)DmaMux::release(ChE::mux_channel);
+    return moved;
+}
+
+void tk_synchronization() {
+    quiet_everything();
+    sync_source_start(1000u);          // one sync edge per millisecond
+    pace_start(20'000u);               // twenty requests per sync period
+
+    // --- the control: no synchronization at all. Twenty thousand
+    // requests a second saturate a 64-word transfer in three
+    // milliseconds, so what follows is not a slow channel.
+    ChE::stop();
+    (void)arm_generated(64);
+    (void)DmaMux::request(ChE::mux_channel, T3::dma_update_request());
+    (void)ChE::enable(true);
+    spin_cycles(SysClock::hz / 200u);   // 5 ms
+    const uint16_t free_run = generated_so_far(64);
+    ChE::stop();
+    (void)DmaMux::release(ChE::mux_channel);
+
+    constexpr uint8_t batch = 4;
+    const uint16_t rising = sync_window(
+        {.input = sync_tim14_oc, .edge = DmaMuxEdge::rising, .requests = batch}, 5);
+    const uint16_t falling = sync_window(
+        {.input = sync_tim14_oc, .edge = DmaMuxEdge::falling, .requests = batch}, 5);
+    const uint16_t both = sync_window(
+        {.input = sync_tim14_oc, .edge = DmaMuxEdge::both, .requests = batch}, 5);
+    const uint16_t one_each = sync_window(
+        {.input = sync_tim14_oc, .edge = DmaMuxEdge::rising, .requests = 1}, 5);
+
+    print(serial, "  in a five-millisecond window at 20 kHz of requests and "
+          "1 kHz of sync: unsynchronized ", free_run, " words, then NBREQ ",
+          batch, " on the rising edge ", rising, ", on the falling edge ",
+          falling, ", on BOTH ", both, ", and NBREQ 1 rising ", one_each, crlf);
+    bench.verdict("THE SYNCHRONIZATION BLOCK HOLDS A CHANNEL'S REQUESTS BACK "
+                  "AND LETS EXACTLY NBREQ OF THEM THROUGH PER EDGE, which is "
+                  "what dma.md has been carrying as built-but-never-run: five "
+                  "sync edges times four requests is twenty words where the "
+                  "same channel unsynchronized saturates its whole transfer "
+                  "in the same window",
+                  free_run >= 60u && rising >= 16u && rising <= 24u);
+    bench.verdict("...and SPOL is a real selector, not a formality: the "
+                  "falling edge serves the same number as the rising one and "
+                  "BOTH serves twice as many, which is the only reading of "
+                  "11.6.1's three codes that a square wave can tell apart",
+                  falling >= 16u && falling <= 24u &&
+                      both >= 2u * rising - 8u && both <= 2u * rising + 8u);
+    bench.verdict("...and NBREQ is the count and not the count minus one - "
+                  "the struct's own claim, measured: one request an edge is a "
+                  "quarter of four requests an edge",
+                  one_each >= 4u && one_each <= 8u);
+
+    // --- SOFx: a sync edge arriving while the previous batch is still
+    // being served. 11.4.4 says the overrun is per multiplexer channel
+    // and 11.6.2 gives it a flag; ES0548 2.5.1 warns that clearing one
+    // channel's flag can clear another's, which is why the suite runs
+    // exactly one synchronized channel here and says so.
+    // TIM3 IS SIXTEEN BITS, so a rate this slow needs its prescaler -
+    // pace_start() divides the core clock by the period alone and 500 Hz
+    // does not fit. Configured by hand for this one leg.
+    pace_stop();
+    T3::init();
+    (void)T3::configure({.prescaler = 63, .period = 1999u});   // 500 Hz
+    T3::interrupts(T3::update_dma, true);
+    T3::enable(true);
+    // THE VECTOR IS ALREADY ARMED AND IT IS NOT THIS LETTER'S TO ARM:
+    // the DMAMUX overrun shares the third line with DMA1's channels 4..7,
+    // which is where this suite's own console engines live. Enabling it
+    // is a no-op and DISABLING it afterwards would take the console's
+    // transmitter down with it - which is exactly what the first version
+    // of this letter did, and the board went silent mid-letter.
+    // TWO LEGS, and the reason is the shared vector again: the FLAG is
+    // read with the interrupt off and the handler's sweep gated, because
+    // a handler that clears SOFx is the thing that would hide it.
+    dmamux_overrun_calls = 0;
+    dmamux_service = false;
+    ChE::stop();
+    (void)arm_generated(64);
+    DmaMux::clear_overrun(0xFFFFFFFFu);
+    (void)DmaMux::request_synchronized(
+        ChE::mux_channel, T3::dma_update_request(),
+        {.input = sync_tim14_oc, .edge = DmaMuxEdge::rising, .requests = 8});
+    (void)ChE::enable(true);
+    spin_cycles(SysClock::hz / 100u);   // 10 ms = ten sync edges, five requests
+    const bool sof = DmaMux::overrun(ChE::mux_channel);
+    DmaMux::clear_overrun(1u << ChE::mux_channel);
+    const bool sof_cleared = !DmaMux::overrun(ChE::mux_channel);
+    ChE::stop();
+    (void)DmaMux::release(ChE::mux_channel);
+
+    dmamux_service = true;
+    ChE::stop();
+    (void)arm_generated(64);
+    DmaMux::clear_overrun(0xFFFFFFFFu);
+    (void)DmaMux::request_synchronized(
+        ChE::mux_channel, T3::dma_update_request(),
+        {.input = sync_tim14_oc, .edge = DmaMuxEdge::rising, .requests = 8,
+         .generate_event = false, .overrun_interrupt = true});
+    (void)ChE::enable(true);
+    spin_cycles(SysClock::hz / 100u);
+    const uint32_t sof_irqs = dmamux_overrun_calls;
+    ChE::stop();
+    (void)DmaMux::release(ChE::mux_channel);
+    dmamux_service = false;
+    DmaMux::clear_overrun(0xFFFFFFFFu);
+    print(serial, "  with eight requests asked for per edge and only about "
+          "half a request arriving between edges: SOF ", sof ? "set" : "clear",
+          " with the interrupt off, ", sof_irqs, " overrun interrupts on the "
+          "shared line with SOIE set, and after the clear ",
+          sof_cleared ? "clear" : "still set", crlf);
+    bench.verdict("A SYNCHRONIZATION OVERRUN IS REAL AND REPORTED: a sync "
+                  "edge that arrives while the previous edge's batch is still "
+                  "unserved sets SOFx, which CFR clears (11.6.2, 11.6.3)",
+                  sof && sof_cleared);
+    bench.verdict("...and SOIE puts it on the NVIC - on the third line, the "
+                  "crowded one it shares with DMA1's channels 4 to 7 and "
+                  "every DMA2 channel (table 61), which is why an application "
+                  "binding that vector is a dispatcher",
+                  sof_irqs > 0u);
+
+    // --- the request GENERATOR's other two polarities, which dma.md
+    // lists beside the synchronization block for the same reason: only
+    // the rising edge was ever staged.
+    pace_stop();
+    uint16_t gen_moved[3] = {0, 0, 0};
+    const DmaMuxEdge edges[3] = {DmaMuxEdge::rising, DmaMuxEdge::falling,
+                                 DmaMuxEdge::both};
+    for (uint8_t i = 0; i < 3u; ++i) {
+        ChE::stop();
+        (void)arm_generated(64);
+        (void)DmaMux::request(ChE::mux_channel, Gen0::request_id);
+        Gen0::clear_overrun();
+        (void)Gen0::configure(sync_tim14_oc, edges[i], 1);
+        Gen0::enable(true);
+        (void)ChE::enable(true);
+        spin_cycles(SysClock::hz / 100u);   // 10 ms = ten TIM14 periods
+        gen_moved[i] = generated_so_far(64);
+        Gen0::release();
+        ChE::stop();
+        (void)DmaMux::release(ChE::mux_channel);
+    }
+    print(serial, "  the request generator over ten TIM14 periods: rising ",
+          gen_moved[0], " words, falling ", gen_moved[1], ", both ",
+          gen_moved[2], crlf);
+    bench.verdict("THE GENERATOR'S THREE POLARITIES ARE ALL REAL, the two "
+                  "dma.md had never staged included: a square wave gives the "
+                  "same count on either single edge and twice as many on "
+                  "both",
+                  gen_moved[0] >= 8u && gen_moved[0] <= 12u &&
+                      gen_moved[1] >= 8u && gen_moved[1] <= 12u &&
+                      gen_moved[2] >= 2u * gen_moved[0] - 4u &&
+                      gen_moved[2] <= 2u * gen_moved[0] + 4u);
+
+    T14::release();
+    quiet_everything();
+}
+
+
+// ---- l: THE TIMER'S DMA BURST ENGINE -----------------------------------------
+//
+// tim.md's own first gap line: "the DMA BURST engine (DCR/DMAR, the one
+// that walks several registers off one request)". The plain requests
+// this suite already drives move ONE datum into ONE register; the burst
+// engine turns each request into a walk of consecutive registers,
+// reached through the single address TIMx_DMAR, so a DMA channel whose
+// peripheral address never moves rewrites a whole waveform per period.
+//
+// THE MAP HAS HOLES AND THE WALK DOES NOT SKIP THEM, which is the thing
+// to know before writing a table: DBA is a WORD OFFSET from TIMx_CR1
+// (21.4.20), so "ARR then CCR1 then CCR2" is not a burst of three but a
+// burst of FOUR - offset 12 between ARR and CCR1 is the repetition
+// counter, which TIM2 does not implement. The table below carries a
+// zero there and says so.
+//
+// THE WITNESS IS LD4's OWN PAD, and the control is what makes it a
+// measurement. Four rows, each with CCR1 at exactly half its own ARR:
+// if all four words land every period the duty is 500 per mille at every
+// row and therefore over the whole lap. The control plays only the ARR
+// column - one word per request, the same table's periods, CCR1 left
+// where it was - and then the time-weighted duty is the sum of a fixed
+// CCR1 over the sum of the ARRs, which is a different number by a
+// factor of two and a half. One bit of DCR is all that changes between
+// the two legs.
+
+/// Four rows of four words: ARR, the repetition counter TIM2 has not
+/// got, CCR1 and CCR2. The periods are 1000, 2000, 3000 and 4000 counts
+/// of a 16 MHz timer clock, and each row's CCR1 is half its own ARR.
+uint32_t burst_rows[16] = {
+     999u, 0u,  500u,  250u,
+    1999u, 0u, 1000u,  500u,
+    2999u, 0u, 1500u,  750u,
+    3999u, 0u, 2000u, 1000u,
+};
+/// The same four periods, alone: the control's table.
+uint32_t burst_periods[4] = {999u, 1999u, 2999u, 3999u};
+
+void tl_timer_burst() {
+    quiet_everything();
+    T2::init();
+    LedOut::claim();
+    // ARPE and OC1PE both on: a value written mid-period is taken at the
+    // next update, so the waveform never shows a torn row.
+    (void)T2::configure({.prescaler = 3, .period = 3999u,
+                         .auto_reload_preload = true});
+    (void)T2::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 2000,
+                                 .preload = true, .enable = true});
+    T2::interrupts(T2::update_dma, true);
+    T2::enable(true);
+
+    print(serial, "  TIM2 has the burst engine (", T2::has_dma_burst,
+          ") and DMAR sits at one address the channel never moves off; "
+          "TIM14 has neither (", T14::has_dma_burst, ")", crlf);
+    bench.verdict("the reserve's own table says which timers carry the burst "
+                  "engine, and the driver refuses to point one at a timer "
+                  "that has not got it",
+                  T2::has_dma_burst && !T14::has_dma_burst &&
+                      !T14::dma_burst(TimBurstBase::arr, 4) &&
+                      T14::dmar_address() == nullptr);
+    bench.verdict("...and DBL is written as a LENGTH and read back as one, "
+                  "which is the off-by-one this driver refuses to make the "
+                  "caller carry",
+                  T2::dma_burst(TimBurstBase::arr, 4) &&
+                      T2::burst_length() == 4u &&
+                      T2::burst_base() == TimBurstBase::arr &&
+                      !T2::dma_burst(TimBurstBase::arr, 0) &&
+                      !T2::dma_burst(TimBurstBase::arr, 19));
+
+    // --- the burst itself: four words a period, played in a circle.
+    (void)T2::dma_burst(TimBurstBase::arr, 4);
+    const bool armed = ChA::load(DmaTransfer{
+        .peripheral = T2::dmar_address(),
+        .memory = &burst_rows[0],
+        .count = 16,
+        .config = {.direction = DmaDirection::memory_to_peripheral,
+                   .circular = true,
+                   .peripheral_increment = false,
+                   .memory_increment = true,
+                   .peripheral_width = DmaWidth::word,
+                   .memory_width = DmaWidth::word}});
+    (void)DmaMux::request(ChA::mux_channel, T2::dma_update_request());
+    (void)ChA::enable(true);
+    spin_cycles(SysClock::hz / 50u);        // 20 ms: thirty-odd laps
+    const uint16_t burst_duty = sample_permille(PadLed::pin_number, 60000u);
+    const uint32_t arr_now = T2::period();
+    const uint32_t ccr1_now = T2::compare(0);
+    const uint32_t ccr2_now = T2::compare(1);
+    ChA::stop();
+    (void)DmaMux::release(ChA::mux_channel);
+    print(serial, "  four words a period through DMAR: LD4 reads ", burst_duty,
+          " per mille, and the three registers stopped coherent at ARR ",
+          arr_now, " CCR1 ", ccr1_now, " CCR2 ", ccr2_now, crlf);
+
+    // --- the control: ONE word a period, the ARR column alone.
+    (void)T2::dma_burst(TimBurstBase::arr, 1);
+    (void)T2::set_compare(0, 500);
+    const bool armed2 = ChA::load(DmaTransfer{
+        .peripheral = T2::dmar_address(),
+        .memory = &burst_periods[0],
+        .count = 4,
+        .config = {.direction = DmaDirection::memory_to_peripheral,
+                   .circular = true,
+                   .peripheral_increment = false,
+                   .memory_increment = true,
+                   .peripheral_width = DmaWidth::word,
+                   .memory_width = DmaWidth::word}});
+    (void)DmaMux::request(ChA::mux_channel, T2::dma_update_request());
+    (void)ChA::enable(true);
+    spin_cycles(SysClock::hz / 50u);
+    const uint16_t control_duty = sample_permille(PadLed::pin_number, 60000u);
+    ChA::stop();
+    (void)DmaMux::release(ChA::mux_channel);
+    T2::dma_burst_off();
+    print(serial, "  the control - the same four periods with CCR1 left at "
+          "500 - reads ", control_duty, " per mille, where the time-weighted "
+          "prediction is 4 x 500 / 10000 = 200", crlf);
+
+    bench.verdict("THE BURST ENGINE REWRITES A WHOLE WAVEFORM OFF ONE "
+                  "REQUEST, which is tim.md's own first gap line: with CCR1 "
+                  "at half of its own ARR in every row the pad reads 500 per "
+                  "mille whatever the period is doing, where the SAME periods "
+                  "with CCR1 left alone read 200 - and the only difference "
+                  "between the two legs is DCR's length field",
+                  armed && armed2 && burst_duty > 470u && burst_duty < 530u &&
+                      control_duty > 170u && control_duty < 230u);
+    bench.verdict("...and the three registers a burst walked are COHERENT "
+                  "when it stops: CCR1 is exactly half the ARR beside it and "
+                  "CCR2 exactly a quarter, which they could not be if the "
+                  "words had landed anywhere but in the order 21.4.19 says",
+                  ccr1_now == (arr_now + 1u) / 2u &&
+                      ccr2_now == (arr_now + 1u) / 4u);
+    print(serial, "  and the map's HOLE is why the table is four words wide "
+          "and not three: DBA is a word offset from TIMx_CR1, so the walk "
+          "from ARR reaches CCR1 only through offset 12 - the repetition "
+          "counter, which TIM2 has not got. The row carries a zero there "
+          "and the write goes nowhere", crlf);
+
+    LedOut::release();
+    T2::release();
+    quiet_everything();
+}
+
 // ---- u: the host peer, and the VCP's ceiling (OUTSIDE z) -----------------------
 //
 // tools/uart_stress.py, unchanged from the samc campaign: the board
@@ -1869,6 +2228,15 @@ extern "C" void DMA1_Channel2_3_IRQHandler() {
 extern "C" void DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQHandler() {
     (void)Serial::dma_isr();
 
+    // The DMAMUX's own overrun shares this line (table 61). Letter k is
+    // the only thing here that arms it, and it clears the flag itself -
+    // this body only counts, because ES0548 2.5.1 makes a CFR write from
+    // a handler that does not know which channels are live a hazard.
+    if (dmamux_service && brio::DmaMux::overruns() != 0u) {
+        dmamux_overrun_calls = dmamux_overrun_calls + 1u;
+        brio::DmaMux::clear_overrun(brio::DmaMux::overruns());
+    }
+
     if (pong_is_capture) {
         const uint8_t f = PongCap::service();
         if ((f & PongCap::flag_error) != 0u) {
@@ -1938,6 +2306,10 @@ int main() {
     bench.letter('i', "the timer round trip: a table played, a capture streamed",
                  ti_timer_round_trip);
     bench.letter('j', "BlockRelay inside a real kernel", tj_relay);
+    bench.letter('k', "the synchronization block: NBREQ per edge, both "
+                 "polarities, SOFx and its interrupt", tk_synchronization);
+    bench.letter('l', "the timer's DMA burst engine: four registers off one "
+                 "update, through DMAR", tl_timer_burst);
     bench.letter('u', "the host peer, and the VCP's ceiling", tu_stress, false);
 
     if (serial_ok) {

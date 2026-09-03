@@ -430,12 +430,21 @@ public:
     /**
      * The three times of sample-and-hold mode, in cycles of dac_hold_ck -
      * which is LSI, selected in the RCC (table 85) and NOT this driver's
-     * to turn on: a caller that asks for a sample-and-hold mode with LSI
-     * stopped gets a channel that never samples.
+     * to turn on.
+     *
+     * AND WITH LSI STOPPED NOTHING SAYS SO. An earlier version of this
+     * comment claimed such a caller "gets a channel that never samples";
+     * measured (test_stm32_analog letter o, with LSIRDY read clear) it
+     * gets the opposite - the pad carries the value to within a count,
+     * exactly as the plain buffered mode does, the times land, and BWST
+     * never stands. So the mode degrades to plain buffered IN SILENCE
+     * and there is no bit an application can read to tell the two apart.
+     * Whoever selects a sample-and-hold mode owns the LSI.
      *
      * Sample and hold are 10-bit fields, refresh is 8. The write crosses
-     * into the low-power domain, so `busy(ch)` stands until it lands
-     * (16.7.14's BWSTx).
+     * into the low-power domain, so `busy(ch)` can stand until it lands
+     * (16.7.14's BWSTx) - though on this silicon it was never observed
+     * to, at either state of the clock.
      */
     static bool sample_hold_times(uint8_t ch, uint16_t sample, uint16_t hold,
                                   uint8_t refresh) {

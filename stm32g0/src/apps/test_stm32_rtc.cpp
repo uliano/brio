@@ -185,24 +185,37 @@ std::optional<uint32_t> meter_average(uint16_t n, uint32_t guard_ms) {
 /// A capture channel polled by a program that also serves a console
 /// MISSES EDGES: the capture flag stands, the next capture overwrites
 /// CCR before the loop reads it, and what comes back is the distance
-/// between edges that are not neighbours. Those errors are ONE-SIDED -
-/// a missed edge only ever makes an interval LONGER - so a plain mean
-/// is dragged upward by a handful of samples and is worth nothing.
-/// What this suite quotes is a TRIMMED MEAN: the average of the samples
-/// inside a narrow band above the shortest one, with the count of them
-/// printed beside it so a reader can see how much was thrown away.
+/// between edges that are not neighbours. Those errors LENGTHEN an
+/// interval.
+///
+/// AND THE OTHER TAIL IS REAL TOO, which is what cost this suite a flaky
+/// verdict for a whole campaign: an UNFILTERED capture of one of these
+/// internal clock lines also OVER-captures, and an extra edge SHORTENS
+/// an interval. Measured on LSI, unfiltered, in one z run: sixty-three
+/// intervals between 1936 and 1967 timer ticks and one of 1822. So the
+/// error is TWO-SIDED, the shortest sample is NOT the period seen from
+/// below, and neither the minimum nor the mean is an estimator of it.
+///
+/// What this suite quotes is therefore anchored on the MEDIAN - the one
+/// statistic both tails have to outnumber before they can move it - with
+/// a trimmed mean of the samples inside a narrow band around it, and the
+/// count of them printed beside it so a reader can see how much was
+/// thrown away.
 struct MeterSpread {
-    uint32_t lo = 0;
-    uint32_t hi = 0;
+    uint32_t lo = 0;        ///< the shortest sample, outliers included
+    uint32_t hi = 0;        ///< the longest sample, outliers included
+    uint32_t median = 0;    ///< the middle sample: immune to both tails
     uint32_t mean = 0;      ///< over every sample, outliers included
     uint32_t robust = 0;    ///< over the samples inside the clean band
+    uint32_t kept_lo = 0;   ///< the shortest sample INSIDE the band
+    uint32_t kept_hi = 0;   ///< the longest sample INSIDE the band
     uint16_t good = 0;      ///< how many those were
     uint16_t total = 0;
 };
 
 /// `n` intervals, kept so the quality is a COUNT and not a guess: the
-/// shortest, the widest, the mean, and how many landed within 1.5 % of
-/// the shortest.
+/// shortest, the widest, the median, the mean, and how many landed
+/// within about 3 % of the median on either side.
 std::optional<MeterSpread> meter_quality(uint16_t n, uint32_t guard_ms) {
     static uint32_t samples[64];
     if (n > 64u) {
@@ -237,15 +250,44 @@ std::optional<MeterSpread> meter_quality(uint16_t n, uint32_t guard_ms) {
         sum += samples[i];
     }
     s.mean = sum / n;
-    const uint32_t bound = s.lo + s.lo / 16u;   // within 6 %
+
+    // Sixty-four words, insertion-sorted: the median is the anchor and
+    // nothing here is fast enough to care about the cost.
+    for (uint16_t i = 1; i < n; ++i) {
+        const uint32_t key = samples[i];
+        uint16_t j = i;
+        while (j != 0u && samples[j - 1u] > key) {
+            samples[j] = samples[j - 1u];
+            --j;
+        }
+        samples[j] = key;
+    }
+    s.median = samples[n / 2u];
+
+    // A SYMMETRIC band around the median, because both tails exist: a
+    // missed edge lands above it and an over-capture below.
+    const uint32_t slack = s.median / 32u;      // about 3 % either way
+    const uint32_t low = s.median > slack ? s.median - slack : 0u;
+    const uint32_t high = s.median + slack;
     uint32_t good_sum = 0;
+    s.kept_lo = 0xFFFFFFFFu;
     for (uint16_t i = 0; i < n; ++i) {
-        if (samples[i] <= bound) {
+        if (samples[i] >= low && samples[i] <= high) {
             good_sum += samples[i];
+            if (samples[i] < s.kept_lo) {
+                s.kept_lo = samples[i];
+            }
+            if (samples[i] > s.kept_hi) {
+                s.kept_hi = samples[i];
+            }
             ++s.good;
         }
     }
-    s.robust = s.good != 0u ? good_sum / s.good : s.mean;
+    if (s.good == 0u) {
+        s.kept_lo = s.lo;
+        s.kept_hi = s.hi;
+    }
+    s.robust = s.good != 0u ? good_sum / s.good : s.median;
     return s;
 }
 
@@ -503,7 +545,7 @@ void tb_lse() {
                       sp->good * 10u >= sp->total * 9u);
         bench.verdict("the crystal's period itself does not wander: the "
                       "kept intervals sit inside a handful of core cycles",
-                      sp->good == 0u || (sp->robust - sp->lo) < 32u);
+                      sp->good != 0u && (sp->kept_hi - sp->kept_lo) < 32u);
     } else {
         bench.verdict("LSE's edges reach TIM16", false);
     }
@@ -552,14 +594,16 @@ void tc_lsi_and_prescalers() {
     }
 
     if (bare.has_value()) {
-        print(serial, "  LSI unfiltered: ", meter_hz(bare->robust, 0),
-              " Hz, intervals ", bare->lo, "..", bare->hi, " timer ticks, ",
+        print(serial, "  LSI unfiltered: ", meter_hz(bare->median, 0),
+              " Hz, intervals ", bare->lo, "..", bare->hi, " timer ticks, "
+              "median ", bare->median, ", ",
               bare->good, " of ", bare->total, " inside the band", crlf);
     }
     if (filtered.has_value()) {
-        lsi_hz = meter_hz(filtered->robust, 0);
+        lsi_hz = meter_hz(filtered->median, 0);
         print(serial, "  LSI filtered  : ", lsi_hz, " Hz, intervals ",
-              filtered->lo, "..", filtered->hi, " ticks, ", filtered->good,
+              filtered->lo, "..", filtered->hi, " ticks, median ",
+              filtered->median, ", ", filtered->good,
               " of ", filtered->total,
               " inside the band (DS13560 table 46 bounds LSI 29500..34000)",
               crlf);
@@ -572,28 +616,53 @@ void tc_lsi_and_prescalers() {
     if (bare.has_value() && filtered.has_value()) {
         // TWO READINGS OF ONE OSCILLATOR. What the input filter changes
         // is not the number - it must not, and this is the verdict that
-        // says so - but the robustness: the excursions are what the
-        // polling loop's blind windows cost, and they are one-sided.
-        print(serial, "  filter on and off agree on the SHORTEST interval "
-                      "to ", ppm_off(bare->lo, filtered->lo),
-              " ppm; the widest excursion was ", bare->hi,
-              " ticks unfiltered against ", filtered->hi, " filtered, and ",
+        // says so - but the robustness.
+        print(serial, "  filter on and off agree on the MEDIAN interval to ",
+              ppm_off(bare->median, filtered->median),
+              " ppm; unfiltered the samples ran ", bare->lo, "..", bare->hi,
+              " against ", filtered->lo, "..", filtered->hi, " filtered, and ",
               bare->good, " against ", filtered->good,
-              " of 64 samples stayed inside the band", crlf);
-        // THE COMPARISON IS MADE ON THE MINIMA, not on the means. A
-        // missed edge can only LENGTHEN an interval, so the shortest one
-        // is the period seen from below and is the same number whatever
-        // the loop was doing; a trimmed mean still moves when too few
-        // samples survive the trim, and it moved enough to fail this
-        // verdict once on a cold run before the minima were used.
+              " of 64 stayed inside their band", crlf);
+        // THE COMPARISON IS MADE ON THE MEDIANS, and the two estimators
+        // tried before it are why.
+        //
+        // A MEAN is dragged up by the missed edges a polling loop that
+        // also serves a console cannot avoid: the capture flag stands,
+        // the next capture overwrites CCR, and the interval that comes
+        // back spans two periods. That failed on a cold run.
+        //
+        // A MINIMUM was the repair, on the argument that a missed edge
+        // can only LENGTHEN an interval so the shortest sample is the
+        // period seen from below. THAT ARGUMENT IS FALSE HERE, and this
+        // letter is where the silicon says so: the BARE leg over-captures
+        // as well, and an extra edge SHORTENS an interval. Caught in the
+        // act inside z, unfiltered - sixty-three intervals of 1936..1967
+        // ticks and one of 1822, i.e. 70408 ppm below the filtered
+        // reading, which failed this verdict about two runs in three
+        // while the letter passed every time it was run alone (alone, the
+        // console is quiet and the line is sampled in a tighter loop).
+        //
+        // The median is the only one of the three that both tails have to
+        // OUTNUMBER before they can move it, and neither tail here is
+        // anywhere near half the samples.
         bench.verdict("the capture channel's own input filter does not move "
                       "the reading - the same oscillator, the same period, "
                       "to better than a per cent",
-                      ppm_off(bare->lo, filtered->lo) < 10'000u);
+                      ppm_off(bare->median, filtered->median) < 10'000u);
         bench.verdict("what it moves is the SCATTER: the filtered reading "
                       "keeps the great majority of its intervals inside a "
                       "narrow band",
                       filtered->good * 10u >= filtered->total * 9u);
+        // AND THE OVER-CAPTURE ITSELF, PRINTED AND NOT JUDGED. Whether a
+        // spurious edge lands in any given 64 samples is luck, so a
+        // verdict on it would be the flake this letter has just stopped
+        // being; what the reader gets is the number.
+        print(serial, "  the bare leg's shortest interval sits ",
+              bare->lo < filtered->median
+                  ? (filtered->median - bare->lo) : 0u,
+              " ticks below the filtered median - a couple of ticks is the "
+              "jitter of the two clocks, and anything much above it is an "
+              "OVER-capture, an edge the filter would have swallowed", crlf);
     }
 
 

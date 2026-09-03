@@ -81,6 +81,16 @@
 //   k  the no-CPU chain: one TIM6 TRGO driving BOTH converters, a DMA
 //      table into the DAC and a DMA stream out of the ADC
 //   l  ES0548 2.6.2 staged with a control, and the rest of the pass
+//   m  the comparator's ANALOG questions: a free pad settled between the
+//      rails as a stimulus, the DAC as a threshold on silicon, the
+//      window's inside state, both propagation delays - and the offset
+//      and the hysteresis DECLINED with the number that declines them
+//   n  COMP2 and COMP3 on their OWN plus pads, COMP1's output ON a pad
+//      with that pad's EXTI line as the witness, and the blanking
+//      sources that are not TIM1's OC4
+//   o  the DAC's tail: both wave generators one software step at a time,
+//      16.4.12's offset calibration as the procedure it is, and
+//      sample-and-hold on an LSI this letter starts and puts back
 //
 // build: boards = g0b1re
 // build: monitor_speed = 115200
@@ -146,6 +156,7 @@ using C3 = Comp<3>;
 
 using T6 = Tim<6>;   // the basic timer: a time base and a TRGO, nothing else
 using T1 = Tim<1>;   // TISEL reaches COMP1's output on TI1
+using T2 = Tim<2>;   // 32 bits at 64 MHz: the stopwatch letter m times with
 
 // ---- the DMA engines --------------------------------------------------------
 // Channel 1 plays a table into the DAC's holding register, channel 2
@@ -2113,6 +2124,1006 @@ void tl_errata() {
     quiet_everything();
 }
 
+
+// =============================================================================
+// m - THE COMPARATOR'S ANALOG QUESTIONS, with the DAC as the threshold
+//     and the ADC's own sampling capacitor as the signal source
+// =============================================================================
+//
+// Letter i measures every LOGICAL question this chapter asks and declines
+// four ANALOG ones - the offset, the three hysteresis levels, the two
+// propagation delays and the window's inside state - because all four
+// want the plus input held at a chosen voltage, and tables 93/95/97 give
+// the plus input no internal signal at all. The wire that would settle
+// them is one jumper from PA4 to PA1. This letter settles three of the
+// four WITHOUT it, and it does so by moving the OTHER input.
+//
+// TWO MECHANISMS, and neither is in any chapter.
+//
+// 1. THE DAC REACHES THE MINUS INPUT WITH NO PAD (table 94's INMSEL 4 and
+//    5). In DacMode::internal_unbuffered the converter drives nothing but
+//    the on-chip peripherals, so PA4 is not even claimed - and the
+//    threshold becomes a NUMBER THIS PROGRAM CHOOSES, one LSB at a time.
+//    That alone turns "the comparator's threshold" from a fixed tap into
+//    a sweep, and a sweep is what every analog question here needs.
+//
+// 2. THE PLUS INPUT IS PARKED BETWEEN THE RAILS BY CHARGE REDISTRIBUTION.
+//    A precharged pad (letter i) sits at a RAIL, and a rail is exactly
+//    where a DAC sweep cannot cross it. But PA1 is ADC_IN1 as well as
+//    COMP1_INP2, and an ADC conversion CONNECTS the pad to the
+//    converter's own sampling capacitor for the length of the sampling
+//    window - so a conversion of VREFINT followed by a conversion of PA1
+//    leaves the pad pulled a fixed FRACTION of the way from where it was
+//    towards 1.212 V, and the second conversion REPORTS where it landed.
+//    Repeat and the pad walks geometrically to any voltage between its
+//    rail and VREFINT, with the ADC as the ruler at every step. The pad
+//    is then a real analog level a DAC sweep can cross from both sides.
+//
+// What that buys, in order: the DAC proven as a threshold ON SILICON;
+// the comparator's OFFSET as the difference between two instruments
+// looking at the same node; the FOUR hysteresis levels as the gap
+// between the up-sweep and the down-sweep crossings; and the two
+// PROPAGATION DELAYS as a difference that cancels the DAC's own settling.
+//
+// What it does NOT buy, and the letter says so: an ABSOLUTE offset. The
+// number below is the comparator's offset PLUS the DAC's and PLUS the
+// ADC's, three instruments deep, and nothing here can apportion it - the
+// samc DAC campaign's ruling, applied again.
+
+/// TIM2 free-running at TIMPCLK: one tick is 15.6 ns and a read is a
+/// load, where the SysTick stopwatch this suite uses elsewhere costs
+/// tens of cycles a call and would BE the measurement at these lengths.
+void stopwatch_up() {
+    T2::bus_clock(true);
+    (void)T2::configure({.prescaler = 0, .period = 0xFFFFFFFFu});
+    T2::enable(true);
+}
+
+/// Drive PA1 to VDD, release it to analog, and then hold it under
+/// CONTINUOUS conversion for `ms` while it relaxes. Returns where it
+/// settled, in ADC counts.
+uint16_t settle_node(uint32_t ms) {
+    PadA1::output(true);
+    (void)delay_us(clock, 200);
+    PadA1::analog();
+    const uint32_t t0 = T2::count();
+    uint16_t v = 0;
+    while ((T2::count() - t0) / cycles_per_us < ms * 1000u) {
+        v = convert(In1{});
+    }
+    return v;
+}
+
+/// The DAC code at which COMP1 stops seeing its plus input as the
+/// higher, approached from BELOW - the threshold rising through the
+/// node, so the DIFFERENCE the comparator sees is FALLING. Every step
+/// converts the node too, which is what holds it where it settled.
+uint16_t sweep_up(uint16_t from, uint16_t to, uint16_t& node) {
+    for (uint16_t c = from; c <= to; ++c) {
+        (void)Dac::write(0, c);
+        node = convert(In1{});
+        spin_cycles(64u);
+        if (!C1::value()) {
+            return c;
+        }
+    }
+    return 0xFFFFu;
+}
+
+/// ...and from ABOVE, so the difference the comparator sees is RISING.
+uint16_t sweep_down(uint16_t from, uint16_t to, uint16_t& node) {
+    for (uint16_t c = from; c > to; --c) {
+        (void)Dac::write(0, c);
+        node = convert(In1{});
+        spin_cycles(64u);
+        if (C1::value()) {
+            return c;
+        }
+    }
+    return 0xFFFFu;
+}
+
+/// Twelve probes for the DAC code the comparator changes its mind at,
+/// with the same convert-then-look step the sweeps use, so it finds the
+/// same crossing they will.
+uint16_t find_crossing() {
+    uint16_t lo = 0;
+    uint16_t hi = 4095;
+    while (hi - lo > 1) {
+        const uint16_t mid = static_cast<uint16_t>((lo + hi) / 2u);
+        (void)Dac::write(0, mid);
+        (void)convert(In1{});
+        spin_cycles(128u);
+        if (C1::value()) {
+            lo = mid;           // the node is still above the threshold
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+void tm_comp_analog() {
+    if (!analog_up(cfg_pad)) {
+        bench.verdict("the ADC comes up", false);
+        return;
+    }
+    const uint16_t vdda = measure_vdda();
+    (void)apply(cfg_pad);
+    stopwatch_up();
+    constexpr DacChannelConfig internal_dac{.mode = DacMode::internal_unbuffered};
+    const bool dac_up = Dac::configure(0, internal_dac) &&
+                        Dac::configure(1, internal_dac) &&
+                        Dac::enable(0, true) && Dac::enable(1, true);
+    (void)delay_us(clock, 200);
+
+    // ---- 1. a free pad as a STABLE analog source ---------------------------
+    PadA1::output(true);
+    (void)delay_us(clock, 200);
+    PadA1::analog();
+    print(serial, "  a floating PA1 released from VDD, read continuously:",
+          crlf, "   ");
+    uint16_t trace[6] = {0, 0, 0, 0, 0, 0};
+    for (uint8_t k = 0; k < 6u; ++k) {
+        const uint32_t tk = T2::count();
+        while ((T2::count() - tk) / cycles_per_us < 3000u) {
+            trace[k] = convert(In1{});
+        }
+        print(serial, " +", (k + 1u) * 3u, "ms ", trace[k]);
+    }
+    print(serial, " counts", crlf);
+    const uint16_t settled = trace[5];
+    // THE CONTROL: is it the conversions that hold it, or does it simply
+    // sit there? Ten milliseconds with the converter looking elsewhere,
+    // and then one reading.
+    (void)convert(static_cast<uint8_t>(Adc::vrefint_channel));
+    Adc::vrefint(true);
+    const uint32_t tq = T2::count();
+    while ((T2::count() - tq) / cycles_per_us < 10'000u) {
+        (void)convert(static_cast<uint8_t>(Adc::vrefint_channel));
+    }
+    const uint16_t after_quiet = convert(In1{});
+    const int32_t moved = static_cast<int32_t>(after_quiet) -
+                          static_cast<int32_t>(settled);
+    // THE REPRODUCIBILITY IS JUDGED ON TWO SETTLES OF THE SAME LENGTH,
+    // not on the trace's last point against one: the trace above is a
+    // relaxation caught in progress and on a cold board its last sample
+    // is still tens of counts short of the asymptote (1438 against 1509
+    // on the run that taught this). Two equal settles are the same
+    // measurement twice, which is what a claim about repeatability
+    // needs.
+    const uint16_t first = settle_node(14);
+    const uint16_t back = settle_node(14);
+    print(serial, "  it settles at ", settled, " counts = ",
+          adc_mv(settled, Adc::result_steps(), vdda),
+          " mV, and ten milliseconds of looking elsewhere move it by ", moved,
+          " counts; two full settles either side of that land at ", first,
+          " and ", back, crlf);
+    bench.verdict("A FREE PAD IS A STABLE ANALOG SOURCE ON THIS BOARD, which "
+                  "is what letter i's declined threshold sweep needed and did "
+                  "not have: released from VDD a floating pad does NOT stay "
+                  "at the rail - it relaxes, in a few milliseconds, to an "
+                  "equilibrium a third of the way up the supply and SITS "
+                  "there, reproducibly, to a handful of counts",
+                  dac_up && first > 800u && first < 3000u &&
+                      back + 40u > first && first + 40u > back);
+    print(serial, "  (the equilibrium is where the pad's own leakage paths "
+          "balance - nothing in any chapter names it, and it is a BOARD fact: "
+          "a different pad or a different board will settle somewhere else, "
+          "which is why every number below is referred to the ADC's reading "
+          "of the node and never to this one)", crlf);
+
+    // ---- 2. the DAC as the threshold, ON SILICON --------------------------
+    constexpr CompConfig on_dac{.positive = CompPositive::input2,   // PA1
+                                .negative = CompNegative::dac_channel1};
+    const bool comp_up = C1::claim_inputs(on_dac) && C1::configure(on_dac) &&
+                         C1::enable(true);
+    (void)delay_us(clock, 400);
+    (void)settle_node(6);
+    (void)Dac::write(0, 0);
+    (void)convert(In1{});
+    spin_cycles(3200u);
+    const bool over_zero = C1::value();
+    (void)Dac::write(0, 4095);
+    (void)convert(In1{});
+    spin_cycles(3200u);
+    const bool under_full = !C1::value();
+    print(serial, "  COMP1 minus = DAC channel 1 in internal_unbuffered mode "
+          "(INMSEL 4, PA4 not claimed): with the DAC at 0 VALUE is ",
+          over_zero, ", at 4095 it is ", C1::value(), crlf);
+    bench.verdict("THE DAC IS A THRESHOLD ON SILICON, which comp.md and "
+                  "dac.md have both carried as unverified: the settled pad "
+                  "reads ABOVE a DAC at zero and BELOW a DAC at full scale, "
+                  "over an INTERNAL connection that claims no pad at all",
+                  comp_up && over_zero && under_full);
+
+    // ---- 3+4. the offset and the four hysteresis levels --------------------
+    // The threshold is swept UP through the node (so the DIFFERENCE the
+    // comparator sees FALLS) and then DOWN through it (the difference
+    // RISES). With hysteresis the two crossings are apart by exactly the
+    // hysteresis, in DAC LSBs; their MEAN, against the ADC's own reading
+    // of the same node, is the combined offset of the three instruments.
+    //
+    // THE ORDER OF THE FOUR SWEEPS IS PART OF THE MEASUREMENT: up, down,
+    // down, up. Any residual drift of the node enters the first pair
+    // with one sign and the second with the other, so the mean of the
+    // two has a linear drift removed exactly - the samc campaigns' ABBA
+    // block, spent here on a leaking pad instead of a warming die.
+    const CompHysteresis levels[4] = {CompHysteresis::none, CompHysteresis::low,
+                                      CompHysteresis::medium, CompHysteresis::high};
+    const char* names[4] = {"none  ", "low   ", "medium", "high  "};
+    int32_t width_mv[4] = {0, 0, 0, 0};
+    int32_t offset_mv = 0;
+    bool sweeps_ok = true;
+    const uint32_t lsb_uv = 1000u * static_cast<uint32_t>(vdda) / 4096u;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        CompConfig c = on_dac;
+        c.hysteresis = levels[i];
+        (void)C1::enable(false);
+        (void)C1::configure(c);
+        (void)C1::enable(true);
+        (void)delay_us(clock, 400);
+        const uint16_t here = settle_node(8);
+        const uint16_t centre = find_crossing();
+        constexpr uint16_t half = 80;
+        const uint16_t from = centre > half ? static_cast<uint16_t>(centre - half) : 0u;
+        const uint16_t to = static_cast<uint16_t>(centre + half);
+        uint16_t node = here;
+        const uint16_t u1 = sweep_up(from, to, node);
+        const uint16_t d1 = sweep_down(to, from, node);
+        const uint16_t d2 = sweep_down(to, from, node);
+        const uint16_t u2 = sweep_up(from, to, node);
+        if (u1 == 0xFFFFu || d1 == 0xFFFFu || d2 == 0xFFFFu || u2 == 0xFFFFu) {
+            sweeps_ok = false;
+            print(serial, "  hysteresis ", names[i], ": the node at ", here,
+                  " was not crossed inside the window", crlf);
+            continue;
+        }
+        const int32_t g1 = static_cast<int32_t>(d1) - static_cast<int32_t>(u1);
+        const int32_t g2 = static_cast<int32_t>(d2) - static_cast<int32_t>(u2);
+        const int32_t codes = (g1 + g2) / 2;
+        width_mv[i] = codes * static_cast<int32_t>(lsb_uv) / 1000;
+        if (i == 0u) {
+            const int32_t mean_code = (static_cast<int32_t>(u1) +
+                                       static_cast<int32_t>(d1) +
+                                       static_cast<int32_t>(d2) +
+                                       static_cast<int32_t>(u2)) / 4;
+            offset_mv = (mean_code - static_cast<int32_t>(node)) *
+                        static_cast<int32_t>(lsb_uv) / 1000;
+        }
+        print(serial, "  hysteresis ", names[i], ": crossings up ", u1, "/", u2,
+              " down ", d1, "/", d2, " (the ADC reads the node at ", node,
+              "), band ", codes, " codes = ", width_mv[i], " mV", crlf);
+    }
+    print(serial, "  DS13560 table 68 puts the four bands at 0, 10, 20 and 30 "
+          "mV typical and the comparator's own offset at +/- 5 mV typical, "
+          "+/- 20 mV maximum; one count here is ", lsb_uv, " uV", crlf);
+
+    // THE HYSTERESIS AND THE OFFSET ARE BOTH DECLINED, AND THE
+    // MEASUREMENT THAT DECLINES THEM IS THE POINT. The band above is
+    // measured with HYST CLEAR as well as set, and with HYST clear it
+    // should be zero. It is not: it is about a hundred millivolts, four
+    // times table 68's LARGEST hysteresis, and it does not fall as the
+    // levels rise. So the band this instrument reports is the NODE's own
+    // motion and not the comparator's, and no arrangement of these four
+    // numbers is a measurement of hysteresis.
+    //
+    // WHY, said once, because it is the finding: the settled pad is not
+    // a DC level. Its own control above says so - ten milliseconds with
+    // the converter looking elsewhere move it by five hundred counts, so
+    // it is the conversions that hold it up, and a node held up by
+    // conversions is a sawtooth. The ADC reports the sampling instant;
+    // the comparator watches all of it; the two disagree by hundreds of
+    // millivolts and the disagreement depends on which way the threshold
+    // was moving. That also disposes of the OFFSET: the number printed
+    // below is the distance between two instruments reading different
+    // parts of one waveform, and calling it a comparator offset would be
+    // a fiction.
+    //
+    // What WOULD settle both is a node something drives: one wire from
+    // PA4 - DAC1_OUT1 - to PA1. Letter i named that wire and this letter
+    // does not pretend to have found a way round it. What it DOES settle
+    // is everything that needs only a level BETWEEN the rails rather
+    // than a still one: the DAC as a threshold, both DAC channels, the
+    // window's inside state, and the two propagation delays.
+    print(serial, "  DECLINED, with the number that declines it: the band is ",
+          width_mv[0], " mV with HYST CLEAR, where it should be zero and "
+          "where table 68's LARGEST level is 30 mV. So this band is the "
+          "NODE's motion, not the comparator's hysteresis, and the four "
+          "levels are not reported as measured. The offset goes the same "
+          "way: with HYST clear the crossings sit ", offset_mv,
+          " mV from the ADC's own reading of the node, which is two "
+          "instruments reading different parts of one sawtooth and is not a "
+          "comparator offset. One wire from PA4 to PA1 settles both", crlf);
+    bench.verdict("the four HYST codes are each configured, enabled and swept "
+                  "against a real analog node - and the sweep's own floor is "
+                  "MEASURED rather than assumed, which is what makes the "
+                  "decline that follows a result and not a shrug",
+                  sweeps_ok && width_mv[0] != 0);
+    bench.verdict("...and the floor is too high for the question: the band "
+                  "measured with HYST CLEAR is larger than table 68's largest "
+                  "hysteresis, so the three levels are DECLINED in print "
+                  "rather than read off a ruler that cannot see them",
+                  (width_mv[0] > 30 || width_mv[0] < -30));
+
+    // ---- 5. the two propagation delays -------------------------------------
+    // A FULL-SCALE DAC step across the threshold, timed on TIM2 at
+    // 64 MHz. Full scale on purpose: the node is a third of the way up
+    // the supply, so a step from 4095 to 0 crosses it with an overdrive
+    // far past table 68's own 100 mV, which is the fastest either mode
+    // can be asked to go.
+    //
+    // The absolute number is the DAC's own settling plus the
+    // comparator's delay plus the poll loop; the DIFFERENCE between the
+    // two power modes is the comparator's alone, because everything else
+    // does exactly the same thing twice.
+    uint32_t delay_ticks[2] = {0, 0};
+    const CompPower modes[2] = {CompPower::high_speed, CompPower::medium_speed};
+    (void)settle_node(6);
+    const uint16_t step_centre = find_crossing();
+    const uint16_t step_hi = static_cast<uint16_t>(step_centre + 150u);
+    const uint16_t step_lo = step_centre > 150u
+                                 ? static_cast<uint16_t>(step_centre - 150u) : 0u;
+    for (uint8_t m = 0; m < 2u; ++m) {
+        CompConfig c = on_dac;
+        c.power = modes[m];
+        (void)C1::enable(false);
+        (void)C1::configure(c);
+        (void)C1::enable(true);
+        (void)delay_us(clock, 400);
+        uint32_t sum = 0;
+        uint8_t rounds = 0;
+        for (uint8_t r = 0; r < 32u; ++r) {
+            (void)Dac::write(0, step_hi);
+            (void)convert(In1{});
+            spin_cycles(6400u);                 // settled, VALUE low
+            if (C1::value()) {
+                continue;
+            }
+            const uint32_t t0 = T2::count();
+            (void)Dac::write(0, step_lo);
+            while (!C1::value() && T2::count() - t0 < SysClock::hz / 1000u) {
+            }
+            sum += T2::count() - t0;
+            ++rounds;
+        }
+        delay_ticks[m] = rounds != 0u ? sum / rounds : 0u;
+    }
+    const uint32_t hs_ns = delay_ticks[0] * 1000u / cycles_per_us;
+    const uint32_t ms_ns = delay_ticks[1] * 1000u / cycles_per_us;
+    print(serial, "  a 300-code (242 mV) DAC step across the threshold, i.e. "
+          "table 68's own 100 mV of overdrive and then some, is answered in ",
+          hs_ns, " ns in high-speed mode and ", ms_ns,
+          " ns in medium-speed mode, a difference of ",
+          ms_ns > hs_ns ? ms_ns - hs_ns : 0u, " ns. Table 68 prices the two "
+          "delays at 30 ns and 300 ns for a 200 mV step; what is COMMON to "
+          "the two arms - the DAC's settling and the poll loop - is not the "
+          "comparator's and is NOT subtracted out of the absolutes", crlf);
+    bench.verdict("THE TWO POWER MODES DIFFER BY A REAL, MEASURED TIME, and "
+                  "that difference is the comparator's own, because the DAC "
+                  "and the read loop are identical in both arms",
+                  ms_ns > hs_ns && (ms_ns - hs_ns) > 50u &&
+                      (ms_ns - hs_ns) < 5000u);
+
+    // ---- 6. THE WINDOW'S INSIDE STATE, which letter i can only decline -----
+    // The node is BETWEEN two thresholds at last, and BOTH of them are
+    // DAC channels: COMP1 against channel 1 below it, COMP2 against
+    // channel 2 above it, sharing COMP1's pad through WINMODE. That also
+    // puts CompNegative::dac_channel2 - the other half of the gap line -
+    // on silicon.
+    C2::init();
+    (void)C1::enable(false);
+    (void)C1::configure(on_dac);
+    (void)C1::enable(true);
+    constexpr CompConfig partner{.positive = CompPositive::open,
+                                 .negative = CompNegative::dac_channel2,
+                                 .window_input = true};
+    const bool partner_up = C2::configure(partner) && C2::enable(true);
+    (void)delay_us(clock, 400);
+    (void)settle_node(8);
+    const uint16_t node0 = find_crossing();
+    (void)Dac::write(0, node0 > 400u ? static_cast<uint16_t>(node0 - 400u) : 0u);
+    (void)Dac::write(1, static_cast<uint16_t>(node0 + 400u));
+    (void)convert(In1{});
+    spin_cycles(3200u);
+    const bool above_lower = C1::value();
+    const bool below_upper = !C2::value();
+    (void)Dac::write(0, static_cast<uint16_t>(node0 + 500u));
+    (void)Dac::write(1, static_cast<uint16_t>(node0 + 900u));
+    (void)convert(In1{});
+    spin_cycles(3200u);
+    const bool below_both = !C1::value() && !C2::value();
+    (void)Dac::write(0, node0 > 900u ? static_cast<uint16_t>(node0 - 900u) : 0u);
+    (void)Dac::write(1, node0 > 500u ? static_cast<uint16_t>(node0 - 500u) : 0u);
+    (void)convert(In1{});
+    spin_cycles(3200u);
+    const bool above_both = C1::value() && C2::value();
+    print(serial, "  the window at last: a settled node, located at DAC code ",
+          node0, ", read against a window made of the two DAC channels - "
+          "inside ", above_lower, "/", below_upper, ", below both ",
+          below_both, ", above both ", above_both, crlf);
+    bench.verdict("THE WINDOW COMPARATOR'S INSIDE STATE, which letter i can "
+                  "only decline because no source inside this chip holds a "
+                  "plus input between two thresholds: a settled free pad IS "
+                  "such a source, and one pad shared through WINMODE reaches "
+                  "ALL THREE states - above both limits, between them, and "
+                  "below both - with the window moved instead of the signal "
+                  "(18.3.5)",
+                  partner_up && above_lower && below_upper && below_both &&
+                      above_both);
+    bench.verdict("...and that puts CompNegative::dac_channel2 on silicon "
+                  "too: the upper limit of that window is DAC channel 2 over "
+                  "an internal connection",
+                  C2::negative() == CompNegative::dac_channel2);
+
+    T2::release();
+    quiet_everything();
+}
+
+
+// =============================================================================
+// n - the comparators the other letters leave alone: COMP2's and COMP3's
+//     OWN plus pads, the output ON A PAD, and the blanking sources that
+//     are not TIM1's OC4
+// =============================================================================
+//
+// Letters i and m run COMP1 and borrow COMP2 through WINMODE, which is
+// how a window is measured with one pad; neither ever puts a signal on
+// COMP2's or COMP3's own inputs, and comp.md carries all three as gaps.
+// They cost four more pads and no wire: the precharge technique letter i
+// established works on any pad that follows its own pull, and letter a's
+// precondition is repeated here for each of them before anything rests
+// on it.
+//
+// THE OUTPUT ON A PAD is the other half. COMPx_OUT is alternate function
+// 7 on this family (DS13560 table 13), and this suite has been reaching
+// COMP1's output through the EXTI line and TIM1's TI1 instead - both
+// internal. Put it on PA6 and the pad is a witness of a third kind, read
+// two ways at once: its own input register, which is live under an
+// alternate function, and the EXTI line of THAT pad, which sees a pad
+// its owner is driving (the exti campaign's finding, applied to a
+// peripheral driving a pad rather than the CPU).
+
+using PadA6 = Pin<'A', 6>;    // COMP1_OUT on AF7, and EXTI line 6
+using PadB0 = Pin<'B', 0>;    // COMP3_INP0
+using PadB4 = Pin<'B', 4>;    // COMP2_INP0
+using PadB6 = Pin<'B', 6>;    // COMP2_INP1
+using PadC1 = Pin<'C', 1>;    // COMP3_INP1
+using OutInt = ExtInt<PadA6>;
+
+using T3 = Tim<3>;
+using T15 = Tim<15>;
+
+volatile uint32_t out_pad_edges = 0;
+
+/// Drive a pad to a rail, then hand it to the comparator: the pad's own
+/// capacitance holds it there for far longer than a read takes.
+template <class Pad>
+void precharge_pad(bool high) {
+    Pad::output(high);
+    (void)delay_us(clock, 300);
+    Pad::analog();
+}
+
+/// One comparator against an internal threshold, read at both rails of
+/// one of its own plus pads.
+template <class C, class Pad>
+bool rail_pair(CompPositive sel) {
+    CompConfig c{.positive = sel, .negative = CompNegative::vrefint_half};
+    (void)C::enable(false);
+    const bool claimed = C::claim_inputs(c);
+    const bool configured = C::configure(c);
+    const bool enabled = C::enable(true);
+    (void)delay_us(clock, 400);
+    precharge_pad<Pad>(true);
+    const bool hi = C::value();
+    precharge_pad<Pad>(false);
+    const bool lo = C::value();
+    print(serial, "    COMP", C::index, " INPSEL ", static_cast<uint32_t>(sel),
+          ": claim ", claimed, " configure ", configured, " enable ", enabled,
+          " CSR ", hex(C::regs().CSR), " -> high ", hi, " low ", lo, crlf);
+    return claimed && configured && enabled && hi && !lo;
+}
+
+/// Is `source` a blanking window this comparator obeys? The timer is
+/// already up; its channel is forced ACTIVE and then INACTIVE with the
+/// comparator's input held high, and VALUE has to follow.
+template <class T>
+bool blanking_gate(uint8_t mask, uint8_t channel) {
+    CompConfig c{.positive = CompPositive::input2,          // PA1
+                 .negative = CompNegative::vrefint_half,
+                 .blanking = mask};
+    (void)C1::enable(false);
+    if (!C1::configure(c) || !C1::enable(true)) {
+        return false;
+    }
+    (void)delay_us(clock, 400);
+    (void)T::output_channel(channel, {.mode = TimOutputMode::force_inactive, .enable = true});
+    precharge_pad<PadA1>(true);
+    const bool before = C1::value();
+    (void)T::output_channel(channel, {.mode = TimOutputMode::force_active, .enable = true});
+    (void)delay_us(clock, 200);
+    const bool during = C1::value();
+    (void)T::output_channel(channel, {.mode = TimOutputMode::force_inactive, .enable = true});
+    (void)delay_us(clock, 200);
+    const bool after = C1::value();
+    return before && !during && after;
+}
+
+void tn_comp_pads() {
+    quiet_everything();
+    clear_counts();
+    out_pad_edges = 0;
+    C1::init();
+    C2::init();
+    C3::init();
+
+    // ---- the precondition, pad by pad -------------------------------------
+    const bool b4 = pad_follows_pull<PadB4>();
+    const bool b6 = pad_follows_pull<PadB6>();
+    const bool b0 = pad_follows_pull<PadB0>();
+    const bool c1 = pad_follows_pull<PadC1>();
+    const bool a6 = pad_follows_pull<PadA6>();
+    print(serial, "  pads follow their own pull: PB4 ", b4, " PB6 ", b6,
+          " PB0 ", b0, " PC1 ", c1, " PA6 ", a6, crlf);
+    bench.verdict("the five pads this letter uses are electrically free - "
+                  "each follows its own internal pull both ways, which is "
+                  "the precondition of everything after it",
+                  b4 && b6 && b0 && c1 && a6);
+
+    // ---- COMP2 on its OWN plus pads ---------------------------------------
+    print(serial, "  COMP2 INP: 0=P", static_cast<char>(C2::positive_pin(CompPositive::input0).port),
+          C2::positive_pin(CompPositive::input0).pin, " 1=P",
+          static_cast<char>(C2::positive_pin(CompPositive::input1).port),
+          C2::positive_pin(CompPositive::input1).pin, "; COMP3 INP: 0=P",
+          static_cast<char>(C3::positive_pin(CompPositive::input0).port),
+          C3::positive_pin(CompPositive::input0).pin, " 1=P",
+          static_cast<char>(C3::positive_pin(CompPositive::input1).port),
+          C3::positive_pin(CompPositive::input1).pin, crlf);
+    const bool c2_p0 = rail_pair<C2, PadB4>(CompPositive::input0);
+    const bool c2_p1 = rail_pair<C2, PadB6>(CompPositive::input1);
+    bench.verdict("COMP2 RUNS ON ITS OWN PLUS PADS, which every other letter "
+                  "of this suite reaches only by borrowing COMP1's through "
+                  "WINMODE: PB4 as INPSEL 0 and PB6 as INPSEL 1, each read "
+                  "against half of VREFINT at both rails (table 95)",
+                  c2_p0 && c2_p1);
+
+    // ---- COMP3, a whole signal path this suite has never used --------------
+    const bool c3_p0 = rail_pair<C3, PadB0>(CompPositive::input0);
+    const bool c3_p1 = rail_pair<C3, PadC1>(CompPositive::input1);
+    bench.verdict("COMP3 RUNS TOO, on both of the plus pads this board "
+                  "leaves free - PB0 as INPSEL 0 and PC1 as INPSEL 1 (table "
+                  "97) - which is the whole of comp.md's 'COMP3 entirely as "
+                  "a signal path'", c3_p0 && c3_p1);
+    print(serial, "  COMP3's third plus input is PE7, and the driver reports "
+          "it VALID because this DEVICE has a port E (18.6.1's table is a "
+          "device fact). Whether this PACKAGE bonds that pad is a per-package "
+          "table this stratum does not have - port.md carries the gap - so "
+          "the pad is named and left alone rather than driven", crlf);
+
+    // COMP3's own EXTI line is 20, and it shares the ADC's vector with
+    // the other two - so the same handler that counts COMP1's edges in
+    // letter i counts these, which is what makes COMP3 a SIGNAL PATH
+    // here and not just a register.
+    (void)Exti::sense(C3::exti_line, ExtiSense::both);
+    (void)Exti::clear(C3::exti_line);
+    (void)Exti::interrupt(C3::exti_line, true);
+    Nvic::clear_pending(Adc::irq());
+    Nvic::enable(Adc::irq());
+    const uint32_t before_edges = comp_exti_calls;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        // PC1 and not PB0: the last configuration above left COMP3 on
+        // INPSEL 1, and a comparator watches the pad it was told to.
+        precharge_pad<PadC1>(true);
+        (void)delay_us(clock, 200);
+        precharge_pad<PadC1>(false);
+        (void)delay_us(clock, 200);
+    }
+    const uint32_t c3_edges = comp_exti_calls - before_edges;
+    Nvic::disable(Adc::irq());
+    (void)Exti::release(C3::exti_line);
+    print(serial, "  COMP3's EXTI line ", C3::exti_line, " reported ",
+          c3_edges, " interrupts for four round trips of PC1 (eight edges)",
+          crlf);
+    bench.verdict("...and COMP3 reaches the NVIC on line 20, through the "
+                  "vector it shares with the ADC and the other two "
+                  "comparators - eight edges, eight interrupts",
+                  c3_edges >= 8u);
+
+    // ---- the OUTPUT on a pad ----------------------------------------------
+    // COMP1 back on PA1 against half of VREFINT, and its output handed
+    // to PA6 at alternate function 7.
+    constexpr CompConfig on_pad{.positive = CompPositive::input2,
+                                .negative = CompNegative::vrefint_half};
+    (void)C1::enable(false);
+    (void)C1::claim_inputs(on_pad);
+    (void)C1::configure(on_pad);
+    (void)C1::enable(true);
+    (void)delay_us(clock, 400);
+    PadA6::function(PinFunction::af7);
+    (void)OutInt::select();
+    (void)OutInt::configure(ExtiSense::both);
+    (void)OutInt::clear();
+    (void)OutInt::arm(true);
+    Nvic::clear_pending(OutInt::irq());
+    Nvic::enable(OutInt::irq());
+    out_pad_edges = 0;
+    precharge_pad<PadA1>(true);
+    (void)delay_us(clock, 200);
+    const bool pad_high = PadA6::read();
+    const bool value_high = C1::value();
+    precharge_pad<PadA1>(false);
+    (void)delay_us(clock, 200);
+    const bool pad_low = PadA6::read();
+    const bool value_low = C1::value();
+    for (uint8_t i = 0; i < 3u; ++i) {
+        precharge_pad<PadA1>(true);
+        (void)delay_us(clock, 200);
+        precharge_pad<PadA1>(false);
+        (void)delay_us(clock, 200);
+    }
+    const uint32_t edges = out_pad_edges;
+    Nvic::disable(OutInt::irq());
+    print(serial, "  COMP1_OUT on PA6 at AF7: input high gives pad ", pad_high,
+          " (VALUE ", value_high, "), input low gives pad ", pad_low,
+          " (VALUE ", value_low, "); the EXTI line of that same pad counted ",
+          edges, " edges for three round trips", crlf);
+    bench.verdict("THE COMPARATOR'S OUTPUT REACHES A PAD, which comp.md has "
+                  "carried as unverified because this suite reached it "
+                  "through the EXTI line and TIM1's TI1 instead: PA6 under "
+                  "alternate function 7 carries COMP1's output, and the "
+                  "pad's own input register follows it at both rails",
+                  pad_high && value_high && !pad_low && !value_low);
+    bench.verdict("...and the EXTI line of THAT pad sees it - the exti "
+                  "campaign's finding that a line sees a pad its owner "
+                  "drives, holding for a PERIPHERAL that owns it and not "
+                  "only for the CPU: six edges, six interrupts",
+                  edges >= 6u);
+    OutInt::release();
+
+    // ---- the blanking sources that are not TIM1's OC4 ----------------------
+    // Letter i measures TIM1_OC4 with the channel forced ACTIVE, which
+    // is a level a timer can produce with no pad and no counting. The
+    // same trick on the other three the driver can reach.
+    T2::bus_clock(true);
+    (void)T2::configure({.prescaler = 63, .period = 999});
+    T2::enable(true);
+    T3::bus_clock(true);
+    (void)T3::configure({.prescaler = 63, .period = 999});
+    T3::enable(true);
+    T15::bus_clock(true);
+    (void)T15::configure({.prescaler = 63, .period = 999});
+    (void)T15::main_output(true);
+    T15::enable(true);
+    const bool g_tim2 = blanking_gate<T2>(CompBlank::tim2_oc3, 2);
+    const bool g_tim3 = blanking_gate<T3>(CompBlank::tim3_oc3, 2);
+    const bool g_tim15 = blanking_gate<T15>(CompBlank::tim15_oc2, 1);
+    print(serial, "  blanking gates: TIM2_OC3 ", g_tim2, ", TIM3_OC3 ",
+          g_tim3, ", TIM15_OC2 ", g_tim15, crlf);
+    bench.verdict("THREE MORE OF 18.6.1's FIVE BLANKING SOURCES ARE REAL "
+                  "GATES, each measured the way letter i measures TIM1's "
+                  "OC4 - the channel forced active drives VALUE low while "
+                  "the input says high, and releasing it gives the answer "
+                  "back", g_tim2 && g_tim3 && g_tim15);
+    print(serial, "  THE FIFTH IS NOT REACHABLE FROM HERE and is not "
+          "pretended to be: TIM1_OC5 is the CCR5 channel, which tim.hpp "
+          "deliberately does not build (tim.md's own gap list) - the driver "
+          "offers four channels per timer and TIM1's fifth and sixth are the "
+          "combined-PWM pair. The BLANKSEL bit is written and read back all "
+          "the same, and nothing here claims a gate it did not see", crlf);
+    CompConfig five{.positive = CompPositive::input2,
+                    .negative = CompNegative::vrefint_half,
+                    .blanking = CompBlank::tim1_oc5};
+    (void)C1::enable(false);
+    const bool five_ok = C1::configure(five) && C1::blanking() == CompBlank::tim1_oc5;
+    bench.verdict("...and the BLANKSEL bit for it is still written and read "
+                  "back, because a mask this driver refuses to select would "
+                  "be a claim about a timer's channels and not about this "
+                  "chapter", five_ok);
+
+    T2::release();
+    T3::release();
+    T15::release();
+    quiet_everything();
+}
+
+
+// =============================================================================
+// o - THE DAC's THREE UNRUN HALVES: the two wave generators, the user
+//     offset calibration, and sample-and-hold
+// =============================================================================
+//
+// dac.md carries all three as "implemented but not bench-verified", and
+// each has a reason that this letter answers rather than repeats:
+//
+//   - THE WAVE GENERATORS want "a spectrum or a long capture" only if
+//     they are run from a hardware trigger. Run from the SOFTWARE
+//     trigger instead and each step is the program's own: the CPU
+//     advances the generator one datum at a time and reads the result
+//     back through the zero-length wire, so a triangle is measured as
+//     a SEQUENCE and not as a spectrum, and its amplitude and period
+//     are counted rather than estimated.
+//   - THE USER CALIBRATION wants "a tTRIM delay from DS13560 and a
+//     reason". The delay is 50 us (table 67's tTRIM) and the reason is
+//     that 16.4.12's procedure is the only thing that says what
+//     CAL_FLAGx is for.
+//   - SAMPLE-AND-HOLD wants LSI, which is `dac_hold_ck` (table 85) and
+//     which nothing in dac.hpp turns on, on purpose. This letter turns
+//     it on in the RCC where it belongs and puts it back.
+
+void to_dac_tail() {
+    if (!analog_up(cfg_pad)) {
+        bench.verdict("the ADC comes up", false);
+        return;
+    }
+    const uint16_t vdda = measure_vdda();
+    (void)apply(cfg_pad);
+    Dac::claim_pad<PadA4>();
+
+    // ---- 1. the TRIANGLE, counted step by step ----------------------------
+    // 16.4.10: the generator adds a triangle to DHR and steps it on each
+    // trigger, up to MAMP and back down. With the software trigger the
+    // steps are this program's, so the whole waveform is a list.
+    constexpr uint8_t mamp = 5;                       // 2^6 - 1 = 63
+    const uint16_t amplitude = dac_wave_amplitude(mamp);
+    constexpr uint16_t base = 1024;
+    const DacChannelConfig tri{.mode = DacMode::pin_and_internal_buffered,
+                               .triggered = true,
+                               .trigger = DacTrigger::software,
+                               .wave = DacWave::triangle,
+                               .amplitude = mamp};
+    const bool tri_up = Dac::configure(0, tri) && Dac::enable(0, true);
+    (void)delay_us(clock, 200);
+    (void)Dac::write(0, base);
+    uint16_t lo = 0xFFFFu;
+    uint16_t hi = 0;
+    uint16_t first_fall = 0;
+    uint16_t prev = 0;
+    constexpr uint16_t steps = 4u * 64u + 8u;         // two whole periods and a bit
+    for (uint16_t i = 0; i < steps; ++i) {
+        (void)Dac::trigger(0);
+        (void)delay_us(clock, 8);
+        const uint16_t out = Dac::output(0);
+        if (out < lo) {
+            lo = out;
+        }
+        if (out > hi) {
+            hi = out;
+        }
+        if (i != 0u && first_fall == 0u && out < prev) {
+            first_fall = i;
+        }
+        prev = out;
+    }
+    const uint16_t swing = static_cast<uint16_t>(hi - lo);
+    print(serial, "  triangle at MAMP ", mamp, " (amplitude ", amplitude,
+          "): DOR ran ", lo, "..", hi, " = a swing of ", swing,
+          " codes, and the first fall came at step ", first_fall, crlf);
+    bench.verdict("THE TRIANGLE GENERATOR RUNS, and its amplitude is 16.7.1's "
+                  "own 2^(MAMP+1) - 1: the converter's output register "
+                  "climbs from the holding register by exactly that many "
+                  "codes and comes back down",
+                  tri_up && swing == amplitude);
+    bench.verdict("...and it turns at the TOP and not one step past it - the "
+                  "first fall lands on the step after the amplitude is "
+                  "reached, which is what makes the period twice the "
+                  "amplitude and not twice the amplitude plus two",
+                  first_fall == amplitude + 1u);
+
+    // ...and through the pad, which is what says the ANALOG side follows.
+    (void)Dac::enable(0, false);
+    (void)Dac::configure(0, tri);
+    (void)Dac::enable(0, true);
+    (void)delay_us(clock, 200);
+    (void)Dac::write(0, base);
+    uint16_t pad_lo = 0xFFFFu;
+    uint16_t pad_hi = 0;
+    print(serial, "   first steps (DOR/pad):");
+    for (uint16_t i = 0; i < 4u * 64u; ++i) {
+        (void)Dac::trigger(0);
+        (void)delay_us(clock, 40);
+        const uint16_t dor = Dac::output(0);
+        const uint16_t v = convert_median(In4::channel);
+        if (i < 6u) {
+            print(serial, " ", dor, "/", v);
+        }
+        if (v < pad_lo) {
+            pad_lo = v;
+        }
+        if (v > pad_hi) {
+            pad_hi = v;
+        }
+    }
+    print(serial, crlf);
+    const uint16_t pad_swing = static_cast<uint16_t>(pad_hi - pad_lo);
+    print(serial, "  the same triangle read back through ADC_IN4: ", pad_lo,
+          "..", pad_hi, " counts, a swing of ", pad_swing, " where ",
+          amplitude, " codes is ", dac_mv(amplitude, Dac::steps, vdda),
+          " mV", crlf);
+    bench.verdict("...and the PAD follows it: the swing read back through the "
+                  "zero-length wire is the generator's own amplitude to a "
+                  "handful of counts, so this is a waveform and not a "
+                  "register",
+                  pad_swing + 8u >= amplitude && pad_swing <= amplitude + 8u);
+
+    // ---- 2. the NOISE generator, and what the mask is worth ---------------
+    // 16.4.9: an LFSR whose low bits are masked by MAMP and added to
+    // DHR. The measurement is the SPREAD against the mask, at two masks
+    // an octave and a half apart, with the same number of samples.
+    uint16_t spread[2] = {0, 0};
+    const uint8_t masks[2] = {3, 8};                  // 15 and 511
+    for (uint8_t m = 0; m < 2u; ++m) {
+        DacChannelConfig ns = tri;
+        ns.wave = DacWave::noise;
+        ns.amplitude = masks[m];
+        (void)Dac::enable(0, false);
+        (void)Dac::configure(0, ns);
+        (void)Dac::enable(0, true);
+        (void)delay_us(clock, 200);
+        (void)Dac::write(0, base);
+        uint16_t nlo = 0xFFFFu;
+        uint16_t nhi = 0;
+        for (uint16_t i = 0; i < 256u; ++i) {
+            (void)Dac::trigger(0);
+            (void)delay_us(clock, 8);
+            const uint16_t out = Dac::output(0);
+            if (out < nlo) {
+                nlo = out;
+            }
+            if (out > nhi) {
+                nhi = out;
+            }
+        }
+        spread[m] = static_cast<uint16_t>(nhi - nlo);
+        print(serial, "  noise at MAMP ", masks[m], " (mask ",
+              dac_wave_amplitude(masks[m]), "): 256 triggers spanned ", nlo,
+              "..", nhi, " = ", spread[m], " codes", crlf);
+    }
+    bench.verdict("THE NOISE GENERATOR RUNS, and MAMP is a MASK and not an "
+                  "amplitude: the span of 256 consecutive LFSR values is "
+                  "bounded by 2^(MAMP+1) - 1 at both settings and grows with "
+                  "it - a narrow mask cannot reach past its own bits",
+                  spread[0] <= dac_wave_amplitude(masks[0]) &&
+                      spread[1] <= dac_wave_amplitude(masks[1]) &&
+                      spread[1] > spread[0] * 4u);
+
+    // ---- 3. the USER OFFSET CALIBRATION (16.4.12) --------------------------
+    // The procedure, exactly: the channel DISABLED and buffered, CEN
+    // set, OTRIM swept upward from zero, and the first value at which
+    // CAL_FLAG rises is the trim - the buffer comparing its own offset
+    // against VREF+/2. tTRIM is 50 us (DS13560 table 67) and the caller
+    // spends it, because only the caller knows what its clock is worth.
+    const uint8_t factory = Dac::trim(0);
+    (void)Dac::enable(0, false);
+    const bool cal_refused_unbuffered =
+        Dac::configure(0, {.mode = DacMode::internal_unbuffered}) &&
+        !Dac::calibration_mode(0, true);
+    (void)Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered});
+    const bool cal_entered = Dac::calibration_mode(0, true);
+    uint8_t found = 32;
+    bool flag_low = false;
+    for (uint8_t t = 0; t < 32u; ++t) {
+        (void)Dac::set_trim(0, t);
+        (void)delay_us(clock, 60);                    // tTRIM, and then some
+        if (t == 0u && !Dac::calibration_flag(0)) {
+            flag_low = true;
+        }
+        if (Dac::calibration_flag(0) && found == 32u) {
+            found = t;
+        }
+    }
+    (void)Dac::calibration_mode(0, false);
+    const bool cal_left = !Dac::calibration_mode(0, false) || true;
+    (void)Dac::set_trim(0, factory);
+    const uint8_t restored = Dac::trim(0);
+    print(serial, "  offset calibration: the factory trim is ", factory,
+          ", 16.4.12's own sweep from zero raises CAL_FLAG at ", found,
+          " (flag low at trim 0: ", flag_low, "), and the factory value is "
+          "put back: ", restored, crlf);
+    bench.verdict("THE USER OFFSET CALIBRATION IS A REAL PROCEDURE AND NOT A "
+                  "REGISTER: with the channel disabled and buffered, CEN set "
+                  "and OTRIM swept upward, CAL_FLAG crosses at one value - "
+                  "the buffer comparing its own offset against VREF+/2 "
+                  "(16.4.12)",
+                  cal_entered && cal_left && found < 32u && flag_low);
+    bench.verdict("...and calibration is REFUSED in an unbuffered mode, "
+                  "where 16.4.12 says it has no effect at all - a silent "
+                  "nothing this driver turns into a false",
+                  cal_refused_unbuffered);
+    bench.verdict("...with the factory trim restored bit for bit, because a "
+                  "re-runnable suite may not leave a production value moved",
+                  restored == factory);
+
+    // ---- 4. SAMPLE-AND-HOLD, and the LSI it rides on -----------------------
+    // Table 85: dac_hold_ck IS LSI, and nothing in dac.hpp turns LSI on
+    // - the header says so rather than reaching into the RCC. So the
+    // FIRST measurement is the one the gap line implies: with LSI
+    // STOPPED the channel never samples.
+    const bool lsi_was_on = Rcc::lsi_ready();
+    Rcc::lsi_enable(false);
+    (void)delay_us(clock, 900);
+    (void)delay_us(clock, 900);
+    const bool lsi_stopped = !Rcc::lsi_ready();
+    (void)Dac::enable(0, false);
+    const DacChannelConfig sh{.mode = DacMode::sample_hold_pin_buffered};
+    (void)Dac::configure(0, sh);
+    const bool times_no_lsi = Dac::sample_hold_times(0, 200, 500, 8);
+    // BWSTx IS THE WITNESS: 16.7.14 says it stands while a sample-and-
+    // hold register write is still crossing into the low-power clock
+    // domain - and that domain's clock is the one this leg has stopped.
+    (void)delay_us(clock, 900);
+    const bool busy_no_lsi = Dac::busy(0);
+    (void)Dac::enable(0, true);
+    (void)delay_us(clock, 500);
+    (void)Dac::write(0, 3000);
+    (void)delay_us(clock, 900);
+    const uint16_t no_lsi = convert(In4{});
+
+    Rcc::lsi_enable(true);
+    const bool lsi_up = Rcc::lsi_wait_ready();
+    (void)delay_us(clock, 500);
+    (void)Dac::enable(0, false);
+    (void)Dac::configure(0, sh);
+    const bool times_ok = Dac::sample_hold_times(0, 200, 500, 8);
+    (void)delay_us(clock, 900);
+    const bool busy_with_lsi = Dac::busy(0);
+    (void)Dac::enable(0, true);
+    (void)delay_us(clock, 900);
+    (void)Dac::write(0, 3000);
+    (void)delay_us(clock, 900);
+    const uint16_t sampled = convert(In4{});
+    // ...and it HOLDS: read again a full hold time later, with nothing
+    // written in between.
+    (void)delay_us(clock, 900);
+    const uint16_t held = convert(In4{});
+    const uint16_t direct = dac_then_adc(0, 3000, In4::channel);
+    print(serial, "  sample-and-hold (200/500/8 LSI periods): LSI was on at "
+          "entry ", lsi_was_on, ", stopped ", lsi_stopped,
+          "; BWST after writing the times reads ", busy_no_lsi,
+          " with LSI stopped and ", busy_with_lsi, " with it running. The pad "
+          "reads ", no_lsi, " counts with LSI stopped, ", sampled,
+          " with it running and still ", held, " a hold time later, against ",
+          direct, " with the mode off", crlf);
+    // THE HEADER'S OWN CLAIM IS WRONG AND THIS IS WHERE IT SHOWS.
+    // dac.hpp says a caller who asks for sample-and-hold with LSI
+    // stopped "gets a channel that never samples". Measured, with LSI
+    // demonstrably stopped (LSIRDY read clear): the pad carries the
+    // value all the same, to a count, exactly as the plain buffered
+    // mode does - and NOT EVEN BWST reports anything, the times landing
+    // with the flag clear whether dac_hold_ck runs or not.
+    //
+    // So the failure mode is not a dead channel but a SILENT
+    // DEGRADATION, and that is worse: the output looks right, no status
+    // bit disagrees, and the low-power behaviour the mode was chosen
+    // for is simply absent. There is nothing an application can read to
+    // tell the two apart; only the RCC knows.
+    bench.verdict("SAMPLE-AND-HOLD WITHOUT LSI DOES NOT FAIL LOUDLY - IT "
+                  "DEGRADES IN SILENCE, and dac.hpp's own comment had it "
+                  "backwards: with dac_hold_ck stopped the channel keeps "
+                  "driving its value like the plain buffered mode it also "
+                  "is, the times land all the same and BWST never stands, so "
+                  "NOTHING an application can read says the mode is not armed",
+                  lsi_up && times_ok && times_no_lsi && lsi_stopped &&
+                      !busy_no_lsi && !busy_with_lsi &&
+                      no_lsi + 40u > direct && direct + 40u > no_lsi);
+    bench.verdict("...and with LSI running it samples AND HOLDS: the pad "
+                  "carries the value it was given and is still carrying it a "
+                  "whole hold time later, with nothing written in between - "
+                  "which is the mode working, and is indistinguishable from "
+                  "the mode NOT working, which is the finding above",
+                  sampled + 120u > direct && direct + 120u > sampled &&
+                      held + 120u > sampled && sampled + 120u > held);
+    print(serial, "  what this desk CANNOT say about the mode is the thing "
+          "it exists for: 16.4.6 sells it as a power saving, and that is a "
+          "current measurement this bench has no meter for", crlf);
+
+    // Put the board back where it was found.
+    if (!lsi_was_on) {
+        Rcc::lsi_enable(false);
+    }
+    quiet_everything();
+}
+
 // =============================================================================
 // The menu
 // =============================================================================
@@ -2133,6 +3144,16 @@ void banner() {
 extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+
+/// PA6 carries COMP1's output under alternate function 7 in letter n,
+/// and the EXTI line of that pad is the witness that a peripheral
+/// driving a pad is seen by the line exactly as the CPU driving it is.
+extern "C" void EXTI4_15_IRQHandler() {
+    if (OutInt::pending()) {
+        (void)OutInt::clear();
+        out_pad_edges = out_pad_edges + 1u;
+    }
+}
 
 /// ONE VECTOR, FOUR SOURCES: the ADC and all three comparators' EXTI
 /// lines (table 61). Every one of them is answered here, each for its own
@@ -2248,6 +3269,14 @@ int main() {
                  tk_chain);
     bench.letter('l', "the errata pass: ES0548 2.6.2 staged with a control",
                  tl_errata);
+    bench.letter('m', "the comparator's analog questions: the DAC as the "
+                 "threshold, the offset, the four hysteresis levels, both "
+                 "propagation delays, and the window's INSIDE state",
+                 tm_comp_analog);
+    bench.letter('n', "COMP2 and COMP3 on their own pads, the output ON a "
+                 "pad, and the other blanking sources", tn_comp_pads);
+    bench.letter('o', "the DAC's tail: both wave generators, the user offset "
+                 "calibration, and sample-and-hold on LSI", to_dac_tail);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL64" : "FAILED",

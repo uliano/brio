@@ -386,11 +386,39 @@ with no pad - streamed out by a ping-pong engine, four blocks of 32 with
 every consecutive pair 30 us apart. A timer update at 32 MHz is also what
 that suite uses to over-request the DMA's arbiter.
 
+### The DMA burst engine (`test_stm32_dma` letter `l`)
+
+`TIMx_DCR` and `TIMx_DMAR` turn ONE request into a walk of consecutive
+registers, all reached through the single address `DMAR`, so a DMA
+channel whose peripheral address never moves rewrites a whole waveform
+per period. `Tim<n>::dma_burst(TimBurstBase, length)` writes the pair -
+**the argument is the LENGTH and `DBL` is the length minus one**, which
+is the off-by-one this driver refuses to make a caller carry - and
+`dmar_address()` is the one address a channel is pointed at.
+
+**THE MAP HAS HOLES AND THE WALK DOES NOT SKIP THEM.** `DBA` is a WORD
+OFFSET from `TIMx_CR1` (21.4.20's own example list), so "ARR then CCR1
+then CCR2" is not a burst of three but a burst of FOUR: offset 12
+between `ARR` and `CCR1` is the repetition counter, which TIM2 does not
+implement. A table meaning those three registers carries a zero there.
+
+Measured on TIM2 driving LD4, four rows of four words played in a
+circle off the update request, each row's `CCR1` at exactly half its own
+`ARR`: **the pad reads 499 per mille whatever the period is doing**, and
+the three registers stop coherent (`CCR1` exactly `(ARR+1)/2`, `CCR2`
+exactly `(ARR+1)/4`). The CONTROL is the same four periods played one
+word at a time into `ARR` alone with `CCR1` left at 500, where the
+time-weighted duty is `4 x 500 / 10000`: **199 per mille measured
+against 200 predicted**. The only difference between the two legs is
+`DCR`'s length field.
+
+`Tim<14>` has no burst engine (DS13560 table 7's "DMA request
+generation" column, which is what `tim_has_dma_burst()` reads), so every
+verb refuses on it and `dmar_address()` is null.
+
 ## Not covered yet
 
-Driver gaps: the DMA BURST engine (`DCR`/`DMAR`, the one that walks
-several registers off one request) - the plain `TIMx_DIER` requests are
-built and measured, see below; encoder and hall-sensor modes (`SMS` 1..3 are spelled and refused
+Driver gaps: encoder and hall-sensor modes (`SMS` 1..3 are spelled and refused
 nowhere, but no task builds them and no bench signal exists for one);
 the EXTERNAL trigger half of the slave controller (`SMCR`'s
 `ECE`/`ETP`/`ETPS`/`ETF` and `TIMx_AF1`'s `ETRSEL`), which needs a pad or

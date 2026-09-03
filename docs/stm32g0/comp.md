@@ -4,12 +4,13 @@
 > the three input multiplexers, the hysteresis and the two speeds, the
 > polarity, the blanking sources, the window mode and its output
 > selector, the lock and the EXTI line each comparator publishes - and
-> everything a bench with no wires can reach is verified. What CANNOT be
-> reached here is an analog THRESHOLD: a comparator's non-inverting
-> input is a pad and only a pad, and this family disconnects a pad's own
-> pull the moment it goes analog, so no source inside the chip can hold
-> that input at a chosen voltage. The consequences are stated where they
-> bite and listed in "Not covered yet".
+> everything a bench with no wires can reach is verified. A comparator's
+> non-inverting input is a pad and only a pad, and this family
+> disconnects a pad's own pull the moment it goes analog; what a FREE
+> pad can nevertheless be made to do is measured below, and what it
+> still cannot - a threshold measured against a level something is
+> HOLDING - is listed in "Not covered yet" with the numbers that decline
+> it.
 
 Documents of record: RM0444 Rev 6 ch. 18, with the EXTI line table
 13.5.1, the vector table 12.3 (table 61) and TIM1_TISEL / TIM1_AF1
@@ -17,8 +18,10 @@ Documents of record: RM0444 Rev 6 ch. 18, with the EXTI line table
 (offset, hysteresis, propagation delay); errata ES0548 Rev 3, which has
 **no item touching the comparators**. Driver: `stm32g0/comp.hpp`; the
 per-part presence and the EXTI line numbers come from
-`stm32g0/device_tables.hpp`. Bench suite: `test_stm32_analog` letter i
-(15 verdicts), shared with the ADC, the DAC and the reference buffer.
+`stm32g0/device_tables.hpp`. Bench suite: `test_stm32_analog` letters i
+(15 verdicts), m (7 - the analog questions) and n (8 - the other two
+comparators, the output on a pad, the blanking sources), shared with the
+ADC, the DAC and the reference buffer.
 Family fixture `test/family_stm32g0/comp.cpp` plus three negatives under
 `tools/check_stm32g0.sh`.
 
@@ -179,35 +182,113 @@ and the two speeds at 30 ns and 0.3 us of propagation delay. **Their
 analog effect is not measured** - both need an input that MOVES through
 a threshold, which is the same missing wire.
 
-**COMP3 answers.** Its CSR is reachable through the SYSCFG gate and its
-INMSEL reads back what was written; its three plus pads are left alone
-on this desk and no verdict about a signal is offered on a comparator
-this suite never gives one.
+**COMP3 answers, and it now RUNS** (letter n). Its two bonded plus pads
+PB0 and PC1 read high and low against half of VREFINT, and its own EXTI
+line 20 delivered eight interrupts for eight edges through the vector it
+shares with the ADC and the other two comparators - so COMP3 is a signal
+path here and not only a register. Its third plus input is PE7, which
+the driver reports VALID because this DEVICE has a port E; whether this
+PACKAGE bonds that pad is a per-package table this stratum does not have
+([port.md](port.md) carries the gap), so the pad is named and left
+alone. COMP2 likewise runs on its OWN pads - PB4 as INPSEL 0 and PB6 as
+INPSEL 1 - where every other letter reaches it by borrowing COMP1's
+through WINMODE.
 
 **The lock is clear and stays clear** on all three, which is what a
 suite that must be re-runnable can say about a bit whose only exit is a
 reset.
 
+### A free pad is a stable analog source (letter `m`)
+
+The stimulus letter i uses is a pad driven to a RAIL and released, which
+is enough for every logical question and for none of the analog ones.
+Letter m starts from the same release and then watches:
+
+**A FLOATING PAD DOES NOT STAY AT THE RAIL - IT RELAXES TO AN
+EQUILIBRIUM AND SITS THERE.** Released from VDD and read continuously,
+PA1 falls through 1440, 1499, 1501, 1519, 1514 and 1511 ADC counts over
+eighteen milliseconds and stops: about **1.22 V, a third of the way up
+the supply**, reproducible to a count between one release and the next
+(1511 then 1512). Nothing in any chapter names it and it is a BOARD
+fact, not a silicon one - it is where that pad's own leakage paths
+balance, and another pad or another board will settle somewhere else.
+The CONTROL says the reading is not passive: ten milliseconds with the
+converter looking elsewhere move the node by five hundred counts, so the
+conversions are part of what holds it.
+
+**So the DAC IS a threshold on silicon.** With `DacMode::internal_
+unbuffered` the converter drives the on-chip peripherals and no pad at
+all - PA4 is not even claimed - and COMP1's INMSEL 4 compares the
+settled node against it: VALUE 1 with the DAC at code 0 and 0 at 4095.
+`CompNegative::dac_channel2` goes the same way as the upper limit of the
+window below.
+
+**THE WINDOW'S INSIDE STATE, which letter i can only decline.** With
+COMP1 against DAC channel 1 and COMP2 against DAC channel 2 through
+WINMODE, one settled node reaches ALL THREE states - above both limits,
+between them, below both - by moving the WINDOW instead of the signal.
+18.3.5's window comparator is complete on this desk.
+
+**The two propagation delays differ by a real, measured time.** A DAC
+step of 300 codes (242 mV, table 68's own 100 mV of overdrive and more)
+across the threshold is answered in **687..1062 ns in high-speed mode
+and 1109..1218 ns in medium-speed mode** over several runs, a difference
+of **406..484 ns** where table 68 prices the gap at 270. The absolutes
+are the DAC's settling plus the comparator plus the poll loop and are
+NOT the comparator's; the difference is, because everything else does
+the same thing twice.
+
+**AND THE OFFSET AND THE HYSTERESIS ARE DECLINED, with the number that
+declines them.** The band between a falling crossing and a rising one is
+measured at all four HYST codes - and **with HYST CLEAR it is 88..93 mV,
+where it should be zero and where table 68's LARGEST hysteresis is 30**.
+So the band this instrument reports is the NODE's own motion and not the
+comparator's, and no arrangement of the four numbers is a measurement of
+hysteresis. The offset goes the same way: with HYST clear the crossings
+sit 194..199 mV from the ADC's reading of the same node, which is two
+instruments reading different parts of one waveform. The reason is the
+settled node itself: it is held up by the conversions that read it, so
+it is a sawtooth - the ADC reports its sampling instant and the
+comparator watches all of it. **One wire from PA4 to PA1 settles both**,
+and this suite does not pretend to have found a way round it.
+
+### The output on a pad, and the blanking sources (letter `n`)
+
+**COMPx_OUT is alternate function 7** (DS13560 table 13) and PA6 carries
+COMP1's output: the pad's own input register follows VALUE at both
+rails, and the EXTI line of THAT pad counted six edges for three round
+trips of the input. That extends the exti campaign's finding - a line
+sees a pad its owner is driving - from the CPU to a PERIPHERAL.
+
+**Three more of 18.6.1's five blanking sources are real gates**:
+TIM2_OC3, TIM3_OC3 and TIM15_OC2 each drive VALUE low while the input
+says high when their channel is forced active, and give the answer back
+when it is released - measured the way letter i measures TIM1_OC4, with
+no pad and no counting. **The fifth, TIM1_OC5, is not reachable from
+here and is not pretended to be**: it is the CCR5 channel, which
+`tim.hpp` deliberately does not build ([tim.md](tim.md)'s own gap). The
+BLANKSEL bit for it is still written and read back, because a mask this
+driver refused to select would be a claim about a timer's channels and
+not about this chapter.
+
 ## Not covered yet
 
 **Implemented but not bench-verified:**
 
-- Every analog THRESHOLD question: the offset (DS13560's +/- 5 mV
-  typical), the three hysteresis levels, the two propagation delays, and
-  the window's INSIDE state. All four want the plus input held at a
-  chosen voltage, which needs one wire from PA4 to a comparator input
-  pad - and this campaign is wireless by construction.
+- **The OFFSET and the three HYSTERESIS levels**, declined above with
+  the measurement that declines them: the instrument's own floor is
+  88..93 mV where the largest effect it would measure is 30. Both want
+  the plus input held at a chosen voltage by something that is not also
+  reading it - one wire from PA4 to PA1, and this campaign is wireless
+  by construction.
 - WINOUT, which did nothing measurable (above) and is recorded as such.
-- The DAC as a threshold ON SILICON. `CompNegative::dac_channel1/2` is
-  configured, validated against `dac_present()` and refused where there
-  is no DAC; with no analog signal on a plus input there is nothing to
-  compare it to yet.
-- The comparator output ON A PAD. It is an alternate function
-  (DS13560's AF tables) and this suite reaches the output through the
-  EXTI line and TIM1's TI1 instead, both of which need no pin.
-- The four blanking sources other than TIM1_OC4.
-- COMP2's and COMP3's own plus pads, and COMP3 entirely as a signal
-  path.
+- **TIM1_OC5 as a blanking source**, because `tim.hpp` builds four
+  channels per timer and TIM1's fifth and sixth are the combined-PWM
+  pair it does not build ([tim.md](tim.md)). The BLANKSEL bit is written
+  and read back; the GATE is not seen.
+- COMP3's third plus input PE7, which the driver reports valid on this
+  DEVICE and which this PACKAGE may not bond - a per-package pin table
+  this stratum does not have ([port.md](port.md)).
 - LOCK. It is offered, never set, and never will be by a re-runnable
   suite.
 - Everything in table 99 (the low-power modes): there is no PWR driver

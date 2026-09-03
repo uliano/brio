@@ -22,7 +22,7 @@ ES0548 Rev 3 items 2.6.1..2.6.5, read on the bench chip's revision Z
 column. Driver: `stm32g0/adc.hpp`; the reference vocabulary is
 `stm32g0/vref.hpp`'s (see [vref.md](vref.md)), the per-part facts come
 from `stm32g0/device_tables.hpp`. Bench suite: `test_stm32_analog`
-(12 letters, 94 verdicts, wireless), shared with the DAC, the reference
+(15 letters, 118 verdicts, wireless), shared with the DAC, the reference
 buffer and the comparators. Family fixture
 `test/family_stm32g0/adc.cpp` plus four negatives under
 `tools/check_stm32g0.sh`.
@@ -302,6 +302,20 @@ reads none.
 | 2.6.3 AWD1 single mode misses a later channel | yes | REPRODUCED with a control (above). Stated on `watchdog1()`, which does not own the sequence and cannot enforce it |
 | 2.6.4 sampling time one cycle longer | yes | MEASURED (above). `adc_conversion_half_cycles()` deliberately reports the CHAPTER's number, with the extra cycle named where it is measured |
 | 2.6.5 ADC offset out of specification | **no** | Revision A only; this die is revision Z |
+
+### A free pad settles, and the converter is part of why (letter `m`)
+
+Released from VDD and read continuously, a free pad on this board does
+NOT stay at the rail: it relaxes in a few milliseconds to about 1.22 V -
+a third of the supply - and sits there, reproducible to a count between
+one release and the next. **The conversions are part of what holds it**:
+ten milliseconds with the converter looking elsewhere move the node by
+five hundred counts. So a floating pad read continuously is a usable
+analog LEVEL and not a usable analog VOLTAGE - the value reported is the
+sampling instant of a node the sampling is itself moving, which is why
+[comp.md](comp.md) declines an absolute comparator offset measured
+against it. It is a BOARD fact, not a silicon one; another pad or
+another board settles somewhere else.
 
 ## Not covered yet
 

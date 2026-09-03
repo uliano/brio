@@ -97,6 +97,7 @@ class Board:
         self.verbose = verbose
         self.buf = b""
         self.legs = []
+        self.last_window_s = 0.0
 
     # ---- console ----------------------------------------------------------
     def read_line(self, timeout=6.0):
@@ -124,7 +125,7 @@ class Board:
         self.ser.stopbits = STOP[fmt[2]]
 
     # ---- the ops ----------------------------------------------------------
-    def run_op(self, op, mode, baud, fmt, window_ms, count):
+    def run_op(self, op, mode, baud, fmt, window_ms, count, t_host=None):
         self.buf = b""
         self.ser.reset_input_buffer()
         self.reconfigure(baud, fmt)
@@ -134,6 +135,23 @@ class Board:
         # before the board prints its report.
         pump_s = max(0.15, window_ms / 1000.0 - 0.5)
 
+        # THE WINDOW IS A DEADLINE AND NOT A SUGGESTION. Everything below
+        # runs at the leg's own baud rate and frame; the moment the
+        # board's window ends it goes back to 115200 8N1 and starts
+        # printing, and a host still reading at 3 Mbaud 7E1 turns that
+        # report into payload - the tally with it. The board's own
+        # window started when it printed the HOST line, so that is what
+        # this clock is set by, and every phase below stops at it.
+        #
+        # (test_stm32_serial repairs this from the FIRMWARE side, by
+        # waiting out the window plus nine hundred milliseconds before it
+        # speaks. test_stm32_dma does not, and its letter u lost its
+        # closing tally to exactly this. Fixing it here fixes it for both
+        # and for anything written next.)
+        if t_host is None:
+            t_host = time.time()
+        deadline = t_host + window_ms / 1000.0
+
         got = bytearray()
         sent = 0
         payload = b""
@@ -141,13 +159,13 @@ class Board:
             # THE TIMING IS THE OP: the board is asleep in the middle of
             # its own window, so the bytes go out at half of it and the
             # rest of the window is spent waiting, quietly.
-            time.sleep(pump_s / 2.0)
+            time.sleep(min(pump_s / 2.0, max(0.0, deadline - time.time())))
             payload = lfsr_stream(max(count, 1), mask)
             self.ser.write(payload)
             self.ser.flush()
             sent = len(payload)
             t0 = time.time()
-            while time.time() - t0 < pump_s / 2.0:
+            while time.time() - t0 < pump_s / 2.0 and time.time() < deadline:
                 n = self.ser.in_waiting
                 if n:
                     got += self.ser.read(n)
@@ -157,15 +175,31 @@ class Board:
             payload = lfsr_stream(int(baud / 10 * pump_s * 1.1) + 256, mask)
             chunk = max(64, baud // 2000)
             t0 = time.time()
-            while time.time() - t0 < pump_s and sent < len(payload):
+            while (time.time() - t0 < pump_s and sent < len(payload)
+                   and time.time() < deadline):
                 self.ser.write(payload[sent:sent + chunk])
                 sent += chunk
                 n = self.ser.in_waiting
                 if n:
                     got += self.ser.read(n)
-        # Collect whatever is still coming, then wait for silence.
+        # AND STOP FEEDING A BRIDGE THAT CANNOT KEEP UP. At a rate the
+        # VCP cannot carry, the pump above queues far more than the wire
+        # will take inside the window, and the operating system goes on
+        # delivering it AFTER the board has gone back to 115200 - where
+        # it lands in the console's receive ring and the menu loop reads
+        # it as LETTERS. Whatever has not left yet is dropped here,
+        # which is the host's half of that; the board's half is to drain
+        # its own ring before it looks for the next command.
+        try:
+            self.ser.reset_output_buffer()
+        except Exception:
+            pass
+        # Collect whatever is still coming, then wait for silence - but
+        # NEVER past the window. A leg that ends early gets its 300 ms of
+        # quiet; one that runs to the edge gets whatever is left, and the
+        # port is back at the console's own rate before the board speaks.
         quiet = time.time() + 0.3
-        hard = time.time() + max(0.6, pump_s + 0.6)
+        hard = min(deadline, time.time() + max(0.6, pump_s + 0.6))
         while time.time() < quiet and time.time() < hard:
             n = self.ser.in_waiting
             if n:
@@ -174,6 +208,7 @@ class Board:
             else:
                 time.sleep(0.005)
         self.reconfigure(CONSOLE_BAUD)
+        self.last_window_s = window_ms / 1000.0
 
         result = {"op": op, "mode": mode, "baud": baud, "format": fmt,
                   "host_sent": sent, "host_got": len(got), "first_bad": None}
@@ -198,6 +233,16 @@ class Board:
 
     # ---- letters ----------------------------------------------------------
     def run_letter(self, key, timeout=120.0):
+        """Drive one suite letter.
+
+        THE DEADLINE GROWS WITH THE WORK. `timeout` bounds how long the
+        script waits for the board to say ANYTHING, not how long a letter
+        may take: a letter of ten legs whose windows are 600 ms each is
+        not a hung board, and test_stm32_dma's letter u used to be
+        declared one at the flat two-minute mark - the legs all ran and
+        the tally was never waited for. Every announced window is added
+        back, so the budget is spent on silence and never on work.
+        """
         self.send(key)
         self.legs = []
         end = time.time() + timeout
@@ -209,9 +254,13 @@ class Board:
             if text.startswith("HOST "):
                 parts = text.split()
                 if len(parts) >= 7:
+                    t_host = time.time()
+                    window_ms = int(parts[5])
                     self.legs.append(self.run_op(parts[1], int(parts[2]),
                                                  int(parts[3]), parts[4],
-                                                 int(parts[5]), int(parts[6])))
+                                                 window_ms, int(parts[6]),
+                                                 t_host))
+                    end += window_ms / 1000.0 + 2.0
                 continue
             if text.startswith("-> ") and "pass" in text:
                 return self.legs, text
