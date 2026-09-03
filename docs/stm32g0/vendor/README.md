@@ -109,6 +109,24 @@ Encoded in code or stated where the code cannot enforce it:
   (`__get_IPSR() == 0`), and `isr()` clears the disabled-interrupt flags
   FIRST and the enabled ones second. Both halves are bench-verified
   (lptim.hpp, test_stm32_lptim letter i).
+- **2.13.1 Desynchronization under specific condition with edge
+  filtering enabled** (workaround: disable edge filtering, or wait for
+  the retransmission): `CCCR.EFBI` is a verb of `fdcan.hpp` with the
+  obligation STATED on it - nothing a driver can enforce, since the
+  coincidence is an end of integration landing on a falling FDCAN_RX
+  edge. **STAGED AND NOT REPRODUCED**: 1500 CAN FD frames with bit rate
+  switching in each arm, EFBI set and clear, every one byte-exact with
+  no protocol error either side - recorded as unreproduced and not as a
+  disproof, because a loop-back whose RX pin is disconnected may never
+  offer the edge (fdcan.md).
+- **2.13.2 Tx FIFO messages inverted under specific buffer usage and
+  priority setting** is **UNREACHABLE BY CONSTRUCTION on this silicon,
+  with the register as the evidence**: `FDCAN_TXBC` written 0xFFFFFFFF
+  reads back 0x01000000, so the only implemented bit is TFQM. The item
+  needs "both a dedicated Tx buffer and a Tx FIFO" and its own
+  workaround names Tx buffers 4 and 5; this M_CAN is configured with
+  three Tx elements and one mode bit, so the area is either a FIFO or a
+  queue and a dedicated buffer cannot be declared (fdcan.md).
 - 2.2.8 (boot select after a debug connection) and 2.11.2 (the USART
   prescaler exists only on some instances) are documentation errata,
   read and applied: the crt's boot assumptions and RM0444 table 183
@@ -122,8 +140,8 @@ driven yet): 2.2.1 (LSI), 2.2.2 (PWR wake-up flags), 2.2.3 (a flash
 double-word all-ones cannot be re-programmed to all zeros - the FLASH
 campaign's), 2.2.6 (PC13 disturbs LSE), 2.2.11 (RTC domain), 2.3.1
 (GPIO after Standby), 2.4.x/2.5.x (DMA/DMAMUX), 2.6.x (ADC), 2.7.x
-(TIM), 2.9.1 (RTC), 2.10.x (I2C), 2.12.x (SPI), 2.13.x
-(FDCAN). Revision A only, absent on Z: 2.2.5, 2.2.7, 2.2.9, 2.6.5.
+(TIM), 2.9.1 (RTC), 2.10.x (I2C), 2.12.x (SPI). Revision A only, absent
+on Z: 2.2.5, 2.2.7, 2.2.9, 2.6.5.
 
 **No item of ES0548 touches the CRC calculation unit** - a statement
 about the document, not a claim about the silicon (crc.md).

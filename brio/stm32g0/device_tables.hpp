@@ -1889,4 +1889,137 @@ constexpr uint8_t tamp_backup_registers() {
         sizeof(uint32_t));
 }
 
+// ---- FDCAN (ch. 36) ---------------------------------------------------------
+//
+// A WHOLE CHAPTER THAT IS ABSENT FROM MOST OF THE FAMILY: table 1 gives
+// FDCAN1 and FDCAN2 to the G0B1/G0C1 alone, and the G071 and G031
+// headers declare no FDCAN symbol at all - not a base, not a struct, not
+// an interrupt enumerator. So every probe below answers "no" there and
+// brio/stm32g0/fdcan.hpp compiles its BODY only where the header
+// declares the block (the avrdx/opamp.hpp precedent: a chapter a part
+// has not got is absent from that part's build).
+
+/// Register block base of FDCANn (n = 1..2), 0 where the device has none.
+constexpr uint32_t fdcan_base(uint8_t n) {
+    switch (n) {
+#if defined(FDCAN1_BASE)
+        case 1: return FDCAN1_BASE;
+#endif
+#if defined(FDCAN2_BASE)
+        case 2: return FDCAN2_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool fdcan_present(uint8_t n) { return fdcan_base(n) != 0u; }
+
+/// How many FDCAN instances this device carries (two or none).
+constexpr uint8_t fdcan_instances() {
+    uint8_t k = 0;
+    for (uint8_t n = 1; n <= 2; ++n) {
+        if (fdcan_present(n)) {
+            ++k;
+        }
+    }
+    return k;
+}
+
+/// The SUBSYSTEM's configuration block (36.1, figure 392) - one CKDIV
+/// register at 0x4000 6500 that divides the kernel clock for BOTH
+/// instances. 36.4.37: "only FDCAN1 instance has FDCAN_CKDIV, which
+/// changes clock divider for all instances", and the header agrees by
+/// giving it a type of its own at a base of its own.
+constexpr uint32_t fdcan_config_base() {
+#if defined(FDCAN_CONFIG_BASE)
+    return FDCAN_CONFIG_BASE;
+#else
+    return 0;
+#endif
+}
+
+/// One instance's slice of the message RAM, in BYTES (36.3.6: 212 words
+/// = 0x350, of which the last word is at 0x34C). The number is the
+/// MANUAL's - no header of this pack spells the map - which is why it
+/// lives here beside lptim_exti_line() and not in a driver.
+constexpr uint32_t fdcan_ram_size_bytes = 0x350;
+
+/// Where FDCANn's message RAM starts. 36.3.6 stacks the instances:
+/// "the RAM start address for the FDCANn is computed by end address + 4
+/// of FDCANn - 1", i.e. FDCAN1 at SRAMCAN + 0x000 and FDCAN2 at
+/// SRAMCAN + 0x350. 0 where the device has no FDCAN.
+constexpr uint32_t fdcan_ram_base(uint8_t n) {
+#if defined(SRAMCAN_BASE)
+    if (!fdcan_present(n)) {
+        return 0;
+    }
+    return SRAMCAN_BASE + static_cast<uint32_t>(n - 1u) * fdcan_ram_size_bytes;
+#else
+    (void)n;
+    return 0;
+#endif
+}
+
+/// RCC_APBENR1.FDCANEN - ONE enable for the whole subsystem, both
+/// instances and the configuration block behind it. 0 where absent.
+constexpr uint32_t fdcan_clock_mask() {
+#if defined(RCC_APBENR1_FDCANEN)
+    return RCC_APBENR1_FDCANEN;
+#else
+    return 0;
+#endif
+}
+
+/// RCC_APBRSTR1.FDCANRST - and ONE reset for the same subsystem, so a
+/// reset asked for through either instance takes the other down with it
+/// (measured: test_stm32_fdcan letter a).
+constexpr uint32_t fdcan_reset_mask() {
+#if defined(RCC_APBRSTR1_FDCANRST)
+    return RCC_APBRSTR1_FDCANRST;
+#else
+    return 0;
+#endif
+}
+
+/// Position of the FDCAN kernel-clock select in RCC_CCIPR2 (5.4.22) -
+/// a DIFFERENT register from the CCIPR every other multiplexer of this
+/// stratum lives in, and one the smaller headers do not even declare as
+/// a struct member. 0xFF where absent.
+constexpr uint8_t fdcan_clock_select_pos() {
+#if defined(RCC_CCIPR2_FDCANSEL_Pos)
+    return RCC_CCIPR2_FDCANSEL_Pos;
+#else
+    return 0xFF;
+#endif
+}
+
+/// RCC_CCIPR2 itself - a STRUCT MEMBER only the G0B1/G0C1 header
+/// declares (the flash_ecc2r() precedent). Null elsewhere, which is what
+/// lets clock.hpp carry one verb for it on every header of the pack.
+inline volatile uint32_t* rcc_ccipr2() {
+#if defined(RCC_CCIPR2_FDCANSEL_Pos)
+    return &RCC->CCIPR2;
+#else
+    return nullptr;
+#endif
+}
+
+/// The NVIC lines of the FDCAN's two interrupt outputs. Table 61 puts
+/// fdcan1_intr0_it AND fdcan2_intr0_it on TIM16's vector and both
+/// intr1_it on TIM17's - so ONE line serves two peripherals and two
+/// instances, and a handler has to ask each of them what it wants.
+/// IRQn_Type values are enumerators the preprocessor cannot probe, so
+/// this reads the DEVICE SELECT macro exactly as usart_irq() and
+/// tim_irq() do; the names themselves only exist on the parts that have
+/// an FDCAN, which is why the body is gated on the block's base.
+/// `line` is 0 or 1.
+constexpr IRQn_Type fdcan_irq(uint8_t line) {
+#if defined(FDCAN1_BASE)
+    return line == 0u ? TIM16_FDCAN_IT0_IRQn : TIM17_FDCAN_IT1_IRQn;
+#else
+    (void)line;
+    return NonMaskableInt_IRQn;
+#endif
+}
+
 } // namespace brio

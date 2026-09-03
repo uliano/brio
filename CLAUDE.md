@@ -351,8 +351,43 @@ gets its dated home in `docs/design/` when taken.
   with it (5.4.24: nothing asks any more), so test_stm32_dma letter i
   scored 53/54 until it started the clock it captures - the one-line
   fix applied by Fable AFTER the gate, the commit's one declared mover.
-  usart.md rewritten, lpuart.md + irtim.md NEW. What remains needs a
-  peer or wires (the buses against a SAM at
+  usart.md rewritten, lpuart.md + irtim.md NEW. Campaign 9 FDCAN DONE
+  2026-09-03 night (Opus delegation, the user's "program autonomous work"
+  - Fable's priorities; re-verified by Fable's own hand: test_stm32_fdcan
+  z 96/96 cold and warm, the md5 gate 15/15 in Fable's worktree with no
+  mover, dma 54/54; and committed): fdcan.hpp over ch. 36 WHOLE - the
+  Bosch M_CAN of the G0B1/G0C1 alone, the register half gated on the
+  header (the opamp precedent) and the protocol ARITHMETIC (bit-timing
+  choosers, DLC coding, the element codecs pinned against hand-built
+  words) compiled everywhere; the INIT/CCE gate as refusals; one
+  enable, one reset and one CKDIV for both instances (FDCAN1's CCE
+  alone opens it); the fixed message RAM map zeroed by enter(); no task
+  and a TARGET-LOCAL FdcanFrame on purpose - the util CAN vocabulary is
+  born with the SAM's CAN (memory can-util-vocabulary-notes carries what
+  it must hold). THE BENCH HAD NO TRANSCEIVER AND NEEDED NONE: internal
+  loop-back for the message path, EXTERNAL loop-back to see frames on
+  the pad, TEST.TX = 01 putting the sample point on the pad so a DMAMUX
+  generator counts the bit rate with no CPU (125 k..1 M within 1 %, the
+  reset NBTP = 4.0 Mbit at 64 MHz), and THE ERROR MACHINE WITH NO NODE:
+  normal mode with the RX pad on its own pull-up makes every dominant bit
+  a bit error - TEC by 8 per attempt, EW at 96, EP at 128, BUS-OFF at
+  847 us with INIT set by hardware, RECOVERY 1421 bit times (36.4.13's
+  129 x 11, not figure 398's 128); a stuck-dominant pad is a WAIT, not an
+  error. FINDINGS: 36.3.4's 0xCC paragraph does not describe this part
+  (64 distinct bytes round-trip byte-exact); the FDCAN's registers
+  ANSWER through a closed clock gate with true reset values and drop
+  writes (VREFBUF's opposite); IR.TC is gated by TXBTIE; the overwriting
+  FIFO's safe read costs one more message than the overwrite; ASM sends
+  nothing (36.3.4 beats 36.4.6); TEST.TX = 01 is a STROBE not a level;
+  ILS is seven groups; TXBC has one bit; a DAR attempt costs 136 of TEC.
+  Errata: 2.13.1 staged 1500 frames both ways, not reproduced; 2.13.2
+  UNREACHABLE by construction (no dedicated Tx buffers - TXBC.TFQM is
+  the register). Desk facts: a deterministic 6-byte corruption of one
+  informational console line in letter k (recorded, unexplained, no
+  verdict on it); and PA8 INTERMITTENTLY FAILS ITS OWN PULL-UP (tim and
+  exti letter a's precondition 2 of 3, an SWD pull-up read low 1 of 3 at
+  10 ms) - the desk, not the code; the user is to look at D7/PA8. What
+  remains needs a peer or wires (the buses against a SAM at
   3.3 V, FDCAN, USB, UCPD, the option-byte bench verb).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR

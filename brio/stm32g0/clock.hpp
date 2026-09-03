@@ -359,6 +359,33 @@ struct Rcc {
     static uint8_t kernel_clock(uint8_t pos) {
         return static_cast<uint8_t>((RCC->CCIPR >> pos) & 0x3u);
     }
+
+    /// The SAME two-bit field engine over RCC_CCIPR2 (5.4.22), the
+    /// SECOND independent-clock register: the I2S, USB and FDCAN
+    /// multiplexers live there and not in CCIPR. It is a separate verb
+    /// and not a wider `kernel_clock` because it is a separate REGISTER,
+    /// and because the register is a struct member only the G0B1/G0C1
+    /// header declares - the reserve hands back a null pointer on the
+    /// parts without it (rcc_ccipr2(), the flash_ecc2r() precedent), so
+    /// this file still compiles on every header of the pack.
+    ///
+    /// False when the device has no CCIPR2 at all, with NOTHING written.
+    static bool kernel_clock2(uint8_t pos, uint8_t code) {
+        volatile uint32_t* reg = rcc_ccipr2();
+        if (reg == nullptr || pos > 30u) {
+            return false;
+        }
+        *reg = (*reg & ~(0x3u << pos)) |
+               ((static_cast<uint32_t>(code) & 0x3u) << pos);
+        return true;
+    }
+    static uint8_t kernel_clock2(uint8_t pos) {
+        volatile uint32_t* reg = rcc_ccipr2();
+        if (reg == nullptr || pos > 30u) {
+            return 0xFF;
+        }
+        return static_cast<uint8_t>((*reg >> pos) & 0x3u);
+    }
 };
 
 // =============================================================================

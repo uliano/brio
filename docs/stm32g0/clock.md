@@ -32,11 +32,13 @@ and the core, PPRE for PCLK = the APB), an ENABLE BIT per peripheral
 that gates its bus clock (RCC_IOPENR/AHBENR/APBENR1/APBENR2), and a
 KERNEL-CLOCK multiplexer for the few peripherals that may run off
 something other than their bus (USART1..3, LPUARTs, I2C1, ADC,
-LPTIMs, RTC - RCC_CCIPR). Two of those multiplexers are DRIVEN: the
-USART's, by `stm32g0/usart.hpp`, and BOTH LPTIMs', by
-`stm32g0/lptim.hpp` - which is where a peripheral's own multiplexer
-belongs, since the block that counts the clock is the one that knows
-what it is worth. The LPTIM's four codes (PCLK, LSI, HSI16, LSE) are
+LPTIMs, RTC - RCC_CCIPR; the I2S, USB and FDCAN - RCC_CCIPR2, a SECOND
+register the smaller headers do not even declare as a struct member).
+Three of those multiplexers are DRIVEN: the USART's, by
+`stm32g0/usart.hpp`, BOTH LPTIMs', by `stm32g0/lptim.hpp`, and the
+FDCAN's, by `stm32g0/fdcan.hpp` - which is where a peripheral's own
+multiplexer belongs, since the block that counts the clock is the one
+that knows what it is worth. The LPTIM's four codes (PCLK, LSI, HSI16, LSE) are
 the same for both instances on every part of this pack, and which of
 them survives a Stop is the low-power timer's own chapter
 ([lptim.md](lptim.md)). What crosses the util clock contract is
@@ -93,6 +95,17 @@ LSE for USART1..3 and for both LPUARTs (5.4.21), and a port on HSI16 or
 LSE does not move when SYSCLK does - which is what makes `rebase()` a
 no-op for it, on purpose. `kernel_clock(pos, code)` is the one verb, and
 each peripheral publishes its own field position from the reserve.
+
+**RCC_CCIPR2 IS A SECOND REGISTER AND IT NEEDED A SECOND VERB.** The
+I2S, USB and FDCAN selects live there (5.4.22) and not in the CCIPR, and
+the register is a STRUCT MEMBER only the G0B1/G0C1 header declares - so
+the reserve hands back a pointer to it (`rcc_ccipr2()`, null elsewhere,
+the `flash_ecc2r()` precedent) and `kernel_clock2(pos, code)` returns
+false with nothing written on a part that has none. That is what lets
+this file compile unchanged on every header of the pack while the
+FDCAN's own select is driven from `fdcan.hpp` ([fdcan.md](fdcan.md)).
+Its other two codes - PLLQCLK and HSE - are refused by that driver,
+because nothing here builds either.
 
 **RCC_CR.HSIKERON is NOT the same mechanism as a peripheral's clock
 REQUEST**, and the difference matters wherever Stop does. 33.5.21: a
@@ -212,7 +225,8 @@ refusal while running, `FlashWaitStates::set`'s bounded wait on a
 DECREASE (every init so far raised), `FlashAccel`'s setters.
 
 The kernel-clock multiplexer is bench-driven for all four codes on
-USART2 and on both LPUARTs ([usart.md](usart.md), [lpuart.md](lpuart.md))
+USART2 and on both LPUARTs ([usart.md](usart.md), [lpuart.md](lpuart.md)),
+and CCIPR2's FDCAN field for its one reachable code
 - including a console that kept talking at 115200 while its own clock
 moved under it. HSIKERON is written, read back and slept on; what it
 COSTS in current is the meter question this stratum keeps deferring.
