@@ -108,7 +108,8 @@ BKPT with no debugger escalates to the crt's distinct
   site calls around every deep sleep). A rate that does not divide 1000
   is refused at compile time.
 - `delay_us(clock, us)` / `delay_us(DelayRate, us)` +
-  `delay_rate(hz)` - stm32g0/delay.hpp: a busy-wait of AT LEAST `us`
+  `delay_rate(hz)` - stm32g0/delay.hpp, which is `armv6m/delay.hpp`
+  plus this family's measured facts: a busy-wait of AT LEAST `us`
   microseconds on SysTick's VAL, CAPPED BELOW ONE KERNEL TICK by
   contract (a tick or more is TimeEvent territory and is refused with
   `false`, spending nothing), and `false` with no time spent when
@@ -189,10 +190,6 @@ read caveat in README.md was found.
 Driver gaps (this chapter's option space the stratum does not touch):
 - VTOR relocation; NVIC priorities are exposed but nothing assigns one.
 - A per-package pin-bonding table.
-- `stm32g0/delay.hpp` and `samc/delay.hpp` are the same file but for
-  their includes and one paragraph of reasoning; neither has been
-  factored into `armv6m/`, which is where the pair belongs once a
-  reviewer says so.
 
 Implemented, not bench-verified: `Nvic::priority`, `abort()`'s and `HardFault_Handler`'s spins
 (the fault VECTOR is exercised, by `hard_fault_reset` - reset.md),

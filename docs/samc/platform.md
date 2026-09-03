@@ -216,7 +216,8 @@ prove dead, and newlib's abort would defeat the no-syscalls rule - so
 the crt defines `abort()` as a spin (not a BKPT: with no debugger a
 BKPT becomes a HardFault and the frame that got there is gone).
 
-**`delay_us(clock, us)`** (samc/delay.hpp) - the microsecond busy-wait,
+**`delay_us(clock, us)`** (samc/delay.hpp, which is `armv6m/delay.hpp`
+plus this family's measured facts - [../armv6m/README.md](../armv6m/README.md)) - the microsecond busy-wait,
 timed on SysTick's own counter and CAPPED BELOW ONE KERNEL TICK by
 contract: a wait of a tick or more is TimeEvent territory, and the call
 REFUSES it (false, no time spent) instead of serving a latency bug -

@@ -420,7 +420,17 @@ gets its dated home in `docs/design/` when taken.
   USART/LPUART and TIM unverified lists; and uart_stress.py's race on the
   dma suite's letter u tally (the tool gained two principled fixes, the
   3 Mbaud sink leg still loses the tally - three unproven repairs tried
-  and REVERTED, recorded). What remains needs a peer or wires (the buses against a SAM at
+  and REVERTED, recorded). Campaign 11 delay.hpp INTO armv6m/ DONE
+  2026-09-03 night BY FABLE'S OWN HAND (the reviewer platform.md's gap
+  line was waiting for): the samc and stm32g0 copies were identical to
+  the byte in code and differed only in their measured numbers, so
+  brio/armv6m/delay.hpp carries the code and the merged reasoning and
+  each family's delay.hpp is the device include plus the core file plus
+  its own facts (the SAM's 4 us division and 20.8 ns VAL, the G0's two
+  wait states and 15.6 ns); gated on BOTH projects from the build alone
+  - 39/39 samc and 16/16 stm32g0 images byte-identical - with
+  test_stm32_platform z 53/53 on the bench (letter d is the delay). What
+  remains needs a peer or wires (the buses against a SAM at
   3.3 V, FDCAN, USB, UCPD, the option-byte bench verb).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
@@ -4029,6 +4039,11 @@ brio/                    the framework, four strata:
     ticker.hpp             BasicTicker<tps> over SysTick with advance/pause/
                            resume; each family's ticker.hpp adds its alias
                            and its own guards
+    delay.hpp              delay_us / delay_rate / DelayRate: the microsecond
+                           busy-wait on SysTick's VAL - at least, never early,
+                           capped below one kernel tick, no division at wait
+                           time; each family's delay.hpp is the device include
+                           plus this file plus its measured facts
   stm32g0/               everything that knows stm32g0xx.h (STM32G0, Cortex-M0+)
     device_tables.hpp      THE RESERVE: GPIO ports, USART instances, APB
                            enables, CCIPR multiplexers and the SHARED
