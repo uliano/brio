@@ -30,6 +30,12 @@
  *    control bits, status bit, ECC register and protection registers;
  *    every smaller part declares none of them, and ECC2R is not even a
  *    member of that part's FLASH_TypeDef.
+ *  - The analog block: every part has the one ADC with its nineteen
+ *    channels, but the DAC is absent on the G031/G041 (16.3) and the
+ *    COMPARATORS are absent there too, while the third of them is the
+ *    G0B1/G0C1's alone (18.1) - and the ADC's own vector is shared with
+ *    all three comparators where they exist and is the ADC's alone where
+ *    they do not.
  *  - The EXTI's lines: sixteen GPIO lines everywhere, but which of the
  *    peripheral lines above them exist - and which of those are
  *    configurable rather than direct - is per part, and so is the
@@ -1175,5 +1181,239 @@ constexpr uint8_t dmamux_generators() {
 /// structures at fixed offsets (0x080 and 0x140).
 constexpr uint32_t dmamux_channel_status_base() { return DMAMUX1_ChannelStatus_BASE; }
 constexpr uint32_t dmamux_generator_status_base() { return DMAMUX1_RequestGenStatus_BASE; }
+
+// ---- ADC, DAC, COMP, VREFBUF (RM0444 ch. 15..18) -----------------------------
+
+/// Register block base of the ADC, 0 where the device has none. Every
+/// STM32G0 carries exactly one (15.1), so this is a presence probe and
+/// not an instance table - but it is still the HEADER that says so.
+constexpr uint32_t adc_base() {
+#if defined(ADC1_BASE)
+    return ADC1_BASE;
+#else
+    return 0;
+#endif
+}
+
+constexpr bool adc_present() { return adc_base() != 0u; }
+
+/// The ADC's COMMON register block - one register, ADC_CCR, at its own
+/// base (the header puts it in a separate ADC_Common_TypeDef): the
+/// asynchronous prescaler and the three internal-source enables. A
+/// single-converter family still has it, because the block is shared
+/// with converters this part does not carry.
+constexpr uint32_t adc_common_base() {
+#if defined(ADC1_COMMON_BASE)
+    return ADC1_COMMON_BASE;
+#else
+    return 0;
+#endif
+}
+
+/// RCC_APBENR2/APBRSTR2 bit of the ADC - the one analog block of this
+/// family on APB2 (the DAC is on APB1, and the comparators have no
+/// enable bit of their own at all: 18.3.3 shares SYSCFG's).
+constexpr uint32_t adc_clock_mask() {
+#if defined(RCC_APBENR2_ADCEN)
+    return RCC_APBENR2_ADCEN;
+#else
+    return 0;
+#endif
+}
+
+constexpr uint32_t adc_reset_mask() {
+#if defined(RCC_APBRSTR2_ADCRST)
+    return RCC_APBRSTR2_ADCRST;
+#else
+    return 0;
+#endif
+}
+
+/// How many multiplexed channels the ADC has, counted off the header's
+/// own CHSELx bits rather than copied from 15.3.8's "up to 19": the
+/// count is what says which internal channel numbers are legal, and a
+/// part that bonds fewer would describe itself.
+constexpr uint8_t adc_channels() {
+    uint8_t count = 0;
+#if defined(ADC_CHSELR_CHSEL0_Msk)
+    count = 1;
+#endif
+#if defined(ADC_CHSELR_CHSEL11_Msk)
+    count = 12;
+#endif
+#if defined(ADC_CHSELR_CHSEL14_Msk)
+    count = 15;
+#endif
+#if defined(ADC_CHSELR_CHSEL18_Msk)
+    count = 19;
+#endif
+    return count;
+}
+
+/// The three channels that are not pads (15.3.8): the temperature
+/// sensor, the internal reference and the divided battery pin. Each is
+/// probed through the ADC_CCR enable bit that WAKES it, because that bit
+/// is the thing a driver must set and the thing a part without the
+/// source does not declare. 0xFF where the source is absent.
+constexpr uint8_t adc_temperature_channel() {
+#if defined(ADC_CCR_TSEN_Msk)
+    return 12;
+#else
+    return 0xFF;
+#endif
+}
+
+constexpr uint8_t adc_vrefint_channel() {
+#if defined(ADC_CCR_VREFEN_Msk)
+    return 13;
+#else
+    return 0xFF;
+#endif
+}
+
+constexpr uint8_t adc_vbat_channel() {
+#if defined(ADC_CCR_VBATEN_Msk)
+    return 14;
+#else
+    return 0xFF;
+#endif
+}
+
+/// The NVIC line of the ADC. On the G0B1/G0C1 and the G071 class it is
+/// SHARED WITH THE THREE COMPARATORS and with EXTI lines 17/18/20 with
+/// them (table 61); on the G031 class, which has no comparator at all,
+/// the ADC has a line to itself under a different name. IRQn values are
+/// enumerators the preprocessor cannot probe, so - as for usart_irq(),
+/// tim_irq() and dma_channel_irq() - this reads the DEVICE SELECT macro.
+constexpr IRQn_Type adc_irq() {
+#if defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G071xx) || \
+    defined(STM32G081xx) || defined(STM32G070xx)
+    return ADC1_COMP_IRQn;
+#else
+    return ADC1_IRQn;
+#endif
+}
+
+/// Register block base of the DAC, 0 where there is none: 16.3's own
+/// table says the G031/G041 have no DAC, and their header declares no
+/// DAC1_BASE, which is the form this file trusts.
+constexpr uint32_t dac_base() {
+#if defined(DAC1_BASE)
+    return DAC1_BASE;
+#else
+    return 0;
+#endif
+}
+
+constexpr bool dac_present() { return dac_base() != 0u; }
+
+/// Output channels of the DAC: two where the header declares the second
+/// channel's enable bit, one where it does not, none where there is no
+/// DAC.
+constexpr uint8_t dac_channels() {
+    if (!dac_present()) {
+        return 0;
+    }
+#if defined(DAC_CR_EN2_Msk)
+    return 2;
+#else
+    return 1;
+#endif
+}
+
+constexpr uint32_t dac_clock_mask() {
+#if defined(RCC_APBENR1_DAC1EN)
+    return RCC_APBENR1_DAC1EN;
+#else
+    return 0;
+#endif
+}
+
+constexpr uint32_t dac_reset_mask() {
+#if defined(RCC_APBRSTR1_DAC1RST)
+    return RCC_APBRSTR1_DAC1RST;
+#else
+    return 0;
+#endif
+}
+
+/// The DAC's NVIC line - the underrun interrupt's only route, and it is
+/// SHARED WITH TIM6 AND LPTIM1 (table 61). The enumerator's own name
+/// says so, which is why this verb exists rather than a driver naming
+/// the vector.
+constexpr IRQn_Type dac_irq() {
+#if defined(DAC1_BASE)
+    return TIM6_DAC_LPTIM1_IRQn;
+#else
+    return NonMaskableInt_IRQn;
+#endif
+}
+
+/// Register block base of COMPn (n = 1..3), 0 where the device has none.
+/// 18.1: the third comparator is the G0B1/G0C1's alone, and the G031
+/// class has no comparator at all - and each header says exactly that by
+/// declaring or not declaring COMPn_BASE.
+constexpr uint32_t comp_base(uint8_t n) {
+    switch (n) {
+#if defined(COMP1_BASE)
+        case 1: return COMP1_BASE;
+#endif
+#if defined(COMP2_BASE)
+        case 2: return COMP2_BASE;
+#endif
+#if defined(COMP3_BASE)
+        case 3: return COMP3_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool comp_present(uint8_t n) { return comp_base(n) != 0u; }
+
+/// How many comparators this device has, counted off those probes.
+constexpr uint8_t comp_count() {
+    uint8_t count = 0;
+    for (uint8_t n = 1; n <= 3; ++n) {
+        if (comp_base(n) != 0u) {
+            count = n;
+        }
+    }
+    return count;
+}
+
+/// The EXTI line COMPn's output raises (13.5.1's line table: 17, 18 and
+/// 20, all three CONFIGURABLE lines, so a sense must be chosen before
+/// anything is pending). 0xFF for a comparator this device has not got.
+/// The NUMBERS are the manual's - no header of this pack spells them -
+/// which is why they live here beside exti_port_code() and not in a
+/// driver.
+constexpr uint8_t comp_exti_line(uint8_t n) {
+    if (!comp_present(n)) {
+        return 0xFF;
+    }
+    switch (n) {
+        case 1: return 17;
+        case 2: return 18;
+        case 3: return 20;
+        default: return 0xFF;
+    }
+}
+
+/// The NVIC line a comparator's EXTI interrupt arrives on: the ADC's,
+/// shared by all three (table 61) - which is why a handler for one is a
+/// dispatcher for four sources.
+constexpr IRQn_Type comp_irq() { return adc_irq(); }
+
+/// Register block base of the voltage reference buffer, 0 where the
+/// device has none.
+constexpr uint32_t vrefbuf_base() {
+#if defined(VREFBUF_BASE)
+    return VREFBUF_BASE;
+#else
+    return 0;
+#endif
+}
+
+constexpr bool vrefbuf_present() { return vrefbuf_base() != 0u; }
 
 } // namespace brio
