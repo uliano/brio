@@ -429,8 +429,46 @@ gets its dated home in `docs/design/` when taken.
   its own facts (the SAM's 4 us division and 20.8 ns VAL, the G0's two
   wait states and 15.6 ns); gated on BOTH projects from the build alone
   - 39/39 samc and 16/16 stm32g0 images byte-identical - with
-  test_stm32_platform z 53/53 on the bench (letter d is the delay). What
-  remains needs a peer or wires (the buses against a SAM at
+  test_stm32_platform z 53/53 on the bench (letter d is the delay). Campaign 10b THE TAILS, SECOND PASS, DONE
+  2026-09-04 small hours (Opus, re-verified by Fable's hand: rtc z
+  125/125 cold, analog z 139/139 cold, dma z 69/69 cold, tim 105/105,
+  the gate 13/16 with exactly the three grown suites as movers;
+  committed): rtc.hpp grew THE WHOLE TAMPER-DETECTION HALF of ch. 31
+  (filters, sampling, precharge, triggers, masks, the internal tampers,
+  the erase and its NOERASE, the EXTI 21 wake line, the ISR) plus
+  reference_clock() (REFIN, refused outside init mode and off the
+  default prescaler pair), shift() with 30.3.11's four refusals,
+  subsecond(), timestamp_on_tamper(); pin.hpp grew ucpd_dead_battery().
+  MEASURED: the tamper filter at 2/4/8 samples 17.5/35.2/66.5 ms against
+  15.6/31.3/62.5 predicted, TAMPFREQ 128/32/8 Hz, TAMPPUDIS real, a
+  masked tamper saving the backups its erase-requesting configuration
+  asked to wipe, ITAMP5 (calendar overflow) provoked and freezing the
+  calendar which an init-mode write restarts; REFIN: a calendar second
+  64131086 TIM2 ticks on the crystal alone, 64006056 against a 50 Hz
+  reference made by a software toggle whose fifty periods are 64000000
+  by construction (the correction quantized at one ck_apre period and
+  able to make SSR skip its zero); a shift of 64/256 landing exactly a
+  quarter second in its own second, SHPF standing 47 ms; the ADC tail
+  (WAIT stalls until DR is read, AUTOFF 700..900 ns per conversion,
+  discontinuous, TOVS exactly eight triggers per x8 result, the async
+  root, the seven remaining triggers, TWELVE external inputs on twelve
+  free pads as a map); the eight remaining DAC triggers and the DMA
+  underrun; all five DMA2 channels at three widths, 10.4.5's p2p (TIM6's
+  update moving TIM3's CCR1 into TIM4's), the DMA running in Sleep and
+  frozen by Stop. FINDINGS: TAMP_CR1 COMES OUT OF A DOMAIN RESET WITH
+  FOUR INTERNAL TAMPERS ARMED (0xFFFF0000), each erasing the backups
+  with no NOERASE bit; ARMING A TAMPER INPUT TAKES THE PAD, pulls and
+  all (no program can put an edge on it); 31.3.4's caution does not
+  reproduce and its latency rows are alternatives, not a sum; a
+  precharged pad reads a third of full scale on the ADC (the
+  sample-and-hold shares the charge); AND PA8 IS UCPD1_CC1 (PB15 CC2)
+  WITH A TYPE-C DEAD-BATTERY PULL-DOWN OUT OF POWER-ON (7.3.16) until
+  SYSCFG's strobe releases it - measured on PB15, very probably the
+  "desk fault" behind tim/exti letter a's PA8 precondition; a follow-up
+  is for those letters to release it through ucpd_dead_battery(). LSE
+  CSS DECLINED (one-way without a BDRST). STILL OPEN on the doc lists:
+  LPTIM2 on silicon, the USART/LPUART and TIM unverified lists,
+  uart_stress.py's 3 Mbaud sink leg. What remains needs a peer or wires (the buses against a SAM at
   3.3 V, FDCAN, USB, UCPD, the option-byte bench verb).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR

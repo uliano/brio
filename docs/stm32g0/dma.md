@@ -14,7 +14,7 @@ on the bench chip's revision Z column, where all five apply. Driver:
 from `stm32g0/device_tables.hpp`, and the REQUEST IDS from the
 peripherals that publish them (`Usart<n>::dma_tx_request()`,
 `Tim<n>::dma_update_request()` and their kin). Bench suite:
-`test_stm32_dma` (12 letters in `z`, 64 verdicts, wireless; letter `u`
+`test_stm32_dma` (14 letters in `z`, 69 verdicts, wireless; letter `u`
 outside `z` needs `tools/uart_stress.py`). Family fixture
 `test/family_stm32g0/dma.cpp` plus seven negatives under
 `tools/check_stm32g0.sh`.
@@ -424,33 +424,60 @@ mid-letter.
 also listed: over ten TIM14 periods, rising moved 10 words, falling 10,
 both 20.
 
+- **DMA2 is five channels and not one** (letter `m`): every one of them
+  moves a block at every width, byte for byte. With DMA1's seven -
+  1..5 the letters above, 6 and 7 the console's own transmit and receive
+  engines - all twelve channels of this part have now carried traffic.
+  DMAMUX's channel numbering runs straight through both controllers,
+  DMA2's first being DMA1's count.
+- **10.4.5's first sense, run**: TIM6's update paces a channel that
+  reads TIM3's CCR1 and writes TIM4's CCR1 - a request from one
+  peripheral moving data between two OTHERS, with both increments off.
+  Nothing in this controller's vocabulary names the arrangement and
+  nothing needs to: it is two addresses and a request id.
+- **THE SLEEP STORY, and the two halves have opposite answers for one
+  reason** (letter `n`): the controller is on HCLK, which Sleep keeps
+  and Stop takes away.
+  - **A channel keeps running with the CPU asleep.** A 512-word block
+    armed with its completion interrupt, then WFI: the transfer finishes,
+    its own completion is what wakes the core, and the destination is
+    exact. So the DMA is a way to spend a Sleep, not a thing that stops
+    with it.
+  - **A channel is FROZEN by a Stop, not broken by it.** A TIM6-paced
+    stream at 10 kHz, CNDTR read on both sides of a 60 ms Stop 1 woken
+    by an LPTIM1 compare on LSE: 391 before, 391 on the wake, 382 a
+    millisecond later. Not one request was served while HCLK was down
+    and the very same block goes on afterwards.
+  - The wake needs its VECTOR BOUND. A Stop left through an EXTI direct
+    line lands in the handler, and with none bound it lands in
+    `Default_Handler` and never comes back - which is what the first
+    version of this letter did.
+
 ## Not covered yet
 
 Driver gaps:
 
 - **Peripheral-to-peripheral transfers** in the sense of 10.4.5's first
-  bullet (a peripheral's request pacing a transfer between two OTHER
-  registers) are reachable through the existing verbs and exercised by
-  this suite's paced letters, but no vocabulary names the arrangement.
+  bullet are reachable through the existing verbs and are now bench-run
+  (above), and no vocabulary names the arrangement - deliberately, since
+  it is two addresses and a request id.
 - **`Dma<n>::reset()` resets the DMAMUX with the controller** (the RCC
   bit's own description), so a program with two live controllers cannot
   use it. Nothing here refuses the call; the caveat is stated on the verb
   and the suite never takes it.
-- **No sleep story.** Whether a channel keeps running in Sleep or Stop,
-  and what `RCC_AHBSMENR.DMAxSMEN` really buys, waits for a PWR driver -
-  there is none in this stratum yet.
-- **DMA2's channels are compile-checked and only channel 1 is bench-run.**
 - **No linked-list or repeated-block vocabulary**, because this
   controller has none: a channel is one block, and the only repetition it
   offers is CIRC.
 - **A one-shot burst vocabulary** in `util/` - a finite capture started
   and stopped - is still absent, and this campaign found no reason to
   change that (`docs/design/block-stream.md` says why).
+- **`RCC_AHBSMENR.DMAxSMEN`**, the sleep-mode clock enable, has no verb
+  in `clock.hpp` at all ([clock.md](clock.md) carries the gap for the
+  whole register group). What it buys is therefore stated by the chapter
+  and not measured; what IS measured is that a channel runs in Sleep and
+  freezes in Stop with the bits at their reset values.
 
-Implemented but not bench-verified:
-
-- the widths on DMA2, and every channel of DMA1 above 5 except as the
-  console's own two engines.
+Implemented but not bench-verified: nothing of the controller's own.
 
 Errata not staged, and why: 2.4.1 is a same-cycle coincidence between a
 hardware error and a CGIFx write, and the write does not exist in this

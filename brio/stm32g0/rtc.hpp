@@ -1030,6 +1030,49 @@ struct Rtc {
         lock();
     }
 
+    // ---- reference clock detection (30.3.12) --------------------------------
+    //
+    // REFCKON does NOT clock the calendar - the LSE still does. What it
+    // buys is a RELOAD of the asynchronous prescaler whenever an edge of
+    // RTC_REFIN is seen inside the detection window around a calendar
+    // update, which drags the 1 Hz edge onto the reference's and makes
+    // the calendar as accurate as the reference instead of as accurate
+    // as the crystal. The correction is therefore quantized at ONE
+    // ck_apre period per second - the prescaler is reloaded, not
+    // trimmed - and the window is 7 ck_apre periods hunting for the
+    // first edge and 3 once locked.
+    //
+    // TWO RULES, and both are refusals here rather than notes:
+    //  - REFCKON is bit 4 of RTC_CR, which 30.6.3's own note says may be
+    //    written in INITIALIZATION MODE ONLY;
+    //  - the prescalers must be the default pair (PREDIV_A = 0x7F,
+    //    PREDIV_S = 0xFF), because the detection is built on a 256 Hz
+    //    ck_apre. Enabling it under any other pair is 30.3.12's own
+    //    "must", and a driver that let it through would be shipping a
+    //    calendar that is silently wrong.
+    //
+    // And one INTERLOCK the chapter states from the other side: a shift
+    // operation must not be issued while this is on (30.3.11's caution),
+    // which shift() below enforces.
+
+    static bool reference_clock() { return (RTC->CR & RTC_CR_REFCKON) != 0u; }
+
+    static bool reference_clock(bool on) {
+        if (!in_init()) {
+            return false;
+        }
+        if (on) {
+            const RtcPrescalers p = prescalers();
+            if (p.async != 0x7Fu || p.sync != 0xFFu) {
+                return false;
+            }
+        }
+        unlock();
+        RTC->CR = on ? (RTC->CR | RTC_CR_REFCKON) : (RTC->CR & ~RTC_CR_REFCKON);
+        lock();
+        return true;
+    }
+
     /**
      * Write the calendar - TR and DR - and pin the 24-hour format.
      * Legal ONLY in initialization mode (30.6.1 and 30.6.2 both say
@@ -1140,6 +1183,25 @@ struct Rtc {
      *
      * 0xFFFFFFFF when the calendar could not be read coherently.
      */
+    /**
+     * RTC_SSR alone - the synchronous prescaler's counter, counting DOWN
+     * from PREDIV_S and reloading at every calendar update.
+     *
+     * read() gives the calendar; this gives the PHASE, in one load where
+     * read() costs three plus a coherence retry. It is what 30.3.11's
+     * synchronization procedure actually needs (the offset to a remote
+     * clock is computed from SS and nothing else), it is shift()'s own
+     * precondition, and it is the only reading fine enough to catch the
+     * 1 Hz edge AS IT HAPPENS: a value that has RISEN since the previous
+     * read is a reload, located to whatever the caller's loop costs
+     * rather than to the 1/(PREDIV_S+1) second the value itself
+     * resolves. With BYPSHAD clear it is a shadow reading like any
+     * other and the caller owes wait_sync() first.
+     */
+    static uint16_t subsecond() {
+        return static_cast<uint16_t>(RTC->SSR & RTC_SSR_SS_Msk);
+    }
+
     static uint32_t time_of_hour_ms() {
         RtcReading r{};
         if (!read(r)) {
@@ -1178,6 +1240,51 @@ struct Rtc {
         lock();
     }
     static bool daylight_flag() { return (RTC->CR & RTC_CR_BKP) != 0u; }
+
+    // ---- the sub-second shift (30.3.11) -------------------------------------
+
+    /**
+     * Shift the calendar by a fraction of a second - RTC_SHIFTR.
+     *
+     * `subfs` is ADDED to the synchronous prescaler counter, which
+     * counts DOWN, so it DELAYS the clock by subfs / (PREDIV_S + 1)
+     * seconds. With `add1s` the whole second is added first, so the pair
+     * ADVANCES the clock by 1 - subfs / (PREDIV_S + 1) seconds in one
+     * atomic operation. That asymmetry is the register's, not this
+     * verb's: there is no "subtract a second" bit.
+     *
+     * FOUR REFUSALS, every one of them a sentence of 30.3.11 or 30.6.10:
+     *  - `subfs` past the 15-bit field;
+     *  - a shift already pending (SHPF), where the register says a write
+     *    "has no effect" - a silent loss this verb turns into a false;
+     *  - REFCKON set, which 30.3.11's caution forbids outright;
+     *  - SS[15] set, the caution's overflow guard. On this family SS is
+     *    16 bits and PREDIV_S is 15, so bit 15 can only be standing
+     *    because an earlier shift put it there, and shifting again from
+     *    that state is what the chapter tells the caller to avoid.
+     *
+     * It INITIATES and returns: the operation takes up to a second of
+     * RTCCLK to land and `shift_pending()` is the completion, exactly as
+     * the flag's own description has it. Writing SUBFS also clears RSF,
+     * so a caller reading through the shadow registers waits for
+     * `synchronized()` before believing what it reads.
+     */
+    static bool shift(bool add1s, uint16_t subfs) {
+        if (subfs > 0x7FFFu) {
+            return false;
+        }
+        if (shift_pending() || reference_clock()) {
+            return false;
+        }
+        if ((RTC->SSR & 0x8000u) != 0u) {
+            return false;
+        }
+        unlock();
+        RTC->SHIFTR = (add1s ? RTC_SHIFTR_ADD1S : 0u) |
+                      (static_cast<uint32_t>(subfs) << RTC_SHIFTR_SUBFS_Pos);
+        lock();
+        return true;
+    }
 
     // ---- alarms -------------------------------------------------------------
 
@@ -1395,6 +1502,34 @@ struct Rtc {
     }
     static bool timestamp_enabled() { return (RTC->CR & RTC_CR_TSE) != 0u; }
 
+    /**
+     * TAMPTS - a TAMPER event fills the timestamp registers.
+     *
+     * It is the timestamp source that needs no RTC_TS pad, and on this
+     * board it is the only one that can be staged at all: RTC_TS is
+     * PC13, which carries the user button and its own pull-up. 31.3.4
+     * also prices it - with TAMPTS set a tamper flag is asserted 3
+     * ck_apre cycles after the event instead of at once.
+     */
+    static void timestamp_on_tamper(bool on) {
+        unlock();
+        RTC->CR = on ? (RTC->CR | RTC_CR_TAMPTS) : (RTC->CR & ~RTC_CR_TAMPTS);
+        lock();
+    }
+    static bool timestamp_on_tamper() { return (RTC->CR & RTC_CR_TAMPTS) != 0u; }
+
+    /// ITSE - the INTERNAL timestamp, whose one event is the switch to
+    /// the VBAT supply (30.3.14). Offered because it is one bit of the
+    /// same register and a program that keeps a timestamp wants to know
+    /// which source filled it; ITSF in RTC_SR is how the two are told
+    /// apart. It cannot be staged on a board with VDD only.
+    static void timestamp_internal(bool on) {
+        unlock();
+        RTC->CR = on ? (RTC->CR | RTC_CR_ITSE) : (RTC->CR & ~RTC_CR_ITSE);
+        lock();
+    }
+    static bool timestamp_internal() { return (RTC->CR & RTC_CR_ITSE) != 0u; }
+
     /// TSTR/TSDR/TSSSR as one reading. Valid only while TSF stands - the
     /// registers are frozen from the event until the flag is cleared.
     static RtcReading timestamp() {
@@ -1457,8 +1592,185 @@ struct Rtc {
 };
 
 // =============================================================================
-// TAMP (RM0444 ch. 31) - the backup registers, and the rest read-only
+// TAMP (RM0444 ch. 31) - the backup registers and the tamper detection
 // =============================================================================
+
+/**
+ * TAMPFLT (31.6.3) - the block's detection MODE, not an input's.
+ *
+ * `edge` is the register's 0x0 and it is a different peripheral from the
+ * other three: no filter, no sampling clock, no internal pull-up on the
+ * pads and no latency between the pad and the flag. The three sample
+ * counts are the LEVEL detector, which precharges each pad through the
+ * internal pull-up, samples it at TAMPFREQ and fires after N
+ * consecutive samples at the active level.
+ *
+ * One FLTCR serves every TAMP_INx, which is why the filter, the
+ * sampling rate and the precharge are a BLOCK config here and only the
+ * trigger polarity is per input.
+ */
+enum class TamperFilter : uint8_t {
+    edge = 0,
+    samples2 = 1,
+    samples4 = 2,
+    samples8 = 3,
+};
+
+/// TAMPFREQ - how often a filtered input is sampled, as RTCCLK divided
+/// by a power of two from 32768 down to 256 (1 Hz to 128 Hz on a 32768
+/// Hz RTCCLK). It is the detection LATENCY's other factor and, through
+/// the precharge, the pull-up's duty cycle: 31.3.4 calls the choice the
+/// trade-off between latency and the current the pull-up costs.
+enum class TamperSampling : uint8_t {
+    div32768 = 0,
+    div16384 = 1,
+    div8192 = 2,
+    div4096 = 3,
+    div2048 = 4,
+    div1024 = 5,
+    div512 = 6,
+    div256 = 7,
+};
+
+constexpr uint32_t tamper_sampling_divider(TamperSampling s) {
+    return 32768UL >> static_cast<uint32_t>(s);
+}
+
+/// The sampling rate in hertz for a STATED RTCCLK - the rate is the
+/// caller's argument, the rtc_ck_spre_hz() convention, because LSE and
+/// LSI are not the same number and this file must not pretend to know
+/// which one the domain took.
+constexpr uint32_t tamper_sampling_hz(TamperSampling s, uint32_t rtcclk_hz) {
+    return rtcclk_hz / tamper_sampling_divider(s);
+}
+
+/// TAMPPRCH - how long a pad is held by the internal pull-up before
+/// each sample, in RTCCLK cycles. Larger capacitance on the input wants
+/// a longer precharge; TamperConfig::pullup false turns the precharge
+/// off entirely (TAMPPUDIS) and makes the sampler read whatever the
+/// outside world holds.
+enum class TamperPrecharge : uint8_t {
+    cycles1 = 0,
+    cycles2 = 1,
+    cycles4 = 2,
+    cycles8 = 3,
+};
+
+/**
+ * TAMPxTRG - and THE BIT MEANS OPPOSITE SENSES IN THE TWO MODES, which
+ * is why neither value is called "active low" here.
+ *
+ * 31.6.2 spells it out per bit: with TAMPFLT != 00 a zero means "input
+ * staying LOW triggers", and with TAMPFLT == 00 the same zero means
+ * "RISING edge and high level triggers". So the one register bit selects
+ * a low level in the filtered detector and a rise in the edge detector -
+ * an application that switches its filter on and keeps its trigger
+ * constant has just inverted its own polarity. The names carry both
+ * readings so the trap cannot be spelled away.
+ */
+enum class TamperTrigger : uint8_t {
+    low_level_or_rising_edge = 0,
+    high_level_or_falling_edge = 1,
+};
+
+/// The block-wide detection config - one TAMP_FLTCR.
+struct TamperConfig {
+    TamperFilter filter = TamperFilter::edge;
+    TamperSampling sampling = TamperSampling::div32768;
+    TamperPrecharge precharge = TamperPrecharge::cycles1;
+    bool pullup = true;   ///< the precharge; TAMPPUDIS is its inverse
+};
+
+/// One TAMP_INx, in the manual's own 1-based numbering.
+struct TamperInput {
+    uint8_t index = 1;
+    TamperTrigger trigger = TamperTrigger::low_level_or_rising_edge;
+
+    /// TAMPxNOERASE inverted. The DEFAULT ERASES THE BACKUP REGISTERS,
+    /// which is the register's own reset state and the whole point of
+    /// the block, and is stated here rather than hidden behind a
+    /// friendlier default.
+    bool erase_backups = true;
+
+    /// TAMPxMSK: the flag is masked and cleared by hardware, the backup
+    /// registers are NOT erased, and what survives is the trigger to the
+    /// low-power timers. 31.3.4 restricts it to the FILTERED detector,
+    /// and 31.6.2 forbids the interrupt with it - both are refusals in
+    /// tamper_input_valid().
+    bool masked = false;
+
+    bool interrupt = false;   ///< TAMPxIE
+};
+
+/// The two illegal combinations, both of them sentences of ch. 31, and
+/// the index checked against what the part declares.
+constexpr bool tamper_input_valid(const TamperInput& t, TamperFilter f) {
+    if (t.index < 1u || t.index > tamp_external_inputs()) {
+        return false;
+    }
+    if (t.masked && t.interrupt) {
+        return false;   // 31.6.2: "must not be enabled when TAMPxMSK is set"
+    }
+    if (t.masked && f == TamperFilter::edge) {
+        return false;   // 31.3.4: level detection with filtering only
+    }
+    return true;
+}
+
+/// One bit per TAMP event - the shape TAMP_SR, TAMP_MISR and TAMP_SCR
+/// all share, the RtcFlag convention.
+struct TampFlag {
+    static constexpr uint32_t tamper1 = TAMP_SR_TAMP1F;
+    static constexpr uint32_t tamper2 = TAMP_SR_TAMP2F;
+    /// THE THIRD INPUT IS THE G0B1'S ALONE - the G071's and the G031's
+    /// headers declare TAMP1F and TAMP2F and stop, which is why
+    /// tamp_external_inputs() is a probe and not a constant. Its mask is
+    /// zero where the part has none, so every expression over these
+    /// stays legal on every header.
+#if defined(TAMP_SR_TAMP3F_Msk)
+    static constexpr uint32_t tamper3 = TAMP_SR_TAMP3F;
+#else
+    static constexpr uint32_t tamper3 = 0u;
+#endif
+    static constexpr uint32_t external = tamper1 | tamper2 | tamper3;
+
+    /// All three headers of this pack declare the four internal sources,
+    /// and the probe is still a probe because a part without them would
+    /// otherwise compile a mask that does not exist.
+#if defined(TAMP_SR_ITAMP3F_Msk)
+    static constexpr uint32_t lse_monitor = TAMP_SR_ITAMP3F;
+    static constexpr uint32_t hse_monitor = TAMP_SR_ITAMP4F;
+    static constexpr uint32_t calendar_overflow = TAMP_SR_ITAMP5F;
+    static constexpr uint32_t manufacturer_readout = TAMP_SR_ITAMP6F;
+#else
+    static constexpr uint32_t lse_monitor = 0u;
+    static constexpr uint32_t hse_monitor = 0u;
+    static constexpr uint32_t calendar_overflow = 0u;
+    static constexpr uint32_t manufacturer_readout = 0u;
+#endif
+    static constexpr uint32_t internal = lse_monitor | hse_monitor |
+                                         calendar_overflow |
+                                         manufacturer_readout;
+    static constexpr uint32_t all = external | internal;
+};
+
+/// The flag of external tamper `index` (1-based), 0 for an index this
+/// part has not got.
+constexpr uint32_t tamper_flag(uint8_t index) {
+    return (index >= 1u && index <= tamp_external_inputs())
+               ? (1UL << (index - 1u))
+               : 0u;
+}
+
+/// The flag of internal tamper `y` (the manual's ITAMP3..ITAMP6), 0
+/// where the part has none.
+constexpr uint32_t internal_tamper_flag(uint8_t y) {
+    if (!tamp_has_internal_tampers() || y < tamp_internal_first ||
+        y > tamp_internal_last) {
+        return 0u;
+    }
+    return 1UL << (15u + y);   // ITAMP3F is bit 18
+}
 
 /**
  * The tamper and backup block.
@@ -1470,14 +1782,18 @@ struct Rtc {
  * kind of surviving storage, beside the .noinit breadcrumb (a system
  * reset only) and the flash journal (everything).
  *
- * WHAT IS NOT, AND WHY: the tamper DETECTION half is decoded read-only.
- * Arming a tamper is not a measurement a bench can undo - a detected
- * tamper ERASES the backup registers by default, which is precisely the
- * storage the rest of this stratum leans on - and nothing on the desk
- * can drive a TAMP_IN pad anyway. The registers are readable so a
- * program can SEE what it inherited (an active tamper configuration
- * left by something else is exactly the sort of thing that eats a
- * breadcrumb), and that is the whole of it.
+ * AND THE TAMPER DETECTION, which is the rest of the chapter: three
+ * external inputs with an edge detector and a filtered level detector,
+ * four internal sources on the parts that declare them, the erase of the
+ * backup registers, the mask that suppresses it, the timestamp
+ * (RTC_CR.TAMPTS, over in Rtc) and the interrupt.
+ *
+ * WHAT ARMING ONE COSTS, said once and not hidden behind a default: a
+ * detected tamper ERASES the five backup registers unless TAMPxNOERASE
+ * or TAMPxMSK says otherwise, and those five words are the third kind of
+ * surviving storage this stratum has. `any_armed()` stays exactly what
+ * it was - the one question a program keeping something there needs
+ * answered about the state it inherited.
  *
  * The domain gate is RtcDomain's: DBP for the write access, RTCAPBEN for
  * the register bank. The RTC's WPR key does NOT cover this block -
@@ -1519,14 +1835,157 @@ struct Tamp {
     static uint32_t status() { return TAMP->SR; }
     static uint32_t masked_status() { return TAMP->MISR; }
 
-    /// Is any tamper input armed? The one question a program that keeps
-    /// something in the backup registers actually needs answered.
+    /// Is any EXTERNAL tamper input armed? The low half of TAMP_CR1.
     static bool any_armed() { return (TAMP->CR1 & 0xFFFFu) != 0u; }
+
+    /// Is any INTERNAL tamper armed? IT IS NOT A RHETORICAL QUESTION:
+    /// 31.6.1 gives TAMP_CR1 the RTC domain reset value 0xFFFF0000, and
+    /// bits 18..21 of that are ITAMP3E..ITAMP6E - so a part that has
+    /// never been told anything about tampering comes out of a domain
+    /// reset with LSE monitoring, HSE monitoring, the calendar overflow
+    /// and the ST manufacturer readout ALL ARMED, measured on this
+    /// silicon. None of them has a NOERASE bit.
+    static bool any_internal_armed() {
+        return (TAMP->CR1 & TampFlag::internal) != 0u;
+    }
+
+    /// THE QUESTION A PROGRAM KEEPING SOMETHING IN THE BACKUP REGISTERS
+    /// ACTUALLY NEEDS ANSWERED: is anything at all armed that would
+    /// erase them? Both halves, because the reset value arms the
+    /// internal one and an application asking only about the pads would
+    /// be told "no" by a chip that is one calendar overflow away from
+    /// wiping its breadcrumb.
+    static bool erase_source_armed() {
+        return any_armed() || any_internal_armed();
+    }
 
     /// Clear a tamper flag (TAMP_SCR). Offered because a flag standing
     /// from a previous life blocks a Standby entry (table 33's own
     /// precondition list), and clearing one is not arming anything.
     static void clear_flags(uint32_t mask) { TAMP->SCR = mask; }
+
+    // ---- the detection half (31.3.4) ----------------------------------------
+
+    static constexpr uint8_t input_count = tamp_external_inputs();
+    static constexpr bool has_internal_tampers = tamp_has_internal_tampers();
+
+    /**
+     * The block's detection mode - TAMP_FLTCR.
+     *
+     * REFUSED WHILE ANY INPUT IS ARMED, and that is 31.6.1's own
+     * footnote: the mode "must be configured before enabling the tamper
+     * detection". Nothing in the silicon enforces it, so a store into a
+     * live block would land and change what a running detector means
+     * halfway through a sample train.
+     */
+    static bool filter_config(const TamperConfig& c) {
+        if (any_armed()) {
+            return false;
+        }
+        TAMP->FLTCR =
+            (static_cast<uint32_t>(c.sampling) << TAMP_FLTCR_TAMPFREQ_Pos) |
+            (static_cast<uint32_t>(c.filter) << TAMP_FLTCR_TAMPFLT_Pos) |
+            (static_cast<uint32_t>(c.precharge) << TAMP_FLTCR_TAMPPRCH_Pos) |
+            (c.pullup ? 0u : TAMP_FLTCR_TAMPPUDIS);
+        return true;
+    }
+
+    static TamperFilter filter_mode() {
+        return static_cast<TamperFilter>(
+            (TAMP->FLTCR & TAMP_FLTCR_TAMPFLT_Msk) >> TAMP_FLTCR_TAMPFLT_Pos);
+    }
+
+    static bool armed(uint8_t index) {
+        const uint32_t bit = tamper_flag(index);
+        return bit != 0u && (TAMP->CR1 & bit) != 0u;
+    }
+
+    /**
+     * Arm one external tamper input.
+     *
+     * The ORDER is the chapter's: the trigger, the erase policy, the
+     * mask and the interrupt all land BEFORE TAMPxE, because the same
+     * footnote that governs filter_config() governs TAMP_CR2. Re-arming
+     * an already-armed input is refused for the same reason - the caller
+     * disarms first, which is also 31.3.4's own advice after a detection
+     * ("the TAMP_INx should be disabled and then re-enabled").
+     */
+    static bool arm(const TamperInput& t) {
+        if (!tamper_input_valid(t, filter_mode()) || armed(t.index)) {
+            return false;
+        }
+        const uint32_t n = t.index - 1u;
+        uint32_t cr2 = TAMP->CR2;
+        cr2 &= ~((1UL << n) | (1UL << (16u + n)) | (1UL << (24u + n)));
+        if (!t.erase_backups) {
+            cr2 |= 1UL << n;              // TAMPxNOERASE
+        }
+        if (t.masked) {
+            cr2 |= 1UL << (16u + n);      // TAMPxMSK
+        }
+        if (t.trigger == TamperTrigger::high_level_or_falling_edge) {
+            cr2 |= 1UL << (24u + n);      // TAMPxTRG
+        }
+        TAMP->CR2 = cr2;
+        TAMP->IER = t.interrupt ? (TAMP->IER | (1UL << n))
+                                : (TAMP->IER & ~(1UL << n));
+        TAMP->CR1 = TAMP->CR1 | (1UL << n);
+        return true;
+    }
+
+    /// Disarm one input, interrupt included - a disarmed input that can
+    /// still raise a vector would be a trap of this driver's making.
+    static bool disarm(uint8_t index) {
+        const uint32_t bit = tamper_flag(index);
+        if (bit == 0u) {
+            return false;
+        }
+        TAMP->CR1 = TAMP->CR1 & ~bit;
+        TAMP->IER = TAMP->IER & ~bit;
+        return true;
+    }
+
+    /**
+     * One INTERNAL tamper, by the manual's own index (ITAMP3 = LSE
+     * monitoring, 4 = HSE monitoring, 5 = the calendar overflow, 6 = the
+     * ST manufacturer readout).
+     *
+     * They are the parts of this chapter that need no pad at all, and
+     * they ERASE THE BACKUP REGISTERS TOO: 31.3.4's erase is driven by
+     * ITAMPyF exactly as it is by TAMPxF, and there is no NOERASE bit
+     * for an internal source. False where the part declares none.
+     */
+    static bool internal_tamper(uint8_t y, bool on, bool interrupt = false) {
+        const uint32_t bit = internal_tamper_flag(y);
+        if (bit == 0u) {
+            return false;
+        }
+        TAMP->CR1 = on ? (TAMP->CR1 | bit) : (TAMP->CR1 & ~bit);
+        TAMP->IER = (on && interrupt) ? (TAMP->IER | bit)
+                                      : (TAMP->IER & ~bit);
+        return true;
+    }
+
+    static bool flag(uint32_t mask) { return (TAMP->SR & mask) != 0u; }
+
+    /// Unmask this block's EXTI line (table 65's DIRECT line 21). The
+    /// RTC's own wake_line_open() is the twin, and the two lines share
+    /// one vector.
+    static bool wake_line_open() { return Exti::interrupt(exti_line, true); }
+
+    /**
+     * The ISR body an app's RTC_TAMP_IRQHandler calls for this half.
+     * Returns the MASKED flags it served and clears exactly those, the
+     * Rtc::isr() convention - so one handler can call both bodies and
+     * dispatch on the union.
+     */
+    [[gnu::always_inline]] static uint32_t isr() {
+        const uint32_t served = TAMP->MISR & TampFlag::all;
+        if (served != 0u) {
+            TAMP->SCR = served;
+        }
+        return served;
+    }
 };
 
 } // namespace brio

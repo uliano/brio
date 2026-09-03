@@ -83,6 +83,8 @@
 #include "stm32g0/delay.hpp"
 #include "stm32g0/dma.hpp"
 #include "stm32g0/exti.hpp"
+#include "stm32g0/lptim.hpp"
+#include "stm32g0/pwr.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/pin.hpp"
 #include "stm32g0/platform_stm32.hpp"
@@ -110,7 +112,7 @@ using ConsoleRx = DmaRxEngine<1, 7>;
 using Serial = Uart<2, console_pins, 64, 256, ConsoleTx, ConsoleRx>;
 constexpr Serial serial;
 
-TestBench<Serial, 16> bench;
+TestBench<Serial, 20> bench;
 
 // ---- the channels this suite plays with -------------------------------------
 using ChA = DmaChannel<1, 1>;   // m2m, the loop engine, the event source
@@ -129,6 +131,9 @@ using T2 = Tim<2>;     // the payload counter, and LD4's PWM
 using T3 = Tim<3>;     // the pace
 using T14 = Tim<14>;   // trigger input 22 for the request generator
 using T16 = Tim<16>;   // the capture source, on LSI
+using T4b = Tim<4>;    // letter m's peripheral-to-peripheral destination
+using T6b = Tim<6>;    // letter m's and letter n's pacer
+using Lp1d = Lptim<1>; // letter n's alarm through a Stop, on LSE
 
 constexpr PinSel led_pad{'A', 5, PinFunction::af2};   // TIM2_CH1
 using PadLed = Pin<'A', 5>;
@@ -196,6 +201,7 @@ uint32_t boot_mux0 = 0;
 
 // ---- interrupt bookkeeping ---------------------------------------------------
 volatile uint32_t ch1_calls = 0;
+volatile uint32_t lptim_calls = 0;
 volatile uint32_t ch2_calls = 0;
 volatile uint32_t ch3_calls = 0;
 volatile uint32_t loop_laps_seen = 0;
@@ -231,6 +237,15 @@ void pace_stop() {
 }
 
 volatile void* payload_address() { return &T2::regs().CNT; }
+
+/// Wait for the console to be physically empty - a measurement window a
+/// transmit engine walks through is not a measurement.
+void drain_console() {
+    uint32_t spins = 8'000'000UL;
+    while ((!Serial::tx_idle() || (Usart<2>::status() & UsartFlag::tc) == 0u) &&
+           spins-- != 0u) {
+    }
+}
 
 void quiet_everything() {
     Loop::stop();
@@ -2183,6 +2198,284 @@ void banner() {
           "  z  every letter but u", crlf);
 }
 
+
+// =============================================================================
+// m - DMA2's own channels, and a transfer between two peripherals
+// =============================================================================
+//
+// DMA1 is fully spoken for by this suite: channels 1..5 carry the
+// letters above and 6 and 7 ARE the console's own transmit and receive
+// engines, so every one of the seven has moved bytes. DMA2's five have
+// not: only channel 1 has ever run, in letter c's last leg. This letter
+// runs all five at all three widths, which is what the doc's line
+// "the widths on DMA2" asks for.
+
+using Ch2a = DmaChannel<2, 1>;
+using Ch2b = DmaChannel<2, 2>;
+using Ch2c = DmaChannel<2, 3>;
+using Ch2d = DmaChannel<2, 4>;
+using Ch2e = DmaChannel<2, 5>;
+
+/// One MEM2MEM block on an arbitrary channel, polled to completion.
+template <class C>
+bool block_on(volatile const void* from, volatile void* to, uint16_t count,
+              DmaWidth w) {
+    if (!C::prepare(DmaTransfer{
+            .peripheral = const_cast<volatile void*>(from),
+            .memory = to,
+            .count = count,
+            .config = {.memory_to_memory = true,
+                       .peripheral_increment = true,
+                       .memory_increment = true,
+                       .peripheral_width = w,
+                       .memory_width = w}})) {
+        return false;
+    }
+    (void)C::enable(true);
+    uint32_t spins = 1'000'000u;
+    while (!C::flag(DmaFlag::complete) && spins-- != 0u) {
+    }
+    const bool done = C::flag(DmaFlag::complete);
+    C::stop();
+    return done;
+}
+
+/// Every width on one channel of the second controller, checked byte for
+/// byte against the source.
+template <class C>
+bool widths_on(uint8_t index) {
+    bool ok = true;
+    const DmaWidth widths[3] = {DmaWidth::byte, DmaWidth::half,
+                                DmaWidth::word};
+    const uint16_t counts[3] = {64, 32, 16};
+    for (uint8_t w = 0; w < 3u; ++w) {
+        for (uint16_t i = 0; i < 16u; ++i) {
+            dst_words[i] = 0;
+        }
+        const bool ran = block_on<C>(&big_src[0], &dst_words[0], counts[w],
+                                     widths[w]);
+        bool exact = ran;
+        for (uint16_t i = 0; i < 16u && exact; ++i) {
+            if (dst_words[i] != big_src[i]) {
+                exact = false;
+            }
+        }
+        if (!exact) {
+            print(serial, "  DMA2 channel ", index, " width code ", w,
+                  ": ran ", ran ? 1u : 0u, ", exact ", exact ? 1u : 0u, crlf);
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+void tm_dma2_and_p2p() {
+    quiet_everything();
+    for (uint16_t i = 0; i < 512; ++i) {
+        big_src[i] = 0x5A000000u + i;
+    }
+    if (!dma_present(2)) {
+        bench.verdict("this part has a second controller", false);
+        return;
+    }
+    Dma<2>::bus_clock(true);
+
+    const bool all = widths_on<Ch2a>(1) && widths_on<Ch2b>(2) &&
+                     widths_on<Ch2c>(3) && widths_on<Ch2d>(4) &&
+                     widths_on<Ch2e>(5);
+    bench.verdict("every one of DMA2's five channels moves a block at every "
+                  "width, byte for byte - the second controller is five "
+                  "channels and not one",
+                  all);
+    print(serial, "  DMA1 has ", Dma<1>::channels, " channels and DMA2 ",
+          Dma<2>::channels, "; DMA1's 6 and 7 are this console's own two "
+          "engines, so all twelve have carried traffic", crlf);
+    bench.verdict("and DMAMUX's channel numbering runs straight through both "
+                  "controllers, DMA2's first being DMA1's count",
+                  Ch2a::mux_channel == Dma<1>::channels &&
+                      Ch2e::mux_channel == Dma<1>::channels + 4u);
+
+    // ---- 10.4.5's FIRST sense: a transfer between two PERIPHERALS -----------
+    // The request comes from ONE peripheral and neither end of the
+    // transfer is that peripheral: TIM6's update paces a channel that
+    // reads TIM3's counter and writes TIM4's reload register. Nothing in
+    // this controller's vocabulary names the arrangement - both ends are
+    // simply addresses with their increments off - which is exactly what
+    // dma.md says, and this is what it looks like when it runs.
+    T3::bus_clock(true);
+    T4b::bus_clock(true);
+    T6b::bus_clock(true);
+    const bool timers =
+        T3::configure({.prescaler = 0, .period = 0xFFFFu}) &&
+        T4b::configure({.prescaler = 0, .period = 0xFFFFu}) &&
+        T6b::configure({.prescaler = 63, .period = 999});
+    T3::enable(true);
+    // A known word in the SOURCE peripheral's register, so the
+    // destination's value can only have come from it.
+    const bool seeded = T3::set_compare(0, 0x1234u) && T4b::set_compare(0, 0u);
+    const bool armed = seeded && ChA::prepare(DmaTransfer{
+        .peripheral = T3::ccr_address(0),
+        .memory = T4b::ccr_address(0),
+        .count = 8,
+        .config = {.direction = DmaDirection::peripheral_to_memory,
+                   .circular = false,
+                   .peripheral_increment = false,
+                   .memory_increment = false,
+                   .peripheral_width = DmaWidth::half,
+                   .memory_width = DmaWidth::half}});
+    const bool routed = DmaMux::request(ChA::mux_channel,
+                                       T6b::dma_update_request());
+    const uint32_t arr_before = T4b::compare(0);
+    T6b::interrupts(T6b::update_dma, true);
+    (void)ChA::enable(true);
+    T6b::enable(true);
+    uint32_t spins = 2'000'000u;
+    while (!ChA::flag(DmaFlag::complete) && spins-- != 0u) {
+    }
+    const bool done = ChA::flag(DmaFlag::complete);
+    T6b::enable(false);
+    T6b::interrupts(T6b::update_dma, false);
+    ChA::stop();
+    const uint32_t arr_after = T4b::compare(0);
+    print(serial, "  TIM6's update paced eight halfwords from TIM3's CCR1 "
+                  "into TIM4's CCR1: ", arr_before, " -> ", arr_after,
+          crlf);
+    bench.verdict("a request from one peripheral moves data between two "
+                  "OTHERS - 10.4.5's first sense, with no vocabulary of its "
+                  "own and none needed",
+                  timers && armed && routed && done && arr_before == 0u &&
+                      arr_after == 0x1234u);
+    T3::release();
+    T4b::release();
+    T6b::release();
+    quiet_everything();
+}
+
+// =============================================================================
+// n - the sleep story: a channel through Sleep, and a channel through Stop
+// =============================================================================
+//
+// dma.md has carried "no sleep story" since the campaign that wrote it,
+// on the grounds that there was no PWR driver. There is one now
+// (pwr.hpp), so the two questions can be asked properly, and they have
+// opposite answers for one reason: the DMA is on HCLK, and HCLK is
+// exactly what Sleep keeps and Stop takes away.
+
+void tn_sleep_story() {
+    quiet_everything();
+    for (uint16_t i = 0; i < 512; ++i) {
+        big_src[i] = 0x7E000000u + i;
+        big_dst[i] = 0;
+    }
+
+    // ---- SLEEP: the transfer is the wake ----------------------------------
+    // A block armed with its completion interrupt, and then WFI. If the
+    // channel stopped with the CPU nothing would ever wake it and the
+    // watchdog below would say so; if it runs, the wake IS the proof.
+    ch1_calls = 0;
+    const bool armed = ChA::prepare(DmaTransfer{
+        .peripheral = &big_src[0],
+        .memory = &big_dst[0],
+        .count = 512,
+        .config = {.memory_to_memory = true,
+                   .peripheral_increment = true,
+                   .memory_increment = true,
+                   .peripheral_width = DmaWidth::word,
+                   .memory_width = DmaWidth::word}});
+    (void)ChA::arm(DmaFlag::complete, true);
+    Nvic::enable(DMA1_Channel1_IRQn);
+    drain_console();
+    const uint32_t t0 = Ticker::millis();
+    (void)ChA::enable(true);
+    Pwr::enter(PwrMode::sleep);
+    const uint32_t woke_ms = Ticker::millis() - t0;
+    const bool done = ChA::flag(DmaFlag::complete) || ch1_calls != 0u;
+    bool exact = done;
+    for (uint16_t i = 0; i < 512u && exact; ++i) {
+        if (big_dst[i] != big_src[i]) {
+            exact = false;
+        }
+    }
+    ChA::stop();
+    Nvic::disable(DMA1_Channel1_IRQn);
+    print(serial, "  Sleep: the block finished and woke the core after ",
+          woke_ms, " ms, handler calls ", ch1_calls, crlf);
+    bench.verdict("a channel keeps running with the CPU asleep - HCLK is what "
+                  "Sleep keeps, and the transfer's own completion is what "
+                  "wakes the core",
+                  armed && exact && ch1_calls != 0u);
+
+    // ---- STOP: the transfer is FROZEN and resumes -------------------------
+    // The pacer is TIM6, which stops with the bus; the alarm is LPTIM1 on
+    // LSE, which does not (lptim.md). CNDTR is read on both sides of the
+    // Stop, and the wall clock the RTC keeps says how long the board was
+    // in it.
+    for (uint16_t i = 0; i < 512; ++i) {
+        big_dst[i] = 0;
+    }
+    T3::bus_clock(true);
+    T6b::bus_clock(true);
+    const bool paced =
+        T3::configure({.prescaler = 0, .period = 0xFFFFu}) &&
+        T6b::configure({.prescaler = 63, .period = 99});   // 10 kHz
+    T3::enable(true);
+    const bool armed2 = ChA::prepare(DmaTransfer{
+        .peripheral = T3::ccr_address(0),
+        .memory = &big_dst[0],
+        .count = 400,
+        .config = {.direction = DmaDirection::peripheral_to_memory,
+                   .peripheral_increment = false,
+                   .memory_increment = true,
+                   .peripheral_width = DmaWidth::half,
+                   .memory_width = DmaWidth::half}});
+    const bool routed2 =
+        DmaMux::request(ChA::mux_channel, T6b::dma_update_request());
+    T6b::interrupts(T6b::update_dma, true);
+
+    // The alarm: LPTIM1 on LSE, a compare match 60 ms out, its EXTI line
+    // open so it leaves Stop.
+    Lp1d::init();
+    Lp1d::kernel_clock(LptimClock::lse);
+    const bool lp = Lp1d::configure({.prescaler = LptimPrescaler::div1}) &&
+                    Lp1d::interrupts(LptimFlag::cmpm, true);
+    Pwr::bus_clock(true);
+    Lp1d::enable();
+    (void)Lp1d::set_arr(0xFFFF);
+    (void)Lp1d::wait_arr_ok();
+    (void)Lp1d::set_cmp(1966);   // 60 ms of a 32768 Hz LSE
+    (void)Lp1d::wait_cmp_ok();
+    (void)Lp1d::wake_line(true);
+    Nvic::enable(Lp1d::irq());
+
+    drain_console();
+    (void)ChA::enable(true);
+    T6b::enable(true);
+    (void)delay_us(clock, 900);            // let a few requests land
+    const uint16_t before = ChA::count();
+    (void)Lp1d::start_continuous();
+    Pwr::enter(PwrMode::stop1);
+    (void)SysClock::init();                // Stop returns on HSI16
+    const uint16_t after = ChA::count();
+    (void)delay_us(clock, 900);
+    const uint16_t later = ChA::count();
+    T6b::enable(false);
+    T6b::interrupts(T6b::update_dma, false);
+    ChA::stop();
+    Lp1d::release();
+    Nvic::disable(Lp1d::irq());
+    T3::release();
+    T6b::release();
+    print(serial, "  Stop 1: CNDTR ", before, " before, ", after,
+          " on the wake, ", later, " a millisecond later; LPTIM wakes ",
+          lptim_calls, crlf);
+    bench.verdict("and a channel is FROZEN by a Stop, not broken by it: not "
+                  "one request was served while HCLK was down, and the very "
+                  "same block goes on afterwards",
+                  paced && armed2 && routed2 && lp && before < 400u &&
+                      after == before && later < after);
+    quiet_everything();
+}
+
 }   // namespace
 
 // ---- the vectors ----------------------------------------------------------------
@@ -2270,6 +2563,15 @@ extern "C" void DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQHandler() {
     }
 }
 
+/// LPTIM1 shares its vector with TIM6 and the DAC (table 61). Letter n
+/// arms it as the one alarm that survives a Stop, and a wake with no
+/// handler bound would land in Default_Handler and never come back -
+/// which is exactly what the first version of that letter did.
+extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
+    (void)Lp1d::clear_flags(LptimFlag::all);
+    lptim_calls = lptim_calls + 1u;
+}
+
 int main() {
     // Sampled before a line of ours runs: letter a judges what this boot
     // found, and Serial::init() below is the first thing to disturb it.
@@ -2310,6 +2612,10 @@ int main() {
                  "polarities, SOFx and its interrupt", tk_synchronization);
     bench.letter('l', "the timer's DMA burst engine: four registers off one "
                  "update, through DMAR", tl_timer_burst);
+    bench.letter('m', "DMA2's five channels at every width, and a transfer "
+                 "between two peripherals", tm_dma2_and_p2p);
+    bench.letter('n', "the sleep story: a channel through Sleep, and a "
+                 "channel frozen by a Stop", tn_sleep_story);
     bench.letter('u', "the host peer, and the VCP's ceiling", tu_stress, false);
 
     if (serial_ok) {

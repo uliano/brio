@@ -224,8 +224,52 @@ void tamp_verbs() {
     (void)Tamp::status();
     (void)Tamp::masked_status();
     (void)Tamp::any_armed();
+    (void)Tamp::any_internal_armed();
+    (void)Tamp::erase_source_armed();
     Tamp::clear_flags(0);
     static_assert(Tamp::irq() == RTC_TAMP_IRQn);
+
+    // The detection half, whole.
+    (void)Tamp::filter_config({.filter = TamperFilter::samples8,
+                               .sampling = TamperSampling::div256,
+                               .precharge = TamperPrecharge::cycles8,
+                               .pullup = false});
+    (void)Tamp::filter_mode();
+    (void)Tamp::armed(1);
+    (void)Tamp::arm({.index = 1,
+                     .trigger = TamperTrigger::high_level_or_falling_edge,
+                     .erase_backups = false,
+                     .masked = false,
+                     .interrupt = true});
+    (void)Tamp::disarm(1);
+    (void)Tamp::internal_tamper(brio::tamp_internal_first, false);
+    (void)Tamp::flag(TampFlag::external);
+    (void)Tamp::wake_line_open();
+    (void)Tamp::isr();
+    static_assert(Tamp::exti_line == 21);
+    static_assert(Tamp::input_count >= 2 && Tamp::input_count <= 3);
+
+    // The two internal-index edges, from the manual's own numbering.
+    static_assert(internal_tamper_flag(2) == 0u);
+    static_assert(internal_tamper_flag(7) == 0u);
+    static_assert(tamper_flag(0) == 0u);
+    static_assert(tamper_flag(1) == TampFlag::tamper1);
+
+    // The sampling arithmetic, on a stated rate the way every other
+    // ratio in this file takes one.
+    static_assert(tamper_sampling_hz(TamperSampling::div32768, 32768) == 1);
+    static_assert(tamper_sampling_hz(TamperSampling::div256, 32768) == 128);
+    static_assert(tamper_sampling_divider(TamperSampling::div2048) == 2048);
+
+    // The new Rtc verbs of the same chapter pair.
+    (void)Rtc::subsecond();
+    (void)Rtc::reference_clock();
+    (void)Rtc::reference_clock(false);
+    (void)Rtc::shift(true, 128);
+    Rtc::timestamp_on_tamper(false);
+    (void)Rtc::timestamp_on_tamper();
+    Rtc::timestamp_internal(false);
+    (void)Rtc::timestamp_internal();
 }
 
 // ---- the other prescaler split (the timebase's, not the calendar's) --------

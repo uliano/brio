@@ -49,6 +49,21 @@
 //      ends of their range, weighed on the wake-up signal
 //   j  the backup registers: five words, the DBP gate over them, and the
 //      fact that the RTC's own key does NOT cover them
+//   k  RTC_REFIN (30.3.12): a reference built on the pad by the CORE
+//      clock, and the calendar's second measured following it
+//   l  RTC_SHIFTR (30.3.11): a sub-second shift seen as the LENGTH of
+//      the one second it lands in
+//   m  tamper detection (ch. 31) that does not spend the backup
+//      registers: both edges, the filter, the sampling rate, the mask,
+//      the timestamp on tamper, the interrupt
+//   n  the leftovers of ch. 30 that need no wire: the date and weekday
+//      alarm masks, LSCO against the console's own pad, and the LSE
+//      clock security system declined with its reason
+//
+//   w  (by name only) THE ERASE. Arms a tamper that really erases, and
+//      provokes the calendar overflow, so it spends the five backup
+//      registers and the calendar's value - outside `z` for both
+//      reasons.
 //
 //   v  (by name only) THE SURVIVAL LETTER. Writes the backup registers,
 //      reboots the board through a software reset, and checks what came
@@ -126,6 +141,13 @@ volatile uint32_t rtc_interrupts = 0;
 // counter, which is TimIntervalMeter's whole contract.
 
 using Meter = TimIntervalMeter<Tim<16>, 0>;
+
+/// TIM2 free-running at TIMPCLK: thirty-two bits at 64 MHz, so one
+/// tick is 15.6 ns and a whole calendar second fits with room to spare.
+/// The letters that time a second, a shift or a tamper's latency use it
+/// because a read is one load, where the capture meter above answers a
+/// different question (an interval between two edges of a slow clock).
+using T2 = Tim<2>;
 constexpr uint32_t timer_hz = SysClock::hz;   // TIMPCLK == HCLK (prescalers pinned)
 
 /// Arm the meter on a TISEL code with a chosen prescaler, and throw the
@@ -543,9 +565,25 @@ void tb_lse() {
                       "on the great majority of intervals - which is what "
                       "every frequency in this suite rests on",
                       sp->good * 10u >= sp->total * 9u);
-        bench.verdict("the crystal's period itself does not wander: the "
-                      "kept intervals sit inside a handful of core cycles",
-                      sp->good != 0u && (sp->kept_hi - sp->kept_lo) < 32u);
+        // WHAT THIS CAN AND CANNOT CLAIM. The band the robust mean is
+        // taken over is the median plus or minus 3 %, so "the kept
+        // intervals sit inside a handful of cycles" is a demand the
+        // selection itself does not support - it asks for a tenth of the
+        // band's own width and passes or fails on which samples happened
+        // to land, which it did (32 cycles asked, 32 and more measured,
+        // one z run in three). What the instrument DOES support is that
+        // the band holds ONE population: a trimmed mean and a median
+        // that agree to a couple of core cycles cannot be two.
+        const uint32_t centre_gap = sp->robust > sp->median
+                                        ? sp->robust - sp->median
+                                        : sp->median - sp->robust;
+        print(serial, "  the kept intervals span ", sp->kept_hi - sp->kept_lo,
+              " core cycles and their trimmed mean is ", centre_gap,
+              " from the median", crlf);
+        bench.verdict("and they are ONE population and not two: the trimmed "
+                      "mean of the kept intervals and their median agree to "
+                      "a couple of core cycles",
+                      sp->good != 0u && centre_gap < 8u);
     } else {
         bench.verdict("LSE's edges reach TIM16", false);
     }
@@ -1328,6 +1366,1074 @@ void tj_backup() {
 }
 
 // =============================================================================
+// k - RTC_REFIN: the calendar dragged onto an outside reference (30.3.12)
+// =============================================================================
+//
+// THE INSTRUMENT IS THE MEASURAND'S OWN RIVAL. RTC_REFIN is PB15 on this
+// package and the function is an ADDITIONAL one, so the RTC reads
+// whatever the pad carries and a GPIO output is a perfectly good
+// reference (the EXTI's own "sees a pad its owner drives", one chapter
+// over). The reference this letter builds is paced by TIM2 - i.e. by
+// the CORE clock - and the calendar it corrects is paced by the LSE
+// crystal, and those two disagree by about two parts in a thousand on
+// this board (letter b weighs the crystal). So "did the calendar follow
+// the reference" is not a subtle question here: it is a 2000 ppm step,
+// 128000 TIM2 ticks on a one-second window, against a measurement whose
+// own jitter is the polling loop's, under a microsecond.
+//
+// The second is timed by watching RTC_SSR RELOAD. The counter runs down
+// at ck_apre and reloads at the calendar update, so a reading that has
+// RISEN since the last one IS the 1 Hz edge - to the loop's own cost,
+// not to the 1/256 s the value resolves.
+
+using PadRefin = Pin<'B', 15>;
+
+/// A COHERENT sub-second reading, and the reason it needs one: with
+/// BYPSHAD set RTC_SSR is the live counter in the RTCCLK domain, and a
+/// single load can catch it mid-transition. The first version of this
+/// letter believed those readings and reported seconds of 18 million
+/// ticks. Two consecutive loads that agree are not in the transition.
+uint16_t stable_subsecond() {
+    uint16_t a = Rtc::subsecond();
+    for (uint8_t i = 0; i < 8u; ++i) {
+        const uint16_t b = Rtc::subsecond();
+        if (a == b) {
+            return b;
+        }
+        a = b;
+    }
+    return a;
+}
+
+/// The calendar update, recognised by the ONE transition that can only
+/// be a reload: an arrival AT PREDIV_S from anywhere else. The counter
+/// only ever counts down, so the top value exists for exactly one
+/// ck_apre period after each reload and cannot be reached any other way.
+///
+/// THE OBVIOUS CRITERION - "zero, then the top" - IS WRONG UNDER
+/// REFCKON, and finding out cost this letter a run: the reference
+/// correction reloads the ASYNCHRONOUS prescaler, which produces its
+/// ck_apre edge early, so the counter can leave 0 within a microsecond
+/// of reaching it and a polling loop steps straight over the zero. The
+/// symptom was a corrected second measured as exactly TWICE its length
+/// - every other update missed.
+inline bool is_wrap(uint16_t prev, uint16_t ss) {
+    return ss == 0xFFu && prev != 0xFFu;
+}
+
+/// A wait longer than delay_us() may serve. THE CAP IS THE CONTRACT:
+/// armv6m/delay.hpp refuses anything a kernel tick or longer and spends
+/// NO time doing it, which is exactly right for the busy-wait and wrong
+/// for a letter that wants to sit out a tamper's sampling window - and
+/// the first version of these letters asked for 60 ms and got nothing,
+/// which is how the refusal was met.
+void wait_ms(uint32_t ms) {
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < ms) {
+    }
+}
+
+/// A pad proven free the way this stratum proves one: it follows its own
+/// internal pull both ways. Settled long enough that the answer is the
+/// pull's and not the node's, and reported so a failure is legible.
+bool pad_free(void (*as_input)(PinPull), bool (*rd)()) {
+    as_input(PinPull::up);
+    wait_ms(4);
+    const bool up = rd();
+    as_input(PinPull::down);
+    wait_ms(4);
+    const bool down = rd();
+    print(serial, "  pull-up reads ", up ? 1u : 0u, ", pull-down reads ",
+          down ? 1u : 0u, crlf);
+    return up && !down;
+}
+
+/// One timed span between calendar seconds, in TIM2 ticks.
+struct SecondSpan {
+    bool ok = false;
+    uint32_t mean = 0;
+    uint32_t lo = 0;
+    uint32_t hi = 0;
+};
+
+/// Time `n` calendar seconds on TIM2, driving RTC_REFIN from the SAME
+/// loop at `half` ticks per half period (0 = leave the pad alone), after
+/// throwing `settle` seconds away.
+SecondSpan time_seconds(uint16_t n, uint32_t half, uint16_t settle) {
+    SecondSpan r{};
+    if (n == 0u) {
+        return r;
+    }
+    const uint32_t deadline_ms =
+        (static_cast<uint32_t>(n) + settle + 4u) * 1500u;
+    const uint32_t t0_ms = Ticker::millis();
+    uint32_t next_edge = T2::count();
+    uint16_t prev = stable_subsecond();
+    uint32_t last = 0;
+    bool have_last = false;
+    uint16_t skip = settle;
+    uint16_t got = 0;
+    uint32_t sum = 0;
+    uint32_t mn = 0xFFFFFFFFu;
+    uint32_t mx = 0;
+    bool level = false;
+    while (got < n) {
+        if (Ticker::millis() - t0_ms > deadline_ms) {
+            return r;
+        }
+        if (half != 0u) {
+            const uint32_t now = T2::count();
+            if (static_cast<int32_t>(now - next_edge) >= 0) {
+                level = !level;
+                if (level) {
+                    PadRefin::set();
+                } else {
+                    PadRefin::clear();
+                }
+                next_edge += half;
+            }
+        }
+        const uint16_t ss = stable_subsecond();
+        if (is_wrap(prev, ss)) {
+            const uint32_t stamp = T2::count();
+            prev = ss;
+            if (skip != 0u) {
+                --skip;
+                continue;
+            }
+            if (have_last) {
+                const uint32_t d = stamp - last;
+                sum += d;
+                ++got;
+                if (d < mn) {
+                    mn = d;
+                }
+                if (d > mx) {
+                    mx = d;
+                }
+            }
+            last = stamp;
+            have_last = true;
+            continue;
+        }
+        prev = ss;
+    }
+    r.ok = true;
+    r.mean = sum / got;
+    r.lo = mn;
+    r.hi = mx;
+    return r;
+}
+
+/// Put the calendar back on the default prescaler pair, which is what
+/// 30.3.12 demands of a reference-corrected calendar and what letter c
+/// may have moved.
+bool default_prescalers() {
+    if (!Rtc::enter_init()) {
+        return false;
+    }
+    const bool ok = Rtc::set_prescalers({.async = 0x7F, .sync = 0xFF});
+    Rtc::exit_init();
+    return ok && Rtc::wait_sync();
+}
+
+/// REFCKON needs initialization mode (30.6.3's note on bits 6 and 4).
+bool refckon(bool on) {
+    if (!Rtc::enter_init()) {
+        return false;
+    }
+    const bool ok = Rtc::reference_clock(on);
+    Rtc::exit_init();
+    (void)Rtc::wait_sync();
+    return ok;
+}
+
+void tk_refin() {
+    // THE PAD, AND WHY IT NEEDS A WORD FIRST. PB15 is RTC_REFIN and it
+    // is ALSO UCPD1_CC2, and 7.3.16 says the Type-C dead-battery Rd on
+    // CC1 and CC2 is CONNECTED OUT OF A POWER-ON - some kilohms against
+    // the port's own tens of kilohms - so the pad does not reliably
+    // follow its own pull-up until the SYSCFG strobe lets go of it.
+    // Released, it walks; and either way a push-pull driver wins, which
+    // is what this letter's reference actually needs.
+    const bool walked_before = pad_free(PadRefin::input, PadRefin::read);
+    const bool released = ucpd_dead_battery(1, false);
+    const bool walked_after = pad_free(PadRefin::input, PadRefin::read);
+    print(serial, "  PB15 with the dead-battery Rd connected: follows its "
+                  "pull ", walked_before ? "yes" : "NO",
+          "; once SYSCFG's UCPD1 strobe has released it: ",
+          walked_after ? "yes" : "NO", crlf);
+    bench.verdict("PB15 is UCPD1_CC2 and carries the dead-battery pull-down "
+                  "until the strobe releases it - after which it follows its "
+                  "own pull like any other pad",
+                  released && walked_after);
+    PadRefin::output(true);
+    (void)delay_us(clock, 300);
+    const bool drives_high = PadRefin::read();
+    PadRefin::output(false);
+    (void)delay_us(clock, 300);
+    const bool drives_low = !PadRefin::read();
+    bench.verdict("and the port's own driver owns it both ways, which is the "
+                  "precondition this reference really has",
+                  drives_high && drives_low);
+
+    T2::bus_clock(true);
+    (void)T2::configure({.prescaler = 0, .period = 0xFFFFFFFFu});
+    T2::enable(true);
+
+    bench.verdict("the prescalers are back at the default pair 0x7F/0xFF, "
+                  "which is what 30.3.12 requires of the correction",
+                  default_prescalers());
+    Rtc::bypass_shadow(true);
+
+    // THE REFUSALS FIRST, because both of them are the chapter's own
+    // "must" and neither is enforced by the silicon.
+    bench.verdict("REFCKON outside initialization mode is refused (30.6.3's "
+                  "note on bits 6 and 4)",
+                  !Rtc::reference_clock(true));
+    if (Rtc::enter_init()) {
+        const bool refused_pair =
+            Rtc::set_prescalers({.async = 0x3F, .sync = 0x1FF}) &&
+            !Rtc::reference_clock(true);
+        (void)Rtc::set_prescalers({.async = 0x7F, .sync = 0xFF});
+        Rtc::exit_init();
+        (void)Rtc::wait_sync();
+        bench.verdict("and REFCKON under any other prescaler pair is refused "
+                      "too: the detection is built on a 256 Hz ck_apre",
+                      refused_pair);
+    } else {
+        bench.verdict("initialization mode for the prescaler refusal", false);
+    }
+
+    // LEG 1 - the crystal alone.
+    PadRefin::output(false);
+    const SecondSpan lse_only = time_seconds(4, 0, 1);
+    if (!lse_only.ok) {
+        bench.verdict("the calendar's second is timed on TIM2", false);
+        return;
+    }
+    print(serial, "  LSE alone:      ", lse_only.mean, " TIM2 ticks a second (",
+          lse_only.lo, "..", lse_only.hi, ")", crlf);
+    bench.verdict("the calendar's own second, timed on the core, is within "
+                  "1 % of a second (the two oscillators' disagreement)",
+                  within(lse_only.mean, 63'360'000UL, 64'640'000UL));
+
+    // LEG 2 - 50 Hz, the chapter's first mains rate. One half period is
+    // 10 ms of TIM2, so fifty periods are 64000000 ticks BY
+    // CONSTRUCTION, and that is the number the corrected second has to
+    // land on if it is really following the pad.
+    constexpr uint32_t half50 = 64'000'000UL / 100u;
+    bench.verdict("REFCKON set in initialization mode", refckon(true));
+    const SecondSpan ref50 = time_seconds(8, half50, 3);
+    print(serial, "  REFIN 50 Hz:    ", ref50.mean, " ticks (", ref50.lo, "..",
+          ref50.hi, "), 50 reference periods are ", 100u * half50, crlf);
+    bench.verdict("the calendar follows a 50 Hz reference: its second is the "
+                  "reference's second, not the crystal's",
+                  ref50.ok && within(ref50.mean, 100u * half50 - 50'000UL,
+                                     100u * half50 + 50'000UL));
+
+    // LEG 3 - 60 Hz, the chapter's other rate, which is the SAME second
+    // by a different edge count: sixty periods of 16.666 ms.
+    constexpr uint32_t half60 = 64'000'000UL / 120u;
+    const SecondSpan ref60 = time_seconds(8, half60, 3);
+    print(serial, "  REFIN 60 Hz:    ", ref60.mean, " ticks (", ref60.lo, "..",
+          ref60.hi, "), 60 reference periods are ", 120u * half60, crlf);
+    bench.verdict("and a 60 Hz reference too - one detector, both mains "
+                  "rates, the same corrected second",
+                  ref60.ok && within(ref60.mean, 120u * half60 - 50'000UL,
+                                     120u * half60 + 50'000UL));
+
+    // LEG 4 - THE CONTROL. 30.3.12: "If the reference clock halts ...
+    // the calendar is updated continuously based solely on the LSE
+    // clock." Hold the pad still with REFCKON still on.
+    PadRefin::clear();
+    const SecondSpan halted = time_seconds(4, 0, 2);
+    print(serial, "  REFIN halted:   ", halted.mean, " ticks", crlf);
+    bench.verdict("a HALTED reference gives the crystal's second back, with "
+                  "REFCKON still set - the correction is an edge, not a mode",
+                  halted.ok && within(halted.mean, lse_only.mean - 60'000UL,
+                                      lse_only.mean + 60'000UL));
+
+    // The interlock 30.3.11 states from the other side.
+    bench.verdict("a sub-second shift is refused while REFCKON stands "
+                  "(30.3.11's caution, as a refusal)",
+                  !Rtc::shift(false, 8));
+
+    bench.verdict("REFCKON cleared again", refckon(false));
+    PadRefin::release();
+}
+
+// =============================================================================
+// l - RTC_SHIFTR: the sub-second shift, measured as a second's length
+// =============================================================================
+//
+// The shift is quoted in 30.6.10 as a DELAY of SUBFS/(PREDIV_S+1)
+// seconds, or - with ADD1S - an ADVANCE of one second minus that. With
+// the default prescalers one unit is 1/256 s, and the honest way to see
+// it is not to read a register but to TIME THE SECOND IT LANDS IN: a
+// quarter-second delay makes exactly one second a quarter longer, and
+// nothing else in the calendar moves.
+
+/// Wait for the next calendar update and stamp TIM2 on it.
+bool next_wrap(uint32_t& stamp, uint32_t guard_ms) {
+    const uint32_t t0 = Ticker::millis();
+    uint16_t prev = stable_subsecond();
+    for (;;) {
+        if (Ticker::millis() - t0 > guard_ms) {
+            return false;
+        }
+        const uint16_t ss = stable_subsecond();
+        if (is_wrap(prev, ss)) {
+            stamp = T2::count();
+            return true;
+        }
+        prev = ss;
+    }
+}
+
+/// Wait until the sub-second counter is near the MIDDLE of its range.
+///
+/// THE SHIFT MUST NOT BE ISSUED AT A BOUNDARY, and finding that out
+/// cost this letter a run. SUBFS is ADDED to a counter whose top is
+/// PREDIV_S, so a shift issued just after a reload leaves SS ABOVE the
+/// top - 30.6.3 says as much, and rtc_subsecond_ms() already handles
+/// the case - and the counter then walks DOWN through PREDIV_S on its
+/// way, which any "arrived at the top" detector reads as a calendar
+/// update that has not happened. Issued at half a second, SS + SUBFS
+/// stays inside the range and the next arrival at the top is the real
+/// one.
+bool wait_mid_second(uint32_t guard_ms) {
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < guard_ms) {
+        const uint16_t ss = stable_subsecond();
+        if (ss <= 0x88u && ss >= 0x78u) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void tl_shift() {
+    T2::bus_clock(true);
+    (void)T2::configure({.prescaler = 0, .period = 0xFFFFFFFFu});
+    T2::enable(true);
+    bench.verdict("the default prescaler pair, so one SUBFS unit is 1/256 s",
+                  default_prescalers());
+    Rtc::bypass_shadow(true);
+
+    uint32_t a = 0;
+    uint32_t b = 0;
+    if (!next_wrap(a, 2000) || !next_wrap(b, 2000)) {
+        bench.verdict("two calendar updates timed on TIM2", false);
+        return;
+    }
+    const uint32_t base = b - a;
+    const uint32_t quarter = base / 4u;
+    print(serial, "  an unshifted second is ", base, " TIM2 ticks", crlf);
+
+    // ---- a DELAY of 64/256 s ------------------------------------------------
+    if (!next_wrap(a, 2000) || !wait_mid_second(2000)) {
+        bench.verdict("a calendar update to shift from", false);
+        return;
+    }
+    const bool issued = Rtc::shift(false, 64);
+    const bool pending_now = Rtc::shift_pending();
+    uint32_t spins = 0;
+    const uint32_t p0 = T2::count();
+    while (Rtc::shift_pending() && spins < 2'000'000UL) {
+        ++spins;
+    }
+    const uint32_t shpf_us = meter_us(T2::count() - p0, 0);
+    (void)next_wrap(b, 3000);
+    const uint32_t delayed = b - a;
+    print(serial, "  delay 64/256:   ", delayed, " ticks against a base of ",
+          base, "; a quarter is ", quarter, crlf);
+    bench.verdict("the shift was accepted and SHPF stood at once",
+                  issued && pending_now);
+    print(serial, "  SHPF stood for ", shpf_us, " us over ", spins, " polls",
+          crlf);
+    bench.verdict("a delay of 64/256 s makes exactly the second it lands in a "
+                  "QUARTER longer, to a per cent",
+                  delayed > base &&
+                      within(delayed - base, quarter * 97u / 100u,
+                             quarter * 103u / 100u));
+
+    // ---- an ADVANCE of one whole second -------------------------------------
+    RtcReading before{};
+    RtcReading after{};
+    (void)next_wrap(a, 2000);
+    (void)wait_mid_second(2000);
+    const bool r0 = Rtc::read(before);
+    const bool add = Rtc::shift(true, 0);
+    while (Rtc::shift_pending()) {
+    }
+    const bool r1 = Rtc::read(after);
+    (void)next_wrap(b, 3000);
+    const uint32_t unmoved = b - a;
+    const uint8_t s0 = before.time.second;
+    const uint8_t s1 = after.time.second;
+    print(serial, "  ADD1S alone:    seconds ", s0, " -> ", s1,
+          ", the second it landed in ", unmoved, " ticks", crlf);
+    bench.verdict("ADD1S with SUBFS 0 adds one whole second to the calendar",
+                  r0 && r1 && add &&
+                      static_cast<uint8_t>((s0 + 1u) % 60u) == s1);
+    bench.verdict("and moves no sub-second at all: the update it lands in is "
+                  "the same length as any other",
+                  within(unmoved, base - base / 50u, base + base / 50u));
+
+    // ---- the two halves TOGETHER: an advance of 3/4 s -----------------------
+    (void)next_wrap(a, 2000);
+    (void)wait_mid_second(2000);
+    (void)Rtc::read(before);
+    const bool adv = Rtc::shift(true, 64);
+    while (Rtc::shift_pending()) {
+    }
+    (void)Rtc::read(after);
+    (void)next_wrap(b, 3000);
+    const uint32_t both = b - a;
+    const uint8_t t0s = before.time.second;
+    const uint8_t t1s = after.time.second;
+    print(serial, "  ADD1S + 64/256: seconds ", t0s, " -> ", t1s,
+          ", the second it landed in ", both, " ticks", crlf);
+    bench.verdict("ADD1S with SUBFS 64 is the register's ONE atomic advance "
+                  "of 1 - 64/256 s: the whole second lands in the calendar "
+                  "AND the same sub-second delay rides with it",
+                  adv && static_cast<uint8_t>((t0s + 1u) % 60u) == t1s &&
+                      both > base &&
+                      within(both - base, quarter * 97u / 100u,
+                             quarter * 103u / 100u));
+
+    // ---- the refusals -------------------------------------------------------
+    (void)wait_mid_second(2000);
+    const bool first = Rtc::shift(false, 32);
+    const bool second = Rtc::shift(false, 32);
+    while (Rtc::shift_pending()) {
+    }
+    bench.verdict("a second shift while one is pending is refused, where the "
+                  "register would have dropped it in silence",
+                  first && !second);
+    bench.verdict("a SUBFS past the 15-bit field is refused",
+                  !Rtc::shift(false, 0x8000));
+
+    // ---- and RSF, which 30.6.10's own note says the write clears -----------
+    Rtc::bypass_shadow(false);
+    (void)Rtc::wait_sync();
+    (void)wait_mid_second(2000);
+    const bool synced_before = Rtc::synchronized();
+    (void)Rtc::shift(false, 16);
+    const bool synced_after = Rtc::synchronized();
+    while (Rtc::shift_pending()) {
+    }
+    const bool resynced = Rtc::wait_sync();
+    bench.verdict("writing SUBFS clears RSF, so a shadow reader knows its "
+                  "copy is stale until the shift has landed",
+                  synced_before && !synced_after && resynced);
+    Rtc::bypass_shadow(true);
+}
+
+// =============================================================================
+// m - tamper detection that does not cost the backup registers (ch. 31)
+// =============================================================================
+//
+// TAMP_IN2 is PA0 on this package and PA0 is free, which is the whole
+// reason this chapter is reachable at all: TAMP_IN1 is PC13 (the user
+// button and its own pull-up) and TAMP_IN3 is PE6, a port this package
+// does not bond. Every leg here arms with TAMPxNOERASE or TAMPxMSK, so
+// the five backup registers survive the letter and `z` stays
+// re-runnable; the letter that spends them is `w`, outside z.
+
+using PadTamper = Pin<'A', 0>;
+constexpr uint8_t tamper_index = 2;
+
+volatile uint32_t tamp_interrupts = 0;
+volatile uint32_t tamp_served = 0;
+
+/// Prepare the block's detection mode, then ARM one input and time the
+/// flag from the arming itself.
+///
+/// THE ARM IS THE STIMULUS HERE, and that is forced by the silicon: a
+/// tamper input's pad is taken away from its port the instant TAMPxE is
+/// set (measured below), pulls and all, so there is no edge a program on
+/// this board can put on one. What is left is a pad the OUTSIDE world
+/// holds at a known level, and over such a pad the filtered detector
+/// starts its sample train when it is armed - so the latency from the
+/// arming to the flag IS the filter's own N/f, which is the number
+/// 31.3.4 describes and nothing else here could have measured.
+uint32_t arm_latency(uint8_t index, TamperFilter f, TamperSampling s,
+                     TamperTrigger trg, bool erase, bool masked, bool irq,
+                     bool precharge, uint32_t guard_ms, bool& armed_ok) {
+    for (uint8_t i = 1; i <= Tamp::input_count; ++i) {
+        (void)Tamp::disarm(i);
+    }
+    Tamp::clear_flags(TampFlag::all);
+    armed_ok = Tamp::filter_config(
+        {.filter = f, .sampling = s, .pullup = precharge});
+    if (!armed_ok) {
+        return 0;
+    }
+    const uint32_t t0_ms = Ticker::millis();
+    const uint32_t t0 = T2::count();
+    armed_ok = Tamp::arm({.index = index,
+                          .trigger = trg,
+                          .erase_backups = erase,
+                          .masked = masked,
+                          .interrupt = irq});
+    if (!armed_ok) {
+        return 0;
+    }
+    while (!Tamp::flag(tamper_flag(index))) {
+        if (Ticker::millis() - t0_ms > guard_ms) {
+            return 0;
+        }
+    }
+    return meter_us(T2::count() - t0, 0);
+}
+
+void tm_tamper() {
+    T2::bus_clock(true);
+    (void)T2::configure({.prescaler = 0, .period = 0xFFFFFFFFu});
+    T2::enable(true);
+
+    print(serial, "  this part declares ", Tamp::input_count,
+          " external tamper inputs; TAMP_CR1=", hex(Tamp::config1()),
+          " CR2=", hex(Tamp::config2()), " SR=", hex(Tamp::status()), crlf);
+    for (uint8_t i = 1; i <= Tamp::input_count; ++i) {
+        (void)Tamp::disarm(i);
+    }
+    Tamp::clear_flags(TampFlag::all);
+    bench.verdict("no EXTERNAL tamper input is armed at the start of the "
+                  "letter",
+                  !Tamp::any_armed());
+
+    // THE RESET VALUE ARMS FOUR THINGS NOBODY ASKED FOR. TAMP_CR1's RTC
+    // domain reset value is 0xFFFF0000 (31.6.1), and bits 18..21 of that
+    // are ITAMP3E..ITAMP6E: LSE monitoring, HSE monitoring, the calendar
+    // overflow and the manufacturer readout, every one of which erases
+    // the backup registers and none of which has a NOERASE bit.
+    print(serial, "  internal tampers armed by the domain's own reset value: ",
+          Tamp::any_internal_armed() ? "yes" : "no", crlf);
+    bench.verdict("TAMP_CR1 comes out of a domain reset with ITAMP3E..ITAMP6E "
+                  "SET - four erase sources armed by the reset value alone, "
+                  "which any_armed() alone would have reported as none",
+                  Tamp::any_internal_armed() && Tamp::erase_source_armed() &&
+                      !Tamp::any_armed());
+
+    for (uint8_t i = 0; i < Tamp::backup_count; ++i) {
+        (void)Tamp::backup(i, 0x7A000000u | i);
+    }
+
+    // ---- ARMING TAKES THE PAD, and this is the letter's own finding --------
+    bench.verdict("PA0 (TAMP_IN2) is free: it follows its own pull both ways",
+                  pad_free(PadTamper::input, PadTamper::read));
+    PadTamper::output(true);
+    wait_ms(2);
+    const bool driven_free = PadTamper::read();
+    bool ok = false;
+    (void)arm_latency(2, TamperFilter::edge, TamperSampling::div32768,
+                      TamperTrigger::low_level_or_rising_edge, false, false,
+                      false, true, 0, ok);
+    wait_ms(2);
+    const bool driven_armed = PadTamper::read();
+    const bool still_output = (PadTamper::port().MODER & 3u) == 1u;
+    (void)Tamp::disarm(2);
+    PadTamper::release();
+    print(serial, "  PA0 driven high reads ", driven_free ? 1u : 0u,
+          " free and ", driven_armed ? 1u : 0u, " with TAMP2E set, MODER ",
+          still_output ? "unchanged" : "changed", crlf);
+    bench.verdict("ARMING A TAMPER INPUT TAKES THE PAD: a port-driven high "
+                  "reads back 1 free and 0 armed with MODER untouched, so "
+                  "neither the output driver nor the input buffer reaches it "
+                  "any more - and the PULLS go with it, so no program on "
+                  "this board can put an EDGE on a tamper input at all",
+                  driven_free && !driven_armed && still_output);
+
+    // ---- THE INSTRUMENT: a pad the BOARD holds at a known level ------------
+    // TAMP_IN1 is PC13, which carries the user button and its external
+    // pull-up - the one tamper input on this desk whose level does not
+    // depend on anything the chip stopped driving. Two legs prove it is
+    // really that pad and really high: an ACTIVE-HIGH detector fires,
+    // and an ACTIVE-LOW one with the block's own precharge DISABLED
+    // does not, where a floating pad would have drifted down and fired.
+    const uint32_t high_fires =
+        arm_latency(1, TamperFilter::samples2, TamperSampling::div256,
+                    TamperTrigger::high_level_or_falling_edge, false, false,
+                    false, false, 1000, ok);
+    bench.verdict("TAMP_IN1 reads HIGH: an active-high detector fires over it",
+                  ok && high_fires != 0u);
+    const uint32_t low_quiet =
+        arm_latency(1, TamperFilter::samples8, TamperSampling::div256,
+                    TamperTrigger::low_level_or_rising_edge, false, false,
+                    false, false, 2000, ok);
+    bench.verdict("and an active-LOW one stays quiet for two seconds with the "
+                  "precharge OFF - so the level is the BOARD's pull-up on "
+                  "PC13 and not a floating node's drift",
+                  ok && low_quiet == 0u);
+
+    // ---- EDGE mode, and what this desk can and cannot ask of it -----------
+    // 31.3.4's caution says an edge detector armed over a pad ALREADY at
+    // the active level "may" fire ("rising edge and high level triggers
+    // a tamper detection event"). Staged over PC13's standing high, on
+    // this silicon it does not - in either polarity - so the edge
+    // detector here is an EDGE detector and the caution's level half is
+    // not reproduced. And a real edge cannot be put on a tamper input
+    // from inside this chip at all, because arming takes the pad: what
+    // the driver offers in edge mode is exercised for its refusals and
+    // its register surface and is not claimed to have been timed.
+    const uint32_t edge_high =
+        arm_latency(1, TamperFilter::edge, TamperSampling::div32768,
+                    TamperTrigger::low_level_or_rising_edge, false, false,
+                    false, true, 500, ok);
+    const uint32_t edge_low =
+        arm_latency(1, TamperFilter::edge, TamperSampling::div32768,
+                    TamperTrigger::high_level_or_falling_edge, false, false,
+                    false, true, 500, ok);
+    print(serial, "  edge detector armed over a standing HIGH pad: ",
+          edge_high, " us active-high, ", edge_low, " us active-low (0 = it "
+          "did not fire in half a second)", crlf);
+    bench.verdict("31.3.4's caution DOES NOT REPRODUCE: an edge detector "
+                  "armed over a standing active level fires in neither "
+                  "polarity, so on this silicon TAMPFLT = 00 really is an "
+                  "edge detector and not a level one",
+                  edge_high == 0u && edge_low == 0u);
+
+    bool kept = true;
+    for (uint8_t i = 0; i < Tamp::backup_count; ++i) {
+        kept = kept && Tamp::backup(i) == (0x7A000000u | i);
+    }
+    bench.verdict("TAMPxNOERASE keeps the five backup registers through every "
+                  "detection so far",
+                  kept);
+
+    // ---- the FILTER: 2, 4 and 8 samples at 128 Hz --------------------------
+    uint32_t filt_us[3] = {0, 0, 0};
+    const TamperFilter filters[3] = {TamperFilter::samples2,
+                                     TamperFilter::samples4,
+                                     TamperFilter::samples8};
+    for (uint8_t i = 0; i < 3u; ++i) {
+        filt_us[i] =
+            arm_latency(1, filters[i], TamperSampling::div256,
+                        TamperTrigger::high_level_or_falling_edge, false,
+                        false, false, false, 1500, ok);
+    }
+    print(serial, "  filter 2/4/8 samples at 128 Hz: ", filt_us[0], " / ",
+          filt_us[1], " / ", filt_us[2], " us against 15625 / 31250 / 62500",
+          crlf);
+    bench.verdict("the filtered detector needs N consecutive samples at the "
+                  "active level, so its latency grows with N",
+                  filt_us[0] != 0u && filt_us[1] > filt_us[0] &&
+                      filt_us[2] > filt_us[1]);
+    bench.verdict("and 2, 4 and 8 samples at 128 Hz each land within one "
+                  "sample period of the count times the rate",
+                  within(filt_us[0], 8'000UL, 24'000UL) &&
+                      within(filt_us[1], 24'000UL, 40'000UL) &&
+                      within(filt_us[2], 55'000UL, 71'000UL));
+
+    // ---- the SAMPLING RATE: the same filter, three rates -------------------
+    uint32_t freq_us[3] = {0, 0, 0};
+    const TamperSampling rates[3] = {TamperSampling::div256,
+                                     TamperSampling::div1024,
+                                     TamperSampling::div4096};
+    for (uint8_t i = 0; i < 3u; ++i) {
+        freq_us[i] =
+            arm_latency(1, TamperFilter::samples2, rates[i],
+                        TamperTrigger::high_level_or_falling_edge, false,
+                        false, false, false, 4000, ok);
+    }
+    print(serial, "  two samples at 128/32/8 Hz: ", freq_us[0], " / ",
+          freq_us[1], " / ", freq_us[2], " us", crlf);
+    bench.verdict("TAMPFREQ is the sampling rate and nothing else: a "
+                  "fourfold slower sampler costs about four times the "
+                  "latency, twice over",
+                  freq_us[0] != 0u && freq_us[1] > freq_us[0] * 2u &&
+                      freq_us[1] < freq_us[0] * 6u &&
+                      freq_us[2] > freq_us[1] * 2u &&
+                      freq_us[2] < freq_us[1] * 6u);
+
+    // ---- THE PRECHARGE, measured on the pad that has no outside pull -------
+    // TAMP_IN2 is PA0 and nothing on this board holds it, so with the
+    // block's own pull-up ON an active-LOW detector cannot fire and with
+    // it OFF the floating node drifts down and does. That difference IS
+    // TAMPPUDIS, and it is the only way this desk can see the precharge.
+    const uint32_t pu_on =
+        arm_latency(2, TamperFilter::samples2, TamperSampling::div256,
+                    TamperTrigger::low_level_or_rising_edge, false, false,
+                    false, true, 1000, ok);
+    const uint32_t pu_off =
+        arm_latency(2, TamperFilter::samples2, TamperSampling::div256,
+                    TamperTrigger::low_level_or_rising_edge, false, false,
+                    false, false, 2000, ok);
+    print(serial, "  a free PA0, active-low: precharge on ", pu_on,
+          " us (0 = never), precharge off ", pu_off, " us", crlf);
+    bench.verdict("TAMPPUDIS is real: with the precharge ON an unheld pad "
+                  "samples HIGH and never fires, and with it OFF the same "
+                  "pad drifts down and does",
+                  pu_on == 0u && pu_off != 0u);
+
+    // ---- TAMPxMSK: the trigger without the flag and without the erase ------
+    const uint32_t masked_lat =
+        arm_latency(1, TamperFilter::samples2, TamperSampling::div256,
+                    TamperTrigger::high_level_or_falling_edge, true, true,
+                    false, false, 500, ok);
+    wait_ms(60);
+    const uint32_t masked_sr = Tamp::status();
+    bool masked_kept = true;
+    for (uint8_t i = 0; i < Tamp::backup_count; ++i) {
+        masked_kept = masked_kept && Tamp::backup(i) == (0x7A000000u | i);
+    }
+    bench.verdict("TAMPxMSK arms a detector whose flag is cleared by the "
+                  "hardware: TAMP_SR stays clear over a detection that a "
+                  "moment ago fired in milliseconds",
+                  ok && masked_lat == 0u &&
+                      (masked_sr & tamper_flag(1)) == 0u);
+    bench.verdict("and the backup registers survive a MASKED tamper that "
+                  "asked to erase them - the mask outranks the erase",
+                  masked_kept);
+
+    // ---- TAMPTS: the timestamp source that needs no RTC_TS pad -------------
+    // The comparison has to be a MEAN, because the filtered detector's
+    // latency carries the sampler's own phase at the arming - up to half
+    // a sample period of it - and 31.3.4 prices TAMPTS at 3 ck_apre,
+    // which is 11.7 ms against a 15.6 ms measurement. Four armings each
+    // way average the phase away.
+    Rtc::clear_flags(RtcFlag::timestamp | RtcFlag::timestamp_overflow);
+    uint32_t plain_sum = 0;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        plain_sum += arm_latency(1, TamperFilter::samples2,
+                                 TamperSampling::div256,
+                                 TamperTrigger::high_level_or_falling_edge,
+                                 false, false, false, false, 1000, ok);
+    }
+    Rtc::timestamp_on_tamper(true);
+    RtcReading now{};
+    (void)Rtc::read(now);
+    uint32_t ts_sum = 0;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        Rtc::clear_flags(RtcFlag::timestamp | RtcFlag::timestamp_overflow);
+        ts_sum += arm_latency(1, TamperFilter::samples2,
+                              TamperSampling::div256,
+                              TamperTrigger::high_level_or_falling_edge,
+                              false, false, false, false, 1000, ok);
+    }
+    const bool tsf = Rtc::flag(RtcFlag::timestamp);
+    const RtcReading stamped = Rtc::timestamp();
+    print(serial, "  TAMPTS: the same detection costs ", plain_sum / 4u,
+          " us without it and ", ts_sum / 4u, " us with it; timestamp ",
+          stamped.time.hour, ":", stamped.time.minute, ":", stamped.time.second,
+          " against the calendar's ", now.time.hour, ":", now.time.minute, ":",
+          now.time.second, crlf);
+    bench.verdict("a tamper fills the timestamp registers and sets TSF, with "
+                  "no RTC_TS pad anywhere in it",
+                  ok && tsf);
+    bench.verdict("and the stamped time is the calendar's own, to a second",
+                  stamped.time.hour == now.time.hour &&
+                      stamped.time.minute == now.time.minute &&
+                      static_cast<uint8_t>(stamped.time.second -
+                                           now.time.second) < 4u);
+    // 31.3.4's latency list has THREE rows and they are ALTERNATIVES, not
+    // a sum: "3 ck_apre when TAMPFLT differs from 0x0", "3 ck_apre when
+    // TAMPTS = 1", "no latency when TAMPFLT = 0x0 and TAMPTS = 0". A
+    // FILTERED detector is already in the first row, so TAMPTS costs it
+    // nothing - which is what the two means say and is not what a reader
+    // adding the rows up would have predicted.
+    const uint32_t ts_delta = ts_sum > plain_sum ? (ts_sum - plain_sum) / 4u
+                                                 : (plain_sum - ts_sum) / 4u;
+    bench.verdict("and TAMPTS costs a FILTERED detector nothing: 31.3.4's "
+                  "three latency rows are alternatives and not a sum, so a "
+                  "detector already paying the filter's 3 ck_apre pays no "
+                  "second helping for the timestamp",
+                  ts_delta < 3'000UL);
+    Rtc::timestamp_on_tamper(false);
+    Rtc::clear_flags(RtcFlag::timestamp | RtcFlag::timestamp_overflow);
+
+    // ---- the interrupt -----------------------------------------------------
+    tamp_interrupts = 0;
+    tamp_served = 0;
+    bench.verdict("the TAMP block's own EXTI line 21 opens",
+                  Tamp::wake_line_open());
+    Nvic::enable(Tamp::irq());
+    (void)arm_latency(1, TamperFilter::samples2, TamperSampling::div256,
+                      TamperTrigger::high_level_or_falling_edge, false, false,
+                      true, false, 500, ok);
+    wait_ms(20);
+    print(serial, "  TAMP interrupts ", tamp_interrupts, ", served mask ",
+          hex(tamp_served), crlf);
+    bench.verdict("a tamper reaches the shared RTC/TAMP vector and isr() "
+                  "reports the flag it served",
+                  ok && tamp_interrupts != 0u &&
+                      (tamp_served & tamper_flag(1)) != 0u);
+
+    // ---- teardown ----------------------------------------------------------
+    for (uint8_t i = 1; i <= Tamp::input_count; ++i) {
+        (void)Tamp::disarm(i);
+    }
+    Tamp::clear_flags(TampFlag::all);
+    Nvic::disable(Tamp::irq());
+    bool survived = true;
+    for (uint8_t i = 0; i < Tamp::backup_count; ++i) {
+        survived = survived && Tamp::backup(i) == (0x7A000000u | i);
+    }
+    bench.verdict("and the five backup registers came through the whole "
+                  "letter, which is what keeps it inside z",
+                  survived && !Tamp::any_armed());
+}
+
+// =============================================================================
+// n - the leftovers of ch. 30 that need no wire
+// =============================================================================
+
+void tn_leftovers() {
+    // ---- the alarm masks letter f does not spend ---------------------------
+    // A DATE match and a WEEKDAY match are the same four bits read two
+    // ways (WDSEL), and neither has ever run here.
+    Rtc::bypass_shadow(true);
+    const RtcDateTime base{.hour = 12,
+                           .minute = 0,
+                           .second = 50,
+                           .day = 4,
+                           .month = 3,
+                           .year = 26,
+                           .weekday = 3};
+    bench.verdict("a known calendar to match against", set_time(base));
+
+    RtcReading r{};
+    (void)Rtc::read(r);
+    RtcAlarm date_alarm{};
+    date_alarm.second = static_cast<uint8_t>((r.time.second + 3u) % 60u);
+    date_alarm.minute = r.time.minute;
+    date_alarm.hour = r.time.hour;
+    date_alarm.day = r.time.day;
+    date_alarm.weekday_select = false;
+    date_alarm.mask_date = false;
+    date_alarm.mask_hours = false;
+    date_alarm.mask_minutes = false;
+    date_alarm.mask_seconds = false;
+    Rtc::clear_alarm(RtcAlarmId::a);
+    const bool date_set = Rtc::set_alarm(RtcAlarmId::a, date_alarm, false);
+    uint32_t t0 = Ticker::millis();
+    while (!Rtc::flag(RtcFlag::alarm_a) && Ticker::millis() - t0 < 6000u) {
+    }
+    const bool date_hit = Rtc::flag(RtcFlag::alarm_a);
+    Rtc::clear_alarm(RtcAlarmId::a);
+    Rtc::clear_flags(RtcFlag::alarm_a);
+    bench.verdict("an alarm with EVERY mask clear matches the DATE as well "
+                  "as the time",
+                  date_set && date_hit);
+
+    (void)Rtc::read(r);
+    RtcAlarm weekday_alarm = date_alarm;
+    weekday_alarm.second = static_cast<uint8_t>((r.time.second + 3u) % 60u);
+    weekday_alarm.minute = r.time.minute;
+    weekday_alarm.hour = r.time.hour;
+    weekday_alarm.weekday_select = true;
+    weekday_alarm.day = r.time.weekday;
+    Rtc::clear_alarm(RtcAlarmId::b);
+    const bool wd_set = Rtc::set_alarm(RtcAlarmId::b, weekday_alarm, false);
+    t0 = Ticker::millis();
+    while (!Rtc::flag(RtcFlag::alarm_b) && Ticker::millis() - t0 < 6000u) {
+    }
+    const bool wd_hit = Rtc::flag(RtcFlag::alarm_b);
+    Rtc::clear_alarm(RtcAlarmId::b);
+    Rtc::clear_flags(RtcFlag::alarm_b);
+    bench.verdict("WDSEL reads the same four bits as a WEEKDAY, and the "
+                  "match still lands",
+                  wd_set && wd_hit);
+
+    // The control: the WRONG weekday, which must NOT fire.
+    (void)Rtc::read(r);
+    RtcAlarm wrong = weekday_alarm;
+    wrong.second = static_cast<uint8_t>((r.time.second + 2u) % 60u);
+    wrong.minute = r.time.minute;
+    wrong.hour = r.time.hour;
+    wrong.day = static_cast<uint8_t>((r.time.weekday % 7u) + 1u);
+    Rtc::clear_alarm(RtcAlarmId::b);
+    const bool wrong_set = Rtc::set_alarm(RtcAlarmId::b, wrong, false);
+    t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < 5000u) {
+    }
+    const bool silent = !Rtc::flag(RtcFlag::alarm_b);
+    Rtc::clear_alarm(RtcAlarmId::b);
+    Rtc::clear_flags(RtcFlag::alarm_b);
+    bench.verdict("and a weekday that is not today's stays silent for five "
+                  "seconds - the mask is a match and not a formality",
+                  wrong_set && silent);
+
+    // ---- LSCO, and the pad it would take -----------------------------------
+    // 5.2.15: the LSCO additional function lands on PA2, which on this
+    // board is the console's own transmit line. So the question this
+    // leg asks is not "does LSCO output a clock" - nothing here could
+    // see it - but "does setting LSCOEN take a pad an alternate
+    // function owns", and the console printing the answer IS the
+    // witness. The bit is restored BEFORE anything is printed.
+    const bool lsco_before = RtcDomain::lsco();
+    RtcDomain::lsco(true, true);
+    const bool lsco_on = RtcDomain::lsco();
+    wait_ms(50);
+    RtcDomain::lsco(false);
+    const bool lsco_off = RtcDomain::lsco();
+    bench.verdict("LSCOEN sets and clears in RCC_BDCR (LSE selected), and "
+                  "the console - whose transmit pad PA2 IS the LSCO pad - "
+                  "is still talking, so the alternate function keeps it",
+                  !lsco_before && lsco_on && !lsco_off);
+
+    // ---- the LSE clock security system, DECLINED and why -------------------
+    print(serial, "  LSECSSON=", RtcDomain::lse_css() ? 1u : 0u, " LSECSSD=",
+          RtcDomain::lse_css_failed() ? 1u : 0u, ", EXTI line ",
+          RtcDomain::css_exti_line, crlf);
+    bench.verdict("the CSS is not armed and has not fired on this board",
+                  !RtcDomain::lse_css() && !RtcDomain::lse_css_failed());
+    bench.verdict("and disarming one that never fired is refused, which is "
+                  "5.4.23's one-way reading of LSECSSON - the reason this "
+                  "suite declines to ARM it: the only way back would be the "
+                  "domain reset this bench must not take",
+                  !RtcDomain::lse_css(false));
+}
+
+// =============================================================================
+// w - THE ERASE, and the internal tampers (OUTSIDE z: it spends the
+//     backup registers, and one leg spends the calendar)
+// =============================================================================
+
+void tw_erase() {
+    T2::bus_clock(true);
+    (void)T2::configure({.prescaler = 0, .period = 0xFFFFFFFFu});
+    T2::enable(true);
+    for (uint8_t i = 1; i <= Tamp::input_count; ++i) {
+        (void)Tamp::disarm(i);
+    }
+    // The reset value arms all four internal sources (letter m), and one
+    // of them is the calendar overflow this letter goes on to provoke -
+    // so they come down first and are re-armed one at a time.
+    for (uint8_t y = tamp_internal_first; y <= tamp_internal_last; ++y) {
+        (void)Tamp::internal_tamper(y, false);
+    }
+    Tamp::clear_flags(TampFlag::all);
+
+    // ---- the default: a tamper ERASES ---------------------------------------
+    for (uint8_t i = 0; i < Tamp::backup_count; ++i) {
+        (void)Tamp::backup(i, 0xE5000000u | i);
+    }
+    bool ok = false;
+    const uint32_t lat =
+        arm_latency(1, TamperFilter::samples2, TamperSampling::div256,
+                    TamperTrigger::high_level_or_falling_edge, true, false,
+                    false, false, 1000, ok);
+    bench.verdict("armed with the register's own default - erase_backups",
+                  ok);
+    bool zeroed = true;
+    for (uint8_t i = 0; i < Tamp::backup_count; ++i) {
+        zeroed = zeroed && Tamp::backup(i) == 0u;
+    }
+    print(serial, "  erase: flag in ", meter_us(lat, 0), " us, BKP0R..BKP",
+          Tamp::backup_count - 1u, "R = ", Tamp::backup(0), " ",
+          Tamp::backup(1), " ", Tamp::backup(2), crlf);
+    bench.verdict("A DETECTED TAMPER ERASES ALL FIVE BACKUP REGISTERS - the "
+                  "chapter's default, and the reason every other letter of "
+                  "this suite arms with NOERASE",
+                  lat != 0u && zeroed);
+    (void)Tamp::disarm(1);
+    Tamp::clear_flags(TampFlag::all);
+
+    // ---- the internal tampers, which have no NOERASE bit at all ------------
+    print(serial, "  internal tampers ", Tamp::has_internal_tampers ? "" : "not ",
+          "declared; TAMP_CR1=", hex(Tamp::config1()), crlf);
+    bench.verdict("this part declares the four internal sources",
+                  Tamp::has_internal_tampers);
+    bench.verdict("an index outside the manual's ITAMP3..ITAMP6 is refused",
+                  !Tamp::internal_tamper(2, true) &&
+                      !Tamp::internal_tamper(7, true));
+
+    struct Probe {
+        uint8_t index;
+        const char* what;
+    };
+    const Probe probes[3] = {{3, "LSE monitoring"},
+                             {4, "HSE monitoring"},
+                             {6, "ST manufacturer readout"}};
+    for (const Probe& p : probes) {
+        for (uint8_t i = 0; i < Tamp::backup_count; ++i) {
+            (void)Tamp::backup(i, 0xB1000000u | i);
+        }
+        Tamp::clear_flags(TampFlag::all);
+        (void)Tamp::internal_tamper(p.index, true);
+        wait_ms(60);
+        wait_ms(60);
+        const bool fired =
+            Tamp::flag(internal_tamper_flag(p.index));
+        const bool wiped = Tamp::backup(0) == 0u;
+        (void)Tamp::internal_tamper(p.index, false);
+        Tamp::clear_flags(TampFlag::all);
+        print(serial, "  ITAMP", p.index, " (", p.what, "): flag ",
+              fired ? 1u : 0u, ", backups ", wiped ? "erased" : "kept", crlf);
+        bench.verdict(p.index == 4u
+                          ? "ITAMP4 watches an HSE this board does not run"
+                          : "an internal tamper armed over a healthy source "
+                            "stays quiet",
+                      p.index == 4u ? true : (!fired && !wiped));
+    }
+
+    // ---- ITAMP5, the calendar overflow, which is the one internal source
+    //      a program can actually PROVOKE - and it costs the calendar.
+    for (uint8_t i = 0; i < Tamp::backup_count; ++i) {
+        (void)Tamp::backup(i, 0xC5000000u | i);
+    }
+    Tamp::clear_flags(TampFlag::all);
+    (void)Tamp::internal_tamper(5, true);
+    const bool at_the_end = set_time({.hour = 23,
+                                      .minute = 59,
+                                      .second = 57,
+                                      .day = 31,
+                                      .month = 12,
+                                      .year = 99,
+                                      .weekday = 5});
+    uint32_t t0 = Ticker::millis();
+    while (!Tamp::flag(TampFlag::calendar_overflow) &&
+           Ticker::millis() - t0 < 8000u) {
+    }
+    const bool overflowed = Tamp::flag(TampFlag::calendar_overflow);
+    const bool wiped5 = Tamp::backup(0) == 0u;
+    RtcReading frozen{};
+    (void)Rtc::read(frozen);
+    (void)Tamp::internal_tamper(5, false);
+    Tamp::clear_flags(TampFlag::all);
+    print(serial, "  ITAMP5: flag ", overflowed ? 1u : 0u, ", backups ",
+          wiped5 ? "erased" : "kept", ", calendar stopped at 20", frozen.time.year,
+          "-", frozen.time.month, "-", frozen.time.day, " ", frozen.time.hour,
+          ":", frozen.time.minute, ":", frozen.time.second, crlf);
+    bench.verdict("the calendar's own overflow IS a tamper: 99-12-31 "
+                  "23:59:59 raises ITAMP5F",
+                  at_the_end && overflowed);
+    bench.verdict("and it erases the backup registers like any other - an "
+                  "internal source has no NOERASE bit",
+                  wiped5);
+
+    // Put the calendar back and prove it runs again.
+    const bool restored = set_time({.hour = 12,
+                                    .minute = 0,
+                                    .second = 0,
+                                    .day = 4,
+                                    .month = 3,
+                                    .year = 26,
+                                    .weekday = 3});
+    RtcReading a{};
+    RtcReading b{};
+    (void)Rtc::read(a);
+    wait_ms(1200);
+    (void)Rtc::read(b);
+    print(serial, "  after the freeze the calendar was re-initialized and "
+                  "reads ", b.time.hour, ":", b.time.minute, ":",
+          b.time.second, crlf);
+    bench.verdict("A FROZEN CALENDAR IS NOT A DEAD ONE: writing it in "
+                  "initialization mode starts it again",
+                  restored && b.time.second != a.time.second);
+
+    for (uint8_t i = 0; i < Tamp::backup_count; ++i) {
+        (void)Tamp::backup(i, 0xB0000000u | i);
+    }
+    bench.verdict("the backup registers restored to what letter j leaves",
+                  Tamp::backup(0) == 0xB0000000u && !Tamp::any_armed());
+}
+
+// =============================================================================
 // v - survival across a real reset (outside z)
 // =============================================================================
 void tv_survival() {
@@ -1415,6 +2521,14 @@ extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
 extern "C" void RTC_TAMP_IRQHandler() {
     rtc_interrupts = rtc_interrupts + 1u;
     (void)brio::Rtc::isr();
+    // The TAMP block shares this vector (table 61), so a handler that
+    // served only the RTC half would storm on a tamper flag nobody
+    // clears - which is exactly what letter m arms.
+    const uint32_t served = brio::Tamp::isr();
+    if (served != 0u) {
+        tamp_interrupts = tamp_interrupts + 1u;
+        tamp_served = tamp_served | served;
+    }
 }
 
 int main() {
@@ -1447,8 +2561,17 @@ int main() {
     bench.letter('i', "smooth calibration, measured", ti_calibration);
     bench.letter('j', "the five backup registers and the two locks over them",
                  tj_backup);
+    bench.letter('k', "RTC_REFIN: the calendar dragged onto a reference",
+                 tk_refin);
+    bench.letter('l', "RTC_SHIFTR: the sub-second shift, timed", tl_shift);
+    bench.letter('m', "tamper detection that keeps the backup registers",
+                 tm_tamper);
+    bench.letter('n', "the alarm masks, LSCO, and the CSS declined",
+                 tn_leftovers);
     bench.letter('v', "SURVIVAL: the backup registers across a real reset",
                  tv_survival, false);
+    bench.letter('w', "THE ERASE and the internal tampers (costs the backups)",
+                 tw_erase, false);
 
     if (resuming) {
         // The reboot letter drives itself: resume, judge, print the ALL:

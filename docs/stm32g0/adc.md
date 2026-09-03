@@ -7,12 +7,12 @@
 > handshake, continuous and discontinuous conversion, the eight hardware
 > triggers, the DMA request in both its modes, the three analog
 > watchdogs, the oversampler and the three internal channels - and all
-> of it is bench-verified. What is NOT here is what needs another
-> chapter or another board: the low-power modes (WAIT and AUTOFF are
-> written and never measured, because there is no PWR driver in this
-> stratum), VREF+ as anything but the board's own supply, and the
-> external analog inputs, of which this desk drives exactly one. The
-> list is in "Not covered yet".
+> of it is bench-verified, the low-power pair WAIT and AUTOFF and the
+> channel-to-pad map of every free external input included. What is NOT
+> here is what needs another board: VREF+ as anything but the board's
+> own supply, and a known VOLTAGE on an external input, which a
+> precharged pad cannot be for the reason measured below. The list is in
+> "Not covered yet".
 
 Documents of record: RM0444 Rev 6 ch. 15, with 5.4.13 (RCC_CCIPR.ADCSEL)
 and the vector table 12.3 (table 61); DS13560 Rev 5 tables 5, 6, 12, 27,
@@ -22,7 +22,7 @@ ES0548 Rev 3 items 2.6.1..2.6.5, read on the bench chip's revision Z
 column. Driver: `stm32g0/adc.hpp`; the reference vocabulary is
 `stm32g0/vref.hpp`'s (see [vref.md](vref.md)), the per-part facts come
 from `stm32g0/device_tables.hpp`. Bench suite: `test_stm32_analog`
-(15 letters, 118 verdicts, wireless), shared with the DAC, the reference
+(18 letters, 139 verdicts, wireless), shared with the DAC, the reference
 buffer and the comparators. Family fixture
 `test/family_stm32g0/adc.cpp` plus four negatives under
 `tools/check_stm32g0.sh`.
@@ -317,31 +317,84 @@ sampling instant of a node the sampling is itself moving, which is why
 against it. It is a BOARD fact, not a silicon one; another pad or
 another board settles somewhere else.
 
+- **WAIT is real, and the READER is the pace** (letter `q`): a
+  continuous converter nobody reads OVERRUNS inside a millisecond, and
+  the same converter with WAIT set holds its result instead and
+  overruns never; reading the data register is what starts the next
+  conversion. 15.6.1's delayed mode, staged as the pair of runs that
+  differ by one bit.
+- **AUTOFF's price is measured**: a conversion costs 2390 ns with the
+  converter awake and 3046..3261 ns with AUTOFF set, so the power-down
+  between conversions is bought at about 700..900 ns of start-up each
+  time. What it SAVES is the meter question this stratum keeps
+  deferring.
+- **CCIPR's ADCSEL really chooses the root, and `configure()` does not
+  write it.** The multiplexer lives in RCC_CCIPR and only `init()` and
+  the `async_source()` verb touch it: `configure()` writes ADC_CCR's
+  PRESCALER and stops there. A letter that changed the config's
+  `async_source` and went through `configure()` alone measured the SAME
+  conversion time from both "roots", which is the multiplexer never
+  having moved. Written properly, at one prescaler: HSI16/4 2883 ticks
+  against SYSCLK/4 753 - the factor of four between 16 MHz and 64 MHz -
+  and SYSCLK/16 2883, which is the prescaler standing alone on that
+  root.
+- **Discontinuous mode converts ONE channel of the sequence per start**,
+  and the sequence's END only comes on the third of a three-channel
+  sequence (15.4.1, staged over the DAC's mid-scale, the bandgap and the
+  junction sensor - three readings that cannot be confused).
+- **TOVS makes the TRIGGER pace the accumulation**: an x8 oversampler
+  needed exactly eight triggers for its one result.
+- **Every hardware trigger of table 75 starts a conversion on one event
+  and not before it** - TIM1_TRGO2, TIM1_CC4, TIM2_TRGO, TIM3_TRGO,
+  TIM4_TRGO, TIM15_TRGO and EXTI11, each fired once into a converter
+  armed on its rising edge. Two of them needed something the table does
+  not say. **TIM1's TRGO2 needs no new verb**: MMS2's reset value is
+  "the UG bit is the trigger output", so the update event this stratum
+  already raises IS TRGO2. And **TIM1_CC4 is a COMPARE and not an EGR
+  strobe** - a software EGR.CC4G into a stopped timer moved nothing at
+  all, and the row runs the way an application would use it, with
+  channel 4 in PWM and a compare the running counter reaches.
+- **EXTI 11 is reached with a pull-walked PB11**, the line's port
+  selected in the EXTI and the sense rising: the same pad technique the
+  comparator campaign established, one chapter over.
+- **The external inputs are a MAP, measured** (letter `r`): twelve
+  channels on twelve free pads - IN0, IN1, IN6..IN11, IN15..IN18 - each
+  follows its OWN pad between the rails by 449..1785 counts of 4096,
+  while the same walk read on a DIFFERENT channel moves 15. That is the
+  channel-to-pad table of DS13560 measured rather than trusted, and the
+  cross-check is what makes it a map.
+- **THE COMPARATOR'S PRECHARGED-PAD TECHNIQUE DOES NOT CARRY TO THE
+  CONVERTER**, which is why those swings are a third of full scale and
+  not full: a comparator's input is a gate and takes no charge, while an
+  ADC's sample-and-hold is a CAPACITOR of the same order as the pad's
+  own, so the first conversion of a precharged pad SHARES its charge and
+  reads a long way short of the rail. Driving, releasing and converting
+  five times over lets the sample capacitor arrive near the rail too and
+  is what makes the swing legible at all. A known voltage on one of
+  these pads still needs a wire.
+
 ## Not covered yet
 
 **Driver gaps** (the register is there, the verb is not):
 
-- The low-power features. WAIT and AUTOFF are in `AdcConfig` and are
-  written, and neither is measured: AUTOFF's whole point is the
-  power-down between sequences, which wants a PWR driver and a current
-  meter, and this stratum has neither.
-- Nothing sets ADC_CCR's prescaler independently of `configure()`, so a
-  caller cannot re-divide the asynchronous clock without an enable
-  cycle. No user has wanted to.
+- `Adc::configure()` writes ADC_CCR's prescaler and NOT RCC_CCIPR's
+  ADCSEL, so a caller changing the asynchronous clock's ROOT after
+  `init()` must call `async_source()` itself with the converter
+  disabled. It is stated on the verb and measured above; whether
+  `configure()` should own the multiplexer is a design question and not
+  a bug.
 
 **Implemented but not bench-verified:**
 
-- The external analog inputs, of which this desk drives ONE (PA4, from
-  the DAC). Fifteen other channels exist and nothing on this board puts
-  a known voltage on any of them.
-- The asynchronous clock from SYSCLK or PLLPCLK. HSI16 is what every
-  letter uses; the other two roots are written, refused where the PLL's
-  P output is dark, and never run.
-- Discontinuous mode, triggered oversampling (TOVS) and the
-  low-frequency trigger bit: all three are configured and refused
-  correctly, none is staged on silicon.
-- Seven of the eight hardware triggers. TIM6_TRGO carries the no-CPU
-  chain; the other seven are codes in an enum.
+- The asynchronous clock from **PLLPCLK**: the code is written and
+  refused where the PLL's P output is dark, which on this board it is
+  ([clock.md](clock.md)).
+- **The four external inputs this package's free pads do not reach**:
+  IN2 and IN3 are the console's own pair, IN4 is the DAC's zero-length
+  wire (letter `d`'s subject) and IN5 is LD4.
+- **A known VOLTAGE on an external input.** The map is measured; an
+  absolute reading on any pad but PA4 needs a source this desk has not
+  got, and the precharge cannot be one for the reason above.
 - VREF+ at anything but the board's supply - see [vref.md](vref.md),
   where the reason is that the buffer must not be enabled on a board
   whose VREF+ wiring is not known.

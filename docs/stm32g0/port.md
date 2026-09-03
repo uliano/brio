@@ -73,6 +73,18 @@ INPUT, which stays live in input, output and alternate modes alike
 peripheral owns - measured. Only ANALOG mode, with the input buffer
 off, hides a pad from its line.
 
+**FOUR PADS ARE NOT ORDINARY GPIOs OUT OF A POWER-ON.** 7.3.16 and
+SYSCFG_CFGR1's strobe bits: "upon power on, internal pull-down resistors
+on UCPD1 CC1 and CC2 pins are enabled (connected)". On this family that
+is PA8 and PB15 for UCPD1 and PD0 and PD2 for UCPD2 - a USB Type-C
+dead-battery Rd of a few kilohms against the tens of kilohms of the
+port's own pull-up - and the chapter's own advice is that "in
+applications that do not use the UCPD peripheral, disable the internal
+pull-down resistor Rd at startup through the strobe bits in SYSCFG
+registers". The strobe only ever RELEASES, and `ucpd_dead_battery()` is
+that verb. It lives in this file because its subject is a PAD and this
+stratum has no UCPD driver to own it.
+
 ## Types and verbs
 
 - `Pin<'A', 5>` - `output()` / `output(level)` (the level written
@@ -91,6 +103,11 @@ off, hides a pad from its line.
   (af0..af15), `PinConfig {pull, open_drain, speed}`, `PinSel {port,
   pin, function}` (a driver's pin claim, `valid()` = port present and
   pin < 16), `PinSet<Pins...>::configure`, `port_exists(letter)`.
+
+`ucpd_dead_battery(instance, on)` - release the Type-C dead-battery
+pull-downs of UCPD1 or UCPD2 (`on` false; the strobe cannot connect
+them again, so true is refused). It opens SYSCFG's clock gate, which is
+where the register lives.
 
 ## How to use it
 
@@ -130,6 +147,15 @@ press is a falling edge. Bonding, measured over SWD on the LQFP64:
 every pin of ports A, B and C answers, port D answers on 0..6, 8 and 9,
 and port F only on 0 and 1.
 
+- **PA8 and PB15 really do come up holding the dead-battery Rd**,
+  measured in `test_stm32_rtc` letter `k`, where PB15 is also RTC_REFIN:
+  the pad does NOT follow its own internal pull-up with the Rd
+  connected, and does once `ucpd_dead_battery(1, false)` has released
+  it. A push-pull driver wins either way. This is very probably the
+  mechanism behind the intermittent PA8 pull-up failure
+  [bench.md](../bench.md) records as a desk fault, and it is a fact
+  about the silicon's reset state rather than about the desk.
+
 ## Not covered yet
 
 Driver gaps: the port lock (GPIOx_LCKR), the alternate-function tables
@@ -141,4 +167,6 @@ Standby-wake pin's configuration).
 
 Implemented, not bench-verified: `PinSpeed` other than low,
 open-drain outputs, `PinSet`, `Port::out_toggle` on several pins at
-once, `Pin::pull` on its own, port clocks other than A's.
+once, `Pin::pull` on its own, port clocks other than A's, and
+`ucpd_dead_battery()` on UCPD2 - whose two pads are PD0 and PD2, which
+this package does not bond.

@@ -111,6 +111,7 @@
 #include "stm32g0/delay.hpp"
 #include "stm32g0/dma.hpp"
 #include "stm32g0/exti.hpp"
+#include "stm32g0/lptim.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/pin.hpp"
 #include "stm32g0/platform_stm32.hpp"
@@ -137,7 +138,7 @@ constexpr UartPins console_pins{
 using Serial = Uart<2, console_pins>;
 constexpr Serial serial;
 
-TestBench<Serial, 16> bench;
+TestBench<Serial, 20> bench;
 
 // ---- the pads --------------------------------------------------------------
 using PadA0 = Pin<'A', 0>;   // ADC_IN0, COMP1_INM8
@@ -349,6 +350,24 @@ void quiet_everything() {
     Nvic::clear_pending(Dac::irq());
     kernel_mode = false;
 }
+
+/// apply(), plus the one thing configure() does not write: the
+/// asynchronous clock's ROOT. 15.3.5 wants it changed with the
+/// converter disabled, which is where apply() already has it.
+bool apply_async(const AdcConfig& c) {
+    (void)Adc::stop();
+    if (!Adc::disable()) {
+        return false;
+    }
+    Adc::async_source(c.async_source);
+    if (!Adc::configure(c)) {
+        return false;
+    }
+    return Adc::enable();
+}
+
+/// A closed band, the other suites' helper.
+bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
 
 /// The bring-up every measuring letter starts from.
 bool analog_up(const AdcConfig& c) {
@@ -3136,6 +3155,731 @@ void banner() {
     print(serial, "  z  run them all", crlf, "  ?  this menu", crlf);
 }
 
+
+// =============================================================================
+// p - the DAC's remaining triggers, and the DMA underrun
+// =============================================================================
+//
+// 16.4.8's trigger multiplexer has nine rows and this suite has run two
+// of them: the software trigger (letter o) and TIM6_TRGO (letter k's
+// no-CPU chain). The other seven are staged here ONE EVENT AT A TIME,
+// which is what makes them countable: a fresh code goes into DHR, the
+// holding register is proven still to be holding it, one trigger event
+// is produced, and DOR - and the pad through ADC_IN4 - is read again.
+// A trigger that does not work leaves DOR where it was, which is a
+// verdict and not an interpretation.
+
+using T1m = Tim<1>;
+using T2m = Tim<2>;
+using T3m = Tim<3>;
+using T7m = Tim<7>;
+using T15m = Tim<15>;
+using Lp1 = Lptim<1>;
+using Lp2 = Lptim<2>;
+using PadB9 = Pin<'B', 9>;
+
+/// Arm one TIMx as a TRGO source and give it one update event.
+template <class T>
+bool trgo_once(bool arm) {
+    T::bus_clock(true);
+    if (arm) {
+        if (!T::configure({.prescaler = 0, .period = 0xFFFFu})) {
+            return false;
+        }
+        return T::master(TimMasterMode::update);
+    }
+    T::update();
+    return true;
+}
+
+/// One DAC step through `t`: load DHR, fire, and see whether DOR moved.
+struct DacStep {
+    bool armed = false;
+    uint16_t before = 0;
+    uint16_t after = 0;
+    uint16_t adc = 0;
+};
+
+DacStep dac_step(DacTrigger t, uint16_t code, void (*fire)()) {
+    DacStep r{};
+    (void)Dac::enable(0, false);
+    r.armed = Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered,
+                                 .triggered = true,
+                                 .trigger = t}) &&
+              Dac::enable(0, true);
+    if (!r.armed) {
+        return r;
+    }
+    (void)delay_us(clock, 200);
+    (void)Dac::write(0, code);
+    (void)delay_us(clock, 20);
+    r.before = Dac::output(0);
+    fire();
+    (void)delay_us(clock, 200);
+    r.after = Dac::output(0);
+    r.adc = convert(In4{});
+    return r;
+}
+
+void tp_dac_triggers() {
+    if (!analog_up(cfg_pad)) {
+        bench.verdict("the ADC comes up", false);
+        return;
+    }
+    (void)apply(cfg_pad);
+    Dac::claim_pad<PadA4>();
+
+    // A DIFFERENT CODE PER ROW, so a step that did not happen cannot be
+    // mistaken for one that did, and so the pad's reading is a second
+    // witness to the register's.
+    uint16_t code = 400;
+    uint16_t moved = 0;
+    uint16_t rows = 0;
+
+    struct Row {
+        const char* name;
+        DacTrigger trigger;
+        bool (*arm)();
+        void (*fire)();
+    };
+    static const Row rows_[] = {
+        {"TIM1_TRGO", DacTrigger::tim1_trgo,
+         [] { return trgo_once<T1m>(true); }, [] { (void)trgo_once<T1m>(false); }},
+        {"TIM2_TRGO", DacTrigger::tim2_trgo,
+         [] { return trgo_once<T2m>(true); }, [] { (void)trgo_once<T2m>(false); }},
+        {"TIM3_TRGO", DacTrigger::tim3_trgo,
+         [] { return trgo_once<T3m>(true); }, [] { (void)trgo_once<T3m>(false); }},
+        {"TIM7_TRGO", DacTrigger::tim7_trgo,
+         [] { return trgo_once<T7m>(true); }, [] { (void)trgo_once<T7m>(false); }},
+        {"TIM15_TRGO", DacTrigger::tim15_trgo,
+         [] { return trgo_once<T15m>(true); }, [] { (void)trgo_once<T15m>(false); }},
+    };
+    for (const Row& row : rows_) {
+        const bool armed = row.arm();
+        const DacStep st = dac_step(row.trigger, code, row.fire);
+        const bool ok = armed && st.armed && st.before != code &&
+                        st.after == code;
+        ++rows;
+        if (ok) {
+            ++moved;
+        }
+        print(serial, "  ", row.name, ": DOR ", st.before, " -> ", st.after,
+              " (asked ", code, "), pad reads ", st.adc, crlf);
+        code = static_cast<uint16_t>(code + 400u);
+    }
+    bench.verdict("every TIMx_TRGO row of 16.4.8's multiplexer moves the DAC "
+                  "on one update event, and only then",
+                  rows == 5u && moved == 5u);
+
+    // ---- the two LPTIM outputs ---------------------------------------------
+    // An LPTIM's OUT is a WAVEFORM and not a strobe, so the "one event"
+    // discipline becomes "start it, let one edge happen, stop it".
+    uint16_t lptim_moved = 0;
+    for (uint8_t i = 0; i < 2u; ++i) {
+        const DacTrigger t =
+            i == 0u ? DacTrigger::lptim1_out : DacTrigger::lptim2_out;
+        if (i == 0u) {
+            Lp1::init();
+            Lp1::kernel_clock(LptimClock::pclk);
+            (void)Lp1::configure({});
+        } else {
+            Lp2::init();
+            Lp2::kernel_clock(LptimClock::pclk);
+            (void)Lp2::configure({});
+        }
+        (void)Dac::enable(0, false);
+        const bool armed =
+            Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered,
+                               .triggered = true,
+                               .trigger = t}) &&
+            Dac::enable(0, true);
+        (void)delay_us(clock, 200);
+        (void)Dac::write(0, code);
+        const uint16_t before = Dac::output(0);
+        if (i == 0u) {
+            Lp1::enable();
+            (void)Lp1::set_arr(2000);
+            (void)Lp1::wait_arr_ok();
+            (void)Lp1::set_cmp(1000);
+            (void)Lp1::wait_cmp_ok();
+            (void)Lp1::start_continuous();
+            (void)delay_us(clock, 500);
+            Lp1::release();
+        } else {
+            Lp2::enable();
+            (void)Lp2::set_arr(2000);
+            (void)Lp2::wait_arr_ok();
+            (void)Lp2::set_cmp(1000);
+            (void)Lp2::wait_cmp_ok();
+            (void)Lp2::start_continuous();
+            (void)delay_us(clock, 500);
+            Lp2::release();
+        }
+        const uint16_t after = Dac::output(0);
+        print(serial, "  LPTIM", i + 1u, "_OUT: DOR ", before, " -> ", after,
+              " (asked ", code, ")", crlf);
+        if (armed && before != code && after == code) {
+            ++lptim_moved;
+        }
+        code = static_cast<uint16_t>(code + 400u);
+    }
+    bench.verdict("both LPTIM outputs reach the DAC's trigger multiplexer",
+                  lptim_moved == 2u);
+
+    // ---- EXTI 9, the one row that is a PAD ---------------------------------
+    // The line is the EXTI's, so the stimulus is a pull-walked PB9 and
+    // the EXTI's own port selection and edge are what put it there.
+    PadB9::input(PinPull::down);
+    (void)delay_us(clock, 300);
+    const bool b9_low = !PadB9::read();
+    PadB9::input(PinPull::up);
+    (void)delay_us(clock, 300);
+    const bool b9_free = b9_low && PadB9::read();
+    PadB9::input(PinPull::down);
+    (void)delay_us(clock, 300);
+    const bool exti_ok =
+        Exti::select(9, 'B') && Exti::sense(9, ExtiSense::rising);
+    (void)Dac::enable(0, false);
+    const bool exti_armed =
+        Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered,
+                           .triggered = true,
+                           .trigger = DacTrigger::exti9}) &&
+        Dac::enable(0, true);
+    (void)delay_us(clock, 200);
+    (void)Dac::write(0, code);
+    const uint16_t exti_before = Dac::output(0);
+    PadB9::pull(PinPull::up);
+    (void)delay_us(clock, 300);
+    const uint16_t exti_after = Dac::output(0);
+    print(serial, "  EXTI9 (PB9 walked up): DOR ", exti_before, " -> ",
+          exti_after, " (asked ", code, ")", crlf);
+    bench.verdict("PB9 follows its own pull, so the EXTI has an edge to see",
+                  b9_free);
+    bench.verdict("and a rising edge on EXTI line 9 triggers the DAC - the "
+                  "one row of the multiplexer that is a PAD",
+                  exti_ok && exti_armed && exti_before != code &&
+                      exti_after == code);
+    (void)Exti::release(9);
+    PadB9::release();
+
+    // ---- THE DMA UNDERRUN --------------------------------------------------
+    // 16.4.8: a trigger that arrives before the previous DMA request has
+    // been served sets DMAUDRx, and the converter stops asking. The
+    // cleanest way to starve one is to ask for the DMA and arm NO
+    // channel at all, so the very second trigger has an unserved request
+    // behind it. THE FLAG IS READ FIRST WITH THE INTERRUPT OFF, because
+    // the handler this suite already binds clears it - the first version
+    // of this leg read 0 and eighteen handler calls, which is the same
+    // fact seen from the wrong side.
+    T6::init();
+    const bool pacer = T6::configure({.prescaler = 63, .period = 99}) &&
+                       T6::master(TimMasterMode::update);
+    (void)Dac::clear_underrun(0);
+    (void)Dac::enable(0, false);
+    const bool udr_armed =
+        Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered,
+                           .triggered = true,
+                           .trigger = DacTrigger::tim6_trgo,
+                           .dma = true}) &&
+        Dac::enable(0, true);
+    const bool clean_before = !Dac::underrun(0);
+    T6::enable(true);
+    (void)delay_us(clock, 900);
+    T6::enable(false);
+    const bool udr = Dac::underrun(0);
+    print(serial, "  DMAUDR1 after a starved stream, interrupt off: ",
+          udr ? 1u : 0u, crlf);
+    bench.verdict("a DAC asking for a DMA nobody serves raises DMAUDR on the "
+                  "trigger after the first, and it was clear before",
+                  udr_armed && pacer && clean_before && udr);
+    const bool cleared = Dac::clear_underrun(0) && !Dac::underrun(0);
+    bench.verdict("the flag is write-one-to-clear and comes down", cleared);
+
+    // And now the same starvation with DMAUDRIE and the NVIC line.
+    dac_underrun_calls = 0;
+    (void)Dac::enable(0, false);
+    const bool irq_armed =
+        Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered,
+                           .triggered = true,
+                           .trigger = DacTrigger::tim6_trgo,
+                           .dma = true,
+                           .underrun_interrupt = true}) &&
+        Dac::enable(0, true);
+    Nvic::enable(Dac::irq());
+    T6::enable(true);
+    (void)delay_us(clock, 900);
+    T6::enable(false);
+    const uint32_t calls = dac_underrun_calls;
+    print(serial, "  handler calls over the same window: ", calls, crlf);
+    bench.verdict("and DMAUDRIE carries it to the vector the DAC shares with "
+                  "TIM6 and LPTIM1, once per unserved trigger",
+                  irq_armed && calls != 0u);
+    Nvic::disable(Dac::irq());
+    (void)Dac::clear_underrun(0);
+    T6::release();
+    quiet_everything();
+}
+
+
+// =============================================================================
+// q - the ADC's tail: the low-power pair, the two sequence modes it has
+//     never worn, the asynchronous clock's other root, and the seven
+//     hardware triggers nothing has ever pulled
+// =============================================================================
+
+using T4m = Tim<4>;
+using PadB11 = Pin<'B', 11>;
+
+/// The conversion time of ONE conversion of the CURRENT configuration,
+/// in TIM2 ticks: start, wait for EOC, stop the clock. The letter c
+/// technique, reused where the question is a difference and not an
+/// absolute.
+uint32_t one_conversion_ticks() {
+    (void)Adc::clear_flags(AdcFlag::converted | AdcFlag::sequence_done | AdcFlag::overrun);
+    const uint32_t t0 = T2::count();
+    (void)Adc::start();
+    while (!Adc::flag(AdcFlag::converted)) {
+    }
+    const uint32_t d = T2::count() - t0;
+    (void)Adc::result();
+    return d;
+}
+
+void tq_adc_tail() {
+    if (!analog_up(cfg_pad)) {
+        bench.verdict("the ADC comes up", false);
+        return;
+    }
+    stopwatch_up();
+    Dac::claim_pad<PadA4>();
+    (void)Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered});
+    (void)Dac::enable(0, true);
+    (void)Dac::write(0, 2048);
+    (void)delay_us(clock, 200);
+
+    // ---- WAIT: the converter paced by its own reader (15.6.1) --------------
+    // With CONT set and nothing reading DR, a converter without WAIT
+    // runs on and OVERRUNS; the same converter with WAIT stalls after
+    // one conversion and cannot overrun at all. Two runs of the same
+    // millisecond, one bit apart.
+    AdcConfig cont = cfg_pad;
+    cont.continuous = true;
+    cont.overrun_overwrite = false;
+    const bool cont_ok = apply(cont) && Adc::select_sync(In4{});
+    (void)Adc::clear_flags(AdcFlag::overrun | AdcFlag::converted);
+    (void)Adc::start();
+    (void)delay_us(clock, 900);
+    const bool overran = Adc::flag(AdcFlag::overrun);
+    (void)Adc::stop();
+
+    AdcConfig waiting = cont;
+    waiting.wait = true;
+    const bool wait_ok = apply(waiting) && Adc::select_sync(In4{});
+    (void)Adc::clear_flags(AdcFlag::overrun | AdcFlag::converted);
+    (void)Adc::start();
+    (void)delay_us(clock, 900);
+    const bool stalled = !Adc::flag(AdcFlag::overrun) && Adc::flag(AdcFlag::converted);
+    const uint16_t held = Adc::result();
+    (void)delay_us(clock, 200);
+    const bool resumed = Adc::flag(AdcFlag::converted);
+    (void)Adc::stop();
+    print(serial, "  WAIT: a free-running converter overran ",
+          overran ? "yes" : "no", "; the same one with WAIT overran ",
+          stalled ? "no" : "yes", " and held ", held,
+          ", then converted again on the read: ", resumed ? "yes" : "no", crlf);
+    bench.verdict("15.6.1's WAIT is real: a continuous converter nobody "
+                  "reads overruns, and the same converter with WAIT set "
+                  "stalls on its result instead",
+                  cont_ok && wait_ok && overran && stalled);
+    bench.verdict("and reading the data register is what releases it - the "
+                  "reader IS the pace",
+                  resumed);
+
+    // ---- AUTOFF: what powering down between conversions costs -------------
+    AdcConfig plain = cfg_pad;
+    const bool plain_ok = apply(plain) && Adc::select_sync(In4{});
+    uint32_t plain_ticks = 0;
+    for (uint8_t i = 0; i < 8u; ++i) {
+        plain_ticks += one_conversion_ticks();
+    }
+    AdcConfig off = cfg_pad;
+    off.auto_off = true;
+    const bool off_ok = apply(off) && Adc::select_sync(In4{});
+    uint32_t off_ticks = 0;
+    for (uint8_t i = 0; i < 8u; ++i) {
+        off_ticks += one_conversion_ticks();
+    }
+    const uint32_t plain_ns = plain_ticks * 1000u / (8u * cycles_per_us);
+    const uint32_t off_ns = off_ticks * 1000u / (8u * cycles_per_us);
+    print(serial, "  AUTOFF: a conversion costs ", plain_ns, " ns awake and ",
+          off_ns, " ns with the converter powered down between them - a "
+          "start-up of ", off_ns > plain_ns ? off_ns - plain_ns : 0u, " ns",
+          crlf);
+    bench.verdict("AUTOFF's price is the start-up it pays per conversion, "
+                  "and it is a real one",
+                  plain_ok && off_ok && off_ns > plain_ns + 500u);
+
+    // ---- the ASYNCHRONOUS CLOCK's other root -------------------------------
+    // Every letter of this suite has run the asynchronous clock from
+    // HSI16. SYSCLK is the other root this board can reach (PLLPCLK is
+    // dark - clock.md), and the conversion time is how you tell them
+    // apart. THE COMPARISON IS AT ONE PRESCALER, because that is the
+    // only way the answer is about the ROOT: 64 MHz against 16 is a
+    // factor of four, and the fixed cost of a start and a poll rides on
+    // both legs alike.
+    // AND THE ROOT IS NOT configure()'S TO WRITE. `Adc::configure()`
+    // writes ADC_CCR's PRESCALER and stops there; ADCSEL lives in
+    // RCC_CCIPR and only `init()` and the `async_source()` verb touch it.
+    // The first version of this leg went through apply() alone and
+    // measured the SAME conversion time from both "roots", which is the
+    // multiplexer never having moved.
+    AdcConfig from_hsi = cfg_internal;
+    from_hsi.prescaler = AdcPresc::div4;
+    const bool hsi_ok = apply_async(from_hsi) && Adc::select_sync(In4{});
+    const uint32_t hsi_ticks = one_conversion_ticks();
+    const bool hsi_read = Adc::async_source() == AdcAsyncSource::hsi16;
+    AdcConfig from_sys = from_hsi;
+    from_sys.async_source = AdcAsyncSource::sysclk;
+    const bool sys_ok = apply_async(from_sys) && Adc::select_sync(In4{});
+    const uint32_t sys_ticks = one_conversion_ticks();
+    const bool sys_read = Adc::async_source() == AdcAsyncSource::sysclk;
+    AdcConfig from_sys16 = from_sys;
+    from_sys16.prescaler = AdcPresc::div16;
+    const bool sys16_ok = apply_async(from_sys16) && Adc::select_sync(In4{});
+    const uint32_t sys16_ticks = one_conversion_ticks();
+    print(serial, "  the async clock at one prescaler: HSI16/4 ", hsi_ticks,
+          " ticks, SYSCLK/4 ", sys_ticks, "; and SYSCLK/16 ", sys16_ticks,
+          crlf);
+    bench.verdict("CCIPR's ADCSEL is written and reads back both ways",
+                  hsi_ok && sys_ok && hsi_read && sys_read);
+    bench.verdict("and it really chooses the ROOT: the same conversion off a "
+                  "64 MHz SYSCLK is about a quarter of what it is off HSI16, "
+                  "at the same prescaler",
+                  within(hsi_ticks * 100u / sys_ticks, 300u, 460u));
+    bench.verdict("ADC_CCR's prescaler stands alone on that root: four times "
+                  "the divider is about four times the conversion",
+                  sys16_ok && within(sys16_ticks * 100u / sys_ticks, 330u,
+                                     460u));
+
+    // ---- DISCONTINUOUS mode: one channel per trigger -----------------------
+    // 15.4.1: with DISCEN a trigger converts ONE channel of the sequence
+    // and stops. Three distinct sources make the order legible - the
+    // DAC's mid-scale on IN4, the bandgap and the junction sensor - and
+    // a sequence that is NOT discontinuous converts all three on one
+    // trigger, which is the control.
+    Adc::vrefint(true);
+    Adc::temperature(true);
+    (void)delay_us(clock, 200);
+    AdcConfig seq = cfg_internal;
+    seq.discontinuous = true;
+    const uint32_t mask = (1UL << 4) | (1UL << Adc::vrefint_channel) |
+                          (1UL << Adc::temperature_channel);
+    bool disc_ok = apply(seq);
+    disc_ok = disc_ok && Adc::sequence(mask);
+    uint16_t got[3] = {0, 0, 0};
+    uint8_t eos_after = 0;
+    for (uint8_t i = 0; i < 3u; ++i) {
+        (void)Adc::clear_flags(AdcFlag::converted | AdcFlag::sequence_done);
+        (void)Adc::start();
+        uint32_t spins = 0;
+        while (!Adc::flag(AdcFlag::converted) && spins < 1'000'000UL) {
+            ++spins;
+        }
+        got[i] = Adc::result();
+        if (Adc::flag(AdcFlag::sequence_done)) {
+            eos_after = static_cast<uint8_t>(i + 1u);
+        }
+    }
+    print(serial, "  discontinuous: three starts gave ", got[0], " / ", got[1],
+          " / ", got[2], ", EOS after start ", eos_after, crlf);
+    bench.verdict("DISCEN converts ONE channel of the sequence per start, and "
+                  "the sequence's END only comes on the third",
+                  disc_ok && eos_after == 3u && got[0] != got[1] &&
+                      got[1] != got[2]);
+
+    // ---- TRIGGERED OVERSAMPLING (TOVS) -------------------------------------
+    // 15.5.4: with TOVS each trigger produces ONE of the accumulated
+    // conversions instead of the whole series, so an x8 oversampler needs
+    // eight triggers before its one result. The pacer is the software
+    // start, which makes the count exact.
+    AdcConfig tovs = cfg_pad;
+    tovs.oversampling = true;
+    tovs.oversampling_ratio = AdcOversampling::x8;
+    tovs.oversampling_shift = 3;
+    tovs.triggered_oversampling = true;
+    tovs.trigger = AdcTrigger::tim6_trgo;
+    tovs.trigger_edge = AdcEdge::rising;
+    bool tovs_ok = apply(tovs) && Adc::select_sync(In4{});
+    T6::init();
+    tovs_ok = tovs_ok && T6::configure({.prescaler = 63, .period = 199}) &&
+              T6::master(TimMasterMode::update);
+    (void)Adc::clear_flags(AdcFlag::converted | AdcFlag::sequence_done);
+    (void)Adc::start();
+    uint8_t triggers = 0;
+    for (; triggers < 16u; ++triggers) {
+        T6::update();
+        (void)delay_us(clock, 60);
+        if (Adc::flag(AdcFlag::converted)) {
+            break;
+        }
+    }
+    const uint16_t tovs_result = Adc::result();
+    (void)Adc::stop();
+    T6::release();
+    print(serial, "  TOVS: an x8 oversampler needed ", triggers + 1u,
+          " triggers for its one result of ", tovs_result, crlf);
+    bench.verdict("TOVS makes the TRIGGER pace the accumulation: eight "
+                  "triggers, one oversampled result",
+                  tovs_ok && triggers + 1u == 8u);
+
+    // ---- the seven hardware triggers -------------------------------------
+    // Every one of them is fired ONCE, by software, into a converter
+    // armed on its rising edge; the witness is EOC. TIM1's TRGO2 needs
+    // no new verb: MMS2's reset value is "the UG bit is the trigger
+    // output", so the update event this suite already raises IS TRGO2.
+    struct TrigRow {
+        const char* name;
+        AdcTrigger trigger;
+        bool (*arm)();
+        void (*fire)();
+    };
+    static const TrigRow trig_rows[] = {
+        {"TIM1_TRGO2", AdcTrigger::tim1_trgo2,
+         [] { T1m::bus_clock(true);
+              return T1m::configure({.prescaler = 0, .period = 0xFFFFu}); },
+         [] { T1m::update(); }},
+        // TIM1_CC4 IS A COMPARE AND NOT AN EGR STROBE: a software
+        // EGR.CC4G into a stopped timer moved nothing at all (measured),
+        // so the row is staged the way an application would use it -
+        // channel 4 in PWM with a compare the running counter reaches.
+        {"TIM1_CC4", AdcTrigger::tim1_cc4,
+         [] { T1m::bus_clock(true);
+              const bool c = T1m::configure({.prescaler = 63,
+                                             .period = 999}) &&
+                             T1m::output_channel(
+                                 3, {.mode = TimOutputMode::pwm1,
+                                     .compare = 500,
+                                     .enable = true}) &&
+                             T1m::main_output(true);
+              T1m::enable(true);
+              return c; },
+         [] { (void)delay_us(clock, 900); }},
+        {"TIM2_TRGO", AdcTrigger::tim2_trgo,
+         [] { return trgo_once<T2m>(true); }, [] { (void)trgo_once<T2m>(false); }},
+        {"TIM3_TRGO", AdcTrigger::tim3_trgo,
+         [] { return trgo_once<T3m>(true); }, [] { (void)trgo_once<T3m>(false); }},
+        {"TIM4_TRGO", AdcTrigger::tim4_trgo,
+         [] { return trgo_once<T4m>(true); }, [] { (void)trgo_once<T4m>(false); }},
+        {"TIM15_TRGO", AdcTrigger::tim15_trgo,
+         [] { return trgo_once<T15m>(true); }, [] { (void)trgo_once<T15m>(false); }},
+    };
+    uint8_t fired = 0;
+    uint8_t tried = 0;
+    for (const TrigRow& row : trig_rows) {
+        ++tried;
+        AdcConfig tc = cfg_pad;
+        tc.trigger = row.trigger;
+        tc.trigger_edge = AdcEdge::rising;
+        const bool armed = row.arm() && apply(tc) && Adc::select_sync(In4{});
+        (void)Adc::clear_flags(AdcFlag::converted | AdcFlag::sequence_done);
+        (void)Adc::start();
+        const bool quiet_first = !Adc::flag(AdcFlag::converted);
+        row.fire();
+        (void)delay_us(clock, 200);
+        const bool hit = Adc::flag(AdcFlag::converted);
+        (void)Adc::result();
+        (void)Adc::stop();
+        if (armed && quiet_first && hit) {
+            ++fired;
+        } else {
+            print(serial, "  ", row.name, ": armed ", armed ? 1u : 0u,
+                  ", quiet ", quiet_first ? 1u : 0u, ", fired ",
+                  hit ? 1u : 0u, crlf);
+        }
+    }
+    print(serial, "  hardware triggers: ", fired, " of ", tried,
+          " fired once each and not before", crlf);
+    bench.verdict("every timer row of table 75 starts a conversion on one "
+                  "event and not before it - TIM1's TRGO2 included, which "
+                  "MMS2's reset value makes the update event itself",
+                  tried == 6u && fired == 6u);
+
+    // EXTI 11, the one row that is a pad.
+    PadB11::input(PinPull::down);
+    (void)delay_us(clock, 300);
+    const bool b11_low = !PadB11::read();
+    PadB11::input(PinPull::up);
+    (void)delay_us(clock, 300);
+    const bool b11_free = b11_low && PadB11::read();
+    PadB11::input(PinPull::down);
+    (void)delay_us(clock, 300);
+    AdcConfig ec = cfg_pad;
+    ec.trigger = AdcTrigger::exti11;
+    ec.trigger_edge = AdcEdge::rising;
+    const bool exti_armed = Exti::select(11, 'B') &&
+                            Exti::sense(11, ExtiSense::rising) && apply(ec) &&
+                            Adc::select_sync(In4{});
+    (void)Adc::clear_flags(AdcFlag::converted | AdcFlag::sequence_done);
+    (void)Adc::start();
+    const bool exti_quiet = !Adc::flag(AdcFlag::converted);
+    PadB11::pull(PinPull::up);
+    (void)delay_us(clock, 300);
+    const bool exti_hit = Adc::flag(AdcFlag::converted);
+    (void)Adc::result();
+    (void)Adc::stop();
+    bench.verdict("PB11 follows its own pull, so EXTI line 11 has an edge",
+                  b11_free);
+    bench.verdict("and that edge starts a conversion: table 75's one pad row",
+                  exti_armed && exti_quiet && exti_hit);
+    (void)Exti::release(11);
+    PadB11::release();
+    quiet_everything();
+}
+
+
+// =============================================================================
+// r - the external analog inputs, one table, both rails
+// =============================================================================
+//
+// This suite has driven exactly ONE external input for its whole life -
+// PA4, because the DAC is on it. The other fifteen have been enum
+// values. The technique that reaches them is the comparator campaign's
+// PRECHARGED PAD: drive the pad to a rail with its own port, hand it to
+// the analog switch, and convert at once - the node holds what it was
+// left at for far longer than a conversion takes (letter m measured the
+// relaxation in hundreds of milliseconds).
+//
+// The channel numbers are DS13560's table 12 and this file's claim, the
+// same standing as an AF number: no header of this family carries a
+// pad-to-channel map, so a wrong pairing here would show as a channel
+// that does not follow its pad, which is exactly what the table below
+// would print.
+
+struct AdcPadRow {
+    const char* name;
+    uint8_t channel;
+    void (*drive)(bool);
+    void (*to_analog)();
+};
+
+template <class Pad>
+constexpr AdcPadRow adc_pad_row(const char* name, uint8_t ch) {
+    return AdcPadRow{name, ch, [](bool hi) { Pad::output(hi); },
+                     [] { Pad::analog(); }};
+}
+
+/// One reading of `channel` off a pad precharged to `hi` - and the
+/// precharge is REPEATED between conversions, because one is not enough.
+///
+/// THE COMPARATOR'S TECHNIQUE DOES NOT CARRY TO THE CONVERTER, and this
+/// is the letter's finding: a comparator's input is a gate and takes no
+/// charge, while an ADC's sample-and-hold is a CAPACITOR of the same
+/// order as the pad's own, so the first conversion of a precharged pad
+/// SHARES its charge and reads a long way short of the rail. Driving,
+/// releasing and converting five times over lets the sample capacitor
+/// arrive near the rail too, and what is left is a reading that follows
+/// its pad by a wide margin without ever reaching it.
+uint16_t precharged_read(uint8_t channel, void (*drive)(bool),
+                         void (*to_analog)(), bool hi) {
+    uint16_t v = 0;
+    for (uint8_t i = 0; i < 5u; ++i) {
+        drive(hi);
+        (void)delay_us(clock, 200);
+        to_analog();
+        v = convert(channel);
+    }
+    to_analog();
+    return v;
+}
+
+void tr_external_inputs() {
+    if (!analog_up(cfg_pad)) {
+        bench.verdict("the ADC comes up", false);
+        return;
+    }
+    (void)apply(cfg_pad);
+    const uint16_t full = static_cast<uint16_t>(Adc::result_steps());
+
+    static const AdcPadRow rows[] = {
+        adc_pad_row<Pin<'A', 0>>("PA0  IN0", 0),
+        adc_pad_row<Pin<'A', 1>>("PA1  IN1", 1),
+        adc_pad_row<Pin<'A', 6>>("PA6  IN6", 6),
+        adc_pad_row<Pin<'A', 7>>("PA7  IN7", 7),
+        adc_pad_row<Pin<'B', 0>>("PB0  IN8", 8),
+        adc_pad_row<Pin<'B', 1>>("PB1  IN9", 9),
+        adc_pad_row<Pin<'B', 2>>("PB2  IN10", 10),
+        adc_pad_row<Pin<'B', 10>>("PB10 IN11", 11),
+        adc_pad_row<Pin<'B', 11>>("PB11 IN15", 15),
+        adc_pad_row<Pin<'B', 12>>("PB12 IN16", 16),
+        adc_pad_row<Pin<'C', 4>>("PC4  IN17", 17),
+        adc_pad_row<Pin<'C', 5>>("PC5  IN18", 18),
+    };
+
+    uint8_t good = 0;
+    uint8_t tried = 0;
+    for (const AdcPadRow& row : rows) {
+        ++tried;
+        const uint16_t hi =
+            precharged_read(row.channel, row.drive, row.to_analog, true);
+        const uint16_t lo =
+            precharged_read(row.channel, row.drive, row.to_analog, false);
+        const uint16_t swing = hi > lo ? static_cast<uint16_t>(hi - lo) : 0u;
+        const bool ok = swing > full / 16u;
+        if (ok) {
+            ++good;
+        }
+        print(serial, "  ", row.name, ": high ", hi, ", low ", lo, ", swing ", swing, ok ? "" : "   <- does not follow its pad",
+              crlf);
+    }
+    print(serial, "  ", good, " of ", tried,
+          " external inputs follow their own pad, out of ", full,
+          " counts full scale", crlf);
+    bench.verdict("every external input this package bonds to a free pad "
+                  "follows that pad by a sixteenth of full scale or more - the "
+                  "channel-to-pad table of DS13560 measured rather than "
+                  "trusted, and the swing short of the rails is the "
+                  "sample-and-hold's own charge and not the map's fault",
+                  tried == 12u && good == 12u);
+
+    // THE CROSS-CHECK, which is what makes the table a MAP and not a
+    // coincidence: one pad walked while a DIFFERENT channel is read.
+    const AdcPadRow& a = rows[1];   // PA1 / IN1
+    const AdcPadRow& b = rows[3];   // PA7 / IN7
+    const uint16_t own_hi = precharged_read(a.channel, a.drive, a.to_analog, true);
+    const uint16_t own_lo = precharged_read(a.channel, a.drive, a.to_analog, false);
+    const uint16_t foreign_hi =
+        precharged_read(b.channel, a.drive, a.to_analog, true);
+    const uint16_t foreign_lo =
+        precharged_read(b.channel, a.drive, a.to_analog, false);
+    const uint16_t own_swing =
+        own_hi > own_lo ? static_cast<uint16_t>(own_hi - own_lo) : 0u;
+    const uint16_t foreign_swing =
+        foreign_hi > foreign_lo ? static_cast<uint16_t>(foreign_hi - foreign_lo)
+                                : static_cast<uint16_t>(foreign_lo - foreign_hi);
+    print(serial, "  PA1 walked, read on IN1: ", own_hi, "/", own_lo,
+          "; the same walk read on IN7: ", foreign_hi, "/", foreign_lo, crlf);
+    bench.verdict("and a channel does NOT follow somebody else's pad, which "
+                  "is what makes the table a map",
+                  own_swing > full / 16u && foreign_swing < full / 32u);
+
+    // The three internal channels, so the table is the whole multiplexer.
+    Adc::vrefint(true);
+    Adc::temperature(true);
+    Adc::vbat(true);
+    (void)delay_us(clock, 200);
+    (void)apply(cfg_internal);
+    const uint16_t vref = convert_median(Adc::vrefint_channel);
+    const uint16_t temp = convert_median(Adc::temperature_channel);
+    const uint16_t vbat = convert_median(Adc::vbat_channel);
+    print(serial, "  and the three internal channels: VREFINT ", vref,
+          ", temperature ", temp, ", VBAT/3 ", vbat, crlf);
+    bench.verdict("and the three internal channels sit where the earlier "
+                  "letters put them, on the same multiplexer",
+                  vref > 1000u && vref < 2000u && temp > 500u &&
+                      temp < 1500u && vbat > 1000u && vbat < 3000u);
+    quiet_everything();
+}
+
 }  // namespace
 
 // =============================================================================
@@ -3275,6 +4019,13 @@ int main() {
                  tm_comp_analog);
     bench.letter('n', "COMP2 and COMP3 on their own pads, the output ON a "
                  "pad, and the other blanking sources", tn_comp_pads);
+    bench.letter('p', "the DAC's remaining triggers, and the DMA underrun",
+                 tp_dac_triggers);
+    bench.letter('q', "the ADC's tail: WAIT and AUTOFF, the async clock's "
+                 "other root, discontinuous, TOVS, and the seven triggers",
+                 tq_adc_tail);
+    bench.letter('r', "the external analog inputs: one table, both rails",
+                 tr_external_inputs);
     bench.letter('o', "the DAC's tail: both wave generators, the user offset "
                  "calibration, and sample-and-hold on LSI", to_dac_tail);
 

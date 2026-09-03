@@ -290,6 +290,51 @@ struct Pin {
     }
 };
 
+/**
+ * THE DEAD-BATTERY PULL-DOWNS, and why a GPIO header carries them.
+ *
+ * 7.3.16 and 5.x's SYSCFG_CFGR1: "Upon power on, internal pull-down
+ * resistors on UCPD1 CC1 and CC2 pins are enabled (connected)", and the
+ * only way to let go of them is the strobe bit. On this family those
+ * pads are PA8 and PB15 for UCPD1 and PD0 and PD2 for UCPD2 - four
+ * ordinary-looking GPIOs that come out of a power-on with a Type-C Rd on
+ * them, some kilohms against the tens of kilohms of the port's own
+ * pull-up. So a pad that will not follow its own pull is not always a
+ * desk fault; on exactly these four it is the reset state, and the
+ * chapter's own advice is "in applications that do not use the UCPD
+ * peripheral, disable the internal pull-down resistor Rd at startup".
+ *
+ * It lives here because its SUBJECT is a pad and this stratum has no
+ * UCPD driver to own it; the day one is built, this verb is its
+ * strobe's first half and moves there. It opens SYSCFG's clock gate for
+ * the same reason vref.hpp's init() does - the register is behind it.
+ *
+ * `instance` is the manual's own 1-based UCPD numbering. False for an
+ * instance this part has not got.
+ */
+inline bool ucpd_dead_battery(uint8_t instance, bool on) {
+    if (on || instance < 1u || instance > 2u) {
+        return false;   // the strobe only ever RELEASES; see 5.x's CFGR1
+    }
+    uint32_t bit = 0;
+#if defined(SYSCFG_CFGR1_UCPD1_STROBE)
+    if (instance == 1u) {
+        bit = SYSCFG_CFGR1_UCPD1_STROBE;
+    }
+#endif
+#if defined(SYSCFG_CFGR1_UCPD2_STROBE)
+    if (instance == 2u) {
+        bit = SYSCFG_CFGR1_UCPD2_STROBE;
+    }
+#endif
+    if (bit == 0u) {
+        return false;
+    }
+    Rcc::apb2_clock(RCC_APBENR2_SYSCFGEN, true);
+    SYSCFG->CFGR1 |= bit;
+    return true;
+}
+
 /// A compile-time set of pins of possibly different ports - the mask
 /// form is per port, so this is the per-port grouping helper the bus
 /// drivers use for "these lines, all inputs now".

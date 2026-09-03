@@ -1889,6 +1889,46 @@ constexpr uint8_t tamp_backup_registers() {
         sizeof(uint32_t));
 }
 
+/// How many EXTERNAL tamper inputs (TAMP_INx) this part declares, and
+/// IT IS NOT THE SAME NUMBER ACROSS THE FAMILY: the G0B1's header
+/// declares TAMP1E..TAMP3E and the G071's and the G031's stop at two.
+/// Counted off the enable bits themselves because table 1 does not say.
+/// THE PACKAGE IS A SECOND QUESTION this stratum cannot ask - TAMP_IN3
+/// is PE6 on this device and the LQFP64 does not bond port E (port.md's
+/// standing per-package gap).
+constexpr uint8_t tamp_external_inputs() {
+    uint8_t n = 0;
+#if defined(TAMP_CR1_TAMP1E_Msk)
+    ++n;
+#endif
+#if defined(TAMP_CR1_TAMP2E_Msk)
+    ++n;
+#endif
+#if defined(TAMP_CR1_TAMP3E_Msk)
+    ++n;
+#endif
+    return n;
+}
+
+/// Does this part have the four INTERNAL tamper sources (LSE and HSE
+/// monitoring, the calendar overflow, the manufacturer readout)? All
+/// three headers of this pack declare ITAMP3E..ITAMP6E - unlike the
+/// external inputs, which differ - and the probe stands so that a part
+/// without them compiles rather than reaching for a missing mask.
+constexpr bool tamp_has_internal_tampers() {
+#if defined(TAMP_CR1_ITAMP3E_Msk)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// The lowest and highest internal tamper INDEX the manual numbers
+/// (ITAMP3..ITAMP6), so a caller's argument is checked against the
+/// chapter's own numbering rather than against a bit position.
+constexpr uint8_t tamp_internal_first = 3;
+constexpr uint8_t tamp_internal_last = 6;
+
 // ---- FDCAN (ch. 36) ---------------------------------------------------------
 //
 // A WHOLE CHAPTER THAT IS ABSENT FROM MOST OF THE FAMILY: table 1 gives

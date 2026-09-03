@@ -196,6 +196,26 @@ pad. The comparator side of the story, including what this arrangement
 can and cannot measure about the comparator itself, is in
 [comp.md](comp.md).
 
+- **Every row of 16.4.8's trigger multiplexer moves this converter**
+  (letter `p`), one event at a time so the step is countable: TIM1,
+  TIM2, TIM3, TIM7 and TIM15's TRGO each on one software update event
+  (a fresh code in DHR, DOR proven still holding the old one, the
+  trigger, DOR at the new one and the pad reading it back through
+  ADC_IN4); both LPTIM outputs, which are waveforms rather than strobes
+  and are started, allowed one edge and stopped; and **EXTI 9 through a
+  pull-walked PB9**, the one row of the multiplexer that is a PAD, with
+  the line's port selected in the EXTI and its sense rising.
+- **The DMA underrun, staged and caught**: a converter asking for a DMA
+  with NO channel armed at all raises DMAUDR on the trigger after the
+  first, and the flag is clear before. It is write-one-to-clear and
+  comes down. With DMAUDRIE set and the NVIC line open the same
+  starvation reaches the vector the DAC shares with TIM6 and LPTIM1,
+  once per unserved trigger (nine calls over a 900 us window at
+  10 kHz). **The flag has to be read with the interrupt OFF** - a
+  handler that serves it clears it, and the first version of this leg
+  read zero and eighteen handler calls, which is the same fact seen
+  from the wrong side.
+
 ## Not covered yet
 
 **Driver gaps:**
@@ -203,19 +223,17 @@ can and cannot measure about the comparator itself, is in
 - Nothing here turns on LSI, which is `dac_hold_ck` and therefore the
   clock the sample-and-hold mode runs on (table 85). That is deliberate
   - an RCC root is not this driver's to start - and the CONSEQUENCE is
-  now measured rather than guessed: with LSI stopped the mode degrades
-  to plain buffered in complete silence (above). The header says so.
+  measured rather than guessed: with LSI stopped the mode degrades to
+  plain buffered in complete silence (above). The header says so.
 
 **Implemented but not bench-verified:**
 
 - The wave generators from a HARDWARE trigger, and therefore at a rate
-  worth a spectrum. Both are run above one software step at a time,
-  which is what makes them countable and is not the same measurement.
+  worth a spectrum. Both are run one software step at a time, which is
+  what makes them countable and is not the same measurement - and the
+  trigger rows themselves are all measured now (above), so what is left
+  is only the RATE.
 - What sample-and-hold COSTS. The mode runs and holds (above); 16.4.6
   sells it as a power saving and this bench has no current meter.
-- The DMA UNDERRUN path. `underrun()` is read on every chain run and has
-  never been true, which is the right answer for a stream that keeps up
-  and no evidence at all about the flag.
-- Eight of the nine hardware triggers, and EXTI9 among them.
 - The dual holding registers as a two-channel stream: `write_dual()` is
   exercised, `data_address_dual_12r()` has never carried a DMA channel.
