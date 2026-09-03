@@ -260,8 +260,15 @@ gets its dated home in `docs/design/` when taken.
   BLOCK-STREAM FIXED POINT ANSWERED - BlockPlayer fits the hardware
   circular mode, BlockSource cannot (skip-rather-tear is undecidable
   after the edge), nothing in util/ changed; a request is a LEVEL served
-  on enable, the SAM's opposite; the VCP ceiling is 921600). Next in
-  order: ADC/DAC/COMP/VREFBUF, RTC+PWR.
+  on enable, the SAM's opposite; the VCP ceiling is 921600); campaign 6
+  ADC/DAC/COMP/VREFBUF DONE (four drivers, test_stm32_analog z 94/94,
+  util/analog + analog_sampler unchanged; VDDA 3310 mV via VREFINT,
+  conversion time exact to the cycle, the DAC reaches the ADC only
+  through PA4, VREFBUF sits behind SYSCFG's clock gate, pulls are
+  disabled in analog mode so the comparator's stimulus is a precharged
+  pad; Ref/ref_mv live in vref.hpp - one shared VREF+ rail). Next:
+  RTC+PWR (the sleep model's third silicon), then the fillers (CRC,
+  LPTIM, the USART tail) and what needs a peer or wires.
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device
