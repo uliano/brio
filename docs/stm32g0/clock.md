@@ -32,7 +32,14 @@ and the core, PPRE for PCLK = the APB), an ENABLE BIT per peripheral
 that gates its bus clock (RCC_IOPENR/AHBENR/APBENR1/APBENR2), and a
 KERNEL-CLOCK multiplexer for the few peripherals that may run off
 something other than their bus (USART1..3, LPUARTs, I2C1, ADC,
-LPTIMs, RTC - RCC_CCIPR). What crosses the util clock contract is
+LPTIMs, RTC - RCC_CCIPR). Two of those multiplexers are DRIVEN: the
+USART's, by `stm32g0/usart.hpp`, and BOTH LPTIMs', by
+`stm32g0/lptim.hpp` - which is where a peripheral's own multiplexer
+belongs, since the block that counts the clock is the one that knows
+what it is worth. The LPTIM's four codes (PCLK, LSI, HSI16, LSE) are
+the same for both instances on every part of this pack, and which of
+them survives a Stop is the low-power timer's own chapter
+([lptim.md](lptim.md)). What crosses the util clock contract is
 unchanged: `clock_hz(clock)` is SYSCLK = HCLK, and this first task
 pins HPRE and PPRE at 1 so PCLK == HCLK == `hz`; `Clock::pclk_hz` is
 stated beside `hz` so a driver on APB asks for the rate that is its

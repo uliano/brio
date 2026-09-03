@@ -243,11 +243,14 @@ bool wall_up() {
 ///
 /// THE TICK IS PAUSED AROUND A DEEP SLEEP, and that is not tidiness.
 /// 4.3.3: a WFI enters a low-power mode "only if no interrupt is
-/// pending", and this kernel's SysTick raises one every millisecond -
-/// so a Stop entered with the tick armed is a coin toss against a
-/// one-millisecond window. Pausing costs nothing at all, because kernel
-/// time stops in a Stop anyway (that is what the timed site exists to
-/// repair), and it turns a probabilistic entry into a deterministic one.
+/// pending", and this kernel's SysTick raises one every millisecond;
+/// once the Stop is taken HCLK stops and SysTick with it, so on a bare
+/// board the window is one instruction wide - but under a debugger's
+/// DBGMCU_CR.DBG_STOP the debug logic keeps HCLK running inside the
+/// Stop and the next tick ends it (letter c measures both). Pausing
+/// costs nothing at all, because kernel time stops in a Stop anyway
+/// (that is what the timed site exists to repair), and it makes the
+/// entry deterministic in both states.
 SysclkSource woke_source = SysclkSource::pllrclk;
 SysclkSource resumed_source = SysclkSource::pllrclk;
 bool resumed_clock = false;
@@ -434,19 +437,36 @@ void tc_stop_freezes() {
 
     // FIRST, THE CONTROL: the same sleep with the kernel's tick still
     // armed. 4.3.3's "only if no interrupt is pending" is what this
-    // measures, and the answer is the reason every deep sleep in this
-    // suite pauses the tick.
+    // measures - AND WHAT A DEBUGGER LEFT BEHIND DECIDES THE ANSWER.
+    // DBGMCU_CR.DBG_STOP keeps HCLK running inside a Stop so that a
+    // probe can still talk to the core; with it set SysTick keeps
+    // firing and the next tick ends the sleep, with it clear HCLK
+    // stops with the WFI and the sleep lasts. The bit outlives every
+    // reset but a power-on and OpenOCD sets it at every connection
+    // that finds the DBGMCU's clock gate open, so this letter READS
+    // the bit and judges the state it finds rather than assuming one:
+    // the first version of this verdict assumed "does not last", which
+    // was true of the probe's setting and not of the silicon.
     const uint32_t with_tick = wall_ms(one_sleep(PwrMode::stop1, counts, false));
     const uint32_t k0 = Ticker::millis();
     const uint32_t slept = one_sleep(PwrMode::stop1, counts);
     const uint32_t kernel_ms = Ticker::millis() - k0;
     const uint32_t slept_ms = wall_ms(slept);
+    const bool dbg_stop = Pwr::debug_in_stop();
     print(serial, "  a 250 ms Stop 1 with the kernel tick STILL ARMED lasted ",
-          with_tick, " ms; with it paused, ", slept_ms, crlf);
-    bench.verdict("A STOP ENTERED WITH THE MILLISECOND TICK ARMED DOES NOT "
-                  "LAST: 4.3.3's \"only if no interrupt is pending\" is a "
-                  "race against SysTick, and SysTick wins",
-                  with_tick < 100u);
+          with_tick, " ms; with it paused, ", slept_ms,
+          " (DBGMCU_CR.DBG_STOP = ", dbg_stop, ")", crlf);
+    if (dbg_stop) {
+        bench.verdict("UNDER A DEBUGGER'S DBG_STOP the debug logic keeps HCLK "
+                      "and SysTick running inside a Stop, and a Stop entered "
+                      "with the tick armed is ended by the next tick",
+                      with_tick < 100u);
+    } else {
+        bench.verdict("A STOP ENTERED WITH THE TICK ARMED LASTS on a board no "
+                      "debugger has touched: 4.3.3's pending-interrupt window "
+                      "is one instruction wide, and HCLK stops with the WFI",
+                      within(with_tick, 230u, 290u));
+    }
     print(serial, "  a Stop 1 of ", slept_ms,
           " ms of wall advanced the kernel tick by ", kernel_ms, " ms", crlf);
     bench.verdict("the sleep really happened, and the RTC saw all of it",

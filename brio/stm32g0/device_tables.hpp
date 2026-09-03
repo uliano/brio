@@ -929,6 +929,189 @@ constexpr IRQn_Type tim_cc_irq(uint8_t n) {
 /// two DIFFERENT vectors? True for TIM1 alone.
 constexpr bool tim_has_split_vector(uint8_t n) { return n == 1u && tim_present(n); }
 
+// ---- LPTIM instances (RM0444 ch. 26) ----------------------------------------
+
+/// Register block base of LPTIMn (n = 1, 2), 0 when the device does not
+/// have it. Every STM32G0x1 of this pack carries both, but the probe is
+/// still the header's and not a claim of this file's.
+constexpr uint32_t lptim_base(uint8_t n) {
+    switch (n) {
+#if defined(LPTIM1_BASE)
+        case 1: return LPTIM1_BASE;
+#endif
+#if defined(LPTIM2_BASE)
+        case 2: return LPTIM2_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool lptim_present(uint8_t n) { return lptim_base(n) != 0u; }
+
+/// RCC_APBENR1 bit that clocks LPTIMn. Both instances are APB1's on
+/// this family (5.4.19), so there is no bus question to answer here as
+/// there is for the timers and the USARTs.
+constexpr uint32_t lptim_bus_clock_mask(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APBENR1_LPTIM1EN)
+        case 1: return RCC_APBENR1_LPTIM1EN;
+#endif
+#if defined(RCC_APBENR1_LPTIM2EN)
+        case 2: return RCC_APBENR1_LPTIM2EN;
+#endif
+        default: return 0;
+    }
+}
+
+/// RCC_APBRSTR1 bit that resets LPTIMn. This one is not a convenience:
+/// ES0548 2.8.1's workaround makes the RCC reset THE ONLY WAY the driver
+/// turns an LPTIM off, so a missing bit here would be a driver with no
+/// disable at all - which is why it is probed and not assumed.
+constexpr uint32_t lptim_reset_mask(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APBRSTR1_LPTIM1RST)
+        case 1: return RCC_APBRSTR1_LPTIM1RST;
+#endif
+#if defined(RCC_APBRSTR1_LPTIM2RST)
+        case 2: return RCC_APBRSTR1_LPTIM2RST;
+#endif
+        default: return 0;
+    }
+}
+
+/// Position of LPTIMn's kernel-clock select field in RCC_CCIPR (5.4.21),
+/// or 0xFF when the instance has no multiplexer. BOTH instances have one
+/// on every part of this pack - unlike the USARTs, where the field
+/// exists for some instances only - and the codes are the same four for
+/// both: 00 PCLK, 01 LSI, 10 HSI16, 11 LSE.
+constexpr uint8_t lptim_clock_select_pos(uint8_t n) {
+    switch (n) {
+#if defined(RCC_CCIPR_LPTIM1SEL_Pos)
+        case 1: return RCC_CCIPR_LPTIM1SEL_Pos;
+#endif
+#if defined(RCC_CCIPR_LPTIM2SEL_Pos)
+        case 2: return RCC_CCIPR_LPTIM2SEL_Pos;
+#endif
+        default: return 0xFF;
+    }
+}
+
+/// The NVIC line of LPTIMn, and it is the reason this probe exists at
+/// all: on the G0B1/G0C1 and the G071 class each LPTIM SHARES a vector
+/// (LPTIM1 with TIM6 and the DAC, LPTIM2 with TIM7 - table 61), while on
+/// the G031 class, which has neither TIM6 nor TIM7 nor a DAC, each has a
+/// line of its own under a different enumerator name. IRQn values are
+/// enumerators the preprocessor cannot probe, so this reads the DEVICE
+/// SELECT macro exactly as usart_irq() and tim_irq() do.
+/// The presence gate is not decoration: the value lines (G070, G0B0,
+/// G030, G050) have no LPTIM AT ALL, so neither enumerator exists there
+/// and an ungated body would fail to compile on a header this stratum is
+/// otherwise happy with. Those parts answer NonMaskableInt_IRQn, which
+/// no caller can reach - Lptim<n> static_asserts on lptim_present(n).
+constexpr IRQn_Type lptim_irq(uint8_t n) {
+#if defined(LPTIM1_BASE)
+#if defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G071xx) || \
+    defined(STM32G081xx)
+    return n == 1u ? TIM6_DAC_LPTIM1_IRQn : TIM7_LPTIM2_IRQn;
+#else
+    return n == 1u ? LPTIM1_IRQn : LPTIM2_IRQn;
+#endif
+#else
+    (void)n;
+    return NonMaskableInt_IRQn;
+#endif
+}
+
+/// The EXTI line LPTIMn's wake-up event raises (table 65: 29 and 30,
+/// both DIRECT - no trigger selection, no pending bit of the EXTI's own,
+/// the peripheral's flag being the pending state). The NUMBERS are the
+/// MANUAL'S: no header of this pack spells them, which is why they live
+/// here beside comp_exti_line() and rtc_exti_line and not in a driver.
+/// 0xFF for an instance this device has not got.
+constexpr uint8_t lptim_exti_line(uint8_t n) {
+    if (!lptim_present(n)) {
+        return 0xFF;
+    }
+    switch (n) {
+        case 1: return 29;
+        case 2: return 30;
+        default: return 0xFF;
+    }
+}
+
+/// Encoder mode: LPTIM1's alone (table 135 - "the full set of features is
+/// implemented in LPTIM1", and the one row of that table is the encoder).
+///
+/// THIS HALF IS THE MANUAL'S AND NOT THE HEADER'S, and the distinction
+/// matters: the device header declares LPTIM_CFGR_ENC, LPTIM_ISR_UP and
+/// their neighbours ONCE for the one LPTIM_TypeDef both instances share,
+/// so `LPTIM2->CFGR |= LPTIM_CFGR_ENC` compiles and writes a bit 26.7.4
+/// marks Reserved on that instance. There is no symbol to read the
+/// difference off, so it is stated here with its citation - the tim.hpp
+/// geometry precedent, where DS13560 table 7 plays the same role.
+constexpr bool lptim_has_encoder(uint8_t n) {
+    return lptim_present(n) && n == 1u;
+}
+
+/// A SECOND input channel: LPTIM1's alone. Figure 271's own footnote -
+/// "LPTIM2 has only the input channel 1, no input channel 2" - and
+/// 26.7.9's note makes CFGR2's IN2SEL field Reserved where encoder mode
+/// is absent. Same authority and same caveat as lptim_has_encoder():
+/// stated from the manual, because the shared struct says nothing.
+constexpr bool lptim_has_input2(uint8_t n) {
+    return lptim_present(n) && n == 1u;
+}
+
+/// The DMAMUX TRIGGER input the LPTIM's output drives (table 56: 20 for
+/// LPTIM1_OUT, 21 for LPTIM2_OUT). A trigger input, NOT a request line -
+/// an LPTIM has no DMA request of its own on this family - so what it
+/// feeds is a request GENERATOR, which is how a DMA channel counts an
+/// LPTIM's output edges with no CPU in the loop. 0xFF past the count.
+constexpr uint8_t lptim_dmamux_trigger(uint8_t n) {
+    if (!lptim_present(n)) {
+        return 0xFF;
+    }
+    switch (n) {
+        case 1: return 20;
+        case 2: return 21;
+        default: return 0xFF;
+    }
+}
+
+// ---- CRC (RM0444 ch. 14) ----------------------------------------------------
+
+/// Register block base of the CRC calculation unit, 0 where the device
+/// has none. Every STM32G0 carries exactly one, so this is a presence
+/// probe like adc_base() and not an instance table.
+constexpr uint32_t crc_base() {
+#if defined(CRC_BASE)
+    return CRC_BASE;
+#else
+    return 0;
+#endif
+}
+
+constexpr bool crc_present() { return crc_base() != 0u; }
+
+/// RCC_AHBENR bit that clocks it - the CRC is an AHB peripheral, which
+/// is what makes its computation cost whole HCLK cycles rather than APB
+/// ones (14.3.3).
+constexpr uint32_t crc_clock_mask() {
+#if defined(RCC_AHBENR_CRCEN)
+    return RCC_AHBENR_CRCEN;
+#else
+    return 0;
+#endif
+}
+
+constexpr uint32_t crc_reset_mask() {
+#if defined(RCC_AHBRSTR_CRCRST)
+    return RCC_AHBRSTR_CRCRST;
+#else
+    return 0;
+#endif
+}
+
 // ---- DMA and DMAMUX (RM0444 ch. 10, 11) --------------------------------------
 
 /// Register block base of DMAn (n = 1, 2), 0 when the device does not

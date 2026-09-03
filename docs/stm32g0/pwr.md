@@ -15,11 +15,14 @@ one), DS13560 Rev 5 table 37 (the wake-up times), and errata ES0548
 Rev 3 - **2.2.2 and 2.2.4 are live on this silicon**, 2.2.7 and 2.3.1
 are revision A only, which is what makes Standby usable here at all.
 Drivers: `stm32g0/pwr.hpp` (`Pwr`, the whole chapter) and
-`stm32g0/sleep.hpp` (`Stm32SleepSite`, `Stm32TimedSleepSite`). Family
-fixture: `test/family_stm32g0/sleep.cpp` + five negatives under
-`tools/check_stm32g0.sh`. Bench suite: `test_stm32_sleep`. The waking
-half of the platform is [platform.md](platform.md); the RTC that wakes
-every deep sleep here is [rtc.md](rtc.md).
+`stm32g0/sleep.hpp` (`Stm32SleepSite`, `Stm32TimedSleepSite`,
+`Stm32LptimTimedSleepSite`). Family fixture:
+`test/family_stm32g0/sleep.cpp` + seven negatives under
+`tools/check_stm32g0.sh`. Bench suites: `test_stm32_sleep` for the first
+two sites, `test_stm32_lptim` letter h for the third. The waking half of
+the platform is [platform.md](platform.md); the RTC that wakes a deep
+sleep at the second site is [rtc.md](rtc.md) and the low-power timer
+that wakes it at the third is [lptim.md](lptim.md).
 
 ## What the silicon does
 
@@ -46,16 +49,26 @@ domain but KEEP SRAM AND REGISTERS, differing only in which regulator
 supplies VCORE; Standby and Shutdown power the VCORE domain off and come
 back through the RESET VECTOR.
 
-**A Stop entered with the kernel's millisecond tick armed does not
-last**, and this is the fact that most shapes what a site has to do
-here. 4.3.3: entering a low-power mode through WFI "is executed only if
-no interrupt is pending", and a 1 kHz SysTick is a pending interrupt
-every millisecond. Measured, three runs out of three: a 250 ms Stop 1
-asked for with the tick armed lasts 0..3 ms; the same one with SysTick's
-interrupt paused lasts 250 ms to the RTC's own tick. So `arm()` pauses
-the ticker for the deep rungs and `disarm()` resumes it - which costs
-NOTHING, because a Stop stops SysTick anyway and kernel time was going
-to stand still for the whole sleep either way.
+**A Stop entered with the kernel's millisecond tick armed LASTS on a
+bare board, and does not under a debugger's DBG_STOP** - and telling
+the two apart took two campaigns. 4.3.3: entering a low-power mode
+through WFI "is executed only if no interrupt is pending", and a 1 kHz
+SysTick raises one every millisecond; but once the WFI is taken HCLK
+stops and SysTick with it, so the window is one instruction wide.
+Measured: a 250 ms Stop 1 asked for with the tick armed lasts 250 ms to
+the RTC's own tick with `DBGMCU_CR.DBG_STOP` clear, and 1 ms with it
+set - because with that bit the debug logic keeps HCLK running inside a
+Stop, SysTick keeps firing, and every millisecond ends the sleep. The
+bit survives every reset but a power-on, and OpenOCD's `stm32g0x.cfg`
+sets it at every connection whose examine finds `RCC_APBENR1.DBGEN`
+open, which is how the first measurement of this fact read "0..3 ms,
+three runs of three" and stood for a campaign. `arm()` still pauses the
+ticker for the deep rungs and `disarm()` resumes it: it costs NOTHING
+(a Stop stops SysTick anyway and kernel time was going to stand still
+for the whole sleep either way), it closes the pending-tick window by
+construction, and it makes a Stop last whatever a probe left behind.
+`Pwr::debug_in_stop()` reads the bit; `tools/bench.py` clears it after
+every flash.
 
 **What comes back from a Stop is not what went in.** 4.3.6 and 5.3: the
 system clock on exit is HSISYS and the PLL is off, so a program running
@@ -168,6 +181,71 @@ hand the machine back to a TICKING sleep - because the never-early bias
 guarantees kernel time is still a shade short of the deadline when the
 alarm lands, and an RTC wake posts nothing to any queue.
 
+## The third site: the same lift, without the RTC
+
+`Stm32TimedSleepSite` OWNS THE WHOLE RTC and cannot share it. Its
+resolution IS the prescaler split, its witness is the calendar and its
+alarm is the wake-up timer - so an application that wants a real
+calendar at the chapter's own low-power split, or either alarm, or the
+wake-up timer for a periodic of its own, cannot use it at all.
+
+`Stm32LptimTimedSleepSite<P, C, cfg>` lifts the same restriction with a
+peripheral almost nothing else wants. 26.5 says an LPTIM on LSE or LSI
+is unaffected by Stop 0 and Stop 1 and that its interrupts bring the
+device out of them, so ONE BLOCK IS BOTH THE ALARM AND THE WITNESS: a
+free-running counter at ARR = 0xFFFF is the witness, its compare
+register is the alarm, and its own EXTI direct line (29 or 30) is the
+wake path. It is a SIBLING of the RTC site, not a replacement - the same
+two verbs, the same four ISR acts, the same directional rate rule, and
+NOT ONE LINE of `util/power.hpp`, of `kernel/`, or of the two other
+sites changed.
+
+**What it owns**: one LPTIM, whole, plus LSEON or LSION in the RCC
+(which it turns on and never off). The RTC, both its alarms, its
+wake-up timer and its prescaler split stay the application's.
+
+**The source is refused at compile time unless it runs in Stop.** PCLK
+stops with the VCORE domain; HSI16 is a clock REQUEST that a
+free-running counter never makes (measured - see [lptim.md](lptim.md))
+and that ES0548 2.2.4 breaks on a divided HSI anyway. Only LSE and LSI
+are rungs.
+
+**The prescaler must leave the counter FINER than the kernel tick**, and
+that too is a compile-time refusal: a resync quantized more coarsely
+than the tick it repairs can advance a tick too many and mature an event
+EARLY. The default /32 on the crystal gives 1024 counts a second - just
+over a 1000 Hz tick - and a lap of 64 seconds.
+
+**ONE COUNT IS SPENT ON EACH SIDE, and that is where "never early" comes
+from.** A counter reading is a whole number taken at an unknown phase
+inside a counter period, so the integer difference of two readings
+OVER-STATES the real interval by up to one count - and one count at the
+default rate is very nearly one kernel tick. So `resync()` converts
+`elapsed - 1` counts and never `elapsed`, and `place_alarm()` asks for
+one count MORE than the deadline needs. Without the pair, a 500 ms
+deadline matured anywhere in 499..501 ms of wall, a knife edge either
+side of its own deadline; with it, 500..501 and never below.
+
+**Three consequences a user must know**, all of them stated because no
+register removes them:
+
+1. THE ALARM IS NEVER CLEARED. Nothing may clear `CR.ENABLE` (ES0548
+   2.8.1) and `LPTIM_IER` is a disabled-only register (26.7.3), so
+   CMPMIE stands for the life of the site and the last compare value
+   stays where it was. A round that places no alarm can therefore be
+   woken once per counter lap by the previous round's compare. That wake
+   is legal by the model - the manager disarms, the site resyncs, the
+   next round re-arms - and it costs one loop pass every 64 seconds.
+2. AN ARRM IS A LEGAL EARLY WAKE TOO. The lap interrupt is what keeps
+   the high word, so it must be armed; `isr()` accumulates, restores the
+   clock and returns WITHOUT downgrading the armed mode, so the loop
+   idles straight back into the same Stop with the alarm still standing.
+3. A MINIMUM DISTANCE IS ENFORCED, because a compare placed behind a
+   counter that has already passed it would not match until the next
+   lap. The floor is four counts; the write's own cost is measured at
+   about 72 us on an LSE kernel clock, a fourteenth of one count, so the
+   floor is generous by an order of magnitude.
+
 ## Types and verbs
 
 - `PwrMode` {sleep, stop0, stop1, standby, shutdown} with
@@ -184,7 +262,10 @@ alarm lands, and an RTC wake posts nothing to any queue.
   `low_power_regulator_ready`, `deep_sleep` (SLEEPDEEP, written here and
   nowhere else), `lpms`, `arm(PwrMode)`, `mode()` (a pure read that is
   total - the Reserved code reads back as the nearest implemented mode),
-  `stop_hsidiv_hazard()` (ES0548 2.2.4 as a predicate), `wakeup_pin` /
+  `stop_hsidiv_hazard()` (ES0548 2.2.4 as a predicate), `debug_in_stop()`
+  / `debug_in_stop(bool)` (DBGMCU_CR.DBG_STOP through its clock gate,
+  the gate put back as found - the bit a probe leaves behind that keeps
+  HCLK running inside a Stop), `wakeup_pin` /
   `wakeup_pin_enabled` / `wakeup_flag` / `wakeup_pin_present`,
   `standby_flag` (SBF), `internal_wakeup_flag` (WUFI) and
   `internal_wakeup` (EIWUL), `clear_wakeup_flags`, `sram_retention`
@@ -252,9 +333,13 @@ which puts ck_apre at the crystal's full 32768 Hz and makes the
 sub-second counter a 30.5 us stopwatch that keeps counting with every
 clock in the chip stopped.
 
-- **A STOP ENTERED WITH THE TICK ARMED DOES NOT LAST**: 0..3 ms against
-  the 250 ms asked for, three runs out of three; paused, 250 ms exactly.
-  This is why the site pauses the ticker for the deep rungs.
+- **A STOP ENTERED WITH THE TICK ARMED LASTS, unless DBGMCU_CR.DBG_STOP
+  is set**: 250 ms of 250 with the bit clear and 1 ms with it set - the
+  same image, the same letter, the bit written and cleared over SWD;
+  with the tick paused, 250 ms in both states. The letter reads the bit
+  through its clock gate and judges the state it finds. The site pauses
+  the ticker for the deep rungs regardless, which is what makes it
+  immune.
 - **Kernel time stands still across a Stop**: a 250 ms Stop 1 advanced
   the tick by 0 ms.
 - **A Stop drops SYSCLK to HSISYS and stops the PLL**, read at the
@@ -322,6 +407,33 @@ clock in the chip stopped.
   to 0x8000), which is why an RTC alarm out of Standby needs nothing set
   in this chapter at all.
 
+### The third site, measured (test_stm32_lptim letter h)
+
+- **A 500 ms deadline through a Stop 1 matures at 501 ms of wall and
+  never earlier**, with the LPTIM as both the alarm and the witness and
+  the RTC untouched; the resync hands back 500 ticks of frozen span.
+  Six repeats of 150 ms all land at 151..152 ms and NOT ONE IS EARLY.
+  The letter synchronizes to a SysTick edge before stamping the wall,
+  which is what makes "never early" a fair test rather than a lucky one:
+  a deadline armed at an arbitrary phase inside a tick is only N - 1 to
+  N milliseconds of real time away, so a wall reading of 499 for a
+  500 ms deadline would be honest and would prove nothing.
+- **The alarm arithmetic is exact**: a 500 ms deadline at 1024 counts a
+  second places the compare 513 counts ahead - `ceil(500 x 1024 / 1000)`
+  plus the one count that pays for the phase of the reading it is
+  measured from.
+- **THE SITE REALLY DOES NOT NEED THE RTC.** The same letter puts the
+  calendar on 30.3.4's own low-power split (PREDIV_A 127 / PREDIV_S 255)
+  - a resolution the RTC-backed site refuses at COMPILE TIME - arms
+  ALARM A for the application, and still meets a 300 ms deadline through
+  a Stop with the alarm standing untouched afterwards. That is the whole
+  reason the third site exists. (The wall is a coarse instrument at that
+  split - one sub-second tick is 1/256 s, about 4 ms - so the letter
+  prints its own quantum and allows for it; the fine-split rounds above
+  are where "never early" is judged.)
+- **A deadline-less round places no alarm at all**, and a round that
+  never slept advances kernel time by at most one tick.
+
 Three suite-craft lessons paid for here, all of them the samc bench's
 own in new dress: a console DRAIN placed between arming a deadline and
 stamping the wall puts tens of milliseconds INSIDE the measurement (it
@@ -351,6 +463,13 @@ change itself - this stratum's flash latency table is the Range 1
 column), `sram_retention` across a real Standby, `sampled_supply_monitor`,
 the VDDIO2 monitor, the DAC supply monitor, and the Standby pull
 registers with APC actually set.
+
+The THIRD site's own gaps: it has been run on LPTIM1 and on LSE only -
+LPTIM2 as the site's instance and LSI as its source are configurations
+the family fixture compiles and the negatives fence, but no letter has
+slept on them; and the once-a-lap wake that consequence 1 predicts (a
+standing compare firing 64 seconds after a deadline-less round) is
+argued from the registers and has not been sat out on the bench.
 
 Not stageable on this desk, and said so rather than left silent: the PVD
 crossing and the wake-up PINS (both want a supply or a wire this bench

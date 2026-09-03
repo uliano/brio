@@ -54,6 +54,30 @@ restriction there as it does on the SAM: a 500 ms deadline through a
 Stop matures at 723 ms of wall with the plain site and at 501 with the
 timed one, never early.
 
+**A third site on the same target, and what it adds to the model.**
+The RTC-backed timed site owns the whole RTC - its prescaler split IS
+its resolution - so a program that wants a real calendar cannot use it.
+The STM32G0 grew a second timed site over a low-power timer that counts
+through a Stop, with ONE peripheral as both alarm and witness and the
+RTC left to the application; the model, the manager and the two older
+sites were not touched by a line, which is what the sibling proves: two
+timed sites can coexist on one target, differing only in the peripheral
+each owns, and an application picks by what else it needs. The
+friction it recorded is a rule the earlier sites never had to face,
+because their witnesses tick far finer than the kernel: WHEN A WITNESS
+TICKS AT CLOSE TO THE KERNEL'S OWN RATE, THE INTEGER DIFFERENCE OF TWO
+READINGS OVER-STATES THE ELAPSED TIME BY UP TO ONE UNIT, and a site that
+hands that difference to the ticker matures events EARLY (measured: a
+500 ms deadline landing anywhere in 499..501 ms of wall). The doctrine
+that falls out: a resync converts `elapsed - 1` witness units, an alarm
+asks for one unit more than the deadline needs, and both errors then
+land on the side the time contract allows. The same rule reaches any
+site whose witness resolution approaches the tick - the RTC site at its
+coarsest permitted split included - and a test of "never early" is only
+fair if the deadline is armed on a tick edge, since a deadline armed at
+an arbitrary phase is honestly N - 1 to N milliseconds away
+(`docs/stm32g0/pwr.md`).
+
 ## The ladder
 
 `SleepDepth` is an ordered ladder of four rungs, shallowest first:

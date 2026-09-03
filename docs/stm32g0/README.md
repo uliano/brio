@@ -102,6 +102,23 @@ for RCC_CR, values those registers cannot hold, while the same reads
 after `halt` were exact. Halt first, read, resume; the samc board
 (CMSIS-DAP) never showed this.
 
+A SECOND SWD CAVEAT, and this one cost a campaign a false fact:
+`target/stm32g0x.cfg`'s examine-end hook writes `DBGMCU_CR.DBG_STOP |
+DBG_STANDBY` ("enable debug during low power modes"), and OpenOCD
+re-examines the target after every reset it issues, so the bits are
+back on the reset a `program` ends with whatever was cleared before it
+(measured: cleared to 0 while halted, read 6 again right after `reset
+run`). The register survives every reset but a power-on, and with
+DBG_STOP set the debug logic keeps HCLK - and SysTick - running inside
+a Stop, which cuts a Stop entered with the kernel tick armed from its
+full 250 ms to one tick. `tools/bench.py` therefore ends every G0
+flash with `reset halt`, a clear of DBGMCU_CR through its clock gate
+(the gate put back to its reset value) and a `resume`, so a board
+leaves the bench as a power-on would leave it; a cortex-debug session
+sets the bits again, and `Pwr::debug_in_stop()` ([pwr.md](pwr.md)) is
+how firmware tells. Both states are measured in `test_stm32_sleep`
+letter c.
+
 ## Debugging (cortex-debug + OpenOCD)
 
 The launch config is "Debug STM32G0 (OpenOCD, Nucleo-G0B1RE)" in

@@ -65,12 +65,16 @@ unchanged by the campaign that added the sites.
 so does the kernel's time - the samc standby situation, and it has the
 same two answers here: `Stm32SleepSite` keeps the honest restriction and
 `Stm32TimedSleepSite` LIFTS it, resynchronizing from the RTC through
-`advance()` ([pwr.md](pwr.md)). AND THE TICK IS ITSELF WHAT DEFEATS A
-DEEP SLEEP: 4.3.3 makes a WFI a no-op with any interrupt pending, so a
-Stop asked for with a 1 kHz SysTick armed lasts 0..3 ms of the 250 that
-were wanted (measured). The site pauses the ticker for the deep rungs
-and resumes it on disarm, which costs nothing because kernel time was
-going to stand still anyway.
+`advance()` ([pwr.md](pwr.md)). THE TICK ITSELF DOES NOT DEFEAT A DEEP
+SLEEP, though a debugger can make it look so: 4.3.3 makes a WFI a no-op
+with an interrupt pending, but a Stop once taken stops HCLK and SysTick
+with it, and a 250 ms Stop asked for with a 1 kHz SysTick armed lasts
+its 250 ms (measured). What cuts it to 1 ms is `DBGMCU_CR.DBG_STOP`,
+which keeps HCLK running inside a Stop for the debug logic's sake -
+and OpenOCD sets that bit at every connection that finds the DBGMCU's
+clock gate open. The site pauses the ticker for the deep rungs anyway
+and resumes it on disarm: it costs nothing and makes the Stop last in
+both states ([pwr.md](pwr.md)).
 
 **SRAM survival across a reset is promised nowhere**, and the SRAM has
 a PARITY CHECK the factory option byte leaves DISABLED
@@ -193,3 +197,16 @@ Driver gaps (this chapter's option space the stratum does not touch):
 Implemented, not bench-verified: `Nvic::priority`, `abort()`'s and `HardFault_Handler`'s spins
 (the fault VECTOR is exercised, by `hard_fault_reset` - reset.md),
 the cortex-debug launch entry.
+
+A DESIGN QUESTION, not a driver gap: **a kernel timebase on a counter
+that does not stop.** SysTick rides HCLK and HCLK stops in Stop, which
+is why kernel time stands still there and why two sleep sites exist to
+repair it after the fact ([pwr.md](pwr.md)). An LPTIM on LSE or LSI
+keeps counting through Stop 0 and Stop 1 ([lptim.md](lptim.md)), so a
+TICKLESS platform is now physically available on this target: `now()`
+read from a free-running LPTIM counter, and the loop's next deadline
+placed in its compare register instead of counted out in ticks. That
+would change the Platform's tick SOURCE and RATE for every program on
+this family, and `BasicTicker`'s own header already names the day it
+must either become a `ClockUser` or move off the core clock. It is a
+decision for `docs/design/`, and it is stated here and not built.

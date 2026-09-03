@@ -273,8 +273,44 @@ gets its dated home in `docs/design/` when taken.
   Stop 0, deep -> Stop 1, Standby/Shutdown OFF it because the program
   does not resume; the LSE crystal is fitted and runs; util/power.hpp
   unchanged on its third silicon). THE WIRELESS SINGLE-BOARD ROSTER IS
-  CLOSED; what remains is the fillers (CRC, LPTIM, IRTIM, the USART
-  tail) and what needs a peer or wires (the buses against a SAM at
+  CLOSED. Campaign 8a LPTIM + CRC DONE 2026-09-03 (Opus delegation, twice
+  interrupted - a PC reboot, then the session limit - re-verified by
+  Fable's own hand and committed): lptim.hpp over ch. 26 whole -
+  disable() IS an RCC reset and no verb clears ENABLE (ES0548 2.8.1),
+  flags cleared only in handler mode with the disabled-IE flags first
+  (2.8.2 as code, IPSR the test), CFGR/CFGR2/IER disabled-only against
+  CMP/ARR enabled-only with the OK flags observed and never cleared by
+  the write verbs, six tasks incl. LptimPwm = util's FOURTH PwmChannel;
+  crc.hpp over ch. 14 with the CCITT preset bit-exact against
+  util/crc.hpp and CRC-32 IEEE (53x the bitwise loop, DMA-fed at
+  36.5 MB/s); a THIRD sleep site Stm32LptimTimedSleepSite - the LPTIM
+  on LSE as alarm AND witness, the RTC left FREE (a 300 ms deadline met
+  with the calendar at the chapter's own split and ALARM A armed for the
+  application), util/power.hpp and the two older sites untouched - and
+  the QUANTIZATION RULE it taught: a witness ticking near the kernel's
+  rate over-states elapsed time by one unit, so a resync converts
+  elapsed-1 and an alarm asks for one more, or events mature EARLY
+  (measured 499..501 before, 500..501 after; design/power.md).
+  test_stm32_lptim z 68/68, test_stm32_crc z 27/27, 12/12 pre-existing
+  images byte-identical. MEASURED: a forbidden CFGR write LANDS while a
+  start written disabled is discarded; CFGR2 keeps eight bits; period
+  ARR+1, high ARR-CMP+1, CMP >= ARR a flat low; exactly five edges lost
+  under an external clock; HSI16 STOPS in Stop for a mere counter (no
+  clock request); a compare match is a per-lap event; a pad under an
+  INPUT alternate function still follows its pull. AND A CAMPAIGN-7
+  FACT FALSIFIED BY FABLE'S OWN HAND: a Stop entered with the kernel
+  tick armed LASTS (250 of 250) - the recorded "0..3 ms" was
+  DBGMCU_CR.DBG_STOP, a bit OpenOCD's stm32g0x.cfg writes at every
+  (re-)examination, that keeps HCLK running inside a Stop and survives
+  every reset but a power-on; staged both ways over SWD (1 ms set,
+  250 ms clear). The sleep suite's letter c now reads the bit and
+  judges the state it finds, tools/bench.py ends every G0 flash with a
+  reset-halt + DBGMCU_CR clear + resume, Pwr::debug_in_stop() exists,
+  and the site's ticker pause stays as the discipline that makes a Stop
+  last in both states. Open: the rtc suite's letter c is flaky inside z
+  (76/77 twice, 77/77 once; 11/11 alone) - a minima comparison of LSI
+  captures, not this campaign's. What remains is 8b (the USART tail,
+  the LPUARTs, IRTIM - brief written) and what needs a peer or wires (the buses against a SAM at
   3.3 V, FDCAN, USB, UCPD, the option-byte bench verb).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR

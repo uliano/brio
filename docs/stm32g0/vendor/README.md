@@ -78,6 +78,24 @@ Encoded in code or stated where the code cannot enforce it:
   workaround): a sub-half-bit glitch inside the second half of a stop
   bit corrupts the byte; the noise flag NE is counted separately by
   the Uart task for exactly that reason (usart.hpp).
+- **2.8.1 Device may remain stuck in LPTIM interrupt when entering Stop
+  mode** (no workaround but a SUBSTITUTION): clearing `CR.ENABLE` near
+  an LPTIM interrupt can freeze the wake-up signal active, after which
+  the device cannot enter Stop at all. The erratum's own remedy is "do
+  not clear its ENABLE bit... instead, reset the whole LPTIMx peripheral
+  via the RCC controller", so NO VERB IN `lptim.hpp` WRITES ENABLE = 0 -
+  `disable()` and `reset()` are both an `RCC_APBRSTR1` pulse. The item
+  is answered structurally and is NOT staged: reproducing it needs the
+  very write the driver does not have, and its failure mode would leave
+  the board unable to Stop (lptim.md).
+- **2.8.2 Device may remain stuck in LPTIM interrupt when clearing event
+  flag**: with at least one interrupt enabled, clearing a flag whose own
+  interrupt is disabled at the instant a new event arrives can leave the
+  interrupt line stuck high. All three parts of the workaround are code:
+  `clear_flags()` REFUSES from thread mode while IER is nonzero
+  (`__get_IPSR() == 0`), and `isr()` clears the disabled-interrupt flags
+  FIRST and the enabled ones second. Both halves are bench-verified
+  (lptim.hpp, test_stm32_lptim letter i).
 - 2.2.8 (boot select after a debug connection) and 2.11.2 (the USART
   prescaler exists only on some instances) are documentation errata,
   read and applied: the crt's boot assumptions and RM0444 table 183
@@ -88,5 +106,8 @@ driven yet): 2.2.1 (LSI), 2.2.2 (PWR wake-up flags), 2.2.3 (a flash
 double-word all-ones cannot be re-programmed to all zeros - the FLASH
 campaign's), 2.2.6 (PC13 disturbs LSE), 2.2.11 (RTC domain), 2.3.1
 (GPIO after Standby), 2.4.x/2.5.x (DMA/DMAMUX), 2.6.x (ADC), 2.7.x
-(TIM), 2.8.x (LPTIM), 2.9.1 (RTC), 2.10.x (I2C), 2.12.x (SPI), 2.13.x
+(TIM), 2.9.1 (RTC), 2.10.x (I2C), 2.12.x (SPI), 2.13.x
 (FDCAN). Revision A only, absent on Z: 2.2.5, 2.2.7, 2.2.9, 2.6.5.
+
+**No item of ES0548 touches the CRC calculation unit** - a statement
+about the document, not a claim about the silicon (crc.md).

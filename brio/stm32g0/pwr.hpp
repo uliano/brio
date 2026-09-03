@@ -414,6 +414,52 @@ struct Pwr {
         return (RCC->CR & RCC_CR_HSIDIV_Msk) != 0u;
     }
 
+    /**
+     * DBGMCU_CR.DBG_STOP (40.10.3): whether the debug logic keeps HCLK
+     * running inside a Stop so a probe can still reach the core - and
+     * with it SysTick and every VCORE clock, which is why a Stop entered
+     * under this bit with the kernel tick armed lasts one tick and no
+     * more (test_stm32_sleep letter c measures both states). The
+     * register survives every reset but a power-on, and OpenOCD's own
+     * target script sets it at every connection whose examine finds the
+     * DBGMCU's clock gate open - so a board that has seen a probe may
+     * hold it without any program having asked. Read here so a program
+     * can tell a slow Stop from a debugged one; tools/bench.py clears it
+     * after every flash.
+     *
+     * The DBGMCU answers only with RCC_APBENR1.DBGEN set (5.2.17), which
+     * is CLEAR at reset: both verbs open the gate for the access and put
+     * it back as they found it, so a program that keeps it open for the
+     * watchdog freeze verbs (reset.hpp) is not disturbed and one that
+     * never opened it is not left with a gate through which the next
+     * probe's examine-end write would land. The gate is written through
+     * the CMSIS pointer with the 5.2.17 readback, as bus_clock() above
+     * does: clock.hpp includes THIS file, so `Rcc` is not reachable
+     * from here.
+     */
+    static bool debug_gate(bool on) {
+        const bool was_open = (RCC->APBENR1 & RCC_APBENR1_DBGEN) != 0u;
+        RCC->APBENR1 = on ? (RCC->APBENR1 | RCC_APBENR1_DBGEN)
+                          : (RCC->APBENR1 & ~RCC_APBENR1_DBGEN);
+        (void)RCC->APBENR1;
+        return was_open;
+    }
+    static bool debug_in_stop() {
+        const bool was_open = debug_gate(true);
+        const bool set = (DBG->CR & DBG_CR_DBG_STOP) != 0u;
+        if (!was_open) {
+            (void)debug_gate(false);
+        }
+        return set;
+    }
+    static void debug_in_stop(bool on) {
+        const bool was_open = debug_gate(true);
+        DBG->CR = on ? (DBG->CR | DBG_CR_DBG_STOP) : (DBG->CR & ~DBG_CR_DBG_STOP);
+        if (!was_open) {
+            (void)debug_gate(false);
+        }
+    }
+
     // ---- wake-up pins (4.4.3, 4.4.4, 4.4.5) ---------------------------------
 
     static constexpr uint8_t wakeup_pin_count = 6;

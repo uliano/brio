@@ -158,6 +158,78 @@ void site_verbs() {
     TimedSite::isr();
 }
 
+// ---- the THIRD site: the same lift, on an LPTIM ------------------------------
+//
+// Its config is checked against the same three rules on every header,
+// and the negatives lptim_site_on_pclk.cpp and
+// lptim_site_slower_than_the_tick.cpp are the other half of the claim.
+
+static_assert(lptim_sleep_rate_hz(LptimTimedSleepConfig{}) == 32'768u,
+              "the LSE default is the crystal's exact rate");
+static_assert(lptim_sleep_rate_hz(LptimTimedSleepConfig{.source = LptimClock::lsi}) ==
+                  34'000u,
+              "and the LSI default is DS13560's UPPER bound - the direction the "
+              "rate rule wants");
+static_assert(lptim_sleep_counter_hz(LptimTimedSleepConfig{}) == 1024u,
+              "32768 / 32");
+static_assert(lptim_timed_sleep_config_valid(LptimTimedSleepConfig{}, 1000u));
+static_assert(lptim_timed_sleep_config_valid(
+    LptimTimedSleepConfig{.instance = 2, .source = LptimClock::lsi,
+                          .rate_hz = 33'000}, 1000u));
+static_assert(!lptim_timed_sleep_config_valid(
+                  LptimTimedSleepConfig{.source = LptimClock::pclk}, 1000u),
+              "PCLK stops with the VCORE domain");
+static_assert(!lptim_timed_sleep_config_valid(
+                  LptimTimedSleepConfig{.source = LptimClock::hsi16}, 1000u),
+              "and HSI16 is a clock request ES0548 2.2.4 breaks");
+static_assert(!lptim_timed_sleep_config_valid(
+                  LptimTimedSleepConfig{.prescaler = LptimPrescaler::div64}, 1000u),
+              "512 counts a second cannot repair a 1 kHz tick");
+static_assert(!lptim_timed_sleep_config_valid(
+                  LptimTimedSleepConfig{.instance = 3}, 1000u));
+
+using LptimSite = Stm32LptimTimedSleepSite<Stm32Platform, SysClock>;
+static_assert(SleepSite<LptimSite>,
+              "the third site over util/power.hpp's unchanged concept");
+static_assert(LptimSite::counter_hz == 1024u);
+static_assert(LptimSite::rate_hz == 32'768u);
+static_assert(LptimSite::min_alarm_counts >= 1u);
+static_assert(LptimSite::span_ticks > 60'000u,
+              "one lap of a 1024 Hz counter is about 64 seconds");
+
+// The same site on the OTHER instance and the OTHER oscillator, since
+// both are legal and the vector differs per header.
+using LptimSite2 =
+    Stm32LptimTimedSleepSite<Stm32Platform, SysClock,
+                             LptimTimedSleepConfig{.instance = 2,
+                                                   .source = LptimClock::lsi,
+                                                   .rate_hz = 33'000,
+                                                   .prescaler = LptimPrescaler::div16}>;
+static_assert(SleepSite<LptimSite2>);
+
+void lptim_site_verbs() {
+    (void)LptimSite::init();
+    (void)LptimSite::ready();
+    (void)LptimSite::arm(SleepDepth::deep);
+    LptimSite::disarm();
+    (void)LptimSite::armed();
+    (void)LptimSite::alarm_armed();
+    (void)LptimSite::last_advance();
+    (void)LptimSite::last_cmp();
+    (void)LptimSite::last_counts();
+    (void)LptimSite::cmp_completions();
+    (void)LptimSite::laps();
+    (void)LptimSite::count32();
+    (void)LptimSite::place_alarm(500);
+    LptimSite::resync();
+    LptimSite::isr();
+
+    (void)LptimSite2::init();
+    (void)LptimSite2::arm(SleepDepth::standby);
+    LptimSite2::disarm();
+    LptimSite2::isr();
+}
+
 // A manager over the site, which is what proves the concept fits.
 struct Voter : Fsm<Voter, PrepareSleep, SleepVote, WakeReport> {
     static inline EventQueue<Event, 4, Stm32Platform> queue;
@@ -177,4 +249,12 @@ using K = Kernel<Stm32Platform, Voter, Manager>;
 void kernel_over_the_site() {
     K::init_all();
     (void)K::step();
+}
+
+using LptimManager = PowerManager<Stm32Platform, LptimSite, PowerConfig{}, Voter>;
+using LptimK = Kernel<Stm32Platform, Voter, LptimManager>;
+
+void kernel_over_the_lptim_site() {
+    LptimK::init_all();
+    (void)LptimK::step();
 }

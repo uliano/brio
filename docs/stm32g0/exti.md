@@ -140,6 +140,12 @@ LSE_CSS, 32 UCPD1, 33 UCPD2 (all direct), 34 VDDIO2 monitoring
 (configurable), 35 LPUART2, 36 USB (direct). **This list is per part**:
 the G031 has neither 20 nor 22 nor 24, the G071 neither 20 nor 22.
 
+**Lines 29 and 30 have an owner**: `stm32g0/lptim.hpp` publishes them as
+`Lptim<n>::exti_line` and opens them with `Lptim<n>::wake_line(true)` -
+the numbers are the MANUAL'S, no header of this pack spells them, and
+they are what lets a low-power timer's compare match bring the core out
+of Stop ([lptim.md](lptim.md), [pwr.md](pwr.md)).
+
 ## Types and verbs
 
 The driver owns the FABRIC and not the vocabulary of what is wired to a
@@ -260,16 +266,22 @@ should.
 
 ## Not covered yet
 
-Driver gaps: the direct lines' own peripherals (every line above 15 is
-somebody else's driver - the RTC, the comparators, the I2Cs, the
-LPUARTs, UCPD, USB - and none of them exists in this stratum yet, so no
-line number above 15 is published by anything); the configurable
-non-GPIO lines (PVD 16, COMP1/2/3 17/18/20, VDDIO2 34) reachable
-through `Exti` today but with no driver to publish their numbers or
-their vectors; wake-up from **Stop** and **Standby**, which needs a PWR
-driver and a `SleepSite` (only Sleep-mode WFE is measured here);
-`SEVONPEND`, which changes what returns a WFE and belongs to the same
-pass.
+Driver gaps: the direct lines whose peripheral this stratum has not
+built - the I2Cs, the LPUARTs, CEC, UCPD, USB - so their line numbers
+are published by nobody. The lines that DO have an owner are the RTC's
+19 and TAMP's 21 ([rtc.md](rtc.md)), the comparators' 17/18/20
+([comp.md](comp.md)) and the LPTIMs' 29/30 ([lptim.md](lptim.md)).
+Still open: the configurable non-GPIO lines PVD 16 and VDDIO2 34,
+reachable through `Exti` today but with no driver to publish their
+numbers or their vectors; and `SEVONPEND`, which changes what returns a
+WFE and belongs to a kernel pass rather than to this chapter.
+
+Wake-up from **Stop** through a direct line is no longer open: an LPTIM
+compare match leaves both Stop 0 and Stop 1 through line 29, measured in
+`test_stm32_lptim` letter g, and an RTC alarm does the same through line
+19 ([pwr.md](pwr.md)). What a direct line contributes there is exactly
+its IMR bit - it has no edge selection and no pending bit of its own,
+the peripheral's own flag being the pending state.
 
 Implemented, not bench-verified: the second register group's own verbs
 (line 34's trigger, pending and software trigger - `VDDIO2` monitoring

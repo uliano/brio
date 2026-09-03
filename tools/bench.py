@@ -357,9 +357,34 @@ def openocd_args(prog, elffile, target_cfg):
     seconds apart (or a replug)."""
     argv = [manifest.OPENOCD] + openocd_interface(prog)
     argv += ["-f", target_cfg,
-             "-c", "program %s verify" % elffile,
-             "-c", "reset run",
-             "-c", "mww 0xE000EDF0 0xA05F0000",
+             "-c", "program %s verify" % elffile]
+    if "stm32g0" in target_cfg:
+        # AND THE DEBUG-IN-STOP BITS ARE TAKEN BACK DOWN, AFTER THE LAST
+        # RESET. OpenOCD's own target/stm32g0x.cfg sets DBGMCU_CR.DBG_STOP
+        # | DBG_STANDBY in its examine-end hook ("enable debug during low
+        # power modes"), and the target is re-examined after every reset
+        # OpenOCD issues - so the bits come back on the `reset` that
+        # `program` ends with, whatever was cleared before it (measured:
+        # cleared to 0 while halted, read 6 again right after `reset
+        # run`). With them set HCLK, SysTick and the whole VCORE domain
+        # keep running inside a Stop, and DBGMCU_CR survives every reset
+        # but a power-on. Measured 2026-09-03: with the bit set a Stop
+        # entered with the kernel tick armed lasts 1 ms, with it clear
+        # the same Stop lasts its full 250 - and the difference had been
+        # recorded as a silicon fact by a whole campaign. So the board is
+        # reset and HALTED at its reset vector (no firmware has run, every
+        # RCC gate is at its reset value), the DBGMCU's gate is opened,
+        # DBGMCU_CR cleared, the gate put back, and only then does the
+        # core run: it leaves the bench exactly as a probe-less power-on
+        # would leave it.
+        argv += ["-c", "reset halt",
+                 "-c", "mmw 0x4002103C 0x08000000 0",
+                 "-c", "mww 0x40015804 0x00000000",
+                 "-c", "mmw 0x4002103C 0 0x08000000",
+                 "-c", "resume"]
+    else:
+        argv += ["-c", "reset run"]
+    argv += ["-c", "mww 0xE000EDF0 0xA05F0000",
              "-c", "exit"]
     return argv
 

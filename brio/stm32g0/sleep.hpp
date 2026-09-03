@@ -54,19 +54,27 @@
  *    deliberate one-shot, whose resumption is the application's boot
  *    path reading PWR_SR1.SBF and the TAMP backup registers.
  *
- * 3. A STOP ENTERED WITH THE KERNEL'S TICK ARMED DOES NOT LAST, and
- *    this is the fact that most changes what a site has to do here.
- *    4.3.3: entering a low-power mode through WFI "is executed only if
- *    no interrupt is pending", and a 1 kHz SysTick is a pending
- *    interrupt every millisecond. MEASURED, and reproducibly: a 250 ms
- *    Stop 1 asked for with the tick armed lasts 0..3 ms; the same one
- *    with SysTick's interrupt paused lasts 250 ms to the RTC's own tick,
- *    three runs out of three (docs/stm32g0/pwr.md). So `arm()` pauses
- *    the ticker for the deep rungs and `disarm()` resumes it - which
- *    costs NOTHING, because a Stop stops SysTick anyway and kernel time
- *    was going to stand still for the whole sleep either way. It is the
- *    difference between a sleep that happens and a sleep that is a coin
- *    toss.
+ * 3. A STOP ENTERED WITH THE KERNEL'S TICK ARMED LASTS - ON A BOARD NO
+ *    DEBUGGER HAS TOUCHED. 4.3.3: entering a low-power mode through WFI
+ *    "is executed only if no interrupt is pending", and a 1 kHz SysTick
+ *    raises one every millisecond; but once the WFI is taken HCLK stops
+ *    and SysTick with it, so that window is one instruction wide and
+ *    not a coin toss. MEASURED (test_stm32_sleep letter c): a 250 ms
+ *    Stop 1 asked for with the tick armed lasts 250 ms to the RTC's own
+ *    tick - UNLESS DBGMCU_CR.DBG_STOP IS SET, in which case the debug
+ *    logic keeps HCLK and SysTick running inside the Stop and the same
+ *    sleep lasts 1 ms (measured both ways, the bit written and cleared
+ *    over SWD under one image). That bit survives every reset but a
+ *    power-on, and OpenOCD's own stm32g0x.cfg sets it at every
+ *    connection whose examine finds RCC_APBENR1.DBGEN open - which is
+ *    how a whole campaign once recorded "0..3 ms" as a silicon fact.
+ *    `arm()` pauses the ticker for the deep rungs and `disarm()`
+ *    resumes it all the same, and the reason is now the right one: it
+ *    costs NOTHING (a Stop stops SysTick anyway and kernel time was
+ *    going to stand still for the whole sleep either way), it closes
+ *    4.3.3's pending-tick window by construction, and it makes a Stop
+ *    last whatever a probe left in DBGMCU_CR. `Pwr::debug_in_stop()`
+ *    reads that bit; tools/bench.py clears it after every flash.
  *
  * 4. WHAT COMES BACK FROM A STOP IS NOT WHAT WENT IN. 4.3.6 and 5.3:
  *    the system clock on exit is HSISYS and the PLL is off, so a
@@ -132,6 +140,17 @@
  * SleepRequested{none}) is LOAD-BEARING with this site, exactly as it
  * is with the SAM's.
  *
+ * ## The third site: the same lift, without the RTC
+ *
+ * `Stm32LptimTimedSleepSite` is the timed site again with a different
+ * counter under it, and it exists because the one above OWNS THE WHOLE
+ * RTC (see the next section). Its own instrument is an LPTIM on LSE or
+ * LSI, which 26.5 says keeps counting through Stop 0 and Stop 1 and
+ * which wakes through its own EXTI line - so one peripheral is BOTH the
+ * alarm and the witness, and the calendar, its prescaler split and both
+ * its alarms stay the application's. Its header comment, below, is where
+ * the differences live.
+ *
  * ## What the site owns
  *
  * THE RTC, WHOLE: the domain gate, the clock select, the prescalers,
@@ -160,6 +179,7 @@
 #include "kernel/platform.hpp"
 #include "kernel/time_event.hpp"
 #include "stm32g0/clock.hpp"
+#include "stm32g0/lptim.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/pwr.hpp"
 #include "stm32g0/rtc.hpp"
@@ -211,10 +231,10 @@ struct Stm32SleepSite {
 
     /**
      * Arm a rung. For the two deep ones this ALSO pauses the kernel's
-     * tick, which is fact 3 in this file's header and not an
-     * optimization: a Stop entered with a millisecond interrupt armed
-     * does not last. The pause costs nothing - a Stop stops SysTick
-     * anyway - and `disarm()` puts it back.
+     * tick - fact 3 in this file's header: it closes 4.3.3's
+     * pending-interrupt window by construction and makes the Stop last
+     * even under a debugger's DBG_STOP, and it costs nothing because a
+     * Stop stops SysTick anyway. `disarm()` puts it back.
      */
     static bool arm(SleepDepth d) {
         switch (d) {
@@ -536,6 +556,460 @@ private:
     static inline uint32_t tick_at_arm_ = 0;
     static inline uint32_t last_advance_ = 0;
     static inline uint32_t last_reload_ = 0;
+};
+
+
+// ---- the third site: the same lift, on an LPTIM ------------------------------
+
+/**
+ * Stm32LptimTimedSleepSite's knobs.
+ *
+ * `source` is the LPTIM's kernel clock and it must be one that RUNS IN
+ * STOP: 26.5's table 145 says "no effect when LPTIM is clocked by LSE or
+ * LSI", and PCLK stops with the VCORE domain while HSI16 is a clock
+ * REQUEST that ES0548 2.2.4 breaks on a divided HSI. Both are refused at
+ * compile time.
+ *
+ * `rate_hz` STATES what that clock is worth AND THE RULE IS DIRECTIONAL,
+ * exactly as for the RTC site: give a value NOT BELOW the true rate. It
+ * enters twice and both errors land late:
+ *   - the ALARM asks for `ticks * counter_hz / tps` counts, so an
+ *     over-estimated rate asks for more counts than needed and the wake
+ *     is LATE;
+ *   - the RESYNC converts elapsed counts back with the same number, so
+ *     an over-estimated rate UNDER-reports the span, kernel time lags,
+ *     and the event matures late again.
+ * Zero means "take the source's own safe default", which is the
+ * crystal's exact 32768 for LSE and DS13560's UPPER BOUND for LSI - a
+ * board that has measured its own LSI says so here and gets the slack
+ * back.
+ *
+ * `prescaler` is the resolution. The counter must tick FINER than the
+ * kernel's tick or a resync quantized more coarsely than a millisecond
+ * can advance a tick too many and mature an event EARLY, which is the
+ * one thing brio's time contract forbids - so the static_assert below
+ * demands counter_hz >= P::ticks_per_second. The default /32 puts a
+ * 32768 Hz crystal at 1024 counts a second: just over a kernel tick, and
+ * a lap of 64 seconds.
+ */
+struct LptimTimedSleepConfig {
+    uint8_t instance = 1;
+    LptimClock source = LptimClock::lse;
+    uint32_t rate_hz = 0;
+    LptimPrescaler prescaler = LptimPrescaler::div32;
+};
+
+/// The stated rate, with the source's own default filled in (above).
+constexpr uint32_t lptim_sleep_rate_hz(const LptimTimedSleepConfig& c) {
+    if (c.rate_hz != 0u) {
+        return c.rate_hz;
+    }
+    return c.source == LptimClock::lse ? 32'768u : 34'000u;
+}
+
+/// What the 16-bit counter advances at, on the stated rate.
+constexpr uint32_t lptim_sleep_counter_hz(const LptimTimedSleepConfig& c) {
+    return lptim_counter_hz(lptim_sleep_rate_hz(c), c.prescaler);
+}
+
+/// The three rules, with `tps` the platform's tick rate (which a
+/// constexpr predicate cannot reach on its own).
+constexpr bool lptim_timed_sleep_config_valid(const LptimTimedSleepConfig& c,
+                                              uint32_t tps) {
+    if (!lptim_present(c.instance)) {
+        return false;
+    }
+    if (!lptim_clock_runs_in_stop(c.source)) {
+        return false;
+    }
+    return lptim_sleep_counter_hz(c) >= tps;
+}
+
+/**
+ * THE THIRD SLEEP SITE: kernel time honest across a Stop, AND THE RTC
+ * LEFT ALONE.
+ *
+ * ## Why it exists
+ *
+ * `Stm32TimedSleepSite` owns the whole RTC and cannot share it: its
+ * resolution IS the prescaler split (PREDIV_S at least 1000, against the
+ * chapter's own low-power advice of PREDIV_A 127), its wake path is
+ * BYPSHAD, and its alarm is the wake-up timer. An application that wants
+ * a real calendar at the chapter's split, or either RTC alarm for
+ * itself, or the wake-up timer for a periodic of its own, cannot use it
+ * at all.
+ *
+ * The LPTIM lifts the same restriction with a peripheral almost nothing
+ * else wants. 26.5: an LPTIM on LSE or LSI is unaffected by Stop 0 and
+ * Stop 1 and its interrupts bring the device out of them - so ONE BLOCK
+ * IS BOTH THE ALARM AND THE WITNESS, and the price is one LPTIM instead
+ * of one RTC.
+ *
+ * It is a SIBLING of the RTC site and not a replacement: same two verbs,
+ * same four ISR acts, same directional rate rule, and NOT ONE LINE of
+ * util/power.hpp, of kernel/, or of the two sites above changed. That is
+ * the third site over the same unchanged model.
+ *
+ * ## The mechanism
+ *
+ *  - the COUNTER is free-running at ARR = 0xFFFF with ARRM armed
+ *    (`LptimCounter`), so a 32-bit count is available whatever the sleep
+ *    did to the CPU. `arm()` stamps it, `resync()` differences it;
+ *  - the ALARM is the compare register, placed at `now + counts` MODULO
+ *    THE LAP - a match after the wrap is fine, because the counter is
+ *    monotonic modulo 65536 and CMPM fires once per lap at equality;
+ *  - the COMPLETION of that compare write is observed through the ISR:
+ *    26.4.11 makes a second write before CMPOK "unpredictable", and
+ *    ES0548 2.8.2 forbids clearing the flag outside the handler once an
+ *    interrupt is enabled - so CMPOKIE is armed, `isr()` clears CMPOK
+ *    and bumps a counter, and `arm()` waits (bounded) for that counter
+ *    to move before it lets the loop reach its WFI. The alarm is IN
+ *    PLACE before the machine stops, or arm() says the round is
+ *    untimed.
+ *
+ * ## Three consequences a reader must know
+ *
+ * 1. THE ALARM IS NEVER CLEARED, because nothing here may clear
+ *    CR.ENABLE (ES0548 2.8.1) and LPTIM_IER is a disabled-only register
+ *    (26.7.3) - so CMPMIE stands for the life of the site and the last
+ *    compare value stays where it was. A round that places NO alarm (no
+ *    deadline) can therefore be woken once per counter lap by the
+ *    previous round's compare. That wake is legal by the model - it is
+ *    an early wake, the manager disarms, the site resyncs and the next
+ *    round re-arms - and it costs one loop iteration every 64 seconds at
+ *    the default rate. It is stated rather than hidden because there is
+ *    no register in this block that would remove it.
+ *
+ * 2. AN ARRM IS A LEGAL EARLY WAKE TOO. The lap interrupt is what keeps
+ *    the high word, so it must be armed; during a Stop it wakes the
+ *    core. `isr()` then accumulates, restores the clock and returns
+ *    WITHOUT downgrading the armed mode, so the kernel's loop idles
+ *    straight back into the same Stop with the alarm still standing.
+ *
+ * 3. A MINIMUM DISTANCE IS ENFORCED. A compare write takes a few kernel
+ *    clocks to cross into the counter's domain, and a compare placed
+ *    behind a counter that has already passed it would not match until
+ *    the next lap. `min_alarm_counts` is that floor; a deadline nearer
+ *    than it is placed at it, which can only make the wake LATE, which
+ *    the model allows. (The write's real cost is measured, not guessed:
+ *    test_stm32_lptim letter a times a compare write to CMPOK at about
+ *    72 us on an LSE kernel clock, which is a fourteenth of one count at
+ *    the default /32 - so the floor is generous by an order of
+ *    magnitude and exists for the deadline that is nearer than the write
+ *    itself, not for the ordinary one.)
+ *
+ * 4. THE COUNT IS A WHOLE NUMBER AND TIME IS NOT, AND THAT ONE COUNT IS
+ *    WHERE AN EARLY MATURITY WOULD COME FROM. `count32()` is read at an
+ *    unknown phase inside a counter period, so the INTEGER difference
+ *    between two readings OVER-STATES the real interval by up to one
+ *    count - and one count at the default 1024 Hz is very nearly one
+ *    kernel tick. Handed to Ticker::advance() unmodified it would push
+ *    kernel time PAST the wall by that much and mature an event EARLY,
+ *    which kernel/time.hpp forbids. So both halves of the arithmetic
+ *    spend one count on the safe side:
+ *      - `resync()` converts `elapsed - 1` counts, never `elapsed`, so
+ *        the span handed back is never longer than the real one;
+ *      - `place_alarm()` asks for ONE COUNT MORE than the deadline
+ *        needs, so the match still lands at or after the deadline's own
+ *        tick instead of up to one count before it.
+ *    The two together are what makes "never early" a property of the
+ *    arithmetic rather than of the phase the counter happened to be in.
+ *    (Measured: without them a 500 ms deadline matured anywhere in
+ *    499..501 ms of wall - a knife edge either side of its own
+ *    deadline; with them, 500..501 and never below.)
+ *
+ * ## What the site owns
+ *
+ * ONE LPTIM, WHOLE - its configuration, its counter, its compare and its
+ * EXTI wake line - plus LSEON or LSION in the RCC (which it turns on and
+ * never off). The RTC, both its alarms, its wake-up timer and its
+ * prescaler split are NOT touched. The application binds the instance's
+ * vector:
+ *
+ *     extern "C" void TIM6_DAC_LPTIM1_IRQHandler() { Site::isr(); }
+ *
+ * (that being LPTIM1's line on the G0B1/G0C1 and G071 classes; on the
+ * G031 class it is LPTIM1_IRQHandler - `Lptim<n>::irq()` names it).
+ *
+ * ## Errata
+ *
+ * ES0548 2.8.1 and 2.8.2 are answered by the driver under it: no verb
+ * clears ENABLE, and every flag this site clears is cleared inside
+ * `isr()`, in the erratum's own order. 2.2.4 does not reach this site on
+ * LSE or LSI - neither asks the RCC for HSI16 - but it WOULD on HSI16,
+ * which is one more reason that source is refused.
+ */
+template <Platform P, class C, LptimTimedSleepConfig cfg = LptimTimedSleepConfig{}>
+struct Stm32LptimTimedSleepSite {
+    static_assert(lptim_timed_sleep_config_valid(cfg, P::ticks_per_second),
+                  "brio Stm32LptimTimedSleepSite: the instance must exist; the "
+                  "kernel clock must be one that runs in Stop (LSE or LSI - PCLK "
+                  "stops with the VCORE domain and HSI16 is a clock request "
+                  "ES0548 2.2.4 breaks on a divided HSI); and the counter rate "
+                  "after the prescaler must be at least the kernel's tick rate, "
+                  "or a resync quantized coarser than a tick can mature an event "
+                  "EARLY");
+
+    Stm32LptimTimedSleepSite() = delete;
+
+    using Plain = Stm32SleepSite<C>;
+    using L = Lptim<cfg.instance>;
+    using Counter = LptimCounter<L>;
+
+    /// The stated rate and what the counter does with it.
+    static constexpr uint32_t rate_hz = lptim_sleep_rate_hz(cfg);
+    static constexpr uint32_t counter_hz = lptim_sleep_counter_hz(cfg);
+
+    /// How far ahead an alarm may be placed. One lap less a margin: a
+    /// compare exactly at the current count would match a whole lap
+    /// later, and an alarm clamped short is an EARLY wake, which the
+    /// manager answers by re-arming.
+    static constexpr uint32_t lap_counts = 0x10000UL;
+    static constexpr uint32_t max_alarm_counts = lap_counts - 64u;
+
+    /// The floor of consequence 3. Sized from the counter's own rate: at
+    /// most a handful of counts, and never zero. The bench measures the
+    /// real compare-write latency (test_stm32_lptim letter a) and the
+    /// doc states it against this number.
+    static constexpr uint32_t min_alarm_counts = 4;
+
+    /// The longest deadline this site can place, in kernel ticks.
+    static constexpr uint32_t span_ticks = static_cast<uint32_t>(
+        (static_cast<uint64_t>(max_alarm_counts) * P::ticks_per_second) /
+        counter_hz);
+
+    /**
+     * Bring the LPTIM up as the free-running counter, open its wake line
+     * and its NVIC line. Call once, after the clock init, before the
+     * manager's first round.
+     *
+     * False = the oscillator never reported ready, or a step of the
+     * chapter's own order was refused. The site still works as a plain
+     * Stm32SleepSite in that case, minus every timed property - which is
+     * why the caller must look at the answer.
+     */
+    static bool init() {
+        if (cfg.source == LptimClock::lse) {
+            // LSEON lives in RCC_BDCR, which needs PWR's bus clock and
+            // DBP - and NOTHING ELSE of the RTC domain: RTCSEL, the
+            // calendar and the backup registers are not touched, which
+            // is this site's whole point.
+            RtcDomain::pwr_bus_clock(true);
+            RtcDomain::unlock(true);
+            RtcDomain::lse_enable(true);
+            if (!RtcDomain::lse_wait_ready()) {
+                return false;
+            }
+        } else {
+            Rcc::lsi_enable(true);
+            if (!Rcc::lsi_wait_ready()) {
+                return false;
+            }
+        }
+        L::init();
+        L::kernel_clock(cfg.source);
+        cmp_completions_ = 0;
+        if (!L::configure({.prescaler = cfg.prescaler,
+                           .interrupts = LptimFlag::arrm | LptimFlag::cmpm |
+                                         LptimFlag::cmpok})) {
+            return false;
+        }
+        L::enable();
+        if (!L::set_arr(0xFFFFu) || !L::wait_arr_ok()) {
+            return false;
+        }
+        // THE COMPARE IS PARKED BEFORE THE COUNTER STARTS. CMP comes out
+        // of reset at ZERO, so a counter started first matches it on its
+        // very first tick and spends a CMPM nobody asked for. Parking it
+        // half a lap away pushes the first unrequested match as far from
+        // now as the register allows - and arm() replaces it long before
+        // then. (Measured in test_stm32_lptim letter g, where the
+        // spurious match at count zero cost the wake measurement its
+        // meaning until the order was put right.)
+        if (!L::set_cmp(0x8000u) || !L::wait_cmp_ok()) {
+            return false;
+        }
+        if (!L::wake_line(true)) {
+            return false;
+        }
+        Nvic::enable(L::irq());
+        if (!L::start_continuous()) {
+            return false;
+        }
+        ready_ = true;
+        return true;
+    }
+
+    static bool ready() { return ready_; }
+    static bool alarm_armed() { return alarm_armed_; }
+    /// Ticks the last resync handed to Ticker::advance() (0 when the
+    /// round never slept, or slept less than it stayed awake).
+    static uint32_t last_advance() { return last_advance_; }
+    /// The compare value the last placed alarm was given, and how many
+    /// counts ahead it was - diagnostics, and what a suite checks the
+    /// arithmetic against.
+    static uint32_t last_cmp() { return last_cmp_; }
+    static uint32_t last_counts() { return last_counts_; }
+    /// How many CMPOK completions the ISR has seen. arm() waits on this.
+    static uint32_t cmp_completions() { return cmp_completions_; }
+    /// Laps the counter has made since init() - the ARRM accumulation.
+    static uint32_t laps() { return Counter::laps(); }
+    /// The counter, 32 bits, for a caller that wants to see it.
+    static std::optional<uint32_t> count32() { return Counter::count32(); }
+
+    /**
+     * Place the alarm for a deadline `ticks` kernel ticks away. Public
+     * because the arithmetic is worth being able to check without arming
+     * a sleep; arm() calls it.
+     *
+     * The conversion rounds UP, GAINS ONE COUNT (consequence 4 of the
+     * header: `now` is read at an unknown phase inside a counter period,
+     * so a match `counts` readings away happens between counts - 1 and
+     * counts periods from now, and the extra one is what keeps the wake
+     * from landing before the deadline's own tick), is clamped to
+     * `max_alarm_counts` above and to `min_alarm_counts` below, and the
+     * compare is placed at `count + counts` MODULO the lap. False = the
+     * counter could not be read coherently, the store was refused, or
+     * the write never completed inside the bound.
+     */
+    static bool place_alarm(uint32_t ticks) {
+        const std::optional<uint16_t> now = L::count();
+        if (!now.has_value()) {
+            return false;
+        }
+        uint32_t counts = static_cast<uint32_t>(
+            (static_cast<uint64_t>(ticks) * counter_hz + P::ticks_per_second - 1u) /
+            P::ticks_per_second);
+        counts += 1u;   // the phase of `now` - consequence 4
+        if (counts > max_alarm_counts) {
+            counts = max_alarm_counts;
+        }
+        if (counts < min_alarm_counts) {
+            counts = min_alarm_counts;
+        }
+        const uint16_t compare =
+            static_cast<uint16_t>((static_cast<uint32_t>(*now) + counts) & 0xFFFFu);
+        const uint32_t seen = cmp_completions_;
+        if (!L::set_cmp(compare)) {
+            return false;
+        }
+        last_cmp_ = compare;
+        last_counts_ = counts;
+        // THE COMPLETION IS OBSERVED THROUGH THE HANDLER, not through
+        // the flag: with CMPOKIE armed, ES0548 2.8.2 forbids clearing
+        // CMPOK anywhere else, so the only honest witness that the write
+        // landed is the ISR having served one.
+        for (uint32_t i = 0; i < L::write_spins; ++i) {
+            if (cmp_completions_ != seen) {
+                return true;
+            }
+        }
+        return cmp_completions_ != seen;
+    }
+
+    static bool arm(SleepDepth d) {
+        if (!Plain::arm(d)) {
+            return false;
+        }
+        if (!ready_ || !is_deep_mode(Plain::armed())) {
+            return true;   // Sleep keeps SysTick: nothing to compensate
+        }
+        const std::optional<uint32_t> at_arm = Counter::count32();
+        count_at_arm_ = at_arm.value_or(0);
+        resync_armed_ = at_arm.has_value();
+        tick_at_arm_ = Ticker::ticks();
+        const std::optional<uint32_t> next = TimeEvents<P>::ticks_to_next();
+        if (next.has_value() && place_alarm(*next)) {
+            alarm_armed_ = true;
+        }
+        return true;
+    }
+
+    static void disarm() {
+        Plain::disarm();
+        // The alarm is NOT cleared - consequence 1 of the header. All
+        // that is dropped here is this site's belief that one is
+        // standing.
+        alarm_armed_ = false;
+        resync();
+    }
+
+    static SleepDepth armed() { return Plain::armed(); }
+
+    /**
+     * Catch kernel time up by the FROZEN span: the counts the LPTIM made
+     * since arm(), converted with the STATED rate, minus what SysTick
+     * itself counted. The subtraction is what makes several naps inside
+     * one armed round, and rounds that never slept at all, come out
+     * right with no special case. The baseline is consumed EXACTLY ONCE,
+     * under the platform's critical section, whichever of isr() and
+     * disarm() gets there first.
+     *
+     * The conversion rounds DOWN and SPENDS ONE COUNT before it rounds
+     * (consequence 4 of the header): the integer difference of two
+     * readings taken at unknown phases over-states the real interval by
+     * up to one count, and one count is nearly one kernel tick at the
+     * default rate - so `elapsed - 1` is converted, never `elapsed`.
+     * With that and a rate stated NOT BELOW the true one, every error
+     * lands on the late side, which is the kernel's own promise.
+     */
+    static void resync() {
+        typename P::CriticalSection cs;
+        if (!resync_armed_) {
+            return;
+        }
+        resync_armed_ = false;
+        const std::optional<uint32_t> now = Counter::count32();
+        if (!now.has_value()) {
+            last_advance_ = 0;
+            return;
+        }
+        const uint32_t elapsed = *now - count_at_arm_;   // wrap-safe
+        const uint32_t whole = elapsed == 0u ? 0u : elapsed - 1u;
+        const uint32_t span = static_cast<uint32_t>(
+            (static_cast<uint64_t>(whole) * P::ticks_per_second) / counter_hz);
+        const uint32_t awake = Ticker::ticks() - tick_at_arm_;   // wrap-safe
+        last_advance_ = span > awake ? span - awake : 0u;
+        if (last_advance_ != 0u) {
+            Ticker::advance(last_advance_);
+        }
+    }
+
+    /**
+     * The four-act ISR body an app binds to the LPTIM's vector. The acts
+     * are the RTC site's, for the same reasons (read its header) - with
+     * acts 2 and 3 conditional on the ALARM having fired, because on
+     * this site a lap interrupt is a wake of its own and must leave the
+     * machine exactly as it found it.
+     */
+    [[gnu::always_inline]] static void isr() {
+        (void)Plain::resume_clock();          // act 0: full speed again
+        const uint32_t served = Counter::isr();   // act 1: ack, in 2.8.2's order
+        if ((served & LptimFlag::cmpok) != 0u) {
+            cmp_completions_ = cmp_completions_ + 1u;
+        }
+        if ((served & LptimFlag::cmpm) == 0u) {
+            // A lap, or a write completion, and nothing more: the
+            // deadline is still ahead, so the loop idles back into the
+            // Stop that is still armed and the tick stays paused.
+            return;
+        }
+        alarm_armed_ = false;
+        resync();                              // act 2
+        (void)Pwr::arm(PwrMode::sleep);        // act 3
+        Ticker::resume();
+    }
+
+private:
+    static inline bool ready_ = false;
+    static inline bool alarm_armed_ = false;
+    static inline bool resync_armed_ = false;
+    static inline uint32_t count_at_arm_ = 0;
+    static inline uint32_t tick_at_arm_ = 0;
+    static inline uint32_t last_advance_ = 0;
+    static inline uint32_t last_cmp_ = 0;
+    static inline uint32_t last_counts_ = 0;
+    static inline volatile uint32_t cmp_completions_ = 0;
 };
 
 } // namespace brio
