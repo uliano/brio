@@ -587,8 +587,9 @@ Implemented, not bench-verified:
   through the resource).
 - The wake from Stop on any instance but USART2, and on Stop 1 (measured
   on an LPUART, docs/stm32g0/lpuart.md).
-- The G071 and G031 instance sets: compile-only, pinned by the family
-  fixture on all three headers.
+- Every part but the G0B1 (the instance sets, the vectors, the
+  FULL/BASIC split): compile-only, pinned by the family fixture on all
+  twelve headers.
 - `usart_kernel_clock_hz` for a `DynamicClock` (the suite uses a static
   `Clock`).
 

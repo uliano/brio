@@ -9,7 +9,9 @@ using namespace brio;
 static_assert(irtim_envelope_valid(IrtimEnvelope::tim16));
 static_assert(irtim_envelope_valid(IrtimEnvelope::second_usart));
 static_assert(!irtim_envelope_valid(static_cast<IrtimEnvelope>(3)));   // Reserved
-#if defined(STM32G071xx) || defined(STM32G0B1xx)
+// Code 10 is USART4 where the part has one and USART2 where it has not
+// (ch. 27's note) - the header's own presence symbol is the key.
+#if defined(USART4_BASE)
 static_assert(Irtim::second_usart_index == 4);
 #else
 static_assert(Irtim::second_usart_index == 2);

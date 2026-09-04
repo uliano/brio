@@ -41,9 +41,15 @@ reached only for an instance the header says exists:
 Which of them a part bonds IS the header's, three ways over (`TIMn_BASE`,
 the RCC enable/reset masks, the IRQn enumerators): the G0B1/G0C1 has all
 ten, the G071 class all but TIM4, the G031 class TIM1, TIM2, TIM3,
-TIM14, TIM16 and TIM17. Every verb that names a feature an instance does
-not have returns false and writes nothing; the tasks that need one
-refuse at compile time.
+TIM14, TIM16 and TIM17 - and the x0 value line has no TIM2 at all
+(the G0B0 keeps TIM4, the G070 and G050 have the basic timers and TIM15,
+the G030 the G031's set less TIM2). The vectors follow what shares them:
+TIM3's is `TIM3_TIM4_IRQn` where there is a TIM4, TIM6's is
+`TIM6_DAC_LPTIM1_IRQn` where there is a DAC or an LPTIM and `TIM6_IRQn`
+where there is neither, TIM16's is `TIM16_FDCAN_IT0_IRQn` where there is
+an FDCAN - each derived in the reserve from the sharer's presence. Every
+verb that names a feature an instance does not have returns false and
+writes nothing; the tasks that need one refuse at compile time.
 
 **The status register is `rc_w0`, not write-one-to-clear.** A flag of
 `TIMx_SR` is cleared by writing ZERO to it and a write of one has no

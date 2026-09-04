@@ -2,13 +2,14 @@
 // no main(), no hardware.
 //
 // THE PER-HEADER DIFFERENCE THIS FIXTURE IS FOR: 16.3's own table says
-// the G031/G041 have NO DAC, and their device header declares no
-// DAC1_BASE - so on the G031 header this file must compile to the
-// PRESENCE CHECK AND NOTHING ELSE, which is what the guard below is.
-// (Trying to instantiate brio::Dac there is a static_assert, and
-// neg/dac_off_the_g031.cpp is where that is proven.) Where the DAC does
-// exist it has both channels, its own two DMA request lines, and a
-// vector shared with TIM6 and LPTIM1.
+// the G031/G041 have NO DAC, and neither has any x0 value-line part -
+// their device headers declare no DAC1_BASE - so on those headers this
+// file must compile to the PRESENCE CHECK AND NOTHING ELSE, which is
+// what the guard below is, keyed on the header's own symbol. (Spelling
+// brio::Dac there is a compile error, and neg/dac_off_the_g031.cpp is
+// where that is proven.) Where the DAC does exist it has both channels,
+// its own two DMA request lines, and a vector shared with TIM6 and
+// LPTIM1.
 
 #include <stdint.h>
 
@@ -17,9 +18,9 @@
 
 using namespace brio;
 
-#if defined(STM32G031xx)
+#if !defined(DAC1_BASE)
 
-static_assert(!dac_present(), "the G031 class has no DAC (16.3)");
+static_assert(!dac_present(), "no DAC on this part (16.3)");
 static_assert(dac_channels() == 0);
 
 #else

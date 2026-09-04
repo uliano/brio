@@ -10,19 +10,28 @@
  * header's own symbol, so a variant the pack adds tomorrow is described
  * by its header and not by a list someone has to keep.
  *
- * WHAT DIFFERS ACROSS THE STM32G0 FAMILY, as far as the bring-up strata
- * reach (cmsis-device-g0 v1.4.5, headers stm32g0b1xx/g071xx/g031xx):
+ * WHAT DIFFERS ACROSS THE STM32G0 FAMILY, as far as the strata reach
+ * (cmsis-device-g0 v1.4.5, ALL TWELVE headers of the pack - g030/g031/
+ * g041/g050/g051/g061/g070/g071/g081/g0b0/g0b1/g0c1; the x0 value line
+ * is the x1 line minus a list of peripherals, the same IP under the
+ * same register names, and every x0 header is a strict subset of its
+ * x1 twin):
  *  - GPIO ports: A, B, C, D, F on every part; E only on the G0B1/G0C1
  *    (the 100-pin bonding); no G or H anywhere.
- *  - USART instances: 1..2 on the G031/G041, 1..4 on the G071/G081,
- *    1..6 on the G0B1/G0C1; LPUART1 everywhere, LPUART2 on G0B1/G0C1.
- *  - Interrupt lines: USART2 shares its vector with LPUART2 on the
- *    G0B1/G0C1 and has one of its own elsewhere; USART3..6 and LPUART1
- *    share ONE line on the G0B1/G0C1 where the G071's is USART3/4/
- *    LPUART1. IRQn values are ENUMERATORS, which the preprocessor cannot
- *    probe, so the vector of an instance is read off the DEVICE SELECT
- *    macro (STM32G0B1xx and friends) - the one place a device name is
- *    spelled in this stratum.
+ *  - USART instances: 1..2 on the G03x/G04x/G05x/G06x, 1..4 on the
+ *    G07x/G08x, 1..6 on the G0Bx/G0C1; LPUART1 on every x1 and on no
+ *    x0, LPUART2 on the G0B1/G0C1.
+ *  - Interrupt lines: a vector's NAME says what shares it (USART2_
+ *    LPUART2, TIM6_DAC_LPTIM1, ADC1_COMP, DMA1_Ch4_7_DMA2_Ch1_5_
+ *    DMAMUX1_OVR...), and which name a header declares follows from
+ *    WHICH PERIPHERALS THAT HEADER DECLARES. IRQn values are
+ *    ENUMERATORS, which the preprocessor cannot probe, but the
+ *    peripherals' base-address macros can be - so every vector verb
+ *    here derives the enumerator from PRESENCE (LPUART2_BASE makes
+ *    USART2's line USART2_LPUART2_IRQn, COMP1_BASE makes the ADC's
+ *    ADC1_COMP_IRQn, and so on), and a header whose naming did not
+ *    follow the rule would fail to COMPILE rather than bind a wrong
+ *    line in silence. No device name is spelled in this stratum.
  *  - The USART kernel-clock multiplexer (RCC_CCIPR.USARTnSEL) exists for
  *    USART1 everywhere, for USART2 on the G071 class and up, for USART3
  *    on the G0B1 class; the other instances run on PCLK with no choice.
@@ -206,28 +215,38 @@ constexpr uint8_t usart_clock_select_pos(uint8_t n) {
 constexpr bool usart_has_clock_select(uint8_t n) { return usart_clock_select_pos(n) != 0xFF; }
 
 /// The NVIC line of USARTn. IRQn_Type values are enumerators and cannot
-/// be probed, so the family's vector sharing is read off the DEVICE
-/// SELECT macro - the one place this stratum spells a device name. A
-/// wrong line here would be a silent Default_Handler spin (the samc
-/// stratum's NMI lesson), which is why the family fixture instantiates
-/// every present instance on every header the pack ships.
+/// be probed, so the family's vector sharing is DERIVED FROM PRESENCE:
+/// the enumerator's name lists what shares the line, and a header
+/// declares the shared name exactly when it declares the sharer. USART2
+/// shares its line with LPUART2 where there is one (the G0B1/G0C1);
+/// USART3..6 sit on ONE line, whose name grows with the instance count
+/// and with LPUART1 - USART3_4 on the G070, USART3_4_LPUART1 on the
+/// G071/G081, USART3_4_5_6 on the G0B0, USART3_4_5_6_LPUART1 on the
+/// G0B1/G0C1. A header that named things otherwise would fail to
+/// compile here, never bind a wrong line: a wrong line would be a
+/// silent Default_Handler spin (the samc stratum's NMI lesson), which
+/// is also why the family fixture instantiates every present instance
+/// on every header the pack ships. NonMaskableInt_IRQn for an instance
+/// the device has not got - unreachable, Usart<n> refusing it first.
 constexpr IRQn_Type usart_irq(uint8_t n) {
-#if defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G0B0xx)
     switch (n) {
         case 1: return USART1_IRQn;
+#if defined(LPUART2_BASE)
         case 2: return USART2_LPUART2_IRQn;
-        default: return USART3_4_5_6_LPUART1_IRQn;
-    }
-#elif defined(STM32G071xx) || defined(STM32G081xx) || defined(STM32G070xx)
-    switch (n) {
-        case 1: return USART1_IRQn;
-        case 2: return USART2_IRQn;
-        default: return USART3_4_LPUART1_IRQn;
-    }
 #else
-    // G031/G041/G030/G051/G061/G050: USART1 and USART2 only, one line each.
-    return n == 1 ? USART1_IRQn : USART2_IRQn;
+        case 2: return USART2_IRQn;
 #endif
+#if defined(USART5_BASE) && defined(LPUART1_BASE)
+        case 3: case 4: case 5: case 6: return USART3_4_5_6_LPUART1_IRQn;
+#elif defined(USART5_BASE)
+        case 3: case 4: case 5: case 6: return USART3_4_5_6_IRQn;
+#elif defined(USART3_BASE) && defined(LPUART1_BASE)
+        case 3: case 4: return USART3_4_LPUART1_IRQn;
+#elif defined(USART3_BASE)
+        case 3: case 4: return USART3_4_IRQn;
+#endif
+        default: return NonMaskableInt_IRQn;
+    }
 }
 
 /// Whether USARTn carries the FULL feature set of table 183/184 - the
@@ -240,20 +259,24 @@ constexpr IRQn_Type usart_irq(uint8_t n) {
 /// the device header expresses the split as POINTER-COMPARISON macros -
 /// IS_UART_FIFO_INSTANCE(x), IS_UART_AUTOBAUDRATE_DETECTION_INSTANCE(x)
 /// and their kin, each of them `((x) == USART1)` and none of them a
-/// constant expression. So this mirrors table 183 off the DEVICE SELECT
-/// macro, exactly as usart_irq() and tim_geometry() do, and the SILICON
-/// is the check: test_stm32_serial's letter a writes FIFOEN and PRESC on
-/// every present instance and compares what sticks against this
-/// function. (ES0548 2.11.2 is the documentation erratum saying some
-/// manual revisions omit the prescaler's own per-instance split; the
+/// constant expression. What CAN be probed is the instance count, and
+/// the split rides on it: the FULL instances are the first HALF of the
+/// roster - USART1 of two, USART1..2 of four, USART1..3 of six - which
+/// is what the twelve headers' own IS_UART_FIFO_INSTANCE macros spell
+/// out one by one (G03x/G04x/G05x/G06x: USART1; G07x/G08x: USART1..2;
+/// G0Bx/G0C1: USART1..3) and what table 183 states. The SILICON is the
+/// check: test_stm32_serial's letter a writes FIFOEN and PRESC on every
+/// present instance and compares what sticks against this function.
+/// (ES0548 2.11.2 is the documentation erratum saying some manual
+/// revisions omit the prescaler's own per-instance split; the
 /// implementation section carries it and so does this table.)
 constexpr bool usart_is_full(uint8_t n) {
     if (!usart_present(n)) {
         return false;
     }
-#if defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G0B0xx)
+#if defined(USART5_BASE)
     return n <= 3;      // USART1..3 FULL, USART4..6 BASIC
-#elif defined(STM32G071xx) || defined(STM32G081xx) || defined(STM32G070xx)
+#elif defined(USART3_BASE)
     return n <= 2;      // USART1..2 FULL, USART3..4 BASIC
 #else
     return n == 1;      // USART1 FULL, USART2 BASIC
@@ -335,21 +358,25 @@ constexpr uint8_t lpuart_clock_select_pos(uint8_t n) {
     }
 }
 
-/// The NVIC line of LPUARTn. Read off the DEVICE SELECT macro for the
-/// same reason usart_irq() is: IRQn_Type values are enumerators. On the
-/// G0B1 class LPUART1 shares USART3..6's line and LPUART2 shares
-/// USART2's; on the G071 class LPUART1 shares USART3/4's; on the G031
-/// class LPUART1 has a line of its own.
+/// The NVIC line of LPUARTn, derived from PRESENCE for the same reason
+/// usart_irq()'s is: IRQn_Type values are enumerators. LPUART1 shares
+/// USART3's line wherever there IS a USART3 (the G071/G081's USART3_4_
+/// LPUART1, the G0B1/G0C1's USART3_4_5_6_LPUART1) and has a line of its
+/// own where there is not (the G031/G041/G051/G061); LPUART2 shares
+/// USART2's. NonMaskableInt_IRQn for an instance the device has not
+/// got - unreachable, Lpuart<n> refusing it first.
 constexpr IRQn_Type lpuart_irq(uint8_t n) {
-#if defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G0B0xx)
-    return n == 2 ? USART2_LPUART2_IRQn : USART3_4_5_6_LPUART1_IRQn;
-#elif defined(STM32G071xx) || defined(STM32G081xx) || defined(STM32G070xx)
-    (void)n;
-    return USART3_4_LPUART1_IRQn;
-#else
-    (void)n;
-    return LPUART1_IRQn;
+    switch (n) {
+#if defined(LPUART1_BASE) && defined(USART3_BASE)
+        case 1: return usart_irq(3);
+#elif defined(LPUART1_BASE)
+        case 1: return LPUART1_IRQn;
 #endif
+#if defined(LPUART2_BASE)
+        case 2: return usart_irq(2);
+#endif
+        default: return NonMaskableInt_IRQn;
+    }
 }
 
 /// The EXTI line LPUARTn's wake-up event raises (table 65: 28 for
@@ -365,14 +392,13 @@ constexpr uint8_t lpuart_exti_line(uint8_t n) {
 // ---- IRTIM (ch. 27) ---------------------------------------------------------
 
 /// Which USART instance SYSCFG_CFGR1.IR_MOD code 10 selects as the
-/// infrared modulation envelope: USART4 on the G071/G081/G0B1/G0C1,
-/// USART2 on the G031/G041/G051/G061 (ch. 27's own note, repeated in
-/// 6.1.3's IR_MOD description). 0 where the part has neither - which
-/// cannot happen, every G0 having at least USART2. Code 01 is USART1
+/// infrared modulation envelope: USART4 where the part has one (the
+/// G07x/G08x/G0Bx/G0C1), USART2 otherwise (ch. 27's own note, repeated
+/// in 6.1.3's IR_MOD description) - so the rule is the instance's own
+/// presence, and every G0 has at least USART2. Code 01 is USART1
 /// everywhere and needs no table.
 constexpr uint8_t irtim_second_usart() {
-#if defined(STM32G071xx) || defined(STM32G081xx) || defined(STM32G070xx) || \
-    defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G0B0xx)
+#if defined(USART4_BASE)
     return 4;
 #else
     return 2;
@@ -382,16 +408,23 @@ constexpr uint8_t irtim_second_usart() {
 // ---- FLASH ------------------------------------------------------------------
 //
 // What differs across the family in chapter 3 is the SECOND BANK and the
-// two protection units that come with the bigger parts. The device header
-// says so three ways and all three are probed here rather than in
-// flash.hpp: a feature macro (FLASH_DBANK_SUPPORT and friends), the
-// presence of a bit mask (FLASH_CR_BKER exists only where a bank may be
-// selected), and - the one a mask cannot express - the presence of a
+// two protection units that come with the bigger parts - and, on the x0
+// VALUE LINE, a whole list of option bits and registers that are simply
+// not there: no programmable BOR, no NRST_MODE, no IRHEN, no nRST_SHDW,
+// no PCROP, no securable memory, no RDERR (there being no PCROP to
+// violate), no DBG_SWEN. The device header says so three ways and all
+// three are probed here rather than in flash.hpp: a feature macro
+// (FLASH_DBANK_SUPPORT and friends), the presence of a bit mask
+// (FLASH_CR_BKER exists only where a bank may be selected; a mask that
+// is absent is exported as 0, which every verb reads as "not on this
+// part"), and - the one a mask cannot express - the presence of a
 // STRUCT MEMBER: FLASH_TypeDef carries ECC2R and the four bank-2
 // protection registers on dual-bank parts only, so a driver naming
-// FLASH->ECC2R would not compile on a G031 at all. Those are exported as
-// POINTERS, null where the register does not exist, which is the value
-// form of "does this exist" and keeps the driver free of #ifdef.
+// FLASH->ECC2R would not compile on a G031 at all. Those are exported
+// as POINTERS, null where the register does not exist, which is the
+// value form of "does this exist" and keeps the driver free of #ifdef.
+// (SECR and the bank-1 PCROP registers, which the value line lacks, are
+// the exception - see the note at the bank-2 pointers.)
 
 /// Dual-bank capability: the 512 KB parts always run in two banks, the
 /// 256 KB ones can, and no smaller part has a second bank at all.
@@ -468,6 +501,118 @@ constexpr uint32_t flash_secr_sec_size2 =
     0u;
 #endif
 
+/// FLASH_SECR.SEC_SIZE (bank 1) and BOOT_LOCK - the x1 line's alone.
+constexpr uint32_t flash_secr_sec_size =
+#if defined(FLASH_SECR_SEC_SIZE_Msk)
+    FLASH_SECR_SEC_SIZE_Msk;
+#else
+    0u;
+#endif
+constexpr uint32_t flash_secr_boot_lock =
+#if defined(FLASH_SECR_BOOT_LOCK)
+    FLASH_SECR_BOOT_LOCK;
+#else
+    0u;
+#endif
+
+/// FLASH_ACR.DBG_SWEN - the debug-port gate. The value line has no such
+/// bit: its debug port is always allowed, and there is nothing to read.
+constexpr uint32_t flash_acr_debug_enable =
+#if defined(FLASH_ACR_DBG_SWEN)
+    FLASH_ACR_DBG_SWEN;
+#else
+    0u;
+#endif
+
+/// FLASH_SR.RDERR and FLASH_CR.RDERRIE - the PCROP read-violation flag
+/// and its interrupt enable, absent with the PCROP itself.
+constexpr uint32_t flash_sr_read_error =
+#if defined(FLASH_SR_RDERR)
+    FLASH_SR_RDERR;
+#else
+    0u;
+#endif
+constexpr uint32_t flash_cr_read_error_interrupt =
+#if defined(FLASH_CR_RDERRIE)
+    FLASH_CR_RDERRIE;
+#else
+    0u;
+#endif
+
+/// FLASH_OPTR's programmable brown-out (BOR_EN, BORR_LEV, BORF_LEV):
+/// the x1 line's. The value line's brown-out has one fixed threshold
+/// and no option bits at all. A field is exported as mask + position,
+/// mask 0 where absent.
+constexpr uint32_t flash_optr_bor_enable =
+#if defined(FLASH_OPTR_BOR_EN)
+    FLASH_OPTR_BOR_EN;
+#else
+    0u;
+#endif
+constexpr uint32_t flash_optr_bor_rise_mask =
+#if defined(FLASH_OPTR_BORR_LEV_Msk)
+    FLASH_OPTR_BORR_LEV_Msk;
+#else
+    0u;
+#endif
+constexpr uint8_t flash_optr_bor_rise_pos =
+#if defined(FLASH_OPTR_BORR_LEV_Pos)
+    FLASH_OPTR_BORR_LEV_Pos;
+#else
+    0u;
+#endif
+constexpr uint32_t flash_optr_bor_fall_mask =
+#if defined(FLASH_OPTR_BORF_LEV_Msk)
+    FLASH_OPTR_BORF_LEV_Msk;
+#else
+    0u;
+#endif
+constexpr uint8_t flash_optr_bor_fall_pos =
+#if defined(FLASH_OPTR_BORF_LEV_Pos)
+    FLASH_OPTR_BORF_LEV_Pos;
+#else
+    0u;
+#endif
+
+/// FLASH_OPTR.nRST_SHDW - the Shutdown-mode reset option. The value line
+/// has a Shutdown mode but no option bit for it.
+constexpr uint32_t flash_optr_nrst_shutdown =
+#if defined(FLASH_OPTR_nRST_SHDW)
+    FLASH_OPTR_nRST_SHDW;
+#else
+    0u;
+#endif
+
+/// FLASH_OPTR.NRST_MODE and IRHEN - the NRST pad's mode and the internal
+/// reset holder, the x1 line's.
+constexpr uint32_t flash_optr_nrst_mode_mask =
+#if defined(FLASH_OPTR_NRST_MODE_Msk)
+    FLASH_OPTR_NRST_MODE_Msk;
+#else
+    0u;
+#endif
+constexpr uint8_t flash_optr_nrst_mode_pos =
+#if defined(FLASH_OPTR_NRST_MODE_Pos)
+    FLASH_OPTR_NRST_MODE_Pos;
+#else
+    0u;
+#endif
+constexpr uint32_t flash_optr_irhen =
+#if defined(FLASH_OPTR_IRHEN)
+    FLASH_OPTR_IRHEN;
+#else
+    0u;
+#endif
+
+/// FLASH_PCROP1AER.PCROP_RDP - whether the PCROP areas are erased on an
+/// RDP regression. Absent with the PCROP.
+constexpr uint32_t flash_pcrop_rdp =
+#if defined(FLASH_PCROP1AER_PCROP_RDP)
+    FLASH_PCROP1AER_PCROP_RDP;
+#else
+    0u;
+#endif
+
 /// FLASH_ECC2R, the bank-2 ECC register - a STRUCT MEMBER that only the
 /// dual-bank headers declare. Null where there is no second bank.
 inline volatile uint32_t* flash_ecc2r() {
@@ -478,7 +623,13 @@ inline volatile uint32_t* flash_ecc2r() {
 #endif
 }
 
-/// The four bank-2 protection registers, same story as ECC2R.
+/// The four bank-2 protection registers, same story as ECC2R. (The
+/// BANK-1 PCROP registers and SECR, which the value line lacks, are
+/// not exported this way: flash.hpp reaches them as struct members
+/// under the header's own feature macro, because a pointer probe on a
+/// register the bench chip HAS costs a literal-pool entry in every
+/// image that reads it - the byte-identity gate said so - where the
+/// bank-2 ones below are read beside their bank-1 twins and fold.)
 inline volatile uint32_t* flash_wrp2ar() {
 #if defined(FLASH_WRP2AR_WRP2A_STRT)
     return &FLASH->WRP2AR;
@@ -1018,52 +1169,50 @@ constexpr bool tim_has_external_trigger(uint8_t n) {
 
 /// The NVIC line TIMn's UPDATE, capture/compare, trigger and break
 /// events reach. SHARED LINES ARE THE RULE HERE (table 61): TIM3 shares
-/// with TIM4 on the G0B1 class, TIM6 with the DAC and LPTIM1, TIM7 with
-/// LPTIM2, TIM16 and TIM17 with the two FDCAN interrupt lines - and TIM1
-/// alone has TWO vectors, the capture/compare one being separate (see
-/// tim_cc_irq). IRQn values are enumerators the preprocessor cannot
-/// probe, so this reads the DEVICE SELECT macro, exactly as usart_irq()
-/// does; a wrong line here is a silent Default_Handler spin, which is
-/// what the family fixture instantiating every present instance on every
-/// header is for.
+/// with TIM4 where there is a TIM4, TIM6 with the DAC and LPTIM1 where
+/// there are those, TIM7 with LPTIM2, TIM16 and TIM17 with the two FDCAN
+/// interrupt lines - and TIM1 alone has TWO vectors, the capture/compare
+/// one being separate (see tim_cc_irq). IRQn values are enumerators the
+/// preprocessor cannot probe, so each line's name is DERIVED FROM THE
+/// PRESENCE of what shares it, exactly as usart_irq() does; a wrong
+/// line here is a silent Default_Handler spin, which is what the family
+/// fixture instantiating every present instance on every header is for.
+/// NonMaskableInt_IRQn for a timer the device has not got - unreachable,
+/// Tim<n> refusing it first.
 constexpr IRQn_Type tim_irq(uint8_t n) {
-#if defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G0B0xx)
     switch (n) {
         case 1: return TIM1_BRK_UP_TRG_COM_IRQn;
+#if defined(TIM2_BASE)
         case 2: return TIM2_IRQn;
-        case 3: case 4: return TIM3_TIM4_IRQn;
-        case 6: return TIM6_DAC_LPTIM1_IRQn;
-        case 7: return TIM7_LPTIM2_IRQn;
-        case 14: return TIM14_IRQn;
-        case 15: return TIM15_IRQn;
-        case 16: return TIM16_FDCAN_IT0_IRQn;
-        default: return TIM17_FDCAN_IT1_IRQn;
-    }
-#elif defined(STM32G071xx) || defined(STM32G081xx) || defined(STM32G070xx)
-    switch (n) {
-        case 1: return TIM1_BRK_UP_TRG_COM_IRQn;
-        case 2: return TIM2_IRQn;
-        case 3: return TIM3_IRQn;
-        case 6: return TIM6_DAC_LPTIM1_IRQn;
-        case 7: return TIM7_LPTIM2_IRQn;
-        case 14: return TIM14_IRQn;
-        case 15: return TIM15_IRQn;
-        case 16: return TIM16_IRQn;
-        default: return TIM17_IRQn;
-    }
-#else
-    // G031/G041/G030/G051/G061/G050: TIM1, TIM2, TIM3, TIM14, TIM16,
-    // TIM17, each on a line of its own (LPTIM1/LPTIM2 take positions 17
-    // and 18, where the bigger parts put TIM6 and TIM7).
-    switch (n) {
-        case 1: return TIM1_BRK_UP_TRG_COM_IRQn;
-        case 2: return TIM2_IRQn;
-        case 3: return TIM3_IRQn;
-        case 14: return TIM14_IRQn;
-        case 16: return TIM16_IRQn;
-        default: return TIM17_IRQn;
-    }
 #endif
+#if defined(TIM4_BASE)
+        case 3: case 4: return TIM3_TIM4_IRQn;
+#else
+        case 3: return TIM3_IRQn;
+#endif
+#if defined(TIM6_BASE) && (defined(DAC1_BASE) || defined(LPTIM1_BASE))
+        case 6: return TIM6_DAC_LPTIM1_IRQn;
+#elif defined(TIM6_BASE)
+        case 6: return TIM6_IRQn;
+#endif
+#if defined(TIM7_BASE) && defined(LPTIM2_BASE)
+        case 7: return TIM7_LPTIM2_IRQn;
+#elif defined(TIM7_BASE)
+        case 7: return TIM7_IRQn;
+#endif
+        case 14: return TIM14_IRQn;
+#if defined(TIM15_BASE)
+        case 15: return TIM15_IRQn;
+#endif
+#if defined(FDCAN1_BASE)
+        case 16: return TIM16_FDCAN_IT0_IRQn;
+        case 17: return TIM17_FDCAN_IT1_IRQn;
+#else
+        case 16: return TIM16_IRQn;
+        case 17: return TIM17_IRQn;
+#endif
+        default: return NonMaskableInt_IRQn;
+    }
 }
 
 /// TIM1's SECOND vector, the capture/compare one (table 61 position 14).
@@ -1146,29 +1295,32 @@ constexpr uint8_t lptim_clock_select_pos(uint8_t n) {
 }
 
 /// The NVIC line of LPTIMn, and it is the reason this probe exists at
-/// all: on the G0B1/G0C1 and the G071 class each LPTIM SHARES a vector
-/// (LPTIM1 with TIM6 and the DAC, LPTIM2 with TIM7 - table 61), while on
-/// the G031 class, which has neither TIM6 nor TIM7 nor a DAC, each has a
-/// line of its own under a different enumerator name. IRQn values are
-/// enumerators the preprocessor cannot probe, so this reads the DEVICE
-/// SELECT macro exactly as usart_irq() and tim_irq() do.
-/// The presence gate is not decoration: the value lines (G070, G0B0,
-/// G030, G050) have no LPTIM AT ALL, so neither enumerator exists there
-/// and an ungated body would fail to compile on a header this stratum is
-/// otherwise happy with. Those parts answer NonMaskableInt_IRQn, which
-/// no caller can reach - Lptim<n> static_asserts on lptim_present(n).
+/// all. Where the part has TIM6 and TIM7 the two LPTIMs SHARE their
+/// lines (LPTIM1 with TIM6 and the DAC, LPTIM2 with TIM7 - table 61);
+/// where it has not (the G031/G041 class) each has a line of its own
+/// under a different enumerator name. IRQn values are
+/// enumerators the preprocessor cannot probe, so the name is DERIVED
+/// FROM THE PRESENCE of the timer it would share with, exactly as
+/// usart_irq() and tim_irq() do. The presence gate on the LPTIM itself
+/// is not decoration: the value lines (G030/G050/G070/G0B0) have no
+/// LPTIM AT ALL, so neither enumerator exists there and an ungated body
+/// would fail to compile on a header this stratum is otherwise happy
+/// with. Those parts answer NonMaskableInt_IRQn, which no caller can
+/// reach - Lptim<n> static_asserts on lptim_present(n).
 constexpr IRQn_Type lptim_irq(uint8_t n) {
-#if defined(LPTIM1_BASE)
-#if defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G071xx) || \
-    defined(STM32G081xx)
-    return n == 1u ? TIM6_DAC_LPTIM1_IRQn : TIM7_LPTIM2_IRQn;
-#else
-    return n == 1u ? LPTIM1_IRQn : LPTIM2_IRQn;
+    switch (n) {
+#if defined(LPTIM1_BASE) && defined(TIM6_BASE)
+        case 1: return TIM6_DAC_LPTIM1_IRQn;
+#elif defined(LPTIM1_BASE)
+        case 1: return LPTIM1_IRQn;
 #endif
-#else
-    (void)n;
-    return NonMaskableInt_IRQn;
+#if defined(LPTIM2_BASE) && defined(TIM7_BASE)
+        case 2: return TIM7_LPTIM2_IRQn;
+#elif defined(LPTIM2_BASE)
+        case 2: return LPTIM2_IRQn;
 #endif
+        default: return NonMaskableInt_IRQn;
+    }
 }
 
 /// The EXTI line LPTIMn's wake-up event raises (table 65: 29 and 30,
@@ -1385,10 +1537,11 @@ constexpr uint32_t dma_reset_mask(uint8_t n) {
 /// TWELVE (table 61): channel 1 alone, channels 2 and 3 together, and
 /// one line for everything else - DMA1's channels 4..7, every DMA2
 /// channel, AND the DMAMUX overrun. IRQn values are enumerators the
-/// preprocessor cannot probe, so this reads the DEVICE SELECT macro,
-/// exactly as usart_irq() and tim_irq() do; the spelling of the third
-/// line differs on all three headers, which is the whole reason this
-/// verb exists.
+/// preprocessor cannot probe, so the third line's name is DERIVED FROM
+/// PRESENCE exactly as usart_irq() and tim_irq() are: it spells the
+/// channels it serves, DMA1's 4..5 on a five-channel DMA1, 4..7 on a
+/// seven-channel one, and DMA2's 1..5 on top where there is a DMA2 -
+/// three spellings, which is the whole reason this verb exists.
 constexpr IRQn_Type dma_channel_irq(uint8_t n, uint8_t ch) {
     if (n == 1u && ch == 1u) {
         return DMA1_Channel1_IRQn;
@@ -1396,10 +1549,9 @@ constexpr IRQn_Type dma_channel_irq(uint8_t n, uint8_t ch) {
     if (n == 1u && (ch == 2u || ch == 3u)) {
         return DMA1_Channel2_3_IRQn;
     }
-#if defined(STM32G0B1xx) || defined(STM32G0C1xx)
+#if defined(DMA2_BASE)
     return DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn;
-#elif defined(STM32G071xx) || defined(STM32G081xx) || defined(STM32G051xx) || \
-    defined(STM32G061xx) || defined(STM32G070xx)
+#elif defined(DMA1_Channel7_BASE)
     return DMA1_Ch4_7_DMAMUX1_OVR_IRQn;
 #else
     return DMA1_Ch4_5_DMAMUX1_OVR_IRQn;
@@ -1612,15 +1764,15 @@ constexpr uint8_t adc_vbat_channel() {
 #endif
 }
 
-/// The NVIC line of the ADC. On the G0B1/G0C1 and the G071 class it is
-/// SHARED WITH THE THREE COMPARATORS and with EXTI lines 17/18/20 with
-/// them (table 61); on the G031 class, which has no comparator at all,
+/// The NVIC line of the ADC. Where the part has comparators it is
+/// SHARED WITH THEM and with EXTI lines 17/18/20 with them (table 61);
+/// where it has none (the G03x/G04x class and every x0 value-line part)
 /// the ADC has a line to itself under a different name. IRQn values are
 /// enumerators the preprocessor cannot probe, so - as for usart_irq(),
-/// tim_irq() and dma_channel_irq() - this reads the DEVICE SELECT macro.
+/// tim_irq() and dma_channel_irq() - the name is DERIVED FROM THE
+/// PRESENCE of the first comparator.
 constexpr IRQn_Type adc_irq() {
-#if defined(STM32G0B1xx) || defined(STM32G0C1xx) || defined(STM32G071xx) || \
-    defined(STM32G081xx) || defined(STM32G070xx)
+#if defined(COMP1_BASE)
     return ADC1_COMP_IRQn;
 #else
     return ADC1_IRQn;
@@ -1870,6 +2022,91 @@ constexpr bool pwr_vddio2_present() {
 #endif
 }
 
+/// PWR_CR2 - the programmable voltage detector and the supply monitors
+/// live in it, and THE VALUE LINE HAS NO SUCH REGISTER: its PWR_TypeDef
+/// reserves offset 0x04, with no PVD and no PVM on the part. A STRUCT
+/// MEMBER that the x1 headers declare and the x0 headers do not; pwr.hpp
+/// reaches it under the header's own symbol (a pointer probe here would
+/// cost every x1 image a literal - the flash bank-1 note above), and
+/// what this file exports is the presence and the masks.
+
+/// The PVD's three fields and its output flag, mask 0 where the part has
+/// no detector (every x0).
+constexpr bool pwr_pvd_present() {
+#if defined(PWR_CR2_PVDE)
+    return true;
+#else
+    return false;
+#endif
+}
+constexpr uint32_t pwr_cr2_pvd_enable =
+#if defined(PWR_CR2_PVDE)
+    PWR_CR2_PVDE;
+#else
+    0u;
+#endif
+constexpr uint32_t pwr_cr2_pvd_rise_mask =
+#if defined(PWR_CR2_PVDRT_Msk)
+    PWR_CR2_PVDRT_Msk;
+#else
+    0u;
+#endif
+constexpr uint8_t pwr_cr2_pvd_rise_pos =
+#if defined(PWR_CR2_PVDRT_Pos)
+    PWR_CR2_PVDRT_Pos;
+#else
+    0u;
+#endif
+constexpr uint32_t pwr_cr2_pvd_fall_mask =
+#if defined(PWR_CR2_PVDFT_Msk)
+    PWR_CR2_PVDFT_Msk;
+#else
+    0u;
+#endif
+constexpr uint8_t pwr_cr2_pvd_fall_pos =
+#if defined(PWR_CR2_PVDFT_Pos)
+    PWR_CR2_PVDFT_Pos;
+#else
+    0u;
+#endif
+constexpr uint32_t pwr_sr2_pvd_output =
+#if defined(PWR_SR2_PVDO)
+    PWR_SR2_PVDO;
+#else
+    0u;
+#endif
+
+/// The DAC supply monitor (PVMEN_DAC / PVMO_DAC): present exactly where
+/// the DAC is, absent on the value line with it.
+constexpr uint32_t pwr_cr2_dac_monitor_enable =
+#if defined(PWR_CR2_PVMEN_DAC)
+    PWR_CR2_PVMEN_DAC;
+#else
+    0u;
+#endif
+constexpr uint32_t pwr_sr2_dac_monitor_output =
+#if defined(PWR_SR2_PVMO_DAC)
+    PWR_SR2_PVMO_DAC;
+#else
+    0u;
+#endif
+
+/// PWR_CR3.RRS (SRAM retention through Standby) and ENB_ULP (the sampled
+/// supply monitor): the x1 line's. The value line's Standby keeps no
+/// SRAM and its supply monitor is never sampled - the bits do not exist.
+constexpr uint32_t pwr_cr3_sram_retention =
+#if defined(PWR_CR3_RRS)
+    PWR_CR3_RRS;
+#else
+    0u;
+#endif
+constexpr uint32_t pwr_cr3_sampled_supply_monitor =
+#if defined(PWR_CR3_ENB_ULP)
+    PWR_CR3_ENB_ULP;
+#else
+    0u;
+#endif
+
 /// The EXTI lines the RTC and the TAMP raise (table 65: 19 and 21, both
 /// DIRECT - no trigger selection and no pending bit in the EXTI). The
 /// NUMBERS are the manual's, like comp_exti_line()'s, which is why they
@@ -2049,8 +2286,8 @@ inline volatile uint32_t* rcc_ccipr2() {
 /// intr1_it on TIM17's - so ONE line serves two peripherals and two
 /// instances, and a handler has to ask each of them what it wants.
 /// IRQn_Type values are enumerators the preprocessor cannot probe, so
-/// this reads the DEVICE SELECT macro exactly as usart_irq() and
-/// tim_irq() do; the names themselves only exist on the parts that have
+/// the names are reached through the block's PRESENCE exactly as
+/// usart_irq() and tim_irq() do: they only exist on the parts that have
 /// an FDCAN, which is why the body is gated on the block's base.
 /// `line` is 0 or 1.
 constexpr IRQn_Type fdcan_irq(uint8_t line) {

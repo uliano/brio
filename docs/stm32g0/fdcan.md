@@ -30,9 +30,9 @@ presence, base, mask, clock-select and vector facts come from
 
 A Bosch M_CAN core - ISO 11898-1:2015 and CAN FD 1.0 - and this is the
 first chapter of the stratum that a part can be **missing entirely**:
-table 1 gives FDCAN1 and FDCAN2 to the G0B1/G0C1 class alone, and the
-G071 and G031 headers declare no base, no struct and no interrupt
-enumerator. `Fdcan<n>` therefore does not exist on a part without one
+table 1 gives FDCAN1 and FDCAN2 to the G0B1/G0C1 class alone, and every
+other header of the pack (the G0B0 included) declares no base, no struct
+and no interrupt enumerator. `Fdcan<n>` therefore does not exist on a part without one
 (the `avrdx/opamp.hpp` precedent), while the protocol ARITHMETIC - bit
 timing, the DLC coding, the element codecs - compiles everywhere,
 because it is a property of CAN and not of a peripheral.

@@ -1,5 +1,5 @@
-// Family smoke TU: stm32g0/crc.hpp on each of the three headers the
-// desk's boards span. Instantiation only - no main(), no hardware.
+// Family smoke TU: stm32g0/crc.hpp on every header the pack ships.
+// Instantiation only - no main(), no hardware.
 //
 // The CRC is the same peripheral on every part of the family, so what
 // this fixture checks is not per-header geometry but the CONFIGURATION

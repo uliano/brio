@@ -227,7 +227,12 @@ struct Pwr {
     // ---- raw registers ------------------------------------------------------
 
     static uint32_t cr1() { return PWR->CR1; }
+    /// 0 on the value line, whose PWR has no CR2 at all (no PVD, no PVM).
+#if defined(PWR_CR2_PVDE)
     static uint32_t cr2() { return PWR->CR2; }
+#else
+    static uint32_t cr2() { return 0u; }
+#endif
     static uint32_t cr3() { return PWR->CR3; }
     static uint32_t cr4() { return PWR->CR4; }
     static uint32_t sr1() { return PWR->SR1; }
@@ -539,43 +544,75 @@ struct Pwr {
     // ---- SRAM retention and the supply sampler (4.4.3) ----------------------
 
     /// RRS: keep the SRAM alive from the low-power regulator through a
-    /// Standby. Costs current, saves everything.
-    static void sram_retention(bool on) {
-        PWR->CR3 = on ? (PWR->CR3 | PWR_CR3_RRS) : (PWR->CR3 & ~PWR_CR3_RRS);
+    /// Standby. Costs current, saves everything. The value line has no
+    /// such bit - its Standby keeps no SRAM - and refuses the request;
+    /// `has_sram_retention` says so before it is asked.
+    static constexpr bool has_sram_retention = pwr_cr3_sram_retention != 0u;
+    static bool sram_retention(bool on) {
+        if (!has_sram_retention) {
+            return false;
+        }
+        PWR->CR3 = on ? (PWR->CR3 | pwr_cr3_sram_retention)
+                      : (PWR->CR3 & ~pwr_cr3_sram_retention);
+        return true;
     }
-    static bool sram_retention() { return (PWR->CR3 & PWR_CR3_RRS) != 0u; }
+    static bool sram_retention() { return (PWR->CR3 & pwr_cr3_sram_retention) != 0u; }
 
     /// ENB_ULP: sample the supply instead of watching it. The chapter's
     /// own Caution is the whole story - "if the supply voltage drops
     /// below the minimum operating condition between two samples, the
     /// reset condition is missed and no reset is generated" - so this is
-    /// offered and never set by anything here.
-    static void sampled_supply_monitor(bool on) {
-        PWR->CR3 = on ? (PWR->CR3 | PWR_CR3_ENB_ULP)
-                      : (PWR->CR3 & ~PWR_CR3_ENB_ULP);
+    /// offered and never set by anything here. Absent on the value
+    /// line, which refuses it.
+    static constexpr bool has_sampled_supply_monitor =
+        pwr_cr3_sampled_supply_monitor != 0u;
+    static bool sampled_supply_monitor(bool on) {
+        if (!has_sampled_supply_monitor) {
+            return false;
+        }
+        PWR->CR3 = on ? (PWR->CR3 | pwr_cr3_sampled_supply_monitor)
+                      : (PWR->CR3 & ~pwr_cr3_sampled_supply_monitor);
+        return true;
     }
 
     // ---- the programmable voltage detector (4.2.2) ---------------------------
+    //
+    // THE VALUE LINE HAS NO DETECTOR AND NO PWR_CR2 - the register is not
+    // a member of its PWR_TypeDef - so the verbs that write it exist in
+    // two bodies, selected on the header's own symbol (the one `#ifdef`
+    // a driver may keep: a register-struct reference that some parts
+    // have not got): the real one, and a refusal that touches nothing.
+    // `has_pvd` is the compile-time form of the same fact, from the
+    // reserve, and the masks come from there too so the two bodies
+    // share every number.
 
+    static constexpr bool has_pvd = pwr_pvd_present();
+
+#if defined(PWR_CR2_PVDE)
     static bool pvd_config(const PvdConfig& c) {
         if (!pvd_config_valid(c)) {
             return false;
         }
-        PWR->CR2 = (PWR->CR2 & ~(PWR_CR2_PVDRT_Msk | PWR_CR2_PVDFT_Msk)) |
-                   ((static_cast<uint32_t>(c.rising) << PWR_CR2_PVDRT_Pos) &
-                    PWR_CR2_PVDRT_Msk) |
-                   ((static_cast<uint32_t>(c.falling) << PWR_CR2_PVDFT_Pos) &
-                    PWR_CR2_PVDFT_Msk);
+        PWR->CR2 = (PWR->CR2 & ~(pwr_cr2_pvd_rise_mask | pwr_cr2_pvd_fall_mask)) |
+                   ((static_cast<uint32_t>(c.rising) << pwr_cr2_pvd_rise_pos) &
+                    pwr_cr2_pvd_rise_mask) |
+                   ((static_cast<uint32_t>(c.falling) << pwr_cr2_pvd_fall_pos) &
+                    pwr_cr2_pvd_fall_mask);
         return true;
     }
 
-    static void pvd_enable(bool on) {
-        PWR->CR2 = on ? (PWR->CR2 | PWR_CR2_PVDE) : (PWR->CR2 & ~PWR_CR2_PVDE);
+    static bool pvd_enable(bool on) {
+        PWR->CR2 = on ? (PWR->CR2 | pwr_cr2_pvd_enable) : (PWR->CR2 & ~pwr_cr2_pvd_enable);
+        return true;
     }
-    static bool pvd_enabled() { return (PWR->CR2 & PWR_CR2_PVDE) != 0u; }
+#else
+    static bool pvd_config(const PvdConfig&) { return false; }
+    static bool pvd_enable(bool) { return false; }
+#endif
+    static bool pvd_enabled() { return (cr2() & pwr_cr2_pvd_enable) != 0u; }
 
     /// PWR_SR2.PVDO: 1 means VDD is BELOW the threshold in force.
-    static bool pvd_below() { return (PWR->SR2 & PWR_SR2_PVDO) != 0u; }
+    static bool pvd_below() { return (PWR->SR2 & pwr_sr2_pvd_output) != 0u; }
 
     /// The EXTI line the detector's output raises - a CONFIGURABLE line
     /// (table 65), so a sense must be chosen before anything is pending.
@@ -584,12 +621,19 @@ struct Pwr {
     static constexpr uint8_t pvd_exti_line = 16;
 
     /// The DAC supply monitor (PVMENDAC / PVMODAC): 1.8 V on VDDA. A
-    /// second detector with no threshold to choose.
-    static void dac_supply_monitor(bool on) {
-        PWR->CR2 = on ? (PWR->CR2 | PWR_CR2_PVMEN_DAC)
-                      : (PWR->CR2 & ~PWR_CR2_PVMEN_DAC);
+    /// second detector with no threshold to choose - and none at all
+    /// where there is no DAC, which refuses it.
+    static constexpr bool has_dac_supply_monitor = pwr_cr2_dac_monitor_enable != 0u;
+#if defined(PWR_CR2_PVMEN_DAC)
+    static bool dac_supply_monitor(bool on) {
+        PWR->CR2 = on ? (PWR->CR2 | pwr_cr2_dac_monitor_enable)
+                      : (PWR->CR2 & ~pwr_cr2_dac_monitor_enable);
+        return true;
     }
-    static bool dac_supply_low() { return (PWR->SR2 & PWR_SR2_PVMO_DAC) != 0u; }
+#else
+    static bool dac_supply_monitor(bool) { return false; }
+#endif
+    static bool dac_supply_low() { return (PWR->SR2 & pwr_sr2_dac_monitor_output) != 0u; }
 
     /// Does this part carry the second I/O supply and its monitor?
     static constexpr bool has_vddio2 = pwr_vddio2_present();

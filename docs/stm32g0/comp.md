@@ -28,10 +28,15 @@ Family fixture `test/family_stm32g0/comp.cpp` plus three negatives under
 ## What the silicon does
 
 **Three comparators, two, or none, and the header says which.** 18.1:
-COMP3 is the G0B1xx/G0C1xx's alone, and the G031 class has no comparator
-at all - each device header saying exactly that by declaring or not
+COMP3 is the G0B1xx/G0C1xx's alone, the G05x/G06x/G07x/G08x have two,
+and the G031 class and every x0 value-line part have no comparator at
+all - each device header saying exactly that by declaring or not
 declaring `COMPn_BASE`. So `Comp<3>` is a compile error on a G071 and
-`Comp<1>` is one on a G031, with no hand-kept list behind either.
+`Comp<1>` is one on a G031 or a G070 (the driver compiles its
+register-facing half only where `COMP1_BASE` exists; the vocabulary is
+every part's), with no hand-kept list behind either. The ADC's vector
+is `ADC1_COMP_IRQn` exactly where a comparator exists and `ADC1_IRQn`
+elsewhere - the reserve derives it from `COMP1_BASE`.
 
 **One CSR each, and it lives inside SYSCFG.** 18.3.3 says two things
 that read as contradictory - "there is no clock enable control bit

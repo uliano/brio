@@ -22,16 +22,18 @@ outside `z` needs `tools/uart_stress.py`). Family fixture
 ## What the silicon does
 
 **Two controllers, one multiplexer, three vectors.** The G0B1/G0C1 class
-has DMA1 with seven channels and DMA2 with five; the G071 class has
-DMA1's seven alone, the G031 class DMA1's five. One DMAMUX serves both:
-its channels 0..6 are DMA1's channels 1..7 and its 7..11 are DMA2's 1..5
-(11.3.2), a hardwired map. Every count above is COUNTED off the device
-header's own `DMAn_ChannelK_BASE` / `DMAMUX1_ChannelK_BASE` symbols, not
-tabulated. The vectors are table 61's: channel 1 has one to itself,
-channels 2 and 3 share one, and ONE line carries DMA1's channels 4..7,
-every DMA2 channel and the DMAMUX overrun - and the third line's NAME
-differs on all three headers, which is why it is read off the device
-select macro in the reserve beside `usart_irq()` and `tim_irq()`.
+has DMA1 with seven channels and DMA2 with five (the G0B0 too); the
+G05x/G06x/G07x/G08x have DMA1's seven alone, the G03x/G04x DMA1's five.
+One DMAMUX serves both: its channels 0..6 are DMA1's channels 1..7 and
+its 7..11 are DMA2's 1..5 (11.3.2), a hardwired map. Every count above
+is COUNTED off the device header's own `DMAn_ChannelK_BASE` /
+`DMAMUX1_ChannelK_BASE` symbols, not tabulated. The vectors are table
+61's: channel 1 has one to itself, channels 2 and 3 share one, and ONE
+line carries DMA1's channels 4..7, every DMA2 channel and the DMAMUX
+overrun - and the third line's NAME spells what it serves, in three
+spellings, which is why the reserve derives it from the presence of
+DMA2 and of DMA1's seventh channel beside `usart_irq()` and
+`tim_irq()`.
 
 **A channel is four registers and an enable discipline.** CCR carries
 the direction, the circular and memory-to-memory bits, the two

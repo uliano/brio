@@ -22,10 +22,13 @@ ADC, the reference buffer and the comparators). Family fixture
 
 ## What the silicon does
 
-**Two 12-bit channels, and on the G031/G041 there are none at all.**
-16.3's own table says so and the device header agrees by declaring no
-`DAC1_BASE` there, so `Dac` is a compile-time refusal on those parts and
-a MONOSTATE on the others (there is one DAC wherever there is one).
+**Two 12-bit channels, and on the G031/G041 - and on every x0
+value-line part - there are none at all.** 16.3's own table says so and
+the device headers agree by declaring no `DAC1_BASE` there, so `Dac`
+does not exist on those parts (the driver compiles its register-facing
+half only where the header declares the block; the trigger, mode and
+wave vocabulary is every part's) and is a MONOSTATE on the others
+(there is one DAC wherever there is one).
 DAC1_OUT1 is PA4 and DAC1_OUT2 is PA5 - which on a Nucleo-64 is LD4.
 
 **THE DAC REACHES THE ADC THROUGH THE PAD AND NOTHING ELSE.** 16.4.2

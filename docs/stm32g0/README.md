@@ -58,11 +58,59 @@ this family's board names (`boards = g0b1re`, the default). One
 configure targets one part (`STM32G0_MCU`, full part number: it decides
 the device define `STM32G0B1xx`, the linker script `ld/<part>.ld` and
 the crt `src/glue/startup_<header>.cpp`); only the G0B1RE has a preset
-today - the G071 and G031 (Nucleo boards in the drawer) are
-compile-checked by `tools/check_stm32g0.sh`, which sweeps every
-positive TU in `test/family_stm32g0/` across the three device headers
-and requires every `neg/` TU to fail for the variants its `// mcu:`
-line names.
+today. Every other part of the family is compile-checked by
+`tools/check_stm32g0.sh`, which sweeps every positive TU in
+`test/family_stm32g0/` across ALL TWELVE device headers the CMSIS pack
+ships and requires every `neg/` TU to fail for the variants its
+`// mcu:` line names - see "Family coverage" below.
+
+## Family coverage
+
+The stratum is written for the whole STM32G0 family, both lines:
+
+- the **x1 line** - G031/G041, G051/G061, G071/G081, G0B1/G0C1 - which
+  is what the bench chip belongs to (the G0B1 is its superset), and
+- the **x0 value line** - G030, G050, G070, G0B0 - each of whose
+  headers is a strict subset of its x1 twin: the same IP under the same
+  register names, minus a list of peripherals (no LPUART, no LPTIM, no
+  DAC, no comparator, no VREFBUF, no TIM2, no PVD/PVM, no programmable
+  BOR, no PCROP or securable memory, no CEC/CRS/UCPD/FDCAN).
+
+What differs is read off the DEVICE HEADER and never off a device
+name: `brio/stm32g0/device_tables.hpp` (the reserve) probes the
+header's own base-address and bit-mask macros and exports what it
+finds as constexpr data. In particular THE VECTORS ARE DERIVED FROM
+PRESENCE: an interrupt line's enumerator NAME lists what shares it
+(`USART2_LPUART2_IRQn`, `TIM6_DAC_LPTIM1_IRQn`, `ADC1_COMP_IRQn`,
+`DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn`...), a header declares the
+shared spelling exactly when it declares the sharer, and IRQn values
+are enumerators the preprocessor cannot probe - so each vector verb
+asks for the sharer's base macro and names the enumerator that
+follows. A header whose naming did not follow the rule would fail to
+compile, never bind a wrong line in silence.
+
+An absence is spelled one of two ways, and the docs say which:
+
+- a peripheral the part has not got is a driver that DOES NOT EXIST
+  there - `Dac`, `Comp<n>`, `Vref`, `Lptim<n>` and its sleep site,
+  `Lpuart<n>`, `Fdcan<n>` compile their register-facing half only where
+  the header declares the block, while their vocabulary (enums, config
+  structs, validity and arithmetic) is every part's; spelling the
+  driver on such a part is a compile error naming the reason, and
+  `Tim<2>` on a value-line part is the "no such timer" refusal;
+- a REGISTER or BIT a present block has not got is a verb that REFUSES
+  at run time and a constexpr flag that says so at compile time:
+  `Pwr::has_pvd` / `has_sram_retention` / `has_sampled_supply_monitor` /
+  `has_dac_supply_monitor`, `Flash::has_debug_gate`,
+  `FlashOptions::has_programmable_bor` / `has_shutdown_reset_option` /
+  `has_nrst_mode`; the reserve's `flash_pcrop_capable` and
+  `flash_securable_capable`.
+
+The sweep proves it on every header the pack ships (21 positive TUs x
+12 headers, and every negative refused on each variant it names); the
+bench proves the G0B1. The G071RB and G031K8 Nucleos in the drawer are
+the next silicon, and they need a preset, a linker script, a crt and
+a manifest position each before a suite can run on them.
 
 ```bash
 (cd stm32g0 && cmake --preset stm32g0b1re-release)                      # configure (once, or after adding an app)

@@ -2,11 +2,12 @@
 //
 // THE PER-HEADER DIFFERENCES THIS FIXTURE IS FOR, and they are the
 // widest in the analog set: the G0B1/G0C1 class carries THREE
-// comparators, the G071 class TWO, and the G031 class NONE - each header
-// saying so by declaring or not declaring COMPn_BASE. On top of that,
-// COMP3's third plus input and third minus input are PE7 and PE8, so
-// they exist only where port E is bonded, which is the same class
-// boundary reached from the GPIO side.
+// comparators, the G051/G061/G071/G081 class TWO, and the G031/G041
+// class and every x0 value-line part NONE - each header saying so by
+// declaring or not declaring COMPn_BASE, which is exactly what this
+// file asks. On top of that, COMP3's third plus input and third minus
+// input are PE7 and PE8, so they exist only where port E is bonded,
+// which is the same class boundary reached from the GPIO side.
 
 #include <stdint.h>
 
@@ -15,9 +16,9 @@
 
 using namespace brio;
 
-#if defined(STM32G031xx)
+#if !defined(COMP1_BASE)
 
-static_assert(comp_count() == 0, "the G031 class has no comparator (18.1)");
+static_assert(comp_count() == 0, "no comparator on this part (18.1)");
 static_assert(!comp_present(1) && comp_exti_line(1) == 0xFF);
 
 #else
@@ -30,13 +31,14 @@ static_assert(comp_exti_line(1) == 17 && comp_exti_line(2) == 18,
 static_assert(comp_irq() == adc_irq(),
               "the comparators report on the ADC's vector (table 61)");
 
-#if defined(STM32G0B1xx)
-static_assert(comp_count() == 3 && comp_present(3), "the G0B1 class has the third");
+#if defined(COMP3_BASE)
+static_assert(comp_count() == 3 && comp_present(3), "this part has the third");
 static_assert(comp_exti_line(3) == 20);
 static_assert(comp_positive_pin(3, CompPositive::input2).port == 'E',
               "COMP3_INP2 is PE7, and port E is this class's");
+static_assert(gpio_port_present('E'), "and this class bonds port E");
 #else
-static_assert(comp_count() == 2 && !comp_present(3), "the G071 class has two");
+static_assert(comp_count() == 2 && !comp_present(3), "two comparators on this part");
 static_assert(comp_exti_line(3) == 0xFF);
 #endif
 
@@ -58,7 +60,7 @@ static_assert(!comp_negative_pin(1, CompNegative::vrefint).valid,
 // The window partner, which is the asymmetry 18.6.1 states one register
 // at a time: 1 borrows from 2, 2 borrows from 1, 3 borrows from 2.
 static_assert(comp_window_partner(1) == 2 && comp_window_partner(2) == 1);
-#if defined(STM32G0B1xx)
+#if defined(COMP3_BASE)
 static_assert(comp_window_partner(3) == 2);
 #endif
 
@@ -112,7 +114,7 @@ void use() {
                          .window_output = true});
     (void)C2::release();
 
-#if defined(STM32G0B1xx)
+#if defined(COMP3_BASE)
     (void)Comp<3>::configure({.positive = CompPositive::input0,
                               .negative = CompNegative::vrefint_quarter});
     (void)Comp<3>::release();

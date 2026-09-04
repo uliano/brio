@@ -425,8 +425,8 @@ is loaded into the peripheral at reset.
 
 ### End state
 
-**Today's end state (2026-09-03): the Nucleo-G0B1RE is
-position E on a direct USB port, running `test_stm32_fdcan` (stm32g0),
+**Today's end state (2026-09-04): the Nucleo-G0B1RE is
+position E on a direct USB port, running `test_stm32_analog` (stm32g0),
 with `test_stm32_nvm`'s heap blocks and `test_stm32_journal`'s values
 both still live in bank 2 - the RTC, SLEEP, ANALOG, DMA, TIMER, EXTI,
 LPTIM, CRC and SERIAL suites are all wireless and write no flash, so the

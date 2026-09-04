@@ -1,5 +1,5 @@
-// Family smoke TU: stm32g0/fdcan.hpp on each of the three headers the
-// desk's boards span. Instantiation only - no main(), no hardware.
+// Family smoke TU: stm32g0/fdcan.hpp on every header the pack ships.
+// Instantiation only - no main(), no hardware.
 //
 // WHAT THIS FIXTURE IS REALLY FOR. FDCAN is the first chapter of this
 // stratum that a part can be MISSING ENTIRELY: table 1 gives the two
@@ -9,7 +9,7 @@
 // the protocol ARITHMETIC still has to compile, because a bit timing and
 // a DLC are properties of CAN and not of a peripheral. This file is
 // therefore in two halves: the arithmetic and the codecs pinned against
-// tables 212..223 on all three headers, and the register-facing verbs
+// tables 212..223 on every header, and the register-facing verbs
 // instantiated behind the same gate the driver uses.
 
 #include <stdint.h>
@@ -18,8 +18,8 @@
 
 using namespace brio;
 
-// ---- presence, as the three headers state it -------------------------------
-#if defined(STM32G0B1xx)
+// ---- presence, as the header states it -------------------------------------
+#if defined(FDCAN1_BASE)
 static_assert(fdcan_present(1) && fdcan_present(2),
               "table 1: the G0B1/G0C1 class carries both modules");
 static_assert(fdcan_instances() == 2);

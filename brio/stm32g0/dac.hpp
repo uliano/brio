@@ -181,6 +181,14 @@ constexpr bool dac_channel_config_valid(const DacChannelConfig& c) {
 }
 
 /// DAC_SR's per-channel bits (16.7.14), by channel index.
+// The register-facing half is compiled only where the device header
+// declares the block (the fdcan.hpp precedent): the G031/G041 and every
+// x0 value-line part have no DAC, no DAC_TypeDef and none of the DAC_CR
+// bit names, and a Dac spelled there is a compile error naming the
+// reason. The vocabulary above - triggers, modes, waves, the channel
+// config and its validity - is every part's.
+#if defined(DAC1_BASE)
+
 struct DacFlag {
     static constexpr uint32_t underrun(uint8_t ch) {
         return ch == 0 ? DAC_SR_DMAUDR1 : DAC_SR_DMAUDR2;
@@ -577,5 +585,7 @@ private:
 
     inline static DacChannelConfig cfg_[2]{};
 };
+
+#endif // DAC1_BASE
 
 } // namespace brio

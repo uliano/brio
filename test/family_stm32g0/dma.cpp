@@ -1,25 +1,27 @@
 // Family smoke TU: stm32g0/dma.hpp instantiated for every DMA controller
-// and every channel each of the three device headers declares, plus the
+// and every channel each device header of the pack declares, plus the
 // whole DMAMUX surface and the four engines at every element width.
 // Instantiation only - no main(), no hardware.
 //
 // WHAT THIS FIXTURE IS REALLY FOR. Three things this stratum cannot check
 // any other way:
 //
-//  1. THE PER-PART GEOMETRY. DMA2 exists on the G0B1 class alone; DMA1
-//     has seven channels there and on the G071 class, five on the G031
-//     class; the DMAMUX has twelve, seven and five multiplexer channels
-//     to match. All of it is counted off the device header's own
+//  1. THE PER-PART GEOMETRY. DMA2 exists on the G0Bx/G0C1 class alone;
+//     DMA1 has seven channels there and on the G05x/G06x/G07x/G08x, five
+//     on the G03x/G04x; the DMAMUX has twelve, seven and five multiplexer
+//     channels to match. All of it is counted off the device header's own
 //     DMAn_ChannelK_BASE / DMAMUX1_ChannelK_BASE symbols in
 //     stm32g0/device_tables.hpp, and this file is where the counts are
-//     re-stated as static_asserts.
+//     re-stated as static_asserts - HEADER-AGNOSTICALLY, each keyed on
+//     the presence symbol that decides it.
 //
 //  2. THE VECTOR MAP. Three lines serve twelve channels and the third
-//     one's NAME differs on all three headers
+//     one's NAME comes in three spellings
 //     (DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR / DMA1_Ch4_7_DMAMUX1_OVR /
 //     DMA1_Ch4_5_DMAMUX1_OVR). A wrong line is a silent Default_Handler
 //     spin - the samc stratum's NMI lesson - so every present channel's
-//     irq() is evaluated here on every header.
+//     irq() is evaluated here on every header, and the third line's
+//     spelling is demanded from the presence that names it.
 //
 //  3. THE util CONTRACTS. util/block_stream.hpp was written BEFORE its
 //     second implementation exactly so that friction would show up as a
@@ -39,30 +41,41 @@
 
 using namespace brio;
 
-// ---- presence and geometry, as the three headers state it ------------------
+// ---- presence and geometry, as the header states it ------------------------
 static_assert(dma_present(1), "every part of this family has DMA1");
 static_assert(!dma_present(3), "there is no third controller anywhere");
 
-#if defined(STM32G0B1xx)
-static_assert(dma_present(2), "the G0B1 class has a second controller");
+#if defined(DMA2_BASE)
+static_assert(dma_present(2), "this part has a second controller");
 static_assert(dma_channels(1) == 7 && dma_channels(2) == 5);
-static_assert(dmamux_channels() == 12, "table 54: twelve on the G0B1/G0C1");
-#elif defined(STM32G071xx)
-static_assert(!dma_present(2), "the G071 class has one controller");
+static_assert(dmamux_channels() == 12, "table 54: twelve on the G0Bx/G0C1");
+static_assert(dma_channel_irq(1, 4) == DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn &&
+              dma_channel_irq(2, 5) == DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn);
+#elif defined(DMA1_Channel7_BASE)
+static_assert(!dma_present(2), "one controller on this part");
 static_assert(dma_channels(1) == 7);
-static_assert(dmamux_channels() == 7, "table 54: seven on the G071/G081");
+static_assert(dmamux_channels() == 7, "table 54: seven on the G05x/G06x/G07x/G08x");
+static_assert(dma_channel_irq(1, 4) == DMA1_Ch4_7_DMAMUX1_OVR_IRQn &&
+              dma_channel_irq(1, 7) == DMA1_Ch4_7_DMAMUX1_OVR_IRQn);
 #else
-static_assert(!dma_present(2), "the G031 class has one controller");
+static_assert(!dma_present(2), "one controller on this part");
 static_assert(dma_channels(1) == 5);
-static_assert(dmamux_channels() == 5, "table 54: five on the G031/G041");
+static_assert(dmamux_channels() == 5, "table 54: five on the G03x/G04x");
+static_assert(dma_channel_irq(1, 4) == DMA1_Ch4_5_DMAMUX1_OVR_IRQn &&
+              dma_channel_irq(1, 5) == DMA1_Ch4_5_DMAMUX1_OVR_IRQn);
 #endif
+static_assert(dma_channel_irq(1, 1) == DMA1_Channel1_IRQn &&
+              dma_channel_irq(1, 2) == DMA1_Channel2_3_IRQn &&
+              dma_channel_irq(1, 3) == DMA1_Channel2_3_IRQn);
+static_assert(dmamux_irq() == dma_channel_irq(1, 4),
+              "the DMAMUX overrun shares the third channel line");
 
 static_assert(dmamux_generators() == 4, "table 54: four request generators everywhere");
 
 // 11.3.2's hardwired map, at both ends of it.
 static_assert(dmamux_channel_of(1, 1) == 0);
 static_assert(dmamux_channel_of(1, dma_channels(1)) == dma_channels(1) - 1u);
-#if defined(STM32G0B1xx)
+#if defined(DMA2_BASE)
 static_assert(dmamux_channel_of(2, 1) == 7);
 static_assert(dmamux_channel_of(2, 5) == 11);
 #endif
@@ -260,7 +273,7 @@ void engines_at(Elem* table, Buf* a, Buf* b) {
 void family_stm32g0_dma();
 void family_stm32g0_dma() {
     one_controller<1>();
-#if defined(STM32G0B1xx)
+#if defined(DMA2_BASE)
     one_controller<2>();
 #endif
     the_multiplexer();
@@ -268,7 +281,7 @@ void family_stm32g0_dma() {
     engines_at<1, 1, uint8_t>(bytes, rx_bytes[0], rx_bytes[1]);
     engines_at<1, 2, uint16_t>(halves, rx_halves[0], rx_halves[1]);
     engines_at<1, 3, uint32_t>(words, rx_words[0], rx_words[1]);
-#if defined(STM32G0B1xx)
+#if defined(DMA2_BASE)
     engines_at<2, 5, uint32_t>(words, rx_words[0], rx_words[1]);
 #endif
 }
@@ -282,11 +295,15 @@ void family_stm32g0_dma() {
 static_assert(Usart<1>::dma_rx_request() == 50 && Usart<1>::dma_tx_request() == 51);
 static_assert(Usart<2>::dma_rx_request() == 52 && Usart<2>::dma_tx_request() == 53);
 static_assert(Tim<1>::dma_update_request() == 25);
+#if defined(TIM2_BASE)
 static_assert(Tim<2>::dma_update_request() == 31 && Tim<2>::dma_compare_request(0) == 26);
+static_assert(Tim<2>::dma_compare_request(4) == dma_request_none,
+              "a fifth channel is not a request row");
+#endif
 static_assert(Tim<3>::dma_update_request() == 37 && Tim<3>::dma_trigger_request() == 36);
 static_assert(Tim<16>::dma_update_request() == 46 && Tim<16>::dma_compare_request(0) == 44);
 static_assert(Tim<14>::dma_update_request() == dma_request_none,
               "DS13560 table 7: TIM14 generates no DMA request at all");
 static_assert(!Tim<14>::has_dma_request);
-static_assert(Tim<2>::dma_compare_request(4) == dma_request_none,
+static_assert(Tim<3>::dma_compare_request(4) == dma_request_none,
               "a channel past the count has no request line");

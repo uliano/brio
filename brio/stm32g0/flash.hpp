@@ -193,8 +193,13 @@ struct FlashAccel {
     /// FLASH_ACR.DBG_SWEN - whether the debug port is allowed to reach
     /// the core. Read-only here: clearing it is one of the two ways to
     /// lose a board (the other is RDP 2), and 3.5.5 is where the story
-    /// is told.
-    static bool debug_access() { return (FLASH->ACR & FLASH_ACR_DBG_SWEN) != 0u; }
+    /// is told. The value line's ACR has no such bit - there is no gate
+    /// to read, and `has_debug_gate` says so; this then answers true,
+    /// the port being ungated.
+    static constexpr bool has_debug_gate = flash_acr_debug_enable != 0u;
+    static bool debug_access() {
+        return !has_debug_gate || (FLASH->ACR & flash_acr_debug_enable) != 0u;
+    }
 };
 
 /// The flash size the part reports, in kilobytes (RM0444 41.2: the
@@ -242,7 +247,9 @@ struct FlashFlag {
     /// mask FLASH_SR_MISERR. Same bit 8, and the header is what compiles.
     static constexpr uint32_t miss_error = FLASH_SR_MISERR;
     static constexpr uint32_t fast_error = FLASH_SR_FASTERR;
-    static constexpr uint32_t read_protect_error = FLASH_SR_RDERR;
+    /// 0 on the value line, which has no PCROP and so nothing to
+    /// violate: the flag never rises and the mask masks nothing.
+    static constexpr uint32_t read_protect_error = flash_sr_read_error;
     static constexpr uint32_t option_error = FLASH_SR_OPTVERR;
 
     // Read-only status.
@@ -793,17 +800,21 @@ struct Flash {
      * and OPERR really are: 3.7.4 says each is SET ONLY IF its enable
      * bit is set, so these are not merely interrupt masks - they decide
      * whether the flag exists at all. That is why this file never waits
-     * on EOP.
+     * on EOP. A read-protect enable asked for on a part with no PCROP
+     * (the value line, where the bit does not exist) is refused.
      */
     static bool interrupts(bool end_of_operation, bool error, bool read_protect) {
+        if (read_protect && flash_cr_read_error_interrupt == 0u) {
+            return false;
+        }
         if (!wait_ready()) {
             return false;
         }
         uint32_t cr = FLASH->CR &
-                      ~(FLASH_CR_EOPIE | FLASH_CR_ERRIE | FLASH_CR_RDERRIE);
+                      ~(FLASH_CR_EOPIE | FLASH_CR_ERRIE | flash_cr_read_error_interrupt);
         if (end_of_operation) cr |= FLASH_CR_EOPIE;
         if (error) cr |= FLASH_CR_ERRIE;
-        if (read_protect) cr |= FLASH_CR_RDERRIE;
+        if (read_protect) cr |= flash_cr_read_error_interrupt;
         FLASH->CR = cr;
         return true;
     }
@@ -989,16 +1000,21 @@ struct FlashOptions {
         return FlashRdpLevel::level1;
     }
 
-    static bool bor_enabled() { return (FLASH->OPTR & FLASH_OPTR_BOR_EN) != 0u; }
+    /// The programmable brown-out is the x1 line's: the value line's
+    /// brown-out has one fixed threshold and no option bits, and the
+    /// three verbs below answer "off" and level 0 there - the flag is
+    /// what tells the two apart.
+    static constexpr bool has_programmable_bor = flash_optr_bor_enable != 0u;
+    static bool bor_enabled() { return (FLASH->OPTR & flash_optr_bor_enable) != 0u; }
     /// BORR_LEV / BORF_LEV, 0..3. 3.7.8 gives the thresholds: rising
     /// 2.1/2.3/2.6/2.9 V, falling 2.0/2.2/2.5/2.8 V.
     static uint8_t bor_rising_level() {
-        return static_cast<uint8_t>((FLASH->OPTR & FLASH_OPTR_BORR_LEV_Msk) >>
-                                    FLASH_OPTR_BORR_LEV_Pos);
+        return static_cast<uint8_t>((FLASH->OPTR & flash_optr_bor_rise_mask) >>
+                                    flash_optr_bor_rise_pos);
     }
     static uint8_t bor_falling_level() {
-        return static_cast<uint8_t>((FLASH->OPTR & FLASH_OPTR_BORF_LEV_Msk) >>
-                                    FLASH_OPTR_BORF_LEV_Pos);
+        return static_cast<uint8_t>((FLASH->OPTR & flash_optr_bor_fall_mask) >>
+                                    flash_optr_bor_fall_pos);
     }
 
     // The three nRST_* bits are spelled here the way they READ, not the
@@ -1006,7 +1022,14 @@ struct FlashOptions {
     // called reset_on_stop() has to be its complement or the name lies.
     static bool reset_on_stop() { return (FLASH->OPTR & FLASH_OPTR_nRST_STOP) == 0u; }
     static bool reset_on_standby() { return (FLASH->OPTR & FLASH_OPTR_nRST_STDBY) == 0u; }
-    static bool reset_on_shutdown() { return (FLASH->OPTR & FLASH_OPTR_nRST_SHDW) == 0u; }
+    /// The Shutdown option is the x1 line's; where the bit does not
+    /// exist (the value line) this answers false, `has_shutdown_reset_
+    /// option` being what says the question has no bit behind it.
+    static constexpr bool has_shutdown_reset_option = flash_optr_nrst_shutdown != 0u;
+    static bool reset_on_shutdown() {
+        return has_shutdown_reset_option &&
+               (FLASH->OPTR & flash_optr_nrst_shutdown) == 0u;
+    }
 
     /// IWDG_SW = 1 means the SOFTWARE watchdog: it is started by
     /// firmware. 0 is the hardware one, which runs from the boot.
@@ -1038,13 +1061,16 @@ struct FlashOptions {
     static bool nboot1() { return (FLASH->OPTR & FLASH_OPTR_nBOOT1) != 0u; }
 
     /// NRST_MODE, 3.7.8: 1 = reset input only, 2 = GPIO, 3 =
-    /// bidirectional (the legacy default). 0 is Reserved.
+    /// bidirectional (the legacy default). 0 is Reserved - and it is
+    /// also what a value-line part answers, its NRST pad having no mode
+    /// to choose and the option no bits; `has_nrst_mode` tells.
+    static constexpr bool has_nrst_mode = flash_optr_nrst_mode_mask != 0u;
     static uint8_t nrst_mode() {
-        return static_cast<uint8_t>((FLASH->OPTR & FLASH_OPTR_NRST_MODE_Msk) >>
-                                    FLASH_OPTR_NRST_MODE_Pos);
+        return static_cast<uint8_t>((FLASH->OPTR & flash_optr_nrst_mode_mask) >>
+                                    flash_optr_nrst_mode_pos);
     }
     static bool internal_reset_holder() {
-        return (FLASH->OPTR & FLASH_OPTR_IRHEN) != 0u;
+        return (FLASH->OPTR & flash_optr_irhen) != 0u;
     }
 
     // ---- the protection areas ----------------------------------------------
@@ -1066,7 +1092,17 @@ struct FlashOptions {
                             static_cast<uint8_t>((v >> 16) & 0x7Fu)};
     }
 
-    /// PCROP area A or B of a bank, in 512-byte subpage offsets.
+    // The PCROP and securable-memory registers are STRUCT MEMBERS the
+    // value line's FLASH_TypeDef has not got, so the verbs reading them
+    // exist in two bodies selected on the header's own feature macro
+    // (the one `#ifdef` a driver may keep: a register-struct reference
+    // some parts lack) - the real one, and an answer of "nothing
+    // protected" that touches no register. flash_pcrop_capable and
+    // flash_securable_capable are the reserve's compile-time forms.
+
+#if defined(FLASH_PCROP_SUPPORT)
+    /// PCROP area A or B of a bank, in 512-byte subpage offsets. An
+    /// absent bank answers an empty area.
     static FlashPcropArea pcrop(FlashBank bank, uint8_t area) {
         const volatile uint32_t* start = nullptr;
         const volatile uint32_t* end = nullptr;
@@ -1087,29 +1123,37 @@ struct FlashOptions {
     /// PCROP_RDP (3.7.10): whether the PCROP area is erased when the RDP
     /// level goes back to 0.
     static bool pcrop_erased_on_rdp_regression() {
-        return (FLASH->PCROP1AER & FLASH_PCROP1AER_PCROP_RDP) != 0u;
+        return (FLASH->PCROP1AER & flash_pcrop_rdp) != 0u;
     }
+#else
+    /// No PCROP on the value line: every area is empty.
+    static FlashPcropArea pcrop(FlashBank, uint8_t) { return FlashPcropArea{0x1FFu, 0u}; }
+    static bool pcrop_erased_on_rdp_regression() { return false; }
+#endif
 
+#if defined(FLASH_SECURABLE_MEMORY_SUPPORT)
     /// The securable memory area, in pages from the bottom of the bank
     /// (3.7.21). Zero = none defined, which is what makes FLASH_CR's
     /// SEC_PROT bits inert.
     static uint8_t securable_pages(FlashBank bank) {
-        if (!flash_securable_capable) {
-            return 0;
-        }
         const uint32_t v = FLASH->SECR;
         if (bank == FlashBank::bank2) {
             return flash_secr_sec_size2 == 0u
                        ? 0u
                        : static_cast<uint8_t>((v & flash_secr_sec_size2) >> 20);
         }
-        return static_cast<uint8_t>(v & FLASH_SECR_SEC_SIZE_Msk);
+        return static_cast<uint8_t>(v & flash_secr_sec_size);
     }
 
     /// BOOT_LOCK: the boot is forced from the user area. Set together
     /// with RDP level 1 it is what ES0548 2.2.9 warns about - the state a
     /// mismatched option write can leave a board in, with no way back.
-    static bool boot_lock() { return (FLASH->SECR & FLASH_SECR_BOOT_LOCK) != 0u; }
+    static bool boot_lock() { return (FLASH->SECR & flash_secr_boot_lock) != 0u; }
+#else
+    /// No securable memory and no SECR register on the value line.
+    static uint8_t securable_pages(FlashBank) { return 0; }
+    static bool boot_lock() { return false; }
+#endif
 };
 
 } // namespace brio

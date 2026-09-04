@@ -31,7 +31,9 @@ CHIP. Two things follow from that and shape everything else:
 
 **The counter's clock is chosen twice.** `RCC_CCIPR.LPTIMnSEL` picks the
 KERNEL clock - PCLK, LSI, HSI16 or LSE, the same four for both instances
-on every part of this pack - and then `CFGR.CKSEL` decides whether the
+on every G0x1 of this pack (the x0 value line has NO LPTIM at all: no
+`LPTIM1_BASE`, and `Lptim<n>` and its sleep site do not exist there,
+while this chapter's vocabulary still compiles) - and then `CFGR.CKSEL` decides whether the
 counter counts that clock or counts EDGES ON ITS OWN INPUT 1 instead.
 With CKSEL = 1 no oscillator has to be running at all (26.4.4), which is
 the "pulse counter" of 26.1; with CKSEL = 0 and COUNTMODE = 1 the input

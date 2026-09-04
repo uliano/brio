@@ -70,9 +70,14 @@ split invites one to guess.
 **The vectors are shared, and not with each other.** On the G0B1 class
 LPUART1 arrives on `USART3_4_5_6_LPUART1_IRQn` and LPUART2 on
 `USART2_LPUART2_IRQn` - the console's own line. On the G071 class
-LPUART1 shares `USART3_4_LPUART1_IRQn`; on the G031 class it has a line
-of its own. An application writes ONE handler per line and calls each
-`isr()` body from it.
+LPUART1 shares `USART3_4_LPUART1_IRQn`; where there is no USART3 at all
+(the G03x/G04x/G05x/G06x) it has a line of its own. The rule the reserve
+derives it from is the presence of USART3 and of LPUART2. An
+application writes ONE handler per line and calls each `isr()` body
+from it. The x0 value line has NO LPUART: `Lpuart<n>` and `LpUart` do
+not exist there (the driver compiles its register half only where the
+header declares `LPUART1_BASE`), while the baud arithmetic is every
+part's.
 
 **The wake lines are EXTI 28 (LPUART1) and 35 (LPUART2)**, both DIRECT:
 no trigger to choose, no pending bit of the EXTI's own - the
@@ -220,5 +225,5 @@ USART's own code, measured there on a USART):
 - LPUART2 on any kernel clock but PCLK, and LPUART2 as a wake source
   (its EXTI line 35 is in the second register group; only LPUART1's 28
   has been used to wake this board).
-- The G071 and G031 vectors and the single-LPUART parts: compile-only,
-  pinned by the family fixture on all three headers.
+- Every part but the G0B1: compile-only, pinned by the family fixture
+  on all twelve headers.

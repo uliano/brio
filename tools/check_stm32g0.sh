@@ -3,10 +3,14 @@
 # definition of done, the stm32g0 twin of tools/check_samc.sh).
 #
 # Positive: every test/family_stm32g0/*.cpp must COMPILE for every device
-# header named below - the G0B1 (the bench chip, the family's superset),
-# the G071 and the G031: the three parts the desk's Nucleo boards carry,
-# of which only the first is plugged in; the headers are the only way
-# the other two get checked at all.
+# header the CMSIS pack ships - ALL TWELVE: the x1 line (G031/G041,
+# G051/G061, G071/G081, G0B1/G0C1) and the x0 value line (G030, G050,
+# G070, G0B0), each x0 header a strict subset of its x1 twin. The G0B1 is
+# the bench chip and the family's superset, the G071 and G031 are the
+# desk's other two Nucleos; for the nine headers no board here carries
+# this sweep is the only check there is, and it is what makes the
+# reserve's presence-keyed vector derivation a proven claim rather than
+# a plausible one.
 # Negative: every test/family_stm32g0/neg/*.cpp must FAIL to compile for
 # each variant named on its "// mcu: <list>" line (what must be refused
 # must be refused at compile time).
@@ -23,7 +27,8 @@ CXX=/sw/arm-none-eabi/bin/arm-none-eabi-g++
 FLAGS="-mcpu=cortex-m0plus -mthumb -mfloat-abi=soft -std=gnu++23 -Os \
        -Wall -Wextra -Werror -fno-exceptions -fno-rtti -c \
        -Ibrio -Ithird_party/cmsis-device-g0/Include -Ithird_party/cmsis-core"
-MCUS="stm32g0b1xx stm32g071xx stm32g031xx"
+MCUS="stm32g030xx stm32g031xx stm32g041xx stm32g050xx stm32g051xx stm32g061xx \
+      stm32g070xx stm32g071xx stm32g081xx stm32g0b0xx stm32g0b1xx stm32g0c1xx"
 FILTER="${1:-}"
 fail=0
 

@@ -90,18 +90,36 @@ void usart_verbs() {
 // the bench suite's letter a does that against the silicon.
 static_assert(usart_is_full(1));
 static_assert(!usart_is_full(7));
-#if defined(STM32G0B1xx)
-static_assert(usart_is_full(2) && usart_is_full(3));
+static_assert(usart_exti_line(1) == 25);
+#if defined(USART5_BASE)
+static_assert(usart_present(6) && usart_is_full(2) && usart_is_full(3));
 static_assert(!usart_is_full(4) && !usart_is_full(5) && !usart_is_full(6));
-static_assert(usart_exti_line(1) == 25 && usart_exti_line(2) == 26 &&
-              usart_exti_line(3) == 24);
+static_assert(usart_exti_line(2) == 26 && usart_exti_line(3) == 24);
 static_assert(usart_exti_line(4) == 0xFF);
-#elif defined(STM32G071xx)
+#elif defined(USART3_BASE)
+static_assert(usart_present(4) && !usart_present(5));
 static_assert(usart_is_full(2) && !usart_is_full(3) && !usart_is_full(4));
-static_assert(usart_exti_line(3) == 0xFF);
+static_assert(usart_exti_line(2) == 26 && usart_exti_line(3) == 0xFF);
 #else
+static_assert(usart_present(2) && !usart_present(3));
 static_assert(!usart_is_full(2));
 static_assert(usart_exti_line(2) == 0xFF);
+#endif
+// The vectors, each demanded from the presence that names it.
+static_assert(usart_irq(1) == USART1_IRQn);
+#if defined(LPUART2_BASE)
+static_assert(usart_irq(2) == USART2_LPUART2_IRQn, "USART2 shares its line with LPUART2");
+#else
+static_assert(usart_irq(2) == USART2_IRQn);
+#endif
+#if defined(USART5_BASE) && defined(LPUART1_BASE)
+static_assert(usart_irq(3) == USART3_4_5_6_LPUART1_IRQn && usart_irq(6) == usart_irq(3));
+#elif defined(USART5_BASE)
+static_assert(usart_irq(3) == USART3_4_5_6_IRQn && usart_irq(6) == usart_irq(3));
+#elif defined(USART3_BASE) && defined(LPUART1_BASE)
+static_assert(usart_irq(3) == USART3_4_LPUART1_IRQn && usart_irq(4) == usart_irq(3));
+#elif defined(USART3_BASE)
+static_assert(usart_irq(3) == USART3_4_IRQn && usart_irq(4) == usart_irq(3));
 #endif
 static_assert(Usart<1>::is_full && Usart<1>::has_prescaler);
 // The row of table 184 that is NOT the FULL/BASIC split: every USART of
@@ -109,7 +127,7 @@ static_assert(Usart<1>::is_full && Usart<1>::has_prescaler);
 // all six, 33.8.3's CLKEN note agrees, and letter a asks the silicon),
 // while LIN and the receiver time-out really are the FULL ones' alone.
 static_assert(Usart<1>::has_synchronous_mode && Usart<1>::has_lin_mode);
-#if defined(STM32G0B1xx)
+#if defined(USART4_BASE)
 static_assert(Usart<4>::has_synchronous_mode && !Usart<4>::has_lin_mode);
 static_assert(!Usart<4>::has_receiver_timeout && !Usart<4>::has_fifo_mode);
 #endif

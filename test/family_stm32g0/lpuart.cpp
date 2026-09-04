@@ -1,6 +1,8 @@
 // LPUART family smoke TU (RM0444 ch. 34): the Lpuart<n> resource, the
 // shared UartTask above it under the name LpUart, and the baud
-// arithmetic between them - on LPUART1, which every G0 has; LPUART2 is
+// arithmetic between them - on LPUART1, which every G0x1 has and no
+// G0x0 does (the value line's headers declare no LPUART at all, and on
+// them this file is the absence check and nothing else); LPUART2 is
 // the negatives' business. The pads are PC1/PC0 (LPUART1 TX/RX on AF1,
 // DS13560 table 17); PA2/PA3 AF6 are the same instance on the console's
 // own pads, which is what the bench suite's console-swap letter uses.
@@ -9,6 +11,13 @@
 
 using namespace brio;
 
+#if !defined(LPUART1_BASE)
+
+static_assert(!lpuart_present(1) && !lpuart_present(2), "no LPUART on the x0 value line");
+static_assert(lpuart_exti_line(1) == 0xFF && lpuart_bus_clock(1).mask == 0);
+
+#else
+
 using SysClock = Clock<ClockSource::pll, 64'000'000>;
 
 static_assert(lpuart_present(1));
@@ -16,19 +25,21 @@ static_assert(!lpuart_present(0) && !lpuart_present(3));
 static_assert(!lpuart_bus_clock(1).apb2 && lpuart_bus_clock(1).mask == RCC_APBENR1_LPUART1EN);
 static_assert(lpuart_clock_select_pos(1) == RCC_CCIPR_LPUART1SEL_Pos);
 static_assert(lpuart_exti_line(1) == 28);
-#if defined(STM32G0B1xx)
+// LPUART1's vector follows the USART3 line where there is a USART3 and
+// is its own where there is not; LPUART2's is USART2's.
+#if defined(USART3_BASE)
+static_assert(lpuart_irq(1) == usart_irq(3), "LPUART1 rides USART3's line");
+#else
+static_assert(lpuart_irq(1) == LPUART1_IRQn, "a line of its own on the G03x/G04x/G05x/G06x");
+#endif
+#if defined(LPUART2_BASE)
 static_assert(lpuart_present(2));
 static_assert(!lpuart_bus_clock(2).apb2 && lpuart_bus_clock(2).mask == RCC_APBENR1_LPUART2EN);
 static_assert(lpuart_clock_select_pos(2) == RCC_CCIPR_LPUART2SEL_Pos);
 static_assert(lpuart_exti_line(2) == 35);
-static_assert(lpuart_irq(2) == USART2_LPUART2_IRQn);
-static_assert(lpuart_irq(1) == USART3_4_5_6_LPUART1_IRQn);
-#elif defined(STM32G071xx)
-static_assert(!lpuart_present(2));
-static_assert(lpuart_irq(1) == USART3_4_LPUART1_IRQn);
+static_assert(lpuart_irq(2) == USART2_LPUART2_IRQn && lpuart_irq(2) == usart_irq(2));
 #else
 static_assert(!lpuart_present(2));
-static_assert(lpuart_irq(1) == LPUART1_IRQn);
 #endif
 
 // 34.4.7: LPUARTDIV = 256 x fck / baud, floor 0x300, twenty bits - and
@@ -84,7 +95,7 @@ static_assert(Lpuart<1>::fifo_depth == 8);
 // Table 55 calls LPUART1's two rows `LPUART_RX` and `LPUART_TX` with no
 // index at all, at 14 and 15 - not with the USARTs.
 static_assert(Lpuart<1>::dma_rx_request() == 14 && Lpuart<1>::dma_tx_request() == 15);
-#if defined(STM32G0B1xx)
+#if defined(LPUART2_BASE)
 static_assert(Lpuart<2>::dma_rx_request() == 64 && Lpuart<2>::dma_tx_request() == 65);
 #endif
 
@@ -207,3 +218,5 @@ void lpuart_verbs() {
     (void)L::irq();
     L::reset();
 }
+
+#endif // LPUART1_BASE

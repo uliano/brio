@@ -560,6 +560,12 @@ private:
 
 
 // ---- the third site: the same lift, on an LPTIM ------------------------------
+//
+// Compiled only where the device header declares an LPTIM (lptim.hpp's
+// own gate): the x0 value line has none, and its programs have the two
+// sites above.
+
+#if defined(LPTIM1_BASE)
 
 /**
  * Stm32LptimTimedSleepSite's knobs.
@@ -1011,5 +1017,7 @@ private:
     static inline uint32_t last_counts_ = 0;
     static inline volatile uint32_t cmp_completions_ = 0;
 };
+
+#endif // LPTIM1_BASE
 
 } // namespace brio

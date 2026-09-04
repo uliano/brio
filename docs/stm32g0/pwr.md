@@ -102,10 +102,16 @@ PWR_CR3.APC is set - and they are NOT reset by a wake from Standby.
 a SPARSE set (the G031 bonds 1, 2, 4 and 6; the G071 adds 5; only the
 G0B1/G0C1 has all six), the pull registers follow the GPIO bonding (port
 E is the G0B1/G0C1's alone), and the VDDIO2 monitor exists only where
-the second I/O supply does. All of it is answered by
-`stm32g0/device_tables.hpp`, and every verb that takes a pin number or a
-port letter checks it and returns false rather than writing a bit that
-is not there.
+the second I/O supply does. THE x0 VALUE LINE HAS NO PWR_CR2 AT ALL -
+its PWR_TypeDef reserves the offset: no programmable voltage detector,
+no supply monitors - and no RRS (its Standby keeps no SRAM) and no
+ENB_ULP. All of it is answered by `stm32g0/device_tables.hpp`: every
+verb that takes a pin number or a port letter checks it and returns
+false rather than writing a bit that is not there, the PVD/PVM verbs
+and `sram_retention` / `sampled_supply_monitor` refuse with false on a
+part without the register, and `Pwr::has_pvd`, `has_sram_retention`,
+`has_sampled_supply_monitor` and `has_dac_supply_monitor` say so at
+compile time.
 
 ## The ladder, and why it is not the identity
 
@@ -271,7 +277,10 @@ register removes them:
   `internal_wakeup` (EIWUL), `clear_wakeup_flags`, `sram_retention`
   (RRS), `sampled_supply_monitor` (ENB_ULP, offered and never set),
   `pvd_config` / `pvd_enable` / `pvd_below` + `pvd_exti_line` (16),
-  `dac_supply_monitor` / `dac_supply_low`, `has_vddio2`, `apply_pulls`
+  `dac_supply_monitor` / `dac_supply_low` - the writing verbs of this
+  line all answering bool, false on a part that has not got the bit,
+  with `has_pvd` / `has_sram_retention` / `has_sampled_supply_monitor`
+  / `has_dac_supply_monitor` as the compile-time form - `has_vddio2`, `apply_pulls`
   (APC) + `standby_pull(port, pin, up, down)`, and `enter(PwrMode)` -
   arm, sweep the flags the chapter demands, DSB, WFI.
 - `Stm32SleepSite<Clock>` - `arm` / `disarm` / `armed`, the

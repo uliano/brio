@@ -110,7 +110,16 @@ FLASH_SECR, and has no setter of any kind. That is the design, not an
 omission: RDP Level 2 is irreversible and ES0548 2.2.9 says an
 interrupted option write can leave the device with BOOT_LOCK set and the
 debug interface gone. Option-byte provisioning belongs to a tool over
-SWD, the way fuses do on the other two targets.
+SWD, the way fuses do on the other two targets. On the x0 value line the
+option register is SHORTER - no programmable BOR (`has_programmable_bor`),
+no nRST_SHDW (`has_shutdown_reset_option`), no NRST_MODE and IRHEN
+(`has_nrst_mode`), no PCROP registers and no SECR (the reserve's
+`flash_pcrop_capable` / `flash_securable_capable`), and no RDERR /
+RDERRIE, there being no PCROP to violate, nor a DBG_SWEN gate
+(`Flash::has_debug_gate`) - and the verbs answer "off", level 0, an
+empty area, false, on such a part, each flag saying whether the
+question had a bit behind it. `Flash::interrupts()` refuses a
+read-protect enable there.
 
 `MainFlashPartition` / `MainFlash` / `MainFlashJournalZone`
 (`stm32g0/nvm_flash.hpp`) are the storage. See below.
@@ -414,8 +423,10 @@ Implemented but not bench-verified:
   (ECCD, a double error) is stated and unexercised.
 - **RDERR and the PCROP read path**, which need a PCROP area to exist.
 - **`mass_erase()`** on either bank.
-- **A single-bank part.** The G071 and G031 headers compile the driver and
-  the family fixture proves the second bank's registers are reached only
-  where they exist, but no such board has run this code, and on one of
-  them `MainFlashPartition::geometry_matches_silicon()` would (correctly)
+- **A single-bank part, and a value-line part.** The other eleven headers
+  compile the driver and the family fixture proves the second bank's
+  registers - and, on the x0 line, the option bits and registers it has
+  not got - are reached only where they exist, but no such board has run
+  this code, and on a single-bank part
+  `MainFlashPartition::geometry_matches_silicon()` would (correctly)
   close the storage.

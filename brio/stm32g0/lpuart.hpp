@@ -109,6 +109,15 @@ constexpr uint32_t lpuart_min_hz(uint32_t baud) { return baud * 3u; }
 constexpr uint32_t lpuart_max_hz(uint32_t baud) { return baud * 4096u; }
 
 // ---- the resource -------------------------------------------------------------
+//
+// Compiled only where the device header declares a first instance (the
+// fdcan.hpp precedent): the x0 value line has no LPUART at all and no
+// USART_BRR_LPUART - the twenty-bit mask is the header's way of saying
+// there is a peripheral with a twenty-bit divisor - and a template body
+// may not name a macro that does not exist even uninstantiated. The
+// arithmetic above is every part's.
+
+#if defined(LPUART1_BASE)
 
 /**
  * Lpuart<n>: the instance. The same surface Usart<n> offers - the task
@@ -520,5 +529,7 @@ template <uint8_t n, UartPins pins, uint32_t rx_size = 64, uint32_t tx_size = 25
           typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
           UartOptions opts = UartOptions{}>
 using LpUart = UartTask<Lpuart<n>, pins, rx_size, tx_size, TxEngine, RxEngine, opts>;
+
+#endif // LPUART1_BASE
 
 } // namespace brio

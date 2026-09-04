@@ -160,9 +160,13 @@ void site_verbs() {
 
 // ---- the THIRD site: the same lift, on an LPTIM ------------------------------
 //
-// Its config is checked against the same three rules on every header,
-// and the negatives lptim_site_on_pclk.cpp and
-// lptim_site_slower_than_the_tick.cpp are the other half of the claim.
+// Its config is checked against the same three rules on every header
+// that HAS an LPTIM (the x0 value line has none, and the site does not
+// exist there - sleep.hpp gates it on the same symbol), and the
+// negatives lptim_site_on_pclk.cpp and lptim_site_slower_than_the_tick.
+// cpp are the other half of the claim.
+
+#if defined(LPTIM1_BASE)
 
 static_assert(lptim_sleep_rate_hz(LptimTimedSleepConfig{}) == 32'768u,
               "the LSE default is the crystal's exact rate");
@@ -230,6 +234,8 @@ void lptim_site_verbs() {
     LptimSite2::isr();
 }
 
+#endif // LPTIM1_BASE
+
 // A manager over the site, which is what proves the concept fits.
 struct Voter : Fsm<Voter, PrepareSleep, SleepVote, WakeReport> {
     static inline EventQueue<Event, 4, Stm32Platform> queue;
@@ -251,6 +257,7 @@ void kernel_over_the_site() {
     (void)K::step();
 }
 
+#if defined(LPTIM1_BASE)
 using LptimManager = PowerManager<Stm32Platform, LptimSite, PowerConfig{}, Voter>;
 using LptimK = Kernel<Stm32Platform, Voter, LptimManager>;
 
@@ -258,3 +265,4 @@ void kernel_over_the_lptim_site() {
     LptimK::init_all();
     (void)LptimK::step();
 }
+#endif

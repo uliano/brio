@@ -43,9 +43,10 @@ and `release()` leaves it open: it is shared.
 
 **Which USART code 10 means is a PER-PART fact** and the manual states it
 twice (ch. 27's own footnote and 6.1.3's IR_MOD description): USART4 on
-the STM32G071/G081/G0B1/G0C1, USART2 on the STM32G031/G041/G051/G061.
-No header symbol carries it, so it is a stated table in the reserve with
-its citation, and the driver publishes it as
+the STM32G071/G081/G0B1/G0C1, USART2 on the STM32G031/G041/G051/G061 -
+which is to say USART4 wherever the part HAS a USART4 and USART2
+otherwise, so the reserve derives it from `USART4_BASE` with the
+citation beside it, and the driver publishes it as
 `Irtim::second_usart_index` rather than restating it. Code 11 is
 Reserved and is refused.
 

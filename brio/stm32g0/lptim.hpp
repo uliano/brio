@@ -299,6 +299,16 @@ constexpr bool lptim_input2_valid(uint8_t n, LptimInput2 s) {
     return s == LptimInput2::pad || comp_present(2);
 }
 
+// Everything from here on names LPTIM registers and bits, and is
+// compiled only where the device header declares a first instance (the
+// fdcan.hpp precedent): the x0 value line has NO LPTIM AT ALL - no
+// LPTIM_TypeDef, none of the LPTIM_CFGR bit names, no DBG_APB_FZ1 freeze
+// bit for it - and a template body may not name a macro that does not
+// exist even uninstantiated. The clock, prescaler, trigger, input and
+// waveform vocabulary above is every part's, and sleep.hpp's LPTIM
+// timed site gates itself on the same symbol.
+#if defined(LPTIM1_BASE)
+
 /// The flags of LPTIM_ISR (26.7.1). The SAME bit positions serve
 /// LPTIM_ICR (26.7.2) and LPTIM_IER (26.7.3), which is what lets isr()
 /// mask one register with another and what makes one `interrupts` mask
@@ -1370,5 +1380,7 @@ struct LptimEncoder {
 
     static void stop() { L::disable(); }
 };
+
+#endif // LPTIM1_BASE
 
 } // namespace brio

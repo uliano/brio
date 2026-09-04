@@ -32,7 +32,11 @@ the chapter that owns the rail, and `stm32g0/adc.hpp` and
 
 `Ref` has three values: `external` (VREF+ as the board supplies it -
 `ref_mv()` then wants the number, and `Adc::vdda_mv()` is how it is
-MEASURED rather than assumed), `buffer_2v048` and `buffer_2v5`.
+MEASURED rather than assumed), `buffer_2v048` and `buffer_2v5`. The x0
+value line has NO VREFBUF: its header declares no `VREFBUF_BASE`, so
+`Vref` does not exist there (the register-facing half of this file
+compiles only where the block does), `ref_valid()` refuses the two
+buffer codes, and `external` is all such a part can say about VREF+.
 
 ## Why the buffer is never enabled here
 

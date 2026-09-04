@@ -78,8 +78,14 @@ enum class Ref : uint8_t {
     buffer_2v5 = 2,    ///< VREFBUF driving VREF+, VRS = 1
 };
 
+/// The buffer codes are valid only where there is a buffer: the value
+/// line (G0x0) has no VREFBUF at all, and its VREF+ is whatever the
+/// board supplies.
 constexpr bool ref_valid(Ref r) {
-    return r == Ref::external || r == Ref::buffer_2v048 || r == Ref::buffer_2v5;
+    if (r == Ref::external) {
+        return true;
+    }
+    return vrefbuf_present() && (r == Ref::buffer_2v048 || r == Ref::buffer_2v5);
 }
 
 /// The reference in millivolts. For the two buffer levels these are
@@ -100,6 +106,15 @@ constexpr uint16_t ref_mv(Ref r, uint16_t known_mv = 0) {
 // =============================================================================
 // VREFBUF (RM0444 ch. 17)
 // =============================================================================
+//
+// The register-facing half is compiled only where the device header
+// declares the block (the fdcan.hpp precedent): the x0 value line has no
+// VREFBUF, no VREFBUF_TypeDef and none of the CSR bit names, and a Vref
+// spelled there is a compile error naming the reason rather than a
+// monostate over an address that does not exist. The vocabulary above
+// - Ref, ref_valid(), ref_mv() - is every part's.
+
+#if defined(VREFBUF_BASE)
 
 /// VREFBUF_CSR.VRS - which of the two levels the buffer produces.
 enum class VrefScale : uint8_t { v2_048 = 0, v2_5 = 1 };
@@ -222,5 +237,7 @@ struct Vref {
 
     static void release() { disable(); }
 };
+
+#endif // VREFBUF_BASE
 
 } // namespace brio

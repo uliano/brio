@@ -1,4 +1,4 @@
-// mcu: stm32g031xx
+// mcu: stm32g031xx stm32g070xx stm32g0b0xx
 // 16.3's own table: there is no DAC on the STM32G031xx/G041xx, and the
 // header declares no DAC1_BASE - so the whole driver is a refusal there
 // rather than a block writing into a hole in the address map.

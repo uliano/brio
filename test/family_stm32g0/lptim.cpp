@@ -1,6 +1,7 @@
 // Family smoke TU: stm32g0/lptim.hpp instantiated for BOTH low-power
-// timers on each of the three headers the desk's boards span.
-// Instantiation only - no main(), no hardware.
+// timers on every G0x1 header of the pack - and, on the x0 value line,
+// which has no LPTIM at all, compiled to the absence check and nothing
+// else. Instantiation only - no main(), no hardware.
 //
 // WHAT THIS FIXTURE IS REALLY FOR. The two instances share one
 // LPTIM_TypeDef and the device header declares CFGR.ENC, ISR.UP/DOWN and
@@ -9,11 +10,11 @@
 // have. Those facts live in stm32g0/device_tables.hpp as the MANUAL'S,
 // and this file is where they are re-stated as static_asserts and where
 // every verb is instantiated against them. The per-header differences it
-// covers: the VECTOR (each LPTIM shares one with a basic timer on the
-// G0B1 and G071 classes and has its own on the G031, where there are no
-// basic timers), and the COMPARATORS the trigger and input multiplexers
-// name - three on the G0B1, two on the G071, NONE on the G031, where
-// every comparator row of tables 138..142 is therefore refused.
+// covers: the VECTOR (each LPTIM shares one with a basic timer where
+// there are basic timers and has its own where there are none), and
+// the COMPARATORS the trigger and input multiplexers name - three,
+// two or none, where every comparator row of tables 138..142 is
+// therefore refused - each keyed on the header's own presence symbol.
 
 #include <stdint.h>
 
@@ -23,7 +24,14 @@
 
 using namespace brio;
 
-// ---- presence, as the three headers state it -------------------------------
+#if !defined(LPTIM1_BASE)
+
+static_assert(!lptim_present(1) && !lptim_present(2), "no LPTIM on the x0 value line");
+static_assert(lptim_exti_line(1) == 0xFF && lptim_bus_clock_mask(1) == 0);
+
+#else
+
+// ---- presence, as the header states it -------------------------------------
 static_assert(lptim_present(1) && lptim_present(2), "every STM32G0x1 has both");
 static_assert(!lptim_present(0) && !lptim_present(3), "and no part has a third");
 
@@ -43,13 +51,14 @@ static_assert(lptim_bus_clock_mask(1) != 0 && lptim_reset_mask(1) != 0,
               "disable ES0548 2.8.1 allows");
 
 // ---- the vector, which is the per-header difference this file exists for ---
-#if defined(STM32G031xx)
-static_assert(lptim_irq(1) == LPTIM1_IRQn && lptim_irq(2) == LPTIM2_IRQn,
-              "the G031 class gives each LPTIM a line of its own");
-#else
-static_assert(lptim_irq(1) == TIM6_DAC_LPTIM1_IRQn,
+#if defined(TIM6_BASE)
+static_assert(lptim_irq(1) == TIM6_DAC_LPTIM1_IRQn && lptim_irq(1) == tim_irq(6),
               "LPTIM1 shares TIM6's and the DAC's vector");
-static_assert(lptim_irq(2) == TIM7_LPTIM2_IRQn, "LPTIM2 shares TIM7's");
+static_assert(lptim_irq(2) == TIM7_LPTIM2_IRQn && lptim_irq(2) == tim_irq(7),
+              "LPTIM2 shares TIM7's");
+#else
+static_assert(lptim_irq(1) == LPTIM1_IRQn && lptim_irq(2) == LPTIM2_IRQn,
+              "no basic timers on the G03x/G04x, so each LPTIM has a line of its own");
 #endif
 
 // ---- the arithmetic --------------------------------------------------------
@@ -75,16 +84,16 @@ static_assert(!lptim_trigger_valid(1, LptimTrigger::tamp_trg3),
               "...and COMP3 on LPTIM1, not TAMP_TRG3");
 static_assert(lptim_trigger_valid(2, LptimTrigger::tamp_trg3));
 
-#if defined(STM32G0B1xx)
+#if defined(COMP3_BASE)
 static_assert(lptim_trigger_valid(1, LptimTrigger::comp3_out),
               "the third comparator is the G0B1/G0C1's alone");
 #else
 static_assert(!lptim_trigger_valid(1, LptimTrigger::comp3_out));
 #endif
-#if defined(STM32G031xx)
+#if !defined(COMP1_BASE)
 static_assert(!lptim_trigger_valid(1, LptimTrigger::comp1_out) &&
                   !lptim_trigger_valid(2, LptimTrigger::comp2_out),
-              "the G031 class has no comparator at all, so those rows are dead");
+              "no comparator on this part at all, so those rows are dead");
 static_assert(!lptim_input1_valid(1, LptimInput1::comp1_out));
 #else
 static_assert(lptim_trigger_valid(1, LptimTrigger::comp1_out) &&
@@ -283,3 +292,5 @@ void instantiate_everything() {
     exercise_encoder();
     exercise_pads();
 }
+
+#endif // LPTIM1_BASE

@@ -281,6 +281,15 @@ constexpr bool comp_config_valid(uint8_t n, const CompConfig& c) {
 // =============================================================================
 // The resource
 // =============================================================================
+//
+// Compiled only where the device header declares a first comparator
+// (the fdcan.hpp precedent): the G031/G041 and every x0 value-line part
+// have none, no COMP_TypeDef and none of the COMP_CSR bit names - which
+// a template body may not name even uninstantiated - and a Comp spelled
+// there is a compile error naming the reason. The vocabulary above is
+// every part's.
+
+#if defined(COMP1_BASE)
 
 template <uint8_t n>
 class Comp {
@@ -455,5 +464,7 @@ private:
         g.PUPDR = g.PUPDR & ~(0x3UL << shift);             // 7.3.1: no pull in analog
     }
 };
+
+#endif // COMP1_BASE
 
 } // namespace brio

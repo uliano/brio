@@ -105,8 +105,13 @@ lives in preset names, per-chip ld/svd files and the `*_MCU` cache
 variables. Names are claims, extended only when a real chip extends
 the family - the known landing names, never used early: avrdx ->
 avrxt (Microchip's sigla for the modern-AVR core) when an EA/mega0
-part proves it shares the stratum; samc -> sam0 if a D21 arrives; stm32g0 shares its name with
-the G0x0 value line if a chip ever proves it; an `armv6m/` core
+part proves it shares the stratum; samc -> sam0 if a D21 arrives; stm32g0 SHARES its name with
+the G0x0 value line - RULED 2026-09-04 on the headers (every x0 header
+is a strict subset of its x1 twin: the same IP under the same register
+names), the stratum compiles on all twelve G0 headers of the pack with
+the reserve deriving every vector from PERIPHERAL PRESENCE and no
+device name spelled anywhere, the bench proof on x0 silicon pending a
+board; an `armv6m/` core
 stratum factored at the SECOND ARM family - DONE 2026-09-02 the day
 the stm32g0 arrived: brio/armv6m/{nvic,ticker}.hpp, the two families'
 nvic/ticker headers reduced to device-include + core-include + their
@@ -3487,7 +3492,7 @@ tools/check_samc.sh [name]                                         # same for th
 (cd samc  && cmake --build --preset samc21j-release --target <app>-upload)     # flash via OpenOCD (SWD)
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)          # STM32G0 release build
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash via OpenOCD (ST-LINK)
-tools/check_stm32g0.sh [name]                                      # same for the stm32g0 stratum (g0b1/g071/g031 headers)
+tools/check_stm32g0.sh [name]                                      # same for the stm32g0 stratum (ALL TWELVE G0 headers, x1 + x0)
 # apps are auto-discovered from <project>/src/apps/*.cpp - plus
 # experiments/*/{avrdx,samc}/*.cpp, each experiment's per-arch app
 # halves - at every configure; no generation step; a new/removed app
@@ -4085,8 +4090,11 @@ brio/                    the framework, four strata:
   stm32g0/               everything that knows stm32g0xx.h (STM32G0, Cortex-M0+)
     device_tables.hpp      THE RESERVE: GPIO ports, USART instances, APB
                            enables, CCIPR multiplexers and the SHARED
-                           VECTORS, read off the device header (the last
-                           off the device-select macro)
+                           VECTORS, read off the device header - the
+                           vectors DERIVED FROM PRESENCE (a line's
+                           enumerator names what shares it, and the
+                           sharer's base macro is what the preprocessor
+                           can probe); no device-select macro anywhere
     nvic.hpp               "stm32g0xx.h" + armv6m/nvic.hpp
     ticker.hpp             armv6m/ticker.hpp + the Ticker alias (1000 Hz)
     platform_stm32.hpp     Stm32Platform (WFI = Sleep mode, SLEEPDEEP never

@@ -1,15 +1,18 @@
 // Family smoke TU: stm32g0/adc.hpp and stm32g0/vref.hpp (RM0444 ch. 15
-// and 17) on each of the three headers the desk's boards span.
-// Instantiation only - no main(), no hardware.
+// and 17) on every header the pack ships. Instantiation only - no
+// main(), no hardware.
 //
 // WHAT THIS FIXTURE IS REALLY FOR. Every part of this family carries
 // exactly one ADC with the same nineteen channels, so - unlike the
 // timers - the converter itself is not what differs. What DOES differ is
-// its VECTOR: on the G0B1 and G071 classes it is shared with the
-// comparators (ADC1_COMP_IRQn), and on the G031 class, which has no
-// comparator at all, the ADC has a line of its own under another name.
-// A wrong answer there would be a silent Default_Handler spin, which is
-// exactly what this file exists to make impossible.
+// its VECTOR: where comparators exist it is shared with them
+// (ADC1_COMP_IRQn), and where none exists the ADC has a line of its own
+// under another name. A wrong answer there would be a silent
+// Default_Handler spin, which is exactly what this file exists to make
+// impossible - so the check below is HEADER-AGNOSTIC: it asks the
+// header whether a comparator exists and demands the matching name.
+// The VREFBUF is the x1 line's; the value line has none and its Vref
+// does not exist, which the reserve says and ref_valid() honours.
 //
 // The arithmetic - full scales, sampling and conversion times, the
 // oversampler's own full scale, the refusals - is constexpr, so it is
@@ -25,21 +28,30 @@
 
 using namespace brio;
 
-// ---- presence and geometry, as the three headers state it ------------------
+// ---- presence and geometry, as the header states it ------------------------
 static_assert(adc_present(), "every STM32G0 has the one ADC");
 static_assert(adc_channels() == 19, "nineteen multiplexed channels (15.3.8)");
 static_assert(adc_temperature_channel() == 12 && adc_vrefint_channel() == 13 &&
                   adc_vbat_channel() == 14,
               "the three internal channels are 12, 13 and 14");
 static_assert(adc_common_base() != 0, "ADC_CCR lives in its own common block");
-static_assert(vrefbuf_present(), "every header of this pack declares VREFBUF");
 
-#if defined(STM32G0B1xx) || defined(STM32G071xx)
+#if defined(VREFBUF_BASE)
+static_assert(vrefbuf_present(), "the header declares VREFBUF and the reserve sees it");
+static_assert(ref_valid(Ref::buffer_2v048) && ref_valid(Ref::buffer_2v5));
+#else
+static_assert(!vrefbuf_present(), "no VREFBUF on this part (the x0 value line)");
+static_assert(!ref_valid(Ref::buffer_2v048) && !ref_valid(Ref::buffer_2v5),
+              "the buffer codes are refused where there is no buffer");
+#endif
+static_assert(ref_valid(Ref::external), "the board's own VREF+ is every part's");
+
+#if defined(COMP1_BASE)
 static_assert(adc_irq() == ADC1_COMP_IRQn,
               "where comparators exist the ADC shares their vector (table 61)");
 #else
 static_assert(adc_irq() == ADC1_IRQn,
-              "the G031 class has no comparator, so the ADC's line is its own");
+              "no comparator on this part, so the ADC's line is its own");
 #endif
 
 // ---- the arithmetic --------------------------------------------------------
@@ -218,6 +230,7 @@ void use() {
     Adc::release();
     In4::release();
 
+#if defined(VREFBUF_BASE)
     // The reference buffer: every verb, and the refusal that guards it.
     Vref::init();
     (void)Vref::bus_clock();
@@ -231,4 +244,5 @@ void use() {
     Vref::hold();
     Vref::disable();
     Vref::release();
+#endif
 }
