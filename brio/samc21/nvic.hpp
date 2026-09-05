@@ -11,7 +11,7 @@
  * written against.
  *
  * It still sits at the BOTTOM of the samc21/ stratum: ticker.hpp and
- * platform_sam.hpp both need the guard, and the platform includes the
+ * platform.hpp both need the guard, and the platform includes the
  * ticker - so the guard can live in neither of them.
  *
  * The SAM's own facts about interrupts: line 0 is SHARED by MCLK,

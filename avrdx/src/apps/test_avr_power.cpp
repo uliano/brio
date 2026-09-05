@@ -38,7 +38,7 @@
 #include "avrdx/clock.hpp"
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/reset.hpp"
 #include "avrdx/rtc.hpp"
 #include "avrdx/sleep.hpp"

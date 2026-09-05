@@ -19,7 +19,7 @@
 #include <stdint.h>
 
 #include "stm32g0/lptim.hpp"
-#include "stm32g0/platform_stm32.hpp"
+#include "stm32g0/platform.hpp"
 #include "util/pwm_channel.hpp"
 
 using namespace brio;

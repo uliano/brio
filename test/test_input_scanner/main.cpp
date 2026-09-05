@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 #include "util/input_scanner.hpp"
 
 namespace {

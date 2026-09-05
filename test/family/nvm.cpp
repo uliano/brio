@@ -203,7 +203,7 @@ void nvm_sigrow() {
 // persistent panic record. They are target-independent, but their only
 // real backend is here, so this TU is where they get compiled for every
 // package.
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "util/nv_writer.hpp"
 #include "util/persistent_panic.hpp"
 

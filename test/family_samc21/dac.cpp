@@ -9,7 +9,7 @@
 
 #include "samc21/dac.hpp"
 #include "samc21/clock.hpp"
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 
 using namespace brio;
 

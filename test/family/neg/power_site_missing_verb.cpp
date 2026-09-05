@@ -4,7 +4,7 @@
 // is armed cannot support the first-event-after-wake contract. The
 // manager must refuse it at the template boundary, not fail somewhere
 // inside its body.
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "util/power.hpp"
 
 using namespace brio;

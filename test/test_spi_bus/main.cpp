@@ -11,7 +11,7 @@
 #include <variant>
 #include <vector>
 
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 #include "kernel/kernel.hpp"
 #include "util/spi_bus.hpp"
 

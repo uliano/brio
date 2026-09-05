@@ -9,7 +9,7 @@
 #include <variant>
 
 #include "kernel/event_queue.hpp"
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 
 using brio::EventQueue;
 using brio::HostPlatform;

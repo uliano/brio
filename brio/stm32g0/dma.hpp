@@ -108,7 +108,7 @@
 #include "stm32g0/clock.hpp"
 #include "stm32g0/device_tables.hpp"
 #include "stm32g0/nvic.hpp"
-#include "stm32g0/platform_stm32.hpp"
+#include "stm32g0/platform.hpp"
 
 namespace brio {
 

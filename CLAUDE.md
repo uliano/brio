@@ -102,15 +102,15 @@ project (host g++, no cross toolchain), run via `ctest`. ONE NAME PER ARCHITECTU
 the same key on three axes: `brio/<arch>/` (stratum),
 `docs/<arch>/` (docs), `<arch>/` (build project); chip precision
 lives in preset names, per-chip ld/svd files and the `*_MCU` cache
-variables. Names are claims, extended only when a real chip extends
-the family - the known landing names, never used early: avrdx ->
-avrxt (Microchip's sigla for the modern-AVR core) when an EA/mega0
-part proves it shares the stratum; samc -> samc21 RENAMED 2026-09-05
-(the user's call) and the OLD "-> sam0" landing name RETIRED with it:
-the C21 is the only SAM this stratum has ever known and a D21 would
-not share GCLK/PM/SYSCTRL with it, so a D21 earns its OWN stratum
-rather than widening this one - chip precision in the name itself,
-like avrdx's own DA/DB span; stm32g0 SHARES its name with
+variables. Names are claims: a stratum is named for exactly the family
+it has been proven on, and a name widens only when a real chip proves
+it shares the stratum. So `samc21` is FINAL (renamed from `samc`
+2026-09-05, the user's call: the C21 is the only SAM this stratum has
+known, a D21 would not share GCLK/PM/SYSCTRL and would earn its OWN
+stratum - the old "-> sam0" landing name is retired); the one landing
+name still pending is avrdx -> avrxt (Microchip's sigla for the
+modern-AVR core) when an EA/mega0 part proves it shares the stratum;
+and stm32g0 SHARES its name with
 the G0x0 value line - RULED 2026-09-04 on the headers (every x0 header
 is a strict subset of its x1 twin: the same IP under the same register
 names), the stratum compiles on all twelve G0 headers of the pack with
@@ -486,7 +486,7 @@ gets its dated home in `docs/design/` when taken.
   select macro because IRQn values are enumerators the preprocessor
   cannot probe), nvic.hpp + ticker.hpp (the samc21 files' twins line for
   line - the armv6m/ factoring candidates, deliberately NOT factored
-  yet), platform_stm32.hpp (`Stm32Platform`: WFI = Sleep mode,
+  yet), platform.hpp (`Stm32Platform`: WFI = Sleep mode,
   SLEEPDEEP never written), flash.hpp (FlashWaitStates with the
   read-back rule and Range-1 table 13, FlashAccel with PRFTEN left at
   reset because of erratum 2.2.10), clock.hpp (THE THIRD CLOCK MODEL:
@@ -1345,7 +1345,7 @@ gets its dated home in `docs/design/` when taken.
   request. `light` is IDLE2 rather than IDLE0 because there is no SEN bit
   here: IDLE0 is both a mode and the reset value, so armed() could not
   stay a pure read of the silicon otherwise (the price is a CAN wake from
-  light, and brio has no CAN driver). platform_sam.hpp's ONE MANDATORY
+  light, and brio has no CAN driver). samc21/platform.hpp's ONE MANDATORY
   DEVIATION turned out to be nearly free - idle() ALREADY took whatever
   SLEEPCFG held, because this family selects the depth there and not in
   SCR.SLEEPDEEP, which is never written - so what it gained is a DSB and
@@ -2325,7 +2325,7 @@ gets its dated home in `docs/design/` when taken.
   overwrite a standing record (hard_fault_reset's own rule), read once
   by take(). The two entry paths are PURE COMPOSITION - TracingReporter
   <Store, source, Next> and hard_fault_trace_reset<P, Store>() - with
-  NOT ONE LINE of reset.hpp, platform_sam.hpp, kernel/ or util/
+  NOT ONE LINE of reset.hpp, samc21/platform.hpp, kernel/ or util/
   changed; mtb.hpp grew freeze() and the oldest-first snapshot()
   additively (32/32 pre-existing images byte-identical, Fable's
   worktree gate). NEW SUITE test_samc_postmortem z 36/36 (agent x4 +
@@ -3753,7 +3753,7 @@ brio/                    the framework, four strata:
     proto/line_parser.hpp  LineAssembler + console/SCPI parsers +
                            CommandRouter<Sink>
   avrdx/                 everything that knows avr/io.h (AVR DA/DB)
-    platform_avr.hpp       AvrPlatform (idle() sleeps in IDLE unless a
+    platform.hpp           AvrPlatform (idle() sleeps in IDLE unless a
                            deeper mode is already armed - see sleep.hpp)
     clock.hpp              CLKCTRL: resources Oschf/Osc32k/Xosc32k/Xoschf/Pll/
                            MainClock/ClockFailure (typed register views) +
@@ -3853,7 +3853,7 @@ brio/                    the framework, four strata:
                            EventUser; tables on demand
   samc21/                  everything that knows sam.h (SAM C21, Cortex-M0+)
     nvic.hpp               "sam.h" + armv6m/nvic.hpp (the guard and Nvic live there)
-    platform_sam.hpp       SamPlatform (idle takes whatever PM.SLEEPCFG holds -
+    platform.hpp           SamPlatform (idle takes whatever PM.SLEEPCFG holds -
                            SCR.SLEEPDEEP is never written - with erratum
                            1.8.13's guard around a standby WFI; BKPT, .noinit
                            breadcrumb, atomic_width 4)
@@ -4102,7 +4102,7 @@ brio/                    the framework, four strata:
                            can probe); no device-select macro anywhere
     nvic.hpp               "stm32g0xx.h" + armv6m/nvic.hpp
     ticker.hpp             armv6m/ticker.hpp + the Ticker alias (1000 Hz)
-    platform_stm32.hpp     Stm32Platform (WFI = Sleep mode, SLEEPDEEP never
+    platform.hpp           Stm32Platform (WFI = Sleep mode, SLEEPDEEP never
                            written; BKPT; .noinit breadcrumb; atomic_width 4)
     flash.hpp              FlashWaitStates (table 13, the read-back rule),
                            FlashAccel, flash_size_kb - the FLASH campaign's
@@ -4118,7 +4118,7 @@ brio/                    the framework, four strata:
     usart.hpp              Usart<n> resource + Uart<n, pins> task, the
                            other two targets' Uart surface verbatim
   host/                  the test target
-    platform_host.hpp      HostPlatform (virtual clock, recording idle/break)
+    platform.hpp           HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests
                            (configurable geometry, power-cut injection,
                            simulated reflash, wear counters)

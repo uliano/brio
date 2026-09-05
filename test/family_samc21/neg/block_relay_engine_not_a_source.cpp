@@ -6,7 +6,7 @@
 // at the spelling, not discovered when a dispatch calls a verb that is
 // not there.
 #include "samc21/dmac.hpp"
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "util/block_stream.hpp"
 using namespace brio;
 

@@ -15,7 +15,7 @@ Configuration Change Protection in 7.4.6 - plus errata DS80000915F
 (item 2.2.4 is code here; clarifications 3.3.1 and 3.4.1 rewrite two
 of those chapters' tables) and, for the DA parts, DS80000882C, which
 lists no SLPCTRL, WDT or CPU item at all. Drivers:
-`avrdx/platform_avr.hpp` (`AvrPlatform`, this target's realization of
+`avrdx/platform.hpp` (`AvrPlatform`, this target's realization of
 the kernel's `Platform` concept), `avrdx/delay.hpp` (the short-wait
 role), `avrdx/sleep.hpp` (`Sleep`, `Vreg`) and `avrdx/reset.hpp`
 (`Reset`, `Watchdog`). Reference tests: `test_avr_platform` and
@@ -139,7 +139,7 @@ on the cores that have one.
 
 ## Types and verbs
 
-`AvrPlatform` (`avrdx/platform_avr.hpp`) is the `Platform` concept for
+`AvrPlatform` (`avrdx/platform.hpp`) is the `Platform` concept for
 this target: the RAII `CriticalSection` (save SREG, `cli`, restore -
 so guards nest and a guard entered with interrupts masked leaves them
 masked), `idle()`, `break_here()`, `now()` and the compile-time

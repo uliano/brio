@@ -36,7 +36,7 @@
 #include "avrdx/clock.hpp"
 #include "avrdx/pin.hpp"
 #include "avrdx/tca.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/ticker.hpp"
 #include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"

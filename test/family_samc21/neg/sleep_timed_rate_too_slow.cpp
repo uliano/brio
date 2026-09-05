@@ -4,7 +4,7 @@
 // would quantize away the very spans it exists to restore. A 1 Hz
 // calendar-style clock is a legal RTC arrangement and an illegal
 // timebase witness - refused where the configuration is named.
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/sleep.hpp"
 using namespace brio;
 

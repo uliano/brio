@@ -54,7 +54,7 @@
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/nvm.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/reset.hpp"
 #include "avrdx/tcb.hpp"
 #include "avrdx/ticker.hpp"

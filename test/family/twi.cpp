@@ -3,7 +3,7 @@
 // the ROUTE table and, above all, which routes bond a DUAL pin pair -
 // the pair a Dual mode client needs.
 #include "avrdx/clock.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/twi.hpp"
 #include "kernel/time.hpp"
 #include "util/i2c_bus.hpp"

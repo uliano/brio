@@ -21,7 +21,7 @@
 #include <stdint.h>
 
 #include "stm32g0/adc.hpp"
-#include "stm32g0/platform_stm32.hpp"
+#include "stm32g0/platform.hpp"
 #include "stm32g0/vref.hpp"
 #include "util/analog.hpp"
 #include "util/analog_sampler.hpp"

@@ -52,7 +52,7 @@
 #include "avrdx/clock.hpp"
 #include "avrdx/nvm.hpp"
 #include "avrdx/nvm_flash.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/reset.hpp"
 #include "avrdx/usart.hpp"
 #include "avrdx/userrow.hpp"

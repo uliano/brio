@@ -49,7 +49,7 @@
 #include "avrdx/evsys.hpp"
 #include "avrdx/opamp.hpp"
 #include "avrdx/pin.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/tcb.hpp"
 #include "avrdx/usart.hpp"
 #include "avrdx/userrow.hpp"

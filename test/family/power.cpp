@@ -10,7 +10,7 @@
 // still agree once avrdx/sleep.hpp includes a util/ header.
 #include <stdint.h>
 
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/sleep.hpp"
 #include "kernel/kernel.hpp"
 #include "util/bus_master.hpp"

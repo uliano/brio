@@ -765,7 +765,7 @@ struct ResetReporter {
  * checkable rather than assumed, which matters here as much as on the
  * SAM: RM0444 promises nothing about SRAM across a reset, and this
  * family can additionally be told by option byte to raise an NMI on the
- * first read of a never-written word (platform_stm32.hpp says where).
+ * first read of a never-written word (stm32g0/platform.hpp says where).
  *
  * AN EXISTING RECORD IS NOT OVERWRITTEN, and that is what makes this
  * compose with panic(). With no debugger attached, panic()'s closing

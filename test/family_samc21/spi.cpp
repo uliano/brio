@@ -9,7 +9,7 @@
 // app-level fact and is not compiled here.
 #include "samc21/clock.hpp"
 #include "samc21/dmac.hpp"
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/spi.hpp"
 #include "kernel/time.hpp"
 #include "util/spi_bus.hpp"

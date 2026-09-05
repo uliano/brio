@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <span>
 
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/postmortem.hpp"
 
 using namespace brio;

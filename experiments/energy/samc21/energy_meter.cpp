@@ -50,7 +50,7 @@
 #include "samc21/dac.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/sdadc.hpp"
 #include "samc21/sercom.hpp"
 #include "samc21/supc.hpp"

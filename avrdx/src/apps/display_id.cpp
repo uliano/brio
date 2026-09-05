@@ -27,7 +27,7 @@
 
 #include "avrdx/clock.hpp"
 #include "avrdx/pin.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/spi.hpp"
 #include "avrdx/ticker.hpp"
 #include "avrdx/usart.hpp"

@@ -14,7 +14,7 @@ Documents of record: SAM C20/C21 data sheet DS60001479M - the
 Cortex-M0+ processor summary ch. 4 with ARM's ARMv6-M ARM behind it,
 PM (power manager) ch. 19 - and errata DS80000740S (1.8.13, 1.8.14,
 1.8.7 and 1.8.5 all touch this chapter; see "What the silicon does").
-Drivers: `samc21/platform_sam.hpp` (`SamPlatform`, this target's
+Drivers: `samc21/platform.hpp` (`SamPlatform`, this target's
 realization of the kernel's `Platform` concept), `samc21/nvic.hpp`
 and `samc21/ticker.hpp` (this family's includes of the core stratum's
 `armv6m/nvic.hpp` - `InterruptGuard`, `Nvic` - and
@@ -136,7 +136,7 @@ does at the end of every SAM flash.
 
 ## Types and verbs
 
-**`SamPlatform`** (platform_sam.hpp) realizes the kernel's `Platform`
+**`SamPlatform`** (samc21/platform.hpp) realizes the kernel's `Platform`
 concept: `CriticalSection` is nvic.hpp's `InterruptGuard` (save
 PRIMASK, `cpsid i`, restore on scope exit; the CMSIS intrinsics carry
 the "memory" clobbers the contract requires, verified in the vendored

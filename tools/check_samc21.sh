@@ -38,12 +38,12 @@ for tu in test/family_samc21/*.cpp; do
     case "$tu" in *"$FILTER"*) ;; *) continue ;; esac
     line="$(basename "$tu" .cpp):"
     for mcu in $MCUS; do
-        if $CXX -D"$(mcu_define "$mcu")" $FLAGS "$tu" -o /dev/null 2>/tmp/check_samc_err; then
+        if $CXX -D"$(mcu_define "$mcu")" $FLAGS "$tu" -o /dev/null 2>/tmp/check_samc21_err; then
             line="$line $mcu"
         else
             line="$line $mcu:FAIL"
             fail=1
-            sed "s/^/    /" /tmp/check_samc_err | head -15
+            sed "s/^/    /" /tmp/check_samc21_err | head -15
         fi
     done
     echo "POS $line"

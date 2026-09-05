@@ -13,7 +13,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 #include "util/block_stream.hpp"
 
 namespace {

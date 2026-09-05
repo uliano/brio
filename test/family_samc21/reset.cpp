@@ -9,7 +9,7 @@
 
 #include <stdint.h>
 
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/reset.hpp"
 
 using namespace brio;

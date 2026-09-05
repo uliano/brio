@@ -1,5 +1,5 @@
 /*
- * platform_sam.hpp
+ * platform.hpp
  *
  * SAM C21 (Cortex-M0+) implementation of the brio Platform concept - the
  * one header of this stratum the kernel templates are instantiated with.

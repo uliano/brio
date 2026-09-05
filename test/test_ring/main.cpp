@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 #include "util/ring.hpp"
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 
 using brio::HostPlatform;
 using brio::Ring;

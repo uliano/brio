@@ -121,7 +121,7 @@
 #include "samc21/clock.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "util/clock.hpp"
 #include "util/ring.hpp"
 #include "util/stream.hpp"

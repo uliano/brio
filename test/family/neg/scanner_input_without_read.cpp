@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 #include "avrdx/pin.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "util/input_scanner.hpp"
 
 using namespace brio;

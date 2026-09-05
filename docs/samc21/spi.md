@@ -247,7 +247,7 @@ A client answering a stream (the one-ahead pump):
   cross-architecture bench: SAM SERCOM1 function C (PA16 MOSI, PA17
   SCK, PA18 SS, PA19 MISO) against the AVR peer's SPI0 ALT1 (PE0-PE3),
   both boards at 5 V. Then the SAM-SAM five-wire bench (both boards'
-  PA16..PA19 straight through plus GND, [bench.md](bench.md)), where
+  PA16..PA19 straight through plus GND, [bench.md](../bench.md)), where
   the same suite scores 71/71 against the samc21 `spi_peer` and the DMA
   findings below were measured. On either desk the same wires carry a
   board as host (DOPO row 0x0) and as client (row 0x2).

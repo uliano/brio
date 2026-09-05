@@ -20,7 +20,7 @@
 #include <variant>
 
 #include "avrdx/clock.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/ticker.hpp"
 #include "avrdx/twi.hpp"
 #include "avrdx/usart.hpp"

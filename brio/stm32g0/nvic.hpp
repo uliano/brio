@@ -10,7 +10,7 @@
  * width the core file is written against.
  *
  * It sits at the BOTTOM of the stm32g0/ stratum: ticker.hpp and
- * platform_stm32.hpp both need the guard, and the platform includes the
+ * platform.hpp both need the guard, and the platform includes the
  * ticker.
  *
  * The STM32G0's own fact about interrupts: SHARED LINES ARE THE RULE.

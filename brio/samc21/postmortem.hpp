@@ -5,7 +5,7 @@
  *
  * The breadcrumb this stratum already has answers WHAT: kernel/panic.hpp
  * writes a PanicRecord - a code and a context byte - into the .noinit
- * storage samc21/platform_sam.hpp hosts, samc21/reset.hpp's `ResetReporter`
+ * storage samc21/platform.hpp hosts, samc21/reset.hpp's `ResetReporter`
  * and `hard_fault_reset<P>()` end the program with a reset, and the next
  * boot reads the record back. What it cannot say is WHERE FROM: which
  * calls led into the wreck.
@@ -261,7 +261,7 @@ private:
     // aligned region (samc21/mtb.hpp).
     alignas(trace_bytes) static inline uint32_t buffer_[trace_bytes / 4]{};
 
-    // NOTE: the same gcc 16 COMDAT-section quirk samc21/platform_sam.hpp
+    // NOTE: the same gcc 16 COMDAT-section quirk samc21/platform.hpp
     // records for its own .noinit variable - harmless, and the section
     // is right.
     [[gnu::section(".noinit")]] static inline Record record_;

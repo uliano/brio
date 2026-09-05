@@ -4,9 +4,9 @@
  * The Platform concept: the complete list of what the brio kernel needs
  * from the machine underneath. Kernel code is templated on a Platform and
  * NEVER includes a hardware header; each target implements the concept in
- * its own header (platform_avr.hpp for AVR Dx, platform_host.hpp for the
- * native test build) and the app names its platform once. No #ifdef: the
- * door to targets other than AVR stays open by construction.
+ * its own <stratum>/platform.hpp (avrdx/, samc21/, stm32g0/, and host/
+ * for the native test build) and the app names its platform once. No
+ * #ifdef: the door to the next target stays open by construction.
  *
  * Contract:
  *  - CriticalSection: RAII guard. The constructor masks interrupts, the

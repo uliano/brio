@@ -82,7 +82,7 @@
 #include "samc21/sercom.hpp"
 #include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/tsens.hpp"
 #include "kernel/kernel.hpp"
 #include "util/block_stream.hpp"

@@ -16,7 +16,7 @@
 #include <stdint.h>
 #include <optional>
 
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 #include "kernel/panic.hpp"
 #include "util/crc.hpp"
 #include "util/nv_record.hpp"

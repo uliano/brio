@@ -1,5 +1,5 @@
 /*
- * platform_host.hpp
+ * platform.hpp
  *
  * Host (native test) implementation of the brio Platform concept: the
  * critical section only tracks its nesting depth (tests are single

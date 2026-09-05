@@ -13,7 +13,7 @@
 #include "avrdx/clock.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/tcb.hpp"
 #include "kernel/kernel.hpp"
 #include "util/bus_master.hpp"

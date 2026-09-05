@@ -77,7 +77,7 @@
 #include "samc21/dmac.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/sercom.hpp"
 #include "samc21/spi.hpp"
 #include "samc21/tc.hpp"

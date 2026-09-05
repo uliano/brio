@@ -85,7 +85,7 @@
  * across a standby whether or not its interrupt is enabled. So the
  * discipline is applied at the WFI, in two places and nowhere else:
  *
- *   - `SamPlatform::idle()` (samc21/platform_sam.hpp), which is where the
+ *   - `SamPlatform::idle()` (samc21/platform.hpp), which is where the
  *     kernel loop sleeps - it reads SLEEPCFG and holds a
  *     `SysTickInterruptGuard` when the armed mode is STANDBY;
  *   - `Pm::sleep()` / `Pm::enter()` below, for a caller that sleeps

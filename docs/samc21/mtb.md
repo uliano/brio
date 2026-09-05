@@ -65,7 +65,7 @@ spells that `freeze()` and the bench measures what skipping it costs.
 ARMv6-M needs DHCSR.C_DEBUGEN - a bit `tools/bench.py` deliberately
 clears at the end of every SAM flash so that no stray halt can stop an
 unattended board. The core cannot read DHCSR itself (it is
-debugger-access-only, the same fact `samc21/platform_sam.hpp` records about
+debugger-access-only, the same fact `samc21/platform.hpp` records about
 BKPT), so the only evidence about these two bits is behavioural.
 
 **Two event users gate the hardware trace-start and trace-stop inputs**,

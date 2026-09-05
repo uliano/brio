@@ -4,7 +4,7 @@
 // device header but by an erratum (SPI1 ALT2 on 48 pins).
 #include "avrdx/clock.hpp"
 #include "avrdx/evsys.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/spi.hpp"
 #include "kernel/time.hpp"
 #include "util/spi_bus.hpp"

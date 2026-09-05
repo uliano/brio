@@ -50,7 +50,7 @@
 #include "stm32g0/dma.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/pin.hpp"
-#include "stm32g0/platform_stm32.hpp"
+#include "stm32g0/platform.hpp"
 #include "stm32g0/ticker.hpp"
 #include "stm32g0/usart.hpp"
 #include "util/crc.hpp"

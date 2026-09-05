@@ -4,7 +4,7 @@
 // resource on, so the site's name is unknown there while the RTC-backed
 // sites above it compile unchanged.
 #include "stm32g0/clock.hpp"
-#include "stm32g0/platform_stm32.hpp"
+#include "stm32g0/platform.hpp"
 #include "stm32g0/sleep.hpp"
 using Sys = brio::Clock<brio::ClockSource::pll, 64'000'000>;
 using Site = brio::Stm32LptimTimedSleepSite<brio::Stm32Platform, Sys>;

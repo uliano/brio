@@ -10,7 +10,7 @@
 
 #include "samc21/adc.hpp"
 #include "samc21/clock.hpp"
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "util/analog_sampler.hpp"
 
 using namespace brio;

@@ -6,7 +6,7 @@
 // verb handed a pin or a port the part has not got refuses instead of
 // writing a bit that is not there.
 #include "kernel/kernel.hpp"
-#include "stm32g0/platform_stm32.hpp"
+#include "stm32g0/platform.hpp"
 #include "stm32g0/pwr.hpp"
 #include "stm32g0/sleep.hpp"
 #include "util/power.hpp"

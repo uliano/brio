@@ -9,7 +9,7 @@
 // is. The board's own pads are an app-level fact and not compiled here.
 #include "samc21/clock.hpp"
 #include "samc21/i2c.hpp"
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "kernel/time.hpp"
 #include "util/i2c_bus.hpp"
 

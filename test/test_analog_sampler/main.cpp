@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 #include "kernel/time.hpp"
 #include "util/analog_sampler.hpp"
 

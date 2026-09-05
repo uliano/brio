@@ -1,7 +1,7 @@
 # Target: host (`host/`)
 
 The native build is a target like any other: `brio/host/
-platform_host.hpp` provides `HostPlatform`, an implementation of the
+platform.hpp` provides `HostPlatform`, an implementation of the
 kernel's `Platform` concept for a single-threaded test process:
 
 - a depth-counting `CriticalSection` (tests can assert that a lock-free

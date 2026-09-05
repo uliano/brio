@@ -11,7 +11,7 @@
 
 #include <cstdint>
 
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 #include "kernel/panic.hpp"
 
 namespace {

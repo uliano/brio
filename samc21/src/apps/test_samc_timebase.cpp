@@ -48,7 +48,7 @@
 #include "samc21/clock.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/osc32kctrl.hpp"
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/reset.hpp"
 #include "samc21/rtc.hpp"
 #include "samc21/sercom.hpp"

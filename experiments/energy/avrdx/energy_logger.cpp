@@ -49,7 +49,7 @@
 #include "avrdx/clock.hpp"
 #include "avrdx/delay.hpp"
 #include "avrdx/pin.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/sleep.hpp"
 #include "avrdx/ticker.hpp"
 #include "avrdx/usart.hpp"

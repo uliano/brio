@@ -1907,7 +1907,7 @@ void tj_mtb_events() {
 // which is exactly why this is asked for by name.
 void tk_mtb_halt() {
     // THE CORE CANNOT ASK. On ARMv6-M the Debug Halting Control and
-    // Status register is debugger-access-only: samc21/platform_sam.hpp
+    // Status register is debugger-access-only: samc21/platform.hpp
     // already records that this is why BKPT cannot be made conditional
     // here. So there is no reading of C_DEBUGEN to take before the
     // experiment - the only evidence is whether the board answers

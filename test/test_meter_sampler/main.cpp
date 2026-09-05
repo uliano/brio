@@ -11,7 +11,7 @@
 #include <optional>
 #include <vector>
 
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 #include "kernel/time.hpp"
 #include "util/meter_sampler.hpp"
 

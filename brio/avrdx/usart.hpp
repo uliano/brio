@@ -89,7 +89,7 @@
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "util/clock.hpp"
 #include "util/ring.hpp"
 #include "util/stream.hpp"

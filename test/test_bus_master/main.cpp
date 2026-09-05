@@ -16,7 +16,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 #include "kernel/kernel.hpp"
 #include "util/bus_master.hpp"
 #include "util/power.hpp"

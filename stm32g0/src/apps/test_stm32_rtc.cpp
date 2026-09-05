@@ -83,7 +83,7 @@
 #include "stm32g0/delay.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/pin.hpp"
-#include "stm32g0/platform_stm32.hpp"
+#include "stm32g0/platform.hpp"
 #include "stm32g0/pwr.hpp"
 #include "stm32g0/reset.hpp"
 #include "stm32g0/rtc.hpp"

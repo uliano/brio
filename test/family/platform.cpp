@@ -5,7 +5,7 @@
 // concept check and both delay paths compile everywhere, including on
 // the DA where CLKCTRL's CFD block does not exist.
 #include "avrdx/delay.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/reset.hpp"
 #include "kernel/panic.hpp"
 

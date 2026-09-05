@@ -1,5 +1,5 @@
 /*
- * platform_avr.hpp
+ * platform.hpp
  *
  * AVR implementation of the brio Platform concept - the one header of
  * the kernel family that is allowed to touch AVR headers. Apps select it

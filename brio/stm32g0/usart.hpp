@@ -103,7 +103,7 @@
 #include "stm32g0/exti.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/pin.hpp"
-#include "stm32g0/platform_stm32.hpp"
+#include "stm32g0/platform.hpp"
 #include "util/clock.hpp"
 #include "util/ring.hpp"
 

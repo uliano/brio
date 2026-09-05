@@ -10,7 +10,7 @@
 #include <variant>
 #include <vector>
 
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
 #include "kernel/kernel.hpp"

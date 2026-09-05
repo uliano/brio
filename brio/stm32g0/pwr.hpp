@@ -16,7 +16,7 @@
  * before a WFI does anything but Sleep. `Pwr` owns them BOTH - SLEEPDEEP
  * is written here and nowhere else in this stratum, so that "what is
  * armed" is one question with one answer (`Pwr::mode()`), and so that
- * stm32g0/platform_stm32.hpp's idle() can stay what it is: a DSB, a WFI
+ * stm32g0/platform.hpp's idle() can stay what it is: a DSB, a WFI
  * and an unmask that take whatever somebody else armed.
  *
  * SEVEN FACTS OF THIS CHAPTER.

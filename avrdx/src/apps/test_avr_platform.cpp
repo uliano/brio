@@ -1,7 +1,7 @@
 // test_avr_platform - the PLATFORM test SUITE for the AVR DA/DB target:
 // everything the kernel stands on that is not a peripheral driver. The
 // short-wait role (avrdx/delay.hpp), the Platform concept's AVR
-// realization (avrdx/platform_avr.hpp: critical section, idle/sleep,
+// realization (avrdx/platform.hpp: critical section, idle/sleep,
 // the timebase, atomic_width, the panic breadcrumb) and the reset side
 // of the story (avrdx/reset.hpp: RSTCTRL and the watchdog).
 //
@@ -38,7 +38,7 @@
 #include "avrdx/clock.hpp"
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/reset.hpp"
 #include "avrdx/tcb.hpp"
 #include "avrdx/ticker.hpp"

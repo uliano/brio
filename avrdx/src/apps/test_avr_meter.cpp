@@ -33,7 +33,7 @@
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
-#include "avrdx/platform_avr.hpp"
+#include "avrdx/platform.hpp"
 #include "avrdx/reset.hpp"
 #include "avrdx/tca.hpp"
 #include "avrdx/tcb.hpp"

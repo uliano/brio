@@ -14,7 +14,7 @@
 #include <stdint.h>
 
 #include "stm32g0/device_tables.hpp"
-#include "stm32g0/platform_stm32.hpp"
+#include "stm32g0/platform.hpp"
 
 using namespace brio;
 

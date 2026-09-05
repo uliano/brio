@@ -7,7 +7,7 @@
 #include <cstdint>
 
 #include "kernel/time.hpp"
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 
 using brio::ticks_from_ms;
 using brio::ticks_from_secs;

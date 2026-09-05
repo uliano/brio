@@ -14,7 +14,7 @@ Documents of record: RM0444 Rev 6 - the Cortex-M0+ summary ch. 12
 here really enters ([pwr.md](pwr.md) owns that chapter) - and errata
 ES0548 Rev 3
 (no item touches this chapter on revision Z). Drivers:
-`stm32g0/platform_stm32.hpp` (`Stm32Platform`, this target's
+`stm32g0/platform.hpp` (`Stm32Platform`, this target's
 realization of the kernel's `Platform` concept), `stm32g0/delay.hpp`
 (the microsecond busy-wait), `stm32g0/reset.hpp`
 ([reset.md](reset.md)), `stm32g0/nvic.hpp`

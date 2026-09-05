@@ -6,7 +6,7 @@
 // timeout_ticks over it must be refused - not discovered when the
 // first wedged transfer calls a verb that is not there.
 #include "kernel/post.hpp"
-#include "samc21/platform_sam.hpp"
+#include "samc21/platform.hpp"
 #include "util/bus_master.hpp"
 using namespace brio;
 

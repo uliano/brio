@@ -1,5 +1,5 @@
 /*
- * platform_stm32.hpp
+ * platform.hpp
  *
  * STM32G0 (Cortex-M0+) implementation of the brio Platform concept - the
  * one header of this stratum the kernel templates are instantiated with.

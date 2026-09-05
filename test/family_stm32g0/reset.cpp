@@ -7,7 +7,7 @@
 // and that the compile-time configure<> twins accept what they must.
 #include "kernel/panic.hpp"
 #include "stm32g0/clock.hpp"
-#include "stm32g0/platform_stm32.hpp"
+#include "stm32g0/platform.hpp"
 #include "stm32g0/reset.hpp"
 
 using namespace brio;

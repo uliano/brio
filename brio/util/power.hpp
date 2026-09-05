@@ -29,7 +29,7 @@
  * finds every queue empty and calls the platform's idle(), and THAT is
  * the sleep. A target whose idle path would otherwise impose its own
  * shallow mode must let an already-armed deeper one stand (avrdx's does,
- * see avrdx/platform_avr.hpp).
+ * see avrdx/platform.hpp).
  *
  * THE DEADLINE GUARD. Leaving a deep mode is not free - on AVR DA/DB it
  * costs the oscillator's restart plus a separate ~290 us of voltage

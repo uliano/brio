@@ -10,7 +10,7 @@
 #include <string>
 #include <type_traits>
 
-#include "host/platform_host.hpp"
+#include "host/platform.hpp"
 #include "util/trace.hpp"
 
 namespace {
