@@ -215,7 +215,7 @@ Implemented but not bench verified:
   crashed only by a software reset, which is a clean boundary.
 - **Power loss on real silicon.** The heap now runs on three real
   targets - the AVR DA/DB main array (512/2), the SAM C21 RWWEE array
-  (256/64, `samc/nvm_flash.hpp`) and the STM32G0's second flash bank
+  (256/64, `samc21/nvm_flash.hpp`) and the STM32G0's second flash bank
   (2048/8, `stm32g0/nvm_flash.hpp`), where it mounted, allocated,
   sealed and re-found a block with no change to this header - so the
   two-granularity contract has been exercised by silicon and not only by

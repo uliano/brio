@@ -23,7 +23,7 @@ is in `test/family_stm32g0/adc.cpp`.
 "every target's vref header defines its own `brio::Ref` under the same
 name". On the SAM C21 there was no shared reference block, so each
 converter carried its own `REFSEL` enum and `Ref` lived in `adc.hpp`
-(`samc/adc.hpp`'s own comment says why). **On this family there IS one
+(`samc21/adc.hpp`'s own comment says why). **On this family there IS one
 shared rail**: the ADC (15.3.1), the DAC (16.4.6) and the comparators'
 VREFINT scaler all work against VREF+, and chapter 17's buffer is the
 one thing that can change what that pin is worth. So the enum sits in

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Family compile check for the STM32G0 stratum (part of every driver's
-# definition of done, the stm32g0 twin of tools/check_samc.sh).
+# definition of done, the stm32g0 twin of tools/check_samc21.sh).
 #
 # Positive: every test/family_stm32g0/*.cpp must COMPILE for every device
 # header the CMSIS pack ships - ALL TWELVE: the x1 line (G031/G041,

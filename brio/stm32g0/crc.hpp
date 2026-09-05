@@ -7,7 +7,7 @@
  *
  *  Crc     the RESOURCE, and there is no task above it: a checksum has
  *          no ordering rule of its own to hide. It is a MONOSTATE (the
- *          samc Dsc/Dac/Rtc precedent): every part of this family has
+ *          samc21 Dsc/Dac/Rtc precedent): every part of this family has
  *          exactly one, so an instance number would be a lie with a
  *          template parameter attached.
  *

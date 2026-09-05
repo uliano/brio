@@ -719,7 +719,7 @@ public:
      * numbers are what makes a channel LISTEN.
      *
      * They live here rather than in stm32g0/device_tables.hpp for the
-     * reason the samc EVSYS campaign settled and this stratum has kept
+     * reason the samc21 EVSYS campaign settled and this stratum has kept
      * for TISEL and for the EXTI's lines above 15: no device header of
      * this pack declares one of them (the DMAMUX_REQ_* spellings are ST's
      * HAL/LL, not vendored), and a fabric driver owns the fabric while a
@@ -1109,7 +1109,7 @@ public:
      * THIS IS WHAT MAKES A CAPTURE CHANNEL MEASURABLE WITH NO PAD AT
      * ALL, which is why the driver exposes the raw code and names no
      * source: the vocabulary of what code 1 means belongs to the
-     * peripheral that owns the signal (the samc EVSYS ruling), and half
+     * peripheral that owns the signal (the samc21 EVSYS ruling), and half
      * of these sources have no driver in this stratum yet.
      */
     static bool input_select(uint8_t ch, uint8_t code) {
@@ -1183,7 +1183,7 @@ private:
  *
  * `top` is a template parameter because PwmChannel requires `max` to be
  * a compile-time constant: a full scale that can move under a generic
- * actuator is not one it can scale against (the samc TcPwm8 ruling).
+ * actuator is not one it can scale against (the samc21 TcPwm8 ruling).
  *
  * The frequency belongs to the TIMER and the duty to the CHANNEL, which
  * is the concept's own division of labour - so `setup()` takes the
@@ -1334,7 +1334,7 @@ struct TimPeriodMeter {
 
     /// The counter is reset ON the edge and the capture is taken AT it,
     /// so a period reads as its own tick count and not one less - the
-    /// opposite of the samc TC's capture, which clears and latches
+    /// opposite of the samc21 TC's capture, which clears and latches
     /// together and always reads one short.
     static uint32_t period_ticks() { return T::compare(0); }
     static uint32_t width_ticks() { return T::compare(1); }

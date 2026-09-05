@@ -19,7 +19,7 @@
  *                        Lpuart<n>: one implementation, two peripherals,
  *                        because chapter 34 is chapter 33 with a
  *                        different baud generator. Its public surface is
- *                        the SAME as avrdx's Uart and samc's Uart, which
+ *                        the SAME as avrdx's Uart and samc21's Uart, which
  *                        is what lets util/serial_port.hpp and print()
  *                        compile on the third architecture untouched.
  *
@@ -60,11 +60,11 @@
  *    usart_ker_ck AFTER the PRESC prescaler, not PCLK by assumption;
  *  - TXE is a CONDITION (transmit data register empty), so its interrupt
  *    is armed only while the ring holds something and disarmed from the
- *    handler when it runs dry - the samc DRE discipline;
+ *    handler when it runs dry - the samc21 DRE discipline;
  *  - ORE raises the interrupt whenever RXNEIE is set (33.8.9), and it is
  *    cleared ONLY through ICR.ORECF - a handler that reads RDR and
  *    leaves ORE standing re-enters for ever (the SERCOM ERROR storm the
- *    samc bench caught, in this family's clothes). Every error flag has
+ *    samc21 bench caught, in this family's clothes). Every error flag has
  *    its ICR twin and the handler clears what it counts;
  *  - RDR holds the LAST GOOD byte when ORE is set (the lost one is the
  *    next); FE/NE/PE flags belong to the byte in RDR, so a framed or
@@ -235,7 +235,7 @@ constexpr std::optional<uint16_t> usart_brr(uint32_t hz, uint32_t baud) {
 /// IT IS A SIBLING VERB AND NOT A DEFAULTED THIRD ARGUMENT, and the
 /// reason is measured: giving usart_brr() a `bool over8 = false` moved
 /// test_stm32_dma's image by forty bytes although the folded code for
-/// `false` is identical - the samc SPI-DMA campaign's ruling, byte
+/// `false` is identical - the samc21 SPI-DMA campaign's ruling, byte
 /// identity outranks API economy, met again on this silicon.
 constexpr std::optional<uint16_t> usart_brr_over8(uint32_t hz, uint32_t baud) {
     if (hz == 0u || baud == 0u) {
@@ -1181,7 +1181,7 @@ struct Usart {
      * They live here and not in stm32g0/device_tables.hpp because NO
      * DEVICE HEADER OF THIS PACK DECLARES THEM - the DMAMUX_REQ_*
      * spellings are ST's HAL/LL, which this project does not vendor - and
-     * because of the standing ruling the samc EVSYS campaign settled: a
+     * because of the standing ruling the samc21 EVSYS campaign settled: a
      * fabric driver owns the fabric, a peripheral owns its own
      * vocabulary. stm32g0/dma.hpp therefore takes a plain request id and
      * knows nothing about USARTs.
@@ -1425,7 +1425,7 @@ constexpr UartOptions uart_half_duplex(UartOptions base = {}) {
  * divisor, and a second copy of this file would have been a second place
  * for the ORE storm to be got wrong.
  *
- * THE TWO OPTIONAL ENGINE SLOTS are the samc Uart's, in this family's
+ * THE TWO OPTIONAL ENGINE SLOTS are the samc21 Uart's, in this family's
  * clothes: name a stm32g0/dma.hpp DmaTxEngine and/or DmaRxEngine and the
  * bytes move without the CPU; name neither (the default) and every engine
  * branch below disappears - `if constexpr` throughout, and the engineless
@@ -2058,7 +2058,7 @@ public:
     }
 
     /// Queue a run of bytes through the ring's contiguous span and nudge
-    /// the transmitter ONCE - the bulk verb the samc campaign measured
+    /// the transmitter ONCE - the bulk verb the samc21 campaign measured
     /// the per-byte one against. Returns the number queued.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
         uint32_t queued = 0;
@@ -2201,7 +2201,7 @@ private:
     /// CHARACTER FOR CHARACTER. Folding `hz / usart_prescaler_divisor
     /// (div1)` to `hz` gives the same value and NOT the same code - the
     /// md5 gate measured a forty-byte move on test_stm32_dma - which is
-    /// the samc SPI-DMA campaign's ruling met again: byte identity
+    /// the samc21 SPI-DMA campaign's ruling met again: byte identity
     /// outranks API economy, and a `plain` branch costs nothing.
     static constexpr bool plain = !S::is_lpuart &&
                                   opts.kernel_clock == UsartClock::pclk &&

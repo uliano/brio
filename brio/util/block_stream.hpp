@@ -9,7 +9,7 @@
  * name is a shape: a source that fills one caller-owned buffer while the
  * caller drains another and accounts for what it could not keep, and a
  * player that feeds one caller-owned table to a peripheral for ever. On
- * the SAM C21 both are DMA engines (samc/dmac.hpp's DmaPingPongEngine
+ * the SAM C21 both are DMA engines (samc21/dmac.hpp's DmaPingPongEngine
  * and DmaLoopEngine); on a machine with no DMA the same concepts are
  * satisfiable by an interrupt handler filling the buffers - nothing here
  * asks HOW a block gets full. The concepts exist BEFORE their second

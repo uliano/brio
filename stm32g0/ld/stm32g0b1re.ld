@@ -4,7 +4,7 @@
  * table 2; the flash size register at 0x1FFF75E0 reads 0x200 KB on the
  * bench chip, checked over SWD before this file was written).
  *
- * Written from scratch, the samc script's twin (section names are the
+ * Written from scratch, the samc21 script's twin (section names are the
  * ones every GNU ld bare-metal script shares), because brio needs one
  * thing the vendor templates do not have: a NOLOAD .noinit RAM section
  * excluded from the crt's .bss zero-fill, hosting kernel/platform.hpp's
@@ -38,7 +38,7 @@
  *     use. Code must therefore stay in one bank; data in the other is
  *     the vendor's sanctioned arrangement;
  *   - and it makes the storage bounds CONSTANTS rather than linker
- *     symbols that move with every build - the property the samc's
+ *     symbols that move with every build - the property the samc21's
  *     RWWEE array has for free and the AVR backend has to work for.
  *
  * NO SECTION MAY BE PLACED IN BANK 2. `__brio_rom_end` below is how

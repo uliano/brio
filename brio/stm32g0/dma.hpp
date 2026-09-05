@@ -31,7 +31,7 @@
  * numbers 77 request lines by peripheral, and no device header of this
  * pack declares one of those numbers (the DMAMUX_REQ_* spellings live in
  * ST's HAL/LL, which this project does not vendor). Reproducing the table
- * here would be a list somebody has to keep, so the samc EVSYS ruling
+ * here would be a list somebody has to keep, so the samc21 EVSYS ruling
  * applies unchanged: a peripheral publishes ITS OWN request codes
  * (Usart<n>::dma_rx_request(), Tim<n>::dma_update_request() and their
  * kin) and this file takes a plain `uint8_t` request id. `dma_request_none`
@@ -517,7 +517,7 @@ public:
      * those, hand them back. The app's handler for a shared vector calls
      * one of these per channel it owns - there is no "which channel
      * interrupted" register on this controller, only the flag word, so
-     * asking each owner IS the dispatch (the samc's take_pending() has no
+     * asking each owner IS the dispatch (the samc21's take_pending() has no
      * twin here).
      *
      * Only ARMED flags are reported and cleared: HT is set by hardware

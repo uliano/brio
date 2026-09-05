@@ -56,7 +56,7 @@
  * a kernel that has TimeEvents - the engine is interrupt-driven and
  * owns no clock, and the silicon's own time-outs (where they exist at
  * all: SMBus mode on the SAM SERCOM) police the HOST'S OWN clock hold,
- * not a wire a client wedged (measured, docs/samc/i2c.md). With
+ * not a wire a client wedged (measured, docs/samc21/i2c.md). With
  * timeout_ticks != 0 every transfer that goes asynchronous arms a
  * one-shot TimeEvent; if it matures first, the engine is declared dead:
  * Bus::recover() puts the PERIPHERAL back where start() is legal, the

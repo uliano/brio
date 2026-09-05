@@ -193,7 +193,7 @@ read back at run time as the proof. Three facts point the same way:
   with no workaround - and its own note lists "EEPROM emulation or other
   data storage in bank 2" as the safe use of the feature. Code must stay
   in one bank; data in the other is the vendor's sanctioned arrangement.
-- the bounds become **constants**, as they are on the samc's RWWEE array
+- the bounds become **constants**, as they are on the samc21's RWWEE array
   and unlike the AVR's, where the free flash is bounded by linker symbols
   that move with every build.
 
@@ -207,7 +207,7 @@ The bank splits once, at the top:
 
 **The media's addresses are OFFSETS from 0x0800_0000, and that is forced.**
 `util/nv_heap.hpp` numbers erase units in a `uint16_t`, so an absolute-address
-media must sit below page 65536 - which the samc's RWWEE array at
+media must sit below page 65536 - which the samc21's RWWEE array at
 0x0040_0000 does (page 16384) and this bank does **not**: 0x0804_0000 /
 2048 is 65664, one page past the field. The AVR backend already numbers
 its flash from zero, so this is the contract's other established
@@ -218,7 +218,7 @@ family fixture asserts both halves of the reasoning.
 (erasing one must not take the other down) and is already 256 write
 cells. The invariant `(max_ids + 2) x max_entry_cells <= half_cells` then
 reads `(6 + 2) x 6 <= 256` for the bench's six 32-byte values - and holds
-up to 40 such ids. That is what the 2048/8 geometry buys over the samc's
+up to 40 such ids. That is what the 2048/8 geometry buys over the samc21's
 256/64, where the same six values needed both rows of a 1 K attic.
 
 **Erratum ES0548 2.2.3 is unreachable by construction.** 3.3.8 makes one
@@ -383,7 +383,7 @@ composition, three lines of application glue over
 `kernel/panic.hpp` and `stm32g0/reset.hpp` with neither touched. The
 record then comes back with its code and its context byte intact,
 `take()` returns it once, and the next ordinary save restores the
-reserve. (The samc campaign found the same thing on its own silicon; this
+reserve. (The samc21 campaign found the same thing on its own silicon; this
 is its confirmation on the third.)
 
 **A reflash does not touch the storage.** OpenOCD's `program <elf> verify`
@@ -402,7 +402,7 @@ Driver gaps:
 
 - **Writing an option byte.** There is no OPTKEYR, OPTSTRT or OBL_LAUNCH
   verb, on purpose (see above). Provisioning wants a `bench.py` verb over
-  SWD, the way the samc's user row got one.
+  SWD, the way the samc21's user row got one.
 - **Setting WRP, PCROP or the securable area, and RDP.** Read-only decode
   only. Each of them is an option-byte write, and RDP Level 2 is one-way.
 - **Writing the OTP area.** It is memory-mapped and `read_otp()` reads

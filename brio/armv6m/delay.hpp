@@ -2,7 +2,7 @@
  * delay.hpp - the CORE stratum: microsecond busy-waits on SysTick.
  *
  * "At least", never early, and CAPPED BELOW ONE KERNEL TICK by contract.
- * The SAM C21 and the STM32G0 carried this file as twins (the samc one
+ * The SAM C21 and the STM32G0 carried this file as twins (the samc21 one
  * drew the boundary at birth, the stm32g0 one kept it to the verb and
  * the return value) until the code was found identical to the byte and
  * the two families' comments differed only in their numbers - so it
@@ -39,7 +39,7 @@
  * does not use that flag. The wait accumulates VAL deltas with the wrap
  * folded in, so it is correct across reload boundaries; it never
  * consults the tick COUNT, so it is equally correct with interrupts
- * masked - inside the samc's SysTickInterruptGuard windows, where the
+ * masked - inside the samc21's SysTickInterruptGuard windows, where the
  * counter runs under a masked interrupt, as anywhere else.
  *
  * WHAT THE NUMBERS MEAN: the wait is in CPU cycles, converted from
@@ -82,7 +82,7 @@
 #include <stdint.h>
 
 #if !defined(__CM0PLUS_REV) && !defined(__CM0_REV)
-#error "armv6m/delay.hpp: include the family's device header first (samc/delay.hpp and stm32g0/delay.hpp do)"
+#error "armv6m/delay.hpp: include the family's device header first (samc21/delay.hpp and stm32g0/delay.hpp do)"
 #endif
 
 #include "util/clock.hpp"

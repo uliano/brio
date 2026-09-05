@@ -28,7 +28,7 @@
 #
 #  TWO ARCHITECTURES SHARE THIS TOOL. The board's TYPE decides everything
 #  that differs (BOARD_TYPES below): db* is an AVR-Dx built by avrdx/ and
-#  written by avrdude over UPDI, c21j is a SAM C21 built by samc/ and written
+#  written by avrdude over UPDI, c21j is a SAM C21 built by samc21/ and written
 #  by OpenOCD over SWD. Everything above that line - the console protocol,
 #  the "ALL: N pass, M fail" verdict grammar, the campaign shape - is one
 #  story on both, which is the point.
@@ -65,11 +65,11 @@ except ImportError:
 # package, and the chip package is what decides which of the sibling CMake
 # projects builds for it, which release preset that project uses, which
 # app roster to read, and how firmware gets in. Mirrors avrdx/cmake/
-# avr-mcus.cmake and samc/CMakePresets.json by hand - keep them in sync.
+# avr-mcus.cmake and samc21/CMakePresets.json by hand - keep them in sync.
 #
 # "project" is also why the rosters are per project: app names COLLIDE
 # across the source trees (blink, console and probe exist in both avrdx/
-# and samc/), so an app name alone never identifies an app.
+# and samc21/), so an app name alone never identifies an app.
 BOARD_TYPES = {
     "db28": {"project": "avrdx", "preset": "avr128db28-release",
              "mcu": "avr128db28", "flash": "avrdude"},
@@ -77,7 +77,7 @@ BOARD_TYPES = {
              "mcu": "avr128db32", "flash": "avrdude"},
     "db48": {"project": "avrdx", "preset": "avr128db48-release",
              "mcu": "avr128db48", "flash": "avrdude"},
-    "c21j": {"project": "samc", "preset": "samc21j-release",
+    "c21j": {"project": "samc21", "preset": "samc21j-release",
              "mcu": "samc21j18a", "flash": "openocd",
              "target_cfg": "target/at91samdXX.cfg"},
     # The Nucleo-G0B1RE: STM32G0B1RE behind its on-board ST-LINK/V2.1 -
@@ -320,7 +320,7 @@ def openocd_args(prog, elffile, target_cfg):
     """OpenOCD over SWD: the probe KIND is the manifest's ("openocd_cmsisdap"
     = an Atmel-ICE, "openocd_stlink" = a Nucleo's on-board ST-LINK), the
     target script the board TYPE's (BOARD_TYPES). Otherwise the same invocation
-    samc/CMakeLists.txt's <app>-upload target uses - except that the probe
+    samc21/CMakeLists.txt's <app>-upload target uses - except that the probe
     is named by THE MANIFEST, not by the CMake cache. Identity is the
     manifest's concern (a second SAM board means a second probe), and this
     mirrors the AVR path, which calls avrdude itself rather than leaning on
@@ -802,7 +802,7 @@ def avr_cmd_fuses(args, prog, tspec):
 #     across untouched, AND THERE IS NO RAW BIT ESCAPE: a field this tool
 #     does not decode is a field it will not write;
 #   - nothing here reaches the security bit (SSB) or a chip erase, in either
-#     direction. brio's own samc/nvm.hpp makes the same ruling from the
+#     direction. brio's own samc21/nvm.hpp makes the same ruling from the
 #     firmware side and exposes no user-row write at all;
 #   - BOOTPROT, the LOCK word and setting WDT ALWAYS-ON all need
 #     --i-know-what-this-does: each of them can leave a board that refuses to
@@ -847,7 +847,7 @@ def sam_eeprom(v):
 
 
 # The three points table 45-18 actually gives. Everything between them is an
-# interpolation neither this tool nor samc/supc.hpp makes.
+# interpolation neither this tool nor samc21/supc.hpp makes.
 SAM_BOD_LEVELS = {8: "2.80 V typ", 9: "2.85 V typ", 44: "4.51 V typ"}
 
 
@@ -873,7 +873,7 @@ def sam_lock(v):
 
 
 # name, first bit, width, guarded, the register it is loaded into, decoder.
-# The bit positions are table 9-4's and are the same fields samc/nvm.hpp's
+# The bit positions are table 9-4's and are the same fields samc21/nvm.hpp's
 # NvmUserRow reads from the firmware side - the two must move together.
 SAM_FUSES = (
     ("bootprot", 0, 3, True, "NA, see table 27-2", sam_bootprot),
@@ -905,7 +905,7 @@ SAM_FUSE_BY_NAME = {f[0]: f for f in SAM_FUSES}
 # The bits table 9-4 gives a meaning this tool refuses to touch. They are
 # carried across every write verbatim; two of them are the BODCORE
 # calibration, which the note under table 9-4 and 22.6.3.4 both say must not
-# change (samc/supc.hpp's BodCore makes the same ruling by having no setter).
+# change (samc21/supc.hpp's BodCore makes the same ruling by having no setter).
 SAM_PRESERVED = (
     (3, 1, "Reserved"),
     (7, 1, "Reserved"),

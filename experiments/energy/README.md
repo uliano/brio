@@ -68,7 +68,7 @@ floors) and duty-100% (measures the true I0 and k of THIS die).
 
 ## The instrument: the SAM C21 is three things at once
 
-`samc/energy_meter.cpp` on bench board C:
+`samc21/energy_meter.cpp` on bench board C:
 
 - THE WORLD: its DAC (PA02) plays a seeded burst schedule as a real
   analog stimulus into the DUT's ADC pin - same seed, identical event

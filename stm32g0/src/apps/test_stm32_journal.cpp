@@ -14,7 +14,7 @@
 // cannot say anything about.
 //
 // AND IT IS THE JOURNAL'S THIRD SILICON. util/nv_journal.hpp was written
-// on the samc's RWWEE array (256-byte erase unit, 64-byte cell) and
+// on the samc21's RWWEE array (256-byte erase unit, 64-byte cell) and
 // host-swept over three geometries, one of which - 2048/8 - was chosen
 // because it is THIS part's. So the first thing letter a checks is that
 // the geometry the host suite has been sweeping all along is the one the
@@ -166,7 +166,7 @@ static_assert(MeteredZone::write_cell == 8u);
 /// Six 32-byte values in two 2 Kbyte halves. The journal's own
 /// static_assert then performs (6 + 2) x 6 cells <= 256 cells, which is
 /// this geometry's whole point: one PAGE per half is already generous
-/// where the samc needed two rows for the same six values.
+/// where the samc21 needed two rows for the same six values.
 using Journal = NvJournal<MeteredZone, 6, 32, 1>;
 Journal journal;
 
@@ -755,7 +755,7 @@ void tp_resume() {
     // WHICH PATH WROTE IT is the finding, not an implementation detail.
     // On this board panic()'s BKPT escalates into HardFault before the
     // Reporter is called, so an application that wants a flash
-    // breadcrumb has to bind the fault body - the samc campaign's
+    // breadcrumb has to bind the fault body - the samc21 campaign's
     // finding, confirmed on the third silicon.
     bench.verdict("and it was the FAULT BODY that wrote it, not the Reporter: "
                   "with C_DEBUGEN cleared, panic()'s BKPT escalates before "

@@ -106,7 +106,7 @@
  *    is idempotent.
  *
  * WHY RCC_BDCR LIVES HERE AND NOT IN clock.hpp. On the SAM the RTC's
- * clock select sits in the oscillator block and samc/rtc.hpp never
+ * clock select sits in the oscillator block and samc21/rtc.hpp never
  * touches it - one register, one owner. The same rule applies here and
  * lands the other way round, for three reasons: RCC_BDCR is unreachable
  * without PWR_CR1.DBP, so its access discipline is the RTC DOMAIN's and

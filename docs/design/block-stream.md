@@ -23,7 +23,7 @@ then, it moves in the open.
 
 The contract is about BLOCKS, not about DMA. Nothing below asks how a
 buffer gets full or drained; on the SAM C21 both concepts are satisfied
-by DMA engines (`samc/dmac.hpp`), and a machine with no DMA can satisfy
+by DMA engines (`samc21/dmac.hpp`), and a machine with no DMA can satisfy
 them from an interrupt handler filling the same buffers.
 
 - **`BlockSource`** - the capture shape: `element` (the sample type),

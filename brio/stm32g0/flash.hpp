@@ -8,7 +8,7 @@
  * ECC status and the one interrupt.
  *
  * WHY THE WAIT STATES LIVE HERE AND NOT IN clock.hpp: they are the flash
- * interface's register, and the samc stratum paid for the other choice
+ * interface's register, and the samc21 stratum paid for the other choice
  * (clock.hpp squatted on NVMCTRL's RWS until the NVM campaign took it
  * back). The clock task calls in; this file owns the register.
  *
@@ -95,7 +95,7 @@
  *  - the ORDER is the same rule as on every target: wait states go UP
  *    before a frequency rise and DOWN after a fall, and a new LATENCY
  *    value is in force only when it READS BACK - 3.7.1 says so in one
- *    sentence, and the samc side proved the cost of not waiting.
+ *    sentence, and the samc21 side proved the cost of not waiting.
  *  - ICEN (instruction cache) is set at reset, PRFTEN (prefetch) is
  *    clear. This stratum leaves both at their reset values: erratum
  *    ES0548 2.2.10 (see above) makes PRFTEN a decision to take

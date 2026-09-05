@@ -55,7 +55,7 @@ struct Stm32Platform {
     /// Sleep - the CPU clock stops, HCLK, SysTick and every peripheral
     /// keep running (5.3) - and with stm32g0/sleep.hpp's site having
     /// armed a Stop, the same WFI is that Stop. The site arms above this
-    /// hook and the hook takes what it finds, exactly as the samc hook
+    /// hook and the hook takes what it finds, exactly as the samc21 hook
     /// does with PM.SLEEPCFG. KERNEL TIME STOPS in a Stop (SysTick rides
     /// HCLK), which is what Stm32TimedSleepSite exists to repair.
     ///
@@ -78,7 +78,7 @@ struct Stm32Platform {
     /// HardFault_Handler, which the crt provides as a distinct spin loop
     /// so the wreck is legible in a backtrace. And with C_DEBUGEN left
     /// set by a flashing session the core HALTS here in silence - the
-    /// samc bench lesson, answered the same way: tools/bench.py clears
+    /// samc21 bench lesson, answered the same way: tools/bench.py clears
     /// DHCSR after every flash.
     static void break_here() { __BKPT(0); }
 

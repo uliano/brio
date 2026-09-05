@@ -1,5 +1,5 @@
 # ============================================================================
-#  toolchain-arm.cmake - cross toolchain for the STM32G0 family (Cortex-M0+) - the samc
+#  toolchain-arm.cmake - cross toolchain for the STM32G0 family (Cortex-M0+) - the samc21
 #  file verbatim: same compiler, same core; the armv6m factoring pass may
 #  make the two one file.
 #

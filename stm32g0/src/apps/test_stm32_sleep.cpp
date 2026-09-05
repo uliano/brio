@@ -513,7 +513,7 @@ void td_wake_cost() {
     //
     // The loop is N whole rounds of arm-sleep-wake against the same N
     // rounds of the shallowest rung, with the alarm RE-ARMED every round
-    // - and even so it locks to RTCCLK, which is the samc bench's own
+    // - and even so it locks to RTCCLK, which is the samc21 bench's own
     // lesson about sub-tick overheads.
     constexpr uint16_t rounds = 32;
     constexpr uint32_t counts = 15;   // (15 + 1) / 2048 s ~ 7.8 ms
@@ -792,7 +792,7 @@ void tf_timed_site() {
     // The lines printed above take tens of milliseconds to leave at
     // 115200, and a drain placed between arming the deadline and
     // stamping the wall would put all of them INSIDE the measurement -
-    // which is the samc bench's own lesson about a print in a
+    // which is the samc21 bench's own lesson about a print in a
     // measurement window, in a new dress. It cost this letter one round
     // of "the event matured early", which is the one verdict that must
     // never be wrong here.

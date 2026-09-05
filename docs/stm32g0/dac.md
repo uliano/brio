@@ -65,7 +65,7 @@ because only the owner knows what its stream was.
 
 **The wave generators need a trigger.** WAVEx is "only used if TENx = 1"
 (16.7.1), so `dac_channel_config_valid()` refuses noise or triangle
-without one rather than quietly doing nothing - the samc `dac.hpp`
+without one rather than quietly doing nothing - the samc21 `dac.hpp`
 ruling on dithering, reached again from another chapter. MAMPx is
 2^(code+1) - 1 in both its readings (an LFSR mask and a triangle
 amplitude), saturating at 4095 above code 11.

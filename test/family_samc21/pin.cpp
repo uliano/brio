@@ -1,0 +1,84 @@
+// PORT/pin family smoke TU. Both port groups, the pin vocabulary and
+// the multi-pin engine must instantiate on every variant - the PORT
+// peripheral is the same two groups everywhere in this family, so a
+// group letter that compiles here compiles on all of them (which is
+// what neg/pin_no_portc.cpp states from the other side).
+#include "samc21/pin.hpp"
+
+using namespace brio;
+
+static_assert(port_exists('A'));
+static_assert(port_exists('B'));
+static_assert(!port_exists('C'));
+static_assert(!port_exists('a'));
+static_assert(Pin<'B', 23>::mask == (1u << 23));
+static_assert(PwmChannel<Pin<'B', 23>>);
+
+void pin_common() {
+    using Led = Pin<'B', 23>;
+    Led::output();
+    Led::set();
+    Led::clear();
+    Led::toggle();
+    Led::duty(1);
+    (void)Led::read();
+    (void)Led::is_output();
+    (void)Led::ref();
+
+    using Button = Pin<'B', 22>;
+    Button::input(PinPull::up);
+    Button::pull(PinPull::down);
+    Button::pull(PinPull::none);
+    Button::configure({.input_enable = true, .pull = PinPull::up});
+    Button::configure({});               // buffer off, no pull, PORT-owned
+    Button::input_enable(false);
+    Button::strong_drive(true);
+
+    // The peripheral handoff, both PMUX nibbles (even and odd pin).
+    Pin<'B', 30>::function(PinFunction::d, {.input_enable = true});
+    Pin<'B', 31>::function(PinFunction::d, {.input_enable = true});
+    (void)Pin<'B', 30>::has_function();
+    Pin<'B', 30>::release();
+}
+
+void port_resource() {
+    using PA = Port<'A'>;
+    PA::dir_set(0x0000'000Cu);
+    PA::dir_clear(0x0000'0004u);
+    PA::dir_toggle(0x0000'0008u);
+    PA::out_set(0x0000'0004u);
+    PA::out_clear(0x0000'0004u);
+    PA::out_toggle(0x0000'0004u);
+    (void)PA::in();
+    (void)PA::dir();
+    (void)PA::out();
+
+    // A mask spanning both WRCONFIG half-words: two stores, one call.
+    PA::configure_mask(0x0001'0001u, {.input_enable = true, .pull = PinPull::up});
+    PA::function_mask(0x00C0'0000u, PinFunction::c, {.input_enable = true});
+    static_assert(Port<'B'>::group == 1);
+}
+
+void port_event_user() {
+    using PA = Port<'A'>;
+    static_assert(PA::event_input_count == 4);
+    static_assert(PA::event_user(0) == 1);
+    static_assert(PA::event_user(3) == 4);
+    // Both groups reach the same four EVSYS users; which group acts is
+    // decided by which group's EVCTRL enables the input.
+    static_assert(Port<'B'>::event_user(0) == PA::event_user(0));
+
+    static_assert(port_event_config_valid(PortEventConfig{.pin = 31}));
+    static_assert(!port_event_config_valid(PortEventConfig{.pin = 32}));
+
+    (void)PA::configure_event(0, PortEventConfig{.pin = 16,
+                                                 .action = PortEventAction::out,
+                                                 .enable = true});
+    (void)PA::configure_event<1, PortEventConfig{.pin = 9,
+                                                 .action = PortEventAction::toggle,
+                                                 .enable = true}>();
+    (void)PA::configure_event(4, PortEventConfig{});   // no such input: false
+    (void)PA::event_config(0);
+    (void)PA::evctrl();
+    PA::release_events();
+}

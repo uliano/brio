@@ -224,7 +224,7 @@ constexpr bool usart_has_clock_select(uint8_t n) { return usart_clock_select_pos
 /// G071/G081, USART3_4_5_6 on the G0B0, USART3_4_5_6_LPUART1 on the
 /// G0B1/G0C1. A header that named things otherwise would fail to
 /// compile here, never bind a wrong line: a wrong line would be a
-/// silent Default_Handler spin (the samc stratum's NMI lesson), which
+/// silent Default_Handler spin (the samc21 stratum's NMI lesson), which
 /// is also why the family fixture instantiates every present instance
 /// on every header the pack ships. NonMaskableInt_IRQn for an instance
 /// the device has not got - unreachable, Usart<n> refusing it first.

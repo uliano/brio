@@ -1,9 +1,9 @@
 # ============================================================================
 #  stm32g0/CMakeLists.txt - the STM32G0 build: brio's third hardware target,
 #  a SIBLING CMake project (own toolchain file, own presets) exactly like
-#  samc/ and avrdx/ - nothing shared, one configure = one compiler, and
+#  samc21/ and avrdx/ - nothing shared, one configure = one compiler, and
 #  still no factored "app discovery" module: this is the THIRD instance of
-#  the shape, written by hand from the samc one, and the factoring (if it
+#  the shape, written by hand from the samc21 one, and the factoring (if it
 #  ever happens) happens with all three in hand.
 #
 #  One executable target per app: every stm32g0/src/apps/*.cpp with a
@@ -118,7 +118,7 @@ function(stm32_add_app name)
 
     # -nostartfiles: the crt is ours; newlib-nano provides memcpy etc.;
     # NO syscall stubs on purpose (an accidental _sbrk/_write fails the
-    # link loudly). Same rationale as samc/CMakeLists.txt.
+    # link loudly). Same rationale as samc21/CMakeLists.txt.
     target_link_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}
         $<$<CONFIG:Release>:-Os -g>
@@ -145,7 +145,7 @@ function(stm32_add_app name)
         VERBATIM
     )
 
-    # The DHCSR write after the reset is the samc lesson (a core left with
+    # The DHCSR write after the reset is the samc21 lesson (a core left with
     # C_DEBUGEN set HALTS on BKPT instead of faulting): every panic ends in
     # a BKPT, and a flashing session must not leave the board deaf to it.
     add_custom_target(${name}-upload

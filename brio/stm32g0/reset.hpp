@@ -41,7 +41,7 @@
  * 2. RCC_CSR IS A SHARED REGISTER, and the two halves have two owners.
  *    Bits 31..23 are this chapter's (the flags and RMVF); bits 1..0 are
  *    the clock tree's (LSION/LSIRDY) and belong to stm32g0/clock.hpp's
- *    `Rcc`, which is where the LSI verbs live - the samc precedent,
+ *    `Rcc`, which is where the LSI verbs live - the samc21 precedent,
  *    where rtc.hpp never writes OSC32KCTRL's RTCCTRL. Every write here
  *    is a read-modify-write that preserves the other owner's bits.
  *
@@ -103,7 +103,7 @@
  *    WWDG's refresh is legal only while the counter is at or below W
  *    and above 0x3F, so any W below 0x40 is the same trap. Both are
  *    refused by the config_valid() predicates rather than armed, the
- *    samc WdtConfig precedent (a caller that asked for a serviceable
+ *    samc21 WdtConfig precedent (a caller that asked for a serviceable
  *    watchdog must not silently get an unserviceable one). Provoking a
  *    reset ON PURPOSE has its own spelling on each: Iwdg::force_reset()
  *    refreshes into a closed window, Wwdg::force_reset() clears T6 with
@@ -343,7 +343,7 @@ struct Iwdg {
      * NOT INSTANTANEOUS and not [[noreturn]]: the refresh crosses into
      * the LSI domain, so the CPU executes whatever follows for a few
      * tens of microseconds. A caller that means to end here says so
-     * with a spin of its own - the samc Watchdog::force_reset()
+     * with a spin of its own - the samc21 Watchdog::force_reset()
      * precedent, for the same reason.
      *
      * Requires a running watchdog: with the counter stopped there is

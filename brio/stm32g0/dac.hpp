@@ -43,7 +43,7 @@
  *
  * 4. THE WAVE GENERATORS NEED A TRIGGER. WAVEx is "only used if TENx = 1"
  *    (16.7.1), so noise and triangle are refused without one rather than
- *    quietly doing nothing - the samc dac.hpp ruling on dithering,
+ *    quietly doing nothing - the samc21 dac.hpp ruling on dithering,
  *    reached again from another chapter.
  *
  * The reference is stm32g0/vref.hpp's `Ref`: 16.4.6's transfer function
@@ -240,7 +240,7 @@ public:
      * CHOICE and it decides the beat width: DHR12Rx wants a halfword,
      * DHR8Rx a byte, and a stream whose element type disagrees with the
      * register it was pointed at writes a number the converter never
-     * meant (the samc campaign's 24-bit lesson, in a smaller key).
+     * meant (the samc21 campaign's 24-bit lesson, in a smaller key).
      */
     static volatile void* data_address_12r(uint8_t ch) {
         return ch == 0u ? static_cast<volatile void*>(&regs().DHR12R1)

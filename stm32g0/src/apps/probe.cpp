@@ -1,6 +1,6 @@
 // probe - the smallest firmware for the Nucleo-G0B1RE: raw-register
 // HSI16 -> PLL -> 64 MHz and a PA5 (LD4) blink, nothing else. The stm32g0
-// analog of the AVR project's family_probe and the samc probe, with the
+// analog of the AVR project's family_probe and the samc21 probe, with the
 // same two jobs: on the desk it proves the whole new chain (toolchain
 // flags, linker script, startup, vector table, OpenOCD over the ST-LINK)
 // with zero brio code in the loop; at the bench it is the first thing

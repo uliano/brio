@@ -64,7 +64,7 @@ therefore spelled from the source.
 
 **The request vocabulary is not in any header of this pack.** Table 55
 numbers 77 request lines by peripheral, and the `DMAMUX_REQ_*` spellings
-live in ST's HAL/LL, which this project does not vendor. So the samc
+live in ST's HAL/LL, which this project does not vendor. So the samc21
 EVSYS ruling applies unchanged: `dma.hpp` owns the FABRIC and takes a
 plain request id, and each peripheral publishes its own codes. The
 family fixture is where the two publishing drivers are held to one table.
@@ -326,7 +326,7 @@ peripheral of its own and never sees an interrupt.
 **The console's own transmit engine saturates the wire, and at 115200 the
 per-byte feed costs nothing.** A kilobyte took 88.97 ms fed byte by byte
 (11510 B/s) and 88.98 ms fed in bulk (11508 B/s), against the 11520 B/s
-115200 8N1 carries. The samc campaign measured the per-byte pump losing a
+115200 8N1 carries. The samc21 campaign measured the per-byte pump losing a
 third of the wire - but it measured it at MEGABAUD; here the wire is five
 hundred times slower than the pump, the ring is always full when a block
 ends, and every block the engine gets is a long one.

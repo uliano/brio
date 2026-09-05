@@ -31,7 +31,7 @@ buffer and the comparators. Family fixture
 
 **One converter, nineteen channels, and no instance question at all.**
 Every STM32G0 carries exactly one ADC (15.1), so `Adc` is a MONOSTATE
-and not an `Adc<n>` - the samc `Dac`/`Sdadc`/`Tsens` precedent. Sixteen
+and not an `Adc<n>` - the samc21 `Dac`/`Sdadc`/`Tsens` precedent. Sixteen
 of the nineteen channels are pads and three are internal: the
 temperature sensor on 12, VREFINT on 13 and VBAT/3 on 14 (15.3.8), each
 woken by its own bit of ADC_CCR. That register is NOT part of

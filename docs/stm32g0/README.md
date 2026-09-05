@@ -18,15 +18,15 @@ over SWD).
 ## Toolchain
 
 Self-built **arm-none-eabi-gcc 16.2** at `/sw/arm-none-eabi` - the
-same compiler, flags and linker discipline as the samc project
+same compiler, flags and linker discipline as the samc21 project
 (`stm32g0/cmake/toolchain-arm.cmake` is that file verbatim:
 `CMAKE_SYSTEM_NAME Generic`, `STATIC_LIBRARY` try-compile,
 `--specs=nano.specs -nostartfiles`, deliberately NO syscall stubs so
 an accidental `_sbrk`/`_write` fails the link). The `armv6m/` core
 stratum the naming rule calls for at the second ARM family is factored
 AFTER this bring-up, with both implementations in hand and a
-byte-identity gate on every samc image; until then `nvic.hpp` and
-`ticker.hpp` are the samc files' twins by discipline.
+byte-identity gate on every samc21 image; until then `nvic.hpp` and
+`ticker.hpp` are the samc21 files' twins by discipline.
 
 The device headers are vendored: `third_party/cmsis-device-g0/`
 (ST's cmsis-device-g0 v1.4.5, every G0 part) and the shared
@@ -51,7 +51,7 @@ crystal (X3 is not fitted by default and the ST-LINK's 8 MHz MCO reaches
 HSE only through solder bridges - the HSE root is unbuilt anyway).
 
 `stm32g0/` is its own CMake project, a sibling and peer of `avrdx/`,
-`samc/` and `test/`. Apps are auto-discovered from
+`samc21/` and `test/`. Apps are auto-discovered from
 `stm32g0/src/apps/*.cpp` - plus `experiments/*/stm32g0/*.cpp` - by
 their `// build:` header comment, the other two projects' grammar with
 this family's board names (`boards = g0b1re`, the default). One
@@ -134,7 +134,7 @@ serial monitor, or pyserial, at 115200 8N1.
 Flashing goes through OpenOCD driving the Nucleo's on-board
 ST-LINK/V2.1: `interface/stlink.cfg` + `target/stm32g0x.cfg` (the
 stm32l4x flash driver underneath) + `program <app>.elf verify`, then
-`reset run` and a write of DHCSR that clears C_DEBUGEN - the samc
+`reset run` and a write of DHCSR that clears C_DEBUGEN - the samc21
 lesson, kept: a core left with halting debug enabled HALTS on a BKPT
 instead of faulting, and every `panic()` ends in one. The oss-cad-suite
 OpenOCD at `/sw/oss-cad-suite/bin/openocd` drives the ST-LINK
@@ -147,7 +147,7 @@ ONE SWD CAVEAT worth knowing: memory reads THROUGH THE HLA TRANSPORT
 WHILE THE CORE SLEEPS IN WFI ARE UNRELIABLE - a running console
 (WFI between events) answered `0xffffffb7` for FLASH_ACR and zeros
 for RCC_CR, values those registers cannot hold, while the same reads
-after `halt` were exact. Halt first, read, resume; the samc board
+after `halt` were exact. Halt first, read, resume; the samc21 board
 (CMSIS-DAP) never showed this.
 
 A SECOND SWD CAVEAT, and this one cost a campaign a false fact:
@@ -174,7 +174,7 @@ The launch config is "Debug STM32G0 (OpenOCD, Nucleo-G0B1RE)" in
 files, `adapter serial` through `openOCDPreConfigLaunchCommands`, and
 `svdPath` at `stm32g0/svd/STM32G0B1.svd`. CMake Tools' Active Folder
 must be `stm32g0/` and its launch target the app to debug. Not yet
-exercised at the bench (the samc entry is the proven twin; the light
+exercised at the bench (the samc21 entry is the proven twin; the light
 verification policy for mature tooling applies).
 
 ## Editor (clangd)

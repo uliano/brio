@@ -19,7 +19,7 @@
  *    page erase. So a program that stores a record while it runs must
  *    store it in the bank it does not execute from. That is what makes
  *    an ordinary NvJournal::save() legal from the main loop here, the
- *    same property the samc backend bought by living in the RWWEE array.
+ *    same property the samc21 backend bought by living in the RWWEE array.
  *
  *  - ERRATUM ES0548 2.2.10 (LIVE, no workaround): the prefetch may fail
  *    when the CPU BRANCHES ACROSS BANKS. The erratum's own note then
@@ -30,7 +30,7 @@
  *  - A CONSTANT ZONE. stm32g0/../ld/stm32g0b1re.ld gives the linker BANK
  *    1 ONLY (256 K of rom), so nothing the compiler emits can land in
  *    bank 2. The heap's floor and the journal's home are therefore
- *    CONSTANTS, exactly as they are on the samc's RWWEE array and unlike
+ *    CONSTANTS, exactly as they are on the samc21's RWWEE array and unlike
  *    the AVR's, where the free flash is bounded by linker symbols that
  *    move with every build. The linker script's own `__brio_rom_end` is
  *    read back here as the proof, so a script edited back to 512 K
@@ -39,7 +39,7 @@
  * ADDRESSES HERE ARE OFFSETS FROM 0x0800 0000, not absolute, and that is
  * a decision with a reason. util/nv_heap.hpp numbers erase units in a
  * uint16_t (NvBlockEntry::first_page), so a media whose addresses are
- * absolute must sit below page 65536 - which the samc's RWWEE array at
+ * absolute must sit below page 65536 - which the samc21's RWWEE array at
  * 0x0040 0000 does (page 16384) and this part's bank 2 at 0x0804 0000
  * does NOT: 0x08040000 / 2048 is 65664, one page past the field. The
  * AVR backend already numbers its flash from zero, so this is the
@@ -47,7 +47,7 @@
  * costs one addition per access.
  *
  * THE ARRAY IS PARTITIONED, because this target has the same two storage
- * classes the samc does and one array to put them in:
+ * classes the samc21 does and one array to put them in:
  *
  *   pages 0..125 of bank 2   MainFlash             252 K  blocks
  *                                                         (util/nv_heap.hpp),
@@ -67,7 +67,7 @@
  *
  * THE GRANULARITIES, and they are the widest split of the three targets:
  * an erase takes down a PAGE of 2048 bytes and a program writes a DOUBLE
- * WORD of 8. On the samc it is 256 and 64, on the AVR 512 and 2. Code
+ * WORD of 8. On the samc21 it is 256 and 64, on the AVR 512 and 2. Code
  * that says "page" for both is code that is wrong on all three.
  *
  * ERRATUM ES0548 2.2.3 IS UNREACHABLE BY CONSTRUCTION here, and it is
@@ -285,7 +285,7 @@ static_assert(MainFlash::flash_end % MainFlash::erase_size == 0u,
 static_assert(MainFlash::flash_end / MainFlash::erase_size <= 0xFFFFu,
               "NvHeap numbers erase units in a uint16_t - which is why this "
               "media's addresses are offsets from 0x08000000 and not the "
-              "absolute addresses the samc backend can afford");
+              "absolute addresses the samc21 backend can afford");
 
 /**
  * The journal's share: the attic, the top two pages of bank 2.
@@ -293,7 +293,7 @@ static_assert(MainFlash::flash_end / MainFlash::erase_size <= 0xFFFFu,
  * A second FlashMedia rather than a parameter on the first one, because
  * the contract is a whole MEMORY and both users anchor their own home to
  * their media's flash_end. Two media over one bank is what keeps that
- * true for both without either knowing the other exists - the samc
+ * true for both without either knowing the other exists - the samc21
  * partition's shape, one page size up.
  */
 struct MainFlashJournalZone {

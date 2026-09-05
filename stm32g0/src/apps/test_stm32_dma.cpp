@@ -981,7 +981,7 @@ void tf_multiplexer() {
                       true);
     } else {
         // The honest form: report and decline, rather than assert a
-        // mechanism the bench did not show (the samc TC 1.20.2 precedent).
+        // mechanism the bench did not show (the samc21 TC 1.20.2 precedent).
         print(serial, "  the software trigger moved ", sw_moved, " of 5 - the "
               "SWIER path to trigger input ", sw_line, " is NOT confirmed here "
               "and the verdict is declined, the hardware trigger above being "
@@ -1216,7 +1216,7 @@ void th_usart_engines() {
     // up with TE set and TXE ALREADY STANDING, which is exactly the state
     // the SAM's DMAC could not start from: it latches a trigger on the
     // RISE of the request, so a channel armed over a standing level waits
-    // for an edge that has been and gone (the samc UART campaign found a
+    // for an edge that has been and gone (the samc21 UART campaign found a
     // transmitter dead in it, and kick() is that target's answer).
     //
     // Nothing leaves the die here: USART1's pads are never claimed, so
@@ -1290,7 +1290,7 @@ void th_usart_engines() {
     // --- the console itself. Every line of this suite has already gone
     // out through a DmaTxEngine and every letter came in through a
     // DmaRxEngine, so what is left to measure is the RATE - and the two
-    // ways of feeding an engine, which is the samc campaign's lesson
+    // ways of feeding an engine, which is the samc21 campaign's lesson
     // arriving on the third target.
     auto drain = [] {
         uint32_t spins = 20'000'000u;
@@ -1345,7 +1345,7 @@ void th_usart_engines() {
                   "left the chip the same way",
                   bulk_bps > 11000u && bulk_bps < 12000u);
     bench.verdict("AND AT THIS RATE FEEDING IT BYTE BY BYTE COSTS NOTHING - "
-                  "the samc campaign measured the per-byte pump losing a "
+                  "the samc21 campaign measured the per-byte pump losing a "
                   "third of the wire, but it measured it at MEGABAUD: here "
                   "the wire is five hundred times slower than the pump, the "
                   "ring is always full when a block ends, and every block "
@@ -2040,7 +2040,7 @@ void tl_timer_burst() {
 
 // ---- u: the host peer, and the VCP's ceiling (OUTSIDE z) -----------------------
 //
-// tools/uart_stress.py, unchanged from the samc campaign: the board
+// tools/uart_stress.py, unchanged from the samc21 campaign: the board
 // prints one "HOST op mode baud format window count" line and the script
 // moves its own port to that rate, pumps or verifies the same xorshift,
 // and goes quiet before the board speaks again. It is the only letter

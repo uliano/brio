@@ -36,7 +36,7 @@
  *    below 2 MHz - a whole-program decision that an application makes,
  *    not something to do behind its back for the duration of one idle.
  *    So `light` maps to Sleep, and `armed()` - which is a PURE READ of
- *    the silicon, the samc position kept - answers `none` for it,
+ *    the silicon, the samc21 position kept - answers `none` for it,
  *    because that is what the machine will really do. The manager's
  *    WakeReport then carries `none`, which is the truth.
  *
@@ -90,7 +90,7 @@
  *
  * ## The timed site
  *
- * The plain site keeps the v1 HONEST RESTRICTION the samc stated: with
+ * The plain site keeps the v1 HONEST RESTRICTION the samc21 stated: with
  * kernel time frozen for the whole Stop, a program with armed time
  * events must not take one. `Stm32TimedSleepSite` LIFTS it, by the same
  * two-verb trick that worked on the SAM and with the RTC in both roles:
@@ -117,7 +117,7 @@
  * its own says so in the config, and gets the slack back.
  *
  * THE ISR HAS FOUR ACTS, and every one of them is load-bearing. The
- * first three are the samc's, learned at that bench; the fourth is this
+ * first three are the samc21's, learned at that bench; the fourth is this
  * family's own:
  *   0. RESTORE THE CLOCK - fact 4 above. First, so that everything
  *      after it (and every handler that runs later) is at full speed

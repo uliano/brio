@@ -41,7 +41,7 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   implementation as the fixed point the next platform is measured
   against).
 - `docs/<target>/` - one folder per target, mirroring
-  `brio/<target>/` (`avrdx/`, `samc/`, `host/`): `README.md` is the
+  `brio/<target>/` (`avrdx/`, `samc21/`, `host/`): `README.md` is the
   operational page (toolchain, board, probe, debugger and their
   quirks); next to it ONE document per peripheral in the shape
   docs/README.md prescribes (documents of record -> what the silicon
@@ -87,14 +87,14 @@ logic, includes nothing of brio), `util/` (services over the kernel),
 `armv6m/` (the CORE stratum both Cortex-M0+ families include after
 their device header: NVIC + PRIMASK guard, the SysTick ticker),
 `avrdx/` (everything that knows `avr/io.h`: AVR DA/DB, bench chip
-AVR128DB48), `samc/` (everything that knows `sam.h`: SAM C21,
+AVR128DB48), `samc21/` (everything that knows `sam.h`: SAM C21,
 Cortex-M0+, bench chip ATSAMC21J18A), `stm32g0/` (everything that
 knows `stm32g0xx.h`: STM32G0, Cortex-M0+, bench chip STM32G0B1RE on
 a Nucleo-64), `host/` (the native test
 target). Includes carry the stratum prefix
 (`#include "avrdx/usart.hpp"`). The builds are four sibling CMake
 projects, PEERS - the repo root is not a CMake project: `avrdx/`,
-`samc/` and `stm32g0/` (each with its own toolchain file and presets,
+`samc21/` and `stm32g0/` (each with its own toolchain file and presets,
 Ninja, emitting into the shared `build-cmake/`) auto-discover one
 `main()` per `src/apps/<app>.cpp` at configure time from its own
 `// build:` header comment; host tests in `test/` are the fourth
@@ -105,7 +105,12 @@ lives in preset names, per-chip ld/svd files and the `*_MCU` cache
 variables. Names are claims, extended only when a real chip extends
 the family - the known landing names, never used early: avrdx ->
 avrxt (Microchip's sigla for the modern-AVR core) when an EA/mega0
-part proves it shares the stratum; samc -> sam0 if a D21 arrives; stm32g0 SHARES its name with
+part proves it shares the stratum; samc -> samc21 RENAMED 2026-09-05
+(the user's call) and the OLD "-> sam0" landing name RETIRED with it:
+the C21 is the only SAM this stratum has ever known and a D21 would
+not share GCLK/PM/SYSCTRL with it, so a D21 earns its OWN stratum
+rather than widening this one - chip precision in the name itself,
+like avrdx's own DA/DB span; stm32g0 SHARES its name with
 the G0x0 value line - RULED 2026-09-04 on the headers (every x0 header
 is a strict subset of its x1 twin: the same IP under the same register
 names), the stratum compiles on all twelve G0 headers of the pack with
@@ -115,7 +120,7 @@ board; an `armv6m/` core
 stratum factored at the SECOND ARM family - DONE 2026-09-02 the day
 the stm32g0 arrived: brio/armv6m/{nvic,ticker}.hpp, the two families'
 nvic/ticker headers reduced to device-include + core-include + their
-own extras, every one of the 42 samc + stm32g0 images byte-identical
+own extras, every one of the 42 samc21 + stm32g0 images byte-identical
 before and after (worktree gate with pinned mtimes).
 
 ## Governing rule and stability hierarchy
@@ -202,7 +207,7 @@ vector - vector names never appear in portable code. No `#ifdef` where
 a template/concept boundary can do the job - and where only the
 preprocessor can ask (does this vendor macro exist?), a probe that
 yields a VALUE lives in the family's device-tables header
-(samc/device_tables.hpp), never in a driver; a driver keeps `#ifdef`
+(samc21/device_tables.hpp), never in a driver; a driver keeps `#ifdef`
 only to select per-instance CODE (ruling 2026-08-28, full text in
 overview.md "Generalization rule"); no target includes outside
 the target strata; the kernel must never know which silicon it runs
@@ -427,13 +432,13 @@ gets its dated home in `docs/design/` when taken.
   3 Mbaud sink leg still loses the tally - three unproven repairs tried
   and REVERTED, recorded). Campaign 11 delay.hpp INTO armv6m/ DONE
   2026-09-03 night BY FABLE'S OWN HAND (the reviewer platform.md's gap
-  line was waiting for): the samc and stm32g0 copies were identical to
+  line was waiting for): the samc21 and stm32g0 copies were identical to
   the byte in code and differed only in their measured numbers, so
   brio/armv6m/delay.hpp carries the code and the merged reasoning and
   each family's delay.hpp is the device include plus the core file plus
   its own facts (the SAM's 4 us division and 20.8 ns VAL, the G0's two
   wait states and 15.6 ns); gated on BOTH projects from the build alone
-  - 39/39 samc and 16/16 stm32g0 images byte-identical - with
+  - 39/39 samc21 and 16/16 stm32g0 images byte-identical - with
   test_stm32_platform z 53/53 on the bench (letter d is the delay). Campaign 10b THE TAILS, SECOND PASS, DONE
   2026-09-04 small hours (Opus, re-verified by Fable's hand: rtc z
   125/125 cold, analog z 139/139 cold, dma z 69/69 cold, tim 105/105,
@@ -479,7 +484,7 @@ gets its dated home in `docs/design/` when taken.
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device
   select macro because IRQn values are enumerators the preprocessor
-  cannot probe), nvic.hpp + ticker.hpp (the samc files' twins line for
+  cannot probe), nvic.hpp + ticker.hpp (the samc21 files' twins line for
   line - the armv6m/ factoring candidates, deliberately NOT factored
   yet), platform_stm32.hpp (`Stm32Platform`: WFI = Sleep mode,
   SLEEPDEEP never written), flash.hpp (FlashWaitStates with the
@@ -496,7 +501,7 @@ gets its dated home in `docs/design/` when taken.
   (`Usart<n>` + `Uart<n, pins>` with the SAME public surface as the
   other two targets' Uart; non-FIFO view; the integer baud divisor;
   ORE cleared through ICR or the handler storms). stm32g0/ build
-  project NEW (the samc shape; `STM32G0_MCU` = full part number ->
+  project NEW (the samc21 shape; `STM32G0_MCU` = full part number ->
   device define STM32G0B1xx + ld/<part>.ld + startup_<header>.cpp;
   the crt's handler NAMES come from ST's startup template because the
   header declares none; OpenOCD stlink.cfg + stm32g0x.cfg + the DHCSR
@@ -523,8 +528,8 @@ gets its dated home in `docs/design/` when taken.
   TIM, ADC/DAC, PWR, the buses against a SAM peer at 3.3 V, RTC,
   watchdogs, FDCAN). Session memory: stm32g0-session-2026-09-02.
 - **Second target: SAM C21 - bring-up step 1 DONE (2026-08-27).**
-  The samc/ stratum (nvic, clock, pin, ticker over SysTick at
-  1000 Hz, platform_sam) and the samc/ build project (own toolchain
+  The samc21/ stratum (nvic, clock, pin, ticker over SysTick at
+  1000 Hz, platform_sam) and the samc21/ build project (own toolchain
   file, presets, hand-written crt: 47-entry vector table +
   ld script with NOLOAD .noinit; OpenOCD upload over SWD,
   cortex-debug) exist and are live-verified on the user's C21J rev
@@ -535,8 +540,8 @@ gets its dated home in `docs/design/` when taken.
   clock. THE PROMISE HELD: kernel/ and util/ compiled UNTOUCHED on
   the second architecture (ring's lock-free path, print's hosted
   branch, serial_port, line_parser, the clock contracts - first real
-  exercise for each). Docs: docs/samc/*.md (all PROVISIONAL with
-  honest gap lists), vendor pass in docs/samc/vendor/README.md.
+  exercise for each). Docs: docs/samc21/*.md (all PROVISIONAL with
+  honest gap lists), vendor pass in docs/samc21/vendor/README.md.
   Findings that cost blood and are now pinned by asserts: SERCOM has
   ONE interrupt vector (isr() masks INTFLAG with INTENSET - DRE is a
   level), CTRLA.DORD resets MSB-first while a UART is LSB-first (the
@@ -551,7 +556,7 @@ gets its dated home in `docs/design/` when taken.
   **DMAC campaign DONE (2026-08-27, Opus delegation, hand-verified
   after the session hosting the agent crashed between code and docs -
   the docs were reconstructed from the agent transcript plus a fresh
-  bench pass).** samc/dmac.hpp NEW - Dmac block (CHID select-then-use
+  bench pass).** samc21/dmac.hpp NEW - Dmac block (CHID select-then-use
   guarded structurally: with_channel private, DmaChannel the only
   friend; INTPEND take_pending() as the selector-free ISR dispatch;
   the two 384-byte SRAM descriptor tables), DmaDescriptor/
@@ -591,7 +596,7 @@ gets its dated home in `docs/design/` when taken.
   lists, event hooks (no EVSYS driver), RUNSTDBY/standby, non-SERCOM
   trigger codes.
   **AC sync-latency probe DONE (2026-08-27, user's curiosity,
-  answered same day).** samc/ac.hpp NEW (minimal by design: Ac block
+  answered same day).** samc21/ac.hpp NEW (minimal by design: Ac block
   + AcComparator<n>, config enable-protected per comparator, the
   probe's surface only - window/events/sleep wait for the full
   campaign) + probe app ac_sync_probe (7 letters, 30/30 twice,
@@ -609,7 +614,7 @@ gets its dated home in `docs/design/` when taken.
   CORRECTED on 2026-08-28 by test_samc_clock letter f: it is
   2^(DIV+1), the DIV value counts, and the probe's own OSC48M/4096 is
   what that gives for DIV = 11. The probe's measurements are
-  unaffected; the explanation was wrong.) Docs: docs/samc/ac.md
+  unaffected; the explanation was wrong.) Docs: docs/samc21/ac.md
   (PROVISIONAL).
   **Peripheral + util campaign PLANNED AND PART-EXECUTED 2026-08-28,
   REVIEWED AND COMMITTED the same day**: Fable re-ran every gate and
@@ -631,7 +636,7 @@ gets its dated home in `docs/design/` when taken.
   tooling for SAM (bench.py is avrdude-only, so test_samc_dma is not
   re-runnable and no SAM suite can be judged - and the app roster
   must become per-project because names COLLIDE across avrdx/ and
-  samc/: blink, console, probe exist in both); B nvm.hpp + nvm_flash
+  samc21/: blink, console, probe exist in both); B nvm.hpp + nvm_flash
   (also taking back the flash wait-state verb clock.hpp squats on)
   and reset.hpp + a real HardFault breadcrumb; C EVSYS + EIC (SAM's
   pin interrupts live in the EIC, PORT has none) and then AC's event/
@@ -648,10 +653,10 @@ gets its dated home in `docs/design/` when taken.
   **Phase A DONE 2026-08-28: the bench tool speaks both
   architectures.** bench.py's BOARD_TYPES maps a board type to its
   project, preset, mcu and flash mechanism (db* -> avrdx/avrdude/UPDI,
-  c21j -> samc/OpenOCD/SWD), so flash/run/console are
+  c21j -> samc21/OpenOCD/SWD), so flash/run/console are
   architecture-blind at the command line while `fuses` and `--erase`
   refuse a SAM board and say why. The app roster became PER PROJECT
-  (apps_avrdx.json + apps_samc.json) because names collide across the
+  (apps_avrdx.json + apps_samc21.json) because names collide across the
   trees. The SAM board is desk position C in the manifest, with its
   factory 128-bit die serial recorded as the identity an AVR board has
   to be GIVEN by hand (no USERROW provisioning on this family).
@@ -659,7 +664,7 @@ gets its dated home in `docs/design/` when taken.
   environment's python had NO pyserial - installed into the venv that
   `python3` already resolves to, so the documented invocation works.
   **Phase B1 DONE 2026-08-28: NVMCTRL, and the heap's second
-  silicon.** samc/nvm.hpp NEW (the whole of ch. 27: both arrays behind
+  silicon.** samc21/nvm.hpp NEW (the whole of ch. 27: both arrays behind
   one page buffer and one command register, the CMDEX key discipline
   with sticky-error reporting, erase-by-row/program-by-page, region
   locks, PARAM geometry cross-checked against the device header, and
@@ -667,7 +672,7 @@ gets its dated home in `docs/design/` when taken.
   NvmCalibration/NvmTemperatureCalibration are what future ADC/OSC32K/
   OSC48M/TSENS drivers must copy into their peripherals, DeviceSerial
   is board identity); FlashWaitStates MOVED here out of clock.hpp,
-  closing that file's own declared squat. samc/nvm_flash.hpp NEW:
+  closing that file's own declared squat. samc21/nvm_flash.hpp NEW:
   RwweeFlash, and the design choice IS the RWWEE array - writing it
   does not stall the CPU (measured: ~3950 polling turns survive a row
   erase there against ONE on the main array), it is 4x more durable
@@ -696,7 +701,7 @@ gets its dated home in `docs/design/` when taken.
   SWD), the SSB security bit (one-way), the header's two undocumented
   commands SF/WL, a main-array FlashMedia backend.
   **Phase B2 DONE 2026-08-28: RSTC + WDT + the fault breadcrumb,
-  closing platform.md's "failing half".** samc/reset.hpp NEW: Reset
+  closing platform.md's "failing half".** samc21/reset.hpp NEW: Reset
   (RCAUSE decoded as the EXCLUSIVE one-cause register it is - the AVR's
   accumulating RSTFR habit does NOT travel here - plus table 18-1's two
   groups and software()), Watchdog (the whole of ch. 23: the shared
@@ -818,10 +823,10 @@ gets its dated home in `docs/design/` when taken.
   The headline throughput is UNTAXED - raw 3 Mbaud 299251 B/s, DMA+bulk
   297890 B/s at 9% CPU, 1 Mbaud DMA+bulk 99902 B/s at 5% - identical to
   the recorded figures. Canaries: test_samc_dma z 112/112 (the erratum
-  still caught and refused, 280 in 153654), check_samc OK, check_family
+  still caught and refused, 280 in 153654), check_samc21 OK, check_family
   OK. JUDGMENT CALLS QUEUED: see memory samc-session-2026-08-29-uart.
   **FREQM DONE 2026-08-28 (ch. 44, a one-hour peripheral).**
-  samc/freqm.hpp NEW: the hardware ratio counter, f_msr = VALUE/REFNUM x
+  samc21/freqm.hpp NEW: the hardware ratio counter, f_msr = VALUE/REFNUM x
   f_ref between two GCLK generators, with the 24-bit overflow budget
   (refnum_for) and erratum 1.24.1 AS CODE - reading CTRLB is a PAC
   protection error on EVERY silicon revision with no workaround, so
@@ -850,12 +855,12 @@ gets its dated home in `docs/design/` when taken.
   ratio test is immune to the reference's absolute error but NOT to its
   drift between the two measurements.
   **OSC32KCTRL DONE 2026-08-28 (ch. 21, measured with the meter built
-  an hour earlier).** samc/osc32kctrl.hpp NEW: the three 32 kHz roots
+  an hour earlier).** samc21/osc32kctrl.hpp NEW: the three 32 kHz roots
   (Osculp32k always-on and only trimmable, Osc32k off-at-reset and
   needing its production trim, Xosc32k with the clock-failure detector),
   the RTC's clock select - which lives in THIS chapter and not in the
   RTC - and the shared IRQ 0 caveat. NEW SUITE test_samc_osc32k 32/32,
-  wireless, using samc/freqm.hpp as its instrument: LETTER B IS WHERE
+  wireless, using samc21/freqm.hpp as its instrument: LETTER B IS WHERE
   THREE DRIVERS MEET - nvm.hpp reads the production trim out of the NVM
   calibration area, osc32kctrl.hpp writes it into the oscillator and
   freqm.hpp says what it was worth. THE ANSWER: 47312 Hz untrimmed
@@ -873,7 +878,7 @@ gets its dated home in `docs/design/` when taken.
   touching ch. 21 applies here (1.1.1 is rev B only, 1.22.1 is the
   N-family row) - the read-the-row trap again.
   **EVSYS DONE 2026-08-28 (ch. 29) - PHASE C's FIRST HALF, and the
-  adaptation the plan was built around.** samc/evsys.hpp NEW, and THE
+  adaptation the plan was built around.** samc21/evsys.hpp NEW, and THE
   DESIGN POSITION IS THE POINT: on the AVR the event system is a typed
   table (per-generator types, compile-time legality); here it is an
   ALLOCATOR - twelve identical channels, numeric codes from tables of 95
@@ -914,9 +919,9 @@ gets its dated home in `docs/design/` when taken.
   NvHeap living in the RWWEE array; the SAM board took
   desk position "C" (letters stay positions, so a second C21 is "D");
   the AVR roster was RENAMED apps_manifest.json -> apps_avrdx.json for
-  symmetry with apps_samc.json; and nvm.hpp's refusal to expose user-row
+  symmetry with apps_samc21.json; and nvm.hpp's refusal to expose user-row
   writes means BOOTPROT and the EEPROM-emulation size are readable only.
-  **EIC DONE 2026-08-28 (ch. 26) - PHASE C CLOSED.** samc/eic.hpp NEW:
+  **EIC DONE 2026-08-28 (ch. 26) - PHASE C CLOSED.** samc21/eic.hpp NEW:
   the peripheral where this family keeps its PIN INTERRUPTS (PORT has
   none), sixteen lines plus the unmaskable NMI, the five senses, the
   majority filter, asynchronous detection, EVCTRL, one NVIC vector for
@@ -927,7 +932,7 @@ gets its dated home in `docs/design/` when taken.
   the silicon ignores. THE PAD-TO-LINE MAP IS THE DEVICE HEADER'S OWN
   TABLE and nothing else: PIN_P<pad>A_EIC_EXTINT_NUM, one guarded probe
   per pad (51 on the J, 37 on the G, 25 on the E; since the 2026-08-28
-  sanitation the probes live in samc/device_tables.hpp, the one file
+  sanitation the probes live in samc21/device_tables.hpp, the one file
   where vendor-macro #ifdef walls are allowed), because the map is
   IRREGULAR (PA16 -> 0, PA24 -> 12, PA27 -> 15, PB30 -> 14) and no
   formula can stand in for it; ExtInt<Pin> refuses to compile on a pad
@@ -982,11 +987,11 @@ gets its dated home in `docs/design/` when taken.
   NMI fires with the EIC DISABLED (26.6.4.1) and sense NONE is the only
   way to turn one off, and PB22 on this board does NOT follow its own
   internal pull (it rests LOW with the pull-up on). Doc:
-  docs/samc/eic.md (PROVISIONAL: the N-variant debouncer, sleep/wake).
+  docs/samc21/eic.md (PROVISIONAL: the N-variant debouncer, sleep/wake).
   Regressions after the crt edit: test_samc_dma z 112/112,
-  test_samc_platform z 34/34 and i 20/20, check_samc OK, host 22/22.
+  test_samc_platform z 34/34 and i 20/20, check_samc21 OK, host 22/22.
   **AC COMPLETED 2026-08-28 (ch. 40) - PHASE C CLOSED FOR GOOD.**
-  samc/ac.hpp grew from the probe's minimal surface to the whole
+  samc21/ac.hpp grew from the probe's minimal surface to the whole
   chapter bar sleep: AcWindow<w> (the comparator PAIRS - WINCTRL is
   write-synchronized but NOT enable-protected, so a window turns on
   under a running block; WSTATE above/inside/below, the four WINTSEL
@@ -1035,11 +1040,11 @@ gets its dated home in `docs/design/` when taken.
   never asked for, which reads as the re-route looking like an edge
   while the not-yet-ready user makes the channel HOLD it (29.2's
   USRRDY handshake); the suite arms twice, rests its verdict on the
-  second and prints the first. Doc: docs/samc/ac.md (still PROVISIONAL:
+  second and prints the first. Doc: docs/samc21/ac.md (still PROVISIONAL:
   sleep, the DAC/bandgap inputs, COMP2/3 and window 1 on silicon).
   **TC DONE 2026-08-28 (ch. 35) - PHASE D OPENS, and it is the campaign's
   "assecondare" case: util's contracts get their SECOND implementation
-  and are validated by it.** samc/tc.hpp NEW: five instances, the three
+  and are validated by it.** samc21/tc.hpp NEW: five instances, the three
   counter resolutions, four waveform modes, capture with all its event
   actions, commands, buffered registers, status, flags, ISR body - plus
   TcWo<Pin>, TcPwm/TcPwm8 (both PwmChannel) and TcPeriodMeter/
@@ -1053,7 +1058,7 @@ gets its dated home in `docs/design/` when taken.
   35.6.2.4's sentence. The pad-to-(TC,WO) map is the same story as the
   EIC's: 26 pads on the J, 18 on the G, 8 on the E, PA22/PB08/PB12 all
   TC0/WO0, PB23 the board's LED = TC3/WO1, one guarded probe per pad
-  (in samc/device_tables.hpp since the sanitation, with the TC instance
+  (in samc21/device_tables.hpp since the sanitation, with the TC instance
   data - gclk/pairing/DMAC ids - beside it). READING COUNT IS A COMMAND (READSYNC then two waits, 35.6.8) and
   the raw accessors are spelled raw. ERRATA: 1.20.1 and 1.20.2 are
   REVISION B ONLY (1.20.2 - "input capture on I/O pins does not work" -
@@ -1091,12 +1096,12 @@ gets its dated home in `docs/design/` when taken.
   because a print sat inside the measurement window; a window is now
   opened and closed by two reads with nothing between them, and it is
   sized to fit the counter that reads it (at /256 a 16-bit counter wraps
-  in 350 ms). Doc: docs/samc/tc.md (PROVISIONAL: the N-variant capture
+  in 350 ms). Doc: docs/samc21/tc.md (PROVISIONAL: the N-variant capture
   modes, DMA, sleep, and 1.20.2 unjudged).
   **TCC DONE 2026-08-28 (ch. 36) - PHASE D CLOSED, the family's richest
   timer and the first driver BORN under the ifdef-reserve rule.**
-  samc/tcc.hpp NEW, with all of its per-instance and per-pad data probed
-  in samc/device_tables.hpp and NOT ONE vendor-macro #ifdef in the driver
+  samc21/tcc.hpp NEW, with all of its per-instance and per-pad data probed
+  in samc21/device_tables.hpp and NOT ONE vendor-macro #ifdef in the driver
   itself. THE POINT OF THE CHAPTER IS THAT THE THREE INSTANCES ARE NOT
   COPIES OF EACH OTHER, where the TC's five differ only in which pads
   they reach: TCC0 is 24-bit with 4 channels, 8 outputs and all five
@@ -1163,11 +1168,11 @@ gets its dated home in `docs/design/` when taken.
   counter gave 0 then 116, READSYNC being a command that must cross the
   domain the halt stopped) - the OVERFLOW FLAG is; and the pad sampler
   needs ~30 periods, so a 100 Hz waveform wants ten times the samples a
-  1 kHz one does. Doc: docs/samc/tcc.md (PROVISIONAL: DMA, sleep, the
+  1 kHz one does. Doc: docs/samc21/tcc.md (PROVISIONAL: DMA, sleep, the
   debug fault, the advanced capture modes, and 1.21.7/1.21.8 not judged).
   **XOSC + FDPLL96M DONE 2026-08-28 (ch. 20) - PHASE E's FIRST HALF, and
   THE BOARD FINALLY HAS A SCALE. REVIEWED BY FABLE next session and COMMITTED (3d7d2e6), all eight judgment calls accepted - the review's canary re-run caught and fixed the osc32k 1% verdict the rescaling had doomed (details: memory samc-session-2026-08-28-clocks); the rest of Fable's
-  review.** samc/clock.hpp GREW rather than gained a neighbour, closing
+  review.** samc21/clock.hpp GREW rather than gained a neighbour, closing
   its own declared gap: Oscctrl (the block - the STATUS register all
   three roots report into, the seven interrupt sources behind the shared
   IRQ 0, the CFD's event output with its published EVSYS code), Xosc
@@ -1214,11 +1219,11 @@ gets its dated home in `docs/design/` when taken.
   both fed by OSC48M (2, 16, 512 for DIV 0, 3, 8) and confirmed on the
   16-bit generator 1 (512 for the same DIV 8); the AC campaign's note in
   GclkConfig, ac.md and ac_sync_probe's comments are corrected, the
-  probe's own measurements unaffected. Docs: docs/samc/clock.md grown
+  probe's own measurements unaffected. Docs: docs/samc21/clock.md grown
   (still PROVISIONAL: the main-clock TASK, DynamicClock, external-clock
   mode, sleep).
   **SUPC DONE 2026-08-28 (ch. 22) - PHASE E's SECOND HALF. NOT
-  COMMITTED.** samc/supc.hpp NEW: Supc (the block, the six flags
+  COMMITTED.** samc21/supc.hpp NEW: Supc (the block, the six flags
   including the three BODCORE ones the chapter does not draw), BodVdd
   (level/action/hysteresis, continuous or sampled, the enable-protection
   AND write-synchronization dance in one verb, matches_fuses() against
@@ -1227,7 +1232,7 @@ gets its dated home in `docs/design/` when taken.
   calibration must not change, so there is no setter to call), Vreg (no
   enable verb at all - 22.8.6 forbids the change - only RUNSTDBY, which
   erratum 1.8.14 makes a workaround) and Vref (the bandgap: three levels
-  out of sixteen codes, and VREFOE, which is what docs/samc/ac.md's gap
+  out of sixteen codes, and VREFOE, which is what docs/samc21/ac.md's gap
   list was waiting for). NEW SUITE test_samc_supc z 44/44 three times,
   wireless AND NOTHING FORCED - every threshold carries ACTION = none, so
   STATUS.BODVDDDET still tracks and a sweep is a measurement rather than
@@ -1248,11 +1253,11 @@ gets its dated home in `docs/design/` when taken.
   header was right and the chapter is incomplete; and ERRATUM 1.5.6 IS
   REAL (a spurious COMP flag on a bandgap enable, seen at the 2.048 V
   reference). The fuse row and the register agree field by field, and the
-  boot BODVDD is restored bit for bit. Doc: docs/samc/supc.md
+  boot BODVDD is restored bit for bit. Doc: docs/samc21/supc.md
   (PROVISIONAL: nothing forces a brown-out, standby, BODCORE stays
   read-only).
   **RTC DONE 2026-08-28 (ch. 24) - PHASE E's DRIVER HALF CLOSED. NOT
-  COMMITTED.** samc/rtc.hpp NEW: one counter wearing three faces
+  COMMITTED.** samc21/rtc.hpp NEW: one counter wearing three faces
   (COUNT32 with one 32-bit compare, COUNT16 with PER as its top and two
   compares, the CLOCK/calendar with its masked alarm) over the THREE
   OVERLAID REGISTER VIEWS, handled the way tc.hpp handles COUNT8/16/32 -
@@ -1318,16 +1323,16 @@ gets its dated home in `docs/design/` when taken.
   what one "count in the prescaler" is worth, since the DIV16 control
   moves with the window length too. Also found: 24.6.5 names a PERD
   event that no register summary, no register description and no header
-  symbol implements. Family fixture test/family_samc/rtc.cpp + SEVEN
+  symbol implements. Family fixture test/family_samc21/rtc.cpp + SEVEN
   negatives (MATCHCLR in COUNT16 - through the compile-time
   configure<cfg> twin - CLKREP outside mode 2, a Reserved prescaler
   code, a periodic event with the prescaler OFF, a compare event past
   the mode's channel count, the Reserved alarm mask, an impossible
-  date). Doc docs/samc/rtc.md (PROVISIONAL: no tasks, sleep, the
+  date). Doc docs/samc21/rtc.md (PROVISIONAL: no tasks, sleep, the
   overflow event through EVSYS, the intermediate alarm masks, the
   12-hour rollover, XOSC1K/XOSC32K).
   **PM + SleepSite DONE 2026-08-28 (ch. 19) - PHASE E CLOSED. NOT
-  COMMITTED.** samc/sleep.hpp NEW, the avrdx/sleep.hpp twin: `Pm` over
+  COMMITTED.** samc21/sleep.hpp NEW, the avrdx/sleep.hpp twin: `Pm` over
   the whole of chapter 19 (which is TWO registers - SLEEPCFG's three
   implemented modes IDLE0/IDLE2/STANDBY with the Reserved codes refused
   both ways, STDBYCFG's VREGSMOD and BBIASHS, the readback rule spent on
@@ -1398,7 +1403,7 @@ gets its dated home in `docs/design/` when taken.
   four consecutive count32() calls on a counter running for six
   milliseconds returned 0, 196, 201, 205 - so read_sync()'s waits return
   before the value THIS command latched is readable. Family fixture
-  test/family_samc/sleep.cpp + two negatives (a Reserved SLEEPMODE code,
+  test/family_samc21/sleep.cpp + two negatives (a Reserved SLEEPMODE code,
   the Reserved VREGSMOD code). Docs: platform.md GROWS its stopping half
   and keeps PROVISIONAL (sleep CURRENT is the big gap - no meter on this
   bench - plus the RTC-backed timebase, EIC wake, PAC, SLEEPONEXIT);
@@ -1406,7 +1411,7 @@ gets its dated home in `docs/design/` when taken.
   unchanged; tc.md gains the one-behind read.
   **ADC DONE 2026-08-28 (ch. 38, BOTH converters) - PHASE G's first
   chapter, and util/analog.hpp + analog_sampler.hpp VALIDATED UNCHANGED
-  on their second architecture. REVIEWED BY FABLE same day and COMMITTED (a79e039), all seven judgment calls accepted; two false claims caught at review - the build-id determinism holds, and VREFOE-vs-REFSEL-INTREF was an open gap later CLOSED by the DAC campaign.** samc/adc.hpp NEW over
+  on their second architecture. REVIEWED BY FABLE same day and COMMITTED (a79e039), all seven judgment calls accepted; two false claims caught at review - the build-id determinism holds, and VREFOE-vs-REFSEL-INTREF was an open gap later CLOSED by the DAC campaign.** samc21/adc.hpp NEW over
   the whole chapter: `Adc<n>` for two instances that are the same
   peripheral at two addresses but NOT a symmetric pair (the device
   header's ADCn_MASTER_SLAVE_MODE gives ADC0 the host role and DUALSEL,
@@ -1486,13 +1491,13 @@ gets its dated home in `docs/design/` when taken.
   internal sources spanning 1, 4 and 5 counts over 64 readings; the
   noisiest is the measurand and the reduction verdict is declined in
   print if even that one spans under four counts). Family fixture
-  test/family_samc/adc.cpp + NINE negatives; suite regressions sleep z
-  87, tc z 77, supc z 44; check_samc, check_family, host 22/22. Docs:
+  test/family_samc21/adc.cpp + NINE negatives; suite regressions sleep z
+  87, tc z 77, supc z 44; check_samc21, check_family, host 22/22. Docs:
   adc.md new PROVISIONAL, with the honest gap list - the host/client
   pair, the sequencer, sleep, differential mode, VREFA and everything
   needing a voltage that is not a rail, which the DAC campaign owns.
   **DAC DONE 2026-08-28 (ch. 41) - PHASE G's SECOND CHAPTER AND THE
-  SESSION THAT CLOSES THE ANALOG LOOP. REVIEWED BY FABLE same day and COMMITTED (f2d550f): JC1 ruled no-code-change (init()'s false IS the truth where 1.4.10 kills ADC0), and the review hunted down the suite's one flaky verdict (letter h's one-count knife edge, rewritten).** samc/dac.hpp NEW:
+  SESSION THAT CLOSES THE ANALOG LOOP. REVIEWED BY FABLE same day and COMMITTED (f2d550f): JC1 ruled no-code-change (init()'s false IS the truth where 1.4.10 kills ADC0), and the review hunted down the suite's one flaky verdict (letter h's one-count knife edge, rewritten).** samc21/dac.hpp NEW:
   the whole small chapter as a MONOSTATE `Dac` (one instance on every
   variant - the Rtc precedent, against Adc<n>'s two), with its OWN
   reference enum `DacRef` (adc.hpp keeps `Ref` for its own REFSEL - the
@@ -1558,14 +1563,14 @@ gets its dated home in `docs/design/` when taken.
   first, ADC0 second) is the way out and the suite spends it visibly.
   adc.hpp's and ac.hpp's comments were corrected from these measurements
   (comment-only, the established precedent); their docs lost exactly the
-  gap lines this closed. Family fixture test/family_samc/dac.cpp + FIVE
-  negatives; docs/samc/dac.md new PROVISIONAL (gaps: dithering, VREFA,
+  gap lines this closed. Family fixture test/family_samc21/dac.cpp + FIVE
+  negatives; docs/samc21/dac.md new PROVISIONAL (gaps: dithering, VREFA,
   the voltage pump, sleep, LEFTADJ on silicon, the interrupts through the
   NVIC, the SDADC's share). THREE JUDGMENT CALLS QUEUED - see memory
   samc-session-2026-08-28-dac.
   **SDADC DONE 2026-08-28 (ch. 39) - PHASE G's THIRD CHAPTER, THE
   CONVERTER THE MULTISLOPE WORK WILL LEAN ON. REVIEWED BY FABLE same day and COMMITTED (see memory samc-session-2026-08-28-sdadc for the rulings).**
-  samc/sdadc.hpp NEW: the whole chapter as a MONOSTATE `Sdadc` (the Rtc
+  samc21/sdadc.hpp NEW: the whole chapter as a MONOSTATE `Sdadc` (the Rtc
   and Dac precedent) with its OWN `SdadcRef` - four codes and NONE
   Reserved, the only reference field of the three converters with no
   illegal value. A 16-bit sigma-delta over THREE DIFFERENTIAL PAD PAIRS
@@ -1648,16 +1653,16 @@ gets its dated home in `docs/design/` when taken.
   REVISION'S PRINTED RESET VALUES (GAINCORR 1, SKPCNT 2) ARE 1.18.3'S OWN
   WORKAROUND baked into the silicon.
   NEW SUITE test_samc_sdadc z 101/101 (twice warm, once cold), 11
-  letters, WIRELESS; family fixture test/family_samc/sdadc.cpp + TEN
+  letters, WIRELESS; family fixture test/family_samc21/sdadc.cpp + TEN
   negatives; canaries dac z 108 and adc z 97; md5 gate on the reserve's
-  growth: ALL 21 pre-existing SAM images BYTE-IDENTICAL. docs/samc/
+  growth: ALL 21 pre-existing SAM images BYTE-IDENTICAL. docs/samc21/
   sdadc.md NEW PROVISIONAL, dac.md's 1.8.10 and SDADC gap lines closed.
   All seven judgment calls RULED AND ACCEPTED at Fable's review (memory samc-session-2026-08-28-sdadc).
   **TSENS DONE 2026-08-28 (ch. 43) - PHASE G's FOURTH AND LAST CHAPTER,
   and the one that is NOT a converter. REVIEWED BY FABLE and COMMITTED
   (b65fa51), all seven judgment calls accepted (memory
   samc-session-2026-08-28-tsens).**
-  samc/tsens.hpp NEW: the whole chapter as a MONOSTATE `Tsens` (the Rtc /
+  samc21/tsens.hpp NEW: the whole chapter as a MONOSTATE `Tsens` (the Rtc /
   Dac / Sdadc precedent - one instance on every C21 variant, and NO PADS
   AT ALL, 43.5.1 being "Not applicable"). THE DESIGN POSITION IS THAT
   THIS IS A CLOCK RATIO AND NOT AN ADC CHANNEL: a temperature-dependent
@@ -1670,7 +1675,7 @@ gets its dated home in `docs/design/` when taken.
   in and `tsens_rescale()` on the way out, BOTH TAKING THE RATE AS A
   CALLER ARGUMENT (the freqm reference_hz pattern - a ratio meter cannot
   know what its own reference is worth). `TsensCalibration::factory()`
-  reads GAIN/OFFSET/TCAL/FCAL out of samc/nvm.hpp's
+  reads GAIN/OFFSET/TCAL/FCAL out of samc21/nvm.hpp's
   NvmTemperatureCalibration, KEEPING THE PROMISE that file's comment has
   carried since phase B1 (the adc.hpp load_calibration precedent). Every
   synchronized write WAITS BEFORE STORING and returns bool - 43.6.7
@@ -1717,18 +1722,18 @@ gets its dated home in `docs/design/` when taken.
   in COMPLETE SILENCE - and it does NOT fault this core, so 11.5.2.4's
   "access error" is not a bus error here. NEW SUITE test_samc_tsens z
   168/168 (three warm, two cold), 10 letters plus `p` outside z (8/8),
-  WIRELESS; family fixture test/family_samc/tsens.cpp + FIVE negatives;
+  WIRELESS; family fixture test/family_samc21/tsens.cpp + FIVE negatives;
   canary sdadc z 101; md5 gate on the reserve's growth: ALL 22
   pre-existing SAM images BYTE-IDENTICAL. Two traps this suite paid for
   and that belong to other drivers: TC2 AND TC3 SHARE GCLK CHANNEL 31, so
   Tc<2>::release() silently stops TC3; and bench.py's --expect="->" can
   truncate a capture, because "  -> " ends with the prompt "> ".
-  docs/samc/tsens.md NEW PROVISIONAL. JUDGMENT CALLS QUEUED - see memory
+  docs/samc21/tsens.md NEW PROVISIONAL. JUDGMENT CALLS QUEUED - see memory
   samc-session-2026-08-28-tsens.
   **CCL DONE 2026-08-29 (ch. 37) - PHASE H's FIRST CHAPTER, and the one
   that CLOSES AC.MD'S OPEN LEAD. COMMITTED 931211f (see memory
   samc-session-2026-08-29-ccl).**
-  samc/ccl.hpp NEW: the whole chapter in the AVR's own two strata,
+  samc21/ccl.hpp NEW: the whole chapter in the AVR's own two strata,
   because for once the two families really do have the same peripheral -
   `Ccl` (one ENABLE, one software reset, ONE generic clock for every
   filter/edge/sequencer in the block, the two sequencer selectors, the
@@ -1790,10 +1795,10 @@ gets its dated home in `docs/design/` when taken.
   input stage, not the path, so evsys.hpp's comment and evsys.md's
   finding were rewritten (the one comment-only change to another driver).
   NEW SUITE test_samc_ccl z 141/141 (three warm, one cold; about two
-  seconds), 7 letters, WIRELESS; family fixture test/family_samc/ccl.cpp
+  seconds), 7 letters, WIRELESS; family fixture test/family_samc21/ccl.cpp
   + TEN negatives; canaries tsens z 168, evsys z 37, ac z 94; md5 gate on
   the reserve's growth with source mtimes PINNED: all 23 pre-existing SAM
-  images BYTE-IDENTICAL. docs/samc/ccl.md NEW PROVISIONAL, ac.md's open
+  images BYTE-IDENTICAL. docs/samc21/ccl.md NEW PROVISIONAL, ac.md's open
   lead CLOSED, evsys.md's software-event finding corrected. JUDGMENT
   CALLS QUEUED - see memory samc-session-2026-08-29-ccl.
   **PHASE H'S TAIL DONE 2026-08-29 - PAC (11), DSU (13), DIVAS (14) and
@@ -1804,18 +1809,18 @@ gets its dated home in `docs/design/` when taken.
   because three of the four meet each other: the DSU comes out of reset
   PAC-protected, DIVAS's only error report is a bit in the PAC's AHB flag
   register, and the MTB's PAC identifier is a number only the PAC's
-  register map states. samc/pac.hpp NEW and THE POSITION IS MECHANISM
+  register map states. samc21/pac.hpp NEW and THE POSITION IS MECHANISM
   ONLY - the keyed word-wise WRCTRL, PERID = 32 x bridge + index, the
   four flag banks, the ACCERR event, the shared IRQ 0 - with NO guard
   type, NO policy and NO util concept, for three reasons stated in the
   header: nothing in brio protects anything yet, 11.5.2.6's balance rule
   (a double set or a double clear is itself an error) makes a nestable
   guard a design decision rather than a detail, and erratum 1.13.3 proves
-  the guarantee is not uniform. samc/dsu.hpp NEW (DID decoded, the
+  the guarantee is not uniform. samc21/dsu.hpp NEW (DID decoded, the
   hardware CRC32, MBIST, the CoreSight ROM, the two debug channels; chip
-  erase DELIBERATELY not exposed, the AVR CHER precedent). samc/divas.hpp
+  erase DELIBERATELY not exposed, the AVR CHER precedent). samc21/divas.hpp
   NEW (both buses, the AHB's wait-state read and the IOBUS's mandatory
-  poll). samc/mtb.hpp NEW (the four registers 10.3 names before deferring
+  poll). samc21/mtb.hpp NEW (the four registers 10.3 names before deferring
   to a TRM this project does not have - so the DEVICE HEADER is the only
   local authority on the layout). THE CAMPAIGN'S HEADLINE is letter b's
   CONTRAST MAP: sixteen peripherals across all three bridges, each
@@ -1882,7 +1887,7 @@ gets its dated home in `docs/design/` when taken.
   own question "il dma possiamo usarlo anche per dac e adc?", REVIEWED
   BY FABLE and COMMITTED same day, all seven judgment calls accepted
   plus one supervisor fix; memory samc-session-2026-08-29-analog-dma).**
-  samc/dmac.hpp GREW: the element type IS the beat (dma_beat_of -
+  samc21/dmac.hpp GREW: the element type IS the beat (dma_beat_of -
   one sizeof feeds BEATSIZE and the end-address arithmetic so they
   cannot disagree; DmaTx/RxEngine<ch, Elem = uint8_t>, every existing
   spelling unchanged, all 27 pre-existing SAM images BYTE-IDENTICAL -
@@ -1943,7 +1948,7 @@ gets its dated home in `docs/design/` when taken.
   oscillator). DELIBERATELY NOT BUILT and said where: a util streaming
   AO (born-with-users - Multislope will dictate the contract), linked
   descriptors, automatic ladder escalation. Canaries test_samc_dma z
-  112/112 and test_samc_uart z 27/27 (agent AND Fable); check_samc,
+  112/112 and test_samc_uart z 27/27 (agent AND Fable); check_samc21,
   check_family, host green; 2 new negatives; family dmac.cpp now
   cross-checks the four analog trigger codes. Docs: dmac.md grown,
   dac.md/adc.md/sdadc.md each gained a "Streaming via DMA" section,
@@ -1984,7 +1989,7 @@ gets its dated home in `docs/design/` when taken.
   blocks (9.6 ms), so the letter measures everything first and prints
   after. Zero-cost held: 26 pre-existing SAM images byte-identical
   (test_samc_nvm's build-id defsym moved because new FILES entered the
-  tree - the standing by-design exception); check_samc, check_family,
+  tree - the standing by-design exception); check_samc21, check_family,
   host all green. Deliberately absent and stated in the design doc: a
   playback AO, one-shot burst vocabulary, gap policy, the AVR
   implementation (born with its first user).
@@ -2003,7 +2008,7 @@ gets its dated home in `docs/design/` when taken.
   measured: OUT bypasses the OUT register and moves the pad even under
   PMUXEN; TGL writes the OUT bit - the pull's direction - at half rate
   awake and DEAD in standby, which doubles as the suite's
-  APB-is-really-down control). samc/pin.hpp GREW the PORT event-user
+  APB-is-really-down control). samc21/pin.hpp GREW the PORT event-user
   surface port.md had declared a gap (PortEventAction/Config,
   event_user published per the EVSYS ruling, evsys.hpp NOT included -
   table 29-3's async-only rule a stated obligation, the ac.hpp SOC
@@ -2065,7 +2070,7 @@ gets its dated home in `docs/design/` when taken.
   counts); the backstop belongs in the sleep primitive (an RTC compare
   in standby_until_wake, the watchdog only where the compare register
   IS the alarm register). Canaries sleep z 87, eic z 85, ccl z 141
-  (both hands); check_samc/check_family/host green. Docs: platform.md
+  (both hands); check_samc21/check_family/host green. Docs: platform.md
   gained "Sleep, peripheral by peripheral"; port.md + 14 chapter docs
   each lost exactly the gap this closed; bench.md row + firmware line.
   **TIMER DMA + THE TIMERS' ADVANCED MODES DONE 2026-08-29 (Opus
@@ -2178,7 +2183,7 @@ gets its dated home in `docs/design/` when taken.
   re-run by hand: tc z 77/77, tcc z 143/143, analog_dma z 78/78,
   sleepwalk z 76/76, dma z 112/112 (agent AND Fable - the reviewer also
   re-proved the comment-only claim by worktree md5, 29/29, and ran the
-  new suite's cold z); check_samc OK, check_family OK, host 23/23. All
+  new suite's cold z); check_samc21 OK, check_family OK, host 23/23. All
   six judgment calls ACCEPTED at review (the DIVSEL ceiling verified
   measured, not inferred); memory samc-session-2026-08-29-timer-dma.
   **THE ANALOG COMPLETION DONE 2026-08-29 (Opus delegation, REVIEWED BY
@@ -2237,7 +2242,7 @@ gets its dated home in `docs/design/` when taken.
   the DAC's dithering is 41.6.8.4, not .3 (dac.hpp's comments). At
   review Fable also retired ac.hpp's stale sleep line (the 40.6.14
   sequences ARE measured - sleepwalk letter h). Canaries adc 97 / dac
-  108 / ac 94 / sdadc 101 / tsens 168 both hands; check_samc,
+  108 / ac 94 / sdadc 101 / tsens 168 both hands; check_samc21,
   check_family, host green; adc.md/dac.md/ac.md/sdadc.md/tsens.md
   moved in the same change, bench.md row + board C firmware. Still
   open by honest necessity: VREFA (a wire), the voltage pump (the
@@ -2306,14 +2311,14 @@ gets its dated home in `docs/design/` when taken.
   dir wiped after pinning (the reviewer's worktree gate always did).
   At review Fable also retired nvm.md's stale wish for DSU/PAC drivers
   (both exist since the debug campaign). Gates: md5 30/30 + the
-  declared mover, check_samc (1 positive + 4 negative TUs),
+  declared mover, check_samc21 (1 positive + 4 negative TUs),
   check_family, host 24/24, canary test_samc_nvm z 52/52 - agent AND
   Fable.
   **MTB INTO THE POST-MORTEM DONE 2026-08-30 (Opus delegation,
   REVIEWED BY FABLE and COMMITTED same day, all eight judgment calls
   accepted; memory samc-session-2026-08-30-postmortem). Group 5's
   second item, and the DIVAS ruling (359396a) closed its third the
-  same day.** samc/postmortem.hpp NEW: MtbPostMortem<trace_bytes,
+  same day.** samc21/postmortem.hpp NEW: MtbPostMortem<trace_bytes,
   keep_packets> - a rolling MTB buffer in .bss and a SEPARATE .noinit
   record (magic + CRC-16 + count + source + packets) that crosses the
   reset, written by capture() which FREEZES FIRST and refuses to
@@ -2348,7 +2353,7 @@ gets its dated home in `docs/design/` when taken.
   recorded in mtb.md's gaps; Fable re-checked the numbers). Docs:
   mtb.md's integration-with-panic gap CLOSED, platform.md's breadcrumb
   gains its trace sibling, reset.md points at the composition.
-  Canary test_samc_debug z 117/117 both hands; check_samc,
+  Canary test_samc_debug z 117/117 both hands; check_samc21,
   check_family, host 24/24.
   **THE STANDBY-SURVIVING TIMEBASE DONE 2026-08-30 (BY FABLE'S OWN
   HAND on the user's blessing - group 5's last item, WHICH CLOSES THE
@@ -2360,9 +2365,9 @@ gets its dated home in `docs/design/` when taken.
   and everything else fits inside arm()/disarm(): THE POWER MODEL IS
   UNTOUCHED, which design/power.md now records as the second
   same-target validation (a site can LIFT a target restriction with
-  the model unchanged). samc/ticker.hpp grew advance(n) (the resync's
+  the model unchanged). samc21/ticker.hpp grew advance(n) (the resync's
   landing point, guard-held, with the caller owing the FROZEN span
-  only); samc/sleep.hpp grew SamTimedSleepSite<P, cfg> - arm() places
+  only); samc21/sleep.hpp grew SamTimedSleepSite<P, cfg> - arm() places
   a COMP0 alarm on ticks_to_next() rounded UP, disarm()/isr() hand the
   frozen span (RTC-elapsed converted DOWN minus what SysTick itself
   counted) to advance(), the baseline consumed once under the guard,
@@ -2391,7 +2396,7 @@ gets its dated home in `docs/design/` when taken.
   the convention's tail before judging counters (the wake report and
   the reply are still queued when the blip lands). 33/33 pre-existing
   images byte-identical (the additive claim proven by worktree gate);
-  canaries sleep z 87, sleepwalk z 76, platform z 34; check_samc (new
+  canaries sleep z 87, sleepwalk z 76, platform z 34; check_samc21 (new
   family coverage + a negative: a sub-1024 Hz rate refused),
   check_family, host 24/24. platform.md's timebase gap CLOSED,
   power.md carries the model-unchanged finding, ticker.hpp's and
@@ -2400,7 +2405,7 @@ gets its dated home in `docs/design/` when taken.
   CROSS-ARCHITECTURE campaign: an Opus delegation the user stopped
   mid-flight, taken over and finished BY FABLE'S OWN HAND - four suite
   defects diagnosed at the bench, one driver verb added, the peer
-  hardened). COMMITTED same day.** samc/spi.hpp NEW: the whole of ch. 32
+  hardened). COMMITTED same day.** samc21/spi.hpp NEW: the whole of ch. 32
   in the two strata - Spi<n> (both roles over ONE register view, SPIM =
   SPIS asserted field by field against the header's own SPIS macros;
   every enable-protection and all three SYNCBUSY bits spelled per
@@ -2459,7 +2464,7 @@ gets its dated home in `docs/design/` when taken.
   names itself; the mechanism stays unhunted, an avrdx-side question
   for an AVR bench. Family fixture + SEVEN negatives; gates: worktree
   md5 33/35 byte-identical + the two declared build-id movers (2 and 4
-  bytes, same sizes), check_samc, check_family, host 24/24; canaries
+  bytes, same sizes), check_samc21, check_family, host 24/24; canaries
   test_samc_uart z 27/27 (sercom.hpp moved) and test_samc_dma z
   112/112. Docs: spi.md NEW PROVISIONAL (gaps: DMA engines, sleep,
   SSDE/address-match on silicon, 1.17.3's dummy, the wedge's cause),
@@ -2468,7 +2473,7 @@ gets its dated home in `docs/design/` when taken.
   QUEUED - see memory samc-session-2026-08-31-spi. I2C (ch. 33) is
   phase F's open half.
   **SERCOM I2C DONE 2026-08-31 (PHASE F CLOSED - BY FABLE'S OWN HAND,
-  same day as the SPI half). COMMITTED.** samc/i2c.hpp NEW: ch. 33 as
+  same day as the SPI half). COMMITTED.** samc21/i2c.hpp NEW: ch. 33 as
   TWO resources, because unlike the SPI's views I2CM and I2CS really
   differ - I2cm<n> (bus state machine, the THIRD SYNCBUSY bit SYSOP
   with the wait-before-store discipline, force_idle as the dependable
@@ -2536,7 +2541,7 @@ gets its dated home in `docs/design/` when taken.
   parked START. Family fixture + SIX negatives; gates: worktree md5
   34/36 byte-identical + the two declared build-id movers (the
   identity of every pre-existing image doubling as the sercom.hpp
-  canary), check_samc, check_family, host 24/24. Docs: i2c.md NEW with
+  canary), check_samc21, check_family, host 24/24. Docs: i2c.md NEW with
   the headline, sercom.md's I2C gap closed, bench.md's bundle finding
   + suite row. JUDGMENT CALLS QUEUED - see memory
   samc-session-2026-08-31-i2c. PHASE F IS CLOSED; of the whole SAM
@@ -2547,14 +2552,14 @@ gets its dated home in `docs/design/` when taken.
   (positions C and D, manifest re-verified; D carries a 32.768 kHz
   crystal on PA00/PA01, recorded for a future 32 kHz pass) with the
   five-wire straight-through SPI link verified conductor by conductor
-  over SWD alone. samc/src/apps/spi_peer.cpp NEW - the avrdx peer
+  over SWD alone. samc21/src/apps/spi_peer.cpp NEW - the avrdx peer
   ported over the SAME spi_link.hpp (one wire format, two
   architectures, two peers): dark listener, one-ahead pumps, raw-host
   host_burst, regimes mapped onto PLOADEN, ident label = die serial -
   and exchanges SERVED THROUGH ITS OWN DMA ENGINES by default, the new
   protocol bit spilink::spare_polled_pump forcing the polled loop so
   both boundaries stay measurable (the AVR peer ignores the bit by
-  construction). samc/spi.hpp: SpiHost grew TWO OPTIONAL DMA ENGINE
+  construction). samc21/spi.hpp: SpiHost grew TWO OPTIONAL DMA ENGINE
   SLOTS (the Uart shape, NoDmaEngine default, engineless build
   byte-identical): the DATA PHASE rides the DMAC - RX drains on RXC
   and its block's completion IS the transaction's, TX feeds on DRE, a
@@ -2594,7 +2599,7 @@ gets its dated home in `docs/design/` when taken.
   ran one z against stale firmware before the rule was learned).
   Gates: md5 worktree 34/37 byte-identical + the two declared build-id
   movers (uart/dma/serial_speed provably identical = the canaries' job
-  done by the gate), check_samc, check_family, host 24/24, avrdx
+  done by the gate), check_samc21, check_family, host 24/24, avrdx
   test_avr_spi/spi_peer compile with the grown protocol. Docs: spi.md
   (DMA sections, the three-boundary ladder, gaps moved), dmac.md (the
   per-mode doctrine + sibling verbs), bench.md (the two-board desk,
@@ -2603,7 +2608,7 @@ gets its dated home in `docs/design/` when taken.
   engine slots (the peer uses raw engines - a driver slot waits for a
   device-shaped user), erratum 1.17.3's staging (now possible, not
   done), SSDE/SSL and address-match on silicon (gaps stand).
-  **samc/delay.hpp BORN 2026-09-02 (same session's tail, user-prompted):
+  **samc21/delay.hpp BORN 2026-09-02 (same session's tail, user-prompted):
   the microsecond busy-wait over SysTick VAL - "at least" never early,
   and CAPPED BELOW ONE KERNEL TICK by contract (a tick or more is
   TimeEvent territory and is REFUSED with false and no time spent; the
@@ -2628,16 +2633,16 @@ gets its dated home in `docs/design/` when taken.
   user; the bench suites keep their proven calibrated spins (comments
   updated to say the facility now exists). Family TU delay.cpp; gates:
   md5 worktree 35/38 + the two build-id movers + the platform suite
-  (the declared mover), check_samc, check_family, host 24/24, spi
+  (the declared mover), check_samc21, check_family, host 24/24, spi
   canary z 71/71.
   **SAM-SAM I2C CAMPAIGN DONE 2026-09-02 (by Fable's own hand,
   autonomous, same desk-day as the SPI campaign): THE FILTERLESS-I2C
   FINDING CLOSED FROM BOTH SIDES.** The I2C pair got its own short
   separated wires with external pull-ups (verified present and stronger
   than an internal pull-down by the SWD wire check - continuity and
-  isolation open-drain style, no firmware). samc/src/apps/twi_peer.cpp
+  isolation open-drain style, no firmware). samc21/src/apps/twi_peer.cpp
   NEW - the avrdx peer ported over the same twi_link.hpp: polled client
-  on the samc verbs (AMATCH resets the decoder, DRDY moves bytes, the
+  on the samc21 verbs (AMATCH resets the decoder, DRDY moves bytes, the
   closing NACK gated past 1.17.22's first-DRDY blind spot), commanded
   stretch = the wait before answering (this silicon stretches by
   construction), serve/coll/hold_sda/quiet/arb - the last a MODE SWITCH
@@ -2651,10 +2656,10 @@ gets its dated home in `docs/design/` when taken.
   host's 10-byte burst byte-exact through the 48 MHz-core client), and
   letter f ran FAST-MODE-PLUS ON THE WIRE - 25 tenures x 16 bytes in
   6 ms at 1 MHz, the stratum's first Fm+, with the refused-never-slowed
-  rule keeping its proof on a throwaway 6 MHz core claim. samc/i2c.hpp
+  rule keeping its proof on a throwaway 6 MHz core claim. samc21/i2c.hpp
   grew ONE additive verb, I2cs/I2cClient::end_transaction() (table
   33-3's CMD 0x2: after the host's closing NACK of a read the client
-  goes back to waiting for a start) - born because the samc peer is the
+  goes back to waiting for a start) - born because the samc21 peer is the
   stratum's FIRST CLIENT-TRANSMIT user (nothing had ever SERVED a read
   before), and the md5 gate proves the growth pure (every pre-existing
   image but the edited suite byte-identical). THE ARBITRATION GAP GOT
@@ -2665,7 +2670,7 @@ gets its dated home in `docs/design/` when taken.
   absent, a live race wants a third node; i2c.md says so. SMBus
   time-outs still open, with board D's 32 kHz crystal named as their
   designated future source. Gates: md5 worktree 35/38 + the two
-  build-id movers + the suite, twi_peer new, check_samc (the family
+  build-id movers + the suite, twi_peer new, check_samc21 (the family
   fixture covers the new verb), check_family, host 24/24. Docs: i2c.md
   headline gains its second half (the bundle ladder stands as the
   measured hazard, the clean pair as the measured absence), bench.md
@@ -2697,7 +2702,7 @@ gets its dated home in `docs/design/` when taken.
   never produces; the earlier doc line that promised LOWTOUT as "the
   hardware answer to BusMaster's no-timeout" was falsified by the
   bench and rewritten. Gates: md5 36/39 + the two build-id movers +
-  the suite, check_samc, host 24/24. Docs i2c.md (findings + the gap
+  the suite, check_samc21, host 24/24. Docs i2c.md (findings + the gap
   closed, MEXT stated) and bench.md moved in the same change.
   **THE PER-BUS TIMEOUT DONE 2026-09-02 (same desk-day's fourth
   campaign, the letter-j consequence built where it belongs - a util/
@@ -2705,7 +2710,7 @@ gets its dated home in `docs/design/` when taken.
   post-fault client re-verification left to the application).**
   util/bus_master.hpp grew `timeout_ticks` (fifth template argument,
   default 0 = today's arbiter BYTE FOR BYTE - the never_retries
-  discipline again, and the gate PROVED it: 36/39 samc + 40/41 avrdx
+  discipline again, and the gate PROVED it: 36/39 samc21 + 40/41 avrdx
   images byte-identical, the only movers the new letter and the three
   standing build-id defsyms at their usual 2/4-byte signature, so
   test_samc_spi/uart/dma's identity doubles as the canary): every
@@ -2713,7 +2718,7 @@ gets its dated home in `docs/design/` when taken.
   TimeEvents<P>::Base node with its own fire glue, because the posted
   BusTimeout must carry the SEQUENCE NUMBER at fire time - kernel/
   untouched); if it matures first the engine is declared dead,
-  Bus::recover() (static_asserted at the spelling; a new samc neg TU
+  Bus::recover() (static_asserted at the spelling; a new samc21 neg TU
   refuses an engine without it) puts the PERIPHERAL back where
   start() is legal, the requester is answered bus_timeout (255, top
   of range - engine codes grow UP from 2 and can never collide) IN
@@ -2728,11 +2733,11 @@ gets its dated home in `docs/design/` when taken.
   the straggler FROM INSIDE recover(); test_bus_master 18/18, host
   24/24). ENGINES: avrdx TwiHost's recover() already existed (the
   errata's ENABLE cycle - reused untouched, and it is the verb the
-  contract names as its model); samc I2cHost::recover() re-runs the
+  contract names as its model); samc21 I2cHost::recover() re-runs the
   init() tail from the cached config as its OWN body (no init()
   refactor - an uncalled template verb costs nothing, byte-identity
   over code economy) because a parked START never fires on release
-  and re-init is the only exit; samc SpiHost::recover() closes the
+  and re-init is the only exit; samc21 SpiHost::recover() closes the
   select window FIRST, puts the engines away and re-claims them,
   resets and reconfigures; avrdx SpiHost::recover() is NEW (silence +
   IF clear, restore_host() for the mid-transfer demotion, CS up) -
@@ -2752,12 +2757,12 @@ gets its dated home in `docs/design/` when taken.
   failure); and the wedge witness is the PAD, never the monitor.
   I2cBus/SpiBus aliases pass Policy + timeout through; i2c_timeout/
   spi_timeout name the code per vocabulary. Family: timed
-  instantiations in all four bus TUs (avrdx twi/spi x8 packages, samc
-  i2c/spi x3 headers) + the neg; check_family, check_samc green.
+  instantiations in all four bus TUs (avrdx twi/spi x8 packages, samc21
+  i2c/spi x3 headers) + the neg; check_family, check_samc21 green.
   Docs: design/i2c-bus.md's "still missing" paragraph became "The
   per-bus timeout" (three rulings recorded), design/spi-bus.md points
-  at it (the SPI wedge is a dead engine, not a wire), samc/i2c.md's
-  consequence line now names the mechanism and letter l, samc/spi.md
+  at it (the SPI wedge is a dead engine, not a wire), samc21/i2c.md's
+  consequence line now names the mechanism and letter l, samc21/spi.md
   + avrdx twi.md/spi.md state their recover() and the not-staged
   gaps, bench.md's suite row moved. Judgment calls in memory
   samc-session-2026-09-02-timeout.
@@ -2782,9 +2787,9 @@ gets its dated home in `docs/design/` when taken.
   lacks, `test/.clangd` pointing at the host project's own database
   (detail in docs/avrdx/README.md). The delta feed is an AVR
   peculiarity (device-specs macros) - confirmed by the second target:
-  samc selects the device with a plain -D__SAMC21J18A__ and needs
+  samc21 selects the device with a plain -D__SAMC21J18A__ and needs
   none of it. clangd routing is now per-stratum .clangd fragments
-  (framework default = host DB; avrdx/samc override with their own
+  (framework default = host DB; avrdx/samc21 override with their own
   database), fully decoupled from CMake Tools' Active Folder, with
   the repo-root .clangd suppressing the two clang-only diagnostics
   -Werror would turn into editor errors on gcc-clean code.
@@ -3479,22 +3484,22 @@ gets its dated home in `docs/design/` when taken.
 
 ```bash
 # Three sibling CMake projects, PEERS (none is the repo root): avrdx/,
-# samc/, test/. cmake presets resolve against their own project dir -
+# samc21/, test/. cmake presets resolve against their own project dir -
 # run cmake FROM that dir (or let tools/bench.py do it).
 (cd test  && ctest --preset host)                                  # host tests (doctest); no hardware needed
 tools/check_family.sh [name]                                       # every avrdx smoke TU compiles for all 8 DA/DB
                                                                     # packages; neg/ TUs must FAIL (definition of done)
-tools/check_samc.sh [name]                                         # same for the samc stratum (E/G/J 18A headers)
+tools/check_samc21.sh [name]                                         # same for the samc21 stratum (E/G/J 18A headers)
 (cd avrdx && cmake --build --preset avr128db48-release --target <app>)         # AVR release build (-Os)
 (cd avrdx && cmake --build --preset avr128db48-release --target <app>-upload)  # flash via Atmel-ICE (UPDI)
 (cd avrdx && cmake --build --preset avr128db48-debug --target <app>)           # AVR debug build, then F5
-(cd samc  && cmake --build --preset samc21j-release --target <app>)            # SAM release build
-(cd samc  && cmake --build --preset samc21j-release --target <app>-upload)     # flash via OpenOCD (SWD)
+(cd samc21 && cmake --build --preset samc21j-release --target <app>)            # SAM release build
+(cd samc21 && cmake --build --preset samc21j-release --target <app>-upload)     # flash via OpenOCD (SWD)
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)          # STM32G0 release build
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash via OpenOCD (ST-LINK)
 tools/check_stm32g0.sh [name]                                      # same for the stm32g0 stratum (ALL TWELVE G0 headers, x1 + x0)
 # apps are auto-discovered from <project>/src/apps/*.cpp - plus
-# experiments/*/{avrdx,samc}/*.cpp, each experiment's per-arch app
+# experiments/*/{avrdx,samc21}/*.cpp, each experiment's per-arch app
 # halves - at every configure; no generation step; a new/removed app
 # or a changed "// build: opt = value" line takes effect on the next
 # configure
@@ -3524,7 +3529,7 @@ python3 tools/bench.py fuses A bootsize=128  # read/write fuses over UPDI (fuses
 
 - Toolchains: self-built avr-gcc 16.2 at `/sw/avr`
   (`avrdx/cmake/toolchain-avr.cmake`) and arm-none-eabi-gcc 16.2 at
-  `/sw/arm-none-eabi` (`samc/cmake/toolchain-arm.cmake`), each pointed
+  `/sw/arm-none-eabi` (`samc21/cmake/toolchain-arm.cmake`), each pointed
   at by absolute path; never a system-packaged one. Never add
   `-mrelax` on AVR (PyAvrOCD refuses the ELF).
   No `-flto` (never added, so nothing to strip) and no `-DF_CPU` (never
@@ -3551,7 +3556,7 @@ python3 tools/bench.py fuses A bootsize=128  # read/write fuses over UPDI (fuses
 ## Layout
 
 ```
-avrdx/                   the AVR build project (a PEER of samc/ and test/ -
+avrdx/                   the AVR build project (a PEER of samc21/ and test/ -
                          the repo root is not a CMake project):
   CMakeLists.txt           app auto-discovery ("// build:" header comments),
                            avr_predefines() (clangd's -mmcu macro delta),
@@ -3573,7 +3578,7 @@ avrdx/                   the AVR build project (a PEER of samc/ and test/ -
                            the app's own source - the .init3 IVSEL store,
                            vectors at BOOT start)
   svd/avr128db48.svd       the debug Peripheral Viewer's register map
-samc/                    the SAM C21 build project, same shape (CMakeLists +
+samc21/                    the SAM C21 build project, same shape (CMakeLists +
                          presets + cmake/toolchain-arm.cmake + ld/ linker
                          script + src/apps + src/glue startup crt + svd/) -
                          its own header comments are the reference
@@ -3585,7 +3590,7 @@ test/CMakeLists.txt      the host test project (independent - one CMake
                          one executable + ctest entry per test_*/main.cpp
 test/CMakePresets.json   the "host" configure/build/test preset (native g++, UBSan)
 test/test_*/main.cpp     host unit tests (doctest), cd test && ctest --preset host
-test/family_samc/        samc family smoke TUs + neg/, tools/check_samc.sh runs them
+test/family_samc21/        samc21 family smoke TUs + neg/, tools/check_samc21.sh runs them
 third_party/doctest/     vendored doctest.h (MIT, upstream doctest/doctest)
 third_party/samc21-dfp/  vendored Microchip.SAMC21_DFP include tree (Apache-2.0)
 third_party/cmsis-device-g0/  vendored ST cmsis-device-g0 v1.4.5 Include/ (Apache-2.0)
@@ -3593,7 +3598,7 @@ test/family_stm32g0/     stm32g0 family smoke TUs + neg/, tools/check_stm32g0.sh
 third_party/cmsis-core/  vendored ARM CMSIS-Core headers (Apache-2.0)
 tools/check_family.sh    family compile check over test/family/ (see above) -
                          zero CMake coupling, calls avr-g++ directly
-tools/check_samc.sh      the samc twin over test/family_samc/
+tools/check_samc21.sh      the samc21 twin over test/family_samc21/
 tools/bench_boards.py    the bench MANIFEST: the physical boards on the desk
                          (type, console by-path, programmer) - not a target list
 tools/uart_stress.py     the host end of test_samc_uart: the same xorshift the
@@ -3602,19 +3607,19 @@ tools/uart_stress.py     the host end of test_samc_uart: the same xorshift the
                          letters cannot be run without it
 tools/bench.py           the bench orchestrator: list / flash / run / console /
                          duo / fuses, over the manifest and the per-project app
-                         rosters build-cmake/apps_{avrdx,samc}.json (each project
+                         rosters build-cmake/apps_{avrdx,samc21}.json (each project
                          writes its own at every configure - separate files
                          because app NAMES COLLIDE across the trees: blink,
                          console and probe exist in both). BOARD_TYPES maps a
                          board type to its project, preset, mcu and flash
                          mechanism (db* -> avrdx/avrdude/UPDI, c21j ->
-                         samc/OpenOCD/SWD); `fuses` and --erase are AVR-only
+                         samc21/OpenOCD/SWD); `fuses` and --erase are AVR-only
                          and refuse a SAM board instead of pretending
 experiments/             one SELF-CONTAINED directory per cross-cutting bench
                          experiment (ruled 2026-08-31; deliberately not
                          "examples" - no maintenance promise): both
                          architectures' app halves (<name>/avrdx/*.cpp and
-                         <name>/samc/*.cpp, globbed by the respective build
+                         <name>/samc21/*.cpp, globbed by the respective build
                          projects; app names unique per arch), the shared
                          wire-protocol header beside them, its own README
                          (rationale, pre-registered predictions, wiring,
@@ -3623,10 +3628,10 @@ experiments/             one SELF-CONTAINED directory per cross-cutting bench
                          energy/ = the clock-strategy energy experiment
                          (DynamicClock-deferral verdict; the SAM as
                          stimulus + judge + meter for an AVR DUT)
-docs/                    README (map + rules), design/, <target>/ (avrdx/, samc/,
+docs/                    README (map + rules), design/, <target>/ (avrdx/, samc21/,
                          host/), bench.md
 brio/.clangd             per-stratum clangd routing: the framework default is
-                         the host database; avrdx/.clangd and samc/.clangd
+                         the host database; avrdx/.clangd and samc21/.clangd
                          (in brio/ AND in each project dir) override with
                          their own architecture's database, so a header always
                          parses with its own compiler regardless of CMake
@@ -3846,7 +3851,7 @@ brio/                    the framework, four strata:
                            EvTcbCaptIn/CountIn/EvLutIn + EventUserBase
                            (listen/unlisten); concepts EventGenerator/
                            EventUser; tables on demand
-  samc/                  everything that knows sam.h (SAM C21, Cortex-M0+)
+  samc21/                  everything that knows sam.h (SAM C21, Cortex-M0+)
     nvic.hpp               "sam.h" + armv6m/nvic.hpp (the guard and Nvic live there)
     platform_sam.hpp       SamPlatform (idle takes whatever PM.SLEEPCFG holds -
                            SCR.SLEEPDEEP is never written - with erratum
@@ -4126,5 +4131,5 @@ brio/                    the framework, four strata:
 `avr_add_app()`'s post-build step - one set per app, in the preset's own
 build dir (the SAM project's `sam_add_app()` does the same, plus a
 `.bin`). Host test binaries live in `build-cmake/host/`, and the
-per-project app rosters `apps_avrdx.json` / `apps_samc.json` in
+per-project app rosters `apps_avrdx.json` / `apps_samc21.json` in
 `build-cmake/` itself.

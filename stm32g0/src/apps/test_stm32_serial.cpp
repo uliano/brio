@@ -1265,7 +1265,7 @@ volatile uint8_t loop_mode = 0;   // 0 none, 1 LoopUart, 2 LoopFifoUart
 // later, because the IWDG is the only thing that can end an interrupt
 // storm. So the handlers below clear WUF and COUNT it, and the letters
 // read the counter rather than a flag their own handler has just
-// cleared. (The samc SERCOM ERROR storm, in this family's clothes.)
+// cleared. (The samc21 SERCOM ERROR storm, in this family's clothes.)
 volatile uint8_t console_wake_armed = 0;
 volatile uint32_t console_wakes = 0;
 /// The SAME lesson one peripheral along: `Rtc::isr()` clears WUTF at
@@ -3975,7 +3975,7 @@ extern "C" void USART2_LPUART2_IRQHandler() {
 /// console stops draining mid-line and the IWDG reboots the board thirty
 /// seconds later. That is exactly what the first version of letter e
 /// did, and it took a HardFault breadcrumb (which stayed empty) to
-/// prove it was not a fault at all. The samc stratum's NMI lesson, in
+/// prove it was not a fault at all. The samc21 stratum's NMI lesson, in
 /// this family's clothes.
 extern "C" void USART1_IRQHandler() {
     loop_irqs = loop_irqs + 1u;

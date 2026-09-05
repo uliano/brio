@@ -2,7 +2,7 @@
 # host/ are target-independent and parse against the HOST project's
 # database (fast native flags, exactly what test/ compiles them with).
 # The target strata override this with their own fragment (avrdx/.clangd,
-# samc/.clangd), so a header always parses with its OWN architecture -
+# samc21/.clangd), so a header always parses with its OWN architecture -
 # regardless of which project CMake Tools happens to have active. Paths
 # are relative to this file.
 CompileFlags:

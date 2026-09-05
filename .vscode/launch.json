@@ -81,7 +81,7 @@
             // SAM C21 board over the second Atmel-ICE (CMSIS-DAP/SWD),
             // cortex-debug launching OpenOCD itself (no PyAvrOCD-style
             // buffering shims needed - cortex-debug parses OpenOCD's
-            // stderr natively). CMake Tools' Active Folder must be samc/
+            // stderr natively). CMake Tools' Active Folder must be samc21/
             // and its launch target the app to debug, same
             // ${command:cmake.launchTargetPath} contract as the AVR entry.
             // "adapter serial" goes through openOCDPreConfigLaunchCommands
@@ -107,7 +107,7 @@
                 "interface/cmsis-dap.cfg",
                 "target/at91samdXX.cfg"
             ],
-            "svdPath": "${workspaceFolder}/samc/svd/ATSAMC21J18A.svd",
+            "svdPath": "${workspaceFolder}/samc21/svd/ATSAMC21J18A.svd",
             "runToEntryPoint": "main"
         },
         {

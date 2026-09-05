@@ -22,7 +22,7 @@
 // NOTHING TO WIRE. Four techniques carry it:
 //   1. THE ZERO-LENGTH WIRE. PA4 is DAC1_OUT1 and ADC_IN4 at once
 //      (DS13560 table 12), so the DAC drives an ADC input through one
-//      bond pad and nothing else - the samc campaign's PA02 trick, on a
+//      bond pad and nothing else - the samc21 campaign's PA02 trick, on a
 //      part where it is the ONLY route between the two converters.
 //   2. THE FACTORY VALUES AS THE SCALE. VREFINT and its calibration at
 //      0x1FFF75AA give VDDA in millivolts without a meter; TS_CAL1 and
@@ -1838,7 +1838,7 @@ void tj_sampler_ao() {
     // Kernel::step() serves ONE queued event and nothing else - only
     // Kernel::run() matures time events, and this loop is not run(). The
     // sampler's software pace IS a time event, so the pump has to do
-    // both halves by hand (the samc suite's own shape).
+    // both halves by hand (the samc21 suite's own shape).
     const uint32_t deadline = Ticker::ticks() + 400u;
     while (Collector::samples < 60u && Ticker::ticks() < deadline) {
         TimeEvents<Stm32Platform>::process();
@@ -2187,7 +2187,7 @@ void tl_errata() {
 // What it does NOT buy, and the letter says so: an ABSOLUTE offset. The
 // number below is the comparator's offset PLUS the DAC's and PLUS the
 // ADC's, three instruments deep, and nothing here can apportion it - the
-// samc DAC campaign's ruling, applied again.
+// samc21 DAC campaign's ruling, applied again.
 
 /// TIM2 free-running at TIMPCLK: one tick is 15.6 ns and a read is a
 /// load, where the SysTick stopwatch this suite uses elsewhere costs
@@ -2366,7 +2366,7 @@ void tm_comp_analog() {
     // THE ORDER OF THE FOUR SWEEPS IS PART OF THE MEASUREMENT: up, down,
     // down, up. Any residual drift of the node enters the first pair
     // with one sign and the second with the other, so the mean of the
-    // two has a linear drift removed exactly - the samc campaigns' ABBA
+    // two has a linear drift removed exactly - the samc21 campaigns' ABBA
     // block, spent here on a leaking pad instead of a warming die.
     const CompHysteresis levels[4] = {CompHysteresis::none, CompHysteresis::low,
                                       CompHysteresis::medium, CompHysteresis::high};

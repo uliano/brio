@@ -7,7 +7,7 @@
  * PRIMASK. Nothing in this file knows a vendor: it is the part of a
  * Cortex-M0+ target that ARM designed, and it became a stratum of its
  * own at the SECOND ARM family in brio, as the naming rule foresaw -
- * `samc/nvic.hpp` and `stm32g0/nvic.hpp` were twins line for line, and
+ * `samc21/nvic.hpp` and `stm32g0/nvic.hpp` were twins line for line, and
  * this is that one file, with the two families' headers reduced to the
  * include that selects the device.
  *
@@ -36,7 +36,7 @@
 #include <stdint.h>
 
 #if !defined(__CM0PLUS_REV) && !defined(__CM0_REV)
-#error "armv6m/nvic.hpp: include the family's device header first (samc/nvic.hpp and stm32g0/nvic.hpp do) - the CMSIS core header it brings is what this file is written against"
+#error "armv6m/nvic.hpp: include the family's device header first (samc21/nvic.hpp and stm32g0/nvic.hpp do) - the CMSIS core header it brings is what this file is written against"
 #endif
 
 namespace brio {

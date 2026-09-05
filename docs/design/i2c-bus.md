@@ -110,7 +110,7 @@ keeps running (nothing blocks) but the bus AO stays busy and later
 requests pile up until rejected - loud, but not recovered. And no
 silicon fixes this: the SAM SERCOM's SMBus time-outs police the HOST'S
 OWN clock hold, not a wire a client wedged (measured -
-[i2c.md](../samc/i2c.md)); the AVR's TWI has none at all. So the
+[i2c.md](../samc21/i2c.md)); the AVR's TWI has none at all. So the
 timeout is the ARBITER'S - the one object that knows a completion is
 owed, living in the kernel that has TimeEvents.
 

@@ -48,7 +48,7 @@
  *    the ADC's, shared by all three comparators (table 61). This driver
  *    PUBLISHES its line number and does not include stm32g0/exti.hpp:
  *    the fabric driver owns the fabric and the peripheral owns its own
- *    vocabulary (the samc EVSYS ruling, kept). The chapter's own
+ *    vocabulary (the samc21 EVSYS ruling, kept). The chapter's own
  *    sequence is to configure the EXTI line FIRST and enable the
  *    comparator last, so the enable's own transient does not arrive on
  *    an unconfigured line.

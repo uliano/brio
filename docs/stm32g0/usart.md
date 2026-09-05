@@ -169,7 +169,7 @@ a compile-time refusal in the task.
   `kernel_hz<Clock>()`, the counters (`rx_overruns`, `hw_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `dma_faults`,
   `wakes`), `clear_errors`, `release()`. The public surface is
-  unchanged from the bring-up's and IDENTICAL to avrdx's and samc's -
+  unchanged from the bring-up's and IDENTICAL to avrdx's and samc21's -
   which is what lets `util/serial_port.hpp` and `print()` compile on the
   third architecture untouched.
 - `Rs485<n, pins, de_pin, assertion, deassertion, ...>` - the same task
@@ -260,7 +260,7 @@ Keeping that identity forced two shapes, and both are on record:
 - `usart_brr()` and `usart_brr_over8()` are SIBLING VERBS. Giving
   `usart_brr()` a `bool over8 = false` third argument moved
   `test_stm32_dma` by forty bytes although the folded code for `false`
-  is identical - the samc SPI-DMA campaign's ruling met again on this
+  is identical - the samc21 SPI-DMA campaign's ruling met again on this
   silicon: byte identity outranks API economy.
 - The task keeps a `plain` constant for the default arrangement (PCLK,
   divide-by-1, no OVER8) and names HEAD's own expression under it,

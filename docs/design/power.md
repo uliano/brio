@@ -13,7 +13,7 @@ it - is each target's, documented in that target's folder
 Contracts and services: `util/power.hpp`. The kernel question it needs:
 `TimeEvents<P>::ticks_to_next()` (`kernel/time_event.hpp`). The
 realizations: `AvrSleepSite` over `Sleep` in `avrdx/sleep.hpp`,
-`SamSleepSite` and `SamTimedSleepSite` over `Pm` in `samc/sleep.hpp`,
+`SamSleepSite` and `SamTimedSleepSite` over `Pm` in `samc21/sleep.hpp`,
 and `Stm32SleepSite` and `Stm32TimedSleepSite` over `Pwr` in
 `stm32g0/sleep.hpp`.
 
@@ -29,7 +29,7 @@ idle path turned out to cost nothing there - PM.SLEEPCFG already IS
 the armed mode, so the hook takes it by not touching it. What the
 second target adds is a target-level restriction the model does not
 express: its kernel tick stops in standby, so an application there may
-only ask for standby with no time event armed (`docs/samc/platform.md`).
+only ask for standby with no time event armed (`docs/samc21/platform.md`).
 
 **And a third silicon, still with no change.** On the STM32G0 the
 `SleepSite`'s two verbs absorbed everything that family asks of a

@@ -7,7 +7,7 @@
  * STM32G0 to the instruction, which is why it lives here. What differs
  * per family sits in the family's own ticker.hpp: the alias `Ticker`
  * (the project-wide rate), any guard the family's errata demand
- * (samc/ticker.hpp's SysTickInterruptGuard), and the caveats a family's
+ * (samc21/ticker.hpp's SysTickInterruptGuard), and the caveats a family's
  * sleep modes attach to a core-clocked timebase.
  *
  * WHY SYSTICK AND NOT A VENDOR TIMER. SysTick is core-private: no
@@ -42,7 +42,7 @@
  * access (read_shared below) so every call performs a real load - in a
  * header-only build a polling loop over an inlined getter would
  * otherwise fold to one hoisted read that never sees the handler's
- * store (gcc -Os deleted exactly such a loop on the samc bench). now()
+ * store (gcc -Os deleted exactly such a loop on the samc21 bench). now()
  * additionally masks: it reads TWO counters that must belong to the
  * same instant.
  *
@@ -55,7 +55,7 @@
  * And a sleep mode that stops the CPU clock stops THIS TIMEBASE: kernel
  * time stands still for the whole sleep (the SAM's standby, the
  * STM32's Stop); `advance()` is the landing point of the resync a timed
- * sleep site performs from an RTC, samc/sleep.hpp's SamTimedSleepSite
+ * sleep site performs from an RTC, samc21/sleep.hpp's SamTimedSleepSite
  * being the built precedent.
  */
 
@@ -64,7 +64,7 @@
 #include <stdint.h>
 
 #if !defined(__CM0PLUS_REV) && !defined(__CM0_REV)
-#error "armv6m/ticker.hpp: include the family's device header first (samc/ticker.hpp and stm32g0/ticker.hpp do)"
+#error "armv6m/ticker.hpp: include the family's device header first (samc21/ticker.hpp and stm32g0/ticker.hpp do)"
 #endif
 
 #include "armv6m/nvic.hpp"

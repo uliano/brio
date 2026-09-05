@@ -44,7 +44,7 @@
  * ceiling (an exact ratio is searched at compile time; an unreachable
  * rate is a compile error naming the rule). HSE (crystal or bypass),
  * LSI, LSE, HSI48 and the P/Q outputs are DECLARED in the enum and
- * refused, and the DynamicClock question is not opened - the samc
+ * refused, and the DynamicClock question is not opened - the samc21
  * position, for the same reason: which root SYSCLK takes at run time and
  * who is told is a design decision, not a side effect of a bring-up.
  *

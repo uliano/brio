@@ -93,7 +93,7 @@ portability readable at a glance:
 | `util/` | services on top of the kernel: `SerialPort`, `BusMaster` (SPI/I2C arbiter), `print`, `Ring`, line parsers | `kernel/` |
 | `avrdx/` | everything that knows `avr/io.h`: clock, pins, UART, SPI, TWI, ticker, `AvrPlatform` | `kernel/`, `util/` |
 | `armv6m/` | what ARM designed into every Cortex-M0/M0+ and both ARM families share: NVIC + PRIMASK guard, the SysTick ticker | `util/` (and the including family's device header) |
-| `samc/` | everything that knows `sam.h` (Cortex-M0+): clock tree, pins, SERCOM UART, `SamPlatform`; its NVIC and ticker are `armv6m/`'s | `kernel/`, `util/`, `armv6m/` |
+| `samc21/` | everything that knows `sam.h` (Cortex-M0+): clock tree, pins, SERCOM UART, `SamPlatform`; its NVIC and ticker are `armv6m/`'s | `kernel/`, `util/`, `armv6m/` |
 | `stm32g0/` | everything that knows `stm32g0xx.h` (Cortex-M0+): RCC/PLL, GPIO, USART, `Stm32Platform`; its NVIC and ticker are `armv6m/`'s | `kernel/`, `util/`, `armv6m/` |
 | `host/` | `HostPlatform`: the native test "target" (virtual clock, recording idle/break) | `kernel/` |
 
@@ -106,7 +106,7 @@ and generic code chooses with `if constexpr` or a concept.
 | Target | State | Notes |
 |--------|-------|-------|
 | AVR DA/DB (`avrdx/`) | on the bench | AVR128DB48, avr-gcc 16.2, see [docs/avrdx/README.md](docs/avrdx/README.md) |
-| SAM C21 (`samc/`) | on the bench | ATSAMC21J18A, arm-none-eabi-gcc 16.2, SysTick tick at 1000 Hz (vs the AVR's 1024: the kernel tick's opacity, exercised for real), see [docs/samc/README.md](docs/samc/README.md) |
+| SAM C21 (`samc21/`) | on the bench | ATSAMC21J18A, arm-none-eabi-gcc 16.2, SysTick tick at 1000 Hz (vs the AVR's 1024: the kernel tick's opacity, exercised for real), see [docs/samc21/README.md](docs/samc21/README.md) |
 | STM32G0 (`stm32g0/`) | on the bench, bring-up | STM32G0B1RE (Nucleo-G0B1RE), arm-none-eabi-gcc 16.2, HSI16 x PLL at 64 MHz, the third clock model (shared bus prescalers + per-peripheral enables), see [docs/stm32g0/README.md](docs/stm32g0/README.md) |
 | host (`host/`) | in use | doctest suites, `cd test && ctest --preset host`, see [docs/host/README.md](docs/host/README.md) |
 
@@ -114,18 +114,18 @@ and generic code chooses with `if constexpr` or a concept.
 
 The framework in `brio/` is header-only, included directly. The
 builds are four sibling CMake projects, one per toolchain, all peers
-(the repo root is not a CMake project): `avrdx/`, `samc/` and
+(the repo root is not a CMake project): `avrdx/`, `samc21/` and
 `stm32g0/` each auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
 - an app may pin build options such as its console baud with
 `// build: monitor_speed = 115200` header lines - and `test/` holds
 the host unit tests (a configure has exactly one compiler).
 
 ```bash
-(cd test  && ctest --preset host)                                       # host tests: kernel, queues, FSM, time events, buses, ring...
-(cd avrdx && cmake --build --preset avr128db48-release --target <app>)  # build one AVR app (release, -Os)
-(cd avrdx && cmake --build --preset avr128db48-release --target <app>-upload)   # flash it over UPDI
-(cd samc  && cmake --build --preset samc21j-release --target <app>)     # build one SAM app
-(cd samc  && cmake --build --preset samc21j-release --target <app>-upload)      # flash it over SWD
+(cd test    && ctest --preset host)                                       # host tests: kernel, queues, FSM, time events, buses, ring...
+(cd avrdx   && cmake --build --preset avr128db48-release --target <app>)  # build one AVR app (release, -Os)
+(cd avrdx   && cmake --build --preset avr128db48-release --target <app>-upload)   # flash it over UPDI
+(cd samc21  && cmake --build --preset samc21j-release --target <app>)     # build one SAM app
+(cd samc21  && cmake --build --preset samc21j-release --target <app>-upload)      # flash it over SWD
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)  # build one STM32G0 app
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash it over the ST-LINK
 ```

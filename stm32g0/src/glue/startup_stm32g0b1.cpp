@@ -1,7 +1,7 @@
 // startup_stm32g0b1.cpp - vector table + reset path for the STM32G0B1
 // (and, by the same header, the G0C1's peripheral subset), compiled into
 // EVERY image of this project (stm32_add_app() lists it alongside the
-// app's own source - the glue slot the samc project's startup_samc21.cpp
+// app's own source - the glue slot the samc21 project's startup_samc21.cpp
 // also fills). No ST startup template, no SystemInit, no
 // SystemCoreClock: this file and ld/stm32g0b1re.ld are the whole crt.
 //
@@ -25,7 +25,7 @@
 // where this family's vector sharing shows: one line for USART2 AND
 // LPUART2, one for USART3/4/5/6 AND LPUART1, one for TIM3 AND TIM4, and
 // so on. A handler for a shared line asks each of its peripherals in
-// turn. The samc lesson stands: a name this table does not reference
+// turn. The samc21 lesson stands: a name this table does not reference
 // compiles, links, and lands in Default_Handler's silent spin.
 //
 // Reset_Handler does the minimum an image needs: copy .data from flash,
@@ -79,7 +79,7 @@ __attribute__((weak)) void HardFault_Handler()
 // abort(): the one libc symbol a brio image references (libstdc++'s
 // throw sites under -fno-exceptions). A spin, so the frame survives for
 // the debugger, and so newlib's abort() does not drag the syscall stubs
-// in - see samc/src/glue/startup_samc21.cpp for the full argument.
+// in - see samc21/src/glue/startup_samc21.cpp for the full argument.
 [[noreturn]] void abort()
 {
     for (;;) {}

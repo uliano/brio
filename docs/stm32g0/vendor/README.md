@@ -47,7 +47,7 @@ ARE in the repository (Apache-2.0 allows it) so a fresh clone builds:
   the comment. ST's startup templates are NOT vendored; the crt cites
   them for the handler NAMES only (`stm32g0/src/glue/`).
 - `third_party/cmsis-core/` - the CMSIS-Core headers the device header
-  includes (ARM CMSIS_5 5.9.0), shared with the samc stratum.
+  includes (ARM CMSIS_5 5.9.0), shared with the samc21 stratum.
 - `stm32g0/svd/STM32G0B1.svd` - ST's SVD for the debug Peripheral
   Viewer (Apache-2.0, from the cmsis-svd-data mirror of ST's pack),
   with its description text SANITIZED TO ASCII (the repo rule): ST's

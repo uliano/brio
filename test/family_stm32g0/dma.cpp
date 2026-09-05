@@ -19,7 +19,7 @@
 //     one's NAME comes in three spellings
 //     (DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR / DMA1_Ch4_7_DMAMUX1_OVR /
 //     DMA1_Ch4_5_DMAMUX1_OVR). A wrong line is a silent Default_Handler
-//     spin - the samc stratum's NMI lesson - so every present channel's
+//     spin - the samc21 stratum's NMI lesson - so every present channel's
 //     irq() is evaluated here on every header, and the third line's
 //     spelling is demanded from the presence that names it.
 //

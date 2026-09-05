@@ -78,7 +78,7 @@ The preprocessor's one legitimate question is whether a vendor macro
 EXISTS - the question no template can ask - and even that is split by
 what the answer produces. A probe whose product is a VALUE (a pad's
 line number, an instance's clock id, a trigger code, a bonding fact)
-belongs in the family's DEVICE-TABLES header (`samc/device_tables.hpp`
+belongs in the family's DEVICE-TABLES header (`samc21/device_tables.hpp`
 is the first), quarantined one entry per header symbol and exported as
 plain constexpr data: probes rather than per-variant tables, because a
 probe re-reads the vendor header at every compile and cannot drift,

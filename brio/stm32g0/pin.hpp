@@ -2,7 +2,7 @@
  * pin.hpp
  *
  * The STM32G0 I/O pins (GPIO, RM0444 ch. 7), register-level, in the same
- * two faces avrdx/pin.hpp and samc/pin.hpp offer:
+ * two faces avrdx/pin.hpp and samc21/pin.hpp offer:
  *
  *  Port<'A'>       the port RESOURCE - one GPIOx block: 16-bit mask
  *                  operations on ODR/IDR through the atomic BSRR/BRR
@@ -37,7 +37,7 @@
  *    thing on every brio target. Analog mode is the reset state of every
  *    pin except PA13/PA14 (SWD) and is also the low-power parking state.
  * 3. THERE IS NO PIN INTERRUPT IN GPIO. Edge and level senses are the
- *    EXTI's (ch. 13), reached through its own multiplexer - the samc EIC
+ *    EXTI's (ch. 13), reached through its own multiplexer - the samc21 EIC
  *    situation; an EXTI driver will own them. Alternate functions are a
  *    PER-PIN 4-bit number (AFRL/AFRH), and which peripheral signal AFn
  *    means on a given pad is a table of the DATASHEET (DS13560 tables

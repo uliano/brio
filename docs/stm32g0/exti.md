@@ -149,7 +149,7 @@ of Stop ([lptim.md](lptim.md), [pwr.md](pwr.md)).
 ## Types and verbs
 
 The driver owns the FABRIC and not the vocabulary of what is wired to a
-line above 15 - the samc EVSYS ruling applied to this family: a
+line above 15 - the samc21 EVSYS ruling applied to this family: a
 peripheral that owns a wake-up publishes its own line number, and
 `exti_line_implemented()` / `exti_line_configurable()` are how such a
 number is checked against the device header. What lives here is what is
@@ -251,7 +251,7 @@ control, with no pending bit set either way.
   a USART interrupt** - an interrupt pending in the NVIC returns WFE
   too (4.2.2). With a print between the arming and the sleep, both legs
   measure zero. The letter now computes its verdicts first, drains the
-  console, sleeps, and prints afterwards. (The same lesson the samc
+  console, sleeps, and prints afterwards. (The same lesson the samc21
   suites learned about prints inside a measurement window, in a new
   form.)
 

@@ -18,7 +18,7 @@
     "C_Cpp.intelliSenseEngine": "disabled",
 
     // --- CMake Tools: three independent CMake projects share this workspace
-    //     folder - avrdx/ (avr-g++), test/ (host g++) and samc/
+    //     folder - avrdx/ (avr-g++), test/ (host g++) and samc21/
     //     (arm-none-eabi-g++), each with its own toolchain since one CMake
     //     configure has exactly one compiler. The REPO ROOT is deliberately
     //     NOT a CMake project any more: it was the Active Folder's silent
@@ -28,7 +28,7 @@
     "cmake.sourceDirectory": [
         "${workspaceFolder}/avrdx",
         "${workspaceFolder}/test",
-        "${workspaceFolder}/samc"
+        "${workspaceFolder}/samc21"
     ],
 
     // CMake Tools 1.23+ defaults cmake.options.statusBarVisibility to

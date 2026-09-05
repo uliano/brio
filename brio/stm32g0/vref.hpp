@@ -11,7 +11,7 @@
  * all work against the SAME VREF+ pin, and the buffer of chapter 17 is
  * the one thing that can change what that pin is worth. On the SAM C21
  * each converter carried its own REFSEL vocabulary and each header
- * therefore carried its own reference enum (samc/adc.hpp's comment says
+ * therefore carried its own reference enum (samc21/adc.hpp's comment says
  * so); here one enum serves all three, so it sits in the chapter that
  * owns the rail. util/analog.hpp's contract is unchanged: `Ref` and
  * `ref_mv()` are each target's, under the same name.
@@ -132,7 +132,7 @@ struct VrefBufConfig {
 };
 
 /// The block. One instance on every part of the family, so a monostate
-/// (the samc Dac/Sdadc/Tsens precedent).
+/// (the samc21 Dac/Sdadc/Tsens precedent).
 struct Vref {
     static_assert(vrefbuf_present(),
                   "brio Vref: this device declares no VREFBUF_BASE");

@@ -68,7 +68,7 @@ static_assert(BenchJournal::erase_size == 2048u && BenchJournal::write_cell == 8
 
 // A journal with room for far more ids than the bench uses still fits in
 // one page per half - which is what the 2048/8 geometry buys over the
-// samc's 256/64.
+// samc21's 256/64.
 using WideJournal = NvJournal<MainFlashJournalZone, 32, 32, 1>;
 static_assert((32u + 2u) * WideJournal::max_entry_cells <=
               WideJournal::half_cells);

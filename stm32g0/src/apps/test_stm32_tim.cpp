@@ -225,7 +225,7 @@ void settle() { (void)delay_us(clock, 200); }
 
 /// Wait for the console to be physically empty. A measurement window
 /// that a transmit interrupt walks through is not a measurement - the
-/// samc campaigns paid for this twice, and letter e pays for it again:
+/// samc21 campaigns paid for this twice, and letter e pays for it again:
 /// a polling capture loop that the USART's ISR interrupts MISSES edges,
 /// and a missed capture reads as an interval that is a multiple of the
 /// true one.
@@ -449,7 +449,7 @@ void ta_block() {
 void tb_time_base() {
     // The arithmetic, against SysTick. The window is opened and closed by
     // two reads with NOTHING between them - a verdict line is four
-    // milliseconds of console, and the samc campaign paid for that lesson
+    // milliseconds of console, and the samc21 campaign paid for that lesson
     // twice.
     T2::init();
     bench.verdict("a free-running 32-bit counter configures and starts",
@@ -946,7 +946,7 @@ void tf_pwm_input() {
                   cap_width < cap_period);
     bench.verdict("the counter is reset ON the rising edge, so a period "
                   "reads as its own tick count and not one less - the "
-                  "opposite of the samc TC's capture",
+                  "opposite of the samc21 TC's capture",
                   cap_period > 900u);
 
     quiet_everything();
@@ -1211,7 +1211,7 @@ void th_vectors() {
 //
 // The instrument is letter d's: TIM2 publishes OC1REF - the waveform
 // itself - and TIM3 counts its rising edges, so the number of WAVEFORM
-// PERIODS in a cycle-measured window is exact. The samc campaign found
+// PERIODS in a cycle-measured window is exact. The samc21 campaign found
 // the SAM's printed dual-slope formula off by one, so this letter
 // distinguishes 2 x ARR from 2 x (ARR + 1) rather than assuming either.
 struct WaveformRate {
@@ -1313,7 +1313,7 @@ void ti_center_aligned() {
 //
 // THIS IS THE CAMPAIGN'S POINT, not a bonus letter. util/meter_sampler.hpp
 // was designed on the AVR around a capture ISR that fills a one-cell
-// latch and an AO that paces PUBLICATION rather than capture; the samc
+// latch and an AO that paces PUBLICATION rather than capture; the samc21
 // campaign ran it from a SAM TC through EVSYS from an EIC pin. Here the
 // source is a TIM16 capture channel fed by LSI over TISEL - a chain with
 // nothing in common with either - and NOT ONE LINE OF util/ CHANGED.

@@ -135,7 +135,7 @@ reaches it only from Low-power RUN, which means the regulator in
 low-power mode and the system clock at or below 2 MHz - a whole-program
 decision an application makes, not something to do behind its back for
 the duration of one idle. So `light` maps to Sleep, and `armed()` -
-which stays a PURE READ of the silicon, the samc position kept - answers
+which stays a PURE READ of the silicon, the samc21 position kept - answers
 `none` for it, because that is what the machine will really do.
 
 **Standby and Shutdown are off the ladder on purpose**, and this is the
@@ -181,7 +181,7 @@ compile time unless its split divides the second at least a thousand
 ways.
 
 **The ISR has four acts**, and every one is load-bearing. The last three
-are the samc's, learned at that bench; the first is this family's own:
+are the samc21's, learned at that bench; the first is this family's own:
 restore the clock (4.3.6), acknowledge the flag, resync the ticker, and
 hand the machine back to a TICKING sleep - because the never-early bias
 guarantees kernel time is still a shade short of the deadline when the
@@ -483,7 +483,7 @@ here beside the rest of the Stop story.
   wake option is named; anything arming the wake through the RESOURCE
   under a task that was not compiled for it owes the clear itself.
 
-Three suite-craft lessons paid for here, all of them the samc bench's
+Three suite-craft lessons paid for here, all of them the samc21 bench's
 own in new dress: a console DRAIN placed between arming a deadline and
 stamping the wall puts tens of milliseconds INSIDE the measurement (it
 made a 500 ms event look 25 ms early); a verdict printed between `arm()`

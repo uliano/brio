@@ -137,7 +137,7 @@ volatile uint32_t ewi_cycles = 0;
 volatile uint16_t ewi_count = 0;
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch, the samc suites' own
+// A cycle-resolution stopwatch, the samc21 suites' own
 //
 // ticks x period + the phase SysTick has already counted down. The two
 // reads are retried until they belong to the same tick, which is what
@@ -393,7 +393,7 @@ void tc_ticker() {
 void td_delay() {
     // THE BRACKET'S OWN ZERO, measured first: two back-to-back
     // cycles_now() readings are not free, and charging their cost to
-    // the delay is the mistake the samc twin of this letter paid for.
+    // the delay is the mistake the samc21 twin of this letter paid for.
     uint32_t zero_min = 0xFFFFFFFFu;
     uint32_t zero_max = 0;
     for (uint8_t k = 0; k < 8; ++k) {
@@ -621,7 +621,7 @@ void te_iwdg() {
 // letter does, so that a reference suite carries no one-way switch.
 void tf_wwdg() {
     // The closed gate first: 5.2.17 says a peripheral without its bus
-    // clock does not answer. Printed, not judged - the samc precedent
+    // clock does not answer. Printed, not judged - the samc21 precedent
     // for a claim the silicon may honour by luck.
     Wwdg::bus_clock(false);
     const uint32_t dark_cr = WWDG->CR;

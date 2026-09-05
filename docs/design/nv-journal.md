@@ -11,8 +11,8 @@ the `JournalPanic` reporter), over the same `FlashMedia` contract
 [`util/crc.hpp`](../../brio/util/crc.hpp) underneath it and
 [`host/sim_flash.hpp`](../../brio/host/sim_flash.hpp) as the media the
 host tests run it on. The SAM C21 backend is `RwweeJournalZone` in
-[`samc/nvm_flash.hpp`](../../brio/samc/nvm_flash.hpp), described in
-[samc/nvm.md](../samc/nvm.md). Reference test suites: `test_nv_journal`
+[`samc21/nvm_flash.hpp`](../../brio/samc21/nvm_flash.hpp), described in
+[samc21/nvm.md](../samc21/nvm.md). Reference test suites: `test_nv_journal`
 on the host, `test_samc_journal` on the bench.
 
 ## What it is for

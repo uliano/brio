@@ -9,7 +9,7 @@ vendor ships unchanged - the NVIC and PRIMASK (`armv6m/nvic.hpp`:
 (`armv6m/delay.hpp`: `delay_us`, `delay_rate`, `DelayRate` - "at
 least", never early, capped below one kernel tick, no division at wait
 time). It exists because brio's naming rule says a core stratum is
-factored at the SECOND ARM family: `samc/` and `stm32g0/` carried
+factored at the SECOND ARM family: `samc21/` and `stm32g0/` carried
 these files as twins line for line - the first two until the STM32G0's
 bring-up, the third until the STM32G0's fillers were done - and every
 extraction was gated by the images: every SAM C21 and STM32G0 release
@@ -26,7 +26,7 @@ image byte-identical before and after.
   stay per family - their idle hooks differ where the families' sleep
   controllers differ), the clock, the pins, every peripheral, the crt
   (vector NAMES are the vendor's), the errata (SAM erratum 1.8.13's
-  `SysTickInterruptGuard` stays in `samc/ticker.hpp`), and the
+  `SysTickInterruptGuard` stays in `samc21/ticker.hpp`), and the
   project-wide `Ticker` alias (each family's ticker.hpp states its
   rate).
 

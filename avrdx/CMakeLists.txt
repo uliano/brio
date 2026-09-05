@@ -302,8 +302,8 @@ endforeach()
 # happens to build) - tools/bench.py reads this instead of parsing apps.ini/
 # platformio.ini. Regenerated identically by any one configure/preset.
 #
-# ONE ROSTER PER PROJECT, named after the project. The samc/ project emits
-# its own apps_samc.json next to this one, and it MUST be a separate file:
+# ONE ROSTER PER PROJECT, named after the project. The samc21/ project emits
+# its own apps_samc21.json next to this one, and it MUST be a separate file:
 # app names collide across the two projects (blink, console and probe exist
 # in both), so a merged roster keyed by app name could not answer "which
 # source tree, which toolchain, which flash mechanism". bench.py picks the

@@ -62,7 +62,7 @@ unchanged by the campaign that added the sites.
 
 **SysTick rides HCLK.** The reload is `Clock::hz / 1000 - 1`
 (63999 at 64 MHz, read back over SWD); in Stop the core clocks stop and
-so does the kernel's time - the samc standby situation, and it has the
+so does the kernel's time - the samc21 standby situation, and it has the
 same two answers here: `Stm32SleepSite` keeps the honest restriction and
 `Stm32TimedSleepSite` LIFTS it, resynchronizing from the RTC through
 `advance()` ([pwr.md](pwr.md)). THE TICK ITSELF DOES NOT DEFEAT A DEEP
@@ -84,7 +84,7 @@ would raise an NMI. The breadcrumb's magic word is what makes the
 default case harmless; the option-byte pass has to remember the other.
 
 **A BKPT with C_DEBUGEN set halts the core in silence**, as on the
-samc: `break_here()` cannot ask whether a debugger is attached
+samc21: `break_here()` cannot ask whether a debugger is attached
 (ARMv6-M), so `tools/bench.py` clears DHCSR after every flash and a
 BKPT with no debugger escalates to the crt's distinct
 `HardFault_Handler` spin.

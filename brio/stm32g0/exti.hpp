@@ -74,7 +74,7 @@
  * 20 nor 22, and a line number that means "USART3 wake-up" on one part
  * means nothing on another. So a peripheral driver that owns a wake-up
  * publishes ITS OWN line number, exactly as this stratum's peripherals
- * will publish their DMAMUX requests and as samc/'s publish their EVSYS
+ * will publish their DMAMUX requests and as samc21/'s publish their EVSYS
  * codes; `exti_line_implemented()` and `exti_line_configurable()` are
  * how such a number is checked against the device header. What lives
  * here is what is uniform: the sixteen GPIO lines, which are lines

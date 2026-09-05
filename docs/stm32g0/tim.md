@@ -102,7 +102,7 @@ and the MCOs, TIM14 the RTC clock, HSE/32 and the MCOs, TIM1/2/3/4 the
 comparator outputs, and TIM15's TI2 the capture signals of TIM2 and
 TIM3. The driver exposes the raw code and names no source: the
 vocabulary of what code 1 means belongs to the peripheral that owns the
-signal (the samc EVSYS ruling), and half of these have no driver in this
+signal (the samc21 EVSYS ruling), and half of these have no driver in this
 stratum yet.
 
 **The pad map is the datasheet's and nothing checks it.** Which AF
@@ -301,7 +301,7 @@ channel does not drive its pad, and PUPDR still does): captured period
 1012 ticks and width 305 ticks against 1010 us and 305 us on the cycle
 stopwatch. **The counter is reset ON the rising edge and the capture is
 taken AT it, so a period reads as its own tick count and not one less** -
-the opposite of the samc TC's capture, which clears and latches together
+the opposite of the samc21 TC's capture, which clears and latches together
 and always reads one short.
 
 **The complementary pair and its dead time.** 60000 paired samples of

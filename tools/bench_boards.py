@@ -146,7 +146,7 @@ BOARDS = {
     "C": {
         # The SAM C21 board: the user's C21J rev 1.1 (ATSAMC21J18A, silicon
         # rev F), console CH340 on PB30/PB31 = SERCOM5 PAD0/PAD1 at 115200,
-        # SWD on PA30/PA31. See docs/samc/README.md.
+        # SWD on PA30/PA31. See docs/samc21/README.md.
         #
         # IDENTITY COMES FREE ON THIS FAMILY. Where an AVR-Dx board has to be
         # LABELLED by hand (a string written once into its USERROW, because
@@ -158,8 +158,8 @@ BOARDS = {
         # DID 0x11010500 (DEVSEL 0x00 = C21J18A, revision 5 = rev F).
         #
         # IT IS CHECKED ON THE BOARD: test_samc_debug letter d reads the DID
-        # through samc/dsu.hpp and the four serial words through
-        # samc/nvm.hpp's DeviceSerial, prints them in exactly the format
+        # through samc21/dsu.hpp and the four serial words through
+        # samc21/nvm.hpp's DeviceSerial, prints them in exactly the format
         # below, and verdicts them against these two constants. bench.py
         # still does not compare them itself (unlike the AVR "id", which a
         # banner carries), so this remains a by-hand check - just one that
@@ -220,5 +220,5 @@ AVRDUDE = "/sw/avr/bin/avrdude"
 
 # The OpenOCD that talks to SAM over SWD: the oss-cad-suite build, which
 # drives the Atmel-ICE as a CMSIS-DAP probe flawlessly where others do not.
-# Same binary samc/CMakeLists.txt's SAMC_OPENOCD defaults to.
+# Same binary samc21/CMakeLists.txt's SAMC21_OPENOCD defaults to.
 OPENOCD = "/sw/oss-cad-suite/bin/openocd"

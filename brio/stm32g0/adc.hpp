@@ -6,7 +6,7 @@
  *
  *   Adc              the RESOURCE - one 12-bit SAR converter, and there
  *                    is exactly one on every part of the family, so it
- *                    is a MONOSTATE (the samc Dac/Sdadc/Tsens precedent)
+ *                    is a MONOSTATE (the samc21 Dac/Sdadc/Tsens precedent)
  *                    and not an Adc<n>.
  *   AnalogIn<Pin,ch> a pad handed to a channel. The channel NUMBER is
  *                    the datasheet's (DS13560 table 12's "additional
@@ -67,7 +67,7 @@
  * THE REFERENCE is stm32g0/vref.hpp's `Ref`, not this file's: on this
  * family VREF+ is one rail shared by the ADC, the DAC and the
  * comparators, so the enum lives with the rail (that file's header says
- * why, against the samc's opposite ruling).
+ * why, against the samc21's opposite ruling).
  *
  * ERRATA, ES0548 Rev 3 on the bench chip's revision Z column:
  *  - 2.6.1 OVR may stay low when an EOC clear coincides with a
@@ -673,7 +673,7 @@ public:
      *
      * `async_hz` is the rate of the root ADCSEL selects and is the
      * caller's to state - the same "a ratio meter cannot know what its
-     * own reference is worth" shape samc/freqm.hpp and samc/tsens.hpp
+     * own reference is worth" shape samc21/freqm.hpp and samc21/tsens.hpp
      * use. It is only read when the config asks for the asynchronous
      * clock; with a PCLK mode the clock is the one `clock` names.
      *

@@ -7,7 +7,7 @@
  * use it for PWM, capture or anything else, so claiming it costs the app
  * nothing - every TIM, the LPTIMs and the RTC stay free. That is the same
  * rule the AVR side follows by taking the RTC's PIT (a timer nothing
- * else wants), and the samc side by taking this same SysTick.
+ * else wants), and the samc21 side by taking this same SysTick.
  *
  * THE TICKER ITSELF IS THE CORE STRATUM'S: `BasicTicker` lives in
  * armv6m/ticker.hpp - this family's arrival is what factored it out of
@@ -43,7 +43,7 @@
  * access (read_shared below) so every call performs a real load - in a
  * header-only build a polling loop over an inlined getter would
  * otherwise fold to one hoisted read that never sees the handler's
- * store (gcc -Os deleted exactly such a loop on the samc bench). now()
+ * store (gcc -Os deleted exactly such a loop on the samc21 bench). now()
  * additionally masks: it reads TWO counters that must belong to the
  * same instant.
  *
@@ -57,7 +57,7 @@
  * ## The same caveat, in its second half: STOP FREEZES THIS TIMEBASE
  * RM0444 5.3: the Stop modes stop every clock in the VCORE domain, so
  * SysTick stops and KERNEL TIME STANDS STILL for exactly as long as the
- * sleep lasts - the samc standby situation, and the same two answers
+ * sleep lasts - the samc21 standby situation, and the same two answers
  * apply when the PWR pass arrives (a restriction site, or a timed site
  * resynchronizing from the RTC through `advance()` below). Sleep mode
  * proper (WFI with SLEEPDEEP clear, what Stm32Platform::idle() does)

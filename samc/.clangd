@@ -1,8 +1,0 @@
-# clangd config for the SAM C21 project: samc/ is its OWN CMake project
-# (samc/CMakeLists.txt) with its own compile_commands.json emitted at
-# ../build-cmake/samc21j-release - point clangd straight at it (same
-# pattern as test/.clangd). clang parses -mcpu=cortex-m0plus natively and
-# the device is a plain -D define, so no macro-delta machinery is needed
-# (unlike the AVR root project).
-CompileFlags:
-  CompilationDatabase: ../build-cmake/samc21j-release

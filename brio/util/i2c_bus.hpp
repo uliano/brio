@@ -39,7 +39,7 @@ inline constexpr uint8_t i2c_bus_error = bus_engine_status + 3;  ///< protocol v
 /// engine was recover()ed, and the WIRE is now the application's to
 /// judge (unstick(), re-probe - the recovery ladder). Arbiter's code,
 /// not the engine's: see bus_master.hpp on why a client-wedged wire has
-/// no silicon timeout on any engine here (docs/samc/i2c.md, measured).
+/// no silicon timeout on any engine here (docs/samc21/i2c.md, measured).
 inline constexpr uint8_t i2c_timeout = bus_timeout;
 
 /// `timeout_ticks` is PER BUS (one wedged client starves every other
