@@ -1,0 +1,1258 @@
+// test_stm32_tickless - THE TICKLESS KERNEL TIMEBASE: kernel time on an
+// LPTIM clocked from the LSE crystal, the kernel's optional idle_until()
+// placing every deadline in the compare register, and NO periodic
+// interrupt anywhere in the program (SysTick runs interrupt-less as
+// delay_us's cycle counter). Board E (Nucleo-G0B1RE), no wires.
+//
+// This whole image runs on Stm32g0Platform<LptimTicker<>>: the timebase
+// is a template argument, so a tickless program is a whole program and
+// the SysTick suites stay what they are. What is judged here:
+//
+//   a  THE TIMEBASE - SysTick counting with its interrupt off (and the
+//      bound handler proving it never runs), the LPTIM's rate against
+//      TIM2 on the PLL, millis()/secs()/now() exact to their arithmetic,
+//      monotonic under two hundred thousand reads
+//   b  THE LAP CARRY on a second LptimTicker, LPTIM2 at the crystal's
+//      own rate (a lap of two seconds): monotonic across wraps in a
+//      tight loop, and with PRIMASK held across a wrap - the pending-ARRM
+//      correction ticks() carries for exactly that case; plus the one
+//      compare question the driver's rule 4 leaves to the bench (does
+//      CMPM fire at CMP == ARR?). LPTIM2's counter runs on silicon here
+//      for the first time.
+//   c  idle_until() OUTSIDE THE KERNEL: N ticks asked, N ticks slept
+//      (against TIM2), exactly one LPTIM interrupt and it served CMPM,
+//      never early in the timebase's own units; the +2 floor's one-tick
+//      lateness for N = 1; a due deadline that does not sleep; no
+//      deadline at all, ended by a foreign wake (the RTC's wake-up timer)
+//   d  THE HANDSHAKE the errata force: two arms back to back, the second
+//      deferred exactly once (rule 1), the register reading the second
+//      value, CMPM at the second deadline; and rule 3's question staged
+//      as a FINDING - a compare stored immediately before a Stop 1, with
+//      and without the wait, judged on the RTC's wall
+//   e  A REAL KERNEL: three periodic events at 7, 30 and 250 ticks
+//      pumped through process()/step()/idle_if_empty() for three seconds,
+//      every firing stamped on TIM2 in its own AO - never early, one
+//      LPTIM wake per distinct deadline, and the SysTick handler still
+//      never run
+//   f  STOP 1 THROUGH THE POWER MANAGER with the PLAIN site (the timed
+//      ones refuse this platform at compile time): a 500 ms deadline
+//      matures on the RTC wall with kernel time having RUN through the
+//      Stop - the restriction the plain site carries on the SysTick
+//      timebase is simply gone - SYSCLK back on the PLL after the round
+//   g  delay_us on the interrupt-less SysTick, the platform suite's
+//      arithmetic re-run here
+//   u  OUTSIDE z: a console keystroke as the foreign wake of a twenty-
+//      second idle_until (an operator's hand).
+//
+// Instruments: TIM2 free-running at 64 MHz on the PLL as the awake
+// wall (15.6 ns), the RTC's sub-second counter on the same crystal as
+// the wall a Stop cannot stop, the IWDG as the backstop of every sleep.
+//
+// build: boards = g0b1re
+// build: monitor_speed = 115200
+
+#include <stdint.h>
+
+#include <optional>
+
+#include "kernel/kernel.hpp"
+#include "kernel/post.hpp"
+#include "kernel/time_event.hpp"
+#include "stm32g0/clock.hpp"
+#include "stm32g0/delay.hpp"
+#include "stm32g0/lptim.hpp"
+#include "stm32g0/lptim_ticker.hpp"
+#include "stm32g0/nvic.hpp"
+#include "stm32g0/platform.hpp"
+#include "stm32g0/pwr.hpp"
+#include "stm32g0/reset.hpp"
+#include "stm32g0/rtc.hpp"
+#include "stm32g0/sleep.hpp"
+#include "stm32g0/tim.hpp"
+#include "stm32g0/usart.hpp"
+#include "util/power.hpp"
+#include "util/print.hpp"
+#include "util/testbench.hpp"
+
+using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
+constexpr SysClock clock;
+
+namespace {
+
+using namespace brio;
+
+// THE TIMEBASE, and the platform on it.
+using Tb = LptimTicker<>;
+using P = Stm32g0Platform<Tb>;
+static_assert(Tickless<Tb>);
+static_assert(P::ticks_per_second == 1024u);
+
+// The lap witness of letter b: LPTIM2 at the crystal's own rate.
+using Witness = LptimTicker<LptimTickerConfig{.instance = 2, .shift = 0}>;
+static_assert(Witness::ticks_per_second == 32'768u);
+
+using L1 = Lptim<1>;
+using L2 = Lptim<2>;
+
+constexpr UartPins console_pins{
+    .tx = {'A', 2, PinFunction::af1},
+    .rx = {'A', 3, PinFunction::af1},
+};
+using Serial = Uart<2, console_pins>;
+constexpr Serial serial;
+
+TestBench<Serial> bench;
+
+using T2 = Tim<2>;
+using Site = Stm32g0SleepSite<SysClock, Tb>;
+static_assert(!Site::pauses_tick);
+
+// ---------------------------------------------------------------------------
+// The two walls
+// ---------------------------------------------------------------------------
+
+/// TIM2 free-running at 64 MHz: the awake wall, 15.6 ns a count, a lap
+/// of 67 s. Stops with HCLK in a Stop, which is what the RTC is for.
+constexpr uint32_t t2_hz = SysClock::hz;
+uint32_t t2() { return T2::count(); }
+uint32_t t2_us(uint32_t counts) { return counts / (t2_hz / 1'000'000u); }
+bool t2_up() {
+    T2::bus_clock(true);
+    if (!T2::configure({.prescaler = 0, .period = 0xFFFFFFFFu})) {
+        return false;
+    }
+    T2::enable(true);
+    return true;
+}
+
+/// The RTC's sub-second counter at PREDIV_A 0 / PREDIV_S 32767: a 30.5 us
+/// stopwatch on the crystal that keeps counting through a Stop (the
+/// lptim suite's instrument, verbatim).
+constexpr uint32_t lse_hz = 32768;
+constexpr RtcPrescalers wall_prescalers{.async = 0, .sync = 32767};
+bool wall_ready = false;
+
+uint32_t wall_ticks_per_second() {
+    return static_cast<uint32_t>(Rtc::prescalers().sync) + 1u;
+}
+uint32_t wall_modulus() { return 60u * wall_ticks_per_second(); }
+uint32_t wall_hz() {
+    return lse_hz / (static_cast<uint32_t>(Rtc::prescalers().async) + 1u);
+}
+uint32_t wall() {
+    RtcReading r{};
+    if (!Rtc::read(r)) {
+        return 0xFFFFFFFFu;
+    }
+    const uint32_t per_second = wall_ticks_per_second();
+    return static_cast<uint32_t>(r.time.second) * per_second +
+           (per_second - 1u - r.subsecond);
+}
+uint32_t wall_delta(uint32_t from, uint32_t to) {
+    return (to >= from) ? (to - from) : (wall_modulus() - from + to);
+}
+uint32_t wall_ms(uint32_t ticks) {
+    return static_cast<uint32_t>((static_cast<uint64_t>(ticks) * 1000ULL) / wall_hz());
+}
+bool wall_up() {
+    if (Rtc::prescalers().sync == wall_prescalers.sync &&
+        Rtc::prescalers().async == wall_prescalers.async) {
+        return true;
+    }
+    return Rtc::init(wall_prescalers,
+                     RtcDateTime{.hour = 0, .minute = 0, .second = 0,
+                                 .day = 1, .month = 1, .year = 24, .weekday = 1});
+}
+
+// ---------------------------------------------------------------------------
+// Instruments
+// ---------------------------------------------------------------------------
+
+void feed() { Iwdg::refresh(); }
+
+void spin_us(uint32_t us) {
+    const uint32_t t0 = t2();
+    const uint32_t c = us * (t2_hz / 1'000'000u);
+    while (t2() - t0 < c) {
+    }
+}
+
+/// A measurement window a transmit interrupt walks through is not a
+/// measurement.
+void console_drain() {
+    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
+    }
+    spin_us(2000);
+}
+
+bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
+
+/// Wait for the very next count edge of the timebase - the metrology
+/// verb the lptim suite explains: a deadline armed at an unknown phase
+/// inside a count is N - 1 to N counts of real time away, and a wall
+/// reading of N - 1 would be honest. Synchronizing first is what lets
+/// "never early" be judged against the nominal.
+void sync_to_count() {
+    const uint32_t t = Tb::ticks();
+    uint32_t guard = 4'000'000u;
+    while (Tb::ticks() == t && guard-- != 0u) {
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared ISR state
+// ---------------------------------------------------------------------------
+
+volatile uint32_t systick_irqs = 0;
+volatile uint32_t lptim_irqs = 0;
+volatile uint32_t lptim_last_served = 0;
+volatile uint32_t lptim_cmpm = 0;
+volatile uint32_t lptim_arrm = 0;
+volatile uint32_t lptim_sweeps = 0;    ///< handler runs that served nothing
+volatile uint32_t lptim_t2_at = 0;     ///< TIM2 at the last LPTIM1 interrupt
+volatile uint32_t lptim_cnt_at = 0;    ///< LPTIM1 CNT at the last interrupt's entry
+volatile uint32_t lptim_isr_at = 0;    ///< LPTIM1 ISR register at the last interrupt's entry
+volatile uint32_t lptim2_irqs = 0;
+volatile uint32_t rtc_wakes = 0;
+volatile uint32_t usart_irqs = 0;
+volatile bool kernel_live = false;
+
+void clear_counters() {
+    lptim_irqs = 0;
+    lptim_last_served = 0;
+    lptim_cmpm = 0;
+    lptim_arrm = 0;
+    lptim_sweeps = 0;
+    lptim_t2_at = 0;
+    lptim_cnt_at = 0;
+    lptim_isr_at = 0;
+    lptim2_irqs = 0;
+    rtc_wakes = 0;
+    usart_irqs = 0;
+}
+
+// ---------------------------------------------------------------------------
+// The kernel half (letters e and f)
+// ---------------------------------------------------------------------------
+
+struct Fast {};
+struct Mid {};
+struct Slow {};
+struct Blip {};
+struct Woke {};
+
+/// One periodic event's bookkeeping: every firing stamped on TIM2, the
+/// worst deviation from its own cadence, and the count of early ones.
+struct Track {
+    uint32_t period_ticks = 0;
+    uint32_t fired = 0;
+    uint32_t last_t2 = 0;
+    uint32_t first_t2 = 0;
+    uint32_t min_us = 0xFFFFFFFFu;
+    uint32_t max_us = 0;
+    uint32_t last_tick = 0;
+    uint32_t min_ticks = 0xFFFFFFFFu;
+    uint32_t max_ticks = 0;
+    uint32_t early = 0;
+    void hit(uint32_t now) {
+        if (fired == 0u) {
+            first_t2 = now;
+        } else {
+            const uint32_t us = t2_us(now - last_t2);
+            if (us < min_us) min_us = us;
+            if (us > max_us) max_us = us;
+            // "Early" is judged in the timebase's OWN units: two firings
+            // closer than the period in ticks.
+            const uint32_t dt = Tb::ticks() - last_tick;
+            if (dt < period_ticks) ++early;
+            if (dt < min_ticks) min_ticks = dt;
+            if (dt > max_ticks) max_ticks = dt;
+        }
+        last_t2 = now;
+        last_tick = Tb::ticks();
+        ++fired;
+    }
+};
+
+/// One AO with three periodic events, each stamping TIM2 at every
+/// firing and keeping its worst deviation from its own cadence.
+struct Metronome : Fsm<Metronome, Fast, Mid, Slow> {
+    static inline EventQueue<Event, 8, P> queue;
+    static inline TimeEvent<P, Metronome, Fast> fast{Fast{}};
+    static inline TimeEvent<P, Metronome, Mid> mid{Mid{}};
+    static inline TimeEvent<P, Metronome, Slow> slow{Slow{}};
+
+    static inline Track tf;
+    static inline Track tm;
+    static inline Track ts;
+
+    static void clear() {
+        tf = Track{};
+        tm = Track{};
+        ts = Track{};
+        tf.period_ticks = 7;
+        tm.period_ticks = 30;
+        ts.period_ticks = 250;
+    }
+    static void init() { start(&only); }
+    static Status only(const Event& e) {
+        return match(e,
+            [](Entry) { return handled(); },
+            [](Exit) { return handled(); },
+            [](Fast) { tf.hit(t2()); return handled(); },
+            [](Mid) { tm.hit(t2()); return handled(); },
+            [](Slow) { ts.hit(t2()); return handled(); });
+    }
+};
+using MetroKernel = Kernel<P, Metronome>;
+
+struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip, Woke> {
+    static inline EventQueue<Event, 8, P> queue;
+    static inline TimeEvent<P, Probe, Blip> deadline{Blip{}};
+
+    static inline uint16_t blips = 0;
+    static inline uint16_t woke = 0;
+    static inline uint16_t wakes = 0;
+    static inline uint16_t votes = 0;
+    static inline bool last_ok = false;
+    static inline uint32_t blip_wall = 0;
+    static inline uint32_t blip_ticks = 0;
+    static inline SleepDepth last_report = SleepDepth::none;
+
+    static void clear() {
+        blips = woke = wakes = votes = 0;
+        last_ok = false;
+        blip_wall = 0;
+        blip_ticks = 0;
+        last_report = SleepDepth::none;
+    }
+    static void init() { start(&only); }
+    static Status only(const Event& e);
+};
+
+using Manager = PowerManager<P, Site, PowerConfig{}, Probe>;
+using K = Kernel<P, Probe, Manager>;
+
+Probe::Status Probe::only(const Event& e) {
+    return match(e,
+        [](Entry) { return handled(); },
+        [](Exit) { return handled(); },
+        [](SleepVote v) { ++votes; last_ok = v.ok; return handled(); },
+        [](const PrepareSleep& p) { p.reply.send(SleepVote{true}); return handled(); },
+        [](WakeReport w) { ++wakes; last_report = w.was; return handled(); },
+        [](Woke) {
+            // util/power.hpp's convention: a wake path with nothing to
+            // say says SleepRequested{none}. Load-bearing here too - it
+            // is what puts the clock back and disarms the Stop.
+            ++woke;
+            post<Manager>(SleepRequested{SleepDepth::none, reply_to<Probe, SleepVote>()});
+            return handled();
+        },
+        [](Blip) {
+            ++blips;
+            blip_wall = wall();
+            blip_ticks = Tb::ticks();
+            post<Manager>(SleepRequested{SleepDepth::none, reply_to<Probe, SleepVote>()});
+            return handled();
+        });
+}
+
+void pump_until_blip(uint32_t guard_ms) {
+    const uint32_t t0 = wall();
+    while (Probe::blips == 0u && wall_ms(wall_delta(t0, wall())) < guard_ms) {
+        feed();
+        TimeEvents<P>::process();
+        if (!K::step()) {
+            K::idle_if_empty();
+        }
+    }
+    while (K::step()) {
+    }
+}
+
+/// One idle_until() by hand, masked as the kernel calls it, timed on
+/// TIM2 (Sleep mode: TIM2 keeps running).
+struct Nap {
+    uint32_t asked = 0;          ///< the deadline, absolute
+    uint32_t t2_us = 0;
+    uint32_t ticks_before = 0;
+    uint32_t ticks_after = 0;
+    uint32_t irqs = 0;
+    uint32_t served = 0;
+    uint32_t isr_at = 0;         ///< LPTIM_ISR at the handler's entry
+    uint32_t cnt_at = 0;         ///< CNT at the handler's entry
+    uint32_t irq_us = 0;         ///< TIM2 at the handler's entry, from the nap's start
+    uint16_t cmp_after = 0;      ///< the register after the arm
+    uint32_t deferrals = 0;
+    uint32_t stores = 0;
+    uint32_t rounds = 0;         ///< idle_until calls until the deadline was due
+    uint32_t rtc = 0;            ///< RTC interrupts during the nap
+    uint32_t usart = 0;          ///< console interrupts during the nap
+    bool interrupts_after = false;
+};
+
+/// One idle_until() by hand, masked as the kernel calls it, timed on
+/// TIM2 (Sleep mode: TIM2 keeps running). The console is drained FIRST:
+/// a transmit interrupt is a wake, and a print between two naps would
+/// end the second one early (this stratum's oldest lesson).
+Nap nap(std::optional<int32_t> delta) {
+    Nap n{};
+    console_drain();
+    clear_counters();
+    const uint32_t d0 = Tb::deferrals();
+    const uint32_t s0 = Tb::stores();
+    sync_to_count();
+    n.ticks_before = Tb::ticks();
+    const std::optional<uint32_t> deadline =
+        delta.has_value() ? std::optional<uint32_t>{n.ticks_before + static_cast<uint32_t>(*delta)}
+                          : std::nullopt;
+    n.asked = deadline.value_or(0u);
+    const uint32_t t0 = t2();
+    // The loop's own shape: idle again until the deadline is due - a lap
+    // wake (ARRM) or a declined arm is a turn, not a failure. With no
+    // deadline, one call.
+    n.interrupts_after = true;
+    for (;;) {
+        {
+            InterruptGuard g;
+            P::idle_until(deadline);
+            n.interrupts_after = n.interrupts_after && interrupts_enabled();
+        }
+        ++n.rounds;
+        if (!deadline.has_value() || static_cast<int32_t>(Tb::ticks() - *deadline) >= 0 ||
+            n.rounds > 100'000u) {
+            break;
+        }
+    }
+    n.t2_us = t2_us(t2() - t0);
+    n.rtc = rtc_wakes;
+    n.usart = usart_irqs;
+    n.ticks_after = Tb::ticks();
+    n.irqs = lptim_irqs;
+    n.served = lptim_last_served;
+    n.isr_at = lptim_isr_at;
+    n.cnt_at = lptim_cnt_at;
+    n.irq_us = lptim_irqs != 0u ? t2_us(lptim_t2_at - t0) : 0u;
+    n.cmp_after = L1::cmp();
+    n.deferrals = Tb::deferrals() - d0;
+    n.stores = Tb::stores() - s0;
+    return n;
+}
+
+void print_nap(const char* what, const Nap& n) {
+    print(serial, "  ", what, ": slept ", n.t2_us, " us in ", n.rounds, " round(s), ticks ",
+          n.ticks_before, " -> ", n.ticks_after, " (asked ", n.asked, "), CMP 0x",
+          hex(n.cmp_after), ", stores ", n.stores, " deferrals ", n.deferrals, ", rtc ", n.rtc,
+          " usart ", n.usart, ", ", n.irqs, " lptim irq");
+    if (n.irqs != 0u) {
+        print(serial, " at ", n.irq_us, " us with CNT ", n.cnt_at, " ISR 0x", hex(n.isr_at),
+              " served 0x", hex(n.served));
+    }
+    print(serial, crlf);
+}
+
+// =============================================================================
+// a - the timebase
+// =============================================================================
+void ta_timebase() {
+    feed();
+    console_drain();
+
+    // SysTick: counting, no interrupt, the reload BasicTicker would use.
+    const uint32_t ctrl = SysTick->CTRL;
+    const uint32_t load = SysTick->LOAD;
+    print(serial, "  SysTick CTRL 0x", hex(ctrl), " LOAD ", load, " (", SysClock::hz / 1000u - 1u,
+          " expected); SysTick_Handler ran ", systick_irqs, " times since boot", crlf);
+    bench.verdict("SysTick counts with its interrupt OFF: CLKSOURCE and ENABLE set, "
+                  "TICKINT clear, the millisecond reload delay_us derives its cap from",
+                  (ctrl & SysTick_CTRL_ENABLE_Msk) != 0u &&
+                      (ctrl & SysTick_CTRL_CLKSOURCE_Msk) != 0u &&
+                      (ctrl & SysTick_CTRL_TICKINT_Msk) == 0u &&
+                      load == SysClock::hz / 1000u - 1u);
+    bench.verdict("and the bound SysTick_Handler has never run - this program has "
+                  "no periodic interrupt",
+                  systick_irqs == 0u);
+
+    // The rate against TIM2: 2 s of the PLL's wall -> 2048 ticks. HSI16
+    // against the crystal, so this is coherence (within a percent), not
+    // metrology.
+    sync_to_count();
+    const uint32_t k0 = Tb::ticks();
+    const uint32_t m0 = Tb::millis();
+    const uint32_t w0 = t2();
+    while (t2() - w0 < 2u * t2_hz) {
+        feed();
+    }
+    const uint32_t ticks = Tb::ticks() - k0;
+    const uint32_t ms = Tb::millis() - m0;
+    print(serial, "  2 s of TIM2: ", ticks, " ticks (2048 due), millis() moved ", ms,
+          " (2000 due)", crlf);
+    bench.verdict("the timebase runs at 1024 ticks a second against the PLL's wall",
+                  within(ticks, 2028u, 2068u));
+    bench.verdict("and millis() is 1000 per 1024 ticks - shifts, no division",
+                  within(ms, 1980u, 2020u));
+
+    // The arithmetic, exact: secs()/now() from one reading.
+    const uint32_t t = Tb::ticks();
+    TimeStamp stamp{};
+    Tb::now(stamp);
+    const uint32_t t_after = Tb::ticks();
+    print(serial, "  ticks ", t, ": secs() ", Tb::secs(), ", now() ", stamp.seconds, ".",
+          stamp.millis, crlf);
+    bench.verdict("secs() is ticks >> 10 and now()'s fraction is the low ten bits in "
+                  "milliseconds",
+                  stamp.seconds == (t_after >> 10) &&
+                      stamp.millis == static_cast<uint16_t>(((t_after & 1023u) * 1000u) >> 10) &&
+                      Tb::secs() >= (t >> 10));
+
+    // Monotonic under a tight read loop (the bracket read, the double
+    // CNT read, the volatile laps): not one step backwards.
+    uint32_t back = 0;
+    uint32_t prev = Tb::ticks();
+    for (uint32_t i = 0; i < 200'000u; ++i) {
+        const uint32_t v = Tb::ticks();
+        if (static_cast<int32_t>(v - prev) < 0) {
+            ++back;
+        }
+        prev = v;
+    }
+    bench.verdict("two hundred thousand reads never step backwards", back == 0u);
+    bench.verdict("the write handshake has never timed out", Tb::write_timeouts() == 0u);
+}
+
+// =============================================================================
+// b - the lap carry, on LPTIM2 at the crystal's rate
+// =============================================================================
+void tb_lap_carry() {
+    feed();
+    console_drain();
+    clear_counters();
+
+    const bool up = Witness::init(clock);
+    print(serial, "  the witness on LPTIM", 2, " at ", Witness::ticks_per_second,
+          " ticks a second (shift 0): ", up ? "up" : "REFUSED", "; a lap is ",
+          Witness::lap_counts, " counts = 2 s", crlf);
+    bench.verdict("A SECOND LptimTicker COMES UP ON LPTIM2 - the instance whose "
+                  "counter had never run on silicon",
+                  up);
+    if (!up) {
+        return;
+    }
+
+    // Tight loop across at least two wraps: monotonic, and the laps
+    // counted by the handler match the wraps the count implies.
+    const uint32_t start = Witness::ticks();
+    const uint32_t laps0 = Witness::laps();
+    uint32_t back = 0;
+    uint32_t prev = start;
+    uint32_t reads = 0;
+    while (static_cast<int32_t>(Witness::ticks() - start) < static_cast<int32_t>(5u * 32768u)) {
+        const uint32_t v = Witness::ticks();
+        if (static_cast<int32_t>(v - prev) < 0) {
+            ++back;
+        }
+        prev = v;
+        ++reads;
+        feed();
+    }
+    const uint32_t laps = Witness::laps() - laps0;
+    print(serial, "  5 s on the witness: ", reads, " reads, ", back, " backwards, ", laps,
+          " laps carried by the handler (", lptim2_irqs, " LPTIM2 interrupts)", crlf);
+    bench.verdict("five seconds of tight reads across two wraps: monotonic, the "
+                  "high word carried by the lap interrupt",
+                  back == 0u && laps >= 2u && lptim2_irqs >= 2u);
+
+    // PRIMASK HELD ACROSS A WRAP: the handler cannot run, ISR.ARRM stands,
+    // and ticks() must add the lap itself (the pending-ARRM correction).
+    // Wait until the wrap is 100 ms away, mask, spin 200 ms on TIM2
+    // (feeding the watchdog), read under the mask, unmask, read again.
+    while ((Witness::count() & 0xFFFFu) < 0x10000u - 3277u) {
+        feed();
+    }
+    uint32_t masked_read = 0;
+    uint32_t masked_lo = 0;
+    bool arrm_stood = false;
+    uint32_t laps_seen = 0;
+    {
+        InterruptGuard g;
+        const uint32_t t0 = t2();
+        while (t2() - t0 < (t2_hz / 5u)) {
+            feed();
+        }
+        laps_seen = Witness::laps();
+        arrm_stood = (L2::status() & LptimFlag::arrm) != 0u;
+        masked_read = Witness::ticks();
+        masked_lo = masked_read & 0xFFFFu;
+    }
+    const uint32_t after = Witness::ticks();
+    const uint32_t laps_after = Witness::laps();
+    const int32_t gap = static_cast<int32_t>(after - masked_read);
+    print(serial, "  under a 200 ms mask across the wrap: ARRM stood=", arrm_stood,
+          ", laps still ", laps_seen, " (", laps_after, " after unmask), the masked read's "
+          "low half ", masked_lo, "; the unmasked read is ", gap, " counts later", crlf);
+    bench.verdict("THE WRAP HAPPENED UNDER THE MASK and the handler had not run: ARRM "
+                  "standing, laps not yet carried",
+                  arrm_stood && laps_after == laps_seen + 1u);
+    bench.verdict("and ticks() read under the mask ALREADY carried the lap - the "
+                  "unmasked read follows it by microseconds, not by 65536",
+                  gap >= 0 && gap < 200);
+
+    // RULE 4's OPEN QUESTION: does CMPM fire at CMP == ARR (0xFFFF)? Put
+    // the witness's compare there and watch a whole lap.
+    clear_counters();
+    const bool stored = L2::set_cmp(0xFFFFu) && L2::wait_cmp_ok();
+    const uint32_t lap_start = Witness::ticks();
+    while (static_cast<int32_t>(Witness::ticks() - lap_start) < static_cast<int32_t>(2u * 32768u + 4000u)) {
+        feed();
+    }
+    const uint32_t cmpm_at_arr = lptim_cmpm;
+    print(serial, "  CMP = 0xFFFF = ARR for a lap and a bit: ", cmpm_at_arr,
+          " CMPM interrupt(s) (", lptim2_irqs, " LPTIM2 interrupts in all)", crlf);
+    if (cmpm_at_arr == 0u) {
+        bench.verdict("A COMPARE EQUAL TO ARR NEVER MATCHES (0xFFFF would need refusing)",
+                      stored);
+    } else {
+        bench.verdict("A COMPARE EQUAL TO ARR MATCHES like any other value - 0xFFFF needs "
+                      "no special case (rule 4 as written)",
+                      stored);
+    }
+    Nvic::disable(L2::irq());
+    L2::init();
+    L2::release();
+}
+
+// =============================================================================
+// c - idle_until outside the kernel
+// =============================================================================
+void tc_idle_until() {
+    feed();
+    console_drain();
+
+    static const uint32_t spans[] = {2, 3, 10, 100, 500};
+    constexpr uint8_t n_spans = sizeof(spans) / sizeof(spans[0]);
+    Nap naps[n_spans];
+    for (uint8_t i = 0; i < n_spans; ++i) {
+        feed();
+        naps[i] = nap(std::optional<int32_t>{static_cast<int32_t>(spans[i])});
+    }
+    bool all_ok = true;
+    bool one_irq = true;
+    bool never_early = true;
+    uint32_t worst_over_us = 0;
+    for (uint8_t i = 0; i < n_spans; ++i) {
+        const Nap& r = naps[i];
+        const uint32_t n = spans[i];
+        const uint32_t nominal_us = (n * 1'000'000u) / P::ticks_per_second;
+        const uint32_t over = r.t2_us > nominal_us ? r.t2_us - nominal_us : 0u;
+        if (over > worst_over_us) worst_over_us = over;
+        print_nap("idle_until(now + N)", r);
+        if (!within(r.t2_us, nominal_us - 40u, nominal_us + 1100u)) all_ok = false;
+        // One CMPM ends the sleep; a lap in the way adds one ARRM and one round.
+        if (r.irqs != r.rounds || (r.served & LptimFlag::cmpm) == 0u || r.rounds > 2u) one_irq = false;
+        if (static_cast<int32_t>(r.ticks_after - r.asked) < 0) never_early = false;
+        if (!r.interrupts_after) all_ok = false;
+    }
+    bench.verdict("N ticks asked, N ticks slept (within one count of the phase), "
+                  "interrupts back on at return",
+                  all_ok);
+    bench.verdict("exactly ONE LPTIM interrupt per sleep and it served CMPM - no "
+                  "spurious wake, no completion interrupt (a lap in the way costs one "
+                  "ARRM and one more round, the loop's own shape)",
+                  one_irq);
+    bench.verdict("NEVER EARLY in the timebase's own units: ticks() >= the deadline at "
+                  "every return",
+                  never_early);
+    bench.verdict("the wake lands within a count of the nominal (no phase conversion: "
+                  "the compare is the same LSE edge the count is)",
+                  worst_over_us < 1100u);
+
+    // A DEADLINE ONE TICK AWAY, right after a tick edge: 32 counts of
+    // room, well past the six-count floor - it sleeps and lands at the
+    // tick. The floor itself (a deadline under six counts away) is a
+    // matter of phase and is counted, not staged: floor_declines().
+    const Nap one = nap(std::optional<int32_t>{1});
+    print_nap("idle_until(now + 1)", one);
+    bench.verdict("A DEADLINE ONE TICK AWAY sleeps to that tick: the compare is placed to "
+                  "the count, 30 us, not to the tick",
+                  one.ticks_after - one.ticks_before == 1u && within(one.t2_us, 700u, 1100u) &&
+                      one.irqs == 1u);
+    print(serial, "  arms declined for the six-count floor so far: ", Tb::floor_declines(),
+          "; for a standing completion: ", Tb::deferrals(), crlf);
+
+    // A due deadline: no sleep, no interrupt, microseconds.
+    const Nap due = nap(std::optional<int32_t>{-5});
+    print_nap("idle_until(now - 5)", due);
+    bench.verdict("a deadline already due does not sleep at all", due.t2_us < 20u && due.irqs == 0u);
+
+    // NO DEADLINE: the sleep ends on a foreign wake - the RTC's wake-up
+    // timer 250 ms out - and the LPTIM stays silent.
+    Rtc::clear_wakeup();
+    const bool wut = Rtc::set_wakeup(RtcWakeupClock::div16, 512u);   // (512 + 1) / 2048 s
+    const Nap none = nap(std::nullopt);
+    Rtc::clear_wakeup();
+    print(serial, "  (the wake-up timer was ", wut ? "armed" : "REFUSED", ")", crlf);
+    print_nap("idle_until(nothing armed), RTC 250 ms out", none);
+    // The wake-up timer's first period is shortened by its asynchronous
+    // start (the sleep suite's own band for this setting is 230..290 ms).
+    bench.verdict("with nothing armed the sleep lasts until a FOREIGN wake - the RTC "
+                  "wake-up timer ended it, the LPTIM never spoke",
+                  within(none.t2_us, 220'000u, 290'000u) && none.rtc == 1u && none.irqs == 0u);
+}
+
+// =============================================================================
+// d - the handshake, and the Stop question
+// =============================================================================
+void td_handshake() {
+    feed();
+    console_drain();
+
+    // TWO ARMS BACK TO BACK with different deadlines. The first stores;
+    // the second finds CMPOK standing (the first landed and no LPTIM
+    // interrupt has run) and is DEFERRED: the vector pended, no sleep.
+    // The handler sweeps the flag; the third arm stores the second value.
+    // (The first arm must find the flag clear: a sweep is forced first.)
+    Nvic::set_pending(Tb::irq());
+    spin_us(50);
+    clear_counters();
+    const uint32_t d0 = Tb::deferrals();
+    const uint32_t s0 = Tb::stores();
+    const uint32_t now0 = Tb::ticks();
+    bool first = false, second = false, third = false;
+    uint32_t sweeps_between = 0;
+    {
+        InterruptGuard g;
+        first = Tb::arm_wake(now0, now0 + 300u);
+        spin_us(150);                       // let the first store land
+        second = Tb::arm_wake(now0, now0 + 400u);
+    }
+    // Interrupts back: the pended handler runs and sweeps CMPOK - and
+    // the clear takes its time to cross into the kernel clock domain.
+    const uint32_t x0 = t2();
+    uint32_t guard = 4'000'000u;
+    while (L1::cmp_ok() && guard-- != 0u) {
+    }
+    const uint32_t crossing_us = t2_us(t2() - x0);
+    sweeps_between = lptim_sweeps;
+    {
+        InterruptGuard g;
+        third = Tb::arm_wake(now0, now0 + 400u);
+    }
+    const uint16_t reg = L1::cmp();
+    const uint32_t deferrals = Tb::deferrals() - d0;
+    const uint32_t stores = Tb::stores() - s0;
+    const uint16_t want = static_cast<uint16_t>(((Tb::count() & ~31u) + 0u) & 0xFFFFu);
+    (void)want;
+    print(serial, "  arm(now+300) -> ", first, ", arm(now+400) 150 us later -> ", second,
+          " (deferred: ", deferrals, ", handler sweeps: ", sweeps_between, ", the clear crossed "
+          "in ", crossing_us, " us), arm(now+400) again -> ", third, "; CMP reads 0x", hex(reg),
+          ", stores ", stores, crlf);
+    bench.verdict("THE SECOND STORE WAITS FOR THE HANDLER: the arm that finds CMPOK "
+                  "standing pends the vector and declines the sleep, exactly once",
+                  first && !second && deferrals == 1u && sweeps_between >= 1u);
+    bench.verdict("and the next arm stores the new value - two stores, one completion "
+                  "between them, 26.4.11 kept",
+                  third && stores == 2u && reg == Tb::cmp_reg());
+    // Let that compare fire and clear the way.
+    while (static_cast<int32_t>(Tb::ticks() - (now0 + 400u)) < 0) {
+        feed();
+    }
+
+    // RULE 3 AS A FINDING. A compare stored IMMEDIATELY before a Stop 1:
+    // with the wait (the ticker's own rule, SLEEPDEEP set means
+    // wait_cmp_ok before the WFI) and WITHOUT it (the raw sequence, to
+    // see whether an in-flight APB->kernel transfer completes with PCLK
+    // stopped). Judged on the RTC wall. The second leg goes through
+    // Pwr and Lptim directly - the ticker would wait.
+    console_drain();
+    clear_counters();
+    sync_to_count();
+    const uint32_t k0 = Tb::ticks();
+    const uint32_t w0 = wall();
+    (void)Pwr::arm(PwrMode::stop1);
+    {
+        InterruptGuard g;
+        P::idle_until(std::optional<uint32_t>{k0 + 300u});
+    }
+    const uint32_t w1 = wall();
+    const uint32_t k1 = Tb::ticks();
+    const bool back_hsisys = Rcc::sysclk_status() == SysclkSource::hsisys;
+    (void)Pwr::arm(PwrMode::sleep);
+    (void)Site::resume_clock();
+    const uint32_t waited = Tb::stop_waits();
+    print(serial, "  a 300-tick deadline through a Stop 1 with the wait: ",
+          wall_ms(wall_delta(w0, w1)), " ms of RTC wall, ticks moved ", k1 - k0,
+          ", stop waits so far ", waited, ", ", lptim_irqs, " LPTIM interrupt(s); SYSCLK "
+          "came back as HSISYS=", back_hsisys, crlf);
+    bench.verdict("THROUGH A STOP 1: the compare waited into place fires at the deadline "
+                  "on the RTC's wall, kernel time RUNS through the Stop, one interrupt",
+                  within(wall_ms(wall_delta(w0, w1)), 290u, 320u) && within(k1 - k0, 300u, 302u) &&
+                      lptim_irqs == 1u && waited >= 1u);
+    bench.verdict("and the Stop was a Stop: SYSCLK came back on HSISYS and the site's "
+                  "resume_clock() restored the PLL",
+                  back_hsisys && Rcc::sysclk_status() == SysclkSource::pllrclk);
+
+    // THE RAW LEG: store, no wait, straight into the Stop. If the
+    // transfer needs PCLK the compare never lands and the RTC backstop
+    // (a 2 s wake-up) ends the sleep; if it lands, the match ends it at
+    // 300 counts. Either answer is a finding, not a verdict on the code.
+    console_drain();
+    clear_counters();
+    Rtc::clear_wakeup();
+    (void)Rtc::set_wakeup(RtcWakeupClock::div16, 4095u);   // 2 s backstop
+    // A fresh store needs CMPOK clear: force a sweep first.
+    Nvic::set_pending(Tb::irq());
+    spin_us(400);
+    sync_to_count();
+    // The compare in the ticker's own arithmetic: the count where the
+    // tick becomes now + 300, less one (CMPM fires at the edge after).
+    const uint32_t cr = Tb::count();
+    const uint16_t raw_cmp =
+        static_cast<uint16_t>(((cr & ~(Tb::counts_per_tick - 1u)) + 300u * Tb::counts_per_tick) - 1u);
+    const uint32_t wr0 = wall();
+    (void)Pwr::arm(PwrMode::stop1);
+    {
+        InterruptGuard g;
+        (void)L1::set_cmp(raw_cmp);
+        __DSB();
+        __WFI();
+        __enable_irq();
+    }
+    const uint32_t wr1 = wall();
+    const bool raw_hsisys = Rcc::sysclk_status() == SysclkSource::hsisys;
+    (void)Pwr::arm(PwrMode::sleep);
+    (void)Site::resume_clock();
+    Rtc::clear_wakeup();
+    const uint32_t raw_ms = wall_ms(wall_delta(wr0, wr1));
+    const bool landed = lptim_cmpm >= 1u && within(raw_ms, 290u, 320u);
+    print(serial, "  the same store with NO wait, straight into the Stop: ", raw_ms,
+          " ms of wall, ", lptim_irqs, " LPTIM interrupt(s) (", lptim_cmpm, " CMPM, ", lptim_arrm,
+          " ARRM), RTC backstop wakes ", rtc_wakes, ", Stop was real=", raw_hsisys, crlf);
+    if (landed) {
+        bench.verdict("FINDING: an in-flight compare write LANDS with PCLK stopped - the "
+                      "APB-to-kernel transfer completes on the kernel clock alone; rule "
+                      "3's wait is insurance the silicon does not need (kept: 93 us per "
+                      "Stop round, and the chapter promises nothing)",
+                      raw_hsisys);
+    } else {
+        bench.verdict("FINDING: an in-flight compare write DOES NOT land with PCLK "
+                      "stopped - the deadline came and went unmatched and something else "
+                      "(the lap, or the backstop) ended the sleep; rule 3's wait is what "
+                      "makes a deadline through a Stop real",
+                      raw_hsisys && lptim_cmpm == 0u);
+    }
+    // Whatever happened, the ticker's mirror no longer matches the
+    // register: re-park through the ticker's own path.
+    Nvic::set_pending(Tb::irq());
+    spin_us(50);
+}
+
+// =============================================================================
+// e - a real kernel
+// =============================================================================
+void te_kernel() {
+    feed();
+    console_drain();
+    Metronome::clear();
+    MetroKernel::init_all();
+    clear_counters();
+    const uint32_t s0 = systick_irqs;
+
+    sync_to_count();
+    Metronome::fast.arm_every(7);
+    Metronome::mid.arm_every(30);
+    Metronome::slow.arm_every(250);
+    const uint32_t t0 = t2();
+    const uint32_t k0 = Tb::ticks();
+    uint32_t turns = 0;
+    uint32_t sleeps = 0;
+    while (t2() - t0 < 3u * t2_hz) {
+        feed();
+        TimeEvents<P>::process();
+        if (!MetroKernel::step()) {
+            const uint32_t before = lptim_irqs;
+            MetroKernel::idle_if_empty();
+            if (lptim_irqs != before) ++sleeps;
+        }
+        ++turns;
+    }
+    Metronome::fast.disarm();
+    Metronome::mid.disarm();
+    Metronome::slow.disarm();
+    const uint32_t kticks = Tb::ticks() - k0;
+    const uint32_t window_us = t2_us(t2() - t0);
+    // TIM2 rides the PLL (HSI16 x 4) and the timebase the crystal: the
+    // wall's scale is what the window measured, not the nominal.
+    const uint32_t tick_us_x1000 = (window_us * 1000u) / kticks;   // ~976.5 x 1000, on TIM2
+    const uint32_t irqs = lptim_irqs;
+    const uint32_t cmpms = lptim_cmpm;
+    const uint32_t deferrals = Tb::deferrals();
+    const Track& f = Metronome::tf;
+    const Track& m = Metronome::tm;
+    const Track& s = Metronome::ts;
+    print(serial, "  3 s of kernel (", kticks, " ticks, ", turns, " turns, ", irqs,
+          " LPTIM interrupts of which ", cmpms, " CMPM, ", lptim_arrm, " ARRM; ", sleeps,
+          " sleeps ended by the LPTIM; deferrals so far ", deferrals, ")", crlf);
+    const uint32_t f_nom = (7u * tick_us_x1000) / 1000u;
+    const uint32_t m_nom = (30u * tick_us_x1000) / 1000u;
+    const uint32_t s_nom = (250u * tick_us_x1000) / 1000u;
+    print(serial, "  one tick is ", tick_us_x1000, " ns on TIM2's scale (976563 nominal: the "
+          "PLL against the crystal)", crlf);
+    print(serial, "  fast  7 ticks: ", f.fired, " firings, period ", f.min_us, "..", f.max_us,
+          " us (", f_nom, " on that scale), in ticks ", f.min_ticks, "..", f.max_ticks,
+          ", early ", f.early, crlf);
+    print(serial, "  mid  30 ticks: ", m.fired, " firings, period ", m.min_us, "..", m.max_us,
+          " us (", m_nom, "), in ticks ", m.min_ticks, "..", m.max_ticks, ", early ", m.early,
+          crlf);
+    print(serial, "  slow 250 ticks: ", s.fired, " firings, period ", s.min_us, "..", s.max_us,
+          " us (", s_nom, "), in ticks ", s.min_ticks, "..", s.max_ticks, ", early ", s.early,
+          crlf);
+    bench.verdict("THREE PERIODICS THROUGH A TICKLESS KERNEL: every firing on its cadence "
+                  "within a count on the wall, drift-free from the first",
+                  within(f.fired, 430u, 450u) && within(m.fired, 100u, 105u) &&
+                      within(s.fired, 12u, 13u) && within(f.max_us, f_nom - 40u, f_nom + 1100u) &&
+                      within(m.max_us, m_nom - 40u, m_nom + 1100u) &&
+                      within(s.max_us, s_nom - 40u, s_nom + 1100u));
+    bench.verdict("NOT ONE EARLY, in three thousand milliseconds of three cadences - judged "
+                  "in the timebase's own ticks",
+                  f.early == 0u && m.early == 0u && s.early == 0u && f.max_ticks <= 8u &&
+                      m.max_ticks <= 31u && s.max_ticks <= 251u);
+    // Distinct deadline instants over 3 s: fast ~439, mid ~102, slow ~12,
+    // minus the coincidences (every 210 ticks fast and mid meet, every 1750
+    // fast and slow) - the LPTIM wakes should number about that and no more.
+    // A deadline on the counter's own wrap serves CMPM and ARRM in ONE
+    // interrupt (letter b: a compare at ARR matches), so the flags may
+    // overlap; what may not happen is an interrupt that served nothing.
+    bench.verdict("about one LPTIM wake per distinct deadline instant and none for "
+                  "anything else - the kernel slept TO its deadlines",
+                  within(irqs, 480u, 560u) && cmpms <= irqs &&
+                      cmpms + lptim_arrm + lptim_sweeps >= irqs);
+    bench.verdict("and the SysTick handler still never ran", systick_irqs == s0);
+}
+
+// =============================================================================
+// f - Stop 1 through the manager, with the plain site
+// =============================================================================
+void tf_stop_through_manager() {
+    feed();
+    console_drain();
+    K::init_all();
+    Probe::clear();
+    clear_counters();
+    kernel_live = true;
+
+    const bool dbg_stop = Pwr::debug_in_stop();
+    sync_to_count();
+    const uint32_t w0 = wall();
+    const uint32_t k0 = Tb::ticks();
+    Probe::deadline.arm(500u);
+    post<Manager>(SleepRequested{SleepDepth::deep, reply_to<Probe, SleepVote>()});
+    pump_until_blip(3000u);
+    const uint32_t to_blip = wall_ms(wall_delta(w0, Probe::blip_wall));
+    const uint32_t kernel_ticks = Probe::blip_ticks - k0;
+    const bool pll_back = Rcc::sysclk_status() == SysclkSource::pllrclk;
+    kernel_live = false;
+    print(serial, "  a 500-tick deadline through a Stop 1 under the manager: matured after ",
+          to_blip, " ms of RTC wall, kernel ticks elapsed ", kernel_ticks, ", ", lptim_irqs,
+          " LPTIM interrupt(s), stop waits ", Tb::stop_waits(), ", votes ", Probe::votes,
+          " wakes ", Probe::wakes, " (DBGMCU_CR.DBG_STOP = ", dbg_stop, ")", crlf);
+    bench.verdict("THE PLAIN SITE MEETS A DEADLINE THROUGH A STOP: no timed site, no "
+                  "resync - kernel time ran through the Stop on the LPTIM",
+                  Probe::blips == 1u && within(to_blip, 488u, 520u) && within(kernel_ticks, 500u, 502u));
+    bench.verdict("never early", to_blip >= 488u && kernel_ticks >= 500u);
+    bench.verdict("one interrupt ended the Stop, the compare's own", lptim_irqs == 1u && lptim_cmpm == 1u);
+    bench.verdict("the round closed by the convention and SYSCLK is back on the PLL",
+                  Probe::wakes >= 1u && Site::armed() == SleepDepth::none && pll_back);
+
+    // Six shorter rounds, never early.
+    constexpr uint16_t repeats = 6;
+    constexpr uint32_t nominal = 150;
+    uint16_t on_time = 0;
+    uint32_t worst_lo = 0xFFFFFFFFu;
+    uint32_t worst_hi = 0;
+    for (uint16_t i = 0; i < repeats; ++i) {
+        feed();
+        K::init_all();
+        Probe::clear();
+        kernel_live = true;
+        console_drain();
+        sync_to_count();
+        const uint32_t a = wall();
+        Probe::deadline.arm(nominal);
+        post<Manager>(SleepRequested{SleepDepth::deep, reply_to<Probe, SleepVote>()});
+        pump_until_blip(1000u);
+        kernel_live = false;
+        if (Probe::blips != 1u) {
+            continue;
+        }
+        const uint32_t ms = wall_ms(wall_delta(a, Probe::blip_wall));
+        if (ms < worst_lo) worst_lo = ms;
+        if (ms > worst_hi) worst_hi = ms;
+        // 150 ticks = 146.5 ms.
+        if (within(ms, 146u, 170u)) ++on_time;
+    }
+    print(serial, "  ", repeats, " rounds of ", nominal, " ticks (146.5 ms) through a Stop: ",
+          worst_lo, "..", worst_hi, " ms of wall", crlf);
+    bench.verdict("six shorter rounds all inside the band", on_time == repeats);
+    bench.verdict("and not one early", worst_lo >= 146u);
+    (void)Site::resume_clock();
+}
+
+// =============================================================================
+// g - delay_us on the interrupt-less SysTick
+// =============================================================================
+void tg_delay() {
+    feed();
+    console_drain();
+    const uint32_t s0 = systick_irqs;
+
+    static const uint32_t spans[] = {5, 30, 100, 500, 900};
+    bool all_exact = true;
+    for (uint8_t i = 0; i < sizeof(spans) / sizeof(spans[0]); ++i) {
+        const uint32_t t0 = t2();
+        const bool ok = delay_us(clock, spans[i]);
+        const uint32_t took = t2_us(t2() - t0);
+        print(serial, "  delay_us(", spans[i], ") -> ", took, " us on TIM2", crlf);
+        if (!ok || took < spans[i] || took > spans[i] + 12u) {
+            all_exact = false;
+        }
+    }
+    bench.verdict("delay_us serves 5..900 us AT LEAST on a SysTick with no interrupt",
+                  all_exact);
+
+    uint32_t min_took = 0xFFFFFFFFu;
+    for (uint16_t k = 0; k < 200; ++k) {
+        const uint32_t t0 = t2();
+        (void)delay_us(clock, 50u);
+        const uint32_t took = t2_us(t2() - t0);
+        if (took < min_took) min_took = took;
+    }
+    const bool refused = !delay_us(clock, 1000u);
+    const bool served = delay_us(clock, 999u);
+    print(serial, "  200 x delay_us(50): min ", min_took, " us; delay_us(1000) refused=",
+          refused, ", delay_us(999) served=", served, crlf);
+    bench.verdict("two hundred 50 us waits, not one early", min_took >= 50u);
+    bench.verdict("the cap is a SysTick period: 1000 us refused, 999 served - a "
+                  "millisecond, which on this timebase is 1.024 ticks",
+                  refused && served);
+    bench.verdict("and SysTick_Handler still never ran", systick_irqs == s0);
+}
+
+// =============================================================================
+// u - the keystroke (outside z)
+// =============================================================================
+void tu_keystroke() {
+    feed();
+    print(serial, "  idle_until() with nothing armed for up to 20 s: press a key to end "
+                  "it (the IWDG is fed by the wake-up timer every second)", crlf);
+    console_drain();
+    Rtc::clear_wakeup();
+    (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 0u);   // every second: a feed
+    clear_counters();
+    const uint32_t t0 = wall();
+    uint32_t rounds = 0;
+    uint8_t key = 0;
+    bool got = false;
+    while (rounds < 20u) {
+        {
+            InterruptGuard g;
+            P::idle_until(std::nullopt);
+        }
+        feed();
+        ++rounds;
+        if (Serial::read_byte(key)) {
+            got = true;
+            break;
+        }
+    }
+    Rtc::clear_wakeup();
+    const uint32_t ms = wall_ms(wall_delta(t0, wall()));
+    print(serial, "  ended after ", ms, " ms and ", rounds, " wake(s); key=",
+          got ? static_cast<char>(key) : '-', ", LPTIM interrupts ", lptim_irqs, crlf);
+    bench.verdict("a UART byte is a foreign wake of a deadline-less idle_until", got);
+}
+
+// =============================================================================
+// x - the compare's own latencies at the ticker's prescaler (diagnostic)
+// =============================================================================
+void tx_latency() {
+    feed();
+    console_drain();
+    Nvic::set_pending(Tb::irq());
+    spin_us(400);
+
+    // 1. CMP write to CMPOK on the undivided counter, five times.
+    print(serial, "  CMPOK latency on the undivided counter (32768 Hz):", crlf);
+    for (uint8_t i = 0; i < 5u; ++i) {
+        const uint32_t before = L1::status();
+        const uint16_t far = static_cast<uint16_t>(Tb::count() + 30000u);
+        const uint32_t c0 = t2();
+        (void)L1::set_cmp(far);
+        uint32_t guard = 20'000'000u;
+        while (!L1::cmp_ok() && guard-- != 0u) {
+        }
+        const uint32_t us = t2_us(t2() - c0);
+        print(serial, "    ISR before 0x", hex(before), ": store -> CMPOK in ", us, " us (",
+              (us * 32768u + 500'000u) / 1'000'000u, " counts)", crlf);
+        Nvic::set_pending(Tb::irq());
+        spin_us(400);
+    }
+
+    // 2. The match: CMP = count + k stored right after a count edge.
+    print(serial, "  the match, CMP = count + k stored right after a count edge:", crlf);
+    static const uint32_t ks[] = {2, 3, 4, 5, 6, 10, 40};
+    for (uint8_t i = 0; i < sizeof(ks) / sizeof(ks[0]); ++i) {
+        feed();
+        console_drain();
+        Nvic::set_pending(Tb::irq());
+        spin_us(400);
+        clear_counters();
+        const uint32_t c_sync = Tb::count();
+        while (Tb::count() == c_sync) {
+        }
+        const uint32_t now = Tb::count();
+        const uint16_t cmp = static_cast<uint16_t>(now + ks[i]);
+        const uint32_t c0 = t2();
+        (void)L1::set_cmp(cmp);
+        uint32_t guard = 200'000'000u;
+        while (lptim_irqs == 0u && guard-- != 0u) {
+            feed();
+        }
+        const uint32_t us = t2_us(lptim_t2_at - c0);
+        print(serial, "    k=", ks[i], ": CMP ", cmp, " stored at CNT ", now & 0xFFFFu,
+              " -> irq at CNT ", lptim_cnt_at, " after ", us, " us (",
+              (us * 32768u + 500'000u) / 1'000'000u, " counts), ISR at entry 0x",
+              hex(lptim_isr_at), " served 0x", hex(lptim_last_served), crlf);
+    }
+    Nvic::set_pending(Tb::irq());
+    spin_us(400);
+}
+
+// ---------------------------------------------------------------------------
+// The menu
+// ---------------------------------------------------------------------------
+
+void banner() {
+    print(serial, crlf,
+          "test_stm32_tickless - the LPTIM kernel timebase and idle_until (board E, "
+          "no wires)", crlf);
+    bench.menu();
+    print(serial, "  z  run them all (a..g)", crlf);
+}
+
+}   // namespace
+
+/// Bound ON PURPOSE, to prove it never runs.
+extern "C" void SysTick_Handler() { systick_irqs = systick_irqs + 1u; }
+
+extern "C" void USART2_LPUART2_IRQHandler() {
+    usart_irqs = usart_irqs + 1u;
+    (void)Serial::isr();
+}
+
+/// LPTIM1's vector, shared with TIM6 and the DAC on this part: the
+/// timebase's body, plus the counters the letters read.
+extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
+    lptim_t2_at = t2();
+    lptim_cnt_at = brio::Lptim<1>::count_raw();
+    lptim_isr_at = brio::Lptim<1>::status();
+    const uint32_t served = Tb::isr();
+    lptim_irqs = lptim_irqs + 1u;
+    lptim_last_served = served;
+    if ((served & brio::LptimFlag::cmpm) != 0u) lptim_cmpm = lptim_cmpm + 1u;
+    if ((served & brio::LptimFlag::arrm) != 0u) lptim_arrm = lptim_arrm + 1u;
+    if (served == 0u) lptim_sweeps = lptim_sweeps + 1u;
+}
+
+/// LPTIM2's vector, shared with TIM7: the witness's body.
+extern "C" void TIM7_LPTIM2_IRQHandler() {
+    const uint32_t served = Witness::isr();
+    lptim2_irqs = lptim2_irqs + 1u;
+    if ((served & brio::LptimFlag::cmpm) != 0u) lptim_cmpm = lptim_cmpm + 1u;
+}
+
+extern "C" void RTC_TAMP_IRQHandler() {
+    rtc_wakes = rtc_wakes + 1u;
+    (void)brio::Rtc::isr();
+    if (kernel_live) {
+        brio::post<Probe>(Woke{});
+    }
+}
+
+int main() {
+    const bool clock_ok = SysClock::init();
+    brio::Pwr::bus_clock(true);
+    brio::Pwr::rtc_domain_unlock(true);
+    brio::RtcDomain::apb_clock(true);
+
+    // The RTC domain is opened as it stands (on LSE since the RTC
+    // campaign), never reset: the wall wants the crystal and reports
+    // itself unavailable otherwise.
+    // A domain nobody has selected yet (no backup battery on a Nucleo: a
+    // USB unplug empties it) is taken for the crystal, one-way but free;
+    // a domain on anything else is left alone and the wall says so.
+    const brio::RtcClockSource sel = brio::RtcDomain::selected();
+    const bool on_lse = sel == brio::RtcClockSource::lse || sel == brio::RtcClockSource::none;
+    brio::RtcDomain::lse_enable(true);
+    const bool lse_ok = brio::RtcDomain::lse_wait_ready(4'000'000UL);
+    if (on_lse && lse_ok) {
+        (void)brio::RtcDomain::open(brio::RtcClockSource::lse);
+        brio::Rtc::bypass_shadow(true);
+        wall_ready = wall_up();
+        (void)brio::Rtc::wake_line_open();
+        brio::Nvic::enable(brio::Rtc::irq());
+    }
+
+    const bool serial_ok = Serial::init(clock, 115200);
+    const bool wall2_ok = t2_up();
+    // THE TIMEBASE: the LPTIM on the crystal, and SysTick interrupt-less.
+    const bool tick_ok = Tb::init(clock);
+    const bool wd = brio::Iwdg::arm(brio::IwdgConfig{
+        .prescaler = brio::IwdgPrescaler::div256,
+        .reload = 0x0FFF,
+        .window = 0x0FFF});
+    brio::enable_interrupts();
+
+    bench.letter('a', "THE TIMEBASE: SysTick silent, the LPTIM's rate, the arithmetic",
+                 ta_timebase);
+    bench.letter('b', "the lap carry on LPTIM2, masked across a wrap; CMP == ARR",
+                 tb_lap_carry);
+    bench.letter('c', "idle_until outside the kernel: N ticks, +2 floor, due, foreign",
+                 tc_idle_until);
+    bench.letter('d', "the handshake the errata force, and the store before a Stop",
+                 td_handshake);
+    bench.letter('e', "A REAL KERNEL: three periodics, never early, one wake each",
+                 te_kernel);
+    bench.letter('f', "STOP 1 through the manager with the PLAIN site", tf_stop_through_manager);
+    bench.letter('g', "delay_us on the interrupt-less SysTick", tg_delay);
+    bench.letter('u', "a keystroke as the foreign wake (outside z)", tu_keystroke, false);
+    bench.letter('x', "diagnostic: the compare's latencies on the counter (outside z)", tx_latency, false);
+
+    if (serial_ok) {
+        print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
+              " tick=", tick_ok ? "LPTIM1 on LSE, 1024 Hz, tickless" : "FAILED",
+              " wall=", wall_ready ? "RTC on LSE" : "NO CRYSTAL",
+              " (BDCR 0x", hex(brio::RtcDomain::bdcr()), " on_lse=", on_lse, " lse_ok=", lse_ok, ")",
+              " tim2=", wall2_ok ? "64 MHz" : "FAILED",
+              " backstop=", wd ? "IWDG 32 s" : "FAILED", crlf);
+        banner();
+        bench.prompt();
+    }
+
+    for (;;) {
+        feed();
+        uint8_t c = 0;
+        if (!Serial::read_byte(c)) {
+            continue;
+        }
+        if (c == '\r' || c == '\n') {
+            continue;
+        }
+        print(serial, static_cast<char>(c), crlf);
+        if (c == '?') {
+            banner();
+        } else if (!bench.handle(static_cast<char>(c))) {
+            print(serial, "unknown letter (? for the menu)", crlf);
+        }
+        bench.prompt();
+    }
+}

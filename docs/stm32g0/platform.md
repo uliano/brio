@@ -1,30 +1,36 @@
 # Platform - what the kernel stands on (STM32G0)
 
 > **PROVISIONAL.** All three halves are here and bench-verified: the
-> WAKING half below (the critical section, the idle hook, the SysTick
-> timebase, the NVIC, the crt), the FAILING half next door in
+> WAKING half below (the critical section, the two idle hooks, the two
+> timebases - SysTick, and the tickless LPTIM one that counts through a
+> Stop - the NVIC, the crt), the FAILING half next door in
 > [reset.md](reset.md) (which reset happened, both watchdogs, the
 > HardFault breadcrumb across a real reset), and the STOPPING half in
-> [pwr.md](pwr.md) (PWR's mode ladder, the two `SleepSite`s and the
-> RTC-backed timebase that survives a Stop). What is left is small and
-> listed in "Not covered yet".
+> [pwr.md](pwr.md) (PWR's mode ladder and the `SleepSite`s). What is
+> left is small and listed in "Not covered yet".
 
 Documents of record: RM0444 Rev 6 - the Cortex-M0+ summary ch. 12
 (NVIC) with ARM's ARMv6-M ARM behind it, and PWR ch. 4 for what a WFI
 here really enters ([pwr.md](pwr.md) owns that chapter) - and errata
 ES0548 Rev 3
-(no item touches this chapter on revision Z). Drivers:
-`stm32g0/platform.hpp` (`Stm32g0Platform`, this target's
-realization of the kernel's `Platform` concept), `stm32g0/delay.hpp`
-(the microsecond busy-wait), `stm32g0/reset.hpp`
-([reset.md](reset.md)), `stm32g0/nvic.hpp`
-and `stm32g0/ticker.hpp` (this family's includes of the core stratum's
-`armv6m/nvic.hpp` - `InterruptGuard`, `Nvic` - and `armv6m/ticker.hpp`
-- `BasicTicker` - plus the `Ticker` alias;
+(2.8.2 and 26.4.11 shape the tickless timebase's arming; nothing else
+touches this chapter on revision Z). Drivers:
+`stm32g0/platform.hpp` (`Stm32g0Platform<TB>`, this target's
+realization of the kernel's `Platform` concept, templated on its
+timebase, and the `Tickless` concept), `stm32g0/ticker.hpp` (the
+SysTick `Ticker`: this family's include of the core stratum's
+`armv6m/ticker.hpp` - `BasicTicker`, `SysTickCounter`),
+`stm32g0/lptim_ticker.hpp` (`LptimTicker`, the tickless timebase over
+[lptim.md](lptim.md)'s driver), `stm32g0/delay.hpp` (the microsecond
+busy-wait), `stm32g0/reset.hpp` ([reset.md](reset.md)),
+`stm32g0/nvic.hpp` (`armv6m/nvic.hpp` - `InterruptGuard`, `Nvic`;
 [../armv6m/README.md](../armv6m/README.md)). The
 crt is `stm32g0/src/glue/startup_stm32g0b1.cpp` +
-`stm32g0/ld/stm32g0b1re.ld` in the build project. The family fixture
-is `test/family_stm32g0/platform.cpp` under `tools/check_stm32g0.sh`.
+`stm32g0/ld/stm32g0b1re.ld` in the build project. The family fixtures
+are `test/family_stm32g0/platform.cpp` and `lptim_ticker.cpp` under
+`tools/check_stm32g0.sh`, with the negatives that refuse a timed sleep
+site on a tickless platform and the tickless timebase off the value
+line.
 
 ## What the silicon does
 
@@ -76,6 +82,29 @@ clock gate open. The site pauses the ticker for the deep rungs anyway
 and resumes it on disarm: it costs nothing and makes the Stop last in
 both states ([pwr.md](pwr.md)).
 
+**And a timebase that does not stop: the LPTIM on the crystal.** The
+platform is ONE class templated on its timebase, `Stm32g0Platform<TB =
+Ticker>`, and the other argument is `LptimTicker<>`: LPTIM1 clocked
+from the 32768 Hz LSE undivided, which keeps counting through Stop 0
+and Stop 1 (26.5), with the kernel tick its count shifted right by
+five - 1024 ticks a second, a power of two, so `millis()` is shifts
+and exact. A program on it is TICKLESS: no periodic interrupt at all,
+the kernel's optional `idle_until(deadline)` hook
+([../design/kernel.md](../design/kernel.md) section 11) places the
+loop's next deadline in the LPTIM's compare and one WFI covers the
+whole wait at whatever depth a sleep site armed, kernel time RUNS
+through the Stop, and the plain sleep site is the only site it takes
+(the timed ones refuse it at compile time: nothing stands still). What
+it gives up: one LPTIM and its vector, bound by the app to the ticker's
+`isr()`; SysTick keeps counting interrupt-less as `delay_us`'s cycle
+counter (`SysTickCounter`), and nothing is bound to `SysTick_Handler`.
+The compare's arming is where the silicon and two errata dictate the
+shape - a write lands 2..3 counts after the store, a match fires at
+the count edge AFTER equality, ES0548 2.8.2 forbids clearing a flag
+outside the handler and 26.4.11 a second write before the first one's
+CMPOK - and the four rules that follow are in `lptim_ticker.hpp`'s
+header and measured below.
+
 **SRAM survival across a reset is promised nowhere**, and the SRAM has
 a PARITY CHECK the factory option byte leaves DISABLED
 (FLASH_OPTR.RAM_PARITY_CHECK = 1): with it enabled, the first read of
@@ -91,10 +120,35 @@ BKPT with no debugger escalates to the crt's distinct
 
 ## Types and verbs
 
-- `Stm32g0Platform` - `CriticalSection` (= `InterruptGuard`), `idle()`
-  (DSB, WFI, unmask), `interrupts_enabled()`, `break_here()` (BKPT),
-  `now()`/`ticks_per_second` (the ticker's), `atomic_width` 4,
-  `panic_record()` in `.noinit`.
+- `Stm32g0Platform<TB = Ticker>` - `Timebase` (= TB), `CriticalSection`
+  (= `InterruptGuard`), `idle()` (DSB, WFI, unmask),
+  `interrupts_enabled()`, `break_here()` (BKPT), `now()`/
+  `ticks_per_second` (the timebase's), `atomic_width` 4,
+  `panic_record()` in `.noinit` - and, on a `Tickless` timebase only,
+  `idle_until(std::optional<uint32_t> deadline)`: the kernel's optional
+  hook, entered masked with the absolute tick of the nearest armed time
+  event; a due deadline or a wake the timebase could not place this turn
+  means no sleep (interrupts back on, return), otherwise the wake is
+  placed and the same DSB/WFI/unmask follows. `Tickless<TB>` requires
+  `ticks()`, `ticks_per_second`, `arm_wake(now, deadline) -> bool`; the
+  SysTick `Ticker` is statically not one.
+- `LptimTicker<cfg>` (`LptimTickerConfig{instance = 1, shift = 5}`) -
+  `init(clock)` (the LSE through the RTC domain's gate, the LPTIM
+  undivided with ARRM and CMPM armed, the compare parked, the wake line
+  and the vector open, the counter started, SysTick as the cycle
+  counter; false when the crystal never came), `ticks()` (the count
+  shifted; exact inside a masked window under one second), `count()`
+  (the 32-bit count itself), `millis()`/`secs()`/`now()` (exact by
+  shifts), `arm_wake(now, deadline)` (the four rules: store only with
+  CMPOK clear and no write in flight, else pend the sweep once and
+  decline; a deadline nearer than six counts is declined and spun
+  through; before a Stop the store is waited for; a deadline a lap or
+  more away arms nothing and the register is mirrored), `isr()` (the
+  ordered clear, the lap carry, the completion note; returns the mask
+  served), the readbacks `laps`/`cmp_reg`/`write_pending`/`deferrals`/
+  `floor_declines`/`stores`/`write_timeouts`/`stop_waits`, `irq()`.
+  LSE only; `shift` 0..10 (32768 down to 32 ticks a second), a lap of
+  two seconds at every shift.
 - `InterruptGuard`, `enable_interrupts()`, `disable_interrupts()`,
   `interrupts_enabled()`, `irq_priority_levels` (4) - armv6m/nvic.hpp
   through stm32g0/nvic.hpp.
@@ -106,18 +160,22 @@ BKPT with no debugger escalates to the crt's distinct
   `millis`/`secs`/`now`, `advance(n)` (the RTC resync's landing point -
   `Stm32g0TimedSleepSite` is its user), `pause`/`resume` (which the same
   site calls around every deep sleep). A rate that does not divide 1000
-  is refused at compile time.
+  is refused at compile time. `SysTickCounter` - `start(clock)`/`stop()`/
+  `running()`: SysTick counting with no interrupt, the same reload, for
+  a program whose timebase is the LPTIM (`LptimTicker::init` calls it).
 - `delay_us(clock, us)` / `delay_us(DelayRate, us)` +
   `delay_rate(hz)` - stm32g0/delay.hpp, which is `armv6m/delay.hpp`
   plus this family's measured facts: a busy-wait of AT LEAST `us`
-  microseconds on SysTick's VAL, CAPPED BELOW ONE KERNEL TICK by
-  contract (a tick or more is TimeEvent territory and is refused with
-  `false`, spending nothing), and `false` with no time spent when
-  SysTick is not running at all. No division runs at wait time: the
-  cycles-per-microsecond factor is rounded UP at compile time so every
-  error lands late. The ticker owns SysTick IN WRITING; this file only
-  reads VAL, and folds the reload across a wrap, so it is correct
-  inside a masked window too.
+  microseconds on SysTick's VAL, CAPPED BELOW ONE SYSTICK PERIOD - one
+  millisecond, one kernel tick on the SysTick timebase and 1.024 on the
+  LPTIM one (a millisecond or more is TimeEvent territory and is
+  refused with `false`, spending nothing), and `false` with no time
+  spent when SysTick is not running at all. No division runs at wait
+  time: the cycles-per-microsecond factor is rounded UP at compile time
+  so every error lands late. SysTick's one writer (the ticker, or the
+  counter) owns it IN WRITING; this file only reads VAL, and folds the
+  reload across a wrap, so it is correct inside a masked window too,
+  and needs the counter running, never its interrupt.
 - The crt: `Reset_Handler` (copy .data, zero .bss, walk .init_array,
   call main; .noinit untouched), weak `Default_Handler` aliases for
   every vector, a distinct weak `HardFault_Handler`, `abort()` as a
@@ -137,6 +195,24 @@ int main() {
     brio::Ticker::init(clock);
     brio::enable_interrupts();
     brio::Kernel<P, Blinker, Supervisor>::run();
+}
+```
+
+The same program TICKLESS - the timebase as the platform's argument,
+the LPTIM's vector instead of SysTick's, nothing else:
+
+```cpp
+using Tb = brio::LptimTicker<>;                  // LPTIM1 on LSE, 1024 Hz
+using P = brio::Stm32g0Platform<Tb>;
+using Site = brio::Stm32g0SleepSite<SysClock, Tb>;   // the only site it takes
+
+extern "C" void TIM6_DAC_LPTIM1_IRQHandler() { Tb::isr(); }
+
+int main() {
+    SysClock::init();
+    const bool tick_ok = Tb::init(clock);        // false: no crystal
+    brio::enable_interrupts();
+    brio::Kernel<P, Blinker, Supervisor>::run(); // sleeps TO each deadline
 }
 ```
 
@@ -173,6 +249,70 @@ What it measures of THIS chapter:
   answer is `false` in 0 us.
 
 
+**The tickless timebase** - the reference suite is `test_stm32_tickless`
+(seven letters in `z`, 38 verdicts, 38/38 three times from a cold
+flash; `u` outside it needs a keystroke and `x` is the diagnostic that
+found the latencies). What it measures:
+
+- **No periodic interrupt**: `SysTick_Handler`, bound on purpose, never
+  runs; SysTick counts with TICKINT clear and the 1 ms reload; the
+  LPTIM raises one interrupt per deadline and one per two-second lap.
+- **The rate and the arithmetic**: 2 s of TIM2 on the PLL move the tick
+  by 2043 (2048 due: HSI16 against the crystal, coherence not
+  metrology) and `millis()` by 1995; `secs()`/`now()` are the shifts
+  they claim; 200000 reads never step backwards.
+- **The lap carry, under a mask too**: a second `LptimTicker` on LPTIM2
+  at shift 0 (the crystal's own rate, a lap of two seconds - LPTIM2's
+  counter on silicon for the first time) is monotonic across wraps in
+  a tight loop, and with PRIMASK held across a wrap the read under the
+  mask already carries the lap (ARRM standing, the handler not yet
+  run): the unmasked read follows it by one count, not by 65536.
+- **A compare equal to ARR matches** like any other value - 0xFFFF
+  needs no special case.
+- **THE LATENCIES SCALE WITH THE COUNTER'S CLOCK, NOT THE KERNEL
+  CLOCK** - the finding that fixed the design: a CMP write reaches CMPOK
+  in 74..88 us on the undivided counter (2..3 counts, lptim.md's
+  figure) and in 2.0..2.8 ms at prescaler /32 (2..3 PRESCALED counts,
+  a match tried three counts out is missed for a whole lap), and CMPM
+  fires at the count edge AFTER equality (k = 4, 5, 6, 10, 40 counts
+  out all wake at CMP + 1; two counts out lands at CMP + 2, the write
+  having arrived on top of the match). Hence the undivided counter
+  with a shifted tick, the compare at the deadline's first count LESS
+  ONE, and the six-count floor.
+- **`idle_until` by hand**: 2 / 3 / 10 / 100 / 500 ticks asked sleep
+  1956 / 2938 / 9786 / 97862 / 489276 us on TIM2's scale (1953 / 2930 /
+  9766 / 97656 / 488281 nominal, the PLL 0.23 % fast against the
+  crystal), one CMPM each, `ticks()` at return equal to the deadline
+  every time; a deadline one tick away sleeps 980 us and lands on it;
+  a due deadline returns in 7 us with no interrupt; with nothing armed
+  the sleep lasts until a foreign wake (the RTC's wake-up timer,
+  232 ms) and the LPTIM never speaks.
+- **The handshake the errata force**: two arms 150 us apart - the
+  second finds CMPOK standing, pends the vector once and declines; the
+  handler's clear is visible on the APB side in 0 us; the third arm
+  stores the new value (two stores, one completion between them).
+- **A store immediately before a Stop 1 LANDS with PCLK stopped**: the
+  compare fires at its 292 ms on the RTC's wall with no wait at all,
+  three runs of three - the APB-to-kernel transfer completes on the
+  kernel clock alone, and the ticker's wait before a Stop (rule 3) is
+  insurance the silicon does not need, kept at 93 us a round.
+- **A real kernel**: three periodics at 7, 30 and 250 ticks pumped
+  through `process()/step()/idle_if_empty()` for three seconds fire
+  438 / 102 / 12 times, every interval exactly 7 / 30 / 250 ticks in
+  the timebase's own units (6829..6871 / 29326..29384 / 244543..244712
+  us on TIM2's scale), NOT ONE EARLY, and the LPTIM woke the loop 535
+  times for 534 CMPM (one interrupt served a deadline and a lap
+  together) with no deferral: the kernel slept TO its deadlines.
+- **Stop 1 through the manager with the plain site**: a 500-tick
+  deadline matures after 488 ms of RTC wall with 500 kernel ticks
+  elapsed - time RAN through the Stop, no resync, no timed site - one
+  LPTIM interrupt, the round closed by the convention and SYSCLK back
+  on the PLL; six rounds of 150 ticks all at 146 ms of wall (146.5
+  nominal) and not one early.
+- **`delay_us` on the interrupt-less SysTick**: 5 / 30 / 100 / 500 /
+  900 us measure 6 / 31 / 101 / 501 / 901 on TIM2; 200 x 50 us never
+  below 51; 1000 us refused, 999 served.
+
 Two kernel apps on the Nucleo-G0B1RE, both in the tree: blink (two
 AOs, time events at 500/250/100 ms; PA5 sampled over SWD every
 100 ms shows the 500 ms cadence and the Supervisor's switch to 250 ms
@@ -195,15 +335,12 @@ Implemented, not bench-verified: `Nvic::priority`, `abort()`'s and `HardFault_Ha
 (the fault VECTOR is exercised, by `hard_fault_reset` - reset.md),
 the cortex-debug launch entry.
 
-A DESIGN QUESTION, not a driver gap: **a kernel timebase on a counter
-that does not stop.** SysTick rides HCLK and HCLK stops in Stop, which
-is why kernel time stands still there and why two sleep sites exist to
-repair it after the fact ([pwr.md](pwr.md)). An LPTIM on LSE or LSI
-keeps counting through Stop 0 and Stop 1 ([lptim.md](lptim.md)), so a
-TICKLESS platform is now physically available on this target: `now()`
-read from a free-running LPTIM counter, and the loop's next deadline
-placed in its compare register instead of counted out in ticks. That
-would change the Platform's tick SOURCE and RATE for every program on
-this family, and `BasicTicker`'s own header already names the day it
-must either become a `ClockUser` or move off the core clock. It is a
-decision for `docs/design/`, and it is stated here and not built.
+The tickless timebase's own gaps: LSE only (an LSI-clocked
+`LptimTicker` would need a stated rate and the directional rule the
+timed site carries - declined, a timebase should not be approximately
+right); a masked window longer than half a lap (one second) mis-reads
+the lap and is a stated precondition, not a check; a deadline nearer
+than six counts (183 us) is spun through the loop rather than slept
+for - a SysTick one-shot could sleep it and is not built; and the
+keystroke letter `u` (a UART byte as the foreign wake of a long
+`idle_until`) needs an operator and has not been run unattended.

@@ -477,9 +477,71 @@ gets its dated home in `docs/design/` when taken.
   "desk fault" behind tim/exti letter a's PA8 precondition; a follow-up
   is for those letters to release it through ucpd_dead_battery(). LSE
   CSS DECLINED (one-way without a BDRST). STILL OPEN on the doc lists:
-  LPTIM2 on silicon, the USART/LPUART and TIM unverified lists,
-  uart_stress.py's 3 Mbaud sink leg. What remains needs a peer or wires (the buses against a SAM at
-  3.3 V, FDCAN, USB, UCPD, the option-byte bench verb).
+  LPTIM2's pads and functions, the USART/LPUART and TIM unverified
+  lists, uart_stress.py's 3 Mbaud sink leg. What remains needs a peer
+  or wires (the buses against a SAM at 3.3 V, FDCAN, USB, UCPD, the
+  option-byte bench verb). THE TICKLESS TIMEBASE DONE 2026-09-05 (item 4
+  of the 2026-09-04 list, BY FABLE'S OWN HAND in three commits, each
+  gated): (1) platform_<x>.hpp -> <stratum>/platform.hpp in all four
+  strata (96 images byte-identical); (2) the kernel's ONE OPTIONAL HOOK -
+  Kernel::idle_if_empty detects `P::idle_until(std::optional<uint32_t>)`
+  by requires and hands it TimeEvents<P>::next_deadline() (new: the
+  ABSOLUTE nearest deadline, ticks_to_next's sibling), the Platform
+  concept untouched; Stm32Platform RENAMED Stm32g0Platform<TB = Ticker>
+  on the user's call (STM32 spans M0..M7 - the G0 stratum's overclaim;
+  SamPlatform/AvrPlatform stay), `using Timebase`, idle_until requires
+  Tickless<TB> (ticks/ticks_per_second/arm_wake); armv6m SysTickCounter
+  (SysTick counting, no interrupt, for delay_us where the timebase is
+  elsewhere); the sites renamed Stm32g0*, the plain one taking the
+  timebase and pausing SysTick only if constexpr it has the verbs, the
+  two timed ones static_asserting !Tickless (two negatives); host
+  test_time_event + test_kernel grown; all images byte-identical but ONE
+  layout-only mover (test_stm32_sleep: idle() now a template member
+  emitted at the TU's end - same sizes, same instruction histogram);
+  (3) brio/stm32g0/lptim_ticker.hpp NEW + test_stm32_tickless (7 letters
+  in z, 38/38 x3 from a cold flash) + canaries sleep 50/50, lptim 68/68,
+  platform 53/53. THE FINDING THAT FIXED THE DESIGN (letter x, a
+  diagnostic kept outside z): A CMP WRITE LANDS IN 2..3 COUNTS OF
+  WHATEVER CLOCK THE COUNTER RUNS ON - 74..88 us undivided, 2.0..2.8 ms
+  at prescaler /32 (lptim.md's "two to three LSE periods" was measured
+  at /1 and does NOT hold at /32: a compare three counts out is missed
+  for a whole lap) - and CMPM FIRES AT THE COUNT EDGE AFTER EQUALITY
+  (CMP + 1 at every distance tried). So the counter runs UNDIVIDED and
+  the kernel tick is its count shifted right (shift 5 = 1024 Hz, a lap
+  of two seconds and one ARRM per lap), the compare goes at the
+  deadline's first count LESS ONE (a wake AT the deadline, never early,
+  to 30 us), and the four rules: a store only with CMPOK clear and no
+  write in flight (the flag READ from thread mode, cleared only by the
+  handler - ES0548 2.8.2 verbatim; a standing completion pends the
+  vector once and declines the sleep, a masked wait of even 90 us would
+  cost a console its bytes), a six-count floor (a nearer deadline is
+  spun through the loop), the store waited for before a Stop (MEASURED
+  UNNECESSARY: an unwaited store lands with PCLK stopped, 292 ms on the
+  wall three of three - kept as 93 us of insurance), a deadline a lap
+  away arms nothing and the register is mirrored; a compare equal to
+  ARR MATCHES; the handler's clear is visible in 0 us. MEASURED: three
+  periodics at 7/30/250 ticks for 3 s fire 438/102/12 times EXACTLY on
+  their ticks with 535 LPTIM wakes for 534 CMPM and no deferral - the
+  kernel slept TO its deadlines; a 500-tick deadline through Stop 1
+  under the manager with the PLAIN site (the timed ones refuse a
+  tickless P at compile time) matures at 488 ms of RTC wall with 500
+  ticks elapsed, six rounds of 150 ticks all at 146 ms, none early;
+  LPTIM2's counter ran on silicon for the first time as the lap witness
+  (monotonic across wraps, the pending-ARRM correction proven under a
+  200 ms mask across a wrap); SysTick_Handler bound to a counter and
+  never run; delay_us exact with TICKINT off. Desk: the RTC domain was
+  found EMPTY (unplugged board, BDCR 0x0003) and the suite selects the
+  crystal on an empty domain. LESSONS PAID FOR: a print between two
+  naps is a wake (the TX interrupt) - collect, then print; a nap's
+  deadline computed before the console drain is due before the WFI;
+  TIM2 on the PLL is 0.23 % fast against the crystal, so a wall verdict
+  must be on the wall's own scale and "never early" judged in ticks; a
+  deadline on the counter's wrap serves CMPM and ARRM in one interrupt.
+  Docs: design/kernel.md + power.md (commit 2), stm32g0/platform.md
+  (the built thing), lptim.md, pwr.md, armv6m/README.md, the map,
+  bench.md. Not covered: LSI as the source, a masked window over a
+  second, a SysTick one-shot for deadlines under six counts, letter u
+  (a keystroke). NEXT: item 5, DynamicClock on the G0 (the design first).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device
@@ -4126,6 +4188,13 @@ brio/                    the framework, four strata:
                            MODER/OTYPER/OSPEEDR/PUPDR/AFR, BSRR/BRR values
     usart.hpp              Usart<n> resource + Uart<n, pins> task, the
                            other two targets' Uart surface verbatim
+    lptim_ticker.hpp       LptimTicker<cfg>: the TICKLESS kernel timebase -
+                           the LPTIM on the LSE crystal undivided, the tick
+                           its count shifted (1024 Hz), arm_wake() placing
+                           the loop's next deadline in CMP under the four
+                           rules the silicon and ES0548 2.8.2 dictate; the
+                           platform's template argument for a program with
+                           no periodic interrupt
   host/                  the test target
     platform.hpp           HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

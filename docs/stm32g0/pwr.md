@@ -18,11 +18,14 @@ Drivers: `stm32g0/pwr.hpp` (`Pwr`, the whole chapter) and
 `stm32g0/sleep.hpp` (`Stm32g0SleepSite`, `Stm32g0TimedSleepSite`,
 `Stm32g0LptimTimedSleepSite`). Family fixture:
 `test/family_stm32g0/sleep.cpp` + seven negatives under
-`tools/check_stm32g0.sh`. Bench suites: `test_stm32_sleep` for the first
-two sites, `test_stm32_lptim` letter h for the third. The waking half of
-the platform is [platform.md](platform.md); the RTC that wakes a deep
-sleep at the second site is [rtc.md](rtc.md) and the low-power timer
-that wakes it at the third is [lptim.md](lptim.md).
+`tools/check_stm32g0.sh` (two of them refuse a timed site on a
+tickless platform). Bench suites: `test_stm32_sleep` for the first two
+sites, `test_stm32_lptim` letter h for the third, `test_stm32_tickless`
+letter f for the plain site on the tickless platform. The waking half
+of the platform is [platform.md](platform.md) - which now has TWO
+timebases, and the sites read differently under each (below); the RTC
+that wakes a deep sleep at the second site is [rtc.md](rtc.md) and the
+low-power timer that wakes it at the third is [lptim.md](lptim.md).
 
 ## What the silicon does
 
@@ -283,9 +286,12 @@ register removes them:
   / `has_dac_supply_monitor` as the compile-time form - `has_vddio2`, `apply_pulls`
   (APC) + `standby_pull(port, pin, up, down)`, and `enter(PwrMode)` -
   arm, sweep the flags the chapter demands, DSB, WFI.
-- `Stm32g0SleepSite<Clock>` - `arm` / `disarm` / `armed`, the
-  `util/power.hpp` concept, plus `resume_clock()` and
-  `expected_source`.
+- `Stm32g0SleepSite<Clock, TB = Ticker>` - `arm` / `disarm` / `armed`,
+  the `util/power.hpp` concept, plus `resume_clock()`,
+  `expected_source` and `pauses_tick` (true for the SysTick ticker,
+  whose interrupt the deep rungs pause; false for a tickless timebase,
+  which has nothing to pause - the `if constexpr` that lets one site
+  serve both programs).
 - `TimedSleepConfig` {rtcclk_hz, source, wipe_domain, fast_clock} with
   `timed_sleep_config_valid`.
 - `Stm32g0TimedSleepSite<P, Clock, cfg>` - the same three verbs, plus
@@ -293,6 +299,23 @@ register removes them:
   four acts) and the readbacks a suite judges it by: `alarm_armed`,
   `last_advance`, `last_reload`, `last_alarm_was_fast`, `prescalers`,
   `fast_hz`, `fast_span_ticks`.
+
+**Under a tickless platform** (`Stm32g0Platform<LptimTicker<>>`,
+[platform.md](platform.md)) the picture simplifies: kernel time runs
+on an LPTIM that counts through a Stop and the platform's own
+`idle_until()` places the next deadline in that LPTIM's compare, so
+nothing stands still, nothing needs a resync and no site may own a
+second alarm. The plain `Stm32g0SleepSite<Clock, LptimTicker<>>` is the
+only site such a program takes - it still arms the depth and still
+puts the clock back, and pauses nothing - and BOTH timed sites refuse
+it at compile time (`static_assert(!Tickless<P::Timebase> ...)`): the
+restriction the plain site carries on the SysTick timebase, no Stop
+with an armed time event, is simply gone there, for every program and
+without a site's help. Measured (test_stm32_tickless letter f): a
+500-tick deadline through a Stop 1 under the manager matures after
+488 ms of RTC wall with 500 kernel ticks elapsed, one LPTIM interrupt,
+the round closed by the convention and SYSCLK back on the PLL; six
+rounds of 150 ticks all at 146 ms (146.5 nominal), not one early.
 
 ## How to use it
 

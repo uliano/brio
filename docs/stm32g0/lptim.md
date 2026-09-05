@@ -5,8 +5,10 @@
 > modes, the trigger and input multiplexers, the three waveforms, the
 > glitch filters, encoder mode, the two counter resets and the wake
 > line - and the tasks over it give `util/pwm_channel.hpp` its fourth
-> silicon and `util/power.hpp` its third sleep site on this target.
-> What is still missing is in "Not covered yet".
+> silicon, `util/power.hpp` its third sleep site on this target, and
+> the kernel its first TICKLESS timebase (`LptimTicker`,
+> [platform.md](platform.md)). What is still missing is in "Not
+> covered yet".
 
 Documents of record: RM0444 Rev 6 - LPTIM ch. 26, the kernel-clock
 multiplexer 5.4.21 (RCC_CCIPR), the bus enable and reset 5.4.19/5.4.11,
@@ -16,12 +18,15 @@ DS13560 Rev 5 tables 13..24 (the AF numbers of the LPTIM pads); errata
 ES0548 Rev 3 items 2.8.1 and 2.8.2, read on the bench chip's revision Z
 column. Driver: `stm32g0/lptim.hpp`; the third sleep site over it is
 `Stm32g0LptimTimedSleepSite` in `stm32g0/sleep.hpp` and is documented in
-[pwr.md](pwr.md). The per-instance presence, vector, EXTI and DMAMUX
-facts come from `stm32g0/device_tables.hpp`. Bench suite:
-`test_stm32_lptim` (9 letters, 68 verdicts, wireless). Family fixture
-`test/family_stm32g0/lptim.cpp` plus five negatives under
-`tools/check_stm32g0.sh` (the third sleep site's own two live with
-`test/family_stm32g0/sleep.cpp` - see [pwr.md](pwr.md)).
+[pwr.md](pwr.md); the tickless kernel timebase over it is
+`LptimTicker` in `stm32g0/lptim_ticker.hpp` and is documented in
+[platform.md](platform.md). The per-instance presence, vector, EXTI and
+DMAMUX facts come from `stm32g0/device_tables.hpp`. Bench suites:
+`test_stm32_lptim` (9 letters, 68 verdicts, wireless) and
+`test_stm32_tickless` (the timebase). Family fixtures
+`test/family_stm32g0/lptim.cpp` and `lptim_ticker.cpp` plus their
+negatives under `tools/check_stm32g0.sh` (the third sleep site's own
+two live with `test/family_stm32g0/sleep.cpp` - see [pwr.md](pwr.md)).
 
 ## What the silicon does
 
@@ -151,7 +156,12 @@ The tasks are thin: `LptimPwm<L, top>` (a `PwmChannel`),
 `LptimPeriodicTick<L>`, `LptimCounter<L>` (free-running, 32-bit through
 an ARRM-accumulated high word), `LptimPulseCounter<L>` (both
 arrangements of 26.4.12), `LptimTimeout<L>` (26.4.9) and
-`LptimEncoder<L>` (LPTIM1 only, `static_assert`ed).
+`LptimEncoder<L>` (LPTIM1 only, `static_assert`ed). The seventh lives
+in its own header, `stm32g0/lptim_ticker.hpp`: `LptimTicker<cfg>`, the
+kernel timebase that does not stop - the counter undivided on the
+crystal, the tick its count shifted, the loop's next deadline placed in
+CMP by the platform's `idle_until()`; [platform.md](platform.md) owns
+it.
 
 ## How to use it
 
@@ -238,7 +248,20 @@ two steps on PCLK cost 2 us and 1 us.
 gives**: on an LSE kernel clock a CMP write reaches CMPOK in about 4600
 to 6000 cycles at 64 MHz (72..93 us, two to three LSE periods) and an
 ARR write in about 5800; on PCLK both cost 131..136 cycles. This is what
-sizes the sleep site's minimum alarm distance.
+sizes the sleep site's minimum alarm distance. **AND THE LATENCY SCALES
+WITH THE PRESCALER** (test_stm32_tickless letter x): the same CMP write
+lands in 2.0..2.8 ms at prescaler /32 - two to three PRESCALED counts,
+not two to three kernel clocks - so "a few LSE periods" is a fact of
+the undivided counter only, and a compare placed three counts out at
+/32 is missed for a whole lap. The same letter measured WHERE THE MATCH
+FIRES: CMPM rises at the count edge AFTER equality, CMP + 1, at every
+distance tried (4, 5, 6, 10, 40 counts), and a compare that lands on
+top of its own equality fires at CMP + 2. Both facts are what the
+tickless timebase is built on (the counter undivided, the compare at
+the deadline's first count less one, a six-count floor); the sleep
+site's own "+1 count for the phase" rule already absorbed the first
+of them without naming it. **A compare equal to ARR matches** like any
+other value (letter b: CMP = 0xFFFF for a lap, one CMPM).
 
 **A FORBIDDEN WRITE IS NOT ONE THING ON THIS FAMILY** (the analog
 campaign's finding, met again). 26.7.4 says CFGR "must only be modified
@@ -383,11 +406,12 @@ Driver gaps - things chapter 26 has and this file does not:
 
 Implemented but not bench-verified:
 
-- **LPTIM2 on silicon.** Everything measured here was measured on
-  LPTIM1, because it is the instance with the encoder and the second
-  input and because its four signals land on four free pads. LPTIM2's
-  presence, vector, EXTI line and refusals are checked by the family
-  fixture and the negatives; its counter has never been run.
+- **LPTIM2's pads and functions.** Its COUNTER has run on silicon -
+  `test_stm32_tickless` letter b runs a second `LptimTicker` on it at
+  the crystal's own rate, laps, ARRM handler and a compare at ARR
+  included, through `TIM7_LPTIM2_IRQHandler` - but its pads, triggers
+  and the rest of what the LPTIM1 letters measure have not been
+  repeated there.
 - **TRGFLT**, the trigger filter, measured only through CKFLT's twin -
   the two fields share the vocabulary and 26.4.5 describes them
   together, but a filtered TRIGGER was not staged separately.
