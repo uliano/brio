@@ -14,7 +14,7 @@ Documents of record: RM0444 Rev 6 - the Cortex-M0+ summary ch. 12
 here really enters ([pwr.md](pwr.md) owns that chapter) - and errata
 ES0548 Rev 3
 (no item touches this chapter on revision Z). Drivers:
-`stm32g0/platform.hpp` (`Stm32Platform`, this target's
+`stm32g0/platform.hpp` (`Stm32g0Platform`, this target's
 realization of the kernel's `Platform` concept), `stm32g0/delay.hpp`
 (the microsecond busy-wait), `stm32g0/reset.hpp`
 ([reset.md](reset.md)), `stm32g0/nvic.hpp`
@@ -63,8 +63,8 @@ unchanged by the campaign that added the sites.
 **SysTick rides HCLK.** The reload is `Clock::hz / 1000 - 1`
 (63999 at 64 MHz, read back over SWD); in Stop the core clocks stop and
 so does the kernel's time - the samc21 standby situation, and it has the
-same two answers here: `Stm32SleepSite` keeps the honest restriction and
-`Stm32TimedSleepSite` LIFTS it, resynchronizing from the RTC through
+same two answers here: `Stm32g0SleepSite` keeps the honest restriction and
+`Stm32g0TimedSleepSite` LIFTS it, resynchronizing from the RTC through
 `advance()` ([pwr.md](pwr.md)). THE TICK ITSELF DOES NOT DEFEAT A DEEP
 SLEEP, though a debugger can make it look so: 4.3.3 makes a WFI a no-op
 with an interrupt pending, but a Stop once taken stops HCLK and SysTick
@@ -91,7 +91,7 @@ BKPT with no debugger escalates to the crt's distinct
 
 ## Types and verbs
 
-- `Stm32Platform` - `CriticalSection` (= `InterruptGuard`), `idle()`
+- `Stm32g0Platform` - `CriticalSection` (= `InterruptGuard`), `idle()`
   (DSB, WFI, unmask), `interrupts_enabled()`, `break_here()` (BKPT),
   `now()`/`ticks_per_second` (the ticker's), `atomic_width` 4,
   `panic_record()` in `.noinit`.
@@ -104,7 +104,7 @@ BKPT with no debugger escalates to the crt's distinct
 - `BasicTicker<tps>` / `Ticker` (1000 Hz) - `init(clock)` (false when
   the reload does not fit 24 bits), `tick()` (the ISR body), `ticks`/
   `millis`/`secs`/`now`, `advance(n)` (the RTC resync's landing point -
-  `Stm32TimedSleepSite` is its user), `pause`/`resume` (which the same
+  `Stm32g0TimedSleepSite` is its user), `pause`/`resume` (which the same
   site calls around every deep sleep). A rate that does not divide 1000
   is refused at compile time.
 - `delay_us(clock, us)` / `delay_us(DelayRate, us)` +
@@ -126,7 +126,7 @@ BKPT with no debugger escalates to the crt's distinct
 ## How to use it
 
 ```cpp
-using P = brio::Stm32Platform;
+using P = brio::Stm32g0Platform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
 constexpr SysClock clock;
 

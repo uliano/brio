@@ -260,22 +260,22 @@ void ta_boot() {
 // =============================================================================
 void tb_critical() {
     bench.verdict("interrupts are enabled when a letter runs",
-                  Stm32Platform::interrupts_enabled());
+                  Stm32g0Platform<>::interrupts_enabled());
 
     bool inside = true, nested = true, after_inner = false, after_outer = false;
     {
-        Stm32Platform::CriticalSection cs;
-        inside = Stm32Platform::interrupts_enabled();
+        Stm32g0Platform<>::CriticalSection cs;
+        inside = Stm32g0Platform<>::interrupts_enabled();
         {
-            Stm32Platform::CriticalSection inner;
-            nested = Stm32Platform::interrupts_enabled();
+            Stm32g0Platform<>::CriticalSection inner;
+            nested = Stm32g0Platform<>::interrupts_enabled();
         }
         // THE NESTING TEST, and it is the whole reason the guard saves
         // PRIMASK instead of just clearing it: the inner scope's exit
         // must NOT unmask, because the outer scope is still holding.
-        after_inner = Stm32Platform::interrupts_enabled();
+        after_inner = Stm32g0Platform<>::interrupts_enabled();
     }
-    after_outer = Stm32Platform::interrupts_enabled();
+    after_outer = Stm32g0Platform<>::interrupts_enabled();
 
     bench.verdict("a critical section masks", !inside);
     bench.verdict("a nested one is still masked", !nested);
@@ -288,7 +288,7 @@ void tb_critical() {
     // pending, not lost - which is what makes idle() safe below.
     const uint32_t t0 = Ticker::ticks();
     {
-        Stm32Platform::CriticalSection cs;
+        Stm32g0Platform<>::CriticalSection cs;
         const uint32_t spin0 = cycles_now();
         while (cycles_now() - spin0 < SysClock::hz / 200u) {   // 5 ms masked
         }
@@ -311,7 +311,7 @@ void tb_critical() {
     const uint32_t c1 = cycles_now();
     uint8_t calls = 0;
     while (Ticker::ticks() == t1 && calls < 20u) {
-        Stm32Platform::idle();
+        Stm32g0Platform<>::idle();
         ++calls;
     }
     const uint32_t idle_us = cycles_to_us(cycles_now() - c1);
@@ -322,7 +322,7 @@ void tb_critical() {
                   "one tick period",
                   calls >= 1u && calls < 20u && idle_us <= 2000u);
     bench.verdict("and it comes back with interrupts enabled",
-                  Stm32Platform::interrupts_enabled());
+                  Stm32g0Platform<>::interrupts_enabled());
 }
 
 // =============================================================================
@@ -894,7 +894,7 @@ void bank(uint8_t leg) {
     console_drain();
     Reset::clear_flags();
     token.flags_before = 0;
-    panic<Stm32Platform, ResetReporter>(PanicCode::assert_failed, 0x5A);
+    panic<Stm32g0Platform<>, ResetReporter>(PanicCode::assert_failed, 0x5A);
 }
 
 /// Leg 5: a deliberate HardFault, caught by hard_fault_reset().
@@ -1138,14 +1138,14 @@ extern "C" void WWDG_IRQHandler() {
 /// The whole point of stm32g0/reset.hpp's fault body: a crash becomes a
 /// note the next boot can read, instead of a spin nobody sees.
 extern "C" void HardFault_Handler() {
-    brio::hard_fault_reset<brio::Stm32Platform>(token.context);
+    brio::hard_fault_reset<brio::Stm32g0Platform<>>(token.context);
 }
 
 int main() {
     // Sampled FIRST: the flags are not cleared by reading, but the panic
     // record is fetch-and-clear and must be taken exactly once.
     boot_flags = brio::Reset::flags();
-    boot_record = brio::take_panic_record<brio::Stm32Platform>();
+    boot_record = brio::take_panic_record<brio::Stm32g0Platform<>>();
 
     // NOTHING FEEDS ANYTHING HERE, and that is a MEASUREMENT and not an
     // oversight: RM0444 28.3.1 says the IWDG "cannot be stopped except

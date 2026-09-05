@@ -223,7 +223,7 @@ using Pulse3 = TimOnePulse<Tim<3>, 1>;
 // What a capture handler feeds: the interval meter's reading is what a
 // MeterLatch stores, and the latch is what MeterSampler consumes. The
 // contract validated here is util/meter_sampler.hpp's, unchanged.
-using CaptureLatch = MeterLatch<uint32_t, Stm32Platform, 0>;
+using CaptureLatch = MeterLatch<uint32_t, Stm32g0Platform<>, 0>;
 static_assert(MeterSource<CaptureLatch>);
 
 void family_stm32g0_tim_tasks() {

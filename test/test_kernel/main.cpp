@@ -6,6 +6,7 @@
 #include <doctest.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -14,6 +15,7 @@
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
 #include "kernel/kernel.hpp"
+#include "kernel/time_event.hpp"
 
 namespace {
 
@@ -82,6 +84,49 @@ struct Lender : brio::Fsm<Lender, Hit> {
     static void init() {}
 };
 
+// A platform with the OPTIONAL idle_until (kernel/platform.hpp): the
+// loop must hand it the nearest armed deadline instead of calling
+// idle(). HostPlatform's shape, plus a recording of what it was given.
+struct TicklessPlatform {
+    using CriticalSection = HostPlatform::CriticalSection;
+
+    static inline uint32_t ticks = 0;
+    static inline uint32_t idle_calls = 0;
+    static inline std::vector<std::optional<uint32_t>> asked;
+
+    static void idle() { ++idle_calls; }
+    static void idle_until(std::optional<uint32_t> deadline) { asked.push_back(deadline); }
+    static void break_here() {}
+    static uint32_t now() { return ticks; }
+    static constexpr uint32_t ticks_per_second = 1000;
+    static constexpr unsigned atomic_width = 4;
+    static brio::PanicRecord& panic_record() {
+        static brio::PanicRecord rec{};
+        return rec;
+    }
+    static void reset() {
+        ticks = 0;
+        idle_calls = 0;
+        asked.clear();
+    }
+};
+static_assert(brio::Platform<TicklessPlatform>);
+
+struct Sleeper : brio::Fsm<Sleeper, Hit> {
+    static inline brio::EventQueue<Event, 4, TicklessPlatform> queue;
+    static inline brio::TimeEvent<TicklessPlatform, Sleeper, Hit> alarm{Hit{1}};
+    static void init() { start(&only); }
+    static Status only(const Event& e) {
+        return brio::match(e,
+            [](brio::Entry) { return handled(); },
+            [](Hit h) { trace.push_back("sl:hit" + std::to_string(h.n)); return handled(); },
+            [](auto) { return unhandled(); }
+        );
+    }
+};
+
+using TK = brio::Kernel<TicklessPlatform, Sleeper>;
+
 void reset() {
     trace.clear();
     HostPlatform::reset();
@@ -143,6 +188,40 @@ TEST_CASE("idle_if_empty sleeps only when every queue is empty") {
     CHECK(K::step());
     K::idle_if_empty();
     CHECK(HostPlatform::idle_calls == 2);
+    CHECK(HostPlatform::CriticalSection::depth == 0);
+}
+
+TEST_CASE("idle_if_empty hands a tickless platform the nearest deadline") {
+    reset();
+    TicklessPlatform::reset();
+    brio::TimeEvents<TicklessPlatform>::clear_all();
+    while (Sleeper::queue.pop().has_value()) {}
+    TK::init_all();
+
+    TK::idle_if_empty();                            // nothing armed
+    REQUIRE(TicklessPlatform::asked.size() == 1);
+    CHECK_FALSE(TicklessPlatform::asked[0].has_value());
+    CHECK(TicklessPlatform::idle_calls == 0);       // never the plain hook
+
+    TicklessPlatform::ticks = 5;
+    Sleeper::alarm.arm(10);                         // deadline 15, absolute
+    TK::idle_if_empty();
+    REQUIRE(TicklessPlatform::asked.size() == 2);
+    CHECK(TicklessPlatform::asked[1] == std::optional<uint32_t>{15});
+
+    brio::post<Sleeper>(Hit{9});
+    TK::idle_if_empty();                            // something pending: no call
+    CHECK(TicklessPlatform::asked.size() == 2);
+    CHECK(TK::step());
+
+    TicklessPlatform::ticks = 15;                   // the deadline arrives
+    brio::TimeEvents<TicklessPlatform>::process();
+    CHECK(TK::step());
+    CHECK(trace == Trace{"sl:hit9", "sl:hit1"});
+    TK::idle_if_empty();                            // nothing armed again
+    REQUIRE(TicklessPlatform::asked.size() == 3);
+    CHECK_FALSE(TicklessPlatform::asked[2].has_value());
+    CHECK(TicklessPlatform::idle_calls == 0);
     CHECK(HostPlatform::CriticalSection::depth == 0);
 }
 

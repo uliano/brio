@@ -56,7 +56,12 @@
  * time stands still for the whole sleep (the SAM's standby, the
  * STM32's Stop); `advance()` is the landing point of the resync a timed
  * sleep site performs from an RTC, samc21/sleep.hpp's SamTimedSleepSite
- * being the built precedent.
+ * being the built precedent. The other answer exists on the STM32G0: a
+ * TICKLESS timebase on a low-power timer that counts through the Stop
+ * (stm32g0/lptim_ticker.hpp, taken by stm32g0/platform.hpp as its
+ * template argument), which gives up one LPTIM for the "costs the app
+ * nothing" above and keeps SysTick running as delay_us's cycle counter
+ * through SysTickCounter at the end of this file.
  */
 
 #pragma once
@@ -226,6 +231,48 @@ public:
     static void resume() {
         SysTick->CTRL = SysTick->CTRL | SysTick_CTRL_TICKINT_Msk;
     }
+};
+
+/**
+ * SysTickCounter: SysTick as a bare cycle counter, no interrupt, for a
+ * program whose KERNEL TIMEBASE is elsewhere (stm32g0/lptim_ticker.hpp
+ * counts kernel time on a low-power timer that runs through a Stop).
+ * armv6m/delay.hpp reads SysTick's VAL against LOAD and tests ENABLE
+ * only - it never needs the interrupt - so this is what keeps delay_us
+ * working when BasicTicker is not the program's ticker. Same reload
+ * rule and the same 24-bit refusal as BasicTicker::init(), so the
+ * one-millisecond period delay_us derives from LOAD is the same on
+ * both; the same clock_follows assertion, for the same reason (a
+ * reload is a function of the CPU rate). No handler, no vector: a
+ * program on this counter binds nothing to SysTick_Handler.
+ *
+ * SysTick keeps belonging to ONE writer per program: BasicTicker when
+ * it is the timebase, this counter when it is not - never both.
+ */
+struct SysTickCounter {
+    SysTickCounter() = delete;
+
+    template <typename C>
+    static bool start(C clock) {
+        static_assert(clock_follows<C, SysTickCounter>(),
+                      "brio SysTickCounter: SysTick is clocked from the CPU clock, so a "
+                      "dynamic clock must list the counter among the users it rebases");
+
+        const uint32_t reload = clock_hz(clock) / 1000u;
+        if (reload == 0u || reload > SysTick_LOAD_RELOAD_Msk + 1u) {
+            return false;
+        }
+        SysTick->CTRL = 0;                  // stop before reprogramming
+        SysTick->LOAD = reload - 1u;
+        SysTick->VAL = 0;                   // any write clears the counter
+        SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk | SysTick_CTRL_ENABLE_Msk;
+        return true;
+    }
+
+    /// The counter off: delay_us then refuses (its ENABLE test).
+    static void stop() { SysTick->CTRL = 0; }
+
+    static bool running() { return (SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) != 0u; }
 };
 
 } // namespace brio

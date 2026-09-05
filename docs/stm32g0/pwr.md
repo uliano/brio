@@ -15,8 +15,8 @@ one), DS13560 Rev 5 table 37 (the wake-up times), and errata ES0548
 Rev 3 - **2.2.2 and 2.2.4 are live on this silicon**, 2.2.7 and 2.3.1
 are revision A only, which is what makes Standby usable here at all.
 Drivers: `stm32g0/pwr.hpp` (`Pwr`, the whole chapter) and
-`stm32g0/sleep.hpp` (`Stm32SleepSite`, `Stm32TimedSleepSite`,
-`Stm32LptimTimedSleepSite`). Family fixture:
+`stm32g0/sleep.hpp` (`Stm32g0SleepSite`, `Stm32g0TimedSleepSite`,
+`Stm32g0LptimTimedSleepSite`). Family fixture:
 `test/family_stm32g0/sleep.cpp` + seven negatives under
 `tools/check_stm32g0.sh`. Bench suites: `test_stm32_sleep` for the first
 two sites, `test_stm32_lptim` letter h for the third. The waking half of
@@ -32,7 +32,7 @@ sleep"; `PWR_CR1.LPMS` says WHICH deep sleep. Neither is the other's and
 both must agree before a WFI does anything but Sleep. `Pwr` owns them
 both - SLEEPDEEP is written there and nowhere else in this stratum - so
 that "what is armed" is one question with one answer, `Pwr::mode()`, and
-so that `Stm32Platform::idle()` can stay what it always was.
+so that `Stm32g0Platform::idle()` can stay what it always was.
 
 **THE IDLE HOOK NEEDED NO CHANGE FOR ANY OF THIS**, and that is a fact
 about the family worth stating beside the other two targets: the AVR's
@@ -154,7 +154,7 @@ backup registers.
 
 The plain site keeps the v1 HONEST RESTRICTION: with kernel time frozen
 for the whole Stop, a program with armed time events must not take one.
-`Stm32TimedSleepSite` LIFTS it, with the RTC in both roles - the ALARM
+`Stm32g0TimedSleepSite` LIFTS it, with the RTC in both roles - the ALARM
 is the periodic wake-up timer placed on `TimeEvents<P>::ticks_to_next()`
 rounded UP, and the WITNESS is the calendar plus the sub-second counter,
 whose elapsed milliseconds minus what SysTick itself counted is the
@@ -189,13 +189,13 @@ alarm lands, and an RTC wake posts nothing to any queue.
 
 ## The third site: the same lift, without the RTC
 
-`Stm32TimedSleepSite` OWNS THE WHOLE RTC and cannot share it. Its
+`Stm32g0TimedSleepSite` OWNS THE WHOLE RTC and cannot share it. Its
 resolution IS the prescaler split, its witness is the calendar and its
 alarm is the wake-up timer - so an application that wants a real
 calendar at the chapter's own low-power split, or either alarm, or the
 wake-up timer for a periodic of its own, cannot use it at all.
 
-`Stm32LptimTimedSleepSite<P, C, cfg>` lifts the same restriction with a
+`Stm32g0LptimTimedSleepSite<P, C, cfg>` lifts the same restriction with a
 peripheral almost nothing else wants. 26.5 says an LPTIM on LSE or LSI
 is unaffected by Stop 0 and Stop 1 and that its interrupts bring the
 device out of them, so ONE BLOCK IS BOTH THE ALARM AND THE WITNESS: a
@@ -283,12 +283,12 @@ register removes them:
   / `has_dac_supply_monitor` as the compile-time form - `has_vddio2`, `apply_pulls`
   (APC) + `standby_pull(port, pin, up, down)`, and `enter(PwrMode)` -
   arm, sweep the flags the chapter demands, DSB, WFI.
-- `Stm32SleepSite<Clock>` - `arm` / `disarm` / `armed`, the
+- `Stm32g0SleepSite<Clock>` - `arm` / `disarm` / `armed`, the
   `util/power.hpp` concept, plus `resume_clock()` and
   `expected_source`.
 - `TimedSleepConfig` {rtcclk_hz, source, wipe_domain, fast_clock} with
   `timed_sleep_config_valid`.
-- `Stm32TimedSleepSite<P, Clock, cfg>` - the same three verbs, plus
+- `Stm32g0TimedSleepSite<P, Clock, cfg>` - the same three verbs, plus
   `init()`, `ready()`, `place_alarm(ticks)`, `resync()`, `isr()` (the
   four acts) and the readbacks a suite judges it by: `alarm_armed`,
   `last_advance`, `last_reload`, `last_alarm_was_fast`, `prescalers`,
@@ -300,11 +300,11 @@ register removes them:
 #include "stm32g0/sleep.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
-using Site = brio::Stm32TimedSleepSite<
-    brio::Stm32Platform, SysClock,
+using Site = brio::Stm32g0TimedSleepSite<
+    brio::Stm32g0Platform<>, SysClock,
     brio::TimedSleepConfig{.rtcclk_hz = 32800,
                            .source = brio::RtcClockSource::lse}>;
-using Manager = brio::PowerManager<brio::Stm32Platform, Site,
+using Manager = brio::PowerManager<brio::Stm32g0Platform<>, Site,
                                    brio::PowerConfig{}, Blinker>;
 
 extern "C" void RTC_TAMP_IRQHandler() { Site::isr(); }
@@ -314,7 +314,7 @@ int main() {
     brio::Ticker::init(clock);
     Site::init();                       // owns the RTC, whole
     brio::enable_interrupts();
-    brio::Kernel<brio::Stm32Platform, Blinker, Manager>::run();
+    brio::Kernel<brio::Stm32g0Platform<>, Blinker, Manager>::run();
 }
 
 // ...and somewhere in an AO:

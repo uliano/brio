@@ -50,7 +50,7 @@
 #include "util/proto/line_parser.hpp"
 #include "util/serial_port.hpp"
 
-using P = brio::Stm32Platform;
+using P = brio::Stm32g0Platform<>;
 
 // The clock: HSI16 through the PLL to 64 MHz, the ONE truth about SYSCLK
 // (stm32g0/clock.hpp); PCLK == SYSCLK (both prescalers at 1), and the

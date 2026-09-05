@@ -156,7 +156,7 @@ A sampled stream into a `BlockRelay`:
 
 ```cpp
 using Source = brio::DmaPingPongEngine<1, 4, uint32_t>;
-using Relay  = brio::BlockRelay<brio::Stm32Platform, Subs, Source>;
+using Relay  = brio::BlockRelay<brio::Stm32g0Platform<>, Subs, Source>;
 Source::arm(&TIM2->CNT, Tim3::dma_update_request());
 Source::start(buffer_a, buffer_b, 32);
 // in the channel's handler, after Source::complete():

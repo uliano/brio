@@ -10,7 +10,7 @@
  *
  * This is the other half of the panic breadcrumb. The kernel writes a
  * PanicRecord into reset-surviving storage (kernel/panic.hpp,
- * Stm32Platform::panic_record) and hands over to a Reporter whose job
+ * Stm32g0Platform::panic_record) and hands over to a Reporter whose job
  * may be "reset now and report at the next boot"; panic.hpp's contract
  * then says to cross-check the target's reset-cause register for the
  * full story. `Reset::take_flags()` IS that cross-check,
@@ -749,7 +749,7 @@ struct ResetReporter {
  * An app binds it, the driver never names a vector:
  *
  *     extern "C" void HardFault_Handler() {
- *         brio::hard_fault_reset<brio::Stm32Platform>();
+ *         brio::hard_fault_reset<brio::Stm32g0Platform>();
  *     }
  *
  * IT DOES NOT GO THROUGH panic(), and the reason is specific to this

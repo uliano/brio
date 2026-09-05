@@ -58,16 +58,39 @@ static_assert(pwr_wakeup_pin_count() >= 4 && pwr_wakeup_pin_count() <= 6);
 // ---- the ladder -------------------------------------------------------------
 
 using SysClock = Clock<ClockSource::pll, 64'000'000>;
-using Site = Stm32SleepSite<SysClock>;
-using TimedSite = Stm32TimedSleepSite<Stm32Platform, SysClock>;
+using Site = Stm32g0SleepSite<SysClock>;                       // TB = Ticker by default
+using TimedSite = Stm32g0TimedSleepSite<Stm32g0Platform<>, SysClock>;
 
 static_assert(SleepSite<Site>);
 static_assert(SleepSite<TimedSite>);
+static_assert(std::same_as<Site, Stm32g0SleepSite<SysClock, Ticker>>);
+static_assert(Site::pauses_tick, "the SysTick ticker has an interrupt to pause");
+
+// The plain site on a TICKLESS timebase (a stand-in with the concept's
+// three members; stm32g0/lptim_ticker.hpp's LptimTicker is the real
+// one): the same three verbs, and nothing to pause. The timed sites
+// refuse such a platform - test/family_stm32g0/neg/*_on_a_tickless_platform.cpp.
+struct FakeTickless {
+    static uint32_t ticks() { return 0; }
+    static constexpr uint32_t ticks_per_second = 1024;
+    static bool arm_wake(uint32_t, uint32_t) { return true; }
+};
+static_assert(Tickless<FakeTickless>);
+using TicklessSite = Stm32g0SleepSite<SysClock, FakeTickless>;
+static_assert(SleepSite<TicklessSite>);
+static_assert(!TicklessSite::pauses_tick, "nothing to pause on a tickless timebase");
+
+void tickless_site_verbs() {
+    (void)TicklessSite::arm(SleepDepth::deep);
+    (void)TicklessSite::armed();
+    TicklessSite::disarm();
+    (void)TicklessSite::resume_clock();
+}
 
 // The Clock task decides which SWS value means "the Stop did not
 // happen": a PLL program has one to detect, an HSISYS program has none.
 static_assert(Site::expected_source == SysclkSource::pllrclk);
-static_assert(Stm32SleepSite<Clock<ClockSource::internal, 16'000'000>>::
+static_assert(Stm32g0SleepSite<Clock<ClockSource::internal, 16'000'000>>::
                   expected_source == SysclkSource::hsisys);
 
 // The timed site's own arithmetic, at the default over-estimate.
@@ -192,7 +215,7 @@ static_assert(!lptim_timed_sleep_config_valid(
 static_assert(!lptim_timed_sleep_config_valid(
                   LptimTimedSleepConfig{.instance = 3}, 1000u));
 
-using LptimSite = Stm32LptimTimedSleepSite<Stm32Platform, SysClock>;
+using LptimSite = Stm32g0LptimTimedSleepSite<Stm32g0Platform<>, SysClock>;
 static_assert(SleepSite<LptimSite>,
               "the third site over util/power.hpp's unchanged concept");
 static_assert(LptimSite::counter_hz == 1024u);
@@ -204,7 +227,7 @@ static_assert(LptimSite::span_ticks > 60'000u,
 // The same site on the OTHER instance and the OTHER oscillator, since
 // both are legal and the vector differs per header.
 using LptimSite2 =
-    Stm32LptimTimedSleepSite<Stm32Platform, SysClock,
+    Stm32g0LptimTimedSleepSite<Stm32g0Platform<>, SysClock,
                              LptimTimedSleepConfig{.instance = 2,
                                                    .source = LptimClock::lsi,
                                                    .rate_hz = 33'000,
@@ -238,7 +261,7 @@ void lptim_site_verbs() {
 
 // A manager over the site, which is what proves the concept fits.
 struct Voter : Fsm<Voter, PrepareSleep, SleepVote, WakeReport> {
-    static inline EventQueue<Event, 4, Stm32Platform> queue;
+    static inline EventQueue<Event, 4, Stm32g0Platform<>> queue;
     static void init() { start(&only); }
     static Status only(const Event& e) {
         return match(e,
@@ -249,8 +272,8 @@ struct Voter : Fsm<Voter, PrepareSleep, SleepVote, WakeReport> {
             [](WakeReport) { return handled(); });
     }
 };
-using Manager = PowerManager<Stm32Platform, TimedSite, PowerConfig{}, Voter>;
-using K = Kernel<Stm32Platform, Voter, Manager>;
+using Manager = PowerManager<Stm32g0Platform<>, TimedSite, PowerConfig{}, Voter>;
+using K = Kernel<Stm32g0Platform<>, Voter, Manager>;
 
 void kernel_over_the_site() {
     K::init_all();
@@ -258,8 +281,8 @@ void kernel_over_the_site() {
 }
 
 #if defined(LPTIM1_BASE)
-using LptimManager = PowerManager<Stm32Platform, LptimSite, PowerConfig{}, Voter>;
-using LptimK = Kernel<Stm32Platform, Voter, LptimManager>;
+using LptimManager = PowerManager<Stm32g0Platform<>, LptimSite, PowerConfig{}, Voter>;
+using LptimK = Kernel<Stm32g0Platform<>, Voter, LptimManager>;
 
 void kernel_over_the_lptim_site() {
     LptimK::init_all();

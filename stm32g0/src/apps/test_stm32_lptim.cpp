@@ -95,7 +95,7 @@ namespace {
 
 using namespace brio;
 
-using P = Stm32Platform;
+using P = Stm32g0Platform<>;
 
 constexpr UartPins console_pins{
     .tx = {'A', 2, PinFunction::af1},
@@ -387,8 +387,8 @@ constexpr LptimTimedSleepConfig site_cfg{.instance = 1,
                                          .source = LptimClock::lse,
                                          .rate_hz = 32'768,
                                          .prescaler = LptimPrescaler::div32};
-using Site = Stm32LptimTimedSleepSite<P, SysClock, site_cfg>;
-using PlainSite = Stm32SleepSite<SysClock>;
+using Site = Stm32g0LptimTimedSleepSite<P, SysClock, site_cfg>;
+using PlainSite = Stm32g0SleepSite<SysClock>;
 using Manager = PowerManager<P, Site, PowerConfig{}, Probe>;
 using K = Kernel<P, Probe, Manager>;
 

@@ -293,7 +293,7 @@ gets its dated home in `docs/design/` when taken.
   the write verbs, six tasks incl. LptimPwm = util's FOURTH PwmChannel;
   crc.hpp over ch. 14 with the CCITT preset bit-exact against
   util/crc.hpp and CRC-32 IEEE (53x the bitwise loop, DMA-fed at
-  36.5 MB/s); a THIRD sleep site Stm32LptimTimedSleepSite - the LPTIM
+  36.5 MB/s); a THIRD sleep site Stm32g0LptimTimedSleepSite - the LPTIM
   on LSE as alarm AND witness, the RTC left FREE (a 300 ms deadline met
   with the calendar at the chapter's own split and ALARM A armed for the
   application), util/power.hpp and the two older sites untouched - and
@@ -486,7 +486,7 @@ gets its dated home in `docs/design/` when taken.
   select macro because IRQn values are enumerators the preprocessor
   cannot probe), nvic.hpp + ticker.hpp (the samc21 files' twins line for
   line - the armv6m/ factoring candidates, deliberately NOT factored
-  yet), platform.hpp (`Stm32Platform`: WFI = Sleep mode,
+  yet), platform.hpp (`Stm32g0Platform`: WFI = Sleep mode,
   SLEEPDEEP never written), flash.hpp (FlashWaitStates with the
   read-back rule and Range-1 table 13, FlashAccel with PRFTEN left at
   reset because of erratum 2.2.10), clock.hpp (THE THIRD CLOCK MODEL:
@@ -3641,6 +3641,8 @@ brio/                    the framework, four strata:
     platform.hpp           Platform concept (CriticalSection, idle,
                            break_here, now, ticks_per_second, atomic_width,
                            panic_record) + PanicRecord (hosted by the platform)
+                           + the OPTIONAL idle_until(deadline) a platform on a
+                           timebase that counts through sleep may offer
     active_object.hpp      ActiveObject concept: what Kernel requires of an
                            AO (Event, queue, init, dispatch) + the informal
                            half of the contract
@@ -3657,10 +3659,13 @@ brio/                    the framework, four strata:
     time_event.hpp         TimeEvents<P> armed list + TimeEvent<P, Ao, Ev>
                            (drift-free periodics, wrap-safe, RAII disarm);
                            ticks_to_next() = how long until the next
-                           deadline, the power model's one kernel question
+                           deadline, the power model's one kernel question;
+                           next_deadline() = its absolute tick, the loop's
+                           question for a tickless platform
     kernel.hpp             Pack<Aos...> (index, lends_ok) + Kernel<P, Aos...>:
                            init_all/step/idle_if_empty/run, static_asserts
-                           borrowers before lenders
+                           borrowers before lenders; idle_if_empty takes the
+                           optional idle_until branch by requires
     panic.hpp              panic<P, Reporter>(), PanicCode, HaltReporter,
                            take_panic_record<P>()
   util/                  pure services - may include kernel/, never a target
@@ -4086,10 +4091,12 @@ brio/                    the framework, four strata:
                            a device header (the family's nvic.hpp does both)
     ticker.hpp             BasicTicker<tps> over SysTick with advance/pause/
                            resume; each family's ticker.hpp adds its alias
-                           and its own guards
+                           and its own guards; SysTickCounter = SysTick as a
+                           bare cycle counter (no interrupt) for delay_us
+                           where the kernel timebase is elsewhere
     delay.hpp              delay_us / delay_rate / DelayRate: the microsecond
                            busy-wait on SysTick's VAL - at least, never early,
-                           capped below one kernel tick, no division at wait
+                           capped below one millisecond, no division at wait
                            time; each family's delay.hpp is the device include
                            plus this file plus its measured facts
   stm32g0/               everything that knows stm32g0xx.h (STM32G0, Cortex-M0+)
@@ -4102,8 +4109,10 @@ brio/                    the framework, four strata:
                            can probe); no device-select macro anywhere
     nvic.hpp               "stm32g0xx.h" + armv6m/nvic.hpp
     ticker.hpp             armv6m/ticker.hpp + the Ticker alias (1000 Hz)
-    platform.hpp           Stm32Platform (WFI = Sleep mode, SLEEPDEEP never
-                           written; BKPT; .noinit breadcrumb; atomic_width 4)
+    platform.hpp           Stm32g0Platform<TB = Ticker> (WFI = Sleep mode,
+                           SLEEPDEEP never written; BKPT; .noinit breadcrumb;
+                           atomic_width 4) + the Tickless<TB> concept and the
+                           idle_until() the kernel calls on such a timebase
     flash.hpp              FlashWaitStates (table 13, the read-back rule),
                            FlashAccel, flash_size_kb - the FLASH campaign's
                            future home

@@ -13,6 +13,14 @@
  * sleep instruction, so no wakeup can slip between the check and the
  * sleep (the lost-wakeup race is closed by the silicon).
  *
+ * A platform whose timebase keeps counting while the core sleeps may
+ * offer the OPTIONAL idle_until(deadline) instead (kernel/platform.hpp):
+ * the loop then hands it the absolute tick of the nearest armed time
+ * event - TimeEvents::next_deadline(), empty when nothing is armed - so
+ * the platform can place its wake there and sleep through the whole
+ * wait in one breath, no periodic tick needed. Detected by requires, so
+ * a platform without it is compiled exactly as before.
+ *
  * Starvation of low-priority AOs under fixed priority is by definition
  * a sizing/design error; the per-queue overflow counters make it
  * visible. All AOs run on the single main stack, one at a time.
@@ -94,10 +102,21 @@ public:
     }
 
     /// Sleep if - re-checked with interrupts masked - nothing is pending.
+    /// A platform with idle_until() is told how far it may sleep: the
+    /// nearest armed deadline, read here under the same mask (the armed
+    /// list is main-loop state, and a masked read of now() is the
+    /// timebase's contract). Absent = today's idle(): the other branch
+    /// is not compiled at all.
     static void idle_if_empty() {
         typename P::CriticalSection cs;
         if ((Aos::queue.empty() && ...)) {
-            P::idle();   // re-enables interrupts, then sleeps: race-free
+            if constexpr (requires {
+                              { P::idle_until(std::optional<uint32_t>{}) } -> std::same_as<void>;
+                          }) {
+                P::idle_until(TimeEvents<P>::next_deadline());
+            } else {
+                P::idle();   // re-enables interrupts, then sleeps: race-free
+            }
         }
     }
 

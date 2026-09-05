@@ -377,7 +377,16 @@ The loop (`run()`), one turn:
    sleep" where the core guarantees enable takes effect only after
    the following instruction; a core with a wait-for-interrupt that
    is itself the wake condition does it differently); the kernel only
-   relies on the contract.
+   relies on the contract. A platform whose timebase keeps counting
+   while the core sleeps may offer the OPTIONAL `idle_until(deadline)`
+   instead (section 11): under the same mask the loop hands it the
+   absolute tick of the nearest armed time event -
+   `TimeEvents<P>::next_deadline()`, empty when nothing is armed - and
+   the platform places its wake there and sleeps the whole wait in one
+   breath, with no periodic tick at all. The hook is detected with a
+   `requires` expression, so a platform without it is compiled exactly
+   as before, and the loop's structure does not change: it still fires
+   the events itself on the next turn.
 
 `init_all()` runs every AO's `init()` in pack order before the first
 turn. Host tests drive `init_all()`/`step()` directly - `run()` never
@@ -422,6 +431,14 @@ since a posted event waits for the current RTC step anyway).
   still fires the events. Its reason to exist is the power model
   ([power.md](power.md)): a stop that costs more to leave than the wait
   it saves is a bad trade, and only the armed list knows the wait.
+- `TimeEvents<P>::next_deadline()` is its sibling for the other
+  consumer: the ABSOLUTE tick of the nearest armed deadline (an overdue
+  one is still the nearest), empty when nothing is armed - what the loop
+  hands a platform that can sleep TO an instant rather than FOR a span.
+  The distance would drift by up to a tick between the loop's read of
+  `now()` and the platform's own; the deadline does not. Same
+  wrap-safe arithmetic, same "question, not decision", main-loop
+  context only.
 
 **The tick is opaque, the rate is a platform constant.** Any given
 timebase peripheral has its own natural rates (a 32 kHz-derived
@@ -476,13 +493,28 @@ target's include: the app names its platform once):
 - `panic_record()`: a reference to a `PanicRecord` in storage that
   survives reset without being zeroed by startup code.
 
+One member is OPTIONAL and outside the concept, for a platform whose
+timebase keeps counting while the core sleeps (a low-power timer
+rather than a tick interrupt): `idle_until(std::optional<uint32_t>
+deadline)`, called instead of `idle()` with interrupts masked and the
+absolute tick of the nearest armed time event (empty = nothing armed).
+Its contract: return with interrupts enabled whether or not it slept;
+it may return without sleeping (a deadline already due, a wake it
+could not place this turn); and it must never sleep PAST a deadline it
+was given - waking at or after it, late is legal and early is not, the
+time contract's own "at least". The loop detects it by `requires` and
+otherwise compiles `idle()` alone, so the two shapes of platform cost
+each other nothing. The STM32G0 is the first target with such a
+timebase ([../stm32g0/platform.md](../stm32g0/platform.md)).
+
 `PanicRecord` is defined in `platform.hpp`, not in `panic.hpp`, on
 purpose: it is the one kernel data type a Platform must host, so the
 concept has to name it and `panic.hpp` (which owns the semantics)
 sits above the concept in the include graph.
 
-Every target stratum ships its implementation (today
-`avrdx/platform.hpp`, see [../avrdx/README.md](../avrdx/README.md));
+Every target stratum ships its implementation as `<stratum>/platform.hpp`
+(`AvrPlatform`, `SamPlatform`, `Stm32g0Platform<TB>` - the last one
+templated on its timebase, see each target's `platform.md`);
 `HostPlatform` (`host/platform.hpp`) gives a depth-counting
 critical section, a test-controlled virtual clock and recording
 idle/break - time becomes deterministic arithmetic in tests
@@ -503,13 +535,13 @@ compile error instead of a template failure.
 | Entity | Header | Role |
 |--------|--------|------|
 | `ActiveObject` (concept) | `active_object.hpp` | what Kernel requires of an AO |
-| `Platform` (concept), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine |
+| `Platform` (concept), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (+ the optional `idle_until`) |
 | `EventQueue<E, depth, P>` | `event_queue.hpp` | per-AO MPSC queue, overflow counter |
 | `Overloaded`, `match`, `Entry`, `Exit`, `Fsm<Derived, Alts...>` | `fsm.hpp` | variant dispatch helpers, state machine base, Event, Status |
 | `post`, `Subscribers`, `publish`, `ReplyTo`, `reply_to` | `post.hpp` | delivery primitives |
 | `Borrowed<T, Lease>`, `Lease` | `borrowed.hpp` | pointer payloads with their lease in the type |
 | `Pack<Aos...>`, `Kernel<P, Aos...>` | `kernel.hpp` | pack ordering questions (index, lends_ok); the loop: init_all/step/idle_if_empty/run |
-| `TimeEvents<P>` (incl. `ticks_to_next`), `TimeEvent<P, Ao, Ev>` | `time_event.hpp` | armed list + owned time events |
+| `TimeEvents<P>` (incl. `ticks_to_next`, `next_deadline`), `TimeEvent<P, Ao, Ev>` | `time_event.hpp` | armed list + owned time events |
 | `ticks_from_ms`, `ticks_from_secs` | `time.hpp` | constexpr tick conversions |
 | `PanicCode`, `panic_magic`, `HaltReporter`, `panic`, `take_panic_record` | `panic.hpp` | unrecoverable failures |
 

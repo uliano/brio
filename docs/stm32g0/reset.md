@@ -144,7 +144,7 @@ so it holds whatever touched it last, across every warm boot.
 #include "stm32g0/reset.hpp"
 
 extern "C" void HardFault_Handler() {
-    brio::hard_fault_reset<brio::Stm32Platform>();
+    brio::hard_fault_reset<brio::Stm32g0Platform<>>();
 }
 extern "C" void WWDG_IRQHandler() { (void)brio::Wwdg::isr(); }
 

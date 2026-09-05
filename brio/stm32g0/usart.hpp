@@ -1521,8 +1521,8 @@ class UartTask {
     using TxPin = Pin<pins.tx.port, pins.tx.pin>;
     using RxPin = Pin<pins.rx.port, pins.rx.pin>;
 
-    static inline Ring<uint8_t, rx_size, Stm32Platform> m_rx{};
-    static inline Ring<uint8_t, tx_size, Stm32Platform> m_tx{};
+    static inline Ring<uint8_t, rx_size, Stm32g0Platform<>> m_rx{};
+    static inline Ring<uint8_t, tx_size, Stm32g0Platform<>> m_tx{};
 
     static inline volatile uint8_t m_rx_overruns = 0;   // RX ring full, byte lost
     static inline volatile uint8_t m_frame_errors = 0;  // FE: byte dropped
@@ -2276,7 +2276,7 @@ private:
      */
     static void pump_tx() {
         if constexpr (has_tx_engine) {
-            typename Stm32Platform::CriticalSection cs;
+            typename Stm32g0Platform<>::CriticalSection cs;
             if (TxEngine::busy()) {
                 return;
             }

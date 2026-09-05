@@ -568,7 +568,7 @@ void tc_arbitration() {
         uint16_t left_a = 0;
         uint16_t left_b = 0;
         {
-            typename Stm32Platform::CriticalSection cs;
+            typename Stm32g0Platform<>::CriticalSection cs;
             (void)ChA::enable(true);
             (void)ChB::enable(true);
         }
@@ -652,7 +652,7 @@ void tc_arbitration() {
         uint16_t left_b = 0;
         uint16_t left_c = 0;
         {
-            typename Stm32Platform::CriticalSection cs;
+            typename Stm32g0Platform<>::CriticalSection cs;
             (void)ChB::enable(true);
             (void)ChC::enable(true);
             T3::enable(true);
@@ -1400,7 +1400,7 @@ void ti_timer_round_trip() {
     uint32_t seen = 0;
     const bool running = Loop::running();
     {
-        typename Stm32Platform::CriticalSection cs;
+        typename Stm32g0Platform<>::CriticalSection cs;
         laps = Loop::laps();
         seen = loop_laps_seen;
     }
@@ -1532,7 +1532,7 @@ class Consumer : public Fsm<Consumer, BlockReady<uint32_t>, BlocksWanted> {
 public:
     using Event = typename Base::Event;
     using Status = typename Base::Status;
-    static inline EventQueue<Event, 8, Stm32Platform> queue;
+    static inline EventQueue<Event, 8, Stm32g0Platform<>> queue;
 
     static void init() {
         blocks_ = 0;
@@ -1593,9 +1593,9 @@ private:
     static inline bool have_tail_ = false;
 };
 
-class Relay : public BlockRelay<Stm32Platform, Subs, Pong> {};
+class Relay : public BlockRelay<Stm32g0Platform<>, Subs, Pong> {};
 
-using DmaKernel = Kernel<Stm32Platform, Consumer, Relay>;
+using DmaKernel = Kernel<Stm32g0Platform<>, Consumer, Relay>;
 
 void tj_relay() {
     constexpr uint32_t hz = 2'000;

@@ -721,7 +721,7 @@ void tp_panic() {
     // before the reporter runs. So the record that crosses the reset may
     // have been written by JournalPanic OR by the fault body, and the
     // next boot reports which.
-    panic<Stm32Platform, Panic>(PanicCode::assert_failed, 0x5E);
+    panic<Stm32g0Platform<>, Panic>(PanicCode::assert_failed, 0x5E);
 }
 
 void tp_resume() {
@@ -741,7 +741,7 @@ void tp_resume() {
           pending ? "present" : "ABSENT", " (written by ",
           token.via_fault ? "the HardFault BODY" : "the Reporter",
           "); SRAM breadcrumb: ",
-          Stm32Platform::panic_record().magic == panic_magic ? "present"
+          Stm32g0Platform<>::panic_record().magic == panic_magic ? "present"
                                                              : "taken/absent",
           crlf);
 
@@ -845,14 +845,14 @@ extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 /// It refuses to write a second record over a standing one, the way
 /// hard_fault_reset() refuses to overwrite the SRAM breadcrumb.
 extern "C" void HardFault_Handler() {
-    const brio::PanicRecord& r = brio::Stm32Platform::panic_record();
+    const brio::PanicRecord& r = brio::Stm32g0Platform<>::panic_record();
     if (r.magic == brio::panic_magic && !Panic::pending()) {
         Panic::report(static_cast<brio::PanicCode>(r.code), r.context);
         if (token.magic == token_magic) {
             token.via_fault = 1;
         }
     }
-    brio::hard_fault_reset<brio::Stm32Platform>(0x5E);
+    brio::hard_fault_reset<brio::Stm32g0Platform<>>(0x5E);
 }
 
 int main() {

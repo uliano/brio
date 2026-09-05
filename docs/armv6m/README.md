@@ -5,10 +5,14 @@ nor a target: what ARM designed into every Cortex-M0/M0+ and every
 vendor ships unchanged - the NVIC and PRIMASK (`armv6m/nvic.hpp`:
 `InterruptGuard`, the global enable/disable/readback verbs, `Nvic`,
 `irq_priority_levels`), the SysTick timebase (`armv6m/ticker.hpp`:
-`BasicTicker`) and the microsecond busy-wait on SysTick's own counter
-(`armv6m/delay.hpp`: `delay_us`, `delay_rate`, `DelayRate` - "at
-least", never early, capped below one kernel tick, no division at wait
-time). It exists because brio's naming rule says a core stratum is
+`BasicTicker`, and `SysTickCounter` - SysTick as a bare cycle counter
+with no interrupt, for a program whose kernel timebase is elsewhere,
+such as the STM32G0's tickless LPTIM one) and the microsecond busy-wait
+on SysTick's own counter (`armv6m/delay.hpp`: `delay_us`,
+`delay_rate`, `DelayRate` - "at least", never early, capped below one
+SysTick period of one millisecond, no division at wait time; it needs
+the counter running, never the interrupt, so it serves both writers
+alike). It exists because brio's naming rule says a core stratum is
 factored at the SECOND ARM family: `samc21/` and `stm32g0/` carried
 these files as twins line for line - the first two until the STM32G0's
 bring-up, the third until the STM32G0's fillers were done - and every
@@ -22,9 +26,10 @@ image byte-identical before and after.
   any vendor header. Each family's `delay.hpp` keeps what was MEASURED
   on its silicon (the division's cost, the counter's resolution, which
   sleep stops it) beside the include.
-- Not here, by design: the Platform (`SamPlatform`, `Stm32Platform`
+- Not here, by design: the Platform (`SamPlatform`, `Stm32g0Platform`
   stay per family - their idle hooks differ where the families' sleep
-  controllers differ), the clock, the pins, every peripheral, the crt
+  controllers differ, and the STM32G0's takes its timebase as a
+  template parameter), the clock, the pins, every peripheral, the crt
   (vector NAMES are the vendor's), the errata (SAM erratum 1.8.13's
   `SysTickInterruptGuard` stays in `samc21/ticker.hpp`), and the
   project-wide `Ticker` alias (each family's ticker.hpp states its

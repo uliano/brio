@@ -60,7 +60,7 @@
  * sleep lasts - the samc21 standby situation, and the same two answers
  * apply when the PWR pass arrives (a restriction site, or a timed site
  * resynchronizing from the RTC through `advance()` below). Sleep mode
- * proper (WFI with SLEEPDEEP clear, what Stm32Platform::idle() does)
+ * proper (WFI with SLEEPDEEP clear, what Stm32g0Platform::idle() does)
  * keeps HCLK and SysTick running.
  *
  * ## Usage

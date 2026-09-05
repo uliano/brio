@@ -1782,12 +1782,12 @@ void ti_comparators() {
 
 struct Collector;
 using Subs = Subscribers<Collector>;
-using Sampler = AnalogSampler<Adc, Stm32Platform, Subs, AdcInput::vrefint,
+using Sampler = AnalogSampler<Adc, Stm32g0Platform<>, Subs, AdcInput::vrefint,
                               AdcInput::temperature, In4{}>;
 
 struct Collector {
     using Event = std::variant<AnalogSample>;
-    static inline EventQueue<Event, 8, Stm32Platform> queue;
+    static inline EventQueue<Event, 8, Stm32g0Platform<>> queue;
 
     static inline uint16_t samples = 0;
     static inline uint16_t per_index[3] = {0, 0, 0};
@@ -1812,7 +1812,7 @@ struct Collector {
     }
 };
 
-using AnalogKernel = Kernel<Stm32Platform, Collector, Sampler>;
+using AnalogKernel = Kernel<Stm32g0Platform<>, Collector, Sampler>;
 
 void tj_sampler_ao() {
     if (!analog_up(cfg_internal)) {
@@ -1841,7 +1841,7 @@ void tj_sampler_ao() {
     // both halves by hand (the samc21 suite's own shape).
     const uint32_t deadline = Ticker::ticks() + 400u;
     while (Collector::samples < 60u && Ticker::ticks() < deadline) {
-        TimeEvents<Stm32Platform>::process();
+        TimeEvents<Stm32g0Platform<>>::process();
         while (AnalogKernel::step()) {
         }
     }

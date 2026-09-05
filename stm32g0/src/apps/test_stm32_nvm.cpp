@@ -750,7 +750,7 @@ void tg_fast() {
     uint32_t v0 = 0;
     uint32_t v1 = 0;
     {
-        Stm32Platform::CriticalSection cs;
+        Stm32g0Platform<>::CriticalSection cs;
         v0 = SysTick->VAL;
         fast_err = Flash::fast_program_row(scratch_b, out_span(Flash::row_size));
         v1 = SysTick->VAL;
@@ -1212,7 +1212,7 @@ extern "C" void FLASH_IRQHandler() {
 }
 
 extern "C" void HardFault_Handler() {
-    brio::hard_fault_reset<brio::Stm32Platform>(0x3F);
+    brio::hard_fault_reset<brio::Stm32g0Platform<>>(0x3F);
 }
 
 int main() {

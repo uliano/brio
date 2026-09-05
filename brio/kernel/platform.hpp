@@ -37,6 +37,21 @@
  *    SURVIVES a reset without being zeroed by startup (.noinit on AVR),
  *    so a panic breadcrumb written just before a watchdog reset can be
  *    reported at the next boot (see kernel/panic.hpp).
+ *
+ * Optional member, NOT part of the concept - a platform whose timebase
+ * keeps counting while the core sleeps (a low-power timer, not a tick
+ * interrupt) may provide it, and the kernel loop detects it by requires
+ * (kernel.hpp's idle_if_empty; a platform without it gets idle() exactly
+ * as before):
+ *  - idle_until(std::optional<uint32_t> deadline): called INSTEAD of
+ *    idle(), with interrupts MASKED, with the ABSOLUTE tick of the
+ *    nearest armed time event (empty = nothing armed). It must return
+ *    with interrupts enabled whether or not it slept; it may return
+ *    without sleeping (a deadline already due, a wake it could not
+ *    place); and it must never sleep PAST a deadline it was given -
+ *    waking at or after it is the contract, late is legal, early is not
+ *    (kernel/time.hpp's "at least"). How the wake is placed is the
+ *    platform's business; the kernel only relies on the contract.
  */
 
 #pragma once

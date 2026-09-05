@@ -209,7 +209,7 @@ signal and no pad at all:
 
 ```cpp
 using Lsi = brio::TimIntervalMeter<brio::Tim<16>, 0>;
-using Latch = brio::MeterLatch<uint32_t, brio::Stm32Platform, 0>;
+using Latch = brio::MeterLatch<uint32_t, brio::Stm32g0Platform<>, 0>;
 
 brio::Tim<16>::init();
 brio::Tim<16>::input_select(0, 1);        // TI1SEL = LSI (RM0444 25.6.18)

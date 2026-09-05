@@ -90,7 +90,7 @@ namespace {
 
 using namespace brio;
 
-using P = Stm32Platform;
+using P = Stm32g0Platform<>;
 
 constexpr UartPins console_pins{
     .tx = {'A', 2, PinFunction::af1},
@@ -205,14 +205,14 @@ bool timed_round = false;
 /// same vector and must not post into a queue nobody pumps.
 bool kernel_live = false;
 
-using Site = Stm32SleepSite<SysClock>;
+using Site = Stm32g0SleepSite<SysClock>;
 
 /// The timed site runs on the same crystal, and states a rate NOT BELOW
 /// it: 32800 against 32768, an over-estimate of about a per mille, which
 /// is the direction the contract wants (late, never early).
 constexpr TimedSleepConfig timed_cfg{.rtcclk_hz = 32800,
                                      .source = RtcClockSource::lse};
-using TimedSite = Stm32TimedSleepSite<P, SysClock, timed_cfg>;
+using TimedSite = Stm32g0TimedSleepSite<P, SysClock, timed_cfg>;
 
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
 

@@ -2783,7 +2783,7 @@ void tk_power() {
             __DSB();
             __WFI();
             const uint32_t slept = us_of(since(t0));
-            (void)Stm32SleepSite<SysClock>::resume_clock();
+            (void)Stm32g0SleepSite<SysClock>::resume_clock();
             Ticker::resume();
             Nvic::disable(Rtc::irq());
             (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 0, false);

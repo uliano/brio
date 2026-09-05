@@ -132,6 +132,32 @@ public:
         return best;
     }
 
+    /**
+     * The NEAREST armed deadline itself - the absolute tick, not the
+     * distance - or empty when nothing is armed. An overdue deadline is
+     * still the nearest (its signed distance is the smallest).
+     *
+     * ticks_to_next()'s sibling, for the other consumer: the loop hands
+     * this to a platform that can sleep TO an instant rather than FOR a
+     * span (kernel.hpp's idle_if_empty, kernel/platform.hpp's optional
+     * idle_until). The distance would drift by up to one tick between
+     * this read of now() and the platform's own; the deadline does not.
+     * A question, not a decision; main-loop context only.
+     */
+    static std::optional<uint32_t> next_deadline() {
+        const uint32_t now = P::now();
+        std::optional<uint32_t> best;
+        int32_t best_left = 0;
+        for (const Base* te = head_; te != nullptr; te = te->next_) {
+            const int32_t left = static_cast<int32_t>(te->deadline_ - now);
+            if (!best.has_value() || left < best_left) {
+                best = te->deadline_;
+                best_left = left;
+            }
+        }
+        return best;
+    }
+
     /// Tests / diagnostics: drop every armed event.
     static void clear_all() {
         while (head_ != nullptr) {

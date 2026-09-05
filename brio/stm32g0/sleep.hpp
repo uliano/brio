@@ -1,11 +1,13 @@
 /*
  * sleep.hpp
  *
- * util/power.hpp's depth ladder on STM32G0 silicon: `Stm32SleepSite`,
- * which arms one of this family's modes, and `Stm32TimedSleepSite`,
+ * util/power.hpp's depth ladder on STM32G0 silicon: `Stm32g0SleepSite`,
+ * which arms one of this family's modes, and `Stm32g0TimedSleepSite`,
  * which additionally keeps KERNEL TIME HONEST across a Stop by putting
  * the RTC's wake-up timer where the deadline is and handing the frozen
- * span back to the ticker.
+ * span back to the SysTick ticker (a third site does the same with an
+ * LPTIM; and a program on the TICKLESS timebase needs neither - see
+ * "Under a tickless platform" below).
  *
  * The MECHANISM - which modes exist, what they gate, what wakes them -
  * is stm32g0/pwr.hpp's. The POLICY - when a program may stop - is
@@ -74,7 +76,10 @@
  *    going to stand still for the whole sleep either way), it closes
  *    4.3.3's pending-tick window by construction, and it makes a Stop
  *    last whatever a probe left in DBGMCU_CR. `Pwr::debug_in_stop()`
- *    reads that bit; tools/bench.py clears it after every flash.
+ *    reads that bit; tools/bench.py clears it after every flash. On a
+ *    TICKLESS program (below) there is no tick to pause: SysTick carries
+ *    no interrupt there, and the site touches it only where the
+ *    timebase has the verbs.
  *
  * 4. WHAT COMES BACK FROM A STOP IS NOT WHAT WENT IN. 4.3.6 and 5.3:
  *    the system clock on exit is HSISYS and the PLL is off, so a
@@ -92,7 +97,7 @@
  *
  * The plain site keeps the v1 HONEST RESTRICTION the samc21 stated: with
  * kernel time frozen for the whole Stop, a program with armed time
- * events must not take one. `Stm32TimedSleepSite` LIFTS it, by the same
+ * events must not take one. `Stm32g0TimedSleepSite` LIFTS it, by the same
  * two-verb trick that worked on the SAM and with the RTC in both roles:
  *
  *  - the ALARM is the periodic wake-up timer (30.3.7), placed on
@@ -142,7 +147,7 @@
  *
  * ## The third site: the same lift, without the RTC
  *
- * `Stm32LptimTimedSleepSite` is the timed site again with a different
+ * `Stm32g0LptimTimedSleepSite` is the timed site again with a different
  * counter under it, and it exists because the one above OWNS THE WHOLE
  * RTC (see the next section). Its own instrument is an LPTIM on LSE or
  * LSI, which 26.5 says keeps counting through Stop 0 and Stop 1 and
@@ -150,6 +155,21 @@
  * alarm and the witness, and the calendar, its prescaler split and both
  * its alarms stay the application's. Its header comment, below, is where
  * the differences live.
+ *
+ * ## Under a tickless platform
+ *
+ * `Stm32g0Platform<LptimTicker<>>` (stm32g0/platform.hpp, stm32g0/
+ * lptim_ticker.hpp) counts kernel time on an LPTIM that runs through a
+ * Stop, and places the loop's next deadline in that LPTIM's compare
+ * from the platform's own idle_until(). Nothing stands still, nothing
+ * needs repairing, and no site may own a second alarm: the plain
+ * `Stm32g0SleepSite` is the only site such a program takes - it still
+ * arms the depth and still puts the clock back (fact 4), and it pauses
+ * nothing - while both timed sites REFUSE a tickless platform at
+ * compile time (their static_assert names the reason). The restriction
+ * the plain site carries on the SysTick timebase - no Stop with an
+ * armed time event - is simply gone there, and gone for every program,
+ * not lifted per site.
  *
  * ## What the site owns
  *
@@ -181,6 +201,7 @@
 #include "stm32g0/clock.hpp"
 #include "stm32g0/lptim.hpp"
 #include "stm32g0/nvic.hpp"
+#include "stm32g0/platform.hpp"
 #include "stm32g0/pwr.hpp"
 #include "stm32g0/rtc.hpp"
 #include "stm32g0/ticker.hpp"
@@ -202,13 +223,27 @@ constexpr SysclkSource sysclk_source_of() {
  *
  * `C` is the application's Clock task (stm32g0/clock.hpp) - not for the
  * rate, but because a Stop drops SYSCLK to HSISYS and something has to
- * put it back (fact 4 in this file's header).
+ * put it back (fact 4 in this file's header). `TB` is the program's
+ * kernel timebase - the platform's template argument, `Ticker` by
+ * default - and the one thing the site asks of it is whether it has a
+ * periodic interrupt to pause across a Stop (fact 3): the SysTick
+ * BasicTicker has, the LptimTicker of a tickless program has not, and
+ * on the latter SysTick carries no interrupt at all, so a `resume()`
+ * here would arm a vector nobody bound. An `if constexpr` on the verbs'
+ * presence is what makes one site serve both programs.
  */
-template <class C>
-struct Stm32SleepSite {
-    Stm32SleepSite() = delete;
+template <class C, class TB = Ticker>
+struct Stm32g0SleepSite {
+    Stm32g0SleepSite() = delete;
 
     static constexpr SysclkSource expected_source = sysclk_source_of<C>();
+
+    /// True when the timebase runs a periodic interrupt the deep rungs
+    /// pause - what `arm()` and `disarm()` decide on.
+    static constexpr bool pauses_tick = requires {
+        TB::pause();
+        TB::resume();
+    };
 
     /**
      * Re-establish the clock the task promised, if a Stop took it away.
@@ -231,41 +266,52 @@ struct Stm32SleepSite {
 
     /**
      * Arm a rung. For the two deep ones this ALSO pauses the kernel's
-     * tick - fact 3 in this file's header: it closes 4.3.3's
-     * pending-interrupt window by construction and makes the Stop last
-     * even under a debugger's DBG_STOP, and it costs nothing because a
-     * Stop stops SysTick anyway. `disarm()` puts it back.
+     * tick where there is one - fact 3 in this file's header: it closes
+     * 4.3.3's pending-interrupt window by construction and makes the
+     * Stop last even under a debugger's DBG_STOP, and it costs nothing
+     * because a Stop stops SysTick anyway. `disarm()` puts it back. A
+     * tickless timebase has nothing to pause, and its wake is placed by
+     * the platform's idle_until(), not here.
      */
     static bool arm(SleepDepth d) {
         switch (d) {
             case SleepDepth::none:
             case SleepDepth::light:
-                Ticker::resume();
+                if constexpr (pauses_tick) {
+                    TB::resume();
+                }
                 return Pwr::arm(PwrMode::sleep);
             case SleepDepth::standby:
                 if (!Pwr::arm(PwrMode::stop0)) {
                     return false;
                 }
-                Ticker::pause();
+                if constexpr (pauses_tick) {
+                    TB::pause();
+                }
                 return true;
             case SleepDepth::deep:
                 if (!Pwr::arm(PwrMode::stop1)) {
                     return false;
                 }
-                Ticker::pause();
+                if constexpr (pauses_tick) {
+                    TB::pause();
+                }
                 return true;
         }
         return false;
     }
 
-    /// Back to the kernel's own idle behaviour: the tick running again,
-    /// the shallow mode armed, and the clock the program was promised -
-    /// because the first thing that reaches the manager after a Stop is
-    /// the first thing that can put any of the three back.
+    /// Back to the kernel's own idle behaviour: the tick running again
+    /// (where there is one), the shallow mode armed, and the clock the
+    /// program was promised - because the first thing that reaches the
+    /// manager after a Stop is the first thing that can put any of the
+    /// three back.
     static void disarm() {
         (void)Pwr::arm(PwrMode::sleep);
         (void)resume_clock();
-        Ticker::resume();
+        if constexpr (pauses_tick) {
+            TB::resume();
+        }
     }
 
     /// A pure read of SLEEPDEEP and LPMS. `light` is never reported: it
@@ -292,7 +338,7 @@ struct Stm32SleepSite {
 // ---- the timed site ---------------------------------------------------------
 
 /**
- * Stm32TimedSleepSite's knobs.
+ * Stm32g0TimedSleepSite's knobs.
  *
  * `rtcclk_hz` is the rate of the clock the RTC counts AND THE RULE IS
  * DIRECTIONAL: give a value NOT BELOW the true rate (see the file
@@ -346,18 +392,30 @@ constexpr bool timed_sleep_config_valid(const TimedSleepConfig& c) {
  * records it.
  */
 template <Platform P, class C, TimedSleepConfig cfg = TimedSleepConfig{}>
-struct Stm32TimedSleepSite {
+struct Stm32g0TimedSleepSite {
     static_assert(timed_sleep_config_valid(cfg),
-                  "brio Stm32TimedSleepSite: the RTC rate must be at least "
+                  "brio Stm32g0TimedSleepSite: the RTC rate must be at least "
                   "1024 Hz; it must admit an exact prescaler pair for a 1 Hz "
                   "ck_spre whose SYNCHRONOUS factor divides the second at "
                   "least a thousand ways (the resync's granularity must be "
                   "finer than the kernel tick it repairs); and the fast "
                   "wake-up clock must be one of the divided-RTCCLK codes");
 
-    Stm32TimedSleepSite() = delete;
+    static_assert(!Tickless<typename P::Timebase> &&
+                      requires {
+                          P::Timebase::advance(0u);
+                          P::Timebase::pause();
+                          P::Timebase::resume();
+                      },
+                  "brio Stm32g0TimedSleepSite: a timed site repairs a timebase that "
+                  "STOPS in Stop (the SysTick ticker, paused, resynchronized through "
+                  "advance()); the platform's timebase is tickless and keeps counting "
+                  "- take the plain Stm32g0SleepSite, the platform's idle_until() "
+                  "places the wake");
 
-    using Plain = Stm32SleepSite<C>;
+    Stm32g0TimedSleepSite() = delete;
+
+    using Plain = Stm32g0SleepSite<C, typename P::Timebase>;
 
     /// THE OTHER PRESCALER SPLIT, and the choice is the site's whole
     /// resolution. 30.3.4's advice - a high asynchronous factor, to save
@@ -393,7 +451,7 @@ struct Stm32TimedSleepSite {
      * False = the domain or the RTC refused (a clock select already
      * taken by something else and `wipe_domain` not given, an oscillator
      * that never reported ready, a synchronization that never settled).
-     * The site still works as a plain Stm32SleepSite in that case, minus
+     * The site still works as a plain Stm32g0SleepSite in that case, minus
      * every timed property - which is why the caller must look at the
      * answer.
      *
@@ -486,7 +544,7 @@ struct Stm32TimedSleepSite {
             return true;   // Sleep keeps SysTick: nothing to compensate
         }
         rtc_at_arm_ = Rtc::time_of_hour_ms();
-        tick_at_arm_ = Ticker::ticks();
+        tick_at_arm_ = P::Timebase::ticks();
         resync_armed_ = rtc_at_arm_ != 0xFFFFFFFFu;
         const std::optional<uint32_t> next = TimeEvents<P>::ticks_to_next();
         if (next.has_value() && place_alarm(*next)) {
@@ -528,10 +586,10 @@ struct Stm32TimedSleepSite {
         const uint32_t wall_ms = Rtc::elapsed_ms(rtc_at_arm_, now);
         const uint32_t span = static_cast<uint32_t>(
             (static_cast<uint64_t>(wall_ms) * P::ticks_per_second) / 1000u);
-        const uint32_t awake = Ticker::ticks() - tick_at_arm_;   // wrap-safe
+        const uint32_t awake = P::Timebase::ticks() - tick_at_arm_;   // wrap-safe
         last_advance_ = span > awake ? span - awake : 0u;
         if (last_advance_ != 0u) {
-            Ticker::advance(last_advance_);
+            P::Timebase::advance(last_advance_);
         }
     }
 
@@ -544,7 +602,7 @@ struct Stm32TimedSleepSite {
         alarm_armed_ = false;
         resync();                      // act 2
         (void)Pwr::arm(PwrMode::sleep);  // act 3
-        Ticker::resume();              // ...and the tick fact 3 paused
+        P::Timebase::resume();              // ...and the tick fact 3 paused
     }
 
 private:
@@ -568,7 +626,7 @@ private:
 #if defined(LPTIM1_BASE)
 
 /**
- * Stm32LptimTimedSleepSite's knobs.
+ * Stm32g0LptimTimedSleepSite's knobs.
  *
  * `source` is the LPTIM's kernel clock and it must be one that RUNS IN
  * STOP: 26.5's table 145 says "no effect when LPTIM is clocked by LSE or
@@ -637,7 +695,7 @@ constexpr bool lptim_timed_sleep_config_valid(const LptimTimedSleepConfig& c,
  *
  * ## Why it exists
  *
- * `Stm32TimedSleepSite` owns the whole RTC and cannot share it: its
+ * `Stm32g0TimedSleepSite` owns the whole RTC and cannot share it: its
  * resolution IS the prescaler split (PREDIV_S at least 1000, against the
  * chapter's own low-power advice of PREDIV_A 127), its wake path is
  * BYPSHAD, and its alarm is the wake-up timer. An application that wants
@@ -746,9 +804,9 @@ constexpr bool lptim_timed_sleep_config_valid(const LptimTimedSleepConfig& c,
  * which is one more reason that source is refused.
  */
 template <Platform P, class C, LptimTimedSleepConfig cfg = LptimTimedSleepConfig{}>
-struct Stm32LptimTimedSleepSite {
+struct Stm32g0LptimTimedSleepSite {
     static_assert(lptim_timed_sleep_config_valid(cfg, P::ticks_per_second),
-                  "brio Stm32LptimTimedSleepSite: the instance must exist; the "
+                  "brio Stm32g0LptimTimedSleepSite: the instance must exist; the "
                   "kernel clock must be one that runs in Stop (LSE or LSI - PCLK "
                   "stops with the VCORE domain and HSI16 is a clock request "
                   "ES0548 2.2.4 breaks on a divided HSI); and the counter rate "
@@ -756,9 +814,20 @@ struct Stm32LptimTimedSleepSite {
                   "or a resync quantized coarser than a tick can mature an event "
                   "EARLY");
 
-    Stm32LptimTimedSleepSite() = delete;
+    static_assert(!Tickless<typename P::Timebase> &&
+                      requires {
+                          P::Timebase::advance(0u);
+                          P::Timebase::pause();
+                          P::Timebase::resume();
+                      },
+                  "brio Stm32g0LptimTimedSleepSite: a timed site repairs a timebase "
+                  "that STOPS in Stop; the platform's timebase is tickless and keeps "
+                  "counting - take the plain Stm32g0SleepSite (and if the LPTIM is "
+                  "what it counts on, it IS this site's counter, promoted)");
 
-    using Plain = Stm32SleepSite<C>;
+    Stm32g0LptimTimedSleepSite() = delete;
+
+    using Plain = Stm32g0SleepSite<C, typename P::Timebase>;
     using L = Lptim<cfg.instance>;
     using Counter = LptimCounter<L>;
 
@@ -791,7 +860,7 @@ struct Stm32LptimTimedSleepSite {
      *
      * False = the oscillator never reported ready, or a step of the
      * chapter's own order was refused. The site still works as a plain
-     * Stm32SleepSite in that case, minus every timed property - which is
+     * Stm32g0SleepSite in that case, minus every timed property - which is
      * why the caller must look at the answer.
      */
     static bool init() {
@@ -923,7 +992,7 @@ struct Stm32LptimTimedSleepSite {
         const std::optional<uint32_t> at_arm = Counter::count32();
         count_at_arm_ = at_arm.value_or(0);
         resync_armed_ = at_arm.has_value();
-        tick_at_arm_ = Ticker::ticks();
+        tick_at_arm_ = P::Timebase::ticks();
         const std::optional<uint32_t> next = TimeEvents<P>::ticks_to_next();
         if (next.has_value() && place_alarm(*next)) {
             alarm_armed_ = true;
@@ -974,10 +1043,10 @@ struct Stm32LptimTimedSleepSite {
         const uint32_t whole = elapsed == 0u ? 0u : elapsed - 1u;
         const uint32_t span = static_cast<uint32_t>(
             (static_cast<uint64_t>(whole) * P::ticks_per_second) / counter_hz);
-        const uint32_t awake = Ticker::ticks() - tick_at_arm_;   // wrap-safe
+        const uint32_t awake = P::Timebase::ticks() - tick_at_arm_;   // wrap-safe
         last_advance_ = span > awake ? span - awake : 0u;
         if (last_advance_ != 0u) {
-            Ticker::advance(last_advance_);
+            P::Timebase::advance(last_advance_);
         }
     }
 
@@ -1003,7 +1072,7 @@ struct Stm32LptimTimedSleepSite {
         alarm_armed_ = false;
         resync();                              // act 2
         (void)Pwr::arm(PwrMode::sleep);        // act 3
-        Ticker::resume();
+        P::Timebase::resume();
     }
 
 private:

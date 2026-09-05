@@ -1322,16 +1322,16 @@ void ti_center_aligned() {
 // and the sampler publishes ten times a second, so what the queues carry
 // is the application's pace and the latch's missed() counts the rest.
 
-using LsiLatch = MeterLatch<uint32_t, Stm32Platform, 0>;
+using LsiLatch = MeterLatch<uint32_t, Stm32g0Platform<>, 0>;
 static_assert(MeterSource<LsiLatch>, "the capture latch is a MeterSource");
 
 struct Collector;
 using Subs = Subscribers<Collector>;
-using Sampler = MeterSampler<Stm32Platform, Subs, LsiLatch>;
+using Sampler = MeterSampler<Stm32g0Platform<>, Subs, LsiLatch>;
 
 struct Collector {
     using Event = std::variant<MeterSample>;
-    static inline EventQueue<Event, 8, Stm32Platform> queue;
+    static inline EventQueue<Event, 8, Stm32g0Platform<>> queue;
 
     static inline uint16_t samples = 0;
     static inline uint32_t last = 0;
@@ -1357,7 +1357,7 @@ struct Collector {
     }
 };
 
-using MeterKernel = Kernel<Stm32Platform, Collector, Sampler>;
+using MeterKernel = Kernel<Stm32g0Platform<>, Collector, Sampler>;
 
 volatile bool kernel_mode = false;
 
@@ -1383,7 +1383,7 @@ void tj_meter_ao() {
     Nvic::enable(T16::irq());
     const uint32_t started = Ticker::millis();
     while (Ticker::millis() - started < 1000UL) {
-        TimeEvents<Stm32Platform>::process();
+        TimeEvents<Stm32g0Platform<>>::process();
         while (MeterKernel::step()) {
         }
     }

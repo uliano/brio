@@ -14,8 +14,8 @@ Contracts and services: `util/power.hpp`. The kernel question it needs:
 `TimeEvents<P>::ticks_to_next()` (`kernel/time_event.hpp`). The
 realizations: `AvrSleepSite` over `Sleep` in `avrdx/sleep.hpp`,
 `SamSleepSite` and `SamTimedSleepSite` over `Pm` in `samc21/sleep.hpp`,
-and `Stm32SleepSite` and `Stm32TimedSleepSite` over `Pwr` in
-`stm32g0/sleep.hpp`.
+and `Stm32g0SleepSite`, `Stm32g0TimedSleepSite` and
+`Stm32g0LptimTimedSleepSite` over `Pwr` in `stm32g0/sleep.hpp`.
 
 **The model has a second silicon under it, and it needed no change.**
 On the SAM C21 the vote round, the unanimity rule, the `PowerLock`
@@ -109,8 +109,21 @@ bearing piece of the design. On every machine brio targets, the mode
 lives in a register and the CPU stops when the idle path executes its
 stop instruction. So the manager arms and returns; its dispatch ends;
 the kernel loop finds every queue empty and calls the platform's
-`idle()`; and THAT is the sleep. No new kernel hook exists, `Kernel::run()`
-is untouched, and an application without a power manager pays nothing.
+`idle()`; and THAT is the sleep. The power model needs no kernel hook
+of its own, `Kernel::run()` is untouched, and an application without a
+power manager pays nothing.
+
+The kernel's one optional idle hook is the TIMEBASE's, not the
+model's, and the two do not know each other. A platform whose kernel
+time runs on a counter that keeps counting while the core sleeps
+offers `idle_until(deadline)` ([kernel.md](kernel.md) section 11): the
+loop hands it the nearest armed deadline and the platform places its
+own wake there - the LPTIM compare on the STM32G0's tickless
+platform - whatever depth a site has armed. It exists whether or not
+a manager exists, the site still only arms, the vote round and the
+guard below run unchanged, and the site's other duty on such a
+platform is simply absent: there is no tick to pause and no time to
+resynchronize (`docs/stm32g0/pwr.md`).
 
 The one duty this places on a target is stated in the `Platform`
 contract's neighbourhood rather than in it: a platform's idle path must
@@ -246,7 +259,11 @@ documentation carries that obligation.
 - **No idle detection.** Nothing in the model decides *when* the
   program has nothing to do; something has to post the request. That is
   application knowledge (a UI gone quiet, a shift ended, a command),
-  and inventing a rule for it would be inventing an application.
+  and inventing a rule for it would be inventing an application. (The
+  loop's own `idle_until`, where a platform has it, decides how LONG an
+  idle may last - the nearest deadline - never WHEN the program is
+  done or how DEEP it may stop: those stay the request's and the
+  round's.)
 - **No per-driver RUNSTDBY policy.** Which peripherals must survive a
   given depth is a target-and-application matter; the drivers expose the
   flags, the voters know what they need, and the model carries the

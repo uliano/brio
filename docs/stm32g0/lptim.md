@@ -15,7 +15,7 @@ interrupt table 12.3 (table 61), the DMAMUX trigger inputs table 56;
 DS13560 Rev 5 tables 13..24 (the AF numbers of the LPTIM pads); errata
 ES0548 Rev 3 items 2.8.1 and 2.8.2, read on the bench chip's revision Z
 column. Driver: `stm32g0/lptim.hpp`; the third sleep site over it is
-`Stm32LptimTimedSleepSite` in `stm32g0/sleep.hpp` and is documented in
+`Stm32g0LptimTimedSleepSite` in `stm32g0/sleep.hpp` and is documented in
 [pwr.md](pwr.md). The per-instance presence, vector, EXTI and DMAMUX
 facts come from `stm32g0/device_tables.hpp`. Bench suite:
 `test_stm32_lptim` (9 letters, 68 verdicts, wireless). Family fixture

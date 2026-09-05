@@ -30,7 +30,7 @@
 #include "stm32g0/platform.hpp"
 #include "stm32g0/ticker.hpp"
 
-using P = brio::Stm32Platform;
+using P = brio::Stm32g0Platform<>;
 
 // The clock: the ONE truth about SYSCLK for every driver of this target
 // (stm32g0/clock.hpp). HSI16 through the PLL to the part's 64 MHz

@@ -1469,7 +1469,7 @@ public:
      * same three counters.
      */
     static bool release() {
-        typename Stm32Platform::CriticalSection cs;
+        typename Stm32g0Platform<>::CriticalSection cs;
         if (pending_ == 0u) {
             return false;
         }

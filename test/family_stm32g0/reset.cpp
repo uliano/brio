@@ -122,6 +122,6 @@ void wwdg_verbs() {
 // The two panic paths: a Reporter the kernel may be given, and the
 // HardFault body an app binds to the vector.
 extern "C" void HardFault_Handler();
-extern "C" void HardFault_Handler() { hard_fault_reset<Stm32Platform>(0x11); }
+extern "C" void HardFault_Handler() { hard_fault_reset<Stm32g0Platform<>>(0x11); }
 
-void panic_paths() { panic<Stm32Platform, ResetReporter>(PanicCode::assert_failed, 7); }
+void panic_paths() { panic<Stm32g0Platform<>, ResetReporter>(PanicCode::assert_failed, 7); }

@@ -1,7 +1,10 @@
 /*
  * delay.hpp - the CORE stratum: microsecond busy-waits on SysTick.
  *
- * "At least", never early, and CAPPED BELOW ONE KERNEL TICK by contract.
+ * "At least", never early, and CAPPED BELOW ONE SYSTICK PERIOD - one
+ * millisecond, which is one kernel tick on the SysTick-ticked programs
+ * and 1.024 ticks on a program whose kernel time runs on the STM32G0's
+ * 1024 Hz LPTIM timebase (SysTick then counts cycles and nothing else).
  * The SAM C21 and the STM32G0 carried this file as twins (the samc21 one
  * drew the boundary at birth, the stm32g0 one kept it to the verb and
  * the return value) until the code was found identical to the byte and
@@ -12,8 +15,8 @@
  *
  * WHY THE CAP IS THE DESIGN AND NOT A LIMITATION. In a cooperative
  * kernel a dispatch that busy-waits for milliseconds starves every
- * other active object; a wait of a tick or more is TimeEvent territory
- * (kernel/time_event.hpp) and this file REFUSES it rather than serving
+ * other active object; a wait of a millisecond or more is TimeEvent
+ * territory (kernel/time_event.hpp) and this file REFUSES it rather than serving
  * it - the misuse fails visibly (false, and no time spent) instead of
  * becoming a latency bug. What remains is exactly what a busy-wait is
  * for: hardware timing at the microsecond scale - a chip-select setup,
@@ -32,8 +35,10 @@
  * in CPU cycles - 20.8 ns of resolution at the SAM C21's 48 MHz, 15.6 ns
  * at the STM32G0's 64.
  *
- * THE OWNERSHIP LINE: SysTick belongs to the Ticker IN WRITING - a
- * store to VAL clears the counter and would skew the tick - but reading
+ * THE OWNERSHIP LINE: SysTick belongs to its one writer - the BasicTicker
+ * that is the kernel timebase, or armv6m/ticker.hpp's SysTickCounter
+ * where the timebase is elsewhere - IN WRITING: a store to VAL clears
+ * the counter and would skew the tick - but reading
  * VAL has no side effect at all. The one CTRL read below tests ENABLE;
  * a CTRL read clears COUNTFLAG, which is harmless because the ticker
  * does not use that flag. The wait accumulates VAL deltas with the wrap
@@ -65,8 +70,9 @@
  * is 65535 x cycles_per_us, and cycles_per_us is 64 at the faster
  * family's ceiling.
  *
- * WHAT THIS FILE DOES NOT SERVE, stated: a program with no running
- * Ticker (SysTick disabled) gets false, not a fallback loop - a counted
+ * WHAT THIS FILE DOES NOT SERVE, stated: a program with SysTick not
+ * running (neither a BasicTicker nor a SysTickCounter started it) gets
+ * false, not a fallback loop - a counted
  * loop could only promise "at least" by overshooting wildly, and a
  * caller that wants one can write one; and nothing here survives a
  * sleep that stops the CPU clock (the SAM's standby, the STM32's Stop
@@ -107,9 +113,10 @@ constexpr DelayRate delay_rate(uint32_t hz) {
  * @brief Busy-wait AT LEAST `us` microseconds on the SysTick counter.
  *
  * @return true when the time was served; false - AND NO TIME IS SPENT -
- * when SysTick is not running (no Ticker in this program) or when the
- * request is one tick period or more (the cap: waits of a tick or more
- * belong to TimeEvents, and a refused misuse beats a served one).
+ * when SysTick is not running (nothing started it in this program) or
+ * when the request is one SysTick period - one millisecond - or more
+ * (the cap: such waits belong to TimeEvents, and a refused misuse beats
+ * a served one).
  *
  * Callable with interrupts masked (pure VAL reads, wrap folded in) and
  * from any context that is allowed to spend the time. The elapsed time
@@ -119,9 +126,9 @@ constexpr DelayRate delay_rate(uint32_t hz) {
  */
 [[nodiscard]] inline bool delay_us(DelayRate rate, uint32_t us) {
     if ((SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) == 0u) {
-        return false;   // no Ticker: nothing here can count time
+        return false;   // SysTick off: nothing here can count time
     }
-    const uint32_t period = SysTick->LOAD + 1u;   // one tick, in CPU cycles
+    const uint32_t period = SysTick->LOAD + 1u;   // one SysTick period, in CPU cycles
 
     // The cap, in 32 bits and nothing wider (the header says why width
     // costs here). A zero rate has nothing to count with; past the

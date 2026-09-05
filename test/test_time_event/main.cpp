@@ -202,6 +202,70 @@ TEST_CASE("ticks_to_next: the answer is a distance, across the wrap too") {
     CHECK_FALSE(TE::ticks_to_next().has_value());
 }
 
+TEST_CASE("next_deadline: nothing armed, nothing to say") {
+    reset();
+    CHECK_FALSE(TE::next_deadline().has_value());
+}
+
+TEST_CASE("next_deadline: an absolute tick, not a countdown") {
+    reset();
+    brio::TimeEvent<HostPlatform, Ear, Beep> te{Beep{6}};
+
+    HostPlatform::ticks = 5;
+    te.arm(10);                                                   // deadline 15
+    CHECK(TE::next_deadline() == std::optional<uint32_t>{15});
+    run_ticks(4);                                                 // now 9
+    CHECK(TE::next_deadline() == std::optional<uint32_t>{15});    // unchanged
+    CHECK(TE::ticks_to_next() == std::optional<uint32_t>{6});     // the sibling counts
+    run_ticks(6);                                                 // fired and consumed
+    CHECK_FALSE(TE::next_deadline().has_value());
+}
+
+TEST_CASE("next_deadline: several armed events, the nearest wins") {
+    reset();
+    brio::TimeEvent<HostPlatform, Ear, Beep> far{Beep{7}};
+    brio::TimeEvent<HostPlatform, Ear, Beep> near{Beep{8}};
+    brio::TimeEvent<HostPlatform, Ear, Beep> mid{Beep{9}};
+
+    HostPlatform::ticks = 1000;
+    far.arm(100);
+    CHECK(TE::next_deadline() == std::optional<uint32_t>{1100});
+    near.arm(3);
+    CHECK(TE::next_deadline() == std::optional<uint32_t>{1003});
+    mid.arm(20);
+    CHECK(TE::next_deadline() == std::optional<uint32_t>{1003});
+    near.disarm();
+    CHECK(TE::next_deadline() == std::optional<uint32_t>{1020});
+}
+
+TEST_CASE("next_deadline: an overdue deadline is still the nearest") {
+    reset();
+    brio::TimeEvent<HostPlatform, Ear, Beep> late{Beep{10}};
+    brio::TimeEvent<HostPlatform, Ear, Beep> soon{Beep{12}};
+
+    late.arm_every(5);                  // deadline 5, periodic: stays armed
+    soon.arm(30);                       // deadline 30
+    HostPlatform::ticks += 17;          // the loop stalled past three deadlines
+    CHECK(TE::next_deadline() == std::optional<uint32_t>{5});     // its past deadline
+    CHECK(TE::ticks_to_next() == std::optional<uint32_t>{0});     // the sibling clamps
+}
+
+TEST_CASE("next_deadline: the nearest by signed distance, across the wrap") {
+    reset();
+    brio::TimeEvent<HostPlatform, Ear, Beep> before{Beep{11}};
+    brio::TimeEvent<HostPlatform, Ear, Beep> after{Beep{12}};
+
+    HostPlatform::ticks = UINT32_MAX - 3;     // 4 ticks to the wrap
+    before.arm(2);                            // deadline UINT32_MAX - 1
+    after.arm(10);                            // deadline 6, past the wrap
+    // Numerically 6 < UINT32_MAX - 1; by distance from now it is 10 ticks
+    // away against 2. The nearest is the big number.
+    CHECK(TE::next_deadline() == std::optional<uint32_t>{UINT32_MAX - 1});
+    run_ticks(3);                             // before fired; now = UINT32_MAX
+    CHECK(fired_at.size() == 1);
+    CHECK(TE::next_deadline() == std::optional<uint32_t>{6});
+}
+
 TEST_CASE("deadlines survive the 32-bit counter wrap") {
     reset();
     brio::TimeEvent<HostPlatform, Ear, Beep> te{Beep{5}};

@@ -126,7 +126,7 @@ namespace {
 
 using namespace brio;
 
-using P = Stm32Platform;
+using P = Stm32g0Platform<>;
 
 constexpr UartPins console_pins{
     .tx = {'A', 2, PinFunction::af1},
@@ -3937,7 +3937,7 @@ extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 /// nothing to say what happened. hard_fault_reset() puts a breadcrumb in
 /// .noinit and resets at once, and main() prints it.
 extern "C" void HardFault_Handler() {
-    brio::hard_fault_reset<brio::Stm32Platform>(0xFA);
+    brio::hard_fault_reset<brio::Stm32g0Platform<>>(0xFA);
 }
 
 /// USART2 and LPUART2 share this line on the G0B1 class. The console is
@@ -4124,7 +4124,7 @@ int main() {
                  false);
 
     const std::optional<brio::PanicRecord> crumb =
-        brio::take_panic_record<brio::Stm32Platform>();
+        brio::take_panic_record<brio::Stm32g0Platform<>>();
 
     if (serial_ok) {
         if (crumb) {

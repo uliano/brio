@@ -890,7 +890,7 @@ struct Edges {
 
 struct Counter {
     using Event = std::variant<Edges>;
-    static inline EventQueue<Event, 16, Stm32Platform> queue;
+    static inline EventQueue<Event, 16, Stm32g0Platform<>> queue;
 
     static inline uint16_t rising = 0;
     static inline uint16_t falling = 0;
@@ -913,7 +913,7 @@ struct Counter {
     }
 };
 
-using EdgeKernel = Kernel<Stm32Platform, Counter>;
+using EdgeKernel = Kernel<Stm32g0Platform<>, Counter>;
 
 /// Raised only while letter h runs: the shared EXTI4_15 handler posts
 /// to the kernel instead of counting, and every other letter would be

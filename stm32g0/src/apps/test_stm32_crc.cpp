@@ -64,7 +64,7 @@ namespace {
 
 using namespace brio;
 
-using P = Stm32Platform;
+using P = Stm32g0Platform<>;
 
 constexpr UartPins console_pins{
     .tx = {'A', 2, PinFunction::af1},

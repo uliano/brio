@@ -6,6 +6,6 @@
 #include "stm32g0/platform.hpp"
 #include "stm32g0/sleep.hpp"
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
-brio::Stm32TimedSleepSite<
-    brio::Stm32Platform, SysClock,
+brio::Stm32g0TimedSleepSite<
+    brio::Stm32g0Platform<>, SysClock,
     brio::TimedSleepConfig{.fast_clock = brio::RtcWakeupClock::ck_spre}> site;

@@ -161,7 +161,7 @@ system's latency.
 ```cpp
 uint8_t row[Flash::row_size];
 {
-    Stm32Platform::CriticalSection cs;
+    Stm32g0Platform<>::CriticalSection cs;
     (void)Flash::fast_program_row(0x0804'0000UL, row);
 }
 ```
