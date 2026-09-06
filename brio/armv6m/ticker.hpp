@@ -48,10 +48,15 @@
  *
  * ## The caveat that outlives this file
  * SysTick is clocked from the CPU clock, so its reload is a function of
- * Clock::hz. Neither family has a DynamicClock yet; when one arrives,
- * this ticker must either become a ClockUser (rebase the reload) or
- * move to a timer that does not follow the core - init()'s
- * clock_follows assertion is what will refuse to compile on that day.
+ * the clock's rate. Under a DynamicClock (the STM32G0 has one,
+ * stm32g0/clock.hpp; the SAM C21 none by ruling) this ticker is a
+ * ClockUser: `rebase(hz)` reprograms the reload and RESTARTS the period,
+ * so the tick in progress at a switch is lost - kernel time runs up to
+ * one tick LATE per switch, never early (the kernel's own direction) -
+ * and a rescaling program that minds that runs on a timebase off the
+ * core clock instead (the STM32G0's tickless one, below). init()'s
+ * clock_follows assertion is what refuses a dynamic clock that forgot
+ * to list the ticker.
  * And a sleep mode that stops the CPU clock stops THIS TIMEBASE: kernel
  * time stands still for the whole sleep (the SAM's standby, the
  * STM32's Stop); `advance()` is the landing point of the resync a timed
@@ -219,6 +224,28 @@ public:
         m_frac = static_cast<uint16_t>(f % tps);
     }
 
+    /**
+     * The ClockUser verb: a new reload for a new CPU rate, the counters
+     * and the interrupt kept. The period is RESTARTED (a VAL write clears
+     * the counter and the next cycle reloads it), because a countdown
+     * begun at the old rate would otherwise finish at the new one and a
+     * fall from 64 to 2 MHz would stretch that one tick to 32 - so the
+     * cost of a switch is the phase of the tick in progress, under one
+     * tick, and it lands LATE. A rate this counter cannot serve (the same
+     * 24-bit rule as init()) writes nothing and the tick then runs at the
+     * old reload: there is no return value in the contract to say so,
+     * and a program's rates are known at build time - a pack is checked
+     * against the ticker where it is written, not here.
+     */
+    static void rebase(uint32_t hz) {
+        const uint32_t reload = hz / tps;
+        if (reload == 0u || reload > SysTick_LOAD_RELOAD_Msk + 1u) {
+            return;
+        }
+        SysTick->LOAD = reload - 1u;
+        SysTick->VAL = 0;
+    }
+
     /// Stop the periodic interrupt without losing the counters. Time
     /// stands still while paused; resume() picks up where it was. The
     /// hardware counter keeps running underneath (SysTick has no pause),
@@ -257,8 +284,27 @@ struct SysTickCounter {
         static_assert(clock_follows<C, SysTickCounter>(),
                       "brio SysTickCounter: SysTick is clocked from the CPU clock, so a "
                       "dynamic clock must list the counter among the users it rebases");
+        return program(clock_hz(clock));
+    }
 
-        const uint32_t reload = clock_hz(clock) / 1000u;
+    /// The ClockUser verb: the counter restarted for the new rate. No
+    /// phase to keep here (nothing counts ticks on this counter), and a
+    /// rate it cannot serve leaves it STOPPED, so that delay_us refuses
+    /// instead of waiting on a wrong period.
+    static void rebase(uint32_t hz) {
+        if (!program(hz)) {
+            stop();
+        }
+    }
+
+    /// The counter off: delay_us then refuses (its ENABLE test).
+    static void stop() { SysTick->CTRL = 0; }
+
+    static bool running() { return (SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) != 0u; }
+
+private:
+    [[gnu::always_inline]] static bool program(uint32_t hz) {
+        const uint32_t reload = hz / 1000u;
         if (reload == 0u || reload > SysTick_LOAD_RELOAD_Msk + 1u) {
             return false;
         }
@@ -269,10 +315,6 @@ struct SysTickCounter {
         return true;
     }
 
-    /// The counter off: delay_us then refuses (its ENABLE test).
-    static void stop() { SysTick->CTRL = 0; }
-
-    static bool running() { return (SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) != 0u; }
 };
 
 } // namespace brio

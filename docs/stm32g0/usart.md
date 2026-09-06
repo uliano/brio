@@ -590,8 +590,12 @@ Implemented, not bench-verified:
 - Every part but the G0B1 (the instance sets, the vectors, the
   FULL/BASIC split): compile-only, pinned by the family fixture on all
   twelve headers.
-- `usart_kernel_clock_hz` for a `DynamicClock` (the suite uses a static
-  `Clock`).
+- `SyncHost`, `IrdaLink` and `Smartcard` under a `DynamicClock`: no
+  `rebase`, refused at `init` by `clock_follows`. (The `Uart` on PCLK
+  IS driven through the ladder as the dynamic clock's rebased user -
+  byte-exact on its loop at 64, 16 and 2 MHz, [clock.md](clock.md);
+  `init` reads the rate through `clock_hz(clock)`, a constant for a
+  static clock.)
 
 The DMA half is bench-verified in `test_stm32_dma`, whose own console
 carries both engines - so every verdict line of that suite left the chip

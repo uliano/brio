@@ -44,9 +44,12 @@
  *    switches VCORE to the low-power regulator and 4.3.2 requires the
  *    system clock to be at or below 2 MHz FIRST; leaving it means
  *    clearing LPR, WAITING FOR REGLPF, and only then raising the clock.
- *    The verbs are here because the register is; nothing in this stratum
- *    calls them, because putting a whole program at 2 MHz is not
- *    something a sleep site may do behind an application's back.
+ *    The verbs are here because the register is; no SLEEP SITE calls
+ *    them, because putting a whole program at 2 MHz is not something a
+ *    site may do behind an application's back - it is a RATE the
+ *    application names (stm32g0/clock.hpp's PowerRegime::low_power_run
+ *    on a Clock<>, whose init() sequences the entry and the exit), and
+ *    the dynamic clock moves a program in and out of it in that order.
  *
  * 4. WHAT COMES BACK AFTER A STOP IS HSISYS, WHATEVER WAS RUNNING
  *    BEFORE. 4.3.6 and 5.3: "the system clock, when exiting Stop 0 or

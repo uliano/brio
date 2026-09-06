@@ -209,13 +209,13 @@
 
 namespace brio {
 
-/// The SysclkSource a Clock task's root ends up in RCC_CFGR.SWS as -
-/// what `resume_clock()` compares against to decide whether a Stop
-/// really happened.
+/// The SysclkSource a STATIC Clock task's root ends up in RCC_CFGR.SWS
+/// as - what `resume_clock()` compares against to decide whether a Stop
+/// really happened. (A DynamicClock answers the same question itself,
+/// for the rate in force: its restore().)
 template <class C>
 constexpr SysclkSource sysclk_source_of() {
-    return C::source == ClockSource::pll ? SysclkSource::pllrclk
-                                         : SysclkSource::hsisys;
+    return C::sysclk_source;
 }
 
 /**
@@ -236,8 +236,6 @@ template <class C, class TB = Ticker>
 struct Stm32g0SleepSite {
     Stm32g0SleepSite() = delete;
 
-    static constexpr SysclkSource expected_source = sysclk_source_of<C>();
-
     /// True when the timebase runs a periodic interrupt the deep rungs
     /// pause - what `arm()` and `disarm()` decide on.
     static constexpr bool pauses_tick = requires {
@@ -253,15 +251,21 @@ struct Stm32g0SleepSite {
      * is a mismatch and the task is re-run; for an HSISYS-based one
      * there is nothing to detect and nothing to do, because HSIDIV
      * survives a Stop - so a program on `internal` pays zero for this
-     * call, every time.
+     * call, every time. Under a DynamicClock the same test and the same
+     * re-run are the clock's own restore(), for the rate IN FORCE - the
+     * one the users were rebased to - and never the boot one.
      *
      * Returns true when the clock is the one `C` promises.
      */
     static bool resume_clock() {
-        if (Rcc::sysclk_status() == expected_source) {
-            return true;
+        if constexpr (C::is_static) {
+            if (Rcc::sysclk_status() == sysclk_source_of<C>()) {
+                return true;
+            }
+            return C::init();
+        } else {
+            return C::restore();
         }
-        return C::init();
     }
 
     /**

@@ -381,10 +381,31 @@ constexpr uint32_t adc_clock_hz(uint32_t pclk_hz, uint32_t async_hz, const AdcCo
     }
 }
 
-/// DS13560 table 62's ceiling, voltage range 1 (which is the range
-/// stm32g0/clock.hpp's Clock<> requires anyway). Range 2 halves it to
-/// 16 MHz and this stratum never enters it.
+/// DS13560 table 62's ceiling, voltage range 1. Range 2's is 16 MHz
+/// and holds BY CONSTRUCTION under stm32g0/clock.hpp's rates: a Range 2
+/// rate has SYSCLK = PCLK <= 16 MHz (so every PCLK mode is under it),
+/// the asynchronous root is HSI16 or SYSCLK (the PLL is off in Range
+/// 2), and PLLP is refused there by init()'s dead-branch check.
 constexpr uint32_t adc_max_hz = 35'000'000UL;
+constexpr uint32_t adc_max_hz_range2 = 16'000'000UL;
+
+/// The PCLK division a config's mode becomes at bus rate `pclk_hz`: the
+/// caller's own while fADC stays under the ceiling, the next larger one
+/// otherwise - a pure function of (config, rate), so that a rate walked
+/// down and back up lands on the same mode (Adc::rebase's rule).
+/// `async` is returned as it is: the bus rate does not reach it.
+constexpr AdcClockMode adc_effective_clock_mode(AdcClockMode m, uint32_t pclk_hz) {
+    if (m == AdcClockMode::async) {
+        return m;
+    }
+    if (m == AdcClockMode::pclk_div1 && pclk_hz <= adc_max_hz) {
+        return AdcClockMode::pclk_div1;
+    }
+    if (m != AdcClockMode::pclk_div4 && pclk_hz / 2u <= adc_max_hz) {
+        return AdcClockMode::pclk_div2;
+    }
+    return AdcClockMode::pclk_div4;
+}
 
 // =============================================================================
 // The factory calibration (DS13560 tables 5 and 6)
@@ -686,13 +707,12 @@ public:
      */
     template <typename Clock>
     static bool init(Clock clock, const AdcConfig& c, uint32_t async_hz = 16'000'000UL) {
-        // The clock is read ONCE here, for the prescaler: a dynamic clock
-        // would leave it stale in silence, and this driver has no
-        // rebase() to answer one (the AVR's keeps CLK_ADC in range across
-        // a change - the precedent, when a consumer asks). Refused.
-        static_assert(Clock::is_static,
-                      "brio Adc: no rebase() yet, so a dynamic clock is refused - "
-                      "docs/design/clock.md, the STM32G0 inventory");
+        // The clock is read here for the division; under a DynamicClock
+        // rebase() below keeps it legal, and the clock must list this
+        // driver or the division would go stale in silence.
+        static_assert(clock_follows<Clock, Adc>(),
+                      "brio Adc: initialized with a DynamicClock that does not list "
+                      "it among its Users - its clock division would not follow");
         if (!adc_config_valid(c)) {
             return false;
         }
@@ -723,6 +743,58 @@ public:
             return false;
         }
         return enable();
+    }
+
+    /**
+     * The ClockUser verb (util/clock.hpp): the bus rate is about to
+     * become `hz`, keep fADC legal. Nothing to do in the asynchronous
+     * mode (the root is not the bus) and nothing while the config's own
+     * division still fits; otherwise the division becomes the next one
+     * that does - adc_effective_clock_mode(), a pure function of the
+     * config and the rate, so a ladder walked down and back up lands on
+     * the mode it started with - written the only way CKMODE can be:
+     * with the converter DISABLED (15.12.5), a conversion in flight
+     * stopped first, the enable put back if it was on. The chapter ties
+     * the calibration factor to the supply and the temperature, not to
+     * the clock, so none is redone here (the bench weighs VREFINT across
+     * the ladder: docs/stm32g0/clock.md). What a rebase costs the caller
+     * is one disable/enable round; what it does NOT keep is the
+     * conversion time in seconds, which follows the clock - that is what
+     * "follows" means.
+     */
+    static void rebase(uint32_t hz) {
+        if (cfg_.clock_mode == AdcClockMode::async) {
+            return;
+        }
+        const AdcClockMode m = adc_effective_clock_mode(cfg_.clock_mode, hz);
+        const AdcClockMode now = clock_mode();
+        if (m == now) {
+            return;
+        }
+        const bool was_enabled = enabled();
+        if (!disable()) {
+            return;
+        }
+        regs().CFGR2 = (regs().CFGR2 & ~ADC_CFGR2_CKMODE_Msk) |
+                       (static_cast<uint32_t>(m) << ADC_CFGR2_CKMODE_Pos);
+        if (was_enabled) {
+            (void)enable();
+        }
+    }
+
+    /// CKMODE as the register holds it - the config's own mode, or the
+    /// larger division rebase() moved it to.
+    static AdcClockMode clock_mode() {
+        return static_cast<AdcClockMode>((regs().CFGR2 & ADC_CFGR2_CKMODE_Msk) >>
+                                         ADC_CFGR2_CKMODE_Pos);
+    }
+
+    /// fADC now, from the bus rate `pclk_hz` (or `async_hz` for the
+    /// asynchronous mode), through the division in force.
+    static uint32_t adc_hz(uint32_t pclk_hz, uint32_t async_hz = 16'000'000UL) {
+        AdcConfig c = cfg_;
+        c.clock_mode = clock_mode();
+        return adc_clock_hz(pclk_hz, async_hz, c);
     }
 
     /// Everything this file turned on, off again: conversions stopped,

@@ -153,7 +153,16 @@ stated on the verb.
   `TimMasterMode`, `TimOutputMode`, `TimChannelSelect`,
   `TimCapturePolarity`, `TimCapturePrescaler`; `TimConfig`,
   `TimChannelConfig`, `TimCaptureConfig`, `TimSlaveConfig`,
-  `TimBreakDeadTime`.
+  `TimEtrConfig` (ETP, ETPS, ETF, ECE - the external trigger input's
+  half of SMCR, `tim_etr_config_valid`), `TimBreakDeadTime`.
+- The external trigger input: `external_trigger(TimEtrConfig)` (refused
+  on a timer without ETR, and ETRP must sit at or below TIMxCLK/4 -
+  the caller's arithmetic, 22.4.3) and `external_trigger_select(code)`
+  / its readback - TIMx_AF1.ETRSEL as the raw code, the vocabulary
+  being the signal's owner's (TIM2/TIM3: 0 the pad, 1 COMP1, 2 COMP2,
+  3 LSE, 4 MCO, 5 MCO2 and 6 COMP3 on the G0B1/G0C1). Measured: MCO =
+  HSI16/64 into TIM2 in external clock mode 2 is a 250 kHz counter with
+  no pad, within HSI16's 1 % of the crystal ([clock.md](clock.md)).
 - Free functions: `tim_dead_time_ticks(dtg)` and `tim_dead_time_code(ticks)`
   (21.4.18's four ranges, the code search always rounding UP),
   `tim_internal_trigger(n, itr)` / `tim_internal_trigger_is_oc1(n, itr)`
@@ -426,9 +435,9 @@ verb refuses on it and `dmar_address()` is null.
 
 Driver gaps: encoder and hall-sensor modes (`SMS` 1..3 are spelled and refused
 nowhere, but no task builds them and no bench signal exists for one);
-the EXTERNAL trigger half of the slave controller (`SMCR`'s
-`ECE`/`ETP`/`ETPS`/`ETF` and `TIMx_AF1`'s `ETRSEL`), which needs a pad or
-a comparator; the commutation event (`CR2.CCPC`/`CCUS`, `EGR.COMG`) and
+the ETR input's other sources (a pad, the comparators, LSE - only
+MCO into TIM2's ETR has run on silicon, as the dynamic clock's wall in
+[clock.md](clock.md)); the commutation event (`CR2.CCPC`/`CCUS`, `EGR.COMG`) and
 the `CCR5`/`CCR6` combined-PWM channels of TIM1; `CR2.TI1S` (the XOR of
 the three inputs); the break's comparator inputs (`TIMx_AF1`'s
 `BKCMPnE`); `TIMx_OR1`; the TIM1/TIM15 kernel-clock choice of PLLQCLK

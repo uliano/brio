@@ -48,11 +48,14 @@
  * same instant.
  *
  * ## The caveat that outlives this file
- * SysTick is clocked from HCLK, so its reload is a function of
- * Clock::hz. There is no DynamicClock on this target; when one arrives
- * this ticker must either become a ClockUser (rebase the reload) or
- * move to a timer that does not follow SYSCLK. init()'s clock_follows
- * assertion is what will refuse to compile on that day.
+ * SysTick is clocked from HCLK, so its reload is a function of the
+ * clock's rate. Under this target's DynamicClock (stm32g0/clock.hpp)
+ * the ticker is a ClockUser - rebase(hz) reprograms the reload and
+ * restarts the period, losing the phase of the tick in progress, late
+ * and never early (armv6m/ticker.hpp) - and a program that minds that
+ * runs tickless on the LPTIM instead, off SYSCLK altogether. init()'s
+ * clock_follows assertion refuses a dynamic clock that forgot to list
+ * the ticker.
  *
  * ## The same caveat, in its second half: STOP FREEZES THIS TIMEBASE
  * RM0444 5.3: the Stop modes stop every clock in the VCORE domain, so

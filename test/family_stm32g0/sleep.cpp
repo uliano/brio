@@ -89,9 +89,9 @@ void tickless_site_verbs() {
 
 // The Clock task decides which SWS value means "the Stop did not
 // happen": a PLL program has one to detect, an HSISYS program has none.
-static_assert(Site::expected_source == SysclkSource::pllrclk);
-static_assert(Stm32g0SleepSite<Clock<ClockSource::internal, 16'000'000>>::
-                  expected_source == SysclkSource::hsisys);
+static_assert(sysclk_source_of<SysClock>() == SysclkSource::pllrclk);
+static_assert(sysclk_source_of<Clock<ClockSource::internal, 16'000'000>>() ==
+              SysclkSource::hsisys);
 
 // The timed site's own arithmetic, at the default over-estimate.
 static_assert(timed_sleep_config_valid(TimedSleepConfig{}));

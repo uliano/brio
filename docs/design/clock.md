@@ -93,12 +93,14 @@ change, all of them before it happens, none of them through a queue.
   the core clock.** Time events, `now()`, timeouts and the idle wake-up
   run from a timebase the CPU rate does not reach (the RTC/PIT on AVR
   DA/DB, the LPTIM on the crystal of the STM32G0's tickless platform):
-  a rate change is invisible to the kernel and to every AO's timing.
-  The two SysTick tickers (SAM C21, the STM32G0's default) ride the
-  core clock instead, and REFUSE a dynamic clock by construction - their
-  `init(clock)` asserts `clock_follows`, and no `rebase` exists to
-  satisfy it - until the day one is written; on the STM32G0 that day
-  need not come, the LPTIM timebase being the right road (below).
+  a rate change is invisible to the kernel and to every AO's timing
+  (measured: a 50-tick periodic through ten switches, none early). The
+  SysTick ticker the two Cortex-M0+ families share rides the core clock
+  instead and is a `ClockUser` that restarts its period at a switch -
+  losing the phase of the tick in progress, under a tick, late and never
+  early - which is why a rescaling program on the STM32G0 is a tickless
+  one; on the SAM C21, with no dynamic clock by ruling, the question does
+  not arise.
 - **The caller picks the moment.** A driver's `rebase` can quiesce
   its own hardware, but a bus transaction in flight (SPI, I2C) belongs
   to a bus AO's FSM: switching in the middle of one corrupts it. The
@@ -113,13 +115,13 @@ change, all of them before it happens, none of them through a queue.
   is produced is per target (a cycle-calibrated loop where the core
   is deterministic, a hardware counter where it is not).
 
-## The other targets: the deferral, and the shape the STM32G0 takes
+## The other targets: the SAM C21's ruling, the STM32G0's tuple
 
 **The SAM C21 has no dynamic clock, by ruling.** Every peripheral there
 has a generic clock channel of its own, so "one rate for everything" is
 an AVR assumption and no program has asked to rescale; the question
-reopens with its first genuine consumer, together with the fan-out and
-the ticker's `ClockUser` question ([../samc21/clock.md](../samc21/clock.md)).
+reopens with its first genuine consumer, together with the fan-out
+([../samc21/clock.md](../samc21/clock.md)).
 
 **What the first target measured, and what it does not settle.** The
 family that CAN do both was made to choose between a fixed clock plus
@@ -134,81 +136,95 @@ scaling. The STM32G0 HAS a second voltage range and a low-power
 regulator whose whole point is running at 2 MHz cheaply - the one lever
 the first target lacked - so there the question is open, not answered.
 
-**The STM32G0: deferred with its design written, until a consumer.**
-Nothing rescales on the third target today (`Clock<source, hz>` is
-static, one root at a time), and the two consumers that would open it
-are named: a LOW-POWER-RUN program - SYSCLK at 2 MHz from HSISYS/8,
-VCORE Range 2, the regulator in low-power mode, the kernel clocks on
-HSI16 and the crystal, the tickless timebase, waking on the RTC, the
-LPTIM or a pad and NEVER on a clock-requesting peripheral (ES0548 2.2.4:
-a divided HSISYS cannot be woken from Stop by a USART or an I2C,
-measured) - or the energy experiment's own STM32G0 instance, with the
-SAM at 3.3 V as its meter. Whichever comes first brings the campaign.
-The shape it takes, so that the consumer starts from a design and not
-from a blank page:
+**The STM32G0 has one, and its rate is a tuple.** The consumer that
+opened it is the energy experiment's own STM32G0 instance (the SAM at
+3.3 V as its meter), and a LOW-POWER-RUN program - SYSCLK at 2 MHz from
+HSISYS/8 on the low-power regulator, the kernel clocks on HSI16 and the
+crystal, the tickless timebase, waking on the RTC, the LPTIM or a pad
+and NEVER on a clock-requesting peripheral (ES0548 2.2.4: a divided
+HSISYS cannot be woken from Stop by a USART or an I2C, measured) - is
+what it makes possible. The shape, as built
+([../stm32g0/clock.md](../stm32g0/clock.md)):
 
 - **A rate is a TUPLE, not a divisor.** On the AVR a dynamic clock's
   rate is the boot rate over one prescaler and the discrete set is an
   array the type indexes. Here a rate is (SYSCLK source and rate, the
-  VCORE range, the regulator mode): 64 MHz on the PLL in Range 1;
-  16 MHz on HSISYS; 2 MHz on HSISYS/8 in Range 2 on the low-power
-  regulator. The reachable rates come from two disjoint families
-  (HSI16 over 2^k, and the exact M/N/R ratios of the PLL) with no single
-  prescaler to index, so the discrete set is an EXPLICIT PACK the
-  program names - `DynamicClock<Boot, Rate<...>, Rate<...>, Users...>`
-  - each rate resolved at compile time to its HSIDIV or PLL setting,
-  its flash latency (the Range 1 and Range 2 columns both exist) and
-  its range; `rate_count`, `rate_hz(i)` and `rate_index()` keep this
-  page's discrete-rate surface unchanged, and `delay_us` dispatches by
-  index as on the AVR.
+  VCORE range, the regulator): 64 MHz on the PLL in Range 1; 16 MHz on
+  HSISYS in Range 2; 2 MHz on HSISYS/8 on the low-power regulator. The
+  reachable rates come from two disjoint families (HSI16 over 2^k, and
+  the exact M/N/R ratios of the PLL) with no single prescaler to index,
+  so the discrete set is an EXPLICIT PACK the program names -
+  `DynamicClock<Rates<R0, R1, ...>, Users...>`, each member a static
+  `Clock<source, hz, regime>` resolved at compile time to its HSIDIV or
+  PLL setting, its flash latency (the Range 1 and Range 2 columns both
+  exist) and its regime, `R0` the boot rate; `rate_count`, `rate_hz(i)`
+  and `rate_index()` keep this page's discrete-rate surface unchanged,
+  and `delay_us` dispatches by index as on the AVR (`delay_rates`, a
+  table built at compile time over that surface).
 - **The switch is direction-aware and interleaves two ladders the AVR
   has not got.** The fan-out precedes the switch in BOTH directions -
   this page's contract, unchanged - and the target's own steps sit
-  around it: rising = the range up and its VOSF wait, then the wait
-  states up, then the fan-out, then the switch; falling = the fan-out,
-  the switch, the wait states down, the range down, and the low-power
-  regulator last, because 4.3.2 wants the clock at or below 2 MHz
-  BEFORE it and REGLPF clear before any rise. `Clock<>::init()` is
-  already that sequence with compile-time settings (the PLL parked on
-  HSISYS before it is touched, the switch read back), which is the
-  body `set()` would run with runtime ones.
+  around it: rising = low-power run left and REGLPF clear, the range up
+  and VOSF clear, then the fan-out, then the rate's own `init()` (the
+  wait states up, then the root); falling = the fan-out, then the
+  rate's `init()` (the root, the wait states down, the range down, and
+  the low-power regulator LAST, because 4.3.2 wants the clock at or
+  below 2 MHz before it). A static `Clock<>` in Range 2 or low-power
+  run is that falling sequence on its own, so it stands alone as a boot
+  clock and is also exactly the body a switch runs; a Range 1 rate
+  refuses a core it finds in Range 2, because raising it is the
+  orderer's step. Measured, every rung as the type claims and the CPU at
+  the claimed rate on the crystal's scale; a switch costs 48 us (64 ->
+  16) to 384 us (2 MHz LPR -> 64: REGLPF, VOSF, the PLL lock).
 - **The fan-out is small by construction, and that is the G0's own
   gift.** The kernel-clock multiplexers (RCC_CCIPR) take a peripheral
   OFF SYSCLK: a USART or LPUART on HSI16 or the crystal, an LPTIM on the
   crystal, the ADC on HSI16, the RTC and the IWDG never on it at all -
   and on the tickless platform the kernel timebase is off it too. A
-  low-power program's users are therefore few: the SysTick cycle
-  counter (`delay_us`'s), a console left on PCLK, the general-purpose
-  timers. The inventory as the drivers stand: the `Uart` FOLLOWS (a
-  `ClockUser` whose `rebase` drains and reloads BRR, and folds to a
-  no-op for a port on HSI16 or LSE); `BasicTicker` and `SysTickCounter`
-  would restart their reload (the SysTick ticker loses ticks across the
-  restart, one more reason a rescaling program is a tickless one); the
-  `Adc` and the timers REFUSE a dynamic clock at compile time until they
-  grow a `rebase` (the ADC's is a prescaler that keeps its clock in
-  range, the AVR precedent; a timer's a new PSC for the same period);
-  the FDCAN and the window watchdog take the bus rate as a NUMBER and
-  keep it (the CAN's bit timing wants a fixed tq clock and its PLLQ/HSE
-  roots are not built; the watchdog's timeout scales with PCLK and a
-  rescaling program re-arms it). Where the AVR listed every clocked
-  driver, the G0 lists the ones it chose not to move off SYSCLK.
+  low-power program's users are therefore few. The inventory as built:
+  the `Uart` FOLLOWS (a `ClockUser` whose `rebase` drains and reloads
+  BRR, and folds to a no-op for a port on HSI16 or LSE - a console left
+  there never notices a switch); `BasicTicker` and `SysTickCounter`
+  FOLLOW (a new reload; the ticker's period restarts and loses the
+  phase of the tick in progress, under a tick, late); the `Adc` FOLLOWS
+  in a PCLK mode (the next larger division when the config's own would
+  put fADC over its ceiling, a pure function of config and rate - the
+  AVR precedent; a no-op in the asynchronous mode); the timers REFUSE
+  (every period, prescaler and capture is in PCLK cycles, and no
+  `rebase` can promise the same periods at the prescaler's granularity
+  - a rescaling program keeps its timers on what does not move, the
+  LPTIM and the RTC); the FDCAN and the window watchdog take the bus
+  rate as a NUMBER and keep it (the CAN's bit timing wants a fixed tq
+  clock and its PLLQ/HSE roots are not built; the watchdog's timeout
+  scales with PCLK and a rescaling program re-arms it). Where the AVR
+  listed every clocked driver, the G0 lists the ones it chose not to
+  move off SYSCLK.
 - **A Stop is a rate change the fan-out never saw.** The part comes out
-  of Stop 0/1 on HSISYS at 16 MHz with the PLL off; today the sleep
-  site re-runs the static clock task at the first thing that executes
-  after the wake ([../stm32g0/pwr.md](../stm32g0/pwr.md)). With a
-  dynamic clock the site restores the CURRENT rate (`rate_index()`),
-  not the boot one, and a program parked on a divided HSISYS keeps its
-  clock across the Stop (HSIDIV survives) but keeps ES0548 2.2.4 too.
-- **What a campaign benches first**, because every one of these sits on
-  the switch's critical path and none has run on silicon: the HSIDIV
-  write under a running core, the PLL's refusal while running (the
-  teardown before a reconfigure), a wait-state DECREASE, and Range 2
-  with its own latency column.
+  of Stop 0/1 on HSISYS with the PLL off, HSIDIV and LPR kept; the
+  dynamic clock's `restore()` re-runs the CURRENT rate (`rate_index()`)
+  with no fan-out - the users hold the divisors for exactly that rate -
+  or finds it in force (every HSISYS rate; a 2 MHz low-power-run program
+  wakes IN low-power run, measured) and does nothing. The plain sleep
+  site calls it at `disarm()`, which the manager reaches at the wake
+  convention - AFTER the AO the deadline was for has run, at 16 MHz
+  with the PLL off; a program that wants its rate back before any AO
+  runs calls `restore()` from the wake's own ISR (legal there: it does
+  nothing while a `set()` is in progress in thread mode). And HSISYS is
+  never left divided behind a PLL rate - the divider a program climbed
+  from is written back to 0 after every switch onto the PLL, or a Stop
+  would land on 2 MHz instead of 16 with ES0548 2.2.4's hazard along.
+- **The four steps the design named as unbenched** - the HSIDIV write
+  under a running core, the PLL's refusal while running, a wait-state
+  DECREASE, and Range 2 with its own latency column - all ran on
+  silicon in the dynamic clock's own suite, and behaved as the chapters
+  say.
 
-The refusals above are code today, so the design states nothing the
-build does not enforce: a static clock is what every STM32G0 driver
-but the `Uart` and the timebase accepts, and a dynamic one is a compile
-error naming this page.
+What the build enforces: a driver initialized with a dynamic clock is
+among its users or does not compile (`clock_follows`); a rate outside a
+pack's `set<hz>()` does not compile; a Range 2 rate above 16 MHz and a
+low-power-run rate above 2 MHz do not compile; the timers and the three
+USART personalities without a `rebase` refuse a dynamic clock at their
+`init`.
 
 ## Reference
 
@@ -220,8 +236,10 @@ error naming this page.
 | `Clock<source, hz, div>` | `avrdx/clock.hpp` | AVR DA/DB static clock |
 | `DynamicClock<Boot, Users...>` | `avrdx/clock.hpp` | AVR DA/DB dynamic clock over a static Boot |
 | `delay_us(clock, us)` | `avrdx/delay.hpp` | AVR DA/DB short wait, "at least" |
-| `Clock<source, hz>` | `samc21/clock.hpp`, `stm32g0/clock.hpp` | the SAM C21's and the STM32G0's static clocks (no dynamic one: the deferral above) |
-| `delay_us(clock, us)` | `armv6m/delay.hpp` | both Cortex-M0+ families' short wait, on SysTick's counter |
+| `Clock<source, hz>` | `samc21/clock.hpp` | the SAM C21's static clock (no dynamic one: the ruling above) |
+| `Clock<source, hz, regime>` | `stm32g0/clock.hpp` | the STM32G0's static clock, with its voltage regime |
+| `DynamicClock<Rates<...>, Users...>` | `stm32g0/clock.hpp` | the STM32G0's dynamic clock over a pack of rate tuples |
+| `delay_us(clock, us)`, `delay_rates<Clock>` | `armv6m/delay.hpp` | both Cortex-M0+ families' short wait, on SysTick's counter; the per-rate table of a dynamic clock |
 
 Target pages: [../avrdx/README.md](../avrdx/README.md),
 [../samc21/clock.md](../samc21/clock.md),

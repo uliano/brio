@@ -86,7 +86,20 @@ trigger. `init()` refuses PLLPCLK when the PLL's P output is not enabled
 (this stratum's `Clock<>` drives R only), refuses PCLK/1 unless the bus
 prescalers are in bypass (15.3.5's duty-cycle caution, asked of the
 silicon and not of the `Clock<>` type), and refuses any combination
-above DS13560 table 62's 35 MHz ceiling.
+above DS13560 table 62's 35 MHz ceiling. Range 2's 16 MHz ceiling holds
+BY CONSTRUCTION under the clock task's rates (a Range 2 rate has PCLK <=
+16 MHz and no PLL). Under a `DynamicClock` the converter FOLLOWS:
+`rebase(hz)` keeps the config's own division while fADC stays under the
+ceiling and moves it to the next larger one when it would not - a pure
+function of the config and the rate, so a ladder walked down and back
+up lands on the mode it started with - written the only way CKMODE can
+be, with the converter disabled and re-enabled; a no-op in the
+asynchronous mode. `clock_mode()` reads the division in force and
+`adc_hz(pclk_hz)` prices it. The calibration factor is not redone (the
+chapter ties it to the supply and the temperature), and the bench shows
+it holds: VDDA through VREFINT 3310..3316 mV at 16, 64 (the division
+moved to /2), 2 MHz in low-power run and 16 again, and 3316 in the
+asynchronous mode at 2 MHz ([clock.md](clock.md)).
 
 **The oversampler changes the FULL SCALE, and the full scale is
 `util/analog.hpp`'s `steps`.** Up to 256 conversions are accumulated,

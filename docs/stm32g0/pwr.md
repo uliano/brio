@@ -287,11 +287,12 @@ register removes them:
   (APC) + `standby_pull(port, pin, up, down)`, and `enter(PwrMode)` -
   arm, sweep the flags the chapter demands, DSB, WFI.
 - `Stm32g0SleepSite<Clock, TB = Ticker>` - `arm` / `disarm` / `armed`,
-  the `util/power.hpp` concept, plus `resume_clock()`,
-  `expected_source` and `pauses_tick` (true for the SysTick ticker,
-  whose interrupt the deep rungs pause; false for a tickless timebase,
-  which has nothing to pause - the `if constexpr` that lets one site
-  serve both programs).
+  the `util/power.hpp` concept, plus `resume_clock()` (a static clock
+  task re-run when SWS says a Stop took the root away, a DynamicClock's
+  own `restore()` - the rate in force, never the boot one) and
+  `pauses_tick` (true for the SysTick ticker, whose interrupt the deep
+  rungs pause; false for a tickless timebase, which has nothing to
+  pause - the `if constexpr` that lets one site serve both programs).
 - `TimedSleepConfig` {rtcclk_hz, source, wipe_domain, fast_clock} with
   `timed_sleep_config_valid`.
 - `Stm32g0TimedSleepSite<P, Clock, cfg>` - the same three verbs, plus
@@ -525,16 +526,22 @@ Driver gaps (this chapter's option space the stratum does not touch):
 - **SLEEPONEXIT and SEVONPEND**: two Cortex bits whose use is a kernel
   design decision - brio's loop returns to the idle path rather than
   staying in a handler - and not a power one.
-- **Low-power run and Low-power sleep as a RUNG**: the verbs exist and
-  nothing in this stratum calls them, because putting a whole program at
-  2 MHz is not something a sleep site may do behind an application's
-  back.
+- **Low-power run and Low-power sleep as a RUNG**: no sleep site takes
+  them, because putting a whole program at 2 MHz is not something a
+  sleep site may do behind an application's back. Low-power run is a
+  RATE instead - `PowerRegime::low_power_run` on a `Clock<>` in
+  [clock.md](clock.md), where the ordering rules of 4.3.2 and 4.1.4 are
+  sequenced by the task and measured; Low-power sleep (a WFI from
+  low-power run) is what a `SleepDepth::light` idle becomes there and
+  is not staged as such.
 
-Implemented, not bench-verified: `Pwr::range(2)` (the voltage scaling
-change itself - this stratum's flash latency table is the Range 1
-column), `sram_retention` across a real Standby, `sampled_supply_monitor`,
-the VDDIO2 monitor, the DAC supply monitor, and the Standby pull
-registers with APC actually set.
+Implemented, not bench-verified: `sram_retention` across a real Standby,
+`sampled_supply_monitor`, the VDDIO2 monitor, the DAC supply monitor,
+and the Standby pull registers with APC actually set. `Pwr::range(2)`,
+`low_power_run` both ways, VOSF and REGLPF are bench-driven by the
+dynamic clock's suite ([clock.md](clock.md)), which also found THE PART
+WAKES FROM A STOP 1 IN LOW-POWER RUN WITH HSIDIV KEPT (4.3.6): LPR and
+REGLPF standing after the wake, SYSCLK on HSISYS/8.
 
 The THIRD site's own gaps: it has been run on LPTIM1 and on LSE only -
 LPTIM2 as the site's instance and LSI as its source are configurations

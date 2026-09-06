@@ -20,11 +20,25 @@ static_assert(delay_rate(125'000UL).cycles_per_us == 1);
 static_assert(delay_rate(64'000'001UL).cycles_per_us == 65);
 static_assert(delay_rate(0).cycles_per_us == 0);
 
+// A dynamic clock's factors are a compile-time table over its pack,
+// selected by the rate index at wait time (no division).
+using Dyn = DynamicClock<Rates<SysClock, Clock<ClockSource::internal, 16'000'000>, SlowClock>,
+                         SysTickCounter>;
+static_assert(delay_rates<Dyn>.size() == 3);
+static_assert(delay_rates<Dyn>[0].cycles_per_us == 64);
+static_assert(delay_rates<Dyn>[1].cycles_per_us == 16);
+static_assert(delay_rates<Dyn>[2].cycles_per_us == 2);
+
 void delay_verbs() {
     constexpr SysClock fast;
     constexpr SlowClock slow;
+    constexpr Dyn dyn;
     (void)delay_us(fast, 100);
     (void)delay_us(slow, 5);
+    (void)delay_us(dyn, 50);
+    (void)SysTickCounter::start(dyn);
+    SysTickCounter::rebase(16'000'000);
+    Ticker::rebase(2'000'000);
     (void)delay_us(fast, 65'535);          // refused at run time, not here
     (void)delay_us(delay_rate(SysClock::hz), 12);
 

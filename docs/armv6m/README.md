@@ -7,12 +7,19 @@ vendor ships unchanged - the NVIC and PRIMASK (`armv6m/nvic.hpp`:
 `irq_priority_levels`), the SysTick timebase (`armv6m/ticker.hpp`:
 `BasicTicker`, and `SysTickCounter` - SysTick as a bare cycle counter
 with no interrupt, for a program whose kernel timebase is elsewhere,
-such as the STM32G0's tickless LPTIM one) and the microsecond busy-wait
-on SysTick's own counter (`armv6m/delay.hpp`: `delay_us`,
-`delay_rate`, `DelayRate` - "at least", never early, capped below one
-SysTick period of one millisecond, no division at wait time; it needs
-the counter running, never the interrupt, so it serves both writers
-alike). It exists because brio's naming rule says a core stratum is
+such as the STM32G0's tickless LPTIM one; both are `ClockUser`s whose
+`rebase(hz)` reprograms the reload for a dynamic clock - the ticker
+restarting its period and losing the phase of the tick in progress,
+under a tick, late and never early; the counter measured at every rung
+of the STM32G0's ladder, the ticker's rebase compiled and not benched)
+and the microsecond busy-wait on SysTick's own counter
+(`armv6m/delay.hpp`: `delay_us`, `delay_rate`, `DelayRate` - "at
+least", never early, capped below one SysTick period of one
+millisecond, no division at wait time: folded for a static clock,
+and for a dynamic one selected by its rate index out of `delay_rates`,
+a per-rate table built at compile time over the clock's discrete-rate
+surface; it needs the counter running, never the interrupt, so it
+serves both writers alike). It exists because brio's naming rule says a core stratum is
 factored at the SECOND ARM family: `samc21/` and `stm32g0/` carried
 these files as twins line for line - the first two until the STM32G0's
 bring-up, the third until the STM32G0's fillers were done - and every

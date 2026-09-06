@@ -44,11 +44,72 @@ using Slow = Clock<ClockSource::internal, 2'000'000>;
 static_assert(Fast::is_static && Fast::hz == 64'000'000 && Fast::pclk_hz == 64'000'000);
 static_assert(clock_hz(Boot{}) == 16'000'000);
 static_assert(Slow::hsidiv == 3);
+static_assert(Fast::power_regime == PowerRegime::range1 && Fast::wait_states == 2);
+static_assert(Fast::sysclk_source == SysclkSource::pllrclk);
+static_assert(Boot::sysclk_source == SysclkSource::hsisys);
+
+// The voltage side of a rate: the Range 2 column of table 13, the two
+// ceilings (16 MHz for Range 2, 2 MHz for low-power run - the negatives
+// hold the refusals), and the regime a rate carries.
+using Mid = Clock<ClockSource::internal, 16'000'000, PowerRegime::range2>;
+using Lpr = Clock<ClockSource::internal, 2'000'000, PowerRegime::low_power_run>;
+using Lpr8 = Clock<ClockSource::internal, 8'000'000, PowerRegime::range2>;
+static_assert(Mid::wait_states == 1 && Lpr::wait_states == 0 && Lpr8::wait_states == 0);
+static_assert(Mid::power_regime == PowerRegime::range2);
+static_assert(Lpr::power_regime == PowerRegime::low_power_run);
+static_assert(flash_wait_states_for(PowerRegime::range1, 16'000'000) == 0);
+static_assert(flash_wait_states_for(PowerRegime::range2, 16'000'000) == 1);
+static_assert(flash_wait_states_for(PowerRegime::low_power_run, 2'000'000) == 0);
+
+// The dynamic clock over a pack of three tuples: the discrete-rate
+// surface, the users list, the first-match rule of set<hz>() and the
+// by-position verbs.
+struct UserA { static void rebase(uint32_t) {} };
+struct UserB { static void rebase(uint32_t) {} };
+struct NotAUser {};
+using Dyn = DynamicClock<Rates<Fast, Mid, Lpr>, UserA, UserB>;
+static_assert(!Dyn::is_static);
+static_assert(Dyn::rate_count == 3);
+static_assert(Dyn::rate_hz(0) == 64'000'000 && Dyn::rate_hz(1) == 16'000'000 &&
+              Dyn::rate_hz(2) == 2'000'000);
+static_assert(Dyn::rate_regime(2) == PowerRegime::low_power_run);
+static_assert(Dyn::rate_source(0) == SysclkSource::pllrclk &&
+              Dyn::rate_source(1) == SysclkSource::hsisys);
+static_assert(Dyn::can_run_at(16'000'000) && !Dyn::can_run_at(8'000'000));
+static_assert(Dyn::index_of(2'000'000) == 2 && Dyn::index_of(1) == Dyn::rate_count);
+static_assert(Dyn::rebases<UserA> && Dyn::rebases<UserB> && !Dyn::rebases<NotAUser>);
+static_assert(clock_follows<Dyn, UserA>() && !clock_follows<Dyn, NotAUser>());
+static_assert(clock_follows<Fast, NotAUser>());   // a static clock follows nothing
+// Two rates sharing an hz: set<hz>() takes the first, set_index() names one.
+using Twins = DynamicClock<Rates<Boot, Mid>>;
+static_assert(Twins::index_of(16'000'000) == 0 && Twins::rate_regime(1) == PowerRegime::range2);
+// The boot rate alone is a legal pack.
+using Lone = DynamicClock<Rates<Fast>, UserA>;
+static_assert(Lone::rate_count == 1);
+
+void dynamic_verbs() {
+    constexpr Dyn clock;
+    (void)Dyn::init();
+    (void)clock_hz(clock);
+    (void)Dyn::hz();
+    (void)Dyn::pclk_hz();
+    (void)Dyn::rate_index();
+    (void)Dyn::power_regime();
+    (void)Dyn::set<2'000'000>();
+    (void)Dyn::set(64'000'000);
+    (void)Dyn::set_index<1>();
+    (void)Dyn::set_index(2);
+    (void)Dyn::restore();
+    (void)Twins::set_index<1>();
+    (void)Lone::init();
+}
 
 void clock_verbs() {
     (void)Fast::init();
     (void)Boot::init();
     (void)Slow::init();
+    (void)Mid::init();
+    (void)Lpr::init();
 
     Rcc::hsi_enable(true);
     (void)Rcc::hsi_ready();
@@ -70,7 +131,14 @@ void clock_verbs() {
     Rcc::apb2_clock(RCC_APBENR2_USART1EN, true);
     Rcc::kernel_clock(RCC_CCIPR_USART1SEL_Pos, 0);
     (void)Rcc::kernel_clock(RCC_CCIPR_USART1SEL_Pos);
+    (void)Rcc::mco(Rcc::mco_hsi16_code, 6);
+    Rcc::mco_off();
     (void)Pwr::range();
+    (void)Pwr::range(2);
+    (void)Pwr::range_changing();
+    (void)Pwr::low_power_run();
+    (void)Pwr::low_power_run(false);
+    (void)Pwr::on_low_power_regulator();
 
     (void)FlashWaitStates::get();
     (void)FlashWaitStates::set(2);

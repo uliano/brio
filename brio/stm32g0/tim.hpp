@@ -284,6 +284,22 @@ struct TimSlaveConfig {
     bool master_slave = false;
 };
 
+/// SMCR's external-trigger half (21.4.3): the ETR input's polarity,
+/// prescaler and filter, and ECE - external clock mode 2, ETRF as the
+/// counter's clock with no trigger selection at all. What feeds ETR is
+/// `Tim<n>::external_trigger_select()`'s multiplexer (the pad by
+/// default, or an internal signal).
+struct TimEtrConfig {
+    bool inverted = false;     ///< ETP: active low / falling edge
+    uint8_t prescaler = 0;     ///< ETPS: 0 off, 1 /2, 2 /4, 3 /8 - 21.4.3's rule wants ETRP at or below TIMxCLK/4
+    uint8_t filter = 0;        ///< ETF 0..15, the same table as a channel's ICxF
+    bool clock_mode2 = false;  ///< ECE: the counter clocks on ETRF's rising edges
+};
+
+constexpr bool tim_etr_config_valid(const TimEtrConfig& c) {
+    return c.prescaler <= 3u && c.filter <= 15u;
+}
+
 /// BDTR, the break and dead-time unit of the four timers that have one
 /// (21.4.18). LOCK IS ONE-WAY: once written non-zero, the level's
 /// registers are read-only until the next peripheral reset - which is
@@ -389,8 +405,12 @@ constexpr uint8_t tim_trigger_index_for(uint8_t n, uint8_t master) {
 template <typename Clock>
 constexpr uint32_t tim_clock_hz(Clock) {
     static_assert(Clock::is_static,
-                  "brio Tim: the timers have no rebase() yet, so a dynamic clock is "
-                  "refused - docs/design/clock.md, the STM32G0 inventory");
+                  "brio Tim: a timer counts PCLK and every period, prescaler and "
+                  "capture it holds is in those cycles - a DynamicClock would move all "
+                  "of them at once and no rebase() can promise the same periods (the "
+                  "prescaler's granularity), so the timers take a static clock only. "
+                  "A rescaling program keeps its timers on what does not move: the "
+                  "LPTIM on LSE, the RTC - docs/design/clock.md, the STM32G0 inventory");
     return Clock::pclk_hz;
 }
 
@@ -1098,6 +1118,63 @@ public:
         }
     }
     static bool main_output() { return has_break && (regs().BDTR & TIM_BDTR_MOE) != 0u; }
+
+    // ---- the external trigger input (21.4.3, 21.4.28) -----------------------
+
+    /// ETP / ETPS / ETF / ECE, the SMCR half the slave configuration
+    /// leaves alone. Refused on a timer without ETR (TIM15 and the
+    /// one-channel timers) and for a code outside its field. 21.4.3:
+    /// "the external clock frequency must be at most a quarter of the
+    /// TIMxCLK" AFTER the prescaler - the caller's arithmetic, since
+    /// this file does not know the source's rate.
+    static bool external_trigger(const TimEtrConfig& c) {
+        if constexpr (!has_external_trigger) {
+            (void)c;
+            return false;
+        } else {
+            if (!tim_etr_config_valid(c)) {
+                return false;
+            }
+            TIM_TypeDef& t = regs();
+            uint32_t v = t.SMCR & ~(TIM_SMCR_ETP | TIM_SMCR_ETPS_Msk | TIM_SMCR_ETF_Msk | TIM_SMCR_ECE);
+            if (c.inverted) v |= TIM_SMCR_ETP;
+            v |= static_cast<uint32_t>(c.prescaler) << TIM_SMCR_ETPS_Pos;
+            v |= static_cast<uint32_t>(c.filter) << TIM_SMCR_ETF_Pos;
+            if (c.clock_mode2) v |= TIM_SMCR_ECE;
+            t.SMCR = v;
+            return true;
+        }
+    }
+
+    /**
+     * TIMx_AF1.ETRSEL: which SOURCE feeds ETR. Code 0 is the pad; the
+     * other codes are per timer and are the chapter's table (TIM1 the
+     * comparators and the ADC's three watchdogs, TIM2 and TIM3 the
+     * comparators, LSE and the MCOs) - the raw code, for the same reason
+     * input_select() gives one: the vocabulary belongs to the signal's
+     * owner. Refused on a timer without ETR.
+     */
+    static bool external_trigger_select(uint8_t code) {
+        if constexpr (!has_external_trigger) {
+            (void)code;
+            return false;
+        } else {
+            if (code > 15u) {
+                return false;
+            }
+            TIM_TypeDef& t = regs();
+            t.AF1 = (t.AF1 & ~TIM1_AF1_ETRSEL_Msk) |
+                    (static_cast<uint32_t>(code) << TIM1_AF1_ETRSEL_Pos);
+            return true;
+        }
+    }
+    static uint8_t external_trigger_select() {
+        if constexpr (!has_external_trigger) {
+            return 0;
+        } else {
+            return static_cast<uint8_t>((regs().AF1 & TIM1_AF1_ETRSEL_Msk) >> TIM1_AF1_ETRSEL_Pos);
+        }
+    }
 
     // ---- the input multiplexer (21.4.29 and its twins) ----------------------
 

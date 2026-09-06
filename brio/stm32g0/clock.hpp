@@ -16,11 +16,22 @@
  *    table is indexed by the voltage range, and opens the PWR block's
  *    bus clock on the way. One chapter, one owner.)
  *
- *  TASK - what an application names:
- *    Clock<source, hz>   the static main clock: ONE constexpr truth `hz`
- *             every driver derives from (no F_CPU in this build, exactly
- *             as on the other two targets); init() composes the
- *             resources and reports whether the requested root runs.
+ *  TASKS - what an application names:
+ *    Clock<source, hz, regime>   the static main clock: ONE constexpr
+ *             truth `hz` every driver derives from (no F_CPU in this
+ *             build, exactly as on the other two targets); init()
+ *             composes the resources and reports whether the requested
+ *             root runs. `regime` is the VOLTAGE SIDE of the rate - the
+ *             VCORE range and the regulator (PowerRegime below) - Range 1
+ *             by default, which is what every program before the dynamic
+ *             clock ran in.
+ *    DynamicClock<Rates<...>, Users...>   the runtime regime: a PACK of
+ *             static Clock tasks the program may run at, the first the
+ *             boot rate, set<hz>() / set(hz) / set_index() switching
+ *             between them under the running program after fanning the
+ *             new rate out to Users (util/clock.hpp's ClockUser contract,
+ *             the avrdx precedent) - and restore(), the verb the sleep
+ *             site calls when a Stop has dropped SYSCLK to HSISYS.
  *
  * THE THIRD CLOCK MODEL, and what crosses the util contract. The AVR
  * has one prescaler on one main clock; the SAM has a generator per
@@ -44,9 +55,39 @@
  * ceiling (an exact ratio is searched at compile time; an unreachable
  * rate is a compile error naming the rule). HSE (crystal or bypass),
  * LSI, LSE, HSI48 and the P/Q outputs are DECLARED in the enum and
- * refused, and the DynamicClock question is not opened - the samc21
- * position, for the same reason: which root SYSCLK takes at run time and
- * who is told is a design decision, not a side effect of a bring-up.
+ * refused.
+ *
+ * THE DYNAMIC CLOCK, AND WHY A RATE IS A TUPLE HERE (docs/design/
+ * clock.md, "The other targets"). On the AVR a dynamic clock's rate is
+ * the boot rate over one prescaler, so its discrete set is an array the
+ * type indexes; on this family a rate is (the SYSCLK root and its rate,
+ * the VCORE range, the regulator) - 64 MHz on the PLL in Range 1, 16 MHz
+ * on HSISYS, 2 MHz on HSISYS/8 in Range 2 on the low-power regulator -
+ * and the reachable rates come from two disjoint families with no single
+ * prescaler to index. So the discrete set is an EXPLICIT PACK the program
+ * names, each member a static Clock task with its regime, and the switch
+ * is DIRECTION-AWARE around the flash latency and the regulator:
+ *   rising:  leave low-power run (REGLPF clear), the range UP (VOSF
+ *            clear), the fan-out, then the rate's own init() - wait
+ *            states up, then the root;
+ *   falling: the fan-out, the rate's init() - the root, then wait states
+ *            down - the range DOWN, and low-power run LAST, because 4.3.2
+ *            wants SYSCLK at or below 2 MHz before it.
+ * A rate in Range 2 takes its wait states from table 13's Range 2 column
+ * inside its own init(), which is why the range is safe to lower after
+ * it: the stricter column is already in force. What a Stop leaves behind
+ * (HSISYS, the PLL off, HSIDIV and LPR kept) is put back by restore() -
+ * the CURRENT rate, no fan-out, the sleep site's verb.
+ *
+ * THE FAN-OUT IS SMALL BY CONSTRUCTION: RCC_CCIPR takes a peripheral OFF
+ * SYSCLK (a USART on HSI16 or LSE, the LPTIM on the crystal, the ADC on
+ * HSI16, the RTC and the IWDG never on it), and a tickless program's
+ * kernel timebase is off it too. What follows SYSCLK and says so with a
+ * rebase(): the Uart on PCLK/SYSCLK (a no-op on HSI16/LSE), the Adc in a
+ * PCLK mode (a divider that keeps its clock in range), and SysTick as
+ * BasicTicker or SysTickCounter (a new reload). The timers take a static
+ * clock only (tim.hpp says why), the FDCAN and the WWDG take the bus
+ * rate as a NUMBER.
  *
  * Facts that shape the code (RM0444 5.2, 5.4, 3.3.4, 4.1.4; ES0548 on
  * silicon rev Z, DBGMCU_IDCODE 0x10016467):
@@ -54,6 +95,10 @@
  *    HCLK = PCLK at 16 MHz, VCORE Range 1, FLASH_ACR.LATENCY 0;
  *  - table 13 ties the wait states to HCLK per voltage range, and 3.3.4
  *    orders them BEFORE a rise (with a readback) and AFTER a fall;
+ *  - 4.1.4: Range 2 serves up to 16 MHz; going up is VOS then VOSF then
+ *    the wait states then the frequency, going down is the reverse;
+ *    4.3.2: low-power run wants SYSCLK <= 2 MHz first and REGLPF clear
+ *    before any rise after leaving it;
  *  - the PLL input after /M must sit in 2.66..16 MHz, the VCO in
  *    96..344 MHz, PLLRCLK <= 64 MHz, N in 8..86, R in 2..8 (5.4.4);
  *    the PLL is configured only while stopped (5.2.4);
@@ -64,13 +109,15 @@
  *    stall that covers it;
  *  - ES0548 2.2.4: with HSIDIV != 0 the part cannot enter Stop and
  *    peripherals with clock-request capability cannot wake it - a
- *    divided `internal` rate is therefore a stated caveat for the
- *    future sleep site, not a refusal here.
+ *    divided `internal` rate is therefore a stated caveat for the sleep
+ *    site (Pwr::stop_hsidiv_hazard() is the predicate), not a refusal.
  */
 
 #pragma once
 
 #include <stdint.h>
+
+#include <concepts>
 
 #include "stm32g0xx.h"
 
@@ -248,6 +295,37 @@ struct Rcc {
         return (RCC->CFGR & (RCC_CFGR_HPRE_Msk | RCC_CFGR_PPRE_Msk)) == 0u;
     }
 
+    // ---- the clock output (5.2.16) --------------------------------------------
+    //
+    // RCC_CFGR.MCOSEL / MCOPRE: one of the tree's clocks, prescaled by a
+    // power of two, as a SIGNAL. It reaches a pad through that pad's
+    // alternate function (PA8's AF0 is MCO on every part - the pin's
+    // job, not this file's) and, with no pad at all, the timers' input
+    // multiplexers: TIM2/TIM3's ETRSEL and TIM14/16/17's TISEL name
+    // "MCO" among their sources, which is what makes an internal clock
+    // COUNTABLE by a timer that is not on it - HSI16/64 into TIM2's ETR
+    // is a 4 us wall that does not move with SYSCLK (test_stm32_clock's
+    // instrument). MCO2 (the G0B1/G0C1's second output) is not built.
+    /// The codes common to every header of the pack; 8..11 (PLLP, PLLQ,
+    /// RTCCLK, RTC_WAKEUP) are the G0B1 class's own and pass as literals.
+    static bool mco(uint8_t source_code, uint8_t log2_div) {
+        const uint32_t sel = static_cast<uint32_t>(source_code) << RCC_CFGR_MCOSEL_Pos;
+        const uint32_t pre = static_cast<uint32_t>(log2_div) << RCC_CFGR_MCOPRE_Pos;
+        if ((sel & ~RCC_CFGR_MCOSEL_Msk) != 0u || (pre & ~RCC_CFGR_MCOPRE_Msk) != 0u) {
+            return false;
+        }
+        RCC->CFGR = (RCC->CFGR & ~(RCC_CFGR_MCOSEL_Msk | RCC_CFGR_MCOPRE_Msk)) | sel | pre;
+        return true;
+    }
+    static void mco_off() { RCC->CFGR = RCC->CFGR & ~(RCC_CFGR_MCOSEL_Msk | RCC_CFGR_MCOPRE_Msk); }
+    static constexpr uint8_t mco_off_code = 0;
+    static constexpr uint8_t mco_sysclk_code = 1;
+    static constexpr uint8_t mco_hsi16_code = 3;
+    static constexpr uint8_t mco_hse_code = 4;
+    static constexpr uint8_t mco_pllr_code = 5;
+    static constexpr uint8_t mco_lsi_code = 6;
+    static constexpr uint8_t mco_lse_code = 7;
+
     // ---- LSI, the low-speed RC (5.2.6, 5.2.14) --------------------------------
     //
     // It lives in RCC_CSR, a register whose TOP BYTE belongs to the
@@ -405,6 +483,31 @@ enum class ClockSource : uint8_t {
     lse,        ///< the 32.768 kHz crystal as SYSCLK
 };
 
+/// The voltage side of a rate: which VCORE range the main regulator
+/// holds (4.1.4) and whether the low-power regulator supplies VCORE
+/// instead (4.3.2). Range 1 is the reset state and serves every rate to
+/// 64 MHz; Range 2 serves up to 16 MHz with one more wait state at the
+/// top of its column and less current; low-power run is Range 2 with
+/// the main regulator off, legal at or below 2 MHz - the one lever the
+/// other two families have not got, and the reason this target's
+/// dynamic clock exists at all.
+enum class PowerRegime : uint8_t {
+    range1,          ///< VOS = Range 1, main regulator (the reset state)
+    range2,          ///< VOS = Range 2, main regulator: SYSCLK <= 16 MHz
+    low_power_run,   ///< Range 2 and PWR_CR1.LPR: SYSCLK <= 2 MHz
+};
+
+inline constexpr uint32_t range2_max_hz = 16'000'000UL;
+inline constexpr uint32_t low_power_run_max_hz = 2'000'000UL;
+
+/// Table 13's column for a regime: the Range 2 column serves both
+/// Range 2 regimes (the low-power regulator's VCORE is the Range 2
+/// level, 4.3.2).
+constexpr uint8_t flash_wait_states_for(PowerRegime regime, uint32_t hz) {
+    return regime == PowerRegime::range1 ? FlashWaitStates::for_hz(hz)
+                                         : FlashWaitStates::for_hz_range2(hz);
+}
+
 /**
  * The static main clock: `hz` is the ONE compile-time truth about SYSCLK
  * that every driver of this target derives from.
@@ -416,13 +519,30 @@ enum class ClockSource : uint8_t {
  *
  * `hz` is SYSCLK = HCLK; `pclk_hz` is the APB rate, equal to `hz`
  * because this task pins both prescalers at 1 (see the file header).
+ *
+ * `regime` is the rate's voltage side (PowerRegime): Range 1 by default,
+ * and init() then REFUSES a core it finds in Range 2 rather than raising
+ * it, because a range change is a sequence around the wait states that
+ * belongs to whoever ordered the rates - DynamicClock below, or the
+ * program. A Range 2 rate's init() is the whole falling sequence of
+ * 4.1.4 on its own: the wait states from the Range 2 column (the
+ * stricter one, so it is legal to set them in either range), the root,
+ * then the range down and, for `low_power_run`, LPR last; it first
+ * LEAVES low-power run if a previous life set it, because every step of
+ * that sequence is priced for the main regulator. So a static Range 2
+ * clock stands alone as a boot clock, and is also exactly the body a
+ * dynamic switch runs.
  */
-template <ClockSource src, uint32_t src_hz>
+template <ClockSource src, uint32_t src_hz, PowerRegime regime = PowerRegime::range1>
 struct Clock {
     static constexpr ClockSource source = src;
     static constexpr uint32_t hz = src_hz;        ///< SYSCLK = HCLK (HPRE = 1)
     static constexpr uint32_t pclk_hz = src_hz;   ///< PCLK (PPRE = 1)
     static constexpr bool is_static = true;
+    static constexpr PowerRegime power_regime = regime;
+    /// The RCC_CFGR.SWS value this task's root reports once in force.
+    static constexpr SysclkSource sysclk_source =
+        src == ClockSource::pll ? SysclkSource::pllrclk : SysclkSource::hsisys;
 
     static_assert(src == ClockSource::internal || src == ClockSource::pll,
                   "brio Clock: only ClockSource::internal (HSI16 / HSIDIV) and "
@@ -436,10 +556,17 @@ struct Clock {
                   "input after /M must sit in 2.66..16 MHz, the VCO in 96..344 MHz, "
                   "R in 2..8, and PLLRCLK must not exceed 64 MHz (RM0444 5.4.4)");
     static_assert(src_hz <= sysclk_max_hz, "SYSCLK must not exceed 64 MHz");
+    static_assert(regime == PowerRegime::range1 || src_hz <= range2_max_hz,
+                  "brio Clock: VCORE Range 2 serves SYSCLK up to 16 MHz (RM0444 4.1.4) "
+                  "- a faster rate is a Range 1 rate");
+    static_assert(regime != PowerRegime::low_power_run || src_hz <= low_power_run_max_hz,
+                  "brio Clock: low-power run wants SYSCLK at or below 2 MHz (RM0444 4.3.2)");
 
     /// The setting `hz` needs (meaningful for the source it belongs to).
     static constexpr uint8_t hsidiv = hsidiv_for(src_hz);
     static constexpr PllConfig pll = pll_config_for(src_hz);
+    /// Table 13's wait states for `hz` in this regime's column.
+    static constexpr uint8_t wait_states = flash_wait_states_for(regime, src_hz);
 
     /// Bring SYSCLK to `hz`. Returns false when a root did not report
     /// ready, the switch did not take, or the wait states did not land -
@@ -450,25 +577,38 @@ struct Clock {
     /// boots on HSI16 undivided, but a debugger or a bootloader may have
     /// left anything behind, and `hz` is a promise.
     static bool init() {
-        // This stratum's latency table is the Range 1 column; a core left
-        // in Range 2 by someone else would be under-waited at 64 MHz. PWR
-        // is an APB peripheral with an enable bit of its own (APBENR1.PWREN,
-        // clear at reset), and 5.2.17 says a clockless peripheral's
-        // registers are not readable - the bench read the right reset
-        // value through the closed gate once, which is luck and not a
-        // contract, so the gate is opened first and left open (the sleep
-        // site will want it anyway).
+        // PWR is an APB peripheral with an enable bit of its own
+        // (APBENR1.PWREN, clear at reset), and 5.2.17 says a clockless
+        // peripheral's registers are not readable - the bench read the
+        // right reset value through the closed gate once, which is luck
+        // and not a contract, so the gate is opened first and left open
+        // (the sleep site wants it anyway).
         Pwr::bus_clock(true);
-        if (Pwr::range() != 1u) {
-            return false;
+        bool ok = true;
+        if constexpr (regime == PowerRegime::range1) {
+            // This regime's latency table is the Range 1 column; a core
+            // left in Range 2 by someone else would be under-waited at
+            // 64 MHz, and raising the range is the orderer's job (the
+            // class comment) - refused, nothing written.
+            if (Pwr::range() != 1u) {
+                return false;
+            }
+        } else {
+            // A Range 2 rate: leave the low-power regulator first if a
+            // previous life is on it (4.3.2's exit - LPR clear, REGLPF
+            // clear - is legal at any rate; its 2 MHz limit is the
+            // ENTRY's, taken last below). The range itself is lowered
+            // after the root, once the Range 2 wait states are in force.
+            if (Pwr::low_power_run()) {
+                ok = Pwr::low_power_run(false);
+            }
         }
 
         // Wait states BEFORE a rise, AFTER a fall (3.3.4).
-        constexpr uint8_t ws = FlashWaitStates::for_hz(hz);
+        constexpr uint8_t ws = wait_states;
         const bool raising = ws > FlashWaitStates::get();
-        bool ok = true;
         if (raising) {
-            ok = FlashWaitStates::set(ws);
+            ok = FlashWaitStates::set(ws) && ok;
         }
 
         Rcc::hsi_enable(true);
@@ -503,8 +643,230 @@ struct Clock {
         if (!raising) {
             ok = FlashWaitStates::set(ws) && ok;
         }
+
+        if constexpr (regime != PowerRegime::range1) {
+            // 4.1.4's falling order: frequency, wait states (the Range 2
+            // column is already in force), then VOS - and the low-power
+            // regulator last of all, at a rate 4.3.2 allows it (the
+            // static_assert above). Pwr::range() waits VOSF out; entering
+            // LPR has no readback to wait for (REGLPF rises, and it is
+            // the EXIT that waits on it).
+            if (Pwr::range() != 2u) {
+                ok = Pwr::range(2) && ok;
+            }
+            if constexpr (regime == PowerRegime::low_power_run) {
+                ok = Pwr::low_power_run(true) && ok;
+            }
+        }
         return ok;
     }
+};
+
+/// The pack of rates a DynamicClock may run at: static Clock tasks, the
+/// FIRST the boot rate. A type list and nothing else - the AVR's
+/// discrete set is an array over one prescaler, this family's is the
+/// program's own choice of tuples (the file header).
+template <typename... Rs>
+struct Rates {
+    static constexpr uint8_t count = sizeof...(Rs);
+};
+
+/**
+ * The runtime regime: `Rates<R0, R1, ...>` names the rates - each a
+ * static `Clock<source, hz, regime>`, R0 the boot rate - and Users the
+ * drivers a switch fans the new rate out to (each a ClockUser: `static
+ * void rebase(uint32_t hz)`, checked by the concept where the list is
+ * written) IN LIST ORDER, synchronously, BEFORE the rate changes - so a
+ * user can drain what it has in flight at the old rate. Then the target
+ * rate's own init() runs, with this file's direction-aware steps around
+ * it (the file header): a rise leaves low-power run and raises the
+ * range FIRST, a fall lets the rate's init() lower them LAST.
+ *
+ *   using Fast = brio::Clock<brio::ClockSource::pll, 64'000'000>;
+ *   using Mid  = brio::Clock<brio::ClockSource::internal, 16'000'000,
+ *                            brio::PowerRegime::range2>;
+ *   using Slow = brio::Clock<brio::ClockSource::internal, 2'000'000,
+ *                            brio::PowerRegime::low_power_run>;
+ *   using SysClock = brio::DynamicClock<brio::Rates<Fast, Mid, Slow>,
+ *                                       brio::SysTickCounter, Link, brio::Adc>;
+ *   constexpr SysClock clock;
+ *   SysClock::init();                 // Fast's init: 64 MHz, Range 1
+ *   SysClock::set<2'000'000>();       // the users rebased, then Slow
+ *
+ * The discrete-rate surface (docs/design/clock.md) is the pack's:
+ * rate_count, rate_hz(i), rate_index() - what armv6m/delay.hpp
+ * dispatches on so that no division runs at wait time. Two rates may
+ * share an hz (16 MHz in Range 1 and in Range 2 are different tuples):
+ * set<hz>() and set(hz) take the FIRST that matches, set_index<i>() /
+ * set_index(i) name one exactly.
+ *
+ * Call set() only when nothing that depends on the rate is
+ * mid-transfer (a bus transaction in flight is the caller's problem -
+ * in an AO system, ask the bus AOs first). Main context only.
+ *
+ * WHAT A STOP DOES TO THIS: the part comes out of Stop 0/1 on HSISYS
+ * with the PLL off, HSIDIV kept, LPR kept (pwr.hpp fact 4). restore()
+ * re-runs the CURRENT rate's init() with no fan-out - the users were
+ * configured for that rate and it is that rate that comes back - and
+ * is what stm32g0/sleep.hpp's site calls first thing after a wake; a
+ * rate already in force (SWS says so: every HSISYS rate, since HSIDIV
+ * survives) costs one register read.
+ */
+template <typename RateList, ClockUser... Users>
+struct DynamicClock;
+
+template <typename... Rs, ClockUser... Users>
+struct DynamicClock<Rates<Rs...>, Users...> {
+    static constexpr bool is_static = false;
+    static constexpr uint8_t rate_count = sizeof...(Rs);
+    static_assert(rate_count >= 1, "brio DynamicClock: at least the boot rate");
+    static_assert(rate_count <= 16, "brio DynamicClock: sixteen rates is more than any program needs");
+    static_assert((Rs::is_static && ...), "brio DynamicClock: every rate is a static Clock task");
+#if defined(F_CPU)
+    static_assert(false, "brio DynamicClock: F_CPU must not be defined with a runtime clock");
+#endif
+
+    /// SYSCLK = HCLK now, and PCLK, which equals it (the prescalers are
+    /// pinned at 1 by every rate's init()).
+    static uint32_t hz() { return hz_; }
+    static uint32_t pclk_hz() { return hz_; }
+
+    /// The discrete-rate surface: the pack, by position.
+    static constexpr uint32_t rate_hz(uint8_t i) { return rate_hz_[i]; }
+    static uint8_t rate_index() { return idx_; }
+    static constexpr PowerRegime rate_regime(uint8_t i) { return rate_regime_[i]; }
+    static constexpr SysclkSource rate_source(uint8_t i) { return rate_source_[i]; }
+    /// The regime in force now, by the mirror (the silicon's own
+    /// readbacks are Pwr::range() and Pwr::low_power_run()).
+    static PowerRegime power_regime() { return rate_regime_[idx_]; }
+
+    /// Is U one of the users that set() rebases? Drivers assert this in
+    /// init(clock): a clocked driver forgotten in the list would keep
+    /// running at the old rate in silence - a compile error instead.
+    template <typename U>
+    static constexpr bool rebases = (std::same_as<U, Users> || ...);
+
+    /// The position of the first rate at `hz`, or rate_count when none.
+    static constexpr uint8_t index_of(uint32_t hz) {
+        for (uint8_t i = 0; i < rate_count; ++i) {
+            if (rate_hz_[i] == hz) {
+                return i;
+            }
+        }
+        return rate_count;
+    }
+    static constexpr bool can_run_at(uint32_t hz) { return index_of(hz) < rate_count; }
+
+    /// The boot rate (the pack's first), no fan-out: nothing is
+    /// initialized yet. See Clock::init for the return.
+    static bool init() { return enter(0, false); }
+
+    /// Switch to a rate known at compile time (checked: a rate the pack
+    /// does not name does not compile).
+    template <uint32_t hz>
+    static bool set() {
+        static_assert(can_run_at(hz), "brio DynamicClock: this rate is not in the Rates pack");
+        return enter(index_of(hz), true);
+    }
+    /// Switch to a rate chosen at run time; false (nothing changed) when
+    /// the pack has no such rate.
+    static bool set(uint32_t hz) {
+        const uint8_t i = index_of(hz);
+        if (i >= rate_count) {
+            return false;
+        }
+        return enter(i, true);
+    }
+    /// The same by position, for a program whose rates share an hz.
+    template <uint8_t i>
+    static bool set_index() {
+        static_assert(i < rate_count, "brio DynamicClock: no such rate");
+        return enter(i, true);
+    }
+    static bool set_index(uint8_t i) {
+        if (i >= rate_count) {
+            return false;
+        }
+        return enter(i, true);
+    }
+
+    /// Put the CURRENT rate back after a Stop dropped SYSCLK to HSISYS -
+    /// no fan-out (the users hold the divisors for exactly this rate).
+    /// True at once when SWS already reports the rate's root, and true
+    /// with nothing done while a set() is in progress in thread mode
+    /// (this verb is legal from an ISR - the wake's own, if a program
+    /// wants the rate back before the first AO runs - and a switch
+    /// parks SYSCLK on HSISYS for a moment on its way to the PLL).
+    static bool restore() {
+        if (switching_ || Rcc::sysclk_status() == rate_source_[idx_]) {
+            return true;
+        }
+        return enter(idx_, false);
+    }
+    /// A set() is between its first and its last store.
+    static bool switching() { return switching_; }
+
+private:
+    static constexpr uint32_t rate_hz_[rate_count] = {Rs::hz...};
+    static constexpr PowerRegime rate_regime_[rate_count] = {Rs::power_regime...};
+    static constexpr SysclkSource rate_source_[rate_count] = {Rs::sysclk_source...};
+
+    /// The switch, for one rate of the pack, in the order the file
+    /// header states. The mirror is written BEFORE the rate's init()
+    /// so that a user rebased for the new rate and a delay_us
+    /// dispatching on the index agree from the first instruction after
+    /// the switch; a failed init() returns false and the mirror then
+    /// names what was ASKED, which is Clock::init's own contract.
+    template <typename R>
+    static bool enter_rate(uint8_t i, bool fan_out) {
+        switching_ = true;
+        bool ok = true;
+        if constexpr (R::power_regime == PowerRegime::range1) {
+            // Rising into Range 1: the regulator before anything - LPR
+            // off and REGLPF clear (4.3.2), then VOS 1 and VOSF clear
+            // (4.1.4) - because R::init() refuses a core in Range 2.
+            if (Pwr::low_power_run()) {
+                ok = Pwr::low_power_run(false);
+            }
+            if (Pwr::range() != 1u) {
+                ok = Pwr::range(1) && ok;
+            }
+        }
+        // (A Range 2 rate's init() leaves LPR itself and lowers the
+        // range last - nothing to do here in that direction.)
+        if (fan_out) {
+            (Users::rebase(R::hz), ...);
+        }
+        hz_ = R::hz;
+        idx_ = i;
+        ok = R::init() && ok;
+        if constexpr (R::sysclk_source == SysclkSource::pllrclk) {
+            // HSISYS IS NOT LEFT DIVIDED BEHIND A PLL RATE. A PLL rate
+            // takes HSI16 undivided and its init() has no reason to
+            // touch HSIDIV, so a program that came up the ladder from
+            // HSISYS/8 would keep the divider - harmless to the rate,
+            // measured (test_stm32_clock letter d, the first version),
+            // and NOT harmless to what a Stop lands on (HSISYS at 2 MHz
+            // instead of 16, and ES0548 2.2.4's wake hazard along with
+            // it). SYSCLK is on the PLL here, so the write is free.
+            Rcc::hsi_div(0);
+        }
+        switching_ = false;
+        return ok;
+    }
+
+    /// Dispatch by position: a fold over the pack that stops at the
+    /// i-th member (no table, no RAM).
+    static bool enter(uint8_t i, bool fan_out) {
+        bool ok = false;
+        uint8_t k = 0;
+        ((k == i ? (ok = enter_rate<Rs>(k, fan_out), true) : (++k, false)) || ...);
+        return ok;
+    }
+
+    static inline uint32_t hz_ = rate_hz_[0];
+    static inline uint8_t idx_ = 0;
+    static inline volatile bool switching_ = false;
 };
 
 } // namespace brio

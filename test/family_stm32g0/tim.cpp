@@ -156,7 +156,17 @@ void exercise_channels() {
         (void)T::input_select(ch, 1);
         (void)T::input_select(ch);
     }
+    // The ETR half of SMCR and its source multiplexer: real on the four
+    // timers with an external trigger, a false everywhere else.
+    (void)T::external_trigger({.prescaler = 2, .filter = 3, .clock_mode2 = true});
+    (void)T::external_trigger_select(4);
+    (void)T::external_trigger_select();
 }
+static_assert(tim_etr_config_valid({.prescaler = 3, .filter = 15}));
+static_assert(!tim_etr_config_valid({.prescaler = 4}));
+static_assert(!tim_etr_config_valid({.filter = 16}));
+static_assert(tim_has_external_trigger(1) && !tim_has_external_trigger(15) &&
+              !tim_has_external_trigger(16));
 
 // A channel index past the instance's count is refused at RUN time by the
 // resource (the negatives cover the compile-time half, in the tasks).

@@ -1575,10 +1575,14 @@ public:
                       "this Uart is initialized with a DynamicClock that does not "
                       "list it among its Users: it would keep the old baud after "
                       "a clock change");
-        (void)clock;
 
-        const Divisor reg = plain ? Divisor{usart_brr(Clock::pclk_hz, baud)}
-                                  : divisor_for(kernel_hz<Clock>(), baud);
+        // clock_hz(clock) is SYSCLK = PCLK (the clock task pins the
+        // prescalers): a constant for a static clock, the rate in force
+        // for a dynamic one; baud_clock() turns it into what the divisor
+        // divides through the options' kernel clock and prescaler.
+        const uint32_t sys_hz = clock_hz(clock);
+        const Divisor reg = plain ? Divisor{usart_brr(sys_hz, baud)}
+                                  : divisor_for(baud_clock(sys_hz), baud);
         if (!reg) {
             return false;
         }
@@ -2356,9 +2360,11 @@ struct SyncHost {
     using Resource = S;
 
     template <typename Clock>
-    static bool init(Clock, uint32_t baud, const SyncConfig& sync,
+    static bool init(Clock clock, uint32_t baud, const SyncConfig& sync,
                      const UartFormat& format = {}) {
-        const std::optional<uint16_t> reg = usart_brr(Clock::pclk_hz, baud);
+        static_assert(clock_follows<Clock, SyncHost>(),
+                      "brio SyncHost: no rebase() - a dynamic clock is refused");
+        const std::optional<uint16_t> reg = usart_brr(clock_hz(clock), baud);
         if (!reg) {
             return false;
         }
@@ -2436,9 +2442,11 @@ struct IrdaLink {
     using Resource = S;
 
     template <typename Clock>
-    static bool init(Clock, uint32_t baud, const IrdaConfig& cfg,
+    static bool init(Clock clock, uint32_t baud, const IrdaConfig& cfg,
                      UartParity parity = UartParity::none) {
-        const std::optional<uint16_t> reg = usart_brr(Clock::pclk_hz, baud);
+        static_assert(clock_follows<Clock, IrdaLink>(),
+                      "brio IrdaLink: no rebase() - a dynamic clock is refused");
+        const std::optional<uint16_t> reg = usart_brr(clock_hz(clock), baud);
         if (!reg) {
             return false;
         }
@@ -2582,8 +2590,10 @@ struct Smartcard {
     using Resource = S;
 
     template <typename Clock>
-    static bool init(Clock, uint32_t baud, const SmartcardConfig& cfg) {
-        const std::optional<uint16_t> reg = usart_brr(Clock::pclk_hz, baud);
+    static bool init(Clock clock, uint32_t baud, const SmartcardConfig& cfg) {
+        static_assert(clock_follows<Clock, Smartcard>(),
+                      "brio Smartcard: no rebase() - a dynamic clock is refused");
+        const std::optional<uint16_t> reg = usart_brr(clock_hz(clock), baud);
         if (!reg) {
             return false;
         }

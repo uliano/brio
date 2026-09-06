@@ -541,26 +541,85 @@ gets its dated home in `docs/design/` when taken.
   (the built thing), lptim.md, pwr.md, armv6m/README.md, the map,
   bench.md. Not covered: LSI as the source, a masked window over a
   second, a SysTick one-shot for deadlines under six counts, letter u
-  (a keystroke). ITEM 5, DYNAMICCLOCK ON THE G0, RULED 2026-09-06:
-  DEFERRED WITH ITS DESIGN WRITTEN (docs/design/clock.md, "The other
-  targets") - a rate there is a TUPLE (SYSCLK source and rate, VCORE
-  range, regulator mode) in an explicit pack, the switch is
-  direction-aware around the flash latency and the range with the
-  low-power regulator last, the fan-out is SMALL because RCC_CCIPR takes
-  peripherals off SYSCLK and the tickless timebase takes the kernel off
-  it, a Stop's landing on HSISYS is restored to the CURRENT rate, and
-  the four steps on the switch's path that never ran on silicon are
-  named for the campaign. The first target's energy experiment
-  vindicates the SAM ruling for a family WITHOUT voltage scaling; the
-  G0 has Range 2 and a low-power regulator, so its question is open and
-  its consumers are named: a low-power-run program at 2 MHz on the
-  tickless timebase waking on RTC/LPTIM/pads (never a clock-requesting
-  peripheral - ES0548 2.2.4), or the energy experiment's G0 instance.
-  What is code today: the inventory's refusals - Adc::init and
-  tim_clock_hz static_assert(Clock::is_static) with two negatives; the
-  Uart follows; the SysTick timebases assert clock_follows. design/
-  clock.md's "the kernel timebase does not move" clause corrected to
-  where it holds (the PIT, the LPTIM) and where it refuses (SysTick).
+  (a keystroke). ITEM 5, DYNAMICCLOCK ON THE G0, first RULED deferred
+  with its design written (09d2589) and then BUILT the same day
+  2026-09-06 BY FABLE'S OWN HAND on the user's call ("tanto vale
+  implementarlo subito" - the energy experiment's G0 instance is the
+  consumer): brio/stm32g0/clock.hpp grew PowerRegime {range1, range2,
+  low_power_run}, `Clock<src, hz, regime = range1>` (a Range 2 rate
+  takes table 13's second column inside its own init() and lowers the
+  range LAST, LPR last of all at the 2 MHz 4.3.2 wants, having first
+  LEFT low-power run if a previous life was there; a Range 1 rate
+  REFUSES a core in Range 2 - raising it is the orderer's step; > 16 MHz
+  in Range 2 and > 2 MHz in LPR are compile errors), `Rates<...>` and
+  `DynamicClock<Rates<R0, R1, ...>, Users...>` (the discrete set as an
+  EXPLICIT PACK of tuples, R0 the boot rate; rate_count/rate_hz/
+  rate_index/rate_regime/rate_source, set<hz>/set(hz) first-match and
+  set_index<i>/set_index(i), the fan-out in list order BEFORE the
+  rate's init() with the direction-aware ladder around it - rising:
+  leave LPR (REGLPF), range up (VOSF), fan-out, init; falling: fan-out,
+  init, range/LPR inside it; restore() = the CURRENT rate after a Stop,
+  no fan-out, nothing when SWS already reports its root or while a set()
+  is in progress - legal from an ISR; HSIDIV WRITTEN BACK TO 0 AFTER
+  EVERY SWITCH ONTO THE PLL, because the first version left a 2 MHz
+  program's divider behind a 64 MHz rate - harmless to the rate, and
+  what a Stop lands on plus ES0548 2.2.4); Rcc::mco()/mco_off(). THE
+  USERS: SysTickCounter::rebase and BasicTicker::rebase (armv6m/
+  ticker.hpp; the ticker restarts its period, under a tick late, never
+  early), the Uart's init via clock_hz(clock) (byte-identical for a
+  static clock), Adc::rebase (the next larger PCLK division when the
+  config's own would put fADC over 35 MHz, a pure function of config
+  and rate, converter disabled/re-enabled; a no-op in async;
+  clock_mode()/adc_hz() readbacks) replacing its static_assert, the
+  timers still REFUSING (a timer's periods are PCLK cycles and no
+  rebase can keep them - rewritten message), SyncHost/IrdaLink/
+  Smartcard refusing by clock_follows; armv6m/delay.hpp's delay_us
+  dispatching on rate_index() into `delay_rates<Clock>`, a constexpr
+  table (no division at wait time, the avrdx precedent); the sleep
+  site's resume_clock() calling C::restore() for a dynamic clock
+  (expected_source retired: sysclk_source_of<C>() reads
+  C::sysclk_source); tim.hpp grew TimEtrConfig + external_trigger()
+  and external_trigger_select() (AF1.ETRSEL, raw code) as the suite's
+  instrument. NEW SUITE test_stm32_clock z 34/34 x3 (one cold) on the
+  TICKLESS platform with the console on HSI16 (its rebase folds to
+  nothing) and USART1 as a single-wire loop on PCLK as the rebased user;
+  THE WALL: HSI16/64 through MCO into TIM2's ETR with no pad (ETRSEL =
+  MCO, external clock mode 2) - a 4 us counter that does not move with
+  SYSCLK, 250 kHz within HSI16's 1 % of the crystal. MEASURED: every
+  rung as the type claims (SWS/HSIDIV/PLLON/VOS/LPR/REGLPF/LATENCY) and
+  the CPU at the claimed rate on the crystal (500 x delay_us(999) =
+  498..501 ms at 64/16, 515 at 2 MHz - the calls' own cycles, 32x
+  dearer); the loop byte-exact at every rung and 72 switches round the
+  ladder with 16 bytes each, zero errors; THE FOUR UNBENCHED STEPS
+  CLOSED (HSIDIV 0 -> 3 under a running HSISYS core, LATENCY 2 -> 1 ->
+  0 DECREASING after the falls, Range 2's own column - 1 WS at 16 MHz -
+  and pll_configure refused with PLLON); switch costs on the wall 64->16
+  48 us, 16->2 LPR 92, 2 LPR->64 384 (REGLPF, VOSF, PLL lock), 64->2
+  132, 2->16 260, 16->64 80; the ADC on PCLK/1 across the ladder with
+  VDDA 3310..3316 mV at all four rungs and its division /1 -> /2 -> /1
+  -> /1 as predicted, the async mode agreeing at 2 MHz LPR; a 50-tick
+  periodic through ten switches at exactly 50 ticks, none early; a Stop
+  1 at 64 MHz with restore() from the wake's ISR before the deadline's
+  AO ran (one restore) - THE PLAIN SITE ALONE RESTORES AT DISARM, after
+  that AO, at 16 MHz with the PLL off (the first version's letter g
+  read SWS=HSISYS at the deadline; recorded, the ISR call is the
+  program's option); AT 2 MHz THE PART WAKES FROM STOP 1 IN LOW-POWER
+  RUN WITH HSIDIV KEPT (4.3.6) and restore() finds nothing to do;
+  delay_us never early at every rung (+0..4 us at 64, +32..40 at 2 MHz
+  = the poll's cost). Family: clock.cpp/delay.cpp/tim.cpp grown, EIGHT
+  new negatives (range2 past 16 MHz, LPR past 2 MHz, a rate not in the
+  pack, a user without rebase, an empty pack, the Adc/Uart/SysTickCounter
+  not listed, SyncHost on a dynamic clock), check_stm32g0 on all twelve
+  headers. GATE: 17/17 stm32g0 + 39/39 samc21 + 41/41 avrdx images
+  BYTE-IDENTICAL, one new image; host 24/24; canaries tickless 38/38
+  and sleep 50/50 on the bench. Docs: design/clock.md (the G0 section
+  "built", the SysTick ticker's rebase, the reference rows),
+  stm32g0/clock.md (regime, pack, verbs, the program shape, the
+  findings, the gaps rewritten), pwr.md/adc.md/tim.md/usart.md/
+  armv6m/README.md/samc21/clock.md, the map, bench.md. Not covered: a
+  PLL rate in Range 2, BasicTicker::rebase on the bench, Stop 0 from
+  LPR, the timers' fan-out (refused, stated), a power-manager AO that
+  asks the buses before a switch, what a rate COSTS (the meter).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device
@@ -4198,10 +4257,15 @@ brio/                    the framework, four strata:
                            FlashAccel, flash_size_kb - the FLASH campaign's
                            future home
     clock.hpp              Rcc (HSI16/HSIDIV, the PLL, SYSCLK switch, bus
-                           prescalers, the per-peripheral ENABLES, CCIPR),
-                           Pwr::range, Clock<internal|pll, hz> with the
-                           compile-time PLL ratio search - the third clock
-                           model
+                           prescalers, the per-peripheral ENABLES, CCIPR,
+                           the MCO clock output), PowerRegime,
+                           Clock<internal|pll, hz, regime> with the
+                           compile-time PLL ratio search and the Range 2 /
+                           low-power-run sequences, Rates<> +
+                           DynamicClock<Rates<...>, Users...> (a pack of
+                           rate TUPLES, the direction-aware switch, the
+                           fan-out, restore() after a Stop) - the third
+                           clock model
     pin.hpp                Pin<'A',5> / Port<'A'> / PinRef over GPIOx: the
                            port clock opened by every configuring verb,
                            MODER/OTYPER/OSPEEDR/PUPDR/AFR, BSRR/BRR values

@@ -56,11 +56,13 @@
  * divisor - about 4 us a call, measured on the SAM C21 (the DIVAS
  * arithmetic) when the first version of this file paid it on every
  * entry. The ONE division lives in delay_rate() - folded to a constant
- * with a compile-time Clock, paid once per clock change by a caller
- * that only has a runtime rate (the SpiHost's rebase shape) - and
- * everything else runs in 32 bits, because this core taxes WIDTH too:
- * a 64-bit product is another libcall of the same size (measured when
- * the second version tried one).
+ * with a compile-time Clock, expanded into a per-rate TABLE at compile
+ * time for a DynamicClock and selected by its rate index (the
+ * discrete-rate surface of docs/design/clock.md, the avrdx precedent),
+ * paid once per clock change by a caller that only has a runtime rate
+ * (the SpiHost's rebase shape) - and everything else runs in 32 bits,
+ * because this core taxes WIDTH too: a 64-bit product is another
+ * libcall of the same size (measured when the second version tried one).
  *
  * THE 32-BIT PRODUCT CANNOT WRAP, and the guard that makes that true is
  * SysTick's own geometry rather than any promise of the Ticker's: the
@@ -86,6 +88,8 @@
 #pragma once
 
 #include <stdint.h>
+
+#include <array>
 
 #if !defined(__CM0PLUS_REV) && !defined(__CM0_REV)
 #error "armv6m/delay.hpp: include the family's device header first (samc21/delay.hpp and stm32g0/delay.hpp do)"
@@ -156,9 +160,27 @@ constexpr DelayRate delay_rate(uint32_t hz) {
     return true;
 }
 
+/// The per-rate factors of a DYNAMIC clock, expanded at compile time
+/// over its discrete-rate surface (rate_count, rate_hz(i)): one table in
+/// flash, indexed by rate_index() at wait time - the avrdx/delay.hpp
+/// shape, and the reason no division ever runs here.
+template <typename Clock>
+inline constexpr auto delay_rates = [] {
+    std::array<DelayRate, Clock::rate_count> table{};
+    for (uint8_t i = 0; i < Clock::rate_count; ++i) {
+        table[i] = delay_rate(Clock::rate_hz(i));
+    }
+    return table;
+}();
+
 template <typename Clock>
 [[nodiscard]] bool delay_us(Clock clock, uint32_t us) {
-    return delay_us(delay_rate(clock_hz(clock)), us);
+    if constexpr (Clock::is_static) {
+        return delay_us(delay_rate(clock_hz(clock)), us);
+    } else {
+        (void)clock;
+        return delay_us(delay_rates<Clock>[Clock::rate_index()], us);
+    }
 }
 
 } // namespace brio
