@@ -350,7 +350,10 @@ Driver gaps:
   The question reopens with its first genuine consumer, together with
   the discrete-rate surface, the rebase fan-out and the ticker's
   ClockUser question (`samc21/ticker.hpp` documents that caveat and
-  refuses the combination mechanically).
+  refuses the combination mechanically). The ruling has since been
+  MEASURED on the first target and holds for a family without voltage
+  scaling; the third target's own deferral and the shape a dynamic clock
+  takes there are in [../design/clock.md](../design/clock.md).
 - Nothing tells a driver that a generator it uses changed source or
   rate. The AVR's `ClockUser`/`clock_follows` pair has no counterpart
   here yet, and on a target where every peripheral has a generator of

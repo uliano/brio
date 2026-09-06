@@ -388,6 +388,9 @@ constexpr uint8_t tim_trigger_index_for(uint8_t n, uint8_t master) {
 /// prescaler at 1, and Tim<n>::clock_ok() checks that at run time.
 template <typename Clock>
 constexpr uint32_t tim_clock_hz(Clock) {
+    static_assert(Clock::is_static,
+                  "brio Tim: the timers have no rebase() yet, so a dynamic clock is "
+                  "refused - docs/design/clock.md, the STM32G0 inventory");
     return Clock::pclk_hz;
 }
 

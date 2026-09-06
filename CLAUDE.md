@@ -541,7 +541,26 @@ gets its dated home in `docs/design/` when taken.
   (the built thing), lptim.md, pwr.md, armv6m/README.md, the map,
   bench.md. Not covered: LSI as the source, a masked window over a
   second, a SysTick one-shot for deadlines under six counts, letter u
-  (a keystroke). NEXT: item 5, DynamicClock on the G0 (the design first).
+  (a keystroke). ITEM 5, DYNAMICCLOCK ON THE G0, RULED 2026-09-06:
+  DEFERRED WITH ITS DESIGN WRITTEN (docs/design/clock.md, "The other
+  targets") - a rate there is a TUPLE (SYSCLK source and rate, VCORE
+  range, regulator mode) in an explicit pack, the switch is
+  direction-aware around the flash latency and the range with the
+  low-power regulator last, the fan-out is SMALL because RCC_CCIPR takes
+  peripherals off SYSCLK and the tickless timebase takes the kernel off
+  it, a Stop's landing on HSISYS is restored to the CURRENT rate, and
+  the four steps on the switch's path that never ran on silicon are
+  named for the campaign. The first target's energy experiment
+  vindicates the SAM ruling for a family WITHOUT voltage scaling; the
+  G0 has Range 2 and a low-power regulator, so its question is open and
+  its consumers are named: a low-power-run program at 2 MHz on the
+  tickless timebase waking on RTC/LPTIM/pads (never a clock-requesting
+  peripheral - ES0548 2.2.4), or the energy experiment's G0 instance.
+  What is code today: the inventory's refusals - Adc::init and
+  tim_clock_hz static_assert(Clock::is_static) with two negatives; the
+  Uart follows; the SysTick timebases assert clock_follows. design/
+  clock.md's "the kernel timebase does not move" clause corrected to
+  where it holds (the PIT, the LPTIM) and where it refuses (SysTick).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device

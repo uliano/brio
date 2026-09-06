@@ -96,6 +96,20 @@ LSE does not move when SYSCLK does - which is what makes `rebase()` a
 no-op for it, on purpose. `kernel_clock(pos, code)` is the one verb, and
 each peripheral publishes its own field position from the reserve.
 
+**WHO WOULD FOLLOW A SYSCLK CHANGE, and who refuses one today** - the
+inventory the dynamic-clock design in
+[../design/clock.md](../design/clock.md) is written against, and what
+the build enforces: the `Uart` FOLLOWS (a `ClockUser` whose `rebase`
+drains and reloads BRR, folded to nothing for a port on HSI16 or LSE;
+its `init` asserts `clock_follows`); the SysTick `BasicTicker` and
+`SysTickCounter` assert `clock_follows` and have no `rebase`, so a
+dynamic clock is refused there until one is written (the tickless
+timebase on the crystal never asks); the `Adc` and the timers
+`static_assert(Clock::is_static)` - REFUSED, because each reads the rate
+once and would keep it stale (two negatives in the family fixture);
+the FDCAN and the window watchdog take the bus rate as a number and
+keep it; the LPTIM, the RTC and the IWDG never see SYSCLK at all.
+
 **RCC_CCIPR2 IS A SECOND REGISTER AND IT NEEDED A SECOND VERB.** The
 I2S, USB and FDCAN selects live there (5.4.22) and not in the CCIPR, and
 the register is a STRUCT MEMBER only the G0B1/G0C1 header declares - so
@@ -210,9 +224,16 @@ Driver gaps:
 - Range 2 (the low-power regulator range) as a TASK - the setter and
   its two ordering sequences now exist in [pwr.md](pwr.md), and what is
   missing here is a `Clock<>` that knows the Range 2 latency column.
-- `DynamicClock` - the same deferral as on the SAM, for the same
-  reason: which root SYSCLK takes at run time and who is told is a
-  design decision, opened by a real consumer.
+- `DynamicClock` - DEFERRED WITH ITS DESIGN WRITTEN
+  ([../design/clock.md](../design/clock.md)): a rate here is a tuple
+  (SYSCLK source and rate, VCORE range, regulator mode) named in an
+  explicit pack, the switch is direction-aware around the flash latency
+  and the range, the fan-out is small because CCIPR takes peripherals
+  off SYSCLK, and a Stop's landing on HSISYS is restored to the CURRENT
+  rate. Opened by its first consumer - a low-power-run program at 2 MHz
+  on the tickless timebase, or the energy experiment's own instance
+  here - whose campaign benches first the four steps below that sit on
+  the switch's path and have not run on silicon.
 - HSI16 trimming (RCC_ICSCR) and its measurement against LSE through
   TIM14/16/17 (5.2.16) - the FREQM-style scale this board does not
   have yet.

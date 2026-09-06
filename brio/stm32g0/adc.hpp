@@ -686,6 +686,13 @@ public:
      */
     template <typename Clock>
     static bool init(Clock clock, const AdcConfig& c, uint32_t async_hz = 16'000'000UL) {
+        // The clock is read ONCE here, for the prescaler: a dynamic clock
+        // would leave it stale in silence, and this driver has no
+        // rebase() to answer one (the AVR's keeps CLK_ADC in range across
+        // a change - the precedent, when a consumer asks). Refused.
+        static_assert(Clock::is_static,
+                      "brio Adc: no rebase() yet, so a dynamic clock is refused - "
+                      "docs/design/clock.md, the STM32G0 inventory");
         if (!adc_config_valid(c)) {
             return false;
         }
