@@ -28,10 +28,12 @@
 // per half over SWD) means the PLL ran; a 4x slower blink means the
 // core is still on HSI16.
 //
-// Wiring: none - LD4 on PA5 is on the board (UM2324's Nucleo-64
-// arrangement; verified here by the pad moving).
+// Wiring: none - the user LED is on the board: LD4 on PA5 on the
+// Nucleo-64s (UM2324; verified on the G0B1RE by the pad moving), LD3 on
+// PC6 on the Nucleo-32 G031K8 (UM2591). The part selects the pin because
+// on this desk the part IS the board.
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb,g031k8
 
 #include "stm32g0xx.h"
 
@@ -58,15 +60,24 @@ int main()
     RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW_Msk) | RCC_CFGR_SW_1;
     while ((RCC->CFGR & RCC_CFGR_SWS_Msk) != RCC_CFGR_SWS_1) {}
 
-    // 4. PA5 as a push-pull output.
-    RCC->IOPENR = RCC->IOPENR | RCC_IOPENR_GPIOAEN;
+    // 4. The LED pad as a push-pull output.
+#if defined(STM32G031xx)
+    GPIO_TypeDef* const led_port = GPIOC;
+    constexpr uint32_t led_clock = RCC_IOPENR_GPIOCEN;
+    constexpr uint32_t led_pin = 6;
+#else
+    GPIO_TypeDef* const led_port = GPIOA;
+    constexpr uint32_t led_clock = RCC_IOPENR_GPIOAEN;
+    constexpr uint32_t led_pin = 5;
+#endif
+    RCC->IOPENR = RCC->IOPENR | led_clock;
     (void)RCC->IOPENR;
-    GPIOA->MODER = (GPIOA->MODER & ~GPIO_MODER_MODE5_Msk) | GPIO_MODER_MODE5_0;
+    led_port->MODER = (led_port->MODER & ~(0x3u << (2u * led_pin))) | (0x1u << (2u * led_pin));
 
     for (;;) {
-        GPIOA->BSRR = GPIO_BSRR_BS5;
+        led_port->BSRR = 1u << led_pin;
         for (volatile uint32_t i = 0; i < 4'000'000u; i = i + 1) {}
-        GPIOA->BRR = GPIO_BRR_BR5;
+        led_port->BRR = 1u << led_pin;
         for (volatile uint32_t i = 0; i < 4'000'000u; i = i + 1) {}
     }
 }

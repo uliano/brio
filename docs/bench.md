@@ -177,6 +177,31 @@ below was verified at the bench, not copied from the user manual.
   wants either pad should release the Rd first -
   [stm32g0/port.md](stm32g0/port.md) carries the verb.
 
+## The second silicon: Nucleo-G071RB and Nucleo-G031K8
+
+Two more G0 Nucleos, the proof that the stratum covers the family on
+silicon and not only on the twelve headers of `tools/check_stm32g0.sh`:
+an **ST Nucleo-G071RB** (STM32G071RB, LQFP64, 128 KB single-bank flash,
+36 KB SRAM - the G0B1RE's board layout: LD4 on PA5, B1 on PC13, the
+ST-LINK's VCP on USART2 PA2/PA3) and an **ST Nucleo-G031K8** (STM32G031K8,
+a Nucleo-32: 64 KB single-bank flash, 8 KB SRAM, LD3 on PC6, the VCP on
+USART2 PA2/PA3 by UM2591). The build knows them (`stm32g071rb-*` and
+`stm32g031k8-*` presets, `ld/stm32g071rb.ld` and `ld/stm32g031k8.ld`,
+`src/glue/startup_stm32g071.cpp` and `startup_stm32g031.cpp`, the board
+types `g071rb` and `g031k8` in `tools/bench.py`; `blink`, `console` and
+`probe` build for all three boards, byte-identical on the G0B1RE), and
+the manifest does NOT yet: positions **F** (the G071RB) and **G** (the
+G031K8) are reserved and get their ST-LINK serials, their VCP by-id
+paths and their first `probe` at the first plug-in - the LED and VCP
+pads above are the user manuals' and the datasheet's until that blink
+and that banner. Both boards have single-bank flash, so neither has the
+storage attic: the NvHeap and NvJournal backends answer bad_geometry
+there and `test_stm32_nvm` / `test_stm32_journal` are the G0B1RE's
+alone. Which other suites run, and which letters skip what a chip
+lacks (no DAC, no comparators, one DMA, fewer timers on the G031; no
+bank 2, no FDCAN, no USB on either), is the second-silicon campaign's
+to say.
+
 ## Multi-board bench
 
 The protocol work (USART/SPI/TWI) needs two chips talking: **board A =

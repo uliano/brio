@@ -54,11 +54,14 @@ HSE only through solder bridges - the HSE root is unbuilt anyway).
 `samc21/` and `test/`. Apps are auto-discovered from
 `stm32g0/src/apps/*.cpp` - plus `experiments/*/stm32g0/*.cpp` - by
 their `// build:` header comment, the other two projects' grammar with
-this family's board names (`boards = g0b1re`, the default). One
+this family's board names (`boards = g0b1re`, the default; an app that
+also runs on the other two Nucleos lists `g071rb` and `g031k8`). One
 configure targets one part (`STM32G0_MCU`, full part number: it decides
-the device define `STM32G0B1xx`, the linker script `ld/<part>.ld` and
-the crt `src/glue/startup_<header>.cpp`); only the G0B1RE has a preset
-today. Every other part of the family is compile-checked by
+the device define `STM32G0B1xx`, the linker script `ld/<part>.ld`, the
+crt `src/glue/startup_<header>.cpp` and the board name, the part's last
+six characters - one Nucleo per part on this desk, so the part IS the
+board); three parts have presets - the G0B1RE, and the two other Nucleos
+below. Every other part of the family is compile-checked by
 `tools/check_stm32g0.sh`, which sweeps every positive TU in
 `test/family_stm32g0/` across ALL TWELVE device headers the CMSIS pack
 ships and requires every `neg/` TU to fail for the variants its
@@ -106,16 +109,43 @@ An absence is spelled one of two ways, and the docs say which:
   `has_nrst_mode`; the reserve's `flash_pcrop_capable` and
   `flash_securable_capable`.
 
-The sweep proves it on every header the pack ships (21 positive TUs x
+The sweep proves it on every header the pack ships (22 positive TUs x
 12 headers, and every negative refused on each variant it names); the
-bench proves the G0B1. The G071RB and G031K8 Nucleos in the drawer are
-the next silicon, and they need a preset, a linker script, a crt and
-a manifest position each before a suite can run on them.
+bench proves the G0B1. **The second silicon**: the **Nucleo-G071RB**
+(STM32G071RB, LQFP64, 128 KB single-bank flash, 36 KB SRAM, the same
+board layout as the G0B1RE's - LD4 on PA5, the VCP on USART2 PA2/PA3)
+and the **Nucleo-G031K8** (STM32G031K8, a Nucleo-32: 64 KB single-bank
+flash, 8 KB SRAM, LD3 on **PC6**, the VCP on USART2 PA2/PA3) have their
+presets (`stm32g071rb-*`, `stm32g031k8-*`), linker scripts
+(`ld/stm32g071rb.ld`, `ld/stm32g031k8.ld` - one bank each, so the
+storage attic of [nvm.md](nvm.md) does not exist there and both
+backends refuse to open), crts (`src/glue/startup_stm32g071.cpp`,
+`startup_stm32g031.cpp` - each header's own vector table, ST's names)
+and `tools/bench.py` board types (`g071rb`, `g031k8`, the same OpenOCD
+path as the G0B1RE's). `blink`, `console` and `probe` build for all
+three. What each of the two has NOT had yet is a first power-on on this
+desk: a manifest position with its ST-LINK's serial, the LED and the
+VCP pads verified the way the G0B1RE's were, the LSE crystal's presence
+(the Nucleo-32 may not populate it), and the suites made to skip what
+each chip lacks - the "second silicon" bench campaign.
+
+**Vector names across the boards.** The crt spells ST's own handler
+names, and a SHARED line's name changes with what shares it - USART2's
+is `USART2_LPUART2_IRQHandler` on the G0B1 and `USART2_IRQHandler` on
+the G071/G031. An app for one board binds the bare name; an app for
+more than one binds the name the reserve derives from the header's
+presence macros, `BRIO_STM32G0_USART2_HANDLER` and its siblings (TIM3,
+TIM6, TIM7, TIM16, TIM17, LPTIM1, LPTIM2, USART3, LPUART1, the DMA's
+upper line, the ADC) - `test/family_stm32g0/handlers.cpp` proves every
+one expands on every header and names the line the reserve's verb
+answers. A name outside that set on the wrong board lands in
+`Default_Handler`'s silent spin, the samc21 lesson.
 
 ```bash
 (cd stm32g0 && cmake --preset stm32g0b1re-release)                      # configure (once, or after adding an app)
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)
+(cd stm32g0 && cmake --preset stm32g071rb-release)                      # the Nucleo-G071RB; stm32g031k8-release the Nucleo-32
 tools/check_stm32g0.sh [name]                                          # family smoke, no hardware
 ```
 

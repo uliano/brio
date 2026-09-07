@@ -13,9 +13,13 @@
 // compile untouched. Only the target-glue lines differ - the clock type
 // (the PLL at 64 MHz here), the pin, the platform, the vector binding.
 //
-// Wiring: none - LD4 on PA5 is on the Nucleo-64.
+// Wiring: none - the user LED is on the board: LD4 on PA5 on the
+// Nucleo-64s (G0B1RE, G071RB), LD3 on PC6 on the Nucleo-32 (G031K8). The
+// part selects the pin because on this desk the part IS the board (one
+// Nucleo per part - stm32g0/CMakeLists.txt); a board file would own this
+// line on a desk with two boards of one part.
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb,g031k8
 
 #include <stdint.h>
 
@@ -40,7 +44,11 @@ constexpr SysClock clock;
 
 namespace {
 
-using Led = brio::Pin<'A', 5>;  // PA5 = LD4
+#if defined(STM32G031xx)
+using Led = brio::Pin<'C', 6>;  // PC6 = LD3 on the Nucleo-32
+#else
+using Led = brio::Pin<'A', 5>;  // PA5 = LD4 on the Nucleo-64s
+#endif
 
 // ---- events -----------------------------------------------------------------
 struct Toggle {};                      // Blinker's own heartbeat

@@ -20,6 +20,46 @@
                 "CMAKE_BUILD_TYPE": "Debug",
                 "STM32G0_MCU": "stm32g0b1re"
             }
+        },
+        {
+            "name": "stm32g071rb-release",
+            "displayName": "STM32G071RB (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32g071rb-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "STM32G0_MCU": "stm32g071rb"
+            }
+        },
+        {
+            "name": "stm32g071rb-debug",
+            "displayName": "STM32G071RB (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32g071rb-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "STM32G0_MCU": "stm32g071rb"
+            }
+        },
+        {
+            "name": "stm32g031k8-release",
+            "displayName": "STM32G031K8 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32g031k8-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "STM32G0_MCU": "stm32g031k8"
+            }
+        },
+        {
+            "name": "stm32g031k8-debug",
+            "displayName": "STM32G031K8 (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32g031k8-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "STM32G0_MCU": "stm32g031k8"
+            }
         }
     ],
     "buildPresets": [
@@ -30,6 +70,22 @@
         {
             "name": "stm32g0b1re-debug",
             "configurePreset": "stm32g0b1re-debug"
+        },
+        {
+            "name": "stm32g071rb-release",
+            "configurePreset": "stm32g071rb-release"
+        },
+        {
+            "name": "stm32g071rb-debug",
+            "configurePreset": "stm32g071rb-debug"
+        },
+        {
+            "name": "stm32g031k8-release",
+            "configurePreset": "stm32g031k8-release"
+        },
+        {
+            "name": "stm32g031k8-debug",
+            "configurePreset": "stm32g031k8-debug"
         }
     ]
 }
