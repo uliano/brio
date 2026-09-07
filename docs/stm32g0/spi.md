@@ -27,10 +27,16 @@ bus vocabulary above it is `util/spi_bus.hpp` over
 `util/bus_master.hpp` ([../design/spi-bus.md](../design/spi-bus.md)).
 The per-instance presence, APB register, vector, I2S capability, I2S
 clock selector and DMAMUX facts come from `stm32g0/device_tables.hpp`.
-Bench suite: `test_stm32_spi` (13 letters, 89 verdicts, on the
-Nucleo-G0B1RE's self-link - [../bench.md](../bench.md)). Family fixture
-`test/family_stm32g0/spi.cpp` plus fourteen negatives under
-`tools/check_stm32g0.sh`.
+Bench suite: `test_stm32_spi`, and it carries TWO INSTRUMENTS on one set
+of pads because the desk has held both (see [../bench.md](../bench.md)):
+letters `a`..`m` (89 verdicts) run on the Nucleo's own SPI1-to-SPI2
+self-link, letters `n`..`r` (20 verdicts) on the cross-architecture link
+to a SAM C21 running `spi_peer`, commanded in band over
+`avrdx/src/apps/spi_link.hpp`. The two wirings exclude each other, the
+suite PROBES which one is fitted before any letter runs, and the letters
+whose instrument is absent skip themselves with the reason printed and
+no verdict claimed. Family fixture `test/family_stm32g0/spi.cpp` plus
+fourteen negatives under `tools/check_stm32g0.sh`.
 
 ## What the silicon does
 
@@ -239,9 +245,11 @@ and their inverse.
 
 ## Bench findings
 
-Measured by `test_stm32_spi` on the Nucleo-G0B1RE's self-link (SPI1 host
-to SPI2 client, four wires), 89 verdicts, three green `z` runs including
-one from a cold flash.
+Measured by `test_stm32_spi`. The findings down to "The dynamic clock"
+are the SELF-LINK's (SPI1 host to SPI2 client, four wires): 89 verdicts,
+three green `z` runs including one from a cold flash. The ones under
+"The cross-architecture link" are the SAM peer's, on the same four SPI1
+pads: 38 verdicts, two green `z` runs including one from a cold flash.
 
 **The block, and the reserve against the header.** SPI1 on line 25 and
 SPI2/SPI3 sharing line 26; the DMAMUX pairs 16/17, 18/19, 66/67; the
@@ -418,6 +426,73 @@ byte-exact at every one, in both directions.
 from a WFI in Sleep mode, eight rounds of eight and the FIRST wake in
 all eight (the kernel tick being the other candidate, 1 ms against the
 frame's 32 us).
+
+### The cross-architecture link (letters n..r)
+
+The same four SPI1 pads reach a SAM C21 running `spi_peer` when the
+jumpers go there instead of to SPI2, and the two topologies EXCLUDE each
+other: the suite probes for the self-link at boot and letters b..l skip
+themselves when it is absent. On the peer desk `z` scores **38 of 38**
+(letter `a` wireless, letter `m` wireless, letters `n`..`r` on the wire),
+green twice including a run from a cold flash.
+
+**The wire format is the AVR campaign's, unchanged, on a third
+architecture.** `avrdx/src/apps/spi_link.hpp` is compiled by three apps
+now and this suite is the third to speak it: the command channel came up
+first try at PCLK/256 = 250 kHz, one frame per chip-select window, ten
+of ten, and `ident` names the peer's die serial and its `spi_peer`
+sanity byte. The protocol owns the chip select here (the Request carries
+a null `PinRef` and the letter frames the window by hand with 30 us of
+hold on each side), and `prime()` is what makes that legal - a mode
+change inside an open select window is one extra edge, which is the
+finding the samc21 bench paid for and this end simply obeys.
+
+**Four modes, both bit orders, byte-exact between two different
+silicons**, and a DORD mismatch is an EXACT two-way bit reversal with
+both ends checking the other's bytes reversed - zero mismatches either
+way. The bit order is a BUS-level verb on this target
+(`SpiHost::bit_order()`, CR1.LSBFIRST) where the samc21 suite has to go
+round its own task for the same leg, and the LSb-first exchange rides
+that verb.
+
+**THE LADDER STOPS AT PCLK/8 = 8 MHz, AND WHERE IT STOPS IS THE PEER'S
+ANSWER RELOAD AND NOT THE WIRE.** Every BR code from PCLK/256 up to
+PCLK/8 carries eight frames byte-exact in both directions; PCLK/4 = 16
+MHz breaks with **the peer's own count full and its mismatches zero** -
+it heard all eight characters exactly and could not put its answers on
+the shifter in time (the SAM peer serves through its DMA engines here,
+which is what its report's `serve=dma` says). The samc21-to-samc21 bench
+measured the same boundary at 6 MHz with both ends engined; a G0 host
+paced by its own frame pump gives the same peer one rung more.
+
+**The arbiter's THIRD silicon, measured against a SECOND CHIP.** Letter
+`q` runs `SpiBus` (= `BusMaster`) over `SpiHost` with the SAM answering:
+four transactions queued from one dispatch come back in order, all
+`spi_ok`, and the 24 bytes on the wire are exactly what each request
+lent - read back and reported by the other board, not by a second
+peripheral of this one. The four share ONE select window because the
+peer's `exchange` is one burst; the rejection past the pending depth,
+both sleep votes and the per-bus timeout with `recover()` follow, and
+the next four transactions run to `spi_ok` on the same bus AO. Not one
+line of `util/spi_bus.hpp`, `util/bus_master.hpp` or `kernel/` moved.
+
+**A SUITE LESSON WITH TEETH, and it is about the vector and not the
+wire**: collecting the peer's report is itself a command, and the
+command path re-inits the host - which hands SPI1's vector back to the
+bare pump. The arbiter's claim on that vector has to be RE-STATED
+afterwards or every later completion is consumed by the wrong branch and
+the arbiter answers `spi_timeout` on transactions that ran perfectly
+(measured: four of them, at exactly the arbiter's limit each, with the
+engine's registers proven healthy).
+
+**THE ROLES INVERT ON THE PADS THIS BOARD HOSTS WITH.** Letter `r` makes
+SPI1 a `SpiClient` on the very four pins it hosts with - MISO driven,
+SCK, MOSI and NSS taken as inputs, the peer's PORT-driven select the
+hardware NSS - while the peer becomes the bus host for a bounded burst:
+twelve frames received byte-exact, and the peer read this end's answer
+stream byte-exact FROM THE FIRST FRAME, which is what the two preloads
+before the select edge buy (35.5.8). An asymmetric bus on symmetric
+wiring needs no re-jumpering to swap roles.
 
 ## Not covered yet
 

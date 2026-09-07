@@ -202,10 +202,29 @@ BOARDS = {
         # THIS probe provoked traffic on THIS port (the firmware it
         # shipped with speaks an unknown baud; the first brio flash
         # replaces it and the banner check becomes the usual one).
+        #
+        # RE-RIGGED 2026-09-07 for the G0-to-SAM bus link: the USB hub is
+        # gone and ONE SAM board is on the desk, on the probe below, with
+        # its CH340 back on the socket the manifest gives to position A
+        # (both AVR boards are unplugged, so nothing collides today - but
+        # the two entries do name the same path, which is the price of
+        # bridges without serial numbers). The console pairing was
+        # re-verified causally: a `reset run` through THIS probe made
+        # THIS port print the peer's banner.
+        #
+        # AND THE DIE SERIAL BELOW IS NOT THE ONE MEASURED HERE TODAY.
+        # Over SWD through probe J42700051207 the DSU reads DID 0x11010500
+        # with die serial f9e78960-51574841-59202020-ff160321 - the die
+        # this manifest records at position C. The two C21 boards have
+        # swapped probes (they have swapped more than once, which is why
+        # every pairing here is re-verified and not remembered), and with
+        # only one of them plugged in there is no way to say which entry
+        # should carry which serial. Recorded, deliberately NOT rewritten:
+        # a die serial is board identity and belongs to a human's call.
         "board": "c21j",
         "id": None,
         "die_serial": "3a39fd67-51574841-59202020-ff160311",
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1.1:1.0-port0",
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0",
         "programmer": {"type": "openocd_cmsisdap", "serial": "J42700051207"},
     },
 }

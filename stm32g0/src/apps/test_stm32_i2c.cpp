@@ -8,16 +8,43 @@
 // meant to keep passing through every later restructuring of the code
 // under it.
 //
-// THE INSTRUMENT IS THE BOARD'S OWN SELF-LINK (docs/bench.md, "The
-// Nucleo-G0B1RE's self-link"): I2C1 is the host and I2C2 the client, two
-// wires between them, each with a 2.2 kOhm pull-up to 3V3 -
+// TWO INSTRUMENTS, ONE PAIR OF PADS, AND THE SUITE ASKS THE WIRE WHICH
+// ONE IS ON THE DESK.
+//
+// (1) THE BOARD'S OWN SELF-LINK (docs/bench.md, "The Nucleo-G0B1RE's
+// self-link"): I2C1 the host and I2C2 the client, two wires between
+// them, each with a 2.2 kOhm pull-up to 3V3 -
 //
 //   SCL   PB8  AF6  <->  PA11 AF6
 //   SDA   PB9  AF6  <->  PA12 AF6
 //
 // - so every wire verdict is a real bus tenure between two peripherals
 // and not a loop-back. There is no third pad on either net, which is the
-// one thing that shapes the instruments below.
+// one thing that shapes the instruments below. Letters b..m are this
+// instrument's.
+//
+// (2) THE CROSS-ARCHITECTURE BUS: the SAME two pads and the SAME pull-ups
+// reach a SAM C21 running `twi_peer` on SERCOM3 function C -
+//
+//   SCL   PB8  AF6  <->  PA23  SERCOM3 PAD[1]
+//   SDA   PB9  AF6  <->  PA22  SERCOM3 PAD[0]
+//
+// plus a dedicated GND, both boards at 3.3 V. The instrument is
+// commanded IN BAND over the bus under test, over
+// avrdx/src/apps/twi_link.hpp included by relative path - one source of
+// truth for the wire format, three architectures compiling it - and its
+// command-mode client answers ONE address (0x6B) with no general call
+// and no mask, which is why nothing the wireless letters do can wake it.
+// Letters n..r are this instrument's.
+//
+// THE TWO CANNOT BE ON THE DESK AT ONCE (the two jumpers go to one end or
+// the other), so main() PROBES the self-link before any letter runs -
+// PB8 and PB9 driven both ways against the far pad's own internal pull -
+// and EACH SET SKIPS ITSELF ON THE OTHER DESK, printing the reason and
+// claiming no verdict either way: letters b..l, x and y when the probe
+// says no, letters n..r when it says yes. The one thing that still
+// FAILS is a peer that does not answer with the wires in place - that
+// is firmware to flash, not a desk this suite was not built for.
 //
 // HOW A BUS RATE IS MEASURED WITH NO PAD TO SPARE. A timer capture or an
 // EXTI count would need a pad on SCL, and both ends of SCL are already
@@ -69,6 +96,16 @@
 //      answering - and the per-bus timeout with recover()
 //   m  the errata: 2.10.1 as the refusals it is, 2.10.2 as what the run
 //      has counted
+//   n  THE PEER: the twi_link command channel to the SAM C21, its ident
+//      and ten command round trips
+//   o  the tenure shapes against the peer - write, read, write-then-read
+//      with the repeated START counted from the far end, general call
+//   p  the vocabulary against the peer (nack_addr from a deaf client,
+//      nack_data at a commanded byte) and commanded stretching priced
+//   q  the three speeds against a second chip
+//   r  THE KERNEL against the peer: I2cBus (= BusMaster) over I2cHost,
+//      the NACK in its place, the rejection, both votes, and the wedge
+//      the PEER holds answered by the per-bus timeout
 //
 // NOTHING WRITES FLASH, no option byte is touched, and the RTC domain is
 // not reset. The pads this suite moves are the four of the I2C
@@ -100,6 +137,11 @@
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+// THE PROTOCOL IS THE AVR CAMPAIGN'S, AND IT IS NOT COPIED. twi_link.hpp
+// is pure encoding - it names no register and includes nothing of brio -
+// so all three architectures' apps compile the same file.
+#include "../../../avrdx/src/apps/twi_link.hpp"
 
 namespace {
 
@@ -154,7 +196,7 @@ constexpr uint8_t r_mid = 1;
 constexpr uint8_t r_slow = 2;
 
 Serial serial;
-TestBench<Serial, 20> bench;
+TestBench<Serial, 24> bench;
 
 /// The client's own address, and one it must be deaf to.
 constexpr uint8_t peer_addr = 0x42;
@@ -621,6 +663,239 @@ bool link_alive() {
     return st == i2c_ok;
 }
 
+void settle_ms(uint32_t ms) {
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < ms) {
+    }
+}
+
+// ===========================================================================
+// Which desk is this? The self-link, asked of the wire
+// ===========================================================================
+//
+// THE SELF-LINK IS NOT A PROPERTY OF THIS BOARD, it is two jumpers, and
+// they have already moved once: PB8/PB9 now carry the cross-architecture
+// bus to a SAM C21 running `twi_peer`, and I2C2's pads are on nothing
+// (docs/bench.md). So the suite ASKS THE WIRE which desk it is on, once,
+// before any letter runs, and the letters whose second node is I2C2 SKIP
+// THEMSELVES - by name, with the reason printed - when the answer is no.
+// A skipped letter claims nothing and scores no verdict either way.
+
+bool self_link = false;
+
+/// Does driving `Drv` really move `Rd`? Both levels, each against the
+/// far pad's OPPOSITE internal pull, so a pad stuck at a rail cannot
+/// answer yes to both. The 2.2 kOhm pull-ups on the host pair are why
+/// the LOW leg is the informative one; the HIGH leg rejects a far pad
+/// that is simply floating up.
+template <typename Drv, typename Rd>
+bool wire_follows() {
+    Rd::input(PinPull::up);
+    Drv::output(false);
+    spin_us(200);
+    const bool low = !Rd::read();
+    Rd::input(PinPull::down);
+    Drv::set();
+    spin_us(200);
+    const bool high = Rd::read();
+    Drv::release();
+    Rd::release();
+    return low && high;
+}
+
+bool probe_self_link() {
+    const bool scl = wire_follows<SclPin, PeerSclPin>();
+    const bool sda = wire_follows<SdaPin, PeerSdaPin>();
+    print(serial, "  self-link probe: SCL ", scl, " SDA ", sda, crlf);
+    return scl && sda;
+}
+
+/// The opening line of every letter whose second node is I2C2.
+bool need_self_link() {
+    if (self_link) {
+        return true;
+    }
+    print(serial,
+          "  SKIPPED, no verdict claimed: this letter's second node is the board's "
+          "OWN I2C2 client (PA11/PA12) and the probe says the two self-link wires "
+          "are not on the desk. PB8/PB9 carry the cross-architecture bus to the "
+          "SAM C21 today - letters n..r are the instrument this desk has "
+          "(docs/bench.md).",
+          crlf);
+    return false;
+}
+
+// ===========================================================================
+// The cross-architecture peer: twi_link.hpp over the bus under test
+// ===========================================================================
+//
+// The wire format is avrdx/src/apps/twi_link.hpp, included by relative
+// path and NOT copied - it names no register, includes nothing of brio
+// and is compiled by three architectures' apps. The instrument at the
+// other end is `twi_peer`, whose samc21 port answers on SERCOM3 fn C at
+// the ONE command address 0x6B, with no general call and no mask, which
+// is the whole coexistence argument: nothing the wireless letters do can
+// wake it.
+//
+// ONE COMMAND IS TWO TENURES of the engine under test - a write carrying
+// the frame, then a read collecting the answer - so the command channel
+// is itself a measurement of this driver.
+
+using twilink::Op;
+
+constexpr I2cSpeed link_speed = I2cSpeed::standard_100k;
+
+uint8_t frame_buf[twilink::max_payload + 4];
+uint8_t resp_buf[twilink::response_bytes];
+twilink::Decoder dec;
+bool link_quiet = false;
+
+/// Put the host where a command can be sent: the on-board client off the
+/// vector, the arbiter's claim on it dropped, the engine re-inited.
+void link_ready() {
+    peer_stop();
+    bus_ao_live = false;
+    dma_host_live = false;
+    raw_host_live = false;
+    host_ready();
+}
+
+bool send_frame(Op op, const uint8_t* p, uint8_t len) {
+    uint8_t n = 0;
+    twilink::write_frame(
+        [&](uint8_t b) {
+            if (n < sizeof frame_buf) {
+                frame_buf[n++] = b;
+            }
+        },
+        op, p, len);
+    return host_tenure(twilink::command_addr, frame_buf, n, nullptr, 0, link_speed) ==
+           i2c_ok;
+}
+
+bool recv_frame(twilink::Frame& out) {
+    dec.reset();
+    for (uint8_t i = 0; i < twilink::response_bytes; ++i) {
+        resp_buf[i] = 0;
+    }
+    if (host_tenure(twilink::command_addr, nullptr, 0, resp_buf,
+                    twilink::response_bytes, link_speed) != i2c_ok) {
+        return false;
+    }
+    for (uint8_t i = 0; i < twilink::response_bytes; ++i) {
+        if (dec.feed(resp_buf[i]) == twilink::Decoder::Result::frame) {
+            out = dec.frame();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool command_once(Op op, const uint8_t* p, uint8_t len) {
+    if (!send_frame(op, p, len)) {
+        return false;
+    }
+    settle_ms(2);
+    twilink::Frame f;
+    if (!recv_frame(f)) {
+        return false;
+    }
+    return f.op == Op::ack && f.len == 2 && f.data[0] == twilink::byte_of(op);
+}
+
+const uint8_t no_payload[1] = {0};
+
+/// Three attempts with the peer's own recovery bound between them.
+bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
+    for (uint8_t k = 0; k < 3; ++k) {
+        if (command_once(op, p, len)) {
+            settle_ms(twilink::arm_ms);
+            return true;
+        }
+        link_ready();
+        settle_ms(400);
+    }
+    if (!link_quiet) {
+        print(serial, "    LINK FAILURE op ", hex(twilink::byte_of(op)),
+              ": the peer board must be running `twi_peer` (python3 tools/bench.py "
+              "flash D twi_peer); check the two I2C wires (PB8-PA23, PB9-PA22), the "
+              "2.2k pull-ups and the GND.",
+              crlf);
+    }
+    return false;
+}
+
+bool query(Op op, twilink::Frame& data) {
+    if (!command(op)) {
+        return false;
+    }
+    settle_ms(2);
+    return recv_frame(data);
+}
+
+bool peer_report(twilink::Report& r) {
+    for (uint8_t k = 0; k < 4; ++k) {
+        twilink::Frame f;
+        if (query(Op::report, f) && f.op == Op::report_data &&
+            f.len == twilink::report_size) {
+            r = twilink::get_report(f.data);
+            return true;
+        }
+        settle_ms(60);
+    }
+    return false;
+}
+
+bool peer_act(Op op, const twilink::Params& a) {
+    uint8_t p[twilink::params_size];
+    twilink::put_params(p, a);
+    return command(op, p, twilink::params_size);
+}
+
+bool ensure_link() {
+    link_quiet = true;
+    link_ready();
+    for (uint8_t k = 0; k < 3; ++k) {
+        if (command(Op::ping)) {
+            link_quiet = false;
+            return true;
+        }
+    }
+    link_quiet = false;
+    print(serial,
+          "  THE PEER DID NOT ANSWER. The peer board must be running `twi_peer` "
+          "(python3 tools/bench.py flash D twi_peer); its console '0' forces the "
+          "command-mode client back. Check the two wires in this file's header.",
+          crlf);
+    return false;
+}
+
+/// The opening line of every letter whose instrument is the SAM peer.
+/// THE TWO WIRINGS ARE THE SAME JUMPERS AT DIFFERENT ENDS, so a desk
+/// carrying the self-link cannot be carrying the peer: that is a
+/// topology and it skips, exactly as the self-link letters skip on the
+/// other desk. An absent peer with the wires in place is a different
+/// thing - firmware to flash - and fails loudly.
+bool need_peer() {
+    if (self_link) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: this letter's instrument is the SAM "
+              "C21 running `twi_peer`, and the probe says these two pads carry the "
+              "board's OWN self-link today - the two wirings are the same jumpers "
+              "at different ends (docs/bench.md). Letters b..m are the instrument "
+              "this desk has.",
+              crlf);
+        return false;
+    }
+    if (ensure_link()) {
+        return true;
+    }
+    bench.verdict("the peer answers on the command address (the peer board running "
+                  "twi_peer)",
+                  false);
+    return false;
+}
+
 // ===========================================================================
 // a - the block, wireless
 // ===========================================================================
@@ -798,6 +1073,9 @@ void ta_block() {
 // ===========================================================================
 
 void tb_link() {
+    if (!need_self_link()) {
+        return;
+    }
     uint8_t answers[16];
     fill_pattern(answers, 16, 0x31);
     (void)peer_arm(answers, 16, I2cSpeed::fast_400k, false, peer_addr,
@@ -873,6 +1151,9 @@ void tb_link() {
 // ===========================================================================
 
 void tc_vocabulary() {
+    if (!need_self_link()) {
+        return;
+    }
     uint8_t answers[8];
     fill_pattern(answers, 8, 0x60);
     (void)peer_arm(answers, 8);
@@ -977,6 +1258,9 @@ uint32_t measure_scl_ns(uint8_t n, I2cSpeed s, uint8_t& status) {
 }
 
 void td_speeds() {
+    if (!need_self_link()) {
+        return;
+    }
     uint8_t answers[8];
     fill_pattern(answers, 8, 0x70);
 
@@ -1220,6 +1504,9 @@ void td_speeds() {
 // ===========================================================================
 
 void te_stretch() {
+    if (!need_self_link()) {
+        return;
+    }
     uint8_t answers[16];
     fill_pattern(answers, 16, 0x20);
     (void)peer_arm(answers, 16, I2cSpeed::fast_400k);
@@ -1314,6 +1601,9 @@ void te_stretch() {
 // ===========================================================================
 
 void tf_addressing() {
+    if (!need_self_link()) {
+        return;
+    }
     uint8_t answers[8];
     fill_pattern(answers, 8, 0xC0);
     // A 10-bit OA1 and a masked 7-bit OA2 at once.
@@ -1410,6 +1700,9 @@ void tf_addressing() {
 // ===========================================================================
 
 void tg_filters() {
+    if (!need_self_link()) {
+        return;
+    }
     uint8_t answers[8];
     fill_pattern(answers, 8, 0x88);
     (void)peer_arm(answers, 8);
@@ -1489,6 +1782,9 @@ void tg_filters() {
 // ===========================================================================
 
 void th_long() {
+    if (!need_self_link()) {
+        return;
+    }
     uint8_t answers[8];
     fill_pattern(answers, 8, 0x11);
     (void)peer_arm(answers, 8);
@@ -1641,6 +1937,9 @@ void th_long() {
 // ===========================================================================
 
 void ti_smbus() {
+    if (!need_self_link()) {
+        return;
+    }
     uint8_t answers[8];
     fill_pattern(answers, 8, 0x44);
     (void)peer_arm(answers, 8);
@@ -1846,6 +2145,9 @@ void ti_smbus() {
 
 
 void tj_wake() {
+    if (!need_self_link()) {
+        return;
+    }
     if (!C::wakes_from_stop) {
         bench.verdict("this I2C2 has no wake from Stop (declined by table 165)", false);
         return;
@@ -1923,6 +2225,9 @@ void tj_wake() {
 // ===========================================================================
 
 void tk_unstick() {
+    if (!need_self_link()) {
+        return;
+    }
     uint8_t answers[8];
     fill_pattern(answers, 8, 0x37);
     (void)peer_arm(answers, 8);
@@ -2081,6 +2386,9 @@ Host::Request request(uint8_t addr, const uint8_t* tx) {
 }  // namespace kl
 
 void tl_kernel() {
+    if (!need_self_link()) {
+        return;
+    }
     uint8_t answers[8];
     fill_pattern(answers, 8, 0x4D);
     (void)peer_arm(answers, 8);
@@ -2239,13 +2547,20 @@ void tm_errata() {
     bench.verdict("the driver counts a master's BERR and never reports it - which is "
                   "the erratum's own workaround",
                   true);
-    uint8_t answers[4];
-    fill_pattern(answers, 4, 0x01);
-    (void)peer_arm(answers, 4);
-    bench.verdict("... and the bus works, which is what 'the transfer continues "
-                  "normally' means",
-                  link_alive());
-    peer_stop();
+    if (self_link) {
+        uint8_t answers[4];
+        fill_pattern(answers, 4, 0x01);
+        (void)peer_arm(answers, 4);
+        bench.verdict("... and the bus works, which is what 'the transfer continues "
+                      "normally' means",
+                      link_alive());
+        peer_stop();
+    } else {
+        print(serial, "  the closing 'and the bus still works' leg wants the I2C2 "
+                      "client and the self-link is not on the desk: no verdict "
+                      "claimed (letter n is the same statement against the SAM peer)",
+              crlf);
+    }
 }
 
 // ===========================================================================
@@ -2259,6 +2574,9 @@ void tm_errata() {
 // it is kept because the next person will need it too.
 
 void tx_trace() {
+    if (!need_self_link()) {
+        return;
+    }
     uint8_t answers[8];
     fill_pattern(answers, 8, 0x61);
     (void)peer_arm(answers, 8);
@@ -2322,6 +2640,9 @@ void tx_trace() {
 /// before a word is printed - so a storm is counted and named instead of
 /// starving the console that would report it.
 void ty_isr_trace() {
+    if (!need_self_link()) {
+        return;
+    }
     uint8_t answers[8];
     fill_pattern(answers, 8, 0x61);
     (void)peer_arm(answers, 8);
@@ -2373,15 +2694,475 @@ void ty_isr_trace() {
     bench.verdict("the ISR trace was taken (a diagnostic, not a verdict)", true);
 }
 
+// ===========================================================================
+// n - the cross-architecture command channel
+// ===========================================================================
+
+void tn_peer_link() {
+    if (!need_peer()) {
+        return;
+    }
+    bench.verdict("the peer answers a ping over the two wires - and every command "
+                  "is TWO TENURES of the engine under test, a write carrying the "
+                  "frame and a read collecting the answer",
+                  true);
+
+    twilink::Frame f;
+    const bool got = query(Op::ident, f) && f.op == Op::ident_data &&
+                     f.len == twilink::ident_size;
+    if (got) {
+        const auto id = twilink::get_ident(f.data);
+        char label[9] = {};
+        for (uint8_t i = 0; i < 8; ++i) {
+            label[i] = id.label[i];
+        }
+        print(serial, "  peer: label '", label, "' xtal=", id.xtal, " sanity=",
+              hex(id.sanity), " fw=", hex(id.version), crlf);
+        bench.verdict("ident comes back and it IS twi_peer (the sanity byte), from a "
+                      "board of ANOTHER ARCHITECTURE speaking the same wire format",
+                      id.sanity == twilink::ident_sanity);
+    } else {
+        bench.verdict("ident comes back", false);
+    }
+
+    uint8_t good = 0;
+    for (uint8_t i = 0; i < 10; ++i) {
+        if (command(Op::ping)) {
+            ++good;
+        }
+    }
+    print(serial, "  ", good, " of 10 command round trips answered at ",
+          Host::scl_hz(link_speed) / 1000u, " kHz", crlf);
+    bench.verdict("the channel is steady over ten command round trips", good == 10u);
+}
+
+// ===========================================================================
+// o - the tenure shapes against the peer
+// ===========================================================================
+
+void to_peer_shapes() {
+    if (!need_peer()) {
+        return;
+    }
+
+    // THE SERVE ENDS ON ITS DEADLINE, never by count: a count reached in
+    // the middle of the combined tenure would cut it in half and leave
+    // the repeated START talking to a command-mode client (the samc21
+    // bench paid for that one).
+    twilink::Params a{};
+    a.count = 64;
+    a.ms = 250;
+    a.addr = twilink::dut_addr;
+    a.seed = 0x30;
+    a.pattern = twilink::pattern_counting;
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the serve command", false);
+        return;
+    }
+
+    uint8_t w[8];
+    for (uint8_t i = 0; i < 8; ++i) {
+        w[i] = static_cast<uint8_t>(0x11u * (i + 1u));
+    }
+    const uint8_t ws = host_tenure(twilink::dut_addr, w, 8, nullptr, 0, link_speed);
+    for (uint8_t i = 0; i < 8; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    const uint8_t rs = host_tenure(twilink::dut_addr, nullptr, 0, rx_buf, 8, link_speed);
+    uint8_t rmism = 0;
+    for (uint8_t i = 0; i < 8; ++i) {
+        if (rx_buf[i] != twilink::pattern_value(a.pattern, a.seed, i)) {
+            ++rmism;
+        }
+    }
+    for (uint8_t i = 0; i < 4; ++i) {
+        tx_buf[i] = static_cast<uint8_t>(0xA0u + i);
+        rx_buf[i] = 0xEE;
+    }
+    const uint8_t cs = host_tenure(twilink::dut_addr, tx_buf, 4, rx_buf, 4, link_speed);
+    settle_ms(300);   // past the serve's own deadline: the peer is back
+    twilink::Report r{};
+    const bool rep = peer_report(r);
+    print(serial, "  write=", ws, " read=", rs, " mism=", rmism, " combined=", cs,
+          "; peer: count=", r.count, " addr_hits=", r.addr_hits, " first=",
+          hex(r.first), " sum=", hex(r.sum), crlf);
+    bench.verdict("a write tenure, a read tenure and the combined write-then-read "
+                  "all complete i2c_ok against a SECOND CHIP",
+                  ws == i2c_ok && rs == i2c_ok && cs == i2c_ok);
+    bench.verdict("the bytes read back are the peer's own pattern, byte-exact",
+                  rmism == 0u);
+    bench.verdict("the peer accounts every byte of the three tenures (8 written, 8 "
+                  "served, then 4 and 4)",
+                  rep && r.count == 24u);
+    bench.verdict("and the COMBINED tenure hit the client's address machinery TWICE "
+                  "- the repeated START, counted from the far end",
+                  rep && r.addr_hits == 4u);
+
+    twilink::Params g{};
+    g.count = 64;
+    g.ms = 250;
+    g.addr = twilink::dut_addr;
+    g.flags = twilink::flag_general_call;
+    if (peer_act(Op::serve, g)) {
+        uint8_t gw[2] = {0x5A, 0xA5};
+        const uint8_t gs = host_tenure(0x00, gw, 2, nullptr, 0, link_speed);
+        settle_ms(300);
+        twilink::Report gr{};
+        const bool grep = peer_report(gr);
+        print(serial, "  general call: status=", gs, " peer last_addr=",
+              hex(gr.last_addr), " count=", gr.count, crlf);
+        bench.verdict("a GENERAL CALL write reaches the peer at address 0x00",
+                      gs == i2c_ok && grep && gr.count == 2u && gr.last_addr == 0x00u);
+    } else {
+        bench.verdict("the peer accepted the general-call serve", false);
+    }
+}
+
+// ===========================================================================
+// p - the vocabulary on the wire, and commanded stretching
+// ===========================================================================
+
+void tp_peer_vocabulary() {
+    if (!need_peer()) {
+        return;
+    }
+
+    // A DEAF peer: its client parked where nobody calls. Both a write and
+    // the EMPTY request an address scanner sends meet nobody-home.
+    twilink::Params a{};
+    a.count = 8;
+    a.ms = 600;
+    a.addr = twilink::dut_addr;
+    a.flags = twilink::flag_deaf;
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the deaf serve", false);
+        return;
+    }
+    uint8_t w[4] = {1, 2, 3, 4};
+    const uint8_t deaf = host_tenure(twilink::dut_addr, w, 4, nullptr, 0, link_speed);
+    const uint8_t probe = host_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0,
+                                      link_speed);
+    settle_ms(700);
+
+    // A data NACK at a commanded byte.
+    twilink::Params n{};
+    n.count = 16;
+    n.ms = 600;
+    n.addr = twilink::dut_addr;
+    n.nack_at = 3;
+    if (!peer_act(Op::serve, n)) {
+        bench.verdict("the peer accepted the nack-at serve", false);
+        return;
+    }
+    uint8_t w6[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
+    const uint8_t nack = host_tenure(twilink::dut_addr, w6, 6, nullptr, 0, link_speed);
+    settle_ms(700);
+    twilink::Report r{};
+    const bool rep = peer_report(r);
+    print(serial, "  deaf=", deaf, " probe=", probe, " data-nack=", nack,
+          " peer flags=", hex(r.flags), " count=", r.count, crlf);
+    bench.verdict("an address nobody answers reports i2c_nack_addr - the scanner's "
+                  "probe result, on a board that is otherwise alive",
+                  deaf == i2c_nack_addr && probe == i2c_nack_addr);
+    bench.verdict("a commanded NACK on the 3rd data byte reports i2c_nack_data - the "
+                  "wire-level vocabulary is REAL statuses across two architectures",
+                  nack == i2c_nack_data && rep &&
+                      (r.flags & twilink::report_nacked) != 0u);
+
+    // Commanded clock stretching, priced against an unstretched baseline.
+    twilink::Params base{};
+    base.count = 128;   // never reached; the deadline ends the serve
+    base.ms = 700;
+    base.addr = twilink::dut_addr;
+    if (!peer_act(Op::serve, base)) {
+        bench.verdict("the peer accepted the baseline serve", false);
+        return;
+    }
+    uint8_t w8[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint32_t t0 = Ticker::millis();
+    bool base_ok = true;
+    for (uint8_t k = 0; k < 8; ++k) {
+        if (host_tenure(twilink::dut_addr, w8, 8, nullptr, 0, link_speed) != i2c_ok) {
+            base_ok = false;
+        }
+    }
+    const uint32_t base_ms = Ticker::millis() - t0;
+    settle_ms(750);
+
+    twilink::Params st{};
+    st.count = 64;
+    st.ms = 150;
+    st.addr = twilink::dut_addr;
+    st.hold_us = 2000;
+    if (!peer_act(Op::serve, st)) {
+        bench.verdict("the peer accepted the stretched serve", false);
+        return;
+    }
+    t0 = Ticker::millis();
+    const uint8_t s2 = host_tenure(twilink::dut_addr, w8, 8, nullptr, 0, link_speed);
+    const uint32_t stretched_ms = Ticker::millis() - t0;
+    settle_ms(300);
+    twilink::Report sr{};
+    const bool srep = peer_report(sr);
+    print(serial, "  8 x 8 bytes unstretched: ", base_ms,
+          " ms; ONE 8-byte tenure at 2 ms per byte: ", stretched_ms,
+          " ms; peer count=", sr.count, crlf);
+    bench.verdict("the unstretched baseline tenures all complete i2c_ok", base_ok);
+    bench.verdict("a client stretching every data byte by 2 ms stretches the WALL "
+                  "TIME the model predicts (16 ms or more for 8 bytes) and the "
+                  "tenure still completes i2c_ok - stretching is flow control and "
+                  "the controller simply waits",
+                  s2 == i2c_ok && stretched_ms >= 16u && srep && sr.count >= 8u);
+}
+
+// ===========================================================================
+// q - the three speeds against a second chip
+// ===========================================================================
+
+void tq_peer_speeds() {
+    if (!need_peer()) {
+        return;
+    }
+
+    struct Rung {
+        I2cSpeed speed;
+        const char* name;
+    };
+    const Rung rungs[] = {{I2cSpeed::standard_100k, "100k"},
+                          {I2cSpeed::fast_400k, "400k"},
+                          {I2cSpeed::fast_plus_1m, "1M  "}};
+    uint8_t exact = 0;
+    bool sm_fm_ok = true;
+    for (uint8_t i = 0; i < 3u; ++i) {
+        twilink::Params a{};
+        a.count = 64;
+        a.ms = 250;
+        a.addr = twilink::dut_addr;
+        a.seed = static_cast<uint8_t>(0x50u + i * 0x10u);
+        a.pattern = twilink::pattern_counting;
+        if (!peer_act(Op::serve, a)) {
+            bench.verdict("the peer accepted the serve for this rung", false);
+            return;
+        }
+        for (uint8_t k = 0; k < 8; ++k) {
+            tx_buf[k] = static_cast<uint8_t>(0xC0u + k);
+            rx_buf[k] = 0xEE;
+        }
+        const bool legal = Host::speed_ok(rungs[i].speed);
+        const uint8_t ws = legal ? host_tenure(twilink::dut_addr, tx_buf, 8, nullptr, 0,
+                                               rungs[i].speed)
+                                 : 0xEEu;
+        const uint8_t rs = legal ? host_tenure(twilink::dut_addr, nullptr, 0, rx_buf, 8,
+                                               rungs[i].speed)
+                                 : 0xEEu;
+        uint8_t mism = 0;
+        for (uint8_t k = 0; k < 8; ++k) {
+            if (rx_buf[k] != twilink::pattern_value(a.pattern, a.seed, k)) {
+                ++mism;
+            }
+        }
+        settle_ms(300);
+        const bool ok = legal && ws == i2c_ok && rs == i2c_ok && mism == 0u;
+        print(serial, "  ", rungs[i].name, ": SCL ", Host::scl_hz(rungs[i].speed) / 1000u,
+              " kHz, write=", ws, " read=", rs, " mism=", mism, " -> ",
+              ok ? "byte-exact both ways" : "NOT exact", crlf);
+        if (ok) {
+            ++exact;
+        } else if (i < 2u) {
+            sm_fm_ok = false;
+        }
+    }
+    print(serial, "  ", exact, " of 3 speeds byte-exact against the SAM peer", crlf);
+    bench.verdict("Standard mode and Fast mode both carry a write and a read "
+                  "byte-exact between two DIFFERENT SILICONS",
+                  sm_fm_ok);
+    // FAST-MODE-PLUS IS THE RUNG THAT IS ABOUT THE WIRE, not the
+    // controller: the peer's client has no input filter of its own (the
+    // samc21 campaign's headline), so what a megahertz bus does here is
+    // a property of these two jumpers and their 2.2 kOhm pull-ups. The
+    // number is printed and the verdict claims only that the register
+    // accepted the rate.
+    bench.verdict("...and Fm+ is REACHABLE at this kernel clock (whether the wire "
+                  "carries it is the print above, not this verdict)",
+                  Host::speed_ok(I2cSpeed::fast_plus_1m));
+    bench.verdict("the command channel survives the ladder", command(Op::ping));
+}
+
+// ===========================================================================
+// r - THE KERNEL against the peer
+// ===========================================================================
+
+void tr_peer_kernel() {
+    if (!need_peer()) {
+        return;
+    }
+
+    // The peer serves for the whole letter's first phase; its deadline is
+    // long enough for the queued tenures and the vote round.
+    twilink::Params a{};
+    a.count = 512;   // never reached: the deadline is the exit
+    a.ms = 900;
+    a.addr = twilink::dut_addr;
+    a.seed = 0x70;
+    a.pattern = twilink::pattern_counting;
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the serve the kernel letter drives", false);
+        return;
+    }
+    bench.verdict("the peer accepted the serve the kernel letter drives", true);
+
+    kl::BusKernel::init_all();
+    bus_ao_live = true;
+    host_swallow_completion = false;
+
+    fill_pattern(kl::out_a, 4, 0x01);
+    fill_pattern(kl::out_b, 4, 0x02);
+    for (uint8_t i = 0; i < 4u; ++i) {
+        post<kl::I2cArb>(
+            kl::request((i == 2u) ? nobody_addr : twilink::dut_addr, kl::out_a));
+    }
+    kl::pump_until(4, 400);
+    print(serial, "  four queued tenures: replies ", kl::Probe::n, " [",
+          kl::Probe::replies[0], " ", kl::Probe::replies[1], " ",
+          kl::Probe::replies[2], " ", kl::Probe::replies[3], "]", crlf);
+    bench.verdict("four tenures through I2cBus against a SECOND CHIP, four replies "
+                  "- util/i2c_bus.hpp and util/bus_master.hpp with not one line "
+                  "changed for the pairing",
+                  kl::Probe::n == 4u);
+    bench.verdict("... in order, with the NACK from an address nobody answers "
+                  "delivered IN ITS PLACE as a reply",
+                  kl::Probe::replies[0] == i2c_ok && kl::Probe::replies[1] == i2c_ok &&
+                      kl::Probe::replies[2] == i2c_nack_addr &&
+                      kl::Probe::replies[3] == i2c_ok);
+
+    kl::Probe::clear_tally();
+    for (uint8_t i = 0; i < 6u; ++i) {
+        post<kl::I2cArb>(kl::request(twilink::dut_addr, kl::out_b));
+    }
+    kl::pump_until(6, 400);
+    print(serial, "  six posted into a four-deep queue: replies ", kl::Probe::n,
+          ", rejected ", kl::Probe::rejected, crlf);
+    bench.verdict("the arbiter rejects what it cannot queue, immediately",
+                  kl::Probe::rejected != 0u);
+    bench.verdict("... and every request is still answered exactly once",
+                  kl::Probe::n == 6u);
+
+    kl::drain(100);
+    kl::Probe::clear_tally();
+    post<kl::I2cArb>(PrepareSleep{
+        .depth = SleepDepth::standby,
+        .reply = reply_to<kl::Probe, SleepVote>(),
+    });
+    kl::pump();
+    bench.verdict("an IDLE bus votes for the sleep",
+                  kl::Probe::votes == 1u && kl::Probe::last_vote);
+    kl::Probe::clear_tally();
+    post<kl::I2cArb>(kl::request(twilink::dut_addr, kl::out_a));
+    post<kl::I2cArb>(PrepareSleep{
+        .depth = SleepDepth::standby,
+        .reply = reply_to<kl::Probe, SleepVote>(),
+    });
+    kl::pump();
+    kl::drain(150);
+    print(serial, "  the vote from a BUSY bus: ", kl::Probe::votes, " vote(s), last ",
+          kl::Probe::last_vote ? "yes" : "no", crlf);
+    bench.verdict("a BUSY bus votes against it",
+                  kl::Probe::votes == 1u && !kl::Probe::last_vote);
+
+    // ---- THE TIMED BUS, with the wedge held by the OTHER BOARD ----
+    // The peer holds SDA down from its own PORT for longer than the
+    // arbiter's limit. No silicon time-out on this controller watches a
+    // wire a client wedged (letter i measures whose hold each of the
+    // three really polices), so the ARBITER is what notices.
+    bus_ao_live = false;
+    settle_ms(400);   // the serve's deadline has to expire first
+    twilink::Params h{};
+    h.ms = 300;
+    h.aux8 = 0;        // only the deadline releases the line
+    h.aux16 = 0;
+    const bool armed = peer_act(Op::hold_sda, h);
+    bus_ao_live = true;
+    if (!armed) {
+        bench.verdict("the peer accepted the hold_sda command", false);
+        peer_stop();
+        return;
+    }
+    bench.verdict("the peer accepted the hold_sda command", true);
+    kl::Probe::clear_tally();
+    post<kl::I2cArb>(kl::request(twilink::dut_addr, kl::out_a));
+    const uint32_t t0 = Ticker::ticks();
+    kl::pump_until(1, 400);
+    const uint32_t took = Ticker::ticks() - t0;
+    const bool still_low = !SdaPin::read();
+    print(serial, "  the wedged tenure answered ", kl::Probe::n, " with status ",
+          kl::Probe::replies[0], " after ", took, " ms; SDA still low at the reply: ",
+          still_low ? "yes" : "no", crlf);
+    // WHICH OF THE TWO ANSWERS COMES IS A PROPERTY OF THE WEDGE'S
+    // TIMING, and both are a report: a foreign chip that takes SDA while
+    // this controller is already driving a START makes the silicon read
+    // back a level it did not drive, which is i2c_arb_lost AT ONCE; a
+    // line already low when the START is issued parks instead, and then
+    // nothing but the arbiter's own limit answers (the self-link's
+    // letter l measures that half).
+    print(serial, "  the answer is ",
+          kl::Probe::replies[0] == i2c_arb_lost
+              ? "i2c_arb_lost - the ENGINE's own wire code, read back from a level "
+                "it did not drive"
+              : (kl::Probe::replies[0] == i2c_timeout
+                     ? "i2c_timeout - the ARBITER's, the silicon having seen a park "
+                       "and no error at all"
+                     : "an engine code"),
+          crlf);
+    bench.verdict("a tenure into a wire a FOREIGN CHIP holds down is answered IN ITS "
+                  "PLACE - never silence and never i2c_ok",
+                  kl::Probe::n == 1u && kl::Probe::replies[0] != i2c_ok);
+    bench.verdict("... at the arbiter's own limit or sooner, never at the wedge's "
+                  "length",
+                  took <= 40u);
+
+    // And the same bus AO carries the next tenure once the peer lets go.
+    bus_ao_live = false;
+    settle_ms(400);
+    link_ready();
+    twilink::Params again{};
+    again.count = 64;
+    again.ms = 250;
+    again.addr = twilink::dut_addr;
+    again.seed = 0x90;
+    const bool re = peer_act(Op::serve, again);
+    bus_ao_live = true;
+    kl::drain(20);
+    kl::Probe::clear_tally();
+    post<kl::I2cArb>(kl::request(twilink::dut_addr, kl::out_a));
+    kl::pump_until(1, 300);
+    print(serial, "  after the release: replies ", kl::Probe::n, " status ",
+          kl::Probe::replies[0], crlf);
+    bench.verdict("THE SAME BUS AO carries the next tenure to i2c_ok after "
+                  "recover()",
+                  re && kl::Probe::n == 1u && kl::Probe::replies[0] == i2c_ok);
+    bus_ao_live = false;
+    settle_ms(300);
+    peer_stop();
+}
+
 // ---------------------------------------------------------------------------
 // the banner
 // ---------------------------------------------------------------------------
 
 void banner() {
-    print(serial, crlf, "test_stm32_i2c - STM32G0 I2C (RM0444 ch. 32), both roles on "
-                        "the Nucleo's own self-link", crlf,
-          "  I2C1 host PB8/PB9 AF6  <->  I2C2 client PA11/PA12 AF6, 2.2k pull-ups",
-          crlf, "  client address 0x", hex(peer_addr), ", client kernel HSI16", crlf);
+    print(serial, crlf, "test_stm32_i2c - STM32G0 I2C (RM0444 ch. 32)", crlf);
+    if (self_link) {
+        print(serial, "  the SELF-LINK is on the desk: I2C1 host PB8/PB9 AF6  <->  "
+                      "I2C2 client PA11/PA12 AF6; letters b..m are live, client "
+                      "address ",
+              hex(peer_addr), ", client kernel HSI16", crlf);
+    } else {
+        print(serial, "  NO SELF-LINK on the desk (probed): letters b..l, x and y "
+                      "skip themselves and claim nothing", crlf);
+    }
+    print(serial, "  PB8/PB9 AF6 with their 2.2k pull-ups reach the SAM C21 running "
+                  "`twi_peer` (SERCOM3 PA23/PA22, command address ",
+          hex(twilink::command_addr), ") - letters n..r", crlf);
     bench.menu();
 }
 
@@ -2480,6 +3261,15 @@ int main() {
     bench.letter('l', "THE KERNEL: I2cBus over I2cHost, and the per-bus timeout",
                  tl_kernel);
     bench.letter('m', "the errata: 2.10.1 as refusals, 2.10.2 as a count", tm_errata);
+    bench.letter('n', "THE PEER: the twi_link command channel to the SAM C21",
+                 tn_peer_link);
+    bench.letter('o', "the tenure shapes against the peer, the repeated START "
+                      "counted from the far end", to_peer_shapes);
+    bench.letter('p', "the vocabulary against the peer, and commanded stretching",
+                 tp_peer_vocabulary);
+    bench.letter('q', "the three speeds against a second chip", tq_peer_speeds);
+    bench.letter('r', "THE KERNEL against the peer: I2cBus over I2cHost, and the "
+                      "wedge the peer holds", tr_peer_kernel);
     bench.letter('x', "a POLLED trace of one tenure, both ends by hand", tx_trace,
                  false);
     bench.letter('y', "the same tenure with the vectors LIVE, bounded and counted",
@@ -2489,6 +3279,11 @@ int main() {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
               " tick=", tick_ok ? "SysTick" : "FAILED",
               " host=", host_ok ? "I2C1" : "FAILED", crlf);
+        // THE TOPOLOGY IS ASKED OF THE WIRE, ONCE, before any letter can
+        // run: which of the two instruments this desk is carrying is not
+        // something the image may assume.
+        self_link = probe_self_link();
+        (void)Host::init(clock, brio::I2cClock::pclk);
         banner();
         bench.prompt();
     }
