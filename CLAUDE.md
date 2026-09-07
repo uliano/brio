@@ -3756,8 +3756,11 @@ samc21/                    the SAM C21 build project, same shape (CMakeLists +
                          script + src/apps + src/glue startup crt + svd/) -
                          its own header comments are the reference
 stm32g0/                 the STM32G0 build project, same shape again (the
-                         part number selects define + ld + crt; ST-LINK
-                         upload target; svd/STM32G0B1.svd)
+                         part number selects define + ld + crt + board
+                         name: presets for the G0B1RE, the G071RB and the
+                         G031K8, ld/<part>.ld and src/glue/startup_<header>
+                         .cpp for each; ST-LINK upload target;
+                         svd/STM32G0B1.svd)
 test/CMakeLists.txt      the host test project (independent - one CMake
                          configure has exactly one compiler):
                          one executable + ctest entry per test_*/main.cpp
@@ -4279,7 +4282,10 @@ brio/                    the framework, four strata:
                            vectors DERIVED FROM PRESENCE (a line's
                            enumerator names what shares it, and the
                            sharer's base macro is what the preprocessor
-                           can probe); no device-select macro anywhere
+                           can probe); no device-select macro anywhere.
+                           Also the handler NAMES an app on more than
+                           one board binds (BRIO_STM32G0_*_HANDLER), the
+                           same presence rule as macros
     nvic.hpp               "stm32g0xx.h" + armv6m/nvic.hpp
     ticker.hpp             armv6m/ticker.hpp + the Ticker alias (1000 Hz)
     platform.hpp           Stm32g0Platform<TB = Ticker> (WFI = Sleep mode,

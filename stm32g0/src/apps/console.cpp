@@ -14,9 +14,11 @@
 // type, the pin, the transport, and the vector binding.
 //
 // ONE VECTOR, SHARED. USART2 raises everything on one NVIC line that it
-// shares with LPUART2 on this part (RM0444 table 61), so the handler
-// name is USART2_LPUART2_IRQHandler and Uart::isr() sorts out what is
-// pending; an app using LPUART2 as well would ask that one next.
+// shares with LPUART2 on the G0B1 (RM0444 table 61), so the handler
+// name is USART2_LPUART2_IRQHandler there and USART2_IRQHandler on the
+// G071/G031 - the reserve's BRIO_STM32G0_USART2_HANDLER spells whichever
+// the header implies - and Uart::isr() sorts out what is pending; an app
+// using LPUART2 as well would ask that one next.
 //
 // Kernel pack order is a CONTRACT here: Console (line consumer) must
 // precede SerialPort (line producer) so the ping-pong buffers are always
@@ -30,7 +32,7 @@
 // Between keystrokes the CPU sleeps in WFI, woken by the SysTick tick or
 // the USART interrupt. No polling anywhere.
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -219,7 +221,11 @@ void Console::cmd_err(const Cmd&, Serial s) {
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-extern "C" void USART2_LPUART2_IRQHandler() {
+// USART2's line is USART2_LPUART2_IRQHandler on the G0B1 and
+// USART2_IRQHandler on the G071/G031 (no LPUART2 to share it): the name
+// the reserve derives from the header's presence macros is what an app
+// on three boards binds.
+extern "C" void BRIO_STM32G0_USART2_HANDLER() {
     if (Serial::isr()) {
         brio::post<SerialLines>(brio::RxActivity{});
     }

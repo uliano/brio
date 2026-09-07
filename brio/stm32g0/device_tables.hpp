@@ -2300,3 +2300,89 @@ constexpr IRQn_Type fdcan_irq(uint8_t line) {
 }
 
 } // namespace brio
+
+// =============================================================================
+// The handler NAMES an app binds - for an app that runs on more than one
+// board of the family
+// =============================================================================
+//
+// The crt of each device header spells its vector table with ST's own
+// startup names (<acronym>_IRQHandler, the acronym of RM0444 table 61),
+// and a SHARED line's acronym changes with what shares it: USART2's line
+// is USART2_LPUART2_IRQHandler where an LPUART2 exists and
+// USART2_IRQHandler where none does, LPTIM1's is TIM6_DAC_LPTIM1 or
+// LPTIM1, and so on - exactly the presence rule every *_irq() verb above
+// follows for the ENUMERATOR. A vector binding is a function DEFINITION,
+// and only the preprocessor can spell a definition's name from a presence
+// probe: so these are macros, the one thing in this file that is a name
+// and not a value, kept HERE for the same reason the values are (a
+// driver never spells a device, and an app that binds a name this table
+// does not derive lands in Default_Handler's silent spin on the board
+// it was not written for). The conditions are the *_irq() verbs' own,
+// line for line; an app for ONE board may still bind the bare name.
+//
+//   extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
+//
+#if defined(LPUART2_BASE)
+#define BRIO_STM32G0_USART2_HANDLER USART2_LPUART2_IRQHandler
+#else
+#define BRIO_STM32G0_USART2_HANDLER USART2_IRQHandler
+#endif
+#if defined(USART5_BASE) && defined(LPUART1_BASE)
+#define BRIO_STM32G0_USART3_HANDLER USART3_4_5_6_LPUART1_IRQHandler
+#elif defined(USART5_BASE)
+#define BRIO_STM32G0_USART3_HANDLER USART3_4_5_6_IRQHandler
+#elif defined(USART3_BASE) && defined(LPUART1_BASE)
+#define BRIO_STM32G0_USART3_HANDLER USART3_4_LPUART1_IRQHandler
+#elif defined(USART3_BASE)
+#define BRIO_STM32G0_USART3_HANDLER USART3_4_IRQHandler
+#endif
+#if defined(LPUART1_BASE) && !defined(USART3_BASE)
+#define BRIO_STM32G0_LPUART1_HANDLER LPUART1_IRQHandler
+#elif defined(LPUART1_BASE)
+#define BRIO_STM32G0_LPUART1_HANDLER BRIO_STM32G0_USART3_HANDLER
+#endif
+#if defined(TIM4_BASE)
+#define BRIO_STM32G0_TIM3_HANDLER TIM3_TIM4_IRQHandler
+#else
+#define BRIO_STM32G0_TIM3_HANDLER TIM3_IRQHandler
+#endif
+#if defined(TIM6_BASE) && (defined(DAC1_BASE) || defined(LPTIM1_BASE))
+#define BRIO_STM32G0_TIM6_HANDLER TIM6_DAC_LPTIM1_IRQHandler
+#elif defined(TIM6_BASE)
+#define BRIO_STM32G0_TIM6_HANDLER TIM6_IRQHandler
+#endif
+#if defined(TIM7_BASE) && defined(LPTIM2_BASE)
+#define BRIO_STM32G0_TIM7_HANDLER TIM7_LPTIM2_IRQHandler
+#elif defined(TIM7_BASE)
+#define BRIO_STM32G0_TIM7_HANDLER TIM7_IRQHandler
+#endif
+#if defined(LPTIM1_BASE) && defined(TIM6_BASE)
+#define BRIO_STM32G0_LPTIM1_HANDLER TIM6_DAC_LPTIM1_IRQHandler
+#elif defined(LPTIM1_BASE)
+#define BRIO_STM32G0_LPTIM1_HANDLER LPTIM1_IRQHandler
+#endif
+#if defined(LPTIM2_BASE) && defined(TIM7_BASE)
+#define BRIO_STM32G0_LPTIM2_HANDLER TIM7_LPTIM2_IRQHandler
+#elif defined(LPTIM2_BASE)
+#define BRIO_STM32G0_LPTIM2_HANDLER LPTIM2_IRQHandler
+#endif
+#if defined(FDCAN1_BASE)
+#define BRIO_STM32G0_TIM16_HANDLER TIM16_FDCAN_IT0_IRQHandler
+#define BRIO_STM32G0_TIM17_HANDLER TIM17_FDCAN_IT1_IRQHandler
+#else
+#define BRIO_STM32G0_TIM16_HANDLER TIM16_IRQHandler
+#define BRIO_STM32G0_TIM17_HANDLER TIM17_IRQHandler
+#endif
+#if defined(DMA2_BASE)
+#define BRIO_STM32G0_DMA1_CH4_UP_HANDLER DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQHandler
+#elif defined(DMA1_Channel7_BASE)
+#define BRIO_STM32G0_DMA1_CH4_UP_HANDLER DMA1_Ch4_7_DMAMUX1_OVR_IRQHandler
+#else
+#define BRIO_STM32G0_DMA1_CH4_UP_HANDLER DMA1_Ch4_5_DMAMUX1_OVR_IRQHandler
+#endif
+#if defined(COMP1_BASE)
+#define BRIO_STM32G0_ADC1_HANDLER ADC1_COMP_IRQHandler
+#else
+#define BRIO_STM32G0_ADC1_HANDLER ADC1_IRQHandler
+#endif

@@ -86,6 +86,16 @@ BOARD_TYPES = {
     "g0b1re": {"project": "stm32g0", "preset": "stm32g0b1re-release",
                "mcu": "stm32g0b1re", "flash": "openocd",
                "target_cfg": "target/stm32g0x.cfg"},
+    # The second silicon: the Nucleo-G071RB (a Nucleo-64 like the
+    # G0B1RE's, around a single-bank 128 K part) and the Nucleo-G031K8
+    # (a Nucleo-32). Same probe, same target script, their own presets,
+    # linker scripts and startup files.
+    "g071rb": {"project": "stm32g0", "preset": "stm32g071rb-release",
+               "mcu": "stm32g071rb", "flash": "openocd",
+               "target_cfg": "target/stm32g0x.cfg"},
+    "g031k8": {"project": "stm32g0", "preset": "stm32g031k8-release",
+               "mcu": "stm32g031k8", "flash": "openocd",
+               "target_cfg": "target/stm32g0x.cfg"},
 }
 
 

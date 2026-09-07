@@ -10,9 +10,9 @@
 #  main() is discovered at configure time (CONFIGURE_DEPENDS) from its own
 #  "// build:" header comment, the same grammar as the other two projects.
 #  One configure targets exactly ONE part (STM32G0_MCU cache var, one value
-#  per configurePreset); only the G0B1RE has a preset today - the
-#  Nucleo-G0B1RE on the desk - the G071/G031 headers are compile-checked by
-#  tools/check_stm32g0.sh instead.
+#  per configurePreset): the G0B1RE (the Nucleo-G0B1RE), the G071RB and
+#  the G031K8 (the two other Nucleos) have presets; every other header of
+#  the pack is compile-checked by tools/check_stm32g0.sh.
 #
 #  THE DEVICE SELECT is ST's convention: the umbrella header stm32g0xx.h
 #  dispatches on a -DSTM32G0B1xx define, so the define is the part number's
@@ -20,7 +20,10 @@
 #  -> STM32G0B1xx). The linker script is per PART (the size letter decides
 #  flash and RAM), so it keeps the full name: ld/stm32g0b1re.ld. The crt is
 #  per DEVICE HEADER (the vector table's names and length follow the
-#  header's IRQn list): src/glue/startup_stm32g0b1.cpp.
+#  header's IRQn list): src/glue/startup_stm32g0b1.cpp. THE BOARD TYPE an
+#  app's "// build: boards =" line names is the part number's last six
+#  characters (g0b1re, g071rb, g031k8): one Nucleo per part on this desk,
+#  so the part IS the board.
 #
 #  Flash/debug: OpenOCD over the Nucleo's on-board ST-LINK/V2.1
 #  (interface/stlink.cfg + target/stm32g0x.cfg); `adapter serial` names
@@ -165,8 +168,8 @@ endfunction()
 # --- App discovery: every stm32g0/src/apps/<app>.cpp - plus every
 #     ../experiments/*/stm32g0/<app>.cpp - becomes a target, gated by its
 #     own "// build: boards = ..." header comment (default: g0b1re, the
-#     one board type that exists).
-set(STM32G0_BOARD "g0b1re")
+#     bench board; an app that also runs on the other Nucleos lists them).
+string(SUBSTRING "${STM32G0_MCU}" 5 6 STM32G0_BOARD)          # g0b1re
 
 file(GLOB APP_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/src/apps/*.cpp"
