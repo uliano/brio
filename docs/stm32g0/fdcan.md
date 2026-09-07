@@ -223,9 +223,13 @@ extern "C" void TIM16_FDCAN_IT0_IRQHandler() {
 All from `test_stm32_fdcan`, **96 verdicts, 96/96 four times** (one from
 a cold flash), wireless, nothing written to flash.
 
-**The pads and the instruments.** PB8 (FDCAN1_RX) and PB9 (FDCAN1_TX),
+**The pads and the instruments.** PC4 (FDCAN1_RX) and PC5 (FDCAN1_TX),
 both AF3, both proven to follow their own internal pull before either is
-claimed and both left in analog mode after. FDCAN2 is exercised
+claimed and both left in analog mode after (the suite was measured on
+PB8/PB9 first and moved when the desk's I2C self-link put 2.2 k pull-ups
+on them: a pad an external pull holds up cannot be pulled dominant by its
+own 40 k, which the error machine below needs - [../bench.md](../bench.md);
+every number here reproduces on PC4/PC5, 96/96). FDCAN2 is exercised
 **without a pad at all**, because internal loop-back needs none. Three
 instruments make the chapter measurable with nothing attached: `TEST.TX
 = 01` counted by a DMAMUX request generator on the pad's EXTI line with
@@ -322,7 +326,7 @@ DOMINANT the whole time changed nothing.
 frame at 500 kbit/s: 60 transitions spanning 200 us = **100 bit times**
 from SOF to the last edge, against 98 bits of SOF..CRC before stuffing;
 the same frame came back inside byte-exact; the error counters never
-moved with PB8 pulled dominant (the pin is disregarded and acknowledge
+moved with the RX pad pulled dominant (the pin is disregarded and acknowledge
 errors are ignored); and three more frames gave 78 rising edges on the
 same pad with no CPU in the loop.
 
@@ -548,8 +552,9 @@ Implemented but not bench-verified, each with the reason:
 - **Timestamps from TIM3 across a wrap**, and the timestamp counter in
   CAN FD, where 36.4.8 warns the internal counter is not a constant time
   base because the bit time changes inside the frame.
-- **Four of the five pads per signal**: PB8/PB9 are what this suite
-  claims; PA11/PA12, PC4/PC5, PD0/PD1, PD12/PD13 for FDCAN1 and
+- **Three of the five pads per signal**: PC4/PC5 are what this suite
+  claims today and PB8/PB9 were measured before the I2C wires took
+  them; PA11/PA12, PD0/PD1, PD12/PD13 for FDCAN1 and
   PB0/PB1, PB5/PB6, PB12/PB13, PC2/PC3, PD14/PD15 for FDCAN2 are
   compile-only here (and the port D pads are not bonded on this
   package).

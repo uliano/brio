@@ -559,6 +559,234 @@ constexpr uint8_t spi_dma_tx_request(uint8_t n) {
     }
 }
 
+// ---- I2C instances (RM0444 ch. 32) ------------------------------------------
+//
+// One chapter, three instances that are NOT copies of each other, and the
+// split is table 165's: every instance does 7- and 10-bit addressing at
+// all three speeds, but the INDEPENDENT CLOCK, the WAKE FROM STOP and the
+// SMBus half belong to I2C1 always, to I2C2 only on the G0B1/G0C1 class,
+// and to I2C3 nowhere.
+
+/// Register block base of I2Cn (n = 1..3), 0 when the device has not got
+/// it. I2C1 and I2C2 sit on every G0 of the pack; I2C3 is the
+/// G0Bx/G0Cx's alone (table 165's footnote 2), and the header says so
+/// with I2C3_BASE. NOTE THE ADDRESS IS NOT CONTIGUOUS with the other
+/// two (0x8800 against 0x5400/0x5800), so this is a switch and not
+/// arithmetic - the SPI3 story again.
+constexpr uint32_t i2c_base(uint8_t n) {
+    switch (n) {
+#if defined(I2C1_BASE)
+        case 1: return I2C1_BASE;
+#endif
+#if defined(I2C2_BASE)
+        case 2: return I2C2_BASE;
+#endif
+#if defined(I2C3_BASE)
+        case 3: return I2C3_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool i2c_present(uint8_t n) { return i2c_base(n) != 0u; }
+
+/// Which APBENR1/APBRSTR1 bit carries I2Cn. EVERY I2C of this family is
+/// on APB1 (bits 21, 22, 23), so - unlike SpiBusClock and UsartBusClock -
+/// there is no register to choose and the answer is a bare mask. The two
+/// registers' bit numbers coincide, so one mask serves the enable and the
+/// reset alike (the enable macro is the one probed).
+constexpr uint32_t i2c_bus_clock(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APBENR1_I2C1EN)
+        case 1: return RCC_APBENR1_I2C1EN;
+#endif
+#if defined(RCC_APBENR1_I2C2EN)
+        case 2: return RCC_APBENR1_I2C2EN;
+#endif
+#if defined(RCC_APBENR1_I2C3EN)
+        case 3: return RCC_APBENR1_I2C3EN;
+#endif
+        default: return 0;
+    }
+}
+
+/// The NVIC line of I2Cn, DERIVED FROM PRESENCE exactly as spi_irq() is:
+/// I2C1 has its own line everywhere, and I2C2's line is I2C2_3_IRQn on a
+/// part that HAS an I2C3 and I2C2_IRQn where none does - so I2C3_BASE is
+/// the probe. NonMaskableInt_IRQn for an instance the device has not got:
+/// unreachable, I2c<n> refusing it first.
+constexpr IRQn_Type i2c_irq(uint8_t n) {
+    switch (n) {
+        case 1: return I2C1_IRQn;
+#if defined(I2C3_BASE)
+        case 2: case 3: return I2C2_3_IRQn;
+#else
+        case 2: return I2C2_IRQn;
+#endif
+        default: return NonMaskableInt_IRQn;
+    }
+}
+
+/// Whether I2Cn has the INDEPENDENT CLOCK of table 165 - a kernel clock
+/// of its own, selected in RCC_CCIPR, rather than PCLK for both the
+/// kernel and the registers (32.4.1: "the instances not supporting the
+/// independent clock function use PCLK for clocking both").
+///
+/// THIS ONE THE HEADER REALLY ANSWERS, and it answers it with a name and
+/// not a base: RCC_CCIPR_I2C2SEL_Pos exists on exactly the headers whose
+/// I2C2 has the feature. The manual calls that field I2C2I2S1SEL because
+/// bits 15:14 select I2C2's clock on the big parts and I2S1's on the
+/// small ones (5.4.21's own note - i2s_clock_select() states it from the
+/// other side); CMSIS splits the two readings into two macro names, so
+/// which name a header declares IS the presence probe.
+constexpr bool i2c_has_independent_clock(uint8_t n) {
+    if (!i2c_present(n)) {
+        return false;
+    }
+    if (n == 1u) {
+        return true;
+    }
+#if defined(RCC_CCIPR_I2C2SEL_Pos)
+    return n == 2u;
+#else
+    return false;
+#endif
+}
+
+/// Position of I2Cn's kernel-clock select field in RCC_CCIPR (I2C1SEL at
+/// bit 12, I2C2SEL at bit 14), or 0xFF for an instance with no selector -
+/// which is I2C3 on every part and I2C2 on every part below the G0B1.
+/// The three codes are 00 PCLK, 01 SYSCLK, 10 HSI16 (11 Reserved), the
+/// same in both fields.
+constexpr uint8_t i2c_clock_select_pos(uint8_t n) {
+    if (!i2c_has_independent_clock(n)) {
+        return 0xFF;
+    }
+#if defined(RCC_CCIPR_I2C1SEL_Pos)
+    if (n == 1u) {
+        return RCC_CCIPR_I2C1SEL_Pos;
+    }
+#endif
+#if defined(RCC_CCIPR_I2C2SEL_Pos)
+    if (n == 2u) {
+        return RCC_CCIPR_I2C2SEL_Pos;
+    }
+#endif
+    return 0xFF;
+}
+
+/// Whether I2Cn can wake the device from Stop on an address match
+/// (32.4.16), and whether it carries the SMBus half (32.4.11..15). Table
+/// 165 puts BOTH in the same column-group as the independent clock, with
+/// the same footnote, so they are one answer here.
+///
+/// AND THE HEADER CANNOT BE ASKED, which is why they are derived from the
+/// clock probe above rather than probed on their own: all twelve headers
+/// of the pack declare EXACTLY the same 253 I2C_* macros with the same
+/// values - I2C_CR1_WUPEN, SMBHEN, SMBDEN, ALERTEN, PECEN and the whole
+/// of TIMEOUTR are there on the G030 as on the G0C1, for the one
+/// I2C_TypeDef every instance is mapped through. This is the
+/// usart_is_full() position exactly: a stated table whose CHECK is the
+/// silicon. The silicon can be asked, and here it answers cleanly:
+/// 32.9.6 says I2C_TIMEOUTR (and I2C_PECR) are "reserved, and their bits
+/// are forced by hardware to 0" on an instance without SMBus, so a write
+/// that does not read back is the peripheral saying which column of table
+/// 165 it is in - test_stm32_i2c's letter a asks all three that way.
+constexpr bool i2c_has_smbus(uint8_t n) { return i2c_has_independent_clock(n); }
+constexpr bool i2c_wakes_from_stop(uint8_t n) { return i2c_has_independent_clock(n); }
+
+/// The EXTI line I2Cn's wake-up event raises (table 65: 23 for I2C1 and
+/// 22 for I2C2, both DIRECT - no trigger selection, no pending bit of the
+/// EXTI's own, the peripheral's ADDR match being the pending state).
+/// 0xFF for an instance that cannot wake at all, which is I2C3 always and
+/// I2C2 below the G0B1. The NUMBERS are the MANUAL'S, like
+/// usart_exti_line()'s and lptim_exti_line()'s.
+///
+/// THE DEVICE HEADER'S OWN COMMENT DISAGREES and table 65 wins: CMSIS
+/// annotates the shared vector as "I2C2, I2C3 Interrupt (combined with
+/// EXTI 24 and EXTI 22)", but line 24 is USART3's wake in table 65 (and
+/// usart_exti_line(3) returns it), and table 165 gives I2C3 no wake at
+/// all. Line 22 is I2C2's and there is no third line.
+constexpr uint8_t i2c_exti_line(uint8_t n) {
+    if (!i2c_wakes_from_stop(n)) {
+        return 0xFF;
+    }
+    return n == 1u ? 23u : 22u;
+}
+
+/// The DMAMUX request lines I2Cn publishes (RM0444 table 56), here for
+/// the reason spi_dma_rx_request()'s are: a per-part TABLE and not a
+/// register field, and I2C3's pair (62/63) sits a long way from
+/// I2C1/I2C2's contiguous block. No device header of this pack declares
+/// them - the DMAMUX_REQ_* spellings are ST's HAL, which this project
+/// does not vendor.
+constexpr uint8_t i2c_dma_rx_request(uint8_t n) {
+    switch (n) {
+        case 1: return 10;
+        case 2: return 12;
+        case 3: return 62;
+        default: return 0;
+    }
+}
+constexpr uint8_t i2c_dma_tx_request(uint8_t n) {
+    switch (n) {
+        case 1: return 11;
+        case 2: return 13;
+        case 3: return 63;
+        default: return 0;
+    }
+}
+
+/// SYSCFG_CFGR1's fast-mode-plus drive bits, which come in TWO FLAVOURS
+/// and the difference matters to a caller: a PER-PAD bit (PB6, PB7, PB8,
+/// PB9, PA9, PA10 - and nothing else on this family) and a PER-INSTANCE
+/// one (I2C1_FMP, I2C2_FMP, I2C3_FMP) that raises every pad configured
+/// for that instance. The 20 mA drive is what makes 1 Mbit/s legal on an
+/// FT_f pad at all (DS13560 table 11's `_f` option), and 6.1.3 adds that
+/// with Fm+ enabled the pad's OSPEEDR speed control is IGNORED.
+///
+/// i2c_pad_fmp_bit() is 0 for a pad with no bit of its own - which
+/// includes PA11 and PA12, the I2C2 pads of this bench's own self-link:
+/// there Fm+ is reachable only through the instance-wide bit.
+constexpr uint32_t i2c_pad_fmp_bit(char port, uint8_t pin) {
+#if defined(SYSCFG_CFGR1_I2C_PB6_FMP)
+    if (port == 'B' && pin == 6u) { return SYSCFG_CFGR1_I2C_PB6_FMP; }
+#endif
+#if defined(SYSCFG_CFGR1_I2C_PB7_FMP)
+    if (port == 'B' && pin == 7u) { return SYSCFG_CFGR1_I2C_PB7_FMP; }
+#endif
+#if defined(SYSCFG_CFGR1_I2C_PB8_FMP)
+    if (port == 'B' && pin == 8u) { return SYSCFG_CFGR1_I2C_PB8_FMP; }
+#endif
+#if defined(SYSCFG_CFGR1_I2C_PB9_FMP)
+    if (port == 'B' && pin == 9u) { return SYSCFG_CFGR1_I2C_PB9_FMP; }
+#endif
+#if defined(SYSCFG_CFGR1_I2C_PA9_FMP)
+    if (port == 'A' && pin == 9u) { return SYSCFG_CFGR1_I2C_PA9_FMP; }
+#endif
+#if defined(SYSCFG_CFGR1_I2C_PA10_FMP)
+    if (port == 'A' && pin == 10u) { return SYSCFG_CFGR1_I2C_PA10_FMP; }
+#endif
+    (void)port;
+    (void)pin;
+    return 0;
+}
+
+constexpr uint32_t i2c_instance_fmp_bit(uint8_t n) {
+    switch (n) {
+#if defined(SYSCFG_CFGR1_I2C1_FMP)
+        case 1: return SYSCFG_CFGR1_I2C1_FMP;
+#endif
+#if defined(SYSCFG_CFGR1_I2C2_FMP)
+        case 2: return SYSCFG_CFGR1_I2C2_FMP;
+#endif
+#if defined(SYSCFG_CFGR1_I2C3_FMP)
+        case 3: return SYSCFG_CFGR1_I2C3_FMP;
+#endif
+        default: return 0;
+    }
+}
+
 // ---- FLASH ------------------------------------------------------------------
 //
 // What differs across the family in chapter 3 is the SECOND BANK and the
@@ -2525,6 +2753,11 @@ constexpr IRQn_Type fdcan_irq(uint8_t line) {
 #define BRIO_STM32G0_SPI2_HANDLER SPI2_3_IRQHandler
 #else
 #define BRIO_STM32G0_SPI2_HANDLER SPI2_IRQHandler
+#endif
+#if defined(I2C3_BASE)
+#define BRIO_STM32G0_I2C2_HANDLER I2C2_3_IRQHandler
+#else
+#define BRIO_STM32G0_I2C2_HANDLER I2C2_IRQHandler
 #endif
 #if defined(FDCAN1_BASE)
 #define BRIO_STM32G0_TIM16_HANDLER TIM16_FDCAN_IT0_IRQHandler

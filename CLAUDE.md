@@ -709,8 +709,78 @@ gets its dated home in `docs/design/` when taken.
   - why SpiHost::init never claims the NSS pad; port.md); a polled burst
   loop erases its own overrun evidence (35.5.11's clear IS "read DR
   then poll SR"), likewise the I2S UDR; the CRC frame is the one neither
-  side writes; the reset CR2 is the one misaligned DS/FRXTH pair. Next:
-  the I2C half of step (a) on the wired I2C1-I2C2 pair.
+  side writes; the reset CR2 is the one misaligned DS/FRXTH pair. THE
+  I2C HALF DONE THE SAME NIGHT (Opus, re-verified by Fable's hand:
+  test_stm32_i2c z 142/142 x2 incl. cold, the gate 19/19 identical + the
+  new suite, host 24/24, canaries spi 89/89, analog 139/139, and fdcan
+  96/96 + tim 118/118 AFTER TWO SUITE MOVES the I2C pull-ups forced -
+  fdcan's loop-back pads PB8/PB9 -> PC4/PC5 with its edge counter on EXTI
+  5, tim letter l judging PB8/PB9 "drivable" (held up by the desk's
+  2.2 k, sinking when driven) since TIM4's channels have no other pads):
+  brio/stm32g0/i2c.hpp over ch. 32 WHOLE - I2c<n> with every register,
+  the four write gates as refusals (THE ENABLE PROTECTION IS REAL HERE,
+  the opposite of the SPI's: a raw write with PE set lands on none of
+  TIMINGR/NOSTRETCH/ANFOFF/DNF), 32.4.6's PE cycle the only disable, the
+  controller engine with RELOAD/TCR/AUTOEND, SMBus, the wake, the FMP
+  drive; THE TIMING ARITHMETIC BOTH WAYS, constexpr, pinned against every
+  cell of tables 172/173/174 and 177/178/179 (i2c_scl_hz reproduces all
+  twelve TIMINGR cells; i2c_timing_for solves 32.4.5's inequalities and
+  reproduces the manual's TIMES to the ns, not its hand-picked words),
+  with ES0548 2.10.1's floors (4/10/20 MHz for Sm/Fm/Fm+) as REFUSALS;
+  I2cHost with the avrdx/samc21 Request VERBATIM (RELOAD past 255 and
+  10-bit therefore resource features, driven raw by the suite) and two
+  DMA slots, I2cClient; the reserve's I2C facts (SMBus and the wake
+  derived from the ONE header probe that distinguishes the G0B1 class -
+  RCC_CCIPR_I2C2SEL_Pos - with smbus_probe() as the silicon's own answer:
+  32.9.6 forces TIMEOUTR to 0 on a non-SMBus instance, I2C1 yes, I2C2
+  yes, I2C3 no) and BRIO_STM32G0_I2C2_HANDLER, eleven negatives.
+  MEASURED on the self-link PB8/PB9-PA11/PA12: the link byte-exact
+  (write, read, write-then-read as TWO address matches, the general
+  call); the vocabulary ON THE WIRE (nack_addr, nack_data, a staged
+  fault); SCL at 100 k / 400 k / 1 M against the register (this wire's
+  tSYNC is 438 ns, so THE STANDARD'S WORST-CASE BUDGET RUNS A REAL BUS
+  FAST - 105263 Hz at a nominal 100 k - and a measured budget brings it
+  to 99690); AT A 2 MHz CORE NO SPEED IS LEGAL ON PCLK (2.10.1) and the
+  independent clock on HSI16 rescues Sm and Fm; the wake and Fm+ are
+  mutually exclusive (the wake accepts HSI16 alone, Fm+ wants 20 MHz);
+  AT 1 MHz THIS CORE CANNOT SERVE A NOSTRETCH TARGET (the 9 us window,
+  32.4.17's automatic NACK) and stretching is byte-exact; stretching
+  priced; 10-bit both ways with ADDCODE = THE 10-BIT HEADER (0x79 for
+  0x155), the second address under every mask; RELOAD past 255 through
+  TCR, AUTOEND against a software STOP, the host's DMA slots; PEC end to
+  end with PECERR staged; ALL THREE TIME-OUTS POLICE THIS CONTROLLER'S
+  OWN HOLD (its unserved hold trips TIMEOUTA, a peer's 6 ms hold trips
+  neither - the SAM's answer again, against 32.4.12's wording); the wake
+  armed on EXTI 22 (the Stop itself DECLINED: both ends of this bus stop
+  together - a second node); a held SDA is a PARK not an error (BUSY
+  alone, no ARLO, no BERR - the third silicon to say so); unstick()
+  counting the clocks; the kernel letter (four ordered, a NACK in its
+  place, rejection, both votes, i2c_timeout with recover() and the next
+  tenure ok - util/i2c_bus.hpp's third silicon, util untouched); 2.10.2
+  never fired. FINDINGS: A REPEATED START MUST BE ONE CR2 STORE WITH
+  START IN IT (AUTOEND raised first is read as "end the transfer TC just
+  finished"); RXNE must be served before STOPF and a NACK branch must
+  return, or the sweep clears the STOPF the tenure waits for (two
+  endless handlers found the hard way); ICR does not reach TXIS/RXNE/TC/
+  TCR - what a sweep cannot clear must be disarmed; a long wait inside
+  an ISR must be a counted loop, and a wire letter needs a flushed marker
+  between its steps (an I2C storm starves main so completely that a
+  letter printing only at its end reports nothing); TIDLE accepted but
+  bus-idle detection did not raise TIMEOUT (recorded, not judged); with
+  NOSTRETCH a late target sends 0xFF in the missing byte's place and the
+  tenure completes (32.4.8); CMSIS annotates I2C2_3's vector with EXTI
+  24, which is USART3's wake - table 65 wins (I2C's lines are 22/23, and
+  I2C3 has no wake); open-drain outputs and SYSCFG's Fm+ drive (a second
+  drive strength outside GPIO) measured for port.md. Judgment calls
+  accepted: the
+  Request verbatim; transfer_now() as a sibling verb; TCIE per tenure;
+  rebase() void; the chooser's finest-prescaler preference; the default
+  tSYNC budget the manual's; i2c_dma_fault = bus_engine_status + 4;
+  letters x/y outside z. Declined: the glitch suppression (no third
+  pad), 2.10.1's wrong sampling, the Fm+ drive's electrical effect, the
+  Stop wake, the target half of the PEC, the ALERT, a live arbitration
+  race, client DMA. STEP (a) OF THE BUS PLAN IS CLOSED; next (b) the SAM
+  at 3.3 V as the independent peer, (c) the G071RB.
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device

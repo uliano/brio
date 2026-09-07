@@ -308,6 +308,25 @@ bool pad_follows_pull() {
     return high && !low;
 }
 
+/// A pad the desk holds UP through an external pull-up (the I2C
+/// self-link's 2.2 k on PB8/PB9 - bench.md) cannot follow its internal
+/// pull-down, and is still a pad this suite may DRIVE: a push-pull
+/// output beats 2.2 k. Free means either.
+template <class Pad>
+bool pad_is_drivable() {
+    if (pad_follows_pull<Pad>()) {
+        return true;
+    }
+    Pad::input(PinPull::down);
+    settle();
+    const bool held_up = Pad::read();
+    Pad::output(false);
+    settle();
+    const bool sinks = !Pad::read();
+    Pad::input(PinPull::none);
+    return held_up && sinks;
+}
+
 /// Per-mille high time of one pad of port A, sampled through IDR and
 /// nothing else in the loop. The estimator is only as good as the number
 /// of WAVEFORM PERIODS the window crosses, which is why every caller
@@ -1766,19 +1785,24 @@ void tl_six_instances() {
     Rcc::io_clock('B', true);
     const bool b6 = pad_follows_pull<PadB6>();
     const bool b7 = pad_follows_pull<PadB7>();
-    const bool b8 = pad_follows_pull<PadB8>();
-    const bool b9 = pad_follows_pull<PadB9>();
+    // PB8 and PB9 carry the desk's I2C self-link with its 2.2 k pull-ups
+    // (bench.md): they cannot follow an internal pull-down any more, and
+    // a push-pull driver still owns them - which is all this letter asks.
+    const bool b8 = pad_is_drivable<PadB8>();
+    const bool b9 = pad_is_drivable<PadB9>();
     const bool b13 = pad_follows_pull<PadB13>();
     const bool b14 = pad_follows_pull<PadB14>();
     const bool b15 = pad_follows_pull<PadB15>();
     print(serial, "  pull-walk: PB6 ", b6, " PB7 ", b7, " PB8 ", b8, " PB9 ",
           b9, " PB13 ", b13, " PB14 ", b14, " PB15 ", b15,
-          " (PB15 is UCPD1_CC2; the dead-battery strobe ",
+          " (PB8/PB9 judged drivable under the desk's I2C pull-ups; PB15 is "
+          "UCPD1_CC2; the dead-battery strobe ",
           rd_released ? "was spent first" : "WAS NOT AVAILABLE", ")", crlf);
     bench.verdict("the seven port-B pads this letter drives are electrically "
-                  "free - each follows its own internal pull between the "
+                  "free - five follow their own internal pull between the "
                   "rails, PB15 included once this letter has spent the "
-                  "Type-C dead-battery strobe it shares with PA8",
+                  "Type-C dead-battery strobe it shares with PA8, and PB8/PB9 "
+                  "are held up by the desk's I2C pull-ups and sink when driven",
                   rd_released && b6 && b7 && b8 && b9 && b13 && b14 && b15);
 
     // QUESTIONS 1 AND 2, instance by instance.

@@ -54,6 +54,15 @@ the host through the SPI alias in `test_spi_bus` - same class);
 carries the client half - see [twi.md](../avrdx/twi.md)). The app's ISR
 binds `TWIn_TWIM_vect`.
 
+THREE ENGINES CARRY THIS CONTRACT NOW, and the third arrived with not
+one line of `util/` or `kernel/` changed: `avrdx/twi.hpp`'s `TwiHost`,
+`samc21/i2c.hpp`'s `I2cHost` and `stm32g0/i2c.hpp`'s `I2cHost`, whose
+Request is the other two's field for field. The three peripherals share
+almost nothing below that - a TWI with its own baud three-step, a SERCOM
+with a select-then-use register file, and an I2C whose whole bus lives in
+one TIMINGR word - which is what makes the descriptor's survival worth
+recording.
+
 ## The transaction descriptor (`TwiHost<n>::Request`)
 
 `{addr, tx span, rx span, reply, speed}` - 9 bytes, one over the
@@ -108,9 +117,16 @@ times are arguments rather than assumptions, belongs to the engine:
 A client holding SDA low forever leaves a tenure in flight: the kernel
 keeps running (nothing blocks) but the bus AO stays busy and later
 requests pile up until rejected - loud, but not recovered. And no
-silicon fixes this: the SAM SERCOM's SMBus time-outs police the HOST'S
-OWN clock hold, not a wire a client wedged (measured -
-[i2c.md](../samc21/i2c.md)); the AVR's TWI has none at all. So the
+silicon fixes this, ON ANY OF THE THREE: the SAM SERCOM's SMBus
+time-outs police the HOST'S OWN clock hold, not a wire a client wedged
+(measured - [i2c.md](../samc21/i2c.md)); the AVR's TWI has none at all;
+and the STM32G0's - which RM0444 32.4.12 describes in words that read
+otherwise ("if SCL is tied low for longer than ...") - were measured with
+a control on each side and answer the same way: the host's own unserved
+hold trips TIMEOUTA, a peer's 6 ms hold trips neither TIMEOUTA nor
+TIMEOUTB ([i2c.md](../stm32g0/i2c.md)). On that part a wedged SDA does
+not even raise an error: the START simply PARKS with BUSY standing,
+which is the AVR's and the SAM's behaviour met a third time. So the
 timeout is the ARBITER'S - the one object that knows a completion is
 owed, living in the kernel that has TimeEvents.
 
@@ -118,8 +134,10 @@ owed, living in the kernel that has TimeEvents.
 `I2cBus`'s) arms a one-shot TimeEvent for every tenure that goes
 asynchronous. If it matures first, the engine is declared dead:
 `Bus::recover()` puts the PERIPHERAL back where `start()` is legal
-(`TwiHost`'s ENABLE-cycle errata work-around, `I2cHost`'s cached
-re-init), the requester is answered `i2c_timeout` in its place, and
+(`TwiHost`'s ENABLE-cycle errata work-around, the SAM `I2cHost`'s cached
+re-init, the G0 `I2cHost`'s PE cycle - which RM0444 32.4.6 offers for
+exactly this, "restores the normal operation ... by toggling the PE
+bit"), the requester is answered `i2c_timeout` in its place, and
 the queue moves on. The races with the real completion are closed by
 construction (a sequence number and a drain state - the whole story in
 `util/bus_master.hpp`, staged deterministically in the host suite).

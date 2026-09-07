@@ -193,7 +193,29 @@ before a mixed-voltage bench, never assume), erratum 2.3.1 (a
 Standby-wake pin's configuration).
 
 Implemented, not bench-verified: `PinSpeed` other than low,
-open-drain outputs, `PinSet`, `Port::out_toggle` on several pins at
+`PinSet`, `Port::out_toggle` on several pins at
 once, `Pin::pull` on its own, port clocks other than A's, and
 `ucpd_dead_battery()` on UCPD2 - whose two pads are PD0 and PD2, which
 this package does not bond.
+
+**Open-drain outputs are measured now**, and by two users at once: an
+I2C bus IS an open-drain pair (both ends of `test_stm32_i2c`'s self-link
+run at AF6 with `open_drain`, carrying bytes at 100 k, 400 k and 1 M),
+and that suite's `unstick()` drives the same pads as open-drain GPIO -
+low by ODR, released to the bus's own pull-ups - to clock a stuck client
+free. See [i2c.md](i2c.md).
+
+**A SECOND DRIVE STRENGTH LIVES IN SYSCFG AND NOT IN GPIO**, which is
+worth knowing before reading `OSPEEDR` as the whole story:
+`SYSCFG_CFGR1` carries fast-mode-plus bits that raise an I2C pad's sink
+to 20 mA, in two flavours - per pad (PB6, PB7, PB8, PB9, PA9, PA10 and
+nothing else on this family) and per instance (`I2C1_FMP`, `I2C2_FMP`,
+`I2C3_FMP`, which reach every pad configured for that instance). 6.1.3
+adds that **with Fm+ enabled the pad's own speed control is ignored**.
+The reserve publishes both (`i2c_pad_fmp_bit()`,
+`i2c_instance_fmp_bit()`) and `I2cHost::fast_plus_drive()` spends them;
+PA11 and PA12 - this bench's own I2C2 pads - have no per-pad bit, so
+there the instance-wide one is the only route. One of those bits has a
+second claimant: PB9's is also `irtim.hpp`'s high-sink LED driver
+([irtim.md](irtim.md)), so a program driving an infrared LED on PB9
+cannot also run an Fm+ bus there.

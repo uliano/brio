@@ -267,11 +267,18 @@ should.
 ## Not covered yet
 
 Driver gaps: the direct lines whose peripheral this stratum has not
-built - the I2Cs, CEC, UCPD, USB - so their line numbers are published
-by nobody. The lines that DO have an owner are the RTC's 19 and TAMP's
-21 ([rtc.md](rtc.md)), the comparators' 17/18/20 ([comp.md](comp.md)),
-the USARTs' 24/25/26 and the LPUARTs' 28/35 ([usart.md](usart.md),
-[lpuart.md](lpuart.md)) and the LPTIMs' 29/30 ([lptim.md](lptim.md)).
+built - CEC, UCPD, USB - so their line numbers are published by nobody.
+The lines that DO have an owner are the RTC's 19 and TAMP's 21
+([rtc.md](rtc.md)), the comparators' 17/18/20 ([comp.md](comp.md)), the
+USARTs' 24/25/26 and the LPUARTs' 28/35 ([usart.md](usart.md),
+[lpuart.md](lpuart.md)), the LPTIMs' 29/30 ([lptim.md](lptim.md)) and
+now the I2Cs' 22 and 23 ([i2c.md](i2c.md), where `i2c_exti_line()`
+publishes them and only for the instances table 165 lets wake at all:
+I2C1 always, I2C2 on the G0B1/G0C1 class, I2C3 never). THE DEVICE
+HEADER'S OWN COMMENT DISAGREES about those two and table 65 wins: CMSIS
+annotates the shared vector as "I2C2, I2C3 Interrupt (combined with EXTI
+24 and EXTI 22)", but line 24 is USART3's wake and I2C3 has no wake at
+all.
 Still open: the configurable non-GPIO lines PVD 16 and VDDIO2 34,
 reachable through `Exti` today but with no driver to publish their
 numbers or their vectors; and `SEVONPEND`, which changes what returns a

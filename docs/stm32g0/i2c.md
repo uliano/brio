@@ -1,0 +1,394 @@
+# I2C (STM32G0)
+
+**PROVISIONAL.** The chapter is built whole and measured on the Nucleo's
+own self-link; what is not covered is listed at the end, with the reason
+in each case.
+
+`brio/stm32g0/i2c.hpp` is RM0444 chapter 32 in the two strata every brio
+bus driver has: `I2c<n>`, the resource; `I2cHost<n, pins, TxEngine,
+RxEngine>`, the transfer engine `util/i2c_bus.hpp` drives; and
+`I2cClient<n, pins>`, the target role. `I2cHost`'s Request is
+`avrdx/twi.hpp`'s and `samc21/i2c.hpp`'s **verbatim**, so
+`util/i2c_bus.hpp` and `util/bus_master.hpp` get their THIRD silicon with
+not one line of `util/` or `kernel/` changed.
+
+## Documents of record
+
+- RM0444 Rev 6 chapter 32 (I2C), and 5.4.21 for the kernel-clock
+  multiplexer, 6.1.3 for the fast-mode-plus drive bits and table 65 for
+  the wake lines.
+- DS13560 Rev 5: tables 13..16 for the alternate functions, table 11 for
+  the pad options (`_f` = Fm+ capable, `_s` = supplied from VDDIO2
+  only), table 74 for the minimum kernel clock and table 75 for the
+  analog filter's delay.
+- ES0548 Rev 3 items 2.10.1 and 2.10.2, both live on this die's
+  revision, and 2.2.4 from outside the chapter (it bites the wake).
+
+## What the silicon does
+
+**The three instances are not copies of each other**, and table 165's
+split is the one fact the whole driver is shaped around. Every instance
+does 7- and 10-bit addressing at all three speeds; the **independent
+clock**, the **wake from Stop** and the **SMBus half** belong to I2C1
+always, to I2C2 only on the G0B1/G0C1 class, and to I2C3 nowhere. The
+device header cannot be asked: all twelve headers of the pack declare
+the same 253 `I2C_*` macros with the same values, so `WUPEN`, `SMBHEN`
+and the whole of `TIMEOUTR` are there on the G030 as on the G0C1. What
+the header DOES distinguish is `RCC_CCIPR_I2C2SEL_Pos`, which exists on
+exactly the parts whose I2C2 has the independent clock - so the reserve
+derives all three rows from that one probe, and the silicon is asked as
+a second opinion (below).
+
+**TIMINGR is the chapter.** Five fields set the SCL period, the data
+hold time and the data setup time, and 32.4.5 gives each an inequality
+against the I2C standard's own numbers and the bus's own edges. Three
+things about it decide the code:
+
+- **tSCL is not tSCLL + tSCLH.** 32.4.9 adds tSYNC1 + tSYNC2 - the edge
+  slopes, the filters and two to three kernel periods of synchronization
+  - and the example tables charge 250..1000 ns of it. That is a BUS fact
+  and not a chip one, so it is an argument (`I2cBusTiming::sync_ns`),
+  exactly as the rise time is on the other two targets.
+- **SDADEL has no +1 and the other three do**: tSDADEL = SDADEL x
+  tPRESC, while tSCLDEL, tSCLL and tSCLH are all (field + 1) x tPRESC.
+- **The kernel clock has three floors and all three bind**: 32.4.3's
+  tI2CCLK < (tLOW - tfilters)/4 and tI2CCLK < tHIGH; DS13560 table 74's
+  2 / 9 / 18 MHz; and ES0548 2.10.1's 4 / 10 / 20 MHz, **which is the
+  strictest in every mode**. The chooser refuses below the erratum's and
+  below 32.4.3's, and states the datasheet's as a constant.
+
+**PE = 0 is the only disable, and it is a reset.** 32.4.6: clearing PE
+releases both lines, resets the state machines, clears CR2's START,
+STOP, PECBYTE and NACK and every ISR flag - and **keeps** every
+configuration register. The chapter asks for write-0 / read-0 / write-1
+and `disable()` is that sequence; there is no raw PE clear in the file.
+It is also the chapter's own deadlock escape (32.4.9), which is what
+`recover()` is built on.
+
+**The clear register does not reach everything.** `I2C_ICR` has a bit for
+ADDR, NACKF, STOPF and each of the six errors and nothing else: TXIS,
+RXNE, TC and TCR are cleared by an ACCESS (a data-register read or
+write, a START, a STOP, an NBYTES write) or by PE. On a level-driven
+vector that is a trap, and it cost this driver two wedged boards before
+it was written down - see the findings.
+
+**The vector is shared** where the part has an I2C3: I2C2 and I2C3 sit
+on `I2C2_3_IRQn`, so an app binds `BRIO_STM32G0_I2C2_HANDLER` and calls
+both instances' bodies. I2C1's line is its own everywhere - and it is
+also EXTI line 23, the wake, so arming the wake needs the EXTI's mask
+and not just WUPEN.
+
+## Types and verbs
+
+`I2c<n>` carries the whole register description: the enable and 32.4.6's
+disable, the configuration (TIMINGR, both filters, NOSTRETCH, SBC, the
+general call, the wake, the SMBus enables and the PEC), the two own
+addresses with OA2's seven mask codes, the controller's transfer engine
+(`transfer()`, `transfer_now()`, `start()`, `stop()`, `reload()`), the
+data registers, the flags with their W1C clears, the interrupts, the two
+DMA enables, the SMBus time-outs and `smbus_probe()`, the wake with its
+EXTI line, and the fast-mode-plus drive in both of SYSCFG's flavours.
+Every field the register description gates is a verb that refuses, and
+the gates are not one rule but four: PE = 0 for TIMINGR, NOSTRETCH,
+ANFOFF, DNF and PECEN; START = 0 for CR2's address, direction and
+NBYTES; OA1EN = 0 and OA2EN = 0 for their own registers; TIMOUTEN = 0
+and TEXTEN = 0 for the two halves of TIMEOUTR.
+
+The timing arithmetic goes both ways and is `constexpr` throughout:
+`i2c_timing_for(kernel_hz, speed, filters, bus)` solves 32.4.5's
+conditions for a register value, `i2c_scl_hz(kernel_hz, timing,
+sync_ns)` prices one, and `i2c_scll_ns` / `i2c_sclh_ns` /
+`i2c_scldel_ns` / `i2c_sdadel_ns` / `i2c_min_stretch_cycles` name the
+four field times and 32.4.8's minimum stretch. `i2c_setup_ok()` and
+`i2c_hold_ok()` judge a hand-written TIMINGR against the chapter's two
+inequalities. The SMBus time-outs have the same pair,
+`i2c_timeout_code_for()` and `i2c_timeout_us()`.
+
+`I2cHost<n, pins, TxEngine, RxEngine>` is the engine: one Request is one
+bus tenure in the four shapes I2C devices use (write, read,
+write-then-read joined by a repeated START, and the empty probe),
+always asynchronous, with the `i2c_*` codes produced on the wire.
+`init(clock, kernel, filters, bus)`, `rebase(hz)` (a ClockUser),
+`speed_ok()`, `scl_hz()`, `start()`, `isr()`, `dma_isr()`, `status()`,
+`recover()`, `unstick()`, `fast_plus_drive()` and
+`spurious_bus_errors()`. The two DMA engine slots default to
+`NoDmaEngine` and every DMA branch folds away.
+
+`I2cClient<n, pins>` is the target: `init(clock, addresses, speed,
+kernel, filters, no_stretch)`, `addressed()`, `host_reads()`,
+`matched_address()`, `answer_address()`, `take()`, `give()`, `flush()`,
+`answer_byte()` for byte control, the STOP/NACK/overrun flags,
+`wake_from_stop()` and the ISR body. A client is a protocol and the
+protocol is the application's, so this half decides nothing.
+
+## How to use it
+
+```cpp
+constexpr brio::I2cPins bus_pins{
+    .scl = {'B', 8, brio::PinFunction::af6},
+    .sda = {'B', 9, brio::PinFunction::af6},
+};
+using I2cHw = brio::I2cHost<1, bus_pins>;
+using Sensors = brio::I2cBus<I2cHw, P, 4, brio::BusPassThrough,
+                             brio::ticks_from_ms<P>(20)>;
+
+I2cHw::init(clock, brio::I2cClock::hsi16);   // independent of the core rate
+
+extern "C" void I2C1_IRQHandler() {
+    if (I2cHw::isr()) { brio::post<Sensors>(brio::TransferDone{I2cHw::status()}); }
+}
+```
+
+A request is the complete script of one tenure:
+
+```cpp
+uint8_t reg = 0x0F;
+uint8_t id = 0;
+brio::post<Sensors>(I2cHw::Request{
+    .addr = 0x1D,
+    .tx = brio::lend<brio::Lease::reply>(&reg), .tx_len = 1,
+    .rx = brio::lend<brio::Lease::reply>(&id),  .rx_len = 1,
+    .reply = brio::reply_to<MyAo, brio::I2cDone>(),
+    .speed = brio::I2cSpeed::fast_400k,
+});
+```
+
+A target answers on its own vector:
+
+```cpp
+using Peer = brio::I2cClient<2, peer_pins>;
+Peer::init(clock, {.own = 0x42}, brio::I2cSpeed::fast_400k,
+           brio::I2cClock::hsi16);
+extern "C" void BRIO_STM32G0_I2C2_HANDLER() {
+    const uint32_t f = Peer::isr();
+    if (f & brio::I2cFlag::addr)  { Peer::answer_address(); }
+    if (f & brio::I2cFlag::rxne)  { store(Peer::take()); }
+    if (f & brio::I2cFlag::txis)  { Peer::give(next()); }
+    if (f & brio::I2cFlag::stop)  { Peer::clear_stop(); }
+}
+```
+
+**A pump must be able to silence everything it is asked about.** ADDR,
+NACKF, STOPF and the errors go through the ICR; RXNE is cleared by
+reading RXDR; TC and TCR have no clear at all outside a START, a STOP or
+an NBYTES write - so a handler that meets one it does not own must
+DISARM its interrupt. The driver's own idle sweep does exactly that and
+the reason is in the findings.
+
+## Bench findings
+
+Measured by `test_stm32_i2c` on the Nucleo-G0B1RE's self-link (I2C1 host
+PB8/PB9, I2C2 client PA11/PA12, both AF6, 2.2 kOhm pull-ups), 13 letters
+in `z` / 142 verdicts, 142/142 three times including a cold flash.
+
+**The enable protection is REAL here, which is the opposite of the SPI's
+answer.** A raw write with PE set lands on NONE of the four PE-gated
+fields - TIMINGR, NOSTRETCH, ANFOFF and DNF all refuse - where
+`test_stm32_spi` found the silicon enforcing not one line of 35.5.7. Two
+chapters of one manual, two different dispositions.
+
+**The silicon names its own column of table 165.** 32.9.6 makes
+`I2C_TIMEOUTR` "reserved, and its bits forced by hardware to 0" on an
+instance without SMBus, so a write that reads back is the peripheral
+saying which column it is in: I2C1 yes, I2C2 yes, I2C3 **no** - exactly
+what the reserve's stated table says, on a question the device header
+cannot answer.
+
+**A repeated START must be ONE CR2 store, START included.** 32.9.2 gives
+START two meanings and says nothing about the order of the two writes it
+takes to get there, but the order decides: at TC the previous transfer
+is finished and UNTERMINATED, so a store that raises AUTOEND before
+START is read as a request to end THAT transfer - the peripheral sends
+the STOP at once and START, a cycle later, opens a new tenure instead of
+restarting this one. Caught on the ISR trace: TC then STOPF with **no
+second address match at the client**, where a repeated START owes two.
+Written as one store, the client sees two matches and one STOP.
+
+**RXNE must be served BEFORE STOPF.** They stand together - the last
+byte of a read is in RXDR at the instant the automatic STOP goes out -
+and RXNE is cleared only by reading RXDR. A handler that serves STOPF
+first loses that byte AND leaves RXNE standing on a level-driven vector,
+which is an endless handler that starves the program so completely that
+nothing can report it.
+
+**A NACK branch must return.** The STOP the peripheral sends by itself
+arrives as its own interrupt microseconds later; a branch that falls
+through to a general sweep clears that STOPF the moment it sets, and the
+tenure keeps its status, loses its flags and never completes. It showed
+up as an order dependency between letters, which is what a race usually
+looks like first.
+
+**Three flags no branch owns.** PECERR, TIMEOUT and ALERT ride the one
+ERRIE a plain I2C engine arms for BERR and ARLO. They are swept at the
+bottom of the handler, and what a sweep cannot reach is disarmed.
+
+**A held SDA is a PARK and not an error** - the third silicon of this
+project to answer that way. A controller whose SDA is held low by
+another device raises no ARLO and no BERR: 32.4.9 makes the START wait
+for a free bus, a low SDA under a high SCL is a START the monitor has
+already seen, so BUSY stands (host ISR `0x8000`, BUSY alone), the
+request is parked and there is no completion to report. Which is why
+`util/i2c_bus.hpp`'s per-bus timeout is the ARBITER'S on all three
+targets.
+
+**ES0548 2.10.1 costs more than the datasheet's floor, and the
+independent clock is the cure.** The erratum's 4 / 10 / 20 MHz beats
+table 74's 2 / 9 / 18 in every mode. Measured on the ladder: at a 64 MHz
+core all three speeds are reachable on PCLK; at 16 MHz Fm+ is refused; at
+**2 MHz NO SPEED IS LEGAL ON PCLK AT ALL** - and the same bus runs
+byte-exact at 100 kHz with the instance's kernel moved to HSI16. That is
+what the independent clock is for, on the wire.
+
+**And the wake and Fm+ are mutually exclusive**, which no table says: a
+target's SDADEL and SCLDEL are solved against the fastest bus it expects,
+so a client is subject to the same 20 MHz floor - and HSI16 is 16 MHz,
+while the wake from Stop accepts HSI16 and nothing else (32.4.16).
+
+**The standard's worst-case edges make a real bus run FAST.** The
+chooser charges tSYNC = 1000 / 750 / 500 ns; this wire's own tSYNC,
+measured as the difference between the tenure's average period and the
+register's own tSCLL + tSCLH, is **438 ns**. So at a nominal 100 kHz the
+bus really runs at **105263 Hz - above the mode's own limit** - and
+handing the measured budget back to `init()` brings it to **99690 Hz**.
+The same hazard `avrdx/twi.hpp` and `samc21/i2c.hpp` record about their
+rise-time arguments, seen from the other side; state what the bench
+measures.
+
+The rates, at 64 MHz on PCLK, measured over a 32-byte tenure as
+duration / (9 x 33) with the target in NOSTRETCH so it holds the clock
+for nothing:
+
+| asked | register floor (tSCLL + tSCLH) | measured | standard-edge prediction |
+|-------|-------------------------------|----------|--------------------------|
+| 100 kHz | 9062 ns | 9500 ns | 10062 ns |
+| 400 kHz | 1750 ns | 2156 ns | 2500 ns |
+| 1 MHz (stretching) | 499 ns | 921 ns | 1000 ns |
+
+**At 1 MHz this core cannot serve a NOSTRETCH target.** The window is
+nine microseconds - the byte before the one being missed - and an
+interrupt-driven target does not always make it: 32.4.17's automatic
+NACK on an overrun follows, and the controller reads `i2c_nack_data`.
+With the target stretching, the same 1 MHz bus is byte-exact.
+
+**Clock stretching is linear and free of the data.** Commanded holds of
+20 / 50 / 100 us per event lengthened an 8-byte read to 307 / 588 /
+1057 us against 383 / 653 / 1103 predicted (nine holds: the address
+event and eight bytes), byte-exact throughout. With NOSTRETCH set, a
+late target raises OVR and **0xFF goes out in the missing byte's place**,
+exactly as 32.4.8 says, while the tenure itself completes - an underrun
+is not a fault the controller sees.
+
+**Whose hold does each time-out police?** With a control on each side:
+the host's own unserved hold trips TIMEOUTA at a 4 ms limit (ISR
+`0x1023`), and a **peer's 6 ms hold does not trip it** - nor does
+TIMEOUTB, which 32.9.6 makes this controller's own cumulative stretch
+(tLOW:MEXT). So 32.4.12's "if SCL is tied low" is this controller's own
+hold, and **the samc21's answer holds here too**: no silicon time-out on
+any engine of this project watches a wire a client wedged. TIDLE = 1 is
+accepted and reads back, but bus idle detection did not raise TIMEOUT on
+a bus idle for 2 ms against a 50 us limit - recorded, not judged.
+
+**The PEC is the standard's CRC-8, pinned against a bitwise reference**:
+hardware `0x3D` against `0x3D` computed with C(x) = x8 + x2 + x + 1 over
+the address byte and the four data bytes, with the checksum travelling as
+a fifth byte the target receives.
+
+**RELOAD past 255 works as the chapter describes**: a 300-byte write goes
+out in one tenure (one address match) through exactly one TCR reload,
+byte-exact. With AUTOEND clear, TC stands with no STOP on the wire and a
+software STOP ends it.
+
+**10-bit addressing**: acknowledged and byte-exact, and **ADDCODE is the
+HEADER and not the address** - `0x79` for the 10-bit address `0x155`,
+which is 11110 plus the address's two MSBs (32.9.7). A client with
+several addresses cannot simply compare ADDCODE with its own.
+
+**OA2's mask is a real range**: OA2 = 0x50 with `low_2` answers 0x50,
+0x51, 0x52 and 0x53 and stops at 0x54, and ADDCODE names the address
+that matched.
+
+**The digital filter is hold delay.** A deeper DNF never asks for MORE
+SDADEL - 32.4.5 subtracts it from the bound - and at 400 kHz on a 64 MHz
+kernel SDADEL falls 7, 7, 5, 3 for DNF 0, 1, 4, 8 with the SCL period
+unmoved. A filter deep enough to eat the low period is refused by
+32.4.3's own condition, not by an arbitrary bound.
+
+**unstick() reads the wire before it clocks it**: 0 on a healthy bus,
+`0xFF` when nine clocks and a STOP leave SDA still low (a short, not a
+client), and 0 again once the pad is given back.
+
+**util/i2c_bus.hpp's third silicon**: four tenures queued through
+`I2cBus` come back in order with the NACK delivered in its place as a
+reply; what will not fit the queue is rejected on the spot and every
+request is still answered exactly once; an idle bus votes for the sleep
+and a busy one against it; and a tenure into a wedged wire is answered
+**i2c_timeout at 20 ms, the arbiter's own limit, with SDA still low at
+the reply** - after which `recover()`'s PE cycle lets the same bus AO
+carry the next tenure to `i2c_ok`.
+
+**ES0548 2.10.2 did not fire once.** The spurious master BERR was swept 0
+times across a whole `z` run. The driver counts it and never reports it -
+the erratum's own workaround - so `i2c_bus_error` from the engine means
+its own bounded wait ran out and never a flag this erratum can forge.
+
+Two facts about the bench itself, both paid for: **a long wait inside an
+interrupt must be a counted loop**, because a stopwatch built on SysTick's
+VAL against the tick count runs backwards when a tick handler cannot
+preempt the interrupt reading it; and **a wire letter needs a flushed
+marker between its steps**, because an I2C storm starves main so
+completely that a letter which prints only at its end reports nothing at
+all.
+
+## Not covered yet
+
+Driver gaps:
+
+- **No client DMA slots.** `I2cClient` has none - the `SpiClient`
+  precedent - and a slot waits for a device-shaped user. The TARGET
+  side of a DMA tenure is therefore not measured at all: letter `h`
+  runs the host's two engines against a client on its byte pump, which
+  proves the host's half and says nothing about the client's.
+- **The Request is 7-bit**, as on all three targets - 10-bit addressing
+  lives at the resource level and `design/i2c-bus.md` records that the
+  arbiter's descriptor has no shape for it.
+- **A tenure longer than 255 bytes is not a Request either**: the
+  lengths are `uint8_t` on all three targets, so RELOAD is a resource
+  feature and the suite drives it directly.
+- **No SMBus task.** The host and alert addresses, the PEC and the
+  time-outs are resource verbs; a `SmbusHost` with the protocol's own
+  vocabulary is born with its first device.
+
+Implemented but not bench-verified:
+
+- **I2C3** - present on this part, exercised in the family fixture and
+  in letter a's refusals, but its pads carry no wire here.
+- **The wake from Stop on silicon.** Everything around it is measured -
+  the three conditions as refusals, WUPEN's readback, the direct EXTI
+  line, a bus that carries bytes with it armed - but the wake itself
+  needs an address on the wire while the core is stopped, and **both
+  ends of this bus are on the same die**: a Stop that silences the
+  client silences the controller that would wake it. It wants a second
+  node. ES0548 2.2.4 (HSIDIV must be 0) is stated for the same reason.
+- **The target half of the PEC**, which table 176 makes "SBC = 1,
+  RELOAD = 0, PECBYTE = 1" - the check rides target byte control, whose
+  NBYTES the suite's pump does not re-arm.
+- **The SMBus ALERT**, which needs a wire to an SMBA pad.
+- **Arbitration lost against a real second controller.** A held SDA
+  parks rather than raising ARLO (measured), so a live race wants a
+  third node - the samc21's own conclusion, reached again.
+
+Declined, with the reason:
+
+- **The filters' suppression itself.** A glitch needs a source on the
+  net, and both ends of both wires are alternate functions with no third
+  pad on either. The filters' effect on the TIMING is arithmetic and is
+  measured; the spike is not staged.
+- **ES0548 2.10.1's wrong sampling.** Reproducing it means a
+  transmitter whose tSU;DAT is under one kernel period, which on this
+  bench means a bit-banged sender on a pad the peripheral must also own.
+  The erratum is carried as the refusal it is instead.
+- **The Fm+ drive's electrical effect.** With the drive on and off the
+  measured SCL period moves by less than the stopwatch's own resolution
+  (921 vs 921 ns): 6.1.3 makes it a pad property and the period is
+  TIMINGR's, so what the 20 mA buys is the EDGE, which no instrument on
+  this board can see.

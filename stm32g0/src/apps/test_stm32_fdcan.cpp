@@ -36,9 +36,12 @@
 //      at all can be weighed against TIM2 - which is how CKDIV is proven
 //      to move BOTH modules.
 //
-// THE PADS: PB8 (FDCAN1_RX) and PB9 (FDCAN1_TX), both AF3, both proven
+// THE PADS: PC4 (FDCAN1_RX) and PC5 (FDCAN1_TX), both AF3, both proven
 // free by their own pull before they are claimed and both left in analog
-// mode afterwards. FDCAN2 is exercised WITHOUT A PAD throughout.
+// mode afterwards (PB8/PB9 until the desk's I2C self-link put 2.2 k
+// pull-ups on them - a pad an external pull holds up cannot be pulled
+// dominant by its own 40 k, and this suite's error machine needs that;
+// bench.md). FDCAN2 is exercised WITHOUT A PAD throughout.
 // PA2/PA3 are the console, PA5 is LD4, PA13/PA14 the SWD, PC13 the
 // button, PC14/PC15 the LSE crystal.
 //
@@ -109,13 +112,13 @@ using Can2 = Fdcan<2>;
 
 // The two pads. Every FDCAN signal of this part is AF3 (DS13560 tables
 // 14, 15, 17 and 18).
-constexpr PinSel rx_sel{'B', 8, PinFunction::af3};   // FDCAN1_RX
-constexpr PinSel tx_sel{'B', 9, PinFunction::af3};   // FDCAN1_TX
+constexpr PinSel rx_sel{'C', 4, PinFunction::af3};   // FDCAN1_RX
+constexpr PinSel tx_sel{'C', 5, PinFunction::af3};   // FDCAN1_TX
 using RxPad = FdcanPad<rx_sel>;
 using TxPad = FdcanPad<tx_sel>;
-using RxPin = Pin<'B', 8>;
-using TxPin = Pin<'B', 9>;
-constexpr uint8_t tx_exti_line = 9;   // an EXTI line's NUMBER IS the pin's
+using RxPin = Pin<'C', 4>;
+using TxPin = Pin<'C', 5>;
+constexpr uint8_t tx_exti_line = 5;   // an EXTI line's NUMBER IS the pin's (PC5)
 
 using Stopwatch = Tim<2>;             // 32 bits at 64 MHz, free running
 using Stamper = Tim<3>;               // the FDCAN's one external timestamp source
@@ -319,12 +322,12 @@ uint32_t edges_over(uint32_t us) {
     return n;
 }
 
-/// The EXTI half of the counter, set up once: line 9 on port B, rising
+/// The EXTI half of the counter, set up once: line 5 on port C, rising
 /// edges, both masks armed (13.3.1 gives no pending bit without IMR and
 /// figure 23 draws the DMAMUX's trigger off the EVENT side).
 void edge_counter_setup() {
     Dma<1>::bus_clock(true);
-    (void)Exti::select(tx_exti_line, 'B');
+    (void)Exti::select(tx_exti_line, 'C');
     (void)Exti::sense(tx_exti_line, ExtiSense::rising);
     (void)Exti::interrupt(tx_exti_line, true);
     (void)Exti::event(tx_exti_line, true);
@@ -684,8 +687,8 @@ bool pad_is_free(const char* name) {
 }
 
 void tb_bit_rate() {
-    const bool rx_free = pad_is_free<RxPin>("PB8 (FDCAN1_RX)");
-    const bool tx_free = pad_is_free<TxPin>("PB9 (FDCAN1_TX)");
+    const bool rx_free = pad_is_free<RxPin>("PC4 (FDCAN1_RX)");
+    const bool tx_free = pad_is_free<TxPin>("PC5 (FDCAN1_TX)");
     bench.verdict("both pads follow their own internal pull between the rails "
                   "before this suite claims either - the precondition, not an "
                   "assumption",
@@ -1107,7 +1110,7 @@ void td_external() {
 
     const uint32_t bit_cycles = SysClock::hz / 500'000u;   // 128 cycles a bit
     const uint32_t bits = span / bit_cycles;
-    print(serial, "  the frame on PB9: ", transitions, " transitions spanning ",
+    print(serial, "  the frame on PC5: ", transitions, " transitions spanning ",
           span, " cycles = ", us_of(span), " us = ", bits, " bit times at "
           "500 kbit/s", crlf);
     bench.verdict("THE FRAME LEAVES THE PAD IN EXTERNAL LOOP-BACK - 36.3.4's "
@@ -1130,7 +1133,7 @@ void td_external() {
     // The RX pin disregarded, and the acknowledge error ignored.
     const auto st = Can1::status();
     const auto ec = Can1::error_counters();
-    print(serial, "  with PB8 pulled DOMINANT throughout: TEC ", ec.transmit,
+    print(serial, "  with PC4 pulled DOMINANT throughout: TEC ", ec.transmit,
           " REC ", ec.receive, ", PSR LEC ", static_cast<uint8_t>(st.last_error),
           " ACT ", static_cast<uint8_t>(st.activity), crlf);
     bench.verdict("36.3.4's two promises for this mode: 'the actual value of "
@@ -2918,7 +2921,7 @@ void tl_errata() {
 void banner() {
     print(serial, crlf, "test_stm32_fdcan - RM0444 ch. 36, one board, no "
           "transceiver", crlf,
-          "  PB8 = FDCAN1_RX, PB9 = FDCAN1_TX (AF3); FDCAN2 runs with no pad "
+          "  PC4 = FDCAN1_RX, PC5 = FDCAN1_TX (AF3); FDCAN2 runs with no pad "
           "at all", crlf);
     bench.menu();
 }
