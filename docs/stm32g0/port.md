@@ -83,7 +83,13 @@ applications that do not use the UCPD peripheral, disable the internal
 pull-down resistor Rd at startup through the strobe bits in SYSCFG
 registers". The strobe only ever RELEASES, and `ucpd_dead_battery()` is
 that verb. It lives in this file because its subject is a PAD and this
-stratum has no UCPD driver to own it.
+stratum has no UCPD driver to own it: UCPD - the Type-C and Power
+Delivery controller, chapter 39 - IS NOT IMPLEMENTED, deferred to a
+board with a Type-C connector (the Nucleo has none); it exists, two
+instances, on the G071, G081, G0B1 and G0C1 alone, so the four pads and
+their pull-downs are those parts' and no other's (the G030/031/041/050/
+051/061/070/0B0 have no UCPD and their PA8/PB15/PD0/PD2 come up as
+ordinary pads).
 
 ## Types and verbs
 

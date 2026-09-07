@@ -301,11 +301,14 @@ struct Rcc {
     // power of two, as a SIGNAL. It reaches a pad through that pad's
     // alternate function (PA8's AF0 is MCO on every part - the pin's
     // job, not this file's) and, with no pad at all, the timers' input
-    // multiplexers: TIM2/TIM3's ETRSEL and TIM14/16/17's TISEL name
+    // multiplexers: TIM2's ETRSEL (TIM2's alone - TIM3/TIM4's name the
+    // comparators only, 22.4.26..27) and TIM14/16/17's TISEL name
     // "MCO" among their sources, which is what makes an internal clock
     // COUNTABLE by a timer that is not on it - HSI16/64 into TIM2's ETR
     // is a 4 us wall that does not move with SYSCLK (test_stm32_clock's
-    // instrument). MCO2 (the G0B1/G0C1's second output) is not built.
+    // instrument), and HSI16/8 into it a clock that runs only while the
+    // part is awake (a Stop's witness). MCO2 (the G0B1/G0C1's second
+    // output) is not built.
     /// The codes common to every header of the pack; 8..11 (PLLP, PLLQ,
     /// RTCCLK, RTC_WAKEUP) are the G0B1 class's own and pass as literals.
     static bool mco(uint8_t source_code, uint8_t log2_div) {
@@ -499,6 +502,9 @@ enum class PowerRegime : uint8_t {
 
 inline constexpr uint32_t range2_max_hz = 16'000'000UL;
 inline constexpr uint32_t low_power_run_max_hz = 2'000'000UL;
+/// DS13560 table 47: the VCO in Range 2 is 96..128 MHz (344 in Range 1)
+/// and the R output 12..16 MHz.
+inline constexpr uint32_t pll_vco_max_range2_hz = 128'000'000UL;
 
 /// Table 13's column for a regime: the Range 2 column serves both
 /// Range 2 regimes (the low-power regulator's VCORE is the Range 2
@@ -561,6 +567,12 @@ struct Clock {
                   "- a faster rate is a Range 1 rate");
     static_assert(regime != PowerRegime::low_power_run || src_hz <= low_power_run_max_hz,
                   "brio Clock: low-power run wants SYSCLK at or below 2 MHz (RM0444 4.3.2)");
+    static_assert(regime == PowerRegime::range1 || src != ClockSource::pll ||
+                      (hsi16_hz / pll_config_for(src_hz).m) * pll_config_for(src_hz).n <=
+                          pll_vco_max_range2_hz,
+                  "brio Clock: a PLL rate in Range 2 wants its VCO at or below 128 MHz "
+                  "(DS13560 table 47) - pll_config_for() picks the smallest R first, so a "
+                  "rate whose only exact ratio needs a faster VCO is a Range 1 rate");
 
     /// The setting `hz` needs (meaningful for the source it belongs to).
     static constexpr uint8_t hsidiv = hsidiv_for(src_hz);

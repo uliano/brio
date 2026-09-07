@@ -157,11 +157,15 @@ as on the AVR ([../armv6m/README.md](../armv6m/README.md)).
 
 **The clock output reaches the timers with no pad.** RCC_CFGR.MCOSEL /
 MCOPRE put one of the tree's clocks, prescaled by a power of two, on a
-SIGNAL that TIM2/TIM3's ETRSEL and TIM14/16/17's TISEL name among their
+SIGNAL that TIM2's ETRSEL (TIM2's alone: TIM3/TIM4's name the
+comparators only, 22.4.26..27) and TIM14/16/17's TISEL name among their
 sources - so a timer can count an internal clock it is not on: HSI16/64
 into TIM2's ETR is a 4 us wall that does not move with SYSCLK, and it
-is what the dynamic clock's own suite measures every switch on
-([tim.md](tim.md) for the timer half).
+is what the dynamic clock's own suite measures every switch on; HSI16/8
+into the same ETR is a clock that runs ONLY WHILE THE PART IS AWAKE,
+which is how a Stop is told from a Sleep and how the tickless timebase
+priced its lap wakes ([tim.md](tim.md) for the timer half,
+[platform.md](platform.md) for the lap).
 
 **RCC_CCIPR2 IS A SECOND REGISTER AND IT NEEDED A SECOND VERB.** The
 I2S, USB and FDCAN selects live there (5.4.22) and not in the CCIPR, and
@@ -319,10 +323,11 @@ the PC's clock over ten seconds (HSI16's 1 %). The raw-register probe
 app, with no brio code in the loop, reaches the same state with the
 same sequence (its blink at 64 MHz is a 4x faster blink than at 16).
 
-**The dynamic clock on silicon** (`test_stm32_clock`, 34 verdicts, on
-the tickless platform with the console on HSI16 and USART1 as a
-single-wire loop on PCLK as the rebased user; TIM2 on MCO = HSI16/64 as
-the wall, weighed at 250 kHz within HSI16's 1 % of the crystal):
+**The dynamic clock on silicon** (`test_stm32_clock`, ten letters, 42
+verdicts, 42/42 three times, on the tickless platform with the console
+on HSI16 and USART1 as a single-wire loop on PCLK as the rebased user;
+TIM2 on MCO = HSI16/64 as the wall, weighed at 250 kHz within HSI16's
+1 % of the crystal):
 
 - Every rung reads back as its type claims - SWS, HSIDIV, PLLON, VOS,
   LPR, REGLPF, LATENCY - and the CPU is at the rate the type claims on
@@ -354,13 +359,41 @@ the wall, weighed at 250 kHz within HSI16's 1 % of the crystal):
 - **Kernel time does not move**: a 50-tick periodic through ten switches
   in three seconds fired 61 times at exactly 50 ticks, none early, at
   all three rates.
-- **A Stop at each end of the ladder**: a 300-tick deadline through a
-  Stop 1 at 64 MHz matures at 292 ms of RTC wall with the PLL re-locked
-  by `restore()` from the wake's ISR before the deadline's AO ran (one
-  interrupt, one restore); at 2 MHz in low-power run THE PART WAKES IN
-  LOW-POWER RUN WITH HSIDIV KEPT (4.3.6's own sentence) - LPR and
-  REGLPF standing after the wake, SYSCLK on HSISYS/8 - and `restore()`
-  finds nothing to do.
+- **A Stop at each end of the ladder**, with THE WALL AS THE WITNESS
+  THAT THE STOP HAPPENED (TIM2 counts HSI16 only while HSI16 runs and
+  its bus is clocked, i.e. only awake: a WFI that fell through as a
+  Sleep - table 31's own escape - would count 75000 in 300 ms): a
+  300-tick deadline through a Stop 1 at 64 MHz matures at 292 ms of RTC
+  wall with 436 us awake in all, the PLL re-locked by `restore()` from
+  the wake's ISR before the deadline's AO ran (one interrupt, one
+  restore); at 2 MHz in low-power run THE PART WAKES IN LOW-POWER RUN
+  WITH HSIDIV KEPT (4.3.6's own sentence) - LPR and REGLPF standing
+  after the wake, SYSCLK on HSISYS/8, 7.8 ms awake (the round's own
+  turns at 2 MHz) - and `restore()` finds nothing to do. And A STOP 0
+  ARMED FROM LOW-POWER RUN STOPS THE CLOCKS LIKE ANY STOP (7.8 ms awake
+  of 294, the deadline met, the part back in low-power run with HSIDIV
+  kept) - 4.3.6 speaks of the main regulator and only warns about
+  HSIDIV, 4.3.7 admits Stop 1 from LPR in so many words; whether the
+  main regulator was on during it (a Stop 0) or the low-power one
+  stayed (a Stop 1 in all but name) is not observable from any
+  register, and only a meter would tell.
+- **The SysTick ticker as a user**: SysTick handed from the
+  interrupt-less counter to `BasicTicker` for one letter, its
+  `rebase()` reloading it at every switch - 500..501 ticks per 500 ms
+  of crystal at 16 MHz Range 2, 2 MHz low-power run, 16 MHz on the PLL
+  and 64 MHz, never fast - then handed back with the handler silent
+  again. (The suite lists BOTH SysTick writers as users for that
+  letter, which no program would do; the two `rebase()` write the same
+  reload and neither touches CTRL - the counter's first version
+  reprogrammed CTRL and turned the ticker's interrupt off, which is why
+  it no longer does.)
+- **A PLL rate in Range 2**: 16 MHz as PLLRCLK from a VCO at 128 MHz
+  (M 1 / N 8 / R 8, exactly table 47's Range 2 ceiling, the driver's
+  own static_assert), VOS 2, one wait state; reached from 64 MHz on the
+  PLL by a reconfiguration through HSISYS in 72..76 us, from 2 MHz in
+  low-power run in 304..312 us, left for it in 92..96 us and for 64 MHz
+  in 88..92, the loop exact at every landing, the CPU at 16 MHz on the
+  crystal's scale.
 - **HSIDIV left behind a PLL rate**, the first version's finding: with
   no HSIDIV write in the PLL rate's `init()`, every rise from 2 MHz
   reached 64 MHz on the crystal's scale with HSIDIV still 3 - which is
@@ -401,12 +434,10 @@ Driver gaps:
 - Flash: everything but the latency and the two accelerators (the
   FLASH campaign).
 
-Implemented, not bench-verified: a PLL rate in Range 2 (a 16 MHz
-PLLRCLK, legal by the arithmetic; the suite's Range 2 rate is on
-HSISYS), the SysTick `BasicTicker`'s `rebase` (the suite runs tickless;
-the SysTickCounter's is measured at every rung), a Stop 0 from
-low-power run (the suite's Stops are Stop 1, which 4.3.7 admits from
-LPR in so many words), `FlashAccel`'s setters.
+Implemented, not bench-verified: `FlashAccel`'s setters; a `BasicTicker`
+program (the SysTick platform) rescaling under a kernel - the ticker's
+`rebase` is measured as a user, the tick's lateness across a switch
+(under one tick, by construction) is not.
 
 The kernel-clock multiplexer is bench-driven for all four codes on
 USART2 and on both LPUARTs ([usart.md](usart.md), [lpuart.md](lpuart.md)),

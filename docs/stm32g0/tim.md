@@ -159,10 +159,13 @@ stated on the verb.
   on a timer without ETR, and ETRP must sit at or below TIMxCLK/4 -
   the caller's arithmetic, 22.4.3) and `external_trigger_select(code)`
   / its readback - TIMx_AF1.ETRSEL as the raw code, the vocabulary
-  being the signal's owner's (TIM2/TIM3: 0 the pad, 1 COMP1, 2 COMP2,
-  3 LSE, 4 MCO, 5 MCO2 and 6 COMP3 on the G0B1/G0C1). Measured: MCO =
-  HSI16/64 into TIM2 in external clock mode 2 is a 250 kHz counter with
-  no pad, within HSI16's 1 % of the crystal ([clock.md](clock.md)).
+  being the signal's owner's (TIM2: 0 the pad, 1 COMP1, 2 COMP2, 3 LSE,
+  4 MCO, 5 MCO2 and 6 COMP3 on the G0B1/G0C1; TIM3 and TIM4: the pad
+  and the comparators ONLY, 22.4.26..27 - measured, TIM3 on code 4
+  counts nothing). Measured: MCO = HSI16/64 into TIM2 in external clock
+  mode 2 is a 250 kHz counter with no pad, within HSI16's 1 % of the
+  crystal, and MCO = HSI16/8 into it a 2 MHz counter that runs only
+  while the part is awake ([clock.md](clock.md), [platform.md](platform.md)).
 - Free functions: `tim_dead_time_ticks(dtg)` and `tim_dead_time_code(ticks)`
   (21.4.18's four ranges, the code search always rounding UP),
   `tim_internal_trigger(n, itr)` / `tim_internal_trigger_is_oc1(n, itr)`

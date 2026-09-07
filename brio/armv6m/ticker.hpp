@@ -287,14 +287,21 @@ struct SysTickCounter {
         return program(clock_hz(clock));
     }
 
-    /// The ClockUser verb: the counter restarted for the new rate. No
-    /// phase to keep here (nothing counts ticks on this counter), and a
-    /// rate it cannot serve leaves it STOPPED, so that delay_us refuses
-    /// instead of waiting on a wrong period.
+    /// The ClockUser verb: a new reload for the new rate, the period
+    /// restarted, CTRL untouched - the BasicTicker's own shape, so that
+    /// the two writers agree on what a rebase IS (a program that hands
+    /// SysTick from one to the other keeps whichever interrupt setting
+    /// stands). No phase to keep here (nothing counts ticks on this
+    /// counter); a rate it cannot serve leaves it STOPPED, so that
+    /// delay_us refuses instead of waiting on a wrong period.
     static void rebase(uint32_t hz) {
-        if (!program(hz)) {
+        const uint32_t reload = hz / 1000u;
+        if (reload == 0u || reload > SysTick_LOAD_RELOAD_Msk + 1u) {
             stop();
+            return;
         }
+        SysTick->LOAD = reload - 1u;
+        SysTick->VAL = 0;
     }
 
     /// The counter off: delay_us then refuses (its ENABLE test).

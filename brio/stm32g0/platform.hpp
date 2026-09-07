@@ -64,15 +64,18 @@ namespace brio {
  * interrupts masked, `now` being the timebase's own reading a moment
  * earlier and `deadline` strictly ahead of it; true means "the wake is
  * in place, sleep", false means "do not sleep this turn" (the timebase
- * could not place it yet - the loop turns and asks again). The SysTick
- * BasicTicker is deliberately NOT one of these: it has no wake to place
- * and its counting stops with the core.
+ * could not place it yet - the loop turns and asks again). `park()` is
+ * the same call with NO deadline: put the wake where it costs nothing
+ * (for the LPTIM, on the counter's own lap edge), same answer. The
+ * SysTick BasicTicker is deliberately NOT one of these: it has no wake
+ * to place and its counting stops with the core.
  */
 template <class TB>
 concept Tickless = requires(uint32_t now, uint32_t deadline) {
     { TB::ticks() } -> std::same_as<uint32_t>;
     requires TB::ticks_per_second > 0u;
     { TB::arm_wake(now, deadline) } -> std::same_as<bool>;
+    { TB::park() } -> std::same_as<bool>;
 };
 
 template <class TB = Ticker>
@@ -134,6 +137,9 @@ struct Stm32g0Platform {
                 __enable_irq();
                 return;
             }
+        } else if (!TB::park()) {
+            __enable_irq();
+            return;
         }
         idle();
     }

@@ -541,7 +541,10 @@ and the Standby pull registers with APC actually set. `Pwr::range(2)`,
 `low_power_run` both ways, VOSF and REGLPF are bench-driven by the
 dynamic clock's suite ([clock.md](clock.md)), which also found THE PART
 WAKES FROM A STOP 1 IN LOW-POWER RUN WITH HSIDIV KEPT (4.3.6): LPR and
-REGLPF standing after the wake, SYSCLK on HSISYS/8.
+REGLPF standing after the wake, SYSCLK on HSISYS/8 - and that a Stop 0
+ARMED from low-power run stops the clocks like any Stop and wakes back
+into low-power run; which regulator held VCORE during it is not
+observable from a register (a meter question).
 
 The THIRD site's own gaps: it has been run on LPTIM1 and on LSE only -
 LPTIM2 as the site's instance and LSI as its source are configurations

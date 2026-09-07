@@ -619,7 +619,40 @@ gets its dated home in `docs/design/` when taken.
   armv6m/README.md/samc21/clock.md, the map, bench.md. Not covered: a
   PLL rate in Range 2, BasicTicker::rebase on the bench, Stop 0 from
   LPR, the timers' fan-out (refused, stated), a power-manager AO that
-  asks the buses before a switch, what a rate COSTS (the meter).
+  asks the buses before a switch, what a rate COSTS (the meter). THE
+  TAILS OF ITEMS 4 AND 5 CLOSED 2026-09-07 BY FABLE'S OWN HAND (the
+  user's rulings: LSI yes, the masked window and the six-count floor
+  declared as contracts, UCPD deferred to a board with the connector):
+  LptimTickerConfig grew `source` (lse | lsi) and `lsi_hz` - a STATED
+  rate, refused outside table 46's 29.5..34 kHz, the default the
+  ceiling (never early on any part: the directional rule, millis() by
+  two divisions on LSI) - and `park()`: THE COMPARE IS PARKED ON THE
+  LAP (0xFFFF) whenever nothing nearer than a lap is armed, so a
+  deadline-less Stop costs ONE interrupt per lap (the CMPM rides the
+  ARRM's) where the first version's mid-lap parking cost two -
+  measured: a ten-second Stop 1 = five lap wakes + the deadline, six
+  interrupts (ten before), each lap wake 214 us awake ISR to ISR on
+  TIM2 clocked from MCO = HSI16/8 (a clock that runs ONLY AWAKE), the
+  PLL never re-locked, a 10^-4 duty; the Tickless concept requires
+  park() and idle_until(nullopt) calls it. test_stm32_tickless grew
+  letters h (the LSI witness: 2041 ticks per 2 s against 2036 stated,
+  a wake placed and served, the default statement 43 per mille late)
+  and i (the lap wakes), 47/47 x5, with three lap-phase flakes of the
+  older letters fixed (a leg judging "one interrupt" over a sub-second
+  window fails one run in four to eight when a lap wraps inside it -
+  the legs now wait for the first half of a lap; letter c judged on
+  TIM2's own scale). test_stm32_clock grew a FOURTH RATE - 16 MHz on
+  the PLL in Range 2, M1/N8/R8 with the VCO at table 47's 128 MHz
+  ceiling, now a static_assert - letter i (SysTick handed to the
+  BasicTicker: its rebase holds 1000 Hz at every rung; the counter's
+  rebase no longer touches CTRL, which is what had silenced the
+  ticker's interrupt) and letter j, plus THE MCO WALL AS THE STOP
+  WITNESS in letter g (TIM2 counts only awake: 436 us of 292 ms at 64
+  MHz) and A STOP 0 ARMED FROM LOW-POWER RUN, which stops the clocks
+  like any Stop and wakes into LPR (which regulator held VCORE is a
+  meter question); 42/42 x3. TIM3/TIM4's ETRSEL name the comparators
+  only (TIM3 on code 4 counts nothing - tim.hpp/tim.md corrected). Gate:
+  16/16 stm32g0 identical + the two grown suites, 39/39 samc21.
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device

@@ -46,10 +46,24 @@
  * of two seconds instead of sixty-four - one ARRM interrupt every two
  * seconds, which a 32 kHz counter's own consumption dwarfs - and a
  * masked window that must stay under one second (below).
- * LSE ONLY, for the power-of-two rate and one more reason: an LSI at
- * "32 kHz nominal, 29.5..34 actual" (DS13560) would need a rate the
- * program states and the directional rule the timed site carries; a
- * timebase should not be approximately right. Not covered, said so.
+ * THE CRYSTAL BY DEFAULT, LSI FOR A BOARD WITHOUT ONE. On LSE the rate
+ * is a power of two and every conversion is a shift. LSI - "32 kHz
+ * nominal, 29.5..34 actual" across parts and temperature (DS13560
+ * table 46), 32586 Hz measured on the bench die - has no rate a header
+ * can know, so `LptimTickerConfig::source = lsi` takes the rate the
+ * PROGRAM STATES in `lsi_hz`, and the DIRECTIONAL RULE decides what to
+ * state: kernel time is exact by COUNT (a tick is a tick), what the
+ * stated rate governs is the conversion of milliseconds into ticks, and
+ * N ticks of a clock FASTER than stated are fewer real milliseconds
+ * than asked - EARLY, which brio's time contract forbids. So a stated
+ * rate must not sit BELOW the true one, the default is table 46's
+ * ceiling (34000: never early on any part, up to 15 % late on a slow
+ * one), and a program that measures its LSI (the rtc suite's TIM16
+ * capture) states a tighter number. millis()/secs()/now() then divide
+ * instead of shifting (two 32-bit divisions, no overflow, a few
+ * microseconds - they are not the kernel's hot path; the kernel counts
+ * ticks). Everything else - the lap, the compare rules, the floor - is
+ * the same: they are properties of the counter, not of its clock.
  *
  * SYSTICK STAYS ON, INTERRUPT-LESS. armv6m/delay.hpp counts cycles on
  * SysTick's VAL and never needs its interrupt, so init() starts it as
@@ -118,15 +132,19 @@
  *     clock alone and this wait is insurance the silicon does not need;
  *     kept, because it costs 93 us per Stop round and the chapter
  *     promises nothing.
- *  4. A DEADLINE A LAP OR MORE AWAY IS NOT ARMED: the ARRM two seconds
- *     out re-evaluates, and a low half-word would match a lap early.
- *     The register is MIRRORED: a deadline whose compare is already in
- *     the register stores nothing. The compare is parked half a lap out
- *     at init, so the first unrequested match is as far away as the
- *     register allows; a compare left behind by a served deadline
- *     matches once per lap afterwards and costs one loop turn.
- *     (A compare equal to ARR DOES match, measured - letter b - so
- *     0xFFFF is a value like any other.)
+ *  4. A DEADLINE A LAP OR MORE AWAY IS NOT ARMED, AND THE COMPARE IS
+ *     PARKED ON THE LAP: the ARRM two seconds out re-evaluates, and a
+ *     low half-word would match a lap early. The register is MIRRORED:
+ *     a deadline whose compare is already in the register stores
+ *     nothing. Where the compare sits when nothing is armed MATTERS,
+ *     because it matches once per lap wherever it is: parked at 0xFFFF
+ *     - equal to ARR, which DOES match (measured, letter b) - its CMPM
+ *     is raised at the counter's own wrap and served by the ARRM's
+ *     interrupt, so a deadline-less Stop costs ONE wake per lap. The
+ *     first version parked it half a lap out and every lap cost two
+ *     (letter i: ten interrupts for a ten-second Stop, now five). The
+ *     parking is done by arm_wake() for a far deadline and by park(),
+ *     which the platform's idle_until(nullopt) calls, for none.
  *
  * ## ticks() inside a masked window
  *
@@ -165,36 +183,62 @@
 
 namespace brio {
 
-/// Which LPTIM, and how far the 32768 Hz count is shifted to make the
-/// kernel tick. The default is LPTIM1 and a shift of 5: 1024 ticks a
-/// second.
+/// The counter's clock: the crystal, or the internal RC at a rate the
+/// program states (the file header's directional rule).
+enum class LptimTickerSource : uint8_t { lse, lsi };
+
+/// Which LPTIM, which clock, and how far the count is shifted to make
+/// the kernel tick. The default is LPTIM1 on LSE with a shift of 5:
+/// 1024 ticks a second. `lsi_hz` is read only with `source = lsi`:
+/// the rate to state is one NOT BELOW the true one, and the default is
+/// DS13560 table 46's ceiling.
 struct LptimTickerConfig {
     uint8_t instance = 1;
     uint8_t shift = 5;
+    LptimTickerSource source = LptimTickerSource::lse;
+    uint32_t lsi_hz = 34'000;
 };
 
-constexpr bool lptim_ticker_config_valid(const LptimTickerConfig& c) {
-    return lptim_present(c.instance) && c.shift <= 10u;
+/// The counter's rate: the crystal's, or the stated LSI rate.
+constexpr uint32_t lptim_ticker_count_hz(const LptimTickerConfig& c) {
+    return c.source == LptimTickerSource::lse ? 32'768u : c.lsi_hz;
 }
 
-/// The tick rate a configuration gives: 32768 >> shift.
+/// A shift that leaves at least 32 ticks a second, and - for LSI - a
+/// stated rate inside table 46's own band (29.5..34 kHz): a number
+/// outside it is not this oscillator.
+constexpr bool lptim_ticker_config_valid(const LptimTickerConfig& c) {
+    if (!lptim_present(c.instance) || c.shift > 10u) {
+        return false;
+    }
+    if (c.source == LptimTickerSource::lsi) {
+        return c.lsi_hz >= 29'500u && c.lsi_hz <= 34'000u;
+    }
+    return true;
+}
+
+/// The tick rate a configuration gives: the count rate >> shift.
 constexpr uint32_t lptim_ticker_hz(const LptimTickerConfig& c) {
-    return 32'768u >> c.shift;
+    return lptim_ticker_count_hz(c) >> c.shift;
 }
 
 template <LptimTickerConfig cfg = LptimTickerConfig{}>
 class LptimTicker {
     static_assert(lptim_ticker_config_valid(cfg),
-                  "brio LptimTicker: the LPTIM instance must exist on this part and the "
-                  "shift must leave at least 32 ticks a second");
+                  "brio LptimTicker: the LPTIM instance must exist on this part, the "
+                  "shift must leave at least 32 ticks a second, and a stated LSI rate "
+                  "must sit inside DS13560 table 46's 29.5..34 kHz");
 
 public:
     LptimTicker() = delete;
 
     using L = Lptim<cfg.instance>;
 
-    /// The crystal's rate, the counter's rate, the tick's rate.
-    static constexpr uint32_t count_hz = 32'768u;
+    /// The counter's clock and rate (the crystal's, or the STATED LSI
+    /// rate), and the tick's rate.
+    static constexpr LptimTickerSource source = cfg.source;
+    static constexpr bool on_crystal = source == LptimTickerSource::lse;
+    static constexpr uint32_t count_hz = lptim_ticker_count_hz(cfg);
     static constexpr uint8_t shift = cfg.shift;
     static constexpr uint32_t ticks_per_second = lptim_ticker_hz(cfg);
     static constexpr uint32_t counts_per_tick = 1u << shift;
@@ -208,8 +252,16 @@ public:
     /// the phase adds up to one, one more for the margin).
     static constexpr uint32_t min_counts_ahead = 6;
 
-    /// Where the compare is parked at init (rule 4).
-    static constexpr uint16_t parked_cmp = 0x8000;
+    /// Where the compare is PARKED (rule 4) - at init, when nothing is
+    /// armed, and when the deadline is a lap or more away: equal to ARR,
+    /// so that its match is the counter's own wrap and the CMPM it
+    /// raises is served by the same interrupt as the ARRM (measured:
+    /// test_stm32_tickless letter b, a compare equal to ARR matches
+    /// like any other; letter i, one interrupt per lap). Parked
+    /// anywhere else it would be a SECOND wake every lap - the first
+    /// version parked at 0x8000 and a ten-second Stop cost ten wakes
+    /// where five would do.
+    static constexpr uint16_t parked_cmp = 0xFFFF;
 
     /// The vector the app binds to isr() - shared on some parts
     /// (device_tables.hpp says with what).
@@ -231,14 +283,24 @@ public:
      */
     template <typename C>
     static bool init(C clock) {
-        RtcDomain::pwr_bus_clock(true);
-        RtcDomain::unlock(true);
-        RtcDomain::lse_enable(true);
-        if (!RtcDomain::lse_wait_ready()) {
-            return false;
+        if constexpr (on_crystal) {
+            RtcDomain::pwr_bus_clock(true);
+            RtcDomain::unlock(true);
+            RtcDomain::lse_enable(true);
+            if (!RtcDomain::lse_wait_ready()) {
+                return false;
+            }
+        } else {
+            // LSI is RCC's own (5.2.6), no domain gate in the way; it
+            // runs through a Stop for a kernel-clock consumer that asks
+            // (the IWDG's precedent), which is what this counter is.
+            Rcc::lsi_enable(true);
+            if (!Rcc::lsi_wait_ready()) {
+                return false;
+            }
         }
         L::init();
-        L::kernel_clock(LptimClock::lse);
+        L::kernel_clock(on_crystal ? LptimClock::lse : LptimClock::lsi);
         laps_ = 0;
         write_pending_ = false;
         sweep_pending_ = false;
@@ -303,19 +365,36 @@ public:
         return tick_of(hi, lo);
     }
 
-    /// Milliseconds: exact, floor(ticks * 1000 / tps) in two shifts.
+    /// Milliseconds: floor(ticks * 1000 / tps) - two shifts on the
+    /// crystal (tps a power of two), two divisions on LSI (whole seconds
+    /// first, so the product never overflows 32 bits).
     static uint32_t millis() {
         const uint32_t t = ticks();
-        return (t >> tick_shift) * 1000u + (((t & (ticks_per_second - 1u)) * 1000u) >> tick_shift);
+        if constexpr (on_crystal) {
+            return (t >> tick_shift) * 1000u + (((t & (ticks_per_second - 1u)) * 1000u) >> tick_shift);
+        } else {
+            return (t / ticks_per_second) * 1000u + ((t % ticks_per_second) * 1000u) / ticks_per_second;
+        }
     }
 
-    static uint32_t secs() { return ticks() >> tick_shift; }
+    static uint32_t secs() {
+        if constexpr (on_crystal) {
+            return ticks() >> tick_shift;
+        } else {
+            return ticks() / ticks_per_second;
+        }
+    }
 
     /// TimeStamp from ONE reading: no guard needed, one word carries both.
     static void now(TimeStamp& out) {
         const uint32_t t = ticks();
-        out.seconds = t >> tick_shift;
-        out.millis = static_cast<uint16_t>(((t & (ticks_per_second - 1u)) * 1000u) >> tick_shift);
+        if constexpr (on_crystal) {
+            out.seconds = t >> tick_shift;
+            out.millis = static_cast<uint16_t>(((t & (ticks_per_second - 1u)) * 1000u) >> tick_shift);
+        } else {
+            out.seconds = t / ticks_per_second;
+            out.millis = static_cast<uint16_t>(((t % ticks_per_second) * 1000u) / ticks_per_second);
+        }
     }
 
     /**
@@ -338,7 +417,7 @@ public:
             return false;   // due now: the loop's next process() fires it
         }
         if (static_cast<uint32_t>(distance) >= lap_ticks) {
-            return true;    // rule 4: the lap's own wake re-evaluates
+            return store(parked_cmp);   // rule 4: the lap's own wake re-evaluates
         }
         // The count where the tick becomes `deadline`, and the compare
         // one below it (CMPM fires at the edge AFTER equality).
@@ -348,7 +427,25 @@ public:
             floor_declines_ = floor_declines_ + 1u;
             return false;   // rule 2: too near to place - spin it through
         }
-        const uint16_t cmp = static_cast<uint16_t>(target - 1u);
+        return store(static_cast<uint16_t>(target - 1u));
+    }
+
+    /**
+     * Nothing armed at all: the compare PARKED where its match is the
+     * lap's own edge (rule 4), so that a sleep with no deadline costs
+     * one interrupt per lap and not two. Same answer as arm_wake's:
+     * true = sleep, false = the loop turns once (a completion being
+     * swept). The platform's idle_until(nullopt) calls it.
+     */
+    static bool park() { return store(parked_cmp); }
+
+private:
+    /**
+     * The one store path (rules 1 and 3, and the mirror): `cmp` into
+     * the register unless it is already there, only with CMPOK clear
+     * and nothing in flight, waited for when a Stop is armed.
+     */
+    static bool store(uint16_t cmp) {
         if (cmp == cmp_reg_) {
             return true;    // the mirror: already in the register
         }
@@ -387,6 +484,7 @@ public:
         return true;
     }
 
+public:
     /**
      * The ISR body: the resource's ordered clear (unarmed flags first -
      * CMPOK among them, which is why it is read BEFORE the sweep), the
@@ -426,7 +524,8 @@ public:
     static uint32_t stop_waits() { return stop_waits_; }
 
 private:
-    static constexpr uint8_t tick_shift = static_cast<uint8_t>(15u - shift);   // log2(tps)
+    /// log2(tps) on the crystal; unused on LSI (its tps is not a power of two).
+    static constexpr uint8_t tick_shift = static_cast<uint8_t>(15u - shift);
 
     static uint32_t read_laps() { return *const_cast<const volatile uint32_t*>(&laps_); }
     static bool read_write_pending() { return *const_cast<const volatile bool*>(&write_pending_); }

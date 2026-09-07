@@ -8,10 +8,11 @@ vendor ships unchanged - the NVIC and PRIMASK (`armv6m/nvic.hpp`:
 `BasicTicker`, and `SysTickCounter` - SysTick as a bare cycle counter
 with no interrupt, for a program whose kernel timebase is elsewhere,
 such as the STM32G0's tickless LPTIM one; both are `ClockUser`s whose
-`rebase(hz)` reprograms the reload for a dynamic clock - the ticker
-restarting its period and losing the phase of the tick in progress,
-under a tick, late and never early; the counter measured at every rung
-of the STM32G0's ladder, the ticker's rebase compiled and not benched)
+`rebase(hz)` reprograms the reload for a dynamic clock - a new LOAD and
+a restarted period, CTRL untouched by either, so the ticker loses the
+phase of the tick in progress, under a tick, late and never early;
+both measured at every rung of the STM32G0's ladder, the ticker holding
+1000 Hz against the crystal at 64, 16 and 2 MHz)
 and the microsecond busy-wait on SysTick's own counter
 (`armv6m/delay.hpp`: `delay_us`, `delay_rate`, `DelayRate` - "at
 least", never early, capped below one SysTick period of one

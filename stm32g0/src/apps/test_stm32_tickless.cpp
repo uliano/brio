@@ -41,6 +41,17 @@
 //      timebase is simply gone - SYSCLK back on the PLL after the round
 //   g  delay_us on the interrupt-less SysTick, the platform suite's
 //      arithmetic re-run here
+//   h  AN LSI-CLOCKED LptimTicker as a witness on LPTIM2: the internal
+//      RC at the rate the program STATES (32586 Hz, this die's measured
+//      one), its ticks and millis() against the crystal, a wake placed
+//      on it and served, and the directional rule's price at the
+//      default statement (table 46's ceiling)
+//   i  THE LAP WAKES OF A LONG STOP: ten seconds in Stop 1 with one
+//      deadline at the end - five ARRM wakes to carry the high word,
+//      each on HSISYS with the PLL never re-locked, their awake time
+//      counted by TIM3 on MCO = HSI16/8 (a clock that runs only while
+//      the part is awake) - what a rare-event program pays for a
+//      16-bit counter that must not be divided
 //   u  OUTSIDE z: a console keystroke as the foreign wake of a twenty-
 //      second idle_until (an operator's hand).
 //
@@ -90,6 +101,18 @@ static_assert(P::ticks_per_second == 1024u);
 // The lap witness of letter b: LPTIM2 at the crystal's own rate.
 using Witness = LptimTicker<LptimTickerConfig{.instance = 2, .shift = 0}>;
 static_assert(Witness::ticks_per_second == 32'768u);
+
+// Letter h's witness: LPTIM2 again, on LSI at the rate this die measured
+// (test_stm32_rtc letter c, a TIM16 capture: 32586 Hz), shift 5.
+constexpr uint32_t lsi_measured_hz = 32'586;
+using LsiWitness = LptimTicker<LptimTickerConfig{
+    .instance = 2, .shift = 5, .source = LptimTickerSource::lsi, .lsi_hz = lsi_measured_hz}>;
+static_assert(!LsiWitness::on_crystal && LsiWitness::ticks_per_second == (lsi_measured_hz >> 5));
+using LsiDefault = LptimTicker<LptimTickerConfig{
+    .instance = 2, .shift = 5, .source = LptimTickerSource::lsi}>;
+static_assert(LsiDefault::ticks_per_second == (34'000u >> 5));
+/// Which body LPTIM2's vector serves: 0 = the crystal witness, 1 = the LSI one.
+volatile uint8_t witness_mode = 0;
 
 using L1 = Lptim<1>;
 using L2 = Lptim<2>;
@@ -196,6 +219,19 @@ void sync_to_count() {
     const uint32_t t = Tb::ticks();
     uint32_t guard = 4'000'000u;
     while (Tb::ticks() == t && guard-- != 0u) {
+    }
+}
+
+/// Spin into the first half of a lap, so that the next second holds no
+/// wrap: the legs that judge "one interrupt" or "the LPTIM never spoke"
+/// over a window under a second assume the ARRM handler does NOT run in
+/// it (it would sweep CMPOK on the deferral leg, and end a single WFI
+/// early) - a phase the first versions left to luck, 12..25 % against
+/// per leg, which is what a lap every two seconds costs a test and
+/// costs a program nothing (the loop turns once more).
+void lap_room() {
+    while ((Tb::count() & 0xFFFFu) >= 0x8000u) {
+        feed();
     }
 }
 
@@ -635,6 +671,19 @@ void tc_idle_until() {
         feed();
         naps[i] = nap(std::optional<int32_t>{static_cast<int32_t>(spans[i])});
     }
+    // TIM2 rides the PLL, i.e. HSI16, which is 0.2..0.3 % off the crystal
+    // and drifts with the board's temperature: a nap is judged on the
+    // wall's OWN scale - one tick weighed on TIM2 first (letter e's
+    // lesson, applied here after a run that failed by 80 us of drift).
+    console_drain();
+    const uint32_t cal_k0 = Tb::ticks();
+    while (Tb::ticks() == cal_k0) {
+    }
+    const uint32_t cal_t0 = t2();
+    while (Tb::ticks() - cal_k0 < 257u) {
+    }
+    const uint32_t tick_ns = (((t2() - cal_t0) / 256u) * 1000u) / (t2_hz / 1'000'000u);   // ns per tick
+    print(serial, "  one tick is ", tick_ns, " ns on TIM2's scale (976563 nominal)", crlf);
     bool all_ok = true;
     bool one_irq = true;
     bool never_early = true;
@@ -642,11 +691,11 @@ void tc_idle_until() {
     for (uint8_t i = 0; i < n_spans; ++i) {
         const Nap& r = naps[i];
         const uint32_t n = spans[i];
-        const uint32_t nominal_us = (n * 1'000'000u) / P::ticks_per_second;
+        const uint32_t nominal_us = (n * tick_ns) / 1000u;
         const uint32_t over = r.t2_us > nominal_us ? r.t2_us - nominal_us : 0u;
         if (over > worst_over_us) worst_over_us = over;
         print_nap("idle_until(now + N)", r);
-        if (!within(r.t2_us, nominal_us - 40u, nominal_us + 1100u)) all_ok = false;
+        if (!within(r.t2_us, nominal_us - 40u, nominal_us + 1040u)) all_ok = false;
         // One CMPM ends the sleep; a lap in the way adds one ARRM and one round.
         if (r.irqs != r.rounds || (r.served & LptimFlag::cmpm) == 0u || r.rounds > 2u) one_irq = false;
         if (static_cast<int32_t>(r.ticks_after - r.asked) < 0) never_early = false;
@@ -664,7 +713,7 @@ void tc_idle_until() {
                   never_early);
     bench.verdict("the wake lands within a count of the nominal (no phase conversion: "
                   "the compare is the same LSE edge the count is)",
-                  worst_over_us < 1100u);
+                  worst_over_us < 1040u);
 
     // A DEADLINE ONE TICK AWAY, right after a tick edge: 32 counts of
     // room, well past the six-count floor - it sleeps and lands at the
@@ -685,8 +734,11 @@ void tc_idle_until() {
     bench.verdict("a deadline already due does not sleep at all", due.t2_us < 20u && due.irqs == 0u);
 
     // NO DEADLINE: the sleep ends on a foreign wake - the RTC's wake-up
-    // timer 250 ms out - and the LPTIM stays silent.
+    // timer 250 ms out - and the LPTIM stays silent (a lap inside the
+    // window would speak, once, for the carry: the window is placed in
+    // the first half of a lap).
     Rtc::clear_wakeup();
+    lap_room();
     const bool wut = Rtc::set_wakeup(RtcWakeupClock::div16, 512u);   // (512 + 1) / 2048 s
     const Nap none = nap(std::nullopt);
     Rtc::clear_wakeup();
@@ -705,6 +757,7 @@ void tc_idle_until() {
 void td_handshake() {
     feed();
     console_drain();
+    lap_room();
 
     // TWO ARMS BACK TO BACK with different deadlines. The first stores;
     // the second finds CMPOK standing (the first landed and no LPTIM
@@ -764,6 +817,7 @@ void td_handshake() {
     // stopped). Judged on the RTC wall. The second leg goes through
     // Pwr and Lptim directly - the ticker would wait.
     console_drain();
+    lap_room();
     clear_counters();
     sync_to_count();
     const uint32_t k0 = Tb::ticks();
@@ -802,6 +856,7 @@ void td_handshake() {
     // A fresh store needs CMPOK clear: force a sweep first.
     Nvic::set_pending(Tb::irq());
     spin_us(400);
+    lap_room();
     sync_to_count();
     // The compare in the ticker's own arithmetic: the count where the
     // tick becomes now + 300, less one (CMPM fires at the edge after).
@@ -959,7 +1014,11 @@ void tf_stop_through_manager() {
                   "resync - kernel time ran through the Stop on the LPTIM",
                   Probe::blips == 1u && within(to_blip, 488u, 520u) && within(kernel_ticks, 500u, 502u));
     bench.verdict("never early", to_blip >= 488u && kernel_ticks >= 500u);
-    bench.verdict("one interrupt ended the Stop, the compare's own", lptim_irqs == 1u && lptim_cmpm == 1u);
+    // A lap inside the 500 ticks (one in four) adds one ARRM wake, which
+    // the loop turns through: the compare's own is the one that ends it.
+    bench.verdict("the compare's own interrupt ended the Stop (plus one per lap wrapped "
+                  "inside the window, none otherwise)",
+                  lptim_irqs == 1u + lptim_arrm && lptim_cmpm >= 1u);
     bench.verdict("the round closed by the convention and SYSCLK is back on the PLL",
                   Probe::wakes >= 1u && Site::armed() == SleepDepth::none && pll_back);
 
@@ -1072,6 +1131,200 @@ void tu_keystroke() {
 }
 
 // =============================================================================
+// h - an LSI-clocked ticker as a witness
+// =============================================================================
+void th_lsi_witness() {
+    feed();
+    console_drain();
+    clear_counters();
+    witness_mode = 1;
+    const bool up = LsiWitness::init(clock);
+    print(serial, "  LptimTicker on LPTIM2 from LSI, stated ", lsi_measured_hz, " Hz, shift 5: ",
+          up ? "up" : "REFUSED", " - ", LsiWitness::ticks_per_second,
+          " ticks a second by the statement", crlf);
+    bench.verdict("AN LSI-CLOCKED LptimTicker COMES UP: RCC's own oscillator, no RTC "
+                  "domain gate in the way",
+                  up);
+    if (!up) {
+        witness_mode = 0;
+        return;
+    }
+    // Two seconds of the crystal timebase: the LSI witness's ticks and
+    // millis() against the statement (LSI wanders 1..2 % between runs;
+    // the band says so).
+    const uint32_t k0 = Tb::ticks();
+    const uint32_t w0 = LsiWitness::ticks();
+    const uint32_t m0 = LsiWitness::millis();
+    while (Tb::ticks() - k0 < 2048u) {
+        feed();
+    }
+    const uint32_t w_ticks = LsiWitness::ticks() - w0;
+    const uint32_t w_ms = LsiWitness::millis() - m0;
+    const uint32_t expected = 2u * LsiWitness::ticks_per_second;
+    print(serial, "  2 s of the crystal: the LSI witness counted ", w_ticks, " ticks (",
+          expected, " by the statement) and ", w_ms, " ms", crlf);
+    bench.verdict("its ticks and millis() follow the STATED rate within 3 % of the crystal "
+                  "- the arithmetic is exact, the number is the oscillator's",
+                  within(w_ticks, expected - expected / 33u, expected + expected / 33u) &&
+                      within(w_ms, 1940u, 2060u));
+
+    // A wake placed on it: arm_wake and a WFI by hand, judged in ITS
+    // units (never early) and on the crystal (the statement's error).
+    clear_counters();
+    const uint32_t before = LsiWitness::ticks();
+    const uint32_t asked = before + 100u;
+    const uint32_t c0 = t2();
+    bool armed = false;
+    uint32_t rounds = 0;
+    for (;;) {
+        InterruptGuard g;
+        const uint32_t now = LsiWitness::ticks();
+        if (static_cast<int32_t>(asked - now) <= 0) {
+            break;
+        }
+        armed = LsiWitness::arm_wake(now, asked);
+        if (armed) {
+            P::idle();
+        } else {
+            enable_interrupts();
+        }
+        ++rounds;
+        if (rounds > 2000u) break;
+    }
+    const uint32_t took_us = t2_us(t2() - c0);
+    const uint32_t landed = LsiWitness::ticks();
+    print(serial, "  a 100-tick wake on the LSI witness: slept ", took_us, " us in ", rounds,
+          " round(s), ticks ", before, " -> ", landed, " (asked ", asked, "), ", lptim2_irqs,
+          " LPTIM2 interrupt(s)", crlf);
+    bench.verdict("the compare placed on the LSI counter wakes at its tick, never early in "
+                  "the witness's own units, one interrupt",
+                  armed && static_cast<int32_t>(landed - asked) >= 0 &&
+                      static_cast<int32_t>(landed - asked) <= 1 && lptim2_irqs >= 1u &&
+                      within(took_us, 95'000u, 105'000u));
+
+    // THE DIRECTIONAL RULE'S PRICE: the default statement is table 46's
+    // ceiling, 34000 - never early on any part, and this many late on
+    // this one.
+    const uint32_t late_per_mille = (34'000u * 1000u) / lsi_measured_hz - 1000u;
+    print(serial, "  the default statement (34000 Hz) on this die's ", lsi_measured_hz,
+          " Hz: every millisecond asked lands ", late_per_mille,
+          " per mille late, never early (", LsiDefault::ticks_per_second,
+          " ticks a second would be counted at ", lsi_measured_hz >> 5, ")", crlf);
+    bench.verdict("the default over-states the rate, so a program that does not measure "
+                  "its LSI is late and never early - 4 % here",
+                  late_per_mille > 0u && late_per_mille < 60u);
+
+    Nvic::disable(L2::irq());
+    L2::init();
+    L2::release();
+    witness_mode = 0;
+    // SysTick was restarted by the witness's init (the same reload):
+    // the timebase's own is put back for good measure.
+    (void)SysTickCounter::start(clock);
+}
+
+// =============================================================================
+// i - the lap wakes of a long Stop
+// =============================================================================
+// THE AWAKE-TIME METER IS TIM2 ITSELF, re-clocked for this letter from
+// MCO = HSI16/8 through its ETR (TIM2 is the ONE timer whose ETRSEL
+// names the MCOs and LSE; TIM3/TIM4's name the comparators only -
+// RM0444 22.4.26..27): a 2 MHz count that runs only while HSI16 runs
+// and the APB is clocked, i.e. only awake. The PLL wall is put back at
+// the end.
+constexpr uint32_t awake_hz = 16'000'000u / 8u;
+volatile uint32_t arrm_t2[8];                       ///< the meter at each ARRM entry
+volatile uint8_t arrm_seen = 0;
+volatile uint8_t arrm_on_hsisys = 0;
+volatile bool lap_watch = false;
+
+bool awake_meter_up() {
+    if (!Rcc::mco(Rcc::mco_hsi16_code, 3)) {
+        return false;
+    }
+    T2::enable(false);
+    T2::reset();
+    if (!T2::configure({.prescaler = 0, .period = 0xFFFFFFFFu})) {
+        return false;
+    }
+    if (!T2::external_trigger_select(4) || !T2::external_trigger({.clock_mode2 = true})) {
+        return false;
+    }
+    T2::enable(true);
+    return true;
+}
+
+void ti_lap_wakes() {
+    feed();
+    console_drain();
+    const bool meter = awake_meter_up();
+    bench.verdict("TIM2 counts MCO = HSI16/8 through its ETR (the awake-time meter: HSI16 "
+                  "stops in a Stop and so does the timer's bus)",
+                  meter);
+    console_drain();   // a Stop under a line in flight is a garbled line (measured)
+
+    K::init_all();
+    Probe::clear();
+    clear_counters();
+    arrm_seen = 0;
+    arrm_on_hsisys = 0;
+    lap_watch = true;
+    kernel_live = true;
+    sync_to_count();
+    const uint32_t w0 = wall();
+    const uint32_t k0 = Tb::ticks();
+    const uint32_t m0 = t2();
+    Probe::deadline.arm(10240u);    // ten seconds: five laps
+    post<Manager>(SleepRequested{SleepDepth::deep, reply_to<Probe, SleepVote>()});
+    pump_until_blip(12000u);
+    kernel_live = false;
+    lap_watch = false;
+    const uint32_t to_blip = wall_ms(wall_delta(w0, Probe::blip_wall));
+    const uint32_t kernel_ticks = Probe::blip_ticks - k0;
+    const uint32_t m1 = t2();
+    const bool pll_back = Rcc::sysclk_status() == SysclkSource::pllrclk;
+
+    // The awake time of one lap wake: the meter between consecutive
+    // ARRM entries (nothing else runs in between: the ISR, the loop's
+    // empty turn, the WFI, the Stop, the next wake's latency up to the
+    // ISR).
+    uint32_t per_wake_min = 0xFFFFFFFFu, per_wake_max = 0;
+    for (uint8_t i = 1; i < arrm_seen && i < 8u; ++i) {
+        const uint32_t d = arrm_t2[i] - arrm_t2[i - 1u];
+        const uint32_t us = (d * 1000u) / (awake_hz / 1000u);
+        if (us < per_wake_min) per_wake_min = us;
+        if (us > per_wake_max) per_wake_max = us;
+    }
+    const uint32_t total_awake_us = ((m1 - m0) * 1000u) / (awake_hz / 1000u);
+    print(serial, "  10 s in Stop 1 with one deadline: matured after ", to_blip,
+          " ms of RTC wall, kernel ticks ", kernel_ticks, "; ", lptim_irqs,
+          " LPTIM interrupts = ", lptim_arrm, " ARRM + ", lptim_cmpm, " CMPM; ", arrm_on_hsisys,
+          " of ", arrm_seen, " ARRM entries found SYSCLK on HSISYS; awake per lap wake ",
+          per_wake_min, "..", per_wake_max, " us (ISR to ISR on the meter), ", total_awake_us,
+          " us awake in the whole round; PLL back at the end=", pll_back, crlf);
+    bench.verdict("A TEN-SECOND STOP COSTS FIVE LAP WAKES AND ONE FOR THE DEADLINE: six "
+                  "LPTIM interrupts in all - the parked compare's CMPM rides the ARRM's "
+                  "own interrupt (the first version parked it mid-lap: ten), the deadline "
+                  "met",
+                  Probe::blips == 1u && lptim_arrm == 5u && lptim_irqs == 6u &&
+                      within(to_blip, 9990u, 10'100u) && within(kernel_ticks, 10240u, 10242u));
+    bench.verdict("THE PLL IS NEVER RE-LOCKED FOR A LAP WAKE: every ARRM ran on HSISYS and "
+                  "the loop went straight back to sleep (no AO, no manager round)",
+                  arrm_seen == 5u && arrm_on_hsisys == 5u);
+    bench.verdict("a lap wake keeps the part awake for under 300 us (ISR to ISR on a clock "
+                  "that only runs awake: the Stop exit, the handler, one empty loop turn "
+                  "and the WFI, all at 16 MHz with the PLL's two wait states still in "
+                  "FLASH_ACR) - a 10^-4 duty for a rare-event program",
+                  per_wake_max < 300u);
+    bench.verdict("and the round closed with the PLL back", pll_back);
+    // The PLL wall back for whatever runs next.
+    T2::enable(false);
+    T2::reset();
+    Rcc::mco_off();
+    (void)t2_up();
+}
+
+// =============================================================================
 // x - the compare's own latencies at the ticker's prescaler (diagnostic)
 // =============================================================================
 void tx_latency() {
@@ -1159,13 +1412,23 @@ extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
     lptim_irqs = lptim_irqs + 1u;
     lptim_last_served = served;
     if ((served & brio::LptimFlag::cmpm) != 0u) lptim_cmpm = lptim_cmpm + 1u;
-    if ((served & brio::LptimFlag::arrm) != 0u) lptim_arrm = lptim_arrm + 1u;
+    if ((served & brio::LptimFlag::arrm) != 0u) {
+        lptim_arrm = lptim_arrm + 1u;
+        if (lap_watch && arrm_seen < 8u) {
+            arrm_t2[arrm_seen] = T2::count();
+            if (brio::Rcc::sysclk_status() == brio::SysclkSource::hsisys) {
+                arrm_on_hsisys = arrm_on_hsisys + 1u;
+            }
+            arrm_seen = arrm_seen + 1u;
+        }
+    }
     if (served == 0u) lptim_sweeps = lptim_sweeps + 1u;
 }
 
-/// LPTIM2's vector, shared with TIM7: the witness's body.
+/// LPTIM2's vector, shared with TIM7: the witness's body - the crystal
+/// one of letter b, or the LSI one of letter h.
 extern "C" void TIM7_LPTIM2_IRQHandler() {
-    const uint32_t served = Witness::isr();
+    const uint32_t served = witness_mode == 1u ? LsiWitness::isr() : Witness::isr();
     lptim2_irqs = lptim2_irqs + 1u;
     if ((served & brio::LptimFlag::cmpm) != 0u) lptim_cmpm = lptim_cmpm + 1u;
 }
@@ -1224,6 +1487,9 @@ int main() {
                  te_kernel);
     bench.letter('f', "STOP 1 through the manager with the PLAIN site", tf_stop_through_manager);
     bench.letter('g', "delay_us on the interrupt-less SysTick", tg_delay);
+    bench.letter('h', "an LSI-clocked ticker as a witness: the stated rate, a wake, the rule's price",
+                 th_lsi_witness);
+    bench.letter('i', "the lap wakes of a ten-second Stop: count, no PLL, awake time", ti_lap_wakes);
     bench.letter('u', "a keystroke as the foreign wake (outside z)", tu_keystroke, false);
     bench.letter('x', "diagnostic: the compare's latencies on the counter (outside z)", tx_latency, false);
 

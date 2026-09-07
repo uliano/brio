@@ -74,6 +74,7 @@ struct FakeTickless {
     static uint32_t ticks() { return 0; }
     static constexpr uint32_t ticks_per_second = 1024;
     static bool arm_wake(uint32_t, uint32_t) { return true; }
+    static bool park() { return true; }
 };
 static_assert(Tickless<FakeTickless>);
 using TicklessSite = Stm32g0SleepSite<SysClock, FakeTickless>;

@@ -1149,8 +1149,10 @@ public:
     /**
      * TIMx_AF1.ETRSEL: which SOURCE feeds ETR. Code 0 is the pad; the
      * other codes are per timer and are the chapter's table (TIM1 the
-     * comparators and the ADC's three watchdogs, TIM2 and TIM3 the
-     * comparators, LSE and the MCOs) - the raw code, for the same reason
+     * comparators and the ADC's three watchdogs; TIM2 the comparators,
+     * LSE and the MCOs; TIM3 and TIM4 the comparators ONLY - 22.4.26 and
+     * 22.4.27, measured: TIM3 on code 4 counts nothing) - the raw code,
+     * for the same reason
      * input_select() gives one: the vocabulary belongs to the signal's
      * owner. Refused on a timer without ETR.
      */

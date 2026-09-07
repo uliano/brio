@@ -62,6 +62,21 @@ static_assert(Tickless<Witness>);
 static_assert(Witness::ticks_per_second == 32'768u);
 static_assert(Witness::shift == 0u && Witness::lap_ticks == 0x10000u);
 static_assert(Witness::irq() == lptim_irq(2));
+static_assert(Tb::parked_cmp == 0xFFFFu, "parked on the lap: one wake per lap, not two");
+
+// ---- the LSI source: a stated rate, the band, the arithmetic ------------------
+using OnLsi = LptimTicker<LptimTickerConfig{
+    .instance = 2, .shift = 5, .source = LptimTickerSource::lsi, .lsi_hz = 32'586}>;
+static_assert(Tickless<OnLsi>);
+static_assert(!OnLsi::on_crystal && Tb::on_crystal);
+static_assert(OnLsi::count_hz == 32'586u && OnLsi::ticks_per_second == 1018u);
+static_assert(OnLsi::lap_ticks == 2048u, "the lap is the counter's, not the clock's");
+static_assert(lptim_ticker_hz({.source = LptimTickerSource::lsi}) == (34'000u >> 5),
+              "the default statement is table 46's ceiling: never early");
+static_assert(lptim_ticker_config_valid({.source = LptimTickerSource::lsi, .lsi_hz = 29'500}));
+static_assert(!lptim_ticker_config_valid({.source = LptimTickerSource::lsi, .lsi_hz = 29'499}));
+static_assert(!lptim_ticker_config_valid({.source = LptimTickerSource::lsi, .lsi_hz = 34'001}));
+static_assert(lptim_ticker_config_valid({.lsi_hz = 40'000}), "lsi_hz is not read on the crystal");
 
 // ---- the platform on it --------------------------------------------------------
 using P = Stm32g0Platform<Tb>;
@@ -122,6 +137,7 @@ void ticker_verbs() {
     TimeStamp stamp{};
     T::now(stamp);
     (void)T::arm_wake(T::ticks(), T::ticks() + 100u);
+    (void)T::park();
     (void)T::isr();
     (void)T::laps();
     (void)T::cmp_reg();
@@ -131,6 +147,10 @@ void ticker_verbs() {
     (void)T::stores();
     (void)T::write_timeouts();
     (void)T::stop_waits();
+    (void)OnLsi::init(clock);
+    (void)OnLsi::millis();
+    (void)OnLsi::secs();
+    OnLsi::now(stamp);
 }
 
 void all_verbs() {

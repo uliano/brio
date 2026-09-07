@@ -132,23 +132,35 @@ BKPT with no debugger escalates to the crt's distinct
   placed and the same DSB/WFI/unmask follows. `Tickless<TB>` requires
   `ticks()`, `ticks_per_second`, `arm_wake(now, deadline) -> bool`; the
   SysTick `Ticker` is statically not one.
-- `LptimTicker<cfg>` (`LptimTickerConfig{instance = 1, shift = 5}`) -
-  `init(clock)` (the LSE through the RTC domain's gate, the LPTIM
-  undivided with ARRM and CMPM armed, the compare parked, the wake line
-  and the vector open, the counter started, SysTick as the cycle
-  counter; false when the crystal never came), `ticks()` (the count
-  shifted; exact inside a masked window under one second), `count()`
-  (the 32-bit count itself), `millis()`/`secs()`/`now()` (exact by
-  shifts), `arm_wake(now, deadline)` (the four rules: store only with
-  CMPOK clear and no write in flight, else pend the sweep once and
-  decline; a deadline nearer than six counts is declined and spun
-  through; before a Stop the store is waited for; a deadline a lap or
-  more away arms nothing and the register is mirrored), `isr()` (the
-  ordered clear, the lap carry, the completion note; returns the mask
-  served), the readbacks `laps`/`cmp_reg`/`write_pending`/`deferrals`/
-  `floor_declines`/`stores`/`write_timeouts`/`stop_waits`, `irq()`.
-  LSE only; `shift` 0..10 (32768 down to 32 ticks a second), a lap of
-  two seconds at every shift.
+- `LptimTicker<cfg>` (`LptimTickerConfig{instance = 1, shift = 5,
+  source = lse, lsi_hz = 34000}`) - `init(clock)` (the LSE through the
+  RTC domain's gate, or LSI through RCC; the LPTIM undivided with ARRM
+  and CMPM armed, the compare parked on the lap, the wake line and the
+  vector open, the counter started, SysTick as the cycle counter; false
+  when the oscillator never came), `ticks()` (the count shifted; exact
+  inside a masked window under one second), `count()` (the 32-bit
+  count itself), `millis()`/`secs()`/`now()` (exact by shifts on the
+  crystal, two divisions on LSI), `arm_wake(now, deadline)` (the four
+  rules: store only with CMPOK clear and no write in flight, else pend
+  the sweep once and decline; a deadline nearer than six counts is
+  declined and spun through; before a Stop the store is waited for; a
+  deadline a lap or more away parks the compare on the lap and the
+  register is mirrored), `park()` (no deadline at all: the compare on
+  the lap - what the platform's `idle_until(nullopt)` calls), `isr()`
+  (the ordered clear, the lap carry, the completion note; returns the
+  mask served), the readbacks `laps`/`cmp_reg`/`write_pending`/
+  `deferrals`/`floor_declines`/`stores`/`write_timeouts`/`stop_waits`,
+  `irq()`; `on_crystal`, `count_hz`. `shift` 0..10 (32768 down to 32
+  ticks a second), a lap of two seconds at every shift and on either
+  clock. **LSI is a stated rate**: `source = lsi` takes `lsi_hz`,
+  refused outside DS13560 table 46's 29.5..34 kHz, and the DIRECTIONAL
+  RULE picks what to state - a tick is exact by count, the statement
+  governs only the conversion of milliseconds into ticks, and N ticks
+  of a clock faster than stated are fewer real milliseconds than asked,
+  i.e. EARLY; so the statement must not sit below the true rate, the
+  default is the band's ceiling (never early on any part, up to 15 %
+  late on a slow one), and a program that has measured its LSI (the
+  rtc suite's TIM16 capture: 32586 Hz on the bench die) states that.
 - `InterruptGuard`, `enable_interrupts()`, `disable_interrupts()`,
   `interrupts_enabled()`, `irq_priority_levels` (4) - armv6m/nvic.hpp
   through stm32g0/nvic.hpp.
@@ -250,13 +262,29 @@ What it measures of THIS chapter:
 
 
 **The tickless timebase** - the reference suite is `test_stm32_tickless`
-(seven letters in `z`, 38 verdicts, 38/38 three times from a cold
+(nine letters in `z`, 47 verdicts, 47/47 five times, one from a cold
 flash; `u` outside it needs a keystroke and `x` is the diagnostic that
 found the latencies). What it measures:
 
 - **No periodic interrupt**: `SysTick_Handler`, bound on purpose, never
   runs; SysTick counts with TICKINT clear and the 1 ms reload; the
-  LPTIM raises one interrupt per deadline and one per two-second lap.
+  LPTIM raises one interrupt per deadline and ONE per two-second lap -
+  the compare parked at 0xFFFF matches at the counter's own wrap and
+  its CMPM rides the ARRM's interrupt (parked mid-lap, as the first
+  version did, every lap cost two wakes: a ten-second Stop measured ten
+  interrupts where five would do, and now measures six - five laps and
+  the deadline).
+- **What a rare-event program pays for the lap**: ten seconds in Stop 1
+  with one deadline at the end cost five lap wakes, every one on HSISYS
+  with the PLL never re-locked (no AO ran, the manager was never asked:
+  the loop found nothing to do and went straight back to the WFI), and
+  each kept the part awake for 214..215 us measured ISR to ISR on TIM2
+  clocked from MCO = HSI16/8 - a clock that runs only while the part is
+  awake - that is the Stop exit, the handler, one empty loop turn and
+  the WFI, at 16 MHz with the PLL's two wait states still in
+  FLASH_ACR; 1.8 ms awake in the whole ten seconds, a 10^-4 duty. It
+  is the price of a 16-bit counter that must not be divided (below),
+  and it does not grow with how rare the events are.
 - **The rate and the arithmetic**: 2 s of TIM2 on the PLL move the tick
   by 2043 (2048 due: HSI16 against the crystal, coherence not
   metrology) and `millis()` by 1995; `secs()`/`now()` are the shifts
@@ -312,6 +340,24 @@ found the latencies). What it measures:
 - **`delay_us` on the interrupt-less SysTick**: 5 / 30 / 100 / 500 /
   900 us measure 6 / 31 / 101 / 501 / 901 on TIM2; 200 x 50 us never
   below 51; 1000 us refused, 999 served.
+- **An LSI-clocked ticker** on LPTIM2 at the stated 32586 Hz (shift 5:
+  1018 ticks a second by the statement): 2 s of the crystal count 2041
+  of its ticks (2036 by the statement) and 2004 of its milliseconds,
+  the oscillator's own 0.2 % that day; a 100-tick wake placed on it
+  lands at its tick, never early in its own units, one interrupt,
+  97.6 ms on TIM2; and the default statement (34000) would make every
+  millisecond asked land 43 per mille late on this die, never early -
+  the directional rule's price, paid by a program that does not
+  measure.
+- **Two lessons a two-second lap taught the suite itself**: a leg that
+  judges "one interrupt" or "the LPTIM never spoke" over a window
+  under a second, or that expects CMPOK unswept between two arms, is
+  wrong once in four to eight runs when a lap wraps inside it - the
+  handler runs for the carry and the loop turns once more, which costs
+  a program nothing and a naive verdict its truth; such legs now wait
+  for the first half of a lap. And a print in flight when a Stop is
+  entered is a garbled line (the console's clock stops mid-character):
+  drain first.
 
 Two kernel apps on the Nucleo-G0B1RE, both in the tree: blink (two
 AOs, time events at 500/250/100 ms; PA5 sampled over SWD every
@@ -335,12 +381,20 @@ Implemented, not bench-verified: `Nvic::priority`, `abort()`'s and `HardFault_Ha
 (the fault VECTOR is exercised, by `hard_fault_reset` - reset.md),
 the cortex-debug launch entry.
 
-The tickless timebase's own gaps: LSE only (an LSI-clocked
-`LptimTicker` would need a stated rate and the directional rule the
-timed site carries - declined, a timebase should not be approximately
-right); a masked window longer than half a lap (one second) mis-reads
-the lap and is a stated precondition, not a check; a deadline nearer
-than six counts (183 us) is spun through the loop rather than slept
-for - a SysTick one-shot could sleep it and is not built; and the
-keystroke letter `u` (a UART byte as the foreign wake of a long
-`idle_until`) needs an operator and has not been run unattended.
+The tickless timebase's two CONTRACTS, stated rather than checked
+because no register can check them: a masked window (PRIMASK held)
+must stay under half a lap, one second - a double wrap under a mask is
+one ARRM flag, indistinguishable from a single one, and `ticks()` then
+loses a lap; in a brio program the longest legitimate masked window is
+microseconds (`delay_us` refuses at a millisecond), so this is a bug's
+name and not a regime. And a deadline nearer than six counts (183 us)
+is not slept for: `idle_until` declines and the loop spins it through
+`process()`, which fires it on time - the part stays awake for under
+183 us instead of taking a Sleep, and only when a deadline is already
+that near when the loop reaches its idle; a SysTick one-shot for those
+would be a second timebase for a case this cheap, and is not built.
+The tickless timebase's own gaps: the keystroke letter `u` (a UART
+byte as the foreign wake of a long `idle_until`) needs an operator and
+has not been run unattended; an LSI-clocked ticker has been the WITNESS
+on LPTIM2 and not yet the platform's own timebase in a program (the
+arithmetic and the wake are measured; a Stop on it is not).

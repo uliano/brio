@@ -49,7 +49,21 @@
 //   h  delay_us AT EVERY RUNG on the MCO wall: the per-rate table
 //      selected by the rate index, at least and never early at 64, 16
 //      and 2 MHz
+//   i  THE SYSTICK TICKER AS A CLOCK USER: SysTick handed from the
+//      interrupt-less counter to BasicTicker for one letter, the tick
+//      rate held at 1000 Hz against the crystal across the ladder
+//      (rebase() restarts the period: under a tick late per switch,
+//      never fast), then handed back
+//   j  A PLL RATE IN RANGE 2: 16 MHz as PLLRCLK with the VCO at table
+//      47's 128 MHz ceiling, reached from 64 MHz on the PLL (a
+//      reconfiguration through HSISYS), from 2 MHz in low-power run and
+//      back, the loop exact, the CPU at 16 MHz
 //   x  OUTSIDE z: the durations of every transition, broken down.
+//
+// Letter g also stages what the chapter leaves open: a STOP 0 from
+// low-power run, judged by the MCO wall (TIM2 counts only while HSI16
+// runs, i.e. only awake - a Sleep that was not a Stop counts 75000 in
+// 300 ms, a Stop counts a few hundred).
 //
 // THE WALL THAT DOES NOT MOVE WITH SYSCLK: HSI16 through the MCO
 // multiplexer divided by 64 (250 kHz), fed to TIM2's ETR through
@@ -97,6 +111,10 @@ using namespace brio;
 using Fast = Clock<ClockSource::pll, 64'000'000>;
 using Mid = Clock<ClockSource::internal, 16'000'000, PowerRegime::range2>;
 using Slow = Clock<ClockSource::internal, 2'000'000, PowerRegime::low_power_run>;
+// The fourth rate, letter j's: the PLL in Range 2 - M 1 / N 8 / R 8,
+// VCO 128 MHz exactly at DS13560 table 47's Range 2 ceiling.
+using Pll16 = Clock<ClockSource::pll, 16'000'000, PowerRegime::range2>;
+static_assert(Pll16::pll.m == 1 && Pll16::pll.n == 8 && Pll16::pll.r == 8);
 
 // The console: USART2 on HSI16, so that its divisor never moves and the
 // report is never a function of the thing under test. It is still
@@ -118,15 +136,22 @@ constexpr UartPins loop_pins{
 using Loop = Uart<1, loop_pins, 64, 64, NoDmaEngine, NoDmaEngine, loop_opts>;
 static_assert(Loop::options.kernel_clock == UsartClock::pclk && Loop::options.half_duplex);
 
-using SysClock = DynamicClock<Rates<Fast, Mid, Slow>, SysTickCounter, Serial, Loop, Adc>;
+// BOTH SysTick writers are listed, which no program would do: letter i
+// hands SysTick from the interrupt-less counter to the BasicTicker and
+// back, and each must follow the rate while it holds the register. The
+// two rebase() write the same reload; the counter's, last in the list,
+// is what stands after every switch outside that letter.
+using SysClock = DynamicClock<Rates<Fast, Mid, Slow, Pll16>, Ticker, SysTickCounter, Serial, Loop, Adc>;
 constexpr SysClock clock;
-static_assert(SysClock::rate_count == 3);
+static_assert(SysClock::rate_count == 4);
 static_assert(delay_rates<SysClock>[0].cycles_per_us == 64);
 static_assert(delay_rates<SysClock>[2].cycles_per_us == 2);
+static_assert(delay_rates<SysClock>[3].cycles_per_us == 16);
 
 constexpr uint8_t r_fast = 0;
 constexpr uint8_t r_mid = 1;
 constexpr uint8_t r_slow = 2;
+constexpr uint8_t r_pll16 = 3;
 
 // THE TIMEBASE, and the platform on it.
 using Tb = LptimTicker<>;
@@ -274,6 +299,18 @@ bool is_slow(const ClockState& s) {
     return s.sws == SysclkSource::hsisys && s.hsidiv == 3u && !s.pll_on && s.vos == 2u &&
            s.lpr && s.reglpf && s.latency == 0u && s.index == r_slow && s.hz == 2'000'000u;
 }
+bool is_pll16(const ClockState& s) {
+    return s.sws == SysclkSource::pllrclk && s.hsidiv == 0u && s.pll_on && s.vos == 2u &&
+           !s.lpr && !s.reglpf && s.latency == 1u && s.index == r_pll16 && s.hz == 16'000'000u;
+}
+bool (*checker_of(uint8_t index))(const ClockState&) {
+    switch (index) {
+        case r_fast: return is_fast;
+        case r_mid: return is_mid;
+        case r_slow: return is_slow;
+        default: return is_pll16;
+    }
+}
 
 /// A switch, timed on the MCO wall (the wall's own 4 us quantum on
 /// top), with the console drained first.
@@ -344,6 +381,7 @@ bool delay_rounds_ok(uint32_t rounds, uint32_t ms) {
 
 volatile uint32_t lptim_irqs = 0;
 volatile uint32_t isr_restores = 0;    ///< LPTIM interrupts that found SYSCLK off the rate
+volatile uint32_t systick_irqs = 0;    ///< SysTick_Handler runs (letter i's only)
 volatile uint32_t rtc_wakes = 0;
 volatile bool kernel_live = false;
 
@@ -626,8 +664,7 @@ void td_rise_and_ladder() {
             const uint32_t us = t2_us(t2() - t0);
             if (us > worst_us[target]) worst_us[target] = us;
             const ClockState st = state();
-            const bool right = target == r_fast ? is_fast(st) : target == r_mid ? is_mid(st) : is_slow(st);
-            if (!right) ++bad_states;
+            if (!checker_of(target)(st)) ++bad_states;
             bad_bytes += 16u - loop_run(16);
         }
     }
@@ -776,60 +813,102 @@ void tf_kernel() {
                   "SYSCLK change is invisible to it",
                   within(Metronome::fired, 59u, 62u) && Metronome::min_ticks == 50u &&
                       Metronome::max_ticks <= 51u && Metronome::early == 0u);
-    bench.verdict("the walker's ten switches all landed and the periodic ran at all three "
+    bench.verdict("the walker's ten switches all landed and the periodic ran at all four "
                   "rates",
                   Walker::switches == 10u && Walker::failures == 0u &&
-                      Metronome::seen_rates == 0x7u);
+                      Metronome::seen_rates == 0xFu);
 }
 
 // =============================================================================
 // g - Stop 1 at 64 MHz and at 2 MHz low-power run
 // =============================================================================
-void stop_round(const char* name, uint8_t index, bool (*check)(const ClockState&)) {
+/// One round through the manager: `depth` deep is Stop 1, standby is
+/// Stop 0. THE WITNESS THAT THE STOP HAPPENED is the MCO wall: TIM2
+/// counts HSI16/64 only while HSI16 runs and its bus is clocked, i.e.
+/// only awake - a WFI that fell through as a Sleep (table 31's own
+/// escape: a Stop whose entry is refused "is ignored and program
+/// execution continues") counts 75000 in 300 ms, a Stop a few hundred.
+struct StopRound {
+    uint32_t to_blip_ms = 0;
+    uint32_t kernel_ticks = 0;
+    uint32_t awake_counts = 0;     ///< TIM2 counts across the round
+    uint32_t irqs = 0;
+    uint32_t restores = 0;
+    ClockState before{}, at_blip{}, after{};
+    bool ok = false;               ///< one blip, the manager's round closed
+};
+StopRound stop_round(const char* name, uint8_t index, SleepDepth depth) {
+    StopRound r{};
     feed();
     console_drain();
     (void)go(index);
-    const ClockState before = state();
+    r.before = state();
     K::init_all();
     Probe::clear();
     lptim_irqs = 0;
+    isr_restores = 0;
     kernel_live = true;
     const uint32_t w0 = wall();
     const uint32_t k0 = Tb::ticks();
-    isr_restores = 0;
+    const uint32_t c0 = t2();
     Probe::deadline.arm(300u);
-    post<Manager>(SleepRequested{SleepDepth::deep, reply_to<Probe, SleepVote>()});
+    post<Manager>(SleepRequested{depth, reply_to<Probe, SleepVote>()});
     pump_until_blip(3000u);
     kernel_live = false;
-    const uint32_t to_blip = wall_ms(wall_delta(w0, Probe::blip_wall));
-    const uint32_t kernel_ticks = Probe::blip_ticks - k0;
-    const ClockState after = state();
-    print(serial, "  Stop 1 at ", name, ": a 300-tick deadline matured after ", to_blip,
-          " ms of RTC wall, kernel ticks ", kernel_ticks, ", ", lptim_irqs,
-          " LPTIM interrupt(s) of which ", isr_restores, " restored the clock, votes ",
-          Probe::votes, " wakes ", Probe::wakes, crlf);
-    print_state("  at the deadline", Probe::blip_state);
-    print_state("  after the round", after);
+    r.awake_counts = t2() - c0;
+    r.to_blip_ms = wall_ms(wall_delta(w0, Probe::blip_wall));
+    r.kernel_ticks = Probe::blip_ticks - k0;
+    r.irqs = lptim_irqs;
+    r.restores = isr_restores;
+    r.at_blip = Probe::blip_state;
+    r.after = state();
+    r.ok = Probe::blips == 1u && Site::armed() == SleepDepth::none;
+    print(serial, "  ", depth == SleepDepth::deep ? "Stop 1" : "Stop 0", " at ", name,
+          ": a 300-tick deadline matured after ", r.to_blip_ms, " ms of RTC wall, kernel ticks ",
+          r.kernel_ticks, ", ", r.irqs, " LPTIM interrupt(s) of which ", r.restores,
+          " restored the clock, votes ", Probe::votes, " wakes ", Probe::wakes,
+          "; TIM2 on MCO counted ", r.awake_counts, " (", t2_us(r.awake_counts),
+          " us awake of ", r.to_blip_ms, " ms)", crlf);
+    print_state("  at the deadline", r.at_blip);
+    print_state("  after the round", r.after);
+    return r;
+}
+bool stopped(const StopRound& r) { return r.awake_counts < 12'500u; }   // under 50 ms of 300 awake
+
+void tg_stop() {
+    const StopRound fast = stop_round("64 MHz on the PLL", r_fast, SleepDepth::deep);
     bench.verdict("the deadline met through the Stop, never early",
-                  Probe::blips == 1u && within(to_blip, 292u, 320u) && within(kernel_ticks, 300u, 302u));
+                  fast.ok && within(fast.to_blip_ms, 292u, 320u) && within(fast.kernel_ticks, 300u, 302u));
+    bench.verdict("THE STOP WAS A STOP: TIM2 on the MCO wall counted only the awake "
+                  "fraction of the round (a Sleep would count 75000)",
+                  stopped(fast));
     bench.verdict("THE RATE IN FORCE CAME BACK: restore() put the silicon where the "
                   "index says - from the wake's own ISR, before the deadline's AO ran - "
                   "and it still stands after the round",
-                  check(before) && check(Probe::blip_state) && check(after) &&
-                      Site::armed() == SleepDepth::none);
-}
-
-void tg_stop() {
-    stop_round("64 MHz on the PLL", r_fast, is_fast);
+                  is_fast(fast.before) && is_fast(fast.at_blip) && is_fast(fast.after));
     bench.verdict("at 64 MHz the wake ISR found SYSCLK on HSISYS exactly once and re-locked "
-                  "the PLL there (the Stop was a Stop)",
-                  isr_restores == 1u);
-    stop_round("2 MHz in low-power run", r_slow, is_slow);
-    bench.verdict("at 2 MHz the wake ISR found nothing to restore", isr_restores == 0u);
+                  "the PLL there",
+                  fast.restores == 1u);
+
+    const StopRound slow = stop_round("2 MHz in low-power run", r_slow, SleepDepth::deep);
+    bench.verdict("the deadline met through the Stop 1 from low-power run, never early, "
+                  "and the Stop was a Stop",
+                  slow.ok && within(slow.to_blip_ms, 292u, 320u) && stopped(slow));
     bench.verdict("AT 2 MHz THE PART WOKE IN LOW-POWER RUN WITH HSIDIV KEPT (4.3.6): LPR "
                   "and REGLPF standing after the wake, SYSCLK on HSISYS/8 - restore() "
-                  "found the rate already in force",
-                  is_slow(state()));
+                  "found the rate already in force, the wake ISR restored nothing",
+                  is_slow(slow.at_blip) && is_slow(slow.after) && slow.restores == 0u);
+
+    // STOP 0 FROM LOW-POWER RUN: 4.3.6 describes the main regulator on
+    // in Stop 0 and says of LPR only that HSIDIV must leave a 2 MHz
+    // wake; 4.3.7 admits Stop 1 from low-power run in so many words and
+    // Stop 0 is not spelled either way. Staged, and judged by the wall.
+    const StopRound lpr0 = stop_round("2 MHz in low-power run", r_slow, SleepDepth::standby);
+    bench.verdict("FINDING: A STOP 0 IS ENTERED FROM LOW-POWER RUN - the deadline met on "
+                  "the wall with TIM2 counting only the awake fraction, and the part back "
+                  "in low-power run with HSIDIV kept",
+                  lpr0.ok && within(lpr0.to_blip_ms, 292u, 320u) && stopped(lpr0) &&
+                      is_slow(lpr0.at_blip) && is_slow(lpr0.after));
     (void)go(r_fast);
 }
 
@@ -870,13 +949,115 @@ void th_delay() {
 }
 
 // =============================================================================
+// i - the SysTick ticker as a clock user
+// =============================================================================
+void ti_systick_ticker() {
+    feed();
+    console_drain();
+    (void)go(r_fast);
+    // Hand SysTick over: the counter off, the ticker on with its
+    // interrupt (SysTick_Handler is bound below and counts its runs).
+    SysTickCounter::stop();
+    systick_irqs = 0;
+    const bool up = Ticker::init(clock);
+    bench.verdict("BasicTicker comes up on a DynamicClock (it is listed among the users)", up);
+
+    static const uint8_t rungs[4] = {r_mid, r_slow, r_pll16, r_fast};
+    static const char* const names[4] = {"16 MHz R2", "2 MHz LPR", "16 MHz PLL R2", "64 MHz"};
+    bool rate_held = true;
+    bool never_fast = true;
+    for (uint8_t i = 0; i < 4; ++i) {
+        feed();
+        console_drain();
+        const Switch sw = go(rungs[i]);
+        // 500 ms of the crystal: the ticker must count 500 (+-1 %), and
+        // never MORE than the wall says - a wrong reload would run it
+        // 4x or 32x fast.
+        const uint32_t k0 = Tb::ticks();
+        const uint32_t s0 = Ticker::ticks();
+        const uint32_t i0 = systick_irqs;
+        while (Tb::ticks() - k0 < 512u) {
+        }
+        const uint32_t counted = Ticker::ticks() - s0;
+        const uint32_t irqs = systick_irqs - i0;
+        print(serial, "  ", names[i], " (switch ", sw.ok, ", ", sw.us, " us): ", counted,
+              " SysTick ticks in 500 ms of the crystal, ", irqs, " handler runs", crlf);
+        if (!within(counted, 494u, 506u) || irqs != counted) rate_held = false;
+        if (counted > 506u) never_fast = false;
+    }
+    bench.verdict("THE SYSTICK TICKER HOLDS 1000 Hz ACROSS THE LADDER: rebase() reloads it "
+                  "at every switch, 500 ticks per 500 ms of crystal at 16, 2, 16 (PLL) "
+                  "and 64 MHz",
+                  rate_held);
+    bench.verdict("and never runs FAST - the restarted period costs under a tick, late",
+                  never_fast);
+    // Hand it back: the interrupt-less counter, and the handler silent.
+    Ticker::pause();
+    const bool back = SysTickCounter::start(clock);
+    const uint32_t i1 = systick_irqs;
+    tb_wait_ms(20);
+    bench.verdict("SysTick handed back to the interrupt-less counter: delay_us works and "
+                  "the handler no longer runs",
+                  back && delay_us(clock, 10) && systick_irqs == i1);
+}
+
+// =============================================================================
+// j - a PLL rate in Range 2
+// =============================================================================
+void tj_pll_range2() {
+    feed();
+    (void)go(r_fast);
+    const Switch sw = go(r_pll16);
+    const ClockState s = state();
+    const uint32_t cfg = RCC->PLLCFGR;
+    const uint8_t n = static_cast<uint8_t>((cfg & RCC_PLLCFGR_PLLN_Msk) >> RCC_PLLCFGR_PLLN_Pos);
+    const uint8_t r = static_cast<uint8_t>(((cfg & RCC_PLLCFGR_PLLR_Msk) >> RCC_PLLCFGR_PLLR_Pos) + 1u);
+    const uint8_t m = static_cast<uint8_t>(((cfg & RCC_PLLCFGR_PLLM_Msk) >> RCC_PLLCFGR_PLLM_Pos) + 1u);
+    print(serial, "  set_index(pll16) from 64 MHz -> ", sw.ok, " in ", sw.us, " us; PLLCFGR M ",
+          m, " N ", n, " R ", r, " (VCO ", (16u / m) * n, " MHz)", crlf);
+    print_state("pll16", s);
+    bench.verdict("A PLL RATE IN RANGE 2: PLLRCLK at 16 MHz from a VCO at 128 MHz (M 1, N 8, "
+                  "R 8 - table 47's Range 2 ceiling), VOS 2, one wait state, reached from "
+                  "the 64 MHz PLL by a reconfiguration through HSISYS",
+                  sw.ok && is_pll16(s) && m == 1u && n == 8u && r == 8u);
+    const uint32_t good = loop_run(64);
+    const uint32_t ms = delay_rounds_ms(500);
+    print(serial, "  the single-wire loop: ", good, " of 64 exact; 500 x delay_us(999): ", ms,
+          " ms on the crystal", crlf);
+    bench.verdict("the rebased USART exact and the CPU at 16 MHz on the crystal's scale",
+                  good == 64u && delay_rounds_ok(500, ms));
+
+    // From and to the other end of the ladder, eight times each way.
+    uint32_t bad = 0;
+    uint32_t worst_from_slow = 0, worst_to_slow = 0;
+    for (uint8_t k = 0; k < 8; ++k) {
+        feed();
+        Switch a = go(r_slow);
+        if (!a.ok || !is_slow(state())) ++bad;
+        if (a.us > worst_to_slow) worst_to_slow = a.us;
+        Switch b = go(r_pll16);
+        if (!b.ok || !is_pll16(state())) ++bad;
+        if (b.us > worst_from_slow) worst_from_slow = b.us;
+        bad += 8u - loop_run(8);
+    }
+    print(serial, "  pll16 <-> 2 MHz LPR eight times: ", bad, " faults; worst pll16 -> slow ",
+          worst_to_slow, " us, slow -> pll16 ", worst_from_slow, " us", crlf);
+    bench.verdict("the PLL in Range 2 is left for low-power run and re-locked from it, "
+                  "the range never leaving 2, the loop exact each time",
+                  bad == 0u);
+    const Switch back = go(r_fast);
+    bench.verdict("and back to 64 MHz in Range 1 (the range up, then the PLL reconfigured)",
+                  back.ok && is_fast(state()));
+}
+
+// =============================================================================
 // x - the durations, broken down (outside z)
 // =============================================================================
 void tx_durations() {
-    static const uint8_t from[6] = {r_fast, r_mid, r_slow, r_fast, r_slow, r_mid};
-    static const uint8_t to[6] = {r_mid, r_slow, r_fast, r_slow, r_mid, r_fast};
-    static const char* const names[3] = {"fast", "mid", "slow"};
-    for (uint8_t i = 0; i < 6; ++i) {
+    static const uint8_t from[10] = {r_fast, r_mid, r_slow, r_fast, r_slow, r_mid, r_fast, r_pll16, r_slow, r_pll16};
+    static const uint8_t to[10] = {r_mid, r_slow, r_fast, r_slow, r_mid, r_fast, r_pll16, r_fast, r_pll16, r_slow};
+    static const char* const names[4] = {"fast", "mid", "slow", "pll16"};
+    for (uint8_t i = 0; i < 10; ++i) {
         (void)go(from[i]);
         uint32_t lo = 0xFFFFFFFFu, hi = 0;
         for (uint8_t k = 0; k < 8; ++k) {
@@ -905,6 +1086,12 @@ void banner() {
 // ---------------------------------------------------------------------------
 
 extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
+
+/// Letter i's only: the BasicTicker's tick while it holds SysTick.
+extern "C" void SysTick_Handler() {
+    Ticker::tick();
+    systick_irqs = systick_irqs + 1u;
+}
 extern "C" void USART1_IRQHandler() { (void)Loop::isr(); }
 
 /// The timebase's vector - and, this program's choice, where the rate
@@ -971,6 +1158,8 @@ int main() {
     bench.letter('f', "a kernel through the switches", tf_kernel);
     bench.letter('g', "Stop 1 at 64 MHz and at 2 MHz low-power run", tg_stop);
     bench.letter('h', "delay_us at every rung", th_delay);
+    bench.letter('i', "the SysTick ticker as a clock user", ti_systick_ticker);
+    bench.letter('j', "a PLL rate in Range 2", tj_pll_range2);
     bench.letter('x', "diagnostic: the durations, broken down (outside z)", tx_durations, false);
 
     if (serial_ok) {
