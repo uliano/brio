@@ -667,6 +667,7 @@ cabling they expect when the rail goes back to 3.3 V.
 | CLKOUT (test_avr_clock) | PA7 | scope: CLK_PER |
 | Analog loop (test_avr_analog, sampler) | PD6 (DAC0 OUT) -> PD1 (AIN1), PD6 -> PD7 (VREFA) | two jumper wires, NOT fitted at the moment: the wire-dependent half of test_avr_analog (36 of 81) is expected to fail until they return |
 | Board-to-board PORTE link (test_avr_serial + usart_peer, the SPI campaign, the sleep pass wake tests) | A.PE0-B.PE0, A.PE1-B.PE1, A.PE2-B.PE2, A.PE3-B.PE3 (STRAIGHT THROUGH) | see "the board-to-board link" below; verified by the wiring probe |
+| The Nucleo-G0B1RE's self-link (the G0 bus campaigns) | SPI1 PB3/PB4/PB5/PA15 to SPI2 PB10/PC2/PD4/PB12; I2C1 PB8/PB9 to I2C2 PA11/PA12 with 2.2k pull-ups to 3V3 | see "The Nucleo-G0B1RE's self-link" below; verified over SWD |
 
 ### The I2C bus (5 V rail)
 
@@ -695,6 +696,47 @@ currently measures PRESENT.
 
 A dedicated GND wire ties the two boards directly (besides the path
 through the two USB cables) - the short return the bus needs at 1 MHz.
+
+### The Nucleo-G0B1RE's self-link (SPI1 to SPI2, I2C1 to I2C2)
+
+THE FIRST WIRES ON THE G0 DESK (2026-09-07), for the bus campaigns'
+first step: one board, both roles, no peer. Six jumpers on the ST morpho
+headers and two 2.2 kOhm pull-ups to 3V3 (CN7-16), every pad chosen so
+that no existing suite has both ends of a wire (the other end stays in
+analog, high impedance, when a suite pull-walks or drives its own pad).
+VERIFIED OVER SWD BEFORE ANY FIRMWARE, the wiring-check technique: core
+halted, one end driven push-pull, the other read under an internal
+pull-down, both directions, and every other wired pad read for
+isolation; the pull-ups by a floating line reading 1 and a line driven
+low and released coming back to 1.
+
+| Signal | SPI1 (host) | SPI2 (client) | AF | Morpho pins |
+|---|---|---|---|---|
+| SCK  | PB3  | PB10 | AF0 / AF5 | CN10-31 (D3) to CN10-28 |
+| MISO | PB4  | PC2  | AF0 / AF1 | CN10-27 (D5) to CN7-35 |
+| MOSI | PB5  | PD4  | AF0 / AF1 | CN10-29 (D4) to CN7-15 |
+| NSS  | PA15 | PB12 | AF0 / AF0 | CN7-17 to CN7-38 |
+
+| Line | I2C1 (host) | I2C2 (client) | AF | Morpho pins | Pull-up |
+|---|---|---|---|---|---|
+| SCL | PB8 | PA11 | AF6 / AF6 | CN10-3 (D15) to CN10-14 | 2.2 kOhm to 3V3 |
+| SDA | PB9 | PA12 | AF6 / AF6 | CN10-5 (D14) to CN10-12 | 2.2 kOhm to 3V3 |
+
+Two facts of the MB1360 board learned while wiring it, worth more than
+the table: the morpho headers carry NO labels on the top side and the
+map is UM2324's (the G0 Nucleo-64), NOT the older Nucleo-64's - PB10
+sits at CN10-28 and PB12 at CN7-38, where the MB1136 boards have them
+at CN10-25 and CN10-16 (PB14 and PC1 on this board); and the two pins
+labelled "PB11/PB9" (CN7-36) and "PB12/PB8" (CN7-38) carry PB11 and
+PB12 on this board (measured: PB12 answers at CN7-38, PB8 does not) -
+the second name is what a solder bridge on the back could route there
+instead, and PB8/PB9 have their own pins at CN10-3/5 (the Arduino
+D15/D14), so an NSS on PB12 and an I2C1 on PB8/PB9 coexist. The wires
+touch pads other suites use (PB3 exti; PB5 lptim; PB10/PB12 the ADC
+input map; PB8/PB9 fdcan and tim) and none of those suites has both
+ends of any wire, so their letters are unaffected - re-checked after
+the wiring: none of the pads reads anything but its own pull when the
+partner is in analog.
 
 ### The board-to-board link, and its two wirings
 
