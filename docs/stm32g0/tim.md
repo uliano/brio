@@ -14,7 +14,7 @@ clock 5.2.13, the interrupt table 12.3 (table 61); DS13560 Rev 5 table 7
 channel pads); errata ES0548 Rev 3 items 2.7.1..2.7.3, read on the bench
 chip's revision Z column. Driver: `stm32g0/tim.hpp`; the per-instance
 presence and vector facts come from `stm32g0/device_tables.hpp`. Bench
-suite: `test_stm32_tim` (11 letters, 105 verdicts, wireless). Family
+suite: `test_stm32_tim` (12 letters, 118 verdicts, wireless). Family
 fixture `test/family_stm32g0/tim.cpp` plus seven negatives under
 `tools/check_stm32g0.sh`.
 
@@ -434,6 +434,55 @@ against 200 predicted**. The only difference between the two legs is
 generation" column, which is what `tim_has_dma_burst()` reads), so every
 verb refuses on it and `dmar_address()` is null.
 
+## The other six instances (letter `l`)
+
+TIM1, TIM2, TIM3 and TIM16 carry every other letter of the suite and
+TIM4 had appeared only as the other half of TIM3's vector, so six of the
+ten had never counted a cycle here. Each is asked the same three
+questions, with every expectation READ OUT OF THE RESERVE rather than
+written down: the channel count, the counter width, the break unit and
+the vector.
+
+**Every one of them counts PCLK at the prescaler it was given.** At
+`PSC = 63` - a 1 MHz counter out of a 64 MHz PCLK - a 10 ms window gives
+10000 or 10001 counts against SysTick's own 10000 or 10001, 0 per mille
+off on all six. (Both instruments ride HCLK, so what this proves is the
+divider and the enable, not the oscillator.)
+
+**And every one of them reaches ITS OWN VECTOR**, which is the question
+worth asking because four of the six are on lines they do not own alone:
+`ARR = 999` on that same 1 MHz counter is 1 kHz, and a 20 ms window
+served 21 updates on each - TIM4 on NVIC line 16 (shared with TIM3),
+TIM6 on 17 (with the DAC and LPTIM1), TIM7 on 18 (with LPTIM2), TIM14 on
+19, TIM15 on 20 and TIM17 on 22 (with the second FDCAN interrupt). A
+wrong name in the reserve is a silent `Default_Handler` spin, and this
+is what catches it.
+
+**The four with channels drive pads.** TIM4's FOUR at once, all on port
+B so one sampling loop reaches them: PB6/PB7/PB8/PB9 at AF9 read
+200/400/601/801 per mille against 200/400/600/800 asked. TIM14's single
+channel on **PA7 at AF4 - the very pad letter `g` drives as TIM1_CH1N at
+AF2** - reads 351 against 350, which is the alternate-function
+multiplexer made visible: one pad, two timers, the AF number choosing,
+and the only check the device header cannot make. TIM15 drives a
+complementary pair (PB14/PB13 at AF5) AND its second channel (PB15)
+beside it, TIM17 its own pair (PB9/PB7 at AF2).
+
+**A COMPLEMENTARY PAIR'S DEAD TIME IS TAKEN OFF BOTH HALVES**, and the
+arithmetic is exact rather than approximate: at `CKD = 1` one DTG tick is
+one timer clock tick, so 64 ticks out of a 1000-count period are 64 per
+mille off EACH output. TIM15 at duty 300 reads 236 and 635 (due 236 and
+636), TIM17 at 450 reads 385 and 487 (due 386 and 486) - the two sum to a
+thousand less TWICE the dead time, and in 40000 samples of one instant
+neither pair was ever both high.
+
+**TIM6 and TIM7 are what 23.2 says and no more**: `CR2.MMS` accepted on
+both, no channel, no slave controller, and `output_channel`/`set_compare`
+refused. Their TRGO's only consumers on this part are the DAC and the
+ADC, and `test_stm32_analog` measures both (`tim6_trgo` and `tim7_trgo`
+as converter triggers) - so nothing here pretends to witness a TRGO the
+timer suite has no instrument for.
+
 ## Not covered yet
 
 Driver gaps: encoder and hall-sensor modes (`SMS` 1..3 are spelled and refused
@@ -448,9 +497,7 @@ the three inputs); the break's comparator inputs (`TIMx_AF1`'s
 `DBGMCU`'s freeze bits (40.9.2); and the LPTIMs and IRTIM, which are
 their own chapters.
 
-Implemented, not bench-verified: TIM4, TIM6, TIM7, TIM14, TIM15 and
-TIM17 as instances (the suite exercises TIM1, TIM2, TIM3, TIM4's vector
-and TIM16); the output modes above `pwm2` (retriggerable one-pulse,
+Implemented, not bench-verified: the output modes above `pwm2` (retriggerable one-pulse,
 combined and asymmetric PWM); `TimOnePulse` and `TimPeriodicTick` on
 silicon; `TimSlaveConfig::master_slave` (MSM), whose default is
 ES0548 2.7.1's own workaround; `BDTR.LOCK`, which is one-way and would

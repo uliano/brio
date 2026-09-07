@@ -66,7 +66,9 @@
 //      update request through TIMx_DMAR, with a control that changes
 //      one field of DCR and nothing else
 //   u  (outside z) tools/uart_stress.py: byte-exact streaming both ways
-//      through the engines, and the VCP's own ceiling
+//      through the engines, up to the VCP's own measured ceiling
+//   w  (outside z) the two rungs ABOVE that ceiling, for the numbers
+//      alone - no verdict rests on a rate the bridge is proven to corrupt
 //
 // build: boards = g0b1re
 // build: monitor_speed = 115200
@@ -2040,14 +2042,13 @@ void tl_timer_burst() {
 
 // ---- u: the host peer, and the VCP's ceiling (OUTSIDE z) -----------------------
 //
-// tools/uart_stress.py, unchanged from the samc21 campaign: the board
-// prints one "HOST op mode baud format window count" line and the script
-// moves its own port to that rate, pumps or verifies the same xorshift,
-// and goes quiet before the board speaks again. It is the only letter
-// here that needs a peer, so it sits outside z - and it is the only one
-// that can say what the ST-LINK's virtual COM port is actually worth,
-// since a rate the bridge cannot divide is a rate no measurement of ours
-// can reach.
+// tools/uart_stress.py: the board prints one "HOST op mode baud format
+// window count" line and the script moves its own port to that rate,
+// pumps or verifies the same xorshift, and goes quiet before the board
+// speaks again. It is the only pair of letters here that needs a peer,
+// so both sit outside z - and they are the only ones that can say what
+// the ST-LINK's virtual COM port is actually worth, since a rate the
+// bridge cannot divide is a rate no measurement of ours can reach.
 
 uint32_t lfsr_state = 0x12345678u;
 void lfsr_reset() { lfsr_state = 0x12345678u; }
@@ -2135,15 +2136,30 @@ StressLeg stress_leg(const char* op, uint32_t baud, uint32_t window_ms,
     return leg;
 }
 
-void tu_stress() {
-    print(serial, "  this letter needs tools/uart_stress.py on the other end "
-          "of the VCP; run it as", crlf,
-          "  python3 tools/uart_stress.py --port <the console> --letters u", crlf);
+/// THE LADDER STOPS AT THE MEASURED CEILING, and that is a decision the
+/// bench made rather than a limit of the engines. The ST-LINK's virtual
+/// COM port carries 921600 byte-exact in both directions; at 2 Mbaud
+/// what comes back is corrupt and at 3 Mbaud seven bytes of twelve
+/// thousand arrive. The board's own USART emits its full window at every
+/// one of those rates - the ceiling is the BRIDGE'S - but a leg run
+/// above it costs more than it says: the host's operating system goes on
+/// delivering a pump the wire never took, and those bytes land in the
+/// console's ring AFTER the board is back at 115200, where the menu loop
+/// reads them as letters and the closing tally is lost. So letter u runs
+/// the three rates the link is proven to carry, and letter w - outside
+/// z, and outside what any verdict rests on - runs the two above it for
+/// whoever wants the numbers again.
+constexpr uint32_t vcp_ceiling = 921600;
+constexpr uint32_t ladder_to_ceiling[] = {115200, 460800, 921600};
+constexpr uint32_t ladder_beyond_ceiling[] = {2'000'000, 3'000'000};
 
-    constexpr uint32_t ladder[] = {115200, 460800, 921600, 2000000, 3000000};
-    uint32_t best_source = 0;
-    uint32_t best_sink = 0;
-    for (uint32_t baud : ladder) {
+/// Every rung of a ladder, both directions, leaving the highest rate
+/// each direction carried in `best_source` and `best_sink`. Letter u
+/// rests its verdicts on those; letter w prints them and judges nothing.
+void stress_rungs(const uint32_t* rungs, uint8_t count, uint32_t& best_source,
+                  uint32_t& best_sink) {
+    for (uint8_t i = 0; i < count; ++i) {
+        const uint32_t baud = rungs[i];
         if (!Serial::can_baud(SysClock::pclk_hz, baud)) {
             print(serial, "  ", baud, " baud is unreachable at this clock", crlf);
             continue;
@@ -2162,6 +2178,21 @@ void tu_stress() {
             best_sink = baud;
         }
     }
+}
+
+void tu_stress() {
+    print(serial, "  this letter needs tools/uart_stress.py on the other end "
+          "of the VCP; run it as", crlf,
+          "  python3 tools/uart_stress.py --port <the console> --letters u", crlf,
+          "  the ladder stops at ", vcp_ceiling, " baud, the rate this bridge "
+          "is PROVEN to carry byte-exact; letter w runs the two rungs above "
+          "it, outside z", crlf);
+
+    uint32_t best_source = 0;
+    uint32_t best_sink = 0;
+    stress_rungs(ladder_to_ceiling,
+                 static_cast<uint8_t>(sizeof ladder_to_ceiling / sizeof(uint32_t)),
+                 best_source, best_sink);
     print(serial, "  the board EMITTED a full window up to ", best_source,
           " baud; it RECEIVED byte-exact up to ", best_sink, " baud", crlf,
           "  WHAT THE BOARD CANNOT SEE is what the host got back: the "
@@ -2171,6 +2202,39 @@ void tu_stress() {
                   "better", best_source >= 115200u);
     bench.verdict("and the receive engine took the host's stream back "
                   "byte-exact at 115200 or better", best_sink >= 115200u);
+    bench.verdict("and both directions carried the whole default ladder, up "
+                  "to the virtual COM port's own measured ceiling",
+                  best_source >= vcp_ceiling && best_sink >= vcp_ceiling);
+
+    quiet_everything();
+}
+
+// ---- w: the rungs ABOVE the bridge's ceiling (OUTSIDE z, no verdict) -----------
+//
+// 2 Mbaud and 3 Mbaud, kept reachable because the MEASUREMENT is worth
+// having (it is what says the ceiling belongs to the bridge and not to
+// the engines) and kept out of z because it cannot be judged: at a rate
+// the VCP does not carry, what comes back is the bridge's noise, and the
+// pump the host queues for a wire that will not take it arrives after
+// the board is home at 115200 - as menu letters. The script declines
+// these rungs too unless it is asked for them (--beyond-vcp), so running
+// this letter without that flag measures the SOURCE direction alone.
+void tw_beyond() {
+    print(serial, "  the rungs ABOVE the ceiling. Run the script as", crlf,
+          "  python3 tools/uart_stress.py --port <the console> --letters w "
+          "--beyond-vcp", crlf,
+          "  NO VERDICT RESTS ON THIS LETTER: above ", vcp_ceiling,
+          " baud the ST-LINK's virtual COM port is measured corrupt, so what "
+          "comes back is the bridge's and not the engines'", crlf);
+
+    uint32_t best_source = 0;
+    uint32_t best_sink = 0;
+    stress_rungs(ladder_beyond_ceiling,
+                 static_cast<uint8_t>(sizeof ladder_beyond_ceiling / sizeof(uint32_t)),
+                 best_source, best_sink);
+    print(serial, "  above the ceiling the board still EMITTED a full window "
+          "up to ", best_source, " baud and RECEIVED byte-exact up to ",
+          best_sink, " baud (0 = no rung of this pair was clean)", crlf);
 
     quiet_everything();
 }
@@ -2194,8 +2258,11 @@ void banner() {
           "  i  the timer round trip: a duty table played, a capture streamed",
           crlf,
           "  j  BlockRelay inside a real kernel", crlf,
-          "  u  the host peer (tools/uart_stress.py) - OUTSIDE z", crlf,
-          "  z  every letter but u", crlf);
+          "  u  the host peer (tools/uart_stress.py), to the VCP's ceiling - "
+          "OUTSIDE z", crlf,
+          "  w  the two rungs above that ceiling, judged by nothing - "
+          "OUTSIDE z", crlf,
+          "  z  every letter but u and w", crlf);
 }
 
 
@@ -2617,6 +2684,8 @@ int main() {
     bench.letter('n', "the sleep story: a channel through Sleep, and a "
                  "channel frozen by a Stop", tn_sleep_story);
     bench.letter('u', "the host peer, and the VCP's ceiling", tu_stress, false);
+    bench.letter('w', "the two rungs ABOVE the ceiling, judged by nothing",
+                 tw_beyond, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL64" : "FAILED",

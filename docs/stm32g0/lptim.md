@@ -22,7 +22,7 @@ column. Driver: `stm32g0/lptim.hpp`; the third sleep site over it is
 `LptimTicker` in `stm32g0/lptim_ticker.hpp` and is documented in
 [platform.md](platform.md). The per-instance presence, vector, EXTI and
 DMAMUX facts come from `stm32g0/device_tables.hpp`. Bench suites:
-`test_stm32_lptim` (9 letters, 68 verdicts, wireless) and
+`test_stm32_lptim` (10 letters, 82 verdicts, wireless) and
 `test_stm32_tickless` (the timebase). Family fixtures
 `test/family_stm32g0/lptim.cpp` and `lptim_ticker.cpp` plus their
 negatives under `tools/check_stm32g0.sh` (the third sleep site's own
@@ -224,14 +224,17 @@ Watch::setup(brio::LptimTrigger::rtc_alarm_a,
 Every number below is `test_stm32_lptim`'s, measured against the RTC's
 sub-second counter on the LSE crystal (PREDIV_A 0: a 30.5 us stopwatch)
 or against SysTick's cycle count at 64 MHz. The suite is WIRELESS: all
-four LPTIM1 signals are on port B at AF5 and each pad is walked by its
-own internal pull, which letter a proves before anything rests on it.
+four LPTIM1 signals are on port B at AF5 and LPTIM2's three are PC0, PC3
+and PD6 at AF2, and each pad is walked by its own internal pull - which
+letter a proves for the first four and letter j for the last three
+before anything rests on them.
 
 **A pad handed to an LPTIM INPUT function still follows its own pull.**
 PB5, PB6 and PB7 walk between the rails under AF5 exactly as they do as
-plain inputs. (The SAM found that a DRIVING peripheral function takes
-the output driver and the pull with it; an INPUT function does not, and
-that is what makes this whole chapter measurable with no wire.)
+plain inputs, and so do PC0 and PC3 under AF2. (The SAM found that a
+DRIVING peripheral function takes the output driver and the pull with
+it; an INPUT function does not, and that is what makes this whole
+chapter measurable with no wire.)
 
 **All four kernel clocks drive the counter**, each inside its own band:
 LSE 32740 counts a second against the crystal's 32768 (the RTC judging
@@ -349,10 +352,20 @@ start, which is the practical difference between the two arrangements.
 (0 counted) and passes ten 2 ms pulses (10 counted), while with the
 filter off the blips are counted like anything else.
 
+**And so is TRGFLT, which is the same field on the other input** (letter
+j, on LPTIM2's own ETR pad and an LSE kernel clock): with the filter off
+the first 60 us blip on PC3 is a trigger like any other and the counter
+starts; with `samples8` ten of them leave the counter at ZERO with
+EXTTRIG never set, and a 2 ms pulse starts it. 26.4.5 describes CKFLT and
+TRGFLT together and this is the measurement that says they behave alike.
+
 **The internal routes work with no pad on the timer's side at all**:
 IN1SEL = COMP1_OUT counts 12 comparator flips as 12 (the comparator's
 own input being a precharged PA1), and the RTC's ALARM A and COMP1_OUT
-each start the counter through the trigger multiplexer.
+each start the counter through the trigger multiplexer. On LPTIM2,
+IN1SEL = 3 - the OR of the two comparators, a code table 140 leaves
+unconnected on LPTIM1 - carries the same 12 flips of COMP1 with COMP2
+quiet.
 
 **A trigger arriving while the counter already runs is ignored AND ITS
 FLAG IS NOT SET** - 26.7.1's easily-missed sentence, measured: EXTTRIG
@@ -396,6 +409,42 @@ out of reset at ZERO, so a counter started before the compare is placed
 matches it on its very first tick and spends the interrupt before the
 sleep. The compare is placed first, here and in the sleep site.
 
+### LPTIM2 (letter `j`)
+
+The second instance is the same `LPTIM_TypeDef` at another address and
+the manual's tables say it is not the same peripheral. Every asymmetry
+above is now measured on silicon rather than only stated:
+
+- **its own three pads, and they are on another port and another
+  function**: PC0 = LPTIM2_IN1, PC3 = LPTIM2_ETR and PD6 = LPTIM2_OUT,
+  all AF2 (DS13560 tables 17 and 18). All three follow their own pull
+  as plain inputs, and the two inputs still do under AF2;
+- **its own CCIPR field**: all four codes of `LPTIM2SEL` drive the
+  counter - LSE 32740, LSI 32680, HSI16/128 125260 and PCLK/128 501240
+  counts a second, each inside its own band, which is what says the
+  reserve's field position for the second instance is right;
+- **the same waveform arithmetic on PD6**: 1000, 752, 498, 248 and 97
+  per mille for CMP 0, 249, 499, 749 and 899 at ARR 999, and WAVPOL
+  inverting it (253 against 747);
+- **table 56's trigger input 21 IS LPTIM2_OUT**: ARR = 1 on the crystal
+  gives a request generator 16385 edges a second against the kernel
+  clock's half, 16384 - the LPTIM1 measurement repeated on the other
+  number the reserve carries;
+- **both of 26.4.12's arrangements on PC0**: 20 of 20 edges sampled by
+  the internal clock, 15 of 20 with the input AS the clock - the same
+  five lost at the start;
+- **the two asymmetries as refusals both ways**: `COMP3_OUT` is legal
+  on LPTIM1 and refused on LPTIM2 while `TAMP_TRG3` is legal on LPTIM2
+  and refused on LPTIM1 (the same TRIGSEL code, two different signals -
+  tables 138 and 139), and `COMP2_OUT` and the OR of the two
+  comparators are accepted as IN1SEL on LPTIM2 and refused on LPTIM1,
+  at compile time and at run time alike;
+- **and one vector with two owners.** Table 61 puts LPTIM2 and TIM7 on
+  the same line, and the letter makes both speak on it: in one 20 ms
+  window `TIM7_LPTIM2_IRQHandler` ran 19 times for LPTIM2's ARRM and 20
+  for TIM7's update, each body clearing and returning exactly the flags
+  its own enable had asked for.
+
 ## Not covered yet
 
 Driver gaps - things chapter 26 has and this file does not:
@@ -406,15 +455,13 @@ Driver gaps - things chapter 26 has and this file does not:
 
 Implemented but not bench-verified:
 
-- **LPTIM2's pads and functions.** Its COUNTER has run on silicon -
-  `test_stm32_tickless` letter b runs a second `LptimTicker` on it at
-  the crystal's own rate, laps, ARRM handler and a compare at ARR
-  included, through `TIM7_LPTIM2_IRQHandler` - but its pads, triggers
-  and the rest of what the LPTIM1 letters measure have not been
-  repeated there.
-- **TRGFLT**, the trigger filter, measured only through CKFLT's twin -
-  the two fields share the vocabulary and 26.4.5 describes them
-  together, but a filtered TRIGGER was not staged separately.
+- **LPTIM2's ENCODER-shaped half, which does not exist**: nothing is
+  left to run there - the instance has no encoder and no second input,
+  and letter j measures the refusals. What letter j does NOT repeat on
+  the second instance is what would only say the same thing twice: the
+  prescaler ladder, PRELOAD, the two counter resets, the timeout
+  function and the Stop behaviour are LPTIM1's letters and are facts of
+  the shared design, not of an instance.
 - **The trigger rows this board cannot reach**: TAMP1, TAMP2 and
   TAMP_TRG3 (arming a tamper input erases the backup registers this
   stratum leans on - the same decline rtc.md makes), and COMP2_OUT and

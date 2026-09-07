@@ -10,12 +10,14 @@
 // under it.
 //
 // NOTHING TO WIRE. Four pads of port B carry LPTIM1's four signals on
-// AF5 (DS13560 table 15) and every one of them is walked by ITS OWN
-// INTERNAL PULL - which letter a proves before anything rests on it. The
-// other stimuli are internal: the RTC's alarm A, COMP1's output, and the
-// DMAMUX request generator, which takes LPTIM1_OUT as trigger input 20
-// (table 56) and so counts this timer's own output edges with no pad and
-// no CPU in the path.
+// AF5 (DS13560 table 15) and three more - PC0, PC3 and PD6 at AF2
+// (tables 17 and 18) - carry LPTIM2's IN1, ETR and OUT; every one of
+// them is walked by ITS OWN INTERNAL PULL, which letter a proves for the
+// first four and letter j for the last three before anything rests on
+// them. The other stimuli are internal: the RTC's alarm A, COMP1's
+// output, and the DMAMUX request generator, which takes LPTIM1_OUT as
+// trigger input 20 and LPTIM2_OUT as 21 (table 56) and so counts either
+// timer's own output edges with no pad and no CPU in the path.
 //
 // THE WALL CLOCK IS THE RTC, and it has to be: every TIM of this family
 // stops in Stop and so does SysTick. The calendar runs on the LSE
@@ -57,6 +59,11 @@
 //      and never early - and the RTC left at the chapter's own low-power
 //      split while it happens
 //   i  the two errata, as code and as measurement
+//   j  LPTIM2, THE SECOND INSTANCE, on its own three pads (PC0, PC3 and
+//      PD6 at AF2): what the manual says it is not, its own CCIPR field,
+//      its waveform, its input both ways, the input code only it has,
+//      TRGFLT as a threshold - and one vector with two owners, LPTIM2
+//      and TIM7 speaking on the same line
 //
 // build: boards = g0b1re
 // build: monitor_speed = 115200
@@ -82,6 +89,7 @@
 #include "stm32g0/rtc.hpp"
 #include "stm32g0/sleep.hpp"
 #include "stm32g0/ticker.hpp"
+#include "stm32g0/tim.hpp"
 #include "stm32g0/usart.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
@@ -124,6 +132,27 @@ using OutPin = Pin<'B', 0>;
 using In1Pin = Pin<'B', 5>;
 using EtrPin = Pin<'B', 6>;
 using In2Pin = Pin<'B', 7>;
+
+// LPTIM2's THREE signals - it has no input channel 2 (figure 271's own
+// footnote) - and they are on OTHER PORTS and ANOTHER alternate function
+// than LPTIM1's: PC0, PC3 and PD6 at AF2 (DS13560 tables 17 and 18).
+// Chosen because no other suite on this board moves them and because
+// nothing on the Nucleo is wired to them; letter j pull-walks all three
+// before anything rests on them, exactly as letter a does for LPTIM1.
+constexpr PinSel out2_sel{'D', 6, PinFunction::af2};    // LPTIM2_OUT
+constexpr PinSel in1_2_sel{'C', 0, PinFunction::af2};   // LPTIM2_IN1
+constexpr PinSel etr2_sel{'C', 3, PinFunction::af2};    // LPTIM2_ETR
+using Out2Pad = LptimPad<out2_sel>;
+using In1Pad2 = LptimPad<in1_2_sel>;
+using Etr2Pad = LptimPad<etr2_sel>;
+using Out2Pin = Pin<'D', 6>;
+using In1Pin2 = Pin<'C', 0>;
+using Etr2Pin = Pin<'C', 3>;
+
+/// TIM7, brought up for ONE leg of letter j: it is the other owner of
+/// LPTIM2's vector (table 61), and a shared line is only shown to be
+/// shared by two owners speaking on it.
+using T7 = Tim<7>;
 
 /// COMP1's plus input is PA1 (its code `input2`), which is the pad the
 /// analog campaign precharges. Nothing of this suite drives it except
@@ -305,6 +334,12 @@ std::optional<uint32_t> counts_over(uint32_t ms) {
     return static_cast<uint32_t>((static_cast<uint32_t>(b) - a) & 0xFFFFu);
 }
 
+/// Whether TIM7 - the other owner of LPTIM2's vector - is up. The shared
+/// handler asks before it calls that body: a timer whose bus clock is
+/// closed does not answer register reads (5.2.17), and a handler is not
+/// the place to find out what it answers instead.
+volatile bool tim7_live = false;
+
 /// Everything this suite ever claims, put back: pads to analog, both
 /// timers reset, the comparator off, the DMA quiet.
 void quiet_everything() {
@@ -323,6 +358,11 @@ void quiet_everything() {
     In1Pad::release();
     EtrPad::release();
     In2Pad::release();
+    Out2Pad::release();
+    In1Pad2::release();
+    Etr2Pad::release();
+    tim7_live = false;
+    T7::release();
     L1::init();
     L1::release();
     L2::init();
@@ -352,6 +392,12 @@ volatile uint32_t lptim_served1 = 0;
 /// before the handler can return.
 volatile uint32_t lptim_isr_after0 = 0;
 volatile uint32_t lptim_wall = 0;
+
+/// Letter j's half of the shared TIM7/LPTIM2 vector.
+volatile uint32_t l2_irqs = 0;
+volatile uint32_t l2_served = 0;
+volatile uint32_t t7_irqs = 0;
+volatile uint32_t t7_served = 0;
 
 // ---------------------------------------------------------------------------
 // The kernel half (letter h)
@@ -2155,6 +2201,519 @@ void ti_errata() {
     quiet_everything();
 }
 
+// =============================================================================
+// j - LPTIM2: the second instance on its own pads
+// =============================================================================
+//
+// Everything above this line is LPTIM1's. LPTIM2 is the SAME
+// LPTIM_TypeDef at another address, and the manual's own tables say it
+// is not the same peripheral: no encoder, no input channel 2, a
+// different fifth trigger row, two input codes LPTIM1 has not, another
+// EXTI line, another DMAMUX trigger input and a vector it shares with
+// TIM7 instead of TIM6 and the DAC. This letter puts it through what
+// letters a, c, d and e measure on LPTIM1, on ITS OWN THREE PADS - PC0,
+// PC3 and PD6, all at AF2 - and adds the two things only a second
+// instance can show: the asymmetries as refusals, and one vector with
+// two owners.
+
+/// LPTIM2's counter, read the way the chapter allows (26.7.8's double
+/// read where it can settle, one read where it cannot).
+uint16_t counter2_now() {
+    const std::optional<uint16_t> v = L2::count();
+    return v.value_or(L2::count_raw());
+}
+
+std::optional<uint32_t> counts2_over(uint32_t ms) {
+    const uint16_t a = counter2_now();
+    const uint32_t w0 = wall();
+    while (wall_ms(wall_delta(w0, wall())) < ms) {
+    }
+    const uint16_t b = counter2_now();
+    return static_cast<uint32_t>((static_cast<uint32_t>(b) - a) & 0xFFFFu);
+}
+
+bool free_run2(LptimClock src, LptimPrescaler p) {
+    L2::init();
+    L2::kernel_clock(src);
+    if (!L2::configure({.prescaler = p})) {
+        return false;
+    }
+    L2::enable();
+    if (!L2::set_arr(0xFFFFu) || !L2::wait_arr_ok()) {
+        return false;
+    }
+    (void)L2::clear_flags(LptimFlag::all);
+    return L2::start_continuous();
+}
+
+/// LPTIM2_OUT is PD6, so the census reads PORT D - the only place in
+/// this stratum that does. Same rule as every other pad sampler here:
+/// the loop must not branch on what it reads.
+uint32_t pad_d6_permille(uint32_t samples) {
+    uint32_t high = 0;
+    for (uint32_t i = 0; i < samples; ++i) {
+        high += (Port<'D'>::in() >> 6) & 1u;
+    }
+    return (high * 1000u + samples / 2u) / samples;
+}
+
+/// The 64 kHz waveform the pad sampler wants, on LPTIM2.
+bool pwm2_64k(uint16_t compare, bool inverted = false) {
+    L2::init();
+    L2::kernel_clock(LptimClock::pclk);
+    if (!L2::configure({.prescaler = LptimPrescaler::div1,
+                        .output_inverted = inverted})) {
+        return false;
+    }
+    L2::enable();
+    if (!L2::set_arr(999) || !L2::wait_arr_ok()) {
+        return false;
+    }
+    (void)L2::clear_flags(LptimFlag::all);
+    if (!L2::set_cmp(compare) || !L2::wait_cmp_ok()) {
+        return false;
+    }
+    (void)L2::clear_flags(LptimFlag::cmpok);
+    return L2::start_continuous();
+}
+
+/// N pull-walked edges on LPTIM2's IN1 (PC0).
+void walk_in1_2(uint32_t edges, uint32_t half_us) {
+    for (uint32_t i = 0; i < edges; ++i) {
+        walk<In1Pin2>(true, half_us);
+        walk<In1Pin2>(false, half_us);
+    }
+}
+
+// The two asymmetries as COMPILE-TIME facts, so the verdicts below can
+// say "at compile time and at run time alike" and mean it literally:
+// `lptim_config_valid()` is the constexpr checker `configure<cfg>()`
+// static_asserts on, and these are the same calls in the same place a
+// static_assert makes them.
+static_assert(lptim_config_valid(1, LptimConfig{
+                  .trigger = LptimTrigger::comp3_out,
+                  .trigger_edge = LptimTriggerEdge::rising}));
+static_assert(!lptim_config_valid(2, LptimConfig{
+                  .trigger = LptimTrigger::comp3_out,
+                  .trigger_edge = LptimTriggerEdge::rising}));
+static_assert(lptim_config_valid(2, LptimConfig{
+                  .trigger = LptimTrigger::tamp_trg3,
+                  .trigger_edge = LptimTriggerEdge::rising}));
+static_assert(!lptim_config_valid(1, LptimConfig{
+                  .trigger = LptimTrigger::tamp_trg3,
+                  .trigger_edge = LptimTriggerEdge::rising}));
+static_assert(lptim_config_valid(2, LptimConfig{.input1 = LptimInput1::comp2_out}));
+static_assert(lptim_config_valid(2, LptimConfig{.input1 = LptimInput1::comp1_or_comp2}));
+static_assert(!lptim_config_valid(1, LptimConfig{.input1 = LptimInput1::comp2_out}));
+static_assert(!lptim_config_valid(1, LptimConfig{.input1 = LptimInput1::comp1_or_comp2}));
+
+void tj_lptim2() {
+    feed();
+    quiet_everything();
+    (void)wall_up();
+
+    // WHAT LPTIM2 IS, out of the reserve - and none of it is readable in
+    // any register: the device header declares one struct for both
+    // instances, so every difference below is the MANUAL'S, stated in
+    // device_tables.hpp with its citation.
+    print(serial, "  LPTIM2: encoder=", L2::has_encoder, " input2=",
+          L2::has_input2, " EXTI line ", L2::exti_line, " DMAMUX trigger ",
+          L2::dmamux_generator_input, "; LPTIM1: encoder=", L1::has_encoder,
+          " input2=", L1::has_input2, " EXTI line ", L1::exti_line,
+          " DMAMUX trigger ", L1::dmamux_generator_input, crlf);
+    bench.verdict("the reserve's LPTIM2 is the manual's: no encoder (table "
+                  "135), no input channel 2 (figure 271's footnote), EXTI "
+                  "line 30 and DMAMUX trigger input 21 where LPTIM1 has 29 "
+                  "and 20 - and a vector of its own, shared with TIM7",
+                  !L2::has_encoder && !L2::has_input2 && L2::exti_line == 30u &&
+                      L2::dmamux_generator_input == 21u &&
+                      L1::exti_line == 29u && L1::dmamux_generator_input == 20u &&
+                      L2::irq() == TIM7_LPTIM2_IRQn && L1::irq() != L2::irq());
+
+    // THE FIFTH TRIGGER ROW IS NOT THE SAME SIGNAL ON THE TWO INSTANCES
+    // (tables 138 and 139), which is why the enum names the SIGNAL and
+    // the checker takes the instance. Each row is legal on one and
+    // refused on the other, both ways round.
+    const bool rows_ok =
+        lptim_config_valid(1, LptimConfig{.trigger = LptimTrigger::comp3_out,
+                                          .trigger_edge = LptimTriggerEdge::rising}) &&
+        !lptim_config_valid(2, LptimConfig{.trigger = LptimTrigger::comp3_out,
+                                           .trigger_edge = LptimTriggerEdge::rising}) &&
+        lptim_config_valid(2, LptimConfig{.trigger = LptimTrigger::tamp_trg3,
+                                          .trigger_edge = LptimTriggerEdge::rising}) &&
+        !lptim_config_valid(1, LptimConfig{.trigger = LptimTrigger::tamp_trg3,
+                                           .trigger_edge = LptimTriggerEdge::rising});
+    bench.verdict("and table 139's fifth trigger row is NOT table 138's: "
+                  "COMP3_OUT is legal on LPTIM1 and refused on LPTIM2, "
+                  "TAMP_TRG3 legal on LPTIM2 and refused on LPTIM1 - the same "
+                  "TRIGSEL code, two different signals",
+                  rows_ok);
+
+    // AND THE INPUT MULTIPLEXER DISAGREES MORE (tables 140 and 142):
+    // LPTIM2's IN1 reaches COMP2_OUT and the OR of the two comparators,
+    // codes LPTIM1's mux leaves unconnected.
+    const bool mux_ok =
+        lptim_config_valid(2, LptimConfig{.input1 = LptimInput1::comp2_out}) &&
+        lptim_config_valid(2, LptimConfig{.input1 = LptimInput1::comp1_or_comp2}) &&
+        !lptim_config_valid(1, LptimConfig{.input1 = LptimInput1::comp2_out}) &&
+        !lptim_config_valid(1, LptimConfig{.input1 = LptimInput1::comp1_or_comp2}) &&
+        !L1::configure({.input1 = LptimInput1::comp2_out});
+    bench.verdict("table 142 gives LPTIM2 two input-1 codes table 140 leaves "
+                  "unconnected on LPTIM1 - COMP2_OUT and the OR of both "
+                  "comparators - and each is accepted here and refused there, "
+                  "at compile time and at run time alike",
+                  mux_ok);
+
+    // THE PADS, before anything rests on them. Same two questions letter
+    // a asks of LPTIM1's four: does each follow its own pull as a plain
+    // input, and does it still do so with the pad handed to the LPTIM?
+    Rcc::io_clock('C', true);
+    Rcc::io_clock('D', true);
+    const bool out2_plain = pull_walks<Out2Pin>(false, PinFunction::af2);
+    const bool in1_plain = pull_walks<In1Pin2>(false, PinFunction::af2);
+    const bool etr_plain = pull_walks<Etr2Pin>(false, PinFunction::af2);
+    const bool in1_af = pull_walks<In1Pin2>(true, PinFunction::af2);
+    const bool etr_af = pull_walks<Etr2Pin>(true, PinFunction::af2);
+    Out2Pin::analog();
+    In1Pin2::analog();
+    Etr2Pin::analog();
+    print(serial, "  pull-walk as plain inputs: PD6 ", out2_plain, " PC0 ",
+          in1_plain, " PC3 ", etr_plain, "; under AF2 (LPTIM2's own "
+          "function): PC0 ", in1_af, " PC3 ", etr_af, crlf);
+    bench.verdict("LPTIM2's three pads are free on this board - PD6, PC0 and "
+                  "PC3 each follow their own internal pull between the rails",
+                  out2_plain && in1_plain && etr_plain);
+    bench.verdict("and the pull survives the handover on THIS function too: a "
+                  "pad given to an LPTIM2 input at AF2 still walks, which is "
+                  "what makes the second instance as wireless as the first",
+                  in1_af && etr_af);
+
+    // THE FOUR KERNEL CLOCKS, through RCC_CCIPR's OTHER field. LPTIM2SEL
+    // is a different field of the same register, and nothing but a bench
+    // says the reserve's position for it is right.
+    struct Src {
+        const char* name;
+        LptimClock code;
+        LptimPrescaler presc;
+        uint32_t nominal;
+        uint32_t lo;
+        uint32_t hi;
+    };
+    const Src sources[] = {
+        {"LSE", LptimClock::lse, LptimPrescaler::div1, 32'768, 32'600, 32'940},
+        {"LSI", LptimClock::lsi, LptimPrescaler::div1, 32'586, 29'500, 34'000},
+        {"HSI16/128", LptimClock::hsi16, LptimPrescaler::div128, 125'000,
+         123'000, 127'000},
+        {"PCLK/128", LptimClock::pclk, LptimPrescaler::div128, 500'000,
+         495'000, 505'000},
+    };
+    Rcc::lsi_enable(true);
+    (void)Rcc::lsi_wait_ready();
+    bool rates_ok = true;
+    for (const Src& s : sources) {
+        feed();
+        if (!free_run2(s.code, s.presc)) {
+            rates_ok = false;
+            continue;
+        }
+        const std::optional<uint32_t> n = counts2_over(100);
+        const uint32_t hz = n.has_value() ? *n * 10u : 0u;
+        print(serial, "  LPTIM2 kernel clock ", s.name, ": ", hz,
+              " counts a second (nominal ", s.nominal, ", off by ",
+              permille_off(hz, s.nominal), " per mille)", crlf);
+        rates_ok = rates_ok && within(hz, s.lo, s.hi);
+    }
+    bench.verdict("all four codes of RCC_CCIPR.LPTIM2SEL drive the second "
+                  "counter, each inside its own document's band - so the "
+                  "reserve's field position for LPTIM2 is right",
+                  rates_ok);
+
+    // THE WAVEFORM ON LPTIM2_OUT, off PD6. Same arithmetic as letter c
+    // measured on PB0, on another port and another function.
+    feed();
+    Out2Pad::claim();
+    struct Duty {
+        uint16_t cmp;
+        uint32_t want;
+    };
+    const Duty duties[] = {{0, 1000}, {249, 751}, {499, 501}, {749, 251},
+                           {899, 101}};
+    bool duty_ok = true;
+    for (const Duty& d : duties) {
+        feed();
+        if (!pwm2_64k(d.cmp)) {
+            duty_ok = false;
+            continue;
+        }
+        spin_us(2000);
+        const uint32_t got = pad_d6_permille(60000);
+        print(serial, "  LPTIM2 ARR 999, CMP ", d.cmp, ": PD6 high ", got,
+              " per mille, (ARR - CMP + 1)/(ARR + 1) = ", d.want, crlf);
+        duty_ok = duty_ok && got + 20u >= d.want && got <= d.want + 20u;
+    }
+    bench.verdict("LPTIM2's output obeys the same arithmetic letter c "
+                  "measured on LPTIM1 - a period of ARR + 1 ticks with a high "
+                  "time of ARR - CMP + 1 - on another port and another "
+                  "alternate function",
+                  duty_ok);
+
+    (void)pwm2_64k(749);
+    spin_us(2000);
+    const uint32_t straight = pad_d6_permille(60000);
+    (void)pwm2_64k(749, true);
+    spin_us(2000);
+    const uint32_t inverted = pad_d6_permille(60000);
+    print(serial, "  CMP = 749 on PD6: WAVPOL 0 gives ", straight,
+          " per mille and WAVPOL 1 gives ", inverted, crlf);
+    bench.verdict("and WAVPOL inverts LPTIM2's waveform and nothing else",
+                  within(straight, 230u, 270u) && within(inverted, 730u, 770u));
+
+    // THE DMAMUX TRIGGER INPUT, which is the reserve's OTHER number: 21
+    // for LPTIM2_OUT where LPTIM1_OUT is 20. A request generator on that
+    // input counts this timer's own edges with no pad and no CPU.
+    feed();
+    Dma1::bus_clock(true);
+    Dma1::reset();
+    L2::init();
+    L2::kernel_clock(LptimClock::lse);
+    (void)L2::configure({.prescaler = LptimPrescaler::div1});
+    L2::enable();
+    (void)L2::set_arr(1);
+    (void)L2::wait_arr_ok();
+    (void)L2::set_cmp(0);
+    (void)L2::wait_cmp_ok();
+    (void)L2::start_continuous();
+
+    static uint32_t sink2 = 0;
+    static const uint32_t source_word2 = 0xA5A5A5A5u;
+    (void)Gen0::configure(L2::dmamux_generator_input, DmaMuxEdge::rising, 1);
+    (void)EdgeCh::prepare(DmaTransfer{
+        .peripheral = const_cast<uint32_t*>(&source_word2),
+        .memory = &sink2,
+        .count = 20000,
+        .config = {.direction = DmaDirection::peripheral_to_memory,
+                   .peripheral_increment = false,
+                   .memory_increment = false,
+                   .peripheral_width = DmaWidth::word,
+                   .memory_width = DmaWidth::word}});
+    DmaMux::request(EdgeCh::mux_channel, Gen0::request_id);
+    (void)EdgeCh::enable(true);
+    Gen0::enable(true);
+    console_drain();
+    const uint32_t gw0 = wall();
+    const uint16_t g0 = EdgeCh::count();
+    while (wall_ms(wall_delta(gw0, wall())) < 200u) {
+    }
+    const uint16_t g1 = EdgeCh::count();
+    Gen0::enable(false);
+    EdgeCh::stop();
+    const uint32_t edge_hz = static_cast<uint32_t>(g0 - g1) * 5u;
+    print(serial, "  LPTIM2_OUT at ARR = 1 on the crystal: the DMAMUX "
+          "generator on trigger input ", L2::dmamux_generator_input,
+          " counted ", edge_hz, " rising edges a second, against 16384", crlf);
+    bench.verdict("table 56's trigger input 21 IS LPTIM2_OUT: a DMA channel "
+                  "with no peripheral counts the second timer's output at "
+                  "half its kernel clock, with no pad and no CPU in the loop",
+                  within(edge_hz, 16'200u, 16'560u));
+    Dma1::reset();
+    Dma1::bus_clock(false);
+    Out2Pad::release();
+
+    // COUNTER MODE ON LPTIM2'S OWN INPUT. Both arrangements of 26.4.12,
+    // and the five lost edges counted again on the other instance.
+    feed();
+    In1Pad2::claim_input(PinPull::down);
+    L2::init();
+    L2::kernel_clock(LptimClock::pclk);
+    const bool sampled_up = L2::configure({.count_external = true,
+                                           .input1 = LptimInput1::pad});
+    L2::enable();
+    (void)L2::set_arr(0xFFFFu);
+    (void)L2::wait_arr_ok();
+    (void)L2::start_continuous();
+    spin_us(500);
+    const uint16_t s0 = L2::count_raw();
+    walk_in1_2(20, 60);
+    const uint32_t sampled = static_cast<uint32_t>((L2::count_raw() - s0) & 0xFFFFu);
+
+    L2::init();
+    L2::kernel_clock(LptimClock::pclk);
+    const bool clocked_up =
+        L2::configure({.clock = LptimClockSource::external_input1,
+                       .clock_polarity = LptimClockPolarity::rising,
+                       .input1 = LptimInput1::pad});
+    L2::enable();
+    (void)L2::set_arr(0xFFFFu);
+    (void)L2::wait_arr_ok();
+    (void)L2::start_continuous();
+    walk<In1Pin2>(false, 200);
+    walk_in1_2(20, 60);
+    const uint32_t clocked = L2::count_raw();
+    print(serial, "  PC0 as LPTIM2_IN1: COUNTMODE = 1 counted ", sampled,
+          " of 20 applied edges; CKSEL = 1 counted ", clocked, " of 20 - ",
+          20u - clocked, " lost at the start", crlf);
+    bench.verdict("LPTIM2's own input counts both of 26.4.12's ways: sampled "
+                  "by the internal clock it loses nothing, and AS the clock "
+                  "it loses the same five edges at the start that LPTIM1 does",
+                  sampled_up && clocked_up && sampled == 20u &&
+                      clocked + 8u >= 20u && clocked < 20u);
+    In1Pad2::release();
+
+    // THE ROUTE THAT EXISTS ON THIS INSTANCE ALONE: IN1SEL = 3, the OR of
+    // the two comparators, which table 140 leaves unconnected on LPTIM1.
+    // COMP1 is the one this board can flip (a precharged PA1), and it is
+    // one of the two the code ORs together.
+    feed();
+    C1::init();
+    constexpr CompConfig comp_cfg{.positive = CompPositive::input2,   // PA1
+                                  .negative = CompNegative::vrefint_half};
+    const bool comp_up =
+        C1::claim_inputs(comp_cfg) && C1::configure(comp_cfg) && C1::enable(true);
+    spin_us(500);
+    L2::init();
+    L2::kernel_clock(LptimClock::pclk);
+    const bool or_route = L2::configure({.count_external = true,
+                                         .input1 = LptimInput1::comp1_or_comp2});
+    L2::enable();
+    (void)L2::set_arr(0xFFFFu);
+    (void)L2::wait_arr_ok();
+    (void)L2::start_continuous();
+    PadA1::output(false);
+    spin_us(300);
+    PadA1::analog();
+    spin_us(300);
+    const uint16_t c0 = L2::count_raw();
+    constexpr uint32_t flips = 12;
+    for (uint32_t i = 0; i < flips; ++i) {
+        PadA1::output(true);
+        spin_us(300);
+        PadA1::analog();
+        spin_us(300);
+        PadA1::output(false);
+        spin_us(300);
+        PadA1::analog();
+        spin_us(300);
+    }
+    const uint32_t counted = static_cast<uint32_t>((L2::count_raw() - c0) & 0xFFFFu);
+    (void)C1::enable(false);
+    PadA1::analog();
+    print(serial, "  IN1SEL = 3 (COMP1_OUT or COMP2_OUT, LPTIM2's alone): ",
+          flips, " COMP1 flips counted as ", counted, crlf);
+    bench.verdict("and the mux code table 142 gives LPTIM2 alone really "
+                  "routes: with COMP2 quiet, the OR of the two carries COMP1's "
+                  "flips into the second counter with no pad on either side",
+                  comp_up && or_route && counted == flips);
+
+    // THE TRIGGER, on LPTIM2's own ETR pad - and with it TRGFLT, the one
+    // field of 26.4.5 this suite had measured only through its twin.
+    // The kernel clock is LSE, so one filter sample is 30.5 us and eight
+    // are 244: a 60 us pulse must not trigger and a 2 ms one must.
+    feed();
+    for (uint8_t leg = 0; leg < 2u; ++leg) {
+        feed();
+        const bool filtered = leg == 1u;
+        Etr2Pad::claim_input(PinPull::down);
+        L2::init();
+        L2::kernel_clock(LptimClock::lse);
+        const bool cfg_ok = L2::configure({
+            .prescaler = LptimPrescaler::div1,
+            .trigger_filter = filtered ? LptimFilter::samples8 : LptimFilter::none,
+            .trigger = LptimTrigger::etr_pad,
+            .trigger_edge = LptimTriggerEdge::rising});
+        L2::enable();
+        (void)L2::set_arr(0xFFFFu);
+        (void)L2::wait_arr_ok();
+        (void)L2::clear_flags(LptimFlag::all);
+        (void)L2::start_continuous();
+        spin_us(1000);
+        const uint16_t armed_at = L2::count_raw();
+        // Ten 60 us blips: shorter than eight samples of a 32768 Hz clock.
+        for (uint32_t i = 0; i < 10u; ++i) {
+            walk<Etr2Pin>(true, 60);
+            walk<Etr2Pin>(false, 2000);
+        }
+        spin_us(3000);
+        const uint16_t after_blips = L2::count_raw();
+        const bool blip_trig = (L2::status() & LptimFlag::exttrig) != 0u;
+        // And one 2 ms pulse, well past the filter's window.
+        walk<Etr2Pin>(true, 3000);
+        spin_us(3000);
+        const uint16_t after_long = L2::count_raw();
+        const bool long_trig = (L2::status() & LptimFlag::exttrig) != 0u;
+        walk<Etr2Pin>(false, 200);
+        Etr2Pad::release();
+        print(serial, "  ETR on PC3, TRGFLT ",
+              filtered ? "8 samples" : "off", ": armed at ", armed_at,
+              ", after ten 60 us blips ", after_blips, " (EXTTRIG ",
+              blip_trig, "), after one 2 ms pulse ", after_long, " (EXTTRIG ",
+              long_trig, ")", crlf);
+        if (!filtered) {
+            bench.verdict("LPTIM2's ETR pad arms the counter rather than "
+                          "starting it, and with TRGFLT off the FIRST 60 us "
+                          "blip is a trigger like any other",
+                          cfg_ok && armed_at == 0u && after_blips != 0u &&
+                              blip_trig);
+        } else {
+            bench.verdict("and TRGFLT IS A REAL THRESHOLD, measured here for "
+                          "the first time on its own rather than through "
+                          "CKFLT's twin: at one sample per 30.5 us eight "
+                          "samples reject ten 60 us blips outright - counter "
+                          "still at zero, EXTTRIG never set - and pass a 2 ms "
+                          "pulse",
+                          cfg_ok && armed_at == 0u && after_blips == 0u &&
+                              !blip_trig && after_long != 0u && long_trig);
+        }
+    }
+
+    // ONE VECTOR, TWO OWNERS. Table 61 puts LPTIM2 and TIM7 on the same
+    // line, and the only way to show a line is shared is to make both
+    // owners speak on it and have each body answer for its own flags.
+    feed();
+    l2_irqs = 0;
+    l2_served = 0;
+    t7_irqs = 0;
+    t7_served = 0;
+    L2::init();
+    L2::kernel_clock(LptimClock::pclk);
+    (void)L2::configure({.prescaler = LptimPrescaler::div128,
+                         .interrupts = LptimFlag::arrm});
+    L2::enable();
+    (void)L2::set_arr(499);          // 500 kHz / 500 = 1 kHz of ARRM
+    (void)L2::wait_arr_ok();
+    (void)L2::clear_flags_raw(LptimFlag::all);
+    T7::init();
+    const bool t7_cfg = T7::configure({.prescaler = 63, .period = 999});
+    T7::interrupts(T7::update_interrupt, true);
+    tim7_live = true;
+    Nvic::clear_pending(L2::irq());
+    Nvic::enable(L2::irq());
+    (void)L2::start_continuous();
+    T7::enable(true);
+    spin_us(20000);
+    T7::enable(false);
+    Nvic::disable(L2::irq());
+    tim7_live = false;
+    const uint32_t l2n = l2_irqs;
+    const uint32_t t7n = t7_irqs;
+    const uint32_t l2s = l2_served;
+    const uint32_t t7s = t7_served;
+    print(serial, "  20 ms on the shared line: LPTIM2 served ", l2n,
+          " times (flags ", hex(l2s), "), TIM7 ", t7n, " times (flags ",
+          hex(t7s), ") - one vector, NVIC line ",
+          static_cast<uint32_t>(TIM7_LPTIM2_IRQn), crlf);
+    bench.verdict("LPTIM2's interrupt reaches TIM7_LPTIM2_IRQHandler and TIM7's "
+                  "reaches the SAME handler in the same window - one line, two "
+                  "owners, each body returning exactly the flags its own enable "
+                  "asked for, and each CLEARING them (a flag left standing "
+                  "would have re-entered the handler for ever instead of "
+                  "twenty times in twenty milliseconds)",
+                  t7_cfg && l2n >= 15u && t7n >= 15u &&
+                      l2s == LptimFlag::arrm && t7s == T7::update_flag);
+
+    T7::release();
+    quiet_everything();
+}
+
 // ---------------------------------------------------------------------------
 // The menu
 // ---------------------------------------------------------------------------
@@ -2190,6 +2749,26 @@ extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
         lptim_served1 = served;
     }
     lptim_irqs = n + 1u;
+}
+
+/// LPTIM2's vector, shared with TIM7 on this part (table 61). Letter j
+/// makes BOTH owners speak on it, which is the only way a shared line
+/// can be shown to be one: each body clears and returns exactly the
+/// flags its own enable asked for, and TIM7's is called only while the
+/// letter says its bus clock is open.
+extern "C" void TIM7_LPTIM2_IRQHandler() {
+    const uint32_t from_lptim = brio::Lptim<2>::isr();
+    if (from_lptim != 0u) {
+        l2_served = from_lptim;
+        l2_irqs = l2_irqs + 1u;
+    }
+    if (tim7_live) {
+        const uint32_t from_tim = brio::Tim<7>::isr();
+        if (from_tim != 0u) {
+            t7_served = from_tim;
+            t7_irqs = t7_irqs + 1u;
+        }
+    }
 }
 
 extern "C" void RTC_TAMP_IRQHandler() { (void)brio::Rtc::isr(); }
@@ -2235,6 +2814,9 @@ int main() {
                  tg_through_stop);
     bench.letter('h', "THE THIRD SLEEP SITE, with the RTC left alone", th_site);
     bench.letter('i', "the two errata, as code and as measurement", ti_errata);
+    bench.letter('j', "LPTIM2 on its own pads: the asymmetries, TRGFLT, one "
+                      "vector with two owners",
+                 tj_lptim2);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",

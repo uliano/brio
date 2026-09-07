@@ -29,6 +29,19 @@ announced rate, and then waits out the rest. It is what a board that is
 ASLEEP needs - the bytes have to arrive while it is in Stop, not before
 it gets there and not after it has given up.
 
+THE LEGS STOP AT THE BRIDGE'S CEILING. A USB-serial bridge carries only
+what it carries: the ST-LINK's virtual COM port on board E is byte-exact
+to 921600 in both directions, corrupt at 2 Mbaud, and at 3 Mbaud seven
+bytes of twelve thousand arrive. Pumping AT such a rate costs more than
+the wasted bytes - the operating system goes on delivering the queue
+after the board has gone home to 115200, where the console's ring reads
+it as MENU LETTERS and the letter's closing tally is lost with it. So a
+HOST line announcing a rate above VCP_CEILING is run PASSIVELY by
+default (the port follows the announced rate and drains, but nothing is
+pumped) and is run in full only with --beyond-vcp. The firmware's own
+default ladders stop there too; test_stm32_dma keeps the rungs above it
+in a separate letter, `w`, outside `z`.
+
 THE PATTERN is a 32-bit xorshift, low byte per step, seeded 0x12345678:
 the same three shifts the firmware runs, so either end can verify the
 other without a return path. A narrow frame (5, 6 or 7 bits) carries only
@@ -56,6 +69,13 @@ ST-LINK's own virtual COM port and is therefore addressed by-id:
     python3 tools/uart_stress.py --letters ywv \
         --port /dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_\
 0670FF534871754867182752-if02
+
+and test_stm32_dma's letter u, whose ladder stops at that bridge's own
+ceiling - with letter w, and only with --beyond-vcp, for the rungs above:
+
+    python3 tools/bench.py flash E test_stm32_dma
+    python3 tools/uart_stress.py --letters u --port <board E's console>
+    python3 tools/uart_stress.py --letters w --beyond-vcp --port <the same>
 """
 import argparse
 import sys
@@ -69,6 +89,10 @@ except ImportError:
 DEFAULT_PORT = "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0"
 CONSOLE_BAUD = 115200
 LFSR_SEED = 0x12345678
+# The highest rate any bridge on this desk is MEASURED to carry byte-exact
+# (board E's ST-LINK VCP; the CH340s reach 3 Mbaud and say so with
+# --beyond-vcp). Above it a leg is passive unless asked for.
+VCP_CEILING = 921600
 
 BITS = {"5": serial.FIVEBITS, "6": serial.SIXBITS,
         "7": serial.SEVENBITS, "8": serial.EIGHTBITS,
@@ -91,10 +115,26 @@ def lfsr_stream(n, mask=0xFF, seed=LFSR_SEED):
     return bytes(out)
 
 
+def default_ceiling(port):
+    """The rate this BRIDGE is measured to carry byte-exact, or None.
+
+    It is a property of the wire and not of the board, so it is decided
+    by which port was opened: board E's console is the ST-LINK's own
+    virtual COM port, measured corrupt above 921600 (docs/stm32g0/
+    dma.md), while the CH340s on the AVR and SAM boards carry 3 Mbaud
+    (docs/samc21/sercom.md) and get no ceiling at all. `--ceiling` and
+    `--beyond-vcp` override this either way.
+    """
+    return VCP_CEILING if "stlink" in port.lower() else None
+
+
 class Board:
-    def __init__(self, port, verbose=True):
+    def __init__(self, port, verbose=True, ceiling=None):
         self.ser = serial.Serial(port, CONSOLE_BAUD, timeout=0.05)
         self.verbose = verbose
+        # None = pump at whatever the board announces; a number = run any
+        # leg above it PASSIVELY (follow the rate, drain, pump nothing).
+        self.ceiling = ceiling
         self.buf = b""
         self.legs = []
         self.last_window_s = 0.0
@@ -155,7 +195,26 @@ class Board:
         got = bytearray()
         sent = 0
         payload = b""
-        if op == "poke":
+        # ABOVE THE BRIDGE'S CEILING, PUMP NOTHING. Feeding a wire that
+        # cannot take the bytes does not just waste them: the operating
+        # system delivers the queue AFTER the board is home at 115200,
+        # where the console's ring reads it as menu letters and the
+        # letter's closing tally goes with it. The port still follows the
+        # announced rate and still drains, so a leg the BOARD sources is
+        # observed; only the host's own pump is withheld.
+        declined = self.ceiling is not None and baud > self.ceiling
+        if declined:
+            if self.verbose:
+                print("  ! %d baud is above this bridge's measured ceiling "
+                      "(%d): pumping nothing (--beyond-vcp to force)"
+                      % (baud, self.ceiling))
+            while time.time() < deadline:
+                n = self.ser.in_waiting
+                if n:
+                    got += self.ser.read(n)
+                else:
+                    time.sleep(0.005)
+        elif op == "poke":
             # THE TIMING IS THE OP: the board is asleep in the middle of
             # its own window, so the bytes go out at half of it and the
             # rest of the window is spent waiting, quietly.
@@ -211,8 +270,11 @@ class Board:
         self.last_window_s = window_ms / 1000.0
 
         result = {"op": op, "mode": mode, "baud": baud, "format": fmt,
-                  "host_sent": sent, "host_got": len(got), "first_bad": None}
-        if op == "poke":
+                  "host_sent": sent, "host_got": len(got), "first_bad": None,
+                  "declined": declined}
+        if declined:
+            pass
+        elif op == "poke":
             result["host_got"] = len(got)
         elif op == "source":
             expect = lfsr_stream(max(count, len(got)), mask)
@@ -278,14 +340,36 @@ def main():
                     help="which suite letters to drive, in order (the "
                          "default is the SAM's test_samc_uart, which is what "
                          "DEFAULT_PORT points at; the STM32G0's "
-                         "test_stm32_serial wants 'ywv' and test_stm32_dma "
-                         "wants 'u', both with an explicit --port)")
+                         "test_stm32_serial wants 'ywv', test_stm32_dma "
+                         "wants 'u' - or 'w' with --beyond-vcp - all with an "
+                         "explicit --port)")
     ap.add_argument("--repeat", type=int, default=1)
+    ap.add_argument("--ceiling", type=int, default=None,
+                    help="the highest rate this bridge is trusted to carry "
+                         "byte-exact; a leg announced above it is run "
+                         "PASSIVELY (the port follows the rate and drains, "
+                         "but nothing is pumped). The default is 921600 for "
+                         "board E's ST-LINK virtual COM port, measured, and "
+                         "none for any other port - the CH340s carry 3 Mbaud")
+    ap.add_argument("--beyond-vcp", action="store_true",
+                    help="lift that ceiling and pump at whatever the board "
+                         "announces (test_stm32_dma's letter w wants this; "
+                         "what comes back above the ceiling is the bridge's "
+                         "noise, and the letter judges nothing)")
     ap.add_argument("-q", "--quiet", action="store_true",
                     help="do not echo the board's console")
     args = ap.parse_args()
 
-    b = Board(args.port, verbose=not args.quiet)
+    if args.beyond_vcp:
+        ceiling = None
+    elif args.ceiling is not None:
+        ceiling = args.ceiling if args.ceiling > 0 else None
+    else:
+        ceiling = default_ceiling(args.port)
+    if ceiling is not None:
+        print("bridge ceiling: %d baud (--beyond-vcp lifts it)" % ceiling)
+
+    b = Board(args.port, verbose=not args.quiet, ceiling=ceiling)
     time.sleep(0.3)
     b.ser.reset_input_buffer()
 

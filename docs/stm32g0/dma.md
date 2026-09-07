@@ -14,8 +14,8 @@ on the bench chip's revision Z column, where all five apply. Driver:
 from `stm32g0/device_tables.hpp`, and the REQUEST IDS from the
 peripherals that publish them (`Usart<n>::dma_tx_request()`,
 `Tim<n>::dma_update_request()` and their kin). Bench suite:
-`test_stm32_dma` (14 letters in `z`, 69 verdicts, wireless; letter `u`
-outside `z` needs `tools/uart_stress.py`). Family fixture
+`test_stm32_dma` (14 letters in `z`, 69 verdicts, wireless; letters `u`
+and `w` outside `z` need `tools/uart_stress.py`). Family fixture
 `test/family_stm32g0/dma.cpp` plus seven negatives under
 `tools/check_stm32g0.sh`.
 
@@ -351,7 +351,18 @@ with nobody draining, the engine STALLED and counted an overrun rather
 than write into the block the caller held, and one `release()` brought
 the stream back.
 
-### The VCP's ceiling (letter `u`, with `tools/uart_stress.py`)
+**The step verdict of that letter is FLAKY at about one run in eight**
+(2026-09-07: one failure in eight consecutive `z` runs of the same
+image, the other seven clean). What fails is the fine-grained one - "no
+sample is off the 32000-tick step" - and nothing else in the letter: the
+blocks arrive, the seams hold, the accounting agrees. The estimator is
+the tightest thing in the suite, an equality between consecutive
+free-running TIM2 readings taken by the DMA on TIM3's update, so a
+single late request shows as a whole failed verdict. It is recorded
+rather than tuned: whoever next owns this suite has the choice of a
+tolerance or of finding what is late.
+
+### The VCP's ceiling (letters `u` and `w`, with `tools/uart_stress.py`)
 
 The board's own USART reaches every rate in the ladder; what the
 ST-LINK's virtual COM port carries is another question, and only the host
@@ -375,11 +386,34 @@ ones alike, which says the corruption happens upstream of the receiver's
 own error detection - the bytes that arrive are well-formed frames
 carrying the wrong data.
 
-An operational note on the tool: this letter's ten legs take longer than
-`uart_stress.py`'s own 120-second per-letter window, so the script prints
-every leg and then reports "no tally". The board is not stuck - it prints
-its tally and answers its prompt immediately afterwards; the letter is
-outside `z` and the suite's score does not depend on it.
+**THE DEFAULT LADDER THEREFORE STOPS AT THE CEILING, on both sides of
+the wire.** Letter `u` runs the three rates the bridge is proven to
+carry - 115200, 460800, 921600, six legs - and letter `w`, outside `z`
+and outside every verdict, keeps the two above it for whoever wants the
+numbers again; `uart_stress.py` declines a leg announced above 921600 in
+the same way, running it PASSIVELY (the port follows the announced rate
+and drains, but nothing is pumped) unless it is given `--beyond-vcp`.
+That ceiling is the tool's default only for board E's ST-LINK port,
+which is where it was measured: the CH340s on the other boards carry
+3 Mbaud and get none.
+
+The reason is not tidiness but a lost tally. A leg pumped at a rate the
+wire will not take leaves the host's operating system delivering the
+queue AFTER the board has gone back to 115200, and those bytes land in
+the console's receive ring, where the menu loop reads them as LETTERS.
+The board's closing "-> N pass" line was then read at the wrong rate and
+never seen, and the script reported "tally: None" - reproducibly, on a
+letter whose ten legs had all run and printed their figures.
+
+**AND IT IS THE HOST'S PUMP AND NOT THE BOARD'S RATE, staged with a
+control.** Letter `w` runs the same two rungs twice: with `--beyond-vcp`
+(the script pumping) all four legs run and the tally is LOST; with the
+flag absent (the script following the rate and draining, pumping
+nothing) the same four legs run over the same rates and the tally
+ARRIVES. So the board emitting 12000 bytes at 3 Mbaud costs nothing -
+only the host's own queue does. With `u`'s ladder ending at the ceiling
+its six legs report and its tally is read every time (three consecutive
+runs).
 
 ### The synchronization block (letter `k`)
 

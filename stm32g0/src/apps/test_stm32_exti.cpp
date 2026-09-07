@@ -33,6 +33,11 @@
 //   PC13       the user button B1, READ ONLY: a press cannot be staged
 //                       from here, so letter u prints the level and
 //                       judges only what the board itself decides
+// PA8 IS UCPD1_CC1, which is not a desk fault but a reset state: RM0444
+// 7.3.16 connects a Type-C DEAD-BATTERY pull-down to it (and to PB15,
+// UCPD1_CC2) out of a power-on until SYSCFG_CFGR1's strobe releases
+// them, a few kilohms against the port's own forty. Letter b spends that
+// strobe once, before it asks the pad to follow its own pull.
 // Avoided on purpose: PA2/PA3 (the console), PA5 (LD4), PA13/PA14
 // (SWD), PC14/PC15 (the LSE pads), PF0/PF1 (the HSE pads).
 //
@@ -410,12 +415,33 @@ void ta_block() {
 // function, so the answer should be yes; everything after this letter
 // uses the cheaper, sharper stimulus if it is.
 void tb_stimulus() {
+    // PA8 IS UCPD1_CC1, AND THAT IS WHY ITS PULL CHECK USED TO FAIL ABOUT
+    // ONE RUN IN THREE. RM0444 7.3.16: the Type-C DEAD-BATTERY pull-downs
+    // on UCPD1_CC1 (PA8) and UCPD1_CC2 (PB15) are CONNECTED out of a
+    // power-on and stay connected until SYSCFG_CFGR1's strobe releases
+    // them - a few kilohms against the port's own forty, so a pad asked
+    // to follow its 40 k pull-up sits between the rails and reads
+    // whichever way the threshold falls that minute. The strobe is
+    // ONE-WAY for the power cycle, so it is spent once, here, before the
+    // precondition every later PA8 leg rests on. (Measured on PB15 by
+    // test_stm32_rtc's letter k.)
+    const bool rd_released = ucpd_dead_battery(1, false);
+
     bench.verdict("PA0 is electrically free (it follows its own pull)",
                   pad_follows_pull<PadA0>());
     bench.verdict("so is PB0", pad_follows_pull<PadB0>());
     bench.verdict("so is PB3", pad_follows_pull<PadB3>());
     bench.verdict("so is PB7", pad_follows_pull<PadB7>());
-    bench.verdict("and so is PA8", pad_follows_pull<PadA8>());
+    const bool pa8_free = pad_follows_pull<PadA8>();
+    print(serial, "  PA8 is UCPD1_CC1: SYSCFG's dead-battery strobe ",
+          rd_released ? "released the Rd" : "WAS NOT AVAILABLE",
+          " before the check, and the pad ", pa8_free ? "follows" : "DOES NOT follow",
+          " its own pull", crlf);
+    bench.verdict("and so does PA8, ONCE THE TYPE-C DEAD-BATTERY PULL-DOWN IS "
+                  "RELEASED - 7.3.16 connects an Rd to UCPD1_CC1 out of a "
+                  "power-on, and the strobe this letter spends first is what "
+                  "makes the pad's own 40 k pull-up the strongest thing on it",
+                  rd_released && pa8_free);
 
     // The two line-0 pads must be electrically independent or letter e
     // measures nothing.

@@ -36,6 +36,16 @@
 //   PA6            TIM3_CH1  AF1   the capture input, and TIM1_BKIN AF2
 //   PA7            TIM1_CH1N AF2   the complementary half of the pair
 //   PA8            TIM1_CH1  AF2   the pair's direct half
+//   PB6..PB9       TIM4_CH1..4 AF9  the four channels of the vector-mate
+//   PB13/PB14/PB15 TIM15_CH1N/CH1/CH2 AF5  two channels and a complement
+//   PA7            TIM14_CH1 AF4   the one-channel timer, on a pad already
+//                                  proven free as TIM1_CH1N
+//   PB7/PB9        TIM17_CH1N/CH1 AF2  the other one-channel pair
+// AND PA8 IS UCPD1_CC1 (PB15 is UCPD1_CC2), which is not a desk fault but
+// a reset state: RM0444 7.3.16 connects a Type-C DEAD-BATTERY pull-down
+// to both out of a power-on until SYSCFG_CFGR1's strobe releases them, a
+// few kilohms against the port's own forty. Letter a spends that strobe
+// once, before it asks either pad to follow its own pull.
 // Avoided on purpose: PA2/PA3 (the console), PA13/PA14 (SWD), PC13 (B1),
 // PC14/PC15 (the LSE pads), PF0/PF1 (the HSE pads).
 //
@@ -59,6 +69,10 @@
 //   i  centre-aligned mode: the period is 2 x ARR, measured
 //   j  MeterSampler inside a REAL KERNEL, fed by a capture ISR
 //   k  ES0548 2.7.2 staged with a control, 2.7.1 and 2.7.3 declared
+//   l  THE SIX INSTANCES this suite had never counted - TIM4, the two
+//      basic timers and the three one-or-two-channel ones: each counting
+//      PCLK at its prescaler, each update reaching the vector the reserve
+//      names for it, and a PWM off a pad for the four that have channels
 //
 // build: boards = g0b1re
 // build: monitor_speed = 115200
@@ -109,11 +123,19 @@ using T2 = Tim<2>;     // the 32-bit one; the master of every cascade here
 using T3 = Tim<3>;     // the slave: counts, gates, resets, captures
 using T4 = Tim<4>;     // TIM3's vector-mate
 using T16 = Tim<16>;   // one channel, and TISEL reaches LSI
+// Letter l's six: every instance this suite had never counted.
+using T6 = Tim<6>;     // basic: no channel, a TRGO and nothing else
+using T7 = Tim<7>;     // basic, and LPTIM2's vector-mate
+using T14 = Tim<14>;   // one channel, no slave, no master, no BDTR
+using T15 = Tim<15>;   // two channels, one complement, a slave controller
+using T17 = Tim<17>;   // one channel and its complement
 
 // ---- the pads --------------------------------------------------------------
-// The AF numbers are DS13560 tables 13 and 15; nothing in the device
-// header can check them (stm32g0/pin.hpp says so once for the stratum),
-// so THIS SUITE IS THE CHECK - letters c, f and g are what prove them.
+// The AF numbers are DS13560 tables 13, 15 and 16 (port A AF0..7, port B
+// AF0..7 and port B AF8..15 - TIM4's channels are the only ones here
+// above AF7); nothing in the device header can check them
+// (stm32g0/pin.hpp says so once for the stratum), so THIS SUITE IS THE
+// CHECK - letters c, f, g and l are what prove them.
 constexpr PinSel led_pad{'A', 5, PinFunction::af2};    // TIM2_CH1
 constexpr PinSel cap_pad{'A', 6, PinFunction::af1};    // TIM3_CH1
 constexpr PinSel brk_pad{'A', 6, PinFunction::af2};    // TIM1_BKIN (same pad)
@@ -129,6 +151,31 @@ using PadLed = Pin<'A', 5>;
 using PadCap = Pin<'A', 6>;
 using PadPairN = Pin<'A', 7>;
 using PadPair = Pin<'A', 8>;
+
+// Letter l's pads: the channels of the six instances this suite had
+// never counted, all on pads no other suite of this board moves and each
+// pull-walked by the letter itself before it is believed. THE PORT IS
+// PART OF THE POINT: TIM4's four channels, TIM15's three outputs and
+// TIM17's pair all land on port B, so a complementary pair is one IDR
+// read and a four-channel timer is one sampling loop.
+constexpr PinSel t4_ch1_pad{'B', 6, PinFunction::af9};    // TIM4_CH1
+constexpr PinSel t4_ch2_pad{'B', 7, PinFunction::af9};    // TIM4_CH2
+constexpr PinSel t4_ch3_pad{'B', 8, PinFunction::af9};    // TIM4_CH3
+constexpr PinSel t4_ch4_pad{'B', 9, PinFunction::af9};    // TIM4_CH4
+constexpr PinSel t14_ch1_pad{'A', 7, PinFunction::af4};   // TIM14_CH1 (PA7 again)
+constexpr PinSel t15_ch1n_pad{'B', 13, PinFunction::af5}; // TIM15_CH1N
+constexpr PinSel t15_ch1_pad{'B', 14, PinFunction::af5};  // TIM15_CH1
+constexpr PinSel t15_ch2_pad{'B', 15, PinFunction::af5};  // TIM15_CH2
+constexpr PinSel t17_ch1n_pad{'B', 7, PinFunction::af2};  // TIM17_CH1N (PB7 again)
+constexpr PinSel t17_ch1_pad{'B', 9, PinFunction::af2};   // TIM17_CH1 (PB9 again)
+
+using PadB6 = Pin<'B', 6>;
+using PadB7 = Pin<'B', 7>;
+using PadB8 = Pin<'B', 8>;
+using PadB9 = Pin<'B', 9>;
+using PadB13 = Pin<'B', 13>;
+using PadB14 = Pin<'B', 14>;
+using PadB15 = Pin<'B', 15>;
 
 // ---- the tasks -------------------------------------------------------------
 // A PWM period of 1000 counts: with PSC = 0 that is 64 kHz (fast enough
@@ -177,6 +224,13 @@ volatile uint32_t t3_saw_t4_flag = 0;   // did TIM3's body ever eat TIM4's flag?
 volatile uint32_t t16_captures = 0;
 volatile uint32_t t16_stores = 0;   // captures that became an INTERVAL
 volatile uint32_t exti_edges = 0;
+// Letter l's six, each on its own vector (two of them shared with
+// something that is not a timer at all).
+volatile uint32_t t6_update_calls = 0;
+volatile uint32_t t7_update_calls = 0;
+volatile uint32_t t14_update_calls = 0;
+volatile uint32_t t15_update_calls = 0;
+volatile uint32_t t17_update_calls = 0;
 
 void clear_counts() {
     t1_up_calls = 0;
@@ -190,6 +244,11 @@ void clear_counts() {
     t16_captures = 0;
     t16_stores = 0;
     exti_edges = 0;
+    t6_update_calls = 0;
+    t7_update_calls = 0;
+    t14_update_calls = 0;
+    t15_update_calls = 0;
+    t17_update_calls = 0;
 }
 
 // =============================================================================
@@ -268,6 +327,16 @@ uint16_t sample_permille(uint8_t shift, uint32_t samples) {
     return static_cast<uint16_t>((high * 1000u + samples / 2u) / samples);
 }
 
+/// The same census on PORT B, where letter l's six instances put their
+/// channels. Same rule: nothing here branches on data.
+uint16_t sample_permille_b(uint8_t shift, uint32_t samples) {
+    uint32_t high = 0;
+    for (uint32_t i = 0; i < samples; ++i) {
+        high += (Port<'B'>::in() >> shift) & 1u;
+    }
+    return static_cast<uint16_t>((high * 1000u + samples / 2u) / samples);
+}
+
 /// The two halves of a complementary pair sampled IN THE SAME READ - one
 /// IDR access carries both pads, so "were they ever both high" is a fact
 /// about one instant and not about two.
@@ -289,6 +358,18 @@ PairCensus census_pair(uint8_t shift_a, uint8_t shift_b, uint32_t samples) {
     }
     return {both, a, b, samples - a - b + both};
 }
+PairCensus census_pair_b(uint8_t shift_a, uint8_t shift_b, uint32_t samples) {
+    uint32_t a = 0, b = 0, both = 0;
+    for (uint32_t i = 0; i < samples; ++i) {
+        const uint32_t v = Port<'B'>::in();
+        const uint32_t x = (v >> shift_a) & 1u;
+        const uint32_t y = (v >> shift_b) & 1u;
+        a += x;
+        b += y;
+        both += x & y;
+    }
+    return {both, a, b, samples - a - b + both};
+}
 
 /// Every timer and pad this suite touches back to reset.
 void quiet_everything() {
@@ -297,22 +378,44 @@ void quiet_everything() {
     Nvic::disable(T2::irq());
     Nvic::disable(T3::irq());
     Nvic::disable(T16::irq());
+    Nvic::disable(T6::irq());
+    Nvic::disable(T7::irq());
+    Nvic::disable(T14::irq());
+    Nvic::disable(T15::irq());
+    Nvic::disable(T17::irq());
     Nvic::disable(EXTI4_15_IRQn);
     T1::release();
     T2::release();
     T3::release();
     T4::release();
     T16::release();
+    T6::release();
+    T7::release();
+    T14::release();
+    T15::release();
+    T17::release();
     (void)Exti::release(PadLed::pin_number);
     PadLed::output(false);
     PadCap::input(PinPull::none);
     PadPair::input(PinPull::none);
     PadPairN::input(PinPull::none);
+    PadB6::input(PinPull::none);
+    PadB7::input(PinPull::none);
+    PadB8::input(PinPull::none);
+    PadB9::input(PinPull::none);
+    PadB13::input(PinPull::none);
+    PadB14::input(PinPull::none);
+    PadB15::input(PinPull::none);
     Nvic::clear_pending(T1::irq());
     Nvic::clear_pending(T1::cc_irq());
     Nvic::clear_pending(T2::irq());
     Nvic::clear_pending(T3::irq());
     Nvic::clear_pending(T16::irq());
+    Nvic::clear_pending(T6::irq());
+    Nvic::clear_pending(T7::irq());
+    Nvic::clear_pending(T14::irq());
+    Nvic::clear_pending(T15::irq());
+    Nvic::clear_pending(T17::irq());
     Nvic::clear_pending(EXTI4_15_IRQn);
 }
 
@@ -321,6 +424,19 @@ void quiet_everything() {
 //     refusals - and the pads this suite is about to rely on
 // =============================================================================
 void ta_block() {
+    // PA8 IS UCPD1_CC1, AND THAT IS WHY ITS PULL CHECK USED TO FAIL ABOUT
+    // ONE RUN IN THREE. RM0444 7.3.16: the Type-C DEAD-BATTERY pull-downs
+    // on UCPD1_CC1 (PA8) and UCPD1_CC2 (PB15) are CONNECTED out of a
+    // power-on and stay connected until SYSCFG_CFGR1's strobe releases
+    // them - a few kilohms against the port's own forty, so a pad asked
+    // to follow its 40 k pull-up sits somewhere between the rails and
+    // reads whichever way the threshold falls that minute. The strobe is
+    // ONE-WAY for the power cycle, so this is done once, here, before
+    // anything asks PA8 a question. (Measured on PB15 by
+    // test_stm32_rtc's letter k; the release is what makes PA8's leg
+    // below repeatable.)
+    const bool rd_released = ucpd_dead_battery(1, false);
+
     print(serial, "  present: TIM1=", tim_present(1), " TIM2=", tim_present(2),
           " TIM3=", tim_present(3), " TIM4=", tim_present(4), " TIM6=", tim_present(6),
           " TIM7=", tim_present(7), " TIM14=", tim_present(14), " TIM15=", tim_present(15),
@@ -426,7 +542,16 @@ void ta_block() {
     bench.verdict("PA6 is electrically free (it follows its own pull)",
                   pad_follows_pull<PadCap>());
     bench.verdict("so is PA7", pad_follows_pull<PadPairN>());
-    bench.verdict("and so is PA8", pad_follows_pull<PadPair>());
+    const bool pa8_free = pad_follows_pull<PadPair>();
+    print(serial, "  PA8 is UCPD1_CC1: SYSCFG's dead-battery strobe ",
+          rd_released ? "released the Rd" : "WAS NOT AVAILABLE",
+          " before the check, and the pad ", pa8_free ? "follows" : "DOES NOT follow",
+          " its own pull", crlf);
+    bench.verdict("and so does PA8, ONCE THE TYPE-C DEAD-BATTERY PULL-DOWN IS "
+                  "RELEASED - 7.3.16 connects an Rd to UCPD1_CC1 out of a "
+                  "power-on, and the strobe this letter spends first is what "
+                  "makes the pad's own 40 k pull-up the strongest thing on it",
+                  rd_released && pa8_free);
     PadLed::output(true);
     settle();
     const bool led_high = PadLed::read();
@@ -1539,6 +1664,324 @@ void tk_errata() {
 }
 
 // =============================================================================
+// l - the six instances this suite had never counted
+// =============================================================================
+//
+// TIM1, TIM2, TIM3 and TIM16 carry every letter above; TIM4 has appeared
+// only as the other half of TIM3's vector. That leaves SIX instances of
+// this chapter's ten that had never counted a cycle here: TIM4 itself,
+// the two basic timers, and the three one-or-two-channel ones. Each is
+// asked the same three questions, and NOT ONE EXPECTATION IS HARD-CODED:
+// the channel count, the counter width, the break unit and the vector all
+// come out of the reserve, so a part with a different geometry gets a
+// different test from the same source.
+//
+//   1. does it count PCLK at the prescaler it was given? (against
+//      SysTick, which is the wall letter b already uses - so what this
+//      proves is the DIVIDER and the enable, not the oscillator: both
+//      ride HCLK)
+//   2. does its update interrupt reach ITS OWN VECTOR? Four of the six
+//      are on lines they do not own alone - TIM4 with TIM3, TIM6 with
+//      the DAC and LPTIM1, TIM7 with LPTIM2, TIM17 with an FDCAN line -
+//      and a wrong name in the reserve is a silent Default_Handler spin,
+//      which is exactly what this question catches
+//   3. and for the four with output channels, does a PWM reach a pad at
+//      the duty asked? TIM6 and TIM7 have no channel at all (23.2), so
+//      their update event IS their whole output; their TRGO's only
+//      consumers on this part are the DAC and the ADC, which are
+//      test_stm32_analog's and are measured there.
+
+/// Percent difference of `v` from `want`, x10 (15 means 1.5 %).
+uint32_t permille_off(uint32_t v, uint32_t want) {
+    if (want == 0u) {
+        return 0xFFFFFFFFu;
+    }
+    const uint32_t d = v > want ? v - want : want - v;
+    return static_cast<uint32_t>((static_cast<uint64_t>(d) * 1000ULL) / want);
+}
+
+/// Questions 1 and 2 for one instance. `calls` is the counter its own
+/// vector's handler bumps.
+template <class T>
+bool instance_counts_and_interrupts(const char* name, volatile uint32_t& calls) {
+    // 1. THE TIME BASE. PSC = 63 makes a 1 MHz counter out of a 64 MHz
+    // PCLK, so a 10 ms window is 10000 counts - inside every one of these
+    // counters and long enough that the window's own ends do not matter.
+    T::init();
+    const bool cfg = T::configure({.prescaler = 63, .period = T::max_period});
+    T::enable(true);
+    console_drain();
+    const uint32_t c0 = cycles_now();
+    const uint32_t n0 = T::count();
+    while (cycles_now() - c0 < 10'000u * cycles_per_us) {
+    }
+    const uint32_t n1 = T::count();
+    const uint32_t c1 = cycles_now();
+    T::enable(false);
+    const uint32_t counted = (n1 - n0) & T::max_period;
+    const uint32_t want = (c1 - c0) / 64u;
+    const uint32_t off = permille_off(counted, want);
+
+    // 2. THE UPDATE INTERRUPT, on whatever vector the reserve names.
+    // ARR = 999 on that same 1 MHz counter is 1 kHz, so a 20 ms window
+    // is twenty updates.
+    calls = 0;
+    T::init();
+    const bool cfg2 = T::configure({.prescaler = 63, .period = 999});
+    T::interrupts(T::update_interrupt, true);
+    Nvic::clear_pending(T::irq());
+    Nvic::enable(T::irq());
+    T::enable(true);
+    const uint32_t s0 = cycles_now();
+    while (cycles_now() - s0 < 20'000u * cycles_per_us) {
+    }
+    T::enable(false);
+    Nvic::disable(T::irq());
+    const uint32_t n = calls;
+    T::release();
+
+    print(serial, "  ", name, ": ", counted, " counts against ", (c1 - c0) / 64u,
+          " expected (", off, " per mille off), ", n,
+          " updates in a 20 ms window (20 due, the window's own ends worth "
+          "one) on NVIC line ", static_cast<uint32_t>(T::irq()),
+          "; the reserve says ", static_cast<uint32_t>(T::channels),
+          " channel(s), ", static_cast<uint32_t>(T::complementary_channels),
+          " complementary, ", static_cast<uint32_t>(T::counter_bits), " bits",
+          crlf);
+    return cfg && cfg2 && off <= 20u && n >= 19u && n <= 21u;
+}
+
+void tl_six_instances() {
+    quiet_everything();
+    clear_counts();
+
+    // THE PADS FIRST, as every pull-walked letter of this stratum does.
+    // PA7 is letter a's already (TIM1_CH1N); the seven port-B pads are
+    // new and are asked the same question here. PB15 is UCPD1_CC2 and
+    // needs the same dead-battery release letter a spends for PA8 - it
+    // is one strobe for both pads and it is one-way for the power cycle,
+    // so spending it again here costs nothing and makes this letter
+    // stand on its own when it is run alone.
+    const bool rd_released = ucpd_dead_battery(1, false);
+    Rcc::io_clock('B', true);
+    const bool b6 = pad_follows_pull<PadB6>();
+    const bool b7 = pad_follows_pull<PadB7>();
+    const bool b8 = pad_follows_pull<PadB8>();
+    const bool b9 = pad_follows_pull<PadB9>();
+    const bool b13 = pad_follows_pull<PadB13>();
+    const bool b14 = pad_follows_pull<PadB14>();
+    const bool b15 = pad_follows_pull<PadB15>();
+    print(serial, "  pull-walk: PB6 ", b6, " PB7 ", b7, " PB8 ", b8, " PB9 ",
+          b9, " PB13 ", b13, " PB14 ", b14, " PB15 ", b15,
+          " (PB15 is UCPD1_CC2; the dead-battery strobe ",
+          rd_released ? "was spent first" : "WAS NOT AVAILABLE", ")", crlf);
+    bench.verdict("the seven port-B pads this letter drives are electrically "
+                  "free - each follows its own internal pull between the "
+                  "rails, PB15 included once this letter has spent the "
+                  "Type-C dead-battery strobe it shares with PA8",
+                  rd_released && b6 && b7 && b8 && b9 && b13 && b14 && b15);
+
+    // QUESTIONS 1 AND 2, instance by instance.
+    const bool t4_ok = instance_counts_and_interrupts<T4>("TIM4", t4_update_calls);
+    bench.verdict("TIM4 counts PCLK at its prescaler and its update reaches "
+                  "the vector it SHARES with TIM3",
+                  t4_ok);
+    const bool t6_ok = instance_counts_and_interrupts<T6>("TIM6", t6_update_calls);
+    bench.verdict("TIM6, a basic timer with no channel at all, counts and "
+                  "reports on the line it shares with the DAC and LPTIM1",
+                  t6_ok);
+    const bool t7_ok = instance_counts_and_interrupts<T7>("TIM7", t7_update_calls);
+    bench.verdict("TIM7 likewise, on the line it shares with LPTIM2",
+                  t7_ok);
+    const bool t14_ok = instance_counts_and_interrupts<T14>("TIM14", t14_update_calls);
+    bench.verdict("TIM14 - one channel, no slave controller, no master mode, "
+                  "no DMA request of any kind - counts and interrupts on a "
+                  "vector of its very own",
+                  t14_ok);
+    const bool t15_ok = instance_counts_and_interrupts<T15>("TIM15", t15_update_calls);
+    bench.verdict("TIM15 does, on its own vector", t15_ok);
+    const bool t17_ok = instance_counts_and_interrupts<T17>("TIM17", t17_update_calls);
+    bench.verdict("and TIM17 does, on the line it shares with the SECOND "
+                  "FDCAN interrupt - so all four shared-line names the "
+                  "reserve derives from PRESENCE are the right ones, which a "
+                  "wrong one would have shown as a silent Default_Handler spin",
+                  t17_ok);
+
+    // AND THE BASIC TIMERS' ONE OUTPUT. 23.4.2's MMS is all TIM6 and TIM7
+    // have to say to the rest of the chip; its consumers here are the DAC
+    // and the ADC, which belong to another suite. What is checked is that
+    // the master mode exists on them and that a CHANNEL does not.
+    T6::init();
+    T7::init();
+    const bool t6_master = T6::master(TimMasterMode::update);
+    const bool t7_master = T7::master(TimMasterMode::update);
+    const bool no_channels = !T6::output_channel(0, {}) && !T7::output_channel(0, {}) &&
+                             !T6::set_compare(0, 10) && T6::channels == 0u &&
+                             T7::channels == 0u;
+    const bool no_slave = !T6::slave({.mode = TimSlaveMode::gated}) &&
+                          !T7::slave({.mode = TimSlaveMode::gated});
+    print(serial, "  TIM6/TIM7: CR2.MMS accepted ", t6_master, "/", t7_master,
+          ", channels ", static_cast<uint32_t>(T6::channels), "/",
+          static_cast<uint32_t>(T7::channels),
+          " - their TRGO's only consumers on this part are the DAC and the "
+          "ADC, and test_stm32_analog measures both", crlf);
+    bench.verdict("the basic timers ARE what 23.2 says: a master mode that "
+                  "publishes TRGO, and no channel, no slave controller and no "
+                  "compare register to refuse a channel with",
+                  t6_master && t7_master && no_channels && no_slave);
+    T6::release();
+    T7::release();
+
+    // QUESTION 3: A PWM ON A PAD, per instance with channels.
+    //
+    // TIM4's FOUR, all on port B and therefore all in one sampling loop's
+    // reach. Four different duties at once, so a channel wired to the
+    // wrong CCR shows up as the wrong number and not as no number.
+    T4::init();
+    const bool t4_cfg = T4::configure({.prescaler = 0, .period = pwm_top,
+                                       .auto_reload_preload = true});
+    TimPad<t4_ch1_pad>::claim();
+    TimPad<t4_ch2_pad>::claim();
+    TimPad<t4_ch3_pad>::claim();
+    TimPad<t4_ch4_pad>::claim();
+    const uint16_t t4_asks[4] = {200, 400, 600, 800};
+    bool t4_channels = t4_cfg;
+    for (uint8_t ch = 0; ch < 4u; ++ch) {
+        t4_channels = t4_channels &&
+                      T4::output_channel(ch, {.mode = TimOutputMode::pwm1,
+                                              .compare = t4_asks[ch]});
+    }
+    T4::enable(true);
+    spin_cycles(SysClock::hz / 1000u);
+    uint16_t t4_got[4];
+    t4_got[0] = sample_permille_b(6, 40000u);
+    t4_got[1] = sample_permille_b(7, 40000u);
+    t4_got[2] = sample_permille_b(8, 40000u);
+    t4_got[3] = sample_permille_b(9, 40000u);
+    print(serial, "  TIM4 at 64 kHz, four channels at once: PB6 ", t4_got[0],
+          " PB7 ", t4_got[1], " PB8 ", t4_got[2], " PB9 ", t4_got[3],
+          " per mille, asked 200/400/600/800", crlf);
+    bool t4_duties = t4_channels;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        const int32_t err = static_cast<int32_t>(t4_got[i]) -
+                            static_cast<int32_t>(t4_asks[i]);
+        if (err > 25 || err < -25) {
+            t4_duties = false;
+        }
+    }
+    bench.verdict("TIM4's four channels drive four pads at four different "
+                  "duties in one period - the reserve's channel count for it "
+                  "is the silicon's",
+                  t4_duties);
+    T4::release();
+    PadB6::input(PinPull::none);
+    PadB7::input(PinPull::none);
+    PadB8::input(PinPull::none);
+    PadB9::input(PinPull::none);
+
+    // TIM14's ONE, on PA7 at AF4 - the same pad letter g drives as
+    // TIM1_CH1N at AF2, which is what makes the alternate-function
+    // multiplexer visible: one pad, two timers, whichever AF says.
+    T14::init();
+    TimPad<t14_ch1_pad>::claim();
+    using T14Pwm = TimPwm<T14, 0, pwm_top>;
+    static_assert(PwmChannel<T14Pwm>);
+    const bool t14_up = T14Pwm::setup(0);
+    T14Pwm::duty(350);
+    spin_cycles(SysClock::hz / 1000u);
+    const uint16_t t14_got = sample_permille(PadPairN::pin_number, 40000u);
+    print(serial, "  TIM14_CH1 on PA7 at AF4 (letter g's TIM1_CH1N pad at "
+          "AF2): duty 350 asked, ", t14_got, " per mille read", crlf);
+    bench.verdict("TIM14's single channel reaches a pad, and the SAME PAD "
+                  "carries a different timer under a different alternate "
+                  "function - the AF number is what chooses, and this is the "
+                  "check the device header cannot make",
+                  t14_up && t14_got + 25u >= 350u && t14_got <= 375u);
+    T14::release();
+    PadPairN::input(PinPull::none);
+
+    // TIM15: TWO channels AND a complement, all three on port B, so one
+    // IDR read carries the pair - the census letter g makes of TIM1's.
+    T15::init();
+    TimPad<t15_ch1_pad>::claim();
+    TimPad<t15_ch1n_pad>::claim();
+    TimPad<t15_ch2_pad>::claim();
+    using T15Pair = TimPairPwm<T15, 0, pwm_top>;
+    static_assert(PwmChannel<T15Pair>);
+    const bool t15_up = T15Pair::setup(0, tim_dead_time_code(64));
+    T15Pair::duty(300);
+    const bool t15_ch2 = T15::output_channel(1, {.mode = TimOutputMode::pwm1,
+                                                 .compare = 700});
+    spin_cycles(SysClock::hz / 1000u);
+    const PairCensus t15c = census_pair_b(14, 13, 40000u);
+    const uint16_t t15_ch2_got = sample_permille_b(15, 40000u);
+    const uint32_t t15_a = (t15c.a_high * 1000u + 20000u) / 40000u;
+    const uint32_t t15_b = (t15c.b_high * 1000u + 20000u) / 40000u;
+    // THE DEAD TIME IS TAKEN OFF BOTH HALVES, and the arithmetic is the
+    // verdict rather than a tolerance: at CKD = 1 one DTG tick is one
+    // timer clock tick, so a dead time of D ticks out of a period of
+    // top + 1 is D per mille off EACH output.
+    const uint32_t t15_dt = (static_cast<uint32_t>(T15Pair::dead_time_ticks()) *
+                             1000u) / (static_cast<uint32_t>(pwm_top) + 1u);
+    const uint32_t t15_want_a = 300u - t15_dt;
+    const uint32_t t15_want_b = 700u - t15_dt;
+    print(serial, "  TIM15: CH1 on PB14 ", t15_a, " per mille, CH1N on PB13 ",
+          t15_b, ", both high together in ", t15c.both_high, " of 40000 reads;"
+          " CH2 on PB15 ", t15_ch2_got, " per mille. Asked 300 and 700 with a "
+          "dead time of ", static_cast<uint32_t>(T15Pair::dead_time_ticks()),
+          " ticks = ", t15_dt, " per mille off each half, so the pair is due ",
+          t15_want_a, " and ", t15_want_b, crlf);
+    bench.verdict("TIM15 drives a COMPLEMENTARY PAIR and a second, "
+                  "independent channel at once: the pair's two halves are "
+                  "never both high in forty thousand samples of one instant, "
+                  "and channel 2 carries its own duty beside them",
+                  t15_up && t15_ch2 && t15c.both_high == 0u &&
+                      t15_ch2_got + 25u >= 700u && t15_ch2_got <= 725u);
+    bench.verdict("...and the dead time 25.5.16's generator inserts is taken "
+                  "off BOTH halves, exactly: each output lands at its own duty "
+                  "less the dead time, so the two sum to a thousand less TWICE "
+                  "it and not to a thousand",
+                  t15_a + 20u >= t15_want_a && t15_a <= t15_want_a + 20u &&
+                      t15_b + 20u >= t15_want_b && t15_b <= t15_want_b + 20u);
+    T15::release();
+    PadB13::input(PinPull::none);
+    PadB14::input(PinPull::none);
+    PadB15::input(PinPull::none);
+
+    // TIM17: one channel and its complement, again both on port B.
+    T17::init();
+    TimPad<t17_ch1_pad>::claim();
+    TimPad<t17_ch1n_pad>::claim();
+    using T17Pair = TimPairPwm<T17, 0, pwm_top>;
+    const bool t17_up = T17Pair::setup(0, tim_dead_time_code(64));
+    T17Pair::duty(450);
+    spin_cycles(SysClock::hz / 1000u);
+    const PairCensus t17c = census_pair_b(9, 7, 40000u);
+    const uint32_t t17_a = (t17c.a_high * 1000u + 20000u) / 40000u;
+    const uint32_t t17_b = (t17c.b_high * 1000u + 20000u) / 40000u;
+    const uint32_t t17_dt = (static_cast<uint32_t>(T17Pair::dead_time_ticks()) *
+                             1000u) / (static_cast<uint32_t>(pwm_top) + 1u);
+    const uint32_t t17_want_a = 450u - t17_dt;
+    const uint32_t t17_want_b = 550u - t17_dt;
+    print(serial, "  TIM17: CH1 on PB9 ", t17_a, " per mille, CH1N on PB7 ",
+          t17_b, ", both high together in ", t17c.both_high, " of 40000 reads "
+          "(asked 450 with the same dead time, so due ", t17_want_a, " and ",
+          t17_want_b, ")", crlf);
+    bench.verdict("TIM17's pair too - one channel, one complement, never both "
+                  "high, and both halves at their own duty less the dead time, "
+                  "on the last of the six instances that had never driven "
+                  "anything here",
+                  t17_up && t17c.both_high == 0u &&
+                      t17_a + 20u >= t17_want_a && t17_a <= t17_want_a + 20u &&
+                      t17_b + 20u >= t17_want_b && t17_b <= t17_want_b + 20u);
+    T17::release();
+    PadB7::input(PinPull::none);
+    PadB9::input(PinPull::none);
+
+    quiet_everything();
+}
+
+// =============================================================================
 // The menu
 // =============================================================================
 void banner() {
@@ -1613,6 +2056,41 @@ extern "C" void TIM3_TIM4_IRQHandler() {
     }
 }
 
+/// Letter l's four other lines. Two of them are shared with something
+/// that is not a timer at all - TIM6 with the DAC and LPTIM1, TIM17 with
+/// the second FDCAN interrupt - and the body still answers only for the
+/// flags its own DIER enabled, which is the whole point of an isr() that
+/// returns what it served.
+extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
+    if ((T6::isr() & T6::update_flag) != 0u) {
+        t6_update_calls = t6_update_calls + 1u;
+    }
+}
+
+extern "C" void TIM7_LPTIM2_IRQHandler() {
+    if ((T7::isr() & T7::update_flag) != 0u) {
+        t7_update_calls = t7_update_calls + 1u;
+    }
+}
+
+extern "C" void TIM14_IRQHandler() {
+    if ((T14::isr() & T14::update_flag) != 0u) {
+        t14_update_calls = t14_update_calls + 1u;
+    }
+}
+
+extern "C" void TIM15_IRQHandler() {
+    if ((T15::isr() & T15::update_flag) != 0u) {
+        t15_update_calls = t15_update_calls + 1u;
+    }
+}
+
+extern "C" void TIM17_FDCAN_IT1_IRQHandler() {
+    if ((T17::isr() & T17::update_flag) != 0u) {
+        t17_update_calls = t17_update_calls + 1u;
+    }
+}
+
 /// TIM16's line is shared with an FDCAN one. In letter j the capture
 /// feeds a util MeterLatch; everywhere else it is only counted, so the
 /// reading is taken either way and `kernel_mode` says where it goes.
@@ -1660,6 +2138,9 @@ int main() {
     bench.letter('j', "MeterSampler inside a real kernel, fed by a capture ISR",
                  tj_meter_ao);
     bench.letter('k', "ES0548 2.7.2 staged with a control", tk_errata);
+    bench.letter('l', "the six instances never counted here: TIM4, TIM6, "
+                      "TIM7, TIM14, TIM15, TIM17",
+                 tl_six_instances);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL64" : "FAILED",

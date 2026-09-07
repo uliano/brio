@@ -157,10 +157,18 @@ and port F only on 0 and 1.
   measured in `test_stm32_rtc` letter `k`, where PB15 is also RTC_REFIN:
   the pad does NOT follow its own internal pull-up with the Rd
   connected, and does once `ucpd_dead_battery(1, false)` has released
-  it. A push-pull driver wins either way. This is very probably the
-  mechanism behind the intermittent PA8 pull-up failure
-  [bench.md](../bench.md) records as a desk fault, and it is a fact
-  about the silicon's reset state rather than about the desk.
+  it. A push-pull driver wins either way. **AND IT WAS THE MECHANISM
+  BEHIND THE INTERMITTENT PA8 PULL-UP FAILURE** the tim and exti suites
+  had been meeting about one run in three: both now spend the strobe
+  before the precondition - `test_stm32_tim`'s letter `a`,
+  `test_stm32_exti`'s letter `b` - and the verdict has passed five z
+  runs of each. It was never the desk. THE RELEASE SURVIVES A SYSTEM
+  RESET (measured over SWD: after a reset through the probe with no
+  strobe spent, PB15 and PA8 under their pull-ups read HIGH, and the
+  strobe changes nothing) - 7.3.16's "upon power on" is literal, and
+  only a power-on connects the Rd again; a program spends the strobe
+  once per power cycle, and a suite letter spends it anyway because it
+  cannot know which reset it is running after.
 
 ## Not covered yet
 
