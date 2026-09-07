@@ -100,6 +100,7 @@
 
 #include "stm32g0/clock.hpp"
 #include "stm32g0/device_tables.hpp"
+#include "stm32g0/dma_engine.hpp"
 #include "stm32g0/exti.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/pin.hpp"
@@ -1266,30 +1267,14 @@ struct Usart {
 
 // ---- the task -----------------------------------------------------------------
 
-/**
- * The "no DMA engine" default of the two optional Uart engine slots.
- *
- * It is a TAG, not a base class: `present` is the only thing the task
- * asks about, and it asks with `if constexpr`, so every engine branch -
- * the pump, the harvest, the completion path and the state they need -
- * disappears from a Uart that does not name one. The proof is the
- * measured kind: the release images of every app that uses no engine are
- * BYTE-IDENTICAL to the ones built before these parameters existed
- * (docs/stm32g0/dma.md records the gate).
- *
- * IT LIVES HERE AND NOT IN stm32g0/dma.hpp, and the reason is the whole
- * point of an optional slot: usart.hpp must not include dma.hpp, or every
- * program with a console would carry the DMA driver. An application that
- * wants an engine includes both headers and names the channel; one that
- * does not never sees the controller at all - which is also why the task
- * below reaches its engines only through THEIR OWN published names
- * (service(), flag_complete, flag_error) and never spells a DmaChannel or
- * a DmaFlag.
+/*
+ * The "no DMA engine" default of the two optional Uart engine slots is
+ * `NoDmaEngine`, and it lives in stm32g0/dma_engine.hpp (included
+ * above): spi.hpp's own two slots take the same tag, and two headers
+ * cannot each define it. That file carries the reasoning - a tag, not a
+ * base class; a slot that folds to nothing; and why a driver with an
+ * optional engine must never include stm32g0/dma.hpp.
  */
-struct NoDmaEngine {
-    NoDmaEngine() = delete;
-    static constexpr bool present = false;
-};
 
 /// Two engines on one transport must not name the same DMA channel: a
 /// channel moves data ONE way, and pointing both directions at it would

@@ -896,6 +896,45 @@ public:
         return true;
     }
 
+    /**
+     * The same block from ONE CELL, sent `length` times: the memory
+     * pointer does not increment. What a full-duplex bus needs for the
+     * transmit side of a READ - the clock has to run, so something must
+     * be shifted out, and the dummy is one byte of the caller's that
+     * stays put for the whole block.
+     *
+     * A SIBLING VERB and not a defaulted argument to start(), and the
+     * reason is measured: the samc21 campaign tried the defaulted
+     * argument first and it MOVED three pre-existing images, where the
+     * sibling restored byte-identity. Byte-identity outranks API
+     * economy (ruling 2026-09-02).
+     */
+    static bool start_fixed(const Elem* cell, uint16_t length) {
+        if (busy_ || cell == nullptr || length == 0u) {
+            return false;
+        }
+        in_flight_ = length;
+        busy_ = true;
+        if (!Channel::load(DmaTransfer{
+                .peripheral = data_,
+                .memory = const_cast<Elem*>(cell),
+                .count = length,
+                .config = {.direction = DmaDirection::memory_to_peripheral,
+                           .circular = false,
+                           .memory_to_memory = false,
+                           .peripheral_increment = false,
+                           .memory_increment = false,
+                           .peripheral_width = width,
+                           .memory_width = width,
+                           .priority = priority_},
+            })) {
+            busy_ = false;
+            in_flight_ = 0;
+            return false;
+        }
+        return true;
+    }
+
     /// The block ended - called from the channel's handler when its
     /// completion flag is up.
     /// @return the elements the block carried, so the owner can release
@@ -1042,6 +1081,36 @@ public:
                        .memory_to_memory = false,
                        .peripheral_increment = false,
                        .memory_increment = true,
+                       .peripheral_width = width,
+                       .memory_width = width,
+                       .priority = priority_},
+        });
+    }
+
+    /**
+     * `length` elements into ONE CELL, thrown away: the memory pointer
+     * does not increment. What a full-duplex bus needs for the receive
+     * side of a WRITE - every frame clocked out brings one back, and a
+     * receiver left unread would overrun. The cell is the caller's and
+     * ends up holding the last frame; nothing else of the block survives.
+     *
+     * A SIBLING VERB, for the reason start_fixed() states.
+     */
+    static bool start_discard(Elem* cell, uint16_t length) {
+        if (cell == nullptr || length == 0u) {
+            return false;
+        }
+        capacity_ = length;
+        taken_ = 0;
+        return Channel::load(DmaTransfer{
+            .peripheral = data_,
+            .memory = cell,
+            .count = length,
+            .config = {.direction = DmaDirection::peripheral_to_memory,
+                       .circular = false,
+                       .memory_to_memory = false,
+                       .peripheral_increment = false,
+                       .memory_increment = false,
                        .peripheral_width = width,
                        .memory_width = width,
                        .priority = priority_},

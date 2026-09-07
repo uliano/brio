@@ -124,6 +124,24 @@ read a write-back and validate it against an erratum that could corrupt
 it; there is no harvest ceremony on this silicon, and `DmaRxEngine::take()`
 is one register read and a subtraction.
 
+### The two verbs a full-duplex bus needs
+
+`DmaTxEngine::start_fixed(cell, n)` sends the SAME cell `n` times and
+`DmaRxEngine::start_discard(cell, n)` throws `n` elements into one -
+the memory pointer simply does not increment. They exist because a
+full-duplex bus has no half-transaction: the transmit side of a READ
+must still put something on the wire to make the clock run, and the
+receive side of a WRITE must still be drained or the peripheral
+overruns. `stm32g0/spi.hpp`'s engined host is their first user (a null
+`tx` feeds 0xFF from a held source, a null `rx` drains into a held sink)
+and `test_stm32_spi` letter `i` is their proof.
+
+They are SIBLING VERBS and not a defaulted argument to `start()`, and
+the reason is measured on the other target: the samc21 campaign tried
+the defaulted argument first and it MOVED three pre-existing images,
+where the sibling restored byte-identity. Byte-identity outranks API
+economy (ruling 2026-09-02).
+
 ### One example per use
 
 Memory to memory - no peripheral, no request, runs on the enable:
@@ -246,7 +264,9 @@ wires.
 
 **A REQUEST IS A LEVEL SERVED ON ENABLE, NOT AN EDGE LATCHED ON THE
 RISE** - the opposite of the SAM C21's DMAC, and the reason this driver
-has no `kick()`. Staged on USART1 brought up with its pads never claimed
+has no `kick()`, on any peripheral: the SPI campaign's engined host
+kicks nothing either, and its data phase moves whole with the channels
+merely enabled. Staged on USART1 brought up with its pads never claimed
 (so nothing leaves the die) and TXE therefore standing: a channel armed
 over that standing request moved its whole four-byte block with no
 software trigger of any kind, and the control - the same channel over the

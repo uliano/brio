@@ -16,6 +16,7 @@ void BRIO_STM32G0_TIM16_HANDLER() {}
 void BRIO_STM32G0_TIM17_HANDLER() {}
 void BRIO_STM32G0_DMA1_CH4_UP_HANDLER() {}
 void BRIO_STM32G0_ADC1_HANDLER() {}
+void BRIO_STM32G0_SPI2_HANDLER() {}
 #if defined(USART3_BASE)
 void BRIO_STM32G0_USART3_HANDLER() {}
 #endif
@@ -52,4 +53,9 @@ static_assert(tim_irq(3) == TIM3_IRQn);
 static_assert(adc_irq() == ADC1_COMP_IRQn);
 #else
 static_assert(adc_irq() == ADC1_IRQn);
+#endif
+#if defined(SPI3_BASE)
+static_assert(spi_irq(2) == SPI2_3_IRQn && spi_irq(3) == SPI2_3_IRQn);
+#else
+static_assert(spi_irq(2) == SPI2_IRQn);
 #endif

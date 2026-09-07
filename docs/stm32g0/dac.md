@@ -206,8 +206,9 @@ can and cannot measure about the comparator itself, is in
   trigger, DOR at the new one and the pad reading it back through
   ADC_IN4); both LPTIM outputs, which are waveforms rather than strobes
   and are started, allowed one edge and stopped; and **EXTI 9 through a
-  pull-walked PB9**, the one row of the multiplexer that is a PAD, with
-  the line's port selected in the EXTI and its sense rising.
+  pull-walked PC9**, the one row of the multiplexer that is a PAD, with
+  the line's port selected in the EXTI and its sense rising (PB9 until
+  the desk's I2C self-link put a pull-up on it - [../bench.md](../bench.md)).
 - **The DMA underrun, staged and caught**: a converter asking for a DMA
   with NO channel armed at all raises DMAUDR on the trigger after the
   first, and the flag is clear before. It is write-one-to-clear and

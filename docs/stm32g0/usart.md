@@ -272,10 +272,14 @@ Keeping that identity forced two shapes, and both are on record:
 `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine, opts>` takes a
 `stm32g0/dma.hpp` `DmaTxEngine` and/or `DmaRxEngine`; both default to
 `NoDmaEngine`, which is a TAG and not a base class - `present` is all the
-task asks about and it asks with `if constexpr`. `NoDmaEngine` and
-`uart_engines_distinct()` live in THIS header rather than in `dma.hpp`,
-which is the whole point of an optional slot: usart.hpp must not include
-the DMA driver, or every program with a console would carry it.
+task asks about and it asks with `if constexpr`. It lives in
+`stm32g0/dma_engine.hpp`, a file of two lines and a paragraph, and NOT
+in `dma.hpp`: that separation is the whole point of an optional slot,
+since a driver with one must not include the DMA driver or every program
+with a console (or a bus) would carry the controller. It was usart.hpp's
+own until `stm32g0/spi.hpp` needed the same tag for its own two slots -
+two headers cannot each define it, and neither is the other's natural
+home. `uart_engines_distinct()` stays here.
 
 - **CR3.DMAT / CR3.DMAR** are set in `init()` before the enable, and the
   matching INTERRUPT is NOT armed: the request and the interrupt are the

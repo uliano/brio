@@ -21,6 +21,16 @@ Layering: `SpiBus` is `util/` (pure, host-testable against a fake Bus);
 `SpiHost<n>` is `avrdx/` (knows the silicon). The app's ISR binds the
 vector, as always.
 
+THREE ENGINES REALIZE THIS CONTRACT and none of them bent it:
+`avrdx/spi.hpp`, `samc21/spi.hpp` and `stm32g0/spi.hpp` (2026-09-07),
+the last measured against a real client on the wire - four transactions
+queued from one dispatch, the rejection, both sleep votes and the
+per-bus timeout with `recover()`, with NOT ONE LINE of `util/spi_bus.hpp`,
+`util/bus_master.hpp` or `kernel/` changed for it. The one thing the
+third target added to the Request is a FRAME SIZE (4 to 16 bits, eight
+by default), which the other two do not have because their silicon does
+not; an 8-bit request is spelled identically on all three.
+
 `SpiBus` is an alias of `BusMaster<Bus, P>` (`util/bus_master.hpp`),
 the arbiter shared with I2C - see [i2c-bus.md](i2c-bus.md).
 "SpiDone"/"spi_ok" are the SPI names of `BusDone`/`bus_ok`.
@@ -185,11 +195,17 @@ its rulings in [i2c-bus.md](i2c-bus.md) - one mechanism, both
 vocabularies). On SPI the plausible wedge is not a wire - the host
 clocks itself - but a DEAD ENGINE whose ISR-style completion never
 posts: an AVR host demoted mid-transfer by its SS pin, a DMA channel
-stopped by the 1.10.4 class of death. A wedged transaction then comes
-back `spi_timeout` on the arbiter's clock, `SpiHost::recover()` having
-silenced the stale interrupt, re-armed a demoted host (AVR) or put the
-DMA channels away and reset the SERCOM (SAM), and closed the select
-window so the device sees the transaction END. Size the limit to the
+stopped by the 1.10.4 class of death, a completion interrupt that
+simply never fired. A wedged transaction then comes back `spi_timeout`
+on the arbiter's clock, `SpiHost::recover()` having silenced the stale
+interrupt, re-armed a demoted host (AVR), put the DMA channels away and
+reset the SERCOM (SAM) or run the disable procedure and the RCC reset
+(STM32G0), and closed the select window so the device sees the
+transaction END. STAGED AND MEASURED on the STM32G0
+(`test_stm32_spi` letter j, the third target's own bench): a lost
+interrupt - the ISR body runs and acknowledges the frames but the
+`TransferDone` is never posted - is answered `spi_timeout` in its place,
+and the very next four transactions run to `spi_ok` on the same bus AO. Size the limit to the
 longest legal transaction; polled requests complete inside `start()`
 and never arm it. With `timeout_ticks = 0` (the default) the arbiter
 is byte-identical to the untimed one.

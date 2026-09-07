@@ -652,7 +652,65 @@ gets its dated home in `docs/design/` when taken.
   like any Stop and wakes into LPR (which regulator held VCORE is a
   meter question); 42/42 x3. TIM3/TIM4's ETRSEL name the comparators
   only (TIM3 on code 4 counts nothing - tim.hpp/tim.md corrected). Gate:
-  16/16 stm32g0 identical + the two grown suites, 39/39 samc21.
+  16/16 stm32g0 identical + the two grown suites, 39/39 samc21. THE
+  SAME DAY, THE TAILS BATCH (Opus, reviewed and committed d0acc63):
+  LPTIM2 on its own pads PC0/PC3/PD6 AF2 (all four LPTIM2SEL codes, the
+  waveform, DMAMUX trigger 21, the two asymmetries refused both ways,
+  TRGFLT measured on its own, one vector with two owners - LPTIM2 and
+  TIM7); the six timers never counted (TIM4/6/7/14/15/17: PCLK, their
+  own vectors, PWM on pads, A COMPLEMENTARY PAIR'S DEAD TIME COMES OFF
+  BOTH HALVES exactly); PA8 WAS NEVER THE DESK (the UCPD dead-battery
+  strobe spent in tim/exti, 10/10; and a system reset does NOT
+  re-connect the Rd - measured at review, the batch had said otherwise);
+  uart_stress.py's ladder stopped at the VCP's measured ceiling (the
+  lost tally was the host's own pump, proven with a control). THE SECOND
+  SILICON'S BUILD (2cdba95, Fable's hand): presets, ld and crt for the
+  Nucleo-G071RB and G031K8, the board name derived from the part,
+  bench.py's two types, and BRIO_STM32G0_*_HANDLER - the shared-line
+  handler NAMES derived by presence in the reserve (USART2's line is
+  USART2_LPUART2_IRQHandler on the G0B1 and USART2_IRQHandler on the
+  others), proven on the twelve headers; blink/console/probe build for
+  all three, byte-identical on the G0B1RE; the boards' first power-on
+  waits for their ST-LINK serials. THE G0 BUS CAMPAIGNS OPENED 2026-09-07
+  WITH THE SELF-LINK WIRED AND VERIFIED OVER SWD (bench.md: SPI1
+  PB3/PB4/PB5/PA15 to SPI2 PB10/PC2/PD4/PB12, I2C1 PB8/PB9 to I2C2
+  PA11/PA12 with 2.2k pull-ups; the MB1360's own morpho map, two pins
+  labelled PB11/PB9 and PB12/PB8 carrying PB11 and PB12) and STEP (a)'s
+  SPI HALF DONE (Opus, re-verified by Fable's hand: test_stm32_spi z
+  89/89 x2 incl. cold, canaries exti 89, lptim 82, analog 139 after its
+  DAC letter moved from PB9 - now under the I2C pull-up - to PC9, the
+  gate 18/18 identical + the new suite, samc21 39/39, host 24/24):
+  brio/stm32g0/spi.hpp over ch. 35 WHOLE incl. the I2S personality,
+  disable() IS 35.5.9's procedure (no raw SPE clear exists: ES0548
+  2.12.1 structural), every CR1/CR2 configuration verb refusing with SPE
+  set because THE SILICON ENFORCES NONE OF 35.5.7 (a raw write lands on
+  all seventeen fields, measured), SpiHost with the other targets'
+  Request verbatim plus a frame size (8 by default), SpiClient with the
+  one-ahead pump, the DMA slots (NoDmaEngine moved to dma_engine.hpp;
+  start_fixed/start_discard as sibling verbs), the reserve's SPI facts
+  and BRIO_STM32G0_SPI2_HANDLER, fourteen negatives. MEASURED on the
+  self-link: all eight BR codes exact to PCLK/2 = 32 MHz when the host
+  paces; THIS CORE CANNOT MAKE A CONTINUOUS SPI CLOCK OUT OF SOFTWARE
+  (~330 cycles a frame in a burst, the ladder measures its own loop);
+  both ends on DMA exact to PCLK/4; the four modes, both orders, all
+  thirteen frame sizes exact; NSS four ways (SSOE falls 77 cycles after
+  SPE, NSSP one pulse per frame counted on EXTI 12, MODF from the far
+  pad); CRC 8/16 equal to a bitwise reference; TI exact, FRE not
+  reproduced; 2.12.1 REPRODUCED (a raw SPE clear with FTLVL 3 leaves BSY
+  standing), 2.12.2 not in 32 rounds; OVR keeps the FIRST four frames;
+  the kernel letter (four queued, two rejected, both votes, spi_timeout
+  + recover() and the next four ok - util/spi_bus's third silicon, util
+  untouched); I2S1 master to I2S2 slave on the same three wires
+  (Philips/MSB/LSB/PCM, 16/24/32 bits, CHSIDE, MCKOE's eightfold, UDR);
+  the BR code following the dynamic clock's ladder under a stated
+  ceiling; an SPI interrupt waking a Sleep. FINDINGS: A PAD NOT IN
+  ALTERNATE FUNCTION READS LOW AT ITS PERIPHERAL'S INPUT (clearing SSM
+  on a master whose NSS is a GPIO output held high raises MODF at once
+  - why SpiHost::init never claims the NSS pad; port.md); a polled burst
+  loop erases its own overrun evidence (35.5.11's clear IS "read DR
+  then poll SR"), likewise the I2S UDR; the CRC frame is the one neither
+  side writes; the reset CR2 is the one misaligned DS/FRXTH pair. Next:
+  the I2C half of step (a) on the wired I2C1-I2C2 pair.
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device

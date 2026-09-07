@@ -405,6 +405,160 @@ constexpr uint8_t irtim_second_usart() {
 #endif
 }
 
+// ---- SPI / I2S instances (RM0444 ch. 35) ------------------------------------
+
+/// Register block base of SPIn (n = 1..3), 0 when the device does not
+/// have it. SPI1 and SPI2 sit on every G0 of the pack; SPI3 is the
+/// G0Bx/G0Cx's alone (table 205's footnote), and the header says so with
+/// SPI3_BASE.
+constexpr uint32_t spi_base(uint8_t n) {
+    switch (n) {
+#if defined(SPI1_BASE)
+        case 1: return SPI1_BASE;
+#endif
+#if defined(SPI2_BASE)
+        case 2: return SPI2_BASE;
+#endif
+#if defined(SPI3_BASE)
+        case 3: return SPI3_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool spi_present(uint8_t n) { return spi_base(n) != 0u; }
+
+/// Which APB enable/reset register carries SPIn, and which bit. SPI1 is
+/// the one APB2 instance (as USART1 is); SPI2 and SPI3 sit on APBENR1.
+/// The two registers' bit numbers are the same in APBENRx and APBRSTRx,
+/// so one mask serves both (the enable macro is the one probed).
+struct SpiBusClock {
+    bool apb2 = false;
+    uint32_t mask = 0;
+};
+
+constexpr SpiBusClock spi_bus_clock(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APBENR2_SPI1EN)
+        case 1: return {true, RCC_APBENR2_SPI1EN};
+#endif
+#if defined(RCC_APBENR1_SPI2EN)
+        case 2: return {false, RCC_APBENR1_SPI2EN};
+#endif
+#if defined(RCC_APBENR1_SPI3EN)
+        case 3: return {false, RCC_APBENR1_SPI3EN};
+#endif
+        default: return {};
+    }
+}
+
+/// The NVIC line of SPIn, DERIVED FROM PRESENCE like usart_irq() and
+/// tim_irq(): SPI1 has its own line everywhere, and SPI2's line is
+/// SPI2_3_IRQn on a part that HAS a SPI3 and SPI2_IRQn where none does -
+/// so SPI3_BASE is the probe, and a header that named the shared line
+/// otherwise would fail to compile here rather than bind a wrong vector
+/// in silence. NonMaskableInt_IRQn for an instance the device has not
+/// got: unreachable, Spi<n> refusing it first.
+constexpr IRQn_Type spi_irq(uint8_t n) {
+    switch (n) {
+        case 1: return SPI1_IRQn;
+#if defined(SPI3_BASE)
+        case 2: case 3: return SPI2_3_IRQn;
+#else
+        case 2: return SPI2_IRQn;
+#endif
+        default: return NonMaskableInt_IRQn;
+    }
+}
+
+/// Whether SPIn can also be an I2S (table 205's "I2S support" row): SPI1
+/// everywhere, SPI2 only on the G0Bx/G0Cx, SPI3 nowhere.
+///
+/// THE SPI3 PROBE IS THE RULE, and it is the reserve's usual presence
+/// derivation rather than a copied list: table 205's footnote 1 marks
+/// I2S2 and SPI3 with the SAME condition ("applies to STM32G0B1xx and
+/// STM32G0C1xx only"), so the part that has a third SPI is exactly the
+/// part whose second SPI carries an I2S. The device header's own answer
+/// is IS_I2S_ALL_INSTANCE(x), a POINTER COMPARISON and therefore not a
+/// constant expression (the IS_UART_FIFO_INSTANCE story again) - it
+/// lists SPI1 alone on every smaller header and SPI1 + SPI2 on the
+/// G0Bx/G0Cx, which is what this function states; Spi<n>::has_i2s()
+/// reads that macro at run time and the bench compares the two.
+///
+/// The register FIELDS are no help: every header of the pack declares
+/// I2SCFGR, I2SPR and all their bit macros for the one SPI_TypeDef every
+/// instance is mapped through, so nothing in the register description
+/// distinguishes an instance that has the mode from one that has not.
+constexpr bool spi_has_i2s(uint8_t n) {
+    if (!spi_present(n)) {
+        return false;
+    }
+#if defined(SPI3_BASE)
+    return n <= 2;
+#else
+    return n == 1;
+#endif
+}
+
+/// Where I2Sn's kernel-clock selector sits, and in WHICH register - the
+/// one fact of this chapter that really moves across the family. On the
+/// G0Bx/G0Cx both selectors are RCC_CCIPR2 fields (I2S1SEL at bit 0,
+/// I2S2SEL at bit 2, 5.4.22); on every smaller part there is one I2S and
+/// its selector is RCC_CCIPR bits 15:14, the field the manual spells
+/// I2C2I2S1SEL because the same two bits select I2C2's clock on the big
+/// parts and I2S1's on the small ones (5.4.21's own note).
+///
+/// `pos` is 0xFF when the instance has no I2S at all. The four codes are
+/// the same in both places: 00 SYSCLK, 01 PLLPCLK, 10 HSI16, 11 I2S_CKIN.
+struct I2sClockSelect {
+    uint8_t pos = 0xFF;   ///< bit position of the 2-bit field
+    bool ccipr2 = false;  ///< true = RCC_CCIPR2, false = RCC_CCIPR
+};
+
+constexpr I2sClockSelect i2s_clock_select(uint8_t n) {
+    if (!spi_has_i2s(n)) {
+        return {};
+    }
+#if defined(RCC_CCIPR2_I2S1SEL_Pos)
+    switch (n) {
+        case 1: return {RCC_CCIPR2_I2S1SEL_Pos, true};
+#if defined(RCC_CCIPR2_I2S2SEL_Pos)
+        case 2: return {RCC_CCIPR2_I2S2SEL_Pos, true};
+#endif
+        default: return {};
+    }
+#elif defined(RCC_CCIPR_I2S1SEL_Pos)
+    return n == 1u ? I2sClockSelect{RCC_CCIPR_I2S1SEL_Pos, false} : I2sClockSelect{};
+#else
+    (void)n;
+    return {};
+#endif
+}
+
+/// The DMAMUX request lines SPIn publishes (RM0444 table 56). They live
+/// HERE rather than beside the instance because they are a per-part
+/// TABLE and not a register field - the same reason the LPTIM's trigger
+/// input does - and because SPI3's pair (66/67) is a long way from
+/// SPI1/SPI2's contiguous block. No device header of this pack declares
+/// them: the DMAMUX_REQ_* spellings are ST's HAL, which this project
+/// does not vendor.
+constexpr uint8_t spi_dma_rx_request(uint8_t n) {
+    switch (n) {
+        case 1: return 16;
+        case 2: return 18;
+        case 3: return 66;
+        default: return 0;
+    }
+}
+constexpr uint8_t spi_dma_tx_request(uint8_t n) {
+    switch (n) {
+        case 1: return 17;
+        case 2: return 19;
+        case 3: return 67;
+        default: return 0;
+    }
+}
+
 // ---- FLASH ------------------------------------------------------------------
 //
 // What differs across the family in chapter 3 is the SECOND BANK and the
@@ -2366,6 +2520,11 @@ constexpr IRQn_Type fdcan_irq(uint8_t line) {
 #define BRIO_STM32G0_LPTIM2_HANDLER TIM7_LPTIM2_IRQHandler
 #elif defined(LPTIM2_BASE)
 #define BRIO_STM32G0_LPTIM2_HANDLER LPTIM2_IRQHandler
+#endif
+#if defined(SPI3_BASE)
+#define BRIO_STM32G0_SPI2_HANDLER SPI2_3_IRQHandler
+#else
+#define BRIO_STM32G0_SPI2_HANDLER SPI2_IRQHandler
 #endif
 #if defined(FDCAN1_BASE)
 #define BRIO_STM32G0_TIM16_HANDLER TIM16_FDCAN_IT0_IRQHandler

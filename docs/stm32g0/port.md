@@ -170,6 +170,19 @@ and port F only on 0 and 1.
   once per power cycle, and a suite letter spends it anyway because it
   cannot know which reset it is running after.
 
+**A PAD THAT IS NOT IN ALTERNATE-FUNCTION MODE READS LOW AT ITS
+PERIPHERAL'S INPUT, whatever the pad's own level is.** The GPIO input
+path is live in every mode but analog - which is why an EXTI line can
+watch a pad its owner drives (see above) - but a PERIPHERAL'S alternate
+FUNCTION input is a different route, and it is connected only when
+MODER says alternate. Measured by accident and then on purpose in
+`test_stm32_spi` letter `a`: an SPI master whose NSS pin is an ordinary
+GPIO output sitting HIGH raises MODF the instant SSM is cleared, because
+what the peripheral's NSS input sees is not the pad's high level but the
+disconnected function input's low one. The consequence for a driver is
+that handing a peripheral a hardware input means handing it the PAD, at
+the right AF, and not merely leaving the pin at the right level.
+
 ## Not covered yet
 
 Driver gaps: the port lock (GPIOx_LCKR), the alternate-function tables

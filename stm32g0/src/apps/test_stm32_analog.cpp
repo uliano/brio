@@ -3176,7 +3176,7 @@ using T7m = Tim<7>;
 using T15m = Tim<15>;
 using Lp1 = Lptim<1>;
 using Lp2 = Lptim<2>;
-using PadB9 = Pin<'B', 9>;
+using PadC9 = Pin<'C', 9>;   // EXTI line 9's pad: PC9, free of every wire (PB9 carries the I2C self-link's SDA and its pull-up)
 
 /// Arm one TIMx as a TRGO source and give it one update event.
 template <class T>
@@ -3327,18 +3327,21 @@ void tp_dac_triggers() {
                   lptim_moved == 2u);
 
     // ---- EXTI 9, the one row that is a PAD ---------------------------------
-    // The line is the EXTI's, so the stimulus is a pull-walked PB9 and
-    // the EXTI's own port selection and edge are what put it there.
-    PadB9::input(PinPull::down);
+    // The line is the EXTI's, so the stimulus is a pull-walked pad on
+    // line 9 and the EXTI's own port selection and edge are what put it
+    // there. PC9, since the desk's I2C self-link put a 2.2 k pull-up on
+    // PB9 (the first version walked PB9 and stopped following its
+    // internal pull-down the day the wire arrived - bench.md).
+    PadC9::input(PinPull::down);
     (void)delay_us(clock, 300);
-    const bool b9_low = !PadB9::read();
-    PadB9::input(PinPull::up);
+    const bool c9_low = !PadC9::read();
+    PadC9::input(PinPull::up);
     (void)delay_us(clock, 300);
-    const bool b9_free = b9_low && PadB9::read();
-    PadB9::input(PinPull::down);
+    const bool c9_free = c9_low && PadC9::read();
+    PadC9::input(PinPull::down);
     (void)delay_us(clock, 300);
     const bool exti_ok =
-        Exti::select(9, 'B') && Exti::sense(9, ExtiSense::rising);
+        Exti::select(9, 'C') && Exti::sense(9, ExtiSense::rising);
     (void)Dac::enable(0, false);
     const bool exti_armed =
         Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered,
@@ -3348,19 +3351,19 @@ void tp_dac_triggers() {
     (void)delay_us(clock, 200);
     (void)Dac::write(0, code);
     const uint16_t exti_before = Dac::output(0);
-    PadB9::pull(PinPull::up);
+    PadC9::pull(PinPull::up);
     (void)delay_us(clock, 300);
     const uint16_t exti_after = Dac::output(0);
-    print(serial, "  EXTI9 (PB9 walked up): DOR ", exti_before, " -> ",
+    print(serial, "  EXTI9 (PC9 walked up): DOR ", exti_before, " -> ",
           exti_after, " (asked ", code, ")", crlf);
-    bench.verdict("PB9 follows its own pull, so the EXTI has an edge to see",
-                  b9_free);
+    bench.verdict("PC9 follows its own pull, so the EXTI has an edge to see",
+                  c9_free);
     bench.verdict("and a rising edge on EXTI line 9 triggers the DAC - the "
                   "one row of the multiplexer that is a PAD",
                   exti_ok && exti_armed && exti_before != code &&
                       exti_after == code);
     (void)Exti::release(9);
-    PadB9::release();
+    PadC9::release();
 
     // ---- THE DMA UNDERRUN --------------------------------------------------
     // 16.4.8: a trigger that arrives before the previous DMA request has
