@@ -238,6 +238,26 @@ in with 0 wrong**. Recorded as not reproduced at that rate against that
 receiver, and not as a disproof - a jitter item is about margin, and a
 1063-byte sample at one baud on one bridge does not measure a margin.
 
+## On the third silicon
+
+LPUART1 exists on the G031 as on every G0, and here it **has a vector of
+its own**: `lpuart_irq(1)` is LPUART1_IRQn because there is no USART3 to
+share with, and `BRIO_STM32G0_LPUART1_HANDLER` expands to
+`LPUART1_IRQHandler` - where on the G0B1 it is USART3's shared name.
+`BRIO_STM32G0_USART3_HANDLER` is UNDEFINED on this part, so a suite that
+binds the LPUART by that name fails to compile there rather than binding
+a wrong line.
+
+**AND ON THIS PACKAGE ITS ONLY BONDED PADS ARE THE CONSOLE'S**, PA2/PA3
+at AF6 (the LQFP32 bonds neither PB10/PB11 nor PC0/PC1 - the last two are
+not even implemented on this part, DS12992 table 15). That is a gain and
+a loss at once: `test_stm32_serial`'s letter `n` loses its own-pad half
+there, and three other suites GAIN a console that rides HSI16 while
+their subject moves the clock, because this part's USART2 has no
+kernel-clock multiplexer at all ([usart.md](usart.md)). LPUART1 at
+115200 on HSI16 carried `test_stm32_clock`'s whole ladder, 72 switches
+and 1152 loop-back bytes with none lost.
+
 ## Not covered yet
 
 Driver gaps: none - chapter 34's every field is implemented.

@@ -10,21 +10,38 @@
 // under it.
 //
 // NOTHING TO WIRE. Four pads of port B carry LPTIM1's four signals on
-// AF5 (DS13560 table 15) and three more - PC0, PC3 and PD6 at AF2
-// (tables 17 and 18) - carry LPTIM2's IN1, ETR and OUT; every one of
-// them is walked by ITS OWN INTERNAL PULL, which letter a proves for the
-// first four and letter j for the last three before anything rests on
-// them. The other stimuli are internal: the RTC's alarm A, COMP1's
-// output, and the DMAMUX request generator, which takes LPTIM1_OUT as
-// trigger input 20 and LPTIM2_OUT as 21 (table 56) and so counts either
-// timer's own output edges with no pad and no CPU in the path.
+// AF5 (DS13560 table 15, DS12992 tables 13-17 - PB0, PB5, PB6 and PB7
+// are the same four rows on every package this suite runs on) and three
+// more carry LPTIM2's IN1, ETR and OUT: PC0, PC3 and PD6 at AF2 on the
+// 64-pin parts (tables 17 and 18), PB1, PA5 and PA4 at AF5 on the
+// LQFP32, whose bonding has neither port D nor port C's low pads. Every
+// one of them is walked by ITS OWN INTERNAL PULL, which letter a proves
+// for the first four and letter j for the last three before anything
+// rests on them. The other stimuli are internal: the RTC's alarm A,
+// COMP1's output where the part has a comparator, and the DMAMUX request
+// generator, which takes LPTIM1_OUT as trigger input 20 and LPTIM2_OUT
+// as 21 (table 56) and so counts either timer's own output edges with no
+// pad and no CPU in the path.
 //
 // THE WALL CLOCK IS THE RTC, and it has to be: every TIM of this family
-// stops in Stop and so does SysTick. The calendar runs on the LSE
-// crystal with PREDIV_A 0 / PREDIV_S 32767 - the sleep suite's own
-// split, a 30.5 us stopwatch that keeps counting with every clock in the
-// chip stopped. THE DOMAIN IS NEVER RESET: RTCSEL is left where it is
-// and the backup registers other suites wrote are not touched.
+// stops in Stop and so does SysTick. The calendar runs on whichever
+// 32 kHz-ish root THIS BOARD HAS with PREDIV_A 0 / PREDIV_S 32767 - the
+// sleep suite's own split, a ~30 us stopwatch that keeps counting with
+// every clock in the chip stopped. THE DOMAIN IS NEVER RESET: RTCSEL is
+// left where it is and the backup registers other suites wrote are not
+// touched, so a board whose domain is already committed to a crystal it
+// has not got simply has no wall, and the letters that need one skip.
+//
+// AND THE ROOT IS A BOARD FACT WITH A SCALE ATTACHED. An LSE crystal is
+// 32768 Hz by construction; an LSI is an RC oscillator DS12992 table 46
+// only BOUNDS at 29.5..34 kHz, so a board without a crystal WEIGHS its
+// own LSI at boot (TIM16's capture channel against PCLK, the median of a
+// batch - test_stm32_rtc's own estimator) and every microsecond printed
+// here is converted with that reading. The same board reads its awake
+// windows on the CPU's cycle counter rather than on the RC wall: what is
+// inside such a window is PCLK-derived, so the ratio is exact, and the
+// wall is left for the one thing only it can do - measuring across a
+// Stop.
 //
 // THE BACKSTOP IS THE IWDG, armed once in main() at about 32 seconds and
 // refreshed at the top of every letter and inside every long loop. It
@@ -59,13 +76,14 @@
 //      and never early - and the RTC left at the chapter's own low-power
 //      split while it happens
 //   i  the two errata, as code and as measurement
-//   j  LPTIM2, THE SECOND INSTANCE, on its own three pads (PC0, PC3 and
-//      PD6 at AF2): what the manual says it is not, its own CCIPR field,
-//      its waveform, its input both ways, the input code only it has,
-//      TRGFLT as a threshold - and one vector with two owners, LPTIM2
-//      and TIM7 speaking on the same line
+//   j  LPTIM2, THE SECOND INSTANCE, on the three pads this package
+//      bonds for it: what the manual says it is not, its own CCIPR
+//      field, its waveform, its input both ways, the input code only it
+//      has, TRGFLT as a threshold - and one vector with two owners,
+//      LPTIM2 and TIM7 speaking on the same line where the part has a
+//      TIM7 to speak with
 //
-// build: boards = g0b1re,g071rb
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -134,31 +152,58 @@ using EtrPin = Pin<'B', 6>;
 using In2Pin = Pin<'B', 7>;
 
 // LPTIM2's THREE signals - it has no input channel 2 (figure 271's own
-// footnote) - and they are on OTHER PORTS and ANOTHER alternate function
-// than LPTIM1's: PC0, PC3 and PD6 at AF2 (DS13560 tables 17 and 18).
-// Chosen because no other suite on this board moves them and because
-// nothing on the Nucleo is wired to them; letter j pull-walks all three
-// before anything rests on them, exactly as letter a does for LPTIM1.
+// footnote) - and WHICH PADS CARRY THEM IS A PACKAGE QUESTION, the one
+// question a driver cannot answer for an app: the alternate-function
+// tables give a signal several pads and the BONDING decides which of
+// them exists. On the 64-pin parts they are taken on PC0, PC3 and PD6 at
+// AF2 (DS13560 tables 17 and 18) because no other suite on those boards
+// moves them; on the LQFP32 neither port D nor port C's low pads are
+// bonded at all (DS12992 table 12 - PA0..PA15, PB0..PB9, PC6, PC14,
+// PC15, PF2 and nothing else), so the same three signals are taken where
+// that package really has them: PB1, PA5 and PA4 at AF5 (DS12992 tables
+// 13-17). Letter j pull-walks all three before anything rests on them,
+// exactly as letter a does for LPTIM1, so a pad chosen wrongly is a
+// printed FACT and not a wrong verdict.
+#if defined(STM32G031xx)
+constexpr PinSel out2_sel{'A', 4, PinFunction::af5};    // LPTIM2_OUT
+constexpr PinSel in1_2_sel{'B', 1, PinFunction::af5};   // LPTIM2_IN1
+constexpr PinSel etr2_sel{'A', 5, PinFunction::af5};    // LPTIM2_ETR
+#else
 constexpr PinSel out2_sel{'D', 6, PinFunction::af2};    // LPTIM2_OUT
 constexpr PinSel in1_2_sel{'C', 0, PinFunction::af2};   // LPTIM2_IN1
 constexpr PinSel etr2_sel{'C', 3, PinFunction::af2};    // LPTIM2_ETR
+#endif
 using Out2Pad = LptimPad<out2_sel>;
 using In1Pad2 = LptimPad<in1_2_sel>;
 using Etr2Pad = LptimPad<etr2_sel>;
-using Out2Pin = Pin<'D', 6>;
-using In1Pin2 = Pin<'C', 0>;
-using Etr2Pin = Pin<'C', 3>;
+using Out2Pin = Pin<out2_sel.port, out2_sel.pin>;
+using In1Pin2 = Pin<in1_2_sel.port, in1_2_sel.pin>;
+using Etr2Pin = Pin<etr2_sel.port, etr2_sel.pin>;
 
 /// TIM7, brought up for ONE leg of letter j: it is the other owner of
 /// LPTIM2's vector (table 61), and a shared line is only shown to be
-/// shared by two owners speaking on it.
-using T7 = Tim<7>;
+/// shared by two owners speaking on it - ON A PART THAT HAS A TIM7. The
+/// G031/G041 class has neither TIM6 nor TIM7 and gives each LPTIM a
+/// vector of its own, so the timer this suite must not SPELL there is
+/// reached through an alias whose NUMBER depends on the reserve fact
+/// that gates every branch naming it: `if constexpr` inside a plain
+/// function still instantiates the branch it discards, and a
+/// NON-DEPENDENT `Tim<7>` inside a template body is looked up when the
+/// template is DEFINED. TIM16 is the stand-in because every G0 has one.
+template <bool present>
+using Tim7 = Tim<present ? uint8_t{7} : uint8_t{16}>;
 
 /// COMP1's plus input is PA1 (its code `input2`), which is the pad the
 /// analog campaign precharges. Nothing of this suite drives it except
-/// through that helper.
+/// through that helper. THE COMPARATOR ITSELF IS NOT ON EVERY PART: the
+/// G031/G041 class has none at all (18.1), so `Comp` cannot even be
+/// NAMED there - no template can reach a type that does not exist, and
+/// `#if defined(COMP1_BASE)` is the right and only tool for the four
+/// legs that need one.
 using PadA1 = Pin<'A', 1>;
+#if defined(COMP1_BASE)
 using C1 = Comp<1>;
+#endif
 
 using Dma1 = Dma<1>;
 using EdgeCh = DmaChannel<1, 1>;
@@ -168,28 +213,69 @@ using Gen0 = DmaMuxGenerator<0>;
 // The wall clock: the RTC's sub-second counter
 // ---------------------------------------------------------------------------
 //
-// PREDIV_A 0 / PREDIV_S 32767 from the 32768 Hz crystal: ck_apre is the
-// crystal itself, ck_spre is still exactly 1 Hz, so the calendar is a
-// calendar AND the sub-second counter is a 30.5 us stopwatch that keeps
-// counting through a Stop. Letter h moves the split to the chapter's own
-// low-power one for a while, so every reader of this instrument asks the
-// SILICON what the split is instead of assuming.
+// PREDIV_A 0 / PREDIV_S 32767 from a 32 kHz-ish root: ck_apre is the
+// root itself, ck_spre is one hertz where the root is a crystal, so the
+// calendar is a calendar AND the sub-second counter is a ~30 us
+// stopwatch that keeps counting through a Stop. Letter h moves the split
+// to the chapter's own low-power one for a while, so every reader of
+// this instrument asks the SILICON what the split is instead of
+// assuming. What the instrument's SCALE is - `slow_hz` below - is asked
+// of the board once, in main().
 
-constexpr uint32_t lse_hz = 32768;
 constexpr RtcPrescalers wall_prescalers{.async = 0, .sync = 32767};
 constexpr RtcPrescalers lowpower_prescalers{.async = 127, .sync = 255};
 
 bool wall_ready = false;
+
+/// THE 32 kHz ROOT THIS BOARD HAS, and it is one fact wearing two hats:
+/// the RTC runs the wall on it AND the LPTIM takes it as the kernel
+/// clock of every leg that wants a slow, Stop-surviving counter. A
+/// crystal where there is one, LSI where there is not.
+LptimClock slow_clock = LptimClock::lse;
+/// Its name, for the lines that print which root a leg ran on.
+const char* slow_name() {
+    return slow_clock == LptimClock::lse ? "LSE" : "LSI";
+}
+/// Its rate in hertz: 32768 by construction on a crystal, and on an LSI
+/// the rate this boot MEASURED (table 46 only bounds that oscillator at
+/// 29.5..34 kHz, so a nominal here would put per-cent-sized errors on
+/// every microsecond this suite prints).
+uint32_t slow_hz = 32768;
+bool wall_on_lse = true;
+/// Whether the boot measurement really happened: false on a board that
+/// runs the crystal (nothing to weigh) and false where the LSI's edges
+/// never reached the meter, which the banner then says out loud rather
+/// than quoting a rate nobody watched.
+bool lsi_weighed = false;
+/// What letter a's LSI row prints its reading against. The 64-pin boards
+/// have no other measurement of their LSI, so they keep this stratum's
+/// recorded one; a board that weighed its own uses that.
+uint32_t lsi_nominal = 32'586;
+
+/// WHICH CLOCK RULES AN AWAKE WINDOW, and it is a board fact rather than
+/// a taste. Where the wall is a crystal it is the wall: an instrument
+/// accurate by construction, and the numbers every letter of this suite
+/// has ever printed are on that scale. Where the wall runs on the LSI it
+/// is the CPU's own cycle counter instead - what is inside these windows
+/// is PCLK-derived (the eight prescaler ratios, a 64 kHz waveform, a
+/// 500 kHz counter), so a PCLK ruler makes them EXACT RATIO tests immune
+/// to both the RC's drift and HSI16's trim, and it leaves the RC wall
+/// for the one thing only it can do: measuring across a Stop.
+#if defined(STM32G031xx)
+constexpr bool cpu_ruler = true;
+#else
+constexpr bool cpu_ruler = false;
+#endif
 
 uint32_t wall_ticks_per_second() {
     return static_cast<uint32_t>(Rtc::prescalers().sync) + 1u;
 }
 uint32_t wall_modulus() { return 60u * wall_ticks_per_second(); }
 
-/// How many sub-second ticks make one REAL second: ck_apre, the crystal
+/// How many sub-second ticks make one REAL second: ck_apre, the root
 /// divided by PREDIV_A + 1.
 uint32_t wall_hz() {
-    return lse_hz / (static_cast<uint32_t>(Rtc::prescalers().async) + 1u);
+    return slow_hz / (static_cast<uint32_t>(Rtc::prescalers().async) + 1u);
 }
 
 uint32_t wall() {
@@ -251,6 +337,119 @@ void spin_cycles(uint32_t c) {
 void spin_us(uint32_t us) { spin_cycles(us * cycles_per_us); }
 
 void feed() { Iwdg::refresh(); }
+
+/// AN AWAKE INTERVAL, on whichever ruler this board's `cpu_ruler` names.
+/// One type for the two shapes every letter here uses - "hold this
+/// window open for N milliseconds" and "how long did that take" - so the
+/// choice of ruler is made ONCE and no letter repeats it. On a crystal
+/// board both members are the wall arithmetic the suite has always used,
+/// to the operation; on a board with none they are the cycle counter,
+/// and NO WALL READ HAPPENS AT ALL, which is what lets these letters run
+/// on a board whose RTC domain has no clock to give them.
+class Span {
+  public:
+    Span() {
+        if constexpr (cpu_ruler) {
+            start_ = cycles_now();
+        } else {
+            start_ = wall();
+        }
+    }
+
+    bool within(uint32_t ms) const {
+        if constexpr (cpu_ruler) {
+            return (cycles_now() - start_) < ms * (SysClock::hz / 1000u);
+        } else {
+            return wall_ms(wall_delta(start_, wall())) < ms;
+        }
+    }
+
+    uint32_t ms() const {
+        if constexpr (cpu_ruler) {
+            return (cycles_now() - start_) / (SysClock::hz / 1000u);
+        } else {
+            return wall_ms(wall_delta(start_, wall()));
+        }
+    }
+
+  private:
+    uint32_t start_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// The LSI meter: what the wall and the slow legs run on where there is no
+// crystal
+// ---------------------------------------------------------------------------
+//
+// TIM16's capture channel with TISEL pointing at LSI (25.6.18's code 1),
+// against a counter clocked from PCLK - the technique test_stm32_rtc's
+// letter c owns and states the reason for: an UNFILTERED capture of an
+// internal clock line errs in BOTH directions (a missed edge lengthens
+// an interval, an over-capture shortens one), so the estimator is the
+// MEDIAN of a batch, which both tails have to outnumber before they can
+// move it. The input filter is on as well, which is the other half of
+// that letter's finding.
+//
+// THE TIMER PRESCALER IS ZERO, which is where this meter differs from
+// the sleep suite's: one tick is 15.6 ns, so an LSI period of about
+// 32 us is some two thousand ticks and the quantization of a single
+// reading is a twentieth of a per mille. Letter c judges a 1 kHz
+// waveform inside half a per cent, and a wall weighed any coarser than
+// that would be the thing under test.
+
+using LsiMeter = TimIntervalMeter<Tim<16>, 0>;
+
+/// The LSI's rate in hertz, or 0 when its edges never arrived. Bounded:
+/// a board that cannot measure gets an honest zero and the caller says
+/// so, rather than a number nobody watched.
+uint32_t measure_lsi_hz() {
+    Rcc::lsi_enable(true);
+    if (!Rcc::lsi_wait_ready()) {
+        return 0;
+    }
+    Tim<16>::bus_clock(true);
+    Tim<16>::enable(false);
+    if (!LsiMeter::setup(0, 8)) {
+        return 0;
+    }
+    if (!Tim<16>::input_select(0, Rcc::lsi_tim16_ti1_code)) {
+        return 0;
+    }
+    (void)Tim<16>::isr();
+    LsiMeter::restart();
+
+    static uint32_t samples[33];
+    constexpr uint16_t want = 33;
+    uint16_t got = 0;
+    for (uint32_t spin = 0; spin < 40'000'000UL && got < want; ++spin) {
+        if ((Tim<16>::flags() & LsiMeter::capture_flag) == 0u) {
+            continue;
+        }
+        Tim<16>::clear_flags(LsiMeter::capture_flag);
+        const std::optional<uint32_t> d = LsiMeter::interval();
+        if (d.has_value()) {
+            samples[got++] = *d;
+        }
+    }
+    Tim<16>::release();
+    if (got != want) {
+        return 0;
+    }
+    for (uint16_t i = 1; i < want; ++i) {
+        const uint32_t key = samples[i];
+        uint16_t j = i;
+        while (j != 0u && samples[j - 1u] > key) {
+            samples[j] = samples[j - 1u];
+            --j;
+        }
+        samples[j] = key;
+    }
+    const uint32_t median = samples[want / 2u];
+    if (median == 0u) {
+        return 0;
+    }
+    return SysClock::hz / median;
+}
 
 /// A measurement window a transmit interrupt walks through is not a
 /// measurement - three campaigns of this stratum have paid for that.
@@ -317,18 +516,18 @@ bool free_run(LptimClock src, LptimPrescaler p) {
     return L1::start_continuous();
 }
 
-/// Counts made over `ms` milliseconds of WALL time, modulo the lap. The
-/// double read is used where it can settle and a single read where it
-/// cannot - which on a counter running at one count per CPU cycle is
-/// never (letter a measures exactly that).
+/// Counts made over `ms` milliseconds of this board's own ruler, modulo
+/// the lap. The double read is used where it can settle and a single read
+/// where it cannot - which on a counter running at one count per CPU
+/// cycle is never (letter a measures exactly that).
 uint16_t counter_now() {
     const std::optional<uint16_t> v = L1::count();
     return v.value_or(L1::count_raw());
 }
 std::optional<uint32_t> counts_over(uint32_t ms) {
     const uint16_t a = counter_now();
-    const uint32_t w0 = wall();
-    while (wall_ms(wall_delta(w0, wall())) < ms) {
+    const Span w;
+    while (w.within(ms)) {
     }
     const uint16_t b = counter_now();
     return static_cast<uint32_t>((static_cast<uint32_t>(b) - a) & 0xFFFFu);
@@ -339,6 +538,26 @@ std::optional<uint32_t> counts_over(uint32_t ms) {
 /// closed does not answer register reads (5.2.17), and a handler is not
 /// the place to find out what it answers instead.
 volatile bool tim7_live = false;
+
+/// TIM7 put back where there is one, and nothing where there is not -
+/// the gated leg's own release, since `quiet_everything()` is a plain
+/// function and may not SPELL an absent instance.
+template <bool present = tim_present(7)>
+void quiet_tim7() {
+    if constexpr (present) {
+        Tim7<present>::release();
+    }
+}
+
+/// The comparator off, on a part that has one. PA1 is put back to analog
+/// either way: it is a pad this suite drives whether or not anything
+/// reads it.
+void quiet_comparator() {
+#if defined(COMP1_BASE)
+    (void)C1::enable(false);
+#endif
+    PadA1::analog();
+}
 
 /// Everything this suite ever claims, put back: pads to analog, both
 /// timers reset, the comparator off, the DMA quiet.
@@ -362,13 +581,12 @@ void quiet_everything() {
     In1Pad2::release();
     Etr2Pad::release();
     tim7_live = false;
-    T7::release();
+    quiet_tim7();
     L1::init();
     L1::release();
     L2::init();
     L2::release();
-    (void)C1::enable(false);
-    PadA1::analog();
+    quiet_comparator();
     Gen0::release();
     EdgeCh::stop();
 }
@@ -429,14 +647,48 @@ struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip, Woke> {
     static Status only(const Event& e);
 };
 
+/// THE SITE'S SOURCE IS A COMPILE-TIME CONFIGURATION AND THE ROOT IS A
+/// BOARD FACT, so this is the one question about the wall only the
+/// preprocessor can answer here (`slow_clock` answers it at run time for
+/// everything else). Either way the site converts with a STATED rate,
+/// and every promise it makes - late, never early - holds only while
+/// that statement is at or ABOVE the true rate.
+#if defined(STM32G031xx)
+/// The Nucleo-32 has no crystal, so the site takes LSI. The statement is
+/// 32768 Hz - the crystal's own nominal, and about four per cent above
+/// what this die measures - because an RC oscillator drifts and the
+/// measured rate itself would leave no room for it: a die that warmed up
+/// past its own reading would start maturing events EARLY, which is the
+/// one direction the contract forbids. The letter prints the statement
+/// against the measurement and scales its WALL bands by the ratio, since
+/// a nap placed with an over-stated rate is proportionally long on the
+/// wall while staying exact in kernel ticks.
+constexpr LptimTimedSleepConfig site_cfg{.instance = 1,
+                                         .source = LptimClock::lsi,
+                                         .rate_hz = 32'768,
+                                         .prescaler = LptimPrescaler::div32};
+#else
 constexpr LptimTimedSleepConfig site_cfg{.instance = 1,
                                          .source = LptimClock::lse,
                                          .rate_hz = 32'768,
                                          .prescaler = LptimPrescaler::div32};
+#endif
 using Site = Stm32g0LptimTimedSleepSite<P, SysClock, site_cfg>;
 using PlainSite = Stm32g0SleepSite<SysClock>;
 using Manager = PowerManager<P, Site, PowerConfig{}, Probe>;
 using K = Kernel<P, Probe, Manager>;
+
+/// The WALL span a deadline of `ms` kernel milliseconds is expected to
+/// take. The site places its alarm with the STATED rate and the wall
+/// reads on the root's REAL one, so a statement above the truth - the
+/// contract's own direction - makes every nap proportionally long in the
+/// world while staying right in kernel ticks. On a crystal the two rates
+/// are the same number and this is the identity, which is why letter h's
+/// bands below are still literally the ones it has always had there.
+uint32_t site_span_ms(uint32_t ms) {
+    return static_cast<uint32_t>((static_cast<uint64_t>(ms) * Site::rate_hz) /
+                                 slow_hz);
+}
 
 Probe::Status Probe::only(const Event& e) {
     return match(e,
@@ -579,7 +831,9 @@ void ta_block() {
                   "makes every stimulus of this suite wireless",
                   in1_af && etr_af && in2_af);
 
-    // THE FOUR KERNEL CLOCKS, each weighed against the crystal.
+    // THE FOUR KERNEL CLOCKS, each weighed on this board's own ruler -
+    // the crystal wall where there is one, the CPU's cycle counter where
+    // there is not.
     struct Src {
         const char* name;
         LptimClock code;
@@ -592,9 +846,10 @@ void ta_block() {
         // LSE against a wall that IS the LSE: this measures the
         // arithmetic and the prescaler, not the crystal.
         {"LSE", LptimClock::lse, LptimPrescaler::div1, 32'768, 32'600, 32'940},
-        // LSI: DS13560 bounds it at 29.5..34 kHz, and the other suites
-        // of this stratum have measured 32536..32586 Hz.
-        {"LSI", LptimClock::lsi, LptimPrescaler::div1, 32'586, 29'500, 34'000},
+        // LSI: DS13560 and DS12992 both bound it at 29.5..34 kHz, and
+        // the boards of this stratum have measured 31496..32586 Hz.
+        {"LSI", LptimClock::lsi, LptimPrescaler::div1, lsi_nominal, 29'500,
+         34'000},
         // HSI16 divided by 128: 125 kHz, with HSI16's own 1 % trim.
         {"HSI16/128", LptimClock::hsi16, LptimPrescaler::div128, 125'000,
          123'000, 127'000},
@@ -607,6 +862,19 @@ void ta_block() {
     bool rates_ok = true;
     for (const Src& s : sources) {
         feed();
+        // THE ONE ROW A BOARD CAN LACK. LSE is a crystal, not a
+        // peripheral: where none starts, the row is not a failure of the
+        // multiplexer but an absence of a signal, and the leg says so
+        // instead of counting a counter that never moves.
+        if (s.code == LptimClock::lse && !wall_on_lse) {
+            print(serial,
+                  "  SKIPPED, no verdict claimed: the LSE row needs a crystal, "
+                  "and LSERDY never rose on this board (the boot line says so) "
+                  "- the other three rows below are the ones this board can "
+                  "put a signal on.",
+                  crlf);
+            continue;
+        }
         if (!free_run(s.code, s.presc)) {
             rates_ok = false;
             continue;
@@ -618,21 +886,23 @@ void ta_block() {
               permille_off(hz, s.nominal), " per mille)", crlf);
         rates_ok = rates_ok && within(hz, s.lo, s.hi);
     }
-    bench.verdict("all four kernel clocks of RCC_CCIPR.LPTIM1SEL drive the "
-                  "counter, and each lands inside its own document's band",
+    bench.verdict("every kernel clock of RCC_CCIPR.LPTIM1SEL this board can "
+                  "supply a root for drives the counter, and each lands inside "
+                  "its own document's band - all four where a crystal is "
+                  "fitted, and the LSE row named and skipped where none is",
                   rates_ok);
 
-    // THE ENABLE AND START LATENCIES, at LSE where they are tens of
-    // microseconds and at PCLK where they are nothing. 26.4.13 says two
-    // counter clocks after ENABLE; 26.4.7 says three kernel clocks
-    // between CNTSTRT and the counter really moving.
+    // THE ENABLE AND START LATENCIES, on the 32 kHz root where they are
+    // tens of microseconds and at PCLK where they are nothing. 26.4.13
+    // says two counter clocks after ENABLE; 26.4.7 says three kernel
+    // clocks between CNTSTRT and the counter really moving.
     uint32_t arr_us_at[2] = {0, 0};
     uint32_t move_us_at[2] = {0, 0};
     for (uint8_t leg = 0; leg < 2u; ++leg) {
         feed();
-        const LptimClock src = leg == 0u ? LptimClock::lse : LptimClock::pclk;
-        const char* name = leg == 0u ? "LSE" : "PCLK";
-        const uint32_t kernel_hz = leg == 0u ? 32'768u : SysClock::hz;
+        const LptimClock src = leg == 0u ? slow_clock : LptimClock::pclk;
+        const char* name = leg == 0u ? slow_name() : "PCLK";
+        const uint32_t kernel_hz = leg == 0u ? slow_hz : SysClock::hz;
         L1::init();
         L1::kernel_clock(src);
         (void)L1::configure({.prescaler = LptimPrescaler::div1});
@@ -657,12 +927,12 @@ void ta_block() {
     }
     // THE VERDICT JUDGES THE COMPARISON ITS OWN SENTENCE MAKES. "Tens of
     // microseconds" is read as at least ten, and "instant on PCLK" as
-    // under ten - one LSE period being 30.5 us and one PCLK period 15 ns,
-    // the two legs cannot land in the same decade unless the latency is
-    // the APB's, which is the thing being denied.
+    // under ten - one period of a 32 kHz root being some 30 us and one
+    // PCLK period 15 ns, the two legs cannot land in the same decade
+    // unless the latency is the APB's, which is the thing being denied.
     bench.verdict("the enable and the software start both cost REAL KERNEL "
-                  "CLOCKS, not APB ones: on LSE the same two steps that are "
-                  "instant on PCLK take tens of microseconds",
+                  "CLOCKS, not APB ones: on the 32 kHz root the same two steps "
+                  "that are instant on PCLK take tens of microseconds",
                   arr_us_at[0] >= 10u && move_us_at[0] >= 10u &&
                       arr_us_at[1] < 10u && move_us_at[1] < 10u);
 
@@ -672,8 +942,8 @@ void ta_block() {
     bool handshakes_landed = true;
     for (uint8_t leg = 0; leg < 2u; ++leg) {
         feed();
-        const LptimClock src = leg == 0u ? LptimClock::lse : LptimClock::pclk;
-        const char* name = leg == 0u ? "LSE" : "PCLK";
+        const LptimClock src = leg == 0u ? slow_clock : LptimClock::pclk;
+        const char* name = leg == 0u ? slow_name() : "PCLK";
         (void)free_run(src, LptimPrescaler::div1);
         console_drain();
         (void)L1::clear_flags(LptimFlag::cmpok | LptimFlag::arrok);
@@ -751,7 +1021,7 @@ void ta_block() {
         LptimPrescaler presc;
     };
     const ReadLeg read_legs[] = {
-        {"LSE /1 (asynchronous, 30.5 us a count)", LptimClock::lse,
+        {"the 32 kHz root /1 (asynchronous, ~30 us a count)", slow_clock,
          LptimPrescaler::div1},
         {"PCLK /128 (synchronous, 2 us a count)", LptimClock::pclk,
          LptimPrescaler::div128},
@@ -780,8 +1050,9 @@ void ta_block() {
         ++idx;
     }
     bench.verdict("26.7.8's double read is not a formality on an asynchronous "
-                  "kernel clock: at LSE a few readings in two thousand really "
-                  "do disagree, and count() is what refuses to hand one back",
+                  "kernel clock: on the 32 kHz root a few readings in two "
+                  "thousand really do disagree, and count() is what refuses to "
+                  "hand one back",
                   disagreements[0] > 0u && disagreements[0] < 200u &&
                       has_value[0]);
     bench.verdict("BUT THE RULE HAS A SECOND REASON THE CHAPTER DOES NOT NAME: "
@@ -877,10 +1148,10 @@ void tb_counting() {
                   "sentences, measured",
                   back_1 == back_2);
 
-    // COUNTRST's synchronization cost, counted at LSE where a kernel
-    // clock is 30.5 us and the reads themselves cost nothing.
+    // COUNTRST's synchronization cost, counted on the 32 kHz root where
+    // a kernel clock is some 30 us and the reads themselves cost nothing.
     feed();
-    (void)free_run(LptimClock::lse, LptimPrescaler::div1);
+    (void)free_run(slow_clock, LptimPrescaler::div1);
     spin_us(2000);
     console_drain();
     const uint16_t before = L1::count_raw();
@@ -914,7 +1185,7 @@ void tb_counting() {
 
     // RSTARE: the read IS the reset.
     feed();
-    (void)free_run(LptimClock::lse, LptimPrescaler::div1);
+    (void)free_run(slow_clock, LptimPrescaler::div1);
     spin_us(2000);
     const bool rstare_ok = L1::reset_on_read(true);
     const uint16_t r1 = L1::count_raw();
@@ -929,16 +1200,22 @@ void tb_counting() {
                   rstare_ok && r1 > 8u && r2 < 16u);
 
     // PRELOAD, measured as WHEN a new period takes effect. The witness
-    // is the ARRM flag's own timing on the wall.
+    // is the ARRM flag's own timing on this board's ruler - AND THE
+    // PERIOD IS SIZED FROM THE ROOT'S MEASURED RATE rather than written
+    // as a constant, so "100 ms" is a hundred milliseconds on a crystal
+    // and on an RC alike. (On the crystal the arithmetic gives back the
+    // 3275 and 1637 this leg has always used, to the count.)
+    const uint16_t tenth_arr = static_cast<uint16_t>(slow_hz / 10u - 1u);
+    const uint16_t half_arr = static_cast<uint16_t>(slow_hz / 20u - 1u);
     for (uint8_t leg = 0; leg < 2u; ++leg) {
         feed();
         const bool preload = leg == 1u;
         L1::init();
-        L1::kernel_clock(LptimClock::lse);
+        L1::kernel_clock(slow_clock);
         (void)L1::configure({.prescaler = LptimPrescaler::div1,
                              .preload = preload});
         L1::enable();
-        (void)L1::set_arr(3275);      // 3276 ticks of LSE = 100 ms
+        (void)L1::set_arr(tenth_arr);      // one tenth of a second
         (void)L1::wait_arr_ok();
         (void)L1::clear_flags(LptimFlag::all);
         (void)L1::start_continuous();
@@ -946,16 +1223,16 @@ void tb_counting() {
         while ((L1::status() & LptimFlag::arrm) == 0u) {
         }
         (void)L1::clear_flags(LptimFlag::arrm | LptimFlag::arrok);
-        (void)L1::set_arr(1637);      // half the period
-        const uint32_t w0 = wall();
+        (void)L1::set_arr(half_arr);       // half the period
+        const Span s0;
         while ((L1::status() & LptimFlag::arrm) == 0u) {
         }
-        const uint32_t first = wall_ms(wall_delta(w0, wall()));
+        const uint32_t first = s0.ms();
         (void)L1::clear_flags(LptimFlag::arrm);
-        const uint32_t w1 = wall();
+        const Span s1;
         while ((L1::status() & LptimFlag::arrm) == 0u) {
         }
-        const uint32_t second = wall_ms(wall_delta(w1, wall()));
+        const uint32_t second = s1.ms();
         print(serial, "  PRELOAD ", preload ? "1" : "0",
               ": after halving ARR the next period was ", first,
               " ms and the one after ", second, " ms", crlf);
@@ -1035,12 +1312,12 @@ void tc_waveform() {
     (void)L1::clear_flags(LptimFlag::cmpok);
     (void)L1::start_continuous();
 
-    // The PERIOD, counted off the ARRM flag over a wall window.
+    // The PERIOD, counted off the ARRM flag over a 200 ms window.
     console_drain();
     (void)L1::clear_flags(LptimFlag::arrm);
-    const uint32_t w0 = wall();
+    const Span window;
     uint32_t periods = 0;
-    while (wall_ms(wall_delta(w0, wall())) < 200u) {
+    while (window.within(200u)) {
         if ((L1::status() & LptimFlag::arrm) != 0u) {
             (void)L1::clear_flags(LptimFlag::arrm);
             ++periods;
@@ -1194,7 +1471,7 @@ void tc_waveform() {
     Dma1::bus_clock(true);
     Dma1::reset();
     L1::init();
-    L1::kernel_clock(LptimClock::lse);
+    L1::kernel_clock(slow_clock);
     (void)L1::configure({.prescaler = LptimPrescaler::div1});
     L1::enable();
     (void)L1::set_arr(1);        // period 2 ticks: the fastest waveform
@@ -1219,22 +1496,29 @@ void tc_waveform() {
     (void)EdgeCh::enable(true);
     Gen0::enable(true);
     console_drain();
-    const uint32_t gw0 = wall();
+    const Span gen_window;
     const uint16_t g0 = EdgeCh::count();
-    while (wall_ms(wall_delta(gw0, wall())) < 200u) {
+    while (gen_window.within(200u)) {
     }
     const uint16_t g1 = EdgeCh::count();
     Gen0::enable(false);
     EdgeCh::stop();
     const uint32_t edges = static_cast<uint32_t>(g0 - g1);
     const uint32_t edge_hz = edges * 5u;
-    print(serial, "  ARR = 1 on the 32768 Hz crystal: the DMAMUX generator "
-                  "counted ", edges, " rising edges in 200 ms = ", edge_hz,
-          " Hz, against the kernel clock's half, 16384", crlf);
+    // THE BAND IS THE CRYSTAL'S OWN WHERE THERE IS A CRYSTAL - the
+    // numbers this leg has always carried - and one of the same width
+    // around the measured root's half rate where there is not.
+    const uint32_t want_hz = slow_hz / 2u;
+    const uint32_t edge_lo = wall_on_lse ? 16'200u : want_hz - want_hz / 100u;
+    const uint32_t edge_hi = wall_on_lse ? 16'560u : want_hz + want_hz / 100u;
+    print(serial, "  ARR = 1 on the ", slow_hz, " Hz ", slow_name(),
+          ": the DMAMUX generator counted ", edges,
+          " rising edges in 200 ms = ", edge_hz,
+          " Hz, against the kernel clock's half, ", want_hz, crlf);
     bench.verdict("26.4.10's \"up to the LPTIM clock frequency divided by 2\" "
                   "is exact, measured by a DMA channel with no peripheral, no "
                   "pad and no CPU in the loop",
-                  within(edge_hz, 16'200u, 16'560u));
+                  within(edge_hz, edge_lo, edge_hi));
     print(serial, "  the same claim at the PCLK extreme (32 MHz of output) is "
                   "DECLINED: no counter this board can spare resolves it, and "
                   "the DMA itself cannot serve requests that fast", crlf);
@@ -1332,16 +1616,19 @@ void td_counter_mode() {
                           1, LptimConfig{.clock = LptimClockSource::external_input1,
                                          .clock_polarity = LptimClockPolarity::both}));
 
-    // THE GLITCH FILTER as a real threshold. The kernel clock is LSE, so
-    // one sample is 30.5 us and CKFLT = 8 samples is 244 us: a 60 us
-    // blip should be rejected and a 1 ms one counted. (26.4.5 makes an
-    // internal clock mandatory for the filters, which is why this leg
-    // runs on COUNTMODE = 1 and not on CKSEL = 1.)
+    // THE GLITCH FILTER as a real threshold. The kernel clock is the
+    // 32 kHz root, so one sample is some 30 us and CKFLT = 8 samples is
+    // some 250: a 60 us blip should be rejected and a 1 ms one counted -
+    // and the two stimuli are four times and thirty times the sample
+    // period, so the conclusion is the same whichever end of table 46's
+    // range an RC root sits at. (26.4.5 makes an internal clock
+    // mandatory for the filters, which is why this leg runs on
+    // COUNTMODE = 1 and not on CKSEL = 1.)
     feed();
     for (uint8_t leg = 0; leg < 2u; ++leg) {
         const bool filtered = leg == 1u;
         L1::init();
-        L1::kernel_clock(LptimClock::lse);
+        L1::kernel_clock(slow_clock);
         (void)L1::configure({.count_external = true,
                              .clock_filter = filtered ? LptimFilter::samples8
                                                       : LptimFilter::none,
@@ -1364,8 +1651,8 @@ void td_counter_mode() {
         const uint16_t f2 = L1::count_raw();
         const uint32_t blips = static_cast<uint32_t>((f1 - f0) & 0xFFFFu);
         const uint32_t longs = static_cast<uint32_t>((f2 - f1) & 0xFFFFu);
-        print(serial, "  CKFLT ", filtered ? "8 samples" : "off",
-              " on a 32768 Hz clock: ten 60 us blips counted ", blips,
+        print(serial, "  CKFLT ", filtered ? "8 samples" : "off", " on a ",
+              slow_hz, " Hz clock: ten 60 us blips counted ", blips,
               ", ten 2 ms pulses counted ", longs, crlf);
         if (!filtered) {
             bench.verdict("with the filter off a short blip is a transition "
@@ -1373,7 +1660,7 @@ void td_counter_mode() {
                           blips >= 8u && longs >= 8u);
         } else {
             bench.verdict("and CKFLT = 8 samples is a REAL THRESHOLD: at one "
-                          "sample per 30.5 us a 60 us blip is rejected and a "
+                          "sample per ~30 us a 60 us blip is rejected and a "
                           "2 ms pulse passes",
                           blips <= 2u && longs >= 8u);
         }
@@ -1381,9 +1668,13 @@ void td_counter_mode() {
 
     // IN1SEL = COMP1_OUT: the timer's input with NO PAD ON THE TIMER'S
     // SIDE AT ALL. The comparator is flipped by precharging its own plus
-    // input, the analog campaign's wireless technique.
+    // input, the analog campaign's wireless technique - AND IT NEEDS A
+    // COMPARATOR. The G031/G041 class has none (18.1), so `Comp` is not
+    // a type there at all and no template can reach it: this is one of
+    // the four places in this file where only the preprocessor can ask.
     feed();
     In1Pad::release();
+#if defined(COMP1_BASE)
     C1::init();
     constexpr CompConfig comp_cfg{.positive = CompPositive::input2,   // PA1
                                   .negative = CompNegative::vrefint_half};
@@ -1424,6 +1715,16 @@ void td_counter_mode() {
                   "output over an internal route, with no pad on the timer's "
                   "side",
                   comp_up && internal_route && counted == flips);
+#else
+    print(serial,
+          "  SKIPPED, no verdict claimed: table 140's mux1 routes COMP1_OUT "
+          "into IN1, and this part has NO COMPARATOR AT ALL (18.1 - the "
+          "reserve's comp_present(1) is false and the header declares no "
+          "COMP1_BASE, so brio::Comp is not a type here). The route is a "
+          "compile-time refusal instead, which letter j's mux census checks "
+          "for both instances.",
+          crlf);
+#endif
 
     quiet_everything();
 }
@@ -1527,45 +1828,62 @@ void te_triggers() {
     EtrPad::release();
 
     // ROW 1: THE RTC'S ALARM A, with no interrupt of its own - the
-    // alarm is the trigger and nothing else.
+    // alarm is the trigger and nothing else. It needs a CALENDAR, which
+    // needs a clock in the RTC domain: a board whose domain holds
+    // nothing this suite can run on has no alarm to be triggered by, and
+    // the row says so instead of watching a counter that cannot move.
     feed();
-    L1::init();
-    L1::kernel_clock(LptimClock::pclk);
-    const bool rtc_cfg = L1::configure({.prescaler = LptimPrescaler::div128,
-                                        .trigger = LptimTrigger::rtc_alarm_a,
-                                        .trigger_edge = LptimTriggerEdge::rising});
-    L1::enable();
-    (void)L1::set_arr(0xFFFFu);
-    (void)L1::wait_arr_ok();
-    (void)L1::clear_flags(LptimFlag::all);
-    (void)L1::start_continuous();
-    RtcReading now{};
-    (void)Rtc::read(now);
-    // Every second, on the seconds boundary: masked everything but the
-    // seconds field is not needed - the default alarm fires once a
-    // second, which is all this needs.
-    const bool alarm_set = Rtc::set_alarm(RtcAlarmId::a, RtcAlarm{}, false);
-    const uint16_t before_alarm = L1::count_raw();
-    const uint32_t aw0 = wall();
-    uint32_t aguard = 40'000'000u;
-    while (L1::count_raw() == before_alarm && aguard-- != 0u) {
-        if (wall_ms(wall_delta(aw0, wall())) > 2500u) {
-            break;
+    if (!wall_ready) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: table 138's row 1 is the RTC's "
+              "alarm A, and this board's RTC domain has no clock this suite "
+              "could open it with (the boot line says which - RTCSEL is "
+              "one-way, and this suite never resets the domain because the "
+              "backup registers are other suites'). The trigger MULTIPLEXER "
+              "is exercised by the ETR row above either way.",
+              crlf);
+    } else {
+        L1::init();
+        L1::kernel_clock(LptimClock::pclk);
+        const bool rtc_cfg =
+            L1::configure({.prescaler = LptimPrescaler::div128,
+                           .trigger = LptimTrigger::rtc_alarm_a,
+                           .trigger_edge = LptimTriggerEdge::rising});
+        L1::enable();
+        (void)L1::set_arr(0xFFFFu);
+        (void)L1::wait_arr_ok();
+        (void)L1::clear_flags(LptimFlag::all);
+        (void)L1::start_continuous();
+        RtcReading now{};
+        (void)Rtc::read(now);
+        // Every second, on the seconds boundary: masked everything but the
+        // seconds field is not needed - the default alarm fires once a
+        // second, which is all this needs.
+        const bool alarm_set = Rtc::set_alarm(RtcAlarmId::a, RtcAlarm{}, false);
+        const uint16_t before_alarm = L1::count_raw();
+        const Span alarm_window;
+        uint32_t aguard = 40'000'000u;
+        while (L1::count_raw() == before_alarm && aguard-- != 0u) {
+            if (!alarm_window.within(2500u)) {
+                break;
+            }
         }
+        const uint16_t after_alarm = L1::count_raw();
+        const bool alarm_trig = (L1::status() & LptimFlag::exttrig) != 0u;
+        Rtc::clear_alarm(RtcAlarmId::a);
+        print(serial, "  RTC alarm A as the trigger: the counter went from ",
+              before_alarm, " to ", after_alarm, " and EXTTRIG ",
+              alarm_trig ? "rose" : "STAYED CLEAR", crlf);
+        bench.verdict("table 138's row 1 is real: the RTC's alarm A starts an "
+                      "LPTIM with no pad, no wire and no interrupt anywhere",
+                      rtc_cfg && alarm_set && after_alarm != before_alarm &&
+                          alarm_trig);
     }
-    const uint16_t after_alarm = L1::count_raw();
-    const bool alarm_trig = (L1::status() & LptimFlag::exttrig) != 0u;
-    Rtc::clear_alarm(RtcAlarmId::a);
-    print(serial, "  RTC alarm A as the trigger: the counter went from ",
-          before_alarm, " to ", after_alarm, " and EXTTRIG ",
-          alarm_trig ? "rose" : "STAYED CLEAR", crlf);
-    bench.verdict("table 138's row 1 is real: the RTC's alarm A starts an "
-                  "LPTIM with no pad, no wire and no interrupt anywhere",
-                  rtc_cfg && alarm_set && after_alarm != before_alarm &&
-                      alarm_trig);
 
-    // ROW 6: COMP1_OUT. The same precharge stimulus letter d uses.
+    // ROW 6: COMP1_OUT. The same precharge stimulus letter d uses - and
+    // the same absence on a part with no comparator at all.
     feed();
+#if defined(COMP1_BASE)
     C1::init();
     constexpr CompConfig comp_cfg{.positive = CompPositive::input2,
                                   .negative = CompNegative::vrefint_half};
@@ -1601,6 +1919,15 @@ void te_triggers() {
                   "counter over an internal route",
                   comp_up && comp_cfg_ok && comp_before == 0u &&
                       comp_after != 0u && comp_trig);
+#else
+    print(serial,
+          "  SKIPPED, no verdict claimed: table 138's row 6 is COMP1_OUT, and "
+          "this part has no comparator at all (18.1). Its rows 0 and 1 above "
+          "are the two internal trigger sources this board can raise; the "
+          "reserve refuses the comparator rows at compile time, which letter "
+          "j's trigger census checks.",
+          crlf);
+#endif
 
     quiet_everything();
 }
@@ -1726,76 +2053,106 @@ void tg_through_stop() {
 
     // Each kernel clock in turn: the counter runs free, the machine
     // takes a real 250 ms Stop 1 woken by the RTC, and the counts made
-    // across it are weighed against the wall.
-    struct Leg {
-        const char* name;
-        LptimClock code;
-        LptimPrescaler presc;
-        uint32_t nominal;   // counts per second
-        bool expect_running;
-    };
-    const Leg legs[] = {
-        {"LSE", LptimClock::lse, LptimPrescaler::div1, 32'768, true},
-        {"LSI", LptimClock::lsi, LptimPrescaler::div1, 32'586, true},
-        {"HSI16/128", LptimClock::hsi16, LptimPrescaler::div128, 125'000, false},
-        {"PCLK/128", LptimClock::pclk, LptimPrescaler::div128, 500'000, false},
-    };
-    Rcc::lsi_enable(true);
-    (void)Rcc::lsi_wait_ready();
-    bool stop_ok = true;
-    bool hsi_ran = false;
-    for (const Leg& leg : legs) {
-        feed();
-        if (!free_run(leg.code, leg.presc)) {
-            stop_ok = false;
-            continue;
+    // across it are weighed against the wall. THIS IS THE HALF OF THE
+    // SUITE THAT CANNOT USE THE CPU AS ITS RULER - the core is stopped -
+    // so a board whose RTC domain has no clock has neither the wake nor
+    // the witness, and both Stop legs below say so and claim nothing.
+    if (!wall_ready) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: a Stop is left by the RTC's "
+              "wake-up timer here and measured on the RTC's own sub-second "
+              "counter, and this board's RTC domain has no clock this suite "
+              "could open it with (the boot line says which; RTCSEL is "
+              "one-way and this suite never resets the domain). Table 145's "
+              "own claim - which kernel clocks a Stop leaves running - is the "
+              "one thing on this page that needs a clock outside the VCORE "
+              "domain to judge.",
+              crlf);
+    } else {
+        struct Leg {
+            const char* name;
+            LptimClock code;
+            LptimPrescaler presc;
+            uint32_t nominal;   // counts per second
+            bool expect_running;
+        };
+        const Leg legs[] = {
+            {"LSE", LptimClock::lse, LptimPrescaler::div1, 32'768, true},
+            {"LSI", LptimClock::lsi, LptimPrescaler::div1, lsi_nominal, true},
+            {"HSI16/128", LptimClock::hsi16, LptimPrescaler::div128, 125'000,
+             false},
+            {"PCLK/128", LptimClock::pclk, LptimPrescaler::div128, 500'000,
+             false},
+        };
+        Rcc::lsi_enable(true);
+        (void)Rcc::lsi_wait_ready();
+        bool stop_ok = true;
+        bool hsi_ran = false;
+        for (const Leg& leg : legs) {
+            feed();
+            if (leg.code == LptimClock::lse && !wall_on_lse) {
+                print(serial,
+                      "  SKIPPED, no verdict claimed: the LSE row of table 145 "
+                      "needs a crystal, and none starts on this board. The LSI "
+                      "row below is the other clock that table names as "
+                      "unaffected by a Stop, and it is the one this board runs "
+                      "its wall on.",
+                      crlf);
+                continue;
+            }
+            if (!free_run(leg.code, leg.presc)) {
+                stop_ok = false;
+                continue;
+            }
+            Nvic::clear_pending(Rtc::irq());
+            Nvic::enable(Rtc::irq());
+            (void)Rtc::set_wakeup(RtcWakeupClock::div16, 512, true);   // 250 ms
+            Nvic::clear_pending(Rtc::irq());
+            console_drain();
+            Ticker::pause();
+            const uint16_t c0 = L1::count_raw();
+            const uint32_t w0 = wall();
+            (void)Pwr::arm(PwrMode::stop1);
+            __DSB();
+            __WFI();
+            (void)PlainSite::resume_clock();
+            const uint16_t c1 = L1::count_raw();
+            const uint32_t span = wall_ms(wall_delta(w0, wall()));
+            Ticker::resume();
+            (void)Pwr::arm(PwrMode::sleep);
+            Rtc::clear_wakeup();
+            Nvic::disable(Rtc::irq());
+            const uint32_t counts = static_cast<uint32_t>((c1 - c0) & 0xFFFFu);
+            const uint32_t expected =
+                span * leg.nominal / 1000u;
+            const uint32_t got_hz = span == 0u ? 0u : counts * 1000u / span;
+            print(serial, "  ", leg.name, ": ", counts, " counts across a ",
+                  span, " ms Stop 1 - ", got_hz, " counts a second against ",
+                  leg.nominal, " running (expected ", expected, ")", crlf);
+            if (leg.expect_running) {
+                stop_ok = stop_ok && permille_off(counts, expected) < 60u;
+            } else if (leg.code == LptimClock::pclk) {
+                stop_ok = stop_ok && counts < 16u;
+            } else {
+                hsi_ran = counts > expected / 10u;
+            }
         }
-        Nvic::clear_pending(Rtc::irq());
-        Nvic::enable(Rtc::irq());
-        (void)Rtc::set_wakeup(RtcWakeupClock::div16, 512, true);   // 250 ms
-        Nvic::clear_pending(Rtc::irq());
-        console_drain();
-        Ticker::pause();
-        const uint16_t c0 = L1::count_raw();
-        const uint32_t w0 = wall();
-        (void)Pwr::arm(PwrMode::stop1);
-        __DSB();
-        __WFI();
-        (void)PlainSite::resume_clock();
-        const uint16_t c1 = L1::count_raw();
-        const uint32_t span = wall_ms(wall_delta(w0, wall()));
-        Ticker::resume();
-        (void)Pwr::arm(PwrMode::sleep);
-        Rtc::clear_wakeup();
-        Nvic::disable(Rtc::irq());
-        const uint32_t counts = static_cast<uint32_t>((c1 - c0) & 0xFFFFu);
-        const uint32_t expected =
-            span * leg.nominal / 1000u;
-        const uint32_t got_hz = span == 0u ? 0u : counts * 1000u / span;
-        print(serial, "  ", leg.name, ": ", counts, " counts across a ", span,
-              " ms Stop 1 - ", got_hz, " counts a second against ",
-              leg.nominal, " running (expected ", expected, ")", crlf);
-        if (leg.expect_running) {
-            stop_ok = stop_ok && permille_off(counts, expected) < 60u;
-        } else if (leg.code == LptimClock::pclk) {
-            stop_ok = stop_ok && counts < 16u;
-        } else {
-            hsi_ran = counts > expected / 10u;
-        }
+        bench.verdict("26.5's table 145 is exact: on the 32 kHz roots this "
+                      "board has, the counter is UNAFFECTED by a Stop and "
+                      "counts the whole of it, while on PCLK it stops dead "
+                      "with the rest of the VCORE domain",
+                      stop_ok);
+        print(serial, "  HSI16 through a Stop 1: the counter ",
+              hsi_ran ? "KEPT RUNNING" : "STOPPED", crlf);
+        bench.verdict("AND HSI16 IS NOT A STOP CLOCK FOR A FREE-RUNNING "
+                      "COUNTER: 5.3 lists the LPTIMs among the peripherals "
+                      "that can REQUEST HSI16 in Stop, and a counter that "
+                      "merely COUNTS makes no such request - it stops with "
+                      "PCLK. Only LSE and LSI, which table 145 names, keep it "
+                      "running; and ES0548 2.2.4 breaks clock requests on a "
+                      "divided HSI anyway",
+                      !hsi_ran);
     }
-    bench.verdict("26.5's table 145 is exact: on LSE and on LSI the counter is "
-                  "UNAFFECTED by a Stop and counts the whole of it, while on "
-                  "PCLK it stops dead with the rest of the VCORE domain",
-                  stop_ok);
-    print(serial, "  HSI16 through a Stop 1: the counter ",
-          hsi_ran ? "KEPT RUNNING" : "STOPPED", crlf);
-    bench.verdict("AND HSI16 IS NOT A STOP CLOCK FOR A FREE-RUNNING COUNTER: "
-                  "5.3 lists the LPTIMs among the peripherals that can REQUEST "
-                  "HSI16 in Stop, and a counter that merely COUNTS makes no "
-                  "such request - it stops with PCLK. Only LSE and LSI, which "
-                  "table 145 names, keep it running; and ES0548 2.2.4 breaks "
-                  "clock requests on a divided HSI anyway",
-                  !hsi_ran);
 
     // WHAT A COMPARE MATCH IS, measured before anything rests on it -
     // and it is not a one-shot. 26.7.1 says CMPM "is set by hardware to
@@ -1812,7 +2169,7 @@ void tg_through_stop() {
         uint32_t window_ms;
     };
     const MatchLeg match_legs[] = {
-        {"LSE", LptimClock::lse, LptimPrescaler::div1, 32'768, 300},
+        {slow_name(), slow_clock, LptimPrescaler::div1, slow_hz, 300},
         {"PCLK/128", LptimClock::pclk, LptimPrescaler::div128, 500'000, 100},
     };
     bool per_lap_ok = true;
@@ -1866,13 +2223,15 @@ void tg_through_stop() {
                   "and not once per event plus a spurious re-entry",
                   clear_lands);
 
-    // THE COMPARE WAKE, through EXTI line 29, from both deep rungs.
-    for (uint8_t leg = 0; leg < 2u; ++leg) {
+    // THE COMPARE WAKE, through EXTI line 29, from both deep rungs. The
+    // wall is the witness here too - the core is stopped, so nothing
+    // inside it can time the wake - and a board without one skips.
+    for (uint8_t leg = 0; leg < 2u && wall_ready; ++leg) {
         feed();
         const PwrMode mode = leg == 0u ? PwrMode::stop0 : PwrMode::stop1;
         const char* name = leg == 0u ? "Stop 0" : "Stop 1";
         L1::init();
-        L1::kernel_clock(LptimClock::lse);
+        L1::kernel_clock(slow_clock);
         (void)L1::configure({.prescaler = LptimPrescaler::div32,
                              .interrupts = LptimFlag::cmpm});
         L1::enable();
@@ -1885,7 +2244,10 @@ void tg_through_stop() {
         // measurement then reported a wall span of nearly a minute -
         // the stamp belonging to a match that happened before the
         // window opened.)
-        constexpr uint16_t compare = 512;   // half a second at LSE / 32
+        // Half a second of the root: 512 counts at 32768/32, and the
+        // same half second whatever an RC root measures, because the
+        // prediction below is made with THIS BOARD'S rate.
+        const uint16_t compare = static_cast<uint16_t>(slow_hz / 64u);
         (void)L1::set_cmp(compare);
         // With CMPMIE armed only the handler may clear a flag (ES0548
         // 2.8.2), so the completion is waited for as a flag READ.
@@ -1914,8 +2276,10 @@ void tg_through_stop() {
         Nvic::disable(L1::irq());
         const uint32_t distance =
             static_cast<uint32_t>((compare - at_sleep) & 0xFFFFu);
-        // The counter is LSE/32 = 1024 counts a second.
-        const uint32_t want_us = distance * 1'000'000UL / 1024u;
+        // The counter is the root divided by 32 - 1024 counts a second
+        // on a crystal - and the wall runs on that same root, so this
+        // prediction is exact whatever the root's absolute rate is.
+        const uint32_t want_us = distance * 1'000'000UL / (slow_hz / 32u);
         print(serial, "  ", name, ": the compare was ", distance,
               " counts ahead when the core stopped, and the match woke it "
               "after ", span, " us of wall against ", want_us,
@@ -1935,6 +2299,16 @@ void tg_through_stop() {
                       lptim_irqs == 1u && lptim_served1 == 0u);
         L1::init();
     }
+    if (!wall_ready) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: the compare wake from Stop 0 and "
+              "Stop 1 is measured on the RTC's sub-second counter, which is "
+              "the only clock left running while the core is stopped, and "
+              "this board's RTC domain has none this suite could open. Both "
+              "rungs are skipped together: what they claim is WHERE the wake "
+              "lands, and there is no instrument here to say.",
+              crlf);
+    }
 
     quiet_everything();
 }
@@ -1945,6 +2319,24 @@ void tg_through_stop() {
 void th_site() {
     feed();
     quiet_everything();
+    // THE SITE NEEDS NO RTC - that is its whole point - BUT THIS LETTER
+    // DOES: every claim below is about where a deadline lands in the
+    // world, and while the core is stopped the RTC is the only clock
+    // left to say. A board whose domain holds no clock this suite can
+    // open therefore skips the letter whole rather than judging a site
+    // it cannot watch.
+    if (!wall_ready) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: the third site places its alarm "
+              "on the LPTIM and needs nothing else, but every verdict here is "
+              "a WALL reading taken across a Stop - and this board's RTC "
+              "domain has no clock this suite could open it with (the boot "
+              "line says which; RTCSEL is one-way and this suite never resets "
+              "the domain). The site's arithmetic is the same on any part; "
+              "what is missing is the witness.",
+              crlf);
+        return;
+    }
     (void)wall_up();
     site_round = true;
 
@@ -1953,12 +2345,30 @@ void th_site() {
           " on LPTIM", static_cast<uint32_t>(site_cfg.instance),
           ": stated rate ", Site::rate_hz, " Hz, counter ", Site::counter_hz,
           " Hz, one lap is ", Site::span_ticks, " kernel ticks", crlf);
-    bench.verdict("the third site comes up on the crystal, with the RTC "
-                  "untouched", up);
+    bench.verdict("the third site comes up on the root this board runs its "
+                  "wall on, with the RTC untouched", up);
     if (!up) {
         site_round = false;
         return;
     }
+
+    // THE SITE'S OWN CONTRACT, in the open: it converts with a STATED
+    // rate, and every promise it makes - late, never early - holds only
+    // while that statement is at or above the true rate. On a crystal
+    // the two are the same number by construction; on an RC root the
+    // statement is a compile-time number and the rate is what this boot
+    // MEASURED, so the two are printed side by side and the wall bands
+    // below are scaled by the ratio. A die found running FASTER than the
+    // number stated for it would show up here first and in the "not one
+    // was early" verdict second.
+    print(serial, "  the site states ", Site::rate_hz, " Hz against the ",
+          slow_hz, wall_on_lse ? " Hz of the crystal" : " Hz measured on LSI",
+          Site::rate_hz >= slow_hz
+              ? " - at or above it, which is the direction the contract wants; "
+                "a nap is that much long on the wall and exact in ticks"
+              : " - BELOW IT, which is the one direction that can mature an "
+                "event early",
+          crlf);
 
     // The alarm's arithmetic, checked before any sleep.
     K::init_all();
@@ -2008,7 +2418,8 @@ void th_site() {
           "back ", Site::last_advance(), " ticks", crlf);
     bench.verdict("THE EVENT MATURED THROUGH A STOP, on the wall, with the "
                   "LPTIM as both the alarm and the witness",
-                  Probe::blips == 1u && within(to_blip, 500u, 560u));
+                  Probe::blips == 1u &&
+                      within(to_blip, 500u, site_span_ms(500u) + 60u));
     bench.verdict("and NEVER EARLY - the lower bound is the kernel's own "
                   "promise", to_blip >= 500u);
     bench.verdict("the sleep was real: the resync handed back a frozen span of "
@@ -2043,7 +2454,7 @@ void th_site() {
         if (ms > worst_hi) {
             worst_hi = ms;
         }
-        if (within(ms, nominal, nominal + 20u)) {
+        if (within(ms, nominal, site_span_ms(nominal) + 20u)) {
             ++on_time;
         }
     }
@@ -2093,8 +2504,9 @@ void th_site() {
                   "resolution the RTC-backed site refuses at compile time - "
                   "and with an application alarm standing untouched",
                   split_moved && alarm_mine && Probe::blips == 1u &&
-                      low_span + quantum_ms >= 300u && low_span <= 340u &&
-                      alarm_survived && left.async == 127u && left.sync == 255u);
+                      low_span + quantum_ms >= 300u &&
+                      low_span <= site_span_ms(300u) + 40u && alarm_survived &&
+                      left.async == 127u && left.sync == 255u);
 
     (void)wall_up();
     site_round = false;
@@ -2210,9 +2622,11 @@ void ti_errata() {
 // is not the same peripheral: no encoder, no input channel 2, a
 // different fifth trigger row, two input codes LPTIM1 has not, another
 // EXTI line, another DMAMUX trigger input and a vector it shares with
-// TIM7 instead of TIM6 and the DAC. This letter puts it through what
-// letters a, c, d and e measure on LPTIM1, on ITS OWN THREE PADS - PC0,
-// PC3 and PD6, all at AF2 - and adds the two things only a second
+// TIM7 instead of TIM6 and the DAC - on the parts that HAVE a TIM7 and a
+// TIM6, the G031/G041 class having neither and giving each LPTIM a line
+// of its own. This letter puts it through what letters a, c, d and e
+// measure on LPTIM1, on ITS OWN THREE PADS (the package's own - see
+// out2_sel and its neighbours) and adds the two things only a second
 // instance can show: the asymmetries as refusals, and one vector with
 // two owners.
 
@@ -2225,8 +2639,8 @@ uint16_t counter2_now() {
 
 std::optional<uint32_t> counts2_over(uint32_t ms) {
     const uint16_t a = counter2_now();
-    const uint32_t w0 = wall();
-    while (wall_ms(wall_delta(w0, wall())) < ms) {
+    const Span w;
+    while (w.within(ms)) {
     }
     const uint16_t b = counter2_now();
     return static_cast<uint32_t>((static_cast<uint32_t>(b) - a) & 0xFFFFu);
@@ -2246,13 +2660,14 @@ bool free_run2(LptimClock src, LptimPrescaler p) {
     return L2::start_continuous();
 }
 
-/// LPTIM2_OUT is PD6, so the census reads PORT D - the only place in
-/// this stratum that does. Same rule as every other pad sampler here:
-/// the loop must not branch on what it reads.
-uint32_t pad_d6_permille(uint32_t samples) {
+/// LPTIM2_OUT's own pad, sampled through its port's IDR - PORT D on the
+/// 64-pin parts, the only place in this stratum that reads it, and port
+/// A on the LQFP32. Same rule as every other pad sampler here: the loop
+/// must not branch on what it reads.
+uint32_t pad_out2_permille(uint32_t samples) {
     uint32_t high = 0;
     for (uint32_t i = 0; i < samples; ++i) {
-        high += (Port<'D'>::in() >> 6) & 1u;
+        high += (Port<out2_sel.port>::in() >> out2_sel.pin) & 1u;
     }
     return (high * 1000u + samples / 2u) / samples;
 }
@@ -2277,7 +2692,7 @@ bool pwm2_64k(uint16_t compare, bool inverted = false) {
     return L2::start_continuous();
 }
 
-/// N pull-walked edges on LPTIM2's IN1 (PC0).
+/// N pull-walked edges on LPTIM2's own IN1 pad.
 void walk_in1_2(uint32_t edges, uint32_t half_us) {
     for (uint32_t i = 0; i < edges; ++i) {
         walk<In1Pin2>(true, half_us);
@@ -2306,10 +2721,83 @@ static_assert(lptim_config_valid(2, LptimConfig{
 static_assert(!lptim_config_valid(1, LptimConfig{
                   .trigger = LptimTrigger::tamp_trg3,
                   .trigger_edge = LptimTriggerEdge::rising}));
-static_assert(lptim_config_valid(2, LptimConfig{.input1 = LptimInput1::comp2_out}));
-static_assert(lptim_config_valid(2, LptimConfig{.input1 = LptimInput1::comp1_or_comp2}));
-static_assert(!lptim_config_valid(1, LptimConfig{.input1 = LptimInput1::comp2_out}));
-static_assert(!lptim_config_valid(1, LptimConfig{.input1 = LptimInput1::comp1_or_comp2}));
+// AND THE SAME GOES FOR THE INPUT MULTIPLEXER'S TWO EXTRA CODES: what
+// makes them LPTIM2's is the instance, but what makes them EXIST is a
+// comparator, so each claim is written against the reserve's own
+// presence fact and holds on a part with two comparators, on one with
+// three, and on one with none.
+static_assert(
+    lptim_config_valid(2, LptimConfig{.input1 = LptimInput1::comp2_out}) ==
+    comp_present(2));
+static_assert(
+    lptim_config_valid(2, LptimConfig{.input1 = LptimInput1::comp1_or_comp2}) ==
+    (comp_present(1) && comp_present(2)));
+static_assert(
+    !lptim_config_valid(1, LptimConfig{.input1 = LptimInput1::comp2_out}));
+static_assert(
+    !lptim_config_valid(1, LptimConfig{.input1 = LptimInput1::comp1_or_comp2}));
+
+/// ONE VECTOR, TWO OWNERS - where the part has a second owner to put on
+/// it. Everything the leg touches beyond LPTIM2 is TIM7's, so the whole
+/// leg is the gated one and the letter's other verdicts are untouched.
+template <bool present = tim_present(7)>
+void tj_shared_line() {
+    if constexpr (present) {
+        using T7 = Tim7<present>;
+        l2_irqs = 0;
+        l2_served = 0;
+        t7_irqs = 0;
+        t7_served = 0;
+        L2::init();
+        L2::kernel_clock(LptimClock::pclk);
+        (void)L2::configure({.prescaler = LptimPrescaler::div128,
+                             .interrupts = LptimFlag::arrm});
+        L2::enable();
+        (void)L2::set_arr(499);          // 500 kHz / 500 = 1 kHz of ARRM
+        (void)L2::wait_arr_ok();
+        (void)L2::clear_flags_raw(LptimFlag::all);
+        T7::init();
+        const bool t7_cfg = T7::configure({.prescaler = 63, .period = 999});
+        T7::interrupts(T7::update_interrupt, true);
+        tim7_live = true;
+        Nvic::clear_pending(L2::irq());
+        Nvic::enable(L2::irq());
+        (void)L2::start_continuous();
+        T7::enable(true);
+        spin_us(20000);
+        T7::enable(false);
+        Nvic::disable(L2::irq());
+        tim7_live = false;
+        const uint32_t l2n = l2_irqs;
+        const uint32_t t7n = t7_irqs;
+        const uint32_t l2s = l2_served;
+        const uint32_t t7s = t7_served;
+        print(serial, "  20 ms on the shared line: LPTIM2 served ", l2n,
+              " times (flags ", hex(l2s), "), TIM7 ", t7n, " times (flags ",
+              hex(t7s), ") - one vector, NVIC line ",
+              static_cast<int32_t>(L2::irq()), crlf);
+        bench.verdict("LPTIM2's interrupt reaches the handler the reserve "
+                      "names for its line and TIM7's reaches the SAME handler "
+                      "in the same window - one vector, two owners, each body "
+                      "returning exactly the flags its own enable asked for, "
+                      "and each CLEARING them (a flag left standing would have "
+                      "re-entered the handler for ever instead of twenty times "
+                      "in twenty milliseconds)",
+                      t7_cfg && l2n >= 15u && t7n >= 15u &&
+                          l2s == LptimFlag::arrm && t7s == T7::update_flag);
+        T7::release();
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: two owners answering on ONE "
+              "vector needs a TIM7 to share LPTIM2's line, and this part has "
+              "neither TIM6 nor TIM7 (tim_present(7) is false - the reserve "
+              "finds no TIM7_BASE, and so names this line LPTIM2's own, "
+              "LPTIM2_IRQn, exactly as it names LPTIM1's LPTIM1_IRQn). That "
+              "the two LPTIMs are on DIFFERENT lines here is claimed by this "
+              "letter's first verdict, which reads the derivation both ways.",
+              crlf);
+    }
+}
 
 void tj_lptim2() {
     feed();
@@ -2325,14 +2813,27 @@ void tj_lptim2() {
           L2::dmamux_generator_input, "; LPTIM1: encoder=", L1::has_encoder,
           " input2=", L1::has_input2, " EXTI line ", L1::exti_line,
           " DMAMUX trigger ", L1::dmamux_generator_input, crlf);
+    print(serial, "  the two vectors: LPTIM1 on NVIC line ",
+          static_cast<int32_t>(L1::irq()), ", LPTIM2 on ",
+          static_cast<int32_t>(L2::irq()),
+          tim_present(7) ? " - shared with TIM7, which this part has"
+                         : " - its own, this part having no TIM7 to share it "
+                           "with",
+          crlf);
+    // THE VECTOR HALF IS WRITTEN AS THE RESERVE'S OWN DERIVATION and not
+    // as one part's enumerator: a line is LPTIM2's alone where there is
+    // no TIM7 and shared where there is, and the claim below is the same
+    // sentence either way.
     bench.verdict("the reserve's LPTIM2 is the manual's: no encoder (table "
                   "135), no input channel 2 (figure 271's footnote), EXTI "
                   "line 30 and DMAMUX trigger input 21 where LPTIM1 has 29 "
-                  "and 20 - and a vector of its own, shared with TIM7",
+                  "and 20 - and a vector that is NEVER LPTIM1's, shared with "
+                  "TIM7 exactly where the part has one",
                   !L2::has_encoder && !L2::has_input2 && L2::exti_line == 30u &&
                       L2::dmamux_generator_input == 21u &&
                       L1::exti_line == 29u && L1::dmamux_generator_input == 20u &&
-                      L2::irq() == TIM7_LPTIM2_IRQn && L1::irq() != L2::irq());
+                      L2::irq() == lptim_irq(2) && L1::irq() != L2::irq() &&
+                      (!tim_present(7) || tim_irq(7) == lptim_irq(2)));
 
     // THE FIFTH TRIGGER ROW IS NOT THE SAME SIGNAL ON THE TWO INSTANCES
     // (tables 138 and 139), which is why the enum names the SIGNAL and
@@ -2360,41 +2861,59 @@ void tj_lptim2() {
 
     // AND THE INPUT MULTIPLEXER DISAGREES MORE (tables 140 and 142):
     // LPTIM2's IN1 reaches COMP2_OUT and the OR of the two comparators,
-    // codes LPTIM1's mux leaves unconnected.
+    // codes LPTIM1's mux leaves unconnected. Both are TWO facts at once -
+    // the instance's and the comparator's - and a part with no
+    // comparator refuses them on BOTH instances, which is the same
+    // sentence with one of its two reasons spent.
     const bool mux_ok =
-        lptim_config_valid(2, LptimConfig{.input1 = LptimInput1::comp2_out}) &&
-        lptim_config_valid(2, LptimConfig{.input1 = LptimInput1::comp1_or_comp2}) &&
+        (lptim_config_valid(2, LptimConfig{.input1 = LptimInput1::comp2_out}) ==
+         comp_present(2)) &&
+        (lptim_config_valid(
+             2, LptimConfig{.input1 = LptimInput1::comp1_or_comp2}) ==
+         (comp_present(1) && comp_present(2))) &&
         !lptim_config_valid(1, LptimConfig{.input1 = LptimInput1::comp2_out}) &&
         !lptim_config_valid(1, LptimConfig{.input1 = LptimInput1::comp1_or_comp2}) &&
         !L1::configure({.input1 = LptimInput1::comp2_out});
+    print(serial, "  IN1SEL's two extra codes on LPTIM2: ",
+          comp_present(2) ? "legal"
+                          : "refused, this part has no comparator at all",
+          crlf);
     bench.verdict("table 142 gives LPTIM2 two input-1 codes table 140 leaves "
                   "unconnected on LPTIM1 - COMP2_OUT and the OR of both "
-                  "comparators - and each is accepted here and refused there, "
-                  "at compile time and at run time alike",
+                  "comparators - each accepted on LPTIM2 where the part has "
+                  "the comparators behind it, refused on LPTIM1 always, and "
+                  "refused on both where the part has none: at compile time "
+                  "and at run time alike",
                   mux_ok);
 
     // THE PADS, before anything rests on them. Same two questions letter
     // a asks of LPTIM1's four: does each follow its own pull as a plain
     // input, and does it still do so with the pad handed to the LPTIM?
-    Rcc::io_clock('C', true);
-    Rcc::io_clock('D', true);
-    const bool out2_plain = pull_walks<Out2Pin>(false, PinFunction::af2);
-    const bool in1_plain = pull_walks<In1Pin2>(false, PinFunction::af2);
-    const bool etr_plain = pull_walks<Etr2Pin>(false, PinFunction::af2);
-    const bool in1_af = pull_walks<In1Pin2>(true, PinFunction::af2);
-    const bool etr_af = pull_walks<Etr2Pin>(true, PinFunction::af2);
+    Rcc::io_clock(out2_sel.port, true);
+    Rcc::io_clock(in1_2_sel.port, true);
+    Rcc::io_clock(etr2_sel.port, true);
+    const bool out2_plain = pull_walks<Out2Pin>(false, out2_sel.function);
+    const bool in1_plain = pull_walks<In1Pin2>(false, in1_2_sel.function);
+    const bool etr_plain = pull_walks<Etr2Pin>(false, etr2_sel.function);
+    const bool in1_af = pull_walks<In1Pin2>(true, in1_2_sel.function);
+    const bool etr_af = pull_walks<Etr2Pin>(true, etr2_sel.function);
     Out2Pin::analog();
     In1Pin2::analog();
     Etr2Pin::analog();
-    print(serial, "  pull-walk as plain inputs: PD6 ", out2_plain, " PC0 ",
-          in1_plain, " PC3 ", etr_plain, "; under AF2 (LPTIM2's own "
-          "function): PC0 ", in1_af, " PC3 ", etr_af, crlf);
-    bench.verdict("LPTIM2's three pads are free on this board - PD6, PC0 and "
-                  "PC3 each follow their own internal pull between the rails",
+    print(serial, "  pull-walk as plain inputs: OUT on P",
+          static_cast<char>(out2_sel.port), static_cast<uint32_t>(out2_sel.pin),
+          " ", out2_plain, ", IN1 on P", static_cast<char>(in1_2_sel.port),
+          static_cast<uint32_t>(in1_2_sel.pin), " ", in1_plain, ", ETR on P",
+          static_cast<char>(etr2_sel.port), static_cast<uint32_t>(etr2_sel.pin),
+          " ", etr_plain, "; under LPTIM2's own alternate function: IN1 ",
+          in1_af, " ETR ", etr_af, crlf);
+    bench.verdict("LPTIM2's three pads are free on this board - the OUT, IN1 "
+                  "and ETR rows the package really bonds each follow their own "
+                  "internal pull between the rails",
                   out2_plain && in1_plain && etr_plain);
     bench.verdict("and the pull survives the handover on THIS function too: a "
-                  "pad given to an LPTIM2 input at AF2 still walks, which is "
-                  "what makes the second instance as wireless as the first",
+                  "pad given to an LPTIM2 input still walks, which is what "
+                  "makes the second instance as wireless as the first",
                   in1_af && etr_af);
 
     // THE FOUR KERNEL CLOCKS, through RCC_CCIPR's OTHER field. LPTIM2SEL
@@ -2410,7 +2929,8 @@ void tj_lptim2() {
     };
     const Src sources[] = {
         {"LSE", LptimClock::lse, LptimPrescaler::div1, 32'768, 32'600, 32'940},
-        {"LSI", LptimClock::lsi, LptimPrescaler::div1, 32'586, 29'500, 34'000},
+        {"LSI", LptimClock::lsi, LptimPrescaler::div1, lsi_nominal, 29'500,
+         34'000},
         {"HSI16/128", LptimClock::hsi16, LptimPrescaler::div128, 125'000,
          123'000, 127'000},
         {"PCLK/128", LptimClock::pclk, LptimPrescaler::div128, 500'000,
@@ -2421,6 +2941,14 @@ void tj_lptim2() {
     bool rates_ok = true;
     for (const Src& s : sources) {
         feed();
+        if (s.code == LptimClock::lse && !wall_on_lse) {
+            print(serial,
+                  "  SKIPPED, no verdict claimed: LPTIM2SEL's LSE code needs a "
+                  "crystal, and none starts on this board - the other three "
+                  "codes of the same field are below.",
+                  crlf);
+            continue;
+        }
         if (!free_run2(s.code, s.presc)) {
             rates_ok = false;
             continue;
@@ -2432,13 +2960,15 @@ void tj_lptim2() {
               permille_off(hz, s.nominal), " per mille)", crlf);
         rates_ok = rates_ok && within(hz, s.lo, s.hi);
     }
-    bench.verdict("all four codes of RCC_CCIPR.LPTIM2SEL drive the second "
-                  "counter, each inside its own document's band - so the "
-                  "reserve's field position for LPTIM2 is right",
+    bench.verdict("every code of RCC_CCIPR.LPTIM2SEL this board can supply a "
+                  "root for drives the second counter, each inside its own "
+                  "document's band - so the reserve's field position for "
+                  "LPTIM2 is right",
                   rates_ok);
 
-    // THE WAVEFORM ON LPTIM2_OUT, off PD6. Same arithmetic as letter c
-    // measured on PB0, on another port and another function.
+    // THE WAVEFORM ON LPTIM2_OUT, off whichever pad this package gives
+    // it. Same arithmetic as letter c measured on PB0, on another pad of
+    // another instance.
     feed();
     Out2Pad::claim();
     struct Duty {
@@ -2455,24 +2985,27 @@ void tj_lptim2() {
             continue;
         }
         spin_us(2000);
-        const uint32_t got = pad_d6_permille(60000);
-        print(serial, "  LPTIM2 ARR 999, CMP ", d.cmp, ": PD6 high ", got,
+        const uint32_t got = pad_out2_permille(60000);
+        print(serial, "  LPTIM2 ARR 999, CMP ", d.cmp, ": P",
+              static_cast<char>(out2_sel.port),
+              static_cast<uint32_t>(out2_sel.pin), " high ", got,
               " per mille, (ARR - CMP + 1)/(ARR + 1) = ", d.want, crlf);
         duty_ok = duty_ok && got + 20u >= d.want && got <= d.want + 20u;
     }
     bench.verdict("LPTIM2's output obeys the same arithmetic letter c "
                   "measured on LPTIM1 - a period of ARR + 1 ticks with a high "
-                  "time of ARR - CMP + 1 - on another port and another "
-                  "alternate function",
+                  "time of ARR - CMP + 1 - on the second instance's own pad, "
+                  "whatever port and alternate function the package puts it on",
                   duty_ok);
 
     (void)pwm2_64k(749);
     spin_us(2000);
-    const uint32_t straight = pad_d6_permille(60000);
+    const uint32_t straight = pad_out2_permille(60000);
     (void)pwm2_64k(749, true);
     spin_us(2000);
-    const uint32_t inverted = pad_d6_permille(60000);
-    print(serial, "  CMP = 749 on PD6: WAVPOL 0 gives ", straight,
+    const uint32_t inverted = pad_out2_permille(60000);
+    print(serial, "  CMP = 749 on P", static_cast<char>(out2_sel.port),
+          static_cast<uint32_t>(out2_sel.pin), ": WAVPOL 0 gives ", straight,
           " per mille and WAVPOL 1 gives ", inverted, crlf);
     bench.verdict("and WAVPOL inverts LPTIM2's waveform and nothing else",
                   within(straight, 230u, 270u) && within(inverted, 730u, 770u));
@@ -2484,7 +3017,7 @@ void tj_lptim2() {
     Dma1::bus_clock(true);
     Dma1::reset();
     L2::init();
-    L2::kernel_clock(LptimClock::lse);
+    L2::kernel_clock(slow_clock);
     (void)L2::configure({.prescaler = LptimPrescaler::div1});
     L2::enable();
     (void)L2::set_arr(1);
@@ -2509,21 +3042,27 @@ void tj_lptim2() {
     (void)EdgeCh::enable(true);
     Gen0::enable(true);
     console_drain();
-    const uint32_t gw0 = wall();
+    const Span gen2_window;
     const uint16_t g0 = EdgeCh::count();
-    while (wall_ms(wall_delta(gw0, wall())) < 200u) {
+    while (gen2_window.within(200u)) {
     }
     const uint16_t g1 = EdgeCh::count();
     Gen0::enable(false);
     EdgeCh::stop();
     const uint32_t edge_hz = static_cast<uint32_t>(g0 - g1) * 5u;
-    print(serial, "  LPTIM2_OUT at ARR = 1 on the crystal: the DMAMUX "
-          "generator on trigger input ", L2::dmamux_generator_input,
-          " counted ", edge_hz, " rising edges a second, against 16384", crlf);
+    const uint32_t want2_hz = slow_hz / 2u;
+    const uint32_t edge2_lo =
+        wall_on_lse ? 16'200u : want2_hz - want2_hz / 100u;
+    const uint32_t edge2_hi =
+        wall_on_lse ? 16'560u : want2_hz + want2_hz / 100u;
+    print(serial, "  LPTIM2_OUT at ARR = 1 on the ", slow_name(),
+          ": the DMAMUX generator on trigger input ",
+          L2::dmamux_generator_input, " counted ", edge_hz,
+          " rising edges a second, against ", want2_hz, crlf);
     bench.verdict("table 56's trigger input 21 IS LPTIM2_OUT: a DMA channel "
                   "with no peripheral counts the second timer's output at "
                   "half its kernel clock, with no pad and no CPU in the loop",
-                  within(edge_hz, 16'200u, 16'560u));
+                  within(edge_hz, edge2_lo, edge2_hi));
     Dma1::reset();
     Dma1::bus_clock(false);
     Out2Pad::release();
@@ -2558,7 +3097,9 @@ void tj_lptim2() {
     walk<In1Pin2>(false, 200);
     walk_in1_2(20, 60);
     const uint32_t clocked = L2::count_raw();
-    print(serial, "  PC0 as LPTIM2_IN1: COUNTMODE = 1 counted ", sampled,
+    print(serial, "  P", static_cast<char>(in1_2_sel.port),
+          static_cast<uint32_t>(in1_2_sel.pin),
+          " as LPTIM2_IN1: COUNTMODE = 1 counted ", sampled,
           " of 20 applied edges; CKSEL = 1 counted ", clocked, " of 20 - ",
           20u - clocked, " lost at the start", crlf);
     bench.verdict("LPTIM2's own input counts both of 26.4.12's ways: sampled "
@@ -2571,8 +3112,11 @@ void tj_lptim2() {
     // THE ROUTE THAT EXISTS ON THIS INSTANCE ALONE: IN1SEL = 3, the OR of
     // the two comparators, which table 140 leaves unconnected on LPTIM1.
     // COMP1 is the one this board can flip (a precharged PA1), and it is
-    // one of the two the code ORs together.
+    // one of the two the code ORs together - ON A PART THAT HAS
+    // COMPARATORS AT ALL, the code being a refusal rather than a route
+    // where there are none (the census above judges exactly that).
     feed();
+#if defined(COMP1_BASE)
     C1::init();
     constexpr CompConfig comp_cfg{.positive = CompPositive::input2,   // PA1
                                   .negative = CompNegative::vrefint_half};
@@ -2612,18 +3156,29 @@ void tj_lptim2() {
                   "routes: with COMP2 quiet, the OR of the two carries COMP1's "
                   "flips into the second counter with no pad on either side",
                   comp_up && or_route && counted == flips);
+#else
+    print(serial,
+          "  SKIPPED, no verdict claimed: IN1SEL = 3 is the OR of the two "
+          "comparators, and this part has no comparator at all (18.1) - there "
+          "is no signal to route and brio::Comp is not a type here. What the "
+          "code IS on this part is a compile-time refusal, which the mux "
+          "census above claims for both instances.",
+          crlf);
+#endif
 
     // THE TRIGGER, on LPTIM2's own ETR pad - and with it TRGFLT, the one
     // field of 26.4.5 this suite had measured only through its twin.
-    // The kernel clock is LSE, so one filter sample is 30.5 us and eight
-    // are 244: a 60 us pulse must not trigger and a 2 ms one must.
+    // The kernel clock is the 32 kHz root, so one filter sample is some
+    // 30 us and eight are some 250: a 60 us pulse must not trigger and a
+    // 2 ms one must, four times and thirty times the sample period being
+    // the same answer at either end of table 46's range.
     feed();
     for (uint8_t leg = 0; leg < 2u; ++leg) {
         feed();
         const bool filtered = leg == 1u;
         Etr2Pad::claim_input(PinPull::down);
         L2::init();
-        L2::kernel_clock(LptimClock::lse);
+        L2::kernel_clock(slow_clock);
         const bool cfg_ok = L2::configure({
             .prescaler = LptimPrescaler::div1,
             .trigger_filter = filtered ? LptimFilter::samples8 : LptimFilter::none,
@@ -2636,7 +3191,7 @@ void tj_lptim2() {
         (void)L2::start_continuous();
         spin_us(1000);
         const uint16_t armed_at = L2::count_raw();
-        // Ten 60 us blips: shorter than eight samples of a 32768 Hz clock.
+        // Ten 60 us blips: shorter than eight samples of the root.
         for (uint32_t i = 0; i < 10u; ++i) {
             walk<Etr2Pin>(true, 60);
             walk<Etr2Pin>(false, 2000);
@@ -2651,7 +3206,8 @@ void tj_lptim2() {
         const bool long_trig = (L2::status() & LptimFlag::exttrig) != 0u;
         walk<Etr2Pin>(false, 200);
         Etr2Pad::release();
-        print(serial, "  ETR on PC3, TRGFLT ",
+        print(serial, "  ETR on P", static_cast<char>(etr2_sel.port),
+              static_cast<uint32_t>(etr2_sel.pin), ", TRGFLT ",
               filtered ? "8 samples" : "off", ": armed at ", armed_at,
               ", after ten 60 us blips ", after_blips, " (EXTTRIG ",
               blip_trig, "), after one 2 ms pulse ", after_long, " (EXTTRIG ",
@@ -2665,7 +3221,7 @@ void tj_lptim2() {
         } else {
             bench.verdict("and TRGFLT IS A REAL THRESHOLD, measured here for "
                           "the first time on its own rather than through "
-                          "CKFLT's twin: at one sample per 30.5 us eight "
+                          "CKFLT's twin: at one sample per ~30 us eight "
                           "samples reject ten 60 us blips outright - counter "
                           "still at zero, EXTTRIG never set - and pass a 2 ms "
                           "pulse",
@@ -2676,50 +3232,15 @@ void tj_lptim2() {
 
     // ONE VECTOR, TWO OWNERS. Table 61 puts LPTIM2 and TIM7 on the same
     // line, and the only way to show a line is shared is to make both
-    // owners speak on it and have each body answer for its own flags.
+    // owners speak on it and have each body answer for its own flags -
+    // WHICH NEEDS A SECOND OWNER. The G031/G041 class has no TIM7 (and
+    // no TIM6), so there the line is LPTIM2's alone and the leg is a
+    // claim with no subject: `tim_present(7)` gates it, the timer being
+    // reached through the dependent alias because a plain function may
+    // not spell an absent instance at all.
     feed();
-    l2_irqs = 0;
-    l2_served = 0;
-    t7_irqs = 0;
-    t7_served = 0;
-    L2::init();
-    L2::kernel_clock(LptimClock::pclk);
-    (void)L2::configure({.prescaler = LptimPrescaler::div128,
-                         .interrupts = LptimFlag::arrm});
-    L2::enable();
-    (void)L2::set_arr(499);          // 500 kHz / 500 = 1 kHz of ARRM
-    (void)L2::wait_arr_ok();
-    (void)L2::clear_flags_raw(LptimFlag::all);
-    T7::init();
-    const bool t7_cfg = T7::configure({.prescaler = 63, .period = 999});
-    T7::interrupts(T7::update_interrupt, true);
-    tim7_live = true;
-    Nvic::clear_pending(L2::irq());
-    Nvic::enable(L2::irq());
-    (void)L2::start_continuous();
-    T7::enable(true);
-    spin_us(20000);
-    T7::enable(false);
-    Nvic::disable(L2::irq());
-    tim7_live = false;
-    const uint32_t l2n = l2_irqs;
-    const uint32_t t7n = t7_irqs;
-    const uint32_t l2s = l2_served;
-    const uint32_t t7s = t7_served;
-    print(serial, "  20 ms on the shared line: LPTIM2 served ", l2n,
-          " times (flags ", hex(l2s), "), TIM7 ", t7n, " times (flags ",
-          hex(t7s), ") - one vector, NVIC line ",
-          static_cast<uint32_t>(TIM7_LPTIM2_IRQn), crlf);
-    bench.verdict("LPTIM2's interrupt reaches TIM7_LPTIM2_IRQHandler and TIM7's "
-                  "reaches the SAME handler in the same window - one line, two "
-                  "owners, each body returning exactly the flags its own enable "
-                  "asked for, and each CLEARING them (a flag left standing "
-                  "would have re-entered the handler for ever instead of "
-                  "twenty times in twenty milliseconds)",
-                  t7_cfg && l2n >= 15u && t7n >= 15u &&
-                      l2s == LptimFlag::arrm && t7s == T7::update_flag);
+    tj_shared_line();
 
-    T7::release();
     quiet_everything();
 }
 
@@ -2735,13 +3256,33 @@ void banner() {
     print(serial, "  z  run them all", crlf);
 }
 
+/// TIM7's half of the shared handler, and NOTHING on a part with no
+/// TIM7: a handler is a plain function and may not spell an absent
+/// instance, so the body that would is a template gated on the same
+/// reserve fact letter j's leg is.
+template <bool present = tim_present(7)>
+[[gnu::always_inline]] inline void service_tim7() {
+    if constexpr (present) {
+        if (tim7_live) {
+            const uint32_t from_tim = Tim7<present>::isr();
+            if (from_tim != 0u) {
+                t7_served = from_tim;
+                t7_irqs = t7_irqs + 1u;
+            }
+        }
+    }
+}
+
 }   // namespace
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 
-/// LPTIM1's vector, shared with TIM6 and the DAC on this part.
-extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
+/// LPTIM1's vector, shared with TIM6 and the DAC where the part has
+/// them and its own where it has not - the NAME derived by the reserve
+/// from the presence of the timer it would share with, because an
+/// enumerator is not something the preprocessor can probe.
+extern "C" void BRIO_STM32G0_LPTIM1_HANDLER() {
     if (site_round) {
         Site::isr();
         return;
@@ -2760,24 +3301,19 @@ extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
     lptim_irqs = n + 1u;
 }
 
-/// LPTIM2's vector, shared with TIM7 on this part (table 61). Letter j
-/// makes BOTH owners speak on it, which is the only way a shared line
-/// can be shown to be one: each body clears and returns exactly the
-/// flags its own enable asked for, and TIM7's is called only while the
-/// letter says its bus clock is open.
-extern "C" void TIM7_LPTIM2_IRQHandler() {
+/// LPTIM2's vector, shared with TIM7 where the part has one (table 61)
+/// and its own where it has not. Letter j makes BOTH owners speak on it
+/// where there are two, which is the only way a shared line can be shown
+/// to be one: each body clears and returns exactly the flags its own
+/// enable asked for, and TIM7's is called only while the letter says its
+/// bus clock is open.
+extern "C" void BRIO_STM32G0_LPTIM2_HANDLER() {
     const uint32_t from_lptim = brio::Lptim<2>::isr();
     if (from_lptim != 0u) {
         l2_served = from_lptim;
         l2_irqs = l2_irqs + 1u;
     }
-    if (tim7_live) {
-        const uint32_t from_tim = brio::Tim<7>::isr();
-        if (from_tim != 0u) {
-            t7_served = from_tim;
-            t7_irqs = t7_irqs + 1u;
-        }
-    }
+    service_tim7();
 }
 
 extern "C" void RTC_TAMP_IRQHandler() { (void)brio::Rtc::isr(); }
@@ -2788,18 +3324,55 @@ int main() {
     brio::Pwr::rtc_domain_unlock(true);
     brio::RtcDomain::apb_clock(true);
 
-    // THE RTC DOMAIN IS NEVER RESET HERE. The wall clock wants the
-    // crystal, and RTCSEL is one-way - but the RTC campaign left this
-    // board's domain on LSE, and wiping it would cost the backup
-    // registers other suites own. So the domain is opened as it stands
-    // and the wall reports itself unavailable if it is not the crystal.
-    const bool on_lse = brio::RtcDomain::selected() == brio::RtcClockSource::lse;
-    brio::RtcDomain::lse_enable(true);
-    const bool lse_ok = brio::RtcDomain::lse_wait_ready(4'000'000UL);
-    if (on_lse && lse_ok) {
-        (void)brio::RtcDomain::open(brio::RtcClockSource::lse);
-        brio::Rtc::bypass_shadow(true);
-        wall_ready = wall_up();
+    // THE RTC DOMAIN IS NEVER RESET HERE, and that is a standing rule of
+    // this suite and not an accident: RTCSEL is one-way, so a wall would
+    // sometimes want a BDRST - and a BDRST costs the backup registers
+    // other suites own. What this boot does instead is TAKE WHAT IT
+    // FINDS. A domain already on a root is kept; an EMPTY one is claimed
+    // for the crystal if the crystal starts and for LSI if it does not,
+    // which is what a board with no X2 fitted has. A domain committed to
+    // a crystal that does not run leaves this suite with no wall at all,
+    // and the letters that need one skip by name.
+    const brio::RtcClockSource had = brio::RtcDomain::selected();
+    brio::RtcClockSource take = had;
+    if (had == brio::RtcClockSource::lse) {
+        brio::RtcDomain::lse_enable(true);
+        wall_on_lse = brio::RtcDomain::lse_wait_ready(4'000'000UL);
+    } else if (had == brio::RtcClockSource::lsi) {
+        wall_on_lse = false;
+        brio::Rcc::lsi_enable(true);
+        (void)brio::Rcc::lsi_wait_ready();
+    } else {
+        brio::RtcDomain::lse_enable(true);
+        wall_on_lse = brio::RtcDomain::lse_wait_ready(4'000'000UL);
+        if (wall_on_lse) {
+            take = brio::RtcClockSource::lse;
+        } else {
+            brio::RtcDomain::lse_enable(false);
+            brio::Rcc::lsi_enable(true);
+            take = brio::Rcc::lsi_wait_ready() ? brio::RtcClockSource::lsi
+                                               : brio::RtcClockSource::none;
+        }
+    }
+    slow_clock = wall_on_lse ? brio::LptimClock::lse : brio::LptimClock::lsi;
+    // THE SCALE, before anything is timed on it. A crystal is 32768 Hz
+    // by construction; an LSI is only bounded, so it is WEIGHED - and
+    // the weighing happens on any board that finds itself without a
+    // crystal, not only on the part that is known to lack one.
+    if (!wall_on_lse) {
+        const uint32_t measured = measure_lsi_hz();
+        if (measured != 0u) {
+            slow_hz = measured;
+            lsi_nominal = measured;
+            lsi_weighed = true;
+        }
+    }
+    if (take != brio::RtcClockSource::none &&
+        (had == take || had == brio::RtcClockSource::none)) {
+        if (brio::RtcDomain::open(take)) {
+            brio::Rtc::bypass_shadow(true);
+            wall_ready = wall_up();
+        }
     }
 
     const bool serial_ok = Serial::init(clock, 115200);
@@ -2833,7 +3406,13 @@ int main() {
               " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
               " tick=", tick_ok ? "SysTick" : "FAILED",
-              " wall=", wall_ready ? "RTC on LSE" : "NO CRYSTAL",
+              " wall=", wall_ready ? (wall_on_lse ? "RTC on LSE" : "RTC on LSI")
+                                   : "NO RTC (letters e, g, h skip)",
+              " root=", slow_hz,
+              wall_on_lse ? " Hz (the crystal)"
+                          : (lsi_weighed ? " Hz (LSI, weighed on TIM16)"
+                                         : " Hz (LSI NOT WEIGHED - nominal)"),
+              " ruler=", cpu_ruler ? "PCLK" : "the wall",
               " backstop=", wd ? "IWDG 32 s" : "FAILED", crlf);
         banner();
         bench.prompt();

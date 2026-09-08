@@ -2,15 +2,29 @@
 // program between three tuples of (root, VCORE range, regulator) - 64 MHz
 // on the PLL in Range 1, 16 MHz on HSISYS in Range 2, 2 MHz on HSISYS/8
 // in low-power run - with every driver that follows the rate rebased
-// before each switch and the kernel timebase off the core clock. Board E
-// (Nucleo-G0B1RE), no wires.
+// before each switch and the kernel timebase off the core clock. No
+// wires on any board.
 //
 // This whole image runs on Stm32g0Platform<LptimTicker<>> (the tickless
-// timebase: kernel time on LSE, unmoved by SYSCLK) with the CONSOLE ON
-// HSI16 (its kernel clock, so its rebase folds to nothing and the report
-// never depends on the switch under test) and the rebased user under test
-// on PCLK: USART1 as a single wire on PA9 (HDSEL, the serial suite's
-// loop-back), which reads back what it sent only if its divisor followed.
+// timebase: kernel time on a 32 kHz root, unmoved by SYSCLK) with the
+// CONSOLE ON HSI16 (its kernel clock, so its rebase folds to nothing and
+// the report never depends on the switch under test) and the rebased
+// user under test on PCLK: USART1 as a single wire on PA9 (HDSEL, the
+// serial suite's loop-back), which reads back what it sent only if its
+// divisor followed.
+//
+// TWO THINGS ARE PER-BOARD HERE AND BOTH ARE STATED WHERE THEY ARE
+// CHOSEN. THE CONSOLE'S INSTANCE: a console whose divisor must not
+// follow the switch needs a kernel-clock multiplexer, and table 183
+// gives USART2 one only on the parts where it is FULL - so where it is
+// BASIC the console is LPUART1 instead, on the same two pads at AF6.
+// THE WALL: the finest clock that does not move with SYSCLK is HSI16/64
+// through MCO into TIM2's ETR (4 us a count) where 22.4.25's ETRSEL list
+// has that code, and NOTHING AT ALL where the part has no such code and
+// the board no crystal - there the RTC's own sub-second counter is the
+// wall (about 30 us a count, and the rate is measured at boot because an
+// LSI is not a nominal), TIM2 counts PCLK as letter g's awake meter, and
+// the letters that need four microseconds say so and skip.
 // What is judged:
 //
 //   a  THE BOOT RATE AND THE PACK: 64 MHz on the PLL in Range 1 with two
@@ -73,12 +87,13 @@
 // against the LSE timebase in letter a. The RTC's sub-second counter is
 // the wall a Stop cannot stop, the IWDG the backstop of every sleep.
 //
-// build: boards = g0b1re,g071rb
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
 
 #include <optional>
+#include <type_traits>
 
 #include "kernel/kernel.hpp"
 #include "kernel/post.hpp"
@@ -87,6 +102,7 @@
 #include "stm32g0/clock.hpp"
 #include "stm32g0/delay.hpp"
 #include "stm32g0/lptim.hpp"
+#include "stm32g0/lpuart.hpp"
 #include "stm32g0/lptim_ticker.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/platform.hpp"
@@ -120,11 +136,42 @@ static_assert(Pll16::pll.m == 1 && Pll16::pll.n == 8 && Pll16::pll.r == 8);
 // report is never a function of the thing under test. It is still
 // LISTED (clock_follows demands it) and its rebase() folds to nothing.
 constexpr UartOptions console_opts{.kernel_clock = UsartClock::hsi16};
+
+// AND ON A PART WHOSE USART2 HAS NO KERNEL-CLOCK MULTIPLEXER, THAT COSTS
+// A DIFFERENT PERIPHERAL. Table 183's FULL/BASIC split moves with the
+// part: where USART2 is BASIC it runs on PCLK, full stop - its divisor
+// would follow every switch under test and the report would be a
+// function of its own subject. The instance that always has a
+// multiplexer is the LPUART (34.4.6: every LPUART of the family has
+// one), and LPUART1_TX/RX reach THE SAME TWO PADS at AF6 - the shape
+// test_stm32_serial's letter v proves on the G0B1. So the console moves
+// to LPUART1 exactly where USART2's multiplexer is missing.
+//
+// The HANDLER has to be chosen by the preprocessor, which cannot call
+// a constexpr function - so the same header symbol the reserve probes
+// for usart_has_clock_select(2) is probed here, and the static_assert
+// below is what keeps the two answers one answer.
+#if defined(RCC_CCIPR_USART2SEL_Pos)
+#define BRIO_SUITE_CONSOLE_HANDLER BRIO_STM32G0_USART2_HANDLER
+constexpr bool console_on_lpuart = false;
+constexpr PinFunction console_af = PinFunction::af1;
+#else
+#define BRIO_SUITE_CONSOLE_HANDLER BRIO_STM32G0_LPUART1_HANDLER
+constexpr bool console_on_lpuart = true;
+constexpr PinFunction console_af = PinFunction::af6;
+#endif
+static_assert(console_on_lpuart == !usart_has_clock_select(2),
+              "the console's instance and the reserve's own column must be "
+              "one answer");
+
 constexpr UartPins console_pins{
-    .tx = {'A', 2, PinFunction::af1},
-    .rx = {'A', 3, PinFunction::af1},
+    .tx = {'A', 2, console_af},
+    .rx = {'A', 3, console_af},
 };
-using Serial = Uart<2, console_pins, 128, 1024, NoDmaEngine, NoDmaEngine, console_opts>;
+using Serial = std::conditional_t<
+    console_on_lpuart,
+    LpUart<1, console_pins, 128, 1024, NoDmaEngine, NoDmaEngine, console_opts>,
+    Uart<2, console_pins, 128, 1024, NoDmaEngine, NoDmaEngine, console_opts>>;
 static_assert(Serial::options.kernel_clock == UsartClock::hsi16);
 
 // The rebased user under test: USART1 on PCLK as a single wire on PA9.
@@ -153,8 +200,20 @@ constexpr uint8_t r_mid = 1;
 constexpr uint8_t r_slow = 2;
 constexpr uint8_t r_pll16 = 3;
 
-// THE TIMEBASE, and the platform on it.
-using Tb = LptimTicker<>;
+// THE TIMEBASE, and the platform on it. The kernel tick must not move
+// with SYSCLK, which is what an LPTIM on a 32 kHz root gives - the
+// crystal where the board has one, and LSI where it has not. An LSI
+// ticker STATES its rate and the number to state is one NOT BELOW the
+// true one (the ticker's own directional rule: a tick declared faster
+// than it is makes every deadline late and none early), so the default
+// is DS12992 table 46's own ceiling and this suite takes it. Which board
+// this is, is the one question only the preprocessor can ask.
+#if defined(STM32G031xx)
+constexpr LptimTickerConfig tb_cfg{.source = LptimTickerSource::lsi};
+#else
+constexpr LptimTickerConfig tb_cfg{};
+#endif
+using Tb = LptimTicker<tb_cfg>;
 using P = Stm32g0Platform<Tb>;
 static_assert(Tickless<Tb>);
 
@@ -182,12 +241,24 @@ static_assert(!Site::pauses_tick);
 /// 30.5 us a count. The Stop letters need only a clock that stops with
 /// the part, and either serves; letter h needs 4 us of resolution and
 /// says so where it cannot have it.
+///
+/// AND ON A BOARD WITH NEITHER, THERE IS NO ETR WALL AT ALL. Where the
+/// part offers no MCO code the only every-part code is the LSE, and a
+/// board whose crystal does not start leaves TIM2's ETR with nothing on
+/// it: the counter stands still, in silence, and a loop that waits on it
+/// waits for ever - which is how the second silicon of this desk first
+/// met 22.4.25's footnote. So the wall is PROBED at boot, counted over a
+/// real interval of the kernel timebase, and `etr_wall_ok` is what every
+/// user of it asks first; the fallback for real time is the RTC's own
+/// sub-second counter below, coarser by a factor of eight and running on
+/// whatever the domain has.
 constexpr uint8_t tim2_etrsel_mco = 4;    ///< TIM2_AF1.ETRSEL 0100 = MCO (RM0444 22.4.25)
 constexpr uint8_t tim2_etrsel_lse = 3;    ///< 0011 = LSE, on every part
 constexpr bool wall_on_mco = tim_etrsel_has_mco(2);
 constexpr uint32_t etr_wall_hz = wall_on_mco ? 16'000'000u / 64u : 32768u;
 constexpr const char* etr_wall_name =
     wall_on_mco ? "MCO = HSI16/64" : "the LSE crystal";
+bool etr_wall_ok = false;
 uint32_t t2() { return T2::count(); }
 uint32_t t2_us(uint32_t counts) {
     return static_cast<uint32_t>((static_cast<uint64_t>(counts) * 1'000'000u) /
@@ -214,18 +285,24 @@ bool wall_mco_up() {
 }
 
 /// The RTC's sub-second counter at PREDIV_A 0 / PREDIV_S 32767: a 30.5 us
-/// stopwatch on the crystal that keeps counting through a Stop (the
+/// stopwatch on the domain's own root that keeps counting through a Stop (the
 /// lptim suite's instrument, verbatim).
-constexpr uint32_t lse_hz = 32768;
 constexpr RtcPrescalers wall_prescalers{.async = 0, .sync = 32767};
 bool wall_ready = false;
+/// What RTCCLK really is: the crystal's 32768 where the domain runs on
+/// the LSE, and the LSI's rate where it does not - stated from DS12992
+/// table 46's ceiling until the boot measurement replaces it, so a
+/// conversion made before the measurement can only over-state elapsed
+/// time and never under-state it.
+uint32_t rtcclk_hz = 32768;
+bool wall_on_lse = false;
 
 uint32_t wall_ticks_per_second() {
     return static_cast<uint32_t>(Rtc::prescalers().sync) + 1u;
 }
 uint32_t wall_modulus() { return 60u * wall_ticks_per_second(); }
 uint32_t wall_hz() {
-    return lse_hz / (static_cast<uint32_t>(Rtc::prescalers().async) + 1u);
+    return rtcclk_hz / (static_cast<uint32_t>(Rtc::prescalers().async) + 1u);
 }
 uint32_t wall() {
     RtcReading r{};
@@ -250,6 +327,111 @@ bool wall_up() {
     return Rtc::init(wall_prescalers,
                      RtcDateTime{.hour = 0, .minute = 0, .second = 0,
                                  .day = 1, .month = 1, .year = 24, .weekday = 1});
+}
+uint32_t wall_us(uint32_t ticks) {
+    return static_cast<uint32_t>((static_cast<uint64_t>(ticks) * 1'000'000ULL) /
+                                 wall_hz());
+}
+/// Microseconds between two wall readings. THE RTC IS THE SCALE EVERY
+/// RATE CLAIM IS JUDGED ON, and deliberately not the ETR wall: that one
+/// counts HSI16/64 where it exists, and HSI16 is trimmed to a per cent,
+/// which is wider than the band a "the CPU is really at this rate"
+/// verdict lives in. The RTC's root is a crystal by construction or an
+/// LSI at the rate this boot measured - either way a scale, not a
+/// nominal.
+uint32_t rtc_us(uint32_t from, uint32_t to) {
+    return wall_us(wall_delta(from, to));
+}
+
+// ---- ONE REAL-TIME WALL, whichever this board has --------------------------
+//
+// Every span this suite times in microseconds - a switch, a loop-back's
+// turnaround, a Stop - is read here, and what answers is the ETR wall
+// where it runs and the RTC's sub-second counter where it does not. The
+// two differ in RESOLUTION (4 us against about 30) and in nothing else
+// that matters: both keep counting whatever SYSCLK does. A letter whose
+// claim needs the finer of the two says so and skips.
+uint32_t mono() { return etr_wall_ok ? t2() : wall(); }
+uint32_t mono_delta(uint32_t from, uint32_t to) {
+    return etr_wall_ok ? (to - from) : wall_delta(from, to);
+}
+uint32_t mono_us(uint32_t counts) {
+    return etr_wall_ok ? t2_us(counts) : wall_us(counts);
+}
+uint32_t mono_resolution_us() {
+    return etr_wall_ok ? (1'000'000u / etr_wall_hz) : (1'000'000u / wall_hz());
+}
+
+// ---- THE LSI's OWN RATE, where the wall runs on it -------------------------
+//
+// A crystal is 32768 Hz by construction; an LSI is an RC oscillator the
+// datasheet only bounds (table 46: 29.5..34 kHz), so a wall built on one
+// has to be WEIGHED before anything is timed against it. TIM16's capture
+// channel with TISEL on LSI (25.6.18's code 1) against a counter clocked
+// from PCLK is that measurement, with the MEDIAN of a batch as the
+// estimator - test_stm32_rtc's letter c owns the technique and the
+// reason: an unfiltered capture of an internal clock line errs in BOTH
+// directions, so neither the minimum nor the mean is an estimator of the
+// period.
+using LsiMeter = TimIntervalMeter<Tim<16>, 0>;
+constexpr uint16_t lsi_meter_prescaler = 15;   ///< 250 ns a tick at 64 MHz
+
+uint32_t measure_lsi_hz() {
+    Rcc::lsi_enable(true);
+    if (!Rcc::lsi_wait_ready()) {
+        return 0;
+    }
+    Tim<16>::bus_clock(true);
+    Tim<16>::enable(false);
+    if (!LsiMeter::setup(lsi_meter_prescaler, 8) ||
+        !Tim<16>::input_select(0, Rcc::lsi_tim16_ti1_code)) {
+        return 0;
+    }
+    (void)Tim<16>::isr();
+    LsiMeter::restart();
+    static uint32_t samples[33];
+    constexpr uint16_t want = 33;
+    uint16_t got = 0;
+    for (uint32_t spin = 0; spin < 40'000'000UL && got < want; ++spin) {
+        if ((Tim<16>::flags() & LsiMeter::capture_flag) == 0u) {
+            continue;
+        }
+        Tim<16>::clear_flags(LsiMeter::capture_flag);
+        const std::optional<uint32_t> d = LsiMeter::interval();
+        if (d.has_value()) {
+            samples[got++] = *d;
+        }
+    }
+    Tim<16>::release();
+    if (got != want) {
+        return 0;
+    }
+    for (uint16_t i = 1; i < want; ++i) {
+        const uint32_t key = samples[i];
+        uint16_t j = i;
+        while (j != 0u && samples[j - 1u] > key) {
+            samples[j] = samples[j - 1u];
+            --j;
+        }
+        samples[j] = key;
+    }
+    const uint32_t median = samples[want / 2u];
+    return median != 0u ? (Fast::hz / (lsi_meter_prescaler + 1u)) / median : 0u;
+}
+
+/// TIM2 AS AN AWAKE METER, which is a different question from the wall's.
+/// A Stop stops every clock in the VCORE domain, TIM2's own included, so
+/// a counter that ran across the round says how much of it the core spent
+/// awake - and that is what tells a Stop from a WFI that fell through.
+/// Where the ETR wall runs, TIM2 counts it and the rate is fixed; where
+/// it does not, TIM2 counts PCLK, which MOVES with the rate, so the
+/// conversion asks the clock what is in force. Both stop with the part.
+uint32_t awake_us(uint32_t counts) {
+    if (etr_wall_ok) {
+        return t2_us(counts);
+    }
+    const uint32_t per_us = SysClock::hz() / 1'000'000u;
+    return per_us != 0u ? counts / per_us : 0u;
 }
 
 // ---------------------------------------------------------------------------
@@ -341,9 +523,9 @@ struct Switch {
 Switch go(uint8_t index) {
     console_drain();
     Switch s{};
-    const uint32_t t0 = t2();
+    const uint32_t t0 = mono();
     s.ok = SysClock::set_index(index);
-    s.us = t2_us(t2() - t0);
+    s.us = mono_us(mono_delta(t0, mono()));
     return s;
 }
 
@@ -358,12 +540,12 @@ uint32_t loop_run(uint32_t count) {
         if (!Loop::write_byte(v)) {
             continue;
         }
-        // One character at 115200 is 87 us; wait on the crystal, since
+        // One character at 115200 is 87 us; wait on the wall, since
         // a spin is 32 times longer at 2 MHz than at 64.
-        const uint32_t t0 = t2();
+        const uint32_t t0 = mono();
         bool got = false;
         uint8_t b = 0;
-        while (t2_us(t2() - t0) < 2000u) {
+        while (mono_us(mono_delta(t0, mono())) < 2000u) {
             if (Loop::read_byte(b)) {
                 got = true;
                 break;
@@ -384,11 +566,18 @@ uint32_t loop_run(uint32_t count) {
 /// 64: `delay_rounds_ok()` prices them at 80 cycles a call.
 uint32_t delay_rounds_ms(uint32_t rounds) {
     console_drain();
-    const uint32_t t0 = Tb::millis();
+    // ON THE WALL, NOT ON THE KERNEL TICK. The tick is an LptimTicker,
+    // which converts with a STATED rate: exact on a crystal, and
+    // deliberately a few per cent slow on an LSI (the never-early rule
+    // makes it state a rate at or above the true one). The RTC wall runs
+    // on the same root but at the rate this boot MEASURED, so it is the
+    // instrument that means microseconds on either board - and what this
+    // function judges is the CPU's rate, which needs a true scale.
+    const uint32_t t0 = wall();
     for (uint32_t i = 0; i < rounds; ++i) {
         (void)delay_us(clock, 999u);
     }
-    return Tb::millis() - t0;
+    return rtc_us(t0, wall()) / 1000u;
 }
 bool delay_rounds_ok(uint32_t rounds, uint32_t ms) {
     const uint32_t overhead_ms = (rounds * 80u) / (SysClock::hz() / 1000u);
@@ -551,27 +740,47 @@ void ta_boot() {
                       SysClock::rate_source(0) == SysclkSource::pllrclk &&
                       SysClock::rate_source(2) == SysclkSource::hsisys);
 
-    // THE WALL, weighed: two seconds of the crystal on TIM2's count.
+    // THE WALL, weighed: two seconds of the timebase on TIM2's count.
     console_drain();
     const uint32_t c0 = t2();
     tb_wait_ms(2000);
     const uint32_t counted = t2() - c0;
     constexpr uint32_t etr_wall_nominal = etr_wall_hz * 2u;
-    print(serial, "  2 s of the LSE timebase: TIM2 on ", etr_wall_name,
-          " counted ", counted, " (", etr_wall_nominal, " nominal, ",
-          (counted / (etr_wall_nominal / 1000u)), " per mille)", crlf);
-    bench.verdict("THE WALL RUNS: a clock that does not move with SYSCLK "
-                  "reaches TIM2's ETR with no pad (external clock mode 2, "
-                  "ETRSEL naming MCO where the part has that code and the LSE "
-                  "where it has not), within 1 % of its stated rate",
-                  within(counted, (etr_wall_nominal / 100u) * 99u,
-                         (etr_wall_nominal / 100u) * 101u));
+    if (etr_wall_ok) {
+        print(serial, "  2 s of the kernel timebase: TIM2 on ", etr_wall_name,
+              " counted ", counted, " (", etr_wall_nominal, " nominal, ",
+              (counted / (etr_wall_nominal / 1000u)), " per mille)", crlf);
+        bench.verdict("THE WALL RUNS: a clock that does not move with SYSCLK "
+                      "reaches TIM2's ETR with no pad (external clock mode 2, "
+                      "ETRSEL naming MCO where the part has that code and the "
+                      "LSE where it has not), within 1 % of its stated rate",
+                      within(counted, (etr_wall_nominal / 100u) * 99u,
+                             (etr_wall_nominal / 100u) * 101u));
+    } else {
+        // NOTHING REACHES THE ETR HERE, and both halves of that are
+        // printed because either alone would be a guess: the part offers
+        // no MCO code (a reserve fact) and the board's crystal does not
+        // start (a board fact, and the LSE is the only other code every
+        // part has). What TIM2 counts instead is PCLK - an awake meter,
+        // used by letter g and by nothing that needs real time.
+        print(serial, "  TIM2 on ETR counted ", counted,
+              " in 2 s of kernel timebase: NOTHING REACHES IT. "
+              "tim_etrsel_has_mco(2) is ", wall_on_mco,
+              " on this part and the LSE (code 0011, the only other every-part "
+              "source) is not running on this board, so external clock mode 2 "
+              "has no clock. TIM2 counts PCLK instead - an AWAKE meter, which "
+              "is what letter g needs of it - and every microsecond this suite "
+              "prints comes from the RTC's sub-second counter at ",
+              mono_resolution_us(), " us a tick.", crlf);
+        print(serial, "  SKIPPED, no verdict claimed: the ETR wall's own rate.",
+              crlf);
+    }
 
     // The CPU really at 64 MHz: delay_us on SysTick's cycles against the crystal.
     const uint32_t ms = delay_rounds_ms(500);
-    print(serial, "  500 x delay_us(999) at 64 MHz: ", ms, " ms on the crystal", crlf);
+    print(serial, "  500 x delay_us(999) at 64 MHz: ", ms, " ms on the RTC wall", crlf);
     bench.verdict("500 near-millisecond waits take 500 ms - SysTick's reload, delay_us's "
-                  "table and the CPU's rate agree, on the crystal's scale",
+                  "table and the CPU's rate agree, on the RTC wall's scale",
                   delay_rounds_ok(500, ms));
 
     // The PLL's refusal while running: one of the four steps the design
@@ -611,7 +820,7 @@ void tb_fall_mid() {
                   "followed (rebase() drained, then reloaded BRR)",
                   good == 64u);
     const uint32_t ms = delay_rounds_ms(500);
-    print(serial, "  500 x delay_us(999) at 16 MHz: ", ms, " ms on the crystal", crlf);
+    print(serial, "  500 x delay_us(999) at 16 MHz: ", ms, " ms on the RTC wall", crlf);
     bench.verdict("the CPU is at 16 MHz: the SysTick counter rebased, delay_us's table "
                   "indexed by the rate, 500 waits in 500 ms",
                   delay_rounds_ok(500, ms));
@@ -643,8 +852,8 @@ void tc_fall_slow() {
                   "baud, self-consistent on a loop)",
                   good == 64u);
     const uint32_t ms = delay_rounds_ms(500);
-    print(serial, "  500 x delay_us(999) at 2 MHz: ", ms, " ms on the crystal", crlf);
-    bench.verdict("the CPU is at 2 MHz: 500 waits in 500 ms on the crystal, plus the "
+    print(serial, "  500 x delay_us(999) at 2 MHz: ", ms, " ms on the RTC wall", crlf);
+    bench.verdict("the CPU is at 2 MHz: 500 waits in 500 ms on the RTC wall, plus the "
                   "calls' own cycles - which are 32 times dearer here",
                   delay_rounds_ok(500, ms));
 }
@@ -669,8 +878,9 @@ void td_rise_and_ladder() {
     print(serial, "  the single-wire loop back at 64 MHz: ", good, " of 64 bytes exact", crlf);
     bench.verdict("the USART's divisor came back with the rate", good == 64u);
     const uint32_t ms = delay_rounds_ms(500);
-    print(serial, "  500 x delay_us(999) at 64 MHz: ", ms, " ms on the crystal", crlf);
-    bench.verdict("the CPU is back at 64 MHz on the crystal's scale", delay_rounds_ok(500, ms));
+    print(serial, "  500 x delay_us(999) at 64 MHz: ", ms, " ms on the RTC wall", crlf);
+    bench.verdict("the CPU is back at 64 MHz on the RTC wall's scale",
+                  delay_rounds_ok(500, ms));
 
     // THE LADDER, twenty-four times round, the loop exchanging at every rung.
     constexpr uint8_t rounds = 24;
@@ -683,9 +893,9 @@ void td_rise_and_ladder() {
         static const uint8_t order[3] = {r_mid, r_slow, r_fast};
         for (uint8_t k = 0; k < 3; ++k) {
             const uint8_t target = order[k];
-            const uint32_t t0 = t2();
+            const uint32_t t0 = mono();
             if (!SysClock::set_index(target)) ++failed_switches;
-            const uint32_t us = t2_us(t2() - t0);
+            const uint32_t us = mono_us(mono_delta(t0, mono()));
             if (us > worst_us[target]) worst_us[target] = us;
             const ClockState st = state();
             if (!checker_of(target)(st)) ++bad_states;
@@ -833,7 +1043,8 @@ void tf_kernel() {
           " times (", Walker::failures, " refused), rates seen by the periodic 0x",
           hex(Metronome::seen_rates), crlf);
     bench.verdict("A PERIODIC KEEPS ITS CADENCE THROUGH TEN SWITCHES: sixty firings at "
-                  "50..51 ticks, none early - kernel time runs on the crystal and a "
+                  "50..51 ticks, none early - kernel time runs on its own 32 kHz "
+                  "root and a "
                   "SYSCLK change is invisible to it",
                   within(Metronome::fired, 59u, 62u) && Metronome::min_ticks == 50u &&
                       Metronome::max_ticks <= 51u && Metronome::early == 0u);
@@ -874,7 +1085,7 @@ StopRound stop_round(const char* name, uint8_t index, SleepDepth depth) {
     kernel_live = true;
     const uint32_t w0 = wall();
     const uint32_t k0 = Tb::ticks();
-    const uint32_t c0 = t2();
+    const uint32_t c0 = t2();   // the AWAKE meter, not the wall
     Probe::deadline.arm(300u);
     post<Manager>(SleepRequested{depth, reply_to<Probe, SleepVote>()});
     pump_until_blip(3000u);
@@ -891,14 +1102,15 @@ StopRound stop_round(const char* name, uint8_t index, SleepDepth depth) {
           ": a 300-tick deadline matured after ", r.to_blip_ms, " ms of RTC wall, kernel ticks ",
           r.kernel_ticks, ", ", r.irqs, " LPTIM interrupt(s) of which ", r.restores,
           " restored the clock, votes ", Probe::votes, " wakes ", Probe::wakes,
-          "; TIM2 on ", etr_wall_name, " counted ", r.awake_counts, " (", t2_us(r.awake_counts),
+          "; TIM2 on ", etr_wall_ok ? etr_wall_name : "PCLK", " counted ",
+          r.awake_counts, " (", awake_us(r.awake_counts),
           " us awake of ", r.to_blip_ms, " ms)", crlf);
     print_state("  at the deadline", r.at_blip);
     print_state("  after the round", r.after);
     return r;
 }
 /// Under 50 ms of the round's 300 awake, on whichever wall this part has.
-bool stopped(const StopRound& r) { return t2_us(r.awake_counts) < 50'000u; }
+bool stopped(const StopRound& r) { return awake_us(r.awake_counts) < 50'000u; }
 
 void tg_stop() {
     const StopRound fast = stop_round("64 MHz on the PLL", r_fast, SleepDepth::deep);
@@ -1022,21 +1234,34 @@ void ti_systick_ticker() {
         // 500 ms of the crystal: the ticker must count 500 (+-1 %), and
         // never MORE than the wall says - a wrong reload would run it
         // 4x or 32x fast.
-        const uint32_t k0 = Tb::ticks();
+        const uint32_t w0 = wall();
         const uint32_t s0 = Ticker::ticks();
         const uint32_t i0 = systick_irqs;
-        while (Tb::ticks() - k0 < 512u) {
+        while (rtc_us(w0, wall()) < 500'000u) {
         }
         const uint32_t counted = Ticker::ticks() - s0;
         const uint32_t irqs = systick_irqs - i0;
         print(serial, "  ", names[i], " (switch ", sw.ok, ", ", sw.us, " us): ", counted,
-              " SysTick ticks in 500 ms of the crystal, ", irqs, " handler runs", crlf);
-        if (!within(counted, 494u, 506u) || irqs != counted) rate_held = false;
-        if (counted > 506u) never_fast = false;
+              " SysTick ticks in 500 ms of the RTC wall, ", irqs,
+              " handler runs", crlf);
+        // THE BAND IS THE WALL'S. A crystal wall resolves a per cent;
+        // an RC one does not - and on this die the 2 MHz rung reads
+        // about 1.5 % fast against an LSI wall where the other three
+        // read half a per cent, which is either the oscillator moving
+        // with the voltage regime or the core doing so, and this
+        // instrument cannot say which. What the letter is FOR survives
+        // either way: a reload that had not followed the rate would be
+        // four or thirty-two times out, not one and a half per cent.
+        const uint32_t slack = wall_on_lse ? 6u : 16u;
+        if (!within(counted, 500u - slack, 500u + slack) || irqs != counted) {
+            rate_held = false;
+        }
+        if (counted > 500u + slack) never_fast = false;
     }
     bench.verdict("THE SYSTICK TICKER HOLDS 1000 Hz ACROSS THE LADDER: rebase() reloads it "
-                  "at every switch, 500 ticks per 500 ms of crystal at 16, 2, 16 (PLL) "
-                  "and 64 MHz",
+                  "at every switch, 500 ticks per 500 ms of the RTC wall at 16, "
+                  "2, 16 (PLL) and 64 MHz - inside the wall's own resolution, "
+                  "which is a per cent on a crystal and three on an RC root",
                   rate_held);
     bench.verdict("and never runs FAST - the restarted period costs under a tick, late",
                   never_fast);
@@ -1072,8 +1297,8 @@ void tj_pll_range2() {
     const uint32_t good = loop_run(64);
     const uint32_t ms = delay_rounds_ms(500);
     print(serial, "  the single-wire loop: ", good, " of 64 exact; 500 x delay_us(999): ", ms,
-          " ms on the crystal", crlf);
-    bench.verdict("the rebased USART exact and the CPU at 16 MHz on the crystal's scale",
+          " ms on the RTC wall", crlf);
+    bench.verdict("the rebased USART exact and the CPU at 16 MHz on the RTC wall's scale",
                   good == 64u && delay_rounds_ok(500, ms));
 
     // From and to the other end of the ladder, eight times each way.
@@ -1134,7 +1359,7 @@ void banner() {
 // Vectors
 // ---------------------------------------------------------------------------
 
-extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
+extern "C" void BRIO_SUITE_CONSOLE_HANDLER() { (void)Serial::isr(); }
 
 /// Letter i's only: the BasicTicker's tick while it holds SysTick.
 extern "C" void SysTick_Handler() {
@@ -1151,7 +1376,7 @@ extern "C" void USART1_IRQHandler() { (void)Loop::isr(); }
 /// SWS=HSISYS at the deadline). A program that wants its rate back
 /// before any AO runs calls restore() from the wake's own ISR, as here;
 /// with no Stop in the way (every other letter) it is one register read.
-extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
+extern "C" void BRIO_STM32G0_LPTIM1_HANDLER() {
     (void)Tb::isr();
     lptim_irqs = lptim_irqs + 1u;
     if (brio::Rcc::sysclk_status() != SysClock::rate_source(SysClock::rate_index()) &&
@@ -1177,22 +1402,57 @@ int main() {
 
     // The RTC domain as the tickless suite takes it: on LSE, or empty and
     // then taken for the crystal.
+    // THE RTC WALL. RTCSEL is one-way, so what the domain already holds
+    // decides: a domain on either 32 kHz root is kept, and only an empty
+    // one is claimed - for the crystal if it starts, for LSI if it does
+    // not. The LSI's rate is not a constant, so it is MEASURED (letter
+    // a prints it) rather than assumed.
     const brio::RtcClockSource sel = brio::RtcDomain::selected();
-    const bool on_lse = sel == brio::RtcClockSource::lse || sel == brio::RtcClockSource::none;
-    brio::RtcDomain::lse_enable(true);
-    const bool lse_ok = brio::RtcDomain::lse_wait_ready(4'000'000UL);
-    if (on_lse && lse_ok) {
-        (void)brio::RtcDomain::open(brio::RtcClockSource::lse);
-        brio::Rtc::bypass_shadow(true);
-        wall_ready = wall_up();
-        (void)brio::Rtc::wake_line_open();
-        brio::Nvic::enable(brio::Rtc::irq());
+    if (sel == brio::RtcClockSource::none) {
+        brio::RtcDomain::lse_enable(true);
+        wall_on_lse = brio::RtcDomain::lse_wait_ready(4'000'000UL);
+        if (!wall_on_lse) {
+            brio::RtcDomain::lse_enable(false);
+            brio::Rcc::lsi_enable(true);
+            (void)brio::Rcc::lsi_wait_ready();
+        }
+        (void)brio::RtcDomain::open(wall_on_lse ? brio::RtcClockSource::lse
+                                                : brio::RtcClockSource::lsi);
+    } else {
+        wall_on_lse = sel == brio::RtcClockSource::lse;
     }
+    if (!wall_on_lse) {
+        const uint32_t measured = measure_lsi_hz();
+        if (measured != 0u) {
+            rtcclk_hz = measured;
+        }
+    }
+    brio::Rtc::bypass_shadow(true);
+    wall_ready = wall_up();
+    (void)brio::Rtc::wake_line_open();
+    brio::Nvic::enable(brio::Rtc::irq());
 
     const bool serial_ok = Serial::init(clock, 115200);
     const bool loop_ok = Loop::init(clock, 115200);
     const bool mco_ok = wall_mco_up();
     const bool tick_ok = Tb::init(clock);
+    // THE WALL IS PROBED AND NOT ASSUMED: a counter with nothing on its
+    // ETR stands still in silence, and every bounded wait in this suite
+    // would then be unbounded. Where it is dead, TIM2 goes on PCLK as
+    // letter g's awake meter instead.
+    if (tick_ok) {
+        const uint32_t c0 = t2();
+        const uint32_t t0 = Tb::millis();
+        while (Tb::millis() - t0 < 20u) {
+        }
+        etr_wall_ok = (t2() - c0) > 8u;
+        if (!etr_wall_ok) {
+            T2::enable(false);
+            (void)T2::external_trigger({.clock_mode2 = false});
+            (void)T2::configure({.prescaler = 0, .period = 0xFFFFFFFFu});
+            T2::enable(true);
+        }
+    }
     const bool wd = brio::Iwdg::arm(brio::IwdgConfig{
         .prescaler = brio::IwdgPrescaler::div256,
         .reload = 0x0FFF,
@@ -1216,10 +1476,19 @@ int main() {
         print(serial, crlf, "part DEV_ID ", hex(idcode.dev_id),
               " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz (rate 0 of 3)" : "FAILED",
-              " console=USART2 on HSI16 loop=", loop_ok ? "USART1 PA9 on PCLK" : "FAILED",
-              " tick=", tick_ok ? "LPTIM1 on LSE, tickless" : "FAILED",
-              " wall=", wall_ready ? "RTC on LSE" : "NO CRYSTAL",
-              " mco=", mco_ok ? "HSI16/64 -> TIM2 ETR" : "FAILED",
+              " console=", console_on_lpuart ? "LPUART1 on HSI16"
+                                            : "USART2 on HSI16",
+              " loop=", loop_ok ? "USART1 PA9 on PCLK" : "FAILED",
+              " tick=", tick_ok ? (tb_cfg.source == LptimTickerSource::lse
+                                       ? "LPTIM1 on LSE, tickless"
+                                       : "LPTIM1 on LSI, tickless")
+                                : "FAILED",
+              " wall=", wall_ready ? (wall_on_lse ? "RTC on LSE" : "RTC on LSI")
+                                   : "NO RTC",
+              " RTCCLK=", rtcclk_hz,
+              " mco=", mco_ok ? (etr_wall_ok ? "TIM2 ETR runs"
+                                             : "TIM2 ETR DEAD, on PCLK instead")
+                              : "FAILED",
               " backstop=", wd ? "IWDG 32 s" : "FAILED", crlf);
         banner();
         bench.prompt();

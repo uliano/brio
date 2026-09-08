@@ -589,6 +589,34 @@ G0B1's 2.12.1 and 2.12.2. Both are staged by letter `h`, which is a
 SELF-LINK letter: NOT STAGED on this board, and said so rather than
 assumed from the other die.
 
+## On the third silicon
+
+`test_stm32_spi` runs WIRELESS on the Nucleo-G031K8 (DEV_ID 0x466,
+REV_ID 0x1003) and scores **18/18** - letter `a`'s whole census of the
+block and letter `m`'s sleep wake, which is everything this board can
+ask. **THERE IS NO LINK OF ANY KIND HERE**: SPI2's four pads
+(PB10/PC2/PD4/PB12) are bonded to no pin of the LQFP32 (DS12992 table
+12), so the board cannot even carry its own self-link, and nothing is
+wired to it. The eleven self-link letters and the six peer ones are
+therefore COMPILED OUT rather than skipped at run time - each printing
+its own reason and claiming nothing - which is also what brings the image
+from 66 KB to 17352 bytes, inside a 64 KB part.
+
+What the census still proves on a third die: the reserve's SPI roster and
+the shared-vector derivation (SPI2's line is SPI1's no more, and it is
+shared with a third instance exactly where the part has one); table 209's
+reset values to the bit, the misaligned reset DS/FRXTH pair, 35.9.2's
+forced DS code; the mode fault a non-alternate-function NSS pad raises;
+**that the silicon enforces none of 35.5.7 - all seventeen CR1/CR2 fields
+take a write with SPE set** - and that every configuring verb refuses
+anyway, with SSI, CRCNEXT and FRXTH open; 35.5.9's disable procedure; and
+`spi_rate_for()` at all three rates of the ladder.
+
+The console this suite runs on is **LPUART1** on PA2/PA3 at AF6, for the
+reason [clock.md](clock.md) gives: its subject moves the clock and this
+part's USART2 has no kernel-clock multiplexer to keep the report out of
+it.
+
 ## Not covered yet
 
 **Driver gaps** - implemented nowhere, and a program that wants them

@@ -415,6 +415,45 @@ The only ADC-side letter that moves is letter q's trigger census: table
 75's TIM4_TRGO row needs a TIM4, so a part without one walks five timer
 rows instead of six and says so.
 
+## On the third silicon
+
+`test_stm32_analog` scores **67 of 139** on the Nucleo-G031K8 (DEV_ID
+0x466, REV_ID 0x1003), and the shortfall is not the ADC's: **this part
+has no DAC and no comparators at all**, so eight of the suite's eighteen
+letters (the DAC's four - `d`, `e`, `o`, `p` - the comparators' three -
+`i`, `m`, `n` - and `k`, which pairs a DAC stream with an ADC one) are
+COMPILED OUT - `Dac` and `Comp` cannot
+be named where `DAC1_BASE` and `COMP1_BASE` do not exist - and each is
+still registered in the menu, printing its own reason and claiming
+nothing. The converter's own letters run whole.
+
+**THE SECOND ANALOG SOURCE IS THE JUNCTION SENSOR.** Half this suite's
+letters need a second reading that is not VREFINT, and on the bigger
+parts that is the DAC's output through PA4; here it is the temperature
+sensor, which is a source no program can move but which is steady and
+far from VREFINT (948 counts against 1512), and every leg that used the
+DAC's code as a knob states what it lost.
+
+Numbers on this die: **VDDA 3308 mV** from VREFINT against
+VREFINT_CAL = 1667 (E 3310, F 3317), CALFACT 63 after the self
+calibration, the junction sensor 948 counts = 32.7 C, VBAT/3 1374 counts
+= 3330 mV, VREFINT 1221 mV at 12 bits and 1218 at 10 - inside table 27's
+1.182..1.232 V. The noise floor over 64 conversions is 2 counts on
+VREFINT and 3 on the sensor.
+
+**THE INPUT MAP IS THIS PACKAGE'S OWN**: IN0..IN7 on PA0..PA7, IN8..IN10
+on PB0/PB1/PB2, IN11 on PB7, IN15 and IN16 on PA11 and PA12 - twelve
+bonded pads, walked and measured, with no IN17/IN18 (those are the
+bigger packages' PC4/PC5). And the walk paid for a fact of the
+technique: a precharged pad's reading is its charge SHARED with the
+sample-and-hold, so the swing is a fraction of the rail and the fraction
+is a BOARD and PACKAGE property - a Nucleo-64's pad drags a morpho header
+behind it and holds its charge, this one holds less. The same twelve rows
+swing 203..840 counts of 4096 here where a sixteenth of full scale is
+what the bigger boards clear on every row, so the floor the verdict
+judges by is a thirty-second there - still thirty times the converter's
+own noise, which is what makes it a claim about the MAP.
+
 ## Not covered yet
 
 **Driver gaps** (the register is there, the verb is not):

@@ -289,6 +289,34 @@ IMPLEMENTED bits, where both dies agree bit for bit, and the residue is
 printed. An unimplemented mask bit does nothing either way, which is why
 this is a finding about the document and not about a program.
 
+## On the third silicon
+
+`test_stm32_exti` scores **85 of 89** on the Nucleo-G031K8 (DEV_ID 0x466,
+REV_ID 0x1003). The four not claimed are one leg and one letter, each
+skipped by name: IMR2's reset value, because **this part has no second
+register group at all** (`exti_implemented_mask2` is zero, the reserve's
+`exti_imr2()`/`exti_emr2()` pointers are null beside the trigger ones -
+so the group's presence is now judged as the EQUIVALENCE "mask registers
+exactly where there are lines above 31"); and letter `u`, the user
+button, because **the LQFP32 does not bond PC13** (DS12992 table 12) and
+a Nucleo-32 has no button - an unbonded pad's level is not a reading, so
+line 13 is left alone rather than configured.
+
+**A THIRD IMR1 RESET VALUE.** This die comes up with IMR1 =
+**0xFFFE0000** where the G071 holds 13.5.12's printed 0xFFF80000 and the
+G0B1 the rule that section states in words. Over the lines the part
+IMPLEMENTS all three agree exactly - here 0xF2A80000 of a 0xF2A9FFFF
+mask, which is the direct set - and the residue 0x0D560000 sits above the
+implemented mask and means nothing. The verdict is the rule over the
+implemented bits; what a die holds above them is printed beside it.
+
+**PA8 IS NOT UCPD1_CC1 HERE**, this part having no UCPD at all: the
+dead-battery Rd is absent, `ucpd_dead_battery()` REFUSES instead of
+writing a strobe bit that does not exist, and letter `b` claims the pad
+follows its own pull AND that the verb answered exactly
+`ucpd_present(1)` - a new reserve fact probed on SYSCFG's own strobe
+bit.
+
 ## Not covered yet
 
 Driver gaps: the direct lines whose peripheral this stratum has not

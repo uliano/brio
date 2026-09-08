@@ -544,6 +544,38 @@ alone would report this path healthy. Letter k's synchronization block is
 unaffected: its sync input is TIM14_OC (table 56 input 22) and not an
 EXTI line.
 
+## On the third silicon
+
+`test_stm32_dma` scores **62 of 69** on the Nucleo-G031K8 (DEV_ID 0x466,
+REV_ID 0x1003). The controller here is **DMA1 with FIVE channels** and a
+DMAMUX with five channel multiplexers and four request generators, so
+DMA2's five channels (2 verdicts), the second bus master (1) and the
+peripheral-to-peripheral leg (1, which needs TIM4 and TIM6 and this part
+has neither) skip by name; the geometry verdict is now the cross-check
+"the multiplexer has exactly as many channels as the controllers have
+between them", which is one claim on all three parts.
+
+**THE CONSOLE GIVES ITS ENGINES BACK.** Two of the seven channels are
+the console's transmit and receive on the bigger parts; on five, the
+letters own all five, so the console runs on the INTERRUPT transport
+here and the three verdicts that measure a DMA-fed console at its
+ceiling skip by name. That is a real change of arrangement and it left a
+mark: with the CPU in the loop the AHB is shared, and four samples of ten
+32-word blocks in the BlockRelay letter arrive **2 ticks long** - the
+payload being TIM2's counter READ BY THE DMA, whose access a CPU one in
+flight delays by a cycle or two. A torn block is off by a whole pace
+period or more, so the check allows the bus's own jitter where the
+console shares it and nothing at all where it does not.
+
+**8 KB OF SRAM IS THE OTHER LIMIT.** The three big memory-to-memory
+buffers drop from 512 to 256 words on this part (every claim restated for
+the length that fits and the length printed beside it), which brings the
+image to 42348 bytes of flash and 6108 of RAM - the stack living in what
+is left.
+
+`BlockRelay` and the two block-stream engines run unchanged on the third
+silicon, as does `util/` entire.
+
 ## Not covered yet
 
 Driver gaps:

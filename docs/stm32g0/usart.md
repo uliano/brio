@@ -613,6 +613,37 @@ ONEBIT on a noisy START bit) is not exercised - letter `f`'s ONEBIT rows
 run on a clean start bit - and 2.12.1 (an SPI-slave TC anticipated) has
 no letter, there being no synchronous slave on this desk.
 
+## On the third silicon
+
+`test_stm32_serial` scores **77 of 88** on the Nucleo-G031K8 (DEV_ID
+0x466, REV_ID 0x1003). This part has **USART1 and USART2 and nothing
+else**, and the split moves one step further down table 183: **USART2 IS
+BASIC HERE** - no FIFO, no PRESC that divides, NO KERNEL-CLOCK
+MULTIPLEXER (`usart_has_clock_select(2)` is false: the header declares no
+`RCC_CCIPR_USART2SEL_Pos`) and no wake from Stop. So the console's own
+instance is the one instance this suite cannot move off PCLK, and three
+legs go with that: letter `d`'s console-kernel-clock legs skip by name,
+letter `a`'s "does a BASIC instance's PRESC DIVIDE" leg has no subject
+that is not the console's own pad, and letter `w` - the wake from Stop
+with ES0548 2.2.4 staged - skips whole, having neither a wake line nor
+(on this board) a crystal for its wall.
+
+**AND IT IS WHY THREE OTHER SUITES MOVE THEIR CONSOLE TO LPUART1**
+(`test_stm32_clock`, `test_stm32_spi`, `test_stm32_i2c`): a console whose
+divisor follows the switch under test cannot report on it, and every
+LPUART has a multiplexer (34.4.6). LPUART1_TX/RX reach PA2/PA3 at AF6 -
+the same two pads - which is letter `v`'s shape put to work.
+
+What still runs on this part is most of the chapter: USART1 is FULL, its
+CK, DE, RTS and CTS are on **PB3 and PB4 at AF4** (DS12992 table 14, and
+the LQFP32 bonds both), so the smartcard clock ladder, the driver enable
+and the flow-control legs are all measured here. What skips beside the
+above: LPUART1's own single wire (its only bonded pads on this package
+are the console's), LPUART2 (absent), and letter `v`'s LSE-clocked
+console leg (no crystal) - the last of which was a `bench.verdict(...,
+false)` on a board with no crystal and is now a skip by name that claims
+nothing.
+
 ## Not covered yet
 
 Driver gaps: none. Every field of chapter 33 is implemented.

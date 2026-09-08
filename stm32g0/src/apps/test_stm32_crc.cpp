@@ -37,7 +37,7 @@
 //      CPU in the loop, judged against two independent references
 //   e  the two rules 14.3.3 states and no register enforces
 //
-// build: boards = g0b1re,g071rb
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>

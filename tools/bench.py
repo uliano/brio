@@ -281,6 +281,9 @@ def cmd_list(args):
         prog = entry["programmer"]
         if prog["type"] == "serialupdi":
             how = "serialupdi %s @ %s" % (prog.get("port"), prog.get("baud"))
+        elif prog["type"] == "stlink_msd":
+            how = "stlink_msd usb:%s drive %s (the probe's own flasher; no SWD)" \
+                  % (prog.get("serial"), prog.get("label"))
         else:
             how = prog["type"] + (" usb:%s" % prog["serial"]
                                   if prog.get("serial") else " (only one attached)")
@@ -416,6 +419,107 @@ def openocd_interface(prog):
     return argv
 
 
+def msd_flash(prog, binfile, app):
+    """THE ST-LINK'S OWN FLASHER. A Nucleo's ST-LINK/V2.1 also enumerates as
+    a small mass-storage drive (NODE_<part>), and a .bin dropped on it is
+    programmed at 0x08000000 by the probe's firmware - connect under reset,
+    program, verify, reset - after which the drive re-enumerates and a
+    FAIL.TXT is left on it when anything went wrong (measured on position
+    G: a garbage file draws "The application file format is unknown", a
+    good image leaves no FAIL.TXT and removes a stale one). The proof an
+    image is running is its banner on the console, which is what `run`
+    reads anyway.
+
+    This kind exists because position G's debug port does not attach
+    (tools/bench_boards.py carries the record): the MSD is the one way in,
+    and it is also why nothing here halts the core, clears DBGMCU_CR or
+    reads anything back over SWD - the debug-in-Stop bits that openocd_args
+    takes down are set only by an OpenOCD examine, which never happens on
+    this path. The drive is mounted through udisks, no root needed."""
+    label = prog.get("label")
+    if not label:
+        die("programmer type stlink_msd needs a \"label\" (the drive's volume "
+            "label, e.g. NODE_G031K8)")
+    dev = os.path.realpath(os.path.join("/dev/disk/by-label", label))
+    if not os.path.exists(dev):
+        die("no drive labelled %s - is the board plugged in? (bench.py list)"
+            % label)
+    block = os.path.basename(dev)
+
+    def mounted_at():
+        out = subprocess.run(["udisksctl", "mount", "-b", dev],
+                             capture_output=True, text=True)
+        text = (out.stdout + out.stderr).strip()
+        m = re.search(r" at (\S+)", text)
+        if m:
+            return m.group(1).rstrip(".")
+        out = subprocess.run(["findmnt", "-n", "-o", "TARGET", dev],
+                             capture_output=True, text=True)
+        if out.stdout.strip():
+            return out.stdout.strip()
+        die("cannot mount %s (%s): %s" % (label, dev, text))
+
+    def unmount():
+        subprocess.run(["udisksctl", "unmount", "-b", dev],
+                       capture_output=True, text=True)
+
+    def drive_size():
+        try:
+            with open("/sys/class/block/%s/size" % block, encoding="ascii") as f:
+                return int(f.read().strip() or "0")
+        except OSError:
+            return 0
+
+    mnt = mounted_at()
+    target = os.path.join(mnt, app + ".bin")
+    size = os.path.getsize(binfile)
+    with open(binfile, "rb") as src, open(target, "wb") as dst:
+        dst.write(src.read())
+        dst.flush()
+        os.fsync(dst.fileno())
+    os.sync()
+    unmount()
+    print("bench: %s -> %s (%d bytes) via the ST-LINK's mass-storage flasher"
+          % (os.path.basename(binfile), label, size))
+    # The probe programs, resets the target and re-enumerates the drive
+    # (its size reads 0 for a moment): wait for that cycle, bounded.
+    t0 = time.time()
+    seen_zero = False
+    while time.time() - t0 < 20.0:
+        if drive_size() == 0:
+            seen_zero = True
+        elif seen_zero:
+            break
+        time.sleep(0.2)
+    if not seen_zero:
+        print("bench: MSD flash FAILED - the drive never re-enumerated, so the "
+              "probe did not process %s.bin (measured: a processed file, good "
+              "or bad, cycles the drive within a few seconds)" % app)
+        return 1
+    time.sleep(1.0)
+    for attempt in range(5):
+        try:
+            mnt = mounted_at()
+            break
+        except SystemExit:
+            if attempt == 4:
+                raise
+            time.sleep(2.0)
+    fail = os.path.join(mnt, "FAIL.TXT")
+    reason = None
+    if os.path.isfile(fail):
+        with open(fail, encoding="ascii", errors="replace") as f:
+            reason = f.read().strip()
+    unmount()
+    if reason is not None:
+        print("bench: MSD flash FAILED - the probe says: %s" % reason)
+        return 1
+    print("bench: MSD flash done, no FAIL.TXT - the target was reset by the "
+          "probe and is running %s (NB no SWD on this position: DBGMCU_CR is "
+          "not touched and nothing is read back)" % app)
+    return 0
+
+
 def cmd_flash(args):
     info, btype = resolve_app(args.name, args.app)
     spec = board_type(btype)
@@ -442,6 +546,14 @@ def cmd_flash(args):
         return rc
 
     prog = board_entry(args.name)["programmer"]
+    if prog["type"] == "stlink_msd":
+        binfile = os.path.join(ROOT, "build-cmake", preset, args.app + ".bin")
+        if not os.path.isfile(binfile):
+            die("no %s after the build" % binfile)
+        rc = msd_flash(prog, binfile, args.app)
+        if rc == 0:
+            state_write(args.name, args.app)
+        return rc
     if spec["flash"] == "openocd":
         elffile = os.path.join("build-cmake", preset, args.app + ".elf")
         if not os.path.isfile(os.path.join(ROOT, elffile)):

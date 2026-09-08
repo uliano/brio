@@ -45,7 +45,10 @@
 // Every one of them is left in analog mode when the suite is done. The
 // host-assisted letter v moves the CONSOLE's OWN PA2/PA3 to AF6 for two
 // legs - LPUART1 reaches the same pair by a different alternate
-// function - and puts them back on USART2's AF1 afterwards.
+// function - and puts them back on USART2's AF1 afterwards. FOUR OF
+// THOSE PADS ARE THE 48- AND 64-PIN PACKAGES' - PB3, PB4, PC1 and PC6:
+// what a 32-pin part bonds instead is under "What the part has" below,
+// and every leg that loses a pad there SKIPS BY NAME and claims nothing.
 //
 // THE BACKSTOP IS THE IWDG, armed once in main() at about 32 seconds and
 // refreshed at the top of every letter. It cannot be turned off again
@@ -56,7 +59,9 @@
 // sleep. THE DOMAIN IS NEVER RESET: RTCSEL is left where it is and the
 // backup registers other suites wrote are not touched.
 //
-// What is exercised, letter by letter:
+// What is exercised, letter by letter (every letter runs on every part
+// this suite builds for; a leg whose instance, feature or pad the part
+// has not got prints the fact and claims nothing):
 //   a  the instance table: six USARTs and two LPUARTs against table 183,
 //      the reserve's stated split, the device header's own macros and
 //      the silicon - does FIFOEN stick, does PRESC stick, does CR2.CLKEN
@@ -92,7 +97,7 @@
 //   w  WAKE FROM STOP, and ES0548 2.2.4 staged (uart_stress)
 //   v  the console moved to LPUART1 on its own pads (uart_stress)
 //
-// build: boards = g0b1re,g071rb
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -174,8 +179,76 @@ constexpr UartPins lp2_pins{.tx = lp2_tx, .rx = lp2_rx};
 using Lp1Pin = Pin<'C', 1>;
 using Lp2Pin = Pin<'C', 6>;
 
+// ---- WHAT THE PART HAS, AND WHAT THE PACKAGE BONDS -------------------------
+//
+// Every INSTANCE question is the reserve's and the letters ask it there
+// (usart_present, usart_is_full, usart_has_clock_select, lpuart_present).
+// The PACKAGE question - which of the die's pads a 32-pin part brings
+// out - has NO answer in any device header: it is the datasheet's pin
+// table, so it is the SUITE's to state, an app being the one place board
+// knowledge may live. Three facts of the Nucleo-32 (STM32G031K8, LQFP32)
+// close legs below - two of them pads, the third a crystal that does not
+// start - and NOT ONE of them is a peripheral this part has not got:
+//
+//  - LPUART1's bonded pads here are PA2/PA3 at AF6, which are the
+//    ST-LINK's virtual COM port - the CONSOLE's own pair. A single-wire
+//    loop on them would put its own traffic into this suite's report, so
+//    letter n's pad half skips; letter v, which MOVES the console there
+//    with the host told, runs.
+//  - USART1_RTS_DE_CK and USART1_CTS ARE on this package, and on the
+//    same two pads at the same alternate function as everywhere else:
+//    DS12992 table 14 gives PB3 AF4 USART1_RTS_DE_CK and PB4 AF4
+//    USART1_CTS, and table 12 bonds both (this package's port B runs
+//    PB0..PB9). So the driver-enable, flow-control, smartcard-clock and
+//    synchronous-clock legs run here as they do on the Nucleo-64s.
+//  - THE LSE CRYSTAL DOES NOT START ON THIS BOARD: measured over fifteen
+//    seconds at both drive settings, LSERDY never rose. So there is no
+//    32768 Hz kernel clock and no RTC wall clock, and the letters that
+//    need either say so by name. (The other two boards' crystals run,
+//    and every leg below still ASKS `RtcDomain::lse_ready()` at run
+//    time - this constant only spares a part the code for a leg its
+//    board cannot stage.)
+#if defined(STM32G031xx)
+constexpr bool has_lpuart_own_pad = false;
+constexpr bool has_u1_ck_pads = true;
+constexpr bool board_lse_fitted = false;
+#else
+constexpr bool has_lpuart_own_pad = true;
+constexpr bool has_u1_ck_pads = true;
+constexpr bool board_lse_fitted = true;
+#endif
+
+/// The one sentence letters j, l and m each print where the CK/DE/RTS
+/// pads are not this package's - one string, three users, because on the
+/// part that prints it every byte of prose is flash it has not got.
+[[maybe_unused]] constexpr const char* ck_pad_skip =
+    "  SKIPPED, no verdict claimed: this leg drives USART1_RTS_DE_CK (and "
+    "CTS) on PB3/PB4 at AF4, which is the 48- and 64-pin packages' row. The "
+    "USART pads this suite knows for the 32-pin one are USART1_TX/RX on "
+    "PA9/PA10 at AF1, USART2 and LPUART1 on PA2/PA3, and IR_OUT on PB9 - no "
+    "CK, no DE, no flow control - so no pad is claimed and nothing is "
+    "measured.";
+
+/// The lowest-numbered instance this part makes BASIC: USART4 on the
+/// G0B1 (of six), USART3 on the G071 (of four), USART2 on the G031 (of
+/// two) - which on that part is the CONSOLE, and the reason the leg that
+/// uses it never touches a bus clock (the kernel-clock multiplexer is
+/// RCC_CCIPR's field, and kernel_clock() on an instance without one
+/// neither reads nor writes the peripheral at all). Every G0 of the pack
+/// has at least two USARTs and therefore at least one BASIC instance;
+/// the trailing 2 only keeps the expression well-formed.
+constexpr uint8_t first_basic_usart() {
+    for (uint8_t i = 1; i <= 6u; ++i) {
+        if (usart_present(i) && !usart_is_full(i)) {
+            return i;
+        }
+    }
+    return 2;
+}
+
 using U1 = Usart<1>;
 using L1 = Lpuart<1>;
+using BasicUsart = Usart<first_basic_usart()>;
 // LPUART2 is the G0B1/G0C1 class's alone. A part without it must not
 // SPELL `Lpuart<2>` (the driver's static_assert is the refusal), and
 // `if constexpr` inside a plain function still instantiates the branch it
@@ -200,6 +273,22 @@ bool lpuart2_exti_35() {
         return Lpuart2<present>::exti_line == 35;
     } else {
         return true;
+    }
+}
+
+/// LPUART1's line, which is the OTHER half of the same presence rule:
+/// where the part has a USART3, LPUART1 shares that instance's line (the
+/// G071's USART3_4_LPUART1, the G0B1's USART3_4_5_6_LPUART1); where it
+/// has none there is nothing to share with and LPUART1 gets a vector of
+/// its own. The second half is spelled as "the line of NEITHER USART
+/// this part has" rather than as LPUART1_IRQn, because that enumerator
+/// exists only on the parts where it is the answer.
+template <bool has_u3 = usart_present(3)>
+bool lpuart1_line_ok() {
+    if constexpr (has_u3) {
+        return usart_irq(3) == usart_irq(4) && lpuart_irq(1) == usart_irq(3);
+    } else {
+        return lpuart_irq(1) != usart_irq(1) && lpuart_irq(1) != usart_irq(2);
     }
 }
 
@@ -739,6 +828,70 @@ TableRow lpuart_row(const char* name) {
     }
 }
 
+/// WHETHER A BASIC INSTANCE'S PRESCALER DIVIDES, measured on USART4's
+/// own single wire (USART4_TX on PA0, AF4) - a pad no other letter
+/// touches. THE LEG IS THIS PART'S OR NOBODY'S: on a part whose only
+/// BASIC instance is USART2 the pad in question is the ST-LINK's virtual
+/// COM port, and a suite that transmits a 0x00 character on it at a
+/// prescaled rate is writing garbage into its own report. So the
+/// measurement is gated on USART4's presence, not on "a BASIC instance
+/// exists" - the READBACK half of the same finding is in the table
+/// above and runs on every part.
+template <bool present = usart_present(4)>
+void ta_basic_prescaler() {
+    if constexpr (present) {
+        const ZeroLow basic1 = zero_low_cycles<Usart<4>, U4Pin>(u4_tx, 640,
+                                                                UsartPrescaler::div1);
+        const ZeroLow basic16 = zero_low_cycles<Usart<4>, U4Pin>(u4_tx, 640,
+                                                                 UsartPrescaler::div16);
+        print(serial, "  USART4 (BASIC, PRESC reads ", basic1.presc_readback, "/",
+              basic16.presc_readback, "): ", to_us(basic1.cycles), " us at /1 and ",
+              to_us(basic16.cycles), " us at /16; seen ",
+              basic1.saw_frame ? "yes" : "no", "/", basic16.saw_frame ? "yes" : "no",
+              ", completed ", basic1.complete ? "yes" : "no", "/",
+              basic16.complete ? "yes" : "no", crlf);
+        if (basic16.saw_frame && basic16.cycles < basic1.cycles * 2u) {
+            print(serial, "  THE FINDING: on a BASIC instance the PRESC FIELD "
+                          "TAKES THE VALUE AND THE DIVIDER IS NOT THERE - same "
+                          "bit period at /1 and /16", crlf);
+            bench.verdict("a BASIC instance implements the prescaler REGISTER and "
+                          "not the prescaler", true);
+        } else if (!basic16.saw_frame) {
+            print(serial, "  THE FINDING, and it is worse than a missing divider: "
+                          "a BASIC instance takes the PRESC value, reads it back, "
+                          "and then TRANSMITS NOTHING AT ALL - the frame never "
+                          "left the pad. Table 184 says the prescaler is not "
+                          "there; the silicon says writing it stops the "
+                          "transmitter, which is why the driver REFUSES the write "
+                          "on such an instance rather than trusting the readback",
+                  crlf);
+            bench.verdict("a non-zero PRESC on a BASIC instance is not ignored - "
+                          "it silences the transmitter, and prescaler() refusing "
+                          "there is the only safe reading", basic1.saw_frame);
+        } else {
+            print(serial, "  the BASIC instance's bit period MOVED with PRESC, "
+                          "which table 184 does not predict; recorded as measured",
+                  crlf);
+            bench.verdict("the BASIC instance's prescaler behaviour is measured "
+                          "and printed either way", basic1.saw_frame);
+        }
+        print(serial, "  ES0548 2.11.2 is the DOCUMENTATION erratum saying some "
+                      "manual revisions omit that the prescaler is not on every "
+                      "instance; RM0444 Rev 6's own table 184 carries it, and the "
+                      "silicon carries it in BEHAVIOUR but not in the REGISTER's "
+                      "readback", crlf);
+        U4Pin::release();
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: whether a BASIC instance's PRESC "
+              "field DIVIDES is measured on a zero character's low time, and "
+              "this part's only BASIC instance is USART2 - the console. Its "
+              "pad is the ST-LINK's virtual COM port, so the frame would land "
+              "in this report; the READBACK half of the finding is in the "
+              "table above.", crlf);
+    }
+}
+
 void ta_instances() {
     feed();
     print(serial, "  RM0444 table 183 read off THIS part: the reserve's "
@@ -852,10 +1005,6 @@ void ta_instances() {
                                                           UsartPrescaler::div1);
     const ZeroLow full16 = zero_low_cycles<Usart<1>, TxPin>(u1_tx, 640,
                                                             UsartPrescaler::div16);
-    const ZeroLow basic1 = zero_low_cycles<Usart<4>, U4Pin>(u4_tx, 640,
-                                                            UsartPrescaler::div1);
-    const ZeroLow basic16 = zero_low_cycles<Usart<4>, U4Pin>(u4_tx, 640,
-                                                             UsartPrescaler::div16);
     print(serial, "  USART1 (FULL, PRESC reads ", full1.presc_readback, "/",
           full16.presc_readback, "): nine zero bits last ", to_us(full1.cycles),
           " us at /1 and ", to_us(full16.cycles), " us at /16; the frame was "
@@ -863,47 +1012,11 @@ void ta_instances() {
           full16.saw_frame ? "yes" : "no", " and completed ",
           full1.complete ? "yes" : "no", "/", full16.complete ? "yes" : "no",
           crlf);
-    print(serial, "  USART4 (BASIC, PRESC reads ", basic1.presc_readback, "/",
-          basic16.presc_readback, "): ", to_us(basic1.cycles), " us at /1 and ",
-          to_us(basic16.cycles), " us at /16; seen ",
-          basic1.saw_frame ? "yes" : "no", "/", basic16.saw_frame ? "yes" : "no",
-          ", completed ", basic1.complete ? "yes" : "no", "/",
-          basic16.complete ? "yes" : "no", crlf);
     const bool full_divides = full16.cycles > full1.cycles * 8u;
     bench.verdict("the prescaler DIVIDES on a FULL instance - sixteen times "
                   "the bit period for the same BRR",
                   full_divides && full1.saw_frame && full16.saw_frame);
-    if (basic16.saw_frame && basic16.cycles < basic1.cycles * 2u) {
-        print(serial, "  THE FINDING: on a BASIC instance the PRESC FIELD "
-                      "TAKES THE VALUE AND THE DIVIDER IS NOT THERE - same "
-                      "bit period at /1 and /16", crlf);
-        bench.verdict("a BASIC instance implements the prescaler REGISTER and "
-                      "not the prescaler", true);
-    } else if (!basic16.saw_frame) {
-        print(serial, "  THE FINDING, and it is worse than a missing divider: "
-                      "a BASIC instance takes the PRESC value, reads it back, "
-                      "and then TRANSMITS NOTHING AT ALL - the frame never "
-                      "left the pad. Table 184 says the prescaler is not "
-                      "there; the silicon says writing it stops the "
-                      "transmitter, which is why the driver REFUSES the write "
-                      "on such an instance rather than trusting the readback",
-              crlf);
-        bench.verdict("a non-zero PRESC on a BASIC instance is not ignored - "
-                      "it silences the transmitter, and prescaler() refusing "
-                      "there is the only safe reading", basic1.saw_frame);
-    } else {
-        print(serial, "  the BASIC instance's bit period MOVED with PRESC, "
-                      "which table 184 does not predict; recorded as measured",
-              crlf);
-        bench.verdict("the BASIC instance's prescaler behaviour is measured "
-                      "and printed either way", basic1.saw_frame);
-    }
-    print(serial, "  ES0548 2.11.2 is the DOCUMENTATION erratum saying some "
-                  "manual revisions omit that the prescaler is not on every "
-                  "instance; RM0444 Rev 6's own table 184 carries it, and the "
-                  "silicon carries it in BEHAVIOUR but not in the REGISTER's "
-                  "readback", crlf);
-    U4Pin::release();
+    ta_basic_prescaler();
 
     // The kernel-clock multiplexers, and what a multiplexer-less instance
     // answers when asked for anything but PCLK.
@@ -911,40 +1024,41 @@ void ta_instances() {
                   "every LPUART's, and no BASIC instance's - the reserve's "
                   "column, the silicon's answer",
                   mux_agrees);
-    Usart<4>::bus_clock(true);
-    const bool pclk_ok = Usart<4>::kernel_clock(UsartClock::pclk);
-    const bool hsi_refused = !Usart<4>::kernel_clock(UsartClock::hsi16);
-    Usart<4>::bus_clock(false);
+    const bool pclk_ok = BasicUsart::kernel_clock(UsartClock::pclk);
+    const bool hsi_refused = !BasicUsart::kernel_clock(UsartClock::hsi16);
     bench.verdict("and an instance without one answers true for PCLK and "
                   "false for anything else, instead of writing a field that "
-                  "does not exist", pclk_ok && hsi_refused);
+                  "does not exist",
+                  !BasicUsart::has_clock_select && pclk_ok && hsi_refused);
 
     // The vectors, off the reserve.
     print(serial, "  vectors: USART1 ", static_cast<int32_t>(usart_irq(1)),
           ", USART2 ", static_cast<int32_t>(usart_irq(2)), ", USART3 ",
           static_cast<int32_t>(usart_irq(3)), ", USART4 ",
           static_cast<int32_t>(usart_irq(4)), ", LPUART1 ",
-          static_cast<int32_t>(lpuart_irq(1)), crlf);
+          static_cast<int32_t>(lpuart_irq(1)),
+          " (-14 = an instance this part has not got)", crlf);
     bench.verdict("the vectors are the SHARED ones of this part: USART1 alone, "
                   "USART2 with an LPUART2 where the part has one, and every "
-                  "remaining USART with LPUART1 - each name derived from what "
-                  "the header declares beside it",
+                  "remaining USART with LPUART1 - or, where there is no USART3 "
+                  "to share with, LPUART1 on a line of its own; each name "
+                  "derived from what the header declares beside it",
                   usart_irq(1) == USART1_IRQn && usart_irq(1) != usart_irq(2) &&
-                      usart_irq(3) == usart_irq(4) &&
-                      lpuart_irq(1) == usart_irq(3) && lpuart2_shares_usart2());
-    print(serial, "  wake lines: USART1 ", Usart<1>::exti_line, " USART2 ",
-          Usart<2>::exti_line, " USART3 ", Usart<3>::exti_line, " USART4 ",
-          Usart<4>::exti_line, " LPUART1 ", Lpuart<1>::exti_line,
+                      lpuart1_line_ok() && lpuart2_shares_usart2());
+    print(serial, "  wake lines: USART1 ", usart_exti_line(1), " USART2 ",
+          usart_exti_line(2), " USART3 ", usart_exti_line(3), " USART4 ",
+          usart_exti_line(4), " LPUART1 ", lpuart_exti_line(1),
           " (0xFF = none)", crlf);
     bench.verdict("and the wake-up EXTI lines are table 65's - 25, 26 and 24 "
                   "for USART1..3 - with the line following the FULL/BASIC "
                   "COLUMN and not the instance number: an instance this part "
                   "makes BASIC has no wake line at all, 28 is LPUART1's and "
                   "35 an LPUART2's",
-                  Usart<1>::exti_line == 25 && Usart<2>::exti_line == 26 &&
-                      Usart<3>::exti_line == (Usart<3>::is_full ? 24u : 0xFFu) &&
-                      Usart<4>::exti_line == 0xFF &&
-                      Lpuart<1>::exti_line == 28 && lpuart2_exti_35());
+                  usart_exti_line(1) == 25 &&
+                      usart_exti_line(2) == (usart_is_full(2) ? 26u : 0xFFu) &&
+                      usart_exti_line(3) == (usart_is_full(3) ? 24u : 0xFFu) &&
+                      usart_exti_line(4) == 0xFF &&
+                      lpuart_exti_line(1) == 28 && lpuart2_exti_35());
 
     // The console must still be alive: every instance above was reset.
     print(serial, "  (the console is USART2 and this letter reset it - these "
@@ -1224,7 +1338,11 @@ void tc_baud() {
 // ---------------------------------------------------------------------------
 
 /// Move the CONSOLE's kernel clock, keeping 115200. The verdict lines of
-/// this letter are the only witness there is, and that is the point.
+/// this letter are the only witness there is, and that is the point. A
+/// TEMPLATE for one reason: on a part whose console has no multiplexer
+/// nothing calls it, and an uninstantiated template is the only kind of
+/// function that costs neither an image byte nor a warning there.
+template <bool mux = usart_has_clock_select(2)>
 bool console_kernel(UsartClock c, uint32_t ker_hz) {
     const std::optional<uint16_t> reg = usart_brr(ker_hz, 115200);
     if (!reg) {
@@ -1241,48 +1359,68 @@ bool console_kernel(UsartClock c, uint32_t ker_hz) {
     return true;
 }
 
-void td_kernel_clocks() {
-    feed();
-    Serial::clear_errors();
-    const uint16_t brr_pclk = Usart<2>::brr();
+/// THE CONSOLE MOVED UNDER ITS OWN FEET - on a console that HAS a
+/// kernel-clock multiplexer. Where the part makes USART2 a BASIC
+/// instance there is no CCIPR field for it at all: it runs on PCLK, full
+/// stop, and this half of the letter would be asking the driver for a
+/// refusal it already tests in letter a.
+template <bool mux = usart_has_clock_select(2)>
+void td_console_kernel() {
+    if constexpr (mux) {
+        Serial::clear_errors();
+        const uint16_t brr_pclk = Usart<2>::brr();
 
-    const bool to_hsi = console_kernel(UsartClock::hsi16, 16'000'000u);
-    spin_us(2000);
-    print(serial, "  the console is now on HSI16: BRR ", Usart<2>::brr(),
-          " where PCLK wanted ", brr_pclk, ", and this line came out at "
-          "115200 all the same", crlf);
-    const uint8_t err_hsi = static_cast<uint8_t>(
-        Serial::frame_errors() + Serial::parity_errors() + Serial::noise_errors() +
-        Serial::hw_overruns());
+        const bool to_hsi = console_kernel(UsartClock::hsi16, 16'000'000u);
+        spin_us(2000);
+        print(serial, "  the console is now on HSI16: BRR ", Usart<2>::brr(),
+              " where PCLK wanted ", brr_pclk, ", and this line came out at "
+              "115200 all the same", crlf);
+        const uint8_t err_hsi = static_cast<uint8_t>(
+            Serial::frame_errors() + Serial::parity_errors() +
+            Serial::noise_errors() + Serial::hw_overruns());
 
-    const bool to_sysclk = console_kernel(UsartClock::sysclk, SysClock::hz);
-    spin_us(2000);
-    print(serial, "  and now on SYSCLK: BRR ", Usart<2>::brr(),
-          " - the same 64 MHz PCLK divides, by a different route", crlf);
-    const uint8_t err_sys = static_cast<uint8_t>(
-        Serial::frame_errors() + Serial::parity_errors() + Serial::noise_errors() +
-        Serial::hw_overruns());
+        const bool to_sysclk = console_kernel(UsartClock::sysclk, SysClock::hz);
+        spin_us(2000);
+        print(serial, "  and now on SYSCLK: BRR ", Usart<2>::brr(),
+              " - the same 64 MHz PCLK divides, by a different route", crlf);
+        const uint8_t err_sys = static_cast<uint8_t>(
+            Serial::frame_errors() + Serial::parity_errors() +
+            Serial::noise_errors() + Serial::hw_overruns());
 
-    const bool back = console_kernel(UsartClock::pclk, SysClock::pclk_hz);
-    spin_us(2000);
-    print(serial, "  and back on PCLK: BRR ", Usart<2>::brr(), crlf);
-    bench.verdict("a console's kernel clock moves under it - HSI16, SYSCLK, "
-                  "PCLK - and every one of these lines is its own witness",
-                  to_hsi && to_sysclk && back && Usart<2>::brr() == brr_pclk);
-    bench.verdict("with not one framing, parity, noise or overrun error "
-                  "counted on the way",
-                  err_hsi == 0u && err_sys == 0u &&
-                      Serial::frame_errors() == 0u && Serial::hw_overruns() == 0u);
-
-    // USART1 off the 32768 Hz crystal. USARTDIV 16 is 2048 baud with
-    // sixteen samples a bit and 4096 with eight - the two slowest links
-    // this chip can make, and the reason the LPUART exists.
-    feed();
-    const bool lse_running = RtcDomain::lse_ready();
-    if (!lse_running) {
-        print(serial, "  the LSE crystal is not running: the two LSE legs are "
-                      "DECLINED and nothing pretends otherwise", crlf);
+        const bool back = console_kernel(UsartClock::pclk, SysClock::pclk_hz);
+        spin_us(2000);
+        print(serial, "  and back on PCLK: BRR ", Usart<2>::brr(), crlf);
+        bench.verdict("a console's kernel clock moves under it - HSI16, SYSCLK, "
+                      "PCLK - and every one of these lines is its own witness",
+                      to_hsi && to_sysclk && back && Usart<2>::brr() == brr_pclk);
+        bench.verdict("with not one framing, parity, noise or overrun error "
+                      "counted on the way",
+                      err_hsi == 0u && err_sys == 0u &&
+                          Serial::frame_errors() == 0u &&
+                          Serial::hw_overruns() == 0u);
     } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: this part makes USART2 a BASIC "
+              "instance, so the console has NO kernel-clock multiplexer to be "
+              "moved on (usart_has_clock_select(2) is false - the device "
+              "header declares no RCC_CCIPR_USART2SEL_Pos) and it runs on "
+              "PCLK, full stop. USART1's own multiplexer is exercised below.",
+              crlf);
+    }
+}
+
+/// USART1 off the 32768 Hz crystal. USARTDIV 16 is 2048 baud with
+/// sixteen samples a bit and 4096 with eight - the two slowest links this
+/// chip can make, and the reason the LPUART exists.
+template <bool fitted = board_lse_fitted>
+void td_lse_legs() {
+    if constexpr (fitted) {
+        const bool lse_running = RtcDomain::lse_ready();
+        if (!lse_running) {
+            print(serial, "  the LSE crystal is not running: the two LSE legs "
+                          "are DECLINED and nothing pretends otherwise", crlf);
+            return;
+        }
         (void)loop_up({.baud = 2048, .kernel = UsartClock::lse});
         const uint16_t lse_brr = U1::brr();
         const uint32_t lse_good = loop_run(4);
@@ -1300,7 +1438,20 @@ void td_kernel_clocks() {
               crlf);
         bench.verdict("OVER8 doubles what a 32768 Hz kernel clock can carry",
                       lse8_good == 4u);
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: a USART clocked by the 32768 Hz "
+              "crystal needs one to be running, and THIS BOARD'S LSE DOES NOT "
+              "START (measured over fifteen seconds at both drive settings, "
+              "LSERDY never rose).", crlf);
     }
+}
+
+void td_kernel_clocks() {
+    feed();
+    td_console_kernel();
+    feed();
+    td_lse_legs();
 
     // A kernel clock that DOES NOT FOLLOW SYSCLK: the whole point of
     // having one. The task's rebase() must rewrite nothing.
@@ -1713,8 +1864,10 @@ void tf_bitbang() {
             ++first_half_bad;
         }
     }
-    print(serial, "  ES0548 2.11.1 staged: a quarter-bit glitch to zero in "
-          "the SECOND half of the stop bit spoiled ", second_half_bad,
+    print(serial, "  2.11.1 staged (the G0B1's ES0548 numbering; each part "
+          "has its own sheet and the outcome below is THIS die's): a "
+          "quarter-bit glitch to zero in the SECOND half of the stop bit "
+          "spoiled ", second_half_bad,
           " of 8 frames (flags seen ", hex(second_flags),
           "); the same glitch in the FIRST half spoiled ", first_half_bad,
           " (flags ", hex(first_flags), "); 0x96 came back as ", corrupted,
@@ -2345,7 +2498,7 @@ void probe_exti_dma_trigger() {
           "see those edges; four SOFTWARE events on the same line, same "
           "generator, same channel moved ", on_swier, crlf);
     if (!exti_dma_ok && exti_saw_the_pad && on_swier >= 4u) {
-        print(serial, "ES0418 2.2.4 REPRODUCED WITH ITS CONTROL on DEV_ID ",
+        print(serial, "THE ERRATUM SHAPE REPRODUCED WITH ITS CONTROL on DEV_ID ",
               hex(id.dev_id), " REV_ID ", hex(id.rev_id),
               ": the EXTI SEES the pad, and a SOFTWARE event on the very same "
               "line, generator and channel moves a word every time - while "
@@ -2360,7 +2513,10 @@ void probe_exti_dma_trigger() {
               "path with SWIER alone sees nothing wrong. The workaround the "
               "sheet does not offer would be a CPU in the loop, which is the "
               "one thing an edge counter with no CPU cannot have: the "
-              "letters below say so and claim nothing.", crlf);
+              "letters below say so and claim nothing. That is ES0418 2.2.4 "
+              "word for word on the G071; whether the sheet of the die "
+              "printed above carries its own twin is not a claim this suite "
+              "makes.", crlf);
     } else if (!exti_dma_ok) {
         print(serial, "the EXTI-to-DMAMUX trigger path did not answer; the "
               "letters that need it will say so and claim nothing", crlf);
@@ -2379,8 +2535,8 @@ bool need_exti_dma() {
           "DMAMUX request generator triggered by an EXTI line, and the boot "
           "probe found that path dead in both mask arrangements on DEV_ID ",
           hex(id.dev_id), " REV_ID ", hex(id.rev_id),
-          " - which is what ES0418 2.2.4 describes with no workaround.",
-          crlf);
+          " - the shape ES0418 2.2.4 describes for the G071, with no "
+          "workaround; the boot probe above says what THIS die did.", crlf);
     return false;
 }
 
@@ -2487,7 +2643,7 @@ void tj_smartcard() {
     static const CkCase cks[] = {{4}, {8}, {16}, {31}};
     uint8_t ck_ok = 0;
     for (const CkCase& c : cks) {
-        if (!exti_dma_ok) {
+        if (!exti_dma_ok || !has_u1_ck_pads) {
             break;
         }
         feed();
@@ -2517,7 +2673,9 @@ void tj_smartcard() {
             ++ck_ok;
         }
     }
-    if (need_exti_dma()) {
+    if constexpr (!has_u1_ck_pads) {
+        print(serial, ck_pad_skip, crlf);
+    } else if (need_exti_dma()) {
         bench.verdict("the smartcard clock is the kernel rate over TWICE the "
                       "prescaler - four rungs of the ladder, counted by a DMA "
                       "channel with no CPU and no interrupt", ck_ok == 4u);
@@ -2805,6 +2963,111 @@ void tk_irda() {
 // l: the pads' extras - swap, the inversions, MSB first, DE, RTS and CTS
 // ---------------------------------------------------------------------------
 
+/// THE DRIVER ENABLE, RTS AND CTS - the three legs of letter l that need
+/// USART1's OTHER two pads. DEAT and DEDT are in SAMPLE times - a
+/// sixteenth of a bit at OVER8 = 0 - and that is the one thing 33.5.20's
+/// single sentence about them is easy to misread.
+template <bool pads = has_u1_ck_pads>
+void tl_de_rts_cts() {
+    if constexpr (!pads) {
+        print(serial, ck_pad_skip, crlf);
+        return;
+    } else {
+        constexpr uint32_t de_baud = 2400;
+        const uint32_t de_bit = SysClock::hz / de_baud;
+        const bool de_free = pull_walks<DePin>();
+        uint32_t assert_cycles = 0;
+        U1::bus_clock(true);
+        U1::reset();
+        (void)U1::configure({}, usart_brr(SysClock::pclk_hz, de_baud).value());
+        const bool de_ok = U1::driver_enable({.assertion = 16, .deassertion = 8});
+        TxPin::function(u1_tx.function);
+        DePin::function(u1_de.function);
+        U1::enable(true);
+        console_drain();
+        spin_us(3000);
+        {
+            InterruptGuard guard;
+            (void)wait_flag(UsartFlag::txe);
+            U1::write_word(0xFF);
+            const uint32_t t0 = now();
+            while (!DePin::read() && to_us(since(t0)) < 50000u) {
+            }
+            const uint32_t de_rise = now();
+            while (TxPin::read() && to_us(since(de_rise)) < 50000u) {
+            }
+            assert_cycles = since(de_rise);
+        }
+        const uint32_t assert_sixteenths = (assert_cycles * 16u) / de_bit;
+        print(serial, "  DEAT = 16 sample times at 2400 baud: DE rose ",
+              to_us(assert_cycles), " us before the start bit = ",
+              assert_sixteenths, " sixteenths of a bit, where a bit is ",
+              to_us(de_bit), " us", crlf);
+        bench.verdict("DEAT is counted in SAMPLE times and not bit times - "
+                      "sixteen of them is one whole bit at OVER8 = 0",
+                      de_ok && de_free && within(assert_sixteenths, 13u, 19u));
+        print(serial, "  and the DE signal came out on PB3, which is the SAME PAD "
+              "as RTS and the synchronous CK (USART1_RTS_DE_CK)", crlf);
+
+        // RTS: an output the RECEIVER raises when it can take no more.
+        feed();
+        (void)loop_up({.baud = 9600});
+        U1::enable(false);
+        (void)U1::flow_control(true, false);
+        U1::enable(true);
+        DePin::function(u1_de.function);
+        U1::clear_flags(UsartClear::all);
+        spin_us(2000);
+        const bool rts_idle = DePin::read();
+        (void)wait_flag(UsartFlag::txe);
+        U1::write_word(0x11);
+        spin_us(3000);
+        const bool rts_full = DePin::read();
+        (void)U1::read_word();
+        spin_us(500);
+        const bool rts_free = DePin::read();
+        print(serial, "  RTS on PB3: idle ", rts_idle ? "high" : "low",
+              ", with a character unread ", rts_full ? "high" : "low",
+              ", after the read ", rts_free ? "high" : "low", crlf);
+        bench.verdict("RTS is asserted exactly while the receiver cannot take "
+                      "another character, and released when it can",
+                      !rts_idle && rts_full && !rts_free);
+
+        // CTS: an input the TRANSMITTER obeys between frames. The pad is
+        // pull-walked - the whole trick of this suite pointed at a
+        // flow-control line.
+        feed();
+        const bool cts_free = pull_walks<CtsPin>();
+        (void)loop_up({.baud = 9600});
+        U1::enable(false);
+        (void)U1::flow_control(false, true);
+        U1::enable(true);
+        CtsPin::function(u1_cts.function, {.pull = PinPull::up});   // CTS high: stop
+        U1::clear_flags(UsartClear::all);
+        spin_us(2000);
+        (void)wait_flag(UsartFlag::txe);
+        U1::write_word(0x22);
+        (void)wait_flag(UsartFlag::txe);
+        U1::write_word(0x23);     // this one must wait for CTS
+        spin_us(8000);
+        const uint32_t st_stalled = U1::status();
+        const bool stalled = (st_stalled & UsartFlag::txe) == 0u;
+        CtsPin::pull(PinPull::down);                                 // CTS low: go
+        spin_us(8000);
+        uint8_t arrived = 0;
+        while ((U1::status() & UsartFlag::rxne) != 0u && arrived < 4u) {
+            (void)U1::read_word();
+            ++arrived;
+            spin_us(200);
+        }
+        print(serial, "  CTS held high: ISR ", hex(st_stalled),
+              "; released, ", arrived, " characters arrived", crlf);
+        bench.verdict("CTS stops the transmitter BETWEEN frames and lets it go "
+                      "again, with the line pull-walked and no wire",
+                      cts_free && stalled && arrived >= 1u);
+    }
+}
+
 void tl_pads() {
     feed();
     // SWAP moves the PADS and not the signals, so a single-wire loop
@@ -2917,102 +3180,8 @@ void tl_pads() {
                   "a loop can never show and a bit-banged line can",
                   rev.has_value() && *rev == 0x4Du);
 
-    // THE DRIVER ENABLE, timed on its own pad. DEAT and DEDT are in
-    // SAMPLE times - a sixteenth of a bit at OVER8 = 0 - and that is the
-    // one thing 33.5.20's single sentence about them is easy to misread.
     feed();
-    constexpr uint32_t de_baud = 2400;
-    const uint32_t de_bit = SysClock::hz / de_baud;
-    const bool de_free = pull_walks<DePin>();
-    uint32_t assert_cycles = 0;
-    U1::bus_clock(true);
-    U1::reset();
-    (void)U1::configure({}, usart_brr(SysClock::pclk_hz, de_baud).value());
-    const bool de_ok = U1::driver_enable({.assertion = 16, .deassertion = 8});
-    TxPin::function(u1_tx.function);
-    DePin::function(u1_de.function);
-    U1::enable(true);
-    console_drain();
-    spin_us(3000);
-    {
-        InterruptGuard guard;
-        (void)wait_flag(UsartFlag::txe);
-        U1::write_word(0xFF);
-        const uint32_t t0 = now();
-        while (!DePin::read() && to_us(since(t0)) < 50000u) {
-        }
-        const uint32_t de_rise = now();
-        while (TxPin::read() && to_us(since(de_rise)) < 50000u) {
-        }
-        assert_cycles = since(de_rise);
-    }
-    const uint32_t assert_sixteenths = (assert_cycles * 16u) / de_bit;
-    print(serial, "  DEAT = 16 sample times at 2400 baud: DE rose ",
-          to_us(assert_cycles), " us before the start bit = ",
-          assert_sixteenths, " sixteenths of a bit, where a bit is ",
-          to_us(de_bit), " us", crlf);
-    bench.verdict("DEAT is counted in SAMPLE times and not bit times - "
-                  "sixteen of them is one whole bit at OVER8 = 0",
-                  de_ok && de_free && within(assert_sixteenths, 13u, 19u));
-    print(serial, "  and the DE signal came out on PB3, which is the SAME PAD "
-          "as RTS and the synchronous CK (USART1_RTS_DE_CK)", crlf);
-
-    // RTS: an output the RECEIVER raises when it can take no more.
-    feed();
-    (void)loop_up({.baud = 9600});
-    U1::enable(false);
-    (void)U1::flow_control(true, false);
-    U1::enable(true);
-    DePin::function(u1_de.function);
-    U1::clear_flags(UsartClear::all);
-    spin_us(2000);
-    const bool rts_idle = DePin::read();
-    (void)wait_flag(UsartFlag::txe);
-    U1::write_word(0x11);
-    spin_us(3000);
-    const bool rts_full = DePin::read();
-    (void)U1::read_word();
-    spin_us(500);
-    const bool rts_free = DePin::read();
-    print(serial, "  RTS on PB3: idle ", rts_idle ? "high" : "low",
-          ", with a character unread ", rts_full ? "high" : "low",
-          ", after the read ", rts_free ? "high" : "low", crlf);
-    bench.verdict("RTS is asserted exactly while the receiver cannot take "
-                  "another character, and released when it can",
-                  !rts_idle && rts_full && !rts_free);
-
-    // CTS: an input the TRANSMITTER obeys between frames. The pad is
-    // pull-walked - the whole trick of this suite pointed at a
-    // flow-control line.
-    feed();
-    const bool cts_free = pull_walks<CtsPin>();
-    (void)loop_up({.baud = 9600});
-    U1::enable(false);
-    (void)U1::flow_control(false, true);
-    U1::enable(true);
-    CtsPin::function(u1_cts.function, {.pull = PinPull::up});   // CTS high: stop
-    U1::clear_flags(UsartClear::all);
-    spin_us(2000);
-    (void)wait_flag(UsartFlag::txe);
-    U1::write_word(0x22);
-    (void)wait_flag(UsartFlag::txe);
-    U1::write_word(0x23);     // this one must wait for CTS
-    spin_us(8000);
-    const uint32_t st_stalled = U1::status();
-    const bool stalled = (st_stalled & UsartFlag::txe) == 0u;
-    CtsPin::pull(PinPull::down);                                 // CTS low: go
-    spin_us(8000);
-    uint8_t arrived = 0;
-    while ((U1::status() & UsartFlag::rxne) != 0u && arrived < 4u) {
-        (void)U1::read_word();
-        ++arrived;
-        spin_us(200);
-    }
-    print(serial, "  CTS held high: ISR ", hex(st_stalled),
-          "; released, ", arrived, " characters arrived", crlf);
-    bench.verdict("CTS stops the transmitter BETWEEN frames and lets it go "
-                  "again, with the line pull-walked and no wire",
-                  cts_free && stalled && arrived >= 1u);
+    tl_de_rts_cts();
 
     loop_down();
 }
@@ -3021,67 +3190,73 @@ void tl_pads() {
 // m: the synchronous master's clock
 // ---------------------------------------------------------------------------
 
+template <bool pads = has_u1_ck_pads>
 void tm_synchronous() {
     feed();
-    constexpr uint32_t sync_baud = 9600;
-    struct SyncCase { bool lbcl; bool cpol; };
-    static const SyncCase scases[] = {{false, false}, {true, false}, {false, true}};
-    uint8_t counted_ok = 0;
-    for (const SyncCase& c : scases) {
-        if (!exti_dma_ok) {
-            break;
+    if constexpr (!pads) {
+        print(serial, ck_pad_skip, crlf);
+        return;
+    } else {
+        constexpr uint32_t sync_baud = 9600;
+        struct SyncCase { bool lbcl; bool cpol; };
+        static const SyncCase scases[] = {{false, false}, {true, false}, {false, true}};
+        uint8_t counted_ok = 0;
+        for (const SyncCase& c : scases) {
+            if (!exti_dma_ok) {
+                break;
+            }
+            feed();
+            U1::bus_clock(true);
+            U1::reset();
+            (void)U1::configure({}, usart_brr(SysClock::pclk_hz, sync_baud).value());
+            const bool sync_ok = U1::synchronous({.clock_idle_high = c.cpol,
+                                                  .sample_second_edge = false,
+                                                  .last_bit_clock = c.lbcl});
+            TxPin::function(u1_tx.function);
+            DePin::function(u1_de.function);   // USART1_RTS_DE_CK, the CK output
+            U1::enable(true);
+            spin_us(2000);
+            const bool idle_level = DePin::read();
+            if (!edge_counter_up(3, 'B', DmaMuxEdge::rising)) {
+                print(serial, "  the edge counter would not come up", crlf);
+                break;
+            }
+            console_drain();
+            const uint32_t a = edge_count_reset();
+            for (uint8_t i = 0; i < 8u; ++i) {
+                (void)wait_flag(UsartFlag::txe);
+                U1::write_word(static_cast<uint16_t>(0x80u + i));
+            }
+            (void)wait_flag(UsartFlag::tc);
+            spin_us(2000);
+            const uint32_t b = edge_count_reset();
+            edge_counter_down(3);
+            const uint32_t edges = b - a;
+            const uint32_t per_byte_x10 = (edges * 10u) / 8u;
+            print(serial, "  CLKEN, LBCL = ", c.lbcl ? 1u : 0u, ", CPOL = ",
+                  c.cpol ? 1u : 0u, ": CK idles ", idle_level ? "high" : "low",
+                  " and eight characters cost ", edges, " rising edges = ",
+                  per_byte_x10 / 10u, ".", per_byte_x10 % 10u, " a character",
+                  crlf);
+            const uint32_t want = c.lbcl ? 64u : 56u;
+            if (sync_ok && edges == want && idle_level == c.cpol) {
+                ++counted_ok;
+            }
         }
-        feed();
-        U1::bus_clock(true);
-        U1::reset();
-        (void)U1::configure({}, usart_brr(SysClock::pclk_hz, sync_baud).value());
-        const bool sync_ok = U1::synchronous({.clock_idle_high = c.cpol,
-                                              .sample_second_edge = false,
-                                              .last_bit_clock = c.lbcl});
-        TxPin::function(u1_tx.function);
-        DePin::function(u1_de.function);   // USART1_RTS_DE_CK, the CK output
-        U1::enable(true);
-        spin_us(2000);
-        const bool idle_level = DePin::read();
-        if (!edge_counter_up(3, 'B', DmaMuxEdge::rising)) {
-            print(serial, "  the edge counter would not come up", crlf);
-            break;
+        if (need_exti_dma()) {
+            bench.verdict("33.5.14's clock is one pulse a data bit with none for "
+                          "the start and stop, LBCL adds the pulse of the LAST "
+                          "bit, and CPOL is the level CK rests at - all three "
+                          "counted with no CPU in the path", counted_ok == 3u);
         }
-        console_drain();
-        const uint32_t a = edge_count_reset();
-        for (uint8_t i = 0; i < 8u; ++i) {
-            (void)wait_flag(UsartFlag::txe);
-            U1::write_word(static_cast<uint16_t>(0x80u + i));
-        }
-        (void)wait_flag(UsartFlag::tc);
-        spin_us(2000);
-        const uint32_t b = edge_count_reset();
-        edge_counter_down(3);
-        const uint32_t edges = b - a;
-        const uint32_t per_byte_x10 = (edges * 10u) / 8u;
-        print(serial, "  CLKEN, LBCL = ", c.lbcl ? 1u : 0u, ", CPOL = ",
-              c.cpol ? 1u : 0u, ": CK idles ", idle_level ? "high" : "low",
-              " and eight characters cost ", edges, " rising edges = ",
-              per_byte_x10 / 10u, ".", per_byte_x10 % 10u, " a character",
+        print(serial, "  THE DATA PATH IS DECLINED and not faked: a synchronous "
+              "link needs something at the other end to clock, and this desk has "
+              "one board. The SLAVE half (CR2.SLVEN, DIS_NSS and the underrun "
+              "flag) is register verbs and no measurement, and its doc says so.",
               crlf);
-        const uint32_t want = c.lbcl ? 64u : 56u;
-        if (sync_ok && edges == want && idle_level == c.cpol) {
-            ++counted_ok;
-        }
+        DePin::release();
+        loop_down();
     }
-    if (need_exti_dma()) {
-        bench.verdict("33.5.14's clock is one pulse a data bit with none for "
-                      "the start and stop, LBCL adds the pulse of the LAST "
-                      "bit, and CPOL is the level CK rests at - all three "
-                      "counted with no CPU in the path", counted_ok == 3u);
-    }
-    print(serial, "  THE DATA PATH IS DECLINED and not faked: a synchronous "
-          "link needs something at the other end to clock, and this desk has "
-          "one board. The SLAVE half (CR2.SLVEN, DIS_NSS and the underrun "
-          "flag) is register verbs and no measurement, and its doc says so.",
-          crlf);
-    DePin::release();
-    loop_down();
 }
 
 // ---------------------------------------------------------------------------
@@ -3198,6 +3373,144 @@ void quiet_lpuart2() {
     }
 }
 
+/// EVERYTHING LETTER N MEASURES ON A WIRE, which on this family is the
+/// LPUART's OWN single pad: PC1 at AF1 on the 48- and 64-pin packages.
+/// A 32-pin part bonds none of LPUART1's other pads and leaves it PA2/PA3
+/// at AF6 - the ST-LINK's virtual COM port and this suite's own console -
+/// so a half-duplex loop there would put its traffic into this report and
+/// silence the console's transmitter while it held the pad. The console
+/// MOVING to those pads is letter v's business, with the host told; the
+/// table-198 arithmetic above and LPUART2's own leg below need no pad at
+/// all and run everywhere.
+template <bool pad = has_lpuart_own_pad>
+void tn_lpuart_wire() {
+    if constexpr (!pad) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: LPUART1's single wire, its "
+              "kernel-clock ladder, its FIFO, its prescaler and its interrupt "
+              "all need a pad of its own, and the only LPUART1 pads this "
+              "package bonds are PA2/PA3 at AF6 - the console's. The vector "
+              "itself is not shared here at all: with no USART3 to share it "
+              "with, LPUART1 has a line of its own (the reserve derives the "
+              "name, and this suite binds it).", crlf);
+        return;
+    } else {
+        // LPUART1's own single wire on PC1, on each of its kernel clocks.
+        const bool pc1_free = pull_walks<Lp1Pin>();
+        print(serial, "  PC1 follows its own pull: ", pc1_free ? "yes" : "NO", crlf);
+        bench.verdict("PC1 is free for LPUART1's single wire", pc1_free);
+
+        const bool lse_running = RtcDomain::lse_ready();
+        uint8_t lp_ok = 0;
+        uint8_t lp_tried = 0;
+        struct LpCase { UsartClock kernel; uint32_t baud; uint32_t timeout; const char* name; };
+        static const LpCase lpcases[] = {
+            {UsartClock::pclk, 115200, 20000, "PCLK 64 MHz at 115200"},
+            {UsartClock::hsi16, 115200, 20000, "HSI16 at 115200"},
+            {UsartClock::hsi16, 9600, 40000, "HSI16 at 9600"},
+            {UsartClock::lse, 9600, 40000, "LSE 32768 Hz at 9600"},
+            {UsartClock::lse, 300, 900000, "LSE 32768 Hz at 300"},
+        };
+        for (const LpCase& c : lpcases) {
+            feed();
+            if (c.kernel == UsartClock::lse && !lse_running) {
+                print(serial, "  ", c.name, ": DECLINED, the crystal is not running",
+                      crlf);
+                continue;
+            }
+            ++lp_tried;
+            if (!lp_loop_up<L1, Lp1Pin>(lp1_tx, c.baud, c.kernel)) {
+                print(serial, "  ", c.name, ": unreachable", crlf);
+                continue;
+            }
+            const uint32_t good = lp_run<L1>(4, c.timeout);
+            print(serial, "  LPUART1 ", c.name, ": BRR ", L1::brr(), ", ", good,
+                  " of 4 bytes round its own wire", crlf);
+            if (good == 4u) {
+                ++lp_ok;
+            }
+        }
+        bench.verdict("LPUART1 runs on PCLK, on HSI16 and on the 32768 Hz crystal, "
+                      "byte-exact on its own single wire", lp_ok == lp_tried &&
+                                                               lp_tried >= 3u);
+
+        // The PCLK ceiling: 34.4.7 puts it at fck / 3, which from 64 MHz is
+        // 21.3 Mbaud. The open-drain loop gives out long before that, and
+        // the ladder says where.
+        feed();
+        static const uint32_t lp_ladder[] = {115200, 460800, 921600, 2'000'000,
+                                             4'000'000, 8'000'000};
+        uint32_t lp_best = 0;
+        for (uint32_t baud : lp_ladder) {
+            if (!lp_loop_up<L1, Lp1Pin>(lp1_tx, baud, UsartClock::pclk)) {
+                print(serial, "  ", baud, " baud is outside 34.4.7's window at "
+                      "this clock", crlf);
+                continue;
+            }
+            const uint32_t good = lp_run<L1>(8, 20000);
+            print(serial, "  LPUART1 at ", baud, " baud on PCLK: ", good,
+                  " of 8 exact", crlf);
+            if (good == 8u) {
+                lp_best = baud;
+            }
+        }
+        print(serial, "  34.4.7's own ceiling from a 64 MHz kernel is fck/3 = "
+              "21.3 Mbaud; the open-drain loop is exact to ", lp_best,
+              " and what fails above it is the pad's pull-up, not the divisor",
+              crlf);
+        bench.verdict("the LPUART carries at least the console's rate on its own "
+                      "wire", lp_best >= 115200u);
+
+        // The FIFOs and the prescaler are the LP column's, not the FULL
+        // column's - which is why has_fifo_mode is a flag of its own.
+        feed();
+        const bool fifo_up =
+            lp_loop_up<L1, Lp1Pin>(lp1_tx, 115200, UsartClock::pclk,
+                                   UsartPrescaler::div1, true);
+        const bool fifo_on = L1::fifo();
+        const uint32_t fifo_good = fifo_up ? lp_run<L1>(8, 20000) : 0u;
+        const bool presc_up =
+            lp_loop_up<L1, Lp1Pin>(lp1_tx, 9600, UsartClock::pclk,
+                                   UsartPrescaler::div64);
+        const uint32_t presc_good = presc_up ? lp_run<L1>(4, 40000) : 0u;
+        print(serial, "  LPUART1 with FIFOEN: ", fifo_good,
+              " of 8 exact; with PRESC = /64 at 9600 baud: ", presc_good,
+              " of 4 - the LP column has both, and no OVER8 at all", crlf);
+        bench.verdict("the LPUART's FIFO and prescaler work, and its baud "
+                      "generator has no oversampling to choose",
+                      fifo_on && fifo_good == 8u && presc_good == 4u &&
+                          !Lpuart<1>::has_oversampling8);
+
+        // THE SHARED VECTORS. LPUART2 arrives on the CONSOLE's own line and
+        // LPUART1 on the line USART3..6 share, so ONE handler serves several
+        // peripherals - which is this family's shape and the reason every
+        // isr() body answers "mine" or "not mine".
+        feed();
+        lpuart_irqs = 0;
+        (void)lp_loop_up<L1, Lp1Pin>(lp1_tx, 9600, UsartClock::pclk);
+        L1::rxne_interrupt(true);
+        lpuart_live = true;
+        Nvic::enable(L1::irq());
+        console_drain();
+        uint32_t lp_spins = 4'000'000u;
+        while ((L1::status() & UsartFlag::txe) == 0u && lp_spins-- != 0u) {
+        }
+        L1::write_word(0x77);
+        spin_us(4000);
+        const uint32_t served = lpuart_irqs;
+        Nvic::disable(L1::irq());
+        lpuart_live = false;
+        L1::rxne_interrupt(false);
+        print(serial, "  LPUART1's interrupt on the line it shares with every "
+              "USART from the third up was served ", served,
+              " time(s) by a handler that answers for several peripherals",
+              crlf);
+        bench.verdict("a shared vector reaches the LPUART, and the console on "
+                      "USART2 - which shares ITS line with LPUART2 - kept talking "
+                      "throughout", served >= 1u);
+    }
+}
+
 void tn_lpuart() {
     feed();
     // TABLE 198 AND TABLE 199, read back out of the register. THE
@@ -3243,120 +3556,9 @@ void tn_lpuart() {
                   lpuart_brr(32768, 9600).has_value() &&
                       !lpuart_brr(32768, 19200).has_value());
 
-    // LPUART1's own single wire on PC1, on each of its kernel clocks.
-    const bool pc1_free = pull_walks<Lp1Pin>();
-    print(serial, "  PC1 follows its own pull: ", pc1_free ? "yes" : "NO", crlf);
-    bench.verdict("PC1 is free for LPUART1's single wire", pc1_free);
-
-    const bool lse_running = RtcDomain::lse_ready();
-    uint8_t lp_ok = 0;
-    uint8_t lp_tried = 0;
-    struct LpCase { UsartClock kernel; uint32_t baud; uint32_t timeout; const char* name; };
-    static const LpCase lpcases[] = {
-        {UsartClock::pclk, 115200, 20000, "PCLK 64 MHz at 115200"},
-        {UsartClock::hsi16, 115200, 20000, "HSI16 at 115200"},
-        {UsartClock::hsi16, 9600, 40000, "HSI16 at 9600"},
-        {UsartClock::lse, 9600, 40000, "LSE 32768 Hz at 9600"},
-        {UsartClock::lse, 300, 900000, "LSE 32768 Hz at 300"},
-    };
-    for (const LpCase& c : lpcases) {
-        feed();
-        if (c.kernel == UsartClock::lse && !lse_running) {
-            print(serial, "  ", c.name, ": DECLINED, the crystal is not running",
-                  crlf);
-            continue;
-        }
-        ++lp_tried;
-        if (!lp_loop_up<L1, Lp1Pin>(lp1_tx, c.baud, c.kernel)) {
-            print(serial, "  ", c.name, ": unreachable", crlf);
-            continue;
-        }
-        const uint32_t good = lp_run<L1>(4, c.timeout);
-        print(serial, "  LPUART1 ", c.name, ": BRR ", L1::brr(), ", ", good,
-              " of 4 bytes round its own wire", crlf);
-        if (good == 4u) {
-            ++lp_ok;
-        }
-    }
-    bench.verdict("LPUART1 runs on PCLK, on HSI16 and on the 32768 Hz crystal, "
-                  "byte-exact on its own single wire", lp_ok == lp_tried &&
-                                                           lp_tried >= 3u);
-
-    // The PCLK ceiling: 34.4.7 puts it at fck / 3, which from 64 MHz is
-    // 21.3 Mbaud. The open-drain loop gives out long before that, and
-    // the ladder says where.
-    feed();
-    static const uint32_t lp_ladder[] = {115200, 460800, 921600, 2'000'000,
-                                         4'000'000, 8'000'000};
-    uint32_t lp_best = 0;
-    for (uint32_t baud : lp_ladder) {
-        if (!lp_loop_up<L1, Lp1Pin>(lp1_tx, baud, UsartClock::pclk)) {
-            print(serial, "  ", baud, " baud is outside 34.4.7's window at "
-                  "this clock", crlf);
-            continue;
-        }
-        const uint32_t good = lp_run<L1>(8, 20000);
-        print(serial, "  LPUART1 at ", baud, " baud on PCLK: ", good,
-              " of 8 exact", crlf);
-        if (good == 8u) {
-            lp_best = baud;
-        }
-    }
-    print(serial, "  34.4.7's own ceiling from a 64 MHz kernel is fck/3 = "
-          "21.3 Mbaud; the open-drain loop is exact to ", lp_best,
-          " and what fails above it is the pad's pull-up, not the divisor",
-          crlf);
-    bench.verdict("the LPUART carries at least the console's rate on its own "
-                  "wire", lp_best >= 115200u);
-
-    // The FIFOs and the prescaler are the LP column's, not the FULL
-    // column's - which is why has_fifo_mode is a flag of its own.
-    feed();
-    const bool fifo_up =
-        lp_loop_up<L1, Lp1Pin>(lp1_tx, 115200, UsartClock::pclk,
-                               UsartPrescaler::div1, true);
-    const bool fifo_on = L1::fifo();
-    const uint32_t fifo_good = fifo_up ? lp_run<L1>(8, 20000) : 0u;
-    const bool presc_up =
-        lp_loop_up<L1, Lp1Pin>(lp1_tx, 9600, UsartClock::pclk,
-                               UsartPrescaler::div64);
-    const uint32_t presc_good = presc_up ? lp_run<L1>(4, 40000) : 0u;
-    print(serial, "  LPUART1 with FIFOEN: ", fifo_good,
-          " of 8 exact; with PRESC = /64 at 9600 baud: ", presc_good,
-          " of 4 - the LP column has both, and no OVER8 at all", crlf);
-    bench.verdict("the LPUART's FIFO and prescaler work, and its baud "
-                  "generator has no oversampling to choose",
-                  fifo_on && fifo_good == 8u && presc_good == 4u &&
-                      !Lpuart<1>::has_oversampling8);
+    tn_lpuart_wire();
 
     tn_lpuart2();
-
-    // THE SHARED VECTORS. LPUART2 arrives on the CONSOLE's own line and
-    // LPUART1 on the line USART3..6 share, so ONE handler serves several
-    // peripherals - which is this family's shape and the reason every
-    // isr() body answers "mine" or "not mine".
-    feed();
-    lpuart_irqs = 0;
-    (void)lp_loop_up<L1, Lp1Pin>(lp1_tx, 9600, UsartClock::pclk);
-    L1::rxne_interrupt(true);
-    lpuart_live = true;
-    Nvic::enable(L1::irq());
-    console_drain();
-    uint32_t lp_spins = 4'000'000u;
-    while ((L1::status() & UsartFlag::txe) == 0u && lp_spins-- != 0u) {
-    }
-    L1::write_word(0x77);
-    spin_us(4000);
-    const uint32_t served = lpuart_irqs;
-    Nvic::disable(L1::irq());
-    lpuart_live = false;
-    L1::rxne_interrupt(false);
-    print(serial, "  LPUART1's interrupt on USART3_4_5_6_LPUART1_IRQn was "
-          "served ", served, " time(s) by a handler that also serves four "
-          "USARTs", crlf);
-    bench.verdict("a shared vector reaches the LPUART, and the console on "
-                  "USART2 - which shares ITS line with LPUART2 - kept talking "
-                  "throughout", served >= 1u);
 
     L1::enable(false);
     L1::reset();
@@ -3544,12 +3746,14 @@ void to_irtim() {
     const bool reserved_refused =
         !Irtim::envelope(static_cast<IrtimEnvelope>(3));
     print(serial, "  IR_MOD = 10 selects USART", Irtim::second_usart_index,
-          " on this part (it is USART2 on the G031 class), and code 11 is "
-          "Reserved: ", reserved_refused ? "refused" : "TAKEN", crlf);
+          " on this part (USART4 where there is one, USART2 where there is "
+          "not), and code 11 is Reserved: ",
+          reserved_refused ? "refused" : "TAKEN", crlf);
     bench.verdict("the envelope multiplexer takes all three implemented codes "
-                  "and refuses the Reserved one",
+                  "and refuses the Reserved one - with code 10 following the "
+                  "instance the part HAS, which is the reserve's own rule",
                   second_ok && reserved_refused &&
-                      Irtim::second_usart_index == 4u);
+                      Irtim::second_usart_index == (usart_present(4) ? 4u : 2u));
 
     // The high-sink driver, which is PB9's alone and wears an I2C name.
     Irtim::pb9_high_sink(true);
@@ -3643,6 +3847,11 @@ void ty_streaming() {
           "  python3 tools/uart_stress.py --port <the console> --letters y",
           crlf);
 
+    // A CONSOLE WITHOUT A MULTIPLEXER HAS ONE KERNEL CLOCK, and this
+    // letter streams on every one it HAS: the two PCLK legs run on any
+    // part, the HSI16 and SYSCLK ones only where USART2 carries a CCIPR
+    // field of its own (letter a is where that is measured).
+    constexpr bool console_mux = usart_has_clock_select(2);
     struct Leg { UsartClock kernel; uint32_t ker_hz; uint32_t baud; const char* name; };
     static const Leg legs[] = {
         {UsartClock::pclk, SysClock::pclk_hz, 115200, "PCLK"},
@@ -3654,6 +3863,15 @@ void ty_streaming() {
     uint8_t tried = 0;
     for (const Leg& l : legs) {
         feed();
+        if constexpr (!console_mux) {
+            if (l.kernel != UsartClock::pclk) {
+                print(serial, "  ", l.name, " at ", l.baud,
+                      " baud: SKIPPED, no verdict claimed - this part makes "
+                      "USART2 a BASIC instance and it has no kernel clock but "
+                      "PCLK", crlf);
+                continue;
+            }
+        }
         const std::optional<uint16_t> reg = usart_brr(l.ker_hz, l.baud);
         if (!reg) {
             continue;
@@ -3709,49 +3927,64 @@ void ty_streaming() {
         }
     }
 
-    // And the same with the FIFO on, at the console's own rate.
+    // AND THE SAME WITH THE FIFO ON, at the console's own rate - on a
+    // console that HAS one. A BASIC instance has not (letter a measures
+    // the enable being dropped), so the leg names the fact and claims
+    // nothing rather than turning FIFOEN's refusal into a stream test.
     feed();
-    host_announce("sink", 0, 115200, "8N1", 900, 0);
-    {
-        InterruptGuard guard;
-        Usart<2>::enable(false);
-        (void)Usart<2>::fifo(true);
-        (void)Usart<2>::fifo_thresholds(UartFifoThreshold::half,
-                                        UartFifoThreshold::none);
-        Usart<2>::enable(true);
-    }
-    Serial::clear_errors();
-    uint8_t fifo_junk[64];
-    while (Serial::read_bulk(fifo_junk) != 0u) {
-    }
-    lfsr_reset();
-    uint32_t fifo_got = 0;
-    uint32_t fifo_bad = 0;
-    uint8_t chunk[64];
-    uint32_t t0 = now();
-    while (to_us(since(t0)) < 500000u) {
-        const uint32_t n = Serial::read_bulk(chunk);
-        for (uint32_t i = 0; i < n; ++i) {
-            if (chunk[i] != lfsr_next()) {
-                ++fifo_bad;
-            }
+    [[maybe_unused]] bool fifo_ok = false;
+    if constexpr (Usart<2>::is_full) {
+        host_announce("sink", 0, 115200, "8N1", 900, 0);
+        {
+            InterruptGuard guard;
+            Usart<2>::enable(false);
+            (void)Usart<2>::fifo(true);
+            (void)Usart<2>::fifo_thresholds(UartFifoThreshold::half,
+                                            UartFifoThreshold::none);
+            Usart<2>::enable(true);
         }
-        fifo_got += n;
+        Serial::clear_errors();
+        uint8_t fifo_junk[64];
+        while (Serial::read_bulk(fifo_junk) != 0u) {
+        }
+        lfsr_reset();
+        uint32_t fifo_got = 0;
+        uint32_t fifo_bad = 0;
+        uint8_t chunk[64];
+        const uint32_t t0 = now();
+        while (to_us(since(t0)) < 500000u) {
+            const uint32_t n = Serial::read_bulk(chunk);
+            for (uint32_t i = 0; i < n; ++i) {
+                if (chunk[i] != lfsr_next()) {
+                    ++fifo_bad;
+                }
+            }
+            fifo_got += n;
+        }
+        const uint8_t fifo_hw = Serial::hw_overruns();
+        {
+            InterruptGuard guard;
+            Usart<2>::enable(false);
+            (void)Usart<2>::fifo(false);
+            Usart<2>::enable(true);
+        }
+        host_settle();
+        print(serial, "  with FIFOEN set on the console: ", fifo_got,
+              " bytes in, ", fifo_bad, " wrong, hardware overruns ", fifo_hw,
+              crlf);
+        fifo_ok = fifo_got >= 2000u && fifo_bad == 0u;
+    } else {
+        print(serial, "  SKIPPED, no verdict claimed: the console is a BASIC "
+                      "instance on this part and has no FIFO to turn on.",
+              crlf);
     }
-    const uint8_t fifo_hw = Serial::hw_overruns();
-    {
-        InterruptGuard guard;
-        Usart<2>::enable(false);
-        (void)Usart<2>::fifo(false);
-        Usart<2>::enable(true);
-    }
-    host_settle();
-    print(serial, "  with FIFOEN set on the console: ", fifo_got,
-          " bytes in, ", fifo_bad, " wrong, hardware overruns ", fifo_hw, crlf);
     bench.verdict("the console streams byte-exact from the host on every "
-                  "kernel clock it can take", clean == tried && tried >= 3u);
-    bench.verdict("and with the FIFO turned on under it, without one line of "
-                  "the transport changing", fifo_got >= 2000u && fifo_bad == 0u);
+                  "kernel clock it can take",
+                  clean == tried && tried >= (console_mux ? 3u : 2u));
+    if constexpr (Usart<2>::is_full) {
+        bench.verdict("and with the FIFO turned on under it, without one line "
+                      "of the transport changing", fifo_ok);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3779,69 +4012,174 @@ uint32_t rtc_ms(uint32_t ticks) {
     return static_cast<uint32_t>((static_cast<uint64_t>(ticks) * 1000ULL) / hz);
 }
 
+/// THE WAKE LETTER NEEDS TWO THINGS THIS PART OR THIS BOARD MAY NOT
+/// HAVE: a console that can wake at all (33.5.21's wake is a FULL
+/// instance's - a BASIC one has no EXTI line, which is what letter a
+/// measures) and a wall clock to time the Stop with, which here is the
+/// RTC on the LSE crystal. Where either is missing the letter says so
+/// and claims NOTHING - a Stop nothing can end is a reboot and a banner,
+/// and a verdict for a leg that was never staged would be worse.
+template <bool stageable = (usart_exti_line(2) != 0xFF) && board_lse_fitted>
 void tw_wake() {
     print(serial, "  this letter needs tools/uart_stress.py; run it as", crlf,
           "  python3 tools/uart_stress.py --port <the console> --letters w",
           crlf);
     feed();
-    const bool wall_ok = RtcDomain::selected() == RtcClockSource::lse &&
-                         RtcDomain::lse_ready();
-    if (!wall_ok) {
-        print(serial, "  the RTC is not on the crystal: this letter would "
-                      "have no wall clock and is DECLINED", crlf);
-        bench.verdict("the wake letter needs the RTC wall clock", false);
+    if constexpr (!stageable) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: this letter needs a console "
+              "that can wake from Stop AND a wall clock to time the Stop "
+              "with, and here it is short of ",
+              usart_exti_line(2) == 0xFFu
+                  ? "the first: the console is USART2, which this part makes "
+                    "a BASIC instance - table 184's last row, and the "
+                    "reserve's usart_exti_line(2) is 0xFF, so there is no "
+                    "wake to arm and no EXTI line to arm it on. "
+                  : "",
+              board_lse_fitted
+                  ? ""
+                  : "the second: this board's LSE crystal does not start "
+                    "(LSERDY never rose in fifteen seconds at either drive "
+                    "setting), so there is neither a wall to measure the "
+                    "Stop against nor an RTC wake-up timer to end it. ",
+              "ES0548 2.2.4's staging - and ES0487's twin, which this suite "
+              "has not read - wants both, so it is not attempted.", crlf);
         return;
-    }
-
-    struct WakeCase { UsartWakeSource src; uint32_t baud; const char* name; };
-    static const WakeCase wcases[] = {
-        {UsartWakeSource::start_bit, 9600, "start bit at 9600"},
-        {UsartWakeSource::receive_ready, 9600, "RXNE at 9600"},
-        {UsartWakeSource::start_bit, 115200, "start bit at 115200"},
-        {UsartWakeSource::address_match, 9600, "address match at 9600"},
-    };
-    uint8_t woke = 0;
-    uint8_t tried = 0;
-    for (const WakeCase& c : wcases) {
-        feed();
-        const std::optional<uint16_t> reg = usart_brr(16'000'000u, c.baud);
-        if (!reg) {
-            continue;
+    } else {
+        const bool wall_ok = RtcDomain::selected() == RtcClockSource::lse &&
+                             RtcDomain::lse_ready();
+        if (!wall_ok) {
+            print(serial, "  the RTC is not on the crystal: this letter would "
+                          "have no wall clock and is DECLINED", crlf);
+            bench.verdict("the wake letter needs the RTC wall clock", false);
+            return;
         }
-        ++tried;
-        host_announce("poke", 0, c.baud, "8N1", 1400, 4);
-        // The console on HSI16 - one of the two kernel clocks that
-        // survive a Stop, and the only one that can carry 115200.
+
+        struct WakeCase { UsartWakeSource src; uint32_t baud; const char* name; };
+        static const WakeCase wcases[] = {
+            {UsartWakeSource::start_bit, 9600, "start bit at 9600"},
+            {UsartWakeSource::receive_ready, 9600, "RXNE at 9600"},
+            {UsartWakeSource::start_bit, 115200, "start bit at 115200"},
+            {UsartWakeSource::address_match, 9600, "address match at 9600"},
+        };
+        uint8_t woke = 0;
+        uint8_t tried = 0;
+        for (const WakeCase& c : wcases) {
+            feed();
+            const std::optional<uint16_t> reg = usart_brr(16'000'000u, c.baud);
+            if (!reg) {
+                continue;
+            }
+            ++tried;
+            host_announce("poke", 0, c.baud, "8N1", 1400, 4);
+            // The console on HSI16 - one of the two kernel clocks that
+            // survive a Stop, and the only one that can carry 115200.
+            {
+                InterruptGuard guard;
+                Usart<2>::enable(false);
+                (void)Usart<2>::kernel_clock(UsartClock::hsi16);
+                Usart<2>::set_brr(*reg);
+                if (c.src == UsartWakeSource::address_match) {
+                    (void)Usart<2>::mute_mode({.wake = MuteWake::address_mark,
+                                               .address_7bit = false,
+                                               .address = 0x5});
+                }
+                (void)Usart<2>::wake_from_stop(c.src);
+                (void)Usart<2>::wake_line(true);
+                Usart<2>::enable(true);
+            }
+            // 33.5.21: REACK must be checked before the Stop is entered.
+            uint32_t spins = 200000;
+            while ((Usart<2>::status() & UsartFlag::reack) == 0u && spins-- != 0u) {
+            }
+            const bool reack = (Usart<2>::status() & UsartFlag::reack) != 0u;
+            Usart<2>::clear_flags(UsartClear::all);
+            Serial::clear_errors();
+            uint8_t junk[16];
+            while (Serial::read_bulk(junk) != 0u) {
+            }
+
+            // THE BACKSTOP IS THE RTC'S OWN WAKE-UP TIMER and not the
+            // watchdog: a Stop that nothing ends would cost this letter a
+            // reboot and a banner, which is exactly what its first version
+            // did. Two seconds of ck_spre, and the two flags afterwards say
+            // WHICH of them ended the sleep.
+            (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
+            Rtc::clear_flags(RtcFlag::wakeup);
+            feed();
+            console_wakes = 0;
+            console_wake_armed = 1;
+            rtc_backstops = 0;
+            const uint32_t w0 = rtc_wall();
+            Ticker::pause();
+            Pwr::enter(PwrMode::stop0);
+            Ticker::resume();
+            (void)SysClock::init();
+            const uint32_t slept = rtc_ms(rtc_delta(w0, rtc_wall()));
+            // WUF HAS ALREADY BEEN CLEARED BY THE TIME THIS LINE RUNS: the
+            // handler runs before the WFI returns, and it must clear a level
+            // it would otherwise re-enter on. The COUNTER is the reading.
+            const uint32_t wuf_seen = console_wakes;
+            const bool by_rtc = rtc_backstops != 0u;
+            Rtc::clear_wakeup();
+            feed();
+            // Whatever arrived while the core was down.
+            uint8_t got[8];
+            uint32_t n = 0;
+            const uint32_t t0 = now();
+            while (to_us(since(t0)) < 200000u && n < sizeof got) {
+                uint8_t b = 0;
+                if (Serial::read_byte(b)) {
+                    got[n++] = b;
+                }
+            }
+            {
+                InterruptGuard guard;
+                Usart<2>::enable(false);
+                (void)Usart<2>::wake_from_stop(UsartWakeSource::none);
+                (void)Usart<2>::wake_line(false);
+                (void)Usart<2>::mute_mode_off();
+                (void)Usart<2>::kernel_clock(UsartClock::pclk);
+                Usart<2>::set_brr(usart_brr(SysClock::pclk_hz, 115200).value());
+                Usart<2>::enable(true);
+            }
+            console_wake_armed = 0;   // only once WUFIE is really down
+            host_settle();
+            print(serial, "  ", c.name, ": REACK ", reack ? "set" : "CLEAR",
+                  ", the Stop lasted ", slept, " ms, WUF seen ", wuf_seen,
+                  " time(s), the RTC backstop ", by_rtc ? "fired" : "did not fire",
+                  ", ", n, " byte(s) survived it, first ", n ? got[0] : 0u, crlf);
+            if (wuf_seen != 0u && !by_rtc) {
+                ++woke;
+            }
+        }
+        bench.verdict("the USART wakes this part out of Stop 0 on every one of "
+                      "33.5.21's three sources, from a byte the host sent while "
+                      "the core was down - and the RTC backstop never had to "
+                      "fire", woke == tried && tried >= 3u);
+
+        // ES0548 2.2.4 STAGED: with HSIDIV != 0 a clock-request peripheral
+        // "fails to wake the device from Stop modes". The control is that
+        // the very same Stop is entered and left at HSIDIV = 0.
+        feed();
+        host_announce("poke", 0, 9600, "8N1", 1500, 4);
         {
             InterruptGuard guard;
             Usart<2>::enable(false);
             (void)Usart<2>::kernel_clock(UsartClock::hsi16);
-            Usart<2>::set_brr(*reg);
-            if (c.src == UsartWakeSource::address_match) {
-                (void)Usart<2>::mute_mode({.wake = MuteWake::address_mark,
-                                           .address_7bit = false,
-                                           .address = 0x5});
-            }
-            (void)Usart<2>::wake_from_stop(c.src);
+            Usart<2>::set_brr(usart_brr(16'000'000u, 9600).value());
+            (void)Usart<2>::wake_from_stop(UsartWakeSource::start_bit);
             (void)Usart<2>::wake_line(true);
             Usart<2>::enable(true);
         }
-        // 33.5.21: REACK must be checked before the Stop is entered.
-        uint32_t spins = 200000;
-        while ((Usart<2>::status() & UsartFlag::reack) == 0u && spins-- != 0u) {
-        }
-        const bool reack = (Usart<2>::status() & UsartFlag::reack) != 0u;
-        Usart<2>::clear_flags(UsartClear::all);
-        Serial::clear_errors();
-        uint8_t junk[16];
-        while (Serial::read_bulk(junk) != 0u) {
-        }
-
-        // THE BACKSTOP IS THE RTC'S OWN WAKE-UP TIMER and not the
-        // watchdog: a Stop that nothing ends would cost this letter a
-        // reboot and a banner, which is exactly what its first version
-        // did. Two seconds of ck_spre, and the two flags afterwards say
-        // WHICH of them ended the sleep.
+        // Move SYSCLK onto a DIVIDED HSI: HSISYS = HSI16 / 4.
+        Rcc::sysclk_select(SysclkSource::hsisys);
+        (void)Rcc::sysclk_wait(SysclkSource::hsisys);
+        Rcc::hsi_div(2);                      // HSIDIV = 010, divide by 4
+        Rcc::pll_enable(false);
+        const uint8_t div_now = Rcc::hsi_div();
+        // The RTC's wake-up timer is the control AND the way out: it proves
+        // the Stop itself works and it ends this leg whatever the USART does.
         (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
         Rtc::clear_flags(RtcFlag::wakeup);
         feed();
@@ -3852,186 +4190,111 @@ void tw_wake() {
         Ticker::pause();
         Pwr::enter(PwrMode::stop0);
         Ticker::resume();
+        Rcc::hsi_div(0);
         (void)SysClock::init();
         const uint32_t slept = rtc_ms(rtc_delta(w0, rtc_wall()));
-        // WUF HAS ALREADY BEEN CLEARED BY THE TIME THIS LINE RUNS: the
-        // handler runs before the WFI returns, and it must clear a level
-        // it would otherwise re-enter on. The COUNTER is the reading.
         const uint32_t wuf_seen = console_wakes;
-        const bool by_rtc = rtc_backstops != 0u;
+        const bool rtc_woke = rtc_backstops != 0u;
         Rtc::clear_wakeup();
         feed();
-        // Whatever arrived while the core was down.
-        uint8_t got[8];
-        uint32_t n = 0;
-        const uint32_t t0 = now();
-        while (to_us(since(t0)) < 200000u && n < sizeof got) {
-            uint8_t b = 0;
-            if (Serial::read_byte(b)) {
-                got[n++] = b;
-            }
-        }
         {
             InterruptGuard guard;
             Usart<2>::enable(false);
             (void)Usart<2>::wake_from_stop(UsartWakeSource::none);
             (void)Usart<2>::wake_line(false);
-            (void)Usart<2>::mute_mode_off();
             (void)Usart<2>::kernel_clock(UsartClock::pclk);
             Usart<2>::set_brr(usart_brr(SysClock::pclk_hz, 115200).value());
             Usart<2>::enable(true);
         }
-        console_wake_armed = 0;   // only once WUFIE is really down
+        console_wake_armed = 0;
         host_settle();
-        print(serial, "  ", c.name, ": REACK ", reack ? "set" : "CLEAR",
-              ", the Stop lasted ", slept, " ms, WUF seen ", wuf_seen,
-              " time(s), the RTC backstop ", by_rtc ? "fired" : "did not fire",
-              ", ", n, " byte(s) survived it, first ", n ? got[0] : 0u, crlf);
-        if (wuf_seen != 0u && !by_rtc) {
-            ++woke;
+        print(serial, "  ES0548 2.2.4 staged with HSIDIV = ", div_now,
+              " (HSI16 / 4): the Stop lasted ", slept, " ms, WUF seen ", wuf_seen,
+              " time(s), and the RTC wake-up timer - the control that the Stop "
+              "itself works - fired: ", rtc_woke ? "yes" : "no", crlf);
+        if (wuf_seen == 0u && rtc_woke) {
+            print(serial, "  THE ERRATUM REPRODUCES: a clock-request peripheral "
+                          "did not wake the part on a divided HSI, and the RTC "
+                          "did", crlf);
+        } else if (wuf_seen != 0u) {
+            print(serial, "  the erratum did NOT reproduce here: WUF rose on a "
+                          "divided HSI. Recorded as measured", crlf);
         }
-    }
-    bench.verdict("the USART wakes this part out of Stop 0 on every one of "
-                  "33.5.21's three sources, from a byte the host sent while "
-                  "the core was down - and the RTC backstop never had to "
-                  "fire", woke == tried && tried >= 3u);
+        bench.verdict("2.2.4 is staged with a control that separates \"the Stop "
+                      "did not work\" from \"the USART did not wake it\"",
+                      rtc_woke);
 
-    // ES0548 2.2.4 STAGED: with HSIDIV != 0 a clock-request peripheral
-    // "fails to wake the device from Stop modes". The control is that
-    // the very same Stop is entered and left at HSIDIV = 0.
-    feed();
-    host_announce("poke", 0, 9600, "8N1", 1500, 4);
-    {
-        InterruptGuard guard;
-        Usart<2>::enable(false);
-        (void)Usart<2>::kernel_clock(UsartClock::hsi16);
-        Usart<2>::set_brr(usart_brr(16'000'000u, 9600).value());
-        (void)Usart<2>::wake_from_stop(UsartWakeSource::start_bit);
-        (void)Usart<2>::wake_line(true);
-        Usart<2>::enable(true);
-    }
-    // Move SYSCLK onto a DIVIDED HSI: HSISYS = HSI16 / 4.
-    Rcc::sysclk_select(SysclkSource::hsisys);
-    (void)Rcc::sysclk_wait(SysclkSource::hsisys);
-    Rcc::hsi_div(2);                      // HSIDIV = 010, divide by 4
-    Rcc::pll_enable(false);
-    const uint8_t div_now = Rcc::hsi_div();
-    // The RTC's wake-up timer is the control AND the way out: it proves
-    // the Stop itself works and it ends this leg whatever the USART does.
-    (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
-    Rtc::clear_flags(RtcFlag::wakeup);
-    feed();
-    console_wakes = 0;
-    console_wake_armed = 1;
-    rtc_backstops = 0;
-    const uint32_t w0 = rtc_wall();
-    Ticker::pause();
-    Pwr::enter(PwrMode::stop0);
-    Ticker::resume();
-    Rcc::hsi_div(0);
-    (void)SysClock::init();
-    const uint32_t slept = rtc_ms(rtc_delta(w0, rtc_wall()));
-    const uint32_t wuf_seen = console_wakes;
-    const bool rtc_woke = rtc_backstops != 0u;
-    Rtc::clear_wakeup();
-    feed();
-    {
-        InterruptGuard guard;
-        Usart<2>::enable(false);
-        (void)Usart<2>::wake_from_stop(UsartWakeSource::none);
-        (void)Usart<2>::wake_line(false);
-        (void)Usart<2>::kernel_clock(UsartClock::pclk);
-        Usart<2>::set_brr(usart_brr(SysClock::pclk_hz, 115200).value());
-        Usart<2>::enable(true);
-    }
-    console_wake_armed = 0;
-    host_settle();
-    print(serial, "  ES0548 2.2.4 staged with HSIDIV = ", div_now,
-          " (HSI16 / 4): the Stop lasted ", slept, " ms, WUF seen ", wuf_seen,
-          " time(s), and the RTC wake-up timer - the control that the Stop "
-          "itself works - fired: ", rtc_woke ? "yes" : "no", crlf);
-    if (wuf_seen == 0u && rtc_woke) {
-        print(serial, "  THE ERRATUM REPRODUCES: a clock-request peripheral "
-                      "did not wake the part on a divided HSI, and the RTC "
-                      "did", crlf);
-    } else if (wuf_seen != 0u) {
-        print(serial, "  the erratum did NOT reproduce here: WUF rose on a "
-                      "divided HSI. Recorded as measured", crlf);
-    }
-    bench.verdict("2.2.4 is staged with a control that separates \"the Stop "
-                  "did not work\" from \"the USART did not wake it\"",
-                  rtc_woke);
-
-    // AND THE ONE THING THAT MIGHT ANSWER IT: RCC_CR.HSIKERON keeps HSI16
-    // running for a kernel-clock consumer whether or not anybody asks -
-    // so if 2.2.4 is really about the REQUEST path (33.5.21's
-    // usart_ker_ck_req, which starts the oscillator on the falling edge
-    // of RX), a clock that never stopped should not need it. The same
-    // leg, the same divided HSI, one bit different. Printed either way;
-    // it is a question the errata sheet does not answer and this letter
-    // does not claim to settle beyond what it measured.
-    feed();
-    host_announce("poke", 0, 9600, "8N1", 1500, 4);
-    {
-        InterruptGuard guard;
-        Usart<2>::enable(false);
-        (void)Usart<2>::kernel_clock(UsartClock::hsi16);
-        Usart<2>::set_brr(usart_brr(16'000'000u, 9600).value());
-        (void)Usart<2>::wake_from_stop(UsartWakeSource::start_bit);
-        (void)Usart<2>::wake_line(true);
-        Usart<2>::enable(true);
-    }
-    Rcc::hsi_kernel_request(true);
-    const bool kernel_on = Rcc::hsi_kernel_request();
-    Rcc::sysclk_select(SysclkSource::hsisys);
-    (void)Rcc::sysclk_wait(SysclkSource::hsisys);
-    Rcc::hsi_div(2);
-    Rcc::pll_enable(false);
-    (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
-    Rtc::clear_flags(RtcFlag::wakeup);
-    feed();
-    console_wakes = 0;
-    console_wake_armed = 1;
-    rtc_backstops = 0;
-    const uint32_t k0 = rtc_wall();
-    Ticker::pause();
-    Pwr::enter(PwrMode::stop0);
-    Ticker::resume();
-    Rcc::hsi_div(0);
-    (void)SysClock::init();
-    const uint32_t k_slept = rtc_ms(rtc_delta(k0, rtc_wall()));
-    const uint32_t k_wuf = console_wakes;
-    const bool k_rtc = rtc_backstops != 0u;
-    Rtc::clear_wakeup();
-    Rcc::hsi_kernel_request(false);
-    feed();
-    {
-        InterruptGuard guard;
-        Usart<2>::enable(false);
-        (void)Usart<2>::wake_from_stop(UsartWakeSource::none);
-        (void)Usart<2>::wake_line(false);
-        (void)Usart<2>::kernel_clock(UsartClock::pclk);
-        Usart<2>::set_brr(usart_brr(SysClock::pclk_hz, 115200).value());
-        Usart<2>::enable(true);
-    }
-    console_wake_armed = 0;
-    host_settle();
-    print(serial, "  and the same leg with RCC_CR.HSIKERON set (", 
-          kernel_on ? "the bit reads back" : "THE BIT DID NOT STICK",
-          "): the Stop lasted ", k_slept, " ms, WUF seen ", k_wuf,
-          " time(s), the RTC backstop ", k_rtc ? "fired" : "did not fire",
-          crlf);
-    if (k_wuf != 0u) {
-        print(serial, "  HSIKERON IS THE WAY ROUND 2.2.4 ON THIS PART: with "
-                      "HSI16 kept running for its kernel-clock consumer the "
-                      "same divided-HSI Stop is woken by the USART, so the "
-                      "erratum is about the clock REQUEST and not about the "
-                      "wake-up path", crlf);
-    } else {
-        print(serial, "  HSIKERON does NOT rescue it: the wake fails on a "
-                      "divided HSI with the oscillator kept running too, so "
-                      "2.2.4 reaches further than the request path. Recorded "
-                      "as measured, not explained", crlf);
+        // AND THE ONE THING THAT MIGHT ANSWER IT: RCC_CR.HSIKERON keeps HSI16
+        // running for a kernel-clock consumer whether or not anybody asks -
+        // so if 2.2.4 is really about the REQUEST path (33.5.21's
+        // usart_ker_ck_req, which starts the oscillator on the falling edge
+        // of RX), a clock that never stopped should not need it. The same
+        // leg, the same divided HSI, one bit different. Printed either way;
+        // it is a question the errata sheet does not answer and this letter
+        // does not claim to settle beyond what it measured.
+        feed();
+        host_announce("poke", 0, 9600, "8N1", 1500, 4);
+        {
+            InterruptGuard guard;
+            Usart<2>::enable(false);
+            (void)Usart<2>::kernel_clock(UsartClock::hsi16);
+            Usart<2>::set_brr(usart_brr(16'000'000u, 9600).value());
+            (void)Usart<2>::wake_from_stop(UsartWakeSource::start_bit);
+            (void)Usart<2>::wake_line(true);
+            Usart<2>::enable(true);
+        }
+        Rcc::hsi_kernel_request(true);
+        const bool kernel_on = Rcc::hsi_kernel_request();
+        Rcc::sysclk_select(SysclkSource::hsisys);
+        (void)Rcc::sysclk_wait(SysclkSource::hsisys);
+        Rcc::hsi_div(2);
+        Rcc::pll_enable(false);
+        (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
+        Rtc::clear_flags(RtcFlag::wakeup);
+        feed();
+        console_wakes = 0;
+        console_wake_armed = 1;
+        rtc_backstops = 0;
+        const uint32_t k0 = rtc_wall();
+        Ticker::pause();
+        Pwr::enter(PwrMode::stop0);
+        Ticker::resume();
+        Rcc::hsi_div(0);
+        (void)SysClock::init();
+        const uint32_t k_slept = rtc_ms(rtc_delta(k0, rtc_wall()));
+        const uint32_t k_wuf = console_wakes;
+        const bool k_rtc = rtc_backstops != 0u;
+        Rtc::clear_wakeup();
+        Rcc::hsi_kernel_request(false);
+        feed();
+        {
+            InterruptGuard guard;
+            Usart<2>::enable(false);
+            (void)Usart<2>::wake_from_stop(UsartWakeSource::none);
+            (void)Usart<2>::wake_line(false);
+            (void)Usart<2>::kernel_clock(UsartClock::pclk);
+            Usart<2>::set_brr(usart_brr(SysClock::pclk_hz, 115200).value());
+            Usart<2>::enable(true);
+        }
+        console_wake_armed = 0;
+        host_settle();
+        print(serial, "  and the same leg with RCC_CR.HSIKERON set (",
+              kernel_on ? "the bit reads back" : "THE BIT DID NOT STICK",
+              "): the Stop lasted ", k_slept, " ms, WUF seen ", k_wuf,
+              " time(s), the RTC backstop ", k_rtc ? "fired" : "did not fire",
+              crlf);
+        if (k_wuf != 0u) {
+            print(serial, "  HSIKERON IS THE WAY ROUND 2.2.4 ON THIS PART: with "
+                          "HSI16 kept running for its kernel-clock consumer the "
+                          "same divided-HSI Stop is woken by the USART, so the "
+                          "erratum is about the clock REQUEST and not about the "
+                          "wake-up path", crlf);
+        } else {
+            print(serial, "  HSIKERON does NOT rescue it: the wake fails on a "
+                          "divided HSI with the oscillator kept running too, so "
+                          "2.2.4 reaches further than the request path. Recorded "
+                          "as measured, not explained", crlf);
+        }
     }
 }
 
@@ -4054,64 +4317,176 @@ constexpr LpConsoleHsi lp_console_hsi;
 
 volatile uint8_t lp_console_mode = 0;
 
+/// The LSE console's own isr(), reached only where that console exists.
+template <bool fitted = board_lse_fitted>
+void lp_console_lse_isr() {
+    if constexpr (fitted) {
+        (void)LpConsoleLse::isr();
+    }
+}
+
+/// LEG ONE, and the only one of the three that needs a crystal: LPUART1
+/// on PA2/PA3 AF6 - the console's OWN pads, which this instance reaches
+/// through a different alternate function - clocked by the 32768 Hz LSE.
+/// A TEMPLATE so that a board with no crystal carries neither the leg nor
+/// its console's two rings. It answers "nothing to hold against it": true
+/// when the leg ran and was exact, and true when it never ran at all.
+template <bool fitted = board_lse_fitted>
+bool tv_lse_leg() {
+    if constexpr (!fitted) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: an LPUART console clocked by "
+              "the 32768 Hz crystal needs one to be running, and THIS BOARD'S "
+              "LSE DOES NOT START (LSERDY never rose in fifteen seconds at "
+              "either drive setting). The HSI16 leg below is the same console "
+              "on the same pads and runs.", crlf);
+        return true;
+    } else {
+        if (!RtcDomain::lse_ready()) {
+            print(serial, "  no crystal running: the LSE console leg is "
+                          "DECLINED and nothing pretends otherwise", crlf);
+            return true;
+        }
+        // LEG ONE: LPUART1 on PA2/PA3 AF6 - the console's OWN pads, which
+        // this instance reaches through a different alternate function -
+        // clocked by the 32768 Hz crystal at 9600 baud, the chapter's own
+        // ceiling for that clock. The host echoes; the board counts.
+        uint32_t lse_got = 0;
+        uint32_t lse_bad = 0;
+        host_announce("sink", 0, 9600, "8N1", 1600, 0);
+        Serial::release();
+        lp_console_mode = 1;
+        const bool lse_up = LpConsoleLse::init(clock, 9600);
+        lfsr_reset();
+        uint8_t chunk[32];
+        uint32_t t0 = now();
+        // THE WINDOW OUTLASTS THE HOST'S PUMP ON PURPOSE (the script pumps
+        // for window - 500 ms and starts 140 ms after reading the HOST
+        // line): a board that stops listening first leaves the tail of the
+        // stream to arrive on a console that has moved back to 115200.
+        while (to_us(since(t0)) < 1200000u) {
+            const uint32_t n = LpConsoleLse::read_bulk(chunk);
+            for (uint32_t i = 0; i < n; ++i) {
+                if (chunk[i] != lfsr_next()) {
+                    ++lse_bad;
+                }
+            }
+            lse_got += n;
+            feed();
+        }
+        const uint32_t lse_brr = L1::brr();
+        LpConsoleLse::release();
+        lp_console_mode = 0;
+        (void)Serial::init(clock, 115200);
+        host_settle();
+        print(serial, "  LPUART1 on PA2/PA3 AF6, clocked by the LSE at 9600: ",
+              lse_got, " bytes in, ", lse_bad, " wrong, BRR ", lse_brr,
+              " (874 is 256 x 32768 / 9600 rounded)", crlf);
+
+        return lse_up && lse_got >= 500u && lse_bad == 0u;
+    }
+}
+
+/// LEG THREE: a Stop with the LPUART on the crystal as the wake source.
+/// This is the arrangement the peripheral exists for - and it wants the
+/// crystal twice over, as the LPUART's kernel clock and as the wall this
+/// suite times the Stop with.
+template <bool fitted = board_lse_fitted>
+void tv_stop_leg() {
+    if constexpr (!fitted) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: an LPUART woken out of Stop by "
+              "a start bit needs the 32768 Hz crystal as its kernel clock - "
+              "no other clock of this part survives a Stop for it - and this "
+              "board's does not start.", crlf);
+        return;
+    } else {
+        if (RtcDomain::selected() != RtcClockSource::lse) {
+            print(serial, "  no RTC wall clock: the Stop leg is DECLINED", crlf);
+            return;
+        }
+        host_announce("poke", 0, 9600, "8N1", 1500, 4);
+        L1::bus_clock(true);
+        L1::reset();
+        (void)L1::kernel_clock(UsartClock::lse);
+        (void)L1::configure({}, lpuart_brr(32768, 9600).value());
+        (void)L1::wake_from_stop(UsartWakeSource::start_bit);
+        (void)L1::wake_line(true);
+        Pin<'A', 3>::function(PinFunction::af6, {.pull = PinPull::up});
+        L1::enable(true);
+        uint32_t spins = 200000;
+        while ((L1::status() & UsartFlag::reack) == 0u && spins-- != 0u) {
+        }
+        L1::clear_flags(UsartClear::all);
+        (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
+        Rtc::clear_flags(RtcFlag::wakeup);
+        feed();
+        // The NVIC line is what turns the EXTI's wake into a handler, and
+        // the handler is what clears WUF - a level, with WUFIE set.
+        lpuart_wakes = 0;
+        lpuart_wake_armed = 1;
+        rtc_backstops = 0;
+        Nvic::enable(L1::irq());
+        const uint32_t w0 = rtc_wall();
+        Ticker::pause();
+        Pwr::enter(PwrMode::stop1);
+        Ticker::resume();
+        (void)SysClock::init();
+        const uint32_t slept = rtc_ms(rtc_delta(w0, rtc_wall()));
+        const uint32_t lp_wuf = lpuart_wakes;
+        lpuart_wake_armed = 0;
+        Nvic::disable(L1::irq());
+        const uint32_t st = L1::status();
+        const bool lp_by_rtc = rtc_backstops != 0u;
+        Rtc::clear_wakeup();
+        feed();
+        // A START-BIT WAKE ARRIVES BEFORE ITS CHARACTER DOES, and at 9600
+        // on a 32768 Hz kernel a frame is a whole millisecond: reading RDR
+        // the instant the WFI returns reads an empty register and calls a
+        // working wake a lost byte. So the character is waited for, bounded.
+        bool rxne = (st & UsartFlag::rxne) != 0u;
+        {
+            const uint32_t t_rx = now();
+            while (!rxne && to_us(since(t_rx)) < 50000u) {
+                rxne = (L1::status() & UsartFlag::rxne) != 0u;
+            }
+        }
+        const uint16_t byte = rxne ? L1::read_word() : 0u;
+        (void)L1::wake_line(false);
+        L1::enable(false);
+        L1::reset();
+        L1::bus_clock(false);
+        (void)Serial::init(clock, 115200);
+        host_settle();
+        print(serial, "  Stop 1 with LPUART1 on the crystal as the wake source: "
+              "the Stop lasted ", slept, " ms, WUF seen ", lp_wuf,
+              " time(s), the RTC backstop ", lp_by_rtc ? "fired" : "did not fire",
+              ", a character ", rxne ? "survived it: " : "did not arrive: ", byte,
+              crlf);
+        bench.verdict("an LPUART on a 32768 Hz crystal brings the part out of "
+                      "Stop 1 on a start bit - the whole reason the peripheral "
+                      "exists", lp_wuf != 0u && !lp_by_rtc);
+    }
+}
+
 void tv_lpuart_console() {
     print(serial, "  this letter needs tools/uart_stress.py; run it as", crlf,
           "  python3 tools/uart_stress.py --port <the console> --letters v",
           crlf);
     feed();
-    const bool lse_running = RtcDomain::lse_ready();
-    if (!lse_running) {
-        print(serial, "  no crystal, no LSE console: DECLINED", crlf);
-        bench.verdict("the LSE console leg needs the crystal", false);
-        return;
-    }
-
-    // LEG ONE: LPUART1 on PA2/PA3 AF6 - the console's OWN pads, which
-    // this instance reaches through a different alternate function -
-    // clocked by the 32768 Hz crystal at 9600 baud, the chapter's own
-    // ceiling for that clock. The host echoes; the board counts.
-    uint32_t lse_got = 0;
-    uint32_t lse_bad = 0;
-    host_announce("sink", 0, 9600, "8N1", 1600, 0);
-    Serial::release();
-    lp_console_mode = 1;
-    const bool lse_up = LpConsoleLse::init(clock, 9600);
-    lfsr_reset();
-    uint8_t chunk[32];
-    uint32_t t0 = now();
-    // THE WINDOW OUTLASTS THE HOST'S PUMP ON PURPOSE (the script pumps
-    // for window - 500 ms and starts 140 ms after reading the HOST
-    // line): a board that stops listening first leaves the tail of the
-    // stream to arrive on a console that has moved back to 115200.
-    while (to_us(since(t0)) < 1200000u) {
-        const uint32_t n = LpConsoleLse::read_bulk(chunk);
-        for (uint32_t i = 0; i < n; ++i) {
-            if (chunk[i] != lfsr_next()) {
-                ++lse_bad;
-            }
-        }
-        lse_got += n;
-        feed();
-    }
-    const uint32_t lse_brr = L1::brr();
-    LpConsoleLse::release();
-    lp_console_mode = 0;
-    (void)Serial::init(clock, 115200);
-    host_settle();
-    print(serial, "  LPUART1 on PA2/PA3 AF6, clocked by the LSE at 9600: ",
-          lse_got, " bytes in, ", lse_bad, " wrong, BRR ", lse_brr,
-          " (874 is 256 x 32768 / 9600 rounded)", crlf);
+    const bool lse_leg_ok = tv_lse_leg();
 
     // LEG TWO: the same instance on HSI16 at 115200, which is what an
     // LPUART is for when the chip is awake.
     uint32_t hsi_got = 0;
     uint32_t hsi_bad = 0;
+    uint8_t chunk[32];
     host_announce("sink", 0, 115200, "8N1", 1300, 0);
     Serial::release();
     lp_console_mode = 2;
     const bool hsi_up = LpConsoleHsi::init(clock, 115200);
     lfsr_reset();
-    t0 = now();
+    uint32_t t0 = now();
     while (to_us(since(t0)) < 1000000u) {
         const uint32_t n = LpConsoleHsi::read_bulk(chunk);
         for (uint32_t i = 0; i < n; ++i) {
@@ -4132,79 +4507,12 @@ void tv_lpuart_console() {
     bench.verdict("a whole console moves to the LPUART - the SAME task, the "
                   "same verbs, a different peripheral and a different baud "
                   "generator - and comes back",
-                  lse_up && hsi_up && lse_got >= 500u && lse_bad == 0u &&
-                      hsi_got >= 2000u && hsi_bad == 0u);
+                  lse_leg_ok && hsi_up && hsi_got >= 2000u && hsi_bad == 0u);
     print(serial, "  (these lines are on USART2 again, which is the other "
           "half of the proof)", crlf);
 
-    // LEG THREE: a Stop with the LPUART on the crystal as the wake
-    // source. This is the arrangement the peripheral exists for.
     feed();
-    if (RtcDomain::selected() != RtcClockSource::lse) {
-        print(serial, "  no RTC wall clock: the Stop leg is DECLINED", crlf);
-        return;
-    }
-    host_announce("poke", 0, 9600, "8N1", 1500, 4);
-    L1::bus_clock(true);
-    L1::reset();
-    (void)L1::kernel_clock(UsartClock::lse);
-    (void)L1::configure({}, lpuart_brr(32768, 9600).value());
-    (void)L1::wake_from_stop(UsartWakeSource::start_bit);
-    (void)L1::wake_line(true);
-    Pin<'A', 3>::function(PinFunction::af6, {.pull = PinPull::up});
-    L1::enable(true);
-    uint32_t spins = 200000;
-    while ((L1::status() & UsartFlag::reack) == 0u && spins-- != 0u) {
-    }
-    L1::clear_flags(UsartClear::all);
-    (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
-    Rtc::clear_flags(RtcFlag::wakeup);
-    feed();
-    // The NVIC line is what turns the EXTI's wake into a handler, and
-    // the handler is what clears WUF - a level, with WUFIE set.
-    lpuart_wakes = 0;
-    lpuart_wake_armed = 1;
-    rtc_backstops = 0;
-    Nvic::enable(L1::irq());
-    const uint32_t w0 = rtc_wall();
-    Ticker::pause();
-    Pwr::enter(PwrMode::stop1);
-    Ticker::resume();
-    (void)SysClock::init();
-    const uint32_t slept = rtc_ms(rtc_delta(w0, rtc_wall()));
-    const uint32_t lp_wuf = lpuart_wakes;
-    lpuart_wake_armed = 0;
-    Nvic::disable(L1::irq());
-    const uint32_t st = L1::status();
-    const bool lp_by_rtc = rtc_backstops != 0u;
-    Rtc::clear_wakeup();
-    feed();
-    // A START-BIT WAKE ARRIVES BEFORE ITS CHARACTER DOES, and at 9600
-    // on a 32768 Hz kernel a frame is a whole millisecond: reading RDR
-    // the instant the WFI returns reads an empty register and calls a
-    // working wake a lost byte. So the character is waited for, bounded.
-    bool rxne = (st & UsartFlag::rxne) != 0u;
-    {
-        const uint32_t t_rx = now();
-        while (!rxne && to_us(since(t_rx)) < 50000u) {
-            rxne = (L1::status() & UsartFlag::rxne) != 0u;
-        }
-    }
-    const uint16_t byte = rxne ? L1::read_word() : 0u;
-    (void)L1::wake_line(false);
-    L1::enable(false);
-    L1::reset();
-    L1::bus_clock(false);
-    (void)Serial::init(clock, 115200);
-    host_settle();
-    print(serial, "  Stop 1 with LPUART1 on the crystal as the wake source: "
-          "the Stop lasted ", slept, " ms, WUF seen ", lp_wuf,
-          " time(s), the RTC backstop ", lp_by_rtc ? "fired" : "did not fire",
-          ", a character ", rxne ? "survived it: " : "did not arrive: ", byte,
-          crlf);
-    bench.verdict("an LPUART on a 32768 Hz crystal brings the part out of "
-                  "Stop 1 on a start bit - the whole reason the peripheral "
-                  "exists", lp_wuf != 0u && !lp_by_rtc);
+    tv_stop_leg();
 }
 
 // ---------------------------------------------------------------------------
@@ -4283,20 +4591,26 @@ extern "C" void USART1_IRQHandler() {
     brio::Nvic::disable(brio::Usart<1>::irq());
 }
 
-/// USART3, USART4, LPUART1 and - where the part has them - USART5 and
-/// USART6 share THIS one, the family's widest vector, which is the reason
-/// every isr() body of this stratum answers for itself alone. The NAME
-/// moves with what the header declares beside it, so the reserve's macro
-/// is what binds it: a bare spelling on the wrong board would land in
-/// Default_Handler's silent spin.
-extern "C" void BRIO_STM32G0_USART3_HANDLER() {
+/// LPUART1'S LINE, WHICH IS USUALLY SOMEBODY ELSE'S TOO: USART3, USART4
+/// and - where the part has them - USART5 and USART6 share it, which is
+/// the reason every isr() body of this stratum answers for itself alone.
+/// The NAME moves with what the header declares beside it - and on a part
+/// with no USART3 at all the LPUART has the line to itself - so the
+/// reserve's LPUART1 macro is what binds it: a bare spelling on the wrong
+/// board would land in Default_Handler's silent spin.
+extern "C" void BRIO_STM32G0_LPUART1_HANDLER() {
     // Letter v puts the whole CONSOLE on LPUART1, which arrives here and
     // not on USART2's line - the two LPUARTs of this part sit on
     // different vectors and only the second one shares the console's.
     // The task's isr() must be reached, or the byte that raised the
     // interrupt is never drained and the level re-enters for ever.
     if (lp_console_mode == 1u) {
-        (void)LpConsoleLse::isr();
+        // A CALL THROUGH A TEMPLATE, so that a board whose crystal never
+        // starts does not carry that console's two rings for a mode
+        // letter v can never put it in (a discarded `if constexpr` branch
+        // in a plain function is still odr-used, and 384 bytes of RAM is
+        // real money on an 8 K part).
+        lp_console_lse_isr();
         return;
     }
     if (lp_console_mode == 2u) {

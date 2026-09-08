@@ -202,6 +202,42 @@ SWDIO, so there is no other), uses the same judgment: the precondition is
 DRIVABILITY and not the internal pull's authority, because drivability is
 the electrical question an alternate-function output actually asks.
 
+## On the third silicon
+
+The Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003) is an **LQFP32**, and
+what changes is the BONDING and nothing else in this chapter: PA0..PA15,
+PB0..PB9, PC6, PC14, PC15 and PF2 (NRST) are pins, and PB10..PB15,
+PC0..PC5, PC7, PC13, PD0..PD3, PF0 and PF1 are not (DS12992 table 12) -
+so `gpio_port_present('D')` is TRUE on a part whose port D reaches no
+pin at all, which is why the package question belongs to a suite and
+never to the reserve. The input path behaves as on the other two dies;
+there is no UCPD here, so PA8 and PB15 carry no dead-battery Rd and
+`ucpd_dead_battery()` REFUSES rather than writing a strobe bit that does
+not exist (`ucpd_present()`, new in the reserve, is what a suite asks
+first).
+
+**A CONFIGURING VERB OPENS THE PORT'S CLOCK BEFORE ANY STORE IT MAKES,
+THE LEVEL STORE INCLUDED.** A BSRR/BRR store into a port whose
+RCC_IOPENR bit is clear is dropped in silence (5.2.17), so
+`Pin::output(bool)` opens the clock, then writes the level, then hands
+the pad over - and a pad on a port nothing else has touched comes up
+driving the level asked for. This is the board that made the rule
+measurable: its user LED is on PORT C, which no console opens, so
+`output(true)` followed by `read()` on PC6 is a test the two Nucleo-64s
+(LED on port A, opened by the console before any letter runs) can never
+fail; it reads HIGH here, and low when driven low. `test_stm32_tim`'s
+letter `a` runs that check on whatever pad the board's LED is on.
+
+**THE USER LED'S PAD IS A PAD LIKE ANY OTHER ONCE ITS PORT IS CLOCKED.**
+LD3 and its series resistor to ground load PC6, and the load is enough
+to beat the port's own 40 kOhm pull-up - so that pad is never
+PULL-WALKED - but a push-pull output still owns it: driven high it reads
+HIGH, driven low it reads low, and under a TIMER at AF2 it reads its own
+PWM back through IDR at 0/250/500/750/1000 per mille exactly, with an
+EXTI line counting the same waveform's edges. Drivability and the
+internal pull's authority are two different questions, and this pad
+answers yes to the first and no to the second.
+
 ## Not covered yet
 
 Driver gaps: the port lock (GPIOx_LCKR), the alternate-function tables

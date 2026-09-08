@@ -253,6 +253,20 @@ cannot be an output while that channel is in an on-chip-only mode) is not
 reached either: the one letter that uses `DacMode::internal_unbuffered`
 drives no pad while it holds.
 
+## On the third silicon
+
+**THERE IS NO DAC ON THE G031** (DEV_ID 0x466): 16.3's table gives the
+block to the G05x class and up, the header declares no `DAC1_BASE`, and
+`dac_present()` is false - so `Dac` cannot be named at all and
+`test_stm32_analog`'s DAC letters are compiled out there, each printing
+that fact when its letter is invoked. Two consequences elsewhere on that
+board: the suite's second analog source becomes the junction sensor
+([adc.md](adc.md)), and TIM6's line - which carries the DAC's interrupt
+where there is one - is LPTIM1's alone (the reserve's
+`BRIO_STM32G0_TIM6_HANDLER` is not even defined on a part with no TIM6,
+which is how a suite finds out at compile time rather than in a
+Default_Handler spin).
+
 ## Not covered yet
 
 **Driver gaps:**

@@ -125,11 +125,12 @@ bench suite prints that pair at boot through `DeviceIdcode::read()`
 two boards is only a finding once the die it was taken on is on the
 record.
 
-**FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT.** An app that builds for
-both boards says so in its `// build: boards = g0b1re,g071rb` line;
-what a suite cannot do there it SKIPS BY NAME, printing the reserve's own
-fact and claiming no verdict, so a smaller count is a shorter list of
-claims and never a weaker one.
+**FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT**, and the same fourteen
+on the third silicon below. An app that builds for more than one board says so
+in its `// build: boards = g0b1re,g071rb,g031k8` line; what a suite
+cannot do on a board it SKIPS BY NAME, printing the reserve's own fact
+and claiming no verdict, so a smaller count is a shorter list of claims
+and never a weaker one.
 
 | Suite | G0B1RE (E) | G071RB (F) | What skips there, and why |
 |---|---|---|---|
@@ -168,15 +169,73 @@ RM0444 22.4.25's ETRSEL list gives codes 0100, 0101 and 0110 to the
 G0B1/G0C1 sales types alone and no TIM register says so
 ([tim.md](tim.md)).
 
-The **Nucleo-G031K8** (STM32G031K8, a Nucleo-32: 64 KB single-bank flash,
-8 KB SRAM, LD3 on **PC6**, the VCP on USART2 PA2/PA3) is in house and has
-NOT had its first power-on: position `G` is reserved and waits for its
-ST-LINK serial, its LED and VCP pads verified the way the other two
-boards' were, and the LSE crystal's presence (a Nucleo-32 may not
-populate it). All three boards have their presets (`stm32g0b1re-*`,
-`stm32g071rb-*`, `stm32g031k8-*`), linker scripts, crts and
-`tools/bench.py` board types, and `blink`, `console` and `probe` build
-for all three.
+All three boards have their presets (`stm32g0b1re-*`, `stm32g071rb-*`,
+`stm32g031k8-*`), linker scripts, crts and `tools/bench.py` board types,
+and `blink`, `console` and `probe` build for all three.
+
+## The third silicon: the Nucleo-G031K8
+
+The **Nucleo-G031K8** (STM32G031K8, a Nucleo-32: **LQFP32, 64 KB
+single-bank flash, 8 KB SRAM**, LD3 on PC6, the VCP on USART2 PA2/PA3)
+sits at manifest position `G` with **nothing wired to it**. Its die
+reports **DEV_ID 0x466, REV_ID 0x1003**. Two facts of that board shape
+every suite on it and both are measured, not assumed: **its LSE crystal
+does not start** (LSEON at both drives for fifteen seconds left LSERDY
+clear), so the RTC, the tickless timebase and every wall run on **LSI at
+the rate the suite weighs at boot** - 31496 Hz on a TIM16 capture, 31400
+by the watchdog, the slowest of the three dies; and **its debug port does
+not attach**, so the ST-LINK's own mass-storage flasher is the way in
+(`tools/bench.py`'s `stlink_msd` programmer kind) and nothing there can
+be halted or read over SWD ([../bench.md](../bench.md)).
+
+**FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT**, each twice and one of the
+two from a cold flash.
+
+| Suite | E | F | G | What skips on G, and why |
+|---|---|---|---|---|
+| `test_stm32_crc` | 27 | 27 | **27** | nothing - the boards line is the whole change |
+| `test_stm32_platform` | 53 (+ `i` 26) | 53 (+ `i` 26) | **53** (+ `i` 26) | nothing; the LED moves to PC6 and LSI reads 31400 Hz |
+| `test_stm32_sleep` | 50 (+ `s` 6, `u` 6) | 50 (+ `s` 6, `u` 6) | **50** (+ `s` 6) | letter `u`: Shutdown powers the LSI down, so an RTC on LSI cannot end one ([pwr.md](pwr.md)) |
+| `test_stm32_exti` | 89 | 89 | **85** | IMR2's reset value (no second register group at all) and the user button (PC13 is not bonded) |
+| `test_stm32_rtc` | 125 (+ `w` 11, `v` 4) | 125 | **106** (+ `w` 11, `v` 4) | the crystal's own legs, RTC_REFIN (PB15 unbonded), the divided-clock calibration (an RC root cannot resolve it) and two tamper legs whose level is a board's ([rtc.md](rtc.md)) |
+| `test_stm32_lptim` | 82 | 82 | **78** | the two LSE rows and the two comparator routes |
+| `test_stm32_tickless` | 47 | 45 | **45** (+ `u` 1) | the awake-time meter, which needs TIM2's ETR taking MCO |
+| `test_stm32_clock` | 42 | 40 | **39** | letter `h` and the ETR wall's own rate: there is no wall TIM2 can count here, so the RTC's is the scale ([clock.md](clock.md)) |
+| `test_stm32_tim` | 118 | 114 | **108** | TIM4, TIM6, TIM7 and TIM15 - four instances the part has not got - and PB13..PB15, which the package does not bond |
+| `test_stm32_dma` | 69 | 65 | **62** (+ `u` 3, `w` 0) | DMA2, the console's DMA-fed rate (five channels, and the letters own all five) and the peripheral-to-peripheral leg |
+| `test_stm32_analog` | 139 | 136 | **67** | the DAC's letters and the comparators' - this part has neither block, so eight of the eighteen letters are compiled out ([adc.md](adc.md)) |
+| `test_stm32_serial` | 88 (+ y/w/v) | 83 | **77** (+ `y` 1, `v` 1, `w` 0) | USART2 is BASIC here (no kernel-clock multiplexer, no wake), LPUART1's only bonded pads are the console's, and there is no LPUART2 |
+| `test_stm32_spi` | 38 (peer) | 38 (peer) | **18** (wireless) | every letter whose instrument is a wire: SPI2's pads are not bonded and the board has no peer |
+| `test_stm32_i2c` | 54 (peer) | 54 (peer) | **28** (wireless) | the same |
+| `test_stm32_nvm`, `test_stm32_journal` | 85, 52 | - | - | one flash bank: no storage attic |
+| `test_stm32_fdcan` | 96 | - | - | no FDCAN |
+
+**64 KB AND 8 KB ARE PART OF THE DESIGN HERE.** Every image on that
+board fits with the cuts named in its own suite: the largest is
+`test_stm32_serial` at **59836 bytes of 65536**, then `test_stm32_lptim`
+50380, `test_stm32_dma` 42392 and `test_stm32_tim` 40660; the hungriest
+in RAM is `test_stm32_dma` at **6108 bytes**, which leaves the stack the
+2 KB the campaign's rule reserves for it. Two suites needed real cuts
+rather than the letters they lose anyway: `test_stm32_dma` halves its
+three memory-to-memory buffers (512 words to 256, every claim restated
+for the length that fits) and gives the console's two DMA channels back
+to the letters; `test_stm32_spi` and `test_stm32_i2c` COMPILE OUT their
+wire letters, which is what brings the first from 66 KB to 17 KB.
+
+**WHAT THE PART HAS NOT GOT**, all of it read off the header by the
+reserve: TIM4, TIM6, TIM7, TIM15, USART3..6, LPUART2, I2C3, SPI3, DMA2
+(DMA1 keeps five channels and the DMAMUX five with four generators),
+**the DAC and every comparator**, FDCAN, USB, CRS, UCPD (so PA8 and PB15
+carry no dead-battery Rd), GPIOE, the second flash bank, the EXTI's
+entire second register group, WKUP3 and WKUP5, `RCC_CCIPR_I2C2SEL` and
+`RCC_CCIPR_USART2SEL` - the last of which is what takes USART2's kernel
+clock, its FIFO and its wake with it. And what the PACKAGE does not bond
+is a separate list the SUITES own, never the reserve: PB10..PB15,
+PC0..PC5, PC7, PC13, PD0..PD3, PF0 and PF1 (GPIOD is declared by the
+header and reaches no pin at all). ONE PER-PART FACT THIS HALF ADDED TO
+THE RESERVE: `ucpd_present(n)`, probed on SYSCFG's own dead-battery
+strobe bit, so a pad that will not follow its pull can be told from one
+that never had an Rd on it.
 
 **Vector names across the boards.** The crt spells ST's own handler
 names, and a SHARED line's name changes with what shares it - USART2's

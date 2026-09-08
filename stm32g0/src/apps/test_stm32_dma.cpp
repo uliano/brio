@@ -9,13 +9,19 @@
 // meant to keep passing through every later restructuring of the code
 // under it.
 //
-// THE CONSOLE IS PART OF THE EXPERIMENT. This suite's own USART2 carries
-// a DmaTxEngine AND a DmaRxEngine (channels 6 and 7), so every verdict
-// line you are reading left the chip without the CPU touching a byte, and
-// the letter you typed to ask for it arrived the same way - harvest() in
-// the main loop is what publishes it. If either engine were broken there
-// would be no output to read and no letter to run: the suite cannot pass
-// vacuously.
+// THE CONSOLE IS PART OF THE EXPERIMENT, WHERE THERE ARE CHANNELS FOR IT.
+// This suite's own USART2 carries a DmaTxEngine AND a DmaRxEngine on
+// channels 6 and 7, so every verdict line you are reading left the chip
+// without the CPU touching a byte, and the letter you typed to ask for it
+// arrived the same way - harvest() in the main loop is what publishes it.
+// If either engine were broken there would be no output to read and no
+// letter to run: the suite cannot pass vacuously.
+//   ON A FIVE-CHANNEL PART THERE IS NO SIXTH AND SEVENTH CHANNEL. Letters
+// a..n spend channels 1..5 and the console falls back to the interrupt
+// transport (the same Uart with both engine slots empty), so letter h's
+// console half - whose claim is about an ENGINE - skips by name there and
+// its USART1 half, which is about the REQUEST LINE, runs as it does
+// everywhere.
 //
 // NOTHING TO WIRE. Five techniques do it:
 //   1. MEMORY TO MEMORY. MEM2MEM needs no peripheral at all, so the
@@ -28,7 +34,8 @@
 //      ITSELF - no wire, no converter, no host.
 //   3. A PAD READ WHILE A PERIPHERAL DRIVES IT. The input buffer stays
 //      live in alternate-function mode (7.3.1), so a duty table played
-//      into TIM2's CCR1 by DMA is read back off LD4's own pad.
+//      into a TIM2 compare register by DMA is read back off the board
+//      LED's own pad.
 //   4. A CAPTURE WITH NO PAD AT ALL. TIM16_TISEL selects LSI as TI1, so
 //      the capture unit produces a real ~32 kHz stream of timestamps for
 //      a ping-pong engine to drain.
@@ -36,8 +43,19 @@
 //      pins left in analog mode still asserts TXE, which is exactly the
 //      standing request letter h needs - and nothing leaves the die.
 //
-// THE PADS: only PA5 (LD4, TIM2_CH1 AF2) is claimed, and only by letter
-// i. PA2/PA3 are the console, PA13/PA14 the SWD, PC13 the button.
+// THE PADS: one, and only by letters i and l - the board's own LED under
+// a timer channel, read back off its own input buffer. PA5 (LD4,
+// TIM2_CH1 AF2) on the Nucleo-64s, PC6 (LD3, TIM2_CH3 AF2) on the
+// Nucleo-32. WHICH PAD CARRIES THE LED IS A BOARD FACT and no device
+// header knows it, so the app asks the one question it is allowed to
+// ask that way (one Nucleo per part on this desk, so the part IS the
+// board). PA2/PA3 are the console, PA13/PA14 the SWD.
+//
+// THE SMALL PART'S OTHER LIMIT IS ITS SRAM: 8 KB against the Nucleo-64s'
+// 36. The three long memory-to-memory blocks are therefore a quarter of
+// a kilobyte of words each there instead of half, `big_words` carries
+// the number and every letter that quotes a size prints the one it
+// actually moved.
 //
 // What is exercised, letter by letter:
 //   a  the block: what the reserve says the silicon has, the reset values
@@ -62,19 +80,20 @@
 //   k  the SYNCHRONIZATION block: a channel's requests held back until
 //      an edge on TIM14_OC, NBREQ of them let through per edge, both
 //      single polarities and BOTH, and SOFx with its interrupt
-//   l  the timer's DMA BURST engine: four registers walked off ONE
-//      update request through TIMx_DMAR, with a control that changes
+//   l  the timer's DMA BURST engine: a whole row of registers walked off
+//      ONE update request through TIMx_DMAR, with a control that changes
 //      one field of DCR and nothing else
 //   u  (outside z) tools/uart_stress.py: byte-exact streaming both ways
 //      through the engines, up to the VCP's own measured ceiling
 //   w  (outside z) the two rungs ABOVE that ceiling, for the numbers
 //      alone - no verdict rests on a rate the bridge is proven to corrupt
 //
-// build: boards = g0b1re,g071rb
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
 
+#include <type_traits>
 #include <variant>
 
 #include "kernel/event_queue.hpp"
@@ -104,15 +123,49 @@ namespace {
 
 using namespace brio;
 
-// ---- the console, engines and all ------------------------------------------
+// ---- the console, engines where there are channels for them -----------------
 constexpr UartPins console_pins{
     .tx = {'A', 2, PinFunction::af1},
     .rx = {'A', 3, PinFunction::af1},
 };
-using ConsoleTx = DmaTxEngine<1, 6>;
-using ConsoleRx = DmaRxEngine<1, 7>;
+
+/// The console's engines are DMA1's SIXTH and SEVENTH channels, which a
+/// five-channel part has not got - and letters a..n want the other five
+/// for themselves. So the slots are chosen by the reserve's own presence
+/// fact and fall back to NoDmaEngine, which is the Uart's default and
+/// its interrupt transport.
+///
+/// The CHANNEL NUMBER depends on that fact as well, for the reason the
+/// DMA2 aliases below spell out: std::conditional_t picks which type the
+/// Uart is handed, but the type-id in the branch it does not pick is
+/// still written down here, and `DmaTxEngine<1, 6>` on a part with five
+/// channels would be a static_assert waiting for someone to touch it.
+template <bool present>
+using ConsoleTxSlot =
+    std::conditional_t<present, DmaTxEngine<1, present ? uint8_t{6} : uint8_t{1}>,
+                       NoDmaEngine>;
+template <bool present>
+using ConsoleRxSlot =
+    std::conditional_t<present, DmaRxEngine<1, present ? uint8_t{7} : uint8_t{1}>,
+                       NoDmaEngine>;
+
+constexpr bool console_engines =
+    dma_channel_present(1, 6) && dma_channel_present(1, 7);
+using ConsoleTx = ConsoleTxSlot<console_engines>;
+using ConsoleRx = ConsoleRxSlot<console_engines>;
 using Serial = Uart<2, console_pins, 64, 256, ConsoleTx, ConsoleRx>;
 constexpr Serial serial;
+
+/// Which channel an engine sits on, for the boot line; -1 where the slot
+/// is empty (NoDmaEngine has no channel, and that is the whole point).
+template <class E>
+constexpr int32_t engine_channel() {
+    if constexpr (E::present) {
+        return static_cast<int32_t>(E::channel);
+    } else {
+        return -1;
+    }
+}
 
 TestBench<Serial, 20> bench;
 
@@ -142,23 +195,55 @@ using Pong = DmaPingPongEngine<1, 4, uint32_t>;
 using PongCap = DmaPingPongEngine<1, 4, uint16_t>;
 
 using T1 = Tim<1>;
-using T2 = Tim<2>;     // the payload counter, and LD4's PWM
+using T2 = Tim<2>;     // the payload counter, and the LED's PWM
 using T3 = Tim<3>;     // the pace
 using T14 = Tim<14>;   // trigger input 22 for the request generator
 using T16 = Tim<16>;   // the capture source, on LSI
-// letter m's peripheral-to-peripheral destination. The same rule as the
-// DMA2 aliases below: a timer this part may not have is reached through
-// an alias whose NUMBER depends on the reserve's fact, so nothing outside
-// a live `if constexpr` branch ever names it.
+// Letter m's peripheral-to-peripheral leg: its DESTINATION is TIM4's
+// compare register and its PACE is a basic timer's update, and a part
+// may have neither. The same rule as the DMA2 aliases above: a timer
+// this part may not have is reached through an alias whose NUMBER
+// depends on the reserve's fact, so nothing outside a live `if
+// constexpr` branch ever names it. Both aliases take the SAME parameter,
+// because the leg needs both timers or none.
 template <bool present>
 using Tim4 = Tim<present ? uint8_t{4} : uint8_t{3}>;
-using T6b = Tim<6>;    // letter m's and letter n's pacer
-using Lp1d = Lptim<1>; // letter n's alarm through a Stop, on LSE
+template <bool present>
+using Tim6 = Tim<present ? uint8_t{6} : uint8_t{3}>;
 
+// Letter n's frozen stream: TIM3's compare register is what the channel
+// reads, and the PACE is a basic timer's update where there is one and
+// TIM2's where there is not. A general-purpose timer's update event is
+// a DMA request too (21.4.4) and it rides the same APB clock a Stop
+// takes away, which is the whole of what that letter asks of a pacer -
+// so only the pacer moves, and the source stays the sixteen-bit
+// register it is on every part.
+using NSrc = Tim<3>;
+using NPace = Tim<tim_present(6) ? uint8_t{6} : uint8_t{2}>;
+
+using Lp1d = Lptim<1>; // letter n's alarm through a Stop
+
+// ---- the one pad, which is a BOARD question ---------------------------------
+// The board's own LED under a TIM2 channel, claimed by letters i and l
+// and read back off its own input buffer (7.3.1 keeps it live in
+// alternate-function mode). The Nucleo-64s carry LD4 on PA5 (TIM2_CH1
+// at AF2); the Nucleo-32 carries LD3 on PC6, which is TIM2_CH3 at AF2 -
+// DS12992 table 16 for the alternate function, table 12 for what the
+// LQFP32 bonds at all, UM2591 for the LED. NO DEVICE HEADER CAN ANSWER
+// THIS: the reserve knows peripherals and a board knows which pad it
+// soldered a diode to, so the app asks the part it was built for and
+// the build's own rule makes that the board (one Nucleo per part on
+// this desk).
+#if defined(STM32G031xx)
+constexpr PinSel led_pad{'C', 6, PinFunction::af2};   // TIM2_CH3 (DS12992 table 16)
+constexpr uint8_t led_channel = 2;                    // CH3, 0-based
+#else
 constexpr PinSel led_pad{'A', 5, PinFunction::af2};   // TIM2_CH1
-using PadLed = Pin<'A', 5>;
+constexpr uint8_t led_channel = 0;                    // CH1, 0-based
+#endif
+using PadLed = Pin<led_pad.port, led_pad.pin>;
 using LedOut = TimPad<led_pad>;
-using LedPwm = TimPwm<T2, 0, 1000>;
+using LedPwm = TimPwm<T2, led_channel, 1000>;
 
 // ---- a cycle counter, the tim suite's ---------------------------------------
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
@@ -181,10 +266,13 @@ void spin_cycles(uint32_t c) {
     }
 }
 
+/// The pad sampler reads the LED pad's OWN port, which is not the same
+/// port on every package (led_pad above).
+template <char L>
 uint16_t sample_permille(uint8_t shift, uint32_t samples) {
     uint32_t high = 0;
     for (uint32_t i = 0; i < samples; ++i) {
-        high += (Port<'A'>::in() >> shift) & 1u;
+        high += (Port<L>::in() >> shift) & 1u;
     }
     return static_cast<uint16_t>((high * 1000u + samples / 2u) / samples);
 }
@@ -195,14 +283,42 @@ uint16_t sample_permille(uint8_t shift, uint32_t samples) {
 // deleting a bare polling loop; the controller is invisible to it either
 // way.
 constexpr uint16_t block_len = 32;
+
+/// THE LONG BLOCK, and it is what this suite's SRAM footprint is. Three
+/// of them - one source and two destinations, because letter c races two
+/// channels out of one source into two - so the figure below is three
+/// quarters of the arrays here. Half a kilobyte of words on a part with
+/// 36 KB of SRAM; a quarter of that on the 8 KB part, where all of this
+/// suite's data has to fit under 6 KB with the stack in the last two.
+///
+/// WHAT THE LENGTH IS FOR, so that a smaller one is a size and not a
+/// weakened claim: letter b measures a per-word cost over it, letter c
+/// needs the race to outlast the polling loop's own start-up (64 words
+/// did not - the comment there records what that looked like), and
+/// letter n needs a block that outlives the two instructions between the
+/// enable and a WFI. A quarter of a kilobyte of words is about 1300
+/// cycles of transfer, four times the length that failed and sixty times
+/// the entry it has to outlive.
+///
+/// AND IT IS THE BUDGET'S LAST WORD. At 256 the small part's image is
+/// 6108 bytes of data and bss, which leaves 2084 for the stack of an 8 KB
+/// SRAM - and the linker says nothing when that number goes down, so an
+/// edit that adds an array here has to check it (arm-none-eabi-size on
+/// the .elf: data + bss, against 8192 less the stack the suite wants).
+#if defined(STM32G031xx)
+constexpr uint16_t big_words = 256;
+#else
+constexpr uint16_t big_words = 512;
+#endif
+
 volatile uint32_t src_words[64];
 volatile uint32_t dst_words[64];
 volatile uint8_t src_bytes[64];
 volatile uint8_t dst_bytes[64];
 volatile uint16_t dst_halves[64];
-volatile uint32_t big_src[512];
-volatile uint32_t big_dst[512];
-volatile uint32_t big_dst2[512];
+volatile uint32_t big_src[big_words];
+volatile uint32_t big_dst[big_words];
+volatile uint32_t big_dst2[big_words];
 volatile uint32_t pong_a[block_len];
 volatile uint32_t pong_b[block_len];
 volatile uint16_t cap_a[block_len];
@@ -342,6 +458,8 @@ int32_t dma2_first_irq() {
 /// 11.3.2's map continues straight through the second controller: its
 /// first multiplexer channel is DMA1's channel COUNT. A part with one
 /// controller has nothing to say and says so by leaving the claim alone.
+/// (`Dma<1>::channels` is 7 on the G0B1 and G071 classes and 5 on the
+/// G031's, so this arithmetic is the map and not the numbers.)
 template <bool present = dma_present(2)>
 bool dma2_mux_numbering() {
     if constexpr (present) {
@@ -358,19 +476,31 @@ void ta_block() {
           dma2_channels_seen(),
           "; DMAMUX channels ", DmaMux::channels, ", request generators ",
           DmaMux::generators, crlf);
+    // THE COUNT ITSELF IS NOT THE CLAIM, because it is the part's:
+    // table 54 gives DMA1 seven channels on the G0B1 and G071 classes
+    // and five on the G031's, and the line above prints which. What IS
+    // one, on every part of the family, is that the two halves of the
+    // geometry AGREE - the multiplexer's channel count is derived from
+    // DMAMUX1_ChannelN_BASE and the controllers' from DMA1_ChannelN_BASE
+    // and DMA2_ChannelN_BASE, three different families of header symbol
+    // that must come out to one number - that a second controller, where
+    // there is one, has five, and that every part has four generators.
     bench.verdict("the reserve reads this part's geometry off the device "
-                  "header: seven channels on DMA1, five more on a second "
-                  "controller where the part has one, one multiplexer channel "
-                  "per channel of both, and four generators",
-                  Dma<1>::channels == 7u &&
+                  "header, and its halves agree: one multiplexer channel per "
+                  "channel of every controller the part has, five channels on "
+                  "a second controller where there is one, and four request "
+                  "generators on every part of the family",
+                  Dma<1>::channels >= 5u &&
                       dma2_channels_seen() == (dma_present(2) ? 5u : 0u) &&
-                      DmaMux::channels == 7u + dma2_channels_seen() &&
+                      DmaMux::channels == Dma<1>::channels + dma2_channels_seen() &&
                       DmaMux::generators == 4u);
 
-    bench.verdict("11.3.2's hardwired map: DMAMUX channels 0..6 are DMA1's "
-                  "1..7, and where a second controller exists 7..11 are "
-                  "DMA2's 1..5",
-                  ChA::mux_channel == 0u && DmaChannel<1, 7>::mux_channel == 6u &&
+    bench.verdict("11.3.2's hardwired map: DMAMUX channels 0..n-1 are DMA1's "
+                  "1..n, and where a second controller exists the five above "
+                  "them are DMA2's 1..5",
+                  ChA::mux_channel == 0u &&
+                      DmaChannel<1, dma_channels(1)>::mux_channel ==
+                          dma_channels(1) - 1u &&
                       dma2_mux_numbering());
 
     print(serial, "  vectors: ch1 ", static_cast<int32_t>(ChA::irq()), ", ch2 ",
@@ -379,7 +509,7 @@ void ta_block() {
           dma2_first_irq(), " (-1 = no second controller), DMAMUX ",
           static_cast<int32_t>(dmamux_irq()), crlf);
     bench.verdict("THREE VECTORS SERVE EVERY CHANNEL (table 61): channel 1 "
-                  "alone, 2 and 3 together, and ONE line for DMA1's 4..7, "
+                  "alone, 2 and 3 together, and ONE line for DMA1's 4 and up, "
                   "every DMA2 channel the part has and the DMAMUX overrun",
                   ChA::irq() == DMA1_Channel1_IRQn && ChB::irq() == ChC::irq() &&
                       ChB::irq() == DMA1_Channel2_3_IRQn &&
@@ -572,27 +702,31 @@ void tb_mem_to_mem() {
     bench.verdict("PINC clear turns a block into a FILL: one address read "
                   "twelve times into twelve", fill_ok);
 
-    // The throughput, at the width that costs least per byte.
-    for (uint16_t i = 0; i < 512; ++i) {
+    // The throughput, at the width that costs least per byte. The block
+    // is `big_words` long, which is what the part's SRAM allows; the
+    // per-word cost is what the verdict is about and the line prints the
+    // length it was measured over.
+    for (uint16_t i = 0; i < big_words; ++i) {
         big_src[i] = 0x5A000000u + i;
         big_dst[i] = 0;
     }
-    const uint32_t cyc = m2m_run(&big_src[0], &big_dst[0], 512, DmaWidth::word,
+    const uint32_t cyc = m2m_run(&big_src[0], &big_dst[0], big_words, DmaWidth::word,
                                  DmaWidth::word);
     bool big_ok = cyc != 0u;
-    for (uint16_t i = 0; i < 512 && big_ok; ++i) {
+    for (uint16_t i = 0; i < big_words && big_ok; ++i) {
         if (big_dst[i] != big_src[i]) {
             big_ok = false;
         }
     }
-    const uint32_t bytes = 512u * 4u;
+    const uint32_t bytes = big_words * 4u;
     const uint32_t kbs = cyc == 0u ? 0u : (bytes * (SysClock::hz / 1000u)) / cyc;
-    print(serial, "  512 words (2048 bytes) in ", cyc, " cycles = ", cyc / 512u,
-          " cycles per word, ", kbs, " kB/s at 64 MHz", crlf);
-    bench.verdict("2048 bytes cross SRAM byte-exact, and one word costs the "
-                  "two AHB accesses 10.4.3 describes and no more than five "
+    print(serial, "  ", big_words, " words (", bytes, " bytes) in ", cyc,
+          " cycles = ", cyc / big_words, " cycles per word, ", kbs,
+          " kB/s at 64 MHz", crlf);
+    bench.verdict("the whole block crosses SRAM byte-exact, and one word costs "
+                  "the two AHB accesses 10.4.3 describes and no more than five "
                   "cycles",
-                  big_ok && cyc / 512u <= 5u);
+                  big_ok && cyc / big_words <= 5u);
 
     quiet_everything();
 }
@@ -658,7 +792,7 @@ bool arm_long(volatile const void* from, volatile void* to, uint16_t count,
 }
 
 void tc_arbitration() {
-    for (uint16_t i = 0; i < 512; ++i) {
+    for (uint16_t i = 0; i < big_words; ++i) {
         big_src[i] = 0x33000000u + i;
         big_dst[i] = 0;
     }
@@ -670,11 +804,12 @@ void tc_arbitration() {
     // THE BLOCKS MUST BE LONG ENOUGH TO WATCH. The first version of this
     // letter raced 64 words: at five cycles a word both were finished
     // before the polling loop's first turn, and every reading came back
-    // a dead heat. 512 words is about 2600 cycles a channel, which a
-    // poll can see into.
+    // a dead heat. `big_words` is 512 where the SRAM allows it - about
+    // 2600 cycles a channel - and 256 on the 8 KB part, which is still
+    // four times the length that failed.
     auto race = [](DmaPriority a, DmaPriority b) {
-        (void)arm_long<ChA>(&big_src[0], &big_dst[0], 512, a);
-        (void)arm_long<ChB>(&big_src[0], &big_dst2[0], 512, b);
+        (void)arm_long<ChA>(&big_src[0], &big_dst[0], big_words, a);
+        (void)arm_long<ChB>(&big_src[0], &big_dst2[0], big_words, b);
         // Both enables in one critical section, so neither gets a head
         // start the arbiter never sees.
         uint16_t left_a = 0;
@@ -705,16 +840,16 @@ void tc_arbitration() {
     const int32_t b_high = race(DmaPriority::low, DmaPriority::very_high);
     const int32_t equal = race(DmaPriority::medium, DmaPriority::medium);
     print(serial, "  two MEM2MEM channels, lead of channel 1 over channel 2 at "
-                  "the first finish (of 512): very_high vs low ", a_high,
-          ", low vs very_high ", b_high, ", equal ", equal, crlf);
+                  "the first finish (of ", big_words, "): very_high vs low ",
+          a_high, ", low vs very_high ", b_high, ", equal ", equal, crlf);
     bench.verdict("TWO MEMORY-TO-MEMORY CHANNELS ALTERNATE ONE TRANSFER EACH, "
                   "and the software priority does not enter into it - 10.4.4 "
                   "says so in a clause easy to read past (\"the arbiter "
                   "automatically alternates and grants the other "
                   "highest-priority requested channel, WHICH MAY BE OF LOWER "
                   "PRIORITY than the memory-to-memory channel\"): at the "
-                  "first finish the loser is within eight of the 512, "
-                  "whatever the two levels are",
+                  "first finish the loser is within eight of the whole "
+                  "block, whatever the two levels are",
                   a_high >= 0 && a_high <= 8 && b_high >= 0 && b_high <= 8 &&
                       equal >= 0 && equal <= 8);
     bench.verdict("and the small lead that is left is the HARDWARE tie-break: "
@@ -740,7 +875,7 @@ void tc_arbitration() {
         (void)ChB::prepare(DmaTransfer{
             .peripheral = &gen_src,
             .memory = &big_dst[0],
-            .count = 512,
+            .count = big_words,
             .config = {.direction = DmaDirection::peripheral_to_memory,
                        .peripheral_increment = false,
                        .memory_increment = true,
@@ -750,7 +885,7 @@ void tc_arbitration() {
         (void)ChC::prepare(DmaTransfer{
             .peripheral = &gen_src,
             .memory = &big_dst2[0],
-            .count = 512,
+            .count = big_words,
             .config = {.direction = DmaDirection::peripheral_to_memory,
                        .peripheral_increment = false,
                        .memory_increment = true,
@@ -797,7 +932,7 @@ void tc_arbitration() {
     const int32_t r_high = request_race(DmaPriority::very_high, DmaPriority::low);
     const int32_t r_low = request_race(DmaPriority::low, DmaPriority::very_high);
     print(serial, "  two OVER-REQUESTED channels, lead of channel 2 over "
-                  "channel 3 (of 512): very_high vs low ", r_high,
+                  "channel 3 (of ", big_words, "): very_high vs low ", r_high,
           ", low vs very_high ", r_low, crlf);
     if (r_high > 0 && r_low < 0) {
         bench.verdict("WITH THE REQUESTS COMING FASTER THAN THE CONTROLLER "
@@ -1328,6 +1463,102 @@ void tg_fixed_point() {
 
 // ---- h: the USART engines -----------------------------------------------------
 
+/// --- the console itself, where it has engines to be about.
+/// Every line of this suite has gone out through a DmaTxEngine and every
+/// letter came in through a DmaRxEngine ON A PART WITH SEVEN CHANNELS,
+/// so what is left to measure there is the RATE - and the two ways of
+/// feeding an engine, which is the samc21 campaign's lesson arriving on
+/// the third target. On a five-channel part the console is the interrupt
+/// transport (there is no sixth channel to give it), so the same
+/// measurement is made and PRINTED and no verdict is claimed: what the
+/// three claims below are about is an engine.
+template <bool engines = console_engines>
+void th_console_rate() {
+    auto drain = [] {
+        uint32_t spins = 20'000'000u;
+        while ((!Serial::tx_idle() || (Usart<2>::status() & UsartFlag::tc) == 0u) &&
+               spins-- != 0u) {
+        }
+    };
+    constexpr uint32_t payload = 1024;
+    uint8_t block[64];
+    for (uint32_t i = 0; i < sizeof block; ++i) {
+        block[i] = static_cast<uint8_t>('0' + (i % 10u));
+    }
+
+    // THE PREVIOUS VERDICTS MUST BE OFF THE WIRE FIRST. The first version
+    // of this leg started its stopwatch with about six hundred bytes of
+    // earlier printing still queued, and charged their time to its own
+    // kilobyte - which read as the engine running at 84 % of the wire.
+    drain();
+    uint32_t t0 = cycles_now();
+    for (uint32_t i = 0; i < payload; ++i) {
+        while (!Serial::write_byte(block[i % sizeof block])) {
+        }
+    }
+    drain();
+    const uint32_t per_byte_us = cycles_to_us(cycles_now() - t0);
+
+    drain();
+    t0 = cycles_now();
+    uint32_t queued = 0;
+    while (queued < payload) {
+        const uint32_t want = payload - queued < sizeof block ? payload - queued
+                                                              : sizeof block;
+        uint32_t done = 0;
+        while (done < want) {
+            done += Serial::write_bulk({block + done, want - done});
+        }
+        queued += want;
+    }
+    drain();
+    const uint32_t bulk_us = cycles_to_us(cycles_now() - t0);
+
+    print(serial, crlf);
+    const uint32_t per_byte_bps =
+        per_byte_us == 0u ? 0u : (payload * 1000000u) / per_byte_us;
+    const uint32_t bulk_bps = bulk_us == 0u ? 0u : (payload * 1000000u) / bulk_us;
+    print(serial, "  1024 bytes out through the console's transmitter (",
+          Serial::has_tx_engine ? "the TX engine" : "the interrupt transport",
+          "): byte by byte ", per_byte_us, " us = ", per_byte_bps,
+          " B/s, in bulk ", bulk_us, " us = ", bulk_bps,
+          " B/s, where 115200 8N1 carries 11520", crlf);
+    print(serial, "  transport bill: dma faults ", Serial::dma_faults(),
+          ", hw overruns ", Serial::hw_overruns(), ", ring overruns ",
+          Serial::rx_overruns(), ", frame ", Serial::frame_errors(), crlf);
+
+    if constexpr (engines) {
+        bench.verdict("fed in BULK the transmit engine saturates the wire: a "
+                      "kilobyte at 115200 costs what 115200 costs, and the fact "
+                      "you can READ this line is the end-to-end proof, since it "
+                      "left the chip the same way",
+                      bulk_bps > 11000u && bulk_bps < 12000u);
+        bench.verdict("AND AT THIS RATE FEEDING IT BYTE BY BYTE COSTS NOTHING - "
+                      "the samc21 campaign measured the per-byte pump losing a "
+                      "third of the wire, but it measured it at MEGABAUD: here "
+                      "the wire is five hundred times slower than the pump, the "
+                      "ring is always full when a block ends, and every block "
+                      "the engine gets is a long one. What the two feeds cost "
+                      "apart is a question for a rate this VCP may not reach "
+                      "(letter u)",
+                      per_byte_bps + 200u >= bulk_bps &&
+                          bulk_bps + 200u >= per_byte_bps);
+        bench.verdict("and nothing was dropped or abandoned on the way",
+                      Serial::dma_faults() == 0u && Serial::frame_errors() == 0u);
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: three claims about an ENGINE "
+              "saturating the wire, being fed two ways and abandoning nothing "
+              "- and this console has none. dma_channel_present(1, 6) and "
+              "(1, 7) are false: DMA1 has five channels here, letters a..n "
+              "spend all five, and USART2 therefore runs on the interrupt "
+              "transport. The two readings above are the measurement of THAT, "
+              "and the transport bill's dma faults are zero because there is "
+              "no engine to fault.",
+              crlf);
+    }
+}
+
 void th_usart_engines() {
     // --- the doctrine, on a peripheral with no pads at all. USART1 comes
     // up with TE set and TXE ALREADY STANDING, which is exactly the state
@@ -1404,77 +1635,7 @@ void th_usart_engines() {
                   "enable: with CR3.DMAT clear the same channel over the "
                   "same standing TXE moves nothing", control_left == 4u);
 
-    // --- the console itself. Every line of this suite has already gone
-    // out through a DmaTxEngine and every letter came in through a
-    // DmaRxEngine, so what is left to measure is the RATE - and the two
-    // ways of feeding an engine, which is the samc21 campaign's lesson
-    // arriving on the third target.
-    auto drain = [] {
-        uint32_t spins = 20'000'000u;
-        while ((!Serial::tx_idle() || (Usart<2>::status() & UsartFlag::tc) == 0u) &&
-               spins-- != 0u) {
-        }
-    };
-    constexpr uint32_t payload = 1024;
-    uint8_t block[64];
-    for (uint32_t i = 0; i < sizeof block; ++i) {
-        block[i] = static_cast<uint8_t>('0' + (i % 10u));
-    }
-
-    // THE PREVIOUS VERDICTS MUST BE OFF THE WIRE FIRST. The first version
-    // of this leg started its stopwatch with about six hundred bytes of
-    // earlier printing still queued, and charged their time to its own
-    // kilobyte - which read as the engine running at 84 % of the wire.
-    drain();
-    uint32_t t0 = cycles_now();
-    for (uint32_t i = 0; i < payload; ++i) {
-        while (!Serial::write_byte(block[i % sizeof block])) {
-        }
-    }
-    drain();
-    const uint32_t per_byte_us = cycles_to_us(cycles_now() - t0);
-
-    drain();
-    t0 = cycles_now();
-    uint32_t queued = 0;
-    while (queued < payload) {
-        const uint32_t want = payload - queued < sizeof block ? payload - queued
-                                                              : sizeof block;
-        uint32_t done = 0;
-        while (done < want) {
-            done += Serial::write_bulk({block + done, want - done});
-        }
-        queued += want;
-    }
-    drain();
-    const uint32_t bulk_us = cycles_to_us(cycles_now() - t0);
-
-    print(serial, crlf);
-    const uint32_t per_byte_bps =
-        per_byte_us == 0u ? 0u : (payload * 1000000u) / per_byte_us;
-    const uint32_t bulk_bps = bulk_us == 0u ? 0u : (payload * 1000000u) / bulk_us;
-    print(serial, "  1024 bytes out through the TX engine: byte by byte ",
-          per_byte_us, " us = ", per_byte_bps, " B/s, in bulk ", bulk_us,
-          " us = ", bulk_bps, " B/s, where 115200 8N1 carries 11520", crlf);
-    bench.verdict("fed in BULK the transmit engine saturates the wire: a "
-                  "kilobyte at 115200 costs what 115200 costs, and the fact "
-                  "you can READ this line is the end-to-end proof, since it "
-                  "left the chip the same way",
-                  bulk_bps > 11000u && bulk_bps < 12000u);
-    bench.verdict("AND AT THIS RATE FEEDING IT BYTE BY BYTE COSTS NOTHING - "
-                  "the samc21 campaign measured the per-byte pump losing a "
-                  "third of the wire, but it measured it at MEGABAUD: here "
-                  "the wire is five hundred times slower than the pump, the "
-                  "ring is always full when a block ends, and every block "
-                  "the engine gets is a long one. What the two feeds cost "
-                  "apart is a question for a rate this VCP may not reach "
-                  "(letter u)",
-                  per_byte_bps + 200u >= bulk_bps && bulk_bps + 200u >= per_byte_bps);
-    print(serial, "  transport bill: dma faults ", Serial::dma_faults(),
-          ", hw overruns ", Serial::hw_overruns(), ", ring overruns ",
-          Serial::rx_overruns(), ", frame ", Serial::frame_errors(), crlf);
-    bench.verdict("and nothing was dropped or abandoned on the way",
-                  Serial::dma_faults() == 0u && Serial::frame_errors() == 0u);
+    th_console_rate();
 
     quiet_everything();
 }
@@ -1483,19 +1644,22 @@ void th_usart_engines() {
 
 void ti_timer_round_trip() {
     // --- a duty table PLAYED into a PWM, read back off the pad.
-    // TIM2's update event is the request; CCR1 is where the table lands;
-    // OC1PE means each new value is taken at the next update, so the
-    // waveform never glitches mid-period.
+    // TIM2's update event is the request; the LED pad's own compare
+    // register is where the table lands (CCR1 on the Nucleo-64s, CCR3 on
+    // the Nucleo-32 - one pad, one channel, `led_channel`); OCyPE means
+    // each new value is taken at the next update, so the waveform never
+    // glitches mid-period.
     T2::init();
     LedOut::claim();
     constexpr uint16_t pwm_top = 1000;
     (void)T2::configure({.prescaler = 3, .period = pwm_top,
                          .auto_reload_preload = true});   // 16 kHz
-    (void)T2::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 0});
+    (void)T2::output_channel(led_channel,
+                             {.mode = TimOutputMode::pwm1, .compare = 0});
     T2::interrupts(T2::update_dma, true);
     T2::enable(true);
 
-    Loop::arm(T2::ccr_address(0), T2::dma_update_request());
+    Loop::arm(T2::ccr_address(led_channel), T2::dma_update_request());
     Nvic::enable(DMA1_Channel1_IRQn);
     loop_laps_seen = 0;
     const bool played = Loop::start(duty_table, 8);
@@ -1508,7 +1672,7 @@ void ti_timer_round_trip() {
     }
     const uint16_t predicted = static_cast<uint16_t>(sum / 8u);
     spin_cycles(SysClock::hz / 100u);
-    const uint16_t measured = sample_permille(PadLed::pin_number, 60000u);
+    const uint16_t measured = sample_permille<led_pad.port>(PadLed::pin_number, 60000u);
     spin_cycles(SysClock::hz / 50u);
     // BOTH COUNTERS UNDER ONE MASK. The first version read them one after
     // the other and caught a lap in between - 76 against 77, which is not
@@ -1525,8 +1689,8 @@ void ti_timer_round_trip() {
           " per mille where the table's mean is ", predicted, "; ", laps,
           " laps counted, handler calls ", seen, crlf);
     bench.verdict("A LOOP ENGINE PLAYS A TABLE INTO A LIVE PWM: the duty read "
-                  "off LD4's own pad is the table's mean within 20 per mille, "
-                  "with the CPU touching not one compare value",
+                  "off the board LED's own pad is the table's mean within 20 "
+                  "per mille, with the CPU touching not one compare value",
                   played && measured + 20u >= predicted && measured <= predicted + 20u);
     bench.verdict("and the stream is alive by the one fact that says so: "
                   "laps() moving, every lap counted by an interrupt that "
@@ -1536,10 +1700,10 @@ void ti_timer_round_trip() {
     // controller wrote is simply what stays.
     Loop::stop();
     spin_cycles(SysClock::hz / 100u);
-    const uint16_t held = sample_permille(PadLed::pin_number, 60000u);
-    const uint32_t ccr_now = T2::compare(0);
-    print(serial, "  stopped: CCR1 holds ", ccr_now, ", pad reads ", held,
-          " per mille", crlf);
+    const uint16_t held = sample_permille<led_pad.port>(PadLed::pin_number, 60000u);
+    const uint32_t ccr_now = T2::compare(led_channel);
+    print(serial, "  stopped: the pad's compare register holds ", ccr_now,
+          ", pad reads ", held, " per mille", crlf);
     bench.verdict("stopping the player leaves the peripheral at the last "
                   "value it was given - one of the table's own entries, "
                   "still on the pad",
@@ -1668,6 +1832,22 @@ public:
     static uint32_t first_bad() { return first_bad_; }
     static void expect_step(uint32_t s) { step_ = s; }
 
+    /// A STEP IS THE PACE PERIOD, WITHIN THE BUS'S OWN JITTER. The datum
+    /// is TIM2's counter READ BY THE DMA at the pacer's edge, and what
+    /// can move that read by a cycle or two is the AHB: a CPU access in
+    /// flight delays the controller's own. Where the console rides its
+    /// own DMA channels the CPU is idle through the capture and every
+    /// step is exact; where it does not - a part with five channels,
+    /// whose letters own all five - the kernel loop and the transmit
+    /// interrupt share the bus with the capture, and four samples in ten
+    /// blocks landed 2 ticks long (measured). That is not a torn block:
+    /// a torn one is off by a WHOLE PERIOD or more, which this slack
+    /// cannot hide.
+    static constexpr uint32_t step_slack = console_engines ? 0u : 8u;
+    static bool step_ok(uint32_t d) {
+        return d + step_slack >= step_ && d <= step_ + step_slack;
+    }
+
 private:
     static Status running(const Event& e) {
         return match(e,
@@ -1681,7 +1861,7 @@ private:
                 const volatile uint32_t* p = b.data.get();
                 for (uint16_t i = 1; i < b.length; ++i) {
                     const uint32_t d = p[i] - p[i - 1];
-                    if (d != step_) {
+                    if (!step_ok(d)) {
                         if (bad_ == 0u) {
                             first_bad_ = d;
                         }
@@ -1691,7 +1871,7 @@ private:
                 // The seam between blocks: with no overrun the last
                 // sample of one block and the first of the next are one
                 // pace period apart too.
-                if (have_tail_ && (p[0] - last_tail_) != step_) {
+                if (have_tail_ && !step_ok(p[0] - last_tail_)) {
                     ++seams_;
                 }
                 last_tail_ = p[b.length - 1u];
@@ -1758,10 +1938,10 @@ void tj_relay() {
                   "caller-owned blocks travelled from a DMA engine to a "
                   "subscriber as Lease::dispatch loans, inside a real "
                   "kernel", started && Consumer::blocks() >= want);
-    bench.verdict("and every sample inside every block is exactly one pace "
-                  "period after the one before it - the loan was read while "
-                  "the engine was filling the OTHER buffer, so nothing was "
-                  "torn", Consumer::bad() == 0u);
+    bench.verdict("and every sample inside every block is one pace period "
+                  "after the one before it, to the bus's own jitter - the "
+                  "loan was read while the engine was filling the OTHER "
+                  "buffer, so nothing was torn", Consumer::bad() == 0u);
     bench.verdict("the SEAMS hold too: the last sample of a block and the "
                   "first of the next are one period apart, so no block was "
                   "skipped between them", Consumer::seams() == 0u &&
@@ -1919,15 +2099,20 @@ void tk_synchronization() {
     (void)T3::configure({.prescaler = 63, .period = 1999u});   // 500 Hz
     T3::interrupts(T3::update_dma, true);
     T3::enable(true);
-    // THE VECTOR IS ALREADY ARMED AND IT IS NOT THIS LETTER'S TO ARM:
-    // the DMAMUX overrun shares the third line with DMA1's channels 4..7,
-    // which is where this suite's own console engines live. Enabling it
-    // is a no-op and DISABLING it afterwards would take the console's
-    // transmitter down with it - which is exactly what the first version
-    // of this letter did, and the board went silent mid-letter.
+    // THE VECTOR IS ARMED HERE AND NEVER DISARMED. The DMAMUX overrun
+    // shares the third line with DMA1's channels 4 and up, which is
+    // where this suite's own console engines live where the part HAS a
+    // sixth and seventh channel - so on those parts this enable is a
+    // no-op, and DISABLING it afterwards would take the console's
+    // transmitter down with it, which is exactly what the first version
+    // of this letter did and the board went silent mid-letter. On a part
+    // whose console has no engines nobody armed it at boot and the
+    // second leg below would count zero interrupts, so the letter arms
+    // what it needs instead of inheriting it.
     // TWO LEGS, and the reason is the shared vector again: the FLAG is
     // read with the interrupt off and the handler's sweep gated, because
     // a handler that clears SOFx is the thing that would hide it.
+    Nvic::enable(dmamux_irq());
     dmamux_overrun_calls = 0;
     dmamux_service = false;
     ChE::stop();
@@ -1969,9 +2154,9 @@ void tk_synchronization() {
                   "unserved sets SOFx, which CFR clears (11.6.2, 11.6.3)",
                   sof && sof_cleared);
     bench.verdict("...and SOIE puts it on the NVIC - on the third line, the "
-                  "crowded one it shares with DMA1's channels 4 to 7 and "
-                  "every DMA2 channel (table 61), which is why an application "
-                  "binding that vector is a dispatcher",
+                  "crowded one it shares with DMA1's channels 4 and up and "
+                  "every DMA2 channel the part has (table 61), which is why an "
+                  "application binding that vector is a dispatcher",
                   sof_irqs > 0u);
 
     // --- the request GENERATOR's other two polarities, which dma.md
@@ -2028,25 +2213,46 @@ void tk_synchronization() {
 // counter, which TIM2 does not implement. The table below carries a
 // zero there and says so.
 //
-// THE WITNESS IS LD4's OWN PAD, and the control is what makes it a
-// measurement. Four rows, each with CCR1 at exactly half its own ARR:
-// if all four words land every period the duty is 500 per mille at every
-// row and therefore over the whole lap. The control plays only the ARR
-// column - one word per request, the same table's periods, CCR1 left
-// where it was - and then the time-weighted duty is the sum of a fixed
-// CCR1 over the sum of the ARRs, which is a different number by a
-// factor of two and a half. One bit of DCR is all that changes between
-// the two legs.
+// AND THE WALK MUST REACH THE PAD'S OWN CHANNEL, which is why the row is
+// a word wider on the Nucleo-32: its LED is TIM2_CH3, one register past
+// CCR2, so the burst is ARR, RCR, CCR1, CCR2, CCR3 where the Nucleo-64s'
+// is ARR, RCR, CCR1, CCR2. The walk is contiguous either way - that is
+// the engine's whole nature - and what changes is the LENGTH.
+//
+// THE WITNESS IS THE BOARD LED's OWN PAD, and the control is what makes
+// it a measurement. Four rows, each with the pad's compare at exactly
+// half its own ARR: if every word of a row lands every period the duty
+// is 500 per mille at every row and therefore over the whole lap. The
+// control plays only the ARR column - one word per request, the same
+// table's periods, the pad's compare left where it was - and then the
+// time-weighted duty is the sum of a fixed compare over the sum of the
+// ARRs, which is a different number by a factor of two and a half. One
+// bit of DCR is all that changes between the two legs.
 
+#if defined(STM32G031xx)
+/// Four rows of FIVE words: ARR, the repetition counter TIM2 has not
+/// got, CCR1, CCR2 and CCR3 - the last being this package's LED channel.
+/// The periods are 1000, 2000, 3000 and 4000 counts of a 16 MHz timer
+/// clock; CCR1 and CCR3 are half their own ARR and CCR2 a quarter.
+constexpr uint8_t burst_width = 5;
+uint32_t burst_rows[4 * burst_width] = {
+     999u, 0u,  500u,  250u,  500u,
+    1999u, 0u, 1000u,  500u, 1000u,
+    2999u, 0u, 1500u,  750u, 1500u,
+    3999u, 0u, 2000u, 1000u, 2000u,
+};
+#else
 /// Four rows of four words: ARR, the repetition counter TIM2 has not
 /// got, CCR1 and CCR2. The periods are 1000, 2000, 3000 and 4000 counts
 /// of a 16 MHz timer clock, and each row's CCR1 is half its own ARR.
-uint32_t burst_rows[16] = {
+constexpr uint8_t burst_width = 4;
+uint32_t burst_rows[4 * burst_width] = {
      999u, 0u,  500u,  250u,
     1999u, 0u, 1000u,  500u,
     2999u, 0u, 1500u,  750u,
     3999u, 0u, 2000u, 1000u,
 };
+#endif
 /// The same four periods, alone: the control's table.
 uint32_t burst_periods[4] = {999u, 1999u, 2999u, 3999u};
 
@@ -2054,12 +2260,13 @@ void tl_timer_burst() {
     quiet_everything();
     T2::init();
     LedOut::claim();
-    // ARPE and OC1PE both on: a value written mid-period is taken at the
+    // ARPE and OCyPE both on: a value written mid-period is taken at the
     // next update, so the waveform never shows a torn row.
     (void)T2::configure({.prescaler = 3, .period = 3999u,
                          .auto_reload_preload = true});
-    (void)T2::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 2000,
-                                 .preload = true, .enable = true});
+    (void)T2::output_channel(led_channel,
+                             {.mode = TimOutputMode::pwm1, .compare = 2000,
+                              .preload = true, .enable = true});
     T2::interrupts(T2::update_dma, true);
     T2::enable(true);
 
@@ -2081,12 +2288,12 @@ void tl_timer_burst() {
                       !T2::dma_burst(TimBurstBase::arr, 0) &&
                       !T2::dma_burst(TimBurstBase::arr, 19));
 
-    // --- the burst itself: four words a period, played in a circle.
-    (void)T2::dma_burst(TimBurstBase::arr, 4);
+    // --- the burst itself: a whole row a period, played in a circle.
+    (void)T2::dma_burst(TimBurstBase::arr, burst_width);
     const bool armed = ChA::load(DmaTransfer{
         .peripheral = T2::dmar_address(),
         .memory = &burst_rows[0],
-        .count = 16,
+        .count = 4u * burst_width,
         .config = {.direction = DmaDirection::memory_to_peripheral,
                    .circular = true,
                    .peripheral_increment = false,
@@ -2096,19 +2303,20 @@ void tl_timer_burst() {
     (void)DmaMux::request(ChA::mux_channel, T2::dma_update_request());
     (void)ChA::enable(true);
     spin_cycles(SysClock::hz / 50u);        // 20 ms: thirty-odd laps
-    const uint16_t burst_duty = sample_permille(PadLed::pin_number, 60000u);
+    const uint16_t burst_duty = sample_permille<led_pad.port>(PadLed::pin_number, 60000u);
     const uint32_t arr_now = T2::period();
     const uint32_t ccr1_now = T2::compare(0);
     const uint32_t ccr2_now = T2::compare(1);
     ChA::stop();
     (void)DmaMux::release(ChA::mux_channel);
-    print(serial, "  four words a period through DMAR: LD4 reads ", burst_duty,
-          " per mille, and the three registers stopped coherent at ARR ",
-          arr_now, " CCR1 ", ccr1_now, " CCR2 ", ccr2_now, crlf);
+    print(serial, "  ", burst_width, " words a period through DMAR: the LED pad "
+          "reads ", burst_duty, " per mille, and the three registers stopped "
+          "coherent at ARR ", arr_now, " CCR1 ", ccr1_now, " CCR2 ", ccr2_now,
+          crlf);
 
     // --- the control: ONE word a period, the ARR column alone.
     (void)T2::dma_burst(TimBurstBase::arr, 1);
-    (void)T2::set_compare(0, 500);
+    (void)T2::set_compare(led_channel, 500);
     const bool armed2 = ChA::load(DmaTransfer{
         .peripheral = T2::dmar_address(),
         .memory = &burst_periods[0],
@@ -2122,20 +2330,20 @@ void tl_timer_burst() {
     (void)DmaMux::request(ChA::mux_channel, T2::dma_update_request());
     (void)ChA::enable(true);
     spin_cycles(SysClock::hz / 50u);
-    const uint16_t control_duty = sample_permille(PadLed::pin_number, 60000u);
+    const uint16_t control_duty = sample_permille<led_pad.port>(PadLed::pin_number, 60000u);
     ChA::stop();
     (void)DmaMux::release(ChA::mux_channel);
     T2::dma_burst_off();
-    print(serial, "  the control - the same four periods with CCR1 left at "
-          "500 - reads ", control_duty, " per mille, where the time-weighted "
-          "prediction is 4 x 500 / 10000 = 200", crlf);
+    print(serial, "  the control - the same four periods with the pad's own "
+          "compare left at 500 - reads ", control_duty, " per mille, where the "
+          "time-weighted prediction is 4 x 500 / 10000 = 200", crlf);
 
     bench.verdict("THE BURST ENGINE REWRITES A WHOLE WAVEFORM OFF ONE "
-                  "REQUEST, which is tim.md's own first gap line: with CCR1 "
-                  "at half of its own ARR in every row the pad reads 500 per "
-                  "mille whatever the period is doing, where the SAME periods "
-                  "with CCR1 left alone read 200 - and the only difference "
-                  "between the two legs is DCR's length field",
+                  "REQUEST, which is tim.md's own first gap line: with the "
+                  "pad's compare at half of its own ARR in every row the pad "
+                  "reads 500 per mille whatever the period is doing, where the "
+                  "SAME periods with that compare left alone read 200 - and the "
+                  "only difference between the two legs is DCR's length field",
                   armed && armed2 && burst_duty > 470u && burst_duty < 530u &&
                       control_duty > 170u && control_duty < 230u);
     bench.verdict("...and the three registers a burst walked are COHERENT "
@@ -2144,11 +2352,11 @@ void tl_timer_burst() {
                   "words had landed anywhere but in the order 21.4.19 says",
                   ccr1_now == (arr_now + 1u) / 2u &&
                       ccr2_now == (arr_now + 1u) / 4u);
-    print(serial, "  and the map's HOLE is why the table is four words wide "
-          "and not three: DBA is a word offset from TIMx_CR1, so the walk "
-          "from ARR reaches CCR1 only through offset 12 - the repetition "
-          "counter, which TIM2 has not got. The row carries a zero there "
-          "and the write goes nowhere", crlf);
+    print(serial, "  and the map's HOLE is why a row that ends at CCR2 is "
+          "four words wide and not three: DBA is a word offset from TIMx_CR1, "
+          "so the walk from ARR reaches CCR1 only through offset 12 - the "
+          "repetition counter, which TIM2 has not got. The row carries a zero "
+          "there and the write goes nowhere", crlf);
 
     LedOut::release();
     T2::release();
@@ -2386,11 +2594,13 @@ void banner() {
 // =============================================================================
 //
 // DMA1 is fully spoken for by this suite: channels 1..5 carry the
-// letters above and 6 and 7 ARE the console's own transmit and receive
-// engines, so every one of the seven has moved bytes. DMA2's five have
-// not: only channel 1 has ever run, in letter c's last leg. This letter
-// runs all five at all three widths, which is what the doc's line
-// "the widths on DMA2" asks for.
+// letters above and, where the controller has a sixth and a seventh,
+// they ARE the console's own transmit and receive engines - so every
+// channel the part has has moved bytes. DMA2's five have not: only
+// channel 1 has ever run, in letter c's last leg. This letter runs all
+// five at all three widths, which is what the doc's line "the widths on
+// DMA2" asks for - and on a part with one controller it says so and
+// claims nothing.
 
 /// One MEM2MEM block on an arbitrary channel, polled to completion.
 template <class C>
@@ -2471,8 +2681,9 @@ void tm_all_of_dma2() {
         print(serial,
               "  SKIPPED, no verdict claimed: five more channels at three "
               "widths need a DMA2, which this part has not got "
-              "(dma_present(2) is false). DMA1's seven are the whole "
-              "controller here and letters a..l have moved every one of them.",
+              "(dma_present(2) is false). DMA1's ", Dma<1>::channels,
+              " are the whole controller here, and letters a..l have moved "
+              "every one of them that this suite owns.",
               crlf);
     }
 }
@@ -2480,22 +2691,28 @@ void tm_all_of_dma2() {
 // ---- 10.4.5's FIRST sense: a transfer between two PERIPHERALS ---------------
 // The request comes from ONE peripheral and neither end of the transfer
 // is that peripheral: TIM6's update paces a channel that reads TIM3's
-// counter and writes TIM4's reload register. TIM4 is the one timer of
-// this suite's set that a part may not have, so the leg carries the
-// reserve's fact in its own template parameter.
-template <bool present = tim_present(4)>
+// counter and writes TIM4's reload register. TIM4 and TIM6 are the two
+// timers of this suite's set that a part may not have, so the leg
+// carries the reserve's fact in its own template parameter - one
+// parameter for both, because the arrangement wants a fourth timer AND
+// a fifth and there is no half of it worth running.
+template <bool present = tim_present(4) && tim_present(6)>
 void tm_peripheral_to_peripheral() {
     if constexpr (!present) {
         print(serial,
               "  SKIPPED, no verdict claimed: the peripheral-to-peripheral "
-              "transfer writes TIM4's compare register, and this part has no "
-              "TIM4 (tim_present(4) is false - the reserve finds no TIM4_BASE "
-              "in the device header). Every other timer of this suite's set "
-              "is spoken for by a letter above.",
+              "transfer writes TIM4's compare register off a basic timer's "
+              "update, and this part has not got both - tim_present(4) is ",
+              tim_present(4) ? 1u : 0u, " and tim_present(6) is ",
+              tim_present(6) ? 1u : 0u,
+              " (the reserve finds no such TIMn_BASE in the device header). "
+              "Every other timer of this suite's set is spoken for by a "
+              "letter above.",
               crlf);
         return;
     } else {
     using T4b = Tim4<present>;
+    using T6b = Tim6<present>;
     // Nothing in this controller's vocabulary names the arrangement -
     // both ends are simply addresses with their increments off - which is
     // exactly what dma.md says, and this is what it looks like when it
@@ -2551,7 +2768,7 @@ void tm_peripheral_to_peripheral() {
 
 void tm_dma2_and_p2p() {
     quiet_everything();
-    for (uint16_t i = 0; i < 512; ++i) {
+    for (uint16_t i = 0; i < big_words; ++i) {
         big_src[i] = 0x5A000000u + i;
     }
     tm_all_of_dma2();
@@ -2568,10 +2785,28 @@ void tm_dma2_and_p2p() {
 // (pwr.hpp), so the two questions can be asked properly, and they have
 // opposite answers for one reason: the DMA is on HCLK, and HCLK is
 // exactly what Sleep keeps and Stop takes away.
+//
+// THE ALARM'S CLOCK IS A BOARD FACT and not a part's. What the leg needs
+// is a clock a Stop does not take away - 26.5's table: "no effect when
+// the LPTIM is clocked by LSE or LSI" - and the two Nucleo-64s carry a
+// 32.768 kHz crystal that has been claimed and measured. NO LSE IS
+// RECORDED FOR THE NUCLEO-32 (docs/bench.md: the board is not on the
+// desk and its pads are still the user manual's), so there it takes the
+// other clock of that sentence, the LSI, which needs no crystal. The
+// compare is the same 1966 counts either way - 60 ms of a 32768 Hz LSE,
+// about 61 of a nominal 32 kHz LSI - because what this leg asks of the
+// alarm is a WAKE and not a time.
+#if defined(STM32G031xx)
+constexpr LptimClock alarm_clock = LptimClock::lsi;
+#else
+constexpr LptimClock alarm_clock = LptimClock::lse;
+#endif
+static_assert(lptim_clock_runs_in_stop(alarm_clock),
+              "letter n's alarm has to survive the Stop it is the way out of");
 
 void tn_sleep_story() {
     quiet_everything();
-    for (uint16_t i = 0; i < 512; ++i) {
+    for (uint16_t i = 0; i < big_words; ++i) {
         big_src[i] = 0x7E000000u + i;
         big_dst[i] = 0;
     }
@@ -2584,7 +2819,7 @@ void tn_sleep_story() {
     const bool armed = ChA::prepare(DmaTransfer{
         .peripheral = &big_src[0],
         .memory = &big_dst[0],
-        .count = 512,
+        .count = big_words,
         .config = {.memory_to_memory = true,
                    .peripheral_increment = true,
                    .memory_increment = true,
@@ -2599,7 +2834,7 @@ void tn_sleep_story() {
     const uint32_t woke_ms = Ticker::millis() - t0;
     const bool done = ChA::flag(DmaFlag::complete) || ch1_calls != 0u;
     bool exact = done;
-    for (uint16_t i = 0; i < 512u && exact; ++i) {
+    for (uint16_t i = 0; i < big_words && exact; ++i) {
         if (big_dst[i] != big_src[i]) {
             exact = false;
         }
@@ -2614,21 +2849,22 @@ void tn_sleep_story() {
                   armed && exact && ch1_calls != 0u);
 
     // ---- STOP: the transfer is FROZEN and resumes -------------------------
-    // The pacer is TIM6, which stops with the bus; the alarm is LPTIM1 on
-    // LSE, which does not (lptim.md). CNDTR is read on both sides of the
-    // Stop, and the wall clock the RTC keeps says how long the board was
-    // in it.
-    for (uint16_t i = 0; i < 512; ++i) {
+    // The pacer stops with the bus (NPace: a basic timer where there is
+    // one, TIM2 where there is not - both ride the APB clock a Stop takes
+    // away); the alarm is LPTIM1 on a low-speed clock, which does not
+    // (lptim.md). CNDTR is read on both sides of the Stop, and the wall
+    // clock the RTC keeps says how long the board was in it.
+    for (uint16_t i = 0; i < big_words; ++i) {
         big_dst[i] = 0;
     }
-    T3::bus_clock(true);
-    T6b::bus_clock(true);
+    NSrc::bus_clock(true);
+    NPace::bus_clock(true);
     const bool paced =
-        T3::configure({.prescaler = 0, .period = 0xFFFFu}) &&
-        T6b::configure({.prescaler = 63, .period = 99});   // 10 kHz
-    T3::enable(true);
+        NSrc::configure({.prescaler = 0, .period = 0xFFFFu}) &&
+        NPace::configure({.prescaler = 63, .period = 99});   // 10 kHz
+    NSrc::enable(true);
     const bool armed2 = ChA::prepare(DmaTransfer{
-        .peripheral = T3::ccr_address(0),
+        .peripheral = NSrc::ccr_address(0),
         .memory = &big_dst[0],
         .count = 400,
         .config = {.direction = DmaDirection::peripheral_to_memory,
@@ -2637,27 +2873,33 @@ void tn_sleep_story() {
                    .peripheral_width = DmaWidth::half,
                    .memory_width = DmaWidth::half}});
     const bool routed2 =
-        DmaMux::request(ChA::mux_channel, T6b::dma_update_request());
-    T6b::interrupts(T6b::update_dma, true);
+        DmaMux::request(ChA::mux_channel, NPace::dma_update_request());
+    NPace::interrupts(NPace::update_dma, true);
 
-    // The alarm: LPTIM1 on LSE, a compare match 60 ms out, its EXTI line
-    // open so it leaves Stop.
+    // The alarm: LPTIM1 on the low-speed clock this board has, a compare
+    // match 60 ms out, its EXTI line open so it leaves Stop.
+    if constexpr (alarm_clock == LptimClock::lsi) {
+        // 5.4.24: nobody else asks for the LSI on this letter's path, so
+        // the alarm starts the oscillator it is about to count.
+        Rcc::lsi_enable(true);
+        (void)Rcc::lsi_wait_ready();
+    }
     Lp1d::init();
-    Lp1d::kernel_clock(LptimClock::lse);
+    Lp1d::kernel_clock(alarm_clock);
     const bool lp = Lp1d::configure({.prescaler = LptimPrescaler::div1}) &&
                     Lp1d::interrupts(LptimFlag::cmpm, true);
     Pwr::bus_clock(true);
     Lp1d::enable();
     (void)Lp1d::set_arr(0xFFFF);
     (void)Lp1d::wait_arr_ok();
-    (void)Lp1d::set_cmp(1966);   // 60 ms of a 32768 Hz LSE
+    (void)Lp1d::set_cmp(1966);   // 60 ms of a 32768 Hz LSE, 61 of a 32 kHz LSI
     (void)Lp1d::wait_cmp_ok();
     (void)Lp1d::wake_line(true);
     Nvic::enable(Lp1d::irq());
 
     drain_console();
     (void)ChA::enable(true);
-    T6b::enable(true);
+    NPace::enable(true);
     (void)delay_us(clock, 900);            // let a few requests land
     const uint16_t before = ChA::count();
     (void)Lp1d::start_continuous();
@@ -2666,16 +2908,17 @@ void tn_sleep_story() {
     const uint16_t after = ChA::count();
     (void)delay_us(clock, 900);
     const uint16_t later = ChA::count();
-    T6b::enable(false);
-    T6b::interrupts(T6b::update_dma, false);
+    NPace::enable(false);
+    NPace::interrupts(NPace::update_dma, false);
     ChA::stop();
     Lp1d::release();
     Nvic::disable(Lp1d::irq());
-    T3::release();
-    T6b::release();
-    print(serial, "  Stop 1: CNDTR ", before, " before, ", after,
-          " on the wake, ", later, " a millisecond later; LPTIM wakes ",
-          lptim_calls, crlf);
+    NSrc::release();
+    NPace::release();
+    print(serial, "  Stop 1 with the alarm on ",
+          alarm_clock == LptimClock::lse ? "LSE" : "LSI", ": CNDTR ", before,
+          " before, ", after, " on the wake, ", later,
+          " a millisecond later; LPTIM wakes ", lptim_calls, crlf);
     bench.verdict("and a channel is FROZEN by a Stop, not broken by it: not "
                   "one request was served while HCLK was down, and the very "
                   "same block goes on afterwards",
@@ -2771,11 +3014,13 @@ extern "C" void BRIO_STM32G0_DMA1_CH4_UP_HANDLER() {
     }
 }
 
-/// LPTIM1 shares its vector with TIM6 and the DAC (table 61). Letter n
+/// LPTIM1 shares its vector with TIM6 and the DAC where the part has
+/// them, and has one of its own where it has not (table 61) - which is
+/// why the NAME comes from the reserve and not from this file. Letter n
 /// arms it as the one alarm that survives a Stop, and a wake with no
 /// handler bound would land in Default_Handler and never come back -
 /// which is exactly what the first version of that letter did.
-extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
+extern "C" void BRIO_STM32G0_LPTIM1_HANDLER() {
     (void)Lp1d::clear_flags(LptimFlag::all);
     lptim_calls = lptim_calls + 1u;
 }
@@ -2834,8 +3079,11 @@ int main() {
               " REV_ID ", brio::hex(idcode.rev_id), brio::crlf);
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL64" : "FAILED",
                     " tick=", tick_ok ? "SysTick" : "FAILED",
-                    " console engines: TX ch", static_cast<uint32_t>(ConsoleTx::channel),
-                    " RX ch", static_cast<uint32_t>(ConsoleRx::channel), brio::crlf);
+                    " console engines: TX ch", engine_channel<ConsoleTx>(),
+                    " RX ch", engine_channel<ConsoleRx>(),
+                    " (-1 = none: this part's DMA1 has ",
+                    brio::Dma<1>::channels, " channels and the letters own ",
+                    "five of them)", brio::crlf);
         banner();
         bench.prompt();
     }

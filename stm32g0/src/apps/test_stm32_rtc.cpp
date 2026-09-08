@@ -72,7 +72,7 @@
 //          python3 tools/bench.py run E v --app test_stm32_rtc
 //                  --expect="pass," --timeout 200
 //
-// build: boards = g0b1re,g071rb
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -1293,10 +1293,28 @@ void ti_calibration() {
         const uint32_t fswing = ppm_off(*fslow, *ffast);
         print(serial, "  the same two settings on RTCCLK/16: ", *fslow,
               " and ", *ffast, " ticks, a swing of ", fswing, " ppm", crlf);
-        bench.verdict("THE SMOOTH CALIBRATION DOES NOT REACH THE DIVIDED "
-                      "RTCCLK WAKE-UP CLOCKS - it masks pulses into the "
-                      "prescalers, so ck_spre moves and RTCCLK/16 does not",
-                      fswing < swing_ppm / 3u);
+        // AND THIS ONE NEEDS A ROOT THAT HOLDS STILL. The claim is that a
+        // number is SMALL, so the instrument's own noise has to be
+        // smaller: the two windows are thirty seconds apart, and an LSI
+        // wanders by hundreds of ppm in that time (letter c prints the
+        // spread of its intervals), which is the size of the effect
+        // itself. On a crystal the wander is a ppm or two and the
+        // comparison means what it says.
+        if (source_in_force == RtcClockSource::lse) {
+            bench.verdict("THE SMOOTH CALIBRATION DOES NOT REACH THE DIVIDED "
+                          "RTCCLK WAKE-UP CLOCKS - it masks pulses into the "
+                          "prescalers, so ck_spre moves and RTCCLK/16 does not",
+                          fswing < swing_ppm / 3u);
+        } else {
+            print(serial, "  SKIPPED, no verdict claimed: reading this swing "
+                  "as ZERO needs a root that holds its rate between two "
+                  "windows thirty seconds apart, and RTCCLK here is the LSI - "
+                  "an RC oscillator whose own wander is the size of the "
+                  "effect under test. Both readings are printed above and "
+                  "nothing is claimed from them; the ck_spre half of the "
+                  "letter, which measures a swing rather than the absence of "
+                  "one, stands.", crlf);
+        }
     } else {
         bench.verdict("the divided-clock control legs were measurable", false);
     }
@@ -1387,6 +1405,19 @@ void tj_backup() {
 // not to the 1/256 s the value resolves.
 
 using PadRefin = Pin<'B', 15>;
+
+// AND THE PAD IS A PACKAGE FACT. RTC_REFIN is PB15 on every G0 of this
+// pack and NOTHING ELSE - there is no second position for it - so a
+// package that does not bond PB15 cannot build the reference at all,
+// whatever the die's registers say. The LQFP32 is such a package
+// (DS12992 table 12: its port B stops at PB9). Which device header is
+// compiled is the one question only the preprocessor can ask; the
+// reserve answers about the die and never about the plastic.
+#if defined(STM32G031xx)
+constexpr bool refin_bonded = false;
+#else
+constexpr bool refin_bonded = true;
+#endif
 
 /// A COHERENT sub-second reading, and the reason it needs one: with
 /// BYPSHAD set RTC_SSR is the live counter in the RTCCLK domain, and a
@@ -1549,6 +1580,16 @@ bool refckon(bool on) {
 }
 
 void tk_refin() {
+    if constexpr (!refin_bonded) {
+        print(serial, "  SKIPPED, no verdict claimed: RTC_REFIN is PB15 and "
+              "this package does not bond it (DS12992 table 12 - the LQFP32's "
+              "port B stops at PB9). The function has no second pad on any G0 "
+              "of this pack, so there is no reference to build and no "
+              "correction to watch: 30.3.12's whole half is out of reach on "
+              "this board, registers included, because REFCKON with nothing "
+              "on the pad is a calendar corrected by noise.", crlf);
+        return;
+    }
     // THE PAD, AND WHY IT NEEDS A WORD FIRST. PB15 is RTC_REFIN and it
     // is ALSO UCPD1_CC2, and 7.3.16 says the Type-C dead-battery Rd on
     // CC1 and CC2 is CONNECTED OUT OF A POWER-ON - some kilohms against
@@ -1835,12 +1876,31 @@ void tl_shift() {
 // m - tamper detection that does not cost the backup registers (ch. 31)
 // =============================================================================
 //
-// TAMP_IN2 is PA0 on this package and PA0 is free, which is the whole
-// reason this chapter is reachable at all: TAMP_IN1 is PC13 (the user
-// button and its own pull-up) and TAMP_IN3 is PE6, a port this package
-// does not bond. Every leg here arms with TAMPxNOERASE or TAMPxMSK, so
-// the five backup registers survive the letter and `z` stays
-// re-runnable; the letter that spends them is `w`, outside z.
+// TAMP_IN2 is PA0 on every package here and PA0 is free, which is the
+// whole reason this chapter is reachable at all: TAMP_IN3 is PE6, a port
+// no package of this desk bonds. Every leg arms with TAMPxNOERASE or
+// TAMPxMSK, so the five backup registers survive the letter and `z`
+// stays re-runnable; the letter that spends them is `w`, outside z.
+//
+// AND THE LEVEL EVERY LATENCY IS MEASURED OVER IS A PACKAGE FACT. A
+// filtered detector times its sample train from the arming (below), so
+// what it needs is a pad standing dependably at the active level. On a
+// package that bonds PC13, TAMP_IN1 IS the user button's pad and the
+// board's own pull-up holds it high with nothing of the chip's driving
+// it - the best stimulus this desk has, and two legs below prove it is
+// really that. The LQFP32 bonds no PC13 (DS12992 table 12) and its
+// TAMP_IN1 is PA4, which nothing outside holds; there the level comes
+// from the TAMP block's OWN PRECHARGE instead - 31.3.4's pull-up,
+// applied before every sample, which is a documented stimulus rather
+// than a guess - and the two legs that prove a BOARD holds the pad skip
+// by name, because on that package no board does.
+#if defined(STM32G031xx)
+constexpr bool tamper_level_is_board = false;
+constexpr bool tamper_level_precharge = true;
+#else
+constexpr bool tamper_level_is_board = true;
+constexpr bool tamper_level_precharge = false;
+#endif
 
 using PadTamper = Pin<'A', 0>;
 constexpr uint8_t tamper_index = 2;
@@ -1967,27 +2027,56 @@ void tm_tamper() {
                       driven_free && still_output && ok);
     }
 
-    // ---- THE INSTRUMENT: a pad the BOARD holds at a known level ------------
-    // TAMP_IN1 is PC13, which carries the user button and its external
-    // pull-up - the one tamper input on this desk whose level does not
-    // depend on anything the chip stopped driving. Two legs prove it is
-    // really that pad and really high: an ACTIVE-HIGH detector fires,
-    // and an ACTIVE-LOW one with the block's own precharge DISABLED
-    // does not, where a floating pad would have drifted down and fired.
-    const uint32_t high_fires =
-        arm_latency(1, TamperFilter::samples2, TamperSampling::div256,
-                    TamperTrigger::high_level_or_falling_edge, false, false,
-                    false, false, 1000, ok);
-    bench.verdict("TAMP_IN1 reads HIGH: an active-high detector fires over it",
-                  ok && high_fires != 0u);
-    const uint32_t low_quiet =
-        arm_latency(1, TamperFilter::samples8, TamperSampling::div256,
-                    TamperTrigger::low_level_or_rising_edge, false, false,
-                    false, false, 2000, ok);
-    bench.verdict("and an active-LOW one stays quiet for two seconds with the "
-                  "precharge OFF - so the level is the BOARD's pull-up on "
-                  "PC13 and not a floating node's drift",
-                  ok && low_quiet == 0u);
+    // ---- THE INSTRUMENT: a pad standing at a known ACTIVE level ------------
+    // On a package that bonds PC13, TAMP_IN1 carries the user button and
+    // its external pull-up - the one tamper input on this desk whose
+    // level does not depend on anything the chip stopped driving - and
+    // two legs prove it is really that pad and really high: an
+    // ACTIVE-HIGH detector fires, and an ACTIVE-LOW one with the block's
+    // own precharge DISABLED does not, where a floating pad would have
+    // drifted down and fired. On a package that does not bond it those
+    // two legs have no subject, and the level below comes from the
+    // precharge instead.
+    if constexpr (tamper_level_is_board) {
+        const uint32_t high_fires =
+            arm_latency(1, TamperFilter::samples2, TamperSampling::div256,
+                        TamperTrigger::high_level_or_falling_edge, false, false,
+                        false, false, 1000, ok);
+        bench.verdict("TAMP_IN1 reads HIGH: an active-high detector fires "
+                      "over it",
+                      ok && high_fires != 0u);
+        const uint32_t low_quiet =
+            arm_latency(1, TamperFilter::samples8, TamperSampling::div256,
+                        TamperTrigger::low_level_or_rising_edge, false, false,
+                        false, false, 2000, ok);
+        bench.verdict("and an active-LOW one stays quiet for two seconds with "
+                      "the precharge OFF - so the level is the BOARD's "
+                      "pull-up on PC13 and not a floating node's drift",
+                      ok && low_quiet == 0u);
+    } else {
+        // MEASURED, and printed rather than claimed: with the precharge
+        // off this pad drifts to the INACTIVE side of an active-high
+        // detector and fires an active-low one, which is what a floating
+        // node does and exactly why the legs above have no subject here.
+        const uint32_t high_bare =
+            arm_latency(1, TamperFilter::samples2, TamperSampling::div256,
+                        TamperTrigger::high_level_or_falling_edge, false, false,
+                        false, false, 1000, ok);
+        const uint32_t high_precharged =
+            arm_latency(1, TamperFilter::samples2, TamperSampling::div256,
+                        TamperTrigger::high_level_or_falling_edge, false, false,
+                        false, true, 1000, ok);
+        print(serial, "  SKIPPED, no verdict claimed: the two legs that prove "
+              "the BOARD holds a tamper input need PC13, and this package "
+              "bonds no PC13 at all (DS12992 table 12) - its TAMP_IN1 is PA4, "
+              "which nothing outside holds. Measured on it: an active-high "
+              "detector with the precharge OFF fired after ", high_bare,
+              " us (0 = not in a second, a floating node reading low), and "
+              "with 31.3.4's PRECHARGE on after ", high_precharged,
+              " us. So the precharge is what gives this package a dependable "
+              "active level, and it is what every latency below is measured "
+              "over.", crlf);
+    }
 
     // ---- EDGE mode, and what this desk can and cannot ask of it -----------
     // 31.3.4's caution says an edge detector armed over a pad ALREADY at
@@ -2010,11 +2099,29 @@ void tm_tamper() {
     print(serial, "  edge detector armed over a standing HIGH pad: ",
           edge_high, " us active-high, ", edge_low, " us active-low (0 = it "
           "did not fire in half a second)", crlf);
-    bench.verdict("31.3.4's caution DOES NOT REPRODUCE: an edge detector "
-                  "armed over a standing active level fires in neither "
-                  "polarity, so on this silicon TAMPFLT = 00 really is an "
-                  "edge detector and not a level one",
-                  edge_high == 0u && edge_low == 0u);
+    if constexpr (tamper_level_is_board) {
+        bench.verdict("31.3.4's caution DOES NOT REPRODUCE: an edge detector "
+                      "armed over a standing active level fires in neither "
+                      "polarity, so on this silicon TAMPFLT = 00 really is an "
+                      "edge detector and not a level one",
+                      edge_high == 0u && edge_low == 0u);
+    } else {
+        // AND THE STIMULUS IS THE ANSWER, which is why nothing is
+        // claimed: on a package where the level comes from the block's
+        // own precharge, ARMING THE DETECTOR IS ITSELF THE EDGE - the
+        // pad is low until the precharge pulls it up, so a rising-edge
+        // detector fires within microseconds of the arming and a
+        // falling-edge one never does. That is a real edge doing what an
+        // edge detector is for, and it says nothing at all about
+        // 31.3.4's caution, which is about a detector armed over a level
+        // that was ALREADY standing.
+        print(serial, "  SKIPPED, no verdict claimed: 31.3.4's caution needs "
+              "a detector armed over a level that was ALREADY there, and on "
+              "this package the level IS the arming - the precharge pulls a "
+              "floating pad up as the detector starts, which is a genuine "
+              "rising edge (the ", edge_high, " us above) and not the "
+              "caution's case at all.", crlf);
+    }
 
     bool kept = true;
     for (uint8_t i = 0; i < Tamp::backup_count; ++i) {
@@ -2033,7 +2140,7 @@ void tm_tamper() {
         filt_us[i] =
             arm_latency(1, filters[i], TamperSampling::div256,
                         TamperTrigger::high_level_or_falling_edge, false,
-                        false, false, false, 1500, ok);
+                        false, false, tamper_level_precharge, 1500, ok);
     }
     print(serial, "  filter 2/4/8 samples at 128 Hz: ", filt_us[0], " / ",
           filt_us[1], " / ", filt_us[2], " us against 15625 / 31250 / 62500",
@@ -2057,7 +2164,7 @@ void tm_tamper() {
         freq_us[i] =
             arm_latency(1, TamperFilter::samples2, rates[i],
                         TamperTrigger::high_level_or_falling_edge, false,
-                        false, false, false, 4000, ok);
+                        false, false, tamper_level_precharge, 4000, ok);
     }
     print(serial, "  two samples at 128/32/8 Hz: ", freq_us[0], " / ",
           freq_us[1], " / ", freq_us[2], " us", crlf);
@@ -2093,7 +2200,7 @@ void tm_tamper() {
     const uint32_t masked_lat =
         arm_latency(1, TamperFilter::samples2, TamperSampling::div256,
                     TamperTrigger::high_level_or_falling_edge, true, true,
-                    false, false, 500, ok);
+                    false, tamper_level_precharge, 500, ok);
     wait_ms(60);
     const uint32_t masked_sr = Tamp::status();
     bool masked_kept = true;
@@ -2121,7 +2228,8 @@ void tm_tamper() {
         plain_sum += arm_latency(1, TamperFilter::samples2,
                                  TamperSampling::div256,
                                  TamperTrigger::high_level_or_falling_edge,
-                                 false, false, false, false, 1000, ok);
+                                 false, false, false,
+                                 tamper_level_precharge, 1000, ok);
     }
     Rtc::timestamp_on_tamper(true);
     RtcReading now{};
@@ -2132,7 +2240,8 @@ void tm_tamper() {
         ts_sum += arm_latency(1, TamperFilter::samples2,
                               TamperSampling::div256,
                               TamperTrigger::high_level_or_falling_edge,
-                              false, false, false, false, 1000, ok);
+                              false, false, false,
+                              tamper_level_precharge, 1000, ok);
     }
     const bool tsf = Rtc::flag(RtcFlag::timestamp);
     const RtcReading stamped = Rtc::timestamp();
@@ -2173,7 +2282,7 @@ void tm_tamper() {
     Nvic::enable(Tamp::irq());
     (void)arm_latency(1, TamperFilter::samples2, TamperSampling::div256,
                       TamperTrigger::high_level_or_falling_edge, false, false,
-                      true, false, 500, ok);
+                      true, tamper_level_precharge, 500, ok);
     wait_ms(20);
     print(serial, "  TAMP interrupts ", tamp_interrupts, ", served mask ",
           hex(tamp_served), crlf);
@@ -2336,7 +2445,7 @@ void tw_erase() {
     const uint32_t lat =
         arm_latency(1, TamperFilter::samples2, TamperSampling::div256,
                     TamperTrigger::high_level_or_falling_edge, true, false,
-                    false, false, 1000, ok);
+                    false, tamper_level_precharge, 1000, ok);
     bench.verdict("armed with the register's own default - erase_backups",
                   ok);
     bool zeroed = true;

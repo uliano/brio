@@ -233,6 +233,17 @@ be gated - which is the smallest chapter's smallest possible finding, and
 worth stating because it is the only driver of this stratum that needs
 NOTHING from the reserve.
 
+## On the third silicon
+
+`test_stm32_crc` runs on the Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003)
+and scores **27/27** again, from a 12104-byte image: the third die of
+this family gives the same reset values, the same reversals and the same
+four check values as the other two, and the only line of the suite that
+had to change is its `// build: boards =` one. The DMA-fed letter reads
+16 KB of this program's own flash through DMA1's channel 1 at 36491 kB/s
+and gets the CPU-fed number and the software reference's, as everywhere
+else.
+
 ## Not covered yet
 
 Driver gaps - things chapter 14 has and this file does not:

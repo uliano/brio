@@ -167,7 +167,8 @@ below was verified at the bench, not copied from the user manual.
   HIGH under their pull-ups) - so on this desk, which is never
   power-cycled between runs, the Rd is met once after a plug-in; the
   letters spend the strobe every time because they cannot know.
-- Firmware today: `test_stm32_i2c` (stm32g0). NB from the FLASH
+- Firmware today: `test_stm32_serial` (stm32g0), the last of the
+  canaries the G031K8 half ran on this board. NB from the FLASH
   campaign on: **physical bank 2 (0x0804_0000..0x0807_FFFF) is
   STORAGE**, not code. `ld/stm32g0b1re.ld` gives the linker bank 1
   alone (256 K of `rom`), and OpenOCD's `program <elf> verify` erases
@@ -255,20 +256,88 @@ Desk position **F**. Everything below was verified at the bench.
   pin numbers are recorded for it: **every wire on this board is placed
   by GPIO NAME** and checked over SWD before any firmware.
 
-## The second silicon's other half: Nucleo-G031K8
+## The Nucleo-G031K8
 
-An **ST Nucleo-G031K8** (STM32G031K8, a Nucleo-32: 64 KB single-bank
-flash, 8 KB SRAM, LD3 on PC6, the VCP on USART2 PA2/PA3 by UM2591) is
-in house and NOT on the desk. The build knows it (`stm32g031k8-*`
-presets, `ld/stm32g031k8.ld`, `src/glue/startup_stm32g031.cpp`, the
-board type `g031k8` in `tools/bench.py`; `blink`, `console` and `probe`
-build for all three boards), and the manifest does not: position **G**
-is reserved and gets its ST-LINK serial, its VCP by-id path and its
-first `probe` at the first plug-in - the LED and VCP pads above are the
-user manual's until that blink and that banner. It too has single-bank
-flash. Which suites run on it, and which letters skip what the chip
-lacks (no DAC, no comparators, one DMA, fewer timers; no bank 2, no
-FDCAN, no USB), is the second-silicon campaign's to say.
+The G0 stratum's THIRD SILICON and the smallest part of the family on
+this desk: an ST **Nucleo-G031K8** with an STM32G031K8 - Cortex-M0+,
+**64 KB single-bank flash, 8 KB SRAM, LQFP32**, DBGMCU_IDCODE
+0x10036466 (DEV_ID 0x466 = G031/G041, REV_ID 0x1003), FLASHSIZE 0x0040
+= 64 KB. Desk position **G**. Everything below was verified at the
+bench; nothing on this board is wired to anything.
+
+- Target voltage **3.20..3.22 V**, and the shipped demo was found
+  running HSE BYPASS from the ST-LINK's MCO with the PLL on (RCC_CR
+  0x03070500) and halted at a BKPT.
+- CPU on **HSI16 through the PLL at 64 MHz**: every suite's boot line
+  reports `clk=PLL 64 MHz`, so `Clock<pll, 64 MHz>` came up on a third
+  die first try.
+- LED **LD3 on PC6** (UM2591), driven by every app that has one and
+  **seen by nobody** - there is no hand at this desk. A Nucleo-32 has
+  no user button, and PC13 is not bonded on this package at all.
+- Console: the ST-LINK's **virtual COM port on USART2, PA2 (TX) / PA3
+  (RX), AF1**, 115200 8N1, by `/dev/serial/by-id` (ST-LINK serial
+  066FFF313541483043191236, firmware V2J46M33) - VERIFIED by the
+  `console` app's banner and its `HELP` reply. Three suites move that
+  console to **LPUART1 on the same two pads at AF6**, because this
+  part's USART2 is a BASIC instance with no kernel-clock multiplexer
+  and their subject is the clock its divisor would follow.
+- **THE DEBUG PORT DOES NOT ATTACH, AND THE MASS-STORAGE FLASHER IS THE
+  WAY IN.** The SW-DP answered twice at the first plug-in and went
+  silent at a write of RCC_BDCR.LSEON with the core halted; since then
+  OpenOCD (hla_swd and dapdirect, plain and under reset, 100 kHz to
+  2 MHz) and pyOCD (attach, halt, under-reset) all get the probe's own
+  status 5, "no device connected", through two USB-port power cycles
+  that provably reset the part. Firmware polling PA13/PA14 during a
+  failed attempt SEES the probe's clock and data edges arrive, so the
+  pins are driven and the DP does not acknowledge; the cause is
+  unknown and wants a hand (the cable and port, the SWD solder
+  bridges, a second probe on PA13/PA14). Meanwhile the ST-LINK's OWN
+  flasher programs the part every time, so `tools/bench.py`'s
+  programmer kind **`stlink_msd`** drops the `.bin` on the
+  NODE_G031K8 drive: a processed file cycles the drive in about four
+  seconds, a bad one leaves FAIL.TXT, and the suite's own banner is
+  the proof the image runs. NOTHING on this position can be halted,
+  read over SWD or reset from the host - a wedged image is recovered
+  by flashing another - and DBGMCU_CR is never written here, because
+  only an OpenOCD examine sets it and none succeeds.
+- **THE LSE CRYSTAL DOES NOT START.** LSEON at the lowest drive for two
+  seconds, then LSEDRV 11 for five and ten more across reboots:
+  LSERDY never rose, so this board has no 32768 Hz reference and its
+  RTC domain runs on **LSI**, which measures **31496 Hz** on a TIM16
+  capture and 31400 Hz through the watchdog (E: 32536/32586, F:
+  32295/32339 - this is the slowest of the three dies, and inside
+  DS12992 table 46's 29.5..34 kHz). Every suite that used to lean on
+  the crystal measures the LSI at boot and prints the rate it is
+  converting with; a claim the LSI cannot resolve is printed and
+  declined. THE ONE THING THAT COSTS A LETTER: Shutdown powers the LSI
+  down (DS12992 3.7.4 names it beside the PLL, HSI16 and HSE, where
+  the Standby paragraph does not), so an RTC on LSI cannot end a
+  Shutdown - `test_stm32_sleep`'s letter `u` skips by name, and the one
+  run that entered it before the skip existed left the board silent
+  until NRST.
+- Identity: the 96-bit UID at 0x1FFF7590 reads `007f0063 34315014
+  20323346`, recorded in `tools/bench_boards.py`.
+- Its errata sheet is **ES0487** ("STM32G031x4/x6/x8 device errata"),
+  and THE DOCUMENT IS NOT IN HAND: every fetch route timed out at the
+  bench. So the erratum letters run and their outcomes are recorded as
+  MEASURED ON THIS DIE (REV_ID 0x1003) with the sheet's own verdict
+  PENDING, and no item number of ES0487 is ever cited -
+  [stm32g0/vendor/README.md](stm32g0/vendor/README.md) carries the
+  table.
+- No second flash bank, so no storage attic: `test_stm32_nvm` and
+  `test_stm32_journal` stay the G0B1RE's alone, as they do on F.
+- **FOURTEEN OF THE SEVENTEEN BENCH SUITES RUN ON THIS BOARD**, each of
+  them twice and one of the two from a cold flash; the table of scores
+  and of what skips where is in
+  [stm32g0/README.md](stm32g0/README.md)'s second-silicon section. The
+  two bus suites run WIRELESS here - this board has no link to itself
+  (SPI2's four pads are not bonded on the LQFP32) and none to a peer -
+  so their wire letters are compiled out and only their census letters
+  score.
+- Firmware today: `test_stm32_i2c`, the last of the fourteen suites
+  re-run here after the campaign's review.
+- The board number was never verified, so no MB number and no connector
+  pin numbers are recorded for it. Nothing is wired to this board.
 
 ## Multi-board bench
 

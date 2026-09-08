@@ -973,6 +973,145 @@ gets its dated home in `docs/design/` when taken.
   which it was not that morning), no flash written but the five TAMP
   backup registers rtc letter w spends by design. NEXT: the G031K8 half
   (position G).
+  **THE SECOND-SILICON CAMPAIGN'S OTHER HALF, THE G031K8, DONE 2026-09-08
+  (Opus delegation on Fable's brief, five suites sub-delegated by the
+  agent and reviewed there; re-verified BY FABLE'S OWN HAND: every gate
+  re-run, all fourteen suites flashed cold on G and run z through the
+  mass-storage path, the eleven E canaries and four more after a driver
+  fix, two driver fixes made and gated at review; and committed):
+  FOURTEEN OF THE SEVENTEEN stm32g0 SUITES RUN ON THE NUCLEO-G031K8 AT G
+  (DEV_ID 0x466 REV_ID 0x1003, LQFP32, 64 KB of flash and 8 KB of SRAM),
+  each twice by the agent with one run from a cold flash and once more
+  cold by Fable, all of them clean.** Scores against E's: crc 27/27,
+  platform 53/53 (+ i 26/26 over six reboots), sleep 50/50 (+ s 6/6, u
+  SKIPPED), exti 85 of 89, rtc 106 of 125 (+ w 11/11, v 4/4), lptim 78
+  of 82, tickless 45 of 47 (+ u 1/1), clock 39 of 42, tim 108 of 118,
+  dma 62 of 69 (+ u 3/3, w 0/0), analog 67 of 139, serial 77 of 88 (+ y
+  1/1, v 1/1, w 0/0), spi 18 and i2c 28 WIRELESS (this board has no
+  wires at all and the LQFP32 bonds neither end of a self-link, so every
+  wire letter is COMPILED OUT with its reason printed, which is also what
+  brings the spi image from 66 KB to 17). Every shortfall is a skip by
+  name on a reserve fact (TIM4/6/7/15, DMA2, the DAC, every COMP,
+  LPUART2, USART3..6, the second EXTI group, the MCO ETRSEL code) or a
+  PACKAGE fact the suites own and the reserve never will (PC13,
+  PB10..PB15, PB15's RTC_REFIN, port D reaching no pin); every G0B1 and
+  G071 letter and verdict stands. THE DESK: THE BOARD'S DEBUG PORT DOES
+  NOT ATTACH. Its SW-DP answered twice at first contact (IDCODE, UID,
+  the RCC and PWR registers, PC6 sampled) and went silent at a write of
+  RCC_BDCR.LSEON with the core halted; OpenOCD (hla_swd and dapdirect,
+  plain and under reset, 100 kHz to 2 MHz) and pyOCD (attach, halt,
+  under-reset) have had the probe's own status 5 "no device connected"
+  ever since, through three USB resets and two port power cycles that
+  provably reset the part (RCC_BDCR came back empty), while the
+  ST-LINK's OWN mass-storage flasher programs it every time (a garbage
+  file draws FAIL.TXT, a good image leaves none) and firmware polling
+  PA13/PA14 SEES the probe's clock and data edges arrive during a failed
+  attempt - the pins are driven and the DP does not acknowledge, cause
+  unknown, a hand's job (cable and port, the SWD solder bridges, a second
+  probe). So bench.py's new `stlink_msd` programmer kind drops the .bin
+  on NODE_G031K8 (a processed file cycles the drive, the suite's banner
+  is the proof) and nothing on G halts, resets or reads over SWD;
+  DBGMCU_CR is never written there. AND THE CRYSTAL DOES NOT START:
+  LSEON at both drives for fifteen seconds left LSERDY clear, so the
+  RTC, the tickless timebase and every wall run on LSI at a rate
+  MEASURED at boot (31496 Hz on a TIM16 capture, 31400 by the watchdog -
+  the slowest of the three dies), the tickless ticker STATES 32768 (the
+  crystal's own number: above the truth, so late and never early, and a
+  power of two so the tick stays a shift) and the sleep suite's timed
+  site states 32000, the measurement rounded up. FINDINGS: SHUTDOWN
+  POWERS THE LSI DOWN (DS12992 3.7.4 names it beside the PLL, HSI16 and
+  HSE where the Standby paragraph does not), so an RTC on LSI cannot end
+  a Shutdown - measured the hard way, the board silent for four minutes
+  until NRST, letter u now skipping by name while letter s (Standby,
+  where the LSI survives) scores 6/6 with SBF standing and RCC_CSR
+  empty; A THIRD IMR1 RESET VALUE (0xFFFE0000 here against the G071's
+  printed 0xFFF80000 and the G0B1's stated rule - all three exactly the
+  direct lines over the IMPLEMENTED mask); THE PRECHARGE IS ITSELF AN
+  EDGE on a package whose TAMP_IN1 (PA4) nothing outside holds, which is
+  why 31.3.4's edge caution cannot be staged there; and a BUS-JITTER
+  READING - with the console on the CPU rather than on DMA channels the
+  BlockRelay letter sees four samples in ten blocks land 2 ticks long,
+  the payload being a counter READ BY THE DMA whose access a CPU one in
+  flight delays. TWO DRIVER FIXES AT REVIEW, each gated by the md5
+  byte-identity of every image it does not reach and DECLARED here as
+  the commit's movers: (1) `Pin::output(bool)` wrote the level through
+  BSRR BEFORE the store that opens the port's clock, so on a port nothing
+  had opened the level was dropped in silence and the pad drove low -
+  found because this board's LED is on PORT C where the other two
+  boards' is on port A, opened by the console before any letter runs;
+  the verb now opens the clock first (pin.hpp), port.md states the RULE
+  (a configuring verb opens the port clock before any store, the level
+  store included) and test_stm32_tim's letter a is its measurement on
+  the first touch of port C; movers on both other presets spi_peer,
+  twi_peer and test_stm32_analog/exti/i2c/lptim/rtc/serial/spi/tim (+24
+  to +124 bytes each, lptim -4). (2) THE RESERVE'S SECOND-GROUP EXTI
+  POINTERS WERE NULL WHERE THE REGISTERS EXIST: exti_emr2() was gated on
+  EXTI_EMR2_EM_Msk, which NO header of the pack defines (CMSIS spells
+  EMR2 per line, EM32..EM36), so the event mask of lines 32..36 was a
+  null pointer on EVERY part, and exti_fpr2() on EXTI_FPR2_FPIF34_Msk
+  where the G0B1's header spells the field RPIF34 (CMSIS's own slip) -
+  both exposed by the agent's new equivalence verdict FAILING ON E (the
+  first canary: 88 of 89) and both re-gated on the headers' real names;
+  movers test_stm32_analog/dma/exti/serial on the G0B1RE and
+  analog/exti/serial on the G071RB, E's exti back to 89/89 with analog
+  139, dma 69 and serial 88 re-run after it. THE SHAPE: `// build:
+  boards = g0b1re,g071rb,g031k8`, dependent aliases for every absent
+  instance (Tim6/Tim7/Tim15/Dma2/Comp3/Lpuart2 in the Tim4<p> shape),
+  `#if defined(X_BASE)` only where a TYPE does not exist (the DAC's and
+  the comparators'), `#if defined(STM32G031xx)` only for BOARD and
+  PACKAGE facts (the LED's pad, the bonded pads, the absent crystal, the
+  RAM budget), and every vector through the reserve's
+  BRIO_STM32G0_*_HANDLER - which the bench PROVED twice: an image binding
+  TIM6_DAC_LPTIM1_IRQHandler on this part answered NOTHING at all, banner
+  included. THE CONSOLE MOVES TO LPUART1 on the same two pads at AF6 in
+  the three suites whose subject is the clock (clock, spi, i2c), because
+  this part's USART2 is a BASIC instance with no kernel-clock
+  multiplexer. SIZE AND RAM ARE PART OF THE DESIGN: the largest image is
+  serial at 59836 bytes of 65536, the hungriest dma at 6108 of RAM (the
+  stack keeps 2 K), and the two cuts that were needed are dma's three
+  memory-to-memory buffers halved to 256 words (every claim restated for
+  the length that fits, and the console handing its two DMA channels
+  back to the letters on a five-channel part) and the two bus suites'
+  wire letters compiled out. THE RESERVE grew ONE fact, `ucpd_present(n)`,
+  probed on SYSCFG's own dead-battery strobe, so a pad that will not
+  follow its pull can be told from one that never had an Rd. ES0487 -
+  the G031's own sheet, its number read off st.com's listing - WAS NOT
+  OBTAINED (five routes, an hour): every erratum letter ran and its
+  outcome is recorded as MEASURED on REV_ID 0x1003 with the sheet's
+  verdict pending, no item of it cited - the G0B1's 2.7.2 twin did not
+  reproduce, the 2.2.4 twin does not reach an RTC wake and has no USART
+  subject here, 2.9.1's twin did not reproduce unguarded, 2.10.2's never
+  fired, the prefetch, FDCAN and DAC items cannot apply. GATES BY FABLE'S
+  HAND: check_stm32g0 OK on the twelve headers, host 24/24, the three
+  presets building every app with zero warnings, the md5 gate three
+  times over - the delivered tree 11 of 22 G0B1RE and 8 of 19 G071RB
+  images byte-identical with exactly the eleven edited suites as movers
+  (test_stm32_crc, spi and i2c IDENTICAL although edited, their whole
+  G031 support folding away where the reserve says otherwise), then each
+  fix's movers named above; the E canaries at their recorded counts -
+  tickless 47, clock 42, tim 118, dma 69, analog 139, serial 88, platform
+  53, sleep 50, exti 89, rtc 125, lptim 82; F is unplugged, so its
+  images are proven by construction alone and not by a run. Judgment
+  calls accepted at review: the tickless ticker stating the crystal's
+  32768 on an LSI root; letter h of tickless restated on a TIM2 window;
+  clock's letter i band as the wall's own resolution (a per cent on a
+  crystal, three on an RC); analog's letter k dropped rather than kept by
+  half; letter r's swing floor a thirty-second on this package (a smaller
+  pad holds less charge against the sample-and-hold); the wire letters of
+  spi and i2c compiled out; sleep's letter u skipped by name. Corrected by
+  Fable: the count of analog letters compiled out (eight of eighteen: d,
+  e, o, p, k and i, m, n - not six), and the two texts that narrated the
+  pin defect instead of the rule. Docs: README.md's third silicon (the
+  table, the fit story), bench.md's G section (the first plug-in, the
+  incident with every remedy tried, the MSD path, the LSE, the end
+  state), vendor/README.md (three bench chips, the ES0487 table), port.md
+  and tim.md's rule, and an "On the third silicon" section in fifteen
+  peripheral docs. Desk: G on test_stm32_i2c with its RTC domain left at
+  BDCR 0x19 (LSEON and the high drive written, nothing answering); E on
+  test_stm32_serial with the six wires to the unplugged F still on its
+  side. For a hand at the desk: G's SWD (the cable and port, the solder
+  bridges, a second probe on PA13/PA14) and whether the MB1455's X2 is
+  fitted at all. NEXT: the harmonization rules pass (roadmap step 2).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device

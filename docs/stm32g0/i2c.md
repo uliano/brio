@@ -484,6 +484,30 @@ REACHED, this suite's ratios being 4, 1 and 0.125; and 2.11.3, 2.11.5 and
 2.11.7 need the multi-master, NOSTRETCH-target and SMBus-target roles the
 SELF-LINK carries, so they are not staged on this board.
 
+## On the third silicon
+
+`test_stm32_i2c` runs WIRELESS on the Nucleo-G031K8 (DEV_ID 0x466,
+REV_ID 0x1003) and scores **28/28** - the whole register-and-reserve
+census of letters `a` and `m`, which is what a board with no wires on it
+can ask. Nothing is connected to this board, and the thirteen self-link
+letters and five peer ones are COMPILED OUT rather than skipped at run
+time (each printing its reason), so no absent peer is ever reported as
+firmware to flash; the image is 18376 bytes.
+
+**TABLE 165's COLUMN AGAIN, one part further down.** This part's I2C2
+has no `RCC_CCIPR_I2C2SEL`, so - as on the G071 - it has no independent
+clock, no SMBus and no wake, and `smbus_probe()` says so on the SILICON:
+32.9.6 forces TIMEOUTR to zero on an instance without SMBus, and every
+instance the reserve's column grants it answers while every instance it
+does not is forced to zero. There is no I2C3 here either, so the "must
+refuse" verbs are asked of I2C2.
+
+The timing arithmetic, ES0548 2.10.1's floors (4, 10 and 20 MHz for Sm,
+Fm and Fm+) and the enable-protection rule - which on this chapter is
+REAL, unlike the SPI's - all hold as they do on the other two dies. The
+console is **LPUART1** on PA2/PA3 at AF6, for [clock.md](clock.md)'s
+reason.
+
 ## Not covered yet
 
 Driver gaps:

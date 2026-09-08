@@ -20,6 +20,8 @@ guessable from a neighbour's (verify on st.com before citing).
 | STM32G0B1xB/xC/xE datasheet | **DS13560 Rev 5** (June 2024) | symlink to `.../stm32g0b1ce.pdf` | pinout, alternate-function tables 13..24 (the AF numbers no header carries), electrical characteristics |
 | STM32G0B1xB/xC/xE device errata | **ES0548 Rev 3** (October 2022) | symlink to `.../es0548-*.pdf` | silicon revisions A (REV_ID 0x1000) and Z (0x1001) in one document with a per-item column each |
 | STM32G071x8/xB device errata | **ES0418 Rev 5** (November 2023) | symlink to `.../es0418-*.pdf` | the SECOND SILICON's (the Nucleo-G071RB at desk position F, revision B); READ AT THE BENCH - see "The second silicon's errata" below |
+| STM32G031x4/x6/x8 datasheet | **DS12992 Rev 4** | not fetched as a PDF; the TEXT was read at the bench | the THIRD SILICON's: pin assignment (table 12 - the LQFP32 column is what says which pads exist), alternate-function tables 13..17, the low-power mode paragraphs of 3.7 |
+| STM32G031x4/x6/x8 device errata | **ES0487** (number read off st.com's own listing, es0487-stm32g031x4x6x8-device-errata) | NOT OBTAINED | the third silicon's, and every route to it timed out at the bench: the erratum letters run on that board and their outcomes are recorded as MEASURED with this sheet's verdict PENDING - see "The third silicon" below |
 | Getting started with STM32G0 hardware development | AN5096 Rev 4 (December 2025) | symlink to `.../an5096-*.pdf` | decoupling, clocks, boot pins |
 
 Canonical URLs (redirect to the current revision):
@@ -55,14 +57,19 @@ ARE in the repository (Apache-2.0 allows it) so a fresh clone builds:
   mapped to plain ones, and a few symbols (micro, greater-or-equal)
   replaced by `?`. Register data untouched, the XML re-parsed.
 
-## The bench chip
+## The bench chips, all three
 
-STM32G0B1RE on an ST Nucleo-G0B1RE (MB1360). DBGMCU_IDCODE reads
-**0x10016467** over SWD: DEV_ID 0x467 = STM32G0B1/G0C1, REV_ID 0x1001
-= **silicon revision Z** (ES0548 table 2, the newer of the two). The
-flash size register (0x1FFF75E0) reads 0x200 = 512 KB; the 96-bit UID
-is recorded in `tools/bench_boards.py`. Read the IDCODE at bring-up of
-any new board - the errata columns are per revision.
+| Board | Part | IDCODE | Sheet | Read at the bench? |
+|---|---|---|---|---|
+| E, Nucleo-G0B1RE (MB1360) | STM32G0B1RE, 512 KB / 144 KB, LQFP64 | **0x10016467** (DEV_ID 0x467, REV_ID 0x1001 = **revision Z**, ES0548 table 2) | ES0548 Rev 3 | yes, in hand |
+| F, Nucleo-G071RB | STM32G071RB, 128 KB / 36 KB, LQFP64 | **0x20006460** (DEV_ID 0x460, REV_ID 0x2000 = **revision B**, ES0418 table 2) | ES0418 Rev 5 | yes, in hand |
+| G, Nucleo-G031K8 (Nucleo-32) | STM32G031K8, 64 KB / 8 KB, LQFP32 | **0x10036466** (DEV_ID 0x466, REV_ID 0x1003) | ES0487 | **NO - not obtained** |
+
+Every bench suite prints `part DEV_ID .. REV_ID ..` at boot from
+`DeviceIdcode::read()`, because a measurement that differs between two
+boards is only a finding once the die it was taken on is on the record.
+Read the IDCODE at the bring-up of any new board - the errata columns
+are per revision, and the SHEET is per part number.
 
 ## Errata ES0548: what touches the bring-up (revision Z)
 
@@ -203,3 +210,39 @@ STM32G0C1xx sales types only". No TIM register differs between the
 headers, so a timer told to take MCO on a smaller part counts nothing, in
 silence - which wedged a suite whose own microsecond wait rode that timer
 ([../tim.md](../tim.md), [../clock.md](../clock.md)).
+
+## The third silicon: STM32G031K8, and a sheet that is not in hand
+
+The Nucleo-G031K8 at desk position G reports **DEV_ID 0x466, REV_ID
+0x1003**, and its errata sheet is **ES0487** - a number read off st.com's
+own listing and nothing more, because THE DOCUMENT WAS NOT OBTAINED:
+every fetch route timed out at the bench. So the rule is simple, and it
+is visible in the suites' own text: **no item
+number of ES0487 is ever cited**. Where a letter stages a behaviour named
+by a sheet that IS in hand it says whose - "the G0B1's 2.7.2, ES0487's
+twin pending" - and what it records is what THIS DIE DID, with the
+sheet's verdict left open.
+
+What the letters found on it, all of it measured on REV_ID 0x1003:
+
+| The behaviour staged (named by the G0B1's ES0548 item) | Where a letter reaches it | What this die did | ES0487's own verdict |
+|---|---|---|---|
+| **2.7.2** the second of two adjacent compare matches | `test_stm32_tim` letter `k`, staged with a control | did NOT reproduce: the second compare raised its flag and toggled its output all eight rounds - as on the other two dies | pending |
+| **2.7.1, 2.7.3** the one-pulse trigger, output-compare clear | - | not staged: 2.7.1 needs a trigger placed at CNT = ARR of a cascaded master, and 2.7.3 needs `ocref_clr`, which on this part has no comparator to come from at all | pending |
+| **2.2.4** peripherals that request HSI16 fail to wake from Stop with HSIDIV != 0 | `test_stm32_sleep` letter `g`, with its control | the hazard predicate is quiet at HSIDIV 0 and speaks as soon as the divider moves, and an RTC wake is NOT reached by it: a Stop armed for 250 ms under HSIDIV /4 lasted its time. The USART half has no subject here - this part's USART2 cannot wake from Stop at all | pending |
+| **2.2.2** a spurious wake-up flag | `test_stm32_sleep` letter `h` | unchanged: `wakeup_pin()` clears WUFx as part of the configuration, so the flag cannot reach a caller | pending |
+| **2.9.1** consecutive initialization-mode entries corrupt the calendar | `test_stm32_rtc` letter `h`, guarded against raw | did not reproduce on the unguarded path in this run either; the guarded path never corrupts a calendar | pending |
+| **2.8.1, 2.8.2** the LPTIM's disable, and a flag cleared from thread mode | `test_stm32_lptim`, as code | unchanged and measured as code: a thread-mode clear with an interrupt enabled is refused, `disable()` IS the RCC reset | pending |
+| **2.10.1** the I2C's minimum kernel clock per speed | `test_stm32_i2c` letter `m` | unchanged: the erratum's floors (4, 10 and 20 MHz) are stricter than the datasheet's in all three modes, and the driver refuses below them | pending |
+| **2.10.2** a master's spurious BERR | `test_stm32_i2c` letter `m` | not seen: BERR swept 0 times since the host's init, and the driver counts it and never reports it - the erratum's own workaround | pending |
+| **2.12.1, 2.12.2** the SPI's BSY and its last frame | `test_stm32_spi` letter `h` | NOT REACHED: that letter's instrument is a wire, and this board has none (nor a second SPI whose pads the package bonds) | pending |
+| **2.2.10** prefetch across flash banks | - | cannot apply: one bank | pending |
+| the FDCAN and DAC items | - | cannot apply: this part has neither | pending |
+
+**AND ONE THING THE SHEET'S ABSENCE DOES NOT EXCUSE.** Two facts of this
+board were found the hard way and belong beside the errata because they
+look like them until they are named: **Shutdown powers the LSI down**
+(DS12992 3.7.4 - it is in the datasheet, not in an errata sheet, and it
+means an RTC on LSI cannot end a Shutdown), and **the debug port does not
+attach** (`docs/bench.md`, a desk fault under investigation and not a
+silicon claim).

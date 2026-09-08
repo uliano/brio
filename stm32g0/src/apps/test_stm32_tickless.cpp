@@ -59,7 +59,7 @@
 // wall (15.6 ns), the RTC's sub-second counter on the same crystal as
 // the wall a Stop cannot stop, the IWDG as the backstop of every sleep.
 //
-// build: boards = g0b1re,g071rb
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -92,19 +92,53 @@ namespace {
 
 using namespace brio;
 
-// THE TIMEBASE, and the platform on it.
-using Tb = LptimTicker<>;
+// THE TIMEBASE, and the platform on it. An LPTIM on a 32 kHz root, which
+// is the crystal where the board has one and LSI where it has not - and
+// on LSI the ticker STATES its rate, the number to state being one NOT
+// BELOW the true one (the driver's own directional rule: a tick declared
+// faster than it is makes every deadline late and none early). What is
+// stated here is the boot measurement of the die this board carries,
+// rounded UP to the next kilohertz. Which board this is, is the one
+// question only the preprocessor can ask.
+// AND THE NUMBER STATED FOR AN LSI IS 32768 - the crystal's own - for a
+// second reason beside the directional one: the tick is the count
+// SHIFTED, so a statement that is a power of two keeps the whole
+// timebase's arithmetic a shift (1024 ticks a second, millis() 1000 per
+// 1024, secs() a right shift by ten), which is what letter a judges. The
+// price is that on a die measured at 31496 Hz the tick is 4 % LONGER
+// than it says: every deadline late, none early, and the wall letters
+// below convert with the root's measured rate rather than pretending
+// otherwise.
+#if defined(STM32G031xx)
+constexpr LptimTickerConfig tb_cfg{.source = LptimTickerSource::lsi,
+                                   .lsi_hz = 32'768};
+#else
+constexpr LptimTickerConfig tb_cfg{};
+#endif
+using Tb = LptimTicker<tb_cfg>;
 using P = Stm32g0Platform<Tb>;
 static_assert(Tickless<Tb>);
-static_assert(P::ticks_per_second == 1024u);
+static_assert(P::ticks_per_second == lptim_ticker_hz(tb_cfg));
 
-// The lap witness of letter b: LPTIM2 at the crystal's own rate.
-using Witness = LptimTicker<LptimTickerConfig{.instance = 2, .shift = 0}>;
-static_assert(Witness::ticks_per_second == 32'768u);
+// The lap witness of letter b: LPTIM2 at the root's own rate, undivided.
+constexpr LptimTickerConfig witness_cfg{.instance = 2, .shift = 0,
+                                        .source = tb_cfg.source,
+                                        .lsi_hz = tb_cfg.lsi_hz};
+using Witness = LptimTicker<witness_cfg>;
+static_assert(Witness::ticks_per_second == lptim_ticker_count_hz(tb_cfg));
+/// The counter's own lap and the rate the witness counts at: a second of
+/// it is `witness_hz` counts whatever the root.
+constexpr uint32_t witness_hz = lptim_ticker_count_hz(witness_cfg);
 
-// Letter h's witness: LPTIM2 again, on LSI at the rate this die measured
-// (test_stm32_rtc letter c, a TIM16 capture: 32586 Hz), shift 5.
+// Letter h's witness: LPTIM2 again, on LSI at the rate the die under it
+// measured (test_stm32_rtc's letter c, a TIM16 capture), shift 5. That
+// is a DIE fact, and the dies of this desk differ by more than the band
+// the letter judges in, so the preprocessor picks the number.
+#if defined(STM32G031xx)
+constexpr uint32_t lsi_measured_hz = 31'496;
+#else
 constexpr uint32_t lsi_measured_hz = 32'586;
+#endif
 using LsiWitness = LptimTicker<LptimTickerConfig{
     .instance = 2, .shift = 5, .source = LptimTickerSource::lsi, .lsi_hz = lsi_measured_hz}>;
 static_assert(!LsiWitness::on_crystal && LsiWitness::ticks_per_second == (lsi_measured_hz >> 5));
@@ -148,19 +182,90 @@ bool t2_up() {
     return true;
 }
 
+// ---- THE LSI's OWN RATE, where the walls run on it -------------------------
+//
+// A crystal is 32768 Hz by construction; an LSI is an RC oscillator the
+// datasheet only bounds (table 46: 29.5..34 kHz), so a wall built on one
+// is WEIGHED before anything is timed against it. TIM16's capture channel
+// with TISEL on LSI (25.6.18's code 1) against a counter clocked from
+// PCLK is that measurement, and the estimator is the MEDIAN of a batch -
+// test_stm32_rtc's letter c owns the technique and the reason: an
+// unfiltered capture of an internal clock line errs in BOTH directions.
+using LsiMeter = TimIntervalMeter<Tim<16>, 0>;
+constexpr uint16_t lsi_meter_prescaler = 15;   ///< 250 ns a tick at 64 MHz
+
+uint32_t measure_lsi_hz() {
+    Rcc::lsi_enable(true);
+    if (!Rcc::lsi_wait_ready()) {
+        return 0;
+    }
+    Tim<16>::bus_clock(true);
+    Tim<16>::enable(false);
+    if (!LsiMeter::setup(lsi_meter_prescaler, 8) ||
+        !Tim<16>::input_select(0, Rcc::lsi_tim16_ti1_code)) {
+        return 0;
+    }
+    (void)Tim<16>::isr();
+    LsiMeter::restart();
+    static uint32_t samples[33];
+    constexpr uint16_t want = 33;
+    uint16_t got = 0;
+    for (uint32_t spin = 0; spin < 40'000'000UL && got < want; ++spin) {
+        if ((Tim<16>::flags() & LsiMeter::capture_flag) == 0u) {
+            continue;
+        }
+        Tim<16>::clear_flags(LsiMeter::capture_flag);
+        const std::optional<uint32_t> d = LsiMeter::interval();
+        if (d.has_value()) {
+            samples[got++] = *d;
+        }
+    }
+    Tim<16>::release();
+    if (got != want) {
+        return 0;
+    }
+    for (uint16_t i = 1; i < want; ++i) {
+        const uint32_t key = samples[i];
+        uint16_t j = i;
+        while (j != 0u && samples[j - 1u] > key) {
+            samples[j] = samples[j - 1u];
+            --j;
+        }
+        samples[j] = key;
+    }
+    const uint32_t median = samples[want / 2u];
+    return median != 0u ? (SysClock::hz / (lsi_meter_prescaler + 1u)) / median : 0u;
+}
+
 /// The RTC's sub-second counter at PREDIV_A 0 / PREDIV_S 32767: a 30.5 us
 /// stopwatch on the crystal that keeps counting through a Stop (the
 /// lptim suite's instrument, verbatim).
-constexpr uint32_t lse_hz = 32768;
 constexpr RtcPrescalers wall_prescalers{.async = 0, .sync = 32767};
 bool wall_ready = false;
+/// What RTCCLK really is: the crystal's 32768 where the domain runs on
+/// it, and the LSI's MEASURED rate where it does not - a nominal here
+/// would put a per-cent error on every microsecond this suite prints.
+uint32_t rtcclk_hz = 32768;
+bool wall_on_lse = false;
 
 uint32_t wall_ticks_per_second() {
     return static_cast<uint32_t>(Rtc::prescalers().sync) + 1u;
 }
 uint32_t wall_modulus() { return 60u * wall_ticks_per_second(); }
 uint32_t wall_hz() {
-    return lse_hz / (static_cast<uint32_t>(Rtc::prescalers().async) + 1u);
+    return rtcclk_hz / (static_cast<uint32_t>(Rtc::prescalers().async) + 1u);
+}
+
+/// A span the KERNEL calls `ms` is this many milliseconds OF THE WALL.
+/// The two clocks are the same 32 kHz root, so the ratio is exactly the
+/// ticker's STATEMENT over the root's true rate: one on a crystal, and
+/// four per cent on a die whose LSI measures 31496 against the 32768 the
+/// ticker states. A band written in kernel milliseconds is converted
+/// through here before it is compared with a wall reading, which is what
+/// keeps "never early" a claim about the kernel and not about the RC.
+uint32_t wall_ms_for_kernel_ms(uint32_t ms) {
+    return static_cast<uint32_t>(
+        (static_cast<uint64_t>(ms) * lptim_ticker_count_hz(tb_cfg)) / rtcclk_hz);
 }
 uint32_t wall() {
     RtcReading r{};
@@ -521,12 +626,29 @@ void ta_timebase() {
     }
     const uint32_t ticks = Tb::ticks() - k0;
     const uint32_t ms = Tb::millis() - m0;
-    print(serial, "  2 s of TIM2: ", ticks, " ticks (2048 due), millis() moved ", ms,
-          " (2000 due)", crlf);
-    bench.verdict("the timebase runs at 1024 ticks a second against the PLL's wall",
-                  within(ticks, 2028u, 2068u));
-    bench.verdict("and millis() is 1000 per 1024 ticks - shifts, no division",
-                  within(ms, 1980u, 2020u));
+    constexpr uint32_t ticks_due = 2u * P::ticks_per_second;
+    print(serial, "  2 s of TIM2: ", ticks, " ticks (", ticks_due,
+          " due by the statement), millis() moved ", ms, " (2000 due)", crlf);
+    // THE BAND IS THE ROOT'S. A crystal is 32768 Hz by construction and
+    // the only spread left is HSI16's own per cent, so the two agree to
+    // a count either way. An LSI is the rate the program STATED - at or
+    // above the true one by the directional rule - so against a real
+    // second the tick can only be SLOW, never fast, and by no more than
+    // table 46's own spread. That is the claim on such a board: never
+    // faster than it says, and inside the datasheet's band.
+    const uint32_t ticks_lo = Tb::on_crystal ? ticks_due - 20u
+                                             : ticks_due - ticks_due / 8u;
+    const uint32_t ticks_hi = Tb::on_crystal ? ticks_due + 20u : ticks_due;
+    const uint32_t ms_lo = Tb::on_crystal ? 1980u : 1750u;
+    const uint32_t ms_hi = Tb::on_crystal ? 2020u : 2000u;
+    bench.verdict("the timebase runs at the rate its configuration states, "
+                  "against a wall that is not it - to a count on a crystal, "
+                  "and on an RC root never FASTER than stated and inside "
+                  "table 46's own spread",
+                  within(ticks, ticks_lo, ticks_hi));
+    bench.verdict("and millis() is 1000 per 1024 ticks - shifts, no division "
+                  "- whatever root the counter runs on",
+                  within(ms, ms_lo, ms_hi));
 
     // The arithmetic, exact: secs()/now() from one reading.
     const uint32_t t = Tb::ticks();
@@ -582,7 +704,7 @@ void tb_lap_carry() {
     uint32_t back = 0;
     uint32_t prev = start;
     uint32_t reads = 0;
-    while (static_cast<int32_t>(Witness::ticks() - start) < static_cast<int32_t>(5u * 32768u)) {
+    while (static_cast<int32_t>(Witness::ticks() - start) < static_cast<int32_t>(5u * witness_hz)) {
         const uint32_t v = Witness::ticks();
         if (static_cast<int32_t>(v - prev) < 0) {
             ++back;
@@ -638,7 +760,7 @@ void tb_lap_carry() {
     clear_counters();
     const bool stored = L2::set_cmp(0xFFFFu) && L2::wait_cmp_ok();
     const uint32_t lap_start = Witness::ticks();
-    while (static_cast<int32_t>(Witness::ticks() - lap_start) < static_cast<int32_t>(2u * 32768u + 4000u)) {
+    while (static_cast<int32_t>(Witness::ticks() - lap_start) < static_cast<int32_t>(2u * witness_hz + 4000u)) {
         feed();
     }
     const uint32_t cmpm_at_arr = lptim_cmpm;
@@ -971,10 +1093,18 @@ void te_kernel() {
     print(serial, "  slow 250 ticks: ", s.fired, " firings, period ", s.min_us, "..", s.max_us,
           " us (", s_nom, "), in ticks ", s.min_ticks, "..", s.max_ticks, ", early ", s.early,
           crlf);
+    // HOW MANY FIRINGS ARE DUE IS THE WINDOW'S OWN ARITHMETIC and not a
+    // constant: the window is three seconds OF THE WALL, and how many
+    // kernel ticks that is depends on the root the timebase runs on -
+    // 3072 on a crystal, about 2950 on an LSI whose tick is the four per
+    // cent long its statement makes it. So the count due is the ticks
+    // the window really carried, divided by each cadence.
     bench.verdict("THREE PERIODICS THROUGH A TICKLESS KERNEL: every firing on its cadence "
                   "within a count on the wall, drift-free from the first",
-                  within(f.fired, 430u, 450u) && within(m.fired, 100u, 105u) &&
-                      within(s.fired, 12u, 13u) && within(f.max_us, f_nom - 40u, f_nom + 1100u) &&
+                  within(f.fired, kticks / 7u - 6u, kticks / 7u + 6u) &&
+                      within(m.fired, kticks / 30u - 2u, kticks / 30u + 2u) &&
+                      within(s.fired, kticks / 250u, kticks / 250u + 1u) &&
+                      within(f.max_us, f_nom - 40u, f_nom + 1100u) &&
                       within(m.max_us, m_nom - 40u, m_nom + 1100u) &&
                       within(s.max_us, s_nom - 40u, s_nom + 1100u));
     bench.verdict("NOT ONE EARLY, in three thousand milliseconds of three cadences - judged "
@@ -1162,19 +1292,25 @@ void th_lsi_witness() {
     // Two seconds of the crystal timebase: the LSI witness's ticks and
     // millis() against the statement (LSI wanders 1..2 % between runs;
     // the band says so).
-    const uint32_t k0 = Tb::ticks();
+    // TWO SECONDS OF TIM2 AND NOT OF THE KERNEL TICK: on a board whose
+    // timebase is itself an LSI, a window measured in kernel ticks is a
+    // window whose LENGTH carries the timebase's own error, and what
+    // this leg weighs is the WITNESS. TIM2 rides the PLL, i.e. HSI16's
+    // per cent, which is well inside the band below.
+    const uint32_t t0 = t2();
     const uint32_t w0 = LsiWitness::ticks();
     const uint32_t m0 = LsiWitness::millis();
-    while (Tb::ticks() - k0 < 2048u) {
+    while (t2() - t0 < 2u * t2_hz) {
         feed();
     }
     const uint32_t w_ticks = LsiWitness::ticks() - w0;
     const uint32_t w_ms = LsiWitness::millis() - m0;
     const uint32_t expected = 2u * LsiWitness::ticks_per_second;
-    print(serial, "  2 s of the crystal: the LSI witness counted ", w_ticks, " ticks (",
+    print(serial, "  2 s of TIM2: the LSI witness counted ", w_ticks, " ticks (",
           expected, " by the statement) and ", w_ms, " ms", crlf);
-    bench.verdict("its ticks and millis() follow the STATED rate within 3 % of the crystal "
-                  "- the arithmetic is exact, the number is the oscillator's",
+    bench.verdict("its ticks and millis() follow the STATED rate within 3 % of a "
+                  "wall that is not its own - the arithmetic is exact, the "
+                  "number is the oscillator's",
                   within(w_ticks, expected - expected / 33u, expected + expected / 33u) &&
                       within(w_ms, 1940u, 2060u));
 
@@ -1220,9 +1356,14 @@ void th_lsi_witness() {
           " Hz: every millisecond asked lands ", late_per_mille,
           " per mille late, never early (", LsiDefault::ticks_per_second,
           " ticks a second would be counted at ", lsi_measured_hz >> 5, ")", crlf);
+    // THE BAND IS TABLE 46'S OWN, because the number is a DIE fact and
+    // the dies differ: the ceiling over the band's floor is 34000/29500,
+    // 153 per mille, and any part of this family lands under it. What is
+    // claimed is the DIRECTION and the bound, not one die's figure.
     bench.verdict("the default over-states the rate, so a program that does not measure "
-                  "its LSI is late and never early - 4 % here",
-                  late_per_mille > 0u && late_per_mille < 60u);
+                  "its LSI is late and never early - by at most what table 46's own "
+                  "ceiling over its own floor allows",
+                  late_per_mille > 0u && late_per_mille < 160u);
 
     Nvic::disable(L2::irq());
     L2::init();
@@ -1340,7 +1481,9 @@ void ti_lap_wakes() {
                   "own interrupt (the first version parked it mid-lap: ten), the deadline "
                   "met",
                   Probe::blips == 1u && lptim_arrm == 5u && lptim_irqs == 6u &&
-                      within(to_blip, 9990u, 10'100u) && within(kernel_ticks, 10240u, 10242u));
+                      within(to_blip, wall_ms_for_kernel_ms(9990u),
+                             wall_ms_for_kernel_ms(10'100u)) &&
+                      within(kernel_ticks, 10240u, 10242u));
     bench.verdict("THE PLL IS NEVER RE-LOCKED FOR A LAP WAKE: every ARRM ran on HSISYS and "
                   "the loop went straight back to sleep (no AO, no manager round)",
                   arrm_seen == 5u && arrm_on_hsisys == 5u);
@@ -1443,9 +1586,14 @@ extern "C" void BRIO_STM32G0_USART2_HANDLER() {
     (void)Serial::isr();
 }
 
-/// LPTIM1's vector, shared with TIM6 and the DAC on this part: the
-/// timebase's body, plus the counters the letters read.
-extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
+/// LPTIM1's vector - shared with TIM6 and the DAC on the parts that have
+/// them, LPTIM1's own where they are absent, and the reserve's macro is
+/// what names it either way: the timebase's body, plus the counters the
+/// letters read. A raw G0B1 name here would leave the tick's interrupt
+/// bound to nothing on a smaller part, which is the Default_Handler spin
+/// the samc21 stratum learned to fear - and this suite MEASURED it: the
+/// G031's first run answered nothing at all, not even a banner.
+extern "C" void BRIO_STM32G0_LPTIM1_HANDLER() {
     lptim_t2_at = t2();
     lptim_cnt_at = brio::Lptim<1>::count_raw();
     lptim_isr_at = brio::Lptim<1>::status();
@@ -1466,9 +1614,10 @@ extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
     if (served == 0u) lptim_sweeps = lptim_sweeps + 1u;
 }
 
-/// LPTIM2's vector, shared with TIM7: the witness's body - the crystal
-/// one of letter b, or the LSI one of letter h.
-extern "C" void TIM7_LPTIM2_IRQHandler() {
+/// LPTIM2's vector - shared with TIM7 on the parts that have one, its
+/// own where they have not, and the reserve's macro is what names it:
+/// the witness's body, the lap one of letter b or the LSI one of h.
+extern "C" void BRIO_STM32G0_LPTIM2_HANDLER() {
     const uint32_t served = witness_mode == 1u ? LsiWitness::isr() : Witness::isr();
     lptim2_irqs = lptim2_irqs + 1u;
     if ((served & brio::LptimFlag::cmpm) != 0u) lptim_cmpm = lptim_cmpm + 1u;
@@ -1488,27 +1637,42 @@ int main() {
     brio::Pwr::rtc_domain_unlock(true);
     brio::RtcDomain::apb_clock(true);
 
-    // The RTC domain is opened as it stands (on LSE since the RTC
-    // campaign), never reset: the wall wants the crystal and reports
-    // itself unavailable otherwise.
-    // A domain nobody has selected yet (no backup battery on a Nucleo: a
-    // USB unplug empties it) is taken for the crystal, one-way but free;
-    // a domain on anything else is left alone and the wall says so.
+    // The RTC domain is opened as it stands and never reset (RTCSEL is
+    // one-way, and a BDRST would cost the backup registers): a domain
+    // already on either 32 kHz root is kept, and a domain nobody has
+    // selected yet - no backup battery on a Nucleo, so a USB unplug
+    // empties it - is claimed for the crystal if it starts and for LSI
+    // if it does not. An LSI wall is not a nominal, so its rate is
+    // MEASURED before anything is timed on it.
     const brio::RtcClockSource sel = brio::RtcDomain::selected();
-    const bool on_lse = sel == brio::RtcClockSource::lse || sel == brio::RtcClockSource::none;
-    brio::RtcDomain::lse_enable(true);
-    const bool lse_ok = brio::RtcDomain::lse_wait_ready(4'000'000UL);
-    if (on_lse && lse_ok) {
-        (void)brio::RtcDomain::open(brio::RtcClockSource::lse);
-        brio::Rtc::bypass_shadow(true);
-        wall_ready = wall_up();
-        (void)brio::Rtc::wake_line_open();
-        brio::Nvic::enable(brio::Rtc::irq());
+    if (sel == brio::RtcClockSource::none) {
+        brio::RtcDomain::lse_enable(true);
+        wall_on_lse = brio::RtcDomain::lse_wait_ready(4'000'000UL);
+        if (!wall_on_lse) {
+            brio::RtcDomain::lse_enable(false);
+            brio::Rcc::lsi_enable(true);
+            (void)brio::Rcc::lsi_wait_ready();
+        }
+        (void)brio::RtcDomain::open(wall_on_lse ? brio::RtcClockSource::lse
+                                                : brio::RtcClockSource::lsi);
+    } else {
+        wall_on_lse = sel == brio::RtcClockSource::lse;
     }
+    if (!wall_on_lse) {
+        const uint32_t measured = measure_lsi_hz();
+        if (measured != 0u) {
+            rtcclk_hz = measured;
+        }
+    }
+    brio::Rtc::bypass_shadow(true);
+    wall_ready = wall_up();
+    (void)brio::Rtc::wake_line_open();
+    brio::Nvic::enable(brio::Rtc::irq());
 
     const bool serial_ok = Serial::init(clock, 115200);
     const bool wall2_ok = t2_up();
-    // THE TIMEBASE: the LPTIM on the crystal, and SysTick interrupt-less.
+    // THE TIMEBASE: the LPTIM on the board's own 32 kHz root, and
+    // SysTick interrupt-less.
     const bool tick_ok = Tb::init(clock);
     const bool wd = brio::Iwdg::arm(brio::IwdgConfig{
         .prescaler = brio::IwdgPrescaler::div256,
@@ -1539,9 +1703,14 @@ int main() {
         print(serial, crlf, "part DEV_ID ", hex(idcode.dev_id),
               " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
-              " tick=", tick_ok ? "LPTIM1 on LSE, 1024 Hz, tickless" : "FAILED",
-              " wall=", wall_ready ? "RTC on LSE" : "NO CRYSTAL",
-              " (BDCR 0x", hex(brio::RtcDomain::bdcr()), " on_lse=", on_lse, " lse_ok=", lse_ok, ")",
+              " tick=", tick_ok ? (Tb::on_crystal ? "LPTIM1 on LSE, tickless"
+                                                  : "LPTIM1 on LSI, tickless")
+                                : "FAILED",
+              " at ", P::ticks_per_second, " Hz",
+              " wall=", wall_ready ? (wall_on_lse ? "RTC on LSE" : "RTC on LSI")
+                                   : "NO RTC",
+              " RTCCLK=", rtcclk_hz,
+              " (BDCR 0x", hex(brio::RtcDomain::bdcr()), ")",
               " tim2=", wall2_ok ? "64 MHz" : "FAILED",
               " backstop=", wd ? "IWDG 32 s" : "FAILED", crlf);
         banner();

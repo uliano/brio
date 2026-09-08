@@ -1,8 +1,8 @@
 // test_stm32_analog - the reference bench suite for the STM32G0's ANALOG
 // BLOCK: the ADC (RM0444 ch. 15), the DAC (ch. 16), the voltage
-// reference buffer (ch. 17) and the three comparators (ch. 18) - and,
-// through them, util/analog.hpp and util/analog_sampler.hpp on their
-// THIRD silicon.
+// reference buffer (ch. 17) and the comparators (ch. 18) - and, through
+// them, util/analog.hpp and util/analog_sampler.hpp on their THIRD
+// silicon.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
@@ -53,6 +53,25 @@
 // none of its own; COMP3's three pads are left alone and its letter says
 // what that costs.
 //
+// A PART WITH NEITHER PARTNER. The G031/G041 class has this ADC and this
+// reference buffer and NO DAC AND NO COMPARATOR AT ALL (16.3's own table
+// and 18.1), which is not a refusal but an ABSENCE: that device header
+// declares no DAC1_BASE and no COMP1_BASE, so brio's `Dac` and `Comp` do
+// not exist there at all and a letter that names one cannot be compiled
+// rather than merely returning false. EIGHT letters are therefore
+// compiled out on such a part - d, e, o and p want the DAC, i, m and n
+// want the comparators, and k wants both plus a basic timer - and each
+// prints what it needs and claims NOTHING when it is asked for. The rest
+// keep running: where a verdict rested on the DAC's VALUE the stimulus
+// becomes an internal channel of the converter's own multiplexer, and
+// where nothing can stand in it the LEG skips by name inside a letter
+// that otherwise runs (letter f's scan direction, letter j's labelled
+// values, letter a's four comparator and DAC facts). The package is the
+// suite's own question and is asked where it belongs, on the
+// device-select macro: the G031's LQFP32 bonds PA0..PA12 and PA15,
+// PB0..PB9 and PC6, and letter r's input table is that list (DS12992
+// table 12).
+//
 // NOTHING FORCED. No flash is written (the linker's rom is bank 1 and
 // bank 2 holds test_stm32_nvm's and test_stm32_journal's live storage),
 // no option byte, no comparator LOCK - the bit is one-way until a reset
@@ -92,7 +111,7 @@
 //      16.4.12's offset calibration as the procedure it is, and
 //      sample-and-hold on an LSI this letter starts and puts back
 //
-// build: boards = g0b1re,g071rb
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -151,9 +170,6 @@ using In1 = AnalogIn<PadA1, 1>;
 using In4 = AnalogIn<PadA4, 4>;
 using In5 = AnalogIn<PadA5, 5>;
 
-using C1 = Comp<1>;
-using C2 = Comp<2>;
-
 // COMP3 and TIM4 are the G0B1/G0C1's alone (18.1 and the reserve's timer
 // table). A part that has not got them must not SPELL them - the drivers'
 // static_asserts are the refusal - and `if constexpr` inside a plain
@@ -163,10 +179,36 @@ using C2 = Comp<2>;
 // depends on the very fact that gates the branch: `Comp3<present>` is
 // `Comp<3>` exactly where `present` is true and is never instantiated
 // where it is false.
-template <bool present>
-using Comp3 = Comp<present ? uint8_t{3} : uint8_t{2}>;
+//
+// A WHOLE MISSING BLOCK NEEDS THE OTHER SPELLING. Where the device has no
+// comparator at all there is no `Comp` template to specialize and no
+// COMP_CSR bit name to reach for, so the alias trick has nothing to fall
+// back on: everything that names a comparator lives under the header's
+// own COMP1_BASE, which is what comp.hpp itself is gated on. The same
+// holds for the DAC and DAC1_BASE. Those two `#if`s, and the package's
+// own in letter r, are the only preprocessor in this file.
 template <bool present>
 using Tim4 = Tim<present ? uint8_t{4} : uint8_t{3}>;
+
+// The timer the trigger letters are paced from: a time base and a TRGO,
+// nothing else. It is TIM6 wherever there is one - and every part of this
+// family that has a DAC has one, so the DAC letters' own `tim6_trgo` rows
+// name exactly this timer - while the G031 class has neither basic timer
+// and takes TIM3 instead, whose master mode is the same one register
+// field (21.4.3). The number is chosen where the fact is, so that the
+// timer a part has not got is never instantiated.
+using Pacer = Tim<tim_present(6) ? uint8_t{6} : uint8_t{3}>;
+constexpr AdcTrigger pacer_trgo =
+    tim_present(6) ? AdcTrigger::tim6_trgo : AdcTrigger::tim3_trgo;
+constexpr const char* pacer_name = tim_present(6) ? "TIM6" : "TIM3";
+
+#if defined(COMP1_BASE)
+
+using C1 = Comp<1>;
+using C2 = Comp<2>;
+
+template <bool present>
+using Comp3 = Comp<present ? uint8_t{3} : uint8_t{2}>;
 
 // ---- the third comparator, asked only where it exists -----------------------
 // Every one of these is the same shape: the reserve's fact as the default
@@ -232,18 +274,70 @@ void quiet_comp3() {
     }
 }
 
-using T6 = Tim<6>;   // the basic timer: a time base and a TRGO, nothing else
+/// Every comparator this part has, unlocked - the reading letters i and l
+/// close on. On a part with none it is vacuously true, and the letters
+/// that say so print what the part carries beside it.
+bool comps_unlocked() { return !C1::locked() && !C2::locked() && comp3_unlocked(); }
+
+/// The ADC's vector, and what shares it. Table 61 gives it to every
+/// comparator the part has; a part with none has an ADC line of its own,
+/// under a name the reserve's adc_irq() derives from that very absence.
+bool adc_vector_shared() {
+    return Adc::irq() == ADC1_COMP_IRQn && C1::irq() == ADC1_COMP_IRQn &&
+           C2::irq() == ADC1_COMP_IRQn && comp3_shares_adc_vector();
+}
+
+bool comp_exti_lines_ok() {
+    return C1::exti_line == 17 && C2::exti_line == 18 && Exti::configurable(17) &&
+           Exti::configurable(18) && comp3_line_20();
+}
+
+bool comp_window_partners_ok() {
+    return C1::window_partner == 2 && C2::window_partner == 1 &&
+           comp3_window_partner();
+}
+
+#else   // no comparator on this part
+
+bool comps_unlocked() { return true; }
+bool adc_vector_shared() { return Adc::irq() == ADC1_IRQn; }
+template <bool present = false>
+constexpr uint32_t comp3_exti_bit() { return 0u; }
+
+// The two letter-a facts that are only ASKED where there is a comparator.
+// `if constexpr` discards the branch that calls them but still LOOKS THEM
+// UP, so they need a spelling here as well - constexpr, so that a
+// definition nothing calls is not a warning either.
+constexpr bool comp_exti_lines_ok() { return true; }
+constexpr bool comp_window_partners_ok() { return true; }
+
+#endif  // COMP1_BASE
+
+/// The DAC's own vector, where there is a DAC to own one - and where
+/// there is not, the RESERVE'S ANSWER is the claim: dac_irq() reports the
+/// "no such vector" enumerator rather than a line some other peripheral
+/// owns, which is the thing an application would otherwise bind by
+/// accident.
+#if defined(DAC1_BASE)
+bool dac_vector_ok() { return Dac::irq() == TIM6_DAC_LPTIM1_IRQn; }
+#else
+bool dac_vector_ok() { return dac_irq() == NonMaskableInt_IRQn; }
+#endif
+
 using T1 = Tim<1>;   // TISEL reaches COMP1's output on TI1
 using T2 = Tim<2>;   // 32 bits at 64 MHz: the stopwatch letter m times with
 
+#if defined(DAC1_BASE)
 // ---- the DMA engines --------------------------------------------------------
 // Channel 1 plays a table into the DAC's holding register, channel 2
 // drains the ADC's data register. Both are halfword engines: a DAC
 // holding register and an ADC result are 12-bit data in a 16-bit word,
 // and an engine whose element disagrees with the register it was pointed
-// at writes a number the converter never meant.
+// at writes a number the converter never meant. Both belong to letter k,
+// which a part with no DAC cannot run at all.
 using DacLoop = DmaLoopEngine<1, 1, uint16_t>;
 using AdcPong = DmaPingPongEngine<1, 2, uint16_t>;
+#endif
 
 // ---- what this boot found ---------------------------------------------------
 uint32_t boot_apbenr1 = 0;
@@ -391,8 +485,12 @@ constexpr AdcConfig cfg_pad{
 constexpr uint32_t async_hz = 16'000'000UL;
 
 /// VDDA, measured through VREFINT under `cfg_internal`. Every absolute
-/// millivolt this suite prints is on this scale.
-uint16_t measure_vdda() {
+/// millivolt this suite prints is on this scale. Its callers are the
+/// letters that print MILLIVOLTS, and every one of those needs the DAC
+/// or a comparator - so on a part with neither it is compiled and not
+/// called, which is what the attribute says rather than hiding it behind
+/// another gate.
+[[maybe_unused]] uint16_t measure_vdda() {
     const AdcConfig keep = Adc::config();
     (void)apply(cfg_internal);
     Adc::vrefint(true);
@@ -402,29 +500,70 @@ uint16_t measure_vdda() {
     return Adc::vdda_mv(raw);
 }
 
-/// Everything this suite ever turns on, off again.
-void quiet_everything() {
-    Nvic::disable(Adc::irq());
+/// The DAC's half of the bring-up and of the teardown, and the
+/// comparators': two verbs each, so every letter below spells the
+/// sequence once whatever the part carries.
+#if defined(DAC1_BASE)
+void dac_up() { Dac::init(); }
+void dac_down() {
     Nvic::disable(Dac::irq());
     Nvic::disable(DMA1_Channel1_IRQn);
     Nvic::disable(DMA1_Channel2_3_IRQn);
     DacLoop::stop();
     AdcPong::stop();
+    Dac::release();
+    Nvic::clear_pending(Dac::irq());
+}
+#else
+void dac_up() {}
+void dac_down() {}
+
+/// What a letter that cannot be compiled without a DAC prints when it is
+/// asked for. The reason is one string for all of them; what is missing
+/// is the caller's one line.
+void skip_no_dac(const char* what) {
+    print(serial, "  SKIPPED, no verdict claimed: ", what,
+          " needs a DAC, and this part has none (dac_present() is false - "
+          "16.3's own table gives the G031/G041 no DAC and the reserve finds "
+          "no DAC1_BASE in the device header). Nothing is refused here: the "
+          "type does not exist, so the letter is not compiled at all.", crlf);
+}
+#endif
+
+#if defined(COMP1_BASE)
+void comps_down() {
     (void)Exti::release(C1::exti_line);
     (void)Exti::release(C2::exti_line);
     (void)C1::release();
     (void)C2::release();
     quiet_comp3();
-    T6::release();
+}
+#else
+void comps_down() {}
+
+/// The comparators' twin of skip_no_dac().
+void skip_no_comp(const char* what) {
+    print(serial, "  SKIPPED, no verdict claimed: ", what,
+          " needs a comparator, and this part has none (comp_count() is 0 - "
+          "18.1 gives the block to the G05x class and up, and the reserve "
+          "finds no COMP1_BASE in the device header). The type does not "
+          "exist, so the letter is not compiled at all.", crlf);
+}
+#endif
+
+/// Everything this suite ever turns on, off again.
+void quiet_everything() {
+    Nvic::disable(Adc::irq());
+    dac_down();
+    comps_down();
+    Pacer::release();
     T1::release();
     Adc::release();
-    Dac::release();
     PadA0::input(PinPull::none);
     PadA1::input(PinPull::none);
     PadA4::analog();
     PadA5::analog();
     Nvic::clear_pending(Adc::irq());
-    Nvic::clear_pending(Dac::irq());
     kernel_mode = false;
 }
 
@@ -446,11 +585,39 @@ bool apply_async(const AdcConfig& c) {
 /// A closed band, the other suites' helper.
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
 
+/// THE SECOND ANALOG SOURCE, which is where a part without a DAC costs
+/// this suite something. Half the ADC letters need a channel that is not
+/// the bandgap and whose reading is steady: with a DAC that is the
+/// zero-length wire's own pad, held at a code this program chooses, and
+/// with none it can only be an INTERNAL channel - 7.3.13 disconnects a
+/// pad's pull in analog mode, so no pad this chip can drive is connected
+/// to the converter at all. The junction sensor is the one that reads
+/// furthest from VREFINT and is as steady as it.
+constexpr uint8_t second_source = dac_present() ? In4::channel
+                                                : adc_temperature_channel();
+constexpr const char* second_source_name =
+    dac_present() ? "the DAC-driven pad" : "the junction sensor";
+
+#if defined(DAC1_BASE)
+void second_source_up(uint16_t code) {
+    Dac::claim_pad<PadA4>();
+    (void)Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered});
+    (void)Dac::enable(0, true);
+    (void)Dac::write(0, code);
+    (void)delay_us(clock, 500);
+}
+#else
+void second_source_up(uint16_t) {
+    Adc::temperature(true);
+    (void)delay_us(clock, 500);   // tSTART_TEMP is 20 us max (table 66)
+}
+#endif
+
 /// The bring-up every measuring letter starts from.
 bool analog_up(const AdcConfig& c) {
     quiet_everything();
     clear_counts();
-    Dac::init();
+    dac_up();
     Vref::init();
     return Adc::init(clock, c, async_hz);
 }
@@ -466,39 +633,57 @@ void ta_block() {
           " comp_count=", comp_count(), " vrefbuf=", vrefbuf_present(), crlf);
     print(serial, "  at boot: APBENR1=", hex(boot_apbenr1), " APBENR2=", hex(boot_apbenr2),
           " ADC_CR=", hex(boot_adc_cr), " ADC_CFGR1=", hex(boot_adc_cfgr1),
-          " VREFBUF_CSR=", hex(boot_vrefbuf_csr), " COMP1_CSR=", hex(boot_comp1_csr),
+          " VREFBUF_CSR=", hex(boot_vrefbuf_csr),
           " CCIPR=", hex(boot_ccipr), " (VREFBUF_CSR through the CLOSED "
           "SYSCFG gate: ", hex(boot_vrefbuf_clockless), ")", crlf);
+    if constexpr (comp_present(1)) {
+        print(serial, "  and COMP1_CSR at boot: ", hex(boot_comp1_csr), crlf);
+    }
 
-    print(serial, "  comparators on this part: ", comp_count(), crlf);
-    bench.verdict("this part carries one ADC of nineteen channels, a "
-                  "two-channel DAC, the reference buffer, and the two or "
-                  "three comparators the reserve reads off the header "
-                  "(18.1: the third is the G0B1/G0C1's alone)",
-                  adc_present() && adc_channels() == 19 && dac_present() &&
-                      dac_channels() == 2 && vrefbuf_present() &&
-                      comp_count() == (comp_present(3) ? 3u : 2u));
+    print(serial, "  comparators on this part: ", comp_count(),
+          ", DAC channels: ", dac_channels(), crlf);
+    bench.verdict("this part carries one ADC of nineteen channels and the "
+                  "reference buffer, plus exactly the DAC and the comparators "
+                  "the reserve reads off the device header - two channels "
+                  "where there is a DAC at all (16.3) and a third comparator "
+                  "only on the G0B1/G0C1 (18.1)",
+                  adc_present() && adc_channels() == 19 && vrefbuf_present() &&
+                      dac_channels() == (dac_present() ? 2u : 0u) &&
+                      comp_count() == (comp_present(3)   ? 3u
+                                       : comp_present(1) ? 2u
+                                                         : 0u));
     bench.verdict("the ADC's vector is SHARED with every comparator the part "
-                  "has, and the DAC's with TIM6 and LPTIM1 (table 61)",
-                  Adc::irq() == ADC1_COMP_IRQn && C1::irq() == ADC1_COMP_IRQn &&
-                      C2::irq() == ADC1_COMP_IRQn && comp3_shares_adc_vector() &&
-                      Dac::irq() == TIM6_DAC_LPTIM1_IRQn);
-    bench.verdict("the comparators' EXTI lines are 17, 18 and - where there is "
-                  "a third - 20, every one of them a CONFIGURABLE line (13.5.1)",
-                  C1::exti_line == 17 && C2::exti_line == 18 &&
-                      Exti::configurable(17) && Exti::configurable(18) &&
-                      comp3_line_20());
-    bench.verdict("WINMODE's partner is NOT n + 1: COMP1 borrows COMP2's plus "
-                  "input, COMP2 borrows COMP1's, and a COMP3 borrows COMP2's "
-                  "(18.6.1, one register description at a time)",
-                  C1::window_partner == 2 && C2::window_partner == 1 &&
-                      comp3_window_partner());
+                  "has - and is the converter's own where there is none, "
+                  "which is how the reserve derives its NAME - and where "
+                  "there is a DAC its own line is TIM6's and LPTIM1's "
+                  "(table 61)",
+                  adc_vector_shared() && dac_vector_ok());
+    if constexpr (comp_present(1)) {
+        bench.verdict("the comparators' EXTI lines are 17, 18 and - where there is "
+                      "a third - 20, every one of them a CONFIGURABLE line (13.5.1)",
+                      comp_exti_lines_ok());
+        bench.verdict("WINMODE's partner is NOT n + 1: COMP1 borrows COMP2's plus "
+                      "input, COMP2 borrows COMP1's, and a COMP3 borrows COMP2's "
+                      "(18.6.1, one register description at a time)",
+                      comp_window_partners_ok());
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: the comparators' EXTI lines and "
+              "their window partners need a comparator, and this part has none "
+              "(comp_count() is 0 - 18.1 gives the block to the G05x class and "
+              "up, and the reserve finds no COMP1_BASE in the device header). "
+              "The lines are not there either, which is a second witness of "
+              "the same absence: Exti::implemented() reads ",
+              Exti::implemented(17), " / ", Exti::implemented(18), " / ",
+              Exti::implemented(20), " for lines 17, 18 and 20, off "
+              "EXTI_IMR1's own per-part mask.", crlf);
+    }
 
     // What this boot found, before a line of this suite ran.
     bench.verdict("every analog block came up with its APB clock CLOSED, "
                   "which is why init() opens it before anything else",
                   (boot_apbenr2 & RCC_APBENR2_ADCEN) == 0u &&
-                      (boot_apbenr1 & RCC_APBENR1_DAC1EN) == 0u);
+                      (boot_apbenr1 & dac_clock_mask()) == 0u);
     bench.verdict("the ADC came up OFF with its regulator down and CFGR1 at "
                   "zero - so 12 bits, right aligned, no trigger",
                   (boot_adc_cr & (ADC_CR_ADEN | ADC_CR_ADVREGEN)) == 0u &&
@@ -533,7 +718,7 @@ void ta_block() {
                       !Vref::enabled());
 
     // The bring-up, step by step.
-    Dac::init();
+    dac_up();
     Adc::bus_clock(true);
     Adc::reset();
     const bool reg_ok = Adc::regulator_on(clock);
@@ -569,6 +754,7 @@ void ta_block() {
     bench.verdict("an ordered sequence is refused while CHSELRMOD is clear, "
                   "and a bitmap sequence while it is set",
                   !Adc::sequence_ordered(nullptr, 0));
+#if defined(DAC1_BASE)
     bench.verdict("a DAC channel past this device's count is refused",
                   !Dac::configure(2, {}) && !Dac::write(2, 0) && !Dac::enable(2, true));
     bench.verdict("a DAC wave generator without a trigger is refused - "
@@ -578,10 +764,28 @@ void ta_block() {
                   !dac_trigger_valid(static_cast<DacTrigger>(4)) &&
                       !Dac::configure(0, {.triggered = true,
                                           .trigger = static_cast<DacTrigger>(9)}));
+#else
+    // The VOCABULARY is still every part's - dac_trigger_valid() and
+    // dac_channel_config_valid() are compiled here and answer - but a
+    // REFUSAL is a verb of a resource, and there is no resource to refuse.
+    print(serial,
+          "  SKIPPED, no verdict claimed: the DAC's three refusals (a channel "
+          "past the count, a wave with no trigger, an empty trigger code) need "
+          "a Dac to do the refusing, and this part has none (dac_present() is "
+          "false - 16.3's table gives the G031/G041 no DAC, and the reserve "
+          "finds no DAC1_BASE in the device header).", crlf);
+#endif
+#if defined(COMP1_BASE)
     bench.verdict("a comparator power mode 18.6.1 marks Reserved is refused, "
                   "and so is a blanking bit past the five",
                   !C1::configure({.power = static_cast<CompPower>(3)}) &&
                       !C1::configure({.blanking = 0x20}));
+#else
+    print(serial,
+          "  SKIPPED, no verdict claimed: the comparator's two refusals need a "
+          "Comp, and this part has none (comp_count() is 0 - no COMP1_BASE in "
+          "the device header).", crlf);
+#endif
 
     // The pads, before anything rests on them.
     console_drain();
@@ -595,10 +799,20 @@ void ta_block() {
                   "the rails under its own internal pull, which is the "
                   "precondition of every letter after this one",
                   a0 && a1 && a4 && a5);
-    bench.verdict("PA5 CARRIES LD4 AND STILL FOLLOWS A 40 KOHM PULL, so the "
-                  "lamp's drive path on this board is high impedance and not "
-                  "an LED with a resistor to ground - which letter e then "
-                  "confirms from the analog side", a5);
+    if constexpr (dac_present()) {
+        bench.verdict("PA5 CARRIES LD4 AND STILL FOLLOWS A 40 KOHM PULL, so the "
+                      "lamp's drive path on this board is high impedance and not "
+                      "an LED with a resistor to ground - which letter e then "
+                      "confirms from the analog side", a5);
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: the lamp's drive path is a claim "
+              "about a board whose LED is on the DAC's second output, and this "
+              "board's LED (LD3) is on PC6 - a pad no analog block reaches and "
+              "one this suite never walks, its series resistor to ground being "
+              "stronger than a 40 kOhm pull. PA5 here is a free pad and is "
+              "judged as one, above.", crlf);
+    }
 
     PadA4::analog();
     PadA5::analog();
@@ -838,6 +1052,8 @@ void tc_timing() {
 // in series, and the nonlinearity that comes out is the PAIR's - it is
 // reported, not apportioned.
 
+#if defined(DAC1_BASE)
+
 /// Set a code, let the buffer settle, and read the pad.
 uint16_t dac_then_adc(uint8_t ch, uint16_t code, uint8_t adc_channel) {
     (void)Dac::write(ch, code);
@@ -1029,6 +1245,18 @@ void te_led_dimmer() {
     quiet_everything();
 }
 
+#else   // no DAC: letters d and e are the zero-length wire and its lamp
+
+void td_zero_length_wire() {
+    skip_no_dac("the zero-length wire - a converter driving ADC_IN4's own pad");
+}
+
+void te_led_dimmer() {
+    skip_no_dac("an analog dimmer - a lamp driven by a converter and read back");
+}
+
+#endif  // DAC1_BASE
+
 // =============================================================================
 // f - the sequencer, both faces, and the CCRDY handshake
 // =============================================================================
@@ -1039,13 +1267,14 @@ void te_led_dimmer() {
 // carried the SAM's analog letters does not exist here and a pad the CPU
 // drives is not connected to the converter at all. The DAC is the only
 // analog source inside this chip, so the sequence walks the DAC's two
-// channels and VREFINT.
-void tf_sequencer() {
-    if (!analog_up(cfg_internal)) {
-        bench.verdict("the ADC came up", false);
-        return;
-    }
-    Adc::vrefint(true);
+// channels and VREFINT - and on a part without a DAC the two ORDER legs
+// below skip, because a scan direction can only be read off values that
+// differ and nothing here can make three of them.
+
+/// The DAC's two channels at a quarter and three quarters of the
+/// reference, on their own pads: letter f's stimulus and nothing else.
+#if defined(DAC1_BASE)
+void sequencer_stimulus() {
     Dac::claim_pad<PadA4>();
     Dac::claim_pad<PadA5>();
     (void)Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered});
@@ -1055,28 +1284,20 @@ void tf_sequencer() {
     (void)Dac::write(0, 1024);   // a quarter of the reference on PA4 (ch 4)
     (void)Dac::write(1, 3072);   // three quarters on PA5 (ch 5)
     (void)delay_us(clock, 500);
+}
+#else
+void sequencer_stimulus() {}
+#endif
 
-    // First, the pull that is not there.
-    PadA0::analog();
-    PadA0::pull(PinPull::up);
-    (void)delay_us(clock, 500);
-    const uint16_t floating_up = convert_median(In0::channel);
-    PadA0::pull(PinPull::down);
-    (void)delay_us(clock, 500);
-    const uint16_t floating_down = convert_median(In0::channel);
-    PadA0::pull(PinPull::none);
-    print(serial, "  an ANALOG pad with its pull-up asked for reads ",
-          floating_up, " counts, with the pull-down ", floating_down, crlf);
-    bench.verdict("7.3.13 IS LITERAL: the weak pulls are disabled by hardware "
-                  "in analog mode, so a pad asked to pull up does NOT read "
-                  "full scale - the SAM's pull-walked analog stimulus has no "
-                  "twin here", floating_up < 3800u);
-
-    // The bitmap face, forward and backward.
+/// The two ORDER legs of the sequencer: the bitmap face forward and
+/// backward, and the fully configurable one. Both are read off THREE
+/// VALUES THAT DIFFER, which is exactly what a part with no DAC cannot
+/// make - 7.3.13 disconnects a pad's own pull in analog mode, so every
+/// free pad there converts to the same undriven node.
+#if defined(DAC1_BASE)
+void sequencer_order(const AdcConfig& fwd) {
     const uint32_t mask = (1u << In4::channel) | (1u << In5::channel) |
                           (1u << Adc::vrefint_channel);
-    AdcConfig fwd = cfg_internal;
-    fwd.sample1 = AdcSampleTime::cycles160_5;
     (void)apply(fwd);
     const bool seq_ok = Adc::sequence(mask);
     uint16_t f[3] = {0, 0, 0};
@@ -1136,6 +1357,49 @@ void tf_sequencer() {
                   "with 0xF terminating a short list",
                   ord_ok && o[0] < 2000u && o[1] > 2700u && o[2] > 800u &&
                       o[2] < 1300u && (Adc::selection() & 0xFFFF000u) != 0u);
+}
+#else
+void sequencer_order(const AdcConfig& fwd) {
+    (void)apply(fwd);
+    print(serial,
+          "  SKIPPED, no verdict claimed: the scan direction and the ordered "
+          "face are read off three inputs that DIFFER, and this part has no "
+          "source that can make them (dac_present() is false, and 7.3.13 "
+          "leaves a pad no pull to walk under). The sequencer's other half - "
+          "the CCRDY handshake and the refusal while a conversion runs - is "
+          "below and does run.", crlf);
+}
+#endif
+
+void tf_sequencer() {
+    if (!analog_up(cfg_internal)) {
+        bench.verdict("the ADC came up", false);
+        return;
+    }
+    Adc::vrefint(true);
+    sequencer_stimulus();
+
+    // First, the pull that is not there.
+    PadA0::analog();
+    PadA0::pull(PinPull::up);
+    (void)delay_us(clock, 500);
+    const uint16_t floating_up = convert_median(In0::channel);
+    PadA0::pull(PinPull::down);
+    (void)delay_us(clock, 500);
+    const uint16_t floating_down = convert_median(In0::channel);
+    PadA0::pull(PinPull::none);
+    print(serial, "  an ANALOG pad with its pull-up asked for reads ",
+          floating_up, " counts, with the pull-down ", floating_down, crlf);
+    bench.verdict("7.3.13 IS LITERAL: the weak pulls are disabled by hardware "
+                  "in analog mode, so a pad asked to pull up does NOT read "
+                  "full scale - the SAM's pull-walked analog stimulus has no "
+                  "twin here", floating_up < 3800u);
+
+    // The bitmap face and the ordered one, both read off three values
+    // that DIFFER.
+    AdcConfig fwd = cfg_internal;
+    fwd.sample1 = AdcSampleTime::cycles160_5;
+    sequencer_order(fwd);
 
     // The handshake. 15.3.8: a CHSELR write is not in force until CCRDY
     // rises, and 15.12.5 says an ADSTART written before it is IGNORED.
@@ -1195,18 +1459,14 @@ void tg_oversampler() {
         return;
     }
     Adc::vrefint(true);
-    Dac::claim_pad<PadA4>();
-    (void)Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered});
-    (void)Dac::enable(0, true);
-    (void)Dac::write(0, 2048);
-    (void)delay_us(clock, 500);
+    second_source_up(2048);
     console_drain();
 
     const Spread ref = spread_of(Adc::vrefint_channel, 64);
-    const Spread pad = spread_of(In4::channel, 64);
+    const Spread pad = spread_of(second_source, 64);
     print(serial, "  noise floor over 64 conversions: VREFINT spans ",
-          ref.hi - ref.lo, " counts around ", ref.mean, ", the DAC-driven pad ",
-          pad.hi - pad.lo, " around ", pad.mean, crlf);
+          ref.hi - ref.lo, " counts around ", ref.mean, ", ", second_source_name,
+          " ", pad.hi - pad.lo, " around ", pad.mean, crlf);
     bench.verdict("THE NOISE IS MEASURED BEFORE ANYTHING IS CLAIMED ABOUT IT: "
                   "both sources are quiet enough to be a converter's own "
                   "noise and not a broken connection",
@@ -1216,7 +1476,7 @@ void tg_oversampler() {
 
     // The noisier of the two is the measurand; the oversampler is judged
     // against it and only if there is something to reduce.
-    const uint8_t noisy = (pad.hi - pad.lo) >= (ref.hi - ref.lo) ? In4::channel
+    const uint8_t noisy = (pad.hi - pad.lo) >= (ref.hi - ref.lo) ? second_source
                                                                  : Adc::vrefint_channel;
     const uint16_t base_span = (pad.hi - pad.lo) >= (ref.hi - ref.lo)
                                    ? static_cast<uint16_t>(pad.hi - pad.lo)
@@ -1234,7 +1494,7 @@ void tg_oversampler() {
                   "full scale, and the MEAN does not move - table 79's row, "
                   "measured",
                   Adc::result_steps() == 4096u &&
-                      base_mean_delta(avg.mean, noisy == In4::channel ? pad.mean
+                      base_mean_delta(avg.mean, noisy == second_source ? pad.mean
                                                                        : ref.mean) < 20u);
     if (base_span >= 4u) {
         bench.verdict("and the spread SHRINKS - which is claimed only because "
@@ -1292,15 +1552,11 @@ void th_watchdogs() {
         return;
     }
     Adc::vrefint(true);
-    Dac::claim_pad<PadA4>();
-    (void)Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered});
-    (void)Dac::enable(0, true);
-    (void)Dac::write(0, 2048);
-    (void)delay_us(clock, 500);
+    second_source_up(2048);
 
     const uint16_t v = convert_median(Adc::vrefint_channel);
-    const uint16_t d = convert_median(In4::channel);
-    print(serial, "  VREFINT ", v, " counts, the DAC's pad ", d, crlf);
+    const uint16_t d = convert_median(second_source);
+    print(serial, "  VREFINT ", v, " counts, ", second_source_name, " ", d, crlf);
 
     // EVERY WATCHDOG VERB IS A DISABLED-STATE VERB on this converter -
     // 15.3.7 for CFGR1's AWD1 bits, 15.12.13's own note for AWD2CR and
@@ -1339,7 +1595,7 @@ void th_watchdogs() {
     (void)convert(Adc::vrefint_channel);
     const bool single_hit = Adc::flag(AdcFlag::watchdog1);
     Adc::clear_flags(AdcFlag::watchdog1);
-    (void)convert(In4::channel);
+    (void)convert(second_source);
     const bool single_miss = Adc::flag(AdcFlag::watchdog1);
     Adc::clear_flags(AdcFlag::watchdog1);
     bench.verdict("and AWD1SGL narrows it to one channel: the guarded "
@@ -1351,16 +1607,16 @@ void th_watchdogs() {
 
     // AWD2 and AWD3: the MASK is the enable (15.7.2).
     Adc::clear_flags(AdcFlag::watchdog2 | AdcFlag::watchdog3);
-    arm_watchdog2(1u << In4::channel, 0,
+    arm_watchdog2(1u << second_source, 0,
                   static_cast<uint16_t>(d > 200u ? d - 200u : 0u));
-    (void)convert(In4::channel);
+    (void)convert(second_source);
     const bool awd2_hit = Adc::flag(AdcFlag::watchdog2);
     Adc::clear_flags(AdcFlag::watchdog2);
     (void)convert(Adc::vrefint_channel);
     const bool awd2_other = Adc::flag(AdcFlag::watchdog2);
     Adc::clear_flags(AdcFlag::watchdog2);
     arm_watchdog2(0, 0, 0);
-    (void)convert(In4::channel);
+    (void)convert(second_source);
     const bool awd2_off = Adc::flag(AdcFlag::watchdog2);
     bench.verdict("AWD2's CHANNEL MASK IS ITS ENABLE - a bit set guards that "
                   "channel, a mask of zero turns the watchdog off, and there "
@@ -1392,7 +1648,7 @@ void th_watchdogs() {
     Adc::regs().CFGR1 = cfgr1_before | ADC_CFGR1_AWD1EN;
     const bool cfgr1_landed = (Adc::regs().CFGR1 & ADC_CFGR1_AWD1EN) != 0u;
     Adc::regs().CFGR1 = cfgr1_before;
-    Adc::regs().AWD2CR = 1u << In4::channel;
+    Adc::regs().AWD2CR = 1u << second_source;
     const bool awd2cr_landed = Adc::regs().AWD2CR != 0u;
     Adc::regs().AWD2CR = 0;
     print(serial, "  written with ADEN set: CFGR1's AWD1EN landed ",
@@ -1441,14 +1697,14 @@ void th_watchdogs() {
     (void)Adc::enable();
     print(serial, "  watchdog interrupts: ", adc_awd_calls, crlf);
     bench.verdict("the watchdog reaches the NVIC through the vector it shares "
-                  "with the three comparators, once per guarded conversion",
-                  adc_awd_calls == 4u);
+                  "with every comparator this part has, once per guarded "
+                  "conversion", adc_awd_calls == 4u);
 
     // ES0548 2.6.3 staged: AWD1 in SINGLE mode on a channel that is not
     // the first of a sequence.
     AdcConfig seq = cfg_internal;
     (void)apply(seq);
-    (void)Adc::sequence((1u << In4::channel) | (1u << Adc::vrefint_channel));
+    (void)Adc::sequence((1u << second_source) | (1u << Adc::vrefint_channel));
     arm_watchdog1(0, static_cast<uint16_t>(v > 200u ? v - 200u : 0u), true,
                   Adc::vrefint_channel);   // channel 13: the SECOND of the two
     Adc::clear_flags(AdcFlag::watchdog1);
@@ -1461,7 +1717,7 @@ void th_watchdogs() {
     // The control: the SAME watchdog on the FIRST channel of the same
     // sequence, whose value is equally far outside its own window.
     arm_watchdog1(0, static_cast<uint16_t>(d > 200u ? d - 200u : 0u), true,
-                  In4::channel);
+                  second_source);
     Adc::start();
     guard = 0;
     while (!Adc::sequence_done() && ++guard < 2'000'000UL) {
@@ -1497,6 +1753,9 @@ void th_watchdogs() {
 // and the timer input - and it is NOT enough for a threshold sweep, which
 // is declined at the end of this letter with the wire that would settle it
 // named.
+
+#if defined(COMP1_BASE)
+
 void precharge(bool high) {
     PadA1::output(high);
     (void)delay_us(clock, 300);
@@ -1862,11 +2121,19 @@ void ti_comparators() {
     print(serial, "  COMP1_CSR=", hex(C1::regs().CSR), " locked=", C1::locked(), crlf);
     bench.verdict("the LOCK bit is clear and stays clear: 18.3.4 makes it "
                   "one-way until the next MCU reset, so this suite reads it "
-                  "and never writes it", !C1::locked() && !C2::locked() &&
-                                             comp3_unlocked());
+                  "and never writes it", comps_unlocked());
     ti_comp3_registers();
     quiet_everything();
 }
+
+#else   // no comparator: letter i is the whole chapter
+
+void ti_comparators() {
+    skip_no_comp("the comparators' muxes, polarity, taps, blanking, window "
+                 "pair, EXTI line and timer input");
+}
+
+#endif  // COMP1_BASE
 
 // =============================================================================
 // j - AnalogSampler inside a REAL KERNEL, walking three inputs
@@ -1884,8 +2151,22 @@ void ti_comparators() {
 
 struct Collector;
 using Subs = Subscribers<Collector>;
+// THE THIRD INPUT IS A PAD ONLY WHERE SOMETHING CAN DRIVE ONE. The list
+// is a template parameter pack of values of DIFFERENT types - an
+// AdcInput enumerator and an AnalogIn - so the choice cannot be a
+// ternary and is made here, where the fact is. Without a DAC the third
+// input is the divided battery pin: a reading this program does not
+// choose, which is exactly what its own verdict then declines to judge,
+// and one the SAMPLER cannot tell from a pad - which is the half this
+// letter is about.
+#if defined(DAC1_BASE)
 using Sampler = AnalogSampler<Adc, Stm32g0Platform<>, Subs, AdcInput::vrefint,
                               AdcInput::temperature, In4{}>;
+#else
+using Sampler = AnalogSampler<Adc, Stm32g0Platform<>, Subs, AdcInput::vrefint,
+                              AdcInput::temperature, AdcInput::vbat>;
+#endif
+constexpr const char* third_input_name = dac_present() ? "DAC pad" : "VBAT/3";
 
 struct Collector {
     using Event = std::variant<AnalogSample>;
@@ -1923,11 +2204,10 @@ void tj_sampler_ao() {
     }
     Adc::vrefint(true);
     Adc::temperature(true);
-    Dac::claim_pad<PadA4>();
-    (void)Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered});
-    (void)Dac::enable(0, true);
-    (void)Dac::write(0, 3000);
-    (void)delay_us(clock, 500);
+    if constexpr (!dac_present()) {
+        Adc::vbat(true);   // the third input where no pad can be driven
+    }
+    second_source_up(3000);
     console_drain();
 
     Adc::interrupts(AdcFlag::converted, true);
@@ -1959,8 +2239,9 @@ void tj_sampler_ao() {
     print(serial, "  ", Collector::samples, " samples: VREFINT ",
           Collector::per_index[0], " (last ", Collector::last[0], " = VDDA ",
           vdda, " mV), TSENSE ", Collector::per_index[1], " (last ",
-          Collector::last[1], "), DAC pad ", Collector::per_index[2], " (last ",
-          Collector::last[2], "); unknown inputs ", Sampler::unknown_inputs(),
+          Collector::last[1], "), ", third_input_name, " ",
+          Collector::per_index[2], " (last ", Collector::last[2],
+          "); unknown inputs ", Sampler::unknown_inputs(),
           ", queue overflows ", Collector::queue.overflows(), crlf);
 
     bench.verdict("AnalogSampler RUNS UNCHANGED ON THE THIRD ARCHITECTURE: "
@@ -1974,11 +2255,23 @@ void tj_sampler_ao() {
     bench.verdict("and NOT ONE sample was mislabelled: every result carried "
                   "an input code the list knows, so `unknown_inputs` stayed "
                   "at zero", Sampler::unknown_inputs() == 0u);
-    bench.verdict("the values are the right ones for their labels - VREFINT "
-                  "gives a plausible VDDA and the DAC's pad reads near the "
-                  "three quarters it was set to",
-                  vdda >= 3000u && vdda <= 3600u && Collector::last[2] > 2700u &&
-                      Collector::last[2] < 3200u);
+    if constexpr (dac_present()) {
+        bench.verdict("the values are the right ones for their labels - VREFINT "
+                      "gives a plausible VDDA and the DAC's pad reads near the "
+                      "three quarters it was set to",
+                      vdda >= 3000u && vdda <= 3600u && Collector::last[2] > 2700u &&
+                          Collector::last[2] < 3200u);
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: the labelled-values check rests "
+              "on a THIRD input this program set to a known code, and without "
+              "a DAC there is nothing to set - the third input here is the "
+              "divided battery pin, whose reading is the supply's and not this "
+              "suite's to choose. VDDA from VREFINT reads ", vdda,
+              " mV and VBAT/3 reads ", Collector::last[2],
+              " counts; the walk, its evenness and its labelling are judged "
+              "above.", crlf);
+    }
     quiet_everything();
 }
 
@@ -1995,6 +2288,8 @@ void tj_sampler_ao() {
 // time, so what is checked is that the captured sequence FOLLOWS the
 // played table with a constant phase - which is the only thing a seam
 // check can mean when the two ends are one edge apart.
+
+#if defined(DAC1_BASE)
 
 constexpr uint16_t table_len = 16;
 constexpr uint16_t block_len = 24;   // deliberately not a divisor of 16
@@ -2038,11 +2333,11 @@ void tk_chain() {
     // settle and the ADC's 1.2 us conversion is over long before the next
     // edge.
     constexpr uint32_t rate = 5'000;
-    T6::init();
+    Pacer::init();
     const uint32_t div = tim_clock_hz(clock) / rate;
-    const bool pacer = T6::configure({.prescaler = 63,
-                                      .period = (div / 64u) - 1u}) &&
-                       T6::master(TimMasterMode::update);
+    const bool pacer = Pacer::configure({.prescaler = 63,
+                                         .period = (div / 64u) - 1u}) &&
+                       Pacer::master(TimMasterMode::update);
 
     // The DAC: triggered by TIM6, fed by the DMA, its first datum in the
     // holding register BEFORE the first trigger (16.4.8).
@@ -2080,7 +2375,7 @@ void tk_chain() {
     const bool loop_started = DacLoop::start(dac_table, table_len);
     const bool pong_started = AdcPong::start(pong_a, pong_b, block_len);
     Adc::start();          // arms the hardware trigger (15.4)
-    T6::enable(true);
+    Pacer::enable(true);
 
     // Six blocks of 24 at 5 kHz is 29 ms. Nothing is printed inside the
     // window: a verdict line is four milliseconds of console and a block
@@ -2135,7 +2430,7 @@ void tk_chain() {
     const uint32_t laps = DacLoop::laps();
     const uint32_t overruns = AdcPong::overruns();
     const bool underrun = Dac::underrun(0);
-    T6::enable(false);
+    Pacer::enable(false);
     (void)Adc::stop();
     DacLoop::stop();
     AdcPong::stop();
@@ -2168,6 +2463,22 @@ void tk_chain() {
                   overruns == 0u && !underrun && laps >= 6u);
     quiet_everything();
 }
+
+#else   // no DAC, and on the same parts no basic timer either
+
+void tk_chain() {
+    skip_no_dac("the no-CPU chain - one TRGO into BOTH converters, a DMA "
+                "table feeding one and a DMA stream draining the other");
+    print(serial,
+          "  ...and the same parts have no basic timer to pace it with: "
+          "tim_present(6) is false here, so table 73's EXTSEL 101 and table "
+          "85's dac_ch1_trg5 name a timer this part has not got. There is no "
+          "half of this letter left to run - a stream with no table to compare "
+          "it against would be a claim about the DMA, which test_stm32_dma "
+          "makes.", crlf);
+}
+
+#endif  // DAC1_BASE
 
 // =============================================================================
 // l - the errata pass
@@ -2240,8 +2551,7 @@ void tl_errata() {
           "ONLY and this die is revision Z, so it does not apply.", crlf);
     bench.verdict("and the pass leaves the block as it found it: nothing "
                   "here wrote a lock bit, an option byte or a flash cell",
-                  !C1::locked() && !C2::locked() && comp3_unlocked() &&
-                      !Vref::enabled());
+                  comps_unlocked() && !Vref::enabled());
     quiet_everything();
 }
 
@@ -2299,6 +2609,12 @@ void stopwatch_up() {
     (void)T2::configure({.prescaler = 0, .period = 0xFFFFFFFFu});
     T2::enable(true);
 }
+
+// Everything from here to the end of letter n needs a comparator: the
+// analog questions of letter m are a DAC sweep read by a comparator, and
+// letter n is the comparators the other letters leave alone. The
+// stopwatch above stays outside - letter q times its conversions with it.
+#if defined(COMP1_BASE)
 
 /// Drive PA1 to VDD, release it to analog, and then hold it under
 /// CONTINUOUS conversion for `ms` while it relaxes. Returns where it
@@ -2967,6 +3283,20 @@ void tn_comp_pads() {
     quiet_everything();
 }
 
+#else   // no comparator: letters m and n are both wholly its own
+
+void tm_comp_analog() {
+    skip_no_comp("the comparator's analog questions - a DAC sweep crossing a "
+                 "node this program parks between the rails");
+}
+
+void tn_comp_pads() {
+    skip_no_comp("COMP2's and COMP3's own plus pads, a comparator's output ON "
+                 "a pad, and the blanking sources that are not TIM1's OC4");
+}
+
+#endif  // COMP1_BASE
+
 
 // =============================================================================
 // o - THE DAC's THREE UNRUN HALVES: the two wave generators, the user
@@ -2990,6 +3320,8 @@ void tn_comp_pads() {
 //   - SAMPLE-AND-HOLD wants LSI, which is `dac_hold_ck` (table 85) and
 //     which nothing in dac.hpp turns on, on purpose. This letter turns
 //     it on in the RCC where it belongs and puts it back.
+
+#if defined(DAC1_BASE)
 
 void to_dac_tail() {
     if (!analog_up(cfg_pad)) {
@@ -3264,14 +3596,30 @@ void to_dac_tail() {
     quiet_everything();
 }
 
+#else   // no DAC: letter o is its three unrun halves
+
+void to_dac_tail() {
+    skip_no_dac("the two wave generators, 16.4.12's user offset calibration "
+                "and sample-and-hold");
+}
+
+#endif  // DAC1_BASE
+
 // =============================================================================
 // The menu
 // =============================================================================
 void banner() {
     print(serial, crlf, "test_stm32_analog - ADC + DAC + VREFBUF + COMP "
-          "(RM0444 ch. 15..18) on the STM32G0", crlf,
-          "  nothing to wire; PA4 is DAC1_OUT1 AND ADC_IN4, which is the "
-          "only route between the two converters on this family", crlf);
+          "(RM0444 ch. 15..18) on the STM32G0", crlf);
+    if constexpr (dac_present()) {
+        print(serial, "  nothing to wire; PA4 is DAC1_OUT1 AND ADC_IN4, which "
+              "is the only route between the two converters on this family",
+              crlf);
+    } else {
+        print(serial, "  nothing to wire; this part has neither a DAC nor a "
+              "comparator (16.3 and 18.1), so the letters that need one skip "
+              "by name and say what they wanted", crlf);
+    }
     bench.menu();
     print(serial, "  z  run them all", crlf, "  ?  this menu", crlf);
 }
@@ -3290,11 +3638,18 @@ void banner() {
 // A trigger that does not work leaves DOR where it was, which is a
 // verdict and not an interpretation.
 
+// The trigger tables' timers. An ALIAS instantiates nothing, so a name
+// here for a timer this part has not got costs nothing and is never
+// reached: the tables that use it are inside the letter that needs it.
 using T1m = Tim<1>;
 using T2m = Tim<2>;
 using T3m = Tim<3>;
+#if defined(TIM7_BASE)
 using T7m = Tim<7>;
+#endif
+#if defined(TIM15_BASE)
 using T15m = Tim<15>;
+#endif
 using Lp1 = Lptim<1>;
 using Lp2 = Lptim<2>;
 using PadC9 = Pin<'C', 9>;   // EXTI line 9's pad: PC9, free of every wire (PB9 carries the I2C self-link's SDA and its pull-up)
@@ -3312,6 +3667,8 @@ bool trgo_once(bool arm) {
     T::update();
     return true;
 }
+
+#if defined(DAC1_BASE)
 
 /// One DAC step through `t`: load DHR, fire, and see whether DOR moved.
 struct DacStep {
@@ -3495,9 +3852,9 @@ void tp_dac_triggers() {
     // the handler this suite already binds clears it - the first version
     // of this leg read 0 and eighteen handler calls, which is the same
     // fact seen from the wrong side.
-    T6::init();
-    const bool pacer = T6::configure({.prescaler = 63, .period = 99}) &&
-                       T6::master(TimMasterMode::update);
+    Pacer::init();
+    const bool pacer = Pacer::configure({.prescaler = 63, .period = 99}) &&
+                       Pacer::master(TimMasterMode::update);
     (void)Dac::clear_underrun(0);
     (void)Dac::enable(0, false);
     const bool udr_armed =
@@ -3507,9 +3864,9 @@ void tp_dac_triggers() {
                            .dma = true}) &&
         Dac::enable(0, true);
     const bool clean_before = !Dac::underrun(0);
-    T6::enable(true);
+    Pacer::enable(true);
     (void)delay_us(clock, 900);
-    T6::enable(false);
+    Pacer::enable(false);
     const bool udr = Dac::underrun(0);
     print(serial, "  DMAUDR1 after a starved stream, interrupt off: ",
           udr ? 1u : 0u, crlf);
@@ -3530,9 +3887,9 @@ void tp_dac_triggers() {
                            .underrun_interrupt = true}) &&
         Dac::enable(0, true);
     Nvic::enable(Dac::irq());
-    T6::enable(true);
+    Pacer::enable(true);
     (void)delay_us(clock, 900);
-    T6::enable(false);
+    Pacer::enable(false);
     const uint32_t calls = dac_underrun_calls;
     print(serial, "  handler calls over the same window: ", calls, crlf);
     bench.verdict("and DMAUDRIE carries it to the vector the DAC shares with "
@@ -3540,9 +3897,18 @@ void tp_dac_triggers() {
                   irq_armed && calls != 0u);
     Nvic::disable(Dac::irq());
     (void)Dac::clear_underrun(0);
-    T6::release();
+    Pacer::release();
     quiet_everything();
 }
+
+#else   // no DAC: letter p is its trigger multiplexer and its underrun
+
+void tp_dac_triggers() {
+    skip_no_dac("16.4.8's other seven trigger rows and the DMA underrun they "
+                "are counted with");
+}
+
+#endif  // DAC1_BASE
 
 
 // =============================================================================
@@ -3559,7 +3925,22 @@ void tp_dac_triggers() {
 #if defined(TIM4_BASE)
 using T4m = Tim<4>;
 #endif
-using PadB11 = Pin<'B', 11>;
+
+// EXTI LINE 11 IS A PAD, AND WHICH PAD IS THE PACKAGE'S ANSWER. Any port
+// may drive line 11 through EXTICR (13.5.11), so the letter takes a pad
+// this package bonds and leaves free: PB11 on the Nucleo-64s, and PA11 on
+// the G031's LQFP32, where port B stops at PB9 (DS12992 table 12).
+#if defined(STM32G031xx)
+using ExtiPad = Pin<'A', 11>;
+constexpr char exti11_port = 'A';
+constexpr const char* exti11_pull_verdict =
+    "PA11 follows its own pull, so EXTI line 11 has an edge";
+#else
+using ExtiPad = Pin<'B', 11>;
+constexpr char exti11_port = 'B';
+constexpr const char* exti11_pull_verdict =
+    "PB11 follows its own pull, so EXTI line 11 has an edge";
+#endif
 
 /// The conversion time of ONE conversion of the CURRENT configuration,
 /// in TIM2 ticks: start, wait for EOC, stop the clock. The letter c
@@ -3582,11 +3963,7 @@ void tq_adc_tail() {
         return;
     }
     stopwatch_up();
-    Dac::claim_pad<PadA4>();
-    (void)Dac::configure(0, {.mode = DacMode::pin_and_internal_buffered});
-    (void)Dac::enable(0, true);
-    (void)Dac::write(0, 2048);
-    (void)delay_us(clock, 200);
+    second_source_up(2048);
 
     // ---- WAIT: the converter paced by its own reader (15.6.1) --------------
     // With CONT set and nothing reading DR, a converter without WAIT
@@ -3695,15 +4072,21 @@ void tq_adc_tail() {
     // ---- DISCONTINUOUS mode: one channel per trigger -----------------------
     // 15.4.1: with DISCEN a trigger converts ONE channel of the sequence
     // and stops. Three distinct sources make the order legible - the
-    // DAC's mid-scale on IN4, the bandgap and the junction sensor - and
-    // a sequence that is NOT discontinuous converts all three on one
+    // DAC's mid-scale on IN4, the bandgap and the junction sensor, and
+    // the divided battery pin in the DAC's place where there is no DAC -
+    // and a sequence that is NOT discontinuous converts all three on one
     // trigger, which is the control.
     Adc::vrefint(true);
     Adc::temperature(true);
+    if constexpr (!dac_present()) {
+        Adc::vbat(true);   // the third source where no pad can be driven
+    }
     (void)delay_us(clock, 200);
     AdcConfig seq = cfg_internal;
     seq.discontinuous = true;
-    const uint32_t mask = (1UL << 4) | (1UL << Adc::vrefint_channel) |
+    constexpr uint32_t third_bit =
+        dac_present() ? (1UL << 4) : (1UL << adc_vbat_channel());
+    const uint32_t mask = third_bit | (1UL << Adc::vrefint_channel) |
                           (1UL << Adc::temperature_channel);
     bool disc_ok = apply(seq);
     disc_ok = disc_ok && Adc::sequence(mask);
@@ -3732,23 +4115,24 @@ void tq_adc_tail() {
     // 15.5.4: with TOVS each trigger produces ONE of the accumulated
     // conversions instead of the whole series, so an x8 oversampler needs
     // eight triggers before its one result. The pacer is the software
-    // start, which makes the count exact.
+    // start, which makes the count exact, and WHICH timer's TRGO carries
+    // it does not matter - only that the timer exists (Pacer, above).
     AdcConfig tovs = cfg_pad;
     tovs.oversampling = true;
     tovs.oversampling_ratio = AdcOversampling::x8;
     tovs.oversampling_shift = 3;
     tovs.triggered_oversampling = true;
-    tovs.trigger = AdcTrigger::tim6_trgo;
+    tovs.trigger = pacer_trgo;
     tovs.trigger_edge = AdcEdge::rising;
     bool tovs_ok = apply(tovs) && Adc::select_sync(In4{});
-    T6::init();
-    tovs_ok = tovs_ok && T6::configure({.prescaler = 63, .period = 199}) &&
-              T6::master(TimMasterMode::update);
+    Pacer::init();
+    tovs_ok = tovs_ok && Pacer::configure({.prescaler = 63, .period = 199}) &&
+              Pacer::master(TimMasterMode::update);
     (void)Adc::clear_flags(AdcFlag::converted | AdcFlag::sequence_done);
     (void)Adc::start();
     uint8_t triggers = 0;
     for (; triggers < 16u; ++triggers) {
-        T6::update();
+        Pacer::update();
         (void)delay_us(clock, 60);
         if (Adc::flag(AdcFlag::converted)) {
             break;
@@ -3756,7 +4140,7 @@ void tq_adc_tail() {
     }
     const uint16_t tovs_result = Adc::result();
     (void)Adc::stop();
-    T6::release();
+    Pacer::release();
     print(serial, "  TOVS: an x8 oversampler needed ", triggers + 1u,
           " triggers for its one result of ", tovs_result, crlf);
     bench.verdict("TOVS makes the TRIGGER pace the accumulation: eight "
@@ -3803,8 +4187,10 @@ void tq_adc_tail() {
         {"TIM4_TRGO", AdcTrigger::tim4_trgo,
          [] { return trgo_once<T4m>(true); }, [] { (void)trgo_once<T4m>(false); }},
 #endif
+#if defined(TIM15_BASE)
         {"TIM15_TRGO", AdcTrigger::tim15_trgo,
          [] { return trgo_once<T15m>(true); }, [] { (void)trgo_once<T15m>(false); }},
+#endif
     };
     uint8_t fired = 0;
     uint8_t tried = 0;
@@ -3830,17 +4216,18 @@ void tq_adc_tail() {
                   hit ? 1u : 0u, crlf);
         }
     }
-    constexpr uint8_t timer_rows = tim_present(4) ? 6u : 5u;
+    constexpr uint8_t timer_rows =
+        4u + (tim_present(4) ? 1u : 0u) + (tim_present(15) ? 1u : 0u);
     print(serial, "  hardware triggers: ", fired, " of ", tried,
           " fired once each and not before (", timer_rows,
           " timer rows on this part)", crlf);
-    if constexpr (!tim_present(4)) {
+    if constexpr (!tim_present(4) || !tim_present(15)) {
         print(serial,
-              "  SKIPPED, no verdict claimed: table 75's TIM4_TRGO row needs "
-              "a TIM4, which this part has not got (tim_present(4) is false - "
-              "the reserve finds no TIM4_BASE in the device header). The "
-              "AdcTrigger enumerator still exists, because the trigger's CODE "
-              "is every part's; the timer behind it is not.",
+              "  SKIPPED, no verdict claimed: table 75's rows for the timers "
+              "this part has not got - TIM4 off the G0B1/G0C1, TIM15 off the "
+              "G031 class (tim_present() is false for each). The AdcTrigger "
+              "enumerators still exist, because a trigger's CODE is every "
+              "part's; the timer behind it is not.",
               crlf);
     }
     bench.verdict("every timer row of table 75 that this part HAS starts a "
@@ -3850,34 +4237,33 @@ void tq_adc_tail() {
                   tried == timer_rows && fired == timer_rows);
 
     // EXTI 11, the one row that is a pad.
-    PadB11::input(PinPull::down);
+    ExtiPad::input(PinPull::down);
     (void)delay_us(clock, 300);
-    const bool b11_low = !PadB11::read();
-    PadB11::input(PinPull::up);
+    const bool b11_low = !ExtiPad::read();
+    ExtiPad::input(PinPull::up);
     (void)delay_us(clock, 300);
-    const bool b11_free = b11_low && PadB11::read();
-    PadB11::input(PinPull::down);
+    const bool b11_free = b11_low && ExtiPad::read();
+    ExtiPad::input(PinPull::down);
     (void)delay_us(clock, 300);
     AdcConfig ec = cfg_pad;
     ec.trigger = AdcTrigger::exti11;
     ec.trigger_edge = AdcEdge::rising;
-    const bool exti_armed = Exti::select(11, 'B') &&
+    const bool exti_armed = Exti::select(11, exti11_port) &&
                             Exti::sense(11, ExtiSense::rising) && apply(ec) &&
                             Adc::select_sync(In4{});
     (void)Adc::clear_flags(AdcFlag::converted | AdcFlag::sequence_done);
     (void)Adc::start();
     const bool exti_quiet = !Adc::flag(AdcFlag::converted);
-    PadB11::pull(PinPull::up);
+    ExtiPad::pull(PinPull::up);
     (void)delay_us(clock, 300);
     const bool exti_hit = Adc::flag(AdcFlag::converted);
     (void)Adc::result();
     (void)Adc::stop();
-    bench.verdict("PB11 follows its own pull, so EXTI line 11 has an edge",
-                  b11_free);
+    bench.verdict(exti11_pull_verdict, b11_free);
     bench.verdict("and that edge starts a conversion: table 75's one pad row",
                   exti_armed && exti_quiet && exti_hit);
     (void)Exti::release(11);
-    PadB11::release();
+    ExtiPad::release();
     quiet_everything();
 }
 
@@ -3894,8 +4280,9 @@ void tq_adc_tail() {
 // left at for far longer than a conversion takes (letter m measured the
 // relaxation in hundreds of milliseconds).
 //
-// The channel numbers are DS13560's table 12 and this file's claim, the
-// same standing as an AF number: no header of this family carries a
+// The channel numbers are the datasheet's table 12 - DS13560's for the
+// Nucleo-64 parts, DS12992's for the G031 - and this file's claim, with
+// the same standing as an AF number: no header of this family carries a
 // pad-to-channel map, so a wrong pairing here would show as a channel
 // that does not follow its pad, which is exactly what the table below
 // would print.
@@ -3945,6 +4332,29 @@ void tr_external_inputs() {
     (void)apply(cfg_pad);
     const uint16_t full = static_cast<uint16_t>(Adc::result_steps());
 
+    // TWELVE FREE PADS, and WHICH twelve is the PACKAGE's answer and not
+    // the device's - the one question in this file the reserve cannot be
+    // asked, because no symbol of a device header carries a bonding map
+    // (stm32g0/pin.hpp says so once for the whole stratum). The Nucleo-64s
+    // reach IN0/1/6..11 and IN15..IN18; the G031's LQFP32 has no PB10 and
+    // up and no PC4/PC5 at all, and its twelve are the DAC's two former
+    // pads plus IN11 on PB7 and IN15/IN16 on PA11/PA12 (DS12992 table 12).
+#if defined(STM32G031xx)
+    static const AdcPadRow rows[] = {
+        adc_pad_row<Pin<'A', 0>>("PA0  IN0", 0),
+        adc_pad_row<Pin<'A', 1>>("PA1  IN1", 1),
+        adc_pad_row<Pin<'A', 6>>("PA6  IN6", 6),
+        adc_pad_row<Pin<'A', 7>>("PA7  IN7", 7),
+        adc_pad_row<Pin<'A', 4>>("PA4  IN4", 4),
+        adc_pad_row<Pin<'A', 5>>("PA5  IN5", 5),
+        adc_pad_row<Pin<'B', 0>>("PB0  IN8", 8),
+        adc_pad_row<Pin<'B', 1>>("PB1  IN9", 9),
+        adc_pad_row<Pin<'B', 2>>("PB2  IN10", 10),
+        adc_pad_row<Pin<'B', 7>>("PB7  IN11", 11),
+        adc_pad_row<Pin<'A', 11>>("PA11 IN15", 15),
+        adc_pad_row<Pin<'A', 12>>("PA12 IN16", 16),
+    };
+#else
     static const AdcPadRow rows[] = {
         adc_pad_row<Pin<'A', 0>>("PA0  IN0", 0),
         adc_pad_row<Pin<'A', 1>>("PA1  IN1", 1),
@@ -3959,7 +4369,29 @@ void tr_external_inputs() {
         adc_pad_row<Pin<'C', 4>>("PC4  IN17", 17),
         adc_pad_row<Pin<'C', 5>>("PC5  IN18", 18),
     };
+#endif
 
+    // HOW BIG A SWING IS UNMISTAKABLY THE PAD'S, and why the number is
+    // per package. The reading is a precharged pad's charge SHARED with
+    // the sample-and-hold, so what the walk sees is never a rail and
+    // always a fraction - and the fraction is the two capacitances'
+    // ratio, which is a BOARD and PACKAGE fact: a Nucleo-64's pad drags
+    // a morpho header and its traces behind it and holds its charge
+    // against the converter, a Nucleo-32's pad holds less. Measured: the
+    // same twelve-row walk swings 203..840 counts of 4096 on the LQFP32
+    // where a sixteenth of full scale (256) is what the bigger boards
+    // clear on every row. The floor is therefore a thirty-second there -
+    // still thirty times the converter's own noise, so a channel that
+    // did NOT move with its pad could not reach it - and a sixteenth
+    // where the bigger boards reach it. What the verdict claims is the
+    // MAP, and the cross-check below is what makes it one.
+#if defined(STM32G031xx)
+    const uint16_t swing_floor = full / 32u;
+#else
+    const uint16_t swing_floor = full / 16u;
+#endif
+    print(serial, "  a swing counts as following the pad above ", swing_floor,
+          " counts of ", full, crlf);
     uint8_t good = 0;
     uint8_t tried = 0;
     for (const AdcPadRow& row : rows) {
@@ -3969,7 +4401,7 @@ void tr_external_inputs() {
         const uint16_t lo =
             precharged_read(row.channel, row.drive, row.to_analog, false);
         const uint16_t swing = hi > lo ? static_cast<uint16_t>(hi - lo) : 0u;
-        const bool ok = swing > full / 16u;
+        const bool ok = swing > swing_floor;
         if (ok) {
             ++good;
         }
@@ -3980,10 +4412,10 @@ void tr_external_inputs() {
           " external inputs follow their own pad, out of ", full,
           " counts full scale", crlf);
     bench.verdict("every external input this package bonds to a free pad "
-                  "follows that pad by a sixteenth of full scale or more - the "
-                  "channel-to-pad table of DS13560 measured rather than "
-                  "trusted, and the swing short of the rails is the "
-                  "sample-and-hold's own charge and not the map's fault",
+                  "follows that pad by the floor printed above - the "
+                  "channel-to-pad table of this part's datasheet measured "
+                  "rather than trusted, and the swing short of the rails is "
+                  "the sample-and-hold's own charge and not the map's fault",
                   tried == 12u && good == 12u);
 
     // THE CROSS-CHECK, which is what makes the table a MAP and not a
@@ -4034,20 +4466,26 @@ extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
+#if defined(COMP1_BASE)
 /// PA6 carries COMP1's output under alternate function 7 in letter n,
 /// and the EXTI line of that pad is the witness that a peripheral
 /// driving a pad is seen by the line exactly as the CPU driving it is.
+/// Nothing else in this suite binds a GPIO line, so on a part with no
+/// comparator this vector is left at the crt's Default_Handler.
 extern "C" void EXTI4_15_IRQHandler() {
     if (OutInt::pending()) {
         (void)OutInt::clear();
         out_pad_edges = out_pad_edges + 1u;
     }
 }
+#endif
 
 /// ONE VECTOR, FOUR SOURCES: the ADC and all three comparators' EXTI
 /// lines (table 61). Every one of them is answered here, each for its own
-/// flags, which is what makes this a dispatcher rather than a handler.
-extern "C" void ADC1_COMP_IRQHandler() {
+/// flags, which is what makes this a dispatcher rather than a handler -
+/// and on a part with no comparator the same body is the ADC's alone,
+/// under the name the reserve derives from that very absence.
+extern "C" void BRIO_STM32G0_ADC1_HANDLER() {
     const uint32_t f = Adc::isr();
     if ((f & brio::AdcFlag::converted) != 0u) {
         adc_eoc_calls = adc_eoc_calls + 1u;
@@ -4069,6 +4507,7 @@ extern "C" void ADC1_COMP_IRQHandler() {
     // ONE LINE PER COMPARATOR THE PART HAS: a part with two comparators
     // has no line 20 at all, and `1u << 0xFF` (the driver's "no such
     // comparator" answer) is not a mask, it is undefined behaviour.
+#if defined(COMP1_BASE)
     constexpr uint32_t comp_lines = (1u << C1::exti_line) | (1u << C2::exti_line) |
                                     comp3_exti_bit();
     const brio::ExtiPending p = brio::Exti::isr(comp_lines);
@@ -4081,10 +4520,14 @@ extern "C" void ADC1_COMP_IRQHandler() {
             comp_exti_falling = comp_exti_falling + 1u;
         }
     }
+#endif
 }
 
-/// The DAC's own line, shared with TIM6 and LPTIM1.
-extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
+#if defined(DAC1_BASE)
+/// The DAC's own line, shared with TIM6 and LPTIM1 - which is why the
+/// reserve spells the NAME by the timer that heads it, and why the macro
+/// is asked for rather than the name written out.
+extern "C" void BRIO_STM32G0_TIM6_HANDLER() {
     if (Dac::isr() != 0u) {
         dac_underrun_calls = dac_underrun_calls + 1u;
     }
@@ -4111,6 +4554,7 @@ extern "C" void DMA1_Channel2_3_IRQHandler() {
         pong_blocks = pong_blocks + 1u;
     }
 }
+#endif  // DAC1_BASE
 
 int main() {
     // Sampled BEFORE anything of ours runs: letter a judges what this boot
@@ -4129,7 +4573,9 @@ int main() {
     RCC->APBENR2 |= RCC_APBENR2_SYSCFGEN;
     (void)RCC->APBENR2;
     boot_vrefbuf_csr = VREFBUF->CSR;
+#if defined(COMP1_BASE)
     boot_comp1_csr = COMP1->CSR;
+#endif
 
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
@@ -4143,39 +4589,73 @@ int main() {
                  tb_scale);
     bench.letter('c', "conversion time exact to the CPU cycle, and ES0548 2.6.4",
                  tc_timing);
+#if defined(DAC1_BASE)
     bench.letter('d', "the zero-length wire: the DAC read back through ADC_IN4",
                  td_zero_length_wire);
     bench.letter('e', "the LED as an analog dimmer, and what its load costs",
                  te_led_dimmer);
+#else
+    bench.letter('d', "SKIPPED, no DAC on this part: the zero-length wire",
+                 td_zero_length_wire);
+    bench.letter('e', "SKIPPED, no DAC on this part: the analog dimmer",
+                 te_led_dimmer);
+#endif
     bench.letter('f', "the sequencer, both faces, and the CCRDY handshake",
                  tf_sequencer);
     bench.letter('g', "the noise floor measured, and then the oversampler",
                  tg_oversampler);
     bench.letter('h', "the three analog watchdogs, and ES0548 2.6.3 staged",
                  th_watchdogs);
+#if defined(COMP1_BASE)
     bench.letter('i', "the comparators: the muxes, the window, EXTI 17, TIM1's TI1",
                  ti_comparators);
+#else
+    bench.letter('i', "SKIPPED, no comparator on this part: chapter 18 whole",
+                 ti_comparators);
+#endif
     bench.letter('j', "AnalogSampler inside a real kernel, three inputs",
                  tj_sampler_ao);
+#if defined(DAC1_BASE)
     bench.letter('k', "the no-CPU chain: one TRGO, both converters, two DMA engines",
                  tk_chain);
+#else
+    bench.letter('k', "SKIPPED, no DAC and no basic timer here: the no-CPU chain",
+                 tk_chain);
+#endif
     bench.letter('l', "the errata pass: ES0548 2.6.2 staged with a control",
                  tl_errata);
+#if defined(COMP1_BASE)
     bench.letter('m', "the comparator's analog questions: the DAC as the "
                  "threshold, the offset, the four hysteresis levels, both "
                  "propagation delays, and the window's INSIDE state",
                  tm_comp_analog);
     bench.letter('n', "COMP2 and COMP3 on their own pads, the output ON a "
                  "pad, and the other blanking sources", tn_comp_pads);
+#else
+    bench.letter('m', "SKIPPED, no comparator on this part: its analog questions",
+                 tm_comp_analog);
+    bench.letter('n', "SKIPPED, no comparator on this part: their own pads",
+                 tn_comp_pads);
+#endif
+#if defined(DAC1_BASE)
     bench.letter('p', "the DAC's remaining triggers, and the DMA underrun",
                  tp_dac_triggers);
+#else
+    bench.letter('p', "SKIPPED, no DAC on this part: its trigger multiplexer",
+                 tp_dac_triggers);
+#endif
     bench.letter('q', "the ADC's tail: WAIT and AUTOFF, the async clock's "
                  "other root, discontinuous, TOVS, and the seven triggers",
                  tq_adc_tail);
     bench.letter('r', "the external analog inputs: one table, both rails",
                  tr_external_inputs);
+#if defined(DAC1_BASE)
     bench.letter('o', "the DAC's tail: both wave generators, the user offset "
                  "calibration, and sample-and-hold on LSI", to_dac_tail);
+#else
+    bench.letter('o', "SKIPPED, no DAC on this part: its three unrun halves",
+                 to_dac_tail);
+#endif
 
     if (serial_ok) {
         const auto idcode = brio::DeviceIdcode::read();

@@ -254,6 +254,23 @@ the critical section, SysTick's arithmetic, `delay_us`, and both
 watchdogs. Nothing in this chapter is per-part on the x1 line, and the
 `i` letter's six real resets behave the same way.
 
+## On the third silicon
+
+`test_stm32_platform`'s letter `i` runs its six real resets on the
+Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003) and scores **26/26**: the
+software reset, the IWDG time-out, the WWDG window violation, the panic
+through `ResetReporter`, the deliberate HardFault and the WWDG time-out,
+with the .noinit token crossing all six intact and the flags
+accumulating as they do elsewhere. The IWDG time-out measures this die's
+LSI at **31400 Hz** ([platform.md](platform.md)).
+
+**AND ON THIS BOARD THE RESET IS ALSO THE ONLY WAY BACK IN.** Its debug
+port does not attach ([bench.md](../bench.md)), so nothing can be halted
+or reset from the host; a wedged image is recovered by flashing another
+through the ST-LINK's mass-storage flasher, which resets the part under
+NRST. That is what brought the board back from the Shutdown its sleep
+letter entered before the skip existed ([pwr.md](pwr.md)).
+
 ## Not covered yet
 
 Driver gaps (this chapter's option space the stratum does not touch):

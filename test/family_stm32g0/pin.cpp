@@ -27,6 +27,9 @@ static_assert(!PinSel{'G', 0, PinFunction::af1}.valid());
 
 void pin_verbs() {
     Led::output();
+    // The level-first output: its contract is that the PORT CLOCK is
+    // opened before the level store, so the level lands on a port nothing
+    // else has configured yet (a store into an unclocked port is dropped).
     Led::output(true);
     Led::set();
     Led::clear();
@@ -59,4 +62,14 @@ void pin_verbs() {
     Port<'A'>::out_toggle(0x3);
     Port<'A'>::configure_mask(0x3, PinMode::alternate, {.pull = PinPull::up}, PinFunction::af1);
     PinSet<Led, B0>::configure(PinMode::input);
+
+    // The Type-C dead-battery pull-down, from both sides: the reserve's
+    // presence probe (a constant on every header) and the verb, which
+    // REFUSES on a part with no UCPD rather than writing a strobe bit
+    // that is not there.
+    static_assert(ucpd_present(1) || !ucpd_present(1));
+    (void)ucpd_present(1);
+    (void)ucpd_present(2);
+    (void)ucpd_dead_battery(1, false);
+    (void)ucpd_dead_battery(2, false);
 }

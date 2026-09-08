@@ -421,6 +421,17 @@ and a journal's ordinary save 3 ms, where the two-bank arrangement costs
 nothing at all (the read-while-write measurement above). Until that
 question is answered, the two suites build for `g0b1re` only.
 
+## On the third silicon
+
+The Nucleo-G031K8 has **64 KB of flash in ONE bank**, so it is the G071's
+case again and for the same reason: `test_stm32_nvm` and
+`test_stm32_journal` stay the G0B1RE's, there being no second bank to
+keep a storage attic in and no answer yet to what a single-bank geometry
+should do (an erase stalls the bank the program is executing from). The
+flash driver itself compiles and runs there - every suite of that board
+is linked against it, and `FlashWaitStates` at two states is what 64 MHz
+asks for on this die as on the others.
+
 ## Not covered yet
 
 Driver gaps:

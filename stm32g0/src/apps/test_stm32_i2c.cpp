@@ -115,12 +115,13 @@
 // not reset. The pads this suite moves are the four of the I2C
 // self-link plus the console's two.
 //
-// build: boards = g0b1re,g071rb
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
 
 #include <optional>
+#include <type_traits>
 
 #include "kernel/kernel.hpp"
 #include "kernel/post.hpp"
@@ -130,6 +131,7 @@
 #include "stm32g0/delay.hpp"
 #include "stm32g0/dma.hpp"
 #include "stm32g0/i2c.hpp"
+#include "stm32g0/lpuart.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/pin.hpp"
 #include "stm32g0/platform.hpp"
@@ -162,11 +164,40 @@ using Mid = Clock<ClockSource::internal, 16'000'000, PowerRegime::range2>;
 using Slow = Clock<ClockSource::internal, 2'000'000, PowerRegime::low_power_run>;
 
 constexpr UartOptions console_opts{.kernel_clock = UsartClock::hsi16};
+
+// AND ON A PART WHOSE USART2 HAS NO KERNEL-CLOCK MULTIPLEXER, THAT COSTS
+// A DIFFERENT PERIPHERAL. Table 183's FULL/BASIC split moves with the
+// part: where USART2 is BASIC it runs on PCLK, full stop - its divisor
+// would follow every switch this suite makes and the report would be a
+// function of its own subject. The instance that always has a
+// multiplexer is the LPUART (34.4.6), and LPUART1_TX/RX reach THE SAME
+// TWO PADS at AF6 - the shape test_stm32_serial's letter v proves on the
+// G0B1. So the console moves to LPUART1 exactly where USART2's
+// multiplexer is missing. The HANDLER has to be chosen by the
+// preprocessor, which cannot call a constexpr function, so the same
+// header symbol the reserve probes for usart_has_clock_select(2) is
+// probed here and the static_assert keeps the two answers one answer.
+#if defined(RCC_CCIPR_USART2SEL_Pos)
+#define BRIO_SUITE_CONSOLE_HANDLER BRIO_STM32G0_USART2_HANDLER
+constexpr bool console_on_lpuart = false;
+constexpr PinFunction console_af = PinFunction::af1;
+#else
+#define BRIO_SUITE_CONSOLE_HANDLER BRIO_STM32G0_LPUART1_HANDLER
+constexpr bool console_on_lpuart = true;
+constexpr PinFunction console_af = PinFunction::af6;
+#endif
+static_assert(console_on_lpuart == !usart_has_clock_select(2),
+              "the console's instance and the reserve's own column must be "
+              "one answer");
+
 constexpr UartPins console_pins{
-    .tx = {'A', 2, PinFunction::af1},
-    .rx = {'A', 3, PinFunction::af1},
+    .tx = {'A', 2, console_af},
+    .rx = {'A', 3, console_af},
 };
-using Serial = Uart<2, console_pins, 64, 512, NoDmaEngine, NoDmaEngine, console_opts>;
+using Serial = std::conditional_t<
+    console_on_lpuart,
+    LpUart<1, console_pins, 64, 512, NoDmaEngine, NoDmaEngine, console_opts>,
+    Uart<2, console_pins, 64, 512, NoDmaEngine, NoDmaEngine, console_opts>>;
 
 // The self-link's pads (DS13560 tables 13 and 15). Both pairs are AF6;
 // PB8/PB9 are plain FT_f pads and PA11/PA12 are FT_fus - "supplied from
@@ -707,7 +738,28 @@ bool wire_follows() {
     return low && high;
 }
 
+// AND ON A BOARD WITH NO WIRES ON IT AT ALL, NEITHER LINK CAN EXIST.
+// The self-link is two jumpers between I2C1's pads and I2C2's and the
+// peer link is two more to another board; a bench position that carries
+// neither has no bus but the one inside the chip. So there the letters
+// whose instrument is a wire are COMPILED OUT rather than skipped at run
+// time - each still printing its own reason and claiming nothing - and
+// an absent PEER is not reported as firmware to flash, because no wire
+// was ever there to carry it. Which device header is compiled is the one
+// question only the preprocessor can ask, and what desk goes with it is
+// this suite's own knowledge.
+#if defined(STM32G031xx)
+constexpr bool wires_possible = false;
+#else
+constexpr bool wires_possible = true;
+#endif
+
 bool probe_self_link() {
+    if constexpr (!wires_possible) {
+        print(serial, "  self-link probe: not asked - this board carries no "
+              "wires at all, on these pads or any others", crlf);
+        return false;
+    }
     const bool scl = wire_follows<SclPin, PeerSclPin>();
     const bool sda = wire_follows<SdaPin, PeerSdaPin>();
     print(serial, "  self-link probe: SCL ", scl, " SDA ", sda, crlf);
@@ -716,6 +768,15 @@ bool probe_self_link() {
 
 /// The opening line of every letter whose second node is I2C2.
 bool need_self_link() {
+    if constexpr (!wires_possible) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: this letter's second node is the "
+              "board's OWN I2C2 client on two jumpers, and this board carries "
+              "no wires at all. The letter is compiled out here, not merely "
+              "skipped.",
+              crlf);
+        return false;
+    }
     if (self_link) {
         return true;
     }
@@ -883,6 +944,15 @@ bool ensure_link() {
 /// other desk. An absent peer with the wires in place is a different
 /// thing - firmware to flash - and fails loudly.
 bool need_peer() {
+    if constexpr (!wires_possible) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: this letter's instrument is a "
+              "PEER BOARD on two wires, and this board has none - so nothing "
+              "here is an absent peer's fault and no failure is claimed from "
+              "a link that was never wired.",
+              crlf);
+        return false;
+    }
     if (self_link) {
         print(serial,
               "  SKIPPED, no verdict claimed: this letter's instrument is the "
@@ -1144,6 +1214,10 @@ void ta_block() {
 // ===========================================================================
 
 void tb_link() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -1222,6 +1296,10 @@ void tb_link() {
 // ===========================================================================
 
 void tc_vocabulary() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -1329,6 +1407,10 @@ uint32_t measure_scl_ns(uint8_t n, I2cSpeed s, uint8_t& status) {
 }
 
 void td_speeds() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -1575,6 +1657,10 @@ void td_speeds() {
 // ===========================================================================
 
 void te_stretch() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -1672,6 +1758,10 @@ void te_stretch() {
 // ===========================================================================
 
 void tf_addressing() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -1771,6 +1861,10 @@ void tf_addressing() {
 // ===========================================================================
 
 void tg_filters() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -1853,6 +1947,10 @@ void tg_filters() {
 // ===========================================================================
 
 void th_long() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -2008,6 +2106,10 @@ void th_long() {
 // ===========================================================================
 
 void ti_smbus() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -2216,6 +2318,10 @@ void ti_smbus() {
 
 
 void tj_wake() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -2296,6 +2402,10 @@ void tj_wake() {
 // ===========================================================================
 
 void tk_unstick() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -2457,6 +2567,10 @@ Host::Request request(uint8_t addr, const uint8_t* tx) {
 }  // namespace kl
 
 void tl_kernel() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -2645,6 +2759,10 @@ void tm_errata() {
 // it is kept because the next person will need it too.
 
 void tx_trace() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -2711,6 +2829,10 @@ void tx_trace() {
 /// before a word is printed - so a storm is counted and named instead of
 /// starving the console that would report it.
 void ty_isr_trace() {
+    if constexpr (!wires_possible) {
+        (void)need_self_link();
+        return;
+    }
     if (!need_self_link()) {
         return;
     }
@@ -2770,6 +2892,10 @@ void ty_isr_trace() {
 // ===========================================================================
 
 void tn_peer_link() {
+    if constexpr (!wires_possible) {
+        (void)need_peer();
+        return;
+    }
     if (!need_peer()) {
         return;
     }
@@ -2812,6 +2938,10 @@ void tn_peer_link() {
 // ===========================================================================
 
 void to_peer_shapes() {
+    if constexpr (!wires_possible) {
+        (void)need_peer();
+        return;
+    }
     if (!need_peer()) {
         return;
     }
@@ -2894,6 +3024,10 @@ void to_peer_shapes() {
 // ===========================================================================
 
 void tp_peer_vocabulary() {
+    if constexpr (!wires_possible) {
+        (void)need_peer();
+        return;
+    }
     if (!need_peer()) {
         return;
     }
@@ -2991,6 +3125,10 @@ void tp_peer_vocabulary() {
 // ===========================================================================
 
 void tq_peer_speeds() {
+    if constexpr (!wires_possible) {
+        (void)need_peer();
+        return;
+    }
     if (!need_peer()) {
         return;
     }
@@ -3064,6 +3202,10 @@ void tq_peer_speeds() {
 // ===========================================================================
 
 void tr_peer_kernel() {
+    if constexpr (!wires_possible) {
+        (void)need_peer();
+        return;
+    }
     if (!need_peer()) {
         return;
     }
@@ -3240,7 +3382,7 @@ void banner() {
 }  // namespace
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
-extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
+extern "C" void BRIO_SUITE_CONSOLE_HANDLER() { (void)Serial::isr(); }
 
 /// I2C1's line is its own. Which host owns it is a flag, because two
 /// I2cHost instantiations over one instance share the peripheral and not

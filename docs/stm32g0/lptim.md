@@ -459,6 +459,40 @@ signal, so `lptim_config_valid(1, {.trigger = comp3_out})` is FALSE there
 The corresponding ES0418 items are 2.9.1 and 2.9.2, word for word the
 G0B1's 2.8.1 and 2.8.2, and both are answered the same way.
 
+## On the third silicon
+
+`test_stm32_lptim` scores **78 of 82** on the Nucleo-G031K8 (DEV_ID
+0x466, REV_ID 0x1003). The four not claimed are each a skip by name:
+the LSE row of the kernel-clock table and the LSE row of table 145 (this
+board's crystal does not start), and two comparator routes - IN1SEL =
+COMP1_OUT and the comparator OR - because **this part has no COMP at
+all**, so the type cannot even be named and those legs are compiled out.
+
+**BOTH LPTIMs HAVE A VECTOR OF THEIR OWN HERE.** LPTIM1's is shared with
+TIM6 and the DAC where those exist and is LPTIM1's alone where they do
+not; LPTIM2's is shared with TIM7 or is LPTIM2's own - so letter `j`'s
+"one vector, two owners" leg skips (`tim_present(7)` is false) and the
+vector verdict is the reserve's derivation itself: `lptim_irq(2)` is not
+`lptim_irq(1)`, and it equals `tim_irq(7)` exactly where there is a TIM7.
+The suite reaches both handlers through `BRIO_STM32G0_LPTIM1_HANDLER`
+and `BRIO_STM32G0_LPTIM2_HANDLER`, which is not decoration: bound by the
+G0B1's own names this image would have been DEAD on this part, both
+vectors unbound.
+
+**LPTIM2'S THREE PADS ARE A PACKAGE QUESTION**: PD6/PC0/PC3 at AF2 on
+the LQFP64s, and **PA4 (OUT), PB1 (IN1) and PA5 (ETR) at AF5** on the
+LQFP32, which bonds neither port D nor PC0..PC5 (DS12992 table 12,
+tables 13-17 for the functions).
+
+**THE ROOT IS LSI AND ITS RATE IS MEASURED, NOT ASSUMED**: 31496 Hz on a
+TIM16 capture at boot, and every band that quoted the crystal is
+computed from that number instead - which on a crystal board reduces to
+the same integers it always had. The kernel-clock census reads the LSI
+at 31400 counts a second against the 31496 measured (3 per mille), and
+the Stop letter reads 7458 counts across a 236 ms Stop 1 - 31601 a
+second against 31496 running, which is the same oscillator seen through
+two instruments.
+
 ## Not covered yet
 
 Driver gaps - things chapter 26 has and this file does not:

@@ -149,6 +149,53 @@ BOARDS = {
         "console": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066FFF534871754867235316-if02",
         "programmer": {"type": "openocd_stlink", "serial": "066FFF534871754867235316"},
     },
+    "G": {
+        # The second silicon's OTHER HALF: an ST Nucleo-G031K8, a Nucleo-32
+        # (no board number verified, so no connector numbering is recorded
+        # and nothing on it is wired). STM32G031K8, Cortex-M0+, 64 KB
+        # single-bank flash, 8 KB SRAM, LQFP32: DBGMCU_IDCODE 0x10036466
+        # (DEV_ID 0x466 = G031/G041, REV_ID 0x1003), FLASHSIZE 0x0040 = 64 KB,
+        # RCC_CSR 0x0C000000 at first contact, target voltage 3.20 V, the
+        # ST-LINK/V2.1 at firmware V2J46M33 - all read over SWD at the first
+        # plug-in (2026-09-08). The ST-LINK's virtual COM port on USART2
+        # PA2/PA3 at 115200 is VERIFIED by the console's banner answering on
+        # it; LD3 on PC6 is UM2591's and is driven by every app, but no hand
+        # was at the desk to see it blink. THE LSE CRYSTAL DOES NOT START:
+        # LSEON at the lowest and then at the highest drive left LSERDY
+        # clear for fifteen seconds (measured by firmware, not assumed), so
+        # this board has no 32768 Hz reference and its RTC domain runs on
+        # LSI (the domain was left with LSEON and LSEDRV = 11 written).
+        #
+        # THE DEBUG PORT DOES NOT ATTACH, and this is the desk fact that
+        # shapes the entry. The SW-DP answered twice at first contact
+        # (IDCODE, UID, the RCC and PWR registers, PC6 sampled) and went
+        # silent at a write of RCC_BDCR.LSEON with the core halted; since
+        # then OpenOCD (hla_swd and dapdirect, plain and under reset, 100 kHz
+        # to 2 MHz) and pyOCD (attach, halt, under-reset) all get the probe's
+        # own status 5 "no device connected", through two USB-port power
+        # cycles that provably reset the part (RCC_BDCR came back empty).
+        # Meanwhile the ST-LINK's OWN mass-storage flasher programs the part
+        # every time (a garbage file draws a FAIL.TXT, a good image leaves
+        # none and its banner appears), and firmware polling PA14/PA13 sees
+        # the probe's clock and data edges arrive during a failed attempt -
+        # so the pins are driven and the DP does not acknowledge. To be
+        # looked at by a hand: the USB cable and port, the SWD solder
+        # bridges, a second probe on PA13/PA14. UNTIL THEN THE PROGRAMMER IS
+        # THE MSD: tools/bench.py's `stlink_msd` kind drops the .bin on the
+        # NODE_G031K8 drive, and nothing on this position can be halted,
+        # read over SWD or have DBGMCU_CR cleared (it was never set: no
+        # examine succeeded after the power cycles). The suites run through
+        # the console exactly as on E and F.
+        #
+        # IDENTITY: the 96-bit unique device ID at 0x1FFF7590, read over SWD
+        # at first contact - the same mechanism as E's and F's.
+        "board": "g031k8",
+        "id": None,
+        "device_uid": "007f0063-34315014-20323346",
+        "console": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066FFF313541483043191236-if02",
+        "programmer": {"type": "stlink_msd", "serial": "066FFF313541483043191236",
+                       "label": "NODE_G031K8"},
+    },
     "A": {
         # The original bench board: AVR128DB48, 24 MHz crystal on PA0/PA1,
         # CH340 on USART2 ALT1 (PF4/PF5). See docs/bench.md.

@@ -524,6 +524,49 @@ short pulses) and 2.8.5 (a sync trigger missed with a faster master
 clock) are not reached: no letter sets BKBID, and one clock feeds every
 timer.
 
+## On the third silicon
+
+`test_stm32_tim` scores **108 of 118** on the Nucleo-G031K8 (DEV_ID
+0x466, REV_ID 0x1003). WHAT THIS PART HAS NOT GOT is four of the ten
+instances - TIM4, TIM6, TIM7 and TIM15 - so ten verdicts are skipped by
+name with `tim_present(n)` printed beside each: TIM4's counter, its four
+channels and TIM3's shared vector (4), TIM6's and TIM7's and TIM15's
+counters (1 each), what a BASIC timer IS (a claim about TIM6 and TIM7
+together, and this part has neither), and TIM15's complementary pair
+with its dead time (2 - which needs both the instance AND PB13/PB14/PB15,
+and the LQFP32 bonds none of those three).
+
+**THE BOARD LED IS A PAD, A CHANNEL AND AN EXTI LINE AT ONCE.** Letter
+`c` reads a PWM back through the pad the timer drives and counts its
+edges on that pad's own EXTI line: LD4 = PA5 = TIM2_CH1 = line 5 on the
+Nucleo-64s, LD3 = **PC6 = TIM2_CH3 = line 6** on the Nucleo-32
+(DS12992 table 16), both lines reporting on EXTI4_15. The duties read
+back 0/250/500/750/1000 per mille exactly and 200 rising edges arrive in
+200002 us, so the finding those letters carry - that an EXTI line sees a
+pad a PERIPHERAL is driving - holds on the third die and on a second
+port.
+
+**AND THE SAME LETTER IS WHERE A GPIO RULE IS MEASURED** - the one in
+[port.md](port.md) that a configuring verb opens the port's clock before
+any store it makes, the level store included: `Pin::output(true)` on the
+LED's pad is the FIRST touch of port C on this board (the console opens
+port A, and nothing before letter `a` opens C), and the pad reads HIGH
+after it, low when driven low. On the Nucleo-64s the same check runs on
+a port the console has long opened and can tell nothing.
+
+**THE ERRATUM LETTER NAMES NO NUMBER IT HAS NOT READ.** The G031's sheet
+is ES0487 and it was not in hand: letter `k` stages the G0B1's 2.7.2 by
+its own mechanism and records the outcome as measured ON THIS DIE - the
+second compare of two consecutive counter cycles raised its flag and
+toggled its output all eight rounds, so the described behaviour did not
+reproduce here either - with ES0487's twin named as pending. 2.7.1 and
+2.7.3 stay stated and unreachable, the second one doubly so: this part
+has no comparator to drive `ocref_clr` with.
+
+LSI on TIM16's capture reads **31434 Hz** here (E 32586, F 32339), and
+the cross-check is against the watchdog-timed figure of the SAME die
+(31400) rather than one board's number.
+
 ## Not covered yet
 
 Driver gaps: encoder and hall-sensor modes (`SMS` 1..3 are spelled and refused

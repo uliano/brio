@@ -504,6 +504,45 @@ and scores **125/125**, the same letters and the same verdicts.
   driving the detector through the precharge and the board's own pulls
   rather than through a port output.
 
+## On the third silicon
+
+`test_stm32_rtc` scores **106 of 125** in `z` on the Nucleo-G031K8
+(DEV_ID 0x466, REV_ID 0x1003), with `w` 11/11 and `v` 4/4 outside it.
+**THE CRYSTAL DOES NOT START ON THIS BOARD** - LSEON at both drives for
+fifteen seconds left LSERDY clear - so letter `a` takes the LSI fallback
+it has always had, letter `b` reports the absence and declines its
+crystal verdicts, and every rate this suite quotes is measured against
+the core: **LSI 31465 Hz unfiltered, 31496 filtered** (E: 32536/32586,
+F: 32295/32339).
+
+**RTC_REFIN IS OUT OF REACH ON THIS PACKAGE.** The function has ONE pad
+on every G0 of this pack - PB15 - and the LQFP32 bonds no PB15 (DS12992
+table 12), so letter `k` skips whole: with nothing on the pad, REFCKON
+would be a calendar corrected by noise.
+
+**THE SMOOTH CALIBRATION'S "does not reach the divided clocks" LEG NEEDS
+A CRYSTAL.** It reads a swing as ZERO, and on an RC root the oscillator's
+own wander between two windows thirty seconds apart is the size of the
+effect: measured 368 ppm against a ck_spre swing of 943 ppm (30.3.13's
+own range is 975). The ck_spre half - which measures a swing rather than
+the absence of one - stands; the divided-clock comparison is printed and
+DECLINED on a non-crystal root.
+
+**THE TAMPER LETTER'S LEVEL IS A PACKAGE FACT, AND THE PRECHARGE IS
+ITSELF AN EDGE.** Every filtered-detector latency is timed from the
+ARMING over a pad standing at the active level, and on a package that
+bonds PC13 that pad is TAMP_IN1 = the user button, held high by the
+board. The LQFP32's TAMP_IN1 is PA4, which nothing outside holds:
+measured there, an active-high detector with the precharge OFF never
+fires (a floating node reading low) and the same detector WITH 31.3.4's
+precharge fires after 20444 us at two samples of 128 Hz. So the
+precharge is what gives this package a dependable level - and it is also
+why 31.3.4's edge caution cannot be staged here: arming the detector IS
+the edge (a rising-edge detector fires 3 us after the arming, a
+falling-edge one never), which says nothing about a detector armed over
+a level that was already there. Both legs skip by name with their
+readings printed.
+
 ## Not covered yet
 
 Driver gaps (this chapter's option space the stratum does not touch):

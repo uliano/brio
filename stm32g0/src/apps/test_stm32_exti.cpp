@@ -62,7 +62,7 @@
 //      object receives
 //   u  the user button as a plain input
 //
-// build: boards = g0b1re,g071rb
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -111,6 +111,19 @@ using PadB3 = Pin<'B', 3>;
 using PadB7 = Pin<'B', 7>;
 using PadA8 = Pin<'A', 8>;
 using PadButton = Pin<'C', 13>;
+
+// THE USER BUTTON IS A BOARD-AND-PACKAGE FACT and not a part one: B1
+// sits on PC13 on the Nucleo-64s, while the LQFP32 does not bond PC13 at
+// all (DS12992 table 12) and the Nucleo-32 carries no user button.
+// Which device header is compiled is the one question only the
+// preprocessor can ask, and what package goes with it is this suite's
+// own knowledge - the reserve answers about the die, never about the
+// plastic.
+#if defined(STM32G031xx)
+constexpr bool button_bonded = false;
+#else
+constexpr bool button_bonded = true;
+#endif
 
 using IntA0 = ExtInt<PadA0>;
 using IntB0 = ExtInt<PadB0>;
@@ -328,11 +341,13 @@ void ta_block() {
           exti_rtsr2() != nullptr, "; line 34 implemented ",
           Exti::implemented(34), " configurable ", Exti::configurable(34), crlf);
     bench.verdict("this part has the second register group's MASK registers "
-                  "wherever it has a line above 31 at all, and its TRIGGER "
+                  "exactly where it has a line above 31 at all - none at all "
+                  "on a part whose lines stop at 31 - and its TRIGGER "
                   "registers exactly where one of those lines is "
-                  "configurable - the reserve answering with a pointer that "
-                  "is null when the register is not there",
-                  exti_imr2() != nullptr &&
+                  "configurable; the reserve answers each with a pointer "
+                  "that is null when the register is not there",
+                  (exti_imr2() != nullptr) == (exti_implemented_mask2 != 0u) &&
+                      (exti_emr2() != nullptr) == (exti_implemented_mask2 != 0u) &&
                       (exti_rtsr2() != nullptr) == (exti_configurable_mask2 != 0u) &&
                       Exti::configurable(34) == ((exti_configurable_mask2 >> 2) & 1u));
 
@@ -369,17 +384,25 @@ void ta_block() {
                   "configurable line unmasked",
                   (boot_imr1 & exti_implemented_mask1) == direct1);
     if (residue != 0u) {
-        print(serial, "  THE PRINTED NUMBER IS WHAT THIS DIE HOLDS: IMR1 "
-              "resets to 13.5.12's own 0xFFF80000 whatever the part's line "
-              "count, so every bit above the implemented mask reads 1 here. "
-              "13.5.12 states a RULE in words and prints a NUMBER beside it; "
-              "the two dies of this family each obey a different one, and "
-              "neither reading changes what an unimplemented mask bit does, "
-              "which is nothing.", crlf);
+        print(serial, "  AND THE BITS ABOVE THE IMPLEMENTED MASK ARE NOT "
+              "ZERO ON THIS DIE, whatever the line count says: they hold ",
+              hex(residue), ", so the whole register reads ", hex(boot_imr1),
+              " where 13.5.12 PRINTS 0xFFF80000 and states a different rule "
+              "in words beside it. The dies of this family hold different "
+              "numbers up there and the same one over the lines they "
+              "implement, which is the verdict above; an unimplemented mask "
+              "bit does nothing whichever way it reads.", crlf);
     }
-    bench.verdict("and so did IMR2, over the lines this part implements up "
-                  "there",
-                  (boot_imr2 & exti_implemented_mask2) == direct2);
+    if (exti_implemented_mask2 != 0u) {
+        bench.verdict("and so did IMR2, over the lines this part implements "
+                      "up there",
+                      (boot_imr2 & exti_implemented_mask2) == direct2);
+    } else {
+        print(serial, "  SKIPPED, no verdict claimed: IMR2's reset value "
+              "needs a line above 31, and this part implements none "
+              "(exti_implemented_mask2 is zero - the reserve finds no "
+              "EXTI_IMR2_IM_Msk, and the register does not exist).", crlf);
+    }
     bench.verdict("EMR1 came up at zero (no CPU event is unmasked)",
                   boot_emr1 == 0u);
     bench.verdict("no trigger was selected before this suite ran",
@@ -468,15 +491,20 @@ void tb_stimulus() {
     bench.verdict("so is PB3", pad_follows_pull<PadB3>());
     bench.verdict("so is PB7", pad_follows_pull<PadB7>());
     const bool pa8_free = pad_follows_pull<PadA8>();
-    print(serial, "  PA8 is UCPD1_CC1: SYSCFG's dead-battery strobe ",
-          rd_released ? "released the Rd" : "WAS NOT AVAILABLE",
-          " before the check, and the pad ", pa8_free ? "follows" : "DOES NOT follow",
+    print(serial, "  PA8 on a part with a UCPD is UCPD1_CC1: this one ",
+          ucpd_present(1) ? "HAS one" : "has none",
+          ", SYSCFG's dead-battery strobe ",
+          rd_released ? "released the Rd" : "answered false (nothing to release)",
+          ", and the pad ", pa8_free ? "follows" : "DOES NOT follow",
           " its own pull", crlf);
-    bench.verdict("and so does PA8, ONCE THE TYPE-C DEAD-BATTERY PULL-DOWN IS "
-                  "RELEASED - 7.3.16 connects an Rd to UCPD1_CC1 out of a "
-                  "power-on, and the strobe this letter spends first is what "
-                  "makes the pad's own 40 k pull-up the strongest thing on it",
-                  rd_released && pa8_free);
+    bench.verdict("and so does PA8 - on a part with a UCPD only once the "
+                  "TYPE-C DEAD-BATTERY PULL-DOWN IS RELEASED (7.3.16 connects "
+                  "an Rd to UCPD1_CC1 out of a power-on, and the strobe this "
+                  "letter spends first is what makes the pad's own 40 k "
+                  "pull-up the strongest thing on it), and on a part with no "
+                  "UCPD with nothing on the pad to release and the verb "
+                  "REFUSING rather than writing a bit that is not there",
+                  pa8_free && rd_released == ucpd_present(1));
 
     // The two line-0 pads must be electrically independent or letter e
     // measures nothing.
@@ -1030,6 +1058,15 @@ void th_kernel() {
 // measure, and because it is the one EXTI line on this Nucleo that a
 // human can exercise by hand.
 void tu_button() {
+    if constexpr (!button_bonded) {
+        print(serial, "  SKIPPED, no verdict claimed: the user button needs "
+              "PC13, and this package does not bond it (DS12992 table 12 - "
+              "the LQFP32's port C is PC6, PC14 and PC15 and nothing else); "
+              "the board it sits on has no user button either. Nothing here "
+              "names a pad the package has not got, so line 13 is left "
+              "alone: an unbonded pad's level is not a reading.", crlf);
+        return;
+    }
     PadButton::input(PinPull::down);
     settle();
     const bool with_pulldown = PadButton::read();
@@ -1127,7 +1164,13 @@ int main() {
     // EXTI's reset values, and every verb of this suite writes some of
     // these registers.
     boot_imr1 = brio::Exti::regs().IMR1;
-    boot_imr2 = brio::Exti::regs().IMR2;
+    // THE SECOND GROUP IS NOT ON EVERY PART, so the register is reached
+    // through the reserve's POINTER and not by name: a part with no line
+    // above 31 has no IMR2 member at all, and `EXTI->IMR2` there is a
+    // compile error and not a zero.
+    if (const volatile uint32_t* imr2 = brio::exti_imr2(); imr2 != nullptr) {
+        boot_imr2 = *imr2;
+    }
     boot_emr1 = brio::Exti::regs().EMR1;
     boot_rtsr1 = brio::Exti::regs().RTSR1;
     boot_exticr0 = brio::Exti::regs().EXTICR[0];

@@ -1273,8 +1273,14 @@ inline volatile uint32_t* exti_rpr2() {
     return nullptr;
 #endif
 }
+/// FPR2's probe takes BOTH spellings of its line-34 flag: the G0B1
+/// header of this pack names the falling-pending bit EXTI_FPR2_RPIF34
+/// (CMSIS's own slip - the register is FPR2, the field is copied from
+/// RPR2's), and a header that corrects it will name it FPIF34. Probed
+/// on one alone, the register was a null pointer on the very part that
+/// has it - measured by test_stm32_exti's letter a on the G0B1RE.
 inline volatile uint32_t* exti_fpr2() {
-#if defined(EXTI_FPR2_FPIF34_Msk)
+#if defined(EXTI_FPR2_FPIF34_Msk) || defined(EXTI_FPR2_RPIF34_Msk)
     return &EXTI->FPR2;
 #else
     return nullptr;
@@ -1287,8 +1293,14 @@ inline volatile uint32_t* exti_imr2() {
     return nullptr;
 #endif
 }
+/// EMR2 has no aggregate EM_Msk in any header of the pack (IMR2 has its
+/// IM_Msk; EMR2 is spelled per line, EM32..EM36), so the probe is the
+/// first line's mask - present on exactly the headers that declare the
+/// register (the G071 class and up). Probed on the aggregate, the
+/// pointer was null on EVERY part, the G0B1 included - measured by
+/// test_stm32_exti's letter a.
 inline volatile uint32_t* exti_emr2() {
-#if defined(EXTI_EMR2_EM_Msk)
+#if defined(EXTI_EMR2_EM32_Msk)
     return &EXTI->EMR2;
 #else
     return nullptr;
@@ -2310,6 +2322,31 @@ constexpr uint32_t vrefbuf_base() {
 }
 
 constexpr bool vrefbuf_present() { return vrefbuf_base() != 0u; }
+
+// ---- UCPD, from the one side a GPIO cares about ----------------------------
+
+/// Whether this device has UCPDn (n = 1..2) - and with it the Type-C
+/// DEAD-BATTERY pull-down 7.3.16 connects to that instance's CC pads out
+/// of a power-on and holds there until SYSCFG's strobe releases it.
+///
+/// THE PROBE IS SYSCFG'S STROBE BIT and not a UCPD_BASE, because this is
+/// the fact a program with no UCPD driver has to know: the pad's reset
+/// state and the register that lets go of it travel together, and a
+/// header that declares no strobe describes a part with no Rd to
+/// release. pin.hpp's ucpd_dead_battery() is the verb; this is what a
+/// caller asks BEFORE it, so a pad that will not follow its own pull can
+/// be told from one that never had anything on it.
+constexpr bool ucpd_present(uint8_t n) {
+    bool have = false;
+#if defined(SYSCFG_CFGR1_UCPD1_STROBE)
+    have = have || n == 1u;
+#endif
+#if defined(SYSCFG_CFGR1_UCPD2_STROBE)
+    have = have || n == 2u;
+#endif
+    (void)n;
+    return have;
+}
 
 // ---- PWR: what the low-power chapter's option space costs per part ---------
 //

@@ -396,6 +396,29 @@ ends and the IWDG reboots the board. The meter and the awake-time verdict
 now go together behind `tim_etrsel_has_mco()`; the lap count and the
 never-re-lock-the-PLL claim need no meter and stay.
 
+## On the third silicon
+
+`test_stm32_platform` scores **53/53** on the Nucleo-G031K8 (DEV_ID
+0x466, REV_ID 0x1003) and letter `i` **26/26** over its six real resets,
+the same letters and the same verdicts as on the other two dies. The
+board's user LED moves to PC6 (a Nucleo-32 fact), which nothing here
+judges.
+
+**THIS DIE'S LSI IS THE SLOWEST OF THE THREE**: the IWDG time-out of
+letter `i` implies **31400 Hz** where the G0B1RE reads 32536 and the
+G071RB 32295 - all three inside DS12992/DS13560 table 46's 29.5..34 kHz,
+and none of them each other. Every suite of this board that used to lean
+on a 32768 Hz crystal now weighs this oscillator at boot instead
+([bench.md](../bench.md)).
+
+**AND LSIRDY IS A READING ABOUT THE RTC DOMAIN AND NOT ABOUT THE
+WATCHDOG**, which this board is the one to show from the other side: its
+RTC domain holds no RTCEN (the LSE hunt left RCC_BDCR at 0x19), so
+LSIRDY stands CLEAR at boot where the other two boards - whose domains
+run the RTC - stand it with LSION clear. Letter `a` claims the
+EQUIVALENCE, which is what makes it a statement about 5.4.24 rather than
+about one desk.
+
 ## Not covered yet
 
 Driver gaps (this chapter's option space the stratum does not touch):

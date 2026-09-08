@@ -264,9 +264,13 @@ struct Pin {
     // ---- configuration (setup / kernel time) ------------------------------------
     /// Push-pull output, low speed, no pull, driving whatever ODR holds.
     static void output(const PinConfig& cfg = {}) { P::configure_mask(mask, PinMode::output, cfg); }
-    /// Output that starts at a KNOWN level: the value is written before
+    /// Output that starts at a KNOWN level: the port's clock is opened
+    /// FIRST (a BSRR/BRR store into an unclocked port is dropped in
+    /// silence, 5.2.17 - fact 1 above), then the value is written before
     /// the mode switches, so the pad never glitches through the old ODR.
+    /// The second clock(true) inside output(cfg) is idempotent.
     static void output(bool level, const PinConfig& cfg = {}) {
+        P::clock(true);
         if (level) set(); else clear();
         output(cfg);
     }

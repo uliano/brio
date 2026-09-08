@@ -297,6 +297,21 @@ same shape as the G0B1RE's 687..1062 ns and 406..484 ns gap, with the
 DAC's settling and the poll loop still inside both absolutes and
 subtracted from neither.
 
+## On the third silicon
+
+**THERE IS NO COMPARATOR AT ALL ON THE G031** (DEV_ID 0x466): no
+COMP1_BASE, no COMP2_BASE, so `comp_present(n)` is false for every n,
+`comp_count()` is zero and the type `Comp` cannot be named. That is the
+one case `#if defined(COMP1_BASE)` exists for in an app - a template
+cannot reach a type that does not exist - and three suites use it:
+`test_stm32_analog` compiles out its comparator letters, `test_stm32_lptim`
+its two comparator routes (IN1SEL = COMP1_OUT and the comparator OR),
+and `test_stm32_tim` states in letter `k` that the G0B1's 2.7.3 is
+doubly out of reach here, `ocref_clr` having no comparator to come from.
+The EXTI lines the comparators own on the bigger parts (17, 18 and 20)
+are not implemented either, which is part of why this part's
+`EXTI_IMR1_IM_Msk` is 0xF2A9FFFF ([exti.md](exti.md)).
+
 ## Not covered yet
 
 **Implemented but not bench-verified:**

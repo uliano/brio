@@ -429,6 +429,50 @@ NAME rather than measure its own tick.
 The G071's RCC_CFGR MCOSEL and MCOPRE are **three bits** where the
 G0B1's are four (the headers' own masks): one clock output, not two.
 
+## On the third silicon
+
+`test_stm32_clock` scores **39 of 42** on the Nucleo-G031K8 (DEV_ID
+0x466, REV_ID 0x1003): the whole ladder, all four rates, the ADC across
+them, the kernel, both Stops and the PLL rate in Range 2. Three verdicts
+are not claimed - letter `h` (`delay_us` at 20 us) and the ETR wall's own
+rate - and both have one cause.
+
+**THERE IS NO WALL ON THIS BOARD THAT TIM2 CAN COUNT.** RM0444 22.4.25's
+ETRSEL list gives code 0100 (MCO) to the G0B1/G0C1 sales types alone, so
+`tim_etrsel_has_mco(2)` is false here as it is on the G071; and the only
+other every-part code, 0011 = LSE, needs a crystal this board has not
+got. So the suite PROBES the ETR at boot - a counter with nothing on its
+ETR stands still in silence, and every bounded wait that rode it would be
+unbounded - and where it is dead, TIM2 goes on PCLK as letter `g`'s
+AWAKE meter (a counter that stops when the clocks do, which is what tells
+a Stop from a WFI that fell through) while REAL time comes from the RTC's
+sub-second counter at about 32 us a tick.
+
+**THE RTC WALL IS ALSO THE SCALE EVERY RATE CLAIM IS JUDGED ON**, and
+deliberately not the ETR one: the MCO wall counts HSI16/64, and HSI16 is
+trimmed to a per cent - wider than the band a "the CPU is really at this
+rate" verdict lives in. On a crystal board the RTC's root is 32768 Hz by
+construction; here it is the LSI at the rate this boot MEASURED on TIM16.
+
+**THE CONSOLE IS LPUART1.** This part's USART2 is a BASIC instance with
+no kernel-clock multiplexer (`usart_has_clock_select(2)` is false), so a
+console on it would run on PCLK and its divisor would follow every switch
+under test. LPUART1 has a multiplexer on every G0 (34.4.6) and reaches
+the SAME two pads at AF6, so the console moves there and rides HSI16 as
+it does elsewhere - 115200 baud carried the whole suite, the letter `v`
+shape of `test_stm32_serial` in production use.
+
+Switch durations on the coarser wall: 64 -> 16 MHz 63..95 us, 16 -> 2 MHz
+in low-power run 190..222, 2 -> 64 MHz 539, 64 -> 2 MHz 222..254; 72
+switches round the ladder with none refused, no wrong state and 0 bad
+bytes of 1152 on the USART1 loop. **AND ONE READING THIS INSTRUMENT
+CANNOT SETTLE**: at the 2 MHz low-power-run rung the SysTick ticker
+counts 508 ticks per 500 ms of the LSI wall where the other three rungs
+count 501 - either the LSI moves with the voltage regime or the core
+does, and an RC wall cannot say which. The letter's band is the wall's
+own resolution (a per cent on a crystal, three on an RC root), and the
+reading is printed.
+
 ## Not covered yet
 
 Driver gaps:

@@ -103,6 +103,13 @@ the same VRR wait. Nothing here is per-part: `vrefbuf_present()` is true
 on every x1 header of the pack, and this is a case where "nothing
 differs" is the whole finding.
 
+## On the third silicon
+
+VREFBUF IS PRESENT on the G031 (`vrefbuf_present()` is true), so the
+shared VREF+ rail and `Ref`/`ref_mv()` are what they are on the other two
+dies; what is absent beside it is the DAC and the comparators, which are
+two of that rail's users ([dac.md](dac.md), [comp.md](comp.md)).
+
 ## Not covered yet
 
 **Implemented but not bench-verified - all of it, and on purpose:**

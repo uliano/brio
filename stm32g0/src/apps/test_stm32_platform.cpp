@@ -53,7 +53,7 @@
 // RESET" is proven literal: the boot after an IWDG reset sits for a
 // second and a half with nobody refreshing anything and lives.
 //
-// build: boards = g0b1re,g071rb
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -121,7 +121,17 @@ constexpr UartPins console_pins{
 using Serial = Uart<2, console_pins>;
 constexpr Serial serial;
 
-using Led = Pin<'A', 5>;   // LD4
+// The board's user LED, the one thing in this suite that is a BOARD fact
+// and not a part fact: the Nucleo-64s carry LD4 on PA5, the Nucleo-32
+// carries LD3 on PC6 (UM2591). Only the preprocessor can ask which
+// device header is compiled - blink.cpp and console.cpp ask it the same
+// way. Nothing is judged on it: the LED marks a keystroke for a hand at
+// the desk.
+#if defined(STM32G031xx)
+using Led = Pin<'C', 6>;   // LD3 on the Nucleo-32
+#else
+using Led = Pin<'A', 5>;   // LD4 on the Nucleo-64s
+#endif
 
 TestBench<Serial> bench;
 
@@ -238,21 +248,26 @@ void ta_boot() {
 
     // THE LSI WITNESS, AND WHY IT IS NOT ONE. 5.4.24 says LSIRDY may
     // stand with LSION clear when the IWDG, the RTC or the CSS on LSE
-    // asks for the oscillator - and on this board the RTC does: the RTC
-    // domain is not reset by a system reset, and RCC_BDCR comes up with
-    // RTCEN set and RTCSEL = LSI. So the running-IWDG question is
-    // answered from a .noinit mark instead, and this line prints both so
-    // the reader can see the difference.
+    // asks for the oscillator - and a board whose RTC domain holds RTCEN
+    // with RTCSEL = LSI has exactly that (the domain is not reset by a
+    // system reset, so the bits outlive every boot). The claim is the
+    // EQUIVALENCE, which is what makes it a claim about the silicon and
+    // not about one desk: LSIRDY stands with LSION clear exactly where
+    // the domain is asking. Both readings are printed, so a board whose
+    // domain holds neither reads as plainly as one whose domain holds
+    // both, and the running-IWDG question is answered from a .noinit
+    // mark instead either way.
+    const bool rtc_asks_lsi =
+        (RCC->BDCR & RCC_BDCR_RTCEN) != 0u &&
+        ((RCC->BDCR & RCC_BDCR_RTCSEL_Msk) >> RCC_BDCR_RTCSEL_Pos) == 2u;
     print(serial, "  LSI  : LSION=", Rcc::lsi_enabled(), " LSIRDY=",
-          Rcc::lsi_ready(), " RCC_BDCR=", hex(RCC->BDCR),
-          " (RTCEN+RTCSEL is what forces LSI here)", crlf);
-    bench.verdict("LSIRDY stands although LSION is clear, and it is the RTC "
-                  "asking: RCC_BDCR survives a system reset with RTCEN set "
-                  "and RTCSEL = LSI, so this bit is no watchdog witness",
-                  boot_lsi_forced ==
-                      ((RCC->BDCR & RCC_BDCR_RTCEN) != 0u &&
-                       ((RCC->BDCR & RCC_BDCR_RTCSEL_Msk) >> RCC_BDCR_RTCSEL_Pos) == 2u &&
-                       !Rcc::lsi_enabled()));
+          Rcc::lsi_ready(), " RCC_BDCR=", hex(RCC->BDCR), " (the RTC domain ",
+          rtc_asks_lsi ? "IS" : "is NOT", " asking for LSI)", crlf);
+    bench.verdict("LSIRDY follows the RTC's standing request and not LSION - "
+                  "it stands with LSION clear exactly where RCC_BDCR, which a "
+                  "system reset does not touch, holds RTCEN with RTCSEL = LSI, "
+                  "so this bit is no watchdog witness on either kind of board",
+                  boot_lsi_forced == (rtc_asks_lsi && !Rcc::lsi_enabled()));
 }
 
 // =============================================================================

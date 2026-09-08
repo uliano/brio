@@ -527,6 +527,15 @@ the DLC coding, the element codecs) compiles on every header of the pack
 and is checked by `tools/check_stm32g0.sh` there; only the
 register-facing half is gated.
 
+## On the third silicon
+
+There is no FDCAN on the G031 either (`fdcan_present(1)` is false), so
+`test_stm32_fdcan` stays the G0B1RE's alone. What the absence is worth
+elsewhere is the reserve's own derivation: `test_stm32_tim`'s letter `a`
+claims TIM16's line is shared with an FDCAN's first interrupt exactly
+where there IS an FDCAN and is TIM16's own where there is none, and this
+part is the second witness for the second half.
+
 ## Not covered yet
 
 Driver gaps - nothing in `fdcan.hpp` reaches these:

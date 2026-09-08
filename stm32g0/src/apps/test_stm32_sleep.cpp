@@ -16,12 +16,21 @@
 // THE WALL CLOCK IS THE RTC, AND IT HAS TO BE. Every TIM of this family
 // lives in the VCORE domain and stops in Stop; SysTick rides HCLK and
 // stops with it; the RTC does not. So this suite runs the calendar on
-// the LSE crystal with the prescalers split the OTHER way from the
-// usual - PREDIV_A 0 and PREDIV_S 32767, which puts ck_apre at the
-// crystal's full 32768 Hz and makes the sub-second counter a 30.5 us
-// stopwatch that keeps counting with every clock in the chip stopped.
-// The kernel's own millis() is the SUBJECT of half these letters and
-// never the judge.
+// whichever 32 kHz-ish root the board HAS, with the prescalers split the
+// OTHER way from the usual - PREDIV_A 0 and PREDIV_S 32767, which puts
+// ck_apre at the root's full rate and makes the sub-second counter a
+// ~30 us stopwatch that keeps counting with every clock in the chip
+// stopped. The kernel's own millis() is the SUBJECT of half these
+// letters and never the judge.
+//
+// THE ROOT IS THE CRYSTAL WHERE THERE IS ONE AND LSI WHERE THERE IS NOT,
+// and the difference is not a detail: LSE is 32768 Hz by construction
+// and LSI is an RC oscillator the datasheet only bounds (table 46:
+// 29.5..34 kHz). So a board without a crystal MEASURES its own LSI at
+// boot, on TIM16's capture channel against PCLK, and every microsecond
+// this suite prints is converted with that reading rather than with a
+// nominal rate. The band a wake-up cost is judged against is the same
+// either way; what changes is the scale the wall is read on.
 //
 // THE BACKSTOP IS THE IWDG, armed once in main() at about 32 seconds and
 // refreshed at the top of every letter and inside every long loop. It
@@ -58,7 +67,7 @@
 //          python3 tools/bench.py run E s --app test_stm32_sleep
 //                  --expect="pass," --timeout 200
 //
-// build: boards = g0b1re,g071rb
+// build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -78,6 +87,7 @@
 #include "stm32g0/rtc.hpp"
 #include "stm32g0/sleep.hpp"
 #include "stm32g0/ticker.hpp"
+#include "stm32g0/tim.hpp"
 #include "stm32g0/usart.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
@@ -111,10 +121,22 @@ TestBench<Serial> bench;
 // taken modulo the MINUTE, which is longer than any sleep this suite
 // takes and keeps the arithmetic in 32 bits.
 
-constexpr uint32_t lse_hz = 32768;
 constexpr RtcPrescalers wall_prescalers{.async = 0, .sync = 32767};
 
 bool wall_ready = false;
+
+/// What RTCCLK really is, in hertz: the crystal's 32768 where the LSE
+/// runs, and the LSI's MEASURED rate where it does not. Set once in
+/// main(), before any letter, and used by every conversion below - a
+/// nominal rate here would put a per-cent-sized error on every
+/// microsecond this suite prints.
+uint32_t rtcclk_hz = 32768;
+bool wall_on_lse = false;
+/// Whether the boot measurement really happened: false on a board that
+/// runs the crystal (nothing to weigh) and false where LSI's edges never
+/// reached the meter, which the banner then says out loud rather than
+/// quoting a rate nobody watched.
+bool lsi_weighed = false;
 
 /// The wall's tick rate, READ FROM THE SILICON and not assumed: the
 /// sub-second counter reloads from PREDIV_S once per ck_spre period, and
@@ -130,16 +152,16 @@ uint32_t wall_ticks_per_second() {
 }
 uint32_t wall_modulus() { return 60u * wall_ticks_per_second(); }
 
-/// How many sub-second ticks make one REAL second: ck_apre, which is the
-/// crystal divided by PREDIV_A + 1 - and the two are NOT the same number
+/// How many sub-second ticks make one REAL second: ck_apre, which is
+/// RTCCLK divided by PREDIV_A + 1 - and the two are NOT the same number
 /// when a caller's stated RTCCLK rate is a deliberate over-estimate.
-/// The timed site states 32800 against a crystal that runs at 32768, so
-/// its calendar second is 0.098 % long; converting with the CRYSTAL is
-/// what keeps this instrument honest about a site that is honest about
-/// being slow. (It cost one verdict: a 500 ms deadline read 499 ms of
-/// "wall" that was really 500 ms of world.)
+/// The timed site states a rate ABOVE the root it runs on, so its
+/// calendar second is long; converting with the ROOT'S OWN measured rate
+/// is what keeps this instrument honest about a site that is honest
+/// about being slow. (It cost one verdict: a 500 ms deadline read 499 ms
+/// of "wall" that was really 500 ms of world.)
 uint32_t wall_hz() {
-    return lse_hz / (static_cast<uint32_t>(Rtc::prescalers().async) + 1u);
+    return rtcclk_hz / (static_cast<uint32_t>(Rtc::prescalers().async) + 1u);
 }
 
 /// Sub-second ticks since the top of the minute, or 0xFFFFFFFF when the
@@ -165,6 +187,78 @@ uint32_t wall_us(uint32_t ticks) {
 uint32_t wall_ms(uint32_t ticks) {
     return static_cast<uint32_t>((static_cast<uint64_t>(ticks) * 1000ULL) /
                                  wall_hz());
+}
+
+// ---------------------------------------------------------------------------
+// The LSI meter: what the wall runs on when there is no crystal
+// ---------------------------------------------------------------------------
+//
+// TIM16's capture channel with TISEL pointing at LSI (25.6.18's code 1),
+// against a counter clocked from PCLK - the technique test_stm32_rtc's
+// letter c owns and states the reason for: an UNFILTERED capture of an
+// internal clock line errs in BOTH directions (a missed edge lengthens
+// an interval, an over-capture shortens one), so the estimator is the
+// MEDIAN of a batch, which both tails have to outnumber before they can
+// move it. The input filter is on as well, which is the other half of
+// that letter's finding.
+//
+// The prescaler is 15, so one timer tick is 250 ns and an LSI period of
+// about 32 us is ~128 ticks: far inside a 16-bit counter and far above
+// the capture's own resolution.
+
+using LsiMeter = TimIntervalMeter<Tim<16>, 0>;
+constexpr uint16_t lsi_meter_prescaler = 15;
+
+/// The LSI's rate in hertz, or 0 when its edges never arrived. Bounded:
+/// a board that cannot measure gets an honest zero and the caller says
+/// so, rather than a number nobody watched.
+uint32_t measure_lsi_hz() {
+    Rcc::lsi_enable(true);
+    if (!Rcc::lsi_wait_ready()) {
+        return 0;
+    }
+    Tim<16>::bus_clock(true);
+    Tim<16>::enable(false);
+    if (!LsiMeter::setup(lsi_meter_prescaler, 8)) {
+        return 0;
+    }
+    if (!Tim<16>::input_select(0, Rcc::lsi_tim16_ti1_code)) {
+        return 0;
+    }
+    (void)Tim<16>::isr();
+    LsiMeter::restart();
+
+    static uint32_t samples[33];
+    constexpr uint16_t want = 33;
+    uint16_t got = 0;
+    for (uint32_t spin = 0; spin < 40'000'000UL && got < want; ++spin) {
+        if ((Tim<16>::flags() & LsiMeter::capture_flag) == 0u) {
+            continue;
+        }
+        Tim<16>::clear_flags(LsiMeter::capture_flag);
+        const std::optional<uint32_t> d = LsiMeter::interval();
+        if (d.has_value()) {
+            samples[got++] = *d;
+        }
+    }
+    Tim<16>::release();
+    if (got != want) {
+        return 0;
+    }
+    for (uint16_t i = 1; i < want; ++i) {
+        const uint32_t key = samples[i];
+        uint16_t j = i;
+        while (j != 0u && samples[j - 1u] > key) {
+            samples[j] = samples[j - 1u];
+            --j;
+        }
+        samples[j] = key;
+    }
+    const uint32_t median = samples[want / 2u];
+    if (median == 0u) {
+        return 0;
+    }
+    return (SysClock::hz / (lsi_meter_prescaler + 1u)) / median;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,11 +301,26 @@ bool kernel_live = false;
 
 using Site = Stm32g0SleepSite<SysClock>;
 
-/// The timed site runs on the same crystal, and states a rate NOT BELOW
-/// it: 32800 against 32768, an over-estimate of about a per mille, which
-/// is the direction the contract wants (late, never early).
+/// The timed site runs on the same root the wall does, and states a rate
+/// NOT BELOW it - late, never early, which is the direction the
+/// contract wants. THE STATEMENT IS A COMPILE-TIME CONFIGURATION and the
+/// root is a BOARD fact, so which one is asked for is the one question
+/// only the preprocessor can answer here; letter f then checks the
+/// statement against the rate this boot MEASURED rather than trusting
+/// it, and declines its timing verdicts if a die is ever found running
+/// faster than the number stated for it.
+#if defined(STM32G031xx)
+/// The Nucleo-32 has no crystal, so the site takes LSI: 32000 Hz stated
+/// against the ~31.4 kHz this die measures, the reading rounded UP to
+/// the next kilohertz.
+constexpr TimedSleepConfig timed_cfg{.rtcclk_hz = 32'000,
+                                     .source = RtcClockSource::lsi};
+#else
+/// 32800 against a crystal that runs at 32768: an over-estimate of about
+/// a per mille.
 constexpr TimedSleepConfig timed_cfg{.rtcclk_hz = 32800,
                                      .source = RtcClockSource::lse};
+#endif
 using TimedSite = Stm32g0TimedSleepSite<P, SysClock, timed_cfg>;
 
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
@@ -386,14 +495,25 @@ void ta_ladder() {
         }
     }
     print(serial, " (", pwr_wakeup_pin_count(), " of six)", crlf);
+    // EVERY pin, not one sample of it: a part's roster is whatever the
+    // header's own EWUPn bits say, and the claim is that the driver
+    // takes exactly those and refuses the rest. That is one census on a
+    // part with six and the same census on a part with four, which is
+    // why nothing here is a magic minimum.
+    bool roster_ok = !Pwr::wakeup_pin(7, true);   // there is no seventh
+    for (uint8_t i = 1; i <= 6u; ++i) {
+        const bool present = Pwr::wakeup_pin_present(i);
+        if (Pwr::wakeup_pin(i, true) != present ||
+            Pwr::wakeup_pin(i, false) != present) {
+            roster_ok = false;
+        }
+    }
+    Pwr::clear_wakeup_flags();
     bench.verdict("this part bonds the wake-up pins the reserve reads off "
                   "PWR_CR3's own EWUPn bits, and a pin it has not got is "
-                  "REFUSED rather than written - WKUP7 always, and WKUP3 too "
-                  "on a part below the G0B1",
-                  pwr_wakeup_pin_count() >= 5u && !Pwr::wakeup_pin(7, true) &&
-                      Pwr::wakeup_pin_present(1) == pwr_wakeup_pin_present(1) &&
-                      Pwr::wakeup_pin(3, true) == pwr_wakeup_pin_present(3) &&
-                      !Pwr::wakeup_pin(3, false) == !pwr_wakeup_pin_present(3));
+                  "REFUSED rather than written - every one of the six asked "
+                  "for in turn, and a seventh that no G0 has",
+                  roster_ok && pwr_wakeup_pin_count() >= 4u);
     bench.verdict("the Standby pull registers follow the GPIO bonding: port "
                   "A has one, port G is nowhere",
                   Pwr::standby_pull('A', 0, false, false) &&
@@ -752,10 +872,30 @@ void tf_timed_site() {
           TimedSite::prescalers.sync, ", its fast alarm clock ",
           TimedSite::fast_hz, " Hz, and it reaches ",
           TimedSite::fast_span_ticks, " ticks on it", crlf);
-    bench.verdict("the timed site comes up on the crystal", up);
+    bench.verdict("the timed site comes up on the root this board runs the "
+                  "RTC on", up);
     if (!up) {
         return;
     }
+
+    // THE SITE'S OWN CONTRACT, in the open: it converts with a STATED
+    // rate, and every promise it makes ("late, never early") holds only
+    // while that statement is at or above the true rate. On a crystal
+    // the statement is a per mille high by construction; on an LSI it is
+    // a compile-time number against a rate this boot measured, and the
+    // two are printed side by side so the "not one early" verdicts below
+    // can be READ rather than merely believed - a die found running
+    // faster than the number stated for it would show up here first and
+    // in those verdicts second.
+    print(serial, "  the site states ", timed_cfg.rtcclk_hz,
+          " Hz for RTCCLK against the ", rtcclk_hz,
+          wall_on_lse ? " Hz of the crystal" : " Hz this boot measured on LSI",
+          timed_cfg.rtcclk_hz >= rtcclk_hz ? " - at or above it, which is the "
+                                             "direction the contract wants"
+                                           : " - BELOW IT, which is the one "
+                                             "direction that can mature an "
+                                             "event early",
+          crlf);
 
     // The alarm's arithmetic, checked before any sleep: ceil of the
     // deadline in ck_wut counts.
@@ -1118,6 +1258,26 @@ void deep_leg(PwrMode mode, const char* name, uint8_t leg_id) {
         bench.verdict("the wall clock is up", false);
         return;
     }
+    // AND THE ONE ENTRY THAT MUST NOT BE MADE. Shutdown powers the LSI
+    // down - DS12992 3.7.4 and DS13560 3.7.4 name it in the same breath
+    // as the PLL, HSI16 and HSE, where the Standby paragraph beside it
+    // does not - so "the RTC can remain active" in Shutdown means an RTC
+    // ON THE CRYSTAL. A board without one has no clock left to end the
+    // sleep with: measured here, a wake-up timer armed for one ck_spre
+    // period did not return in four minutes, and only NRST brought the
+    // board back. The leg is skipped rather than entered, because
+    // entering it is a board that answers nothing until a hand or a
+    // flasher resets it.
+    if (mode == PwrMode::shutdown && !wall_on_lse) {
+        print(serial, "  SKIPPED, no verdict claimed: Shutdown powers the LSI "
+              "down (DS12992 3.7.4 - the Standby paragraph beside it does "
+              "not), so an RTC running on LSI has no clock to wake with and "
+              "this board has no crystal. The wake sources left are NRST, a "
+              "WKUP pin and a TAMP event, none of which this suite can raise "
+              "on itself. Letter s - Standby, where the LSI DOES survive - "
+              "is the rung this board can still measure.", crlf);
+        return;
+    }
     bench.verdict("the RTC wake-up timer is set for the return trip",
                   Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true));
     Nvic::enable(Rtc::irq());
@@ -1181,21 +1341,45 @@ int main() {
     brio::Pwr::rtc_domain_unlock(true);
     brio::RtcDomain::apb_clock(true);
 
-    // THE RTC DOMAIN, ONCE, BEFORE ANY LETTER: this suite's wall clock
-    // is the crystal, and RTCSEL is one-way, so a domain that came up on
-    // something else has to be wiped first. That costs the backup
-    // registers, which is why it happens here and not inside a letter
-    // that has just written one.
-    if (brio::RtcDomain::selected() != brio::RtcClockSource::lse) {
+    // THE RTC DOMAIN, ONCE, BEFORE ANY LETTER. RTCSEL is one-way, so
+    // what the domain ALREADY holds decides: a domain running on a root
+    // this suite can use is KEPT - the two deep letters' token lives in
+    // a backup register and a BDRST would wipe it every boot - and only
+    // a domain holding nothing usable is wiped. A fresh domain takes the
+    // crystal if it starts and LSI if it does not, which is what a board
+    // with no X2 has.
+    const brio::RtcClockSource had = brio::RtcDomain::selected();
+    if (had == brio::RtcClockSource::lse) {
+        lse_ok = true;
+        wall_on_lse = true;
+    } else if (had == brio::RtcClockSource::lsi) {
+        lse_ok = false;
+        wall_on_lse = false;
+    } else {
         brio::RtcDomain::reset();
+        brio::RtcDomain::lse_enable(true);
+        lse_ok = brio::RtcDomain::lse_wait_ready(4'000'000UL);
+        wall_on_lse = lse_ok;
+        if (!lse_ok) {
+            brio::RtcDomain::lse_enable(false);
+        }
     }
-    brio::RtcDomain::lse_enable(true);
-    lse_ok = brio::RtcDomain::lse_wait_ready(4'000'000UL);
-    if (lse_ok) {
+    if (wall_on_lse) {
         (void)brio::RtcDomain::open(brio::RtcClockSource::lse);
-        brio::Rtc::bypass_shadow(true);
-        wall_ready = wall_up();
+    } else {
+        (void)brio::RtcDomain::open(brio::RtcClockSource::lsi);
     }
+    // THE SCALE. A crystal is 32768 Hz by construction; an LSI is only
+    // bounded, so it is weighed here, before anything is timed on it.
+    if (!wall_on_lse) {
+        const uint32_t measured = measure_lsi_hz();
+        if (measured != 0u) {
+            rtcclk_hz = measured;
+            lsi_weighed = true;
+        }
+    }
+    brio::Rtc::bypass_shadow(true);
+    wall_ready = wall_up();
 
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
@@ -1238,7 +1422,12 @@ int main() {
               " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
               " tick=", tick_ok ? "SysTick" : "FAILED",
-              " wall=", wall_ready ? "RTC on LSE" : "NO CRYSTAL",
+              " wall=", wall_ready ? (wall_on_lse ? "RTC on LSE" : "RTC on LSI")
+                                   : "NO RTC",
+              " RTCCLK=", rtcclk_hz,
+              wall_on_lse ? " Hz (the crystal)"
+                          : (lsi_weighed ? " Hz (LSI, measured on TIM16)"
+                                         : " Hz (LSI NOT WEIGHED - nominal)"),
               " backstop=", wd ? "IWDG 32 s" : "FAILED", crlf);
         banner();
         bench.prompt();

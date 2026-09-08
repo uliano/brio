@@ -148,6 +148,15 @@ stands. PB9 is also the pad the desk's I2C pull-up hangs on, so the
 letter's precondition is DRIVABILITY and not the internal pull's
 authority - [port.md](port.md) carries the rule.
 
+## On the third silicon
+
+The IRTIM's second envelope source follows the part: `irtim_second_usart()`
+is USART4 where the part has one and **USART2 here**, which is ch. 27's
+own rule read off presence rather than a copied table.
+`test_stm32_serial`'s letter `o` checks exactly that on the G031, and its
+carrier-and-envelope counts ride the same EXTI-to-DMAMUX path the boot
+probe judges.
+
 ## Not covered yet
 
 Driver gaps: none - the chapter's three bits and its one pad are all
