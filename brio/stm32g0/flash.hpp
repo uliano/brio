@@ -209,6 +209,31 @@ inline uint32_t flash_size_kb() {
     return *reinterpret_cast<const volatile uint32_t*>(FLASHSIZE_BASE) & 0x03FFu;
 }
 
+/**
+ * The 96-bit unique device identifier (RM0444 41.1), three read-only
+ * words at UID_BASE - factory programmed, never erased, the same on
+ * every part of the family.
+ *
+ * It sits beside flash_size_kb() because it is the same READ-ONLY
+ * section of the system memory area and the same chapter; the samc21
+ * stratum's DeviceSerial is the shape (nvm.hpp there, this file here -
+ * each stratum keeps its identity read next to the memory verbs that
+ * reach the area).
+ *
+ * WHAT IT IS FOR: a board that has no label to be given (there is no
+ * USERROW here) still has a NAME, and word[0] in hex is what the bench
+ * peers report as their ident over the wire.
+ */
+struct DeviceUid {
+    uint32_t word[3];
+
+    static DeviceUid read() {
+        const volatile uint32_t* const p =
+            reinterpret_cast<const volatile uint32_t*>(UID_BASE);
+        return DeviceUid{{p[0], p[1], p[2]}};
+    }
+};
+
 /// Which PHYSICAL bank an erase acts on. 3.3.2: erase is always linked
 /// to a physical bank and is NOT affected by nSWAP_BANK, while
 /// programming follows the logical address - so this enum is only ever

@@ -77,6 +77,24 @@ constexpr Serial serial;                     // tag for print(serial, ...)
 
 constexpr uint32_t console_baud = 115200;
 
+// THE PART IS THE BOARD on this desk (stm32g0/CMakeLists.txt's own
+// rule: the board type an app's "// build: boards =" line names is the
+// part number's last six characters), so the banner reads the part off
+// the DEVICE-SELECT define rather than stating one board's name on
+// three. The whole head is one literal per part so the print is one
+// argument, as it was when only one board existed. This is the one
+// question only the preprocessor can ask - which device header is
+// compiled - and probe.cpp asks it the same way.
+#if defined(STM32G0B1xx)
+constexpr const char* banner_head = "STM32G0B1RE brio console (clk=";
+#elif defined(STM32G071xx)
+constexpr const char* banner_head = "STM32G071RB brio console (clk=";
+#elif defined(STM32G031xx)
+constexpr const char* banner_head = "STM32G031K8 brio console (clk=";
+#else
+constexpr const char* banner_head = "STM32G0 brio console (clk=";
+#endif
+
 // ---- events -----------------------------------------------------------------
 struct Toggle {};                                  // Blinker heartbeat
 struct SetLed { enum class Mode : uint8_t { on, off, tog } mode; };
@@ -243,7 +261,7 @@ int main()
     // printing into a UART that failed to come up would never return -
     // the LED heartbeat below is then the only sign of life.
     if (serial_ok) {
-        brio::print(serial, brio::crlf, "STM32G0B1RE brio console (clk=",
+        brio::print(serial, brio::crlf, banner_head,
                     clock_ok ? "PLL64" : "FAILED", ", tick=",
                     tick_ok ? "SysTick" : "FAILED",
                     "), type HELP", brio::crlf, "> ");

@@ -28,16 +28,21 @@
 // the client's hardware NSS input, and an EXTI line counts its edges for
 // the NSS-pulse letter. Letters b..l are this instrument's.
 //
-// (2) THE CROSS-ARCHITECTURE LINK: the SAME four SPI1 pads reach a SAM
-// C21 running `spi_peer` on SERCOM1 function C -
+// (2) THE PEER LINK: the SAME four SPI1 pads reach a SECOND BOARD
+// running `spi_peer`, and EITHER instrument is valid - the peer names
+// itself in its `ident` (fw 0x01xx = the AVR, 0x02xx = the SAM C21,
+// 0x03xx = a second STM32G0), and docs/bench.md says which one is
+// fitted -
 //
-//   SCK   PB3  AF0  ->  PA17  SERCOM1 PAD[1]
-//   MOSI  PB5  AF0  ->  PA16  SERCOM1 PAD[0] (its DI)
-//   MISO  PB4  AF0  <-  PA19  SERCOM1 PAD[3] (its DO)
-//   NSS   PA15 GPIO ->  PA18  SERCOM1 PAD[2] (its SS)
+//   SCK   PB3  AF0  ->  a SAM C21's PA17 SERCOM1 PAD[1],  or PB3  AF0
+//   MOSI  PB5  AF0  ->  a SAM C21's PA16 SERCOM1 PAD[0],  or PB5  AF0
+//   MISO  PB4  AF0  <-  a SAM C21's PA19 SERCOM1 PAD[3],  or PB4  AF0
+//   NSS   PA15 GPIO ->  a SAM C21's PA18 SERCOM1 PAD[2],  or PA15 AF0
 //
-// plus a dedicated GND, both boards at 3.3 V. The instrument is
-// commanded IN BAND over the bus under test, over
+// - the stm32g0 port of the peer answers on the SAME PIN NAMES this
+// board hosts on (SPI's own MOSI/MISO naming carries the direction, so
+// nothing is crossed), plus a dedicated GND, both boards at 3.3 V. The
+// instrument is commanded IN BAND over the bus under test, over
 // avrdx/src/apps/spi_link.hpp included by relative path - one source of
 // truth for the wire format, three architectures compiling it. Letters
 // n..r are this instrument's.
@@ -94,8 +99,8 @@
 //   l  THE DYNAMIC CLOCK: the link exact at 64, 16 and 2 MHz with the
 //      BR code re-resolved against a stated ceiling
 //   m  sleep: an SPI interrupt waking a WFI in Sleep mode
-//   n  THE PEER: the spi_link command channel to the SAM C21, its ident
-//      and ten frames
+//   n  THE PEER: the spi_link command channel to the peer board, its
+//      ident and ten frames
 //   o  the matrix against the peer: four modes, both bit orders, and a
 //      DORD mismatch as an exact two-way bit reversal
 //   p  the BR ladder against the peer, and where its answer reload stops
@@ -104,6 +109,9 @@
 //      sleep votes and the per-bus timeout with recover()
 //   r  THE ROLES INVERT: this board as the CLIENT on the pads it hosts
 //      with, the peer clocking a bounded burst as the bus host
+//   x  (OUTSIDE z) slip statistics against the peer: each mode ten times,
+//      the bursts that were not byte-exact and where each broke - the
+//      instrument that found the peer's MISO edge rate (spi.md)
 //
 // NOTHING WRITES FLASH, no option byte is touched, and the RTC domain is
 // not reset. The pads this suite moves are the eight of the self-link
@@ -458,9 +466,9 @@ void settle() { settle_ms(spilink::settle_ms); }
 // =============================================================================
 //
 // THE SELF-LINK IS NOT A PROPERTY OF THIS BOARD, it is four jumpers, and
-// they have already moved once: the same SPI1 pads now carry the
-// cross-architecture link to a SAM C21 running `spi_peer`, and SPI2's
-// four pads are on nothing (docs/bench.md). So the suite ASKS THE WIRE
+// they have already moved: the same SPI1 pads now carry the link to a
+// PEER BOARD running `spi_peer`, and SPI2's four pads are on nothing
+// (docs/bench.md). So the suite ASKS THE WIRE
 // which desk it is on, once, before any letter runs, and the letters
 // that need two peripherals on four wires SKIP THEMSELVES - by name,
 // with the reason printed - when the answer is no. A skipped letter
@@ -507,20 +515,23 @@ bool need_self_link() {
           "  SKIPPED, no verdict claimed: this letter's instrument is the board's "
           "OWN self-link (SPI1 PB3/PB4/PB5/PA15 to SPI2 PB10/PC2/PD4/PB12) and "
           "the probe says those four wires are not on the desk. They carry the "
-          "cross-architecture link to the SAM C21 today - letters n..r are the "
-          "instrument this desk has (docs/bench.md).",
+          "link to the PEER BOARD today - letters n..r are the instrument this "
+          "desk has (docs/bench.md).",
           crlf);
     return false;
 }
 
 // =============================================================================
-// The cross-architecture peer: spi_link.hpp over the bus under test
+// The peer: spi_link.hpp over the bus under test
 // =============================================================================
 //
 // The wire format is avrdx/src/apps/spi_link.hpp, included by relative
 // path and NOT copied - it names no register, includes nothing of brio
 // and is compiled by three architectures' apps. The instrument at the
-// other end is `spi_peer`, whose samc21 port answers on SERCOM1 fn C.
+// other end is `spi_peer`, in whichever of its three ports the desk
+// carries: the samc21 one answers on SERCOM1 fn C, the stm32g0 one on
+// SPI1 AF0 at the same pin names this board hosts on. The peer's own
+// `ident` says which (fw 0x01xx, 0x02xx, 0x03xx).
 
 using spilink::Op;
 
@@ -663,7 +674,7 @@ bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
     }
     print(serial, crlf,
           "      the peer board must be running `spi_peer` (python3 tools/bench.py "
-          "flash D spi_peer); its console '0' forces the dark client back.",
+          "flash F spi_peer); its console '0' forces the dark client back.",
           crlf);
     (void)link_command_mode();
     return false;
@@ -724,13 +735,13 @@ bool ensure_link() {
     link_quiet = false;
     print(serial,
           "  THE PEER DID NOT ANSWER. The peer board must be running `spi_peer` "
-          "(python3 tools/bench.py flash D spi_peer); its console '0' forces the "
+          "(python3 tools/bench.py flash F spi_peer); its console '0' forces the "
           "dark client back. Check the five wires in this file's header.",
           crlf);
     return false;
 }
 
-/// The opening line of every letter whose instrument is the SAM peer.
+/// The opening line of every letter whose instrument is the PEER BOARD.
 /// THE TWO WIRINGS ARE THE SAME JUMPERS AT DIFFERENT ENDS, so a desk
 /// carrying the self-link cannot be carrying the peer: that is a
 /// topology and it skips, exactly as the self-link letters skip on the
@@ -739,11 +750,11 @@ bool ensure_link() {
 bool need_peer() {
     if (self_link) {
         print(serial,
-              "  SKIPPED, no verdict claimed: this letter's instrument is the SAM "
-              "C21 running `spi_peer`, and the probe says these four pads carry the "
-              "board's OWN self-link today - the two wirings are the same jumpers "
-              "at different ends (docs/bench.md). Letters b..l are the instrument "
-              "this desk has.",
+              "  SKIPPED, no verdict claimed: this letter's instrument is the PEER "
+              "BOARD running `spi_peer`, and the probe says these four pads carry "
+              "the board's OWN self-link today - the two wirings are the same "
+              "jumpers at different ends (docs/bench.md). Letters b..l are the "
+              "instrument this desk has.",
               crlf);
         return false;
     }
@@ -3178,7 +3189,7 @@ void tm_sleep() {
 }
 
 // =============================================================================
-// n - the cross-architecture command channel
+// n - the peer's command channel
 // =============================================================================
 
 void tn_peer_link() {
@@ -3198,7 +3209,7 @@ void tn_peer_link() {
               hex(d.version), crlf);
     }
     bench.verdict("ident comes back and it IS spi_peer (the sanity byte), from a "
-                  "board of ANOTHER ARCHITECTURE speaking the same wire format",
+                  "SECOND BOARD speaking the same wire format",
                   got && d.sanity == spilink::ident_sanity);
 
     uint8_t pings = 0;
@@ -3242,7 +3253,7 @@ void to_peer_matrix() {
     print(serial, "  ", good, " of 4 transfer modes byte-exact BOTH ways, 8 frames each",
           crlf);
     bench.verdict("all four transfer modes carry a burst byte-exact in both "
-                  "directions between two DIFFERENT SILICONS",
+                  "directions between TWO SEPARATE CHIPS",
                   good == 4u);
 
     Exchange lsb{};
@@ -3289,15 +3300,21 @@ void tp_peer_rates() {
 
     // The BR codes, not a frequency ladder: a Request's clock IS a
     // division of PCLK, so this walks the register's own vocabulary from
-    // the command rate upwards and prints what each one really is.
+    // the command rate upwards and prints what each one really is. The
+    // top rung, PCLK/2 = 32 MHz, is only ASKED when everything below it
+    // was exact - the ladder's job is to FIND the boundary, and a rung
+    // above a break measures nothing.
     static const SpiClock codes[] = {SpiClock::div256, SpiClock::div128,
                                      SpiClock::div64,  SpiClock::div32,
                                      SpiClock::div16,  SpiClock::div8,
-                                     SpiClock::div4};
+                                     SpiClock::div4,   SpiClock::div2};
     uint32_t last_good = 0;
     uint32_t first_bad = 0;
     spilink::Report bad_r{};
     for (const SpiClock c : codes) {
+        if (c == SpiClock::div2 && first_bad != 0u) {
+            break;
+        }
         Exchange e{};
         e.rate = c;
         e.count = 8;
@@ -3318,7 +3335,7 @@ void tp_peer_rates() {
             bad_r = r;
         }
     }
-    print(serial, "  the cross-architecture link held to ", last_good / 1000u, " kHz");
+    print(serial, "  the link to the peer held to ", last_good / 1000u, " kHz");
     if (first_bad != 0u) {
         print(serial, " and broke at ", first_bad / 1000u, " kHz");
     }
@@ -3334,6 +3351,44 @@ void tp_peer_rates() {
     bench.verdict("wherever the climb breaks, the peer still hears every character "
                   "exact there - the boundary is its ANSWER RELOAD, not the wire",
                   first_bad == 0u || (bad_r.count == 8u && bad_r.mism == 0u));
+
+    // THE SECOND CLIMB IS INFORMATIONAL AND CLAIMS NOTHING: the same
+    // ladder with `spare_polled_pump` set, which asks the peer for its
+    // SOFTWARE serve instead of whatever engine it has. Two boundaries
+    // printed side by side is what the bit was added for, and a peer
+    // with no engine at all simply repeats its first answer here.
+    uint32_t soft_last = 0;
+    uint32_t soft_first_bad = 0;
+    for (const SpiClock c : codes) {
+        if (soft_first_bad != 0u) {
+            break;
+        }
+        Exchange e{};
+        e.rate = c;
+        e.count = 8;
+        e.seed_a = 0x35;
+        e.seed_b = 0x9A;
+        e.spare = spilink::spare_polled_pump;
+        Verify v{};
+        spilink::Report r{};
+        const bool ok = exchange_exact(e, v, r);
+        const uint32_t real = Host::sck_hz(c);
+        print(serial, "  [informational] software pump at PCLK/", spi_division(c),
+              " = ", real / 1000u, " kHz: ", ok ? "exact" : "SLIPPED",
+              "  host mism=", v.mism, " client mism=", r.mism, " count=", r.count,
+              " serve=", (r.aux2 & 0x04u) != 0u ? "dma" : "pump", crlf);
+        if (ok) {
+            soft_last = real;
+        } else {
+            soft_first_bad = real;
+        }
+    }
+    print(serial, "  the peer's SOFTWARE pump held to ", soft_last / 1000u, " kHz");
+    if (soft_first_bad != 0u) {
+        print(serial, " and broke at ", soft_first_bad / 1000u, " kHz");
+    }
+    print(serial, " (no verdict: this is the other boundary, printed)", crlf);
+
     (void)link_command_mode();
     bench.verdict("the command channel survives the climb", command(Op::ping));
 }
@@ -3424,8 +3479,8 @@ void tq_peer_kernel() {
           r.count, " of ", total, " with mism=", r.mism, " flags=", hex(r.flags), crlf);
     bench.verdict("FOUR TRANSACTIONS QUEUED FROM ONE DISPATCH come back in order, "
                   "every one spi_ok, and the bytes on the wire are exactly what "
-                  "each request lent - read back by A BOARD OF ANOTHER "
-                  "ARCHITECTURE, with not one line of util/spi_bus.hpp, "
+                  "each request lent - read back by A SECOND BOARD, with not "
+                  "one line of util/spi_bus.hpp, "
                   "util/bus_master.hpp or kernel/ changed for it",
                   wire_ok && mism == 0u && rep && r.count == total && r.mism == 0u);
 
@@ -3573,7 +3628,10 @@ void tr_peer_client() {
     a.seed_b = 0x71;
     a.pattern = spilink::pattern_prbs;
     a.aux8 = 40;    // lead-in ms: time for this end to become a client
-    a.aux16 = 32;   // the peer's own SCK division (48 MHz / 32 = 1.5 MHz)
+    // The peer's own SCK division OF ITS OWN CLOCK, so the same number
+    // names a different rate at each end of the family: 750 kHz on a
+    // 24 MHz AVR, 1.5 MHz on a 48 MHz SAM, 2 MHz on a 64 MHz G0.
+    a.aux16 = 32;
     a.cfg.apply = 1;
     a.cfg.mode = 0;
     a.cfg.dord = 0;
@@ -3632,6 +3690,51 @@ void tr_peer_client() {
     bench.verdict("the command channel is back after the role swap", command(Op::ping));
 }
 
+// =============================================================================
+// x - the slip statistics against the peer (a diagnostic, OUTSIDE z)
+// =============================================================================
+//
+// Letter o runs each transfer mode ONCE; this letter runs each of them
+// `slip_rounds` times with the seeds moved every round, counts the bursts
+// that were not byte-exact and prints where each one broke at both ends.
+// No verdict: it is the instrument that measures the falling-edge slip
+// (spi.md), not a claim about it.
+
+constexpr uint8_t slip_rounds = 10;
+
+void tx_peer_slips() {
+    if (!need_peer()) {
+        return;
+    }
+    print(serial, "  each mode ", slip_rounds, " times, 8 frames at PCLK/",
+          spi_division(link_clock), ": bursts not byte-exact, and the first bad "
+          "frame at each end (host/client)", crlf);
+    uint8_t total = 0;
+    for (uint8_t m = 0; m < 4; ++m) {
+        uint8_t slips = 0;
+        print(serial, "  mode ", m, ":");
+        for (uint8_t k = 0; k < slip_rounds; ++k) {
+            Exchange e{};
+            e.cfg.mode = m;
+            e.host_mode = static_cast<SpiMode>(m);
+            e.seed_a = static_cast<uint8_t>(0x13u + m + 7u * k);
+            e.seed_b = static_cast<uint8_t>(0x57u + m + 11u * k);
+            Verify v{};
+            spilink::Report r{};
+            if (!exchange_exact(e, v, r)) {
+                ++slips;
+                print(serial, " [", v.idx, "/", r.idx, r.count != e.count ? "!" : "", "]");
+            }
+        }
+        print(serial, "  -> ", slips, " of ", slip_rounds, crlf);
+        total = static_cast<uint8_t>(total + slips);
+    }
+    print(serial, "  ", total, " of ", 4u * slip_rounds, " bursts slipped", crlf);
+    (void)link_command_mode();
+    print(serial, "  the command channel afterwards: ",
+          command(Op::ping) ? "answers" : "DEAD", crlf);
+}
+
 // ---------------------------------------------------------------------------
 // The menu
 // ---------------------------------------------------------------------------
@@ -3646,8 +3749,8 @@ void banner() {
         print(serial, "  NO SELF-LINK on the desk (probed): letters b..l skip "
                       "themselves and claim nothing", crlf);
     }
-    print(serial, "  SPI1 PB3/PB4/PB5 + PA15 also reach the SAM C21 running "
-                  "`spi_peer` (SERCOM1 PA17/PA16/PA19/PA18) - letters n..r", crlf);
+    print(serial, "  SPI1 PB3/PB4/PB5 + PA15 also reach a PEER BOARD running "
+                  "`spi_peer` (its ident says which port) - letters n..r", crlf);
     bench.menu();
     print(serial, "  z  run them all", crlf);
 }
@@ -3762,7 +3865,7 @@ int main() {
     bench.letter('l', "the dynamic clock: the BR code follows the rate",
                  tl_dynamic);
     bench.letter('m', "an SPI interrupt wakes a WFI in Sleep mode", tm_sleep);
-    bench.letter('n', "THE PEER: the spi_link command channel to the SAM C21",
+    bench.letter('n', "THE PEER: the spi_link command channel to the peer board",
                  tn_peer_link);
     bench.letter('o', "the matrix against the peer: four modes, both orders",
                  to_peer_matrix);
@@ -3772,6 +3875,8 @@ int main() {
                  tq_peer_kernel);
     bench.letter('r', "THE ROLES INVERT: this board as the client, the peer as "
                       "the host", tr_peer_client);
+    bench.letter('x', "SLIP STATISTICS against the peer: each mode ten times, no "
+                      "verdict", tx_peer_slips, false);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",

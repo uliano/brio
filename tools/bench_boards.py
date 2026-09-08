@@ -118,6 +118,37 @@ BOARDS = {
         "console": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_0670FF534871754867182752-if02",
         "programmer": {"type": "openocd_stlink", "serial": "0670FF534871754867182752"},
     },
+    "F": {
+        # The SECOND SILICON of the third architecture: an ST Nucleo-G071RB.
+        # Its board number is NOT recorded here because it was never
+        # verified, and the morpho numbering that would follow from it is
+        # therefore not to be assumed either: EVERY WIRE ON THIS BOARD IS
+        # PLACED BY GPIO NAME and checked over SWD before any firmware,
+        # never by a connector number copied from E's notes.
+        # STM32G071RB, Cortex-M0+, 128 KB single-bank flash, 36 KB
+        # SRAM, DBGMCU_IDCODE 0x20006460 (DEV_ID 0x460 = G071/G081, REV_ID
+        # 0x2000), FLASHSIZE 0x0080 = 128 KB, all read over SWD before a
+        # line of brio ran on it. LD4 on PA5, B1 on PC13, the ST-LINK's
+        # virtual COM port on USART2 PA2/PA3 at 115200. Target voltage
+        # 3.24 V. Its errata sheet is ES0418 (not the G0B1's ES0548).
+        #
+        # ITS JOB ON THIS DESK: the G0's own bus peer - `spi_peer` and
+        # `twi_peer` (the stm32g0 ports) on SPI1 PB3/PB4/PB5/PA15 and I2C1
+        # PB8/PB9, the SAME pin names E hosts on, wired straight through
+        # to E with a dedicated GND (docs/bench.md, "The G0-to-G0 bus
+        # link").
+        #
+        # IDENTITY: the 96-bit unique device ID at 0x1FFF7590 (RM0444
+        # 41.1), read over SWD at this position - the same mechanism as
+        # E's. The stm32g0 peers report its first word as their ident
+        # label over the bus, so the host suite's peer letter names this
+        # board by it.
+        "board": "g071rb",
+        "id": None,
+        "device_uid": "00700051-4b305010-20383659",
+        "console": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066FFF534871754867235316-if02",
+        "programmer": {"type": "openocd_stlink", "serial": "066FFF534871754867235316"},
+    },
     "A": {
         # The original bench board: AVR128DB48, 24 MHz crystal on PA0/PA1,
         # CH340 on USART2 ALT1 (PF4/PF5). See docs/bench.md.

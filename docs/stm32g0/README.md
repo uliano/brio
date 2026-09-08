@@ -123,11 +123,19 @@ backends refuse to open), crts (`src/glue/startup_stm32g071.cpp`,
 `startup_stm32g031.cpp` - each header's own vector table, ST's names)
 and `tools/bench.py` board types (`g071rb`, `g031k8`, the same OpenOCD
 path as the G0B1RE's). `blink`, `console` and `probe` build for all
-three. What each of the two has NOT had yet is a first power-on on this
-desk: a manifest position with its ST-LINK's serial, the LED and the
-VCP pads verified the way the G0B1RE's were, the LSE crystal's presence
-(the Nucleo-32 may not populate it), and the suites made to skip what
-each chip lacks - the "second silicon" bench campaign.
+three. **THE G071RB IS ON THE DESK** at manifest position `F`, with its
+ST-LINK's serial, its VCP by-id path and its unique device ID recorded
+there: `probe` blinked LD4 with the PLL at 64 MHz and `console` answered
+its banner, so the clock, the ticker, the kernel and the USART
+transport of this stratum all run on a second die - and its first real
+firmware is the pair of bus peers, `spi_peer` and `twi_peer`, which is
+how the G0B1RE's SPI and I2C drivers meet an independent chip of their
+own family ([../bench.md](../bench.md), "The G0-to-G0 bus link"). The
+G031K8 has NOT had its first power-on: position `G` is reserved and
+waits for its ST-LINK serial, its LED and VCP pads verified the way the
+G0B1RE's were, the LSE crystal's presence (the Nucleo-32 may not
+populate it), and the suites made to skip what the chip lacks - the
+"second silicon" bench campaign.
 
 **Vector names across the boards.** The crt spells ST's own handler
 names, and a SHARED line's name changes with what shares it - USART2's

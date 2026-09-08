@@ -64,8 +64,13 @@ static_assert((flash_cr_mass_erase2 != 0u) == flash_dual_bank_capable);
 static_assert((flash_optr_dual_bank != 0u) == flash_dual_bank_capable);
 static_assert((flash_optr_swap_bank != 0u) == flash_dual_bank_capable);
 
+// The identity read, RM0444 41.1: three words at UID_BASE on every
+// header of the pack.
+static_assert(sizeof(DeviceUid) == 12);
+
 void flash_geometry() {
     (void)flash_size_kb();
+    (void)DeviceUid::read().word[0];
     (void)Flash::size_bytes();
     (void)Flash::page_count();
     (void)Flash::bank_count();

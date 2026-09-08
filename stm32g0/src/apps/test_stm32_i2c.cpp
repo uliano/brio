@@ -23,14 +23,18 @@
 // one thing that shapes the instruments below. Letters b..m are this
 // instrument's.
 //
-// (2) THE CROSS-ARCHITECTURE BUS: the SAME two pads and the SAME pull-ups
-// reach a SAM C21 running `twi_peer` on SERCOM3 function C -
+// (2) THE PEER BUS: the SAME two pads and the SAME pull-ups reach a
+// SECOND BOARD running `twi_peer`, and EITHER instrument is valid - the
+// peer names itself in its `ident` (fw 0x01xx = the AVR, 0x02xx = the
+// SAM C21, 0x03xx = a second STM32G0), and docs/bench.md says which one
+// is fitted -
 //
-//   SCL   PB8  AF6  <->  PA23  SERCOM3 PAD[1]
-//   SDA   PB9  AF6  <->  PA22  SERCOM3 PAD[0]
+//   SCL   PB8  AF6  <->  a SAM C21's PA23 SERCOM3 PAD[1], or PB8 AF6
+//   SDA   PB9  AF6  <->  a SAM C21's PA22 SERCOM3 PAD[0], or PB9 AF6
 //
-// plus a dedicated GND, both boards at 3.3 V. The instrument is
-// commanded IN BAND over the bus under test, over
+// - the stm32g0 port of the peer answers on the SAME PIN NAMES this
+// board hosts on, plus a dedicated GND, both boards at 3.3 V. The
+// instrument is commanded IN BAND over the bus under test, over
 // avrdx/src/apps/twi_link.hpp included by relative path - one source of
 // truth for the wire format, three architectures compiling it - and its
 // command-mode client answers ONE address (0x6B) with no general call
@@ -96,8 +100,8 @@
 //      answering - and the per-bus timeout with recover()
 //   m  the errata: 2.10.1 as the refusals it is, 2.10.2 as what the run
 //      has counted
-//   n  THE PEER: the twi_link command channel to the SAM C21, its ident
-//      and ten command round trips
+//   n  THE PEER: the twi_link command channel to the peer board, its
+//      ident and ten command round trips
 //   o  the tenure shapes against the peer - write, read, write-then-read
 //      with the repeated START counted from the far end, general call
 //   p  the vocabulary against the peer (nack_addr from a deaf client,
@@ -674,8 +678,8 @@ void settle_ms(uint32_t ms) {
 // ===========================================================================
 //
 // THE SELF-LINK IS NOT A PROPERTY OF THIS BOARD, it is two jumpers, and
-// they have already moved once: PB8/PB9 now carry the cross-architecture
-// bus to a SAM C21 running `twi_peer`, and I2C2's pads are on nothing
+// they have already moved: PB8/PB9 now carry the bus to a PEER BOARD
+// running `twi_peer`, and I2C2's pads are on nothing
 // (docs/bench.md). So the suite ASKS THE WIRE which desk it is on, once,
 // before any letter runs, and the letters whose second node is I2C2 SKIP
 // THEMSELVES - by name, with the reason printed - when the answer is no.
@@ -718,24 +722,26 @@ bool need_self_link() {
     print(serial,
           "  SKIPPED, no verdict claimed: this letter's second node is the board's "
           "OWN I2C2 client (PA11/PA12) and the probe says the two self-link wires "
-          "are not on the desk. PB8/PB9 carry the cross-architecture bus to the "
-          "SAM C21 today - letters n..r are the instrument this desk has "
-          "(docs/bench.md).",
+          "are not on the desk. PB8/PB9 carry the bus to the PEER BOARD today "
+          "- letters n..r are the instrument this desk has (docs/bench.md).",
           crlf);
     return false;
 }
 
 // ===========================================================================
-// The cross-architecture peer: twi_link.hpp over the bus under test
+// The peer: twi_link.hpp over the bus under test
 // ===========================================================================
 //
 // The wire format is avrdx/src/apps/twi_link.hpp, included by relative
 // path and NOT copied - it names no register, includes nothing of brio
 // and is compiled by three architectures' apps. The instrument at the
-// other end is `twi_peer`, whose samc21 port answers on SERCOM3 fn C at
-// the ONE command address 0x6B, with no general call and no mask, which
-// is the whole coexistence argument: nothing the wireless letters do can
-// wake it.
+// other end is `twi_peer`, in whichever of its three ports the desk
+// carries - the samc21 one on SERCOM3 fn C, the stm32g0 one on I2C1 AF6
+// at the same pin names this board hosts on - answering at the ONE
+// command address 0x6B, with no general call and no mask, which is the
+// whole coexistence argument: nothing the wireless letters do can wake
+// it. The peer's own `ident` says which port it is (fw 0x01xx, 0x02xx,
+// 0x03xx).
 //
 // ONE COMMAND IS TWO TENURES of the engine under test - a write carrying
 // the frame, then a read collecting the answer - so the command channel
@@ -818,8 +824,8 @@ bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
     if (!link_quiet) {
         print(serial, "    LINK FAILURE op ", hex(twilink::byte_of(op)),
               ": the peer board must be running `twi_peer` (python3 tools/bench.py "
-              "flash D twi_peer); check the two I2C wires (PB8-PA23, PB9-PA22), the "
-              "2.2k pull-ups and the GND.",
+              "flash F twi_peer); check the two SCL/SDA wires, the 2.2k pull-ups "
+              "and the GND.",
               crlf);
     }
     return false;
@@ -864,13 +870,13 @@ bool ensure_link() {
     link_quiet = false;
     print(serial,
           "  THE PEER DID NOT ANSWER. The peer board must be running `twi_peer` "
-          "(python3 tools/bench.py flash D twi_peer); its console '0' forces the "
+          "(python3 tools/bench.py flash F twi_peer); its console '0' forces the "
           "command-mode client back. Check the two wires in this file's header.",
           crlf);
     return false;
 }
 
-/// The opening line of every letter whose instrument is the SAM peer.
+/// The opening line of every letter whose instrument is the PEER BOARD.
 /// THE TWO WIRINGS ARE THE SAME JUMPERS AT DIFFERENT ENDS, so a desk
 /// carrying the self-link cannot be carrying the peer: that is a
 /// topology and it skips, exactly as the self-link letters skip on the
@@ -879,11 +885,11 @@ bool ensure_link() {
 bool need_peer() {
     if (self_link) {
         print(serial,
-              "  SKIPPED, no verdict claimed: this letter's instrument is the SAM "
-              "C21 running `twi_peer`, and the probe says these two pads carry the "
-              "board's OWN self-link today - the two wirings are the same jumpers "
-              "at different ends (docs/bench.md). Letters b..m are the instrument "
-              "this desk has.",
+              "  SKIPPED, no verdict claimed: this letter's instrument is the "
+              "PEER BOARD running `twi_peer`, and the probe says these two pads "
+              "carry the board's OWN self-link today - the two wirings are the "
+              "same jumpers at different ends (docs/bench.md). Letters b..m are "
+              "the instrument this desk has.",
               crlf);
         return false;
     }
@@ -2695,7 +2701,7 @@ void ty_isr_trace() {
 }
 
 // ===========================================================================
-// n - the cross-architecture command channel
+// n - the peer's command channel
 // ===========================================================================
 
 void tn_peer_link() {
@@ -2719,7 +2725,7 @@ void tn_peer_link() {
         print(serial, "  peer: label '", label, "' xtal=", id.xtal, " sanity=",
               hex(id.sanity), " fw=", hex(id.version), crlf);
         bench.verdict("ident comes back and it IS twi_peer (the sanity byte), from a "
-                      "board of ANOTHER ARCHITECTURE speaking the same wire format",
+                      "SECOND BOARD speaking the same wire format",
                       id.sanity == twilink::ident_sanity);
     } else {
         bench.verdict("ident comes back", false);
@@ -2972,16 +2978,16 @@ void tq_peer_speeds() {
             sm_fm_ok = false;
         }
     }
-    print(serial, "  ", exact, " of 3 speeds byte-exact against the SAM peer", crlf);
+    print(serial, "  ", exact, " of 3 speeds byte-exact against the peer", crlf);
     bench.verdict("Standard mode and Fast mode both carry a write and a read "
-                  "byte-exact between two DIFFERENT SILICONS",
+                  "byte-exact between TWO SEPARATE CHIPS",
                   sm_fm_ok);
-    // FAST-MODE-PLUS IS THE RUNG THAT IS ABOUT THE WIRE, not the
-    // controller: the peer's client has no input filter of its own (the
-    // samc21 campaign's headline), so what a megahertz bus does here is
-    // a property of these two jumpers and their 2.2 kOhm pull-ups. The
-    // number is printed and the verdict claims only that the register
-    // accepted the rate.
+    // FAST-MODE-PLUS IS THE RUNG THAT IS ABOUT THE WIRE AND THE FAR
+    // END, not this controller: what a megahertz bus does here is a
+    // property of these two jumpers, their 2.2 kOhm pull-ups and the
+    // peer's own input path (a SAM C21 target has no input filter at
+    // all - the samc21 campaign's headline). The number is printed and
+    // the verdict claims only that the register accepted the rate.
     bench.verdict("...and Fm+ is REACHABLE at this kernel clock (whether the wire "
                   "carries it is the print above, not this verdict)",
                   Host::speed_ok(I2cSpeed::fast_plus_1m));
@@ -3160,8 +3166,8 @@ void banner() {
         print(serial, "  NO SELF-LINK on the desk (probed): letters b..l, x and y "
                       "skip themselves and claim nothing", crlf);
     }
-    print(serial, "  PB8/PB9 AF6 with their 2.2k pull-ups reach the SAM C21 running "
-                  "`twi_peer` (SERCOM3 PA23/PA22, command address ",
+    print(serial, "  PB8/PB9 AF6 with their 2.2k pull-ups reach a PEER BOARD "
+                  "running `twi_peer` (its ident says which port; command address ",
           hex(twilink::command_addr), ") - letters n..r", crlf);
     bench.menu();
 }
@@ -3261,7 +3267,7 @@ int main() {
     bench.letter('l', "THE KERNEL: I2cBus over I2cHost, and the per-bus timeout",
                  tl_kernel);
     bench.letter('m', "the errata: 2.10.1 as refusals, 2.10.2 as a count", tm_errata);
-    bench.letter('n', "THE PEER: the twi_link command channel to the SAM C21",
+    bench.letter('n', "THE PEER: the twi_link command channel to the peer board",
                  tn_peer_link);
     bench.letter('o', "the tenure shapes against the peer, the repeated START "
                       "counted from the far end", to_peer_shapes);

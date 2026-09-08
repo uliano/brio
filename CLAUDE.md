@@ -779,8 +779,84 @@ gets its dated home in `docs/design/` when taken.
   letters x/y outside z. Declined: the glitch suppression (no third
   pad), 2.10.1's wrong sampling, the Fm+ drive's electrical effect, the
   Stop wake, the target half of the PEC, the ALERT, a live arbitration
-  race, client DMA. STEP (a) OF THE BUS PLAN IS CLOSED; next (b) the SAM
-  at 3.3 V as the independent peer, (c) the G071RB.
+  race, client DMA. STEP (a) OF THE BUS PLAN IS CLOSED. STEP (b) DONE
+  2026-09-07 (c57215f, Opus on Fable's brief, re-verified by Fable's
+  hand): the same six E pads moved to a SAM C21 at 3.3 V (SERCOM1 for
+  SpiClient, SERCOM3 for the I2C target), both suites grew letters n..r
+  over the avrdx spi_link/twi_link headers included by relative path
+  (one wire format, three architectures), main() PROBES for the
+  self-link at boot and each letter set skips itself on the other desk;
+  test_stm32_spi z 38/38 x2 and test_stm32_i2c z 54/54 x2 incl. cold:
+  the SPI ladder exact to PCLK/8 and breaking at PCLK/4 WITH THE PEER'S
+  COUNT FULL (its answer reload, not the wire), I2C 100k/400k/1M
+  byte-exact incl. Fm+, both kernel letters against a second chip with
+  util untouched; a suite bug caught by ISR counters (collecting the
+  peer's report re-inits the host and the arbiter's vector claim must be
+  re-stated). STEP (c) DONE 2026-09-08 (Opus on Fable's brief, the slip
+  finding closed and everything re-verified BY FABLE'S OWN HAND, and
+  committed): THE NUCLEO-G071RB AT POSITION F IS THE G0'S OWN BUS PEER
+  AND THE X1 LINE'S SECOND SILICON ON THE BENCH - the first-plug-in
+  ceremony by Fable's hand (probe: PA5 alternating over SWD with
+  RCC_CFGR 0x12 = PLLRCLK; console: its banner and HELP over the VCP;
+  DEV_ID 0x460 REV_ID 0x2000, 128 KB single bank, UID 00700051-...),
+  stm32g0/src/apps/spi_peer.cpp + twi_peer.cpp NEW as ports of the
+  samc21 peers onto SpiClient/I2cClient (boards g071rb,g0b1re; the
+  one-ahead pump on the SPI1 interrupt, the exchange on raw DMA engines
+  by default with spare_polled_pump = the software reload, host_burst
+  via SpiHost one-frame Requests under a GPIO select, the I2C target
+  polled with byte control for nack_at and arb as a bounded role switch
+  to I2cHost; ident 0x0300 with the UID's first word as label, xtal 0),
+  brio/stm32g0/flash.hpp grew DeviceUid (RM0444 41.1, the samc21
+  DeviceSerial shape), console.cpp names its part from the device-select
+  define (the G071 had printed "STM32G0B1RE"), the six wires E.PB3/PB4/
+  PB5/PA15 + PB8/PB9 to the SAME PIN NAMES on F (SWD-verified, stated by
+  GPIO name - F's board number unverified), check_stm32g0 OK on twelve
+  headers, host 24/24, the md5 gate 18/20 pre-existing images identical
+  + exactly the two suites as movers + 2 new. MEASURED: the AF table
+  proven by the first ping (SPI1 AF0, I2C1 AF6 on the G071 too);
+  test_stm32_i2c z 54/54 x2 incl. cold (all three speeds byte-exact
+  from ONE target configuration solved for Fm+; the wedge answered
+  i2c_arb_lost at 0 ms with SDA still low); test_stm32_spi z 38/38 x2
+  incl. cold with THE LADDER HOLDING THE WHOLE VOCABULARY - every BR
+  code exact to PCLK/2 = 32 MHz on the peer's DMA engines (the SAM broke
+  at PCLK/4; letter p now asks div2 when everything below was exact) and
+  the software pump 8 MHz always, marginal at 16, slipped at 32
+  (printed, no verdict); roles inverted at 2 MHz 12/12 each way. THE
+  FINDING THE AGENT LEFT UNEXPLAINED AND FABLE CLOSED ON THE BENCH: the
+  matrix letter slipped one bit mid-burst, both ends from the same frame
+  on, ONLY in modes 1 and 2 (the falling-edge samplers, where the data
+  lines change on the rising edge) - 20 bursts of 160 under a new
+  statistics letter x OUTSIDE z, modes 0/3 0 of 80 - and the cause is
+  the client's MISO EDGE RATE: SpiClient::drive_output hands the pad
+  over at very-high speed, and on this jumper bus the slave's falling
+  MISO edge, landing its propagation delay after the clock edge on an
+  SCK that has just settled high, dips the clock through VIL = one
+  sampling edge too many; one notch down, at HIGH, 0 of 120 with the
+  ladders UNCHANGED (medium costs the 32 MHz rung, low the 16 MHz one).
+  The peer re-states its MISO pad at high after every init (console 's'
+  cycles the four), z is deterministic, spi.md carries the mechanism and
+  the priced trade plus a driver-gap line (the tasks' pad speed is not a
+  Config knob; the wire's electrical question). Also measured on the I2C
+  target side: a target transmitter is asked for one byte MORE than the
+  controller takes (the byte in TXDR at the closing NACK never reaches
+  the wire - flush() throws it away), and the last data byte's stretch
+  falls outside the controller's tenure (so the commanded hold is spent
+  at ADDR too). A client must NOT run 35.5.9's disable procedure between
+  windows (~31 ms of bounded spins inside a 5 ms settle; init()'s RCC
+  reset is the right act). No G071-vs-G0B1 difference met in the code:
+  the same headers, drivers and Clock/Ticker/Uart/SpiClient/I2cClient
+  run on both; the only per-part spelling is the reserve's handler-name
+  macro. JCs: spare_polled_pump = the RXNE software pump on this peer;
+  the I2C target solved for Fm+; arb implemented and exercised by no
+  letter; letter s (the live arbitration race) not attempted; the MISO
+  speed an app-level restatement, not a driver default change. NOW
+  REACHABLE: the live I2C arbitration race (arb on all three peer
+  ports, low_addr, a busy-bus rendezvous), the I2C wake from Stop with a
+  second node (a role swap no letter does), sink_slow/ss_pulse/arb
+  served and commanded by no letter, and the full suites ON the G071
+  (the second-silicon campaign proper). Desk: E last ran test_stm32_i2c,
+  F twi_peer; no flash written; the self-link and the SAM link are not
+  fitted.
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device

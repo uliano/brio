@@ -121,6 +121,17 @@ empty area, false, on such a part, each flag saying whether the
 question had a bit behind it. `Flash::interrupts()` refuses a
 read-protect enable there.
 
+`flash_size_kb()` and `DeviceUid` are the two READ-ONLY facts of the
+system memory area this chapter also carries (RM0444 41.1 and 41.2):
+the flash size the part reports in kilobytes, and the 96-bit unique
+device identifier as three words. Both are plain reads of a factory
+region - no unlock, no engine, nothing to refuse. `DeviceUid` is the
+samc21 stratum's `DeviceSerial` in this family's clothes: a board that
+has no label to be given (there is no USERROW here) still has a NAME,
+and the first word in hex is what the bench peers report as their
+identity over the wire, so a suite's peer letter can say which board
+answered it.
+
 `MainFlashPartition` / `MainFlash` / `MainFlashJournalZone`
 (`stm32g0/nvm_flash.hpp`) are the storage. See below.
 
