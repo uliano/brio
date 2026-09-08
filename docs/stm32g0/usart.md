@@ -628,6 +628,15 @@ that is not the console's own pad, and letter `w` - the wake from Stop
 with ES0548 2.2.4 staged - skips whole, having neither a wake line nor
 (on this board) a crystal for its wall.
 
+**THE FOUR EDGE-COUNTER VERDICTS RUN HERE**, because the erratum that
+took them on the G071 is revision Z's alone on this part: ES0487 2.2.4
+is marked absent on revision Y, and the boot probe on PB3 agrees - four
+pad edges into the request generator move **4 words with the event mask
+alone and 4 with the interrupt mask armed** (F: 0 and 1 of 4). And
+ES0548 2.11.1's twin, **ES0487 2.10.1**, applies on Y and REPRODUCES with
+its control in letter `f`: the glitch in the stop bit's second half
+reaches the byte, the one in the first half does not.
+
 **AND IT IS WHY THREE OTHER SUITES MOVE THEIR CONSOLE TO LPUART1**
 (`test_stm32_clock`, `test_stm32_spi`, `test_stm32_i2c`): a console whose
 divisor follows the switch under test cannot report on it, and every

@@ -555,6 +555,12 @@ has neither) skip by name; the geometry verdict is now the cross-check
 "the multiplexer has exactly as many channels as the controllers have
 between them", which is one claim on all three parts.
 
+**AND THE EXTI PATH INTO THE DMAMUX WORKS HERE.** ES0487 lists the
+DMAMUX-from-EXTI limitation (its 2.2.4, ES0418 2.2.4's twin) for
+revision Z alone, and this board is revision Y: `test_stm32_serial`'s
+boot probe moves 4 words for 4 pad edges with the event mask alone (F:
+0), so letter f's SWIER leg passes here for the right reason.
+
 **THE CONSOLE GIVES ITS ENGINES BACK.** Two of the seven channels are
 the console's transmit and receive on the bigger parts; on five, the
 letters own all five, so the console runs on the INTERRUPT transport

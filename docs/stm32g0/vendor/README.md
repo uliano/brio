@@ -21,7 +21,7 @@ guessable from a neighbour's (verify on st.com before citing).
 | STM32G0B1xB/xC/xE device errata | **ES0548 Rev 3** (October 2022) | symlink to `.../es0548-*.pdf` | silicon revisions A (REV_ID 0x1000) and Z (0x1001) in one document with a per-item column each |
 | STM32G071x8/xB device errata | **ES0418 Rev 5** (November 2023) | symlink to `.../es0418-*.pdf` | the SECOND SILICON's (the Nucleo-G071RB at desk position F, revision B); READ AT THE BENCH - see "The second silicon's errata" below |
 | STM32G031x4/x6/x8 datasheet | **DS12992 Rev 4** | not fetched as a PDF; the TEXT was read at the bench | the THIRD SILICON's: pin assignment (table 12 - the LQFP32 column is what says which pads exist), alternate-function tables 13..17, the low-power mode paragraphs of 3.7 |
-| STM32G031x4/x6/x8 device errata | **ES0487** (number read off st.com's own listing, es0487-stm32g031x4x6x8-device-errata) | NOT OBTAINED | the third silicon's, and every route to it timed out at the bench: the erratum letters run on that board and their outcomes are recorded as MEASURED with this sheet's verdict PENDING - see "The third silicon" below |
+| STM32G031x4/x6/x8 device errata | **ES0487 Rev 6** (September 2023) | symlink to `.../es0487-stm32g031x4x6x8-device-errata-stmicroelectronics.pdf` | the THIRD SILICON's (the Nucleo-G031K8 at desk position G, revision Y); READ AT THE BENCH against the letters - see "The third silicon" below. st.com serves it to `curl` with a browser user agent where the same URL times out elsewhere |
 | Getting started with STM32G0 hardware development | AN5096 Rev 4 (December 2025) | symlink to `.../an5096-*.pdf` | decoupling, clocks, boot pins |
 
 Canonical URLs (redirect to the current revision):
@@ -211,38 +211,43 @@ headers, so a timer told to take MCO on a smaller part counts nothing, in
 silence - which wedged a suite whose own microsecond wait rode that timer
 ([../tim.md](../tim.md), [../clock.md](../clock.md)).
 
-## The third silicon: STM32G031K8, and a sheet that is not in hand
+## The third silicon: STM32G031K8, and ES0487 read against the letters
 
 The Nucleo-G031K8 at desk position G reports **DEV_ID 0x466, REV_ID
-0x1003**, and its errata sheet is **ES0487** - a number read off st.com's
-own listing and nothing more, because THE DOCUMENT WAS NOT OBTAINED:
-every fetch route timed out at the bench. So the rule is simple, and it
-is visible in the suites' own text: **no item
-number of ES0487 is ever cited**. Where a letter stages a behaviour named
-by a sheet that IS in hand it says whose - "the G0B1's 2.7.2, ES0487's
-twin pending" - and what it records is what THIS DIE DID, with the
-sheet's verdict left open.
+0x1003**, which ES0487's table 2 names **revision Y** (0x1001 is Z).
+The sheet numbers its items on its own scale and A NUMBER DOES NOT
+TRAVEL BETWEEN SHEETS, so the table pairs each limitation BY TITLE with
+its ES0548 twin; the suites' own prints still name the G0B1's number as
+the description being staged ("ES0487's twin pending" - true when they
+were written, the sheet arrived after), and the verdict is here.
 
-What the letters found on it, all of it measured on REV_ID 0x1003:
-
-| The behaviour staged (named by the G0B1's ES0548 item) | Where a letter reaches it | What this die did | ES0487's own verdict |
+| ES0487 item, status on revision Y | ES0548 twin | Where a letter reaches it on G | What this die did |
 |---|---|---|---|
-| **2.7.2** the second of two adjacent compare matches | `test_stm32_tim` letter `k`, staged with a control | did NOT reproduce: the second compare raised its flag and toggled its output all eight rounds - as on the other two dies | pending |
-| **2.7.1, 2.7.3** the one-pulse trigger, output-compare clear | - | not staged: 2.7.1 needs a trigger placed at CNT = ARR of a cascaded master, and 2.7.3 needs `ocref_clr`, which on this part has no comparator to come from at all | pending |
-| **2.2.4** peripherals that request HSI16 fail to wake from Stop with HSIDIV != 0 | `test_stm32_sleep` letter `g`, with its control | the hazard predicate is quiet at HSIDIV 0 and speaks as soon as the divider moves, and an RTC wake is NOT reached by it: a Stop armed for 250 ms under HSIDIV /4 lasted its time. The USART half has no subject here - this part's USART2 cannot wake from Stop at all | pending |
-| **2.2.2** a spurious wake-up flag | `test_stm32_sleep` letter `h` | unchanged: `wakeup_pin()` clears WUFx as part of the configuration, so the flag cannot reach a caller | pending |
-| **2.9.1** consecutive initialization-mode entries corrupt the calendar | `test_stm32_rtc` letter `h`, guarded against raw | did not reproduce on the unguarded path in this run either; the guarded path never corrupts a calendar | pending |
-| **2.8.1, 2.8.2** the LPTIM's disable, and a flag cleared from thread mode | `test_stm32_lptim`, as code | unchanged and measured as code: a thread-mode clear with an interrupt enabled is refused, `disable()` IS the RCC reset | pending |
-| **2.10.1** the I2C's minimum kernel clock per speed | `test_stm32_i2c` letter `m` | unchanged: the erratum's floors (4, 10 and 20 MHz) are stricter than the datasheet's in all three modes, and the driver refuses below them | pending |
-| **2.10.2** a master's spurious BERR | `test_stm32_i2c` letter `m` | not seen: BERR swept 0 times since the host's init, and the driver counts it and never reports it - the erratum's own workaround | pending |
-| **2.12.1, 2.12.2** the SPI's BSY and its last frame | `test_stm32_spi` letter `h` | NOT REACHED: that letter's instrument is a wire, and this board has none (nor a second SPI whose pads the package bonds) | pending |
-| **2.2.10** prefetch across flash banks | - | cannot apply: one bank | pending |
-| the FDCAN and DAC items | - | cannot apply: this part has neither | pending |
+| **2.2.4** DMAMUX cannot be synchronized or triggered by EXTI - **ABSENT ON Y** (N on Z; the G071's ES0418 2.2.4, reproduced on F) | none | `test_stm32_serial`'s boot probe on PB3 | THE DIE AGREES: four pad edges into a request generator move **4 words with the event mask alone and 4 with the interrupt mask armed** (F: 0 and 1 of 4), so the four edge-counter verdicts that skip on F run here |
+| **2.2.6** wakeup from Stop not effective with HSIDIV != 0 - N/N | 2.2.4 | `test_stm32_sleep` letter `g`, with its control | the hazard predicate is quiet at HSIDIV 0 and speaks as soon as the divider moves; an RTC wake is not a clock-request wake and a 250 ms Stop under HSIDIV /4 lasted its time. No USART subject: this part's USART2 cannot wake from Stop at all |
+| **2.2.2** WUFx set while configuring the pin - A/A | 2.2.2 | `test_stm32_sleep` letter `h` | `wakeup_pin()` clears WUFx as part of the configuration, so the flag cannot reach a caller - the workaround as code |
+| **2.2.1** unstable LSI when it clocks the RTC and VDD resets without the backup domain - P/P | 2.2.1 | - | NOT STAGED, and it weighs more on this board than on the other two: ITS RTC RUNS ON LSI. The workaround is a program's - on a power-on (BORRSTF) reset the backup domain before trusting it |
+| **2.2.5** overwriting all ones with all zeros fails - N/N | 2.2.3 | - | not reached: the flash suites stay the G0B1RE's |
+| **2.2.8** PC13 transitions disturb LSE - N/N | 2.2.6 | - | moot: PC13 reaches no pin and the LSE does not start |
+| **2.2.11** RTC domain corrupted on a missed power-on reset - A/A | 2.2.11 | - | not staged |
+| **2.3.1** DMA disable failure on a transfer error coinciding with a GIF clear - A/A; **2.4.1..2.4.4** the DMAMUX flags and the synchronization write - N/N/N/A | 2.4.1; 2.5.1..2.5.4 | dma.hpp | the same block as the other dies', item for item by title: whatever [dma.md](../dma.md) records for ES0548's holds here |
+| **2.5.1..2.5.4** ADC overrun flag, CFGR1 under ADEN, AWD1 in single mode, sampling one cycle longer - P/A/A/N | 2.6.1..2.6.4 | `test_stm32_analog`, adc.hpp | 2.5.2 is structural on every part (a configure with ADEN set is refused), as audited on F; **2.5.6** (offset out of specification) is Z only |
+| **2.6.2** consecutive compare event missed - N/N | 2.7.2 | `test_stm32_tim` letter `k`, staged with a control | did NOT reproduce in that staging: the second compare raised its flag and toggled its output 8 of 8 - unrefuted rather than disproved, as on the other two dies |
+| **2.6.1, 2.6.3** the one-pulse trigger, output-compare clear - P/P; **2.6.4** TIM1's sync trigger missed by a slower slave - N/N; **2.6.5** TIM16/17 clocked by SYSCLK | 2.7.1, 2.7.3; none; none | - | not staged (2.6.1 needs a trigger placed at CNT = ARR of a cascaded master, 2.6.3 an `ocref_clr` this part has no comparator for, 2.6.4 has no G0B1 twin and no letter); 2.6.5 is Z only |
+| **2.7.1, 2.7.2** LPTIM stuck in its interrupt on a disable / on a flag clear - A/A, P/P | 2.8.1, 2.8.2 | lptim.hpp, as code | unchanged: `disable()` IS the RCC reset, a thread-mode clear with an interrupt enabled is refused |
+| **2.8.1** calendar initialization fails on consecutive INIT entries - A/A | 2.9.1 | `test_stm32_rtc` letter `h`, guarded against raw | did not reproduce on the unguarded path here either; the guarded path never corrupts a calendar |
+| **2.9.1** tSU;DAT shorter than one kernel clock - P/P | 2.10.1 | `test_stm32_i2c` letter `m` | the floors (4, 10, 20 MHz) are stricter than the datasheet's and the driver refuses below them |
+| **2.9.2** spurious BERR in master mode - A/A | 2.10.2 | `test_stm32_i2c` letter `m` | not seen: BERR swept 0 times; the driver counts it and never reports it - the workaround |
+| **2.9.3** spurious master transfer upon own slave address match - P/P | none | - | not staged: it wants one node that is master and slave at once while a second master addresses it |
+| **2.10.1** data corruption from a glitch in the stop bit's second half - **A/A here, N/N on the G0B1** | 2.11.1 | `test_stm32_serial` letter `f`, with its control | REPRODUCES on this die: the glitch in the second half reaches the byte, the one in the first half does not |
+| **2.11.1, 2.11.2** SPI BSY high after a disable / at the end of a slave transfer - A/A | 2.12.1, 2.12.2 | `test_stm32_spi` letter `h` | NOT REACHED: that letter's instrument is the self-link, which the LQFP32 cannot carry (SPI2's pads reach no pin) |
+| documentation errata **2.2.10**, **2.5.5**, **2.10.2** | - | - | 2.5.5 corrects the ADC trigger latency to 6.5/12.5/3.5 PCLK cycles; 2.10.2 says PRESC is absent on some instances, which is the fact the serial suite measured on USART2 |
+| ES0548 2.13.x (FDCAN), 2.14.x (UCPD) | - | - | no counterpart: this part has neither |
 
-**AND ONE THING THE SHEET'S ABSENCE DOES NOT EXCUSE.** Two facts of this
-board were found the hard way and belong beside the errata because they
-look like them until they are named: **Shutdown powers the LSI down**
-(DS12992 3.7.4 - it is in the datasheet, not in an errata sheet, and it
-means an RTC on LSI cannot end a Shutdown), and **the debug port does not
-attach** (`docs/bench.md`, a desk fault under investigation and not a
-silicon claim).
+**AND ONE THING THE SHEET DOES NOT CARRY.** Two facts of this board were
+found the hard way and belong beside the errata because they look like
+them until they are named: **Shutdown powers the LSI down** (DS12992
+3.7.4 - it is in the datasheet, not in an errata sheet, and it means an
+RTC on LSI cannot end a Shutdown), and **the debug port can go silent**
+until the board is replugged (`docs/bench.md` - a state of the ST-LINK
+half, not a silicon claim).

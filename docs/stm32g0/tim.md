@@ -554,14 +554,18 @@ port A, and nothing before letter `a` opens C), and the pad reads HIGH
 after it, low when driven low. On the Nucleo-64s the same check runs on
 a port the console has long opened and can tell nothing.
 
-**THE ERRATUM LETTER NAMES NO NUMBER IT HAS NOT READ.** The G031's sheet
-is ES0487 and it was not in hand: letter `k` stages the G0B1's 2.7.2 by
-its own mechanism and records the outcome as measured ON THIS DIE - the
-second compare of two consecutive counter cycles raised its flag and
-toggled its output all eight rounds, so the described behaviour did not
-reproduce here either - with ES0487's twin named as pending. 2.7.1 and
-2.7.3 stay stated and unreachable, the second one doubly so: this part
-has no comparator to drive `ocref_clr` with.
+**THE ERRATUM LETTER'S TWIN IS ES0487 2.6.2** (revision Y, no
+workaround) - the sheet is in hand ([vendor/README.md](vendor/README.md))
+though letter `k`'s own print still names the G0B1's 2.7.2, the
+description it stages. Measured on this die: the second compare of two
+consecutive counter cycles raised its flag and toggled its output all
+eight rounds, so the described behaviour did not reproduce here either -
+unrefuted, not disproved. 2.6.1 and 2.6.3 (the G0B1's 2.7.1 and 2.7.3)
+stay stated and unreachable, the second one doubly so: this part has no
+comparator to drive `ocref_clr` with; 2.6.4 - TIM1's synchronization
+trigger missed by a slower slave, an item with no G0B1 twin - is not
+staged; and 2.6.5 (TIM16/TIM17 clocked by SYSCLK) is revision Z's
+alone.
 
 LSI on TIM16's capture reads **31434 Hz** here (E 32586, F 32339), and
 the cross-check is against the watchdog-timed figure of the SAME die

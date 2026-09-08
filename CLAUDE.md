@@ -1182,7 +1182,26 @@ gets its dated home in `docs/design/` when taken.
   connector columns, the wire-check ritual, the end state), stm32g0/
   README.md's second-silicon table and fit story, spi.md and i2c.md's
   "On the third silicon". Desk: E on test_stm32_spi, G on spi_peer, F
-  unplugged. NEXT: the harmonization rules pass (roadmap step 2).
+  unplugged. ES0487 OBTAINED THE SAME EVENING (Rev 6, September 2023 -
+  `curl` with a browser user agent where WebFetch and every earlier
+  route timed out; the user filed it beside the other G0 sheets):
+  REV_ID 0x1003 IS REVISION Y, every pending row of vendor/README.md's
+  table now carries the sheet's verdict paired BY TITLE (item numbers do
+  not travel between sheets - ES0487 2.6.2 is the G0B1's 2.7.2, 2.2.6
+  its 2.2.4, 2.10.1 its 2.11.1), and TWO VERDICTS WERE CHECKED ON THE
+  DIE: 2.2.4 (the DMAMUX from EXTI, the item that took four serial
+  verdicts on the G071) is ABSENT on Y and the serial suite's boot probe
+  agrees - 4 words of 4 pad edges with the event mask alone, where F
+  moved 0 - and 2.10.1 (the stop-bit glitch, N/N on the G0B1 and A/A
+  here) applies and reproduces with its control. Items with no G0B1
+  twin: 2.6.4 (TIM1's sync trigger missed by a slower slave) and 2.9.3
+  (a spurious master transfer upon own address match), neither staged;
+  2.2.1 (LSI unstable across a VDD reset without a backup-domain reset)
+  is the one to keep in mind on a board whose RTC runs on LSI. The
+  suites' prints still say "ES0487's twin pending" (tim k, serial w) -
+  true when written; a string edit that moves three images, left for
+  the harmonization pass. NEXT: the harmonization rules pass (roadmap
+  step 2).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device

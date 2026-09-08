@@ -320,13 +320,16 @@ E ("The G0-to-G0 bus link" below).
   until NRST.
 - Identity: the 96-bit UID at 0x1FFF7590 reads `007f0063 34315014
   20323346`, recorded in `tools/bench_boards.py`.
-- Its errata sheet is **ES0487** ("STM32G031x4/x6/x8 device errata"),
-  and THE DOCUMENT IS NOT IN HAND: every fetch route timed out at the
-  bench. So the erratum letters run and their outcomes are recorded as
-  MEASURED ON THIS DIE (REV_ID 0x1003) with the sheet's own verdict
-  PENDING, and no item number of ES0487 is ever cited -
-  [stm32g0/vendor/README.md](stm32g0/vendor/README.md) carries the
-  table.
+- Its errata sheet is **ES0487 Rev 6** ("STM32G031x4/x6/x8 device
+  errata"), in hand and read against the letters: REV_ID 0x1003 is its
+  **revision Y**. Two of its verdicts were checked on this die at the
+  bench - 2.2.4 (the DMAMUX triggered from EXTI) is ABSENT on Y and the
+  serial suite's boot probe agrees, four pad edges moving 4 words where
+  the G071 moved 0; 2.10.1 (a glitch in the stop bit's second half)
+  applies and reproduces with its control - and the whole map is
+  [stm32g0/vendor/README.md](stm32g0/vendor/README.md)'s. (The sheet
+  came down with `curl` and a browser user agent where every other route
+  had timed out.)
 - No second flash bank, so no storage attic: `test_stm32_nvm` and
   `test_stm32_journal` stay the G0B1RE's alone, as they do on F.
 - **FOURTEEN OF THE SEVENTEEN BENCH SUITES RUN ON THIS BOARD**, each of
