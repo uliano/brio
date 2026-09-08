@@ -1120,7 +1120,60 @@ gets its dated home in `docs/design/` when taken.
   test_stm32_serial with the six wires to the unplugged F still on its
   side. For a hand at the desk: G's SWD (the cable and port, the solder
   bridges, a second probe on PA13/PA14) and whether the MB1455's X2 is
-  fitted at all. NEXT: the harmonization rules pass (roadmap step 2).
+  fitted at all.
+  **THE G031K8 ON THE BUS, 2026-09-08 (Opus at the bench, no delegation,
+  the user watching): the third silicon stops being the wireless board
+  and becomes a full bus DUT in BOTH ROLES.** The six wires that had gone to the unplugged F moved to
+  G at the same pin names (E.PB3/PB4/PB5/PA15 + PB8/PB9, the 2.2k
+  pull-ups staying on E's side), and were verified before any firmware
+  the campaign's own way: two OpenOCD sessions at once, both cores
+  halted at their reset vector, each end driven push-pull while the far
+  end read under its OWN internal pull IN THE OPPOSITE DIRECTION, all
+  six far pads read at every step as the isolation half - six wires,
+  both directions, no crosstalk - plus the pull-up control (a line
+  driven low and released with no pull at either end comes back to 1 on
+  SCL/SDA and stays 0 on the four SPI lines). THE DESK FACTS THE CHECK
+  TAUGHT, both from documents fetched at last (UM2591 Rev 2 and the
+  MB1455-C01 schematic, where WebFetch times out and curl does not):
+  the Nucleo-32's connector map (PA15 = D2 = CN3-5, PB8 = D8 = CN3-11,
+  PB9 = D10 = CN3-13, PB5 = D11 = CN3-14, PB4 = D12 = CN3-15, PB3 =
+  D13 = CN4-15), the SHIPPED HW1 SHUNT between CN3-4 (GND) and CN3-5
+  (the bus NSS) which UM2591's getting-started tells you to pull - not
+  fitted on this board, measured - and SB12/SB13 (default LED on PC6,
+  PB3 free). AND ONE DIAGNOSIS THE WIRE ITSELF GAVE: with E unplugged,
+  G's PB8/PB9 would not follow their own pull-ups and pulled each other
+  - two resistors to a dead rail, which is what a half-powered bus looks
+  like from one end. THE CODE: `wires_possible` was ONE constant asking
+  TWO questions and is now `self_link_possible` alone - the peer letters
+  are compiled on every part (SPI1's and I2C1's pads are bonded
+  everywhere) and what settles them is the desk, while the self-link
+  stays a package fact for the SPI suite (SPI2 reaches no pin of the
+  LQFP32) and is NOT one for the I2C suite (the LQFP32 bonds I2C2's
+  PA11/PA12 = the board's A5/A4), which therefore probes on that part
+  like on any other and printed `self-link probe: SCL 0 SDA 0` on
+  silicon; spi_peer and twi_peer gained `g031k8` in their boards line
+  and needed NOT ONE other line (10512 and 10128 bytes, console on
+  USART2 as every non-clock suite there). BENCH: test_stm32_spi z 38/38
+  and test_stm32_i2c z 54/54, twice per direction with one run from a
+  cold flash, ON E WITH G AS THE PEER AND ON G WITH E AS THE PEER - the
+  same counts the SAM and the G071RB scored - plus letter x (the
+  falling-edge slip) 0 of 40 bursts in each direction. MEASURED: the BR
+  ladder exact to PCLK/2 = 32 MHz whichever board hosts, and the peer's
+  software pump holding to 8 MHz and slipping at 16 on both dies
+  (printed, no verdict - it is the peer's turnaround). GATE:
+  check_stm32g0 OK on twelve headers, host 24/24, the three presets
+  clean (the assembler's SHF_GROUP notes are HEAD's own, same count),
+  and the md5 worktree gate with pinned mtimes and wiped build dirs -
+  22 of 22 G0B1RE and 19 of 19 G071RB images BYTE-IDENTICAL (the change
+  folds to nothing where wires_possible was already true, which is its
+  own proof) with exactly the two edited suites as movers on the G031K8
+  and the two peers new. Sizes there: spi 31104 with the self-link half
+  compiled out, i2c 52676 with every letter it has anywhere. Docs:
+  bench.md (the G section, the link section rewritten E-to-G with both
+  connector columns, the wire-check ritual, the end state), stm32g0/
+  README.md's second-silicon table and fit story, spi.md and i2c.md's
+  "On the third silicon". Desk: E on test_stm32_spi, G on spi_peer, F
+  unplugged. NEXT: the harmonization rules pass (roadmap step 2).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device

@@ -738,26 +738,24 @@ bool wire_follows() {
     return low && high;
 }
 
-// AND ON A BOARD WITH NO WIRES ON IT AT ALL, NEITHER LINK CAN EXIST.
-// The self-link is two jumpers between I2C1's pads and I2C2's and the
-// peer link is two more to another board; a bench position that carries
-// neither has no bus but the one inside the chip. So there the letters
-// whose instrument is a wire are COMPILED OUT rather than skipped at run
-// time - each still printing its own reason and claiming nothing - and
-// an absent PEER is not reported as firmware to flash, because no wire
-// was ever there to carry it. Which device header is compiled is the one
-// question only the preprocessor can ask, and what desk goes with it is
-// this suite's own knowledge.
-#if defined(STM32G031xx)
-constexpr bool wires_possible = false;
-#else
-constexpr bool wires_possible = true;
-#endif
+// BOTH LINKS ARE A QUESTION FOR THE WIRE HERE, ON EVERY PART SO FAR.
+// The self-link is two jumpers between I2C1's pads and I2C2's and the peer
+// link is two more to another board, and the two are the same two pads at
+// different ends, so a desk carries one or the other and the probe below
+// is what says which. Unlike the SPI suite, whose SPI2 reaches no pin of
+// the LQFP32, THIS package bonds every pad of both links - I2C1 on
+// PB8/PB9 and I2C2 on PA11/PA12, the Nucleo-32's own A5 and A4 (DS12992
+// table 12) - so nothing here is compiled out for a package, and the
+// constant stays as the one line a part that does not bond them would
+// need. An absent peer with the wires in place still fails LOUDLY: that
+// is firmware to flash, not a desk this suite was not built for.
+constexpr bool self_link_possible = true;
 
 bool probe_self_link() {
-    if constexpr (!wires_possible) {
-        print(serial, "  self-link probe: not asked - this board carries no "
-              "wires at all, on these pads or any others", crlf);
+    if constexpr (!self_link_possible) {
+        print(serial, "  self-link probe: not asked - this package bonds no "
+              "pad of I2C2, so there is nothing at the far end to drive or "
+              "read", crlf);
         return false;
     }
     const bool scl = wire_follows<SclPin, PeerSclPin>();
@@ -768,11 +766,11 @@ bool probe_self_link() {
 
 /// The opening line of every letter whose second node is I2C2.
 bool need_self_link() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         print(serial,
               "  SKIPPED, no verdict claimed: this letter's second node is the "
-              "board's OWN I2C2 client on two jumpers, and this board carries "
-              "no wires at all. The letter is compiled out here, not merely "
+              "board's OWN I2C2 client on two jumpers, and this package bonds "
+              "no pad of I2C2. The letter is compiled out here, not merely "
               "skipped.",
               crlf);
         return false;
@@ -944,15 +942,6 @@ bool ensure_link() {
 /// other desk. An absent peer with the wires in place is a different
 /// thing - firmware to flash - and fails loudly.
 bool need_peer() {
-    if constexpr (!wires_possible) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: this letter's instrument is a "
-              "PEER BOARD on two wires, and this board has none - so nothing "
-              "here is an absent peer's fault and no failure is claimed from "
-              "a link that was never wired.",
-              crlf);
-        return false;
-    }
     if (self_link) {
         print(serial,
               "  SKIPPED, no verdict claimed: this letter's instrument is the "
@@ -1214,7 +1203,7 @@ void ta_block() {
 // ===========================================================================
 
 void tb_link() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -1296,7 +1285,7 @@ void tb_link() {
 // ===========================================================================
 
 void tc_vocabulary() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -1407,7 +1396,7 @@ uint32_t measure_scl_ns(uint8_t n, I2cSpeed s, uint8_t& status) {
 }
 
 void td_speeds() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -1657,7 +1646,7 @@ void td_speeds() {
 // ===========================================================================
 
 void te_stretch() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -1758,7 +1747,7 @@ void te_stretch() {
 // ===========================================================================
 
 void tf_addressing() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -1861,7 +1850,7 @@ void tf_addressing() {
 // ===========================================================================
 
 void tg_filters() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -1947,7 +1936,7 @@ void tg_filters() {
 // ===========================================================================
 
 void th_long() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -2106,7 +2095,7 @@ void th_long() {
 // ===========================================================================
 
 void ti_smbus() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -2318,7 +2307,7 @@ void ti_smbus() {
 
 
 void tj_wake() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -2402,7 +2391,7 @@ void tj_wake() {
 // ===========================================================================
 
 void tk_unstick() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -2567,7 +2556,7 @@ Host::Request request(uint8_t addr, const uint8_t* tx) {
 }  // namespace kl
 
 void tl_kernel() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -2759,7 +2748,7 @@ void tm_errata() {
 // it is kept because the next person will need it too.
 
 void tx_trace() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -2829,7 +2818,7 @@ void tx_trace() {
 /// before a word is printed - so a storm is counted and named instead of
 /// starving the console that would report it.
 void ty_isr_trace() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -2892,10 +2881,6 @@ void ty_isr_trace() {
 // ===========================================================================
 
 void tn_peer_link() {
-    if constexpr (!wires_possible) {
-        (void)need_peer();
-        return;
-    }
     if (!need_peer()) {
         return;
     }
@@ -2938,10 +2923,6 @@ void tn_peer_link() {
 // ===========================================================================
 
 void to_peer_shapes() {
-    if constexpr (!wires_possible) {
-        (void)need_peer();
-        return;
-    }
     if (!need_peer()) {
         return;
     }
@@ -3024,10 +3005,6 @@ void to_peer_shapes() {
 // ===========================================================================
 
 void tp_peer_vocabulary() {
-    if constexpr (!wires_possible) {
-        (void)need_peer();
-        return;
-    }
     if (!need_peer()) {
         return;
     }
@@ -3125,10 +3102,6 @@ void tp_peer_vocabulary() {
 // ===========================================================================
 
 void tq_peer_speeds() {
-    if constexpr (!wires_possible) {
-        (void)need_peer();
-        return;
-    }
     if (!need_peer()) {
         return;
     }
@@ -3202,10 +3175,6 @@ void tq_peer_speeds() {
 // ===========================================================================
 
 void tr_peer_kernel() {
-    if constexpr (!wires_possible) {
-        (void)need_peer();
-        return;
-    }
     if (!need_peer()) {
         return;
     }

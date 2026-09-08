@@ -207,22 +207,24 @@ two from a cold flash.
 | `test_stm32_dma` | 69 | 65 | **62** (+ `u` 3, `w` 0) | DMA2, the console's DMA-fed rate (five channels, and the letters own all five) and the peripheral-to-peripheral leg |
 | `test_stm32_analog` | 139 | 136 | **67** | the DAC's letters and the comparators' - this part has neither block, so eight of the eighteen letters are compiled out ([adc.md](adc.md)) |
 | `test_stm32_serial` | 88 (+ y/w/v) | 83 | **77** (+ `y` 1, `v` 1, `w` 0) | USART2 is BASIC here (no kernel-clock multiplexer, no wake), LPUART1's only bonded pads are the console's, and there is no LPUART2 |
-| `test_stm32_spi` | 38 (peer) | 38 (peer) | **18** (wireless) | every letter whose instrument is a wire: SPI2's pads are not bonded and the board has no peer |
-| `test_stm32_i2c` | 54 (peer) | 54 (peer) | **28** (wireless) | the same |
+| `test_stm32_spi` | 38 (peer) | 38 (peer) | **38** (peer) | the eleven self-link letters, COMPILED OUT: SPI2's four pads are bonded to no pin of the LQFP32, so that instrument cannot exist here at any wiring |
+| `test_stm32_i2c` | 54 (peer) | 54 (peer) | **54** (peer) | the eleven self-link letters, skipped on the PROBE's answer like everywhere else - this package does bond I2C2's PA11/PA12, so what rules them out is the desk and not the plastic |
 | `test_stm32_nvm`, `test_stm32_journal` | 85, 52 | - | - | one flash bank: no storage attic |
 | `test_stm32_fdcan` | 96 | - | - | no FDCAN |
 
 **64 KB AND 8 KB ARE PART OF THE DESIGN HERE.** Every image on that
 board fits with the cuts named in its own suite: the largest is
-`test_stm32_serial` at **59836 bytes of 65536**, then `test_stm32_lptim`
-50380, `test_stm32_dma` 42392 and `test_stm32_tim` 40660; the hungriest
-in RAM is `test_stm32_dma` at **6108 bytes**, which leaves the stack the
-2 KB the campaign's rule reserves for it. Two suites needed real cuts
-rather than the letters they lose anyway: `test_stm32_dma` halves its
-three memory-to-memory buffers (512 words to 256, every claim restated
-for the length that fits) and gives the console's two DMA channels back
-to the letters; `test_stm32_spi` and `test_stm32_i2c` COMPILE OUT their
-wire letters, which is what brings the first from 66 KB to 17 KB.
+`test_stm32_serial` at **59836 bytes of 65536**, then `test_stm32_i2c`
+52676, `test_stm32_lptim` 50380 and `test_stm32_dma` 42392; the
+hungriest in RAM is `test_stm32_dma` at **6108 bytes**, which leaves the
+stack the 2 KB the campaign's rule reserves for it. One suite needed a
+real cut rather than the letters it loses anyway: `test_stm32_dma`
+halves its three memory-to-memory buffers (512 words to 256, every claim
+restated for the length that fits) and gives the console's two DMA
+channels back to the letters. `test_stm32_spi` compiles its eleven
+self-link letters out - a package fact, not a budget one - and comes to
+31104 bytes with the peer half in; `test_stm32_i2c` keeps every letter
+it has anywhere.
 
 **WHAT THE PART HAS NOT GOT**, all of it read off the header by the
 reserve: TIM4, TIM6, TIM7, TIM15, USART3..6, LPUART2, I2C3, SPI3, DMA2

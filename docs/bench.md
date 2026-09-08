@@ -263,7 +263,8 @@ this desk: an ST **Nucleo-G031K8** with an STM32G031K8 - Cortex-M0+,
 **64 KB single-bank flash, 8 KB SRAM, LQFP32**, DBGMCU_IDCODE
 0x10036466 (DEV_ID 0x466 = G031/G041, REV_ID 0x1003), FLASHSIZE 0x0040
 = 64 KB. Desk position **G**. Everything below was verified at the
-bench; nothing on this board is wired to anything.
+bench, and this board carries the SIX BUS WIRES to the Nucleo-G0B1RE at
+E ("The G0-to-G0 bus link" below).
 
 - Target voltage **3.20..3.22 V**, and the shipped demo was found
   running HSE BYPASS from the ST-LINK's MCO with the PLL on (RCC_CR
@@ -332,14 +333,29 @@ bench; nothing on this board is wired to anything.
   them twice and one of the two from a cold flash; the table of scores
   and of what skips where is in
   [stm32g0/README.md](stm32g0/README.md)'s second-silicon section. The
-  two bus suites run WIRELESS here - this board has no link to itself
-  (SPI2's four pads are not bonded on the LQFP32) and none to a peer -
-  so their wire letters are compiled out and only their census letters
-  score.
-- Firmware today: `test_stm32_i2c`, the last of the fourteen suites
-  re-run here after the campaign's review.
-- The board number was never verified, so no MB number and no connector
-  pin numbers are recorded for it. Nothing is wired to this board.
+  two bus suites now run ON THE WIRE here too, in both roles: with the
+  six jumpers to E fitted, `test_stm32_spi` scores **38/38** and
+  `test_stm32_i2c` **54/54** on this board - the same counts as on the
+  other two dies - and this board serves as the PEER for E's own 38 and
+  54. Its SELF-link is a different matter per bus: SPI2's four pads are
+  bonded to no pin of the LQFP32, so those eleven letters are compiled
+  out here for good, while I2C2's pads ARE bonded (PA11/PA12 = the
+  board's A5/A4), so that suite asks the wire like everywhere else and
+  its self-link letters skip on the probe's answer, not on the package.
+- Firmware today: `test_stm32_spi`, with `spi_peer` on E.
+- Board and connectors: **MB1455** (UM2591), an ARDUINO Nano V3 pinout
+  on CN3 and CN4. The pins this desk uses, verified against UM2591's
+  table 9 and the MB1455-C01 schematic's own nets: PA15 = D2 = CN3-5,
+  PB8 = D8 = CN3-11, PB9 = D10 = CN3-13, PB5 = D11 = CN3-14, PB4 = D12
+  = CN3-15, PB3 = D13 = CN4-15, GND on CN3-4 and CN4-2, 3V3 on CN4-14.
+- **TWO SHIPPED JUMPERS TO KNOW ABOUT**, because both sit on pads this
+  desk uses. **HW1** is a shunt between CN3-4 (GND) and CN3-5 (D2 =
+  PA15, the bus NSS): the board ships with it for the demo and UM2591's
+  own getting-started tells you to pull it. It is NOT fitted on this
+  board - measured over SWD, PA15 reads 1 under an internal pull-up and
+  0 under a pull-down, so it follows its own pull. **SB12/SB13** choose
+  which pad drives LD3: the default is SB12 OFF and SB13 ON, LED on PC6
+  and PB3 (D13, the bus SCK) free, which is what this board measures.
 
 ## Multi-board bench
 
@@ -590,12 +606,17 @@ is loaded into the peripheral at reset.
 ### End state
 
 **Today's end state: THE DESK IS THE NUCLEO-G0B1RE AT E AND THE
-NUCLEO-G031K8 AT G; THE NUCLEO-G071RB (F) IS UNPLUGGED** to free the
-USB port, its six wires still attached on E's side with their far ends
-on the unpowered board (stubs; the I2C pull-ups may hang on F's dead
-3V3 rail, which matters only to an I2C letter on E). E last ran
-`test_stm32_serial`, G runs `probe` flashed over SWD after its debug
-port came back (its section above). What follows is the previous desk,
+NUCLEO-G031K8 AT G, TIED BY THE SIX-WIRE BUS LINK** of "The G0-to-G0 bus
+link" above - SPI1 to SPI1, I2C1 to I2C1, the same pin names at both
+ends, the two 2.2 kOhm pull-ups on E's side, a dedicated GND - every
+wire verified over SWD with both cores halted before any firmware ran.
+The Nucleo-G071RB (F) is unplugged to free the USB port. Both bus suites
+run their peer halves **in EITHER direction**: `test_stm32_spi` z 38/38
+and `test_stm32_i2c` z 54/54, twice per direction with one of the two
+from a cold flash, on E with G as the peer AND on G with E as the peer -
+so the smallest part of the family is a full bus DUT and not the
+wireless board the second-silicon campaign left. E runs
+`test_stm32_spi`, G runs `spi_peer`. What follows is an earlier desk,
 the G071RB day, and it stands as the record of that wiring: the
 Nucleo-G0B1RE at position E and the Nucleo-G071RB at position F were
 tied by the six-wire link of
@@ -867,7 +888,7 @@ cabling they expect when the rail goes back to 3.3 V.
 | Board-to-board PORTE link (test_avr_serial + usart_peer, the SPI campaign, the sleep pass wake tests) | A.PE0-B.PE0, A.PE1-B.PE1, A.PE2-B.PE2, A.PE3-B.PE3 (STRAIGHT THROUGH) | see "the board-to-board link" below; verified by the wiring probe |
 | The Nucleo-G0B1RE's self-link (the G0 bus campaigns' step a) | SPI1 PB3/PB4/PB5/PA15 to SPI2 PB10/PC2/PD4/PB12; I2C1 PB8/PB9 to I2C2 PA11/PA12 with 2.2k pull-ups to 3V3 | see "The Nucleo-G0B1RE's self-link" below; verified over SWD. **NOT FITTED TODAY** - the same six G0 pads carry the last row instead |
 | The G0-to-SAM bus link (the G0 bus campaigns' step b) | E.PB3/PB4/PB5/PA15 to D.PA17/PA19/PA16/PA18 (SPI); E.PB8/PB9 to D.PA23/PA22 (I2C, the same 2.2k pull-ups) plus a dedicated GND | see "The G0-to-SAM bus link" below. **NOT FITTED TODAY** - the same six G0 pads carry the row below instead |
-| The G0-to-G0 bus link (the G0 bus campaigns' step c) | E.PB3/PB4/PB5/PA15 to F.PB3/PB4/PB5/PA15 (SPI); E.PB8/PB9 to F.PB8/PB9 (I2C, the same 2.2k pull-ups) plus a dedicated GND - the SAME PIN NAMES at both ends | see "The G0-to-G0 bus link" below; verified over SWD before any firmware |
+| The G0-to-G0 bus link (the G0 bus campaigns' step c) | E.PB3/PB4/PB5/PA15 to G.PB3/PB4/PB5/PA15 (SPI); E.PB8/PB9 to G.PB8/PB9 (I2C, the same 2.2k pull-ups on E's side) plus a dedicated GND - the SAME PIN NAMES at both ends | see "The G0-to-G0 bus link" below; every wire verified over SWD with both cores halted, before any firmware. The G071RB at F takes the same wiring when it is the board plugged in |
 
 ### The I2C bus (5 V rail)
 
@@ -1020,41 +1041,59 @@ arithmetic claim.
 
 ### The G0-to-G0 bus link
 
-STEP (c) OF THE G0 BUS CAMPAIGNS, and the wiring on the desk today: the
-same six G0B1RE pads, now facing a SECOND STM32G0 - the Nucleo-G071RB at
-position F - so that both bus drivers meet an independent chip of their
-OWN family. Both boards run at 3.3 V (E measures 3.23, F 3.24); the two
-2.2 kOhm pull-ups fitted for the I2C self-link serve this bus unchanged,
-and a dedicated GND wire ties the two boards. Every wire was verified
-over SWD with both cores halted - one end driven, the other read under
-its own internal pull, both directions, with a full-port isolation check
-- before any firmware ran.
+THE WIRING ON THE DESK TODAY: the same six G0B1RE pads, facing a SECOND
+STM32G0 so that both bus drivers meet an independent chip of their OWN
+family. The far end is **the Nucleo-G031K8 at position G** - the smallest
+part of the family, and the one this link made a full bus DUT of; the
+Nucleo-G071RB at F takes the very same wiring, pin name for pin name,
+when it is the board that is plugged in. Both boards run at 3.3 V (E
+measures 3.23, G 3.21); the two 2.2 kOhm pull-ups fitted for the I2C
+self-link serve this bus unchanged and stay on E's side, and a dedicated
+GND wire ties the two boards.
 
-| Signal | G0B1RE (position E) | G071RB (position F) |
-|---|---|---|
-| SCK  | PB3  AF0  | PB3  AF0 |
-| MISO | PB4  AF0  | PB4  AF0 |
-| MOSI | PB5  AF0  | PB5  AF0 |
-| NSS  | PA15 GPIO | PA15 AF0 (the client's hardware select input) |
-| SCL  | PB8  AF6  | PB8  AF6 |
-| SDA  | PB9  AF6  | PB9  AF6 |
-| GND  | - | - |
+| Signal | G0B1RE (position E) | pin at E | G031K8 (position G) | pin at G |
+|---|---|---|---|---|
+| SCK  | PB3  AF0  | CN10-31 (D3)  | PB3  AF0 | CN4-15 (D13) |
+| MISO | PB4  AF0  | CN10-27 (D5)  | PB4  AF0 | CN3-15 (D12) |
+| MOSI | PB5  AF0  | CN10-29 (D4)  | PB5  AF0 | CN3-14 (D11) |
+| NSS  | PA15 GPIO | CN7-17        | PA15 AF0 (the client's hardware select input) | CN3-5 (D2) |
+| SCL  | PB8  AF6  | CN10-3 (D15)  | PB8  AF6 | CN3-11 (D8) |
+| SDA  | PB9  AF6  | CN10-5 (D14)  | PB9  AF6 | CN3-13 (D10) |
+| GND  | -         | any morpho GND | -       | CN3-4 or CN4-2 |
 
 **THE SAME PIN NAME AT BOTH ENDS, and nothing is crossed**: SPI's own
 MOSI/MISO naming already carries the direction, and the two I2C lines
-are a bus. F's wires are placed BY GPIO NAME (its board number was never
-verified, so no connector number is recorded for it) and E's are the
-same pads its self-link and the SAM link used.
+are a bus. E's pads are the ones its self-link and the SAM link used;
+G's connector numbers are UM2591's table 9, cross-checked against the
+MB1455-C01 schematic's own nets. F's wires, when F is the board at the
+far end, are placed BY GPIO NAME (its board number was never verified,
+so no connector number is recorded for it).
 
-The instrument is `spi_peer` or `twi_peer` - the stm32g0 ports - on F,
-one at a time (the two peers use different peripherals but the same
-console and the same flash), commanded IN BAND over the very bus under
-test through `avrdx/src/apps/spi_link.hpp` and
-`avrdx/src/apps/twi_link.hpp`. Those two headers are compiled by three
-architectures' apps and copied by none, and the peer NAMES ITSELF in its
-`ident` (firmware 0x01xx = the AVR port, 0x02xx = the samc21 one,
-0x03xx = the stm32g0 one) with F's unique-ID word `00700051` as its
-label - so a suite's peer letter says on which chip its instrument ran.
+**EVERY WIRE WAS VERIFIED OVER SWD BEFORE ANY FIRMWARE RAN**, with both
+cores halted at their reset vector so no program owned a pad: each end
+driven push-pull in turn while the other read under its OWN internal
+pull IN THE OPPOSITE DIRECTION (a driven low against a pull-up, a driven
+high against a pull-down), and all six far-side pads read at every step
+as the isolation half - only the driven line moves. The two pull-ups
+were proven separately by their own control: with no pull at either end,
+a line driven low and released comes back to 1 on SCL and SDA and stays
+at 0 on the four SPI lines. TWO THINGS THAT CHECK ONLY THIS WAY: the
+Nucleo-32's shipped HW1 shunt sits between CN3-4 and CN3-5, i.e. GND and
+the bus NSS (it is not fitted here, PA15 follows its own pull); and with
+E UNPOWERED the two I2C lines read 0 through their own pull-ups - the
+2.2 k then lead to a dead rail - which is what a half-plugged desk looks
+like from G's side.
+
+The instrument is `spi_peer` or `twi_peer` - the stm32g0 ports - on
+whichever board is not the DUT, one at a time (the two peers use
+different peripherals but the same console and the same flash),
+commanded IN BAND over the very bus under test through
+`avrdx/src/apps/spi_link.hpp` and `avrdx/src/apps/twi_link.hpp`. Those
+two headers are compiled by three architectures' apps and copied by
+none, and the peer NAMES ITSELF in its `ident` (firmware 0x01xx = the
+AVR port, 0x02xx = the samc21 one, 0x03xx = the stm32g0 one) with its
+own unique-ID word as label - `007f0063` for G, `00700051` for F - so a
+suite's peer letter says on which chip its instrument ran.
 
 **THE THREE WIRINGS EXCLUDE EACH OTHER**, because the six G0B1RE pads
 are the same six. `test_stm32_spi` and `test_stm32_i2c` PROBE for the
@@ -1063,20 +1102,29 @@ self-link pad's own internal pull, in firmware - and print the answer in
 their banner; then each set of letters skips itself on the other desk,
 with the reason printed and no verdict claimed. A peer that does not
 answer with the wires in place still FAILS LOUDLY: that is firmware to
-flash.
+flash. On the LQFP32 the SPI suite has no probe to run at all - SPI2
+reaches no pin there - so its self-link letters are compiled out and the
+peer's are the whole wire half; the I2C suite probes on that part like
+on any other, because the LQFP32 does bond I2C2's PA11/PA12.
 
-Scores with THIS wiring: `test_stm32_i2c` z = **54/54** twice including
-a run from a cold flash - the same 54 the SAM peer scored, on a second
-chip of this family - and `test_stm32_spi` z = **38/38** twice including
-a run from a cold flash, the same 38, with the BR ladder holding to
-PCLK/2 = 32 MHz where the SAM broke at PCLK/4. ONE DESK FACT THIS LINK
-TAUGHT: the peer's MISO pad runs at HIGH speed, one notch below the
-driver's very-high, because at very-high its answer edge couples into
-the SCK jumper beside it and the falling-edge modes (1 and 2) slip one
-bit mid-burst - 20 bursts of 160 at very-high against 0 of 120 at high,
-with nothing of the ladder lost ([stm32g0/spi.md](stm32g0/spi.md);
-`test_stm32_spi`'s letter `x`, outside `z`, is the instrument and the
-peer's console `s` the knob).
+Scores with THIS wiring, IN BOTH DIRECTIONS - each board hosting the
+suite while the other runs the peer, which is what makes the pair a
+measurement of two dies and not of one: `test_stm32_spi` z = **38/38**
+and `test_stm32_i2c` z = **54/54**, each twice per direction with one of
+the two from a cold flash, and the same counts the SAM peer and the
+G071RB scored. The BR ladder holds to PCLK/2 = 32 MHz with either board
+hosting (the SAM broke at PCLK/4); the peer's SOFTWARE pump - the RXNE
+reload, against its DMA engines - holds to PCLK/8 = 8 MHz and slips at
+16 MHz on both dies, printed and not judged, because what it measures is
+the peer's own turnaround. ONE DESK FACT THIS LINK TAUGHT: the peer's
+MISO pad runs at HIGH speed, one notch below the driver's very-high,
+because at very-high its answer edge couples into the SCK jumper beside
+it and the falling-edge modes (1 and 2) slip one bit mid-burst - 20
+bursts of 160 at very-high against 0 of 120 at high, with nothing of the
+ladder lost ([stm32g0/spi.md](stm32g0/spi.md); `test_stm32_spi`'s letter
+`x`, outside `z`, is the instrument and the peer's console `s` the
+knob). At high, with the G031K8 at either end of the link, letter `x`
+scores **0 of 40 bursts slipped in both directions**.
 
 ### The board-to-board link, and its two wirings
 

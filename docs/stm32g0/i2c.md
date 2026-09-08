@@ -486,13 +486,16 @@ SELF-LINK carries, so they are not staged on this board.
 
 ## On the third silicon
 
-`test_stm32_i2c` runs WIRELESS on the Nucleo-G031K8 (DEV_ID 0x466,
-REV_ID 0x1003) and scores **28/28** - the whole register-and-reserve
-census of letters `a` and `m`, which is what a board with no wires on it
-can ask. Nothing is connected to this board, and the thirteen self-link
-letters and five peer ones are COMPILED OUT rather than skipped at run
-time (each printing its reason), so no absent peer is ever reported as
-firmware to flash; the image is 18376 bytes.
+`test_stm32_i2c` runs ON THE WIRE on the Nucleo-G031K8 (DEV_ID 0x466,
+REV_ID 0x1003) and scores **54/54** - the same 54 the SAM C21 and the
+G071RB scored - **in both roles**: this board hosting against a Nucleo-64
+running `twi_peer`, and this board running the peer while the G0B1RE
+hosts. NOTHING IS COMPILED OUT HERE FOR A PACKAGE, unlike the SPI
+suite's self-link: the LQFP32 bonds every pad of both links - I2C1's
+PB8/PB9 and I2C2's PA11/PA12, which are the Nucleo-32's own A5 and A4 -
+so this board asks the wire at boot like any other (`self-link probe:
+SCL 0 SDA 0` today) and its eleven self-link letters skip on that
+answer, claiming nothing. The image is 52676 bytes of the part's 64 K.
 
 **TABLE 165's COLUMN AGAIN, one part further down.** This part's I2C2
 has no `RCC_CCIPR_I2C2SEL`, so - as on the G071 - it has no independent

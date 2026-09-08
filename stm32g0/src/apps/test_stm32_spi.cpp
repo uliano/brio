@@ -57,6 +57,12 @@
 // place - that is firmware to flash, not a desk this suite was not
 // built for.
 //
+// ON THE LQFP32 ONLY ONE OF THE TWO IS EVEN POSSIBLE: SPI2's four pads
+// reach no pin of that package (DS12992 table 12), so its letters are
+// compiled out there and the probe is not asked - while SPI1's own four
+// pads are bonded, so the PEER letters run on that part like on any
+// other, against a Nucleo-64 at the other end of the same four wires.
+//
 // THE CLIENT RUNS ON ITS OWN INTERRUPT, ONE FRAME AHEAD (35.5.8: "the
 // data register of the slave must already contain data to be sent before
 // starting communication with the master"), so a host polling in main
@@ -509,20 +515,25 @@ void settle() { settle_ms(spilink::settle_ms); }
 
 bool self_link = false;
 
-// AND ON A PACKAGE THAT BONDS NEITHER END THERE IS NO WIRE TO ASK ABOUT.
-// SPI2's four pads (PB10/PC2/PD4/PB12) reach no pin of the LQFP32 at all
-// (DS12992 table 12: its port B stops at PB9 and it has no port D), and
-// the peer link is four wires this board has none of. So on that package
-// the letters whose instrument is a WIRE are not merely skipped at run
-// time - they are COMPILED OUT, which is also what makes this suite fit
-// 64 KB of flash; each still prints its own reason and claims nothing.
+// THE PACKAGE DECIDES THE SELF-LINK AND THE DESK DECIDES THE PEER, which
+// are two questions and not one. SPI2's four pads (PB10/PC2/PD4/PB12)
+// reach no pin of the LQFP32 at all (DS12992 table 12: its port B stops
+// at PB9 and it has no port D), so on that package the self-link letters
+// are not merely skipped at run time - they are COMPILED OUT, each still
+// printing its own reason and claiming nothing, which is also what keeps
+// this suite inside 64 KB of flash. SPI1's own four pads, on the other
+// hand, are bonded on every package this stratum has met, so THE PEER
+// LETTERS ARE COMPILED EVERYWHERE and what settles them is the wiring:
+// the probe below says whether these pads carry the self-link instead,
+// and a peer that does not answer with the wires in place fails LOUDLY,
+// because that is firmware to flash and not a fact about the plastic.
 // Which device header is compiled is the one question only the
-// preprocessor can ask, and what package and desk go with it is this
-// suite's own knowledge.
+// preprocessor can ask, and what package goes with it is this suite's own
+// knowledge.
 #if defined(STM32G031xx)
-constexpr bool wires_possible = false;
+constexpr bool self_link_possible = false;
 #else
-constexpr bool wires_possible = true;
+constexpr bool self_link_possible = true;
 #endif
 
 /// Does driving `Drv` really move `Rd`? Both levels, each against the
@@ -544,7 +555,7 @@ bool wire_follows() {
 }
 
 bool probe_self_link() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         print(serial, "  self-link probe: not asked - SPI2's four pads are "
               "bonded to no pin of this package (DS12992 table 12), so there "
               "is nothing at the far end to drive or read", crlf);
@@ -561,7 +572,7 @@ bool probe_self_link() {
 
 /// The opening line of every letter whose instrument is the self-link.
 bool need_self_link() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         print(serial,
               "  SKIPPED, no verdict claimed: this letter's instrument is a "
               "SELF-LINK between SPI1's pads and SPI2's, and SPI2's four "
@@ -812,17 +823,6 @@ bool ensure_link() {
 /// other desk. An absent peer with the wires in place is a different
 /// thing - firmware to flash - and fails loudly.
 bool need_peer() {
-    if constexpr (!wires_possible) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: this letter's instrument is a "
-              "PEER BOARD on four wires, and this board has no wires on it at "
-              "all - nor a second SPI whose pads this package bonds. The "
-              "letter is compiled out here, not merely skipped, and no "
-              "absent-peer failure is claimed from a link that was never "
-              "wired.",
-              crlf);
-        return false;
-    }
     if (self_link) {
         print(serial,
               "  SKIPPED, no verdict claimed: this letter's instrument is the PEER "
@@ -1262,7 +1262,7 @@ LinkResult judge_link(uint16_t n) {
 }
 
 void tb_link() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -1333,7 +1333,7 @@ void tb_link() {
 // =============================================================================
 
 void tc_matrix() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -1465,7 +1465,7 @@ void tc_matrix() {
 // =============================================================================
 
 void td_ladder() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -1701,7 +1701,7 @@ void td_ladder() {
 volatile uint16_t nss_edges = 0;
 
 void te_nss() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -1916,7 +1916,7 @@ void peer_arm_crc(const Peer::Config& cfg, const uint16_t* answers, uint16_t n) 
 }
 
 void tf_crc() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -2094,7 +2094,7 @@ void tf_crc() {
 // =============================================================================
 
 void tg_ti() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -2196,7 +2196,7 @@ void tg_ti() {
 // =============================================================================
 
 void th_errata() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -2352,7 +2352,7 @@ void th_errata() {
 volatile uint16_t dma_completions = 0;
 
 void ti_dma() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -2720,7 +2720,7 @@ void pump() {
 }   // namespace kl
 
 void tj_kernel() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -2960,7 +2960,7 @@ uint16_t i2s_play(const uint16_t* src, uint16_t n) {
 }
 
 void tk_i2s() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -3213,7 +3213,7 @@ void tk_i2s() {
 // =============================================================================
 
 void tl_dynamic() {
-    if constexpr (!wires_possible) {
+    if constexpr (!self_link_possible) {
         (void)need_self_link();
         return;
     }
@@ -3347,10 +3347,6 @@ void tm_sleep() {
 // =============================================================================
 
 void tn_peer_link() {
-    if constexpr (!wires_possible) {
-        (void)need_peer();
-        return;
-    }
     if (!need_peer()) {
         return;
     }
@@ -3387,10 +3383,6 @@ void tn_peer_link() {
 // =============================================================================
 
 void to_peer_matrix() {
-    if constexpr (!wires_possible) {
-        (void)need_peer();
-        return;
-    }
     if (!need_peer()) {
         return;
     }
@@ -3456,10 +3448,6 @@ void to_peer_matrix() {
 // =============================================================================
 
 void tp_peer_rates() {
-    if constexpr (!wires_possible) {
-        (void)need_peer();
-        return;
-    }
     if (!need_peer()) {
         return;
     }
@@ -3564,10 +3552,6 @@ void tp_peer_rates() {
 // =============================================================================
 
 void tq_peer_kernel() {
-    if constexpr (!wires_possible) {
-        (void)need_peer();
-        return;
-    }
     if (!need_peer()) {
         return;
     }
@@ -3787,10 +3771,6 @@ bool run_as_client(const spilink::Params& a) {
 }
 
 void tr_peer_client() {
-    if constexpr (!wires_possible) {
-        (void)need_peer();
-        return;
-    }
     if (!need_peer()) {
         return;
     }
@@ -3877,10 +3857,6 @@ void tr_peer_client() {
 constexpr uint8_t slip_rounds = 10;
 
 void tx_peer_slips() {
-    if constexpr (!wires_possible) {
-        (void)need_peer();
-        return;
-    }
     if (!need_peer()) {
         return;
     }
@@ -3923,6 +3899,10 @@ void banner() {
         print(serial, "  the SELF-LINK is on the desk: SPI1 host PB3/PB4/PB5 + PA15 "
                       " <->  SPI2 client PB10/PC2/PD4/PB12; letters b..l are live",
               crlf);
+    } else if constexpr (!self_link_possible) {
+        print(serial, "  NO SELF-LINK is possible on this package: SPI2's four pads "
+                      "are bonded to no pin of it, so letters b..l are compiled out "
+                      "and claim nothing", crlf);
     } else {
         print(serial, "  NO SELF-LINK on the desk (probed): letters b..l skip "
                       "themselves and claim nothing", crlf);

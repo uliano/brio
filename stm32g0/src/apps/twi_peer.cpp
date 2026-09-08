@@ -63,7 +63,7 @@
 // ident.xtal is ALWAYS 0, because a Nucleo-64 fits no HSE crystal and
 // this stratum has no HSE root at all.
 //
-// build: boards = g071rb,g0b1re
+// build: boards = g071rb,g0b1re,g031k8
 // build: monitor_speed = 115200
 
 #include <stdint.h>

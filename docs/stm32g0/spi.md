@@ -591,16 +591,19 @@ assumed from the other die.
 
 ## On the third silicon
 
-`test_stm32_spi` runs WIRELESS on the Nucleo-G031K8 (DEV_ID 0x466,
-REV_ID 0x1003) and scores **18/18** - letter `a`'s whole census of the
-block and letter `m`'s sleep wake, which is everything this board can
-ask. **THERE IS NO LINK OF ANY KIND HERE**: SPI2's four pads
+`test_stm32_spi` runs ON THE WIRE on the Nucleo-G031K8 (DEV_ID 0x466,
+REV_ID 0x1003) and scores **38/38** - the same 38 the SAM C21 and the
+G071RB scored - **in both roles**: this board hosting against a Nucleo-64
+running `spi_peer`, and this board running the peer while the G0B1RE
+hosts. What it cannot have is a SELF-link: SPI2's four pads
 (PB10/PC2/PD4/PB12) are bonded to no pin of the LQFP32 (DS12992 table
-12), so the board cannot even carry its own self-link, and nothing is
-wired to it. The eleven self-link letters and the six peer ones are
-therefore COMPILED OUT rather than skipped at run time - each printing
-its own reason and claiming nothing - which is also what brings the image
-from 66 KB to 17352 bytes, inside a 64 KB part.
+12), so those eleven letters are COMPILED OUT rather than skipped at run
+time - each printing its own reason and claiming nothing - and there is
+no probe to run either, which keeps the image at 31104 bytes inside a
+64 KB part. THE PEER LETTERS ARE COMPILED EVERYWHERE, because SPI1's own
+four pads are bonded on every package this stratum has met: what settles
+them is the desk, and an absent peer with the wires in place fails
+loudly.
 
 What the census still proves on a third die: the reserve's SPI roster and
 the shared-vector derivation (SPI2's line is SPI1's no more, and it is
@@ -611,6 +614,15 @@ forced DS code; the mode fault a non-alternate-function NSS pad raises;
 take a write with SPE set** - and that every configuring verb refuses
 anyway, with SSI, CRCNEXT and FRXTH open; 35.5.9's disable procedure; and
 `spi_rate_for()` at all three rates of the ladder.
+
+MEASURED WITH THIS PART ON THE LINK: the BR ladder is exact to
+PCLK/2 = 32 MHz whichever board hosts (the SAM peer broke at PCLK/4);
+the peer's SOFTWARE pump - the RXNE reload, against its DMA engines -
+holds to PCLK/8 = 8 MHz and slips at 16 MHz on both dies, printed
+without a verdict because what it measures is the peer's own turnaround
+and not the wire; and letter `x`, the falling-edge slip instrument,
+scores **0 of 40 bursts** in each direction with the client's MISO pad
+at `PinSpeed::high`.
 
 The console this suite runs on is **LPUART1** on PA2/PA3 at AF6, for the
 reason [clock.md](clock.md) gives: its subject moves the clock and this
