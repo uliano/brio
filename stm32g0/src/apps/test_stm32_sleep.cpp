@@ -304,23 +304,14 @@ using Site = Stm32g0SleepSite<SysClock>;
 /// The timed site runs on the same root the wall does, and states a rate
 /// NOT BELOW it - late, never early, which is the direction the
 /// contract wants. THE STATEMENT IS A COMPILE-TIME CONFIGURATION and the
-/// root is a BOARD fact, so which one is asked for is the one question
-/// only the preprocessor can answer here; letter f then checks the
-/// statement against the rate this boot MEASURED rather than trusting
-/// it, and declines its timing verdicts if a die is ever found running
-/// faster than the number stated for it.
-#if defined(STM32G031xx)
-/// The Nucleo-32 has no crystal, so the site takes LSI: 32000 Hz stated
-/// against the ~31.4 kHz this die measures, the reading rounded UP to
-/// the next kilohertz.
-constexpr TimedSleepConfig timed_cfg{.rtcclk_hz = 32'000,
-                                     .source = RtcClockSource::lsi};
-#else
-/// 32800 against a crystal that runs at 32768: an over-estimate of about
-/// a per mille.
+/// root is a BOARD fact: every board of this desk runs its crystal, so
+/// the site takes the LSE and states 32800 against a crystal that runs
+/// at 32768, an over-estimate of about a per mille. Letter f then checks
+/// the statement against the rate this boot MEASURED rather than
+/// trusting it, and declines its timing verdicts if a die is ever found
+/// running faster than the number stated for it.
 constexpr TimedSleepConfig timed_cfg{.rtcclk_hz = 32800,
                                      .source = RtcClockSource::lse};
-#endif
 using TimedSite = Stm32g0TimedSleepSite<P, SysClock, timed_cfg>;
 
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }

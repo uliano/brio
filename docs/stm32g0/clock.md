@@ -431,28 +431,23 @@ G0B1's are four (the headers' own masks): one clock output, not two.
 
 ## On the third silicon
 
-`test_stm32_clock` scores **39 of 42** on the Nucleo-G031K8 (DEV_ID
+`test_stm32_clock` scores **40 of 42** on the Nucleo-G031K8 (DEV_ID
 0x466, REV_ID 0x1003): the whole ladder, all four rates, the ADC across
-them, the kernel, both Stops and the PLL rate in Range 2. Three verdicts
-are not claimed - letter `h` (`delay_us` at 20 us) and the ETR wall's own
-rate - and both have one cause.
+them, the kernel, both Stops and the PLL rate in Range 2. The two
+verdicts not claimed are letter `h`'s (`delay_us` at 20 us), and the
+cause is the G071's: RM0444 22.4.25's ETRSEL list gives code 0100 (MCO)
+to the G0B1/G0C1 sales types alone, so `tim_etrsel_has_mco(2)` is false
+here, and the 4 us wall a 20 us delay is judged on does not exist.
 
-**THERE IS NO WALL ON THIS BOARD THAT TIM2 CAN COUNT.** RM0444 22.4.25's
-ETRSEL list gives code 0100 (MCO) to the G0B1/G0C1 sales types alone, so
-`tim_etrsel_has_mco(2)` is false here as it is on the G071; and the only
-other every-part code, 0011 = LSE, needs a crystal this board has not
-got. So the suite PROBES the ETR at boot - a counter with nothing on its
-ETR stands still in silence, and every bounded wait that rode it would be
-unbounded - and where it is dead, TIM2 goes on PCLK as letter `g`'s
-AWAKE meter (a counter that stops when the clocks do, which is what tells
-a Stop from a WFI that fell through) while REAL time comes from the RTC's
-sub-second counter at about 32 us a tick.
-
-**THE RTC WALL IS ALSO THE SCALE EVERY RATE CLAIM IS JUDGED ON**, and
-deliberately not the ETR one: the MCO wall counts HSI16/64, and HSI16 is
-trimmed to a per cent - wider than the band a "the CPU is really at this
-rate" verdict lives in. On a crystal board the RTC's root is 32768 Hz by
-construction; here it is the LSI at the rate this boot MEASURED on TIM16.
+**THE WALL IS THE LSE CRYSTAL ON TIM2'S ETR** (code 0011, the one every
+part has, 30.5 us a count), which this board runs. The suite PROBES the
+ETR at boot - a counter with nothing on its ETR stands still in silence,
+and every bounded wait that rode it would be unbounded - and finds it
+alive; so letter `g`'s Stop witness is the crystal (TIM2 counted 14
+counts = 427 us awake of a 292 ms Stop 1 at 64 MHz, and 258 = 7.9 ms of
+the 293 ms Stop 1 and the 294 ms Stop 0 entered from low-power run),
+and the RTC's sub-second counter is the scale every rate claim is judged
+on, as on every board.
 
 **THE CONSOLE IS LPUART1.** This part's USART2 is a BASIC instance with
 no kernel-clock multiplexer (`usart_has_clock_select(2)` is false), so a
@@ -462,16 +457,16 @@ the SAME two pads at AF6, so the console moves there and rides HSI16 as
 it does elsewhere - 115200 baud carried the whole suite, the letter `v`
 shape of `test_stm32_serial` in production use.
 
-Switch durations on the coarser wall: 64 -> 16 MHz 63..95 us, 16 -> 2 MHz
-in low-power run 190..222, 2 -> 64 MHz 539, 64 -> 2 MHz 222..254; 72
-switches round the ladder with none refused, no wrong state and 0 bad
-bytes of 1152 on the USART1 loop. **AND ONE READING THIS INSTRUMENT
-CANNOT SETTLE**: at the 2 MHz low-power-run rung the SysTick ticker
-counts 508 ticks per 500 ms of the LSI wall where the other three rungs
-count 501 - either the LSI moves with the voltage regime or the core
-does, and an RC wall cannot say which. The letter's band is the wall's
-own resolution (a per cent on a crystal, three on an RC root), and the
-reading is printed.
+Switch durations: 64 -> 16 MHz 30 us, 16 -> 2 MHz in low-power run 122,
+2 -> 64 MHz 427, 64 -> 2 MHz 213 (worst of 24 rounds); 72 switches round
+the ladder with none refused, no wrong state and 0 bad bytes of 1152 on
+the USART1 loop. **AND THE CRYSTAL SETTLES A READING AN RC WALL COULD
+NOT**: at the 2 MHz low-power-run rung the SysTick ticker counts 502
+ticks per 500 ms of the crystal wall where the other three rungs count
+500 - the same rung read 508 against an LSI wall, so six of those eight
+ticks were the LSI moving with the voltage regime and the remaining two
+per 500 are the core's own (HSI16 under the low-power regulator), inside
+the band the letter judges in.
 
 ## Not covered yet
 

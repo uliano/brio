@@ -430,8 +430,9 @@ def msd_flash(prog, binfile, app):
     image is running is its banner on the console, which is what `run`
     reads anyway.
 
-    This kind exists because position G's debug port does not attach
-    (tools/bench_boards.py carries the record): the MSD is the one way in,
+    This kind exists because position G's debug port can go silent until
+    the board is replugged (tools/bench_boards.py carries the record): the
+    MSD is then the one way in,
     and it is also why nothing here halts the core, clears DBGMCU_CR or
     reads anything back over SWD - the debug-in-Stop bits that openocd_args
     takes down are set only by an OpenOCD examine, which never happens on

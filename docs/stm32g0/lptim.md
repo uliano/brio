@@ -462,11 +462,19 @@ G0B1's 2.8.1 and 2.8.2, and both are answered the same way.
 ## On the third silicon
 
 `test_stm32_lptim` scores **78 of 82** on the Nucleo-G031K8 (DEV_ID
-0x466, REV_ID 0x1003). The four not claimed are each a skip by name:
-the LSE row of the kernel-clock table and the LSE row of table 145 (this
-board's crystal does not start), and two comparator routes - IN1SEL =
-COMP1_OUT and the comparator OR - because **this part has no COMP at
-all**, so the type cannot even be named and those legs are compiled out.
+0x466, REV_ID 0x1003). The four not claimed are each a skip by name,
+and all four are the PART's: two comparator routes - IN1SEL = COMP1_OUT
+and the comparator OR - and the comparator row of the trigger table,
+because **this part has no COMP at all**, so the type cannot even be
+named and those legs are compiled out; and the "one vector, two owners"
+leg, which needs the TIM7 this part has not got (below). The crystal
+runs on this board and every LSE row is measured, folded into the same
+verdicts it shares on E: the kernel-clock census reads the **LSE at
+32740 counts a second**, the LSI at 31430 (against a 32586 nominal, 35
+per mille - the slowest die of the desk), HSI16/128 and PCLK/128 at
+125240 and 501010; the Stop letter reads 7434 LSE counts across a 226
+ms Stop 1; and the third sleep site on the crystal matures a 500 ms
+event at 501 ms of wall with six 150 ms rounds at 152 ms, none early.
 
 **BOTH LPTIMs HAVE A VECTOR OF THEIR OWN HERE.** LPTIM1's is shared with
 TIM6 and the DAC where those exist and is LPTIM1's alone where they do
@@ -484,14 +492,12 @@ the LQFP64s, and **PA4 (OUT), PB1 (IN1) and PA5 (ETR) at AF5** on the
 LQFP32, which bonds neither port D nor PC0..PC5 (DS12992 table 12,
 tables 13-17 for the functions).
 
-**THE ROOT IS LSI AND ITS RATE IS MEASURED, NOT ASSUMED**: 31496 Hz on a
-TIM16 capture at boot, and every band that quoted the crystal is
-computed from that number instead - which on a crystal board reduces to
-the same integers it always had. The kernel-clock census reads the LSI
-at 31400 counts a second against the 31496 measured (3 per mille), and
-the Stop letter reads 7458 counts across a 236 ms Stop 1 - 31601 a
-second against 31496 running, which is the same oscillator seen through
-two instruments.
+**THE RULER IS THE WALL ON EVERY BOARD OF THIS DESK**, the crystal being
+the instrument every number of this document is on. The suite keeps the
+other arrangement as a stated rule for a board without one: a root
+weighed on TIM16 at boot, every band that quotes the crystal computed
+from that number, and the awake windows ruled by the CPU's own cycle
+counter so the PCLK-derived ratios stay exact tests under an RC wall.
 
 ## Not covered yet
 

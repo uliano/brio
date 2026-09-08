@@ -264,12 +264,14 @@ with the .noinit token crossing all six intact and the flags
 accumulating as they do elsewhere. The IWDG time-out measures this die's
 LSI at **31400 Hz** ([platform.md](platform.md)).
 
-**AND ON THIS BOARD THE RESET IS ALSO THE ONLY WAY BACK IN.** Its debug
-port does not attach ([bench.md](../bench.md)), so nothing can be halted
-or reset from the host; a wedged image is recovered by flashing another
-through the ST-LINK's mass-storage flasher, which resets the part under
-NRST. That is what brought the board back from the Shutdown its sleep
-letter entered before the skip existed ([pwr.md](pwr.md)).
+**AND WHEN THIS BOARD'S DEBUG PORT GOES SILENT, THE RESET IS THE ONLY
+WAY BACK IN.** Its ST-LINK half can stop answering until the board is
+replugged ([bench.md](../bench.md)); in that state nothing can be halted
+or reset from the host, and a wedged image is recovered by flashing
+another through the ST-LINK's mass-storage flasher, which resets the
+part under NRST. That is what brought the board back from a Shutdown
+entered with the RTC on LSI, the clock Shutdown switches off
+([pwr.md](pwr.md)).
 
 ## Not covered yet
 

@@ -260,12 +260,10 @@ uint32_t lsi_nominal = 32'586;
 /// is PCLK-derived (the eight prescaler ratios, a 64 kHz waveform, a
 /// 500 kHz counter), so a PCLK ruler makes them EXACT RATIO tests immune
 /// to both the RC's drift and HSI16's trim, and it leaves the RC wall
-/// for the one thing only it can do: measuring across a Stop.
-#if defined(STM32G031xx)
-constexpr bool cpu_ruler = true;
-#else
+/// for the one thing only it can do: measuring across a Stop. Every
+/// board of this desk runs its crystal, so the wall rules; a board
+/// without one would say so here.
 constexpr bool cpu_ruler = false;
-#endif
 
 uint32_t wall_ticks_per_second() {
     return static_cast<uint32_t>(Rtc::prescalers().sync) + 1u;
@@ -648,31 +646,18 @@ struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip, Woke> {
 };
 
 /// THE SITE'S SOURCE IS A COMPILE-TIME CONFIGURATION AND THE ROOT IS A
-/// BOARD FACT, so this is the one question about the wall only the
-/// preprocessor can answer here (`slow_clock` answers it at run time for
-/// everything else). Either way the site converts with a STATED rate,
-/// and every promise it makes - late, never early - holds only while
-/// that statement is at or ABOVE the true rate.
-#if defined(STM32G031xx)
-/// The Nucleo-32 has no crystal, so the site takes LSI. The statement is
-/// 32768 Hz - the crystal's own nominal, and about four per cent above
-/// what this die measures - because an RC oscillator drifts and the
-/// measured rate itself would leave no room for it: a die that warmed up
-/// past its own reading would start maturing events EARLY, which is the
-/// one direction the contract forbids. The letter prints the statement
-/// against the measurement and scales its WALL bands by the ratio, since
-/// a nap placed with an over-stated rate is proportionally long on the
-/// wall while staying exact in kernel ticks.
-constexpr LptimTimedSleepConfig site_cfg{.instance = 1,
-                                         .source = LptimClock::lsi,
-                                         .rate_hz = 32'768,
-                                         .prescaler = LptimPrescaler::div32};
-#else
+/// BOARD FACT (`slow_clock` answers it at run time for everything else):
+/// every board of this desk runs its crystal, so the site takes the LSE.
+/// The site converts with a STATED rate, and every promise it makes -
+/// late, never early - holds only while that statement is at or ABOVE
+/// the true rate; a board on LSI would state the crystal's 32768 (some
+/// per cent above any die of table 46) and letter h would scale its WALL
+/// bands by the measured ratio, which it still does - on a crystal the
+/// ratio is one and the bands are literally the ones below.
 constexpr LptimTimedSleepConfig site_cfg{.instance = 1,
                                          .source = LptimClock::lse,
                                          .rate_hz = 32'768,
                                          .prescaler = LptimPrescaler::div32};
-#endif
 using Site = Stm32g0LptimTimedSleepSite<P, SysClock, site_cfg>;
 using PlainSite = Stm32g0SleepSite<SysClock>;
 using Manager = PowerManager<P, Site, PowerConfig{}, Probe>;

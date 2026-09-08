@@ -407,15 +407,14 @@ judges.
 **THIS DIE'S LSI IS THE SLOWEST OF THE THREE**: the IWDG time-out of
 letter `i` implies **31400 Hz** where the G0B1RE reads 32536 and the
 G071RB 32295 - all three inside DS12992/DS13560 table 46's 29.5..34 kHz,
-and none of them each other. Every suite of this board that used to lean
-on a 32768 Hz crystal now weighs this oscillator at boot instead
-([bench.md](../bench.md)).
+and none of them each other. The board's crystal runs, so this is the
+rate of the LSI witness letters alone ([bench.md](../bench.md)).
 
 **AND LSIRDY IS A READING ABOUT THE RTC DOMAIN AND NOT ABOUT THE
-WATCHDOG**, which this board is the one to show from the other side: its
-RTC domain holds no RTCEN (the LSE hunt left RCC_BDCR at 0x19), so
-LSIRDY stands CLEAR at boot where the other two boards - whose domains
-run the RTC - stand it with LSION clear. Letter `a` claims the
+WATCHDOG**: LSIRDY stands with LSION clear exactly where RCC_BDCR holds
+RTCEN with RTCSEL = LSI, and is clear otherwise - on this board it reads
+0 with LSION 0 and the domain on the crystal (RCC_BDCR 0x8103), as it
+read 0 with the domain holding no RTCEN at all. Letter `a` claims the
 EQUIVALENCE, which is what makes it a statement about 5.4.24 rather than
 about one desk.
 

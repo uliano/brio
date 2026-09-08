@@ -186,9 +186,9 @@ using Lp2Pin = Pin<'C', 6>;
 // The PACKAGE question - which of the die's pads a 32-pin part brings
 // out - has NO answer in any device header: it is the datasheet's pin
 // table, so it is the SUITE's to state, an app being the one place board
-// knowledge may live. Three facts of the Nucleo-32 (STM32G031K8, LQFP32)
-// close legs below - two of them pads, the third a crystal that does not
-// start - and NOT ONE of them is a peripheral this part has not got:
+// knowledge may live. Two pad facts of the Nucleo-32 (STM32G031K8,
+// LQFP32) close legs below, and NOT ONE of them is a peripheral this
+// part has not got:
 //
 //  - LPUART1's bonded pads here are PA2/PA3 at AF6, which are the
 //    ST-LINK's virtual COM port - the CONSOLE's own pair. A single-wire
@@ -201,22 +201,21 @@ using Lp2Pin = Pin<'C', 6>;
 //    USART1_CTS, and table 12 bonds both (this package's port B runs
 //    PB0..PB9). So the driver-enable, flow-control, smartcard-clock and
 //    synchronous-clock legs run here as they do on the Nucleo-64s.
-//  - THE LSE CRYSTAL DOES NOT START ON THIS BOARD: measured over fifteen
-//    seconds at both drive settings, LSERDY never rose. So there is no
-//    32768 Hz kernel clock and no RTC wall clock, and the letters that
-//    need either say so by name. (The other two boards' crystals run,
-//    and every leg below still ASKS `RtcDomain::lse_ready()` at run
-//    time - this constant only spares a part the code for a leg its
-//    board cannot stage.)
+//  - THE LSE CRYSTAL RUNS ON THIS BOARD TOO, as on the Nucleo-64s, so
+//    the 32768 Hz kernel clock and the RTC wall are there for the
+//    letters that need them. `board_lse_fitted` stays a BOARD statement
+//    (a board whose X2 is absent or cut off its pads by its solder
+//    bridges would set it false and spare itself the code of the legs
+//    it cannot stage), and every leg below still ASKS
+//    `RtcDomain::lse_ready()` at run time before resting on it.
 #if defined(STM32G031xx)
 constexpr bool has_lpuart_own_pad = false;
 constexpr bool has_u1_ck_pads = true;
-constexpr bool board_lse_fitted = false;
 #else
 constexpr bool has_lpuart_own_pad = true;
 constexpr bool has_u1_ck_pads = true;
-constexpr bool board_lse_fitted = true;
 #endif
+constexpr bool board_lse_fitted = true;
 
 /// The one sentence letters j, l and m each print where the CK/DE/RTS
 /// pads are not this package's - one string, three users, because on the
@@ -4038,10 +4037,9 @@ void tw_wake() {
                   : "",
               board_lse_fitted
                   ? ""
-                  : "the second: this board's LSE crystal does not start "
-                    "(LSERDY never rose in fifteen seconds at either drive "
-                    "setting), so there is neither a wall to measure the "
-                    "Stop against nor an RTC wake-up timer to end it. ",
+                  : "the second: this board is declared without a running "
+                    "LSE crystal, so there is neither a wall to measure "
+                    "the Stop against nor an RTC wake-up timer to end it. ",
               "ES0548 2.2.4's staging - and ES0487's twin, which this suite "
               "has not read - wants both, so it is not attempted.", crlf);
         return;
@@ -4336,10 +4334,9 @@ bool tv_lse_leg() {
     if constexpr (!fitted) {
         print(serial,
               "  SKIPPED, no verdict claimed: an LPUART console clocked by "
-              "the 32768 Hz crystal needs one to be running, and THIS BOARD'S "
-              "LSE DOES NOT START (LSERDY never rose in fifteen seconds at "
-              "either drive setting). The HSI16 leg below is the same console "
-              "on the same pads and runs.", crlf);
+              "the 32768 Hz crystal needs one to be running, and THIS BOARD "
+              "IS DECLARED WITHOUT ONE. The HSI16 leg below is the same "
+              "console on the same pads and runs.", crlf);
         return true;
     } else {
         if (!RtcDomain::lse_ready()) {
@@ -4398,7 +4395,7 @@ void tv_stop_leg() {
               "  SKIPPED, no verdict claimed: an LPUART woken out of Stop by "
               "a start bit needs the 32768 Hz crystal as its kernel clock - "
               "no other clock of this part survives a Stop for it - and this "
-              "board's does not start.", crlf);
+              "board is declared without one.", crlf);
         return;
     } else {
         if (RtcDomain::selected() != RtcClockSource::lse) {

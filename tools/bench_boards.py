@@ -151,8 +151,8 @@ BOARDS = {
     },
     "G": {
         # The second silicon's OTHER HALF: an ST Nucleo-G031K8, a Nucleo-32
-        # (no board number verified, so no connector numbering is recorded
-        # and nothing on it is wired). STM32G031K8, Cortex-M0+, 64 KB
+        # (MB1455; it carries the six bus wires to E - docs/bench.md's
+        # "The G0-to-G0 bus link"). STM32G031K8, Cortex-M0+, 64 KB
         # single-bank flash, 8 KB SRAM, LQFP32: DBGMCU_IDCODE 0x10036466
         # (DEV_ID 0x466 = G031/G041, REV_ID 0x1003), FLASHSIZE 0x0040 = 64 KB,
         # RCC_CSR 0x0C000000 at first contact, target voltage 3.20 V, the
@@ -160,11 +160,16 @@ BOARDS = {
         # plug-in (2026-09-08). The ST-LINK's virtual COM port on USART2
         # PA2/PA3 at 115200 is VERIFIED by the console's banner answering on
         # it; LD3 on PC6 is UM2591's and is driven by every app, but no hand
-        # was at the desk to see it blink. THE LSE CRYSTAL DOES NOT START:
-        # LSEON at the lowest and then at the highest drive left LSERDY
-        # clear for fifteen seconds (measured by firmware, not assumed), so
-        # this board has no 32768 Hz reference and its RTC domain runs on
-        # LSI (the domain was left with LSEON and LSEDRV = 11 written).
+        # was at the desk to see it blink. THE LSE CRYSTAL RUNS: with the
+        # oscillator bridges at UM2591's default (SB7 off, SB8/SB9 on)
+        # LSEON at the lowest drive raises LSERDY in ~900 ms from an empty
+        # domain, and the crystal weighs 32719..32753 Hz against the core;
+        # the RTC domain runs the RTC on it (RCC_BDCR 0x8103). The LSI of
+        # this die is the slowest of the desk's three, 31403..31496 Hz on a
+        # TIM16 capture and 31400 by the watchdog. PA0 and PA4 LEAN HIGH
+        # when left floating (PA0 back at 1 within 200 ms of a released
+        # pull-down), where the Nucleo-64s' free pads drift down - a fact
+        # of the node, nothing is wired to either.
         #
         # THE DEBUG PORT CAN GO SILENT, AND ONLY UNPLUGGING THE BOARD BRINGS
         # IT BACK. The SW-DP answered at first contact and went silent at a

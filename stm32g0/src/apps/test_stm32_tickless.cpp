@@ -92,29 +92,18 @@ namespace {
 
 using namespace brio;
 
-// THE TIMEBASE, and the platform on it. An LPTIM on a 32 kHz root, which
-// is the crystal where the board has one and LSI where it has not - and
-// on LSI the ticker STATES its rate, the number to state being one NOT
-// BELOW the true one (the driver's own directional rule: a tick declared
-// faster than it is makes every deadline late and none early). What is
-// stated here is the boot measurement of the die this board carries,
-// rounded UP to the next kilohertz. Which board this is, is the one
-// question only the preprocessor can ask.
-// AND THE NUMBER STATED FOR AN LSI IS 32768 - the crystal's own - for a
-// second reason beside the directional one: the tick is the count
-// SHIFTED, so a statement that is a power of two keeps the whole
-// timebase's arithmetic a shift (1024 ticks a second, millis() 1000 per
-// 1024, secs() a right shift by ten), which is what letter a judges. The
-// price is that on a die measured at 31496 Hz the tick is 4 % LONGER
-// than it says: every deadline late, none early, and the wall letters
-// below convert with the root's measured rate rather than pretending
-// otherwise.
-#if defined(STM32G031xx)
-constexpr LptimTickerConfig tb_cfg{.source = LptimTickerSource::lsi,
-                                   .lsi_hz = 32'768};
-#else
+// THE TIMEBASE, and the platform on it. An LPTIM on the 32 kHz crystal,
+// which every board of this desk runs. A board without one would put
+// the ticker on LSI here and STATE its rate, the number to state being
+// one NOT BELOW the true one (the driver's own directional rule: a tick
+// declared faster than it is makes every deadline late and none early)
+// and a power of two, since the tick is the count SHIFTED and a
+// power-of-two statement keeps the whole timebase's arithmetic a shift
+// (1024 ticks a second, millis() 1000 per 1024, secs() a right shift by
+// ten) - the crystal's own 32768 serves both, at the price of a tick some
+// per cent longer than it says on any die of table 46. Letter h below is
+// where that LSI arrangement is measured, on a witness of its own.
 constexpr LptimTickerConfig tb_cfg{};
-#endif
 using Tb = LptimTicker<tb_cfg>;
 using P = Stm32g0Platform<Tb>;
 static_assert(Tickless<Tb>);

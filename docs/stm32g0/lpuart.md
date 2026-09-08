@@ -256,7 +256,10 @@ there, and three other suites GAIN a console that rides HSI16 while
 their subject moves the clock, because this part's USART2 has no
 kernel-clock multiplexer at all ([usart.md](usart.md)). LPUART1 at
 115200 on HSI16 carried `test_stm32_clock`'s whole ladder, 72 switches
-and 1152 loop-back bytes with none lost.
+and 1152 loop-back bytes with none lost; and on the board's crystal it
+is the 9600-baud console of `test_stm32_serial`'s letter `v` (BRR 874,
+0 wrong of 1062) and the start-bit wake that ends a 590 ms Stop 1 there,
+as on the Nucleo-64s.
 
 ## Not covered yet
 

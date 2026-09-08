@@ -553,13 +553,12 @@ verdict now says.
 ## On the third silicon
 
 `test_stm32_sleep` scores **50/50** in `z` on the Nucleo-G031K8 (DEV_ID
-0x466, REV_ID 0x1003) with the ladder, the two sites and the vote round
-all as they are elsewhere. Its wall is the RTC on **LSI at the rate the
-boot measured** (31496 Hz on a TIM16 capture), the timed site states
-32000 Hz for it - the measurement rounded up, the direction the
-never-early rule wants - and a 500 ms deadline through Stop 1 matures at
-**508 ms** of that wall with six 150 ms rounds at 152..153 ms and none
-early.
+0x466, REV_ID 0x1003), with `s` 6/6 and `u` 6/6 outside it, the ladder,
+the two sites and the vote round all as they are elsewhere. Its wall is
+the RTC on the **LSE crystal**, the timed site states 32800 Hz for it
+as on the other two boards, and a 500 ms deadline through Stop 1
+matures at **501 ms** of that wall with six 150 ms rounds at 150..151 ms
+and none early.
 
 **WKUP1, WKUP2, WKUP4 AND WKUP6 - four of the six.** The G071 bonds five
 and the G0B1/G0C1 all six, so letter `a`'s census walks all six in turn
@@ -570,17 +569,17 @@ a minimum no small package can meet.
 **SHUTDOWN POWERS THE LSI DOWN, SO AN RTC ON LSI CANNOT END ONE.**
 DS12992 3.7.4 names the LSI beside the PLL, the HSI16 and the HSE in
 Shutdown's list of what is switched off, where the Standby paragraph
-above it does not - and the bench found it the hard way before the skip
-existed: letter `u` entered Shutdown with the wake-up timer armed for one
-ck_spre period and the board answered nothing for four minutes, until
-NRST (the mass-storage flasher's own reset) brought it back. The letter
-now SKIPS BY NAME on a board with no crystal, and letter `s` - Standby,
-where the LSI does survive - is the deep rung that board can still
-measure: 6/6 there, with **PWR_SR1.SBF standing and RCC_CSR empty**, the
-G0B1's signature. The Shutdown wake by NRST reported the OTHER one
-(RCC_CSR 0x0C000000 = PWRRSTF + PINRSTF, SBF clear), which is the G071's,
-so the exclusive-or letter `u` judges holds on this die too - it is just
-not the RTC that ends the sleep here.
+above it does not - and the bench found it the hard way: a Shutdown
+entered with the RTC on LSI and the wake-up timer armed for one ck_spre
+period left the board silent for four minutes, until NRST brought it
+back. So letter `u` SKIPS BY NAME whenever the wall is on LSI, and runs
+where it is on the crystal - which on this board it is: **6/6**, the
+Shutdown ended by the wake-up timer 1485 ms of calendar later, and the
+wake reported as a literal power-on reset (RCC_CSR 0x0C000000 = PWRRSTF
++ PINRSTF, SBF clear), the G071's signature and not the G0B1's; letter
+`s` - Standby, where the LSI would survive too - scores 6/6 with
+**PWR_SR1.SBF standing and RCC_CSR empty**, the G0B1's. The exclusive-or
+letter `u` judges holds on all three dies.
 
 ## Not covered yet
 

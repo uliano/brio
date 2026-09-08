@@ -201,18 +201,12 @@ constexpr uint8_t r_slow = 2;
 constexpr uint8_t r_pll16 = 3;
 
 // THE TIMEBASE, and the platform on it. The kernel tick must not move
-// with SYSCLK, which is what an LPTIM on a 32 kHz root gives - the
-// crystal where the board has one, and LSI where it has not. An LSI
-// ticker STATES its rate and the number to state is one NOT BELOW the
-// true one (the ticker's own directional rule: a tick declared faster
-// than it is makes every deadline late and none early), so the default
-// is DS12992 table 46's own ceiling and this suite takes it. Which board
-// this is, is the one question only the preprocessor can ask.
-#if defined(STM32G031xx)
-constexpr LptimTickerConfig tb_cfg{.source = LptimTickerSource::lsi};
-#else
+// with SYSCLK, which is what an LPTIM on the 32 kHz crystal gives, and
+// every board of this desk runs one. (A board without it would put the
+// ticker on LSI and STATE a rate NOT BELOW the true one - the ticker's
+// own directional rule - which is what the driver's default statement,
+// DS12992 table 46's ceiling, is for.)
 constexpr LptimTickerConfig tb_cfg{};
-#endif
 using Tb = LptimTicker<tb_cfg>;
 using P = Stm32g0Platform<Tb>;
 static_assert(Tickless<Tb>);

@@ -517,7 +517,8 @@ void tb_lse() {
         // a suite that cannot start the oscillator says so instead of
         // failing a verdict about a component that is not there.
         print(serial, "  LSE did not start: X2 is not fitted on this board, "
-                      "or the crystal is dead. The data verdicts of this "
+                      "is dead, or is cut off its pads by the board's own "
+                      "solder bridges. The data verdicts of this "
                       "letter are DECLINED and the rest of the suite runs "
                       "on LSI.", crlf);
         bench.verdict("LSE reports NOT ready, and the suite says so rather "
@@ -2189,12 +2190,46 @@ void tm_tamper() {
         arm_latency(2, TamperFilter::samples2, TamperSampling::div256,
                     TamperTrigger::low_level_or_rising_edge, false, false,
                     false, false, 2000, ok);
+    // WHICH WAY THE FREE NODE LEANS IS A DESK FACT, and it decides whether
+    // the second half can be asked at all. The contrast above needs a
+    // node that leaks DOWN once nothing holds it (the Nucleo-64s' PA0
+    // does, in a few hundred milliseconds); a node that leaks UP - the
+    // desk's Nucleo-32 after its bridges were reworked reads PA0 back at
+    // 1 within 200 ms of a released pull-down - samples high with the
+    // precharge off as well as on, and a detector that never fired then
+    // says nothing about TAMPPUDIS. So a silent precharge-off leg is
+    // judged only after the pad has been asked where it rests on its own:
+    // released from its own pull-down and read 100 ms later.
+    bool leans_high = false;
+    if (pu_off == 0u) {
+        (void)Tamp::disarm(2);
+        PadTamper::input(PinPull::down);
+        wait_ms(4);
+        PadTamper::input(PinPull::none);
+        wait_ms(100);
+        leans_high = PadTamper::read();
+        PadTamper::release();
+    }
     print(serial, "  a free PA0, active-low: precharge on ", pu_on,
-          " us (0 = never), precharge off ", pu_off, " us", crlf);
-    bench.verdict("TAMPPUDIS is real: with the precharge ON an unheld pad "
-                  "samples HIGH and never fires, and with it OFF the same "
-                  "pad drifts down and does",
-                  pu_on == 0u && pu_off != 0u);
+          " us (0 = never), precharge off ", pu_off, " us",
+          leans_high ? " - and released from a pull-down the free pad "
+                       "reads HIGH 100 ms later: this node leans UP on "
+                       "its own"
+                     : "",
+          crlf);
+    if (pu_off == 0u && leans_high) {
+        print(serial, "  SKIPPED, no verdict claimed: TAMPPUDIS shows as "
+              "the contrast between a precharged pad that samples high "
+              "and a free one that drifts LOW, and on this desk the free "
+              "pad drifts UP by itself - a fact of the node, not of the "
+              "block - so with the precharge off the detector has nothing "
+              "to fire on.", crlf);
+    } else {
+        bench.verdict("TAMPPUDIS is real: with the precharge ON an unheld "
+                      "pad samples HIGH and never fires, and with it OFF "
+                      "the same pad drifts down and does",
+                      pu_on == 0u && pu_off != 0u);
+    }
 
     // ---- TAMPxMSK: the trigger without the flag and without the erase ------
     const uint32_t masked_lat =

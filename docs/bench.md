@@ -303,64 +303,89 @@ E ("The G0-to-G0 bus link" below).
   read over SWD or reset from the host, and DBGMCU_CR is never
   written, because only an OpenOCD examine sets it. Position G is
   back on `openocd_stlink` whenever the DP answers.
-- **THE LSE CRYSTAL DOES NOT START.** LSEON at the lowest drive for two
-  seconds, then LSEDRV 11 for five and ten more across reboots:
-  LSERDY never rose, so this board has no 32768 Hz reference and its
-  RTC domain runs on **LSI**, which measures **31496 Hz** on a TIM16
-  capture and 31400 Hz through the watchdog (E: 32536/32586, F:
-  32295/32339 - this is the slowest of the three dies, and inside
-  DS12992 table 46's 29.5..34 kHz). Every suite that used to lean on
-  the crystal measures the LSI at boot and prints the rate it is
-  converting with; a claim the LSI cannot resolve is printed and
-  declined. THE ONE THING THAT COSTS A LETTER: Shutdown powers the LSI
-  down (DS12992 3.7.4 names it beside the PLL, HSI16 and HSE, where
-  the Standby paragraph does not), so an RTC on LSI cannot end a
-  Shutdown - `test_stm32_sleep`'s letter `u` skips by name, and the one
-  run that entered it before the skip existed left the board silent
-  until NRST.
-- Identity: the 96-bit UID at 0x1FFF7590 reads `007f0063 34315014
-  20323346`, recorded in `tools/bench_boards.py`.
-- Its errata sheet is **ES0487 Rev 6** ("STM32G031x4/x6/x8 device
-  errata"), in hand and read against the letters: REV_ID 0x1003 is its
-  **revision Y**. Two of its verdicts were checked on this die at the
-  bench - 2.2.4 (the DMAMUX triggered from EXTI) is ABSENT on Y and the
-  serial suite's boot probe agrees, four pad edges moving 4 words where
-  the G071 moved 0; 2.10.1 (a glitch in the stop bit's second half)
-  applies and reproduces with its control - and the whole map is
-  [stm32g0/vendor/README.md](stm32g0/vendor/README.md)'s. (The sheet
-  came down with `curl` and a browser user agent where every other route
-  had timed out.)
-- No second flash bank, so no storage attic: `test_stm32_nvm` and
-  `test_stm32_journal` stay the G0B1RE's alone, as they do on F.
-- **FOURTEEN OF THE SEVENTEEN BENCH SUITES RUN ON THIS BOARD**, each of
-  them twice and one of the two from a cold flash; the table of scores
-  and of what skips where is in
-  [stm32g0/README.md](stm32g0/README.md)'s second-silicon section. The
-  two bus suites now run ON THE WIRE here too, in both roles: with the
-  six jumpers to E fitted, `test_stm32_spi` scores **38/38** and
-  `test_stm32_i2c` **54/54** on this board - the same counts as on the
-  other two dies - and this board serves as the PEER for E's own 38 and
-  54. Its SELF-link is a different matter per bus: SPI2's four pads are
-  bonded to no pin of the LQFP32, so those eleven letters are compiled
-  out here for good, while I2C2's pads ARE bonded (PA11/PA12 = the
-  board's A5/A4), so that suite asks the wire like everywhere else and
-  its self-link letters skip on the probe's answer, not on the package.
-- Firmware today: `test_stm32_spi`, with `spi_peer` on E.
-- Board and connectors: **MB1455** (UM2591), an ARDUINO Nano V3 pinout
-  on CN3 and CN4. The pins this desk uses, verified against UM2591's
-  table 9 and the MB1455-C01 schematic's own nets: PA15 = D2 = CN3-5,
-  PB8 = D8 = CN3-11, PB9 = D10 = CN3-13, PB5 = D11 = CN3-14, PB4 = D12
-  = CN3-15, PB3 = D13 = CN4-15, GND on CN3-4 and CN4-2, 3V3 on CN4-14.
-- **TWO SHIPPED JUMPERS TO KNOW ABOUT**, because both sit on pads this
-  desk uses. **HW1** is a shunt between CN3-4 (GND) and CN3-5 (D2 =
-  PA15, the bus NSS): the board ships with it for the demo and UM2591's
-  own getting-started tells you to pull it. It is NOT fitted on this
-  board - measured over SWD, PA15 reads 1 under an internal pull-up and
-  0 under a pull-down, so it follows its own pull. **SB12/SB13** choose
-  which pad drives LD3: the default is SB12 OFF and SB13 ON, LED on PC6
-  and PB3 (D13, the bus SCK) free. On this board PB3 behaves as a free
-  pad in every wire check, which is consistent with the default; the
-  bridges themselves were not inspected.
+- **THE LSE CRYSTAL IS FITTED AND RUNS.** With the board's oscillator
+  bridges at UM2591's default (SB7 off - the ST-LINK's MCO NOT routed
+  to PC14 - and SB8/SB9 on, X2 on PC14/PC15) LSEON at the lowest drive
+  raises LSERDY in about 900 ms from an empty backup domain, and the
+  crystal weighs **32719..32753 Hz against the core** (the core's own
+  trim; E 32703, F 32736). So the RTC, the tickless timebase, the timed
+  sleep sites and every wall of this desk's suites run on the crystal
+  here exactly as on the Nucleo-64s, and the six suites whose subject
+  it touches are configured identically for all three boards. The
+  board's **LSI** measures **31403..31496 Hz** on a TIM16 capture and
+  31400 Hz through the watchdog (E: 32536/32586, F: 32295/32339 - the
+  slowest of the three dies, and inside DS12992 table 46's 29.5..34
+  kHz), the rate the LSI witness letters convert with. A PART FACT
+  WORTH KNOWING BESIDE IT: Shutdown powers the LSI down (DS12992 3.7.4
+  names it beside the PLL, HSI16 and HSE, where the Standby paragraph
+  does not), so an RTC on LSI cannot end a Shutdown - on this board the
+  RTC is on the crystal and `test_stm32_sleep`'s letter `u` ends its
+  Shutdown by the wake-up timer (6/6), coming back through a literal
+  power-on reset as the G071 does (SBF clear, RCC_CSR 0x0C000000).
+- **PA0 AND PA4 LEAN HIGH WHEN LEFT FLOATING** on this board: released
+  from an internal pull-down, PA0 reads 1 again within 200 ms, and an
+  active-high tamper detector on PA4 with the precharge OFF fires as
+  if the pad were held high. The Nucleo-64s' free pads drift DOWN
+  (their PA0 in a few hundred milliseconds). Nothing is wired to
+  either pin; the lean is the node's own (A0's neighbour on CN4 is
+  AREF at 3.3 V, and the board has been soldered on). One consequence:
+  `test_stm32_rtc`'s TAMPPUDIS leg - the contrast between a precharged
+  pad that samples high and a free one that drifts low - has no
+  stimulus here and declines by name, with the pad's own reading
+  printed.
+- Identity: the 96-bit UID at 0x1FFF7590 is recorded in
+  `tools/bench_boards.py` (no suite letter checks it yet).
+- **PA8's pull check was NEVER THE DESK'S: PA8 is UCPD1_CC1, and the
+  Type-C dead-battery pull-down on it is a RESET STATE (closed
+  2026-09-07).** `test_stm32_tim`'s letter `a` and `test_stm32_exti`'s
+  letter `b` both begin by proving a pad follows its own internal pull,
+  and PA8's leg used to fail about one run in three on images the md5
+  gate proved byte-identical to the ones that had passed. RM0444 7.3.16
+  with `SYSCFG_CFGR1`'s strobe bit is the whole explanation: the
+  dead-battery Rd on UCPD1_CC1 (PA8) and UCPD1_CC2 (PB15) is CONNECTED
+  out of a power-on and stays connected until the strobe releases it - a
+  few kilohms against the port's own forty, which puts a pad asked to
+  follow its 40 k pull-up somewhere between the rails, to be read
+  whichever way the threshold falls that minute. Both letters now spend
+  `brio::ucpd_dead_battery(1, false)` once, before the precondition, and
+  the verdict has passed **five z runs each** (`test_stm32_tim` 118/118
+  x5, `test_stm32_exti` 89/89 x5, cold flashes among them). D7/PA8
+  (CN9 pin 8, CN10 pin 23) needs no looking at. The release is one-way
+  per POWER CYCLE and survives a system reset (measured over SWD at the
+  review: after a probe reset with no strobe spent, PB15 and PA8 read
+  HIGH under their pull-ups) - so on this desk, which is never
+  power-cycled between runs, the Rd is met once after a plug-in; the
+  letters spend the strobe every time because they cannot know.
+- Firmware today: `test_stm32_serial` (stm32g0), the last of the
+  canaries the G031K8 half ran on this board. NB from the FLASH
+  campaign on: **physical bank 2 (0x0804_0000..0x0807_FFFF) is
+  STORAGE**, not code. `ld/stm32g0b1re.ld` gives the linker bank 1
+  alone (256 K of `rom`), and OpenOCD's `program <elf> verify` erases
+  only the sectors the image occupies - so flashing any app leaves the
+  NvHeap's blocks and the NvJournal's values intact, which is what the
+  `v` letter of each storage suite proves. There is no `--erase` on
+  this target to take them down; the way to wipe the storage is a mass
+  erase of bank 2 from firmware, which nothing in the tree does. At the campaign's review Fable measured it over SWD with the core
+  halted and a 10 ms settle: with the pull-up on, IDR bit 8 read HIGH in
+  two attempts of three and LOW in the third, seconds apart, while the
+  tim suite's letter a passed two of three runs in the same minutes -
+  so something on this desk pulls PA8 low intermittently, stronger than
+  the 40 k pull-up, and it is not the code (byte-identical images pass
+  and fail). Until D7/PA8 (CN9 pin 8, CN10 pin 23) has been looked at,
+  a tim or exti letter-a failure on that one verdict is the desk's.
+  **AND THERE IS A CANDIDATE INSIDE THE CHIP (campaign 10b).** PA8 is
+  UCPD1_CC1 and PB15 is UCPD1_CC2, and RM0444 7.3.16 with
+  SYSCFG_CFGR1's strobe bit says the Type-C DEAD-BATTERY pull-downs on
+  those two pins are CONNECTED out of a power-on and stay connected
+  until the strobe releases them - a few kilohms against the port's own
+  forty. Measured on PB15 in `test_stm32_rtc` letter `k`: the pad does
+  NOT follow its own internal pull-up with the Rd connected and DOES
+  once `ucpd_dead_battery(1, false)` has released it. That is a fact
+  about the silicon's reset state, and it is very probably what the
+  tim and exti suites have been meeting on PA8. Neither suite is
+  changed here (PA8 was not this campaign's to touch), but a letter that
+  wants either pad should release the Rd first -
+  [stm32g0/port.md](stm32g0/port.md) carries the verb.
 
 ## Multi-board bench
 
@@ -620,8 +645,11 @@ run their peer halves **in EITHER direction**: `test_stm32_spi` z 38/38
 and `test_stm32_i2c` z 54/54, twice per direction with one of the two
 from a cold flash, on E with G as the peer AND on G with E as the peer -
 so the smallest part of the family is a full bus DUT and not the
-wireless board the second-silicon campaign left. E runs
-`test_stm32_spi`, G runs `spi_peer`. What follows is an earlier desk,
+wireless board the second-silicon campaign left. TODAY ONLY G IS
+PLUGGED IN (E and F are off the hub; the six wires stay fitted at both
+ends, unpowered on E's side), on `test_stm32_rtc` after the crystal
+day: its oscillator bridges back at the default, the LSE running, and
+the six crystal suites re-run on it. What follows is an earlier desk,
 the G071RB day, and it stands as the record of that wiring: the
 Nucleo-G0B1RE at position E and the Nucleo-G071RB at position F were
 tied by the six-wire link of
