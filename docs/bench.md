@@ -355,7 +355,9 @@ E ("The G0-to-G0 bus link" below).
   board - measured over SWD, PA15 reads 1 under an internal pull-up and
   0 under a pull-down, so it follows its own pull. **SB12/SB13** choose
   which pad drives LD3: the default is SB12 OFF and SB13 ON, LED on PC6
-  and PB3 (D13, the bus SCK) free, which is what this board measures.
+  and PB3 (D13, the bus SCK) free. On this board PB3 behaves as a free
+  pad in every wire check, which is consistent with the default; the
+  bridges themselves were not inspected.
 
 ## Multi-board bench
 
@@ -1114,9 +1116,13 @@ and `test_stm32_i2c` z = **54/54**, each twice per direction with one of
 the two from a cold flash, and the same counts the SAM peer and the
 G071RB scored. The BR ladder holds to PCLK/2 = 32 MHz with either board
 hosting (the SAM broke at PCLK/4); the peer's SOFTWARE pump - the RXNE
-reload, against its DMA engines - holds to PCLK/8 = 8 MHz and slips at
-16 MHz on both dies, printed and not judged, because what it measures is
-the peer's own turnaround. ONE DESK FACT THIS LINK TAUGHT: the peer's
+reload, against its DMA engines - is where THE TWO DIES DIFFER: with the
+G031K8 as the peer it holds to PCLK/2 = 32 MHz, the whole ladder (3 of
+3 runs), with the G0B1RE as the peer it holds to 8 MHz and breaks at 16
+(2 of 2), and the G071RB as the peer was exact at 8, marginal at 16 and
+slipped at 32.
+Printed and not judged, because what it measures is each peer's own
+interrupt turnaround and not the wire. ONE DESK FACT THIS LINK TAUGHT: the peer's
 MISO pad runs at HIGH speed, one notch below the driver's very-high,
 because at very-high its answer edge couples into the SCK jumper beside
 it and the falling-edge modes (1 and 2) slip one bit mid-burst - 20

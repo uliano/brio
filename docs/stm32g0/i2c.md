@@ -534,6 +534,13 @@ Implemented but not bench-verified:
 
 - **I2C3** - present on this part, exercised in the family fixture and
   in letter a's refusals, but its pads carry no wire here.
+- **The LQFP32's own self-link.** The third silicon bonds both ends of
+  it (I2C1 on PB8/PB9, I2C2 on PA11/PA12), so the eleven self-link
+  letters are compiled there and probe for it at boot - but that desk
+  carries the peer link on the same two pads, the probe answers no, and
+  I2C2 AS A CLIENT HAS NEVER RUN ON THAT DIE. Two jumpers from CN3-11
+  and CN3-13 to CN4-7 and CN4-8, with the peer wires off, would run
+  them.
 - **The wake from Stop on silicon.** Everything around it is measured -
   the three conditions as refusals, WUPEN's readback, the direct EXTI
   line, a bus that carries bytes with it armed - but the wake itself

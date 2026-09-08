@@ -1159,8 +1159,17 @@ gets its dated home in `docs/design/` when taken.
   same counts the SAM and the G071RB scored - plus letter x (the
   falling-edge slip) 0 of 40 bursts in each direction. MEASURED: the BR
   ladder exact to PCLK/2 = 32 MHz whichever board hosts, and the peer's
-  software pump holding to 8 MHz and slipping at 16 on both dies
-  (printed, no verdict - it is the peer's turnaround). GATE:
+  software pump - the RXNE reload - WHERE THE DIES DIFFER: the G031K8 as
+  the peer holds to 32 MHz, the whole ladder, the G0B1RE as the peer
+  holds to 8 and breaks at 16, the G071RB was exact at 8, marginal at 16
+  and slipped at 32 (printed, no verdict - each peer's own interrupt turnaround; why
+  three turnarounds differ on one core at one clock is not known). THE
+  CORRECTION AT REVIEW, the user's: the first write-up said "8 MHz,
+  slips at 16, on both dies" from the one direction's log it had read -
+  the other direction was re-run three times before the sentence was
+  rewritten. Also stated at review: I2C2 as a client has never run on
+  the G031 (its self-link letters are compiled and probe there, and the
+  desk carries the peer link on the same pads - i2c.md's gap list). GATE:
   check_stm32g0 OK on twelve headers, host 24/24, the three presets
   clean (the assembler's SHF_GROUP notes are HEAD's own, same count),
   and the md5 worktree gate with pinned mtimes and wiped build dirs -

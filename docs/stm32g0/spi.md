@@ -617,10 +617,14 @@ anyway, with SSI, CRCNEXT and FRXTH open; 35.5.9's disable procedure; and
 
 MEASURED WITH THIS PART ON THE LINK: the BR ladder is exact to
 PCLK/2 = 32 MHz whichever board hosts (the SAM peer broke at PCLK/4);
-the peer's SOFTWARE pump - the RXNE reload, against its DMA engines -
-holds to PCLK/8 = 8 MHz and slips at 16 MHz on both dies, printed
-without a verdict because what it measures is the peer's own turnaround
-and not the wire; and letter `x`, the falling-edge slip instrument,
+the peer's SOFTWARE pump - the RXNE reload, against its DMA engines - is
+where the dies differ, and THIS one is the fastest of the three: as the
+peer it holds to PCLK/2 = 32 MHz, the whole ladder, where the G0B1RE as
+the peer holds to 8 MHz and breaks at 16 and the G071RB was exact at
+8, marginal at 16 and slipped at 32 - printed without a verdict, because what it measures is
+each peer's own interrupt turnaround and not the wire, and why the
+three turnarounds differ on one core at one clock is not known; and
+letter `x`, the falling-edge slip instrument,
 scores **0 of 40 bursts** in each direction with the client's MISO pad
 at `PinSpeed::high`.
 
