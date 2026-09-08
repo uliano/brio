@@ -1006,12 +1006,21 @@ gets its dated home in `docs/design/` when taken.
   ST-LINK's OWN mass-storage flasher programs it every time (a garbage
   file draws FAIL.TXT, a good image leaves none) and firmware polling
   PA13/PA14 SEES the probe's clock and data edges arrive during a failed
-  attempt - the pins are driven and the DP does not acknowledge, cause
-  unknown, a hand's job (cable and port, the SWD solder bridges, a second
-  probe). So bench.py's new `stlink_msd` programmer kind drops the .bin
-  on NODE_G031K8 (a processed file cycles the drive, the suite's banner
-  is the proof) and nothing on G halts, resets or reads over SWD;
-  DBGMCU_CR is never written there. AND THE CRYSTAL DOES NOT START:
+  attempt - the pins are driven and the DP does not acknowledge. So
+  bench.py's new `stlink_msd` programmer kind drops the .bin on
+  NODE_G031K8 (a processed file cycles the drive, the suite's banner is
+  the proof) and the whole campaign ran with nothing on G halted, reset
+  or read over SWD and DBGMCU_CR never written. RESOLVED THE SAME
+  EVENING BY THE USER'S HAND: unplugging the board's own USB cable and
+  plugging it back restored the DP at once (examination succeeds,
+  RCC_CSR reads the power-on flags) - the state lived in the ST-LINK
+  half, which a hub port's VBUS switch does not power down; G is back
+  on `openocd_stlink` (probe flashed and verified over SWD, DBGMCU_CR
+  cleared), `stlink_msd` stays as the fallback, and the rule is on
+  record: a probe reporting "no device connected" against a live
+  target is replugged as a whole before any other diagnosis. AND THE
+  CRYSTAL DOES NOT START (re-tried over SWD after the recovery, drive
+  11 for eight seconds, LSERDY never rose):
   LSEON at both drives for fifteen seconds left LSERDY clear, so the
   RTC, the tickless timebase and every wall run on LSI at a rate
   MEASURED at boot (31496 Hz on a TIM16 capture, 31400 by the watchdog -

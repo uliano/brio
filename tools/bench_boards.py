@@ -166,26 +166,26 @@ BOARDS = {
         # this board has no 32768 Hz reference and its RTC domain runs on
         # LSI (the domain was left with LSEON and LSEDRV = 11 written).
         #
-        # THE DEBUG PORT DOES NOT ATTACH, and this is the desk fact that
-        # shapes the entry. The SW-DP answered twice at first contact
-        # (IDCODE, UID, the RCC and PWR registers, PC6 sampled) and went
-        # silent at a write of RCC_BDCR.LSEON with the core halted; since
-        # then OpenOCD (hla_swd and dapdirect, plain and under reset, 100 kHz
-        # to 2 MHz) and pyOCD (attach, halt, under-reset) all get the probe's
-        # own status 5 "no device connected", through two USB-port power
-        # cycles that provably reset the part (RCC_BDCR came back empty).
-        # Meanwhile the ST-LINK's OWN mass-storage flasher programs the part
-        # every time (a garbage file draws a FAIL.TXT, a good image leaves
-        # none and its banner appears), and firmware polling PA14/PA13 sees
-        # the probe's clock and data edges arrive during a failed attempt -
-        # so the pins are driven and the DP does not acknowledge. To be
-        # looked at by a hand: the USB cable and port, the SWD solder
-        # bridges, a second probe on PA13/PA14. UNTIL THEN THE PROGRAMMER IS
-        # THE MSD: tools/bench.py's `stlink_msd` kind drops the .bin on the
-        # NODE_G031K8 drive, and nothing on this position can be halted,
-        # read over SWD or have DBGMCU_CR cleared (it was never set: no
-        # examine succeeded after the power cycles). The suites run through
-        # the console exactly as on E and F.
+        # THE DEBUG PORT CAN GO SILENT, AND ONLY UNPLUGGING THE BOARD BRINGS
+        # IT BACK. The SW-DP answered at first contact and went silent at a
+        # write of RCC_BDCR.LSEON with the core halted; from then on OpenOCD
+        # (hla_swd and dapdirect, plain and under reset, 100 kHz to 2 MHz)
+        # and pyOCD (attach, halt, under-reset) all got the probe's own
+        # status 5 "no device connected", through hub-port power cycles
+        # that provably reset the part (RCC_BDCR came back empty), while
+        # firmware polling PA14/PA13 saw the probe's clock and data edges
+        # arrive - the pins driven, the DP not acknowledging. Pulling the
+        # board's USB cable and plugging it back restored it at once: the
+        # state lived in the ST-LINK half, which a hub port's switch does
+        # not power down. So the programmer is `openocd_stlink` like E's
+        # and F's, and the rule is: a probe reporting "no device connected"
+        # against a live target is replugged as a whole before any other
+        # diagnosis. The fallback, proven for a whole campaign: the
+        # ST-LINK's OWN mass-storage flasher (tools/bench.py's `stlink_msd`
+        # kind drops the .bin on the NODE_G031K8 drive; a bad file draws a
+        # FAIL.TXT, a good image leaves none and its banner appears), under
+        # which nothing can be halted, read over SWD or have DBGMCU_CR
+        # cleared, and the suites run through the console alone.
         #
         # IDENTITY: the 96-bit unique device ID at 0x1FFF7590, read over SWD
         # at first contact - the same mechanism as E's and F's.
@@ -193,8 +193,10 @@ BOARDS = {
         "id": None,
         "device_uid": "007f0063-34315014-20323346",
         "console": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066FFF313541483043191236-if02",
-        "programmer": {"type": "stlink_msd", "serial": "066FFF313541483043191236",
-                       "label": "NODE_G031K8"},
+        "programmer": {"type": "openocd_stlink", "serial": "066FFF313541483043191236"},
+        # The fallback when the DP is silent (see the comment above):
+        #   {"type": "stlink_msd", "serial": "066FFF313541483043191236",
+        #    "label": "NODE_G031K8"}
     },
     "A": {
         # The original bench board: AVR128DB48, 24 MHz crystal on PA0/PA1,

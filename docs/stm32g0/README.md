@@ -183,10 +183,12 @@ every suite on it and both are measured, not assumed: **its LSE crystal
 does not start** (LSEON at both drives for fifteen seconds left LSERDY
 clear), so the RTC, the tickless timebase and every wall run on **LSI at
 the rate the suite weighs at boot** - 31496 Hz on a TIM16 capture, 31400
-by the watchdog, the slowest of the three dies; and **its debug port does
-not attach**, so the ST-LINK's own mass-storage flasher is the way in
-(`tools/bench.py`'s `stlink_msd` programmer kind) and nothing there can
-be halted or read over SWD ([../bench.md](../bench.md)).
+by the watchdog, the slowest of the three dies; and **its debug port can
+go silent** - a state of the board's ST-LINK half that only unplugging
+the board clears - in which case the ST-LINK's own mass-storage flasher
+is the way in (`tools/bench.py`'s `stlink_msd` programmer kind) and
+nothing can be halted or read over SWD until the replug
+([../bench.md](../bench.md)).
 
 **FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT**, each twice and one of the
 two from a cold flash.

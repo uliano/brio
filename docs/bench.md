@@ -281,25 +281,27 @@ bench; nothing on this board is wired to anything.
   console to **LPUART1 on the same two pads at AF6**, because this
   part's USART2 is a BASIC instance with no kernel-clock multiplexer
   and their subject is the clock its divisor would follow.
-- **THE DEBUG PORT DOES NOT ATTACH, AND THE MASS-STORAGE FLASHER IS THE
-  WAY IN.** The SW-DP answered twice at the first plug-in and went
-  silent at a write of RCC_BDCR.LSEON with the core halted; since then
+- **THE DEBUG PORT CAN GO SILENT, AND ONLY UNPLUGGING THE BOARD BRINGS
+  IT BACK.** The SW-DP answered at the first plug-in and went silent
+  at a write of RCC_BDCR.LSEON with the core halted; from then on
   OpenOCD (hla_swd and dapdirect, plain and under reset, 100 kHz to
-  2 MHz) and pyOCD (attach, halt, under-reset) all get the probe's own
-  status 5, "no device connected", through two USB-port power cycles
-  that provably reset the part. Firmware polling PA13/PA14 during a
-  failed attempt SEES the probe's clock and data edges arrive, so the
-  pins are driven and the DP does not acknowledge; the cause is
-  unknown and wants a hand (the cable and port, the SWD solder
-  bridges, a second probe on PA13/PA14). Meanwhile the ST-LINK's OWN
-  flasher programs the part every time, so `tools/bench.py`'s
-  programmer kind **`stlink_msd`** drops the `.bin` on the
-  NODE_G031K8 drive: a processed file cycles the drive in about four
-  seconds, a bad one leaves FAIL.TXT, and the suite's own banner is
-  the proof the image runs. NOTHING on this position can be halted,
-  read over SWD or reset from the host - a wedged image is recovered
-  by flashing another - and DBGMCU_CR is never written here, because
-  only an OpenOCD examine sets it and none succeeds.
+  2 MHz) and pyOCD (attach, halt, under-reset) all got the probe's own
+  status 5, "no device connected", through USBDEVFS_RESETs and two
+  hub-port power cycles that provably reset the part. Firmware
+  polling PA13/PA14 during a failed attempt SAW the probe's clock and
+  data edges arrive, so the pins were driven and the DP did not
+  acknowledge. Pulling the board's USB cable and plugging it back
+  restored it at once (examination succeeds, RCC_CSR reads the
+  power-on flags) - the state lived in the ST-LINK half of the board,
+  which a hub port's switch does not power down. The mass-storage
+  flasher was the way in meanwhile and stays as the fallback:
+  `tools/bench.py`'s programmer kind **`stlink_msd`** drops the
+  `.bin` on the NODE_G031K8 drive (a processed file cycles the drive
+  in about four seconds, a bad one leaves FAIL.TXT, the suite's own
+  banner is the proof the image runs); under it nothing can be halted,
+  read over SWD or reset from the host, and DBGMCU_CR is never
+  written, because only an OpenOCD examine sets it. Position G is
+  back on `openocd_stlink` whenever the DP answers.
 - **THE LSE CRYSTAL DOES NOT START.** LSEON at the lowest drive for two
   seconds, then LSEDRV 11 for five and ten more across reboots:
   LSERDY never rose, so this board has no 32768 Hz reference and its
@@ -587,9 +589,16 @@ is loaded into the peripheral at reset.
 
 ### End state
 
-**Today's end state: THE DESK IS TWO STM32G0 NUCLEOS AND NOTHING ELSE,
-AND BOTH OF THEM RUN THE SUITES NOW.** The Nucleo-G0B1RE at position E
-and the Nucleo-G071RB at position F are tied by the six-wire link of
+**Today's end state: THE DESK IS THE NUCLEO-G0B1RE AT E AND THE
+NUCLEO-G031K8 AT G; THE NUCLEO-G071RB (F) IS UNPLUGGED** to free the
+USB port, its six wires still attached on E's side with their far ends
+on the unpowered board (stubs; the I2C pull-ups may hang on F's dead
+3V3 rail, which matters only to an I2C letter on E). E last ran
+`test_stm32_serial`, G runs `probe` flashed over SWD after its debug
+port came back (its section above). What follows is the previous desk,
+the G071RB day, and it stands as the record of that wiring: the
+Nucleo-G0B1RE at position E and the Nucleo-G071RB at position F were
+tied by the six-wire link of
 "The G0-to-G0 bus link" above (SPI1 to SPI1, I2C1 to I2C1, the same pin
 names at both ends, the I2C pull-ups unchanged, a dedicated GND), so the
 Nucleo's own SPI1-to-SPI2 and I2C1-to-I2C2 self-links are BROKEN and both
