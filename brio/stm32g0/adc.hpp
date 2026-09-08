@@ -664,6 +664,12 @@ public:
      * the erratum has nothing to act on. `configure_while_enabled()`
      * exists so a suite can stage the erratum deliberately; nothing else
      * should call it.
+     *
+     * THE SAME ANSWER COVERS THE G071's OWN PAIR, ES0418 2.6.2 and 2.6.4:
+     * the second says a CFGR2 write with ADEN set resets CKMODE, and
+     * EVERY CFGR2 store in this file is under a cleared ADEN - this one
+     * behind the refusal above, and `rebase()`'s behind a `disable()`
+     * whose failure aborts the rebase. There is no third.
      */
     static bool configure(const AdcConfig& c) {
         if (!adc_config_valid(c) || enabled() || (regs().CR & ADC_CR_ADCAL) != 0u) {

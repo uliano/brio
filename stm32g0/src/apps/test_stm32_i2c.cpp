@@ -115,7 +115,7 @@
 // not reset. The pads this suite moves are the four of the I2C
 // self-link plus the console's two.
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -906,22 +906,88 @@ bool need_peer() {
 // a - the block, wireless
 // ===========================================================================
 
+// ---- the instances a part may not have -------------------------------------
+// A part whose header declares no I2C3 must not SPELL `I2c<3>` (the
+// driver's static_assert is the refusal), and `if constexpr` inside a
+// plain function still instantiates the branch it discards - while a
+// NON-DEPENDENT `I2c<3>` inside a template body is looked up when the
+// template is DEFINED. So the instance NUMBER is made to depend on the
+// reserve fact that gates the branch.
+template <bool present>
+using I2c3 = I2c<present ? uint8_t{3} : uint8_t{2}>;
+
+/// 32.9.6's TIMEOUTR probe, put to a third instance where there is one.
+/// Where there is not, the answer is the reserve's own (no such
+/// instance, therefore no SMBus) and nothing is written.
+template <bool present = i2c_present(3)>
+bool third_instance_smbus_probe() {
+    if constexpr (present) {
+        I2c3<present>::bus_clock(true);
+        I2c3<present>::reset();
+        return I2c3<present>::smbus_probe();
+    } else {
+        return false;
+    }
+}
+
+/// The three verbs that must refuse on an instance table 165 leaves
+/// without the independent clock. WHICH instance that is moves with the
+/// part - I2C3 where there is one, I2C2 on every part below the G0B1 -
+/// so the leg names the instance it asked.
+template <bool third = i2c_present(3)>
+void no_independent_clock_refusals() {
+    if constexpr (third) {
+        using I3 = I2c3<third>;
+        bench.verdict("I2C3 has no kernel-clock multiplexer: the verb says so",
+                      !I3::kernel_clock(I2cClock::hsi16));
+        bench.verdict("I2C3 has no SMBus time-outs: the verb says so",
+                      !I3::timeouts(1, false, true, 1, true));
+        bench.verdict("I2C3 has no wake from Stop: the verb says so",
+                      !I3::wake_from_stop(true));
+    } else {
+        print(serial, "  this part has no I2C3, and table 165 leaves its I2C2 "
+              "without the independent clock - so I2C2 is the instance the "
+              "three verbs must refuse", crlf);
+        bench.verdict("the instance without the independent clock has no "
+                      "kernel-clock multiplexer: the verb says so",
+                      !C::kernel_clock(I2cClock::hsi16));
+        bench.verdict("... no SMBus time-outs: the verb says so",
+                      !C::timeouts(1, false, true, 1, true));
+        bench.verdict("... and no wake from Stop: the verb says so",
+                      !C::wake_from_stop(true));
+    }
+}
+
 void ta_block() {
     // ---- the reserve against the header ----
-    bench.verdict("reserve: I2C1 and I2C2 on every G0, I2C3 on this one",
-                  i2c_present(1) && i2c_present(2) && i2c_present(3));
-    bench.verdict("reserve: I2C1's line is its own, I2C2 shares with I2C3",
-                  i2c_irq(1) == I2C1_IRQn && i2c_irq(2) == I2C2_3_IRQn &&
-                      i2c_irq(3) == I2C2_3_IRQn);
-    bench.verdict("reserve: DMAMUX 10/11, 12/13, 62/63 (table 56)",
+    print(serial, "  instances: I2C1 ", i2c_present(1), " I2C2 ", i2c_present(2),
+          " I2C3 ", i2c_present(3), "; independent clock: I2C1 ",
+          i2c_has_independent_clock(1), " I2C2 ", i2c_has_independent_clock(2),
+          crlf);
+    bench.verdict("reserve: I2C1 and I2C2 on every G0, a third only where the "
+                  "header declares one",
+                  i2c_present(1) && i2c_present(2));
+    bench.verdict("reserve: I2C1's line is its own, and I2C2's is shared with "
+                  "an I2C3 exactly where the part has one",
+                  i2c_irq(1) == I2C1_IRQn && i2c_irq(1) != i2c_irq(2) &&
+                      (!i2c_present(3) || i2c_irq(2) == i2c_irq(3)));
+    bench.verdict("reserve: DMAMUX 10/11 and 12/13 for the first two, 62/63 "
+                  "for a third (table 56)",
                   H::dma_rx_request() == 10 && H::dma_tx_request() == 11 &&
                       C::dma_rx_request() == 12 && C::dma_tx_request() == 13 &&
                       i2c_dma_rx_request(3) == 62 && i2c_dma_tx_request(3) == 63);
-    bench.verdict("reserve: the clock selector is I2C1's and I2C2's, never I2C3's",
-                  i2c_clock_select_pos(1) == 12u && i2c_clock_select_pos(2) == 14u &&
+    bench.verdict("reserve: I2C1 always has a kernel-clock selector, I2C2 has "
+                  "one only on the parts table 165 gives it to, and a third "
+                  "instance never does",
+                  i2c_clock_select_pos(1) == 12u &&
+                      i2c_clock_select_pos(2) ==
+                          (i2c_has_independent_clock(2) ? 14u : 0xFFu) &&
                       i2c_clock_select_pos(3) == 0xFF);
-    bench.verdict("reserve: EXTI 23 wakes I2C1, 22 wakes I2C2, I2C3 never",
-                  H::exti_line == 23 && C::exti_line == 22 && i2c_exti_line(3) == 0xFF);
+    bench.verdict("reserve: EXTI 23 wakes I2C1, 22 wakes an I2C2 that has the "
+                  "independent clock, and nothing else wakes at all (table 65)",
+                  H::exti_line == 23 &&
+                      C::exti_line == (i2c_has_independent_clock(2) ? 22u : 0xFFu) &&
+                      i2c_exti_line(3) == 0xFF);
     bench.verdict("reserve: PB8/PB9 have their own FMP bits, PA11/PA12 have none",
                   i2c_pad_fmp_bit('B', 8) != 0 && i2c_pad_fmp_bit('B', 9) != 0 &&
                       i2c_pad_fmp_bit('A', 11) == 0 && i2c_pad_fmp_bit('A', 12) == 0);
@@ -932,20 +998,21 @@ void ta_block() {
     // is the peripheral naming its own column.
     H::bus_clock(true);
     C::bus_clock(true);
-    I2c<3>::bus_clock(true);
     H::reset();
     C::reset();
-    I2c<3>::reset();
     const bool s1 = H::smbus_probe();
     const bool s2 = C::smbus_probe();
-    const bool s3 = I2c<3>::smbus_probe();
+    const bool s3 = third_instance_smbus_probe();
     print(serial, "  TIMEOUTR answers: I2C1 ", s1 ? "yes" : "no", " I2C2 ",
-          s2 ? "yes" : "no", " I2C3 ", s3 ? "yes" : "no", crlf);
-    bench.verdict("SMBus, asked of the silicon: I2C1 and I2C2 yes, I2C3 no",
-                  s1 && s2 && !s3);
-    bench.verdict("... and that is exactly what the reserve's table says",
-                  s1 == H::has_smbus && s2 == C::has_smbus &&
+          s2 ? "yes" : "no", " I2C3 ",
+          i2c_present(3) ? (s3 ? "yes" : "no") : "absent", crlf);
+    bench.verdict("SMBus, asked of the SILICON: every instance the reserve's "
+                  "table 165 column grants it answers, and every instance it "
+                  "does not is forced to zero",
+                  s1 == i2c_has_smbus(1) && s2 == i2c_has_smbus(2) &&
                       s3 == i2c_has_smbus(3));
+    bench.verdict("... and that is exactly what the reserve's table says",
+                  s1 == H::has_smbus && s2 == C::has_smbus);
 
     // ---- the reset values (table 214) ----
     const uint32_t cr1 = H::regs().CR1;
@@ -1055,12 +1122,10 @@ void ta_block() {
                                  I2cSpeed::fast_plus_1m) == 1'000'000);
 
     // ---- the refusals a register can be asked for ----
-    bench.verdict("I2C3 has no kernel-clock multiplexer: the verb says so",
-                  !I2c<3>::kernel_clock(I2cClock::hsi16));
-    bench.verdict("I2C3 has no SMBus time-outs: the verb says so",
-                  !I2c<3>::timeouts(1, false, true, 1, true));
-    bench.verdict("I2C3 has no wake from Stop: the verb says so",
-                  !I2c<3>::wake_from_stop(true));
+    // THE INSTANCE WITHOUT THE INDEPENDENT CLOCK IS THE ONE THAT REFUSES,
+    // and WHICH instance that is moves with the part: I2C3 where there is
+    // one, I2C2 on every part below the G0B1 (table 165's column).
+    no_independent_clock_refusals();
     (void)H::kernel_clock(I2cClock::pclk);
     bench.verdict("the wake is refused off HSI16 (32.4.16)", !H::wake_from_stop(true));
     (void)H::kernel_clock(I2cClock::hsi16);
@@ -3282,6 +3347,9 @@ int main() {
                  ty_isr_trace, false);
 
     if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        print(serial, crlf, "part DEV_ID ", hex(idcode.dev_id),
+              " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
               " tick=", tick_ok ? "SysTick" : "FAILED",
               " host=", host_ok ? "I2C1" : "FAILED", crlf);

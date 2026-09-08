@@ -404,6 +404,31 @@ TIM2 on MCO = HSI16/64 as the wall, weighed at 250 kHz within HSI16's
   poll's own cost, 32 times the 64 MHz one - never early, the
   millisecond cap refused at every rate.
 
+## On the second silicon
+
+`test_stm32_clock` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
+0x2000): the four rungs of the pack, the regimes, the wait states, the
+PLL's refusals, the rebased users and the Stop rounds all behave as the
+type claims, on a second die.
+
+**THE ONE THING THAT MOVES IS THE WALL.** This suite weighs every rung
+against a clock that does NOT move with SYSCLK: TIM2's own ETR, with no
+pad anywhere. WHICH clock is a per-part table cell - RM0444 22.4.25
+footnotes ETRSEL codes 0100 (MCO), 0101 (MCO2) and 0110 (COMP3)
+"available on STM32G0B1xx and STM32G0C1xx sales types only", while 0011
+(LSE) is every part's - and nothing in any TIM register says so, one
+`TIM_TypeDef` serving every instance on every header. So
+`tim_etrsel_has_mco()` states it (probed through `RCC_CFGR_MCO2SEL_Pos`,
+the second clock output that same class has) and the wall is HSI16/64
+through MCO at 250 kHz where the code exists and the LSE crystal at
+32.768 kHz where it does not - 4 us a count against 30.5. The Stop
+letters need only a clock that stops with the part and both serve; letter
+h, which judges a 20 us `delay_us`, needs the 4 us quantum and SKIPS BY
+NAME rather than measure its own tick.
+
+The G071's RCC_CFGR MCOSEL and MCOPRE are **three bits** where the
+G0B1's are four (the headers' own masks): one clock output, not two.
+
 ## Not covered yet
 
 Driver gaps:
@@ -445,3 +470,8 @@ and CCIPR2's FDCAN field for its one reachable code
 - including a console that kept talking at 115200 while its own clock
 moved under it. HSIKERON is written, read back and slept on; what it
 COSTS in current is the meter question this stratum keeps deferring.
+
+On the second silicon (the Nucleo-G071RB), NOT COVERED: **`delay_us` at
+every rung**, because judging a 20 us wait needs the 4 us MCO wall and
+that part's ETRSEL has no MCO code. The LSE wall it falls back to carries
+every other letter.

@@ -371,6 +371,31 @@ the core sits in WFI (the PC read over SWD is the instruction after
 the WFI, inside the kernel's idle path) - which is also how the HLA
 read caveat in README.md was found.
 
+## On the second silicon
+
+Every platform-level claim of this document holds on the Nucleo-G071RB
+(DEV_ID 0x460, REV_ID 0x2000): `test_stm32_platform` scores **53/53** in
+`z` (the reset flags, the critical section, the idle hook, SysTick's
+arithmetic, `delay_us` and both watchdogs), `test_stm32_sleep` **50/50**
+(all four depths and both sites - [pwr.md](pwr.md)), and
+`test_stm32_tickless` runs the LPTIM timebase and `idle_until` there.
+`flash.hpp` gained `DeviceIdcode`, which reads DBGMCU_IDCODE's DEV_ID and
+REV_ID through the APB gate 5.2.17 keeps closed at reset (and puts the
+gate back as it found it, the way `Pwr::debug_in_stop()` does): every
+bench suite prints it at boot, because a measurement that differs between
+two boards is only a finding once the die it was taken on is on the
+record.
+
+ONE LETTER OF `test_stm32_tickless` MOVES, and the reason belongs here
+because it cost a wedged board: letter `i` measures what a lap wake COSTS
+with a meter built out of TIM2's ETR taking MCO, and RM0444 22.4.25 gives
+that ETRSEL code to the G0B1/G0C1 alone. On a part without it the meter
+does not count - and `spin_us()`, this suite's own microsecond wait,
+rides the same TIM2, so a meter that does not count is a wait that never
+ends and the IWDG reboots the board. The meter and the awake-time verdict
+now go together behind `tim_etrsel_has_mco()`; the lap count and the
+never-re-lock-the-PLL claim need no meter and stay.
+
 ## Not covered yet
 
 Driver gaps (this chapter's option space the stratum does not touch):
@@ -398,3 +423,8 @@ byte as the foreign wake of a long `idle_until`) needs an operator and
 has not been run unattended; an LSI-clocked ticker has been the WITNESS
 on LPTIM2 and not yet the platform's own timebase in a program (the
 arithmetic and the wake are measured; a Stop on it is not).
+
+On the second silicon (the Nucleo-G071RB), NOT COVERED: **what a lap wake
+COSTS** in `test_stm32_tickless` letter `i`, whose meter is TIM2's ETR
+taking MCO. The lap COUNT and the never-re-lock-the-PLL claim are measured
+there; the microseconds are not.

@@ -445,6 +445,20 @@ above is now measured on silicon rather than only stated:
   for TIM7's update, each body clearing and returning exactly the flags
   its own enable had asked for.
 
+## On the second silicon
+
+`test_stm32_lptim` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
+0x2000) and scores **82/82**, every letter and every verdict the G0B1RE
+gives. Both instances, both clocks, the waveform, the encoder, the
+filters, the DMAMUX trigger and the two errata legs behave identically.
+ONE COMPILE-TIME STATEMENT MOVES WITH THE PART: `lptim_ext_trig5` is
+COMP3_OUT on LPTIM1, and a part with no third comparator has no such
+signal, so `lptim_config_valid(1, {.trigger = comp3_out})` is FALSE there
+- the suite's asymmetry pair is written as the reserve's own fact
+(`== comp_present(3)`) rather than as a constant, and holds both ways.
+The corresponding ES0418 items are 2.9.1 and 2.9.2, word for word the
+G0B1's 2.8.1 and 2.8.2, and both are answered the same way.
+
 ## Not covered yet
 
 Driver gaps - things chapter 26 has and this file does not:

@@ -37,7 +37,7 @@
 //      CPU in the loop, judged against two independent references
 //   e  the two rules 14.3.3 states and no register enforces
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -654,7 +654,7 @@ void te_refusals() {
 
 void banner() {
     print(serial, crlf,
-          "test_stm32_crc - the CRC calculation unit (board E, no wires)", crlf);
+          "test_stm32_crc - the CRC calculation unit (no wires)", crlf);
     bench.menu();
     print(serial, "  z  run them all", crlf);
 }
@@ -662,7 +662,7 @@ void banner() {
 }   // namespace
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
-extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
+extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -684,6 +684,9 @@ int main() {
                  te_refusals);
 
     if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        print(serial, crlf, "part DEV_ID ", hex(idcode.dev_id),
+              " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
               " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
         banner();

@@ -73,7 +73,7 @@
 // against the LSE timebase in letter a. The RTC's sub-second counter is
 // the wall a Stop cannot stop, the IWDG the backstop of every sleep.
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -169,13 +169,32 @@ static_assert(!Site::pauses_tick);
 // The walls
 // ---------------------------------------------------------------------------
 
-/// TIM2 on HSI16/64 through MCO and ETR: 250 kHz, 4 us a count, 32 bits.
-constexpr uint32_t mco_hz = 16'000'000u / 64u;
-constexpr uint8_t tim2_etrsel_mco = 4;    ///< TIM2_AF1.ETRSEL 0100 = MCO (RM0444 22.4.30)
+/// TIM2 counting a clock that does NOT move with SYSCLK, through its own
+/// ETR and with no pad anywhere - the wall every rung of the ladder is
+/// weighed against.
+///
+/// WHICH clock is a per-part table cell and not a choice: RM0444
+/// 22.4.25's ETRSEL list gives 0100 (MCO), 0101 (MCO2) and 0110 (COMP3)
+/// to the G0B1/G0C1 sales types alone, while 0011 (LSE) is every part's,
+/// and the reserve is what says which (`tim_etrsel_has_mco`). So the wall
+/// is HSI16/64 through MCO at 250 kHz where the part offers that code -
+/// 4 us a count - and the LSE crystal at 32.768 kHz where it does not,
+/// 30.5 us a count. The Stop letters need only a clock that stops with
+/// the part, and either serves; letter h needs 4 us of resolution and
+/// says so where it cannot have it.
+constexpr uint8_t tim2_etrsel_mco = 4;    ///< TIM2_AF1.ETRSEL 0100 = MCO (RM0444 22.4.25)
+constexpr uint8_t tim2_etrsel_lse = 3;    ///< 0011 = LSE, on every part
+constexpr bool wall_on_mco = tim_etrsel_has_mco(2);
+constexpr uint32_t etr_wall_hz = wall_on_mco ? 16'000'000u / 64u : 32768u;
+constexpr const char* etr_wall_name =
+    wall_on_mco ? "MCO = HSI16/64" : "the LSE crystal";
 uint32_t t2() { return T2::count(); }
-uint32_t t2_us(uint32_t counts) { return counts * (1'000'000u / mco_hz); }
+uint32_t t2_us(uint32_t counts) {
+    return static_cast<uint32_t>((static_cast<uint64_t>(counts) * 1'000'000u) /
+                                 etr_wall_hz);
+}
 bool wall_mco_up() {
-    if (!Rcc::mco(Rcc::mco_hsi16_code, 6)) {
+    if (wall_on_mco && !Rcc::mco(Rcc::mco_hsi16_code, 6)) {
         return false;
     }
     T2::bus_clock(true);
@@ -183,7 +202,8 @@ bool wall_mco_up() {
     if (!T2::configure({.prescaler = 0, .period = 0xFFFFFFFFu})) {
         return false;
     }
-    if (!T2::external_trigger_select(tim2_etrsel_mco)) {
+    if (!T2::external_trigger_select(wall_on_mco ? tim2_etrsel_mco
+                                                 : tim2_etrsel_lse)) {
         return false;
     }
     if (!T2::external_trigger({.clock_mode2 = true})) {
@@ -536,12 +556,16 @@ void ta_boot() {
     const uint32_t c0 = t2();
     tb_wait_ms(2000);
     const uint32_t counted = t2() - c0;
-    print(serial, "  2 s of the LSE timebase: TIM2 on MCO = HSI16/64 counted ", counted,
-          " (500000 nominal, ", (counted * 1000u) / 500000u, " per mille)", crlf);
-    bench.verdict("THE MCO WALL RUNS: HSI16/64 reaches TIM2's ETR with no pad "
-                  "(ETRSEL = MCO, external clock mode 2), 250 kHz within HSI16's own "
-                  "1 % of the crystal",
-                  within(counted, 495'000u, 505'000u));
+    constexpr uint32_t etr_wall_nominal = etr_wall_hz * 2u;
+    print(serial, "  2 s of the LSE timebase: TIM2 on ", etr_wall_name,
+          " counted ", counted, " (", etr_wall_nominal, " nominal, ",
+          (counted / (etr_wall_nominal / 1000u)), " per mille)", crlf);
+    bench.verdict("THE WALL RUNS: a clock that does not move with SYSCLK "
+                  "reaches TIM2's ETR with no pad (external clock mode 2, "
+                  "ETRSEL naming MCO where the part has that code and the LSE "
+                  "where it has not), within 1 % of its stated rate",
+                  within(counted, (etr_wall_nominal / 100u) * 99u,
+                         (etr_wall_nominal / 100u) * 101u));
 
     // The CPU really at 64 MHz: delay_us on SysTick's cycles against the crystal.
     const uint32_t ms = delay_rounds_ms(500);
@@ -867,28 +891,37 @@ StopRound stop_round(const char* name, uint8_t index, SleepDepth depth) {
           ": a 300-tick deadline matured after ", r.to_blip_ms, " ms of RTC wall, kernel ticks ",
           r.kernel_ticks, ", ", r.irqs, " LPTIM interrupt(s) of which ", r.restores,
           " restored the clock, votes ", Probe::votes, " wakes ", Probe::wakes,
-          "; TIM2 on MCO counted ", r.awake_counts, " (", t2_us(r.awake_counts),
+          "; TIM2 on ", etr_wall_name, " counted ", r.awake_counts, " (", t2_us(r.awake_counts),
           " us awake of ", r.to_blip_ms, " ms)", crlf);
     print_state("  at the deadline", r.at_blip);
     print_state("  after the round", r.after);
     return r;
 }
-bool stopped(const StopRound& r) { return r.awake_counts < 12'500u; }   // under 50 ms of 300 awake
+/// Under 50 ms of the round's 300 awake, on whichever wall this part has.
+bool stopped(const StopRound& r) { return t2_us(r.awake_counts) < 50'000u; }
 
 void tg_stop() {
     const StopRound fast = stop_round("64 MHz on the PLL", r_fast, SleepDepth::deep);
     bench.verdict("the deadline met through the Stop, never early",
                   fast.ok && within(fast.to_blip_ms, 292u, 320u) && within(fast.kernel_ticks, 300u, 302u));
-    bench.verdict("THE STOP WAS A STOP: TIM2 on the MCO wall counted only the awake "
-                  "fraction of the round (a Sleep would count 75000)",
+    bench.verdict("THE STOP WAS A STOP: TIM2 on the wall counted only the awake "
+                  "fraction of the round - under 50 ms of 300, where a Sleep "
+                  "would count the whole of it",
                   stopped(fast));
     bench.verdict("THE RATE IN FORCE CAME BACK: restore() put the silicon where the "
                   "index says - from the wake's own ISR, before the deadline's AO ran - "
                   "and it still stands after the round",
                   is_fast(fast.before) && is_fast(fast.at_blip) && is_fast(fast.after));
-    bench.verdict("at 64 MHz the wake ISR found SYSCLK on HSISYS exactly once and re-locked "
-                  "the PLL there",
-                  fast.restores == 1u);
+    // EVERY LPTIM wake of the round, not "exactly one": a deadline that
+    // lands near the timebase's own lap boundary is served by two
+    // interrupts (the lap's ARRM and the deadline's CMPM), which is the
+    // tickless suite's subject and not this letter's - so what is judged
+    // here is that the ISR restored the clock on every one of them.
+    print(serial, "  the round took ", fast.irqs, " LPTIM interrupt(s) and ",
+          fast.restores, " of them re-locked the PLL", crlf);
+    bench.verdict("at 64 MHz EVERY wake ISR of the round found SYSCLK on "
+                  "HSISYS and re-locked the PLL there",
+                  fast.irqs >= 1u && fast.restores == fast.irqs);
 
     const StopRound slow = stop_round("2 MHz in low-power run", r_slow, SleepDepth::deep);
     bench.verdict("the deadline met through the Stop 1 from low-power run, never early, "
@@ -916,6 +949,22 @@ void tg_stop() {
 // h - delay_us at every rung
 // =============================================================================
 void th_delay() {
+    // THE INSTRUMENT IS THE WALL'S QUANTUM. A 20 us call cannot be judged
+    // on a 30.5 us tick, so where the part's ETRSEL has no MCO code the
+    // letter says so and claims nothing rather than measuring the
+    // quantum instead of the delay.
+    if constexpr (!wall_on_mco) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: judging a 20 us delay needs the "
+              "4 us wall, which is TIM2's ETR taking MCO - and RM0444 "
+              "22.4.25's ETRSEL list gives code 0100 to the G0B1/G0C1 sales "
+              "types alone (tim_etrsel_has_mco(2) is false here). The LSE "
+              "code 0011 every part has makes a 30.5 us tick, coarser than "
+              "three of this letter's four spans, so what it would measure is "
+              "its own quantum.",
+              crlf);
+        return;
+    }
     static const uint32_t spans[] = {20, 100, 500, 900};
     static const uint8_t rungs[3] = {r_fast, r_mid, r_slow};
     static const char* const names[3] = {"64 MHz", "16 MHz", "2 MHz"};
@@ -1085,7 +1134,7 @@ void banner() {
 // Vectors
 // ---------------------------------------------------------------------------
 
-extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
+extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 
 /// Letter i's only: the BasicTicker's tick while it holds SysTick.
 extern "C" void SysTick_Handler() {
@@ -1163,6 +1212,9 @@ int main() {
     bench.letter('x', "diagnostic: the durations, broken down (outside z)", tx_durations, false);
 
     if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        print(serial, crlf, "part DEV_ID ", hex(idcode.dev_id),
+              " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz (rate 0 of 3)" : "FAILED",
               " console=USART2 on HSI16 loop=", loop_ok ? "USART1 PA9 on PCLK" : "FAILED",
               " tick=", tick_ok ? "LPTIM1 on LSE, tickless" : "FAILED",

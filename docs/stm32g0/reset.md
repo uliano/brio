@@ -245,6 +245,15 @@ reboots the board six times and resumes from a `.noinit` token.
   and, being in a register 40.10.3 does not reset on a system reset,
   they were found set on warm boots and clear on cold ones.
 
+## On the second silicon
+
+`test_stm32_platform` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
+0x2000) and scores **53/53** in `z`, every letter and every verdict the
+G0B1RE gives - the reset flags as the history they are, the breadcrumb,
+the critical section, SysTick's arithmetic, `delay_us`, and both
+watchdogs. Nothing in this chapter is per-part on the x1 line, and the
+`i` letter's six real resets behave the same way.
+
 ## Not covered yet
 
 Driver gaps (this chapter's option space the stratum does not touch):

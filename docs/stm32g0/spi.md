@@ -558,6 +558,37 @@ it, letter `o` is deterministic (38/38 twice including a cold flash),
 and letter `x` stays as the instrument that measures it. The DUT's own
 pads keep the driver's very-high: only the slave's edge lags the clock.
 
+## On the second silicon
+
+`test_stm32_spi` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
+with the Nucleo-G0B1RE as its peer - THE ROLES OF THE G0-TO-G0 LINK
+EXCHANGED, the same six wires, the same pin names at both ends - and
+scores **38/38**, the same 38 the G0B1RE scores hosting the other way.
+The self-link letters skip after the probe on this desk, as they do on E.
+
+**THERE ARE TWO INSTANCES AND NOT THREE.** `spi_present(3)` is false, so
+`Spi<3>` does not compile there; SPI2's line is SPI2_IRQn rather than
+SPI2_3_IRQn (the reserve deriving the name from SPI3's presence, and
+`BRIO_STM32G0_SPI2_HANDLER` binding whichever it is), and **the I2S is
+SPI1's alone** - `IS_I2S_ALL_INSTANCE` names one instance on this header
+where the G0B1's names two. The suite's roster and I2S-row verdicts are
+written as the reserve's own statements and hold both ways; the I2S
+letter itself is a self-link letter and skips on this desk.
+
+MEASURED WITH THE G071 AS THE HOST: the BR ladder holds to **PCLK/2 = 32
+MHz**, byte-exact both ways at every one of the eight codes, on the DMA
+engines AND on the software pump - the same ceiling the G0B1RE reaches
+hosting in the other direction, so neither die is the limit and the wire
+is not either. The four modes and both orders are byte-exact, the DORD
+mismatch is the exact two-way bit reversal, and the kernel letter runs
+`SpiBus` over `SpiHost` against the far board with four ordered replies,
+two rejections, both sleep votes and a `spi_timeout` recovered.
+
+ES0418's SPI items are **2.14.1** and **2.14.2**, word for word the
+G0B1's 2.12.1 and 2.12.2. Both are staged by letter `h`, which is a
+SELF-LINK letter: NOT STAGED on this board, and said so rather than
+assumed from the other die.
+
 ## Not covered yet
 
 **Driver gaps** - implemented nowhere, and a program that wants them
@@ -655,3 +686,10 @@ on every header of the pack, but no silicon has run it:
   Closing that would need a receiver that counts PCM frames rather than
   half-words; the count is printed and the samples that arrive are
   value-exact.
+
+On the second silicon (the Nucleo-G071RB), NOT COVERED because the letters
+that would cover it are the SELF-LINK's and this desk does not carry it
+there: **ES0418 2.14.1 and 2.14.2** (the two BSY items), the frame matrix,
+the eight BR codes host-to-host, NSS four ways, the CRC, TI mode, the OVR
+and the whole I2S personality - which that part has on SPI1 alone. All of
+them are measured on the G0B1RE; none is claimed for the G071.

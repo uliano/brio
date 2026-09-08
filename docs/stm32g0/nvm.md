@@ -407,6 +407,20 @@ had. That is what the `v` letter of each suite is for, and it is also why
 there is no way to wipe the storage from `bench.py`: `--erase` is refused
 on this target and nothing in the tree calls `mass_erase()`.
 
+## On the second silicon
+
+`test_stm32_nvm` and `test_stm32_journal` STAY THE G0B1RE's ALONE, and
+the reason is geometry rather than a driver gap. Both backends open on a
+storage attic in **bank 2** and a G071RB has one bank: `MainFlash` and
+`MainFlashJournalZone` answer `bad_geometry` there and refuse to mount,
+which is the survival-aware mount working. Giving a single-bank part a
+storage zone is a DESIGN QUESTION and not a port - an erase or a program
+stalls the core that fetches from the same bank for the operation's whole
+duration (3.3.6), so a heap in bank 1 costs every caller a 22 ms freeze
+and a journal's ordinary save 3 ms, where the two-bank arrangement costs
+nothing at all (the read-while-write measurement above). Until that
+question is answered, the two suites build for `g0b1re` only.
+
 ## Not covered yet
 
 Driver gaps:

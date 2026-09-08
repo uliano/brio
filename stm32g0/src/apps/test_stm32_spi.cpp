@@ -117,7 +117,7 @@
 // not reset. The pads this suite moves are the eight of the self-link
 // plus the console's two.
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -908,6 +908,39 @@ bool probe_cr2(uint32_t bit) {
     return stuck;
 }
 
+// ---- the third instance, asked only where the part has one ------------------
+// A part whose header declares no SPI3 must not SPELL `Spi<3>` (the
+// driver's static_assert is the refusal), and `if constexpr` inside a
+// plain function still instantiates the branch it discards - while a
+// NON-DEPENDENT `Spi<3>` inside a template body is looked up when the
+// template is DEFINED. So the instance NUMBER depends on the same
+// reserve fact that gates the branch.
+template <bool present>
+using Spi3 = Spi<present ? uint8_t{3} : uint8_t{2}>;
+
+/// The reserve's I2S row and the device header's own macro, compared on a
+/// third instance. Where there is none there is nothing to compare, and
+/// the reserve already says so (spi_has_i2s(3) is false with no I2S3).
+template <bool present = spi_present(3)>
+bool third_instance_i2s_agrees() {
+    if constexpr (present) {
+        return spi_has_i2s(3) == Spi3<present>::has_i2s();
+    } else {
+        return !spi_has_i2s(3);
+    }
+}
+
+/// "A third instance is not an I2S" - at compile time and at run time
+/// both where one exists, and at compile time alone where it does not.
+template <bool present = spi_present(3)>
+bool third_instance_has_no_i2s() {
+    if constexpr (present) {
+        return !Spi3<present>::has_i2s_mode && !Spi3<present>::has_i2s();
+    } else {
+        return !spi_has_i2s(3);
+    }
+}
+
 void ta_block() {
     peer_stop();
     Nvic::disable(S1::irq());
@@ -917,16 +950,18 @@ void ta_block() {
     S2::reset();
 
     // ---- the reserve against the device header ----
+    print(serial, "  instances: SPI1 ", spi_present(1), " SPI2 ", spi_present(2),
+          " SPI3 ", spi_present(3), crlf);
     bench.verdict("the reserve knows this part's SPI roster: SPI1 and SPI2 "
-                  "everywhere, SPI3 on the G0B1/G0C1 alone",
-                  spi_present(1) && spi_present(2) && spi_present(3) && !spi_present(4));
+                  "everywhere, a third on the G0B1/G0C1 alone",
+                  spi_present(1) && spi_present(2) && !spi_present(4));
     print(serial, "  vectors: SPI1 ", static_cast<int32_t>(spi_irq(1)), ", SPI2 ",
-          static_cast<int32_t>(spi_irq(2)), ", SPI3 ", static_cast<int32_t>(spi_irq(3)),
-          crlf);
-    bench.verdict("SPI2 and SPI3 SHARE a line on a part that has both, and the "
-                  "reserve derives it from SPI3's presence",
-                  spi_irq(1) == SPI1_IRQn && spi_irq(2) == SPI2_3_IRQn &&
-                      spi_irq(3) == SPI2_3_IRQn);
+          static_cast<int32_t>(spi_irq(2)), crlf);
+    bench.verdict("SPI2's line is SPI1's no more, and it is SHARED with a "
+                  "third instance exactly where the part has one - which is "
+                  "how the reserve derives the name",
+                  spi_irq(1) == SPI1_IRQn && spi_irq(1) != spi_irq(2) &&
+                      (!spi_present(3) || spi_irq(2) == spi_irq(3)));
     bench.verdict("the DMAMUX request pairs are table 56's (16/17, 18/19, 66/67)",
                   S1::dma_rx_request() == 16 && S1::dma_tx_request() == 17 &&
                       S2::dma_rx_request() == 18 && S2::dma_tx_request() == 19 &&
@@ -934,12 +969,11 @@ void ta_block() {
     print(serial, "  I2S: reserve says SPI1 ", spi_has_i2s(1) ? "yes" : "no", " SPI2 ",
           spi_has_i2s(2) ? "yes" : "no", " SPI3 ", spi_has_i2s(3) ? "yes" : "no",
           "; the header's IS_I2S_ALL_INSTANCE says SPI1 ", S1::has_i2s() ? "yes" : "no",
-          " SPI2 ", S2::has_i2s() ? "yes" : "no", " SPI3 ",
-          Spi<3>::has_i2s() ? "yes" : "no", crlf);
+          " SPI2 ", S2::has_i2s() ? "yes" : "no", crlf);
     bench.verdict("table 205's I2S row: the reserve's constant and the device "
-                  "header's own macro agree on all three instances",
+                  "header's own macro agree on every instance the part has",
                   spi_has_i2s(1) == S1::has_i2s() && spi_has_i2s(2) == S2::has_i2s() &&
-                      spi_has_i2s(3) == Spi<3>::has_i2s());
+                      third_instance_i2s_agrees());
     bench.verdict("SPI1's APB enable is APB2's and SPI2's is APB1's, and both "
                   "gates are open",
                   spi_bus_clock(1).apb2 && !spi_bus_clock(2).apb2 && S1::bus_clock() &&
@@ -2824,8 +2858,9 @@ void tk_i2s() {
     bench.verdict("this instance pair CAN be an I2S at all (table 205: SPI1 "
                   "everywhere, SPI2 on the G0B1/G0C1)",
                   S1::has_i2s_mode && S2::has_i2s_mode && S1::has_i2s() && S2::has_i2s());
-    bench.verdict("...and SPI3 cannot, at compile time and at run time both",
-                  !Spi<3>::has_i2s_mode && !Spi<3>::has_i2s());
+    bench.verdict("...and a third instance cannot, at compile time and at run "
+                  "time both",
+                  third_instance_has_no_i2s());
 
     static uint16_t samples[16];
     for (uint16_t i = 0; i < 16u; ++i) {
@@ -3740,7 +3775,7 @@ void tx_peer_slips() {
 // ---------------------------------------------------------------------------
 
 void banner() {
-    print(serial, crlf, "test_stm32_spi - SPI/I2S on the Nucleo-G0B1RE", crlf);
+    print(serial, crlf, "test_stm32_spi - SPI/I2S on a G0 Nucleo", crlf);
     if (self_link) {
         print(serial, "  the SELF-LINK is on the desk: SPI1 host PB3/PB4/PB5 + PA15 "
                       " <->  SPI2 client PB10/PC2/PD4/PB12; letters b..l are live",
@@ -3879,6 +3914,9 @@ int main() {
                       "verdict", tx_peer_slips, false);
 
     if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        print(serial, crlf, "part DEV_ID ", hex(idcode.dev_id),
+              " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
               " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
         // THE TOPOLOGY IS ASKED OF THE WIRE, ONCE, before any letter can

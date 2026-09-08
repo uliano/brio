@@ -276,6 +276,27 @@ BLANKSEL bit for it is still written and read back, because a mask this
 driver refused to select would be a claim about a timer's channels and
 not about this chapter.
 
+## On the second silicon
+
+`test_stm32_analog` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
+0x2000), where **THERE ARE TWO COMPARATORS AND NOT THREE**: 18.1 gives
+the third to the G0B1/G0C1 alone, `comp_present(3)` is false and
+`Comp<3>` does not compile there. Three of the suite's verdicts go with
+it - the third comparator's register block through the SYSCFG gate, and
+letter n's whole COMP3 signal path (its own plus pads PB0 and PC1, and
+its EXTI line 20 counted through the shared ADC vector) - each skipping
+by name with the reserve's fact printed. The ISR's line mask is built
+from `comp3_exti_bit()` for the same reason: `1u << Comp<3>::exti_line`
+on a part with no COMP3 would be a shift by 0xFF.
+
+COMP1 and COMP2 behave identically on both dies. Measured on the G071:
+the medium-speed hysteresis band is **101 mV** (126 codes), and a
+300-code step across the threshold is answered in **781 ns** in
+high-speed mode and **1218 ns** in medium, a difference of 437 ns - the
+same shape as the G0B1RE's 687..1062 ns and 406..484 ns gap, with the
+DAC's settling and the poll loop still inside both absolutes and
+subtracted from neither.
+
 ## Not covered yet
 
 **Implemented but not bench-verified:**
@@ -299,3 +320,7 @@ not about this chapter.
 - Everything in table 99 (the low-power modes): there is no PWR driver
   in this stratum, so "comparator interrupts cause the device to exit
   Stop" is a sentence and not a measurement.
+
+On the second silicon (the Nucleo-G071RB), NOT COVERED: **COMP3** in every
+respect - its register block, its two plus pads and its EXTI line 20. The
+part has two comparators.

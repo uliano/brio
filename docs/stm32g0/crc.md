@@ -222,6 +222,17 @@ util service is a design question about the util level (a concept, a
 fallback, what a constexpr context does with a peripheral), and it is
 not this stratum's to open.
 
+## On the second silicon
+
+`test_stm32_crc` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
+and scores **27/27**, the same letters and the same verdicts as on the
+G0B1RE: every reset value, every reversal, all four polynomial widths and
+the four catalogue check values are bit for bit what the other die gives.
+The unit has no per-part table cell of any kind, and nothing here had to
+be gated - which is the smallest chapter's smallest possible finding, and
+worth stating because it is the only driver of this stratum that needs
+NOTHING from the reserve.
+
 ## Not covered yet
 
 Driver gaps - things chapter 14 has and this file does not:

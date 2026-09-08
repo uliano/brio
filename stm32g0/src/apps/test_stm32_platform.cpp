@@ -53,7 +53,7 @@
 // RESET" is proven literal: the boot after an IWDG reset sits for a
 // second and a half with nobody refreshing anything and lives.
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -1107,7 +1107,7 @@ void ti_resume() {
 // The menu
 // =============================================================================
 void banner() {
-    print(serial, crlf, "test_stm32_platform - STM32G0B1RE platform + reset "
+    print(serial, crlf, "test_stm32_platform - the G0 platform + reset "
           "(RM0444 5.1/5.4.24, ch. 28, ch. 29), clk=", SysClock::hz, " Hz",
           crlf);
     bench.menu();
@@ -1119,7 +1119,7 @@ void banner() {
 //
 // An unbound vector here is a SILENT death - the crt's default handler
 // is a spin loop - so every line this suite can raise is bound.
-extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
+extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
@@ -1182,6 +1182,9 @@ int main() {
         ti_resume();
         bench.prompt();
     } else if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        brio::print(serial, brio::crlf, "part DEV_ID ", brio::hex(idcode.dev_id),
+              " REV_ID ", brio::hex(idcode.rev_id), brio::crlf);
         brio::print(serial, brio::crlf, "boot: clk=",
                     clock_ok ? "PLL64" : "FAILED", " tick=",
                     tick_ok ? "SysTick" : "FAILED", " flags=",

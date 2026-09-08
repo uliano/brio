@@ -857,6 +857,122 @@ gets its dated home in `docs/design/` when taken.
   (the second-silicon campaign proper). Desk: E last ran test_stm32_i2c,
   F twi_peer; no flash written; the self-link and the SAM link are not
   fitted.
+  **THE SECOND-SILICON CAMPAIGN PROPER, G071RB HALF, DONE 2026-09-08
+  (Opus on Fable's brief; re-verified BY FABLE'S OWN HAND - every gate
+  re-run, all fourteen suites flashed cold on F and run z twice each, the
+  outside-z letters once, both bus suites in both directions, twelve E
+  canaries plus dma six times, the boot banners captured, two texts
+  corrected; and committed): FOURTEEN OF THE SEVENTEEN stm32g0 SUITES
+  RUN ON THE NUCLEO-G071RB AT F (DEV_ID 0x460 REV_ID 0x2000 = ES0418
+  silicon revision B), and the "every x1 header is a strict subset of
+  its twin, the reserve derives every fact from presence" ruling is on
+  silicon.** Scores on F against E's: crc 27/27, platform 53/53 (+ i
+  26/26 over six reboots), sleep 50/50 (+ s 6/6, u 6/6), lptim 82/82,
+  exti 89/89, rtc 125/125 (+ w 11/11, v 4/4), analog 136 of 139, tim 114
+  of 118, dma 65 of 69, tickless 45 of 47, clock 40 of 42, serial 83 of
+  88 (+ y/w/v 2/2 each through uart_stress.py), and BOTH BUS SUITES AT
+  THE SAME COUNT WITH THE ROLES EXCHANGED - spi 38/38 and i2c 54/54 with
+  E as the peer, the BR ladder holding to PCLK/2 = 32 MHz with F hosting
+  on the DMA engines AND on the software pump, letter x 0 of 40 bursts
+  slipped. Every shortfall is a letter that SKIPS BY NAME on the
+  reserve's own fact (TIM4, DMA2, COMP3, SPI3, I2C3, LPUART2, USART5/6,
+  the MCO ETRSEL code) with the reason printed and no verdict claimed;
+  every G0B1 letter and verdict stands (the twelve wireless canaries on E
+  at their recorded counts, spi 38 and i2c 54 on E with F as the peer);
+  nvm/journal stay g0b1re (one bank, no attic - a single-bank storage
+  geometry is a design question, the erase stalling the executing bank)
+  and fdcan stays g0b1re (no FDCAN); the G031K8 is opened nowhere (its
+  own campaign). THE SHAPE: the console vector bound by its G0B1 name
+  (USART2_LPUART2_IRQHandler) in fifteen suites would have printed
+  NOTHING on the G071 - the nine suites that "compiled clean" were all
+  dead there - so every name the reserve derives goes through
+  BRIO_STM32G0_*_HANDLER / *_irq(); an absent instance is reached through
+  an alias whose NUMBER depends on the gating fact (`template <bool p>
+  using Tim4 = Tim<p ? 4 : 3>` and its siblings - `if constexpr` in a
+  non-template function still instantiates the discarded branch, and a
+  non-dependent `Tim<4>` in a template body is looked up at definition
+  time), `#if defined(X_BASE)` inside an app only where a template cannot
+  reach; every suite prints `part DEV_ID/REV_ID` from the NEW
+  flash.hpp verb DeviceIdcode (DBGMCU_IDCODE through 5.2.17's gate, put
+  back as found); one reserve fact added, tim_etrsel_has_mco(). Gates:
+  check_stm32g0 OK on twelve headers, host 24/24, three presets building
+  every app with zero warnings, the md5 gate (pinned mtimes, wiped build
+  dirs, HEAD worktree vs a copy) 8 of 22 G0B1RE images BYTE-IDENTICAL
+  (blink, console, probe, both peers, nvm, journal, fdcan) and exactly
+  the fourteen edited suites as movers; the largest F image 71296 B of
+  128 K, the hungriest 9204 B of 36 K RAM. FINDINGS THE DOCUMENTS DO NOT
+  CARRY: **ES0418 2.2.4 REPRODUCED WITH ITS MECHANISM** - the brief had
+  predicted "0 of 5" on test_stm32_dma letter f's SWIER leg and was
+  WRONG (5 of 5 on F): the serial suite's new boot probe on PB3 shows
+  four pad edges into a DMAMUX request generator moving 0 words with the
+  EXTI event mask alone and 1 OF 4 with IMR armed while the EXTI's own
+  pending bit sees every edge and four SWIER pulses each followed by a
+  clear move 4 - the trigger follows the LEVEL of the line's pending
+  interrupt ("routed to it_exti_per(y)"), a SWIER-with-clear staging
+  reports the path healthy, and the four serial verdicts that count real
+  pad edges with no CPU (the smartcard CK ladder, the sync CK census,
+  both IRTIM counts) skip by name; **A SHUTDOWN WAKE IS A LITERAL
+  POWER-ON RESET ON THE G071** (SBF cleared, RCC_CSR 0x0C000000 =
+  PWRRSTF + PINRSTF) where the G0B1 leaves SBF standing and RCC_CSR
+  empty - letter u judges the exclusive OR, and a boot reading only SBF
+  is wrong on half the family (a Standby wake is the same on both);
+  **IMR1 RESETS TO 13.5.12's PRINTED 0xFFF80000 ON THE G071 AND TO ITS
+  STATED RULE ON THE G0B1** (bits 20/22/24 set above a 0xFEAFFFFF
+  implemented mask; judged over the implemented bits); **ARMING A TAMPER
+  INPUT DOES NOT TAKE THE PAD ON THE G071** (PA0 = TAMP_IN2 on both
+  datasheets reads 1 driven high with TAMP2E set, 0 on E; no errata item;
+  declined there); **RM0444 22.4.25's ETRSEL FOOTNOTE IS A PER-PART CELL
+  NO REGISTER CARRIES** - codes 0100 MCO / 0101 MCO2 / 0110 COMP3 are
+  the G0B1/G0C1's, a timer told to take MCO on the G071 counts NOTHING in
+  silence, test_stm32_tickless letter i's awake-time meter rode the same
+  TIM2 as its spin_us() and the board wedged until the IWDG at 32 s
+  (found by halt-and-dump with the PC inside spin_us), and
+  test_stm32_clock's Stop letters had PASSED VACUOUSLY on a zero wall -
+  the wall now falls back to ETRSEL 0011 = LSE (30.5 us a count) and
+  letter h (delay_us at 20 us) skips; the G071's MCOSEL/MCOPRE are three
+  bits (one MCO); **TABLE 165's COLUMN MOVES WITH THE PART**: the G071's
+  I2C2 has no RCC_CCIPR_I2C2SEL, so smbus_probe() answers I2C1 yes and
+  I2C2 NO on the silicon, no wake line, and the three "must refuse" verbs
+  move from I2C3 to I2C2; **USART3 IS BASIC** there (FULL on the G0B1),
+  so the wake line follows table 183's column and not the instance
+  number. Numbers: F's LSE crystal IS FITTED AND RUNS (its domain found
+  EMPTY with LSEON CLEAR - BDCR 0x0, never started, unlike E's 0x0003 -
+  rtc letter a claimed it first try: 32736 Hz against the core, E
+  32703, both the core's own trim), LSI 32295 Hz (IWDG) / 32339 (TIM16
+  capture) against E's 32536/32586, VDDA 3317 mV against 3310, CALFACT
+  47, the ADC's conversion times exact to the cycle, comparator delays
+  781/1218 ns and a 101 mV medium-speed band, I2C SCL 99/400/1000 kHz,
+  Sleep/Stop 0/Stop 1 rounds 7933/7964/7993 us, the clock ladder's 72
+  switches with 0 bad bytes of 1152. ES0418 against the letters (the
+  full map in docs/stm32g0/vendor/README.md): 2.2.6 (the G0B1's 2.2.4)
+  reproduced by letter w on F; 2.7.1 (DAC MODE-before-data, the brief's
+  prime suspect) DID NOT REPRODUCE under configure-then-set - the
+  workaround stated on dac.hpp's configure(), not built (a store reorder
+  moves every image); 2.13.1 at the sheet's own 32768/9600 = 3.41 lost
+  nothing in 1063 bytes; 2.6.2/2.6.4 (CFGR1/CFGR2 under ADEN) and 2.12.4
+  (ABREN cleared mid-reception) answered STRUCTURALLY and audited;
+  2.14.1/2.14.2 and 2.11.3/5/7 not staged (self-link roles); 2.8.6
+  unobservable with HPRE = PPRE = 1; 2.6.7 not reached (VREF+ 3.32 V).
+  Judgment calls accepted at review: "skip the leg, keep the letter"; the
+  dependent aliases; the exti/sleep/rtc verdicts rewritten as the claim
+  true on both dies with both readings printed; test_stm32_clock's "one
+  LPTIM interrupt" -> "every wake restored" (a lap-phase flake, the
+  tickless campaign's own fix) and the tickless nap band made
+  proportional (its nominal is the LSE measured against HSI16's trim);
+  test_stm32_serial's letter o judging PB9 "drivable" (the desk's 2.2 k
+  pull-up; the tim-letter-l rule); both boards left on blink. Corrected
+  by Fable at review: test_stm32_dma letter f's decline text no longer
+  claims "no EXTI line reaches a generator, SWIER or pad" (a
+  SWIER-with-clear loop does, measured), and dac.hpp's comment claims
+  only the order the suite measures. Recorded, not explained: the agent
+  saw letter n's Sleep leg of test_stm32_dma print "woke the core after
+  1 ms, handler calls 0" on E in 2 of 9 runs; Fable saw it in 0 of 6 (the
+  one lost verdict in six was letter j's documented estimator, 1 in 6
+  against the recorded 1 in 8). Desk at the end: E and F wired as before
+  and BOTH ON `blink`, F's RTC domain on the LSE crystal (BDCR 0x8103,
+  which it was not that morning), no flash written but the five TAMP
+  backup registers rtc letter w spends by design. NEXT: the G031K8 half
+  (position G).
   brio/stm32g0/ NEW: device_tables.hpp (THE RESERVE from day one -
   GPIO ports, USART instances, their APB enables, their CCIPR
   multiplexers and their SHARED VECTORS, the last read off the device

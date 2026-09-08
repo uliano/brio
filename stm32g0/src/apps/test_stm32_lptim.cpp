@@ -65,7 +65,7 @@
 //      TRGFLT as a threshold - and one vector with two owners, LPTIM2
 //      and TIM7 speaking on the same line
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -2290,9 +2290,13 @@ void walk_in1_2(uint32_t edges, uint32_t half_us) {
 // `lptim_config_valid()` is the constexpr checker `configure<cfg>()`
 // static_asserts on, and these are the same calls in the same place a
 // static_assert makes them.
+// AND ON A PART WITH NO COMP3 THE ROW IS A SIGNAL THAT DOES NOT EXIST:
+// lptim.hpp's fifth row asks comp_present(3), so lptim_ext_trig5 is
+// refused on BOTH instances there. The claim is written as the reserve's
+// own fact so it holds either way.
 static_assert(lptim_config_valid(1, LptimConfig{
                   .trigger = LptimTrigger::comp3_out,
-                  .trigger_edge = LptimTriggerEdge::rising}));
+                  .trigger_edge = LptimTriggerEdge::rising}) == comp_present(3));
 static_assert(!lptim_config_valid(2, LptimConfig{
                   .trigger = LptimTrigger::comp3_out,
                   .trigger_edge = LptimTriggerEdge::rising}));
@@ -2336,17 +2340,22 @@ void tj_lptim2() {
     // refused on the other, both ways round.
     const bool rows_ok =
         lptim_config_valid(1, LptimConfig{.trigger = LptimTrigger::comp3_out,
-                                          .trigger_edge = LptimTriggerEdge::rising}) &&
+                                          .trigger_edge = LptimTriggerEdge::rising}) ==
+            comp_present(3) &&
         !lptim_config_valid(2, LptimConfig{.trigger = LptimTrigger::comp3_out,
                                            .trigger_edge = LptimTriggerEdge::rising}) &&
         lptim_config_valid(2, LptimConfig{.trigger = LptimTrigger::tamp_trg3,
                                           .trigger_edge = LptimTriggerEdge::rising}) &&
         !lptim_config_valid(1, LptimConfig{.trigger = LptimTrigger::tamp_trg3,
                                            .trigger_edge = LptimTriggerEdge::rising});
+    print(serial, "  lptim_ext_trig5 on LPTIM1 (COMP3_OUT): ",
+          comp_present(3) ? "legal" : "refused, this part has no COMP3", crlf);
     bench.verdict("and table 139's fifth trigger row is NOT table 138's: "
-                  "COMP3_OUT is legal on LPTIM1 and refused on LPTIM2, "
-                  "TAMP_TRG3 legal on LPTIM2 and refused on LPTIM1 - the same "
-                  "TRIGSEL code, two different signals",
+                  "COMP3_OUT is LPTIM1's alone and refused on LPTIM2 - and "
+                  "refused on LPTIM1 too where the part has no third "
+                  "comparator - while TAMP_TRG3 is legal on LPTIM2 and "
+                  "refused on LPTIM1: the same TRIGSEL code, two different "
+                  "signals",
                   rows_ok);
 
     // AND THE INPUT MULTIPLEXER DISAGREES MORE (tables 140 and 142):
@@ -2721,7 +2730,7 @@ void tj_lptim2() {
 void banner() {
     print(serial, crlf,
           "test_stm32_lptim - the low-power timers and the third sleep site "
-          "(board E, no wires)", crlf);
+          "(no wires)", crlf);
     bench.menu();
     print(serial, "  z  run them all", crlf);
 }
@@ -2729,7 +2738,7 @@ void banner() {
 }   // namespace
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
-extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
+extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 
 /// LPTIM1's vector, shared with TIM6 and the DAC on this part.
 extern "C" void TIM6_DAC_LPTIM1_IRQHandler() {
@@ -2819,6 +2828,9 @@ int main() {
                  tj_lptim2);
 
     if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        print(serial, crlf, "part DEV_ID ", hex(idcode.dev_id),
+              " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
               " tick=", tick_ok ? "SysTick" : "FAILED",
               " wall=", wall_ready ? "RTC on LSE" : "NO CRYSTAL",

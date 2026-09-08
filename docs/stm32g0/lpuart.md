@@ -210,6 +210,34 @@ millisecond, so the byte has to be waited for; reading RDR the instant
 the WFI returns reads an empty register and calls a working wake a lost
 byte.
 
+## On the second silicon
+
+The Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000) has **one LPUART and not
+two**: `lpuart_present(2)` is false, `Lpuart<2>` does not compile there,
+and USART2's vector is USART2's alone rather than shared with it. Letter
+`n` of `test_stm32_serial` therefore skips its LPUART2 leg by name - the
+second single wire on PC6 at AF3 - and keeps every LPUART1 verdict: the
+20-bit LPUARTDIV, the 3x..4096x window, the FIFO, the prescaler at /64,
+the absence of OVER8, and the shared vector reaching it.
+
+**ES0418 2.13.1 IS THIS PART'S OWN ITEM AND IT NAMES THIS DRIVER'S
+ARITHMETIC**: the LPUART transmitter jitters when the kernel-clock to
+baud-rate ratio is a NON-INTEGER between 3 and 4 (partial workaround on
+both revisions - choose a ratio outside the band). The sheet's own
+example is the one letter `v` runs, the console moved to LPUART1 with the
+LSE as its kernel clock at 9600 baud: 32768 / 9600 = 3.41. Letter `n`'s
+own rungs are 115200 and 9600 on PCLK, ratios of 555.6 and 6666.7, well
+outside. A caller that wants the band avoided has the numbers here; the
+driver does not refuse it, because a jittering transmitter is still a
+transmitter and only the application knows what its far end tolerates.
+
+**AND ON THIS DIE THE SHEET'S OWN EXAMPLE COST NOTHING**: letter `v` ran
+LPUART1 on PA2/PA3 at AF6 with the LSE as its kernel clock and BRR 874
+(874 being 256 x 32768 / 9600 rounded), and the host read **1063 bytes
+in with 0 wrong**. Recorded as not reproduced at that rate against that
+receiver, and not as a disproof - a jitter item is about margin, and a
+1063-byte sample at one baud on one bridge does not measure a margin.
+
 ## Not covered yet
 
 Driver gaps: none - chapter 34's every field is implemented.
@@ -227,3 +255,7 @@ USART's own code, measured there on a USART):
   has been used to wake this board).
 - Every part but the G0B1: compile-only, pinned by the family fixture
   on all twelve headers.
+
+On the second silicon (the Nucleo-G071RB), NOT COVERED: **LPUART2** - its
+own pad, its own LPUART2SEL field and its own share of USART2's vector.
+The part has one LPUART.

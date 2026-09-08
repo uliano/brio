@@ -2,7 +2,7 @@
 // LPTIM clocked from the LSE crystal, the kernel's optional idle_until()
 // placing every deadline in the compare register, and NO periodic
 // interrupt anywhere in the program (SysTick runs interrupt-less as
-// delay_us's cycle counter). Board E (Nucleo-G0B1RE), no wires.
+// delay_us's cycle counter). No wires.
 //
 // This whole image runs on Stm32g0Platform<LptimTicker<>>: the timebase
 // is a template argument, so a tickless program is a whole program and
@@ -59,7 +59,7 @@
 // wall (15.6 ns), the RTC's sub-second counter on the same crystal as
 // the wall a Stop cannot stop, the IWDG as the backstop of every sleep.
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -695,7 +695,17 @@ void tc_idle_until() {
         const uint32_t over = r.t2_us > nominal_us ? r.t2_us - nominal_us : 0u;
         if (over > worst_over_us) worst_over_us = over;
         print_nap("idle_until(now + N)", r);
-        if (!within(r.t2_us, nominal_us - 40u, nominal_us + 1040u)) all_ok = false;
+        // THE LOWER BOUND SCALES WITH THE SPAN, because the nominal does
+        // not come from a specification: `tick_ns` is the LSE measured
+        // against TIM2 ON THE PLL, i.e. against HSI16's own 1 % trim, and
+        // the residue of that ratio grows with the sleep. One per mille
+        // plus the 40 us of quantisation is what the calibration can
+        // claim; NEVER EARLY is judged separately below, in the
+        // timebase's own units, where no scale enters at all.
+        if (!within(r.t2_us, nominal_us - nominal_us / 1000u - 40u,
+                    nominal_us + 1040u)) {
+            all_ok = false;
+        }
         // One CMPM ends the sleep; a lap in the way adds one ARRM and one round.
         if (r.irqs != r.rounds || (r.served & LptimFlag::cmpm) == 0u || r.rounds > 2u) one_irq = false;
         if (static_cast<int32_t>(r.ticks_after - r.asked) < 0) never_early = false;
@@ -1233,6 +1243,16 @@ void th_lsi_witness() {
 // and the APB is clocked, i.e. only awake. The PLL wall is put back at
 // the end.
 constexpr uint32_t awake_hz = 16'000'000u / 8u;
+/// WHETHER THE METER CAN EXIST AT ALL. RM0444 22.4.25's ETRSEL list
+/// footnotes 0100 (MCO), 0101 (MCO2) and 0110 (COMP3) "available on
+/// STM32G0B1xx and STM32G0C1xx sales types only"; on every smaller part
+/// the code selects nothing and TIM2 does not count. THE PRICE OF
+/// GETTING THAT WRONG IS THE WHOLE SUITE: `spin_us()` above rides the
+/// same TIM2, so a meter that does not count is a wait that never ends
+/// (measured - the board sat in `spin_us` until the watchdog reset it).
+/// So the meter is built only where the reserve says the code exists,
+/// and TIM2 is left on its PLL wall everywhere else.
+constexpr bool meter_possible = tim_etrsel_has_mco(2);
 volatile uint32_t arrm_t2[8];                       ///< the meter at each ARRM entry
 volatile uint8_t arrm_seen = 0;
 volatile uint8_t arrm_on_hsisys = 0;
@@ -1257,10 +1277,23 @@ bool awake_meter_up() {
 void ti_lap_wakes() {
     feed();
     console_drain();
-    const bool meter = awake_meter_up();
-    bench.verdict("TIM2 counts MCO = HSI16/8 through its ETR (the awake-time meter: HSI16 "
-                  "stops in a Stop and so does the timer's bus)",
-                  meter);
+    bool meter = false;
+    if constexpr (meter_possible) {
+        meter = awake_meter_up();
+        bench.verdict("TIM2 counts MCO = HSI16/8 through its ETR (the awake-time meter: "
+                      "HSI16 stops in a Stop and so does the timer's bus)",
+                      meter);
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: the awake-time meter is TIM2's "
+              "ETR taking MCO, and RM0444 22.4.25's ETRSEL list gives code "
+              "0100 to the G0B1/G0C1 sales types alone "
+              "(tim_etrsel_has_mco(2) is false here). TIM2 stays on its PLL "
+              "wall - which this suite's own spin_us() also rides - and the "
+              "awake-time verdict below is the only one that goes with it; "
+              "the lap count and the PLL claim do not need a meter.",
+              crlf);
+    }
     console_drain();   // a Stop under a line in flight is a garbled line (measured)
 
     K::init_all();
@@ -1311,17 +1344,25 @@ void ti_lap_wakes() {
     bench.verdict("THE PLL IS NEVER RE-LOCKED FOR A LAP WAKE: every ARRM ran on HSISYS and "
                   "the loop went straight back to sleep (no AO, no manager round)",
                   arrm_seen == 5u && arrm_on_hsisys == 5u);
-    bench.verdict("a lap wake keeps the part awake for under 300 us (ISR to ISR on a clock "
-                  "that only runs awake: the Stop exit, the handler, one empty loop turn "
-                  "and the WFI, all at 16 MHz with the PLL's two wait states still in "
-                  "FLASH_ACR) - a 10^-4 duty for a rare-event program",
-                  per_wake_max < 300u);
+    if (meter) {
+        bench.verdict("a lap wake keeps the part awake for under 300 us (ISR to ISR on a "
+                      "clock that only runs awake: the Stop exit, the handler, one empty "
+                      "loop turn and the WFI, all at 16 MHz with the PLL's two wait states "
+                      "still in FLASH_ACR) - a 10^-4 duty for a rare-event program",
+                      per_wake_max < 300u);
+    } else {
+        print(serial, "  SKIPPED, no verdict claimed: what a lap wake COSTS "
+              "needs a clock that runs only while the part is awake, which "
+              "on this part the meter above could not build.", crlf);
+    }
     bench.verdict("and the round closed with the PLL back", pll_back);
     // The PLL wall back for whatever runs next.
-    T2::enable(false);
-    T2::reset();
-    Rcc::mco_off();
-    (void)t2_up();
+    if (meter) {
+        T2::enable(false);
+        T2::reset();
+        Rcc::mco_off();
+        (void)t2_up();
+    }
 }
 
 // =============================================================================
@@ -1386,8 +1427,8 @@ void tx_latency() {
 
 void banner() {
     print(serial, crlf,
-          "test_stm32_tickless - the LPTIM kernel timebase and idle_until (board E, "
-          "no wires)", crlf);
+          "test_stm32_tickless - the LPTIM kernel timebase and idle_until "
+          "(no wires)", crlf);
     bench.menu();
     print(serial, "  z  run them all (a..g)", crlf);
 }
@@ -1397,7 +1438,7 @@ void banner() {
 /// Bound ON PURPOSE, to prove it never runs.
 extern "C" void SysTick_Handler() { systick_irqs = systick_irqs + 1u; }
 
-extern "C" void USART2_LPUART2_IRQHandler() {
+extern "C" void BRIO_STM32G0_USART2_HANDLER() {
     usart_irqs = usart_irqs + 1u;
     (void)Serial::isr();
 }
@@ -1494,6 +1535,9 @@ int main() {
     bench.letter('x', "diagnostic: the compare's latencies on the counter (outside z)", tx_latency, false);
 
     if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        print(serial, crlf, "part DEV_ID ", hex(idcode.dev_id),
+              " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
               " tick=", tick_ok ? "LPTIM1 on LSE, 1024 Hz, tickless" : "FAILED",
               " wall=", wall_ready ? "RTC on LSE" : "NO CRYSTAL",

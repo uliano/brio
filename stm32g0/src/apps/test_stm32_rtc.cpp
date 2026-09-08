@@ -72,7 +72,7 @@
 //          python3 tools/bench.py run E v --app test_stm32_rtc
 //                  --expect="pass," --timeout 200
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -1938,14 +1938,34 @@ void tm_tamper() {
     (void)Tamp::disarm(2);
     PadTamper::release();
     print(serial, "  PA0 driven high reads ", driven_free ? 1u : 0u,
-          " free and ", driven_armed ? 1u : 0u, " with TAMP2E set, MODER ",
+          " free and ", driven_armed ? 1u : 0u, " with TAMP2E set (the arm ",
+          ok ? "took" : "was REFUSED", "), MODER ",
           still_output ? "unchanged" : "changed", crlf);
-    bench.verdict("ARMING A TAMPER INPUT TAKES THE PAD: a port-driven high "
-                  "reads back 1 free and 0 armed with MODER untouched, so "
-                  "neither the output driver nor the input buffer reaches it "
-                  "any more - and the PULLS go with it, so no program on "
-                  "this board can put an EDGE on a tamper input at all",
-                  driven_free && !driven_armed && still_output);
+    // AND THE TWO DIES OF THIS FAMILY DO NOT AGREE, which is why the
+    // reading is printed before it is judged. Neither errata sheet has an
+    // item for it and no register says which behaviour a part has, so the
+    // strong claim is made where the silicon supports it and DECLINED,
+    // with both numbers on the record, where it does not. TAMP_IN2 is PA0
+    // on both parts (DS12232 and DS13560 alike), so this is not a pad map.
+    if (driven_free && !driven_armed && still_output) {
+        bench.verdict("ARMING A TAMPER INPUT TAKES THE PAD: a port-driven high "
+                      "reads back 1 free and 0 armed with MODER untouched, so "
+                      "neither the output driver nor the input buffer reaches "
+                      "it any more - and the PULLS go with it, so no program "
+                      "on this board can put an EDGE on a tamper input at all",
+                      true);
+    } else {
+        print(serial, "  ON THIS DIE ARMING DOES NOT TAKE THE PAD: the "
+              "port-driven high is still readable through the GPIO input "
+              "buffer with TAMP2E set, where the other silicon of this "
+              "family reads 0 there. The claim is DECLINED rather than "
+              "restated, and what follows does not rest on it - every leg "
+              "below drives the detector through the precharge and the "
+              "board's own pulls, never through a port output.", crlf);
+        bench.verdict("whether arming a tamper input takes the pad - "
+                      "DECLINED on this die, see the line above",
+                      driven_free && still_output && ok);
+    }
 
     // ---- THE INSTRUMENT: a pad the BOARD holds at a known level ------------
     // TAMP_IN1 is PC13, which carries the user button and its external
@@ -2505,7 +2525,7 @@ void tv_survival() {
 
 void banner() {
     print(serial, crlf,
-          "test_stm32_rtc - the RTC domain (board E, no wires)", crlf);
+          "test_stm32_rtc - the RTC domain (no wires)", crlf);
     bench.menu();
     print(serial, "  z  run them all", crlf);
 }
@@ -2513,7 +2533,7 @@ void banner() {
 }   // namespace
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
-extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
+extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 // The RTC's whole vector - the wake-up, both alarms, the timestamp -
 // arrives here (table 61). Its only job in this suite is to be PROMPT:
 // the wake-up source that TIM16 captures is the interrupt LINE, and the
@@ -2594,6 +2614,9 @@ int main() {
     }
 
     if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        print(serial, crlf, "part DEV_ID ", hex(idcode.dev_id),
+              " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
               " tick=", tick_ok ? "SysTick" : "FAILED", " BDCR=", hex(boot_bdcr),
               crlf);

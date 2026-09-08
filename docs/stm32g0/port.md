@@ -183,6 +183,25 @@ disconnected function input's low one. The consequence for a driver is
 that handing a peripheral a hardware input means handing it the PAD, at
 the right AF, and not merely leaving the pin at the right level.
 
+## On the second silicon
+
+The Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000) is the same LQFP64
+package with the same pads, and every bench suite that walks one behaves
+identically there - the same bonding, the same live input path in every
+mode but analog, the same UCPD dead-battery Rd on PA8 and PB15. ONE PORT
+IS MISSING: `gpio_port_present('E')` is false, which also takes PWR's
+PUCRE and PDCRE with it (see [pwr.md](pwr.md)); no suite of this stratum
+drives a port-E pad, the LQFP64 bonding none of them.
+
+**A PAD WITH AN EXTERNAL PULL-UP IS NOT A PAD A SUITE CAN PULL-WALK**, and
+this desk now has two suites that say so. `test_stm32_tim`'s letter `l`
+settled the rule for PB8 and PB9 - held up by the desk's 2.2 kOhm I2C
+pull-ups, sinking when a push-pull output drives them low - and
+`test_stm32_serial`'s letter `o`, whose IR_OUT pad is PB9 (PA13 being
+SWDIO, so there is no other), uses the same judgment: the precondition is
+DRIVABILITY and not the internal pull's authority, because drivability is
+the electrical question an alternate-function output actually asks.
+
 ## Not covered yet
 
 Driver gaps: the port lock (GPIOx_LCKR), the alternate-function tables

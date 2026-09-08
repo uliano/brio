@@ -68,9 +68,15 @@ static_assert((flash_optr_swap_bank != 0u) == flash_dual_bank_capable);
 // header of the pack.
 static_assert(sizeof(DeviceUid) == 12);
 
+// The die's own identity, RM0444 40.10.1: DBGMCU_IDCODE's two fields on
+// every header of the pack.
+static_assert(sizeof(DeviceIdcode) == 4);
+
 void flash_geometry() {
     (void)flash_size_kb();
     (void)DeviceUid::read().word[0];
+    (void)DeviceIdcode::read().dev_id;
+    (void)DeviceIdcode::read().rev_id;
     (void)Flash::size_bytes();
     (void)Flash::page_count();
     (void)Flash::bank_count();

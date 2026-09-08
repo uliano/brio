@@ -1549,6 +1549,34 @@ constexpr bool tim_has_external_trigger(uint8_t n) {
     }
 }
 
+/// Whether TIMn_AF1.ETRSEL can select the MCO output as the external
+/// trigger source - and THIS IS A PER-PART TABLE CELL, not a register
+/// field. RM0444 22.4.25 lists the ETR sources 0000 ETR legacy, 0001
+/// COMP1, 0010 COMP2, 0011 LSE, 0100 MCO, 0101 MCO2, 0110 COMP3, and
+/// footnotes the last THREE "available on STM32G0B1xx and STM32G0C1xx
+/// sales types only"; on every smaller part those codes are Reserved and
+/// select nothing at all, so a timer told to take MCO simply does not
+/// count. Nothing in the register description says so and no TIM_* macro
+/// differs between the headers - one TIM_TypeDef serves every instance
+/// on every part - which is why the probe is the CLASS the footnote
+/// names, asked the only way a preprocessor can ask it: MCO2 is that
+/// class's own second clock output and RCC_CFGR_MCO2SEL_Pos exists on
+/// exactly the headers whose ETRSEL carries the three footnoted codes.
+///
+/// The LSE code (0011) is every part's, which is what makes a
+/// SYSCLK-independent wall buildable on all of them - it is only the
+/// RATE that changes.
+constexpr bool tim_etrsel_has_mco(uint8_t n) {
+    if (!tim_has_external_trigger(n)) {
+        return false;
+    }
+#if defined(RCC_CFGR_MCO2SEL_Pos)
+    return true;
+#else
+    return false;
+#endif
+}
+
 /// The NVIC line TIMn's UPDATE, capture/compare, trigger and break
 /// events reach. SHARED LINES ARE THE RULE HERE (table 61): TIM3 shares
 /// with TIM4 where there is a TIM4, TIM6 with the DAC and LPTIM1 where

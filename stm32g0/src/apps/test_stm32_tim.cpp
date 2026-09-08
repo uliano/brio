@@ -74,7 +74,7 @@
 //      PCLK at its prescaler, each update reaching the vector the reserve
 //      names for it, and a PWM off a pad for the four that have channels
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -121,7 +121,15 @@ TestBench<Serial, 16> bench;
 using T1 = Tim<1>;     // advanced: the pair, the dead time, the break, RCR
 using T2 = Tim<2>;     // the 32-bit one; the master of every cascade here
 using T3 = Tim<3>;     // the slave: counts, gates, resets, captures
-using T4 = Tim<4>;     // TIM3's vector-mate
+// TIM4 is TIM3's vector-mate on the parts that have one, and the one
+// timer of this suite's set a G0 may not have at all. A part without it
+// must not SPELL `Tim<4>` (the driver's static_assert is the refusal),
+// `if constexpr` inside a plain function still instantiates the branch it
+// discards, and a NON-DEPENDENT `Tim<4>` inside a template body is looked
+// up when the template is DEFINED - so the timer NUMBER is made to depend
+// on the reserve fact that gates every branch that names it.
+template <bool present>
+using Tim4 = Tim<present ? uint8_t{4} : uint8_t{3}>;
 using T16 = Tim<16>;   // one channel, and TISEL reaches LSI
 // Letter l's six: every instance this suite had never counted.
 using T6 = Tim<6>;     // basic: no channel, a TRGO and nothing else
@@ -158,6 +166,9 @@ using PadPair = Pin<'A', 8>;
 // PART OF THE POINT: TIM4's four channels, TIM15's three outputs and
 // TIM17's pair all land on port B, so a complementary pair is one IDR
 // read and a four-channel timer is one sampling loop.
+// TIM4's four pads are named on every part: a PinSel is a pad and an
+// alternate-function NUMBER, pure data with no register behind it, and
+// nothing but a live TIM4 leg ever claims them.
 constexpr PinSel t4_ch1_pad{'B', 6, PinFunction::af9};    // TIM4_CH1
 constexpr PinSel t4_ch2_pad{'B', 7, PinFunction::af9};    // TIM4_CH2
 constexpr PinSel t4_ch3_pad{'B', 8, PinFunction::af9};    // TIM4_CH3
@@ -390,6 +401,46 @@ PairCensus census_pair_b(uint8_t shift_a, uint8_t shift_b, uint32_t samples) {
     return {both, a, b, samples - a - b + both};
 }
 
+// ---- TIM4, asked only where the part has one --------------------------------
+
+template <bool present = tim_present(4)>
+void quiet_tim4() {
+    if constexpr (present) {
+        Tim4<present>::release();
+    }
+}
+
+/// TIM3's line is shared with a TIM4 exactly where there is one.
+template <bool present = tim_present(4)>
+bool tim3_shares_with_tim4() {
+    if constexpr (present) {
+        return Tim4<present>::irq() == tim_irq(3);
+    } else {
+        return true;
+    }
+}
+
+/// TIM16's line is shared with the FDCAN's first interrupt exactly where
+/// there is an FDCAN - the same derivation, on a peripheral that is not a
+/// timer at all.
+template <bool present = fdcan_present(1)>
+bool tim16_shares_with_fdcan() {
+    if constexpr (present) {
+        return fdcan_irq(0) == tim_irq(16);
+    } else {
+        return true;
+    }
+}
+
+template <bool present = fdcan_present(1)>
+int32_t fdcan_first_irq() {
+    if constexpr (present) {
+        return static_cast<int32_t>(fdcan_irq(0));
+    } else {
+        return -1;
+    }
+}
+
 /// Every timer and pad this suite touches back to reset.
 void quiet_everything() {
     Nvic::disable(T1::irq());
@@ -406,7 +457,7 @@ void quiet_everything() {
     T1::release();
     T2::release();
     T3::release();
-    T4::release();
+    quiet_tim4();
     T16::release();
     T6::release();
     T7::release();
@@ -464,10 +515,15 @@ void ta_block() {
           " TIM1_BDTR=", hex(boot_t1_bdtr), " APBENR1=", hex(boot_apbenr1),
           " APBENR2=", hex(boot_apbenr2), crlf);
 
-    bench.verdict("the G0B1 carries all ten timers of the family",
-                  tim_present(1) && tim_present(2) && tim_present(3) && tim_present(4) &&
+    print(serial, "  timers present: 1 2 3", tim_present(4) ? " 4" : "",
+          " 6 7 14 15 16 17", crlf);
+    bench.verdict("this part carries every timer of the family but the one "
+                  "the reserve reads off the header - TIM4 is the G0B1/G0C1's "
+                  "and every other instance is on all three x1 lines",
+                  tim_present(1) && tim_present(2) && tim_present(3) &&
                       tim_present(6) && tim_present(7) && tim_present(14) &&
-                      tim_present(15) && tim_present(16) && tim_present(17));
+                      tim_present(15) && tim_present(16) && tim_present(17) &&
+                      !tim_present(5) && !tim_present(8));
     bench.verdict("TIM2 is the family's one 32-bit counter, everything else 16",
                   T2::counter_bits == 32 && T2::max_period == 0xFFFFFFFFUL &&
                       T3::counter_bits == 16 && T1::max_period == 0xFFFFUL);
@@ -486,10 +542,19 @@ void ta_block() {
                   T1::has_split_vector && T1::irq() == TIM1_BRK_UP_TRG_COM_IRQn &&
                       T1::cc_irq() == TIM1_CC_IRQn && !T2::has_split_vector &&
                       T2::irq() == T2::cc_irq());
-    bench.verdict("TIM3 and TIM4 SHARE their vector on this part",
-                  T3::irq() == TIM3_TIM4_IRQn && T4::irq() == TIM3_TIM4_IRQn);
-    bench.verdict("and TIM16's is shared with an FDCAN line",
-                  T16::irq() == TIM16_FDCAN_IT0_IRQn);
+    print(serial, "  TIM4 present ", tim_present(4), "; TIM3's vector ",
+          static_cast<int32_t>(T3::irq()), ", TIM16's ",
+          static_cast<int32_t>(T16::irq()), ", the FDCAN's first line ",
+          static_cast<int32_t>(fdcan_first_irq()),
+          " (-1 = no FDCAN on this part)", crlf);
+    bench.verdict("TIM3 SHARES its vector with a TIM4 exactly where the part "
+                  "has one, and has it to itself where it has not - the "
+                  "reserve deriving the line from PRESENCE both ways",
+                  T3::irq() == tim_irq(3) && tim3_shares_with_tim4());
+    bench.verdict("and TIM16's line is shared with an FDCAN's first interrupt "
+                  "on a part that has an FDCAN, and TIM16's alone where none "
+                  "does",
+                  T16::irq() == tim_irq(16) && tim16_shares_with_fdcan());
 
     // The interconnect tables, both ways (RM0444 tables 119, 123, 130).
     bench.verdict("TIM3 reaches TIM2 on ITR1 and TIM2 reaches TIM1 on ITR0",
@@ -1257,48 +1322,82 @@ void tg_pair_and_break() {
 // h - the shared vectors, and the status register that cannot swallow a
 //     flag
 // =============================================================================
-void th_vectors() {
-    clear_counts();
-    T3::init();
-    T4::init();
-    (void)T3::configure({.prescaler = 63, .period = 999});    // 1 kHz
-    (void)T4::configure({.prescaler = 63, .period = 499});    // 2 kHz
-    T3::interrupts(T3::update_interrupt, true);
-    T4::interrupts(T4::update_interrupt, true);
-    T3::clear_flags(T3::update_flag);
-    T4::clear_flags(T4::update_flag);
-    T3::enable(true);
-    T4::enable(true);
-    Nvic::clear_pending(TIM3_TIM4_IRQn);
-    Nvic::enable(TIM3_TIM4_IRQn);
-    spin_cycles(SysClock::hz / 10u);   // 100 ms
-    Nvic::disable(TIM3_TIM4_IRQn);
-    const uint32_t n3 = t3_update_calls;
-    const uint32_t n4 = t4_update_calls;
-    print(serial, "  100 ms on ONE vector: TIM3 (1 kHz) ", n3,
-          " updates, TIM4 (2 kHz) ", n4, crlf);
-    bench.verdict("TWO TIMERS ON ONE VECTOR, each answered by its own ISR "
-                  "body and each at its own rate",
-                  n3 > 90u && n3 < 110u && n4 > 180u && n4 < 220u);
-    bench.verdict("and neither body ever consumed the other's flag",
-                  t3_saw_t4_flag == 0u);
-
-    // A flag whose interrupt is DISABLED stands where it is - unlike this
-    // family's EXTI, where an unarmed line has no pending bit at all.
-    T4::interrupts(T4::update_interrupt, false);
-    T4::clear_flags(T4::update_flag);
+/// A flag whose interrupt is DISABLED stands where it is - unlike this
+/// family's EXTI, where an unarmed line has no pending bit at all. The
+/// claim is about A TIMER and not about a particular one, so the leg
+/// takes the timer it is given: TIM4 where the part has one (already
+/// running from the leg above) and TIM3 where it has not.
+template <class T>
+void masked_flag_leg(volatile uint32_t& calls) {
+    T::interrupts(T::update_interrupt, false);
+    T::clear_flags(T::update_flag);
     spin_cycles(SysClock::hz / 100u);
-    const bool standing = T4::flag(T4::update_flag);
-    Nvic::clear_pending(TIM3_TIM4_IRQn);
-    Nvic::enable(TIM3_TIM4_IRQn);
-    const uint32_t before = t4_update_calls;
+    const bool standing = T::flag(T::update_flag);
+    Nvic::clear_pending(T::irq());
+    Nvic::enable(T::irq());
+    const uint32_t before = calls;
     spin_cycles(SysClock::hz / 100u);
-    Nvic::disable(TIM3_TIM4_IRQn);
-    const uint32_t after = t4_update_calls;
+    Nvic::disable(T::irq());
+    const uint32_t after = calls;
     bench.verdict("A TIMER FLAG STANDS WITH ITS INTERRUPT MASKED and is "
                   "readable by a poller - the EXTI of this same family "
                   "keeps no pending bit for a masked line at all",
                   standing && after == before);
+}
+
+/// The two timers that share ONE line, each at its own rate - and, on a
+/// part whose TIM3 has that line to itself, the same masked-flag question
+/// put to TIM3 instead. Only the SHARING is skipped; nothing else is.
+template <bool present = tim_present(4)>
+void th_shared_line() {
+    if constexpr (present) {
+        using T4 = Tim4<present>;
+        T4::init();
+        (void)T4::configure({.prescaler = 63, .period = 499});    // 2 kHz
+        T4::interrupts(T4::update_interrupt, true);
+        T4::clear_flags(T4::update_flag);
+        T4::enable(true);
+        Nvic::clear_pending(tim_irq(3));
+        Nvic::enable(tim_irq(3));
+        spin_cycles(SysClock::hz / 10u);   // 100 ms
+        Nvic::disable(tim_irq(3));
+        const uint32_t n3 = t3_update_calls;
+        const uint32_t n4 = t4_update_calls;
+        print(serial, "  100 ms on ONE vector: TIM3 (1 kHz) ", n3,
+              " updates, TIM4 (2 kHz) ", n4, crlf);
+        bench.verdict("TWO TIMERS ON ONE VECTOR, each answered by its own ISR "
+                      "body and each at its own rate",
+                      n3 > 90u && n3 < 110u && n4 > 180u && n4 < 220u);
+        bench.verdict("and neither body ever consumed the other's flag",
+                      t3_saw_t4_flag == 0u);
+        masked_flag_leg<T4>(t4_update_calls);
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: two timers answering on ONE "
+              "vector needs a TIM4 to share TIM3's line, and this part has "
+              "not got one (tim_present(4) is false - the reserve finds no "
+              "TIM4_BASE, and so names this line TIM3's alone). The masked "
+              "flag below is asked of TIM3 instead: the claim is about A "
+              "timer, not about that one.",
+              crlf);
+        Nvic::clear_pending(tim_irq(3));
+        Nvic::enable(tim_irq(3));
+        spin_cycles(SysClock::hz / 10u);
+        Nvic::disable(tim_irq(3));
+        print(serial, "  100 ms on TIM3's own vector: ", t3_update_calls,
+              " updates at 1 kHz", crlf);
+        masked_flag_leg<T3>(t3_update_calls);
+    }
+}
+
+void th_vectors() {
+    clear_counts();
+    T3::init();
+    (void)T3::configure({.prescaler = 63, .period = 999});    // 1 kHz
+    T3::interrupts(T3::update_interrupt, true);
+    T3::clear_flags(T3::update_flag);
+    T3::enable(true);
+    th_shared_line();
 
     // TIM1's TWO vectors: an update on one, a compare on the other.
     T1::init();
@@ -1770,6 +1869,85 @@ bool instance_counts_and_interrupts(const char* name, volatile uint32_t& calls) 
     return cfg && cfg2 && off <= 20u && n >= 19u && n <= 21u;
 }
 
+/// Question 1 and 2 put to TIM4: does it count PCLK at its prescaler, and
+/// does its update reach the vector the reserve names?
+template <bool present = tim_present(4)>
+void tl_tim4_counts() {
+    if constexpr (present) {
+        const bool t4_ok =
+            instance_counts_and_interrupts<Tim4<present>>("TIM4", t4_update_calls);
+        bench.verdict("TIM4 counts PCLK at its prescaler and its update reaches "
+                      "the vector it SHARES with TIM3",
+                      t4_ok);
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: TIM4's counter and its update "
+              "interrupt need a TIM4, which this part has not got "
+              "(tim_present(4) is false). The census below is therefore of "
+              "FIVE instances and not six.",
+              crlf);
+    }
+}
+
+/// Question 3 put to TIM4: FOUR channels driving four pads at four
+/// different duties in one period, all on port B and therefore all in one
+/// sampling loop's reach - so a channel wired to the wrong CCR shows up as
+/// the wrong number and not as no number.
+template <bool present = tim_present(4)>
+void tl_tim4_pwm() {
+    if constexpr (present) {
+        using T4 = Tim4<present>;
+        T4::init();
+        const bool t4_cfg = T4::configure({.prescaler = 0, .period = pwm_top,
+                                           .auto_reload_preload = true});
+        TimPad<t4_ch1_pad>::claim();
+        TimPad<t4_ch2_pad>::claim();
+        TimPad<t4_ch3_pad>::claim();
+        TimPad<t4_ch4_pad>::claim();
+        const uint16_t t4_asks[4] = {200, 400, 600, 800};
+        bool t4_channels = t4_cfg;
+        for (uint8_t ch = 0; ch < 4u; ++ch) {
+            t4_channels = t4_channels &&
+                          T4::output_channel(ch, {.mode = TimOutputMode::pwm1,
+                                                  .compare = t4_asks[ch]});
+        }
+        T4::enable(true);
+        spin_cycles(SysClock::hz / 1000u);
+        uint16_t t4_got[4];
+        t4_got[0] = sample_permille_b(6, 40000u);
+        t4_got[1] = sample_permille_b(7, 40000u);
+        t4_got[2] = sample_permille_b(8, 40000u);
+        t4_got[3] = sample_permille_b(9, 40000u);
+        print(serial, "  TIM4 at 64 kHz, four channels at once: PB6 ", t4_got[0],
+              " PB7 ", t4_got[1], " PB8 ", t4_got[2], " PB9 ", t4_got[3],
+              " per mille, asked 200/400/600/800", crlf);
+        bool t4_duties = t4_channels;
+        for (uint8_t i = 0; i < 4u; ++i) {
+            const int32_t err = static_cast<int32_t>(t4_got[i]) -
+                                static_cast<int32_t>(t4_asks[i]);
+            if (err > 25 || err < -25) {
+                t4_duties = false;
+            }
+        }
+        bench.verdict("TIM4's four channels drive four pads at four different "
+                      "duties in one period - the reserve's channel count for "
+                      "it is the silicon's",
+                      t4_duties);
+        T4::release();
+        PadB6::input(PinPull::none);
+        PadB7::input(PinPull::none);
+        PadB8::input(PinPull::none);
+        PadB9::input(PinPull::none);
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: four channels at four duties on "
+              "PB6/PB7/PB8/PB9 at AF9 need a TIM4, which this part has not got "
+              "(tim_present(4) is false). No other timer of this package "
+              "reaches those four pads at once.",
+              crlf);
+    }
+}
+
 void tl_six_instances() {
     quiet_everything();
     clear_counts();
@@ -1806,10 +1984,7 @@ void tl_six_instances() {
                   rd_released && b6 && b7 && b8 && b9 && b13 && b14 && b15);
 
     // QUESTIONS 1 AND 2, instance by instance.
-    const bool t4_ok = instance_counts_and_interrupts<T4>("TIM4", t4_update_calls);
-    bench.verdict("TIM4 counts PCLK at its prescaler and its update reaches "
-                  "the vector it SHARES with TIM3",
-                  t4_ok);
+    tl_tim4_counts();
     const bool t6_ok = instance_counts_and_interrupts<T6>("TIM6", t6_update_calls);
     bench.verdict("TIM6, a basic timer with no channel at all, counts and "
                   "reports on the line it shares with the DAC and LPTIM1",
@@ -1858,50 +2033,7 @@ void tl_six_instances() {
 
     // QUESTION 3: A PWM ON A PAD, per instance with channels.
     //
-    // TIM4's FOUR, all on port B and therefore all in one sampling loop's
-    // reach. Four different duties at once, so a channel wired to the
-    // wrong CCR shows up as the wrong number and not as no number.
-    T4::init();
-    const bool t4_cfg = T4::configure({.prescaler = 0, .period = pwm_top,
-                                       .auto_reload_preload = true});
-    TimPad<t4_ch1_pad>::claim();
-    TimPad<t4_ch2_pad>::claim();
-    TimPad<t4_ch3_pad>::claim();
-    TimPad<t4_ch4_pad>::claim();
-    const uint16_t t4_asks[4] = {200, 400, 600, 800};
-    bool t4_channels = t4_cfg;
-    for (uint8_t ch = 0; ch < 4u; ++ch) {
-        t4_channels = t4_channels &&
-                      T4::output_channel(ch, {.mode = TimOutputMode::pwm1,
-                                              .compare = t4_asks[ch]});
-    }
-    T4::enable(true);
-    spin_cycles(SysClock::hz / 1000u);
-    uint16_t t4_got[4];
-    t4_got[0] = sample_permille_b(6, 40000u);
-    t4_got[1] = sample_permille_b(7, 40000u);
-    t4_got[2] = sample_permille_b(8, 40000u);
-    t4_got[3] = sample_permille_b(9, 40000u);
-    print(serial, "  TIM4 at 64 kHz, four channels at once: PB6 ", t4_got[0],
-          " PB7 ", t4_got[1], " PB8 ", t4_got[2], " PB9 ", t4_got[3],
-          " per mille, asked 200/400/600/800", crlf);
-    bool t4_duties = t4_channels;
-    for (uint8_t i = 0; i < 4u; ++i) {
-        const int32_t err = static_cast<int32_t>(t4_got[i]) -
-                            static_cast<int32_t>(t4_asks[i]);
-        if (err > 25 || err < -25) {
-            t4_duties = false;
-        }
-    }
-    bench.verdict("TIM4's four channels drive four pads at four different "
-                  "duties in one period - the reserve's channel count for it "
-                  "is the silicon's",
-                  t4_duties);
-    T4::release();
-    PadB6::input(PinPull::none);
-    PadB7::input(PinPull::none);
-    PadB8::input(PinPull::none);
-    PadB9::input(PinPull::none);
+    tl_tim4_pwm();
 
     // TIM14's ONE, on PA7 at AF4 - the same pad letter g drives as
     // TIM1_CH1N at AF2, which is what makes the alternate-function
@@ -1993,7 +2125,7 @@ void tl_six_instances() {
           t17_want_b, ")", crlf);
     bench.verdict("TIM17's pair too - one channel, one complement, never both "
                   "high, and both halves at their own duty less the dead time, "
-                  "on the last of the six instances that had never driven "
+                  "on the last of the instances that had never driven "
                   "anything here",
                   t17_up && t17c.both_high == 0u &&
                       t17_a + 20u >= t17_want_a && t17_a <= t17_want_a + 20u &&
@@ -2010,7 +2142,7 @@ void tl_six_instances() {
 // =============================================================================
 void banner() {
     print(serial, crlf,
-          "test_stm32_tim - STM32G0B1RE timers (RM0444 ch. 21..25): PwmChannel "
+          "test_stm32_tim - the G0 timers (RM0444 ch. 21..25): PwmChannel "
           "and MeterSampler on the third silicon, wireless, clk=",
           SysClock::hz, " Hz", crlf);
     bench.menu();
@@ -2025,7 +2157,7 @@ void banner() {
 // not a letter is using it. SHARED VECTORS ARE THE RULE on this family
 // (RM0444 table 61), so a handler calls one ISR BODY per owner and each
 // answers for its own flags only.
-extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
+extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
@@ -2066,7 +2198,21 @@ extern "C" void TIM2_IRQHandler() {
 /// The shared line, and letter h's question: each body reads its own
 /// timer, so TIM3's can neither see nor consume TIM4's flags. What is
 /// recorded is whether it ever did.
-extern "C" void TIM3_TIM4_IRQHandler() {
+/// One vector, two timers - where the part has two. The body serves TIM4
+/// only where there is one; the reserve's macro is what names the line,
+/// so the same source binds TIM3_TIM4_IRQHandler on a G0B1 and
+/// TIM3_IRQHandler on a part whose TIM3 has the line to itself.
+template <bool present = tim_present(4)>
+void serve_tim4() {
+    if constexpr (present) {
+        const uint32_t f4 = Tim4<present>::isr();
+        if ((f4 & Tim4<present>::update_flag) != 0u) {
+            t4_update_calls = t4_update_calls + 1u;
+        }
+    }
+}
+
+extern "C" void BRIO_STM32G0_TIM3_HANDLER() {
     const uint32_t f3 = T3::isr();
     if ((f3 & T3::update_flag) != 0u) {
         t3_update_calls = t3_update_calls + 1u;
@@ -2074,10 +2220,7 @@ extern "C" void TIM3_TIM4_IRQHandler() {
     if ((f3 & ~(T3::update_flag | T3::compare_flag(0))) != 0u) {
         t3_saw_t4_flag = t3_saw_t4_flag + 1u;
     }
-    const uint32_t f4 = T4::isr();
-    if ((f4 & T4::update_flag) != 0u) {
-        t4_update_calls = t4_update_calls + 1u;
-    }
+    serve_tim4();
 }
 
 /// Letter l's four other lines. Two of them are shared with something
@@ -2109,7 +2252,7 @@ extern "C" void TIM15_IRQHandler() {
     }
 }
 
-extern "C" void TIM17_FDCAN_IT1_IRQHandler() {
+extern "C" void BRIO_STM32G0_TIM17_HANDLER() {
     if ((T17::isr() & T17::update_flag) != 0u) {
         t17_update_calls = t17_update_calls + 1u;
     }
@@ -2118,7 +2261,7 @@ extern "C" void TIM17_FDCAN_IT1_IRQHandler() {
 /// TIM16's line is shared with an FDCAN one. In letter j the capture
 /// feeds a util MeterLatch; everywhere else it is only counted, so the
 /// reading is taken either way and `kernel_mode` says where it goes.
-extern "C" void TIM16_FDCAN_IT0_IRQHandler() {
+extern "C" void BRIO_STM32G0_TIM16_HANDLER() {
     const uint32_t f = T16::isr();
     if ((f & LsiMeter::capture_flag) != 0u) {
         t16_captures = t16_captures + 1u;
@@ -2162,11 +2305,14 @@ int main() {
     bench.letter('j', "MeterSampler inside a real kernel, fed by a capture ISR",
                  tj_meter_ao);
     bench.letter('k', "ES0548 2.7.2 staged with a control", tk_errata);
-    bench.letter('l', "the six instances never counted here: TIM4, TIM6, "
-                      "TIM7, TIM14, TIM15, TIM17",
+    bench.letter('l', "the instances never counted here: TIM6, TIM7, TIM14, "
+                      "TIM15, TIM17 and a TIM4 where the part has one",
                  tl_six_instances);
 
     if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        brio::print(serial, brio::crlf, "part DEV_ID ", brio::hex(idcode.dev_id),
+              " REV_ID ", brio::hex(idcode.rev_id), brio::crlf);
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL64" : "FAILED",
                     " tick=", tick_ok ? "SysTick" : "FAILED", brio::crlf);
         banner();

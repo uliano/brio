@@ -62,7 +62,7 @@
 //      object receives
 //   u  the user button as a plain input
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -316,10 +316,25 @@ void ta_block() {
                   Exti::implemented(19) && !Exti::configurable(19));
     bench.verdict("line 16 (the PVD) is implemented and CONFIGURABLE",
                   Exti::implemented(16) && Exti::configurable(16));
-    bench.verdict("this part has the second register group (lines 32..36) "
-                  "and line 34 is configurable in it",
-                  Exti::implemented(34) && Exti::configurable(34) &&
-                      exti_rtsr2() != nullptr && exti_imr2() != nullptr);
+    // THE SECOND REGISTER GROUP IS TWO SEPARATE FACTS, and this part may
+    // have one without the other: IMR2/EMR2 exist wherever there are
+    // lines above 31 at all, while RTSR2/FTSR2/SWIER2/RPR2/FPR2 exist
+    // only where one of those lines is CONFIGURABLE - and the reserve
+    // answers each with a POINTER that is null when the register is not
+    // there. The verdict is the reserve's own statement for this part,
+    // and the two probes are the pointers this suite would otherwise
+    // dereference.
+    print(serial, "  second group: IMR2 ", exti_imr2() != nullptr, " RTSR2 ",
+          exti_rtsr2() != nullptr, "; line 34 implemented ",
+          Exti::implemented(34), " configurable ", Exti::configurable(34), crlf);
+    bench.verdict("this part has the second register group's MASK registers "
+                  "wherever it has a line above 31 at all, and its TRIGGER "
+                  "registers exactly where one of those lines is "
+                  "configurable - the reserve answering with a pointer that "
+                  "is null when the register is not there",
+                  exti_imr2() != nullptr &&
+                      (exti_rtsr2() != nullptr) == (exti_configurable_mask2 != 0u) &&
+                      Exti::configurable(34) == ((exti_configurable_mask2 >> 2) & 1u));
 
     // THE RESET VALUES THIS BOOT FOUND, and the first place the manual
     // disagrees with itself. 13.5.12 states the RULE in words - "the
@@ -336,15 +351,35 @@ void ta_block() {
           " = the direct lines), IMR2=", hex(boot_imr2), " (", hex(direct2),
           "), EMR1=", hex(boot_emr1), " RTSR1=", hex(boot_rtsr1),
           " EXTICR1=", hex(boot_exticr0), crlf);
-    bench.verdict("IMR1 came up with EXACTLY the direct lines unmasked - the "
-                  "header's implemented and configurable masks predict the "
-                  "reset value bit for bit, where 13.5.12's printed "
-                  "0xFFF80000 would leave line 20 (COMP3, a CONFIGURABLE "
-                  "line here) unmasked",
-                  boot_imr1 == direct1);
-    bench.verdict("and so did IMR2, where the printed 0x1B and the rule do "
-                  "agree (line 34 is the only configurable one up there)",
-                  boot_imr2 == direct2);
+    // AND THE TWO DIES OF THIS FAMILY TAKE OPPOSITE SIDES OF THAT
+    // DISAGREEMENT, which is why the claim is made over the IMPLEMENTED
+    // bits and the residue is printed beside it. A part whose
+    // EXTI_IMR1_IM_Msk is all ones has no residue and the two readings
+    // are the same statement; a part with fewer lines comes up holding
+    // 13.5.12's PRINTED number, so the bits its header marks
+    // unimplemented read back SET and mean nothing.
+    const uint32_t residue = boot_imr1 & ~exti_implemented_mask1;
+    print(serial, "  IMR1 over the IMPLEMENTED lines: ",
+          hex(boot_imr1 & exti_implemented_mask1), " against ", hex(direct1),
+          "; the unimplemented bits hold ", hex(residue), crlf);
+    bench.verdict("IMR1 came up with EXACTLY the direct lines unmasked among "
+                  "the ones this part IMPLEMENTS - the header's implemented "
+                  "and configurable masks predict the reset value bit for "
+                  "bit, where 13.5.12's PRINTED 0xFFF80000 would leave a "
+                  "configurable line unmasked",
+                  (boot_imr1 & exti_implemented_mask1) == direct1);
+    if (residue != 0u) {
+        print(serial, "  THE PRINTED NUMBER IS WHAT THIS DIE HOLDS: IMR1 "
+              "resets to 13.5.12's own 0xFFF80000 whatever the part's line "
+              "count, so every bit above the implemented mask reads 1 here. "
+              "13.5.12 states a RULE in words and prints a NUMBER beside it; "
+              "the two dies of this family each obey a different one, and "
+              "neither reading changes what an unimplemented mask bit does, "
+              "which is nothing.", crlf);
+    }
+    bench.verdict("and so did IMR2, over the lines this part implements up "
+                  "there",
+                  (boot_imr2 & exti_implemented_mask2) == direct2);
     bench.verdict("EMR1 came up at zero (no CPU event is unmasked)",
                   boot_emr1 == 0u);
     bench.verdict("no trigger was selected before this suite ran",
@@ -1043,7 +1078,7 @@ void tu_button() {
 // =============================================================================
 void banner() {
     print(serial, crlf,
-          "test_stm32_exti - STM32G0B1RE EXTI (RM0444 ch. 13): the pin senses "
+          "test_stm32_exti - the G0 EXTI (RM0444 ch. 13): the pin senses "
           "GPIO does not have, wireless, clk=",
           SysClock::hz, " Hz", crlf);
     bench.menu();
@@ -1056,7 +1091,7 @@ void banner() {
 // An unbound vector here is a SILENT death - the crt's default handler
 // is a spin loop - so all three EXTI vectors are bound, whether or not a
 // letter is using them.
-extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
+extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
@@ -1120,6 +1155,9 @@ int main() {
     bench.letter('u', "the user button as a plain input", tu_button);
 
     if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        brio::print(serial, brio::crlf, "part DEV_ID ", brio::hex(idcode.dev_id),
+              " REV_ID ", brio::hex(idcode.rev_id), brio::crlf);
         brio::print(serial, brio::crlf, "boot: clk=",
                     clock_ok ? "PLL64" : "FAILED", " tick=",
                     tick_ok ? "SysTick" : "FAILED", brio::crlf);

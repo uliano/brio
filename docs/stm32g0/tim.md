@@ -483,6 +483,47 @@ ADC, and `test_stm32_analog` measures both (`tim6_trgo` and `tim7_trgo`
 as converter triggers) - so nothing here pretends to witness a TRGO the
 timer suite has no instrument for.
 
+## On the second silicon
+
+`test_stm32_tim` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
+and scores **114/114** against the G0B1RE's 118, the difference being
+TIM4 and nothing else:
+
+- **NINE TIMERS, NOT TEN.** `tim_present(4)` is false, so `Tim<4>` does
+  not compile there; TIM1, TIM2, TIM3, TIM6, TIM7, TIM14, TIM15, TIM16
+  and TIM17 are every instance and each behaves exactly as on the G0B1.
+- **TIM3 HAS ITS VECTOR TO ITSELF**, which is the reserve's derivation
+  working in the other direction: `tim_irq(3)` is `TIM3_TIM4_IRQn` where
+  the header declares a TIM4 and `TIM3_IRQn` where it does not, and the
+  handler is bound through `BRIO_STM32G0_TIM3_HANDLER`. Likewise TIM16
+  and TIM17, whose lines carry no FDCAN interrupt on a part with no FDCAN
+  (`BRIO_STM32G0_TIM16_HANDLER` / `..._TIM17_HANDLER`). Letter h's
+  two-timers-on-one-vector demonstration skips; the masked-flag claim
+  beside it is about A timer and is put to TIM3 instead.
+- **Letter l's census is of five instances.** TIM4's counter, its update
+  interrupt and its four channels on PB6..PB9 at AF9 all skip; no other
+  timer of this package reaches those four pads at once.
+- LSI, captured on TIM16's TISEL with no pad anywhere, measures **32323
+  Hz** on this die against the G0B1's 32586 - both inside DS13560 table
+  46's 29.5..34 kHz window, and both the oscillator's own number rather
+  than the capture's.
+
+**ONE PER-PART TABLE CELL THIS CAMPAIGN ADDED TO THE RESERVE**, because a
+suite fell into it: RM0444 22.4.25's ETRSEL list gives codes 0100 (MCO),
+0101 (MCO2) and 0110 (COMP3) to the G0B1/G0C1 sales types ALONE, while
+0011 (LSE) is every part's. `tim_etrsel_has_mco(n)` states it, probed
+through `RCC_CFGR_MCO2SEL_Pos` - the second clock output that same class
+has. Nothing in any TIM register differs between the headers (one
+`TIM_TypeDef` serves every instance on every part), so a timer told to
+take MCO on a smaller part simply does not count, in silence.
+
+ES0418 2.8.6 (TIM16/TIM17 clocked by SYSCLK rather than TIMPCLK) is
+UNOBSERVABLE here by construction: this stratum pins HPRE and PPRE at 1,
+so SYSCLK and TIMPCLK are the same clock. 2.8.4 (bidirectional break with
+short pulses) and 2.8.5 (a sync trigger missed with a faster master
+clock) are not reached: no letter sets BKBID, and one clock feeds every
+timer.
+
 ## Not covered yet
 
 Driver gaps: encoder and hall-sensor modes (`SMS` 1..3 are spelled and refused
@@ -504,3 +545,7 @@ ES0548 2.7.1's own workaround; `BDTR.LOCK`, which is one-way and would
 cost a peripheral reset to undo; `OSSR`/`OSSI` other than clear;
 `CR1.UIFREMAP` and `count_update_flag()`; the capture polarity `both`;
 and every `TISEL` code but TIM16's LSI.
+
+On the second silicon (the Nucleo-G071RB), NOT COVERED: **TIM4** in every
+respect - it does not exist there - and with it the two-timers-on-one-vector
+demonstration. Everything else of this chapter is measured on both.

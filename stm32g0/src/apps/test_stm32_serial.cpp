@@ -92,7 +92,7 @@
 //   w  WAKE FROM STOP, and ES0548 2.2.4 staged (uart_stress)
 //   v  the console moved to LPUART1 on its own pads (uart_stress)
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -176,7 +176,32 @@ using Lp2Pin = Pin<'C', 6>;
 
 using U1 = Usart<1>;
 using L1 = Lpuart<1>;
-using L2 = Lpuart<2>;
+// LPUART2 is the G0B1/G0C1 class's alone. A part without it must not
+// SPELL `Lpuart<2>` (the driver's static_assert is the refusal), and
+// `if constexpr` inside a plain function still instantiates the branch it
+// discards - while a NON-DEPENDENT `Lpuart<2>` inside a template body is
+// looked up when the template is DEFINED. So the instance NUMBER depends
+// on the reserve fact that gates every branch that names it.
+template <bool present>
+using Lpuart2 = Lpuart<present ? uint8_t{2} : uint8_t{1}>;
+
+template <bool present = lpuart_present(2)>
+bool lpuart2_shares_usart2() {
+    if constexpr (present) {
+        return Lpuart2<present>::irq() == usart_irq(2);
+    } else {
+        return true;
+    }
+}
+
+template <bool present = lpuart_present(2)>
+bool lpuart2_exti_35() {
+    if constexpr (present) {
+        return Lpuart2<present>::exti_line == 35;
+    } else {
+        return true;
+    }
+}
 
 // The task instantiations this suite drives. The DEFAULT one is what
 // every console in the tree uses; the others are the option struct at
@@ -677,83 +702,121 @@ void print_row(const char* name, const InstanceReading& r, bool claim_fifo,
           claim_sync ? "yes" : "no ", ")  mux ", r.mux ? "yes" : "no ", crlf);
 }
 
+/// One row of table 183, read off the silicon - or, on an instance this
+/// part has not got, an EMPTY row that is counted nowhere and printed as
+/// "absent". `Usart<n>` is dependent on the template parameter here, so
+/// the branch the reserve discards is never instantiated.
+struct TableRow {
+    const char* name;
+    InstanceReading r;
+    bool present;
+    bool fifo;     ///< the reserve's stated column
+    bool presc;    ///< the reserve's stated column
+    bool header;   ///< the device header's own IS_UART_FIFO_INSTANCE
+    bool sync;     ///< the reserve's stated column
+    bool is_lpuart;
+};
+
+template <uint8_t n, bool present = usart_present(n)>
+TableRow usart_row(const char* name) {
+    if constexpr (present) {
+        using U = Usart<n>;
+        return {name, probe_instance<U>(), true, U::is_full, U::has_prescaler,
+                U::has_fifo(), U::has_synchronous_mode, false};
+    } else {
+        return {name, InstanceReading{}, false, false, false, false, false, false};
+    }
+}
+
+template <uint8_t n, bool present = lpuart_present(n)>
+TableRow lpuart_row(const char* name) {
+    if constexpr (present) {
+        using L = Lpuart<n>;
+        return {name, probe_instance<L>(), true, L::has_fifo_mode,
+                L::has_prescaler, L::has_fifo(), L::has_synchronous_mode, true};
+    } else {
+        return {name, InstanceReading{}, false, false, false, false, false, true};
+    }
+}
+
 void ta_instances() {
     feed();
-    print(serial, "  RM0444 table 183 on this part (G0B1): USART1..3 FULL, "
-                  "USART4..6 BASIC, LPUART1 and LPUART2 LP", crlf);
+    print(serial, "  RM0444 table 183 read off THIS part: the reserve's "
+                  "usart_is_full / usart_present / lpuart_present columns, "
+                  "checked against the device header and the silicon", crlf);
 
     uint8_t agree = 0;
     uint8_t rows = 0;
-    bool all_agree = true;
 
-    const InstanceReading r1 = probe_instance<Usart<1>>();
-    print_row("USART1", r1, Usart<1>::is_full, Usart<1>::has_prescaler,
-              Usart<1>::has_fifo(), Usart<1>::has_synchronous_mode);
+    TableRow rowset[8] = {};
+    rowset[0] = usart_row<1>("USART1");
     // USART2 IS THE CONSOLE, and the probe resets it. The lines are
     // drained first, the instance is walked like any other, and the
     // console is brought straight back up - which is why the rest of
     // this letter arriving at all is the reading's own witness.
     console_drain();
-    const InstanceReading r2 = probe_instance<Usart<2>>();
+    rowset[1] = usart_row<2>("USART2");
     (void)Serial::init(clock, 115200);
     spin_us(2000);
-    print_row("USART2", r2, Usart<2>::is_full, Usart<2>::has_prescaler,
-              Usart<2>::has_fifo(), Usart<2>::has_synchronous_mode);
-    const InstanceReading r3 = probe_instance<Usart<3>>();
-    print_row("USART3", r3, Usart<3>::is_full, Usart<3>::has_prescaler,
-              Usart<3>::has_fifo(), Usart<3>::has_synchronous_mode);
-    const InstanceReading r4 = probe_instance<Usart<4>>();
-    print_row("USART4", r4, Usart<4>::is_full, Usart<4>::has_prescaler,
-              Usart<4>::has_fifo(), Usart<4>::has_synchronous_mode);
-    const InstanceReading r5 = probe_instance<Usart<5>>();
-    print_row("USART5", r5, Usart<5>::is_full, Usart<5>::has_prescaler,
-              Usart<5>::has_fifo(), Usart<5>::has_synchronous_mode);
-    const InstanceReading r6 = probe_instance<Usart<6>>();
-    print_row("USART6", r6, Usart<6>::is_full, Usart<6>::has_prescaler,
-              Usart<6>::has_fifo(), Usart<6>::has_synchronous_mode);
-    const InstanceReading l1 = probe_instance<Lpuart<1>>();
-    print_row("LPUART1", l1, Lpuart<1>::has_fifo_mode, Lpuart<1>::has_prescaler,
-              Lpuart<1>::has_fifo(), Lpuart<1>::has_synchronous_mode);
-    const InstanceReading l2 = probe_instance<Lpuart<2>>();
-    print_row("LPUART2", l2, Lpuart<2>::has_fifo_mode, Lpuart<2>::has_prescaler,
-              Lpuart<2>::has_fifo(), Lpuart<2>::has_synchronous_mode);
+    rowset[2] = usart_row<3>("USART3");
+    rowset[3] = usart_row<4>("USART4");
+    rowset[4] = usart_row<5>("USART5");
+    rowset[5] = usart_row<6>("USART6");
+    rowset[6] = lpuart_row<1>("LPUART1");
+    rowset[7] = lpuart_row<2>("LPUART2");
 
-    struct Row { InstanceReading r; bool fifo; bool presc; bool header; };
-    const Row rowset[] = {
-        {r1, Usart<1>::is_full, Usart<1>::has_prescaler, Usart<1>::has_fifo()},
-        {r2, Usart<2>::is_full, Usart<2>::has_prescaler, Usart<2>::has_fifo()},
-        {r3, Usart<3>::is_full, Usart<3>::has_prescaler, Usart<3>::has_fifo()},
-        {r4, Usart<4>::is_full, Usart<4>::has_prescaler, Usart<4>::has_fifo()},
-        {r5, Usart<5>::is_full, Usart<5>::has_prescaler, Usart<5>::has_fifo()},
-        {r6, Usart<6>::is_full, Usart<6>::has_prescaler, Usart<6>::has_fifo()},
-        {l1, Lpuart<1>::has_fifo_mode, Lpuart<1>::has_prescaler, Lpuart<1>::has_fifo()},
-        {l2, Lpuart<2>::has_fifo_mode, Lpuart<2>::has_prescaler, Lpuart<2>::has_fifo()},
-    };
+    for (const TableRow& row : rowset) {
+        if (!row.present) {
+            print(serial, "  ", row.name, ": absent on this part", crlf);
+            continue;
+        }
+        print_row(row.name, row.r, row.fifo, row.presc, row.header, row.sync);
+    }
+
     uint8_t fifo_agree = 0;
-    for (const Row& row : rowset) {
+    uint8_t basic_dropped = 0;
+    uint8_t basic_rows = 0;
+    bool sync_agrees = true;
+    bool mux_agrees = true;
+    for (const TableRow& row : rowset) {
+        if (!row.present) {
+            continue;
+        }
         ++rows;
         if (row.r.fifo_sticks == row.fifo && row.header == row.fifo) {
             ++fifo_agree;
         }
-        const bool ok = row.r.fifo_sticks == row.fifo &&
-                        row.r.presc_sticks == row.presc && row.header == row.fifo;
-        if (ok) {
+        if (row.r.fifo_sticks == row.fifo &&
+            row.r.presc_sticks == row.presc && row.header == row.fifo) {
             ++agree;
-        } else {
-            all_agree = false;
+        }
+        if (!row.is_lpuart && !row.fifo) {
+            ++basic_rows;
+            if (!row.r.fifo_sticks) {
+                ++basic_dropped;
+            }
+        }
+        // The CK output belongs to every USART and to no LPUART.
+        if (row.r.clken_sticks != !row.is_lpuart) {
+            sync_agrees = false;
+        }
+        // And the kernel-clock multiplexer to the FULL USARTs and the
+        // LPUARTs - which is exactly the reserve's own column.
+        if (row.r.mux != (row.is_lpuart ? (lpuart_clock_select_pos(1) != 0xFFu)
+                                        : row.fifo)) {
+            mux_agrees = false;
         }
     }
-    (void)all_agree;
     print(serial, "  ", agree, " of ", rows,
-          " instances agree with the reserve's stated table, the device "
-          "header's own IS_UART_FIFO_INSTANCE and the silicon on BOTH counts",
-          crlf);
+          " instances this part HAS agree with the reserve's stated table, the "
+          "device header's own IS_UART_FIFO_INSTANCE and the silicon on BOTH "
+          "counts", crlf);
     bench.verdict("table 183's FULL/BASIC/LP split is the silicon's for the "
                   "FIFO, on every instance of this part - three authorities, "
                   "one answer", fifo_agree == rows);
     bench.verdict("and a BASIC instance really does DROP the FIFO enable "
                   "rather than taking it",
-                  !r4.fifo_sticks && !r5.fifo_sticks && !r6.fifo_sticks);
+                  basic_rows != 0u && basic_dropped == basic_rows);
 
     // THE ROW THAT IS NOT THE FULL/BASIC SPLIT, and the reason the
     // driver states it separately from is_full: table 184 gives
@@ -764,13 +827,10 @@ void ta_instances() {
     // neither synchronous nor smartcard mode is supported. So the CK
     // output belongs to every USART of this part - and the silicon
     // agrees, which is the third authority.
-    const bool sync_agrees =
-        r1.clken_sticks && r2.clken_sticks && r3.clken_sticks &&
-        r4.clken_sticks && r5.clken_sticks && r6.clken_sticks &&
-        !l1.clken_sticks && !l2.clken_sticks;
-    print(serial, "  CR2.CLKEN sticks on all six USARTs including the three "
-                  "BASIC ones, and on NEITHER LPUART - so the synchronous row "
-                  "of table 184 cuts USART-vs-LPUART, not FULL-vs-BASIC", crlf);
+    print(serial, "  CR2.CLKEN sticks on EVERY USART this part has, the "
+                  "BASIC ones included, and on NO LPUART - so the synchronous "
+                  "row of table 184 cuts USART-vs-LPUART, not FULL-vs-BASIC",
+          crlf);
     bench.verdict("the CK output is every USART's and no LPUART's - the one "
                   "row of table 184 that is not the FULL/BASIC split, agreed "
                   "by the manual, the device header and the silicon",
@@ -784,9 +844,10 @@ void ta_instances() {
     // follows measures a zero character's low time on the pad, which is
     // start + eight zero bits = nine bit times, with the same BRR and
     // two different prescaler codes.
-    print(serial, "  PRESC[3:0] took 0xB and read it back on ALL SIX USARTs, "
-                  "including the three table 184 says have no prescaler. "
-                  "Whether it DIVIDES is another question:", crlf);
+    print(serial, "  PRESC[3:0] took 0xB and read it back on EVERY USART of "
+                  "this part, the BASIC ones table 184 says have no "
+                  "prescaler included. Whether it DIVIDES is another "
+                  "question:", crlf);
     const ZeroLow full1 = zero_low_cycles<Usart<1>, TxPin>(u1_tx, 640,
                                                           UsartPrescaler::div1);
     const ZeroLow full16 = zero_low_cycles<Usart<1>, TxPin>(u1_tx, 640,
@@ -846,10 +907,10 @@ void ta_instances() {
 
     // The kernel-clock multiplexers, and what a multiplexer-less instance
     // answers when asked for anything but PCLK.
-    bench.verdict("the kernel-clock multiplexer is USART1..3's here, and the "
-                  "LPUARTs' - every one of them",
-                  r1.mux && r2.mux && r3.mux && !r4.mux && !r5.mux && !r6.mux &&
-                      l1.mux && l2.mux);
+    bench.verdict("the kernel-clock multiplexer is every FULL USART's and "
+                  "every LPUART's, and no BASIC instance's - the reserve's "
+                  "column, the silicon's answer",
+                  mux_agrees);
     Usart<4>::bus_clock(true);
     const bool pclk_ok = Usart<4>::kernel_clock(UsartClock::pclk);
     const bool hsi_refused = !Usart<4>::kernel_clock(UsartClock::hsi16);
@@ -859,19 +920,31 @@ void ta_instances() {
                   "does not exist", pclk_ok && hsi_refused);
 
     // The vectors, off the reserve.
-    bench.verdict("the vectors are the shared ones of this part: USART2 with "
-                  "LPUART2, and USART3..6 with LPUART1",
-                  Usart<2>::irq() == USART2_LPUART2_IRQn &&
-                      Lpuart<2>::irq() == USART2_LPUART2_IRQn &&
-                      Usart<3>::irq() == USART3_4_5_6_LPUART1_IRQn &&
-                      Usart<6>::irq() == USART3_4_5_6_LPUART1_IRQn &&
-                      Lpuart<1>::irq() == USART3_4_5_6_LPUART1_IRQn);
-    bench.verdict("and the wake-up EXTI lines are table 65's: 25, 26 and 24 "
-                  "for USART1..3, 28 and 35 for the LPUARTs, and nothing at "
-                  "all for a BASIC instance",
+    print(serial, "  vectors: USART1 ", static_cast<int32_t>(usart_irq(1)),
+          ", USART2 ", static_cast<int32_t>(usart_irq(2)), ", USART3 ",
+          static_cast<int32_t>(usart_irq(3)), ", USART4 ",
+          static_cast<int32_t>(usart_irq(4)), ", LPUART1 ",
+          static_cast<int32_t>(lpuart_irq(1)), crlf);
+    bench.verdict("the vectors are the SHARED ones of this part: USART1 alone, "
+                  "USART2 with an LPUART2 where the part has one, and every "
+                  "remaining USART with LPUART1 - each name derived from what "
+                  "the header declares beside it",
+                  usart_irq(1) == USART1_IRQn && usart_irq(1) != usart_irq(2) &&
+                      usart_irq(3) == usart_irq(4) &&
+                      lpuart_irq(1) == usart_irq(3) && lpuart2_shares_usart2());
+    print(serial, "  wake lines: USART1 ", Usart<1>::exti_line, " USART2 ",
+          Usart<2>::exti_line, " USART3 ", Usart<3>::exti_line, " USART4 ",
+          Usart<4>::exti_line, " LPUART1 ", Lpuart<1>::exti_line,
+          " (0xFF = none)", crlf);
+    bench.verdict("and the wake-up EXTI lines are table 65's - 25, 26 and 24 "
+                  "for USART1..3 - with the line following the FULL/BASIC "
+                  "COLUMN and not the instance number: an instance this part "
+                  "makes BASIC has no wake line at all, 28 is LPUART1's and "
+                  "35 an LPUART2's",
                   Usart<1>::exti_line == 25 && Usart<2>::exti_line == 26 &&
-                      Usart<3>::exti_line == 24 && Usart<4>::exti_line == 0xFF &&
-                      Lpuart<1>::exti_line == 28 && Lpuart<2>::exti_line == 35);
+                      Usart<3>::exti_line == (Usart<3>::is_full ? 24u : 0xFFu) &&
+                      Usart<4>::exti_line == 0xFF &&
+                      Lpuart<1>::exti_line == 28 && lpuart2_exti_35());
 
     // The console must still be alive: every instance above was reset.
     print(serial, "  (the console is USART2 and this letter reset it - these "
@@ -2122,6 +2195,13 @@ bool edge_counter_up(uint8_t line, char port, DmaMuxEdge edge) {
                                                       : ExtiSense::falling)) {
         return false;
     }
+    // BOTH MASKS, and the boot probe below says why: on one die of this
+    // family the DMAMUX's trigger input follows the EXTI's INTERRUPT
+    // output and not its event output, so a line whose IMR bit is clear
+    // triggers nothing. The NVIC line is never enabled by this suite, so
+    // an unmasked EXTI dispatches nothing either way.
+    (void)Exti::interrupt(line, true);
+    (void)Exti::event(line, true);
     (void)Exti::clear(line);
     if (!Gen0::configure(dmamux_trigger_exti(line), edge, 1)) {
         return false;
@@ -2152,8 +2232,156 @@ void edge_counter_down(uint8_t line) {
     Gen0::enable(false);
     Gen0::release();
     EdgeCh::stop();
+    (void)Exti::interrupt(line, false);
+    (void)Exti::event(line, false);
     (void)Exti::sense(line, ExtiSense::none);
     (void)Exti::release(line);
+}
+
+// ---- IS THE INSTRUMENT THERE AT ALL, AND WHAT DOES IT NEED? ----------------
+// Four letters below count edges with the arrangement above, and ES0418
+// 2.2.4 (STM32G071/G081 revision B, "no workaround") says the
+// EXTI-related DMAMUX synchronization and trigger inputs are routed to
+// the EXTI's per-line INTERRUPT output `it_exti_per(y)` instead of to
+// `exti[15:0]`. That is a testable difference and not a dead path: a
+// signal taken off the interrupt output arrives only while the line's
+// IMR bit is SET, where one taken off the event output does not care.
+// So the question is put to the SILICON at boot, on PB3 - a pad this
+// board drives itself, with the far end of its jumper in analog - with
+// a REAL edge as the stimulus and the channel's own CNDTR as the
+// witness, in both arrangements. The NVIC line is never enabled, so an
+// unmasked EXTI dispatches nothing.
+bool exti_dma_ok = false;         ///< the counter works with both masks armed
+bool exti_dma_needs_imr = false;  ///< ...and ONLY with the interrupt mask
+
+/// Toggle PB3 `n` times as a plain output and say how many words moved.
+uint32_t edge_probe_pulses(uint8_t n) {
+    using Pb3 = Pin<'B', 3>;
+    const uint32_t before = edge_count_reset();
+    for (uint8_t i = 0; i < n; ++i) {
+        Pb3::output(false);
+        spin_us(300);
+        Pb3::set();
+        spin_us(300);
+    }
+    Pb3::input(PinPull::none);
+    return edge_count_reset() - before;
+}
+
+void probe_exti_dma_trigger() {
+    using Pb3 = Pin<'B', 3>;
+    // THE DMAMUX IS CLOCKED BY DMA1's AHB ENABLE: a generator configured
+    // through a closed gate is configured nowhere (this probe's own first
+    // version measured that instead of the silicon).
+    Dma1::bus_clock(true);
+    // The EVENT side alone.
+    (void)Exti::sense(3, ExtiSense::none);
+    if (!Exti::select(3, 'B') || !Exti::sense(3, ExtiSense::rising)) {
+        return;
+    }
+    (void)Exti::interrupt(3, false);
+    (void)Exti::event(3, true);
+    (void)Exti::clear(3);
+    if (!Gen0::configure(dmamux_trigger_exti(3), DmaMuxEdge::rising, 1)) {
+        return;
+    }
+    if (!EdgeCh::prepare(DmaTransfer{
+            .peripheral = const_cast<uint32_t*>(&edge_source),
+            .memory = &edge_sink,
+            .count = 60000,
+            .config = {.direction = DmaDirection::peripheral_to_memory,
+                       .peripheral_increment = false,
+                       .memory_increment = false,
+                       .peripheral_width = DmaWidth::word,
+                       .memory_width = DmaWidth::word}})) {
+        return;
+    }
+    Pb3::output(true);
+    DmaMux::request(EdgeCh::mux_channel, Gen0::request_id);
+    (void)EdgeCh::enable(true);
+    Gen0::enable(true);
+    const uint32_t on_event = edge_probe_pulses(4);
+    // And with the INTERRUPT mask armed as well.
+    Pb3::output(true);
+    (void)Exti::interrupt(3, true);
+    (void)Exti::clear(3);
+    const uint32_t on_interrupt = edge_probe_pulses(4);
+    // THE CONTROL THAT TELLS A DEAD PROBE FROM A DEAD PATH, two ways.
+    // First: does the EXTI itself see the pad? Its own rising pending
+    // bit is the witness, and it is set by the same edges that moved
+    // nothing. Second: a SOFTWARE event on the same line, same
+    // generator, same channel - the stimulus the dma suite uses.
+    Pb3::output(true);
+    (void)Exti::clear(3);
+    Pb3::output(false);
+    spin_us(300);
+    Pb3::set();
+    spin_us(300);
+    const bool exti_saw_the_pad = Exti::rising_pending(3);
+    (void)Exti::clear(3);
+    Pb3::input(PinPull::none);
+    const uint32_t before_sw = edge_count_reset();
+    for (uint8_t i = 0; i < 4u; ++i) {
+        (void)Exti::trigger(3);
+        spin_us(300);
+        (void)Exti::clear(3);
+    }
+    const uint32_t on_swier = edge_count_reset() - before_sw;
+    Gen0::enable(false);
+    Gen0::release();
+    EdgeCh::stop();
+    (void)Exti::interrupt(3, false);
+    (void)Exti::event(3, false);
+    (void)Exti::sense(3, ExtiSense::none);
+    (void)Exti::release(3);
+    Pb3::input(PinPull::none);
+    exti_dma_ok = on_interrupt >= 4u;
+    exti_dma_needs_imr = exti_dma_ok && on_event < 4u;
+    const auto id = brio::DeviceIdcode::read();
+    print(serial, crlf, "probe: four PB3 edges into a DMAMUX request "
+          "generator moved ", on_event, " words with the EVENT mask alone, ",
+          on_interrupt, " with the INTERRUPT mask armed too; the EXTI's own "
+          "rising pending bit did ", exti_saw_the_pad ? "" : "NOT ",
+          "see those edges; four SOFTWARE events on the same line, same "
+          "generator, same channel moved ", on_swier, crlf);
+    if (!exti_dma_ok && exti_saw_the_pad && on_swier >= 4u) {
+        print(serial, "ES0418 2.2.4 REPRODUCED WITH ITS CONTROL on DEV_ID ",
+              hex(id.dev_id), " REV_ID ", hex(id.rev_id),
+              ": the EXTI SEES the pad, and a SOFTWARE event on the very same "
+              "line, generator and channel moves a word every time - while "
+              "four PAD EDGES move none with IMR clear and ONE with IMR set. "
+              "That is the shape of \"routed to it_exti_per(y) instead of "
+              "exti[15:0]\": the trigger follows the LEVEL of the line's "
+              "pending interrupt, so with no IMR bit there is no level at "
+              "all, and with one the first edge raises it and nothing "
+              "further arrives until somebody clears the pending bit. The "
+              "software leg passes for exactly that reason - its loop clears "
+              "after every pulse - which is why a suite that stages this "
+              "path with SWIER alone sees nothing wrong. The workaround the "
+              "sheet does not offer would be a CPU in the loop, which is the "
+              "one thing an edge counter with no CPU cannot have: the "
+              "letters below say so and claim nothing.", crlf);
+    } else if (!exti_dma_ok) {
+        print(serial, "the EXTI-to-DMAMUX trigger path did not answer; the "
+              "letters that need it will say so and claim nothing", crlf);
+    }
+}
+
+/// The one line every letter whose instrument is that edge counter
+/// prints when the probe says the path is dead in both arrangements.
+bool need_exti_dma() {
+    if (exti_dma_ok) {
+        return true;
+    }
+    const auto id = brio::DeviceIdcode::read();
+    print(serial,
+          "  SKIPPED, no verdict claimed: this letter counts edges with a "
+          "DMAMUX request generator triggered by an EXTI line, and the boot "
+          "probe found that path dead in both mask arrangements on DEV_ID ",
+          hex(id.dev_id), " REV_ID ", hex(id.rev_id),
+          " - which is what ES0418 2.2.4 describes with no workaround.",
+          crlf);
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -2259,6 +2487,9 @@ void tj_smartcard() {
     static const CkCase cks[] = {{4}, {8}, {16}, {31}};
     uint8_t ck_ok = 0;
     for (const CkCase& c : cks) {
+        if (!exti_dma_ok) {
+            break;
+        }
         feed();
         U1::enable(false);
         if (!U1::smartcard({.nack = true, .retries = 0, .guard_time = 0,
@@ -2286,9 +2517,11 @@ void tj_smartcard() {
             ++ck_ok;
         }
     }
-    bench.verdict("the smartcard clock is the kernel rate over TWICE the "
-                  "prescaler - four rungs of the ladder, counted by a DMA "
-                  "channel with no CPU and no interrupt", ck_ok == 4u);
+    if (need_exti_dma()) {
+        bench.verdict("the smartcard clock is the kernel rate over TWICE the "
+                      "prescaler - four rungs of the ladder, counted by a DMA "
+                      "channel with no CPU and no interrupt", ck_ok == 4u);
+    }
     print(serial, "  AND THE PAD IS THE OTHER FINDING: the CK output shares "
                   "USARTn_RTS_DE_CK with the flow-control RTS and the RS-485 "
                   "driver enable - one pad, three jobs, and chapter 33 never "
@@ -2795,6 +3028,9 @@ void tm_synchronous() {
     static const SyncCase scases[] = {{false, false}, {true, false}, {false, true}};
     uint8_t counted_ok = 0;
     for (const SyncCase& c : scases) {
+        if (!exti_dma_ok) {
+            break;
+        }
         feed();
         U1::bus_clock(true);
         U1::reset();
@@ -2833,10 +3069,12 @@ void tm_synchronous() {
             ++counted_ok;
         }
     }
-    bench.verdict("33.5.14's clock is one pulse a data bit with none for the "
-                  "start and stop, LBCL adds the pulse of the LAST bit, and "
-                  "CPOL is the level CK rests at - all three counted with no "
-                  "CPU in the path", counted_ok == 3u);
+    if (need_exti_dma()) {
+        bench.verdict("33.5.14's clock is one pulse a data bit with none for "
+                      "the start and stop, LBCL adds the pulse of the LAST "
+                      "bit, and CPOL is the level CK rests at - all three "
+                      "counted with no CPU in the path", counted_ok == 3u);
+    }
     print(serial, "  THE DATA PATH IS DECLINED and not faked: a synchronous "
           "link needs something at the other end to clock, and this desk has "
           "one board. The SLAVE half (CR2.SLVEN, DIS_NSS and the underrun "
@@ -2922,6 +3160,43 @@ uint32_t lp_run(uint32_t count, uint32_t timeout_us) {
 volatile uint32_t lpuart_irqs = 0;
 /// Whether LPUART1's bus clock is on and its interrupt is ours to serve.
 volatile bool lpuart_live = false;
+
+/// The second LPUART, on its own pad and its own kernel-clock field.
+template <bool present = lpuart_present(2)>
+void tn_lpuart2() {
+    if constexpr (present) {
+        using L2 = Lpuart2<present>;
+        feed();
+        const bool pc6_free = pull_walks<Lp2Pin>();
+        const bool l2_up =
+            lp_loop_up<L2, Lp2Pin>(lp2_tx, 115200, UsartClock::pclk);
+        const uint32_t l2_good = l2_up ? lp_run<L2>(8, 20000) : 0u;
+        print(serial, "  PC6 free: ", pc6_free ? "yes" : "NO",
+              "; LPUART2 on its own single wire at 115200: ", l2_good,
+              " of 8 exact, BRR ", L2::brr(), crlf);
+        bench.verdict("LPUART2 - the G0B1 class's second one, with its own "
+                      "LPUART2SEL field and its own APB bit - runs the same way",
+                      pc6_free && l2_up && l2_good == 8u);
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: a second single wire on PC6 at "
+              "AF3 needs an LPUART2, which this part has not got "
+              "(lpuart_present(2) is false - the reserve finds no LPUART2_BASE "
+              "in the device header, and USART2's vector is therefore USART2's "
+              "alone).",
+              crlf);
+    }
+}
+
+template <bool present = lpuart_present(2)>
+void quiet_lpuart2() {
+    if constexpr (present) {
+        using L2 = Lpuart2<present>;
+        L2::enable(false);
+        L2::reset();
+        L2::bus_clock(false);
+    }
+}
 
 void tn_lpuart() {
     feed();
@@ -3054,18 +3329,7 @@ void tn_lpuart() {
                   fifo_on && fifo_good == 8u && presc_good == 4u &&
                       !Lpuart<1>::has_oversampling8);
 
-    // LPUART2, on its own pad and its own kernel-clock field.
-    feed();
-    const bool pc6_free = pull_walks<Lp2Pin>();
-    const bool l2_up =
-        lp_loop_up<L2, Lp2Pin>(lp2_tx, 115200, UsartClock::pclk);
-    const uint32_t l2_good = l2_up ? lp_run<L2>(8, 20000) : 0u;
-    print(serial, "  PC6 free: ", pc6_free ? "yes" : "NO",
-          "; LPUART2 on its own single wire at 115200: ", l2_good,
-          " of 8 exact, BRR ", L2::brr(), crlf);
-    bench.verdict("LPUART2 - the G0B1 class's second one, with its own "
-                  "LPUART2SEL field and its own APB bit - runs the same way",
-                  pc6_free && l2_up && l2_good == 8u);
+    tn_lpuart2();
 
     // THE SHARED VECTORS. LPUART2 arrives on the CONSOLE's own line and
     // LPUART1 on the line USART3..6 share, so ONE handler serves several
@@ -3097,9 +3361,7 @@ void tn_lpuart() {
     L1::enable(false);
     L1::reset();
     L1::bus_clock(false);
-    L2::enable(false);
-    L2::reset();
-    L2::bus_clock(false);
+    quiet_lpuart2();
     Lp1Pin::release();
     Lp2Pin::release();
 }
@@ -3111,13 +3373,38 @@ void tn_lpuart() {
 using Carrier = TimPwm<Tim<17>, 0>;
 using Envelope = TimPwm<Tim<16>, 0>;
 
+/// A PAD WITH AN EXTERNAL PULL-UP IS NOT A PAD A SUITE CAN PULL-WALK.
+/// PB9 carries the desk's 2.2 kOhm I2C pull-up, which beats the internal
+/// pull-down, so the precondition is the one test_stm32_tim's letter l
+/// settled on: the pad is HELD UP by the external resistor and SINKS when
+/// a push-pull output drives it low - which is exactly the electrical
+/// question IR_OUT asks of it. A pad with no external pull answers the
+/// plain walk and is accepted by the first clause.
+template <class Pad>
+bool pad_is_drivable() {
+    if (pull_walks<Pad>()) {
+        return true;
+    }
+    Pad::input(PinPull::down);
+    spin_us(300);
+    const bool held_up = Pad::read();
+    Pad::output(false);
+    spin_us(300);
+    const bool sinks = !Pad::read();
+    Pad::input(PinPull::none);
+    return held_up && sinks;
+}
+
 void to_irtim() {
     feed();
-    const bool pb9_free = pull_walks<IrPin>();
-    print(serial, "  PB9 follows its own pull: ", pb9_free ? "yes" : "NO",
+    const bool pb9_free = pad_is_drivable<IrPin>();
+    print(serial, "  PB9 is drivable (its own pull, or held up by an external "
+          "one and sinking when driven): ", pb9_free ? "yes" : "NO",
           " - and it is the ONE pad of this board an infrared LED would use, "
           "PA13's IR_OUT being SWDIO", crlf);
-    bench.verdict("PB9 is free for IR_OUT", pb9_free);
+    bench.verdict("PB9 is free for IR_OUT - a push-pull alternate function "
+                  "owns it whether or not the desk hangs a pull-up on it",
+                  pb9_free);
 
     Irtim::init();
     bench.verdict("the interface's three bits live in SYSCFG, behind the "
@@ -3153,7 +3440,9 @@ void to_irtim() {
     Irtim::polarity(false);
     IrtimPad<ir_out>::claim();
 
-    if (!edge_counter_up(9, 'B', DmaMuxEdge::rising)) {
+    if (!exti_dma_ok) {
+        (void)need_exti_dma();
+    } else if (!edge_counter_up(9, 'B', DmaMuxEdge::rising)) {
         bench.verdict("the edge counter comes up on EXTI line 9", false);
     } else {
         console_drain();
@@ -3202,7 +3491,9 @@ void to_irtim() {
     (void)U1::configure({}, usart_brr(SysClock::pclk_hz, env_baud).value());
     U1::enable(true);
     (void)Irtim::envelope(IrtimEnvelope::usart1);
-    if (edge_counter_up(9, 'B', DmaMuxEdge::rising)) {
+    if (!exti_dma_ok) {
+        (void)need_exti_dma();
+    } else if (edge_counter_up(9, 'B', DmaMuxEdge::rising)) {
         console_drain();
         // Idle first: the transmit line rests HIGH, so the carrier is
         // passed continuously.
@@ -3923,7 +4214,7 @@ void tv_lpuart_console() {
 void banner() {
     print(serial, crlf,
           "test_stm32_serial - the USART's long tail, the LPUARTs and IRTIM "
-          "(board E, no wires)", crlf);
+          "(no wires)", crlf);
     bench.menu();
 }
 
@@ -3943,7 +4234,7 @@ extern "C" void HardFault_Handler() {
 /// USART2 and LPUART2 share this line on the G0B1 class. The console is
 /// the first; the LPUART console of letter v is the second, and only one
 /// of them is up at a time.
-extern "C" void USART2_LPUART2_IRQHandler() {
+extern "C" void BRIO_STM32G0_USART2_HANDLER() {
     // USART2 and LPUART2 share this line on the G0B1 class. Only USART2
     // is ever up on it in this suite - LPUART2 is driven polled in
     // letter n - so the console's body is the whole of it. LPUART1's
@@ -3992,10 +4283,13 @@ extern "C" void USART1_IRQHandler() {
     brio::Nvic::disable(brio::Usart<1>::irq());
 }
 
-/// USART3, USART4, USART5, USART6 and LPUART1 share THIS one - the
-/// family's widest vector, and the reason every isr() body of this
-/// stratum answers for itself alone.
-extern "C" void USART3_4_5_6_LPUART1_IRQHandler() {
+/// USART3, USART4, LPUART1 and - where the part has them - USART5 and
+/// USART6 share THIS one, the family's widest vector, which is the reason
+/// every isr() body of this stratum answers for itself alone. The NAME
+/// moves with what the header declares beside it, so the reserve's macro
+/// is what binds it: a bare spelling on the wrong board would land in
+/// Default_Handler's silent spin.
+extern "C" void BRIO_STM32G0_USART3_HANDLER() {
     // Letter v puts the whole CONSOLE on LPUART1, which arrives here and
     // not on USART2's line - the two LPUARTs of this part sit on
     // different vectors and only the second one shares the console's.
@@ -4088,8 +4382,14 @@ int main() {
         .window = 0x0FFF});
     brio::enable_interrupts();
 
-    bench.letter('a', "the instance table: six USARTs, two LPUARTs, three "
-                      "authorities", ta_instances);
+    // Four letters below count edges through a DMAMUX request generator
+    // an EXTI line triggers. Whether that path exists on this die is a
+    // silicon question, asked here once and answered by the letters that
+    // need it (ES0418 2.2.4).
+    probe_exti_dma_trigger();
+
+    bench.letter('a', "the instance table: every USART and LPUART the part "
+                      "has, three authorities", ta_instances);
     bench.letter('b', "THE INSTRUMENT: the single wire, and every frame format",
                  tb_loop);
     bench.letter('c', "the baud generator: both oversamplings, twelve "
@@ -4132,6 +4432,9 @@ int main() {
                   static_cast<uint32_t>(crumb->code), " context ",
                   static_cast<uint32_t>(crumb->context), crlf);
         }
+        const auto idcode = brio::DeviceIdcode::read();
+        print(serial, crlf, "part DEV_ID ", hex(idcode.dev_id),
+              " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
               " tick=", tick_ok ? "SysTick" : "FAILED",
               " wall=", wall_ready ? "RTC on LSE" : "NO CRYSTAL",

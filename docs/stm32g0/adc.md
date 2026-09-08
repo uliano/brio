@@ -386,6 +386,35 @@ another board settles somewhere else.
   is what makes the swing legible at all. A known voltage on one of
   these pads still needs a wire.
 
+## On the second silicon
+
+`test_stm32_analog` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
+0x2000) and the ADC's half of it is unchanged: one converter, nineteen
+channels, VREFINT/TS/VBAT, the same prescaler and sampling arithmetic.
+Measured there: **VDDA 3317 mV** by 15.9's ratio against VREFINT_CAL
+(3310 on the G0B1RE), VBAT 3345 mV, the junction at 2591 centi-C, and the
+CONVERSION TIME EXACT TO THE CYCLE in every configuration - 14.0, 16.0,
+20.0, 52.0 and 14.0 ADC cycles predicted and measured. CALFACT came out
+of the self calibration at 46, a plausible mid-range factor and neither
+of the 0x00 / 0x7F extremes ES0418 2.6.7 (ADC offset out of
+specification, revision B only) would signal; the item's own condition is
+VREF+ below 3.0 V and this rail is above it.
+
+**ES0418 2.6.2 and 2.6.4** (a CFGR1 or CFGR2 write with ADEN set resets
+RES or CKMODE) are answered STRUCTURALLY, and the audit is worth stating
+because it is a property of the file and not of a letter: every CFGR1 and
+CFGR2 store in `adc.hpp` sits under a cleared ADEN - `configure()`
+refuses while the converter is enabled, and `rebase()`'s store is behind
+a `disable()` whose failure aborts the rebase. There is no third store.
+`configure_while_enabled()` is the deliberate staging ground and is named
+for what it is. 2.6.6 corrects the trigger latency figures to 6.5 / 12.5
+/ 3.5 PCLK cycles typical; no letter of this suite measures a trigger
+latency, so nothing here is judged against them.
+
+The only ADC-side letter that moves is letter q's trigger census: table
+75's TIM4_TRGO row needs a TIM4, so a part without one walks five timer
+rows instead of six and says so.
+
 ## Not covered yet
 
 **Driver gaps** (the register is there, the verb is not):

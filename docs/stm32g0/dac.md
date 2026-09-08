@@ -220,6 +220,39 @@ can and cannot measure about the comparator itself, is in
   read zero and eighteen handler calls, which is the same fact seen
   from the wrong side.
 
+## On the second silicon
+
+`test_stm32_analog` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
+0x2000) and every DAC letter passes there unchanged: two channels, the
+four data placements, both outputs, the wave generators, sample-and-hold,
+the user trim and the DMA underrun.
+
+**ES0418 2.7.1 IS THIS PART'S OWN ITEM AND IT DID NOT BITE**: "writing a
+value different from 000 to the DAC channel MODE bitfield before
+performing data initialization causes the corresponding DAC channel
+analog output to be invalid", present on both revisions with a
+workaround. `configure()` writes MCR.MODE with the channel disabled and
+BEFORE any data write, which is the erratum's exact condition, and the
+suite's letters - which read the DAC back through the ADC on PA4 -
+measure a correct output every time. Recorded as NOT REPRODUCED under
+configure-then-set on DEV_ID 0x460 REV_ID 0x2000, not as a disproof.
+
+The obligation is nonetheless STATED on `configure()`, because a driver
+that cannot enforce a caller's ordering must say so: the workaround is
+one write to any data register first, then the MODE, and `set(ch, code)`
+is that write - it stores DHR12Rx unconditionally, with or without a
+configuration. Putting the data write inside `configure()` would change
+what every image already built for this family does, so it is a stated
+obligation and not a silent edit.
+
+ES0418 2.7.2 (the DMA underrun flag missed when an internal trigger lands
+on the same cycle as a DMA request acknowledge) needs software AND
+hardware triggers used concurrently; no letter of this suite does that,
+so the condition is not reached. 2.3.1 (a GPIO assigned to a DAC channel
+cannot be an output while that channel is in an on-chip-only mode) is not
+reached either: the one letter that uses `DacMode::internal_unbuffered`
+drives no pad while it holds.
+
 ## Not covered yet
 
 **Driver gaps:**

@@ -19,7 +19,7 @@ guessable from a neighbour's (verify on st.com before citing).
 | STM32G0x1 reference manual | **RM0444 Rev 6** (December 2024) | symlink to `~/Documenti/Elettronica/STM32/STM32G0/rm0444-*.pdf` | the whole x1 line (G031/041/051/061/071/081/0B1/0C1); the x0 value line is RM0454 (same peripherals minus a few) |
 | STM32G0B1xB/xC/xE datasheet | **DS13560 Rev 5** (June 2024) | symlink to `.../stm32g0b1ce.pdf` | pinout, alternate-function tables 13..24 (the AF numbers no header carries), electrical characteristics |
 | STM32G0B1xB/xC/xE device errata | **ES0548 Rev 3** (October 2022) | symlink to `.../es0548-*.pdf` | silicon revisions A (REV_ID 0x1000) and Z (0x1001) in one document with a per-item column each |
-| STM32G071x8/xB device errata | ES0418 Rev 5 (November 2023) | symlink to `.../es0418-*.pdf` | the SECOND-SILICON board's (a Nucleo-G071RB in the drawer); not the bench chip's |
+| STM32G071x8/xB device errata | **ES0418 Rev 5** (November 2023) | symlink to `.../es0418-*.pdf` | the SECOND SILICON's (the Nucleo-G071RB at desk position F, revision B); READ AT THE BENCH - see "The second silicon's errata" below |
 | Getting started with STM32G0 hardware development | AN5096 Rev 4 (December 2025) | symlink to `.../an5096-*.pdf` | decoupling, clocks, boot pins |
 
 Canonical URLs (redirect to the current revision):
@@ -145,3 +145,61 @@ on Z: 2.2.5, 2.2.7, 2.2.9, 2.6.5.
 
 **No item of ES0548 touches the CRC calculation unit** - a statement
 about the document, not a claim about the silicon (crc.md).
+
+## The second silicon: STM32G071RB, and its errata read at the bench
+
+The Nucleo-G071RB at desk position F carries an **STM32G071RB, DBGMCU_IDCODE
+DEV_ID 0x460, REV_ID 0x2000 = silicon revision B** (ES0418 table 2; Y is
+0x2002 and is the newer of the two). Every bench suite of this stratum
+prints that pair at boot, through `DeviceIdcode::read()` in `flash.hpp`,
+because a measurement that differs between two boards is only a finding
+once the die it was taken on is on the record.
+
+FOURTEEN OF THE SEVENTEEN SUITES RUN THERE (`../README.md` has the table
+and the reasons for the other three), so ES0418 can be read against real
+letters rather than against a driver's intentions. The status letters are
+ST's own: A = present with a workaround, N = present with none, P =
+partial, "-" = absent.
+
+| ES0418 (rev B) | Where a letter reaches it | What the bench found |
+|---|---|---|
+| **2.2.4** DMAMUX cannot be synchronized or triggered by EXTI (N) | `test_stm32_serial`'s boot probe; `test_stm32_dma` letter `f` | **REPRODUCED, WITH ITS MECHANISM.** Four pad edges into a request generator moved 0 words with the EXTI event mask alone and 1 of 4 with the interrupt mask armed too, while the EXTI's own rising pending bit saw every edge and four SOFTWARE events on the same line, generator and channel moved 4. The trigger follows the LEVEL of the line's pending interrupt: no IMR bit, no level, no trigger; with one, the first edge raises it and nothing more arrives until the pending bit is cleared. `test_stm32_dma` letter `f` PASSES on this die because its loop clears after every SWIER pulse - a SWIER-only staging reports the path healthy. Four verdicts of the serial suite skip; the sheet's "no workaround" holds, since the clear would need a CPU in a loop that has none |
+| **2.2.6** Wakeup from Stop not effective (N) | `test_stm32_serial` letter `w`, the RTC-wake controls in `test_stm32_rtc` and `test_stm32_sleep` | the G0B1's 2.2.4, staged the same way: letter `w` scores 2 of 2 on this die too - the USART poke at HSIDIV = /4 does not wake the part, the RTC backstop ends the sleep, and HSIKERON does not rescue it, exactly as on the G0B1 (usart.md); REPRODUCED on revision B |
+| **2.7.1** Invalid DAC output if MODE is written before data (A) | every DAC letter of `test_stm32_analog` - `configure()` writes MCR.MODE with the channel disabled and before any data write, the erratum's exact condition | **NOT REPRODUCED** under configure-then-set: the ADC reads a correct output through PA4 every time. Recorded as unreproduced, not as a disproof; the workaround (one write to any data register, then the MODE) is STATED on `dac.hpp`'s `configure()`, and `set()` is that write |
+| **2.6.2 / 2.6.4** CFGR1 or CFGR2 written with ADEN set resets RES or CKMODE (A) | `adc.hpp` | **ANSWERED STRUCTURALLY**, and audited: every CFGR1 and CFGR2 store in the file is under a cleared ADEN - `configure()` refuses while enabled, `rebase()`'s store is behind a `disable()` whose failure aborts it, and `configure_while_enabled()` is the deliberate staging ground. There is no third |
+| **2.6.7** ADC offset out of specification (A on rev B) | `test_stm32_analog` letter `a` prints CALFACT | not reached: the item's condition is VREF+ below 3.0 V and this rail measures 3317 mV. CALFACT came out at 46, neither of the 0x00 / 0x7F extremes |
+| **2.6.6** trigger latency documentation | - | no letter measures a trigger latency, so nothing is judged against the corrected 6.5 / 12.5 / 3.5 PCLK figures |
+| **2.9.1 / 2.9.2** LPTIM stuck (A / P) | the G0B1's 2.8.1 / 2.8.2, structurally and in `test_stm32_lptim` letter `i` | unchanged: 82/82 on this die, both halves of the flag-clear discipline behaving as on the other |
+| **2.11.1** I2C tSU;DAT floors (P) | `test_stm32_i2c` letter `m`'s refusals | identical - the floors are the driver's compile-time and run-time refusals and do not depend on the die |
+| **2.11.2** I2C spurious BERR (A) | `test_stm32_i2c` letter `m` counts BERR over the run | not seen |
+| **2.11.6** I2C stalled when PCLK/I2CCLK is in 1.5..3 (A) | - | NOT REACHED: this suite's ratios are 4 (a 64 MHz PCLK with the HSI16 kernel), 1 (PCLK as the kernel) and 0.125 (the 2 MHz core), none of them in the band |
+| **2.11.3 / 2.11.5 / 2.11.7** own-address match, NOSTRETCH underrun, SMBus slave timeout | multi-master, the NOSTRETCH target and the SMBus target are SELF-LINK roles | not staged on this board: its I2C1 faces a peer, not a second instance of its own |
+| **2.12.2** noisy receive line (A) | `test_stm32_serial` letter `f` | the G0B1's 2.11.1, staged identically |
+| **2.12.3** prescaler documentation | `test_stm32_serial` letter `a` | measured on this die too, and worse than a missing divider: a BASIC instance takes the PRESC value, reads it back and transmits nothing |
+| **2.12.4** data corrupted when ABREN is cleared during a reception (A) | `usart.hpp` | **ANSWERED STRUCTURALLY**: `auto_baud_off()` refuses with UE set, so there is no path to that write and a disabled receiver is not receiving |
+| **2.12.5** NE set with ONEBIT on a noisy START bit (N) | letter `f`'s ONEBIT rows | not exercised: those rows run on a clean start bit, the suite's bit-banger putting its glitch in the stop bit |
+| **2.12.1** USART SPI-slave TC anticipated (A) | - | not staged: there is no synchronous slave on this desk |
+| **2.13.1** LPUART transmitter jitter, kernel/baud a non-integer in 3..4 (P) | `test_stm32_serial` letter `v`, whose LSE-kernel leg at 9600 baud is the sheet's own 32768 / 9600 = 3.41 | the band is a stated caveat in [../lpuart.md](../lpuart.md); letter `n`'s own rungs (ratios 555.6 and 6666.7) are outside it |
+| **2.14.1 / 2.14.2** SPI BSY on disable, slave BSY (A) | `test_stm32_spi` letter `h`, a SELF-LINK letter | NOT STAGED on this board: the self-link is not wired here, so the letter skips. Both are the G0B1's 2.12.1 and 2.12.2 and are measured there |
+| **2.8.6** TIM16/TIM17 clocked by SYSCLK rather than TIMPCLK (N) | - | UNOBSERVABLE by construction: this stratum pins HPRE and PPRE at 1, so the two clocks are one |
+| **2.8.4 / 2.8.5** bidirectional break with short pulses, sync trigger missed with a faster master clock (N) | - | not reached: no letter sets BKBID, and one clock feeds every timer |
+| **2.2.5** a flash location of all ones cannot be re-programmed to all zeros (N) | `test_stm32_nvm`, which stays the G0B1RE's | not staged here (no storage geometry on a single-bank part) |
+| **2.2.3, 2.2.7, 2.2.9** RDP1 boot via PA14, PCROP weakness, option-byte lock | - | not staged: there is no option-byte write verb, PCROP is a read-only decode and RDP is one-way |
+| **2.2.1, 2.2.2, 2.2.8, 2.2.10, 2.2.11, 2.10.2** LSI, WUFx, boot select, RTC domain, tamper flag on LSE failure | the same items as the G0B1's, applied the same way | unchanged; the LSE CSS stays declined, its only way back being the domain reset this bench must not take |
+| **2.3.1** a GPIO assigned to a DAC channel cannot be an output while that channel is on-chip only (N) | `test_stm32_analog`'s `DacMode::internal_unbuffered` leg | not reached: no letter drives PA4 or PA5 as a GPIO output while such a mode holds |
+| **2.7.2** DAC DMA underrun flag missed with concurrent SW+HW triggers (N) | `test_stm32_analog` letter `p` | not reached: the condition needs software and hardware triggers used together and this letter uses one at a time |
+| **2.5.4, 2.6.1, 2.6.3, 2.6.5** and the remaining shared items | the G0B1's twins, applied where they are | unchanged |
+
+**ES0418 HAS NO PREFETCH ITEM** - the G0B1's 2.2.10 (prefetch failure
+branching across flash memory banks) has no twin here, and it could not:
+this part has ONE bank. `FlashAccel::prefetch` stays a verb left at its
+reset value on both parts, because the reason to leave it there is the
+G0B1's and a common default is worth more than a per-part one.
+
+**AND ONE PER-PART FACT THAT IS NOT AN ERRATUM AT ALL**, found the hard
+way and now in the reserve: RM0444 22.4.25's ETRSEL list footnotes codes
+0100 (MCO), 0101 (MCO2) and 0110 (COMP3) "available on STM32G0B1xx and
+STM32G0C1xx sales types only". No TIM register differs between the
+headers, so a timer told to take MCO on a smaller part counts nothing, in
+silence - which wedged a suite whose own microsecond wait rode that timer
+([../tim.md](../tim.md), [../clock.md](../clock.md)).

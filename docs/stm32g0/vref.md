@@ -94,6 +94,15 @@ can see: `Adc::vdda_mv()` puts it at 3310 mV, which is what a Nucleo's
 pin and with a separately supplied one, and it is exactly the ambiguity
 that keeps the buffer off.
 
+## On the second silicon
+
+`test_stm32_analog` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
+0x2000) and VREFBUF is present and behaves identically - the same three
+scaled levels, the same SYSCFG clock gate in front of the register block,
+the same VRR wait. Nothing here is per-part: `vrefbuf_present()` is true
+on every x1 header of the pack, and this is a case where "nothing
+differs" is the whole finding.
+
 ## Not covered yet
 
 **Implemented but not bench-verified - all of it, and on purpose:**

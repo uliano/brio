@@ -264,6 +264,31 @@ depends on a press - it cannot be staged from here - but the letter
 prints the level, so running `u` with the button held says what it
 should.
 
+## On the second silicon
+
+`test_stm32_exti` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
+0x2000), where the controller has FEWER LINES: `EXTI_IMR1_IM_Msk` is
+0xFEAFFFFF against the G0B1's 0xFFFFFFFF - lines 20 (COMP3), 22 (an I2C2
+wake) and 24 are not implemented there - and the second register group
+has its MASK registers (IMR2, EMR2) but NO TRIGGER registers at all, no
+line above 31 being configurable. The reserve answers the second group
+with POINTERS that are null when the register is absent
+(`exti_rtsr2()`, `exti_ftsr2()`, `exti_swier2()`, `exti_rpr2()`,
+`exti_fpr2()`), which is why the suite judges their presence against
+`exti_configurable_mask2` rather than dereferencing them.
+
+**AND THE TWO DIES TAKE OPPOSITE SIDES OF A MANUAL THAT DISAGREES WITH
+ITSELF.** 13.5.12 states the reset value as a RULE in words - "enable
+interrupt from direct lines, and disable interrupt from configurable
+lines" - and then PRINTS 0xFFF8 0000 beside it. The G0B1RE obeys the
+rule, and its implemented mask being all ones the two readings coincide.
+The G071RB holds **the printed number**: IMR1 comes up 0xFFF80000 with
+its implemented mask 0xFEAFFFFF, so bits 20, 22 and 24 - lines it does
+not implement - read back SET. The verdict is therefore over the
+IMPLEMENTED bits, where both dies agree bit for bit, and the residue is
+printed. An unimplemented mask bit does nothing either way, which is why
+this is a finding about the document and not about a program.
+
 ## Not covered yet
 
 Driver gaps: the direct lines whose peripheral this stratum has not

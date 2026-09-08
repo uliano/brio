@@ -130,6 +130,24 @@ is Reserved and `envelope()` refuses it with nothing written.
 **The high-sink bit sticks and clears**, which is the whole of what a
 board with no infrared LED can say about it.
 
+## On the second silicon
+
+The interface itself is unchanged on the Nucleo-G071RB (DEV_ID 0x460,
+REV_ID 0x2000): the three SYSCFG bits stick, IR_POL inverts, the envelope
+multiplexer takes all three implemented codes and refuses the Reserved
+one, `irtim_second_usart()` is USART4 there as on the G0B1, and the
+high-sink driver on PB9 is the same one bit with two names.
+
+WHAT CANNOT BE MEASURED THERE IS THE PRODUCT. Both of letter `o`'s
+counting legs - the 38 kHz carrier under a 1 kHz envelope, and the USART
+envelope's active-low gate - weigh the pad with a DMAMUX request
+generator triggered by an EXTI line, and ES0418 2.2.4 breaks exactly that
+path (the mechanism and its numbers are in [usart.md](usart.md)). Both
+legs skip by name and claim nothing; the register half of the letter
+stands. PB9 is also the pad the desk's I2C pull-up hangs on, so the
+letter's precondition is DRIVABILITY and not the internal pull's
+authority - [port.md](port.md) carries the rule.
+
 ## Not covered yet
 
 Driver gaps: none - the chapter's three bits and its one pad are all

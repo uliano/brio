@@ -911,6 +911,12 @@ struct Usart {
                      (static_cast<uint32_t>(m) << USART_CR2_ABRMODE_Pos);
         return true;
     }
+    /// REFUSES with UE set - which is CR2's own protection, and ALSO the
+    /// structural answer to ES0418 2.12.4 (a G071/G081 item with no twin
+    /// in the G0B1's ES0548): clearing ABREN DURING a reception corrupts
+    /// the data being received. This driver has no path to that write -
+    /// the instance is disabled first, and a disabled receiver is not
+    /// receiving - so the erratum has nothing to act on.
     static bool auto_baud_off() {
         if (enabled()) {
             return false;

@@ -516,6 +516,17 @@ power-down is released does not move it; inserting text before it moves
 it by exactly that many bytes; draining the console first does not help.
 No verdict rests on that line and the letter scores 4/4.
 
+## On the second silicon
+
+`test_stm32_fdcan` STAYS THE G0B1RE's ALONE: the FDCAN is the G0B1/G0C1
+class's peripheral and a G071RB has none, so `fdcan_present(1)` is false
+there and `Fdcan<1>` does not compile - which is the stratum's own way of
+spelling an absence and the reason the suite's `boards` line names one
+board. The protocol ARITHMETIC of this driver (the bit-timing choosers,
+the DLC coding, the element codecs) compiles on every header of the pack
+and is checked by `tools/check_stm32g0.sh` there; only the
+register-facing half is gated.
+
 ## Not covered yet
 
 Driver gaps - nothing in `fdcan.hpp` reaches these:

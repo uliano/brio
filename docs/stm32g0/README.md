@@ -111,31 +111,72 @@ An absence is spelled one of two ways, and the docs say which:
 
 The sweep proves it on every header the pack ships (22 positive TUs x
 12 headers, and every negative refused on each variant it names); the
-bench proves the G0B1. **The second silicon**: the **Nucleo-G071RB**
-(STM32G071RB, LQFP64, 128 KB single-bank flash, 36 KB SRAM, the same
-board layout as the G0B1RE's - LD4 on PA5, the VCP on USART2 PA2/PA3)
-and the **Nucleo-G031K8** (STM32G031K8, a Nucleo-32: 64 KB single-bank
-flash, 8 KB SRAM, LD3 on **PC6**, the VCP on USART2 PA2/PA3) have their
-presets (`stm32g071rb-*`, `stm32g031k8-*`), linker scripts
-(`ld/stm32g071rb.ld`, `ld/stm32g031k8.ld` - one bank each, so the
-storage attic of [nvm.md](nvm.md) does not exist there and both
-backends refuse to open), crts (`src/glue/startup_stm32g071.cpp`,
-`startup_stm32g031.cpp` - each header's own vector table, ST's names)
-and `tools/bench.py` board types (`g071rb`, `g031k8`, the same OpenOCD
-path as the G0B1RE's). `blink`, `console` and `probe` build for all
-three. **THE G071RB IS ON THE DESK** at manifest position `F`, with its
-ST-LINK's serial, its VCP by-id path and its unique device ID recorded
-there: `probe` blinked LD4 with the PLL at 64 MHz and `console` answered
-its banner, so the clock, the ticker, the kernel and the USART
-transport of this stratum all run on a second die - and its first real
-firmware is the pair of bus peers, `spi_peer` and `twi_peer`, which is
-how the G0B1RE's SPI and I2C drivers meet an independent chip of their
-own family ([../bench.md](../bench.md), "The G0-to-G0 bus link"). The
-G031K8 has NOT had its first power-on: position `G` is reserved and
-waits for its ST-LINK serial, its LED and VCP pads verified the way the
-G0B1RE's were, the LSE crystal's presence (the Nucleo-32 may not
-populate it), and the suites made to skip what the chip lacks - the
-"second silicon" bench campaign.
+bench proves two of them.
+
+## The second silicon: the Nucleo-G071RB
+
+The **Nucleo-G071RB** (STM32G071RB, LQFP64, 128 KB single-bank flash,
+36 KB SRAM, the same board layout as the G0B1RE's - LD4 on PA5, the VCP
+on USART2 PA2/PA3) sits at manifest position `F`, tied to the G0B1RE by
+the six-wire bus link of [../bench.md](../bench.md). Its die reports
+**DEV_ID 0x460, REV_ID 0x2000** - ES0418 silicon revision B - and every
+bench suite prints that pair at boot through `DeviceIdcode::read()`
+([platform.md](platform.md)), because a measurement that differs between
+two boards is only a finding once the die it was taken on is on the
+record.
+
+**FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT.** An app that builds for
+both boards says so in its `// build: boards = g0b1re,g071rb` line;
+what a suite cannot do there it SKIPS BY NAME, printing the reserve's own
+fact and claiming no verdict, so a smaller count is a shorter list of
+claims and never a weaker one.
+
+| Suite | G0B1RE (E) | G071RB (F) | What skips there, and why |
+|---|---|---|---|
+| `test_stm32_crc` | 27 | **27** | nothing - the one driver that needs no fact from the reserve |
+| `test_stm32_platform` | 53 (+ `i` 26) | **53** (+ `i` 26) | nothing |
+| `test_stm32_sleep` | 50 | **50** | nothing in `z`; letter `u` measures a DIFFERENT Shutdown wake ([pwr.md](pwr.md)) |
+| `test_stm32_exti` | 89 | **89** | nothing; IMR1's reset value differs ([exti.md](exti.md)) |
+| `test_stm32_rtc` | 125 | **125** | nothing in `z`; two tamper inputs instead of three, and arming one does not take its pad ([rtc.md](rtc.md)) |
+| `test_stm32_lptim` | 82 | **82** | nothing |
+| `test_stm32_tickless` | 47 | **45** | letter `i`'s awake-time meter needs TIM2's ETR taking MCO, which this part's ETRSEL has not got |
+| `test_stm32_clock` | 42 | **40** | letter `h` (`delay_us` at 20 us) needs that same 4 us wall; the rest runs on an LSE wall instead |
+| `test_stm32_tim` | 118 | **114** | TIM4: its counter, its four channels on PB6..PB9, and TIM3's shared vector |
+| `test_stm32_dma` | 69 | **65** | DMA2's five channels, and letter `m`'s peripheral-to-peripheral destination |
+| `test_stm32_analog` | 139 | **136** | COMP3's register block and its whole signal path |
+| `test_stm32_serial` | 88 | **83** | LPUART2, and four verdicts to ES0418 2.2.4 ([usart.md](usart.md)) |
+| `test_stm32_spi` | 38 (peer) | **38** (peer) | the same self-link letters that skip on E; SPI3 and SPI2's I2S are absent |
+| `test_stm32_i2c` | 54 (peer) | **54** (peer) | the same self-link letters; I2C3 is absent and I2C2 has no independent clock |
+| `test_stm32_nvm` | 85 | - | one flash bank: no storage attic ([nvm.md](nvm.md)) |
+| `test_stm32_journal` | 52 | - | the same |
+| `test_stm32_fdcan` | 96 | - | no FDCAN on this part ([fdcan.md](fdcan.md)) |
+
+Every score above was taken TWICE on the board it names, one of the two
+from a cold flash. The two bus suites run with the OTHER board as their
+peer, roles exchanged, on the same six wires.
+
+WHAT THE PART HAS NOT GOT, all of it read off the header by the reserve:
+TIM4, USART5, USART6, LPUART2, I2C3, SPI3 (and with it SPI2's I2S), DMA2
+(DMA1 keeps seven channels and the DMAMUX seven), COMP3, FDCAN, USB, CRS,
+GPIOE, the second flash bank, the EXTI's second-group TRIGGER registers,
+WKUP3, TAMP_IN3, PWR's PUCRE/PDCRE, and `RCC_CCIPR_I2C2SEL` - which is
+what takes I2C2's independent clock, its SMBus and its wake with it. Its
+USART3 is BASIC where the G0B1's is FULL, so it has one wake line fewer;
+its MCOSEL and MCOPRE are three bits rather than four. ONE PER-PART FACT
+THIS CAMPAIGN ADDED TO THE RESERVE: `tim_etrsel_has_mco()`, because
+RM0444 22.4.25's ETRSEL list gives codes 0100, 0101 and 0110 to the
+G0B1/G0C1 sales types alone and no TIM register says so
+([tim.md](tim.md)).
+
+The **Nucleo-G031K8** (STM32G031K8, a Nucleo-32: 64 KB single-bank flash,
+8 KB SRAM, LD3 on **PC6**, the VCP on USART2 PA2/PA3) is in house and has
+NOT had its first power-on: position `G` is reserved and waits for its
+ST-LINK serial, its LED and VCP pads verified the way the other two
+boards' were, and the LSE crystal's presence (a Nucleo-32 may not
+populate it). All three boards have their presets (`stm32g0b1re-*`,
+`stm32g071rb-*`, `stm32g031k8-*`), linker scripts, crts and
+`tools/bench.py` board types, and `blink`, `console` and `probe` build
+for all three.
 
 **Vector names across the boards.** The crt spells ST's own handler
 names, and a SHARED line's name changes with what shares it - USART2's

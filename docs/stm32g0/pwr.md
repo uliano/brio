@@ -516,6 +516,40 @@ back; and a shared interrupt vector whose body is chosen by a variable
 must have that variable set by every letter that drives the peripheral
 by hand, or a warm run inherits the previous letter's behaviour.
 
+## On the second silicon
+
+`test_stm32_sleep` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
+0x2000) and scores **50/50**, every letter and every verdict the G0B1RE
+gives: all four depths, both sites, the entry preconditions, the flash
+power-down and the Standby and Shutdown letters outside `z`. Measured
+there, one arm-sleep-wake round costs **7933 us in Sleep, 7964 in Stop 0
+and 7993 in Stop 1** (the same 7993 with the flash powered down), and a
+250 ms Stop 1 with the kernel tick still armed lasted its full 250 ms
+with DBGMCU_CR.DBG_STOP clear - the same two states this suite measures
+on the other die.
+
+**AND THE TWO DIES DO NOT AGREE ABOUT WHAT A SHUTDOWN WAKE LOOKS LIKE.**
+A STANDBY wake is the same on both: `PWR_SR1.SBF` stands and RCC_CSR
+names no reset source at all, so a deep wake is invisible to the reset
+chapter's own register. A SHUTDOWN wake is not. On the G0B1RE it looks
+exactly like the Standby one - SBF standing, RCC_CSR empty. On the
+G071RB it is **4.3.9's power-on reset, literally**: SBF is CLEARED with
+everything else and RCC_CSR comes up holding **PWRRSTF with the
+catch-all PINRSTF beside it** (0x0C00 0000). So the evidence a deep wake
+leaves is an EXCLUSIVE OR across this family, which is how letter `u`
+now judges it: something is always left behind, and exactly one of the
+two things is - a boot that reads only SBF is reading the wrong register
+on half the family. Neither register tells Standby from Shutdown on
+either die, which is why a program that has to know leaves itself a note
+in a backup register, as this letter does.
+
+**TWO PER-PART FACTS the reserve reads and this suite now judges rather
+than assumes**: the G071 bonds FIVE of the six wake-up pins (WKUP3 is the
+G0B1/G0C1's) and has no PWR_PUCRE/PDCRE, port E being absent - so
+`pwr_wakeup_pin_count()` is 5 there and 6 on the G0B1RE, and a pin the
+part has not got is REFUSED rather than written, which is what the
+verdict now says.
+
 ## Not covered yet
 
 Driver gaps (this chapter's option space the stratum does not touch):

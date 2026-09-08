@@ -443,6 +443,47 @@ re-state its claim afterwards or every later completion is consumed by
 the wrong branch and answered `i2c_timeout` on a tenure that ran
 perfectly.
 
+## On the second silicon
+
+`test_stm32_i2c` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
+with the Nucleo-G0B1RE as its peer - the roles of the G0-to-G0 link
+exchanged - and scores **54/54**, the same 54 the G0B1RE scores hosting
+the other way. The self-link letters skip after the probe, as on E.
+
+**TABLE 165's COLUMN MOVES WITH THE PART, AND THE SILICON SAYS SO.**
+There is no I2C3 (`i2c_present(3)` false, `I2c<3>` does not compile), and
+- the finding that matters - **this part's I2C2 HAS NO INDEPENDENT
+CLOCK**: the header declares no `RCC_CCIPR_I2C2SEL_Pos`, so
+`i2c_has_independent_clock(2)`, `i2c_has_smbus(2)` and
+`i2c_wakes_from_stop(2)` are all false, and `smbus_probe()` - 32.9.6's
+own question, a TIMEOUTR write that does not read back - answers **I2C1
+yes, I2C2 NO** where on the G0B1RE both answer yes. The wake line follows:
+`i2c_exti_line(2)` is 0xFF here and 22 there. Letter `a`'s roster,
+selector, wake-line and SMBus verdicts are all written as the reserve's
+statement for the part rather than as constants.
+
+**AND THE THREE REFUSALS MOVE WITH IT.** The verbs that must refuse on an
+instance without the independent clock - `kernel_clock()`, `timeouts()`,
+`wake_from_stop()` - are put to I2C3 on a part that has one and to I2C2
+on a part that has not, which is the same claim about the same column
+asked of whichever instance is in it.
+
+Measured against the peer: the three speeds byte-exact both ways with SCL
+at **99 / 400 / 1000 kHz** (the 100 k rung at 99 kHz, the measured
+tSYNC budget rather than the standard's worst case), the tenure shapes
+with the repeated START counted from the far end as two address matches,
+the whole vocabulary on the wire, commanded stretching at 2 ms a byte
+costing exactly 16 ms for eight, and the kernel letter running `I2cBus`
+with an `i2c_timeout` recovered and the next tenure `i2c_ok`.
+
+ES0418's I2C items: **2.11.1** (the tSU;DAT floors) is the G0B1's 2.10.1
+and is the driver's refusals, identical on both; **2.11.2** (a spurious
+BERR) is the G0B1's 2.10.2 and letter `m` counts none; **2.11.6** (a
+transfer stalled when PCLK/I2CCLK falls between 1.5 and 3) is NOT
+REACHED, this suite's ratios being 4, 1 and 0.125; and 2.11.3, 2.11.5 and
+2.11.7 need the multi-master, NOSTRETCH-target and SMBus-target roles the
+SELF-LINK carries, so they are not staged on this board.
+
 ## Not covered yet
 
 Driver gaps:
@@ -516,3 +557,9 @@ Declined, with the reason:
   (921 vs 921 ns): 6.1.3 makes it a pad property and the period is
   TIMINGR's, so what the 20 mA buys is the EDGE, which no instrument on
   this board can see.
+
+On the second silicon (the Nucleo-G071RB), NOT COVERED for the same reason
+- they are SELF-LINK roles: **ES0418 2.11.3, 2.11.5 and 2.11.7** (the
+own-address match, the NOSTRETCH underrun, the SMBus slave timeout), the
+10-bit addressing both ways, the PEC, the time-outs, the wake from Stop
+and the whole stretching census. All are measured on the G0B1RE.

@@ -298,6 +298,21 @@ public:
      * 16.7.1 says the same of TSELx - so this verb disables the channel
      * first, writes MCR, then CR. A caller that wants the channel running
      * calls `enable(ch, true)` after.
+     *
+     * A CALLER'S OBLIGATION ON THE G071/G081, and this file cannot
+     * discharge it: ES0418 2.7.1 (revisions Y and B alike) says that with
+     * the channel disabled, writing a MODE other than 000 BEFORE any data
+     * has been written leaves that channel's analog output INVALID, and
+     * the workaround is one write to any data register FIRST, then the
+     * MODE. Every mode this driver offers but `internal_unbuffered` is a
+     * non-zero MODE, so the sequence a caller wants is `set(ch, code)`
+     * (which stores DHR12Rx unconditionally, with or without a
+     * configuration) and only then `configure(ch, ...)`. Putting the data
+     * write inside this verb would change what every image already built
+     * for this family does, so it is stated and not done; the G0B1's
+     * ES0548 has no such item, and test_stm32_analog measures the
+     * configure-then-set order - the erratum's own condition - on the
+     * die it runs on (not reproduced on a G071 revision B).
      */
     static bool configure(uint8_t ch, const DacChannelConfig& c) {
         if (!channel_valid(ch) || !dac_channel_config_valid(c)) {

@@ -561,6 +561,58 @@ RTC's wake-up timer as the backstop:
   reaches further than the request path. Recorded as measured, not
   explained.
 
+## On the second silicon
+
+`test_stm32_serial` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
+0x2000) and scores **83/83** against the G0B1RE's 88.
+
+**TABLE 183 IS A DIFFERENT ROW THERE, and the silicon says so.** The part
+has FOUR USARTs and one LPUART: USART1 and USART2 FULL, **USART3 and
+USART4 BASIC** (USART3 is FULL on the G0B1), USART5, USART6 and LPUART2
+absent. Letter `a` walks every instance the part HAS and finds the
+reserve's `usart_is_full` column, the device header's own
+`IS_UART_FIFO_INSTANCE` and the silicon agreeing on the FIFO for each of
+them; CR2.CLKEN sticks on every USART including the BASIC ones and on
+neither LPUART, so the synchronous row of table 184 still cuts
+USART-vs-LPUART and not FULL-vs-BASIC; and PRESC still takes a value and
+reads it back on a BASIC instance while the transmitter then emits
+NOTHING (90 us of nine zero bits at /1 and no frame at all at /16), which
+is the same finding on a second die.
+
+**THE WAKE LINE FOLLOWS THE COLUMN AND NOT THE INSTANCE NUMBER**: with
+USART3 BASIC here, `usart_exti_line(3)` is 0xFF and the part has three
+wake lines (25, 26 for USART1/2 and 28 for LPUART1) where the G0B1RE has
+four. The vectors move the same way, derived from presence:
+USART3_4_LPUART1_IRQn here against USART3_4_5_6_LPUART1_IRQn there, both
+bound through `BRIO_STM32G0_USART3_HANDLER`.
+
+**AND ONE ERRATUM TAKES FOUR VERDICTS WITH IT.** ES0418 2.2.4 says the
+EXTI-related DMAMUX trigger inputs are routed to `it_exti_per(y)` instead
+of to `exti[15:0]`, and this suite's edge counter - a DMAMUX request
+generator triggered by an EXTI line, the instrument letters `j`, `m` and
+`o` use to count a clock with no CPU - is exactly what that breaks. The
+boot probe measures it on PB3 and the numbers are the mechanism: four pad
+edges move **0** words with the EXTI event mask alone and **1 of 4** with
+the interrupt mask armed too, while the EXTI's own rising pending bit
+sees every edge and four SOFTWARE events on the same line, generator and
+channel move **4**. So the trigger follows the LEVEL of the line's
+pending interrupt - no IMR bit, no level, no trigger; with one, the first
+edge raises it and nothing further arrives until somebody clears the
+pending bit. The sheet's "no workaround" is right for this purpose: the
+clear would need a CPU in the loop, which is the one thing a counter with
+no CPU cannot have. The smartcard CK ladder, the synchronous CK census
+and both IRTIM counts therefore skip by name.
+
+ES0418 2.12.2 (data corruption on a noisy receive line) is the G0B1's
+2.11.1 and letter `f` stages it the same way; 2.12.3 is the prescaler
+documentation item measured above. **2.12.4** (data corrupted when ABREN
+is cleared during a reception) is answered STRUCTURALLY:
+`auto_baud_off()` refuses with UE set, so this driver has no path to that
+write and a disabled receiver is not receiving. 2.12.5 (NE set with
+ONEBIT on a noisy START bit) is not exercised - letter `f`'s ONEBIT rows
+run on a clean start bit - and 2.12.1 (an SPI-slave TC anticipated) has
+no letter, there being no synchronous slave on this desk.
+
 ## Not covered yet
 
 Driver gaps: none. Every field of chapter 33 is implemented.
@@ -606,3 +658,10 @@ carries both engines - so every verdict line of that suite left the chip
 through a `DmaTxEngine` and every letter arrived through a `DmaRxEngine`
 (docs/stm32g0/dma.md has the throughput table and the ST-LINK VCP's own
 921600 ceiling).
+
+On the second silicon (the Nucleo-G071RB), NOT COVERED, all four blocked by
+ES0418 2.2.4 rather than by a missing block: **the smartcard CK ladder**,
+**the synchronous master's CK census** and **both IRTIM counting legs** -
+every one of them an edge counter with no CPU, which is exactly the path
+that erratum breaks. USART5, USART6 and LPUART2 are absent there and are
+not claimed either.

@@ -58,7 +58,7 @@
 //          python3 tools/bench.py run E s --app test_stm32_sleep
 //                  --expect="pass," --timeout 200
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -386,9 +386,14 @@ void ta_ladder() {
         }
     }
     print(serial, " (", pwr_wakeup_pin_count(), " of six)", crlf);
-    bench.verdict("the G0B1 bonds all six wake-up pins, and a pin the part "
-                  "has not got is refused rather than written",
-                  pwr_wakeup_pin_count() == 6u && !Pwr::wakeup_pin(7, true));
+    bench.verdict("this part bonds the wake-up pins the reserve reads off "
+                  "PWR_CR3's own EWUPn bits, and a pin it has not got is "
+                  "REFUSED rather than written - WKUP7 always, and WKUP3 too "
+                  "on a part below the G0B1",
+                  pwr_wakeup_pin_count() >= 5u && !Pwr::wakeup_pin(7, true) &&
+                      Pwr::wakeup_pin_present(1) == pwr_wakeup_pin_present(1) &&
+                      Pwr::wakeup_pin(3, true) == pwr_wakeup_pin_present(3) &&
+                      !Pwr::wakeup_pin(3, false) == !pwr_wakeup_pin_present(3));
     bench.verdict("the Standby pull registers follow the GPIO bonding: port "
                   "A has one, port G is nowhere",
                   Pwr::standby_pull('A', 0, false, false) &&
@@ -1069,14 +1074,28 @@ void deep_leg(PwrMode mode, const char* name, uint8_t leg_id) {
         // raises. So neither register tells the two apart, and a
         // program that has to know must leave itself a note (this
         // letter's own backup register is that note).
-        bench.verdict("PWR_SR1.SBF stands after the wake: the boot can tell "
-                      "a DEEP-mode wake from a plain reset, which is what "
-                      "4.4.5 promises",
-                      sbf);
-        bench.verdict("and RCC_CSR names NO reset source for it - not "
-                      "PWRRSTF, not the catch-all PINRSTF - so a deep wake "
-                      "is invisible to the reset chapter's own register",
-                      (boot_flags & ResetFlag::all) == 0u);
+        const uint32_t named = boot_flags & ResetFlag::all;
+        print(serial, "  the evidence this boot was left: PWR_SR1.SBF ",
+              sbf ? "STANDS" : "clear", ", RCC_CSR reset flags ", hex(named),
+              " (power=", (named & ResetFlag::power) != 0u,
+              " pin=", (named & ResetFlag::pin) != 0u, ")", crlf);
+        bench.verdict("THE BOOT CAN TELL A DEEP-MODE WAKE FROM A PLAIN "
+                      "RESET: something is left behind - PWR_SR1.SBF, which "
+                      "4.4.5 promises, or the reset RCC_CSR names",
+                      sbf || named != 0u);
+        // AND THE TWO DIES OF THIS FAMILY LEAVE DIFFERENT EVIDENCE, which
+        // is why this is an EXCLUSIVE OR and not two claims. One leaves
+        // SBF standing with RCC_CSR empty - so a deep wake is invisible
+        // to the reset chapter's own register; the other performs
+        // 4.3.9's power-on reset literally, raising PWRRSTF (with the
+        // catch-all PINRSTF beside it) and clearing SBF with everything
+        // else. Neither register alone tells Standby from Shutdown on
+        // either of them, which is why a program that has to know leaves
+        // itself a note - this letter's own backup register is that note.
+        bench.verdict("and the two are ALTERNATIVES and not a pair: exactly "
+                      "one of them appears, so a boot that reads only SBF is "
+                      "reading the wrong register on half this family",
+                      sbf != (named != 0u));
         const uint32_t stamp = Tamp::backup(token_reg2);
         const uint32_t now = wall();
         const uint32_t slept = wall_delta(stamp, now);
@@ -1130,7 +1149,7 @@ void tu_shutdown() { deep_leg(PwrMode::shutdown, "Shutdown", 2); }
 
 void banner() {
     print(serial, crlf,
-          "test_stm32_sleep - PWR and the two sleep sites (board E, no wires)",
+          "test_stm32_sleep - PWR and the two sleep sites (no wires)",
           crlf);
     bench.menu();
     print(serial, "  z  run them all", crlf);
@@ -1139,7 +1158,7 @@ void banner() {
 }   // namespace
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
-extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
+extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 extern "C" void RTC_TAMP_IRQHandler() {
     rtc_wakes = rtc_wakes + 1u;
     if (timed_round) {
@@ -1214,6 +1233,9 @@ int main() {
         }
         bench.prompt();
     } else if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        print(serial, crlf, "part DEV_ID ", hex(idcode.dev_id),
+              " REV_ID ", hex(idcode.rev_id), crlf);
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL 64 MHz" : "FAILED",
               " tick=", tick_ok ? "SysTick" : "FAILED",
               " wall=", wall_ready ? "RTC on LSE" : "NO CRYSTAL",

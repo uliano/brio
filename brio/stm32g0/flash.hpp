@@ -234,6 +234,49 @@ struct DeviceUid {
     }
 };
 
+/**
+ * The two halves of DBGMCU_IDCODE (RM0444 40.10.1): DEV_ID names the
+ * part FAMILY (0x460 = G071/G081, 0x467 = G0B1/G0C1, 0x466 = G031/G041,
+ * ...) and REV_ID names the SILICON REVISION, which is the key an errata
+ * sheet's status columns are read by.
+ *
+ * It sits beside DeviceUid because it answers the same question at the
+ * other granularity: the UID says WHICH BOARD, the ID code says WHICH
+ * DIE, and a bench suite that runs on more than one part prints both -
+ * a measurement that differs between two boards is only a finding once
+ * the part it was taken on is on the record.
+ *
+ * NEITHER FIELD IS A NAME THIS STRATUM KNOWS. The reserve derives what
+ * a part HAS from the header's own presence macros and never from a
+ * device identifier, and nothing in brio branches on this read: it is
+ * evidence for a human, printed and not compared.
+ *
+ * THE DBGMCU ANSWERS ONLY WITH RCC_APBENR1.DBGEN SET (5.2.17), which is
+ * CLEAR at reset, so read() opens the gate for the access and puts it
+ * back as it found it - pwr.hpp's debug_in_stop() is the same dance for
+ * the same reason. The gate is written through the CMSIS pointer with
+ * 5.2.17's readback because clock.hpp includes THIS file, so `Rcc` is
+ * not reachable from here.
+ */
+struct DeviceIdcode {
+    uint16_t dev_id;
+    uint16_t rev_id;
+
+    static DeviceIdcode read() {
+        const bool was_open = (RCC->APBENR1 & RCC_APBENR1_DBGEN) != 0u;
+        RCC->APBENR1 = RCC->APBENR1 | RCC_APBENR1_DBGEN;
+        (void)RCC->APBENR1;
+        const uint32_t code = DBG->IDCODE;
+        if (!was_open) {
+            RCC->APBENR1 = RCC->APBENR1 & ~RCC_APBENR1_DBGEN;
+            (void)RCC->APBENR1;
+        }
+        return DeviceIdcode{
+            static_cast<uint16_t>((code & DBG_IDCODE_DEV_ID_Msk) >> DBG_IDCODE_DEV_ID_Pos),
+            static_cast<uint16_t>((code & DBG_IDCODE_REV_ID_Msk) >> DBG_IDCODE_REV_ID_Pos)};
+    }
+};
+
 /// Which PHYSICAL bank an erase acts on. 3.3.2: erase is always linked
 /// to a physical bank and is NOT affected by nSWAP_BANK, while
 /// programming follows the logical address - so this enum is only ever

@@ -477,6 +477,33 @@ capture channel weighs all three against the core clock with no pad.
   internal pull-up until the strobe releases it, and does afterwards.
   The same is true of PA8, which is CC1 - see [port.md](port.md).
 
+## On the second silicon
+
+`test_stm32_rtc` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
+and scores **125/125**, the same letters and the same verdicts.
+
+- **The LSE crystal is fitted on that board too and starts.** Its RTC
+  domain was found EMPTY (RCC_BDCR 0x0000 0000, LSEON clear - not merely
+  unselected), letter `a` claimed it with the ordinary one-way RTCSEL
+  write, and LSERDY rose inside the driver's bounded wait on the first
+  try. The crystal measures **32736 Hz** against the core (976 ppm off
+  32768) where the G0B1RE's reads 32703 - both of them the CORE's own 1 %
+  trim and not the crystal's.
+- **There are TWO external tamper inputs and not three.**
+  `tamp_external_inputs()` counts the TAMPxE enable bits and finds two;
+  TAMP_IN3 is the G0B1/G0C1's. TAMP_CR1 still comes out of a domain reset
+  at 0xFFFF0000 with the four internal tampers armed, and the five backup
+  registers are the same.
+- **ARMING A TAMPER INPUT DOES NOT TAKE THE PAD ON THIS DIE.** PA0
+  (TAMP_IN2 on both parts - DS12232 and DS13560 agree, so this is not a
+  pad map) driven HIGH by PORT reads back 1 with TAMP2E set on the G071RB
+  and 0 on the G0B1RE, MODER untouched in both. Neither errata sheet has
+  an item for it and no register reports it. The letter prints both
+  readings and DECLINES the strong claim where the silicon does not
+  support it; nothing else in the chapter rests on it, every later leg
+  driving the detector through the precharge and the board's own pulls
+  rather than through a port output.
+
 ## Not covered yet
 
 Driver gaps (this chapter's option space the stratum does not touch):

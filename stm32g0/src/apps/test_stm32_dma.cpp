@@ -70,7 +70,7 @@
 //   w  (outside z) the two rungs ABOVE that ceiling, for the numbers
 //      alone - no verdict rests on a rate the bridge is proven to corrupt
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -122,7 +122,20 @@ using ChB = DmaChannel<1, 2>;   // m2m, the vector pair
 using ChC = DmaChannel<1, 3>;   // the vector pair's other half
 using ChD = DmaChannel<1, 4>;   // the ping-pong engine
 using ChE = DmaChannel<1, 5>;   // the request generator, and the CIRC race
-using Ch2 = DmaChannel<2, 1>;   // the second controller
+
+// ---- naming a SECOND controller only where the part has one ----------------
+// `if constexpr` inside a plain function still instantiates the branch it
+// discards, so every leg that spells `Dma<2>` lives in a function TEMPLATE
+// whose parameter carries the reserve's presence fact. That is not enough
+// on its own: a NON-DEPENDENT `Dma<2>` inside a template body is looked up
+// when the template is DEFINED, discarded branch or not. So the instance
+// NUMBER is made to depend on the very same fact - `Dma2<present>` is
+// `Dma<2>` exactly where `present` is true, and is never instantiated
+// where it is false.
+template <bool present>
+using Dma2 = Dma<present ? uint8_t{2} : uint8_t{1}>;
+template <bool present, uint8_t ch>
+using Dma2Channel = DmaChannel<present ? uint8_t{2} : uint8_t{1}, ch>;
 
 using Loop = DmaLoopEngine<1, 1, uint32_t>;
 using Pong = DmaPingPongEngine<1, 4, uint32_t>;
@@ -133,7 +146,12 @@ using T2 = Tim<2>;     // the payload counter, and LD4's PWM
 using T3 = Tim<3>;     // the pace
 using T14 = Tim<14>;   // trigger input 22 for the request generator
 using T16 = Tim<16>;   // the capture source, on LSI
-using T4b = Tim<4>;    // letter m's peripheral-to-peripheral destination
+// letter m's peripheral-to-peripheral destination. The same rule as the
+// DMA2 aliases below: a timer this part may not have is reached through
+// an alias whose NUMBER depends on the reserve's fact, so nothing outside
+// a live `if constexpr` branch ever names it.
+template <bool present>
+using Tim4 = Tim<present ? uint8_t{4} : uint8_t{3}>;
 using T6b = Tim<6>;    // letter m's and letter n's pacer
 using Lp1d = Lptim<1>; // letter n's alarm through a Stop, on LSE
 
@@ -249,6 +267,14 @@ void drain_console() {
     }
 }
 
+/// The second controller's channel 1 is stopped only where it exists.
+template <bool present = dma_present(2)>
+void quiet_second_controller() {
+    if constexpr (present) {
+        Dma2Channel<present, 1>::stop();
+    }
+}
+
 void quiet_everything() {
     Loop::stop();
     Pong::stop();
@@ -258,7 +284,7 @@ void quiet_everything() {
     ChC::stop();
     ChD::stop();
     ChE::stop();
-    Ch2::stop();
+    quiet_second_controller();
     (void)DmaMux::release(ChA::mux_channel);
     (void)DmaMux::release(ChB::mux_channel);
     (void)DmaMux::release(ChC::mux_channel);
@@ -289,34 +315,76 @@ void fill_source() {
 
 // ---- a: the block ------------------------------------------------------------
 
+// ---- what a SECOND controller answers, where the part has one ---------------
+// A part whose header declares no DMA2 must not SPELL `Dma<2>` at all (the
+// driver's static_assert is the refusal), and `if constexpr` inside a plain
+// function still instantiates the branch it discards - so every question
+// letter a and letter c ask about the second controller lives in a function
+// TEMPLATE whose parameter carries the reserve's presence fact.
+template <bool present = dma_present(2)>
+uint32_t dma2_channels_seen() {
+    if constexpr (present) {
+        return Dma2<present>::channels;
+    } else {
+        return 0u;
+    }
+}
+
+template <bool present = dma_present(2)>
+int32_t dma2_first_irq() {
+    if constexpr (present) {
+        return static_cast<int32_t>(Dma2Channel<present, 1>::irq());
+    } else {
+        return -1;   // no such line on this part
+    }
+}
+
+/// 11.3.2's map continues straight through the second controller: its
+/// first multiplexer channel is DMA1's channel COUNT. A part with one
+/// controller has nothing to say and says so by leaving the claim alone.
+template <bool present = dma_present(2)>
+bool dma2_mux_numbering() {
+    if constexpr (present) {
+        return Dma2Channel<present, 1>::mux_channel == Dma<1>::channels &&
+               Dma2Channel<present, 5>::mux_channel == Dma<1>::channels + 4u &&
+               Dma2Channel<present, 1>::irq() == dma_channel_irq(1, 4);
+    } else {
+        return true;
+    }
+}
+
 void ta_block() {
     print(serial, "  DMA1 channels ", Dma<1>::channels, ", DMA2 ",
-          static_cast<uint32_t>(dma_present(2) ? Dma<2>::channels : 0),
+          dma2_channels_seen(),
           "; DMAMUX channels ", DmaMux::channels, ", request generators ",
           DmaMux::generators, crlf);
     bench.verdict("the reserve reads this part's geometry off the device "
-                  "header: seven channels on DMA1, five on DMA2, twelve "
-                  "multiplexer channels and four generators",
-                  Dma<1>::channels == 7u && dma_present(2) && Dma<2>::channels == 5u &&
-                      DmaMux::channels == 12u && DmaMux::generators == 4u);
+                  "header: seven channels on DMA1, five more on a second "
+                  "controller where the part has one, one multiplexer channel "
+                  "per channel of both, and four generators",
+                  Dma<1>::channels == 7u &&
+                      dma2_channels_seen() == (dma_present(2) ? 5u : 0u) &&
+                      DmaMux::channels == 7u + dma2_channels_seen() &&
+                      DmaMux::generators == 4u);
 
     bench.verdict("11.3.2's hardwired map: DMAMUX channels 0..6 are DMA1's "
-                  "1..7 and 7..11 are DMA2's 1..5",
+                  "1..7, and where a second controller exists 7..11 are "
+                  "DMA2's 1..5",
                   ChA::mux_channel == 0u && DmaChannel<1, 7>::mux_channel == 6u &&
-                      Ch2::mux_channel == 7u && DmaChannel<2, 5>::mux_channel == 11u);
+                      dma2_mux_numbering());
 
     print(serial, "  vectors: ch1 ", static_cast<int32_t>(ChA::irq()), ", ch2 ",
           static_cast<int32_t>(ChB::irq()), ", ch3 ", static_cast<int32_t>(ChC::irq()),
           ", ch4 ", static_cast<int32_t>(ChD::irq()), ", DMA2 ch1 ",
-          static_cast<int32_t>(Ch2::irq()), ", DMAMUX ",
+          dma2_first_irq(), " (-1 = no second controller), DMAMUX ",
           static_cast<int32_t>(dmamux_irq()), crlf);
-    bench.verdict("THREE VECTORS SERVE TWELVE CHANNELS (table 61): channel 1 "
-                  "alone, 2 and 3 together, and one line for DMA1's 4..7, "
-                  "every DMA2 channel and the DMAMUX overrun",
+    bench.verdict("THREE VECTORS SERVE EVERY CHANNEL (table 61): channel 1 "
+                  "alone, 2 and 3 together, and ONE line for DMA1's 4..7, "
+                  "every DMA2 channel the part has and the DMAMUX overrun",
                   ChA::irq() == DMA1_Channel1_IRQn && ChB::irq() == ChC::irq() &&
                       ChB::irq() == DMA1_Channel2_3_IRQn &&
-                      ChD::irq() == DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn &&
-                      Ch2::irq() == ChD::irq() && dmamux_irq() == ChD::irq());
+                      ChD::irq() == dma_channel_irq(1, 4) &&
+                      dma2_mux_numbering() && dmamux_irq() == ChD::irq());
 
     // What this boot found, sampled in main() before a line of ours ran.
     // NOTHING HERE RESETS A CONTROLLER, and that is not squeamishness:
@@ -531,6 +599,48 @@ void tb_mem_to_mem() {
 
 // ---- c: arbitration ----------------------------------------------------------
 
+/// The controllers are independent bus masters: DMA2 arbitrates its own
+/// channels and nothing says a DMA1 priority reaches across. A part with
+/// one controller has no such claim to make and says so by name.
+template <bool present = dma_present(2)>
+void tc_second_controller() {
+    if constexpr (present) {
+        using Ch2 = Dma2Channel<present, 1>;
+        Dma2<present>::bus_clock(true);
+        for (uint16_t i = 0; i < 64; ++i) {
+            dst_words[i] = 0;
+        }
+        const bool ok = Ch2::load(DmaTransfer{
+            .peripheral = &big_src[0],
+            .memory = &dst_words[0],
+            .count = 64,
+            .config = {.memory_to_memory = true,
+                       .peripheral_increment = true,
+                       .memory_increment = true,
+                       .peripheral_width = DmaWidth::word,
+                       .memory_width = DmaWidth::word}});
+        uint32_t spins = 1'000'000u;
+        while (!Ch2::flag(DmaFlag::complete) && spins-- != 0u) {
+        }
+        bool exact = ok && Ch2::flag(DmaFlag::complete);
+        for (uint16_t i = 0; i < 64 && exact; ++i) {
+            if (dst_words[i] != big_src[i]) {
+                exact = false;
+            }
+        }
+        Ch2::stop();
+        bench.verdict("the SECOND controller is a bus master of its own and "
+                      "moves a block on its own channel 1", exact);
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: the second bus master's own "
+              "channel 1 needs a DMA2, which this part has not got "
+              "(dma_present(2) is false - the reserve finds no DMA2_BASE in "
+              "the device header).",
+              crlf);
+    }
+}
+
 /// Prepare a long MEM2MEM block on `C` without starting it.
 template <class C>
 bool arm_long(volatile const void* from, volatile void* to, uint16_t count,
@@ -712,35 +822,7 @@ void tc_arbitration() {
                       "the line above", true);
     }
 
-    // The controllers are independent bus masters; DMA2 arbitrates its own
-    // channels and nothing says a DMA1 priority reaches across.
-    if (dma_present(2)) {
-        Dma<2>::bus_clock(true);
-        for (uint16_t i = 0; i < 64; ++i) {
-            dst_words[i] = 0;
-        }
-        const bool ok = Ch2::load(DmaTransfer{
-            .peripheral = &big_src[0],
-            .memory = &dst_words[0],
-            .count = 64,
-            .config = {.memory_to_memory = true,
-                       .peripheral_increment = true,
-                       .memory_increment = true,
-                       .peripheral_width = DmaWidth::word,
-                       .memory_width = DmaWidth::word}});
-        uint32_t spins = 1'000'000u;
-        while (!Ch2::flag(DmaFlag::complete) && spins-- != 0u) {
-        }
-        bool exact = ok && Ch2::flag(DmaFlag::complete);
-        for (uint16_t i = 0; i < 64 && exact; ++i) {
-            if (dst_words[i] != big_src[i]) {
-                exact = false;
-            }
-        }
-        Ch2::stop();
-        bench.verdict("the SECOND controller is a bus master of its own and "
-                      "moves a block on its own channel 1", exact);
-    }
+    tc_second_controller();
 
     quiet_everything();
 }
@@ -981,13 +1063,46 @@ void tf_multiplexer() {
                       "SWIER pulses on an EXTI line moved five words, with "
                       "no pad, no peripheral and no wire",
                       true);
+        print(serial, "  AND THIS LEG DOES NOT SPEAK FOR A PAD. ES0418 2.2.4 "
+              "(STM32G071/G081 revision B) routes the EXTI-related DMAMUX "
+              "trigger inputs to the line's pending-INTERRUPT level instead "
+              "of to its edge, and this loop clears that pending bit after "
+              "every pulse - so a software event passes on such a die while "
+              "a pad edge does not. test_stm32_serial's boot probe is where "
+              "the two are told apart.", crlf);
     } else {
         // The honest form: report and decline, rather than assert a
         // mechanism the bench did not show (the samc21 TC 1.20.2 precedent).
+        //
+        // AND ON ONE DIE OF THIS FAMILY THE DECLINE HAS A CANDIDATE NAME.
+        // ES0418 2.2.4 (STM32G071/G081, revision B, no workaround) says
+        // the EXTI-related DMAMUX synchronization and trigger inputs are
+        // wrongly routed to it_exti_per(y) instead of exti[15:0]. Measured
+        // (test_stm32_serial's boot probe), that routing makes the trigger
+        // follow the LEVEL of the line's pending interrupt: a pad edge
+        // moves nothing without IMR and one word with it, while a SWIER
+        // pulse whose loop CLEARS the pending bit - this loop - still
+        // moves a word each time. So a zero here on that die is not the
+        // erratum's own signature; the die's ID code only says which
+        // sheet to read. DEV_ID 0x460 is the G071/G081 family, and the
+        // reserve knows no device names.
+        const auto id = brio::DeviceIdcode::read();
+        const bool es0418 = id.dev_id == 0x460u;
         print(serial, "  the software trigger moved ", sw_moved, " of 5 - the "
               "SWIER path to trigger input ", sw_line, " is NOT confirmed here "
               "and the verdict is declined, the hardware trigger above being "
               "what this letter rests on", crlf);
+        if (es0418) {
+            print(serial, "  on DEV_ID ", hex(id.dev_id), " REV_ID ",
+                  hex(id.rev_id), " ES0418 2.2.4 routes the EXTI-related "
+                  "DMAMUX trigger inputs to it_exti_per(y) - the pending "
+                  "interrupt's LEVEL - and not to exti[15:0]; a SWIER loop "
+                  "that clears after every pulse still moves a word on that "
+                  "die (measured by test_stm32_serial's boot probe), so this "
+                  "zero is NOT that erratum's signature and stays unexplained. "
+                  "The hardware trigger above (TIM14_OC, trigger input 22) is "
+                  "not an EXTI line and is unaffected either way.", crlf);
+        }
         bench.verdict("a software EXTI trigger reaching the request "
                       "generator - DECLINED, see the line above",
                       true);
@@ -1161,7 +1276,7 @@ void tg_fixed_point() {
                        .memory_width = DmaWidth::word}});
         (void)DmaMux::request(ChE::mux_channel, T3::dma_update_request());
         ChE::arm(DmaFlag::half, true);
-        Nvic::enable(DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn);
+        Nvic::enable(dma_channel_irq(1, 4));
         uint32_t spins = 4'000'000u;
         while (circ_hits == 0u && spins-- != 0u) {
         }
@@ -1464,7 +1579,7 @@ void ti_timer_round_trip() {
     pong_is_capture = true;
     pong_blocks = 0;
     PongCap::arm(T16::ccr_address(0), T16::dma_compare_request(0));
-    Nvic::enable(DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn);
+    Nvic::enable(dma_channel_irq(1, 4));
     const bool cap_started = PongCap::start(cap_a, cap_b, block_len);
 
     uint32_t drained = 0;
@@ -1613,7 +1728,7 @@ void tj_relay() {
     pong_is_capture = false;
     pace_start(hz);
     Pong::arm(payload_address(), T3::dma_update_request());
-    Nvic::enable(DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn);
+    Nvic::enable(dma_channel_irq(1, 4));
     kernel_mode = true;
     const bool started = Pong::start(pong_a, pong_b, block_len);
 
@@ -2277,12 +2392,6 @@ void banner() {
 // runs all five at all three widths, which is what the doc's line
 // "the widths on DMA2" asks for.
 
-using Ch2a = DmaChannel<2, 1>;
-using Ch2b = DmaChannel<2, 2>;
-using Ch2c = DmaChannel<2, 3>;
-using Ch2d = DmaChannel<2, 4>;
-using Ch2e = DmaChannel<2, 5>;
-
 /// One MEM2MEM block on an arbitrary channel, polled to completion.
 template <class C>
 bool block_on(volatile const void* from, volatile void* to, uint16_t count,
@@ -2336,39 +2445,61 @@ bool widths_on(uint8_t index) {
     return ok;
 }
 
-void tm_dma2_and_p2p() {
-    quiet_everything();
-    for (uint16_t i = 0; i < 512; ++i) {
-        big_src[i] = 0x5A000000u + i;
+template <bool present = dma_present(2)>
+void tm_all_of_dma2() {
+    if constexpr (present) {
+        Dma2<present>::bus_clock(true);
+
+        const bool all = widths_on<Dma2Channel<present, 1>>(1) &&
+                         widths_on<Dma2Channel<present, 2>>(2) &&
+                         widths_on<Dma2Channel<present, 3>>(3) &&
+                         widths_on<Dma2Channel<present, 4>>(4) &&
+                         widths_on<Dma2Channel<present, 5>>(5);
+        bench.verdict("every one of DMA2's five channels moves a block at every "
+                      "width, byte for byte - the second controller is five "
+                      "channels and not one",
+                      all);
+        print(serial, "  DMA1 has ", Dma<1>::channels, " channels and DMA2 ",
+              Dma2<present>::channels, "; DMA1's 6 and 7 are this console's own "
+              "two engines, so all twelve have carried traffic", crlf);
+        bench.verdict("and DMAMUX's channel numbering runs straight through both "
+                      "controllers, DMA2's first being DMA1's count",
+                      Dma2Channel<present, 1>::mux_channel == Dma<1>::channels &&
+                          Dma2Channel<present, 5>::mux_channel ==
+                              Dma<1>::channels + 4u);
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: five more channels at three "
+              "widths need a DMA2, which this part has not got "
+              "(dma_present(2) is false). DMA1's seven are the whole "
+              "controller here and letters a..l have moved every one of them.",
+              crlf);
     }
-    if (!dma_present(2)) {
-        bench.verdict("this part has a second controller", false);
+}
+
+// ---- 10.4.5's FIRST sense: a transfer between two PERIPHERALS ---------------
+// The request comes from ONE peripheral and neither end of the transfer
+// is that peripheral: TIM6's update paces a channel that reads TIM3's
+// counter and writes TIM4's reload register. TIM4 is the one timer of
+// this suite's set that a part may not have, so the leg carries the
+// reserve's fact in its own template parameter.
+template <bool present = tim_present(4)>
+void tm_peripheral_to_peripheral() {
+    if constexpr (!present) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: the peripheral-to-peripheral "
+              "transfer writes TIM4's compare register, and this part has no "
+              "TIM4 (tim_present(4) is false - the reserve finds no TIM4_BASE "
+              "in the device header). Every other timer of this suite's set "
+              "is spoken for by a letter above.",
+              crlf);
         return;
-    }
-    Dma<2>::bus_clock(true);
-
-    const bool all = widths_on<Ch2a>(1) && widths_on<Ch2b>(2) &&
-                     widths_on<Ch2c>(3) && widths_on<Ch2d>(4) &&
-                     widths_on<Ch2e>(5);
-    bench.verdict("every one of DMA2's five channels moves a block at every "
-                  "width, byte for byte - the second controller is five "
-                  "channels and not one",
-                  all);
-    print(serial, "  DMA1 has ", Dma<1>::channels, " channels and DMA2 ",
-          Dma<2>::channels, "; DMA1's 6 and 7 are this console's own two "
-          "engines, so all twelve have carried traffic", crlf);
-    bench.verdict("and DMAMUX's channel numbering runs straight through both "
-                  "controllers, DMA2's first being DMA1's count",
-                  Ch2a::mux_channel == Dma<1>::channels &&
-                      Ch2e::mux_channel == Dma<1>::channels + 4u);
-
-    // ---- 10.4.5's FIRST sense: a transfer between two PERIPHERALS -----------
-    // The request comes from ONE peripheral and neither end of the
-    // transfer is that peripheral: TIM6's update paces a channel that
-    // reads TIM3's counter and writes TIM4's reload register. Nothing in
-    // this controller's vocabulary names the arrangement - both ends are
-    // simply addresses with their increments off - which is exactly what
-    // dma.md says, and this is what it looks like when it runs.
+    } else {
+    using T4b = Tim4<present>;
+    // Nothing in this controller's vocabulary names the arrangement -
+    // both ends are simply addresses with their increments off - which is
+    // exactly what dma.md says, and this is what it looks like when it
+    // runs.
     T3::bus_clock(true);
     T4b::bus_clock(true);
     T6b::bus_clock(true);
@@ -2415,6 +2546,16 @@ void tm_dma2_and_p2p() {
     T3::release();
     T4b::release();
     T6b::release();
+    }
+}
+
+void tm_dma2_and_p2p() {
+    quiet_everything();
+    for (uint16_t i = 0; i < 512; ++i) {
+        big_src[i] = 0x5A000000u + i;
+    }
+    tm_all_of_dma2();
+    tm_peripheral_to_peripheral();
     quiet_everything();
 }
 
@@ -2547,7 +2688,7 @@ void tn_sleep_story() {
 
 // ---- the vectors ----------------------------------------------------------------
 
-extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
+extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
@@ -2585,7 +2726,7 @@ extern "C" void DMA1_Channel2_3_IRQHandler() {
 /// The third line is the crowded one: DMA1's channels 4..7, every DMA2
 /// channel, and the DMAMUX overrun. The console's own two engines live
 /// here, which is why they are served first.
-extern "C" void DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQHandler() {
+extern "C" void BRIO_STM32G0_DMA1_CH4_UP_HANDLER() {
     (void)Serial::dma_isr();
 
     // The DMAMUX's own overrun shares this line (table 61). Letter k is
@@ -2688,6 +2829,9 @@ int main() {
                  tw_beyond, false);
 
     if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        brio::print(serial, brio::crlf, "part DEV_ID ", brio::hex(idcode.dev_id),
+              " REV_ID ", brio::hex(idcode.rev_id), brio::crlf);
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL64" : "FAILED",
                     " tick=", tick_ok ? "SysTick" : "FAILED",
                     " console engines: TX ch", static_cast<uint32_t>(ConsoleTx::channel),

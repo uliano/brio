@@ -92,7 +92,7 @@
 //      16.4.12's offset calibration as the procedure it is, and
 //      sample-and-hold on an LSI this letter starts and puts back
 //
-// build: boards = g0b1re
+// build: boards = g0b1re,g071rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -153,7 +153,84 @@ using In5 = AnalogIn<PadA5, 5>;
 
 using C1 = Comp<1>;
 using C2 = Comp<2>;
-using C3 = Comp<3>;
+
+// COMP3 and TIM4 are the G0B1/G0C1's alone (18.1 and the reserve's timer
+// table). A part that has not got them must not SPELL them - the drivers'
+// static_asserts are the refusal - and `if constexpr` inside a plain
+// function still instantiates the branch it discards, while a
+// NON-DEPENDENT `Comp<3>` inside a template body is looked up when the
+// template is DEFINED. So both are reached through aliases whose NUMBER
+// depends on the very fact that gates the branch: `Comp3<present>` is
+// `Comp<3>` exactly where `present` is true and is never instantiated
+// where it is false.
+template <bool present>
+using Comp3 = Comp<present ? uint8_t{3} : uint8_t{2}>;
+template <bool present>
+using Tim4 = Tim<present ? uint8_t{4} : uint8_t{3}>;
+
+// ---- the third comparator, asked only where it exists -----------------------
+// Every one of these is the same shape: the reserve's fact as the default
+// template argument, the live branch spelling `Comp3<present>` and the
+// other branch claiming nothing.
+
+template <bool present = comp_present(3)>
+constexpr uint32_t comp3_exti_bit() {
+    if constexpr (present) {
+        return 1u << Comp3<present>::exti_line;
+    } else {
+        return 0u;
+    }
+}
+
+template <bool present = comp_present(3)>
+bool comp3_shares_adc_vector() {
+    if constexpr (present) {
+        return Comp3<present>::irq() == ADC1_COMP_IRQn;
+    } else {
+        return true;
+    }
+}
+
+template <bool present = comp_present(3)>
+bool comp3_line_20() {
+    if constexpr (present) {
+        return Comp3<present>::exti_line == 20 && Exti::configurable(20);
+    } else {
+        return true;
+    }
+}
+
+template <bool present = comp_present(3)>
+bool comp3_window_partner() {
+    if constexpr (present) {
+        return Comp3<present>::window_partner == 2;
+    } else {
+        return true;
+    }
+}
+
+template <bool present = comp_present(3)>
+bool comp3_unlocked() {
+    if constexpr (present) {
+        return !Comp3<present>::locked();
+    } else {
+        return true;
+    }
+}
+
+template <bool present = comp_present(3)>
+void comp3_init() {
+    if constexpr (present) {
+        Comp3<present>::init();
+    }
+}
+
+template <bool present = comp_present(3)>
+void quiet_comp3() {
+    if constexpr (present) {
+        (void)Comp3<present>::release();
+    }
+}
 
 using T6 = Tim<6>;   // the basic timer: a time base and a TRGO, nothing else
 using T1 = Tim<1>;   // TISEL reaches COMP1's output on TI1
@@ -337,7 +414,7 @@ void quiet_everything() {
     (void)Exti::release(C2::exti_line);
     (void)C1::release();
     (void)C2::release();
-    (void)C3::release();
+    quiet_comp3();
     T6::release();
     T1::release();
     Adc::release();
@@ -393,24 +470,29 @@ void ta_block() {
           " CCIPR=", hex(boot_ccipr), " (VREFBUF_CSR through the CLOSED "
           "SYSCFG gate: ", hex(boot_vrefbuf_clockless), ")", crlf);
 
-    bench.verdict("the G0B1 carries one ADC of nineteen channels, a two-channel "
-                  "DAC, three comparators and the reference buffer",
+    print(serial, "  comparators on this part: ", comp_count(), crlf);
+    bench.verdict("this part carries one ADC of nineteen channels, a "
+                  "two-channel DAC, the reference buffer, and the two or "
+                  "three comparators the reserve reads off the header "
+                  "(18.1: the third is the G0B1/G0C1's alone)",
                   adc_present() && adc_channels() == 19 && dac_present() &&
-                      dac_channels() == 2 && comp_count() == 3 && vrefbuf_present());
-    bench.verdict("the ADC's vector is SHARED with all three comparators, and "
-                  "the DAC's with TIM6 and LPTIM1 (table 61)",
+                      dac_channels() == 2 && vrefbuf_present() &&
+                      comp_count() == (comp_present(3) ? 3u : 2u));
+    bench.verdict("the ADC's vector is SHARED with every comparator the part "
+                  "has, and the DAC's with TIM6 and LPTIM1 (table 61)",
                   Adc::irq() == ADC1_COMP_IRQn && C1::irq() == ADC1_COMP_IRQn &&
-                      C3::irq() == ADC1_COMP_IRQn && Dac::irq() == TIM6_DAC_LPTIM1_IRQn);
-    bench.verdict("the comparators' EXTI lines are 17, 18 and 20, and all "
-                  "three are CONFIGURABLE lines (13.5.1)",
-                  C1::exti_line == 17 && C2::exti_line == 18 && C3::exti_line == 20 &&
+                      C2::irq() == ADC1_COMP_IRQn && comp3_shares_adc_vector() &&
+                      Dac::irq() == TIM6_DAC_LPTIM1_IRQn);
+    bench.verdict("the comparators' EXTI lines are 17, 18 and - where there is "
+                  "a third - 20, every one of them a CONFIGURABLE line (13.5.1)",
+                  C1::exti_line == 17 && C2::exti_line == 18 &&
                       Exti::configurable(17) && Exti::configurable(18) &&
-                      Exti::configurable(20));
+                      comp3_line_20());
     bench.verdict("WINMODE's partner is NOT n + 1: COMP1 borrows COMP2's plus "
-                  "input, COMP2 borrows COMP1's, COMP3 borrows COMP2's (18.6.1, "
-                  "one register description at a time)",
+                  "input, COMP2 borrows COMP1's, and a COMP3 borrows COMP2's "
+                  "(18.6.1, one register description at a time)",
                   C1::window_partner == 2 && C2::window_partner == 1 &&
-                      C3::window_partner == 2);
+                      comp3_window_partner());
 
     // What this boot found, before a line of this suite ran.
     bench.verdict("every analog block came up with its APB clock CLOSED, "
@@ -1421,6 +1503,34 @@ void precharge(bool high) {
     PadA1::analog();
 }
 
+/// The third comparator's registers, reached through the SYSCFG gate its
+/// block lives behind. Its plus pads are left alone here - letter n is
+/// where it becomes a signal path.
+template <bool present = comp_present(3)>
+void ti_comp3_registers() {
+    if constexpr (present) {
+        using C3 = Comp3<present>;
+        print(serial, "  COMP3 is present and its registers answer, but its "
+              "three plus pads (PB0/PC1/PE7) are left alone here - no verdict "
+              "is offered on a comparator this letter never gives an input.",
+              crlf);
+        bench.verdict("COMP3 exists on this part and its CSR is reachable "
+                      "through the SYSCFG gate, which is what its register "
+                      "block lives behind (18.3.3)",
+                      C3::configure({.negative = CompNegative::vrefint}) &&
+                          C3::negative() == CompNegative::vrefint);
+        (void)C3::release();
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: the third comparator's register "
+              "block needs a COMP3, which this part has not got "
+              "(comp_present(3) is false - 18.1 gives the third to the "
+              "G0B1/G0C1 alone, and the reserve finds no COMP3 bit field in "
+              "the device header).",
+              crlf);
+    }
+}
+
 void ti_comparators() {
     quiet_everything();
     clear_counts();
@@ -1753,16 +1863,8 @@ void ti_comparators() {
     bench.verdict("the LOCK bit is clear and stays clear: 18.3.4 makes it "
                   "one-way until the next MCU reset, so this suite reads it "
                   "and never writes it", !C1::locked() && !C2::locked() &&
-                                             !C3::locked());
-    print(serial, "  COMP3 is present and its registers answer, but its three "
-          "plus pads (PB0/PC1/PE7) are left alone on this desk - no verdict "
-          "is offered on a comparator this suite never gives an input.", crlf);
-    bench.verdict("COMP3 exists on this part and its CSR is reachable through "
-                  "the SYSCFG gate, which is what its register block lives "
-                  "behind (18.3.3)",
-                  comp_present(3) && C3::configure({.negative = CompNegative::vrefint}) &&
-                      C3::negative() == CompNegative::vrefint);
-    (void)C3::release();
+                                             comp3_unlocked());
+    ti_comp3_registers();
     quiet_everything();
 }
 
@@ -2138,7 +2240,7 @@ void tl_errata() {
           "ONLY and this die is revision Z, so it does not apply.", crlf);
     bench.verdict("and the pass leaves the block as it found it: nothing "
                   "here wrote a lock bit, an option byte or a flash cell",
-                  !C1::locked() && !C2::locked() && !C3::locked() &&
+                  !C1::locked() && !C2::locked() && comp3_unlocked() &&
                       !Vref::enabled());
     quiet_everything();
 }
@@ -2669,13 +2771,76 @@ bool blanking_gate(uint8_t mask, uint8_t channel) {
     return before && !during && after;
 }
 
+/// COMP3 as a whole SIGNAL PATH - both of its own plus pads read against
+/// half of VREFINT, and its own EXTI line counted through the vector it
+/// shares with the ADC.
+template <bool present = comp_present(3)>
+void tn_comp3_half() {
+    if constexpr (present) {
+        using C3 = Comp3<present>;
+        print(serial, "  COMP3 INP: 0=P",
+              static_cast<char>(C3::positive_pin(CompPositive::input0).port),
+              C3::positive_pin(CompPositive::input0).pin, " 1=P",
+              static_cast<char>(C3::positive_pin(CompPositive::input1).port),
+              C3::positive_pin(CompPositive::input1).pin, crlf);
+        const bool c3_p0 = rail_pair<C3, PadB0>(CompPositive::input0);
+        const bool c3_p1 = rail_pair<C3, PadC1>(CompPositive::input1);
+        bench.verdict("COMP3 RUNS TOO, on both of the plus pads this board "
+                      "leaves free - PB0 as INPSEL 0 and PC1 as INPSEL 1 (table "
+                      "97) - which is the whole of comp.md's 'COMP3 entirely as "
+                      "a signal path'", c3_p0 && c3_p1);
+        print(serial, "  COMP3's third plus input is PE7, and the driver reports "
+              "it VALID because this DEVICE has a port E (18.6.1's table is a "
+              "device fact). Whether this PACKAGE bonds that pad is a per-package "
+              "table this stratum does not have - port.md carries the gap - so "
+              "the pad is named and left alone rather than driven", crlf);
+
+        // COMP3's own EXTI line is 20, and it shares the ADC's vector with
+        // the other two - so the same handler that counts COMP1's edges in
+        // letter i counts these, which is what makes COMP3 a SIGNAL PATH
+        // here and not just a register.
+        (void)Exti::sense(C3::exti_line, ExtiSense::both);
+        (void)Exti::clear(C3::exti_line);
+        (void)Exti::interrupt(C3::exti_line, true);
+        Nvic::clear_pending(Adc::irq());
+        Nvic::enable(Adc::irq());
+        const uint32_t before_edges = comp_exti_calls;
+        for (uint8_t i = 0; i < 4u; ++i) {
+            // PC1 and not PB0: the last configuration above left COMP3 on
+            // INPSEL 1, and a comparator watches the pad it was told to.
+            precharge_pad<PadC1>(true);
+            (void)delay_us(clock, 200);
+            precharge_pad<PadC1>(false);
+            (void)delay_us(clock, 200);
+        }
+        const uint32_t c3_edges = comp_exti_calls - before_edges;
+        Nvic::disable(Adc::irq());
+        (void)Exti::release(C3::exti_line);
+        print(serial, "  COMP3's EXTI line ", C3::exti_line, " reported ",
+              c3_edges, " interrupts for four round trips of PC1 (eight edges)",
+              crlf);
+        bench.verdict("...and COMP3 reaches the NVIC on line 20, through the "
+                      "vector it shares with the ADC and the other two "
+                      "comparators - eight edges, eight interrupts",
+                      c3_edges >= 8u);
+    } else {
+        print(serial,
+              "  SKIPPED, no verdict claimed: a third comparator's own plus "
+              "pads (PB0, PC1) and its own EXTI line 20 need a COMP3, which "
+              "this part has not got (comp_present(3) is false - 18.1 gives "
+              "the third to the G0B1/G0C1 alone). COMP1 and COMP2 above are "
+              "every comparator this part has, and both ran.",
+              crlf);
+    }
+}
+
 void tn_comp_pads() {
     quiet_everything();
     clear_counts();
     out_pad_edges = 0;
     C1::init();
     C2::init();
-    C3::init();
+    comp3_init();
 
     // ---- the precondition, pad by pad -------------------------------------
     const bool b4 = pad_follows_pull<PadB4>();
@@ -2694,11 +2859,7 @@ void tn_comp_pads() {
     print(serial, "  COMP2 INP: 0=P", static_cast<char>(C2::positive_pin(CompPositive::input0).port),
           C2::positive_pin(CompPositive::input0).pin, " 1=P",
           static_cast<char>(C2::positive_pin(CompPositive::input1).port),
-          C2::positive_pin(CompPositive::input1).pin, "; COMP3 INP: 0=P",
-          static_cast<char>(C3::positive_pin(CompPositive::input0).port),
-          C3::positive_pin(CompPositive::input0).pin, " 1=P",
-          static_cast<char>(C3::positive_pin(CompPositive::input1).port),
-          C3::positive_pin(CompPositive::input1).pin, crlf);
+          C2::positive_pin(CompPositive::input1).pin, crlf);
     const bool c2_p0 = rail_pair<C2, PadB4>(CompPositive::input0);
     const bool c2_p1 = rail_pair<C2, PadB6>(CompPositive::input1);
     bench.verdict("COMP2 RUNS ON ITS OWN PLUS PADS, which every other letter "
@@ -2707,47 +2868,7 @@ void tn_comp_pads() {
                   "against half of VREFINT at both rails (table 95)",
                   c2_p0 && c2_p1);
 
-    // ---- COMP3, a whole signal path this suite has never used --------------
-    const bool c3_p0 = rail_pair<C3, PadB0>(CompPositive::input0);
-    const bool c3_p1 = rail_pair<C3, PadC1>(CompPositive::input1);
-    bench.verdict("COMP3 RUNS TOO, on both of the plus pads this board "
-                  "leaves free - PB0 as INPSEL 0 and PC1 as INPSEL 1 (table "
-                  "97) - which is the whole of comp.md's 'COMP3 entirely as "
-                  "a signal path'", c3_p0 && c3_p1);
-    print(serial, "  COMP3's third plus input is PE7, and the driver reports "
-          "it VALID because this DEVICE has a port E (18.6.1's table is a "
-          "device fact). Whether this PACKAGE bonds that pad is a per-package "
-          "table this stratum does not have - port.md carries the gap - so "
-          "the pad is named and left alone rather than driven", crlf);
-
-    // COMP3's own EXTI line is 20, and it shares the ADC's vector with
-    // the other two - so the same handler that counts COMP1's edges in
-    // letter i counts these, which is what makes COMP3 a SIGNAL PATH
-    // here and not just a register.
-    (void)Exti::sense(C3::exti_line, ExtiSense::both);
-    (void)Exti::clear(C3::exti_line);
-    (void)Exti::interrupt(C3::exti_line, true);
-    Nvic::clear_pending(Adc::irq());
-    Nvic::enable(Adc::irq());
-    const uint32_t before_edges = comp_exti_calls;
-    for (uint8_t i = 0; i < 4u; ++i) {
-        // PC1 and not PB0: the last configuration above left COMP3 on
-        // INPSEL 1, and a comparator watches the pad it was told to.
-        precharge_pad<PadC1>(true);
-        (void)delay_us(clock, 200);
-        precharge_pad<PadC1>(false);
-        (void)delay_us(clock, 200);
-    }
-    const uint32_t c3_edges = comp_exti_calls - before_edges;
-    Nvic::disable(Adc::irq());
-    (void)Exti::release(C3::exti_line);
-    print(serial, "  COMP3's EXTI line ", C3::exti_line, " reported ",
-          c3_edges, " interrupts for four round trips of PC1 (eight edges)",
-          crlf);
-    bench.verdict("...and COMP3 reaches the NVIC on line 20, through the "
-                  "vector it shares with the ADC and the other two "
-                  "comparators - eight edges, eight interrupts",
-                  c3_edges >= 8u);
+    tn_comp3_half();
 
     // ---- the OUTPUT on a pad ----------------------------------------------
     // COMP1 back on PA1 against half of VREFINT, and its output handed
@@ -3148,7 +3269,7 @@ void to_dac_tail() {
 // =============================================================================
 void banner() {
     print(serial, crlf, "test_stm32_analog - ADC + DAC + VREFBUF + COMP "
-          "(RM0444 ch. 15..18) on the STM32G0B1RE", crlf,
+          "(RM0444 ch. 15..18) on the STM32G0", crlf,
           "  nothing to wire; PA4 is DAC1_OUT1 AND ADC_IN4, which is the "
           "only route between the two converters on this family", crlf);
     bench.menu();
@@ -3430,7 +3551,14 @@ void tp_dac_triggers() {
 //     hardware triggers nothing has ever pulled
 // =============================================================================
 
+// TIM4 exists on the G0B1/G0C1 alone. Its trigger row lives inside a
+// static table of lambdas, where a template parameter cannot reach, so
+// this is one of the two places the brief's other spelling applies: an
+// `#if` INSIDE THE APP, on the header's own base macro - never in a
+// driver, and never a device name.
+#if defined(TIM4_BASE)
 using T4m = Tim<4>;
+#endif
 using PadB11 = Pin<'B', 11>;
 
 /// The conversion time of ONE conversion of the CURRENT configuration,
@@ -3671,8 +3799,10 @@ void tq_adc_tail() {
          [] { return trgo_once<T2m>(true); }, [] { (void)trgo_once<T2m>(false); }},
         {"TIM3_TRGO", AdcTrigger::tim3_trgo,
          [] { return trgo_once<T3m>(true); }, [] { (void)trgo_once<T3m>(false); }},
+#if defined(TIM4_BASE)
         {"TIM4_TRGO", AdcTrigger::tim4_trgo,
          [] { return trgo_once<T4m>(true); }, [] { (void)trgo_once<T4m>(false); }},
+#endif
         {"TIM15_TRGO", AdcTrigger::tim15_trgo,
          [] { return trgo_once<T15m>(true); }, [] { (void)trgo_once<T15m>(false); }},
     };
@@ -3700,12 +3830,24 @@ void tq_adc_tail() {
                   hit ? 1u : 0u, crlf);
         }
     }
+    constexpr uint8_t timer_rows = tim_present(4) ? 6u : 5u;
     print(serial, "  hardware triggers: ", fired, " of ", tried,
-          " fired once each and not before", crlf);
-    bench.verdict("every timer row of table 75 starts a conversion on one "
-                  "event and not before it - TIM1's TRGO2 included, which "
-                  "MMS2's reset value makes the update event itself",
-                  tried == 6u && fired == 6u);
+          " fired once each and not before (", timer_rows,
+          " timer rows on this part)", crlf);
+    if constexpr (!tim_present(4)) {
+        print(serial,
+              "  SKIPPED, no verdict claimed: table 75's TIM4_TRGO row needs "
+              "a TIM4, which this part has not got (tim_present(4) is false - "
+              "the reserve finds no TIM4_BASE in the device header). The "
+              "AdcTrigger enumerator still exists, because the trigger's CODE "
+              "is every part's; the timer behind it is not.",
+              crlf);
+    }
+    bench.verdict("every timer row of table 75 that this part HAS starts a "
+                  "conversion on one event and not before it - TIM1's TRGO2 "
+                  "included, which MMS2's reset value makes the update event "
+                  "itself",
+                  tried == timer_rows && fired == timer_rows);
 
     // EXTI 11, the one row that is a pad.
     PadB11::input(PinPull::down);
@@ -3888,7 +4030,7 @@ void tr_external_inputs() {
 // =============================================================================
 // The vectors
 // =============================================================================
-extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
+extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
@@ -3924,8 +4066,11 @@ extern "C" void ADC1_COMP_IRQHandler() {
         adc_awd_calls = adc_awd_calls + 1u;
     }
 
+    // ONE LINE PER COMPARATOR THE PART HAS: a part with two comparators
+    // has no line 20 at all, and `1u << 0xFF` (the driver's "no such
+    // comparator" answer) is not a mask, it is undefined behaviour.
     constexpr uint32_t comp_lines = (1u << C1::exti_line) | (1u << C2::exti_line) |
-                                    (1u << C3::exti_line);
+                                    comp3_exti_bit();
     const brio::ExtiPending p = brio::Exti::isr(comp_lines);
     if (p.any()) {
         comp_exti_calls = comp_exti_calls + 1u;
@@ -4033,6 +4178,9 @@ int main() {
                  "calibration, and sample-and-hold on LSI", to_dac_tail);
 
     if (serial_ok) {
+        const auto idcode = brio::DeviceIdcode::read();
+        brio::print(serial, brio::crlf, "part DEV_ID ", brio::hex(idcode.dev_id),
+              " REV_ID ", brio::hex(idcode.rev_id), brio::crlf);
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL64" : "FAILED",
                     " tick=", tick_ok ? "SysTick" : "FAILED", brio::crlf);
         banner();

@@ -509,6 +509,41 @@ both 20.
     `Default_Handler` and never comes back - which is what the first
     version of this letter did.
 
+## On the second silicon
+
+`test_stm32_dma` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
+and scores **65/65** against the G0B1RE's 69, the four missing verdicts
+being the two the part cannot have and the two that skip with them:
+
+- **There is ONE controller.** `dma_present(2)` is false, so `Dma<2>` and
+  `DmaChannel<2, n>` do not compile there at all and DMA1's seven channels
+  are the whole of it; the DMAMUX has seven channels to match and the same
+  four request generators. Letter c's second-bus-master leg and the whole
+  of letter m's DMA2 half skip by name.
+- **The peripheral-to-peripheral transfer needs a fourth timer.** 10.4.5's
+  first sense is staged with TIM6's update moving TIM3's compare into
+  TIM4's, and a part with no TIM4 has no free timer left in this suite's
+  set, so that leg skips too. The arrangement itself is not per-part: it
+  is addresses with their increments off, and nothing in the vocabulary
+  names it.
+- Everything else is identical, the three vectors included: `dma_irq(1, 4)`
+  is the reserve's derivation on both parts and the handler is bound
+  through `BRIO_STM32G0_DMA1_CH4_UP_HANDLER`, which expands to the
+  G0B1's four-way name and the G071's three-way one.
+
+**AND ONE ERRATUM RIDES ON THE REQUEST GENERATOR.** ES0418 2.2.4
+(STM32G071/G081, revision B, "no workaround") says the EXTI-related
+DMAMUX synchronization and trigger inputs are routed to `it_exti_per(y)`
+instead of to `exti[15:0]`. Letter f's SWIER leg PASSES on that die (five
+software events, five words) and the reason is instructive: the trigger
+follows the LEVEL of the line's pending interrupt, and the leg's own loop
+clears that pending bit after every pulse. A REAL PAD EDGE does not
+survive it - `test_stm32_serial`'s boot probe measures both and
+[usart.md](usart.md) carries the numbers - so a staging that uses SWIER
+alone would report this path healthy. Letter k's synchronization block is
+unaffected: its sync input is TIM14_OC (table 56 input 22) and not an
+EXTI line.
+
 ## Not covered yet
 
 Driver gaps:
@@ -541,3 +576,8 @@ driver; 2.5.1 and 2.5.3 need two channels that can both overrun at once,
 which is the configuration their own workaround says to avoid; 2.5.2
 needs a trigger landing on the last request of a batch above two, which
 this suite's overrun leg deliberately steps around.
+
+On the second silicon (the Nucleo-G071RB), NOT COVERED: **DMA2's five
+channels at three widths**, the second bus master, and 10.4.5's
+peripheral-to-peripheral transfer, whose destination register is TIM4's.
+The part has neither.
