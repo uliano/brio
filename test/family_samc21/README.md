@@ -2,11 +2,11 @@
 
 Smoke translation units proving the `samc21/` drivers compile for every
 device header of the family the pack ships - instantiation only, no
-hardware, no `main()`. `tools/check_samc21.sh` compiles each `*.cpp` here
+hardware, no `main()`. `brio check samc21` compiles each `*.cpp` here
 for the E/G/J 18A variants (seconds), and each `neg/*.cpp` must FAIL for
 the variants its `// mcu:` header line names.
 
-The AVR counterpart (`test/family/`, `tools/check_family.sh`) exists
+The AVR counterpart (`test/family/`, `brio check avrdx`) exists
 because the bench chip masks half of that family: a missing port,
 instance, register or enum value only shows up on the package that lacks
 it. The SAM C21 is far more uniform - PORT (two groups everywhere),

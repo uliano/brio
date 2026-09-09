@@ -25,7 +25,7 @@ setters a rate's own `init()` sequences. ONE CHAPTER, ONE OWNER: chapter
 lives in [rtc.md](rtc.md), because that register is unreachable without
 the RTC domain's own write gate and its choices are one-way. The family
 fixture is `test/family_stm32g0/clock.cpp` plus eight negatives under
-`tools/check_stm32g0.sh`; the bench suite is `test_stm32_clock`.
+`brio check stm32g0`; the bench suite is `test_stm32_clock`.
 
 ## What the silicon does
 

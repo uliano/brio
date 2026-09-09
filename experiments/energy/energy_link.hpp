@@ -68,7 +68,7 @@ inline constexpr uint16_t signature_gap_us = 5000;
 
 // ---- the schedule generator -------------------------------------------------
 
-// xorshift32 (Marsaglia), the same generator tools/uart_stress.py
+// xorshift32 (Marsaglia), the same generator brio stress
 // established as the firmware/Python shared PRNG shape. Seed must be
 // nonzero. The burst-schedule derivation on top of this (arrival times,
 // M, W per point) is the meter's and run.py's alone - deliberately NOT

@@ -25,7 +25,7 @@ DMAMUX facts come from `stm32g0/device_tables.hpp`. Bench suites:
 `test_stm32_lptim` (10 letters, 82 verdicts, wireless) and
 `test_stm32_tickless` (the timebase). Family fixtures
 `test/family_stm32g0/lptim.cpp` and `lptim_ticker.cpp` plus their
-negatives under `tools/check_stm32g0.sh` (the third sleep site's own
+negatives under `brio check stm32g0` (the third sleep site's own
 two live with `test/family_stm32g0/sleep.cpp` - see [pwr.md](pwr.md)).
 
 ## What the silicon does

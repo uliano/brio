@@ -72,7 +72,7 @@
 //   p  (outside z) PM.bus_clock, whose "off" 19.5.2 calls one-way
 //
 // NOTE for anyone adding a letter: a printed line must NEVER contain
-// the two characters "->", because tools/bench.py looks for that arrow
+// the two characters "->", because bin/brio looks for that arrow
 // to find a letter's tally line and truncates the capture on a stray
 // one.
 //

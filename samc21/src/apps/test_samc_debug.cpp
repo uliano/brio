@@ -134,7 +134,7 @@ void console_drain() {
 }
 
 /// Eight zero-padded lowercase hex digits - the format
-/// tools/bench_boards.py records the die serial in, which a bare hex()
+/// bench/bench_boards.py records the die serial in, which a bare hex()
 /// (no padding) cannot produce.
 const char* hex8(uint32_t v, char* buf) {
     static const char digits[] = "0123456789abcdef";
@@ -842,7 +842,7 @@ void tc_resume() {
 // DSU letter d - board identity
 // =============================================================================
 //
-// THE OPERATIONAL DELIVERABLE. tools/bench_boards.py records each
+// THE OPERATIONAL DELIVERABLE. bench/bench_boards.py records each
 // board's factory 128-bit die serial and its DSU DID; these four words
 // are that record for the board this image is built for, and the
 // verdict is the check that the chip in hand is that board.
@@ -888,7 +888,7 @@ void td_identity() {
         }
     }
     bench.verdict("the factory die serial matches the one board C carries in "
-                  "tools/bench_boards.py - THE BOARD IS THE BOARD",
+                  "bench/bench_boards.py - THE BOARD IS THE BOARD",
                   serial_matches);
     bench.verdict("and it is not a blank or an erased word",
                   serial_words.word[0] != 0u &&
@@ -1899,7 +1899,7 @@ void tj_mtb_events() {
 //
 // OUTSIDE z BECAUSE IT RISKS THE BOARD. MASTER.HALTREQ and FLOW.AUTOHALT
 // ask the core to HALT. On ARMv6-M a halt request is honoured only when
-// DHCSR.C_DEBUGEN is set, and tools/bench.py CLEARS that bit at the end
+// DHCSR.C_DEBUGEN is set, and bin/brio CLEARS that bit at the end
 // of every SAM flash - so the expectation is that both are inert here.
 // If the expectation is wrong the board stops dead and needs a reflash,
 // which is exactly why this is asked for by name.

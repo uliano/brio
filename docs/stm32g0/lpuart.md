@@ -25,7 +25,7 @@ position, vector and EXTI line come from
 `stm32g0/device_tables.hpp`. Bench suite: `test_stm32_serial` letters n
 (in `z`) and v (host-assisted, outside `z`). Family fixture
 `test/family_stm32g0/lpuart.cpp` plus four negatives under
-`tools/check_stm32g0.sh`.
+`brio check stm32g0`.
 
 ## What the silicon does
 
@@ -194,7 +194,7 @@ while the console on USART2 - which shares ITS line with LPUART2 - kept
 talking throughout.
 
 **A WHOLE CONSOLE MOVES ONTO IT AND COMES BACK** (letter v, through
-`tools/uart_stress.py`): `LpUart<1>` on PA2/PA3 AF6, the same task and
+`brio stress`): `LpUart<1>` on PA2/PA3 AF6, the same task and
 the same verbs, clocked by the 32768 Hz crystal at 9600 takes 1061 bytes
 of the host's stream byte-exact with BRR 874, then on HSI16 at 115200
 takes 9280 bytes byte-exact with BRR 35556, and USART2 comes back to

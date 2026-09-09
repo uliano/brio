@@ -58,7 +58,7 @@
  *     }
  *
  * ON A BOARD WITH DHCSR.C_DEBUGEN CLEARED - which is what
- * `tools/bench.py` leaves after every SAM flash - THE SECOND PATH IS THE
+ * `bin/brio` leaves after every SAM flash - THE SECOND PATH IS THE
  * ONE THAT RUNS EVEN FOR AN ORDERLY PANIC: panic() calls
  * P::break_here() BEFORE any reporter, break_here() is a BKPT, and a
  * BKPT with nothing halted on it escalates to HardFault. The

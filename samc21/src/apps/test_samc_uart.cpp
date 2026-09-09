@@ -3,7 +3,7 @@
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over a
 // serial console; z runs the self-contained ones and prints the ALL: line
-// tools/bench.py judges.
+// bin/brio judges.
 //
 // WHAT THIS SUITE IS FOR. samc21/sercom.hpp's Uart can be built in four
 // shapes - interrupt or DMA on each direction, independently - and what
@@ -12,7 +12,7 @@
 // IDENTIFIED and not merely counted.
 //
 // THE PATTERN is a 32-bit xorshift, low byte per step, seeded the same at
-// both ends (tools/uart_stress.py runs the identical arithmetic). The
+// both ends (brio stress runs the identical arithmetic). The
 // board can therefore verify a received stream WITHOUT a return path, and
 // the host can verify an echoed one - so every leg is checked at both
 // ends, and the position of the first wrong byte is a number.
@@ -21,7 +21,7 @@
 // itself: there is no second port, no loop-back bit in this silicon and
 // no jumper on the bench. A byte can
 // only be checked against something OUTSIDE the chip, so the letters that
-// stream traffic sit OUTSIDE z, driven by tools/uart_stress.py - which is
+// stream traffic sit OUTSIDE z, driven by brio stress - which is
 // also the only thing that can speak a frame format the board is not
 // using, and therefore the only way to reach the receiver's error paths
 // at all. z keeps what the board can decide alone: the baud arithmetic,
@@ -42,7 +42,7 @@
 //
 // What is exercised, letter by letter - a..d need nothing outside the
 // board and are what z runs; e..p stream traffic and are driven by
-// tools/uart_stress.py:
+// brio stress:
 //   a  the baud generator's arithmetic
 //   b  every frame format, written and read back
 //   c  the transmit ring's contract under pressure
@@ -242,7 +242,7 @@ ErrCounts mode_errors() {
 // The stream, and the clock
 // =============================================================================
 
-/// The 32-bit xorshift both ends run. tools/uart_stress.py holds the same
+/// The 32-bit xorshift both ends run. brio stress holds the same
 /// three shifts and the same seed; if either moves, every letter that
 /// verifies a stream stops meaning anything, so neither does.
 constexpr uint32_t lfsr_seed = 0x12345678UL;
@@ -960,7 +960,7 @@ void banner() {
     print(plain, crlf,
           "test_samc_uart - SAMC21J18A SERCOM5 USART (ch. 30/31), clk=",
           SysClock::hz, " Hz", crlf,
-          "  letters e..p need tools/uart_stress.py on the other end", crlf);
+          "  letters e..p need brio stress on the other end", crlf);
     bench.menu();
 }
 

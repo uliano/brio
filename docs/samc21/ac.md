@@ -16,7 +16,7 @@ covers ONLY the analog path - the digital path's cost in cycles is
 stated nowhere, which is what the probe below measures). Driver:
 `samc21/ac.hpp` (`Ac` block + `AcComparator<n>` + `AcWindow<w>`).
 Family fixture `test/family_samc21/ac.cpp` plus four negatives under
-`tools/check_samc21.sh`. Two bench SUITES and one probe, and the
+`brio check samc21`. Two bench SUITES and one probe, and the
 distinction matters: `test_samc_ac` (6 letters, 94 verdicts, wireless)
 is the chapter's own, `test_samc_analog` carries what needs the DAC as
 a swept source (letters g to j), and `ac_sync_probe` is a PROBE - it

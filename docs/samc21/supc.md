@@ -13,7 +13,7 @@ characteristics of tables 45-18 and 45-20 - and errata DS80000740S
 item 1.8.14, live on this silicon and named in the code, with 1.8.11
 read and declared revision B only. Driver: `samc21/supc.hpp`. The family
 fixture is `test/family_samc21/supc.cpp` plus
-`neg/supc_vref_reserved_level.cpp` under `tools/check_samc21.sh`; the
+`neg/supc_vref_reserved_level.cpp` under `brio check samc21`; the
 bench suite is `test_samc_supc`.
 
 ## What the silicon does

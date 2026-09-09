@@ -24,7 +24,7 @@ presence, base, mask, clock-select and vector facts come from
 `stm32g0/clock.hpp` is the CCIPR2 verb this chapter needed. Bench suite:
 `test_stm32_fdcan` (12 letters, 96 verdicts, wireless). Family fixture
 `test/family_stm32g0/fdcan.cpp` plus twelve negatives under
-`tools/check_stm32g0.sh`.
+`brio check stm32g0`.
 
 ## What the silicon does
 
@@ -522,7 +522,7 @@ there and `Fdcan<1>` does not compile - which is the stratum's own way of
 spelling an absence and the reason the suite's `boards` line names one
 board. The protocol ARITHMETIC of this driver (the bit-timing choosers,
 the DLC coding, the element codecs) compiles on every header of the pack
-and is checked by `tools/check_stm32g0.sh` there; only the
+and is checked by `brio check stm32g0` there; only the
 register-facing half is gated.
 
 ## On the third silicon

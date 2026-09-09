@@ -17,7 +17,7 @@ is coded**, 2.2.1 and 2.2.11 are live and are reasons to prefer the
 crystal, 2.2.6 is live and unfixable. Driver: `stm32g0/rtc.hpp`
 (`RtcDomain`, `Rtc`, `Tamp`). Family fixture:
 `test/family_stm32g0/rtc.cpp` + eleven negatives under
-`tools/check_stm32g0.sh`. Bench suite: `test_stm32_rtc`.
+`brio check stm32g0`. Bench suite: `test_stm32_rtc`.
 
 ## What the silicon does
 

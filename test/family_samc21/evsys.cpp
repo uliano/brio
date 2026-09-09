@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/evsys.hpp: every verb must COMPILE on the E,
-// G and J 18A headers (tools/check_samc21.sh sweeps all three).
+// G and J 18A headers (brio check samc21 sweeps all three).
 //
 // EVSYS is one instance with the same twelve channels on every member of
 // the family. What this fixture pins is the LEGALITY the driver adds -

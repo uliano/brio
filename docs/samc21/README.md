@@ -61,7 +61,7 @@ grammar as the AVR project, board names of this family (`boards =
 c21j`; c21j is also the default). One configure targets one chip
 variant (`SAMC21_MCU`); only the J18A has a preset today - the E/G
 variants have no board on the desk and are compile-checked by
-`tools/check_samc21.sh` instead, which sweeps every positive TU in
+`brio check samc21` instead, which sweeps every positive TU in
 `test/family_samc21/` across the E/G/J 18A headers and requires every
 `neg/` TU to fail for the variants its `// mcu:` line names.
 
@@ -69,13 +69,13 @@ variants have no board on the desk and are compile-checked by
 (cd samc21 && cmake --preset samc21j-release)                       # configure (once, or after adding an app)
 (cd samc21 && cmake --build --preset samc21j-release --target <app>)
 (cd samc21 && cmake --build --preset samc21j-release --target <app>-upload)
-tools/check_samc21.sh [name]                                        # family smoke, no hardware
+brio check samc21 [name]                                        # family smoke, no hardware
 ```
 
 Build outputs land in the shared `build-cmake/samc21j-{release,debug}`
 at the repo root: `<app>.elf/.bin/.hex`, `firmware-<app>.map`,
 `<app>.lst`. A configure also writes this project's app roster,
-`build-cmake/apps_samc21.json`, which `tools/bench.py` reads: the board's
+`build-cmake/apps_samc21.json`, which `bin/brio` reads: the board's
 TYPE (`c21j`) is what tells that tool to build here and to flash
 through OpenOCD instead of avrdude, so a SAM suite is driven exactly
 like an AVR one (`bench.py flash C <app>`, `bench.py run C z`). The

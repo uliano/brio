@@ -3,7 +3,7 @@
 // ONE board.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
-// the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
+// the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the code
 // under it.
@@ -743,7 +743,7 @@ bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
         print(serial, " ", hex(first_seen[i]));
     }
     print(serial, crlf,
-          "      the peer board must be running `spi_peer` (python3 tools/bench.py "
+          "      the peer board must be running `spi_peer` (brio "
           "flash F spi_peer); its console '0' forces the dark client back.",
           crlf);
     (void)link_command_mode();
@@ -805,7 +805,7 @@ bool ensure_link() {
     link_quiet = false;
     print(serial,
           "  THE PEER DID NOT ANSWER. The peer board must be running `spi_peer` "
-          "(python3 tools/bench.py flash F spi_peer); its console '0' forces the "
+          "(brio flash F spi_peer); its console '0' forces the "
           "dark client back. Check the five wires in this file's header.",
           crlf);
     return false;

@@ -1,4 +1,4 @@
-# The samc21 family smoke TUs are compiled by tools/check_samc21.sh alone
+# The samc21 family smoke TUs are compiled by brio check samc21 alone
 # (no CMake project, so no database entry of their own). Same routing
 # rationale as test/family/.clangd: the SAM database's TUs lend their
 # flags, so these parse as arm-none-eabi instead of inheriting test/'s

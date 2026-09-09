@@ -3,7 +3,7 @@
 // fractional DPLL (FDPLL96M), DS60001479M ch. 20.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
-// the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
+// the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the driver
 // under it.
@@ -133,7 +133,7 @@ void wait_ms(uint32_t ms) {
     }
 }
 
-// NB the printed lines below never contain "->": tools/bench.py's judge
+// NB the printed lines below never contain "->": brio's judge
 // looks for that arrow to find a letter's tally line, and a stray one in
 // a report line ends the capture early. Learned on the bench.
 bool near(uint32_t got, uint32_t want, uint32_t band) {

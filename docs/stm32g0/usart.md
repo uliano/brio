@@ -24,9 +24,9 @@ bus-clock, capability and EXTI facts come from
 `stm32g0/device_tables.hpp`. The LPUARTs are
 [lpuart.md](lpuart.md) - the SAME task over a different resource. Bench
 suite: `test_stm32_serial` (15 letters in `z`, 88 verdicts, wireless;
-three more outside `z` through `tools/uart_stress.py`). Family fixture
+three more outside `z` through `brio stress`). Family fixture
 `test/family_stm32g0/usart.cpp` plus ELEVEN negatives under
-`tools/check_stm32g0.sh` (an instance nowhere, an instance off a part, a
+`brio check stm32g0` (an instance nowhere, an instance off a part, a
 pad used twice, two engines on one channel, FIFO mode on a BASIC
 instance, a Reserved prescaler code, a Reserved threshold code, a wake
 on PCLK, DE without a pad, and DE together with RTS).
@@ -518,7 +518,7 @@ for the start and the stop** - eight characters cost 56 rising edges,
 i.e. 7.0 each - **LBCL adds the pulse of the LAST bit** (64 edges, 8.0
 each), and CPOL is the level CK rests at.
 
-### Host-assisted (outside `z`, `tools/uart_stress.py`)
+### Host-assisted (outside `z`, `brio stress`)
 
 **Streaming across the kernel clocks** (letter y): the console took the
 host's stream byte-exact on PCLK at 115200, HSI16 at 115200, SYSCLK at

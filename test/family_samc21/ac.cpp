@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/ac.hpp: every verb must COMPILE on the E, G
-// and J 18A headers (tools/check_samc21.sh sweeps all three). The AC block
+// and J 18A headers (brio check samc21 sweeps all three). The AC block
 // is identical across the family at the register level; what differs is
 // PAD BONDING - 40.1 gives COMP2/3 only AIN[5:4] on the E and G - and
 // that is asserted here per variant, out of the device header's own AIN

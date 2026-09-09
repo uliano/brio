@@ -14,7 +14,7 @@ not a claim about the silicon. Driver: `stm32g0/crc.hpp`; the presence
 and mask facts come from `stm32g0/device_tables.hpp`. Bench suite:
 `test_stm32_crc` (5 letters, 27 verdicts, wireless). Family fixture
 `test/family_stm32g0/crc.cpp` plus two negatives under
-`tools/check_stm32g0.sh`.
+`brio check stm32g0`.
 
 ## What the silicon does
 

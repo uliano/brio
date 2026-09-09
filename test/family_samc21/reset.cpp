@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/reset.hpp: every verb must COMPILE on the E,
-// G and J 18A headers (tools/check_samc21.sh sweeps all three).
+// G and J 18A headers (brio check samc21 sweeps all three).
 //
 // RSTC and the WDT are one instance each on every member of the family
 // and neither register layout varies, so there is no package gating to

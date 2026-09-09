@@ -12,7 +12,7 @@
 // precede SerialPort (line producer) so the ping-pong buffers are always
 // free when SerialPort runs - see the scheduling contract in serial_port.hpp.
 //
-// Connect at 460800 8N1 (`tools/bench.py console <board>` names the
+// Connect at 460800 8N1 (`brio console <board>` names the
 // device, any serial monitor - incl. VSCode's built-in one - works) and type:
 //   HELP | LED ON|OFF|TOG | UPTIME | ERR
 //

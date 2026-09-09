@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/sleep.hpp: every verb must COMPILE on the E,
-// G and J 18A headers (tools/check_samc21.sh sweeps all three).
+// G and J 18A headers (brio check samc21 sweeps all three).
 //
 // The PM is one instance with one register layout on every member of the
 // family, so there is no package gating to check. What this fixture pins

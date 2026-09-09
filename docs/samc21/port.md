@@ -9,7 +9,7 @@
 Documents of record: SAM C20/C21 data sheet DS60001479M, PORT ch. 28
 (the EIC, for contrast, is ch. 26). Driver: `samc21/pin.hpp`. The
 family fixture is `test/family_samc21/pin.cpp` plus the two port-C
-negatives under `tools/check_samc21.sh`.
+negatives under `brio check samc21`.
 
 ## What the silicon does
 

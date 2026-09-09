@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/osc32kctrl.hpp: every verb must COMPILE on
-// the E, G and J 18A headers (tools/check_samc21.sh sweeps all three).
+// the E, G and J 18A headers (brio check samc21 sweeps all three).
 //
 // OSC32KCTRL is one instance on every member of the family and nothing
 // in it varies by package. What this fixture pins is the LEGALITY the

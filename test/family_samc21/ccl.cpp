@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/ccl.hpp: every verb must COMPILE on the E, G
-// and J 18A headers (tools/check_samc21.sh sweeps all three), and the pad
+// and J 18A headers (brio check samc21 sweeps all three), and the pad
 // map has to come out DIFFERENT on each - which is the whole point of
 // this chapter's per-package half.
 //

@@ -10,7 +10,7 @@ errata DS80000740S items 1.12.1, 1.12.3 and 1.12.4, **all three live on
 every silicon revision including this one** (1.12.2 is revisions B..E and
 not this chip). Driver: `samc21/evsys.hpp`. Family fixture
 `test/family_samc21/evsys.cpp` plus one negative under
-`tools/check_samc21.sh`; the bench suite is `test_samc_evsys`, which uses
+`brio check samc21`; the bench suite is `test_samc_evsys`, which uses
 `samc21/dmac.hpp` as its event user.
 
 ## What the silicon does

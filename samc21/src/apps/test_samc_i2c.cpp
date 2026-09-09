@@ -232,7 +232,7 @@ bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
     }
     if (!link_quiet) {
         print(serial, "    LINK FAILURE op ", hex(twilink::byte_of(op)),
-              ": the peer board must be running `twi_peer` (python3 tools/bench.py "
+              ": the peer board must be running `twi_peer` (brio "
               "flash C twi_peer); check the two I2C wires and the pull-ups.",
               crlf);
     }
@@ -280,7 +280,7 @@ bool ensure_link() {
     link_quiet = false;
     print(serial,
           "  THE PEER DID NOT ANSWER. The peer board must be running `twi_peer` "
-          "(python3 tools/bench.py flash C twi_peer). Check the desk's two I2C "
+          "(brio flash C twi_peer). Check the desk's two I2C "
           "wires (PA22-PA22, PA23-PA23), the pull-ups and the GND.",
           crlf);
     return false;

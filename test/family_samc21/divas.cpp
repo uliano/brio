@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/divas.hpp: every verb must COMPILE on the E,
-// G and J 18A headers (tools/check_samc21.sh sweeps all three).
+// G and J 18A headers (brio check samc21 sweeps all three).
 //
 // DIVAS is one instance at one address on every member of the family and
 // has no package variation at all. What this fixture pins is the pair of

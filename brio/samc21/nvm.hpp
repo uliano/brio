@@ -97,7 +97,7 @@
  *    action, and the watchdog's power-on ENABLE/ALWAYSON/PER - and it
  *    survives a chip erase, so a wrong word is not recoverable by
  *    reflashing. It is read here and typed; writing it is provisioning,
- *    and it is tools/bench.py's `fuses` verb, over SWD, that does it.
+ *    and it is brio's `fuses` verb, over SWD, that does it.
  *  - The two commands the device header carries but chapter 27's command
  *    table does not list at all: SF (0xA, "Security Flow") and WL (0xF,
  *    "Write lockbits"). Undocumented and, in WL's case, permanent.

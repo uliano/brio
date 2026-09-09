@@ -48,7 +48,7 @@
  * FLOW.AUTOSTOP and the watermark are pure hardware and work with
  * nothing attached. MASTER.HALTREQ and FLOW.AUTOHALT ask the core to
  * HALT, which on ARMv6-M requires DHCSR.C_DEBUGEN - a bit
- * `tools/bench.py` deliberately CLEARS after every SAM flash, precisely
+ * `bin/brio` deliberately CLEARS after every SAM flash, precisely
  * so a stray BKPT cannot stop an unattended board. They are exposed and
  * named; what they do here is measured rather than assumed.
  *

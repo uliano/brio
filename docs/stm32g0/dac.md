@@ -18,7 +18,7 @@ revision. Driver: `stm32g0/dac.hpp`; the reference vocabulary is
 `stm32g0/vref.hpp`'s. Bench suite: `test_stm32_analog` (shared with the
 ADC, the reference buffer and the comparators). Family fixture
 `test/family_stm32g0/dac.cpp` plus one negative under
-`tools/check_stm32g0.sh`.
+`brio check stm32g0`.
 
 ## What the silicon does
 

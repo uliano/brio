@@ -11,7 +11,7 @@ Documents of record: SAM C20/C21 data sheet DS60001479M ch. 35 - and
 errata DS80000740S items 1.20.1 to 1.20.3, of which **one is this
 silicon**. Driver: `samc21/tc.hpp`. Family fixture
 `test/family_samc21/tc.cpp` plus four negatives under
-`tools/check_samc21.sh`; the bench suites are `test_samc_tc` and - for
+`brio check samc21`; the bench suites are `test_samc_tc` and - for
 DMA-driven operation and the advanced modes - `test_samc_timer_dma`.
 
 ## What the silicon does

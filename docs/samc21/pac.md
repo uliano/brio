@@ -11,7 +11,7 @@ errata DS80000740S, which has **no PAC section at all**: not one of items
 OTHER chapters, five of them live at revision F, each saying the PAC does
 not behave as ch. 11 promises for one particular peripheral. Driver:
 `samc21/pac.hpp`. Family fixture `test/family_samc21/pac.cpp` plus two
-negatives under `tools/check_samc21.sh`; the bench suite is
+negatives under `brio check samc21`; the bench suite is
 `test_samc_debug`.
 
 The block can write-protect any peripheral on any APB bridge and reports

@@ -432,7 +432,7 @@ struct Pwr {
      * target script sets it at every connection whose examine finds the
      * DBGMCU's clock gate open - so a board that has seen a probe may
      * hold it without any program having asked. Read here so a program
-     * can tell a slow Stop from a debugged one; tools/bench.py clears it
+     * can tell a slow Stop from a debugged one; bin/brio clears it
      * after every flash.
      *
      * The DBGMCU answers only with RCC_APBENR1.DBGEN set (5.2.17), which

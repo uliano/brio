@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/tsens.hpp: every verb must COMPILE on the E,
-// G and J 18A headers (tools/check_samc21.sh sweeps all three). This
+// G and J 18A headers (brio check samc21 sweeps all three). This
 // peripheral has ONE instance and NO PADS AT ALL (43.5.1 is "Not
 // applicable"), so unlike the three converters there is no pad map to
 // vary - which is exactly what this file asserts, per variant, out of

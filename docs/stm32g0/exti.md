@@ -19,7 +19,7 @@ anything in this stratum. Driver: `stm32g0/exti.hpp`; the per-part line
 facts come from `stm32g0/device_tables.hpp`. Bench suite:
 `test_stm32_exti` (board E). Family fixture
 `test/family_stm32g0/exti.cpp` plus three negatives under
-`tools/check_stm32g0.sh`.
+`brio check stm32g0`.
 
 ## What the silicon does
 

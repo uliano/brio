@@ -1,6 +1,6 @@
 // Family smoke TU for util/nv_journal.hpp over samc21/nvm_flash.hpp: the
 // value journal and the RWWEE partition it lives in must COMPILE on the
-// E, G and J 18A headers (tools/check_samc21.sh sweeps all three).
+// E, G and J 18A headers (brio check samc21 sweeps all three).
 //
 // The partition is a pair of CONSTANTS on every variant - the RWWEE
 // array is 8 KB across the whole family and nothing the linker places

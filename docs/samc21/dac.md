@@ -18,7 +18,7 @@ own 1.9.2 (the EMPTY flag across a standby) are live, while 1.9.1
 `samc21/dac.hpp`, over the reserve's DAC entries in
 `samc21/device_tables.hpp`. The family fixture is
 `test/family_samc21/dac.cpp` plus five negatives under
-`tools/check_samc21.sh`; the bench suites are `test_samc_dac` and, for
+`brio check samc21`; the bench suites are `test_samc_dac` and, for
 dithering and the interrupts, `test_samc_analog` (letters e and f).
 
 ## What the silicon does

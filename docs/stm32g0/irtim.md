@@ -18,7 +18,7 @@ statement about the document, not a claim about the silicon. Driver:
 per-part envelope instance comes from `stm32g0/device_tables.hpp`
 (`irtim_second_usart()`). Bench suite: `test_stm32_serial` letter o
 (7 verdicts, wireless). Family fixture `test/family_stm32g0/irtim.cpp`
-plus one negative under `tools/check_stm32g0.sh`.
+plus one negative under `brio check stm32g0`.
 
 ## What the silicon does
 

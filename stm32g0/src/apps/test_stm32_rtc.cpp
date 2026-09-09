@@ -4,7 +4,7 @@
 // domain can reach.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
-// the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
+// the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the code
 // under it.
@@ -69,7 +69,7 @@
 //      reboots the board through a software reset, and checks what came
 //      back - so it is NOT in `z`, which has to be one console session a
 //      tool can judge from a single capture. Run it with
-//          python3 tools/bench.py run <board> v --app test_stm32_rtc
+//          brio run <board> v --app test_stm32_rtc
 //                  --expect="pass," --timeout 200
 //
 // build: boards = g0b1re,g071rb,g031k8

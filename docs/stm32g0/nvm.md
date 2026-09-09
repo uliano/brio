@@ -20,7 +20,7 @@ read weakness, revision A only, and nothing here sets PCROP). Drivers:
 `FlashOptions`) and `stm32g0/nvm_flash.hpp` (`MainFlashPartition`,
 `MainFlash` the `util/nv_heap.hpp` backend, `MainFlashJournalZone` the
 `util/nv_journal.hpp` one). Family fixtures `test/family_stm32g0/flash.cpp`
-and `nvm_flash.cpp` plus four negatives under `tools/check_stm32g0.sh`;
+and `nvm_flash.cpp` plus four negatives under `brio check stm32g0`;
 the bench suites are `test_stm32_nvm` and `test_stm32_journal`.
 
 ## What the silicon does
@@ -378,7 +378,7 @@ the running image is out of reach by bounds and not only by convention.
 
 **A panic crosses a reset in FLASH - and the FAULT BODY is what writes
 it.** `test_stm32_journal` letter `p` panics for real. On a board whose
-C_DEBUGEN `tools/bench.py` has cleared, `panic()`'s BKPT escalates into
+C_DEBUGEN `bin/brio` has cleared, `panic()`'s BKPT escalates into
 HardFault *before* `Reporter::report()` is ever reached, which leaves the
 SRAM breadcrumb present and the journal empty. So an application that
 wants a breadcrumb in FLASH on this target must bind the fault body and

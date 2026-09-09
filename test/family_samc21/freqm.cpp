@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/freqm.hpp: every verb must COMPILE on the E,
-// G and J 18A headers (tools/check_samc21.sh sweeps all three).
+// G and J 18A headers (brio check samc21 sweeps all three).
 //
 // FREQM is one instance on every member of the family and its registers
 // do not vary by package, so what this fixture pins is the ARITHMETIC -

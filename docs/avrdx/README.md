@@ -105,7 +105,7 @@ flag, so there is no "last one wins" hazard to guard against.
 - **Fuses are provisioning, not build output.** The CPU can read them
   and nothing more; only the programmer writes them, so they are a
   property of the chip on the desk and live behind
-  `tools/bench.py fuses <board> [name=value ...]` (see
+  `brio fuses <board> [name=value ...]` (see
   [../bench.md](../bench.md) for the standing geometry). The one that
   matters to the build is `BOOTSIZE`: with its shipping default of 0
   the whole Flash is one BOOT section and no software can write any
@@ -119,7 +119,7 @@ flag, so there is no "last one wins" hazard to guard against.
   yields an unreadable `.lst`).
 - Do NOT add `-mrelax`: PyAvrOCD refuses ELF files built with it
   (distorted line-number info).
-- **Family compile check**: `tools/check_family.sh` compiles every
+- **Family compile check**: `brio check avrdx` compiles every
   smoke TU in `test/family/` for all eight AVR128 DA/DB packages
   (28/32/48/64 pins, both families) and requires every
   `test/family/neg/` TU to FAIL for the MCUs its `// mcu:` line
@@ -137,7 +137,7 @@ shape
 
 Any key other than `boards` (below) and `flmap_lock` (see FLMAPLOCK
 above) is collected as metadata and written into
-`build-cmake/apps_avrdx.json` at every configure - `tools/bench.py`
+`build-cmake/apps_avrdx.json` at every configure - `bin/brio`
 reads it instead of a build-tool manifest, e.g. to pick a console's
 `monitor_speed` (a console fact, not a compiler flag: nothing in
 `CMakeLists.txt` interprets it beyond passing it through). Rules: one
@@ -241,7 +241,7 @@ handler bodies (`rxc()`, `dre()`, `pit()`), the app binds the vector.
 `cmake --build --preset <pkg>-release --target <app>-upload` drives
 avrdude 8.1 through the Atmel-ICE (`avr_add_app()` in `CMakeLists.txt`;
 `-P usb:<serial>` disambiguates when more than one Atmel-ICE is
-attached, see `AVR_PROBE_SERIAL`). `tools/bench.py flash <board> <app>`
+attached, see `AVR_PROBE_SERIAL`). `brio flash <board> <app>`
 does the same, resolved against the bench manifest.
 
 - Plug the cable into the Atmel-ICE **AVR** port, NOT the SAM port.

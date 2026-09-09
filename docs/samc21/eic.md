@@ -10,7 +10,7 @@ Documents of record: SAM C20/C21 data sheet DS60001479M ch. 26 - and
 errata DS80000740S items 1.11.1 to 1.11.6, of which **exactly one is
 this silicon** (see below). Driver: `samc21/eic.hpp`. Family fixture
 `test/family_samc21/eic.cpp` plus three negatives under
-`tools/check_samc21.sh`; the bench suite is `test_samc_eic`.
+`brio check samc21`; the bench suite is `test_samc_eic`.
 
 ## What the silicon does
 

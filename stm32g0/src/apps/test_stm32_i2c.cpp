@@ -3,7 +3,7 @@
 // ONE board.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
-// the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
+// the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the code
 // under it.
@@ -879,7 +879,7 @@ bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
     }
     if (!link_quiet) {
         print(serial, "    LINK FAILURE op ", hex(twilink::byte_of(op)),
-              ": the peer board must be running `twi_peer` (python3 tools/bench.py "
+              ": the peer board must be running `twi_peer` (brio "
               "flash F twi_peer); check the two SCL/SDA wires, the 2.2k pull-ups "
               "and the GND.",
               crlf);
@@ -926,7 +926,7 @@ bool ensure_link() {
     link_quiet = false;
     print(serial,
           "  THE PEER DID NOT ANSWER. The peer board must be running `twi_peer` "
-          "(python3 tools/bench.py flash F twi_peer); its console '0' forces the "
+          "(brio flash F twi_peer); its console '0' forces the "
           "command-mode client back. Check the two wires in this file's header.",
           crlf);
     return false;

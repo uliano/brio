@@ -1043,7 +1043,7 @@ struct FlashPcropArea {
  * is the design: RDP Level 2 is one-way, ES0548 2.2.9 turns an
  * interrupted option write into a device with no debug port, and this
  * class of change belongs to a TOOL over the programming interface
- * rather than to firmware (tools/bench.py's `fuses` verb). What
+ * rather than to firmware (brio's `fuses` verb). What
  * firmware needs is to KNOW - to cross-check the
  * watchdog options against reset.hpp's registers, to see the BOR level,
  * to prove the bank mapping the storage backend assumes.

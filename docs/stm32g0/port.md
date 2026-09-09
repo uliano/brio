@@ -15,7 +15,7 @@ Standby wake-up; Standby is not entered yet). Driver:
 `stm32g0/pin.hpp`; the port-presence facts come from
 `stm32g0/device_tables.hpp`. The family fixture is
 `test/family_stm32g0/pin.cpp` plus two negatives under
-`tools/check_stm32g0.sh`.
+`brio check stm32g0`.
 
 ## What the silicon does
 

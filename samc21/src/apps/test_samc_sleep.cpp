@@ -74,7 +74,7 @@
 //      first-event-after-wake contract, and THE TICK RULE
 //
 // NOTE for anyone adding a letter: a printed line must NEVER contain the
-// two characters "->", because tools/bench.py looks for that arrow to
+// two characters "->", because bin/brio looks for that arrow to
 // find a letter's tally line and truncates the capture on a stray one.
 //
 // build: boards = c21j
@@ -1742,7 +1742,7 @@ extern "C" void WDT_Handler() {
     wdt_warned = true;
 }
 
-// The fault body: with C_DEBUGEN cleared (tools/bench.py does that at the
+// The fault body: with C_DEBUGEN cleared (bin/brio does that at the
 // end of every SAM flash) a BKPT faults instead of halting, and this
 // turns the wreck into a reboot with a breadcrumb.
 extern "C" void HardFault_Handler() { brio::hard_fault_reset<P>(0); }

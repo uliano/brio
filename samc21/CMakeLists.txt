@@ -13,7 +13,7 @@
 #  configure targets exactly ONE chip variant (SAMC21_MCU cache var, one
 #  value per configurePreset); only the J18A variant has a preset today -
 #  the board on the desk - the E/G variants' headers are compile-checked by
-#  tools/check_samc21.sh instead (no hardware to verify them on).
+#  brio check samc21 instead (no hardware to verify them on).
 #
 #  What the AVR project needs and this one deliberately does NOT:
 #  - avr_predefines(): clang parses -mcpu=cortex-m0plus directly, and the
@@ -178,7 +178,7 @@ endfunction()
 #     by its own "// build: boards = ..." header comment (default: c21j -
 #     the one board type that exists; the grammar is the AVR project's, the
 #     board names are this family's). monitor_speed is carried through to
-#     the roster below so tools/bench.py opens a console at the speed the
+#     the roster below so bin/brio opens a console at the speed the
 #     app itself declares; other keys are tolerated as metadata.
 set(SAMC21_BOARD "c21j")
 
@@ -237,7 +237,7 @@ foreach(_app_path IN LISTS APP_SOURCES)
     endif()
 endforeach()
 
-# This project's app roster for tools/bench.py - the twin of the AVR
+# This project's app roster for bin/brio - the twin of the AVR
 # project's apps_avrdx.json, and a SEPARATE FILE on purpose: app names
 # collide across the two source trees (blink, console, probe exist in
 # both), so only a per-project roster can say which tree, which toolchain

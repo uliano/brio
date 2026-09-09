@@ -8,7 +8,7 @@ Documents of record: SAM C20/C21 data sheet DS60001479M ch. 44 - and
 errata DS80000740S item **1.24.1, live on every silicon revision
 including this one, with no workaround offered**. Driver:
 `samc21/freqm.hpp`. Family fixture `test/family_samc21/freqm.cpp` plus one
-negative under `tools/check_samc21.sh`; the bench suite is
+negative under `brio check samc21`; the bench suite is
 `test_samc_freqm`.
 
 The AVR DA/DB has no counterpart: there a clock is measured by counting

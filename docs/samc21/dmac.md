@@ -17,7 +17,7 @@ does"). Driver: `samc21/dmac.hpp` (`Dmac` block + `DmaDescriptor` /
 `DmaRxEngine`, which `samc21/sercom.hpp`'s Uart takes as options, and
 `DmaLoopEngine` / `DmaPingPongEngine`, the two streaming shapes).
 Family fixture `test/family_samc21/dmac.cpp` plus negatives under
-`tools/check_samc21.sh`; the bench suites are `test_samc_dma` (the block,
+`brio check samc21`; the bench suites are `test_samc_dma` (the block,
 the channel, the serial engines), `test_samc_analog_dma` (the streaming
 engines and the element-type generalization) and `test_samc_timer_dma`
 (the same two engines on the timers, and the peripheral that does NOT

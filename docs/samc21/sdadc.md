@@ -16,7 +16,7 @@ revision F**, where exactly ONE item applies: the device-level 1.8.10
 (the DAC as this converter's reference). Driver: `samc21/sdadc.hpp`, over
 the reserve's SDADC entries in `samc21/device_tables.hpp`. The family
 fixture is `test/family_samc21/sdadc.cpp` plus ten negatives under
-`tools/check_samc21.sh`; the bench suites are `test_samc_sdadc` and, for
+`brio check samc21`; the bench suites are `test_samc_sdadc` and, for
 the flush, the window event and the interrupts, `test_samc_analog`
 (letter k).
 

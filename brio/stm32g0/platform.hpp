@@ -150,7 +150,7 @@ struct Stm32g0Platform {
     /// HardFault_Handler, which the crt provides as a distinct spin loop
     /// so the wreck is legible in a backtrace. And with C_DEBUGEN left
     /// set by a flashing tool the core HALTS here in silence, which
-    /// is why tools/bench.py clears DHCSR after every flash.
+    /// is why bin/brio clears DHCSR after every flash.
     static void break_here() { __BKPT(0); }
 
     static uint32_t now() { return TB::ticks(); }

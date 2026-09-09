@@ -14,7 +14,7 @@ Documents of record: SAM C20/C21 data sheet DS60001479M ch. 24, plus
 errata DS80000740S items 1.16.1, 1.16.2, 1.16.3 and 1.8.7, of which
 **one is live on this silicon**. Driver: `samc21/rtc.hpp`. The family
 fixture is `test/family_samc21/rtc.cpp` plus seven negatives under
-`tools/check_samc21.sh`; the bench suite is `test_samc_rtc`.
+`brio check samc21`; the bench suite is `test_samc_rtc`.
 
 ## What the silicon does
 

@@ -40,7 +40,7 @@ two wirings exclude each other, the suite PROBES which one is fitted
 before any letter runs, and the letters whose instrument is absent skip
 themselves with the reason printed and no verdict claimed. Family
 fixture `test/family_stm32g0/spi.cpp` plus fourteen negatives under
-`tools/check_stm32g0.sh`.
+`brio check stm32g0`.
 
 ## What the silicon does
 

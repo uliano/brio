@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/sdadc.hpp: every verb must COMPILE on the E,
-// G and J 18A headers (tools/check_samc21.sh sweeps all three). This
+// G and J 18A headers (brio check samc21 sweeps all three). This
 // peripheral has ONE instance everywhere, but its pad map is the most
 // package-dependent in the stratum - the E bonds ONE differential pair,
 // the G two, only the J all three - so what this file asserts per

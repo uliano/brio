@@ -15,9 +15,9 @@ from `stm32g0/device_tables.hpp`, and the REQUEST IDS from the
 peripherals that publish them (`Usart<n>::dma_tx_request()`,
 `Tim<n>::dma_update_request()` and their kin). Bench suite:
 `test_stm32_dma` (14 letters in `z`, 69 verdicts, wireless; letters `u`
-and `w` outside `z` need `tools/uart_stress.py`). Family fixture
+and `w` outside `z` need `brio stress`). Family fixture
 `test/family_stm32g0/dma.cpp` plus seven negatives under
-`tools/check_stm32g0.sh`.
+`brio check stm32g0`.
 
 ## What the silicon does
 
@@ -381,7 +381,7 @@ single late request shows as a whole failed verdict. It is recorded
 rather than tuned: whoever next owns this suite has the choice of a
 tolerance or of finding what is late.
 
-### The VCP's ceiling (letters `u` and `w`, with `tools/uart_stress.py`)
+### The VCP's ceiling (letters `u` and `w`, with `brio stress`)
 
 The board's own USART reaches every rate in the ladder; what the
 ST-LINK's virtual COM port carries is another question, and only the host

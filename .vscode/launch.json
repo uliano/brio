@@ -22,7 +22,7 @@
     // package.json) - no cortex-debug needed for this to work with cppdbg.
     //
     // -d/-u below assume db48/board A (today's actual daily driver, two
-    // Atmel-ICEs on this desk needing -u to disambiguate - tools/bench.py
+    // Atmel-ICEs on this desk needing -u to disambiguate - bin/brio
     // list). For board B or a db28/db32 session, duplicate this entry with
     // -u <board B's serial> or -d avr128db28/avr128db32.
     //

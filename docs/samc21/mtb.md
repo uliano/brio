@@ -14,7 +14,7 @@ layout**, and everything it does not name is measured or left alone.
 Drivers: `samc21/mtb.hpp` (the block) and `samc21/postmortem.hpp` (the trace
 carried across a reset, beside the panic breadcrumb). Family fixtures
 `test/family_samc21/mtb.cpp` and `test/family_samc21/postmortem.cpp` plus six
-negatives under `tools/check_samc21.sh`; the bench suites are
+negatives under `brio check samc21`; the bench suites are
 `test_samc_debug` (the block) and `test_samc_postmortem` (the
 post-mortem).
 
@@ -62,7 +62,7 @@ FIRST step of any post-mortem path and not a step in it; the driver
 spells that `freeze()` and the bench measures what skipping it costs.
 
 **MASTER.HALTREQ and FLOW.AUTOHALT ask the CORE to halt**, which on
-ARMv6-M needs DHCSR.C_DEBUGEN - a bit `tools/bench.py` deliberately
+ARMv6-M needs DHCSR.C_DEBUGEN - a bit `bin/brio` deliberately
 clears at the end of every SAM flash so that no stray halt can stop an
 unattended board. The core cannot read DHCSR itself (it is
 debugger-access-only, the same fact `samc21/platform.hpp` records about
@@ -250,7 +250,7 @@ own measurement of the same path, recorded in `evsys.md`.
 reaching its watermark, and MASTER.HALTREQ set directly, both leave the
 CPU running - which is the expected reading of ARMv6-M's rule that a halt
 request needs DHCSR.C_DEBUGEN, and is worth having measured on a board
-`tools/bench.py` deliberately leaves with that bit clear.
+`bin/brio` deliberately leaves with that bit clear.
 
 ## Bench findings - the post-mortem
 
@@ -315,7 +315,7 @@ into it - but the `source` byte says **the HardFault body**, and the
 trace shows why: one packet with the source flag set, landing on
 `HardFault_Handler`, right after the chain. `panic()` calls
 `P::break_here()` BEFORE any reporter, that is a BKPT, and with
-DHCSR.C_DEBUGEN clear - which `tools/bench.py` leaves after every SAM
+DHCSR.C_DEBUGEN clear - which `bin/brio` leaves after every SAM
 flash - a BKPT escalates. Nothing is lost, because the PanicRecord is
 written before `break_here()`; but an app that wants a trace **must bind
 the fault body**, and the reporter alone is not enough. The reporter's

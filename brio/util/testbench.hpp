@@ -6,7 +6,7 @@
  * A `test_<target>_<subject>` app is a menu of single-letter tests over
  * a serial console. The ritual around them - a letter table, a verdict
  * printer, a pair of counters, the per-letter tally and the closing
- * total - is not free decoration: `tools/bench.py` READS it. Its judge
+ * total - is not free decoration: `bin/brio` READS it. Its judge
  * matches
  *
  *     N pass, M fail

@@ -4,7 +4,7 @@
 // chapter 27 that ANDs two of this board's timers onto one pad.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
-// the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
+// the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the code
 // under it.
@@ -3769,7 +3769,7 @@ void to_irtim() {
 }
 
 // ---------------------------------------------------------------------------
-// The host-assisted letters (tools/uart_stress.py), OUTSIDE z
+// The host-assisted letters (brio stress), OUTSIDE z
 // ---------------------------------------------------------------------------
 //
 // The board prints one "HOST op mode baud format window count" line, the
@@ -3838,9 +3838,9 @@ void host_settle() {
 }
 
 void ty_streaming() {
-    print(serial, "  this letter needs tools/uart_stress.py on the other end "
+    print(serial, "  this letter needs brio stress on the other end "
           "of the VCP; run it as", crlf,
-          "  python3 tools/uart_stress.py --port <the console> --letters y",
+          "  brio stress --port <the console> --letters y",
           crlf);
 
     // A CONSOLE WITHOUT A MULTIPLEXER HAS ONE KERNEL CLOCK, and this
@@ -4017,8 +4017,8 @@ uint32_t rtc_ms(uint32_t ticks) {
 /// and a verdict for a leg that was never staged would be worse.
 template <bool stageable = (usart_exti_line(2) != 0xFF) && board_lse_fitted>
 void tw_wake() {
-    print(serial, "  this letter needs tools/uart_stress.py; run it as", crlf,
-          "  python3 tools/uart_stress.py --port <the console> --letters w",
+    print(serial, "  this letter needs brio stress; run it as", crlf,
+          "  brio stress --port <the console> --letters w",
           crlf);
     feed();
     if constexpr (!stageable) {
@@ -4464,8 +4464,8 @@ void tv_stop_leg() {
 }
 
 void tv_lpuart_console() {
-    print(serial, "  this letter needs tools/uart_stress.py; run it as", crlf,
-          "  python3 tools/uart_stress.py --port <the console> --letters v",
+    print(serial, "  this letter needs brio stress; run it as", crlf,
+          "  brio stress --port <the console> --letters v",
           crlf);
     feed();
     const bool lse_leg_ok = tv_lse_leg();

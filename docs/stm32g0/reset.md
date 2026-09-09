@@ -21,7 +21,7 @@ workaround is keyed on PWRRSTF, a flag this driver reads.
 Driver: `stm32g0/reset.hpp` (`ResetFlag`, `Reset`, `Iwdg`, `Wwdg`,
 `ResetReporter`, `hard_fault_reset`). Family fixture
 `test/family_stm32g0/reset.cpp` plus four negatives under
-`tools/check_stm32g0.sh`; the bench suite is `test_stm32_platform`.
+`brio check stm32g0`; the bench suite is `test_stm32_platform`.
 
 ## What the silicon does
 

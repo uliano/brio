@@ -2,7 +2,7 @@
 // calculation unit: stm32g0/crc.hpp (RM0444 ch. 14, the whole of it).
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
-// the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
+// the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the code
 // under it.

@@ -4,7 +4,7 @@
 // the RTC-backed timebase that lifts its restriction).
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
-// the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
+// the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the code
 // under it.
@@ -64,7 +64,7 @@
 //      what a program without SRAM has to do. Not in `z`.
 //   u  (by name only) SHUTDOWN, the same one rung deeper.
 //      Run either with
-//          python3 tools/bench.py run <board> s --app test_stm32_sleep
+//          brio run <board> s --app test_stm32_sleep
 //                  --expect="pass," --timeout 200
 //
 // build: boards = g0b1re,g071rb,g031k8
@@ -436,7 +436,7 @@ void ta_ladder() {
     };
     const Leg legs[] = {
         // NB the names carry no " -> " and no "ALL:": both are
-        // tools/bench.py's own markers, and a verdict line that contains
+        // brio's own markers, and a verdict line that contains
         // one truncates the capture. (It did: the arrow in this table
         // and a "WALL:" three letters down between them made every z run
         // stop early, and the suite looked broken when it was not.)

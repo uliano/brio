@@ -4,7 +4,7 @@ Smoke translation units proving the `stm32g0/` drivers compile for
 EVERY device header the CMSIS pack ships - all twelve, the x1 line
 (G031/G041, G051/G061, G071/G081, G0B1/G0C1) and the x0 value line
 (G030, G050, G070, G0B0) - instantiation only, no hardware, no
-`main()`. `tools/check_stm32g0.sh` compiles each `*.cpp` here for each
+`main()`. `brio check stm32g0` compiles each `*.cpp` here for each
 of the twelve, and each `neg/*.cpp` must FAIL for the variants its
 `// mcu:` header line names. The G0B1 is the bench chip and the
 family's superset; the G071 and G031 are the desk's other Nucleos; for

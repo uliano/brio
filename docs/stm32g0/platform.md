@@ -28,7 +28,7 @@ busy-wait), `stm32g0/reset.hpp` ([reset.md](reset.md)),
 crt is `stm32g0/src/glue/startup_stm32g0b1.cpp` +
 `stm32g0/ld/stm32g0b1re.ld` in the build project. The family fixtures
 are `test/family_stm32g0/platform.cpp` and `lptim_ticker.cpp` under
-`tools/check_stm32g0.sh`, with the negatives that refuse a timed sleep
+`brio check stm32g0`, with the negatives that refuse a timed sleep
 site on a tickless platform and the tickless timebase off the value
 line.
 
@@ -113,7 +113,7 @@ default case harmless; the option-byte pass has to remember the other.
 
 **A BKPT with C_DEBUGEN set halts the core in silence**, as on the
 samc21: `break_here()` cannot ask whether a debugger is attached
-(ARMv6-M), so `tools/bench.py` clears DHCSR after every flash and a
+(ARMv6-M), so `bin/brio` clears DHCSR after every flash and a
 BKPT with no debugger escalates to the crt's distinct
 `HardFault_Handler` spin.
 

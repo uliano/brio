@@ -11,7 +11,7 @@ errata DS80000740S items 1.21.1 to 1.21.11, of which **seven are live on
 this silicon**. Driver: `samc21/tcc.hpp`, with its per-instance and
 per-pad data in `samc21/device_tables.hpp`. Family fixture
 `test/family_samc21/tcc.cpp` plus eight negatives under
-`tools/check_samc21.sh`; the bench suites are `test_samc_tcc` and - for
+`brio check samc21`; the bench suites are `test_samc_tcc` and - for
 DMA-driven operation, the circular buffers and the advanced modes -
 `test_samc_timer_dma`.
 

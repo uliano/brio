@@ -134,7 +134,7 @@ silicon, revision B only: 1.8.1, 1.8.11, 1.8.6.
 **A debugger changes what standby is.** 19.5.6: with the CPU halted in
 debug mode the PM keeps operating, and a standby requested while a
 debugger is attached does not turn the power domains off. Every number
-below was taken with DHCSR.C_DEBUGEN cleared, which `tools/bench.py`
+below was taken with DHCSR.C_DEBUGEN cleared, which `bin/brio`
 does at the end of every SAM flash.
 
 ## Types and verbs

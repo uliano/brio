@@ -152,7 +152,7 @@
  * mode the PM keeps operating, and a standby requested while a debugger
  * is attached does NOT turn the power domains off. A sleep measured with
  * a debugger attached is not the sleep the silicon does on its own, and
- * tools/bench.py clears DHCSR.C_DEBUGEN at the end of every flash for
+ * bin/brio clears DHCSR.C_DEBUGEN at the end of every flash for
  * this reason among others.
  *
  * ## Errata that touch this chapter, at silicon revision F

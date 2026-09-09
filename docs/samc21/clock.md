@@ -16,7 +16,7 @@ DS80000740S items 1.2.2, 1.2.3, 1.3.3, 1.3.4 and 1.25.1, all encoded
 in code, with 1.22.1 and 1.25.2 read and declared inapplicable or out
 of scope below. Driver: `samc21/clock.hpp`. The family fixture is
 `test/family_samc21/clock.cpp` (plus four negatives under `neg/`) under
-`tools/check_samc21.sh`; the bench suite is `test_samc_clock`.
+`brio check samc21`; the bench suite is `test_samc_clock`.
 
 ## What the silicon does
 

@@ -1,7 +1,7 @@
 // test_samc_rtc - the reference bench suite for samc21/rtc.hpp.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
-// the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
+// the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the driver
 // under it.
@@ -48,7 +48,7 @@
 //      the top-of-range wrap and the masked alarm
 //
 // NOTE for anyone adding a letter: a printed line must NEVER contain the
-// two characters "->", because tools/bench.py looks for that arrow to
+// two characters "->", because bin/brio looks for that arrow to
 // find a letter's tally line and truncates the capture on a stray one.
 //
 // build: boards = c21j

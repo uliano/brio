@@ -204,7 +204,7 @@ golden vector in every log; divergence invalidates the run.
 
 ## Campaign driver and analysis
 
-- `run.py` - drives both consoles via tools/bench.py + the bench
+- `run.py` - drives both consoles via bin/brio + the bench
   manifest. Human-centric: live per-slice progress (mean/max current,
   bursts seen/expected, deadlines), clean Ctrl-C (current run marked
   aborted, prior runs stay valid), resumable point lists. Cap mode

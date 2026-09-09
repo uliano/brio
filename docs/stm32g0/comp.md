@@ -23,7 +23,7 @@ per-part presence and the EXTI line numbers come from
 comparators, the output on a pad, the blanking sources), shared with the
 ADC, the DAC and the reference buffer.
 Family fixture `test/family_stm32g0/comp.cpp` plus three negatives under
-`tools/check_stm32g0.sh`.
+`brio check stm32g0`.
 
 ## What the silicon does
 

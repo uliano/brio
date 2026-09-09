@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/mtb.hpp: every verb must COMPILE on the E, G
-// and J 18A headers (tools/check_samc21.sh sweeps all three).
+// and J 18A headers (brio check samc21 sweeps all three).
 //
 // The MTB is core-private: one instance, one register map, identical on
 // every member of the family (and on every Cortex-M0+ that has one). So

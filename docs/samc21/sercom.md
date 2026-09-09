@@ -19,8 +19,8 @@ encoded in code (1.17.4 and 1.17.14 are named where their fields
 live). Driver: `samc21/sercom.hpp` (`Sercom<n>` resource +
 `Uart<n, pads, rx, tx, TxEngine, RxEngine>` task, the engine slots
 optional). The family fixture is `test/family_samc21/sercom.cpp` plus
-its negatives under `tools/check_samc21.sh`; the bench suite is
-`test_samc_uart`, driven from the host by `tools/uart_stress.py`.
+its negatives under `brio check samc21`; the bench suite is
+`test_samc_uart`, driven from the host by `brio stress`.
 
 ## What the silicon does
 
@@ -256,7 +256,7 @@ int main() {
   violations on their own channels (the full account is in dmac.md).
 
 **THE FOUR SHAPES, BYTE FOR BYTE** (suite `test_samc_uart` with
-`tools/uart_stress.py` at the other end; the pattern is a 32-bit
+`brio stress` at the other end; the pattern is a 32-bit
 xorshift both ends generate, so a lost byte is located and not merely
 counted). Every combination of interrupt and DMA on each direction, as
 a 1.2 s echo at 115200:

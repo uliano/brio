@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/eic.hpp: every verb must COMPILE on the E, G
-// and J 18A headers (tools/check_samc21.sh sweeps all three).
+// and J 18A headers (brio check samc21 sweeps all three).
 //
 // The EIC block itself is identical across this family - sixteen lines,
 // two CONFIG registers, one vector. What DOES vary is which PADS are

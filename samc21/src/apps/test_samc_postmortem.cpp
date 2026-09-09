@@ -726,7 +726,7 @@ void tp_resume() {
 
     // THE FINDING, and it is a property of the debug state and not of
     // the program: with DHCSR.C_DEBUGEN cleared - which is what
-    // tools/bench.py leaves after every SAM flash - panic()'s own
+    // bin/brio leaves after every SAM flash - panic()'s own
     // break_here() escalates to HardFault BEFORE the reporter runs, so
     // the body that captures is the fault's. Both are bound, and the
     // record says which one it was.

@@ -11,7 +11,7 @@ Documents of record: SAM C20/C21 data sheet DS60001479M ch. 43, table 9-6
 - and errata DS80000740S item **1.19.1, live on every silicon revision
 including this one**, which is reproduced below. Driver: `samc21/tsens.hpp`.
 Family fixture `test/family_samc21/tsens.cpp` plus five negatives under
-`tools/check_samc21.sh`; the bench suites are `test_samc_tsens` and, for
+`brio check samc21`; the bench suites are `test_samc_tsens` and, for
 the inverted start event, `test_samc_analog` (letter l).
 
 The chapter is C21-only, and table 1-1's own note adds that TSENS is
@@ -463,7 +463,7 @@ only where a program sets it - through `samc21/pac.hpp`, whose verbs take
   has 32 to itself), so `Tc<2>::release()` silently stops TC3. A chain
   built on TC3 loses that half without a word, and every verdict ahead of
   the loss still passes.
-- **`tools/bench.py --expect="->"` can truncate a capture.** The judge
+- **`bin/brio --expect="->"` can truncate a capture.** The judge
   returns as soon as the marker has been seen AND the text ends with the
   prompt `"> "` - and `"  -> "` ends with `"> "`. When the tally lands in
   a later read chunk the run looks like it stopped mid-line. Judging a

@@ -164,7 +164,7 @@ comments justifying wrong restrictions. The antidote, in practice:
   every package - `avr-g++ -mmcu=avr128d{a,b}{28,48,64} -std=gnu++23
   -Os -c -I brio` takes seconds, no hardware; (3) negative
   tests: what must be refused must FAIL to compile; (4) the
-  `test_<target>_<subject>` suite on the bench; (5) `tools/check_prose.py`
+  `test_<target>_<subject>` suite on the bench; (5) `brio prose`
   clean over the files touched - a comment or a document is a reference
   for the code as it is, and a claim about another part of the tree is
   a POINTER the tool can check, never a statement that ages. The bench chip alone
@@ -415,7 +415,7 @@ gets its dated home in `docs/design/` when taken.
   (re-)examination, that keeps HCLK running inside a Stop and survives
   every reset but a power-on; staged both ways over SWD (1 ms set,
   250 ms clear). The sleep suite's letter c now reads the bit and
-  judges the state it finds, tools/bench.py ends every G0 flash with a
+  judges the state it finds, bin/brio ends every G0 flash with a
   reset-halt + DBGMCU_CR clear + resume, Pwr::debug_in_stop() exists,
   and the site's ticker pause stays as the discipline that makes a Stop
   last in both states. Open: the rtc suite's letter c is flaky inside z
@@ -1330,7 +1330,7 @@ gets its dated home in `docs/design/` when taken.
   header declares none; OpenOCD stlink.cfg + stm32g0x.cfg + the DHCSR
   clear). third_party/cmsis-device-g0/ (v1.4.5, Apache-2.0) + the SVD
   vendored. Apps probe/blink/console; test/family_stm32g0/ (4 TUs x
-  g0b1/g071/g031 + 8 negatives) + tools/check_stm32g0.sh green;
+  g0b1/g071/g031 + 8 negatives) + brio check stm32g0 green;
   bench.py grew the g0b1re board type and the openocd_stlink probe
   kind (the SAM argv proven unchanged), manifest position E by-id.
   THE VICTORY CONDITION HELD FOR THE THIRD TIME: kernel/ and util/
@@ -1630,7 +1630,7 @@ gets its dated home in `docs/design/` when taken.
   and test_samc_dma letter j passes because nothing is being RECEIVED
   during it, so its RX channel takes no triggers at all. NEW SUITE
   test_samc_uart (z 27/27; eleven host letters, 62 verdicts, green twice
-  over) + NEW TOOL tools/uart_stress.py. Measured there: all four
+  over) + NEW TOOL brio stress. Measured there: all four
   transports carry 11840 bytes byte-exact except at the RX engine's
   block boundaries (11813..11827, and WHERE it loses is its contract -
   a filled block has no run to continue into until a harvest re-arms
@@ -2670,7 +2670,7 @@ gets its dated home in `docs/design/` when taken.
   reset" and table 18-1's silence left it open, and a SYSTEM reset AND a
   watchdog reset each CLEAR IT - a PAC lock lasts until the next reset of
   any kind, and letter c is re-runnable because of it. DSU: the die
-  serial and DID match tools/bench_boards.py's record for board C (that
+  serial and DID match bench/bench_boards.py's record for board C (that
   manifest comment's "recorded, NOT yet checked" now names the letter
   that checks it); the CRC32 is the standard reflected-0xEDB88320 answer
   over flash and SRAM, chains through a raw seed, refuses a bus error,
@@ -2704,7 +2704,7 @@ gets its dated home in `docs/design/` when taken.
   pac/dsu/divas/mtb + SEVEN negatives; the reserve grew five probes
   (pac/dsu/mtb ids, the bridge count, the two MTB event users). Docs
   pac.md / dsu.md / divas.md / mtb.md NEW PROVISIONAL; the board-C
-  comment in tools/bench_boards.py updated (comment only). JUDGMENT CALLS
+  comment in bench/bench_boards.py updated (comment only). JUDGMENT CALLS
   QUEUED - see memory samc-session-2026-08-29-debug.
   **ANALOG STREAMING DMA DONE 2026-08-29 (Opus delegation, the user's
   own question "il dma possiamo usarlo anche per dac e adc?", REVIEWED
@@ -3596,7 +3596,7 @@ gets its dated home in `docs/design/` when taken.
   + build preset pair per package x {release, debug}), app
   auto-discovery from `// build:` header comments
   (`CMakeLists.txt`, no generation step), the independent host-test
-  project under `test/`, `tools/bench.py` retargeted, every PlatformIO
+  project under `test/`, `bin/brio` retargeted, every PlatformIO
   file removed. Verified byte-identical `.hex` output against the old
   PlatformIO build before committing to the migration. The EDITOR half
   moved early (2026-08-25, forced, and unaffected by the later
@@ -3914,7 +3914,7 @@ gets its dated home in `docs/design/` when taken.
 - **Low-level review track (planned 2026-08-20, full plan in memory
   low-level-review-plan).** Everything in avrdx/ gets the Working
   discipline treatment, device by device. Phase 0 DONE 2026-08-20:
-  family-compile fixture (tools/check_family.sh, all 8 DA/DB
+  family-compile fixture (brio check avrdx, all 8 DA/DB
   packages, negatives included) and bench baseline re-run after the
   TCB edits - test_avr_timer 82/82, test_avr_analog 68/68 at 5 V
   (VDD measured 5190 mV), test_avr_clock 15/15 (the old "14/14" note
@@ -4308,11 +4308,16 @@ gets its dated home in `docs/design/` when taken.
 ```bash
 # Three sibling CMake projects, PEERS (none is the repo root): avrdx/,
 # samc21/, test/. cmake presets resolve against their own project dir -
-# run cmake FROM that dir (or let tools/bench.py do it).
+# run cmake FROM that dir (or let bin/brio do it).
 (cd test  && ctest --preset host)                                  # host tests (doctest); no hardware needed
-tools/check_family.sh [name]                                       # every avrdx smoke TU compiles for all 8 DA/DB
-                                                                    # packages; neg/ TUs must FAIL (definition of done)
-tools/check_samc21.sh [name]                                         # same for the samc21 stratum (E/G/J 18A headers)
+brio check avrdx [name]         # every avrdx smoke TU compiles for all 8 DA/DB packages;
+                                # neg/ TUs must FAIL (definition of done)
+brio check samc21 [name]        # same for the samc21 stratum (E/G/J 18A headers)
+brio check stm32g0 [name]       # same for the stm32g0 stratum (ALL TWELVE G0 headers, x1 + x0)
+brio check all                  # the three in a row
+brio prose [paths...]           # the prose net: no dates/process words/Doxygen tags in
+                                # comments and docs, every cited path exists, ASCII only;
+                                # "review" lines are claims of absence to re-read, not errors
 (cd avrdx && cmake --build --preset avr128db48-release --target <app>)         # AVR release build (-Os)
 (cd avrdx && cmake --build --preset avr128db48-release --target <app>-upload)  # flash via Atmel-ICE (UPDI)
 (cd avrdx && cmake --build --preset avr128db48-debug --target <app>)           # AVR debug build, then F5
@@ -4320,25 +4325,24 @@ tools/check_samc21.sh [name]                                         # same for 
 (cd samc21 && cmake --build --preset samc21j-release --target <app>-upload)     # flash via OpenOCD (SWD)
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)          # STM32G0 release build
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash via OpenOCD (ST-LINK)
-tools/check_stm32g0.sh [name]                                      # same for the stm32g0 stratum (ALL TWELVE G0 headers, x1 + x0)
-tools/check_prose.py [paths...]                                   # the prose net: no dates/process words/Doxygen tags in
-                                                                    # comments and docs, every cited path exists, ASCII only;
-                                                                    # "review" lines are claims of absence to re-read, not errors
 # apps are auto-discovered from <project>/src/apps/*.cpp - plus
 # experiments/*/{avrdx,samc21}/*.cpp, each experiment's per-arch app
 # halves - at every configure; no generation step; a new/removed app
 # or a changed "// build: opt = value" line takes effect on the next
 # configure
 
-python3 tools/bench.py list                  # serial devices, USB probes, the bench manifest
-python3 tools/bench.py flash A test_avr_pin  # cmake --build --target <app>, then avrdude/UPDI
-python3 tools/bench.py flash C test_samc_dma # ... or OpenOCD/SWD - the BOARD TYPE decides both
-python3 tools/bench.py flash E console       # ... or OpenOCD/ST-LINK (the Nucleo-G0B1RE, position E)
-                                             # the project to build in and the flash mechanism
-python3 tools/bench.py run C z               # drive the console, judge "ALL: N pass, M fail"
-python3 tools/bench.py console A             # device path + speed, for your own monitor
-python3 tools/bench.py duo A:a B:script.txt  # instrument peer scripted, then the DUT
-python3 tools/bench.py fuses A bootsize=128  # read/write fuses over UPDI (fuses are
+# The bench has ONE command, bin/brio (put bin/ on the PATH); its guts
+# are the bench/ package. The verbs:
+brio list                  # serial devices, USB probes, the bench manifest
+brio flash A test_avr_pin  # cmake --build --target <app>, then avrdude/UPDI
+brio flash C test_samc_dma # ... or OpenOCD/SWD - the BOARD TYPE decides both
+brio flash E console       # ... or OpenOCD/ST-LINK (the Nucleo-G0B1RE, position E)
+                           # the project to build in and the flash mechanism
+brio run C z               # drive the console, judge "ALL: N pass, M fail"
+brio console A             # device path + speed, for your own monitor
+brio duo A:a B:script.txt  # instrument peer scripted, then the DUT
+brio stress --letters ...  # the host end of the UART suites
+brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
                                              # provisioning: UPDI-only, survive reflash)
 ```
 
@@ -4347,9 +4351,9 @@ python3 tools/bench.py fuses A bootsize=128  # read/write fuses over UPDI (fuses
   (`// build: boards = db28,db32,db48` in the app header; `db48` is the
   default when the line is absent; a configure targets exactly one
   package, so switching `configurePreset` switches which apps' targets
-  exist), IDENTITY = the manifest `tools/bench_boards.py` (which board
+  exist), IDENTITY = the manifest `bench/bench_boards.py` (which board
   sits where, its console by `/dev/serial/by-path` because the CH340s
-  have no USB serial, its programmer), ORCHESTRATION = `tools/bench.py`.
+  have no USB serial, its programmer), ORCHESTRATION = `bin/brio`.
   Never a target per physical board. `family_probe` carries the matrix
   and is the first firmware for a new board.
 
@@ -4398,7 +4402,7 @@ avrdx/                   the AVR build project (a PEER of samc21/ and test/ -
                            ("boards = db28,..." gates which package builds it,
                            default db48 only; "flmap_lock = 0" opts out of the
                            FLMAPLOCK default; anything else is just metadata
-                           for tools/bench.py, e.g. "monitor_speed = 115200")
+                           for bin/brio, e.g. "monitor_speed = 115200")
   src/glue/                build invariants compiled into EVERY image (every
                            avr_add_app() call lists ivsel_boot.cpp alongside
                            the app's own source - the .init3 IVSEL store,
@@ -4419,31 +4423,37 @@ test/CMakeLists.txt      the host test project (independent - one CMake
                          one executable + ctest entry per test_*/main.cpp
 test/CMakePresets.json   the "host" configure/build/test preset (native g++, UBSan)
 test/test_*/main.cpp     host unit tests (doctest), cd test && ctest --preset host
-test/family_samc21/        samc21 family smoke TUs + neg/, tools/check_samc21.sh runs them
+test/family_samc21/        samc21 family smoke TUs + neg/, brio check samc21 runs them
 third_party/doctest/     vendored doctest.h (MIT, upstream doctest/doctest)
 third_party/samc21-dfp/  vendored Microchip.SAMC21_DFP include tree (Apache-2.0)
 third_party/cmsis-device-g0/  vendored ST cmsis-device-g0 v1.4.5 Include/ (Apache-2.0)
-test/family_stm32g0/     stm32g0 family smoke TUs + neg/, tools/check_stm32g0.sh
+test/family_stm32g0/     stm32g0 family smoke TUs + neg/, brio check stm32g0
 third_party/cmsis-core/  vendored ARM CMSIS-Core headers (Apache-2.0)
-tools/check_family.sh    family compile check over test/family/ (see above) -
-                         zero CMake coupling, calls avr-g++ directly
-tools/check_samc21.sh      the samc21 twin over test/family_samc21/
-tools/bench_boards.py    the bench MANIFEST: the physical boards on the desk
-                         (type, console by-path, programmer) - not a target list
-tools/uart_stress.py     the host end of test_samc_uart: the same xorshift the
-                         firmware generates, plus the baud and frame changes only
-                         an OUTSIDE sender can make - the suite's streaming
-                         letters cannot be run without it
-tools/bench.py           the bench orchestrator: list / flash / run / console /
-                         duo / fuses, over the manifest and the per-project app
-                         rosters build-cmake/apps_{avrdx,samc21}.json (each project
-                         writes its own at every configure - separate files
-                         because app NAMES COLLIDE across the trees: blink,
-                         console and probe exist in both). BOARD_TYPES maps a
-                         board type to its project, preset, mcu and flash
-                         mechanism (db* -> avrdx/avrdude/UPDI, c21j ->
-                         samc21/OpenOCD/SWD); `fuses` and --erase are AVR-only
-                         and refuse a SAM board instead of pretending
+bin/brio                 THE ONE COMMAND of the bench, dispatching on its first
+                         argument; put bin/ on the PATH
+bench/                   its guts, a Python package:
+  cli.py                 the verbs list / flash / run / console / duo / fuses,
+                         over the manifest and the per-project app rosters
+                         build-cmake/apps_{avrdx,samc21,stm32g0}.json (each
+                         project writes its own at every configure - separate
+                         files because app NAMES COLLIDE across the trees).
+                         BOARD_TYPES maps a board type to its project, preset,
+                         mcu and flash mechanism (db* -> avrdx/avrdude/UPDI,
+                         c21j -> samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/
+                         ST-LINK); `fuses` and --erase refuse what a board
+                         type cannot do instead of pretending
+  manifest.py            loads the bench MANIFEST from private/bench_boards.py
+                         if it exists, else bench/bench_boards.py: the physical
+                         boards on the desk (type, console by-path, programmer)
+                         - not a target list; no verb imports the file by name
+  bench_boards.py        the manifest in the repository
+  prose.py               `brio prose`, the prose net (see the definition of done)
+  stress.py              `brio stress`, the host end of the UART suites: the same
+                         xorshift the firmware generates, plus the baud and
+                         frame changes only an OUTSIDE sender can make
+  check_*.sh             `brio check <stratum> [name]`: the family compile
+                         fixtures over test/family*/ - zero CMake coupling,
+                         they call the cross compiler directly
 experiments/             one SELF-CONTAINED directory per cross-cutting bench
                          experiment (ruled 2026-08-31; deliberately not
                          "examples" - no maintenance promise): both
@@ -4573,7 +4583,7 @@ brio/                    the framework, four strata:
     testbench.hpp          TestBench<Sink, max_letters>: the bench suite
                            grammar in one place - letter registry, verdict
                            lines, per-letter tally and the ALL: total
-                           tools/bench.py parses
+                           bin/brio parses
     serial_port.hpp        SerialPort<Transport, P, LineSink>: RX bytes ->
                            LineReceived (Lease::dispatch loan, LendsTo)
     bus_master.hpp         BusMaster<Bus, P, depth, Policy>: bus arbiter

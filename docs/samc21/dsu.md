@@ -11,7 +11,7 @@ Debug Interface Disable lock of 13.10 is not available on E/G/J silicon
 up to and including revision F, a feature this driver does not build in
 any case. Driver: `samc21/dsu.hpp`. Family fixture
 `test/family_samc21/dsu.cpp` plus two negatives under
-`tools/check_samc21.sh`; the bench suite is `test_samc_debug`.
+`brio check samc21`; the bench suite is `test_samc_debug`.
 
 The DSU is the block a debug probe talks to before the CPU is running.
 Three of its services are useful to the CPU itself, and those are what
@@ -159,7 +159,7 @@ Test a block of SRAM the program has finished with:
 CAN-bearing series, so a C21 and not a C20), DIE 0, REVISION 5 = **rev
 F**, DEVSEL 0x00. The factory 128-bit die serial `samc21/nvm.hpp` reads
 comes back as **f9e78960-51574841-59202020-ff160321**, matching the
-string `tools/bench_boards.py` records for desk position C. The CoreSight
+string `bench/bench_boards.py` records for desk position C. The CoreSight
 PARTNUM is 0xCD0, table 13-2's "a DSU is present".
 
 **The CRC32 engine is the standard CRC-32**, matched against a table-free

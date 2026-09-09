@@ -2,7 +2,7 @@
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console; `z` runs them all and prints the "ALL: N pass, M fail"
-// line tools/bench.py judges. No wires.
+// line bin/brio judges. No wires.
 //
 // WHAT IT IS ABOUT. stm32g0/nvm_flash.hpp gives the whole of physical
 // BANK 2 to storage - the linker script hands the compiler bank 1 alone -
@@ -715,7 +715,7 @@ void tp_panic() {
     // WHAT ACTUALLY HAPPENS HERE, and it is worth knowing before reading
     // the next boot's verdicts: panic() writes the SRAM breadcrumb, then
     // executes break_here() - a BKPT - and on a board whose C_DEBUGEN
-    // tools/bench.py has cleared that BKPT ESCALATES INTO HardFault
+    // bin/brio has cleared that BKPT ESCALATES INTO HardFault
     // before the reporter runs. So the record that crosses the reset may
     // have been written by JournalPanic OR by the fault body, and the
     // next boot reports which.
@@ -801,7 +801,7 @@ void tv_verify() {
     bench.verdict("and the maximum-size value is whole",
                   holds(id_full, 32, 0x53) || holds(id_full, 32, 0x9E));
 
-    // THE POINT OF THIS LETTER. tools/bench.py flashes through OpenOCD's
+    // THE POINT OF THIS LETTER. brio flashes through OpenOCD's
     // `program <elf> verify`, which erases only the sectors the image
     // occupies - and ld/stm32g0b1re.ld gives the image bank 1 alone. So
     // a reflash of a DIFFERENT app cannot touch the attic, and these
@@ -829,7 +829,7 @@ extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 /// one piece of application glue that follows from it.
 ///
 /// panic() writes the SRAM breadcrumb and then executes break_here() - a
-/// BKPT - which on a core whose C_DEBUGEN tools/bench.py has cleared
+/// BKPT - which on a core whose C_DEBUGEN bin/brio has cleared
 /// ESCALATES INTO HardFault before the Reporter is ever called. Measured:
 /// with only kernel/panic.hpp's own composition, JournalPanic::report()
 /// never runs and the journal comes up empty after the reset. So the

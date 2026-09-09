@@ -12,7 +12,7 @@
 #  One configure targets exactly ONE part (STM32G0_MCU cache var, one value
 #  per configurePreset): the G0B1RE (the Nucleo-G0B1RE), the G071RB and
 #  the G031K8 (the two other Nucleos) have presets; every other header of
-#  the pack is compile-checked by tools/check_stm32g0.sh.
+#  the pack is compile-checked by brio check stm32g0.
 #
 #  THE DEVICE SELECT is ST's convention: the umbrella header stm32g0xx.h
 #  dispatches on a -DSTM32G0B1xx define, so the define is the part number's
@@ -226,7 +226,7 @@ foreach(_app_path IN LISTS APP_SOURCES)
     endif()
 endforeach()
 
-# This project's app roster for tools/bench.py (apps_stm32g0.json): a
+# This project's app roster for bin/brio (apps_stm32g0.json): a
 # separate file because app names collide across the three trees.
 file(WRITE "${CMAKE_SOURCE_DIR}/../build-cmake/apps_stm32g0.json"
     "{\n  \"apps\": {\n    ${_manifest_entries}\n  }\n}\n")

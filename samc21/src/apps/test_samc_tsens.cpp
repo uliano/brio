@@ -2,7 +2,7 @@
 // SAM C21's on-die temperature sensor (DS60001479M ch. 43).
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
-// the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
+// the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the driver
 // under it.
@@ -170,7 +170,7 @@ volatile int32_t tsens_last_value = 0;
 // Helpers
 // ---------------------------------------------------------------------------
 
-// NB the printed lines below never contain "->": tools/bench.py's judge
+// NB the printed lines below never contain "->": brio's judge
 // looks for that arrow to find a letter's tally line, and a stray one in
 // a report line ends the capture early. Learned on the bench, twice.
 

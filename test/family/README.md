@@ -2,7 +2,7 @@
 
 Smoke translation units proving the avrdx drivers compile for EVERY
 package of the AVR DA/DB family - instantiation only, no hardware, no
-main(). `tools/check_family.sh` compiles each `*.cpp` here for
+main(). `brio check avrdx` compiles each `*.cpp` here for
 avr128da/db x 28/32/48/64 (seconds), and each `neg/*.cpp` must FAIL
 for the MCUs its `// mcu:` header line names.
 

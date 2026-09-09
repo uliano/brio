@@ -76,7 +76,7 @@
  *    the whole sleep either way), it closes
  *    4.3.3's pending-tick window by construction, and it makes a Stop
  *    last whatever a probe left in DBGMCU_CR. `Pwr::debug_in_stop()`
- *    reads that bit; tools/bench.py clears it after every flash. On a
+ *    reads that bit; bin/brio clears it after every flash. On a
  *    TICKLESS program (below) there is no tick to pause: SysTick carries
  *    no interrupt there, and the site touches it only where the
  *    timebase has the verbs.

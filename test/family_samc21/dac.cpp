@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/dac.hpp: every verb must COMPILE on the E, G
-// and J 18A headers (tools/check_samc21.sh sweeps all three). This
+// and J 18A headers (brio check samc21 sweeps all three). This
 // peripheral has ONE instance and its two analog pads are PORT A pads
 // every variant bonds, so unlike the ADC's there is no pad map to vary -
 // which is exactly what this file asserts, per variant, out of the

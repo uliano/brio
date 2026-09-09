@@ -17,7 +17,7 @@
 // whole flash is one BOOT section, no software can write any of it, and
 // the middle zone collapses to nothing. The standing bench geometry is
 // BOOTSIZE = 128 (BOOT = the first 64 KB, where all the code is) and
-// CODESIZE = 0; tools/bench.py's `fuses` verb writes it.
+// CODESIZE = 0; brio's `fuses` verb writes it.
 //
 // THE SURVIVAL IT DEMONSTRATES IS A TOOL CONVENTION, NOT SILICON. Pages
 // outside the image survive a reflash because bench.py flashes with

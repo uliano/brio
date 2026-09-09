@@ -1,6 +1,6 @@
 // Family smoke TU for samc21/postmortem.hpp: the MTB post-mortem store,
 // its two entry paths and the boot side must COMPILE on the E, G and J
-// 18A headers (tools/check_samc21.sh sweeps all three).
+// 18A headers (brio check samc21 sweeps all three).
 //
 // Nothing here is package-dependent - the MTB is core-private and the
 // record is SRAM - so what this fixture pins is the SHAPE: the geometry

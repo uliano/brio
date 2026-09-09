@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/tcc.hpp: every verb must COMPILE on the E, G
-// and J 18A headers (tools/check_samc21.sh sweeps all three).
+// and J 18A headers (brio check samc21 sweeps all three).
 //
 // The TCC block is where this family stops being uniform. All three
 // variants carry all three instances, but the INSTANCES differ from each

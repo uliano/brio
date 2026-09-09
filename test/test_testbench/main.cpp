@@ -1,5 +1,5 @@
 // Host tests for util/testbench.hpp: the bench suite GRAMMAR, which is
-// not decoration but the contract tools/bench.py parses. Every check
+// not decoration but the contract bin/brio parses. Every check
 // here is about characters on the wire and about the counters behind
 // them. Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
@@ -29,7 +29,7 @@ static_assert(brio::ByteSink<Capture>);
 
 using Bench = brio::TestBench<Capture>;
 
-// The judge in tools/bench.py, verbatim: whatever the harness emits must
+// The judge in bin/brio, verbatim: whatever the harness emits must
 // still be read by THIS.
 const std::regex summary_re(R"((\d+)\s+pass,\s*(\d+)\s+fail)");
 

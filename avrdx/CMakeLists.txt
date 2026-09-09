@@ -120,16 +120,16 @@ find_program(AVR_SIZE avr-size PATHS "${AVR_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 find_program(AVR_OBJDUMP avr-objdump PATHS "${AVR_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 
 # --- Flash over UPDI (Atmel-ICE). -P usb:<serial> disambiguates which
-#     Atmel-ICE when more than one is attached (tools/bench.py does the same
-#     via its manifest); default here is board A's probe (tools/bench.py
+#     Atmel-ICE when more than one is attached (bin/brio does the same
+#     via its manifest); default here is board A's probe (bin/brio
 #     list). Override with -DAVR_PROBE_SERIAL=... for board B or another desk.
-set(AVR_PROBE_SERIAL "J42700051207" CACHE STRING "Atmel-ICE serial to flash/debug through (tools/bench.py list)")
+set(AVR_PROBE_SERIAL "J42700051207" CACHE STRING "Atmel-ICE serial to flash/debug through (brio list)")
 
 # --- The build id every image carries: avrdx/nvm_flash.hpp records it in
 #     every map version of a flash NvHeap, where it is a DIAGNOSTIC and
 #     nothing else - a stored block is judged by its checksum, never by
 #     which build wrote it. It is the NEWEST SOURCE TIMESTAMP, not the time
-#     of the link: tools/bench.py flash reprograms without erasing, which on
+#     of the link: brio flash reprograms without erasing, which on
 #     this part only clears bits, so reflashing is safe only while the image
 #     is byte-identical to the one already in the chip - a wall-clock id
 #     would break that for every app at every relink. An unchanged tree
@@ -233,7 +233,7 @@ endfunction()
 #     (grammar: any "// build: <key> = <value>" line in the file; "boards"
 #     is a comma-separated allow-list, default {db48} if absent - matching
 #     every app that doesn't name the line today; any other key is
-#     collected as per-app metadata for tools/bench.py, via the JSON
+#     collected as per-app metadata for bin/brio, via the JSON
 #     manifest below, EXCEPT "flmap_lock" which also feeds avr_add_app()'s
 #     link flags directly).
 file(GLOB APP_SOURCES CONFIGURE_DEPENDS
@@ -295,7 +295,7 @@ foreach(_app_path IN LISTS APP_SOURCES)
 endforeach()
 
 # Package-agnostic (a scan of source comments, not of what THIS configure
-# happens to build) - tools/bench.py reads it. Regenerated identically by
+# happens to build) - bin/brio reads it. Regenerated identically by
 # any one configure/preset.
 #
 # ONE ROSTER PER PROJECT, named after the project. The samc21/ project emits

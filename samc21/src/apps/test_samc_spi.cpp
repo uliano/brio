@@ -472,7 +472,7 @@ bool ensure_link() {
     link_quiet = false;
     print(serial,
           "  THE PEER DID NOT ANSWER. The peer board must be running `spi_peer` "
-          "(python3 tools/bench.py flash D spi_peer); its console '0' forces the "
+          "(brio flash D spi_peer); its console '0' forces the "
           "dark client back. Check the five wires in this file's header.",
           crlf);
     return false;

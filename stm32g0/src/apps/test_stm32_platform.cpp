@@ -6,7 +6,7 @@
 // stm32g0/delay.hpp (the microsecond busy-wait).
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
-// the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
+// the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the code
 // under it.
@@ -35,7 +35,7 @@
 //      once per leg and resumes from a .noinit token, so it is NOT in
 //      `z`: `z` has to be one console session a tool can judge from a
 //      single capture. Run it with
-//          python3 tools/bench.py run <board> i --app test_stm32_platform
+//          brio run <board> i --app test_stm32_platform
 //                  --expect="->" --timeout 120
 //      Legs: a software reset, an IWDG time-out (which measures the
 //      real one and with it LSI), a WWDG window violation, a panic

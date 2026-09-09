@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/adc.hpp: every verb must COMPILE on the E, G
-// and J 18A headers (tools/check_samc21.sh sweeps all three). The two
+// and J 18A headers (brio check samc21 sweeps all three). The two
 // converters are identical at the register level; what differs across
 // the family is PAD BONDING, and it differs a lot - the E bonds NO PORT
 // B pad to either ADC, which leaves ADC1 there with AIN10 and AIN11 and

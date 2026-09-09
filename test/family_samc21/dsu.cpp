@@ -1,5 +1,5 @@
 // Family smoke TU for samc21/dsu.hpp: every verb must COMPILE on the E, G
-// and J 18A headers (tools/check_samc21.sh sweeps all three).
+// and J 18A headers (brio check samc21 sweeps all three).
 //
 // The DSU is one instance with one register map on every member of the
 // family. What varies is the DEVICE the DID reports, which is the point

@@ -2,7 +2,7 @@
 // over it (util/nv_heap.hpp on this silicon).
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
-// the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
+// the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the code
 // under it.
@@ -984,7 +984,7 @@ void ti_heap() {
 // THIS LETTER REBOOTS THE BOARD, four times, which is why it is not in
 // `z`: `z` has to be one console session a tool can judge from a single
 // capture. Run it with
-//     python3 tools/bench.py run <board> s --app test_stm32_nvm
+//     brio run <board> s --app test_stm32_nvm
 //             --expect="pass," --timeout 250
 //
 // WHY A REBOOT PER MISSTEP, and it is a finding rather than caution.
@@ -1175,7 +1175,7 @@ void tv_verify() {
     bench.verdict("and the small one holds what letter i last wrote into it",
                   short_ok);
 
-    // THE POINT OF THIS LETTER. tools/bench.py flashes through OpenOCD's
+    // THE POINT OF THIS LETTER. brio flashes through OpenOCD's
     // `program <elf> verify`, which erases only the sectors the image
     // occupies - and the image occupies bank 1 alone. So a reflash of a
     // DIFFERENT app leaves bank 2 untouched, and a build id older than

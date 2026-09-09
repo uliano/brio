@@ -137,6 +137,14 @@ the host unit tests (a configure has exactly one compiler).
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash it over the ST-LINK
 ```
 
+With more than one board on the desk the bench has one command,
+`bin/brio` (put `bin/` on the PATH): `brio list` shows the boards the
+manifest knows and which are plugged in, `brio flash <board> <app>`
+builds for that board's type and flashes it whatever its probe,
+`brio run <board> <letter>` drives a test suite's console and judges
+its summary, `brio check <stratum>` runs the family compile fixtures
+and `brio prose` the prose net. `brio --help` lists the rest.
+
 Everything target-specific - toolchain, board, probe, debugger, its
 quirks - is documented per target in each target's folder under [docs/](docs/).
 The apps are the framework's test bench: disposable by design, they

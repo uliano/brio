@@ -15,7 +15,7 @@ switch to the safe clock when the input is stuck high) tells the
 application to run the WDT and switch clocks in firmware after the reset.
 Driver: `samc21/reset.hpp` (`Reset`, `Watchdog`, `ResetReporter`,
 `hard_fault_reset`). Family fixture `test/family_samc21/reset.cpp` plus one
-negative under `tools/check_samc21.sh`; the bench suite is
+negative under `brio check samc21`; the bench suite is
 `test_samc_platform`.
 
 ## What the silicon does
@@ -254,7 +254,7 @@ endurance.
   makes it sticky: the debug logic is reset by a power-on or an external
   reset and NOT by a watchdog reset or a system reset request, so every
   later software reset inherits it. The symptom is a silent board parked
-  on the BKPT instruction. `tools/bench.py` clears C_DEBUGEN as the last
+  on the BKPT instruction. `bin/brio` clears C_DEBUGEN as the last
   step of every SAM flash, which is what a board with no probe attached
   looks like.
 - **An unbound vector is a silent death** on this target - the crt's

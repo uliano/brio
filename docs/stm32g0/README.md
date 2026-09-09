@@ -57,7 +57,7 @@ crt `src/glue/startup_<header>.cpp` and the board name, the part's last
 six characters - one Nucleo per part on this desk, so the part IS the
 board); three parts have presets - the G0B1RE, and the two other Nucleos
 below. Every other part of the family is compile-checked by
-`tools/check_stm32g0.sh`, which sweeps every positive TU in
+`brio check stm32g0`, which sweeps every positive TU in
 `test/family_stm32g0/` across ALL TWELVE device headers the CMSIS pack
 ships and requires every `neg/` TU to fail for the variants its
 `// mcu:` line names - see "Family coverage" below.
@@ -163,7 +163,7 @@ because RM0444 22.4.25 gives codes 0100, 0101 and 0110 to the G0B1/G0C1
 sales types alone and no TIM register says so ([tim.md](tim.md)).
 
 All three boards have their presets (`stm32g0b1re-*`, `stm32g071rb-*`,
-`stm32g031k8-*`), linker scripts, crts and `tools/bench.py` board types,
+`stm32g031k8-*`), linker scripts, crts and `bin/brio` board types,
 and `blink`, `console` and `probe` build for all three.
 
 ## The third silicon: the Nucleo-G031K8
@@ -184,7 +184,7 @@ Nucleo-64s' free pads drift down), which costs the tamper letter its
 TAMPPUDIS contrast; and **its debug port can go silent** - a state of
 the board's ST-LINK half that only unplugging the board clears - in
 which case the ST-LINK's own mass-storage flasher is the way in
-(`tools/bench.py`'s `stlink_msd` programmer kind) and nothing can be
+(`bin/brio`'s `stlink_msd` programmer kind) and nothing can be
 halted or read over SWD until the replug ([../bench.md](../bench.md)).
 
 **FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT.**
@@ -253,13 +253,13 @@ answers. A name outside that set on the wrong board lands in
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)
 (cd stm32g0 && cmake --preset stm32g071rb-release)                      # the Nucleo-G071RB; stm32g031k8-release the Nucleo-32
-tools/check_stm32g0.sh [name]                                          # family smoke, no hardware
+brio check stm32g0 [name]                                          # family smoke, no hardware
 ```
 
 Build outputs land in `build-cmake/stm32g0b1re-{release,debug}` at the
 repo root: `<app>.elf/.bin/.hex`, `firmware-<app>.map`, `<app>.lst`. A
 configure also writes this project's app roster,
-`build-cmake/apps_stm32g0.json`, which `tools/bench.py` reads: the
+`build-cmake/apps_stm32g0.json`, which `bin/brio` reads: the
 board TYPE `g0b1re` is what tells that tool to build here and to flash
 through OpenOCD's ST-LINK interface (`bench.py flash E <app>`). NB
 `bench.py run` speaks the bench SUITES' single-letter grammar (no
@@ -297,7 +297,7 @@ read 6 again right after `reset run`). The register survives every
 reset but a power-on, and with DBG_STOP set the debug logic keeps
 HCLK - and SysTick - running inside a Stop, which cuts a Stop entered
 with the kernel tick armed from its full 250 ms to one tick.
-`tools/bench.py` therefore ends every G0 flash with `reset halt`, a
+`bin/brio` therefore ends every G0 flash with `reset halt`, a
 clear of DBGMCU_CR through its clock gate (the gate put back to its
 reset value) and a `resume`, so a board leaves the bench as a power-on
 would leave it; a cortex-debug session sets the bits again, and

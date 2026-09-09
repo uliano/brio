@@ -19,7 +19,7 @@ section 1.4, read on the **E/G/J row at revision F**: items 1.4.4,
 revisions B..E. Driver: `samc21/adc.hpp`, over the reserve's ADC entries
 in `samc21/device_tables.hpp`. The family fixture is
 `test/family_samc21/adc.cpp` plus nine negatives under
-`tools/check_samc21.sh`; the bench suites are `test_samc_adc` and, for
+`brio check samc21`; the bench suites are `test_samc_adc` and, for
 what needs the DAC as a swept mid-scale source, `test_samc_analog`
 (letters a to d).
 

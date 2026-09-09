@@ -4,7 +4,7 @@
 // silicon.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
-// the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
+// the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the code
 // under it.
@@ -83,7 +83,7 @@
 //   l  the timer's DMA BURST engine: a whole row of registers walked off
 //      ONE update request through TIMx_DMAR, with a control that changes
 //      one field of DCR and nothing else
-//   u  (outside z) tools/uart_stress.py: byte-exact streaming both ways
+//   u  (outside z) brio stress: byte-exact streaming both ways
 //      through the engines, up to the VCP's own measured ceiling
 //   w  (outside z) the two rungs ABOVE that ceiling, for the numbers
 //      alone - no verdict rests on a rate the bridge is proven to corrupt
@@ -2360,7 +2360,7 @@ void tl_timer_burst() {
 
 // ---- u: the host peer, and the VCP's ceiling (OUTSIDE z) -----------------------
 //
-// tools/uart_stress.py: the board prints one "HOST op mode baud format
+// brio stress: the board prints one "HOST op mode baud format
 // window count" line and the script moves its own port to that rate,
 // pumps or verifies the same xorshift, and goes quiet before the board
 // speaks again. It is the only pair of letters here that needs a peer,
@@ -2498,9 +2498,9 @@ void stress_rungs(const uint32_t* rungs, uint8_t count, uint32_t& best_source,
 }
 
 void tu_stress() {
-    print(serial, "  this letter needs tools/uart_stress.py on the other end "
+    print(serial, "  this letter needs brio stress on the other end "
           "of the VCP; run it as", crlf,
-          "  python3 tools/uart_stress.py --port <the console> --letters u", crlf,
+          "  brio stress --port <the console> --letters u", crlf,
           "  the ladder stops at ", vcp_ceiling, " baud, the rate this bridge "
           "is PROVEN to carry byte-exact; letter w runs the two rungs above "
           "it, outside z", crlf);
@@ -2538,7 +2538,7 @@ void tu_stress() {
 // this letter without that flag measures the SOURCE direction alone.
 void tw_beyond() {
     print(serial, "  the rungs ABOVE the ceiling. Run the script as", crlf,
-          "  python3 tools/uart_stress.py --port <the console> --letters w "
+          "  brio stress --port <the console> --letters w "
           "--beyond-vcp", crlf,
           "  NO VERDICT RESTS ON THIS LETTER: above ", vcp_ceiling,
           " baud the ST-LINK's virtual COM port is measured corrupt, so what "
@@ -2575,7 +2575,7 @@ void banner() {
           "  i  the timer round trip: a duty table played, a capture streamed",
           crlf,
           "  j  BlockRelay inside a real kernel", crlf,
-          "  u  the host peer (tools/uart_stress.py), to the VCP's ceiling - "
+          "  u  the host peer (brio stress), to the VCP's ceiling - "
           "OUTSIDE z", crlf,
           "  w  the two rungs above that ceiling, judged by nothing - "
           "OUTSIDE z", crlf,

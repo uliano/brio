@@ -2,7 +2,7 @@
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // a serial console; `z` runs them all and prints the "ALL: N pass, M
-// fail" line tools/bench.py judges. No wires.
+// fail" line bin/brio judges. No wires.
 //
 // WHAT IT IS ABOUT. samc21/nvm_flash.hpp partitions the 8 KB RWWEE array
 // into two storage classes: rows 0..27 are the block heap's

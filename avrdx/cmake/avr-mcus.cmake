@@ -4,7 +4,7 @@
 #  packages: 128 KB flash, 16 KB SRAM (microchip.com/en-us/product/AVR128DBxx).
 #  Nothing in this build programmatically checks flash/RAM size - avr_add_app()
 #  already reports real usage after every link via `avr-size -A -d`; this file
-#  is the one documented home for the package->mcu mapping. tools/bench.py's
+#  is the one documented home for the package->mcu mapping. bench/cli.py's
 #  MCU_OF_BOARD dict mirrors these short names by hand - keep both in sync.
 # ============================================================================
 

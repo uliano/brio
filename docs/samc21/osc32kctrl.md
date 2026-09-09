@@ -14,7 +14,7 @@ clock when the input is stuck high) is marked only in the **N-family
 row**. Both are the shape of trap `dmac.md` already records: read the
 row, not the column. Driver: `samc21/osc32kctrl.hpp`. Family fixture
 `test/family_samc21/osc32kctrl.cpp` plus one negative under
-`tools/check_samc21.sh`; the bench suite is `test_samc_osc32k`, which
+`brio check samc21`; the bench suite is `test_samc_osc32k`, which
 measures with `samc21/freqm.hpp`.
 
 ## What the silicon does

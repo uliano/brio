@@ -18,7 +18,7 @@ Drivers: `stm32g0/pwr.hpp` (`Pwr`, the whole chapter) and
 `stm32g0/sleep.hpp` (`Stm32g0SleepSite`, `Stm32g0TimedSleepSite`,
 `Stm32g0LptimTimedSleepSite`). Family fixture:
 `test/family_stm32g0/sleep.cpp` + seven negatives under
-`tools/check_stm32g0.sh` (two of them refuse a timed site on a
+`brio check stm32g0` (two of them refuse a timed site on a
 tickless platform). Bench suites: `test_stm32_sleep` for the first two
 sites, `test_stm32_lptim` letter h for the third, `test_stm32_tickless`
 letter f for the plain site on the tickless platform. The waking half
@@ -69,7 +69,7 @@ for the deep rungs and `disarm()` resumes it: it costs NOTHING (a Stop
 stops SysTick anyway and kernel time was going to stand still for the
 whole sleep either way), it closes the pending-tick window by
 construction, and it makes a Stop last whatever a probe left behind.
-`Pwr::debug_in_stop()` reads the bit; `tools/bench.py` clears it after
+`Pwr::debug_in_stop()` reads the bit; `bin/brio` clears it after
 every flash.
 
 **What comes back from a Stop is not what went in.** 4.3.6 and 5.3: the

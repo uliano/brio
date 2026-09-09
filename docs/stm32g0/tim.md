@@ -16,7 +16,7 @@ chip's revision Z column. Driver: `stm32g0/tim.hpp`; the per-instance
 presence and vector facts come from `stm32g0/device_tables.hpp`. Bench
 suite: `test_stm32_tim` (12 letters, 118 verdicts, wireless). Family
 fixture `test/family_stm32g0/tim.cpp` plus seven negatives under
-`tools/check_stm32g0.sh`.
+`brio check stm32g0`.
 
 ## What the silicon does
 

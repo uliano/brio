@@ -1,4 +1,4 @@
-# The stm32g0 family smoke TUs are compiled by tools/check_stm32g0.sh
+# The stm32g0 family smoke TUs are compiled by brio check stm32g0
 # alone (no CMake project, so no database entry of their own). The STM32G0
 # database's TUs lend their flags, so these parse as arm-none-eabi instead
 # of inheriting test/'s host fragment. The G071/G031 variants parse as the

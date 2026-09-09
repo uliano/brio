@@ -19,7 +19,7 @@ workaround around RWWEE access; it is not needed here. Drivers:
 `util/nv_heap.hpp` backend, and `RwweeJournalZone` the
 `util/nv_journal.hpp` one). Family fixtures `test/family_samc21/nvm.cpp`
 and `test/family_samc21/journal.cpp` plus their negatives under
-`tools/check_samc21.sh`; the bench suites are `test_samc_nvm` and
+`brio check samc21`; the bench suites are `test_samc_nvm` and
 `test_samc_journal`.
 
 ## What the silicon does
@@ -111,7 +111,7 @@ Auxiliary Page (WAP) - and this driver deliberately exposes neither. The
 row IS the fuses: it survives a chip erase, and it carries the watchdog's
 power-on ALWAYSON bit, the brown-out level and BOOTPROT, so a wrong word
 is not undone by reflashing and an application has no business writing
-one. Provisioning belongs to the programmer: `tools/bench.py fuses` over
+one. Provisioning belongs to the programmer: `brio fuses` over
 SWD reads and decodes every field of table 9-4, and a write is a whole-row
 read-modify-write through EAR + WAP with the core halted, the old row
 printed first, the new one read back and diffed, the BODCORE calibration

@@ -18,7 +18,7 @@
 // whole Flash is one BOOT section and no software can write any of it,
 // so the Flash legs report the geometry and skip. The standing bench
 // geometry is BOOTSIZE = 128 (BOOT = the first 64 KB, where all the
-// code is) and CODESIZE = 0; tools/bench.py's `fuses` verb writes it.
+// code is) and CODESIZE = 0; brio's `fuses` verb writes it.
 //
 // Times are COUNTED IN CLK_PER CYCLES: a TCB pair (TCB1+TCB2) cascaded
 // into one 32-bit counter at CLK_PER is the stopwatch, latched by a
