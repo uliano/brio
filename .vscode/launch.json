@@ -97,7 +97,7 @@
             "cwd": "${workspaceFolder}",
             "executable": "${command:cmake.launchTargetPath}",
             "servertype": "openocd",
-            "serverpath": "/sw/oss-cad-suite/bin/openocd",
+            "serverpath": "/sw/openocd/bin/openocd",
             "gdbPath": "/sw/arm-none-eabi/bin/arm-none-eabi-gdb",
             "objdumpPath": "/sw/arm-none-eabi/bin/arm-none-eabi-objdump",
             "openOCDPreConfigLaunchCommands": [
@@ -123,7 +123,7 @@
             "cwd": "${workspaceFolder}",
             "executable": "${command:cmake.launchTargetPath}",
             "servertype": "openocd",
-            "serverpath": "/sw/oss-cad-suite/bin/openocd",
+            "serverpath": "/sw/openocd/bin/openocd",
             "gdbPath": "/sw/arm-none-eabi/bin/arm-none-eabi-gdb",
             "objdumpPath": "/sw/arm-none-eabi/bin/arm-none-eabi-objdump",
             "openOCDPreConfigLaunchCommands": [

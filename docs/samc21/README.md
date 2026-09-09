@@ -86,8 +86,10 @@ like an AVR one (`bench.py flash C <app>`, `bench.py run C z`). The
 Flashing goes through OpenOCD driving the Atmel-ICE as a CMSIS-DAP
 probe: `interface/cmsis-dap.cfg` + `target/at91samdXX.cfg` (the
 at91samd flash driver auto-probes the geometry from the DSU DID) +
-`program <app>.elf verify reset exit`. The oss-cad-suite OpenOCD
-build at `/sw/oss-cad-suite/bin/openocd` drives the ICE flawlessly.
+`program <app>.elf verify reset exit`. OpenOCD is the 0.12.0 release,
+built from its tarball into `/sw/openocd-0.12.0` (`/sw/openocd`) by
+`/sw/src/build-openocd.sh` the way the toolchains are, with the
+CMSIS-DAP adapter on its hidapi backend; it drives the ICE flawlessly.
 Two Atmel-ICE probes live on this desk, so `adapter serial` is
 mandatory (the `SAMC21_PROBE_SERIAL` cache variable, default the SAM
 board's probe); flashing requires the debug session to be closed -

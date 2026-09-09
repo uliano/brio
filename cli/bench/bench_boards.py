@@ -322,7 +322,9 @@ DEFAULT_MONITOR_SPEED = 460800
 # avrdx/CMakeLists.txt's avr_add_app() uses for the <app>-upload targets.
 AVRDUDE = "/sw/avr/bin/avrdude"
 
-# The OpenOCD that talks to SAM over SWD: the oss-cad-suite build, which
-# drives the Atmel-ICE as a CMSIS-DAP probe flawlessly where others do not.
-# Same binary samc21/CMakeLists.txt's SAMC21_OPENOCD defaults to.
-OPENOCD = "/sw/oss-cad-suite/bin/openocd"
+# The OpenOCD every SWD path uses - the Atmel-ICE as a CMSIS-DAP probe and
+# the Nucleos' ST-LINKs: the 0.12.0 release built from its tarball into
+# /sw the way the toolchains are (/sw/src/build-openocd.sh; --enable-
+# cmsis-dap with the hidapi backend, --enable-stlink). Same binary the
+# two ARM projects' *_OPENOCD cache variables default to.
+OPENOCD = "/sw/openocd/bin/openocd"

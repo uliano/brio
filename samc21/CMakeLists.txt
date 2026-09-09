@@ -76,7 +76,7 @@ find_program(ARM_OBJDUMP arm-none-eabi-objdump PATHS "${ARM_TOOLCHAIN_DIR}/bin" 
 #     DSU DID). `adapter serial` disambiguates which Atmel-ICE when more
 #     than one is attached - same concern as the AVR project's
 #     AVR_PROBE_SERIAL; default is the SAM board's probe on this desk.
-set(SAMC21_OPENOCD "/sw/oss-cad-suite/bin/openocd" CACHE FILEPATH "OpenOCD with CMSIS-DAP + at91samd support")
+set(SAMC21_OPENOCD "/sw/openocd/bin/openocd" CACHE FILEPATH "OpenOCD with CMSIS-DAP + at91samd support")
 set(SAMC21_PROBE_SERIAL "J42700049508" CACHE STRING "Atmel-ICE serial to flash/debug through")
 
 # --- The build id every image carries: samc21/nvm_flash.hpp records it in

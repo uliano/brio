@@ -273,9 +273,10 @@ ST-LINK/V2.1: `interface/stlink.cfg` + `target/stm32g0x.cfg` (the
 stm32l4x flash driver underneath) + `program <app>.elf verify`, then
 `reset run` and a write of DHCSR that clears C_DEBUGEN: a core left with
 halting debug enabled HALTS on a BKPT instead of faulting, and every
-`panic()` ends in one. The oss-cad-suite
-OpenOCD at `/sw/oss-cad-suite/bin/openocd` drives the ST-LINK
-(firmware V2J46M31) without incident; the probe carries a REAL USB
+`panic()` ends in one. OpenOCD - the 0.12.0 release built from its
+tarball into `/sw/openocd-0.12.0` (`/sw/openocd`), see
+[the SAM page](../samc21/README.md) - drives the ST-LINK (firmware
+V2J46M31) without incident; the probe carries a REAL USB
 serial, so `adapter serial` names it and the same serial names the
 console under `/dev/serial/by-id`. Single-client: close the debug
 session before flashing.

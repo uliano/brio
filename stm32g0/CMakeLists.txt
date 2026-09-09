@@ -75,7 +75,7 @@ find_program(ARM_OBJCOPY arm-none-eabi-objcopy PATHS "${ARM_TOOLCHAIN_DIR}/bin" 
 find_program(ARM_SIZE arm-none-eabi-size PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 find_program(ARM_OBJDUMP arm-none-eabi-objdump PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 
-set(STM32G0_OPENOCD "/sw/oss-cad-suite/bin/openocd" CACHE FILEPATH "OpenOCD with ST-LINK + stm32g0x support")
+set(STM32G0_OPENOCD "/sw/openocd/bin/openocd" CACHE FILEPATH "OpenOCD with ST-LINK + stm32g0x support")
 set(STM32G0_PROBE_SERIAL "0670FF534871754867182752" CACHE STRING "ST-LINK serial to flash/debug through")
 
 set(STM32G0_NVHEAP_BUILD_ID 0)

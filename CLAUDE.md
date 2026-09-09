@@ -4364,9 +4364,12 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   and is the first firmware for a new board.
 
 - Toolchains: self-built avr-gcc 16.2 at `/sw/avr`
-  (`avrdx/cmake/toolchain-avr.cmake`) and arm-none-eabi-gcc 16.2 at
-  `/sw/arm-none-eabi` (`samc21/cmake/toolchain-arm.cmake`), each pointed
-  at by absolute path; never a system-packaged one. Never add
+  (`avrdx/cmake/toolchain-avr.cmake`), arm-none-eabi-gcc 16.2 at
+  `/sw/arm-none-eabi` (`samc21/cmake/toolchain-arm.cmake`) and OpenOCD
+  0.12.0 at `/sw/openocd` (`/sw/src/build-openocd.sh`, from the release
+  tarball: CMSIS-DAP on hidapi + ST-LINK; the manifest's OPENOCD, the
+  two ARM projects' `*_OPENOCD` cache variables and launch.json all
+  point there), each by absolute path; never a system-packaged one. Never add
   `-mrelax` on AVR (PyAvrOCD refuses the ELF).
   No `-flto` (never added, so nothing to strip) and no `-DF_CPU` (never
   added either: the clock rate has one truth, `Clock::hz`; avr-libc's
