@@ -63,13 +63,18 @@ struct Tester : brio::Fsm<Tester, Kick, brio::SpiDone> {
     static void init() {
         CsPin::set();                              // idle high (inactive)
         CsPin::output();
-        // Shared bus hygiene: DESELECT every real device on the bench
-        // (display CS=PD0, ADC CS=PD3) and keep the display quiet
-        // (RST=PD2 high, DC=PD1 high) while the jumper test runs.
-        brio::Pin<'D', 0>::set(); brio::Pin<'D', 0>::output();
-        brio::Pin<'D', 1>::set(); brio::Pin<'D', 1>::output();
-        brio::Pin<'D', 2>::set(); brio::Pin<'D', 2>::output();
-        brio::Pin<'D', 3>::set(); brio::Pin<'D', 3>::output();
+        // Shared bus hygiene: DESELECT every real device on SPI0's
+        // DEFAULT route (the list is docs/bench.md's wiring table) and
+        // keep the display quiet while the jumper test runs. It matters
+        // for the verdict, not only for the devices: the MCP3550's SDO
+        // sits on MISO, the very pad this test reads, and drives it
+        // unless its select is held high.
+        brio::Pin<'D', 0>::set(); brio::Pin<'D', 0>::output();   // display CS
+        brio::Pin<'D', 1>::set(); brio::Pin<'D', 1>::output();   // display DC
+        brio::Pin<'D', 2>::set(); brio::Pin<'D', 2>::output();   // display RST
+        brio::Pin<'D', 4>::set(); brio::Pin<'D', 4>::output();   // SD module CS
+        brio::Pin<'D', 5>::set(); brio::Pin<'D', 5>::output();   // XPT2046 touch CS
+        brio::Pin<'B', 0>::set(); brio::Pin<'B', 0>::output();   // MCP3550 CS
         start(&running);
     }
 
