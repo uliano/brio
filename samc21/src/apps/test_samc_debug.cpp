@@ -134,7 +134,7 @@ void console_drain() {
 }
 
 /// Eight zero-padded lowercase hex digits - the format
-/// bench/bench_boards.py records the die serial in, which a bare hex()
+/// cli/bench/bench_boards.py records the die serial in, which a bare hex()
 /// (no padding) cannot produce.
 const char* hex8(uint32_t v, char* buf) {
     static const char digits[] = "0123456789abcdef";
@@ -842,7 +842,7 @@ void tc_resume() {
 // DSU letter d - board identity
 // =============================================================================
 //
-// THE OPERATIONAL DELIVERABLE. bench/bench_boards.py records each
+// THE OPERATIONAL DELIVERABLE. cli/bench/bench_boards.py records each
 // board's factory 128-bit die serial and its DSU DID; these four words
 // are that record for the board this image is built for, and the
 // verdict is the check that the chip in hand is that board.
@@ -888,7 +888,7 @@ void td_identity() {
         }
     }
     bench.verdict("the factory die serial matches the one board C carries in "
-                  "bench/bench_boards.py - THE BOARD IS THE BOARD",
+                  "cli/bench/bench_boards.py - THE BOARD IS THE BOARD",
                   serial_matches);
     bench.verdict("and it is not a blank or an erased word",
                   serial_words.word[0] != 0u &&

@@ -2671,7 +2671,7 @@ gets its dated home in `docs/design/` when taken.
   reset" and table 18-1's silence left it open, and a SYSTEM reset AND a
   watchdog reset each CLEAR IT - a PAC lock lasts until the next reset of
   any kind, and letter c is re-runnable because of it. DSU: the die
-  serial and DID match bench/bench_boards.py's record for board C (that
+  serial and DID match cli/bench/bench_boards.py's record for board C (that
   manifest comment's "recorded, NOT yet checked" now names the letter
   that checks it); the CRC32 is the standard reflected-0xEDB88320 answer
   over flash and SRAM, chains through a raw seed, refuses a bus error,
@@ -2705,7 +2705,7 @@ gets its dated home in `docs/design/` when taken.
   pac/dsu/divas/mtb + SEVEN negatives; the reserve grew five probes
   (pac/dsu/mtb ids, the bridge count, the two MTB event users). Docs
   pac.md / dsu.md / divas.md / mtb.md NEW PROVISIONAL; the board-C
-  comment in bench/bench_boards.py updated (comment only). JUDGMENT CALLS
+  comment in cli/bench/bench_boards.py updated (comment only). JUDGMENT CALLS
   QUEUED - see memory samc-session-2026-08-29-debug.
   **ANALOG STREAMING DMA DONE 2026-08-29 (Opus delegation, the user's
   own question "il dma possiamo usarlo anche per dac e adc?", REVIEWED
@@ -4337,8 +4337,8 @@ brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--s
 # or a changed "// build: opt = value" line takes effect on the next
 # configure
 
-# The bench has ONE command, bin/brio (put bin/ on the PATH); its guts
-# are the bench/ package. The verbs:
+# The bench and the repository have ONE command, bin/brio (put bin/ on
+# the PATH); its guts are the cli/ package. The verbs:
 brio list                  # serial devices, USB probes, the bench manifest
 brio flash A test_avr_pin  # cmake --build --target <app>, then avrdude/UPDI
 brio flash C test_samc_dma # ... or OpenOCD/SWD - the BOARD TYPE decides both
@@ -4357,7 +4357,7 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   (`// build: boards = db28,db32,db48` in the app header; `db48` is the
   default when the line is absent; a configure targets exactly one
   package, so switching `configurePreset` switches which apps' targets
-  exist), IDENTITY = the manifest `bench/bench_boards.py` (which board
+  exist), IDENTITY = the manifest `cli/bench/bench_boards.py` (which board
   sits where, its console by `/dev/serial/by-path` because the CH340s
   have no USB serial, its programmer), ORCHESTRATION = `bin/brio`.
   Never a target per physical board. `family_probe` carries the matrix
@@ -4437,37 +4437,42 @@ test/family_stm32g0/     stm32g0 family smoke TUs + neg/, brio check stm32g0
 third_party/cmsis-core/  vendored ARM CMSIS-Core headers (Apache-2.0)
 bin/brio                 THE ONE COMMAND of the bench, dispatching on its first
                          argument; put bin/ on the PATH
-bench/                   its guts, a Python package, one module per job:
-  cli.py                 the argparse front of the six bench verbs and `list`
-  common.py              what every verb needs: the manifest, BOARD_TYPES (a
-                         board type -> its project, preset, mcu and flash
+cli/                     its guts, a Python package: main.py dispatches on the
+                         verb; gate.py, prose.py and check.py need no board
+  gate.py                `brio gate`, the byte-identity gate over the images and
+                         the token-identity check over sources
+  prose.py               `brio prose`, the prose net (see the definition of done)
+  check.py               `brio check <stratum> [filter]` over cli/checks/, the
+                         three family compile fixtures kept as shell scripts
+                         (zero CMake coupling, they call the cross compiler
+                         directly)
+  bench/                 THE BENCH HALF: the verbs that need a board
+    verbs.py             the argparse front of list / flash / run / console /
+                         duo / fuses
+    common.py            what every bench verb needs: the manifest, BOARD_TYPES
+                         (a board type -> its project, preset, mcu and flash
                          mechanism: db* -> avrdx/avrdude/UPDI, c21j ->
                          samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/ST-LINK),
                          the per-project app rosters build-cmake/apps_{avrdx,
                          samc21,stm32g0}.json (each project writes its own at
                          every configure - separate files because app NAMES
                          COLLIDE across the trees), the console paths
-  flash.py               `brio flash`: build, then avrdude / OpenOCD / the
+    manifest.py          loads the bench MANIFEST from private/bench_boards.py
+                         if it exists, else cli/bench/bench_boards.py: the
+                         physical boards on the desk (type, console by-path,
+                         programmer) - not a target list; no verb imports
+                         the file by name
+    bench_boards.py      the manifest in the repository
+    flash.py             `brio flash`: build, then avrdude / OpenOCD / the
                          ST-LINK's mass-storage flasher by board type, with
                          the flash-heap preflight on the AVR
-  fuses.py               `brio fuses`: the AVR FUSE bytes over UPDI, the SAM
+    fuses.py             `brio fuses`: the AVR FUSE bytes over UPDI, the SAM
                          user row over SWD; refuses what a type cannot do
-  console.py             the suites' console protocol and `brio run`,
+    console.py           the suites' console protocol and `brio run`,
                          `brio console`, `brio duo` over it
-  manifest.py            loads the bench MANIFEST from private/bench_boards.py
-                         if it exists, else bench/bench_boards.py: the physical
-                         boards on the desk (type, console by-path, programmer)
-                         - not a target list; no verb imports the file by name
-  bench_boards.py        the manifest in the repository
-  prose.py               `brio prose`, the prose net (see the definition of done)
-  gate.py                `brio gate`, the byte-identity gate over the images and
-                         the token-identity check over sources
-  stress.py              `brio stress`, the host end of the UART suites: the same
-                         xorshift the firmware generates, plus the baud and
-                         frame changes only an OUTSIDE sender can make
-  check_*.sh             `brio check <stratum> [name]`: the family compile
-                         fixtures over test/family*/ - zero CMake coupling,
-                         they call the cross compiler directly
+    stress.py            `brio stress`, the host end of the UART suites: the
+                         same xorshift the firmware generates, plus the baud
+                         and frame changes only an OUTSIDE sender can make
 experiments/             one SELF-CONTAINED directory per cross-cutting bench
                          experiment (ruled 2026-08-31; deliberately not
                          "examples" - no maintenance promise): both

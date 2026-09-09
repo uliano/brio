@@ -159,7 +159,7 @@ Test a block of SRAM the program has finished with:
 CAN-bearing series, so a C21 and not a C20), DIE 0, REVISION 5 = **rev
 F**, DEVSEL 0x00. The factory 128-bit die serial `samc21/nvm.hpp` reads
 comes back as **f9e78960-51574841-59202020-ff160321**, matching the
-string `bench/bench_boards.py` records for desk position C. The CoreSight
+string `cli/bench/bench_boards.py` records for desk position C. The CoreSight
 PARTNUM is 0xCD0, table 13-2's "a DSU is present".
 
 **The CRC32 engine is the standard CRC-32**, matched against a table-free

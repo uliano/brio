@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-from bench.common import *   # noqa: F401,F403
+from cli.bench.common import *   # noqa: F401,F403
 
 
 def avrdude_args(prog, mcu, hexfile, chip_erase=False):

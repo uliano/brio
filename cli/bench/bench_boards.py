@@ -9,7 +9,7 @@
 #                    board.
 #    2. IDENTITY   - this file: the boards actually on the desk, each with its
 #                    board type, its console and its programmer.
-#    3. ORCHESTRATION - bench/cli.py, which reads this manifest, resolves an
+#    3. ORCHESTRATION - cli/bench/verbs.py, which reads this manifest, resolves an
 #                    env, flashes and drives the consoles.
 #
 #  A board's NAME here ("A", "B", ...) is what brio commands take; it is a
@@ -89,7 +89,7 @@
 #  serial over SWD and by the reset-provokes-banner check on its console.
 # ============================================================================
 
-# The board types known to the build: keys of bench/cli.py's
+# The board types known to the build: keys of cli/bench/verbs.py's
 # BOARD_PRESET/MCU_OF_BOARD, mirroring cmake/avr-mcus.cmake. A board type
 # other than db48 needs the app to carry a "// build: boards" line, otherwise
 # there is no target to flash (brio says so).
@@ -186,7 +186,7 @@ BOARDS = {
         # and F's, and the rule is: a probe reporting "no device connected"
         # against a live target is replugged as a whole before any other
         # diagnosis. The fallback, proven for a whole campaign: the
-        # ST-LINK's OWN mass-storage flasher (bench/cli.py's `stlink_msd`
+        # ST-LINK's OWN mass-storage flasher (cli/bench/verbs.py's `stlink_msd`
         # kind drops the .bin on the NODE_G031K8 drive; a bad file draws a
         # FAIL.TXT, a good image leaves none and its banner appears), under
         # which nothing can be halted, read over SWD or have DBGMCU_CR

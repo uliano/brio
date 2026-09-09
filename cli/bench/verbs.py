@@ -1,6 +1,6 @@
 # ============================================================================
-#  bench/cli.py - the multi-board bench ORCHESTRATOR: build, flash, drive.
-#  The command is bin/brio; this module is its verbs.
+#  cli/bench/verbs.py - the bench verbs of brio: build, flash, drive.
+#  The command is bin/brio; this module is their argparse front.
 #
 #  Run with any Python 3 that has pyserial installed (pip install --user
 #  pyserial):
@@ -21,7 +21,7 @@
 #                 (each project's CMakeLists.txt); a configure also (re)writes
 #                 that project's build-cmake/apps_<project>.json, which this
 #                 file reads. Never a target per physical board.
-#    2. IDENTITY- the bench manifest (bench/manifest.py says where it is
+#    2. IDENTITY- the bench manifest (cli/bench/manifest.py says where it is
 #                 loaded from): which board sits where, on which console,
 #                 behind which programmer.
 #    3. THIS    - resolves 1 against 2 and drives the hardware.
@@ -48,10 +48,10 @@ import subprocess
 import sys
 import time
 
-from bench.common import *            # noqa: F401,F403
-from bench.flash import cmd_flash     # noqa: E402
-from bench.fuses import cmd_fuses     # noqa: E402
-from bench.console import cmd_run, cmd_console, cmd_duo   # noqa: E402
+from cli.bench.common import *            # noqa: F401,F403
+from cli.bench.flash import cmd_flash     # noqa: E402
+from cli.bench.fuses import cmd_fuses     # noqa: E402
+from cli.bench.console import cmd_run, cmd_console, cmd_duo   # noqa: E402
 
 
 def cmd_list(args):
@@ -112,7 +112,7 @@ def cmd_list(args):
 def main():
     ap = argparse.ArgumentParser(
         prog="brio",
-        description="Multi-board bench orchestrator (the manifest: bench/manifest.py)")
+        description="Multi-board bench orchestrator (the manifest: cli/bench/manifest.py)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("list", help="serial devices, USB programmers, manifest")

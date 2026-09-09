@@ -9,8 +9,8 @@ import subprocess
 import sys
 import time
 
-from bench.common import *   # noqa: F401,F403
-from bench.flash import avrdude_base   # noqa: E402
+from cli.bench.common import *   # noqa: F401,F403
+from cli.bench.flash import avrdude_base   # noqa: E402
 
 # ---------------------------------------------------------------------------
 #  fuses
@@ -318,7 +318,7 @@ def _sam_bit_map_is_complete():
 
 
 assert _sam_bit_map_is_complete(), \
-    "bench/cli.py: SAM_FUSES + SAM_PRESERVED must tile bits 0..63 of table 9-4"
+    "cli/cli/bench/fuses.py: SAM_FUSES + SAM_PRESERVED must tile bits 0..63 of table 9-4"
 
 
 def sam_bit_span(first, width):

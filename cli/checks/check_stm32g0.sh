@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Family compile check for the STM32G0 stratum (part of every driver's
-# definition of done, the stm32g0 twin of bench/check_samc21.sh).
+# definition of done, the stm32g0 twin of cli/checks/check_samc21.sh).
 #
 # Positive: every test/family_stm32g0/*.cpp must COMPILE for every device
 # header the CMSIS pack ships - ALL TWELVE: the x1 line (G031/G041,
@@ -18,10 +18,10 @@
 # No CMake coupling on purpose (same as check_family.sh): the compiler is
 # called directly, the whole sweep takes seconds and needs no hardware.
 #
-# Usage: bench/check_stm32g0.sh            all TUs, all variants
-#        bench/check_stm32g0.sh pin        only TUs/negatives matching "pin"
+# Usage: brio check stm32g0            all TUs, all variants
+#        brio check stm32g0 pin        only TUs/negatives matching "pin"
 set -u
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 CXX=/sw/arm-none-eabi/bin/arm-none-eabi-g++
 FLAGS="-mcpu=cortex-m0plus -mthumb -mfloat-abi=soft -std=gnu++23 -Os \

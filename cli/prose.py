@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bench/prose.py - the prose net: what a comment or a document may not say.
+"""cli/prose.py - the prose net: what a comment or a document may not say.
 
 Comments and documents in this repository are a reference for the code
 as it is (docs/README.md, docs/design/overview.md). Three things age
@@ -66,8 +66,8 @@ REVIEW_PATTERNS = [
 
 PATH_RE = re.compile(
     r"(?<![/A-Za-z0-9_.-])"
-    r"(?:brio|docs|tools|avrdx|samc21|stm32g0|armv6m|kernel|util|host|test|experiments)"
-    r"/[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:hpp|cpp|md|py|sh|json|svg|ld|cmake|txt)\b"
+    r"(?:brio|docs|tools|bench|cli|bin|avrdx|samc21|stm32g0|armv6m|kernel|util|host|test|experiments)"
+    r"/[A-Za-z0-9_][A-Za-z0-9_./-]*(?:\.(?:hpp|cpp|md|py|sh|json|svg|ld|cmake|txt)|(?<=bin/brio))\b"
 )
 
 
@@ -157,6 +157,9 @@ def check_text(path, chunks, errors, reviews):
 
 
 def main(argv):
+    if argv[1:2] in (["-h"], ["--help"]):
+        print(__doc__)
+        return 0
     targets = argv[1:]
     errors, reviews = [], []
     if targets:

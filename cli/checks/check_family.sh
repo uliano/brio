@@ -8,10 +8,10 @@
 # MCU named on its "// mcu: <list>" line (what must be refused must be
 # refused at compile time).
 #
-# Usage: bench/check_family.sh            all TUs, all MCUs
-#        bench/check_family.sh tcb        only TUs/negatives matching "tcb"
+# Usage: brio check avrdx            all TUs, all MCUs
+#        brio check avrdx tcb        only TUs/negatives matching "tcb"
 set -u
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 CXX=/sw/avr/bin/avr-g++
 FLAGS="-std=gnu++23 -Os -Wall -Wextra -Werror -c -Ibrio"

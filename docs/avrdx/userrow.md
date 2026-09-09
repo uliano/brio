@@ -57,7 +57,7 @@ avrdude -c atmelice_updi -p avr128db48 -P usb:<probe-serial> \
 avrdude ... -U userrow:r:-:h                                # read back
 ```
 
-The bench manifest (`bench/bench_boards.py`) records the label each
+The bench manifest (`cli/bench/bench_boards.py`) records the label each
 desk position is expected to carry; the suites' banners let the human
 (or a script) compare.
 

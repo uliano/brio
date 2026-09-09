@@ -3,7 +3,7 @@ which programmer. It is the user's own desk, so it is loaded from the
 first of these that exists:
 
   private/bench_boards.py   the desk that is really there (not published)
-  bench/bench_boards.py     the one in the repository
+  cli/cli/bench/bench_boards.py the one in the repository
 
 Every verb reaches the manifest through load(); nothing imports the file
 by name."""
@@ -11,10 +11,10 @@ by name."""
 import importlib.util
 import os
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CANDIDATES = (
     os.path.join(ROOT, "private", "bench_boards.py"),
-    os.path.join(ROOT, "bench", "bench_boards.py"),
+    os.path.join(ROOT, "cli", "bench", "bench_boards.py"),
 )
 
 

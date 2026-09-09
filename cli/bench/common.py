@@ -9,9 +9,9 @@ import subprocess
 import sys
 import time
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from bench.manifest import load as _load_manifest, path as manifest_path   # noqa: E402
+from cli.bench.manifest import load as _load_manifest, path as manifest_path   # noqa: E402
 manifest = _load_manifest()
 
 try:
@@ -62,7 +62,7 @@ def board_type(btype):
     spec = BOARD_TYPES.get(btype)
     if spec is None:
         die("unknown board type '%s' (known: %s) - a new type needs an entry "
-            "in bench/cli.py's BOARD_TYPES" % (btype, ", ".join(sorted(BOARD_TYPES))))
+            "in cli/cli/bench/common.py's BOARD_TYPES" % (btype, ", ".join(sorted(BOARD_TYPES))))
     return spec
 
 PROMPT = "> "
