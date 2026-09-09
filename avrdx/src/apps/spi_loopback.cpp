@@ -63,12 +63,11 @@ struct Tester : brio::Fsm<Tester, Kick, brio::SpiDone> {
     static void init() {
         CsPin::set();                              // idle high (inactive)
         CsPin::output();
-        // Shared bus hygiene: DESELECT every real device on SPI0's
-        // DEFAULT route (the list is docs/bench.md's wiring table) and
-        // keep the display quiet while the jumper test runs. It matters
-        // for the verdict, not only for the devices: the MCP3550's SDO
-        // sits on MISO, the very pad this test reads, and drives it
-        // unless its select is held high.
+        // Bus hygiene for a desk that has the experiments/display and
+        // experiments/dac_adc devices on SPI0's DEFAULT route: hold
+        // every select high so nothing else drives the bus - the
+        // MCP3550's SDO sits on MISO, the very pad this test reads. On
+        // a bare board these are free pins driven high, and harmless.
         brio::Pin<'D', 0>::set(); brio::Pin<'D', 0>::output();   // display CS
         brio::Pin<'D', 1>::set(); brio::Pin<'D', 1>::output();   // display DC
         brio::Pin<'D', 2>::set(); brio::Pin<'D', 2>::output();   // display RST

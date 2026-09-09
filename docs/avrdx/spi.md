@@ -382,12 +382,11 @@ client selects itself with INVEN on its own pulled-up SS pin.
   measured on the wire (above), but two hosts actually contending for
   one bus - and the driver's part in resolving it - is not written and
   not tested;
-- SPI1 electrically: its pin positions (PC0-PC3, PC4-PC7) are the
-  traffic LEDs of this bench, so SPI1 is exercised on route NONE only -
-  the register work, not a wire;
-- SPI0 DEFAULT and ALT2 electrically: DEFAULT (PA4-PA7) is cabled on
-  this desk to a 3.3 V display module and an MCP3550 while the desk runs
-  at 5 V, and ALT2 needs a 64-pin package this bench does not have;
+- SPI1 electrically: it is exercised on route NONE only - the
+  register work, not a wire;
+- SPI0 DEFAULT and ALT2 electrically: the suite runs on ALT1 and leaves
+  DEFAULT (PA4-PA7) unwired, and ALT2 needs a 64-pin package this bench
+  does not have;
 - the errata refusals are proven by what the driver REFUSES, not by what
   the silicon does: nobody has watched SPI1 ALT2 fail on a 48-pin part,
   or a pinless DA host lose Host mode with SSD = 0;
