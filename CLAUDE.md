@@ -4437,17 +4437,23 @@ test/family_stm32g0/     stm32g0 family smoke TUs + neg/, brio check stm32g0
 third_party/cmsis-core/  vendored ARM CMSIS-Core headers (Apache-2.0)
 bin/brio                 THE ONE COMMAND of the bench, dispatching on its first
                          argument; put bin/ on the PATH
-bench/                   its guts, a Python package:
-  cli.py                 the verbs list / flash / run / console / duo / fuses,
-                         over the manifest and the per-project app rosters
-                         build-cmake/apps_{avrdx,samc21,stm32g0}.json (each
-                         project writes its own at every configure - separate
-                         files because app NAMES COLLIDE across the trees).
-                         BOARD_TYPES maps a board type to its project, preset,
-                         mcu and flash mechanism (db* -> avrdx/avrdude/UPDI,
-                         c21j -> samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/
-                         ST-LINK); `fuses` and --erase refuse what a board
-                         type cannot do instead of pretending
+bench/                   its guts, a Python package, one module per job:
+  cli.py                 the argparse front of the six bench verbs and `list`
+  common.py              what every verb needs: the manifest, BOARD_TYPES (a
+                         board type -> its project, preset, mcu and flash
+                         mechanism: db* -> avrdx/avrdude/UPDI, c21j ->
+                         samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/ST-LINK),
+                         the per-project app rosters build-cmake/apps_{avrdx,
+                         samc21,stm32g0}.json (each project writes its own at
+                         every configure - separate files because app NAMES
+                         COLLIDE across the trees), the console paths
+  flash.py               `brio flash`: build, then avrdude / OpenOCD / the
+                         ST-LINK's mass-storage flasher by board type, with
+                         the flash-heap preflight on the AVR
+  fuses.py               `brio fuses`: the AVR FUSE bytes over UPDI, the SAM
+                         user row over SWD; refuses what a type cannot do
+  console.py             the suites' console protocol and `brio run`,
+                         `brio console`, `brio duo` over it
   manifest.py            loads the bench MANIFEST from private/bench_boards.py
                          if it exists, else bench/bench_boards.py: the physical
                          boards on the desk (type, console by-path, programmer)
