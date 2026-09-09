@@ -164,7 +164,10 @@ comments justifying wrong restrictions. The antidote, in practice:
   every package - `avr-g++ -mmcu=avr128d{a,b}{28,48,64} -std=gnu++23
   -Os -c -I brio` takes seconds, no hardware; (3) negative
   tests: what must be refused must FAIL to compile; (4) the
-  `test_<target>_<subject>` suite on the bench. The bench chip alone
+  `test_<target>_<subject>` suite on the bench; (5) `tools/check_prose.py`
+  clean over the files touched - a comment or a document is a reference
+  for the code as it is, and a claim about another part of the tree is
+  a POINTER the tool can check, never a statement that ages. The bench chip alone
   masks half the family (SWEVENTB, TCA1, PORTB proved it).
 - **Package variability pattern** (full rule: overview.md "Target
   strata"; model code: tcb.hpp/pin.hpp/evsys.hpp): device header =
@@ -4318,6 +4321,9 @@ tools/check_samc21.sh [name]                                         # same for 
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)          # STM32G0 release build
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash via OpenOCD (ST-LINK)
 tools/check_stm32g0.sh [name]                                      # same for the stm32g0 stratum (ALL TWELVE G0 headers, x1 + x0)
+tools/check_prose.py [paths...]                                   # the prose net: no dates/process words/Doxygen tags in
+                                                                    # comments and docs, every cited path exists, ASCII only;
+                                                                    # "review" lines are claims of absence to re-read, not errors
 # apps are auto-discovered from <project>/src/apps/*.cpp - plus
 # experiments/*/{avrdx,samc21}/*.cpp, each experiment's per-arch app
 # halves - at every configure; no generation step; a new/removed app

@@ -501,7 +501,7 @@ TIM4 and nothing else:
 - **Letter l's census is of five instances.** TIM4's counter, its update
   interrupt and its four channels on PB6..PB9 at AF9 all skip; no other
   timer of this package reaches those four pads at once.
-- LSI, captured on TIM16's TISEL with no pad anywhere, measures **32323
+- LSI, captured on TIM16's TISEL with no pad anywhere, measures **32339
   Hz** on this die against the G0B1's 32586 - both inside DS13560 table
   46's 29.5..34 kHz window, and both the oscillator's own number rather
   than the capture's.

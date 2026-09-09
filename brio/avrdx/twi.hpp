@@ -1213,7 +1213,8 @@ private:
  * recover() below. A stuck WIRE is a different fault and the remedy is
  * Twi<n>::unstick() (and this task's `unstick()`), which nothing calls
  * on its own: which devices to free, and when, is the application's
- * (design/i2c-bus.md). Not covered: 10-bit addressing.
+ * (design/i2c-bus.md). What is not covered (10-bit addressing and the
+ * rest) is docs/avrdx/twi.md's list.
  *
  * ISR wiring (app glue, as usual):
  *   ISR(TWI0_TWIM_vect) {

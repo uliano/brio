@@ -344,13 +344,12 @@ struct Streams {
 /// (the run_exchange lesson: the select read is telemetry, never a
 /// gate), and the deadline is the only other exit.
 ///
-/// THE HOT LOOP CARRIES NOTHING BUT BYTES. The first version stepped
-/// the two LFSRs, compared and tallied INSIDE the loop, and the bench
-/// answer was immediate: back-to-back characters above 1 MHz slipped
-/// from byte 2 on - the two preloads exact, then the reload missing
-/// the three-SCK-cycle window every time. So the answer stream is
-/// PRECOMPUTED, the received bytes only STORED, and every judgement
-/// happens after the burst. What that buys is a reload path of a few
+/// THE HOT LOOP CARRIES NOTHING BUT BYTES. A loop that steps the two
+/// LFSRs, compares and tallies INSIDE itself slips from byte 2 on at
+/// back-to-back characters above 1 MHz - the two preloads exact, then
+/// the reload missing the three-SCK-cycle window every time. So the
+/// answer stream is PRECOMPUTED, the received bytes only STORED, and
+/// every judgement happens after the burst. What that buys is a reload path of a few
 /// register accesses; what it costs is the burst cap below.
 constexpr uint16_t exchange_cap = 64;
 uint8_t x_out[exchange_cap];
@@ -523,9 +522,9 @@ spilink::Report run_host_burst(const spilink::Params& a) {
     // high from PORT while the pins change hands. Client::release()
     // ALSO RELEASES THE CLOCKS (the GCLK channel and the APB mask), so
     // they are re-established before one register of the host role is
-    // written - the first version configured a host into a clockless
-    // block, whose SYNCBUSY of zeros READS like success while every
-    // store is dropped: the burst then "ran" and moved nothing.
+    // written - a host configured into a clockless block has a SYNCBUSY
+    // of zeros that READS like success while every store is dropped:
+    // the burst then "runs" and moves nothing.
     Client::release();
     SsPin::input(PinPull::up);
     Raw::bus_clock(true);

@@ -26,12 +26,12 @@
  * reaches the registers through Sercom<n>::spi_regs() and shares this
  * class's per-instance facts (clocks, NVIC line, DMAC triggers); I2C
  * host/client is ch. 33 and is not built. Inside
- * USART mode the fractional and 3x baud regimes, the synchronous role
- * with XCK, hardware handshaking (RTS/CTS), RS485/TE, LIN, IrDA,
- * collision detection, auto-baud, start-of-frame detection and the DMA
- * triggers are declared here as NOT BUILT rather than half-built. The
- * baud arithmetic below names its oversampling explicitly so a second
- * regime slots in without moving anything.
+ * USART mode, what is NOT BUILT rather than half-built (the fractional
+ * and 3x baud regimes, the synchronous role, handshaking, RS485, LIN,
+ * IrDA, auto-baud, start-of-frame detection) is listed with its reasons
+ * in docs/samc21/sercom.md. The baud arithmetic below names its
+ * oversampling explicitly so a second regime slots in without moving
+ * anything.
  *
  * ONE INTERRUPT VECTOR, NOT TWO, whatever a two-vector transport would
  * lead one to expect. A SERCOM has exactly ONE line in the NVIC

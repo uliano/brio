@@ -948,7 +948,7 @@ extern "C" void SDADC_Handler() {
     }
 }
 // Bound even though only WIT arms it: an unbound vector is a silent
-// spin at Default_Handler (the sleepwalk campaign's watchdog lesson).
+// spin at Default_Handler, ended only by the watchdog.
 extern "C" void AC_Handler() {
     const uint8_t flags = brio::Ac::take_flags();
     if ((flags & WitnessComp::flag) != 0u) {

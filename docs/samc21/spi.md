@@ -1,9 +1,8 @@
 # SERCOM SPI (SAM C21)
 
 > **PROVISIONAL.** Both roles are built and bench-verified against a
-> real second board - first the AVR128DB48 peer (the cross-architecture
-> bench), then a second SAM C21 (the speed campaign's bench, where the
-> DMA engines were born) - and util's bus vocabulary runs over the host
+> real second board - an AVR128DB48 peer and a second SAM C21 - and
+> util's bus vocabulary runs over the host
 > engine unchanged. What is deliberately still open is listed under
 > "Not covered yet".
 

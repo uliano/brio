@@ -156,10 +156,10 @@ COMPCTRLn.ENABLE bits standing.
 
 **A GCLK fact this probe needs** (it lives in
 [clock.md](clock.md) and in `samc21/clock.hpp`, where the config is):
-GENCTRL.DIVSEL divides by **2^(DIV+1)** - the DIV value counts, and
-the width of the field does not. The linear divisor is what this
-probe uses, and only generator 1's linear field reaches past 255
-(table 16-3).
+GENCTRL.DIVSEL divides by **2^(DIV+1)**, saturated at 2^(width+1) -
+the DIV value counts up to the field's width, and past it buys nothing.
+The linear divisor is what this probe uses, and only generator 1's
+linear field reaches past 255 (table 16-3).
 
 ## Types and verbs
 
