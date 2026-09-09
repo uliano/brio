@@ -18,8 +18,8 @@ lists no SLPCTRL, WDT or CPU item at all. Drivers:
 `avrdx/platform.hpp` (`AvrPlatform`, this target's realization of
 the kernel's `Platform` concept), `avrdx/delay.hpp` (the short-wait
 role), `avrdx/sleep.hpp` (`Sleep`, `Vreg`) and `avrdx/reset.hpp`
-(`Reset`, `Watchdog`). Reference tests: `test_avr_platform` and
-`test_avr_sleep`.
+(`Reset`, `Watchdog`). Reference tests: `test_avr_platform`,
+`test_avr_sleep` and `test_avr_power`.
 
 These are not peripheral drivers in the tasks-over-resources sense:
 they are the services the kernel names in `kernel/platform.hpp` and
@@ -197,9 +197,9 @@ only: if `SEN` is already set when it runs, something above the kernel
 armed a mode on purpose, so `idle()` leaves that arming alone and takes
 it - `sei` + `SLEEP`, and no disarming store on the way out, because the
 arming is the power manager's to clear (it does so on the first event it
-dispatches after the wake). With nothing armed it behaves exactly as
-before: arm IDLE, sleep, disarm. This one branch is the whole of what
-the power model needs from the target; there is no new kernel hook.
+dispatches after the wake). With nothing armed it arms IDLE, sleeps
+and disarms. This one branch is the whole of what the power model
+needs from the target; there is no new kernel hook.
 
 The POLICY otherwise stays out of this header. Standby and power-down
 gate clock domains and shorten the wake-up list, so entering them is a
@@ -363,15 +363,15 @@ subtracted and interrupts masked.
   measured for a nominal 24000 - the six cycles are the index chain),
   a runtime `us` selects the branch's Q4.12 factor into the shared
   tail (157..160 cycles, identical at 24, 12 and 1.5 MHz; the suite
-  caps it at 200 so the old runtime division - it cost 693 - cannot
+  caps it at 200, so a division in the wait path - 693 cycles - cannot
   come back unnoticed). The per-microsecond cost stays exact: 24000
   cycles per 1000 us at 24 MHz, 12000 at 12 MHz.
-- **Sub-MHz rates are exact now, not 4/3 long.** At 1.5 MHz (24 MHz
-  divided by 16, a rate the prescaler really reaches) the per-rate
-  factor is exactly 0.375 loops/us (1536 in Q4.12): 1000 us measures a
-  1502-cycle slope = 1001 us. The old whole-cycles-per-us rounding
-  (`cycles_per_us(1'500'000)` = 2, still what the stored-byte helper
-  does) ran every delay 4/3 long. What no arithmetic fixes at such
+- **Sub-MHz rates are exact.** At 1.5 MHz (24 MHz divided by 16, a
+  rate the prescaler really reaches) the per-rate factor is exactly
+  0.375 loops/us (1536 in Q4.12): 1000 us measures a 1502-cycle
+  slope = 1001 us. Whole-cycles-per-us rounding
+  (`cycles_per_us(1'500'000)` = 2, which is what the stored-byte helper
+  does) runs every delay 4/3 long. What no arithmetic fixes at such
   rates is granularity and overhead in TIME: one loop turn is 4 cycles
   and the 157-cycle dispatch is ~105 us of them - below roughly 1 MHz
   a microsecond-denominated busy-wait is out of its domain, and the
@@ -393,9 +393,9 @@ subtracted and interrupts masked.
   ~13600 times awake and exactly 32 times asleep, one per wake.
   `idle()` returns only after an interrupt has fired, leaves
   `SLPCTRL.CTRLA` at 0 and interrupts enabled, and waits at most one
-  tick period. A caveat the suite had to learn: an unfinished console
-  line leaves the USART's DRE interrupt armed, and THAT is then what
-  does the waking - one wake per frame, every ~250 cycles at 460800.
+  tick period. An unfinished console line leaves the USART's DRE
+  interrupt armed, and THAT is then what does the waking - one wake per
+  frame, every ~250 cycles at 460800.
 - **The generated sleep sequence is right.** In the disassembly the
   `sei` is immediately followed by `sleep` (nothing can slip into the
   lost-wakeup window), the disarming store to `SLPCTRL.CTRLA` is
@@ -411,8 +411,8 @@ subtracted and interrupts masked.
   overflows and saturates at 65535 rather than wrapping.
 - **The timebase measures +8843 ppm fast** against the crystal (1024
   ticks in 23786556 CLK_PER cycles instead of 24000000) - the same
-  OSC32K figure the RTC campaign found. `now()` never goes backwards
-  and advances one tick at a time across low-byte wraps.
+  OSC32K error rtc.md reports from its own measurements. `now()` never
+  goes backwards and advances one tick at a time across low-byte wraps.
 - **The breadcrumb survives real resets, both kinds.** After a
   watchdog reset `RSTFR` reads exactly 0x08 and `take_panic_record()`
   returns the magic, code and context `panic()` wrote, with a second
@@ -436,15 +436,15 @@ subtracted and interrupts masked.
 
 ### The sleep modes
 
-Established by `test_avr_sleep`, whose single-board set `z` is 72
-verdicts on rev A5 at 5 V with nothing wired. Two instruments carry
-every number below: a 32-bit TCB pair counting
-CLK_PER says whether the main clock ran, and the RTC counter says
-whether the 32 kHz domain did, both read across one PIT period of 4096
-CLK_RTC cycles. The two rulers measure the same interval, which is what
-makes the third number possible: 4096 CLK_RTC cycles measure 2966514
-CLK_PER ticks against the 24 MHz crystal, so this board's OSC32K runs
-at 33137 Hz - **+11 000 ppm**, one tick being 30.18 us.
+Established by `test_avr_sleep`, whose single-board set `z` runs on
+rev A5 at 5 V with nothing wired. Two instruments carry every number
+below: a 32-bit TCB pair counting CLK_PER says whether the main clock
+ran, and the RTC counter says whether the 32 kHz domain did, both read
+across one PIT period of 4096 CLK_RTC cycles. The two rulers measure
+the same interval, which is what makes the third number possible: 4096
+CLK_RTC cycles measure 2966514 CLK_PER ticks against the 24 MHz
+crystal, so this board's OSC32K runs at 33137 Hz - **+11 000 ppm**, one
+tick being 30.18 us.
 
 - **The erratum's NOP is where it must be.** Every store to
   `SLPCTRL.CTRLA` in a built image is preceded by the NOP, with only
@@ -515,13 +515,13 @@ at 33137 Hz - **+11 000 ppm**, one tick being 30.18 us.
 A sleeping chip cannot time its own return: the only clock power-down
 leaves running is the PIT's, and the counter that would measure the
 restart is the one the mode stops. So the ruler is off-chip.
-`test_avr_sleep`'s two-board set `y` (49 verdicts) drives board B
-(`sleep_peer`) over a one-wire link: B zeroes a 32-bit CLK_PER
-stopwatch and raises a stimulus pin in the same instruction pair, this
-board's PORT ISR raises an echo pin as its first statement, and that
-edge CAPTURES the stopwatch through B's event system. One tick is
-41.7 ns (B's OSCHF at 24 MHz nominal, a per-cent-class reference -
-ample for these figures). Medians of eight shots.
+`test_avr_sleep`'s two-board set `y` drives board B over a one-wire
+link: B zeroes a 32-bit CLK_PER stopwatch and raises a stimulus pin in
+the same instruction pair, this board's PORT ISR raises an echo pin as
+its first statement, and that edge CAPTURES the stopwatch through B's
+event system. One tick is 41.7 ns (B's OSCHF at 24 MHz nominal, a
+per-cent-class reference - ample for these figures). Medians of eight
+shots.
 
 - **The fixed cost of the measurement is 23 ticks - 958 ns.** That is
   the AWAKE baseline: B's zero-to-edge gap, the wire, this chip's
@@ -547,7 +547,7 @@ ample for these figures). Medians of eight shots.
   Standby and Power-Down, and whenever OSC32K is the only clock
   running" (13.3.5) - and the bench reads that sentence strictly: an
   oscillator left running by its own `RUNSTDBY` keeps the regulator at
-  full drive EVEN WHEN IT IS NOT THE MAIN CLOCK SOURCE. Beside a
+  full drive even when it is not the main clock source. Beside a
   running crystal, an OSCHF restart out of standby is 23.6 us and
   `PMODE` moves it by nothing; stop the crystal and the same restart
   becomes 313 us, of which `PMODE = FULL` removes 290. The 24-30 us of
@@ -594,10 +594,10 @@ ample for these figures). Medians of eight shots.
 
 ### The power manager on this target
 
-Established by `test_avr_power`, 5 letters / 44 verdicts on board B at
-5 V with nothing wired. It is the only suite here that runs the KERNEL:
-the object under test is an active object, so the rounds go through real
-queues and real dispatch, and only the loop is the suite's.
+Established by `test_avr_power` on board B at 5 V with nothing wired.
+It is the only suite here that runs the KERNEL: the object under test
+is an active object, so the rounds go through real queues and real
+dispatch, and only the loop is the suite's.
 
 - **The ladder maps one-to-one onto SMODE.** `SLPCTRL.CTRLA` reads
   0x00, 0x01, 0x03, 0x05 for `none`, `light`, `standby`, `deep`, and

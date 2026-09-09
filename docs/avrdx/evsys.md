@@ -150,7 +150,7 @@ brio::EventChannel<3>::pulse();
   writes: the signal appears and vanishes on the pin.
 - Illegal pairings (a PIT divider on the wrong parity, a pin on the
   wrong channel pair, a non-EVOUT pin) are refused at compile time.
-- `test_avr_timer` (82/82) closes its loops through this peripheral
+- `test_avr_timer` closes its loops through this peripheral
   with no wires: `EvPin` generators feed TCB capture and count users,
   LUT outputs and event inputs route through channels, AC OUT drives
   a channel as a generator.

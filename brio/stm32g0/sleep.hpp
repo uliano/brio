@@ -38,13 +38,13 @@
  *    below 2 MHz - a whole-program decision that an application makes,
  *    not something to do behind its back for the duration of one idle.
  *    So `light` maps to Sleep, and `armed()` - which is a PURE READ of
- *    the silicon, the samc21 position kept - answers `none` for it,
+ *    the silicon - answers `none` for it,
  *    because that is what the machine will really do. The manager's
  *    WakeReport then carries `none`, which is the truth.
  *
- * 2. STANDBY AND SHUTDOWN ARE OFF THE LADDER ON PURPOSE, and this is
- *    the first target where a mode the silicon has is deliberately not
- *    a rung. util/power.hpp's model is built on the program RESUMING:
+ * 2. STANDBY AND SHUTDOWN ARE OFF THE LADDER ON PURPOSE: a mode the
+ *    silicon has, deliberately not a rung.
+ *    util/power.hpp's model is built on the program RESUMING:
  *    "the manager's next dispatch - of ANY event - first disarms the
  *    site and publishes a WakeReport". After this family's Standby or
  *    Shutdown there is no next dispatch - 4.3.8: "program execution
@@ -61,19 +61,19 @@
  *    "is executed only if no interrupt is pending", and a 1 kHz SysTick
  *    raises one every millisecond; but once the WFI is taken HCLK stops
  *    and SysTick with it, so that window is one instruction wide and
- *    not a coin toss. MEASURED (test_stm32_sleep letter c): a 250 ms
- *    Stop 1 asked for with the tick armed lasts 250 ms to the RTC's own
- *    tick - UNLESS DBGMCU_CR.DBG_STOP IS SET, in which case the debug
+ *    not a coin toss. MEASURED: a 250 ms Stop 1 asked for with the tick
+ *    armed lasts 250 ms to the RTC's own tick - UNLESS
+ *    DBGMCU_CR.DBG_STOP IS SET, in which case the debug
  *    logic keeps HCLK and SysTick running inside the Stop and the same
  *    sleep lasts 1 ms (measured both ways, the bit written and cleared
  *    over SWD under one image). That bit survives every reset but a
  *    power-on, and OpenOCD's own stm32g0x.cfg sets it at every
- *    connection whose examine finds RCC_APBENR1.DBGEN open - which is
- *    how a whole campaign once recorded "0..3 ms" as a silicon fact.
- *    `arm()` pauses the ticker for the deep rungs and `disarm()`
- *    resumes it all the same, and the reason is now the right one: it
- *    costs NOTHING (a Stop stops SysTick anyway and kernel time was
- *    going to stand still for the whole sleep either way), it closes
+ *    connection whose examine finds RCC_APBENR1.DBGEN open, so a Stop
+ *    that looks like it lasts a millisecond is a debugged board and
+ *    not a silicon fact. `arm()` pauses the ticker for the deep rungs
+ *    and `disarm()` resumes it all the same: it costs NOTHING (a Stop
+ *    stops SysTick anyway and kernel time was going to stand still for
+ *    the whole sleep either way), it closes
  *    4.3.3's pending-tick window by construction, and it makes a Stop
  *    last whatever a probe left in DBGMCU_CR. `Pwr::debug_in_stop()`
  *    reads that bit; tools/bench.py clears it after every flash. On a
@@ -95,10 +95,10 @@
  *
  * ## The timed site
  *
- * The plain site keeps the v1 HONEST RESTRICTION the samc21 stated: with
- * kernel time frozen for the whole Stop, a program with armed time
- * events must not take one. `Stm32g0TimedSleepSite` LIFTS it, by the same
- * two-verb trick that worked on the SAM and with the RTC in both roles:
+ * The plain site keeps an HONEST RESTRICTION: with kernel time frozen
+ * for the whole Stop, a program with armed time events must not take
+ * one. `Stm32g0TimedSleepSite` LIFTS it, inside arm() and disarm()
+ * alone, with the RTC in both roles:
  *
  *  - the ALARM is the periodic wake-up timer (30.3.7), placed on
  *    TimeEvents<P>::ticks_to_next() rounded UP. 4.3.10 calls this the
@@ -121,9 +121,7 @@
  * nominal and DS13560 bounds at 29.5..34 kHz; a board that has measured
  * its own says so in the config, and gets the slack back.
  *
- * THE ISR HAS FOUR ACTS, and every one of them is load-bearing. The
- * first three are the samc21's, learned at that bench; the fourth is this
- * family's own:
+ * THE ISR HAS FOUR ACTS, and every one of them is load-bearing:
  *   0. RESTORE THE CLOCK - fact 4 above. First, so that everything
  *      after it (and every handler that runs later) is at full speed
  *      and the console's divisor is right again.
@@ -142,8 +140,7 @@
  * progress is its own event, the resync happens in disarm() instead,
  * and the Stop stays armed WITH the alarm still standing. That is why
  * util/power.hpp's convention (a wake path with nothing to say sends
- * SleepRequested{none}) is LOAD-BEARING with this site, exactly as it
- * is with the SAM's.
+ * SleepRequested{none}) is LOAD-BEARING with this site.
  *
  * ## The third site: the same lift, without the RTC
  *
@@ -391,9 +388,8 @@ constexpr bool timed_sleep_config_valid(const TimedSleepConfig& c) {
  *
  * The power MODEL is untouched - no new concept member, no new manager
  * hook, no change to util/power.hpp - because everything the lift needs
- * fits inside the two verbs the SleepSite concept always had. That is
- * the second target on which that has held; docs/design/power.md
- * records it.
+ * fits inside the two verbs the SleepSite concept has;
+ * docs/design/power.md records that.
  */
 template <Platform P, class C, TimedSleepConfig cfg = TimedSleepConfig{}>
 struct Stm32g0TimedSleepSite {
@@ -760,7 +756,7 @@ constexpr bool lptim_timed_sleep_config_valid(const LptimTimedSleepConfig& c,
  *    the next lap. `min_alarm_counts` is that floor; a deadline nearer
  *    than it is placed at it, which can only make the wake LATE, which
  *    the model allows. (The write's real cost is measured, not guessed:
- *    test_stm32_lptim letter a times a compare write to CMPOK at about
+ *    a compare write reaches CMPOK in about
  *    72 us on an LSE kernel clock, which is a fourteenth of one count at
  *    the default /32 - so the floor is generous by an order of
  *    magnitude and exists for the deadline that is nearer than the write
@@ -847,9 +843,9 @@ struct Stm32g0LptimTimedSleepSite {
     static constexpr uint32_t max_alarm_counts = lap_counts - 64u;
 
     /// The floor of consequence 3. Sized from the counter's own rate: at
-    /// most a handful of counts, and never zero. The bench measures the
-    /// real compare-write latency (test_stm32_lptim letter a) and the
-    /// doc states it against this number.
+    /// most a handful of counts, and never zero. The real compare-write
+    /// latency is measured on the bench and docs/stm32g0/lptim.md states
+    /// it against this number.
     static constexpr uint32_t min_alarm_counts = 4;
 
     /// The longest deadline this site can place, in kernel ticks.
@@ -902,9 +898,8 @@ struct Stm32g0LptimTimedSleepSite {
         // very first tick and spends a CMPM nobody asked for. Parking it
         // half a lap away pushes the first unrequested match as far from
         // now as the register allows - and arm() replaces it long before
-        // then. (Measured in test_stm32_lptim letter g, where the
-        // spurious match at count zero cost the wake measurement its
-        // meaning until the order was put right.)
+        // then. (Measured: with the counter started first, that spurious
+        // match at count zero lands inside the very next wake.)
         if (!L::set_cmp(0x8000u) || !L::wait_cmp_ok()) {
             return false;
         }

@@ -1,18 +1,15 @@
 // test_avr_analog - the analog block self-test SUITE for the AVR DA/DB
 // target: VREF, DAC, ADC exercised knob by knob against expectations,
-// PASS/FAIL on the console. Bench-verified 54/54 on an AVR128DB48 rev
-// A5 at 3.3 V (2026-08-19). It is the reference test of vref.hpp,
+// PASS/FAIL on the console. It is the reference test of vref.hpp,
 // dac.hpp and adc.hpp: keep it passing through every restructuring
 // (docs/avrdx/adc.md holds the findings it produced).
 //
 // Naming: test_<target>_<subject> marks a bench test suite as opposed
-// to a demo app; suites live in src/apps/ while the multi-app tooling
-// is what it is, and move to a per-target directory when there are
-// enough of them.
+// to a demo app.
 //
 // Bench diagnostic, NOT a kernel app: sequential, blocking (delay_us,
-// polling), declared outside the AO rules like mcp_diag - it needs
-// waits and ordered steps, and its findings feed the drivers. The
+// polling), outside the AO rules - it needs waits and ordered steps,
+// and its findings feed the drivers. The
 // kernel integration of the ADC (results as events, event-paced
 // sampling) is the sampler app over util/analog_sampler.hpp.
 //
@@ -218,7 +215,7 @@ void t3_outen() {
     D::set(512);
     delay_us(clock, 300);
     // the internal path with default sampling vs with sample_length:
-    // the unbuffered DAC output is high-impedance (bench finding)
+    // the unbuffered DAC output is high-impedance (measured)
     adc_default(Ref::v2048);
     A::select(AdcInput::dac0);
     const uint16_t in_short = read_avg(8);
@@ -383,8 +380,9 @@ void t9_sampling() {
     const uint32_t start = Ticker::millis();
     uint32_t n = 0;
     while (Ticker::millis() - start < 100) { (void)A::read(); ++n; }
-    // Bench finding (A5): INITDLY is paid only for the first conversion
-    // after enable, not per start - one-shots run at the plain rate.
+    // MEASURED on rev A5, where the formula reads otherwise: INITDLY is
+    // paid only for the first conversion after enable, not per start -
+    // one-shots run at the plain rate.
     print(serial, "  init_delay 256 @ 375 kHz: ", n, " one-shots/100ms (bench: ~2240 - the delay "
                   "is paid once after enable, not per start)", crlf);
     verdict("init_delay applies once after enable (not per start)", n > 1500);

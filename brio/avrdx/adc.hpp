@@ -54,10 +54,10 @@
  * idle, rewritten, free-running resumed); the owner pauses event-
  * started conversions around the switch.
  *
- * Bench facts (test_avr_analog, silicon A5): the converter needs its warm-up
- * (t_ADC_INIT 6 us typ.) after ENABLE before the first conversion is
- * trustworthy - init(clock, cfg) waits for it; INITDLY is paid only for
- * the first conversion after enable (not per start); the UNBUFFERED
+ * Bench facts (silicon A5): the converter needs its warm-up (t_ADC_INIT
+ * 6 us typ.) after ENABLE before the first conversion is trustworthy -
+ * init(clock, cfg) waits for it; INITDLY is paid only for the first
+ * conversion after enable (not per start); the UNBUFFERED
  * DAC0 input (MUXPOS DAC0) is high-impedance and reads 3-4 % low with
  * the default 2-cycle sampling - give it sample_length (16-32 at
  * 1.5 MHz) like any source above 10 kOhm; the WCMP flag is cleared by

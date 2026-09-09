@@ -102,8 +102,7 @@ and the MCOs, TIM14 the RTC clock, HSE/32 and the MCOs, TIM1/2/3/4 the
 comparator outputs, and TIM15's TI2 the capture signals of TIM2 and
 TIM3. The driver exposes the raw code and names no source: the
 vocabulary of what code 1 means belongs to the peripheral that owns the
-signal (the samc21 EVSYS ruling), and half of these have no driver in this
-stratum yet.
+signal, and half of these have no driver in this stratum yet.
 
 **The pad map is the datasheet's and nothing checks it.** Which AF
 number carries TIM2_CH1 on PA5 is DS13560 table 13 (AF2), and the device
@@ -249,7 +248,7 @@ bits, which only TIM2 can do. PSC = 63 gave 10002 counts where 10002
 were due, so the divisor is PSC + 1 exactly. An edge-aligned period
 measured 1000.0 counter ticks for ARR = 999 (below).
 
-**The shadow registers, both of them, caught in the act.** A new
+**The shadow registers, both of them, are measurable.** A new
 prescaler written under a running counter changed NOTHING - 1002 counts
 in the millisecond after the write, against 1 in the millisecond after
 `EGR.UG` loaded the shadow. With ARPE set, ARR moved from 20000 to 100
@@ -262,14 +261,13 @@ set raised no UIF, and with URS clear it did.
 **PWM read back through its own pad.** LD4 on PA5 at 64 kHz, sampled
 60000 times through GPIOA's IDR: duties asked 0 / 250 / 500 / 750 / 1000
 per mille read back 0 / 250 / 499 / 750 / 1000. **A sampling loop must
-not branch on what it reads** - the first version of the pair census did,
-and reported a 50 % complementary pair as 566 and 383 per mille, because
-a branch makes the loop's own duration depend on the sampled state and
-the slower state is then counted fewer times. Shifted-and-added, the same
-pair reads 469 and 467.
+not branch on what it reads**: a branch makes the loop's own duration
+depend on the sampled state and the slower state is then counted fewer
+times, which reads a 50 % complementary pair as 566 and 383 per mille.
+Shifted-and-added, the same pair reads 469 and 467.
 
-**An EXTI line sees a pad a PERIPHERAL is driving.** The EXTI campaign
-proved a line watches a pad its own application drives; here line 5
+**An EXTI line sees a pad a PERIPHERAL is driving.** `test_stm32_exti`
+measures a line watching a pad its own application drives; here line 5
 counted 200 rising edges of TIM2's waveform in 200002 us - one every
 1000 us, the frequency TIMPCLK / (PSC + 1) / (ARR + 1) predicts - with
 PA5 in alternate-function mode. 7.3.1's live input buffer holds for AF
@@ -286,8 +284,8 @@ time: duties asked 250 / 500 / 750 per mille came back 250 / 500 / 749 -
 the same numbers the pad's own sampling gives, from a mechanism that
 shares nothing with it. **OC1REF exists whether or not CCER lets it
 reach a pad**, but the channel has to be a waveform generator first: a
-frozen channel publishes a constant and the gate never opens (the first
-version of the letter measured zero).
+frozen channel publishes a constant, the gate never opens and the count
+comes back zero.
 
 **A capture that needs no pad anywhere.** TIM16 with TI1SEL = LSI
 captured sixteen consecutive intervals of 1964 ticks (1963..1966), which
@@ -300,21 +298,21 @@ landed on an unread one, and an input filter of 15 (eight samples at
 fDTS/32) left the interval unchanged at 1964 ticks - a filter delays
 both edges alike.
 
-**A polling capture loop must have the console DRAINED first.** The
-first version of that letter reported means of 11514 and 6536 ticks
-where 3928 and 1964 were due: a transmit interrupt walking through the
-loop makes it miss an edge, and a missed edge reads as an interval that
-is a MULTIPLE of the true one. The suite now drains the console before
-every window and carries `CCyOF` out with the readings, so a run that
-did miss says so instead of averaging the damage in.
+**A polling capture loop must have the console DRAINED first.** A
+transmit interrupt walking through the loop makes it miss an edge, and a
+missed edge reads as an interval that is a MULTIPLE of the true one:
+undrained, that window reports means of 11514 and 6536 ticks where 3928
+and 1964 are due. The suite drains the console before every window and
+carries `CCyOF` out with the readings, so a run that did miss says so
+instead of averaging the damage in.
 
 **PWM input mode**, on a TIM3_CH1 pad walked by its own pull (a capture
 channel does not drive its pad, and PUPDR still does): captured period
 1012 ticks and width 305 ticks against 1010 us and 305 us on the cycle
 stopwatch. **The counter is reset ON the rising edge and the capture is
 taken AT it, so a period reads as its own tick count and not one less** -
-the opposite of the samc21 TC's capture, which clears and latches together
-and always reads one short.
+the opposite of the SAM C21's TC capture, which clears and latches
+together and always reads one short.
 
 **The complementary pair and its dead time.** 60000 paired samples of
 ONE IDR read: CH1 high 469 per mille, CH1N 467, **both high ZERO times**,
@@ -357,8 +355,8 @@ formulas apart and 21.3.3's "0 to ARR-1 up, ARR to 1 down" is right. The
 three CMS codes differ only in WHEN the compare flag rises: 100 flags in
 100 ms counting up, 200 counting both.
 
-**`MeterSampler` in a real kernel, on a third architecture with not one
-line of `util/` changed.** TIM16 capturing LSI through its interrupt for
+**`MeterSampler` in a real kernel, over `util/meter_sampler.hpp` exactly
+as written.** TIM16 capturing LSI through its interrupt for
 one second: **32535 capture interrupts, 9 samples published, 9 received**,
 values 1964..1966 ticks, the latch's `missed()` 32524 and one reading
 left fresh. **published + missed + leftover = 32534 = the number of
@@ -389,7 +387,7 @@ a DMA request; the NUMBER a channel has to listen for is RM0444 table
 `ccr_address(ch)` for the register a stream writes into or reads out of.
 The numbers live here and not in `stm32g0/device_tables.hpp` because no
 device header of this pack declares one (the `DMAMUX_REQ_*` spellings are
-ST's HAL/LL), and because of the standing ruling this stratum keeps for
+ST's HAL/LL), and because of the rule this stratum keeps for
 TISEL and for the EXTI's lines above 15: a fabric driver owns the fabric,
 a peripheral owns its own vocabulary. **TIM14 has no DMA request of any
 kind** (DS13560 table 7), so every verb answers `dma_request_none` for it
@@ -436,12 +434,12 @@ verb refuses on it and `dmar_address()` is null.
 
 ## The other six instances (letter `l`)
 
-TIM1, TIM2, TIM3 and TIM16 carry every other letter of the suite and
-TIM4 had appeared only as the other half of TIM3's vector, so six of the
-ten had never counted a cycle here. Each is asked the same three
-questions, with every expectation READ OUT OF THE RESERVE rather than
-written down: the channel count, the counter width, the break unit and
-the vector.
+TIM1, TIM2, TIM3 and TIM16 carry every other letter of the suite, and
+TIM4 appears elsewhere only as the other half of TIM3's vector, so this
+letter is where the remaining six count a cycle. Each is asked the same
+three questions, with every expectation READ OUT OF THE RESERVE rather
+than written down: the channel count, the counter width, the break unit
+and the vector.
 
 **Every one of them counts PCLK at the prescaler it was given.** At
 `PSC = 63` - a 1 MHz counter out of a 64 MHz PCLK - a 10 ms window gives
@@ -508,8 +506,8 @@ TIM4 and nothing else:
   46's 29.5..34 kHz window, and both the oscillator's own number rather
   than the capture's.
 
-**ONE PER-PART TABLE CELL THIS CAMPAIGN ADDED TO THE RESERVE**, because a
-suite fell into it: RM0444 22.4.25's ETRSEL list gives codes 0100 (MCO),
+**ONE PER-PART TABLE CELL LIVES IN THE RESERVE FOR THIS**, and a suite
+that ignores it falls in: RM0444 22.4.25's ETRSEL list gives codes 0100 (MCO),
 0101 (MCO2) and 0110 (COMP3) to the G0B1/G0C1 sales types ALONE, while
 0011 (LSE) is every part's. `tim_etrsel_has_mco(n)` states it, probed
 through `RCC_CFGR_MCO2SEL_Pos` - the second clock output that same class
@@ -556,7 +554,7 @@ a port the console has long opened and can tell nothing.
 
 **THE ERRATUM LETTER'S TWIN IS ES0487 2.6.2** (revision Y, no
 workaround) - the sheet is in hand ([vendor/README.md](vendor/README.md))
-though letter `k`'s own print still names the G0B1's 2.7.2, the
+though letter `k`'s own print names the G0B1's 2.7.2, the
 description it stages. Measured on this die: the second compare of two
 consecutive counter cycles raised its flag and toggled its output all
 eight rounds, so the described behaviour did not reproduce here either -

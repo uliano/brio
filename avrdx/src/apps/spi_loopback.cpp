@@ -1,5 +1,6 @@
-// spi_loopback - first on-silicon test of the SPI stack: jumper PA4
-// (MOSI) -> PA5 (MISO), and every byte transmitted comes straight back.
+// spi_loopback - the smallest on-silicon exercise of the SPI stack:
+// jumper PA4 (MOSI) -> PA5 (MISO), and every byte transmitted comes
+// straight back.
 //
 // A Tester fires a full-duplex transaction once per second (rolling
 // 8-byte pattern, CS on PA7 - unconnected, just exercised), gets its

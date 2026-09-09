@@ -13,8 +13,8 @@
 // Commands: ? | 1 senses | 2 level | 3 invert | 4 flags | 5 pullup
 // | 6 input off | 7 multi-pin | 8 port verbs | a all
 // Not testable here: INLVL thresholds and the slew rate (analog
-// levels / a scope), the fully-async wake (needs standby - queued
-// with RUNSTDBY), the buttons PA2..PA5 (a human extra).
+// levels / a scope), the fully-async wake (needs a standby sleep),
+// the buttons PA2..PA5 (a human finger).
 
 // build: monitor_speed = 460800
 
@@ -151,7 +151,7 @@ void t4_flags() {
     C6::clear_flag();                              // plain W1C store
     delay_us(clock, 1);                            // the clear lands a cycle later:
                                                    // a back-to-back read still sees
-                                                   // the old flags (bench finding)
+                                                   // the old flags (measured)
     const uint8_t after = Port<'C'>::flags();
     Port<'C'>::clear_flags(0xFF);
     sei();

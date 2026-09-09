@@ -6,8 +6,9 @@
  *
  * Concurrency: every operation runs inside Platform::CriticalSection.
  * Under the cooperative kernel the only real concurrency is ISR vs main
- * loop, and the AVR has no CAS: the brief interrupts-off section IS the
- * honest primitive (copying an 8-byte event costs about 1 us at 24 MHz).
+ * loop, and a small core may offer no CAS at all: the brief
+ * interrupts-off section IS the honest primitive (copying an 8-byte
+ * event costs about 1 us at 24 MHz).
  * There are deliberately NO *_from_isr variants: one API, always safe -
  * the saved cycles would not pay for the doubled surface and the risk of
  * calling the wrong one. Revisit only with measurements.

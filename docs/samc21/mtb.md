@@ -121,7 +121,7 @@ the buffer").
 
 `samc21/postmortem.hpp` is the glue that makes those two survive a reset,
 beside the kernel's panic breadcrumb rather than inside it - a trace is
-silicon this stratum happens to have, and the next target may answer
+silicon this stratum happens to have, and another target may answer
 differently or not at all.
 
 `MtbPostMortem<trace_bytes, keep_packets>` - the store. It owns the
@@ -145,8 +145,8 @@ power-of-two buffer, and no more kept than the buffer can hold.
 and then chains to another (`ResetReporter` by default).
 `hard_fault_trace_reset<P, Store>()` - the HardFault body an app binds,
 which captures and then does what `samc21/reset.hpp`'s
-`hard_fault_reset<P>()` does. Composition: nothing in `reset.hpp`
-changed and nothing in it knows about the trace.
+`hard_fault_reset<P>()` does. It is pure composition: nothing in
+`reset.hpp` knows about the trace.
 
 ## How to use it
 
@@ -243,8 +243,8 @@ asynchronous path and on a resynchronized one with a rising edge, and a
 software event fired at it: **only user 45 starts the trace** (on both
 paths), and user **46 stops a running one**. So START is 45 and STOP is
 46, as `EVENT_ID_USER_MTB_START` / `_STOP` say. That a SOFTWARE event on
-an ASYNCHRONOUS channel reaches this user at all is consistent with what
-the CCL campaign established and `samc21/evsys.md` now records.
+an ASYNCHRONOUS channel reaches this user at all agrees with the CCL's
+own measurement of the same path, recorded in `evsys.md`.
 
 **Neither halt bit stops a core with no debugger.** FLOW.AUTOHALT
 reaching its watermark, and MASTER.HALTREQ set directly, both leave the
@@ -256,8 +256,8 @@ request needs DHCSR.C_DEBUGEN, and is worth having measured on a board
 
 `test_samc_postmortem` on the ATSAMC21J18A rev F, wireless and with no
 probe attached, with a 256-byte rolling buffer (32 packets) keeping 16.
-Letters `a`, `b` and `c` are `z` (36 verdicts); `f` and `p` reboot the
-board and sit outside it.
+Letters `a`, `b` and `c` are `z`; `f` and `p` reboot the board and sit
+outside it.
 
 **A Cortex-M0+ hands the next boot its own last branches.** A UDF
 executed three calls deep leaves, after the reset, a validated record of
@@ -269,12 +269,12 @@ trace are read side by side: what died and where from.
 SOURCE word is **+8 bytes into the dying leaf** - the UDF itself - and
 its destination is the address the linker gave `HardFault_Handler`.
 
-**Bit 0 of the SOURCE word marks the exception entry**, which settles
-what letter i of `test_samc_debug` could only report as absent ("set on
-none of them, so it means something this window never produced"). In
-every fault trace exactly one packet carries it, and it is the entry
-into the fault handler. Bit 0 of the DESTINATION word still marks the
-start of trace, on the first packet of a window.
+**Bit 0 of the SOURCE word marks the exception entry**, which is why a
+window with no exception in it - letter i of `test_samc_debug` - has it
+set on no packet at all. In every fault trace exactly one packet
+carries it, and it is the entry into the fault handler. Bit 0 of the
+DESTINATION word still marks the start of trace, on the first packet of
+a window.
 
 **The capture costs two packets.** Between the exception entry and
 `freeze()` the trace grows by two packets - the handler's own branch
@@ -291,7 +291,7 @@ loop's own backward branch written again and again. The reader wins the
 race against the program it came to read.
 
 **What a chain costs.** One three-deep chain is **9 packets** in this
-suite (a single leaf call is 3); `test_samc_debug`'s own chain was 12
+suite (a single leaf call is 3); `test_samc_debug`'s own chain is 12
 into a 1024-byte buffer. So 16 kept packets hold a whole chain plus the
 fault path with slack, and the record is 136 bytes of `.noinit`.
 

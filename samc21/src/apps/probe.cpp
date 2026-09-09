@@ -1,15 +1,15 @@
 // probe - the smallest firmware for the SAM C21 board: raw-register OSC48M
-// to 48 MHz and a PB23 LED blink, nothing else. The samc21 analog of the
-// AVR project's family_probe, with the same two jobs: on the desk it proves
-// the whole new chain (toolchain flags, linker script, startup, vector
-// table, OpenOCD flash) with zero brio code in the loop; at the bench it is
-// the first thing flashed onto a NEW board - the LED says the chip runs,
-// the SWD link works, and the clock really moved.
+// to 48 MHz and a PB23 LED blink, nothing else. It has two jobs: on the
+// desk it proves the whole build chain (toolchain flags, linker script,
+// startup, vector table, OpenOCD flash) with zero brio code in the loop;
+// at the bench it is the first thing flashed onto a NEW board - the LED
+// says the chip runs, the SWD link works, and the clock really moved.
 //
 // This is the ONE app allowed to poke registers directly (it exists exactly
 // to prove the layer below the samc21/ stratum; apps proper never touch
-// registers - see CLAUDE.md's layering rule). The clock sequence it proves
-// is the stratum's future Clock<internal, 48 MHz>::init() in miniature:
+// registers - see docs/design/overview.md's layering rule). The clock
+// sequence it proves is the stratum's Clock<internal, 48 MHz>::init() in
+// miniature:
 //
 //   1. NVMCTRL.CTRLB.RWS = 2 first - table 45-41 (DS60001479M): flash reads
 //      hold to 19 MHz at 0 wait states, 38 at 1, 64 at 2; and 27.5.2 orders

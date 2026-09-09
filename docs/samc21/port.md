@@ -18,8 +18,7 @@ negatives under `tools/check_samc21.sh`.
 header's `PORT_GROUPS` says 2 with no per-variant override - so a
 group-C request is refused on all of them, not on small packages.
 Which PINS of an existing group are bonded on a given package is a
-finer, per-package question this driver leaves open, exactly as the
-AVR side does.
+finer, per-package question this driver leaves open.
 
 **The input buffer is OFF by default.** `PINCFG.INEN` gates it, and
 `IN` reads 0 for a pin whose buffer is disabled - including a pin
@@ -64,10 +63,10 @@ peripheral. 28.6.4 also says only the OUT action survives a standby -
 SET, CLR and TGL want up to three clock cycles the PORT does not have
 there. All three sentences are measured, in "Bench findings".
 
-**And PMUXEN takes the pad away from the output driver**, measured while
-building that driver: with the mux selecting an input-only function,
-writing DIR and OUT moves nothing at the pad, while PINCFG.PULLEN and the
-OUT bit that gives the pull its direction keep working. 28.6.1's
+**And PMUXEN takes the pad away from the output driver**: with the mux
+selecting an input-only function, writing DIR and OUT moves nothing at
+the pad, while PINCFG.PULLEN and the OUT bit that gives the pull its
+direction keep working. 28.6.1's
 "override the connection between the PORT and that I/O pin" reaches the
 driver and not the pull - which is what makes a pad-driven bench test
 possible with no wire at all (see [eic.md](eic.md)).
@@ -94,7 +93,7 @@ possible with no wire at all (see [eic.md](eic.md)).
   static_assert its own claim.
 - **`Port<letter>`** - the 32-bit mask verbs,
   `configure_mask`/`function_mask` over WRCONFIG, and the group's four
-  EVENT INPUTS: `event_input_count`, `event_user(m)` (the EVSYS user
+  event inputs: `event_input_count`, `event_user(m)` (the EVSYS user
   index this peripheral publishes - the four PORT users are the
   peripheral's and not the group's, and which group an input acts on is
   decided by which group's EVCTRL enables it), `configure_event(m,
@@ -124,20 +123,19 @@ brio::Pin<'B', 31>::function(brio::PinFunction::d, {.input_enable = true});
 
 ## Bench findings
 
-- Output drive and toggle: the board's LED on PB23, from the raw
-  bring-up probe through the kernel heartbeat, at every firmware
-  since.
+- Output drive and toggle: the board's LED on PB23, under PORT's own
+  output and under a kernel heartbeat alike.
 - **The four event actions, separated.** A square wave carried to
   PORT event input 0 over an asynchronous channel, with the same pad
   read back: EVACT = OUT moves the pad whether it is PORT's own output
   or handed to the EIC under PMUXEN, and EVACT = TGL moves it under
-  PMUXEN too - at HALF the rate, because one toggle of the OUT bit is a
+  PMUXEN too - at half the rate, because one toggle of the OUT bit is a
   whole pad period. So OUT reaches the pad and TGL reaches the OUT
   register that is the pull's direction, exactly as 28.6.5 separates
   them.
 - **28.6.4's standby note, measured.** Across one standby of a hundred
-  wave periods the OUT action kept driving the pad (a hundred EXTINT
-  detections of it) and the TGL action produced NONE. "In Standby mode,
+  wave periods the OUT action keeps driving the pad (a hundred EXTINT
+  detections of it) and the TGL action produces none. "In Standby mode,
   only the Out action is possible" holds.
 - **This is what makes a pad move while the CPU is stopped**, which is
   the one thing the pull-walking of [eic.md](eic.md) cannot do (its
@@ -153,10 +151,9 @@ Driver gaps (not built):
   yet) and the per-package pin-bonding tables.
 - **CTRL's continuous input sampling** (28.8.1), which 28.6.5 requires
   for a pin read through the IOBUS. Nothing here reads a pin that way.
-- **The IOBUS window itself.** Reached in [dsu.md](dsu.md)'s campaign
-  for erratum 1.13.3 and found NOT to be a plain mirror (DIR and OUT
-  read through it, IN and CTRL read zero); this driver uses the APB
-  addresses only.
+- **The IOBUS window itself.** Reached in [dsu.md](dsu.md) for erratum
+  1.13.3 and found not to be a plain mirror (DIR and OUT read through
+  it, IN and CTRL read zero); this driver uses the APB addresses only.
 
 Implemented but not bench-verified:
 - Pulls (up and down), `strong_drive`, `configure_mask`/

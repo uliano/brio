@@ -7,7 +7,7 @@
  * not "BusDone" - the names say which wire the bytes took. Everything
  * about arbitration, the pending FIFO, replies and the engine contract
  * is documented once, in bus_master.hpp; the SPI engine descriptor and
- * its two completion styles live in avrdx/spi.hpp and
+ * its two completion styles live in each target's SpiHost and in
  * docs/design/spi-bus.md.
  *
  * SPI has no wire-level failure the engine can detect (no ACK, no
@@ -30,9 +30,9 @@ inline constexpr uint8_t spi_rejected = bus_rejected;
 /// The transaction never answered inside the arbiter's per-bus timeout:
 /// the engine was recover()ed and the requester is told here. On SPI
 /// the plausible wedge is not a wire (the host clocks itself) but a
-/// dead engine - a demoted AVR host mid-transfer, a DMA channel the
-/// 1.10.4 class of death stopped - and the ISR-style completion that
-/// therefore never posts.
+/// dead engine - a host demoted mid-transfer, a DMA channel stopped by
+/// a controller erratum - and the ISR-style completion that therefore
+/// never posts.
 inline constexpr uint8_t spi_timeout = bus_timeout;
 
 /// `timeout_ticks` is PER BUS; size it to the longest legal transaction

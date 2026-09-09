@@ -1,7 +1,7 @@
 // test_stm32_tim - the reference bench suite for the STM32G0's TIMERS
 // (RM0444 ch. 21..25: the advanced-control TIM1, the general-purpose
 // TIM2/3/4, the basic TIM6/7, TIM14 and TIM15/16/17) and, through them,
-// for two util contracts on their THIRD silicon: util/pwm_channel.hpp's
+// for two util contracts on this silicon: util/pwm_channel.hpp's
 // PwmChannel and util/meter_sampler.hpp's MeterLatch/MeterSampler.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
@@ -20,13 +20,13 @@
 //      a duty cycle measured internally.
 //   2. A PAD READ WHILE A PERIPHERAL DRIVES IT. The input buffer stays
 //      live in alternate-function mode (7.3.1), so the board LED's own
-//      PWM is readable on IDR and an EXTI line can count its edges - the
-//      EXTI campaign proved that for OUTPUT mode, letter c extends it to
-//      AF.
+//      PWM is readable on IDR and an EXTI line can count its edges;
+//      letter c is what proves it for a pad under an ALTERNATE FUNCTION
+//      and not only for one its own port drives.
 //   3. A CAPTURE WITH NO PAD AT ALL. TIM16_TISEL selects LSI as TI1
 //      (25.6.18), so the capture unit measures a real ~32 kHz signal that
-//      never leaves the die - and the reading cross-checks the LSI rate
-//      test_stm32_reset measured through the watchdog.
+//      never leaves the die - and the reading is a second, independent
+//      measurement of the LSI rate the watchdog implies.
 //   4. A PAD WALKED BY ITS OWN PULL. A capture channel does not drive its
 //      pad, and PUPDR still does, so a square wave of software's own
 //      making reaches PWM input mode.
@@ -50,7 +50,7 @@
 // takes TIM2_CH1. Everything else this suite drives - PA6, PA7, PA8,
 // PB6..PB9 - is bonded on all three parts and carries the same functions.
 // AND PA8 IS UCPD1_CC1 (PB15 is UCPD1_CC2) ON A PART THAT HAS A UCPD,
-// which is not a desk fault but a reset state: RM0444 7.3.16 connects a
+// and the pads come out of reset already loaded: RM0444 7.3.16 connects a
 // Type-C DEAD-BATTERY pull-down to both out of a power-on until
 // SYSCFG_CFGR1's strobe releases them, a few kilohms against the port's
 // own forty. Letter a spends that strobe once, before it asks either pad
@@ -351,12 +351,12 @@ void spin_cycles(uint32_t c) {
 }
 
 /// Long enough for a floating pad's own RC under a ~40 kohm internal
-/// pull (the EXTI campaign's figure, kept).
+/// pull of about 40 kohm.
 void settle() { (void)delay_us(clock, 200); }
 
 /// Wait for the console to be physically empty. A measurement window
-/// that a transmit interrupt walks through is not a measurement - the
-/// samc21 campaigns paid for this twice, and letter e pays for it again:
+/// that a transmit interrupt walks through is not a measurement, and
+/// letter e is where it bites hardest:
 /// a polling capture loop that the USART's ISR interrupts MISSES edges,
 /// and a missed capture reads as an interval that is a multiple of the
 /// true one.
@@ -380,10 +380,10 @@ bool pad_follows_pull() {
     return high && !low;
 }
 
-/// A pad the desk holds UP through an external pull-up (the I2C
-/// self-link's 2.2 k on PB8/PB9 - bench.md) cannot follow its internal
-/// pull-down, and is still a pad this suite may DRIVE: a push-pull
-/// output beats 2.2 k. Free means either.
+/// A pad an external pull-up holds UP (a wired I2C bus puts 2.2 k on
+/// PB8/PB9 - docs/bench.md) cannot follow its internal pull-down, and is
+/// still a pad this suite may DRIVE: a push-pull output beats 2.2 k.
+/// Free means either.
 template <class Pad>
 bool pad_is_drivable() {
     if (pad_follows_pull<Pad>()) {
@@ -406,9 +406,9 @@ bool pad_is_drivable() {
 /// THE LOOP MUST TAKE THE SAME TIME WHATEVER IT READS. A sampler that
 /// branches on the bit it just read spends more cycles in one state than
 /// in the other, and then counts FEWER iterations of the slower state -
-/// a bias that reads as a duty the waveform does not have. (Measured:
-/// the first version of letter g reported a 50 % pair as 566 and 383 per
-/// mille.) So the bit is shifted down and ADDED, and nothing here
+/// a bias that reads as a duty the waveform does not have (measured: a
+/// branching sampler reads a 50 % pair as 566 and 383 per
+/// mille). So the bit is shifted down and ADDED, and nothing here
 /// branches on data.
 /// THE PORT IS A TEMPLATE PARAMETER and not an argument, so the loop
 /// still reads one register through one constant address and still
@@ -609,17 +609,18 @@ constexpr bool expect_tim7 = !package_lqfp32;
 constexpr bool expect_tim15 = !package_lqfp32;
 
 void ta_block() {
-    // PA8 IS UCPD1_CC1 ON A PART WITH A UCPD, AND THAT IS WHY ITS PULL
-    // CHECK USED TO FAIL ABOUT ONE RUN IN THREE. RM0444 7.3.16: the Type-C
+    // PA8 IS UCPD1_CC1 ON A PART WITH A UCPD, AND WITHOUT THE STROBE
+    // BELOW ITS PULL CHECK FAILS ABOUT ONE RUN IN THREE. RM0444 7.3.16:
+    // the Type-C
     // DEAD-BATTERY pull-downs on UCPD1_CC1 (PA8) and UCPD1_CC2 (PB15) are
     // CONNECTED out of a power-on and stay connected until SYSCFG_CFGR1's
     // strobe releases them - a few kilohms against the port's own forty,
     // so a pad asked to follow its 40 k pull-up sits somewhere between the
     // rails and reads whichever way the threshold falls that minute. The
     // strobe is ONE-WAY for the power cycle, so this is done once, here,
-    // before anything asks PA8 a question. (Measured on PB15 by
-    // test_stm32_rtc's letter k; the release is what makes PA8's leg
-    // below repeatable.) On a part the reserve reports as having no UCPD
+    // before anything asks PA8 a question. (Measured on PB15; the
+    // release is what makes PA8's leg below repeatable.) On a part the
+    // reserve reports as having no UCPD
     // there is no Rd and no strobe bit, and the verb answers false: which
     // of the two this die is, is what ucpd_present() says.
     const bool rd_released = ucpd_dead_battery(1, false);
@@ -793,8 +794,7 @@ void ta_block() {
 void tb_time_base() {
     // The arithmetic, against SysTick. The window is opened and closed by
     // two reads with NOTHING between them - a verdict line is four
-    // milliseconds of console, and the samc21 campaign paid for that lesson
-    // twice.
+    // milliseconds of console.
     T2::init();
     bench.verdict("a free-running 32-bit counter configures and starts",
                   T2::configure({.prescaler = 0, .period = 0xFFFFFFFFUL}));
@@ -920,8 +920,8 @@ void tb_time_base() {
 // Two witnesses for one waveform, neither of them a wire. The first is
 // the pad's own port IDR - 7.3.1 leaves the input buffer live in
 // alternate-function mode, so a pad the timer is driving is readable -
-// and the second is an EXTI line pointed at that port, which the EXTI
-// campaign proved sees a pad its OWNER drives; letter c is what extends
+// and the second is an EXTI line pointed at that port, which sees a pad
+// its own port drives; letter c is what extends
 // that to a pad a PERIPHERAL drives. Which pad, which channel and which
 // line are the package's choice and nothing else: LD4 = PA5 = TIM2_CH1 =
 // line 5 on the Nucleo-64s, LD3 = PC6 = TIM2_CH3 = line 6 on the
@@ -1182,8 +1182,8 @@ void te_capture_lsi() {
                   "DS13560 table 46's 29.5..34 kHz window for LSI",
                   lsi_hz >= 29'500u && lsi_hz <= 34'000u);
     // THE CROSS-CHECK IS AGAINST THE OTHER INSTRUMENT ON THIS DIE, and
-    // that number is a DIE fact: test_stm32_platform's letter i times a
-    // real IWDG time-out on the same oscillator and reads 32536 Hz on the
+    // that number is a DIE fact: a real IWDG time-out timed on the same
+    // oscillator reads 32536 Hz on the
     // G0B1RE, 32295 on the G071RB and 31400 on the G031K8 - all three
     // inside table 46's band and none of them each other. So what is
     // compared is this die's own pair, and the number is stated per part
@@ -1334,8 +1334,8 @@ void tf_pwm_input() {
 //     repetition counter
 // =============================================================================
 //
-// The advanced timer is the one shape neither the AVR's TCA nor the SAM's
-// TC has and only the SAM's TCC does: two outputs that are each other's
+// The advanced timer is the one shape the plainer timers of this family
+// have not got: two outputs that are each other's
 // complement with a gap the SILICON inserts, a master switch every output
 // passes through, and a break that opens it in hardware. The two pads sit
 // on one port, so ONE IDR read carries both - "were they ever both high"
@@ -1622,8 +1622,8 @@ void th_vectors() {
 //
 // The instrument is letter d's: TIM2 publishes OC1REF - the waveform
 // itself - and TIM3 counts its rising edges, so the number of WAVEFORM
-// PERIODS in a cycle-measured window is exact. The samc21 campaign found
-// the SAM's printed dual-slope formula off by one, so this letter
+// PERIODS in a cycle-measured window is exact. A printed dual-slope
+// formula is exactly the kind that comes out off by one, so this letter
 // distinguishes 2 x ARR from 2 x (ARR + 1) rather than assuming either.
 struct WaveformRate {
     uint32_t counts;
@@ -1722,12 +1722,10 @@ void ti_center_aligned() {
 // j - MeterSampler inside a REAL KERNEL, fed by a capture ISR
 // =============================================================================
 //
-// THIS IS THE CAMPAIGN'S POINT, not a bonus letter. util/meter_sampler.hpp
-// was designed on the AVR around a capture ISR that fills a one-cell
-// latch and an AO that paces PUBLICATION rather than capture; the samc21
-// campaign ran it from a SAM TC through EVSYS from an EIC pin. Here the
-// source is a TIM16 capture channel fed by LSI over TISEL - a chain with
-// nothing in common with either - and NOT ONE LINE OF util/ CHANGED.
+// util/meter_sampler.hpp is a capture ISR that fills a one-cell latch
+// and an AO that paces PUBLICATION rather than capture. Here the source
+// is a TIM16 capture channel fed by LSI over TISEL, and the letter is
+// what says the contract holds over it.
 //
 // The economy is the file's own: LSI arrives about 32000 times a second
 // and the sampler publishes ten times a second, so what the queues carry
@@ -2341,8 +2339,8 @@ void tl_six_instances() {
     Rcc::io_clock('B', true);
     const bool b6 = pad_follows_pull<PadB6>();
     const bool b7 = pad_follows_pull<PadB7>();
-    // PB8 and PB9 carry the desk's I2C self-link with its 2.2 k pull-ups
-    // on the Nucleo-64 bench (bench.md): there they cannot follow an
+    // PB8 and PB9 are where a wired I2C bus puts its 2.2 k pull-ups on
+    // the Nucleo-64s (docs/bench.md): there they cannot follow an
     // internal pull-down any more, and a push-pull driver still owns them
     // - which is all this letter asks. On a board with nothing on the
     // pads the same verb takes the plain pull-walk's answer.

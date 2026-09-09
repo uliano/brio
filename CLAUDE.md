@@ -220,6 +220,104 @@ app may contain). Full text: `docs/design/overview.md`.
 Roughly ordered by proximity. None of these is a decision yet; each
 gets its dated home in `docs/design/` when taken.
 
+- **THE HARMONIZATION PASS, STEP 2 OF THE ROADMAP, OPENED 2026-09-09.**
+  The rules before anything new is added, so what is born after is born
+  under them; it also unblocks publicizing. RULED in discussion before
+  a line was touched: the bench LETTERS stay where they serve but must
+  find their MAP where a visitor looks (a header never names one, the
+  suite's own header comment is the map, the chapter doc names the
+  suite); the CLIENT SIDE stays the application's protocol (no util
+  pump - three peers converging is three instruments by one author, and
+  the house rule is born-with-its-first-user), with every SpiClient to
+  publish its PRELOAD CONSTANT because that integer is the only thing a
+  util pump would need and today it lives in the peers' comments alone;
+  MATURITY becomes a property of the PLATFORM stated once (`supported`
+  / `in bring-up`) instead of a per-file "Validated on:" list and a
+  per-document PROVISIONAL banner - which retires 69 banners and leaves
+  each document its gap list with a REASON on every item; the private
+  material will live in a GITIGNORED NESTED REPO (never a submodule: a
+  submodule records URL and commit in the public tree and breaks a
+  stranger's --recursive clone). A NEW OPEN DESIGN POINT was opened and
+  deliberately NOT taken: transfer granularity. Three widths must be
+  kept apart - the FRAME (8 fixed on the AVR, 8 or 9 on the SAM, 4..16
+  on the G0; none does 24 or 32, so those are PROTOCOL and
+  util/wire.hpp owns them), the ACCESS GRANULARITY, and the machine
+  word (which costs the same cycle at every width on an M0+). The cost
+  per frame is the INTERRUPT TURNAROUND - a frame at PCLK/2 = 32 MHz
+  lasts 250 ns against ~375 ns for an M0+ entry and exit at 64 MHz -
+  so widening the pump divides the interrupt rate, and that is the
+  whole prize. The gap is already in the code: `stm32g0/spi.hpp`'s
+  `dma_serves()` refuses a wide frame, so a 16-bit request cannot use
+  DMA and pays two loads and a shift per frame in `frame_at()`, with a
+  block of 16-bit pixels the worst case. The answer exists elsewhere in
+  the tree - THE ELEMENT TYPE IS THE BEAT (`dma_beat_of`) - and it
+  gives alignment by construction, which matters the more because a
+  misaligned wide access on an M0+ does not fault: gcc emits four byte
+  loads, so the failure mode is a silent 4x. To be closed by the first
+  portable example that moves a block (the ILI9481), where it can be
+  MEASURED. FIRST STEP DONE the same day: the task-level rename on the
+  AVR - `TwiHost`/`TwiClient`/`TwiSpeed` become `I2cHost`/`I2cClient`/
+  `I2cSpeed`, the resource `Twi<n>` and `twi.hpp` keep the chapter's
+  name, the pin claim keeps `TwiRoute` - which is the convergence
+  gradient made visible in one declaration: `brio::I2cClient<0,
+  brio::TwiRoute::def, true>`. The enumerators were already identical
+  word for word on the three targets. Gate: 41 avrdx + 39 samc21 + 22
+  stm32g0 release images BYTE-IDENTICAL (worktree vs copy, mtimes
+  pinned, build dirs wiped), check_family / check_samc21 /
+  check_stm32g0 OK, host 24/24. The rule now sits where a reader meets
+  it (twi.hpp's header and twi.md's "The tasks"). THE VOICE PASS DONE
+  the same day, over the whole tree: 294 files, ~6000 comment and doc
+  lines rewritten, delegated per area on a closed brief with the four
+  ratified samples inside it and re-verified by hand. What went: every
+  date and process word from code, every bench-suite letter cited FROM
+  a header (the measured fact and its number stay; the suite's own
+  header comment is the map and the chapter doc names the suite), every
+  cross-stratum citation - stm32g0 named the SAM or the AVR 156 times
+  and now zero, samc21 named the AVR 100 times and now zero, kernel/
+  and util/ named a target 31 times and now name none but print.hpp's
+  real avr-libc dependency - and every per-file "Validated on:" list,
+  replaced by ONE platform table in README.md (`supported` / `in
+  bring-up`). The cross-target view moved to the design docs, where
+  spi-bus.md and i2c-bus.md gained REALIZATIONS tables. Gate: 41 avrdx
+  + 39 samc21 + 22 stm32g0 release images BYTE-IDENTICAL to HEAD
+  (worktree baseline vs copy, mtimes pinned, build dirs wiped),
+  check_family / check_samc21 / check_stm32g0 OK, host 24/24, ASCII
+  clean over all 294 files, and the only non-comment lines in the whole
+  diff are the rename plus three static_assert MESSAGES (diagnostics,
+  not code the binary carries). THE PASS'S REAL YIELD IS NOT THE VOICE:
+  it found FIFTEEN FALSE STATEMENTS, and the most serious was the
+  KERNEL'S OWN CONTRACT - kernel/platform.hpp promised that
+  break_here() "does nothing" with no debugger attached, which is true
+  on the AVR and false on both ARM strata, where a BKPT with C_DEBUGEN
+  cleared escalates to HardFault (this project measured it twice and
+  both ARM headers say so; only the contract above them did not).
+  Others: avrdx/twi.hpp said the per-bus timeout "is not built" while
+  its own recover() exists FOR it; util/analog_sampler.hpp doubted a
+  contract the SAM had already proven; five documents declared a driver
+  absent that exists (rtc, tsens, pac, pwr, armv6m); samc21/freqm.hpp's
+  header promised a register field the same file refuses;
+  stm32g0/flash.hpp said "nothing calls it yet" of a function
+  clock.hpp calls; stm32g0/adc.hpp's @return described another
+  function's return; docs/samc21/supc.md taught readers to set VREFOE
+  for a comparator that does not need it. AND ONE SYSTEMATIC CLASS,
+  DELIBERATELY LEFT for the gap-list decision: several documents' "Not
+  covered yet" lists are contradicted BY THE SAME DOCUMENT'S OWN "On
+  the second/third silicon" sections - the later campaigns added the
+  new sections and never revisited the old lists. Two more categories
+  are recorded and unfixed because they move images: process words
+  inside CONSOLE STRING LITERALS (about twenty across the suites), and
+  one real code defect - avrdx/src/apps/spi_loopback.cpp deselects PD3
+  as "the ADC CS" where bench.md and dac_adc.cpp both put the MCP3550's
+  select on PB0, so its bus hygiene leaves the real device floating.
+  Rules settled on the way: a "bench:" marker often means THE SILICON
+  CONTRADICTS THE DOCUMENT JUST CITED and that contrast is the fact,
+  never to be flattened to "(measured)"; "born with its first user" is
+  a forward-looking design position and stays where "X is the
+  precedent" goes; and a document may name APPARATUS - a reference
+  suite and the peer firmware it talks to - but not a probe, which is
+  disposable (docs/README.md carries the rule). NEXT: the gap lists and
+  what replaces PROVISIONAL.
+
 - **Borrowed, phase 2 (debug epoch).** `Borrowed<T, Lease::dispatch>`
   is a plain pointer today. Planned: in debug builds an 8-bit lender
   epoch travels with the loan (on 8-bit targets it costs one byte and
@@ -229,7 +327,7 @@ gets its dated home in `docs/design/` when taken.
   that simulates preemption; not before.
 - **Payload/ownership pass DONE.** Every reply-class pointer payload
   now names its lease in the field type: `NvWrite::data`,
-  `TwiHost::Request::tx/rx` and `SpiHost::Request::cmd/tx/rx` are
+  `I2cHost::Request::tx/rx` and `SpiHost::Request::cmd/tx/rx` are
   `Borrowed<..., Lease::reply>`, built at the call sites with the new
   `lend<Lease::reply>(buf)` maker in kernel/borrowed.hpp (spelled like
   `reply_to<>`; `{}` is the null loan, and a loan converts to the same
@@ -4533,8 +4631,8 @@ brio/                    the framework, four strata:
                            with its dual pin pairs, the three errata as code,
                            the chapter's baud arithmetic with the bus edges as
                            arguments, host and client halves, two ISR bodies)
-                           + tasks TwiHost<n, route> (the I2C transfer engine
-                           driven by util/i2c_bus.hpp) and TwiClient<n, route,
+                           + tasks I2cHost<n, route> (the I2C transfer engine
+                           driven by util/i2c_bus.hpp) and I2cClient<n, route,
                            on_dual_pins>
     tca.hpp                TCA: Tca<n> resource (normal mode: PER, three
                            buffered CMP, waveform modes, event inputs A/B,

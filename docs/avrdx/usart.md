@@ -211,14 +211,14 @@ U::disarm_start_of_frame();         // first thing on the way back
 
 ## Bench findings
 
-Two suites, one driver. `test_avr_serial` runs on board A (`brio-a`,
-AVR128DB48 rev. A5, 24 MHz crystal, 5 V) and has two halves: `z` is the
-SINGLE-BOARD set (9 tests, 108 verdicts, 108/108, nothing to wire) and
-`y` is the TWO-BOARD set (12 tests, 103 verdicts, 103/103) against board
-B running `usart_peer`, an instrument driven IN BAND over the very link
-under test. Two more commands stand outside `y` because they depend on
-how the desk is jumpered: `v`, the wiring probe, and `w`, the one-wire
-bus (6/6 on the shared-line desk; it skips itself on the crossed pair).
+`test_avr_serial` runs on board A (`brio-a`, AVR128DB48 rev. A5, 24 MHz
+crystal, 5 V) and has two halves: `z` is the SINGLE-BOARD set (9 tests,
+108 verdicts, nothing to wire) and `y` is the TWO-BOARD set (12 tests,
+103 verdicts) against board B running `usart_peer`, an instrument driven
+IN BAND over the very link under test. Two more commands stand outside
+`y` because they depend on how the desk is jumpered: `v`, the wiring
+probe, and `w`, the one-wire bus (6 verdicts on the shared-line desk; it
+skips itself on the crossed pair).
 
 ### The two boards, and what they cost the measurements
 
@@ -228,8 +228,7 @@ bus (6/6 on the shared-line desk; it skips itself on the crossed pair).
   crystal time. The auto-baud findings below were measured against a
   genuinely foreign clock: board B on its internal OSCHF, **+0.24 to
   +0.28 % fast** - the offset every learned BAUD reproduced. (Running a
-  board on OSCHF - deliberately, or via `xtal_probe` when a crystal is
-  in doubt - recreates that condition at will.)
+  board on OSCHF recreates that condition at will.)
 - **The link topology is discovered, not assumed, and never latched.**
   The apps support two wirings - the crossed full-duplex pair and a
   single wire between the two TXD pads - and find out which one the desk
@@ -244,7 +243,7 @@ bus (6/6 on the shared-line desk; it skips itself on the crossed pair).
   everything except the synchronous roles was also measured half duplex
   through the single shared wire, with LBME at both ends.
 
-### Facts the campaign measured
+### Facts measured on the wire
 
 - **The loop-back is taken at the TXD PAD, and it hears the OUTSIDE.**
   With PORTMUX at NONE the peripheral still transmits - DREIF, TXCIF and
@@ -423,8 +422,8 @@ bus (6/6 on the shared-line desk; it skips itself on the crossed pair).
   fit in a three-deep receive FIFO, and in synchronous mode they arrive
   as fast as the host clocks them: draining after the fact returns three
   frames whatever the wire did. This is not a silicon fact, it is the
-  FIFO depth above - but it is the one that made the client direction
-  look broken until the suite collected live.
+  FIFO depth above - but it is the one that makes a client direction
+  look broken unless the reader collects live.
 - **Rebase is transparent, under real traffic too.** 24 -> 12 -> 24 MHz
   with the USART among a `DynamicClock`'s users: loop-back traffic stays
   clean across every switch and the bit time holds at 8.7 us (208
@@ -445,9 +444,9 @@ bus (6/6 on the shared-line desk; it skips itself on the crossed pair).
 - **`release()` really releases**: PORTMUX reads NONE again, the TXD
   pin's direction bit is back to input, and `MspiHost::release()` also
   clears the INVEN `invert_sck` put on the XCK PIN - a PORT bit the
-  resource's own teardown cannot know about. Measured the hard way: with
-  it left set, an SPI host that took the same position afterwards
-  clocked the opposite polarity and its client stopped decoding.
+  resource's own teardown cannot know about. Left set, it makes an SPI
+  host that takes the same position afterwards clock the opposite
+  polarity, and its client stops decoding.
 
 ### Start-of-frame detection out of a real standby
 
@@ -509,7 +508,7 @@ platform.md.
   while it talks loses the beginning of that answer: two bits were
   swallowed at 2400 baud and the receiver locked onto a later low. A
   turnaround guard of a few bit times fixes it, and `OneWire`'s header
-  comment now says so.
+  comment says so.
 - **`wait_line_idle()` CLEARS TXCIF**, so two calls in a row do not both
   return at once: the second spins out its whole budget. A half-duplex
   turnaround that waited twice stayed deaf for 60 ms and lost the

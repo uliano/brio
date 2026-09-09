@@ -155,7 +155,7 @@ pins really show is the register's `BAUD + 5` clocks MINUS the fall, so
 it would land below the floor by exactly tOF (measured, see below).
 
 Fast-mode Plus is a PAD setting as much as a divider one (29.3.3.1: x10
-output drive instead of the slew limit), so `TwiSpeed::fast_plus_1m`
+output drive instead of the slew limit), so `I2cSpeed::fast_plus_1m`
 and CTRLA.FMPEN are checked against each other: asking for 1 MHz with
 FMPEN off is refused rather than run on slew-limited drivers.
 
@@ -166,7 +166,7 @@ FMPEN off is refused rather than run on slew-limited drivers.
 | Knob | Values | Default | Effect |
 |---|---|---|---|
 | `TwiRoute` | `def`, `alt1`, `alt2` | `def` | PORTMUX.TWIROUTEA. The values ARE the header's group values; there is no pinless code |
-| `TwiSpeed` | `standard_100k`, `fast_400k`, `fast_plus_1m` | `standard_100k` | the bus speed class; MBAUD is solved from it and Fm+ also demands FMPEN |
+| `I2cSpeed` | `standard_100k`, `fast_400k`, `fast_plus_1m` | `standard_100k` | the bus speed class; MBAUD is solved from it and Fm+ also demands FMPEN |
 | `rise_ns` / `fall_ns` | nanoseconds, 0 = the mode's specification maximum | 0 | the bus's own edges, the only inputs equations 29-3 and 29-5 take beyond the clock |
 | `TwiInputLevel` | `i2c`, `smbus` | `i2c` | CTRLA/DUALCTRL.INPUTLVL, the input transition level |
 | `TwiSdaSetup` | `cycles4`, `cycles8` | `cycles4` | CTRLA.SDASETUP: the clocks the CLIENT stretches SCL to set up its SDA output |
@@ -217,7 +217,14 @@ pinless route can go.
 
 ### The tasks
 
-**`TwiHost<n, route>`** is the transfer engine the bus AO drives. One
+The resource is named for the chapter and the tasks for the bus they
+speak: this silicon calls the peripheral a TWI, while `I2cHost` and
+`I2cClient` are spelled the same on every target brio runs on, so an
+application AO reads unchanged when it moves. The pin claim in the
+template arguments stays in this silicon's words - `TwiRoute::def` is a
+PORTMUX code and nothing else. [The contract the tasks implement](../design/i2c-bus.md).
+
+**`I2cHost<n, route>`** is the transfer engine the bus AO drives. One
 `Request` is ONE bus tenure - `{addr, tx span, rx span, reply, speed}` -
 in the four shapes I2C devices actually use (write, read, write-then-read
 with a repeated START, probe); `start()` is always asynchronous and
@@ -228,7 +235,7 @@ host - paid at `start()`, only when the speed actually moves, never per
 byte. `quick_command(true)` turns every request into an address-only
 frame.
 
-**`TwiClient<n, route, on_dual_pins>`** is the other end: the whole
+**`I2cClient<n, route, on_dual_pins>`** is the other end: the whole
 address-match space as options, the four cases as verbs - `respond`
 (ACK or NACK the address packet), `receive` (S1), `transmit` (S2),
 `complete` (S3, and the way to clear a Stop's APIF), `collision` (S4) -
@@ -248,25 +255,25 @@ them.
 **A host on the default route, through the bus AO** (the usual case):
 
 ```cpp
-using TwiHw = brio::TwiHost<0>;                 // PA2 SDA / PA3 SCL
-using I2c = brio::I2cBus<TwiHw, P>;
-ISR(TWI0_TWIM_vect) { if (TwiHw::isr()) brio::post<I2c>(brio::TransferDone{TwiHw::status()}); }
+using I2cHw = brio::I2cHost<0>;                 // PA2 SDA / PA3 SCL
+using I2c = brio::I2cBus<I2cHw, P>;
+ISR(TWI0_TWIM_vect) { if (I2cHw::isr()) brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
 ...
-TwiHw::init(clock, {.speed = brio::TwiSpeed::fast_400k});
-brio::post<I2c>(TwiHw::Request{addr, tx, 3, rx, 2, brio::reply_to<Me, brio::I2cDone>()});
+I2cHw::init(clock, {.speed = brio::I2cSpeed::fast_400k});
+brio::post<I2c>(I2cHw::Request{addr, tx, 3, rx, 2, brio::reply_to<Me, brio::I2cDone>()});
 ```
 
 **A bus whose edges are known** - declare them and get the speed back:
 
 ```cpp
-TwiHw::init(clock, {.speed = brio::TwiSpeed::standard_100k,
+I2cHw::init(clock, {.speed = brio::I2cSpeed::standard_100k,
                     .rise_ns = 200, .fall_ns = 150});   // 1.5k pull-ups, short wires
 ```
 
 **A client answering one address, polled:**
 
 ```cpp
-using C = brio::TwiClient<0>;
+using C = brio::I2cClient<0>;
 C::init(clock, {.address = 0x42, .stop_interrupt = true});
 const auto s = C::isr();
 if (s.address_or_stop()) { s.is_address() ? C::respond() : C::complete(); }
@@ -277,7 +284,7 @@ else if (s.data()) { s.host_reading() ? C::transmit(next()) : store(C::receive()
 pair for its own bus):
 
 ```cpp
-using C = brio::TwiClient<0, brio::TwiRoute::def, true>;   // PC2/PC3
+using C = brio::I2cClient<0, brio::TwiRoute::def, true>;   // PC2/PC3
 C::init(clock, {.address = 0x42});
 ```
 
@@ -292,7 +299,7 @@ C::init(clock, {.address = 0x42, .promiscuous = true});                     // e
 **A wedged host** - the errata's remedy, never FLUSH:
 
 ```cpp
-if (TwiHw::bus_state() == brio::TwiBusState::unknown) TwiHw::recover();
+if (I2cHw::bus_state() == brio::TwiBusState::unknown) I2cHw::recover();
 ```
 
 **A wedged WIRE** - a different fault and a different remedy. `recover()`
@@ -300,7 +307,7 @@ puts the peripheral back in a known state; it cannot make a client that
 is holding SDA low let go. Only clocks can:
 
 ```cpp
-const uint8_t pulses = TwiHw::unstick();          // <= 9 SCL pulses, then a STOP
+const uint8_t pulses = I2cHw::unstick();          // <= 9 SCL pulses, then a STOP
 if (pulses == brio::Twi<0>::unstick_failed) { /* the line is not clocked free */ }
 ```
 
@@ -311,13 +318,13 @@ is a policy for the bus AO and is not built ([i2c-bus.md](../design/i2c-bus.md))
 
 Measured on rev. A5 at 5 V, CLK_PER 24 MHz, TWI0 on its DEFAULT route,
 one open-drain bus with 1.5k pull-ups. `test_avr_twi`: `z` = the
-single-board half, 176 verdicts; `y` = the two-board half, 174 verdicts,
-with a second AVR128DB48 on the same node running the campaign's
-instrument firmware. The desk gives that bus three taps of the DUT -
-PA2/PA3 (the host and the combined client), PC2/PC3 (the dual client,
-and a plain-GPIO bit-bang injector whenever Dual mode is off) and
-PB2/PB3 - plus the second board's own PA2/PA3, so a host, several
-clients, a second host and a foreign agitator all sit on one wire.
+single-board half; `y` = the two-board half, with a second AVR128DB48
+on the same node running instrument firmware. The desk gives that bus
+three taps of the DUT - PA2/PA3 (the host and the combined client),
+PC2/PC3 (the dual client, and a plain-GPIO bit-bang injector whenever
+Dual mode is off) and PB2/PB3 - plus the second board's own PA2/PA3, so
+a host, several clients, a second host and a foreign agitator all sit
+on one wire.
 
 **The errata's OUT bits are real work, not ceremony.** With `PORTA.OUT`
 bits 2 and 3 deliberately set before `init`, the driver clears them and
@@ -342,9 +349,9 @@ how both are read off the measurement: **tR = 166 ns on this bus at
 every speed** (it is the pull-up's job, and FMPEN does not help it), and
 **tOF = 125 ns in Standard and Fast mode but 0 in Fast-mode Plus** -
 the x10 pad drive of FMPEN collapses the fall below the meter's 42 ns
-tick. Charging nothing for tOF, as an earlier revision of this driver
-did, put the measured tLOW at 4583 ns and 1208 ns, i.e. BELOW the
-specified floor at both Sm and Fm: the equations' tOF is the difference.
+tick. Charging nothing for tOF puts the measured tLOW at 4583 ns and
+1208 ns, i.e. BELOW the specified floor at both Sm and Fm: the
+equations' tOF is the difference.
 
 **Declaring the bus's real edges buys the speed back.** The same
 Standard mode with `rise_ns = 206, fall_ns = 165` gives MBAUD 113 and
@@ -587,14 +594,14 @@ implement):
   byte when SADDR[7:3] is 0b11110 and the second byte is software's job
   (29.3.3.6); neither the client task nor the host's `Request` has a
   shape for it.
-- **The timed bus on THIS silicon.** The stuck-bus watchdog now exists
+- **The timed bus on THIS silicon.** The stuck-bus watchdog lives
   where it belongs: `I2cBus`'s per-bus `timeout_ticks` notices a tenure
   that never answers, calls this engine's `recover()` (the errata's
   ENABLE cycle - exactly the verb the contract names as its model) and
   replies `i2c_timeout` ([i2c-bus.md](../design/i2c-bus.md)). It is
-  host-tested and compile-proven over `TwiHost` on every package; no
-  AVR bench has staged the wedge yet - the SAM I2C suite's letter l is
-  the mechanism's silicon witness.
+  host-tested and compile-proven over `I2cHost` on every package; no
+  AVR bench has staged the wedge - the SAM C21's `test_samc_i2c`
+  letter l is the mechanism's silicon witness.
 - **Multi-host as a policy.** Arbitration is measured and the engine
   reports `i2c_arb_lost`, but nothing above the engine decides what to
   do with it: a retry policy, a back-off, a bus AO that knows it shares

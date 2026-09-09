@@ -769,7 +769,7 @@ private:
  * boot-side verb that takes it back out - util/persistent_panic.hpp's
  * shape over flash instead of over an EEPROM record.
  *
- *   inline brio::NvJournal<brio::RwweeJournalZone, 6, 32> journal;
+ *   inline brio::NvJournal<JournalZone, 6, 32> journal;   // any FlashMedia
  *   using Panic = brio::JournalPanic<journal, 0>;
  *   ...
  *   brio::panic<P, Panic>(PanicCode::assert_failed, 7);   // at the fault

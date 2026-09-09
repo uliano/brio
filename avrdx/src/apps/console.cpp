@@ -1,5 +1,5 @@
-// console - the console migrated to the brio kernel: three active
-// objects replacing the old polling main loop.
+// console - a line console on the brio kernel: three active objects
+// and no polling loop anywhere.
 //
 //   SerialPort   turns RX bytes into LineReceived events (ping-pong line
 //              buffers, backpressure on the ring - see util/serial_port.hpp)

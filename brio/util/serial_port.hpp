@@ -33,11 +33,10 @@
  *
  * TX has no AO: print() goes straight to the transport's blocking
  * push path - bounded by the wire rate (~2 ms worst case at 460800),
- * naturally atomic between AOs (RTC), revisited only for slow links or
- * hard latency budgets. See CLAUDE.md, "Serial AO" decision.
+ * naturally atomic between AOs (run-to-completion), revisited only for
+ * slow links or hard latency budgets (docs/design/serial.md).
  *
- * Validated on: AVR DA/DB (Uart<n, Route>) and the host fake. The
- * contract assumes a byte stream read one byte at a time with an
+ * The contract assumes a byte stream read one byte at a time with an
  * "RX went non-empty" edge from the ISR; a DMA/FIFO transport may
  * change it (docs/design/overview.md, "Authority of util/").
  */

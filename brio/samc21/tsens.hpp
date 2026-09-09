@@ -5,19 +5,18 @@
  * small chapter in one monostate resource - `Tsens`, not `Tsens<n>`:
  * this family has exactly ONE instance on every variant, so an index
  * would be a parameter with a single legal value (the `Rtc` / `Dac` /
- * `Sdadc` precedent in this stratum).
+ * `Sdadc` shape in this stratum).
  *
  *   brio::Tsens::init(generator, brio::TsensConfig{
  *       .calibration = brio::TsensCalibration::factory()});
  *   const auto centi = brio::Tsens::measure_average(10);   // 43.6.2.3
  *
  * ---------------------------------------------------------------------
- * THIS IS NOT AN ADC CHANNEL, and everything else follows from that.
+ * THIS IS NOT AN ADC CHANNEL - not a voltage into a converter with a
+ * correction applied - AND EVERYTHING ELSE FOLLOWS FROM THAT.
  *
- * On the AVR the die temperature is one more analog input: a voltage
- * into the SAR, a SIGROW correction, a reading in kelvin. HERE IT IS A
- * CLOCK RATIO. A temperature-dependent oscillator (TOSC) is run twice -
- * once in its "min" configuration and once in its "max" - and the
+ * IT IS A CLOCK RATIO. A temperature-dependent oscillator (TOSC) is run
+ * twice - once in its "min" configuration and once in its "max" - and the
  * DIFFERENCE of the two periods, amplified over GAIN periods of
  * GCLK_TSENS, is counted by a counter clocked by GCLK_TSENS itself: up
  * during the first phase, down during the second (43.6.1). What lands in
@@ -60,9 +59,9 @@
  * in the NVM Temperature Calibration Area at 0x00806030 (table 9-6) and
  * MUST be copied in by software: GAIN and OFFSET into their own
  * registers, TCAL and FCAL into CAL. `samc21/nvm.hpp`'s
- * `NvmTemperatureCalibration` has typed all four since the NVMCTRL pass;
- * `TsensCalibration::factory()` is the promise that file's comment made,
- * kept - the same shape `Adc::load_calibration()` has for the SAR.
+ * `NvmTemperatureCalibration` types all four and
+ * `TsensCalibration::factory()` copies them in - the same shape
+ * `Adc::load_calibration()` has for the SAR.
  *
  * WITHOUT THEM THE PERIPHERAL IS NOT MERELY INACCURATE, AND ITS RESET
  * VALUE IS A TRAP. GAIN reads zero out of reset, and a zero GAIN is not
@@ -136,21 +135,25 @@
  *    not functional", i.e. a START written under protection does
  *    nothing. It contradicts 43.5.8, which lists CTRLB among the
  *    registers PAC protection does not cover. THE OBLIGATION IS THE
- *    CALLER'S and this header states it rather than coding around it,
- *    because brio has no PAC driver at all: PAC write protection is OFF
+ *    CALLER'S and this header states it rather than coding around it:
+ *    PAC write protection is OFF
  *    out of reset (11.5.2.2) and nothing in this framework turns it on,
- *    so the item is inapplicable by construction TODAY and becomes a
- *    real constraint the day a PAC pass arrives. `Tsens::pac_id` is the
- *    peripheral identifier that pass will need. The errata's other
+ *    so the item is inapplicable by construction until a program turns
+ *    it on. `Tsens::pac_id` is the identifier samc21/pac.hpp takes for
+ *    that. The errata's other
  *    workaround - "or use the TSENS in free-running mode" - is exactly
  *    `TsensConfig::free_running`, which needs no CTRLB write after the
  *    enable.
  *  - There is no other TSENS item in the document, on any row.
  *
  * ---------------------------------------------------------------------
- * NOT BUILT (docs/samc21/tsens.md carries the list): sleep behaviour
- * beyond the one CTRLA bit (table 43-1 is written and never entered),
- * and the E/G variants are compile-only.
+ * NOT BUILT (docs/samc21/tsens.md carries the list): the block as a WAKE
+ * source - table 43-1's rows are measured through an event witness, and
+ * RESRDY, WINMON, OVERRUN and OVF have never driven the NVIC out of a
+ * sleep; a MeterSource or sampler adapter, which util/analog_sampler.hpp's
+ * converter concept cannot take as it stands (this block has neither a
+ * channel to select nor an unsigned datum); and the E/G variants are
+ * compile-only.
  */
 
 #pragma once
@@ -263,8 +266,7 @@ constexpr int32_t tsens_milli_celsius(int32_t centi) { return centi * 10; }
  * remember.
  *
  * `factory()` reads them out of the NVM Temperature Calibration Area
- * through samc21/nvm.hpp - which typed all four in the NVMCTRL pass with a
- * comment promising this driver would consume them.
+ * through samc21/nvm.hpp, which types all four.
  */
 struct TsensCalibration {
     /// GAIN[23:0]: the number of GCLK_TSENS periods a measurement cycle
@@ -446,9 +448,9 @@ public:
     static constexpr uint8_t gclk_id = tsens_gclk_id();
     static constexpr IRQn_Type irq() { return TSENS_IRQn; }
 
-    /// The PAC peripheral identifier. Published because erratum 1.19.1 is
-    /// about this number and because there is no PAC driver yet to own
-    /// it (see this file's header).
+    /// The PAC peripheral identifier - what samc21/pac.hpp takes.
+    /// Published here because erratum 1.19.1 is about this number (see
+    /// this file's header).
     static constexpr uint16_t pac_id = tsens_pac_id();
 
     // ---- the vocabularies this peripheral publishes -------------------------

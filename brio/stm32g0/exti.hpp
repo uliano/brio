@@ -3,9 +3,8 @@
  *
  * The STM32G0's Extended interrupt and event controller (RM0444 ch. 13):
  * the peripheral where THIS family keeps its pin interrupts. There are
- * none in GPIO - stm32g0/pin.hpp says so and stops there - so everything
- * the AVR spells in PINnCTRL.ISC, and everything the SAM keeps in its
- * EIC, lives here.
+ * none in GPIO - stm32g0/pin.hpp says so and stops there - so every
+ * edge sense, every pending bit and every wake-up line lives here.
  *
  *  Exti           the block: the trigger selection, the software
  *                 trigger, the two pending registers, the interrupt and
@@ -21,34 +20,31 @@
  * 1. THE LINE NUMBER IS THE PIN NUMBER, AND THE PORT IS A CHOICE. PA3,
  *    PB3, PC3, PD3, PE3 and PF3 all reach line 3 and EXTI_EXTICR1's
  *    third field says which one of them does (13.3.3, figure 29). So
- *    unlike the SAM's irregular pad-to-EXTINT map there is no table to
- *    read - and unlike it, THE SIXTEEN LINES ARE A SCARCE RESOURCE
- *    SHARED ACROSS SIX PORTS: PA3 and PB3 cannot both raise interrupts,
- *    ever. The last write to EXTICR wins and nothing in the silicon
- *    warns; `exti_lines_distinct<...>()` is the compile-time check an
- *    application can put on ITS OWN set of lines, and `selected()` is
- *    the run-time readback of who owns one now.
+ *    there is no pad-to-line table to read - and THE SIXTEEN LINES ARE
+ *    A SCARCE RESOURCE SHARED ACROSS SIX PORTS: PA3 and PB3 cannot both
+ *    raise interrupts, ever. The last write to EXTICR wins and nothing
+ *    in the silicon warns; `exti_lines_distinct<...>()` is the
+ *    compile-time check an application can put on ITS OWN set of lines,
+ *    and `selected()` is the run-time readback of who owns one now.
  *
  * 2. THERE IS NO LEVEL SENSE. The configurable lines are EDGE triggered
  *    and nothing else (13.5.1's own note: "the configurable lines are
  *    edge triggered, no glitch must be generated on these inputs"), so
- *    `ExtiSense` has four values where the AVR's PinSense has six and
- *    the SAM's EicSense has six. A level-triggered input is the
- *    application's to build - sense both edges and read the pad.
+ *    `ExtiSense` has four values and none of them is a level. A
+ *    level-triggered input is the application's to build - sense both
+ *    edges and read the pad.
  *
  * 3. RISING AND FALLING ARE TWO SEPARATE PENDING BITS, in two separate
  *    registers (EXTI_RPR1 and EXTI_FPR1, 13.5.4/13.5.5), both W1C. A
  *    both-edges line therefore says WHICH edge arrived without reading
- *    the pad - the AVR and the SAM each have one flag per line and
- *    cannot. That is why the ISR body returns a PAIR of masks.
+ *    the pad, which is why the ISR body returns a PAIR of masks.
  *
  * 4. THE PENDING BIT IS ONLY SET FOR AN UNMASKED INTERRUPT. 13.3.1 says
  *    it in those words and 13.4 repeats it: with EXTI_IMR clear, an
  *    edge on an enabled trigger leaves no trace in RPR/FPR at all - the
- *    "flag standing while the interrupt is masked" that both other brio
- *    targets offer does not exist here, and neither does polling a line
- *    without arming it. Measured, and it is exactly what the chapter
- *    says (docs/stm32g0/exti.md).
+ *    flag cannot stand while its interrupt is masked, and a line cannot
+ *    be polled without being armed. Measured, and it is exactly what
+ *    the chapter says (docs/stm32g0/exti.md).
  *
  * 5. THREE VECTORS FOR SIXTEEN LINES: EXTI0_1 serves lines 0 and 1,
  *    EXTI2_3 lines 2 and 3, EXTI4_15 the other twelve (table 61). A
@@ -73,9 +69,9 @@
  * PART: the G031 implements neither 20 nor 22 nor 24, the G071 neither
  * 20 nor 22, and a line number that means "USART3 wake-up" on one part
  * means nothing on another. So a peripheral driver that owns a wake-up
- * publishes ITS OWN line number, exactly as this stratum's peripherals
- * will publish their DMAMUX requests and as samc21/'s publish their EVSYS
- * codes; `exti_line_implemented()` and `exti_line_configurable()` are
+ * publishes ITS OWN line number, the way this stratum's peripherals
+ * publish their DMAMUX requests; `exti_line_implemented()` and
+ * `exti_line_configurable()` are
  * how such a number is checked against the device header. What lives
  * here is what is uniform: the sixteen GPIO lines, which are lines
  * 0..15 on every part of the family.
@@ -132,8 +128,8 @@ namespace brio {
  * note says so explicitly - "rising edge trigger can be set for a line
  * with falling edge trigger enabled").
  *
- * THERE IS NO LEVEL HERE, unlike avrdx/pin.hpp's PinSense and the SAM's
- * EicSense: this controller detects edges and nothing else. `none`
+ * THERE IS NO LEVEL HERE: this controller detects edges and nothing
+ * else. `none`
  * disables the line's detection altogether, which is also its reset
  * state.
  */
@@ -349,13 +345,11 @@ public:
      *
      * Read-and-clear, both registers, and the two halves come back
      * apart: on a both-edges line the returned pair says which edge it
-     * was without reading the pad, which is this controller's one real
-     * advantage over the AVR's and the SAM's single flag.
+     * was without reading the pad.
      *
      * There is no mask to apply beyond `lines`: a pending bit only
      * exists for an unmasked interrupt in the first place (13.3.1), so
-     * unlike the SERCOM's and the EIC's bodies this one has no
-     * INTENSET-equivalent to AND with.
+     * there is no enable register to AND with.
      */
     [[gnu::always_inline]] static ExtiPending isr(uint32_t lines) {
         ExtiPending p{regs().RPR1 & lines, regs().FPR1 & lines};

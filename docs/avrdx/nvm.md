@@ -367,11 +367,11 @@ if (const auto block = heap.find(cal_id)) { // came through
 Three things about NVMCTRL are settled once, for every image, and not
 left to each app:
 
-- **`src/glue/ivsel_boot.cpp`** is compiled into every env (through
-  `[common] base_src_filter`). It is a four-instruction `.init3`
-  fragment that sets `CPUINT.CTRLA.IVSEL` under CCP, before anything
-  can enable an interrupt. Without it any image on a chip with
-  `BOOTSIZE != 0` reset-loops on its first interrupt.
+- **`src/glue/ivsel_boot.cpp`** is compiled into every image:
+  `avr_add_app()` adds it to every executable. It is a four-instruction
+  `.init3` fragment that sets `CPUINT.CTRLA.IVSEL` under CCP, before
+  anything can enable an interrupt. Without it any image on a chip
+  with `BOOTSIZE != 0` reset-loops on its first interrupt.
   `Nvm::vectors_in_boot()` is the same store as a run-time verb and
   `vectors_in_boot_armed()` is the readback the suite asserts.
 - **FLMAPLOCK is set at startup**: `avr_add_app()` (`CMakeLists.txt`)

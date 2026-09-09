@@ -8,7 +8,8 @@
  *
  * Model:
  *  - a state is a function `Status handler(const Event&)`; the current
- *    state of the machine IS a pointer to it (2 bytes on AVR);
+ *    state of the machine IS a pointer to it (two bytes on an 8-bit
+ *    core);
  *  - Event is the AO's own std::variant, with the kernel's reserved
  *    alternatives Entry and Exit prepended by this template: the handler
  *    receives them through the same visit as ordinary events. They are

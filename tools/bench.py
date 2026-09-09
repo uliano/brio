@@ -20,8 +20,7 @@
 #                 each app's own "// build: boards = ..." header comment
 #                 (each project's CMakeLists.txt); a configure also (re)writes
 #                 that project's build-cmake/apps_<project>.json, which this
-#                 file reads instead of parsing apps.ini/platformio.ini (both
-#                 gone). Never a target per physical board.
+#                 file reads. Never a target per physical board.
 #    2. IDENTITY- tools/bench_boards.py, the bench manifest: which board sits
 #                 where, on which console, behind which programmer.
 #    3. THIS    - resolves 1 against 2 and drives the hardware.

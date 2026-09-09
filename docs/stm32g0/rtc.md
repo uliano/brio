@@ -258,21 +258,20 @@ while (brio::Rtc::shift_pending()) { }
 ## Bench findings
 
 The reference suite is `test_stm32_rtc` (fourteen letters in `z`, 125
-verdicts, **125/125 cold and warm**; letter `v` outside it reboots the
-board once, and letter `w` outside it spends the five backup registers
-and the calendar's value on the erase and the calendar overflow).
-NOTHING IS WIRED: TIM16's input multiplexer
-reaches LSI, LSE and the RTC's own wake-up signal (25.6.18), so a 64 MHz
-capture channel weighs all three against the core clock with no pad.
+verdicts; letter `v` outside it reboots the board once, and letter `w`
+outside it spends the five backup registers and the calendar's value on
+the erase and the calendar overflow). Nothing is wired: TIM16's input
+multiplexer reaches LSI, LSE and the RTC's own wake-up signal (25.6.18),
+so a 64 MHz capture channel weighs all three against the core clock with
+no pad.
 
-- **THE NUCLEO'S X2 CRYSTAL IS FITTED AND IT RUNS**, which
-  [README.md](README.md) had listed as unverified since the bring-up:
-  LSE starts, LSERDY rises, and the period measures **32703 Hz against
-  the core** - 1983 ppm from 32768, which is the CORE's own error (HSI16
-  is trimmed to 1 %) and not the crystal's. Sixty-four consecutive
-  periods span 1952..1968 timer ticks, so the instrument resolves a
-  32 kHz period to a handful of core cycles.
-- **LSI measures 32586 Hz on this die**, and that CONFIRMS the figure
+- **THE NUCLEO'S X2 CRYSTAL IS FITTED AND IT RUNS**: LSE starts, LSERDY
+  rises, and the period measures **32703 Hz against the core** - 1983
+  ppm from 32768, which is the CORE's own error (HSI16 is trimmed to
+  1 %) and not the crystal's. Sixty-four consecutive periods span
+  1952..1968 timer ticks, so the instrument resolves a 32 kHz period to
+  a handful of core cycles.
+- **LSI measures 32586 Hz on this die**, and that confirms the figure
   `test_stm32_platform` derived from an IWDG time-out (32536 Hz) by a
   completely different route - a period capture against a watchdog's
   coarse reset. The two agree to 1.5 per mille.
@@ -347,13 +346,12 @@ capture channel weighs all three against the core clock with no pad.
   with the RTC's key never written and is dropped with DBP clear. So the
   RTC's WPR does not cover chapter 31's registers.
 - **The five backup registers and the calendar survive a real reset**
-  (letter `v`, 4/4): all five words come back bit for bit after a
-  software reset, RCC_BDCR still names its source, INITS still stands,
-  and the calendar has kept counting across the reset AND across the
-  reflash that preceded it.
+  (letter `v`): all five words come back bit for bit after a software
+  reset, RCC_BDCR still names its source, INITS still stands, and the
+  calendar has kept counting across the reset and across a reflash.
 - **This board's domain comes up on LSI with RTCEN set** (RCC_BDCR
   0x8200 on a board that has never been told otherwise), which is what
-  [reset.md](reset.md) reported from the other side and what makes
+  [reset.md](reset.md) sees from the other side and what makes
   ES0548 2.2.1's precondition - LSI clocking the RTC - true here by
   default. Moving to the crystal takes a BDRST first, and the suite
   spends one.
@@ -408,22 +406,20 @@ capture channel weighs all three against the core clock with no pad.
   0xFFFF0000 and bits 18..21 of that are ITAMP3E..ITAMP6E - LSE
   monitoring, HSE monitoring, the calendar overflow and the ST
   manufacturer readout - every one of which erases the backup registers
-  and none of which has a NOERASE bit. Measured on this board, which had
+  and none of which has a NOERASE bit. Measured on a board that had
   never been told anything about tampering. `Tamp::any_armed()` reads
-  the EXTERNAL half only and would have answered "none";
-  `erase_source_armed()` is the question that matters and it exists
-  because of this measurement.
-- **ARMING A TAMPER INPUT TAKES THE PAD, pulls and all** - the finding
-  that decided how the whole letter is built, and one ch. 31 does not
-  carry. A PA0 driven high by its own port reads 1 in IDR before TAMP2E
-  is set and 0 the instant it is, with MODER untouched; the internal
-  pulls go the same way. So **no program on this board can put an EDGE
-  on a tamper input**, and the "the EXTI sees a pad its owner drives"
-  technique has no twin here. What is left is a pad the OUTSIDE world
-  holds: TAMP_IN1 is PC13, which carries the user button and its
-  external pull-up, and over a pad at a standing active level the
-  filtered detector starts its sample train when it is ARMED - so the
-  latency from the arming to the flag IS the filter's own N/f.
+  the EXTERNAL half only and answers "none" over that reset value;
+  `erase_source_armed()` is the question that matters.
+- **ARMING A TAMPER INPUT TAKES THE PAD, pulls and all**, which ch. 31
+  does not carry. A PA0 driven high by its own port reads 1 in IDR
+  before TAMP2E is set and 0 the instant it is, with MODER untouched;
+  the internal pulls go the same way. So **no program on this board can
+  put an EDGE on a tamper input**, and the "the EXTI sees a pad its
+  owner drives" technique has no twin here. What is left is a pad the
+  OUTSIDE world holds: TAMP_IN1 is PC13, which carries the user button
+  and its external pull-up, and over a pad at a standing active level
+  the filtered detector starts its sample train when it is ARMED - so
+  the latency from the arming to the flag IS the filter's own N/f.
 - **The filter and the sampling rate, measured that way**: 2, 4 and 8
   samples at 128 Hz cost 17465 / 35211 / 66523 us against the 15625 /
   31250 / 62500 the counts and the rate predict, each inside one sample
@@ -485,15 +481,15 @@ capture channel weighs all three against the core clock with no pad.
 ## On the second silicon
 
 `test_stm32_rtc` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
-and scores **125/125**, the same letters and the same verdicts.
+with the same letters and the same verdicts.
 
 - **The LSE crystal is fitted on that board too and starts.** Its RTC
-  domain was found EMPTY (RCC_BDCR 0x0000 0000, LSEON clear - not merely
-  unselected), letter `a` claimed it with the ordinary one-way RTCSEL
-  write, and LSERDY rose inside the driver's bounded wait on the first
-  try. The crystal measures **32736 Hz** against the core (976 ppm off
-  32768) where the G0B1RE's reads 32703 - both of them the CORE's own 1 %
-  trim and not the crystal's.
+  domain comes up EMPTY (RCC_BDCR 0x0000 0000, LSEON clear - not merely
+  unselected); letter `a` claims it with the ordinary one-way RTCSEL
+  write, and LSERDY rises inside the driver's bounded wait. The crystal
+  measures **32736 Hz** against the core (976 ppm off 32768) where the
+  G0B1RE's reads 32703 - both of them the CORE's own 1 % trim and not
+  the crystal's.
 - **There are TWO external tamper inputs and not three.**
   `tamp_external_inputs()` counts the TAMPxE enable bits and finds two;
   TAMP_IN3 is the G0B1/G0C1's. TAMP_CR1 still comes out of a domain reset
@@ -511,15 +507,16 @@ and scores **125/125**, the same letters and the same verdicts.
 
 ## On the third silicon
 
-`test_stm32_rtc` scores **109 of 125** in `z` on the Nucleo-G031K8
-(DEV_ID 0x466, REV_ID 0x1003), with `w` 11/11 and `v` 4/4 outside it.
-**THE CRYSTAL RUNS THERE AS ON THE NUCLEO-64s**: letter `a` claims it
-from an empty domain first try, letter `b` weighs it at **32719..32753
-Hz against the core** (E 32703, F 32736 - the core's own trim), and
-every rate this suite quotes is on the crystal's scale; the LSI of that
-die reads **31403..31496 Hz filtered** (E: 32536/32586, F:
-32295/32339), the slowest of the three. Every crystal leg, the divided-
-clock calibration included, holds the verdicts it holds on E.
+`test_stm32_rtc` claims 109 of its 125 verdicts in `z` on the
+Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003), with `w` (11 verdicts) and
+`v` (4) outside it. **THE CRYSTAL RUNS THERE AS ON THE NUCLEO-64s**:
+letter `a` claims it from an empty domain, letter `b` weighs it at
+**32719..32753 Hz against the core** (the G0B1RE 32703, the G071RB
+32736 - the core's own trim), and every rate this suite quotes is on the
+crystal's scale; the LSI of that die reads **31403..31496 Hz filtered**
+(the G0B1RE 32536/32586, the G071RB 32295/32339), the slowest of the
+three. Every crystal leg, the divided-clock calibration included, holds
+the verdicts it holds on the G0B1RE.
 
 **RTC_REFIN IS OUT OF REACH ON THIS PACKAGE.** The function has ONE pad
 on every G0 of this pack - PB15 - and the LQFP32 bonds no PB15 (DS12992

@@ -90,7 +90,7 @@ the event unmasked: **an edge before the WFE makes it return in 0 us,
 where the same edge with the event masked leaves the WFE waiting 798
 us for the next SysTick**, and the line's pending bits are zero either
 way. This is a Sleep-mode measurement (SLEEPDEEP never written); Stop
-and Standby wait for the PWR pass.
+and Standby are not measured here.
 
 **The block has no clock gate and no reset.** It is on the AHB and runs
 on hclk; no device header of the family declares an `EXTIEN` or an
@@ -149,11 +149,10 @@ of Stop ([lptim.md](lptim.md), [pwr.md](pwr.md)).
 ## Types and verbs
 
 The driver owns the FABRIC and not the vocabulary of what is wired to a
-line above 15 - the samc21 EVSYS ruling applied to this family: a
-peripheral that owns a wake-up publishes its own line number, and
-`exti_line_implemented()` / `exti_line_configurable()` are how such a
-number is checked against the device header. What lives here is what is
-uniform: the sixteen GPIO lines.
+line above 15: a peripheral that owns a wake-up publishes its own line
+number, and `exti_line_implemented()` / `exti_line_configurable()` are
+how such a number is checked against the device header. What lives here
+is what is uniform: the sixteen GPIO lines.
 
 - `ExtiSense` - `none` / `rising` / `falling` / `both` (there is no
   level); `exti_sense_has_rising/falling`.
@@ -212,25 +211,24 @@ afterwards.
 
 ## Bench findings
 
-`test_stm32_exti`, 9 letters, 89 verdicts, **89/89 three times
-including a cold run**, WIRELESS. Pads PA0/PB0 (line 0), PB3 (line 3),
-PB7 (line 7), PA8 (line 8), PC13 (the user button, read only); the
-console (PA2/PA3), LD4 (PA5), SWD (PA13/PA14), the LSE pads
-(PC14/PC15) and the HSE pads (PF0/PF1) are all avoided.
+`test_stm32_exti`, 9 letters, 89 verdicts, WIRELESS. Pads PA0/PB0 (line
+0), PB3 (line 3), PB7 (line 7), PA8 (line 8), PC13 (the user button,
+read only); the console (PA2/PA3), LD4 (PA5), SWD (PA13/PA14), the LSE
+pads (PC14/PC15) and the HSE pads (PF0/PF1) are all avoided.
 
 **The stimulus, measured before anything rests on it.** All five pads
 follow their own internal pull (input mode, PUPDR up then down, read
-IDR), and PA0 and PB0 were shown independent of each other. Then the
-fact that makes this family's wireless bench easier than the SAM's:
-**the EXTI sees a pad its owner is DRIVING**. The multiplexer selects a
-PORT and not a pin function, and the input buffer stays live in output
-mode (7.3.1), so a pad in OUTPUT mode driving itself high is a clean
-edge on its line - where the SAM's PMUXEN takes the pad away from
-PORT's output driver entirely and only the pull remains. Both
-techniques were counted and both are exact: 16 of 16 driven edges, 16
-of 16 pull-walked edges, no edge ever double-counted by an unfiltered
-detector. **Analog mode is the one that blinds a line**: with the input
-buffer off, the pad's own pull moves nothing the EXTI can see.
+IDR), and PA0 and PB0 are independent of each other. And the fact that
+makes a wireless bench easy on this family: **the EXTI sees a pad its
+owner is DRIVING**. The multiplexer selects a PORT and not a pin
+function, and the input buffer stays live in output mode (7.3.1), so a
+pad in OUTPUT mode driving itself high is a clean edge on its line -
+where the SAM C21's PMUXEN takes the pad away from PORT's output driver
+entirely and only the pull remains. Both techniques are exact: 16 of 16
+driven edges, 16 of 16 pull-walked edges, no edge ever double-counted
+by an unfiltered detector. **Analog mode is the one that blinds a
+line**: with the input buffer off, the pad's own pull moves nothing the
+EXTI can see.
 
 **The reset value of IMR1** (see above): 0xFFE80000, not the 0xFFF80000
 13.5.12 prints - the manual's own rule beats the manual's own number,
@@ -239,7 +237,7 @@ and the device header's two masks predict the silicon bit for bit.
 **The CPU event out of WFE**: 0 us against 798 us for the masked
 control, with no pending bit set either way.
 
-**Two measurement traps paid for**, both worth keeping:
+**Two measurement traps**, both worth knowing:
 
 - **An exception entry sets the core's event register**, not just SEV
   and the EXTI - so a loop that waits for a tick edge (and therefore
@@ -250,10 +248,8 @@ control, with no pending bit set either way.
 - **A verdict line is milliseconds of console, and every byte of it is
   a USART interrupt** - an interrupt pending in the NVIC returns WFE
   too (4.2.2). With a print between the arming and the sleep, both legs
-  measure zero. The letter now computes its verdicts first, drains the
-  console, sleeps, and prints afterwards. (The same lesson the samc21
-  suites learned about prints inside a measurement window, in a new
-  form.)
+  measure zero: the measurement computes its verdicts first, drains the
+  console, sleeps, and prints afterwards.
 
 **The board's own button.** PC13 reads HIGH against an internal
 pull-down, against an internal pull-up and with no pull at all: the
@@ -277,7 +273,7 @@ with POINTERS that are null when the register is absent
 `exti_fpr2()`), which is why the suite judges their presence against
 `exti_configurable_mask2` rather than dereferencing them.
 
-**AND THE TWO DIES TAKE OPPOSITE SIDES OF A MANUAL THAT DISAGREES WITH
+**THE TWO DIES TAKE OPPOSITE SIDES OF A MANUAL THAT DISAGREES WITH
 ITSELF.** 13.5.12 states the reset value as a RULE in words - "enable
 interrupt from direct lines, and disable interrupt from configurable
 lines" - and then PRINTS 0xFFF8 0000 beside it. The G0B1RE obeys the
@@ -313,9 +309,8 @@ implemented bits; what a die holds above them is printed beside it.
 **PA8 IS NOT UCPD1_CC1 HERE**, this part having no UCPD at all: the
 dead-battery Rd is absent, `ucpd_dead_battery()` REFUSES instead of
 writing a strobe bit that does not exist, and letter `b` claims the pad
-follows its own pull AND that the verb answered exactly
-`ucpd_present(1)` - a new reserve fact probed on SYSCFG's own strobe
-bit.
+follows its own pull AND that the verb answers exactly
+`ucpd_present(1)` - a reserve fact probed on SYSCFG's own strobe bit.
 
 ## Not covered yet
 
@@ -337,13 +332,14 @@ reachable through `Exti` today but with no driver to publish their
 numbers or their vectors; and `SEVONPEND`, which changes what returns a
 WFE and belongs to a kernel pass rather than to this chapter.
 
-Wake-up from **Stop** through a direct line is no longer open: an LPTIM
+Wake-up from **Stop** through a direct line is covered: an LPTIM
 compare match leaves both Stop 0 and Stop 1 through line 29, measured in
 `test_stm32_lptim` letter g, an RTC alarm does the same through line 19
 ([pwr.md](pwr.md)), a USART's WUF leaves Stop 0 through line 26 and an
-LPUART's leaves Stop 1 through line 28 ([usart.md](usart.md)). What a direct line contributes there is exactly
-its IMR bit - it has no edge selection and no pending bit of its own,
-the peripheral's own flag being the pending state.
+LPUART's leaves Stop 1 through line 28 ([usart.md](usart.md)). What a
+direct line contributes there is exactly its IMR bit - it has no edge
+selection and no pending bit of its own, the peripheral's own flag being
+the pending state.
 
 Implemented, not bench-verified: the second register group's own verbs
 (line 34's trigger, pending and software trigger - `VDDIO2` monitoring

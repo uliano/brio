@@ -15,17 +15,15 @@
  * another, and `hard_fault_reset<P>()` is the body an app binds to
  * HardFault_Handler so that a fault leaves a note instead of a spin.
  *
- * FOUR FACTS OF THIS SILICON shape everything below, and the first is
- * the one that most needs saying because the AVR family taught the
- * opposite habit.
+ * FOUR FACTS OF THIS SILICON shape everything below.
  *
  * 1. RCAUSE IS EXCLUSIVE, NOT CUMULATIVE. "When a Reset occurs, the bit
  *    corresponding to the Reset source is set to '1' and all other bits
  *    are written to '0'" (18.8.1). It is read-only, there is nothing to
  *    clear, and it always describes exactly one reset - the last one.
- *    The AVR's RSTFR accumulates history and needs a read-and-clear verb
- *    at boot; porting that habit here would be writing to a read-only
- *    register and reading a history that does not exist.
+ *    A cumulative reset-flag register would need a read-and-clear verb
+ *    at boot; here that would be writing to a read-only register and
+ *    reading a history that does not exist.
  *
  * 2. NOT EVERY RESET RESETS EVERYTHING (table 18-1). Only a power-supply
  *    reset (POR, BODVDD, BODCORE) clears the whole device. An external
@@ -65,17 +63,17 @@
  * workaround: 1.22.1 (XOSC/XOSC32K clock-failure detection cannot switch
  * to the safe clock when the input is stuck high) tells the application
  * to run the WDT and switch clocks in firmware after the WDT reset. That
- * matters to the clock pass, when XOSC exists.
+ * matters wherever XOSC's failure detector is used (samc21/clock.hpp).
  *
  * REGISTER ACCESS PROTECTION: RCAUSE and every writable WDT register but
  * INTFLAG are PAC write-protected (18.5.8, 23.5.8). PAC protection is off
  * out of reset and no brio driver enables it, so nothing here unlocks
- * anything; a future PAC driver must.
+ * anything; a program that turns it on through samc21/pac.hpp must.
  *
  * NOT BUILT (docs/samc21/platform.md carries the list): the SUPC side of
  * the story - BODVDD and BODCORE are reset SOURCES named here and
- * configured there, and SUPC has no driver yet - and the vector table
- * relocation (VTOR), which a bootloader would want and nothing else does.
+ * configured in samc21/supc.hpp - and the vector table relocation (VTOR),
+ * which a bootloader would want and nothing else does.
  */
 
 #pragma once
@@ -95,8 +93,7 @@ namespace brio {
 // =============================================================================
 
 /// What brought the program here. RCAUSE names exactly one source, so
-/// this is an enum and not a flag set - the difference from the AVR's
-/// accumulating RSTFR is the point.
+/// this is an enum and not a flag set: there is no history to accumulate.
 enum class ResetCause : uint8_t {
     unknown = 0,      ///< no bit set: not reachable on real silicon after a reset
     power_on,         ///< POR
@@ -253,7 +250,7 @@ struct Watchdog {
 
     /// This block's bit in MCLK.APBAMASK. On at reset (APBAMASK's reset
     /// value is 0xFFF, every bit of the A bridge), so nothing has to
-    /// enable it - the verb exists for a power pass that wants it off.
+    /// enable it - the verb exists for a program that wants it off.
     static void bus_clock(bool on) { Mclk::apb_a(MCLK_APBAMASK_WDT_Msk, on); }
 
     /// The watchdog's own interrupt line - the early warning's, since a

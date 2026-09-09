@@ -52,8 +52,7 @@
  *    absent and `clear_flags()` is unrestricted, which is what makes the
  *    polling tasks (LptimPwm's compare handshake) legal.
  *    `clear_flags_raw()` is the unguarded store, named for what it is:
- *    the ISR body's own verb and the bench's staging one (the rtc.hpp
- *    raw-verb precedent).
+ *    the ISR body's own verb and the bench's staging one.
  *
  * 3. THE TWO SIDES OF THE BLOCK HAVE OPPOSITE ENABLE RULES, and getting
  *    them backwards is the chapter's easiest mistake. CFGR, CFGR2 and
@@ -87,8 +86,8 @@
  *    CFGR.ENC, ISR.UP/DOWN and CFGR2.IN2SEL once, for the struct both
  *    share, so `LPTIM2->CFGR |= LPTIM_CFGR_ENC` compiles and writes a
  *    Reserved bit. What an instance IS therefore comes from
- *    stm32g0/device_tables.hpp with its citation (the tim.hpp geometry
- *    precedent), every verb that names a missing feature refuses, and
+ *    stm32g0/device_tables.hpp with its citation, every verb that names
+ *    a missing feature refuses, and
  *    LptimEncoder static_asserts.
  *
  * THE KERNEL CLOCK. RCC_CCIPR.LPTIMnSEL (5.4.21) offers PCLK, LSI, HSI16
@@ -105,7 +104,7 @@
  * both DIRECT: no trigger selection, no pending bit of the EXTI's own -
  * the peripheral's own ISR flag IS the pending state - and the line's
  * IMR bit must be set for the interrupt to bring the core out of Stop.
- * `wake_line(true)` is that one bit (the rtc.hpp precedent).
+ * `wake_line(true)` is that one bit.
  *
  * THE VECTOR. On the G0B1/G0C1 and the G071 class LPTIM1 shares
  * TIM6_DAC_LPTIM1_IRQn with TIM6 and the DAC and LPTIM2 shares
@@ -116,8 +115,7 @@
  *
  * THE PAD MAP IS THE DATASHEET'S AND NOTHING CHECKS IT (DS13560 tables
  * 13..24), exactly as for the timers: `LptimPad<sel>` is the caller's
- * claim and the bench is the only check. test_stm32_lptim measures four
- * of those claims.
+ * claim and the bench is the only check.
  */
 
 #pragma once
@@ -300,8 +298,8 @@ constexpr bool lptim_input2_valid(uint8_t n, LptimInput2 s) {
 }
 
 // Everything from here on names LPTIM registers and bits, and is
-// compiled only where the device header declares a first instance (the
-// fdcan.hpp precedent): the x0 value line has NO LPTIM AT ALL - no
+// compiled only where the device header declares a first instance: the
+// x0 value line has NO LPTIM AT ALL - no
 // LPTIM_TypeDef, none of the LPTIM_CFGR bit names, no DBG_APB_FZ1 freeze
 // bit for it - and a template body may not name a macro that does not
 // exist even uninstantiated. The clock, prescaler, trigger, input and
@@ -512,9 +510,9 @@ public:
     static constexpr uint8_t exti_line = lptim_exti_line(n);
     /// Table 56's DMAMUX TRIGGER input this timer's output drives - a
     /// trigger for a request GENERATOR, not a request line: an LPTIM has
-    /// no DMA request of its own on this family. Published HERE per the
-    /// stratum's ruling that a fabric driver owns the fabric and a
-    /// peripheral publishes its own codes.
+    /// no DMA request of its own on this family. Published HERE because
+    /// a fabric driver owns the fabric and a peripheral publishes its
+    /// own codes.
     static constexpr uint8_t dmamux_generator_input = lptim_dmamux_trigger(n);
 
     static constexpr IRQn_Type irq() { return lptim_irq(n); }
@@ -910,7 +908,7 @@ public:
     /// EXTI line 29 (LPTIM1) or 30 (LPTIM2): a DIRECT line, so there is
     /// no trigger to select and no pending bit to clear - but its IMR
     /// bit must stand or the interrupt does not bring the core out of a
-    /// Stop. Idempotent (rtc.hpp's wake_line_open() precedent).
+    /// Stop. Idempotent.
     static bool wake_line(bool on) { return Exti::interrupt(exti_line, on); }
     static bool wake_line() { return Exti::interrupt(exti_line); }
 
@@ -921,11 +919,11 @@ public:
     // ---- debug (26.4.16) ----------------------------------------------------
 
     /// DBG_APB_FZ1.DBG_LPTIMn_STOP: whether the counter freezes while a
-    /// debugger holds the core. Two things this register needs, both
-    /// learned in reset.hpp: it answers a store only with
-    /// RCC_APBENR1.DBGEN set - which is CLEAR at reset - so this verb
-    /// opens that gate itself; and 40.10.3 says it is not reset by a
-    /// system reset, so whatever a debug session left is still there.
+    /// debugger holds the core. Two things this register needs: it
+    /// answers a store only with RCC_APBENR1.DBGEN set - which is CLEAR
+    /// at reset - so this verb opens that gate itself; and 40.10.3 says
+    /// it is not reset by a system reset, so whatever a debugger left
+    /// is still there.
     static void debug_freeze(bool on) {
         Rcc::apb1_clock(RCC_APBENR1_DBGEN, true);
         const uint32_t bit = n == 1u ? DBG_APB_FZ1_DBG_LPTIM1_STOP
@@ -951,16 +949,15 @@ public:
 // =============================================================================
 
 /**
- * LptimPwm<L, top>: one PWM output on LPTIMx_OUT, and util/pwm_channel.hpp's
- * PwmChannel on its FOURTH implementation (the AVR's TCA, the SAM's TC
- * and TCC, this).
+ * LptimPwm<L, top>: one PWM output on LPTIMx_OUT, and
+ * util/pwm_channel.hpp's PwmChannel over a low-power timer.
  *
  *   using Lamp = brio::LptimPwm<brio::Lptim<1>, 1000>;
  *   Lamp::setup(brio::LptimPrescaler::div1);
  *   Lamp::duty(250);            // a quarter
  *
- * THE ARITHMETIC, MEASURED (test_stm32_lptim letter c) because 26.4.10
- * describes the waveform in words and prints no formula:
+ * THE ARITHMETIC, MEASURED because 26.4.10 describes the waveform in
+ * words and prints no formula:
  *
  *   period    = ARR + 1 counter ticks (the counter runs 0..ARR);
  *   high time = ARR - CMP + 1 counter ticks - ONE MORE than the
@@ -978,13 +975,12 @@ public:
  * pair, whose flat low IS zero duty (0 per mille measured). In between
  * the duty is (v + 1) / (max + 1), one tick generous - the mapping says
  * 251, 501 and 751 per mille for v = 250, 500 and 750 out of 999 and the
- * pad reads 251, 502 and 752, the last per mille being the sampler's own
- * (test_stm32_lptim letter c counts pad levels; it does not count
- * ticks).
+ * pad reads 251, 502 and 752, the last per mille being the sampler's
+ * own (the bench counts pad levels; it does not count ticks).
  *
  * PRELOAD IS SET. A PwmChannel::duty() that can cut the pulse being
- * produced is not one a generic actuator can use (the tim.hpp ruling),
- * so 26.4.11's end-of-period update is on and a duty change lands at the
+ * produced is not one a generic actuator can use, so 26.4.11's
+ * end-of-period update is on and a duty change lands at the
  * next period boundary.
  *
  * NO INTERRUPT IS ENABLED, and that is load-bearing rather than
@@ -1261,7 +1257,7 @@ private:
  * LptimTimeout<L>: 26.4.9's timeout function - "the first trigger event
  * will start the timer, any successive trigger event will reset the
  * counter and the timer will restart", so a CMPM means NO TRIGGER
- * ARRIVED within the compare value.
+ * arrived within the compare value.
  *
  * THE FEED IS THE TRIGGER, AND ONLY THE TRIGGER. A software start
  * (TRIGEN = 00) cannot feed a timeout: 26.4.9's mechanism is the trigger

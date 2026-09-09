@@ -8,17 +8,16 @@
 //
 // NOTHING TO WIRE. An ADC input is a DIRECT connection to the pad, so a
 // pad left under PORT and driven as an ordinary output is a rail the
-// converter measures - the technique samc21/ac.hpp's campaign established
-// for the comparators and this one inherits. The other voltages in the
-// room are all internal: the SUPC bandgap through MUXPOS INTREF, the
-// quarter-scaled analog supply, the quarter-scaled core supply, and the
-// three reference divisions of VDDANA.
+// converter measures. The other voltages in the room are all internal:
+// the SUPC bandgap through MUXPOS INTREF, the quarter-scaled analog
+// supply, the quarter-scaled core supply, and the three reference
+// divisions of VDDANA.
 //
-// WHAT THIS BOARD CANNOT DO, said once: there is no DAC driver in this
-// stratum, so no ramp and no arbitrary mid-rail voltage exists. Every
-// measurement here is a rail, an internal divider or a bandgap; INL,
-// DNL, a transfer curve and anything needing a swept source are OUT OF
-// REACH and are named as gaps in docs/samc21/adc.md rather than faked.
+// WHAT THIS SUITE DOES NOT DO, said once: it uses NO SWEPT SOURCE.
+// Every measurement here is a rail, an internal divider or a bandgap,
+// so a transfer curve and anything else needing an arbitrary mid-rail
+// voltage is outside it - that is test_samc_analog's half of the
+// chapter, where the DAC drives the shared pad.
 //
 // THE PADS, and why these: PA08 and PA09 are the only two pads on this
 // package that reach BOTH converters (PA08 = ADC0/AIN8 and ADC1/AIN10),
@@ -36,7 +35,8 @@
 //   g  the window monitor, and MODE4's documented ambiguity settled
 //   h  the NO-CPU CHAIN: a timer event starts it, the DMAC takes the
 //      result, and a second timer counts the result-ready events
-//   i  util/analog_sampler.hpp INSIDE A REAL KERNEL, unchanged
+//   i  util/analog_sampler.hpp INSIDE A REAL KERNEL, walking a list of
+//      inputs on this converter
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -104,10 +104,10 @@ using Adc1 = Adc<1>;
 constexpr uint8_t adc_gen = 0;
 constexpr uint32_t adc_gen_hz = SysClock::hz;
 
-/// What the SUPC campaign located this board's supply at, through the
-/// comparator's own scaler against the bandgap (docs/samc21/supc.md). It
-/// is the number letter c re-derives from the ADC's side, so it is a
-/// STARTING POINT here and never a verdict's authority.
+/// Where this board's supply sits, located through the comparator's own
+/// scaler against the bandgap (docs/samc21/supc.md). Letter c re-derives
+/// it from the ADC's side, so it is a STARTING POINT here and never a
+/// verdict's authority.
 constexpr uint16_t supc_vdd_mv = 5141;
 uint16_t vdd_mv = supc_vdd_mv;   ///< refined by letter c, used by the rest
 
@@ -138,8 +138,8 @@ bool stopwatch_start() {
 uint32_t ticks_now() { return Stopwatch::count32(); }
 
 // ---------------------------------------------------------------------------
-// The event fabric, as in every SAM suite here: DMAC channel 0 is EVSYS
-// user 5, and the event channels take their clock from generator 6.
+// The event fabric: DMAC channel 0 is EVSYS user 5, and the event
+// channels take their clock from generator 6.
 // ---------------------------------------------------------------------------
 constexpr uint8_t dma_ch = 0;
 constexpr uint8_t ev_start_channel = 0;    // TC2 overflow -> ADC0 START
@@ -150,9 +150,8 @@ using EvGen = Gclk<ev_gen>;
 using Pacer = Tc<2>;      // the trigger source
 using Counter = Tc<3>;    // counts result-ready events
 
-/// VOLATILE IN BOTH DIRECTIONS - the lesson the DMAC campaign paid for
-/// on this target: the compiler sees neither the controller's writes nor
-/// its reads.
+/// VOLATILE IN BOTH DIRECTIONS: the compiler sees neither the
+/// controller's writes nor its reads.
 constexpr uint16_t dma_results = 16;
 volatile uint16_t results[dma_results];
 
@@ -284,8 +283,8 @@ void ta_block() {
     bench.verdict("and the DMA trigger ids are the header's",
                   Adc0::dma_trigger_resrdy == 42u && Adc1::dma_trigger_resrdy == 43u);
 
-    // THE PAD MAP IS PER INSTANCE, which is the fact that made the
-    // reserve's ADC entry need two maps rather than one.
+    // THE PAD MAP IS PER INSTANCE, which is why the reserve's ADC entry
+    // carries two maps rather than one.
     bench.verdict("ONE PAD, TWO NUMBERS: PA08 is ADC0/AIN8 and ADC1/AIN10",
                   Adc0::ain_of('A', 8) == 8 && Adc1::ain_of('A', 8) == 10);
     bench.verdict("and PA04 belongs to ADC0 alone",
@@ -324,7 +323,8 @@ void ta_block() {
                                   adc_gen_hz) &&
                       adc_clock_in_range(adc_gen_hz, AdcPresc::div4));
 
-    // THE PROMISE nvm.hpp's comment has carried since phase B1.
+    // THE PROMISE samc21/nvm.hpp's comment makes: the factory
+    // calibration is there to be copied into the converter.
     const NvmCalibration cal = NvmCalibration::read();
     bench.verdict("ADC0 comes up", adc_up<Adc0>(AdcConfig{}));
     bench.verdict("ADC1 comes up", adc_up<Adc1>(AdcConfig{}));
@@ -470,9 +470,9 @@ void tb_rails() {
 //
 // The bandgap read against the supply is a RATIO whose numerator is
 // known: 1.024, 2.048 or 4.096 V. So VDD = level * full_scale / counts,
-// and this is the same supply the SUPC campaign located from the
-// COMPARATOR's side (5251 / 5141 / 5090 mV at the three levels) with no
-// mechanism in common - the AC compares, this one converts.
+// and this is the same supply the COMPARATOR locates from its own side
+// (5251 / 5141 / 5090 mV at the three levels) with no mechanism in
+// common - the AC compares, this one converts.
 void tc_bandgap() {
     constexpr AdcConfig cfg{
         .reference = Ref::vddana,
@@ -1011,8 +1011,7 @@ void tg_window() {
     Adc0::select(AnalogIn<PadShared>{});
 
     // Reading RESULT clears WINMON as well as RESRDY (38.8.7), so
-    // window_hit() reports the verdict for the value just read - the
-    // shape avrdx/adc.hpp has for the same reason.
+    // window_hit() reports the verdict for the value just read.
     auto hit_at = [](bool high) {
         drive<PadShared>(high);
         settle();
@@ -1277,12 +1276,11 @@ void th_no_cpu() {
 // i - util/analog_sampler.hpp inside a real kernel
 // =============================================================================
 //
-// THE CAMPAIGN'S POINT, not a bonus letter. util/analog_sampler.hpp was
-// designed on the AVR around a converter that reports ONE result per
-// interrupt and reads back which input it was taken on. Its own file
-// comment doubted the shape would survive on a target with a hardware
-// sequencer and DMA. It survives: the concept is satisfied by Adc<0> as
-// written, the walk works, and NOT ONE LINE OF util/ CHANGED.
+// THE POINT OF THE SUITE, not a bonus letter. util/analog_sampler.hpp
+// asks a converter for ONE result per interrupt and reads back which
+// input it was taken on - a shape that owes nothing to this chapter's
+// hardware sequencer or its DMA trigger. Adc<0> satisfies the concept
+// as written, and the walk works.
 
 struct Collector;
 using Subs = Subscribers<Collector>;

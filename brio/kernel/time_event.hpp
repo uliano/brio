@@ -2,14 +2,13 @@
  * time_event.hpp
  *
  * Time events: a timer never runs user code - it POSTS an event to its
- * owner AO, so the logic stays serialized in the AO's dispatch. This is
- * the kernel-side replacement of the legacy callback Timer.
+ * owner AO, so the logic stays serialized in the AO's dispatch.
  *
- * Mechanics (the "T2" decision): the tick ISR only advances the counter
- * and, by firing, wakes the CPU from idle; expiry runs in the KERNEL
- * LOOP - Kernel::run() calls TimeEvents<P>::process() once per turn,
- * which compares P::now() against the armed deadlines and posts the
- * matured events in main context. Wrap-safe comparison via signed
+ * Mechanics: the tick ISR only advances the counter and, by firing,
+ * wakes the CPU from idle; expiry runs in the KERNEL LOOP -
+ * Kernel::run() calls TimeEvents<P>::process() once per turn, which
+ * compares P::now() against the armed deadlines and posts the matured
+ * events in main context. Wrap-safe comparison via signed
  * difference: (int32_t)(now - deadline) >= 0 works across the 32-bit
  * counter wrap (~49 days at 1024 Hz).
  *

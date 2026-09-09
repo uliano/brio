@@ -71,8 +71,8 @@ flag, so there is no "last one wins" hazard to guard against.
   the include search path and the `avr` target, while the `-D` delta
   above supplies the device macros clang does not define
   (`__AVR_DEVICE_NAME__` drives avr-libc's computed `<avr/io.h>`).
-  `test/.clangd` points straight at the host project's own database
-  instead of the root AVR one. cpptools' own engine is disabled in the
+  `test/.clangd` points straight at the host project's own database.
+  cpptools' own engine is disabled in the
   same file: its clang-based parser (1.33+) runs in an x86-64 model
   against the full gcc macro set, and the AVR-configured libstdc++ then
   demands gcc-only types (`__int24`, `_Float32`) it cannot have -
@@ -137,7 +137,7 @@ shape
 
 Any key other than `boards` (below) and `flmap_lock` (see FLMAPLOCK
 above) is collected as metadata and written into
-`build-cmake/apps_manifest.json` at every configure - `tools/bench.py`
+`build-cmake/apps_avrdx.json` at every configure - `tools/bench.py`
 reads it instead of a build-tool manifest, e.g. to pick a console's
 `monitor_speed` (a console fact, not a compiler flag: nothing in
 `CMakeLists.txt` interprets it beyond passing it through). Rules: one
@@ -179,21 +179,22 @@ produce: `hz` stays true either way). `is_static` is true.
 
 The runtime regime is `brio::DynamicClock<Boot, Users...>`: `Boot` is a
 static `Clock<...>` naming the source, `Users` types satisfying the
-`ClockUser` concept (a static `rebase(hz)`, checked where
-the list is written); `set<hz>()` / `set(hz)` name the new RATE (Hz - the prescaler that produces it is the silicon's detail;
-an unreachable rate is a compile error / a false) and fan it out to
-every listed user (`Uart`, `Twi`, `Spi` expose `rebase(hz)`; `Uart`
-drains its TX at the old rate first) and THEN reprograms the main
-prescaler; `hz()` is a value, `is_static` false, `clock_hz(clock)`
-reads either kind. `delay_us` takes the runtime path. The RTC/PIT
-timebase does not move. The subscription is explicit and checked: a
-clocked driver initialized with a DynamicClock that does not list it
-fails to compile at its `init(clock)` (`clock_follows<Clock, Driver>()`)
-- forgetting a user cannot leave it silently at the old rate. Not while a bus transaction is in flight (ask
-the bus AOs); RX bytes during the switch may be garbled. `Uart::
-can_baud(hz, baud)` tells whether a rate can still hit a baud (BAUD >=
-64, i.e. CLK_PER >= 16 x baud). Bench-verified: 24 -> 12 -> 2 MHz
-under a running 115200 console, 1 MHz refused as expected.
+`ClockUser` concept (a static `rebase(hz)`, checked where the list is
+written); `set<hz>()` / `set(hz)` name the new RATE (Hz - the prescaler
+that produces it is the silicon's detail; an unreachable rate is a
+compile error / a false) and fan it out to every listed user (`Uart`,
+`Twi`, `Spi` expose `rebase(hz)`; `Uart` drains its TX at the old rate
+first) and THEN reprograms the main prescaler; `hz()` is a value,
+`is_static` false, `clock_hz(clock)` reads either kind. `delay_us` takes
+the runtime path. The RTC/PIT timebase does not move. The subscription
+is explicit and checked: a clocked driver initialized with a
+DynamicClock that does not list it fails to compile at its `init(clock)`
+(`clock_follows<Clock, Driver>()`) - forgetting a user cannot leave it
+silently at the old rate. Do not switch while a bus transaction is in
+flight (ask the bus AOs); RX bytes during the switch may be garbled.
+`Uart::can_baud(hz, baud)` tells whether a rate can still hit a baud
+(BAUD >= 64, i.e. CLK_PER >= 16 x baud). Bench-verified: 24 -> 12 -> 2
+MHz under a running 115200 console, 1 MHz refused as expected.
 
 `F_CPU` is NOT defined in this project: nothing in `CMakeLists.txt`
 ever adds a `-DF_CPU`, since flags here are built up from scratch
@@ -207,7 +208,7 @@ therefore not GPIO), `Clock<ClockSource::crystal, 24'000'000>`.
 
 `brio::delay_us(clock, us)` (`avrdx/delay.hpp`) busy-waits AT LEAST
 `us` microseconds: a folded `__builtin_avr_delay_cycles` when `us` is
-a compile-time constant (what `_delay_us` did, minus F_CPU), a 4-cycle
+a compile-time constant (what `_delay_us` does, minus F_CPU), a 4-cycle
 `_delay_loop_2` loop otherwise (`delay_us_runtime(cycles_per_us, us)`
 for drivers holding a runtime setup time, e.g. `Spi`'s cs_setup_us).
 For hardware setup times in drivers and pre-kernel init only:
@@ -303,16 +304,14 @@ PyAvrOCD is launched by cppdbg itself (`debugServerPath` +
 }
 ```
 
-(the flags mean the same as before: hardware breakpoints only, no GUI,
+(the flags: hardware breakpoints only, no GUI,
 GDB server port, let PyAvrOCD manage the relevant fuses, MCU -
 `pyavrocd -d '?'` lists them, UPDI, `-t`/`-u` needed with more than one
 probe attached, UPDI programming clock in kHz). `-F` (below) stays
 inert for a UPDI target either way. `svdPath` is read directly by the
 mcu-debug Peripheral Viewer extension from the active session's launch
 config (its `svdPathConfig` setting defaults to trying `svdPath` then
-`svdFile`, confirmed in the extension's own `package.json`) - the same
-mechanism Cortex-Debug's `svdFile` used to provide before it moved SVD
-support out to this same extension.
+`svdFile`, confirmed in the extension's own `package.json`).
 
 `-F` and the CPU clock: for a UPDI target `-F` is inert. PyAvrOCD uses
 it only to derive the default JTAG debug clock (megaAVR JTAG sessions)

@@ -124,9 +124,8 @@ of the kind. The driver does not offer it.
   anyway and does not find it (below).
 - **1.8.7 DMA Write Access** (a DMA write during standby may not land;
   RTC.COUNT is on the list) is live on every revision, and is a
-  caller obligation for the power pass rather than something a driver
-  can wrap: use Idle rather than Standby when SleepWalking writes
-  COUNT.
+  caller obligation rather than something a driver can wrap: use Idle
+  rather than Standby when SleepWalking writes COUNT.
 
 ## Types and verbs
 
@@ -221,9 +220,9 @@ brio::Evsys::connect(user, channel,
 
 ## Bench findings
 
-`test_samc_rtc`, 8 letters / 125 verdicts, **125/125** on the C21J at
-revision F, wireless. The instruments: a TC0+TC1 pair as a 32-bit
-stopwatch clocked FROM THE BOARD'S 24 MHz CRYSTAL through generator 2
+`test_samc_rtc`, 8 letters / 125 verdicts, on the C21J at revision F,
+wireless. The instruments: a TC0+TC1 pair as a 32-bit stopwatch
+clocked FROM THE BOARD'S 24 MHz CRYSTAL through generator 2
 (not from GCLK0, which is OSC48M - an RC 5100 ppm slow with a wander of
 its own, [clock.md](clock.md)), `samc21/freqm.hpp` measuring the RTC's
 source against the same crystal, and a DMA channel armed with no
@@ -240,14 +239,13 @@ on the same oscillators.
 
 **And because the ruler is the crystal, those are ABSOLUTE numbers**:
 OSCULP32K measures **33002 Hz** and a factory-trimmed OSC32K **33152
-to 33174 Hz**, both about 7 per mille above the nominal 32768 - which
-is the first time this stratum has weighed the slow oscillators
-without an RC in the reference. Note that it does not agree to the
-hertz with the rescaled figure in [clock.md](clock.md) (32907 Hz for
-OSCULP32K, derived hours earlier from an OSC48M-scaled reading): the
-two differ by about 3 per mille, which is the oscillator's own drift
-between sessions and not a disagreement between the instruments. An
-RC read to five figures is a reading of one afternoon.
+to 33174 Hz**, both about 7 per mille above the nominal 32768. Note
+that it does not agree to the hertz with the rescaled figure in
+[clock.md](clock.md) (32907 Hz for OSCULP32K, derived from an
+OSC48M-scaled reading): the two differ by about 3 per mille, which is
+the oscillator's own drift between measurements and not a disagreement
+between the instruments. An RC read to five figures is the reading of
+one moment, not a constant.
 
 **The prescaler is exact.** DIV2, DIV32 and DIV1024 imply the same
 source rate as DIV1 to within **70 to 300 ppm** - and the DIV1024
@@ -313,18 +311,17 @@ flags together. 24.6.2.3's note is exact.
   wording ("increments until it reaches the PER value, and then wraps")
   is exact.
 - **A MODE CHANGE DOES NOT CLEAR COUNT**, and a 16-bit counter that
-  starts ABOVE PER never meets it: it runs to 0xFFFF instead. The first
-  version of the suite watched exactly that happen, with the value
-  mode 0 had left behind. Nothing in the chapter warns of it.
-- **AND A DRIVER TRAP THE BENCH CAUGHT.** The device header's group
-  mask for the compare EVENT outputs is ONE bit in the mode 0 view
-  (`RTC_MODE0_EVCTRL_CMPEO_Msk`) and TWO in the mode 1 view, at the
-  same position - so a driver writing the shared control surface
+  starts ABOVE PER never meets it: it runs to 0xFFFF instead, carrying
+  whatever value the previous mode left behind. Nothing in the chapter
+  warns of it.
+- **A TRAP IN THE DEVICE HEADER'S OWN MASKS.** The device header's
+  group mask for the compare EVENT outputs is ONE bit in the mode 0
+  view (`RTC_MODE0_EVCTRL_CMPEO_Msk`) and TWO in the mode 1 view, at
+  the same position - so a driver writing the shared control surface
   through the mode 0 macro, which is the natural thing to do when
-  everything else is identical, silently drops CMPEO1. This one did,
-  until a verdict asked for both bits to be readable back. The driver
-  now writes that field through the mode 1 macro, which is a superset,
-  and a family static_assert pins both widths.
+  everything else is identical, silently drops CMPEO1. The driver
+  writes that field through the mode 1 macro, which is a superset, and
+  a family static_assert pins both widths.
 
 ### Mode 2, the calendar
 
@@ -340,10 +337,9 @@ flags together. 24.6.2.3's note is exact.
 - **THE ALARM IS A WHOLE COUNTER PERIOD LATE**, measured at **989 ms**
   after the match on a 1 Hz counter. 24.6.2.5 says so in a sentence
   easy to read past ("the Alarm 0 Interrupt flag is set with a delay of
-  1s after the occurrence of alarm match"), and the first version of
-  this suite read the flags at the instant of the match and reported a
-  working alarm as broken. The overflow flag, by contrast, is already
-  there.
+  1s after the occurrence of alarm match"), so flags read at the instant
+  of the match report a working alarm as broken. The overflow flag, by
+  contrast, is already there.
 - **MASK.SEL = OFF is a real disarm**: the same match two seconds later
   raises nothing, while the overflow still does.
 - **CLKREP is a reading, not a format.** The same CLOCK word that reads
@@ -355,11 +351,11 @@ flags together. 24.6.2.3's note is exact.
 - **The sign is confirmed, under the register's double negative.**
   SIGN = 0 is called a POSITIVE correction and DECREASES the frequency
   (24.8.8): the +127 windows measure longer than the -127 ones, in
-  every block of every session.
+  every block of every run.
 - **The magnitude measures LARGER than 24.6.8.2's formula.** The full
   swing between SIGN positive and SIGN negative at VALUE 127 comes out
   at **415 to 620 ppm** (median of seven ABBA blocks, five separate
-  sessions) where `2 x VALUE / 983040` predicts **258 ppm** - a factor
+  runs) where `2 x VALUE / 983040` predicts **258 ppm** - a factor
   of 1.6 to 2.4. The driver's `rtc_correction_ppb()` still states the
   chapter's formula: one board's RC is no basis for replacing it, and
   the discrepancy is recorded here instead.
@@ -374,25 +370,24 @@ flags together. 24.6.2.3's note is exact.
   FREQCORR is a crystal's instrument, and this board cannot put a
   crystal on the RTC's clock select.
 - **The per-step linearity is therefore NOT judged.** A sweep over
-  VALUE 32, 64, 96, 127 was written first and thrown away: its readings
-  were the wander with the trim underneath, non-monotonic from run to
-  run, and asserting a shape on them would have made a coin toss into a
-  verdict.
+  VALUE 32, 64, 96, 127 reads the wander with the trim underneath,
+  non-monotonic from run to run, and asserting a shape on it would make
+  a coin toss into a verdict.
 - **What one "count in the prescaler" is worth is OPEN.** The same
-  measurement repeated at DIV16 was meant to settle it - an unchanged
-  answer would mean one SOURCE cycle, an eightfold one would mean one
-  COUNTER tick. It settles nothing: the DIV16 answer moves with the
-  WINDOW LENGTH as well (around 500 ppm over a 32768-cycle window,
+  measurement repeated at DIV16 would settle it - an unchanged answer
+  would mean one SOURCE cycle, an eightfold one one COUNTER tick - and
+  it settles nothing: the DIV16 answer moves with the WINDOW LENGTH as
+  well (around 500 ppm over a 32768-cycle window,
   under 100 ppm over a 16384-cycle one), which neither reading
   explains and which points at the adjustments being distributed
   unevenly inside the 240-period correction cycle. The number is
   printed by the suite and not verdicted.
 
 
-- **As a wake source** (the transversal sleep pass -
-  [platform.md](platform.md)): all three of this chapter's interrupts
-  wake the device from STANDBY and none needs a RUNSTDBY bit, this
-  block having none and riding OSC32KCTRL rather than a generator. A
+- **As a wake source** ([platform.md](platform.md), "Sleep, peripheral
+  by peripheral"): all three of this chapter's interrupts wake the
+  device from STANDBY and none needs a RUNSTDBY bit, this block having
+  none and riding OSC32KCTRL rather than a generator. A
   COMP0 compare 1000 ticks ahead woke it in 30177 us against 30312 us
   asked, four of four; a periodic interrupt woke it inside one of its
   own periods (7679 us against 7744 us measured awake); and a mode-2
@@ -404,12 +399,12 @@ flags together. 24.6.2.3's note is exact.
 ## Not covered yet
 
 Driver gaps:
-- **No tasks at all**, deliberately, following `avrdx/rtc.hpp`: an
-  alarm clock, a slow periodic source and a power-manager timebase are
-  each a policy, and each is born with its first user.
-- **The RTC is not the kernel timebase and this pass did not make it
-  one.** `samc21/ticker.hpp` stays on SysTick and says why; the RTC is
-  what the power pass will want when SysTick stops in standby.
+- **No tasks at all**, deliberately: an alarm clock, a slow periodic
+  source and a power-manager timebase are each a policy, and each is
+  born with its first user.
+- **The RTC is not the kernel timebase.** `samc21/ticker.hpp` stays on
+  SysTick and says why; the RTC is what is wanted when SysTick stops in
+  standby.
 - **Erratum 1.8.7's caveat** - that a DMA write to RTC.COUNT during
   standby SleepWalking may not land - is stated and unexercised: it
   needs the DMAC across a sleep, which is [dmac.md](dmac.md)'s own gap.

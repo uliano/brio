@@ -158,7 +158,7 @@ bool near(int32_t a, int32_t b, int32_t tol) {
     return d <= tol;
 }
 // Holds are counted in CRYSTAL time (delay_us, a cycle loop), not by
-// the Ticker: the RTC runs from the internal OSC32K (+-10 %; bench:
+// the Ticker: the RTC runs from the internal OSC32K (+-10 %; measured
 // +0.9 % fast on this board) and the suite measures the timers against
 // the crystal they share. A cycle loop is stretched by ISR time, so the
 // PIT is paused for the whole suite and the ISRs of the test under way
@@ -224,7 +224,7 @@ void t1_frequency() {
     print(serial, "  CLK_TCA (div64) clocked TCB: period ticks=", cap_a, " expect 750", crlf);
     verdict("TCB on CLK_TCA: 500 Hz = 750 ticks of CLK_PER/64", near(cap_a, 750, 1));
     // ... and restarting with the TCA (SYNCUPD): the TCB restarts at
-    // the TCA's TOP, which IS the edge it captures - it reads 0 (bench)
+    // the TCA's TOP, which is the edge it captures - it reads 0 (measured)
     T0::init({.mode = TcbMode::frequency, .clock = TcbClock::tca0, .compare = 0,
               .event_input = true, .sync_update = true});
     T0::capture_on(ChGen{});
@@ -695,8 +695,8 @@ void tn_timeout_exact() {
 
     // edge = true: start on the falling edge, stop on the rising. With
     // the stop edge 9.5 ms away and TOP = 1 ms the counter FREE-RUNS
-    // past TOP and CAPT re-fires at every wrap through TOP (found on
-    // the bench: 24000, then every 65536 ticks -> 4 per 9.5 ms low).
+    // past TOP and CAPT re-fires at every wrap through TOP (measured:
+    // 24000, then every 65536 ticks -> 4 per 9.5 ms low).
     tcb1_hook = tcb1_timeout;
     Beat::pulse_us<0>(500);
     verdict("Timeout init (edge = true)", Timeout<T1>::init(clock, 1000, ChGen{}, true));
@@ -920,7 +920,7 @@ void td_pwm_centered() {
     const uint16_t e2 = measure_duration();
     print(serial, "  rising -> OVF: ", e1, " (CMP 3000), ", e2, " (CMP 6000)", crlf);
     // The centring proof is the SCALING: the distance grows by exactly
-    // delta-CMP; the constant skew is small and negative (bench: -3 -
+    // delta-CMP; the constant skew is small and negative (measured -3 -
     // the rising edge is stamped through the PIN's input synchronizer,
     // the OVF event is internal).
     verdict("OVF at the pulse centre (distance scales as CMP, small constant skew)",

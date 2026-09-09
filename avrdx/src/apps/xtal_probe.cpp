@@ -1,6 +1,6 @@
-// xtal_probe - the crystal diagnosis probe, the bench tool a board
-// whose 24 MHz crystal will not start gets flashed with (board B is
-// the first patient). The main clock stays on the internal OSCHF for
+// xtal_probe - the crystal diagnosis probe: the bench tool a board
+// whose 24 MHz crystal will not start gets flashed with. The main
+// clock stays on the internal OSCHF for
 // the whole run: the XOSCHF oscillator is only STARTED and OBSERVED
 // (MCLKSTATUS.EXTS), never switched to, so the console keeps running
 // whatever the crystal does.

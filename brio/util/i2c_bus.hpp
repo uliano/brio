@@ -7,11 +7,11 @@
  * address (nobody home: the probe result an address scanner reads), a
  * NACK on a data byte (device refused/finished early), arbitration
  * lost against another master, and a bus error (illegal START/STOP,
- * SDA stuck). The engine (avrdx/twi.hpp) reports them through
+ * SDA stuck). The engine (each target's I2cHost) reports them through
  * TransferDone{status}; the arbiter forwards them untouched.
  *
- * The I2C transaction shape lives in the engine's Request (see
- * avrdx/twi.hpp): {addr, tx span, rx span} in ONE bus tenure - write,
+ * The I2C transaction shape lives in the engine's Request (each
+ * target's I2cHost): {addr, tx span, rx span} in ONE bus tenure - write,
  * read, or write-then-read with a repeated START (the register-access
  * idiom), and the empty request as an address probe. Same rule as SPI:
  * the request is the complete script of one tenure, so nothing another
@@ -39,7 +39,8 @@ inline constexpr uint8_t i2c_bus_error = bus_engine_status + 3;  ///< protocol v
 /// engine was recover()ed, and the WIRE is now the application's to
 /// judge (unstick(), re-probe - the recovery ladder). Arbiter's code,
 /// not the engine's: see bus_master.hpp on why a client-wedged wire has
-/// no silicon timeout on any engine here (docs/samc21/i2c.md, measured).
+/// no silicon timeout on any engine here (measured; the reasoning is in
+/// docs/design/i2c-bus.md).
 inline constexpr uint8_t i2c_timeout = bus_timeout;
 
 /// `timeout_ticks` is PER BUS (one wedged client starves every other

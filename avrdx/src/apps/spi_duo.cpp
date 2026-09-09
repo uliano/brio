@@ -1,5 +1,5 @@
 // spi_duo - TWO devices, ONE SPI bus, arbitration by active objects:
-// the whole point of the SpiBus design, finally on real silicon.
+// the whole point of the SpiBus design, on real silicon.
 //
 //   Filler  - the ILI9481 display client: continuously repaints the
 //             320x480 panel (480 requests of 960 bytes per frame, at

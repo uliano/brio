@@ -4,8 +4,8 @@
  * The SAM C21's 10-bit digital-to-analog converter (DS60001479M ch. 41),
  * a whole small chapter in one monostate resource - `Dac`, not `Dac<n>`:
  * this family has exactly ONE instance on every variant, so an index
- * would be a parameter with a single legal value (the `Rtc` precedent in
- * this stratum, against `Adc<n>`'s two real instances).
+ * would be a parameter with a single legal value (the `Rtc` shape in this
+ * stratum, against `Adc<n>`'s two real instances).
  *
  *   brio::Dac::init(generator, brio::DacConfig{
  *       .reference = brio::DacRef::vddana,
@@ -74,8 +74,7 @@
  * family there is no shared reference block at all - the ADC's
  * multiplexer has six codes, this one has three, the SDADC's are
  * different again - so a single enum would be a type no register
- * accepts (the ADC campaign's judgment call 1, taken there and followed
- * here).
+ * accepts.
  *
  * ---------------------------------------------------------------------
  * WHERE THE DATA SITS IN THE REGISTER is decided by two bits together
@@ -97,8 +96,8 @@
  *
  * ---------------------------------------------------------------------
  * MILLIVOLTS. `set_mv()` is a thin wrapper over util/analog.hpp's
- * `dac_code(mv, steps, ref_mv)` with `steps` = 1024, exactly as
- * avrdx/dac.hpp does - the arithmetic is target-independent and stays
+ * `dac_code(mv, steps, ref_mv)` with `steps` = 1024: the arithmetic is
+ * target-independent and stays
  * there. NOTE the half-truth in that: 41.6.2.4's own formula divides by
  * 0x3FF (1023) and not by 1024, so the two conventions differ by
  * mv/ref of one LSB - nothing at the bottom of the range and one whole
@@ -130,17 +129,19 @@
  *    ignore and clear EMPTY after a standby wake - and `clear_flags()`
  *    is how; a driver cannot know that a wake happened.
  *  - 1.8.10 (the DAC as the SDADC's reference) is live on this row too,
- *    and INAPPLICABLE HERE BY ABSENCE: there is no SDADC driver in this
- *    stratum. Its workaround, if one is ever written, is
- *    REFCTRL.ONREFBUF = 1 on the SDADC's side.
+ *    and is answered from the OTHER side: its workaround is
+ *    REFCTRL.ONREFBUF = 1, which samc21/sdadc.hpp requires for both of
+ *    its internal references.
  *  - NOT this silicon: 1.9.1 (dithering with right-adjusted data giving
  *    16 LSB of INL) is REVISION B ONLY - the E/G/J row carries one X
  *    and it is under B - so `left_adjust` is not forced here, and the
  *    row is the trap the errata document sets over and over.
  *
  * ---------------------------------------------------------------------
- * NOT BUILT (docs/samc21/dac.md carries the list): the SDADC side of
- * everything, and the sleep behaviour beyond the one CTRLA bit.
+ * NOT BUILT (docs/samc21/dac.md carries the list): VREFA, which needs a
+ * wire this board has not got; the voltage pump, which this supply
+ * never switches on; and the DAC as a WAKE source - EMPTY and UNDERRUN
+ * have never driven the NVIC out of a sleep.
  */
 
 #pragma once

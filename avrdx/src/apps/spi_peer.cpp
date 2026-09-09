@@ -1,6 +1,6 @@
-// spi_peer - the INSTRUMENT half of the SPI campaign: board B, the
-// scriptable CLIENT that test_avr_spi (board A, the DUT and the bus
-// host) drives IN BAND over the very bus both are testing.
+// spi_peer - the INSTRUMENT half of a two-board SPI test: the
+// scriptable CLIENT that test_avr_spi (the DUT, and the bus host)
+// drives IN BAND over the very bus both are testing.
 //
 // It is deliberately not a kernel app: one blocking loop that shifts
 // whatever the host clocks, decodes a command frame
@@ -17,8 +17,9 @@
 // dark command-mode client BY ITSELF.
 //
 // THE DARK LISTENER - the one thing to understand before touching this
-// file. The four wires are PORTE straight through (A.PEn - B.PEn), and
-// they are also the pins the DUT's SINGLE-board half measures: that
+// file. The four wires are PORTE straight through to the DUT (each PEn
+// to the same PEn), and they are also the pins the DUT's SINGLE-board
+// half measures: that
 // half drives the select wire low and drives MISO from its own PORT.
 // So this peer's command-mode client runs with `drive_miso = false` and
 // only listens. MISO is driven for exactly one answer window, entered
@@ -26,8 +27,8 @@
 // two gates that keep the single-board half's traffic from ever waking
 // the answer line are in spi_link.hpp's header comment: an unknown op
 // is dropped in silence, and a bad checksum is nak'ed only while the
-// peer is ENGAGED. The proof is that `test_avr_spi z` still scores
-// 148/148 with this firmware attached and running.
+// peer is ENGAGED. Together they let the DUT run its whole
+// single-board half with this firmware attached and clocking.
 //
 // The select wire is held up by THIS board's pull-up at all times: the
 // DUT leaves its own end an input for the demotion test, and a floating
@@ -249,8 +250,8 @@ struct Streams {
 /// Spin until the host's clock leaves its idle level - that is, until
 /// the next transfer has really started. This is a PASSIVE read of a
 /// pin the other board drives and this one never does (SCK is an input
-/// on a client, and the campaign's rule against touching PE0/PE2 is
-/// about driving them), and it is the only way to write to DATA on a
+/// on a client, and this app's rule against touching PE0/PE2 is about
+/// driving them), and it is the only way to write to DATA on a
 /// chosen side of the inter-byte boundary rather than a random one. At
 /// CLK_PER/32 a byte lasts about 10.7 us and this loop samples every
 /// few cycles, so a write that follows a `true` lands early inside the
@@ -285,17 +286,17 @@ spilink::Report run_exchange(const spilink::Params& a) {
     if (bufwr) Raw::write(s.out.next());
     r.aux3 = Raw::flags();   // INTFLAGS right after the preloads
 
-    // NO WAIT-FOR-SELECT. This loop used to spin on Client::selected()
-    // before counting, and that wait is where a RARE WEDGE lived: a
-    // state (entered about once in five z-runs of the SAM campaign,
-    // persistent until this board resets) in which the select READ
+    // NO WAIT-FOR-SELECT. A spin on Client::selected() before counting
+    // is where a RARE WEDGE lives: a state (roughly one burst in five,
+    // and persistent until this board resets) in which the select READ
     // never fires while the SPI hardware demonstrably shifts - the host
-    // read the preloads above and then the echo, this loop read nothing
-    // and burned its whole window. The wait added nothing the poll
-    // cannot give: apply_cfg() just re-initialized the client, so the
-    // buffers hold no stale bytes, and a byte can only ARRIVE while the
-    // host holds the select low - polling RXC is therefore the same
-    // "wait for the burst" with one less mechanism in the loop.
+    // reads the preloads above and then the echo, this loop reads
+    // nothing and burns its whole window. That wait adds nothing the
+    // poll cannot give: apply_cfg() has just re-initialized the client,
+    // so the buffers hold no stale bytes, and a byte can only ARRIVE
+    // while the host holds the select low - polling RXC is therefore
+    // the same "wait for the burst" with one less mechanism in the
+    // loop.
     // selected() is still SAMPLED, as telemetry: aux1 carries the
     // milliseconds to the first received byte (255 = none came), aux2
     // bit0 whether the select read true at that byte, bit1 whether it

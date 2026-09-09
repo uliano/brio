@@ -17,9 +17,8 @@
 // EVIE set - so the ONLY thing that can move its bytes is an event
 // arriving through EVSYS. If the destination buffer changes, the event
 // was routed. That is a stronger statement than any status bit: it is
-// the fabric doing its job end to end, through a driver that knew
-// nothing about it (dmac.md's own gap list says every EVACT value but
-// `none` was untested silicon - this is where that stops being true).
+// the fabric doing its job end to end, and it is what exercises the
+// DMAC's EVACT paths on silicon.
 //
 // What is exercised, letter by letter:
 //   a  the fabric: the user multiplexer's off-by-one, the ordering rule,
@@ -84,10 +83,9 @@ constexpr uint8_t gen_slow = 5;      // a generator this suite builds for the cl
 using Copy = DmaChannel<dma_ch>;
 using GenSlow = Gclk<gen_slow>;
 
-// VOLATILE IN BOTH DIRECTIONS, the lesson the DMAC campaign paid for on
-// this same target: the compiler cannot see the controller's writes, and
-// it cannot see its reads either - it will happily sink the preparation
-// of a buffer past the thing that starts the transfer.
+// VOLATILE IN BOTH DIRECTIONS: the compiler cannot see the controller's
+// writes, and it cannot see its reads either - it will happily sink the
+// preparation of a buffer past the thing that starts the transfer.
 constexpr uint16_t payload = 16;
 volatile uint8_t src[payload];
 volatile uint8_t dst[payload];

@@ -21,8 +21,8 @@
  *   1. FREEZE FIRST. `capture()` stops the trace before it does anything
  *      else - before the validity test, before the copy. The MTB traces
  *      the processor reading it, so a handler that decides, tests and
- *      prints first reads back its own branches and nothing else. The
- *      bench letter that measures this is the reason the verb exists.
+ *      prints first reads back its own branches and nothing else
+ *      (measured).
  *   2. COPY, CHECKSUM, AND KEEP. The last `keep_packets` packets are
  *      copied out of the rolling buffer into a SEPARATE .noinit record
  *      with a magic word and a CRC-16 (util/crc.hpp) - so what survives
@@ -35,7 +35,7 @@
  *
  * IT IS A SIBLING OF THE PANIC RECORD, NOT AN EXTENSION OF IT. The
  * kernel's PanicRecord is the kernel's; a trace is silicon this stratum
- * happens to have and the STM32 target may answer differently or not at
+ * happens to have and another target may answer differently or not at
  * all. So the record lives here, in a samc21 type, and the two are read
  * side by side at boot.
  *

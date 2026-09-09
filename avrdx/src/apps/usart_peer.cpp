@@ -1,6 +1,6 @@
-// usart_peer - the INSTRUMENT half of the USART campaign: board B, the
-// scriptable peer that test_avr_serial (board A, the DUT) drives IN
-// BAND over the very link under test.
+// usart_peer - the INSTRUMENT half of a two-board USART test: the
+// scriptable peer that test_avr_serial (the DUT) drives IN BAND over
+// the very link under test.
 //
 // It is deliberately not a kernel app: one blocking loop that polls the
 // link, decodes a command frame (src/apps/usart_link.hpp), acknowledges
@@ -14,8 +14,9 @@
 //
 // Link: USART4 at its default position - TXD PE0, RXD PE1, XCK PE2. Two
 // wirings are supported and the peer FINDS OUT which one the desk has
-// (usart_link.hpp Topology): the crossed full-duplex pair (A.PE0-B.PE1,
-// A.PE1-B.PE0, A.PE2-B.PE2) or a single wire between the two TXD pads,
+// (usart_link.hpp Topology): the crossed full-duplex pair (each board's
+// PE0 to the other's PE1, PE1 to the other's PE0, PE2 to PE2) or a
+// single wire between the two TXD pads,
 // which is the one-wire bus of 27.3.3.2.6. Console command '2' is the
 // wiring probe that names every connection outright.
 //

@@ -1,11 +1,7 @@
 /*
  * ac.hpp
  *
- * The SAM C21 Analog Comparators (DS60001479M ch. 40) - the MINIMAL
- * resource surface, built to answer one bench question first (the
- * latency of the GCLK_AC-synchronized output path, which the chapter
- * never quantifies) and shaped so the full AC campaign can grow on it
- * rather than replace it:
+ * The SAM C21 Analog Comparators (DS60001479M ch. 40), in three faces:
  *
  *  Ac              the BLOCK: APB clock, the one GCLK channel
  *                  (GCLK_AC clocks ALL the digital - sampling, filter,
@@ -18,6 +14,10 @@
  *                  is enable-protected, 40.8.13), the per-comparator
  *                  VDD scaler, single-shot start, READY/STATE, flag
  *                  and arming verbs.
+ *
+ *  AcWindow<w>     the comparator PAIR as a window: WSTATE, the four
+ *                  WINTSEL conditions, and the two consistency rules
+ *                  the registers do not enforce (below).
  *
  * WHAT THE CHAPTER SAYS ABOUT TIME, collected here because the bench
  * question lives exactly in the gaps between these clauses:
@@ -45,8 +45,7 @@
  * (*J package only - and on the E and G packages COMP2/3 bond only
  * AIN[5:4], 40.1). Outputs CMP0 = PA12 or PA18, CMP1 = PA13 or PA19,
  * CMP2 = PA24 or PB30, CMP3 = PA25 or PB31 - on the bench board
- * PB30/PB31 are the console, one more reason this driver's first
- * user lives on COMP0.
+ * PB30/PB31 are the console.
  *
  * WINDOW MODE (40.6.4) is the second face of every comparator PAIR:
  * COMP0/COMP1 form window 0 and COMP2/COMP3 window 1. The pair shares
@@ -101,12 +100,11 @@
  *    AC must borrow GCLK_ADC1's channel - REVISION B ONLY, so `clock()`
  *    uses AC_GCLK_ID as the header declares.
  *
- * SLEEP IS MEASURED, not built here: the 40.6.14 sequences ran in the
- * transversal sleep pass (test_samc_sleepwalk letter h - a continuous
- * comparator with RUNSTDBY wakes the device on its own edge, and
- * COMPCTRL.RUNSTDBY gates the COMPARATOR, not merely its clock;
- * docs/samc21/ac.md carries the numbers). What remains not covered is in
- * ac.md's own list.
+ * SLEEP IS MEASURED, not built here: the 40.6.14 sequences both ran
+ * (measured - a continuous comparator with RUNSTDBY wakes the device on
+ * its own edge, and COMPCTRL.RUNSTDBY gates the COMPARATOR, not merely
+ * its clock; docs/samc21/ac.md carries the numbers). What remains not
+ * covered is in ac.md's own list.
  */
 
 #pragma once

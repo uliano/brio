@@ -299,8 +299,8 @@ void tb_runtime() {
 // division ever runs at wait time, and the per-rate Q4.12 factor makes
 // the microsecond arithmetic exact even at sub-MHz rates. The delay
 // must stay honest at each rate, the fixed cost must be small (the
-// ceiling verdict bars the old runtime division from coming back), and
-// at 1.5 MHz the old whole-cycles-per-us 4/3 overshoot must be GONE.
+// ceiling verdict is what bars a runtime division from creeping back
+// in), and at 1.5 MHz there must be no 4/3 overshoot.
 void tc_rebase() {
     print(serial, "c delay_us under DynamicClock: the index dispatch, 24 -> 12 -> 24 MHz and 1.5 MHz exact", crlf);
     quiesce();
@@ -374,11 +374,11 @@ void tc_rebase() {
             k1000 - 24000u < 100u);
 
     // The sub-MHz honesty. 1.5 MHz is 24 MHz / 16, a rate the prescaler
-    // really reaches. The old whole-cycles-per-us rounding (still what
-    // the stored-byte helper does: cycles_per_us(1.5 MHz) = 2) ran every
-    // delay at 4/3 of nominal; the dispatch's Q4.12 factor for this rate
-    // is exact (1536/4096 = 0.375 loops/us), so the slope must now be
-    // 1000 us, not 1333. The console cannot survive 1.5 MHz (BAUD would
+    // really reaches. Whole-cycles-per-us rounding - still what the
+    // stored-byte helper does: cycles_per_us(1.5 MHz) = 2 - would run
+    // every delay at 4/3 of nominal; the dispatch's Q4.12 factor for
+    // this rate is exact (1536/4096 = 0.375 loops/us), so the slope is
+    // 1000 us and not 1333. The console cannot survive 1.5 MHz (BAUD would
     // have to go below its floor of 64), so the leg is measured in
     // silence and printed after the climb back.
     verdict("the driver knows 460800 is unreachable at 1.5 MHz",

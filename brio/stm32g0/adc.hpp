@@ -6,8 +6,7 @@
  *
  *   Adc              the RESOURCE - one 12-bit SAR converter, and there
  *                    is exactly one on every part of the family, so it
- *                    is a MONOSTATE (the samc21 Dac/Sdadc/Tsens precedent)
- *                    and not an Adc<n>.
+ *                    is a MONOSTATE and not an Adc<n>.
  *   AnalogIn<Pin,ch> a pad handed to a channel. The channel NUMBER is
  *                    the datasheet's (DS13560 table 12's "additional
  *                    functions" column) and no device header of this
@@ -67,7 +66,7 @@
  * THE REFERENCE is stm32g0/vref.hpp's `Ref`, not this file's: on this
  * family VREF+ is one rail shared by the ADC, the DAC and the
  * comparators, so the enum lives with the rail (that file's header says
- * why, against the samc21's opposite ruling).
+ * why).
  *
  * ERRATA, ES0548 Rev 3 on the bench chip's revision Z column:
  *  - 2.6.1 OVR may stay low when an EOC clear coincides with a
@@ -360,7 +359,7 @@ constexpr AdcSampleTime adc_sample_time_of(const AdcConfig& c, uint8_t ch) {
 /// conversion, or to the first of a sequence, when the sampling time is
 /// 1.5 or 3.5 cycles - deliberately NOT folded in, because the chapter's
 /// number is what a caller is predicting against and the erratum is
-/// measured beside it (test_stm32_analog letter k).
+/// measured beside it.
 constexpr uint32_t adc_conversion_half_cycles(const AdcConfig& c, uint8_t ch) {
     return static_cast<uint32_t>(adc_sample_half_cycles(adc_sample_time_of(c, ch))) +
            adc_sar_half_cycles(c.resolution);
@@ -576,8 +575,7 @@ public:
      * checked, because 15.3.7 warns that a forbidden write leaves the
      * converter in an undefined state.
      *
-     * @return the calibration factor, or nothing if the preconditions
-     * were not met or ADCAL never cleared.
+     * False when the preconditions were not met or ADCAL never cleared.
      */
     static bool calibrate(uint32_t spins = 0x100000UL) {
         if (enabled() || (regs().CFGR1 & (ADC_CFGR1_AUTOFF | ADC_CFGR1_DMAEN)) != 0u ||
@@ -699,9 +697,9 @@ public:
      * calibration, configuration, enable.
      *
      * `async_hz` is the rate of the root ADCSEL selects and is the
-     * caller's to state - the same "a ratio meter cannot know what its
-     * own reference is worth" shape samc21/freqm.hpp and samc21/tsens.hpp
-     * use. It is only read when the config asks for the asynchronous
+     * caller's to state: a driver cannot know what a root it does not
+     * program is worth. It is only read when the config asks for the
+     * asynchronous
      * clock; with a PCLK mode the clock is the one `clock` names.
      *
      * REFUSES when the resulting fADC would exceed DS13560 table 62's
@@ -910,8 +908,8 @@ public:
      * util/analog_sampler.hpp labels a sample with.
      *
      * THE SILICON DOES NOT REPORT IT. There is no "current channel"
-     * register on this converter (unlike the SAM's INPUTCTRL readback):
-     * the sequencer walks a list the driver wrote, so the driver is what
+     * register on this converter: the sequencer walks a list the driver
+     * wrote, so the driver is what
      * knows where it is. With a single-channel selection - the sampler's
      * whole usage - that is exact; inside a multi-channel sequence it is
      * the sequence's FIRST channel, and a caller walking a sequence
@@ -1055,9 +1053,9 @@ public:
      *
      * A DISABLED-STATE VERB, and the bench is why. The channel selection
      * lives in CFGR1, which 15.3.7 makes writable only with ADEN clear;
-     * a forbidden write there DOES land on this silicon (the first
-     * version of test_stm32_analog letter h configured this watchdog
-     * with the converter running and it worked), but the SAME forbidden
+     * a forbidden write there DOES land on this silicon (measured: this
+     * watchdog configured with the converter running works), but the
+     * SAME forbidden
      * write is also what ES0548 2.6.2 turns into a silent reset of the
      * resolution - so the rule is kept and the verb refuses. Its two
      * siblings below refuse for a stronger reason still: their register
@@ -1108,8 +1106,8 @@ public:
      * 15.12.13's own note says "the software is allowed to write this bit
      * only when ADEN = 0", and MEASURED, a write with the converter
      * enabled takes no effect AT ALL - in silence, and unlike CFGR1's
-     * AWD1 bits, which land. Same sentence in the manual, two behaviours
-     * in the silicon (test_stm32_analog letter h stages both).
+     * AWD1 bits, which land. Same sentence in the manual, two
+     * behaviours in the silicon (both measured).
      */
     static bool watchdog2(uint32_t channel_mask, uint16_t low, uint16_t high) {
         return watchdog_23(true, channel_mask, low, high);

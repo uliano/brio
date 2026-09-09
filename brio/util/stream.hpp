@@ -1,8 +1,8 @@
 /*
  * stream.hpp
  *
- * Compile-time stream concepts - the zero-cost replacement for the old
- * ByteStream virtual interface.
+ * Compile-time stream concepts: a transport is a TYPE, not a virtual
+ * interface, and costs nothing to pass around.
  *
  * A transport does not inherit from anything: it just provides static
  * `write_byte` / `read_byte` with try semantics (return false when the

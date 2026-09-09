@@ -1,44 +1,44 @@
-// twi_peer - the INSTRUMENT half of the I2C campaign on the SAM C21:
-// the scriptable second chip on the bus that test_samc_i2c (the DUT)
-// drives IN BAND over the very bus both are testing.
+// twi_peer - a scriptable I2C CLIENT for the other end of a two-board
+// bus test: the far board is the bus controller and drives this one IN
+// BAND over the very wires under test, every command travelling as a
+// checksummed frame in the same traffic.
 //
-// A PORT OF avrdx/src/apps/twi_peer.cpp TO THE SECOND ARCHITECTURE,
-// over the SAME protocol header (twi_link.hpp, relative path - one
-// source of truth for the wire format). What changed is what the
-// silicon changed:
+// The wire format is twi_link.hpp, included by relative path: one file
+// is the single source of truth for every board that speaks it,
+// whatever its architecture. What this silicon makes of it:
 //
-//  - ONE SERCOM IS HOST *OR* CLIENT (CTRLA.MODE), never both: the
-//    AVR's COMBINED mode (host and client halves live at once) does
-//    not exist here, so the `arb` action SWITCHES the instance to host
-//    for its bounded moment and back - during a host action this
-//    board's client is simply absent, which the choreography already
-//    tolerates (the DUT waits out the action's deadline either way).
+//  - ONE SERCOM IS HOST *OR* CLIENT (CTRLA.MODE), never both. A
+//    combined instance with both halves alive at once does not exist
+//    here, so the `arb` action SWITCHES the instance to host for its
+//    bounded moment and back - during a host action this board's
+//    client is simply absent, which the choreography tolerates (the
+//    far end waits out the action's deadline either way).
 //  - THE CLIENT STRETCHES BY CONSTRUCTION: AMATCH and DRDY hold SCL
 //    until software answers (33.10.6), so the commanded per-byte hold
 //    is simply a wait spent BEFORE the answer - no register knob.
 //  - flag_stop_interrupt maps to nothing: PREC is a polled flag here
 //    and the Stop count is kept whenever the action loop sees it.
-//  - THE CORE RUNS AT 48 MHz (generator 0), AND THAT IS THE CLEAN
-//    WIRE'S BET: the filterless-I2C finding (samc21/i2c.md) was the
-//    seven-wire bundle's crosstalk, and this desk's I2C pair is short
-//    and separate. If this peer answers the command channel, the
-//    glitch wall is gone with the bundle; if it sits deaf, the ladder
-//    gets re-measured before anything else.
+//  - THE CORE RUNS AT 48 MHz (generator 0), AND THE WIRE HAS TO EARN
+//    IT: this silicon's I2C samples the bus on GCLK_CORE with no input
+//    filter, so per-edge crosstalk from a bundled cable reads as false
+//    Starts and Stops and a fast core goes deaf (samc21/i2c.md). The
+//    two bus lines want to be short, separate and pulled up.
 //
-// COEXISTENCE is the protocol header's own argument, unchanged: the
-// command channel is ONE exact client address (0x6B) - mask 0, no
-// general call - so nothing the DUT's wireless letters do can wake
-// this board.
+// COEXISTENCE is the protocol header's own argument: the command
+// channel is ONE exact client address (0x6B) - mask 0, no general
+// call - so nothing the far board's wireless tests do can wake this
+// one.
 //
 // Bus: SERCOM3 function C - SDA PA22 = PAD[0], SCL PA23 = PAD[1] - on
-// the two-wire node with external pull-ups and the dedicated GND.
+// a two-wire node with external pull-ups and a dedicated GND.
 //
 // Console: SERCOM5 PB30/PB31 at 115200, observability only.
 //   ? help | i status and counters | 0 back to command mode | 3 trace
 //
-// The ident label is the die serial's first word in hex (the spi_peer
-// precedent - this family's identity is factory-programmed); ident.xtal
-// reports whether the 24 MHz crystal started (probed once at boot).
+// The ident label is the die serial's first word in hex - this
+// family's identity is factory-programmed (no user-row label to
+// read); ident.xtal reports whether the board's 24 MHz crystal
+// started (probed once at boot).
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -55,9 +55,9 @@
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
 
-// THE PROTOCOL IS THE AVR CAMPAIGN'S, AND IT IS NOT COPIED (the
-// spi_link ruling: pure encoding, both architectures compile the same
-// file).
+// THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
+// register, and every architecture on this link compiles the same
+// file.
 #include "../../../avrdx/src/apps/twi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -82,7 +82,7 @@ constexpr I2cPads bus_pads{
     .scl_pin = {'A', 23, PinFunction::c},
 };
 
-/// The clean wire's bet - see the header comment.
+/// The core clock the client samples the wire on - see the header.
 constexpr uint8_t core_gen = 0;
 constexpr uint32_t bus_rise_ns = 300;
 
@@ -93,7 +93,9 @@ using Host = I2cHost<3, bus_pads, core_gen>;
 using Sda = Pin<'A', 22>;
 using Scl = Pin<'A', 23>;
 
-constexpr uint16_t firmware_version = 0x0200;   ///< 0x01xx = the AVR peer
+/// Reported in ident: the high byte names the peer implementation, so
+/// a controller can tell which end of the link it is talking to.
+constexpr uint16_t firmware_version = 0x0200;   ///< see twi_link.hpp's Ident
 
 bool crystal_ok = false;
 bool trace = false;
@@ -321,14 +323,14 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
 }
 
 /// The HOST action - and on this silicon it is a MODE SWITCH, not a
-/// second half (see the header). The shape serves both of the suite's
-/// needs with one code path: with a LEAD (aux16) it is letter h's
-/// foreign host (wait for the DUT's traffic to prove the rendezvous,
-/// give the DUT its window to become a client, then write the burst);
-/// with lead 0 the ADDR write lands while the bus is still BUSY and
-/// PARKS IN HARDWARE - the held START, which is the arbitration race's
-/// own arming (measured on this silicon by the campaign: a tenure into
-/// a busy bus parks, and ARBLOST is a status the engine reports).
+/// second half (see the header). One code path serves both of the far
+/// board's needs: with a LEAD (aux16) it is a foreign controller (wait
+/// for the far end's traffic to prove the rendezvous, give it its
+/// window to become a client, then write the burst); with lead 0 the
+/// ADDR write lands while the bus is still BUSY and PARKS IN HARDWARE
+/// - the held START, which is what arms an arbitration race (measured
+/// on this silicon: a tenure into a busy bus parks, and ARBLOST is a
+/// status the engine reports).
 twilink::Report run_arb(const twilink::Params& a) {
     twilink::Report r{};
     Client::release();

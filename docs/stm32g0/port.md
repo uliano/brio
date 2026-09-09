@@ -132,14 +132,13 @@ Sda::function(brio::PinFunction::af6, {.open_drain = true, .speed = brio::PinSpe
 
 ## Bench findings
 
-PA5 (LD4) driven high over SWD through IOPENR + MODER + BSRR before a
-line of firmware existed, read back on IDR; then toggled by the raw
-probe and by the kernel apps (sampled over SWD at 100 ms: the 500 and
-250 ms cadences). PA2/PA3 handed to USART2 at AF1 by `Pin::function`
-read back as MODER 10 / AFRL 0x1100 with PA3's pull-up in PUPDR, and
-the console answered through them (usart.md). Port A's reset values
-read as the chapter states them (MODER 0xEBFFFFFF, OSPEEDR
-0x0C000000, PUPDR 0x24000000).
+PA5 (LD4) driven high over SWD through IOPENR + MODER + BSRR and read
+back on IDR, and toggled from firmware at the 500 and 250 ms cadences
+(sampled over SWD at 100 ms). PA2/PA3 handed to USART2 at AF1 by
+`Pin::function` read back as MODER 10 / AFRL 0x1100 with PA3's pull-up
+in PUPDR, and the console answers through them (usart.md). Port A's
+reset values read as the chapter states them (MODER 0xEBFFFFFF,
+OSPEEDR 0x0C000000, PUPDR 0x24000000).
 
 An input pad with nothing attached FOLLOWS ITS OWN PULL, which is what
 makes a wireless bench possible on this board: PA0, PB0, PB3, PB7 and
@@ -157,18 +156,18 @@ and port F only on 0 and 1.
   measured in `test_stm32_rtc` letter `k`, where PB15 is also RTC_REFIN:
   the pad does NOT follow its own internal pull-up with the Rd
   connected, and does once `ucpd_dead_battery(1, false)` has released
-  it. A push-pull driver wins either way. **AND IT WAS THE MECHANISM
-  BEHIND THE INTERMITTENT PA8 PULL-UP FAILURE** the tim and exti suites
-  had been meeting about one run in three: both now spend the strobe
-  before the precondition - `test_stm32_tim`'s letter `a`,
-  `test_stm32_exti`'s letter `b` - and the verdict has passed five z
-  runs of each. It was never the desk. THE RELEASE SURVIVES A SYSTEM
-  RESET (measured over SWD: after a reset through the probe with no
-  strobe spent, PB15 and PA8 under their pull-ups read HIGH, and the
-  strobe changes nothing) - 7.3.16's "upon power on" is literal, and
-  only a power-on connects the Rd again; a program spends the strobe
-  once per power cycle, and a suite letter spends it anyway because it
-  cannot know which reset it is running after.
+  it. A push-pull driver wins either way. **SO A LETTER THAT NEEDS PA8
+  OR PB15 TO FOLLOW ITS OWN PULL SPENDS THE STROBE FIRST** -
+  `test_stm32_tim`'s letter `a` and `test_stm32_exti`'s letter `b` both
+  do, ahead of their precondition; without it the pull-up reads low
+  about one run in three, which looks like a bad connection and is not.
+  THE RELEASE SURVIVES A SYSTEM RESET (measured over SWD: after a reset
+  through the probe with no strobe spent, PB15 and PA8 under their
+  pull-ups read HIGH, and the strobe changes nothing) - 7.3.16's "upon
+  power on" is literal, and only a power-on connects the Rd again; a
+  program spends the strobe once per power cycle, and a suite letter
+  spends it anyway because it cannot know which reset it is running
+  after.
 
 **A PAD THAT IS NOT IN ALTERNATE-FUNCTION MODE READS LOW AT ITS
 PERIPHERAL'S INPUT, whatever the pad's own level is.** The GPIO input
@@ -193,14 +192,15 @@ IS MISSING: `gpio_port_present('E')` is false, which also takes PWR's
 PUCRE and PDCRE with it (see [pwr.md](pwr.md)); no suite of this stratum
 drives a port-E pad, the LQFP64 bonding none of them.
 
-**A PAD WITH AN EXTERNAL PULL-UP IS NOT A PAD A SUITE CAN PULL-WALK**, and
-this desk now has two suites that say so. `test_stm32_tim`'s letter `l`
-settled the rule for PB8 and PB9 - held up by the desk's 2.2 kOhm I2C
+**A PAD WITH AN EXTERNAL PULL-UP IS NOT A PAD A SUITE CAN PULL-WALK**,
+and two suites of this stratum rest on that. `test_stm32_tim`'s letter
+`l` states the rule for PB8 and PB9 - held up by the desk's 2.2 kOhm I2C
 pull-ups, sinking when a push-pull output drives them low - and
 `test_stm32_serial`'s letter `o`, whose IR_OUT pad is PB9 (PA13 being
-SWDIO, so there is no other), uses the same judgment: the precondition is
-DRIVABILITY and not the internal pull's authority, because drivability is
-the electrical question an alternate-function output actually asks.
+SWDIO, so there is no other), uses the same criterion: the precondition
+is DRIVABILITY and not the internal pull's authority, because
+drivability is the electrical question an alternate-function output
+actually asks.
 
 ## On the third silicon
 
@@ -213,7 +213,7 @@ pin at all, which is why the package question belongs to a suite and
 never to the reserve. The input path behaves as on the other two dies;
 there is no UCPD here, so PA8 and PB15 carry no dead-battery Rd and
 `ucpd_dead_battery()` REFUSES rather than writing a strobe bit that does
-not exist (`ucpd_present()`, new in the reserve, is what a suite asks
+not exist (`ucpd_present()` in the reserve is what a suite asks
 first).
 
 **A CONFIGURING VERB OPENS THE PORT'S CLOCK BEFORE ANY STORE IT MAKES,
@@ -221,12 +221,13 @@ THE LEVEL STORE INCLUDED.** A BSRR/BRR store into a port whose
 RCC_IOPENR bit is clear is dropped in silence (5.2.17), so
 `Pin::output(bool)` opens the clock, then writes the level, then hands
 the pad over - and a pad on a port nothing else has touched comes up
-driving the level asked for. This is the board that made the rule
-measurable: its user LED is on PORT C, which no console opens, so
+driving the level asked for. This board is where the rule is
+measurable: its user LED is on PORT C, which nothing else opens, so
 `output(true)` followed by `read()` on PC6 is a test the two Nucleo-64s
-(LED on port A, opened by the console before any letter runs) can never
-fail; it reads HIGH here, and low when driven low. `test_stm32_tim`'s
-letter `a` runs that check on whatever pad the board's LED is on.
+(LED on port A, whose clock the console opens before any letter runs)
+cannot fail; it reads HIGH here, and low when driven low.
+`test_stm32_tim`'s letter `a` runs that check on whatever pad the
+board's LED is on.
 
 **THE USER LED'S PAD IS A PAD LIKE ANY OTHER ONCE ITS PORT IS CLOCKED.**
 LD3 and its series resistor to ground load PC6, and the load is enough
@@ -253,7 +254,7 @@ once, `Pin::pull` on its own, port clocks other than A's, and
 `ucpd_dead_battery()` on UCPD2 - whose two pads are PD0 and PD2, which
 this package does not bond.
 
-**Open-drain outputs are measured now**, and by two users at once: an
+**Open-drain outputs are measured**, and by two users at once: an
 I2C bus IS an open-drain pair (both ends of `test_stm32_i2c`'s self-link
 run at AF6 with `open_drain`, carrying bytes at 100 k, 400 k and 1 M),
 and that suite's `unstick()` drives the same pads as open-drain GPIO -

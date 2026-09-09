@@ -8,14 +8,13 @@
  * THE CONTRACT IS ABOUT BLOCKS, NOT ABOUT DMA. What the concepts below
  * name is a shape: a source that fills one caller-owned buffer while the
  * caller drains another and accounts for what it could not keep, and a
- * player that feeds one caller-owned table to a peripheral for ever. On
- * the SAM C21 both are DMA engines (samc21/dmac.hpp's DmaPingPongEngine
- * and DmaLoopEngine); on a machine with no DMA the same concepts are
- * satisfiable by an interrupt handler filling the buffers - nothing here
- * asks HOW a block gets full. The concepts exist BEFORE their second
- * implementation on purpose: they are the fixed point against which the
- * next platform's stream machinery is measured, so that friction shows
- * up as "this concept does not fit" rather than as silent divergence.
+ * player that feeds one caller-owned table to a peripheral for ever.
+ * Where the silicon has DMA both are DMA engines; on a machine with no
+ * DMA the same concepts are satisfiable by an interrupt handler filling
+ * the buffers - nothing here asks HOW a block gets full. The concepts
+ * are the fixed point against which a platform's stream machinery is
+ * measured, so that friction shows up as "this concept does not fit"
+ * rather than as silent divergence.
  *
  * WHY AN AO AT ALL, AND WHY IT IS NOT A SAMPLER. MeterSampler exists to
  * DISCARD: a meter's latest value is the only one worth publishing, so
@@ -52,8 +51,7 @@
  * SOURCE's contract; whether the gap warrants an app-level response is
  * the subscriber's business, told by the overrun count it can read.
  *
- * Validated on: SAM C21 (the two DMA streaming engines) and the host
- * fake. (docs/design/block-stream.md.)
+ * (docs/design/block-stream.md.)
  */
 
 #pragma once
@@ -93,8 +91,8 @@ concept BlockSource = requires {
  * The playback half of the vocabulary: one caller-owned table fed to a
  * peripheral for ever. No AO consumes it - the readbacks are the
  * surface, and laps() moving is the one fact that says the stream is
- * alive. Named here so the NEXT platform's playback machinery has a
- * contract to meet, exactly as BlockSource does for capture.
+ * alive. Named here so a platform's playback machinery has a contract
+ * to meet, exactly as BlockSource does for capture.
  */
 template <typename Pl>
 concept BlockPlayer = requires {

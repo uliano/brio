@@ -22,11 +22,11 @@
  *    ENABLE). On silicon A4/A5 (2.4.1) reconfiguring ANY LUT wants the
  *    whole CCL disabled, which drops every other LUT meanwhile - so the
  *    protocol is: Ccl::disable(); Ccl::sequencer<pair>(...) (BEFORE the
- *    even LUT's init: SEQSEL is protected by that LUT's ENABLE - bench:
- *    written after, silently ignored); Lut<..>::init(...) for each;
- *    Ccl::enable(). A LUT reconfigured
- *    under a running block is a glitch on all of them, by design of
- *    the silicon, not of this driver;
+ *    even LUT's init: SEQSEL is protected by that LUT's ENABLE and a
+ *    write after it is silently ignored, measured); Lut<..>::init(...)
+ *    for each; Ccl::enable(). A LUT reconfigured under a running block
+ *    is a glitch on all of them, by design of the silicon, not of this
+ *    driver;
  *  - inputs: the same menu for the three inputs, but the peripheral
  *    entries select the INSTANCE by input index - input 0/1/2 of a LUT
  *    sees AC0/1/2, TCB0/1/2 WO, TCA WO0/1/2, USART0/1/2 TXD, ZCD0/1/2,
@@ -156,7 +156,7 @@ struct Ccl {
 
     /// The sequencer of pair p (LUT 2p / 2p+1). Enable-protected by the
     /// even LUT: written while LUT 2p is disabled, BEFORE its init()
-    /// (bench: written after, it is silently ignored). Disables the
+    /// (written after, it is silently ignored - measured). Disables the
     /// even LUT first, to be safe.
     template <uint8_t pair>
     static void sequencer(Sequencer s) {

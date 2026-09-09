@@ -34,10 +34,10 @@ ctest --preset host -R test_fsm     # one suite
 - Framework: [doctest](https://github.com/doctest/doctest) (vendored,
   `third_party/doctest/`), one `test/test_<subject>/main.cpp` per
   suite, each with `DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN`.
-- `test/CMakeLists.txt` is an entirely separate CMake project from the
-  repo root's AVR build (its own `CMakePresets.json`, host g++, no
-  cross toolchain - a CMake configure has exactly one compiler), so
-  there is no AVR build to accidentally touch a probe from in the
-  first place.
+- `test/CMakeLists.txt` is a CMake project of its own, a peer of the
+  cross-build projects rather than a part of them (its own
+  `CMakePresets.json`, host g++, no cross toolchain - a CMake
+  configure has exactly one compiler), so no cross build is in reach
+  of a probe here in the first place.
 - No hardware needed; the host compiler must speak gnu++23 (the same
-  standard as the target build - the code is identical).
+  standard as the cross builds - the code is identical).

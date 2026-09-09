@@ -36,7 +36,7 @@
 //   ?  this list
 // Every experiment prints what it did and what it saw.
 //
-// Bench log 2026-08-17 (analyzer on CS/SCK/SDO), what this part does:
+// Measured with an analyzer on CS/SCK/SDO, what this part does:
 //  - t_conv 81 ms with CS held low; RDY low then valid frame (a, h);
 //    a second read gives all ones (h) - single conversion mode.
 //  - CS raised DURING a conversion: it goes on and the result is HELD
@@ -50,11 +50,12 @@
 //    hardware engine clocking 1.5 us after CS lost the frame (0x7FFFFF)
 //    - hence Spi::Request::cs_setup_us.
 //  - the device latches its SPI mode from SCK at CS fall: the engine
-//    have SCK at CPOL before asserting CS (Spi::apply_mode changes the
-//    mode with the peripheral disabled), the AVR SPI does not move SCK
-//    on a CTRLB write while enabled.
-//  Earlier chaos (random t_conv, frames decaying to zero) was a PA5
-//  header pin that was not soldered.
+//    must have SCK at CPOL before asserting CS (Spi::apply_mode changes
+//    the mode with the peripheral disabled), and this SPI does not move
+//    SCK on a CTRLB write while enabled.
+//  A DRY JOINT LOOKS LIKE A PROTOCOL FAULT: an unsoldered PA5 header
+//  pin gives random t_conv and frames decaying to zero - check the
+//  wire before believing any of the above.
 // Against the datasheet (DS20001950F): 5.3 confirms "CS rise during
 // tCONV -> conversion completes, then Shutdown; the next CS fall does
 // not restart"; 5.3.1: in single conversion mode RDY is LATCHED at each

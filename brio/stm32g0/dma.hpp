@@ -31,23 +31,22 @@
  * numbers 77 request lines by peripheral, and no device header of this
  * pack declares one of those numbers (the DMAMUX_REQ_* spellings live in
  * ST's HAL/LL, which this project does not vendor). Reproducing the table
- * here would be a list somebody has to keep, so the samc21 EVSYS ruling
- * applies unchanged: a peripheral publishes ITS OWN request codes
+ * here would be a list somebody has to keep, so a peripheral publishes
+ * ITS OWN request codes
  * (Usart<n>::dma_rx_request(), Tim<n>::dma_update_request() and their
  * kin) and this file takes a plain `uint8_t` request id. `dma_request_none`
  * is the null the chapter gives DMAREQ_ID = 0.
  *
- * WHAT THIS CONTROLLER DOES THAT THE SAM C21'S DOES NOT, and both facts
- * change the engines above:
+ * TWO FACTS OF THIS CONTROLLER shape the engines above:
  *
  *  - A REQUEST IS A LEVEL SERVED ON ENABLE, NOT AN EDGE LATCHED ON THE
  *    RISE. 10.4.3 spells the handshake out: the peripheral drives its
  *    request, the controller acknowledges, the peripheral releases. A
  *    channel enabled while its peripheral's request is ALREADY standing
  *    therefore serves it at once - there is no software-trigger register
- *    on this controller because there is nothing for one to do. The SAM's
- *    kick() has no twin here, and its absence is measured, not assumed
- *    (docs/stm32g0/dma.md).
+ *    on this controller because there is nothing for one to do, and a
+ *    driver here needs no verb to kick a stalled first beat. Measured,
+ *    not assumed (docs/stm32g0/dma.md).
  *
  *  - THERE IS A HARDWARE CIRCULAR MODE (CCR.CIRC). At the end of a block
  *    CNDTR and both current address registers reload themselves and the
@@ -66,11 +65,10 @@
  * handed over is untorn. Under CIRC that decision can only be taken AFTER
  * the edge, in the handler, and by then the controller is already writing
  * the next half: the tear happens while the software is deciding not to
- * allow it. That race is measured in test_stm32_dma (letter g), and the
- * answer is the non-circular channel this engine uses - it stops itself at
- * the end of every block, exactly as the SAM's does, and the swap into the
- * other buffer happens in the handler with the channel idle. The concept
- * needed no change; the natural-looking implementation did.
+ * allow it. That race is measured (docs/stm32g0/dma.md), and the answer
+ * is the non-circular channel this engine uses: it stops itself at the
+ * end of every block, and the swap into the other buffer happens in the
+ * handler with the channel idle.
  *
  * ERRATA (ES0548 rev 3, silicon revision Z - all five DMA/DMAMUX items
  * apply to this part):
@@ -131,9 +129,8 @@ constexpr uint8_t dma_width_bytes(DmaWidth w) {
 }
 
 /**
- * THE ELEMENT TYPE IS THE ACCESS WIDTH. One `sizeof` decides PSIZE, MSIZE
- * and the address arithmetic together, so they cannot disagree - the SAM
- * campaign's dma_beat_of() rule, kept because it was right.
+ * THE ELEMENT TYPE IS THE ACCESS WIDTH. One `sizeof` decides PSIZE,
+ * MSIZE and the address arithmetic together, so they cannot disagree.
  *
  * Only the three widths the silicon has are element types: anything else
  * is a compile error at the engine that named it, which is where a
@@ -226,11 +223,10 @@ constexpr bool dma_transfer_valid(const DmaTransfer& t) {
            dma_channel_config_valid(t.config);
 }
 
-/// How far a running channel has got - and unlike the SAM's, this
-/// reading costs nothing and is never refused: CNDTR is a live register
-/// the controller decrements, readable at any time (10.6.4), where the
-/// SAM had to SUSPEND a channel and validate a write-back against an
-/// erratum. There is no harvest ceremony on this silicon.
+/// How far a running channel has got. The reading costs nothing and is
+/// never refused: CNDTR is a live register the controller decrements,
+/// readable at any time (10.6.4), so nothing has to be suspended and no
+/// write-back has to be judged.
 struct DmaProgress {
     uint16_t remaining = 0;   ///< data items still to move
     uint16_t done = 0;        ///< data items moved in the current block
@@ -296,7 +292,7 @@ struct Dma {
  * DmaChannel<n, ch>: one channel of controller n, numbered as the
  * silicon numbers it (1-based; there is no channel 0).
  *
- * THE ENABLE DISCIPLINE IS THE CHAPTER'S, and it is not the SAM's.
+ * THE ENABLE DISCIPLINE IS THE CHAPTER'S.
  * 10.4.5's "channel state and disabling a channel" says plainly that
  * suspend-and-resume is NOT SUPPORTED: a channel disabled mid-block and
  * re-enabled without reprogramming is not guaranteed to finish correctly.
@@ -341,10 +337,10 @@ public:
      * Set or clear CCR.EN in a write of its own (10.4.5: the disable and
      * the reconfiguration must be separate accesses).
      *
-     * @return for `true`, whether the channel really came up: the silicon
-     * refuses the bit while TEIFx stands (10.4.7). For `false`, always
-     * true - a disable cannot fail, though what a mid-block one leaves in
-     * CNDTR is not to be trusted.
+     * For `true`, returns whether the channel really came up: the
+     * silicon refuses the bit while TEIFx stands (10.4.7). For `false`,
+     * always true - a disable cannot fail, though what a mid-block one
+     * leaves in CNDTR is not to be trusted.
      */
     static bool enable(bool on) {
         if (!on) {
@@ -517,8 +513,7 @@ public:
      * those, hand them back. The app's handler for a shared vector calls
      * one of these per channel it owns - there is no "which channel
      * interrupted" register on this controller, only the flag word, so
-     * asking each owner IS the dispatch (the samc21's take_pending() has no
-     * twin here).
+     * asking each owner IS the dispatch.
      *
      * Only ARMED flags are reported and cleared: HT is set by hardware
      * whether or not HTIE is on, and a body that swallowed it would
@@ -786,8 +781,7 @@ struct DmaMuxGenerator {
 /// one for one. Spelled as a verb rather than left to arithmetic because
 /// the identity is a table's and not a law's - and because the EXTI's own
 /// SWIER makes trigger input `line` reachable from software, which is what
-/// lets a request generator be exercised with no wire (test_stm32_dma
-/// letter f).
+/// lets a request generator be exercised with no wire.
 constexpr uint8_t dmamux_trigger_exti(uint8_t line) { return line; }
 
 /// Table 56 again: trigger inputs 16..19 are the four multiplexer channel
@@ -811,15 +805,15 @@ constexpr uint8_t dmamux_trigger_event(uint8_t event) {
  * what a USART wants; a converter's data register wants uint16_t and
  * nothing else in the engine changes.
  *
- * THERE IS NO KICK ON THIS CONTROLLER and the absence is a fact, not an
- * omission. The SAM's DMAC latches a trigger on the RISE of a request
- * level, so a channel armed while the peripheral's request was ALREADY
- * standing waited for an edge that had been and gone - hence kick(). Here
- * 10.4.3's handshake is level-driven: the controller looks at the request
- * line, not at its edge, so enabling the channel with TXE already set
- * moves the first byte immediately. Measured (test_stm32_dma letter h),
- * because it is exactly the kind of claim that costs a dead transmitter
- * when it is wrong.
+ * THERE IS NO VERB TO KICK A STALLED FIRST BEAT, and the absence is a
+ * fact, not an omission. A controller that latched a trigger on the
+ * RISE of a request level would leave a channel armed behind an ALREADY
+ * STANDING request waiting for an edge that had been and gone. Here
+ * 10.4.3's handshake is level-driven: the controller looks at the
+ * request line, not at its edge, so enabling the channel with TXE
+ * already set moves the first byte immediately. Measured, because it is
+ * exactly the kind of claim that costs a dead transmitter when it is
+ * wrong.
  */
 template <uint8_t n, uint8_t ch, typename Elem = uint8_t>
 class DmaTxEngine {
@@ -904,10 +898,9 @@ public:
      * stays put for the whole block.
      *
      * A SIBLING VERB and not a defaulted argument to start(), and the
-     * reason is measured: the samc21 campaign tried the defaulted
-     * argument first and it MOVED three pre-existing images, where the
-     * sibling restored byte-identity. Byte-identity outranks API
-     * economy (ruling 2026-09-02).
+     * reason is measured: a defaulted argument MOVES the images of every
+     * caller that does not pass it, where a sibling leaves them
+     * byte-identical. Byte-identity outranks API economy.
      */
     static bool start_fixed(const Elem* cell, uint16_t length) {
         if (busy_ || cell == nullptr || length == 0u) {
@@ -936,9 +929,8 @@ public:
     }
 
     /// The block ended - called from the channel's handler when its
-    /// completion flag is up.
-    /// @return the elements the block carried, so the owner can release
-    /// exactly that much of its ring.
+    /// completion flag is up. Returns the elements the block carried,
+    /// so the owner can release exactly that much of its ring.
     static uint16_t complete() {
         if (!busy_) {
             return 0;
@@ -955,10 +947,10 @@ public:
 
     /**
      * Throw away a block the silicon has stopped running and free the
-     * channel - the SAM's caller-decides doctrine, kept for the same
-     * reason: only the peripheral's owner can read the flags that make
-     * "dead" a fact rather than a timeout. What is lost is the untransmitted
-     * tail, and it is counted rather than papered over.
+     * channel. THE CALLER DECIDES, because only the peripheral's owner
+     * can read the flags that make "dead" a fact rather than a timeout.
+     * What is lost is the untransmitted tail, and it is counted rather
+     * than papered over.
      */
     static bool abandon() {
         if (!busy_) {
@@ -1009,10 +1001,9 @@ private:
  *
  * AND ON THIS SILICON ASKING IS FREE. CNDTR is a live counter the
  * controller decrements and software may read at any time (10.6.4), so
- * take() is one register read and a subtraction. The SAM had to SUSPEND
- * the channel, read a write-back, and validate it against an erratum that
- * could corrupt it - a whole ceremony this controller simply does not
- * need. The PACING is still the owner's (a kernel TimeEvent every few
+ * take() is one register read and a subtraction: nothing is suspended,
+ * no write-back has to be read and judged. The PACING is still the
+ * owner's (a kernel TimeEvent every few
  * ticks), because the latency of asking late is the owner's to choose;
  * what is gone is the cost of asking.
  */
@@ -1120,7 +1111,7 @@ public:
     /**
      * How many elements have arrived since the last take(). One CNDTR
      * read; nothing is suspended and nothing can be refused, so the
-     * return is a plain number and not the SAM's optional.
+     * return is a plain number and not an optional.
      */
     static uint16_t take() {
         if (capacity_ == 0u) {
@@ -1185,11 +1176,10 @@ private:
  * THIS IS WHERE THE HARDWARE CIRCULAR MODE BELONGS. CCR.CIRC makes the
  * controller reload CNDTR and both current address registers at the end of
  * every block (10.4.5), so the table repeats with NO CPU in the path at
- * all. The SAM's engine had to re-arm from the completion interrupt - one
- * interrupt per lap, and a window at every lap boundary in which the
- * peripheral was unserved. Neither exists here: the interrupt at the wrap
- * only COUNTS the lap, and a program that never enables it still plays the
- * table for ever.
+ * all - no re-arm from a completion interrupt, and no window at a lap
+ * boundary in which the peripheral goes unserved. The interrupt at the
+ * wrap only COUNTS the lap, and a program that never enables it still
+ * plays the table for ever.
  *
  * Which is also why nothing about a lap can be lost: laps() is a count
  * kept by software and an interrupt that is late (or masked) delays the
@@ -1254,8 +1244,8 @@ public:
      * copied. THE POINTER IS `const volatile` ON PURPOSE - the controller
      * reads this memory and the compiler cannot see it happen, so a table
      * the program fills and then hands over is exactly the shape gcc has
-     * been caught optimizing (a zeroing store sunk past a transfer, the
-     * SAM campaign's own lesson). A plain array converts for free.
+     * been caught optimizing (a zeroing store sunk past a transfer).
+     * A plain array converts for free.
      */
     static bool start(const volatile Elem* table, uint16_t length) {
         if (table == nullptr || length == 0u) {
@@ -1273,7 +1263,7 @@ public:
      * controller already reloaded itself, and that is the whole point of
      * this engine.
      *
-     * @return the elements the finished lap carried, so an owner that
+     * Returns the elements the finished lap carried, so an owner that
      * wants to know the stream is alive has a number rather than a
      * promise.
      */
@@ -1384,8 +1374,8 @@ private:
  * arrivals that went unserved are the PERIPHERAL's to report (a USART's
  * ORE, a converter's overrun), never this engine's to invent.
  *
- * WHY THIS ENGINE IS NOT CIRCULAR, which is the campaign's one real
- * finding about the contract. Circular mode with the half-transfer flag
+ * WHY THIS ENGINE IS NOT CIRCULAR, which is this file's one real
+ * position about the contract. Circular mode with the half-transfer flag
  * looks like a free ping-pong: one buffer, two halves, HT and TC as the
  * two edges, no re-arm at all. It cannot honour the paragraph above. A
  * circular channel never stops, so when the caller still holds the half
@@ -1394,9 +1384,9 @@ private:
  * has already begun writing that half. The tear happens while the
  * software is deciding not to allow it, and it is invisible: nothing in
  * the block says which of its elements are this lap's and which are the
- * next one's. test_stm32_dma letter g measures exactly that race (how many
- * elements land in the held half before a handler can disable the
- * channel), which is the evidence behind this class using a NON-circular
+ * next one's. That race is measured (how many elements land in the held
+ * half before a handler can disable the channel), and it is the
+ * evidence behind this class using a NON-circular
  * channel: it stops itself at the end of every block, so the swap into the
  * other buffer happens with the channel idle and the guarantee is
  * structural rather than a hope about interrupt latency.
@@ -1492,7 +1482,7 @@ public:
      * completion flag. Hands the buffer to the caller and starts the next
      * block in the other one, or counts an overrun and stalls.
      *
-     * @return the elements the finished block carried, or zero when
+     * Returns the elements the finished block carried, or zero when
      * nothing was running.
      */
     static uint16_t complete() {

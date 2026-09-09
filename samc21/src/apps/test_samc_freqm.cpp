@@ -20,12 +20,11 @@
 //   - The RATIO of two measurements needs no reference accuracy at all.
 //     Halving REFNUM must halve VALUE exactly; that is arithmetic, and
 //     it holds whatever the oscillators are really doing.
-//   - OSCULP32K was measured INDEPENDENTLY, by software, in
-//     test_samc_platform letter c (1030.4 Hz by the watchdog's early
-//     warning against SysTick). Letter d here measures the same
-//     oscillator by a different mechanism entirely, and the two must
-//     agree. Neither is a calibration of the other - they are two
-//     witnesses.
+//   - OSCULP32K can be measured INDEPENDENTLY, by software: 1030.4 Hz
+//     by the watchdog's early warning against SysTick. Letter d here
+//     measures the same oscillator by a different mechanism entirely,
+//     and the two must agree. Neither is a calibration of the other -
+//     they are two witnesses.
 //
 // What is exercised, letter by letter:
 //   a  the block: claim, geometry, the enable-protection order, and the
@@ -36,8 +35,8 @@
 //      arriving where the budget says it will, and CFGA.DIVREF - which
 //      the chapter draws and this silicon does not have, shown twice
 //      over (the bit does not stay written, and it changes nothing)
-//   d  the cross-check: OSCULP32K measured here against the software
-//      measurement of it in test_samc_platform
+//   d  the cross-check: OSCULP32K measured here against a software
+//      measurement of the same oscillator by another mechanism
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -385,11 +384,10 @@ void td_cross_check() {
     print(serial, "  OSCULP32K measures ", osculp_hz, " Hz against OSC48M",
           " (nominal ", osculp_nominal_hz, ")", crlf);
 
-    // The watchdog runs on OSCULP32K divided by 32, and test_samc_platform
-    // letter c measured THAT at 1030.4 Hz by an entirely different
-    // route: the early-warning interrupt timed against SysTick. Scaled
-    // up, that says OSCULP32K itself is near 32973 Hz. Two witnesses,
-    // no shared mechanism.
+    // The watchdog runs on OSCULP32K divided by 32, and THAT measures
+    // 1030.4 Hz by an entirely different route: the early-warning
+    // interrupt timed against SysTick. Scaled up, that says OSCULP32K
+    // itself is near 32973 Hz. Two witnesses, no shared mechanism.
     constexpr uint32_t software_witness_hz = 1030 * 32;
     const uint32_t diff = osculp_hz > software_witness_hz
                               ? osculp_hz - software_witness_hz

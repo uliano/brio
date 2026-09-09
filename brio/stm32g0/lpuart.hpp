@@ -110,8 +110,8 @@ constexpr uint32_t lpuart_max_hz(uint32_t baud) { return baud * 4096u; }
 
 // ---- the resource -------------------------------------------------------------
 //
-// Compiled only where the device header declares a first instance (the
-// fdcan.hpp precedent): the x0 value line has no LPUART at all and no
+// Compiled only where the device header declares a first instance: the
+// x0 value line has no LPUART at all and no
 // USART_BRR_LPUART - the twenty-bit mask is the header's way of saying
 // there is a peripheral with a twenty-bit divisor - and a template body
 // may not name a macro that does not exist even uninstantiated. The
@@ -154,8 +154,7 @@ struct Lpuart {
     static constexpr IRQn_Type irq() { return lpuart_irq(n); }
 
     /// The header's own answers, at run time - the second opinion the
-    /// bench compares the table above against (test_stm32_serial's
-    /// letter a asks both, and the silicon third).
+    /// bench compares the table above against.
     static bool has_fifo() { return IS_UART_FIFO_INSTANCE(&regs()) != 0; }
     static bool has_half_duplex() { return IS_UART_HALFDUPLEX_INSTANCE(&regs()) != 0; }
     static bool has_flow_control() { return IS_UART_HWFLOW_INSTANCE(&regs()) != 0; }
@@ -464,14 +463,13 @@ struct Lpuart {
     }
 
     /// The DMAMUX rows of table 55, published by the peripheral that
-    /// owns them (the standing ruling; no header of this pack spells
-    /// them). LPUART1's rows are the ones the TABLE CALLS `LPUART_RX`
+    /// owns them (no header of this pack spells them).
+    /// LPUART1's rows are the ones the TABLE CALLS `LPUART_RX`
     /// and `LPUART_TX` WITHOUT AN INDEX - 14 and 15, low down among the
     /// I2Cs and the SPIs and nowhere near the USARTs' block - while
     /// LPUART2 sits at 64 and 65 with the rest of the G0B1 class's
-    /// additions. Reading the table by shape rather than by name is how
-    /// this pair first came out as 22 and 23, which are TIM1_CH3 and
-    /// TIM1_CH4.
+    /// additions. Reading the table by shape rather than by name puts
+    /// this pair at 22 and 23, which are TIM1_CH3 and TIM1_CH4.
     static constexpr uint8_t dma_rx_request() { return n == 1 ? 14 : 64; }
     static constexpr uint8_t dma_tx_request() { return n == 1 ? 15 : 65; }
 

@@ -6,7 +6,7 @@
 // What it proves. The register surface and its two enforced rules (the
 // erratum 2.2.4 NOP before every CTRLA store, and HTLLEN refused while
 // a TWI client or the CCL could still try to wake the device). That
-// IDLE through the new verb behaves like the platform's own idle().
+// IDLE through Sleep::enter() behaves like the platform's own idle().
 // That STANDBY really stops CLK_PER and that the PIT still wakes from
 // it. WHICH RUNSTDBY DECIDES: two different bits carry that name, a
 // peripheral's and each oscillator's, and the matrix of test d sweeps
@@ -24,8 +24,8 @@
 // wake-up takes. A sleeping chip cannot time its own return - the only
 // clock power-down leaves running is the PIT's, and the counter that
 // would measure the restart is exactly the one the mode stops (test f).
-// So the ruler moves off-chip: board B (src/apps/sleep_peer.cpp) drives
-// a stimulus edge, starts a 32-bit CLK_PER stopwatch on the same
+// So the ruler moves off-chip: a second board (src/apps/sleep_peer.cpp)
+// drives a stimulus edge, starts a 32-bit CLK_PER stopwatch on the same
 // instruction, and CAPTURES it in hardware when this board's wake-up
 // ISR answers with an edge of its own. Tests h..m then time idle,
 // standby and power-down against every clock configuration that
@@ -45,11 +45,11 @@
 // WIRING. The single-board half (z) needs NOTHING beyond the desk's
 // standing state - but PD1/PD2 MUST BE FREE of the bus jumpers, because
 // test e drives PD2 from the event system and senses its own edge on
-// the pad. The two-board half (y) needs board B running sleep_peer and
-// the standing desk wiring: PE0 the shared one-wire command channel
-// (both USART4 TXD pads, LBME), PE2 B's stimulus into this board, PE3
-// this board's echo into B's capture, and the office I2C bus on
-// PA2/PA3 for test m. PE1 is spare. Event channels 0 (the PIT divider
+// the pad. The two-board half (y) needs a second board running
+// sleep_peer and this wiring: PE0 the shared one-wire command channel
+// (both USART4 TXD pads, LBME), PE2 the peer's stimulus into this
+// board, PE3 this board's echo into the peer's capture, and an I2C bus
+// on PA2/PA3 for test m. PE1 is spare. Event channels 0 (the PIT divider
 // to the pad), 1 (the PIT divider into the CCL, test n), 4 and 5 (the
 // 32-bit stopwatch's carry and snapshot).
 //
@@ -61,7 +61,7 @@
 // c standby is real | d the RUNSTDBY chain | e a pin wakes from the
 // deep modes | f power-down stops the rest | g the voltage regulator |
 // n the CCL as a wake-up source | z = all of those
-//   two-board (board B = sleep_peer): h the link and the two wires |
+//   two-board (the peer runs sleep_peer): h the link and the two wires |
 //   i the awake baseline and idle | j standby, timed from outside |
 //   k power-down, timed from outside | l start-of-frame | m a TWI
 //   address match | y = all of h..m
@@ -133,15 +133,15 @@ using PadPin = Pin<'D', 2>;          ///< EVOUTD, and a fully asynchronous sense
 
 // ---- the two-board half's wires and peripherals -----------------------------------
 // PE0 is the shared command wire (both boards' USART4 TXD pads, LBME);
-// PE2 is board B's stimulus into this chip - and it is a Px2 pin, one of
-// the two FULLY ASYNCHRONOUS positions of every port (port.md), which is
-// what lets an edge on it wake this device from power-down at all; PE3 is
-// this chip's echo back into B's hardware capture.
+// PE2 is the peer's stimulus into this chip - and it is a Px2 pin, one
+// of the two FULLY ASYNCHRONOUS positions of every port (port.md),
+// which is what lets an edge on it wake this device from power-down at
+// all; PE3 is this chip's echo back into the peer's hardware capture.
 using U4 = Usart<4>;
 using LinePin = Pin<'E', 0>;
 using WakePin = Pin<'E', 2>;
 using EchoPin = Pin<'E', 3>;
-using Client = TwiClient<0, TwiRoute::def>;
+using Client = I2cClient<0, TwiRoute::def>;
 using WakeLut = Lut<0>;
 constexpr uint8_t client_addr = 0x42;
 
@@ -217,8 +217,8 @@ bool use_oschf(bool osc_standby) {
 /// enabled, so the crystal is reconfigured from OSCHF and only then
 /// selected back.
 ///
-/// BENCH FACT (found here): an oscillator whose RUNSTDBY is CLEAR does
-/// not run merely because it is enabled - it runs when something
+/// MEASURED: an oscillator whose RUNSTDBY is CLEAR does not run merely
+/// because it is enabled - it runs when something
 /// REQUESTS it. Enabling the crystal with RUNSTDBY = 0 while CLK_PER
 /// comes from OSCHF therefore leaves MCLKSTATUS.EXTS clear forever, and
 /// waiting for it is a dead end. Selecting the crystal IS the request:
@@ -435,9 +435,9 @@ void ta_surface() {
     quiesce();
 }
 
-// ---- b IDLE through the new verb ------------------------------------------------------
-// The platform's idle() is the kernel's hook and owns the six-cycle
-// measurement (test_avr_platform f). What is proven here is that
+// ---- b IDLE through Sleep::enter() ----------------------------------------------------
+// The platform's idle() is the kernel's hook, and the six-cycle cost of
+// its wake is test_avr_platform's measurement. What is proven here is that
 // Sleep::enter(idle) is the same thing under an application's control:
 // it stops the CPU, comes back on an interrupt, and disarms itself.
 void tb_idle() {
@@ -681,7 +681,7 @@ void te_pin_wake() {
 // both count; in power-down neither the counter nor CLK_PER does, and
 // the PIT alone comes back.
 //
-// One bench fact shapes the measurement: RTC.CNT read IMMEDIATELY after
+// One measured fact shapes the measurement: RTC.CNT read IMMEDIATELY after
 // a wake still carries the value it had when the CPU went to sleep. The
 // read is synchronized into CLK_PER (26.10) and that path needs the
 // clock back plus a CLK_RTC edge, so the counter is read here after a
@@ -751,7 +751,7 @@ void tf_power_down() {
 // of the wake), and the same sequence measured AWAKE is the baseline
 // that removes the settle and the cost of zeroing CNT. What the
 // difference then shows is what the sleep itself cost - which is where
-// an oscillator's own RUNSTDBY finally earns its keep: it is not what
+// an oscillator's own RUNSTDBY earns its keep: it is not what
 // keeps a peripheral counting (test d), it is what saves the restart.
 void tg_vreg() {
     print(serial, "g VREGCTRL: the profile across a sleep, HTLLEN with the PIT, and the "
@@ -857,7 +857,7 @@ void tg_vreg() {
 // ==============================================================================
 //  THE TWO-BOARD HALF (h..m, set y)
 //
-//  Board B runs sleep_peer and is driven IN BAND over the shared PE0
+//  The far board runs sleep_peer and is driven IN BAND over the shared PE0
 //  wire (src/apps/sleep_link.hpp: magic, opcode, checksum, ack before
 //  act, every action bounded and self-restoring). The command channel is
 //  8N1 at slink::command_baud with LBME at both ends: this board takes
@@ -1362,7 +1362,7 @@ void ti_idle_latency() {
 
 // ---- j STANDBY, timed from outside ----------------------------------------------
 // Phase one proved WHICH RUNSTDBY keeps a peripheral counting and got at
-// the wake-up cost only through the 30.5 us RTC ruler. Here board B
+// the wake-up cost only through the 30.5 us RTC ruler. Here the peer
 // measures six configurations in 41.7 ns ticks, and the sixth one is the
 // finding: the regulator costs nothing until the device is allowed to
 // let go of every oscillator. Nothing is printed while the main clock is
@@ -1664,10 +1664,11 @@ void tl_sfd() {
 }
 
 // ---- m a TWI address match wakes the device --------------------------------------
-// This board becomes a client at 0x42 on the office bus (TWI0 default,
-// PA2/PA3) and sleeps with it enabled; board B addresses it. The
-// SCL stretch from the match to the first serviced byte IS the wake-up
-// latency, and it is visible in the tenure's wall time, which B measures.
+// This board becomes a client at 0x42 on the shared I2C bus (TWI0
+// default, PA2/PA3) and sleeps with it enabled; the peer addresses it.
+// The SCL stretch from the match to the first serviced byte IS the
+// wake-up latency, and it is visible in the tenure's wall time, which
+// the peer measures.
 //
 // The HTLLEN half of chapter 13's warning is asserted in situ here: with
 // a client enabled the driver REFUSES to arm high-temperature low
@@ -1958,7 +1959,7 @@ ISR(PORTD_PORT_vect) {
 /// THE WAKE-UP ISR OF THE TWO-BOARD HALF, and the one place in this
 /// suite where the ORDER of two statements is a measurement. The echo
 /// goes up FIRST - a single-cycle SBI on a low-I/O VPORT register - so
-/// everything board B reports is the silicon's wake-up plus this
+/// everything the peer reports is the silicon's wake-up plus this
 /// vector's own latency and prologue, and nothing else. The flag clear
 /// and the counter follow.
 ISR(PORTE_PORT_vect) {
@@ -1980,8 +1981,8 @@ ISR(USART4_RXC_vect) {
 
 /// The TWI client of test m, serviced entirely from its vector: the
 /// address match that wakes the device and every byte of the frame are
-/// one uninterrupted piece of work, so the stretch board B measures is
-/// the wake-up and nothing else.
+/// one uninterrupted piece of work, so the stretch the peer measures
+/// is the wake-up and nothing else.
 ISR(TWI0_TWIS_vect) {
     const auto s = Client::isr();
     if (s.address_or_stop()) {

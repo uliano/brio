@@ -25,8 +25,8 @@
 // hardware pace, attribution by the reported input code, publish to
 // two subscribers by value, the queue as the ammortizer (STAT), the
 // same millivolts test_avr_analog measures, the pace source being the
-// app's choice (PIT here, any generator tomorrow), and a clock change
-// under sampling.
+// app's choice (a PIT divider here, any other generator by editing
+// this file alone), and a clock change under sampling.
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -87,10 +87,10 @@ using Sampler = brio::AnalogSampler<Adc, P, brio::Subscribers<Monitor, Alarm>,
                                     Loop{}, brio::AdcInput::temp, brio::AdcInput::vdd_div10>;
 
 // ---- the hardware pace: PIT divider -> channel 1 -> ADC start ---------------
-// TARGET GLUE, like the ISR vector bindings below: which generator, which
-// channel, which start input are this silicon's (an EVSYS route here; a
-// TC overflow on ATSAM; one of a short list of timer TRGO triggers on
-// STM32). The sampler never sees any of it.
+// TARGET GLUE, like the ISR vector bindings below: which generator,
+// which channel and which start input exist at all is this silicon's
+// business (an EVSYS route here; elsewhere a timer overflow or a
+// trigger multiplexer). The sampler never sees any of it.
 using PaceChannel = brio::EventChannel<1>;
 
 struct Pace {

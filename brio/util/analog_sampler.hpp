@@ -8,9 +8,8 @@
  * what the samples mean (the subscribers convert with util/analog.hpp),
  * where the pace comes from, or which silicon converts.
  *
- * The converter is a type satisfying AnalogConverter (avrdx/adc.hpp's
- * Adc<0> on AVR DA/DB; a fake in host tests): it can start one
- * conversion, say which input is selected, and select each input of
+ * The converter is a type satisfying AnalogConverter (a target's own
+ * ADC; a fake in host tests): it can start one conversion, say which input is selected, and select each input of
  * the list (the inputs are values of the converter's own input
  * vocabulary - pin tags, internal sources - given as template
  * arguments, so selection is an overload resolved at compile time).
@@ -21,8 +20,8 @@
  *    Hz ticker), no hardware beyond the converter.
  *  - HARDWARE: the application routes any event generator (a PIT
  *    divider, a timer overflow, a pin, ...) to the converter's start
- *    input (on AVR: EventChannel<n>::source(gen); Adc<0>::start_on(ch))
- *    and never calls start_every: the sampler only receives results.
+ *    input, in that target's own vocabulary, and never calls
+ *    start_every: the sampler only receives results.
  *    That is the precise pace - jitter-free, in standby too - and the
  *    sampler does not care WHICH generator: the pace is the app's
  *    choice, made where the hardware is wired.
@@ -48,16 +47,15 @@
  * change (docs/design/clock.md), and never selecting an input behind
  * the sampler's back.
  *
- * Validated on: AVR DA/DB (Adc<0>) and the host fake. The contract
- * carries that silicon's shape - ONE result per interrupt and the
- * selected input readable from a register. On a converter with a
- * hardware sequencer and DMA (ATSAM, STM32) the natural delivery is a
- * block per interrupt and the selected input is a count the driver
- * keeps; the walk here becomes vestigial or the type changes. The
- * pace-by-hardware-event idea survives everywhere (an event system on
- * ATSAM; a fixed, short list of timer TRGO triggers on STM32/CH32):
- * the sampler never names the trigger, the app's wiring does and is
- * target glue. (docs/design/overview.md, "Authority of util/".)
+ * The contract wants a converter that reports ONE result per interrupt
+ * with the selected input readable from a register - which a converter
+ * carrying a hardware sequencer and DMA also satisfies, because the
+ * sampler uses neither: it walks its own list and reads the code the
+ * driver reports. A source that delivers a whole BLOCK per interrupt is
+ * a different economy and belongs to util/block_stream.hpp instead.
+ * Pacing from a hardware event survives everywhere, because the sampler
+ * never names the trigger: the app's wiring does, and that is target
+ * glue. (docs/design/overview.md, "Authority of util/".)
  */
 
 #pragma once

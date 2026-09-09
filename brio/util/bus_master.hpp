@@ -7,9 +7,8 @@
  * ARBITRATION and the REPLY channel, which is exactly what makes a
  * shared bus safe - clients post requests, the AO serializes them, the
  * requester gets its BusDone back through the ReplyTo capsule inside
- * the request. Born as SpiBus (2026-08-13); generalized on the second
- * specimen, I2C (2026-08-17): the arbiter never looked at a byte, only
- * its name was SPI. util/spi_bus.hpp and util/i2c_bus.hpp keep the
+ * the request. The arbiter never looks at a byte, so nothing here is
+ * specific to one bus: util/spi_bus.hpp and util/i2c_bus.hpp keep the
  * per-bus vocabulary (SpiDone, I2cDone, status codes) as zero-cost
  * aliases so client code reads as what it is.
  *
@@ -22,8 +21,8 @@
  * never blocking; an undersized FIFO shows up in the requester's error
  * handling, not as a lost transfer.
  *
- * Contract with the Bus engine (avrdx/spi.hpp, avrdx/twi.hpp on AVR; a
- * fake in host tests):
+ * Contract with the Bus engine (each target's SpiHost/I2cHost; a fake
+ * in host tests):
  *  - Bus::Request: the transaction descriptor. Must be trivially
  *    copyable and carry a `ReplyTo<BusDone> reply` member. Buffer
  *    ownership travels with it: the requester must not touch the spans
@@ -55,16 +54,16 @@
  * it is the one object that knows a completion is OWED, and it lives in
  * a kernel that has TimeEvents - the engine is interrupt-driven and
  * owns no clock, and the silicon's own time-outs (where they exist at
- * all: SMBus mode on the SAM SERCOM) police the HOST'S OWN clock hold,
- * not a wire a client wedged (measured, docs/samc21/i2c.md). With
+ * all) police the HOST'S OWN clock hold and not a wire a client
+ * wedged - measured, and the reason this layer carries a timeout at
+ * all. With
  * timeout_ticks != 0 every transfer that goes asynchronous arms a
  * one-shot TimeEvent; if it matures first, the engine is declared dead:
  * Bus::recover() puts the PERIPHERAL back where start() is legal, the
  * requester is answered bus_timeout IN ITS PLACE like every reply, and
  * the queue moves on. THE WIRE STAYS THE APPLICATION'S: whether to
  * unstick(), power-cycle a client, or re-probe the whole bus is a
- * recovery ladder no arbiter can own (ruling 2026-09-02) - what the
- * timeout guarantees is only that the bus AO and its queue survive to
+ * recovery ladder no arbiter can own; what the timeout guarantees is only that the bus AO and its queue survive to
  * be asked. A timeout is NOT a completion: the retry policy is not
  * consulted (the engine never spoke), and stretching below the limit
  * is legal flow control, so the value must be generous - a whole
@@ -89,11 +88,12 @@
  * would add an ownership protocol for zero RAM at queue depths this
  * small.
  *
- * Validated on: AVR DA/DB (SpiHost<n>, TwiHost<n>) and the host fake.
  * The contract assumes a transaction that runs on interrupts and
  * completes later with a status only (buffers travel in the request);
  * a DMA engine or a peripheral with hardware chip-select/queues may
- * change it (docs/design/overview.md, "Authority of util/").
+ * change it (docs/design/overview.md, "Authority of util/"). Which
+ * targets this is validated on is a property of the TARGET, stated
+ * once in README.md's table, not a list that ages here.
  */
 
 #pragma once
@@ -226,7 +226,7 @@ constexpr bool bus_policy_may_retry() {
  * `timeout_ticks` is PER BUS and in KERNEL TICKS (ticks_from_ms<P>()
  * converts): one wedged device on a shared bus starves every other
  * client of that bus, so the limit is a property of the wire, not of a
- * request (ruling 2026-09-02). 0 = no timeout, and no timeout code.
+ * request. 0 = no timeout, and no timeout code.
  */
 template <typename Bus, Platform P, uint8_t pending_depth = 4,
           typename Policy = BusPassThrough, uint32_t timeout_ticks = 0>
@@ -242,9 +242,8 @@ class BusMaster
 
     static_assert(!timed || requires { Bus::recover(); },
                   "a timed BusMaster needs Bus::recover(): the verb that puts a dead "
-                  "engine back where start() is legal again (avrdx/twi.hpp's is the "
-                  "model). The WIRE is not its job - unstick() and the recovery "
-                  "ladder stay the application's");
+                  "engine back where start() is legal again. The WIRE is not its job - "
+                  "unstick() and the recovery ladder stay the application's");
 
     /// Whether the retry machinery exists at all in this instantiation.
     static constexpr bool may_retry = bus_policy_may_retry<Policy>();

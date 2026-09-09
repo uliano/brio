@@ -1,50 +1,46 @@
-// spi_peer - the INSTRUMENT half of the SPI campaign on the SAM C21:
-// board D, the scriptable CLIENT that test_samc_spi (board C, the DUT
-// and the bus host) drives IN BAND over the very bus both are testing.
+// spi_peer - a scriptable SPI CLIENT for the other end of a two-board
+// bus test: the far board is the bus host and drives this one IN BAND
+// over the very wires under test, every command travelling as a
+// checksummed frame in the same traffic.
 //
-// A PORT OF avrdx/src/apps/spi_peer.cpp TO THE SECOND ARCHITECTURE,
-// over the SAME protocol header (spi_link.hpp, included by relative
-// path - one source of truth for the wire format, never a copy). What
-// changed is exactly what the silicon changed:
+// The wire format is spi_link.hpp, included by relative path: one file
+// is the single source of truth for every board that speaks it,
+// whatever its architecture. What this silicon makes of it:
 //
-//  - THE PUMP RUNS ONE AHEAD. The AVR client loads its answer in the
-//    host's inter-byte gap and the shifter takes it at the boundary;
-//    this client's DATA write needs THREE SCK CYCLES to reach the
-//    shifter, and those cycles elapse only while SCK runs (32.6.2.6.2)
-//    - so an answer written in the gap is one character late, every
-//    time. The working shape (test_samc_spi letter e, measured): the
-//    FIRST answer goes in through CTRLB.PLOADEN while SS is still high,
-//    the SECOND parks in DATA at once, and every received character
-//    loads the next-PLUS-ONE. Both serve() and run_exchange() are that
-//    pump.
+//  - THE PUMP RUNS ONE AHEAD. A byte written to DATA reaches the
+//    shifter three SCK cycles later, and those cycles elapse only while
+//    SCK runs (32.6.2.6.2), so an answer written in the host's
+//    inter-byte gap arrives one character late. Instead: the FIRST
+//    answer goes in through CTRLB.PLOADEN while SS is still high, the
+//    SECOND parks in DATA at once, and every received character loads
+//    the next-PLUS-ONE. Both serve() and run_exchange() are that pump.
 //
-//  - THE BUFFERING REGIMES COLLAPSE. The AVR's normal/buffer/buffer-
-//    wait knobs (CTRLB.BUFEN/BUFWR) do not exist here: this client is
-//    always buffered two deep, and PLOADEN plays BUFWR's role for the
-//    first character only. spilink::Cfg::regime is therefore mapped,
-//    not translated: regime_buffer_wait (the only regime the SAM suite
-//    ever commands) runs the preloaded one-ahead pump and delivers the
-//    exact rx[i] = P_B(i) alignment that regime promises; the other two
-//    run without preload, which on this silicon means the shifter's
-//    leftover leads - stated here, exercised nowhere.
+//  - THE BUFFERING REGIMES COLLAPSE. This client is always buffered two
+//    deep and has no knob for anything else; PLOADEN plays for the
+//    first character the role a write-before-clock flag plays where one
+//    exists. spilink::Cfg::regime is therefore MAPPED, not translated:
+//    regime_buffer_wait runs the preloaded one-ahead pump and delivers
+//    the exact rx[i] = P_B(i) alignment that regime promises; the other
+//    two run without preload, which here means the shifter's leftover
+//    leads - stated, exercised nowhere.
 //
-//  - flag_wrcol AND flag_feed_tx ARE AVR EXPERIMENTS (WRCOL and the
-//    28.5.5 BUFOVF clause have no counterpart in ch. 32) and are
-//    ignored; Op::mspi (the USART Host SPI client) is answered with
+//  - THE PROTOCOL CARRIES OPTIONS THIS SILICON HAS NOT GOT. flag_wrcol
+//    and flag_feed_tx name conditions chapter 32 does not have and are
+//    ignored; Op::mspi asks for a USART in host-SPI mode and is answered
 //    report_cfg_failed - this SERCOM is not a USART while it is an SPI.
 //    Everything else of the repertoire is served: ping/ident/report,
 //    exchange, sink_slow, ss_pulse, host_burst.
 //
-// THE DARK LISTENER discipline is the AVR peer's, unchanged: the
-// command-mode client never drives MISO (drive_output = false), the
+// THE DARK LISTENER discipline: the command-mode client never drives
+// MISO (drive_output = false), the
 // answer line wakes only for one answer window after a frame that
 // CHECKED OUT, an unknown op is dropped in silence, and a bad checksum
 // is nak'ed only while ENGAGED. The select wire is held up by THIS
 // board's internal pull-up at all times - the pull survives PMUXEN
-// (28.6.3.2, the EIC campaign's finding: the mux takes the output
-// driver, not the pull), so it is re-stated after every re-init.
+// (28.6.3.2: the mux takes the output driver, not the pull), so it is
+// re-stated after every re-init.
 //
-// Link: SERCOM1 function C on the C-D straight-through wires -
+// Link: SERCOM1 function C, straight through to the host board -
 //   PA16 = PAD[0]  MOSI (DI here: the client's DOPO row is 0x2)
 //   PA17 = PAD[1]  SCK
 //   PA18 = PAD[2]  SS (input; this board's pull-up holds it high)
@@ -58,7 +54,7 @@
 // The ident label is the die serial's first word in hex - this family's
 // identity is factory-programmed (no USERROW label to read); ident.xtal
 // reports whether the board's 24 MHz crystal started (probed once at
-// boot, the test_samc_spi ruler's own arrangement).
+// boot: it is the ruler every rate on this link is measured against).
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -75,9 +71,9 @@
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
 
-// THE PROTOCOL IS THE AVR CAMPAIGN'S, AND IT IS NOT COPIED (the
-// test_samc_spi ruling: pure encoding, no register, both architectures
-// compile the same file).
+// THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
+// register, and every architecture on this link compiles the same
+// file.
 #include "../../../avrdx/src/apps/spi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -142,7 +138,7 @@ using SckPin = Pin<'A', 17>;
 using SsPin = Pin<'A', 18>;
 using MisoPin = Pin<'A', 19>;
 
-constexpr uint16_t firmware_version = 0x0201;   ///< 0x01xx = the AVR peer
+constexpr uint16_t firmware_version = 0x0201;   ///< see spi_link.hpp's Ident
 
 /// The exchange's DMA engines (channels 0/1 on SERCOM1's triggers).
 /// Armed once at boot; the SERCOM re-inits under them freely - the

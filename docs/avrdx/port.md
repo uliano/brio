@@ -114,7 +114,7 @@ apart); `level_low` is quiet while high, re-fires continuously while
 low (245 ISRs in a ~20 us window) and stops on the rising edge;
 rising + INVEN counts the physical falling edges; the W1C discipline
 holds (clearing one pin's flag leaves the other's) and the clear
-lands ONE CYCLE after the store; a pulled-up input reads 1;
+lands one cycle after the store; a pulled-up input reads 1;
 `input_disable` freezes IN at its last value and the buffer comes
 back live; the multi-pin engine writes one setting into three pins on
 two ports (PINnCTRL readbacks exact) and both ports interrupt; the
@@ -132,6 +132,5 @@ Implemented but not bench-verified:
 - The INLVL thresholds (needs analog levels) and the slew rate's
   electrical effect (needs a scope) - both are configuration
   read-back only today.
-- The fully-async wake of Px2/Px6 from standby (queued with the
-  RUNSTDBY pass, LOW priority).
+- The fully-async wake of Px2/Px6 from standby.
 - The PA2..PA5 buttons as a human-in-the-loop extra.

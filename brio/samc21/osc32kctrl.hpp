@@ -50,7 +50,7 @@
  * 4. THE RTC'S CLOCK IS CHOSEN HERE, NOT IN THE RTC. RTCCTRL.RTCSEL
  *    picks among all six oscillator outputs, and 21.6.7 asks for the RTC
  *    to be disabled before the selection changes. This header owns the
- *    register; the ordering is the RTC driver's to keep when it exists.
+ *    register; the ordering is samc21/rtc.hpp's to keep.
  *
  * ERRATA: NEITHER ITEM TOUCHING THIS CHAPTER APPLIES TO THIS SILICON,
  * and both are the kind that a careless read of the matrix would apply
@@ -62,9 +62,9 @@
  * the column.
  *
  * NOT BUILT (docs/samc21/osc32kctrl.md carries the list): the CFD's event
- * output (EVCTRL.CFDEO - no EVSYS driver on this target), and XOSC32K
- * itself is written and family-compiled but cannot be exercised here
- * because the bench board carries no 32 kHz crystal.
+ * output (EVCTRL.CFDEO), and XOSC32K itself is written and
+ * family-compiled but cannot be exercised here because the bench board
+ * carries no 32 kHz crystal.
  */
 
 #pragma once

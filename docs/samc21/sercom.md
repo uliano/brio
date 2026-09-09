@@ -19,17 +19,18 @@ encoded in code (1.17.4 and 1.17.14 are named where their fields
 live). Driver: `samc21/sercom.hpp` (`Sercom<n>` resource +
 `Uart<n, pads, rx, tx, TxEngine, RxEngine>` task, the engine slots
 optional). The family fixture is `test/family_samc21/sercom.cpp` plus
-its negatives under `tools/check_samc21.sh`.
+its negatives under `tools/check_samc21.sh`; the bench suite is
+`test_samc_uart`, driven from the host by `tools/uart_stress.py`.
 
 ## What the silicon does
 
 **One interrupt vector for the whole instance.** DRE, TXC, RXC, RXS,
-CTSIC, RXBRK and ERROR all share the instance's single NVIC line -
-the one place where the AVR shape (two vectors, two ISR bodies) must
-not be copied. And DRE is a CONDITION, not an event: it reads 1
-whenever the transmit buffer is empty, which is most of the time, so
-a handler acting on raw INTFLAG would run the transmit path on every
-receive interrupt. The mask that matters is INTFLAG AND INTENSET.
+CTSIC, RXBRK and ERROR all share the instance's single NVIC line,
+where the AVR DA/DB's USART has two vectors and two ISR bodies. And
+DRE is a CONDITION, not an event: it reads 1 whenever the transmit
+buffer is empty, which is most of the time, so a handler acting on raw
+INTFLAG would run the transmit path on every receive interrupt. The
+mask that matters is INTFLAG AND INTENSET.
 
 **Instance count is the family's one package difference.** The E
 package bonds four SERCOMs (0..3), the G and J six - read from the
@@ -48,11 +49,11 @@ routes TxD to PAD[2].
 **The frame is LSB-first on the wire - but the register's reset is
 not.** CTRLA.DORD resets to MSB-first; a standard UART frame is
 LSB-first and the chapter's own init sequence says to set the bit.
-Measured consequence of getting this wrong, kept as the cautionary
-fact: every byte arrives exactly bit-reversed at the correct baud
-(0x0D 0x0A 'S' reads back 0xB0 0x50 0xCA), with every other register
-correct - the driver's `UartFormat` defaults the bit and a family
-static_assert keeps it from regressing.
+The measured consequence of getting this wrong: every byte arrives
+exactly bit-reversed at the correct baud (0x0D 0x0A 'S' reads back
+0xB0 0x50 0xCA), with every other register correct - the driver's
+`UartFormat` defaults the bit and a family static_assert keeps it from
+regressing.
 
 **Enable-protection and synchronization are both real.** CTRLA,
 CTRLB and BAUD accept writes only while the instance is disabled -
@@ -72,10 +73,9 @@ before DATA anyway, 31.8.11).
 `BAUD = 65536 x (1 - 16 x f_baud / f_ref)`, f_ref being the
 instance's GCLK core clock, with f_baud <= f_ref/16. BAUD = 0 is a
 LEGAL value - the fastest rate - which is why the driver's arithmetic
-returns an optional rather than overloading zero. TXC, unlike the
-AVR's, is exact: cleared by every DATA write and set only when the
-shifter empties with nothing queued - "the last byte is on the wire",
-no timing guesswork.
+returns an optional rather than overloading zero. TXC is exact:
+cleared by every DATA write and set only when the shifter empties with
+nothing queued - "the last byte is on the wire", no timing guesswork.
 
 **A SERCOM input pin can only pull DOWN** (31.5.1, verified
 verbatim): PULLEN still works under the peripheral function, but the
@@ -105,11 +105,11 @@ whatever drives it.
   task: two SPSC rings (lock-free at any size here - `atomic_width` 4
   - so 64/256 are console-class defaults, not a ceiling),
   `init(clock, baud, format)` speaking hertz off the clock tag,
-  `isr()` as the ONE handler body with the AVR's edge-return contract
-  intact (true on the RX ring's empty-to-non-empty transition - the
-  kernel wakeup), try-semantics `write_byte`, `read_byte`, error
-  counters, `rebase(hz)` for the day a dynamic clock exists,
-  `release()`. Init order is deliberate: clocks, reset, configure,
+  `isr()` as the ONE handler body honouring the edge-return contract
+  (true on the RX ring's empty-to-non-empty transition - the kernel
+  wakeup), try-semantics `write_byte`, `read_byte`, error counters,
+  `rebase(hz)` for the day a dynamic clock exists, `release()`. Init
+  order is deliberate: clocks, reset, configure,
   enable, and only THEN the pads to the SERCOM - the transmitter
   idles high before the pad leaves PORT, so no glitch start bit
   reaches the wire. `ByteTransport` and `ClockUser` are
@@ -136,11 +136,11 @@ The engines are POLICIES, not features of the task:
 
 - **Zero when absent.** `NoDmaEngine` (the default) is a tag with
   `present = false`; every engine branch sits behind `if constexpr`,
-  so a Uart that names no engine carries no test, no state, no code -
-  measured, not asserted: the release images of the engine-less apps
-  are byte-identical to the ones built before the parameters existed.
-  sercom.hpp never includes dmac.hpp (the engines live THERE), so a
-  program with a serial port does not carry descriptor tables.
+  so a Uart that names no engine carries no test, no state and no
+  code - an engine-less image is byte for byte what it would be with
+  no engine slots at all. sercom.hpp never includes dmac.hpp (the
+  engines live THERE), so a program with a serial port does not carry
+  descriptor tables.
 - **The trigger replaces the interrupt.** DRE for the transmitter and
   RXC for the receiver are the SAME condition as the DMA trigger, so
   whichever direction has an engine does not arm its interrupt -
@@ -177,17 +177,16 @@ The engines are POLICIES, not features of the task:
   the level is ALREADY HIGH can therefore be waiting for an edge that
   has already happened: the channel sits enabled, CHSTATUS empty, the
   peripheral's own flag standing, and not one beat moves. CAN, not
-  MUST - the streaming campaign later measured two arrangements on the
-  ADC's RESRDY where a late arm is rescued by the silicon itself
-  (selecting TRIGSRC onto a standing request is itself a rise, and a
-  rise during a disable is latched; dmac.md), and every wedge this
-  suite caught in the act carried a corrupted write-back (erratum
-  1.10.4) in hand. The kick is therefore insurance whose cost is one
-  never-doubling store, kept on both paths. Both
-  `pump_tx()` and the receive re-arm therefore ask the SERCOM whether
-  its flag is already set and, if it is, give the channel one software
-  trigger. It cannot double a byte: a channel has exactly one pending
-  bit and SWTRIGCTRL raises it only if it was clear (25.8.8), so a kick
+  MUST: on the ADC's RESRDY a late arm is rescued by the silicon
+  itself - selecting TRIGSRC onto a standing request is itself a rise,
+  and a rise during a disable is latched (dmac.md) - and every wedge
+  measured here carried a corrupted write-back (erratum 1.10.4) with
+  it. The kick is therefore insurance whose cost is one never-doubling
+  store, kept on both paths. Both `pump_tx()` and the receive re-arm
+  therefore ask the SERCOM whether its flag is already set and, if it
+  is, give the channel one software trigger. It cannot double a byte:
+  a channel has exactly one pending bit and SWTRIGCTRL raises it only
+  if it was clear (25.8.8), so a kick
   that races a real trigger is lost rather than served twice.
 - **A REFUSED BYTE STILL NUDGES.** `write_byte()` returning false is
   the state in which nothing is draining the ring, and `print()`
@@ -242,13 +241,13 @@ int main() {
 - A full duplex round-trip at 115200 over the board's CH340: banner,
   command parsing, replies, timed responses coherent with the
   SysTick timebase; error counters all zero after the exchanges.
-- The DORD lesson above was measured, not deduced: right baud,
+- The DORD fact above is measured, not deduced: right baud,
   bit-reversed bytes, every other register verified over SWD in one
   halt-and-dump.
-- The enable-clears-TXEN/RXEN clause and the pull-down-only clause
-  were both verified against the data sheet text verbatim - neither
-  is folklore.
-- The engined transport, live on the console's own SERCOM5: print()
+- The enable-clears-TXEN/RXEN clause and the pull-down-only clause are
+  both verified against the data sheet text verbatim - neither is
+  folklore.
+- The engined transport, live on the console port's SERCOM5: print()
   through the TX engine is byte-exact on the wire (a six-line banner
   went out as seven DMA blocks - the ring wrap served as two spans,
   exactly as designed); the RX engine with a tick-paced harvest
@@ -259,8 +258,8 @@ int main() {
 **THE FOUR SHAPES, BYTE FOR BYTE** (suite `test_samc_uart` with
 `tools/uart_stress.py` at the other end; the pattern is a 32-bit
 xorshift both ends generate, so a lost byte is located and not merely
-counted). Every combination of interrupt and DMA on each direction was
-run as a 1.2 s echo at 115200, twice:
+counted). Every combination of interrupt and DMA on each direction, as
+a 1.2 s echo at 115200:
 
   | transport      | received | echoed back | notes                    |
   |----------------|----------|-------------|--------------------------|
@@ -297,10 +296,10 @@ run as a 1.2 s echo at 115200, twice:
   nothing about that is illegal. A UART cannot be trusted to notice that
   its peer is missing a bit; it notices an extra one.
 
-**How fast the link really goes, and what it costs** (probe app
-`serial_speed`, which reports throughput while the host checks every
-byte). The measurements are of the BENCH LINK - an ADuM1201 isolator and
-a CH340 bridge between the pads and the PC - as much as of the driver.
+**How fast the link really goes, and what it costs**, throughput
+reported by the board while the host checks every byte. The
+measurements are of the BENCH LINK - an ADuM1201 isolator and a CH340
+bridge between the pads and the PC - as much as of the driver.
 
 - **3 Mbaud works**, which is the generator's own ceiling at 48 MHz
   (16x oversampling, BAUD 0). A raw polled transmit - no ring, no

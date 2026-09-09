@@ -168,9 +168,9 @@ int main() {
 ## Bench findings
 
 `test_stm32_platform` on the Nucleo-G0B1RE at 64 MHz, nothing wired.
-Six letters in `z` (53 verdicts, 53/53 - one cold from a fresh flash and
-five warm) and letter `i` outside it (26 verdicts, 26/26 twice), which
-reboots the board six times and resumes from a `.noinit` token.
+Six letters in `z` (53 verdicts) and letter `i` outside it (26
+verdicts), which reboots the board six times and resumes from a
+`.noinit` token.
 
 - **The flags accumulate, seen on real resets.** Leg 1 clears them and
   does a software reset: the next boot reads exactly `SFT | PIN`
@@ -187,16 +187,15 @@ reboots the board six times and resumes from a `.noinit` token.
   prints its next line. Had 28.3.1's first sentence been the whole
   truth, that boot would have died at 940 ms and every one after it.
 - **The IWDG's time-out, measured: 940 ms** against 955 ms nominal, so
-  **LSI = 32536 Hz** (a second run: 940 ms, 32536 Hz; an earlier
-  arrangement at /4 gave 504 ms and 32507 Hz) - inside DS13560 table
-  46's 29.5..34 kHz, about 1.7% above the 32 kHz nominal. **CONFIRMED
-  LATER BY A SECOND ROUTE**: `test_stm32_rtc` weighs LSI as a PERIOD, on
-  a TIM16 capture against the core clock, and reads 32586 Hz - the two
-  agree to 1.5 per mille, which is more than a watchdog's coarse reset
-  and a period capture had any right to. The setting
-  is deliberately not the reset one, so the time-out itself proves the
-  configuration landed: an unconfigured watchdog would have taken
-  512 ms.
+  **LSI = 32536 Hz** (repeated: 940 ms, 32536 Hz; at /4: 504 ms and
+  32507 Hz) - inside DS13560 table 46's 29.5..34 kHz, about 1.7% above
+  the 32 kHz nominal. **Confirmed by a second route**: `test_stm32_rtc`
+  weighs LSI as a PERIOD, on a TIM16 capture against the core clock, and
+  reads 32586 Hz - the two agree to 1.5 per mille, which is more than a
+  watchdog's coarse reset and a period capture have any right to. The
+  setting is deliberately not the reset one, so the time-out itself
+  proves the configuration landed: an unconfigured watchdog would have
+  taken 512 ms.
 - **A keyed IWDG write raises its update bit AT THE STORE** (the read
   right after it already sees the bit) - only the CLEARING waits for
   the peripheral's clock. **With the watchdog stopped it never
@@ -240,10 +239,10 @@ reboots the board six times and resumes from a `.noinit` token.
 - **WDGA is cleared by the reset** (29.5.1 confirmed): the boot after a
   WWDG reset finds the watchdog disabled, unlike the IWDG's registers,
   which come back at their own reset values.
-- **The debug freeze bits are writable only with RCC_APBENR1.DBGEN on**
-  - the first version of the suite measured a store that went nowhere -
-  and, being in a register 40.10.3 does not reset on a system reset,
-  they were found set on warm boots and clear on cold ones.
+- **The debug freeze bits are writable only with RCC_APBENR1.DBGEN on**:
+  without it a store goes nowhere. Being in a register 40.10.3 does not
+  reset on a system reset, they stand on warm boots and are clear on
+  cold ones.
 
 ## On the second silicon
 
@@ -264,14 +263,13 @@ with the .noinit token crossing all six intact and the flags
 accumulating as they do elsewhere. The IWDG time-out measures this die's
 LSI at **31400 Hz** ([platform.md](platform.md)).
 
-**AND WHEN THIS BOARD'S DEBUG PORT GOES SILENT, THE RESET IS THE ONLY
-WAY BACK IN.** Its ST-LINK half can stop answering until the board is
+**WHEN THIS BOARD'S DEBUG PORT GOES SILENT, THE RESET IS THE ONLY WAY
+BACK IN.** Its ST-LINK half can stop answering until the board is
 replugged ([bench.md](../bench.md)); in that state nothing can be halted
 or reset from the host, and a wedged image is recovered by flashing
 another through the ST-LINK's mass-storage flasher, which resets the
-part under NRST. That is what brought the board back from a Shutdown
-entered with the RTC on LSI, the clock Shutdown switches off
-([pwr.md](pwr.md)).
+part under NRST. That is the way back from a Shutdown entered with the
+RTC on LSI, the clock Shutdown switches off ([pwr.md](pwr.md)).
 
 ## Not covered yet
 
@@ -280,15 +278,15 @@ Driver gaps (this chapter's option space the stratum does not touch):
   (hardware or software watchdog), `IWDG_STOP` and `IWDG_STDBY` (the
   counter's fate in the low-power modes), and `nRST_STOP` /
   `nRST_STDBY` / `nRST_SHDW`, which are what LPWRRSTF reports on. They
-  are read-only facts here; writing FLASH_OPTR belongs to the flash
-  campaign, and a wrong option byte is a bricked board.
+  are read-only facts here; writing FLASH_OPTR is not this chapter's,
+  and a wrong option byte is a bricked board.
 - The NRST pin's three modes (reset input/output, reset input, PF2
   GPIO) - option bytes again.
 - The PWR side of PWRRSTF: the BOR levels and the brown-out detector
-  arrive with the sleep pass.
+  are not read or written here.
 - The RTC domain reset (`RCC_BDCR.BDRST`), which is the one thing that
   would put this board's RTCEN/RTCSEL back - and ES0548 2.2.1's
-  workaround. It belongs to an RTC or clock pass, not here.
+  workaround. It belongs to the RTC or the clock chapter, not here.
 
 Implemented, not bench-verified:
 - `Iwdg::force_reset()` (the window-violation path; the WWDG's

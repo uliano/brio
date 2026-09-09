@@ -3,10 +3,10 @@
  *
  * The SAM C21 External Interrupt Controller (DS60001479M ch. 26): the
  * peripheral where this family keeps its PIN INTERRUPTS. There are none
- * in PORT - samc21/pin.hpp says so and stops there - so everything the
- * AVR spells in PINnCTRL.ISC lives here, one register field per line,
- * behind a peripheral of its own with its own clock, its own enable and
- * its own event outputs.
+ * in PORT - samc21/pin.hpp says so and stops there - so every edge and
+ * level sense lives here, one register field per line, behind a
+ * peripheral of its own with its own clock, its own enable and its own
+ * event outputs.
  *
  *  Eic              the block: APB clock, the clock CHOICE (GCLK_EIC or
  *                   CLK_ULP32K), reset and enable with their
@@ -98,7 +98,7 @@
  *    the item most likely to be applied by mistake on this part.
  *  - 1.11.6 Edge Detection in Standby: the matrix marks EVERY REVISION
  *    of E/G/J ("only the first edge will be detected"), and the bench
- *    REFUTED it at rev F (test_samc_sleepwalk letter a): an
+ *    REFUTED it at rev F (measured): an
  *    asynchronous line detected 100 edges of 100 offered inside ONE
  *    standby - counted by its own event generator into a RUNSTDBY
  *    timer, with the interrupt disarmed so the window really was one
@@ -112,9 +112,9 @@
  * NOT BUILT (docs/samc21/eic.md carries the list): the debouncer
  * (DEBOUNCEN/DPRESCALER/PINSTATE - SAM C20/C21 N variants only, and the
  * device header for this family does not even declare the registers, so
- * there is nothing to gate); and sleep/wake behaviour beyond the
- * erratum above, which belongs to the power pass together with
- * util/power.hpp's SleepSite.
+ * there is nothing to gate); and a kernel event out of a pin - `isr()`
+ * gives an app the mask, and nothing in the framework yet turns an EIC
+ * line into a posted event.
  */
 
 #pragma once
@@ -182,15 +182,15 @@ struct EicLineConfig {
      * a pulse of any width is caught and no EIC clock is needed.
      *
      * ERRATUM 1.11.6 says that in STANDBY only the first such edge is
-     * detected, on every revision of this family - and the bench
-     * REFUTED it at rev F: an asynchronous line detected and woke on
-     * every one of 100 edges inside one standby (test_samc_sleepwalk
-     * letter a; the block's errata note above has the controls). The
-     * matrix's claim stands in print, so a design that must survive
-     * other silicon keeps Microchip's fallback available: SYNCHRONOUS
-     * detection (this bit false, the block clocked - CLK_ULP32K is the
-     * cheap one) detects every standby edge too, measured in the same
-     * letter. Awake, this bit is the fast, clockless path either way.
+     * detected, on every revision of this family - and the bench REFUTED
+     * it at rev F: an asynchronous line detected and woke on every one of
+     * 100 edges inside one standby (measured, with the controls the
+     * block's errata note above lists). The matrix's claim stands in
+     * print, so a design that must survive other silicon keeps
+     * Microchip's fallback available: SYNCHRONOUS detection (this bit
+     * false, the block clocked - CLK_ULP32K is the cheap one) detects
+     * every standby edge too, measured in the same letter. Awake, this
+     * bit is the fast, clockless path either way.
      */
     bool asynchronous = false;
 

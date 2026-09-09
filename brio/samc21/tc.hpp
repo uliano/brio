@@ -96,8 +96,8 @@
  *
  * NOT BUILT (docs/samc21/tc.md carries the list): the minimum and maximum
  * capture modes (SAM C20/C21 N variants only - this family's device
- * header does not declare CTRLA.CAPTMODE at all), and sleep, which the
- * power pass owns together with CTRLA.ONDEMAND's clock-request
+ * header does not declare CTRLA.CAPTMODE at all), and sleep, which
+ * samc21/sleep.hpp owns together with CTRLA.ONDEMAND's clock-request
  * behaviour.
  */
 
@@ -429,11 +429,10 @@ public:
     /// share one generic clock channel and TC2/TC3 share another (the
     /// header's TCn_GCLK_ID, stated at the top of this file), so the
     /// disconnect below STOPS THE SIBLING TOO: Tc<2>::release() silently
-    /// halts a running TC3, which cost the TSENS campaign half a letter
-    /// before it was understood. This driver cannot know whether the
-    /// sibling is in use - a caller releasing one half of a shared pair
-    /// while the other must keep running should skip release() and tear
-    /// down by hand (reset + bus_clock), leaving the channel connected.
+    /// halts a running TC3. This driver cannot know whether the sibling
+    /// is in use - a caller releasing one half of a shared pair while the
+    /// other must keep running should skip release() and tear down by
+    /// hand (reset + bus_clock), leaving the channel connected.
     static void release(uint32_t spins = 0xFFFFu) {
         Nvic::disable(irq());
         (void)reset(spins);
@@ -550,8 +549,7 @@ public:
     // then the load. `*_raw()` skips it and says so.
     //
     // AND THE COMMAND IS ISSUED TWICE, because the silicon gives no
-    // other honest way. Measured (tc_readsync_probe, designed from
-    // test_samc_sleep's one-behind finding): after a READSYNC,
+    // other honest way. Measured: after a READSYNC,
     // SYNCBUSY.CTRLB stands for the command's own crossing and falls -
     // and the COUNT shadow lands about HALF A COUNTER-CLOCK PERIOD
     // LATER, with NO SYNCBUSY bit advertising it (SYNCBUSY.COUNT never
@@ -711,13 +709,12 @@ public:
      * a handler that clears MCx without reading CCx throws the reading
      * away.
      *
-     * AND THE OTHER HALF OF THE SAME FACT, measured
-     * (test_samc_timer_dma, docs/samc21/tc.md): because CCx has CCBUFx
-     * behind it, ONE read taken after the signal under test has changed
-     * hands back a value the PREVIOUS arrangement captured. A reader
-     * that has just reconfigured something drains both stages and then
-     * takes a whole fresh capture; a reader keeping up with a running
-     * stream never notices.
+     * AND THE OTHER HALF OF THE SAME FACT, measured (docs/samc21/tc.md):
+     * because CCx has CCBUFx behind it, ONE read taken after the signal
+     * under test has changed hands back a value the PREVIOUS arrangement
+     * captured. A reader that has just reconfigured something drains both
+     * stages and then takes a whole fresh capture; a reader keeping up
+     * with a running stream never notices.
      */
     [[gnu::always_inline]] static uint8_t isr() {
         const uint8_t p = static_cast<uint8_t>(flags() & armed());

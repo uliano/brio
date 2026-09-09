@@ -1,8 +1,8 @@
 /*
  * clock.hpp
  *
- * The SAM C21 clock tree in two strata, the same split avrdx/clock.hpp
- * uses (docs/design/clock.md):
+ * The SAM C21 clock tree in the two strata docs/design/clock.md
+ * describes:
  *
  *  RESOURCES - one monostate per block, a thin typed view of its
  *  registers with the synchronization discipline built in:
@@ -32,7 +32,7 @@
  *  TASK - what an application names:
  *    Clock<source, hz>   the static main clock: ONE constexpr truth
  *                 `hz` every driver derives from (there is no F_CPU in
- *                 this build, exactly as on AVR); init() composes the
+ *                 this build); init() composes the
  *                 resources and reports whether the requested source
  *                 really runs.
  *
@@ -477,11 +477,10 @@ struct Xosc {
         return ready();
     }
 
-    /// The same thing with the configuration known at compile time, so
-    /// an impossible one is a compile error naming what is wrong rather
-    /// than a false return at run time. The house pattern (avrdx's
-    /// `Adc::init<cfg>()`): the runtime overload stays for a
-    /// configuration built from runtime values.
+    /// The same thing with the configuration known at compile time, so an
+    /// impossible one is a compile error naming what is wrong rather than
+    /// a false return at run time. The house pattern: the runtime
+    /// overload stays for a configuration built from runtime values.
     template <XoscConfig cfg>
     static bool init(uint32_t spins = 40'000'000UL) {
         static_assert(cfg.hz >= min_hz && cfg.hz <= max_hz,
@@ -588,18 +587,17 @@ struct GclkConfig {
     /// 16.8.3's wording invites another reading - "divided by 2^(N+1),
     /// where N is the Division Factor Bits for the selected generator" -
     /// which would make the divisor a FIXED 512 on the eight-bit
-    /// generators and 131072 on generator 1, with DIV ignored. An
-    /// earlier note in this file said exactly that. IT IS WRONG, and
-    /// the correction is measured, not argued: test_samc_clock letter f
-    /// counts generator 5 against generator 0 with the frequency meter -
+    /// generators and 131072 on generator 1, with DIV ignored. THAT
+    /// READING IS WRONG, and the correction is measured, not argued:
+    /// counting generator 5 against generator 0 with the frequency meter -
     /// both fed by OSC48M, so the count IS the divisor and no reference
-    /// error can enter - and gets 2, 16 and 512 for DIV = 0, 3 and 8.
+    /// error can enter - gives 2, 16 and 512 for DIV = 0, 3 and 8.
     /// Generator 1, the sixteen-bit one, gives 512 for the same DIV = 8,
     /// so the field's WIDTH plays no part in the FORMULA.
     ///
     /// IT DOES PLAY A PART IN THE CEILING, though, and that is measured
-    /// too (test_samc_timer_dma letter i): on generator 7, whose DIV
-    /// field is eight bits, DIV = 8 and DIV = 9 give the SAME divisor of
+    /// too: on generator 7, whose DIV field is eight bits, DIV = 8 and
+    /// DIV = 9 give the SAME divisor of
     /// 512 = 2^9. So the rule is 2^(DIV+1) SATURATED AT 2^(width+1), and
     /// a DIV past the field's width buys nothing. The two measurements
     /// agree at DIV = 8 and only the extrapolation past it was ever in
@@ -975,13 +973,12 @@ struct Fdpll {
      * INTFLAG.DPLLLTO - and it does NOT mean what its name says.
      *
      * The chapter calls it "DPLL Lock Timer Time-out", which reads as a
-     * failure to lock. Measured (test_samc_clock letter d), a loop
-     * configured with LTIME = 8 ms comes up with CLKRDY set, LOCK set
-     * and THIS FLAG SET as well: the flag marks the lock TIMER reaching
-     * zero, which in that mode is simply how the output is released
-     * (table 20-3), not a failure. It is only ever raised when
-     * DpllLockTime is not `automatic`, and it says nothing about the
-     * loop - `locked()` is the bit that does.
+     * failure to lock. Measured: a loop configured with LTIME = 8 ms
+     * comes up with CLKRDY set, LOCK set and THIS FLAG SET as well: the
+     * flag marks the lock TIMER reaching zero, which in that mode is
+     * simply how the output is released (table 20-3), not a failure. It
+     * is only ever raised when DpllLockTime is not `automatic`, and it
+     * says nothing about the loop - `locked()` is the bit that does.
      */
     static bool timed_out() {
         return (Oscctrl::flags() & OscctrlFlag::dpll_timeout) != 0u;

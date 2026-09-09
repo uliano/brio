@@ -13,9 +13,9 @@
  *                   part and the SMBus half that only some instances
  *                   have;
  *   I2cHost<...>    the TASK util/i2c_bus.hpp drives: one Request is one
- *                   BUS TENURE, with the SAME descriptor shape
- *                   avrdx/twi.hpp and samc21/i2c.hpp carry, so a device
- *                   client compiles on the third architecture untouched;
+ *                   BUS TENURE, with the descriptor shape every
+ *                   target's I2cHost carries (docs/design/i2c-bus.md),
+ *                   so a device client compiles here untouched;
  *   I2cClient<...>  the target role: address matching, the stretching
  *                   pump, the wake from Stop. A client is a PROTOCOL and
  *                   the protocol is the application's, so this half
@@ -60,7 +60,7 @@
  *        tables charge 250..1000 ns of it. A prediction that ignores it
  *        over-estimates the bus rate by up to 40 %. It is a BUS fact,
  *        not a chip one, so it is an ARGUMENT (I2cBusTiming::sync_ns),
- *        exactly as the rise time is on the other two targets.
+ *        like the rise and fall times beside it.
  *      * SDADEL HAS NO +1 AND THE OTHER THREE DO: tSDADEL = SDADEL x
  *        tPRESC while tSCLDEL, tSCLL and tSCLH are all (field + 1) x
  *        tPRESC (32.9.5). One helper for all four would be wrong for
@@ -103,7 +103,7 @@
  *    and TEXTEN = 0 for TIMEOUTB. Each verb checks ITS OWN gate rather
  *    than one blanket rule, because here - unlike the SPI's - the gates
  *    really differ. Whether the SILICON enforces any of them is a
- *    different question and test_stm32_i2c letter a asks it directly.
+ *    different question, and the bench asks it directly.
  *
  *  - THE VECTOR IS SHARED where the part has an I2C3: I2C2 and I2C3 sit
  *    on I2C2_3_IRQn (the reserve derives it from I2C3_BASE), so an app
@@ -149,11 +149,10 @@ namespace brio {
 // =============================================================================
 
 /**
- * The three bus speeds, SPELLED THE SAME WAY as avrdx/twi.hpp's TwiSpeed
- * and samc21/i2c.hpp's I2cSpeed - one vocabulary across three
- * architectures, so a Request naming a speed compiles anywhere.
+ * The three bus speeds, spelled the way every target's I2cSpeed is, so
+ * a Request naming a speed compiles anywhere.
  *
- * Unlike the other two targets there is no SPEED FIELD here: the mode is
+ * THERE IS NO SPEED FIELD IN THIS SILICON: the mode is
  * entirely a matter of what TIMINGR holds (and, for Fm+, of the SYSCFG
  * drive bit the pads need). What the enum selects is which row of the
  * I2C standard the arithmetic below is solved against.
@@ -332,8 +331,7 @@ inline constexpr uint16_t i2c_analog_filter_max_ns = 260;
  * example tables 172..174 assume 1000 ns for Sm, 750 for Fm and
  * 250..655 for Fm+. THOSE ARE THE DEFAULTS HERE, so that this file's
  * arithmetic reproduces the manual's own tables, and a caller who has
- * measured its bus overrides them - the rise_ns argument of
- * avrdx/twi.hpp and samc21/i2c.hpp, met again in this chapter's clothes.
+ * measured its bus overrides them.
  */
 struct I2cBusTiming {
     uint16_t rise_ns;
@@ -608,48 +606,46 @@ constexpr uint8_t i2c_high_share(I2cSpeed s) {
     }
 }
 
-/**
- * THE CHOOSER: solve 32.4.5's conditions and 32.4.9's period formula for
- * a register value, at this kernel clock, for this speed, on this bus.
- *
- * The method is the chapter's own, in four steps:
- *
- *  1. The PERIOD in kernel cycles is kernel_hz / f_SCL, less the tSYNC
- *     budget; what remains is split between tSCLL and tSCLH in the
- *     mode's own ratio (above). Both halves are then rounded UP into
- *     prescaler units, so the produced period is never SHORTER than
- *     asked - a requested SCL is a CEILING, the samc21 rule.
- *  2. SCLDEL comes from 32.4.5's setup condition, which is a LOWER
- *     bound: (SCLDEL + 1) x tPRESC >= tr(max) + tSU;DAT(min).
- *  3. SDADEL comes from its hold condition, also a lower bound:
- *     SDADEL x tPRESC >= tf(max) + tHD;DAT(min) - tAF(min)
- *                        - (DNF + 3) x tI2CCLK
- *     with the tAF term present only while the analog filter is on, and
- *     the whole right-hand side floored at zero.
- *  4. PRESC IS WHAT MAKES 2 AND 3 FIT. SCLDEL and SDADEL are four bits
- *     each, so a small prescaler can put the setup delay out of range
- *     (at 64 MHz in Sm the setup needs 80 kernel cycles and the field
- *     holds sixteen units) - which is exactly why the manual's own
- *     tables use a coarse PRESC and small SCLL/SCLH. This function
- *     therefore walks PRESC from 0 up and takes the FIRST value at which
- *     every field fits, which gives the finest resolution the four-bit
- *     delays allow.
- *
- * WHAT IT DOES NOT DO is reproduce the manual's own register words: its
- * tables are hand-picked, and for the same times there are several legal
- * (PRESC, SCLL, SCLH) triples. What it reproduces is the TIMES - tSCLL,
- * tSCLH and tSCLDEL come out equal to the tables' at every kernel clock
- * they cover - while SDADEL comes out at the inequality's own minimum
- * where the tables are more generous. Both are stated in the doc and
- * pinned by the static_asserts below.
- *
- * @return nullopt when the kernel clock is below ES0548 2.10.1's floor
- * for this speed, when 32.4.3's own conditions are not met, when the
- * period leaves no room after the tSYNC budget, or when no prescaler
- * makes every field fit. A speed that cannot be produced is REFUSED and
- * never approximated: a bus run at a rate nobody asked for is a fault
- * the caller must see.
- */
+/// THE CHOOSER: solve 32.4.5's conditions and 32.4.9's period formula for
+/// a register value, at this kernel clock, for this speed, on this bus.
+///
+/// The method is the chapter's own, in four steps:
+///
+///  1. The PERIOD in kernel cycles is kernel_hz / f_SCL, less the tSYNC
+///     budget; what remains is split between tSCLL and tSCLH in the
+///     mode's own ratio (above). Both halves are then rounded UP into
+///     prescaler units, so the produced period is never SHORTER than
+///     asked: a requested SCL is a CEILING.
+///  2. SCLDEL comes from 32.4.5's setup condition, which is a LOWER
+///     bound: (SCLDEL + 1) x tPRESC >= tr(max) + tSU;DAT(min).
+///  3. SDADEL comes from its hold condition, also a lower bound:
+///     SDADEL x tPRESC >= tf(max) + tHD;DAT(min) - tAF(min)
+///                        - (DNF + 3) x tI2CCLK
+///     with the tAF term present only while the analog filter is on, and
+///     the whole right-hand side floored at zero.
+///  4. PRESC IS WHAT MAKES 2 AND 3 FIT. SCLDEL and SDADEL are four bits
+///     each, so a small prescaler can put the setup delay out of range
+///     (at 64 MHz in Sm the setup needs 80 kernel cycles and the field
+///     holds sixteen units) - which is exactly why the manual's own
+///     tables use a coarse PRESC and small SCLL/SCLH. This function
+///     therefore walks PRESC from 0 up and takes the FIRST value at which
+///     every field fits, which gives the finest resolution the four-bit
+///     delays allow.
+///
+/// WHAT IT DOES NOT DO is reproduce the manual's own register words: its
+/// tables are hand-picked, and for the same times there are several legal
+/// (PRESC, SCLL, SCLH) triples. What it reproduces is the TIMES - tSCLL,
+/// tSCLH and tSCLDEL come out equal to the tables' at every kernel clock
+/// they cover - while SDADEL comes out at the inequality's own minimum
+/// where the tables are more generous. Both are stated in the doc and
+/// pinned by the static_asserts below.
+///
+/// Returns nullopt when the kernel clock is below ES0548 2.10.1's floor
+/// for this speed, when 32.4.3's own conditions are not met, when the
+/// period leaves no room after the tSYNC budget, or when no prescaler
+/// makes every field fit. A speed that cannot be produced is REFUSED and
+/// never approximated: a bus run at a rate nobody asked for is a fault
+/// the caller must see.
 constexpr std::optional<I2cTiming> i2c_timing_for(uint32_t kernel_hz, I2cSpeed s,
                                                   const I2cFilters& filters,
                                                   const I2cBusTiming& bus) {
@@ -778,10 +774,9 @@ constexpr bool i2c_hold_upper_ok(uint32_t kernel_hz, const I2cTiming& t,
  * hold; TIMEOUTA with TIDLE = 1 watches both lines high (bus idle
  * detection); and TIMEOUTB watches THIS peripheral's OWN cumulative
  * stretch - tLOW:MEXT in controller mode, tLOW:SEXT in target mode
- * (32.9.6's own field description). The samc21's SERCOM had only the
- * second kind, which is why samc21/i2c.md records that a host's SMBus
- * time-outs police the host's own hold and nothing else; this block has
- * both kinds and the bench measures them apart.
+ * (32.9.6's own field description). A block with only the second kind
+ * could police nothing but its own hold; this one has both, and the
+ * bench measures them apart.
  *
  * The register's own arithmetic note: 32.9.6 prints TIMEOUTB's formula
  * as "tLOW:EXT = (TIMEOUTB + TIDLE = 01) x 2048 x tI2CCLK", which is
@@ -1028,7 +1023,7 @@ struct I2c {
 
     /// The DMAMUX request ids of this instance (table 56), published BY
     /// THE PERIPHERAL - stm32g0/dma.hpp takes a plain number and knows
-    /// nothing about I2Cs (the EVSYS ruling, kept).
+    /// nothing about I2Cs.
     static constexpr uint8_t dma_rx_request() { return i2c_dma_rx_request(n); }
     static constexpr uint8_t dma_tx_request() { return i2c_dma_tx_request(n); }
     /// The two data registers, which unlike the SPI's are SEPARATE - a
@@ -1093,24 +1088,22 @@ struct I2c {
 
     static void enable() { regs().CR1 = regs().CR1 | I2C_CR1_PE; }
 
-    /**
-     * 32.4.6's RESET, and the only way this driver turns the peripheral
-     * off: write PE = 0, check PE = 0, write PE = 1 is the chapter's own
-     * three-step (PE must stay low for at least three APB cycles), and
-     * this verb is its first two steps.
-     *
-     * WHAT IT DOES: releases SCL and SDA, resets the state machines,
-     * clears CR2's START, STOP, PECBYTE and NACK, and clears every ISR
-     * flag - TXE going back to 1, PECR to 0.
-     * WHAT IT KEEPS: every configuration register, which is CR1's other
-     * bits, OAR1, OAR2, TIMINGR, TIMEOUTR and the rest of CR2. That is
-     * why enable() alone brings the same peripheral back and why
-     * recover() needs no reconfiguration.
-     *
-     * @return false only if PE would not read back clear (a bus clock
-     * that is off, and nothing else) - an engine that reports is worth
-     * more than one that hangs.
-     */
+    /// 32.4.6's RESET, and the only way this driver turns the peripheral
+    /// off: write PE = 0, check PE = 0, write PE = 1 is the chapter's own
+    /// three-step (PE must stay low for at least three APB cycles), and
+    /// this verb is its first two steps.
+    ///
+    /// WHAT IT DOES: releases SCL and SDA, resets the state machines,
+    /// clears CR2's START, STOP, PECBYTE and NACK, and clears every ISR
+    /// flag - TXE going back to 1, PECR to 0.
+    /// WHAT IT KEEPS: every configuration register, which is CR1's other
+    /// bits, OAR1, OAR2, TIMINGR, TIMEOUTR and the rest of CR2. That is
+    /// why enable() alone brings the same peripheral back and why
+    /// recover() needs no reconfiguration.
+    ///
+    /// Returns false only if PE would not read back clear (a bus clock
+    /// that is off, and nothing else) - an engine that reports is worth
+    /// more than one that hangs.
     static bool disable() {
         regs().CR1 = regs().CR1 & ~I2C_CR1_PE;
         uint32_t left = 1000u;
@@ -1301,9 +1294,9 @@ struct I2c {
      * store that raises AUTOEND before START is read as a request to end
      * THAT transfer - the peripheral sends the STOP at once and START,
      * written a cycle later, opens a whole new tenure instead of
-     * restarting this one. test_stm32_i2c's ISR trace caught it: TC then
-     * STOPF with no second address match at the client, where a repeated
-     * START owes two.
+     * restarting this one. An ISR trace shows it plainly: TC then STOPF
+     * with no second address match at the client, where a repeated START
+     * owes two.
      *
      * So the engine uses THIS verb and transfer() is for a caller that
      * means to prepare CR2 and launch later - legal exactly when the bus
@@ -1671,9 +1664,8 @@ constexpr bool i2c_engines_distinct() {
     }
 }
 
-/// A DMA transfer error as a BusDone status - the first engine-defined
-/// code bus_master.hpp reserves, spelled the way samc21/spi.hpp and
-/// stm32g0/spi.hpp spell theirs. i2c_bus.hpp's four wire codes sit at
+/// A DMA transfer error as a BusDone status: an engine-defined code
+/// bus_master.hpp reserves. i2c_bus.hpp's four wire codes sit at
 /// bus_engine_status + 0..3, so this one takes the next.
 inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
 
@@ -1689,9 +1681,9 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * wire: the address phase, the repeated START of a write-then-read, the
  * byte pump and the status vocabulary.
  *
- * THE TRANSACTION DESCRIPTOR IS THE OTHER TWO TARGETS' VERBATIM -
+ * THE TRANSACTION DESCRIPTOR IS EVERY TARGET'S -
  * {addr, tx span, tx_len, rx span, rx_len, reply, speed} - so a device
- * client written against avrdx/twi.hpp compiles here untouched. One
+ * client written against the contract compiles here untouched. One
  * request is ONE BUS TENURE in the four shapes I2C devices use:
  *
  *   write            tx set, rx_len 0    S addr+W data... P
@@ -1799,34 +1791,32 @@ public:
 
     // ---- lifecycle ----------------------------------------------------------
 
-    /**
-     * @brief Bring the instance up as a bus host.
-     *
-     * `clock` is the app's brio::Clock tag; the timing arithmetic is
-     * solved against the KERNEL clock, which is `select`ed here and may
-     * be PCLK, SYSCLK or HSI16 on an instance that has the multiplexer
-     * (I2C1 always, I2C2 on the G0B1/G0C1). HSI16 is worth choosing for
-     * two reasons and the bench uses both: it is the only kernel clock a
-     * wake from Stop accepts, and it keeps the bus alive at a core rate
-     * ES0548 2.10.1 would otherwise refuse - at a 2 MHz core NO speed of
-     * the vocabulary is legal on PCLK, and all three are on HSI16.
-     *
-     * `bus` is the BUS'S own edges and the SCL detection budget, exactly
-     * as `rise_ns` is on the other two targets: a rise time the bus does
-     * not have lands tSCLL below the specification floor by the
-     * difference. Nullopt (the default) means "the standard's own
-     * numbers and the manual's own tSYNC budget for each mode", which
-     * reproduces tables 172..174.
-     *
-     * The three speeds' TIMINGR values are resolved here (and at
-     * rebase()); one this kernel clock cannot produce is marked
-     * unreachable - speed_ok() tells, and a Request naming it is
-     * answered i2c_rejected rather than run at a rate nobody asked for
-     * (the samc21's refused-never-slowed rule).
-     *
-     * @return false when not even standard_100k is reachable, or when
-     * the boot configuration is refused.
-     */
+    /// Bring the instance up as a bus host.
+    ///
+    /// `clock` is the app's brio::Clock tag; the timing arithmetic is
+    /// solved against the KERNEL clock, which is `select`ed here and may
+    /// be PCLK, SYSCLK or HSI16 on an instance that has the multiplexer
+    /// (I2C1 always, I2C2 on the G0B1/G0C1). HSI16 is worth choosing for
+    /// two reasons and the bench uses both: it is the only kernel clock a
+    /// wake from Stop accepts, and it keeps the bus alive at a core rate
+    /// ES0548 2.10.1 would otherwise refuse - at a 2 MHz core NO speed of
+    /// the vocabulary is legal on PCLK, and all three are on HSI16.
+    ///
+    /// `bus` is the BUS'S own edges and the SCL detection budget: a rise
+    /// time the bus does not have lands tSCLL below the specification
+    /// floor by the difference. Nullopt (the default) means "the
+    /// standard's own numbers and the manual's own tSYNC budget for each
+    /// mode", which
+    /// reproduces tables 172..174.
+    ///
+    /// The three speeds' TIMINGR values are resolved here (and at
+    /// rebase()); one this kernel clock cannot produce is marked
+    /// unreachable - speed_ok() tells, and a Request naming it is
+    /// answered i2c_rejected rather than run at a rate nobody asked
+    /// for: refused, never silently slowed.
+    ///
+    /// Returns false when not even standard_100k is reachable, or when
+    /// the boot configuration is refused.
     template <typename Clock>
     static bool init(Clock clock, I2cClock kernel = I2cClock::pclk,
                      const I2cFilters& f = {},
@@ -1884,25 +1874,23 @@ public:
         return true;
     }
 
-    /**
-     * @brief The core clock changed (DynamicClock fan-out): re-solve the
-     * three speeds' TIMINGR values against the new KERNEL rate.
-     *
-     * A port on HSI16 FOLDS TO NOTHING - its kernel clock did not move -
-     * which is the whole reason a bus can outlive a rate change that
-     * would otherwise refuse it. A speed this kernel clock cannot
-     * produce is marked unreachable, not an error: speed_ok() answers,
-     * and only a request naming it is refused.
-     *
-     * THE BUS MUST BE IDLE: TIMINGR is PE-gated, so applying a new value
-     * costs a PE cycle, and a PE cycle mid-tenure releases both lines.
-     *
-     * VOID, because util/clock.hpp's ClockUser concept says so - the
-     * fan-out has no caller to report to. What a rate change can COST is
-     * asked afterwards, and speed_ok() is the verb: at 2 MHz on PCLK it
-     * answers false for all three speeds, which is the whole finding of
-     * this driver's ladder.
-     */
+    /// The core clock changed (DynamicClock fan-out): re-solve the
+    /// three speeds' TIMINGR values against the new KERNEL rate.
+    ///
+    /// A port on HSI16 FOLDS TO NOTHING - its kernel clock did not move -
+    /// which is the whole reason a bus can outlive a rate change that
+    /// would otherwise refuse it. A speed this kernel clock cannot
+    /// produce is marked unreachable, not an error: speed_ok() answers,
+    /// and only a request naming it is refused.
+    ///
+    /// THE BUS MUST BE IDLE: TIMINGR is PE-gated, so applying a new value
+    /// costs a PE cycle, and a PE cycle mid-tenure releases both lines.
+    ///
+    /// VOID, because util/clock.hpp's ClockUser concept says so - the
+    /// fan-out has no caller to report to. What a rate change can COST is
+    /// asked afterwards, and speed_ok() is the verb: at 2 MHz on PCLK it
+    /// answers false for all three speeds, which is the whole finding of
+    /// this driver's ladder.
     static void rebase(uint32_t hz) {
         pclk_hz_ = hz;
         ker_hz_ = on_hsi16_ ? 16'000'000UL : hz;
@@ -1962,13 +1950,12 @@ public:
 
     // ---- the transfer -------------------------------------------------------
 
-    /**
-     * @brief Begin one bus tenure (called by I2cBus from main context).
-     * @return false ALWAYS on success - the tenure runs on the ISR and a
-     * TransferDone{status()} follows - and true only for the degenerate
-     * failure the reply must not wait for: a speed this kernel clock
-     * cannot produce. The avrdx TwiHost contract.
-     */
+    /// Begin one bus tenure (called by I2cBus from main context).
+    /// Returns false ALWAYS on success - the tenure runs on the ISR and a
+    /// TransferDone{status()} follows - and true only for the degenerate
+    /// failure the reply must not wait for: a speed this kernel clock
+    /// cannot produce. That is the I2cHost contract
+    /// (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
         req_ = r;
         pos_ = 0;
@@ -2008,11 +1995,9 @@ public:
     /// TransferDone payload.
     static uint8_t status() { return status_; }
 
-    /**
-     * @brief The instance's interrupt body - call from its vector.
-     * @return true when the tenure just completed: the edge on which the
-     * app's glue posts TransferDone to the bus AO.
-     */
+    /// The instance's interrupt body - call from its vector.
+    /// Returns true when the tenure just completed: the edge on which the
+    /// app's glue posts TransferDone to the bus AO.
     [[gnu::always_inline]] static bool isr() {
         const uint32_t p = S::pending();
         if (p == 0u) {
@@ -2020,12 +2005,9 @@ public:
         }
         if (phase_ == Phase::idle) {
             // A flag with no tenure owning it. SWEEP IT, or a level
-            // holds the NVIC line and the handler storms - the samc21's
-            // first-version bug, met again here in this chapter's own
-            // clothes.
+            // holds the NVIC line and the handler storms.
             //
-            // AND A SWEEP IS NOT ENOUGH ON THIS PERIPHERAL, which is the
-            // finding that cost this suite a wedged board: TC and TCR
+            // AND A SWEEP IS NOT ENOUGH ON THIS PERIPHERAL: TC and TCR
             // HAVE NO ICR BIT. 32.9.8's clear register has one bit for
             // ADDR, NACKF, STOPF and each of the six errors and NOTHING
             // for the two transfer-complete flags, because the chapter
@@ -2155,17 +2137,15 @@ public:
         return false;
     }
 
-    /**
-     * @brief The DMA channels' interrupt body - call from whichever
-     * vector each channel reports on. Compiles away on an engineless
-     * host.
-     *
-     * A transfer error on either channel ends the tenure with
-     * i2c_dma_fault and a software STOP, so the bus is released rather
-     * than left to a channel that will never be served again.
-     *
-     * @return true when the tenure just completed that way.
-     */
+    /// The DMA channels' interrupt body - call from whichever
+    /// vector each channel reports on. Compiles away on an engineless
+    /// host.
+    ///
+    /// A transfer error on either channel ends the tenure with
+    /// i2c_dma_fault and a software STOP, so the bus is released rather
+    /// than left to a channel that will never be served again.
+    ///
+    /// Returns true when the tenure just completed that way.
     [[gnu::always_inline]] static bool dma_isr() {
         if constexpr (has_engines) {
             const uint8_t tx = TxEngine::service();
@@ -2193,26 +2173,23 @@ public:
         return false;
     }
 
-    /**
-     * @brief The classic bus unstick: nine SCL pulses and a STOP, by
-     * hand, open-drain, with the pads reclaimed from the peripheral for
-     * the duration - avrdx/twi.hpp's and samc21/i2c.hpp's verb ported to
-     * this silicon. RECOVER() FIXES THE PERIPHERAL, THIS FIXES THE WIRE.
-     *
-     * @return the number of pulses it took a stuck client to release SDA
-     * (0 = the wire was never stuck), or 0xFF when nine pulses and a
-     * STOP left SDA still low - a short, not a client.
-     *
-     * A HEALTHY WIRE IS LEFT ALONE: SDA already high means nothing is
-     * stuck, and zero pulses is both the answer and the action (the
-     * samc21's first version pulsed first and asked after, so a clean bus
-     * read "released at pulse 1" and nine spurious clocks went out).
-     */
+    /// The classic bus unstick: nine SCL pulses and a STOP, by
+    /// hand, open-drain, with the pads reclaimed from the peripheral for
+    /// the duration. RECOVER() FIXES THE PERIPHERAL, THIS FIXES THE
+    /// WIRE.
+    ///
+    /// Returns the number of pulses it took a stuck client to release SDA
+    /// (0 = the wire was never stuck), or 0xFF when nine pulses and a
+    /// STOP left SDA still low - a short, not a client.
+    ///
+    /// A HEALTHY WIRE IS LEFT ALONE: SDA already high means nothing is
+    /// stuck, and zero pulses is both the answer and the action. Pulsing
+    /// first and asking after would report "released at pulse 1" on a
+    /// clean bus and put nine spurious clocks on it.
     static uint8_t unstick() {
         Nvic::disable(S::irq());
         // The pads back to GPIO, OPEN DRAIN with ODR high: releasing is
-        // the pull-ups' job and driving low is ours - the same technique
-        // on all three architectures, in this one's clothes.
+        // the pull-ups' job and driving low is ours.
         SclPin::set();
         SdaPin::set();
         SclPin::output(true, {.open_drain = true});
@@ -2256,24 +2233,22 @@ public:
         return released_at == 0xFF ? 0u : released_at;
     }
 
-    /**
-     * @brief Put the ENGINE back where start() is legal - the verb a
-     * timed I2cBus calls on a tenure that never answered
-     * (util/bus_master.hpp).
-     *
-     * It is 32.4.6's PE cycle and nothing more, because 32.4.6 is
-     * exactly what the chapter offers for this: "restores the normal
-     * operation of the I2C peripheral in case of a deadlock, by toggling
-     * the PE bit". The cycle releases both lines, resets the state
-     * machines and clears every flag - and KEEPS every configuration
-     * register, so the timings, the filters and the pads survive it and
-     * nothing is reconfigured.
-     *
-     * THE WIRE IS NOT ITS JOB: a client still holding SDA makes the next
-     * tenure report, and unstick() is the wire's verb.
-     *
-     * @return false when PE would not read back clear.
-     */
+    /// Put the ENGINE back where start() is legal - the verb a
+    /// timed I2cBus calls on a tenure that never answered
+    /// (util/bus_master.hpp).
+    ///
+    /// It is 32.4.6's PE cycle and nothing more, because 32.4.6 is
+    /// exactly what the chapter offers for this: "restores the normal
+    /// operation of the I2C peripheral in case of a deadlock, by toggling
+    /// the PE bit". The cycle releases both lines, resets the state
+    /// machines and clears every flag - and KEEPS every configuration
+    /// register, so the timings, the filters and the pads survive it and
+    /// nothing is reconfigured.
+    ///
+    /// THE WIRE IS NOT ITS JOB: a client still holding SDA makes the next
+    /// tenure report, and unstick() is the wire's verb.
+    ///
+    /// Returns false when PE would not read back clear.
     static bool recover() {
         Nvic::disable(S::irq());
         phase_ = Phase::idle;
@@ -2421,18 +2396,16 @@ public:
     using Resource = S;
     static constexpr I2cPins pin_pads = pins;
 
-    /**
-     * @brief Bring the instance up as a bus target.
-     *
-     * A CLIENT NEEDS TIMINGR TOO, and that surprises people: SDADEL and
-     * SCLDEL are the data hold and setup delays a TARGET applies, and
-     * 32.4.8 makes the minimum stretch after every falling edge
-     * [(SDADEL + SCLDEL + 1) x (PRESC + 1) + 1] kernel periods. SCLL and
-     * SCLH are the controller's alone and are ignored here. So `speed`
-     * names the row of the standard the delays are solved against - the
-     * FASTEST bus this target expects to sit on - and not a rate it
-     * generates.
-     */
+    /// Bring the instance up as a bus target.
+    ///
+    /// A CLIENT NEEDS TIMINGR TOO, and that surprises people: SDADEL and
+    /// SCLDEL are the data hold and setup delays a TARGET applies, and
+    /// 32.4.8 makes the minimum stretch after every falling edge
+    /// [(SDADEL + SCLDEL + 1) x (PRESC + 1) + 1] kernel periods. SCLL and
+    /// SCLH are the controller's alone and are ignored here. So `speed`
+    /// names the row of the standard the delays are solved against - the
+    /// FASTEST bus this target expects to sit on - and not a rate it
+    /// generates.
     template <typename Clock>
     static bool init(Clock clock, const I2cAddressConfig& addr,
                      I2cSpeed speed = I2cSpeed::standard_100k,
@@ -2500,10 +2473,10 @@ public:
      * call.
      *
      * A TARGET CANNOT NACK ITS OWN ADDRESS on this peripheral: the
-     * address has already been acknowledged by the time ADDR rises
-     * (unlike the SAM's SERCOM, whose AMATCH is answered with an ACK
-     * bit). Refusing a tenure is therefore a DATA-phase act - NACK the
-     * first byte - and this verb's only job is to let the wire go.
+     * address has already been acknowledged by the time ADDR rises, and
+     * the flag is a report rather than a decision point with an ACK bit
+     * of its own. Refusing a tenure is therefore a DATA-phase act - NACK
+     * the first byte - and this verb's only job is to let the wire go.
      */
     static void answer_address() { S::clear(I2cClear::addr); }
 

@@ -11,11 +11,11 @@ including this one, with no workaround offered**. Driver:
 negative under `tools/check_samc21.sh`; the bench suite is
 `test_samc_freqm`.
 
-There is no AVR analog: on that family a clock is measured by counting
+The AVR DA/DB has no counterpart: there a clock is measured by counting
 its edges in a timer with the CPU in the loop. This block does it in
-hardware, and it earns its place because everything the clock work ahead
-must characterize - the 32 kHz oscillators, the FDPLL, a crystal against
-the internal RC - is exactly a ratio between two generators.
+hardware, and it earns its place because everything worth
+characterizing here - the 32 kHz oscillators, the FDPLL, a crystal
+against the internal RC - is exactly a ratio between two generators.
 
 ## What the silicon does
 
@@ -129,23 +129,21 @@ const uint32_t slow_hz = (uint64_t(refnum) * 48'000'000) / *count;
 
 ## Bench findings
 
-From `test_samc_freqm` (4 letters, 25 verdicts, 25/25). Nothing to wire,
-and this suite could not need wires in principle: every clock it
-measures is inside the chip. It is also the first thing in this stratum
-to run a GCLK generator other than 0 on silicon.
+From `test_samc_freqm` (4 letters, 25 verdicts). Nothing to wire, and
+this suite could not need wires in principle: every clock it measures is
+inside the chip.
 
 - **The measurement agrees with a second route to three parts in ten
   thousand - but the two routes SHARE THE SCALE.** OSCULP32K measured
   here against OSC48M reads **32957 Hz**; `test_samc_platform` letter c
-  measured the same oscillator through the watchdog's early warning
-  timed against SysTick and implies 32960 Hz, 3 Hz apart. This page
-  first read that as two witnesses sharing no mechanism. IT IS NOT:
-  SysTick runs on CLK_MAIN, which is OSC48M, so both numbers are ratios
-  against the SAME RC times a nominal 48 MHz. What the 3 Hz agreement
-  proves is the CONSISTENCY of the two measurement chains, not the
-  frequency - and the crystal, measured later, says OSC48M is about
-  5100 ppm SLOW on this die ([clock.md](clock.md)), which rescales both
-  readings to about **32907 Hz**.
+  measures the same oscillator through the watchdog's early warning
+  timed against SysTick and implies 32960 Hz, 3 Hz apart. They are not
+  two witnesses sharing no mechanism: SysTick runs on CLK_MAIN, which
+  is OSC48M, so both numbers are ratios against the same RC times a
+  nominal 48 MHz. What the 3 Hz agreement proves is the consistency of
+  the two measurement chains, not the frequency - and the crystal says
+  OSC48M is about 5100 ppm slow on this die ([clock.md](clock.md)),
+  which rescales both readings to about **32907 Hz**.
 - **OSCULP32K runs fast of its nominal 32768 Hz** - about 5 to 6 per
   mille on the OSC48M-nominal scale these suites report in, about 4 per
   mille on the crystal's scale ([clock.md](clock.md)). Every timeout
@@ -157,22 +155,21 @@ to run a GCLK generator other than 0 on silicon.
   is wrong for this silicon.
 - **REFNUM scales the count, to within the reference's own wander.**
   Doubling REFNUM from 64 to 128 doubles the count to within 0..9 parts
-  in 10000 across runs, occasionally more. A permille band on that
-  verdict was too tight and made it FLAKY; the band is the oscillator's
-  and not the meter's, and an arithmetic fault would miss by a factor
-  rather than by a third of a percent. Through a FOUR-cycle window the
+  in 10000 across runs, occasionally more. A per mille band on that
+  verdict is too tight to hold: the spread is the oscillator's and not
+  the meter's, and an arithmetic fault would miss by a factor rather
+  than by a third of a percent. Through a FOUR-cycle window the
   same test misses by anywhere from 0 to 34 parts in 10000 between runs,
   which is the same wander seen through too few of the reference's
-  cycles to average it. A ratio test is immune to the reference's absolute error but
-  not to its drift between the two measurements.
+  cycles to average it. A ratio test is immune to the reference's
+  absolute error but not to its drift between the two measurements.
 - **`refnum_for()`'s budget is where the overflow really is**: a
   measurement at the computed REFNUM completes with its count under
   2^24, and OSC48M against OSCULP32K saturates the field at 255 before
   the overflow edge is reachable at all.
 - **An initialization order that looks arbitrary is not.** Resetting the
   block before its GCLK channels are connected leaves SYNCBUSY.SWRST
-  standing forever, and every measurement then returns nothing - which
-  is exactly how the first version of this driver failed here. SWRST is
+  standing forever, and every measurement then returns nothing: SWRST is
   synchronized into a clock domain those channels feed.
 
 
@@ -180,10 +177,10 @@ to run a GCLK generator other than 0 on silicon.
   RUNSTDBY bit and does not need one: with the measured clock on the
   crystal generator and the REFERENCE on OSCULP32K - the opposite of
   every other use of the meter here, and the point, since the window is
-  REFNUM *reference* periods - a measurement started awake ran through
-  a STANDBY and its DONE interrupt was the wake. REFNUM 128 gives a
-  3878 us window; the sleep lasted 3895 us and the answer (24004949 Hz)
-  agreed with the same measurement taken awake (23987157 Hz). Details
+  REFNUM *reference* periods - a measurement started awake runs through
+  a standby and its DONE interrupt is the wake. REFNUM 128 gives a
+  3878 us window; the sleep lasts 3895 us and the answer (24004949 Hz)
+  agrees with the same measurement taken awake (23987157 Hz). Details
   in [platform.md](platform.md), "Sleep, peripheral by peripheral".
 
 ## Not covered yet

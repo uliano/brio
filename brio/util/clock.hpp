@@ -3,8 +3,8 @@
  *
  * The target-independent side of brio's clock model: the contracts and
  * helpers every target's clock type and every clocked driver share.
- * Nothing here knows an oscillator or a prescaler - that is the target's
- * clock.hpp (avrdx/clock.hpp today). See docs/design/clock.md.
+ * Nothing here knows an oscillator or a prescaler - that is each
+ * target's own clock.hpp. See docs/design/clock.md.
  *
  * A clock type C is either
  *  - static:  `C::is_static == true`, `C::hz` a compile-time constant;

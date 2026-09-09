@@ -98,8 +98,8 @@ using Led = Pin<'B', 23>;
 /// Which transport currently owns SERCOM5. Only one is ever initialized.
 bool engined = false;
 
-/// The rates the menu offers. Everything from 460800 up is above what
-/// the AVR bench ever ran; 3 Mbaud is the generator's own ceiling here.
+/// The rates the menu offers. 3 Mbaud is the baud generator's own
+/// ceiling here (f_ref/16 at 48 MHz).
 constexpr uint32_t rates[] = {
     115200, 460800, 921600, 1'000'000,
     1'500'000, 2'000'000, 2'500'000, 3'000'000,

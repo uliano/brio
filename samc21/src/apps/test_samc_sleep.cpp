@@ -906,8 +906,7 @@ void tc_instrument() {
             print(serial, "  ", l.what, ": counted ", l.counted, " of ", l.rtc,
                   " RTC ticks, awake ", fine_us(l.fine), " us", crlf);
         }
-        // THE FINDING, and it is the same one the AVR pass made about a
-        // different silicon: THE PERIPHERAL'S OWN RUNSTDBY IS THE WHOLE
+        // THE FINDING: THE PERIPHERAL'S OWN RUNSTDBY IS THE WHOLE
         // REQUEST. 19.6.3.3.2 calls the mechanism SleepWalking and
         // describes it from the top down ("a peripheral can run during
         // standby and request its GCLK asynchronous clock, which will
@@ -1363,9 +1362,9 @@ void tf_survivors() {
                   "should stop, and on this silicon it does not",
                   xl[0].up && xl[1].up && xl[2].up && xl[0].tick_us == 0u &&
                       xl[1].tick_us == 0u && xl[2].tick_us == 0u);
-    // Which is also why the AVR's biggest sleep bill has no counterpart
-    // here: there a 24 MHz crystal cost 1.77 ms to restart out of every
-    // deep sleep, and no profile touched it.
+    // Which is why a crystal restart is not part of this board's sleep
+    // bill at all: a 24 MHz crystal that DID stop would cost about
+    // 1.77 ms to come back, out of every deep sleep.
     print(serial, "  so a standby on this board costs NO crystal restart, where "
           "the same crystal on the first target cost 1.77 ms out of every deep "
           "sleep", crlf);

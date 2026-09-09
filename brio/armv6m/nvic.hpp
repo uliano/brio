@@ -5,11 +5,9 @@
  * NVIC (enable / disable / pend one peripheral line, and its priority)
  * plus the single global mask every brio critical section rides on,
  * PRIMASK. Nothing in this file knows a vendor: it is the part of a
- * Cortex-M0+ target that ARM designed, and it became a stratum of its
- * own at the SECOND ARM family in brio, as the naming rule foresaw -
- * `samc21/nvic.hpp` and `stm32g0/nvic.hpp` were twins line for line, and
- * this is that one file, with the two families' headers reduced to the
- * include that selects the device.
+ * Cortex-M0+ target that ARM designed. Each family's own nvic.hpp -
+ * `samc21/nvic.hpp`, `stm32g0/nvic.hpp` - is the include that selects
+ * the device, and then this file.
  *
  * WHAT A FAMILY OWES BEFORE INCLUDING THIS: its device header. The
  * CMSIS core header this file relies on (core_cm0plus.h: the PRIMASK
@@ -27,8 +25,8 @@
  *
  * NOT here (declared, not built): the fault/exception configuration,
  * NVIC_SystemReset and the vector-table relocation - they belong with
- * each family's reset/panic pass (a system reset request is core, the
- * reset CAUSE is the vendor's).
+ * each family's reset and panic handling (a system reset request is core,
+ * the reset CAUSE is the vendor's).
  */
 
 #pragma once
@@ -42,8 +40,8 @@
 namespace brio {
 
 /// Number of distinct NVIC priority levels: the core implements
-/// __NVIC_PRIO_BITS high bits of an 8-bit field (2 on both families so
-/// far -> four levels, 0 the most urgent). The device header is the
+/// __NVIC_PRIO_BITS high bits of an 8-bit field (2 on both families here
+/// -> four levels, 0 the most urgent). The device header is the
 /// authority.
 inline constexpr uint8_t irq_priority_levels = 1u << __NVIC_PRIO_BITS;
 

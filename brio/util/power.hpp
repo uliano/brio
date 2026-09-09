@@ -5,8 +5,8 @@
  * and how everyone with something at stake gets a say.
  *
  * The mechanism - which sleep mode exists, what it gates, what wakes it
- * - belongs to the target (avrdx/sleep.hpp on AVR DA/DB). What belongs
- * here is the POLICY shape, and it is target-independent: an ordered
+ * - belongs to the target (its own sleep.hpp). What belongs here is the
+ * POLICY shape, and it is target-independent: an ordered
  * ladder of depths, a site that arms one, a round of votes among the
  * stakeholders, and standing restrictions for the stakeholders that
  * cannot vote because they live in an interrupt.
@@ -28,18 +28,18 @@
  * kernel hook - the manager arms, its dispatch returns, the kernel loop
  * finds every queue empty and calls the platform's idle(), and THAT is
  * the sleep. A target whose idle path would otherwise impose its own
- * shallow mode must let an already-armed deeper one stand (avrdx's does,
- * see avrdx/platform.hpp).
+ * shallow mode must let an already-armed deeper one stand; each
+ * target's platform.hpp says how it does.
  *
- * THE DEADLINE GUARD. Leaving a deep mode is not free - on AVR DA/DB it
- * costs the oscillator's restart plus a separate ~290 us of voltage
- * regulator, and beside a crystal 1.77 ms. Stopping for less than that
- * is a losing trade, so a request for standby or deeper is REFUSED when
- * the nearest armed time event is nearer than `min_deep_ticks`
- * (kernel/time_event.hpp gained ticks_to_next() for exactly this
- * question). The default, two ticks, is that worst case expressed in the
- * coarsest timebase brio runs on; an app with a faster tick or a
- * cheaper wake sets its own.
+ * THE DEADLINE GUARD. Leaving a deep mode is not free: it costs the
+ * oscillator's restart, and on some silicon a separate voltage-regulator
+ * bill on top (measured: ~290 us, and 1.77 ms beside a crystal).
+ * Stopping for less than that is a losing trade, so a request for
+ * standby or deeper is REFUSED when the nearest armed time event is
+ * nearer than `min_deep_ticks` (kernel/time_event.hpp's ticks_to_next()
+ * answers exactly this question). The default, two ticks, is that worst
+ * case expressed in the coarsest timebase brio runs on; an app with a
+ * faster tick or a cheaper wake sets its own.
  *
  * THE FIRST EVENT AFTER A WAKE DISARMS. The manager does not sleep and
  * does not wake anyone: the CPU comes back on an interrupt, that

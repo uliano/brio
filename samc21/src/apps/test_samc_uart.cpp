@@ -6,12 +6,10 @@
 // tools/bench.py judges.
 //
 // WHAT THIS SUITE IS FOR. samc21/sercom.hpp's Uart can be built in four
-// shapes - interrupt or DMA on each direction, independently - and until
-// now nothing verified the BYTES through any of them: test_samc_dma
-// exercises the DMAC's mechanics and serial_speed measures throughput,
-// but neither checks a stream against what was sent. The letters below do
-// exactly that, on both sides at once, with a pattern in which a lost,
-// duplicated or reordered byte is IDENTIFIED and not merely counted.
+// shapes - interrupt or DMA on each direction, independently - and what
+// is checked here is the BYTES through each of them, on both sides at
+// once, with a pattern in which a lost, duplicated or reordered byte is
+// IDENTIFIED and not merely counted.
 //
 // THE PATTERN is a 32-bit xorshift, low byte per step, seeded the same at
 // both ends (tools/uart_stress.py runs the identical arithmetic). The
@@ -20,8 +18,8 @@
 // ends, and the position of the first wrong byte is a number.
 //
 // WHY MOST LETTERS NEED THE HOST. This SERCOM's only wire is the console
-// itself: there is no second port, no loop-back bit in this silicon (the
-// AVR's LBME has no twin here) and the bench has no jumpers. A byte can
+// itself: there is no second port, no loop-back bit in this silicon and
+// no jumper on the bench. A byte can
 // only be checked against something OUTSIDE the chip, so the letters that
 // stream traffic sit OUTSIDE z, driven by tools/uart_stress.py - which is
 // also the only thing that can speak a frame format the board is not
@@ -41,6 +39,25 @@
 //      read as payload and every count is a lie;
 //   4. the board hands the console back at 115200 8N1 and prints its
 //      verdicts.
+//
+// What is exercised, letter by letter - a..d need nothing outside the
+// board and are what z runs; e..p stream traffic and are driven by
+// tools/uart_stress.py:
+//   a  the baud generator's arithmetic
+//   b  every frame format, written and read back
+//   c  the transmit ring's contract under pressure
+//   d  the engines' compile-time and register facts
+//   e  echo through the plain interrupt transport
+//   f  echo with the DMA transmitter
+//   g  echo with the DMA receiver
+//   h  echo with both engines
+//   i  receive-only, sustained
+//   j  transmit-only, sustained
+//   k  the same traffic at 115200, 1 M and 3 Mbaud
+//   l  the frame-format matrix, host-driven
+//   m  a MISMATCHED frame and the recovery from it
+//   n  ring pressure: eager against lazy harvests
+//   p  bursty traffic with idle gaps
 //
 // build: boards = c21j
 // build: monitor_speed = 115200

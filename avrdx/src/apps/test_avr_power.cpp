@@ -15,14 +15,14 @@
 // timebase and the wake source, and a fake bus engine gives the arbiter
 // something to be busy with.
 //
-// UNLIKE EVERY OTHER SUITE HERE, THIS ONE RUNS THE KERNEL. The object
-// under test is an active object, so the rounds go through real queues,
-// real dispatch and the real Kernel pack (Probe, Bus, Pm) - only the
-// LOOP is the suite's: each test pumps Kernel::step() itself, and where
-// a sleep is the point it calls Kernel::idle_if_empty(), which is the
-// same hook run() would call. The console loop between tests is the
-// usual polled one and never sleeps, so a mode left armed by a test is
-// inert until the next quiesce() clears it.
+// THIS SUITE RUNS THE KERNEL. The object under test is an active
+// object, so the rounds go through real queues, real dispatch and the
+// real Kernel pack (Probe, Bus, Pm) - only the LOOP is the suite's:
+// each test pumps Kernel::step() itself, and where a sleep is the point
+// it calls Kernel::idle_if_empty(), which is the same hook run() would
+// call. The console loop between tests is the usual polled one and
+// never sleeps, so a mode left armed by a test is inert until the next
+// quiesce() clears it.
 //
 // PINS IT CLAIMS: none but the console (USART2 ALT1, PF4/PF5, 460800).
 //

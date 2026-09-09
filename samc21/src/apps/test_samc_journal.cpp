@@ -2,7 +2,7 @@
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // a serial console; `z` runs them all and prints the "ALL: N pass, M
-// fail" line tools/bench.py judges. Board C (ATSAMC21J18A), no wires.
+// fail" line tools/bench.py judges. No wires.
 //
 // WHAT IT IS ABOUT. samc21/nvm_flash.hpp partitions the 8 KB RWWEE array
 // into two storage classes: rows 0..27 are the block heap's
@@ -21,9 +21,8 @@
 //   c  the halves ping-pong on silicon: churn until a collection
 //      happens, watch the active half change, and prove every value
 //      came through it and through a fresh mount afterwards.
-//   d  what it costs, and the no-stall claim, in the shape
-//      test_samc_nvm letter d gives it: the polling turns the CPU
-//      completes INSIDE an RWWEE row erase.
+//   d  what it costs, and the no-stall claim: the polling turns the
+//      CPU completes INSIDE an RWWEE row erase.
 //   e  COEXISTENCE: a heap in rows 0..27 and the journal in the attic,
 //      both mounted, the heap's block byte-exact while the journal
 //      churns over it.
@@ -71,7 +70,7 @@ constexpr SysClock clock;
 // ---------------------------------------------------------------------------
 // The token letter p lives in
 //
-// INLINE, and in .noinit, for the two reasons test_samc_platform gives:
+// INLINE, and in .noinit, for two reasons:
 // the section must survive the crt, and gcc gives an inline variable with
 // a section attribute the COMDAT group a plain one does not get. Its
 // magic word is not decoration - table 18-1 has no SRAM row at all, so
@@ -189,7 +188,7 @@ constexpr Calibration calibration{-31415, 4001, 0x5A};
 constexpr uint32_t scratch_row = Nvm::rwwee_base;
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch (the one test_samc_nvm and test_samc_dma use)
+// A cycle-resolution stopwatch
 // ---------------------------------------------------------------------------
 uint32_t cycles_now() {
     const uint32_t reload = SysTick->LOAD;
@@ -216,8 +215,8 @@ void console_drain() {
 // ---------------------------------------------------------------------------
 // Payload helpers
 //
-// The buffers are VOLATILE for the reason the DMAC campaign paid for on
-// this target: they are read back from flash the CPU itself programmed
+// The buffers are VOLATILE for the usual reason on this target: they
+// are read back from flash the CPU itself programmed
 // through a side channel the optimizer cannot see, and gcc will fold such
 // a read-back into whatever was last stored.
 // ---------------------------------------------------------------------------
@@ -479,9 +478,9 @@ void td_cost() {
         return;
     }
 
-    // THE NO-STALL CLAIM, in the shape test_samc_nvm letter d gives it:
-    // the erase is issued by hand so that the POLLING TURNS between the
-    // command and READY are the measurement. The target is the bottom
+    // THE NO-STALL CLAIM: the erase is issued by hand so that the
+    // POLLING TURNS between the command and READY are the
+    // measurement. The target is the bottom
     // row of the HEAP's share, which the allocator (top-down) reaches
     // last - not a journal row, because the journal's own bookkeeping
     // must not be disturbed by a measurement.
@@ -573,8 +572,8 @@ void td_cost() {
 
     // The software timebase keeps up through all of it, which is the
     // other half of the no-stall story: SysTick_Handler is code in the
-    // MAIN array, and a main-array operation is what makes it go stale
-    // (test_samc_nvm letter m).
+    // MAIN array, and it is a MAIN-array operation - not an RWWEE one -
+    // that makes the timebase go stale.
     const uint32_t t0 = Ticker::ticks();
     const uint32_t k0 = cycles_now();
     for (uint8_t k = 0; k < 3; ++k) {

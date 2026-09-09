@@ -64,10 +64,10 @@ therefore spelled from the source.
 
 **The request vocabulary is not in any header of this pack.** Table 55
 numbers 77 request lines by peripheral, and the `DMAMUX_REQ_*` spellings
-live in ST's HAL/LL, which this project does not vendor. So the samc21
-EVSYS ruling applies unchanged: `dma.hpp` owns the FABRIC and takes a
-plain request id, and each peripheral publishes its own codes. The
-family fixture is where the two publishing drivers are held to one table.
+live in ST's HAL/LL, which this project does not vendor. So `dma.hpp`
+owns the FABRIC and takes a plain request id, and each peripheral
+publishes its own codes. The family fixture is where the two publishing
+drivers are held to one table.
 
 **A DMAMUX channel can do three more things than route.** With SE it
 holds the peripheral's request back until an edge arrives on one of 24
@@ -119,8 +119,8 @@ not 1, 2 or 4 bytes wide is a compile error at the engine that named it.
 ### Reading a channel's progress costs nothing
 
 CNDTR is a live register the controller decrements and software may read
-at any time (10.6.4). The SAM C21's driver had to SUSPEND a channel,
-read a write-back and validate it against an erratum that could corrupt
+at any time (10.6.4). The SAM C21's DMAC asks for a channel SUSPENDED,
+its write-back read and validated against an erratum that can corrupt
 it; there is no harvest ceremony on this silicon, and `DmaRxEngine::take()`
 is one register read and a subtraction.
 
@@ -137,10 +137,9 @@ overruns. `stm32g0/spi.hpp`'s engined host is their first user (a null
 and `test_stm32_spi` letter `i` is their proof.
 
 They are SIBLING VERBS and not a defaulted argument to `start()`, and
-the reason is measured on the other target: the samc21 campaign tried
-the defaulted argument first and it MOVED three pre-existing images,
-where the sibling restored byte-identity. Byte-identity outranks API
-economy (ruling 2026-09-02).
+the reason is measured on the SAM C21: a defaulted argument changes the
+code generated for the callers that never pass it, where a sibling verb
+adds nothing to them at all. Byte-identity outranks API economy.
 
 ### One example per use
 
@@ -196,24 +195,24 @@ extern "C" void DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQHandler() {
 
 ## The block stream's second implementation
 
-`util/block_stream.hpp` was written against the SAM C21 and BEFORE this
-implementation, on purpose, so that friction would show up as "this
-concept does not fit" instead of as silent divergence
-(`docs/design/block-stream.md`). Both concepts are satisfied here
-UNCHANGED - not one line of `util/` moved - and the interesting part is
-what the measurement said on the way.
+`util/block_stream.hpp` is written against the SAM C21 and deliberately
+predates this implementation, so that friction shows up as "this concept
+does not fit" instead of as silent divergence
+(`docs/design/block-stream.md`). Both concepts are satisfied here as
+written, and the measurements are what say why.
 
-**`BlockPlayer` fits circular mode exactly, and gains by it.** The SAM's
-controller has no circular mode, so its loop engine re-armed from a
+**`BlockPlayer` fits circular mode exactly, and gains by it.** The SAM
+C21's controller has no circular mode, so its loop engine re-arms from a
 completion interrupt: one interrupt per lap, and a window at every lap
-boundary in which the peripheral was unserved. Here CCR.CIRC reloads
+boundary in which the peripheral is unserved. Here CCR.CIRC reloads
 CNDTR and both current address registers in hardware, so the interrupt at
 the wrap only COUNTS the lap. Measured: a circular channel with its
 interrupt DISARMED and its NVIC line masked was still enabled 25 ms
 later with CNDTR moving, and the captured block was self-checking to the
 tick. The sentence in the design doc that says a player "publishes
 nothing per lap and `laps()` moving is the one fact that says the stream
-is alive" is exactly right here - and cheaper than it was there.
+is alive" is exactly right here - and cheaper than on a controller that
+has to re-arm.
 
 **`BlockSource` does NOT fit circular mode, and the reason is the
 doctrine rather than the API.** Circular plus the half-transfer flag
@@ -251,11 +250,11 @@ served LATE rather than lost; what can still be lost is a SECOND arrival
 inside one window, and that loss is the peripheral's own overrun flag to
 report - which is exactly where the contract already puts it.
 
-**No sentence of `docs/design/block-stream.md` had to change.** The one
-that this implementation makes sharper is the concepts' own framing:
-they are about BLOCKS and not about DMA, and the proof is that the
-same two concepts are met by a controller whose natural streaming mode is
-the one the contract cannot use.
+**The concepts hold here word for word** (`docs/design/block-stream.md`).
+What this implementation makes sharper is their own framing: they are
+about BLOCKS and not about DMA, and the proof is that the same two
+concepts are met by a controller whose natural streaming mode is the one
+the contract cannot use.
 
 ## Bench findings
 
@@ -264,15 +263,15 @@ wires.
 
 **A REQUEST IS A LEVEL SERVED ON ENABLE, NOT AN EDGE LATCHED ON THE
 RISE** - the opposite of the SAM C21's DMAC, and the reason this driver
-has no `kick()`, on any peripheral: the SPI campaign's engined host
+has no `kick()`, on any peripheral: `stm32g0/spi.hpp`'s engined host
 kicks nothing either, and its data phase moves whole with the channels
 merely enabled. Staged on USART1 brought up with its pads never claimed
 (so nothing leaves the die) and TXE therefore standing: a channel armed
 over that standing request moved its whole four-byte block with no
 software trigger of any kind, and the control - the same channel over the
 same standing TXE with CR3.DMAT clear - moved nothing at all. The SAM
-campaign's wedge (a channel enabled, its peripheral asking, and not one
-beat moving) has no analogue here.
+C21's wedge (a channel enabled, its peripheral asking, and not one beat
+moving) has no analogue here.
 
 **Two memory-to-memory channels ALTERNATE, and the software priority
 does not enter into it.** 10.4.4 says so in a clause easy to read past:
@@ -334,8 +333,8 @@ event mask set, moved ZERO words on a channel that the TIM14_OC trigger
 drove perfectly in the same letter. The data verdict is DECLINED with
 the finding printed. What this bench has not separated: whether the
 DMAMUX watches a signal SWIER does not drive, or whether a pad left in
-analog mode (which the EXTI campaign found blinds a line) blinds this
-path too.
+analog mode - which blinds an EXTI line ([exti.md](exti.md)) - blinds
+this path too.
 
 **EGE makes one channel pace another through the fabric alone.** With a
 multiplexer channel set to emit an event every four served requests and a
@@ -346,10 +345,10 @@ peripheral of its own and never sees an interrupt.
 **The console's own transmit engine saturates the wire, and at 115200 the
 per-byte feed costs nothing.** A kilobyte took 88.97 ms fed byte by byte
 (11510 B/s) and 88.98 ms fed in bulk (11508 B/s), against the 11520 B/s
-115200 8N1 carries. The samc21 campaign measured the per-byte pump losing a
-third of the wire - but it measured it at MEGABAUD; here the wire is five
-hundred times slower than the pump, the ring is always full when a block
-ends, and every block the engine gets is a long one.
+115200 8N1 carries. On the SAM C21 the per-byte pump loses a third of
+the wire, but at MEGABAUD; here the wire is five hundred times slower
+than the pump, the ring is always full when a block ends, and every
+block the engine gets is a long one.
 
 **The timer round trip.** An eight-entry duty table played into TIM2's
 CCR1 on its own update request, at a 16 kHz PWM, reads 521..522 per mille
@@ -372,10 +371,10 @@ than write into the block the caller held, and one `release()` brought
 the stream back.
 
 **The step verdict of that letter is FLAKY at about one run in eight**
-(2026-09-07: one failure in eight consecutive `z` runs of the same
-image, the other seven clean). What fails is the fine-grained one - "no
-sample is off the 32000-tick step" - and nothing else in the letter: the
-blocks arrive, the seams hold, the accounting agrees. The estimator is
+(one failure in eight consecutive `z` runs of the same image, the other
+seven clean). What fails is the fine-grained one - "no sample is off the
+32000-tick step" - and nothing else in the letter: the blocks arrive,
+the seams hold, the accounting agrees. The estimator is
 the tightest thing in the suite, an equality between consecutive
 free-running TIM2 readings taken by the DMA on TIM3's update, so a
 single late request shows as a whole failed verdict. It is recorded
@@ -421,9 +420,9 @@ The reason is not tidiness but a lost tally. A leg pumped at a rate the
 wire will not take leaves the host's operating system delivering the
 queue AFTER the board has gone back to 115200, and those bytes land in
 the console's receive ring, where the menu loop reads them as LETTERS.
-The board's closing "-> N pass" line was then read at the wrong rate and
-never seen, and the script reported "tally: None" - reproducibly, on a
-letter whose ten legs had all run and printed their figures.
+The board's closing "-> N pass" line is then read at the wrong rate and
+never seen, and the script reports "tally: None" - reproducibly, on a
+letter whose ten legs have all run and printed their figures.
 
 **AND IT IS THE HOST'S PUMP AND NOT THE BOARD'S RATE, staged with a
 control.** Letter `w` runs the same two rungs twice: with `--beyond-vcp`
@@ -437,12 +436,11 @@ runs).
 
 ### The synchronization block (letter `k`)
 
-dma.md carried this as built-but-never-run since the DMA campaign, and
-what it wanted was a stimulus that was already on the board: **table
-57's synchronization input 22 is TIM14_OC**, the same signal table 56
-offers the request generator as trigger input 22 and the same signal
-letter f already produces with no pad at all. So TIM3's update event is
-the REQUEST at 20 kHz and TIM14's OC1REF is the SYNC at 1 kHz.
+The stimulus this block needs is already on the board: **table 57's
+synchronization input 22 is TIM14_OC**, the same signal table 56 offers
+the request generator as trigger input 22 and the same signal letter `f`
+produces with no pad at all. So TIM3's update event is the REQUEST at
+20 kHz and TIM14's OC1REF is the SYNC at 1 kHz.
 
 In a five-millisecond window:
 
@@ -471,19 +469,17 @@ handler that clears `SOFx` is the thing that would hide it.
 
 **AND THE VECTOR IS NOT THIS LETTER'S TO ARM.** The DMAMUX overrun
 shares the third line with DMA1's channels 4..7, which is where this
-suite's own console engines live: enabling it is a no-op and disabling
-it afterwards takes the console's transmitter down with it. The first
-version of the letter did exactly that and the board went silent
-mid-letter.
+suite's own console engines live: enabling it is a no-op, and disabling
+it afterwards takes the console's transmitter down with it and leaves
+the board silent mid-letter.
 
-**The request generator's other two polarities**, which this document
-also listed: over ten TIM14 periods, rising moved 10 words, falling 10,
-both 20.
+**The request generator's other two polarities**: over ten TIM14
+periods, rising moves 10 words, falling 10, both 20.
 
 - **DMA2 is five channels and not one** (letter `m`): every one of them
   moves a block at every width, byte for byte. With DMA1's seven -
   1..5 the letters above, 6 and 7 the console's own transmit and receive
-  engines - all twelve channels of this part have now carried traffic.
+  engines - all twelve channels of this part carry traffic.
   DMAMUX's channel numbering runs straight through both controllers,
   DMA2's first being DMA1's count.
 - **10.4.5's first sense, run**: TIM6's update paces a channel that
@@ -506,8 +502,7 @@ both 20.
     and the very same block goes on afterwards.
   - The wake needs its VECTOR BOUND. A Stop left through an EXTI direct
     line lands in the handler, and with none bound it lands in
-    `Default_Handler` and never comes back - which is what the first
-    version of this letter did.
+    `Default_Handler` and never comes back.
 
 ## On the second silicon
 
@@ -551,7 +546,7 @@ REV_ID 0x1003). The controller here is **DMA1 with FIVE channels** and a
 DMAMUX with five channel multiplexers and four request generators, so
 DMA2's five channels (2 verdicts), the second bus master (1) and the
 peripheral-to-peripheral leg (1, which needs TIM4 and TIM6 and this part
-has neither) skip by name; the geometry verdict is now the cross-check
+has neither) skip by name; the geometry verdict is the cross-check
 "the multiplexer has exactly as many channels as the controllers have
 between them", which is one claim on all three parts.
 
@@ -587,7 +582,7 @@ silicon, as does `util/` entire.
 Driver gaps:
 
 - **Peripheral-to-peripheral transfers** in the sense of 10.4.5's first
-  bullet are reachable through the existing verbs and are now bench-run
+  bullet are reachable through the existing verbs and are bench-run
   (above), and no vocabulary names the arrangement - deliberately, since
   it is two addresses and a request id.
 - **`Dma<n>::reset()` resets the DMAMUX with the controller** (the RCC
@@ -598,8 +593,8 @@ Driver gaps:
   controller has none: a channel is one block, and the only repetition it
   offers is CIRC.
 - **A one-shot burst vocabulary** in `util/` - a finite capture started
-  and stopped - is still absent, and this campaign found no reason to
-  change that (`docs/design/block-stream.md` says why).
+  and stopped - is absent, and nothing on this controller asks for one
+  (`docs/design/block-stream.md` says why).
 - **`RCC_AHBSMENR.DMAxSMEN`**, the sleep-mode clock enable, has no verb
   in `clock.hpp` at all ([clock.md](clock.md) carries the gap for the
   whole register group). What it buys is therefore stated by the chapter

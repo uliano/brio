@@ -210,8 +210,7 @@ brio::Lut<1>::listen(channel, {.generator = some_generator,
 
 ## Bench findings
 
-From `test_samc_ccl` (7 letters, 141 verdicts, **141/141** four times -
-three warm and one cold from a fresh flash - in about two seconds).
+From `test_samc_ccl` (7 letters, 141 verdicts, about two seconds).
 **Nothing to wire.** The stimuli are a free pad walked between the rails
 by its own internal pull (which survives PMUXEN where the output driver
 does not - [port.md](port.md), [eic.md](eic.md)), TC and TCC waveforms
@@ -243,9 +242,8 @@ ENABLE bit in each state - settle three documents that disagree:
   That is a 0 -> 1 *transition* of ENABLE, not a store into an already
   enabled LUT - which is what makes a one-store `configure()` legal.
 - **A store into an enabled LUT is dropped in complete silence** - no
-  flag, no fault, the old table still decoding. This is what the first
-  version of `ccl.hpp` got wrong and this suite caught: `configure()`
-  and `truth()` now drop LUTCTRLn.ENABLE in a store of its own first,
+  flag, no fault, the old table still decoding. `configure()` and
+  `truth()` therefore drop LUTCTRLn.ENABLE in a store of its own first,
   because 37.6.2.1 forbids writing the protected bits together with
   ENABLE = 0.
 - **The price, measured:** with the block taken down to reconfigure
@@ -295,8 +293,7 @@ ENABLE bit in each state - settle three documents that disagree:
   8/8 times. Held high, the output goes back low - it is an edge
   detector, not a level pass. A disabled LUT drives nothing.
 
-The latency table below is the campaign's headline and has its own
-section.
+The latency table below has its own section.
 
 ### The sequencers
 
@@ -307,9 +304,8 @@ section.
   latch sets and holds.
 - **THE GATE MUST COME DOWN FIRST.** Both stimuli here are pads walking
   between the rails through their own pulls, so moving D and G in the
-  same breath is a race the *pads* decide - the first version of the
-  D-latch test lost its hold state that way. Close the gate, let it
-  settle, then move D.
+  same breath is a race the *pads* decide, and a D latch loses its hold
+  state to it. Close the gate, let it settle, then move D.
 - **ERRATUM 1.7.1 IS REVISION B**: the RS latch's reset works on this
   silicon.
 - **The odd LUT's own output stays available** on OUT[1] while the
@@ -334,25 +330,25 @@ section.
   same events reach nothing. A synchronous or resynchronized channel
   into this user is refused by the driver, because table 29-3 grants it
   the asynchronous path alone.
-- **A SOFTWARE EVENT *DOES* CROSS AN ASYNCHRONOUS CHANNEL - and this
-  corrects [evsys.md](evsys.md).** Sixteen of sixteen single, spaced
-  software events reach this LUT on an asynchronous channel; the same
-  sixteen with the user disconnected reach nothing; and **one** of them
-  moves a whole DMA block *through* the LUT, which is a second witness
-  of a different kind. `test_samc_evsys` found that eight of them moved
-  nothing through a DMA channel on the same path - so the limit belongs
-  to the **user's input stage**, not to the path: a register write has
-  no width for the DMAC's trigger, and the CCL's own event edge detector
+- **A SOFTWARE EVENT *DOES* CROSS AN ASYNCHRONOUS CHANNEL.** Sixteen
+  of sixteen single, spaced software events reach this LUT on an
+  asynchronous channel; the same sixteen with the user disconnected
+  reach nothing; and **one** of them moves a whole DMA block *through*
+  the LUT, which is a second witness of a different kind. Eight of them
+  move nothing through a DMA channel on the same path
+  (`test_samc_evsys`, [evsys.md](evsys.md)) - so the limit belongs to
+  the **user's input stage**, not to the path: a register write has no
+  width for the DMAC's trigger, and the CCL's own event edge detector
   catches every one.
 
 ### THE LATENCY TABLE - what a CCL output costs, and the answer to ac.md
 
-The question [ac.md](ac.md) left open: the comparator's *synchronized*
+The question [ac.md](ac.md) asks: the comparator's *synchronized*
 output costs the fraction to the next GCLK_AC edge **plus two whole
-periods**, which killed an application that wanted a clock-synchronized
-comparator cheaply. Two leads were named and never measured - a LUT as a
-one-stage synchronizer, and a combinational LUT on the comparator's
-*asynchronous* flavour. Both are measured here.
+periods**, which kills an application that wants a clock-synchronized
+comparator cheaply. The two cheaper candidates are a LUT as a one-stage
+synchronizer and a combinational LUT on the comparator's *asynchronous*
+flavour, and both are measured here.
 
 The instrument is `ac_sync_probe`'s: GCLK_AC and GCLK_CCL both on
 generator 1 at OSC48M/4096 = **11.719 kHz**, so one period is exactly
@@ -376,8 +372,7 @@ shots per row, minimum of three per step.
   need be muxed.
 - **A combinational LUT costs no clock edge at all** - 207 cycles flat
   across the whole phase sweep, eight CPU cycles above the comparator's
-  own asynchronous pad. Lead (b) confirmed: a LUT dodges every sampler
-  in the chain.
+  own asynchronous pad: a LUT dodges every sampler in the chain.
 - **A LUT PAIR AS A DFF COSTS NO WHOLE PERIOD**, just the fraction to
   the next GCLK_CCL edge. That is a true one-stage synchronizer and the
   cheapest clocked path on this die.
@@ -420,10 +415,10 @@ Driver gaps (not built):
 
 Implemented but not bench-verified:
 - **The EDGE DETECTOR and the SEQUENTIAL sub-modules across a
-  standby.** 37.6.4 names three things it forces to zero and the sleep
-  pass measured two of them (the synchronizer and the filter - see
-  "Bench findings"); an edged LUT and a flip-flop pair in a standby are
-  the same sentence and are not separately witnessed.
+  standby.** 37.6.4 names three things it forces to zero and two of
+  them are measured (the synchronizer and the filter - see "Bench
+  findings"); an edged LUT and a flip-flop pair in a standby are the
+  same sentence and are not separately witnessed.
 - **The E and G variants**, compile-only: the pad map is asserted per
   variant out of the device header (`test/family_samc21/ccl.cpp`) and two
   negatives refuse the pads those packages lack, but no such board

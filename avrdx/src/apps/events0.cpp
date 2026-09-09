@@ -1,6 +1,6 @@
 // events0 - the event system on the bench: generators routed to EVOUT
 // pins, watched with a logic analyzer (and one with the naked eye).
-// First step of the exhaustive-driver track (docs/avrdx/evsys.md).
+// The driver it exercises is documented in docs/avrdx/evsys.md.
 //
 // What it shows, without any peripheral other than the EVSYS itself:
 //   - a static route, made once at init and never touched again:
@@ -22,7 +22,7 @@
 //     -> EVOUTC = PC2. One CLK_PER cycle wide (42 ns at 24 MHz): the
 //     analyzer may or may not catch it - documented, not relied upon;
 //     the real test of software events is a user that latches them
-//     (ADC start, next step).
+//     (an ADC start, for one).
 // The console prints each phase with the uptime so the trace can be
 // aligned, plus the silicon revision (SYSCFG.REVID: MAJOR<<4 | MINOR,
 // 0x1x = A, 0x2x = B) to know which errata items apply.

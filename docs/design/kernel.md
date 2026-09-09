@@ -272,7 +272,7 @@ bool-returning post spreading untested error branches.
 `std::optional<E>` (C++17): "an E, or nothing". The caller writes `if
 (auto e = q.pop()) dispatch(*e);` and cannot forget to test, where a
 `bool pop(E& out)` would leave a half-written out-parameter around. A
-project style ruling: optional returns instead of bool + out-param.
+project style rule: optional returns instead of bool + out-param.
 
 ## 6. State machines (`kernel/fsm.hpp`)
 

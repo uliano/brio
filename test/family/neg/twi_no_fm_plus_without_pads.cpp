@@ -5,5 +5,5 @@
 #include "avrdx/twi.hpp"
 using namespace brio;
 void f() {
-    (void)Twi<0>::init<TwiConfig{.speed = TwiSpeed::fast_plus_1m}>(24'000'000u);
+    (void)Twi<0>::init<TwiConfig{.speed = I2cSpeed::fast_plus_1m}>(24'000'000u);
 }

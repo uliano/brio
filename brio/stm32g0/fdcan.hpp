@@ -30,8 +30,7 @@
  * another architecture's controller and the policy that goes with them
  * are a util design question, and this stratum must not open it with one
  * implementation in hand: `FdcanFrame` below is deliberately
- * TARGET-LOCAL and says so. The avrdx/rtc.hpp precedent - a task is born
- * with its first user.
+ * TARGET-LOCAL and says so: a task is born with its first user.
  *
  * SEVEN FACTS THAT SHAPE EVERYTHING BELOW.
  *
@@ -40,7 +39,7 @@
  *    declare no base, no struct and no interrupt enumerator. So the
  *    REGISTER-FACING half of this file is compiled only where the header
  *    declares the block, and `Fdcan<n>` simply does not exist on a part
- *    without one (the avrdx/opamp.hpp precedent). The pure ARITHMETIC -
+ *    without one. The pure ARITHMETIC -
  *    the bit-timing chooser, the DLC coding, the element codecs - is
  *    outside that gate and compiles everywhere, because it is a property
  *    of the CAN protocol and not of a peripheral.
@@ -574,9 +573,9 @@ constexpr std::optional<FdcanBitTiming> fdcan_data_timing_for(
  * DELIBERATELY TARGET-LOCAL. A `brio::CanFrame` every controller shares,
  * with a bus AO over it, is a util design decision, and a decision taken
  * from ONE implementation is a decision taken from the M_CAN's element
- * layout - which is not a neutral shape. When a second silicon's CAN
- * arrives the vocabulary is designed against both; until then this
- * struct is the STM32G0's and the doc says so.
+ * layout - which is not a neutral shape. Until a second controller is
+ * there to design the vocabulary against, this struct is the STM32G0's
+ * and the doc says so.
  *
  * `id` IS THE NATURAL IDENTIFIER, right aligned: 0..0x7FF for a standard
  * frame and 0..0x1FFF_FFFF for an extended one. The element's own ID
@@ -902,8 +901,8 @@ constexpr bool fdcan_extended_filter_valid(const FdcanExtendedFilter& f) {
  * fact 5 of pin.hpp's own header. The bench is the check.
  *
  * THE RX PAD'S PULL IS THE BENCH'S ONLY BUS. A pad under an INPUT
- * alternate function still follows its own PUPDR (measured by the LPTIM
- * and USART campaigns), so `claim_rx(PinPull::up)` gives the receiver a
+ * alternate function still follows its own PUPDR (measured), so
+ * `claim_rx(PinPull::up)` gives the receiver a
  * recessive line and `PinPull::down` a stuck-dominant one - which is how
  * the error machine is reachable on a board with no transceiver.
  */

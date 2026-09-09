@@ -109,7 +109,7 @@ SysTick wall clock: **DIV = 8 and DIV = 9 give the SAME divisor of 512
 = 2^9** on that eight-bit field. So the rule is 2^(DIV+1) SATURATED at
 2^(width+1), and a DIV past the field's width buys nothing. The two
 measurements agree where they overlap - both put DIV = 8 at 512 - and
-only the extrapolation past it was ever in question.
+part company only past the field's width.
 
 **A generator source change is glitch-free on the fly** (16.6.2.6):
 the old source is released only once the new one is ready - which is
@@ -244,35 +244,33 @@ if (brio::Fdpll::init<pll>()) {     // waits CLKRDY, not LOCK
 
 ## Bench findings
 
-`test_samc_clock`, 6 letters / 108 verdicts, wireless. The instrument
-is `samc21/freqm.hpp`; the reference is the crystal divided by 250
+`test_samc_clock`, six letters, wireless. The instrument is
+`samc21/freqm.hpp`; the reference is the crystal divided by 250
 (96 kHz), which at REFNUM 255 makes one count about 8 ppm of a 48 MHz
 measurand.
 
-- **THE INTERNAL RC IS HALF A PER CENT SLOW, and this is the first
-  time anything here could say so.** OSC48M weighed against the
-  crystal measures **47.755 MHz, about 5100 ppm slow** (three runs:
+- **The internal RC is half a per cent slow.** OSC48M weighed against
+  the crystal measures **47.755 MHz, about 5100 ppm slow** (three runs:
   5051, 5076, 5098 ppm). That is comfortably inside table 45-57 -
   +-5% for the standard factory calibration, +-1% for the enhanced
-  one - and it is not a fault. It is a SCALE.
-- **The scale matters, because every absolute frequency this stratum
-  had reported before was a ratio against OSC48M multiplied by a
-  nominal 48 MHz.** OSCULP32K read that way looks like 33074 Hz;
-  weighed on the crystal it is **32907 Hz**, about 4200 ppm high
-  rather than 9200. The same correction applies to
-  `osc32kctrl.md`'s figures and to `test_samc_platform`'s
-  watchdog timing, which rides SysTick and therefore the same
-  oscillator - which also means those "two witnesses sharing no
-  mechanism" shared one after all. The crystal is the first scale
-  here that does not come from an RC.
+  one - and it is not a fault. It is a scale.
+- **The scale matters, because any absolute frequency taken as a ratio
+  against OSC48M and multiplied by a nominal 48 MHz inherits it.**
+  OSCULP32K read that way looks like 33074 Hz; weighed on the crystal
+  it is **32907 Hz**, about 4200 ppm high rather than 9200. The same
+  correction applies to `osc32kctrl.md`'s figures and to
+  `test_samc_platform`'s watchdog timing, which rides SysTick and
+  therefore the same oscillator - so those two routes share a scale
+  and are not independent witnesses of it. The crystal is the only
+  scale here that does not come from an RC.
 - **The crystal starts in 554..576 us** with STARTUP = 4 (a masking
   time table 20-5 puts at 488 us), measured enable-to-XOSCRDY on a
   46875 Hz stopwatch. Reported from the other side, the crystal
   measures 24.122 MHz if OSC48M is believed exact - the same ratio,
   read the other way up.
-- **A clock failure was induced with no wire and detected.** Clearing
-  XTALEN with a crystal attached leaves XIN a digital input that
-  nothing drives; STATUS.XOSCFAIL rises, INTFLAG latches, and
+- **A clock failure can be induced with no wire, and is detected.**
+  Clearing XTALEN with a crystal attached leaves XIN a digital input
+  that nothing drives; STATUS.XOSCFAIL rises, INTFLAG latches, and
   STATUS.XOSCCKSW shows the output switched to the safe clock.
   Restoring XTALEN clears the failure and SWBEN is consumed by the
   hardware, after which XOSCCKSW is clear again. Erratum 1.22.1
@@ -294,23 +292,23 @@ measurand.
 - **Erratum 1.3.3 observed directly**: after an on-the-fly ratio
   change INTFLAG.DPLLLDRTO is 1 and STATUS.DPLLLDRTO is 0, in the
   same reading.
-- **THE CPU HAS RUN FROM THE DPLL.** Generator 0 was moved onto a
-  crystal-locked 48 MHz loop and back to OSC48M with the console
-  alive throughout; measured from the crystal's side while it was
-  there, CLK_CPU counted 127500 - the crystal ratio, not the RC's -
-  and SysTick kept advancing across both switches. It is a proof, not
+- **The CPU runs from the DPLL.** Generator 0 moved onto a
+  crystal-locked 48 MHz loop and back to OSC48M leaves the serial
+  console alive throughout; measured from the crystal's side while it
+  is there, CLK_CPU counts 127500 - the crystal ratio, not the RC's -
+  and SysTick keeps advancing across both switches. It is a proof, not
   a policy: the driver still leaves CLK_MAIN on OSC48M.
-- **GENCTRL's DIVSEL settles as 2^(DIV+1)** - see "What the silicon
-  does" above for the measurement and for what it corrects.
-- The reset-state verification from bring-up still holds: OSC48MDIV =
-  0, OSC48MCTRL = ENABLE with ONDEMAND clear, GENCTRL0 = OSC48M +
-  GENEN, CPUDIV = 1, RWS = 2, and the SERCOM baud generator
-  programmed from `Clock::hz` produces a byte-exact 115200 console.
+- **GENCTRL's DIVSEL divides by 2^(DIV+1)** - see "What the silicon
+  does" above for the measurement.
+- The reset state reads as the chapter describes it: OSC48MDIV = 0,
+  OSC48MCTRL = ENABLE with ONDEMAND clear, GENCTRL0 = OSC48M + GENEN,
+  CPUDIV = 1, RWS = 2, and the SERCOM baud generator programmed from
+  `Clock::hz` produces a byte-exact 115200 console.
 
 ## Sleep
 
-Measured in the transversal sleep pass; the shape all three roots share
-is in [platform.md](platform.md), "Sleep, peripheral by peripheral".
+The shape all three roots share is in [platform.md](platform.md),
+"Sleep, peripheral by peripheral".
 
 - **A peripheral's own RUNSTDBY is the whole clock request, and it
   carries the chain.** A TC with RUNSTDBY set counted 1410 ticks of an
@@ -343,23 +341,22 @@ Driver gaps:
   and `Clock<dpll, hz>` are vocabulary that refuses to compile,
   deliberately: the resources exist and the switch is proven, but
   which root CLK_MAIN takes belongs with the main-clock design. THAT
-  DESIGN IS RULED DEFERRED (2026-08-28): no `DynamicClock` on this
-  target for now - on a family where every peripheral has its own
-  generic clock channel, "one rate for everything" is an AVR
-  assumption, and no real need for run-time rescaling has appeared.
-  The question reopens with its first genuine consumer, together with
-  the discrete-rate surface, the rebase fan-out and the ticker's
-  ClockUser question (`samc21/ticker.hpp` documents that caveat and
-  refuses the combination mechanically). The ruling has since been
-  MEASURED on the first target and holds for a family without voltage
-  scaling; the third target, which HAS a second voltage range and a
-  low-power regulator, built its dynamic clock - a pack of rate tuples,
-  [../design/clock.md](../design/clock.md),
+  DESIGN IS DEFERRED: no `DynamicClock` on this target for now - on a
+  family where every peripheral has its own generic clock channel,
+  "one rate for everything" is an AVR assumption, and no real need for
+  run-time rescaling has appeared. The question reopens with its first
+  genuine consumer, together with the discrete-rate surface, the rebase
+  fan-out and the ticker's ClockUser question (`samc21/ticker.hpp`
+  documents that caveat and refuses the combination mechanically). The
+  position is measured on the AVR DA/DB and holds for a family without
+  voltage scaling; the STM32G0, which has a second voltage range and a
+  low-power regulator, does carry a dynamic clock - a pack of rate
+  tuples, [../design/clock.md](../design/clock.md),
   [../stm32g0/clock.md](../stm32g0/clock.md).
 - Nothing tells a driver that a generator it uses changed source or
-  rate. The AVR's `ClockUser`/`clock_follows` pair has no counterpart
-  here yet, and on a target where every peripheral has a generator of
-  its own it will not be the same shape.
+  rate. The AVR DA/DB's `ClockUser`/`clock_follows` pair has no
+  counterpart here, and on a target where every peripheral has a
+  generator of its own it will not be the same shape.
 - XOSC in EXTERNAL-CLOCK mode is written and family-compiled but has
   never run: it needs a clock source on XIN, and this board has a
   crystal there.
@@ -369,7 +366,7 @@ Driver gaps:
 - OSC48M's CAL48M calibration register is not exposed. Erratum 1.8.12
   (the accuracy that needs it) is revisions B..E, not this silicon.
 - Whether any of these clocks runs in standby with NOTHING requesting
-  it. The measurements below all use a peripheral clocked from the
+  it. The measurements above all use a peripheral clocked from the
   clock under test, and that peripheral IS the request; the
   unrequested case has no witness on this board, which is also why
   erratum 1.3.1 stays unjudged.

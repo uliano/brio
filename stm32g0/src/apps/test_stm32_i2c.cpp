@@ -32,11 +32,11 @@
 //   SCL   PB8  AF6  <->  a SAM C21's PA23 SERCOM3 PAD[1], or PB8 AF6
 //   SDA   PB9  AF6  <->  a SAM C21's PA22 SERCOM3 PAD[0], or PB9 AF6
 //
-// - the stm32g0 port of the peer answers on the SAME PIN NAMES this
-// board hosts on, plus a dedicated GND, both boards at 3.3 V. The
+// - an stm32g0 peer answers on the SAME PIN NAMES this board hosts on,
+// plus a dedicated GND, both boards at 3.3 V. The
 // instrument is commanded IN BAND over the bus under test, over
 // avrdx/src/apps/twi_link.hpp included by relative path - one source of
-// truth for the wire format, three architectures compiling it - and its
+// truth for the wire format, whatever the peer's architecture - and its
 // command-mode client answers ONE address (0x6B) with no general call
 // and no mask, which is why nothing the wireless letters do can wake it.
 // Letters n..r are this instrument's.
@@ -144,9 +144,9 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
-// THE PROTOCOL IS THE AVR CAMPAIGN'S, AND IT IS NOT COPIED. twi_link.hpp
+// THE PROTOCOL HEADER IS SHARED, NOT COPIED. twi_link.hpp
 // is pure encoding - it names no register and includes nothing of brio -
-// so all three architectures' apps compile the same file.
+// so every architecture on this link compiles the same file.
 #include "../../../avrdx/src/apps/twi_link.hpp"
 
 namespace {
@@ -171,8 +171,7 @@ constexpr UartOptions console_opts{.kernel_clock = UsartClock::hsi16};
 // would follow every switch this suite makes and the report would be a
 // function of its own subject. The instance that always has a
 // multiplexer is the LPUART (34.4.6), and LPUART1_TX/RX reach THE SAME
-// TWO PADS at AF6 - the shape test_stm32_serial's letter v proves on the
-// G0B1. So the console moves to LPUART1 exactly where USART2's
+// TWO PADS at AF6. So the console moves to LPUART1 exactly where USART2's
 // multiplexer is missing. The HANDLER has to be chosen by the
 // preprocessor, which cannot call a constexpr function, so the same
 // header symbol the reserve probes for usart_has_clock_select(2) is
@@ -272,7 +271,7 @@ uint32_t cycles_ns(uint32_t cycles) {
 }
 
 /// A measurement window a transmit interrupt walks through is not a
-/// measurement - the lesson this stratum has paid for four times.
+/// measurement.
 void console_drain() {
     for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
     }
@@ -294,10 +293,8 @@ void spin_us(uint32_t us) {
 /// handler cannot preempt an interrupt of its own priority - so across a
 /// SysTick period (one millisecond here) VAL wraps while the count does
 /// not, the stopwatch runs backwards and a wait on it never ends.
-/// MEASURED: the first version of letter e commanded a 1000 us stretch
-/// from the client's own vector and hung the board at exactly that
-/// length. The samc21's unstick() takes a counted spin for the same
-/// class of reason.
+/// MEASURED: a 1000 us stretch commanded from the client's own vector
+/// on the cycle stopwatch hangs the board at exactly that length.
 volatile uint32_t spin_iters_per_us = 8;
 
 [[gnu::noinline]] void spin_loop(uint32_t iters) {
@@ -456,7 +453,7 @@ void peer_service() {
         return;
     }
     // Every error flag is a LEVEL: record it and clear it, or the
-    // handler re-enters for ever (the samc21 SERCOM storm, not repeated).
+    // handler re-enters for ever.
     peer_errors_seen = peer_errors_seen | (f & I2cFlag::errors);
     if ((f & I2cFlag::overrun) != 0u) {
         peer_overruns = static_cast<uint16_t>(peer_overruns + 1u);
@@ -589,8 +586,8 @@ uint8_t host_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx
         stall_peer_entries = peer_isr_entries;
         // The HOST is recovered and the CLIENT is put back on its feet:
         // a stalled leg must not cost the rest of the letter its
-        // verdicts (the first version left the client disarmed and every
-        // later leg of letter f read as a stall it had not had).
+        // verdicts (a client left disarmed makes every later leg of
+        // letter f read as a stall it never had).
         (void)Host::recover();
         C::clear(I2cClear::all);
         if ((C::flags() & I2C_ISR_RXNE) != 0u) {
@@ -608,8 +605,8 @@ uint8_t host_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx
 /// the next tenure starts, so the last line on the wire names the step
 /// that wedged the board. An I2C interrupt storm starves main, and a
 /// suite that prints only at the end of a letter reports nothing at all
-/// when one happens (measured: the first version of letter b died mid
-/// title).
+/// when one happens (measured: a letter that wedges mid-title says
+/// nothing at all about where).
 void mark(const char* what) {
     print(serial, "  . ", what, " isr h", host_isr_entries, " c", peer_isr_entries,
           crlf);
@@ -793,10 +790,10 @@ bool need_self_link() {
 //
 // The wire format is avrdx/src/apps/twi_link.hpp, included by relative
 // path and NOT copied - it names no register, includes nothing of brio
-// and is compiled by three architectures' apps. The instrument at the
-// other end is `twi_peer`, in whichever of its three ports the desk
-// carries - the samc21 one on SERCOM3 fn C, the stm32g0 one on I2C1 AF6
-// at the same pin names this board hosts on - answering at the ONE
+// and every architecture that speaks the link compiles it. The
+// instrument at the other end is `twi_peer`, in whichever of its ports
+// the wires reach - the samc21 one on SERCOM3 fn C, the stm32g0 one on
+// I2C1 AF6 at the same pin names this board hosts on - answering at the ONE
 // command address 0x6B, with no general call and no mask, which is the
 // whole coexistence argument: nothing the wireless letters do can wake
 // it. The peer's own `ident` says which port it is (fw 0x01xx, 0x02xx,
@@ -1262,7 +1259,7 @@ void tb_link() {
     bench.verdict("... the read bytes are the client's", same(rx_buf, answers, 6));
     // The repeated START counted on the WIRE, from the far end: two
     // matches and ONE stop is what a repeated start looks like from a
-    // target (the samc21's own finding, met again on this silicon).
+    // target.
     print(serial, "  address matches ", peer_addr_hits, ", stops ", peer_stops, crlf);
     bench.verdict("THE REPEATED START: two address matches, one STOP",
                   peer_addr_hits == 2u && peer_stops == 1u);
@@ -1334,7 +1331,7 @@ void tc_vocabulary() {
     (void)Peer::byte_control(false);
 
     // ---- a fault staged from the client's own pad ----
-    // The samc21's technique in this silicon's clothes: the CLIENT owns
+    // The CLIENT owns
     // PA12, so it can take the pad from the peripheral and hold SDA low
     // while the host is driving it high. That is arbitration lost, not a
     // bus error, and the difference is the point (32.4.17: ARLO is "a
@@ -1350,14 +1347,13 @@ void tc_vocabulary() {
     print(serial, "  SDA held low by the client's pad: status ", st, ", host ISR ",
           hex(held_isr), crlf);
     bench.verdict("a tenure into a held SDA never reports i2c_ok", st != i2c_ok);
-    // THE FINDING, and it is the third silicon of this project to behave
-    // this way: a controller whose SDA is held low by another device
+    // THE FINDING: a controller whose SDA is held low by another device
     // raises NOTHING. 32.4.9 makes the START wait for a free bus ("either
     // immediately if the BUSY flag is low, or tBUF time after the BUSY
     // flag transits from high to low"), and a low SDA under a high SCL is
     // a START the bus monitor has already seen - so BUSY stands, the
     // request is PARKED, and there is no ARLO, no BERR and no completion
-    // to report. The AVR's TWI and the SAM's SERCOM park the same way.
+    // to report.
     // WHICH IS WHY THE ARBITER OWNS THE TIMEOUT (util/i2c_bus.hpp, and
     // letter l measures it): no engine here can notice a wedged wire.
     bench.verdict("A HELD SDA IS A PARK AND NOT AN ERROR: no ARLO, no BERR - the "
@@ -1449,9 +1445,7 @@ void td_speeds() {
     //   * the CEILING is the chooser's own prediction, which charges the
     //     I2C standard's WORST-CASE edges (tSYNC = 1000 / 750 / 500 ns).
     //     A real 2.2 kOhm bus is far quicker than that, so the measured
-    //     period lands INSIDE the bracket and nearer the floor - which is
-    //     the same fact avrdx/twi.hpp and samc21/i2c.hpp record about
-    //     their own rise-time budgets, seen here from the other side.
+    //     period lands INSIDE the bracket and nearer the floor.
     for (uint8_t i = 0; i < 3u; ++i) {
         const auto s = static_cast<I2cSpeed>(i);
         if (!Host::speed_ok(s)) {
@@ -1522,9 +1516,8 @@ void td_speeds() {
     // The legs above ran on the STANDARD'S worst-case edges, which a
     // 2.2 kOhm bus beats by a wide margin - so the produced clock comes
     // out FASTER than nominal, and at Sm that means a bus above the
-    // 100 kHz the mode allows. It is the same hazard avrdx/twi.hpp and
-    // samc21/i2c.hpp record about their own rise-time arguments, and the
-    // same cure: state what the bench measures. The difference between
+    // 100 kHz the mode allows. The cure is to state what the bench
+    // measures. The difference between
     // the measured period and the register's own floor IS this wire's
     // tSYNC, and handing it back closes the loop.
     {
@@ -1633,8 +1626,8 @@ void td_speeds() {
     // THE ORDER MATTERS HERE: init() REFUSES at a 2 MHz kernel (no speed
     // is legal there) and a refused init leaves the NVIC line disarmed,
     // which is right - so the rate goes back first and the host is
-    // brought up after (the first version of this letter left the host
-    // silent for letter e, and letter e said so).
+    // brought up after: a host left down here is a host letter e finds
+    // silent.
     SysClock::set_index(r_fast);
     console_drain();
     (void)Host::init(clock, I2cClock::pclk);
@@ -2189,9 +2182,8 @@ void ti_smbus() {
     (void)Host::init(clock, I2cClock::pclk);
 
     // ---- THE TIME-OUTS: whose hold does each one police? ----
-    // The samc21's answer was "the host's own, and nothing else"
-    // (samc21/i2c.md, letter j). 32.4.12 reads as though this block's
-    // TIMEOUTA were different - "if SCL is tied low for longer than
+    // 32.4.12 reads as though TIMEOUTA policed the WIRE - "if SCL is
+    // tied low for longer than
     // (TIMEOUTA + 1) x 2048 x tI2CCLK, the TIMEOUT flag is set" - so the
     // bench asks, with a control on each side.
     (void)H::disable();
@@ -2206,8 +2198,7 @@ void ti_smbus() {
     H::enable();
 
     // (1) THE CONTROL: the HOST'S OWN hold. A tenure started and then
-    // left unserved - its own interrupts cut - holds SCL low itself, and
-    // that is the case the SAM's time-outs could see.
+    // left unserved - its own interrupts cut - holds SCL low itself.
     (void)peer_arm(answers, 8);
     raw_host_live = true;
     H::clear(I2cClear::all);
@@ -2338,8 +2329,8 @@ void tj_wake() {
     // ES0548 2.2.4: a peripheral with clock-request capability does not
     // wake the device while HSIDIV is anything but 000. At the first rung
     // the core is on the PLL and HSIDIV is 0, so the hazard does not
-    // apply - said, because it is exactly the trap the USART campaign
-    // reproduced.
+    // apply - said, because it is exactly the trap that catches a wake
+    // arranged at any other rung.
     print(serial, "  ES0548 2.2.4 does not apply here: HSIDIV is 0 at this rung", crlf);
 
     // ---- AND THE STOP ITSELF IS DECLINED, WITH ITS REASON ----
@@ -2350,9 +2341,9 @@ void tj_wake() {
     // every timer stop with the core, and a bit-banged edge needs the
     // CPU. So the address-match wake wants a SECOND NODE, and this
     // letter measures everything around it instead of faking the middle.
-    // (The first version DID enter Stop 1 with a tenure in flight and
-    // hung the board exactly as predicted: the host froze mid-byte with
-    // the client stretching, and neither could wake the other.)
+    // (Measured: a Stop 1 entered with a tenure in flight hangs the
+    // board - the host freezes mid-byte with the client stretching, and
+    // neither can wake the other.)
     print(serial, "  the wake itself needs a SECOND NODE - both ends of this bus stop "
                   "together - so the Stop is DECLINED, not faked", crlf);
 
@@ -2929,8 +2920,7 @@ void to_peer_shapes() {
 
     // THE SERVE ENDS ON ITS DEADLINE, never by count: a count reached in
     // the middle of the combined tenure would cut it in half and leave
-    // the repeated START talking to a command-mode client (the samc21
-    // bench paid for that one).
+    // the repeated START talking to a command-mode client.
     twilink::Params a{};
     a.count = 64;
     a.ms = 250;
@@ -3161,8 +3151,8 @@ void tq_peer_speeds() {
     // FAST-MODE-PLUS IS THE RUNG THAT IS ABOUT THE WIRE AND THE FAR
     // END, not this controller: what a megahertz bus does here is a
     // property of these two jumpers, their 2.2 kOhm pull-ups and the
-    // peer's own input path (a SAM C21 target has no input filter at
-    // all - the samc21 campaign's headline). The number is printed and
+    // peer's own input path (a SAM C21 target, for one, has no input
+    // filter at all). The number is printed and
     // the verdict claims only that the register accepted the rate.
     bench.verdict("...and Fm+ is REACHABLE at this kernel clock (whether the wire "
                   "carries it is the print above, not this verdict)",

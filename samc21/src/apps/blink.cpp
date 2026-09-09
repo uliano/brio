@@ -7,13 +7,12 @@
 // canonical AO-to-AO addressed message. No delay loops anywhere: between
 // events the CPU is in WFI sleep, woken by the SysTick tick.
 //
-// This app is a PORT of the AVR project's src/apps/blink.cpp and its
-// point is what did NOT change: the two AOs, their events, their queues
-// and every kernel and util header below them compile untouched. Only
-// the target-glue lines differ - the clock type, the pin, and the vector
-// binding (SysTick_Handler here, ISR(RTC_PIT_vect) there). The tick rate
-// differs too (1000 Hz vs 1024) and nothing above notices, which is the
-// kernel's tick opacity being exercised for real.
+// Nothing above the target glue knows which silicon this is: the two
+// AOs, their events, their queues and every kernel and util header
+// below them are target-independent. What this file supplies is the
+// clock type, the pin and the vector binding (SysTick_Handler). The
+// tick rate is 1000 Hz here and nothing above notices it - the
+// kernel's tick opacity, exercised for real.
 //
 // Wiring: none - the LED on PB23 is on the board.
 //

@@ -43,10 +43,10 @@
  * 2. THE STATUS REGISTER IS rc_w0, NOT W1C. A flag of TIMx_SR is cleared
  *    by writing ZERO to it and a write of one has no effect (21.4.5), so
  *    clearing is `SR = ~flags` - a plain store, no read-modify-write, and
- *    a flag that arrives between the read and the store SURVIVES. Both
- *    other brio targets clear their flags by writing ONES (the AVR's
- *    INTFLAGS, the SAM's INTFLAG, this family's own EXTI_RPR1), so this
- *    is the one register in the stratum where the reflex is wrong.
+ *    a flag that arrives between the read and the store SURVIVES. Every
+ *    other flag register in this stratum - EXTI_RPR1, the USART's ICR -
+ *    is cleared by writing ONES, so this is the one place where that
+ *    reflex is wrong.
  *
  * 3. THE PRESCALER AND THE AUTO-RELOAD ARE SHADOWED. PSC is copied into
  *    the working register at the next UPDATE event and never before
@@ -71,7 +71,7 @@
  *    device header has no symbol for it - stm32g0/pin.hpp states that
  *    once for the whole stratum. So a timer pad is a `PinSel` the CALLER
  *    writes, `TimPad<sel>` is the claim, and the bench is the only check
- *    there is. Three of those claims are measured in test_stm32_tim.
+ *    there is.
  *
  * THE CLOCK. TIMPCLK is PCLK when the APB prescaler is 1 and twice PCLK
  * otherwise (5.2.13); stm32g0/clock.hpp's `Clock<>` pins that prescaler
@@ -91,7 +91,7 @@
  *    cycle-accurate cascading is a legitimate thing to want.
  *  - 2.7.2 consecutive compare event missed when CCR changes between two
  *    adjacent counter cycles - no workaround, and it is STAGED at the
- *    bench (test_stm32_tim letter k) rather than described.
+ *    bench rather than described.
  *  - 2.7.3 output-compare clear (ocref_clr) with an external counter
  *    reset. This driver exposes OCyCE and the OCCS selection, so the
  *    combination is reachable; the obligation is stated on the verb.
@@ -742,11 +742,10 @@ public:
      * numbers are what makes a channel LISTEN.
      *
      * They live here rather than in stm32g0/device_tables.hpp for the
-     * reason the samc21 EVSYS campaign settled and this stratum has kept
-     * for TISEL and for the EXTI's lines above 15: no device header of
-     * this pack declares one of them (the DMAMUX_REQ_* spellings are ST's
-     * HAL/LL, not vendored), and a fabric driver owns the fabric while a
-     * peripheral owns its own vocabulary.
+     * same reason TISEL and the EXTI's lines above 15 do: no device
+     * header of this pack declares one of them (the DMAMUX_REQ_*
+     * spellings are ST's HAL/LL, not vendored), and a fabric driver owns
+     * the fabric while a peripheral owns its own vocabulary.
      *
      * TIM14 HAS NO DMA AT ALL - DS13560 table 7's "DMA request
      * generation" column, which is also what tim_has_dma_burst() reads -
@@ -1191,8 +1190,8 @@ public:
      * THIS IS WHAT MAKES A CAPTURE CHANNEL MEASURABLE WITH NO PAD AT
      * ALL, which is why the driver exposes the raw code and names no
      * source: the vocabulary of what code 1 means belongs to the
-     * peripheral that owns the signal (the samc21 EVSYS ruling), and half
-     * of these sources have no driver in this stratum yet.
+     * peripheral that owns the signal, and half of these sources have no
+     * driver in this stratum yet.
      */
     static bool input_select(uint8_t ch, uint8_t code) {
         if constexpr (!has_tisel) {
@@ -1265,7 +1264,7 @@ private:
  *
  * `top` is a template parameter because PwmChannel requires `max` to be
  * a compile-time constant: a full scale that can move under a generic
- * actuator is not one it can scale against (the samc21 TcPwm8 ruling).
+ * actuator is not one it can scale against.
  *
  * The frequency belongs to the TIMER and the duty to the CHANNEL, which
  * is the concept's own division of labour - so `setup()` takes the
@@ -1415,9 +1414,8 @@ struct TimPeriodMeter {
     }
 
     /// The counter is reset ON the edge and the capture is taken AT it,
-    /// so a period reads as its own tick count and not one less - the
-    /// opposite of the samc21 TC's capture, which clears and latches
-    /// together and always reads one short.
+    /// so a period reads as its own tick count and not one less: no
+    /// off-by-one to add back.
     static uint32_t period_ticks() { return T::compare(0); }
     static uint32_t width_ticks() { return T::compare(1); }
 

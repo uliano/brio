@@ -6,10 +6,9 @@
  * the smallest complete chapter in this stratum.
  *
  *  Crc     the RESOURCE, and there is no task above it: a checksum has
- *          no ordering rule of its own to hide. It is a MONOSTATE (the
- *          samc21 Dsc/Dac/Rtc precedent): every part of this family has
- *          exactly one, so an instance number would be a lie with a
- *          template parameter attached.
+ *          no ordering rule of its own to hide. It is a MONOSTATE:
+ *          every part of this family has exactly one, so an instance
+ *          number would be a lie with a template parameter attached.
  *
  * FIVE FACTS THAT SHAPE THIS FILE.
  *
@@ -30,8 +29,8 @@
  *    byte, little-endian assembly under REV_IN word. `feed(span)`
  *    assembles big-endian and FALLS BACK to byte-by-byte under the two
  *    reversals that cross a byte boundary, so the verb means one thing
- *    whatever is configured. test_stm32_crc letter b measures the
- *    equivalence in all four settings rather than asserting it.
+ *    whatever is configured. The equivalence is measured in all four
+ *    settings rather than asserted.
  *
  * 3. THE POLYNOMIAL MAY NOT CHANGE MID-CALCULATION. 14.3.3: "if a CRC
  *    calculation is ongoing, the application must either reset it or
@@ -57,9 +56,8 @@
  * ## util/crc.hpp is NOT replaced and NOT hooked
  *
  * util/crc.hpp's bitwise CRC-16/CCITT-FALSE is portable, constexpr and
- * the nonvolatile stores' judge on three architectures. This block
- * computes the same checksum with `crc_ccitt_false_config` - which is
- * what test_stm32_crc letter b proves bit for bit over 4 KB - but
+ * the nonvolatile stores' judge. This block computes the same checksum
+ * with `crc_ccitt_false_config` - measured bit for bit over 4 KB - but
  * nothing in util/ is pointed at it: a hardware hook for a util service
  * is a design question about the util level (a concept, a fallback, what
  * a constexpr context does with a peripheral), and it is not this
@@ -176,8 +174,8 @@ constexpr CrcConfig crc_ccitt_false_config{
     .reverse_out = false,
 };
 
-/// CRC-32/ISO-HDLC, the reflected CRC-32 of IEEE 802.3, zip and the
-/// SAM's own DSU engine: polynomial 0x04C11DB7, initial value
+/// CRC-32/ISO-HDLC, the reflected CRC-32 of IEEE 802.3 and zip:
+/// polynomial 0x04C11DB7, initial value
 /// 0xFFFFFFFF, input reflected per byte, output reflected - AND A FINAL
 /// XOR THE HARDWARE DOES NOT DO, which is why `crc32_ieee_finish()`
 /// exists beside it and why a caller that forgets it gets the
@@ -352,8 +350,8 @@ public:
      * Under REV_IN halfword or word the reversal crosses byte
      * boundaries, so no assembly makes the two paths agree and this verb
      * FEEDS BYTE BY BYTE instead. The branch is one read of CR. Fact 2
-     * of the file header; letter b of the suite measures all four
-     * settings rather than trusting this comment.
+     * of the file header; all four settings are measured rather than
+     * trusted to this comment.
      */
     static void feed(std::span<const uint8_t> data) {
         const CrcReverse rev = reverse_in();
@@ -384,7 +382,7 @@ public:
 
     /// CRC_DR, whole. For a width under 32 the bits above it are the
     /// datapath's leftovers - use value_masked() unless you want to see
-    /// them (letter a does).
+    /// them.
     static uint32_t value() { return regs().DR; }
 
     /// The result of the configured width, 14.3.3's "least significant
@@ -410,8 +408,8 @@ public:
     // ---- the scratch register (14.4.2) --------------------------------------
 
     /// CRC_IDR: four bytes of storage this peripheral never looks at,
-    /// and NOT AFFECTED BY CR.RESET - which is the only interesting
-    /// thing about it and what letter a checks.
+    /// and NOT AFFECTED BY CR.RESET, which is the only interesting
+    /// thing about it.
     static void scratch(uint32_t v) { regs().IDR = v; }
     static uint32_t scratch() { return regs().IDR; }
 

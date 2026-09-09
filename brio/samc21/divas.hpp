@@ -37,15 +37,15 @@
  * `DivasBus` selects, and the AHB is the default because it is the one
  * that cannot be got wrong.
  *
- * THE IOBUS ADDRESS COMES FROM THE DATA SHEET, NOT THE HEADER. The
- * device header defines DIVAS at 0x48000000 and says nothing about the
- * IOBUS alias; the memory map (9.2, table 9-1) and the product mapping
- * (figure 8-3) both put the IOBUS region at 0x60000000 with PORT at its
- * base and DIVAS at +0x200. This is the CCL's `LutInput::tcc` situation
- * again and it takes the same ruling: THE HEADER WINS WHERE BOTH
- * DOCUMENTS SPEAK, and where the header is SILENT the datasheet is
- * spelled out and the bench arbitrates. It does - test_samc_debug letter
- * h computes the same quotients through both paths.
+ * THE IOBUS ADDRESS COMES FROM THE DATA SHEET, NOT THE HEADER. The device
+ * header defines DIVAS at 0x48000000 and says nothing about the IOBUS
+ * alias; the memory map (9.2, table 9-1) and the product mapping (figure
+ * 8-3) both put the IOBUS region at 0x60000000 with PORT at its base and
+ * DIVAS at +0x200. This is the CCL's `LutInput::tcc` situation again and
+ * it takes the same rule: THE HEADER WINS WHERE BOTH DOCUMENTS SPEAK, and
+ * where the header is SILENT the datasheet is spelled out and the bench
+ * arbitrates. It does - measured, the same quotients come back through
+ * both paths.
  *
  * WRITING AN OPERAND WHILE BUSY IS AN ERROR. 14.5.8 write-protects
  * CTRLA, DIVIDEND, DIVISOR and SQRNUM for the duration of an operation

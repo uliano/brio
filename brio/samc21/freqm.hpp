@@ -2,12 +2,11 @@
  * freqm.hpp
  *
  * The SAM C21 Frequency Meter (DS60001479M ch. 44): a hardware ratio
- * counter that measures one generic clock against another. There is no
- * AVR analog - on that family a clock is measured by counting its edges
- * in a timer, with the CPU in the loop - and it earns its place here
- * because everything the clock work ahead has to characterize (the
- * 32 kHz oscillators, the FDPLL, a crystal against the internal RC) is
- * exactly a ratio between two generators.
+ * counter that measures one generic clock against another, with no CPU in
+ * the loop. It earns its place here because everything this stratum's
+ * clock drivers have to characterize (the 32 kHz oscillators, the FDPLL,
+ * a crystal against the internal RC) is exactly a ratio between two
+ * generators.
  *
  * WHAT THE SILICON DOES, in one formula and three constraints.
  *
@@ -32,9 +31,11 @@
  *    REFNUM x (f_msr/f_ref) must stay under 2^24, and STATUS.OVF says
  *    when it did not. Longer measurements are more precise and closer to
  *    overflowing, which is the whole trade: `refnum_for()` picks the
- *    largest REFNUM that stays safe for an expected ratio, and CFGA's
- *    DIVREF - a divide-by-8 on the reference alone - buys another
- *    eightfold when the ratio is small.
+ *    largest REFNUM that stays safe for an expected ratio. CFGA's
+ *    DIVREF - which 44.8.3 draws as a divide-by-8 on the reference
+ *    alone, and which this silicon does not implement - would have
+ *    bought another eightfold; see `Freqm::cfga_divref` for what was
+ *    measured and why a configuration asking for it is refused.
  *
  * 3. ERRATUM 1.24.1, LIVE ON EVERY SILICON REVISION INCLUDING THIS ONE,
  *    with no workaround offered: READING CTRLB RAISES A PAC PROTECTION
@@ -139,12 +140,12 @@ struct Freqm {
      * device header, as though CFGA were eight bits wide, while 44.8.3
      * draws sixteen and puts DIVREF at bit 15 with a description
      * ("Divides the reference clock by 8"). The bench settled it twice
-     * over (test_samc_freqm letter c): CFGA written with bit 15 and
-     * REFNUM 1 READS BACK 0x0001 - the bit does not even stay written -
-     * and setting it changes no measurement. The header is right, the
-     * chapter's drawing is not, and `config_valid()` refuses a
-     * configuration that asks for a divider that is not there rather
-     * than accepting one that would silently do nothing.
+     * over (measured): CFGA written with bit 15 and REFNUM 1 READS BACK
+     * 0x0001 - the bit does not even stay written - and setting it
+     * changes no measurement. The header is right, the chapter's drawing
+     * is not, and `config_valid()` refuses a configuration that asks for
+     * a divider that is not there rather than accepting one that would
+     * silently do nothing.
      */
     static constexpr uint16_t cfga_divref = static_cast<uint16_t>(1u << 15);
 

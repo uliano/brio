@@ -20,8 +20,8 @@
  *              the TASK util/i2c_bus.hpp (= util/bus_master.hpp) drives:
  *              the transfer ENGINE. A Request is one BUS TENURE - write,
  *              read, or write-then-read joined by a repeated START - the
- *              SAME descriptor shape avrdx/twi.hpp carries, buffers as
- *              Lease::reply loans, completion as the bus AO's
+ *              descriptor shape every target's I2cHost carries, buffers
+ *              as Lease::reply loans, completion as the bus AO's
  *              TransferDone with the i2c_* status vocabulary.
  *
  *  I2cClient<n, pads>
@@ -51,8 +51,8 @@
  *    IDLE - so a host on a quiet bus that never forces IDLE never
  *    starts. force_idle() is therefore part of the host's init;
  *  - MB and SB hold SCL LOW (STATUS.CLKHOLD) until software answers
- *    with DATA, ADDR, a command, or a flag clear (33.10.6) - the
- *    unlimited-time-to-respond design the AVR's TWI shares;
+ *    with DATA, ADDR, a command, or a flag clear (33.10.6) - an
+ *    unlimited-time-to-respond design;
  *  - writing ADDR.ADDR clears BUSERR, ARBLOST, LENERR and the time-out
  *    flags AUTOMATICALLY (33.10.7), which is why the engine starts a
  *    tenure with no clear ceremony at all;
@@ -63,8 +63,8 @@
  *  - ERRATUM 1.17.10 (LIVE): 10-bit addressing in CLIENT mode is not
  *    functional, no workaround. I2csConfig has no ten-bit knob and the
  *    resource refuses ADDR.TENBITEN by construction (host-side 10-bit
- *    exists at the RESOURCE level; the engine speaks 7-bit, the avrdx
- *    Request shape);
+ *    exists at the RESOURCE level; the engine speaks 7-bit, which is
+ *    what the shared Request shape carries);
  *  - ERRATUM 1.17.11 (LIVE): the client's error status bits are NOT
  *    cleared when INTFLAG.AMATCH is cleared, against 33.8.6. The
  *    workaround is code: I2cs<n>::clear_errors() writes them by hand
@@ -73,8 +73,8 @@
  *    error on a repeated start. i2cm_config_valid() refuses the pair;
  *  - ERRATUM 1.17.16: SWRST claimed non-functional while ENABLE = 0 on
  *    every revision. NOT REPRODUCED in SPI mode on this silicon
- *    (test_samc_spi a); the enable-first discipline is kept here too
- *    and the I2C-mode disposition is the suite's to measure;
+ *    (samc21/spi.hpp); the enable-first discipline is kept here too
+ *    and the I2C-mode disposition is unmeasured;
  *  - ERRATUM 1.17.21 (LIVE): automatic address acknowledge (AACKEN)
  *    breaks on a repeated start, workaround "do not use the AACKEN
  *    feature". This driver has NO AACKEN knob at all - an AMATCH
@@ -120,11 +120,11 @@ namespace brio {
 // The knobs (33.8.1, 33.10.1..3)
 // =============================================================================
 
-/// The bus speed a tenure runs at - the same three-step vocabulary
-/// avrdx/twi.hpp's TwiSpeed speaks, because they name the same I2C
-/// specification classes. High-speed (3.4 MHz) is deliberately absent:
-/// errata 1.17.7 and 1.17.9 break its repeated starts with no
-/// workaround (see the header comment).
+/// The bus speed a tenure runs at - the three-step vocabulary every
+/// target's I2cSpeed speaks, because they name the same I2C specification
+/// classes. High-speed (3.4 MHz) is deliberately absent: errata 1.17.7
+/// and 1.17.9 break its repeated starts with no workaround (see the
+/// header comment).
 enum class I2cSpeed : uint8_t {
     standard_100k,   ///< Sm, CTRLA.SPEED = 0x0
     fast_400k,       ///< Fm, CTRLA.SPEED = 0x0 (the same code serves both)
@@ -211,9 +211,9 @@ constexpr bool i2c_pads_valid(const I2cPads& p) {
  * with BAUD timing the HIGH half and BAUDLOW the LOW half (BAUDLOW = 0
  * makes BAUD time both). T_RISE is the BUS'S, not the chip's - the
  * pull-ups and the wire capacitance own it, which is why it is an
- * ARGUMENT here exactly as it is in avrdx/twi.hpp's three-step: a baud
- * computed with a rise time the bus does not have lands the SCL low
- * time below the specification floor by exactly the difference.
+ * ARGUMENT here and not a constant: a baud computed with a rise time the
+ * bus does not have lands the SCL low time below the specification floor
+ * by exactly the difference.
  *
  * THE SPLIT IS THE SPECIFICATION'S: Fm+ requires a nominal 1:2
  * high-to-low ratio (the chapter's own note), Sm/Fm are symmetric. The
@@ -269,7 +269,7 @@ constexpr std::optional<I2cBaud> i2c_baud_for(uint32_t gclk_hz, uint32_t scl_hz,
 }
 
 /// What SCL a register pair really produces at gclk_hz on a bus with
-/// this rise time (the readback half, actual_scl in the AVR's spelling).
+/// this rise time - the readback half of the arithmetic.
 constexpr uint32_t i2c_scl_hz(uint32_t gclk_hz, I2cBaud b, uint32_t rise_ns) {
     const uint32_t rise_cycles =
         static_cast<uint32_t>((static_cast<uint64_t>(gclk_hz) * rise_ns) / 1'000'000'000ULL);
@@ -835,12 +835,12 @@ public:
 /*
  * I2cHost<n, pads, generator>
  *
- * The transfer engine, driven by util/bus_master.hpp exactly as
- * avrdx/twi.hpp's TwiHost is: a Request is ONE BUS TENURE - write, read,
- * or write-then-read joined by a repeated START (the register-access
- * idiom) - and the empty request is an address probe. ALWAYS
- * asynchronous: start() returns false and a TransferDone{status()}
- * follows from the ISR, the avrdx engine's own contract.
+ * The transfer engine, driven by util/bus_master.hpp: a Request is ONE
+ * BUS TENURE - write, read, or write-then-read joined by a repeated START
+ * (the register-access idiom) - and the empty request is an address
+ * probe. ALWAYS asynchronous: start() returns false and a
+ * TransferDone{status()} follows from the ISR, which is the engine
+ * contract every target's I2cHost keeps.
  *
  * The state machine is 33.6.2.4's, SCLSM = 0, smart mode off: MB is
  * "the host moved a byte out (or failed to)", SB is "a byte arrived",
@@ -894,35 +894,31 @@ public:
     };
     static_assert(std::is_trivially_copyable_v<Request>);
 
-    /**
-     * @brief Bring the instance up as a bus host.
-     *
-     * `rise_ns` is the BUS'S rise time - the pull-ups' and the wire's,
-     * not the chip's - and it enters the baud arithmetic exactly as it
-     * does on the AVR (a budget that ignores it lands T_LOW under the
-     * specification floor). State what the bench measures; 300 ns is a
-     * conservative default for a 1.5k / breadboard-scale bus.
-     *
-     * `core_hz` is the RATE OF THE GENERATOR the `generator` template
-     * argument names - the caller's claim, exactly as freqm's
-     * reference_hz is (a divided generator's rate is not knowable
-     * here); 0 means generator 0 at the CPU clock, the default. WHY A
-     * CALLER WOULD SLOW THE CORE AT ALL: the I2C bus monitor samples
-     * SDA/SCL on this clock and HAS NO INPUT FILTER, so on a wire
-     * whose crosstalk glitches are ~100 ns a fast core SEES them - as
-     * false Start/Stop conditions, i.e. instant BUSERR/ARBLOST. On the
-     * phase F bench (the seven-wire bundle) the measured ladder is:
-     * 6 MHz core clean, 12 MHz and up dead on the first tenure, at
-     * EVERY SCL rate. A clean, short, separated wire has no such
-     * problem; a bundled one wants a core a notch above its top SCL
-     * and no more.
-     *
-     * The three speeds' register pairs are resolved HERE (and at
-     * rebase()); one this core cannot produce is marked unreachable -
-     * speed_ok() tells, and a Request naming it completes on the spot
-     * with i2c_rejected rather than running at a rate nobody asked
-     * for.
-     */
+    /// Bring the instance up as a bus host.
+    ///
+    /// `rise_ns` is the BUS'S rise time - the pull-ups' and the wire's,
+    /// not the chip's - and it enters the baud arithmetic directly (a
+    /// budget that ignores it lands T_LOW under the specification
+    /// floor). State what the bench measures; 300 ns is a conservative
+    /// default for a 1.5k / breadboard-scale bus.
+    ///
+    /// `core_hz` is the RATE OF THE GENERATOR the `generator` template
+    /// argument names - the caller's claim, exactly as freqm's
+    /// reference_hz is (a divided generator's rate is not knowable
+    /// here); 0 means generator 0 at the CPU clock, the default. WHY A
+    /// CALLER WOULD SLOW THE CORE AT ALL: the I2C bus monitor samples
+    /// SDA/SCL on this clock and HAS NO INPUT FILTER, so on a wire
+    /// whose crosstalk glitches are ~100 ns a fast core SEES them - as
+    /// false Start/Stop conditions, i.e. instant BUSERR/ARBLOST. On a
+    /// seven-wire bundle the measured ladder is: 6 MHz core clean,
+    /// 12 MHz and up dead on the first tenure, at EVERY SCL rate. A
+    /// clean, short, separated wire has no such problem; a bundled one
+    /// wants a core a notch above its top SCL and no more.
+    ///
+    /// The three speeds' register pairs are resolved HERE (and at
+    /// rebase()); one this core cannot produce is marked unreachable -
+    /// speed_ok() tells, and a Request naming it completes on the spot
+    /// with i2c_rejected rather than running at a rate nobody asked for.
     template <typename Clock>
     static bool init(Clock clock, uint32_t rise_ns = 300u, uint32_t core_hz = 0u) {
         static_assert(clock_follows<Clock, I2cHost>(),
@@ -1008,18 +1004,16 @@ public:
     /// serializes, so this is a convenience for suites, not a lock.
     static bool idle() { return phase_ == Phase::idle; }
 
-    /**
-     * @brief Begin one bus tenure (called by I2cBus from main context).
-     * @return false ALWAYS on success - the tenure runs on the ISR and a
-     * TransferDone{status()} follows - and true only for the degenerate
-     * failure the reply must not wait for: a request whose speed cannot
-     * be programmed. The avrdx TwiHost contract.
-     *
-     * A tenure against a BUSY bus is the silicon's to hold: writing
-     * ADDR while another host owns the wire parks the START until the
-     * bus goes idle (33.6.2.4.2), which is exactly the AVR's
-     * held-START behaviour.
-     */
+    /// Begin one bus tenure (called by I2cBus from main context). Returns
+    /// false ALWAYS on success - the tenure runs on the ISR and a
+    /// TransferDone{status()} follows - and true only for the degenerate
+    /// failure the reply must not wait for: a request whose speed cannot
+    /// be programmed. That is the I2cHost contract util/bus_master.hpp is
+    /// written against.
+    ///
+    /// A tenure against a BUSY bus is the silicon's to hold: writing ADDR
+    /// while another host owns the wire parks the START until the bus
+    /// goes idle (33.6.2.4.2) - the held-START behaviour.
     static bool start(const Request& r) {
         req_ = r;
         pos_ = 0;
@@ -1051,11 +1045,9 @@ public:
     /// TransferDone payload.
     static uint8_t status() { return status_; }
 
-    /**
-     * @brief SERCOM interrupt body - call from SERCOMn_Handler().
-     * @return true when the tenure just completed (Stop sent or bus
-     * lost): the edge on which the glue posts TransferDone.
-     */
+    /// SERCOM interrupt body - call from SERCOMn_Handler(). Returns true
+    /// when the tenure just completed (Stop sent or bus lost): the edge
+    /// on which the glue posts TransferDone.
     [[gnu::always_inline]] static bool isr() {
         const uint8_t p = S::pending();
         if (p == 0u) {
@@ -1135,24 +1127,21 @@ public:
         return false;
     }
 
-    /**
-     * @brief The classic bus unstick: nine SCL pulses and a Stop, by
-     * hand, open-drain, with the pads reclaimed from the SERCOM for the
-     * duration - avrdx/twi.hpp's Twi<n>::unstick() ported to this
-     * silicon. RECOVER() FIXES THE PERIPHERAL, THIS FIXES THE WIRE.
-     *
-     * @return the number of pulses it took a stuck client to release
-     * SDA (0 = the wire was never stuck), or 0xFF when nine pulses and
-     * a Stop left SDA still low - a short, not a client.
-     *
-     * The bus is then re-inited from force_idle(); the caller re-inits
-     * nothing.
-     */
+    /// The classic bus unstick: nine SCL pulses and a Stop, by hand,
+    /// open-drain, with the pads reclaimed from the SERCOM for the
+    /// duration. RECOVER() FIXES THE PERIPHERAL, THIS FIXES THE WIRE.
+    ///
+    /// Returns the number of pulses it took a stuck client to release SDA
+    /// (0 = the wire was never stuck), or 0xFF when nine pulses and a
+    /// Stop left SDA still low - a short, not a client.
+    ///
+    /// The bus is then re-inited from force_idle(); the caller re-inits
+    /// nothing.
     static uint8_t unstick() {
         Nvic::disable(S::irq());
         // The pads back to PORT: open-drain by DIRECTION (OUT stays 0;
         // driving low = output, releasing = input under the bus's own
-        // pull-ups), the AVR verb's exact technique.
+        // pull-ups).
         SdaPin::release();
         SclPin::release();
         SdaPin::clear();
@@ -1160,10 +1149,9 @@ public:
         SdaPin::configure({.input_enable = true});
         SclPin::configure({.input_enable = true});
         // A HEALTHY WIRE IS LEFT ALONE: SDA already high means nothing
-        // is stuck and zero pulses is both the answer and the action -
-        // the first version pulsed first and asked after, so a clean
-        // bus read "released at pulse 1" and nine spurious clocks went
-        // out besides.
+        // is stuck, and zero pulses is both the answer and the action.
+        // Pulsing first and asking after would report a clean bus as
+        // "released at pulse 1" and put nine spurious clocks on it.
         if (SdaPin::read()) {
             SdaPin::function(pads.sda_pin.function, {.input_enable = true});
             SclPin::function(pads.scl_pin.function, {.input_enable = true});
@@ -1202,22 +1190,20 @@ public:
         return released_at == 0xFF ? 0u : released_at;
     }
 
-    /**
-     * @brief Put the ENGINE back where start() is legal: the init()
-     * tail re-run from the cached configuration. Clocks and pads are
-     * untouched - a SERCOM software reset reaches neither GCLK routing
-     * nor PORT - and the baud table stands, so no Clock is needed.
-     *
-     * The verb a timed I2cBus calls on a tenure that never answered
-     * (util/bus_master.hpp): a START parked into a held wire does NOT
-     * fire on this silicon when the hold releases (measured, letter g),
-     * so a re-init is the ONLY way out of a park. THE WIRE IS NOT ITS
-     * JOB: a client still holding SDA makes the next tenure report -
-     * a bus error, another timeout - and unstick() is the wire's verb.
-     *
-     * @return false when a synchronization never settled (the bounded
-     * waits' honesty: a false engine is refusing, not hanging).
-     */
+    /// Put the ENGINE back where start() is legal: the init() tail re-run
+    /// from the cached configuration. Clocks and pads are untouched - a
+    /// SERCOM software reset reaches neither GCLK routing nor PORT - and
+    /// the baud table stands, so no Clock is needed.
+    ///
+    /// The verb a timed I2cBus calls on a tenure that never answered
+    /// (util/bus_master.hpp): a START parked into a held wire does NOT
+    /// fire on this silicon when the hold releases (measured), so a
+    /// re-init is the ONLY way out of a park. THE WIRE IS NOT ITS JOB: a
+    /// client still holding SDA makes the next tenure report - a bus
+    /// error, another timeout - and unstick() is the wire's verb.
+    ///
+    /// Returns false when a synchronization never settled (the bounded
+    /// waits' honesty: a false engine is refusing, not hanging).
     static bool recover() {
         Nvic::disable(S::irq());
         phase_ = Phase::idle;

@@ -5,7 +5,7 @@
 //     as six 8-bit PWM channels on pins 0..5 of one port. Two timers,
 //     twelve channels, four RGB lamps: TCA1 -> PORTB (LED1, LED2),
 //     TCA0 -> PORTC (LED3, LED4);
-//   - Lamp is now three PWM channels and a colour TABLE (an Rgb triple
+//   - Lamp is three PWM channels and a colour TABLE (an Rgb triple
 //     per Colour) instead of three on/off pins - the mixed colours get
 //     the per-channel levels they need (a green LED is far brighter than
 //     the red one; "yellow" wants a lot less green than red). Tune the
@@ -21,7 +21,7 @@
 // (walk 5 s, flashing walk 3 s). Every transition is traced on the
 // console with the uptime.
 //
-// Wiring (rewired for the PWM step; traffic0/traffic1 follow it too):
+// Wiring (traffic0 and traffic1 use the same map):
 //   LED1 R/G/B  PB0/PB1/PB2   TCA1 WO0-2
 //   LED2 R/G/B  PB3/PB4/PB5   TCA1 WO3-5
 //   LED3 R/G/B  PC0/PC1/PC2   TCA0 WO0-2

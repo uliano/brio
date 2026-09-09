@@ -30,10 +30,9 @@ are worth reading before writing any code.
   channel "cannot be set to different clock frequencies", and
   `Tc<n>::gclk_id` is what says which do. THE SHARP EDGE OF THE SHARING
   is `release()`: it disconnects the shared channel, so releasing one
-  half of a pair SILENTLY STOPS THE OTHER (the TSENS campaign paid half
-  a letter to learn it). A caller keeping the sibling alive tears down
-  by hand - reset plus bus_clock - and leaves the channel connected;
-  the verb's own comment says so.
+  half of a pair SILENTLY STOPS THE OTHER. A caller keeping the sibling
+  alive tears down by hand - reset plus bus_clock - and leaves the
+  channel connected; the verb's own comment says so.
 - **`TCn_MASTER_SLAVE_MODE` is 1 for a pair master, 2 for a client and 0
   for an instance that cannot pair.** TC0+TC1 and TC2+TC3 pair into a
   32-bit counter, TC4 does not - which is exactly 35.6.2.4's sentence,
@@ -80,9 +79,9 @@ as a two-deep FIFO: reading CCx is what lets the buffer move up
 (23..27), one event input per instance. 35.6.6 says "the TC requires only
 asynchronous event inputs" while table 29-3 lists all three paths for
 TCnEVU, and 35.6.2.8's note 2 requires the asynchronous path for capture
-specifically - the bench used the asynchronous path throughout and it
-works. The DMAC trigger ids are published from the header's own
-`TCn_DMAC_ID_*` too.
+specifically - the asynchronous path is what every measurement below
+uses, and it works. The DMAC trigger ids are published from the
+header's own `TCn_DMAC_ID_*` too.
 
 ## The errata: read the row, not the column
 
@@ -181,21 +180,19 @@ extern "C" void TC2_Handler() {
 
 ## Bench findings
 
-From `test_samc_tc` (6 letters, **77 verdicts, 77/77 three times**).
-Nothing to wire. Every timer runs from generator 0 - the CPU's own
-48 MHz OSC48M - so every expected number below is exact arithmetic and
-not a measurement of an oscillator, and SysTick is the independent
-witness.
+From `test_samc_tc`, six letters. Nothing to wire. Every timer runs from
+generator 0 - the CPU's own 48 MHz OSC48M - so every expected number
+below is exact arithmetic and not a measurement of an oscillator, and
+SysTick is the independent witness.
 
 - **The prescaler is exact.** Over a SysTick-timed 250 ms window a /1024
   counter advanced 11677..11710 ticks against an exact 11718 (0.1..0.4 %
   low, which is the window's own rounding), and /256 counted **4.00x**
   as fast - a ratio immune to everything the measurement chain adds.
-- **A verdict line is 4 ms of console at 115200**, which is worth
-  remembering: the first version of this letter measured 4849 ticks where
-  4687 were due, because a `bench.verdict()` print sat between starting
-  the counter and starting the clock. The window is now opened and closed
-  by two reads with nothing between them but the wait.
+- **A verdict line is 4 ms of console at 115200**, so a `bench.verdict()`
+  print between starting the counter and starting the clock lands inside
+  the measurement: 4849 ticks read where 4687 are due. A window is opened
+  and closed by two reads with nothing between them but the wait.
 - **A measurement window has to fit the counter that reads it**: at /256
   a 16-bit counter wraps in 350 ms, which is why the window is 250.
 - **COUNT32 is genuinely 32 bits**: TC0 paired with TC1, no prescaler,
@@ -209,28 +206,26 @@ witness.
   accessor afterwards returns exactly what the command fetched - which is
   what makes the two names worth having.
 - **A synchronized read pays TWO READSYNC commands, and here is why.**
-  `test_samc_sleep` letter c found a single-command read ONE BEHIND
-  (four consecutive `count32()` calls on a 32 kHz pair that had run six
-  milliseconds returned **0, 216, 221, 225**), and the dedicated probe
-  `tc_readsync_probe` then watched the crossing itself: after a
-  READSYNC, SYNCBUSY.CTRLB stands for the command's crossing and falls,
-  and the COUNT shadow lands about **half a counter-clock period
-  later, with no SYNCBUSY bit advertising it** - SYNCBUSY.COUNT never
-  rises for a READSYNC (it is the write's bit), so there is nothing to
-  wait on. The waiting-for-the-rise candidate fix was tried and DOES
-  NOT work (the reads stayed one behind); what works is a SECOND
+  A single-command read is ONE BEHIND (`test_samc_sleep` letter c: four
+  consecutive `count32()` calls on a 32 kHz pair that has run six
+  milliseconds return **0, 216, 221, 225**). Watching the crossing
+  itself says what happens: after a READSYNC, SYNCBUSY.CTRLB stands for
+  the command's crossing and falls, and the COUNT shadow lands about
+  **half a counter-clock period later, with no SYNCBUSY bit advertising
+  it** - SYNCBUSY.COUNT never rises for a READSYNC (it is the write's
+  bit), so there is nothing to wait on. Waiting for that rise therefore
+  does not work, and the reads stay one behind; what works is a SECOND
   READSYNC, whose own crossing covers the first's landing gap.
-  `read_sync()` now issues it, so a synchronized read returns the count
-  at the CALL's entry - measured **224, 233, 241, 249** on the same
-  setup, the first value finally current. The price: **~242 us** per
-  read at a 32.768 kHz counter clock against ~117 single-command,
-  unmeasurably small at 48 MHz. The TCC's `read_sync()` has the same
-  silicon and carries the same fix. And **there is no priming** - the
-  refutation was run on purpose: after a double read, a later
-  single-command read returns the previous read's second snapshot,
-  stale by the whole inter-read gap (**233 against a true 464** after
-  a 6 ms gap, identical on the TCC), so every synchronized read pays
-  its own two commands and no cheaper protocol exists.
+  `read_sync()` issues it, so a synchronized read returns the count at
+  the CALL's entry - **224, 233, 241, 249** on the same setup, the first
+  value current. The price: **~242 us** per read at a 32.768 kHz counter
+  clock against ~117 single-command, unmeasurably small at 48 MHz. The
+  TCC's `read_sync()` is the same silicon and carries the same
+  discipline. And **there is no priming**: after a double read, a
+  later single-command read returns the previous read's second
+  snapshot, stale by the whole inter-read gap (**233 against a true
+  464** after a 6 ms gap, identical on the TCC), so every synchronized
+  read pays its own two commands and no cheaper protocol exists.
 - **PWM measured two ways at once.** On the LED's own waveform output
   (PB23 = TC3/WO1), TOP 199 at /256: duty 0 reads **0** per mille high on
   the pad, duty 199 reads **994**, duty 100 reads **488** and duty 50
@@ -263,19 +258,17 @@ witness.
   a subscriber AO. Over two seconds of a 20 Hz wave: **41 ISR captures,
   19 samples published, 19 received, last value 2344 ticks (exact 2343),
   21 captures overwritten in the latch.** That is `meter_sampler.hpp`'s
-  whole design measured on a second architecture - the AO paces
-  PUBLICATION, not capture - and **not one line of `util/` changed** to
-  make it work.
+  design as written, measured on silicon: the AO paces PUBLICATION, not
+  capture.
 
 ## Bench findings, DMA and the advanced modes
 
-From `test_samc_timer_dma` (10 letters, **101 verdicts, 101/101 three
-times - twice warm and once cold from a fresh flash**, under four
-seconds). Nothing to wire, and the instrument is the finding it rests
-on: a TCC or TC waveform reaches a capture channel through a
-COMBINATIONAL CCL LUT published as an EVSYS generator, so both its edges
-are delayed by the same handful of cycles and both a period and a pulse
-width come out untouched. `Lut<0>`'s INSEL "TC" source is TC0's WO[0]
+From `test_samc_timer_dma`, ten letters, under four seconds. Nothing to
+wire, and the instrument is the finding it rests on: a TCC or TC
+waveform reaches a capture channel through a COMBINATIONAL CCL LUT
+published as an EVSYS generator, so both its edges are delayed by the
+same handful of cycles and both a period and a pulse width come out
+untouched. `Lut<0>`'s INSEL "TC" source is TC0's WO[0]
 and its "TCC" source is TCC0's WO[0], so one fabric carries either.
 
 - **A TC CAPTURE'S DMA REQUEST IS NOT A LEVEL WAITING TO BE RE-RISEN.**
@@ -296,9 +289,10 @@ and its "TCC" source is TCC0's WO[0], so one fabric carries either.
 - **A capture register is TWO registers, and one read after a change is
   stale.** CCx has CCBUFx behind it, so a reading taken after the signal
   under test has been reconfigured hands back what the PREVIOUS
-  arrangement captured. The first version of the waveform-mode letter
-  "measured" MPWM's period as MFRQ's and INVEN's width as the run before
-  it. Draining both stages and then taking a whole fresh capture is what
+  arrangement captured - a waveform-mode measurement that skips the
+  drain reports the previous mode's period, and an inverted output's
+  width as the run before it. Draining both stages and then taking a
+  whole fresh capture is what
   makes a reading current; a reader keeping up with a running stream
   never notices.
 - **The captured period is the waveform's LESS ONE TICK**, every sample
@@ -325,8 +319,8 @@ and its "TCC" source is TCC0's WO[0], so one fabric carries either.
   PER = 199 at /256, stamped by a 4800-tick waveform, advanced **18 or
   19 counts** per event against 4800/256 = 18.75 - and the counter has
   to be put back to zero by hand after a mode change, because a COUNT
-  left above the new PER runs all the way to 0xFF (the trap
-  `test_samc_rtc` found in the RTC's mode 1, and it is the TC's too).
+  left above the new PER runs all the way to 0xFF (the same trap as the
+  RTC's mode 1, `test_samc_rtc`).
 - **PRESCSYNC = GCLK starts the counter a whole prescaled tick earlier**
   than either prescaler-synchronized option. Over 300 retrigger phases
   spanning one tick at /1024, the mean count after a fixed wait was
@@ -350,8 +344,8 @@ Driver gaps (deliberate):
   C20/C21 **N** variants only, and this family's device header does not
   declare CTRLA.CAPTMODE at all, so there is nothing to gate and nothing
   to write.
-- **Sleep, half of it.** `CTRLA.RUNSTDBY` is now exercised and it is
-  the load-bearing bit of the whole clock chain (`platform.md`): a TC
+- **Sleep, half of it.** `CTRLA.RUNSTDBY` is exercised and it is the
+  load-bearing bit of the whole clock chain (`platform.md`): a TC
   with it set counts through a standby, with its generator's and its
   source's own RUNSTDBY clear. `on_demand` is still only a field -
   35.6.7's clock-request behaviour, ONDEMAND stopping the request while
@@ -367,7 +361,7 @@ Not judged, and deliberately so:
   cannot be presented to a muxed WO pad from inside the chip on a board
   with no wires: function E holds the pin against its own pull, and a pad
   left under PORT is not seen by the capture input. The suite prints what
-  it can (CC0 did not stay at zero after the pad was handed over, so the
+  it can (CC0 does not stay at zero after the pad is handed over, so the
   path is not obviously dead) and declines the verdict. One wire between
   two pads would settle it in a minute.
 

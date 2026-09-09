@@ -134,7 +134,7 @@ compared with what gcc's own software division produces for the same
 operands, through volatiles so nothing folds away.
 
 **Nine unsigned divisions** - including 0xFFFFFFFF / 1, 0xFFFFFFFF /
-0xFFFFFFFF, 1 / 0xFFFFFFFF and 0 / 5 - agree in quotient AND remainder,
+0xFFFFFFFF, 1 / 0xFFFFFFFF and 0 / 5 - agree in quotient and remainder,
 and **so do the same nine through the IOBUS alias at 0x60000200**. **Six
 signed divisions** match the language's truncating semantics, remainders
 included.
@@ -146,7 +146,7 @@ included.
 STATUS.DBZ, and the bit **latches across a later good division** until it
 is written back.
 
-**Seven square roots** are exact, with REMAINDER = n - root^2; the widest
+**Seven square roots** are exact, with remainder = n - root^2; the widest
 input 0xFFFFFFFF gives 65535 remainder 131070. The square root **ignores
 CTRLA.SIGNED**, which has no meaning for it.
 
@@ -182,10 +182,10 @@ worse still.)
 dividend costs 8.2..8.3 cycles against 20.7..20.8 for a full-width one -
 **12.4 cycles apart**; with DLZ = 1 both cost 20.7..20.8 and the pair is
 apart by **less than a tenth of a cycle** across runs. That is the
-deterministic timing 14.6.2.6 offers, and the price of it. (The
-second verdict is a band on the ABSOLUTE difference for a reason: two
-measurements that are meant to be EQUAL cannot be compared by ordering,
-because the stopwatch's own noise decides which is larger.)
+deterministic timing 14.6.2.6 offers, and the price of it. (That second
+verdict is a band on the absolute difference because two measurements
+meant to be equal cannot be compared by ordering: the stopwatch's own
+noise decides which is larger.)
 
 **A square root of 0xFFFFFFFF costs 20.8 cycles**, the same as a
 full-width division.
@@ -196,18 +196,18 @@ full-width division.
 
 Driver gaps - features of ch. 14 not built:
 
-- **Adopting the block as the toolchain's division: RULED OUT
-  (2026-08-30).** gcc lets `__aeabi_uidiv`/`__aeabi_idiv` be
-  overridden and the numbers above were the decision's input - and the
-  decision is NO. A global override is a whole-image invariant whose
-  one hazard - the block has ONE set of operand registers, so a
-  division taken in an interrupt corrupts one in progress below it -
-  could be held off only by discipline (or by paying a critical
-  section on every division, eating the gain exactly where divisions
-  are short), and brio's house rule is that a guarantee is enforced or
-  it is not stated. The gain matters only in division-heavy code,
-  which can spend it deliberately: `Divas`'s explicit verbs are the
-  offer, and the mechanism-not-policy split stands.
+- **The block is not the toolchain's division.** gcc lets
+  `__aeabi_uidiv`/`__aeabi_idiv` be overridden and the numbers above
+  say what that would buy, and the answer is still no. A global
+  override is a whole-image invariant whose one hazard - the block has
+  ONE set of operand registers, so a division taken in an interrupt
+  corrupts one in progress below it - could be held off only by
+  discipline (or by paying a critical section on every division,
+  eating the gain exactly where divisions are short), and brio's house
+  rule is that a guarantee is enforced or it is not stated. The gain
+  matters only in division-heavy code, which can spend it
+  deliberately: `Divas`'s explicit verbs are the offer, and the
+  mechanism-not-policy split stands.
 - **16-bit operation.** The chapter's cycle counts mention it (14.6.2.6)
   and no register ever does: the operands are one 32-bit width, and the
   "16-bit division" of that sentence is a 32-bit division whose dividend

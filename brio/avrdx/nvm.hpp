@@ -48,11 +48,11 @@
  * No verb in this file consults it.
  *
  * THE ERRATA THAT ARE CODE HERE. DS80000915F 2.7.1 / DS80000882C 2.7.2,
- * both families, all revisions on this desk: a MULTI-PAGE erase checks
- * only the FIRST page of the range against write protection and erases
- * the rest regardless. There is no work-around in silicon, so the
- * driver validates the WHOLE range - every page of it - against the
- * section geometry and the protection bits before issuing any erase.
+ * both families: a MULTI-PAGE erase checks only the FIRST page of the
+ * range against write protection and erases the rest regardless. There
+ * is no work-around in silicon, so the driver validates the WHOLE
+ * range - every page of it - against the section geometry and the
+ * protection bits before issuing any erase.
  * What the hardware would wrongly allow, erase() refuses.
  *
  * DS80000915F 2.7.2 says the EEPROM erase command ignores an "EEWP" bit

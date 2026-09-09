@@ -2,10 +2,10 @@
  * sdadc.hpp
  *
  * The SAM C21's 16-bit SIGMA-DELTA converter (DS60001479M ch. 39), this
- * family's third and strangest converter, and the one the Multislope
- * work will lean on. A MONOSTATE `Sdadc`, not `Sdadc<n>`: there is
+ * family's third and strangest converter. A MONOSTATE `Sdadc`, not
+ * `Sdadc<n>`: there is
  * exactly one instance on every C21 variant, so an index would be a
- * parameter with a single legal value (the `Rtc` and `Dac` precedent in
+ * parameter with a single legal value (the `Rtc` and `Dac` shape in
  * this stratum, against `Adc<n>`'s two real instances).
  *
  *   brio::Sdadc::init(generator, brio::SdadcConfig{
@@ -92,7 +92,7 @@
  *
  * No `rebase()` and no `ClockUser`: this converter has its own generic
  * clock channel and a main-clock change does not move CLK_SDADC
- * (docs/samc21/clock.md, the DynamicClock deferral).
+ * (docs/samc21/clock.md).
  *
  * ---------------------------------------------------------------------
  * THE FOUR REGISTER DISCIPLINES, spelled per register - and this chapter
@@ -198,9 +198,12 @@
  *    outside specification here whatever the errata say.
  *
  * ---------------------------------------------------------------------
- * NOT BUILT (docs/samc21/sdadc.md carries the list): sleep behaviour
- * beyond the two CTRLA bits, and the C20 half of the family, which has
- * no SDADC at all.
+ * NOT BUILT (docs/samc21/sdadc.md carries the list): the converter as a
+ * WAKE source, and erratum 1.8.7's SleepWalking obligation on SWTRIG,
+ * which needs a DMA write during a standby; ANACTRL's CTLSDADC and
+ * BUFTEST, which 39.8.21 describes too thinly to measure against
+ * anything; REFCTRL.REFRANGE, a real field no document of record
+ * explains; and the C20 half of the family, which has no SDADC at all.
  */
 
 #pragma once
@@ -230,9 +233,8 @@ namespace brio {
  *
  * `SdadcRef` is deliberately not `brio::Ref` (samc21/adc.hpp's, six codes)
  * nor `DacRef` (samc21/dac.hpp's, three): on this family there is no shared
- * reference block at all, so one enum would be a type no register accepts
- * - the ADC campaign's judgment call 1, taken there and followed twice
- * since.
+ * reference block at all, so one enum would be a type no register
+ * accepts.
  */
 enum class SdadcRef : uint8_t {
     /// INTREF: the SUPC bandgap, whose LEVEL is SUPC.VREF.SEL
@@ -384,8 +386,8 @@ constexpr uint32_t sdadc_gain_permille(uint16_t gain, uint8_t shift) {
  * The whole post-processing formula of 39.6.3.4, in software - what a
  * caller can predict a corrected result will be from an uncorrected one.
  *
- * IT WORKS IN THE RAW 24-BIT UNITS THE SILICON USES, which is the
- * campaign's central measurement: `data0` and the return value are
+ * IT WORKS IN THE RAW 24-BIT UNITS THE SILICON USES, which is measured:
+ * `data0` and the return value are
  * `result24()`s, not `result()`s, and the saturation is the register's
  * own +/-2^23. A caller thinking in 16-bit counts multiplies by
  * `sdadc_raw_per_count` on the way in and divides on the way out.

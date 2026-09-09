@@ -55,8 +55,8 @@
  *               DRE and an ADC's RESRDY do, a TC CAPTURE CHANNEL DOES NOT
  *               - a capture stream armed with INTFLAG.MCx already
  *               standing starts anyway, and resumes from a dead stop with
- *               the flag up and TRIGSRC untouched (test_samc_timer_dma
- *               letter b, docs/samc21/dmac.md). kick() is harmless where it
+ *               the flag up and TRIGSRC untouched (measured,
+ *               docs/samc21/dmac.md). kick() is harmless where it
  *               is unnecessary and necessary where it is not; arming with
  *               the request drained is what makes the first beat a fresh
  *               one either way.
@@ -128,8 +128,9 @@
  * only in a program that names Dmac - and with -ffunction-sections
  * -fdata-sections -Wl,--gc-sections (this target's flags) an image that
  * does not reach them does not carry them. That claim is not asserted
- * here, it is MEASURED: the release images of the apps that use no DMA
- * are byte-identical before and after this header existed.
+ * here, it is MEASURED: the release image of an app that names no
+ * engine is byte-identical to one built with this header out of the
+ * tree entirely.
  *
  * Alignment: the register descriptions of BASEADDR/WRBADDR require
  * 64-bit alignment and the device header's own descriptor type carries
@@ -183,15 +184,15 @@
  *    programmed length, and DISCARDS a reading that fails, counting it.
  *
  *    THE READING IS NOT THE DAMAGE, and that is the correction this
- *    header carries after the bench went hunting for a wedged serial port
- *    (docs/samc21/dmac.md, docs/samc21/sercom.md). 25.6.2.6: "For an ongoing
+ *    header carries (docs/samc21/dmac.md, docs/samc21/sercom.md).
+ *    25.6.2.6: "For an ongoing
  *    block transfer, the descriptor will be fetched from the WRITE-BACK
  *    memory section (WRBADDR)." The write-back is therefore not a report
  *    the driver may take or leave - it is the controller's LIVE COPY of
  *    the descriptor it is running. When 1.10.4 corrupts it, the transfer
  *    itself is destroyed: the channel stops moving bytes, raises no
- *    interrupt, and sits there enabled for ever. Caught in the act with
- *    two engines on one SERCOM: the transmit channel enabled, its
+ *    interrupt, and sits there enabled for ever. MEASURED with two
+ *    engines on one SERCOM: the transmit channel enabled, its
  *    peripheral's DRE and TXC both set (the transmitter idle and asking),
  *    CHSTATUS all zeros, no flag anywhere - and its write-back holding
  *    the OTHER channel's descriptor (BTCTRL 0x809 with SRCADDR = the
@@ -245,8 +246,8 @@
  * as descriptor and channel fields because they are part of the words
  * this driver writes, and a channel driven only by an event has been
  * measured, but no engine here routes one); QOSCTRL (left at its reset
- * value); RUNSTDBY and the standby sequence of 25.6.7 (the power pass
- * owns sleep on this target).
+ * value); RUNSTDBY and the standby sequence of 25.6.7 (sleep on this
+ * target is samc21/sleep.hpp's).
  *
  * AND ONE LEVEL UP: the target-independent contract these engines
  * satisfy is util/block_stream.hpp (design/block-stream.md) -
@@ -386,9 +387,9 @@ enum class DmaPriority : uint8_t {
 };
 
 /// CHCTRLB.EVACT (25.8.19): what an incoming event does to the channel.
-/// Exposed because it is part of the word this driver writes; nothing
-/// routes events to the DMAC on this target yet (no EVSYS driver), so
-/// every value but `none` is untested silicon from here.
+/// Exposed because it is part of the word this driver writes. `trigger`
+/// with EVIE set is silicon-tested from a software event over
+/// samc21/evsys.hpp; the other values are untested from here.
 enum class DmaEventAction : uint8_t {
     none = DMAC_CHCTRLB_EVACT_NOACT_Val,
     trigger = DMAC_CHCTRLB_EVACT_TRIG_Val,
@@ -816,19 +817,18 @@ public:
         return false;
     }
 
-    /**
-     * @brief Clock, reset, register the two descriptor tables, set the
-     * arbitration up and enable the block.
-     *
-     * The two BASEADDR/WRBADDR writes are why the reset comes first: both
-     * registers are ENABLE-PROTECTED (25.6.2.1), so a write while the
-     * block runs is discarded rather than refused. Everything below the
-     * enable is therefore written into a stopped controller on purpose.
-     *
-     * False when the reset did not complete. A caller that gets false has
-     * a block that is NOT configured - not one that is half configured:
-     * nothing after the failed step is written.
-     */
+    /// Clock, reset, register the two descriptor tables, set the
+    /// arbitration up and enable the block.
+    ///
+    /// The two BASEADDR/WRBADDR writes are why the reset comes first:
+    /// both registers are ENABLE-PROTECTED (25.6.2.1), so a write while
+    /// the block runs is discarded rather than refused. Everything below
+    /// the enable is therefore written into a stopped controller on
+    /// purpose.
+    ///
+    /// False when the reset did not complete. A caller that gets false
+    /// has a block that is NOT configured - not one that is half
+    /// configured: nothing after the failed step is written.
     static bool init(const DmacConfig& cfg = {}, uint32_t spins = 0xFFFFu) {
         Nvic::disable(irq());
         bus_clock(true);
@@ -897,28 +897,26 @@ public:
     /// be inspected WITHOUT being cleared.
     static uint16_t interrupt_pending() { return regs().DMAC_INTPEND; }
 
-    /**
-     * @brief The interrupt dispatch: which channel needs service, and
-     * why - flags CLEARED in the same breath.
-     *
-     * This is the whole ISR body of the block. INTPEND holds the LOWEST
-     * channel number with a pending interrupt together with that
-     * channel's three flags, and a write of {flags, id} clears those
-     * flags for that id (25.8.10) - so one read and one store serve one
-     * channel, and neither of them touches CHID. That is not a small
-     * detail: it is what lets the handler run without contending for the
-     * selector main context is using (see the file header).
-     *
-     * Nullopt when nothing is pending. A handler loops until it gets
-     * nullopt, because INTPEND reports one channel at a time and several
-     * may be pending at once:
-     *
-     *     extern "C" void DMAC_Handler() {
-     *         while (const auto irq = brio::Dmac::take_pending()) {
-     *             ...
-     *         }
-     *     }
-     */
+    /// The interrupt dispatch: which channel needs service, and why -
+    /// flags CLEARED in the same breath.
+    ///
+    /// This is the whole ISR body of the block. INTPEND holds the LOWEST
+    /// channel number with a pending interrupt together with that
+    /// channel's three flags, and a write of {flags, id} clears those
+    /// flags for that id (25.8.10) - so one read and one store serve one
+    /// channel, and neither of them touches CHID. That is not a small
+    /// detail: it is what lets the handler run without contending for the
+    /// selector main context is using (see the file header).
+    ///
+    /// Nullopt when nothing is pending. A handler loops until it gets
+    /// nullopt, because INTPEND reports one channel at a time and several
+    /// may be pending at once:
+    ///
+    ///     extern "C" void DMAC_Handler() {
+    ///         while (const auto irq = brio::Dmac::take_pending()) {
+    ///             ...
+    ///         }
+    ///     }
     [[gnu::always_inline]] static std::optional<DmaInterrupt> take_pending() {
         const uint16_t word = regs().DMAC_INTPEND;
         const uint8_t flags =
@@ -1016,13 +1014,13 @@ struct DmaChannelConfig {
     DmaTriggerAction action = DmaTriggerAction::block;
     DmaPriority priority = DmaPriority::level0;
 
-    /// The event input half. Nothing routes events to the DMAC on this
-    /// target yet; see the enum's own comment.
+    /// The event input half; see the enum's own comment for what of it
+    /// is silicon-tested.
     DmaEventAction event_action = DmaEventAction::none;
     bool event_input = false;    ///< CHCTRLB.EVIE
     bool event_output = false;   ///< CHCTRLB.EVOE
-    /// CHCTRLA.RUNSTDBY. Left false: sleep belongs to the power pass, and
-    /// 25.6.7's suspend-before-standby sequence has no owner here yet.
+    /// CHCTRLA.RUNSTDBY. Left false: sleep is samc21/sleep.hpp's, and
+    /// 25.6.7's suspend-before-standby sequence has no owner here.
     bool run_standby = false;
 };
 
@@ -1330,33 +1328,32 @@ public:
 
     // ---- progress -----------------------------------------------------------
 
-    /**
-     * @brief How far the block has got - the ONE way to ask, and the one
-     * place erratum 1.10.4 is answered.
-     *
-     * The controller keeps BTCNT in an internal register and only spills
-     * it to the write-back section when the channel loses priority, is
-     * SUSPENDED, or is disabled (25.10.2). So a suspend is not a
-     * side-effect of asking, it IS the asking: the channel is suspended,
-     * the write-back read, and the channel resumed.
-     *
-     * THE READING IS THEN CHECKED, NOT BELIEVED. Everything in a
-     * write-back descriptor except BTCNT and BTCTRL.VALID is invariant -
-     * the controller copied it from the descriptor it fetched and never
-     * touches it again - so a corrupted write-back (1.10.4) shows up as
-     * any of the four invariants differing from what load() put there, or
-     * as a BTCNT above the programmed length. Either way the reading is
-     * DISCARDED, the violation counted, the channel resumed and the
-     * caller told nothing rather than something wrong.
-     *
-     * @return the progress, or nullopt when the reading was refused
-     * (a write-back inconsistency, counted in violations(); or the
-     * suspend never took hold, counted in suspend_timeouts()).
-     *
-     * Callable from main context or from a handler: everything it touches
-     * is guarded. It is NOT free - it stops the channel for the duration
-     * - so the pacing is the caller's policy, never this driver's.
-     */
+    /// How far the block has got - the ONE way to ask, and the one
+    /// place erratum 1.10.4 is answered.
+    ///
+    /// The controller keeps BTCNT in an internal register and only spills
+    /// it to the write-back section when the channel loses priority, is
+    /// SUSPENDED, or is disabled (25.10.2). So a suspend is not a
+    /// side-effect of asking, it IS the asking: the channel is suspended,
+    /// the write-back read, and the channel resumed.
+    ///
+    /// THE READING IS THEN CHECKED, NOT BELIEVED. Everything in a
+    /// write-back descriptor except BTCNT and BTCTRL.VALID is invariant -
+    /// the controller copied it from the descriptor it fetched and never
+    /// touches it again - so a corrupted write-back (1.10.4) shows up as
+    /// any of the four invariants differing from what load() put there,
+    /// or as a BTCNT above the programmed length. Either way the reading
+    /// is DISCARDED, the violation counted, the channel resumed and the
+    /// caller told nothing rather than something wrong.
+    ///
+    /// Returns the progress, or nullopt when the reading was refused (a
+    /// write-back inconsistency, counted in violations(); or the suspend
+    /// never took hold, counted in suspend_timeouts()).
+    ///
+    /// Callable from main context or from a handler: everything it
+    /// touches is guarded. It is NOT free - it stops the channel for the
+    /// duration - so the pacing is the caller's policy, never this
+    /// driver's.
     static std::optional<DmaProgress> harvest(uint32_t spins = 0xFFFFu) {
         if (!loaded_.valid_bit()) {
             return std::nullopt;   // nothing was ever loaded: nothing to report
@@ -1557,27 +1554,26 @@ public:
         Nvic::enable(Dmac::irq());
     }
 
-    /**
-     * @brief Throw away a block the silicon has stopped running, and hand
-     * the channel back ready for the next one.
-     *
-     * THE CALLER DECIDES THAT THE BLOCK IS DEAD, not this engine: only
-     * the peripheral's owner knows what its own flags mean (samc21/
-     * sercom.hpp's Uart asks whether DRE and TXC are both set, which no
-     * live transmit block can allow). This verb is the consequence, and
-     * it is deliberately blunt - the channel is reset, reconfigured and
-     * re-armed from scratch, because after erratum 1.10.4 the controller's
-     * live descriptor copy is not something to reason about.
-     *
-     * WHAT IS LOST: an unknown tail of the abandoned block. The engine
-     * told its owner `length` beats were in flight and cannot say how
-     * many of them reached the wire, so the owner's ring is left as it
-     * was and those bytes are simply gone. There is no honest alternative
-     * - the one field that would say is the corrupted one.
-     *
-     * @return true when a block was abandoned (and faults() incremented);
-     * false when nothing was in flight.
-     */
+    /// Throw away a block the silicon has stopped running, and hand
+    /// the channel back ready for the next one.
+    ///
+    /// THE CALLER DECIDES THAT THE BLOCK IS DEAD, not this engine: only
+    /// the peripheral's owner knows what its own flags mean (samc21/
+    /// sercom.hpp's Uart asks whether DRE and TXC are both set, which no
+    /// live transmit block can allow). This verb is the consequence, and
+    /// it is deliberately blunt - the channel is reset, reconfigured and
+    /// re-armed from scratch, because after erratum 1.10.4 the
+    /// controller's live descriptor copy is not something to reason
+    /// about.
+    ///
+    /// WHAT IS LOST: an unknown tail of the abandoned block. The engine
+    /// told its owner `length` beats were in flight and cannot say how
+    /// many of them reached the wire, so the owner's ring is left as it
+    /// was and those bytes are simply gone. There is no honest
+    /// alternative - the one field that would say is the corrupted one.
+    ///
+    /// Returns true when a block was abandoned (and faults() incremented);
+    /// false when nothing was in flight.
     static bool abandon() {
         if (!busy_) {
             return false;
@@ -1650,25 +1646,23 @@ public:
     }
 
 
-    /**
-     * @brief Raise ONE software trigger on the channel.
-     *
-     * THE STANDING REQUEST. A peripheral asserts its DMA request as a
-     * LEVEL - "my transmit buffer is free", "I have a character" - and the
-     * DMAC turns that level into a pending trigger when it RISES. A block
-     * armed while the level is ALREADY HIGH therefore waits for an edge
-     * that has already happened and may never happen again: the channel
-     * sits enabled, CHSTATUS empty, the peripheral's own flag standing,
-     * and not one beat moves. The owner, which is the only thing that can
-     * read the peripheral's flag, gives the channel the missing edge with
-     * this.
-     *
-     * Safe against doubling by construction: SWTRIGCTRL raises the
-     * pending bit only if it was not already set (25.8.8), and the
-     * channel has exactly one, so a kick that races a real hardware
-     * trigger is simply LOST (readable through trigger_lost()) rather
-     * than moving a second beat.
-     */
+    /// Raise ONE software trigger on the channel.
+    ///
+    /// THE STANDING REQUEST. A peripheral asserts its DMA request as a
+    /// LEVEL - "my transmit buffer is free", "I have a character" - and
+    /// the DMAC turns that level into a pending trigger when it RISES. A
+    /// block armed while the level is ALREADY HIGH therefore waits for an
+    /// edge that has already happened and may never happen again: the
+    /// channel sits enabled, CHSTATUS empty, the peripheral's own flag
+    /// standing, and not one beat moves. The owner, which is the only
+    /// thing that can read the peripheral's flag, gives the channel the
+    /// missing edge with this.
+    ///
+    /// Safe against doubling by construction: SWTRIGCTRL raises the
+    /// pending bit only if it was not already set (25.8.8), and the
+    /// channel has exactly one, so a kick that races a real hardware
+    /// trigger is simply LOST (readable through trigger_lost()) rather
+    /// than moving a second beat.
     static void kick() { Channel::trigger(); }
 
     /// Beats of the block currently in flight (0 when idle).
@@ -1849,25 +1843,23 @@ public:
 
 
 
-    /**
-     * @brief Raise ONE software trigger on the channel.
-     *
-     * THE STANDING REQUEST. A peripheral asserts its DMA request as a
-     * LEVEL - "my transmit buffer is free", "I have a character" - and the
-     * DMAC turns that level into a pending trigger when it RISES. A block
-     * armed while the level is ALREADY HIGH therefore waits for an edge
-     * that has already happened and may never happen again: the channel
-     * sits enabled, CHSTATUS empty, the peripheral's own flag standing,
-     * and not one beat moves. The owner, which is the only thing that can
-     * read the peripheral's flag, gives the channel the missing edge with
-     * this.
-     *
-     * Safe against doubling by construction: SWTRIGCTRL raises the
-     * pending bit only if it was not already set (25.8.8), and the
-     * channel has exactly one, so a kick that races a real hardware
-     * trigger is simply LOST (readable through trigger_lost()) rather
-     * than moving a second beat.
-     */
+    /// Raise ONE software trigger on the channel.
+    ///
+    /// THE STANDING REQUEST. A peripheral asserts its DMA request as a
+    /// LEVEL - "my transmit buffer is free", "I have a character" - and
+    /// the DMAC turns that level into a pending trigger when it RISES. A
+    /// block armed while the level is ALREADY HIGH therefore waits for an
+    /// edge that has already happened and may never happen again: the
+    /// channel sits enabled, CHSTATUS empty, the peripheral's own flag
+    /// standing, and not one beat moves. The owner, which is the only
+    /// thing that can read the peripheral's flag, gives the channel the
+    /// missing edge with this.
+    ///
+    /// Safe against doubling by construction: SWTRIGCTRL raises the
+    /// pending bit only if it was not already set (25.8.8), and the
+    /// channel has exactly one, so a kick that races a real hardware
+    /// trigger is simply LOST (readable through trigger_lost()) rather
+    /// than moving a second beat.
     static void kick() { Channel::trigger(); }
 
     /// True once the block filled the whole run: the owner must hand over
@@ -1988,10 +1980,10 @@ public:
      * THE POINTER IS `const volatile` ON PURPOSE. The controller reads
      * this memory and the compiler cannot see it happen, so a table the
      * program fills and then hands over is exactly the shape gcc has
-     * already been caught optimizing on this target (a zeroing store
-     * sunk past a transfer - the DMAC campaign's own lesson). Declaring
-     * the parameter volatile lets a caller keep its table volatile
-     * without a cast, and a plain array still converts to it for free.
+     * already been caught optimizing on this target (a zeroing store sunk
+     * past a transfer, measured). Declaring the parameter volatile lets a
+     * caller keep its table volatile without a cast, and a plain array
+     * still converts to it for free.
      */
     static bool start(const volatile Elem* table, uint16_t length) {
         if (table == nullptr || length == 0u) {
@@ -2003,14 +1995,12 @@ public:
         return launch();
     }
 
-    /**
-     * The block ended - called from the DMAC handler when
-     * Dmac::take_pending() names this channel. Counts the lap and starts
-     * the same block again.
-     *
-     * @return the beats the finished lap carried, so an owner that wants
-     * to know the stream is alive has a number rather than a promise.
-     */
+    /// The block ended - called from the DMAC handler when
+    /// Dmac::take_pending() names this channel. Counts the lap and starts
+    /// the same block again.
+    ///
+    /// Returns the beats the finished lap carried, so an owner that wants
+    /// to know the stream is alive has a number rather than a promise.
     static uint16_t complete() {
         if (!running_) {
             return 0;
@@ -2232,15 +2222,13 @@ public:
         return launch();
     }
 
-    /**
-     * The block ended - called from the DMAC handler when
-     * Dmac::take_pending() names this channel. Hands the filled buffer
-     * to the caller and starts the next block in the other one, or
-     * counts an overrun and stalls.
-     *
-     * @return the beats the finished block carried, or zero when nothing
-     * was running.
-     */
+    /// The block ended - called from the DMAC handler when
+    /// Dmac::take_pending() names this channel. Hands the filled buffer
+    /// to the caller and starts the next block in the other one, or
+    /// counts an overrun and stalls.
+    ///
+    /// Returns the beats the finished block carried, or zero when nothing
+    /// was running.
     static uint16_t complete() {
         if (!running_) {
             return 0;

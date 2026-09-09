@@ -33,16 +33,14 @@
  * baud arithmetic below names its oversampling explicitly so a second
  * regime slots in without moving anything.
  *
- * ONE INTERRUPT VECTOR, NOT TWO. This is the one place where the AVR
- * shape must NOT be copied. An AVR USART raises RXC and DRE on two
- * separate vectors, so avrdx/usart.hpp offers two ISR bodies. A SERCOM
- * has exactly ONE line in the NVIC (SERCOM5_IRQn = 14 here) shared by
- * DRE, TXC, RXC, RXS, CTSIC, RXBRK and ERROR - so the task offers ONE
- * ISR body, Uart::isr(), which reads INTFLAG, masks it with INTENSET
- * (a raised flag nobody asked for must not be acted on - DRE in
- * particular reads 1 whenever the transmit buffer is empty, which is
- * most of the time) and serves whatever is genuinely pending. The app
- * binds exactly one vector:
+ * ONE INTERRUPT VECTOR, NOT TWO, whatever a two-vector transport would
+ * lead one to expect. A SERCOM has exactly ONE line in the NVIC
+ * (SERCOM5_IRQn = 14 here) shared by DRE, TXC, RXC, RXS, CTSIC, RXBRK and
+ * ERROR - so the task offers ONE ISR body, Uart::isr(), which reads
+ * INTFLAG, masks it with INTENSET (a raised flag nobody asked for must
+ * not be acted on - DRE in particular reads 1 whenever the transmit
+ * buffer is empty, which is most of the time) and serves whatever is
+ * genuinely pending. The app binds exactly one vector:
  *
  *   extern "C" void SERCOM5_Handler() {
  *       if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
@@ -106,7 +104,7 @@
  *    in Debug mode. The field is exposed and the erratum named, because
  *    a fact with no code behind it must at least be visible;
  *  - erratum 1.17.14 (standby over-consumption with RUNSTDBY = 0 and the
- *    receiver disabled) belongs to the power pass: nothing here sleeps.
+ *    receiver disabled) is a sleep-current fact: nothing here sleeps.
  */
 
 #pragma once
@@ -238,8 +236,8 @@ struct UartFormat {
 
 /// Everything one instance is configured with. `baud` is the BAUD
 /// REGISTER value - sercom_baud_reg() computes it from a reference rate
-/// and a bit rate, exactly as on the AVR side: the resource speaks the
-/// register, the task speaks hertz.
+/// and a bit rate: the resource speaks the register, the task speaks
+/// hertz.
 struct SercomUartConfig {
     UartPads pads{};
     UartFormat format{};
@@ -840,10 +838,10 @@ public:
  * Uart<n, pads, rx_size, tx_size>
  *
  * The interrupt-driven full-duplex byte transport: 8N1 by default, SPSC
- * rings on both sides, ByteSink + ByteSource. It is the AVR Uart's twin
- * in everything but the ISR surface - one combined isr() instead of the
- * AVR's rxc()/dre() pair, because this core gives the peripheral one
- * vector (see the file header).
+ * rings on both sides, ByteSink + ByteSource. It carries the Uart surface
+ * every target's console sits on, with ONE combined isr() rather than a
+ * per-condition pair, because this core gives the peripheral one vector
+ * (see the file header).
  *
  *  - all state is `static inline` (one set per instantiation, in .bss,
  *    no constructor before main): hardware is touched ONLY by the
@@ -879,11 +877,10 @@ public:
  * block; print.hpp blocks). RX overflow (ring full, byte lost) IS
  * counted, as are the hardware error flags.
  *
- * Ring sizes: unlike AVR, NOTHING here pushes them towards 256. This
- * core reads a word atomically (SamPlatform::atomic_width == 4), so
- * util/ring.hpp takes its lock-free path at every size and a larger
- * ring costs only RAM. 64/256 are kept as console-class defaults, not
- * as a ceiling.
+ * Ring sizes: NOTHING here pushes them towards 256. This core reads a
+ * word atomically (SamPlatform::atomic_width == 4), so util/ring.hpp
+ * takes its lock-free path at every size and a larger ring costs only
+ * RAM. 64/256 are kept as console-class defaults, not as a ceiling.
  */
 /**
  * The "no DMA engine" default of the two optional Uart engine slots.
@@ -992,22 +989,20 @@ public:
 
     // ---- lifecycle --------------------------------------------------------
 
-    /**
-     * @brief Bring the instance up: clocks, configuration, pads, pins,
-     * the receive interrupt and its NVIC line.
-     *
-     * Call AFTER the main clock is set up and before interrupts are
-     * enabled globally; `clock` is the app's brio::Clock tag
-     * (samc21/clock.hpp), so the baud divisor comes from Clock::hz and
-     * never from a second statement of the rate. The divisor is computed
-     * here rather than folded - see sercom_scale_65536() for what that
-     * costs and why it is still the cheap option.
-     *
-     * False when the rate cannot be produced at this clock, or when one
-     * of the peripheral's synchronizations did not complete - the caller
-     * then knows the transport is NOT up, rather than printing into a
-     * ring nothing will drain.
-     */
+    /// Bring the instance up: clocks, configuration, pads, pins,
+    /// the receive interrupt and its NVIC line.
+    ///
+    /// Call AFTER the main clock is set up and before interrupts are
+    /// enabled globally; `clock` is the app's brio::Clock tag
+    /// (samc21/clock.hpp), so the baud divisor comes from Clock::hz and
+    /// never from a second statement of the rate. The divisor is computed
+    /// here rather than folded - see sercom_scale_65536() for what that
+    /// costs and why it is still the cheap option.
+    ///
+    /// False when the rate cannot be produced at this clock, or when one
+    /// of the peripheral's synchronizations did not complete - the caller
+    /// then knows the transport is NOT up, rather than printing into a
+    /// ring nothing will drain.
     template <typename Clock>
     static bool init(Clock clock, uint32_t baud, const UartFormat& format = {}) {
         static_assert(clock_follows<Clock, Uart>(),
@@ -1077,22 +1072,20 @@ public:
         return true;
     }
 
-    /**
-     * @brief The core clock changed (DynamicClock fan-out): keep the
-     * same bit rate at the new rate.
-     *
-     * Called BEFORE the clock actually changes, so the drain below runs
-     * at the rate the queued bytes were meant for. TXC answers "the last
-     * byte has left the shifter" exactly - it is cleared by every write
-     * to DATA and set only when the shifter empties with nothing queued
-     * - so no timing guess is needed here (the AVR twin has to wait out
-     * two frame times because its TXCIF cannot tell "done" from "idle
-     * since a while"). A byte being RECEIVED during the switch may still
-     * be garbled: the caller picks a quiet moment.
-     *
-     * BAUD is enable-protected, so the instance is stopped around the
-     * write. Main context only.
-     */
+    /// The core clock changed (DynamicClock fan-out): keep the
+    /// same bit rate at the new rate.
+    ///
+    /// Called BEFORE the clock actually changes, so the drain below runs
+    /// at the rate the queued bytes were meant for. TXC answers "the last
+    /// byte has left the shifter" exactly - it is cleared by every write
+    /// to DATA and set only when the shifter empties with nothing
+    /// queued - so no timing guess is needed here, as it would be on a
+    /// transmit-complete flag that cannot tell "done" from "idle since a
+    /// while". A byte being RECEIVED during the switch may still be
+    /// garbled: the caller picks a quiet moment.
+    ///
+    /// BAUD is enable-protected, so the instance is stopped around the
+    /// write. Main context only.
     static void rebase(uint32_t hz) {
         // Bounded, like every wait in this stratum. A full 256-byte ring
         // at 9600 baud is a quarter of a second and one frame is about a
@@ -1135,23 +1128,21 @@ public:
 
     // ---- the ISR body -----------------------------------------------------
 
-    /**
-     * @brief The instance's ONE interrupt body - call from SERCOMn_Handler().
-     *
-     * Every source of this peripheral shares the vector, so the body
-     * starts by asking which of them is both raised AND enabled, then
-     * serves each. Only the two a byte transport needs are ever armed:
-     * RXC and, on demand, DRE. The ERROR interrupt deliberately is not -
-     * erratum 1.17.15 says it does not wake the device and directs the
-     * error check to the RXC path, which is exactly where STATUS is read
-     * anyway (it has to be read before DATA).
-     *
-     * @return true when the RX ring transitioned empty -> non-empty: the
-     * edge signal for kernel glue ("post RxActivity to the serial AO on
-     * true"). Every empty->non-empty transition reports true and the
-     * consumer only empties the ring by draining it, so no wakeup is
-     * ever lost. Plain (non-kernel) apps may ignore the return value.
-     */
+    /// The instance's ONE interrupt body - call from SERCOMn_Handler().
+    ///
+    /// Every source of this peripheral shares the vector, so the body
+    /// starts by asking which of them is both raised AND enabled, then
+    /// serves each. Only the two a byte transport needs are ever armed:
+    /// RXC and, on demand, DRE. The ERROR interrupt deliberately is not -
+    /// erratum 1.17.15 says it does not wake the device and directs the
+    /// error check to the RXC path, which is exactly where STATUS is read
+    /// anyway (it has to be read before DATA).
+    ///
+    /// Returns true when the RX ring transitioned empty -> non-empty: the
+    /// edge signal for kernel glue ("post RxActivity to the serial AO on
+    /// true"). Every empty->non-empty transition reports true and the
+    /// consumer only empties the ring by draining it, so no wakeup is
+    /// ever lost. Plain (non-kernel) apps may ignore the return value.
     // always_inline: a single call site (the vector binding in the app),
     // so inlining costs no flash and lets the compiler save only the
     // registers it actually uses - see ticker.hpp tick().
@@ -1169,26 +1160,24 @@ public:
 
     // ---- the DMA half ------------------------------------------------------
 
-    /**
-     * @brief The block's interrupt, filtered to this transport's engines
-     * - call from DMAC_Handler() for each channel it reports.
-     *
-     * The DMAC has ONE vector for twelve channels, and an application
-     * may well be using some of them for something else, so the app's
-     * binding names the channel and this answers whether it was ours:
-     *
-     *     extern "C" void DMAC_Handler() {
-     *         while (const auto irq = brio::Dmac::take_pending()) {
-     *             (void)Serial::dma_isr(irq->channel);
-     *         }
-     *     }
-     *
-     * On the transmit channel a completion means the block this engine
-     * handed over has left the wire, so exactly that many bytes are
-     * released from the ring and the next contiguous run is started.
-     *
-     * @return true when the interrupt belonged to this transport.
-     */
+    /// The block's interrupt, filtered to this transport's engines -
+    /// call from DMAC_Handler() for each channel it reports.
+    ///
+    /// The DMAC has ONE vector for twelve channels, and an application
+    /// may well be using some of them for something else, so the app's
+    /// binding names the channel and this answers whether it was ours:
+    ///
+    ///     extern "C" void DMAC_Handler() {
+    ///         while (const auto irq = brio::Dmac::take_pending()) {
+    ///             (void)Serial::dma_isr(irq->channel);
+    ///         }
+    ///     }
+    ///
+    /// On the transmit channel a completion means the block this engine
+    /// handed over has left the wire, so exactly that many bytes are
+    /// released from the ring and the next contiguous run is started.
+    ///
+    /// Returns true when the interrupt belonged to this transport.
     [[gnu::always_inline]] static bool dma_isr(uint8_t channel) {
         if constexpr (has_tx_engine) {
             if (channel == TxEngine::channel) {
@@ -1211,32 +1200,30 @@ public:
         return false;
     }
 
-    /**
-     * @brief Ask the receive engine what has arrived, and publish it.
-     *
-     * WHY THIS IS A VERB AND NOT AN INTERRUPT. A receive block completes
-     * only when the buffer fills, which on an idle line may be never, so
-     * there is no event to wait for: the only way to learn how far a
-     * receive channel has got is to SUSPEND it and read its write-back
-     * (samc21/dmac.hpp's harvest, erratum 1.10.4 validation included).
-     * That is a deliberate act with a cost, so this transport does not
-     * schedule it - WHOEVER OWNS THE PORT DECIDES HOW OFTEN TO ASK, and
-     * pays the latency it chose. A kernel TimeEvent every few ticks is
-     * the shape brio expects.
-     *
-     * WHAT IS TRADED AWAY, and it cannot be given back: per-byte error
-     * attribution. With RXC armed, STATUS is read for EACH character
-     * before its DATA and a corrupted byte is dropped precisely. With
-     * the channel consuming RXC instead, nobody reads STATUS per
-     * character - it is read HERE, once per harvest, and its errors are
-     * counted against the whole harvested run rather than a byte. A
-     * protocol with its own framing does not care; a console that wants
-     * exact frame-error attribution should not take an RX engine.
-     *
-     * @return true when the receive ring went from empty to non-empty -
-     * the same edge contract isr() has, so the same kernel glue works:
-     * post RxActivity on true. False, and free, without an engine.
-     */
+    /// Ask the receive engine what has arrived, and publish it.
+    ///
+    /// WHY THIS IS A VERB AND NOT AN INTERRUPT. A receive block completes
+    /// only when the buffer fills, which on an idle line may be never, so
+    /// there is no event to wait for: the only way to learn how far a
+    /// receive channel has got is to SUSPEND it and read its write-back
+    /// (samc21/dmac.hpp's harvest, erratum 1.10.4 validation included).
+    /// That is a deliberate act with a cost, so this transport does not
+    /// schedule it - WHOEVER OWNS THE PORT DECIDES HOW OFTEN TO ASK, and
+    /// pays the latency it chose. A kernel TimeEvent every few ticks is
+    /// the shape brio expects.
+    ///
+    /// WHAT IS TRADED AWAY, and it cannot be given back: per-byte error
+    /// attribution. With RXC armed, STATUS is read for EACH character
+    /// before its DATA and a corrupted byte is dropped precisely. With
+    /// the channel consuming RXC instead, nobody reads STATUS per
+    /// character - it is read HERE, once per harvest, and its errors are
+    /// counted against the whole harvested run rather than a byte. A
+    /// protocol with its own framing does not care; a console that wants
+    /// exact frame-error attribution should not take an RX engine.
+    ///
+    /// Returns true when the receive ring went from empty to non-empty -
+    /// the same edge contract isr() has, so the same kernel glue works:
+    /// post RxActivity on true. False, and free, without an engine.
     static bool harvest() {
         if constexpr (!has_rx_engine) {
             return false;

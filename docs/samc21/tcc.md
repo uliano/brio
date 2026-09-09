@@ -7,13 +7,13 @@
 > covered yet".
 
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 36 - and
-errata DS80000740S items 1.21.1 to 1.21.11, of which **seven are this
-silicon**, the largest live errata list of any chapter this stratum has
-touched. Driver: `samc21/tcc.hpp`, with its per-instance and per-pad data
-in `samc21/device_tables.hpp`. Family fixture `test/family_samc21/tcc.cpp`
-plus eight negatives under `tools/check_samc21.sh`; the bench suites are
-`test_samc_tcc` and - for DMA-driven operation, the circular buffers and
-the advanced modes - `test_samc_timer_dma`.
+errata DS80000740S items 1.21.1 to 1.21.11, of which **seven are live on
+this silicon**. Driver: `samc21/tcc.hpp`, with its per-instance and
+per-pad data in `samc21/device_tables.hpp`. Family fixture
+`test/family_samc21/tcc.cpp` plus eight negatives under
+`tools/check_samc21.sh`; the bench suites are `test_samc_tcc` and - for
+DMA-driven operation, the circular buffers and the advanced modes -
+`test_samc_timer_dma`.
 
 ## What the silicon does
 
@@ -53,14 +53,13 @@ dual-slope flavours differing only in where the interrupt and event land.
 
 **Reading COUNT is a command, not a load** - CTRLBSET.CMD = READSYNC,
 then wait out SYNCBUSY.CTRLB and SYNCBUSY.COUNT, then read (36.6.7),
-exactly as in the TC - AND ISSUED TWICE, exactly as in the TC: the
+exactly as in the TC - and issued twice, exactly as in the TC: the
 COUNT shadow lands about half a counter-clock period after SYNCBUSY
-clears with no bit advertising it (measured on both timers by
-`tc_readsync_probe`; the mechanism and the numbers are in
-[tc.md](tc.md)), so a single-command read returns the PREVIOUS
-command's snapshot and `read_sync()` pays the second crossing to
-return the count at the call's entry. `count()` does it; `count_raw()`
-skips it and says so.
+clears with no bit advertising it (measured on both timers; the
+mechanism and the numbers are in [tc.md](tc.md)), so a single-command
+read returns the PREVIOUS command's snapshot and `read_sync()` pays the
+second crossing to return the count at the call's entry. `count()` does
+it; `count_raw()` skips it and says so.
 
 **Enable-protection and write-synchronization split differently here
 than in the TC, and the difference is useful.** Enable-protected
@@ -106,7 +105,7 @@ a set/clear pair for the command fields. See "Bench findings".
 ## The errata: read the row, not the column
 
 Eleven items, and the E/G/J row at revision F is what decides. **Seven
-are live**, which is the most of any chapter in this stratum.
+are live**.
 
 | item | what | here |
 |---|---|---|
@@ -282,10 +281,10 @@ Tcc<0>::clear_non_recoverable(0);
 
 ## Bench findings
 
-From `test_samc_tcc` (12 letters, **143 verdicts, 143/143 three times**).
-Nothing to wire. Five of TCC0's eight outputs reach pads this board
-leaves free - PA08 (WO0, function E), PA09 (WO1, E), PA22 (WO4, F) and
-PA12 (WO6, F) - and PA16 carries EXTINT0, which is the fault stimulus.
+From `test_samc_tcc` (12 letters, 143 verdicts). Nothing to wire. Five of
+TCC0's eight outputs reach pads this board leaves free - PA08 (WO0,
+function E), PA09 (WO1, E), PA22 (WO4, F) and PA12 (WO6, F) - and PA16
+carries EXTINT0, which is the fault stimulus.
 Every timer runs from OSC48M, so the expected numbers are exact
 arithmetic and not a measurement of an oscillator. A second TC, free
 running at 3 MHz, is the stopwatch; a third counts events.
@@ -318,11 +317,11 @@ running at 3 MHz, is the stopwatch; a third counts events.
    fields.** DIR, LUPD and ONESHOT behave as expected, but CMD and IDXCMD
    are written as a VALUE and "writing zero to this bit group has no
    effect" on *both* halves (36.8.2, 36.8.3) - so a command is issued
-   through CTRLBSET and can only be CANCELLED through CTRLBCLR. Found
-   with a RAMP2 index that stayed held forever after a `HOLD` the driver
-   thought it had cleared; `command(none)` and `ramp_index_command(off)`
-   now go through CTRLBCLR, and the index toggles again (499 per mille
-   of a 50 ms window against 1000 while held).
+   through CTRLBSET and can only be CANCELLED through CTRLBCLR. A RAMP2
+   index put on `HOLD` and then given a zero through the same half stays
+   held for ever; `command(none)` and `ramp_index_command(off)` go
+   through CTRLBCLR, and the index toggles again (499 per mille of a
+   50 ms window against 1000 while held).
 
 **The counter and the waveform**
 
@@ -337,7 +336,7 @@ running at 3 MHz, is the stopwatch; a third counts events.
    36.6.2.5.6 prints it** - and NOT 2 x (PER+1). Measured over two
    seconds, where the two predictions are five counts apart: **942
    against a predicted 942, where 2 x (PER+1) would have given 937**.
-   Worth the two seconds: the AVR TCD campaign found its own datasheet's
+   Worth the two seconds: the AVR DA/DB's TCD chapter prints its own
    dual-slope formula off by exactly that one, and this chapter's is
    right.
 7. **Dithering buys a fractional period.** With DITH6 and PER = 99, the
@@ -430,7 +429,7 @@ the period at 748 overflows a second in **NPWM counting up, NPWM counting
 down and NFRQ counting down** alike, where an unprotected PERBUF would
 have given 1350. The item is recorded as unreproduced rather than
 disproved: the errata document offers no workaround and names no mode
-beyond "down-counting", and what the bench CAN say is that the register
+beyond "down-counting", and what the bench can say is that the register
 read of finding 2 looks exactly like it.
 
 **Erratum 1.21.10 confirmed.** CTRLA.ALOCK writes and reads back as 1,
@@ -445,22 +444,20 @@ See [platform.md](platform.md), "Sleep, peripheral by peripheral".
 
 ## Bench findings, DMA and the advanced modes
 
-From `test_samc_timer_dma` (10 letters, **101 verdicts, 101/101 three
-times - twice warm and once cold**). Wireless: TCC0's WO[0] reaches a TC
-capture channel through a combinational CCL LUT and an asynchronous
-EVSYS channel, with no pad in the path at all, and `tc.md` carries the
-capture side's own findings.
+From `test_samc_timer_dma` (10 letters, 101 verdicts). Wireless: TCC0's
+WO[0] reaches a TC capture channel through a combinational CCL LUT and an
+asynchronous EVSYS channel, with no pad in the path at all, and `tc.md`
+carries the capture side's own findings.
 
-**THE ROUND TRIP, which is what the whole letter set is built around.**
-One DMA channel plays an eight-entry duty table into TCC0's CCBUF0 on
-the OVF trigger; two more drain the capture meter's CC0 and CC1. Over
-**192 judged samples of each stream** the captured widths were the
-played table, in order, with a **worst error of ZERO ticks** and a phase
-that held across every lap boundary of the loop engine and every block
-boundary of the two ping-pong streams - which is what says not one beat
-was lost anywhere. The period did not move by a single tick throughout,
-no stream overran, and no write-back reading was refused (erratum
-1.10.4).
+**THE ROUND TRIP.** One DMA channel plays an eight-entry duty table into
+TCC0's CCBUF0 on the OVF trigger; two more drain the capture meter's CC0
+and CC1. Over **192 judged samples of each stream** the captured widths
+were the played table, in order, with a **worst error of ZERO ticks** and
+a phase that held across every lap boundary of the loop engine and every
+block boundary of the two ping-pong streams - which is what says not one
+beat was lost anywhere. The period did not move by a single tick
+throughout, no stream overran, and no write-back reading was refused
+(erratum 1.10.4).
 
 - **A TCC COMPARE REGISTER IS A WORD AND A DUTY STREAM'S BEAT MUST BE
   ONE.** CCBUF is 32 bits on a 24-bit counter, and a HALFWORD write
@@ -468,7 +465,7 @@ no stream overran, and no write-back reading was refused (erratum
   reads back **0x00AB1234**. So the element type is `uint32_t`, not
   because the value needs the width but because the register does.
 - **One DMA beat per waveform period is exactly one write per update
-  window**, which is why the round trip works at all: fact 8's
+  window**, which is why the round trip works at all: finding 1's
   SYNCBUSY.CCx stands from a buffered write until the update consumes
   it, and a beat delivered per OVF lands in a window the update has just
   emptied. The beats moved and the periods captured agreed to within a
@@ -508,11 +505,11 @@ no stream overran, and no write-back reading was refused (erratum
 - **Recoverable fault B is the mirror of A**, on channel 1's event
   input, and a pulse on it is a valid fault.
 - **FCTRLn.FILTERVAL COUNTS GCLK_TCC CYCLES, NOT PRESCALED ONES** - the
-  dead-time unit's story again, and not what 36.8.5's wording or this
-  driver's own comment said. On one 93 kHz generic clock, the shortest
-  pulse that still made a valid fault was **20 us with FILTERVAL 0 and
-  160 us with FILTERVAL 15**, and **a sixty-fourfold prescaler change
-  left it at 160** - where fifteen cycles of that clock are 160.9 us.
+  dead-time unit's story again, and not what 36.8.5's wording suggests.
+  On one 93 kHz generic clock, the shortest pulse that still made a valid
+  fault was **20 us with FILTERVAL 0 and 160 us with FILTERVAL 15**, and
+  **a sixty-fourfold prescaler change left it at 160** - where fifteen
+  cycles of that clock are 160.9 us.
   The stimulus was calibrated against a 750 kHz stopwatch before it was
   used, and the generator's rate measured rather than computed.
 - **A blanking window gates the input, not its edge.** With the pad held
@@ -521,9 +518,8 @@ no stream overran, and no write-back reading was refused (erratum
 - **FCTRLn.QUAL ties the fault to the waveform, and to THE FAULT'S OWN
   CHANNEL.** Fault B qualifies on channel 1's output: with CC1 at zero
   the same held input raised nothing, and with CC1 at half the period it
-  raised a fault. The first version of the letter moved CC0 and measured
-  a qualified fault that never fired at any duty - correct behaviour of
-  a wrong setup.
+  raised a fault. Qualifying fault B against CC0 instead gives a fault
+  that never fires at any duty - correct behaviour on a wrong setup.
 - **EVACT0 = INCREMENT counts events and nothing else**: twenty pin
   pulses gave **COUNT = 20** exactly, with the counter's own clock
   slowed to 45.8 Hz so it could not contribute. **EVACT0 = COUNT** turns

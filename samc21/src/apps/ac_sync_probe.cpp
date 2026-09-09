@@ -10,18 +10,17 @@
 //
 // THE TRICK IS A SLOW GCLK_AC: generator 1 (the one with the 16-bit
 // linear divider) runs OSC48M / 4096 = 11.719 kHz, so one sampling
-// period is EXACTLY 4096 CPU cycles and the
-// SysTick cycle stopwatch (48 MHz, the test_samc_dma technique) resolves
-// 1/4000 of it. The comparator's own analog delay (38-73 ns high speed,
-// electrical table 45-34) is two-three CPU cycles - invisible.
+// period is EXACTLY 4096 CPU cycles and the SysTick cycle stopwatch
+// (48 MHz) resolves 1/4000 of it. The comparator's own analog delay
+// (38-73 ns high speed, electrical table 45-34) is two-three CPU
+// cycles - invisible.
 //
 // Setup, all inside the chip, no wires: COMP0 positive input = AIN[0]
 // = PA04 DRIVEN BY PORT AS A PLAIN GPIO (letter a proves the analog mux
-// really sees a GPIO-driven pad - the AVR suites' trick, checked before
-// anything relies on it); negative input = the comparator's own VDD
-// scaler at mid-rail. The observers: the CMP0 pad (PA12, function H,
-// input buffer on, read back through PORT.IN), STATUSA.STATE0, and
-// INTFLAG.COMP0.
+// really sees a GPIO-driven pad, checked before anything relies on it);
+// negative input = the comparator's own VDD scaler at mid-rail. The
+// observers: the CMP0 pad (PA12, function H, input buffer on, read
+// back through PORT.IN), STATUSA.STATE0, and INTFLAG.COMP0.
 //
 // Letters (z = all):
 //   a  block + comparator up, t_STARTUP, and the GPIO-driven-pad proof
@@ -85,7 +84,7 @@ constexpr uint32_t period = 4096;         // CPU cycles per GCLK_AC period
 constexpr uint32_t ulp_period = 1465;     // ~48e6 / 32768, nominal
 
 // ---------------------------------------------------------------------------
-// The cycle stopwatch (test_samc_dma's technique)
+// The cycle stopwatch
 // ---------------------------------------------------------------------------
 uint32_t cycles_now() {
     const uint32_t reload = SysTick->LOAD;
@@ -545,8 +544,7 @@ void tg_ulp() {
 } // namespace
 
 // The one vendor glue an app may contain: the vector bindings. An
-// unbound vector is Default_Handler's forever-loop, not a crash - the
-// DMA suite's lesson, re-learned once already.
+// unbound vector is Default_Handler's forever-loop, not a crash.
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
 

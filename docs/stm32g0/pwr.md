@@ -22,7 +22,7 @@ Drivers: `stm32g0/pwr.hpp` (`Pwr`, the whole chapter) and
 tickless platform). Bench suites: `test_stm32_sleep` for the first two
 sites, `test_stm32_lptim` letter h for the third, `test_stm32_tickless`
 letter f for the plain site on the tickless platform. The waking half
-of the platform is [platform.md](platform.md) - which now has TWO
+of the platform is [platform.md](platform.md) - which has TWO
 timebases, and the sites read differently under each (below); the RTC
 that wakes a deep sleep at the second site is [rtc.md](rtc.md) and the
 low-power timer that wakes it at the third is [lptim.md](lptim.md).
@@ -35,14 +35,14 @@ sleep"; `PWR_CR1.LPMS` says WHICH deep sleep. Neither is the other's and
 both must agree before a WFI does anything but Sleep. `Pwr` owns them
 both - SLEEPDEEP is written there and nowhere else in this stratum - so
 that "what is armed" is one question with one answer, `Pwr::mode()`, and
-so that `Stm32g0Platform::idle()` can stay what it always was.
+so that `Stm32g0Platform::idle()` never has to ask.
 
-**THE IDLE HOOK NEEDED NO CHANGE FOR ANY OF THIS**, and that is a fact
-about the family worth stating beside the other two targets: the AVR's
-`idle()` had to learn to honour a standing SEN bit and the SAM's had to
-grow an erratum guard, while this one has always been a DSB, a WFI and
-an unmask - and since the depth lives in SCR and PWR_CR1, which it never
-writes, it has always taken whatever somebody else armed.
+**The idle hook asks nothing of this chapter.**
+`Stm32g0Platform::idle()` is a DSB, a WFI and an unmask; the depth lives
+in SCR and PWR_CR1, which it never writes, so it takes whatever somebody
+else armed. That is a fact about the family worth stating beside the
+other two targets, where the AVR's `idle()` has to honour a standing SEN
+bit and the SAM's carries an erratum guard.
 
 **Seven modes, and only four of them are a ladder a program can resume
 from.** Run, Low-power run, Sleep, Low-power sleep, Stop 0, Stop 1,
@@ -53,22 +53,21 @@ supplies VCORE; Standby and Shutdown power the VCORE domain off and come
 back through the RESET VECTOR.
 
 **A Stop entered with the kernel's millisecond tick armed LASTS on a
-bare board, and does not under a debugger's DBG_STOP** - and telling
-the two apart took two campaigns. 4.3.3: entering a low-power mode
-through WFI "is executed only if no interrupt is pending", and a 1 kHz
-SysTick raises one every millisecond; but once the WFI is taken HCLK
-stops and SysTick with it, so the window is one instruction wide.
-Measured: a 250 ms Stop 1 asked for with the tick armed lasts 250 ms to
-the RTC's own tick with `DBGMCU_CR.DBG_STOP` clear, and 1 ms with it
-set - because with that bit the debug logic keeps HCLK running inside a
-Stop, SysTick keeps firing, and every millisecond ends the sleep. The
-bit survives every reset but a power-on, and OpenOCD's `stm32g0x.cfg`
-sets it at every connection whose examine finds `RCC_APBENR1.DBGEN`
-open, which is how the first measurement of this fact read "0..3 ms,
-three runs of three" and stood for a campaign. `arm()` still pauses the
-ticker for the deep rungs and `disarm()` resumes it: it costs NOTHING
-(a Stop stops SysTick anyway and kernel time was going to stand still
-for the whole sleep either way), it closes the pending-tick window by
+bare board, and does not under a debugger's DBG_STOP.** 4.3.3: entering
+a low-power mode through WFI "is executed only if no interrupt is
+pending", and a 1 kHz SysTick raises one every millisecond; but once the
+WFI is taken HCLK stops and SysTick with it, so the window is one
+instruction wide. Measured: a 250 ms Stop 1 asked for with the tick
+armed lasts 250 ms to the RTC's own tick with `DBGMCU_CR.DBG_STOP`
+clear, and 1 ms with it set - because with that bit the debug logic
+keeps HCLK running inside a Stop, SysTick keeps firing, and every
+millisecond ends the sleep. The bit survives every reset but a power-on,
+and OpenOCD's `stm32g0x.cfg` sets it at every connection whose examine
+finds `RCC_APBENR1.DBGEN` open, so a board under a probe measures a
+millisecond Stop unless something clears it. `arm()` pauses the ticker
+for the deep rungs and `disarm()` resumes it: it costs NOTHING (a Stop
+stops SysTick anyway and kernel time was going to stand still for the
+whole sleep either way), it closes the pending-tick window by
 construction, and it makes a Stop last whatever a probe left behind.
 `Pwr::debug_in_stop()` reads the bit; `tools/bench.py` clears it after
 every flash.
@@ -137,12 +136,12 @@ Low-power SLEEP, and it is not a rung a sleep site may take: 4.3.5
 reaches it only from Low-power RUN, which means the regulator in
 low-power mode and the system clock at or below 2 MHz - a whole-program
 decision an application makes, not something to do behind its back for
-the duration of one idle. So `light` maps to Sleep, and `armed()` -
-which stays a PURE READ of the silicon, the samc21 position kept - answers
-`none` for it, because that is what the machine will really do.
+the duration of one idle. So `light` maps to Sleep, and `armed()` - a
+PURE READ of the silicon - answers `none` for it, because that is what
+the machine will really do.
 
-**Standby and Shutdown are off the ladder on purpose**, and this is the
-first target where a mode the silicon has is deliberately not a rung.
+**Standby and Shutdown are off the ladder on purpose**, two modes the
+silicon has that are deliberately not rungs.
 The power model is built on the program RESUMING: "the manager's next
 dispatch - of ANY event - first disarms the site and publishes a
 WakeReport". After this family's Standby or Shutdown there is no next
@@ -155,7 +154,7 @@ backup registers.
 
 ## The timed site
 
-The plain site keeps the v1 HONEST RESTRICTION: with kernel time frozen
+The plain site carries an honest restriction: with kernel time frozen
 for the whole Stop, a program with armed time events must not take one.
 `Stm32g0TimedSleepSite` LIFTS it, with the RTC in both roles - the ALARM
 is the periodic wake-up timer placed on `TimeEvents<P>::ticks_to_next()`
@@ -177,15 +176,14 @@ the sub-second counter divides a second, and that counter is the site's
 only way of measuring a span the tick did not count. The chapter's
 default at 32.8 kHz gives 328 steps a second - three milliseconds a
 step, three times the kernel tick - and a resync quantized that coarsely
-can advance one tick too many and mature an event EARLY. Measured, and
-it did: a 150 ms deadline came back at 149 ms before
-`rtc_prescalers_for_resolution()` existed. The config is refused at
-compile time unless its split divides the second at least a thousand
-ways.
+can advance one tick too many and mature an event EARLY. Measured at
+that split: a 150 ms deadline comes back at 149 ms.
+`rtc_prescalers_for_resolution()` chooses the split instead, and the
+config is refused at compile time unless it divides the second at least
+a thousand ways.
 
-**The ISR has four acts**, and every one is load-bearing. The last three
-are the samc21's, learned at that bench; the first is this family's own:
-restore the clock (4.3.6), acknowledge the flag, resync the ticker, and
+**The ISR has four acts**, and every one is load-bearing: restore the
+clock (4.3.6), acknowledge the flag, resync the ticker, and
 hand the machine back to a TICKING sleep - because the never-early bias
 guarantees kernel time is still a shade short of the deadline when the
 alarm lands, and an RTC wake posts nothing to any queue.
@@ -205,9 +203,8 @@ device out of them, so ONE BLOCK IS BOTH THE ALARM AND THE WITNESS: a
 free-running counter at ARR = 0xFFFF is the witness, its compare
 register is the alarm, and its own EXTI direct line (29 or 30) is the
 wake path. It is a SIBLING of the RTC site, not a replacement - the same
-two verbs, the same four ISR acts, the same directional rate rule, and
-NOT ONE LINE of `util/power.hpp`, of `kernel/`, or of the two other
-sites changed.
+two verbs, the same four ISR acts, the same directional rate rule, over
+`util/power.hpp` as written and beside the other two sites.
 
 **What it owns**: one LPTIM, whole, plus LSEON or LSION in the RCC
 (which it turns on and never off). The RTC, both its alarms, its
@@ -232,7 +229,7 @@ OVER-STATES the real interval by up to one count - and one count at the
 default rate is very nearly one kernel tick. So `resync()` converts
 `elapsed - 1` counts and never `elapsed`, and `place_alarm()` asks for
 one count MORE than the deadline needs. Without the pair, a 500 ms
-deadline matured anywhere in 499..501 ms of wall, a knife edge either
+deadline matures anywhere in 499..501 ms of wall, a knife edge either
 side of its own deadline; with it, 500..501 and never below.
 
 **Three consequences a user must know**, all of them stated because no
@@ -352,9 +349,9 @@ int main() {
 ## Bench findings
 
 The reference suite is `test_stm32_sleep` (eight letters in `z`, 50
-verdicts, **50/50 cold and warm, three runs**; letters `s` and `u`
-outside it reboot the board, 6/6 each). NOTHING IS WIRED: the RTC is the
-wake-up source and the wall clock, and the backstop is the IWDG, armed
+verdicts; letters `s` and `u` sit outside it because they reboot the
+board). NOTHING IS WIRED: the RTC is the wake-up source and the wall
+clock, and the backstop is the IWDG, armed
 once at about 32 seconds and fed at the top of every letter - it cannot
 be turned off again (28.3.1), which is the point.
 
@@ -407,8 +404,8 @@ clock in the chip stopped.
   runs, the site is armed at the depth the target really took, the first
   event after the wake ends the round with nothing polling - and a
   500 ms time event matures after 500 ms of KERNEL tick but **723..741
-  ms of WALL**, late by about the length of the Stop. That is the v1
-  restriction, measured rather than asserted.
+  ms of WALL**, late by about the length of the Stop. That is the plain
+  site's restriction, measured rather than asserted.
 - **THE TIMED SITE MEETS THE DEADLINE ON THE WALL**: the same 500 ms
   event matures after **501 ms of wall**, with the resync handing back
   500 frozen ticks; and six repeats of a 150 ms deadline come back at
@@ -495,24 +492,23 @@ here beside the rest of the Stop story.
   HSIDIV = /4 the same poke did not wake the same Stop - WUF never rose
   - and the sleep ran to the RTC wake-up timer's full length, with that
   timer as the control that the Stop itself was working. The difference
-  from the RTC campaign's negative result is exactly the one the erratum
+  from the RTC's negative result above is exactly the one the erratum
   names: a USART makes a clock request and the RTC makes none. **And
   HSIKERON does not rescue it**: the same leg with HSI16 kept running
   still did not wake, so 2.2.4 reaches further than the request path.
   Recorded as measured, not explained.
 - **WUF IS A LEVEL LIKE ORE**, and a handler that leaves it standing
-  with WUFIE set re-enters until the watchdog reboots the board. Caught
-  by halt-and-dump on this very campaign: IPSR 44, ISR bit 20 standing,
-  the wake counter frozen at one. The `Uart` task clears it when the
+  with WUFIE set re-enters until the watchdog reboots the board. The
+  signature under halt-and-dump is IPSR 44, ISR bit 20 standing and the
+  wake counter frozen at one. The `Uart` task clears it when the
   wake option is named; anything arming the wake through the RESOURCE
   under a task that was not compiled for it owes the clear itself.
 
-Three suite-craft lessons paid for here, all of them the samc21 bench's
-own in new dress: a console DRAIN placed between arming a deadline and
-stamping the wall puts tens of milliseconds INSIDE the measurement (it
-made a 500 ms event look 25 ms early); a verdict printed between `arm()`
-and `disarm()` is four milliseconds of frozen span the resync then hands
-back; and a shared interrupt vector whose body is chosen by a variable
+Three rules for a letter that measures a sleep: a console DRAIN placed
+between arming a deadline and stamping the wall puts tens of
+milliseconds INSIDE the measurement (enough to make a 500 ms event look
+25 ms early); a verdict printed between `arm()` and `disarm()` is four
+milliseconds of frozen span the resync then hands back; and a shared interrupt vector whose body is chosen by a variable
 must have that variable set by every letter that drives the peripheral
 by hand, or a warm run inherits the previous letter's behaviour.
 
@@ -537,18 +533,17 @@ G071RB it is **4.3.9's power-on reset, literally**: SBF is CLEARED with
 everything else and RCC_CSR comes up holding **PWRRSTF with the
 catch-all PINRSTF beside it** (0x0C00 0000). So the evidence a deep wake
 leaves is an EXCLUSIVE OR across this family, which is how letter `u`
-now judges it: something is always left behind, and exactly one of the
+judges it: something is always left behind, and exactly one of the
 two things is - a boot that reads only SBF is reading the wrong register
 on half the family. Neither register tells Standby from Shutdown on
 either die, which is why a program that has to know leaves itself a note
 in a backup register, as this letter does.
 
-**TWO PER-PART FACTS the reserve reads and this suite now judges rather
+**TWO PER-PART FACTS the reserve reads and this suite judges rather
 than assumes**: the G071 bonds FIVE of the six wake-up pins (WKUP3 is the
 G0B1/G0C1's) and has no PWR_PUCRE/PDCRE, port E being absent - so
 `pwr_wakeup_pin_count()` is 5 there and 6 on the G0B1RE, and a pin the
-part has not got is REFUSED rather than written, which is what the
-verdict now says.
+part has not got is REFUSED rather than written.
 
 ## On the third silicon
 
@@ -569,10 +564,10 @@ a minimum no small package can meet.
 **SHUTDOWN POWERS THE LSI DOWN, SO AN RTC ON LSI CANNOT END ONE.**
 DS12992 3.7.4 names the LSI beside the PLL, the HSI16 and the HSE in
 Shutdown's list of what is switched off, where the Standby paragraph
-above it does not - and the bench found it the hard way: a Shutdown
-entered with the RTC on LSI and the wake-up timer armed for one ck_spre
-period left the board silent for four minutes, until NRST brought it
-back. So letter `u` SKIPS BY NAME whenever the wall is on LSI, and runs
+above it does not - and it is measurable: a Shutdown entered with the
+RTC on LSI and the wake-up timer armed for one ck_spre period leaves the
+board silent until NRST brings it back, four minutes later on the bench.
+So letter `u` SKIPS BY NAME whenever the wall is on LSI, and runs
 where it is on the crystal - which on this board it is: **6/6**, the
 Shutdown ended by the wake-up timer 1485 ms of calendar later, and the
 wake reported as a literal power-on reset (RCC_CSR 0x0C000000 = PWRRSTF

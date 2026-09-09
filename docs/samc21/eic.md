@@ -98,7 +98,8 @@ item everyone would reach for - 1.11.5 - is N-family only.
   CLK_ULP32K as the cheap clock for it. The driver cannot enforce this,
   because it does not know whether the application ever sleeps:
   `EicLineConfig::asynchronous` carries the obligation in its own
-  comment, and the power pass owns the rest.
+  comment. At revision F the item does not reproduce - see "Bench
+  findings".
 
 ## Types and verbs
 
@@ -196,9 +197,8 @@ header's name. See "Bench findings".
 
 ## Bench findings
 
-From `test_samc_eic`: 6 letters in `z`, **85 verdicts, 85/85 twice**,
-plus `n` (the NMI, **9/9**) and `u` (the button, **4/4**) outside it.
-**Nothing to wire.**
+From `test_samc_eic`: six letters in `z`, plus `n` (the NMI) and `u`
+(the button) outside it. **Nothing to wire.**
 
 **The stimulus technique, which is itself a finding.** A chapter about
 *external* pins on a board with no wires needs the chip to move its own
@@ -237,14 +237,13 @@ cheap escape is CLK_ULP32K, which needs no GCLK channel at all and is
 always running on this family - measured: a synchronous edge is detected
 with `EIC_GCLK_ID` disconnected and CKSEL = ULP32K.
 
-**A HARDWARE GENERATOR DOES CROSS AN ASYNCHRONOUS EVSYS CHANNEL.** This
-is the question `evsys.md` explicitly declined to answer, having only
-software events to test with. An EXTINT rising edge routed through an
-**asynchronous** channel moves a whole DMA block, exactly as the same
-edge on a resynchronized channel does - where eight software events on an
-asynchronous channel move nothing. The reading that fits both
-measurements: the asynchronous path carries what has *width*, and a
-register write has none.
+**A HARDWARE GENERATOR DOES CROSS AN ASYNCHRONOUS EVSYS CHANNEL.** An
+EXTINT rising edge routed through an **asynchronous** channel moves a
+whole DMA block, exactly as the same edge on a resynchronized channel
+does - where eight software events on an asynchronous channel move
+nothing through the DMAC. That limit belongs to the DMAC's own trigger
+stage and not to the path: [evsys.md](evsys.md) carries the
+reconciliation.
 
 **Every line is an event generator, not just EXTINT0-7.** 26.6.7's prose
 is narrower than its own EVCTRL register and than ch. 29's generator
@@ -271,15 +270,13 @@ NMISENSE alone enables it, no CTRLA.ENABLE and no INTENSET involved. And
 sense NONE is the only way to turn one off, since there is no enable to
 clear - verified across a further edge.
 
-**A trap in this project's own crt, found by that NMI.** The device
-header declares the core exception vectors as
-`NonMaskableInt_Handler` and `SVCall_Handler`; the crt spelled them
-`NMI_Handler` and `SVC_Handler` (the CMSIS-classic names), while all
-thirty-one *peripheral* vectors already matched the header. An app
-binding the header's name therefore compiled, linked and left the real
-vector pointing at `Default_Handler`, which on this target is a silent
-spin: the first NMI wedged the board with a half-printed line. The crt
-now spells both the header's way. Vectors: `EIC_Handler`,
+**THE CORE EXCEPTION VECTORS CARRY THE DEVICE HEADER'S NAMES**, not the
+CMSIS-classic ones: the header declares `NonMaskableInt_Handler` and
+`SVCall_Handler`, and the crt spells them that way, as all thirty-one
+*peripheral* vectors already do. An app that binds `NMI_Handler` or
+`SVC_Handler` compiles, links and leaves the real vector pointing at
+`Default_Handler`, which on this target is a silent spin - an NMI then
+wedges the board with no output at all. Vectors: `EIC_Handler`,
 `NonMaskableInt_Handler`.
 
 **One board fact**, from letter `u`: PB22 does **not** follow its own
@@ -290,10 +287,10 @@ what the pad does, and offers a ten-second window whose result is
 printed and not judged - a suite must not fail for want of a finger.
 
 
-- **In standby** (measured in the transversal sleep pass -
-  [platform.md](platform.md), "Sleep, peripheral by peripheral", where
-  the hardware stimulus that makes it possible is described): an EXTINT
-  wakes the device from STANDBY in 7 us; a SAMPLED line detects every
+- **In standby** ([platform.md](platform.md), "Sleep, peripheral by
+  peripheral", carries the measurement and the hardware stimulus that
+  makes it possible): an EXTINT wakes the device from STANDBY in 7 us;
+  a SAMPLED line detects every
   edge of a standby on CLK_ULP32K **and** on a GCLK_EIC whose generator
   has RUNSTDBY clear, because this block has no RUNSTDBY bit of its own
   to ask with and its clock request is honoured in there anyway; and

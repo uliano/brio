@@ -224,8 +224,8 @@ constexpr bool usart_has_clock_select(uint8_t n) { return usart_clock_select_pos
 /// G071/G081, USART3_4_5_6 on the G0B0, USART3_4_5_6_LPUART1 on the
 /// G0B1/G0C1. A header that named things otherwise would fail to
 /// compile here, never bind a wrong line: a wrong line would be a
-/// silent Default_Handler spin (the samc21 stratum's NMI lesson), which
-/// is also why the family fixture instantiates every present instance
+/// silent Default_Handler spin, which is also why the family fixture
+/// instantiates every present instance
 /// on every header the pack ships. NonMaskableInt_IRQn for an instance
 /// the device has not got - unreachable, Usart<n> refusing it first.
 constexpr IRQn_Type usart_irq(uint8_t n) {
@@ -265,8 +265,8 @@ constexpr IRQn_Type usart_irq(uint8_t n) {
 /// is what the twelve headers' own IS_UART_FIFO_INSTANCE macros spell
 /// out one by one (G03x/G04x/G05x/G06x: USART1; G07x/G08x: USART1..2;
 /// G0Bx/G0C1: USART1..3) and what table 183 states. The SILICON is the
-/// check: test_stm32_serial's letter a writes FIFOEN and PRESC on every
-/// present instance and compares what sticks against this function.
+/// check: the bench writes FIFOEN and PRESC on every present instance
+/// and compares what sticks against this function.
 /// (ES0548 2.11.2 is the documentation erratum saying some manual
 /// revisions omit the prescaler's own per-instance split; the
 /// implementation section carries it and so does this table.)
@@ -690,8 +690,8 @@ constexpr uint8_t i2c_clock_select_pos(uint8_t n) {
 /// silicon. The silicon can be asked, and here it answers cleanly:
 /// 32.9.6 says I2C_TIMEOUTR (and I2C_PECR) are "reserved, and their bits
 /// are forced by hardware to 0" on an instance without SMBus, so a write
-/// that does not read back is the peripheral saying which column of table
-/// 165 it is in - test_stm32_i2c's letter a asks all three that way.
+/// that does not read back is the peripheral saying which column of
+/// table 165 it is in, and the bench asks all three that way.
 constexpr bool i2c_has_smbus(uint8_t n) { return i2c_has_independent_clock(n); }
 constexpr bool i2c_wakes_from_stop(uint8_t n) { return i2c_has_independent_clock(n); }
 
@@ -1277,8 +1277,8 @@ inline volatile uint32_t* exti_rpr2() {
 /// header of this pack names the falling-pending bit EXTI_FPR2_RPIF34
 /// (CMSIS's own slip - the register is FPR2, the field is copied from
 /// RPR2's), and a header that corrects it will name it FPIF34. Probed
-/// on one alone, the register was a null pointer on the very part that
-/// has it - measured by test_stm32_exti's letter a on the G0B1RE.
+/// on one spelling alone, the register is a null pointer on the very
+/// part that has it (measured on G0B1 silicon).
 inline volatile uint32_t* exti_fpr2() {
 #if defined(EXTI_FPR2_FPIF34_Msk) || defined(EXTI_FPR2_RPIF34_Msk)
     return &EXTI->FPR2;
@@ -1296,9 +1296,8 @@ inline volatile uint32_t* exti_imr2() {
 /// EMR2 has no aggregate EM_Msk in any header of the pack (IMR2 has its
 /// IM_Msk; EMR2 is spelled per line, EM32..EM36), so the probe is the
 /// first line's mask - present on exactly the headers that declare the
-/// register (the G071 class and up). Probed on the aggregate, the
-/// pointer was null on EVERY part, the G0B1 included - measured by
-/// test_stm32_exti's letter a.
+/// register (the G071 class and up). Probed on the aggregate instead,
+/// the pointer is null on EVERY part, the G0B1 included (measured).
 inline volatile uint32_t* exti_emr2() {
 #if defined(EXTI_EMR2_EM32_Msk)
     return &EXTI->EMR2;
@@ -1770,8 +1769,8 @@ constexpr uint8_t lptim_exti_line(uint8_t n) {
 /// their neighbours ONCE for the one LPTIM_TypeDef both instances share,
 /// so `LPTIM2->CFGR |= LPTIM_CFGR_ENC` compiles and writes a bit 26.7.4
 /// marks Reserved on that instance. There is no symbol to read the
-/// difference off, so it is stated here with its citation - the tim.hpp
-/// geometry precedent, where DS13560 table 7 plays the same role.
+/// difference off, so it is stated here with its citation, the way
+/// tim.hpp's geometry table states DS13560 table 7.
 constexpr bool lptim_has_encoder(uint8_t n) {
     return lptim_present(n) && n == 1u;
 }
@@ -2620,8 +2619,8 @@ constexpr uint8_t tamp_internal_last = 6;
 // headers declare no FDCAN symbol at all - not a base, not a struct, not
 // an interrupt enumerator. So every probe below answers "no" there and
 // brio/stm32g0/fdcan.hpp compiles its BODY only where the header
-// declares the block (the avrdx/opamp.hpp precedent: a chapter a part
-// has not got is absent from that part's build).
+// declares the block: a chapter a part has not got is absent from that
+// part's build.
 
 /// Register block base of FDCANn (n = 1..2), 0 where the device has none.
 constexpr uint32_t fdcan_base(uint8_t n) {
@@ -2696,7 +2695,7 @@ constexpr uint32_t fdcan_clock_mask() {
 
 /// RCC_APBRSTR1.FDCANRST - and ONE reset for the same subsystem, so a
 /// reset asked for through either instance takes the other down with it
-/// (measured: test_stm32_fdcan letter a).
+/// (measured).
 constexpr uint32_t fdcan_reset_mask() {
 #if defined(RCC_APBRSTR1_FDCANRST)
     return RCC_APBRSTR1_FDCANRST;
@@ -2718,7 +2717,7 @@ constexpr uint8_t fdcan_clock_select_pos() {
 }
 
 /// RCC_CCIPR2 itself - a STRUCT MEMBER only the G0B1/G0C1 header
-/// declares (the flash_ecc2r() precedent). Null elsewhere, which is what
+/// declares, like flash_ecc2r(). Null elsewhere, which is what
 /// lets clock.hpp carry one verb for it on every header of the pack.
 inline volatile uint32_t* rcc_ccipr2() {
 #if defined(RCC_CCIPR2_FDCANSEL_Pos)

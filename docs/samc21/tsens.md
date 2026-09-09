@@ -22,13 +22,13 @@ this header declares the block.
 ## What the silicon does
 
 **This is not an ADC channel, and everything else follows.** On the AVR
-the die temperature is one more analog input: a voltage into the SAR, a
-SIGROW correction, a reading in kelvin. Here it is a **clock ratio**. A
-temperature-dependent oscillator (TOSC) is run twice - once in a "min"
-configuration and once in a "max" - and the difference of the two periods,
-amplified over GAIN periods of GCLK_TSENS, is counted by a counter clocked
-by GCLK_TSENS itself: up during the first phase, down during the second
-(43.6.1). What lands in VALUE is
+DA/DB the die temperature is one more analog input: a voltage into the
+SAR, a SIGROW correction, a reading in kelvin. Here it is a **clock
+ratio**. A temperature-dependent oscillator (TOSC) is run twice - once in
+a "min" configuration and once in a "max" - and the difference of the two
+periods, amplified over GAIN periods of GCLK_TSENS, is counted by a
+counter clocked by GCLK_TSENS itself: up during the first phase, down
+during the second (43.6.1). What lands in VALUE is
 
     VALUE = OFFSET + GAIN x (f_TOSCMIN - f_TOSCMAX) / f_GCLK
 
@@ -58,16 +58,15 @@ worry about:
 **Calibration is the chapter's heart** (43.5.9). Four production values
 live in the NVM Temperature Calibration Area at 0x00806030 (table 9-6) and
 must be copied in by software: GAIN and OFFSET into their own registers,
-TCAL and FCAL into CAL. `samc21/nvm.hpp`'s `NvmTemperatureCalibration` has
-typed all four since the NVMCTRL pass; `TsensCalibration::factory()` is
-the promise that file's comment made.
+TCAL and FCAL into CAL. `samc21/nvm.hpp`'s `NvmTemperatureCalibration`
+types all four, and `TsensCalibration::factory()` reads them.
 
 **And the reset value of GAIN is a trap, not a benign nothing.** GAIN
 reads zero out of reset, the field is 24 bits, and a zero GAIN behaves as
-**2^24**: measured twice over, the conversion takes 699 ms instead of
-3.7 ms and the result is the gain term amplified about two hundredfold,
-arriving as a plausible-looking -16000 C. `tsens_config_valid()` refuses a
-zero GAIN outright.
+**2^24**: the conversion takes 699 ms instead of 3.7 ms and the result is
+the gain term amplified about two hundredfold, arriving as a
+plausible-looking -16000 C. `tsens_config_valid()` refuses a zero GAIN
+outright.
 
 **The register disciplines**, spelled per register:
 
@@ -143,12 +142,11 @@ in OUTSIDE**, whose two descriptions want opposite orders; and an inverted
 event input nothing listens to.
 
 **`Tsens`** - the block, monostate (one instance on every C21 variant, so
-there is no index to carry - the `Rtc` / `Dac` / `Sdadc` precedent).
+there is no index to carry, as in `Rtc`, `Dac` and `Sdadc`).
 
 - *Constants*: `gclk_id` (5), `pac_id` (12, published for erratum 1.19.1
-  and for the PAC pass that does not exist yet), `window_generator` (30),
-  `start_event_user` (0), `dma_trigger_resrdy` (1), the four `flag_*`
-  masks, `irq()`.
+  and for `samc21/pac.hpp`), `window_generator` (30), `start_event_user`
+  (0), `dma_trigger_resrdy` (1), the four `flag_*` masks, `irq()`.
 - *Claim and release*: `init(generator, cfg)` and its compile-time twin
   `init<cfg>(generator)`; `release()`. `init()` writes every
   enable-protected register between the reset and the enable, in that
@@ -232,9 +230,8 @@ Tsens::enable(true);
 ## Bench findings
 
 From `test_samc_tsens` (10 letters in `z` plus letter `p` by name, 168
-verdicts in `z`, 168/168 - three warm runs and two cold from a fresh
-flash, about two minutes). **Nothing to wire**, and this chapter could not
-need wires in principle: 43.5.1 is "Not applicable".
+verdicts in `z`, about two minutes). **Nothing to wire**, and this chapter
+could not need wires in principle: 43.5.1 is "Not applicable".
 
 **No absolute accuracy is claimed anywhere in that suite**, and that is a
 design decision rather than an omission: this bench has no independent
@@ -277,14 +274,15 @@ plausibility one, and what cannot be answered is printed and declined.
 
 ### THE SCALE LEVER: one die, two references, one prediction
 
-The letter this chapter exists for on a bench with no thermometer. FREQM
-weighs OSC48M against the board's crystal in the same letter, so the
-prediction comes from a measured ppm and not from a memory; a DPLL locked
-to the same crystal provides a true 48 MHz; the comparison is
-**interleaved A-B-B-A and repeated four times**, because a linear drift of
-the die's own temperature cancels exactly out of four equally spaced
-batches, and the **median** of the four is reported (the technique
-`test_samc_rtc`'s FREQCORR letter had to invent for the same reason).
+What stands in for a thermometer: the same die read on two references,
+against a prediction. FREQM weighs OSC48M against the board's crystal in
+the same letter, so the prediction comes from a measured ppm and not from
+a memory; a DPLL locked to the same crystal provides a true 48 MHz; the
+comparison is **interleaved A-B-B-A and repeated four times**, because a
+linear drift of the die's own temperature cancels exactly out of four
+equally spaced batches, and the **median** of the four is reported (the
+same technique `test_samc_rtc`'s FREQCORR letter uses, for the same
+reason).
 
 - **OSC48M measures 47759811 Hz, 5003 ppm slow**; the crystal-locked DPLL
   measures 48000000 Hz, 0 ppm - the crystal's own error cancels out of the
@@ -408,9 +406,9 @@ the CPU took **at the same GAIN**.
 
 ### The interrupts, through the one vector
 
-The DAC's and the SDADC's suites both read their flags and never bound
-their vectors, so this closes the gap their pages carry; the ADC's did
-bind one, through `util/analog_sampler.hpp`.
+This block's vector is bound and driven. The DAC's and the SDADC's
+suites only read their flags and never bind theirs; the ADC's is driven
+through `util/analog_sampler.hpp`.
 
 - One started measurement produces exactly **one** interrupt, with RESRDY
   in the mask `isr()` returns; reading VALUE in the handler clears it, so
@@ -455,17 +453,16 @@ before it starts, and the breadcrumb has never been needed.
 - The errata's second workaround is real: **free-running mode needs no
   CTRLB write at all**.
 
-There is no PAC driver in this stratum, and PAC write protection is off
-out of reset (11.5.2.2), so the item is inapplicable by construction today
-and becomes a real constraint the day a PAC pass arrives. `Tsens::pac_id`
-is the number that pass will need.
+PAC write protection is off out of reset (11.5.2.2), so the item bites
+only where a program sets it - through `samc21/pac.hpp`, whose verbs take
+`Tsens::pac_id`.
 
-### Two things this suite learned the hard way, for other suites
+### Two facts of this stratum that any suite can trip over
 
 - **TC2 and TC3 share generic clock channel 31** (TC0/TC1 share 30, TC4
-  has 32 to itself), so `Tc<2>::release()` silently stops TC3. The first
-  version of the no-CPU letter lost the whole window-monitor half of its
-  chain that way, with every verdict before it still passing.
+  has 32 to itself), so `Tc<2>::release()` silently stops TC3. A chain
+  built on TC3 loses that half without a word, and every verdict ahead of
+  the loss still passes.
 - **`tools/bench.py --expect="->"` can truncate a capture.** The judge
   returns as soon as the marker has been seen AND the text ends with the
   prompt `"> "` - and `"  -> "` ends with `"> "`. When the tally lands in
@@ -476,8 +473,8 @@ is the number that pass will need.
 **Table 43-1, in standby, and a witness this chapter forces.** Free-
 running, the block measured 4 times in a 30 ms window awake, 4 in the
 same window spent in STANDBY with CTRLA.RUNSTDBY set, and 0 with it
-clear - the table's rows 4 and 2. THE WITNESS HAD TO BE THE WINDOW
-MONITOR: unlike every other converter in this stratum the TSENS
+clear - the table's rows 4 and 2. The witness has to be the window
+monitor: unlike every other converter in this stratum the TSENS
 publishes NO result-ready event generator (43.6.5 lists WINMON alone),
 so a window whose lower limit sits below the datum's rail matches on
 every measurement and its event is the count. See

@@ -169,7 +169,7 @@ TcdPwm<TcdRoute::def>::init(clock, {.clock = TcdClock::pll, .source_hz = 48'000'
 // PLLS sets as soon as the TCD requests it; it stays 0 until then.
 ```
 
-## Bench findings (`test_avr_clock`, rev A5, CLKOUT on PA7, 15/15)
+## Bench findings (`test_avr_clock`, rev A5, CLKOUT on PA7)
 
 - Every OSCHF rate (24, 20, 16, 12, 8, 4, 3, 2, 1 MHz) and every main
   prescaler (24 MHz / 1 .. 64, down to 375 kHz) appears on CLKOUT as
@@ -241,7 +241,7 @@ Driver gaps:
 
 - Errata 2.5.1 (A4 silicon): `Clock<external>::init` waits for EXTS
   before anything requests the source, which on A4 never sets - the
-  init as shipped always falls back to OSCHF there (documented
+  init as written always falls back to OSCHF there (documented
   above, not worked around; B0 and A5 unaffected).
 
 Implemented but not bench-verified:

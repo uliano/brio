@@ -21,6 +21,8 @@
 //   c  what OSCULP32K actually runs at, measured through the early-
 //      warning interrupt in both modes - the offset in normal mode and
 //      the closed window in window mode
+//   d  samc21/delay.hpp's delay_us on the SysTick counter: at-least
+//      never early, the sub-tick cap, and the refusals
 //
 //   i  (by name only) SIX REAL RESETS. This letter reboots the board
 //      once per leg and resumes from a .noinit token, so it is NOT in
@@ -58,8 +60,8 @@ constexpr SysClock clock;
 // ---------------------------------------------------------------------------
 // The token letter i lives in
 //
-// INLINE, and in .noinit, for the same two reasons the AVR twin of this
-// suite gives: the section must survive the crt (the linker script marks
+// INLINE, and in .noinit, for two reasons: the section must survive the
+// crt (the linker script marks
 // .noinit NOLOAD and startup neither loads nor zeroes it), and gcc gives
 // an inline variable with a section attribute a COMDAT group where a
 // plain one gets none - the platform's own panic_record_ is a static
@@ -171,8 +173,8 @@ void ta_boot() {
 
     // RCAUSE IS EXCLUSIVE. 18.8.1: the bit for the source is set and all
     // others are written to zero. This is the fact that most needs
-    // asserting, because the AVR family's RSTFR does the opposite and
-    // the habit travels.
+    // asserting: a reset-cause register that ACCUMULATES history is the
+    // commoner shape, and the habit travels.
     uint8_t bits = boot_cause_bits, set = 0;
     while (bits != 0u) {
         set = static_cast<uint8_t>(set + (bits & 1u));
@@ -227,14 +229,14 @@ void ta_boot() {
 // =============================================================================
 // RE-RUNNABILITY: letter a compares the WDT registers against the user
 // row, and at boot they agree because the silicon loaded them from it -
-// but letters b AND c reprogram CONFIG and EWCTRL, so a second z in the
-// same power cycle found letter a failing on exactly the fields the
-// armings change (the first fix restored in b alone and letter c
-// re-clobbered them straight after). The boot values are captured once
-// in main(), and every arming letter ends by putting them back - AFTER
-// the disable's synchronization, because a store made while ENABLE's
-// clear is still crossing is discarded (measured: the unsynchronized
-// first version restored nothing).
+// but letters b AND c reprogram CONFIG and EWCTRL, so without a restore
+// a second z in the same power cycle fails letter a on exactly the
+// fields the armings change - and restoring in ONE of them is not
+// enough, since the other clobbers the fields again straight after.
+// The boot values are captured once in main(), and EVERY arming letter
+// ends by putting them back - AFTER the disable's synchronization,
+// because a store made while ENABLE's clear is still crossing is
+// discarded (measured: an unsynchronized restore stores nothing).
 uint8_t wdt_boot_config = 0;
 uint8_t wdt_boot_ewctrl = 0;
 
@@ -315,8 +317,8 @@ void tb_watchdog() {
 // real rate without ever letting the dog bite: it fires at a known
 // number of CLK_WDT_OSC cycles and the CPU times it against SysTick.
 //
-// SINGLE MEASUREMENTS DO NOT GIVE THE RATE, and that is the lesson this
-// letter is built around. Arming the watchdog and starting the clock are
+// SINGLE MEASUREMENTS DO NOT GIVE THE RATE, and the whole letter is
+// built around that. Arming the watchdog and starting the clock are
 // two different instants: the CTRLA and CLEAR writes cross into the
 // 1.024 kHz domain and take up to a couple of its cycles to land, so
 // every measurement carries a CONSTANT negative offset of a few
@@ -438,9 +440,8 @@ void tc_oscillator() {
 // Each leg banks its number in the .noinit token, triggers a reset, and
 // then SPINS - because not every trigger here is instantaneous. A wrong
 // key written to CLEAR is synchronized into the 1.024 kHz domain and
-// arrives a few milliseconds later, which the first version of this
-// letter learned the hard way by running on past its own trigger and
-// into the next leg.
+// arrives a few milliseconds later, so a leg that does not spin runs on
+// past its own trigger and into the next one.
 
 void bank(uint8_t leg) {
     token.magic = token_magic;
@@ -659,9 +660,9 @@ void td_delay() {
 
     // THE BRACKET'S OWN ZERO, measured first: two back-to-back
     // count32() reads are not free (each is a READSYNC command and its
-    // waits), and the first version of this letter charged that cost
-    // to the delay - every span came out a constant ~11 us "late" and
-    // even a REFUSAL "took" 10. The empty bracket is sampled eight
+    // waits), and charging that cost to the delay would put a constant
+    // ~11 us of "lateness" on every span and make even a REFUSAL "take"
+    // 10 us. The empty bracket is sampled eight
     // times; its MAX bounds what measurement overhead can add, and the
     // at-least verdicts below deliberately use the RAW reading (the
     // bracket only ever adds, so raw >= true is a safe witness).

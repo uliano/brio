@@ -1,10 +1,9 @@
 // test_stm32_platform - the reference bench suite for the STM32G0's
-// PLATFORM: the parts of it that were already there (the PRIMASK
-// critical section, the idle hook, the SysTick timebase) and the two
-// halves this campaign built - stm32g0/reset.hpp (the RCC's reset
-// flags, the independent watchdog, the system window watchdog, the
-// panic breadcrumb across a real reset) and stm32g0/delay.hpp (the
-// microsecond busy-wait).
+// PLATFORM: the running half (the PRIMASK critical section, the idle
+// hook, the SysTick timebase) and the failing half - stm32g0/reset.hpp
+// (the RCC's reset flags, the independent watchdog, the system window
+// watchdog, the panic breadcrumb across a real reset) and
+// stm32g0/delay.hpp (the microsecond busy-wait).
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
@@ -36,7 +35,7 @@
 //      once per leg and resumes from a .noinit token, so it is NOT in
 //      `z`: `z` has to be one console session a tool can judge from a
 //      single capture. Run it with
-//          python3 tools/bench.py run E i --app test_stm32_platform
+//          python3 tools/bench.py run <board> i --app test_stm32_platform
 //                  --expect="->" --timeout 120
 //      Legs: a software reset, an IWDG time-out (which measures the
 //      real one and with it LSI), a WWDG window violation, a panic
@@ -147,7 +146,7 @@ volatile uint32_t ewi_cycles = 0;
 volatile uint16_t ewi_count = 0;
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch, the samc21 suites' own
+// A cycle-resolution stopwatch
 //
 // ticks x period + the phase SysTick has already counted down. The two
 // reads are retried until they belong to the same tick, which is what
@@ -221,8 +220,8 @@ void ta_boot() {
                   (boot_flags & ResetFlag::pin) != 0u);
 
     // READING IS NOT CLEARING. Nothing but RMVF (or a power reset) takes
-    // these bits down - the AVR's RSTFR habit, not the SAM's exclusive
-    // RCAUSE - so two reads in a row give the same answer, and so does
+    // these bits down - this is an ACCUMULATING history and not one
+    // exclusive cause - so two reads in a row give the same answer, and so does
     // the sample main() took at boot. THIS LETTER NEVER WRITES RMVF: it
     // would be a one-way loss of the boot's own evidence, and letter i
     // proves the clearing on real resets (legs 2 and 3) where the flags
@@ -408,7 +407,7 @@ void tc_ticker() {
 void td_delay() {
     // THE BRACKET'S OWN ZERO, measured first: two back-to-back
     // cycles_now() readings are not free, and charging their cost to
-    // the delay is the mistake the samc21 twin of this letter paid for.
+    // the delay would put the whole bracket inside the measurement.
     uint32_t zero_min = 0xFFFFFFFFu;
     uint32_t zero_max = 0;
     for (uint8_t k = 0; k < 8; ++k) {
@@ -610,8 +609,7 @@ void te_iwdg() {
 
     // ---- the debug freeze bit ---------------------------------------------
     // It only answers with RCC_APBENR1.DBGEN on, which main() turned on:
-    // a peripheral without its bus clock does not take a store (5.2.17),
-    // and the first version of this letter measured exactly that.
+    // a peripheral without its bus clock does not take a store (5.2.17).
     const bool freeze_was = Iwdg::debug_freeze();
     Iwdg::debug_freeze(!freeze_was);
     const bool toggled = Iwdg::debug_freeze() != freeze_was;
@@ -636,8 +634,8 @@ void te_iwdg() {
 // letter does, so that a reference suite carries no one-way switch.
 void tf_wwdg() {
     // The closed gate first: 5.2.17 says a peripheral without its bus
-    // clock does not answer. Printed, not judged - the samc21 precedent
-    // for a claim the silicon may honour by luck.
+    // clock does not answer. Printed, not judged: a claim the silicon
+    // may honour by luck is no verdict.
     Wwdg::bus_clock(false);
     const uint32_t dark_cr = WWDG->CR;
     Wwdg::bus_clock(true);
@@ -870,8 +868,7 @@ void bank(uint8_t leg) {
     // THROUGH A VOLATILE POINTER, and it is not decoration: a plain
     // store to a non-volatile object inside a loop that never exits is
     // one gcc is entitled to sink out of the loop - which is to say,
-    // never to perform. The first version of this leg banked a
-    // beautiful zero.
+    // never to perform, and the leg then banks a beautiful zero.
     volatile uint32_t* const elapsed = &token.elapsed_ms;
     const uint32_t t0 = Ticker::ticks();
     for (;;) {
@@ -1023,8 +1020,8 @@ void ti_resume() {
         // it: "Once running, the IWDG cannot be stopped" is followed, in
         // the Stop-mode sections, by "except upon a reset". If the first
         // half were the whole truth this board would now be rebooting
-        // every 955 ms with nothing refreshing anything - the SAM's and
-        // the AVR's habits, and the widespread STM32 lore. It is not.
+        // every 955 ms with nothing refreshing anything, which is what
+        // the widespread STM32 lore expects. It is not.
         const uint32_t quiet0 = Ticker::ticks();
         while (Ticker::ticks() - quiet0 < 1500u) {
         }
@@ -1166,15 +1163,15 @@ int main() {
     // oversight: RM0444 28.3.1 says the IWDG "cannot be stopped except
     // upon a reset", and letter i's second leg is where this suite
     // proves the last four words literal - the reset it causes stops
-    // it. (The widespread STM32 lore, and the SAM's and AVR's habits,
-    // would have this board reboot-looping from then on.)
+    // it. (The widespread STM32 lore would have this board
+    // reboot-looping from then on.)
     boot_lsi_forced = brio::Rcc::lsi_ready() && !brio::Rcc::lsi_enabled();
 
     const bool clock_ok = SysClock::init();
     // The DBGMCU is an APB peripheral with an enable bit of its own, and
     // it is CLEAR AT RESET: without it the two watchdogs' freeze bits do
-    // not take a store (5.2.17), which is what the first run of letters
-    // e and f measured before this line existed.
+    // not take a store (5.2.17): without this line letters e and f
+    // measure a peripheral that never heard them.
     brio::Rcc::apb1_clock(RCC_APBENR1_DBGEN, true);
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);

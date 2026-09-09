@@ -113,10 +113,10 @@ half of 38000 for a tenth of a second is 1900.
 the pad rests LOW normally and HIGH inverted - which is what an LED
 wired to the supply wants.
 
-**THE FINDING CHAPTER 27 DOES NOT CARRY: the USART envelope is ACTIVE
-LOW where TIM16's is active high.** With IR_MOD = 01 an IDLE transmit
-line - which is HIGH - passes **0 carrier edges a millisecond**, i.e. it
-shuts the gate completely; twenty 0x00 characters at 1200 baud, which
+**THE USART ENVELOPE IS ACTIVE LOW where TIM16's is active high, and
+chapter 27 does not say so.** With IR_MOD = 01 an IDLE transmit line -
+which is HIGH - passes **0 carrier edges a millisecond**, i.e. it shuts
+the gate completely; twenty 0x00 characters at 1200 baud, which
 hold the line low for nine of every ten bit times, pass **34 edges a
 millisecond** against a free-running carrier's 38, which is nine tenths
 of it. That is the right way round for infrared (no light at rest, light
@@ -167,7 +167,7 @@ Implemented, not bench-verified:
   is worth in milliamps needs an LED and a meter).
 - IR_MOD = 10, the second USART: selected and read back, never counted
   on the pad. It is USART4 here, and USART4 is a BASIC instance whose
-  transmit line is the same signal USART1's was, so nothing new is
+  transmit line is the same signal USART1's is, so nothing new is
   expected - which is why this is a gap and not a doubt.
 - The PA13 IR_OUT pad. `IrtimPad<{'A',13,af1}>` compiles and would claim
   it; on this board PA13 is SWDIO and claiming it costs the debug port,

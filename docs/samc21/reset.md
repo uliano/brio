@@ -12,9 +12,8 @@ table 18-1 - and errata DS80000740S, where **neither module has an item**:
 there is no section for either. The watchdog does appear inside someone
 else's workaround: 1.22.1 (XOSC/XOSC32K clock-failure detection cannot
 switch to the safe clock when the input is stuck high) tells the
-application to run the WDT and switch clocks in firmware after the reset,
-which will matter to the clock pass when XOSC exists. Driver:
-`samc21/reset.hpp` (`Reset`, `Watchdog`, `ResetReporter`,
+application to run the WDT and switch clocks in firmware after the reset.
+Driver: `samc21/reset.hpp` (`Reset`, `Watchdog`, `ResetReporter`,
 `hard_fault_reset`). Family fixture `test/family_samc21/reset.cpp` plus one
 negative under `tools/check_samc21.sh`; the bench suite is
 `test_samc_platform`.
@@ -128,7 +127,7 @@ live watchdog is off), `clear` (the 0xA5 key, and only that), and
 Synchronization: `busy`, `sync`, both bounded. The interrupt:
 `arm_interrupt`, `flags`, `armed`, `clear_flags`, `early_warning_flag`,
 `isr` (the handler body; the app binds the vector). And `bus_clock`, for
-a power pass that wants the APB clock off - it is on at reset.
+a program that wants the APB clock off - it is on at reset.
 
 **`ResetReporter`** - a `kernel/panic.hpp` Reporter that ends the program
 with a system reset instead of a spin, so the breadcrumb is read at the
@@ -206,9 +205,9 @@ panic<SamPlatform, ResetReporter>(PanicCode::assert_failed, my_context);
 
 ## Bench findings
 
-From `test_samc_platform` (34 verdicts in `z`, plus letter `i` outside it
-- `i` reboots the board six times and must be asked for by name, with
-`bench.py run C i --expect="->"`). Nothing to wire, and nothing costs
+From `test_samc_platform`, whose letter `i` sits outside `z`: it
+reboots the board six times and must be asked for by name, with
+`bench.py run C i --expect="->"`. Nothing to wire, and nothing costs
 endurance.
 
 - **The fuse row and the watchdog registers agree**, field by field:
@@ -229,8 +228,9 @@ endurance.
   the stopped case open; measured, the key bites with CTRLA.ENABLE clear
   exactly as it does with it set, and RCAUSE calls it a WATCHDOG reset
   both times. It is also **not immediate**: CLEAR is write-synchronized,
-  and the first version of this test ran on past its own trigger into
-  the next leg before the reset landed.
+  so the CPU runs on past the offending store for a few CLK_WDT_OSC
+  cycles, and code that expects the reset to have happened already runs
+  into whatever comes next.
 - **The breadcrumb survives a system reset**, code and context byte
   intact - which table 18-1 promises nowhere, so it is a measurement and
   not a quotation.
@@ -253,14 +253,14 @@ endurance.
   dead with no output. Attaching a probe sets that bit, and table 18-1
   makes it sticky: the debug logic is reset by a power-on or an external
   reset and NOT by a watchdog reset or a system reset request, so every
-  later software reset inherits it. Diagnosed by halting the silent board
-  and finding it parked on the BKPT instruction. `tools/bench.py` now
-  clears C_DEBUGEN as the last step of every SAM flash, which is what a
-  board with no probe attached looks like.
+  later software reset inherits it. The symptom is a silent board parked
+  on the BKPT instruction. `tools/bench.py` clears C_DEBUGEN as the last
+  step of every SAM flash, which is what a board with no probe attached
+  looks like.
 - **An unbound vector is a silent death** on this target - the crt's
-  default handler is a spin - and `HardFault_Handler` needed the `weak`
-  attribute the crt's own comment already claimed it had: without it an
-  app that binds the vector fails to link.
+  default handler is a spin - and the crt's `HardFault_Handler` carries
+  the `weak` attribute, without which an app that binds the vector fails
+  to link.
 
 ## Not covered yet
 
@@ -285,8 +285,8 @@ Implemented but not bench-verified:
   itself until someone unplugged it. The same reason keeps
   `disable()`'s refusal-while-always-on path unexercised.
 - `bus_clock()`, which only matters once something turns the APB clock
-  off - the power pass.
+  off.
 - `Reset::warm()` as a decision: the RTC surviving a user reset is
-  table 18-1's claim and there is no RTC driver yet to observe it with.
+  table 18-1's claim, and nothing here observes it.
 - Operation on the E and G variants: compile-checked only. Neither module
   varies by package.

@@ -11,8 +11,9 @@
 // rebase with an SCK ceiling, and the transfer engine (SpiHost) with
 // both its completion styles.
 //
-// TWO BOARDS (k..s, `y`): the same four pins with board B running
-// `spi_peer` as a real client, driven IN BAND over the bus under test
+// TWO BOARDS (k..s, `y`): the same four pins with a second board
+// running `spi_peer` as a real client, driven IN BAND over the bus
+// under test
 // (src/apps/spi_link.hpp) - the client matrix (four transfer modes, both
 // bit orders, all three buffering regimes), the rates against the
 // client's CLK_PER/6 ceiling and above it, deliberate CPOL/CPHA/DORD
@@ -27,20 +28,21 @@
 // USART2 ALT1 (PF4/PF5) at 460800 - USART2 is never reconfigured here.
 //
 // Wires: NONE of its own. Everything runs on SPI0 ALT1 (MOSI PE0, MISO
-// PE1, SCK PE2, SS PE3), which is also the desk's board-to-board link
-// (A.PEn - B.PEn, n = 0..3, straight across). In the SINGLE-board half
+// PE1, SCK PE2, SS PE3), which is also the board-to-board link (each
+// PEn to the same PEn on the peer, n = 0..3, straight across). In the
+// SINGLE-board half
 // the board answers itself: MISO and SS are driven by its own PORT while
 // the SPI reads them (and the SS pin's INVEN fakes the external driver
 // that would demote the host), and MOSI is observed through a pin event
 // and an edge counter. That half needs the other board to keep off all
 // four wires, and `spi_peer` does: it is a DARK listener that drives
 // MISO only for one answer window, after a frame that checked out. So
-// both halves run with the peer attached - `z` scores the same with
-// board B inert (`family_probe`) and with `spi_peer` on it.
-// SPI0's DEFAULT route (PA4-PA7) is NEVER used here: on this desk those
-// pins are cabled to a 3.3 V display module and an MCP3550, and the desk
-// runs at 5 V. SPI1 is exercised on route NONE only - its pin positions
-// (PC0-PC3 / PC4-PC7) are the traffic LEDs of this bench.
+// both halves run with the peer attached: `z` behaves the same with the
+// far board inert (`family_probe`) and with `spi_peer` on it.
+// SPI0's DEFAULT route (PA4-PA7) is NEVER used here: on this bench
+// those pins are cabled to a 3.3 V display module and an MCP3550, while
+// the boards run at 5 V. SPI1 is exercised on route NONE only - its pin
+// positions (PC0-PC3 / PC4-PC7) are the traffic LEDs of this bench.
 //
 // Commands: ? for the menu, z = the single-board half, y = the two-board
 // half.
@@ -170,7 +172,7 @@ bool host(SpiClock c, SpiMode m = SpiMode::mode0, bool buffered = false, bool ss
 /// in is then a level this suite chose. The peripheral only READS the
 /// pin in host mode (28.2.2) - but the direction OVERRIDE that makes
 /// MISO an input is latched when the SPI is ENABLED: a PORT.DIRSET
-/// while it is running has no effect on the pad (bench). So the level
+/// while it is running has no effect on the pad (measured). So the level
 /// is set with the instance briefly disabled, and it sticks.
 void miso_level(bool high) {
     const bool was_enabled = S0::enabled();
@@ -259,7 +261,7 @@ void measure_rate(SpiClock c) {
     // A stream of bytes: the meter sees one period per SCK cycle, plus
     // the long gap between bytes - so the MINIMUM period is the rate
     // (the first two captures are dropped: arming a capture input reads
-    // a spurious edge, a TCB finding of the timer campaign).
+    // a spurious edge - a measured property of the TCB).
     for (uint8_t i = 0; i < 64; ++i) {
         (void)xfer(0xAA);
     }
@@ -884,7 +886,7 @@ void tj_engine() {
 }
 
 // ==============================================================================
-//  THE TWO-BOARD HALF (k .. s, `y`): board B runs `spi_peer` and is driven IN
+//  THE TWO-BOARD HALF (k .. s, `y`): the far board runs `spi_peer`, driven IN
 //  BAND over the very bus under test - the protocol is src/apps/spi_link.hpp.
 //  The command channel is SPI mode 0, MSb first, CLK_PER/32, with PE3 as a
 //  plain GPIO chip select (this end runs with SSD set, so the peripheral

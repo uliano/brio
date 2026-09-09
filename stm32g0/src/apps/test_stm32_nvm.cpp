@@ -1,5 +1,5 @@
 // test_stm32_nvm - the STM32G0's FLASH (RM0444 ch. 3) and the block heap
-// over it (util/nv_heap.hpp on its THIRD silicon).
+// over it (util/nv_heap.hpp on this silicon).
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
@@ -24,8 +24,8 @@
 //   a  the geometry: the size register against the chapter's tables and
 //      against the partition's constants, the bank mapping including
 //      nSWAP_BANK, and the linker's own boundary
-//   b  the option bytes DECODED and printed, cross-checked against the
-//      reset campaign's own registers - and never written
+//   b  the option bytes DECODED and printed, cross-checked against
+//      stm32g0/reset.hpp's own registers - and never written
 //   c  the lock: LOCK at boot, the keyed unlock, the refusals a locked
 //      FLASH_CR earns. NO WRONG KEY IS EVER WRITTEN (3.3.6: that locks
 //      the register until the next system reset and hard-faults)
@@ -49,9 +49,9 @@
 //      after reflashing another app and coming back
 //
 // THE ENDURANCE BUDGET. DS13560 table 49 gives this part 10 kcycles
-// minimum per page. Letter w prints what a run cost; at the time of
-// writing one z is about twenty page erases spread over half a dozen
-// pages, so the busiest page is good for hundreds of runs.
+// minimum per page. Letter w prints what a run cost; one z is about
+// twenty page erases spread over half a dozen pages, so the busiest
+// page is good for hundreds of runs.
 //
 // The suite is re-runnable in one power-on: nothing here is one-way.
 //
@@ -437,8 +437,7 @@ void tb_options() {
     // THE CROSS-CHECK. The option bytes and the RCC describe the same
     // two watchdogs from opposite ends: WWDG_SW = 0 (a hardware window
     // watchdog) is what makes the RCC hand the WWDG its bus clock at
-    // reset, which test_stm32_platform letter a reads from the other
-    // side.
+    // reset.
     bench.verdict("the WWDG is the SOFTWARE one here, which is why nothing "
                   "was feeding it before this suite started",
                   FlashOptions::wwdg_software());
@@ -735,13 +734,12 @@ void tg_fast() {
     // written with interrupts off - flash.hpp does not do it for the
     // caller, because a driver that masks behind the application's back
     // decides the system's latency.
-    // THE STOPWATCH HAS TO CHANGE FOR THIS ONE MEASUREMENT, and the
-    // first version of the letter paid for not noticing: cycles_now()
+    // THE STOPWATCH HAS TO CHANGE FOR THIS ONE MEASUREMENT: cycles_now()
     // is ticks x period + phase, and inside a critical section SysTick's
     // INTERRUPT is masked, so the tick count freezes while the counter
     // keeps wrapping - the sum then goes BACKWARDS every time the
-    // window happens to straddle a millisecond, which is exactly the
-    // one-run-in-three failure it produced. SysTick's own VAL, with the
+    // window happens to straddle a millisecond, which fails about one
+    // run in three. SysTick's own VAL, with the
     // single wrap folded in, is valid with interrupts masked and good
     // for one whole tick period; the row takes well under that, and the
     // verdict below refuses to believe a figure that says otherwise.
@@ -986,7 +984,7 @@ void ti_heap() {
 // THIS LETTER REBOOTS THE BOARD, four times, which is why it is not in
 // `z`: `z` has to be one console session a tool can judge from a single
 // capture. Run it with
-//     python3 tools/bench.py run E s --app test_stm32_nvm
+//     python3 tools/bench.py run <board> s --app test_stm32_nvm
 //             --expect="pass," --timeout 250
 //
 // WHY A REBOOT PER MISSTEP, and it is a finding rather than caution.

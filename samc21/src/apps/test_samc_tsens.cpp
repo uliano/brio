@@ -28,8 +28,8 @@
 // GCLK_TSENS, so the GENERIC CLOCK IS THE RULER and the factory GAIN
 // belongs to one particular rate - "the undivided internal 48MHz
 // oscillator" (43.6.1). On this die OSC48M is 5100 ppm SLOW against the
-// board's 24 MHz crystal (the clock campaign measured it; letter d
-// measures it again, here, with FREQM). So the SAME DIE at the SAME
+// board's 24 MHz crystal (letter d measures that here, with FREQM). So
+// the SAME DIE at the SAME
 // temperature read with GCLK_TSENS on OSC48M and on a crystal-locked
 // DPLL at a true 48 MHz must differ by exactly the reference's own error
 // mapped through 43.6.1's formula - a self-contained demonstration that
@@ -81,7 +81,6 @@
 // variable with a section attribute a COMDAT group where a plain one gets
 // none, and the platform's own panic_record_ is a static inline member -
 // so a plain object here collides with it as a section type conflict.
-// (test_samc_platform's token carries the same note for the same reason.)
 //
 // Its magic word is not decoration: table 18-1 has no SRAM row at all,
 // for any reset source, so nothing promises this object survives and
@@ -153,9 +152,8 @@ using Counter = Tc<3>;
 constexpr uint8_t dma_ch = 0;
 using Copy = DmaChannel<dma_ch>;
 constexpr uint16_t dma_results = 16;
-/// VOLATILE IN BOTH DIRECTIONS - the DMAC campaign's lesson on this
-/// target: the compiler sees neither the controller's reads nor its
-/// writes.
+/// VOLATILE IN BOTH DIRECTIONS: the compiler sees neither the
+/// controller's reads nor its writes.
 volatile uint32_t results[dma_results];
 
 constexpr uint8_t ev_start_channel = 0;    ///< pacer overflow -> TSENS START
@@ -818,10 +816,9 @@ void tc_at_rest() {
 // tens of centi-degrees while a single reading's spread is about sixty,
 // so the comparison is INTERLEAVED A-B-B-A and repeated: over four
 // equally spaced batches a LINEAR drift of the die's own temperature
-// cancels exactly out of (A1 + A4)/2 - (A2 + A3)/2, and the MEDIAN of the
-// repeats is reported rather than the mean - the technique the RTC
-// campaign's FREQCORR letter had to invent for the same reason, a signal
-// smaller than the wander it sits on.
+// cancels exactly out of (A1 + A4)/2 - (A2 + A3)/2, and the MEDIAN of
+// the repeats is reported rather than the mean. That is the shape any
+// signal smaller than the wander it sits on demands.
 //
 // The structural half needs no such care, because it is enormous: the
 // same die read at 24 MHz with the factory GAIN unchanged must DOUBLE the
@@ -1120,9 +1117,8 @@ void te_timing() {
     }
 
     // A single measurement, for a caller that is not free-running: the
-    // difference of two long loops, because a single stopwatch read pair
-    // on this target costs microseconds of its own (the DAC campaign's
-    // lesson).
+    // difference of two long loops, because a single stopwatch read
+    // pair on this target costs microseconds of its own.
     bench.verdict("the block comes back to single measurements",
                   tsens_up(gen_sys, base_cfg()));
     const uint32_t s0 = ticks_now();
@@ -1528,9 +1524,8 @@ void th_no_cpu() {
     /// The GAIN the whole chain runs at - a quarter of the factory value,
     /// so a measurement is under a millisecond and the pacer's own
     /// millisecond is never the bottleneck. EVERY VERDICT BELOW COMPARES
-    /// AGAINST A READING TAKEN AT THIS SAME GAIN: a number measured at one
-    /// GAIN says nothing about one measured at another, which is how the
-    /// first version of this letter fooled itself.
+    /// AGAINST A READING TAKEN AT THIS SAME GAIN: a number measured at
+    /// one GAIN says nothing about one measured at another.
     const uint32_t chain_gain = factory.gain / 4u;
     TsensConfig chain_cfg = base_cfg();
     chain_cfg.calibration.gain = chain_gain;
@@ -1566,7 +1561,8 @@ void th_no_cpu() {
         // THE DMA REQUEST IS THE RESRDY FLAG (43.6.3: "cleared when the
         // VALUE register is read"), so a result left standing from a
         // previous run would move one stale beat the moment the channel
-        // is enabled. Read it away first - the ADC campaign's lesson.
+        // is enabled. Read it away first; clearing the flag alone is
+        // not the same thing.
         (void)Tsens::value();
         Tsens::clear_flags(Tsens::flag_all);
         (void)Copy::reset();
@@ -1648,10 +1644,11 @@ void th_no_cpu() {
                   "too, where the DAC's and the SDADC's take neither",
                   sync_beats == dma_results && resync_beats == dma_results);
 
-    // AND THE OTHER HALF OF THE SAME LESSON, MEASURED RATHER THAN ASSERTED.
-    // A SAMPLED PATH SAMPLES, and neither 29.6.2.6 nor table 29-3 says
-    // what that costs. Two knobs are turned one at a time: the pulse's
-    // width (the pacer's generator) and the channel's own clock.
+    // AND THE OTHER HALF OF THE SAME QUESTION, MEASURED RATHER THAN
+    // ASSERTED. A SAMPLED PATH SAMPLES, and neither 29.6.2.6 nor
+    // table 29-3 says what that costs. Two knobs are turned one at a
+    // time: the pulse's width (the pacer's generator) and the
+    // channel's own clock.
     const uint16_t wide_slow_sync =
         run(EventPath::synchronous, EventEdge::rising, gen_ref);
     bench.verdict("the pacer goes back to the narrow 21 ns pulse",
@@ -1726,8 +1723,8 @@ void th_no_cpu() {
     {
         // AGAIN AT THE CHAIN'S OWN GAIN: `reference` above is what this
         // block reads at this GAIN, and placing a threshold from a
-        // factory-GAIN reading instead is exactly the mistake that made
-        // the first version of this control fire when it should not have.
+        // factory-GAIN reading instead makes this control fire when it
+        // should not.
         const bool here = chain_ref.has_value();
         bench.verdict("the current reading at the chain's GAIN is in hand",
                       here);
@@ -2015,9 +2012,10 @@ void tj_drift() {
 // it starts, and the banner reports the answer at the next boot if the
 // board did in fact come back the hard way.
 //
-// There is no PAC driver in this stratum, so the two PAC registers are
-// written raw. That is a failure injection and not a configuration - the
-// precedent is test_samc_clock's letter c, which clears XTALEN by hand.
+// The two PAC registers are written RAW here rather than through
+// samc21/pac.hpp, because this is a failure injection and not a
+// configuration: what is under test is what the silicon does to a write
+// the protection should have stopped.
 void tp_pac_protection() {
     bench.verdict("the sensor comes up fully calibrated", tsens_up(gen_sys, base_cfg()));
     const auto before = Tsens::measure();

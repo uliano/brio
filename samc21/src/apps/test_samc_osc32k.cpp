@@ -8,14 +8,13 @@
 //
 // NOTHING TO WIRE. Every oscillator here is on the die.
 //
-// THE INSTRUMENT IS THE FREQUENCY METER, which is why this suite could
-// not have been written before samc21/freqm.hpp existed. Each oscillator
-// is routed to a GCLK generator and measured against OSC48M - a clock
-// the build knows to a permille - so what comes out is hertz and not a
-// ratio nobody can check. Three drivers meet in letter b: samc21/nvm.hpp
-// reads the production trim out of the NVM calibration area,
-// samc21/osc32kctrl.hpp writes it into the oscillator, and samc21/freqm.hpp
-// says what difference it made.
+// THE INSTRUMENT IS THE FREQUENCY METER (samc21/freqm.hpp). Each
+// oscillator is routed to a GCLK generator and measured against OSC48M -
+// a clock the build knows to a permille - so what comes out is hertz and
+// not a ratio nobody can check. Three drivers meet in letter b:
+// samc21/nvm.hpp reads the production trim out of the NVM calibration
+// area, samc21/osc32kctrl.hpp writes it into the oscillator, and
+// samc21/freqm.hpp says what difference it made.
 //
 // What is exercised, letter by letter:
 //   a  the block: the RTC clock select, the status and interrupt
@@ -225,9 +224,9 @@ void tb_factory_trim() {
     // order is not tidiness. 16.6.2.6 releases a generator's old source
     // only once the new one is ready, so a generator still sourced from
     // a STOPPED oscillator cannot be moved: the GENCTRL write never
-    // synchronizes and every later measurement returns nothing. The
-    // first version of this suite stopped OSC32K here and letter c then
-    // failed to route anything at all.
+    // synchronizes and every later measurement returns nothing - stop
+    // OSC32K while a generator still points at it and nothing
+    // downstream can be routed again.
     bench.verdict("the generator is moved to an oscillator that is running "
                   "BEFORE the old one stops",
                   route_slow(GclkSource::osculp32k));
@@ -303,16 +302,15 @@ void tc_roots() {
         //
         // THE BAND IS 3%, NOT 1%, AND THE REFERENCE IS WHY. This number
         // is a ratio against OSC48M times a NOMINAL 48 MHz, and OSC48M
-        // is itself an RC: measured 5100 ppm SLOW on this die
-        // (test_samc_clock, against the crystal) with a +-5% standard
-        // calibration spec and a thermal wander of its own. The first
-        // version's 1% band was therefore mostly consumed by the
-        // REFERENCE's error - it passed at +9.3 per mille one power-on
-        // and failed at +11.5 the next, with the oscillator under test
-        // blameless both times. 3% still fails an untrimmed OSC32K
-        // (+44%) by an order of magnitude, which is this verdict's
-        // actual job; the crystal-scale truth about these oscillators
-        // lives in test_samc_clock and docs/samc21/clock.md.
+        // is itself an RC: measured 5100 ppm SLOW on this die against
+        // the crystal, with a +-5% standard calibration spec and a
+        // thermal wander of its own. A 1% band would be mostly consumed
+        // by the REFERENCE's error - it passes at +9.3 per mille one
+        // power-on and fails at +11.5 the next, with the oscillator
+        // under test blameless both times. 3% still fails an untrimmed
+        // OSC32K (+44%) by an order of magnitude, which is this
+        // verdict's actual job; the crystal-scale truth about these
+        // oscillators is in docs/samc21/clock.md.
         bench.verdict("both trimmed oscillators land within 3% of nominal "
                       "(measured through OSC48M, whose own error dominates)",
                       per_mille_off(*osc) < 30u && per_mille_off(*ulp) < 30u);

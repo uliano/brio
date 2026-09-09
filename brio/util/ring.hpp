@@ -4,26 +4,26 @@
  * Single-producer / single-consumer FIFO for ISR <-> main-loop traffic,
  * and for anything else that needs a bounded FIFO between exactly two
  * parties: driver byte rings (UART, I2C, SPI), sample buffers, logs.
- * Descends from the AVR-Multislope ring (2026-07: brio namespace, index
- * type derived from the size); rewritten 2026-08-16 as a pure util
- * service templated on the Platform.
  *
  * Concurrency model (SPSC): the producer only ever writes head_, the
  * consumer only ever writes tail_, each reads the other's index. When an
  * index is a single naturally-atomic access for the target (sizeof
- * (index_t) <= P::atomic_width - a byte on AVR, a word on 32-bit cores),
+ * (index_t) <= P::atomic_width - one byte on an 8-bit core, a word on a
+ * 32-bit one),
  * every operation is LOCK-FREE: no interrupt masking, no added interrupt
  * latency, both sides may call the same functions from ISR or main
  * context. A stale read of the OTHER side's index only errs on the safe
  * side (the producer underestimates room, the consumer underestimates
- * data). Wider indices (size > 256 on AVR) are torn by an interrupt, so
+ * data). A wider index - a capacity above 256 where the index is a
+ * byte - is torn by an interrupt, so
  * every operation is wrapped in P::CriticalSection instead - selected
  * with if constexpr, invisible to the caller. Ordering between the slot
  * copy and the index publish is enforced with std::atomic_signal_fence
  * (a compiler-only fence: correct on single-core targets, free).
  *
  * The one API is therefore always safe: there are no *_from_isr twins
- * (kernel style ruling). Only clear() is NOT concurrent: it rewrites both
+ * (docs/design/overview.md's style rule: no API doubling). Only clear()
+ * is NOT concurrent: it rewrites both
  * indices and is legal only while the other party is quiescent (init,
  * or after masking its interrupt).
  *
@@ -44,8 +44,7 @@
  * producer would have to move tail_, again breaking the rule; a full
  * ring reports false and the caller counts or blocks (its policy).
  *
- * Validated on: AVR DA/DB (atomic_width 1) and the host (4). The
- * lock-free path assumes an index the platform reads/writes
+ * The lock-free path assumes an index the platform reads/writes
  * atomically; a target with DMA producers needs a producer index
  * that IS the hardware counter (docs/design/overview.md, "Authority
  * of util/").

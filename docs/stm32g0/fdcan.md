@@ -32,10 +32,10 @@ A Bosch M_CAN core - ISO 11898-1:2015 and CAN FD 1.0 - and this is the
 first chapter of the stratum that a part can be **missing entirely**:
 table 1 gives FDCAN1 and FDCAN2 to the G0B1/G0C1 class alone, and every
 other header of the pack (the G0B0 included) declares no base, no struct
-and no interrupt enumerator. `Fdcan<n>` therefore does not exist on a part without one
-(the `avrdx/opamp.hpp` precedent), while the protocol ARITHMETIC - bit
-timing, the DLC coding, the element codecs - compiles everywhere,
-because it is a property of CAN and not of a peripheral.
+and no interrupt enumerator. `Fdcan<n>` therefore does not exist on a
+part without one, while the protocol ARITHMETIC - bit timing, the DLC
+coding, the element codecs - compiles everywhere, because it is a
+property of CAN and not of a peripheral.
 
 **One clock, one reset, one divider for the SUBSYSTEM.** Figure 392
 draws the two modules inside one block. `RCC_APBENR1.FDCANEN` clocks
@@ -152,8 +152,8 @@ either, on purpose.
 architecture's controller and the policy that goes with them are a util
 design question, and a decision taken from ONE implementation is a
 decision taken from the M_CAN's element layout. `FdcanFrame` is this
-target's until a second silicon's CAN arrives (the `avrdx/rtc.hpp`
-precedent - a task is born with its first user).
+target's until another architecture's CAN arrives: a task is born with
+its first user.
 
 ## How to use it
 
@@ -220,16 +220,14 @@ extern "C" void TIM16_FDCAN_IT0_IRQHandler() {
 
 ## Bench findings
 
-All from `test_stm32_fdcan`, **96 verdicts, 96/96 four times** (one from
-a cold flash), wireless, nothing written to flash.
+All from `test_stm32_fdcan`, wireless, with nothing written to flash.
 
 **The pads and the instruments.** PC4 (FDCAN1_RX) and PC5 (FDCAN1_TX),
 both AF3, both proven to follow their own internal pull before either is
-claimed and both left in analog mode after (the suite was measured on
-PB8/PB9 first and moved when the desk's I2C self-link put 2.2 k pull-ups
-on them: a pad an external pull holds up cannot be pulled dominant by its
-own 40 k, which the error machine below needs - [../bench.md](../bench.md);
-every number here reproduces on PC4/PC5, 96/96). FDCAN2 is exercised
+claimed and both left in analog mode after (PB8/PB9 carry this desk's
+I2C self-link and its 2.2 k pull-ups, and a pad an external pull holds
+up cannot be pulled dominant by its own 40 k, which the error machine
+below needs - [../bench.md](../bench.md)). FDCAN2 is exercised
 **without a pad at all**, because internal loop-back needs none. Three
 instruments make the chapter measurable with nothing attached: `TEST.TX
 = 01` counted by a DMAMUX request generator on the pad's EXTI line with
@@ -514,11 +512,11 @@ two independent capture tools (a pyserial reader and `cat`), while every
 other line of every other letter is intact. Moving the print after the
 power-down is released does not move it; inserting text before it moves
 it by exactly that many bytes; draining the console first does not help.
-No verdict rests on that line and the letter scores 4/4.
+No verdict rests on that line.
 
 ## On the second silicon
 
-`test_stm32_fdcan` STAYS THE G0B1RE's ALONE: the FDCAN is the G0B1/G0C1
+`test_stm32_fdcan` is the G0B1RE's alone: the FDCAN is the G0B1/G0C1
 class's peripheral and a G071RB has none, so `fdcan_present(1)` is false
 there and `Fdcan<1>` does not compile - which is the stratum's own way of
 spelling an absence and the reason the suite's `boards` line names one
@@ -572,9 +570,8 @@ Implemented but not bench-verified, each with the reason:
 - **Timestamps from TIM3 across a wrap**, and the timestamp counter in
   CAN FD, where 36.4.8 warns the internal counter is not a constant time
   base because the bit time changes inside the frame.
-- **Three of the five pads per signal**: PC4/PC5 are what this suite
-  claims today and PB8/PB9 were measured before the I2C wires took
-  them; PA11/PA12, PD0/PD1, PD12/PD13 for FDCAN1 and
+- **Three of the five pads per signal**: PC4/PC5 and PB8/PB9 are
+  measured, while PA11/PA12, PD0/PD1, PD12/PD13 for FDCAN1 and
   PB0/PB1, PB5/PB6, PB12/PB13, PC2/PC3, PD14/PD15 for FDCAN2 are
   compile-only here (and the port D pads are not bonded on this
   package).

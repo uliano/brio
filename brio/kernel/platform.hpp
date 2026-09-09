@@ -16,27 +16,33 @@
  *    of the classic ATOMIC_BLOCK pattern.
  *  - idle(): called with interrupts MASKED when there is no work. Must
  *    re-enable interrupts and suspend until the next interrupt with no
- *    lost-wakeup window (on AVR: sei immediately followed by sleep - sei
- *    takes effect after the following instruction).
- *  - break_here(): drop into the debugger when one is attached, do
- *    nothing otherwise (AVR BREAK is a NOP without an active OCD).
+ *    lost-wakeup window (where a core defers an interrupt enable by one
+ *    instruction, that means the enable immediately followed by the
+ *    sleep instruction).
+ *  - break_here(): a debug trap. With a debugger halted on it, the
+ *    program stops there. What the instruction does with NO debugger
+ *    attached is the core's business and is not promised here: some
+ *    cores make it a no-op, others escalate it to a fault - so a
+ *    reporter that must survive without a debugger cannot assume this
+ *    call returns, and each platform's own header says which it is.
  *  - now(): current tick count of the system timebase.
  *  - ticks_per_second: the tick rate, a compile-time constant OF THE
- *    TARGET (1024 on AVR Dx from the 32k PIT dividers, typically 1000
- *    on SysTick-based targets). The kernel reasons in opaque ticks and
- *    assumes NOTHING about the rate - no power-of-two, no "1 tick =
- *    1 ms"; conversions live in kernel/time.hpp parameterized on this
- *    constant.
+ *    TARGET (commonly 1000 or 1024, whatever its timebase divides to).
+ *    The kernel reasons in opaque ticks and assumes NOTHING about the
+ *    rate - no power-of-two, no "1 tick = 1 ms"; conversions live in
+ *    kernel/time.hpp parameterized on this constant.
  *  - atomic_width: the widest naturally aligned load/store the CPU
- *    performs as ONE uninterruptible access, in bytes (1 on AVR, 4 on
- *    32-bit cores). Lock-free SPSC code (util/ring.hpp) uses it to
- *    decide whether an index can be shared with an ISR bare or needs a
- *    CriticalSection; the platform states the fact, generic code
- *    chooses the path with if constexpr - no #ifdef, no per-use knob.
+ *    performs as ONE uninterruptible access, in bytes (1 on an 8-bit
+ *    core, 4 on a 32-bit one). Lock-free SPSC code (util/ring.hpp) uses
+ *    it to decide whether an index can be shared with an ISR bare or
+ *    needs a CriticalSection; the platform states the fact, generic
+ *    code chooses the path with if constexpr - no #ifdef, no per-use
+ *    knob.
  *  - panic_record(): reference to a PanicRecord in storage that
- *    SURVIVES a reset without being zeroed by startup (.noinit on AVR),
- *    so a panic breadcrumb written just before a watchdog reset can be
- *    reported at the next boot (see kernel/panic.hpp).
+ *    SURVIVES a reset without being zeroed by startup (a .noinit
+ *    section or the target's equivalent), so a panic breadcrumb written
+ *    just before a watchdog reset can be reported at the next boot (see
+ *    kernel/panic.hpp).
  *
  * Optional member, NOT part of the concept - a platform whose timebase
  * keeps counting while the core sleeps (a low-power timer, not a tick

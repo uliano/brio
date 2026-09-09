@@ -155,10 +155,9 @@ constexpr uint8_t user_dmac_ch0 = 5;
 constexpr uint8_t ev_ch = 0;
 using Copy = DmaChannel<dma_ch>;
 
-// VOLATILE IN BOTH DIRECTIONS - the lesson the DMAC campaign paid for on
-// this target: the compiler sees neither the controller's writes nor its
-// reads, and will sink a buffer's preparation past the thing that starts
-// the transfer.
+// VOLATILE IN BOTH DIRECTIONS: the compiler sees neither the
+// controller's writes nor its reads, and will sink a buffer's
+// preparation past the thing that starts the transfer.
 constexpr uint16_t payload = 16;
 volatile uint8_t src[payload];
 volatile uint8_t dst[payload];
@@ -210,8 +209,8 @@ bool arm_event_driven_copy(uint8_t seed) {
 }
 
 // ---------------------------------------------------------------------------
-// The frequency meter, used exactly as test_samc_osc32k uses it: whatever
-// generator 5 is sourced from, measured against OSC48M.
+// The frequency meter: whatever generator 5 is sourced from, measured
+// against OSC48M.
 // ---------------------------------------------------------------------------
 constexpr uint8_t gen_slow = 5;
 using GenSlow = Gclk<gen_slow>;
@@ -498,8 +497,8 @@ void tb_counts_its_source() {
         {RtcClock::osc_1k, GclkSource::osc32k, 32, "OSC32K 1k"},
     };
 
-    // OSC32K needs its production trim before it means anything (21.5.9,
-    // and test_samc_osc32k measured what skipping it costs: 44%).
+    // OSC32K needs its production trim before it means anything (21.5.9;
+    // untrimmed it runs 44% fast).
     bench.verdict("OSC32K starts with its factory trim and both outputs on",
                   Osc32k::init(Osc32kConfig{.calib = Osc32k::factory_calib(),
                                             .enable_32k = true,
@@ -767,17 +766,15 @@ void td_frequency_correction() {
                   "is 24.8.8's, under its double negative: a POSITIVE "
                   "correction slows the counter down",
                   swing2 > 0);
-    // THE NOISE GATE, added after this verdict lost a run to RC
+    // THE NOISE GATE, because this verdict can lose a run to RC
     // weather: the floor (the source's own movement between two idle
     // windows) is itself a single sample of the RC's wander, and on a
     // windy afternoon it can exceed the trim's whole swing - measured
     // once at 547 ppm against a 401 ppm swing, with the same firmware
     // passing minutes earlier. When the floor is calm the comparison is
-    // real; when the floor alone rivals the swing, no single-session
-    // measurement can separate trim from noise, so the verdict PASSES
-    // AS DECLINED and says so (the DAC suite's own
-    // pass-with-declared-inconclusiveness shape) - z's total stays
-    // stable whatever the weather.
+    // real; when the floor alone rivals the swing, no single run can
+    // separate trim from noise, so the verdict PASSES AS DECLINED and
+    // says so - the tally stays stable whatever the weather.
     const bool floor_calm = idle_ppm < 300u;
     if (!floor_calm) {
         print(serial, "  the source alone moved ", idle_ppm,
@@ -1100,8 +1097,7 @@ void tg_mode1() {
     // AND THE COUNTER HAS TO START BELOW IT. A mode change does not
     // clear COUNT, so the value mode 0 left behind is still there - and
     // a 16-bit counter that starts ABOVE PER never meets it, running to
-    // 0xFFFF instead. The first version of this letter watched exactly
-    // that happen.
+    // 0xFFFF instead.
     //
     // The write is also where the READ path shows its own delay: the
     // synchronized shadow keeps returning the OLD value for a while
@@ -1305,8 +1301,8 @@ void th_calendar() {
     // transition of CLK_RTC_CNT... for a 1 Hz clock counter, it means
     // the Alarm 0 Interrupt flag is set with a delay of 1s after the
     // occurrence of alarm match". So the flags read at the instant of
-    // the match do NOT carry it yet, and the first version of this
-    // letter reported a working alarm as broken.
+    // the match do NOT carry it yet, and a letter that read them there
+    // would report a working alarm as broken.
     const uint32_t t_alarm = ticks_now();
     uint32_t alarm_wait = 0;
     while ((Rtc::flags() & RtcFlag::alarm0) == 0u &&

@@ -9,10 +9,9 @@
 // under it.
 //
 // NOTHING TO WIRE - and for once that sentence is not about jumpers.
-// The board's 24 MHz crystal on PA14/PA15 has been on the board since
-// bring-up and has never been switched on; OSCCTRL claims XIN and XOUT
-// by itself when the oscillator is enabled (20.5.1), so arming it is a
-// register write and nothing else.
+// The board's 24 MHz crystal sits on PA14/PA15, and OSCCTRL claims XIN
+// and XOUT by itself when the oscillator is enabled (20.5.1), so arming
+// it is a register write and nothing else.
 //
 // THE INSTRUMENT IS AGAIN samc21/freqm.hpp, and the measurement is
 // arranged so the answers are RATIOS wherever a ratio is what is being
@@ -31,9 +30,8 @@
 //
 // What is exercised, letter by letter:
 //   a  the block, the arithmetic and the refusals - no oscillator moved
-//   b  THE CRYSTAL, armed for the first time on this board: start-up
-//      time measured, then the internal RC weighed against it, and
-//      OSCULP32K weighed against both
+//   b  THE CRYSTAL: start-up time measured, then the internal RC
+//      weighed against it, and OSCULP32K weighed against both
 //   c  the clock failure detector: a real failure induced with no wire,
 //      the safe-clock switch observed, and the recovery
 //   d  the DPLL: locked to the crystal, three ratios including a
@@ -402,13 +400,13 @@ void tb_crystal() {
                       near(ppm_off(xtal_hz, crystal_hz), ppm_off(rc_hz, sys_hz),
                            200u));
 
-        // AND THE CONSEQUENCE FOR EVERYTHING MEASURED HERE BEFORE. Every
-        // absolute frequency this stratum has reported was a ratio
-        // against OSC48M multiplied by a NOMINAL 48 MHz - the frequency
-        // meter's own suites, and the watchdog timing in
-        // test_samc_platform, which rides SysTick and therefore the same
-        // oscillator. The crystal is the first scale here that does not
-        // come from that RC, so OSCULP32K can be weighed properly:
+        // AND THE CONSEQUENCE FOR EVERY OTHER ABSOLUTE FREQUENCY ON
+        // THIS BOARD. Anything measured as a ratio against OSC48M and
+        // multiplied by a NOMINAL 48 MHz carries that oscillator's own
+        // error - which includes anything timed on SysTick, since
+        // SysTick rides the same root. The crystal is the one scale
+        // here that does not come from that RC, so OSCULP32K can be
+        // weighed properly:
         // measured against OSC48M as before, but multiplied by what
         // OSC48M REALLY is.
         const uint32_t ulp_nominal_scale =

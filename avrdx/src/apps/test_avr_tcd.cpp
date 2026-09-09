@@ -1,5 +1,5 @@
 // test_avr_tcd - the TCD (12-bit timer/counter type D) test SUITE for
-// the AVR DA/DB target, and the first bench that makes the PLL
+// the AVR DA/DB target, and the one bench that makes the PLL
 // electrically observable: on this silicon the TCD is the PLL's only
 // consumer, so a multiplier can only be proven by what the TCD does.
 //
@@ -734,7 +734,7 @@ void te_clocks() {
     quiet_meters();
 }
 
-// ---- f: the PLL, on the wire at last -----------------------------------------
+// ---- f: the PLL, on the wire -------------------------------------------------
 
 /// One PLL (or plain OSCHF) leg: configure, run the TCD on it, measure
 /// the cycle in CLK_PER ticks. The main clock stays on the 24 MHz

@@ -55,8 +55,8 @@
 //      with the frozen span handed back to the ticker
 //   g  ES0548 2.2.4 staged, and the entry preconditions that make a
 //      Stop silently not happen
-//   h  the register surface that cannot be staged on this desk, and
-//      what it says
+//   h  the register surface nothing on the board can stage, and what
+//      it says
 //
 //   s  (by name only) STANDBY. The VCORE domain is powered off and the
 //      wake comes back THROUGH THE RESET VECTOR, so this letter reboots
@@ -64,7 +64,7 @@
 //      what a program without SRAM has to do. Not in `z`.
 //   u  (by name only) SHUTDOWN, the same one rung deeper.
 //      Run either with
-//          python3 tools/bench.py run E s --app test_stm32_sleep
+//          python3 tools/bench.py run <board> s --app test_stm32_sleep
 //                  --expect="pass," --timeout 200
 //
 // build: boards = g0b1re,g071rb,g031k8
@@ -561,8 +561,8 @@ void tc_stop_freezes() {
     // reset but a power-on and OpenOCD sets it at every connection
     // that finds the DBGMCU's clock gate open, so this letter READS
     // the bit and judges the state it finds rather than assuming one:
-    // the first version of this verdict assumed "does not last", which
-    // was true of the probe's setting and not of the silicon.
+    // "the sleep does not last" is true of the probe's setting and not
+    // of the silicon.
     const uint32_t with_tick = wall_ms(one_sleep(PwrMode::stop1, counts, false));
     const uint32_t k0 = Ticker::millis();
     const uint32_t slept = one_sleep(PwrMode::stop1, counts);
@@ -629,8 +629,8 @@ void td_wake_cost() {
     //
     // The loop is N whole rounds of arm-sleep-wake against the same N
     // rounds of the shallowest rung, with the alarm RE-ARMED every round
-    // - and even so it locks to RTCCLK, which is the samc21 bench's own
-    // lesson about sub-tick overheads.
+    // - and even so it locks to RTCCLK: a sub-tick overhead is
+    // quantized away by the very clock that paces the loop.
     constexpr uint16_t rounds = 32;
     constexpr uint32_t counts = 15;   // (15 + 1) / 2048 s ~ 7.8 ms
 
@@ -927,11 +927,9 @@ void tf_timed_site() {
     // THE CONSOLE IS DRAINED BEFORE THE CLOCK IS STARTED, not after.
     // The lines printed above take tens of milliseconds to leave at
     // 115200, and a drain placed between arming the deadline and
-    // stamping the wall would put all of them INSIDE the measurement -
-    // which is the samc21 bench's own lesson about a print in a
-    // measurement window, in a new dress. It cost this letter one round
-    // of "the event matured early", which is the one verdict that must
-    // never be wrong here.
+    // stamping the wall would put all of them INSIDE the measurement,
+    // and the verdict that must never be wrong here - "the event did
+    // not mature early" - is exactly the one such a window breaks.
     console_drain();
     const uint32_t w0 = wall();
     const uint32_t k0 = Ticker::millis();

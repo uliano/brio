@@ -15,10 +15,8 @@
  *                    packed word, with the chapter's own leap-year rule.
  *
  * There are no TASKS here on purpose. An alarm clock, a slow periodic
- * source, a power-pass timebase: each of those is a policy, and the AVR
- * precedent (`avrdx/rtc.hpp`, which built its resources and left its
- * tasks unwritten) is the one being followed. They get born with their
- * first user.
+ * source, a low-power timebase: each of those is a policy. They get born
+ * with their first user.
  *
  * SEVEN FACTS THAT SHAPE THE FILE.
  *
@@ -117,10 +115,12 @@
  *    VALUE / 983040, i.e. 1.017 ppm a step and +-129 ppm at the ends.
  *
  * NOT BUILT (docs/samc21/rtc.md carries the list): tasks of any kind (see
- * above); SleepWalking and wake-from-sleep, which belong to the power
- * pass together with erratum 1.8.7's caveat that a DMA WRITE to
- * RTC.COUNT during standby may not land; and the RTC as the kernel
- * timebase, which stays SysTick's job (samc21/ticker.hpp says why).
+ * above); erratum 1.8.7's caveat that a DMA WRITE to RTC.COUNT during
+ * standby SleepWalking may not land, which is stated and unexercised
+ * because it needs the DMAC across a sleep; and the RTC as the kernel
+ * timebase, which stays SysTick's job (samc21/ticker.hpp says why -
+ * samc21/sleep.hpp's SamTimedSleepSite uses this counter as an ALARM and
+ * a WITNESS beside it instead).
  */
 
 #pragma once
@@ -606,8 +606,8 @@ struct Rtc {
         return sync_wait(RTC_MODE0_SYNCBUSY_COUNTSYNC_Msk, spins);
     }
 
-    /// The compile-time twin, following avrdx's `Adc::init<cfg>()` and
-    /// this stratum's `Vref::configure<cfg>()`: an impossible
+    /// The compile-time twin, following this stratum's
+    /// `Adc::init<cfg>()` and `Vref::configure<cfg>()`: an impossible
     /// configuration is a compile error and not a false return.
     template <RtcConfig c>
     static bool configure(uint32_t spins = 0xFFFFu) {

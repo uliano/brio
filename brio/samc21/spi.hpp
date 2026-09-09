@@ -16,14 +16,14 @@
  *              the transfer ENGINE. A Request is a two-phase transaction
  *              in one chip-select window, the buffers travel with it as
  *              Lease::reply loans, and the completion is the bus AO's
- *              TransferDone. The SAME descriptor shape avrdx/spi.hpp
- *              carries, so a device client written for one architecture
- *              reads unchanged on the other.
+ *              TransferDone. It is the descriptor shape every target's
+ *              SpiHost carries, so a device client reads unchanged on
+ *              any of them.
  *
  *  SpiClient<n, pads>
  *              the other end of the wire: a polled surface plus the ISR
- *              bodies, with the three things this silicon gives a client
- *              and the AVR does not - preloading (CTRLB.PLOADEN),
+ *              bodies, with the three things this silicon gives a
+ *              client - preloading (CTRLB.PLOADEN),
  *              select-low detection (CTRLB.SSDE) and address recognition
  *              (CTRLA.FORM = 0x2 with CTRLB.AMODE and ADDR).
  *
@@ -92,8 +92,9 @@
  *    decides whether it is raised at the overflow or travels with the
  *    data through the two-level receive buffer;
  *  - THERE IS NO EVENT SURFACE AT ALL: 32.5.6 and 32.6.4.3 are both
- *    "Not applicable". This is the first peripheral in this stratum with
- *    nothing to publish under the EVSYS ruling, and the absence is
+ *    "Not applicable". Under samc21/evsys.hpp's division of labour a
+ *    peripheral publishes its own generator and user codes; this one
+ *    has none to publish, and the absence is
  *    stated rather than left to be noticed;
  *  - erratum 1.17.16: CTRLA.SWRST does NOTHING while CTRLA.ENABLE = 0.
  *    reset() therefore enables the instance first when it finds it
@@ -109,8 +110,8 @@
  *    32.6.2.2 promises it is the one register a reset spares. configure()
  *    writes DBGCTRL AFTER any reset for that reason;
  *  - erratum 1.17.20 (LIVE): a client left with a preloaded character on
- *    the way into standby consumes extra power. A power-pass fact, named
- *    on the field;
+ *    the way into standby consumes extra power. A sleep-current fact,
+ *    named on the field;
  *  - erratum 1.17.1 is REVISION B ONLY on the E/G/J row (the spurious
  *    INTFLAG.SSL when a client is enabled with SSDE and RXEN together).
  *    It is named here because it is the one item a reader would apply
@@ -143,19 +144,19 @@ namespace brio {
 // =============================================================================
 
 /// Which end of the bus this instance is (CTRLA.MODE: 0x3 host, 0x2
-/// client). There is NO runtime demotion on this peripheral - the AVR's
-/// "a low SS turns a host into a client" has no counterpart here, and a
-/// role is a configuration written while the SERCOM is disabled.
+/// client). There is NO runtime demotion on this peripheral: a low SS
+/// does not turn a host into a client, and a role is a configuration
+/// written while the SERCOM is disabled.
 enum class SpiRole : uint8_t {
     host = SERCOM_SPIM_CTRLA_MODE_SPI_MASTER_Val,
     client = SERCOM_SPIM_CTRLA_MODE_SPI_SLAVE_Val,
 };
 
-/// The four clock phase/polarity combinations (32.6.2.5, table 32-3).
-/// SPELLED THE SAME WAY AS avrdx/spi.hpp: bit 1 is CPOL, bit 0 is CPHA,
-/// so brio's SpiMode is one vocabulary across the two architectures even
-/// though the register the bits go into is not the same one. Here they
-/// are two separate bits of CTRLA rather than one field of CTRLB.
+/// The four clock phase/polarity combinations (32.6.2.5, table 32-3). BIT
+/// 1 IS CPOL AND BIT 0 IS CPHA, so brio's SpiMode is one vocabulary
+/// across targets even though the register the bits go into is not the
+/// same one. Here they are two separate bits of CTRLA rather than one
+/// field of CTRLB.
 enum class SpiMode : uint8_t {
     mode0 = 0,   ///< SCK idle low,  sample on the leading (rising) edge
     mode1 = 1,   ///< SCK idle low,  sample on the trailing (falling) edge
@@ -620,14 +621,13 @@ public:
      * Everything back to its reset value, instance disabled.
      *
      * ERRATUM 1.17.16: SWRST does nothing while ENABLE = 0 - exactly the
-     * state a freshly booted instance is in, so the obvious "reset
-     * first, then configure" would silently do nothing. A disabled
-     * instance is therefore ENABLED first and reset from there.
-     * THE BENCH COULD NOT REPRODUCE THE ITEM in SPI mode at rev F
-     * (test_samc_spi a: SWRST from the disabled state resets the block,
-     * synchronization completing) - the discipline is kept anyway: the
-     * sheet marks every revision, other SERCOM modes are unmeasured, and
-     * the cost is one enable.
+     * state a freshly booted instance is in, so the obvious "reset first,
+     * then configure" would silently do nothing. A disabled instance is
+     * therefore ENABLED first and reset from there. THE BENCH COULD NOT
+     * REPRODUCE THE ITEM in SPI mode at rev F (measured: SWRST from the
+     * disabled state resets the block, its synchronization completing) -
+     * the discipline is kept anyway: the sheet marks every revision,
+     * other SERCOM modes are unmeasured, and the cost is one enable.
      *
      * IT IS ENABLED IN SPI HOST MODE, and the mode is the point: the
      * enable synchronizes against GCLK_SERCOMx_CORE, and only a host
@@ -870,7 +870,7 @@ public:
  * byte pump under the SERCOM interrupt.
  *
  * Transaction descriptor (Request) - two phases in ONE chip-select
- * window, the SAME shape avrdx/spi.hpp carries:
+ * window, the shape every target's SpiHost carries:
  *
  *   phase 1 (optional): cmd[cmd_len] transmitted with DC LOW
  *   phase 2 (optional): len bytes with DC HIGH, FULL-DUPLEX -
@@ -887,8 +887,8 @@ public:
  * exists and this driver exposes it - but 32.6.3.5 says hardware SS is
  * raised "for a minimum of one baud cycle between each data sent", so it
  * frames one CHARACTER and not one TRANSACTION. Every device this engine
- * is for wants the second. So the Request carries a PinRef, exactly as
- * on the AVR, and 32.6.3.3's "host with several clients" is the
+ * is for wants the second. So the Request carries a PinRef, and
+ * 32.6.3.3's "host with several clients" is the
  * arrangement: MSSEN clear, one ordinary output per client.
  *
  * WHY RXC AND NOT DRE DRIVES THE PUMP. The two are one interrupt line
@@ -902,18 +902,17 @@ public:
  * must be enabled even for a write-only transfer, which costs the DI
  * pad and nothing else.
  *
- * THE PER-REQUEST CHIP-SELECT DELAY IS THE AVRDX'S, VERBATIM: the
- * Request carries cs_setup_us, spent spinning in start() (main
+ * THE PER-REQUEST CHIP-SELECT DELAY is part of that shared descriptor:
+ * the Request carries cs_setup_us, spent spinning in start() (main
  * context, bounded by the byte) between the CS assertion and the first
  * clock, timed by samc21/delay.hpp on a rate init()/rebase() keep
- * current - so it follows a clock change exactly as the avrdx one
- * does, and a device client written for one architecture reads
- * unchanged on the other. It is served ONLY while a Ticker runs
- * (delay_us's own contract; with SysTick stopped the wait is skipped
- * and the transaction proceeds), and on a program whose tick period is
+ * current - so it follows a clock change, and a device client reads
+ * unchanged on any target. It is served ONLY while a Ticker runs
+ * (delay_us's own contract; with SysTick stopped the wait is skipped and
+ * the transaction proceeds), and on a program whose tick period is
  * SHORTER than the requested setup the cap skips it too - both stated
- * here, neither reachable on the standard 1000 Hz ticker with a
- * uint8_t of microseconds.
+ * here, neither reachable on the standard 1000 Hz ticker with a uint8_t
+ * of microseconds.
  *
  * THE TWO OPTIONAL DMA ENGINE SLOTS (the Uart's shape, for the same
  * reason: an engineless build must stay byte-identical, so the slots
@@ -934,24 +933,24 @@ public:
  * channel in the program (the Uart's own contract, restated).
  *
  * THE KICK DOCTRINE INVERTS IN SPI MODE, and it was measured, not
- * assumed. The UART campaign's finding was that a channel armed while
- * the peripheral's request LEVEL is already high sees no beat (the
- * trigger latches on the RISE) and must be kicked. THIS mode's TX
- * request behaves as the opposite: ENABLING the channel with DRE
+ * assumed. In USART mode a channel armed while the peripheral's request
+ * LEVEL is already high sees no beat (the trigger latches on the RISE)
+ * and must be kicked - samc21/sercom.hpp carries that half. THIS mode's
+ * TX request behaves as the opposite: ENABLING the channel with DRE
  * already standing fires the first beat by itself, the chain then
- * sustains on the per-character rises - and a kick on top of that
- * start is one EXTRA beat whose byte lands in a full transmit buffer
- * and is DISCARDED in silence (measured three ways on the loop-back
- * bench: with the kick, exactly one early character vanishes from the
- * wire - the kick's own - at every rate; without it the stream is
- * byte-exact). So launch_dma() starts the two channels and kicks
- * NOTHING; on silicon where the SPI request ever behaved the UART way
- * the bounded fault path below is what would fire, and the kick
- * question would reopen with that measurement in hand. RXC starts
- * clear (flushed) and is a clean rise under either reading. Both
- * engines' completions arrive on the DMAC's own vector, so AN APP THAT
- * NAMES ENGINES BINDS DMAC_Handler TOO (below) - polled requests
- * included: the spin waits on a flag that handler sets.
+ * sustains on the per-character rises - and a kick on top of that start
+ * is one EXTRA beat whose byte lands in a full transmit buffer and is
+ * DISCARDED in silence (measured three ways on the loop-back bench: with
+ * the kick, exactly one early character vanishes from the wire - the
+ * kick's own - at every rate; without it the stream is byte-exact). So
+ * launch_dma() starts the two channels and kicks NOTHING; on silicon
+ * where the SPI request ever behaved the UART way the bounded fault path
+ * below is what would fire, and the kick question would reopen with that
+ * measurement in hand. RXC starts clear (flushed) and is a clean rise
+ * under either reading. Both engines' completions arrive on the DMAC's
+ * own vector, so AN APP THAT NAMES ENGINES BINDS DMAC_Handler TOO
+ * (below) - polled requests included: the spin waits on a flag that
+ * handler sets.
  *
  * A DMA TRANSFER ERROR (erratum 1.10.4's class) is the one failure this
  * otherwise ACK-less bus can detect: the request completes with
@@ -1032,9 +1031,9 @@ public:
         PinRef cs;   ///< asserted low around the transaction
         PinRef dc;   ///< display D/C line; null = no such pin
         /// Microseconds between the CS assertion and the first clock -
-        /// what a device's datasheet calls CS setup (the avrdx Request's
-        /// own field, byte for byte). Spent spinning in start(), main
-        /// context; 0 = none.
+        /// what a device's datasheet calls CS setup (the same field, byte
+        /// for byte, in every target's Request). Spent spinning in
+        /// start(), main context; 0 = none.
         uint8_t cs_setup_us = 0;
         /// Phase 1, sent with DC low; LENT until the reply lands.
         Borrowed<const uint8_t, Lease::reply> cmd;
@@ -1052,13 +1051,13 @@ public:
         /// costs a disable/enable pair only when something CHANGED, and
         /// nothing per byte.
         ///
-        /// THE RATE IS THE BAUD REGISTER VALUE, not an enum of
-        /// divisions: this generator has 256 of them, and naming them
-        /// would be inventing a vocabulary the silicon does not have.
-        /// Use SpiHost::baud_for(hz) once, at the client's own init, and
-        /// keep the byte. It is a DIVISION of the core clock, so it
-        /// follows a clock change by itself exactly as the AVR's
-        /// SpiClock does; max_sck_hz() is the ceiling that clamps it.
+        /// THE RATE IS THE BAUD REGISTER VALUE, not an enum of divisions:
+        /// this generator has 256 of them, and naming them would be
+        /// inventing a vocabulary the silicon does not have. Use
+        /// SpiHost::baud_for(hz) once, at the client's own init, and keep
+        /// the byte. It is a DIVISION of the core clock, so it follows a
+        /// clock change by itself; max_sck_hz() is the ceiling that
+        /// clamps it.
         uint8_t baud = 0;
         SpiMode mode = SpiMode::mode0;
 
@@ -1076,23 +1075,21 @@ public:
 
     // ---- lifecycle -----------------------------------------------------------
 
-    /**
-     * @brief Bring the instance up as a host: clocks, configuration,
-     * pads, pins, the NVIC line.
-     *
-     * Call AFTER the main clock is set up and before interrupts are
-     * enabled globally; `clock` is the app's brio::Clock tag, so the
-     * baud arithmetic comes from Clock::hz and never from a second
-     * statement of the rate.
-     *
-     * `max_sck_hz` is an optional CEILING for the whole bus: with it set
-     * the engine slows any request that would exceed it, and re-resolves
-     * the limit after a clock change, which is what makes rebase()
-     * meaningful. 0 = no ceiling.
-     *
-     * False when the ceiling cannot be produced at this clock, or when
-     * one of the peripheral's synchronizations did not complete.
-     */
+    /// Bring the instance up as a host: clocks, configuration,
+    /// pads, pins, the NVIC line.
+    ///
+    /// Call AFTER the main clock is set up and before interrupts are
+    /// enabled globally; `clock` is the app's brio::Clock tag, so the
+    /// baud arithmetic comes from Clock::hz and never from a second
+    /// statement of the rate.
+    ///
+    /// `max_sck_hz` is an optional CEILING for the whole bus: with it set
+    /// the engine slows any request that would exceed it, and re-resolves
+    /// the limit after a clock change, which is what makes rebase()
+    /// meaningful. 0 = no ceiling.
+    ///
+    /// False when the ceiling cannot be produced at this clock, or when
+    /// one of the peripheral's synchronizations did not complete.
     template <typename Clock>
     static bool init(Clock clock, uint32_t max_sck_hz = 0) {
         static_assert(clock_follows<Clock, SpiHost>(),
@@ -1149,14 +1146,12 @@ public:
         return true;
     }
 
-    /**
-     * @brief The core clock changed (DynamicClock fan-out).
-     *
-     * A Request's `baud` is a DIVISION of the core clock and scales with
-     * it by itself, exactly like the AVR's SpiClock - so what is
-     * recomputed here is only the ceiling. The bus must be IDLE: a
-     * transfer in flight keeps its divisor for the remaining characters.
-     */
+    /// The core clock changed (DynamicClock fan-out).
+    ///
+    /// A Request's `baud` is a DIVISION of the core clock and scales with
+    /// it by itself, so what is recomputed here is only the ceiling. The
+    /// bus must be IDLE: a transfer in flight keeps its divisor for the
+    /// remaining characters.
     static void rebase(uint32_t hz) {
         ref_hz_ = hz;
         ceiling_ = ceiling_hz_ ? spi_baud_reg(hz, ceiling_hz_) : std::optional<uint8_t>{};
@@ -1183,30 +1178,26 @@ public:
     /// The core clock rate this task last computed against.
     static uint32_t reference_hz() { return ref_hz_; }
 
-    /**
-     * @brief Put the peripheral at this mode and rate NOW, moving no data.
-     *
-     * FOR CALLERS THAT FRAME THE SELECT WINDOW THEMSELVES (Request.cs
-     * null). start() applies a request's mode before it asserts the
-     * request's own cs, so an engine-owned select window always opens
-     * with SCK settled at the new idle level - but a caller driving CS by
-     * hand inverts that order, and a mode change is a CPOL FLIP ON THE
-     * WIRE: flipped inside an open select window it is one extra edge,
-     * and a selected client counts it into the character (measured as a
-     * one-bit slip in both directions, test_samc_spi c's first version).
-     * Prime FIRST, then assert the select.
-     */
+    /// Put the peripheral at this mode and rate NOW, moving no data.
+    ///
+    /// FOR CALLERS THAT FRAME THE SELECT WINDOW THEMSELVES (Request.cs
+    /// null). start() applies a request's mode before it asserts the
+    /// request's own cs, so an engine-owned select window always opens
+    /// with SCK settled at the new idle level - but a caller driving CS
+    /// by hand inverts that order, and a mode change is a CPOL FLIP ON
+    /// THE WIRE: flipped inside an open select window it is one extra
+    /// edge, and a selected client counts it into the character (measured
+    /// as a one-bit slip in both directions). Prime FIRST, then assert
+    /// the select.
     static void prime(SpiMode mode, uint8_t baud) { apply(mode, clamp(baud)); }
 
     // ---- the transfer --------------------------------------------------------
 
-    /**
-     * @brief Begin a transaction (called by SpiBus from main context).
-     * @return true when the transaction completed SYNCHRONOUSLY (polled
-     * requests, and the degenerate zero-length one); false when it runs
-     * on the ISR and a TransferDone will follow. That is exactly
-     * util/bus_master.hpp's engine contract.
-     */
+    /// Begin a transaction (called by SpiBus from main context). Returns
+    /// true when the transaction completed SYNCHRONOUSLY (polled
+    /// requests, and the degenerate zero-length one); false when it runs
+    /// on the ISR and a TransferDone will follow. That is exactly
+    /// util/bus_master.hpp's engine contract.
     static bool start(const Request& r) {
         req_ = r;
         pos_ = 0;
@@ -1298,17 +1289,15 @@ public:
         return true;
     }
 
-    /**
-     * @brief SERCOM interrupt body - call from SERCOMn_Handler().
-     *
-     * ONE VECTOR, so the body starts by asking which source is both
-     * raised AND enabled. Only RXC is ever armed by this engine (see the
-     * class comment), and reading DATA is both the capture and the
-     * acknowledgement.
-     *
-     * @return true when the transaction just completed (CS released):
-     * the edge on which the app's glue posts TransferDone to the bus AO.
-     */
+    /// SERCOM interrupt body - call from SERCOMn_Handler().
+    ///
+    /// ONE VECTOR, so the body starts by asking which source is both
+    /// raised AND enabled. Only RXC is ever armed by this engine (see the
+    /// class comment), and reading DATA is both the capture and the
+    /// acknowledgement.
+    ///
+    /// Returns true when the transaction just completed (CS released):
+    /// the edge on which the app's glue posts TransferDone to the bus AO.
     [[gnu::always_inline]] static bool isr() {
         if ((S::pending() & SpiFlag::rxc) == 0u) {
             return false;
@@ -1356,22 +1345,20 @@ public:
         return false;
     }
 
-    /**
-     * @brief DMAC interrupt body - call from DMAC_Handler() with each
-     * take_pending() result (engine builds only; on an engineless host
-     * this compiles away).
-     *
-     * @return true when the transaction just completed (CS released):
-     * the edge on which the glue posts TransferDone{status()}.
-     *
-     * A TRANSFER ERROR ON EITHER CHANNEL ENDS THE TRANSACTION with
-     * spi_dma_fault: a TX block the silicon stopped running starves the
-     * receive side for ever (the UART campaign's wedge, met here as a
-     * bounded failure instead), and an RX error means the count can no
-     * longer be trusted. Both channels are put away, CS is raised, and
-     * the fault is REPORTED rather than retried - retry policy is the
-     * bus AO's, not the engine's.
-     */
+    /// DMAC interrupt body - call from DMAC_Handler() with each
+    /// take_pending() result (engine builds only; on an engineless host
+    /// this compiles away).
+    ///
+    /// Returns true when the transaction just completed (CS released):
+    /// the edge on which the glue posts TransferDone{status()}.
+    ///
+    /// A TRANSFER ERROR ON EITHER CHANNEL ENDS THE TRANSACTION with
+    /// spi_dma_fault: a TX block the silicon stopped running starves the
+    /// receive side for ever (the wedge samc21/sercom.hpp describes, met
+    /// here as a bounded failure instead), and an RX error means the
+    /// count can no longer be trusted. Both channels are put away, CS is
+    /// raised, and the fault is REPORTED rather than retried - retry
+    /// policy is the bus AO's, not the engine's.
     [[gnu::always_inline]] static bool dma_isr(uint8_t channel, uint8_t flags) {
         if constexpr (has_engines) {
             // take_pending() aligns the flags to bit 0 = TERR, the same
@@ -1402,25 +1389,22 @@ public:
     /// TransferDone payload. Always spi_ok on an engineless host.
     static uint8_t status() { return status_; }
 
-    /// Hand the pins back, then the peripheral.
-    /**
-     * @brief Put the ENGINE back where start() is legal: engines put
-     * away and re-claimed, the peripheral reset and reconfigured to the
-     * applied state, the select window closed. Clocks, pads and the
-     * ceiling arithmetic are untouched (a SERCOM software reset reaches
-     * none of them), so no Clock is needed.
-     *
-     * The verb a timed SpiBus calls on a transaction that never
-     * answered (util/bus_master.hpp) - here that means an ISR-style
-     * completion that never posted: a DMA channel the 1.10.4 class of
-     * death stopped with no fault flag to see, a lost interrupt. The
-     * in-flight request's CS is deasserted FIRST: its device sees the
-     * transaction end, however garbled, rather than a select held for
-     * ever.
-     *
-     * @return false when a synchronization never settled (the bounded
-     * waits' honesty: a false engine is refusing, not hanging).
-     */
+    /// Hand the pins back, then the peripheral. Put the ENGINE back where
+    /// start() is legal: engines put away and re-claimed, the peripheral
+    /// reset and reconfigured to the applied state, the select window
+    /// closed. Clocks, pads and the ceiling arithmetic are untouched (a
+    /// SERCOM software reset reaches none of them), so no Clock is
+    /// needed.
+    ///
+    /// The verb a timed SpiBus calls on a transaction that never answered
+    /// (util/bus_master.hpp) - here that means an ISR-style completion
+    /// that never posted: a DMA channel the 1.10.4 class of death stopped
+    /// with no fault flag to see, a lost interrupt. The in-flight
+    /// request's CS is deasserted FIRST: its device sees the transaction
+    /// end, however garbled, rather than a select held for ever.
+    ///
+    /// Returns false when a synchronization never settled (the bounded
+    /// waits' honesty: a false engine is refusing, not hanging).
     static bool recover() {
         req_.cs.set();
         if constexpr (has_engines) {
@@ -1491,7 +1475,7 @@ private:
     }
 
     /// One exit for the data phase, from either flavour of dma_isr().
-    /// @return true when the ISR-style caller should post completion.
+    /// Returns true when the ISR-style caller should post completion.
     static bool finish_dma(uint8_t st) {
         if (st != spi_ok) {
             status_ = st;
@@ -1553,8 +1537,8 @@ private:
     /**
      * Put the peripheral where this request wants it.
      *
-     * CTRLA (which is where CPOL and CPHA live here, unlike the AVR's
-     * CTRLB) and BAUD are BOTH enable-protected, so any change costs a
+     * CTRLA (which is where CPOL and CPHA live on this peripheral) and
+     * BAUD are BOTH enable-protected, so any change costs a
      * disable/enable pair - which is why the applied state is cached and
      * the pair is paid only when something really moved. A run of
      * requests to one device costs nothing at all.
@@ -1658,11 +1642,10 @@ private:
  * character early, and the three cycles are already spent when its
  * boundary comes.
  *
- * THERE IS NO DEMOTION HERE. On the AVR a host that sees its SS pin
- * pulled low becomes a client on the spot, and avrdx/spi.hpp has to
- * report and undo it. This peripheral has nothing of the kind: the role
- * is CTRLA.MODE, written while the SERCOM is disabled, and a low SS on a
- * host with MSSEN = 0 is simply a pin nobody is looking at. What the
+ * THERE IS NO DEMOTION HERE - no host that sees its SS pin pulled low
+ * becomes a client on the spot and has to be reported and undone. The
+ * role is CTRLA.MODE, written while the SERCOM is disabled, and a low SS
+ * on a host with MSSEN = 0 is simply a pin nobody is looking at. What the
  * silicon offers instead is CTRLB.SSDE - a client that WAKES on the
  * select edge - which is a different feature answering a different
  * question.
@@ -1736,17 +1719,15 @@ public:
         bool drive_output = true;
     };
 
-    /**
-     * @brief Bring the instance up as a client.
-     *
-     * The core clock is still required even though the SHIFT register
-     * runs on the host's SCK: 32.5.3 says GCLK_SERCOMx_CORE "is required
-     * to clock the SPI", and every synchronization in the peripheral
-     * crosses into it - a client without it never finishes enabling.
-     *
-     * False when the configuration is refused or a synchronization did
-     * not complete.
-     */
+    /// Bring the instance up as a client.
+    ///
+    /// The core clock is still required even though the SHIFT register
+    /// runs on the host's SCK: 32.5.3 says GCLK_SERCOMx_CORE "is required
+    /// to clock the SPI", and every synchronization in the peripheral
+    /// crosses into it - a client without it never finishes enabling.
+    ///
+    /// False when the configuration is refused or a synchronization did
+    /// not complete.
     template <typename Clock>
     static bool init(Clock clock, const Config& cfg = {}) {
         (void)clock;
@@ -1831,19 +1812,17 @@ public:
 
     // ---- the ISR bodies --------------------------------------------------------
 
-    /**
-     * @brief The instance's ONE interrupt body - call from
-     * SERCOMn_Handler().
-     *
-     * A client's protocol is the application's, so this body does not
-     * decide anything: it reports WHICH sources are both raised and
-     * enabled and lets the app's glue act. The received character is not
-     * consumed here - reading DATA is the app's, because only the app
-     * knows where the character goes.
-     *
-     * @return the pending mask (SpiFlag::rxc | ::txc | ::ssl | ...), 0
-     * when this SERCOM was not the one asking.
-     */
+    /// The instance's ONE interrupt body - call from
+    /// SERCOMn_Handler().
+    ///
+    /// A client's protocol is the application's, so this body does not
+    /// decide anything: it reports WHICH sources are both raised and
+    /// enabled and lets the app's glue act. The received character is not
+    /// consumed here - reading DATA is the app's, because only the app
+    /// knows where the character goes.
+    ///
+    /// Returns the pending mask (SpiFlag::rxc | ::txc | ::ssl | ...), 0
+    /// when this SERCOM was not the one asking.
     [[gnu::always_inline]] static uint8_t isr() { return S::pending(); }
 
     static void enable_rxc_interrupt(bool on) { S::enable_rxc_interrupt(on); }

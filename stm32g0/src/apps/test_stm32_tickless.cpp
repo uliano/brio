@@ -17,8 +17,7 @@
 //      tight loop, and with PRIMASK held across a wrap - the pending-ARRM
 //      correction ticks() carries for exactly that case; plus the one
 //      compare question the driver's rule 4 leaves to the bench (does
-//      CMPM fire at CMP == ARR?). LPTIM2's counter runs on silicon here
-//      for the first time.
+//      CMPM fire at CMP == ARR?)
 //   c  idle_until() OUTSIDE THE KERNEL: N ticks asked, N ticks slept
 //      (against TIM2), exactly one LPTIM interrupt and it served CMPM,
 //      never early in the timebase's own units; the +2 floor's one-tick
@@ -39,8 +38,8 @@
 //      matures on the RTC wall with kernel time having RUN through the
 //      Stop - the restriction the plain site carries on the SysTick
 //      timebase is simply gone - SYSCLK back on the PLL after the round
-//   g  delay_us on the interrupt-less SysTick, the platform suite's
-//      arithmetic re-run here
+//   g  delay_us on the interrupt-less SysTick: 5..900 us at least and
+//      never early, and the cap at one SysTick period
 //   h  AN LSI-CLOCKED LptimTicker as a witness on LPTIM2: the internal
 //      RC at the rate the program STATES (32586 Hz, this die's measured
 //      one), its ticks and millis() against the crystal, a wake placed
@@ -119,10 +118,10 @@ static_assert(Witness::ticks_per_second == lptim_ticker_count_hz(tb_cfg));
 /// it is `witness_hz` counts whatever the root.
 constexpr uint32_t witness_hz = lptim_ticker_count_hz(witness_cfg);
 
-// Letter h's witness: LPTIM2 again, on LSI at the rate the die under it
-// measured (test_stm32_rtc's letter c, a TIM16 capture), shift 5. That
-// is a DIE fact, and the dies of this desk differ by more than the band
-// the letter judges in, so the preprocessor picks the number.
+// Letter h's witness: LPTIM2 again, on LSI at the rate measured on the
+// die under it (a TIM16 capture), shift 5. That is a DIE fact, and the
+// three dies differ by more than the band the letter judges in, so the
+// preprocessor picks the number.
 #if defined(STM32G031xx)
 constexpr uint32_t lsi_measured_hz = 31'496;
 #else
@@ -177,9 +176,9 @@ bool t2_up() {
 // datasheet only bounds (table 46: 29.5..34 kHz), so a wall built on one
 // is WEIGHED before anything is timed against it. TIM16's capture channel
 // with TISEL on LSI (25.6.18's code 1) against a counter clocked from
-// PCLK is that measurement, and the estimator is the MEDIAN of a batch -
-// test_stm32_rtc's letter c owns the technique and the reason: an
-// unfiltered capture of an internal clock line errs in BOTH directions.
+// PCLK is that measurement, and the estimator is the MEDIAN of a batch,
+// because an unfiltered capture of an internal clock line errs in BOTH
+// directions.
 using LsiMeter = TimIntervalMeter<Tim<16>, 0>;
 constexpr uint16_t lsi_meter_prescaler = 15;   ///< 250 ns a tick at 64 MHz
 
@@ -320,9 +319,9 @@ void sync_to_count() {
 /// wrap: the legs that judge "one interrupt" or "the LPTIM never spoke"
 /// over a window under a second assume the ARRM handler does NOT run in
 /// it (it would sweep CMPOK on the deferral leg, and end a single WFI
-/// early) - a phase the first versions left to luck, 12..25 % against
-/// per leg, which is what a lap every two seconds costs a test and
-/// costs a program nothing (the loop turns once more).
+/// early). Left to luck, such a leg fails 12..25 % of runs: that is what
+/// a lap every two seconds costs a test, and it costs a program nothing
+/// (the loop turns once more).
 void lap_room() {
     while ((Tb::count() & 0xFFFFu) >= 0x8000u) {
         feed();
@@ -523,8 +522,8 @@ struct Nap {
 
 /// One idle_until() by hand, masked as the kernel calls it, timed on
 /// TIM2 (Sleep mode: TIM2 keeps running). The console is drained FIRST:
-/// a transmit interrupt is a wake, and a print between two naps would
-/// end the second one early (this stratum's oldest lesson).
+/// a transmit interrupt is a wake, and a print between two naps ends the
+/// second one early.
 Nap nap(std::optional<int32_t> delta) {
     Nap n{};
     console_drain();
@@ -784,8 +783,8 @@ void tc_idle_until() {
     }
     // TIM2 rides the PLL, i.e. HSI16, which is 0.2..0.3 % off the crystal
     // and drifts with the board's temperature: a nap is judged on the
-    // wall's OWN scale - one tick weighed on TIM2 first (letter e's
-    // lesson, applied here after a run that failed by 80 us of drift).
+    // wall's OWN scale - one tick weighed on TIM2 first. Judged on a
+    // nominal scale instead, a nap misses by some 80 us of drift.
     console_drain();
     const uint32_t cal_k0 = Tb::ticks();
     while (Tb::ticks() == cal_k0) {
@@ -1579,9 +1578,9 @@ extern "C" void BRIO_STM32G0_USART2_HANDLER() {
 /// them, LPTIM1's own where they are absent, and the reserve's macro is
 /// what names it either way: the timebase's body, plus the counters the
 /// letters read. A raw G0B1 name here would leave the tick's interrupt
-/// bound to nothing on a smaller part, which is the Default_Handler spin
-/// the samc21 stratum learned to fear - and this suite MEASURED it: the
-/// G031's first run answered nothing at all, not even a banner.
+/// bound to nothing on a smaller part - Default_Handler's silent spin.
+/// Measured: an image binding the G0B1 name on the G031 answers nothing
+/// at all, not even a banner.
 extern "C" void BRIO_STM32G0_LPTIM1_HANDLER() {
     lptim_t2_at = t2();
     lptim_cnt_at = brio::Lptim<1>::count_raw();

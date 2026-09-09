@@ -2,9 +2,9 @@
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
-// (util/testbench.hpp owns that grammar - this is its first use on the
-// SAM target). It is a REFERENCE test: it is meant to keep passing
-// through every later restructuring of the driver under it.
+// (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
+// meant to keep passing through every later restructuring of the driver
+// under it.
 //
 // What is exercised, letter by letter:
 //   a  the block, the tables, a software-triggered copy, and THE
@@ -138,19 +138,18 @@ uint32_t cycles_to_us(uint32_t cycles) { return cycles / (SysClock::hz / 1'000'0
 // and those bytes have to be identifiable and legally ours to read.
 // ---------------------------------------------------------------------------
 // EVERY DMA BUFFER IS VOLATILE, in BOTH directions, and that is not
-// belt-and-braces - it is the correctness condition, learned the hard
-// way here.
+// belt-and-braces - it is the correctness condition.
 //
 // A DMA buffer is memory shared with a third party the language knows
 // nothing about. The obvious half is that the compiler cannot see the
 // controller's WRITES, so a plain read after a transfer may be folded to
-// whatever the CPU last stored. The half that actually bit was the other
-// one: it cannot see the controller's READS either, so it is free to
-// SINK the CPU's own preparation of the buffer past the code that starts
-// the transfer. Letter e caught exactly that - a write-back reporting
-// BTCNT = 0 with precisely the right addresses, one block's destination
-// correct and the other's still zero, because the zeroing of the first
-// had been moved to after the transfer that filled it.
+// whatever the CPU last stored. The sharper half is the other one: it
+// cannot see the controller's READS either, so it is free to SINK the
+// CPU's own preparation of the buffer past the code that starts the
+// transfer. That is measurable here - a write-back reporting BTCNT = 0
+// with precisely the right addresses, one block's destination correct
+// and the other's still zero, because the zeroing of the first was
+// moved to after the transfer that filled it.
 //
 // Declaring the buffers volatile fixes both halves at once: every access
 // to them is a real one, and volatile accesses are performed in program
@@ -791,9 +790,9 @@ void te_interrupts() {
     // FERR clears on a software RESUME and on nothing else (25.8.23) -
     // but a RESUME onto the SAME invalid descriptor with a trigger still
     // pending re-fetches it and sets FERR again before the CPU can look,
-    // which is how this first read as "RESUME does not clear FERR". So
-    // the descriptor is made VALID first, and the clause is then exactly
-    // what the chapter says it is.
+    // which reads as "RESUME does not clear FERR". So the descriptor is
+    // made VALID first, and the clause is then exactly what the chapter
+    // says it is.
     brio::DmaDescriptor repaired = invalid;
     repaired.btctrl = static_cast<uint16_t>(repaired.btctrl | DMAC_BTCTRL_VALID_Msk);
     Copy::load(repaired);
@@ -1466,8 +1465,8 @@ void tj_engine_duplex() {
         }
         if (!churn_ok && Churn0::violations() != before && !captured) {
             // One-shot: WHAT was inconsistent, not just that something
-            // was. The same technique that turned letter e's mystery
-            // into a fact.
+            // was - the whole write-back, the loaded copy and the
+            // channel's status, printed side by side.
             bad_wb = brio::Dmac::read_write_back(ch_churn0);
             bad_loaded = Churn0::loaded();
             bad_status = Churn0::status();

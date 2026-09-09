@@ -4,12 +4,12 @@
 // the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the driver
-// under it. `ac_sync_probe` stays what it is - a PROBE that answered one
-// timing question - and is not touched by this file.
+// under it. `ac_sync_probe` is a separate PROBE and owns the sync-output
+// timing question; nothing here touches it.
 //
-// NOTHING TO WIRE, on the technique the probe proved: a comparator's
-// analog input is a DIRECT connection to the pad, so a pad left under
-// PORT and driven as an ordinary output is a rail the AC can measure.
+// NOTHING TO WIRE: a comparator's analog input is a DIRECT connection
+// to the pad, so a pad left under PORT and driven as an ordinary output
+// is a rail the AC can measure.
 // (40.6.3 asks for the pad's digital driver to be disabled for analog
 // use; keeping it enabled is exactly the deviation that makes a wireless
 // test possible, and the AC reads what PORT drives.) The other voltage
@@ -99,9 +99,9 @@ using Window0 = AcWindow<0>;
 // sampling clock is the right one - ac_sync_probe owns the timing.
 constexpr uint8_t ac_gen = 0;
 
-// The event fabric, as in test_samc_evsys and test_samc_eic: DMAC
-// channel 0 is event user 5, and a transfer is the witness that an event
-// arrived. The event channel's own clock comes from generator 6.
+// The event fabric: DMAC channel 0 is event user 5, and a transfer is
+// the witness that an event arrived. The event channel's own clock
+// comes from generator 6.
 constexpr uint8_t dma_ch = 0;
 constexpr uint8_t user_dmac_ch0 = 5;
 constexpr uint8_t ev_ch = 0;
@@ -169,7 +169,7 @@ const char* window_state_name(AcWindowState s) {
 
 /// The EIC's stimulus is different in kind: the pad is handed to a
 /// peripheral, so PORT's output driver is gone and only the internal
-/// pull can move it (test_samc_eic established that).
+/// pull can move it.
 template <class P>
 bool pad_follows_pull() {
     P::input(PinPull::up);
@@ -716,11 +716,12 @@ void te_generator() {
 // =============================================================================
 //
 // SOC0 is user 34 and table 29-3 marks it ASYNCHRONOUS PATH ONLY, which
-// is a constraint on the CHANNEL and not on this peripheral - and the
-// asynchronous path is exactly the one test_samc_eic proved a HARDWARE
-// generator can cross. So the stimulus is an EIC pin edge, moved by the
-// pad's own internal pull, and the measurement is a single-shot
-// comparison that started with no CPU in the path.
+// is a constraint on the CHANNEL and not on this peripheral - and a
+// HARDWARE generator does cross the asynchronous path (measured; a
+// SOFTWARE event does not reach every user's input stage). So the
+// stimulus is an EIC pin edge, moved by the pad's own internal pull,
+// and the measurement is a single-shot comparison that started with no
+// CPU in the path.
 void tf_user() {
     bench.verdict("PA16 follows its own internal pull, which is what the EIC\n"
                   "                stimulus needs",
@@ -772,8 +773,8 @@ void tf_user() {
                                      .path = EventPath::asynchronous}));
     settle();
 
-    // The pad's own pull is the edge - the technique test_samc_eic
-    // established.
+    // The pad's own pull is the edge: under PMUXEN the mux takes the
+    // output driver, not the pull.
     EicPad::set();
     settle();
 

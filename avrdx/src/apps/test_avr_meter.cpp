@@ -5,14 +5,13 @@
 //
 // Reference test of those (docs/design/meters.md): keep it passing.
 //
-// NOTHING TO WIRE. The instrument is the chip, the technique
-// test_avr_timer established: a TCA drives a known waveform onto its own
-// WO0 pad and the event system carries that pad's level back into a TCB
-// running in a capture mode - a closed loop through the silicon with no
-// jumper in it. PD0 is TCA0's WO0 on the PORTD route and goes nowhere on
-// this desk.
+// NOTHING TO WIRE. The instrument is the chip itself: a TCA drives a
+// known waveform onto its own WO0 pad and the event system carries that
+// pad's level back into a TCB running in a capture mode - a closed loop
+// through the silicon with no jumper in it. PD0 is TCA0's WO0 on the
+// PORTD route and goes nowhere on this bench.
 //
-// LIKE test_avr_power, THIS SUITE RUNS THE KERNEL: the object under test
+// THIS SUITE RUNS THE KERNEL: the object under test
 // is an active object, so the samples travel through a real queue, a
 // real dispatch and a real Kernel pack (Sink, Sampler). Only the LOOP is
 // the suite's - run_ticks() pumps TimeEvents and Kernel::step() for a

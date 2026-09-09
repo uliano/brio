@@ -6,6 +6,6 @@
 #include "avrdx/twi.hpp"
 using namespace brio;
 void f() {
-    (void)TwiClient<0, TwiRoute::alt1, true>::init(
+    (void)I2cClient<0, TwiRoute::alt1, true>::init(
         Clock<ClockSource::internal, 24'000'000>{}, {.address = 0x40});
 }

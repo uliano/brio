@@ -48,7 +48,7 @@
  *    the ADC's, shared by all three comparators (table 61). This driver
  *    PUBLISHES its line number and does not include stm32g0/exti.hpp:
  *    the fabric driver owns the fabric and the peripheral owns its own
- *    vocabulary (the samc21 EVSYS ruling, kept). The chapter's own
+ *    vocabulary. The chapter's own
  *    sequence is to configure the EXTI line FIRST and enable the
  *    comparator last, so the enable's own transient does not arrive on
  *    an unconfigured line.
@@ -282,8 +282,8 @@ constexpr bool comp_config_valid(uint8_t n, const CompConfig& c) {
 // The resource
 // =============================================================================
 //
-// Compiled only where the device header declares a first comparator
-// (the fdcan.hpp precedent): the G031/G041 and every x0 value-line part
+// Compiled only where the device header declares a first comparator:
+// the G031/G041 and every x0 value-line part
 // have none, no COMP_TypeDef and none of the COMP_CSR bit names - which
 // a template body may not name even uninstantiated - and a Comp spelled
 // there is a compile error naming the reason. The vocabulary above is

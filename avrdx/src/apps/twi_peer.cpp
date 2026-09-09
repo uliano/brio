@@ -1,9 +1,9 @@
-// twi_peer - the INSTRUMENT half of the TWI campaign: board B, the
-// scriptable second chip on the I2C bus that test_avr_twi (board A, the
-// DUT) drives IN BAND over the very bus both are testing.
+// twi_peer - the INSTRUMENT half of a two-board TWI test: the
+// scriptable second chip on the I2C bus that test_avr_twi (the DUT)
+// drives IN BAND over the very bus both are testing.
 //
 // It is deliberately not a kernel app: one blocking loop around the
-// polled TwiClient surface that answers exactly one address, decodes a
+// polled I2cClient surface that answers exactly one address, decodes a
 // command frame (src/apps/twi_link.hpp), acknowledges it and then
 // becomes for a bounded moment whatever the DUT needs at the other end
 // of the wire:
@@ -31,18 +31,19 @@
 // which the peer restores its command-mode client BY ITSELF.
 //
 // COEXISTENCE - the one thing to understand before touching this file.
-// I2C addresses, so this peer needs none of the SPI campaign's dark
-// listener gymnastics: in command mode its client answers ONE address
-// (twilink::command_addr, which no test of the DUT's single-board half
-// sends, general-calls or mask-matches), with General Call off, no mask,
-// no second address, PMEN off, Smart mode off and even PIEN off - so the
-// only thing on this board that can raise a flag while `test_avr_twi z`
-// runs is an address packet naming that address. The proof is that `z`
-// still scores its full 175 with this firmware attached and running.
+// I2C addresses, so this peer needs none of the gymnastics an
+// unaddressed bus imposes on a listener: in command mode its client
+// answers ONE address (twilink::command_addr, which no test of the
+// DUT's single-board half sends, general-calls or mask-matches), with
+// General Call off, no mask, no second address, PMEN off, Smart mode
+// off and even PIEN off - so the only thing on this board that can
+// raise a flag while the DUT's single-board half runs is an address
+// packet naming that address. That is what lets the DUT run every
+// single-board test with this firmware attached to the node.
 //
-// Bus: TWI0 DEFAULT, SDA PA2 / SCL PA3, on the desk's one open-drain
-// node with 1.5k pull-ups to +5 V and a dedicated GND wire between the
-// boards.
+// Bus: TWI0 DEFAULT, SDA PA2 / SCL PA3, both boards tapping one
+// open-drain node with 1.5k pull-ups to +5 V and a dedicated GND wire
+// between them.
 //
 // Console: USART2 ALT1 (PF4/PF5) at 460800, observability only.
 //   ? help | i status and counters | 0 back to command mode | 3 trace
@@ -80,8 +81,8 @@ using Console = Uart<2, Route::alt1>;
 constexpr Console console;
 
 using T = Twi<0>;
-using Client = TwiClient<0, TwiRoute::def>;
-using Host = TwiHost<0, TwiRoute::def>;
+using Client = I2cClient<0, TwiRoute::def>;
+using Host = I2cHost<0, TwiRoute::def>;
 
 using Sda = Pin<'A', 2>;
 using Scl = Pin<'A', 3>;
@@ -312,7 +313,7 @@ twilink::Report run_serve(const twilink::Params& a) {
 twilink::Report run_arb(const twilink::Params& a) {
     twilink::Report r{};
     if (!apply_client(a)) return r;
-    if (!Host::init(clock, {.speed = TwiSpeed::standard_100k})) return r;
+    if (!Host::init(clock, {.speed = I2cSpeed::standard_100k})) return r;
     T::enable_read_interrupt(false);
     T::enable_write_interrupt(false);
 
@@ -519,8 +520,8 @@ twilink::Report run_hold_sda(const twilink::Params& a) {
     return r;
 }
 
-/// Board B off the wire entirely, for as long as the deadline says: the
-/// control case for every measurement the DUT takes with the peer
+/// This board off the wire entirely, for as long as the deadline says:
+/// the control case for every measurement the DUT takes with the peer
 /// attached.
 twilink::Report run_quiet(const twilink::Params& a) {
     twilink::Report r{};

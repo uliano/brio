@@ -1,10 +1,9 @@
 # Target: SAM C21 (`samc21/`)
 
-The operational page for brio's second hardware target: an ARM
-Cortex-M0+ (ATSAMC21J18A on the bench), the first target whose crt -
-linker script, startup, vector table - is the project's own work
-rather than the toolchain's gift, and the target that proved the
-kernel and util strata compile UNCHANGED on a second architecture.
+The operational page for the SAM C21 target: an ARM Cortex-M0+
+(ATSAMC21J18A on the bench), whose crt - linker script, startup,
+vector table - is the project's own work rather than the toolchain's
+gift, and on which the kernel and util strata run unchanged.
 
 Peripheral documents live next to this page (`platform.md`,
 `clock.md`, `port.md`, `sercom.md`, `dmac.md`, `ac.md`, `nvm.md`,
@@ -47,13 +46,14 @@ itself is `abort()` (see `platform.md`, "The crt").
 
 The bench board is the user's own C21J rev 1.1 (custom, not the
 Xplained Pro): ATSAMC21J18A, CPU on the internal OSC48M at 48 MHz, a
-24 MHz crystal on PA14/PA15 reserved for future use (NOT enabled),
+24 MHz crystal on PA14/PA15 - not the default clock root, but a real
+oscillator the suites start and measure against ([clock.md](clock.md)) -
 console CH340 on PB30/PB31 (SERCOM5 PAD0/PAD1), user button PB22,
 LED PB23, SWD on PA30/PA31.
 
-`samc21/` is its own CMake project, a sibling and peer of `avrdx/` and
-`test/` (one configure has exactly one compiler; the repo root is not
-a CMake project). Apps are auto-discovered from
+`samc21/` is its own CMake project, a sibling and peer of `avrdx/`,
+`stm32g0/` and `test/` (one configure has exactly one compiler; the
+repo root is not a CMake project). Apps are auto-discovered from
 `samc21/src/apps/*.cpp` - plus `experiments/*/samc21/*.cpp`, the SAM half
 of any top-level experiment directory (which documents itself in its
 own README) - by their `// build:` header comment - the same
@@ -108,11 +108,11 @@ and its launch target the app to debug - the executable comes from
 
 Verified at the bench: stop at `main`, user breakpoints hit. By
 policy the verification is light - cortex-debug and OpenOCD are
-mature tooling, unlike PyAvrOCD which earned its exhaustive
-treatment; quirks get documented here as they are found. One SWD
+mature tooling, where PyAvrOCD on the AVR side needs exhaustive
+checking; quirks get documented here as they are found. One SWD
 technique worth knowing: with the CPU halted, `mdw`/`mdb` from
-OpenOCD reads any peripheral register - it diagnosed a wrong-looking
-serial line in one pass where guessing host baud rates went nowhere.
+OpenOCD reads any peripheral register - it settles a wrong-looking
+serial line in one pass where guessing host baud rates does not.
 
 ## Editor (clangd)
 

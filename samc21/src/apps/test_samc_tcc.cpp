@@ -8,16 +8,16 @@
 //
 // NOTHING TO WIRE. The TCC is the richest timer of this family and the
 // one whose whole point - complementary outputs, patterns and fault
-// shutdown - is about what reaches a PIN, so the wireless toolkit the
-// earlier suites built is what makes it measurable at all:
+// shutdown - is about what reaches a PIN, so four facts about this
+// family are what make it measurable at all:
 //   - a pad a peripheral DRIVES can be read back through PORT.IN with
-//     the input buffer on (test_samc_tc), which turns five of TCC0's
+//     the input buffer on, which turns five of TCC0's
 //     eight outputs into instruments;
 //   - a pad under an INPUT-ONLY function still follows its internal
-//     pull (test_samc_eic), which is how a fault is raised and lowered
+//     pull (28.6.3.2), which is how a fault is raised and lowered
 //     from inside the chip, through the EIC and an event channel;
 //   - a timer counting another timer's EVENTS is a frequency meter with
-//     no wire in it (test_samc_tc), which is what settles a PWM rate and
+//     no wire in it, which is what settles a PWM rate and
 //     a dithered average;
 //   - and a second TC, free-running at 3 MHz, is the stopwatch that
 //     measures a dead time of a few hundred microseconds.
@@ -683,9 +683,9 @@ void tc_pwm() {
                   "timer counting another's events, within 1 %",
                   near(single, pwm_hz, pwm_hz / 100u + 2u));
 
-    // THE DUAL-SLOPE ARITHMETIC, measured rather than trusted - the AVR
-    // TCD campaign found the datasheet's printed dual-slope formula off
-    // by one, and this is the same question asked of this silicon.
+    // THE DUAL-SLOPE ARITHMETIC, measured rather than trusted, because
+    // a printed dual-slope formula is exactly the kind that comes out
+    // off by one.
     // 36.6.2.5.6 prints fPWM_DS = fGCLK / (2 N PER); the natural
     // alternative, if the counter visited TOP and ZERO both, would be
     // 2 (PER + 1). Over two seconds they are eight counts apart.

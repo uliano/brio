@@ -6,10 +6,10 @@
 // meant to keep passing through every later restructuring of the driver
 // under it.
 //
-// NOTHING TO WIRE, and the three techniques it rests on were each
-// established by an earlier suite:
+// NOTHING TO WIRE, and it rests on three facts about this family's
+// pads:
 //   - a pad handed to a peripheral still moves under its own INTERNAL
-//     PULL, which is how the EIC gets its edges (test_samc_eic);
+//     PULL (28.6.3.2), which is how an input gets its edges;
 //   - a pad a peripheral DRIVES can be read back through PORT.IN with
 //     the input buffer on, which is how a waveform is observed;
 //   - a timer counting another timer's EVENTS is a frequency meter with
@@ -577,13 +577,11 @@ void te_capture() {
     // --- capture ON THE PIN, which erratum 1.20.2 says does not work
     //
     // That item is REVISION B ONLY on this family, and this is the
-    // measurement that says so. The pad is muxed to the timer, so PORT's
-    // output driver is gone (test_samc_eic established that) and the
-    // stimulus is the pad's own internal pull.
-    // The stimulus is the pad's own internal pull, so the pad has to
-    // follow it - checked under PORT before the timer ever sees it,
-    // exactly as test_samc_ac learned to do after PA04 turned out not
-    // to.
+    // measurement that says so. The pad is muxed to the timer, so
+    // PORT's output driver is gone and the stimulus is the pad's own
+    // internal pull - so the pad has to FOLLOW that pull, which is
+    // checked under PORT before the timer ever sees it (not every pad
+    // on a board does).
     PwmPad::input(PinPull::up);
     wait_ms(2);
     const bool pull_up = PwmPad::read();
@@ -612,7 +610,7 @@ void te_capture() {
     //      reaches the pad with no mux at all (docs/samc21/ac.md), so it
     //      is a fair question whether a digital capture input does too.
     //  (2) hand the pad to the timer (function E) and move it with its
-    //      own internal pull, the way test_samc_eic moves an EIC line.
+    //      own internal pull.
     struct Attempt {
         bool captured;
         bool moved;
@@ -695,12 +693,11 @@ void te_capture() {
 // f - the util contract, live: MeterSampler inside a running kernel
 // =============================================================================
 //
-// THIS IS THE CAMPAIGN'S POINT, not a bonus letter. util/meter_sampler.hpp
-// was designed on the AVR around a capture ISR that fills a one-cell
-// latch and an AO that paces PUBLICATION rather than capture. Here the
-// capture comes from a SAM TC, through EVSYS, from an EIC pin - a chain
-// with nothing in common with the AVR's - and NOT ONE LINE OF util/
-// CHANGED.
+// THE POINT OF THE SUITE, not a bonus letter. util/meter_sampler.hpp
+// asks for a capture ISR that fills a one-cell latch and an AO that
+// paces PUBLICATION rather than capture. Here the capture comes from a
+// TC, through EVSYS, from an EIC pin, and the AO is target-independent
+// code driving it.
 
 using Latch = MeterLatch<uint16_t, SamPlatform, 0>;
 static_assert(MeterSource<Latch>, "the TC's capture latch is a MeterSource");

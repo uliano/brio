@@ -19,7 +19,7 @@
  * event - TimeEvents::next_deadline(), empty when nothing is armed - so
  * the platform can place its wake there and sleep through the whole
  * wait in one breath, no periodic tick needed. Detected by requires, so
- * a platform without it is compiled exactly as before.
+ * a platform without it is compiled with the plain idle() path alone.
  *
  * Starvation of low-priority AOs under fixed priority is by definition
  * a sizing/design error; the per-queue overflow counters make it
@@ -105,7 +105,7 @@ public:
     /// A platform with idle_until() is told how far it may sleep: the
     /// nearest armed deadline, read here under the same mask (the armed
     /// list is main-loop state, and a masked read of now() is the
-    /// timebase's contract). Absent = today's idle(): the other branch
+    /// timebase's contract). Without it, plain idle(): the other branch
     /// is not compiled at all.
     static void idle_if_empty() {
         typename P::CriticalSection cs;

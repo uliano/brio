@@ -9,9 +9,9 @@
 //
 // NOTHING TO WIRE. Three stimuli, all inside the chip:
 //  - a free pad walked between the rails BY ITS OWN INTERNAL PULL, which
-//    survives PMUXEN where the output driver does not (the technique
-//    test_samc_eic established and docs/samc21/port.md records) - that is
-//    how a CCL *IO* input gets a real edge with no wire;
+//    survives PMUXEN where the output driver does not (28.6.3.2, and
+//    docs/samc21/port.md records it) - that is how a CCL *IO* input
+//    gets a real edge with no wire;
 //  - TC0/TC1/TC4 and TCC0 waveforms, which the CCL takes internally;
 //  - the analog comparator, whose positive input is a pad PORT is
 //    driving as a plain GPIO (the analog mux keeps the output driver).
@@ -131,7 +131,7 @@ constexpr uint32_t slow_period = 4096;   // CPU cycles per GCLK period
 constexpr uint8_t gen_fast = 0;          // generator 0: OSC48M, always up
 
 // ---------------------------------------------------------------------------
-// The cycle stopwatch (the test_samc_dma / ac_sync_probe technique)
+// The cycle stopwatch
 // ---------------------------------------------------------------------------
 uint32_t cycles_now() {
     const uint32_t reload = SysTick->LOAD;
@@ -1169,7 +1169,7 @@ void te_sequencers() {
 // =============================================================================
 
 // The DMA witness: a channel armed with NO hardware trigger, so only an
-// event can move its bytes (the test_samc_evsys technique).
+// event can move its bytes.
 constexpr uint8_t dma_ch = 0;
 constexpr uint8_t user_dmac_ch0 = 5;
 constexpr uint8_t ev_ch = 2;
@@ -1285,10 +1285,8 @@ void tf_events() {
                                          .path = EventPath::resynchronized,
                                          .edge = EventEdge::rising}));
 
-    // The generator is a TC overflow: a HARDWARE generator, which is
-    // what an asynchronous channel needs. (A SOFTWARE event cannot be
-    // used here at all - test_samc_evsys measured that one does not
-    // cross an asynchronous channel, and this user has no other path.)
+    // The generator is a TC overflow, a HARDWARE generator; the second
+    // witness below asks the same LUT with a SOFTWARE event instead.
     // EVCTRL is enable-protected with the rest, so the event output is
     // written BEFORE the timer is enabled and not after.
     constexpr TcConfig pacer{.mode = TcMode::count8,

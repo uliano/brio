@@ -188,7 +188,7 @@ reported.
   while `TSENS.CTRLA` - the same peripheral, in the map above - does.
   (`test_samc_tsens` letter p is where the write is also shown not to
   take effect.)
-- **Erratum 1.7.4 confirmed again**: writing `CCL.CTRL.SWRST` raises the
+- **Erratum 1.7.4 confirmed**: writing `CCL.CTRL.SWRST` raises the
   CCL's PAC flag **with no protection set anywhere**.
 
 Together: an ABSENT flag is not evidence that a write landed, and a
@@ -228,7 +228,7 @@ peripheral refuses a CLEAR (flagged in INTFLAGA.PAC) and refuses a second
 LOCK. After a SYSRESETREQ the lock is gone and the peripheral takes a
 normal set/clear round trip with no error; after a watchdog reset,
 likewise. So 11.5.2.2's "hardware reset" includes the CPU's own reset
-request, and a lock is not a until-power-on measure.
+request, and a lock is not an until-power-on measure.
 
 ## Not covered yet
 

@@ -2,20 +2,19 @@
 // build: monitor_speed = 115200
 //
 // test_samc_i2c - the SERCOM in I2C mode (DS60001479M ch. 33) and, over
-// it, the SECOND cross-architecture proof of util's bus vocabulary:
-// util/i2c_bus.hpp is util/bus_master.hpp plus the four wire-level
-// status codes, and it drives samc21/i2c.hpp's I2cHost exactly as it
-// drives avrdx/twi.hpp's TwiHost - including the codes themselves,
-// which letters d and g produce ON THE WIRE (a real address NACK, a
-// real data NACK, a real loss of the bus).
+// it, util's bus vocabulary on the wire: util/i2c_bus.hpp is
+// util/bus_master.hpp plus the four wire-level status codes, and it
+// drives samc21/i2c.hpp's I2cHost with no knowledge of this silicon -
+// including the codes themselves, which letters d and g produce ON THE
+// WIRE (a real address NACK, a real data NACK, a real loss of the bus).
 //
-// THE BENCH is the phase F desk's I2C half: board C (this one, the DUT)
-// on SERCOM3 - PA22 = PAD[0] = SDA, PA23 = PAD[1] = SCL, function C,
-// both on table 6-7's I2C-capable list - against board A, an AVR128DB48
-// running `twi_peer`, on the open-drain node with 1.5k pull-ups to
-// +5 V and the dedicated GND. The protocol is the AVR TWI campaign's
-// own twi_link.hpp, included BY RELATIVE PATH (one source, two
-// architectures - the spi_link precedent).
+// THE BENCH: this board is the DUT on SERCOM3 - PA22 = PAD[0] = SDA,
+// PA23 = PAD[1] = SCL, function C, both on table 6-7's I2C-capable
+// list - against a second board running a `twi_peer` on the same
+// open-drain node, with 1.5k pull-ups to +5 V and a dedicated GND. The
+// wire format is twi_link.hpp, included BY RELATIVE PATH: one file is
+// the single source of truth for every board that speaks it, whatever
+// its architecture.
 //
 // I2C NEEDS NO DARK-LISTENER GYMNASTICS (the protocol header's own
 // argument): the command channel is a CLIENT ADDRESS (0x6B), and a
@@ -47,9 +46,9 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
-// The protocol is the AVR campaign's, and it is not copied (the
-// spi_link ruling): pure encoding, no register, both architectures
-// compile the same file.
+// THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
+// register, and every architecture on this link compiles the same
+// file.
 #include "../../../avrdx/src/apps/twi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -82,16 +81,15 @@ constexpr I2cPads bus_pads{
     .scl_pin = {'A', 23, PinFunction::c},
 };
 
-/// THE CORE RUNS AT FULL SPEED ON THIS DESK, AND THAT TOO IS A
-/// MEASURED DECISION - the other half of the filterless-I2C story.
+/// THE CORE RUNS AT FULL SPEED, AND THAT IS A MEASURED DECISION.
 /// The C21's I2C machinery samples the wire on GCLK_SERCOMx_CORE with
-/// NO input filter, and on the phase F seven-wire BUNDLE its ~100 ns
-/// crosstalk read as false Start/Stop at any core above 6 MHz (the
-/// SWD-driven ladder in samc21/i2c.md). THIS desk's I2C pair is short
-/// and separate, and the wall is GONE WITH THE BUNDLE: a 48 MHz core
-/// serves the whole suite clean - both the peer's client (its own
-/// declared bet) and this DUT - which pins the original finding as a
-/// WIRE fact and reopens Fm+ (letter f runs it on the wire).
+/// NO input filter, so the wire has to earn a fast core: in a bundled
+/// cable the neighbours' ~100 ns crosstalk reads as false Start/Stop
+/// at any core above 6 MHz (the SWD-driven ladder in samc21/i2c.md).
+/// On a short, separate, pulled-up pair that wall is gone - a 48 MHz
+/// core serves the whole suite clean at both ends, which pins the
+/// limit as a WIRE fact and puts Fm+ within reach (letter f runs it on
+/// the wire).
 constexpr uint8_t core_gen = 0;
 constexpr uint32_t core_hz = 0;   // generator 0 = the CPU clock, the default claim
 
@@ -99,9 +97,9 @@ using I2cHw = I2cHost<3, bus_pads, core_gen>;
 using Raw = I2cm<3>;
 using Client = I2cClient<3, bus_pads, core_gen>;
 
-/// The bus's rise-time budget: 1.5k to 5 V on a breadboard node - the
-/// AVR campaign measured 166 ns on this very node, so 300 ns is a
-/// conservative statement of the same wire.
+/// The bus's rise-time budget: 1.5k to 5 V on a breadboard node, whose
+/// rise measures 166 ns, so 300 ns is a conservative statement of the
+/// same wire.
 constexpr uint32_t bus_rise_ns = 300;
 
 // ---------------------------------------------------------------------------
@@ -109,7 +107,7 @@ constexpr uint32_t bus_rise_ns = 300;
 // ---------------------------------------------------------------------------
 // The bare letters spin on a volatile completion; the kernel letter's
 // arbiter gets TransferDone instead. One handler serves both, switched
-// by bus_ao_live (the test_samc_spi pattern).
+// by bus_ao_live.
 
 volatile bool xfer_done = false;
 volatile uint8_t xfer_status = i2c_ok;
@@ -123,8 +121,7 @@ bool timed_ao_live = false;   ///< letter l's TIMED arbiter takes the completion
 
 /// One bus tenure, driven synchronously: start the engine, spin on the
 /// ISR's completion under a deadline of our own. The ENGINE is always
-/// asynchronous (the avrdx TwiHost contract) - this wrapper is the
-/// suite's.
+/// asynchronous (design/i2c-bus.md) - this wrapper is the suite's.
 bool engine_up();   // fwd: tenure()'s deadline path re-inits the engine
 
 uint8_t tenure(const I2cHw::Request& r, uint16_t deadline_ms = 300) {
@@ -320,10 +317,9 @@ void ta_block() {
         return c;
     }();
 
-    // ERRATUM 1.17.16, THE I2C-MODE LEG. The SPI campaign measured
-    // SWRST working from the disabled state where the sheet's matrix
-    // says it does nothing; this is the same question asked of THIS
-    // mode.
+    // ERRATUM 1.17.16, THE I2C-MODE LEG. In SPI mode SWRST works from
+    // the disabled state where the sheet's matrix says it does nothing
+    // (measured); this asks the same question of THIS mode.
     bench.verdict("configure() programs a host while the block is disabled",
                   Raw::configure(cfg));
     const uint32_t before = Raw::ctrla();
@@ -378,10 +374,9 @@ void ta_block() {
                   was_unknown && forced && Raw::bus_state() == I2cBusState::idle);
     // ... AND WITH IT: the state machine leaves UNKNOWN by itself -
     // measured as already-IDLE at the first read after enable, the
-    // print above the fold having given the 205 us their time. The
-    // first version of this letter expected UNKNOWN here and the
-    // silicon was right: INACTOUT is the third exit of 33.6.2.3, and
-    // it makes force_idle() a convenience rather than a necessity.
+    // print above the fold having given the 205 us their time.
+    // INACTOUT is the third exit of 33.6.2.3, and it makes
+    // force_idle() a convenience rather than a necessity.
     (void)Raw::configure(cfg);
     (void)Raw::enable(true);
     settle_ms(2);
@@ -466,8 +461,7 @@ void tc_shapes() {
     // THE SERVE ENDS BY COUNT, exactly: 8 written + 8 served + 4 + 4 of
     // the combined tenure. A count the letter does not reach leaves the
     // peer INSIDE its action - deaf to the report query - until the
-    // deadline, which is what the first version of these letters
-    // measured as a chain of link failures.
+    // deadline, which shows up as a chain of link failures.
     twilink::Params a{};
     a.count = 64;    // NEVER reached: ending BY COUNT would cut the
                      // combined tenure in half (measured - the serve
@@ -741,10 +735,9 @@ void tg_arbitration() {
     if (!need_peer()) return;
 
     // The peer pins SDA low for 60 ms. A falling SDA under a high SCL
-    // IS a Start (the AVR campaign's own finding, met again here), so
-    // the bus reads BUSY - and a tenure started into it PARKS IN
-    // HARDWARE until the wire frees (the held START, the AVR's own
-    // behaviour seen from the second architecture). THE WITNESS IS THE
+    // IS a Start, so the bus reads BUSY - and a tenure started into it
+    // PARKS IN HARDWARE until the wire frees: the held START. THE
+    // WITNESS IS THE
     // CLOCK: an unheld two-byte tenure is ~1 ms; this one completes at
     // the HOLD'S length. And it completes with i2c_nack_addr - the
     // peer's TWI is off the bus while its PORT holds the pin, so the
@@ -910,18 +903,17 @@ void th_client() {
                       "client (AMATCH, direction, data, Stop)",
                       true);
     } else {
-        // THE DECLINED HALF, and it is a WIRE fact, not a driver one
-        // (the TC suite's 1.20.2 precedent: print what is known, claim
-        // nothing the desk cannot support). On this seven-wire bundle
-        // the C21 CLIENT cannot follow a foreign 100 kHz host at ANY
-        // core rate tried (6 and 48 MHz alike): per-edge crosstalk
-        // resets its start/address machinery, so it hears nothing while
-        // the peer's host reads a clean address NACK (MSTATUS 0x72, the
-        // AVR campaign's own nobody-home signature). THE CLIENT ITSELF
-        // IS PROVEN: the same registers, the same pads, the same
-        // silicon matched a bit-banged address and stretched SCL for it
-        // (the SWD+UPDI record in the doc). The physical fix is named
-        // there too: take the I2C pair out of the bundle.
+        // THE DECLINED HALF, and it is a WIRE fact, not a driver one:
+        // print what is known and claim nothing the desk cannot
+        // support. On a BUNDLED cable the C21 CLIENT cannot follow a
+        // foreign 100 kHz host at any core rate (6 and 48 MHz alike):
+        // per-edge crosstalk resets its start/address machinery, so it
+        // hears nothing while the far host reads a clean address NACK
+        // (MSTATUS 0x72, this bus's nobody-home signature). THE CLIENT
+        // ITSELF IS SOUND: the same registers, the same pads, the same
+        // silicon match a bit-banged address and stretch SCL for it
+        // (the record is in samc21/i2c.md, with the physical fix: take
+        // the I2C pair out of the bundle).
         print(serial, "  DECLINED on this desk: the client is deaf to the peer's "
                       "100 kHz on the bundled wire (its function is proven by the "
                       "bit-bang record - see samc21/i2c.md); fix the wire and this "
@@ -953,8 +945,7 @@ void ti_unstick() {
                   clean == 0u);
 
     // The peer holds SDA low and releases it AT THE 4TH SCL FALLING
-    // EDGE - edges only unstick()'s own pulses can produce. The AVR
-    // measured its verb this exact way.
+    // EDGE - edges only unstick()'s own pulses can produce.
     twilink::Params h{};
     h.ms = 900;
     h.aux16 = 60000;   // or 60 ms, whichever comes first
@@ -987,10 +978,8 @@ constexpr uint8_t slow_gen = 4;
 /// Move the shared SLOW channel to a generator, WITH the wait the
 /// fire-and-forget disconnect() does not give: PCHCTRL.CHEN is
 /// write-synchronized (16.6.3.3), and a connect() issued while the
-/// clear is still crossing is discarded - the SPI campaign measured
-/// that exact race, and the first version of this letter re-ran it:
-/// the channel ended up DISCONNECTED and no time-out ever counted, at
-/// any meter rate.
+/// clear is still crossing is discarded (measured), which leaves the
+/// channel DISCONNECTED and no time-out counting at any meter rate.
 bool move_slow(uint8_t generator) {
     GclkChannel::disconnect(Sercom<3>::gclk_slow_id());
     bool clear = false;
@@ -1018,8 +1007,8 @@ bool timeouts_on(bool low, bool sext) {
 
 /// One tenure with the STATUS register sampled LIVE while it runs: the
 /// engine's finish() sweeps the W1C bits, so which time-out fired can
-/// only be seen before the completion - the letter-g technique, turned
-/// on the flags instead of the bus state.
+/// only be seen before the completion - a live sample of the flags
+/// rather than of the bus state.
 struct TimedTenure {
     uint8_t status = 0xEE;
     uint32_t ms = 0;
@@ -1234,7 +1223,7 @@ void tj_timeouts() {
 }
 
 // ===========================================================================
-// k - THE KERNEL LETTER: util/i2c_bus.hpp over this engine, unchanged
+// k - THE KERNEL LETTER: util/i2c_bus.hpp over this engine
 // ===========================================================================
 
 namespace kl {
@@ -1454,7 +1443,7 @@ void tk_kernel() {
 // Letter j measured that the silicon's SMBus time-outs police the
 // HOST'S OWN clock hold and cannot see a wire a client wedged; this
 // letter runs the answer that CAN - util/bus_master.hpp's per-bus
-// timeout (ruling 2026-09-02) - against the same two stagings letter j
+// timeout - against the same two stagings letter j
 // used: legal stretching (must pass untouched) and the held wire (must
 // come back i2c_timeout on the arbiter's clock, the engine recover()ed
 // in the same dispatch).

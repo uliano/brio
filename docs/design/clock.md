@@ -99,7 +99,7 @@ change, all of them before it happens, none of them through a queue.
   instead and is a `ClockUser` that restarts its period at a switch -
   losing the phase of the tick in progress, under a tick, late and never
   early - which is why a rescaling program on the STM32G0 is a tickless
-  one; on the SAM C21, with no dynamic clock by ruling, the question does
+  one; on the SAM C21, which has no dynamic clock, the question does
   not arise.
 - **The caller picks the moment.** A driver's `rebase` can quiesce
   its own hardware, but a bus transaction in flight (SPI, I2C) belongs
@@ -115,24 +115,24 @@ change, all of them before it happens, none of them through a queue.
   is produced is per target (a cycle-calibrated loop where the core
   is deterministic, a hardware counter where it is not).
 
-## The other targets: the SAM C21's ruling, the STM32G0's tuple
+## The other targets: the SAM C21's static clock, the STM32G0's tuple
 
-**The SAM C21 has no dynamic clock, by ruling.** Every peripheral there
+**The SAM C21 has no dynamic clock.** Every peripheral there
 has a generic clock channel of its own, so "one rate for everything" is
 an AVR assumption and no program has asked to rescale; the question
 reopens with its first genuine consumer, together with the fan-out
 ([../samc21/clock.md](../samc21/clock.md)).
 
-**What the first target measured, and what it does not settle.** The
-family that CAN do both was made to choose between a fixed clock plus
+**What one family measured, and what it does not settle.** A family
+that CAN do both was made to choose between a fixed clock plus
 sleep and clock adaptation on an event-logging load, in joules: without
 voltage scaling active current is `I0 + k * f` and a slower clock costs
 MORE per cycle, so adaptation cannot win on compute and its one asset is
 the wake it avoids - and the same experiment found that HOW the program
 watches for its events is worth a factor ~1.7, more than any clock
 choice (a frugal watcher on a fixed clock beat the adaptive program by
-27 %). That vindicates the SAM ruling on a family without voltage
-scaling. The STM32G0 HAS a second voltage range and a low-power
+27 %). On a family without voltage scaling, that is the argument for
+leaving the clock alone. The STM32G0 HAS a second voltage range and a low-power
 regulator whose whole point is running at 2 MHz cheaply - the one lever
 the first target lacked - so there the question is open, not answered.
 
@@ -236,7 +236,7 @@ USART personalities without a `rebase` refuse a dynamic clock at their
 | `Clock<source, hz, div>` | `avrdx/clock.hpp` | AVR DA/DB static clock |
 | `DynamicClock<Boot, Users...>` | `avrdx/clock.hpp` | AVR DA/DB dynamic clock over a static Boot |
 | `delay_us(clock, us)` | `avrdx/delay.hpp` | AVR DA/DB short wait, "at least" |
-| `Clock<source, hz>` | `samc21/clock.hpp` | the SAM C21's static clock (no dynamic one: the ruling above) |
+| `Clock<source, hz>` | `samc21/clock.hpp` | the SAM C21's static clock (no dynamic one - see above) |
 | `Clock<source, hz, regime>` | `stm32g0/clock.hpp` | the STM32G0's static clock, with its voltage regime |
 | `DynamicClock<Rates<...>, Users...>` | `stm32g0/clock.hpp` | the STM32G0's dynamic clock over a pack of rate tuples |
 | `delay_us(clock, us)`, `delay_rates<Clock>` | `armv6m/delay.hpp` | both Cortex-M0+ families' short wait, on SysTick's counter; the per-rate table of a dynamic clock |

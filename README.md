@@ -103,12 +103,19 @@ above them uses `#ifdef` to tell targets apart: where behaviour must
 differ, the target states a fact (`ticks_per_second`, `atomic_width`)
 and generic code chooses with `if constexpr` or a concept.
 
-| Target | State | Notes |
-|--------|-------|-------|
-| AVR DA/DB (`avrdx/`) | on the bench | AVR128DB48, avr-gcc 16.2, see [docs/avrdx/README.md](docs/avrdx/README.md) |
-| SAM C21 (`samc21/`) | on the bench | ATSAMC21J18A, arm-none-eabi-gcc 16.2, SysTick tick at 1000 Hz (vs the AVR's 1024: the kernel tick's opacity, exercised for real), see [docs/samc21/README.md](docs/samc21/README.md) |
-| STM32G0 (`stm32g0/`) | on the bench, bring-up | STM32G0B1RE (Nucleo-G0B1RE), arm-none-eabi-gcc 16.2, HSI16 x PLL at 64 MHz, the third clock model (shared bus prescalers + per-peripheral enables), see [docs/stm32g0/README.md](docs/stm32g0/README.md) |
-| host (`host/`) | in use | doctest suites, `cd test && ctest --preset host`, see [docs/host/README.md](docs/host/README.md) |
+A target is either **supported** - its peripheral chapters are
+implemented and bench-verified, and everything `kernel/` and `util/`
+claim holds there - or **in bring-up**, where the stratum exists, part
+of it is proven on silicon, and the rest is still to be validated. This
+table is the one place that question is answered: no source file carries
+its own list of the targets it was tried on.
+
+| Target | State | Bench silicon | Notes |
+|--------|-------|---------------|-------|
+| AVR DA/DB (`avrdx/`) | supported | AVR128DB48 | avr-gcc 16.2, see [docs/avrdx/README.md](docs/avrdx/README.md) |
+| SAM C21 (`samc21/`) | supported | ATSAMC21J18A | arm-none-eabi-gcc 16.2, SysTick tick at 1000 Hz against the AVR's 1024 - the kernel tick's opacity, exercised for real; see [docs/samc21/README.md](docs/samc21/README.md) |
+| STM32G0 (`stm32g0/`) | supported | STM32G0B1RE, STM32G071RB, STM32G031K8 | arm-none-eabi-gcc 16.2, HSI16 x PLL at 64 MHz, the third clock model (shared bus prescalers + per-peripheral enables) and a tickless timebase option; see [docs/stm32g0/README.md](docs/stm32g0/README.md) |
+| host (`host/`) | supported | - | doctest suites, `cd test && ctest --preset host`, see [docs/host/README.md](docs/host/README.md) |
 
 ## Building and testing
 
@@ -138,15 +145,16 @@ wiring lives in [docs/bench.md](docs/bench.md).
 
 ## Status
 
-Bench-tested on the AVR128DB48: kernel loop, time events, serial
-console over `SerialPort`, arbitrated SPI (display + touch on one bus)
-and I2C (DAC written and read back, ADC measured through SPI).
-Bench-tested on the ATSAMC21J18A: the same kernel and the same
-services, recompiled untouched - blink under time events and a full
-serial console at 115200, byte-exact on the wire. Bench-tested on the
-STM32G0B1RE: the same two apps, recompiled untouched again, on the
-third clock model and the third crt. Under continuous,
-deliberately radical revision: nothing below the kernel contract is
-considered done (see the governing rule in
-[overview.md](docs/design/overview.md)). Clean-room with respect to
-QP: the concepts come from Samek's book, never the QP source.
+The kernel and the services above it compile unchanged on every
+supported target and are bench-tested on all three families: the kernel
+loop and time events, a serial console over `SerialPort`, an arbitrated
+SPI bus (a display and a touch controller sharing one) and an
+arbitrated I2C bus (a DAC written and read back, an ADC measured
+through SPI), the power model with its sleep sites, the flash storage
+classes, and the analog and metering services. Each target's own
+chapters are covered by the reference suites its documentation names.
+
+brio is under continuous, deliberately radical revision: nothing below
+the kernel contract is considered done (see the governing rule in
+[overview.md](docs/design/overview.md)). Clean-room with respect to QP:
+the concepts come from Samek's book, never the QP source.

@@ -205,7 +205,7 @@ Driver gaps - what the design does not do:
   typo; nothing warns.
 - **No iteration in write order.** This is a set of values, not a log. A
   growing accumulator is a different structure with different invariants,
-  the same ruling [nv-heap.md](nv-heap.md) makes.
+  the same choice [nv-heap.md](nv-heap.md) makes.
 - **No sequence-number wrap handling.** 32 bits at one save per
   millisecond is fifty days of continuous writing and far beyond any
   flash endurance budget, so the case is unreachable rather than handled.

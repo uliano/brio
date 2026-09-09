@@ -69,11 +69,12 @@ itself is the power pass's business.
 
 **VREF is the bandgap every analog block eventually asks for.** SEL
 picks 1.024 V, 2.048 V or 4.096 V - three codes out of sixteen, the
-rest Reserved and refused. VREFOE is worded in 22.8.7 as routing the
-reference "to an ADC input channel", which undersells it: the ANALOG
-COMPARATOR's MUXNEG bandgap selection needs it too, and without this
-bit that input is a floating promise. Its absence is what
-[ac.md](ac.md)'s gap list was waiting for.
+rest Reserved and refused. VREFOE means exactly what 22.8.7 says: it
+routes the reference to an ADC INPUT CHANNEL, and that path alone is
+dead without it. The blocks that take the bandgap as a REFERENCE reach
+it internally and do not need the bit - measured with it clear and set,
+the analog comparator's bandgap negative input and the DAC's reference
+behave identically ([ac.md](ac.md), [dac.md](dac.md)).
 
 ## Types and verbs
 
@@ -102,11 +103,11 @@ bit that input is a floating promise. Its absence is what
 
 ## How to use it
 
-Give the analog comparator the bandgap it has been missing:
+Give the analog comparator its bandgap reference:
 
 ```cpp
-brio::Vref::configure<brio::VrefConfig{.level = brio::VrefLevel::v1_024,
-                                       .output_enable = true}>();
+// The comparator takes the bandgap internally: no output_enable here.
+brio::Vref::configure<brio::VrefConfig{.level = brio::VrefLevel::v1_024}>();
 brio::Ac::init(0);
 brio::AcComparator<0>::configure({.positive = brio::AcPositive::vscale,
                                   .negative = brio::AcNegative::bandgap});
@@ -125,8 +126,8 @@ const bool below = brio::BodVdd::detected();
 
 ## Bench findings
 
-`test_samc_supc`, 3 letters / 44 verdicts, 44/44 three times, nothing
-wired and nothing forced.
+`test_samc_supc`, 3 letters / 44 verdicts, nothing wired and nothing
+forced.
 
 - **THE FUSE ROW AND THE REGISTER AGREE FIELD BY FIELD**: level 8,
   enabled, action RESET, hysteresis off, read from the user row
@@ -136,10 +137,9 @@ wired and nothing forced.
   12 for the 1.024 V level, step 25 for 2.048 V and step 51 for
   4.096 V - VDD of 5251, 5141 and 5090 mV, all within 3% of each
   other, and the crossing step doubles with the reference exactly as a
-  real voltage must. This is the first supply measurement on this
-  board.
+  real voltage must.
 - **THE BODVDD STEP MEASURES 48.7 mV**, which settles table 45-18
-  against itself: the table STATES 60 mV typical, while its own three
+  against itself: the table states 60 mV typical, while its own three
   anchor points imply about 47.5 mV. The threshold sweep first detects
   at level 56, and with VDD known from the bandgap that is
   (5141 - 2800) / (56 - 8) mV a step. The implied number wins.
@@ -147,11 +147,10 @@ wired and nothing forced.
   RUNNING detector is discarded and the register keeps the old one;
   the same level through `configure()`, which stops it first, takes.
 - **AND THE LAST STEP OF THAT DANCE MATTERS.** A single store carrying
-  the configuration AND ENABLE = 1 together sets the bit and leaves
-  the protected fields WHERE THEY WERE: the protection is judged on
-  the value being written, not on the one already in the register.
-  Caught by a restore that did not restore, and now `configure()` sets
-  ENABLE on its own.
+  the configuration and ENABLE = 1 together sets the bit and leaves
+  the protected fields where they were: the protection is judged on
+  the value being written, not on the one already in the register,
+  which is why `configure()` sets ENABLE on its own.
 - **A sampled detector never reports ready**, as 22.8.4 says: 20 ms
   after configuring PSEL = div2 (a 512 Hz nominal sampling clock)
   STATUS.BODVDDRDY still reads 0, where a continuous detector reports
@@ -159,10 +158,10 @@ wired and nothing forced.
 - **THE CORE DETECTOR IS RUNNING AND THE CHAPTER DOES NOT DRAW IT.**
   SUPC_BODCORE reads 0x0028000A - enabled, action RESET - at an offset
   22.7 marks Reserved, and STATUS bits 3 and 5 (BODCORERDY,
-  BCORESRDY) read 1 with BODCOREDET at 0. The device header was right
-  and the chapter is incomplete.
+  BCORESRDY) read 1 with BODCOREDET at 0. The device header is right
+  and the chapter incomplete.
 - **ERRATUM 1.5.6 IS REAL ON THIS DIE.** Enabling a comparator with
-  MUXNEG = bandgap raised a spurious COMP flag at the 2.048 V
+  MUXNEG = bandgap raises a spurious COMP flag at the 2.048 V
   reference (not at 1.024 V) with nothing to flag - which is why
   `ac.hpp` states the clear-before-arming obligation and why this
   suite keeps it.
@@ -171,15 +170,15 @@ wired and nothing forced.
   board is left protected exactly as it was found.
 
 **INTFLAG.BODVDDDET IS A TRANSITION AND NOT A LEVEL**, and that is why
-this block could not be made a standby wake source here. With the level
-set to 63 - above this board's ~5.1 V - STATUS.BODVDDDET reads 1 and
-stays 1, and the detector reports READY; but clearing the flag under
-that standing condition does NOT bring it back, awake or across a
-standby, and NOT EVEN TO A SAMPLING DETECTOR configured to sample in
-standby at the fastest prescaler. So a detection is a crossing, and
-nothing on this board can make one with the CPU stopped. ACTION = none
-throughout, so nothing was ever forced, and the board's boot BODVDD
-word is restored bit for bit.
+this block cannot be a standby wake source here. With the level set to
+63 - above this board's ~5.1 V - STATUS.BODVDDDET reads 1 and stays 1,
+and the detector reports READY; but clearing the flag under that
+standing condition does not bring it back, awake or across a standby,
+and not even to a sampling detector configured to sample in standby at
+the fastest prescaler. So a detection is a crossing, and nothing on
+this board can make one with the CPU stopped. ACTION = none throughout,
+so nothing is forced, and the board's boot BODVDD word is restored bit
+for bit.
 
 ## Not covered yet
 
@@ -190,8 +189,8 @@ Driver gaps:
   interrupt has an arm/disarm surface and an ISR body it shares with
   the block, and no letter has ever seen it fire.
 - **The BODVDD as a standby WAKE SOURCE**, and with it any effect of
-  `run_standby` / `sampled_in_standby`: a detection is a SUPPLY
-  CROSSING and nothing on this board can make one while the CPU is
+  `run_standby` / `sampled_in_standby`: a detection is a supply
+  crossing and nothing on this board can make one while the CPU is
   stopped. What that costs is measured rather than assumed - see "Bench
   findings" - and forcing a brown-out stays out of scope.
 - **`Vreg::run_standby`** (erratum 1.8.14's workaround) and

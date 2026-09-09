@@ -1,7 +1,6 @@
-// twi_link.hpp - the board-to-board bench protocol of the TWI campaign:
-// what test_avr_twi (board A, the DUT and the bus HOST) tells twi_peer
-// (board B, the instrument and a bus CLIENT) over the very bus both are
-// testing.
+// twi_link.hpp - the board-to-board bench protocol of the TWI suites:
+// what test_avr_twi (the DUT, and the bus HOST) tells twi_peer (the
+// instrument, and a bus CLIENT) over the very bus both are testing.
 //
 // APP-LEVEL BENCH TOOLING, not framework. It sits next to the two apps
 // that share it and is included by its plain name; nothing in
@@ -17,18 +16,18 @@
 //
 // THE COMMAND CHANNEL - why I2C needs no dark listener
 //
-// The SPI campaign's peer had to stay mute because SPI has no
-// addressing: every byte the DUT clocked reached the client, and a
-// listener that answered would have fought the DUT pin for pin. I2C
-// addresses, so the command channel is simply a CLIENT ADDRESS
-// (`command_addr` below) that no test of the DUT's single-board half
-// ever sends, general-calls or mask-matches. In command mode the peer's
-// client is maximally deaf: that one address exactly, General Call OFF,
-// no mask, no second address, PMEN off, Smart mode off, and even the
-// Stop interrupt off - so the ONLY thing that raises a flag on board B
-// while the DUT runs `z` is an address packet naming `command_addr`.
-// That is the whole coexistence argument, and `test_avr_twi z` scoring
-// its full 175 with this firmware attached is its proof.
+// On a bus with no addressing a peer has to stay mute: every byte the
+// DUT clocks reaches the client, and a listener that answered would
+// fight the DUT pin for pin. I2C addresses, so the command channel is
+// simply a CLIENT ADDRESS (`command_addr` below) that no test of the
+// DUT's single-board half ever sends, general-calls or mask-matches.
+// In command mode the peer's client is maximally deaf: that one
+// address exactly, General Call OFF, no mask, no second address, PMEN
+// off, Smart mode off, and even the Stop interrupt off - so the ONLY
+// thing that raises a flag on the peer while the DUT runs its
+// single-board half is an address packet naming `command_addr`. That
+// is the whole coexistence argument, and it is what lets the DUT run
+// every single-board test with this firmware attached to the wire.
 //
 // REQUEST / RESPONSE. One command is two bus tenures:
 //
@@ -63,8 +62,8 @@ inline constexpr uint8_t magic = 0xC3;
 inline constexpr uint8_t max_payload = 32;
 
 /// The peer's command-mode client address. Chosen so that NO test of
-/// test_avr_twi's single-board half (a..j) addresses it, mask-matches it
-/// or general-calls it: that half uses 0x42, 0x43, 0x00, 0x40..0x44,
+/// test_avr_twi's single-board half addresses it, mask-matches it or
+/// general-calls it: that half uses 0x42, 0x43, 0x00, 0x40..0x44,
 /// 0x3F, 0x55, 0x54, 0x08, 0x33, 0x77, 0x7E and 0x20.
 inline constexpr uint8_t command_addr = 0x6B;
 
@@ -271,7 +270,7 @@ inline constexpr uint8_t pattern_fixed = 1;      ///< seed every time
 ///   hold_sda   aux16 = microseconds to hold SDA low at most, aux8 =
 ///              how many SCL falling edges release it (0 = only the
 ///              deadline does), ms = deadline
-///   quiet      ms = how long board B stays off the wire entirely
+///   quiet      ms = how long the peer stays off the wire entirely
 struct Params {
     uint16_t count = 0;
     uint16_t ms = 200;
@@ -336,6 +335,13 @@ struct Ident {
     char label[8] = {};      ///< the peer's USERROW board label, NUL padded
     uint8_t xtal = 0;        ///< did the peer's 24 MHz crystal start?
     uint8_t sanity = 0;
+    /// The peer's firmware version. THE HIGH BYTE NAMES THE PEER
+    /// IMPLEMENTATION and is allocated here, once, for every
+    /// architecture that speaks this protocol: 0x01 the avrdx peer,
+    /// 0x02 the samc21 peer, 0x03 the stm32g0 peer. The low byte is
+    /// that peer's own revision. A host may use the high byte to
+    /// expect a capability, never to decide correctness: what a peer
+    /// can do it answers with, and what it cannot it refuses.
     uint16_t version = 0;
 };
 

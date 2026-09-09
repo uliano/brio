@@ -105,10 +105,9 @@
  *    there. `wake_line_open()` is the one-bit assertion of that, and it
  *    is idempotent.
  *
- * WHY RCC_BDCR LIVES HERE AND NOT IN clock.hpp. On the SAM the RTC's
- * clock select sits in the oscillator block and samc21/rtc.hpp never
- * touches it - one register, one owner. The same rule applies here and
- * lands the other way round, for three reasons: RCC_BDCR is unreachable
+ * WHY RCC_BDCR LIVES HERE AND NOT IN clock.hpp. One register, one
+ * owner - and the owner is this chapter, for three reasons: RCC_BDCR is
+ * unreachable
  * without PWR_CR1.DBP, so its access discipline is the RTC DOMAIN's and
  * not the clock tree's; RTCSEL is one-way, and a clock verb whose
  * consequence can only be undone by wiping a calendar belongs beside the
@@ -1578,10 +1577,10 @@ struct Rtc {
     // ---- debug --------------------------------------------------------------
 
     /// DBG_APB_FZ1.DBG_RTC_STOP: whether the calendar freezes when a
-    /// debugger halts the core. Needs RCC_APBENR1.DBGEN, the reset.hpp
-    /// caveat again, and like the watchdogs' bit it is "not reset by
-    /// system reset" - whatever a debug session left there is what the
-    /// next boot finds.
+    /// debugger halts the core. Needs RCC_APBENR1.DBGEN, the same
+    /// caveat reset.hpp carries, and like the watchdogs' bit it is "not
+    /// reset by system reset" - whatever a debugger left there is what
+    /// the next boot finds.
     static bool debug_freeze() {
         return (DBG->APBFZ1 & DBG_APB_FZ1_DBG_RTC_STOP) != 0u;
     }

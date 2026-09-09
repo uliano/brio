@@ -29,16 +29,17 @@ fixture is `test/family_stm32g0/clock.cpp` plus eight negatives under
 
 ## What the silicon does
 
-**The third clock model brio meets.** The AVR has one prescaler on one
-main clock; the SAM has a generic-clock generator per peripheral; this
-family has ONE SYSCLK selected from five roots (HSISYS, HSE, PLLRCLK,
-LSI, LSE), two SHARED PRESCALERS below it (HPRE for HCLK = the AHB
-and the core, PPRE for PCLK = the APB), an ENABLE BIT per peripheral
-that gates its bus clock (RCC_IOPENR/AHBENR/APBENR1/APBENR2), and a
-KERNEL-CLOCK multiplexer for the few peripherals that may run off
-something other than their bus (USART1..3, LPUARTs, I2C1, ADC,
-LPTIMs, RTC - RCC_CCIPR; the I2S, USB and FDCAN - RCC_CCIPR2, a SECOND
-register the smaller headers do not even declare as a struct member).
+**A clock tree shaped like neither of the other families'.** The AVR
+has one prescaler on one main clock; the SAM has a generic-clock
+generator per peripheral; this family has ONE SYSCLK selected from five
+roots (HSISYS, HSE, PLLRCLK, LSI, LSE), two SHARED PRESCALERS below it
+(HPRE for HCLK = the AHB and the core, PPRE for PCLK = the APB), an
+ENABLE BIT per peripheral that gates its bus clock
+(RCC_IOPENR/AHBENR/APBENR1/APBENR2), and a KERNEL-CLOCK multiplexer for
+the few peripherals that may run off something other than their bus
+(USART1..3, LPUARTs, I2C1, ADC, LPTIMs, RTC - RCC_CCIPR; the I2S, USB
+and FDCAN - RCC_CCIPR2, a SECOND register the smaller headers do not
+even declare as a struct member).
 Three of those multiplexers are DRIVEN: the USART's, by
 `stm32g0/usart.hpp`, BOTH LPTIMs', by `stm32g0/lptim.hpp`, and the
 FDCAN's, by `stm32g0/fdcan.hpp` - which is where a peripheral's own
@@ -122,8 +123,8 @@ rule, never an approximation.
 with the divider at anything but 1 the part cannot enter Stop when
 SYSCLK is HSE, and clock-request-capable peripherals cannot wake it
 from Stop. A divided `internal` rate is legal here and stated as a
-caveat for the sleep site. THIS HALF OF THE ERRATUM IS NOW MEASURED and
-it is real: a USART on HSI16 with its wake armed does NOT come out of
+caveat for the sleep site. This half of the erratum is measured and it
+is real: a USART on HSI16 with its wake armed does NOT come out of
 Stop 0 at HSIDIV = /4, where the RTC does (usart.md, pwr.md).
 
 **The KERNEL clocks are the other half of RCC_CCIPR and they are what a
@@ -152,8 +153,8 @@ does not move, the LPTIM on LSE and the RTC); `SyncHost`, `IrdaLink`
 and `Smartcard` REFUSE (no `rebase`); the FDCAN and the window watchdog
 take the bus rate as a number and keep it; the LPTIM, the RTC and the
 IWDG never see SYSCLK at all. `delay_us` dispatches on the rate index
-into a per-rate table built at compile time - no division at wait time,
-as on the AVR ([../armv6m/README.md](../armv6m/README.md)).
+into a per-rate table built at compile time - no division at wait time
+([../armv6m/README.md](../armv6m/README.md)).
 
 **The clock output reaches the timers with no pad.** RCC_CFGR.MCOSEL /
 MCOPRE put one of the tree's clocks, prescaled by a power of two, on a
@@ -171,7 +172,7 @@ priced its lap wakes ([tim.md](tim.md) for the timer half,
 I2S, USB and FDCAN selects live there (5.4.22) and not in the CCIPR, and
 the register is a STRUCT MEMBER only the G0B1/G0C1 header declares - so
 the reserve hands back a pointer to it (`rcc_ccipr2()`, null elsewhere,
-the `flash_ecc2r()` precedent) and `kernel_clock2(pos, code)` returns
+the shape `flash_ecc2r()` has) and `kernel_clock2(pos, code)` returns
 false with nothing written on a part that has none. That is what lets
 this file compile unchanged on every header of the pack while the
 FDCAN's own select is driven from `fdcan.hpp` ([fdcan.md](fdcan.md)).
@@ -319,15 +320,14 @@ PLLRCLK), RCC_PLLCFGR 0x30000802 (R 2, REN, N 8, M 1, source HSI16),
 FLASH_ACR latency 2, PWR_CR1 0x208 (Range 1); SysTick's reload
 63999 and the console's baud 115107 = 64e6/556 are the same 64 MHz
 seen from two other registers, and the kernel tick is +0.24 % against
-the PC's clock over ten seconds (HSI16's 1 %). The raw-register probe
-app, with no brio code in the loop, reaches the same state with the
-same sequence (its blink at 64 MHz is a 4x faster blink than at 16).
+the PC's clock over ten seconds (HSI16's 1 %). A raw-register sequence
+with no brio code in the loop reaches the same state in the same order.
 
 **The dynamic clock on silicon** (`test_stm32_clock`, ten letters, 42
-verdicts, 42/42 three times, on the tickless platform with the console
-on HSI16 and USART1 as a single-wire loop on PCLK as the rebased user;
-TIM2 on MCO = HSI16/64 as the wall, weighed at 250 kHz within HSI16's
-1 % of the crystal):
+verdicts, on the tickless platform with the console on HSI16 and USART1
+as a single-wire loop on PCLK as the rebased user; TIM2 on MCO =
+HSI16/64 as the wall, weighed at 250 kHz within HSI16's 1 % of the
+crystal):
 
 - Every rung reads back as its type claims - SWS, HSIDIV, PLLON, VOS,
   LPR, REGLPF, LATENCY - and the CPU is at the rate the type claims on
@@ -337,7 +337,7 @@ TIM2 on MCO = HSI16/64 as the wall, weighed at 250 kHz within HSI16's
   rung (64 of 64; BRR 0x8B at 16 MHz, 0x11 at 2), and 72 switches round the
   ladder with 16 bytes exchanged at each landed with no refusal, no
   wrong state and no bad byte.
-- **The four steps the design named as unbenched are closed**: HSIDIV
+- **The four delicate steps of a rate change, each measured**: HSIDIV
   written under a running HSISYS core (0 -> 3 at 16 MHz, the program
   going on at 2), a wait-state DECREASE (2 -> 1 after the fall to 16,
   1 -> 0 after the fall to 2, read back), Range 2 with its own column
@@ -384,9 +384,8 @@ TIM2 on MCO = HSI16/64 as the wall, weighed at 250 kHz within HSI16's
   and 64 MHz, never fast - then handed back with the handler silent
   again. (The suite lists BOTH SysTick writers as users for that
   letter, which no program would do; the two `rebase()` write the same
-  reload and neither touches CTRL - the counter's first version
-  reprogrammed CTRL and turned the ticker's interrupt off, which is why
-  it no longer does.)
+  reload and neither touches CTRL - a rebase that reprogrammed CTRL
+  would turn the other writer's interrupt off.)
 - **A PLL rate in Range 2**: 16 MHz as PLLRCLK from a VCO at 128 MHz
   (M 1 / N 8 / R 8, exactly table 47's Range 2 ceiling, the driver's
   own static_assert), VOS 2, one wait state; reached from 64 MHz on the
@@ -394,11 +393,10 @@ TIM2 on MCO = HSI16/64 as the wall, weighed at 250 kHz within HSI16's
   low-power run in 304..312 us, left for it in 92..96 us and for 64 MHz
   in 88..92, the loop exact at every landing, the CPU at 16 MHz on the
   crystal's scale.
-- **HSIDIV left behind a PLL rate**, the first version's finding: with
-  no HSIDIV write in the PLL rate's `init()`, every rise from 2 MHz
-  reached 64 MHz on the crystal's scale with HSIDIV still 3 - which is
-  what the dynamic clock's write after every switch onto the PLL now
-  prevents (above).
+- **HSIDIV left behind a PLL rate**: with no HSIDIV write in the PLL
+  rate's `init()`, a rise from 2 MHz reaches 64 MHz on the crystal's
+  scale with HSIDIV still 3 - which is what the dynamic clock's write
+  after every switch onto the PLL prevents (above).
 - **`delay_us` at every rung**, on the wall: 20/100/500/900 us served
   at 20..900 (+0..4) at 64 MHz, +4..8 at 16 MHz, +32..40 at 2 MHz - the
   poll's own cost, 32 times the 64 MHz one - never early, the
@@ -409,7 +407,7 @@ TIM2 on MCO = HSI16/64 as the wall, weighed at 250 kHz within HSI16's
 `test_stm32_clock` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
 0x2000): the four rungs of the pack, the regimes, the wait states, the
 PLL's refusals, the rebased users and the Stop rounds all behave as the
-type claims, on a second die.
+type claims.
 
 **THE ONE THING THAT MOVES IS THE WALL.** This suite weighs every rung
 against a clock that does NOT move with SYSCLK: TIM2's own ETR, with no
@@ -431,13 +429,14 @@ G0B1's are four (the headers' own masks): one clock output, not two.
 
 ## On the third silicon
 
-`test_stm32_clock` scores **40 of 42** on the Nucleo-G031K8 (DEV_ID
-0x466, REV_ID 0x1003): the whole ladder, all four rates, the ADC across
-them, the kernel, both Stops and the PLL rate in Range 2. The two
-verdicts not claimed are letter `h`'s (`delay_us` at 20 us), and the
-cause is the G071's: RM0444 22.4.25's ETRSEL list gives code 0100 (MCO)
-to the G0B1/G0C1 sales types alone, so `tim_etrsel_has_mco(2)` is false
-here, and the 4 us wall a 20 us delay is judged on does not exist.
+`test_stm32_clock` claims 40 of its 42 verdicts on the Nucleo-G031K8
+(DEV_ID 0x466, REV_ID 0x1003): the whole ladder, all four rates, the ADC
+across them, the kernel, both Stops and the PLL rate in Range 2. The two
+verdicts not claimed are letter `h`'s (`delay_us` at 20 us), for the
+same reason as on the G071RB: RM0444 22.4.25's ETRSEL list gives code
+0100 (MCO) to the G0B1/G0C1 sales types alone, so
+`tim_etrsel_has_mco(2)` is false here, and the 4 us wall a 20 us delay
+is judged on does not exist.
 
 **THE WALL IS THE LSE CRYSTAL ON TIM2'S ETR** (code 0011, the one every
 part has, 30.5 us a count), which this board runs. The suite PROBES the
@@ -474,11 +473,11 @@ Driver gaps:
 - The other roots as SYSCLK: HSE (crystal, or the ST-LINK's MCO in
   bypass through the Nucleo's solder bridges), LSI, LSE, and HSI48
   (the G0B1/G0C1's USB clock, with its CRS); the PLL's P and Q
-  outputs and its HSE input. LSE now RUNS on this board and is
-  measured (32703 Hz against the core - [rtc.md](rtc.md)); what is
-  missing is only the path that would make it SYSCLK, and the day it is
-  built the task must ASK `RtcDomain` for a running crystal rather than
-  start one behind the RTC's back.
+  outputs and its HSE input. LSE RUNS on this board and is measured
+  (32703 Hz against the core - [rtc.md](rtc.md)); what is missing is
+  only the path that would make it SYSCLK, and the day it is built the
+  task must ASK `RtcDomain` for a running crystal rather than start one
+  behind the RTC's back.
 - HPRE and PPRE other than 1 (a bus-dividing task, and `pclk_hz`
   becoming a real second rate); MCO2 and MCO on a pad; the CSS and
   LSECSS; the RCC interrupts; the peripheral RESET registers beyond
@@ -495,8 +494,7 @@ Driver gaps:
 - HSI16 trimming (RCC_ICSCR) and its measurement against LSE through
   TIM14/16/17 (5.2.16) - the FREQM-style scale this board does not
   have yet.
-- Flash: everything but the latency and the two accelerators (the
-  FLASH campaign).
+- Flash: everything but the latency and the two accelerators.
 
 Implemented, not bench-verified: `FlashAccel`'s setters; a `BasicTicker`
 program (the SysTick platform) rescaling under a kernel - the ticker's
@@ -506,8 +504,8 @@ program (the SysTick platform) rescaling under a kernel - the ticker's
 The kernel-clock multiplexer is bench-driven for all four codes on
 USART2 and on both LPUARTs ([usart.md](usart.md), [lpuart.md](lpuart.md)),
 and CCIPR2's FDCAN field for its one reachable code
-- including a console that kept talking at 115200 while its own clock
-moved under it. HSIKERON is written, read back and slept on; what it
+- including a console that keeps talking at 115200 while its own clock
+moves under it. HSIKERON is written, read back and slept on; what it
 COSTS in current is the meter question this stratum keeps deferring.
 
 On the second silicon (the Nucleo-G071RB), NOT COVERED: **`delay_us` at

@@ -25,6 +25,9 @@ microsecond busy-wait over SysTick), `samc21/sleep.hpp` (`Pm`,
 target-independent power model above the last of these is
 [design/power.md](../design/power.md). The crt is `samc21/src/glue/
 startup_samc21.cpp` + `samc21/ld/samc21j18a.ld` in the build project.
+The bench suites are `test_samc_platform` (the waking half and
+`delay_us`), `test_samc_sleep` (the stopping half) and
+`test_samc_timebase` (the standby-surviving site).
 
 These are one story - how a program on this silicon runs one event at
 a time, waits, keeps time and stops - told across one stratum header
@@ -55,8 +58,8 @@ the interrupt - there is no flag for the handler to clear. Because it
 is core-private, no application could ever use it for PWM or capture:
 claiming it for the kernel tick costs the application nothing - the
 same reasoning that gave the AVR tick to the RTC's PIT. The reload is
-a function of the CPU clock, and that is the one caveat that outlives
-the bring-up: the day this target grows a DynamicClock, the ticker
+a function of the CPU clock, and that is the one caveat worth
+carrying: the day this target grows a DynamicClock, the ticker
 must either become a ClockUser or move to the RTC (`ticker.hpp`
 refuses to compile with a dynamic clock that does not list it - the
 caveat is mechanical, not a comment).
@@ -161,10 +164,10 @@ the 1000 Hz alias. `init(clock)` computes the reload from the clock
 tag (refusing a reload that does not fit 24 bits), `tick()` is the
 handler body, `ticks()/millis()/secs()/now()` read the counters -
 through a volatile access, because word atomicity alone is not
-visibility (see the header's Concurrency note; the bench finding
-below is why that sentence exists). `pause()/resume()` gate only the
-interrupt: SysTick has no pause, so the first tick after resume can
-be short - the escape hatch, not a metrology verb.
+visibility (see the header's Concurrency note, and the bench finding
+below). `pause()/resume()` gate only the interrupt: SysTick has no
+pause, so the first tick after resume can be short - the escape hatch,
+not a metrology verb.
 
 **`SysTickInterruptGuard`** (ticker.hpp, next to the register it
 guards): an RAII scope that holds the SysTick interrupt off and puts
@@ -186,7 +189,7 @@ register for the caller.
 **`SamSleepSite`** (sleep.hpp): the `util/power.hpp` adapter. `none`
 maps to IDLE0, `light` to IDLE2, `standby` to STANDBY and `deep` to
 STANDBY as well - **this family has nothing deeper, so the model's
-map-an-absent-rung-shallower rule is not the identity here as it was
+map-an-absent-rung-shallower rule is not the identity here as it is
 on AVR DA/DB, and `armed()` reports `standby` for a `deep` request:
 what the target really took**. `light` is IDLE2 rather than IDLE0
 because there is no SEN bit on this silicon: IDLE0 is both a sleep
@@ -221,30 +224,28 @@ plus this family's measured facts - [../armv6m/README.md](../armv6m/README.md)) 
 timed on SysTick's own counter and CAPPED BELOW ONE KERNEL TICK by
 contract: a wait of a tick or more is TimeEvent territory, and the call
 REFUSES it (false, no time spent) instead of serving a latency bug -
-the boundary avrdx/delay.hpp never had, drawn right on the second
-target from birth. It reads VAL only (no side effect; SysTick stays the
-Ticker's in writing), accumulates deltas with the reload wrap folded
-in - so it is exact across tick boundaries and inside
-SysTickInterruptGuard windows alike - and converts through
+a boundary `avrdx/delay.hpp` does not draw. It reads VAL only (no side
+effect; SysTick stays the Ticker's in writing), accumulates deltas with
+the reload wrap folded in - so it is exact across tick boundaries and
+inside SysTickInterruptGuard windows alike - and converts through
 clock_hz(clock) with the cycles-per-microsecond factor rounded UP, the
-kernel's own at-least. NO DIVISION RUNS AT WAIT TIME, EVER,
-and nothing wider than 32 bits either: the M0+ has no high multiply,
-so gcc calls __aeabi_uidiv even for a constant divisor (~4 us a call)
-and a 64-bit product is another libcall of the same size (~4 us) -
-both measured on early versions of this file and both removed. The one
-division lives in `delay_rate()`: folded with a compile-time Clock, or
-paid ONCE per clock change by a caller holding a runtime rate as a
-`DelayRate` (the SpiHost's cs_setup timing is that caller); the
-overflow guard is the Ticker's own sub-1024 Hz refusal, which bounds
-every legal tick period under 65536 us. With SysTick not running (a
-program with no Ticker) the answer is false, not a fallback loop. Measured by test_samc_platform
-letter d against a TC ruler: 5..900 us all served at least and within
-~1 us of call overhead once the measurement bracket's own ~6 us is
-subtracted; 200 waits of 50 us with NOT ONE EARLY; the 1000 us cap
-refused at the bracket's own cost; 999 us served. The measurement
-lesson the letter paid for: two back-to-back synchronized TC reads
-cost ~6..10 us of their own, and the first version charged that
-bracket to the delay.
+kernel's own at-least. NO DIVISION RUNS AT WAIT TIME, EVER, and nothing
+wider than 32 bits either: the M0+ has no high multiply, so gcc calls
+__aeabi_uidiv even for a constant divisor (~4 us a call) and a 64-bit
+product is another libcall of the same size (~4 us), both measured - so
+neither is on the path. The one division lives in `delay_rate()`:
+folded with a compile-time Clock, or paid ONCE per clock change by a
+caller holding a runtime rate as a `DelayRate` (the SpiHost's cs_setup
+timing is that caller); the overflow guard is the Ticker's own
+sub-1024 Hz refusal, which bounds every legal tick period under
+65536 us. With SysTick not running (a
+program with no Ticker) the answer is false, not a fallback loop.
+Measured by `test_samc_platform` letter d against a TC ruler: 5..900 us
+all served at least and within ~1 us of call overhead once the
+measurement bracket's own ~6 us is subtracted; 200 waits of 50 us with
+NOT ONE EARLY; the 1000 us cap refused at the bracket's own cost;
+999 us served. Two back-to-back synchronized TC reads cost ~6..10 us of
+their own, which that bracket subtracts.
 
 ## How to use it
 
@@ -306,16 +307,15 @@ the supply already at working point, and is stated as such.
   reload read back over SWD is exactly 47999.
 - The visibility clause in ticker.hpp is not theoretical: with the
   getters reading the counters bare (non-volatile, no barrier), gcc
-  at -Os DELETED a `while (ticks() < t)` polling loop outright - the
-  function compiled to an immediate return with no load at all. The
+  at -Os deletes a `while (ticks() < t)` polling loop outright - the
+  function compiles to an immediate return with no load at all. The
   volatile-access read (ring.hpp's own technique) restores the load
-  inside the loop; the kernel path had been safe only by the accident
-  of crossing InterruptGuard barriers every turn.
-- WFI-then-enable ran continuously under both bring-up firmwares (a
-  1 kHz tick is a permanent lost-wakeup stress); no stall observed.
-  Instrumented since: over a quarter second the idle loop turns
-  109000 times spinning and 250 times sleeping in IDLE0, i.e. exactly
-  once per SysTick tick.
+  inside the loop; a kernel path that crosses InterruptGuard barriers
+  every turn is safe only by that accident.
+- WFI-then-enable runs continuously under a 1 kHz tick - a permanent
+  lost-wakeup stress - with no stall observed. Instrumented: over a
+  quarter second the idle loop turns 109000 times spinning and 250
+  times sleeping in IDLE0, i.e. exactly once per SysTick tick.
 - The vendored CMSIS 5.9.0 really does put "memory" clobbers on
   `cpsid`/`cpsie`/`msr primask` and even `wfi` - the InterruptGuard's
   barrier claim is the intrinsics', verified, not assumed.
@@ -335,24 +335,16 @@ Stopping:
   i.e. a WFI and an exception entry. **IDLE2 costs 24 to 30 us more
   than IDLE0** on a board with no CAN traffic at all - chapter 19
   presents IDLE2 as IDLE0 with one more clock gated and says nothing
-  about paying for it at the wake. (THE ABSOLUTES HERE WERE CORRECTED
-  on 2026-08-29: the campaign's original 3.5..4.4 us was measured
-  through tc.hpp's one-behind READSYNC defect, whose differences
-  telescoped onto the inter-round ARMING time instead of the wait
-  window - tc.md carries the mechanism and the fix. Every structural
-  conclusion below survived the correction; the absolute bills did
-  not.)
+  about paying for it at the wake.
 - **Waking from STANDBY costs about 106 us** more than waking from
-  IDLE0 (mean of 64 single wakes on the crystal ruler; originally
-  reported as 16.6..17.8 us through the same defect). That is the
+  IDLE0 (mean of 64 single wakes on the crystal ruler). That is the
   whole bill: **nothing in STDBYCFG or SUPC.VREG moves it**. Six
   combinations of VREGSMOD (AUTO / PERFORMANCE / LP) x SUPC.VREG.
   RUNSTDBY x BBIASHS spread under 2 us, inside twice the scatter of
   the same measurement repeated first and last. This family therefore
   has NO separate regulator bill, unlike AVR DA/DB where the regulator
-  was a distinct ~290 us item on top of the oscillator's - and even
-  the corrected 106 us is far below the AVR's 290 us + 1.77 ms
-  crystal restart.
+  is a distinct ~290 us item on top of the oscillator's - and 106 us
+  is far below the AVR's 290 us + 1.77 ms crystal restart.
 - Erratum 1.8.14's predicted fingerprint - PERFORMANCE alone keeping
   GCLK0 requested, hence a cheap wake - **is not visible in the wake
   time**. Reported, not claimed: the erratum is about which regulator
@@ -377,30 +369,28 @@ Stopping:
   with ONDEMAND = 0 and RUNSTDBY = 0 as stopped. The same shape errata
   1.3.1 records for the FDPLL and marks revision B. The practical
   consequence is large: **a standby on this board costs no crystal
-  restart**, where the same crystal on the first target cost 1.77 ms
-  out of every deep sleep.
+  restart**, where AVR DA/DB pays 1.77 ms out of every deep sleep.
 - **The watchdog runs through standby and its early warning wakes the
   device** - 123 ms measured for a 128-cycle offset on its nominal
   1.024 kHz. It is also this suite's anti-wedge backstop: a wake that
   never arrives costs a reboot and a banner instead of a mute board.
-- **The power model needed no change at all.** `util/power.hpp`
-  compiled and ran UNTOUCHED on this second architecture: the vote
-  round, the unanimity rule, the `PowerLock` ceilings, the deadline
-  guard and the first-event-after-wake contract all pass on the real
-  kernel with two voters. A two-voter round costs 153 us post-to-armed.
-- The deviation the model asks of a platform is one line here rather
-  than the AVR's: `SamPlatform::idle()` already took whatever was
-  armed. Making it read SLEEPCFG (for the erratum guard) and adding a
-  DSB cost **+52 bytes on blink and +44 on console**; the other twelve
-  SAM images that do not use `idle()` are byte-identical.
+- **The power model is realized here as written.** `util/power.hpp`
+  needs nothing of its own on this silicon: the vote round, the
+  unanimity rule, the `PowerLock` ceilings, the deadline guard and the
+  first-event-after-wake contract all hold on the real kernel with two
+  voters. A two-voter round costs 153 us post-to-armed.
+- The deviation the model asks of a platform is small here:
+  `SamPlatform::idle()` takes whatever is armed already. The erratum
+  guard's SLEEPCFG read and the DSB cost about 50 bytes of flash in an
+  image that idles, and nothing at all in one that does not.
 
 ## Sleep, peripheral by peripheral
 
 Everything above is the CPU's side of a standby. THIS SECTION IS THE
 OTHER SIDE - what the rest of the die does while the core is stopped -
-and it is the transversal answer every chapter's own "Not covered yet"
-used to defer to "the power pass". Each chapter's document carries its
-own numbers; what belongs here is the shape they all share.
+and it is the transversal answer each chapter's own sleep row points
+at. Each chapter's document carries its own numbers; what belongs here
+is the shape they all share.
 
 **THE RULE, in one line: a peripheral's own RUNSTDBY is a CLOCK
 REQUEST, and a request is what carries a whole chain through a
@@ -415,13 +405,12 @@ OSC48M changes none of it: a request is a request.
 counting a DPLL-fed generator through a standby, the count across the
 sleep equals the count awake tick for tick (1414 against 1413) - a loop
 that had stopped would have lost the whole window and paid a relock on
-top. So the open question this document used to record is answered: for
-a peripheral that asks, the loop runs through. Its CLKRDY reads set at
-that wake either way, so the status bit remains no evidence. Whether it
-also runs UNREQUESTED - erratum 1.3.1, revision B, and a CONSUMPTION
-claim - is out of reach here twice over: the only witness of a running
-loop is a peripheral clocked from it, which is itself a request, and
-this bench has no supply meter.
+top. For a peripheral that asks, the loop runs through. Its CLKRDY
+reads set at that wake either way, so the status bit is no evidence.
+Whether it also runs UNREQUESTED - erratum 1.3.1, revision B, and a
+CONSUMPTION claim - is out of reach here twice over: the only witness
+of a running loop is a peripheral clocked from it, which is itself a
+request, and this bench has no supply meter.
 
 **Table after table says the same thing about the blocks that convert.**
 The ADC's table 38-4, the SDADC's 39-1, the TSENS's 43-1 and the TCC's
@@ -476,7 +465,7 @@ every pin-driven sleep measurement here is built on:
       = PORT event input, action OUT, on the pad
       = the pad walks between the rails on its own.
 
-**What that chain proved about the EIC.** An EXTINT line wakes the
+**What that chain proves about the EIC.** An EXTINT line wakes the
 device from standby in 7 us; and ERRATUM 1.11.6 - which the errata
 matrix marks LIVE ON EVERY REVISION of E/G/J, "with the asynchronous
 edge detection enabled and the system in Standby mode, only the first
@@ -509,17 +498,17 @@ offered); a SYNCHRONIZED or FILTERED one has its output forced to zero
 (1 of 100, which is the wake's own seam) unless CTRL.RUNSTDBY is set,
 and then it is 100 again.
 
-**Two errata this pass could judge, both live on paper.** ADC erratum
-1.4.5 - "SYNCBUSY.SWTRIG becomes stuck to one after wake-up from
+**Two errata judged here, both live on paper.** ADC erratum 1.4.5 -
+"SYNCBUSY.SWTRIG becomes stuck to one after wake-up from
 Standby Sleep mode" - DOES NOT REPRODUCE: the register reads zero at
 every wake of a sleepwalking converter. DAC erratum 1.9.2 DOES, with
 its own control. Erratum 1.25.2 (the FDPLL's ONDEMAND not functional in
 standby) is unreachable by construction, `samc21/clock.hpp` never setting
 that bit and offering no verb that could.
 
-**One more sentence of chapter 19 turned out narrower than the
-silicon.** 19.5.2 makes CLK_PM_APB one-way - "can only be re-enabled by
-a system reset". Measured, `Pm::bus_clock(false)` clears MCLK's mask
+**One more sentence of chapter 19 is narrower than the silicon.**
+19.5.2 makes CLK_PM_APB one-way - "can only be re-enabled by a system
+reset". Measured, `Pm::bus_clock(false)` clears MCLK's mask
 bit and `Pm::bus_clock(true)` puts it back, SLEEPCFG reads and writes
 as before, and a real standby still works afterwards with no reset in
 between. The one-way sentence is about the CLOCK inside the block and
@@ -534,24 +523,23 @@ the ALARM (a COMP0 wake placed on `ticks_to_next()`, rounded UP) and
 the WITNESS (the frozen span, converted DOWN against a rate the caller
 must not under-state, handed to `Ticker::advance()` at the first event
 after the wake - or right in the alarm's own ISR). SysTick stays the
-ticker; the power MODEL is untouched - everything fits inside
-arm()/disarm(). Measured on the crystal: a 500 ms time event through a
+ticker and the power MODEL needs nothing of its own - everything fits
+inside arm()/disarm(). Measured on the crystal: a 500 ms time event through a
 standby matures at 507 ms of wall (the band is nominal + 3.5%, the
 default rate being a deliberate over-estimate), a resync of ~473 ticks,
 millis() within the stated bias of the wall (502 over 510), six 150 ms
 rounds all at 152 ms and NOT ONE EARLY, and a foreign wake mid-sleep
 (the watchdog's early warning) re-placed the alarm for the remainder
-with the deadline still met. THE FINDING THAT COST THE FIRST VERSION A
-WEDGE: the never-early bias GUARANTEES kernel time is still short of
-the deadline at the alarm, so the alarm's ISR must do three things -
-acknowledge, resync, and HAND THE MACHINE BACK TO A TICKING SLEEP
-(SLEEPCFG to IDLE0); with only the first two, the loop re-entered the
-still-armed standby behind a spent alarm and nothing ever ended it
-(caught by RAM dump: advance 490 against a deadline 491 ticks out).
-The model's after-a-wake convention (speak to the manager, even with
-`SleepRequested{none}`) is LOAD-BEARING with this site and stated on
-it. `SamSleepSite` remains the v1 site for programs that want the
-plain restriction.
+with the deadline still met. THE ALARM'S ISR MUST DO THREE THINGS: the
+never-early bias GUARANTEES kernel time is still short of the deadline
+at the alarm, so the handler has to acknowledge, resync, and HAND THE
+MACHINE BACK TO A TICKING SLEEP (SLEEPCFG to IDLE0). With only the
+first two the loop re-enters the still-armed standby behind a spent
+alarm and nothing ever ends it (RAM dump: advance 490 against a
+deadline 491 ticks out). The model's after-a-wake convention (speak to
+the manager, even with `SleepRequested{none}`) is LOAD-BEARING with
+this site and stated on it. `SamSleepSite` is the plain site for
+programs that accept the restriction.
 
 Driver gaps (not built):
 - **PAC.** Chapter 19's registers are optionally PAC write-protected
@@ -565,7 +553,7 @@ Driver gaps (not built):
   unless taught otherwise).
 
 Implemented but not bench-verified:
-- `break_here()` with no debugger attached. It is now REACHED
+- `break_here()` with no debugger attached. It is REACHED
   deliberately - `test_samc_platform` letter i runs a panic() through
   it - but what it does depends on DHCSR.C_DEBUGEN: with a probe
   attached the core HALTS on the BKPT instead of faulting, and that

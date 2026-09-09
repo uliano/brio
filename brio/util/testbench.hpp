@@ -4,16 +4,16 @@
  * TestBench: the one implementation of the bench SUITE GRAMMAR.
  *
  * A `test_<target>_<subject>` app is a menu of single-letter tests over
- * a serial console. Every one of them had grown its own copy of the same
- * ritual - a letter table, a verdict printer, a pair of counters, the
- * per-letter tally and the closing total - and the ritual is not free
- * decoration: `tools/bench.py` READS it. Its judge matches
+ * a serial console. The ritual around them - a letter table, a verdict
+ * printer, a pair of counters, the per-letter tally and the closing
+ * total - is not free decoration: `tools/bench.py` READS it. Its judge
+ * matches
  *
  *     N pass, M fail
  *
- * and waits for the "ALL:" marker followed by the "> " prompt. Sixteen
- * hand-written copies of a machine-read grammar is sixteen chances to
- * drift, so the grammar lives here and nowhere else:
+ * and waits for the "ALL:" marker followed by the "> " prompt. A
+ * machine-read grammar copied into every suite is one chance to drift
+ * per copy, so the grammar lives here and nowhere else:
  *
  *     -- <title>                       (one letter starts)
  *       PASS  <name>                   (verdict, two spaces of indent)
@@ -206,8 +206,7 @@ private:
         bool in_all = true;
     };
 
-    /// The all-key answers to either case, the way every hand-written
-    /// suite accepted 'z' and 'Z'.
+    /// The all-key answers to either case: 'z' and 'Z' both run the set.
     bool is_all_key(char c) const {
         return c == all_key_ ||
                (all_key_ >= 'a' && all_key_ <= 'z' &&

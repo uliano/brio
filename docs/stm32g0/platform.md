@@ -58,13 +58,12 @@ construction. What the WFI enters is WHATEVER IS ARMED: SCR.SLEEPDEEP is
 0 out of reset and this file never writes it, so a bare WFI is Sleep -
 HCLK, SysTick and every peripheral keep running (5.3) - and with
 `stm32g0/sleep.hpp`'s site having armed a Stop, the same WFI is that
-Stop. **THIS FILE NEEDED NO CHANGE FOR THE SLEEP CAMPAIGN**, and that is
-worth stating beside the other two targets: the AVR's `idle()` had to
-learn to honour a standing SEN bit and the SAM's had to grow an erratum
-guard, while this hook was already right, because this silicon selects
-the depth in SCR.SLEEPDEEP and PWR_CR1.LPMS and it writes neither. The
-proof is a byte-identity gate: all ten pre-existing STM32G0 images are
-unchanged by the campaign that added the sites.
+Stop. **THE IDLE HOOK KNOWS NOTHING OF THE DEPTH**, and that is worth
+stating beside the other two targets: the AVR's `idle()` must honour a
+standing SEN bit and the SAM C21's carries an erratum guard, while this
+hook writes neither SCR.SLEEPDEEP nor PWR_CR1.LPMS - this silicon
+selects the depth there, and the arming is the sleep site's business
+alone.
 
 **SysTick rides HCLK.** The reload is `Clock::hz / 1000 - 1`
 (63999 at 64 MHz, read back over SWD); in Stop the core clocks stop and
@@ -231,8 +230,8 @@ int main() {
 ## Bench findings
 
 The reference suite is `test_stm32_platform` (six letters in `z`, 53
-verdicts, 53/53 cold and warm; letter `i` outside it reboots the board
-six times - [reset.md](reset.md) carries the reset and watchdog half).
+verdicts; letter `i` outside it reboots the board six times -
+[reset.md](reset.md) carries the reset and watchdog half).
 What it measures of THIS chapter:
 
 - **PRIMASK nesting is nesting**: leaving an INNER critical section does
@@ -262,18 +261,16 @@ What it measures of THIS chapter:
 
 
 **The tickless timebase** - the reference suite is `test_stm32_tickless`
-(nine letters in `z`, 47 verdicts, 47/47 five times, one from a cold
-flash; `u` outside it needs a keystroke and `x` is the diagnostic that
-found the latencies). What it measures:
+(nine letters in `z`, 47 verdicts; `u` outside it needs a keystroke and
+`x` is the diagnostic that measures the latencies). What it measures:
 
 - **No periodic interrupt**: `SysTick_Handler`, bound on purpose, never
   runs; SysTick counts with TICKINT clear and the 1 ms reload; the
   LPTIM raises one interrupt per deadline and ONE per two-second lap -
   the compare parked at 0xFFFF matches at the counter's own wrap and
-  its CMPM rides the ARRM's interrupt (parked mid-lap, as the first
-  version did, every lap cost two wakes: a ten-second Stop measured ten
-  interrupts where five would do, and now measures six - five laps and
-  the deadline).
+  its CMPM rides the ARRM's interrupt. Parked mid-lap it would be a
+  SECOND wake every lap: a ten-second Stop costs ten interrupts there
+  where parking on the lap costs six - five laps and the deadline.
 - **What a rare-event program pays for the lap**: ten seconds in Stop 1
   with one deadline at the end cost five lap wakes, every one on HSISYS
   with the PLL never re-locked (no AO ran, the manager was never asked:
@@ -298,7 +295,7 @@ found the latencies). What it measures:
 - **A compare equal to ARR matches** like any other value - 0xFFFF
   needs no special case.
 - **THE LATENCIES SCALE WITH THE COUNTER'S CLOCK, NOT THE KERNEL
-  CLOCK** - the finding that fixed the design: a CMP write reaches CMPOK
+  CLOCK**: a CMP write reaches CMPOK
   in 74..88 us on the undivided counter (2..3 counts, lptim.md's
   figure) and in 2.0..2.8 ms at prescaler /32 (2..3 PRESCALED counts,
   a match tried three counts out is missed for a whole lap), and CMPM
@@ -349,59 +346,58 @@ found the latencies). What it measures:
   millisecond asked land 43 per mille late on this die, never early -
   the directional rule's price, paid by a program that does not
   measure.
-- **Two lessons a two-second lap taught the suite itself**: a leg that
-  judges "one interrupt" or "the LPTIM never spoke" over a window
+- **What a two-second lap asks of a suite over this timebase**: a leg
+  that judges "one interrupt" or "the LPTIM never spoke" over a window
   under a second, or that expects CMPOK unswept between two arms, is
   wrong once in four to eight runs when a lap wraps inside it - the
   handler runs for the carry and the loop turns once more, which costs
-  a program nothing and a naive verdict its truth; such legs now wait
-  for the first half of a lap. And a print in flight when a Stop is
+  a program nothing and a naive verdict its truth; such legs wait for
+  the first half of a lap. And a print in flight when a Stop is
   entered is a garbled line (the console's clock stops mid-character):
   drain first.
 
-Two kernel apps on the Nucleo-G0B1RE, both in the tree: blink (two
-AOs, time events at 500/250/100 ms; PA5 sampled over SWD every
-100 ms shows the 500 ms cadence and the Supervisor's switch to 250 ms
-after three seconds) and console (three AOs over USART2; see
-usart.md). The kernel tick against the PC's clock over ten seconds:
+Two kernel programs on the Nucleo-G0B1RE: two AOs under time events at
+500/250/100 ms (PA5 sampled over SWD every 100 ms shows the 500 ms cadence
+and the switch to 250 ms after three seconds), and three AOs over USART2
+(see usart.md). The kernel tick against the PC's clock over ten seconds:
 +0.24 % (HSI16 is factory-trimmed to 1 %; the host side of that
 measurement is a serial round trip, so the figure is coherence, not
-metrology). SysTick CTRL 0x7 / LOAD 0xF9FF read back. Between events
-the core sits in WFI (the PC read over SWD is the instruction after
-the WFI, inside the kernel's idle path) - which is also how the HLA
-read caveat in README.md was found.
+metrology). SysTick CTRL 0x7 / LOAD 0xF9FF read back. Between events the
+core sits in WFI (the PC read over SWD is the instruction after the WFI,
+inside the kernel's idle path), which is the state README.md's HLA read
+caveat is about.
 
 ## On the second silicon
 
 Every platform-level claim of this document holds on the Nucleo-G071RB
-(DEV_ID 0x460, REV_ID 0x2000): `test_stm32_platform` scores **53/53** in
+(DEV_ID 0x460, REV_ID 0x2000): `test_stm32_platform` runs whole in
 `z` (the reset flags, the critical section, the idle hook, SysTick's
-arithmetic, `delay_us` and both watchdogs), `test_stm32_sleep` **50/50**
+arithmetic, `delay_us` and both watchdogs), `test_stm32_sleep` likewise
 (all four depths and both sites - [pwr.md](pwr.md)), and
 `test_stm32_tickless` runs the LPTIM timebase and `idle_until` there.
-`flash.hpp` gained `DeviceIdcode`, which reads DBGMCU_IDCODE's DEV_ID and
+`flash.hpp`'s `DeviceIdcode` reads DBGMCU_IDCODE's DEV_ID and
 REV_ID through the APB gate 5.2.17 keeps closed at reset (and puts the
 gate back as it found it, the way `Pwr::debug_in_stop()` does): every
 bench suite prints it at boot, because a measurement that differs between
 two boards is only a finding once the die it was taken on is on the
 record.
 
-ONE LETTER OF `test_stm32_tickless` MOVES, and the reason belongs here
-because it cost a wedged board: letter `i` measures what a lap wake COSTS
+ONE LETTER OF `test_stm32_tickless` IS PART-DEPENDENT: letter `i`
+measures what a lap wake COSTS
 with a meter built out of TIM2's ETR taking MCO, and RM0444 22.4.25 gives
 that ETRSEL code to the G0B1/G0C1 alone. On a part without it the meter
 does not count - and `spin_us()`, this suite's own microsecond wait,
 rides the same TIM2, so a meter that does not count is a wait that never
 ends and the IWDG reboots the board. The meter and the awake-time verdict
-now go together behind `tim_etrsel_has_mco()`; the lap count and the
+go together behind `tim_etrsel_has_mco()`; the lap count and the
 never-re-lock-the-PLL claim need no meter and stay.
 
 ## On the third silicon
 
-`test_stm32_platform` scores **53/53** on the Nucleo-G031K8 (DEV_ID
-0x466, REV_ID 0x1003) and letter `i` **26/26** over its six real resets,
-the same letters and the same verdicts as on the other two dies. The
-board's user LED moves to PC6 (a Nucleo-32 fact), which nothing here
+`test_stm32_platform` runs whole on the Nucleo-G031K8 (DEV_ID 0x466,
+REV_ID 0x1003), letter `i` included over its six real resets, with the
+same letters and the same verdicts as on the other two dies. The
+board's user LED is on PC6 (a Nucleo-32 fact), which nothing here
 judges.
 
 **THIS DIE'S LSI IS THE SLOWEST OF THE THREE**: the IWDG time-out of

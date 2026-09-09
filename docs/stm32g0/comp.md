@@ -57,9 +57,9 @@ a SIGNAL cannot.
 
 **And this family will not lend a pull to an analog pad.** 7.3.13: in
 analog configuration "the weak pull-up and pull-down resistors are
-disabled by hardware". The SAM C21's analog letters walked a pad between
-the rails with its own pull; that technique has no twin here, and it is
-measured rather than assumed (see the findings).
+disabled by hardware". A pad walked between the rails by its own pull -
+the SAM C21's analog stimulus - has no twin here, and the findings below
+measure that rather than assume it.
 
 **The input tables are per instance and are not a pattern.** COMP1's
 plus inputs are PC5/PB2/PA1, COMP2's PB4/PB6/PA3, COMP3's PB0/PC1/PE7 -
@@ -146,11 +146,10 @@ after the polarity selector.
 **THE BLANKING WINDOW IS A REAL GATE, measured with no pad and no
 wire.** TIM1's OC4 forced ACTIVE while the comparator's input says high
 drives VALUE to 0, and forcing it inactive again gives the answer back:
-1 -> 0 -> 1. Two things had to be right and the first version of the
-letter had neither: the blanking source must rise AT a live comparator
-(a level that was already there when the comparator was enabled produced
-nothing), and TIM1's channel needs CCER's enable and MOE for its OCREF
-to reach the comparator.
+1 -> 0 -> 1. Two things must be right: the blanking source must rise AT
+a live comparator (a level already standing when the comparator is
+enabled produces nothing), and TIM1's channel needs CCER's enable and
+MOE for its OCREF to reach the comparator.
 
 **A WINDOW COMPARATOR WITH ONE PAD.** COMP2's WINMODE takes COMP1's plus
 input (18.3.5), so one precharged node is compared against two
@@ -159,7 +158,7 @@ comparators say "above" together and "below" together. The **INSIDE**
 state is DECLINED in print: it needs the node held between the two
 thresholds, and no source inside this chip can do that.
 
-**WINOUT DID NOTHING THIS BENCH CAN SEE, and that is recorded rather
+**WINOUT DOES NOTHING THIS BENCH CAN SEE, and that is recorded rather
 than explained.** 18.6.1 says COMP1_CSR.WINOUT selects "COMP1_VALUE XOR
 COMP2_VALUE". Staged in figure 69's own arrangement - COMP1 owning the
 pad with WINMODE clear and WINOUT set, COMP2 borrowing it with WINMODE
@@ -187,11 +186,11 @@ and the two speeds at 30 ns and 0.3 us of propagation delay. **Their
 analog effect is not measured** - both need an input that MOVES through
 a threshold, which is the same missing wire.
 
-**COMP3 answers, and it now RUNS** (letter n). Its two bonded plus pads
-PB0 and PC1 read high and low against half of VREFINT, and its own EXTI
-line 20 delivered eight interrupts for eight edges through the vector it
-shares with the ADC and the other two comparators - so COMP3 is a signal
-path here and not only a register. Its third plus input is PE7, which
+**COMP3 RUNS, and not only as a register** (letter n). Its two bonded
+plus pads PB0 and PC1 read high and low against half of VREFINT, and its
+own EXTI line 20 delivers eight interrupts for eight edges through the
+vector it shares with the ADC and the other two comparators - so it is a
+signal path here. Its third plus input is PE7, which
 the driver reports VALID because this DEVICE has a port E; whether this
 PACKAGE bonds that pad is a per-package table this stratum does not have
 ([port.md](port.md) carries the gap), so the pad is named and left
@@ -243,7 +242,7 @@ are the DAC's settling plus the comparator plus the poll loop and are
 NOT the comparator's; the difference is, because everything else does
 the same thing twice.
 
-**AND THE OFFSET AND THE HYSTERESIS ARE DECLINED, with the number that
+**THE OFFSET AND THE HYSTERESIS ARE DECLINED, with the number that
 declines them.** The band between a falling crossing and a rising one is
 measured at all four HYST codes - and **with HYST CLEAR it is 88..93 mV,
 where it should be zero and where table 68's LARGEST hysteresis is 30**.
@@ -261,8 +260,8 @@ and this suite does not pretend to have found a way round it.
 
 **COMPx_OUT is alternate function 7** (DS13560 table 13) and PA6 carries
 COMP1's output: the pad's own input register follows VALUE at both
-rails, and the EXTI line of THAT pad counted six edges for three round
-trips of the input. That extends the exti campaign's finding - a line
+rails, and the EXTI line of THAT pad counts six edges for three round
+trips of the input. That extends [exti.md](exti.md)'s finding - a line
 sees a pad its owner is driving - from the CPU to a PERIPHERAL.
 
 **Three more of 18.6.1's five blanking sources are real gates**:
@@ -320,8 +319,8 @@ are not implemented either, which is part of why this part's
   the measurement that declines them: the instrument's own floor is
   88..93 mV where the largest effect it would measure is 30. Both want
   the plus input held at a chosen voltage by something that is not also
-  reading it - one wire from PA4 to PA1, and this campaign is wireless
-  by construction.
+  reading it - one wire from PA4 to PA1, and this suite is wireless by
+  construction.
 - WINOUT, which did nothing measurable (above) and is recorded as such.
 - **TIM1_OC5 as a blanking source**, because `tim.hpp` builds four
   channels per timer and TIM1's fifth and sixth are the combined-PWM
@@ -332,9 +331,9 @@ are not implemented either, which is part of why this part's
   this stratum does not have ([port.md](port.md)).
 - LOCK. It is offered, never set, and never will be by a re-runnable
   suite.
-- Everything in table 99 (the low-power modes): there is no PWR driver
-  in this stratum, so "comparator interrupts cause the device to exit
-  Stop" is a sentence and not a measurement.
+- Everything in table 99 (the low-power modes): "comparator interrupts
+  cause the device to exit Stop" is a sentence here and not a
+  measurement.
 
 On the second silicon (the Nucleo-G071RB), NOT COVERED: **COMP3** in every
 respect - its register block, its two plus pads and its EXTI line 20. The

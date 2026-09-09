@@ -427,7 +427,7 @@ struct Pwr {
      * running inside a Stop so a probe can still reach the core - and
      * with it SysTick and every VCORE clock, which is why a Stop entered
      * under this bit with the kernel tick armed lasts one tick and no
-     * more (test_stm32_sleep letter c measures both states). The
+     * more (measured, both states). The
      * register survives every reset but a power-on, and OpenOCD's own
      * target script sets it at every connection whose examine finds the
      * DBGMCU's clock gate open - so a board that has seen a probe may

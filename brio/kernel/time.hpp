@@ -3,9 +3,8 @@
  *
  * Kernel time units and conversions. The kernel's unit is the platform
  * TICK - an opaque quantum whose rate is Platform::ticks_per_second, a
- * compile-time constant of the target (1024 on AVR Dx, typically 1000 on
- * SysTick-based targets). Nothing here assumes a power of two or a
- * millisecond tick.
+ * compile-time constant of the target (commonly 1000 or 1024). Nothing
+ * here assumes a power of two or a millisecond tick.
  *
  * Conversion semantics is CEIL - "at least this long": a timeout of 5 ms
  * must never fire early just because the tick rate does not divide

@@ -206,7 +206,7 @@ and OVF share it).
 
 ## Bench findings
 
-`test_avr_timer` (silicon rev A5, 24 MHz crystal, 3.3 V; 82/82), all
+`test_avr_timer` (silicon rev A5, 24 MHz crystal, 3.3 V), all
 measured against the same crystal:
 
 - **The capture is the interval minus one CLK_PER cycle** in FRQ, PW and
@@ -272,14 +272,14 @@ or implements wrongly):
   PF4/PF5 (TCB0/TCB1 ALT1) are not bonded, and `alt_pin` there
   compiles and programs a mute position. Deferred to the family
   device tables.
+
 Implemented but not bench-verified:
 
 - DBGRUN under a halt; TCB4 and the 28/32-pin builds
   (compile-verified for every package, no such part on the bench).
 - The ALT1 positions of TCB0/TCB1 (PF4/PF5 are the console; the ALT1
   mechanism itself is verified on TCB2 - moving the console to free
-  them is a wiring job, queued).
+  them is a wiring job).
 - Event-paced captures inside the kernel (an AO owning a meter and
   publishing Hz/period/duty readings as events, the way AnalogSampler
-  owns the ADC) - queued as a util/ usage type for when an app needs
-  it.
+  owns the ADC) - a util/ usage type for when an app needs it.

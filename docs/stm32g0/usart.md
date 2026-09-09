@@ -61,8 +61,8 @@ reading of `is_full`, and the silicon settles it (below).
 CR2, CR3, GTPR and PRESC are all "can only be written when the USART is
 disabled". Every resource verb that touches such a field RETURNS FALSE
 AND STORES NOTHING while UE stands rather than trusting the silicon to
-ignore it - the LPTIM campaign of this stratum found a forbidden write
-landing anyway, so the refusal is the driver's.
+ignore it - on this family's LPTIM a forbidden write lands anyway
+([lptim.md](lptim.md)), so the refusal is the driver's.
 
 **The baud generator has two encodings and OVER8's is not a divisor**
 (33.5.7). With OVER8 = 0, BRR = USARTDIV = usart_ker_ck_pres / baud.
@@ -84,11 +84,10 @@ register is empty, so its interrupt is armed only while the ring holds
 something and disarmed from the handler when it runs dry. ORE raises the
 interrupt whenever RXNEIE is set (33.8.9) and is cleared ONLY through
 ICR.ORECF: a handler that reads RDR and leaves ORE standing re-enters
-for ever. **WUF IS THE SAME SHAPE ONE FLAG ALONG** and this campaign
-paid for it twice: with UESM and WUFIE set, a WUF nobody clears makes
-the vector re-enter until the watchdog reboots the board (caught by
-halt-and-dump, IPSR 44 with ISR bit 20 standing). Every error flag has
-its ICR twin and every handler here clears what it can see.
+for ever. **WUF IS THE SAME SHAPE ONE FLAG ALONG**: with UESM and WUFIE
+set, a WUF nobody clears makes the vector re-enter until the watchdog
+reboots the board (IPSR 44 with ISR bit 20 standing). Every error flag
+has its ICR twin and every handler here clears what it can see.
 
 **RDR holds the last GOOD byte when ORE is set**; FE/NE/PE belong to the
 byte in RDR, so a framed or parity-failed byte is dropped precisely and
@@ -169,9 +168,8 @@ a compile-time refusal in the task.
   `kernel_hz<Clock>()`, the counters (`rx_overruns`, `hw_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `dma_faults`,
   `wakes`), `clear_errors`, `release()`. The public surface is
-  unchanged from the bring-up's and IDENTICAL to avrdx's and samc21's -
-  which is what lets `util/serial_port.hpp` and `print()` compile on the
-  third architecture untouched.
+  IDENTICAL to avrdx's and samc21's, which is what lets
+  `util/serial_port.hpp` and `print()` compile here untouched.
 - `Rs485<n, pins, de_pin, assertion, deassertion, ...>` - the same task
   with the driver enable filled in. **`OneWire` is NOT a task here**:
   33.5.15 is a bit, so single-wire is `Uart` with
@@ -190,7 +188,7 @@ a compile-time refusal in the task.
 
 ## How to use it
 
-The console, unchanged since the bring-up:
+The console:
 
 ```cpp
 constexpr brio::UartPins console_pins{
@@ -247,23 +245,19 @@ constexpr brio::UartOptions waker{
 ## The options cost nothing
 
 `UartOptions` is ONE trailing NTTP with a default, and every member of it
-is `if constexpr`-ed, so `Uart<n, pins>` compiles to exactly what it
-compiled to before the parameter existed. That is not a hope: the md5
-byte-identity gate on a pinned-mtime worktree of the previous commit
-shows all FOURTEEN pre-existing STM32G0 release images byte-identical
-after this chapter's whole tail was added - the console and
-`test_stm32_dma` (whose own console carries both DMA engines) among
-them.
+is `if constexpr`-ed, so `Uart<n, pins>` costs a program that names no
+option exactly nothing: an image built with the default options is byte
+for byte an image built with no option parameter at all, a port carrying
+both DMA engines included.
 
-Keeping that identity forced two shapes, and both are on record:
+Keeping that identity takes two shapes:
 
-- `usart_brr()` and `usart_brr_over8()` are SIBLING VERBS. Giving
-  `usart_brr()` a `bool over8 = false` third argument moved
-  `test_stm32_dma` by forty bytes although the folded code for `false`
-  is identical - the samc21 SPI-DMA campaign's ruling met again on this
-  silicon: byte identity outranks API economy.
+- `usart_brr()` and `usart_brr_over8()` are SIBLING VERBS. Spelling them
+  as one verb with a `bool over8 = false` third argument costs forty
+  bytes in an image that never passes it, although the folded code for
+  `false` is identical: byte identity outranks API economy.
 - The task keeps a `plain` constant for the default arrangement (PCLK,
-  divide-by-1, no OVER8) and names HEAD's own expression under it,
+  divide-by-1, no OVER8) and names the plain expression under it,
   because folding `hz / usart_prescaler_divisor(div1)` to `hz` gives the
   same value and NOT the same code.
 
@@ -276,10 +270,10 @@ task asks about and it asks with `if constexpr`. It lives in
 `stm32g0/dma_engine.hpp`, a file of two lines and a paragraph, and NOT
 in `dma.hpp`: that separation is the whole point of an optional slot,
 since a driver with one must not include the DMA driver or every program
-with a console (or a bus) would carry the controller. It was usart.hpp's
-own until `stm32g0/spi.hpp` needed the same tag for its own two slots -
-two headers cannot each define it, and neither is the other's natural
-home. `uart_engines_distinct()` stays here.
+with a console (or a bus) would carry the controller. Two headers need
+the same tag - this one and `stm32g0/spi.hpp`, which has two slots of
+its own - and neither is the other's natural home, so it belongs to
+neither. `uart_engines_distinct()` lives here.
 
 - **CR3.DMAT / CR3.DMAR** are set in `init()` before the enable, and the
   matching INTERRUPT is NOT armed: the request and the interrupt are the
@@ -362,7 +356,7 @@ pad's own 40 k pull-up, not the generator.
 
 ### The kernel clocks
 
-**The console was moved under itself, and the verdict lines are the
+**The console moves under itself and the verdict lines are the
 witness**: USART2 to HSI16 (BRR 139 where PCLK wanted 556), then to
 SYSCLK (BRR 556 - the same 64 MHz by a different route), then back to
 PCLK, keeping 115200 throughout with not one framing, parity, noise or
@@ -385,11 +379,11 @@ reports"** - and 33.8.4's second sentence is literal: with OVRDIS set
 the RXFIFO IS BYPASSED, so a FIFO-mode receiver collapses to ONE
 character in RDR (eleven in, the newest one out).
 
-**AND THE LOOP CANNOT SHOW WHAT A FIFO IS FOR, which is worth saying
-rather than dressing up.** 256 bytes round the loop through the task
-cost 258 interrupts without the FIFO and 257 with it: a single wire is
-its own pacer, so each byte's transmit and receive events fall in the
-SAME interrupt and there is never a second character waiting. One
+**AND THE LOOP CANNOT SHOW WHAT A FIFO IS FOR.** 256 bytes round the
+loop through the task cost 258 interrupts without the FIFO and 257 with
+it: a single wire is its own pacer, so each byte's transmit and receive
+events fall in the SAME interrupt and there is never a second character
+waiting. One
 interrupt a byte is the floor here whatever FIFOEN says. What the letter
 does prove is that the FIFO COSTS NOTHING to turn on - no more
 interrupts, not one byte different, the same public verbs and one option
@@ -550,11 +544,10 @@ RTC's wake-up timer as the backstop:
 - **ES0548 2.2.4 REPRODUCES ON A USART WAKE.** With HSIDIV = /4 the same
   Stop was NOT ended by the same poke - WUF never rose - and ran to the
   RTC backstop's full 1.4..2.0 s, with the RTC wake-up timer as the
-  control that the Stop itself works. This is the first REPRODUCTION of
-  2.2.4 in this project: the RTC campaign found it did NOT reach an RTC
-  wake, and the difference is exactly the one the erratum names - the
-  USART is a clock-request peripheral (33.5.21's `usart_ker_ck_req`) and
-  the RTC is not.
+  control that the Stop itself works. The same erratum does NOT reach an
+  RTC wake ([pwr.md](pwr.md)), and the difference is exactly the one it
+  names - the USART is a clock-request peripheral (33.5.21's
+  `usart_ker_ck_req`) and the RTC is not.
 - **AND HSIKERON DOES NOT RESCUE IT.** The same leg with RCC_CR.HSIKERON
   set - HSI16 kept running for its kernel-clock consumer, so no request
   is needed - still did not wake: WUF 0, the backstop firing. So 2.2.4

@@ -1,16 +1,16 @@
-// probe - the smallest firmware for the Nucleo-G0B1RE: raw-register
-// HSI16 -> PLL -> 64 MHz and a PA5 (LD4) blink, nothing else. The stm32g0
-// analog of the AVR project's family_probe and the samc21 probe, with the
-// same two jobs: on the desk it proves the whole new chain (toolchain
-// flags, linker script, startup, vector table, OpenOCD over the ST-LINK)
-// with zero brio code in the loop; at the bench it is the first thing
-// flashed onto a NEW board - the LED says the chip runs, the SWD link
+// probe - the smallest firmware this target has: raw-register HSI16 ->
+// PLL -> 64 MHz and a blink of the user LED, nothing else. Its two jobs:
+// it proves the whole build and upload chain (toolchain flags, linker
+// script, startup, vector table, OpenOCD over the ST-LINK) with zero
+// brio code in the loop, and it is the first thing flashed onto a board
+// nothing has run on yet - the LED says the chip runs, the SWD link
 // works, and the clock really moved.
 //
 // This is the ONE app allowed to poke registers directly (it exists
 // exactly to prove the layer below the stm32g0/ stratum; apps proper
-// never touch registers - CLAUDE.md's layering rule). The sequence it
-// proves is the stratum's Clock<pll, 64 MHz>::init() in miniature
+// never touch registers - the layering rule of docs/design/overview.md).
+// The sequence it proves is the stratum's Clock<pll, 64 MHz>::init() in
+// miniature
 // (RM0444 3.3.4, 5.2.4, 5.4.4):
 //
 //   1. FLASH_ACR.LATENCY = 2 first and read back - table 13: HCLK holds
@@ -31,7 +31,7 @@
 // Wiring: none - the user LED is on the board: LD4 on PA5 on the
 // Nucleo-64s (UM2324; verified on the G0B1RE by the pad moving), LD3 on
 // PC6 on the Nucleo-32 G031K8 (UM2591). The part selects the pin because
-// on this desk the part IS the board.
+// one Nucleo carries one part.
 //
 // build: boards = g0b1re,g071rb,g031k8
 

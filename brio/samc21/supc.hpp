@@ -37,8 +37,7 @@
  *    COSMETIC: a store carrying the configuration AND ENABLE = 1
  *    together sets the bit and leaves the protected fields where they
  *    were - the protection is judged on the value being WRITTEN, not
- *    on the one already in the register. Measured, at the cost of a
- *    restore that did not restore.
+ *    on the one already in the register. Measured.
  *
  * 2. THE LEVEL IS A FIELD AND NOT A VOLTAGE. Table 45-18 gives three
  *    points - level 8 is 2.8 V, level 9 is 2.85 V, level 44 is 4.51 V -
@@ -66,18 +65,20 @@
  *    application has business writing (and which erratum 1.8.14 makes
  *    the workaround for a standby bug in PM).
  *
- * ERRATA. 1.8.14 is LIVE on this silicon and belongs to the power pass,
- * not here: entering standby with PM.STDBYCFG.VREGSMOD in performance
- * mode wrongly switches to the low-power regulator and keeps requesting
- * GCLK0, and the workaround is SUPC.VREG.RUNSTDBY = 1 - which is why
- * that bit has a verb and a comment pointing at it. 1.8.11 (VREGSMOD
- * having no effect at all) is revision B only. Nothing else in the
- * errata document touches this chapter.
+ * ERRATA. 1.8.14 is LIVE on this silicon and belongs to PM
+ * (samc21/sleep.hpp), not here: entering standby with
+ * PM.STDBYCFG.VREGSMOD in performance mode wrongly switches to the
+ * low-power regulator and keeps requesting GCLK0, and the workaround is
+ * SUPC.VREG.RUNSTDBY = 1 - which is why that bit has a verb and a comment
+ * pointing at it. 1.8.11 (VREGSMOD having no effect at all) is revision B
+ * only. Nothing else in the errata document touches this chapter.
  *
  * NOT BUILT (docs/samc21/supc.md carries the list): nothing here forces a
- * brown-out - the supply is not this program's to dip - so RESET and
- * INT actions are configured and read back but never fired; and standby
- * behaviour of all three blocks waits for the power pass.
+ * brown-out - the supply is not this program's to dip - so RESET and INT
+ * actions are configured and read back but never fired; and the standby
+ * behaviour of all three blocks is written and read back but never
+ * observed across a sleep, because a detection is a SUPPLY CROSSING
+ * nothing on this board can make while the CPU is stopped.
  */
 
 #pragma once
@@ -154,8 +155,8 @@ struct Supc {
     static constexpr IRQn_Type irq() { return SUPC_IRQn; }
 
     /// The APB clock. It is ON out of reset (17.6.2.6) - a supply
-    /// controller nobody could reach would be a poor idea - and the
-    /// verb exists for symmetry and for a power pass that wants it off.
+    /// controller nobody could reach would be a poor idea - and the verb
+    /// exists for symmetry and for a program that wants it off.
     static void bus_clock(bool on) { Mclk::apb_a(MCLK_APBAMASK_SUPC_Msk, on); }
 
     static uint32_t status() { return SUPC_REGS->SUPC_STATUS; }
@@ -207,8 +208,9 @@ struct BodVddConfig {
     bool sampled = false;
 
     /// RUNSTDBY and STDBYCFG: whether the detector runs in standby at
-    /// all, and whether it samples there. Untested by this stratum -
-    /// standby belongs to the power pass.
+    /// all, and whether it samples there. Written and read back, never
+    /// observed across a sleep: a detection is a supply crossing this
+    /// board cannot make.
     bool run_standby = false;
     bool sampled_in_standby = false;
 
@@ -325,7 +327,7 @@ struct BodVdd {
         // ENABLE ON ITS OWN, and this is measured rather than deduced: a
         // single store carrying both the configuration and ENABLE = 1
         // leaves the ENABLE bit set and the protected fields UNCHANGED
-        // (test_samc_supc letter c caught it restoring a saved
+        // (caught while restoring a saved
         // register). The protection is evaluated against the value
         // being written, not against the one already there.
         return BodVdd::enable(true, spins);

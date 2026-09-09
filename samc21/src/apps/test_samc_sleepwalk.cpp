@@ -14,14 +14,14 @@
 //    clock), so nothing timed here may use Ticker::millis(). The
 //    stopwatch is a TC0+TC1 32-bit pair on the board's 24 MHz crystal
 //    with RUNSTDBY set: XOSC keeps running through a standby whatever
-//    RUNSTDBY says (measured in test_samc_sleep), so this counter is
-//    the one clock in the building that means the same thing on both
-//    sides of a WFI. 42 ns a tick.
+//    RUNSTDBY says (measured), so this counter is the one clock in the
+//    building that means the same thing on both sides of a WFI. 42 ns
+//    a tick.
 //
 // 2. THE STIMULUS. A pad cannot be moved by the CPU while the CPU is
-//    asleep, and every wireless pin trick this stratum owns (the EIC
-//    campaign's pull-walking) is a CPU store. So the pad is walked by
-//    HARDWARE, through a chain that is itself a finding:
+//    asleep, and the wireless pin trick this stratum uses awake -
+//    walking a pad with its own pull - is a CPU store. So the pad is
+//    walked by HARDWARE, through a chain that is itself a finding:
 //
 //      TC2 (OSCULP32K, RUNSTDBY)  a square wave that survives standby
 //        -> CCL LUT2, combinational   its OUTPUT VALUE is an event
@@ -33,9 +33,8 @@
 //    28.6.4 is what makes it legal: "In Standby mode, only the Out
 //    action is possible" - the OUT action is combinational ("sent to
 //    the pin without any internal latency") where SET/CLR/TGL cost
-//    three clocks the PORT does not have in standby. samc21/pin.hpp grew
-//    the PORT event-input surface for this, which is also the gap
-//    docs/samc21/port.md declared.
+//    three clocks the PORT does not have in standby. The PORT
+//    event-input surface is samc21/pin.hpp's (docs/samc21/port.md).
 //
 // 3. THE WITNESS. The CPU cannot observe anything during a standby, so
 //    every "did it happen while asleep" question is answered by a
@@ -44,8 +43,8 @@
 //    after the wake, its advance is the answer; the same window spent
 //    AWAKE is the control that says what the advance should be.
 //
-// THE ANTI-WEDGE RULE, inherited from test_samc_sleep: every sleeping
-// letter arms the WATCHDOG first (it runs on OSCULP32K and survives
+// THE ANTI-WEDGE RULE: every sleeping letter arms the WATCHDOG first
+// (it runs on OSCULP32K and survives
 // standby) and disarms it at the end, so a wake that never arrives
 // costs a reboot and a banner instead of a mute board. Nothing prints
 // between arming a sleep and coming back from it - the console is dead
@@ -557,8 +556,9 @@ bool walker_arrange(PortEventAction action, bool under_mux) {
         return false;
     }
     if (under_mux) {
-        // DIR cleared FIRST: an input with a pull is the arrangement the
-        // EIC campaign established, and leaving DIR set would confuse
+        // DIR cleared FIRST: an input with a pull is the arrangement
+        // that makes the pull the only mover, and leaving DIR set would
+        // confuse
         // "the event reached the pull" with "the event reached a driver
         // that was still connected".
         StimPad::input(PinPull::up);
@@ -1178,9 +1178,9 @@ void td_clocks() {
     // Generator 5 takes OSC48M undivided and TC4 counts it at /1024, so
     // one window is about 1400 counts and a 16-bit counter cannot wrap.
     // The generator's own RUNSTDBY is left CLEAR throughout: the
-    // question is whether the counter's request is enough on its own,
-    // which is the rule test_samc_sleep established on the crystal and
-    // this is the internal oscillator's turn to answer.
+    // question is whether the counter's request is enough on its own -
+    // the rule the crystal already obeys, asked here of the internal
+    // oscillator.
     bool ok = Gclk<gen_probe>::configure(GclkConfig{.source = GclkSource::osc48m});
     ok = ok && counter_on_clock(gen_probe, true);
     const uint16_t osc_awake = ok ? clock_ticks(false, window) : 0xFFFFu;
@@ -1332,7 +1332,7 @@ void td_clocks() {
                   "request is what carries it, exactly as with OSC48M",
                   near(o32_no_std, o32_awake, o32_awake / 20u + 4u));
 
-    // The teardown order is the one docs/samc21/osc32kctrl.md paid for: a
+    // The teardown order matters (docs/samc21/osc32kctrl.md): a
     // generator may not be left pointing at a source that is about to
     // stop (16.6.2.6).
     (void)Gclk<gen_probe>::configure(GclkConfig{.source = GclkSource::osc48m});
@@ -1729,9 +1729,9 @@ void th_ac() {
     // period - the time to the next pad edge after the counter is
     // retriggered - is 15 ms, where entering a standby costs microseconds
     // and the RTC backstop is 90 ms away. Three separated numbers, so
-    // "the comparator woke it" and "nothing did" cannot be confused. The
-    // first version used a 2 ms wave and was a coin toss: the flip
-    // arrived between clearing the flag and the WFI as often as not.
+    // "the comparator woke it" and "nothing did" cannot be confused. A
+    // 2 ms wave would be a coin toss: the flip arrives between clearing
+    // the flag and the WFI as often as not.
     constexpr uint8_t wave = 16;
     constexpr uint32_t window = 3000;   // ~91 ms
 
@@ -1753,10 +1753,9 @@ void th_ac() {
     // not enough to say which bit did what: the third takes GCLK_AC off
     // a generator that survives standby, and it is the one that shows
     // what COMPCTRL.RUNSTDBY is actually gating.
-    // AND EACH LEG IS RUN FOUR TIMES, because the first version of this
-    // measurement was a single shot and one of its runs disagreed with
-    // the next: a wake counted out of four is a fact, a wake counted
-    // once is a coin.
+    // AND EACH LEG IS RUN FOUR TIMES, because single shots of this
+    // measurement disagree with each other: a wake counted out of four
+    // is a fact, a wake counted once is a coin.
     constexpr uint8_t rounds = 8;
     struct Leg3 {
         bool std;
@@ -2092,7 +2091,7 @@ void tj_leftovers() {
                                                  .run_standby = true});
     // The detector has a start-up of its own and 22.8.4's READY is what
     // says it is over, so the flag is read only once the block admits
-    // to being ready - the supc campaign's own discipline.
+    // to being ready.
     for (uint32_t i = 0; i < 200'000u && !BodVdd::ready(); ++i) {
     }
     const bool bod_ready = BodVdd::ready();
@@ -2148,9 +2147,8 @@ void tj_leftovers() {
     // Which is exactly why the wake claim cannot be made here: a
     // detection needs the SUPPLY to cross the threshold, or the
     // threshold to move - and the CPU that could move it is asleep.
-    // Forcing a brown-out is out of this campaign's scope and this
-    // bench has no programmable supply. Printed, counted, claiming
-    // nothing about the silicon.
+    // Forcing a brown-out needs a programmable supply this bench has
+    // not got. Printed, counted, claiming nothing about the silicon.
     bench.verdict("the BODVDD as a STANDBY WAKE SOURCE: DECLINED - a "
                   "detection is a supply crossing, and nothing on this board "
                   "can make one while the CPU is stopped",

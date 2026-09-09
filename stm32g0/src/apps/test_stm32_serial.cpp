@@ -337,7 +337,7 @@ inline void spin_us(uint32_t us) { spin_cycles(us * cycles_per_us); }
 void feed() { Iwdg::refresh(); }
 
 /// A measurement window a transmit interrupt walks through is not a
-/// measurement - four campaigns of this stratum have paid for that.
+/// measurement.
 void console_drain() {
     for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
     }
@@ -361,10 +361,10 @@ uint32_t permille_off(uint32_t v, uint32_t want) {
 /// THE PRECONDITION OF EVERY PULL-WALKED LETTER: a pad with nothing on it
 /// goes where its own pull sends it - and, the question this chapter
 /// adds, it must still do so with the pad handed to the peripheral. An
-/// input alternate function leaves the pull in charge (the LPTIM
-/// campaign measured that); an OPEN-DRAIN output function releases the
-/// pad whenever it is not pulling low, so the pull should rule there
-/// too. Both are measured, not assumed.
+/// input alternate function leaves the pull in charge (measured); an
+/// OPEN-DRAIN output function releases the pad whenever it is not
+/// pulling low, so the pull should rule there too. Both are measured,
+/// not assumed.
 template <class Pin>
 bool pull_walks() {
     Pin::input(PinPull::up);
@@ -1072,9 +1072,9 @@ void tb_loop() {
     feed();
     // The pad, twice: as a plain input and under the OPEN-DRAIN
     // alternate function the chapter asks for. The second is the one
-    // that matters, and it is not obvious - a driving function takes the
-    // pull away on other silicon (the SAM measured that), while an
-    // open-drain one is released whenever it is not pulling low.
+    // that matters, and it is not obvious - a function that DRIVES a pad
+    // could take the pull away, while an open-drain one is released
+    // whenever it is not pulling low.
     const bool free_plain = pull_walks<TxPin>();
     U1::bus_clock(true);
     U1::reset();
@@ -1137,8 +1137,7 @@ void tb_loop() {
             // it and RDR keep it, in the word's top position - so what
             // is compared is the DATA the format carries and not the
             // whole register. A reader who expects the parity stripped
-            // sees every parity format "fail", which is how this suite
-            // learned it.
+            // sees every parity format "fail".
             if (!got || (*got & mask) != want) {
                 ok = false;
             }
@@ -1483,15 +1482,14 @@ volatile uint8_t loop_mode = 0;   // 0 none, 1 LoopUart, 2 LoopFifoUart
 // TASK was compiled without the option - the console is a plain
 // `Uart<2, ...>` and its isr() therefore knows nothing about WUF. With
 // WUFIE set and WUF standing, the vector re-enters for ever and the main
-// loop never runs again: the first version of letter w died exactly
-// there, and what came out of the wire was a BANNER thirty seconds
-// later, because the IWDG is the only thing that can end an interrupt
-// storm. So the handlers below clear WUF and COUNT it, and the letters
-// read the counter rather than a flag their own handler has just
-// cleared. (The samc21 SERCOM ERROR storm, in this family's clothes.)
+// loop never runs again, and what comes out of the wire is a BANNER
+// thirty seconds later, because the IWDG is the only thing that can end
+// an interrupt storm. So the handlers below clear WUF and COUNT it, and
+// the letters read the counter rather than a flag their own handler has
+// just cleared.
 volatile uint8_t console_wake_armed = 0;
 volatile uint32_t console_wakes = 0;
-/// The SAME lesson one peripheral along: `Rtc::isr()` clears WUTF at
+/// THE SAME HAZARD ONE PERIPHERAL ALONG: `Rtc::isr()` clears WUTF at
 /// entry, so a letter that reads RTC_SR.WUTF after the sleep reads a
 /// flag its own handler has already taken away and concludes the
 /// backstop never fired. It fired. The counter is the reading.
@@ -2329,10 +2327,9 @@ void ti_mute_modbus() {
 //
 // Table 56 makes the DMAMUX's trigger inputs 0..15 the EXTI's own lines,
 // so an EDGE on a pad becomes a DMA request and a channel's CNDTR
-// becomes an edge counter with NO CPU in the path (the LPTIM campaign's
-// instrument, pointed at a pad this time). The EXTI sees a pad its owner
-// drives - the exti suite proved that - so the pad stays under its
-// peripheral's alternate function throughout.
+// becomes an edge counter with NO CPU in the path. The EXTI sees a pad
+// its owner drives, so the pad stays under its peripheral's alternate
+// function throughout.
 
 uint32_t edge_sink = 0;
 const uint32_t edge_source = 0x5A5A5A5Au;
@@ -3575,9 +3572,9 @@ using Carrier = TimPwm<Tim<17>, 0>;
 using Envelope = TimPwm<Tim<16>, 0>;
 
 /// A PAD WITH AN EXTERNAL PULL-UP IS NOT A PAD A SUITE CAN PULL-WALK.
-/// PB9 carries the desk's 2.2 kOhm I2C pull-up, which beats the internal
-/// pull-down, so the precondition is the one test_stm32_tim's letter l
-/// settled on: the pad is HELD UP by the external resistor and SINKS when
+/// PB9 is where a wired I2C bus puts its 2.2 kOhm pull-up, which beats
+/// the internal pull-down, so the precondition becomes a weaker one:
+/// the pad is HELD UP by the external resistor and SINKS when
 /// a push-pull output drives it low - which is exactly the electrical
 /// question IR_OUT asks of it. A pad with no external pull answers the
 /// plain walk and is accepted by the first clause.
@@ -4545,12 +4542,11 @@ extern "C" void BRIO_STM32G0_USART2_HANDLER() {
     // letter n - so the console's body is the whole of it. LPUART1's
     // line is USART3_4_5_6_LPUART1's, below.
     // WUF IS CLEARED UNCONDITIONALLY, and the counter is what the
-    // letter reads. Gating the CLEAR on the letter's own flag was this
-    // suite's second wake-storm: the flag was dropped as soon as the
-    // Stop returned, while WUFIE stayed armed for the 200 ms in which
-    // the letter drains the bytes that woke it - and every further start
-    // bit then set a level nobody would clear. Caught by halt-and-dump:
-    // IPSR 44 (this very vector), ISR bit 20 standing, the counter
+    // letter reads. Gating the CLEAR on the letter's own flag is a wake
+    // storm: the flag is dropped as soon as the Stop returns while
+    // WUFIE stays armed for the 200 ms in which the letter drains the
+    // bytes that woke it, and every further start bit then sets a level
+    // nobody will clear - the vector re-enters for ever with its counter
     // frozen at one. A handler clears every level it can see.
     if ((brio::Usart<2>::status() & brio::UsartFlag::wuf) != 0u) {
         brio::Usart<2>::clear_flags(brio::UsartClear::wuf);
@@ -4569,10 +4565,8 @@ extern "C" void BRIO_STM32G0_USART2_HANDLER() {
 /// crt's Default_Handler spins with interrupts still enabled but never
 /// returns, so no other handler of equal priority runs either - the
 /// console stops draining mid-line and the IWDG reboots the board thirty
-/// seconds later. That is exactly what the first version of letter e
-/// did, and it took a HardFault breadcrumb (which stayed empty) to
-/// prove it was not a fault at all. The samc21 stratum's NMI lesson, in
-/// this family's clothes.
+/// seconds later. The symptom looks like a fault and is not one: a
+/// HardFault breadcrumb stays EMPTY through it.
 extern "C" void USART1_IRQHandler() {
     loop_irqs = loop_irqs + 1u;
     if (loop_mode == 1u) {
@@ -4621,8 +4615,8 @@ extern "C" void BRIO_STM32G0_LPUART1_HANDLER() {
         }
         brio::Lpuart<1>::clear_flags(brio::UsartClear::receive_errors);
         // One wake is this letter's whole need, and the line is taken
-        // down here so no later level can storm it (the console's own
-        // lesson, one vector along).
+        // down here so no later level can storm it - the same rule as
+        // the console's vector above.
         brio::Nvic::disable(brio::Lpuart<1>::irq());
         return;
     }
@@ -4632,7 +4626,7 @@ extern "C" void BRIO_STM32G0_LPUART1_HANDLER() {
         brio::Lpuart<1>::clear_flags(brio::UsartClear::all);
         return;
     }
-    // AND THE OTHER HALF OF THE SAME LESSON: reading a peripheral whose
+    // AND THE OTHER HALF OF THE SAME RULE: reading a peripheral whose
     // bus clock is off is not a zero, it is a bus fault (5.2.17), so the
     // fallback here touches NOTHING and takes the line down instead.
     brio::Nvic::disable(brio::Lpuart<1>::irq());

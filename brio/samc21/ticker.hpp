@@ -4,25 +4,21 @@
  * The kernel timebase of this target, on the Cortex-M0+ SysTick.
  *
  * THE TICKER ITSELF IS THE CORE STRATUM'S: `BasicTicker` lives in
- * armv6m/ticker.hpp since the STM32G0 arrived with the identical class
- * (the second Cortex-M0+ family is what the naming rule factors the
- * core out at). What is SAM about this file is what stays in it - the
- * `Ticker` alias that fixes the project-wide rate, the erratum guard
+ * armv6m/ticker.hpp. What is SAM about this file is what stays in it -
+ * the `Ticker` alias that fixes the project-wide rate, the erratum guard
  * below, and this comment's account of what standby does to a
  * core-clocked timebase. The class's own contract (rates that divide
- * 1000, the volatile reads, advance/pause/resume) is documented where
- * the class is.
+ * 1000, the volatile reads, advance/pause/resume) is documented where the
+ * class is.
  *
  * WHY SYSTICK AND NOT A TC. SysTick is core-private: no application can
  * use it for PWM, capture or anything else, so claiming it costs the app
- * nothing - every TC, TCC and the RTC stay free. That is the same rule
- * the AVR side follows by taking the RTC's PIT (a timer nothing else
- * wants), applied to what this core offers.
+ * nothing - every TC, TCC and the RTC stay free.
  *
- * Monostate, exactly like avrdx/ticker.hpp: every member is a static
- * inline, there is one timebase per program because there is one SysTick,
- * and the ISR body reaches its counters with no pointer indirection.
- * State lives in .bss, zeroed before main().
+ * Monostate: every member is a static inline, there is one timebase per
+ * program because there is one SysTick, and the ISR body reaches its
+ * counters with no pointer indirection. State lives in .bss, zeroed
+ * before main().
  *
  * ## Time representations
  *  - ticks():  raw 32-bit tick counter (wraps: 49.7 days @ 1000 Hz).
@@ -31,9 +27,9 @@
  *  - now():    TimeStamp = whole seconds + millisecond fraction.
  *
  * ## No millisecond correction, and why the rate is constrained
- * AVR's 1024 Hz tick does not divide decimal milliseconds, so its ISR
- * skips three increments per 128 ticks to keep millis() honest. Nothing
- * of the sort is needed here: SysTick counts CPU cycles, so the rate is
+ * A timebase whose rate does not divide decimal milliseconds needs its
+ * ISR to skip increments to keep millis() honest. Nothing of the sort
+ * is needed here: SysTick counts CPU cycles, so the rate is
  * ours to choose, and every rate this class accepts divides 1000 exactly
  * (1000, 500, 250, 200, 125, 100 ... Hz). millis() is then ticks times a
  * compile-time constant - exact, with no drift and no jitter. A rate that
@@ -47,19 +43,17 @@
  * access (read_shared below) so every call performs a real load - in a
  * header-only build a polling loop over an inlined getter would
  * otherwise fold to one hoisted read that never sees the handler's
- * store. AVR's getters get both properties from ATOMIC_BLOCK at once
- * (cli for atomicity, its barriers for the reload); here each has its
- * own explicit source, exactly as util/ring.hpp spells it for its
+ * store. Atomicity and visibility have separate explicit sources here,
+ * exactly as util/ring.hpp spells it for its
  * shared indexes. now() additionally masks: it reads TWO counters that
  * must belong to the same instant.
  *
  * ## The caveat that outlives this file
  * SysTick is clocked from the CPU clock, so its reload is a function of
- * Clock::hz. There is no DynamicClock on this target yet; when one
- * arrives, this ticker must either become a ClockUser (rebase the
- * reload) or move to the RTC - unlike AVR, where the 32 kHz PIT tick
- * never moves when CLK_PER does. init()'s clock_follows assertion below
- * is what will refuse to compile on that day, which is the point.
+ * Clock::hz. There is no DynamicClock on this target; if one arrives,
+ * this ticker must either become a ClockUser (rebase the reload) or
+ * move to the RTC. init()'s clock_follows assertion below is what will
+ * refuse to compile on that day, which is the point.
  *
  * ## The same caveat, in its second half: STANDBY FREEZES THIS TIMEBASE
  * Being clocked from the CPU clock has a consequence beyond rebasing:
@@ -67,13 +61,11 @@
  * and KERNEL TIME STANDS STILL for exactly as long as the sleep lasts.
  * Time events do not fire late by a little - they fire late by the
  * whole slept duration, and `millis()` under-reports the wall clock by
- * the same amount. This does NOT travel from the AVR, where the tick is
- * the RTC's PIT on a 32 kHz oscillator and runs through every sleep
- * mode the part has. IDLE is unaffected: MCLK and GCLK0 keep running
+ * the same amount. IDLE is unaffected: MCLK and GCLK0 keep running
  * there.
  *
  * The two answers are stated in samc21/sleep.hpp and enforced nowhere in
- * this file: `SamSleepSite` keeps the v1 restriction (standby only with
+ * this file: `SamSleepSite` keeps the restriction (standby only with
  * no armed time event), and `SamTimedSleepSite` lifts it by
  * resynchronizing this counter from the RTC after every wake - the
  * `advance()` verb below is that resync's landing point.

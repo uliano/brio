@@ -21,12 +21,12 @@ is in `test/family_stm32g0/adc.cpp`.
 
 `util/analog.hpp` leaves the reference vocabulary to each target -
 "every target's vref header defines its own `brio::Ref` under the same
-name". On the SAM C21 there was no shared reference block, so each
-converter carried its own `REFSEL` enum and `Ref` lived in `adc.hpp`
-(`samc21/adc.hpp`'s own comment says why). **On this family there IS one
-shared rail**: the ADC (15.3.1), the DAC (16.4.6) and the comparators'
-VREFINT scaler all work against VREF+, and chapter 17's buffer is the
-one thing that can change what that pin is worth. So the enum sits in
+name". On the SAM C21 there is no shared reference block, so each
+converter carries its own `REFSEL` enum and `Ref` lives in `adc.hpp`
+there (`samc21/adc.hpp`'s own comment says why). **On this family there
+IS one shared rail**: the ADC (15.3.1), the DAC (16.4.6) and the
+comparators' VREFINT scaler all work against VREF+, and chapter 17's
+buffer is the one thing that can change what that pin is worth. So the enum sits in
 the chapter that owns the rail, and `stm32g0/adc.hpp` and
 `stm32g0/dac.hpp` include this file.
 

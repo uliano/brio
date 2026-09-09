@@ -1,20 +1,22 @@
-// tc_readsync_probe - the one-behind experiment.
+// tc_readsync_probe - what a synchronized COUNT read really returns.
 //
-// samc21/tc.hpp's read_sync() returns the PREVIOUS READSYNC's snapshot
-// (measured by test_samc_sleep: 0, 196, 201, 205 on a pair that had run
-// six milliseconds). The candidate fix waits for SYNCBUSY.COUNT to RISE
-// before waiting for it to fall. This probe, in order:
+// Reading COUNT is a command (35.6.8), and a SINGLE READSYNC returns
+// the PREVIOUS command's snapshot: the shadow lands about half a
+// counter-clock period after SYNCBUSY.CTRLB clears, with no bit
+// advertising it (SYNCBUSY.COUNT never rises for a READSYNC - it is
+// the WRITE's bit). That is why samc21/tc.hpp issues the command
+// TWICE. This probe shows the whole picture on silicon, in order:
 //
-//   A  reproduces the defect with the CURRENT read_sync();
-//   B  OBSERVES what SYNCBUSY and the COUNT shadow actually do after a
-//      raw READSYNC command, sampled tight into RAM - the fix must come
-//      from the observation, not from the guess;
-//   C  runs the candidate fixed read four times (first value must be
-//      the CURRENT count, not zero);
-//   D  prices both reads, and re-checks the fixed one on a 48 MHz clock
-//      (the rise must not become a hang when the crossing is fast);
-//   E  the same reproduce/observe/fix on the TCC, whose read_sync() has
-//      the same shape.
+//   A  four consecutive counts through the driver's read_sync();
+//   B  OBSERVES what SYNCBUSY and the COUNT shadow do after ONE raw
+//      READSYNC command, sampled tight into RAM - the observation the
+//      double-command read is designed from;
+//   C  four counts through a locally built double-command read (first
+//      value must be the CURRENT count, not zero);
+//   D  prices both reads, and re-checks on a 48 MHz clock (a bounded
+//      wait must not become a hang when the crossing is fast);
+//   E  the same three steps on the TCC, whose read_sync() has the same
+//      shape.
 //
 // PROBE, not a suite: prints everything once at boot and parks. No
 // wires; the pair TC2+TC3 runs on OSCULP32K through generator 3.
@@ -60,19 +62,14 @@ void wait_ms(uint32_t ms) {
     }
 }
 
-// ---- the candidate fixed read ----------------------------------------------
+// ---- the double-command read, built locally --------------------------------
 //
-// READSYNC, then wait the COUNT bit to RISE (bounded - on a fast clock
-// the whole crossing may finish between two checks), then to FALL, then
-// load. The rise bound is small on purpose: if the bit never shows, the
-// crossing either already completed (new value in place) or the silicon
-// does not pulse it - phase B says which.
-
-// The DOUBLE-COMMAND read, designed from phase B's observation: the
-// shadow lands about half a slow period AFTER SYNCBUSY.CTRLB clears,
-// with no bit advertising it. A second READSYNC's own crossing covers
-// the first's landing gap, so what this returns is the count AT THE
-// FIRST COMMAND - the verb's entry time, which is the honest contract.
+// The shadow lands about half a slow period AFTER SYNCBUSY.CTRLB
+// clears, with no bit advertising it. A second READSYNC's own crossing
+// covers the first's landing gap, so what this returns is the count AT
+// THE FIRST COMMAND - the verb's entry time, which is the honest
+// contract. It is spelled out here rather than called through the
+// driver so that the probe measures the sequence itself.
 uint32_t fixed_read_tc(uint32_t spins = 400'000u) {
     for (int pass = 0; pass < 2; ++pass) {
         Watch::regs().TC_CTRLBSET =
@@ -163,7 +160,7 @@ int main() {
 
     print(serial, crlf, "tc_readsync_probe", crlf);
 
-    // ---- A: reproduce with the CURRENT read_sync ----
+    // ---- A: the driver's read_sync(), four times ----
     print(serial, "A  reproduce (TC pair at 32768 Hz, 6 ms of running):", crlf);
     (void)watch_up(gen_slow);
     wait_ms(6);
@@ -181,7 +178,7 @@ int main() {
     observe([] { return static_cast<uint32_t>(Watch::regs().TC_SYNCBUSY); },
             [] { return Watch::count32_raw(); }, "TC", tc_cmd);
 
-    // ---- C: the candidate fixed read ----
+    // ---- C: the locally built double-command read ----
     print(serial, "C  fixed read (rise-then-fall) x4 after 6 ms:", crlf);
     (void)watch_up(gen_slow);
     wait_ms(6);
@@ -270,7 +267,7 @@ int main() {
     {
         const uint32_t d1 = fixed_read_tc();       // double: current (~196+)
         wait_ms(6);
-        // one single-command read, the driver's OLD shape:
+        // one single-command read:
         Watch::regs().TC_CTRLBSET =
             TC_CTRLBSET_CMD(TC_CTRLBSET_CMD_READSYNC_Val);
         uint32_t f = 400000u;

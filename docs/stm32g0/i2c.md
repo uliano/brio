@@ -10,8 +10,8 @@ bus driver has: `I2c<n>`, the resource; `I2cHost<n, pins, TxEngine,
 RxEngine>`, the transfer engine `util/i2c_bus.hpp` drives; and
 `I2cClient<n, pins>`, the target role. `I2cHost`'s Request is
 `avrdx/twi.hpp`'s and `samc21/i2c.hpp`'s **verbatim**, so
-`util/i2c_bus.hpp` and `util/bus_master.hpp` get their THIRD silicon with
-not one line of `util/` or `kernel/` changed.
+`util/i2c_bus.hpp` and `util/bus_master.hpp` drive this engine exactly
+as they are written.
 
 ## Documents of record
 
@@ -70,8 +70,8 @@ It is also the chapter's own deadlock escape (32.4.9), which is what
 ADDR, NACKF, STOPF and each of the six errors and nothing else: TXIS,
 RXNE, TC and TCR are cleared by an ACCESS (a data-register read or
 write, a START, a STOP, an NBYTES write) or by PE. On a level-driven
-vector that is a trap, and it cost this driver two wedged boards before
-it was written down - see the findings.
+vector that is a trap: a handler that meets one of those flags and
+cannot clear it must DISARM its interrupt - see the findings.
 
 **The vector is shared** where the part has an I2C3: I2C2 and I2C3 sit
 on `I2C2_3_IRQn`, so an app binds `BRIO_STM32G0_I2C2_HANDLER` and calls
@@ -180,18 +180,16 @@ the reason is in the findings.
 
 Measured by `test_stm32_i2c`. The findings down to "ES0548 2.10.2 did
 not fire once" are the SELF-LINK's (I2C1 host PB8/PB9, I2C2 client
-PA11/PA12, both AF6, 2.2 kOhm pull-ups): 13 letters in `z` / 142
-verdicts, 142/142 three times including a cold flash. The ones under
-"The peer bus" are a SECOND CHIP's, on the same two pads and the same
-pull-ups: 54 verdicts, green twice including a cold flash against a SAM
-C21 and green three times including a cold flash against a second
-STM32G0.
+PA11/PA12, both AF6, 2.2 kOhm pull-ups): 13 letters in `z`, 142
+verdicts. The ones under "The peer bus" are a SECOND CHIP's, on the same
+two pads and the same pull-ups: 54 verdicts, against a SAM C21 and
+against a second STM32G0.
 
 **The enable protection is REAL here, which is the opposite of the SPI's
 answer.** A raw write with PE set lands on NONE of the four PE-gated
 fields - TIMINGR, NOSTRETCH, ANFOFF and DNF all refuse - where
-`test_stm32_spi` found the silicon enforcing not one line of 35.5.7. Two
-chapters of one manual, two different dispositions.
+`test_stm32_spi` measures the silicon enforcing not one line of 35.5.7.
+Two chapters of one manual, two different dispositions.
 
 **The silicon names its own column of table 165.** 32.9.6 makes
 `I2C_TIMEOUTR` "reserved, and its bits forced by hardware to 0" on an
@@ -206,7 +204,7 @@ takes to get there, but the order decides: at TC the previous transfer
 is finished and UNTERMINATED, so a store that raises AUTOEND before
 START is read as a request to end THAT transfer - the peripheral sends
 the STOP at once and START, a cycle later, opens a new tenure instead of
-restarting this one. Caught on the ISR trace: TC then STOPF with **no
+restarting this one. On the ISR trace: TC then STOPF with **no
 second address match at the client**, where a repeated START owes two.
 Written as one store, the client sees two matches and one STOP.
 
@@ -220,16 +218,16 @@ nothing can report it.
 **A NACK branch must return.** The STOP the peripheral sends by itself
 arrives as its own interrupt microseconds later; a branch that falls
 through to a general sweep clears that STOPF the moment it sets, and the
-tenure keeps its status, loses its flags and never completes. It showed
-up as an order dependency between letters, which is what a race usually
-looks like first.
+tenure keeps its status, loses its flags and never completes. The
+symptom is an order dependency between letters, which is what a race
+usually looks like first.
 
 **Three flags no branch owns.** PECERR, TIMEOUT and ALERT ride the one
 ERRIE a plain I2C engine arms for BERR and ARLO. They are swept at the
 bottom of the handler, and what a sweep cannot reach is disarmed.
 
-**A held SDA is a PARK and not an error** - the third silicon of this
-project to answer that way. A controller whose SDA is held low by
+**A held SDA is a PARK and not an error**, the same answer the AVR DA/DB
+and the SAM C21 give. A controller whose SDA is held low by
 another device raises no ARLO and no BERR: 32.4.9 makes the START wait
 for a free bus, a low SDA under a high SCL is a START the monitor has
 already seen, so BUSY stands (host ISR `0x8000`, BUSY alone), the
@@ -289,7 +287,7 @@ the host's own unserved hold trips TIMEOUTA at a 4 ms limit (ISR
 `0x1023`), and a **peer's 6 ms hold does not trip it** - nor does
 TIMEOUTB, which 32.9.6 makes this controller's own cumulative stretch
 (tLOW:MEXT). So 32.4.12's "if SCL is tied low" is this controller's own
-hold, and **the samc21's answer holds here too**: no silicon time-out on
+hold, and **the SAM C21 answers the same way**: no silicon time-out on
 any engine of this project watches a wire a client wedged. TIDLE = 1 is
 accepted and reads back, but bus idle detection did not raise TIMEOUT on
 a bus idle for 2 ms against a 50 us limit - recorded, not judged.
@@ -323,7 +321,7 @@ unmoved. A filter deep enough to eat the low period is refused by
 `0xFF` when nine clocks and a STOP leave SDA still low (a short, not a
 client), and 0 again once the pad is given back.
 
-**util/i2c_bus.hpp's third silicon**: four tenures queued through
+**`util/i2c_bus.hpp` over this engine**: four tenures queued through
 `I2cBus` come back in order with the NACK delivered in its place as a
 reply; what will not fit the queue is rejected on the spot and every
 request is still answered exactly once; an idle bus votes for the sleep
@@ -337,7 +335,7 @@ times across a whole `z` run. The driver counts it and never reports it -
 the erratum's own workaround - so `i2c_bus_error` from the engine means
 its own bounded wait ran out and never a flag this erratum can forge.
 
-Two facts about the bench itself, both paid for: **a long wait inside an
+Two facts about the bench itself: **a long wait inside an
 interrupt must be a counted loop**, because a stopwatch built on SysTick's
 VAL against the tick count runs backwards when a tick handler cannot
 preempt the interrupt reading it; and **a wire letter needs a flushed
@@ -352,17 +350,15 @@ The same two pads and the same two pull-ups reach a PEER BOARD running
 topologies EXCLUDE each other: the suite probes for the self-link at
 boot and letters b..l, x and y skip themselves when it is absent (letter
 m keeps its three wireless verdicts and drops its closing wire leg). On
-the peer desk `z` scores **54 of 54** (letter `a` wireless, letter `m`
-wireless, letters `n`..`r` on the wire) - green twice including a run
-from a cold flash against a SAM C21, and green three times including a
-run from a cold flash against a SECOND STM32G0. THE TWO PEERS ARE
-INTERCHANGEABLE HERE: every verdict of the five letters holds against
-both, and the peer's `ident` is what says which one answered.
+the peer desk `z` is 54 verdicts (letter `a` wireless, letter `m`
+wireless, letters `n`..`r` on the wire), and they hold against a SAM C21
+and against a second STM32G0 alike. THE TWO PEERS ARE INTERCHANGEABLE
+HERE: every verdict of the five letters holds against both, and the peer's `ident` is what says which one answered.
 
-**The wire format is the AVR campaign's, unchanged, on a third
-architecture.** `avrdx/src/apps/twi_link.hpp` is compiled by three apps
-now, and here **one command is TWO TENURES of the engine under test** - a
-write carrying the frame, then a read collecting the answer - so the
+**The wire format is `avrdx/src/apps/twi_link.hpp`, shared by all three
+architectures' peers.** Here **one command is TWO TENURES of the engine
+under test** - a write carrying the frame, then a read collecting the
+answer - so the
 command channel is itself a measurement of this driver. Ten of ten round
 trips at a measured 99 kHz, and `ident` names the peer's die serial and
 its `twi_peer` sanity byte.
@@ -387,21 +383,21 @@ controller simply waits, which is what flow control means.
 each, against BOTH peers. That is worth stating as a WIRE result and not
 a controller one: a megahertz bus here is a property of these two short
 jumpers, their 2.2 kOhm pull-ups and the far end's own input path (the
-SAM's target has no input filter at all - the samc21 campaign's headline
-finding), and the suite's verdict on the Fm+ rung claims only that the
+SAM's target has no input filter at all), and the suite's verdict on the
+Fm+ rung claims only that the
 kernel clock can produce it. **AND ONE TARGET CONFIGURATION SERVES ALL
 THREE RUNGS**: a target's `speed` names the row its SDADEL and SCLDEL
 are solved against and not a rate it generates (32.4.8), so the G0 peer
 sits on the bus solved for Fm+ - the fastest rung the ladder will bring
 - and the Sm and Fm rungs are byte-exact through the same delays.
 
-**The arbiter's third silicon, measured against a SECOND CHIP.** Letter
+**The arbiter measured against a SECOND CHIP.** Letter
 `r` runs `I2cBus` (= `BusMaster`) over `I2cHost` with the SAM answering:
 four tenures queued come back in order with the NACK from an address
 nobody answers delivered in its place, the sixth of six posted into a
 four-deep queue is rejected on the spot, an idle bus votes for the sleep
-and a busy one against it. Not one line of `util/i2c_bus.hpp`,
-`util/bus_master.hpp` or `kernel/` moved for the pairing.
+and a busy one against it - `util/i2c_bus.hpp` and `util/bus_master.hpp`
+exactly as they are written.
 
 **AND THE WEDGE HAS A SECOND SIGNATURE WHEN A FOREIGN CHIP HOLDS THE
 WIRE - RECORDED, NOT RECONCILED.** The self-link's letters `c` and `l`
@@ -420,13 +416,13 @@ the same bus AO carries the next tenure to `i2c_ok` once the line comes
 back.
 
 **TWO THINGS A TARGET OF THIS FAMILY DOES THAT ITS TALLY MUST KNOW**,
-both measured from the peer's side and both fixed in the instrument
-rather than in the verdicts. First, **a target transmitter is always
-asked for one byte more than the controller takes**: TXIS rises as soon
+both measured from the peer's side and both a property of the target
+rather than of the verdict counting it. First, **a target transmitter is
+always asked for one byte more than the controller takes**: TXIS rises as soon
 as TXDR empties, so while the controller clocks byte k the target has
 already loaded k+1, and the byte standing in TXDR when the closing NACK
 arrives never reaches the wire - 32.4.8's own `flush()` is what throws
-it away, and an instrument that counted it reported nine bytes served
+it away, and an instrument that counts it reports nine bytes served
 for eight clocked. Second, **the last data byte's stretch falls outside
 the controller's own tenure**: a controller's write is over once its
 last byte is in the shifter, so a target that holds SCL before every
@@ -436,8 +432,8 @@ an instrument that spends its commanded hold at ADDR as well puts the
 full N back inside the measured window - which is how 2 ms a byte
 prices an 8-byte tenure at the 16 ms the model predicts.
 
-**A SUITE LESSON THAT IS ABOUT THE VECTOR AND NOT THE WIRE** (the SPI
-suite paid for it first): a peer command re-inits the host, which hands
+**A RULE ABOUT THE VECTOR AND NOT THE WIRE**, shared with the SPI
+suite: a peer command re-inits the host, which hands
 I2C1's vector back to the bare pump, so an arbiter that owned it must
 re-state its claim afterwards or every later completion is consumed by
 the wrong branch and answered `i2c_timeout` on a tenure that ran
@@ -515,8 +511,8 @@ reason.
 
 Driver gaps:
 
-- **No client DMA slots.** `I2cClient` has none - the `SpiClient`
-  precedent - and a slot waits for a device-shaped user. The TARGET
+- **No client DMA slots.** `I2cClient` has none, as `SpiClient` has
+  none, and a slot waits for a device-shaped user. The TARGET
   side of a DMA tenure is therefore not measured at all: letter `h`
   runs the host's two engines against a client on its byte pump, which
   proves the host's half and says nothing about the client's.
@@ -549,7 +545,7 @@ Implemented but not bench-verified:
   that silences the client silences the controller that would wake it.
   The peer bus removes that obstacle - the peer is a second node and
   `twi_link`'s `arb` op makes it a CONTROLLER, on all three of that
-  app's ports - so the wake is now stageable and simply not built: it
+  app's ports - so the wake is stageable and simply not built: it
   wants this board's client on PB8/PB9 while the peer addresses it,
   which is a role swap no letter of this suite does yet. ES0548 2.2.4
   (HSIDIV must be 0) is stated for the same reason.
@@ -564,17 +560,17 @@ Implemented but not bench-verified:
   byte control and the target-transmit path - but `test_stm32_i2c`
   itself has never been run ON it, so the self-link half and the
   wireless letters are one G0B1RE's.
-- **Arbitration lost against a real second controller.** ARLO is now
+- **Arbitration lost against a real second controller.** ARLO is
   seen on silicon (letter `r`'s wedge, held by the peer from its own
   GPIO), but a LIVE RACE - two controllers driving addresses at once and
-  the smaller byte winning - is still not staged, and it is now the
+  the smaller byte winning - is not staged, and it is the
   cheapest gap on this list: `twi_link`'s `arb` op makes the peer a
   controller (implemented on the stm32g0 port too, exercised by no
   letter), `twilink::low_addr` exists so either end can be made to lose,
   and the rendezvous it needs is a bus both ends see Busy at the same
   instant. The self-link cannot help, since a held START on this silicon
-  does not fire when a phantom release comes (the samc21's own
-  conclusion, reached again).
+  does not fire when a phantom release comes - the SAM C21's answer
+  too.
 
 Declined, with the reason:
 

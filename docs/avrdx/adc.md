@@ -277,7 +277,7 @@ Ownership: one converter, one owner. An AO that owns it configures it
 in its states and interprets its results; a second consumer asks that
 AO (request/reply), it does not touch the registers.
 
-## Bench findings (`test_avr_analog`, rev A5, 3.3 V and 5 V: 68/68)
+## Bench findings (`test_avr_analog`, rev A5, 3.3 V and 5 V)
 
 - The warm-up after enabling is real: the first conversion before
   ~6 us is garbage. `init()` waits 10 us - that is why it takes the
@@ -322,7 +322,7 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- `run_standby` (an event-started conversion in standby; queued, LOW
-  priority); the 200 us reference start-up case (32.768 kHz main
-  clock: the console cannot follow it, so it waits for a sleepy
-  app); `debug_run` (needs a debugger session).
+- `run_standby` (an event-started conversion in standby); the 200 us
+  reference start-up case (32.768 kHz main clock: a serial console
+  cannot follow it, so it needs a sleepy application); `debug_run`
+  (needs a debugger session).

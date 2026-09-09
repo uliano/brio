@@ -468,7 +468,7 @@ public:
     /// interrupts off, PORTMUX to NONE, the pins this driver drove
     /// returned to inputs with their pull-up cleared. The teardown that
     /// lets another peripheral take the position (evsys.hpp's unlisten
-    /// is the precedent).
+    /// does the same for an event user).
     static void release() {
         auto& u = regs();
         u.CTRLA = 0;
@@ -964,7 +964,7 @@ public:
     // ---- lifecycle -------------------------------------------------------
 
     /**
-     * @brief Configure pins, PORTMUX, baud rate and enable the USART.
+     * Configure pins, PORTMUX, baud rate and enable the USART.
      *
      * Call AFTER the main clock is set up and before sei(); `clock` is
      * the app's brio::Clock tag (avrdx/clock.hpp): the baud divisor is
@@ -981,9 +981,8 @@ public:
         m_baud = baud;
         // init() STARTS the transport: whatever a previous life of this
         // instance left in the rings and the counters is not this one's
-        // traffic. (Bench: a suite that re-init'ed the same Uart after
-        // driving the resource directly read a stale byte as the first
-        // one of the new session.)
+        // traffic. (Measured: an instance re-init'ed after the resource
+        // had been driven directly reads a stale byte as its first one.)
         while (m_rx.pop()) {
         }
         while (m_tx.pop()) {
@@ -999,8 +998,8 @@ public:
     }
 
     /**
-     * @brief The peripheral clock changed (DynamicClock fan-out): keep
-     * the same baud rate at the new rate.
+     * The peripheral clock changed (DynamicClock fan-out): keep the
+     * same baud rate at the new rate.
      *
      * Waits for the TX side to go idle first (ring drained by the DRE
      * ISR, shifter empty: TXCIF), so nothing already queued is sent at
@@ -1045,13 +1044,13 @@ public:
     // ---- ISR bodies ------------------------------------------------------
 
     /**
-     * @brief RX Complete interrupt body - call from ISR(USARTn_RXC_vect).
+     * RX Complete interrupt body - call from ISR(USARTn_RXC_vect).
      *
      * RXDATAH (status for the byte at the FIFO head) is read BEFORE
      * RXDATAL (which advances the FIFO). Corrupted bytes (frame/parity) are
      * counted and dropped; BUFOVF means the hardware already lost bytes.
      *
-     * @return true when the RX ring transitioned empty -> non-empty: the
+     * Returns true when the RX ring transitioned empty -> non-empty: the
      * edge signal for kernel glue ("post RxActivity to the serial AO on
      * true"). Every empty->non-empty transition reports true and the
      * consumer only empties the ring by draining it, so no wakeup is ever
@@ -1078,7 +1077,8 @@ public:
     }
 
     /**
-     * @brief Data Register Empty interrupt body - call from ISR(USARTn_DRE_vect).
+     * Data Register Empty interrupt body - call from
+     * ISR(USARTn_DRE_vect).
      *
      * Feeds the next byte from the TX ring; disables itself when the ring
      * drains (write_byte() re-enables it).
@@ -1148,7 +1148,7 @@ static_assert(ByteTransport<Uart<0>>, "Uart must satisfy the transport concepts"
 
 /// The polled half-duplex and synchronous tasks share this much: a
 /// configured resource, a bounded send/receive pair, and a rebase that
-/// recomputes BAUD from the rate the task was born with.
+/// recomputes BAUD from the rate the task was configured with.
 template <uint8_t n, UsartRoute route, UsartMode task_mode>
 struct UsartTaskBase {
     UsartTaskBase() = delete;

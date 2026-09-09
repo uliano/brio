@@ -3,8 +3,7 @@
  *
  * The STM32G0's main flash as a FlashMedia (util/nv_heap.hpp): the
  * backends that let the target-independent block allocator and the
- * target-independent value journal run on this silicon - the THIRD
- * implementation of that contract, and the first one on a part where the
+ * target-independent value journal run on this silicon, where the
  * storage and the running image share one array.
  *
  * THE STORAGE ATTIC IS BANK 2, and that choice is the whole design.
@@ -18,8 +17,7 @@
  *    from that bank, means the CPU stops for the whole 22..40 ms of a
  *    page erase. So a program that stores a record while it runs must
  *    store it in the bank it does not execute from. That is what makes
- *    an ordinary NvJournal::save() legal from the main loop here, the
- *    same property the samc21 backend bought by living in the RWWEE array.
+ *    an ordinary NvJournal::save() legal from the main loop here.
  *
  *  - ERRATUM ES0548 2.2.10 (LIVE, no workaround): the prefetch may fail
  *    when the CPU BRANCHES ACROSS BANKS. The erratum's own note then
@@ -30,24 +28,21 @@
  *  - A CONSTANT ZONE. stm32g0/../ld/stm32g0b1re.ld gives the linker BANK
  *    1 ONLY (256 K of rom), so nothing the compiler emits can land in
  *    bank 2. The heap's floor and the journal's home are therefore
- *    CONSTANTS, exactly as they are on the samc21's RWWEE array and unlike
- *    the AVR's, where the free flash is bounded by linker symbols that
- *    move with every build. The linker script's own `__brio_rom_end` is
+ *    CONSTANTS and not linker symbols that move with every build. The
+ *    linker script's own `__brio_rom_end` is
  *    read back here as the proof, so a script edited back to 512 K
  *    closes the storage instead of letting an image grow into it.
  *
  * ADDRESSES HERE ARE OFFSETS FROM 0x0800 0000, not absolute, and that is
  * a decision with a reason. util/nv_heap.hpp numbers erase units in a
  * uint16_t (NvBlockEntry::first_page), so a media whose addresses are
- * absolute must sit below page 65536 - which the samc21's RWWEE array at
- * 0x0040 0000 does (page 16384) and this part's bank 2 at 0x0804 0000
- * does NOT: 0x08040000 / 2048 is 65664, one page past the field. The
- * AVR backend already numbers its flash from zero, so this is the
- * contract's other established convention rather than a new one, and it
- * costs one addition per access.
+ * absolute must sit below page 65536 - which this part's bank 2 at
+ * 0x0804 0000 does NOT: 0x08040000 / 2048 is 65664, one page past the
+ * field. Numbering the media from zero is the contract's other allowed
+ * convention, and it costs one addition per access.
  *
- * THE ARRAY IS PARTITIONED, because this target has the same two storage
- * classes the samc21 does and one array to put them in:
+ * THE ARRAY IS PARTITIONED, because this target has two storage classes
+ * and one array to put them in:
  *
  *   pages 0..125 of bank 2   MainFlash             252 K  blocks
  *                                                         (util/nv_heap.hpp),
@@ -65,10 +60,9 @@
  * ceil((12 + 32) / 8) = 6 cells). Both bounds are anchored to the TOP of
  * the part so each user's home is anchored to the silicon in turn.
  *
- * THE GRANULARITIES, and they are the widest split of the three targets:
- * an erase takes down a PAGE of 2048 bytes and a program writes a DOUBLE
- * WORD of 8. On the samc21 it is 256 and 64, on the AVR 512 and 2. Code
- * that says "page" for both is code that is wrong on all three.
+ * THE GRANULARITIES ARE FAR APART: an erase takes down a PAGE of 2048
+ * bytes and a program writes a DOUBLE WORD of 8. Code that says "page"
+ * for both is code that is wrong.
  *
  * ERRATUM ES0548 2.2.3 IS UNREACHABLE BY CONSTRUCTION here, and it is
  * worth saying which construction. 3.3.8 makes one exception to the
@@ -80,7 +74,7 @@
  * special-case zeros either, and a caller that tries gets the silicon's
  * PROGERR back unedited.
  *
- * THE BUILD ID is a link-time constant, as on the other two targets:
+ * THE BUILD ID is a link-time constant:
  * stm32g0/CMakeLists.txt passes -Wl,--defsym,__nvheap_build_id=<newest
  * source mtime> to every image, so an unchanged tree relinks to the same
  * bytes. A pointer is 32 bits here, so the symbol's ADDRESS is the value.
@@ -285,7 +279,7 @@ static_assert(MainFlash::flash_end % MainFlash::erase_size == 0u,
 static_assert(MainFlash::flash_end / MainFlash::erase_size <= 0xFFFFu,
               "NvHeap numbers erase units in a uint16_t - which is why this "
               "media's addresses are offsets from 0x08000000 and not the "
-              "absolute addresses the samc21 backend can afford");
+              "absolute addresses a media low in the map could afford");
 
 /**
  * The journal's share: the attic, the top two pages of bank 2.
@@ -293,8 +287,7 @@ static_assert(MainFlash::flash_end / MainFlash::erase_size <= 0xFFFFu,
  * A second FlashMedia rather than a parameter on the first one, because
  * the contract is a whole MEMORY and both users anchor their own home to
  * their media's flash_end. Two media over one bank is what keeps that
- * true for both without either knowing the other exists - the samc21
- * partition's shape, one page size up.
+ * true for both without either knowing the other exists.
  */
 struct MainFlashJournalZone {
     MainFlashJournalZone() = delete;

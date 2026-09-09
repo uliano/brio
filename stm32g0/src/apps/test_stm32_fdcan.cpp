@@ -24,11 +24,11 @@
 //      and an edge a counter can count.
 //   3. TEST.TX = 01, THE SAMPLE POINT ON THE PAD. One edge per bit time,
 //      counted by a DMAMUX request generator on the pad's EXTI line with
-//      no CPU in the loop (the dma suite's technique): a bit-rate meter
-//      for a bus that does not exist.
+//      no CPU in the loop: a bit-rate meter for a bus that does not
+//      exist.
 //   4. THE RX PAD'S OWN PULL IS THE BUS. A pad under an input alternate
-//      function still follows its PUPDR (the LPTIM and USART campaigns
-//      proved it), so a pull-up is a recessive line and a pull-down a
+//      function still follows its PUPDR (measured), so a pull-up is a
+//      recessive line and a pull-down a
 //      stuck-dominant one - which is how the ERROR MACHINE, bus-off and
 //      the recovery sequence are reachable with nothing attached.
 //   5. THE INTERNAL TIMESTAMP COUNTER IS A BIT-RATE METER. TSCC.TSS = 01
@@ -38,10 +38,12 @@
 //
 // THE PADS: PC4 (FDCAN1_RX) and PC5 (FDCAN1_TX), both AF3, both proven
 // free by their own pull before they are claimed and both left in analog
-// mode afterwards (PB8/PB9 until the desk's I2C self-link put 2.2 k
-// pull-ups on them - a pad an external pull holds up cannot be pulled
-// dominant by its own 40 k, and this suite's error machine needs that;
-// bench.md). FDCAN2 is exercised WITHOUT A PAD throughout.
+// mode afterwards. THE CHOICE OF PADS IS ELECTRICAL: a pad an external
+// pull-up holds up cannot be pulled dominant by its own 40 k, and this
+// suite's error machine needs exactly that, so a pad carrying a wired
+// bus with its own pull-ups will not serve (docs/bench.md says which
+// pads the wiring occupies). FDCAN2 is exercised WITHOUT A PAD
+// throughout.
 // PA2/PA3 are the console, PA5 is LD4, PA13/PA14 the SWD, PC13 the
 // button, PC14/PC15 the LSE crystal.
 //

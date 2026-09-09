@@ -3,9 +3,9 @@
  *
  * PwmChannel: the role-level contract of "one dimmable output". This is
  * what generic actuators (util/rgb_lamp.hpp, a future dimmer or servo)
- * depend on; how the duty is produced - a TCA in split mode, a 16-bit
- * TIM channel, or a plain GPIO pin that only knows on/off - is the
- * target driver's business and never leaks above this concept.
+ * depend on; how the duty is produced - a split-mode 8-bit timer, a
+ * 16-bit compare channel, or a plain GPIO pin that only knows on/off -
+ * is the target driver's business and never leaks above this concept.
  *
  * Contract:
  *  - `max`: a positive compile-time constant, the value of full duty

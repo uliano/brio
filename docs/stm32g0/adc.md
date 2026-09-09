@@ -30,22 +30,21 @@ buffer and the comparators. Family fixture
 ## What the silicon does
 
 **One converter, nineteen channels, and no instance question at all.**
-Every STM32G0 carries exactly one ADC (15.1), so `Adc` is a MONOSTATE
-and not an `Adc<n>` - the samc21 `Dac`/`Sdadc`/`Tsens` precedent. Sixteen
-of the nineteen channels are pads and three are internal: the
-temperature sensor on 12, VREFINT on 13 and VBAT/3 on 14 (15.3.8), each
-woken by its own bit of ADC_CCR. That register is NOT part of
-`ADC_TypeDef`: the device header puts it in its own `ADC_Common_TypeDef`
-at its own base, which is why the driver has a `common()` beside
-`regs()`.
+Every STM32G0 carries exactly one ADC (15.1), so `Adc` is a MONOSTATE and
+not an `Adc<n>`. Sixteen of the nineteen channels are pads and three are
+internal: the temperature sensor on 12, VREFINT on 13 and VBAT/3 on 14
+(15.3.8), each woken by its own bit of ADC_CCR. That register is NOT part
+of `ADC_TypeDef`: the device header puts it in its own
+`ADC_Common_TypeDef` at its own base, which is why the driver has a
+`common()` beside `regs()`.
 
 **It has a regulator and a self calibration, and both are procedures.**
 ADVREGEN must be raised and tADCVREG_STUP spent (15.3.2; DS13560 table
 62 gives 20 us max) before anything else; ADCAL then measures and
 applies an offset correction that varies part to part (15.3.3). Neither
 is a factory value copied into a register, which is where this converter
-differs from both earlier brio targets - and it is why `init()` takes
-the CLOCK: it has real microseconds to spend. Measured on this die:
+differs from the AVR DA/DB's and the SAM C21's - and it is why `init()`
+takes the CLOCK: it has real microseconds to spend. Measured on this die:
 `CALFACT` comes out **55**, and the whole bring-up (regulator, 25 us,
 calibration, configure, enable) fits in one call.
 
@@ -174,8 +173,7 @@ const uint16_t mv   = brio::adc_mv((brio::Adc::select(Sense{}), brio::Adc::read(
 ## Bench findings
 
 Measured by `test_stm32_analog` on an STM32G0B1RE at 3.3 V, silicon
-revision Z. The numbers below are one run's; the suite scores 94/94
-three times, once cold from a fresh flash.
+revision Z. The numbers below are one run's.
 
 **VDDA MEASURED WITH NO METER, and it is 3310 mV.** VREFINT converts to
 1511 counts against a factory value of 1667 taken at 3.0 V, so 15.9's
@@ -230,10 +228,10 @@ AWD2CR, in the same words - and the silicon does two different things.
 Staged with both halves in one letter: **CFGR1 takes an AWD1 bit with
 the converter enabled** (which is exactly the door ES0548 2.6.2 comes
 through, since the same write resets RES to 12 bits) while **AWD2CR
-ignores the identical forbidden write in complete silence**. The first
-version of the suite configured every watchdog with the converter
-running: AWD1 worked and AWD2/AWD3 did nothing at all, which is how this
-was found. Every watchdog verb in the driver now refuses while enabled.
+ignores the identical forbidden write in complete silence**. Which is
+why every watchdog verb in the driver refuses while the converter is
+enabled: configured under a running converter, AWD1 takes its bit and
+AWD2/AWD3 do nothing at all.
 
 **The watchdogs themselves, all three.** AWD1 guards a window and both
 sides of it (a reading inside raises nothing, one above the high
@@ -276,35 +274,32 @@ with CHSELR reading 0xFFFFF45D, the 0xF terminating a three-entry list;
 EOS rises at the end of the sequence and not before; and a channel
 selection is refused while a conversion runs.
 
-**`AnalogSampler` runs unchanged on the third architecture.** Letter j
-puts `util/analog_sampler.hpp`'s AO inside a real kernel walking
-VREFINT, the temperature sensor and a DAC-driven pad: 60 samples,
-20 on each input, zero mislabelled, zero queue overflows, and the values
-right for their labels. The file's own comment doubted this shape would
-survive a converter with a hardware sequencer and DMA - both of which
-this one has - and the answer is that it does, because the sampler uses
-neither. One method note the letter pays for: `Kernel::step()` serves a
-queued event and nothing else, so a pump that is not `Kernel::run()`
-must call `TimeEvents<P>::process()` itself or a software pace never
-matures.
+**`util/analog_sampler.hpp` is realized here as written.** Letter j
+puts its AO inside a real kernel walking VREFINT, the temperature
+sensor and a DAC-driven pad: 60 samples, 20 on each input, zero
+mislabelled, zero queue overflows, and the values right for their
+labels. The shape survives a converter with a hardware sequencer and
+DMA - both of which this one has - because the sampler uses neither.
+One method note: `Kernel::step()` serves a queued event and nothing
+else, so a pump that is not `Kernel::run()` must call
+`TimeEvents<P>::process()` itself or a software pace never matures.
 
 **One trigger, both converters, no CPU.** TIM6's TRGO is `dac_ch1_trg5`
 (table 85) AND the ADC's EXTSEL 101 (table 73), so one basic timer paces
 both converters from the same edge while a `DmaLoopEngine` plays a table
 into the DAC and a `DmaPingPongEngine` drains ADC_DR. Over six blocks of
-24 samples at 5 kHz the captured sequence follows the 16-entry table
-with **zero samples off it** and **5 of 5 seams stepping by exactly 8**
-(24 mod 16), with no engine overrun and no DAC underrun. Two things had
-to be got right and both are findings: the FIRST block is spent, not
-judged, because 16.4.8 makes the caller write the first datum before the
-first trigger and the launch block is therefore one entry out of phase
-(measured exactly that way - entries 0, 7, 15, 7, 15, 7); and **the
-sampling time is the delay**, because both converters start on the same
-edge and the ADC's sample-and-hold closes at the END of tSMPL, so a
-window longer than the DAC's settling time (5 us against 1.7 us typical)
-holds the value the DAC has just reached instead of one caught mid-slew.
-A 1.2 us window read nine transitional samples in six blocks; a 5 us one
-reads none.
+24 samples at 5 kHz the captured sequence follows the 16-entry table with
+**zero samples off it** and **5 of 5 seams stepping by exactly 8** (24 mod
+16), with no engine overrun and no DAC underrun. Two facts govern the
+arrangement: the FIRST block is spent, not judged, because 16.4.8 makes
+the caller write the first datum before the first trigger and the launch
+block is therefore one entry out of phase (measured exactly that way -
+entries 0, 7, 15, 7, 15, 7); and **the sampling time is the delay**,
+because both converters start on the same edge and the ADC's
+sample-and-hold closes at the END of tSMPL, so a window longer than the
+DAC's settling time (5 us against 1.7 us typical) holds the value the DAC
+has just reached instead of one caught mid-slew. A 1.2 us window read nine
+transitional samples in six blocks; a 5 us one reads none.
 
 ## Errata (ES0548 Rev 3, revision Z)
 
@@ -369,7 +364,7 @@ another board settles somewhere else.
   channel 4 in PWM and a compare the running counter reaches.
 - **EXTI 11 is reached with a pull-walked PB11**, the line's port
   selected in the EXTI and the sense rising: the same pad technique the
-  comparator campaign established, one chapter over.
+  comparator letters use, one chapter over.
 - **The external inputs are a MAP, measured** (letter `r`): twelve
   channels on twelve free pads - IN0, IN1, IN6..IN11, IN15..IN18 - each
   follows its OWN pad between the rails by 449..1785 counts of 4096,
@@ -417,15 +412,15 @@ rows instead of six and says so.
 
 ## On the third silicon
 
-`test_stm32_analog` scores **67 of 139** on the Nucleo-G031K8 (DEV_ID
-0x466, REV_ID 0x1003), and the shortfall is not the ADC's: **this part
-has no DAC and no comparators at all**, so eight of the suite's eighteen
-letters (the DAC's four - `d`, `e`, `o`, `p` - the comparators' three -
-`i`, `m`, `n` - and `k`, which pairs a DAC stream with an ADC one) are
-COMPILED OUT - `Dac` and `Comp` cannot
-be named where `DAC1_BASE` and `COMP1_BASE` do not exist - and each is
-still registered in the menu, printing its own reason and claiming
-nothing. The converter's own letters run whole.
+On the Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003) `test_stm32_analog`
+claims **67 of its 139** verdicts, and the shortfall is not the ADC's:
+**this part has no DAC and no comparators at all**, so eight of the
+suite's eighteen letters (the DAC's four - `d`, `e`, `o`, `p` - the
+comparators' three - `i`, `m`, `n` - and `k`, which pairs a DAC stream
+with an ADC one) are COMPILED OUT - `Dac` and `Comp` cannot be named where
+`DAC1_BASE` and `COMP1_BASE` do not exist - and each is still registered
+in the menu, printing its own reason and claiming nothing. The converter's
+own letters run whole.
 
 **THE SECOND ANALOG SOURCE IS THE JUNCTION SENSOR.** Half this suite's
 letters need a second reading that is not VREFINT, and on the bigger
@@ -434,17 +429,17 @@ sensor, which is a source no program can move but which is steady and
 far from VREFINT (948 counts against 1512), and every leg that used the
 DAC's code as a knob states what it lost.
 
-Numbers on this die: **VDDA 3308 mV** from VREFINT against
-VREFINT_CAL = 1667 (E 3310, F 3317), CALFACT 63 after the self
-calibration, the junction sensor 948 counts = 32.7 C, VBAT/3 1374 counts
-= 3330 mV, VREFINT 1221 mV at 12 bits and 1218 at 10 - inside table 27's
-1.182..1.232 V. The noise floor over 64 conversions is 2 counts on
-VREFINT and 3 on the sensor.
+Numbers on this die: **VDDA 3308 mV** from VREFINT against VREFINT_CAL =
+1667 (3310 on the G0B1RE, 3317 on the G071RB), CALFACT 63 after the self
+calibration, the junction sensor 948 counts = 32.7 C, VBAT/3 1374 counts =
+3330 mV, VREFINT 1221 mV at 12 bits and 1218 at 10 - inside table 27's
+1.182..1.232 V. The noise floor over 64 conversions is 2 counts on VREFINT
+and 3 on the sensor.
 
 **THE INPUT MAP IS THIS PACKAGE'S OWN**: IN0..IN7 on PA0..PA7, IN8..IN10
 on PB0/PB1/PB2, IN11 on PB7, IN15 and IN16 on PA11 and PA12 - twelve
 bonded pads, walked and measured, with no IN17/IN18 (those are the
-bigger packages' PC4/PC5). And the walk paid for a fact of the
+bigger packages' PC4/PC5). And the walk shows a fact of the
 technique: a precharged pad's reading is its charge SHARED with the
 sample-and-hold, so the swing is a fraction of the rail and the fraction
 is a BOARD and PACKAGE property - a Nucleo-64's pad drags a morpho header

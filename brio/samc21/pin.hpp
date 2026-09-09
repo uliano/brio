@@ -2,7 +2,7 @@
  * pin.hpp
  *
  * The SAM C21 I/O pins (PORT, DS60001479M ch. 28), register-level, in
- * the same two faces avrdx/pin.hpp offers:
+ * two faces:
  *
  *  Port<'B'>       the port RESOURCE - one GROUP of the PORT peripheral:
  *                  32-bit mask operations on DIR/OUT/IN and the
@@ -17,7 +17,7 @@
  *   Led::input(brio::PinPull::up);
  *   Rx::function(brio::PinFunction::d, {.input_enable = true});  // SERCOM
  *
- * TWO FACTS THAT DIFFER FROM AVR and shape everything below.
+ * TWO FACTS THAT SHAPE EVERYTHING BELOW.
  *
  * 1. THE INPUT BUFFER IS OFF BY DEFAULT. PINCFG.INEN gates it, and IN
  *    reads 0 for a pin whose buffer is disabled - including a pin this
@@ -25,10 +25,10 @@
  *    too: read() then means the same thing here as on every other brio
  *    target. A pin whose microamps matter parks it with
  *    configure({}) (all of PINCFG cleared).
- * 2. THERE IS NO PIN INTERRUPT IN PORT. The edge/level senses AVR keeps
- *    in PINnCTRL are a separate peripheral here (EIC, ch. 26), reached
+ * 2. THERE IS NO PIN INTERRUPT IN PORT. Edge and level sensing is a
+ *    separate peripheral here (EIC, ch. 26), reached
  *    through PMUX function A. Hence no PinSense vocabulary and no
- *    take_flags() in this file: an EIC driver will own them, and
+ *    take_flags() in this file: samc21/eic.hpp owns them, and
  *    inventing half of one here would be a promise with no code behind
  *    it. What PORT does have is the OPPOSITE direction: it is an event
  *    USER (EVCTRL, 28.6.4), four inputs per group that set, clear,
@@ -42,7 +42,7 @@
  * port_exists() below reads that number rather than listing letters, so
  * it stays true if a relative ever grows a group C. Which PINS of an
  * existing group are bonded on a given package is a FINER question - a
- * device-table job, open here exactly as it is open on AVR.
+ * device-table job, and open.
  */
 
 #pragma once
@@ -59,7 +59,7 @@ namespace brio {
 /// PORT_GROUPS is the device header's own count (the authority), so no
 /// #ifdef ladder is needed and none can go stale. Group-level only: a
 /// pin missing from an EXISTING group is the per-package device tables'
-/// job, not built for any target yet.
+/// job, and is not built.
 constexpr bool port_exists(char p) {
     const int group = p - 'A';
     return group >= 0 && group < static_cast<int>(PORT_GROUPS);
@@ -191,10 +191,9 @@ struct Port {
     static void out_toggle(uint32_t m) { regs().PORT_OUTTGL = m; }
 
     /// Multi-pin configuration (WRCONFIG, 28.8.11): one PINCFG (and, for
-    /// function(), one PMUX nibble) into every pin of `pins` through
-    /// WRCONFIG - the SAM analog of AVR's PINCTRLUPD engine. WRCONFIG's
-    /// pin mask is 16 bits wide with a half-word selector, so a mask
-    /// spanning both halves costs the two stores it must.
+    /// function(), one PMUX nibble) into every pin of `pins` in one pass.
+    /// WRCONFIG's pin mask is 16 bits wide with a half-word selector, so
+    /// a mask spanning both halves costs the two stores it must.
     static void configure_mask(uint32_t pins, const PinConfig& cfg) {
         write_config(pins, pin_cfg_byte(cfg, false), 0, false);
         apply_pull(pins, cfg.pull);

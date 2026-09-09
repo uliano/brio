@@ -3,19 +3,18 @@
 // only WHAT died (kernel/panic.hpp's PanicRecord, code and context) but
 // WHERE FROM - the last branches before the disaster.
 //
-// It is a suite of its own rather than three more letters of
-// test_samc_debug because two of its five letters REBOOT THE BOARD and
-// because the mechanism under test is the composition of four things
-// that already have suites of their own (the MTB, the panic record, the
-// fault body and the reset controller). test_samc_debug's letters i, j
-// and k stay what they are and its z stays 117.
+// It is a suite of its own rather than more letters of test_samc_debug
+// because two of its five letters REBOOT THE BOARD and because the
+// mechanism under test is the composition of four things that already
+// have suites of their own: the MTB, the panic record, the fault body
+// and the reset controller.
 //
 // NOTHING TO WIRE. The MTB has no pad, the record is SRAM and the fault
 // is an instruction.
 //
 // WHAT MAKES THE VERDICTS CHECKABLE:
 //
-//   - THE LINKER is the reference, as in test_samc_debug letter i: the
+//   - THE LINKER is the reference: the
 //     chains are noinline functions whose addresses the program can ask
 //     for, and a recovered trace must contain them, oldest first, in the
 //     order they were called.
@@ -51,8 +50,8 @@ constexpr SysClock clock;
 // ---------------------------------------------------------------------------
 // The token the two rebooting letters live in
 //
-// In .noinit and inline, for the reasons test_samc_platform and
-// test_samc_journal both give: the section must survive the crt, and gcc
+// In .noinit and inline, for two reasons: the section must survive the
+// crt, and gcc
 // gives an inline variable with a section attribute a COMDAT group where
 // a plain one gets none. Table 18-1 lists no SRAM row for any reset
 // source, so every read is guarded by the magic word.
@@ -92,16 +91,15 @@ using Led = Pin<'B', 23>;
 TestBench<Serial> bench;
 
 // ---------------------------------------------------------------------------
-// THE STORE, and the two numbers that are this campaign's only real
-// design choice.
+// THE STORE, and the two numbers that are its only real design choice.
 //
 // 256 bytes of rolling buffer = 32 packets. The buffer's size does not
 // change WHICH packets are kept - the tail is always the last
 // keep_packets - so it is chosen for headroom and not for reach.
 //
 // 16 packets kept, and the justification is measured rather than
-// guessed: letter c prints what one three-deep chain costs (the debug
-// campaign's own chain produced 12 packets into a 1024-byte buffer) and
+// guessed: letter c prints what one three-deep chain costs (a
+// three-deep chain runs to about 12 packets) and
 // letter f prints how much of the recovered trace the fault path itself
 // takes up. 16 packets is 128 bytes of .noinit plus an 8-byte header.
 // ---------------------------------------------------------------------------
@@ -140,8 +138,7 @@ volatile uint32_t sink = 0;
 
 // The chain that dies. UDF is the only instruction on this core that is
 // beyond the compiler's reach: an unaligned volatile load does NOT
-// fault, because gcc emits four byte loads with shifts (the lesson
-// test_samc_platform paid for).
+// fault, because gcc emits four byte loads with shifts.
 [[gnu::noinline]] void die_here() {
     sink = sink + 7u;
     __asm volatile("udf #0" ::: "memory");
@@ -205,7 +202,7 @@ void print_chain_addresses() {
           ", HardFault_Handler at ", hex(handler_address()), crlf);
 }
 
-// The cycle stopwatch and the console drain, the test_samc_debug forms.
+// The cycle stopwatch and the console drain.
 uint32_t cycles_now() {
     const uint32_t reload = SysTick->LOAD;
     for (;;) {
@@ -427,8 +424,8 @@ void tc_walk() {
     MtbPacket kept[Trace::kept]{};
 
     // THE YOUNG BUFFER: fewer packets than the caller asked for, and the
-    // start-of-trace flag on the first one (test_samc_debug letter i
-    // established that bit 0 of the DESTINATION word marks it).
+    // start-of-trace flag on the first one (bit 0 of the DESTINATION
+    // word marks it).
     (void)Trace::arm();
     leaf_a();
     (void)Mtb::freeze();
@@ -597,8 +594,8 @@ void tf_resume() {
                   "from",
                   record && trace && i_leaf > i_middle && i_handler > i_leaf);
 
-    // THE EXCEPTION-ENTRY PACKET, and the flag test_samc_debug letter i
-    // saw on nothing. Its SOURCE is the faulting instruction itself -
+    // THE EXCEPTION-ENTRY PACKET, and the flag an ordinary trace never
+    // carries. Its SOURCE is the faulting instruction itself -
     // the UDF inside the leaf - and bit 0 of the source word is set on
     // it and on no other packet of the trace.
     uint32_t source_flags = 0;

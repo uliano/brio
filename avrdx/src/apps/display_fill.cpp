@@ -1,5 +1,5 @@
-// display_fill - first pixels on the 3.5" ILI9481 module (HST035003-A,
-// identified by display_id: DEVCODE 02 04 94 81). Full-screen solid
+// display_fill - solid pixels on the 3.5" ILI9481 module (HST035003-A,
+// DEVCODE 02 04 94 81, which display_id reads back). Full-screen solid
 // fill cycling red -> green -> blue every couple of seconds: if the
 // panel shows the colors, the whole write path (commands + GRAM) is
 // proven and the display is bench-ready.

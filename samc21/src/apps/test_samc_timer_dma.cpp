@@ -1,6 +1,5 @@
-// test_samc_timer_dma - the timers' SECOND pass: DMA-driven operation on
-// the TC and the TCC, and the advanced modes both chapters' docs still
-// listed as gaps.
+// test_samc_timer_dma - DMA-driven operation of the TC and the TCC, and
+// the advanced modes of both chapters.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
@@ -134,8 +133,8 @@ using TccWo0 = TccWo<TccWo0Pin, PinFunction::e>;    // TCC0/WO0
 using TccWo1Pin = Pin<'A', 9>;
 using TccWo1 = TccWo<TccWo1Pin, PinFunction::e>;    // TCC0/WO1
 
-/// The EIC stimulus pad, the established one: PA16 is EXTINT0, and it
-/// walks between the rails under its own internal pull.
+/// The EIC stimulus pad: PA16 is EXTINT0, and it walks between the
+/// rails under its own internal pull.
 using EicPad = Pin<'A', 16>;
 using EicLine = ExtInt<EicPad>;
 
@@ -157,8 +156,9 @@ constexpr uint8_t ch_width = 3;
 /// The duty table is played into TCC0's CCBUF0, and CCBUF0 IS A 32-BIT
 /// REGISTER (36.7's register summary; TCC0 is a 24-bit counter but its
 /// compare registers are words). So the beat is a WORD and the element
-/// type is uint32_t - the SDADC's lesson said out loud: the element type
-/// feeds BEATSIZE and the end-address arithmetic together, so a beat
+/// type is uint32_t, and that is the rule rather than a detail: the
+/// element type feeds BEATSIZE and the end-address arithmetic
+/// together, so a beat
 /// narrower than the register is not a saving, it is a half-written
 /// register. Letter a measures what the half-write actually does.
 using DutyLoop = DmaLoopEngine<ch_duty, uint32_t>;
@@ -216,8 +216,8 @@ bool near(uint32_t v, uint32_t target, uint32_t band) {
 uint32_t abs_diff(uint32_t a, uint32_t b) { return a > b ? a - b : b - a; }
 
 /// What fraction of `samples` reads found the pad high, in per mille.
-/// The established pad sampler (test_samc_tcc): it needs ~30 waveform
-/// periods to be steady, and at 10 kHz 40000 reads are far more.
+/// The pad sampler: it needs ~30 waveform periods to be steady, and at
+/// 10 kHz 40000 reads are far more.
 template <class P>
 uint32_t duty_permille(uint32_t samples = 40'000UL) {
     uint32_t high = 0;
@@ -433,9 +433,9 @@ void ta_shapes() {
 // comment makes unavoidable: 25.8.8 says a peripheral asserts its DMA
 // request as a LEVEL and the controller latches a pending trigger when
 // that level RISES, which is why a SERCOM transmit engine armed while
-// DRE already stands moves nothing (samc21-session-2026-08-29-uart) and
-// why the ADC stream drains RESULT before arming (test_samc_analog_dma
-// letter g). A TC capture channel's flag is INTFLAG.MCx and 35.6.2.8
+// DRE already stands moves nothing, and why an ADC stream drains
+// RESULT before arming. A TC capture channel's flag is INTFLAG.MCx and
+// 35.6.2.8
 // makes READING CCx the only thing that clears it, so an unread capture
 // looks exactly like a standing request.
 //
@@ -995,10 +995,10 @@ bool wait_flag(uint8_t mask, uint32_t ms = 50) {
  * A capture channel is not one register but TWO: CCx with CCBUFx behind
  * it (35.6.2.8), and reading CCx is what lets CCBUFx move up. So a
  * single read after the waveform under test has changed hands back a
- * value the PREVIOUS configuration captured - which is exactly how the
- * first version of letter f "measured" MPWM's period as MFRQ's and
- * INVEN's width as the run before it. Draining both stages and then
- * taking several whole fresh captures is what makes a reading current.
+ * value the PREVIOUS configuration captured - so a letter that reads
+ * once per waveform mode reports each mode's predecessor. Draining both
+ * stages and then taking several whole fresh captures is what makes a
+ * reading current.
  */
 bool meter_read(uint16_t& period, uint16_t& width, uint8_t fresh = 4) {
     for (uint8_t i = 0; i < 3u; ++i) {
@@ -1217,9 +1217,8 @@ void tg_tc_capture_and_locks() {
                       Meter::set_count8(0) && Meter::enable(true));
     // THE COUNTER MUST BE PUT BACK TO ZERO BY HAND: a mode change does
     // not clear COUNT, so an 8-bit counter left above its new PER never
-    // meets it and runs all the way to 0xFF - the trap test_samc_rtc
-    // found in the RTC's mode 1, and it is the TC's too. Without the
-    // set_count8(0) above the first stamps read 255.
+    // meets it and runs all the way to 0xFF. Without the set_count8(0)
+    // above the first stamps read 255.
     uint8_t stamps[8] = {0};
     for (uint8_t i = 0; i < 3u; ++i) {
         (void)Meter::cc8(0);
@@ -1341,8 +1340,9 @@ void tg_tc_capture_and_locks() {
           "/100", crlf);
 
     // ---- CTRLA.ALOCK. The witness is THE PAD, because a register read
-    // is not one (the TCC taught that; letter g asks whether the TC has
-    // the same trap).
+    // is not one: on the TCC a read of a compare register with a
+    // buffered write pending returns the BUFFERED value, and letter g
+    // asks whether the TC has the same trap.
     Led::configure({});
     using LedWave = TcWo<Led>;                // TC3, WO1
     LedWave::claim();
@@ -1556,10 +1556,10 @@ void th_tcc_waveforms() {
 // i - the fault system's second half: fault B, filter, blanking, qualifier
 // ---------------------------------------------------------------------------
 //
-// test_samc_tcc drove recoverable fault A from a pin level through the
-// event system and stopped there; tcc.md listed fault B, FILTERVAL,
-// BLANK/BLANKVAL and QUAL as configured, refused where illegal, and
-// never given a stimulus. THE WITNESS THROUGHOUT IS INTFLAG.FAULTB, not
+// Recoverable fault A is driven from a pin level through the event
+// system elsewhere; what this letter gives a stimulus to is fault B,
+// FILTERVAL, BLANK/BLANKVAL and QUAL. THE WITNESS THROUGHOUT IS
+// INTFLAG.FAULTB, not
 // a pad: whether the silicon judged the fault VALID is exactly the
 // question, and a flag answers it in one read where a duty sampler needs
 // thirty periods of a waveform this letter deliberately runs slowly.
@@ -1605,10 +1605,9 @@ bool fault_b_up(const TccFaultConfig& fb, uint32_t duty = 2343,
                 uint32_t per = slow_per) {
     // THE DUTY GOES INTO CC1, NOT CC0, and that is the whole of the
     // qualifier's meaning: FCTRLn.QUAL watches THE FAULT'S OWN CHANNEL
-    // output (36.6.3.5), and fault B is channel 1's. The first version
-    // of this letter put the duty in CC0 and measured a qualified fault
-    // that never fired at any duty, which was correct behaviour of a
-    // wrong setup.
+    // output (36.6.3.5), and fault B is channel 1's. Put the duty in
+    // CC0 and the qualified fault never fires at any duty - correct
+    // behaviour of a wrong setup.
     if (!Wave::init(generator)) {
         return false;
     }
@@ -1744,12 +1743,11 @@ void ti_fault_b() {
 
     // ---- FILTERVAL, and the question is not whether it works but WHAT
     // IT COUNTS. tcc.hpp says "prescaled clocks", following 36.8.5's
-    // wording - but this chapter has form: the TCC campaign measured the
-    // dead times to be GCLK_TCC cycles and UNMOVED by a fourfold
-    // prescaler change, where 36.8.7 reads the same way. The first
-    // version of this letter asserted a 320 us minimum from FILTERVAL 15
-    // at /1024 and measured no rejection at 30 us, which is the answer
-    // to a different question.
+    // wording - but this chapter has form: the dead times measure as
+    // GCLK_TCC cycles and are UNMOVED by a fourfold prescaler change,
+    // where 36.8.7 reads the same way. Asserting a 320 us minimum from
+    // FILTERVAL 15 at /1024 measures no rejection at 30 us, which is
+    // the answer to a different question.
     //
     // So: ONE generic clock slow enough that fifteen of its cycles are
     // 320 us, and TWO prescalers on it. If FILTERVAL counts generic

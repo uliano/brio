@@ -19,9 +19,8 @@
 // wide. SUPC's VREF produces INTREF; samc21/ac.hpp's comparator takes it
 // as its negative input and its own 64-step VDD scaler as the positive
 // one; sweeping the scaler until the comparison flips locates VDD
-// against a known voltage. That is the gap docs/samc21/ac.md has been
-// carrying - the bandgap input needs SUPC.VREF.VREFOE, and until this
-// header there was nothing to turn it on with.
+// against a known voltage. The bandgap INPUT path needs
+// SUPC.VREF.VREFOE, which is this block's bit to set.
 //
 // What is exercised, letter by letter:
 //   a  the block, the fuses, and the half of this chapter that is

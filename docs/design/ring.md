@@ -69,7 +69,7 @@ service reads it from there.
 - One API, always safe from either side: `push(v) -> bool` (false when
   full, nothing written), `pop() -> std::optional<T>`, `count()`,
   `empty()`, `full()`, `capacity()`. No `*_from_isr` twins (style
-  ruling honoured; measured on the uart ISRs: `std::optional` folds
+  rule honoured; measured on the uart ISRs: `std::optional` folds
   away completely and the DRE/RXC bodies are one instruction shorter
   than the bool + out-param form).
 - `clear()` is the ONE non-concurrent operation: it rewrites both

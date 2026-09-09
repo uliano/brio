@@ -7,9 +7,9 @@
  * THE GRANULARITIES ARE NOT THE SAME NUMBER. An erase takes down a
  * 512-byte page; a program writes ONE 16-BIT WORD, and a word may only
  * be written once between erases. That is why the concept keeps the two
- * apart - on this part they are 512 and 2, on an STM32G0 they are 2048
- * and 8, and code that says "page" for both is code that will be wrong
- * on the second target.
+ * apart - on this part they are 512 and 2, elsewhere they are 2048 and
+ * 8, and code that says "page" for both is code that will be wrong on
+ * the next silicon.
  *
  * ADDRESSES ARE 24-BIT AND GO THROUGH ELPM/SPM, never through the
  * data-space FLMAP window - the discipline avrdx/nvm.hpp is built on and

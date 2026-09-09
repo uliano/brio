@@ -2,26 +2,24 @@
 // build: monitor_speed = 115200
 //
 // test_samc_spi - the SERCOM in SPI mode (DS60001479M ch. 32) and, over
-// it, the cross-architecture proof that util's bus vocabulary did not
-// need one line changed for a second silicon: util/spi_bus.hpp is
-// util/bus_master.hpp, and it drives samc21/spi.hpp's SpiHost exactly as
-// it drives avrdx/spi.hpp's.
+// it, util's bus vocabulary on the wire: util/spi_bus.hpp is
+// util/bus_master.hpp, and it drives samc21/spi.hpp's SpiHost with no
+// knowledge of this silicon.
 //
-// THE BENCH, and it is a TWO-BOARD bench. Board C (this one) is the DUT;
-// the peer board runs `spi_peer`, the scriptable instrument client,
-// commanded IN BAND over the very bus under test (the protocol is
-// avrdx/src/apps/spi_link.hpp, included here BY RELATIVE PATH - one
-// source of truth for the wire format, never a copy). TWO peers speak
-// it: the AVR campaign's avrdx spi_peer (board A, the cross-architecture
-// bench this suite was born on) and the samc21 port (board D, the SAM-SAM
-// bench of the speed campaign) - the suite asks ident and does not care.
+// THE BENCH, and it is a TWO-BOARD bench. This board is the DUT; the
+// far board runs a `spi_peer`, the scriptable instrument client,
+// commanded IN BAND over the very bus under test. The wire format is
+// spi_link.hpp, included BY RELATIVE PATH: one file is the single
+// source of truth for every board that speaks it, whatever its
+// architecture - the suite asks ident and does not care which peer
+// answered.
 //
-// Today's desk is the SAM-SAM five-wire link, STRAIGHT THROUGH:
+// The link is five wires, STRAIGHT THROUGH (same pin names both ends):
 //
-//   C.PA16 = SERCOM1/PAD[0], function C  <->  D.PA16   MOSI
-//   C.PA17 = SERCOM1/PAD[1], function C  <->  D.PA17   SCK
-//   C.PA18 = SERCOM1/PAD[2], function C  <->  D.PA18   SS
-//   C.PA19 = SERCOM1/PAD[3], function C  <->  D.PA19   MISO
+//   PA16 = SERCOM1/PAD[0], function C   MOSI
+//   PA17 = SERCOM1/PAD[1], function C   SCK
+//   PA18 = SERCOM1/PAD[2], function C   SS
+//   PA19 = SERCOM1/PAD[3], function C   MISO
 //   plus a dedicated GND.
 //
 // THE SAME FOUR WIRES CARRY BOTH ROLES, ON TWO DIFFERENT DOPO ROWS, and
@@ -38,10 +36,9 @@
 // 32.6.3.3's "host with several clients" arrangement and the one every
 // device client in brio uses.
 //
-// NO INTER-BYTE GAP, unlike the AVR half of this protocol. test_avr_spi
-// spends spilink::gap_us between characters because its peer's
-// NORMAL-mode client has to load its answer in the gap. Every window
-// this suite opens has the peer in a BUFFERED regime (its command
+// NO INTER-BYTE GAP. spilink::gap_us exists for a peer whose
+// NORMAL-mode client has to load its answer between characters. Every
+// window this suite opens has the peer in a BUFFERED regime (its command
 // listener only reads; its answer windows and the exchanges commanded
 // here all run BUFEN with BUFWR), where a whole byte time of slack
 // replaces the gap - so the engine sends a frame as ONE request and is
@@ -65,8 +62,7 @@
 //      characters, BUFOVF and IBON, and what CTRLB.MSSEN really drives
 //   g  THE KERNEL LETTER: SpiBus (= BusMaster) over SpiHost inside a
 //      real kernel - queued requests, replies through ReplyTo,
-//      reject-when-full, and the PrepareSleep vote idle vs busy, with
-//      NOT ONE LINE of util/ or kernel/ changed for this architecture
+//      reject-when-full, and the PrepareSleep vote idle vs busy
 //
 // Letters that need the peer say so and FAIL LOUDLY rather than hanging
 // when it is absent. Nothing here wears flash.
@@ -89,7 +85,7 @@
 #include "util/spi_bus.hpp"
 #include "util/testbench.hpp"
 
-// THE PROTOCOL IS THE AVR CAMPAIGN'S, AND IT IS NOT COPIED. spi_link.hpp
+// THE PROTOCOL HEADER IS SHARED, NOT COPIED. spi_link.hpp
 // is pure encoding - it names no register and includes nothing of brio -
 // so both boards' apps compile the same file. A copy here would be a
 // second source of truth for a wire format, which is exactly the thing
@@ -196,7 +192,7 @@ static_assert(command_baud == 119);
 static_assert(spi_sck_hz(SysClock::hz, command_baud) == command_hz);
 
 // ---------------------------------------------------------------------------
-// The crystal ruler (the test_samc_sleep / test_samc_timebase instrument)
+// The crystal ruler
 // ---------------------------------------------------------------------------
 
 using Ruler = Tc<2>;   ///< TC2+TC3 as one 32-bit counter
@@ -258,36 +254,31 @@ bool link_command_mode() {
 }
 
 /**
- * THE CHIP-SELECT HOLD, and it is this campaign's first bench finding.
+ * THE CHIP-SELECT HOLD, and it is a wire fact this suite has to spend.
  *
  * The engine releases CS as soon as the last character's RXC says the
  * bits have moved - about a microsecond after the last SCK edge, and
- * that is not enough for the peer. An AVR SPI client is RESET by SS
- * going high, so a byte sitting in its DATA that its polled loop has not
- * fetched yet is simply gone: the symptom was that every command frame
- * lost EXACTLY ITS LAST CHARACTER, which for a four-byte ping frame is
- * the checksum, so the peer sat waiting for one and nak'ed the next
- * window's first dummy instead. One frame in a dozen got through.
- *
- * The AVR half of this protocol never sees it because its own host pays
- * spilink::gap_us AFTER each character including the last, so its CS
- * release is 20 us behind the wire - a hold time it gets by accident.
+ * that is not enough for a peer whose SPI client is RESET by SS going
+ * high: a byte sitting in its DATA that its polled loop has not fetched
+ * yet is simply gone. The symptom is that every command frame loses
+ * EXACTLY ITS LAST CHARACTER, which for a four-byte ping frame is the
+ * checksum, so the peer waits for one and nak's the next window's first
+ * dummy instead - about one frame in a dozen gets through. A host that
+ * pays spilink::gap_us AFTER each character including the last never
+ * meets it, because its CS release is 20 us behind the wire.
  *
  * So the PROTOCOL owns the chip select here, and the engine's Request
- * carries a null PinRef for these windows. Neither engine has a
- * per-request chip-select hold yet; samc21/delay.hpp exists now (born
- * after this suite's spins were calibrated), and the Request knob is
- * declared future growth with its first device user - this suite keeps
- * its own measured spin, which predates the facility and is proven.
+ * carries a null PinRef for these windows. No engine has a per-request
+ * chip-select hold: that Request knob is declared future growth with
+ * its first device user, and this suite spends its own measured spin.
  */
 volatile uint32_t hold_spins = 0;
 uint32_t hold_us = 0;
 
 void link_hold() {
-    // The counter is volatile so -Os cannot delete the loop (the ticker
-    // doctrine: gcc has deleted a bare polling loop in this stratum
-    // before). Compound ops on volatile are deprecated in C++20, hence
-    // the long spelling.
+    // The counter is volatile so -Os cannot delete the loop: gcc will
+    // delete a bare polling loop. Compound ops on volatile are
+    // deprecated in C++20, hence the long spelling.
     for (volatile uint32_t i = 0; i < hold_spins; i = i + 1) {
     }
 }
@@ -295,8 +286,7 @@ void link_hold() {
 /// A spin is not a time, so it is MEASURED and not assumed: one
 /// thousand turns are timed on the crystal, the count is scaled to about
 /// thirty microseconds, and what that really came out at is printed in
-/// the banner. (This is an APP spinning, not a driver: samc21/ has no
-/// delay facility and this campaign did not invent one inside a driver.)
+/// the banner. (This is an APP spinning, not a driver.)
 void calibrate_hold() {
     if (!ruler_ok) {
         hold_spins = 300;   // blind but generous
@@ -344,9 +334,8 @@ bool link_xfer_bare(const uint8_t* tx, uint8_t* rx, uint16_t len, uint8_t baud,
 /// deliberately does not own), which inverts start()'s own
 /// apply-before-select order: a CPOL flip landing inside an open select
 /// window is one extra SCK edge, and the selected client counts it into
-/// the character - measured as an exact one-bit slip in BOTH directions,
-/// on modes 2 and 3 only, by this suite's first version. Bus::prime()
-/// restates the order.
+/// the character - measured as an exact one-bit slip in BOTH
+/// directions, on modes 2 and 3 only. Bus::prime() restates the order.
 bool link_xfer(const uint8_t* tx, uint8_t* rx, uint16_t len, uint8_t baud = command_baud,
                SpiMode mode = SpiMode::mode0) {
     Bus::prime(mode, baud);
@@ -406,7 +395,7 @@ const uint8_t no_payload[1] = {0};
 /// Three attempts, each separated by longer than the peer's own
 /// answer-window bound, so a peer that was serving into nothing is
 /// certainly dark again before the retry - the protocol's own recovery
-/// guarantee, used as the AVR half uses it.
+/// guarantee.
 bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
     uint8_t first_n = 0;
     uint8_t first_seen[16];
@@ -649,9 +638,9 @@ void dump_exchange(const Exchange& e, const Verify& v, const spilink::Report& r)
         // preloads and echoes, the window burns whole reading nothing.
         // The peer's exchange loop no longer depends on its select READ
         // (it polls RXC directly and samples the select only as the
-        // telemetry printed here), so if this fires again the aux bytes
-        // are the forensics - and a peer running the OLD firmware is
-        // healed by resetting board A.
+        // telemetry printed here), so if this fires the aux bytes are
+        // the forensics - and a peer left in a stale state is healed by
+        // resetting it.
         print(serial, "    the peer's exchange window read NOTHING (count=0, timed "
                       "out) while the command channel works - peer telemetry: "
                       "first-byte ms=", r.aux1, " select bits=", hex(r.aux2),
@@ -722,9 +711,9 @@ void ta_block() {
     // - a synchronization that never completes is reported here, never
     // hung on - and the channel is put back before anything is judged.
     // PCHCTRL.CHEN is itself write-synchronized (16.6.3.3), so the
-    // control waits until the channel really reads disconnected: the
-    // first version read it back on the next instruction and measured
-    // its own race, not the silicon.
+    // control waits until the channel really reads disconnected; a
+    // read-back on the next instruction measures its own race, not the
+    // silicon.
     (void)Raw::configure(host_cfg);
     const uint32_t before3 = Raw::ctrla();
     GclkChannel::disconnect(Raw::gclk_core_id());
@@ -761,8 +750,8 @@ void ta_block() {
                   "discipline is kept anyway, the sheet marking every revision and "
                   "the cost being one enable",
                   sync2 && after_disabled == 0);
-    // The CLOCKLESS leg is its own finding either way (the FREQM lesson:
-    // a reset can synchronize into a domain the channel feeds). What is
+    // The CLOCKLESS leg is its own finding either way (a reset can
+    // synchronize into a domain the channel feeds). What is
     // JUDGED is only that nothing hung and the reset has landed by the
     // time the clock is back; whether it completed clockless or pended
     // is the print above.
@@ -1041,10 +1030,10 @@ void td_rates() {
     // climb finds is the PEER'S RELOAD BOUNDARY: its client must land
     // the next-plus-one answer at least three SCK cycles before a
     // character boundary (32.6.2.6.2), and a polled loop's turnaround
-    // sets where that stops holding. The SAM peer's precomputed pump
-    // holds to 2 MHz; the AVR peer's polled loop held to 500 kHz with
-    // 1 MHz a coin toss. WHERE it lands is the print; the verdict
-    // claims only the floor both peers clear.
+    // sets where that stops holding, and it differs from peer to peer:
+    // a precomputed pump holds to 2 MHz, a plain polled loop to
+    // 500 kHz with 1 MHz a coin toss. WHERE it lands is the print; the
+    // verdict claims only the floor every peer clears.
     static const uint32_t rates[] = {200'000UL, 500'000UL, 1'000'000UL, 2'000'000UL,
                                      3'000'000UL, 4'000'000UL, 6'000'000UL,
                                      8'000'000UL, 12'000'000UL, 24'000'000UL};
@@ -1142,9 +1131,9 @@ bool run_as_client(const spilink::Params& a, SpiMode mode, bool lsb) {
     // DATA write needs three SCK cycles to reach the shifter, and those
     // cycles ELAPSE ONLY WHILE SCK RUNS - so an answer written in the
     // inter-character gap (where a poll loop reacting to RXC lands)
-    // matures mid-character and reaches the wire ONE CHARACTER LATE.
-    // Measured by this suite's first version: the host read the preload
-    // exactly and then the whole stream slipped by one (mism 11 of 12).
+    // matures mid-character and reaches the wire ONE CHARACTER LATE:
+    // measured, the host reads the preload exactly and then the whole
+    // stream slips by one (mism 11 of 12).
     // The cure the silicon offers is the transmit buffer: preload puts
     // b0 in the SHIFTER, the next write parks b1 in DATA, and every RXC
     // hands DATA its NEXT-plus-one - each value is then in place a whole
@@ -1181,8 +1170,8 @@ void te_client() {
     a.seed_b = 0x71;
     a.pattern = spilink::pattern_prbs;
     a.aux8 = 40;             // lead-in ms: time for this end to become a client
-    a.aux16 = 32;            // the peer's host SCK: its own clock / 32 (the SAM
-                             // peer at 48 MHz clocks 1.5 MHz, the AVR one 750 kHz)
+    a.aux16 = 32;            // the peer's host SCK: its own clock / 32
+                             // (a 48 MHz peer clocks 1.5 MHz)
     a.cfg.apply = 1;
     a.cfg.mode = 0;
     a.cfg.dord = 0;
@@ -1290,8 +1279,8 @@ void tf_wireless() {
     // polled request with cs_setup_us 0 and 100, and the difference
     // must be the setup - which proves the engine spends it, and
     // spends it inside the transaction. (The pin itself is null here -
-    // the field alone drives the wait, exactly as on the AVR, where a
-    // caller may own the CS and still want the engine's pacing.)
+    // the field alone drives the wait, because a caller may own the CS
+    // and still want the engine's pacing.)
     if (ruler_ok) {
         auto timed = [&](uint8_t setup) {
             Loop::Request r{
@@ -1340,8 +1329,8 @@ void tf_wireless() {
             const uint32_t sck = spi_sck_hz(SysClock::hz, bauds[i]);
             // Crystal ticks the characters alone should cost. The
             // division comes FIRST: n x 8 x 24e6 overflows 32 bits at
-            // these lengths, and the first version of this line said so
-            // by reporting an impossible negative overhead.
+            // these lengths, and the overflow shows up as an impossible
+            // negative overhead.
             const uint32_t due = static_cast<uint32_t>(n) * 8u * (crystal_hz / sck);
             const uint32_t over = took > due ? took - due : 0;
             const uint32_t over_us = over / (crystal_hz / 1000000u);
@@ -1439,8 +1428,8 @@ void tf_wireless() {
     bool prev = Cs::read();
     // A plain local, NOT a static: a static survives into the next run
     // of z in the same power cycle, arrives holding 4, and this letter
-    // then clocks ONE character and counts one rise - the flaky verdict
-    // the first version had on every second run.
+    // then clocks ONE character and counts one rise - a verdict that
+    // then fails on every second run.
     uint8_t sent = 1;
     Raw::data(0x00);
     for (uint32_t k = 0; k < 400000u; ++k) {
@@ -1472,7 +1461,7 @@ void tf_wireless() {
 }
 
 // ===========================================================================
-// g - THE KERNEL LETTER: util/spi_bus.hpp over this engine, unchanged
+// g - THE KERNEL LETTER: util/spi_bus.hpp over this engine
 // ===========================================================================
 
 namespace kl {

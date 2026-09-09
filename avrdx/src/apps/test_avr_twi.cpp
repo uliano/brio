@@ -31,19 +31,20 @@
 // third tap; this desk does not fit it, and test h says so out loud
 // instead of assuming either way. TWI1 stays DISABLED throughout.
 //
-// TWO BOARDS (k..s, `y`): board B runs `twi_peer` and taps the same node
-// with its own PA2/PA3. The DUT drives it IN BAND over the bus itself -
-// a write tenure to `twilink::command_addr` carries one command frame, a
-// read tenure collects the answer (src/apps/twi_link.hpp) - and then
-// measures what a SECOND, independent chip does to the wire: clock
-// stretching, an injected address or data NACK, multi-host arbitration
-// with both boards combined, the collision case S4 with two clients on
-// one address, a really stuck SDA against `Twi<0>::unstick()`, a General
-// Call answered by two chips, the three bus speeds and a clock rebase.
+// TWO BOARDS (k..s, `y`): a second board runs `twi_peer` and taps the
+// same node with its own PA2/PA3. The DUT drives it IN BAND over the
+// bus itself - a write tenure to `twilink::command_addr` carries one
+// command frame, a read tenure collects the answer
+// (src/apps/twi_link.hpp) - and then measures what a SECOND,
+// independent chip does to the wire: clock stretching, an injected
+// address or data NACK, multi-host arbitration with both boards
+// combined, the collision case S4 with two clients on one address, a
+// really stuck SDA against `Twi<0>::unstick()`, a General Call
+// answered by two chips, the three bus speeds and a clock rebase.
 // The peer's command-mode client answers ONE address exactly, with no
 // General Call, no mask, no PMEN and no PIEN, so the single-board half
-// above cannot see it at all - which is why `z` scores its full count
-// with board B attached and running.
+// above cannot see it at all - which is why `z` runs unchanged with the
+// peer attached to the node.
 //
 // Commands: ? for the menu, z = the single-board half, y = the two-board
 // half.
@@ -95,9 +96,9 @@ using InjScl = DualScl;
 // does not fit it (test h says so out loud rather than assuming).
 using InjB2 = Pin<'B', 2>;
 
-using Host = TwiHost<0, TwiRoute::def>;
-using Client = TwiClient<0, TwiRoute::def>;
-using DualClient = TwiClient<0, TwiRoute::def, true>;
+using Host = I2cHost<0, TwiRoute::def>;
+using Client = I2cClient<0, TwiRoute::def>;
+using DualClient = I2cClient<0, TwiRoute::def, true>;
 
 // The SCL instruments: PORTA pin events live on channels 0-1 (evsys.hpp).
 // One channel feeds two TCBs - a capture meter and an edge counter.
@@ -361,7 +362,7 @@ void quiesce() {
 
 /// The host, polled: the engine arms RIEN/WIEN by design, and the polled
 /// tests take them straight back down so the vector never fires.
-bool host_polled(TwiSpeed s = TwiSpeed::standard_100k, Host::Options o = {}) {
+bool host_polled(I2cSpeed s = I2cSpeed::standard_100k, Host::Options o = {}) {
     o.speed = s;
     const bool ok = Host::init(clock, o);
     T::enable_read_interrupt(false);
@@ -499,9 +500,9 @@ void ta_routes() {
     // What must be refused at run time (the compile-time twins live in
     // test/family/neg/).
     verdict("1 MHz without FMPEN refused (29.3.3.1: Fm+ is a PAD setting)",
-            !T::init({.speed = TwiSpeed::fast_plus_1m}, SysClock::hz));
+            !T::init({.speed = I2cSpeed::fast_plus_1m}, SysClock::hz));
     verdict("1 MHz WITH FMPEN accepted",
-            T::init({.fm_plus = true, .speed = TwiSpeed::fast_plus_1m}, SysClock::hz));
+            T::init({.fm_plus = true, .speed = I2cSpeed::fast_plus_1m}, SysClock::hz));
     T::release();
     verdict("an instance with neither half enabled refused",
             !T::init({.host = false}, SysClock::hz));
@@ -558,7 +559,7 @@ uint16_t measure(uint8_t mode) {
 uint16_t last_rise_ns = 0;
 uint16_t last_fall_ns = 0;
 
-void measure_speed(TwiSpeed s, const char* name, uint16_t rise = 0, uint16_t fall = 0) {
+void measure_speed(I2cSpeed s, const char* name, uint16_t rise = 0, uint16_t fall = 0) {
     if (!host_polled(s, {.rise_ns = rise, .fall_ns = fall})) {
         verdict("host init ", name, false);
         return;
@@ -595,11 +596,11 @@ void tb_speeds() {
                   "low-width meters), against equations 29-2..29-5", crlf);
     quiesce();
     ChScl::source(EvPin<Scl>{});
-    measure_speed(TwiSpeed::standard_100k, "Sm 100 kHz");
+    measure_speed(I2cSpeed::standard_100k, "Sm 100 kHz");
     const uint16_t desk_rise = last_rise_ns;
     const uint16_t desk_fall = last_fall_ns;
-    measure_speed(TwiSpeed::fast_400k, "Fm 400 kHz");
-    measure_speed(TwiSpeed::fast_plus_1m, "Fm+ 1 MHz");
+    measure_speed(I2cSpeed::fast_400k, "Fm 400 kHz");
+    measure_speed(I2cSpeed::fast_plus_1m, "Fm+ 1 MHz");
 
     // The default charges the specification's worst case, because that
     // is all a driver can know. A bus that DECLARES its own measured
@@ -608,18 +609,18 @@ void tb_speeds() {
     const uint16_t fall = static_cast<uint16_t>(desk_fall + 40);
     print(serial, "  this desk measures tR ~", desk_rise, " ns and tOF ~", desk_fall,
           " ns; declaring ", rise, "/", fall, " ns:", crlf);
-    measure_speed(TwiSpeed::standard_100k, "Sm 100 kHz, timing declared", rise, fall);
+    measure_speed(I2cSpeed::standard_100k, "Sm 100 kHz, timing declared", rise, fall);
 
     // Fast-mode Plus is the pads as much as the divider, and the engine
     // turns FMPEN on with the speed.
-    verdict("host at 1 MHz", host_polled(TwiSpeed::fast_plus_1m));
+    verdict("host at 1 MHz", host_polled(I2cSpeed::fast_plus_1m));
     verdict("the engine turned FMPEN on for Fm+", T::fm_plus());
     verdict("a 1 MHz request without FMPEN is not expressible: the resource refuses it",
-            !T::init({.speed = TwiSpeed::fast_plus_1m}, SysClock::hz));
-    verdict("host back at 100 kHz", host_polled(TwiSpeed::standard_100k));
+            !T::init({.speed = I2cSpeed::fast_plus_1m}, SysClock::hz));
+    verdict("host back at 100 kHz", host_polled(I2cSpeed::standard_100k));
     verdict("the engine turned FMPEN off again", !T::fm_plus());
     print(serial, "  actual_scl_hz at 100 kHz: ", Host::actual_scl_hz(0), " Hz (tR = 0), ",
-          Host::actual_scl_hz(twi_rise_budget_ns(TwiSpeed::standard_100k)),
+          Host::actual_scl_hz(twi_rise_budget_ns(I2cSpeed::standard_100k)),
           " Hz (the 1000 ns budget), ", Host::actual_scl_hz(desk_rise),
           " Hz (this desk's measured rise)", crlf);
     verdict("actual_scl_hz never claims more than the nominal rate",
@@ -1295,7 +1296,7 @@ bool rebase_step(uint32_t hz, const char* what) {
     const uint16_t period = meter_min;
     const uint16_t floor_ticks = static_cast<uint16_t>(twi_period_ticks(hz, baud, 0));
     const uint16_t budget = static_cast<uint16_t>(
-        twi_period_ticks(hz, baud, twi_rise_budget_ns(TwiSpeed::standard_100k)));
+        twi_period_ticks(hz, baud, twi_rise_budget_ns(I2cSpeed::standard_100k)));
     print(serial, "  ", what, ": CLK_PER = ", hz, " Hz, MBAUD = ", baud, ", SCL period ",
           period, " ticks = ", period ? hz / period : 0, " Hz (window ", floor_ticks,
           "..", budget, "), actual_scl_hz(0) = ", Host::actual_scl_hz(0), crlf);
@@ -1360,7 +1361,7 @@ void tj_rebase() {
     quiesce();
 }
 
-// ==== TWO BOARDS (k..s): board B runs twi_peer ================================
+// ==== TWO BOARDS (k..s): the far board runs twi_peer ==========================
 //
 // The command channel is the bus itself: a WRITE tenure to
 // twilink::command_addr carries one command frame, a READ tenure of
@@ -2077,7 +2078,7 @@ void tq_general_call() {
 
 // ---- r: the three speeds against a real client -------------------------------
 
-void speed_round(TwiSpeed s, const char* name) {
+void speed_round(I2cSpeed s, const char* name) {
     twilink::Params a{};
     a.ms = 400;
     a.addr = twilink::command_addr;
@@ -2142,9 +2143,9 @@ void tr_speeds() {
     quiesce();
     verdict("link up", link_up());
     ChScl::source(EvPin<Scl>{});
-    speed_round(TwiSpeed::standard_100k, "Sm 100 kHz");
-    speed_round(TwiSpeed::fast_400k, "Fm 400 kHz");
-    speed_round(TwiSpeed::fast_plus_1m, "Fm+ 1 MHz");
+    speed_round(I2cSpeed::standard_100k, "Sm 100 kHz");
+    speed_round(I2cSpeed::fast_400k, "Fm 400 kHz");
+    speed_round(I2cSpeed::fast_plus_1m, "Fm+ 1 MHz");
     verdict("the host is back at 100 kHz for the command channel",
             link_cmd(Op::ping));
     quiesce();

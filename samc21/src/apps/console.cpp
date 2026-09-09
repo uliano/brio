@@ -1,5 +1,5 @@
 // console - the brio kernel console on the SAM C21: three active objects
-// over the SERCOM5 UART, a port of the AVR project's src/apps/console.cpp.
+// over the SERCOM5 UART.
 //
 //   SerialPort   turns RX bytes into LineReceived events (ping-pong line
 //              buffers, backpressure on the ring - see util/serial_port.hpp)
@@ -8,15 +8,14 @@
 //   Blinker  owns the LED: heartbeat time event at 1 Hz, manual
 //              LED ON|OFF|TOG commands arrive as posted SetLed events
 //
-// What did NOT change from the AVR app is the point: the three AOs, their
-// events, their queues and every kernel and util header below them are
-// the same source. Only the target glue differs - the clock type, the pin,
-// the transport, and the vector bindings.
+// The three AOs, their events, their queues and every kernel and util
+// header below them are target-independent; what this file supplies is
+// the target glue - the clock type, the pin, the transport and the
+// vector bindings.
 //
-// ONE VECTOR, NOT TWO. The AVR app binds USART2_RXC_vect and
-// USART2_DRE_vect separately; a SERCOM raises everything on a single NVIC
-// line, so SERCOM5_Handler is the whole binding and Uart::isr() sorts out
-// what is pending (samc21/sercom.hpp says why).
+// ONE VECTOR FOR THE WHOLE PERIPHERAL: a SERCOM raises everything on a
+// single NVIC line, so SERCOM5_Handler is the whole binding and
+// Uart::isr() sorts out what is pending (samc21/sercom.hpp says why).
 //
 // Kernel pack order is a CONTRACT here: Console (line consumer) must
 // precede SerialPort (line producer) so the ping-pong buffers are always

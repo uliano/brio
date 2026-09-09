@@ -1,8 +1,8 @@
 // build: boards = c21j
 // build: monitor_speed = 115200
 //
-// test_samc_timebase - the standby-surviving timebase, live: the v2
-// answer to "kernel time stands still in standby" (samc21/sleep.hpp's
+// test_samc_timebase - the standby-surviving timebase, live: the answer
+// to "kernel time stands still in standby" (samc21/sleep.hpp's
 // SamTimedSleepSite + samc21/ticker.hpp's advance()), proven inside a
 // REAL kernel against the board's crystal.
 //
@@ -10,10 +10,10 @@
 // EVENTS may sleep in STANDBY and still meet them - the RTC on
 // OSCULP32K is the alarm (a COMP0 wake placed on the next deadline) and
 // the witness (the frozen span handed to Ticker::advance()), the power
-// MODEL is untouched, and the kernel's own promise holds throughout:
-// at least, never early.
+// MODEL needs no new hook, and the kernel's own promise holds
+// throughout: at least, never early.
 //
-// THE RULER is the test_samc_sleep instrument: the TC2+TC3 pair as a
+// THE RULER: the TC2+TC3 pair as a
 // 32-bit counter on generator 2 fed by the 24 MHz crystal, RUNSTDBY
 // through the whole chain, counting while the CPU is stopped. Every
 // wall-clock claim below is crystal-referenced; the kernel's own
@@ -41,7 +41,7 @@
 //  d  NEVER EARLY, repeated: six 150 ms rounds, each judged on the
 //     crystal
 //
-// Wiring: NONE. Board C, console SERCOM5 PB02/PB03 at 115200.
+// Wiring: NONE. Console on SERCOM5, PB30/PB31 at 115200.
 
 #include <stdint.h>
 
@@ -82,7 +82,7 @@ constexpr Serial serial;
 TestBench<Serial> bench;
 
 // ---------------------------------------------------------------------------
-// The crystal ruler (the test_samc_sleep instrument, single-role here)
+// The crystal ruler
 // ---------------------------------------------------------------------------
 
 using Ruler = Tc<2>;                    ///< TC2+TC3 pair, 32-bit
@@ -341,8 +341,8 @@ void tc_foreign() {
     Probe::renew_on_foreign = true;
 
     // The intruder: the watchdog's early warning, ~125 ms in - a proven
-    // standby wake source (test_samc_sleep letter h) that posts to its
-    // own AO like any real interrupt.
+    // standby wake source (it runs on OSCULP32K) that posts to its own
+    // AO like any real interrupt.
     (void)Watchdog::disable();
     (void)Watchdog::arm(WdtConfig{.period = WdtCycles::cyc1024,
                                   .early_warning = true,

@@ -29,10 +29,10 @@
  * requester must keep them alive and unchanged until its NvDone arrives.
  * A static buffer or a member of the requesting AO is the normal answer.
  *
- * ISR GLUE the app must provide (the vector name never appears in
- * portable code):
+ * ISR GLUE the app must provide (the vector name is the target's, and
+ * never appears in portable code):
  *
- *     ISR(NVMCTRL_EE_vect) {
+ *     ISR(<the store's ready vector>) {
  *         Store::arm_ready_interrupt(false);   // level flag: mandatory
  *         brio::post<Writer>(brio::NvReady{});
  *     }

@@ -38,14 +38,14 @@
  * watchdog) times it with its own time event, which is the only place
  * where "how long is too long" is known.
  *
- * THE DRIVERS STAY UNTOUCHED. avrdx/tcb.hpp's FrequencyMeter,
- * PulseWidthMeter and DutyMeter expose ISR handler BODIES that return a
+ * THE DRIVERS STAY UNTOUCHED. A target's capture tasks - a frequency, a
+ * pulse-width or a duty meter - expose ISR handler BODIES that return a
  * reading and re-arm the capture; the application's vector binding is
  * what joins them to a latch, exactly as it joins a converter's result
  * to AnalogSampler:
  *
  *   using Period = brio::MeterLatch<uint16_t, P, 0>;
- *   ISR(TCB0_INT_vect) { Period::store(brio::FrequencyMeter<Tcb<0>>::period_ticks()); }
+ *   ISR(<the capture vector>) { Period::store(Meter::period_ticks()); }
  *
  * The sampler never names a timer, an interrupt or a unit: a source is
  * anything with a take(), the value is an unsigned number, and what it
@@ -53,8 +53,7 @@
  * subscriber's business - the same division of labour AnalogSampler
  * makes between raw counts and millivolts.
  *
- * Validated on: AVR DA/DB (the three TCB meters) and the host fake. The
- * contract carries nothing target-specific: a capture unit that reports
+ * The contract carries nothing target-specific: a capture unit that reports
  * through an interrupt exists on every machine brio targets, and a
  * peripheral that instead keeps a readable register needs no latch at
  * all - it satisfies MeterSource by reading it (an adapter of three

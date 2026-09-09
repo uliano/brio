@@ -31,7 +31,7 @@ second target adds is a target-level restriction the model does not
 express: its kernel tick stops in standby, so an application there may
 only ask for standby with no time event armed (`docs/samc21/platform.md`).
 
-**And a third silicon, still with no change.** On the STM32G0 the
+**A third silicon, still with no change.** On the STM32G0 the
 `SleepSite`'s two verbs absorbed everything that family asks of a
 sleeper - a SYSCLK restore after a Stop (the part comes back on
 HSI16, 5.3 of its manual) and a kernel-ticker pause across it - with
@@ -239,8 +239,8 @@ it has a say in the decision, which is not the same as wanting the news
 afterwards, and forcing the alternative into every voter's variant would
 make a bus engine pay queue slots for a fact it has no use for.
 
-**And a second finding from the same target, one campaign later: a
-site can LIFT a target restriction with the model still unchanged.**
+**A site can LIFT a target restriction with the model still
+unchanged.**
 The SAM's v1 restriction - standby only with no armed time event,
 because its tick freezes there - fell entirely INSIDE the two verbs the
 concept always had: the timed site (`SamTimedSleepSite`) places an RTC

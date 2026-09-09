@@ -1,13 +1,12 @@
 /*
  * print.hpp
  *
- * Text formatting as free variadic functions over any brio::ByteSink - the
- * replacement for the print() methods that used to live inside the Uart
- * driver (which is byte transport only now).
+ * Text formatting as free variadic functions over any brio::ByteSink: a
+ * transport moves bytes, formatting lives here.
  *
  * Usage (sink passed as a zero-cost tag instance):
  *
- *   constexpr brio::Uart<2, brio::Route::alt1> serial;
+ *   constexpr brio::Uart<2> serial;
  *   brio::print(serial, "[", ts, "] count = ", count, brio::crlf);
  *   brio::print(serial, "mask = ", brio::hex(0xBEEF), " v = ", brio::fixed(v, 8, 3));
  *
@@ -22,9 +21,9 @@
  *
  * Delivery policy: print BLOCKS until the sink accepts each byte (spinning
  * on write_byte). With the interrupt-driven Uart this means "wait for the
- * TX ring to drain", so printed text is never silently truncated - the old
- * driver dropped bytes on a full ring. Consequence: only print after the
- * sink is initialized and interrupts are enabled, or the spin never ends.
+ * TX ring to drain", so printed text is never silently truncated.
+ * Consequence: only print after the sink is initialized and interrupts
+ * are enabled, or the spin never ends.
  *
  * Number-to-text conversion uses avr-libc (ltoa/ultoa/dtostrf/dtostre):
  * <charconv> is not part of this freestanding libstdc++. Those four are
@@ -211,8 +210,8 @@ inline void print_one(S s, F value) {
 }
 
 /// TimeStamp as "<seconds>.<millis>s", millis zero-padded to 3 digits
-/// (12.045s) - unambiguous on every target, unlike the old tick-based
-/// "12s.46t" whose unit changed with the silicon.
+/// (12.045s) - unambiguous on every target, where a tick-based fraction
+/// would change unit with the silicon.
 template <ByteSink S>
 inline void print_one(S s, const TimeStamp &t) {
     print_one(s, t.seconds);

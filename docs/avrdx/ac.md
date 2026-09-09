@@ -138,5 +138,5 @@ Implemented but not bench-verified:
   a DAC step is swamped by the DAC's own slew - a faster edge is
   needed); the three power profiles; the small/large hysteresis
   widths; tDACREF; `INITVAL` (its window is the start-up itself).
-- RUNSTDBY under a real standby (queued, LOW priority - it would
-  also settle the 32.3.5 vs 32.5.1 contradiction above).
+- RUNSTDBY under a real standby (it would also settle the 32.3.5 vs
+  32.5.1 contradiction above).

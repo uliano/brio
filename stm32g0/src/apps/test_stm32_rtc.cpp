@@ -69,7 +69,7 @@
 //      reboots the board through a software reset, and checks what came
 //      back - so it is NOT in `z`, which has to be one console session a
 //      tool can judge from a single capture. Run it with
-//          python3 tools/bench.py run E v --app test_stm32_rtc
+//          python3 tools/bench.py run <board> v --app test_stm32_rtc
 //                  --expect="pass," --timeout 200
 //
 // build: boards = g0b1re,g071rb,g031k8
@@ -210,8 +210,7 @@ std::optional<uint32_t> meter_average(uint16_t n, uint32_t guard_ms) {
 /// between edges that are not neighbours. Those errors LENGTHEN an
 /// interval.
 ///
-/// AND THE OTHER TAIL IS REAL TOO, which is what cost this suite a flaky
-/// verdict for a whole campaign: an UNFILTERED capture of one of these
+/// AND THE OTHER TAIL IS REAL TOO: an UNFILTERED capture of one of these
 /// internal clock lines also OVER-captures, and an extra edge SHORTENS
 /// an interval. Measured on LSI, unfiltered, in one z run: sixty-three
 /// intervals between 1936 and 1967 timer ticks and one of 1822. So the
@@ -972,9 +971,9 @@ void tf_alarms() {
                   Rtc::set_alarm(RtcAlarmId::a, a, false));
     bench.verdict("and reads back enabled", Rtc::alarm_enabled(RtcAlarmId::a));
 
-    // THE LATENCY QUESTION. On the SAM an alarm lands a whole counter
-    // period after its match; here the comparison is against the
-    // calendar, so the flag should land AT the second it names. Measured:
+    // THE LATENCY QUESTION: the comparison is against the CALENDAR and
+    // not against a free counter, so the flag should land AT the second
+    // it names rather than a whole counter period later. Measured:
     // wait for the flag, then read the calendar in the same breath.
     Rtc::clear_flags(RtcFlag::alarm_a);
     const uint32_t t0 = Ticker::millis();
@@ -1422,9 +1421,9 @@ constexpr bool refin_bonded = true;
 
 /// A COHERENT sub-second reading, and the reason it needs one: with
 /// BYPSHAD set RTC_SSR is the live counter in the RTCCLK domain, and a
-/// single load can catch it mid-transition. The first version of this
-/// letter believed those readings and reported seconds of 18 million
-/// ticks. Two consecutive loads that agree are not in the transition.
+/// single load can catch it mid-transition, and a letter that believes
+/// such a reading reports seconds of 18 million ticks. Two consecutive
+/// loads that agree are not in the transition.
 uint16_t stable_subsecond() {
     uint16_t a = Rtc::subsecond();
     for (uint8_t i = 0; i < 8u; ++i) {
@@ -1456,9 +1455,8 @@ inline bool is_wrap(uint16_t prev, uint16_t ss) {
 /// A wait longer than delay_us() may serve. THE CAP IS THE CONTRACT:
 /// armv6m/delay.hpp refuses anything a kernel tick or longer and spends
 /// NO time doing it, which is exactly right for the busy-wait and wrong
-/// for a letter that wants to sit out a tamper's sampling window - and
-/// the first version of these letters asked for 60 ms and got nothing,
-/// which is how the refusal was met.
+/// for a letter that wants to sit out a tamper's sampling window: a
+/// request of 60 ms is refused outright and no time is spent.
 void wait_ms(uint32_t ms) {
     const uint32_t t0 = Ticker::millis();
     while (Ticker::millis() - t0 < ms) {

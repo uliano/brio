@@ -65,6 +65,8 @@
 //   h  a dead block abandoned, counted, and the stream resumed
 //   i  the SDADC through the ping-pong engine, on WORD beats
 //   j  TSENS through the same engine, on WORD beats
+//   k  util/block_stream.hpp's BlockRelay inside a real kernel: the
+//      same chain, with the blocks travelling as dispatch loans
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -148,9 +150,9 @@ using Churn0 = DmaChannel<ch_churn0>;
 using Churn1 = DmaChannel<ch_churn1>;
 
 // ---------------------------------------------------------------------------
-// The buffers. VOLATILE IN BOTH DIRECTIONS - the DMAC campaign's lesson
-// on this target, where gcc sank a zeroing store past a transfer. The
-// engines take volatile pointers precisely so this needs no cast.
+// The buffers. VOLATILE IN BOTH DIRECTIONS: gcc will sink a zeroing
+// store past the transfer that reads it. The engines take volatile
+// pointers precisely so this needs no cast.
 // ---------------------------------------------------------------------------
 constexpr uint16_t table_len = 32;    ///< the DAC's lap
 constexpr uint16_t block_len = 24;    ///< the ADC's block
@@ -279,9 +281,9 @@ void churn_spray(uint8_t offset, uint32_t& blocks, uint32_t& deaths,
 //
 // div64 of the 48 MHz main clock is 750 kHz, so PER = 149 makes a period
 // of 150 ticks = 200 us and the pair runs at 5 kHz. THE RULER IS OSC48M,
-// which the clock campaign measured 5100 ppm slow against the board's
-// crystal, so every absolute rate this suite prints is on that scale and
-// letter d says so where it matters.
+// measured 5100 ppm slow against the board's crystal, so every absolute
+// rate this suite prints is on that scale and letter d says so where it
+// matters.
 // ---------------------------------------------------------------------------
 constexpr uint8_t pacer_period = 149;      ///< PER: 150 ticks
 constexpr uint8_t pacer_match = 112;       ///< CC0: three quarters of it
@@ -845,8 +847,8 @@ void tc_round_trip() {
 // clock, and on this target both ARE OSC48M - so this letter checks the
 // divider arithmetic and the two engines' bookkeeping, NOT the
 // oscillator. OSC48M itself is 5100 ppm slow against the board's
-// crystal (the clock campaign measured it), and every absolute figure
-// printed here carries that.
+// crystal (measured), and every absolute figure printed here carries
+// that.
 void td_rate() {
     if (!calibrated && !calibrate()) {
         bench.verdict("the calibration pass runs", false);
@@ -945,8 +947,7 @@ void te_accounting() {
     // one verdict line is about four milliseconds of console at 115200
     // and a restarted stream fills a 24-sample block in 4.8 ms, so a
     // `stalled()` read placed after a print is a read of the NEXT stall
-    // and not of the release under test. The first version of this
-    // letter failed exactly that way.
+    // and not of the release under test.
     uint32_t e0 = 0;
     uint32_t w0 = 0;
     const volatile uint16_t* first = AdcStream::ready();
@@ -1136,12 +1137,12 @@ void tf_churn() {
 
     // ---- THE PROVOCATION -----------------------------------------------
     //
-    // THE PACER KEEPS RUNNING THROUGH THIS, and the first version of the
-    // letter got that wrong: with the chain stopped, the "provocation"
-    // was churn and harvests against an idle channel, it delivered no
-    // block at all, and the stall detector duly fired once per fifty
-    // milliseconds - five times, every run, deterministically. Five
-    // identical numbers from a thing described as weather is the shape
+    // THE PACER KEEPS RUNNING THROUGH THIS, and it has to: with the
+    // chain stopped the "provocation" would be churn and harvests
+    // against an idle channel, no block would arrive at all, and the
+    // stall detector would fire once per fifty milliseconds - five
+    // times, every run, deterministically. Five identical numbers from
+    // a thing described as weather is the shape
     // of a measurement that is measuring the test.
     //
     // The loop above is what an application would do. THIS is not: a
@@ -1322,9 +1323,8 @@ void tf_churn() {
     chain_down();
     // HAND THE CONTROLLER BACK CLEAN. The erratum's destructive form
     // leaves a channel enabled for ever with no flag on it, and a letter
-    // that left one behind would poison every letter after it - which is
-    // exactly what the first version of this suite did, turning one
-    // strike in `f` into twelve failures across `g`..`j`.
+    // that left one behind would poison every letter after it, turning
+    // one strike in `f` into failures all the way down the menu.
     (void)Dmac::init();
     Nvic::enable(Dmac::irq());
 }
@@ -1335,9 +1335,9 @@ void tf_churn() {
 //
 // A peripheral asserts its DMA request as a LEVEL and the controller
 // latches a pending trigger when that level RISES (25.8.8) - which is
-// the whole mechanism behind the wedge the UART campaign diagnosed, and
-// behind kick() existing at all. This letter asks the sharper question
-// that campaign left open: WHICH rise?
+// the whole mechanism behind a channel that sits enabled with a
+// standing request and moves nothing, and behind kick() existing at
+// all. The sharper question this letter asks is: WHICH rise?
 //
 // The answer, measured here in two legs with the same standing request,
 // is that the trigger multiplexer's OUTPUT is what has to rise, and
@@ -1475,10 +1475,9 @@ void tg_edge_not_level() {
 // decides it is dead is the peripheral's owner and never the engine, and
 // what the abandonment loses is stated rather than pretended away.
 //
-// The corruption is injected by hand here - the write-back is this
+// The corruption is injected by hand here: the write-back is this
 // driver's own SRAM, so a suite can scribble on it and watch the
-// validation say no - which is the same technique test_samc_dma uses on
-// the serial engines.
+// validation say no.
 void th_abandon() {
     if (!calibrated && !calibrate()) {
         bench.verdict("the calibration pass runs", false);
@@ -1486,11 +1485,11 @@ void th_abandon() {
     }
     bench.verdict("the chain comes up", chain_up());
 
-    // EVERY MEASUREMENT BELOW IS TAKEN WITH THE STREAM DRAINED FIRST and
-    // all the printing is left to the end - the letter-e lesson: a
-    // stream fills a block in 4.8 ms and one verdict line is about four
-    // milliseconds of console, so a letter that prints between two
-    // measurements is measuring its own console.
+    // EVERY MEASUREMENT BELOW IS TAKEN WITH THE STREAM DRAINED FIRST
+    // and all the printing is left to the end: a stream fills a block
+    // in 4.8 ms and one verdict line is about four milliseconds of
+    // console, so a letter that prints between two measurements is
+    // measuring its own console.
     const uint32_t t_warm = Ticker::millis();
     while (Ticker::millis() - t_warm < 20u) {
         if (AdcStream::ready() != nullptr) {
@@ -1524,10 +1523,9 @@ void th_abandon() {
     (void)Pacer::enable(false);
     // LET THE LAST PERIOD FINISH BEFORE ASKING ANYTHING. Stopping the
     // pacer mid-period leaves one conversion still to complete, and its
-    // RESRDY can rise after the drain and before the question - which
-    // made the first version of this letter fail about one run in four
-    // on a predicate that is otherwise exact. Five milliseconds is
-    // twenty-five periods.
+    // RESRDY can rise after the drain and before the question, which
+    // fails an otherwise exact predicate about one run in four. Five
+    // milliseconds is twenty-five periods.
     wait_ms(5);
     while (AdcStream::ready() != nullptr) {
         (void)AdcStream::release();
@@ -1626,8 +1624,7 @@ void th_abandon() {
 void ti_sdadc() {
     // The pair's two pads, driven by PORT to opposite rails. An analog
     // input is a direct connection to the pad, so a pad left under PORT
-    // is read as it stands - the technique the AC and the ADC campaigns
-    // established and this suite inherits.
+    // is read as it stands.
     SdN::output();
     SdN::clear();
     SdP::output();
@@ -1906,10 +1903,10 @@ void tj_tsens() {
 // =============================================================================
 //
 // The block-stream vocabulary (util/block_stream.hpp,
-// design/block-stream.md) run on the silicon that shaped it: the same
-// DAC-to-ADC chain as letter c, but the blocks now travel as
-// Lease::dispatch loans through a REAL kernel - StreamSink (the
-// borrower) before BlockRelay (the lender) in the pack, the DMAC
+// design/block-stream.md) on silicon: the same DAC-to-ADC chain as
+// letter c, but the blocks now travel as Lease::dispatch loans through
+// a REAL kernel - StreamSink (the borrower) before BlockRelay (the
+// lender) in the pack, the DMAC
 // completion posting the wakeup, and every buffer returned to the
 // engine by the relay's next dispatch. The sink does letter c's whole
 // verification INSIDE the loan window, which is the point: a block is
@@ -1975,14 +1972,14 @@ void tk_relay() {
         bench.verdict("the calibration pass runs", false);
         return;
     }
-    // EVERY MEASUREMENT FIRST, EVERY PRINT AFTER - the suite's own
-    // lesson, and here it is load-bearing: chain_up() starts the 5 kHz
-    // stream, a print is milliseconds (and BLOCKS while the console
-    // ring, still full of the previous letters' output in a z run,
-    // drains at 115200), and the engine's whole slack is two blocks =
-    // 9.6 ms. The first version printed the chain verdict between the
-    // start and the pump and overran once, deterministically, in every
-    // z run - and never when the letter ran alone with an empty ring.
+    // EVERY MEASUREMENT FIRST, EVERY PRINT AFTER, and here it is
+    // load-bearing: chain_up() starts the 5 kHz stream, a print is
+    // milliseconds (and BLOCKS while the console ring, still full of
+    // the previous letters' output when the whole menu runs, drains at
+    // 115200), and the engine's whole slack is two blocks = 9.6 ms. A
+    // verdict printed between the start and the pump overruns the
+    // engine once, deterministically - and never when the letter runs
+    // alone with an empty ring.
     const bool up = chain_up();
 
     constexpr uint8_t blocks = 12;
@@ -2053,11 +2050,11 @@ void banner() {
 // lowest one pending together with its flags - so the whole dispatch is
 // a read and a store, with no CHID contention against main context.
 //
-// THE TRAP THIS BINDING AVOIDS, learned by the UART campaign: an engine
-// is a static-only class, so telling the WRONG engine that a block
-// finished reprograms a running channel. Here each channel belongs to
-// exactly one engine and the switch says so; a transfer error is not a
-// completion and must not be reported as one.
+// THE TRAP THIS BINDING AVOIDS: an engine is a static-only class, so
+// telling the WRONG engine that a block finished reprograms a running
+// channel. Here each channel belongs to exactly one engine and the
+// switch says so; a transfer error is not a completion and must not be
+// reported as one.
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
 

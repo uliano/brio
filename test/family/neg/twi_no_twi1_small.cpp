@@ -4,4 +4,4 @@
 #include "avrdx/clock.hpp"
 #include "avrdx/twi.hpp"
 using namespace brio;
-void f() { (void)TwiHost<1>::init(Clock<ClockSource::internal, 24'000'000>{}); }
+void f() { (void)I2cHost<1>::init(Clock<ClockSource::internal, 24'000'000>{}); }

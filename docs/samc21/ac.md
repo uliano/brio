@@ -13,14 +13,14 @@ Documents of record: SAM C20/C21 data sheet DS60001479M ch. 40 and
 the electrical characteristics table 45-34 (whose note 4 states the
 propagation delay is measured on "ACOUT (AC direct output)" and
 covers ONLY the analog path - the digital path's cost in cycles is
-stated nowhere, which is what the probe below measured). Driver:
+stated nowhere, which is what the probe below measures). Driver:
 `samc21/ac.hpp` (`Ac` block + `AcComparator<n>` + `AcWindow<w>`).
 Family fixture `test/family_samc21/ac.cpp` plus four negatives under
 `tools/check_samc21.sh`. Two bench SUITES and one probe, and the
 distinction matters: `test_samc_ac` (6 letters, 94 verdicts, wireless)
-is the chapter's own, `test_samc_analog` carries what needed the DAC as
-a swept source (letters g to j), and `ac_sync_probe` remains a PROBE -
-it answered one timing question and is not a reference test.
+is the chapter's own, `test_samc_analog` carries what needs the DAC as
+a swept source (letters g to j), and `ac_sync_probe` is a PROBE - it
+answers one timing question and is not a reference test.
 
 The errata, read on the E/G/J row at silicon revision F: of six AC
 items plus one device-level one, **two apply** and neither is
@@ -51,9 +51,8 @@ digital machinery - slow the generator down and every digital
 latency becomes visible to a software stopwatch, which is the
 probe's whole method.
 
-**THE MEASURED ANSWER, stated first because it is why this driver
-exists: a synchronized output edge costs the fraction of a period to
-the next GCLK_AC edge PLUS TWO WHOLE PERIODS** - a two-stage
+**A synchronized output edge costs the fraction of a period to the
+next GCLK_AC edge PLUS TWO WHOLE PERIODS** - a two-stage
 synchronizer, in the classic shape. Measured as a phase-anchored
 64-step staircase (a clean sawtooth spanning exactly one period) and
 as 1000 randomized shots, on two independent clockings: OSC48M/4096
@@ -80,15 +79,14 @@ the fraction + 2 - is the slowest clocked path of the four.
 the pad routed ASYNC, the STATE readback still pays the same
 fraction + 2 periods. STATE is declared valid only while
 STATUSB.READY is one; after a continuous-mode enable, READY itself
-arrived in ~6.7 GCLK_AC periods on the bench (the electrical
-t_STARTUP of 2-3 us is invisible at a slow clock - the domain
-crossings dominate).
+arrives in ~6.7 GCLK_AC periods (the electrical t_STARTUP of 2-3 us
+is invisible at a slow clock - the domain crossings dominate).
 
 **INTFLAG raises on the SAME period as the output flip.** Edge
 detection compares the current and previous sample (40.6.2.4.1), and
-the flag was consistently observed a few tens of CPU cycles BEFORE
-the pad readback (the pad round-trip pays PORT input sampling that
-the APB flag read does not) - not one period later.
+the flag appears a few tens of CPU cycles BEFORE the pad readback
+(the pad round-trip pays PORT input sampling that the APB flag read
+does not) - not one period later.
 
 **A mid-stream edge through the majority filter costs (N-1)/2 extra
 periods, not the chapter's N-1.** Measured exactly: MAJ3 adds one
@@ -104,13 +102,12 @@ figure 40-4 draws "2-3 cycles" plus t_STARTUP: the figure's cycles
 are the command's domain crossing alone; the comparison itself and
 READY's own journey back to the APB face pay the rest.
 
-**A GPIO-driven pad reaches the comparator's input mux.** The AVR
-suites' wireless trick holds on this family too: PA04 driven by PORT
-as a plain output (no PMUX, no function B) is seen by MUXPOS = PIN0,
-both levels, proven before anything else relied on it. The
-comparator's negative input never needs a pad at all: each
-comparator has its own 64-step VDD scaler (SCALERn), and the probe's
-threshold is scaler 31 = VDD/2.
+**A GPIO-driven pad reaches the comparator's input mux.** PA04
+driven by PORT as a plain output (no PMUX, no function B) is seen by
+MUXPOS = PIN0 at both levels, which is the precondition every
+wireless measurement here rests on. The comparator's negative input
+never needs a pad at all: each comparator has its own 64-step VDD
+scaler (SCALERn), and the probe's threshold is scaler 31 = VDD/2.
 
 **Window mode is the second face of every PAIR** (40.6.4): COMP0/COMP1
 are window 0 and COMP2/COMP3 window 1. The pair shares one positive
@@ -146,7 +143,7 @@ exist on the J alone), so that is the authority: `ac_config_valid()`
 refuses a pin the package does not bond, and the comparator index is
 part of the question.
 
-**Two more chapter rules are refusals now**: hysteresis is
+**Two more chapter rules are refusals**: hysteresis is
 "available only in continuous mode" (40.6.6), and the
 end-of-comparison interrupt is "single-shot mode only" (40.8.12).
 
@@ -157,7 +154,7 @@ CTRLA.SWRST/ENABLE and WINCTRL. Disabling the whole block
 (CTRLA.ENABLE = 0) stops every comparator but leaves their
 COMPCTRLn.ENABLE bits standing.
 
-**A GCLK fact this probe needed** (it lives in
+**A GCLK fact this probe needs** (it lives in
 [clock.md](clock.md) and in `samc21/clock.hpp`, where the config is):
 GENCTRL.DIVSEL divides by **2^(DIV+1)** - the DIV value counts, and
 the width of the field does not. The linear divisor is what this
@@ -227,7 +224,7 @@ still needs its PMUX, and reading it back needs its input buffer
 
 ## Bench findings
 
-### From `test_samc_ac` (6 letters, 94 verdicts, **94/94 three times**)
+### From `test_samc_ac` (6 letters, 94 verdicts)
 
 Nothing to wire. The stimulus is a pad driven by PORT and read by the
 comparator, and the second voltage is each comparator's own VDD
@@ -246,7 +243,7 @@ scaler.
   STATE1=1) and `below` (both at VDD: both 0) - and confirms that the
   mapping is symmetric in which comparator holds which limit, exactly
   as 40.6.4 says. **The chapter's own shape** - one shared input PIN,
-  the two scalers as limits at 49/64 and 17/64 of VDD - was exercised
+  the two scalers as limits at 49/64 and 17/64 of VDD - is exercised
   too and reads `above` at VDD and `below` at ground; `inside` is
   unreachable in that shape here, and that is a board limitation, not
   a silicon one.
@@ -269,9 +266,6 @@ scaler.
   READY=0 and the end-of-comparison flag is clear, after it READY=1,
   the flag is set and STATE answers correctly. With EVCTRL.COMPEI0
   cleared the same edge starts nothing, so the enable bit is the gate.
-  This is also the first thing in this stratum to use a hardware
-  generator on an asynchronous channel for something other than a DMA
-  transfer.
 - **Re-pointing an event channel at a new generator leaves an event
   standing.** Measured, reproducibly: after `Evsys::connect()` moves
   channel 0 from COMP0 to WIN0, the first DMA arming that follows
@@ -321,7 +315,7 @@ period = 4096 CPU cycles at 48 MHz, stopwatch = SysTick):
   periods. Continuous-mode enable to READY: 27489 cycles (~6.7
   periods).
 - The GPIO-driven-pad proof and the scaler threshold sanity pass on
-  every run; two consecutive full runs at 30/30.
+  every run.
 
 **40.6.14, both sequences.** With a pad walked by hardware while the
 CPU is stopped (the chain is in [platform.md](platform.md), "Sleep,
@@ -332,12 +326,11 @@ about 14 ms - the moment the pad was due to move - against a 91 ms RTC
 backstop. With RUNSTDBY CLEAR it woke nothing, in eight rounds of
 eight, **whether GCLK_AC stopped with the CPU or was force-fed by a
 generator that runs in standby**: COMPCTRL.RUNSTDBY gates the
-COMPARATOR and not merely its clock. The force-fed arrangement did
-produce ONE stray wake in thirty-two rounds across four runs, recorded
-here and not rounded away. And 40.6.14.2's single-shot SleepWalking
-runs: an RTC periodic event on the ASYNCHRONOUS path - all table 29-3
-grants the SOC users - starts a comparison DURING a standby and its
-INTFLAG is read at the wake.
+COMPARATOR and not merely its clock. The force-fed arrangement does
+produce ONE stray wake in thirty-two rounds across four runs. And
+40.6.14.2's single-shot SleepWalking runs: an RTC periodic event on the
+ASYNCHRONOUS path - all table 29-3 grants the SOC users - starts a
+comparison DURING a standby and its INTFLAG is read at the wake.
 
 ## COMP2, COMP3, window 1, the bandgap and the hysteresis
 
@@ -345,11 +338,11 @@ From `test_samc_analog` letters g to j, 41 verdicts, with the DAC on
 PA02 as the swept source - PA02 being AIN4, which is COMP2/3's PIN0.
 
 **COMP2 and COMP3 run, and window 1 gets the arrangement 40.6.4
-actually describes.** Where `test_samc_ac` had to swap the roles (the
-scaler as the signal, two rail-driven pads as the limits) because no pad
-on this board can sit between the rails, the DAC IS a signal between
-them: both comparators share PA02 as the positive input and their own
-VDD scalers - steps 16/64 and 40/64 - are the two limits.
+actually describes.** Where `test_samc_ac` swaps the roles (the scaler
+as the signal, two rail-driven pads as the limits) because no pad on
+this board can sit between the rails, the DAC IS a signal between them:
+both comparators share PA02 as the positive input and their own VDD
+scalers - steps 16/64 and 40/64 - are the two limits.
 
 | DAC code | COMP2 / COMP3 STATE | WSTATE1 |
 |---|---|---|
@@ -368,8 +361,7 @@ clear and 203 with it set**: 22.6.2.2's sentence is about routing the
 reference to an ADC INPUT CHANNEL, which is the one path that really is
 dead without it ([adc.md](adc.md)), while the AC's negative multiplexer
 takes the bandgap internally exactly as the ADC's and the DAC's
-REFERENCE paths do ([dac.md](dac.md)). `ac.hpp`'s own comment said
-otherwise and is corrected.
+REFERENCE paths do ([dac.md](dac.md)).
 
 Weighed by the DAC, the three SUPC levels cross at codes **203 / 405 /
 812**, i.e. 1044 / 2083 / 4178 mV against a supply this suite locates at
@@ -409,14 +401,13 @@ hysteresis specification itself being wrong - is B..E too, so table
 **40.6.10'S SWAP PROCEDURE RUNS, AND WHAT IT RETURNS IS A BOUND.**
 Swapping the terminals inverts the output as well, so the two cancel and
 the SENSE of the output is unchanged - which is what makes the recipe an
-offset measurement rather than a polarity change, and what the first
-version of this test got wrong. Unswapped and swapped, the crossing is
-the same code (513, spread 0 on four repeats each), midpoint 513 against
-a nominal 512: **half the difference is under one DAC code, so this
-comparator's input offset is smaller than the 5 mV step of the only
-source that can sweep it** - consistent with table 45-34's typical
--0.1/+1 mV, and the honest outcome of a procedure run with an instrument
-coarser than the quantity.
+offset measurement rather than a polarity change. Unswapped and
+swapped, the crossing is the same code (513, spread 0 on four repeats
+each), midpoint 513 against a nominal 512: **half the difference is
+under one DAC code, so this comparator's input offset is smaller than
+the 5 mV step of the only source that can sweep it** - consistent with
+table 45-34's typical -0.1/+1 mV, and the honest outcome of a procedure
+run with an instrument coarser than the quantity.
 
 **The directed INTSEL flavours are directed**: rising fires on the
 output's rise and stays silent on its fall, falling does the opposite,

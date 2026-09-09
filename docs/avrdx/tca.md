@@ -237,8 +237,8 @@ Implemented but not bench-verified:
 - The dual_slope_top/both OVF placements (bottom is bench-verified
   by the centred task); the split ISR bodies (the flags and the HUNF
   event are bench-verified, the vectors are not bound by any test).
-- RUNSTDBY under a real standby (queued, LOW priority - needs a
-  sleeping app); DBGRUN under a halt.
+- RUNSTDBY under a real standby (needs a sleeping app); DBGRUN under
+  a halt.
 - Event input B restart actions; count_anyedge/count_while_high on
   input A; FRQ phase-offset outputs on CMP1/CMP2; ALUPD multi-register
   updates; the UPDATE command.

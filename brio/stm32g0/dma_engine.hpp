@@ -7,10 +7,8 @@
  * IT IS A TAG, NOT A BASE CLASS: `present` is the only thing a task asks
  * about, and it asks with `if constexpr`, so every engine branch - the
  * pump, the completion path and the state they need - disappears from a
- * driver that does not name one. The proof is the measured kind: the
- * release images of every app that uses no engine are BYTE-IDENTICAL to
- * the ones built before the slots existed (docs/stm32g0/dma.md records
- * that gate).
+ * driver that does not name one: an image whose tasks all take the
+ * default carries no engine code at all.
  *
  * IT LIVES IN A FILE OF ITS OWN AND NOT IN stm32g0/dma.hpp, and the
  * reason is the whole point of an optional slot: a driver with such a
@@ -22,8 +20,9 @@
  * service(), flag_complete, flag_error) and never spells a DmaChannel or
  * a DmaFlag.
  *
- * It was usart.hpp's until spi.hpp needed the same tag: two headers
- * cannot each define it, and neither is the other's natural home.
+ * And it is a file rather than a member of one of the two drivers
+ * because two headers cannot each define the same tag, and neither is
+ * the other's natural home.
  */
 
 #pragma once

@@ -284,7 +284,7 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   either has a guard in the code or is listed as a driver gap -
   knowledge the code does not enforce is a bug deferred.
 
-## Style rulings
+## Style rules
 
 - No `Ao` suffix on active-object class names: in an AO framework
   every service is an active object, so the suffix is noise - name

@@ -28,18 +28,19 @@ bus vocabulary above it is `util/spi_bus.hpp` over
 The per-instance presence, APB register, vector, I2S capability, I2S
 clock selector and DMAMUX facts come from `stm32g0/device_tables.hpp`.
 Bench suite: `test_stm32_spi`, and it carries TWO INSTRUMENTS on one set
-of pads because the desk has held both (see [../bench.md](../bench.md)):
+of pads because the desk carries either (see [../bench.md](../bench.md)):
 letters `a`..`m` (89 verdicts) run on the Nucleo's own SPI1-to-SPI2
 self-link, letters `n`..`r` (20 verdicts) on the link to a PEER BOARD
 running `spi_peer`, commanded in band over
 `avrdx/src/apps/spi_link.hpp`. The peer may be any of the three ports of
 that app - the AVR's, the SAM C21's or this stratum's own, which answers
 on SPI1 AF0 at the same pin names this board hosts on - and the peer's
-`ident` names which one answered (firmware 0x01xx, 0x02xx, 0x03xx). The two wirings exclude each other, the
-suite PROBES which one is fitted before any letter runs, and the letters
-whose instrument is absent skip themselves with the reason printed and
-no verdict claimed. Family fixture `test/family_stm32g0/spi.cpp` plus
-fourteen negatives under `tools/check_stm32g0.sh`.
+`ident` names which one answered (firmware 0x01xx, 0x02xx, 0x03xx). The
+two wirings exclude each other, the suite PROBES which one is fitted
+before any letter runs, and the letters whose instrument is absent skip
+themselves with the reason printed and no verdict claimed. Family
+fixture `test/family_stm32g0/spi.cpp` plus fourteen negatives under
+`tools/check_stm32g0.sh`.
 
 ## What the silicon does
 
@@ -249,11 +250,10 @@ and their inverse.
 ## Bench findings
 
 Measured by `test_stm32_spi`. The findings down to "The dynamic clock"
-are the SELF-LINK's (SPI1 host to SPI2 client, four wires): 89 verdicts,
-three green `z` runs including one from a cold flash. The ones under
-"The peer link" are a SECOND CHIP's, on the same four SPI1 pads: 38
-verdicts, measured first against a SAM C21 (two green `z` runs including
-one from a cold flash) and then against a second STM32G0.
+are the SELF-LINK's (SPI1 host to SPI2 client, four wires): 89 verdicts.
+The ones under "The peer link" are a SECOND CHIP's, on the same four
+SPI1 pads: 38 verdicts, measured against a SAM C21 and against a second
+STM32G0.
 
 **The block, and the reserve against the header.** SPI1 on line 25 and
 SPI2/SPI3 sharing line 26; the DMAMUX pairs 16/17, 18/19, 66/67; the
@@ -346,8 +346,8 @@ reads back where the checksum belongs is the client's own TXCRCR. Also
 0x5204 for a 16-bit CRC over 8-bit frames and 0xABD0 for 16-bit frames -
 every one matching the software reference exactly. **The checksum frame
 is the one NEITHER SIDE WRITES**: after CRCNEXT the shifter is fed from
-the CRC register and a store there is one more DATA frame instead (the
-trap the first version of the letter fell into, on both ends at once).
+the CRC register and a store there is one more DATA frame instead, at
+whichever end makes it.
 35.5.14's arithmetic confirmed: a 16-bit CRC over 8-bit frames costs
 TWO extra frames on the wire, a matched pair costs one. CRCERR is staged
 by giving the client a different polynomial - what can be corrupted on a
@@ -378,11 +378,11 @@ frames out and back byte-exact with no CPU between them and ONE
 completion - the receive block's. The command-phase handover loses and
 repeats nothing at the seam. A read-only request feeds 0xFF from a held
 cell and a write-only one drains into a held sink (the two sibling verbs
-`start_fixed()` and `start_discard()` this campaign added to
-`stm32g0/dma.hpp`). **With BOTH ends on DMA channels the ladder is
-monotone and has a real ceiling: byte-exact to PCLK/4 = 16 MHz, slipping
-at PCLK/2 = 32 MHz** - a channel sustains frames an interrupt entry
-cannot, which is the distinction the CPU-driven ladder could only name.
+`start_fixed()` and `start_discard()` of `stm32g0/dma.hpp`). **With BOTH
+ends on DMA channels the ladder is monotone and has a real ceiling:
+byte-exact to PCLK/4 = 16 MHz, slipping at PCLK/2 = 32 MHz** - a channel
+sustains frames an interrupt entry cannot, which is the distinction the
+CPU-driven ladder could only name.
 **35.9.2's LDMA_TX, measured**: three 16-bit DMA accesses to an 8-bit
 frame size carry SIX frames with the bit clear and FIVE with it set, the
 odd count told to the silicon being what stops the dummy half of the
@@ -438,30 +438,28 @@ jumpers go there instead of to SPI2, and the topologies EXCLUDE each
 other: the suite probes for the self-link at boot and letters b..l skip
 themselves when it is absent. On the peer desk `z` scores **38 of 38**
 (letter `a` wireless, letter `m` wireless, letters `n`..`r` on the
-wire) - green twice including a run from a cold flash against a SAM
-C21, and green twice including a run from a cold flash against a second
-STM32G0 once that peer's answer line had its edge rate set (the last
-finding below: at the driver's very-high pad speed the falling-edge
-modes slipped in one burst of eight).
+wire), against a SAM C21 and against a second STM32G0 - the latter with
+that peer's answer line at the pad speed the last finding below
+prescribes, since at the driver's very-high speed the falling-edge modes
+slip.
 
-**The wire format is the AVR campaign's, unchanged, on a third
-architecture.** `avrdx/src/apps/spi_link.hpp` is compiled by three apps
-now and this suite is the third to speak it: the command channel came up
-first try at PCLK/256 = 250 kHz, one frame per chip-select window, ten
-of ten, and `ident` names the peer's die serial and its `spi_peer`
-sanity byte. The protocol owns the chip select here (the Request carries
-a null `PinRef` and the letter frames the window by hand with 30 us of
-hold on each side), and `prime()` is what makes that legal - a mode
-change inside an open select window is one extra edge, which is the
-finding the samc21 bench paid for and this end simply obeys.
+**One wire format, three architectures.** `avrdx/src/apps/spi_link.hpp`
+is compiled by three apps and this suite speaks it unchanged: the
+command channel runs at PCLK/256 = 250 kHz, one frame per chip-select
+window, ten of ten, and `ident` names the peer's die serial and its
+`spi_peer` sanity byte. The protocol owns the chip select here (the
+Request carries a null `PinRef` and the letter frames the window by hand
+with 30 us of hold on each side), and `prime()` is what makes that
+legal - a mode change inside an open select window is one extra edge,
+measured on the SAM C21 as an exact one-bit slip.
 
 **Four modes, both bit orders, byte-exact between two different
 silicons**, and a DORD mismatch is an EXACT two-way bit reversal with
 both ends checking the other's bytes reversed - zero mismatches either
 way. The bit order is a BUS-level verb on this target
-(`SpiHost::bit_order()`, CR1.LSBFIRST) where the samc21 suite has to go
-round its own task for the same leg, and the LSb-first exchange rides
-that verb.
+(`SpiHost::bit_order()`, CR1.LSBFIRST) where the SAM C21 has to go round
+its own task for the same leg, and the LSb-first exchange rides that
+verb.
 
 **WHERE THE LADDER STOPS IS THE PEER'S ANSWER RELOAD AND NOT THE WIRE,
 AND WITH A G0 PEER IT DOES NOT STOP AT ALL.** Against the SAM C21 every
@@ -470,16 +468,15 @@ both directions and PCLK/4 = 16 MHz breaks with **the peer's own count
 full and its mismatches zero** - it heard all eight characters exactly
 and could not put its answers on the shifter in time (the SAM serves
 through its DMA engines here, which is what its report's `serve=dma`
-says). The samc21-to-samc21 bench measured the same boundary at 6 MHz
-with both ends engined; a G0 host paced by its own frame pump gives that
-peer one rung more. **AGAINST A SECOND STM32G0 SERVING ON ITS OWN DMA
+says). A SAM C21 hosting the same peer meets that boundary at 6 MHz with
+both ends engined; a G0 host paced by its own frame pump gives that peer
+one rung more. **AGAINST A SECOND STM32G0 SERVING ON ITS OWN DMA
 CHANNELS THE WHOLE REGISTER VOCABULARY IS EXACT** - every code down to
 PCLK/2 = 32 MHz, eight frames byte-exact both ways at each, which is the
 same ceiling the self-link's own two peripherals reach on letter `i`
-with both ends engined. So the top rung is now ASKED (the letter walks
-it only when everything below it was exact - the ladder's job is to find
-a boundary, not to assume one) and this pairing has no boundary left
-inside the vocabulary.
+with both ends engined. The top rung is ASKED only when everything below
+it was exact (the ladder's job is to find a boundary, not to assume
+one), and this pairing has none left inside the vocabulary.
 
 **AND THE SAME LETTER PRINTS THE OTHER BOUNDARY BESIDE IT**, without
 claiming a verdict: a second climb sets `spilink::spare_polled_pump`,
@@ -492,23 +489,24 @@ every time**: an interrupt entry per frame sits right at the edge of
 letter: what a channel sustains and what an interrupt entry per frame
 sustains, a factor of two to four apart.
 
-**The arbiter's THIRD silicon, measured against a SECOND CHIP.** Letter
-`q` runs `SpiBus` (= `BusMaster`) over `SpiHost` with the SAM answering:
-four transactions queued from one dispatch come back in order, all
-`spi_ok`, and the 24 bytes on the wire are exactly what each request
+**The arbiter over a SECOND CHIP.** Letter `q` runs `SpiBus`
+(= `BusMaster`) over `SpiHost` with the SAM answering: four transactions
+queued from one dispatch come back in order, all `spi_ok`, and the 24
+bytes on the wire are exactly what each request
 lent - read back and reported by the other board, not by a second
 peripheral of this one. The four share ONE select window because the
 peer's `exchange` is one burst; the rejection past the pending depth,
 both sleep votes and the per-bus timeout with `recover()` follow, and
-the next four transactions run to `spi_ok` on the same bus AO. Not one
-line of `util/spi_bus.hpp`, `util/bus_master.hpp` or `kernel/` moved.
+the next four transactions run to `spi_ok` on the same bus AO.
+`util/spi_bus.hpp`, `util/bus_master.hpp` and `kernel/` are realized
+here exactly as they are written.
 
-**A SUITE LESSON WITH TEETH, and it is about the vector and not the
-wire**: collecting the peer's report is itself a command, and the
-command path re-inits the host - which hands SPI1's vector back to the
-bare pump. The arbiter's claim on that vector has to be RE-STATED
-afterwards or every later completion is consumed by the wrong branch and
-the arbiter answers `spi_timeout` on transactions that ran perfectly
+**THE VECTOR IS THE HAZARD HERE, NOT THE WIRE**: collecting the peer's
+report is itself a command, and the command path re-inits the host -
+which hands SPI1's vector back to the bare pump. The arbiter's claim on
+that vector has to be RE-STATED afterwards or every later completion is
+consumed by the wrong branch and the arbiter answers `spi_timeout` on
+transactions that ran perfectly
 (measured: four of them, at exactly the arbiter's limit each, with the
 engine's registers proven healthy).
 
@@ -543,20 +541,19 @@ settled HIGH in modes 1/2, and a fast falling edge coupled into the
 clock wire beside it dips it through VIL - a spurious falling edge, one
 sampling edge too many. In modes 0/3 the same edge lands on a LOW clock
 and nothing happens. The proof is the knob: ONE NOTCH DOWN, at HIGH, the
-slip is gone - **0 bursts of 120** - and the ladders are UNCHANGED (the
+slip is gone - **0 bursts of 120** - and the ladders are UNMOVED (the
 DMA serve exact to PCLK/2 = 32 MHz, the software pump the same 8..16
 MHz); medium costs the top rung (16 MHz) and low two (8 MHz), on both
-serves alike, which prices the trade the desk offers. What was excluded
-before the cause was found still stands: the peer's serve path (engines
-and pump slipped alike), the select arrangement (the pad, and SSM/SSI
-which is worse for a reason of its own - a client framing on the clock
-alone counts the host's CPOL settling edge and is then one bit early
-from frame zero), the enable timing and the rate. The SAM peer never
-showed it on the same E-side pads: its pads are slower. So the stm32g0
-`spi_peer` re-states its MISO pad at HIGH after every init that drives
-it, letter `o` is deterministic (38/38 twice including a cold flash),
-and letter `x` stays as the instrument that measures it. The DUT's own
-pads keep the driver's very-high: only the slave's edge lags the clock.
+serves alike, which prices the trade the desk offers. What the controls
+exclude: the peer's serve path (engines and pump slip alike), the select
+arrangement (the pad, and SSM/SSI which is worse for a reason of its
+own: a client framing on the clock alone counts the host's CPOL settling
+edge and is then one bit early from frame zero), the enable timing and
+the rate. The SAM peer does not show it on the same E-side pads: its
+pads are slower. So the stm32g0 `spi_peer` re-states its MISO pad at
+HIGH after every init that drives it, letter `o` is deterministic, and
+letter `x` stays as the instrument that measures it. The DUT's own pads
+keep the driver's very-high: only the slave's edge lags the clock.
 
 ## On the second silicon
 
@@ -575,7 +572,7 @@ where the G0B1's names two. The suite's roster and I2S-row verdicts are
 written as the reserve's own statements and hold both ways; the I2S
 letter itself is a self-link letter and skips on this desk.
 
-MEASURED WITH THE G071 AS THE HOST: the BR ladder holds to **PCLK/2 = 32
+Measured with the G071 as the host: the BR ladder holds to **PCLK/2 = 32
 MHz**, byte-exact both ways at every one of the eight codes, on the DMA
 engines AND on the software pump - the same ceiling the G0B1RE reaches
 hosting in the other direction, so neither die is the limit and the wire
@@ -615,18 +612,18 @@ take a write with SPE set** - and that every configuring verb refuses
 anyway, with SSI, CRCNEXT and FRXTH open; 35.5.9's disable procedure; and
 `spi_rate_for()` at all three rates of the ladder.
 
-MEASURED WITH THIS PART ON THE LINK: the BR ladder is exact to
+Measured with this part on the link: the BR ladder is exact to
 PCLK/2 = 32 MHz whichever board hosts (the SAM peer broke at PCLK/4);
 the peer's SOFTWARE pump - the RXNE reload, against its DMA engines - is
 where the dies differ, and THIS one is the fastest of the three: as the
 peer it holds to PCLK/2 = 32 MHz, the whole ladder, where the G0B1RE as
-the peer holds to 8 MHz and breaks at 16 and the G071RB was exact at
-8, marginal at 16 and slipped at 32 - printed without a verdict, because what it measures is
-each peer's own interrupt turnaround and not the wire, and why the
-three turnarounds differ on one core at one clock is not known; and
-letter `x`, the falling-edge slip instrument,
-scores **0 of 40 bursts** in each direction with the client's MISO pad
-at `PinSpeed::high`.
+the peer holds to 8 MHz and breaks at 16, and the G071RB is exact at 8,
+marginal at 16 and slips at 32 - printed without a verdict, because what
+it measures is each peer's own interrupt turnaround and not the wire,
+and why the three turnarounds differ on one core at one clock is not
+known; and letter `x`, the falling-edge slip instrument, scores **0 of
+40 bursts** in each direction with the client's MISO pad at
+`PinSpeed::high`.
 
 The console this suite runs on is **LPUART1** on PA2/PA3 at AF6, for the
 reason [clock.md](clock.md) gives: its subject moves the clock and this
@@ -643,7 +640,7 @@ must reach the registers itself:
   `SpiHost`'s Request is full-duplex only: a bidirectional device wants
   a direction turn in the middle of a transaction, which is a second
   Request shape and belongs with its first real user.
-- **no DMA engine slots on `SpiClient`.** The samc21 left them for a
+- **no DMA engine slots on `SpiClient`.** The SAM C21 leaves them for a
   device-shaped user and so does this; the bench drives the client's
   channels raw, which is what a peer does anyway.
 - **the tasks claim their pads at very-high speed with no knob.**
@@ -692,7 +689,7 @@ on every header of the pack, but no silicon has run it:
 - **the I2S asynchronous start (ASTRTEN)** and the PCM long-frame
   synchronization: written and read back, never staged.
 - **`SpiHost::prime()`** - the CPOL-flip-before-the-select verb. Its
-  reason is the samc21 bench's measured one-bit slip; the same slip has
+  reason is a one-bit slip measured on the SAM C21; the same slip has
   not been staged here. What HAS been measured on this target is its
   mirror image at the other end: a peer client that frames on the clock
   alone (SSM/SSI) counts a host's CPOL settling edge and is one bit

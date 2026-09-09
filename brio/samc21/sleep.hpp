@@ -41,18 +41,15 @@
  * ## THE TICK STANDS STILL IN STANDBY
  *
  * This is the fact that shapes how a brio program on this target may
- * sleep, and it does NOT travel from the AVR. There the kernel timebase
- * is the RTC's PIT on a 32 kHz oscillator, and it runs through every
- * sleep mode the part has. Here the timebase is SysTick, SysTick is
- * clocked from the CPU clock (samc21/ticker.hpp), and in standby the CPU
- * clock stops. So:
+ * sleep. The timebase is SysTick, SysTick is clocked from the CPU clock
+ * (samc21/ticker.hpp), and in standby the CPU clock stops. So:
  *
  *   KERNEL TIME STOPS FOR EXACTLY AS LONG AS THE STANDBY LASTS, and
  *   every armed time event matures LATE by that amount.
  *
  * TWO SITES ANSWER IT, and the choice is the application's:
  *
- *  - `SamSleepSite` keeps the v1 honest restriction: standby is
+ *  - `SamSleepSite` keeps the honest restriction: standby is
  *    legitimate when the kernel has NO armed time event
  *    (`TimeEvents<P>::ticks_to_next()` empty - nothing waiting,
  *    nothing late), and a deadline-less standby still under-reports
@@ -62,8 +59,8 @@
  *    wake placed on the next deadline, and the frozen span handed to
  *    `Ticker::advance()` at the first event after the wake - so a
  *    program with armed periodics sleeps deep and still meets them,
- *    and millis() stays honest whether or not anything was due. The
- *    power MODEL is untouched: everything fits inside arm()/disarm().
+ *    and millis() stays honest whether or not anything was due. It
+ *    asks nothing of the power model beyond arm()/disarm().
  *
  * IDLE is not affected: MCLK and GCLK0 keep running, so SysTick keeps
  * counting and time events mature on time.
@@ -140,11 +137,11 @@
  * ## The rest of the chapter's own answers
  *
  * The PM has NO interrupt, NO event, NO DMA connection and NO software
- * reset (19.5.4 is about the interrupt CONTROLLER, 19.6.6 and 19.6.7
- * say "Not applicable", 19.6.3.2 says "always enabled and can not be
- * reset"). Its registers are optionally PAC write-protected (19.5.7);
- * samc21/pac.hpp exists (mechanism only, per its own ruling) and nothing
- * here writes it - the protection is left as reset leaves it, off.
+ * reset (19.5.4 is about the interrupt CONTROLLER, 19.6.6 and 19.6.7 say
+ * "Not applicable", 19.6.3.2 says "always enabled and can not be reset").
+ * Its registers are optionally PAC write-protected (19.5.7);
+ * samc21/pac.hpp exists (mechanism only) and nothing here writes it - the
+ * protection is left as reset leaves it, off.
  *
  * ITS BUS CLOCK IS ONE-WAY. 19.5.2: "If this clock is disabled, it can
  * only be re-enabled by a system reset." `bus_clock(false)` is
@@ -153,9 +150,8 @@
  *
  * DEBUG CHANGES WHAT STANDBY IS. 19.5.6: with the CPU halted in debug
  * mode the PM keeps operating, and a standby requested while a debugger
- * is attached does NOT turn the power domains off. A sleep measured
- * under a debug session is not the sleep the silicon does on its own -
- * the AVR's chapter 13 says the same thing about its own OCD, and
+ * is attached does NOT turn the power domains off. A sleep measured with
+ * a debugger attached is not the sleep the silicon does on its own, and
  * tools/bench.py clears DHCSR.C_DEBUGEN at the end of every flash for
  * this reason among others.
  *
@@ -422,8 +418,8 @@ struct Pm {
  *
  * TWO THINGS TO READ BEFORE USING IT.
  *
- * THE NEVER-DEEPER RULE EARNS ITS KEEP HERE, unlike on AVR DA/DB where
- * the three rungs matched three modes exactly. This family's deepest
+ * THE NEVER-DEEPER RULE EARNS ITS KEEP HERE, because the ladder's rungs
+ * do not match this family's modes one for one. Its deepest
  * stop is STANDBY, so `deep` maps to it and `armed()` reports
  * `standby` - what the target really took, which is what the manager
  * records. An application asking for `deep` gets the deepest stop this
@@ -526,9 +522,10 @@ constexpr bool timed_sleep_config_valid(const TimedSleepConfig& c) {
  *    RTC count and the tick count. If the kernel has an armed time
  *    event (TimeEvents<P>::ticks_to_next()), a COMP0 alarm is placed on
  *    the deadline - rounded UP in RTC counts - and its interrupt armed:
- *    the CPU wakes WHEN NEEDED, not every tick (the AVR's PIT pays one
- *    wake per millisecond of every standby; this pays one per
- *    deadline). No deadline, no alarm - the resync below still runs, so
+ *    the CPU wakes WHEN NEEDED, not every tick: a periodic tick left
+ *    running through a standby would pay one wake per millisecond,
+ *    where this pays one per
+ *    deadline. No deadline, no alarm - the resync below still runs, so
  *    even a deadline-less standby keeps millis() honest.
  *  - disarm(): returns the alarm, then advances the ticker by the
  *    FROZEN span only: RTC-elapsed converted DOWN, minus what SysTick
@@ -671,11 +668,12 @@ struct SamTimedSleepSite {
      *
      * AND THE MODEL'S CONVENTION BECOMES LOAD-BEARING with this site:
      * util/power.hpp's file header says a wake path with nothing to say
-     * sends SleepRequested{none}. On the AVR, ignoring that is benign -
-     * the PIT tick keeps waking the machine. Here a woken program that
-     * idles again WITHOUT speaking to the manager re-enters the
-     * still-armed standby with no alarm behind it: after any wake,
-     * request again or send none. The suites demonstrate both.
+     * sends SleepRequested{none}. Where a periodic tick runs through the
+     * sleep, ignoring that is benign - the tick keeps waking the machine.
+     * Here a woken program that idles again WITHOUT speaking to the
+     * manager re-enters the still-armed standby with no alarm behind it:
+     * after any wake, request again or send none. The suites demonstrate
+     * both.
      */
     [[gnu::always_inline]] static void isr() {
         (void)Rtc::isr();

@@ -14,8 +14,8 @@
  *     series, die, revision and device-select - the number every errata
  *     row is indexed by. Board identity on this family comes free: this
  *     register plus the factory 128-bit serial samc21/nvm.hpp already
- *     reads (`DeviceSerial`) is a label no chip erase can remove, where
- *     an AVR-Dx board has to be GIVEN one by hand in its USERROW.
+ *     reads (`DeviceSerial`) is a label no chip erase can remove, so a
+ *     board on this family needs no identity written into it by hand.
  *  2. A HARDWARE CRC32 OVER ANY MEMORY THE BUS MATRIX REACHES. The
  *     engine walks flash or SRAM with no CPU in the loop and no code
  *     size spent on a table; the polynomial is the industry-standard
@@ -29,14 +29,13 @@
  *     documents and what the bench suite does.
  *
  * WHAT IS DELIBERATELY NOT HERE: CHIP ERASE. CTRL.CE erases the whole
- * flash array including the EEPROM emulation area and clears the
- * security bit; a firmware-callable verb for it would be a verb for
- * destroying the running program, and this framework's AVR half made
- * the same call about NVMCTRL's CHER (see docs/avrdx/nvm.md). The bit
- * is named in docs/samc21/dsu.md and not exposed.
+ * flash array including the EEPROM emulation area and clears the security
+ * bit; a firmware-callable verb for it would be a verb for destroying the
+ * running program. The bit is named in docs/samc21/dsu.md and not
+ * exposed.
  *
- * THE PROTECTION SURPRISE, and it is the first thing this driver had to
- * deal with. PAC.STATUSB's RESET VALUE IS 0x00000002 (11.7.11): the DSU
+ * THE PROTECTION SURPRISE. PAC.STATUSB's RESET VALUE IS 0x00000002
+ * (11.7.11): the DSU
  * comes out of reset ALREADY WRITE-PROTECTED, alone among the
  * peripherals of this device, and table 12-3's "Prot at Reset" column
  * says Y for this row and N for every other. So a bare store to
@@ -313,8 +312,7 @@ struct Dsu {
      * word count, i.e. a byte length, and what the field reads back is
      * the number of words. This verb takes WORDS and writes words x 4,
      * which the bench confirms by matching the engine's CRC32 against a
-     * software one over exactly that many words (test_samc_debug letter
-     * e).
+     * software one over exactly that many words (measured).
      */
     static void set_length_words(uint32_t words) {
         DSU_REGS->DSU_LENGTH = words << 2;

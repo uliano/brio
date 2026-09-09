@@ -628,7 +628,7 @@ struct DynamicClock {
                                       "the prescaler is what set() changes");
 #if defined(F_CPU)
     static_assert(false, "brio DynamicClock: F_CPU must not be defined with a "
-                         "runtime clock (build_unflags = -DF_CPU)");
+                         "runtime clock - the rate has one truth, Clock::hz");
 #endif
 
     static uint32_t hz() { return hz_; }

@@ -3,27 +3,24 @@
  *
  * The SAM C21 flash as a FlashMedia (util/nv_heap.hpp): the backends that
  * let the target-independent block allocator and the target-independent
- * value journal run on this silicon, and the second implementation of
- * that contract - the first one written against an architecture the
- * concept was not designed on.
+ * value journal run on this silicon.
  *
  * IT LIVES IN THE RWWEE ARRAY, and that choice is the whole design.
  *
  * This family has two programmable arrays: the 256 KB main array the CPU
  * executes from, and a dedicated 8 KB Read-While-Write EEPROM array at
  * 0x00400000. Writing or erasing the MAIN array stalls the AHB - every
- * instruction fetch with it - until the operation ends, exactly the way
- * an AVR page erase halts that CPU for its full 10 ms. Writing the RWWEE
+ * instruction fetch with it - until the operation ends. Writing the RWWEE
  * array stalls NOTHING: the main array can be read throughout (27.6.4.1),
  * so a program that stores a record keeps running while it is stored.
  *
- * That difference removes the AVR backend's hardest problem as a
- * side effect. There, the free flash of a linked image is two bands whose
- * inner edges are linker symbols moving with every build, and an image
- * that grows silently lands on stored blocks (which is why tools/bench.py
- * grew a preflight). The RWWEE array is not part of the link at all:
- * nothing the compiler emits can ever land in it, so the zone is a
- * CONSTANT - the whole array - and no linker symbol is read here.
+ * That difference also removes the hardest problem a backend inside the
+ * LINKED IMAGE has: its free flash is bands whose inner edges are
+ * linker symbols moving with every build, so an image that grows
+ * silently lands on stored blocks. The RWWEE array is not part of the
+ * link at all: nothing the compiler emits can ever land in it, so the
+ * zone is a CONSTANT - the whole array - and no linker symbol is read
+ * here.
  *
  * The price is size and speed: 8 KB rather than the tens of kilobytes a
  * main-array heap could reach, and reads that miss the cache because the
@@ -50,25 +47,24 @@
  *
  * THE GRANULARITIES ARE NOT THE SAME NUMBER, which is what the concept's
  * erase_size / write_cell split is for: here an erase takes down a ROW of
- * 256 bytes and a program writes a PAGE of 64. On the AVR they are 512
- * and 2. Code that says "page" for both is code that is wrong on one of
- * the two targets - and note that on THIS target "page" is the small one,
- * the opposite of the AVR's usage, which is the trap the split exists to
- * make harmless.
+ * 256 bytes and a program writes a PAGE of 64, so on THIS silicon "page"
+ * is the SMALL unit. Other targets spell the two words the other way
+ * round, which is why the concept names its units erase_size and
+ * write_cell and never "page": code that says "page" for both is code
+ * that is wrong on one target or another.
  *
  * ADDRESSES ARE ABSOLUTE. NvHeap works in flat byte addresses and derives
  * an erase-unit index from them, so the heap's `first_page` numbers here
  * start at 0x00400000 / 256 = 16384 rather than at 0 - which is exactly
  * why the index is a page number and not an offset.
  *
- * THE BUILD ID is a link-time constant, as on the AVR:
- * samc21/CMakeLists.txt passes -Wl,--defsym,__nvheap_build_id=<newest
- * source mtime> to every image. A wall-clock id would make every relink a
- * different image; the newest source timestamp keeps an unchanged tree
- * relinking to the same bytes. Unlike the AVR, reading it needs no
- * assembly: a pointer is 32 bits here, so the symbol's address IS the
- * value. It is recorded in every map version and NOTHING decides on it -
- * a block's validity is its checksum's business.
+ * THE BUILD ID is a link-time constant: samc21/CMakeLists.txt passes
+ * -Wl,--defsym,__nvheap_build_id=<newest source mtime> to every image. A
+ * wall-clock id would make every relink a different image; the newest
+ * source timestamp keeps an unchanged tree relinking to the same bytes.
+ * Reading it needs no assembly: a pointer is 32 bits here, so the
+ * symbol's address IS the value. It is recorded in every map version and
+ * NOTHING decides on it - a block's validity is its checksum's business.
  */
 
 #pragma once
@@ -121,11 +117,11 @@ struct RwweeFlash {
     static constexpr uint32_t flash_end = RwweePartition::heap_end;
     static constexpr uint8_t zone_count = 1;
 
-    /// The one zone: rows 0..27. Constant, unlike every zone on the AVR
-    /// side - nothing the linker places can reach in here, so there is
-    /// no image edge to round and no build that can move it. The heap
-    /// carves its own map home out of the top of this by itself, which
-    /// with the default two map pages is rows 26..27.
+    /// The one zone: rows 0..27, and CONSTANT - nothing the linker places
+    /// can reach in here, so there is no image edge to round and no build
+    /// that can move it. The heap carves its own map home out of the top
+    /// of this by itself, which with the default two map pages is rows
+    /// 26..27.
     static std::array<FlashZone, zone_count> zones() {
         return std::array<FlashZone, zone_count>{
             FlashZone{flash_end, Nvm::rwwee_base}};

@@ -27,10 +27,10 @@
 //   2  the twelve prescalers from the 24 MHz crystal: 24 .. 0.375 MHz,
 //      the console follows all of them;
 //   3  OSCHF manual tune at 16 MHz: -32, -16, 0, +16, +31 steps of
-//      nominal 0.4 %; bench (A5, scope): 14.56 / 15.22 / 15.97 / ~17.0 /
-//      17.96 MHz - about 0.28 %/step downward, 0.4 %/step upward; the
-//      console is retuned to the MEASURED rate at each step and keeps
-//      talking;
+//      nominal 0.4 %; measured on rev A5 with a scope: 14.56 / 15.22 /
+//      15.97 / ~17.0 / 17.96 MHz - about 0.28 %/step downward and
+//      0.4 %/step upward; the console is retuned to the MEASURED rate
+//      at each step and keeps talking;
 //   4  the 24 MHz crystal vs OSCHF at 24 MHz: same nominal, the scope
 //      tells the accuracy apart (crystal ppm, OSCHF %);
 //   5  OSC32K as the main clock: CLKOUT at ~32 kHz (+-10 %) for two
@@ -310,10 +310,10 @@ void t7_pll_status() {
           " XOSC32KS=", (st >> 3) & 1, " OSC32KS=", (st >> 2) & 1, " OSCHFS=", (st >> 1) & 1,
           " SOSC=", st & 1, crlf);
     verdict("EXTS set (crystal running)", (st & CLKCTRL_EXTS_bm) != 0);
-    // Bench finding: OSCHFS reads 0 while OSCHF is not the main clock and
-    // nobody requests it, RUNSTDBY notwithstanding (the status follows
-    // the request, like the register note says of the signal); it reads
-    // 1 whenever OSCHF is the main clock (test 4).
+    // MEASURED: OSCHFS reads 0 while OSCHF is not the main clock and
+    // nobody requests it, RUNSTDBY notwithstanding - the status follows
+    // the REQUEST, exactly as the register note says of the signal; it
+    // reads 1 whenever OSCHF is the main clock (test 4).
     print(serial, "  OSCHFS=", (st >> 1) & 1, " with OSCHF idle and RUNSTDBY on (finding: status follows the request)", crlf);
     verdict("not switching", (st & CLKCTRL_SOSC_bm) == 0);
     Oschf::run_standby(false);

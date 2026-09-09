@@ -5,17 +5,14 @@
  * carrying events from any of 95 generators to any of 47 users, with no
  * CPU in the path.
  *
- * THIS IS THE ONE PLACE WHERE THE AVR SHAPE DOES NOT TRANSFER, and the
- * difference is worth stating before any verb. On the AVR the event
- * system is a small fixed table: a channel is a typed thing, a generator
- * is a type, and legality is a compile-time question that
- * `avrdx/evsys.hpp` answers with per-generator types. Here it is an
- * ALLOCATOR - twelve identical channels, numeric generator and user
- * codes drawn from two tables ninety-five and forty-seven rows long,
- * and a per-channel generic clock. Reproducing the AVR's per-generator
- * types would mean 95 of them, and they would encode a table this
- * header has no business owning: which generator a peripheral offers is
- * that peripheral's driver's knowledge, and it should hand over a code.
+ * IT IS AN ALLOCATOR AND NOT A TYPED TABLE, and the difference is worth
+ * stating before any verb: twelve identical channels, numeric generator
+ * and user codes drawn from two tables ninety-five and forty-seven rows
+ * long, and a per-channel generic clock. A typed vocabulary - one type
+ * per generator, legality settled at compile time - would mean 95 of them
+ * here, and they would encode a table this header has no business owning:
+ * which generator a peripheral offers is that peripheral's driver's
+ * knowledge, and it should hand over a code.
  *
  * So this header owns the FABRIC and not the vocabulary. It moves
  * channels, users, paths and edges; a driver that generates events
@@ -70,8 +67,9 @@
  *  - 1.12.2 is NOT this silicon (E/G/J revisions B..E only).
  *
  * NOT BUILT (docs/samc21/evsys.md carries the list): the generator and
- * user TABLES, deliberately - see above; and SleepWalking, which needs
- * the power pass.
+ * user TABLES, deliberately - see above; and the channel INTERRUPT as a
+ * wake source (CHANNELn.RUNSTDBY is measured on the propagation path, a
+ * channel interrupt leaving a standby is not).
  */
 
 #pragma once

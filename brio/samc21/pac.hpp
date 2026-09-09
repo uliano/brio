@@ -13,7 +13,7 @@
  * "protect everything at boot" ceremony. The reasons are three and they
  * are worth stating, because a PAC driver invites all of them:
  *
- *  1. THE FRAMEWORK HAS NO USER YET. Nothing in brio turns protection
+ *  1. THE FRAMEWORK HAS NO USER. Nothing in brio turns protection
  *     on, and a guard type designed before its first caller would be
  *     designed against an imagined one. The shape a guard should take -
  *     scoped, reference-counted, per-peripheral, or a boot-time policy
@@ -35,11 +35,11 @@
  *     the house rule is never to state what is not enforced.
  *
  * So: a monostate that can set, clear and lock a peripheral's write
- * protection by the identifier the peripheral itself publishes, read
- * back the per-bridge status, and read and clear the four interrupt-flag
+ * protection by the identifier the peripheral itself publishes, read back
+ * the per-bridge status, and read and clear the four interrupt-flag
  * banks. Each driver publishes its own `pac_id` (samc21/tsens.hpp and
- * samc21/ccl.hpp did so before this file existed, for exactly the errata
- * below); this header owns the fabric and not the census.
+ * samc21/ccl.hpp do, for exactly the errata below); this header owns the
+ * fabric and not the census.
  *
  * WHAT THE SILICON DOES.
  *

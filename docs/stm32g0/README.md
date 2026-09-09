@@ -1,19 +1,15 @@
 # Target: STM32G0 (`stm32g0/`)
 
-The operational page for brio's third hardware target: an ARM
-Cortex-M0+ from the other big vendor (STM32G0B1RE on the bench, on an
-ST Nucleo-64), the second ARMv6-M family in the tree - and the target
-that proved, for the third time, that the kernel and util strata
-compile UNCHANGED on a new architecture: blink under time events and
-the full console over the board's own virtual COM port, with not one
-line of `kernel/` or `util/` touched.
+The operational page for brio's STM32G0 target: an ARM Cortex-M0+
+(STM32G0B1RE on the bench, on an ST Nucleo-64), an ARMv6-M family that
+shares the `armv6m/` core stratum with the SAM C21. `kernel/` and
+`util/` run here as written: time events pacing a pin, and the full
+console over the board's own virtual COM port.
 
-Peripheral documents live next to this page (`platform.md`,
-`clock.md`, `port.md`, `usart.md` - all PROVISIONAL, this is a
-bring-up); the documents of record are in
-[vendor/README.md](vendor/README.md) together with the errata pass
-and the bench chip's identity (silicon revision Z, DBGMCU_IDCODE read
-over SWD).
+Peripheral documents live next to this page, one per chapter; the
+documents of record are in [vendor/README.md](vendor/README.md)
+together with the errata pass and the bench chip's identity (silicon
+revision Z, DBGMCU_IDCODE read over SWD).
 
 ## Toolchain
 
@@ -22,11 +18,10 @@ same compiler, flags and linker discipline as the samc21 project
 (`stm32g0/cmake/toolchain-arm.cmake` is that file verbatim:
 `CMAKE_SYSTEM_NAME Generic`, `STATIC_LIBRARY` try-compile,
 `--specs=nano.specs -nostartfiles`, deliberately NO syscall stubs so
-an accidental `_sbrk`/`_write` fails the link). The `armv6m/` core
-stratum the naming rule calls for at the second ARM family is factored
-AFTER this bring-up, with both implementations in hand and a
-byte-identity gate on every samc21 image; until then `nvic.hpp` and
-`ticker.hpp` are the samc21 files' twins by discipline.
+an accidental `_sbrk`/`_write` fails the link). What is ARMv6-M and not
+ST lives in the `armv6m/` core stratum, so `nvic.hpp`, `ticker.hpp` and
+`delay.hpp` here are the device header plus that core file plus this
+family's own facts.
 
 The device headers are vendored: `third_party/cmsis-device-g0/`
 (ST's cmsis-device-g0 v1.4.5, every G0 part) and the shared
@@ -38,17 +33,17 @@ no device-specs machinery, so clangd needs no macro-delta feed.
 
 The bench board is an **ST Nucleo-G0B1RE** (MB1360): STM32G0B1RE
 (LQFP64, 512 KB dual-bank flash, 144 KB SRAM), silicon revision Z,
-running at **3.3 V**. Verified at the bench, each by its own
-experiment and not by the user manual: LD4 on **PA5** (driven over
-SWD before a line of firmware, then by `probe`), the ST-LINK virtual
-COM port on **USART2 PA2 (TX) / PA3 (RX), AF1** (the console answers
-through it), the CPU on **HSI16 through the PLL at 64 MHz**, and the **LSE
-32.768 kHz crystal fitted and running** (X2 is populated on this board:
-LSERDY rises and the period measures 32703 Hz against the core, which is
-the core's own 1 % trim and not the crystal's - [rtc.md](rtc.md)). NOT
-yet verified: the user button B1 on PC13, and the absence of an HSE
-crystal (X3 is not fitted by default and the ST-LINK's 8 MHz MCO reaches
-HSE only through solder bridges - the HSE root is unbuilt anyway).
+running at **3.3 V**. Verified at the bench, each by its own experiment
+and not by the user manual: LD4 on **PA5** (driven over SWD), the
+ST-LINK virtual COM port on **USART2 PA2 (TX) / PA3 (RX), AF1** (the
+console answers through it), the CPU on **HSI16 through the PLL at
+64 MHz**, and the **LSE 32.768 kHz crystal fitted and running** (X2 is
+populated on this board: LSERDY rises and the period measures 32703 Hz
+against the core, which is the core's own 1 % trim and not the
+crystal's - [rtc.md](rtc.md)). NOT yet verified: the user button B1 on
+PC13, and the absence of an HSE crystal (X3 is not fitted by default
+and the ST-LINK's 8 MHz MCO reaches HSE only through solder bridges -
+the HSE root is unbuilt anyway).
 
 `stm32g0/` is its own CMake project, a sibling and peer of `avrdx/`,
 `samc21/` and `test/`. Apps are auto-discovered from
@@ -152,9 +147,8 @@ and never a weaker one.
 | `test_stm32_journal` | 52 | - | the same |
 | `test_stm32_fdcan` | 96 | - | no FDCAN on this part ([fdcan.md](fdcan.md)) |
 
-Every score above was taken TWICE on the board it names, one of the two
-from a cold flash. The two bus suites run with the OTHER board as their
-peer, roles exchanged, on the same six wires.
+The two bus suites run with the OTHER board as their peer, roles
+exchanged, on the same six wires.
 
 WHAT THE PART HAS NOT GOT, all of it read off the header by the reserve:
 TIM4, USART5, USART6, LPUART2, I2C3, SPI3 (and with it SPI2's I2S), DMA2
@@ -163,11 +157,10 @@ GPIOE, the second flash bank, the EXTI's second-group TRIGGER registers,
 WKUP3, TAMP_IN3, PWR's PUCRE/PDCRE, and `RCC_CCIPR_I2C2SEL` - which is
 what takes I2C2's independent clock, its SMBus and its wake with it. Its
 USART3 is BASIC where the G0B1's is FULL, so it has one wake line fewer;
-its MCOSEL and MCOPRE are three bits rather than four. ONE PER-PART FACT
-THIS CAMPAIGN ADDED TO THE RESERVE: `tim_etrsel_has_mco()`, because
-RM0444 22.4.25's ETRSEL list gives codes 0100, 0101 and 0110 to the
-G0B1/G0C1 sales types alone and no TIM register says so
-([tim.md](tim.md)).
+its MCOSEL and MCOPRE are three bits rather than four. The ETRSEL list
+is a per-part fact of its own in the reserve, `tim_etrsel_has_mco()`,
+because RM0444 22.4.25 gives codes 0100, 0101 and 0110 to the G0B1/G0C1
+sales types alone and no TIM register says so ([tim.md](tim.md)).
 
 All three boards have their presets (`stm32g0b1re-*`, `stm32g071rb-*`,
 `stm32g031k8-*`), linker scripts, crts and `tools/bench.py` board types,
@@ -194,8 +187,7 @@ which case the ST-LINK's own mass-storage flasher is the way in
 (`tools/bench.py`'s `stlink_msd` programmer kind) and nothing can be
 halted or read over SWD until the replug ([../bench.md](../bench.md)).
 
-**FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT**, each twice and one of the
-two from a cold flash.
+**FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT.**
 
 | Suite | E | F | G | What skips on G, and why |
 |---|---|---|---|---|
@@ -221,14 +213,13 @@ board fits with the cuts named in its own suite: the largest is
 `test_stm32_serial` at **61928 bytes of 65536**, then `test_stm32_i2c`
 52676, `test_stm32_lptim` 50336 and `test_stm32_dma` 42392; the
 hungriest in RAM is `test_stm32_dma` at **6108 bytes**, which leaves the
-stack the 2 KB the campaign's rule reserves for it. One suite needed a
-real cut rather than the letters it loses anyway: `test_stm32_dma`
-halves its three memory-to-memory buffers (512 words to 256, every claim
-restated for the length that fits) and gives the console's two DMA
-channels back to the letters. `test_stm32_spi` compiles its eleven
-self-link letters out - a package fact, not a budget one - and comes to
-31104 bytes with the peer half in; `test_stm32_i2c` keeps every letter
-it has anywhere.
+stack the 2 KB reserved for it. One suite makes a real cut rather than
+losing letters: `test_stm32_dma` gives its three memory-to-memory
+buffers 256 words there instead of 512 (every claim restated for the
+length that fits) and gives the console's two DMA channels back to the
+letters. `test_stm32_spi` compiles its eleven self-link letters out - a
+package fact, not a budget one - and comes to 31104 bytes with the peer
+half in; `test_stm32_i2c` keeps every letter it has anywhere.
 
 **WHAT THE PART HAS NOT GOT**, all of it read off the header by the
 reserve: TIM4, TIM6, TIM7, TIM15, USART3..6, LPUART2, I2C3, SPI3, DMA2
@@ -240,10 +231,10 @@ entire second register group, WKUP3 and WKUP5, `RCC_CCIPR_I2C2SEL` and
 clock, its FIFO and its wake with it. And what the PACKAGE does not bond
 is a separate list the SUITES own, never the reserve: PB10..PB15,
 PC0..PC5, PC7, PC13, PD0..PD3, PF0 and PF1 (GPIOD is declared by the
-header and reaches no pin at all). ONE PER-PART FACT THIS HALF ADDED TO
-THE RESERVE: `ucpd_present(n)`, probed on SYSCFG's own dead-battery
-strobe bit, so a pad that will not follow its pull can be told from one
-that never had an Rd on it.
+header and reaches no pin at all). One per-part fact in the reserve
+covers that difference: `ucpd_present(n)`, probed on SYSCFG's own
+dead-battery strobe bit, so a pad that will not follow its pull can be
+told from one that never had an Rd on it.
 
 **Vector names across the boards.** The crt spells ST's own handler
 names, and a SHARED line's name changes with what shares it - USART2's
@@ -255,7 +246,7 @@ TIM6, TIM7, TIM16, TIM17, LPTIM1, LPTIM2, USART3, LPUART1, the DMA's
 upper line, the ADC) - `test/family_stm32g0/handlers.cpp` proves every
 one expands on every header and names the line the reserve's verb
 answers. A name outside that set on the wrong board lands in
-`Default_Handler`'s silent spin, the samc21 lesson.
+`Default_Handler`'s silent spin.
 
 ```bash
 (cd stm32g0 && cmake --preset stm32g0b1re-release)                      # configure (once, or after adding an app)
@@ -280,9 +271,9 @@ serial monitor, or pyserial, at 115200 8N1.
 Flashing goes through OpenOCD driving the Nucleo's on-board
 ST-LINK/V2.1: `interface/stlink.cfg` + `target/stm32g0x.cfg` (the
 stm32l4x flash driver underneath) + `program <app>.elf verify`, then
-`reset run` and a write of DHCSR that clears C_DEBUGEN - the samc21
-lesson, kept: a core left with halting debug enabled HALTS on a BKPT
-instead of faulting, and every `panic()` ends in one. The oss-cad-suite
+`reset run` and a write of DHCSR that clears C_DEBUGEN: a core left with
+halting debug enabled HALTS on a BKPT instead of faulting, and every
+`panic()` ends in one. The oss-cad-suite
 OpenOCD at `/sw/oss-cad-suite/bin/openocd` drives the ST-LINK
 (firmware V2J46M31) without incident; the probe carries a REAL USB
 serial, so `adapter serial` names it and the same serial names the
@@ -293,25 +284,25 @@ ONE SWD CAVEAT worth knowing: memory reads THROUGH THE HLA TRANSPORT
 WHILE THE CORE SLEEPS IN WFI ARE UNRELIABLE - a running console
 (WFI between events) answered `0xffffffb7` for FLASH_ACR and zeros
 for RCC_CR, values those registers cannot hold, while the same reads
-after `halt` were exact. Halt first, read, resume; the samc21 board
-(CMSIS-DAP) never showed this.
+after `halt` were exact. Halt first, read, resume; the CMSIS-DAP probe
+on the SAM C21 board does not do this.
 
-A SECOND SWD CAVEAT, and this one cost a campaign a false fact:
-`target/stm32g0x.cfg`'s examine-end hook writes `DBGMCU_CR.DBG_STOP |
-DBG_STANDBY` ("enable debug during low power modes"), and OpenOCD
-re-examines the target after every reset it issues, so the bits are
-back on the reset a `program` ends with whatever was cleared before it
-(measured: cleared to 0 while halted, read 6 again right after `reset
-run`). The register survives every reset but a power-on, and with
-DBG_STOP set the debug logic keeps HCLK - and SysTick - running inside
-a Stop, which cuts a Stop entered with the kernel tick armed from its
-full 250 ms to one tick. `tools/bench.py` therefore ends every G0
-flash with `reset halt`, a clear of DBGMCU_CR through its clock gate
-(the gate put back to its reset value) and a `resume`, so a board
-leaves the bench as a power-on would leave it; a cortex-debug session
-sets the bits again, and `Pwr::debug_in_stop()` ([pwr.md](pwr.md)) is
-how firmware tells. Both states are measured in `test_stm32_sleep`
-letter c.
+A SECOND SWD CAVEAT, and one that reads as a silicon fact until it is
+found: `target/stm32g0x.cfg`'s examine-end hook writes
+`DBGMCU_CR.DBG_STOP | DBG_STANDBY` ("enable debug during low power
+modes"), and OpenOCD re-examines the target after every reset it
+issues, so the bits are back on the reset a `program` ends with
+whatever was cleared before it (measured: cleared to 0 while halted,
+read 6 again right after `reset run`). The register survives every
+reset but a power-on, and with DBG_STOP set the debug logic keeps
+HCLK - and SysTick - running inside a Stop, which cuts a Stop entered
+with the kernel tick armed from its full 250 ms to one tick.
+`tools/bench.py` therefore ends every G0 flash with `reset halt`, a
+clear of DBGMCU_CR through its clock gate (the gate put back to its
+reset value) and a `resume`, so a board leaves the bench as a power-on
+would leave it; a cortex-debug session sets the bits again, and
+`Pwr::debug_in_stop()` ([pwr.md](pwr.md)) is how firmware tells. Both
+states are measured in `test_stm32_sleep` letter c.
 
 ## Debugging (cortex-debug + OpenOCD)
 
@@ -320,8 +311,8 @@ The launch config is "Debug STM32G0 (OpenOCD, Nucleo-G0B1RE)" in
 files, `adapter serial` through `openOCDPreConfigLaunchCommands`, and
 `svdPath` at `stm32g0/svd/STM32G0B1.svd`. CMake Tools' Active Folder
 must be `stm32g0/` and its launch target the app to debug. Not yet
-exercised at the bench (the samc21 entry is the proven twin; the light
-verification policy for mature tooling applies).
+exercised at the bench (mature tooling gets the light verification
+policy).
 
 ## Editor (clangd)
 

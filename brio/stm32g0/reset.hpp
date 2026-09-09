@@ -25,25 +25,24 @@
  *    reset flags are set by hardware and "cleared by setting the RMVF
  *    bit" - nothing else clears them, and 5.4.24 says the register is
  *    "reset upon system reset, except for reset flags that are only
- *    reset upon power reset". So this register is a HISTORY, the AVR's
- *    RSTFR habit and not the SAM's exclusive RCAUSE, and the verb is
- *    read-and-clear: `take_flags()`. Worse than a history: PINRSTF is
- *    a CATCH-ALL - 5.4.24 bit 26 sets it "when a reset from the
- *    PF2-NRST pin occurs OR when a system reset is triggered by any
- *    other source" - so a lone PINRSTF is the only reading that means
- *    "the pin", and every other source raises it alongside its own bit
- *    (measured: docs/stm32g0/reset.md). That is why this file offers no
- *    `cause()` enum: with an accumulating register and a catch-all bit,
- *    the cause is not a function of the register's value. An
+ *    reset upon power reset". So this register is a HISTORY and not a
+ *    single cause, and the verb is read-and-clear: `take_flags()`.
+ *    Worse than a history: PINRSTF is a CATCH-ALL - 5.4.24 bit 26 sets
+ *    it "when a reset from the PF2-NRST pin occurs OR when a system
+ *    reset is triggered by any other source" - so a lone PINRSTF is the
+ *    only reading that means "the pin", and every other source raises
+ *    it alongside its own bit (measured: docs/stm32g0/reset.md). That
+ *    is why this file offers no `cause()` enum: with an accumulating
+ *    register and a catch-all bit, the cause is not a function of the
+ *    register's value. An
  *    application clears the flags when it has read them, and what it
  *    sees at the next boot is the delta.
  *
  * 2. RCC_CSR IS A SHARED REGISTER, and the two halves have two owners.
  *    Bits 31..23 are this chapter's (the flags and RMVF); bits 1..0 are
  *    the clock tree's (LSION/LSIRDY) and belong to stm32g0/clock.hpp's
- *    `Rcc`, which is where the LSI verbs live - the samc21 precedent,
- *    where rtc.hpp never writes OSC32KCTRL's RTCCTRL. Every write here
- *    is a read-modify-write that preserves the other owner's bits.
+ *    `Rcc`, which is where the LSI verbs live. Every write here is a
+ *    read-modify-write that preserves the other owner's bits.
  *
  * 3. THE IWDG IS ON ANOTHER CLOCK, AND SOFTWARE CANNOT STOP IT - BUT A
  *    RESET CAN. It counts LSI (about 32 kHz, min 29.5 / max 34 kHz over
@@ -52,13 +51,13 @@
  *    28.3.1's "Once running, the IWDG cannot be stopped" is followed
  *    elsewhere in the manual by the four words that matter: "except
  *    upon a reset" (5.3's Stop and Standby summaries). MEASURED, and
- *    against the family lore as well as against the AVR's and the
- *    SAM's habits: a boot that follows an IWDG reset outlives its own
- *    time-out several times over with nothing refreshing anything, so
- *    the reset really does stop it and a program does NOT inherit a
- *    watchdog it must feed for ever. There is still no register bit
- *    that says whether it runs - and LSIRDY standing with LSION clear
- *    is NOT that bit, whatever 5.4.24's list of requestors invites: on
+ *    against the family lore: a boot that follows an IWDG reset
+ *    outlives its own time-out several times over with nothing
+ *    refreshing anything, so the reset really does stop it and a
+ *    program does NOT inherit a watchdog it must feed for ever. There
+ *    is still no register bit that says whether it runs - and LSIRDY
+ *    standing with LSION clear is NOT that bit, whatever 5.4.24's list
+ *    of requestors invites: on
  *    the bench board the RTC domain survives every system reset with
  *    RTCEN set and RTCSEL = LSI, so the oscillator is forced by
  *    something that is not a watchdog.
@@ -102,9 +101,9 @@
  *    WIN = 0 is a configuration in which no refresh is ever legal; the
  *    WWDG's refresh is legal only while the counter is at or below W
  *    and above 0x3F, so any W below 0x40 is the same trap. Both are
- *    refused by the config_valid() predicates rather than armed, the
- *    samc21 WdtConfig precedent (a caller that asked for a serviceable
- *    watchdog must not silently get an unserviceable one). Provoking a
+ *    refused by the config_valid() predicates rather than armed (a
+ *    caller that asked for a serviceable watchdog must not silently
+ *    get an unserviceable one). Provoking a
  *    reset ON PURPOSE has its own spelling on each: Iwdg::force_reset()
  *    refreshes into a closed window, Wwdg::force_reset() clears T6 with
  *    WDGA set (29.3.3's own note).
@@ -119,9 +118,9 @@
  * that decide the watchdogs' hardware/software mode and their behaviour
  * in Stop and Standby (IWDG_SW, IWDG_STOP, IWDG_STDBY, WWDG_SW,
  * nRST_STOP/STDBY/SHDW behind LPWRRSTF) - read-only facts here, because
- * writing FLASH_OPTR is the flash campaign's and a bad option byte
+ * writing FLASH_OPTR belongs to stm32g0/flash.hpp and a bad option byte
  * bricks a board; the NRST pin's three modes; and the PWR side of
- * PWRRSTF (BOR levels), which arrives with the sleep pass.
+ * PWRRSTF, the BOR levels, which are option bytes too.
  */
 
 #pragma once
@@ -343,8 +342,7 @@ struct Iwdg {
      * NOT INSTANTANEOUS and not [[noreturn]]: the refresh crosses into
      * the LSI domain, so the CPU executes whatever follows for a few
      * tens of microseconds. A caller that means to end here says so
-     * with a spin of its own - the samc21 Watchdog::force_reset()
-     * precedent, for the same reason.
+     * with a spin of its own.
      *
      * Requires a running watchdog: with the counter stopped there is
      * nothing to compare against a window.
@@ -491,8 +489,8 @@ struct Iwdg {
     /// RESET (5.2.17: a peripheral without its bus clock does not take
     /// one) - so a caller opens that gate first, exactly as it would
     /// for any other APB peripheral. And 40.10.3 says the register is
-    /// "not reset by system reset": whatever set it last - a debug
-    /// session, an earlier run of the program - is still what it holds
+    /// "not reset by system reset": whatever set it last - a debugger,
+    /// an earlier run of the program - is still what it holds
     /// at the next boot, so a program that cares must write it and not
     /// assume it.
     static bool debug_freeze() {
@@ -762,8 +760,8 @@ struct ResetReporter {
  *
  * The record survives because .noinit is NOLOAD and the crt neither
  * loads nor zeroes it - and because the magic word makes the claim
- * checkable rather than assumed, which matters here as much as on the
- * SAM: RM0444 promises nothing about SRAM across a reset, and this
+ * checkable rather than assumed: RM0444 promises nothing about SRAM
+ * across a reset, and this
  * family can additionally be told by option byte to raise an NMI on the
  * first read of a never-written word (stm32g0/platform.hpp says where).
  *

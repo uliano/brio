@@ -1,8 +1,7 @@
 // startup_samc21.cpp - vector table + reset path for the SAM C21, compiled
 // into EVERY image of this project (sam_add_app() lists it alongside the
-// app's own source - the samc21 analog of the AVR build's ivsel_boot.cpp
-// glue slot). No vendor ASF startup: this file and ld/samc21j18a.ld are the
-// whole crt.
+// app's own source). No vendor ASF startup: this file and
+// ld/samc21j18a.ld are the whole crt.
 //
 // The app-binds-the-vector rule, ARM edition: every handler below is a WEAK
 // alias for Default_Handler (a spin), and an app binds a vector by defining
@@ -10,7 +9,7 @@
 //
 //   extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 //
-// exactly as an AVR app writes ISR(RTC_PIT_vect) {...}. Vector names never
+// Vector names never
 // appear in portable code; the IRQ list is samc21j18a.h's IRQn enum
 // (SERCOM0..5 = 9..14, TCC0..2, TC0..4, ADC0/1, ... - 31 peripheral lines,
 // several sharing line 0).
@@ -19,7 +18,7 @@
 // zero .bss, run static constructors (walking .init_array itself - brio's
 // monostate types keep the list empty in practice, see the linker script),
 // call main(). It deliberately does NOT touch the clock: SysClock::init()
-// in main() owns the clock tree, same division of labor as on AVR.
+// in main() owns the clock tree.
 // .noinit is neither loaded nor zeroed, which is what lets the
 // PanicRecord breadcrumb survive a warm reset. Note what the silicon
 // does NOT promise: DS60001479M table 18-1 lists what each reset cause
@@ -87,8 +86,8 @@ __attribute__((weak)) void HardFault_Handler()
 // With -fno-exceptions libstdc++ compiles every throw site into a call to
 // abort(), std::__throw_bad_variant_access() among them - so every app
 // built on the AO kernel reaches it the moment the optimizer stops
-// proving that branch dead (-Os does; -Og does not, which is how this
-// surfaced). newlib's own abort() goes through raise()/_exit() and would
+// proving that branch dead (-Os does; -Og does not). newlib's own
+// abort() goes through raise()/_exit() and would
 // drag in the whole syscall stub set, defeating the deliberate "no
 // nosys.specs" rule in samc21/CMakeLists.txt - a rule worth keeping,
 // because it is what makes an accidental _sbrk or _write fail the link
@@ -97,8 +96,8 @@ __attribute__((weak)) void HardFault_Handler()
 // A spin, not a BKPT: on ARMv6-M a BKPT with no debugger attached
 // escalates to HardFault and the frame that got here is gone, while a
 // halt-and-spin leaves the whole call stack for the debugger to walk.
-// Routing this into the panic breadcrumb belongs with the reset/panic
-// pass, the samc21 analog of avrdx/reset.hpp.
+// This path does NOT write the panic breadcrumb (kernel/panic.hpp):
+// nothing routes abort() into it.
 [[noreturn]] void abort()
 {
     for (;;) {}
@@ -132,8 +131,7 @@ __attribute__((weak)) void HardFault_Handler()
 // below already agree with it. The CMSIS-classic spellings NMI_Handler
 // and SVC_Handler are NOT used here: an app that binds a name this table
 // does not reference compiles and links happily and its exception lands
-// in Default_Handler, which on this target is a silent spin - found at
-// the bench, by an NMI that fired exactly as designed into nothing.
+// in Default_Handler, which on this target is a silent spin.
 void NonMaskableInt_Handler() __attribute__((weak, alias("Default_Handler")));
 void SVCall_Handler()     __attribute__((weak, alias("Default_Handler")));
 void PendSV_Handler()     __attribute__((weak, alias("Default_Handler")));

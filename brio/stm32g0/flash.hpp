@@ -3,14 +3,12 @@
  *
  * The embedded flash memory and its interface (RM0444 ch. 3): the read
  * access latency the clock task must set before it raises HCLK, the two
- * CPU-side accelerators, and - since the FLASH campaign - the whole of
- * the program/erase engine, the option bytes as a READ-ONLY decode, the
- * ECC status and the one interrupt.
+ * CPU-side accelerators, the program/erase engine, the option bytes as
+ * a READ-ONLY decode, the ECC status and the one interrupt.
  *
- * WHY THE WAIT STATES LIVE HERE AND NOT IN clock.hpp: they are the flash
- * interface's register, and the samc21 stratum paid for the other choice
- * (clock.hpp squatted on NVMCTRL's RWS until the NVM campaign took it
- * back). The clock task calls in; this file owns the register.
+ * WHY THE WAIT STATES LIVE HERE AND NOT IN clock.hpp: they are the
+ * flash interface's register. The clock task calls in; this file owns
+ * the register.
  *
  * WHAT THE CHAPTER IS, in the shape the code takes:
  *
@@ -62,8 +60,8 @@
  *    on purpose: RDP Level 2 is irreversible, and ES0548 2.2.9 says an
  *    option-byte MISMATCH can leave the device with BOOT_LOCK set and
  *    the debug interface gone - a brick, from one interrupted write.
- *    Provisioning belongs to a tool over SWD, the way fuses do on the
- *    other two targets. FlashOptions decodes what is there.
+ *    Provisioning belongs to a tool over SWD. FlashOptions decodes what
+ *    is there.
  *
  *  - THE OTP AREA (3.3.1) is 1 Kbyte of double words that can be written
  *    ONCE and never erased - not even back to zero. It is memory-mapped
@@ -88,14 +86,14 @@
  *    writing option bytes at all.
  *
  * Facts that shape the wait-state code (RM0444 3.3.4, 3.7.1):
- *  - table 13: at VCORE Range 1 (the reset range, and the only one this
- *    stratum runs in) HCLK <= 24 MHz needs 0 wait states, <= 48 needs 1,
- *    <= 64 needs 2; Range 2 halves the ceilings (8 / 16 MHz) and forbids
- *    2 WS. Out of reset HCLK is 16 MHz at 0 WS.
- *  - the ORDER is the same rule as on every target: wait states go UP
- *    before a frequency rise and DOWN after a fall, and a new LATENCY
- *    value is in force only when it READS BACK - 3.7.1 says so in one
- *    sentence, and the samc21 side proved the cost of not waiting.
+ *  - table 13: at VCORE Range 1 (the reset range) HCLK <= 24 MHz needs
+ *    0 wait states, <= 48 needs 1, <= 64 needs 2; Range 2 halves the
+ *    ceilings (8 / 16 MHz) and forbids 2 WS. Out of reset HCLK is
+ *    16 MHz at 0 WS.
+ *  - the ORDER: wait states go UP before a frequency rise and DOWN
+ *    after a fall, and a new LATENCY value is in force only when it
+ *    READS BACK - 3.7.1 says so in one sentence, and a rise taken
+ *    before the readback runs the core off a flash that cannot keep up.
  *  - ICEN (instruction cache) is set at reset, PRFTEN (prefetch) is
  *    clear. This stratum leaves both at their reset values: erratum
  *    ES0548 2.2.10 (see above) makes PRFTEN a decision to take
@@ -149,8 +147,8 @@ struct FlashWaitStates {
         return 2;
     }
 
-    /// Table 13, Range 2 column - declared for the day a low-power
-    /// clock task runs the core in Range 2; nothing calls it yet.
+    /// Table 13, Range 2 column: what a clock task running the core in
+    /// PowerRegime::range2 asks for (stm32g0/clock.hpp).
     static constexpr uint8_t for_hz_range2(uint32_t hz) {
         return hz <= 8'000'000UL ? 0 : 1;
     }
@@ -215,10 +213,8 @@ inline uint32_t flash_size_kb() {
  * every part of the family.
  *
  * It sits beside flash_size_kb() because it is the same READ-ONLY
- * section of the system memory area and the same chapter; the samc21
- * stratum's DeviceSerial is the shape (nvm.hpp there, this file here -
- * each stratum keeps its identity read next to the memory verbs that
- * reach the area).
+ * section of the system memory area and the same chapter: a stratum
+ * keeps its identity read next to the memory verbs that reach the area.
  *
  * WHAT IT IS FOR: a board that has no label to be given (there is no
  * USERROW here) still has a NAME, and word[0] in hex is what the bench
@@ -526,8 +522,7 @@ struct Flash {
      * Only erase_page(), mass_erase(), program(), fast_program_row() and
      * provoke() publish it. The bookkeeping waits inside unlock(),
      * lock() and interrupts() do NOT - they return on their first turn
-     * and would otherwise wipe the measurement the caller just made,
-     * which is exactly what the first version of this did.
+     * and would otherwise wipe the measurement the caller just made.
      */
     static uint32_t last_wait_turns() { return op_turns_; }
 
@@ -606,11 +601,11 @@ struct Flash {
      * Erase a whole bank (3.3.7's "mass erase", which on a dual-bank part
      * is per bank: MER1 and MER2 are separate bits).
      *
-     * EXPOSED AND NEVER CALLED IN THIS TREE. On this board bank 1 holds
-     * the running image, so a mass erase of it is a way to end a
-     * session; bank 2 is the storage attic and erasing it wholesale is
-     * slower than erasing the pages that are actually used. It is here
-     * because the chapter has it and a bootloader would want it.
+     * EXPOSED AND NEVER CALLED IN THIS TREE. Bank 1 holds the running
+     * image, so a mass erase of it ends the program; bank 2 is the
+     * storage attic and erasing it wholesale is slower than erasing the
+     * pages that are actually used. It is here because the chapter has
+     * it and a bootloader would want it.
      */
     static uint32_t mass_erase(FlashBank bank) {
         const uint32_t bit = bank == FlashBank::bank2 ? flash_cr_mass_erase2
@@ -1046,10 +1041,10 @@ struct FlashPcropArea {
  * Everything here is a plain read of an option register the option
  * loader filled at power-on reset. There is no setter anywhere, and that
  * is the design: RDP Level 2 is one-way, ES0548 2.2.9 turns an
- * interrupted option write into a device with no debug port, and the
- * other two targets already put this class of change in a TOOL over the
- * programming interface rather than in firmware (tools/bench.py's
- * `fuses` verb). What firmware needs is to KNOW - to cross-check the
+ * interrupted option write into a device with no debug port, and this
+ * class of change belongs to a TOOL over the programming interface
+ * rather than to firmware (tools/bench.py's `fuses` verb). What
+ * firmware needs is to KNOW - to cross-check the
  * watchdog options against reset.hpp's registers, to see the BOR level,
  * to prove the bank mapping the storage backend assumes.
  */

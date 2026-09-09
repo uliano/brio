@@ -59,9 +59,9 @@ using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock;
 
 // ---------------------------------------------------------------------------
-// The token letter c lives in (the test_samc_platform machinery)
+// The token letter c lives in: a reboot-spanning marker
 //
-// INLINE and in .noinit for the two reasons that suite gives: the
+// INLINE and in .noinit for two reasons: the
 // section must survive the crt, and gcc gives an inline variable with a
 // section attribute a COMDAT group where a plain one gets none. Table
 // 18-1 lists no SRAM row for any reset source, so every read is guarded
@@ -111,7 +111,7 @@ uint8_t boot_dsu_statusb = 0;
 ResetCause boot_cause = ResetCause::unknown;
 
 // ---------------------------------------------------------------------------
-// The cycle stopwatch (the test_samc_dma / test_samc_ccl technique)
+// The cycle stopwatch
 // ---------------------------------------------------------------------------
 uint32_t cycles_now() {
     const uint32_t reload = SysTick->LOAD;
@@ -651,8 +651,8 @@ void tb_pac_map() {
     // ERRATUM 1.19.1 (TSENS) AND ERRATUM 1.7.4 (CCL), THE TWO POLES OF
     // THIS CHAPTER, measured side by side against the map above.
     //
-    // 1.19.1: a write to a PAC-protected TSENS.CTRLB is not functional -
-    // and test_samc_tsens letter p found it dropped in COMPLETE SILENCE.
+    // 1.19.1: a write to a PAC-protected TSENS.CTRLB is not functional,
+    // and it is dropped in COMPLETE SILENCE - no flag at all.
     // 43.5.8 lists CTRLB among the registers PAC protection does not
     // cover, so by the chapter that write should land and flag nothing.
     // TSENS.CTRLA is in the map above and FLAGS, so this is the same
@@ -842,10 +842,10 @@ void tc_resume() {
 // DSU letter d - board identity
 // =============================================================================
 //
-// THE OPERATIONAL DELIVERABLE. tools/bench_boards.py records board C's
-// factory 128-bit die serial and its DSU DID, and until this letter
-// existed the comment said so in as many words: "recorded, NOT yet
-// checked". These four words are that record; the verdict is the check.
+// THE OPERATIONAL DELIVERABLE. tools/bench_boards.py records each
+// board's factory 128-bit die serial and its DSU DID; these four words
+// are that record for the board this image is built for, and the
+// verdict is the check that the chip in hand is that board.
 constexpr uint32_t manifest_serial[4] = {
     0xF9E78960UL, 0x51574841UL, 0x59202020UL, 0xFF160321UL,
 };
@@ -912,8 +912,8 @@ void td_identity() {
 
 /// The reference: table-free, bit at a time, reflected polynomial
 /// 0xEDB88320, initial value and final complement as the standard CRC-32
-/// defines them. util/crc.hpp is CRC-16 and stays untouched - a one-off
-/// reference belongs in the suite that needs it.
+/// defines them. util/crc.hpp is CRC-16 and is not what this needs: a
+/// one-off reference belongs in the suite that needs it.
 uint32_t sw_crc32_update(uint32_t crc, uint8_t byte) {
     crc ^= byte;
     for (uint8_t i = 0; i < 8u; ++i) {
@@ -1409,7 +1409,7 @@ void tg_divas_math() {
 // LOOPS - the loop with the operation and an otherwise identical loop
 // with a cheap operation in its place - because a single division is a
 // handful of cycles and the stopwatch's own read costs more than that
-// (the lesson test_samc_dac wrote down).
+// - so a single measurement would be mostly instrument.
 //
 // The SysTick interrupt runs inside the measured windows, at one entry
 // per millisecond; at 48 MHz that is well under a tenth of a per cent
@@ -1565,9 +1565,7 @@ void th_divas_cost() {
         // number (2080 centicycles measured), so an ordering comparison
         // between them is a coin flip - the stopwatch's own noise, a
         // SysTick entry landing in one window and not the other, decides
-        // it. The first version wrote `large >= small` and failed one run
-        // in three, which is the latent-suite-bug shape this project has
-        // been bitten by before.
+        // it. An ordering assertion there fails about one run in three.
         const uint32_t cs = centicycles(small, base_small);
         const uint32_t cl = centicycles(large, base_large);
         const uint32_t diff = cl > cs ? cl - cs : cs - cl;

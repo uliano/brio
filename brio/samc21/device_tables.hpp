@@ -1650,9 +1650,8 @@ constexpr uint8_t tsens_start_user() {
 
 /// The PAC peripheral identifier (PAC.WRCTRL.PERID). Erratum 1.19.1 is
 /// about this number: with write protection set for it, TSENS.CTRLB
-/// writes stop working although 43.5.8 lists CTRLB as unprotectable.
-/// There is no PAC driver in this stratum yet; the id is published so
-/// the pass that writes one inherits the fact.
+/// writes stop working although 43.5.8 lists CTRLB as unprotectable. The
+/// id is published here; samc21/pac.hpp is what takes it.
 constexpr uint16_t tsens_pac_id() {
 #ifdef ID_TSENS
     return ID_TSENS;

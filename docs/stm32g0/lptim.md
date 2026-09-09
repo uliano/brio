@@ -66,8 +66,8 @@ one input channel - but the device header declares `CFGR.ENC`,
 `ISR.UP/DOWN` and `CFGR2.IN2SEL` once, for the struct both instances
 share, so `LPTIM2->CFGR |= LPTIM_CFGR_ENC` compiles and writes a bit
 26.7.4 marks Reserved there. What an instance IS therefore comes from
-the manual, stated with its citation in `device_tables.hpp` - the
-`tim.hpp` geometry precedent - and every verb naming a missing feature
+the manual, stated with its citation in `device_tables.hpp`, where
+`tim.hpp`'s geometry lives too, and every verb naming a missing feature
 refuses.
 
 **The trigger multiplexer's fifth row is not the same signal on the two
@@ -231,7 +231,7 @@ before anything rests on them.
 
 **A pad handed to an LPTIM INPUT function still follows its own pull.**
 PB5, PB6 and PB7 walk between the rails under AF5 exactly as they do as
-plain inputs, and so do PC0 and PC3 under AF2. (The SAM found that a
+plain inputs, and so do PC0 and PC3 under AF2. (On the SAM C21 a
 DRIVING peripheral function takes the output driver and the pull with
 it; an INPUT function does not, and that is what makes this whole
 chapter measurable with no wire.)
@@ -239,7 +239,7 @@ chapter measurable with no wire.)
 **All four kernel clocks drive the counter**, each inside its own band:
 LSE 32740 counts a second against the crystal's 32768 (the RTC judging
 the LPTIM on the same crystal - a consistency check, not a frequency),
-LSI 32660 against the 32586 the platform, tim and rtc suites saw, HSI16
+LSI 32660 against the 32586 the platform, tim and rtc suites measure, HSI16
 125210 x 128 and PCLK 501040 x 128 against 64 MHz.
 
 **26.4.13's and 26.4.7's latencies are REAL KERNEL CLOCKS, not APB
@@ -248,26 +248,25 @@ ones.** On LSE, `enable()` plus the first ARR write to ARROK costs
 two steps on PCLK cost 2 us and 1 us.
 
 **26.4.11's write handshake, in CPU cycles - a number the chapter never
-gives**: on an LSE kernel clock a CMP write reaches CMPOK in about 4600
-to 6000 cycles at 64 MHz (72..93 us, two to three LSE periods) and an
-ARR write in about 5800; on PCLK both cost 131..136 cycles. This is what
-sizes the sleep site's minimum alarm distance. **AND THE LATENCY SCALES
-WITH THE PRESCALER** (test_stm32_tickless letter x): the same CMP write
-lands in 2.0..2.8 ms at prescaler /32 - two to three PRESCALED counts,
-not two to three kernel clocks - so "a few LSE periods" is a fact of
-the undivided counter only, and a compare placed three counts out at
-/32 is missed for a whole lap. The same letter measured WHERE THE MATCH
-FIRES: CMPM rises at the count edge AFTER equality, CMP + 1, at every
-distance tried (4, 5, 6, 10, 40 counts), and a compare that lands on
-top of its own equality fires at CMP + 2. Both facts are what the
+gives**: on an LSE kernel clock at prescaler /1 a CMP write reaches
+CMPOK in about 4600 to 6000 cycles at 64 MHz (72..93 us, two to three
+LSE periods) and an ARR write in about 5800; on PCLK both cost 131..136
+cycles. This is what sizes the sleep site's minimum alarm distance.
+**The latency is two to three counts of the PRESCALED clock, not of the
+kernel clock**: the same CMP write lands in 2.0..2.8 ms at prescaler
+/32 (`test_stm32_tickless` letter x), so a compare placed three counts
+out at /32 is missed for a whole lap. The same letter says WHERE THE
+MATCH FIRES: CMPM rises at the count edge AFTER equality, CMP + 1, at
+every distance tried (4, 5, 6, 10, 40 counts), and a compare that lands
+on top of its own equality fires at CMP + 2. Both facts are what the
 tickless timebase is built on (the counter undivided, the compare at
-the deadline's first count less one, a six-count floor); the sleep
-site's own "+1 count for the phase" rule already absorbed the first
-of them without naming it. **A compare equal to ARR matches** like any
-other value (letter b: CMP = 0xFFFF for a lap, one CMPM).
+the deadline's first count less one, a six-count floor), and the sleep
+site's own "+1 count for the phase" rule absorbs the first of them.
+**A compare equal to ARR matches** like any other value (letter b:
+CMP = 0xFFFF for a lap, one CMPM).
 
-**A FORBIDDEN WRITE IS NOT ONE THING ON THIS FAMILY** (the analog
-campaign's finding, met again). 26.7.4 says CFGR "must only be modified
+**A FORBIDDEN WRITE IS NOT ONE THING ON THIS FAMILY.**
+26.7.4 says CFGR "must only be modified
 when the LPTIM is disabled" - and a CFGR store made while the block is
 ENABLED LANDS: the register reads back what was written. What the
 chapter forbids is what the COUNTER then does with it, not the store.
@@ -404,16 +403,16 @@ re-entry.
 where the counter said it would: a compare placed 512 counts ahead on
 LSE/32 woke the core after 503.6 ms of wall from Stop 0 and 503.5 ms
 from Stop 1, against 500.0 ms predicted, with exactly one interrupt each
-time. THE ORDER MATTERS AND COST A MEASUREMENT ITS MEANING: CMP comes
-out of reset at ZERO, so a counter started before the compare is placed
-matches it on its very first tick and spends the interrupt before the
-sleep. The compare is placed first, here and in the sleep site.
+time. THE ORDER MATTERS: CMP comes out of reset at ZERO, so a counter
+started before the compare is placed matches it on its very first tick
+and spends the interrupt before the sleep. The compare is placed
+first, here and in the sleep site.
 
 ### LPTIM2 (letter `j`)
 
 The second instance is the same `LPTIM_TypeDef` at another address and
 the manual's tables say it is not the same peripheral. Every asymmetry
-above is now measured on silicon rather than only stated:
+above is measured on silicon:
 
 - **its own three pads, and they are on another port and another
   function**: PC0 = LPTIM2_IN1, PC3 = LPTIM2_ETR and PD6 = LPTIM2_OUT,
@@ -447,10 +446,10 @@ above is now measured on silicon rather than only stated:
 
 ## On the second silicon
 
-`test_stm32_lptim` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
-0x2000) and scores **82/82**, every letter and every verdict the G0B1RE
-gives. Both instances, both clocks, the waveform, the encoder, the
-filters, the DMAMUX trigger and the two errata legs behave identically.
+`test_stm32_lptim` runs whole on the Nucleo-G071RB (DEV_ID 0x460,
+REV_ID 0x2000): every letter and every verdict the G0B1RE gives. Both
+instances, both clocks, the waveform, the encoder, the filters, the
+DMAMUX trigger and the two errata legs behave identically.
 ONE COMPILE-TIME STATEMENT MOVES WITH THE PART: `lptim_ext_trig5` is
 COMP3_OUT on LPTIM1, and a part with no third comparator has no such
 signal, so `lptim_config_valid(1, {.trigger = comp3_out})` is FALSE there
@@ -461,15 +460,15 @@ G0B1's 2.8.1 and 2.8.2, and both are answered the same way.
 
 ## On the third silicon
 
-`test_stm32_lptim` scores **78 of 82** on the Nucleo-G031K8 (DEV_ID
-0x466, REV_ID 0x1003). The four not claimed are each a skip by name,
+On the Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003) four of
+`test_stm32_lptim`'s 82 verdicts are not claimed, each a skip by name,
 and all four are the PART's: two comparator routes - IN1SEL = COMP1_OUT
 and the comparator OR - and the comparator row of the trigger table,
 because **this part has no COMP at all**, so the type cannot even be
 named and those legs are compiled out; and the "one vector, two owners"
 leg, which needs the TIM7 this part has not got (below). The crystal
 runs on this board and every LSE row is measured, folded into the same
-verdicts it shares on E: the kernel-clock census reads the **LSE at
+verdicts as on the G0B1RE: the kernel-clock census reads the **LSE at
 32740 counts a second**, the LSI at 31430 (against a 32586 nominal, 35
 per mille - the slowest die of the desk), HSI16/128 and PCLK/128 at
 125240 and 501010; the Stop letter reads 7434 LSE counts across a 226
@@ -483,8 +482,8 @@ not; LPTIM2's is shared with TIM7 or is LPTIM2's own - so letter `j`'s
 vector verdict is the reserve's derivation itself: `lptim_irq(2)` is not
 `lptim_irq(1)`, and it equals `tim_irq(7)` exactly where there is a TIM7.
 The suite reaches both handlers through `BRIO_STM32G0_LPTIM1_HANDLER`
-and `BRIO_STM32G0_LPTIM2_HANDLER`, which is not decoration: bound by the
-G0B1's own names this image would have been DEAD on this part, both
+and `BRIO_STM32G0_LPTIM2_HANDLER`, which is not decoration: an image
+bound to the G0B1's own handler names is DEAD on this part, both
 vectors unbound.
 
 **LPTIM2'S THREE PADS ARE A PACKAGE QUESTION**: PD6/PC0/PC3 at AF2 on

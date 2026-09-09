@@ -217,8 +217,8 @@ Driver gaps - features of ch. 13 not built:
 
 - **Chip erase.** CTRL.CE erases the whole flash array including the
   EEPROM emulation area and clears the security bit. A firmware-callable
-  verb for it would be a verb for destroying the running program; the AVR
-  half of this framework made the same call about NVMCTRL's CHER.
+  verb for it would be a verb for destroying the running program;
+  `avrdx/nvm.hpp` leaves NVMCTRL's CHER unexposed for the same reason.
 - **Everything that is a probe's business rather than the CPU's**: the
   DAP security filter, cold- and hot-plugging as procedures, programming
   through the AHB-AP, and the external address range at 0x100..0x1FFF.

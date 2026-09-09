@@ -41,11 +41,10 @@ struct SamPlatform {
     /// Entered with interrupts MASKED and nothing to do: sleep until the
     /// next interrupt.
     ///
-    /// WFI FIRST, UNMASK AFTER. On Cortex-M a pending interrupt wakes
-    /// WFI even with PRIMASK set - the handler simply does not run until
+    /// WFI FIRST, UNMASK AFTER. On Cortex-M a pending interrupt wakes WFI
+    /// even with PRIMASK set - the handler simply does not run until
     /// PRIMASK clears. So sleeping before unmasking closes the
-    /// lost-wakeup window by construction, and it closes it more simply
-    /// than AVR's sei-then-sleep pairing: an interrupt that becomes
+    /// lost-wakeup window by construction: an interrupt that becomes
     /// pending between the caller's queue check and the WFI does not put
     /// the core to sleep at all.
     ///
@@ -92,12 +91,11 @@ struct SamPlatform {
     ///
     /// CAVEAT, ARMv6-M. Unlike v7-M, this core cannot ask whether a
     /// debugger is attached (DHCSR is debugger-access-only), so BKPT
-    /// cannot be made conditional the way the AVR BREAK instruction is a
-    /// NOP without an active OCD: with no debugger halted on it, this
-    /// escalates to HardFault_Handler - which the startup file provides
-    /// as a distinct spin loop precisely so the wreck is legible in a
-    /// backtrace. Documented rather than guessed around; the breadcrumb
-    /// -then-reset story belongs to the reset/panic pass.
+    /// cannot be made conditional on one being present: with no debugger
+    /// halted on it, this escalates to HardFault_Handler - which the
+    /// startup file provides as a distinct spin loop precisely so the
+    /// wreck is legible in a backtrace. Documented rather than guessed
+    /// around; the breadcrumb-then-reset story is samc21/reset.hpp's.
     static void break_here() { __BKPT(0); }
 
     static uint32_t now() { return Ticker::ticks(); }
@@ -111,20 +109,19 @@ struct SamPlatform {
 
     /// Panic breadcrumb in .noinit: the linker script marks the section
     /// NOLOAD and startup neither loads nor zeroes it, so the record
-    /// survives a warm reset and can be reported at the next boot.
-    /// SRAM survival is promised NOWHERE: table 18-1 lists what each
-    /// reset cause resets and no row of it mentions SRAM, for any
-    /// source including power-on - exactly the AVR situation. Hence
-    /// take_panic_record()'s magic word: cold RAM is what makes that
-    /// check necessary, not merely prudent.
+    /// survives a warm reset and can be reported at the next boot. SRAM
+    /// survival is promised NOWHERE: table 18-1 lists what each reset
+    /// cause resets and no row of it mentions SRAM, for any source
+    /// including power-on. Hence take_panic_record()'s magic word: cold
+    /// RAM is what makes that check necessary, not merely prudent.
     static PanicRecord& panic_record() { return panic_record_; }
 
 private:
     // NOTE: gcc 16 emits the COMDAT section for an inline variable with a
     // custom section attribute as `"awG"` WITHOUT the group name, and gas
     // warns "group name for SHF_GROUP not specified". Harmless (the symbol
-    // lands in .noinit, weak dedup works) and identical on the AVR side -
-    // the same candidate upstream bug report, now seen on two back ends.
+    // lands in .noinit, weak dedup works) and not specific to this back
+    // end - it appears on others too, so it is a candidate gcc bug.
     [[gnu::section(".noinit")]] static inline PanicRecord panic_record_;
 };
 

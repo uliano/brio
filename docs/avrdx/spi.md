@@ -21,8 +21,8 @@ DS80000882C (2.10.1). Three items shape the code:
   NON-FUNCTIONAL there (rev. A4/A5; fixed in B0). The 48-pin device
   headers still list it, with MOSI on PB4 and MISO on PB5 and no SCK or
   SS position at all - so the driver refuses it on every 48-pin part of
-  both families, at compile time and at run time. This is the first
-  place in `avrdx/` where an erratum beats the device header.
+  both families, at compile time and at run time. Here an erratum beats
+  the device header.
 - **DA 2.10.1, SSD with the pinless route**: with PORTMUX.SPIROUTE at
   NONE the Client Select line must be disabled (CTRLB.SSD = 1) or Host
   mode does not survive. It is listed for every DA revision and not at

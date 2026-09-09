@@ -1,23 +1,21 @@
-// blink - the first brio-kernel firmware on the STM32G0: two active
-// objects talking.
+// blink - two active objects talking.
 //
-// Blinker toggles LD4 on PA5, driven by its own periodic time event;
+// Blinker toggles the user LED, driven by its own periodic time event;
 // Supervisor cycles the blink period (500 -> 250 -> 100 ms) every 3
 // seconds by POSTING a SetPeriod command to the Blinker - the canonical
 // AO-to-AO addressed message. No delay loops anywhere: between events
 // the CPU is in WFI sleep, woken by the SysTick tick.
 //
-// This app is a PORT of the AVR and SAM projects' blink.cpp and its
-// point is what did NOT change, for the THIRD time: the two AOs, their
-// events, their queues and every kernel and util header below them
-// compile untouched. Only the target-glue lines differ - the clock type
-// (the PLL at 64 MHz here), the pin, the platform, the vector binding.
+// Everything above the target glue is portable: the two AOs, their
+// events, their queues and every kernel and util header below them.
+// Only the glue lines are this target's - the clock type (the PLL at
+// 64 MHz here), the pin, the platform, the vector binding.
 //
 // Wiring: none - the user LED is on the board: LD4 on PA5 on the
 // Nucleo-64s (G0B1RE, G071RB), LD3 on PC6 on the Nucleo-32 (G031K8). The
-// part selects the pin because on this desk the part IS the board (one
-// Nucleo per part - stm32g0/CMakeLists.txt); a board file would own this
-// line on a desk with two boards of one part.
+// part selects the pin because one Nucleo carries one part
+// (stm32g0/CMakeLists.txt); a board file would own this line where two
+// boards carry the same part.
 //
 // build: boards = g0b1re,g071rb,g031k8
 

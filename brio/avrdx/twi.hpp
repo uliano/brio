@@ -15,18 +15,26 @@
  *  two ISR bodies (one per vector), and release().
  *
  *  TASKS - what an application names:
- *    TwiHost<n, route>    the transfer ENGINE: one Request = ONE bus
+ *    I2cHost<n, route>    the transfer ENGINE: one Request = ONE bus
  *                         tenure (write / read / write-then-read with a
  *                         repeated START / probe), the byte pump under
  *                         the host interrupt. Driven by util/i2c_bus.hpp
  *                         (arbitration and replies).
- *    TwiClient<n, route, on_dual_pins>
+ *    I2cClient<n, route, on_dual_pins>
  *                         the other end: the address-match space, the
  *                         S1..S4 protocol surface as verbs, a polled
  *                         surface and the ISR body.
  *  Host and client of ONE instance may run together - COMBINED mode
  *  (same pins) or DUAL mode (the client on the route's second pin pair).
  *  That is a first-class configuration here, not an accident.
+ *
+ *  THE TWO NAMES ARE DELIBERATE. The resource is named for the
+ *  chapter - this silicon calls the peripheral a TWI - and the tasks
+ *  for the bus they speak. I2cHost and I2cClient are spelled the same
+ *  on every target, so an application reads unchanged when it moves;
+ *  the resource stays in its own silicon's words, where a datasheet
+ *  in hand is what a reader needs. docs/design/i2c-bus.md holds the
+ *  contract the tasks implement.
  *
  * Facts that shape the code (29.3, 29.5, errata DS80000915F 2.15.1/
  * 2.15.2 and DS80000882C 2.14.1/2.14.2/2.14.3):
@@ -54,9 +62,11 @@
  *  - recover() and unstick() fix DIFFERENT things and neither replaces
  *    the other: recover() puts this PERIPHERAL back into a known state,
  *    unstick() bit-bangs the WIRE free of a client that is holding SDA
- *    low (the classic nine-clocks-and-a-STOP remedy). The policy above
- *    them - noticing a stuck transaction at all - is the bus AO's and is
- *    not built (design/i2c-bus.md);
+ *    low (the classic nine-clocks-and-a-STOP remedy). Noticing a stuck
+ *    TRANSACTION is the bus AO's: util/bus_master.hpp's per-bus
+ *    timeout_ticks answers the requester bus_timeout and calls
+ *    recover() in its place. Noticing a stuck WIRE, and deciding to
+ *    spend unstick() on it, stays the application's (design/i2c-bus.md);
  *      * DA 2.14.2 (every DA rev., DA only): the SDAHOLD 50 ns and
  *        300 ns SELECTIONS are swapped in the silicon. TwiSdaHold names
  *        TRUE nanoseconds and twi_sdahold_bits() swaps the encoding on
@@ -76,7 +86,7 @@
  *    performs the ENABLE cycle and re-declares the bus idle;
  *  - FMPEN is what Fast-mode Plus means to the PINS (x10 drive instead
  *    of a slew limit, 29.3.3.1); the divider knows nothing about it. So
- *    TwiSpeed::fast_plus_1m and CTRLA.FMPEN are checked against each
+ *    I2cSpeed::fast_plus_1m and CTRLA.FMPEN are checked against each
  *    other by twi_config_valid: asking for 1 MHz with FMPEN off is
  *    refused rather than silently run on slew-limited pads;
  *  - CLK_PER must be at least four times f_SCL for the bus-error
@@ -283,16 +293,16 @@ enum class TwiBusState : uint8_t { unknown = 0, idle = 1, owner = 2, busy = 3 };
 /// The three bus speed classes of this peripheral. Fast-mode Plus needs
 /// CTRLA.FMPEN as well - it is what changes the PADS (x10 drive instead
 /// of the slew limit, 29.3.3.1), the divider knows nothing about it.
-enum class TwiSpeed : uint8_t {
+enum class I2cSpeed : uint8_t {
     standard_100k,   ///< Sm, up to 100 kHz
     fast_400k,       ///< Fm, up to 400 kHz
     fast_plus_1m,    ///< Fm+, up to 1 MHz - requires FMPEN
 };
 
-constexpr uint32_t twi_scl_hz(TwiSpeed s) {
+constexpr uint32_t twi_scl_hz(I2cSpeed s) {
     switch (s) {
-        case TwiSpeed::standard_100k: return 100'000u;
-        case TwiSpeed::fast_400k: return 400'000u;
+        case I2cSpeed::standard_100k: return 100'000u;
+        case I2cSpeed::fast_400k: return 400'000u;
         default: return 1'000'000u;
     }
 }
@@ -302,10 +312,10 @@ constexpr uint32_t twi_scl_hz(TwiSpeed s) {
 /// with stiff pull-ups, which makes the real SCL run a little ABOVE the
 /// value this budget predicts - measure it, do not assume it
 /// (twi_scl_hz_at() takes the rise time as an argument for that reason).
-constexpr uint32_t twi_rise_budget_ns(TwiSpeed s) {
+constexpr uint32_t twi_rise_budget_ns(I2cSpeed s) {
     switch (s) {
-        case TwiSpeed::standard_100k: return 1000u;
-        case TwiSpeed::fast_400k: return 300u;
+        case I2cSpeed::standard_100k: return 1000u;
+        case I2cSpeed::fast_400k: return 300u;
         default: return 120u;
     }
 }
@@ -317,25 +327,25 @@ constexpr uint32_t twi_rise_budget_ns(TwiSpeed s) {
 /// period lands below the mode's floor by exactly tOF, which the bench
 /// measures. Fast-mode Plus drives the pads ten times harder, and its
 /// budget is correspondingly smaller.
-constexpr uint32_t twi_fall_budget_ns(TwiSpeed s) {
+constexpr uint32_t twi_fall_budget_ns(I2cSpeed s) {
     switch (s) {
-        case TwiSpeed::standard_100k: return 300u;
-        case TwiSpeed::fast_400k: return 300u;
+        case I2cSpeed::standard_100k: return 300u;
+        case I2cSpeed::fast_400k: return 300u;
         default: return 120u;
     }
 }
 
 /// The specified minimum SCL low time of the mode (29.3.2.2.1 step 3).
-constexpr uint32_t twi_low_min_ns(TwiSpeed s) {
+constexpr uint32_t twi_low_min_ns(I2cSpeed s) {
     switch (s) {
-        case TwiSpeed::standard_100k: return 4700u;
-        case TwiSpeed::fast_400k: return 1300u;
+        case I2cSpeed::standard_100k: return 4700u;
+        case I2cSpeed::fast_400k: return 1300u;
         default: return 500u;
     }
 }
 
 /// Does this speed require Fast-mode Plus pads?
-constexpr bool twi_needs_fm_plus(TwiSpeed s) { return s == TwiSpeed::fast_plus_1m; }
+constexpr bool twi_needs_fm_plus(I2cSpeed s) { return s == I2cSpeed::fast_plus_1m; }
 
 /**
  * MBAUD for a speed at a peripheral clock - the chapter's own two-step
@@ -357,7 +367,7 @@ constexpr bool twi_needs_fm_plus(TwiSpeed s) { return s == TwiSpeed::fast_plus_1
  *
  * Empty when even BAUD = 255 cannot reach the speed at this clock.
  */
-constexpr std::optional<uint8_t> twi_baud_for(uint32_t clk_hz, TwiSpeed s,
+constexpr std::optional<uint8_t> twi_baud_for(uint32_t clk_hz, I2cSpeed s,
                                               uint32_t rise_ns = 0, uint32_t fall_ns = 0) {
     if (clk_hz == 0) return {};
     if (rise_ns == 0) rise_ns = twi_rise_budget_ns(s);
@@ -403,7 +413,7 @@ constexpr uint32_t twi_scl_hz_at(uint32_t clk_hz, uint8_t baud, uint32_t t_rise_
 
 /// CLK_PER must be at least four times f_SCL for the bus error detector
 /// (29.5.6) and the client Stop interrupt (29.5.10) to work.
-constexpr bool twi_clock_ok(uint32_t clk_hz, TwiSpeed s) {
+constexpr bool twi_clock_ok(uint32_t clk_hz, I2cSpeed s) {
     return clk_hz >= 4u * twi_scl_hz(s);
 }
 
@@ -426,7 +436,7 @@ struct TwiConfig {
 
     // MCTRLA / MBAUD.
     bool host = true;
-    TwiSpeed speed = TwiSpeed::standard_100k;
+    I2cSpeed speed = I2cSpeed::standard_100k;
     /// The bus's own rise and fall times, in nanoseconds; 0 = charge the
     /// mode's specification maximum. They enter equations 29-3 and 29-5
     /// and nothing else - see twi_baud_for().
@@ -1012,9 +1022,9 @@ public:
     /// baud arithmetic reads it). init() does it itself; the half that
     /// joins an already-running instance uses this.
     static void note_clock(uint32_t hz) { clk_per_hz_ = hz; }
-    static bool clock_ok(TwiSpeed s) { return twi_clock_ok(clk_per_hz_, s); }
+    static bool clock_ok(I2cSpeed s) { return twi_clock_ok(clk_per_hz_, s); }
     /// The speed the last set_speed()/init() programmed.
-    static TwiSpeed speed() { return speed_; }
+    static I2cSpeed speed() { return speed_; }
 
     /// Reprogram MBAUD (and FMPEN with it) for a speed at the peripheral
     /// clock last seen. False when the speed cannot be reached, or needs
@@ -1030,7 +1040,7 @@ public:
     static uint16_t rise_ns() { return rise_ns_; }
     static uint16_t fall_ns() { return fall_ns_; }
 
-    static bool set_speed(TwiSpeed s) {
+    static bool set_speed(I2cSpeed s) {
         const auto b = twi_baud_for(clk_per_hz_, s, rise_ns_, fall_ns_);
         if (!b) return false;
         const bool want_fmp = twi_needs_fm_plus(s);
@@ -1152,7 +1162,7 @@ private:
     }
 
     static inline TwiRoute route_ = TwiRoute::def;
-    static inline TwiSpeed speed_ = TwiSpeed::standard_100k;
+    static inline I2cSpeed speed_ = I2cSpeed::standard_100k;
     static inline uint32_t clk_per_hz_ = 0;
     static inline uint16_t rise_ns_ = 0;   ///< 0 = the mode's specification maximum
     static inline uint16_t fall_ns_ = 0;
@@ -1161,7 +1171,7 @@ private:
 // ---- tasks ------------------------------------------------------------------
 
 /*
- * TwiHost<n, route>
+ * I2cHost<n, route>
  *
  * The transfer ENGINE: the target-side half of the I2C stack, driven by
  * util/i2c_bus.hpp (the BusMaster arbiter, which owns arbitration and
@@ -1198,26 +1208,27 @@ private:
  * CHANGE costs an ENABLE cycle and a force-idle - paid at start(), only
  * when the speed actually moves, and never per byte.
  *
- * NOT covered (noted, not built): a stuck-bus WATCHDOG - the mechanical
- * remedy is Twi<n>::unstick() (and this task's `unstick()` below), but
- * noticing that a transaction is stuck and deciding to call it is a
- * policy for the bus AO, which has no per-request timeout yet. Also not
- * covered: 10-bit addressing.
+ * A stuck TRANSACTION is the bus AO's to notice: util/bus_master.hpp's
+ * timeout_ticks answers the requester bus_timeout in its place and calls
+ * recover() below. A stuck WIRE is a different fault and the remedy is
+ * Twi<n>::unstick() (and this task's `unstick()`), which nothing calls
+ * on its own: which devices to free, and when, is the application's
+ * (design/i2c-bus.md). Not covered: 10-bit addressing.
  *
  * ISR wiring (app glue, as usual):
  *   ISR(TWI0_TWIM_vect) {
- *       if (TwiHw::isr()) { brio::post<I2c>(brio::TransferDone{TwiHw::status()}); }
+ *       if (I2cHw::isr()) { brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
  *   }
  */
 template <uint8_t n, TwiRoute route = TwiRoute::def>
-class TwiHost {
+class I2cHost {
     using T = Twi<n>;
     static_assert(twi_route_exists(n, route),
                   "this package does not bond this TWI route (TWI1 ALT2 needs 48 "
                   "pins; TWI1 itself needs 32)");
 
 public:
-    TwiHost() = delete;
+    I2cHost() = delete;
 
     using Resource = T;
     static constexpr TwiRoute pin_route = route;
@@ -1234,7 +1245,7 @@ public:
         Borrowed<uint8_t, Lease::reply> rx;
         uint8_t rx_len;
         ReplyTo<I2cDone> reply;
-        TwiSpeed speed = TwiSpeed::standard_100k;
+        I2cSpeed speed = I2cSpeed::standard_100k;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
 
@@ -1242,7 +1253,7 @@ public:
     /// speed. The SMBus knobs live here because they are properties of
     /// the WIRE, not of one transaction.
     struct Options {
-        TwiSpeed speed = TwiSpeed::standard_100k;   ///< the speed init() programs
+        I2cSpeed speed = I2cSpeed::standard_100k;   ///< the speed init() programs
         /// The rise and fall times of THIS bus in nanoseconds; 0 charges
         /// the mode's specification maximum, which is what a driver that
         /// knows nothing about the wiring must assume. A stiff bus that
@@ -1270,8 +1281,8 @@ public:
      */
     template <typename Clock>
     static bool init(Clock clock, Options o = {}) {
-        static_assert(clock_follows<Clock, TwiHost>(),
-                      "this TwiHost is initialized with a DynamicClock that does not "
+        static_assert(clock_follows<Clock, I2cHost>(),
+                      "this I2cHost is initialized with a DynamicClock that does not "
                       "list it among its Users: MBAUD would go stale on a clock change");
         if constexpr (!available) {
             (void)clock;
@@ -1330,7 +1341,7 @@ public:
     /// whose rise time is `t_rise_ns` (0 = the divider's own limit).
     static uint32_t actual_scl_hz(uint32_t t_rise_ns = 0) { return T::actual_scl_hz(t_rise_ns); }
     static uint8_t baud() { return T::baud(); }
-    static TwiSpeed speed() { return T::speed(); }
+    static I2cSpeed speed() { return T::speed(); }
     /// CLK_PER >= 4 x f_SCL, the condition the bus error detector needs.
     static bool clock_ok() { return T::clock_ok(T::speed()); }
 
@@ -1365,9 +1376,9 @@ public:
     static uint8_t status() { return status_; }
 
     /**
-     * @brief TWI host interrupt body - call from ISR(TWIn_TWIM_vect).
-     * @return true when the transaction just completed (STOP issued or
-     * bus lost): the edge on which the glue posts TransferDone.
+     * TWI host interrupt body - call from ISR(TWIn_TWIM_vect). Returns
+     * true when the transaction just completed (STOP issued or bus
+     * lost): the edge on which the glue posts TransferDone.
      */
     [[gnu::always_inline]] static bool isr() {
         const auto st = T::take_host();
@@ -1457,7 +1468,7 @@ private:
 };
 
 /*
- * TwiClient<n, route, on_dual_pins>
+ * I2cClient<n, route, on_dual_pins>
  *
  * The other end of the wire (29.3.2.3): the host sets the pace, this
  * side answers. The protocol is four cases and this task is their verbs:
@@ -1487,7 +1498,7 @@ private:
  *   ISR(TWI0_TWIS_vect) { const auto s = Client::isr(); ... }
  */
 template <uint8_t n, TwiRoute route = TwiRoute::def, bool on_dual_pins = false>
-class TwiClient {
+class I2cClient {
     using T = Twi<n>;
     static_assert(twi_route_exists(n, route),
                   "this package does not bond this TWI route (TWI1 ALT2 needs 48 "
@@ -1498,7 +1509,7 @@ class TwiClient {
                   "for PB2/PB3 and TWI1 ALT1/ALT2 need 64 for PB6/PB7");
 
 public:
-    TwiClient() = delete;
+    I2cClient() = delete;
 
     using Resource = T;
     static constexpr TwiRoute pin_route = route;
@@ -1538,8 +1549,8 @@ public:
     /// host shares. False when the package cannot bond the pins.
     template <typename Clock>
     static bool init(Clock clock, Options o) {
-        static_assert(clock_follows<Clock, TwiClient>(),
-                      "this TwiClient is initialized with a DynamicClock that does "
+        static_assert(clock_follows<Clock, I2cClient>(),
+                      "this I2cClient is initialized with a DynamicClock that does "
                       "not list it among its Users: the CLK_PER >= 4 x f_SCL "
                       "readback would go stale on a clock change");
         if constexpr (!available) {
@@ -1714,7 +1725,7 @@ private:
     static inline bool smart_ = false;
 };
 
-static_assert(ClockUser<TwiHost<0>>);
-static_assert(ClockUser<TwiClient<0>>);
+static_assert(ClockUser<I2cHost<0>>);
+static_assert(ClockUser<I2cClient<0>>);
 
 } // namespace brio

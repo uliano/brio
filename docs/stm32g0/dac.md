@@ -65,10 +65,9 @@ because only the owner knows what its stream was.
 
 **The wave generators need a trigger.** WAVEx is "only used if TENx = 1"
 (16.7.1), so `dac_channel_config_valid()` refuses noise or triangle
-without one rather than quietly doing nothing - the samc21 `dac.hpp`
-ruling on dithering, reached again from another chapter. MAMPx is
-2^(code+1) - 1 in both its readings (an LFSR mask and a triangle
-amplitude), saturating at 4095 above code 11.
+without one rather than quietly doing nothing. MAMPx is 2^(code+1) - 1
+in both its readings (an LFSR mask and a triangle amplitude),
+saturating at 4095 above code 11.
 
 **The trigger table has holes.** Table 85 assigns dac_chx_trg1, 2, 3,
 5, 6, 8, 11, 12 and 13 (TIM1/TIM2/TIM3/TIM6/TIM7/TIM15 TRGO, the two
@@ -129,24 +128,23 @@ span nearly the whole reference - at the price of driving nothing.
 **The three data formats are PLACEMENTS of one 12-bit datum** (16.4.4):
 DHR12R1 = 2048, DHR12L1 = 0x8000 and DHR8R1 = 128 all put 2048 in DOR.
 
-**LD4 is not a load the DAC can feel, and that was a surprise.** Both
-channels run at once, one on the free PA4 and one on PA5 = LD4, and the
-two agree to **5 mV at every code** across the range - the worst
-difference is at code 1024, not at the top where a conducting LED would
-droop the buffer. PA5 also follows a 40 kohm internal pull between the
-rails exactly as the free pads do. So whatever drives LD4 on this board
-is high-impedance seen from the pin, and the obvious guess - a diode and
-a series resistor to ground - is wrong. A DAC-driven brightness works
-either way, and it is the one thing in this suite a human can see.
+**LD4 is not a load the DAC can feel.** Both channels run at once, one
+on the free PA4 and one on PA5 = LD4, and the two agree to **5 mV at
+every code** across the range - the worst difference is at code 1024,
+not at the top where a conducting LED would droop the buffer. PA5 also
+follows a 40 kohm internal pull between the rails exactly as the free
+pads do. So whatever drives LD4 on this board is high-impedance seen
+from the pin, and the obvious guess - a diode and a series resistor to
+ground - is wrong. A DAC-driven brightness works either way, and it is
+the one thing in this suite a human can see.
 
 **One trigger, both converters, no CPU:** the chain is described in
 [adc.md](adc.md)'s bench findings - TIM6's TRGO starting the DAC and the
 ADC on the same edge, a `DmaLoopEngine` playing a 16-entry table into
 DHR12R1 and a `DmaPingPongEngine` draining ADC_DR, with zero samples off
-the table over six blocks and every seam stepping by exactly 8. The one
-DAC-side lesson it paid for: **the launch block is out of phase by
-construction**, because 16.4.8's rule makes the first datum the CPU's
-and not the table's.
+the table over six blocks and every seam stepping by exactly 8. On the
+DAC side, **the launch block is out of phase by construction**, because
+16.4.8's rule makes the first datum the CPU's and not the table's.
 
 ### The wave generators, the calibration and sample-and-hold (letter `o`)
 
@@ -171,20 +169,18 @@ low at trim 0 and crosses at **14**, where this die's FACTORY trim is
 in an unbuffered mode is REFUSED, where 16.4.12 says it has no effect at
 all.
 
-**SAMPLE-AND-HOLD WITHOUT LSI DOES NOT FAIL - IT DEGRADES IN SILENCE,
-and `dac.hpp`'s own comment had it backwards.** dac_hold_ck is LSI
-(table 85) and this driver deliberately does not start it; the comment
-used to say a caller who asks for the mode with LSI stopped "gets a
-channel that never samples". Measured with LSIRDY read CLEAR: the pad
-carries the value to within a count, exactly as the plain buffered mode
-does; the times land; and **BWST never stands, at either state of the
-clock**. So there is no bit an application can read to tell an armed
-sample-and-hold from a degraded one - only the RCC knows. With LSI
-running the mode samples and holds (the pad still carrying its value a
-whole hold time later with nothing written in between), and that is
-indistinguishable from the failure, which is the finding. What this desk
-cannot say is the thing the mode exists for: 16.4.6 sells it as a power
-saving, and that is a current measurement with no meter here.
+**SAMPLE-AND-HOLD WITHOUT LSI DOES NOT FAIL - IT DEGRADES IN SILENCE.**
+dac_hold_ck is LSI (table 85) and this driver deliberately does not
+start it. Measured with LSIRDY read CLEAR: the pad carries the value to
+within a count, exactly as the plain buffered mode does; the times land;
+and **BWST never stands, at either state of the clock**. So there is no
+bit an application can read to tell an armed sample-and-hold from a
+degraded one - only the RCC knows. With LSI running the mode samples and
+holds (the pad still carrying its value a whole hold time later with
+nothing written in between), and that is indistinguishable from the
+failure. What this desk cannot say is the thing the mode exists for:
+16.4.6 sells it as a power saving, and that is a current measurement
+with no meter here.
 
 ### The DAC as a comparator threshold (`test_stm32_analog` letter `m`)
 
@@ -194,7 +190,7 @@ what receives it. Measured against a free pad settled at about 1.22 V:
 VALUE reads 1 with the DAC at code 0 and 0 at 4095, and a binary search
 locates the crossing to one LSB. Channel 2 goes the same way as the
 upper limit of a window comparator built from both channels at once, so
-**both internal connections are now on silicon** and neither costs a
+**both internal connections work on silicon** and neither costs a
 pad. The comparator side of the story, including what this arrangement
 can and cannot measure about the comparator itself, is in
 [comp.md](comp.md).
@@ -207,18 +203,19 @@ can and cannot measure about the comparator itself, is in
   ADC_IN4); both LPTIM outputs, which are waveforms rather than strobes
   and are started, allowed one edge and stopped; and **EXTI 9 through a
   pull-walked PC9**, the one row of the multiplexer that is a PAD, with
-  the line's port selected in the EXTI and its sense rising (PB9 until
-  the desk's I2C self-link put a pull-up on it - [../bench.md](../bench.md)).
-- **The DMA underrun, staged and caught**: a converter asking for a DMA
-  with NO channel armed at all raises DMAUDR on the trigger after the
-  first, and the flag is clear before. It is write-one-to-clear and
-  comes down. With DMAUDRIE set and the NVIC line open the same
-  starvation reaches the vector the DAC shares with TIM6 and LPTIM1,
-  once per unserved trigger (nine calls over a 900 us window at
-  10 kHz). **The flag has to be read with the interrupt OFF** - a
-  handler that serves it clears it, and the first version of this leg
-  read zero and eighteen handler calls, which is the same fact seen
-  from the wrong side.
+  the line's port selected in the EXTI and its sense rising - PC9 and
+  not PB9, which the desk's I2C self-link holds up
+  ([../bench.md](../bench.md)).
+- **The DMA underrun, staged**: a converter asking for a DMA with NO
+  channel armed at all raises DMAUDR on the trigger after the first,
+  and the flag is clear before. It is write-one-to-clear and comes
+  down. With DMAUDRIE set and the NVIC line open the same starvation
+  reaches the vector the DAC shares with TIM6 and LPTIM1, once per
+  unserved trigger (nine calls over a 900 us window at 10 kHz). **The
+  flag has to be read with the interrupt OFF** - a handler that serves
+  it clears it, so read with the interrupt armed the flag is zero and
+  the evidence is the handler count instead (eighteen calls, the same
+  fact seen from the wrong side).
 
 ## On the second silicon
 
@@ -227,23 +224,23 @@ can and cannot measure about the comparator itself, is in
 four data placements, both outputs, the wave generators, sample-and-hold,
 the user trim and the DMA underrun.
 
-**ES0418 2.7.1 IS THIS PART'S OWN ITEM AND IT DID NOT BITE**: "writing a
+**ES0418 2.7.1 is this part's own item and it does not bite**: "writing a
 value different from 000 to the DAC channel MODE bitfield before
 performing data initialization causes the corresponding DAC channel
 analog output to be invalid", present on both revisions with a
 workaround. `configure()` writes MCR.MODE with the channel disabled and
 BEFORE any data write, which is the erratum's exact condition, and the
 suite's letters - which read the DAC back through the ADC on PA4 -
-measure a correct output every time. Recorded as NOT REPRODUCED under
-configure-then-set on DEV_ID 0x460 REV_ID 0x2000, not as a disproof.
+measure a correct output every time. NOT REPRODUCED under
+configure-then-set on DEV_ID 0x460 REV_ID 0x2000, which is not a
+disproof.
 
 The obligation is nonetheless STATED on `configure()`, because a driver
 that cannot enforce a caller's ordering must say so: the workaround is
 one write to any data register first, then the MODE, and `set(ch, code)`
 is that write - it stores DHR12Rx unconditionally, with or without a
-configuration. Putting the data write inside `configure()` would change
-what every image already built for this family does, so it is a stated
-obligation and not a silent edit.
+configuration. The data write stays outside `configure()`, so the
+ordering is a stated obligation and not a hidden one.
 
 ES0418 2.7.2 (the DMA underrun flag missed when an internal trigger lands
 on the same cycle as a DMA request acknowledge) needs software AND
@@ -282,8 +279,8 @@ Default_Handler spin).
 - The wave generators from a HARDWARE trigger, and therefore at a rate
   worth a spectrum. Both are run one software step at a time, which is
   what makes them countable and is not the same measurement - and the
-  trigger rows themselves are all measured now (above), so what is left
-  is only the RATE.
+  trigger rows themselves are all measured (above), so what is left is
+  only the RATE.
 - What sample-and-hold COSTS. The mode runs and holds (above); 16.4.6
   sells it as a power saving and this bench has no current meter.
 - The dual holding registers as a two-channel stream: `write_dual()` is

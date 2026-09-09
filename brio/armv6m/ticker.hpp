@@ -13,8 +13,6 @@
  * WHY SYSTICK AND NOT A VENDOR TIMER. SysTick is core-private: no
  * application can use it for PWM, capture or anything else, so claiming
  * it costs the app nothing - every TC/TCC/TIM and the RTC stay free.
- * That is the same rule the AVR side follows by taking the RTC's PIT (a
- * timer nothing else wants), applied to what this core offers.
  *
  * Include-order contract: the family's device header first (it brings
  * the CMSIS core header with `SysTick`); the family's ticker.hpp does.
@@ -26,8 +24,8 @@
  *  - now():    TimeStamp = whole seconds + millisecond fraction.
  *
  * ## No millisecond correction, and why the rate is constrained
- * AVR's 1024 Hz tick does not divide decimal milliseconds, so its ISR
- * skips three increments per 128 ticks to keep millis() honest. Nothing
+ * A timebase whose rate does not divide decimal milliseconds needs its
+ * ISR to skip increments to keep millis() honest. Nothing
  * of the sort is needed here: SysTick counts CPU cycles, so the rate is
  * ours to choose, and every rate this class accepts divides 1000 exactly
  * (1000, 500, 250, 200, 125, 100 ... Hz). millis() is then ticks times a
@@ -42,14 +40,14 @@
  * access (read_shared below) so every call performs a real load - in a
  * header-only build a polling loop over an inlined getter would
  * otherwise fold to one hoisted read that never sees the handler's
- * store (gcc -Os deleted exactly such a loop on the samc21 bench). now()
+ * store (gcc -Os deletes exactly such a loop). now()
  * additionally masks: it reads TWO counters that must belong to the
  * same instant.
  *
  * ## The caveat that outlives this file
  * SysTick is clocked from the CPU clock, so its reload is a function of
  * the clock's rate. Under a DynamicClock (the STM32G0 has one,
- * stm32g0/clock.hpp; the SAM C21 none by ruling) this ticker is a
+ * stm32g0/clock.hpp; the SAM C21 has none) this ticker is a
  * ClockUser: `rebase(hz)` reprograms the reload and RESTARTS the period,
  * so the tick in progress at a switch is lost - kernel time runs up to
  * one tick LATE per switch, never early (the kernel's own direction) -
@@ -60,8 +58,8 @@
  * And a sleep mode that stops the CPU clock stops THIS TIMEBASE: kernel
  * time stands still for the whole sleep (the SAM's standby, the
  * STM32's Stop); `advance()` is the landing point of the resync a timed
- * sleep site performs from an RTC, samc21/sleep.hpp's SamTimedSleepSite
- * being the built precedent. The other answer exists on the STM32G0: a
+ * sleep site performs from an RTC (samc21/sleep.hpp's
+ * SamTimedSleepSite). The other answer exists on the STM32G0: a
  * TICKLESS timebase on a low-power timer that counts through the Stop
  * (stm32g0/lptim_ticker.hpp, taken by stm32g0/platform.hpp as its
  * template argument), which gives up one LPTIM for the "costs the app
@@ -83,11 +81,8 @@
 
 namespace brio {
 
-/**
- * @class BasicTicker
- * @brief Static (monostate) time tracker driven by the SysTick interrupt
- * @tparam tps Tick frequency in Hz; must divide 1000 exactly
- */
+/// Static (monostate) time tracker driven by the SysTick interrupt.
+/// `tps` is the tick frequency in Hz and must divide 1000 exactly.
 template <uint16_t tps = 1000>
 class BasicTicker {
     static_assert(tps > 0, "ticks per second must be positive");
@@ -120,7 +115,7 @@ public:
     static constexpr uint16_t ticks_per_second = tps;
 
     /**
-     * @brief Program SysTick for `tps` and start its interrupt
+     * Program SysTick for `tps` and start its interrupt.
      *
      * The reload is clock_hz(clock) / tps - 1 (SysTick counts down to
      * zero, so N + 1 cycles per period). Returns false and starts
@@ -161,7 +156,7 @@ public:
     }
 
     /**
-     * @brief SysTick interrupt body - call from SysTick_Handler()
+     * SysTick interrupt body - call from SysTick_Handler().
      *
      * No flag to clear: reading CTRL.COUNTFLAG would clear it, and the
      * exception is cleared by entry. Advances the tick counter, then the

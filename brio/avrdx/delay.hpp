@@ -33,8 +33,8 @@
  *
  * The fixed-point path also serves a static clock with a runtime `us`,
  * which makes the microsecond arithmetic EXACT at every rate the
- * divisors can produce - including the sub-MHz ones, where the old
- * whole-cycles-per-us rounding overshot by up to 30x. What no
+ * divisors can produce - including the sub-MHz ones, where a
+ * whole-cycles-per-us rounding overshoots by up to 30x. What no
  * implementation can fix at those rates is granularity and overhead in
  * TIME: one loop turn is 4 cycles, so at 32.768 kHz it is 122 us and
  * even a handful of dispatch cycles is a whole tick - below roughly

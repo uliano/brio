@@ -2,15 +2,13 @@
  * proto/line_parser.hpp
  *
  * Line assembly and command parsing, protocol layer on top of the byte
- * transports. Rewritten 07/2026 from the AVR-Multislope pull-based design
- * following the framework decisions:
+ * transports:
  *
  *  - PUSH model: LineAssembler is fed one byte at a time and returns the
  *    completed line - it holds no reference to any transport, so it works
  *    with any source (UART ring, test vector, host-side unit test);
- *  - the virtual endpoint layer (IParserEndpoint / StreamParserEndpoint /
- *    ParserHub) is gone: with sinks and sources resolved at compile time
- *    the glue is a few lines in the app's main loop (see below);
+ *  - no endpoint indirection: sinks and sources are resolved at compile
+ *    time, so the glue is a few lines in the app's main loop (see below);
  *  - the CommandRouter is templated on the reply sink (brio::ByteSink) so
  *    handlers can answer without any runtime stream indirection.
  *
@@ -91,17 +89,16 @@ inline bool command_equals(const char *left, const char *right) {
 
 // ---- line assembly (push model) ---------------------------------------------
 
-/**
- * @brief Assembles newline-terminated lines from a pushed byte stream.
- *
- * - '\r' is ignored
- * - '\n' completes the line: push() returns the NUL-terminated text
- * - on overflow the line is discarded and bytes are dropped until the
- *   next '\n' (counted in overflow_count)
- *
- * The returned pointer refers to the internal buffer and stays valid until
- * the next push(): consume (or copy) the line before feeding more bytes.
- */
+/// Assembles newline-terminated lines from a pushed byte stream.
+///
+/// - '\r' is ignored
+/// - '\n' completes the line: push() returns the NUL-terminated text
+/// - on overflow the line is discarded and bytes are dropped until the
+///   next '\n' (counted in overflow_count)
+///
+/// The returned pointer refers to the internal buffer and stays valid
+/// until the next push(): consume (or copy) the line before feeding more
+/// bytes.
 template <uint8_t max_line_length = 96>
 class LineAssembler {
     static_assert(max_line_length >= 4, "line buffer should be at least 4 chars");
@@ -150,11 +147,8 @@ public:
 
 // ---- tokenization -----------------------------------------------------------
 
-/**
- * @brief Non-owning tokenizer on top of a mutable C string.
- *
- * Tokenization happens in place by replacing separators with '\0'.
- */
+/// Non-owning tokenizer on top of a mutable C string. Tokenization
+/// happens in place by replacing separators with '\0'.
 class TokenCursor {
 private:
     char *m_next;
@@ -198,12 +192,9 @@ public:
 
 // ---- parsed command representation ------------------------------------------
 
-/**
- * @brief Generic parsed command: command word + argument pointers.
- *
- * The command string and argument pointers refer to memory inside the line
- * buffer (LineAssembler): consume them before pushing more bytes.
- */
+/// Generic parsed command: command word + argument pointers. The command
+/// string and the argument pointers refer to memory inside the line
+/// buffer (LineAssembler): consume them before pushing more bytes.
 template <uint8_t max_arguments = 8>
 struct ParsedCommand {
     char *command;
@@ -223,10 +214,8 @@ struct ParsedCommand {
 
 // ---- parsers ----------------------------------------------------------------
 
-/**
- * @brief Console-style parser: "CMD arg1 arg2", spaces/tabs separate.
- * The command word is uppercased in place.
- */
+/// Console-style parser: "CMD arg1 arg2", spaces/tabs separate. The
+/// command word is uppercased in place.
 template <uint8_t max_arguments = 8>
 class ConsoleCommandParser {
 public:
@@ -258,12 +247,10 @@ public:
     }
 };
 
-/**
- * @brief Minimal SCPI-like parser: ":SUB:SYS:CMD? arg1,arg2".
- *
- * Separators: spaces, tabs, commas. Normalization: command uppercased in
- * place, optional leading ':' removed, trailing '?' sets is_query.
- */
+/// Minimal SCPI-like parser: ":SUB:SYS:CMD? arg1,arg2".
+///
+/// Separators: spaces, tabs, commas. Normalization: command uppercased in
+/// place, optional leading ':' removed, trailing '?' sets is_query.
 template <uint8_t max_arguments = 8>
 class ScpiCommandParser {
 public:
@@ -313,13 +300,11 @@ public:
 
 // ---- routing ----------------------------------------------------------------
 
-/**
- * @brief Static command router, templated on the reply sink.
- *
- * Route names should be provided in canonical uppercase form. Handlers
- * receive the parsed command and the sink tag to answer on (compile-time
- * dispatch, no stream indirection).
- */
+/// Static command router, templated on the reply sink.
+///
+/// Route names should be provided in canonical uppercase form. Handlers
+/// receive the parsed command and the sink tag to answer on (compile-time
+/// dispatch, no stream indirection).
 template <ByteSink Sink, uint8_t max_arguments = 8>
 class CommandRouter {
 public:

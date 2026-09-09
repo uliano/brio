@@ -23,9 +23,9 @@
  * asks for it. RTC, CCL, AC, ADC, DAC, OPAMP, TCA and TCB run only with
  * their own RUNSTDBY set; WDT, BOD, EVSYS and NVM run regardless;
  * everything else is stopped - the TCD's clock never runs in standby at
- * all. The main clock source runs only if something requests it - and
- * the bench proved the PERIPHERAL'S flag alone is that request: a TCB
- * with RUNSTDBY set counts through standby with the oscillator's own
+ * all. The main clock source runs only if something requests it, and the
+ * PERIPHERAL'S flag alone is that request (measured): a TCB with
+ * RUNSTDBY set counts through standby with the oscillator's own
  * RUNSTDBY on or off, and with it clear the whole chain stops whatever
  * the oscillator's flag says. An oscillator's RUNSTDBY (Oschf::
  * run_standby(), Osc32k::run_standby()) buys something else entirely:
@@ -45,20 +45,19 @@
  * - the RTC's COUNTER stops even with RUNSTDBY, the PIT half does not.
  * Wake-up sources: a PORT pin, BOD VLM, MVIO, the PIT, a TWI address
  * match, and the CCL only when its path is fully asynchronous
- * (FILTSEL = 0 and EDGEDET = 0) - or, as the bench refined that note,
- * whenever the LUT's own clock is one power-down keeps: a filtered LUT
- * clocked from OSC32K wakes, the same LUT clocked from CLK_PER does
- * not. With VREGCTRL.HTLLEN set the list
- * shrinks to the PORT pin, BOD VLM, MVIO and the PIT: no TWI match, no
- * CCL - which is why high_temp_low_leakage(true) REFUSES while a TWI
- * client or the CCL is enabled instead of silently making their wake-up
- * unpredictable (the chapter's own warning).
+ * (FILTSEL = 0 and EDGEDET = 0) - more exactly, whenever the LUT's own
+ * clock is one power-down keeps: a filtered LUT clocked from OSC32K
+ * wakes, the same LUT clocked from CLK_PER does not (measured). With
+ * VREGCTRL.HTLLEN set the list shrinks to the PORT pin, BOD VLM, MVIO
+ * and the PIT: no TWI match, no CCL - which is why
+ * high_temp_low_leakage(true) REFUSES while a TWI client or the CCL is
+ * enabled instead of silently making their wake-up unpredictable (the
+ * chapter's own warning).
  *
  * WAKE TIME. Six CLK_PER cycles from IDLE. From standby or power-down
  * the same six cycles plus whatever the main clock source needs to come
  * back and the regulator to reach its normal drive - and those are two
- * separate bills, which is the whole of what a second board measured
- * (platform.md carries the table):
+ * separate bills, measured apart (platform.md carries the table):
  *
  *   the OSCILLATOR - OSCHF comes back in 24 us, a 24 MHz crystal in
  *   1.77 ms, and an oscillator kept alive by its own RUNSTDBY in no

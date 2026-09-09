@@ -1,6 +1,6 @@
-// i2c_scan - first on-silicon test of the I2C stack: an address scanner
-// on TWI0 (SDA PA2, SCL PA3, external pull-ups), the I2C twin of
-// spi_loopback.
+// i2c_scan - an I2C address scanner on TWI0 (SDA PA2, SCL PA3,
+// external pull-ups): the smallest on-silicon exercise of the whole
+// I2C stack, from the engine up to the bus arbiter.
 //
 // A Scanner sweeps 0x08..0x77 once every 2 s, one empty request (the
 // address probe: S addr+W P) per address, sequentially through the
@@ -45,8 +45,8 @@ namespace {
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
-using TwiHw = brio::TwiHost<0>;                        // PA2 SDA / PA3 SCL
-using I2c = brio::I2cBus<TwiHw, P>;
+using I2cHw = brio::I2cHost<0>;                        // PA2 SDA / PA3 SCL
+using I2c = brio::I2cBus<I2cHw, P>;
 
 struct Kick {};                                    // start a sweep
 
@@ -112,7 +112,7 @@ struct Scanner : brio::Fsm<Scanner, Kick, brio::I2cDone> {
 
 private:
     static void probe(uint8_t a) {
-        brio::post<I2c>(TwiHw::Request{
+        brio::post<I2c>(I2cHw::Request{
             a, {}, 0, {}, 0,                       // empty: address only
             brio::reply_to<Scanner, brio::I2cDone>()});
     }
@@ -122,8 +122,8 @@ private:
 
 // ---- target glue ------------------------------------------------------------
 ISR(TWI0_TWIM_vect) {
-    if (TwiHw::isr()) {
-        brio::post<I2c>(brio::TransferDone{TwiHw::status()});
+    if (I2cHw::isr()) {
+        brio::post<I2c>(brio::TransferDone{I2cHw::status()});
     }
 }
 ISR(USART2_RXC_vect) { Serial::rxc(); }            // console is output-only here
@@ -133,7 +133,7 @@ ISR(RTC_PIT_vect)    { brio::Ticker::pit(); }
 int main() {
     SysClock::init();
     Serial::init(clock, 460800);
-    TwiHw::init(clock);
+    I2cHw::init(clock);
     brio::Ticker::init();
     sei();
 

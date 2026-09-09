@@ -6,9 +6,9 @@
  * Apps select it by including it and passing Stm32g0Platform<> along.
  *
  * ONE CLASS, TWO TIMEBASES. The template parameter is the kernel
- * timebase, and the default is the SysTick BasicTicker every program of
- * this family has run on (stm32g0/ticker.hpp's `Ticker`, 1000 Hz).
- * SysTick rides HCLK, and HCLK stops in the Stop modes - so on that
+ * timebase, and the default is the SysTick BasicTicker of
+ * stm32g0/ticker.hpp (`Ticker`, 1000 Hz). SysTick rides HCLK, and HCLK
+ * stops in the Stop modes - so on that
  * timebase KERNEL TIME STANDS STILL across a Stop, and stm32g0/sleep.hpp
  * keeps two timed sites that repair it afterwards from an RTC or LPTIM
  * witness. The other argument is stm32g0/lptim_ticker.hpp's
@@ -34,12 +34,9 @@
  * Sleep/Stop/Standby/Shutdown ladder and the util/power.hpp sites over
  * it - is stm32g0/pwr.hpp plus stm32g0/sleep.hpp. This silicon selects
  * the sleep depth in SCB->SCR.SLEEPDEEP and PWR_CR1.LPMS, and neither
- * idle hook here writes either, so a WFI here has always taken whatever
- * somebody else armed. (The AVR's idle() had to learn to honour a
- * standing SEN bit, and the SAM's had to grow an erratum guard; on this
- * target the hook was already right.) This header provides the storage
- * the panic record lives in, and the linker script the .noinit section
- * it needs.
+ * idle hook here writes either, so a WFI here takes whatever somebody
+ * else armed. This header provides the storage the panic record lives
+ * in, and the linker script the .noinit section it needs.
  */
 
 #pragma once
@@ -57,19 +54,17 @@
 
 namespace brio {
 
-/**
- * A timebase that keeps counting while the core sleeps AND can place a
- * wake at an absolute tick: what Stm32g0Platform needs to offer the
- * kernel's idle_until(). `arm_wake(now, deadline)` is called with
- * interrupts masked, `now` being the timebase's own reading a moment
- * earlier and `deadline` strictly ahead of it; true means "the wake is
- * in place, sleep", false means "do not sleep this turn" (the timebase
- * could not place it yet - the loop turns and asks again). `park()` is
- * the same call with NO deadline: put the wake where it costs nothing
- * (for the LPTIM, on the counter's own lap edge), same answer. The
- * SysTick BasicTicker is deliberately NOT one of these: it has no wake
- * to place and its counting stops with the core.
- */
+/// A timebase that keeps counting while the core sleeps AND can place a
+/// wake at an absolute tick: what Stm32g0Platform needs to offer the
+/// kernel's idle_until(). `arm_wake(now, deadline)` is called with
+/// interrupts masked, `now` being the timebase's own reading a moment
+/// earlier and `deadline` strictly ahead of it; true means "the wake is
+/// in place, sleep", false means "do not sleep this turn" (the timebase
+/// could not place it yet - the loop turns and asks again). `park()` is
+/// the same call with NO deadline: put the wake where it costs nothing
+/// (for the LPTIM, on the counter's own lap edge), same answer. The
+/// SysTick BasicTicker is deliberately NOT one of these: it has no wake
+/// to place and its counting stops with the core.
 template <class TB>
 concept Tickless = requires(uint32_t now, uint32_t deadline) {
     { TB::ticks() } -> std::same_as<uint32_t>;
@@ -103,8 +98,8 @@ struct Stm32g0Platform {
     /// Sleep - the CPU clock stops, HCLK, SysTick and every peripheral
     /// keep running (5.3) - and with stm32g0/sleep.hpp's site having
     /// armed a Stop, the same WFI is that Stop. The site arms above this
-    /// hook and the hook takes what it finds, exactly as the samc21 hook
-    /// does with PM.SLEEPCFG. On the SysTick timebase KERNEL TIME STOPS
+    /// hook and the hook takes what it finds. On the SysTick timebase
+    /// KERNEL TIME STOPS
     /// in a Stop (SysTick rides HCLK), which is what the timed sites
     /// exist to repair; on a Tickless timebase it does not, and the loop
     /// calls idle_until() below instead of this.
@@ -154,9 +149,8 @@ struct Stm32g0Platform {
     /// conditional: with no debugger halted on it, this escalates to
     /// HardFault_Handler, which the crt provides as a distinct spin loop
     /// so the wreck is legible in a backtrace. And with C_DEBUGEN left
-    /// set by a flashing session the core HALTS here in silence - the
-    /// samc21 bench lesson, answered the same way: tools/bench.py clears
-    /// DHCSR after every flash.
+    /// set by a flashing tool the core HALTS here in silence, which
+    /// is why tools/bench.py clears DHCSR after every flash.
     static void break_here() { __BKPT(0); }
 
     static uint32_t now() { return TB::ticks(); }
@@ -179,14 +173,14 @@ struct Stm32g0Platform {
     /// word: with the SRAM PARITY CHECK enabled by option byte
     /// (FLASH_OPTR.RAM_PARITY_CHECK = 0; the factory default is 1,
     /// disabled) a read of uninitialized SRAM raises an NMI - the
-    /// breadcrumb's first read after a power-on would. Kept in mind for
-    /// the option-byte pass; today's boards ship with the check off.
+    /// breadcrumb's first read after a power-on would. Nothing here
+    /// enables the check, and the bench boards ship with it off.
     static PanicRecord& panic_record() { return panic_record_; }
 
 private:
     // gcc 16 emits the COMDAT section for an inline variable with a
     // custom section attribute as `"awG"` without the group name and gas
-    // warns; harmless, identical on the AVR and SAM sides.
+    // warns; harmless.
     [[gnu::section(".noinit")]] static inline PanicRecord panic_record_;
 };
 

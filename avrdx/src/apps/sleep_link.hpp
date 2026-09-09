@@ -1,19 +1,19 @@
 // sleep_link.hpp - the board-to-board bench protocol of the SLEEP
-// campaign: what test_avr_sleep (board A, the DUT) tells sleep_peer
-// (board B, the instrument) while A is about to stop its clocks.
+// suites: what test_avr_sleep (the DUT) tells sleep_peer (the
+// instrument) while the DUT is about to stop its clocks.
 //
 // APP-LEVEL BENCH TOOLING, not framework. It sits next to the two apps
 // that share it and is included by its plain name; nothing in
 // brio knows it exists, and nothing here touches a register -
 // it is pure encoding.
 //
-// WHY A SECOND BOARD AT ALL. Every latency this campaign measures is
+// WHY A SECOND BOARD AT ALL. Every latency measured over this link is
 // the time between an event OUTSIDE the sleeping chip and that chip's
 // first instruction afterwards. A sleeping device cannot time its own
 // wake-up: the counter that would do it is exactly the one the mode
-// stops (test_avr_sleep f says so in as many words). So the ruler moves
-// off-chip - board B drives the stimulus, board B starts the stopwatch
-// on the same edge, and board B captures the DUT's echo IN HARDWARE.
+// stops. So the ruler moves off-chip - the instrument drives the
+// stimulus, starts the stopwatch on the same edge, and captures the
+// DUT's echo IN HARDWARE.
 //
 // THE FRAME
 //
@@ -31,18 +31,19 @@
 // after a bounded action the peer goes back to command mode and WAITS
 // to be asked for its numbers.
 //
-// THE WIRES (fixed - this campaign does NO topology discovery)
+// THE WIRES (fixed - this link does NO topology discovery)
 //
 //   PE0   the command channel: one wire between the two USART4 TXD
 //         pads, LBME at both ends, 8N1 at command_baud. It is also the
 //         line the SFD test wakes on.
 //   PE1   spare.
-//   PE2   B drives, A senses: the STIMULUS. B's rising edge starts its
-//         stopwatch and is what has to wake the sleeping DUT.
-//   PE3   A drives, B senses: the ECHO. A's wake-up ISR raises it as
-//         its very first instruction; on B that edge is an event that
-//         CAPTURES the 32-bit stopwatch - no polling anywhere in the
-//         measurement path.
+//   PE2   the instrument drives, the DUT senses: the STIMULUS. That
+//         rising edge starts the instrument's stopwatch and is what has
+//         to wake the sleeping DUT.
+//   PE3   the DUT drives, the instrument senses: the ECHO. The DUT's
+//         wake-up ISR raises it as its very first instruction; at the
+//         instrument that edge is an event that CAPTURES the 32-bit
+//         stopwatch - no polling anywhere in the measurement path.
 //
 // THE RECOVERY GUARANTEE
 //

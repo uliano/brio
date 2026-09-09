@@ -51,7 +51,7 @@ pin externally to an ADC AINx pin" a wire of zero length.
 The chapter mixes them, and it disagrees with itself about one:
 
 1. **Enable-protected** - CTRLB, and 41.6.2.1 also names EVCTRL while
-   41.8.3's own property line does not. **Measured: EVCTRL IS
+   41.8.3's own property line does not. Measured: **EVCTRL is
    enable-protected** - a raw write under a running converter reads back
    zero - so 41.6.2.1's list is right and the register description's
    property line is missing a property.
@@ -120,19 +120,18 @@ spilling into the neighbouring field.
 
 The EVSYS and DMAC vocabularies this peripheral publishes -
 `empty_generator`, `start_event_user`, `dma_trigger_empty` - live here
-and not in `evsys.hpp` or `dmac.hpp`, per the ruling in
-[evsys.md](evsys.md): those files own the fabric and the channels, a
-peripheral owns its own codes. `adc_input_pad_port` /
-`adc_input_pad_pin` publish the pad erratum 1.8.9's workaround wants, so
-a caller does not have to know the pinout.
+and not in `evsys.hpp` or `dmac.hpp` ([evsys.md](evsys.md)): those
+files own the fabric and the channels, a peripheral owns its own codes.
+`adc_input_pad_port` / `adc_input_pad_pin` publish the pad erratum
+1.8.9's workaround wants, so a caller does not have to know the pinout.
 
-**Millivolts go through `util/analog.hpp`**, unchanged from the AVR:
-`set_mv()` is a thin wrapper over `dac_code(mv, 1024, ref_mv)`. Note the
-half-truth: 41.6.2.4's own formula divides by 0x3FF (1023), so the two
-conventions differ by mv/ref of one LSB - nothing at the bottom of the
-range and one whole LSB at full scale. Below full scale that is smaller
-than this converter's own gain error, which is why the bench declines to
-decide between them.
+**Millivolts go through `util/analog.hpp`**: `set_mv()` is a thin
+wrapper over `dac_code(mv, 1024, ref_mv)`. Note the half-truth:
+41.6.2.4's own formula divides by 0x3FF (1023), so the two conventions
+differ by mv/ref of one LSB - nothing at the bottom of the range and one
+whole LSB at full scale. Below full scale that is smaller than this
+converter's own gain error, which is why the bench declines to decide
+between them.
 
 **The linear range is not the whole range.** Table 45-30 gives it as
 0.05 V .. VDDANA - 0.05 V, so at a 5 V reference roughly the bottom ten
@@ -176,7 +175,7 @@ brio::Dac::enable(true);
 ## Errata
 
 Read on the **E/G/J row at revision F** - the row, not the column, which
-is the trap this document set repeatedly.
+is the standing trap in this errata sheet.
 
 - **1.8.9 DAC Output** (device level, every revision): selecting the DAC
   output as the ADC's positive multiplexer input makes both the DAC
@@ -194,7 +193,7 @@ is the trap this document set repeatedly.
 - **1.8.10 DAC Output Reference Selection** (every revision) is live on
   this row and belongs to the OTHER side of the same pair of pins: with
   the SDADC converting against `REFCTRL.REFSEL = DAC`, this DAC's own
-  output goes noisy. **Reproduced with a control** by the SDADC campaign
+  output goes noisy. **Reproduced with a control** on the SDADC side
   (a pad spread of 1 count becoming 108 with the reference buffer off,
   and 1 again with it on or with the SDADC running against VDDANA) - see
   [sdadc.md](sdadc.md). Its workaround, `REFCTRL.ONREFBUF = 1`, is
@@ -250,10 +249,11 @@ board's 24 MHz crystal.
   the quarter points land within one per cent - which is the two
   converters' combined offset and gain error, not their linearity. Over
   64 readings at mid-code the spread is **1 count**.
-- **`util/analog.hpp` NEEDED NO CHANGE.** `set_mv(2000)` at a 5150 mV
-  reference writes code 398 and the ADC reads **1982 mV** back through
-  `adc_mv()` - 18 mV apart, with the DAC's own quantization at 5 mV a
-  code and the pair's gain error dwarfing both.
+- **`util/analog.hpp`'S ARITHMETIC HOLDS ON THIS CONVERTER.**
+  `set_mv(2000)` at a 5150 mV reference writes code 398 and the ADC
+  reads **1982 mV** back through `adc_mv()` - 18 mV apart, with the
+  DAC's own quantization at 5 mV a code and the pair's gain error
+  dwarfing both.
 - **THE DEVICE HEADER'S `INT1V` NAME IS THE SAM D21'S AND IS WRONG
   HERE.** With `REFSEL = INTREF` and the SUPC bandgap at its three
   levels, DAC code 1000 reads 775 / 1564 / 3154 counts, implying full
@@ -265,12 +265,10 @@ board's 24 MHz crystal.
   opposite of what the ADC's bandgap INPUT channel needs (a flat zero
   without the bit, [adc.md](adc.md)) - the reference multiplexer takes
   the bandgap internally.
-- **AND NEITHER DOES THE ADC'S**, which is the question
-  [adc.md](adc.md) could not answer without a steady mid-range source.
-  A 1479 mV DAC level read against
-  `REFSEL = INTREF` at 2.048 V gives **2991 counts with VREFOE clear and
-  2990 with it set**, i.e. 1496 mV against the 1479 mV VDDANA said. The
-  bit is genuinely not in the reference path.
+- **AND NEITHER DOES THE ADC'S** ([adc.md](adc.md)). A 1479 mV DAC
+  level read against `REFSEL = INTREF` at 2.048 V gives **2991 counts
+  with VREFOE clear and 2990 with it set**, i.e. 1496 mV against the
+  1479 mV VDDANA said. The bit is genuinely not in the reference path.
 - **`Ref::dac` CONVERTS, AND IT IS RATIOMETRIC.** The quarter-scaled
   analog supply read against a DAC reference at codes 512 / 768 / 1000
   gives **2045 / 1358 / 1040** counts, against 2045 / 1363 / 1047
@@ -363,9 +361,9 @@ board's 24 MHz crystal.
   observed.
 - **ERRATUM 1.4.10 (the ADC's) REPRODUCES, and it is worse than its own
   sentence** - a finding that belongs to [adc.md](adc.md) and is
-  recorded here because this is the suite that provoked it. Once ADC1
-  has been enabled in a power cycle, `ADC0.SYNCBUSY.ENABLE` is stuck at
-  one and stays stuck; ADC0 then **does not enable at all** - a plain
+  recorded here because this suite provokes it. Once ADC1 has been
+  enabled in a power cycle, `ADC0.SYNCBUSY.ENABLE` is stuck at one and
+  stays stuck; ADC0 then **does not enable at all** - a plain
   `Adc<0>::init()` returns false and the converter reads zero - and a
   software reset does not clear it (SWRST's own bit joins the stuck
   one). The errata's order is the way out: bring ADC1 up FIRST and ADC0
@@ -390,7 +388,7 @@ From `test_samc_analog` letters e and f, 23 verdicts.
 is most of the result.** 41.6.8.4 makes the sixteen sub-conversions the
 EVENT'S job, so the chain is a TC overflow into the START user with the
 DMAC refilling DATABUF; the witness has to average over WHOLE dither
-periods, and the numbers were chosen so that it does exactly:
+periods, and the numbers are chosen so that it does exactly:
 
 | stage | setting | period |
 | --- | --- | --- |
@@ -406,8 +404,7 @@ samples with ADJRES 0 the result is 16 bits wide, so **one DAC LSB is 64
 counts and one sixteenth of one is 4** - the effect is under the ADC's
 own LSB and only the accumulation can see it.
 
-Six repeats of one dithered value span **1 count**, measured before any
-band was chosen. Then, at base code 512:
+Six repeats of one dithered value span **1 count**. At base code 512:
 
 | DATA[3:0] | 0 | 4 | 8 | 12 | 15 |
 | --- | --- | --- | --- | --- | --- |
@@ -419,10 +416,10 @@ bit against 4.0 exact. The control is the same converter with dithering
 off: codes 512 and 513 read 32487 and 32552, **one whole LSB apart with
 nothing between them**.
 
-**CTRLB.LEFTADJ is a placement and not a scale**, on silicon at last:
-code 512 reads 32487 right-adjusted and 32488 left-adjusted, and the
-left-adjusted dither staircase (32487 / 32504 / 32519 / 32535 / 32547,
-swing 60) is the right-adjusted one. **ERRATUM 1.9.1** - dithering with
+**CTRLB.LEFTADJ is a placement and not a scale**: code 512 reads 32487
+right-adjusted and 32488 left-adjusted, and the left-adjusted dither
+staircase (32487 / 32504 / 32519 / 32535 / 32547, swing 60) is the
+right-adjusted one. **ERRATUM 1.9.1** - dithering with
 right-adjusted data giving an INL of 16 LSB - is **revision B alone** on
 the E/G/J row, and the bench agrees with the row: a 16 LSB nonlinearity
 in one of the two arrangements could not hide in a swing of one.
@@ -453,11 +450,11 @@ Driver gaps:
   the NVIC out of a sleep. (41.6.6's promise about the output buffer IS
   measured - see "Bench findings".)
 - **The SDADC's use of `CTRLB.IOEN` as a REFERENCE** (41.6.8.1's third
-  consumer) is now built and measured on the other side -
-  [sdadc.md](sdadc.md) - including erratum 1.8.10. What is still not
-  measured here is what the DAC's output does electrically while the
-  SDADC loads it: the disturbance was seen through the ADC watching the
-  pad, and the load itself was not characterised.
+  consumer) is built and measured on the other side -
+  [sdadc.md](sdadc.md) - including erratum 1.8.10. What is not measured
+  here is what the DAC's output does electrically while the SDADC loads
+  it: the disturbance is seen through the ADC watching the pad, and the
+  load itself is not characterised.
 
 Implemented but not bench-verified:
 - **`DBGCTRL.DBGRUN`** is written and read back at the offset the device

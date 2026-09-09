@@ -1,8 +1,8 @@
 /*
  * pin.hpp
  *
- * The STM32G0 I/O pins (GPIO, RM0444 ch. 7), register-level, in the same
- * two faces avrdx/pin.hpp and samc21/pin.hpp offer:
+ * The STM32G0 I/O pins (GPIO, RM0444 ch. 7), register-level, in the two
+ * faces every target's pin header offers:
  *
  *  Port<'A'>       the port RESOURCE - one GPIOx block: 16-bit mask
  *                  operations on ODR/IDR through the atomic BSRR/BRR
@@ -19,8 +19,7 @@
  *   Button::input(brio::PinPull::up);
  *   Tx::function(brio::PinFunction::af1);   // USART2_TX
  *
- * THREE FACTS THAT DIFFER FROM THE OTHER TWO TARGETS and shape everything
- * below.
+ * THREE FACTS OF THIS SILICON shape everything below.
  *
  * 1. THE PORT HAS A CLOCK, AND IT IS OFF AT RESET. RCC_IOPENR.GPIOxEN
  *    gates the whole block (5.2.17): with it clear every register of the
@@ -33,25 +32,25 @@
  *    second pin of the same port would lose its block; releasing a port
  *    is a program-wide decision (Port<L>::clock(false) exists for it).
  * 2. THE INPUT BUFFER IS ALWAYS ON in input, output and AF modes and OFF
- *    in analog mode (7.3.1). No INEN to remember; read() means the same
- *    thing on every brio target. Analog mode is the reset state of every
- *    pin except PA13/PA14 (SWD) and is also the low-power parking state.
+ *    in analog mode (7.3.1). No enable bit to remember: read() reads
+ *    the pad whenever the pin is not analog. Analog mode is the reset
+ *    state of every pin except PA13/PA14 (SWD) and is also the
+ *    low-power parking state.
  * 3. THERE IS NO PIN INTERRUPT IN GPIO. Edge and level senses are the
- *    EXTI's (ch. 13), reached through its own multiplexer - the samc21 EIC
- *    situation; an EXTI driver will own them. Alternate functions are a
+ *    EXTI's (ch. 13), reached through its own multiplexer, and
+ *    stm32g0/exti.hpp is what owns them. Alternate functions are a
  *    PER-PIN 4-bit number (AFRL/AFRH), and which peripheral signal AFn
  *    means on a given pad is a table of the DATASHEET (DS13560 tables
  *    13..24), not of the reference manual: a peripheral driver's pin
  *    claim names the AF and the app's static_asserts cannot check it
  *    against a header symbol, because the device header does not carry
- *    the pin table (unlike the SAM DFP's MUX_* macros). The bench is the
- *    check.
+ *    the pin table at all. The bench is the check.
  *
  * THE PACKAGE FACT is a port-level one, read off the device header in
  * stm32g0/device_tables.hpp: ports A, B, C, D and F exist on every part,
  * E only on the G0B1/G0C1 class. Which PINS of a present port a package
- * bonds is finer than that and stays open, exactly as on the other two
- * targets (a Pin on an unbonded pad configures a register nobody wired).
+ * bonds is finer than that and stays open (a Pin on an unbonded pad
+ * configures a register nobody wired).
  *
  * CONCURRENCY. MODER/OTYPER/OSPEEDR/PUPDR/AFR are read-modify-write
  * fields with no set/clear twins, so configuring two pins of one port

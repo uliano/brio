@@ -9,8 +9,8 @@
 // timebase: kernel time on a 32 kHz root, unmoved by SYSCLK) with the
 // CONSOLE ON HSI16 (its kernel clock, so its rebase folds to nothing and
 // the report never depends on the switch under test) and the rebased
-// user under test on PCLK: USART1 as a single wire on PA9 (HDSEL, the
-// serial suite's loop-back), which reads back what it sent only if its
+// user under test on PCLK: USART1 as a single wire on PA9 (HDSEL,
+// single-wire half-duplex), which reads back what it sent only if its
 // divisor followed.
 //
 // TWO THINGS ARE PER-BOARD HERE AND BOTH ARE STATED WHERE THEY ARE
@@ -30,17 +30,15 @@
 //   a  THE BOOT RATE AND THE PACK: 64 MHz on the PLL in Range 1 with two
 //      wait states, the readbacks against the type's claims, the MCO
 //      wall weighed against the crystal, delay_us against the crystal,
-//      and one of the four steps the design named as unbenched - the
-//      PLL's refusal to be reconfigured while it runs
+//      and the PLL's refusal to be reconfigured while it runs
 //   b  THE FALL TO 16 MHz IN RANGE 2: the switch's duration, SWS on
 //      HSISYS with the PLL off, VOS 2, ONE wait state (the Range 2
 //      column, where Range 1 wants none at 16 MHz - a wait-state
-//      DECREASE from two, the second unbenched step, and the range's own
-//      column, the fourth), the loop-back exact at the new rate, the
+//      DECREASE from two), the loop-back exact at the new rate, the
 //      CPU really at 16 MHz (delay_us against the crystal)
 //   c  THE FALL TO 2 MHz IN LOW-POWER RUN: HSIDIV written under a running
-//      HSISYS core (the third unbenched step), LPR set and REGLPF
-//      standing, no wait state, the loop-back exact, the CPU at 2 MHz
+//      HSISYS core, LPR set and REGLPF standing, no wait state, the
+//      loop-back exact, the CPU at 2 MHz
 //   d  THE RISE BACK TO 64: LPR left (REGLPF clear), Range 1 before the
 //      PLL, two wait states before the frequency, everything as in a;
 //      then THE LADDER walked twenty-four times round with the loop-back
@@ -143,9 +141,8 @@ constexpr UartOptions console_opts{.kernel_clock = UsartClock::hsi16};
 // would follow every switch under test and the report would be a
 // function of its own subject. The instance that always has a
 // multiplexer is the LPUART (34.4.6: every LPUART of the family has
-// one), and LPUART1_TX/RX reach THE SAME TWO PADS at AF6 - the shape
-// test_stm32_serial's letter v proves on the G0B1. So the console moves
-// to LPUART1 exactly where USART2's multiplexer is missing.
+// one), and LPUART1_TX/RX reach THE SAME TWO PADS at AF6. So the console
+// moves to LPUART1 exactly where USART2's multiplexer is missing.
 //
 // The HANDLER has to be chosen by the preprocessor, which cannot call
 // a constexpr function - so the same header symbol the reserve probes
@@ -202,9 +199,10 @@ constexpr uint8_t r_pll16 = 3;
 
 // THE TIMEBASE, and the platform on it. The kernel tick must not move
 // with SYSCLK, which is what an LPTIM on the 32 kHz crystal gives, and
-// every board of this desk runs one. (A board without it would put the
-// ticker on LSI and STATE a rate NOT BELOW the true one - the ticker's
-// own directional rule - which is what the driver's default statement,
+// every board this suite is built for fits one. (A board without it
+// would put the ticker on LSI and STATE a rate NOT BELOW the true one -
+// the ticker's own directional rule - which is what the driver's
+// default statement,
 // DS12992 table 46's ceiling, is for.)
 constexpr LptimTickerConfig tb_cfg{};
 using Tb = LptimTicker<tb_cfg>;
@@ -240,8 +238,7 @@ static_assert(!Site::pauses_tick);
 /// part offers no MCO code the only every-part code is the LSE, and a
 /// board whose crystal does not start leaves TIM2's ETR with nothing on
 /// it: the counter stands still, in silence, and a loop that waits on it
-/// waits for ever - which is how the second silicon of this desk first
-/// met 22.4.25's footnote. So the wall is PROBED at boot, counted over a
+/// waits for ever. So the wall is PROBED at boot, counted over a
 /// real interval of the kernel timebase, and `etr_wall_ok` is what every
 /// user of it asks first; the fallback for real time is the RTC's own
 /// sub-second counter below, coarser by a factor of eight and running on
@@ -363,8 +360,8 @@ uint32_t mono_resolution_us() {
 // has to be WEIGHED before anything is timed against it. TIM16's capture
 // channel with TISEL on LSI (25.6.18's code 1) against a counter clocked
 // from PCLK is that measurement, with the MEDIAN of a batch as the
-// estimator - test_stm32_rtc's letter c owns the technique and the
-// reason: an unfiltered capture of an internal clock line errs in BOTH
+// estimator, and the reason is that an unfiltered capture of an internal
+// clock line errs in BOTH
 // directions, so neither the minimum nor the mean is an estimator of the
 // period.
 using LsiMeter = TimIntervalMeter<Tim<16>, 0>;
@@ -1366,8 +1363,8 @@ extern "C" void USART1_IRQHandler() { (void)Loop::isr(); }
 /// comes back after a Stop: a Stop lands on HSISYS and the plain site
 /// restores the clock at disarm(), which the manager calls at the wake
 /// convention - AFTER the AO the deadline was for has run, at 16 MHz
-/// with the PLL off (measured: the first version of letter g read
-/// SWS=HSISYS at the deadline). A program that wants its rate back
+/// with the PLL off (measured: without the ISR call below, SWS still
+/// reads HSISYS at the deadline). A program that wants its rate back
 /// before any AO runs calls restore() from the wake's own ISR, as here;
 /// with no Stop in the way (every other letter) it is one register read.
 extern "C" void BRIO_STM32G0_LPTIM1_HANDLER() {

@@ -125,12 +125,11 @@ read-protect enable there.
 system memory area this chapter also carries (RM0444 41.1 and 41.2):
 the flash size the part reports in kilobytes, and the 96-bit unique
 device identifier as three words. Both are plain reads of a factory
-region - no unlock, no engine, nothing to refuse. `DeviceUid` is the
-samc21 stratum's `DeviceSerial` in this family's clothes: a board that
-has no label to be given (there is no USERROW here) still has a NAME,
-and the first word in hex is what the bench peers report as their
-identity over the wire, so a suite's peer letter can say which board
-answered it.
+region - no unlock, no engine, nothing to refuse. `DeviceUid` is what
+gives a board a NAME where it has no label to be given (there is no
+USERROW here), and the first word in hex is what the bench peers report
+as their identity over the wire, so a suite's peer letter can say which
+board answered it.
 
 `MainFlashPartition` / `MainFlash` / `MainFlashJournalZone`
 (`stm32g0/nvm_flash.hpp`) are the storage. See below.
@@ -216,14 +215,14 @@ The bank splits once, at the top:
 | 0x40000..0x7EFFF | 0x0804_0000..0x0807_EFFF | `MainFlash` - the heap's 252 K, its map pair in the top two pages |
 | 0x7F000..0x7FFFF | 0x0807_F000..0x0807_FFFF | `MainFlashJournalZone` - the attic, two 2 K halves |
 
-**The media's addresses are OFFSETS from 0x0800_0000, and that is forced.**
-`util/nv_heap.hpp` numbers erase units in a `uint16_t`, so an absolute-address
-media must sit below page 65536 - which the samc21's RWWEE array at
-0x0040_0000 does (page 16384) and this bank does **not**: 0x0804_0000 /
-2048 is 65664, one page past the field. The AVR backend already numbers
-its flash from zero, so this is the contract's other established
-convention and not a new one. It costs one addition per access, and the
-family fixture asserts both halves of the reasoning.
+**The media's addresses are OFFSETS from 0x0800_0000, and that is
+forced.** `util/nv_heap.hpp` numbers erase units in a `uint16_t`, so an
+absolute-address media must sit below page 65536 - which the samc21's
+RWWEE array at 0x0040_0000 does (page 16384) and this bank does **not**:
+0x0804_0000 / 2048 is 65664, one page past the field. The AVR backend
+numbers its flash from zero too, so this is the contract's other
+convention. It costs one addition per access, and the family fixture
+asserts both halves of the reasoning.
 
 **A journal half is one page**, which is the smallest a half may be
 (erasing one must not take the other down) and is already 256 write
@@ -250,8 +249,8 @@ written nothing.
 
 ## Bench findings
 
-Measured by `test_stm32_nvm` (z = 85 verdicts over 10 letters, plus `s`
-12/12 and `v` 5/5 outside `z`) and `test_stm32_journal` (z = 52 verdicts
+Measured by `test_stm32_nvm` (85 verdicts over 10 letters in `z`, plus
+letters `s` and `v` outside it) and `test_stm32_journal` (52 verdicts
 over 7 letters, plus `p` and `v`), on the Nucleo-G0B1RE at 64 MHz. Both
 suites are wireless.
 
@@ -314,11 +313,9 @@ happens: **no further flash operation of any kind is possible, and a
 store into FLASH_CR from there would be a HardFault** (3.7.5). Only a
 system reset gets the interface back, which letter `s`'s last leg proves
 by erasing and programming again afterwards. `Flash::provoke()` reports
-that state as `FlashFlag::refused` and touches nothing.
-
-The first version of this suite paid for the discovery the expensive way:
-it provoked SIZERR with a single half-word store inside `z`, wedged the
-engine, and rebooted the board in the middle of its own output.
+that state as `FlashFlag::refused` and touches nothing. A single
+half-word store is that misstep, which is why letter `s` runs outside
+`z`, one provocation per boot.
 
 **The option bytes of this board**, read through `FlashOptions`
 (FLASH_OPTR = 0xFFFF_FEAA):
@@ -349,28 +346,27 @@ two watchdog bits are the same two `test_stm32_platform` letter a reads
 from the RCC's side: WWDG_SW = 1 is why nothing was feeding a window
 watchdog before that suite started.
 
-**util/nv_heap.hpp on the third silicon, unchanged.** A mount costs no
-erase and no program. A 300-byte block is placed at the top of the zone,
-sealed, found, read back byte for byte and survives a fresh mount; a
-`rewrite()` replaces it in place; the map pair really ping-pongs (page
-0 -> 1 -> 0) and every mutation lands on the other one. A whole `z` run
-costs **15 page erases** (8 through the heap, 7 raw), which against
-DS13560 table 49's 10 kcycle minimum leaves the busiest page good for
-hundreds of runs.
+**`util/nv_heap.hpp` runs here as written.** A mount costs no erase and no
+program. A 300-byte block is placed at the top of the zone, sealed, found,
+read back byte for byte and survives a fresh mount; a `rewrite()` replaces
+it in place; the map pair really ping-pongs (page 0 -> 1 -> 0) and every
+mutation lands on the other one. A whole `z` run costs **15 page erases**
+(8 through the heap, 7 raw), which against DS13560 table 49's 10 kcycle
+minimum leaves the busiest page good for hundreds of runs.
 
-**util/nv_journal.hpp on the third silicon, unchanged.** Mount is
-read-only and takes **4.3..5.3 ms** for 800..1000 media reads over the two
-2 K halves - the boot-path cost of walking 512 cells. A save of 16 bytes
-is **420 us** and **no erase**: four double words plus the CRC over them.
-Fifty-seven such saves fill a half and trigger a collection, which costs
-**46.3 ms** for six live ids - two page erases (2 x 22 ms) plus one
-program each - and the erase inside it spins **176009** bank-1 turns, so
-the no-stall claim holds for the attic too. That is what makes an
-ordinary save legal from the main loop on this target. Over eighty
-consecutive saves the half never fell below **7** free cells against a
-reserve of **6**, and `save_reserved()` spends exactly that in **629 us**
-with **zero** erases - which is what makes it legal from a panic handler.
-A `z` run costs **10 attic page erases**.
+**`util/nv_journal.hpp` runs here as written.** Mount is read-only and
+takes **4.3..5.3 ms** for 800..1000 media reads over the two 2 K halves -
+the boot-path cost of walking 512 cells. A save of 16 bytes is **420 us**
+and **no erase**: four double words plus the CRC over them. Fifty-seven
+such saves fill a half and trigger a collection, which costs **46.3 ms**
+for six live ids - two page erases (2 x 22 ms) plus one program each - and
+the erase inside it spins **176009** bank-1 turns, so the no-stall claim
+holds for the attic too. That is what makes an ordinary save legal from
+the main loop on this target. Over eighty consecutive saves the half never
+fell below **7** free cells against a reserve of **6**, and
+`save_reserved()` spends exactly that in **629 us** with **zero** erases -
+which is what makes it legal from a panic handler. A `z` run costs **10
+attic page erases**.
 
 **Coexistence.** A heap block in the lower pages stays byte-exact while
 the journal collects twice in the attic above it, and a heap mutation
@@ -383,19 +379,17 @@ the running image is out of reach by bounds and not only by convention.
 **A panic crosses a reset in FLASH - and the FAULT BODY is what writes
 it.** `test_stm32_journal` letter `p` panics for real. On a board whose
 C_DEBUGEN `tools/bench.py` has cleared, `panic()`'s BKPT escalates into
-HardFault *before* `Reporter::report()` is ever reached, and the first
-version of the letter measured exactly that: the SRAM breadcrumb present,
-the journal empty. So an application that wants a breadcrumb in FLASH on
-this target must bind the fault body and write it there - through the
-same bounded, erase-free `save_reserved()` path the reporter would have
-used, which is what makes it legal with interrupts masked for good and
-the board about to reset. The suite's `HardFault_Handler` is that
-composition, three lines of application glue over
-`kernel/panic.hpp` and `stm32g0/reset.hpp` with neither touched. The
-record then comes back with its code and its context byte intact,
-`take()` returns it once, and the next ordinary save restores the
-reserve. (The samc21 campaign found the same thing on its own silicon; this
-is its confirmation on the third.)
+HardFault *before* `Reporter::report()` is ever reached, which leaves the
+SRAM breadcrumb present and the journal empty. So an application that
+wants a breadcrumb in FLASH on this target must bind the fault body and
+write it there - through the same bounded, erase-free `save_reserved()`
+path the reporter would have used, which is what makes it legal with
+interrupts masked for good and the board about to reset. The suite's
+`HardFault_Handler` is that composition, three lines of application glue
+over `kernel/panic.hpp` and `stm32g0/reset.hpp` with neither touched. The
+record then comes back with its code and its context byte intact, `take()`
+returns it once, and the next ordinary save restores the reserve. (The
+same escalation and the same answer hold on the SAM C21.)
 
 **A reflash does not touch the storage.** OpenOCD's `program <elf> verify`
 erases only the sectors the image occupies, and the image occupies bank 1
@@ -438,7 +432,7 @@ Driver gaps:
 
 - **Writing an option byte.** There is no OPTKEYR, OPTSTRT or OBL_LAUNCH
   verb, on purpose (see above). Provisioning wants a `bench.py` verb over
-  SWD, the way the samc21's user row got one.
+  SWD, as the samc21's user row has.
 - **Setting WRP, PCROP or the securable area, and RDP.** Read-only decode
   only. Each of them is an option-byte write, and RDP Level 2 is one-way.
 - **Writing the OTP area.** It is memory-mapped and `read_otp()` reads

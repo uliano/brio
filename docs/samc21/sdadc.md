@@ -167,9 +167,9 @@ here can say what it does.
 `brio/samc21/sdadc.hpp` is the reference. In outline:
 
 - `Sdadc` - a **MONOSTATE**, not `Sdadc<n>`: one instance on every C21
-  variant, so an index would be a parameter with a single legal value
-  (the `Rtc` and `Dac` precedent). `sdadc_count()` in the reserve is what
-  makes "and none on a C20" a compile-time fact.
+  variant, so an index would be a parameter with a single legal value -
+  as `Rtc` and `Dac` are. `sdadc_count()` in the reserve is what makes
+  "and none on a C20" a compile-time fact.
 - `SdadcRef` - this converter's OWN reference vocabulary (INTREF, VREFB,
   DAC, VDDANA). Deliberately not `brio::Ref` (the ADC's six codes) nor
   `DacRef` (the DAC's three): this family has no shared reference block,
@@ -390,7 +390,7 @@ Board C, ATSAMC21J18A rev F, VDD about 5.15 V (the suite refines it to
 unless stated; times are ruled by the board's 24 MHz **crystal**, since
 OSC48M is 5100 ppm slow. Counts are of the SIGNED 16-bit datum
 (+/-32768 = +/-VREF) unless the text says "raw", which is the 24-bit
-value (+/-8388608 = +/-VREF). Suite `test_samc_sdadc`, `z` 101/101.
+value (+/-8388608 = +/-VREF). Suite `test_samc_sdadc`.
 
 ### The result, and the width nobody documents
 
@@ -405,17 +405,17 @@ value (+/-8388608 = +/-VREF). Suite `test_samc_sdadc`, `z` 101/101.
   shorted differential at OSR 64 the datum spans 3 counts while the raw
   value spans 760, and at OSR 256 and above the datum is BIT-EXACT over
   64 conversions while the raw value still moves.
-- **THE CORRECTIONS ACT IN THOSE RAW UNITS**, which is the campaign's
-  central measurement and which 39.6.3.4's "Data0 is an unsigned integer
-  defined on 16 bits" denies. On a shorted differential reading -22628
-  raw (-89 counts): OFFSETCORR 1000 gives -21456 raw (predicted -21628),
-  -1000 gives -23632 (predicted -23628), 8000 gives -14452 (predicted
-  -14628) and **25600 gives +2945 raw = +11 counts, i.e. exactly 100
-  counts of movement**. With OFFSETCORR 51200 standing, GAINCORR 2 at
-  SHIFTCORR 0 gives 57091 raw (predicted 57144), GAINCORR 4 at SHIFTCORR
-  1 gives 57497 (the same gain, as it must be), 3/2^1 gives 42817
-  (predicted 42858) and 1/2^1 gives 14357 (predicted 14286). **The gain
-  really is an integer over a power of two.**
+- **THE CORRECTIONS ACT IN THOSE RAW UNITS**, which 39.6.3.4's "Data0
+  is an unsigned integer defined on 16 bits" denies. On a shorted
+  differential reading -22628 raw (-89 counts): OFFSETCORR 1000 gives
+  -21456 raw (predicted -21628), -1000 gives -23632 (predicted -23628),
+  8000 gives -14452 (predicted -14628) and **25600 gives +2945 raw =
+  +11 counts, i.e. exactly 100 counts of movement**. With OFFSETCORR
+  51200 standing, GAINCORR 2 at SHIFTCORR 0 gives 57091 raw (predicted
+  57144), GAINCORR 4 at SHIFTCORR 1 gives 57497 (the same gain, as it
+  must be), 3/2^1 gives 42817 (predicted 42858) and 1/2^1 gives 14357
+  (predicted 14286). **The gain really is an integer over a power of
+  two.**
 - **GAINCORR = 0 makes every result zero** (span 0), which is erratum
   1.18.3 by arithmetic rather than by accident. The driver refuses it;
   the register was written raw to see it.
@@ -520,8 +520,9 @@ converter reads k x 64 counts:
   it**.
 - **39.6.2.3's "the first valid sample is the third" is literal.** With
   SKPCNT written raw, the same full-scale differential reads **5478 at
-  SKPCNT 0, 27623 at 1 and 32767 at 2** - the SINC filter's step response
-  caught in the act, and the reason the driver refuses fewer than two.
+  SKPCNT 0, 27623 at 1 and 32767 at 2** - the SINC filter's step
+  response in the readings, and the reason the driver refuses fewer
+  than two.
 
 ### The references
 
@@ -555,10 +556,9 @@ references at OSR 1024:
 
 ### Erratum 1.8.10, reproduced with a control
 
-The instrument is the one the DAC campaign built for erratum 1.8.9: the
-SAR ADC watching the DAC's own VOUT pad, whose spread is the
-disturbance. Spread of 64 SAR readings of 4096, with the DAC at
-mid-code:
+The instrument is erratum 1.8.9's: the SAR ADC watching the DAC's own
+VOUT pad, whose spread is the disturbance. Spread of 64 SAR readings of
+4096, with the DAC at mid-code:
 
 | arrangement | spread |
 |-------------|--------|
@@ -598,9 +598,9 @@ so the bit was cleared by hand to measure it.
   conversion is done. A one-input sequence converts THAT input whatever
   MUXSEL says, and zero in SEQCTRL gives the multiplexer back. **A
   sequence is over in 385 us at OSR 64**, which is shorter than one
-  console line at 115200 - the suite prints nothing between the START and
-  the third result, and the first version of the letter that did lost the
-  whole sequence.
+  console line at 115200: a letter that prints between the START and the
+  third result loses the whole sequence, so the suite prints nothing
+  there.
 - **Three differential pairs are three independent inputs**, each
   following its own two pads.
 - **The documentary disputes, settled by writing registers raw under a
@@ -624,8 +624,8 @@ See [platform.md](platform.md), "Sleep, peripheral by peripheral".
 
 ## The flush, the window event, and the three interrupts
 
-From `test_samc_analog` letter k, 17 verdicts, with the pair's two pads
-driven to opposite rails and the crystal as the ruler.
+From `test_samc_analog` letter k, with the pair's two pads driven to
+opposite rails and the crystal as the ruler.
 
 **A free-running result arrives every decimation window and nothing
 else.** Timed across thirty-two consecutive results in one stopwatch
@@ -677,7 +677,7 @@ Driver gaps:
 - **The converter as a WAKE source**, and erratum 1.8.7's SleepWalking
   obligation on SWTRIG: exercising the second needs a DMA write during
   a standby, which is [dmac.md](dmac.md)'s own gap - the sleep
-  measurement below sidesteps it by free-running, which is the
+  measurement above sidesteps it by free-running, which is the
   erratum's own escape (a free-running converter writes no trigger).
   `CTRLA.ONDEMAND` is written and read back and nothing distinguishes
   it here.

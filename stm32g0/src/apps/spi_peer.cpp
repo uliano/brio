@@ -1,13 +1,11 @@
-// spi_peer - the INSTRUMENT half of the SPI campaign on the STM32G0:
-// the scriptable CLIENT that test_stm32_spi (the DUT and the bus HOST,
-// on the OTHER board) drives IN BAND over the very bus both are
-// testing.
+// spi_peer - a scriptable SPI CLIENT for the other end of a two-board
+// bus test: the far board is the bus host and the DUT (test_stm32_spi)
+// and drives this one IN BAND over the very bus both are testing, every
+// command travelling as a checksummed frame in the same traffic.
 //
-// A PORT OF samc21/src/apps/spi_peer.cpp TO THE THIRD ARCHITECTURE,
-// over the SAME protocol header (spi_link.hpp, included by relative
-// path - one source of truth for the wire format, never a copy; three
-// architectures compile it now). What changed is exactly what the
-// silicon changed:
+// The wire format is spi_link.hpp, included by relative path: one file
+// is the single source of truth for every board that speaks it,
+// whatever its architecture. What this silicon makes of it:
 //
 //  - THE PUMP RUNS ONE AHEAD, and here it is the FIFO that says so
 //    rather than a documented latency: a client answering on RXNE
@@ -17,8 +15,8 @@
 //    already contain data to be sent before starting communication with
 //    the master", so the opening is TWO preloads before the host's clock
 //    can arrive (SpiClient::enable(a, b)) and every received frame loads
-//    the next-PLUS-ONE. This is test_stm32_spi's own `peer_service()`
-//    shape, which is the arrangement proven on this silicon.
+//    the next-PLUS-ONE - the same shape test_stm32_spi's own
+//    `peer_service()` runs.
 //
 //  - THE PUMP RUNS ON THE SPI1 INTERRUPT, not in a polled loop. Only the
 //    COMMAND listener is polled (a command character is 32 us at
@@ -28,53 +26,51 @@
 //    reload on the RXNE interrupt" as against the DMA engines - the bit
 //    names the software path, and that is what it selects here.
 //
-//  - THE BUFFERING REGIMES COLLAPSE, as they did on the SAM. There is no
-//    BUFEN/BUFWR pair here either: this client is always FIFO-buffered
-//    and the two preloads play BUFWR's role. spilink::Cfg::regime is
-//    mapped, not translated: regime_buffer_wait (the only regime the G0
-//    suite ever commands) runs the preloaded one-ahead pump and delivers
-//    the exact rx[i] = P_B(i) alignment that regime promises; the other
-//    two run WITHOUT the preloads, which on this silicon means the
-//    shifter's leftover leads - stated here, exercised nowhere.
+//  - THE BUFFERING REGIMES COLLAPSE. There is no BUFEN/BUFWR pair in
+//    ch. 35: this client is always FIFO-buffered and the two preloads
+//    play BUFWR's role. spilink::Cfg::regime is therefore MAPPED, not
+//    translated: regime_buffer_wait (the only regime this link ever
+//    commands) runs the preloaded one-ahead pump and delivers the exact
+//    rx[i] = P_B(i) alignment that regime promises; the other two run
+//    WITHOUT the preloads, which on this silicon means the shifter's
+//    leftover leads - stated here, exercised nowhere.
 //
-//  - flag_wrcol AND flag_feed_tx ARE AVR EXPERIMENTS (WRCOL and the
-//    28.5.5 BUFOVF clause have no counterpart in ch. 35) and are
-//    ignored; Op::mspi (the USART Host SPI client) is answered with
+//  - THE PROTOCOL CARRIES OPTIONS THIS SILICON HAS NOT GOT. flag_wrcol
+//    and flag_feed_tx name conditions chapter 35 does not have and are
+//    ignored; Op::mspi asks for a USART in host-SPI mode and is answered
 //    report_cfg_failed - this stratum's USART has no such mode.
 //    Everything else of the repertoire is served: ping/ident/report,
 //    exchange, sink_slow, ss_pulse, host_burst.
 //
-//  - THE ANSWER LINE'S EDGE RATE IS THIS APP'S, NOT THE DRIVER'S, and it
-//    was found the hard way. SpiClient hands MISO to the peripheral at
-//    VERY-HIGH speed, and on this jumper-wire bus that edge is an
-//    AGGRESSOR: with MISO at very-high the DUT's four-mode matrix slips
-//    in 20 bursts of 160 - byte-exact for its first frames, then BOTH
-//    ENDS DISAGREE FROM THE SAME FRAME ON, the rest of the stream one
-//    bit out of place - and every one of the twenty is mode 1 or mode
-//    2, THE TWO MODES THAT SAMPLE ON THE FALLING EDGE, where the data
-//    lines change on the RISING edge: this client's MISO edge lands,
-//    its own propagation delay after the clock edge, on an SCK that has
-//    just settled HIGH, and a fast falling edge coupled into the clock
-//    wire beside it dips it through VIL - a spurious falling edge, i.e.
-//    one sampling edge too many. In modes 0 and 3 the same edge lands on
-//    a LOW clock and nothing happens (0 of 80). One notch down, at HIGH,
-//    the slip is gone - 0 of 120 - and the ladders are UNCHANGED (the
-//    DMA serve exact to PCLK/2 = 32 MHz, the software pump to 16 MHz);
-//    medium costs the top rung (16 MHz) and low two (8 MHz), on both
-//    serves. So this app re-states the pad at HIGH after every init that
-//    drives it (console 's' cycles the four speeds; test_stm32_spi's
-//    letter x is the instrument). The DUT-side pads keep the driver's
-//    very-high: only the slave's edge lags the clock.
+//  - THE ANSWER LINE'S EDGE RATE IS THIS APP'S, NOT THE DRIVER'S.
+//    SpiClient hands MISO to the peripheral at VERY-HIGH speed, and on
+//    this jumper-wire bus that edge is an AGGRESSOR: with MISO at
+//    very-high the DUT's four-mode matrix slips in 20 bursts of 160 -
+//    byte-exact for its first frames, then BOTH ENDS DISAGREE FROM THE
+//    SAME FRAME ON, the rest of the stream one bit out of place - and
+//    every one of the twenty is mode 1 or mode 2, THE TWO MODES THAT
+//    SAMPLE ON THE FALLING EDGE, where the data lines change on the
+//    RISING edge: this client's MISO edge lands, its own propagation
+//    delay after the clock edge, on an SCK that has just settled HIGH,
+//    and a fast falling edge coupled into the clock wire beside it dips
+//    it through VIL - a spurious falling edge, i.e. one sampling edge
+//    too many. In modes 0 and 3 the same edge lands on a LOW clock and
+//    nothing happens (0 of 80). One notch down, at HIGH, the slip is
+//    gone - 0 of 120 - and the ladders are UNCHANGED (the DMA serve
+//    exact to PCLK/2 = 32 MHz, the software pump to 16 MHz); medium
+//    costs the top rung (16 MHz) and low two (8 MHz), on both serves. So
+//    this app re-states the pad at HIGH after every init that drives it
+//    (console 's' cycles the four speeds). The DUT-side pads keep the
+//    driver's very-high: only the slave's edge lags the clock.
 //
-// THE DARK LISTENER discipline is the AVR peer's, unchanged: the
-// command-mode client never drives MISO (drive_output = false, which
-// leaves the pad in analog), the answer line wakes only for one answer
-// window after a frame that CHECKED OUT, an unknown op is dropped in
-// silence, and a bad checksum is nak'ed only while ENGAGED. The select
-// wire is held up by THIS board's internal pull-up at all times - a pad
-// under an INPUT alternate function still follows its pull (the LPTIM
-// campaign's measurement) - so the pull is re-stated after every
-// re-init.
+// THE DARK LISTENER discipline: the command-mode client never drives
+// MISO (drive_output = false, which leaves the pad in analog), the
+// answer line wakes only for one answer window after a frame that
+// CHECKED OUT, an unknown op is dropped in silence, and a bad checksum
+// is nak'ed only while ENGAGED. The select wire is held up by THIS
+// board's internal pull-up at all times - a pad under an INPUT
+// alternate function still follows its pull (measured) - so the pull is
+// re-stated after every re-init.
 //
 // Link: SPI1 at AF0, the SAME PIN NAMES the DUT hosts on (SPI's own
 // MOSI/MISO naming carries the direction, so nothing is crossed) -
@@ -115,9 +111,9 @@
 #include "stm32g0/usart.hpp"
 #include "util/print.hpp"
 
-// THE PROTOCOL IS THE AVR CAMPAIGN'S, AND IT IS NOT COPIED (the
-// test_stm32_spi ruling: pure encoding, no register, three
-// architectures compile the same file).
+// THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
+// register, and every architecture on this link compiles the same
+// file.
 #include "../../../avrdx/src/apps/spi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -156,9 +152,9 @@ using Raw = Spi<1>;
 using MisoPin = Pin<link_pins.miso.port, link_pins.miso.pin>;
 using NssPin = Pin<link_pins.nss.port, link_pins.nss.pin>;
 
-constexpr uint16_t firmware_version = 0x0300;   ///< 0x01xx AVR, 0x02xx SAM
+constexpr uint16_t firmware_version = 0x0300;   ///< see spi_link.hpp's Ident
 
-/// THE ANSWER LINE'S EDGE RATE (the header's finding): HIGH, one notch
+/// THE ANSWER LINE'S EDGE RATE (see the header): HIGH, one notch
 /// below the driver's very-high, which is where the falling-edge slip
 /// stops with nothing of the ladder lost. init() rewrites the pad, so the
 /// choice is re-stated after every init that drives the output; the
@@ -211,7 +207,7 @@ void wait_ms(uint32_t ms) {
 /// SysTick period BY DESIGN (a tick or more is TimeEvent territory), and
 /// this instrument's holds are exactly the blocking waits that cap keeps
 /// out of KERNEL programs - this is not one, so the hold is spent in
-/// chunks the cap admits (the samc21 twi_peer's own shape).
+/// chunks the cap admits.
 void hold_us(uint32_t us) {
     while (us >= 500u) {
         (void)delay_us(clock, 500u);
@@ -226,9 +222,8 @@ void hold_us(uint32_t us) {
 //
 // One pump serves both the answer windows and the software-pump
 // exchange: the answers are precomputed, the received frames are only
-// STORED, and every judgement happens after the burst (the samc21
-// lesson - a reload path of a few register accesses is what a burst at
-// rate needs).
+// STORED, and every judgement happens after the burst - a reload path
+// of a few register accesses is what a burst at rate needs.
 
 constexpr uint16_t pump_cap = 64;
 
@@ -327,8 +322,8 @@ bool go_dark() {
     // takes the FIFOs, SPE and BSY down at once, while 35.5.9's
     // procedure WAITS for a transmit FIFO the host has stopped clocking
     // - up to two bounded spins, ~31 ms on this core, spent between two
-    // windows the protocol gives 5 ms. The first version paid exactly
-    // that and answered every frame longer than an ack too late.
+    // windows the protocol gives 5 ms - so a client that spends it
+    // answers every frame longer than an ack too late.
     const bool ok = Client::init(clock, {.mode = SpiMode::mode0,
                                          .bits = SpiDataSize::bits8,
                                          .lsb_first = false,
@@ -479,12 +474,12 @@ uint8_t burst_rx[2];
 /// The workhorse: the host sends P_A(i), this client answers P_B(i).
 ///
 /// TWO SERVES, so both boundaries stay measurable. THE DEFAULT IS THE
-/// DMA ENGINES - test_stm32_spi letter i's own arrangement, which
-/// measured the self-link exact to PCLK/4 with both ends engined: the
-/// peripheral disabled, TXDMAEN and RXDMAEN set, both channels claimed
-/// and started, and SPE raised LAST so the transmit channel's own first
-/// beats ARE the preload (a request is a level this controller serves on
-/// enable - the DMA campaign's finding). The receive block's completion
+/// DMA ENGINES, the arrangement that measures the self-link exact to
+/// PCLK/4 with both ends engined: the peripheral disabled, TXDMAEN and
+/// RXDMAEN set, both channels claimed and started, and SPE raised LAST
+/// so the transmit channel's own first beats ARE the preload (a request
+/// is a level this controller serves on enable). The receive block's
+/// completion
 /// is the transaction's. `spilink::spare_polled_pump` asks for the
 /// SOFTWARE pump instead - the one-ahead reload on RXNE - whose
 /// boundary is an interrupt entry per frame.
@@ -626,8 +621,8 @@ spilink::Report run_ss_pulse(const spilink::Params& a) {
 
 /// THE ROLES INVERT: this end becomes the bus HOST for a bounded burst
 /// (the DUT's own CLIENT half needs a clock, and there is nobody else on
-/// this wire). The choreography is the AVR peer's: the ack is already
-/// served, both boards count the same lead-in milliseconds, and at their
+/// this wire). The choreography: the ack is already served, both boards
+/// count the same lead-in milliseconds, and at their
 /// end the DUT is a client with its first answers preloaded. PA15 is
 /// driven LOW from GPIO for the WHOLE burst - one transaction, the thing
 /// hardware NSS cannot frame (35.5.5 frames the peripheral's lifetime,
@@ -636,8 +631,7 @@ spilink::Report run_ss_pulse(const spilink::Params& a) {
 ///
 /// aux16 is "the instrument's SCK division of its own clock", and this
 /// instrument's clock is 64 MHz: the division is turned into the BR code
-/// that produces AT MOST PCLK/aux16, so the suite's 32 is 2 MHz here
-/// where it was 1.5 MHz on the SAM and 750 kHz on the AVR.
+/// that produces AT MOST PCLK/aux16, so a commanded 32 is 2 MHz here.
 spilink::Report run_host_burst(const spilink::Params& a) {
     spilink::Report r{};
 
@@ -664,7 +658,7 @@ spilink::Report run_host_burst(const spilink::Params& a) {
     (void)Host::bit_order(a.cfg.dord != 0);
     // The mode is primed BEFORE the select falls: a CPOL flip inside an
     // open window is one extra edge and the selected client counts it
-    // (SpiHost::prime()'s own comment, the samc21 bench's finding).
+    // (SpiHost::prime()'s own comment).
     Host::prime(mode_of(a.cfg.mode), rate);
     hold_us(200);
 
@@ -755,7 +749,7 @@ void handle(const spilink::Frame& f) {
         case Op::sink_slow: r = run_sink_slow(a); break;
         case Op::ss_pulse: r = run_ss_pulse(a); break;
         case Op::host_burst: r = run_host_burst(a); break;
-        // Op::mspi is the AVR's USART-Host-SPI experiment and this
+        // Op::mspi asks for a USART in host-SPI mode and this
         // stratum's USART has no such mode; cfg_failed says "not on this
         // peer" rather than pretending.
         default: r.flags |= spilink::report_cfg_failed; break;

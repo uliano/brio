@@ -19,13 +19,13 @@ properties make it an identity store:
 The CPU can also write it through the NVMCTRL Flash commands - the
 row is erased and written as Flash, one byte at a time, with the erase
 taking all 32 bytes at once ([nvm.md](nvm.md), `Nvm::userrow_write` and
-`Nvm::userrow_erase`). `board_id()` stays a READ: a label is
+`Nvm::userrow_erase`). `board_id()` stays a read: a label is
 provisioning, not a run-time act, and the programmer already owns the
 write.
 
 Related but different: SIGROW (DS40002247B 8.6) carries a factory
 serial number, unique per chip and read-only. It identifies the die;
-USERROW carries the name WE chose for the board, which is what a human
+USERROW carries the name given to the board, which is what a human
 at the bench wants to read.
 
 ## What brio makes of it

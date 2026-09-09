@@ -20,7 +20,7 @@ revisions B..E. Driver: `samc21/adc.hpp`, over the reserve's ADC entries
 in `samc21/device_tables.hpp`. The family fixture is
 `test/family_samc21/adc.cpp` plus nine negatives under
 `tools/check_samc21.sh`; the bench suites are `test_samc_adc` and, for
-what needed the DAC as a swept mid-scale source, `test_samc_analog`
+what needs the DAC as a swept mid-scale source, `test_samc_analog`
 (letters a to d).
 
 ## What the silicon does
@@ -79,10 +79,10 @@ tables so nobody copies them by hand.
 the BIAS and LINEARITY values from production test "must be loaded from
 the NVM Software Calibration Area into the ADC Calibration register
 (CALIB) by software to achieve specified accuracy... The value must be
-copied only, and must not be changed." `samc21/nvm.hpp` has typed the
-four fields (two per converter) since its own campaign with a comment
-promising this; `init()` copies them, always. CALIB is enable-protected,
-so `load_calibration()` refuses under a running converter.
+copied only, and must not be changed." `samc21/nvm.hpp` types the four
+fields (two per converter) and `init()` copies them, always. CALIB is
+enable-protected, so `load_calibration()` refuses under a running
+converter.
 
 **The negative multiplexer is six pads wide where the positive one is
 twelve** - MUXNEG reaches AIN0..AIN5 and internal ground and nothing
@@ -95,7 +95,7 @@ f_adc at 160 kHz .. 16 MHz - so **at a 48 MHz generator DIV2 is illegal**
 prescaler that leaves the range when told the generator's rate. There is
 no `rebase()` and no `ClockUser` here: on this family the converter has
 its own generic clock channel, so a main-clock change does not move
-CLK_ADC and the AVR's fan-out has nothing to fan out to.
+CLK_ADC and a `ClockUser` fan-out would have nothing to fan out to.
 
 **The INTREF channel wants a long sample.** 38.8.9 says MUXPOS = INTREF
 requires SAMPCTRL.SAMPLEN "written with a corresponding value" and table
@@ -147,9 +147,8 @@ place every rule of the chapter is written down.
 The EVSYS and DMAC vocabularies this peripheral publishes -
 `resrdy_generator`, `winmon_generator`, `start_event_user`,
 `flush_event_user`, `dma_trigger_resrdy` - live here and not in
-`evsys.hpp` or `dmac.hpp`, per the ruling in
-[evsys.md](evsys.md): those files own the fabric and the channels, a
-peripheral owns its own codes.
+`evsys.hpp` or `dmac.hpp`: those files own the fabric and the channels,
+a peripheral owns its own codes ([evsys.md](evsys.md)).
 
 ### One example per use
 
@@ -193,7 +192,7 @@ Meter::enable(true);
 // conversion, source &Meter::regs().ADC_RESULT with no increment.
 ```
 
-The sampler AO (`util/analog_sampler.hpp`, unchanged from the AVR):
+The sampler AO (`util/analog_sampler.hpp`):
 
 ```
 using Sampler = brio::AnalogSampler<Meter, brio::SamPlatform, Subs,
@@ -231,7 +230,7 @@ does about it:
   `sequence_state()`; there is nothing to write.
 - **1.4.10 Syncbusy Enable** - enabling ADC1 while ADC0 is disabled can
   leave ADC0.SYNCBUSY.ENABLE stuck at one, and the workaround is
-  "enable ADC0 before ADC1 or disregard the bit". **It DOES reproduce
+  "enable ADC0 before ADC1 or disregard the bit". **It does reproduce
   on this die, and it is worse than the item's sentence** - see the
   findings. `enable()` waits on that bit, so `Adc<0>::init()` FAILS and
   leaves the converter disabled once the state is entered. The
@@ -246,7 +245,7 @@ never clearing), **1.4.2** (the LSB stuck at zero at 8 and 10 bits) and
 **1.8.2**, which says GCLK_AC is dead and the AC must borrow GCLK_ADC1's
 channel, is revision B only - which is why `ac.hpp` uses AC_GCLK_ID.
 **1.8.9** (the DAC output as MUXPOS making both the DAC and the reading
-noisy) is live at every revision and is now measured: see
+noisy) is live at every revision and is measured: see
 [dac.md](dac.md), where the output half is large and the reading half is
 declined, and where the workaround's "external wire" turns out to have
 zero length because PA02 is DAC/VOUT and ADC0/AIN0 at once.
@@ -286,8 +285,8 @@ counts.
 
 ## Bench findings
 
-From `test_samc_adc`, 9 letters / 97 verdicts, 97/97 four times
-(including one from a fresh flash), wireless, on the C21J at ~5.2 V.
+From `test_samc_adc`, 9 letters / 97 verdicts, wireless, on the C21J at
+~5.2 V.
 
 - **THE BANDGAP CHANNEL IS DEAD WITHOUT SUPC.VREF.VREFOE.** MUXPOS =
   INTREF reads a **flat zero** with that bit clear and **795 counts of
@@ -299,9 +298,9 @@ From `test_samc_adc`, 9 letters / 97 verdicts, 97/97 four times
   counts with VREFOE clear and 2990 with it set ([dac.md](dac.md)).
 - **VDD LOCATED FROM THE ADC'S SIDE, and it agrees with the AC's.**
   Against VDDANA, INTREF at 1.024 / 2.048 / 4.096 V reads 795 / 1603 /
-  3226 counts, which puts VDDANA at **5276 / 5233 / 5201 mV**. The SUPC
-  campaign, through the comparator's own 64-step scaler against the same
-  three levels, got 5251 / 5141 / 5090 mV ([supc.md](supc.md)). Two
+  3226 counts, which puts VDDANA at **5276 / 5233 / 5201 mV**. The
+  comparator's own 64-step scaler, against the same three levels, puts it
+  at 5251 / 5141 / 5090 mV ([supc.md](supc.md)). Two
   peripherals sharing no mechanism, agreeing to under 2 %, and both
   sloping the same way with the reference level - which says the slope
   belongs to the bandgap's own level accuracy and not to either
@@ -347,7 +346,7 @@ From `test_samc_adc`, 9 letters / 97 verdicts, 97/97 four times
   38.6.2.14's own subtraction. `adc_conversion_cycles()` keeps charging
   the 13 cycles in single mode deliberately - a pacing prediction that
   is too generous is safe and one that is too tight is not.
-- **MODE4 IS THE COMPLEMENT OF MODE3, and the two documents disagreed.**
+- **MODE4 IS THE COMPLEMENT OF MODE3, and the two documents disagree.**
   38.8.10's table prints MODE4 as "WINUT < RESULT < WINLT" while the
   device header's comment on the same value reads "!(WINLT < RESULT <
   WINUT)". With WINLT = 1000 below WINUT = 3000 the first reading is an
@@ -368,8 +367,8 @@ From `test_samc_adc`, 9 letters / 97 verdicts, 97/97 four times
 - **THE DMA REQUEST IS THE RESRDY FLAG, and clearing the flag is not the
   same as reading RESULT.** 38.6.4 says the request is "cleared when the
   RESULT register is read". A result left standing from a previous run
-  moves one stale beat the instant the channel is enabled - caught as a
-  suite bug, and the fix is to read RESULT away, not to write the flag.
+  moves one stale beat the instant the channel is enabled, so the remedy
+  is to read RESULT away, not to write the flag.
 - **AVERAGING WORKS, AND THE BOARD IS ALMOST TOO QUIET TO SHOW IT.** The
   three internal sources span 1 count (1/4 VDDANA), 4 counts (1/4
   VDDCORE) and 5 counts (INTREF) over 64 single 12-bit readings. On the
@@ -382,15 +381,13 @@ From `test_samc_adc`, 9 letters / 97 verdicts, 97/97 four times
   16-bit oversampled reading of the same source is 12714 of 65536, which
   is 794 of 4096 - the 12-bit reading exactly - and both convert to the
   same millivolts through `result_steps()`.
-- **`util/analog_sampler.hpp` RUNS UNCHANGED ON THIS SILICON**, which
-  was the campaign's point. One second at a 20 ms software pace: 49
-  conversion interrupts, 49 `AnalogSample` events received through the
-  kernel, 25 on the scaled supply and 24 on the pad, **zero** results
-  with an input code outside the list, each value attributed to the
-  right input. The file's own comment doubted the shape would survive on
-  a target with a hardware sequencer and DMA; the answer is that it
-  does, because the sequencer and the DMA are not what the sampler
-  uses.
+- **`util/analog_sampler.hpp` runs on this converter as written.** One
+  second at a 20 ms software pace: 49 conversion interrupts, 49
+  `AnalogSample` events received through the kernel, 25 on the scaled
+  supply and 24 on the pad, **zero** results with an input code outside
+  the list, each value attributed to the right input. A hardware
+  sequencer and a DMA trigger do not disturb the shape, because the
+  sampler uses neither.
 - **ERRATUM 1.4.10 REPRODUCES, AND IT IS WORSE THAN ITS OWN SENTENCE.**
   A narrow probe sees nothing: with ADC1 enabled and ADC0 disabled,
   ADC0.SYNCBUSY reads 0x0000. Running the two converters in earnest is
@@ -536,8 +533,9 @@ Driver gaps:
   and nothing on this board drives it inside table 45-30's range. Needs
   a wire.
 - **No temperature reading.** On this family the sensor is the separate
-  TSENS peripheral (ch. 43), not an ADC channel; `samc21/nvm.hpp` already
-  reads its calibration and its driver is a future pass.
+  TSENS peripheral (ch. 43), not an ADC channel; its driver is
+  `samc21/tsens.hpp` ([tsens.md](tsens.md)), fed the calibration
+  `samc21/nvm.hpp` reads.
 - **No rebase / ClockUser**, deliberately: the converter has its own
   generic clock channel and a main-clock change does not move CLK_ADC.
 
@@ -548,8 +546,8 @@ Implemented but not bench-verified:
 - **The gain correction.** `GAINCORR` is written, range-checked and
   read back; only the OFFSET half was measured against a reading.
 - **The FLUSH event input** (`flush_on()`): exercised for its refusal of
-  a synchronous channel, never for its effect. `flush()` itself now has
-  one measured effect and it is a NEGATIVE one - it does not restart an
+  a synchronous channel, never for its effect. `flush()` itself has one
+  measured effect and it is a NEGATIVE one - it does not restart an
   interleaved sequence (see above) - and what it costs a conversion in
   flight is unmeasured here. (The SDADC's flush is measured both ways -
   [sdadc.md](sdadc.md).)

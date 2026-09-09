@@ -47,7 +47,7 @@ namespace brio {
  * A panic reporter that stores the record in nonvolatile memory, and
  * the boot-side verb that reads it back.
  *
- *   using Panic = brio::PersistentPanic<brio::EepromStore, 0>;
+ *   using Panic = brio::PersistentPanic<Store, 0>;   // any NvStore
  *   ...
  *   brio::panic<P, Panic>(PanicCode::assert_failed, 7);   // at the fault
  *   ...

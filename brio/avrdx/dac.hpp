@@ -22,9 +22,9 @@
  * OUTEN on, and PD6 is then taken.
  * RUNSTDBY keeps it running in standby sleep.
  *
- * Bench facts (analog0, A5 silicon, bare pin): the buffered output RISES
- * to a new code within ~10-20 us but FALLS at the sink limit - about
- * 1 uA into the pin capacitance, i.e. ~20 kV/s: from 2 V to 0 V takes
+ * Bench facts (A5 silicon, bare pin): the buffered output RISES to a
+ * new code within ~10-20 us but FALLS at the sink limit - about 1 uA
+ * into the pin capacitance, i.e. ~20 kV/s: from 2 V to 0 V takes
  * ~100 us or more, and the last tens of mV much longer. A falling step
  * that must be fast needs the datasheet's resistor to ground (10 kOhm
  * sinks 200 uA at 2 V: 100 x faster). Settling after a rising step

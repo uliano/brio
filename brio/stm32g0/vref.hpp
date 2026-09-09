@@ -9,11 +9,9 @@
  * in stm32g0/adc.hpp: on this family there IS one shared reference block.
  * The ADC (15.3.1), the DAC (16.4.6) and the comparators' VREFINT scaler
  * all work against the SAME VREF+ pin, and the buffer of chapter 17 is
- * the one thing that can change what that pin is worth. On the SAM C21
- * each converter carried its own REFSEL vocabulary and each header
- * therefore carried its own reference enum (samc21/adc.hpp's comment says
- * so); here one enum serves all three, so it sits in the chapter that
- * owns the rail. util/analog.hpp's contract is unchanged: `Ref` and
+ * the one thing that can change what that pin is worth. One enum
+ * therefore serves all three converters, and it sits in the chapter that
+ * owns the rail. util/analog.hpp's contract is the usual one: `Ref` and
  * `ref_mv()` are each target's, under the same name.
  *
  * THE RULE THAT SHAPES THE DRIVER. 17.1: "When the VREF+ pin is
@@ -36,9 +34,9 @@
  * HIZ set. Hold mode (ENVR = 1, HIZ = 1) is reachable, because it drives
  * nothing.
  *
- * THE BLOCK IS BEHIND SYSCFG'S CLOCK GATE, and the bench is how that was
- * learned. Chapter 17 names no clock at all, and the device header's own
- * address map is what says it: VREFBUF_BASE is SYSCFG_BASE + 0x30, the
+ * THE BLOCK IS BEHIND SYSCFG'S CLOCK GATE, which chapter 17 names
+ * nowhere: the device header's own address map is what says it.
+ * VREFBUF_BASE is SYSCFG_BASE + 0x30, the
  * same block COMP1..COMP3 live in - so RCC_APBENR2.SYSCFGEN gates it,
  * and 5.2.17's rule applies. WITH THE GATE CLOSED VREFBUF_CSR READS
  * ZERO, and zero is not the reset value: it is table 91's OTHER off mode,
@@ -131,8 +129,7 @@ struct VrefBufConfig {
     bool board_vref_pin_is_free = false;
 };
 
-/// The block. One instance on every part of the family, so a monostate
-/// (the samc21 Dac/Sdadc/Tsens precedent).
+/// The block. One instance on every part of the family, so a monostate.
 struct Vref {
     static_assert(vrefbuf_present(),
                   "brio Vref: this device declares no VREFBUF_BASE");

@@ -12,10 +12,9 @@
 // still holds PULLEN, and the pull's DIRECTION is the PORT OUT bit
 // (28.6.3.2), so writing OUT moves the pad between the rails through
 // the pull resistor and the EIC sees a real edge on a real pin. Letter
-// b is where that technique is established rather than assumed: it
-// tries the obvious one first (drive the pad from PORT with the
-// peripheral mux on) and reports what the silicon actually does with
-// each.
+// b is where that stimulus is measured rather than assumed: it tries
+// the obvious one first (drive the pad from PORT with the peripheral
+// mux on) and reports what the silicon does with each.
 //
 // What is exercised, letter by letter:
 //   a  the block: geometry, the pad-to-line map read out of the device
@@ -106,8 +105,8 @@ using Nmi = ExtNmi<NmiPad>;
 constexpr uint8_t eic_gen = 6;
 using EicGen = Gclk<eic_gen>;
 
-// The event fabric, as in test_samc_evsys: DMAC channel 0 is event user
-// 5, and the transfer is the witness that an event arrived.
+// The event fabric: DMAC channel 0 is event user 5, and the transfer is
+// the witness that an event arrived.
 constexpr uint8_t dma_ch = 0;
 constexpr uint8_t user_dmac_ch0 = 5;
 constexpr uint8_t ev_ch = 0;
@@ -117,9 +116,9 @@ volatile uint32_t eic_isr_count = 0;
 volatile uint32_t eic_isr_mask = 0;
 volatile uint32_t nmi_count = 0;
 
-// VOLATILE IN BOTH DIRECTIONS - the lesson the DMAC campaign paid for on
-// this target: gcc cannot see the controller's reads either, and will
-// sink a buffer's preparation past the thing that starts the transfer.
+// VOLATILE IN BOTH DIRECTIONS: gcc cannot see the controller's reads
+// either, and will sink a buffer's preparation past the thing that
+// starts the transfer.
 constexpr uint16_t payload = 16;
 volatile uint8_t src[payload];
 volatile uint8_t dst[payload];
@@ -657,11 +656,10 @@ void td_clock() {
 // e - the event: an EIC edge through EVSYS, into a DMA transfer
 // =============================================================================
 //
-// THIS IS THE LETTER THE EVSYS CAMPAIGN COULD NOT WRITE. docs/samc21/
-// evsys.md declined to claim anything about a HARDWARE generator on the
-// ASYNCHRONOUS path, because that suite had no generator to route - only
-// the software event, which measurably does not cross an async channel.
-// The EIC is that generator, and it settles the question both ways.
+// A HARDWARE GENERATOR ON THE ASYNCHRONOUS PATH, which is the case a
+// software event cannot stand in for: a software event does not reach
+// the DMAC's trigger stage at all (docs/samc21/evsys.md). The EIC is a
+// real generator, and it settles the question both ways.
 //
 // It also settles a documentation dispute: 26.6.7 says the EIC's event
 // outputs are "External event from pin (EXTINT0-7)", while its own

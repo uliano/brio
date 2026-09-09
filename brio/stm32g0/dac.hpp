@@ -35,16 +35,15 @@
  * 3. A TRIGGER IS AN EDGE AND THE FIRST DATUM MUST PRECEDE IT. 16.4.8:
  *    "the very first data has to be written to the DAC_DHRx before the
  *    first trigger event occurs" - which is why a DMA-fed stream on this
- *    converter starts by filling the holding register, exactly as the
- *    SAM's did, and why the underrun flag exists at all. DMAUDRx is
+ *    converter starts by filling the holding register, and why the
+ *    underrun flag exists at all. DMAUDRx is
  *    write-1-to-clear and 16.4.8 says recovering from it means
  *    re-initializing the DMA channel and the converter both: `underrun()`
  *    reports, and the owner decides.
  *
  * 4. THE WAVE GENERATORS NEED A TRIGGER. WAVEx is "only used if TENx = 1"
  *    (16.7.1), so noise and triangle are refused without one rather than
- *    quietly doing nothing - the samc21 dac.hpp ruling on dithering,
- *    reached again from another chapter.
+ *    quietly doing nothing.
  *
  * The reference is stm32g0/vref.hpp's `Ref`: 16.4.6's transfer function
  * is VREF+ x DOR / 4096, the same rail the ADC measures against.
@@ -182,7 +181,7 @@ constexpr bool dac_channel_config_valid(const DacChannelConfig& c) {
 
 /// DAC_SR's per-channel bits (16.7.14), by channel index.
 // The register-facing half is compiled only where the device header
-// declares the block (the fdcan.hpp precedent): the G031/G041 and every
+// declares the block: the G031/G041 and every
 // x0 value-line part have no DAC, no DAC_TypeDef and none of the DAC_CR
 // bit names, and a Dac spelled there is a compile error naming the
 // reason. The vocabulary above - triggers, modes, waves, the channel
@@ -240,7 +239,7 @@ public:
      * CHOICE and it decides the beat width: DHR12Rx wants a halfword,
      * DHR8Rx a byte, and a stream whose element type disagrees with the
      * register it was pointed at writes a number the converter never
-     * meant (the samc21 campaign's 24-bit lesson, in a smaller key).
+     * meant.
      */
     static volatile void* data_address_12r(uint8_t ch) {
         return ch == 0u ? static_cast<volatile void*>(&regs().DHR12R1)
@@ -310,9 +309,9 @@ public:
      * configuration) and only then `configure(ch, ...)`. Putting the data
      * write inside this verb would change what every image already built
      * for this family does, so it is stated and not done; the G0B1's
-     * ES0548 has no such item, and test_stm32_analog measures the
-     * configure-then-set order - the erratum's own condition - on the
-     * die it runs on (not reproduced on a G071 revision B).
+     * ES0548 has no such item, and the configure-then-set order - the
+     * erratum's own condition - is measured on the die the bench runs
+     * (not reproduced on a G071 revision B).
      */
     static bool configure(uint8_t ch, const DacChannelConfig& c) {
         if (!channel_valid(ch) || !dac_channel_config_valid(c)) {
@@ -455,12 +454,11 @@ public:
      * which is LSI, selected in the RCC (table 85) and NOT this driver's
      * to turn on.
      *
-     * AND WITH LSI STOPPED NOTHING SAYS SO. An earlier version of this
-     * comment claimed such a caller "gets a channel that never samples";
-     * measured (test_stm32_analog letter o, with LSIRDY read clear) it
-     * gets the opposite - the pad carries the value to within a count,
-     * exactly as the plain buffered mode does, the times land, and BWST
-     * never stands. So the mode degrades to plain buffered IN SILENCE
+     * AND WITH LSI STOPPED NOTHING SAYS SO. Measured with LSIRDY read
+     * clear: the channel does not stop sampling - the pad carries the
+     * value to within a count, exactly as the plain buffered mode does,
+     * the times land, and BWST never stands. So the mode degrades to
+     * plain buffered IN SILENCE
      * and there is no bit an application can read to tell the two apart.
      * Whoever selects a sample-and-hold mode owns the LSI.
      *

@@ -24,13 +24,13 @@
 // This relies on the device keeping its conversion running while CS is
 // high (single conversion mode with CS toggling), which is what makes
 // the ADC a good citizen of a shared bus - the display can use SCK/MOSI
-// while it converts. Measured on the bench (2026-08-17, analyzer): with
-// CS held low the conversion ends at 83 ms; with CS HIGH during the
+// while it converts. Measured with an analyzer on CS/SCK/SDO: with CS
+// held low the conversion ends at 83 ms; with CS HIGH during the
 // conversion RDY comes ~119 ms after the trigger - the part converts
-// slower in shutdown - and a read at 120 ms was on the knife edge. Also
+// slower in shutdown - and a read at 120 ms is on the knife edge. Also
 // seen: after CS falls the ADC needs a few us before SDO shows RDY, and
 // devices latching their SPI mode from SCK at CS-fall need SCK parked
-// at CPOL beforehand (now guaranteed by the engine, Spi::apply_mode).
+// at CPOL beforehand (guaranteed by the engine, Spi::apply_mode).
 //
 // One BusDone alternative serves both buses: the FSM state says which
 // bus the reply came from (a client of two buses distinguishes replies
@@ -70,12 +70,12 @@ namespace {
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
-using TwiHw = brio::TwiHost<0>;                        // PA2 SDA / PA3 SCL
-using I2c = brio::I2cBus<TwiHw, P>;
+using I2cHw = brio::I2cHost<0>;                        // PA2 SDA / PA3 SCL
+using I2c = brio::I2cBus<I2cHw, P>;
 using SpiHw = brio::SpiHost<0>;                        // PA4/PA5/PA6
 using Spi = brio::SpiBus<SpiHw, P>;
 
-using AdcCs = brio::Pin<'B', 0>;                   // MCP3550 CS (moved from PD3, 2026-08-17)
+using AdcCs = brio::Pin<'B', 0>;                   // MCP3550 CS
 constexpr uint8_t adc_cs_setup_us = 10;            // CS-to-first-SCK after wake (see spi.hpp)
 
 // ---- MCP47CVB22 (dual 12-bit DAC, I2C) ---------------------------------------
@@ -140,10 +140,10 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
             [](brio::Entry) {
                 i2c_tx[0] = static_cast<uint8_t>((dac_reg_out0 << 3) | dac_cmd_write);
                 brio::store_be16(&i2c_tx[1], dac_code);
-                brio::post<I2c>(TwiHw::Request{
+                brio::post<I2c>(I2cHw::Request{
                     dac_addr, brio::lend<brio::Lease::reply>(i2c_tx), 3, {}, 0,
                     brio::reply_to<Loop, brio::BusDone>(),
-                    brio::TwiSpeed::fast_400k});
+                    brio::I2cSpeed::fast_400k});
                 return handled();
             },
             [](brio::BusDone d) {
@@ -162,10 +162,10 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
         return brio::match(e,
             [](brio::Entry) {
                 i2c_tx[0] = static_cast<uint8_t>((dac_reg_out0 << 3) | dac_cmd_read);
-                brio::post<I2c>(TwiHw::Request{
+                brio::post<I2c>(I2cHw::Request{
                     dac_addr, brio::lend<brio::Lease::reply>(i2c_tx), 1, brio::lend<brio::Lease::reply>(i2c_rx), 2,
                     brio::reply_to<Loop, brio::BusDone>(),
-                    brio::TwiSpeed::fast_400k});
+                    brio::I2cSpeed::fast_400k});
                 return handled();
             },
             [](brio::BusDone d) {
@@ -307,8 +307,8 @@ private:
 
 // ---- target glue ------------------------------------------------------------
 ISR(TWI0_TWIM_vect) {
-    if (TwiHw::isr()) {
-        brio::post<I2c>(brio::TransferDone{TwiHw::status()});
+    if (I2cHw::isr()) {
+        brio::post<I2c>(brio::TransferDone{I2cHw::status()});
     }
 }
 ISR(SPI0_INT_vect) {
@@ -323,7 +323,7 @@ ISR(RTC_PIT_vect)    { brio::Ticker::pit(); }
 int main() {
     SysClock::init();
     Serial::init(clock, 460800);
-    TwiHw::init(clock);
+    I2cHw::init(clock);
     SpiHw::init(clock);
     brio::Ticker::init();
     sei();

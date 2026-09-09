@@ -116,8 +116,8 @@
  *    written as a VALUE, and "writing zero to this bit group has no
  *    effect" on BOTH halves (36.8.2, 36.8.3). So a command is issued
  *    through CTRLBSET and CANCELLED through CTRLBCLR, and a driver that
- *    cancels by writing zero to CTRLBSET cancels nothing at all. The
- *    bench found this with a RAMP2 index held forever; `command()` and
+ *    cancels by writing zero to CTRLBSET cancels nothing at all.
+ *    Measured with a RAMP2 index held forever; `command()` and
  *    `ramp_index_command()` route their `none`/`off` through CTRLBCLR.
  *
  * ERRATA, DS80000740S, read on the E/G/J ROW at revision F. This chapter
@@ -166,10 +166,10 @@
  *  1.21.1 Circular Buffer in standby, 1.21.2 RAMP2 double restart,
  *  1.21.3 CAPTMARK, 1.21.4 Capture Overflow within 3+3 clocks.
  *
- * NOT BUILT (docs/samc21/tcc.md carries the list): the debug-fault
- * state as an exercised path (FDDBD is exposed, a halted debugger is
- * not something a bench suite can stage), and sleep, which the power
- * pass owns together with RUNSTDBY.
+ * NOT BUILT (docs/samc21/tcc.md carries the list): the debug-fault state
+ * as an exercised path (FDDBD is exposed, a halted debugger is not
+ * something a bench suite can stage), and sleep, which samc21/sleep.hpp
+ * owns together with RUNSTDBY.
  */
 
 #pragma once
@@ -611,15 +611,14 @@ struct TccFaultConfig {
      * valid one is delayed by it. MUST be zero for a synchronous event
      * source - which erratum 1.21.9 forbids anyway.
      *
-     * IT COUNTS GCLK_TCC CYCLES, NOT PRESCALED ONES, and that is
-     * MEASURED (test_samc_timer_dma letter i, docs/samc21/tcc.md): with
-     * one generic clock and two prescalers sixty-four apart, the
-     * shortest pulse that still makes a valid fault does not move, and
-     * it lands where fifteen cycles of the GENERIC clock put it - 160 us
-     * on a 93 kHz generator against 160 us measured. 36.8.5 says
-     * "prescaled clocks" and so did this comment; the dead-time unit
-     * (36.8.7) reads exactly the same way and was caught being generic
-     * clocks by the TCC campaign, so this chapter has form.
+     * IT COUNTS GCLK_TCC CYCLES, NOT PRESCALED ONES, and that is MEASURED
+     * (docs/samc21/tcc.md): with one generic clock and two prescalers
+     * sixty-four apart, the shortest pulse that still makes a valid fault
+     * does not move, and it lands where fifteen cycles of the GENERIC
+     * clock put it - 160 us on a 93 kHz generator against 160 us
+     * measured. 36.8.5 says "prescaled clocks", and the dead-time unit
+     * (36.8.7) reads exactly the same way and is likewise measured to be
+     * generic clocks - so this chapter has form.
      */
     uint8_t filter_value = 0;
 };
@@ -1602,8 +1601,7 @@ struct TccPwm {
 
 /**
  * TccPairPwm<Tcc, slice, top>: the complementary output pair with
- * dead-time insertion - this chapter's reason to exist, and the SAM
- * counterpart of the AVR's TcdPwm.
+ * dead-time insertion - this chapter's reason to exist.
  *
  * One duty value drives two pads: the dead-time unit splits matrix
  * output `slice` into a non-inverted LOW SIDE on WO[slice] and an

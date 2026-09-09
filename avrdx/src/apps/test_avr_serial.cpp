@@ -8,8 +8,9 @@
 // the fractional baud generator (the start bit measured by a TCB
 // through the event system), the clock rebase, auto-baud and Host SPI.
 //
-// TWO BOARDS (j..u and w, `y`): board B runs `usart_peer` and is driven
-// IN BAND over the very link under test (protocol: usart_link.hpp) -
+// TWO BOARDS (j..u and w, `y`): a second board runs `usart_peer` and is
+// driven IN BAND over the very link under test (protocol:
+// usart_link.hpp) -
 // the baud and frame matrices cross the wire, errors are injected on
 // purpose, a cycle-counted bit-banger makes waveforms no clean UART can
 // produce, a foreign clock feeds auto-baud, the synchronous roles run
@@ -27,15 +28,15 @@
 // Wires: the single-board half needs none - everything that needs a
 // loop-back runs on USART4 at its default position (TXD PE0, RXD PE1,
 // XCK PE2) with LBME, and the internal loop-back is taken at the TXD
-// PAD, so a pinless route receives nothing (bench finding, and what
-// usart.hpp now refuses). The two-board half needs the campaign wiring
-// A.PE0-B.PE1, A.PE1-B.PE0, A.PE2-B.PE2, GND-GND, with `usart_peer`
-// flashed on board B. Test `w` alone wants a single PE0-PE0 wire
-// instead and is therefore NOT part of `y`.
+// PAD, so a pinless route receives nothing (measured, and what
+// usart.hpp refuses). The two-board half needs the crossed pair - this
+// board's PE0 to the peer's PE1, PE1 to the peer's PE0, PE2 to PE2,
+// GND to GND - with `usart_peer` flashed on the peer. Test `w` alone
+// wants a single PE0-PE0 wire instead and is therefore NOT part of `y`.
 // USART0's default route is NOT usable on this board: TXD would be PA0,
 // the 24 MHz crystal pin. The per-instance loop-back smoke therefore
 // uses USART0 ALT1 (PA4/PA5), USART1 default (PC0/PC1) and USART3 ALT1
-// (PB4/PB5); on this desk PC0 and PB4 are traffic LEDs (harmless) and
+// (PB4/PB5); on this bench PC0 and PB4 are traffic LEDs (harmless) and
 // PA4 doubles as SPI0 MOSI and traffic button 2 - do not hold a button
 // down while test b runs.
 //
@@ -284,9 +285,10 @@ void tc_overflow() {
     verdict("three frames survive (two buffered + the shifter)", cnt == 3);
     verdict("the two buffered frames are the two oldest",
             cnt == 3 && got[0].data == 0xA0 && got[1].data == 0xA1);
-    // Bench: the shift register is NOT frozen at the third frame - it
-    // keeps taking new ones while the buffer stays full, so the third
-    // read is the LAST frame on the line, not the third one sent.
+    // MEASURED, against the obvious reading of a full FIFO: the shift
+    // register is NOT frozen at the third frame - it keeps taking new
+    // ones while the buffer stays full, so the third read is the LAST
+    // frame on the line, not the third one sent.
     verdict("the third is the last frame received, not the third sent",
             cnt == 3 && got[2].data == 0xA5);
     verdict("BUFOVF marks that frame and only that one",
@@ -621,8 +623,8 @@ void th_autobaud() {
 // ---- i: Host SPI mode ---------------------------------------------------------
 // Compile-complete and exercised through the internal loop-back only:
 // MOSI (TXD) is fed back to the receiver, so a transfer must return
-// what it sent. The electrical side (a real client on XCK/TXD/RXD)
-// belongs to the SPI campaign.
+// what it sent. The electrical side (a real client on XCK/TXD/RXD) is
+// test_avr_spi's, which drives this mode against a real SPI client.
 
 using Mspi = MspiHost<4, UsartRoute::def>;
 
@@ -654,7 +656,7 @@ void ti_mspi() {
 }
 
 // ==============================================================================
-//  THE TWO-BOARD HALF (j .. u, w): board B runs `usart_peer` and is driven
+//  THE TWO-BOARD HALF (j .. u, w): the far board runs `usart_peer`, driven
 //  IN BAND over the very link under test - the protocol is
 //  src/apps/usart_link.hpp. Command mode is async 8N1 at 115200 on both
 //  boards; every command that changes the link carries a frame count and a
@@ -677,8 +679,8 @@ link::Decoder dec;
 const uint8_t no_payload[1] = {0};
 
 /// Which wiring this desk has (usart_link.hpp Topology). Found once by
-/// ensure_link() and then reused: the crossed full-duplex pair the
-/// campaign assumes, or a single wire between the two TXD pads.
+/// ensure_link() and then reused: the crossed full-duplex pair, or a
+/// single wire between the two TXD pads.
 link::Topology topo = link::Topology::full_duplex;
 bool topo_known = false;
 bool link_quiet = false;      ///< suppress the failure dump while probing
@@ -1206,10 +1208,10 @@ void tx_clocks() {
 }
 
 // ---- v: the wiring probe -------------------------------------------------------
-// Not part of `y`: it needs board B's console command '2' started at the
-// same time, and it is the answer to "is the desk wired the way the
-// campaign assumes?" - a question no in-band protocol can ask when the
-// wires are the thing that is broken. Each board drives its own PE0 with
+// Not part of `y`: it needs the peer's own console command '2' started
+// at the same time, and it is the answer to "is the desk wired the way
+// this suite expects?" - a question no in-band protocol can ask when
+// the wires are the thing that is broken. Each board drives its own PE0 with
 // a slow square wave (the DUT at 5 Hz, the peer at 7) and counts the
 // edges on the pins it only listens to.
 

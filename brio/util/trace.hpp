@@ -2,8 +2,7 @@
  * trace.hpp (util)
  *
  * Trace: a ring of timestamped marks, written from anywhere and read
- * back afterwards. The bench technique every campaign reinvented,
- * promoted to a service.
+ * back afterwards - a bench technique as a service.
  *
  * WHAT IT IS FOR. On a machine with one console and no debugger
  * attached, the two things a program cannot do while something
@@ -45,8 +44,8 @@
  * Nothing in a service can name an application's events, and a table of
  * strings would cost more flash than the ring costs RAM.
  *
- * Validated on: AVR DA/DB and the host. Nothing here is target-specific
- * beyond the platform's clock and critical section.
+ * Nothing here is target-specific beyond the platform's clock and
+ * critical section.
  */
 
 #pragma once

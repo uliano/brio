@@ -6,12 +6,12 @@
  * in millivolts. Pure, constexpr, host-tested (test/test_analog).
  *
  * What is NOT here, on purpose: the reference levels (the enum Ref and
- * ref_mv() are each target's - the AVR DA/DB VREF offers 1.024/2.048/
- * 2.5/4.096 V, other silicon offers other sets - so every target's
- * vref header defines its own brio::Ref under the same name, as with
- * Clock or Pin: two targets never meet in one binary) and the
- * temperature formula (calibration factors and their meaning are the
- * silicon's: Adc<n>::temp_kelvin() on AVR DA/DB).
+ * ref_mv() are each target's - one family's VREF offers 1.024/2.048/
+ * 2.5/4.096 V, another a different set - so every target's vref header
+ * defines its own brio::Ref under the same name, as with Clock or Pin:
+ * two targets never meet in one binary) and the temperature formula
+ * (calibration factors and their meaning are the silicon's, so the
+ * conversion lives with the target's own converter).
  */
 
 #pragma once

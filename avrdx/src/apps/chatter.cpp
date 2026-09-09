@@ -1,8 +1,8 @@
 // chatter - a desk identification beacon: it does nothing but transmit
 // on the console UART continuously, so the board running it is the one
 // whose on-board TX LED is lit. Flash it on the board you are trying to
-// tell apart (the two bench boards are physically identical); every
-// line carries the USERROW label, so the console names the board too.
+// tell apart when several are physically identical; every line carries
+// the USERROW label, so the console names the board too.
 //
 // Wiring: none. Console on USART2 ALT1 (PF4/PF5) at 460800, like every
 // bench app.

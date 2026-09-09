@@ -14,8 +14,7 @@
  *
  *  FlashWaitStates  the wait-state verb the clock code needs. It lives
  *                 here because it is NVMCTRL's register (CTRLB.RWS);
- *                 samc21/clock.hpp calls it, having held it on loan until
- *                 this driver existed.
+ *                 samc21/clock.hpp calls it around a rate change.
  *
  * WHAT THE SILICON DOES, in the four facts that shape every verb below.
  *
@@ -52,7 +51,7 @@
  *    (27.6.4.3's own second example).
  *
  *    THE REAL RULE IS NARROWER THAN "WRITE ASCENDING", and it was
- *    measured rather than inferred (test_samc_nvm letter c): what a
+ *    measured rather than inferred: what a
  *    section needs is that ITS TWO WORDS BE WRITTEN BACK TO BACK.
  *    Ascending satisfies that; so does DESCENDING, which crosses a
  *    boundary on every store and still comes out byte-exact, because
@@ -85,28 +84,26 @@
  *
  * REGISTER ACCESS PROTECTION: CTRLA, CTRLB and ADDR are PAC
  * write-protected (27.5.5). PAC protection is off out of reset and no
- * brio driver enables it, so nothing here performs the unlock dance; when
- * a PAC driver arrives it must, and this is the note that says so.
+ * brio driver enables it, so nothing here performs the unlock dance; a
+ * program that turns it on through samc21/pac.hpp must.
  *
  * NOT BUILT (docs/samc21/nvm.md carries the list and the reasons):
  *  - The SSB command (Set Security Bit). It is ONE-WAY - only a debugger
  *    chip erase clears it - and its whole effect is to lock the part
  *    against the debugger. `security_bit()` reads the state; nothing here
- *    sets it, the same ruling that kept CHER and software fuse writes out
- *    of avrdx/nvm.hpp.
+ *    sets it - a one-way hazard gets a reader and never a writer.
  *  - Writing the NVM User Row (the EAR and WAP commands). On this family
  *    the user row IS the fuses - BOOTPROT, EEPROM size, BODVDD level and
  *    action, and the watchdog's power-on ENABLE/ALWAYSON/PER - and it
  *    survives a chip erase, so a wrong word is not recoverable by
  *    reflashing. It is read here and typed; writing it is provisioning,
- *    which on the AVR side lives in the bench tool and over UPDI, and
- *    which here wants a bench.py verb over SWD.
+ *    and it is tools/bench.py's `fuses` verb, over SWD, that does it.
  *  - The two commands the device header carries but chapter 27's command
  *    table does not list at all: SF (0xA, "Security Flow") and WL (0xF,
  *    "Write lockbits"). Undocumented and, in WL's case, permanent.
  *  - Power reduction (SPRM/CPRM and CTRLB.SLEEPPRM) is exposed as
- *    configuration and verbs, but the sleep modes that give it meaning
- *    belong to the power pass.
+ *    configuration and verbs, and nothing here enters the sleep modes
+ *    that give it meaning (samc21/sleep.hpp does).
  */
 
 #pragma once
@@ -140,8 +137,8 @@ enum class NvmReadMode : uint8_t {
 
 /// CTRLB.SLEEPPRM: whether the NVM block powers down in sleep, and what
 /// wakes it. The reset value is WAKEUPACCESS; brio defaults to `disabled`
-/// because nothing on this target sleeps yet and an unexpected wake
-/// latency is worse than the microamps until the power pass measures both.
+/// because an unexpected wake latency is worse than the microamps until
+/// both are measured.
 enum class NvmSleepPower : uint8_t {
     wake_on_access = NVMCTRL_CTRLB_SLEEPPRM_WAKEONACCESS_Val,
     wake_on_exit = NVMCTRL_CTRLB_SLEEPPRM_WAKEUPINSTANT_Val,
@@ -160,7 +157,7 @@ enum class NvmError : uint8_t {
 };
 
 /// STATUS, unpacked (27.8.7). The three error bits are write-one-to-clear
-/// and accumulate until cleared, exactly like the AVR's RSTFR.
+/// and accumulate until cleared.
 struct NvmStatus {
     bool nvm_error;       ///< NVME
     bool lock_error;      ///< LOCKE
@@ -422,8 +419,7 @@ struct Nvm {
     }
 
     /// Read the accumulated error bits and clear them in one step - the
-    /// boot-time / post-operation verb, the analog of RSTFR's read-and-
-    /// clear on the AVR.
+    /// boot-time / post-operation verb.
     static NvmStatus take_status() {
         const NvmStatus s = status();
         clear_status();
@@ -778,9 +774,9 @@ struct NvmUserRow {
  * are loaded automatically - a driver that skips this runs an uncalibrated
  * converter or oscillator.
  *
- * The area CANNOT be written. Every consumer is a future driver (ADC0,
- * ADC1, OSC32KCTRL, OSCCTRL), which is why this view lands with the NVM
- * driver rather than with any of them.
+ * The area CANNOT be written. Its consumers are spread across drivers
+ * (ADC0, ADC1, OSC32KCTRL, OSCCTRL), which is why this view lands with
+ * the NVM driver rather than with any one of them.
  */
 struct NvmCalibration {
     uint32_t word0;
@@ -834,8 +830,8 @@ struct NvmTemperatureCalibration {
 /**
  * The die's 128-bit serial number (9.6): four words that are NOT
  * contiguous - word 0 sits apart from words 1..3. Factory-programmed, and
- * the reason a SAM board needs no written identity label where an AVR one
- * does.
+ * the reason a board of this family needs no identity label written into
+ * it by hand.
  *
  * "The uniqueness of the serial number is guaranteed only when using all
  * 128 bits" - so a program that wants a short id must hash all four, not

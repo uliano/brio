@@ -13,10 +13,9 @@
  *                 states: configuration only with SPE clear, and the
  *                 disable PROCEDURE of 35.5.9;
  *   SpiHost<...>  the TASK util/spi_bus.hpp drives: the transfer engine
- *                 with the SAME Request shape and the same public
- *                 surface as avrdx/spi.hpp's and samc21/spi.hpp's, so a
- *                 device client compiles on the third architecture
- *                 untouched;
+ *                 with the Request shape and the public surface every
+ *                 target's SpiHost carries (docs/design/spi-bus.md), so
+ *                 a device client compiles here untouched;
  *   SpiClient<..> the other end of the wire: the hardware NSS input, the
  *                 preload and the one-ahead pump, a polled surface and
  *                 an ISR body. A client is a PROTOCOL and the protocol
@@ -46,8 +45,8 @@
  *    THEM WHILE SPE IS SET - one rule instead of two, so that no caller
  *    has to remember which sentence a field got. Which of those the
  *    SILICON really enforces is a different question and the bench asks
- *    it directly (test_stm32_spi letter a writes each field with SPE set
- *    and reports what stuck). The verbs that stay open under a running
+ *    it directly (the bench writes each field with SPE set and reports
+ *    what stuck). The verbs that stay open under a running
  *    SPI are the ones that MUST be: SSI (the software select, whose
  *    whole use is to be moved under a live master), CRCNEXT (35.9.1:
  *    "written as soon as the last data is written in SPIx_DR"), the
@@ -71,8 +70,8 @@
  *    bus whose clock never runs must not hang the kernel - and reports
  *    false rather than spinning.
  *
- *  - RXNE AND NOT TXE DRIVES THE HOST PUMP, the samc21 lesson in this
- *    family's clothes. TXE means "the transmit FIFO has room", which is
+ *  - RXNE AND NOT TXE DRIVES THE HOST PUMP. TXE means "the transmit
+ *    FIFO has room", which is
  *    true well before a frame is on the wire and true again immediately
  *    after; RXNE means "a frame has been shifted in", which on a
  *    full-duplex bus is exactly "one frame moved, both ways" - and
@@ -91,8 +90,8 @@
  *    verb here therefore comes in a byte flavour and a half-word one,
  *    and data(size, v) picks by the size the caller states.
  *
- *  - THE CHIP SELECT A TRANSACTION IS FRAMED BY IS A GPIO, as on both
- *    other targets, and the reason is 35.5.5: hardware NSS output falls
+ *  - THE CHIP SELECT A TRANSACTION IS FRAMED BY IS A GPIO, and the
+ *    reason is 35.5.5: hardware NSS output falls
  *    "as soon as the SPI is enabled in master mode (SPE = 1)" and rises
  *    when it is disabled - it frames the peripheral's LIFETIME and not a
  *    transaction - while NSS pulse mode (35.5.12) frames a DATA FRAME,
@@ -138,18 +137,17 @@ namespace brio {
 // The vocabulary (35.9.1, 35.9.2)
 // =============================================================================
 
-/// Which end of the bus this instance is (CR1.MSTR). There IS a runtime
-/// demotion on this peripheral, unlike the SAM's: a master whose NSS
-/// input goes low raises MODF and the silicon clears MSTR and SPE for
-/// it (35.5.11) - the AVR's behaviour, met again. `Spi<n>::mode_fault()`
-/// reports it and clear_mode_fault() is the chapter's own sequence.
+/// Which end of the bus this instance is (CR1.MSTR). THERE IS A RUNTIME
+/// DEMOTION on this peripheral: a master whose NSS input goes low raises
+/// MODF and the silicon clears MSTR and SPE for it (35.5.11).
+/// `Spi<n>::mode_fault()` reports it and clear_mode_fault() is the
+/// chapter's own sequence.
 enum class SpiRole : uint8_t { host = 1, client = 0 };
 
-/// The four clock phase/polarity combinations. SPELLED THE SAME WAY AS
-/// avrdx/spi.hpp and samc21/spi.hpp - bit 1 is CPOL, bit 0 is CPHA - so
-/// brio's SpiMode is one vocabulary across three architectures even
-/// though here the two bits sit at the BOTTOM of CR1 and there they were
-/// two bits of CTRLA and a field of CTRLB.
+/// The four clock phase/polarity combinations, spelled the way every
+/// target's SpiMode is - bit 1 is CPOL, bit 0 is CPHA - so a device
+/// driver names one vocabulary wherever it runs. Here the two bits
+/// happen to sit at the BOTTOM of CR1.
 enum class SpiMode : uint8_t {
     mode0 = 0,   ///< SCK idle low,  first edge captures
     mode1 = 1,   ///< SCK idle low,  second edge captures
@@ -161,9 +159,8 @@ constexpr bool spi_cpol(SpiMode m) { return (static_cast<uint8_t>(m) & 0x02u) !=
 constexpr bool spi_cpha(SpiMode m) { return (static_cast<uint8_t>(m) & 0x01u) != 0; }
 
 /// CR1.BR[2:0], all eight codes. The name is the DIVISION, which is what
-/// a device's datasheet limit is spoken in and what avrdx/spi.hpp's
-/// SpiClock names too - the AVR's ladder stops at div128 because that is
-/// where its prescaler stops; this one has a div256 as well.
+/// a device's datasheet limit is spoken in. This prescaler reaches
+/// div256.
 enum class SpiClock : uint8_t {
     div2 = 0, div4 = 1, div8 = 2, div16 = 3,
     div32 = 4, div64 = 5, div128 = 6, div256 = 7,
@@ -183,8 +180,7 @@ constexpr uint32_t spi_min_sck_hz(uint32_t pclk_hz) { return pclk_hz / 256u; }
 
 /**
  * The FASTEST code at or below `max_sck_hz` - the chooser a device's
- * datasheet limit is spoken to (avrdx/spi.hpp's spi_clock_for(), same
- * shape and same contract). Nullopt when even PCLK/256 is too fast:
+ * datasheet limit is spoken to. Nullopt when even PCLK/256 is too fast:
  * a ceiling this generator cannot honour is REFUSED and never rounded
  * up, because a bus run faster than a device's limit is a fault the
  * caller must see.
@@ -778,7 +774,7 @@ struct Spi {
 
     /// The DMAMUX request ids of this instance (table 56), published
     /// BY THE PERIPHERAL - stm32g0/dma.hpp takes a plain number and
-    /// knows nothing about SPIs (the EVSYS ruling, kept).
+    /// knows nothing about SPIs.
     static constexpr uint8_t dma_rx_request() { return spi_dma_rx_request(n); }
     static constexpr uint8_t dma_tx_request() { return spi_dma_tx_request(n); }
     /// The address an engine pours into or drains from. It is ONE
@@ -792,8 +788,7 @@ struct Spi {
      * and a useless constant one - so it cannot key the reserve, but
      * folded against a constant &regs() it costs nothing and is the
      * SECOND opinion the bench compares the reserve's table and the
-     * silicon against (test_stm32_spi letter a). The usart_is_full()
-     * precedent, applied.
+     * silicon against, the way usart_is_full() is checked.
      */
     static bool has_i2s() { return IS_I2S_ALL_INSTANCE(&regs()) != 0; }
 
@@ -865,23 +860,21 @@ struct Spi {
     /// is why this is a verb of its own and not the tail of configure().
     static void enable() { regs().CR1 = regs().CR1 | SPI_CR1_SPE; }
 
-    /**
-     * 35.5.9's DISABLE PROCEDURE, and the only way this driver turns the
-     * peripheral off:
-     *   1. wait FTLVL = 00 (nothing left to transmit)
-     *   2. wait BSY = 0    (the last frame is through)
-     *   3. clear SPE
-     *   4. read DR until FRLVL = 00 (nothing left unread)
-     *
-     * ES0548 2.12.1's workaround falls out of steps 1 and 2 for the
-     * master-transmit case it names. Both waits are BOUNDED - the
-     * slowest frame this generator can produce is 256 x 16 PCLK cycles -
-     * and a wait that runs out returns false with SPE cleared anyway:
-     * an engine that reports is worth more than one that hangs.
-     *
-     * @return false when a wait ran out (the flags are left readable for
-     * whoever wants to say WHICH).
-     */
+    /// 35.5.9's DISABLE PROCEDURE, and the only way this driver turns the
+    /// peripheral off:
+    ///   1. wait FTLVL = 00 (nothing left to transmit)
+    ///   2. wait BSY = 0    (the last frame is through)
+    ///   3. clear SPE
+    ///   4. read DR until FRLVL = 00 (nothing left unread)
+    ///
+    /// ES0548 2.12.1's workaround falls out of steps 1 and 2 for the
+    /// master-transmit case it names. Both waits are BOUNDED - the
+    /// slowest frame this generator can produce is 256 x 16 PCLK cycles -
+    /// and a wait that runs out returns false with SPE cleared anyway:
+    /// an engine that reports is worth more than one that hangs.
+    ///
+    /// Returns false when a wait ran out (the flags are left readable for
+    /// whoever wants to say WHICH).
     static bool disable() {
         constexpr uint32_t spins = 200'000u;
         bool ok = true;
@@ -1166,13 +1159,11 @@ struct Spi {
     static uint16_t rx_crc() { return static_cast<uint16_t>(regs().RXCRCR); }
     static uint16_t tx_crc() { return static_cast<uint16_t>(regs().TXCRCR); }
 
-    /**
-     * 35.5.14's "if the SPI is disabled during a communication" reset of
-     * the two checksum accumulators: disable, clear CRCEN, set it again,
-     * enable. The caller gets the peripheral back exactly as it handed
-     * it over - which is why this is one verb and not four.
-     * @return the disable procedure's own answer.
-     */
+    /// 35.5.14's "if the SPI is disabled during a communication" reset of
+    /// the two checksum accumulators: disable, clear CRCEN, set it again,
+    /// enable. The caller gets the peripheral back exactly as it handed
+    /// it over - which is why this is one verb and not four.
+    /// Returns the disable procedure's own answer.
     static bool restart_crc() {
         const bool was_enabled = enabled();
         const bool ok = was_enabled ? disable() : true;
@@ -1404,11 +1395,9 @@ struct Spi {
         }
     }
 
-    /**
-     * 35.7.5's transmitter shutdown: "to switch off the I2S, by clearing
-     * I2SE, it is mandatory to wait for TXE = 1 and BSY = 0".
-     * @return false when either wait ran out (bounded, as everywhere).
-     */
+    /// 35.7.5's transmitter shutdown: "to switch off the I2S, by clearing
+    /// I2SE, it is mandatory to wait for TXE = 1 and BSY = 0".
+    /// Returns false when either wait ran out (bounded, as everywhere).
     static bool i2s_stop_transmit() {
         constexpr uint32_t spins = 400'000u;
         uint32_t left = spins;
@@ -1481,9 +1470,9 @@ constexpr bool spi_engines_distinct() {
     }
 }
 
-/// A DMA transfer error as a BusDone status - the first engine-defined
-/// code bus_master.hpp reserves, spelled the same way samc21/spi.hpp
-/// spells it. On an engineless host status() is spi_ok by construction
+/// A DMA transfer error as a BusDone status: the first engine-defined
+/// code bus_master.hpp reserves. On an engineless host status() is
+/// spi_ok by construction
 /// and this code is unreachable.
 inline constexpr uint8_t spi_dma_fault = bus_engine_status;
 
@@ -1500,7 +1489,7 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * frame pump under the SPI interrupt.
  *
  * TRANSACTION DESCRIPTOR (Request) - two phases in ONE chip-select
- * window, the SAME shape avrdx/spi.hpp and samc21/spi.hpp carry:
+ * window, the shape every target's SpiHost carries:
  *
  *   phase 1 (optional): cmd[cmd_len] transmitted with DC LOW
  *   phase 2 (optional): len frames with DC HIGH, FULL-DUPLEX -
@@ -1514,8 +1503,8 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * without touching the wire.
  *
  * LEN IS A FRAME COUNT AND THE FRAME SIZE IS THE REQUEST'S. With the
- * default 8-bit frames a frame is a byte and `len` is a byte count -
- * exactly the other two targets' meaning, which is what lets a device
+ * default 8-bit frames a frame is a byte and `len` is a byte count,
+ * which is the shared Request's own meaning and what lets a device
  * client compile unchanged. With `bits` above 8 a frame occupies TWO
  * bytes of the caller's buffer, in the CPU's own order (low byte first),
  * and `len` still counts frames: a 16-bit request of len 4 moves four
@@ -1529,8 +1518,8 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * lifetime, not a transaction - and NSS pulse mode (35.5.12) raises NSS
  * between two consecutive DATA FRAMES. Every device this engine is for
  * wants a select that spans a command and its answer, so the Request
- * carries a PinRef exactly as on the AVR and the SAM, and the two
- * hardware arrangements stay resource facts the bench measures.
+ * carries a PinRef of its own and the two hardware arrangements stay
+ * resource facts the bench measures.
  *
  * WHY RXNE AND NOT TXE DRIVES THE PUMP: the file comment says it. One
  * interrupt per frame, and the transfer ends when the last frame has
@@ -1538,7 +1527,7 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * idle". It does mean the receiver runs even for a write-only transfer,
  * which costs the MISO pad and nothing else.
  *
- * THE PER-REQUEST CHIP-SELECT DELAY IS THE OTHER TARGETS', VERBATIM:
+ * THE PER-REQUEST CHIP-SELECT DELAY:
  * cs_setup_us is spent spinning in start() (main context, bounded by the
  * byte) between the CS assertion and the first clock, timed by
  * armv6m/delay.hpp on a rate init()/rebase() keep current. It is served
@@ -1546,9 +1535,9 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * one kernel tick - both stated there, neither reachable with a uint8_t
  * of microseconds on a 1000 Hz ticker.
  *
- * THE TWO OPTIONAL DMA ENGINE SLOTS (the Uart's shape, for the same
- * reason: an engineless build must stay byte-identical, so the slots
- * default to NoDmaEngine and every DMA branch folds away under
+ * THE TWO OPTIONAL DMA ENGINE SLOTS (stm32g0/usart.hpp's shape, for
+ * the same reason: an engineless build must stay byte-identical, so the
+ * slots default to NoDmaEngine and every DMA branch folds away under
  * `if constexpr`). With engines named, the DATA PHASE of every request
  * runs on the DMA: the RX channel drains DR on the RXNE request, the TX
  * channel feeds it on TXE, and the transaction is complete when the
@@ -1573,11 +1562,10 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * controller somebody else owns, and a driver that reset the shared
  * block would stop every other channel in the program.
  *
- * THERE IS NO KICK HERE and the absence is stm32g0/dma.hpp's own
- * measured fact: 10.4.3's handshake is level-driven, so a channel
- * enabled while TXE already stands moves its first beat by itself. The
- * SAM's rise-latched trigger - and the kick that inverts in ITS SPI mode
- * - has no counterpart on this controller.
+ * NOTHING KICKS A STALLED FIRST BEAT HERE, and the absence is
+ * stm32g0/dma.hpp's own measured fact: 10.4.3's handshake is
+ * level-driven, so a channel enabled while TXE already stands moves its
+ * first beat by itself.
  *
  * A DMA TRANSFER ERROR is the one failure this otherwise ACK-less bus
  * can detect: the request completes with spi_dma_fault in status()
@@ -1645,8 +1633,7 @@ public:
         PinRef cs;   ///< asserted low around the transaction
         PinRef dc;   ///< display D/C line; null = no such pin
         /// Microseconds between the CS assertion and the first clock -
-        /// what a device's datasheet calls CS setup (the avrdx and
-        /// samc21 Requests' own field, byte for byte). Spent spinning in
+        /// what a device's datasheet calls CS setup. Spent spinning in
         /// start(), main context; 0 = none.
         uint8_t cs_setup_us = 0;
         /// Phase 1, sent with DC low; LENT until the reply lands.
@@ -1667,7 +1654,7 @@ public:
         SpiClock clock = SpiClock::div16;
         SpiMode mode = SpiMode::mode0;
         /// 4..16 bits. Eight is the default, so an 8-bit request looks
-        /// exactly like the other two targets'.
+        /// like the shared Request it is.
         SpiDataSize bits = SpiDataSize::bits8;
 
         /// Completion style, the client's call: false = per-frame ISR
@@ -1684,23 +1671,21 @@ public:
 
     // ---- lifecycle ----------------------------------------------------------
 
-    /**
-     * @brief Bring the instance up as a host: bus clock, reset,
-     * configuration, pads, the NVIC line.
-     *
-     * Call AFTER the main clock is set up and before interrupts are
-     * enabled globally; `clock` is the app's brio::Clock tag, so the
-     * baud arithmetic comes from its pclk_hz and never from a second
-     * statement of the rate.
-     *
-     * `max_sck_hz` is an optional CEILING for the whole bus: with it set
-     * the engine slows any request that would exceed it and re-resolves
-     * the limit after a clock change, which is what makes rebase()
-     * meaningful. 0 = no ceiling.
-     *
-     * @return false when the ceiling cannot be produced at this clock,
-     * or when the boot configuration is refused.
-     */
+    /// Bring the instance up as a host: bus clock, reset,
+    /// configuration, pads, the NVIC line.
+    ///
+    /// Call AFTER the main clock is set up and before interrupts are
+    /// enabled globally; `clock` is the app's brio::Clock tag, so the
+    /// baud arithmetic comes from its pclk_hz and never from a second
+    /// statement of the rate.
+    ///
+    /// `max_sck_hz` is an optional CEILING for the whole bus: with it set
+    /// the engine slows any request that would exceed it and re-resolves
+    /// the limit after a clock change, which is what makes rebase()
+    /// meaningful. 0 = no ceiling.
+    ///
+    /// Returns false when the ceiling cannot be produced at this clock,
+    /// or when the boot configuration is refused.
     template <typename Clock>
     static bool init(Clock clock, uint32_t max_sck_hz = 0) {
         static_assert(clock_follows<Clock, SpiHost>(),
@@ -1759,14 +1744,12 @@ public:
         return true;
     }
 
-    /**
-     * @brief PCLK changed (DynamicClock fan-out).
-     *
-     * A Request's `clock` is a DIVISION of PCLK and scales with it by
-     * itself, exactly like the AVR's SpiClock - so what is recomputed
-     * here is the CEILING and the cs_setup timing. THE BUS MUST BE IDLE:
-     * see the class comment.
-     */
+    /// PCLK changed (DynamicClock fan-out).
+    ///
+    /// A Request's `clock` is a DIVISION of PCLK and scales with it by
+    /// itself, so what is recomputed here is the CEILING and the
+    /// cs_setup timing. THE BUS MUST BE IDLE:
+    /// see the class comment.
     static void rebase(uint32_t hz) {
         pclk_hz_ = hz;
         ceiling_ = ceiling_hz_ ? spi_rate_for(hz, ceiling_hz_) : std::optional<SpiClock>{};
@@ -1787,38 +1770,34 @@ public:
     static std::optional<SpiClock> ceiling_clock() { return ceiling_; }
     static uint32_t reference_hz() { return pclk_hz_; }
 
-    /**
-     * @brief Put the peripheral at this mode, rate and frame size NOW,
-     * moving no data.
-     *
-     * FOR CALLERS THAT FRAME THE SELECT WINDOW THEMSELVES (Request.cs
-     * null). start() applies a request's mode before it asserts the
-     * request's own cs, so an engine-owned select window always opens
-     * with SCK settled at the new idle level - but a caller driving CS
-     * by hand inverts that order, and a mode change is a CPOL FLIP ON
-     * THE WIRE: flipped inside an open select window it is one extra
-     * edge, and a selected client counts it into the frame (the samc21
-     * bench measured that as an exact one-bit slip, both directions).
-     * Prime FIRST, then assert the select.
-     */
+    /// Put the peripheral at this mode, rate and frame size NOW,
+    /// moving no data.
+    ///
+    /// FOR CALLERS THAT FRAME THE SELECT WINDOW THEMSELVES (Request.cs
+    /// null). start() applies a request's mode before it asserts the
+    /// request's own cs, so an engine-owned select window always opens
+    /// with SCK settled at the new idle level - but a caller driving CS
+    /// by hand inverts that order, and a mode change is a CPOL FLIP ON
+    /// THE WIRE: flipped inside an open select window it is one extra
+    /// edge, and a selected client counts it into the frame (measured as
+    /// an exact one-bit slip, both directions).
+    /// Prime FIRST, then assert the select.
     static void prime(SpiMode m, SpiClock c, SpiDataSize bits = SpiDataSize::bits8) {
         apply(m, clamp(c), bits);
     }
 
-    /**
-     * @brief The bus's bit order (CR1.LSBFIRST).
-     *
-     * NOT a per-request field, and the asymmetry is deliberate: mode,
-     * rate and frame size differ from DEVICE to device on a shared bus,
-     * while the bit order is a property of the WIRE - a bus with an
-     * MSB-first device and an LSB-first one on it is a bus whose two
-     * clients disagree about what a byte is, and no engine can arbitrate
-     * that. So it is a bus-level verb, applied once, and the Request
-     * stays the shape the other two targets carry.
-     *
-     * @return false when the configuration was refused (it never is,
-     * with a valid cached state) - the bus must be IDLE.
-     */
+    /// The bus's bit order (CR1.LSBFIRST).
+    ///
+    /// NOT a per-request field, and the asymmetry is deliberate: mode,
+    /// rate and frame size differ from DEVICE to device on a shared bus,
+    /// while the bit order is a property of the WIRE - a bus with an
+    /// MSB-first device and an LSB-first one on it is a bus whose two
+    /// clients disagree about what a byte is, and no engine can arbitrate
+    /// that. So it is a bus-level verb, applied once, and the Request
+    /// stays the shape docs/design/spi-bus.md gives it.
+    ///
+    /// Returns false when the configuration was refused (it never is,
+    /// with a valid cached state) - the bus must be IDLE.
     static bool bit_order(bool lsb_first) {
         if (applied_.lsb_first == lsb_first) {
             return true;
@@ -1833,13 +1812,11 @@ public:
 
     // ---- the transfer -------------------------------------------------------
 
-    /**
-     * @brief Begin a transaction (called by SpiBus from main context).
-     * @return true when it completed SYNCHRONOUSLY (polled requests, and
-     * the degenerate zero-length one); false when it runs on the ISR and
-     * a TransferDone will follow. Exactly util/bus_master.hpp's engine
-     * contract.
-     */
+    /// Begin a transaction (called by SpiBus from main context).
+    /// Returns true when it completed SYNCHRONOUSLY (polled requests, and
+    /// the degenerate zero-length one); false when it runs on the ISR and
+    /// a TransferDone will follow. Exactly util/bus_master.hpp's engine
+    /// contract.
     static bool start(const Request& r) {
         req_ = r;
         pos_ = 0;
@@ -1910,15 +1887,13 @@ public:
         return true;
     }
 
-    /**
-     * @brief The instance's interrupt body - call from its vector.
-     *
-     * Only RXNE is ever armed by this engine (see the class comment),
-     * and reading DR is both the capture and the acknowledgement.
-     *
-     * @return true when the transaction just completed (CS released):
-     * the edge on which the app's glue posts TransferDone to the bus AO.
-     */
+    /// The instance's interrupt body - call from its vector.
+    ///
+    /// Only RXNE is ever armed by this engine (see the class comment),
+    /// and reading DR is both the capture and the acknowledgement.
+    ///
+    /// Returns true when the transaction just completed (CS released):
+    /// the edge on which the app's glue posts TransferDone to the bus AO.
     [[gnu::always_inline]] static bool isr() {
         if ((S::isr() & SpiFlag::rxne) == 0u) {
             return false;
@@ -1969,22 +1944,20 @@ public:
         return false;
     }
 
-    /**
-     * @brief The DMA channels' interrupt body - call from whichever
-     * vector each channel reports on (three vectors serve twelve
-     * channels here, so the same call is safe on a shared line: each
-     * engine's service() answers for its own channel and returns 0
-     * otherwise). Compiles away on an engineless host.
-     *
-     * A TRANSFER ERROR ON EITHER CHANNEL ENDS THE TRANSACTION with
-     * spi_dma_fault: a stopped transmit block starves the receive side
-     * for ever, and an error on the receive side means the count can no
-     * longer be trusted. Both channels are put away, CS is raised, and
-     * the fault is REPORTED rather than retried - retry policy is the
-     * bus AO's, not the engine's.
-     *
-     * @return true when the transaction just completed.
-     */
+    /// The DMA channels' interrupt body - call from whichever
+    /// vector each channel reports on (three vectors serve twelve
+    /// channels here, so the same call is safe on a shared line: each
+    /// engine's service() answers for its own channel and returns 0
+    /// otherwise). Compiles away on an engineless host.
+    ///
+    /// A TRANSFER ERROR ON EITHER CHANNEL ENDS THE TRANSACTION with
+    /// spi_dma_fault: a stopped transmit block starves the receive side
+    /// for ever, and an error on the receive side means the count can no
+    /// longer be trusted. Both channels are put away, CS is raised, and
+    /// the fault is REPORTED rather than retried - retry policy is the
+    /// bus AO's, not the engine's.
+    ///
+    /// Returns true when the transaction just completed.
     [[gnu::always_inline]] static bool dma_isr() {
         if constexpr (has_engines) {
             const uint8_t tx = TxEngine::service();
@@ -2013,23 +1986,21 @@ public:
     /// TransferDone payload. Always spi_ok on an engineless host.
     static uint8_t status() { return status_; }
 
-    /**
-     * @brief Put the ENGINE back where start() is legal: engines put
-     * away and re-claimed, the peripheral disabled by its own procedure,
-     * reconfigured to the applied state and re-enabled, the select
-     * window closed. Clocks, pads and the ceiling arithmetic are
-     * untouched.
-     *
-     * The verb a timed SpiBus calls on a transaction that never answered
-     * (util/bus_master.hpp) - here that means an ISR-style completion
-     * that never posted: a client that never clocked, a lost interrupt,
-     * a DMA channel that stopped. The in-flight request's CS is
-     * deasserted FIRST: its device sees the transaction end, however
-     * garbled, rather than a select held for ever.
-     *
-     * @return false when a bounded wait ran out (a false engine is
-     * refusing, not hanging).
-     */
+    /// Put the ENGINE back where start() is legal: engines put
+    /// away and re-claimed, the peripheral disabled by its own procedure,
+    /// reconfigured to the applied state and re-enabled, the select
+    /// window closed. Clocks, pads and the ceiling arithmetic are
+    /// untouched.
+    ///
+    /// The verb a timed SpiBus calls on a transaction that never answered
+    /// (util/bus_master.hpp) - here that means an ISR-style completion
+    /// that never posted: a client that never clocked, a lost interrupt,
+    /// a DMA channel that stopped. The in-flight request's CS is
+    /// deasserted FIRST: its device sees the transaction end, however
+    /// garbled, rather than a select held for ever.
+    ///
+    /// Returns false when a bounded wait ran out (a false engine is
+    /// refusing, not hanging).
     static bool recover() {
         req_.cs.set();
         if constexpr (has_engines) {
@@ -2127,7 +2098,7 @@ private:
     }
 
     /// One exit for the data phase, from either flavour of dma_isr().
-    /// @return true when the ISR-style caller should post completion.
+    /// True when the ISR-style caller should post completion.
     static bool finish_dma(uint8_t st) {
         if (st != spi_ok) {
             status_ = st;
@@ -2318,7 +2289,7 @@ private:
  * directly (selected()) and keeps its input buffer on for that reason -
  * the peripheral publishes no select status bit of its own.
  *
- * `drive_output` is the DARK LISTENER of the SAM's client: the MISO pad
+ * `drive_output` MAKES THIS CLIENT A DARK LISTENER: the MISO pad
  * is handed to the peripheral only for the window this client means to
  * answer in, so a shared harness where something else drives MISO stays
  * uncontested. On a point-to-point link it is simply left on.
@@ -2377,15 +2348,13 @@ public:
         bool drive_output = true;
     };
 
-    /**
-     * @brief Bring the instance up as a client.
-     *
-     * The APB clock is required even though the SHIFT register runs on
-     * the host's SCK: every synchronization in the peripheral crosses
-     * into it, and its registers are dead without it.
-     *
-     * @return false when the configuration is refused.
-     */
+    /// Bring the instance up as a client.
+    ///
+    /// The APB clock is required even though the SHIFT register runs on
+    /// the host's SCK: every synchronization in the peripheral crosses
+    /// into it, and its registers are dead without it.
+    ///
+    /// Returns false when the configuration is refused.
     template <typename Clock>
     static bool init(Clock clock, const Config& cfg = {}) {
         (void)clock;

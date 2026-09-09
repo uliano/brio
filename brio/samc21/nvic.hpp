@@ -2,13 +2,11 @@
  * nvic.hpp
  *
  * Interrupt control on the SAM C21: the device header, then the core
- * stratum. Everything that used to be here - InterruptGuard, the
- * enable/disable/readback verbs, the Nvic resource, irq_priority_levels
- * - is ARMv6-M and not SAM, and lives in armv6m/nvic.hpp since the
- * second Cortex-M0+ family (the STM32G0) arrived with the identical
- * file; this header is the SAM's include of it, after "sam.h" has
- * declared the IRQn enumerators and the priority width the core file is
- * written against.
+ * stratum. InterruptGuard, the enable/disable/readback verbs, the Nvic
+ * resource and irq_priority_levels are ARMv6-M and not SAM, so they live
+ * in armv6m/nvic.hpp; this header is the SAM's include of it, after
+ * "sam.h" has declared the IRQn enumerators and the priority width the
+ * core file is written against.
  *
  * It still sits at the BOTTOM of the samc21/ stratum: ticker.hpp and
  * platform.hpp both need the guard, and the platform includes the

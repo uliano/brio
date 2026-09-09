@@ -1,28 +1,26 @@
-// twi_peer - the INSTRUMENT half of the I2C campaign on the STM32G0:
-// the scriptable second chip on the bus that test_stm32_i2c (the DUT, on
-// the OTHER board) drives IN BAND over the very bus both are testing.
+// twi_peer - a scriptable second chip on the bus for the other end of a
+// two-board I2C test: the far board is the DUT (test_stm32_i2c) and
+// drives this one IN BAND over the very bus both are testing.
 //
-// A PORT OF samc21/src/apps/twi_peer.cpp TO THE THIRD ARCHITECTURE, over
-// the SAME protocol header (twi_link.hpp, relative path - one source of
-// truth for the wire format, three architectures compiling it). What
-// changed is what the silicon changed:
+// The wire format is twi_link.hpp, included by relative path: one file
+// is the single source of truth for every board that speaks it,
+// whatever its architecture. What this silicon makes of it:
 //
-//  - ONE I2C IS HOST *OR* TARGET, as on the SAM: this peripheral has one
-//    CR2 and one state machine, so the `arb` action SWITCHES the
-//    instance to controller for its bounded moment and back. During a
-//    host action this board's target is simply absent, which the
-//    choreography already tolerates (the DUT waits out the action's
-//    deadline either way).
+//  - ONE I2C IS HOST *OR* TARGET: this peripheral has one CR2 and one
+//    state machine, so the `arb` action SWITCHES the instance to
+//    controller for its bounded moment and back. During a host action
+//    this board's target is simply absent, which the choreography
+//    already tolerates (the DUT waits out the action's deadline either
+//    way).
 //  - THE TARGET STRETCHES BY CONSTRUCTION: ADDR, RXNE and TXIS hold SCL
 //    until software answers (32.4.8), so the commanded per-byte hold is
 //    simply a wait spent BEFORE the answer - no register knob.
 //  - A TARGET CANNOT NACK ITS OWN ADDRESS here: the address is
 //    acknowledged by the hardware before ADDR rises, so "deaf" is a
-//    re-init at `deaf_addr` (the samc21 port's answer, for the same
-//    reason). Refusing a byte is a DATA-phase act and rides TARGET BYTE
-//    CONTROL - SBC with NBYTES re-armed to one per byte, the decision
-//    taken at TCR, which is the pump test_stm32_i2c proved on this
-//    silicon and this one follows to the letter.
+//    re-init at `deaf_addr`. Refusing a byte is a DATA-phase act and
+//    rides TARGET BYTE CONTROL - SBC with NBYTES re-armed to one per
+//    byte, the decision taken at TCR, which is the pump this end runs
+//    and the DUT expects.
 //  - flag_stop_interrupt maps to nothing: STOPF is a polled flag here
 //    and the Stop count is kept whenever the action loop sees it.
 //  - A TARGET TRANSMITTER IS ASKED FOR ONE BYTE MORE THAN THE
@@ -38,12 +36,12 @@
 //    16 ms the model predicts instead of 14.
 //  - THE CLIENT'S SPEED IS ITS SDADEL/SCLDEL AND NOT A RATE. 32.4.8
 //    makes those the delays a TARGET applies, so `speed` names the
-//    FASTEST bus this end expects to sit on. The DUT's letter `q` walks
-//    100k, 400k and 1M against this one configuration and the peer
-//    cannot know which rung is coming, so it is solved for Fm+ - the
-//    fastest of the three - and the same delays serve the slower rungs.
+//    FASTEST bus this end expects to sit on. The DUT walks 100k, 400k
+//    and 1M against this one configuration and the peer cannot know
+//    which rung is coming, so it is solved for Fm+ - the fastest of the
+//    three - and the same delays serve the slower rungs.
 //
-// COEXISTENCE is the protocol header's own argument, unchanged: the
+// COEXISTENCE is the protocol header's own argument: the
 // command channel is ONE exact target address (0x6B) - no mask, no
 // general call, no second address - so nothing the DUT's wireless
 // letters do can wake this board.
@@ -59,8 +57,8 @@
 //   ? help | i status and counters | 0 back to command mode | 3 trace
 //
 // The ident label is the 96-bit unique device ID's first word in hex
-// (RM0444 41.1 through brio::DeviceUid - the spi_peer arrangement);
-// ident.xtal is ALWAYS 0, because a Nucleo-64 fits no HSE crystal and
+// (RM0444 41.1 through brio::DeviceUid); ident.xtal is
+// ALWAYS 0, because a Nucleo-64 fits no HSE crystal and
 // this stratum has no HSE root at all.
 //
 // build: boards = g071rb,g0b1re,g031k8
@@ -78,9 +76,9 @@
 #include "stm32g0/usart.hpp"
 #include "util/print.hpp"
 
-// THE PROTOCOL IS THE AVR CAMPAIGN'S, AND IT IS NOT COPIED (the
-// spi_link ruling: pure encoding, three architectures compile the same
-// file).
+// THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
+// register, and every architecture on this link compiles the same
+// file.
 #include "../../../avrdx/src/apps/twi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -114,7 +112,7 @@ using Raw = I2c<1>;
 using SclPin = Pin<bus_pins.scl.port, bus_pins.scl.pin>;
 using SdaPin = Pin<bus_pins.sda.port, bus_pins.sda.pin>;
 
-constexpr uint16_t firmware_version = 0x0300;   ///< 0x01xx AVR, 0x02xx SAM
+constexpr uint16_t firmware_version = 0x0300;   ///< see twi_link.hpp's Ident
 
 bool trace = false;
 
@@ -205,7 +203,7 @@ void prepare(const twilink::Frame& f);
 void prepare_nak(Op op, uint8_t sum);
 
 /// One pass of the command-mode target protocol, POLLED, on the
-/// I2cClient verbs. THE ORDER IS THE ONE THE CAMPAIGN PAID FOR: RXNE
+/// I2cClient verbs. THE ORDER IS LOAD-BEARING: RXNE
 /// before STOPF (a sweep that clears STOPF first eats the edge the
 /// tenure is waiting for), and the closing NACK of a read is what says
 /// "the answer has been collected" - ack-before-act's own trigger.
@@ -373,7 +371,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
         if (Client::host_nacked()) {
             // The flags sampled AT the closing NACK - a copy taken when
             // the action ends carries whatever the last tenure left
-            // behind (the AVR peer's own lesson, held here too).
+            // behind.
             r.mstatus = status_byte();
             // AND THE TALLY GIVES ONE BYTE BACK. A target transmitter is
             // asked for the NEXT byte as soon as TXDR empties, so it has

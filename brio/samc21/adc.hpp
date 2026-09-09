@@ -16,11 +16,10 @@
  *   const uint16_t raw = Meter::read();
  *   const uint16_t mv  = brio::adc_mv(raw, Meter::result_steps(), 5100);
  *
- * ONE TYPE WITH KNOBS, for the reason avrdx/adc.hpp gives and this
- * chapter repeats: every use - a single reading, a paced stream, an
- * oversampled reading, a window watch, a supply monitor - is the same
- * sequence (select, trigger, wait RESRDY, read RESULT) with different
- * knobs and different consumers of the same two flags.
+ * ONE TYPE WITH KNOBS, because every use - a single reading, a paced
+ * stream, an oversampled reading, a window watch, a supply monitor - is
+ * the same sequence (select, trigger, wait RESRDY, read RESULT) with
+ * different knobs and different consumers of the same two flags.
  *
  * ---------------------------------------------------------------------
  * THE FOUR REGISTER DISCIPLINES, spelled per register because this
@@ -77,8 +76,8 @@
  * NVM Software Calibration Area into the ADC Calibration register
  * (CALIB) by software to achieve specified accuracy." The device header
  * says the same thing per instance (`ADCn_LOAD_CALIB`), and
- * samc21/nvm.hpp has typed those two fields per converter since its own
- * campaign. So `init()` copies them, always, and `calibration_loaded()`
+ * samc21/nvm.hpp types those two fields per converter.
+ * So `init()` copies them, always, and `calibration_loaded()`
  * reports what stands in CALIB. Nothing here computes a calibration
  * value; the row is the only authority and the chapter says to copy it
  * and not to change it.
@@ -90,9 +89,8 @@
  * fastest legal setting - `adc_clock_in_range()` says so and `init()`
  * refuses a prescaler that leaves the range. There is no `rebase()` and
  * no ClockUser here: on this family the converter has its OWN generic
- * clock channel, so a main-clock change does not move CLK_ADC at all -
- * the AVR's fan-out has nothing to fan out to (docs/samc21/clock.md, the
- * DynamicClock ruling).
+ * clock channel, so a main-clock change does not move CLK_ADC at all
+ * and there is nothing to fan out to (docs/samc21/clock.md).
  *
  * INTREF NEEDS A LONG SAMPLE. 38.8.9's MUXPOS description: "If the
  * internal INTREF voltage input channel is selected, then the Sampling
@@ -154,11 +152,12 @@
  * anything (`ADC0_MASTER_SLAVE_MODE` = 1). Asking for either on the
  * wrong instance is refused, at compile time in the `init<cfg>()` form.
  *
- * NOT BUILT (docs/samc21/adc.md carries the list): sleep behaviour beyond
- * the two CTRLA bits (the 38.6.7 table has an owner in util/power.hpp
- * but no bench leg here), VREFA (needs a pin this board does not drive),
- * and the temperature sensor, which is the separate TSENS peripheral
- * (ch. 43) on this family and not an ADC channel.
+ * NOT BUILT (docs/samc21/adc.md carries the list): the converter as a
+ * WAKE source - table 38-4 is measured, but RESRDY, WINMON and OVERRUN
+ * have never driven the NVIC at all; VREFA (needs a pin this board does
+ * not drive); and the temperature sensor, which is the separate TSENS
+ * peripheral (ch. 43) on this family and not an ADC channel
+ * (samc21/tsens.hpp).
  */
 
 #pragma once
@@ -187,10 +186,10 @@ namespace brio {
  *
  * util/analog.hpp asks every target for an enum of this name plus a
  * `ref_mv()`, because the arithmetic is target-independent and the
- * levels never are. On the AVR DA/DB the set is a shared VREF block's
- * four internal levels; here it is a per-converter multiplexer over the
+ * levels never are. Here the set is a per-converter multiplexer over the
  * bandgap, two divisions of the analog supply, the supply itself, an
- * external pin and the DAC.
+ * external pin and the DAC - there is no shared reference block on this
+ * family, which is why each converter owns its own vocabulary.
  */
 enum class Ref : uint8_t {
     /// INTREF: the SUPC bandgap, whose LEVEL is chosen in SUPC.VREF.SEL
@@ -1127,8 +1126,7 @@ public:
      *
      * READING IT CLEARS BOTH RESRDY AND WINMON (38.8.7), so the window
      * verdict is captured first and `window_hit()` reports it for the
-     * last value read - the same shape avrdx/adc.hpp has, for the same
-     * reason.
+     * last value read.
      */
     static uint16_t result() {
         last_hit_ = (regs().ADC_INTFLAG & flag_winmon) != 0u;

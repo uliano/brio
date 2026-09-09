@@ -1,7 +1,6 @@
-// spi_link.hpp - the board-to-board bench protocol of the SPI campaign:
-// what test_avr_spi (board A, the DUT and the bus HOST) tells spi_peer
-// (board B, the instrument and the bus CLIENT) over the very bus both
-// are testing.
+// spi_link.hpp - the board-to-board bench protocol of the SPI suites:
+// what test_avr_spi (the DUT, and the bus HOST) tells spi_peer (the
+// instrument, and the bus CLIENT) over the very bus both are testing.
 //
 // APP-LEVEL BENCH TOOLING, not framework. It sits next to the two apps
 // that share it and is included by its plain name; nothing in
@@ -74,9 +73,9 @@
 //
 // THE ROLES INVERT: host_burst
 //
-// Every op above has the instrument as the bus CLIENT, because that is
-// what the AVR campaign needed: the DUT was the host. A DUT whose own
-// CLIENT half must be exercised needs the opposite, and there is no way
+// Every op above has the instrument as the bus CLIENT, because in that
+// arrangement the DUT is the host. A DUT whose own CLIENT half must be
+// exercised needs the opposite, and there is no way
 // to get it from a client - SPI is host-clocked, so somebody has to
 // clock. `host_burst` is that somebody: after an ack and a stated
 // LEAD-IN (aux8 milliseconds, long enough for the DUT to reconfigure
@@ -90,7 +89,7 @@
 //
 // Nothing about the other ops moves: an instrument that does not know
 // this op drops it in silence like any other unknown one, which is what
-// makes the addition safe for firmware that predates it.
+// makes the op safe on a desk where the two ends are not in step.
 //
 // THE RECOVERY GUARANTEE
 //
@@ -363,12 +362,12 @@ inline constexpr uint8_t flag_feed_tx = 0x08;
 inline constexpr uint8_t skip_at = 3;
 
 /// `Params::spare` bit 0: serve this exchange with the POLLED PUMP even
-/// when the instrument has a faster engine. The SAM peer answers an
-/// exchange through its DMA engines by default (its polled loop's
-/// reload boundary is ~3 MHz, its engines' is the silicon's); this bit
-/// asks for the polled loop so a suite can measure BOTH boundaries.
-/// The AVR peer has no engines and ignores the bit - its pump is
-/// always the polled one, which is exactly what the bit names.
+/// when the instrument has a faster engine. An instrument that can hand
+/// an exchange to a DMA engine does so by default - its polled loop's
+/// reload boundary is well below the silicon's - and this bit asks for
+/// the polled loop instead, so a suite can measure BOTH boundaries. An
+/// instrument whose only pump IS the polled loop ignores the bit, which
+/// is exactly what the bit names.
 inline constexpr uint8_t spare_polled_pump = 0x01;
 
 /// The two sides of the write-collision boundary, and the byte the
@@ -458,6 +457,13 @@ struct Ident {
     char label[8] = {};      ///< the peer's USERROW board label, NUL padded
     uint8_t xtal = 0;        ///< did the peer's 24 MHz crystal start?
     uint8_t sanity = 0;
+    /// The peer's firmware version. THE HIGH BYTE NAMES THE PEER
+    /// IMPLEMENTATION and is allocated here, once, for every
+    /// architecture that speaks this protocol: 0x01 the avrdx peer,
+    /// 0x02 the samc21 peer, 0x03 the stm32g0 peer. The low byte is
+    /// that peer's own revision. A host may use the high byte to
+    /// expect a capability, never to decide correctness: what a peer
+    /// can do it answers with, and what it cannot it refuses.
     uint16_t version = 0;
 };
 

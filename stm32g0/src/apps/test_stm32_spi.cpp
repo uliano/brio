@@ -39,12 +39,12 @@
 //   MISO  PB4  AF0  <-  a SAM C21's PA19 SERCOM1 PAD[3],  or PB4  AF0
 //   NSS   PA15 GPIO ->  a SAM C21's PA18 SERCOM1 PAD[2],  or PA15 AF0
 //
-// - the stm32g0 port of the peer answers on the SAME PIN NAMES this
-// board hosts on (SPI's own MOSI/MISO naming carries the direction, so
-// nothing is crossed), plus a dedicated GND, both boards at 3.3 V. The
-// instrument is commanded IN BAND over the bus under test, over
+// - an stm32g0 peer answers on the SAME PIN NAMES this board hosts on
+// (SPI's own MOSI/MISO naming carries the direction, so nothing is
+// crossed), plus a dedicated GND, both boards at 3.3 V. The instrument
+// is commanded IN BAND over the bus under test, over
 // avrdx/src/apps/spi_link.hpp included by relative path - one source of
-// truth for the wire format, three architectures compiling it. Letters
+// truth for the wire format, whatever the peer's architecture. Letters
 // n..r are this instrument's.
 //
 // THE TWO CANNOT BE ON THE DESK AT ONCE (the four jumpers go to one end
@@ -150,9 +150,9 @@
 #include "util/spi_bus.hpp"
 #include "util/testbench.hpp"
 
-// THE PROTOCOL IS THE AVR CAMPAIGN'S, AND IT IS NOT COPIED. spi_link.hpp
+// THE PROTOCOL HEADER IS SHARED, NOT COPIED. spi_link.hpp
 // is pure encoding - it names no register and includes nothing of brio -
-// so all three architectures' apps compile the same file. A copy here
+// so every architecture on this link compiles the same file. A copy here
 // would be a second source of truth for a wire format, which is exactly
 // the thing that drifts.
 #include "../../../avrdx/src/apps/spi_link.hpp"
@@ -183,8 +183,7 @@ constexpr UartOptions console_opts{.kernel_clock = UsartClock::hsi16};
 // would follow every switch this suite makes and the report would be a
 // function of its own subject. The instance that always has a
 // multiplexer is the LPUART (34.4.6), and LPUART1_TX/RX reach THE SAME
-// TWO PADS at AF6 - the shape test_stm32_serial's letter v proves on the
-// G0B1. So the console moves to LPUART1 exactly where USART2's
+// TWO PADS at AF6. So the console moves to LPUART1 exactly where USART2's
 // multiplexer is missing. The HANDLER has to be chosen by the
 // preprocessor, which cannot call a constexpr function, so the same
 // header symbol the reserve probes for usart_has_clock_select(2) is
@@ -276,8 +275,7 @@ uint32_t cycles_now() {
 }
 
 /// A measurement window a transmit interrupt walks through is not a
-/// measurement - the lesson four campaigns of this stratum have paid
-/// for. Drain, then count.
+/// measurement. Drain, then count.
 void console_drain() {
     for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
     }
@@ -306,8 +304,8 @@ volatile uint16_t peer_crc_next_at = 0;
 /// How many answers the pump may write at all. A CRC-protected exchange
 /// stops at the last DATA frame: what follows it on the wire is the
 /// hardware's own checksum, and a pump that kept feeding would put a
-/// data frame there instead (measured - the first version of letter f
-/// read 0xFF where the client's TXCRCR belonged).
+/// data frame there instead (measured: without the limit, 0xFF lands
+/// where the client's TXCRCR belongs).
 volatile uint16_t peer_tx_limit = 0xFFFFu;
 /// Letter i: the client is on raw DMA engines and its vector serves
 /// nothing.
@@ -345,8 +343,7 @@ void peer_service() {
     }
     // An error, and only where ERRIE was deliberately armed: report ONCE
     // and disarm, because every one of these flags is a LEVEL and a
-    // handler that leaves one standing re-enters for ever (the samc21
-    // SERCOM storm, met again).
+    // handler that leaves one standing re-enters for ever.
     peer_err_seen = peer_err_seen | (f & SpiFlag::errors);
     peer_err_count = static_cast<uint16_t>(peer_err_count + 1u);
     Peer::error_interrupt(false);
@@ -509,9 +506,7 @@ void settle() { settle_ms(spilink::settle_ms); }
 // which desk it is on, once, before any letter runs, and the letters
 // that need two peripherals on four wires SKIP THEMSELVES - by name,
 // with the reason printed - when the answer is no. A skipped letter
-// claims nothing and scores no verdict either way, which is how
-// test_avr_serial's letter q has always treated a wiring its desk did
-// not have.
+// claims nothing and scores no verdict either way.
 
 bool self_link = false;
 
@@ -602,11 +597,11 @@ bool need_self_link() {
 //
 // The wire format is avrdx/src/apps/spi_link.hpp, included by relative
 // path and NOT copied - it names no register, includes nothing of brio
-// and is compiled by three architectures' apps. The instrument at the
-// other end is `spi_peer`, in whichever of its three ports the desk
-// carries: the samc21 one answers on SERCOM1 fn C, the stm32g0 one on
-// SPI1 AF0 at the same pin names this board hosts on. The peer's own
-// `ident` says which (fw 0x01xx, 0x02xx, 0x03xx).
+// and every architecture that speaks the link compiles it. The
+// instrument at the other end is `spi_peer`, in whichever of its ports
+// the wires reach: the samc21 one answers on SERCOM1 fn C, the stm32g0
+// one on SPI1 AF0 at the same pin names this board hosts on. The peer's
+// own `ident` says which (fw 0x01xx, 0x02xx, 0x03xx).
 
 using spilink::Op;
 
@@ -623,8 +618,8 @@ uint8_t raw_n = 0;
 spilink::Decoder dec;
 bool link_quiet = false;
 
-/// THE HOLD AROUND EACH SELECT WINDOW, and it is the samc21 bench's
-/// finding rather than a precaution: the engine releases CS about a
+/// THE HOLD AROUND EACH SELECT WINDOW, and it is a measurement rather
+/// than a precaution: the engine releases CS about a
 /// microsecond after the last SCK edge, and a client whose transaction
 /// the select edge RESETS loses a character it has not fetched yet. The
 /// protocol therefore owns the chip select for these windows (the
@@ -1514,10 +1509,10 @@ void td_ladder() {
     //
     // NOT ONE CHARACTER IS PRINTED INSIDE THIS LOOP. A console byte is
     // an interrupt, an interrupt inside a burst is a gap the host's own
-    // receive FIFO can overrun, and the first version of this letter
-    // measured its own printing (one rung stalled outright, its loop
-    // spending four million turns waiting for a frame the overrun had
-    // thrown away). Collect the eight rungs, THEN say what happened ----
+    // receive FIFO can overrun, so a printing loop measures its own
+    // printing: one rung stalls outright, spending four million turns
+    // waiting for a frame the overrun has thrown away. Collect the
+    // eight rungs, THEN say what happened ----
     bool answers[8];
     bool receives[8];
     bool stalled[8];
@@ -2542,10 +2537,10 @@ void ti_dma() {
         uint32_t sp = 2'000'000u;
         while (peer_rx_n < 5u && sp-- != 0u) {
         }
-        // A SETTLE MUST WAIT ON SOMETHING REAL. The first version spun
-        // an empty countdown here and gcc deleted it, so the count was
-        // read while the sixth frame was still in the transmit FIFO -
-        // and the two legs looked identical. The wall is the wall.
+        // A SETTLE MUST WAIT ON SOMETHING REAL. An empty countdown here
+        // is one gcc deletes, and the count is then read while the sixth
+        // frame is still in the transmit FIFO - the two legs look
+        // identical. The wall is the wall.
         const uint32_t t_settle = cycles_now();
         while (cycles_now() - t_settle < 3'200'000u) {
         }
@@ -2708,8 +2703,8 @@ using BusKernel = Kernel<P, Driver, SpiArb>;
 /// The kernel's own loop, minus the sleep: Kernel::run() matures the
 /// TIME EVENTS before every step, and the per-bus timeout IS a time
 /// event - a pump that only called step() would wait for a deadline
-/// nothing was advancing (measured: the first version of this letter's
-/// timeout leg sat for six hundred milliseconds with no reply at all).
+/// nothing was advancing (measured: a step()-only pump leaves the
+/// timeout leg sitting six hundred milliseconds with no reply at all).
 void pump() {
     TimeEvents<P>::process();
     while (BusKernel::step()) {
@@ -2910,9 +2905,8 @@ bool i2s_pair(const I2sConfig& master, const I2sConfig& slave) {
     // A LETTER MUST STAND ALONE. Both APB gates are opened here and not
     // assumed: run on its own, this letter is the first thing to touch
     // either instance, and a register block with no bus clock answers
-    // every read with zero - which is what the first version of this
-    // letter measured when it was run from a cold flash instead of
-    // after its neighbours.
+    // every read with zero, which is what this letter would measure run
+    // from a cold flash instead of after its neighbours.
     S1::bus_clock(true);
     S2::bus_clock(true);
     S1::reset();

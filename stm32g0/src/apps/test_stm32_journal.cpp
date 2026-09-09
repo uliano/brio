@@ -2,7 +2,7 @@
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console; `z` runs them all and prints the "ALL: N pass, M fail"
-// line tools/bench.py judges. Board E (STM32G0B1RE), no wires.
+// line tools/bench.py judges. No wires.
 //
 // WHAT IT IS ABOUT. stm32g0/nvm_flash.hpp gives the whole of physical
 // BANK 2 to storage - the linker script hands the compiler bank 1 alone -
@@ -13,12 +13,10 @@
 // once - which is the partition's whole point and the thing a host test
 // cannot say anything about.
 //
-// AND IT IS THE JOURNAL'S THIRD SILICON. util/nv_journal.hpp was written
-// on the samc21's RWWEE array (256-byte erase unit, 64-byte cell) and
-// host-swept over three geometries, one of which - 2048/8 - was chosen
-// because it is THIS part's. So the first thing letter a checks is that
-// the geometry the host suite has been sweeping all along is the one the
-// silicon really has.
+// THE GEOMETRY IS A CLAIM TO CHECK. util/nv_journal.hpp's host sweep
+// covers three geometries, one of them 2048/8 - this part's erase unit
+// and its write cell. So the first thing letter a checks is that the
+// silicon really has the geometry the host suite assumes.
 //
 // What is exercised, letter by letter:
 //
@@ -166,7 +164,7 @@ static_assert(MeteredZone::write_cell == 8u);
 /// Six 32-byte values in two 2 Kbyte halves. The journal's own
 /// static_assert then performs (6 + 2) x 6 cells <= 256 cells, which is
 /// this geometry's whole point: one PAGE per half is already generous
-/// where the samc21 needed two rows for the same six values.
+/// for six values.
 using Journal = NvJournal<MeteredZone, 6, 32, 1>;
 Journal journal;
 
@@ -755,8 +753,7 @@ void tp_resume() {
     // WHICH PATH WROTE IT is the finding, not an implementation detail.
     // On this board panic()'s BKPT escalates into HardFault before the
     // Reporter is called, so an application that wants a flash
-    // breadcrumb has to bind the fault body - the samc21 campaign's
-    // finding, confirmed on the third silicon.
+    // breadcrumb has to bind the fault body.
     bench.verdict("and it was the FAULT BODY that wrote it, not the Reporter: "
                   "with C_DEBUGEN cleared, panic()'s BKPT escalates before "
                   "Reporter::report() is ever reached",
@@ -828,8 +825,8 @@ void banner() {
 extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
-/// THE PANIC PATH ON THIS BOARD IS THE FAULT PATH, and this body is where
-/// the campaign's one piece of application glue lives.
+/// THE PANIC PATH ON THIS BOARD IS THE FAULT PATH, and this body is the
+/// one piece of application glue that follows from it.
 ///
 /// panic() writes the SRAM breadcrumb and then executes break_here() - a
 /// BKPT - which on a core whose C_DEBUGEN tools/bench.py has cleared

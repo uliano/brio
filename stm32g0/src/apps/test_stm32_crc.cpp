@@ -95,8 +95,7 @@ uint32_t cycles_now() {
 }
 
 /// A measurement window a transmit interrupt walks through is not a
-/// measurement - the lesson three campaigns of this stratum have paid
-/// for. Letter c drains before it counts.
+/// measurement. Letter c drains before it counts.
 void console_drain() {
     for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
     }
@@ -152,8 +151,8 @@ static_assert(bitrev_halfwords(0x1A2B3C4Du) == 0xD458B23Cu,
  *
  * It lives in this suite because util/crc.hpp holds exactly one
  * checksum, the one the nonvolatile stores use, and adding a second
- * there to check a peripheral would be a util decision this campaign has
- * no business taking. Here it is a measuring instrument, and it is
+ * there to check a peripheral would be a util decision no bench suite
+ * has any business taking. Here it is a measuring instrument, and it is
  * allowed to be slow.
  */
 uint32_t crc32_reference(const uint8_t* data, uint32_t len, uint32_t seed = 0xFFFFFFFFu) {

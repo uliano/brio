@@ -977,9 +977,9 @@ public:
     }
 
     /**
-     * @brief SPI interrupt body - call from ISR(SPIn_INT_vect).
-     * @return true when the transaction just completed (CS released):
-     * the edge on which the glue posts TransferDone to the bus AO.
+     * SPI interrupt body - call from ISR(SPIn_INT_vect). Returns true
+     * when the transaction just completed (CS released): the edge on
+     * which the glue posts TransferDone to the bus AO.
      */
     [[gnu::always_inline]] static bool isr() {
         const uint8_t in = S::take_normal().data;   // INTFLAGS then DATA: the IF clear sequence
@@ -1004,14 +1004,12 @@ public:
 
     /// The work-around for a wedged host: a demotion mid-transfer (SS
     /// driven low with SSD clear stops the ISR pump dead, 28.3.2.1.3 -
-    /// bench-measured on the shared-SS letter) or a lost completion.
-    /// The interrupt is silenced and its flag cleared by the
-    /// INTFLAGS-then-DATA sequence, the Host role the hardware dropped
-    /// is re-armed, the select window closed; start() reprograms mode
-    /// and clock per request, so nothing else needs saving. The verb a
-    /// timed SpiBus calls (util/bus_master.hpp). COMPILE-VERIFIED
-    /// against the bench suites' engine only: the timed path itself has
-    /// not run on AVR silicon yet (docs/avrdx/spi.md).
+    /// measured) or a lost completion. The interrupt is silenced and
+    /// its flag cleared by the INTFLAGS-then-DATA sequence, the Host
+    /// role the hardware dropped is re-armed, the select window closed;
+    /// start() reprograms mode and clock per request, so nothing else
+    /// needs saving. The verb a timed SpiBus calls
+    /// (util/bus_master.hpp).
     static void recover() {
         if constexpr (available) {
             S::enable_interrupt(false);

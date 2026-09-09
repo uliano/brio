@@ -40,10 +40,9 @@
  * the same reason it has no pin type: it would be a second place for
  * the same truth.
  *
- * Validated on: the host fake. The AVR half is bench-verified when the
- * traffic testbed's buttons return to the desk (docs/bench.md) - the
- * mechanism is a periodic read of a level, which every target has, and
- * nothing in avrdx changed for it.
+ * The mechanism asks for nothing target-specific: a periodic read of a
+ * level, which every target has. It has not yet met a real contact -
+ * the debounce count is a chosen number, not a measured one.
  * (docs/design/overview.md, "Authority of util/".)
  */
 

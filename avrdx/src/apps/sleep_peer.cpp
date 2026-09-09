@@ -1,15 +1,15 @@
-// sleep_peer - the INSTRUMENT half of the SLEEP campaign: board B, the
-// scriptable peer that test_avr_sleep (board A, the DUT) drives IN BAND
-// over the PE0 one-wire link while A is stopping its own clocks.
+// sleep_peer - the INSTRUMENT half of a two-board SLEEP test: the
+// scriptable peer that test_avr_sleep (the DUT) drives IN BAND over the
+// PE0 one-wire link while the DUT is stopping its own clocks.
 //
 // WHY IT EXISTS. A sleeping chip cannot time its own wake-up: the only
 // clock that survives power-down is the PIT's, and the counter that
-// could measure the restart is exactly the one the mode stops
-// (test_avr_sleep f says so). So the ruler lives on this board. B
-// drives the stimulus edge on PE2, zeroes a 32-bit CLK_PER stopwatch on
-// the same instruction, and the DUT's wake-up ISR answers with an edge
-// on PE3 that CAPTURES that stopwatch through the event system - no
-// software is in the measurement path on this side at all.
+// could measure the restart is exactly the one the mode stops. So the
+// ruler lives on this board: it drives the stimulus edge on PE2, zeroes
+// a 32-bit CLK_PER stopwatch on the same instruction, and the DUT's
+// wake-up ISR answers with an edge on PE3 that CAPTURES that stopwatch
+// through the event system - no software is in the measurement path on
+// this side at all.
 //
 // It is deliberately not a kernel app: one blocking loop that polls the
 // link, decodes a command frame (src/apps/sleep_link.hpp), acknowledges
@@ -19,19 +19,20 @@
 // against the DUT's TWI client. Every action carries a count and a
 // millisecond deadline after which command mode is restored BY ITSELF.
 //
-// WIRING (fixed; no topology discovery here, unlike usart_peer):
+// WIRING (fixed; there is no topology discovery on this link):
 //   PE0  command channel, one wire between the two USART4 TXD pads,
 //        LBME both ends, 8N1 at slink::command_baud
 //   PE1  spare
-//   PE2  B drives, A senses: the stimulus (idles low)
-//   PE3  A drives, B senses: the echo, captured in hardware
-//   PA2/PA3  the desk I2C bus (SDA/SCL, 1.5k to +5 V), shared with A
+//   PE2  this board drives, the DUT senses: the stimulus (idles low)
+//   PE3  the DUT drives, this board senses: the echo, captured in
+//        hardware
+//   PA2/PA3  the I2C bus (SDA/SCL, 1.5k to +5 V), shared with the DUT
 //
-// THE CLOCK. This board's 24 MHz crystal does not start; CLK_PER comes
-// from OSCHF at 24 MHz, which is a per-cent-class reference. Every
-// latency measured here is a microsecond-to-millisecond figure, so that
-// accuracy is ample - but the banner and the `ident` answer both say
-// which source is really in force, and the DUT prints it.
+// THE CLOCK. A board whose 24 MHz crystal does not start runs CLK_PER
+// from OSCHF at 24 MHz instead, which is a per-cent-class reference.
+// Every latency measured here is a microsecond-to-millisecond figure,
+// so that accuracy is ample - but the banner and the `ident` answer
+// both say which source is really in force, and the DUT prints it.
 //
 // Console: USART2 ALT1 (PF4/PF5) at 460800, observability only.
 //   ? help | i status and counters | 0 back to command mode | 3 trace
@@ -79,7 +80,7 @@ using Watch = CascadedCounter<WatchLo, WatchHi>;
 using ChCarry = EventChannel<0>;
 using ChSnap = EventChannel<4>;   ///< PORTE pin events live on channels 4-5
 
-using Host = TwiHost<0, TwiRoute::def>;
+using Host = I2cHost<0, TwiRoute::def>;
 
 constexpr uint16_t firmware_version = 0x0101;
 
@@ -323,16 +324,16 @@ slink::Report run_sfd_byte(const slink::Params& a) {
 /// One host write tenure against the DUT's TWI client, timed on the
 /// wire. Start = the address byte leaving MADDR, stop = the engine
 /// reporting the transaction complete (the STOP has been commanded).
-/// The bus belongs to the office: the host half is released again as
-/// soon as the tenure is over.
+/// The bus is shared with other devices: the host half is released
+/// again as soon as the tenure is over.
 slink::Report run_twi_write(const slink::Params& a) {
     slink::Report r{};
     settle();
     if (a.delay_ms) delay_us(clock, static_cast<uint32_t>(a.delay_ms) * 1000u);
 
-    const TwiSpeed speed = a.rate >= 1'000'000u ? TwiSpeed::fast_plus_1m
-                         : a.rate >= 400'000u   ? TwiSpeed::fast_400k
-                                                : TwiSpeed::standard_100k;
+    const I2cSpeed speed = a.rate >= 1'000'000u ? I2cSpeed::fast_plus_1m
+                         : a.rate >= 400'000u   ? I2cSpeed::fast_400k
+                                                : I2cSpeed::standard_100k;
     if (!Host::init(clock, {.speed = speed})) {
         r.flags |= slink::report_failed;
         return r;

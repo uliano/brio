@@ -18,10 +18,10 @@
  *                        pins, ...>` names the SAME task over an
  *                        Lpuart<n>: one implementation, two peripherals,
  *                        because chapter 34 is chapter 33 with a
- *                        different baud generator. Its public surface is
- *                        the SAME as avrdx's Uart and samc21's Uart, which
- *                        is what lets util/serial_port.hpp and print()
- *                        compile on the third architecture untouched.
+ *                        different baud generator. Its public surface
+ *                        is every target's Uart surface, which is what
+ *                        lets util/serial_port.hpp and print() compile
+ *                        here untouched.
  *
  * SCOPE. The chapter, whole, bar what is declined with a reason in
  * docs/stm32g0/usart.md: every frame format, both oversamplings, the
@@ -41,9 +41,9 @@
  * the split as POINTER-COMPARISON macros, which are not constant
  * expressions) and the `has_*()` verbs below are the RUNTIME reads of
  * those very macros - so a suite can compare the table, the header and
- * the silicon against each other, which is what test_stm32_serial's
- * letter a does. Every feature verb a BASIC instance lacks REFUSES on
- * one (false, nothing written).
+ * the silicon against each other, which is what the bench does. Every
+ * feature verb a BASIC instance lacks REFUSES on one (false, nothing
+ * written).
  *
  * Facts that shape the code (RM0444 33.5, 33.8; ES0548 rev Z):
  *  - BRR, CR1's frame fields, CR2, CR3, GTPR and PRESC are written only
@@ -60,12 +60,11 @@
  *    usart_ker_ck AFTER the PRESC prescaler, not PCLK by assumption;
  *  - TXE is a CONDITION (transmit data register empty), so its interrupt
  *    is armed only while the ring holds something and disarmed from the
- *    handler when it runs dry - the samc21 DRE discipline;
+ *    handler when it runs dry;
  *  - ORE raises the interrupt whenever RXNEIE is set (33.8.9), and it is
  *    cleared ONLY through ICR.ORECF - a handler that reads RDR and
- *    leaves ORE standing re-enters for ever (the SERCOM ERROR storm the
- *    samc21 bench caught, in this family's clothes). Every error flag has
- *    its ICR twin and the handler clears what it counts;
+ *    leaves ORE standing re-enters for ever. Every error flag has its
+ *    ICR twin and the handler clears what it counts;
  *  - RDR holds the LAST GOOD byte when ORE is set (the lost one is the
  *    next); FE/NE/PE flags belong to the byte in RDR, so a framed or
  *    parity-failed byte is dropped precisely - and in FIFO mode 33.5.4
@@ -134,8 +133,8 @@ constexpr bool uart_format_valid(const UartFormat& f) {
 }
 
 /// CR2.STOP, all four codes - 0.5 and 1.5 belong to smartcard mode
-/// (33.5.17) and cannot be reached through UartFormat, which is the
-/// asynchronous vocabulary the three targets share.
+/// (33.5.17) and cannot be reached through UartFormat, which speaks
+/// the shared asynchronous vocabulary alone.
 enum class UartStop : uint8_t { one = 0, half = 1, two = 2, one_and_half = 3 };
 
 /// The two pads of a link, each with the AF the datasheet gives the
@@ -234,10 +233,9 @@ constexpr std::optional<uint16_t> usart_brr(uint32_t hz, uint32_t baud) {
 /// BRR[2:0] = USARTDIV[3:0] >> 1, BRR[3] kept clear (33.5.7).
 ///
 /// IT IS A SIBLING VERB AND NOT A DEFAULTED THIRD ARGUMENT, and the
-/// reason is measured: giving usart_brr() a `bool over8 = false` moved
-/// test_stm32_dma's image by forty bytes although the folded code for
-/// `false` is identical - the samc21 SPI-DMA campaign's ruling, byte
-/// identity outranks API economy, met again on this silicon.
+/// reason is measured: giving usart_brr() a `bool over8 = false` moves
+/// an image by forty bytes although the folded code for `false` is
+/// identical. Byte identity outranks API economy.
 constexpr std::optional<uint16_t> usart_brr_over8(uint32_t hz, uint32_t baud) {
     if (hz == 0u || baud == 0u) {
         return std::nullopt;
@@ -473,8 +471,8 @@ struct UsartInterrupt {
  * THE ENABLE RULE, everywhere: a field 33.8.x calls "can only be written
  * when the USART is disabled" is written by a verb that returns false
  * and STORES NOTHING while UE stands. The silicon's own behaviour is not
- * uniform enough to trust (the LPTIM campaign of this stratum found a
- * forbidden write landing anyway), so the refusal is the driver's.
+ * uniform enough to trust (elsewhere in this stratum a forbidden write
+ * has been measured landing anyway), so the refusal is the driver's.
  */
 template <uint8_t n>
 struct Usart {
@@ -535,10 +533,9 @@ struct Usart {
      * good expressions and perfectly useless as constant ones. Folded
      * against a constant `&regs()` they cost nothing, and they are the
      * SECOND opinion the bench compares the reserve's stated table and
-     * the silicon against (test_stm32_serial letter a). Where the header
-     * has no macro - the prescaler, synchronous mode, the receiver
-     * time-out - the constants above are the only claim, and the bench
-     * asks the silicon directly.
+     * the silicon against. Where the header has no macro - the
+     * prescaler, synchronous mode, the receiver time-out - the constants
+     * above are the only claim, and the bench asks the silicon directly.
      */
     static bool has_fifo() { return IS_UART_FIFO_INSTANCE(&regs()) != 0; }
     static bool has_autobaud() {
@@ -673,8 +670,8 @@ struct Usart {
     static bool oversampling() { return (regs().CR1 & USART_CR1_OVER8) != 0u; }
 
     /// CR1.FIFOEN (33.5.4). Refused on a BASIC instance, where the bit
-    /// is Reserved - and where writing it would read back clear anyway,
-    /// which is what letter a of the suite measures.
+    /// is Reserved - and where writing it reads back clear anyway,
+    /// which is measured.
     static bool fifo(bool on) {
         if (enabled() || !is_full) {
             return false;
@@ -1148,10 +1145,9 @@ struct Usart {
     static void write_data(uint8_t b) { regs().TDR = b; }
     static void write_word(uint16_t v) { regs().TDR = v & 0x1FFu; }
 
-    /// Where a DMA channel reads from and writes to. Two REGISTERS here,
-    /// where the SERCOM had one DATA: a receive engine points at RDR and
-    /// a transmit engine at TDR, and neither can be mistaken for the
-    /// other.
+    /// Where a DMA channel reads from and writes to. TWO REGISTERS, not
+    /// one: a receive engine points at RDR and a transmit engine at TDR,
+    /// and neither can be mistaken for the other.
     static volatile void* tx_data_address() { return &regs().TDR; }
     static volatile void* rx_data_address() { return &regs().RDR; }
 
@@ -1188,10 +1184,9 @@ struct Usart {
      * They live here and not in stm32g0/device_tables.hpp because NO
      * DEVICE HEADER OF THIS PACK DECLARES THEM - the DMAMUX_REQ_*
      * spellings are ST's HAL/LL, which this project does not vendor - and
-     * because of the standing ruling the samc21 EVSYS campaign settled: a
-     * fabric driver owns the fabric, a peripheral owns its own
-     * vocabulary. stm32g0/dma.hpp therefore takes a plain request id and
-     * knows nothing about USARTs.
+     * because a fabric driver owns the fabric while a peripheral owns
+     * its own vocabulary. stm32g0/dma.hpp therefore takes a plain
+     * request id and knows nothing about USARTs.
      *
      * The numbers are the same on every part of the family; an instance
      * a part does not bond simply has no user for its row.
@@ -1306,9 +1301,9 @@ constexpr bool uart_engines_distinct() {
  * stm32g0 image is what says so (docs/stm32g0/usart.md).
  *
  * WHY AN OPTIONS STRUCT AND NOT TEN TEMPLATE PARAMETERS: the surface of
- * Uart is SHARED with the other two targets (util/serial_port.hpp and
- * print() compile against all three), so its parameter list cannot grow
- * a target-specific tail. One trailing NTTP with a default is the whole
+ * Uart is a SHARED one (util/serial_port.hpp and print() compile
+ * against every target's), so its parameter list cannot grow a
+ * target-specific tail. One trailing NTTP with a default is the whole
  * change, and a caller who names nothing sees nothing.
  */
 struct UartOptions {
@@ -1382,9 +1377,8 @@ constexpr UartOptions uart_with_driver_enable(UartOptions base, PinSel de,
     return base;
 }
 
-/// A copy of `base` in single-wire half-duplex - the OneWire arrangement
-/// the AVR stratum spells as a task of its own and this one does not
-/// need to (33.5.15 is a bit, not a mode).
+/// A copy of `base` in single-wire half-duplex. It is an OPTION and not
+/// a task of its own, because 33.5.15 is a bit and not a mode.
 constexpr UartOptions uart_half_duplex(UartOptions base = {}) {
     base.half_duplex = true;
     return base;
@@ -1404,7 +1398,7 @@ constexpr UartOptions uart_half_duplex(UartOptions base = {}) {
  *   }
  *   Serial::init(clock, 115200);
  *
- * Same verbs, same return contracts as the other two targets' Uart:
+ * The shared Uart surface - same verbs, same return contracts:
  * init/rebase/isr/write_byte/read_byte/write/write_bulk/read_bulk, the
  * error counters, release().
  *
@@ -1416,12 +1410,11 @@ constexpr UartOptions uart_half_duplex(UartOptions base = {}) {
  * divisor, and a second copy of this file would have been a second place
  * for the ORE storm to be got wrong.
  *
- * THE TWO OPTIONAL ENGINE SLOTS are the samc21 Uart's, in this family's
- * clothes: name a stm32g0/dma.hpp DmaTxEngine and/or DmaRxEngine and the
- * bytes move without the CPU; name neither (the default) and every engine
- * branch below disappears - `if constexpr` throughout, and the engineless
- * release images are BYTE-IDENTICAL to the ones built before the
- * parameters existed (docs/stm32g0/dma.md records the md5 gate).
+ * THE TWO OPTIONAL ENGINE SLOTS: name a stm32g0/dma.hpp DmaTxEngine
+ * and/or DmaRxEngine and the bytes move without the CPU; name neither
+ * (the default) and every engine branch below disappears - `if
+ * constexpr` throughout, so an engineless image carries no DMA code at
+ * all (docs/stm32g0/dma.md records the md5 gate).
  *
  * WHICHEVER DIRECTION HAS AN ENGINE DOES NOT ARM ITS INTERRUPT: the DMA
  * request and the interrupt are the SAME condition (TXE, RXNE), so arming
@@ -1548,18 +1541,16 @@ public:
                                opts.prescaler);
     }
 
-    /**
-     * @brief Bring the instance up: bus clock, kernel clock, frame, baud,
-     * the chapter options, pads, the receive interrupt and its NVIC line.
-     *
-     * Call AFTER the main clock is set up and before interrupts are
-     * enabled globally; `clock` is the app's brio::Clock tag, and the
-     * divisor comes from THE KERNEL CLOCK THE OPTIONS NAME - never from
-     * a second statement of the rate, and never from PCLK by assumption.
-     * False when the rate cannot be produced at that clock: the caller
-     * then knows the transport is NOT up, rather than printing into a
-     * ring nothing will drain.
-     */
+    /// Bring the instance up: bus clock, kernel clock, frame, baud,
+    /// the chapter options, pads, the receive interrupt and its NVIC line.
+    ///
+    /// Call AFTER the main clock is set up and before interrupts are
+    /// enabled globally; `clock` is the app's brio::Clock tag, and the
+    /// divisor comes from THE KERNEL CLOCK THE OPTIONS NAME - never from
+    /// a second statement of the rate, and never from PCLK by assumption.
+    /// False when the rate cannot be produced at that clock: the caller
+    /// then knows the transport is NOT up, rather than printing into a
+    /// ring nothing will drain.
     template <typename Clock>
     static bool init(Clock clock, uint32_t baud, const UartFormat& format = {}) {
         static_assert(clock_follows<Clock, UartTask>(),
@@ -1690,25 +1681,23 @@ public:
         return true;
     }
 
-    /**
-     * @brief The ISR body of WHICHEVER DMA channel this transport owns -
-     * call it from the vector(s) the engines' channels report on.
-     *
-     *     extern "C" void DMA1_Channel1_IRQHandler() { (void)Serial::dma_isr(); }
-     *
-     * Each engine's channel reads ONLY its own flags (there is no
-     * "which channel interrupted" register on this controller), so this is
-     * safe to call from a shared vector that also serves other people's
-     * channels: it answers for its own and returns false otherwise.
-     *
-     * On the transmit channel a completion means the block has left the
-     * ring, so exactly that many bytes are released and the next
-     * contiguous run started. On the receive channel nothing is published
-     * here - only harvest() knows how much of the run the consumer has
-     * been told about, and the pacing of that is the owner's.
-     *
-     * @return true when something belonging to this transport was served.
-     */
+    /// The ISR body of WHICHEVER DMA channel this transport owns -
+    /// call it from the vector(s) the engines' channels report on.
+    ///
+    ///     extern "C" void DMA1_Channel1_IRQHandler() { (void)Serial::dma_isr(); }
+    ///
+    /// Each engine's channel reads ONLY its own flags (there is no
+    /// "which channel interrupted" register on this controller), so this is
+    /// safe to call from a shared vector that also serves other people's
+    /// channels: it answers for its own and returns false otherwise.
+    ///
+    /// On the transmit channel a completion means the block has left the
+    /// ring, so exactly that many bytes are released and the next
+    /// contiguous run started. On the receive channel nothing is published
+    /// here - only harvest() knows how much of the run the consumer has
+    /// been told about, and the pacing of that is the owner's.
+    ///
+    /// Returns true when something belonging to this transport was served.
     [[gnu::always_inline]] static bool dma_isr() {
         bool mine = false;
         if constexpr (has_tx_engine) {
@@ -1738,23 +1727,21 @@ public:
         return mine;
     }
 
-    /**
-     * @brief Ask the receive engine what has arrived, and publish it.
-     *
-     * WHY THIS IS A VERB AND NOT AN INTERRUPT. A receive block completes
-     * only when the buffer fills, which on an idle line may be never, so
-     * there is no event to wait for. WHOEVER OWNS THE PORT DECIDES HOW
-     * OFTEN TO ASK and pays the latency it chose; a kernel TimeEvent every
-     * few ticks is the shape brio expects.
-     *
-     * On this silicon the asking itself is nearly free - one CNDTR read
-     * (stm32g0/dma.hpp, DmaRxEngine::take()) where the SAM had to suspend
-     * the channel and validate a write-back against an erratum.
-     *
-     * @return true when the receive ring went from empty to non-empty -
-     * the same edge contract isr() has, so the same kernel glue works.
-     * False, and free, without an engine.
-     */
+    /// Ask the receive engine what has arrived, and publish it.
+    ///
+    /// WHY THIS IS A VERB AND NOT AN INTERRUPT. A receive block completes
+    /// only when the buffer fills, which on an idle line may be never, so
+    /// there is no event to wait for. WHOEVER OWNS THE PORT DECIDES HOW
+    /// OFTEN TO ASK and pays the latency it chose; a kernel TimeEvent every
+    /// few ticks is the shape brio expects.
+    ///
+    /// On this silicon the asking itself is nearly free: one CNDTR read
+    /// (stm32g0/dma.hpp, DmaRxEngine::take()), with nothing suspended
+    /// and no write-back to judge.
+    ///
+    /// Returns true when the receive ring went from empty to non-empty -
+    /// the same edge contract isr() has, so the same kernel glue works.
+    /// False, and free, without an engine.
     static bool harvest() {
         if constexpr (!has_rx_engine) {
             return false;
@@ -1786,8 +1773,8 @@ public:
             }
             // THE SILICON IS ASKED FIRST AND THE ARITHMETIC SECOND: a
             // channel that is not running gets a new run whatever the
-            // count says. (The SAM campaign found a receive stream dead
-            // in exactly the opposite rule.)
+            // count says. The opposite rule - trust the count and leave
+            // a stopped channel alone - leaves a receive stream dead.
             if (RxEngine::idle() || RxEngine::full() || RxEngine::capacity() == 0u) {
                 rearm_rx();
             }
@@ -1795,17 +1782,15 @@ public:
         }
     }
 
-    /**
-     * @brief The core clock changed (DynamicClock fan-out): keep the
-     * same bit rate at the new rate. Called BEFORE the clock changes,
-     * so the drain runs at the rate the queued bytes were meant for;
-     * TC answers "the shifter is empty" exactly. BRR is UE-protected,
-     * so the instance is stopped around the write. Main context only.
-     *
-     * A KERNEL CLOCK THAT IS NOT PCLK OR SYSCLK DOES NOT FOLLOW, and
-     * this verb then rewrites NOTHING - which is exactly what an
-     * application asks for when it puts a console on HSI16 or LSE.
-     */
+    /// The core clock changed (DynamicClock fan-out): keep the
+    /// same bit rate at the new rate. Called BEFORE the clock changes,
+    /// so the drain runs at the rate the queued bytes were meant for;
+    /// TC answers "the shifter is empty" exactly. BRR is UE-protected,
+    /// so the instance is stopped around the write. Main context only.
+    ///
+    /// A KERNEL CLOCK THAT IS NOT PCLK OR SYSCLK DOES NOT FOLLOW, and
+    /// this verb then rewrites NOTHING - which is exactly what an
+    /// application asks for when it puts a console on HSI16 or LSE.
     static void rebase(uint32_t hz) {
         if constexpr (!follows_sysclk) {
             (void)hz;
@@ -1829,22 +1814,20 @@ public:
         }
     }
 
-    /**
-     * @brief Move the LINK to a different bit rate, the clock staying put
-     * - the mirror of rebase(), which moves the clock and keeps the rate.
-     *
-     * `hz` is the SYSCLK/PCLK rate, the same argument rebase() takes;
-     * what the divisor divides is derived from it through the options'
-     * kernel clock and prescaler, so a caller never has to know which.
-     *
-     * The queued bytes are drained at the OLD rate first (they were meant
-     * for it), then BRR is written with the instance stopped, since it is
-     * UE-protected like every other frame field. False, and nothing
-     * written, when the new rate is unreachable at this clock.
-     *
-     * Main context only, and the caller owns the agreement with whatever
-     * is on the other end: a receiver still at the old rate reads noise.
-     */
+    /// Move the LINK to a different bit rate, the clock staying put
+    /// - the mirror of rebase(), which moves the clock and keeps the rate.
+    ///
+    /// `hz` is the SYSCLK/PCLK rate, the same argument rebase() takes;
+    /// what the divisor divides is derived from it through the options'
+    /// kernel clock and prescaler, so a caller never has to know which.
+    ///
+    /// The queued bytes are drained at the OLD rate first (they were meant
+    /// for it), then BRR is written with the instance stopped, since it is
+    /// UE-protected like every other frame field. False, and nothing
+    /// written, when the new rate is unreachable at this clock.
+    ///
+    /// Main context only, and the caller owns the agreement with whatever
+    /// is on the other end: a receiver still at the old rate reads noise.
     static bool set_baud(uint32_t hz, uint32_t baud) {
         const Divisor reg = plain ? Divisor{usart_brr(hz, baud)}
                                   : divisor_for(baud_clock(hz), baud);
@@ -1892,15 +1875,13 @@ public:
         }
     }
 
-    /**
-     * @brief The instance's ONE interrupt body - call from the vector
-     * the device gives this instance (shared with others on this family).
-     *
-     * @return true when the RX ring transitioned empty -> non-empty: the
-     * edge signal for kernel glue ("post RxActivity on true"). Every
-     * empty->non-empty transition reports true and the consumer only
-     * empties the ring by draining it, so no wakeup is ever lost.
-     */
+    /// The instance's ONE interrupt body - call from the vector
+    /// the device gives this instance (shared with others on this family).
+    ///
+    /// Returns true when the RX ring transitioned empty -> non-empty: the
+    /// edge signal for kernel glue ("post RxActivity on true"). Every
+    /// empty->non-empty transition reports true and the consumer only
+    /// empties the ring by draining it, so no wakeup is ever lost.
     [[gnu::always_inline]] static bool isr() {
         USART_TypeDef& r = S::regs();
         const uint32_t st = r.ISR;
@@ -2053,8 +2034,9 @@ public:
     }
 
     /// Queue a run of bytes through the ring's contiguous span and nudge
-    /// the transmitter ONCE - the bulk verb the samc21 campaign measured
-    /// the per-byte one against. Returns the number queued.
+    /// the transmitter ONCE - one nudge per run where write() costs one
+    /// per byte, which is what a fed engine wants. Returns the number
+    /// queued.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
         uint32_t queued = 0;
         while (queued < src.size()) {
@@ -2191,12 +2173,11 @@ private:
     /// optional<uint32_t> from being an AMBIGUOUS composite type (each
     /// converts to the other, so the operator has no answer).
     ///
-    /// THE DEFAULT ARRANGEMENT, and it is spelled out so that every
-    /// baud-arithmetic verb below can name HEAD's own expression for it
-    /// CHARACTER FOR CHARACTER. Folding `hz / usart_prescaler_divisor
-    /// (div1)` to `hz` gives the same value and NOT the same code - the
-    /// md5 gate measured a forty-byte move on test_stm32_dma - which is
-    /// the samc21 SPI-DMA campaign's ruling met again: byte identity
+    /// THE DEFAULT ARRANGEMENT, spelled out so that every
+    /// baud-arithmetic verb below can name one and the same expression
+    /// for it CHARACTER FOR CHARACTER. Folding `hz /
+    /// usart_prescaler_divisor(div1)` to `hz` gives the same value and
+    /// NOT the same code: an image moves by forty bytes. Byte identity
     /// outranks API economy, and a `plain` branch costs nothing.
     static constexpr bool plain = !S::is_lpuart &&
                                   opts.kernel_clock == UsartClock::pclk &&
@@ -2261,13 +2242,13 @@ private:
      * Hand the transmit engine the ring's next contiguous run, if it is
      * free to take one.
      *
-     * NO KICK, AND THAT IS THIS CONTROLLER'S OWN FACT. The SAM's twin had
-     * to ask the peripheral whether its request was already standing and
-     * software-trigger the channel if it was, because that DMAC latches a
-     * trigger on the RISE. Here 10.4.3's handshake is level-driven: the
-     * channel is enabled, it sees TXE asserted, it writes TDR. Measured
-     * (test_stm32_dma letter h) rather than assumed, because a wrong
-     * answer is a transmitter that never starts.
+     * NOTHING KICKS THE FIRST BEAT, AND THAT IS THIS CONTROLLER'S OWN
+     * FACT. A controller that latched a trigger on the RISE would need
+     * to be asked whether the peripheral's request was already standing
+     * and software-triggered if it was. Here 10.4.3's handshake is
+     * level-driven: the channel is enabled, it sees TXE asserted, it
+     * writes TDR. Measured rather than assumed, because a wrong answer
+     * is a transmitter that never starts.
      */
     static void pump_tx() {
         if constexpr (has_tx_engine) {
@@ -2298,17 +2279,15 @@ private:
     }
 };
 
-/// The task over a USART instance - the name every application and both
-/// other targets know.
+/// The task over a USART instance: the name every application knows.
 template <uint8_t n, UartPins pins, uint32_t rx_size = 64, uint32_t tx_size = 256,
           typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
           UartOptions opts = UartOptions{}>
 using Uart = UartTask<Usart<n>, pins, rx_size, tx_size, TxEngine, RxEngine, opts>;
 
 /// RS-485: a Uart with the driver enable of 33.5.20 on the RTS pad. The
-/// AVR stratum's name kept, because it is the same role; the DE timings
-/// are SAMPLE times (1/16 of a bit at OVER8 = 0), which is the one thing
-/// about this feature that is easy to get wrong.
+/// DE timings are SAMPLE times (1/16 of a bit at OVER8 = 0), which is
+/// the one thing about this feature that is easy to get wrong.
 template <uint8_t n, UartPins pins, PinSel de_pin, uint8_t assertion = 0,
           uint8_t deassertion = 0, uint32_t rx_size = 64, uint32_t tx_size = 256,
           UartOptions base = UartOptions{}>

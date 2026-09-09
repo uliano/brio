@@ -104,7 +104,7 @@ Heap heap;
 constexpr uint16_t heap_record = 0x5A01;
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch (the same one test_samc_dma uses)
+// A cycle-resolution stopwatch
 //
 // The kernel timebase ticks at 1 kHz, far too coarse for an operation
 // that costs microseconds. SysTick counts CPU cycles DOWN from LOAD to
@@ -131,8 +131,7 @@ uint32_t cycles_to_us(uint32_t cycles) { return cycles / (SysClock::hz / 1'000'0
 // Buffers
 //
 // VOLATILE, because these are read back from flash the CPU itself just
-// programmed through a side channel the optimizer cannot see. The DMAC
-// campaign learned this the expensive way on this same target: gcc will
+// programmed through a side channel the optimizer cannot see: gcc will
 // happily fold a read-back into whatever the CPU last stored, and a
 // round-trip test that does that proves nothing at all.
 // ---------------------------------------------------------------------------
@@ -548,9 +547,10 @@ void te_heap() {
     bench.verdict("the heap mounts on the RWWEE array", r.mounted());
 
     // The zone is a constant on this target - no linker symbol reaches
-    // into the RWWEE array - which is worth asserting because it is the
-    // whole difference from the AVR backend. It is the heap's SHARE of
-    // the array: the top four rows are the journal's attic
+    // into the RWWEE array - which is worth asserting, because a
+    // backend whose bounds come from linker symbols has to be told
+    // where its zone is and this one cannot be. It is the heap's SHARE
+    // of the array: the top four rows are the journal's attic
     // (samc21/nvm_flash.hpp's RwweePartition), and that bound is a
     // constant for exactly the same reason.
     const auto zones = brio::RwweeFlash::zones();
@@ -729,14 +729,13 @@ void tm_main_array() {
                   spins_erase < 16u);
 
     // AND THE DURATIONS ARE NOT PRINTED IN MICROSECONDS, because the
-    // stopwatch cannot be trusted across a stall - a fact this letter
-    // measured the hard way, having first predicted the wrong cause.
+    // stopwatch cannot be trusted across a stall.
     //
-    // A single erase timed with cycles_now() scattered between 234 and
+    // A single erase timed with cycles_now() scatters between 234 and
     // 1233 us across runs: a whole tick period of spread on a ~1 ms
-    // operation. The guess was that the SysTick handler, being code in
-    // the stalled main array, was MISSING ticks. The eight-round total
-    // below refutes that - eight erases report eight milliseconds of
+    // operation. It is NOT that the SysTick handler, being code in the
+    // stalled main array, misses ticks - the eight-round total below
+    // rules that out, since eight erases report eight milliseconds of
     // ticks, so nothing is lost.
     //
     // What actually happens is subtler and worth knowing on this target:
@@ -798,9 +797,8 @@ void banner() {
 //
 // AN UNBOUND VECTOR HERE IS A SILENT DEATH, not a crash: the crt's
 // default handler is a spin loop, so the first console interrupt parks
-// the CPU in it and the board simply never says anything. (The AVR side's
-// twin of this lesson is the opposite shape - an unbound vector there
-// jumps to 0 and the suite reboots forever.) Both of these are needed:
+// the CPU in it and the board simply never says anything. Both of these
+// are needed:
 // the Uart is interrupt-driven, and the stopwatch below reads the tick
 // counter SysTick_Handler advances.
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }

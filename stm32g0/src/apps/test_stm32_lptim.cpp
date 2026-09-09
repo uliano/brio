@@ -26,7 +26,8 @@
 // THE WALL CLOCK IS THE RTC, and it has to be: every TIM of this family
 // stops in Stop and so does SysTick. The calendar runs on whichever
 // 32 kHz-ish root THIS BOARD HAS with PREDIV_A 0 / PREDIV_S 32767 - the
-// sleep suite's own split, a ~30 us stopwatch that keeps counting with
+// split the other way from the usual, which makes the sub-second
+// counter a ~30 us stopwatch that keeps counting with
 // every clock in the chip stopped. THE DOMAIN IS NEVER RESET: RTCSEL is
 // left where it is and the backup registers other suites wrote are not
 // touched, so a board whose domain is already committed to a crystal it
@@ -36,7 +37,8 @@
 // 32768 Hz by construction; an LSI is an RC oscillator DS12992 table 46
 // only BOUNDS at 29.5..34 kHz, so a board without a crystal WEIGHS its
 // own LSI at boot (TIM16's capture channel against PCLK, the median of a
-// batch - test_stm32_rtc's own estimator) and every microsecond printed
+// batch, because an unfiltered capture of an internal clock line errs
+// in BOTH directions) and every microsecond printed
 // here is converted with that reading. The same board reads its awake
 // windows on the CPU's cycle counter rather than on the RC wall: what is
 // inside such a window is PCLK-derived, so the ratio is exact, and the
@@ -193,9 +195,9 @@ using Etr2Pin = Pin<etr2_sel.port, etr2_sel.pin>;
 template <bool present>
 using Tim7 = Tim<present ? uint8_t{7} : uint8_t{16}>;
 
-/// COMP1's plus input is PA1 (its code `input2`), which is the pad the
-/// analog campaign precharges. Nothing of this suite drives it except
-/// through that helper. THE COMPARATOR ITSELF IS NOT ON EVERY PART: the
+/// COMP1's plus input is PA1 (its code `input2`), a pad nothing in this
+/// suite drives except through the precharge helper that flips the
+/// comparator. THE COMPARATOR ITSELF IS NOT ON EVERY PART: the
 /// G031/G041 class has none at all (18.1), so `Comp` cannot even be
 /// NAMED there - no template can reach a type that does not exist, and
 /// `#if defined(COMP1_BASE)` is the right and only tool for the four
@@ -340,8 +342,8 @@ void feed() { Iwdg::refresh(); }
 /// One type for the two shapes every letter here uses - "hold this
 /// window open for N milliseconds" and "how long did that take" - so the
 /// choice of ruler is made ONCE and no letter repeats it. On a crystal
-/// board both members are the wall arithmetic the suite has always used,
-/// to the operation; on a board with none they are the cycle counter,
+/// board both members are the wall arithmetic, to the operation; on a
+/// board with none they are the cycle counter,
 /// and NO WALL READ HAPPENS AT ALL, which is what lets these letters run
 /// on a board whose RTC domain has no clock to give them.
 class Span {
@@ -450,7 +452,7 @@ uint32_t measure_lsi_hz() {
 }
 
 /// A measurement window a transmit interrupt walks through is not a
-/// measurement - three campaigns of this stratum have paid for that.
+/// measurement.
 void console_drain() {
     for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
     }
@@ -471,8 +473,7 @@ uint32_t permille_off(uint32_t v, uint32_t want) {
 /// THE PRECONDITION OF EVERY PULL-WALKED LETTER: an input pad with
 /// nothing attached goes where its own pull sends it - and the question
 /// this chapter adds is whether it still does so WITH THE PAD HANDED TO
-/// THE PERIPHERAL, which on the SAM depended on whether the function
-/// drives the pad or only reads it.
+/// THE PERIPHERAL.
 template <class Pin>
 bool pull_walks(bool in_af, PinFunction fn) {
     if (in_af) {
@@ -595,9 +596,8 @@ void quiet_everything() {
 
 /// Which body the shared TIM6/DAC/LPTIM1 vector runs. Both are compiled
 /// and only one is right at a time, so every letter that drives LPTIM1
-/// by hand says so. (The sleep suite paid for this lesson: a letter that
-/// inherits the previous one's handler measures a wake that never
-/// happened the way it thought.)
+/// by hand says so: a letter that inherits the previous one's handler
+/// measures a wake that never happened the way it thought.
 volatile bool site_round = false;
 volatile bool kernel_live = false;
 volatile uint32_t lptim_irqs = 0;
@@ -647,7 +647,8 @@ struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip, Woke> {
 
 /// THE SITE'S SOURCE IS A COMPILE-TIME CONFIGURATION AND THE ROOT IS A
 /// BOARD FACT (`slow_clock` answers it at run time for everything else):
-/// every board of this desk runs its crystal, so the site takes the LSE.
+/// every board this suite is built for fits a crystal, so the site takes
+/// the LSE.
 /// The site converts with a STATED rate, and every promise it makes -
 /// late, never early - holds only while that statement is at or ABOVE
 /// the true rate; a board on LSI would state the crystal's 32768 (some
@@ -669,7 +670,7 @@ using K = Kernel<P, Probe, Manager>;
 /// contract's own direction - makes every nap proportionally long in the
 /// world while staying right in kernel ticks. On a crystal the two rates
 /// are the same number and this is the identity, which is why letter h's
-/// bands below are still literally the ones it has always had there.
+/// bands below are literally the ones written there.
 uint32_t site_span_ms(uint32_t ms) {
     return static_cast<uint32_t>((static_cast<uint64_t>(ms) * Site::rate_hz) /
                                  slow_hz);
@@ -788,10 +789,8 @@ void ta_block() {
                   "draws - the two upper codes of each are simply unnamed",
                   cfgr2_all == 0xFFu);
 
-    // THE PADS, before anything rests on them. The question this chapter
-    // adds to the EXTI campaign's: does a pad handed to a peripheral
-    // INPUT still follow its own pull? (On the SAM a DRIVING function
-    // took the pull away and an input function did not.)
+    // THE PADS, before anything rests on them. The question: does a pad
+    // handed to a peripheral INPUT still follow its own pull?
     Rcc::io_clock('B', true);
     const bool out_plain = pull_walks<OutPin>(false, PinFunction::af5);
     const bool in1_plain = pull_walks<In1Pin>(false, PinFunction::af5);
@@ -959,9 +958,9 @@ void ta_block() {
                       arr_cycles_at[0] >= 1000u && cmp_cycles_at[1] < 1000u &&
                       arr_cycles_at[1] < 1000u);
 
-    // A FORBIDDEN WRITE IS NOT ONE THING ON THIS FAMILY (the analog
-    // campaign's finding). 26.7.4 says CFGR is disabled-only; whether
-    // the silicon drops such a store or takes it is measured.
+    // A FORBIDDEN WRITE IS NOT ONE THING ON THIS FAMILY. 26.7.4 says
+    // CFGR is disabled-only; whether the silicon drops such a store or
+    // takes it is measured.
     (void)free_run(LptimClock::pclk, LptimPrescaler::div1);
     const uint32_t cfgr_before = L1::regs().CFGR;
     L1::regs().CFGR = cfgr_before | (7u << LPTIM_CFGR_PRESC_Pos);
@@ -1188,8 +1187,8 @@ void tb_counting() {
     // is the ARRM flag's own timing on this board's ruler - AND THE
     // PERIOD IS SIZED FROM THE ROOT'S MEASURED RATE rather than written
     // as a constant, so "100 ms" is a hundred milliseconds on a crystal
-    // and on an RC alike. (On the crystal the arithmetic gives back the
-    // 3275 and 1637 this leg has always used, to the count.)
+    // and on an RC alike. (On the crystal the arithmetic gives back 3275
+    // and 1637, to the count.)
     const uint16_t tenth_arr = static_cast<uint16_t>(slow_hz / 10u - 1u);
     const uint16_t half_arr = static_cast<uint16_t>(slow_hz / 20u - 1u);
     for (uint8_t leg = 0; leg < 2u; ++leg) {
@@ -1243,8 +1242,7 @@ void tb_counting() {
 /// Sample LPTIM1_OUT through GPIOB's IDR - the pad's input buffer stays
 /// live in alternate mode (7.3.1), so a driven waveform is readable.
 /// THE LOOP MUST NOT BRANCH on what it reads: a branch makes its
-/// duration depend on the level and biases the answer (the tim campaign
-/// paid for this).
+/// duration depend on the level and biases the answer.
 uint32_t pad_permille(uint32_t samples) {
     uint32_t high = 0;
     for (uint32_t i = 0; i < samples; ++i) {
@@ -1256,9 +1254,8 @@ uint32_t pad_permille(uint32_t samples) {
 /// Bring LPTIM1 up as a 64 kHz PWM on PB0 - the rate the pad sampler
 /// wants. THE WAVEFORM HAS TO BE FAST: the sampling loop is a fixed-rate
 /// sampler, so it must cross HUNDREDS of periods for the aliasing
-/// between the two rates to average out (the tim campaign's own
-/// finding, paid for again here - a 1 kHz waveform sampled over three
-/// periods reported a 500 per mille duty as 552).
+/// between the two rates to average out: a 1 kHz waveform sampled over
+/// three periods reads a 500 per mille duty as 552.
 bool pwm_64k(uint16_t compare, bool inverted = false) {
     L1::init();
     L1::kernel_clock(LptimClock::pclk);
@@ -1490,9 +1487,9 @@ void tc_waveform() {
     EdgeCh::stop();
     const uint32_t edges = static_cast<uint32_t>(g0 - g1);
     const uint32_t edge_hz = edges * 5u;
-    // THE BAND IS THE CRYSTAL'S OWN WHERE THERE IS A CRYSTAL - the
-    // numbers this leg has always carried - and one of the same width
-    // around the measured root's half rate where there is not.
+    // THE BAND IS THE CRYSTAL'S OWN WHERE THERE IS A CRYSTAL, and one of
+    // the same width around the measured root's half rate where there is
+    // not.
     const uint32_t want_hz = slow_hz / 2u;
     const uint32_t edge_lo = wall_on_lse ? 16'200u : want_hz - want_hz / 100u;
     const uint32_t edge_hi = wall_on_lse ? 16'560u : want_hz + want_hz / 100u;
@@ -1653,8 +1650,8 @@ void td_counter_mode() {
 
     // IN1SEL = COMP1_OUT: the timer's input with NO PAD ON THE TIMER'S
     // SIDE AT ALL. The comparator is flipped by precharging its own plus
-    // input, the analog campaign's wireless technique - AND IT NEEDS A
-    // COMPARATOR. The G031/G041 class has none (18.1), so `Comp` is not
+    // input, with no wire anywhere - AND IT NEEDS A COMPARATOR.
+    // The G031/G041 class has none (18.1), so `Comp` is not
     // a type there at all and no template can reach it: this is one of
     // the four places in this file where only the preprocessor can ask.
     feed();

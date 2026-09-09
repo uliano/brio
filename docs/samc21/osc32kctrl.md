@@ -50,8 +50,7 @@ chapter at all, but in GCLK's 16.6.2.6: a generator releases its old
 source only once the new one is ready. Stop an oscillator while a
 generator still points at it and that generator can never be
 re-sourced - the GENCTRL write does not complete. Point the generator
-somewhere running *first*, then stop the oscillator. This cost the bench
-suite a whole letter before it was understood.
+somewhere running *first*, then stop the oscillator.
 
 **WRTLOCK is one-way until a power-on reset**, on both internal
 oscillators. The worst it does is freeze a working configuration, but
@@ -125,19 +124,19 @@ Osc32k::stop();
 
 ## Bench findings
 
-From `test_samc_osc32k` (3 letters, 32 verdicts, 32/32), measured with
+From `test_samc_osc32k` (3 letters, 32 verdicts), measured with
 `samc21/freqm.hpp` against OSC48M. Nothing to wire.
 
 **THE SCALE, first.** Every absolute frequency below is a ratio against
 OSC48M multiplied by a NOMINAL 48 MHz - and OSC48M, weighed against the
-crystal after this page was first written, is about **5100 ppm SLOW on
-this die** with a +-5% calibration spec and a thermal wander of its own
-([clock.md](clock.md)). So these numbers overread by about half a per
-cent, they move a little between power-ons, and the suite's near-nominal
-verdict carries a 3% band for exactly that reason - the band covers the
-REFERENCE more than the oscillator under test. The per-step and
-percent-class findings below are unaffected; the crystal-scale values
-live in [clock.md](clock.md).
+crystal, is about **5100 ppm SLOW on this die** with a +-5% calibration
+spec and a thermal wander of its own ([clock.md](clock.md)). So these
+numbers overread by about half a per cent, they move a little between
+power-ons, and the suite's near-nominal verdict carries a 3% band for
+exactly that reason - the band covers the reference more than the
+oscillator under test. The per-step and percent-class findings below
+are unaffected; the crystal-scale values live in
+[clock.md](clock.md).
 
 - **The production trim is worth 44%.** OSC32K started with CALIB at
   zero - what a caller who never read 21.5.9 gets - measures
@@ -150,24 +149,22 @@ live in [clock.md](clock.md).
   oscillator, a program that trims it moves every timeout.
 - **The two internal RCs are indistinguishable at one operating point.**
   Trimmed, they land within a couple of per mille of each other and of
-  nominal - around 32960..33010 Hz for both - and WHICH OF THEM IS
-  NEARER FLIPS BETWEEN RUNS. 21.6.5's ordering ("OSCULP32K should be
+  nominal - around 32960..33010 Hz for both - and which of them is
+  nearer flips between runs. 21.6.5's ordering ("OSCULP32K should be
   preferred whenever power requirements are prevalent over frequency
   stability and accuracy") is about stability across conditions, and a
-  single measurement at room temperature cannot see it; a verdict that
-  asserted the ordering was a coin toss and has been removed. The
-  OSCULP32K figures are consistent with the measurements in
-  [freqm.md](freqm.md) and [reset.md](reset.md) - which, as freqm.md
-  now records, all share the OSC48M scale rather than witnessing it
+  single measurement at room temperature cannot see it, so no verdict
+  here asserts the ordering. The OSCULP32K figures are consistent with
+  the measurements in [freqm.md](freqm.md) and [reset.md](reset.md) -
+  all of which share the OSC48M scale rather than witnessing it
   independently.
 - **A missing crystal is a false return, not a hang.** XOSC32K started
   on a board with no 32 kHz crystal never raises its ready flag, and the
   bounded wait reports that instead of spinning.
-- **A generator cannot be moved off a stopped source** (16.6.2.6),
-  which the suite learned by doing it: stopping OSC32K while generator 5
-  still pointed at it left that generator unroutable and every later
-  measurement empty. The rule is to point the generator at something
-  running first.
+- **A generator cannot be moved off a stopped source** (16.6.2.6):
+  stopping OSC32K while generator 5 still points at it leaves that
+  generator unroutable and every later measurement empty. The rule is
+  to point the generator at something running first.
 
 ## Not covered yet
 
@@ -187,7 +184,7 @@ Implemented but not bench-verified:
   codes, the external-clock mode (XTALEN clear), the failure detector
   and `switch_back()` are all in that state.
 - `on_demand` on either internal oscillator: set and read back, never
-  observed to gate anything. (`run_standby` on OSC32K IS observed
+  observed to gate anything. (`run_standby` on OSC32K is observed
   across a standby, both ways - [clock.md](clock.md) records what a
   peripheral's request does with and without it.)
 - `lock()` on any of the three: writing it would freeze the

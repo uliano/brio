@@ -43,27 +43,31 @@ can observe:
      I2cBus<Bus, P>          util/i2c_bus.hpp   = BusMaster: arbitration + replies
          |  Bus::start(req)
          v
-     TwiHost<n> engine       avrdx/twi.hpp     START/Sr/STOP, ACK policy, per-byte ISR
+     I2cHost<n> engine       avrdx/twi.hpp     START/Sr/STOP, ACK policy, per-byte ISR
          |
-     ISR glue in the app     posts TransferDone{TwiHw::status()} on completion
+     ISR glue in the app     posts TransferDone{I2cHw::status()} on completion
 ```
 
 Layering as for SPI: `I2cBus`/`BusMaster` are `util/` (pure, tested on
-the host through the SPI alias in `test_spi_bus` - same class);
-`TwiHost<n>` is `avrdx/` (a task over the `Twi<n>` resource, which also
-carries the client half - see [twi.md](../avrdx/twi.md)). The app's ISR
-binds `TWIn_TWIM_vect`.
+the host through the SPI alias in `test_spi_bus` - same class); the
+`I2cHost<n>` engine belongs to a target stratum, as a task over that
+silicon's own resource. The app's ISR binds the vector.
 
-THREE ENGINES CARRY THIS CONTRACT NOW, and the third arrived with not
-one line of `util/` or `kernel/` changed: `avrdx/twi.hpp`'s `TwiHost`,
-`samc21/i2c.hpp`'s `I2cHost` and `stm32g0/i2c.hpp`'s `I2cHost`, whose
-Request is the other two's field for field. The three peripherals share
-almost nothing below that - a TWI with its own baud three-step, a SERCOM
-with a select-then-use register file, and an I2C whose whole bus lives in
-one TIMINGR word - which is what makes the descriptor's survival worth
-recording.
+### Realizations
 
-## The transaction descriptor (`TwiHost<n>::Request`)
+| target | engine | resource under it |
+|---|---|---|
+| avrdx | `avrdx/twi.hpp` | `Twi<n>`, which carries the client half too - see [twi.md](../avrdx/twi.md) |
+| samc21 | `samc21/i2c.hpp` | `I2cm<n>` and `I2cs<n>`, two resources over one SERCOM |
+| stm32g0 | `stm32g0/i2c.hpp` | `I2c<n>`, whose whole bus timing lives in one TIMINGR word |
+
+The Request is field for field the same on the three, and the three
+peripherals share almost nothing below it - a TWI with its own baud
+three-step, a SERCOM with a select-then-use register file, and an I2C
+with one timing word - which is what makes the descriptor's survival
+worth recording.
+
+## The transaction descriptor (`I2cHost<n>::Request`)
 
 `{addr, tx span, rx span, reply, speed}` - 9 bytes, one over the
 envelope guideline, the same recorded deviation as SPI (the request IS
@@ -89,7 +93,7 @@ The tx and rx buffers are `Lease::reply` loans and say so in their
 field types: the requester keeps them alive and untouched until its
 I2cDone arrives.
 
-Bus speed travels per request (`TwiSpeed::standard_100k` /
+Bus speed travels per request (`I2cSpeed::standard_100k` /
 `fast_400k` / `fast_plus_1m`), like clock and mode on SPI: a shared bus
 can carry a 100 kHz sensor and a 400 kHz DAC. MBAUD may only be written
 with the host disabled, so a speed CHANGE costs an ENABLE cycle and a
@@ -134,15 +138,15 @@ owed, living in the kernel that has TimeEvents.
 `I2cBus`'s) arms a one-shot TimeEvent for every tenure that goes
 asynchronous. If it matures first, the engine is declared dead:
 `Bus::recover()` puts the PERIPHERAL back where `start()` is legal
-(`TwiHost`'s ENABLE-cycle errata work-around, the SAM `I2cHost`'s cached
-re-init, the G0 `I2cHost`'s PE cycle - which RM0444 32.4.6 offers for
+(the AVR `I2cHost`'s ENABLE-cycle errata work-around, the SAM's cached
+re-init, the G0's PE cycle - which RM0444 32.4.6 offers for
 exactly this, "restores the normal operation ... by toggling the PE
 bit"), the requester is answered `i2c_timeout` in its place, and
 the queue moves on. The races with the real completion are closed by
 construction (a sequence number and a drain state - the whole story in
 `util/bus_master.hpp`, staged deterministically in the host suite).
 
-Three decisions worth their line (ruling 2026-09-02):
+Three decisions worth their line:
 
 - **Per BUS, not per request.** One wedged device starves every client
   of the wire, so the limit is a property of the bus. It must sit

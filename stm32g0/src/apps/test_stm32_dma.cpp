@@ -1,6 +1,6 @@
 // test_stm32_dma - the reference bench suite for the STM32G0's DMA
 // controller and its request multiplexer (RM0444 ch. 10 and 11) and,
-// through them, for util/block_stream.hpp's two concepts on their SECOND
+// through them, for util/block_stream.hpp's two concepts on this
 // silicon.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
@@ -48,8 +48,8 @@
 // TIM2_CH1 AF2) on the Nucleo-64s, PC6 (LD3, TIM2_CH3 AF2) on the
 // Nucleo-32. WHICH PAD CARRIES THE LED IS A BOARD FACT and no device
 // header knows it, so the app asks the one question it is allowed to
-// ask that way (one Nucleo per part on this desk, so the part IS the
-// board). PA2/PA3 are the console, PA13/PA14 the SWD.
+// ask that way (one Nucleo carries one part, so the part selects the
+// pad). PA2/PA3 are the console, PA13/PA14 the SWD.
 //
 // THE SMALL PART'S OTHER LIMIT IS ITS SRAM: 8 KB against the Nucleo-64s'
 // 36. The three long memory-to-memory blocks are therefore a quarter of
@@ -801,10 +801,10 @@ void tc_arbitration() {
     // single transfer, so both run interleaved and the priority decides
     // which one gets the larger share - and therefore finishes first.
     //
-    // THE BLOCKS MUST BE LONG ENOUGH TO WATCH. The first version of this
-    // letter raced 64 words: at five cycles a word both were finished
-    // before the polling loop's first turn, and every reading came back
-    // a dead heat. `big_words` is 512 where the SRAM allows it - about
+    // THE BLOCKS MUST BE LONG ENOUGH TO WATCH. Race 64 words and, at
+    // five cycles a word, both are finished before the polling loop's
+    // first turn and every reading comes back a dead heat.
+    // `big_words` is 512 where the SRAM allows it - about
     // 2600 cycles a channel - and 256 on the 8 KB part, which is still
     // four times the length that failed.
     auto race = [](DmaPriority a, DmaPriority b) {
@@ -1207,7 +1207,7 @@ void tf_multiplexer() {
               "the two are told apart.", crlf);
     } else {
         // The honest form: report and decline, rather than assert a
-        // mechanism the bench did not show (the samc21 TC 1.20.2 precedent).
+        // mechanism the bench did not show.
         //
         // AND ON ONE DIE OF THIS FAMILY THE DECLINE HAS A CANDIDATE NAME.
         // ES0418 2.2.4 (STM32G071/G081, revision B, no workaround) says
@@ -1318,16 +1318,15 @@ void tf_multiplexer() {
 
 // ---- g: THE FIXED POINT ------------------------------------------------------
 //
-// util/block_stream.hpp was written against the SAM C21 and BEFORE this
-// implementation, so that friction would show up as "this concept does
-// not fit" instead of as silent divergence. This letter is the
-// measurement. It has two halves and they point opposite ways:
+// util/block_stream.hpp's concepts are the fixed point this controller
+// is measured against, and this letter is the measurement. It has two
+// halves and they point opposite ways:
 //
-//  - What circular mode GIVES. The SAM's controller has none, so its
-//    BlockPlayer re-armed from a completion interrupt: one interrupt per
-//    lap, and a window at every lap boundary in which the peripheral was
-//    unserved. Here CIRC reloads CNDTR and both address registers in
-//    hardware, so a player runs with its interrupt DISARMED - measured.
+//  - What circular mode GIVES. A controller without it has to re-arm a
+//    BlockPlayer from a completion interrupt: one interrupt per lap, and
+//    a window at every lap boundary in which the peripheral is unserved.
+//    Here CIRC reloads CNDTR and both address registers in hardware, so
+//    a player runs with its interrupt DISARMED - measured.
 //
 //  - What circular mode CANNOT give. BlockSource's contract is that a
 //    source with no free buffer SKIPS the lap rather than write into the
@@ -1467,8 +1466,7 @@ void tg_fixed_point() {
 /// Every line of this suite has gone out through a DmaTxEngine and every
 /// letter came in through a DmaRxEngine ON A PART WITH SEVEN CHANNELS,
 /// so what is left to measure there is the RATE - and the two ways of
-/// feeding an engine, which is the samc21 campaign's lesson arriving on
-/// the third target. On a five-channel part the console is the interrupt
+/// feeding an engine. On a five-channel part the console is the interrupt
 /// transport (there is no sixth channel to give it), so the same
 /// measurement is made and PRINTED and no verdict is claimed: what the
 /// three claims below are about is an engine.
@@ -1486,10 +1484,10 @@ void th_console_rate() {
         block[i] = static_cast<uint8_t>('0' + (i % 10u));
     }
 
-    // THE PREVIOUS VERDICTS MUST BE OFF THE WIRE FIRST. The first version
-    // of this leg started its stopwatch with about six hundred bytes of
-    // earlier printing still queued, and charged their time to its own
-    // kilobyte - which read as the engine running at 84 % of the wire.
+    // THE PREVIOUS VERDICTS MUST BE OFF THE WIRE FIRST. A stopwatch
+    // started with about six hundred bytes of earlier printing still
+    // queued charges their time to its own kilobyte, and the engine then
+    // reads as running at 84 % of the wire.
     drain();
     uint32_t t0 = cycles_now();
     for (uint32_t i = 0; i < payload; ++i) {
@@ -1562,10 +1560,10 @@ void th_console_rate() {
 void th_usart_engines() {
     // --- the doctrine, on a peripheral with no pads at all. USART1 comes
     // up with TE set and TXE ALREADY STANDING, which is exactly the state
-    // the SAM's DMAC could not start from: it latches a trigger on the
-    // RISE of the request, so a channel armed over a standing level waits
-    // for an edge that has been and gone (the samc21 UART campaign found a
-    // transmitter dead in it, and kick() is that target's answer).
+    // that tells the two possible request disciplines apart: a controller
+    // that latches its trigger on the RISE of the request would be
+    // waiting for an edge that has been and gone, and the channel would
+    // sit there dead; one that serves the LEVEL on enable moves the block.
     //
     // Nothing leaves the die here: USART1's pads are never claimed, so
     // its TX signal has nowhere to go.
@@ -1674,9 +1672,9 @@ void ti_timer_round_trip() {
     spin_cycles(SysClock::hz / 100u);
     const uint16_t measured = sample_permille<led_pad.port>(PadLed::pin_number, 60000u);
     spin_cycles(SysClock::hz / 50u);
-    // BOTH COUNTERS UNDER ONE MASK. The first version read them one after
-    // the other and caught a lap in between - 76 against 77, which is not
-    // a defect in either but a reading taken across an interrupt.
+    // BOTH COUNTERS UNDER ONE MASK. Read one after the other they catch
+    // a lap in between - 76 against 77, which is not a defect in either
+    // but a reading taken across an interrupt.
     uint32_t laps = 0;
     uint32_t seen = 0;
     const bool running = Loop::running();
@@ -1728,13 +1726,13 @@ void ti_timer_round_trip() {
     (void)T16::configure({.prescaler = 63, .period = 0xFFFF});   // 1 MHz counter
     // LSI IS NOT FREE ANY MORE. 5.4.24: LSIRDY stands whenever the IWDG,
     // the RTC or the LSE's CSS asks for it, whatever LSION says - and
-    // while this board's RTC domain ran on LSI every program got the
-    // oscillator for nothing. With the domain on the LSE crystal (the
-    // RTC campaign's end state) nobody asks, so this letter drained 0
-    // blocks and scored 53/54 until it started the clock it captures.
+    // while a board's RTC domain runs on LSI every program gets the
+    // oscillator for nothing. With the domain on the LSE crystal nobody
+    // asks, and this letter drains no block at all unless it starts the
+    // clock it captures - which is what the next line is for.
     Rcc::lsi_enable(true);
     (void)Rcc::lsi_wait_ready();
-    (void)T16::input_select(0, 1);   // TISEL: LSI as TI1 (the tim campaign's letter e)
+    (void)T16::input_select(0, 1);   // TISEL: LSI as TI1
     (void)T16::capture_channel(0, {.select = TimChannelSelect::direct,
                                    .polarity = TimCapturePolarity::rising});
     T16::interrupts(T16::compare_dma(0), true);
@@ -1985,12 +1983,10 @@ void tj_relay() {
 
 // ---- k: THE SYNCHRONIZATION BLOCK --------------------------------------------
 //
-// dma.md has carried this as a driver gap since the DMA campaign:
 // `DmaMux::request_synchronized()` writes the whole CxCR word with
-// ES0548 2.5.4's invariant built in, the family fixture instantiates it,
-// and no letter had ever driven a synchronized channel or seen a SOFx
-// rise. What it wanted was a stimulus, and the stimulus was already on
-// this board: table 57's synchronization input 22 is TIM14_OC, the same
+// ES0548 2.5.4's invariant built in; what a synchronized channel needs
+// to be driven at all is a stimulus, and one is already on the board:
+// table 57's synchronization input 22 is TIM14_OC, the same
 // signal table 56 offers the request GENERATOR as trigger input 22 and
 // the same signal letter f already produces with no pad at all.
 //
@@ -2104,8 +2100,7 @@ void tk_synchronization() {
     // where this suite's own console engines live where the part HAS a
     // sixth and seventh channel - so on those parts this enable is a
     // no-op, and DISABLING it afterwards would take the console's
-    // transmitter down with it, which is exactly what the first version
-    // of this letter did and the board went silent mid-letter. On a part
+    // transmitter down with it and leave the board silent mid-letter. On a part
     // whose console has no engines nobody armed it at boot and the
     // second leg below would count zero interrupts, so the letter arms
     // what it needs instead of inheriting it.
@@ -2199,8 +2194,8 @@ void tk_synchronization() {
 
 // ---- l: THE TIMER'S DMA BURST ENGINE -----------------------------------------
 //
-// tim.md's own first gap line: "the DMA BURST engine (DCR/DMAR, the one
-// that walks several registers off one request)". The plain requests
+// THE BURST ENGINE IS DCR AND DMAR, the pair that walks several
+// registers off one request. The plain requests
 // this suite already drives move ONE datum into ONE register; the burst
 // engine turns each request into a walk of consecutive registers,
 // reached through the single address TIMx_DMAR, so a DMA channel whose
@@ -2449,9 +2444,8 @@ StressLeg stress_leg(const char* op, uint32_t baud, uint32_t window_ms,
     // AND THEN A LONG SILENCE, which is not politeness but the script's
     // own contract: it collects the leg's traffic until the wire has been
     // quiet for a while, so a report printed too soon is read as payload.
-    // The first version of this letter printed at once, and every report
-    // - including the next leg's HOST line - was eaten as data, which is
-    // why the sink legs never ran at all.
+    // A report printed at once is eaten as data - the next leg's HOST
+    // line included - and the sink legs then never run at all.
     for (uint8_t i = 0; i < 5; ++i) {
         spin_cycles(SysClock::hz / 10u);   // half a second of quiet in all
     }
@@ -2780,10 +2774,8 @@ void tm_dma2_and_p2p() {
 // n - the sleep story: a channel through Sleep, and a channel through Stop
 // =============================================================================
 //
-// dma.md has carried "no sleep story" since the campaign that wrote it,
-// on the grounds that there was no PWR driver. There is one now
-// (pwr.hpp), so the two questions can be asked properly, and they have
-// opposite answers for one reason: the DMA is on HCLK, and HCLK is
+// Two questions with opposite answers, for one reason: the DMA is on
+// HCLK, and HCLK is
 // exactly what Sleep keeps and Stop takes away.
 //
 // THE ALARM'S CLOCK IS A BOARD FACT and not a part's. What the leg needs
@@ -3018,8 +3010,7 @@ extern "C" void BRIO_STM32G0_DMA1_CH4_UP_HANDLER() {
 /// them, and has one of its own where it has not (table 61) - which is
 /// why the NAME comes from the reserve and not from this file. Letter n
 /// arms it as the one alarm that survives a Stop, and a wake with no
-/// handler bound would land in Default_Handler and never come back -
-/// which is exactly what the first version of that letter did.
+/// handler bound lands in Default_Handler and never comes back.
 extern "C" void BRIO_STM32G0_LPTIM1_HANDLER() {
     (void)Lp1d::clear_flags(LptimFlag::all);
     lptim_calls = lptim_calls + 1u;

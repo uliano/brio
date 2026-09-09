@@ -1,5 +1,4 @@
-// test_samc_dac - the reference bench suite for samc21/dac.hpp, and the
-// session that closes the analog loop.
+// test_samc_dac - the reference bench suite for samc21/dac.hpp.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
@@ -11,9 +10,8 @@
 // DAC's VOUT pad, ADC0's AIN0 and the AC's AIN4 all at once, so the
 // "wire the DAC output to an ADC input" that erratum 1.8.9 asks for as
 // a workaround is already on the die - a wire of zero length. The DAC
-// is therefore the swept voltage source this board never had, and three
-// drivers that were left holding unvalidated enumerators get their
-// answer here:
+// is therefore this board's swept voltage source, and it is what makes
+// three enumerators in other drivers answerable at all:
 //   samc21/adc.hpp   AdcInput::dac  and  Ref::dac
 //   samc21/ac.hpp    AcNegative::dac
 //   samc21/adc.hpp   Ref::intref as a REFERENCE, and whether it needs
@@ -109,10 +107,9 @@ using Comp = AcComparator<0>;
 constexpr uint8_t main_gen = 0;
 constexpr uint32_t main_gen_hz = SysClock::hz;
 
-/// What the two earlier campaigns located this board's supply at - the
-/// comparator's scaler said 5141 mV, the ADC's own bandgap reading said
-/// 5233. A STARTING POINT, refined by letter b, never a verdict's
-/// authority.
+/// Where this board's supply sits: the comparator's scaler puts it at
+/// 5141 mV, the ADC's own bandgap reading at 5233. A STARTING POINT,
+/// refined by letter b, never a verdict's authority.
 constexpr uint16_t supply_hint_mv = 5150;
 uint16_t vdd_mv = supply_hint_mv;
 
@@ -142,7 +139,7 @@ bool stopwatch_start() {
 uint32_t ticks_now() { return Stopwatch::count32(); }
 
 // ---------------------------------------------------------------------------
-// The event fabric (letter j): the same shape every SAM suite here uses.
+// The event fabric (letter j).
 // ---------------------------------------------------------------------------
 constexpr uint8_t dma_ch = 0;
 constexpr uint8_t ev_start_channel = 0;    // TC2 overflow -> DAC START
@@ -153,9 +150,8 @@ using EvGen = Gclk<ev_gen>;
 using Pacer = Tc<2>;
 using Counter = Tc<3>;
 
-/// VOLATILE IN BOTH DIRECTIONS - the DMAC campaign's lesson on this
-/// target: the compiler sees neither the controller's reads nor its
-/// writes.
+/// VOLATILE IN BOTH DIRECTIONS: the compiler sees neither the
+/// controller's reads nor its writes.
 constexpr uint16_t wave_len = 32;
 volatile uint16_t wave[wave_len];
 
@@ -424,8 +420,8 @@ void tb_loop() {
     Adc0::select(AnalogIn<Vout>{});
 
     // FIRST: does the analog output need the pad's peripheral function?
-    // An ADC INPUT does not (the connection is direct, which is what makes
-    // every wireless letter in test_samc_adc possible); an OUTPUT has a
+    // An ADC INPUT does not (the connection is direct, which is what
+    // makes a wireless analog test possible at all); an OUTPUT has a
     // driver to win against PORT's, so the question is a real one.
     Vout::release();          // pad under PORT, direction input (reset state)
     dac_set(512);
@@ -471,7 +467,7 @@ void tb_loop() {
                                           supply_hint_mv));
     // One Newton step: the reading is a quarter of VDD measured against
     // VDD, so it is a self-consistency check and not a supply meter -
-    // keep the campaigns' number and print the check.
+    // keep the hint and print the check.
     print(serial, "  1/4 VDDANA reads ", quarter, " counts (a quarter of full "
           "scale would be 1024); VDD taken as ", supply_hint_mv, " mV from the "
           "SUPC and ADC campaigns", crlf);
@@ -507,7 +503,7 @@ void tb_loop() {
                   "of the whole range",
                   monotone);
 
-    // set_mv() through util/analog.hpp, unchanged on this target.
+    // set_mv(), whose arithmetic is util/analog.hpp's.
     (void)Dac::set_mv(2000, vdd_mv);
     settle();
     const uint32_t two_volts = mean_of<Adc0>(16);
@@ -602,12 +598,12 @@ void tc_reference() {
 // d - the ADC's own open gap: REFSEL = INTREF with VREFOE off and on
 // =============================================================================
 //
-// docs/samc21/adc.md has carried this line since the ADC campaign: every
-// letter that touched the bandgap read it as an INPUT, where VREFOE is
-// mandatory and undocumented; no conversion had ever run with the
-// bandgap as the ADC's REFERENCE. The DAC is what makes the question
-// answerable - it supplies a steady mid-range voltage the ADC can
-// measure against both references and compare.
+// TWO DIFFERENT PATHS WEAR THE SAME NAME. Reading the bandgap as an
+// INPUT needs SUPC.VREF.VREFOE, which is mandatory and undocumented;
+// whether the bandgap as the ADC's REFERENCE needs it too is a
+// separate question, and the DAC is what makes it answerable - it
+// supplies a steady mid-range voltage the ADC can measure against both
+// references and compare.
 void td_adc_intref_reference() {
     bench.verdict("the DAC comes up on VDDANA", dac_up());
     (void)Vref::configure(VrefConfig{.level = VrefLevel::v2_048,
@@ -806,7 +802,7 @@ void tf_internal_channel() {
     // DECISIVELY apart - the larger at least three times the smaller and
     // at least eight counts - because at this board's noise floor a
     // three-against-five comparison is a coin toss dressed as a
-    // measurement (the lesson test_samc_adc's letter e records).
+    // measurement.
     const uint16_t larger = internal_span > pad_span ? internal_span : pad_span;
     const uint16_t smaller = internal_span > pad_span ? pad_span : internal_span;
     const bool decisive = larger >= 8u && larger >= 3u * (smaller + 1u);
@@ -879,9 +875,9 @@ void tf_internal_channel() {
 
     // ERRATUM 1.4.10, PROVOKED BY THIS LETTER AND MEASURED HERE, because
     // this is the only letter in the suite that runs the second
-    // converter. THE ADC CAMPAIGN RECORDED THAT IT DID NOT REPRODUCE -
-    // it read ADC0.SYNCBUSY as 0x0000 with ADC1 enabled and ADC0
-    // disabled. It does reproduce, and it is worse than the item's own
+    // converter. A NARROW PROBE MISSES IT: reading ADC0.SYNCBUSY as
+    // 0x0000 with ADC1 enabled and ADC0 disabled shows nothing. It does
+    // reproduce, and it is worse than the item's own
     // sentence: the bit is not merely stale, ADC0 will NOT ENABLE while
     // it stands, so `Adc<0>::init()` - which waits on that bit - returns
     // false with the converter dead and reading zero.
@@ -1131,9 +1127,8 @@ void th_curve() {
           " counts where the line predicts ", predicted_bottom / 100,
           ", code 1023 reads ", top, " where it predicts ",
           predicted_top / 100, crlf);
-    // THE BOTTOM CLAMP IS A VERDICT, THE TOP IS A PRINT - and the split
-    // was paid for: the first version asserted both ends and FAILED one
-    // run in three or four, because the TOP endpoint sits ON the line to
+    // THE BOTTOM CLAMP IS A VERDICT, THE TOP IS A PRINT, and the split
+    // is what the data supports: the TOP endpoint sits ON the line to
     // within a count (4074 read against a prediction the fit's own
     // sub-count jitter rounds to 4073 or 4074 between runs) - a coin
     // toss, not a clipping. The BOTTOM is unambiguous: the line predicts
@@ -1221,9 +1216,9 @@ void ti_timing() {
 
     // THE INSTRUMENT'S OWN FLOOR, measured before the measurand: a
     // single-shot timing is not usable here, because reading the
-    // stopwatch is itself a READSYNC command across a clock boundary -
-    // the RTC campaign priced that at about two microseconds, which is
-    // the same order as the thing being timed.
+    // stopwatch is itself a READSYNC command across a clock boundary,
+    // measured at about two microseconds, which is the same order as
+    // the thing being timed.
     (void)Dac::set(1023);
     spin(4'000UL);
     const uint32_t floor_t0 = ticks_now();
@@ -1238,9 +1233,9 @@ void ti_timing() {
     // TWO LOOPS, DIFFERENCED. Loop A waits for the comparator at every
     // step; loop B does the same stores and the same DATA
     // synchronization and waits for nothing. Everything software is in
-    // both, so what is left is the analog crossing - the same
-    // differencing the RTC and platform campaigns used where a single
-    // measurement carried a constant nobody could name.
+    // both, so what is left is the analog crossing. Differencing is the
+    // only honest shape where a single measurement carries a constant
+    // nobody can name.
     constexpr uint16_t reps = 500;
     auto sync_data = []() {
         while ((Dac::regs().DAC_SYNCBUSY & DAC_SYNCBUSY_DATA_Msk) != 0u) {
@@ -1527,7 +1522,8 @@ bool rtc_up() {
 }
 
 /// One standby of about `ticks` RTC ticks (32 kHz), with the watchdog
-/// armed as the anti-wedge backstop the sleep campaign established.
+/// armed as the anti-wedge backstop: a wake that never comes costs a
+/// reboot and a banner instead of a mute board.
 bool standby_for(uint32_t ticks) {
     (void)Watchdog::arm(WdtConfig{.period = WdtCycles::cyc4096});
     const uint32_t now = Rtc::count32();

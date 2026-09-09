@@ -242,7 +242,7 @@ ISR(TCD0_OVF_vect)  { brio::Tcd<0>::ovf(); ... }
 ISR(TCD0_TRIG_vect) { const auto t = brio::Tcd<0>::take_triggers(); if (t.a) ... }
 ```
 
-## Bench findings (`test_avr_tcd`, rev A5, 250/250, no wires)
+## Bench findings (`test_avr_tcd`, rev A5, no wires)
 
 The measurement rig: WOA..WOD on the DEFAULT route are read back as
 pin EVENTS into TCB meters, the TCD's own CMPBCLR event is the cycle
@@ -278,7 +278,7 @@ switch: on OSCHF the period stays 50 us and the tick count halves;
 on CLK_PER the tick count stays 1200 and the period doubles to 100 us.
 (OSCHF measured 1202 ticks against the crystal's 1200: -0.17 %.)
 
-**The PLL, at last on the wire.** Every leg runs from the same
+**The PLL on the wire.** Every leg runs from the same
 oscillator, so the ratios are the multipliers themselves, free of
 OSCHF's own error. A 3200-tick TCD cycle measured in CLK_PER ticks:
 OSCHF 16 MHz 4808, x2 2404, x3 1603; OSCHF 24 MHz 3205, x2 1602. That
@@ -426,6 +426,6 @@ Implemented but not bench-verified:
 - **DBGRUN and FAULTDET.** Both need a CPU halted in an OCD session;
   neither is reachable from a running suite.
 - **Sleep.** The TCD runs in Idle and stops in Standby and Power-Down
-  (25.3.6); the sleep campaign measured other peripherals and did not
-  exercise the TCD, so this remains datasheet-trusted, including
-  RUNSTDBY on the clock sources the TCD requests.
+  (25.3.6); nothing on this bench exercises the TCD across a sleep, so
+  this remains datasheet-trusted, including RUNSTDBY on the clock
+  sources the TCD requests.

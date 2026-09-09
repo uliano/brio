@@ -5,13 +5,8 @@
  * millisecond, which is one kernel tick on the SysTick-ticked programs
  * and 1.024 ticks on a program whose kernel time runs on the STM32G0's
  * 1024 Hz LPTIM timebase (SysTick then counts cycles and nothing else).
- * The SAM C21 and the STM32G0 carried this file as twins (the samc21 one
- * drew the boundary at birth, the stm32g0 one kept it to the verb and
- * the return value) until the code was found identical to the byte and
- * the two families' comments differed only in their numbers - so it
- * lives here, exactly as armv6m/ticker.hpp does, and each family's
- * delay.hpp is the device include, this file, and its own measured
- * facts. Nothing below reads anything but CMSIS-Core's SysTick.
+ * Each family's delay.hpp is the device include, this file, and its own
+ * measured facts. Nothing below reads anything but CMSIS-Core's SysTick.
  *
  * WHY THE CAP IS THE DESIGN AND NOT A LIMITATION. In a cooperative
  * kernel a dispatch that busy-waits for milliseconds starves every
@@ -20,15 +15,12 @@
  * it - the misuse fails visibly (false, and no time spent) instead of
  * becoming a latency bug. What remains is exactly what a busy-wait is
  * for: hardware timing at the microsecond scale - a chip-select setup,
- * an analog settle, a protocol gap. (avrdx/delay.hpp has no such cap
- * for historical reasons; both Cortex-M0+ strata got the boundary right
- * from birth.)
+ * an analog settle, a protocol gap.
  *
- * WHY SYSTICK AND NOT A COUNTED LOOP. The Cortex-M0+ has no cycle
- * counter (DWT arrives with the M3), and a counted loop is not
+ * WHY SYSTICK AND NOT A COUNTED LOOP. The Cortex-M0+ has no cycle counter
+ * (DWT arrives with the M3), and a counted loop is not
  * cycle-deterministic through flash wait states, prefetch and code
- * placement - the calibrated app-local spins the bench suites carried
- * before this file existed were the honest workaround, not a
+ * placement - a calibrated app-local spin is an honest workaround, not a
  * foundation. SysTick IS a cycle counter in all but name:
  * armv6m/ticker.hpp clocks it from the processor clock (CLKSOURCE = 1)
  * and reloads it every 1/tps second, so VAL is the current tick's phase
@@ -48,21 +40,19 @@
  * counter runs under a masked interrupt, as anywhere else.
  *
  * WHAT THE NUMBERS MEAN: the wait is in CPU cycles, converted from
- * microseconds through clock_hz(clock) - the one truth about the rate,
- * as everywhere in brio - with the cycles-per-microsecond factor
- * rounded UP so every conversion error lands LATE (the kernel's own
- * "at least"). NO DIVISION RUNS AT WAIT TIME, EVER: the M0+ has no
- * divide instruction, so gcc calls __aeabi_uidiv even for a CONSTANT
- * divisor - about 4 us a call, measured on the SAM C21 (the DIVAS
- * arithmetic) when the first version of this file paid it on every
- * entry. The ONE division lives in delay_rate() - folded to a constant
- * with a compile-time Clock, expanded into a per-rate TABLE at compile
- * time for a DynamicClock and selected by its rate index (the
- * discrete-rate surface of docs/design/clock.md, the avrdx precedent),
- * paid once per clock change by a caller that only has a runtime rate
- * (the SpiHost's rebase shape) - and everything else runs in 32 bits,
- * because this core taxes WIDTH too: a 64-bit product is another
- * libcall of the same size (measured when the second version tried one).
+ * microseconds through clock_hz(clock) - the one truth about the rate, as
+ * everywhere in brio - with the cycles-per-microsecond factor rounded UP
+ * so every conversion error lands LATE (the kernel's own "at least"). NO
+ * DIVISION RUNS AT WAIT TIME, EVER: the M0+ has no divide instruction, so
+ * gcc calls __aeabi_uidiv even for a CONSTANT divisor - about 4 us a
+ * call, measured on the SAM C21. The ONE division lives in delay_rate() -
+ * folded to a constant with a compile-time Clock, expanded into a
+ * per-rate TABLE at compile time for a DynamicClock and selected by its
+ * rate index (the discrete-rate surface of docs/design/clock.md), paid
+ * once per clock change by a caller that only has a runtime rate (the
+ * SpiHost's rebase shape) - and everything else runs in 32 bits, because
+ * this core taxes WIDTH too: a 64-bit product is another libcall of the
+ * same size (measured).
  *
  * THE 32-BIT PRODUCT CANNOT WRAP, and the guard that makes that true is
  * SysTick's own geometry rather than any promise of the Ticker's: the
@@ -113,21 +103,19 @@ constexpr DelayRate delay_rate(uint32_t hz) {
     return {(hz + 999'999UL) / 1'000'000UL};
 }
 
-/**
- * @brief Busy-wait AT LEAST `us` microseconds on the SysTick counter.
- *
- * @return true when the time was served; false - AND NO TIME IS SPENT -
- * when SysTick is not running (nothing started it in this program) or
- * when the request is one SysTick period - one millisecond - or more
- * (the cap: such waits belong to TimeEvents, and a refused misuse beats
- * a served one).
- *
- * Callable with interrupts masked (pure VAL reads, wrap folded in) and
- * from any context that is allowed to spend the time. The elapsed time
- * includes the interruptions a busy-wait suffers - an ISR that fires
- * mid-wait lengthens the wait, which is the only honest reading of
- * "at least" on a machine with interrupts.
- */
+/// Busy-wait AT LEAST `us` microseconds on the SysTick counter.
+///
+/// True when the time was served; false - AND NO TIME IS SPENT - when
+/// SysTick is not running (nothing started it in this program) or when
+/// the request is one SysTick period - one millisecond - or more (the
+/// cap: such waits belong to TimeEvents, and a refused misuse beats a
+/// served one).
+///
+/// Callable with interrupts masked (pure VAL reads, wrap folded in) and
+/// from any context that is allowed to spend the time. The elapsed time
+/// includes the interruptions a busy-wait suffers - an ISR that fires
+/// mid-wait lengthens the wait, which is the only honest reading of "at
+/// least" on a machine with interrupts.
 [[nodiscard]] inline bool delay_us(DelayRate rate, uint32_t us) {
     if ((SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) == 0u) {
         return false;   // SysTick off: nothing here can count time
@@ -160,10 +148,10 @@ constexpr DelayRate delay_rate(uint32_t hz) {
     return true;
 }
 
-/// The per-rate factors of a DYNAMIC clock, expanded at compile time
-/// over its discrete-rate surface (rate_count, rate_hz(i)): one table in
-/// flash, indexed by rate_index() at wait time - the avrdx/delay.hpp
-/// shape, and the reason no division ever runs here.
+/// The per-rate factors of a DYNAMIC clock, expanded at compile time over
+/// its discrete-rate surface (rate_count, rate_hz(i)): one table in
+/// flash, indexed by rate_index() at wait time - which is the reason no
+/// division ever runs here.
 template <typename Clock>
 inline constexpr auto delay_rates = [] {
     std::array<DelayRate, Clock::rate_count> table{};

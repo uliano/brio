@@ -1,18 +1,15 @@
-/**
- * @file ticker.hpp
- * @author uliano
- * @brief Time tracking on the AVR RTC Periodic Interrupt Timer (PIT)
- * @date Created on April 26, 2024; rewritten as a static class on 07/21/2026
+/*
+ * ticker.hpp
  *
- * Rewrite of the AVR-Multislope singleton Ticker as a "monostate" class
- * template: every data member is a C++17 `static inline` (one shared copy,
- * no instances, header-only) and every method is static. Compared to the
- * previous `Ticker::instance()` / `Ticker::ptr` singleton this removes:
+ * Written by Uliano Guerrini; rewritten with Claude (Anthropic).
  *
- *  - the global pointer indirection in the ISR (the compiler emits direct
- *    lds/sts on absolute addresses instead of loading a pointer first),
- *  - the Meyers-singleton lazy-init branch and guard,
- *  - the separate ticker.cpp translation unit.
+ * Time tracking on the RTC Periodic Interrupt Timer (PIT): this stratum's
+ * kernel timebase. A "monostate" class template - every data member is a
+ * `static inline` (one shared copy, no instances, header-only) and every
+ * method is static - so the ISR body reaches its counters with direct
+ * lds/sts on absolute addresses instead of loading a pointer first, there
+ * is no lazy-init branch or guard to pay for, and the class needs no
+ * translation unit of its own.
  *
  * State lives in .bss (zero-initialized before main, no runtime ctor). The
  * tick frequency is a template parameter, so alternative rates are distinct
@@ -43,16 +40,9 @@
  * 0x00, 0x2A and 0x55 of every 128-tick window (3 skips per 128 ticks,
  * evenly spread): (1024 - 24) * 1 ms = exactly 1000 ms per second, and the
  * same average holds for every supported tick rate. millis() consequently
- * jitters by up to ~1 tick but never drifts.
- *
- * NOTE - two bugs of the original AVR-Multislope implementation are fixed:
- *  1. the H/L split of the tick counter was declared in the wrong order for
- *     a little-endian layout, so ticks() interleaved its words (the counter
- *     effectively advanced by 65536 per tick); the union is gone, the ISR
- *     now increments the plain 32-bit counter.
- *  2. position 0x00 of the 128-tick window was NOT skipped (the code assumed
- *     it could not occur, but it does at every multiple of 128 that is not a
- *     second boundary), so millis() gained 0.7% at 1024 Hz.
+ * jitters by up to ~1 tick but never drifts. Position 0x00 belongs in that
+ * list: it comes round at every multiple of 128 and not only at the second
+ * boundaries, and leaving it unskipped gains 0.7% at 1024 Hz.
  *
  * ## Usage
  * ```cpp
@@ -82,9 +72,8 @@
 namespace brio {
 
 /**
- * @class BasicTicker
- * @brief Static (monostate) time tracker driven by the RTC PIT interrupt
- * @tparam tps Tick frequency in Hz: power of two, 16..1024
+ * Static (monostate) time tracker driven by the RTC PIT interrupt.
+ * `tps` is the tick frequency in Hz: a power of two, 16..1024.
  *
  * All members are static: there is exactly one time base per program, backed
  * by the single hardware PIT. Use the `Ticker` alias below; instantiating a
@@ -135,7 +124,7 @@ public:
     static constexpr uint16_t ticks_per_second = tps;
 
     /**
-     * @brief Configure the RTC clock source and start the PIT interrupt
+     * Configure the RTC clock source and start the PIT interrupt.
      *
      * The Ticker OWNS the RTC block's one clock select (rtc.hpp): it
      * takes XOSC32K when the clock init found a running 32k crystal, the
@@ -165,7 +154,7 @@ public:
     }
 
     /**
-     * @brief PIT interrupt body - call from ISR(RTC_PIT_vect)
+     * PIT interrupt body - call from ISR(RTC_PIT_vect).
      *
      * Clears the interrupt flag, advances the tick counter, then derives
      * seconds (exact) and milliseconds (skip-corrected, see file header).
@@ -193,12 +182,6 @@ public:
         }
     }
 
-    /**
-     * @brief Current timestamp: whole seconds + fractional ticks
-     *
-     * The most precise representation (no millis jitter); seconds and ticks
-     * are read atomically so they belong to the same instant.
-     */
     /// Stop the periodic interrupt without losing the counters: for the
     /// rare moments when the CPU runs too slowly to serve a 1024 Hz tick
     /// (a 32 kHz main clock: the ISR would never return). Time stands
@@ -206,6 +189,9 @@ public:
     static void pause() { Pit::enable_interrupt(false); }
     static void resume() { Pit::enable_interrupt(true); }
 
+    /// Current timestamp: whole seconds + fractional ticks - the most
+    /// precise representation (no millis jitter); seconds and ticks are
+    /// read atomically so they belong to the same instant.
     static void now(TimeStamp &out) {
         uint16_t frac;
         ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {

@@ -30,14 +30,13 @@
  *
  * The LPTIM counts the crystal UNDIVIDED, 32768 counts a second, and
  * the kernel tick is that count shifted right: `shift` 5 gives 1024
- * ticks a second - just over the SysTick programs' 1000, the AVR's own
- * rate, and a POWER OF TWO by construction, which is what makes
+ * ticks a second - just over the 1000 a SysTick program on this family
+ * runs at, and a POWER OF TWO by construction, which is what makes
  * millis() two shifts and a multiply instead of a division the M0+ has
  * not got, and exact: 1000 ms per 1024 ticks, floor at every reading.
  * WHY NOT THE PRESCALER: every latency of this block scales with the
- * clock the COUNTER runs on, not the kernel clock - measured on the
- * bench (test_stm32_tickless letter x): a CMP write lands in 2..3
- * counts whatever the prescaler, 72..93 us at /1 and 2.0..2.8 ms at
+ * clock the COUNTER runs on, not the kernel clock. Measured: a CMP
+ * write lands in 2..3 counts whatever the prescaler, 72..93 us at /1 and 2.0..2.8 ms at
  * /32, and a CMPM fires at the count edge AFTER equality. At /32 a
  * compare could not be placed closer than four milliseconds and a
  * masked wait for a completion cost three, which no console would
@@ -75,8 +74,8 @@
  * ## The compare, and the rules its arming follows
  *
  * The wake is CMP: CMPM fires at the count edge where CNT becomes
- * CMP + 1 (measured, letter x: exactly one count after equality at
- * every distance tried), on the same LSE edge ticks() reads - so a
+ * CMP + 1 (measured: exactly one count after equality at every
+ * distance tried), on the same LSE edge ticks() reads - so a
  * compare at (the deadline's first count - 1) wakes AT the deadline,
  * never early, with no phase conversion and no second clock. What
  * makes the arming delicate is the register's own discipline, and two
@@ -104,11 +103,11 @@
  *     same answer: false, no masked wait, the loop turns until it
  *     lands - a masked wait of even 90 us would cost a console its
  *     bytes. The common path costs nothing: a deadline's own CMPM
- *     sweeps the completion of the store that placed it (letter e:
+ *     sweeps the completion of the store that placed it (measured:
  *     534 CMPM for 534 deadlines in three seconds of three periodics,
- *     no deferral in the loop). The clear itself is visible on the
- *     APB side the moment the handler's ICR store returns (letter d:
- *     0 us), so the crossing guard never fires; it stays as the cheap
+ *     with no deferral in the loop). The clear itself is visible on
+ *     the APB side the moment the handler's ICR store returns
+ *     (measured: 0 us), so the crossing guard never fires; it stays as the cheap
  *     insurance it is.
  *  2. THE LANDING RACE IS CLOSED BY A FLOOR: a compare must reach the
  *     register before the counter reaches it, and the write lands 2..3
@@ -125,8 +124,8 @@
  *     nowhere in chapter 26, so with SLEEPDEEP set arm_wake() spends
  *     the 93 us on wait_cmp_ok() and the compare is in place before
  *     the machine stops (the timed site's own rule). In Sleep the APB
- *     keeps running and the store is left to land on its own. MEASURED
- *     (letter d): a store followed by the Stop 1 with NO wait lands all
+ *     keeps running and the store is left to land on its own.
+ *     Measured: a store followed by the Stop 1 with NO wait lands all
  *     the same - the compare fires at its 292 ms on the RTC's wall,
  *     three runs of three - so the transfer completes on the kernel
  *     clock alone and this wait is insurance the silicon does not need;
@@ -138,12 +137,12 @@
  *     a deadline whose compare is already in the register stores
  *     nothing. Where the compare sits when nothing is armed MATTERS,
  *     because it matches once per lap wherever it is: parked at 0xFFFF
- *     - equal to ARR, which DOES match (measured, letter b) - its CMPM
- *     is raised at the counter's own wrap and served by the ARRM's
- *     interrupt, so a deadline-less Stop costs ONE wake per lap. The
- *     first version parked it half a lap out and every lap cost two
- *     (letter i: ten interrupts for a ten-second Stop, now five). The
- *     parking is done by arm_wake() for a far deadline and by park(),
+ *     - equal to ARR, which does match (measured) - its CMPM is raised
+ *     at the counter's own wrap and served by the ARRM's interrupt, so
+ *     a deadline-less Stop costs ONE wake per lap. Parked anywhere
+ *     else its match is a second wake every lap: measured, a
+ *     ten-second Stop costs five wakes with the compare on the lap and
+ *     ten with it half a lap out. The parking is done by arm_wake() for a far deadline and by park(),
  *     which the platform's idle_until(nullopt) calls, for none.
  *
  * ## ticks() inside a masked window
@@ -255,12 +254,11 @@ public:
     /// Where the compare is PARKED (rule 4) - at init, when nothing is
     /// armed, and when the deadline is a lap or more away: equal to ARR,
     /// so that its match is the counter's own wrap and the CMPM it
-    /// raises is served by the same interrupt as the ARRM (measured:
-    /// test_stm32_tickless letter b, a compare equal to ARR matches
-    /// like any other; letter i, one interrupt per lap). Parked
-    /// anywhere else it would be a SECOND wake every lap - the first
-    /// version parked at 0x8000 and a ten-second Stop cost ten wakes
-    /// where five would do.
+    /// raises is served by the same interrupt as the ARRM (measured: a
+    /// compare equal to ARR matches like any other, and a lap then
+    /// costs one interrupt). Parked anywhere else it would be a SECOND
+    /// wake every lap: parked at 0x8000, a ten-second Stop costs ten
+    /// wakes where five do.
     static constexpr uint16_t parked_cmp = 0xFFFF;
 
     /// The vector the app binds to isr() - shared on some parts
@@ -320,7 +318,7 @@ public:
         }
         // Parked BEFORE the counter starts: CMP comes out of reset at
         // zero and a counter started first matches it on its first
-        // tick (the sleep site's finding, test_stm32_lptim letter g).
+        // tick.
         if (!L::set_cmp(parked_cmp) || !L::wait_cmp_ok()) {
             return false;
         }

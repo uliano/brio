@@ -18,30 +18,29 @@
  *
  *  TASKS - what an application names:
  *    Clock<source, hz, regime>   the static main clock: ONE constexpr
- *             truth `hz` every driver derives from (no F_CPU in this
- *             build, exactly as on the other two targets); init()
+ *             truth `hz` every driver derives from (there is no F_CPU
+ *             in this build); init()
  *             composes the resources and reports whether the requested
  *             root runs. `regime` is the VOLTAGE SIDE of the rate - the
  *             VCORE range and the regulator (PowerRegime below) - Range 1
- *             by default, which is what every program before the dynamic
- *             clock ran in.
+ *             by default, which is the only range a 64 MHz rate can run
+ *             in.
  *    DynamicClock<Rates<...>, Users...>   the runtime regime: a PACK of
  *             static Clock tasks the program may run at, the first the
  *             boot rate, set<hz>() / set(hz) / set_index() switching
  *             between them under the running program after fanning the
- *             new rate out to Users (util/clock.hpp's ClockUser contract,
- *             the avrdx precedent) - and restore(), the verb the sleep
- *             site calls when a Stop has dropped SYSCLK to HSISYS.
+ *             new rate out to Users (util/clock.hpp's ClockUser
+ *             contract) - and restore(), the verb the sleep site calls
+ *             when a Stop has dropped SYSCLK to HSISYS.
  *
- * THE THIRD CLOCK MODEL, and what crosses the util contract. The AVR
- * has one prescaler on one main clock; the SAM has a generator per
- * peripheral; this family has SHARED PRESCALERS (HPRE for AHB, PPRE for
- * APB) below one SYSCLK, an ENABLE BIT per peripheral that gates its
+ * THE CLOCK MODEL, and what crosses the util contract. This family has
+ * SHARED PRESCALERS (HPRE for AHB, PPRE for APB) below one SYSCLK,
+ * an ENABLE BIT per peripheral that gates its
  * bus clock (a peripheral whose bit is clear does not even answer
  * register reads - 5.2.17), and a KERNEL-CLOCK multiplexer for the few
  * peripherals that may run off something other than their bus (USART1..3,
  * I2C1, ADC, LPTIM, RTC). What crosses the contract is unchanged:
- * `clock_hz(clock)` is SYSCLK = HCLK, and this first cut PINS HPRE and
+ * `clock_hz(clock)` is SYSCLK = HCLK, and this file PINS HPRE and
  * PPRE at 1 so that PCLK == HCLK == hz and one number serves every
  * driver - stated as `Clock::pclk_hz` beside `hz`, so that a driver on
  * APB asks for the rate that is really its own and the day the
@@ -58,9 +57,7 @@
  * refused.
  *
  * THE DYNAMIC CLOCK, AND WHY A RATE IS A TUPLE HERE (docs/design/
- * clock.md, "The other targets"). On the AVR a dynamic clock's rate is
- * the boot rate over one prescaler, so its discrete set is an array the
- * type indexes; on this family a rate is (the SYSCLK root and its rate,
+ * clock.md). A rate on this family is (the SYSCLK root and its rate,
  * the VCORE range, the regulator) - 64 MHz on the PLL in Range 1, 16 MHz
  * on HSISYS, 2 MHz on HSISYS/8 in Range 2 on the low-power regulator -
  * and the reachable rates come from two disjoint families with no single
@@ -305,10 +302,9 @@ struct Rcc {
     // comparators only, 22.4.26..27) and TIM14/16/17's TISEL name
     // "MCO" among their sources, which is what makes an internal clock
     // COUNTABLE by a timer that is not on it - HSI16/64 into TIM2's ETR
-    // is a 4 us wall that does not move with SYSCLK (test_stm32_clock's
-    // instrument), and HSI16/8 into it a clock that runs only while the
-    // part is awake (a Stop's witness). MCO2 (the G0B1/G0C1's second
-    // output) is not built.
+    // is a 4 us wall that does not move with SYSCLK, and HSI16/8 into it
+    // a clock that runs only while the part is awake (a Stop's witness).
+    // MCO2 (the G0B1/G0C1's second output) is not built.
     /// The codes common to every header of the pack; 8..11 (PLLP, PLLQ,
     /// RTCCLK, RTC_WAKEUP) are the G0B1 class's own and pass as literals.
     static bool mco(uint8_t source_code, uint8_t log2_div) {
@@ -412,8 +408,8 @@ struct Rcc {
     // ---- peripheral resets (5.4.15, 5.4.16) ---------------------------------
     // RCC_APBRSTRx holds a peripheral in reset while its bit stands, so a
     // reset is a PULSE and not a store: set, read back (the same
-    // two-cycle stall the enables pay), clear. This is the STM32's
-    // equivalent of the SAM's CTRLA.SWRST and the only way a driver gets
+    // two-cycle stall the enables pay), clear. It is the only way a
+    // driver gets
     // a peripheral to a documented state without writing every register
     // of it by hand - which is what a driver over a block with three
     // dozen registers would otherwise have to promise.
@@ -447,8 +443,8 @@ struct Rcc {
     /// and not a wider `kernel_clock` because it is a separate REGISTER,
     /// and because the register is a struct member only the G0B1/G0C1
     /// header declares - the reserve hands back a null pointer on the
-    /// parts without it (rcc_ccipr2(), the flash_ecc2r() precedent), so
-    /// this file still compiles on every header of the pack.
+    /// parts without it (rcc_ccipr2(), the same shape as flash_ecc2r()),
+    /// so this file still compiles on every header of the pack.
     ///
     /// False when the device has no CCIPR2 at all, with NOTHING written.
     static bool kernel_clock2(uint8_t pos, uint8_t code) {
@@ -675,9 +671,9 @@ struct Clock {
 };
 
 /// The pack of rates a DynamicClock may run at: static Clock tasks, the
-/// FIRST the boot rate. A type list and nothing else - the AVR's
-/// discrete set is an array over one prescaler, this family's is the
-/// program's own choice of tuples (the file header).
+/// FIRST the boot rate. A type list and nothing else: the discrete set
+/// on this family is the program's own choice of tuples (the file
+/// header).
 template <typename... Rs>
 struct Rates {
     static constexpr uint8_t count = sizeof...(Rs);
@@ -857,7 +853,7 @@ private:
             // takes HSI16 undivided and its init() has no reason to
             // touch HSIDIV, so a program that came up the ladder from
             // HSISYS/8 would keep the divider - harmless to the rate,
-            // measured (test_stm32_clock letter d, the first version),
+            // measured,
             // and NOT harmless to what a Stop lands on (HSISYS at 2 MHz
             // instead of 16, and ES0548 2.2.4's wake hazard along with
             // it). SYSCLK is on the PLL here, so the write is free.

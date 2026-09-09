@@ -1,5 +1,4 @@
-// console - the brio kernel console on the STM32G0: three active objects
-// over USART2, a port of the AVR and SAM projects' console.cpp.
+// console - the brio kernel console: three active objects over USART2.
 //
 //   SerialPort   turns RX bytes into LineReceived events (ping-pong line
 //              buffers, backpressure on the ring - see util/serial_port.hpp)
@@ -8,10 +7,10 @@
 //   Blinker  owns the LED: heartbeat time event at 1 Hz, manual
 //              LED ON|OFF|TOG commands arrive as posted SetLed events
 //
-// What did NOT change from the other two apps is the point: the three
-// AOs, their events, their queues and every kernel and util header below
-// them are the same source. Only the target glue differs - the clock
-// type, the pin, the transport, and the vector binding.
+// Everything above the target glue is portable: the three AOs, their
+// events, their queues and every kernel and util header below them.
+// Only the glue lines are this target's - the clock type, the pin, the
+// transport, and the vector binding.
 //
 // ONE VECTOR, SHARED. USART2 raises everything on one NVIC line that it
 // shares with LPUART2 on the G0B1 (RM0444 table 61), so the handler
@@ -66,7 +65,7 @@ using Led = brio::Pin<'A', 5>;  // PA5 = LD4
 
 // The console pads: USART2_TX on PA2 and USART2_RX on PA3, both at AF1
 // (DS13560 table 13 - the datasheet is the authority; the device header
-// carries no pin table to static_assert against, unlike the SAM DFP).
+// carries no pin table to static_assert against).
 constexpr brio::UartPins console_pins{
     .tx = {'A', 2, brio::PinFunction::af1},
     .rx = {'A', 3, brio::PinFunction::af1},
@@ -77,14 +76,13 @@ constexpr Serial serial;                     // tag for print(serial, ...)
 
 constexpr uint32_t console_baud = 115200;
 
-// THE PART IS THE BOARD on this desk (stm32g0/CMakeLists.txt's own
-// rule: the board type an app's "// build: boards =" line names is the
-// part number's last six characters), so the banner reads the part off
-// the DEVICE-SELECT define rather than stating one board's name on
-// three. The whole head is one literal per part so the print is one
-// argument, as it was when only one board existed. This is the one
-// question only the preprocessor can ask - which device header is
-// compiled - and probe.cpp asks it the same way.
+// One Nucleo carries one part (stm32g0/CMakeLists.txt's own rule: the
+// board type an app's "// build: boards =" line names is the part
+// number's last six characters), so the banner reads the part off the
+// DEVICE-SELECT define rather than stating one board's name on three.
+// The whole head is one literal per part, so the print takes one
+// argument. Which device header is compiled is the one question only
+// the preprocessor can ask.
 #if defined(STM32G0B1xx)
 constexpr const char* banner_head = "STM32G0B1RE brio console (clk=";
 #elif defined(STM32G071xx)

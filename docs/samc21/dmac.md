@@ -78,8 +78,7 @@ until it clears, CHCTRLB is still enable-protected and CHCTRLA.SWRST
 is still IGNORED, both silently: the SWRST bit never reads back set,
 so a wait for it to clear succeeds instantly having reset nothing.
 The driver's `enable(false)` therefore waits, bounded, and `reset()`
-refuses when the disable did not complete - see the bench findings
-for how this was caught.
+refuses when the disable did not complete - see the bench findings.
 
 **Suspend is the only window into progress.** The controller keeps
 BTCNT internally and spills it to the write-back only when the
@@ -131,20 +130,19 @@ write-back except BTCNT and VALID is invariant WHILE THE BLOCK RUNS
 beat counter is written back - 25.10.2), so `harvest()` compares them
 all against the copy it loaded, bounds-checks BTCNT, and DISCARDS a
 reading that fails, counting it in `violations()`. The corruption is
-real and was caught in the act - see the bench findings.
+real and is measured - see the bench findings.
 
 **THE READING IS NOT THE DAMAGE.** Validating what is read is
-necessary and NOT sufficient, and that correction cost a wedged serial
-port to learn. 25.6.2.6: "For an ongoing block transfer, the
-descriptor will be fetched from the WRITE-BACK memory section
-(WRBADDR)." The write-back is not a report a driver may take or leave
-- it is the controller's LIVE COPY of the descriptor it is running -
-so when 1.10.4 scribbles it, the transfer itself is destroyed. The
-channel stops moving bytes, raises no interrupt and sits there
-enabled. On the receive side the same corruption shows as
+necessary and NOT sufficient. 25.6.2.6: "For an ongoing block
+transfer, the descriptor will be fetched from the WRITE-BACK memory
+section (WRBADDR)." The write-back is not a report a driver may take
+or leave - it is the controller's LIVE COPY of the descriptor it is
+running - so when 1.10.4 scribbles it, the transfer itself is
+destroyed. The channel stops moving bytes, raises no interrupt and
+sits there enabled. On the receive side the same corruption shows as
 CHSTATUS.FERR, which 25.6.2.8 raises when an invalid descriptor is
 fetched and which only a software RESUME clears. Two consequences the
-driver now carries: an ENGINE'S OWNER can declare a block dead and
+driver carries: an ENGINE'S OWNER can declare a block dead and
 `abandon()` it (the channel is reset, reconfigured and re-armed, and
 the count is public in `faults()`), and a harvest of a channel whose
 write-back the driver itself zeroed reports "nothing started" instead
@@ -390,24 +388,23 @@ and the switch says so.
   back). A harvest measures ~525 cycles (~10 us), which is why its
   pacing is the caller's policy.
 - **Erratum 1.10.4 does not merely give a bad READING - it kills the
-  TRANSFER**, and that is what a wedged console eventually proved. A
-  transmit channel was caught enabled with its peripheral's DRE and TXC
-  both set (the transmitter idle and asking), CHSTATUS all zeros, no
-  flag anywhere - and its write-back holding the OTHER channel's
-  descriptor: BTCTRL 0x809 with SRCADDR = the SERCOM's DATA register,
-  where its own says 0x409 and a RAM address. Since 25.6.2.6 makes the
-  write-back the ongoing descriptor, that channel was running someone
-  else's transfer and never finished it; `DmaTxEngine::busy()` stayed
-  true, the owner's pump did nothing every time it was called, the
-  transmit ring filled and `print()` spun in `Ring::push` with the
-  board silent. The fingerprint was identical across three independent
-  reproductions.
-- **Erratum 1.10.4 caught in the act**, twice over: under five
+  TRANSFER**, and from outside it looks like a wedged serial port. The
+  fingerprint, identical across three independent reproductions: a
+  transmit channel enabled with its peripheral's DRE and TXC both set
+  (the transmitter idle and asking), CHSTATUS all zeros, no flag
+  anywhere - and its write-back holding the OTHER channel's descriptor,
+  BTCTRL 0x809 with SRCADDR = the SERCOM's DATA register where its own
+  says 0x409 and a RAM address. Since 25.6.2.6 makes the write-back the
+  ongoing descriptor, that channel is running someone else's transfer
+  and never finishes it; `DmaTxEngine::busy()` stays true, the owner's
+  pump does nothing every time it is called, the transmit ring fills
+  and `print()` spins in `Ring::push` with the board silent.
+- **Erratum 1.10.4 observed directly**, twice over: under five
   concurrent channels with the engined Uart running, 340 corrupted
-  write-backs were refused out of 210852 readings in one four-second
+  write-backs are refused out of 210852 readings in one four-second
   window - every one on the heavily-churned channel, and the captured
   bad write-back is a MIXTURE: another channel's SRCADDR and BTCTRL
-  with the victim's own DSTADDR. Every transfer still landed
+  with the victim's own DSTADDR. Every transfer still lands
   byte-exact: the corruption is in the REPORTING, and validation
   turns it from wrong answers into refused readings. Under trigger
   densities an order of magnitude lower (the raw-channel stress:
@@ -420,53 +417,49 @@ and the switch says so.
   write-back reports BTCNT=0. Documented nowhere in ch. 25. A channel
   recovering from TERR must spend one block and discard it; the
   driver deliberately does not hide that.
-- The LVLEN trap was caught exactly as the header comment records it:
-  two channels at level 1 sat still for four seconds while the
-  level-0 ones ran nine thousand blocks - the per-level macro had
-  masked the group write down to level 0.
-- The silent-SWRST edge was caught by data too: a 16-beat block on a
-  channel "reset" out of a still-draining disable lost its first
+- The LVLEN trap is exactly what the header comment records: two
+  channels at level 1 sit still for four seconds while the level-0
+  ones run nine thousand blocks, the per-level macro having masked the
+  group write down to level 0.
+- The silent-SWRST edge shows in the data too: a 16-beat block on a
+  channel "reset" out of a still-draining disable loses its first
   beat, fifteen bytes correct, write-back cheerfully reporting zero
   remaining. Hence the bounded disable wait and the refusing reset.
-- The harvest handshake had a measured race worth its critical
-  section: `take_pending()` acknowledging INTPEND mid-harvest could
-  steal the SUSP flag the wait was watching - roughly one loss per
+- The harvest handshake has a measured race worth its critical
+  section: `take_pending()` acknowledging INTPEND mid-harvest can
+  steal the SUSP flag the wait is watching - roughly one loss per
   70000 harvests under load, exactly rare enough to be mistaken for
-  silicon. The whole suspend-read-resume now sits in one critical
+  silicon. The whole suspend-read-resume sits in one critical
   section (~10 us of masked interrupts per harvest).
-- A DMA buffer must be volatile in BOTH directions: gcc sank a plain
-  zeroing store past the transfer that was supposed to overwrite it,
-  so the check read pre-transfer values. The compiler cannot see a
+- A DMA buffer must be volatile in BOTH directions: gcc sinks a plain
+  zeroing store past the transfer that is supposed to overwrite it,
+  so the check reads pre-transfer values. The compiler cannot see a
   DMA store; both sides of shared buffers are volatile in the suite.
 - INTPEND dispatch with two channels pending serves them lowest
   first, one loop turn each; an invalid-descriptor fetch raises
   CHSTATUS.FERR with TERR AND SUSP together, as 25.8.22's clause
   says (that FERR clears only on the RESUME command is 25.8.23's
   text, encoded but not separately measured).
-- Zero when absent, measured not asserted: the release images of the
-  apps that name no DMA (blink, console, probe) are byte-identical
-  before and after this header and the Uart's engine parameters
-  existed - and the 40 AVR hexes are byte-identical after ring.hpp
-  gained the span API the TX engine drains through. The element-type
-  generalization and the two streaming engines were held to the same
-  gate: all 27 pre-existing SAM release images are byte-identical
-  after them, and all 29 after the timers' pass, which added a suite and
-  changed no line of code in this header.
+- Zero when absent, measured and not asserted: an image that names no
+  DMA channel carries none of this - the descriptor tables and the
+  engines are collected away, and the Uart's optional engine
+  parameters cost nothing where they are left at their defaults.
 
 From `test_samc_spi` letters d and h (the serial engines' second
 SERCOM personality, and the block-request engines' own speed record):
 `start_fixed()`/`start_discard()` are the two sibling verbs the SPI
-host's null buffers wanted (one element sent `length` times, `length`
+host's null buffers need (one element sent `length` times, `length`
 elements drained into one cell - each differs from start() by one
-descriptor bit, and they are SIBLINGS rather than flags so every
-pre-existing call site stays byte-identical); the full-duplex pair
-moves a data phase byte-exact through 12 MHz in loop-back and carries
-a two-board link exact to 6 MHz with both ends on engines - and the
-SPI-mode kick inversion above is this campaign's finding.
+descriptor bit, and they are SIBLINGS rather than a defaulted argument
+on start(), which would move the code generated for every caller that
+does not use them); the full-duplex pair moves a data phase byte-exact
+through 12 MHz in loop-back and carries a two-board link exact to 6 MHz
+with both ends on engines. The SPI-mode kick inversion above is
+measured there.
 
-From `test_samc_timer_dma` (10 letters, 101 verdicts, wireless), which
-is the streaming engines' THIRD peripheral family and the one that
-qualifies the trigger doctrine:
+From `test_samc_timer_dma` (10 letters, wireless), which is the
+streaming engines' third peripheral family and the one that qualifies
+the trigger doctrine:
 
 - **NOT EVERY PERIPHERAL PRESENTS ITS DMA REQUEST AS A LEVEL, and a TC
   CAPTURE CHANNEL DOES NOT.** 25.8.8 makes a trigger the RISE of a
@@ -503,8 +496,8 @@ qualifies the trigger doctrine:
   halfword write lands in the low half alone (0x00ABCDEF then a halfword
   0x1234 reads back **0x00AB1234**), so a duty stream's beat is a WORD.
 
-From `test_samc_analog_dma` (10 letters in `z`, 72 verdicts, wireless -
-PA02 is the DAC's VOUT pad and ADC0's AIN0 at once), on a chain where a
+From `test_samc_analog_dma` (10 letters in `z`, wireless - PA02 is the
+DAC's VOUT pad and ADC0's AIN0 at once), on a chain where a
 timer's overflow starts the DAC and its CC0 match starts the ADC, one
 sample of each per 200 us period at 5 kHz:
 
@@ -522,8 +515,8 @@ sample of each per 200 us period at 5 kHz:
   5000 nominal, inside the 2.5 parts per thousand a 1 kHz tick
   quantizes a 400 ms window by at each end. Both rulers are OSC48M
   here (the TC counts GCLK0 and SysTick the CPU clock), so this checks
-  the divider arithmetic and NOT the oscillator - which the clock
-  campaign put 5100 ppm slow against the board's crystal.
+  the divider arithmetic and NOT the oscillator - which is 5100 ppm
+  slow against the board's crystal.
 - **The two engines stay in step by construction**: 12 ADC blocks x 24
   and 9 DAC laps x 32 are 288 samples each, exactly, because one timer
   paces both.
@@ -551,9 +544,8 @@ sample of each per 200 us period at 5 kHz:
   trigger already selected was ALSO latched and served on the next
   enable. So neither arrangement wedged here - `kick()` is insurance
   at a first arm on this peripheral rather than a demonstrated
-  necessity, and the sercom.md wedge is not contradicted (it was
-  caught with a corrupted write-back in hand, which is a different
-  fact).
+  necessity, and the sercom.md wedge is not contradicted (that one has
+  a corrupted write-back in hand, which is a different fact).
 - **Erratum 1.10.4 reached again, and the density that reaches it is
   the concurrency and not the traffic.** Two memory-to-memory channels
   re-armed with a BOUNDED WAIT for each block ran 43000 blocks
@@ -613,19 +605,18 @@ Driver gaps (not built):
   chain in `test_samc_analog_dma`'s kernel letter; the contract speaks
   blocks, not DMA, and exists as the fixed point the next platform's
   stream machinery is measured against.)
-- An automatic recovery ladder. The bench established that a channel
-  the erratum has left unable to clear ENABLE cannot be reclaimed at
-  the channel level and needs `Dmac::init()`, and the suite spends
-  that rung by hand - but no verb here escalates on its own, because
-  resetting the block stops every OTHER channel too and that is a
-  program-wide decision, not a driver's.
-- The event system hooks, PARTLY RETIRED: an EVSYS driver now exists
+- An automatic recovery ladder. A channel the erratum has left unable
+  to clear ENABLE cannot be reclaimed at the channel level and needs
+  `Dmac::init()`; the suite spends that rung by hand, and no verb here
+  escalates on its own, because resetting the block stops every OTHER
+  channel too and that is a program-wide decision, not a driver's.
+- The event system hooks, PARTLY RETIRED: an EVSYS driver exists
   ([evsys.md](evsys.md)) and `test_samc_evsys` drives a DMA channel
   with EVACT `trigger` and EVIE set from a software event, so that
   path is silicon-tested. EVOE and EVOSEL - the DMAC as an event
   GENERATOR - and the other EVACT values remain untested from here.
 - QOSCTRL (left at reset), RUNSTDBY and the 25.6.7 standby sequence
-  (the power pass owns sleep on this target).
+  (sleep on this target is [platform.md](platform.md)'s).
 - Trigger codes beyond the two SERCOM pairs - each arrives with the
   driver that owns its peripheral.
 

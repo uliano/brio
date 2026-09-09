@@ -18,18 +18,24 @@ form ([i2c-bus.md](i2c-bus.md) shares the same arbiter).
 ```
 
 Layering: `SpiBus` is `util/` (pure, host-testable against a fake Bus);
-`SpiHost<n>` is `avrdx/` (knows the silicon). The app's ISR binds the
-vector, as always.
+the `SpiHost<n>` engine belongs to a target stratum and knows the
+silicon. The app's ISR binds the vector, as always.
 
-THREE ENGINES REALIZE THIS CONTRACT and none of them bent it:
-`avrdx/spi.hpp`, `samc21/spi.hpp` and `stm32g0/spi.hpp` (2026-09-07),
-the last measured against a real client on the wire - four transactions
-queued from one dispatch, the rejection, both sleep votes and the
-per-bus timeout with `recover()`, with NOT ONE LINE of `util/spi_bus.hpp`,
-`util/bus_master.hpp` or `kernel/` changed for it. The one thing the
-third target added to the Request is a FRAME SIZE (4 to 16 bits, eight
-by default), which the other two do not have because their silicon does
-not; an 8-bit request is spelled identically on all three.
+### Realizations
+
+| target | engine | what it adds to the Request |
+|---|---|---|
+| avrdx | `avrdx/spi.hpp` | - |
+| samc21 | `samc21/spi.hpp` | the rate as a `baud` divisor rather than a division enum |
+| stm32g0 | `stm32g0/spi.hpp` | a frame size, 4 to 16 bits, eight by default |
+
+An 8-bit request is spelled identically on all three, and each engine is
+measured against a real client on the wire: transactions queued from one
+dispatch, a rejection when the queue is full, both sleep votes, and the
+per-bus timeout with `recover()`. The three peripherals share almost
+nothing below the contract - a shift register with a two-deep buffer, a
+SERCOM with a pad matrix, and an SPI with a FIFO and a frame size - which
+is what makes the descriptor's survival worth recording.
 
 `SpiBus` is an alias of `BusMaster<Bus, P>` (`util/bus_master.hpp`),
 the arbiter shared with I2C - see [i2c-bus.md](i2c-bus.md).
@@ -191,7 +197,7 @@ arbitration price is only paid where there is something to arbitrate.
 ## The per-bus timeout
 
 `SpiBus` surfaces `BusMaster`'s `timeout_ticks` (the full design and
-its rulings in [i2c-bus.md](i2c-bus.md) - one mechanism, both
+its rules in [i2c-bus.md](i2c-bus.md) - one mechanism, both
 vocabularies). On SPI the plausible wedge is not a wire - the host
 clocks itself - but a DEAD ENGINE whose ISR-style completion never
 posts: an AVR host demoted mid-transfer by its SS pin, a DMA channel
@@ -201,11 +207,10 @@ on the arbiter's clock, `SpiHost::recover()` having silenced the stale
 interrupt, re-armed a demoted host (AVR), put the DMA channels away and
 reset the SERCOM (SAM) or run the disable procedure and the RCC reset
 (STM32G0), and closed the select window so the device sees the
-transaction END. STAGED AND MEASURED on the STM32G0
-(`test_stm32_spi` letter j, the third target's own bench): a lost
-interrupt - the ISR body runs and acknowledges the frames but the
-`TransferDone` is never posted - is answered `spi_timeout` in its place,
-and the very next four transactions run to `spi_ok` on the same bus AO. Size the limit to the
+transaction END. Staged and measured on silicon: a lost interrupt -
+the ISR body runs and acknowledges the frames but the `TransferDone` is
+never posted - is answered `spi_timeout` in its place, and the very next
+four transactions run to `spi_ok` on the same bus AO. Size the limit to the
 longest legal transaction; polled requests complete inside `start()`
 and never arm it. With `timeout_ticks = 0` (the default) the arbiter
 is byte-identical to the untimed one.

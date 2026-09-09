@@ -1,4 +1,5 @@
-// blink - the first brio-kernel firmware: two active objects talking.
+// blink - the smallest brio-kernel firmware with two active objects
+// talking.
 //
 // Blinker toggles the LED on PF2, driven by its own periodic time
 // event; Supervisor cycles the blink period (500 -> 250 -> 100 ms)
@@ -6,7 +7,7 @@
 // canonical AO-to-AO addressed message. No delay loops anywhere: between
 // events the CPU is in IDLE sleep, woken by the PIT tick.
 //
-// Wiring: LED from PF2 -> resistor (~330 ohm) -> GND (same as blink).
+// Wiring: LED from PF2 -> resistor (~330 ohm) -> GND.
 //
 // The ISR vector bindings live HERE (target glue by nature); the AOs and
 // the kernel below them are pure logic - see CLAUDE.md, layering rule.

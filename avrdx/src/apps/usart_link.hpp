@@ -1,6 +1,6 @@
 // usart_link.hpp - the board-to-board bench protocol of the USART
-// campaign: what test_avr_serial (board A, the DUT) tells usart_peer
-// (board B, the instrument) over the very link both are testing.
+// suites: what test_avr_serial (the DUT) tells usart_peer (the
+// instrument) over the very link both are testing.
 //
 // APP-LEVEL BENCH TOOLING, not framework. It sits next to the two apps
 // that share it and is included by its plain name; nothing in
@@ -54,9 +54,10 @@ inline constexpr uint8_t max_payload = 32;
 /// Command mode: what both boards fall back to, always.
 inline constexpr uint32_t command_baud = 115'200;
 
-/// HOW THE TWO BOARDS ARE WIRED. The campaign's wiring is the crossed
-/// full-duplex pair (A.PE0-B.PE1, A.PE1-B.PE0, A.PE2-B.PE2), but a
-/// single wire between the two TXD pads is a perfectly good link too -
+/// HOW THE TWO BOARDS ARE WIRED. The expected wiring is the crossed
+/// full-duplex pair (each board's PE0 to the other's PE1, PE1 to the
+/// other's PE0, PE2 to PE2), but a single wire between the two TXD
+/// pads is a perfectly good link too -
 /// it is the one-wire bus of 27.3.3.2.6, and with LBME each end hears
 /// the pad. Both apps support both and FIND OUT which one is on the
 /// desk (the peer alternates its command-mode configuration until a
@@ -70,7 +71,7 @@ inline constexpr uint32_t command_baud = 115'200;
 /// while transmitting so the loop-back echo is not decoded. Nothing
 /// needs a slower rate: the line is driven except between frames.
 enum class Topology : uint8_t {
-    full_duplex = 0,   ///< TXD -> RXD each way (the campaign wiring)
+    full_duplex = 0,   ///< TXD -> RXD each way (the crossed pair)
     shared = 1,        ///< one wire between the two TXD pads
 };
 

@@ -60,8 +60,8 @@ flow control are one implementation. `LpUart<n, ...>` IS
 `UartTask<Lpuart<n>, ...>` - the same task `Uart<n, ...>` names over a
 `Usart<n>` - and what differs the RESOURCE answers: `brr_for()`, the
 capability flags, where the kernel-clock field sits, which vector,
-which EXTI line. A second copy of that file would have been a second
-place to get the ORE storm wrong.
+which EXTI line. A second copy of that file would be a second place to
+get the ORE storm wrong.
 
 **BOTH LPUARTs sit on APBENR1** (LPUART1 at bit 20, LPUART2 at bit 7) -
 the header is the authority, and it is not what the USARTs' APB2/APB1
@@ -149,7 +149,7 @@ constexpr brio::UartOptions wake_opts{
 Wireless, on LPUART1's own pad PC1 (AF1) and LPUART2's PC6 (AF3), each
 proven free by its own pull first, and each looped back on itself
 through CR3.HDSEL - the single-wire half duplex the USART's own suite
-uses as its instrument. Letter v moves the WHOLE CONSOLE onto LPUART1
+uses as its instrument. Letter v moves the whole console onto LPUART1
 through PA2/PA3 AF6, which is the console's own pair reached by a
 different alternate function.
 
@@ -195,10 +195,10 @@ talking throughout.
 
 **A WHOLE CONSOLE MOVES ONTO IT AND COMES BACK** (letter v, through
 `tools/uart_stress.py`): `LpUart<1>` on PA2/PA3 AF6, the same task and
-the same verbs, clocked by the 32768 Hz crystal at 9600 took 1061 bytes
+the same verbs, clocked by the 32768 Hz crystal at 9600 takes 1061 bytes
 of the host's stream byte-exact with BRR 874, then on HSI16 at 115200
-took 9280 bytes byte-exact with BRR 35556, and USART2 came back to print
-the verdict - which is the other half of the proof.
+takes 9280 bytes byte-exact with BRR 35556, and USART2 comes back to
+print the verdict - which is the other half of the proof.
 
 **AND THE REASON THE PERIPHERAL EXISTS, measured**: with the console's
 USART2 down and LPUART1 on the crystal with `wake_from_stop = start
@@ -220,8 +220,8 @@ second single wire on PC6 at AF3 - and keeps every LPUART1 verdict: the
 20-bit LPUARTDIV, the 3x..4096x window, the FIFO, the prescaler at /64,
 the absence of OVER8, and the shared vector reaching it.
 
-**ES0418 2.13.1 IS THIS PART'S OWN ITEM AND IT NAMES THIS DRIVER'S
-ARITHMETIC**: the LPUART transmitter jitters when the kernel-clock to
+**ES0418 2.13.1 is this part's own item and it names this driver's
+arithmetic**: the LPUART transmitter jitters when the kernel-clock to
 baud-rate ratio is a NON-INTEGER between 3 and 4 (partial workaround on
 both revisions - choose a ratio outside the band). The sheet's own
 example is the one letter `v` runs, the console moved to LPUART1 with the
@@ -231,11 +231,11 @@ outside. A caller that wants the band avoided has the numbers here; the
 driver does not refuse it, because a jittering transmitter is still a
 transmitter and only the application knows what its far end tolerates.
 
-**AND ON THIS DIE THE SHEET'S OWN EXAMPLE COST NOTHING**: letter `v` ran
-LPUART1 on PA2/PA3 at AF6 with the LSE as its kernel clock and BRR 874
-(874 being 256 x 32768 / 9600 rounded), and the host read **1063 bytes
-in with 0 wrong**. Recorded as not reproduced at that rate against that
-receiver, and not as a disproof - a jitter item is about margin, and a
+**AND ON THIS DIE THE SHEET'S OWN EXAMPLE COSTS NOTHING**: letter `v`
+runs LPUART1 on PA2/PA3 at AF6 with the LSE as its kernel clock and BRR
+874 (874 being 256 x 32768 / 9600 rounded), and the host reads **1063
+bytes in with 0 wrong**. Not reproduced at that rate against that
+receiver, which is not a disproof - a jitter item is about margin, and a
 1063-byte sample at one baud on one bridge does not measure a margin.
 
 ## On the third silicon
@@ -252,7 +252,7 @@ a wrong line.
 at AF6 (the LQFP32 bonds neither PB10/PB11 nor PC0/PC1 - the last two are
 not even implemented on this part, DS12992 table 15). That is a gain and
 a loss at once: `test_stm32_serial`'s letter `n` loses its own-pad half
-there, and three other suites GAIN a console that rides HSI16 while
+there, and three other suites gain a console that rides HSI16 while
 their subject moves the clock, because this part's USART2 has no
 kernel-clock multiplexer at all ([usart.md](usart.md)). LPUART1 at
 115200 on HSI16 carried `test_stm32_clock`'s whole ladder, 72 switches

@@ -33,8 +33,8 @@
 //   PC13       the user button B1, READ ONLY: a press cannot be staged
 //                       from here, so letter u prints the level and
 //                       judges only what the board itself decides
-// PA8 IS UCPD1_CC1, which is not a desk fault but a reset state: RM0444
-// 7.3.16 connects a Type-C DEAD-BATTERY pull-down to it (and to PB15,
+// PA8 IS UCPD1_CC1, and the pad comes out of reset already loaded:
+// RM0444 7.3.16 connects a Type-C DEAD-BATTERY pull-down to it (and to PB15,
 // UCPD1_CC2) out of a power-on until SYSCFG_CFGR1's strobe releases
 // them, a few kilohms against the port's own forty. Letter b spends that
 // strobe once, before it asks the pad to follow its own pull.
@@ -226,7 +226,7 @@ void settle() { (void)delay_us(clock, 200); }
 
 /// Wait for the console to be physically empty - a WFE that any pending
 /// interrupt can return is only a measurement when nothing else is
-/// asking (test_stm32_platform's idle() letter paid for this lesson).
+/// asking.
 void console_drain() {
     for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
     }
@@ -465,24 +465,22 @@ void ta_block() {
 // =============================================================================
 //
 // Two questions no chapter answers for a wireless bench. First: is each
-// pad electrically free, so that its own pull moves it? Second - and
-// this is where the STM32 differs from the SAM, whose PMUXEN takes a
-// pad away from PORT's output driver - does the EXTI see a pad its
-// owner is DRIVING? 7.3.1 says the input buffer is on in output mode
+// pad electrically free, so that its own pull moves it? Second: does
+// the EXTI see a pad its own port is DRIVING, rather than only one an
+// outside signal moves? 7.3.1 says the input buffer is on in output mode
 // too, and the EXTI's multiplexer selects a PORT and not a pin
 // function, so the answer should be yes; everything after this letter
 // uses the cheaper, sharper stimulus if it is.
 void tb_stimulus() {
-    // PA8 IS UCPD1_CC1, AND THAT IS WHY ITS PULL CHECK USED TO FAIL ABOUT
-    // ONE RUN IN THREE. RM0444 7.3.16: the Type-C DEAD-BATTERY pull-downs
+    // PA8 IS UCPD1_CC1, AND ITS PULL CHECK FAILS INTERMITTENTLY WITHOUT
+    // THE STROBE BELOW. RM0444 7.3.16: the Type-C DEAD-BATTERY pull-downs
     // on UCPD1_CC1 (PA8) and UCPD1_CC2 (PB15) are CONNECTED out of a
     // power-on and stay connected until SYSCFG_CFGR1's strobe releases
     // them - a few kilohms against the port's own forty, so a pad asked
     // to follow its 40 k pull-up sits between the rails and reads
     // whichever way the threshold falls that minute. The strobe is
     // ONE-WAY for the power cycle, so it is spent once, here, before the
-    // precondition every later PA8 leg rests on. (Measured on PB15 by
-    // test_stm32_rtc's letter k.)
+    // precondition every later PA8 leg rests on. (Measured on PB15.)
     const bool rd_released = ucpd_dead_battery(1, false);
 
     bench.verdict("PA0 is electrically free (it follows its own pull)",
@@ -907,13 +905,13 @@ void tg_masks() {
         IntB7::event(true) && IntB7::event() && !IntB7::armed();
     console_drain();
 
-    // THE ORDER BELOW IS THE MEASUREMENT, and the first version of this
-    // letter got it wrong: on this core the event register is set by AN
-    // EXCEPTION ENTRY as well as by SEV and by an external event, so
-    // the loop that waits for a tick edge - which ends by returning
-    // from SysTick_Handler - leaves the register SET. A WFE right after
-    // it returns at once whatever the EXTI did, and the control leg
-    // measured 0 us for the wrong reason. So: align to the tick FIRST,
+    // THE ORDER BELOW IS THE MEASUREMENT, and getting it wrong measures
+    // nothing: on this core the event register is set by AN EXCEPTION
+    // ENTRY as well as by SEV and by an external event, so the loop
+    // that waits for a tick edge - which ends by returning from
+    // SysTick_Handler - leaves the register SET. A WFE right after it
+    // returns at once whatever the EXTI did, and the control leg then
+    // reads 0 us for the wrong reason. So: align to the tick FIRST,
     // then clear the event register with SEV + WFE, then make the edge,
     // then sleep. Nothing takes an exception in between - delay_us and
     // the stopwatch only READ SysTick - so the register's state is the

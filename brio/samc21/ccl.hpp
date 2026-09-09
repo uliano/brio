@@ -9,8 +9,7 @@
  * with NO INTERRUPT AND NO DMA (37.5.4 and 37.5.5 are both "Not
  * applicable"), so the only ways out are a pad and an event.
  *
- * The shape is the AVR's (`avrdx/ccl.hpp`), because for once the two
- * families really do have the same peripheral:
+ * The file has three faces:
  *
  *   Ccl        the block: one ENABLE, one software reset, one generic
  *              clock for every filter/edge/sequencer in it, the two
@@ -21,17 +20,15 @@
  *   CclIn<Pin> / CclOut<Pin>
  *              the pads, from the reserve's own map.
  *
- * WHAT DIFFERS FROM THE AVR, and it is not cosmetic:
+ * FOUR SHAPES OF THIS BLOCK THAT ARE EASY TO GUESS WRONG:
  *  - there is ONE generic clock for the whole block, not a per-LUT
  *    clock selector: slowing a filter down slows every filter down;
- *  - a LUT has ONE event input line (LUTEI + INSEL = EVENT), where the
- *    AVR has two (EVENTA/EVENTB), and the CCL's own edge detector turns
- *    that event into a one-GCLK strobe;
- *  - the input menu is different and per-LUT rather than per-INPUT: on
- *    the AVR input k of a LUT sees peripheral instance k, here the
- *    whole LUT n sees instance n (AC gives CMP[n], TC gives TC[n], TCC
- *    gives TCC[n % 3], SERCOM gives SERCOM[n]) with the ONE exception
- *    that TCC hands WO[0], WO[1] and WO[2] to inputs 0, 1 and 2;
+ *  - a LUT has ONE event input line (LUTEI + INSEL = EVENT), and the
+ *    CCL's own edge detector turns that event into a one-GCLK strobe;
+ *  - the input menu is per-LUT and not per-INPUT: the whole LUT n sees
+ *    instance n (AC gives CMP[n], TC gives TC[n], TCC gives TCC[n % 3],
+ *    SERCOM gives SERCOM[n]) with the ONE exception that TCC hands
+ *    WO[0], WO[1] and WO[2] to inputs 0, 1 and 2;
  *  - there is no interrupt at all.
  *
  * THE ENABLE-PROTECTION STORY, WHICH IS WHY EVERY CONFIGURING VERB HERE
@@ -45,9 +42,8 @@
  *             registers are enable-protected by the CTRL.ENABLE bit,
  *             whereas they must be enable-protected by the
  *             LUTCTRLx.ENABLE bits."
- * The erratum is the strictest and the one the silicon obeys
- * (measured - docs/samc21/ccl.md), so the protocol this driver enforces
- * is the AVR's errata-2.4.1 protocol by another road:
+ * The erratum is the strictest and the one the silicon obeys (measured -
+ * docs/samc21/ccl.md), so the protocol this driver enforces is:
  *
  *     Ccl::enable(false);
  *     Ccl::sequencer(pair, LutSequencer::d_flip_flop);   // before the even LUT
@@ -72,7 +68,7 @@
  *  - 1.7.4 PAC Protection Error, EVERY REVISION: writing CTRL.SWRST is
  *    said to trigger a PAC protection error. There is no workaround and
  *    no alternative to a software reset, so `reset()` writes it anyway
- *    and says so; `Ccl::pac_id` is the number a future PAC pass needs.
+ *    and says so; `Ccl::pac_id` is the number samc21/pac.hpp needs.
  *  - 1.8.3 TC Selection (the default TC input is TC4 and not TC0):
  *    REVISION B ONLY, and the bench confirms the documented mapping on
  *    this one rather than trusting the row.
@@ -104,11 +100,10 @@ namespace brio {
 
 /// LUTCTRLn.INSELy: what one input of a LUT is connected to.
 ///
-/// Every peripheral entry selects the instance from the LUT's OWN
-/// NUMBER, not from the input index - which is the opposite of the AVR
-/// and the reason `LutInput` is a plain menu here with no per-input
-/// meaning. `Lut<n>::ac_source()` and its siblings below name what a
-/// given LUT will actually get.
+/// Every peripheral entry selects the instance from the LUT's OWN NUMBER,
+/// not from the input index, which is the reason `LutInput` is a plain
+/// menu here with no per-input meaning. `Lut<n>::ac_source()` and its
+/// siblings below name what a given LUT will actually get.
 enum class LutInput : uint8_t {
     masked = CCL_LUTCTRL_INSEL0_MASK_Val,        ///< 0x0: the input is tied low
     feedback = CCL_LUTCTRL_INSEL0_FEEDBACK_Val,  ///< 0x1: this pair's sequencer output
@@ -171,8 +166,7 @@ constexpr bool lut_sequencer_valid(LutSequencer s) {
  *     lut_truth([](bool a, bool b, bool c) { return a && !b; })
  *
  * TRUTH[k] is the output for the input pattern k with IN[0] as the LSB
- * and IN[2] as the MSB (table 37-1) - the same convention the AVR uses,
- * so a table written for one family reads correctly on the other.
+ * and IN[2] as the MSB (table 37-1).
  */
 template <typename F>
 constexpr uint8_t lut_truth(F f) {
@@ -436,12 +430,11 @@ public:
      *
      * TWO refusals, from the two documents that disagree about which
      * ENABLE protects this register: the block must be disabled (37.8.2
-     * and erratum 1.7.3) and the EVEN LUT must be disabled (37.6.2.1
-     * and 37.6.2.7's "while configuring the sequential logic, the even
-     * LUT must be disabled"). Obeying both is free and obeying only one
-     * is a write that may land nowhere - the AVR's own SEQCTRL lesson,
-     * where a selector written after the even LUT's enable was silently
-     * ignored.
+     * and erratum 1.7.3) and the EVEN LUT must be disabled (37.6.2.1 and
+     * 37.6.2.7's "while configuring the sequential logic, the even LUT
+     * must be disabled"). Obeying both is free and obeying only one is a
+     * write that may land nowhere: a selector written after the even
+     * LUT's enable is silently ignored.
      */
     static bool sequencer(uint8_t pair, LutSequencer s) {
         if (pair >= sequencer_count || !lut_sequencer_valid(s) || enabled()) {
@@ -555,14 +548,12 @@ public:
      * as long as the block is down.
      *
      * AND THE TWO GATES ARE AN *AND*, not the swap erratum 1.7.3's
-     * sentence describes - measured, four cells of a truth table
-     * (test_samc_ccl letter a): a LUTCTRL write lands only with BOTH
-     * CTRL.ENABLE and LUTCTRLn.ENABLE clear. So this verb CLEARS
-     * LUTCTRLn.ENABLE first, in a store of its own carrying nothing
-     * else, because 37.6.2.1 forbids writing the protected bits
-     * together with ENABLE = 0. Without that first store a
-     * reconfiguration of a running LUT is dropped IN SILENCE, which is
-     * the bug this suite caught in the first version of this file.
+     * sentence describes - measured, four cells of a truth table: a
+     * LUTCTRL write lands only with BOTH CTRL.ENABLE and LUTCTRLn.ENABLE
+     * clear. So this verb CLEARS LUTCTRLn.ENABLE first, in a store of its
+     * own carrying nothing else, because 37.6.2.1 forbids writing the
+     * protected bits together with ENABLE = 0. Without that first store a
+     * reconfiguration of a running LUT is dropped IN SILENCE.
      */
     static bool configure(const LutConfig& c, bool enable_now = true) {
         if (!config_valid(c) || Ccl::enabled()) {
@@ -715,9 +706,9 @@ struct CclIn {
  * CclOut<Pin>: one LUT's output on a pad. `lut` IS the output number
  * (OUT[3:0] against LUT[3:0]).
  *
- * The input buffer is raised here too, deliberately: it costs nothing
- * and it makes the pad READABLE through PORT.IN, which is how every
- * verdict in `test_samc_ccl` observes a LUT at all.
+ * The input buffer is raised here too, deliberately: it costs nothing and
+ * it makes the pad READABLE through PORT.IN, which is the only way
+ * anything on this chip observes a LUT's output at all.
  */
 template <class P>
 struct CclOut {

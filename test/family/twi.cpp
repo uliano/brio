@@ -31,21 +31,21 @@ static_assert(twi_dual_pin(0, TwiRoute::def, TwiSignal::sda).pin == 2);
 
 // ---- the baud arithmetic (29.3.2.2.1) ------------------------------------
 
-static_assert(twi_scl_hz(TwiSpeed::standard_100k) == 100'000u);
-static_assert(twi_scl_hz(TwiSpeed::fast_plus_1m) == 1'000'000u);
-static_assert(twi_low_min_ns(TwiSpeed::standard_100k) == 4700u);
-static_assert(twi_rise_budget_ns(TwiSpeed::fast_400k) == 300u);
-static_assert(twi_needs_fm_plus(TwiSpeed::fast_plus_1m));
-static_assert(!twi_needs_fm_plus(TwiSpeed::fast_400k));
+static_assert(twi_scl_hz(I2cSpeed::standard_100k) == 100'000u);
+static_assert(twi_scl_hz(I2cSpeed::fast_plus_1m) == 1'000'000u);
+static_assert(twi_low_min_ns(I2cSpeed::standard_100k) == 4700u);
+static_assert(twi_rise_budget_ns(I2cSpeed::fast_400k) == 300u);
+static_assert(twi_needs_fm_plus(I2cSpeed::fast_plus_1m));
+static_assert(!twi_needs_fm_plus(I2cSpeed::fast_400k));
 
 // At 24 MHz, with the specification's worst-case rise AND fall charged
 // to the bus, all three speeds are decided by the tLOW FLOOR (equation
 // 29-5): equation 29-3 alone would give 103 / 22 / 6.
-static_assert(twi_fall_budget_ns(TwiSpeed::standard_100k) == 300u);
-static_assert(twi_fall_budget_ns(TwiSpeed::fast_plus_1m) == 120u);
-static_assert(*twi_baud_for(24'000'000u, TwiSpeed::standard_100k) == 115);
-static_assert(*twi_baud_for(24'000'000u, TwiSpeed::fast_400k) == 34);
-static_assert(*twi_baud_for(24'000'000u, TwiSpeed::fast_plus_1m) == 10);
+static_assert(twi_fall_budget_ns(I2cSpeed::standard_100k) == 300u);
+static_assert(twi_fall_budget_ns(I2cSpeed::fast_plus_1m) == 120u);
+static_assert(*twi_baud_for(24'000'000u, I2cSpeed::standard_100k) == 115);
+static_assert(*twi_baud_for(24'000'000u, I2cSpeed::fast_400k) == 34);
+static_assert(*twi_baud_for(24'000'000u, I2cSpeed::fast_plus_1m) == 10);
 // ... and the tLOW they produce clears the mode's floor WITH the fall
 // time subtracted (ticks at 24 MHz -> nanoseconds: x 1000 / 24).
 static_assert(twi_low_ticks(115) * 1000ul / 24ul - 300ul >= 4700ul);
@@ -53,7 +53,7 @@ static_assert(twi_low_ticks(34) * 1000ul / 24ul - 300ul >= 1300ul);
 static_assert(twi_low_ticks(10) * 1000ul / 24ul - 120ul >= 500ul);
 // A bus that DECLARES its (stiffer) real timing gets a faster clock and
 // still meets the floor: 4.79 us of low at 100 kHz.
-static_assert(*twi_baud_for(24'000'000u, TwiSpeed::standard_100k, 200u, 150u) == 113);
+static_assert(*twi_baud_for(24'000'000u, I2cSpeed::standard_100k, 200u, 150u) == 113);
 static_assert(twi_low_ticks(113) * 1000ul / 24ul - 150ul >= 4700ul);
 // The period floor (tR = 0) and the period the rise budget predicts.
 static_assert(twi_period_ticks(24'000'000u, 115, 0) == 240u);
@@ -62,9 +62,9 @@ static_assert(twi_scl_hz_at(24'000'000u, 115, 1000u) == 90'909u);
 // A 1 MHz bus at BAUD 10 is 30 ticks minimum: CLK_PER/30 at 24 MHz.
 static_assert(twi_period_ticks(24'000'000u, 10, 0) == 30u);
 // A clock the divider cannot span: BAUD would have to exceed 255.
-static_assert(!twi_baud_for(64'000'000u, TwiSpeed::standard_100k).has_value());
-static_assert(twi_clock_ok(24'000'000u, TwiSpeed::fast_plus_1m));
-static_assert(!twi_clock_ok(2'000'000u, TwiSpeed::fast_plus_1m));
+static_assert(!twi_baud_for(64'000'000u, I2cSpeed::standard_100k).has_value());
+static_assert(twi_clock_ok(24'000'000u, I2cSpeed::fast_plus_1m));
+static_assert(!twi_clock_ok(2'000'000u, I2cSpeed::fast_plus_1m));
 
 // ---- the SDAHOLD swap (DA errata 2.14.2) ---------------------------------
 
@@ -87,8 +87,8 @@ static_assert(twi_sdahold_code(TwiSdaHold::ns300) == 1);
 
 static_assert(twi_config_valid<0>({.route = TwiRoute::def}));
 // Fast-mode Plus without its pads is refused.
-static_assert(!twi_config_valid<0>({.speed = TwiSpeed::fast_plus_1m}));
-static_assert(twi_config_valid<0>({.fm_plus = true, .speed = TwiSpeed::fast_plus_1m}));
+static_assert(!twi_config_valid<0>({.speed = I2cSpeed::fast_plus_1m}));
+static_assert(twi_config_valid<0>({.fm_plus = true, .speed = I2cSpeed::fast_plus_1m}));
 // An instance with neither half enabled does nothing.
 static_assert(!twi_config_valid<0>({.host = false}));
 // Dual mode needs a client and a bonded dual pair. TWI0 DEFAULT always
@@ -114,8 +114,8 @@ static_assert(twi_dual_pin(1, TwiRoute::alt1, TwiSignal::sda).pin == 6);
 static_assert(twi_has_dual(1, TwiRoute::alt2));
 static_assert(twi_pin(1, TwiRoute::alt2, TwiSignal::sda).port == 'B');
 void use_64() {
-    (void)TwiHost<1, TwiRoute::alt2>::init(SysClock{});
-    (void)TwiClient<1, TwiRoute::alt1, true>::init(SysClock{}, {.address = 0x40});
+    (void)I2cHost<1, TwiRoute::alt2>::init(SysClock{});
+    (void)I2cClient<1, TwiRoute::alt1, true>::init(SysClock{}, {.address = 0x40});
 }
 #elif defined(PORTE)
 // 48 pins: TWI1 has all three routes; PB6/PB7 do not exist, so TWI1
@@ -130,9 +130,9 @@ static_assert(!twi_has_dual(1, TwiRoute::alt2));
 static_assert(twi_pin(1, TwiRoute::alt2, TwiSignal::sda).port == 'B');
 static_assert(twi_pin(1, TwiRoute::alt2, TwiSignal::sda).bonded);
 void use_48() {
-    (void)TwiHost<1, TwiRoute::alt2>::init(SysClock{});
-    (void)TwiClient<0, TwiRoute::alt1, true>::init(SysClock{}, {.address = 0x40});
-    (void)TwiClient<1, TwiRoute::def, true>::init(SysClock{}, {.address = 0x41});
+    (void)I2cHost<1, TwiRoute::alt2>::init(SysClock{});
+    (void)I2cClient<0, TwiRoute::alt1, true>::init(SysClock{}, {.address = 0x40});
+    (void)I2cClient<1, TwiRoute::def, true>::init(SysClock{}, {.address = 0x41});
 }
 #elif defined(TWI1)
 // 32 pins: TWI1 exists with DEFAULT and ALT1 only, and NO route of
@@ -145,8 +145,8 @@ static_assert(!twi_route_exists(1, TwiRoute::alt2));                  // no PB2/
 static_assert(!twi_has_dual(0, TwiRoute::alt1));                      // no PC6/PC7
 static_assert(!twi_has_dual(1, TwiRoute::def));                       // no PORTB at all
 void use_32() {
-    (void)TwiHost<1, TwiRoute::alt1>::init(SysClock{});
-    (void)TwiClient<0, TwiRoute::def, true>::init(SysClock{}, {.address = 0x40});
+    (void)I2cHost<1, TwiRoute::alt1>::init(SysClock{});
+    (void)I2cClient<0, TwiRoute::def, true>::init(SysClock{}, {.address = 0x40});
 }
 #else
 // 28 pins: TWI0 only, and only its DEFAULT route has a dual pair.
@@ -156,17 +156,17 @@ static_assert(!twi_route_exists(1, TwiRoute::def));
 static_assert(!twi_has_dual(0, TwiRoute::alt1));
 static_assert(!twi_has_dual(0, TwiRoute::alt2));
 void use_28() {
-    (void)TwiHost<0, TwiRoute::alt2>::init(SysClock{});
-    (void)TwiClient<0, TwiRoute::def, true>::init(SysClock{}, {.address = 0x40});
+    (void)I2cHost<0, TwiRoute::alt2>::init(SysClock{});
+    (void)I2cClient<0, TwiRoute::def, true>::init(SysClock{}, {.address = 0x40});
 }
 #endif
 
 // ---- the resource and the tasks on what every package has ----------------
 
 using T0 = Twi<0>;
-using Host0 = TwiHost<0>;
-using Client0 = TwiClient<0>;
-using DualClient0 = TwiClient<0, TwiRoute::def, true>;
+using Host0 = I2cHost<0>;
+using Client0 = I2cClient<0>;
+using DualClient0 = I2cClient<0, TwiRoute::def, true>;
 
 static_assert(Host0::available);
 static_assert(Client0::available);
@@ -178,11 +178,11 @@ uint8_t rx_buf[4];
 
 void use_resource() {
     (void)T0::init<TwiConfig{.route = TwiRoute::def, .sda_hold = TwiSdaHold::ns300,
-                             .speed = TwiSpeed::fast_400k,
+                             .speed = I2cSpeed::fast_400k,
                              .rise_ns = 200, .fall_ns = 150,
                              .timeout = TwiTimeout::us100}>(24'000'000u);
     (void)T0::init({.route = TwiRoute::alt2, .fm_plus = true,
-                    .speed = TwiSpeed::fast_plus_1m, .client = true,
+                    .speed = I2cSpeed::fast_plus_1m, .client = true,
                     .address = 0x42, .general_call = true}, 24'000'000u);
     // CTRLA
     T0::input_level(TwiInputLevel::smbus);
@@ -275,8 +275,8 @@ void use_resource() {
     T0::bus_timing(250, 200);
     (void)T0::rise_ns();
     (void)T0::fall_ns();
-    (void)T0::clock_ok(TwiSpeed::fast_400k);
-    (void)T0::set_speed(TwiSpeed::standard_100k);
+    (void)T0::clock_ok(I2cSpeed::fast_400k);
+    (void)T0::set_speed(I2cSpeed::standard_100k);
     (void)T0::speed();
     (void)T0::actual_scl_hz(0);
     (void)T0::rebase(24'000'000u);
@@ -286,13 +286,13 @@ void use_resource() {
 }
 
 void use_tasks() {
-    (void)Host0::init(SysClock{}, {.speed = TwiSpeed::fast_400k,
+    (void)Host0::init(SysClock{}, {.speed = I2cSpeed::fast_400k,
                                    .rise_ns = 200, .fall_ns = 150,
                                    .timeout = TwiTimeout::us100,
                                    .sda_hold = TwiSdaHold::ns300,
                                    .smart = true});
     (void)Host0::start(typename Host0::Request{
-        0x60, lend<Lease::reply>(tx_buf), 2, lend<Lease::reply>(rx_buf), 4, {}, TwiSpeed::standard_100k});
+        0x60, lend<Lease::reply>(tx_buf), 2, lend<Lease::reply>(rx_buf), 4, {}, I2cSpeed::standard_100k});
     (void)Host0::isr();
     (void)Host0::status();
     Host0::rebase(12'000'000u);
@@ -344,7 +344,7 @@ void use_tasks() {
 }
 
 // ---- the per-bus timeout instantiates over this engine ---------------------
-// A timed I2cBus static_asserts Bus::recover(), and TwiHost's - the
+// A timed I2cBus static_asserts Bus::recover(), and I2cHost's - the
 // errata's ENABLE-cycle work-around - is the verb it names as the
 // model (util/bus_master.hpp). Compile proof on every package; the
 // timed path itself has not run on AVR silicon yet (docs/avrdx/twi.md).

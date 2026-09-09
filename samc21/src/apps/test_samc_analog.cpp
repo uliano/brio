@@ -1,26 +1,23 @@
-// test_samc_analog - the ANALOG COMPLETION: the gaps the five analog
-// chapters (38 ADC, 39 SDADC, 40 AC, 41 DAC, 43 TSENS) still carried
-// after their own campaigns and that are single-board testable now that
-// the infrastructure they were waiting for exists.
+// test_samc_analog - the CROSS-CHAPTER analog suite: what the five
+// analog chapters (38 ADC, 39 SDADC, 40 AC, 41 DAC, 43 TSENS) can only
+// be asked with more than one of them running at once.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test: it is
 // meant to keep passing through every later restructuring of the drivers
-// under it. NOT ONE LINE OF DRIVER CODE IS NEEDED FOR IT - every knob
-// exercised here was already written, refused correctly and read back by
-// the campaign that built it; what was missing was silicon.
+// under it.
 //
-// WHAT MADE THE DIFFERENCE. Three things that did not exist when the
-// chapters were first written:
+// WHAT MAKES IT POSSIBLE, and each of the three is a whole letter's
+// stimulus:
 //   - THE DAC IS A REAL MID-SCALE SOURCE. On this package PA02 is
 //     DAC/VOUT, ADC0/AIN0 and the AC's AIN4 at once, so a swept voltage
 //     between the rails reaches the SAR converter's positive input, its
 //     negative multiplexer and two comparators' positive input with no
 //     wire at all. Differential mode, the comparator hysteresis and the
 //     40.6.10 offset procedure are all sweeps of that one source.
-//   - supc.hpp's BANDGAP, with the VREFOE bit that ac.md's gap list was
-//     explicitly waiting for.
+//   - supc.hpp's BANDGAP, and its VREFOE bit, which is what puts a
+//     known mid-scale level on a comparator's negative input.
 //   - THE EVENT PACERS. A TC overflow into the DAC's START user is what
 //     dithering IS (41.6.8.4 makes the sixteen sub-conversions the
 //     event's job), and a comparator output is a LEVEL, which is what an
@@ -29,7 +26,7 @@
 // WHAT IS DELIBERATELY NOT HERE, said once: anything needing a wire or a
 // second board (VREFA on any converter, the SDADC's external reference
 // at a non-rail level, the DAC's voltage pump - this board sits at
-// ~5.15 V where it is off); sleep, which the sleepwalk campaign owns;
+// ~5.15 V where it is off); sleep, which test_samc_sleepwalk owns;
 // util/ adapters (analog_sampler-vs-SDADC and a TSENS MeterSource stay
 // design questions, restated in the docs and not built); and
 // SDADC.ANACTRL's CTLSDADC/BUFTEST, which 39.8.21 calls
@@ -125,9 +122,8 @@ using Window1 = AcWindow<1>;
 constexpr uint8_t main_gen = 0;
 constexpr uint32_t main_gen_hz = SysClock::hz;
 
-/// Where the earlier campaigns located this board's supply. A STARTING
-/// POINT, refined by whichever letter measures it, never a verdict's
-/// authority.
+/// Where this board's supply sits. A STARTING POINT, refined by
+/// whichever letter measures it, never a verdict's authority.
 constexpr uint16_t supply_hint_mv = 5150;
 uint16_t vdd_mv = supply_hint_mv;
 
@@ -172,9 +168,8 @@ using Counter = Tc<3>;   ///< NB TC2 and TC3 SHARE generic clock channel 31
 constexpr uint8_t dma_ch = 0;
 using Feed = DmaChannel<dma_ch>;
 
-/// VOLATILE IN BOTH DIRECTIONS - the DMAC campaign's lesson on this
-/// target: the compiler sees neither the controller's reads nor its
-/// writes.
+/// VOLATILE IN BOTH DIRECTIONS: the compiler sees neither the
+/// controller's reads nor its writes.
 constexpr uint16_t feed_len = 512;
 volatile uint16_t feed_buf[feed_len];
 
@@ -246,8 +241,7 @@ constexpr AdcConfig pad_cfg{
 };
 
 /**
- * ADC0 up, WITH ERRATUM 1.4.10'S WORKAROUND WHERE IT IS NEEDED - the
- * helper test_samc_dac established and this suite inherits verbatim.
+ * ADC0 up, WITH ERRATUM 1.4.10'S WORKAROUND WHERE IT IS NEEDED.
  *
  * Once ADC1 has been enabled in this power cycle, ADC0.SYNCBUSY.ENABLE
  * is stuck at one on this die and `Adc<0>::init()` - which waits on it -
@@ -332,16 +326,16 @@ void dac_set(uint16_t code) {
 }
 
 /**
- * Locate the supply, the way test_samc_adc does: read the BANDGAP as an
- * input against VDDANA as the reference, so the reading is 1.024 V of
- * VDDANA and the supply falls out of it. The other direction - the
+ * Locate the supply: read the BANDGAP as an input against VDDANA as
+ * the reference, so the reading is 1.024 V of VDDANA and the supply
+ * falls out of it. The other direction - the
  * quarter-supply channel against the bandgap - saturates on this board,
  * since VDDANA/4 is about 1.29 V and the smallest bandgap level is
  * 1.024 V.
  *
- * THE BANDGAP INPUT CHANNEL NEEDS SUPC.VREF.VREFOE (the ADC campaign's
- * finding) and table 45-22's 10 us of sampling; SAMPLEN 20 at 1.5 MHz is
- * 14 us.
+ * THE BANDGAP INPUT CHANNEL NEEDS SUPC.VREF.VREFOE (measured: the
+ * channel reads a flat zero without it) and table 45-22's 10 us of
+ * sampling; SAMPLEN 20 at 1.5 MHz is 14 us.
  */
 void locate_supply() {
     if (!adc0_up(AdcConfig{.reference = Ref::vddana,
@@ -373,7 +367,7 @@ void locate_supply() {
 //
 // PA08 is ADC0/AIN8 AND ADC1/AIN10 - one pad, two converters - so
 // "simultaneous" has a witness that costs no wire: the two results must
-// agree the way test_samc_adc's solo letter proved they do.
+// agree, as they do when each converter reads that pad on its own.
 //
 // THE RATE CLAIM IS FRAMED AS A FALSIFIABLE ONE. Both modes deliver two
 // results per trigger; what INTERLEAVE buys is that ONE signal can be
@@ -774,9 +768,9 @@ void tb_sequence() {
     PadA4::output();
     PadA4::set();
 
-    // THE BANDGAP CHANNEL NEEDS TWO THINGS: SUPC.VREF.VREFOE (the ADC
-    // campaign's finding, which neither chapter states) and table
-    // 45-22's 10 us of sampling. SAMPLEN 20 at 1.5 MHz is 14 us.
+    // THE BANDGAP CHANNEL NEEDS TWO THINGS: SUPC.VREF.VREFOE (measured;
+    // neither chapter states it) and table 45-22's 10 us of sampling.
+    // SAMPLEN 20 at 1.5 MHz is 14 us.
     bench.verdict("the bandgap output is on and its level is 1.024 V",
                   Vref::configure(VrefConfig{.level = VrefLevel::v1_024,
                                              .output_enable = true}) &&
@@ -1513,9 +1507,9 @@ void te_dither() {
 
     // ---- CTRLB.LEFTADJ on silicon, dithered and plain ----------------------
     //
-    // dac_data_word() has been fixture-pinned since the DAC campaign and
-    // never bench-run. A left-adjusted code must put the SAME voltage on
-    // the pad as the right-adjusted one.
+    // dac_data_word()'s placements are pinned by the family fixture;
+    // this is where the pad judges them. A left-adjusted code must put
+    // the SAME voltage on the pad as the right-adjusted one.
     Dac::release();
     bench.verdict("the DAC comes up LEFT-ADJUSTED", dac_up(true, true, true));
     dac_set(base_code);
@@ -1573,9 +1567,9 @@ void te_dither() {
 //
 // dac.md: "EMPTY and UNDERRUN are read, cleared and used as verdicts;
 // neither has ever driven the NVIC, and isr() is compile-verified only."
-// The vector name is the DEVICE HEADER'S - the trap that cost the EIC
-// campaign a silent spin is that the header, not CMSIS habit, is the
-// authority.
+// The vector name is the DEVICE HEADER'S: the header, not CMSIS habit,
+// is the authority, and a name this table does not carry links happily
+// and lands in Default_Handler's silent spin.
 void tf_dac_interrupts() {
     bench.verdict("the event fabric is up", event_clock_up());
     const TcConfig pacer_cfg{.mode = TcMode::count8,
@@ -1663,7 +1657,8 @@ void tf_dac_interrupts() {
 // run window 1." The pair owns the pads - COMP2/3 take AIN[4..7] - and
 // AIN4 IS PA02, the DAC's own output pad. So window 1 gets something
 // window 0 never had: a SIGNAL THAT REALLY SITS BETWEEN THE LIMITS,
-// swept, instead of the role swap test_samc_ac had to invent.
+// swept, so the window's three states are reached by moving the signal
+// rather than by swapping the roles of signal and limits.
 void tg_comp23_window1() {
     bench.verdict("the pair owns the pads: COMP2/3's PIN0 is AIN4 and this "
                   "package bonds AIN4 through AIN7",
@@ -1980,9 +1975,6 @@ void th_bandgap() {
 //   - the offset procedure is the DIFFERENCE between the unswapped and
 //     the swapped flip codes, whose half is the comparator's own input
 //     offset and whose MIDPOINT is the crossing with the offset removed.
-//
-// The AVR's own comparator came out at 17 mV of hysteresis; this
-// chapter's is a different design and its table says so.
 void ti_hysteresis() {
     bench.verdict("hysteresis in single-shot mode is refused - 40.6.6 makes it "
                   "continuous-mode only",
@@ -2349,9 +2341,9 @@ void tj_intsel_invei() {
         return Comp2::flag_set();
     };
 
-    // THE STANDING-EVENT LESSON from the AC campaign: re-pointing a
-    // channel at a generator can leave one event standing, so every
-    // arrangement is run twice and the SECOND is the verdict.
+    // RE-POINTING A CHANNEL AT A GENERATOR CAN LEAVE ONE EVENT
+    // STANDING, so every arrangement is run twice and the SECOND is the
+    // verdict.
     (void)started_on(false, true);
     const bool plain_rise = started_on(false, true);
     (void)started_on(false, false);

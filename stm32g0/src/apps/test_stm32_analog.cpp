@@ -1,8 +1,7 @@
 // test_stm32_analog - the reference bench suite for the STM32G0's ANALOG
 // BLOCK: the ADC (RM0444 ch. 15), the DAC (ch. 16), the voltage
 // reference buffer (ch. 17) and the comparators (ch. 18) - and, through
-// them, util/analog.hpp and util/analog_sampler.hpp on their THIRD
-// silicon.
+// them, util/analog.hpp and util/analog_sampler.hpp on this silicon.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by tools/bench.py's "ALL: N pass, M fail" grammar
@@ -17,13 +16,13 @@
 // rail all three measure against with the VREFBUF as the only thing that
 // could change it. Every letter below needs at least two of the four
 // chapters up, so splitting them would mean writing the same bring-up
-// three times and flashing the board three times to judge one desk.
+// three times and flashing the board three times to judge one chip.
 //
 // NOTHING TO WIRE. Four techniques carry it:
 //   1. THE ZERO-LENGTH WIRE. PA4 is DAC1_OUT1 and ADC_IN4 at once
 //      (DS13560 table 12), so the DAC drives an ADC input through one
-//      bond pad and nothing else - the samc21 campaign's PA02 trick, on a
-//      part where it is the ONLY route between the two converters.
+//      bond pad and nothing else - and on this part it is the ONLY route
+//      between the two converters.
 //   2. THE FACTORY VALUES AS THE SCALE. VREFINT and its calibration at
 //      0x1FFF75AA give VDDA in millivolts without a meter; TS_CAL1 and
 //      TS_CAL2 give the junction temperature. Both are ADC results taken
@@ -398,8 +397,7 @@ void spin_cycles(uint32_t c) {
 }
 
 /// Wait for the console to be physically empty. A measurement window a
-/// transmit interrupt walks through is not a measurement - three earlier
-/// campaigns on this desk paid for that lesson.
+/// transmit interrupt walks through is not a measurement.
 void console_drain() {
     for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
     }
@@ -1263,8 +1261,8 @@ void te_led_dimmer() {
 //
 // THREE KNOWN-DISTINCT INPUTS AND NOT ONE OF THEM IS A DRIVEN PAD, which
 // is a fact about this family: 7.3.13 says the weak pull-up and pull-down
-// are DISABLED BY HARDWARE in analog mode, so the pull-walked pad that
-// carried the SAM's analog letters does not exist here and a pad the CPU
+// are DISABLED BY HARDWARE in analog mode, so there is no pull-walked
+// analog pad to be had here and a pad the CPU
 // drives is not connected to the converter at all. The DAC is the only
 // analog source inside this chip, so the sequence walks the DAC's two
 // channels and VREFINT - and on a part without a DAC the two ORDER legs
@@ -1972,9 +1970,8 @@ void ti_comparators() {
 
     // WINOUT: the XOR of the pair, and figure 69 puts it on the
     // comparator that OWNS the pad - the one with WINMODE CLEAR - while
-    // the one borrowing the input keeps WINOUT clear. The first version
-    // of this letter set both bits on COMP2 and measured a value that
-    // never moved, which is the figure read the wrong way round.
+    // the one borrowing the input keeps WINOUT clear. Read the wrong way
+    // round - both bits set on COMP2 - the value never moves at all.
     precharge(true);
     const bool plain_above = C1::value();
     precharge(false);
@@ -2139,11 +2136,11 @@ void ti_comparators() {
 // j - AnalogSampler inside a REAL KERNEL, walking three inputs
 // =============================================================================
 //
-// util/analog_sampler.hpp's third silicon, and its own comment doubted
-// this one: "on a converter with a hardware sequencer and DMA the natural
+// util/analog_sampler.hpp's own comment names the shape this converter
+// has: "on a converter with a hardware sequencer and DMA the natural
 // delivery is a block per interrupt and the selected input is a count the
 // driver keeps". Both halves of that are true here - and the sampler uses
-// NEITHER, so the shape survives again with not one line of util/ changed.
+// NEITHER, which is what this letter measures.
 // What it costs is stated where it belongs: this converter has no
 // current-channel register at all, so Adc::selected() is the driver's own
 // memory of the last selection, and it is exact precisely because the
@@ -2220,7 +2217,7 @@ void tj_sampler_ao() {
     // Kernel::step() serves ONE queued event and nothing else - only
     // Kernel::run() matures time events, and this loop is not run(). The
     // sampler's software pace IS a time event, so the pump has to do
-    // both halves by hand (the samc21 suite's own shape).
+    // both halves by hand.
     const uint32_t deadline = Ticker::ticks() + 400u;
     while (Collector::samples < 60u && Ticker::ticks() < deadline) {
         TimeEvents<Stm32g0Platform<>>::process();
@@ -2356,8 +2353,8 @@ void tk_chain() {
     // a sampling window LONGER than the DAC's settling time (DS13560's
     // tSETTLING, 1.7 us typical) holds the value the DAC has just
     // reached rather than one caught mid-slew. At 160.5 cycles of a
-    // 32 MHz fADC that window is 5 us. The first version of this letter
-    // sampled for 1.2 us and read nine transitional values in six blocks.
+    // 32 MHz fADC that window is 5 us. Sampled for 1.2 us instead, the
+    // chain reads nine transitional values in six blocks.
     AdcConfig chain = cfg_pad;
     chain.sample1 = AdcSampleTime::cycles160_5;
     chain.trigger = AdcTrigger::tim6_trgo;
@@ -2379,14 +2376,13 @@ void tk_chain() {
 
     // Six blocks of 24 at 5 kHz is 29 ms. Nothing is printed inside the
     // window: a verdict line is four milliseconds of console and a block
-    // is under five, which is the lesson three campaigns on this desk
-    // have already paid for.
+    // is under five.
     // THE FIRST BLOCK IS DISCARDED, and the reason is in the chapter:
     // 16.4.8 makes the caller write the first datum into the holding
     // register BEFORE the first trigger, so the stream's opening entry is
     // the CPU's and not the table's, and the block that carries it is one
     // entry out of phase with every block after it. Measured exactly that
-    // way the first time this letter ran (entries 0, 7, 15, 7, 15, 7 -
+    // way with the first block kept (entries 0, 7, 15, 7, 15, 7 -
     // one step of seven among five of eight), which is why the launch
     // block is now spent rather than judged.
     uint8_t first_entry[8];
@@ -2598,8 +2594,7 @@ void tl_errata() {
 //
 // What it does NOT buy, and the letter says so: an ABSOLUTE offset. The
 // number below is the comparator's offset PLUS the DAC's and PLUS the
-// ADC's, three instruments deep, and nothing here can apportion it - the
-// samc21 DAC campaign's ruling, applied again.
+// ADC's, three instruments deep, and nothing here can apportion it.
 
 /// TIM2 free-running at TIMPCLK: one tick is 15.6 ns and a read is a
 /// load, where the SysTick stopwatch this suite uses elsewhere costs
@@ -2725,8 +2720,8 @@ void tm_comp_analog() {
     // THE REPRODUCIBILITY IS JUDGED ON TWO SETTLES OF THE SAME LENGTH,
     // not on the trace's last point against one: the trace above is a
     // relaxation caught in progress and on a cold board its last sample
-    // is still tens of counts short of the asymptote (1438 against 1509
-    // on the run that taught this). Two equal settles are the same
+    // is still tens of counts short of the asymptote (measured on a cold
+    // board: 1438 against 1509). Two equal settles are the same
     // measurement twice, which is what a claim about repeatability
     // needs.
     const uint16_t first = settle_node(14);
@@ -2784,8 +2779,8 @@ void tm_comp_analog() {
     // THE ORDER OF THE FOUR SWEEPS IS PART OF THE MEASUREMENT: up, down,
     // down, up. Any residual drift of the node enters the first pair
     // with one sign and the second with the other, so the mean of the
-    // two has a linear drift removed exactly - the samc21 campaigns' ABBA
-    // block, spent here on a leaking pad instead of a warming die.
+    // two has a linear drift removed exactly - an ABBA block, spent here
+    // on a leaking pad rather than on a warming die.
     const CompHysteresis levels[4] = {CompHysteresis::none, CompHysteresis::low,
                                       CompHysteresis::medium, CompHysteresis::high};
     const char* names[4] = {"none  ", "low   ", "medium", "high  "};
@@ -2943,11 +2938,11 @@ void tm_comp_analog() {
                       (ms_ns - hs_ns) < 5000u);
 
     // ---- 6. THE WINDOW'S INSIDE STATE, which letter i can only decline -----
-    // The node is BETWEEN two thresholds at last, and BOTH of them are
+    // The node sits BETWEEN two thresholds, and BOTH of them are
     // DAC channels: COMP1 against channel 1 below it, COMP2 against
     // channel 2 above it, sharing COMP1's pad through WINMODE. That also
-    // puts CompNegative::dac_channel2 - the other half of the gap line -
-    // on silicon.
+    // puts CompNegative::dac_channel2 - the second of the two DAC
+    // channels a comparator can take - on silicon.
     C2::init();
     (void)C1::enable(false);
     (void)C1::configure(on_dac);
@@ -3018,8 +3013,8 @@ void tm_comp_analog() {
 // internal. Put it on PA6 and the pad is a witness of a third kind, read
 // two ways at once: its own input register, which is live under an
 // alternate function, and the EXTI line of THAT pad, which sees a pad
-// its owner is driving (the exti campaign's finding, applied to a
-// peripheral driving a pad rather than the CPU).
+// its owner is driving - here the owner being a peripheral rather than
+// the CPU.
 
 using PadA6 = Pin<'A', 6>;    // COMP1_OUT on AF7, and EXTI line 6
 using PadB0 = Pin<'B', 0>;    // COMP3_INP0
@@ -3509,8 +3504,8 @@ void to_dac_tail() {
     // ---- 4. SAMPLE-AND-HOLD, and the LSI it rides on -----------------------
     // Table 85: dac_hold_ck IS LSI, and nothing in dac.hpp turns LSI on
     // - the header says so rather than reaching into the RCC. So the
-    // FIRST measurement is the one the gap line implies: with LSI
-    // STOPPED the channel never samples.
+    // FIRST measurement is the one that follows: with LSI STOPPED the
+    // channel never samples.
     const bool lsi_was_on = Rcc::lsi_ready();
     Rcc::lsi_enable(false);
     (void)delay_us(clock, 900);
@@ -3807,9 +3802,9 @@ void tp_dac_triggers() {
     // ---- EXTI 9, the one row that is a PAD ---------------------------------
     // The line is the EXTI's, so the stimulus is a pull-walked pad on
     // line 9 and the EXTI's own port selection and edge are what put it
-    // there. PC9, since the desk's I2C self-link put a 2.2 k pull-up on
-    // PB9 (the first version walked PB9 and stopped following its
-    // internal pull-down the day the wire arrived - bench.md).
+    // there. PC9 AND NOT PB9: a pad an external 2.2 k pull-up holds up
+    // will not follow its own internal pull-down, and PB9 is where a
+    // wired I2C bus puts one (docs/bench.md).
     PadC9::input(PinPull::down);
     (void)delay_us(clock, 300);
     const bool c9_low = !PadC9::read();
@@ -3849,9 +3844,9 @@ void tp_dac_triggers() {
     // cleanest way to starve one is to ask for the DMA and arm NO
     // channel at all, so the very second trigger has an unserved request
     // behind it. THE FLAG IS READ FIRST WITH THE INTERRUPT OFF, because
-    // the handler this suite already binds clears it - the first version
-    // of this leg read 0 and eighteen handler calls, which is the same
-    // fact seen from the wrong side.
+    // the handler this suite already binds clears it - read after the
+    // sweep it is 0 with eighteen handler calls, which is the same fact
+    // seen from the wrong side.
     Pacer::init();
     const bool pacer = Pacer::configure({.prescaler = 63, .period = 99}) &&
                        Pacer::master(TimMasterMode::update);
@@ -4038,9 +4033,9 @@ void tq_adc_tail() {
     // AND THE ROOT IS NOT configure()'S TO WRITE. `Adc::configure()`
     // writes ADC_CCR's PRESCALER and stops there; ADCSEL lives in
     // RCC_CCIPR and only `init()` and the `async_source()` verb touch it.
-    // The first version of this leg went through apply() alone and
-    // measured the SAME conversion time from both "roots", which is the
-    // multiplexer never having moved.
+    // A leg that went through apply() alone would measure the SAME
+    // conversion time from both "roots", which is the multiplexer never
+    // having moved.
     AdcConfig from_hsi = cfg_internal;
     from_hsi.prescaler = AdcPresc::div4;
     const bool hsi_ok = apply_async(from_hsi) && Adc::select_sync(In4{});
@@ -4272,9 +4267,9 @@ void tq_adc_tail() {
 // r - the external analog inputs, one table, both rails
 // =============================================================================
 //
-// This suite has driven exactly ONE external input for its whole life -
-// PA4, because the DAC is on it. The other fifteen have been enum
-// values. The technique that reaches them is the comparator campaign's
+// Exactly ONE external input is driven anywhere else in this suite -
+// PA4, because the DAC is on it. The other fifteen are enum values.
+// The technique that reaches them is the
 // PRECHARGED PAD: drive the pad to a rail with its own port, hand it to
 // the analog switch, and convert at once - the node holds what it was
 // left at for far longer than a conversion takes (letter m measured the
@@ -4566,9 +4561,9 @@ int main() {
     boot_adc_cfgr1 = ADC1->CFGR1;
     // COMP1_CSR *and VREFBUF_CSR* live inside the SYSCFG block, which is
     // clocked at reset by nothing - so the gate is opened first and both
-    // reads are honest. Read through the closed gate (the first version
-    // of this suite did) VREFBUF_CSR answers 0x0, which is not its reset
-    // value but table 91's OTHER off mode.
+    // reads are honest. Read through the closed gate, VREFBUF_CSR
+    // answers 0x0, which is not its reset value but table 91's OTHER
+    // off mode.
     boot_vrefbuf_clockless = VREFBUF->CSR;
     RCC->APBENR2 |= RCC_APBENR2_SYSCFGEN;
     (void)RCC->APBENR2;

@@ -5,13 +5,13 @@
  * nonvolatile store as a CONCEPT, and one record layout over it.
  *
  * Why a concept and not a driver call: the store is the only
- * target-specific thing here (on AVR DA/DB it is the EEPROM behind
- * avrdx/nvm.hpp; on the host it is an array), while the layout, the
- * validity rule and the write policy are pure logic and are tested on
- * the host. util/ never includes a target.
+ * target-specific thing here (on silicon with EEPROM it is the EEPROM
+ * behind that target's nvm driver; on the host it is an array), while
+ * the layout, the validity rule and the write policy are pure logic and
+ * are tested on the host. util/ never includes a target.
  *
  * THE WRITE POLICY IS THE POINT. A nonvolatile byte has a finite number
- * of erase/write cycles (100k on this silicon's EEPROM), so store()
+ * of erase/write cycles (100k on a typical EEPROM), so store()
  * READS FIRST and writes only the bytes that actually differ. Storing
  * the same value twice costs zero cycles of endurance; changing one
  * field of a struct costs the bytes of that field plus the two checksum
@@ -57,7 +57,7 @@ namespace brio {
  *  - ready()         no write/erase is in flight;
  *  - wait_ready()    bounded wait for that; false = it never came;
  *  - finish()        release whatever the store armed for the writes
- *                    (on this silicon: clear the NVMCTRL command).
+ *                    (typically: clear the flash controller's command).
  *
  * Every verb is static: a store is a piece of hardware, not an object.
  */

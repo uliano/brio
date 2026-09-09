@@ -358,12 +358,12 @@ constexpr uint8_t tcd_dither_cycle_cost(TcdWaveform w, TcdDitherSelect d) {
 /// CMPACLR ramp, four ramp walks all four, and dual slope goes down and
 /// up again.
 ///
-/// The dual-slope line is the one place where the BENCH corrects the
-/// chapter. 25.3.3.2.4 prints T = (2 x CMPBCLR + 1) / f; the silicon
+/// The dual-slope line is the one place where the measurement corrects
+/// the chapter. 25.3.3.2.4 prints T = (2 x CMPBCLR + 1) / f; the silicon
 /// measures 2 x (CMPBCLR + 1) counter ticks exactly, at more than one
-/// geometry (test_avr_tcd d) - the ramp down and the ramp up are each
-/// CMPBCLR + 1 ticks long, like every other mode's ramp. The measured
-/// number is what this function returns.
+/// geometry - the ramp down and the ramp up are each CMPBCLR + 1 ticks
+/// long, like every other mode's ramp. The measured number is what this
+/// function returns.
 constexpr uint32_t tcd_cycle_ticks(TcdWaveform w, uint16_t a_set, uint16_t a_clr,
                                    uint16_t b_set, uint16_t b_clr) {
     switch (w) {
@@ -482,8 +482,8 @@ struct TcdConfig {
 /// Deliberately NOT refused: errata 2.14.1 (async events with a counter
 /// prescaler) and 2.14.2 (CMPAEN gating every output on an alternate
 /// route) are fixed in DB rev. B0, so refusing them would make the
-/// driver useless on the silicon that works. They are documented, and
-/// the suite measures them.
+/// driver useless on the silicon that works. They are documented in
+/// docs/avrdx/tcd.md instead.
 constexpr bool tcd_config_valid(const TcdConfig& c) {
     if (!tcd_route_exists(c.route)) return false;
     if (c.compare_a_set > tcd_compare_max || c.compare_a_clear > tcd_compare_max ||
@@ -863,11 +863,11 @@ public:
     /// last asked?" is one call. A plain store of the two bits: an RMW
     /// would write back CMDRDY/ENRDY too.
     ///
-    /// BENCH: the chapter says "each time the WOx output toggles", and
-    /// the pad is NOT what it watches. With an input mode holding the
-    /// outputs off (mode 4, mode 10) the pins provably stand still and
-    /// PWMACT keeps setting - it follows the WAVEFORM GENERATOR behind
-    /// the fault override. The W1C clear itself is sound (with the TCD
+    /// MEASURED: the chapter says "each time the WOx output toggles",
+    /// and the pad is NOT what it watches. With an input mode holding
+    /// the outputs off (mode 4, mode 10) the pins provably stand still
+    /// and PWMACT keeps setting - it follows the WAVEFORM GENERATOR
+    /// behind the fault override. The W1C clear itself is sound (with the TCD
     /// disabled the bits stay down). To ask about the PAD, read the pin.
     static TcdActivity take_pwm_activity() {
         const uint8_t s = regs().STATUS;

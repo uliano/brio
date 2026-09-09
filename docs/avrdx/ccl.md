@@ -155,7 +155,7 @@ exactly (EN high, CLK_PER clock); the RS latch sets and resets from
 two software channels, read on LUT2's pin; LUT1's ALT1 drives PC6
 and a re-init without the pin releases its direction. TCA0 WO0 as a
 LUT input reads 24000 ticks exact; AC0 as a LUT input counts 3 DAC
-crossings; the filter delays measured DIFFERENTIALLY (the stamp
+crossings; the filter delays measured differentially (the stamp
 technique): sync +2, filter +4 CLK_PER exact, and the same filter on
 OSC32K delays ~4 cycles (2871 CLK_PER measured) - the low-power
 debouncer is real.

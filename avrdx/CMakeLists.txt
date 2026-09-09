@@ -1,18 +1,15 @@
 # ============================================================================
-#  CMakeLists.txt - the AVR build (brio's sole build system; PlatformIO is
-#  gone, see git history for the old platformio.ini/apps.ini-based setup).
+#  CMakeLists.txt - the AVR build.
 #
 #  One executable target per (app x AVR128DB package): every src/apps/*.cpp
 #  with a main() is discovered automatically at configure time
 #  (CONFIGURE_DEPENDS), gated by its own "// build: boards = ..." header
 #  comment (default: db48 only, matching every app that doesn't name the
 #  line explicitly). A CMake configure targets exactly ONE package
-#  (AVR_MCU cache var, one value per configurePreset in CMakePresets.json) -
-#  that is what replaces PlatformIO's per-(app x board) env multiplication:
-#  switching CMake Tools' configurePreset switches the board, and the
-#  Target dropdown narrows itself to whatever that package actually builds
-#  (verified against the CMake File API codemodel directly during the
-#  PlatformIO->CMake migration POC).
+#  (AVR_MCU cache var, one value per configurePreset in CMakePresets.json),
+#  so there is no target per physical board: switching CMake Tools'
+#  configurePreset switches the package, and the Target dropdown narrows
+#  itself to whatever that package actually builds.
 #
 #  Host unit tests (test/test_*/main.cpp, doctest) are a SEPARATE CMake
 #  project under test/ (own CMakeLists.txt + CMakePresets.json, host g++,
@@ -41,8 +38,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Replace CMake's own per-config defaults (-O3 -DNDEBUG for Release, -g for
 # Debug) so the ONLY optimization/debug flags in effect are the ones set
-# explicitly below, matching debug_build_flags' old platformio.ini profile
-# exactly instead of layering on top of them.
+# explicitly below, instead of layering on top of them.
 foreach(lang C CXX)
     set(CMAKE_${lang}_FLAGS_RELEASE "" CACHE STRING "" FORCE)
     set(CMAKE_${lang}_FLAGS_DEBUG "" CACHE STRING "" FORCE)
@@ -299,8 +295,8 @@ foreach(_app_path IN LISTS APP_SOURCES)
 endforeach()
 
 # Package-agnostic (a scan of source comments, not of what THIS configure
-# happens to build) - tools/bench.py reads this instead of parsing apps.ini/
-# platformio.ini. Regenerated identically by any one configure/preset.
+# happens to build) - tools/bench.py reads it. Regenerated identically by
+# any one configure/preset.
 #
 # ONE ROSTER PER PROJECT, named after the project. The samc21/ project emits
 # its own apps_samc21.json next to this one, and it MUST be a separate file:

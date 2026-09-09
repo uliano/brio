@@ -5,22 +5,19 @@
  *
  * WHY SYSTICK AND NOT A TIM. SysTick is core-private: no application can
  * use it for PWM, capture or anything else, so claiming it costs the app
- * nothing - every TIM, the LPTIMs and the RTC stay free. That is the same
- * rule the AVR side follows by taking the RTC's PIT (a timer nothing
- * else wants), and the samc21 side by taking this same SysTick.
+ * nothing - every TIM, the LPTIMs and the RTC stay free.
  *
  * THE TICKER ITSELF IS THE CORE STRATUM'S: `BasicTicker` lives in
- * armv6m/ticker.hpp - this family's arrival is what factored it out of
- * the SAM's file, the two having been twins line for line. What is
- * STM32G0 about this file is what stays in it: the `Ticker` alias that
- * fixes the project-wide rate, and this comment's account of what the
- * Stop modes do to a core-clocked timebase. The class's own contract is
+ * armv6m/ticker.hpp, since it is ARMv6-M and not ST. What is STM32G0
+ * about this file is what stays in it: the `Ticker` alias that fixes
+ * the project-wide rate, and this comment's account of what the Stop
+ * modes do to a core-clocked timebase. The class's own contract is
  * documented where the class is.
  *
- * Monostate, exactly like the other two: every member is a static
- * inline, there is one timebase per program because there is one
- * SysTick, and the ISR body reaches its counters with no pointer
- * indirection. State lives in .bss, zeroed before main().
+ * Monostate: every member is a static inline, there is one timebase per
+ * program because there is one SysTick, and the ISR body reaches its
+ * counters with no pointer indirection. State lives in .bss, zeroed
+ * before main().
  *
  * ## Time representations
  *  - ticks():  raw 32-bit tick counter (wraps: 49.7 days @ 1000 Hz).
@@ -43,7 +40,7 @@
  * access (read_shared below) so every call performs a real load - in a
  * header-only build a polling loop over an inlined getter would
  * otherwise fold to one hoisted read that never sees the handler's
- * store (gcc -Os deleted exactly such a loop on the samc21 bench). now()
+ * store (gcc -Os has been seen deleting exactly such a loop). now()
  * additionally masks: it reads TWO counters that must belong to the
  * same instant.
  *
@@ -60,9 +57,10 @@
  * ## The same caveat, in its second half: STOP FREEZES THIS TIMEBASE
  * RM0444 5.3: the Stop modes stop every clock in the VCORE domain, so
  * SysTick stops and KERNEL TIME STANDS STILL for exactly as long as the
- * sleep lasts - the samc21 standby situation, and the same two answers
- * apply when the PWR pass arrives (a restriction site, or a timed site
- * resynchronizing from the RTC through `advance()` below). Sleep mode
+ * sleep lasts. stm32g0/sleep.hpp holds the two answers to that: a site
+ * that restricts the depth while a deadline is near, and timed sites
+ * that place an alarm on a clock which does keep running and hand the
+ * frozen span back through `advance()` (armv6m/ticker.hpp). Sleep mode
  * proper (WFI with SLEEPDEEP clear, what Stm32g0Platform::idle() does)
  * keeps HCLK and SysTick running.
  *

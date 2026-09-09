@@ -33,11 +33,11 @@
 //     45-26 specifies +/- 0.7, so any compression at the ends of the
 //     sweep is the modulator's overload and not the converter's INL.
 //
-// The cross-check between the two architectures is therefore NOT a
-// shared voltage (there is none) but a shared RATIO: letter g reads the
-// SUPC bandgap against VDDANA through the SDADC's reference multiplexer
-// and compares it with what the SAR ADC says about the same two, two
-// converters sharing nothing but the bandgap itself.
+// The cross-check between the two CONVERTER architectures is therefore
+// NOT a shared voltage (there is none) but a shared RATIO: letter g
+// reads the SUPC bandgap against VDDANA through the SDADC's reference
+// multiplexer and compares it with what the SAR ADC says about the same
+// two, two converters sharing nothing but the bandgap itself.
 //
 // What is exercised, letter by letter:
 //   a  the block: geometry, the vocabularies it publishes, the register
@@ -123,8 +123,8 @@ constexpr uint8_t main_gen = 0;
 constexpr uint32_t main_gen_hz = SysClock::hz;
 constexpr uint8_t fast_prescaler = 3;
 
-/// What the earlier campaigns located this board's supply at. A STARTING
-/// POINT for the millivolt prints, never a verdict's authority.
+/// Where this board's supply sits. A STARTING POINT for the millivolt
+/// prints, never a verdict's authority.
 constexpr uint16_t supply_hint_mv = 5150;
 uint16_t vdd_mv = supply_hint_mv;
 
@@ -167,9 +167,8 @@ using EvGen = Gclk<ev_gen>;
 using Pacer = Tc<2>;
 using Counter = Tc<3>;
 
-/// VOLATILE IN BOTH DIRECTIONS - the DMAC campaign's lesson on this
-/// target: the compiler sees neither the controller's reads nor its
-/// writes.
+/// VOLATILE IN BOTH DIRECTIONS: the compiler sees neither the
+/// controller's reads nor its writes.
 constexpr uint16_t dma_results = 16;
 volatile uint32_t results[dma_results];
 
@@ -339,9 +338,9 @@ constexpr AdcConfig sar_avg_cfg{
 };
 
 /**
- * ADC0 up, WITH ERRATUM 1.4.10'S WORKAROUND WHERE IT IS NEEDED - the DAC
- * campaign's helper, unchanged. Once ADC1 has been used in this power
- * cycle, ADC0.SYNCBUSY.ENABLE is stuck at one on this die and
+ * ADC0 up, WITH ERRATUM 1.4.10'S WORKAROUND WHERE IT IS NEEDED. Once
+ * ADC1 has been used in this power cycle, ADC0.SYNCBUSY.ENABLE is
+ * stuck at one on this die and
  * `Adc<0>::init()` returns false with the converter dead. The errata's
  * way out is to bring ADC1 up FIRST.
  */
@@ -1167,9 +1166,8 @@ void te_timing() {
 // f - ERRATUM 1.8.10: the DAC as the SDADC's reference
 // =============================================================================
 void tf_dac_reference() {
-    // The instrument is the one the DAC campaign built for erratum 1.8.9:
-    // ADC0 watching the DAC's own VOUT pad, whose spread is the
-    // disturbance.
+    // The instrument is the one erratum 1.8.9 calls for: ADC0 watching
+    // the DAC's own VOUT pad, whose spread is the disturbance.
     DacConfig dcfg{};
     dcfg.reference = DacRef::vddana;
     dcfg.external_output = true;
@@ -1697,7 +1695,8 @@ void tj_no_cpu() {
         // THE DMA REQUEST IS THE RESRDY FLAG (39.6.4: "cleared when the
         // RESULT register is read"), so a result left standing from the
         // previous run would move one stale beat the moment the channel
-        // is enabled. Read it away first - the ADC campaign's lesson.
+        // is enabled. Read it away first; clearing the flag alone is
+        // not the same thing.
         (void)Sdadc::result();
         Sdadc::clear_flags(Sdadc::flag_resrdy | Sdadc::flag_overrun);
         (void)Copy::reset();
@@ -1847,11 +1846,11 @@ void tk_sequence() {
     (void)Sdadc::enable(true);
     Sdadc::clear_flags(Sdadc::flag_resrdy | Sdadc::flag_overrun);
 
-    // NOTHING IS PRINTED BETWEEN THE START AND THE THIRD RESULT. The
-    // first version of this letter put a verdict line in there and lost
-    // the whole sequence: one console line at 115200 is about five
-    // milliseconds and three conversions are 385 microseconds, so every
-    // read came back with the LAST one.
+    // NOTHING IS PRINTED BETWEEN THE START AND THE THIRD RESULT: one
+    // console line at 115200 is about five milliseconds and three
+    // conversions are 385 microseconds, so a verdict line in there
+    // loses the whole sequence and every read comes back with the LAST
+    // one.
     const bool started = Sdadc::start();
     const bool busy_at_start = Sdadc::sequence_busy();
     int32_t got[3] = {0, 0, 0};

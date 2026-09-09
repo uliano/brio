@@ -15,14 +15,14 @@ not this chip). Driver: `samc21/evsys.hpp`. Family fixture
 
 ## What the silicon does
 
-**This is where the AVR shape does not transfer**, and it is worth
-saying before any verb. On the AVR the event system is a small fixed
+**The AVR shape does not transfer here**, and it is worth saying
+before any verb. On the AVR DA/DB the event system is a small fixed
 table: a channel is a typed thing, a generator is a type, and legality is
 answered at compile time. Here it is an **allocator** - twelve identical
 channels, numeric generator and user codes drawn from tables ninety-five
-and forty-seven rows long, and a generic clock per channel. Reproducing
-the AVR's per-generator types would mean ninety-five of them, encoding a
-table this driver has no business owning.
+and forty-seven rows long, and a generic clock per channel. Per-generator
+types would mean ninety-five of them, encoding a table this driver has no
+business owning.
 
 So the driver owns the **fabric** and not the vocabulary: it moves
 channels, users, paths and edges, while a peripheral that generates
@@ -123,29 +123,28 @@ Evsys::trigger(0);
 
 ## Bench findings
 
-From `test_samc_evsys` (4 letters, 37 verdicts, 37/37). Nothing to wire:
-the software event supplies the stimulus and the DMAC supplies the user.
+From `test_samc_evsys` (4 letters, 37 verdicts). Nothing to wire: the
+software event supplies the stimulus and the DMAC supplies the user.
 
 - **An event moves bytes with no CPU in the path.** A DMA channel armed
   with *no hardware trigger* (`dma_trigger_none`, EVACT trigger, EVIE
   set) copies its block when - and only when - a software event reaches
-  it through EVSYS. That also retires `dmac.md`'s own caveat that every
-  EVACT value but `none` was untested silicon.
+  it through EVSYS.
 - **A SOFTWARE EVENT ON AN ASYNCHRONOUS CHANNEL DOES NOT REACH THE
-  DMAC** - and what that means took two suites to pin down. Measured
-  here, **eight** back-to-back software events on an asynchronous channel
-  move nothing through a DMA channel, while **one** on a synchronous or
+  DMAC - AND THE LIMIT IS THE USER'S, NOT THE PATH'S.** **Eight**
+  back-to-back software events on an asynchronous channel move nothing
+  through a DMA channel, while **one** on a synchronous or
   resynchronized channel moves a whole block; 29.6.2.12 says a software
   event "can be serviced as any event generator" and never qualifies by
-  path. **But the limit belongs to the USER and not to the path.**
-  `test_samc_ccl` puts a *different* user on the same asynchronous
-  channel - a CCL LUT, whose event input has an edge detector of its own
-  - and **sixteen of sixteen single software events arrive**, with a
-  disconnected-user control catching none, and with one of them moving a
-  DMA block through the LUT as a second witness. So the asynchronous path
-  really does carry a software event; what a register write has no width
-  for is the DMAC's own trigger stage. A hardware generator crosses that
-  path for every user tried (`test_samc_eic`, [eic.md](eic.md)).
+  path. Put a *different* user on the same asynchronous channel - a CCL
+  LUT, whose event input has an edge detector of its own - and
+  **sixteen of sixteen single software events arrive**
+  (`test_samc_ccl`), with a disconnected-user control catching none and
+  with one of them moving a DMA block through the LUT as a second
+  witness. So the asynchronous path does carry a software event; what a
+  register write has no width for is the DMAC's own trigger stage. A
+  hardware generator crosses that path for every user tried
+  (`test_samc_eic`, [eic.md](eic.md)).
 - **Both clocked paths work and both raise EVD**, the event-detected flag
   that only they have.
 - **The asynchronous path really is silent.** After eight events its
@@ -163,9 +162,9 @@ invites the reading that the bit is a synchronous-path concern - the
 asynchronous path having no clock to keep alive. It is not. 29.6.4's
 sentence says a channel needs the bit "to be able to run in Standby
 mode", the table's single ASYNC row reads "Disabled in Standby Sleep
-mode", and measured with nothing else in the chain moving, a HARDWARE
-event over an ASYNCHRONOUS channel crossed 32 times in a 30 ms standby
-with the bit set and NOT ONCE without it (32 awake). Every sleepwalking
+mode", and measured with nothing else in the chain moving, a hardware
+event over an asynchronous channel crosses 32 times in a 30 ms standby
+with the bit set and not once without it (32 awake). Every sleepwalking
 chain in this stratum depends on that bit -
 [platform.md](platform.md), "Sleep, peripheral by peripheral".
 
@@ -188,11 +187,11 @@ Driver gaps (deliberate):
 Implemented but not bench-verified:
 
 - **Most real generators.** Every event in *this* suite is a software
-  one, so `CHANNELn.EVGEN` is only ever written as zero here. The first
-  driver to publish generator codes was the EIC, and `test_samc_eic`
-  exercises EVGEN, the resynchronized and asynchronous paths and rising
-  edge detection with a real hardware generator - the other ninety-odd
-  codes wait for their own drivers.
+  one, so `CHANNELn.EVGEN` is only ever written as zero here. The EIC
+  publishes generator codes, and `test_samc_eic` exercises EVGEN, the
+  resynchronized and asynchronous paths and rising edge detection with a
+  real hardware generator - the other ninety-odd codes wait for their
+  own drivers.
 - Falling and both-edge detection; `overrun` actually being raised
   (provoking one needs a generator faster than its user).
 - Operation on the E and G variants: compile-checked only. Nothing in
