@@ -160,7 +160,9 @@ def tokens(path, blank_strings):
     text = r.stdout
     if blank_strings:
         text = STRING_RE.sub('""', text)
-        text = re.sub(r'("" *)+', '"" ', text)
+        # phase 6 of translation: adjacent literals are ONE literal, on
+        # one line or across a line break
+        text = re.sub(r'(""\s*)+', '"" ', text)
     return " ".join(text.split())
 
 
