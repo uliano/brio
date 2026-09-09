@@ -461,9 +461,11 @@ rail gives 1240 / 335 / 176 / 135 / 88.)
   and real. Table 45-27's +/-3.9 mV typical is presumably at a
   mid-supply common mode, which is where the swept measurement below puts
   it: **an intercept of 4 counts, about 0.6 mV**.
-- **The chopper moves the offset by a third**: at the low rail, -136
-  counts (-21 mV) with `ANACTRL.ONCHOP` clear against -89 counts (-14 mV)
-  with it set.
+- **The chopper moves the offset, and which way is the die's**: on one
+  board -136 counts (-21 mV) at the low rail with `ANACTRL.ONCHOP` clear
+  against -89 (-14 mV) with it set, a third off; on the other -94 (-15 mV)
+  against -107 (-17 mV), a seventh added. The reference suite judges the
+  move and prints the direction.
 
 ### Linearity, swept with a PWM and the converter's own filter
 

@@ -122,7 +122,7 @@ def openocd_interface(prog):
     and is addressed by its real USB serial."""
     kind = prog["type"]
     if kind == "openocd_cmsisdap":
-        argv = ["-f", "interface/cmsis-dap.cfg", "-c", "cmsis-dap backend hid"]
+        argv = ["-f", "interface/cmsis-dap.cfg", "-c", "cmsis_dap_backend hid"]
     elif kind == "openocd_stlink":
         argv = ["-f", "interface/stlink.cfg"]
     else:

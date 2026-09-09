@@ -384,14 +384,21 @@ void tb_crystal() {
               ppm_off(xtal_hz, crystal_hz), " ppm from 24 MHz", crlf);
 
         // THE HEADLINE. A quartz crystal is tens of ppm; an open-loop RC
-        // is per mille. So the two determinations of OSC48M must
-        // DISAGREE by about as much as the RC is off, and the one made
-        // against the crystal is the one to believe.
+        // is per mille. So the two determinations of OSC48M DISAGREE by
+        // OSCULP32K's own error, and the one made against the crystal is
+        // the one to believe. Which of the two lands NEARER nominal is a
+        // matter of signs: two RC errors of the same sign cancel in a
+        // ratio, so a die whose OSC48M and OSCULP32K both run fast makes
+        // the RC-on-RC reading look BETTER than the crystal's - a
+        // coincidence, not a verdict. The claim is the size of the
+        // disagreement, not its direction.
         bench.verdict("OSC48M lands within 1% of nominal on the crystal's scale",
                       ppm_off(rc_hz, sys_hz) < 10'000u);
-        bench.verdict("OSCULP32K's verdict on the same oscillator is FAR "
-                      "coarser - it is an ultra-low-power RC, not a reference",
-                      ppm_off(rc_ulp_hz, sys_hz) > ppm_off(rc_hz, sys_hz));
+        print(serial, "  the two determinations of OSC48M disagree by ",
+              ppm_off(rc_ulp_hz, rc_hz), " ppm - OSCULP32K's own error", crlf);
+        bench.verdict("and the OSCULP32K-referenced one is off from it by per "
+                      "mille, not ppm - an ultra-low-power RC, not a reference",
+                      ppm_off(rc_ulp_hz, rc_hz) > 500u);
 
         // The crystal read back through the RC has to agree with the RC
         // read back through the crystal - it is one ratio, and this is
@@ -406,27 +413,23 @@ void tb_crystal() {
         // error - which includes anything timed on SysTick, since
         // SysTick rides the same root. The crystal is the one scale
         // here that does not come from that RC, so OSCULP32K can be
-        // weighed properly:
-        // measured against OSC48M as before, but multiplied by what
-        // OSC48M REALLY is.
-        const uint32_t ulp_nominal_scale =
-            count_to_hz(*rc_ulp, 32768u, ulp_refnum);
+        // weighed properly: measured against OSC48M as before, but
+        // multiplied by what OSC48M REALLY is. The two scales differ by
+        // OSC48M's own error, in whichever direction this die's runs -
+        // the RC-scaled reading is not nearer nominal or farther from
+        // it, it is simply on the wrong ruler.
         const uint32_t ulp_hz = static_cast<uint32_t>(
             (static_cast<uint64_t>(ulp_refnum) * rc_hz) / *rc_ulp);
+        const uint32_t ulp_rc_scaled = static_cast<uint32_t>(
+            (static_cast<uint64_t>(ulp_refnum) * sys_hz) / *rc_ulp);
         print(serial, "  OSCULP32K on the CRYSTAL's scale : ", ulp_hz, " Hz (",
               ppm_off(ulp_hz, 32768u), " ppm from 32768)", crlf);
-        print(serial, "  ... where the 48 MHz nominal made it look like ",
-              static_cast<uint32_t>((static_cast<uint64_t>(ulp_refnum) * sys_hz) /
-                                    *rc_ulp),
-              " Hz", crlf);
-        (void)ulp_nominal_scale;
-        bench.verdict("OSCULP32K is nearer nominal than the RC-scaled readings "
-                      "of earlier suites made it look",
-                      ppm_off(ulp_hz, 32768u) <
-                          ppm_off(static_cast<uint32_t>(
-                                      (static_cast<uint64_t>(ulp_refnum) * sys_hz) /
-                                      *rc_ulp),
-                                  32768u));
+        print(serial, "  ... where the 48 MHz nominal makes it look like ",
+              ulp_rc_scaled, " Hz", crlf);
+        bench.verdict("the RC-scaled reading of OSCULP32K is off the crystal-scaled "
+                      "one by exactly OSC48M's own error",
+                      near(ppm_off(ulp_hz, ulp_rc_scaled), ppm_off(rc_hz, sys_hz),
+                           200u));
     }
 
     Stopwatch::release();

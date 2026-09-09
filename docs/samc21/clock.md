@@ -249,11 +249,15 @@ if (brio::Fdpll::init<pll>()) {     // waits CLKRDY, not LOCK
 (96 kHz), which at REFNUM 255 makes one count about 8 ppm of a 48 MHz
 measurand.
 
-- **The internal RC is half a per cent slow.** OSC48M weighed against
-  the crystal measures **47.755 MHz, about 5100 ppm slow** (three runs:
-  5051, 5076, 5098 ppm). That is comfortably inside table 45-57 -
-  +-5% for the standard factory calibration, +-1% for the enhanced
-  one - and it is not a fault. It is a scale.
+- **The internal RC is half a per cent off, and the sign is the die's.**
+  OSC48M weighed against the crystal measures **47.755 MHz, about
+  5100 ppm slow** on one board (three runs: 5051, 5076, 5098 ppm) and
+  **48.31 MHz, about 6500 ppm fast** on the other. Both are comfortably
+  inside table 45-57 - +-5% for the standard factory calibration, +-1%
+  for the enhanced one - and neither is a fault. It is a scale, and a
+  verdict that compares an RC-on-RC ratio with a crystal reading must
+  not assume which lands nearer nominal: two RC errors of the same
+  sign cancel in a ratio.
 - **The scale matters, because any absolute frequency taken as a ratio
   against OSC48M and multiplied by a nominal 48 MHz inherits it.**
   OSCULP32K read that way looks like 33074 Hz; weighed on the crystal

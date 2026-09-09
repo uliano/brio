@@ -10,8 +10,9 @@
 //   SPI loopback #3: OK  (8 bytes)
 //   SPI loopback #4: FAIL got FF FF ... (jumper missing?)
 //
-// Without the jumper MISO floats/reads 0xFF: FAIL is the expected
-// no-jumper outcome, OK proves the whole chain - request event ->
+// Without the jumper MISO floats and reads whatever the pad settles
+// at (all 0x00 on the bench board): FAIL is the expected no-jumper
+// outcome, OK proves the whole chain - request event ->
 // arbiter -> engine -> per-byte ISR -> TransferDone -> reply.
 
 #include <avr/interrupt.h>

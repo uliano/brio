@@ -216,7 +216,10 @@ BOARDS = {
         # identity confirmed by USERROW readback (brio-a) through ICE
         # ...51207, console identified by its clock_console banner
         # answering on this port.
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0",
+        # The home desk: the one CH340 socket on the PC's port 1.1 that
+        # the SAM boards use too, the boards taking turns; the banner's
+        # USERROW id (brio-a) is the pairing check.
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1:1.0-port0",
         "programmer": {"type": "atmelice_updi", "serial": "J42700051207"},
     },
     "B": {
@@ -257,14 +260,15 @@ BOARDS = {
         "board": "c21j",
         "id": None,
         "die_serial": "f9e78960-51574841-59202020-ff160321",
-        # Re-plugged 2026-09-02: a USB hub entered the chain (the
-        # alternative was unpowering the desk), so every by-path below
-        # it changed - the console now sits behind the hub at 1.1.2.
-        # The stale-match lesson of the 2026-08-31 re-plug stands: the
-        # pairing is re-verified by resetting the chip over SWD and
-        # watching this port emit the firmware's banner.
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1.2:1.0-port0",
-        "programmer": {"type": "openocd_cmsisdap", "serial": "J42700049508"},
+        # Re-rigged 2026-09-09 (the home desk, no hub): THIS die - the
+        # serial above, read again over SWD - sits on Atmel-ICE ...51207,
+        # the probe position D used to name (the 2026-09-07 note under D
+        # had already seen this die through that probe), with its CH340
+        # on the PC's own port 1.1. The stale-match lesson of every
+        # earlier re-plug stands: the pairing is re-verified by resetting
+        # the chip over SWD and watching this port emit the banner.
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1:1.0-port0",
+        "programmer": {"type": "openocd_cmsisdap", "serial": "J42700051207"},
     },
     "D": {
         # The second SAM C21 board (2026-09-02): same C21J rev 1.1 design
@@ -308,8 +312,16 @@ BOARDS = {
         # a die serial is board identity and belongs to a human's call.
         "board": "c21j",
         "id": None,
+        # RESOLVED 2026-09-09: both dies read over SWD the same evening,
+        # one board at a time on ONE Atmel-ICE (...51207) and ONE CH340
+        # socket (the PC's port 1.1) - the die above answered as D, the
+        # one under C as C, so the two records ARE the two boards. On this
+        # desk C and D therefore name the same probe and the same console
+        # path and take turns; whichever is plugged in is the one the
+        # verbs reach. The pairing is re-verified at every swap by reading
+        # the die serial (the incantation under C).
         "die_serial": "3a39fd67-51574841-59202020-ff160311",
-        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0",
+        "console": "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.1:1.0-port0",
         "programmer": {"type": "openocd_cmsisdap", "serial": "J42700051207"},
     },
 }

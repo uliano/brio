@@ -347,7 +347,7 @@ def openocd_batch(prog, commands, timeout=180.0):
     (returncode, all output) - OpenOCD logs and command output both land on
     stderr, so the two streams are joined and parsed together."""
     argv = [manifest.OPENOCD, "-f", "interface/cmsis-dap.cfg",
-            "-c", "cmsis-dap backend hid"]
+            "-c", "cmsis_dap_backend hid"]
     if prog.get("serial"):
         argv += ["-c", "adapter serial %s" % prog["serial"]]
     argv += ["-f", "target/at91samdXX.cfg"]
@@ -470,7 +470,7 @@ def sam_write_row(prog, row, pages):
     with open(path, "w", encoding="ascii") as f:
         f.write(sam_write_script(row, pages))
     argv = [manifest.OPENOCD, "-f", "interface/cmsis-dap.cfg",
-            "-c", "cmsis-dap backend hid"]
+            "-c", "cmsis_dap_backend hid"]
     if prog.get("serial"):
         argv += ["-c", "adapter serial %s" % prog["serial"]]
     argv += ["-f", "target/at91samdXX.cfg", "-f", path]

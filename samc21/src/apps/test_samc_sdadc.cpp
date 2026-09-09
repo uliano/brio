@@ -59,6 +59,7 @@
 // build: boards = c21j
 // build: monitor_speed = 115200
 
+#include <algorithm>
 #include <stdint.h>
 
 #include "samc21/adc.hpp"
@@ -998,7 +999,7 @@ void td_sweep() {
 void te_timing() {
     bench.verdict("the crystal stopwatch is running (24 MHz, 41.7 ns a tick) - "
                   "a conversion time against OSC48M would carry that "
-                  "oscillator's 5100 ppm",
+                  "oscillator's own per-mille error",
                   stopwatch_start());
     drive_pair0(false, false);
 
@@ -1034,7 +1035,17 @@ void te_timing() {
         {SdadcOsr::osr256, "256", 32},
         {SdadcOsr::osr1024, "1024", 8},
     };
-    bool all_exact = true;
+    // The converter runs on OSC48M and the stopwatch on the crystal, so
+    // every period carries OSC48M's own error as a COMMON factor - half
+    // a per cent one way or the other, a die's own number. The claim is
+    // therefore the OSR dependence: the three periods, each divided by
+    // its prediction, must agree with one another to two per mille -
+    // the OSR 64 period is ~1000 ticks, so its reading is quantized at
+    // one per mille, and the RC itself wanders a few hundred ppm between
+    // one window and the next - and the factor they share is the RC
+    // weighed against the crystal.
+    uint32_t ratio_ppm[3] = {};
+    uint8_t n = 0;
     for (const auto& o : osrs) {
         SdadcConfig cfg = base_cfg(o.osr, true);
         const uint32_t measured = period_ticks(cfg, o.count);
@@ -1046,13 +1057,18 @@ void te_timing() {
         print(serial, "  free running, OSR ", o.label, ": ", measured,
               " crystal ticks a result (predicted ", predicted, ") = ", us,
               " us", crlf);
-        if (!near(measured, predicted, predicted / 200u + 2u)) {
-            all_exact = false;
-        }
+        ratio_ppm[n++] = static_cast<uint32_t>(
+            (static_cast<uint64_t>(measured) * 1'000'000ULL) / predicted);
     }
-    bench.verdict("THE FREE-RUNNING PERIOD IS OSR x 4 CLK_SDADC CYCLES, exact "
-                  "to five per mille at every ratio",
-                  all_exact);
+    const uint32_t lo = std::min({ratio_ppm[0], ratio_ppm[1], ratio_ppm[2]});
+    const uint32_t hi = std::max({ratio_ppm[0], ratio_ppm[1], ratio_ppm[2]});
+    print(serial, "  measured/predicted, x1e6: ", ratio_ppm[0], " / ",
+          ratio_ppm[1], " / ", ratio_ppm[2], " - the common factor is OSC48M "
+          "on the crystal's scale", crlf);
+    bench.verdict("THE FREE-RUNNING PERIOD IS OSR x 4 CLK_SDADC CYCLES - the "
+                  "three ratios agree to two per mille, so the residual is the "
+                  "oscillator's and not the filter's",
+                  hi - lo <= 2000u && near(lo, 1'000'000u, 20'000u));
 
     // THE PRESCALER QUESTION. The datasheet says the divider is
     // 2 x (P + 1); the device header's enumerators say 2 << P. The two
@@ -1538,10 +1554,14 @@ void th_corrections() {
                                         : static_cast<uint32_t>(without.mean);
     const uint32_t b = with.mean < 0 ? static_cast<uint32_t>(-with.mean)
                                      : static_cast<uint32_t>(with.mean);
+    // Which way it moves is the die's: one die's offset shrank by a
+    // third with the chopper on, another's grew by a seventh. The claim
+    // is that it MOVES - by more than either arrangement's own scatter.
+    const uint32_t moved = a > b ? a - b : b - a;
     if (a > 40u || b > 40u) {
         bench.verdict("THE CHOPPER MOVES THE OFFSET, and the direction is "
                       "reported rather than assumed",
-                      b <= a);
+                      moved > without.span() + with.span() + 2u);
     } else {
         print(serial, "  both offsets are under 40 counts (about 6 mV) and the "
               "difference between them is inside this suite's own scatter - "

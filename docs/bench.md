@@ -53,27 +53,46 @@ over SWD on both). Desk positions **C** and **D**; everything below
 holds for both except where a board is named.
 
 - CPU on the internal OSC48M at 48 MHz. **The 24 MHz crystal on
-  PA14/PA15 now RUNS** - `test_samc_clock` was its first consumer
-  (2026-08-28) - and it is what finally put a scale on this board:
-  OSC48M measures **5100 ppm SLOW** against it, so every absolute
-  frequency measured here before that date was a ratio multiplied by
-  a nominal 48 MHz that is half a per cent off. The crystal is armed
-  by the suites that want it and handed back at the end of every
-  letter; the CPU still boots and runs on OSC48M.
-- **VDD is about 5.1 V**, located by `test_samc_supc` through the
-  comparator's VDD scaler against the SUPC bandgap at all three of its
-  reference levels (5251 / 5141 / 5090 mV). Toolchain, upload and
-  debug: [samc21/README.md](samc21/README.md).
+  PA14/PA15 RUNS on board D** - `test_samc_clock` was its first
+  consumer, on board C - and it is what puts a scale on a
+  board: OSC48M measured against it is **5100 ppm SLOW on C's die and
+  6500 ppm FAST on D's** (the sign is the die's, both inside table
+  45-57), so every absolute frequency taken as a ratio multiplied by a
+  nominal 48 MHz is half a per cent off, one way on one board and the
+  other way on the other. The crystal is armed by the suites that
+  want it and handed back at the end of every letter; the CPU still
+  boots and runs on OSC48M. **BOARD C'S CRYSTAL NO LONGER OSCILLATES**: at 5 V STATUS.XOSCRDY rises after ~830 us (the
+  masking counter expiring, which proves nothing) and FREQM with the
+  crystal as reference never completes; at 3.3 V XOSCRDY never rises
+  at all. It last ran under `test_samc_timebase`, on its
+  stopwatch. D's crystal starts in 576 us at 3.3 V and at 5 V alike
+  and measures, so the fault is C's oscillator circuit and not the
+  supply - a solder-and-magnifier job on C's crystal and its two load
+  capacitors before C carries any crystal-scaled suite again. Until
+  then D is the SAM bench.
+- **VDD is about 5.1 V** with the supply jumper at 5 V, located by
+  `test_samc_supc` through the comparator's VDD scaler against the
+  SUPC bandgap at all three of its reference levels (5251 / 5141 /
+  5090 mV). The jumper went to 3.3 V on both boards for the G0-to-SAM
+  bus link and IS BACK AT 5 V on both: at
+  3.3 V the analog suites lose the verdicts that locate the supply
+  (adc 5, analog 2..9, dac 2..3, sdadc 4 - the 4.096 V bandgap level
+  saturates the converters), which is the supply and not a regression.
+  Toolchain, upload and debug: [samc21/README.md](samc21/README.md).
 - LED **PB23**, button **PB22** (EXTINT6; measured 2026-08-28: the pad does NOT follow its own internal pull and reads LOW with the internal pull-up on, so the button is not fitted pull-up-to-ground).
 - Console: CH340 on **PB30/PB31 = SERCOM5 PAD0/PAD1** (function D),
   115200 8N1. Like every CH340 here it has no USB serial number:
   identify its `/dev/serial/by-path` entry by listening on the
   candidates during an OpenOCD `reset run` and seeing which one
   prints the boot banner.
-- Programmer/debugger: one Atmel-ICE each on SWD (PA30/PA31) - board
-  C has `J42700049508` (the ICE that used to sit on AVR board B's
-  UPDI), board D has `J42700051207` (formerly board A's). Flashing
-  needs the cortex-debug session closed (the ICE is single-client).
+- Programmer/debugger: an Atmel-ICE on SWD (PA30/PA31). On the home
+  desk ONE ICE, `J42700051207`, serves both boards in
+  turn, on the PC's own USB port, with the CH340
+  on port 1.1 - so the manifest's C and D entries name the same probe
+  and the same console path and the die serial read over SWD says
+  which board is plugged in (both dies were read that evening and the
+  two `die_serial` records ARE the two boards). Flashing needs the
+  cortex-debug session closed (the ICE is single-client).
 - Desk positions **C** and **D** in the manifest, driven by
   `bin/brio` like any other board (`flash`/`run`/`console`);
   each die serial is recorded there as the identity an AVR board has
@@ -84,17 +103,20 @@ holds for both except where a board is named.
   32 kHz reference: XOSC32K bring-up, RTC on a crystal,
   GCLK_SERCOM_SLOW for the I2C SMBus time-outs, OSCULP32K
   cross-checks.
-- Firmware today: **only ONE of the two boards is on the desk**, on the
-  Atmel-ICE recorded at position **D** (`J42700051207`), and it runs
-  the instrument half of the G0-to-SAM bus link - `spi_peer` for the
-  SPI campaign, `twi_peer` for the I2C one, reflashed between them.
-  NB the DIE at position D today reads serial
-  `f9e78960-51574841-59202020-ff160321`, which is the die the manifest
-  records at position **C**: the two boards have swapped probes again.
-  `cli/bench/bench_boards.py` records the measurement in a comment and
-  leaves both `die_serial` fields alone - a die serial is board
-  identity, and with only one board plugged in there is no way to say
-  which entry should carry which.
+- Firmware today: **D is on the desk** on `test_samc_freqm`
+  after the whole wireless roster re-ran on it at 5 V through the
+  0.12.0 OpenOCD (freqm 25, clock 108, adc 97, analog 136, analog_dma
+  78, ccl 141, dac 108, sdadc 101, tcc 143, timebase 15, timer_dma 101,
+  the user row read by `brio fuses D`); C is unplugged with its dead
+  crystal, last on `test_samc_clock`. Two suite verdicts were tuned to
+  C's die and were rewritten that day to hold on any die: the clock
+  suite's two OSCULP32K comparisons (a ratio of two RC errors of the
+  same sign CANCELS, so on D the RC-on-RC reading of OSC48M lands
+  nearer nominal than the crystal's - a coincidence the letter now
+  prints and no longer judges) and the SDADC suite's free-running
+  period (judged on the three OSR ratios agreeing, the common residual
+  being OSC48M's) and chopper (it MOVES the offset - by a third down on
+  C, a seventh up on D - and the direction is printed).
 - **THE HUB AND THE PROBES (2026-09-02, operational).** The desk's USB
   hub desynchronizes the Atmel-ICEs' default usb_bulk CMSIS-DAP
   transport under sustained traffic (every command gets the previous
@@ -104,7 +126,7 @@ holds for both except where a board is named.
   and do not care), and both probes flash first-try again. No manifest
   edit was needed: probes are addressed by their own serial, consoles
   by by-path, and only the latter is topology. `bin/brio` keeps
-  `cmsis-dap backend hid` on every OpenOCD invocation (measured no
+  `cmsis_dap_backend hid` on every OpenOCD invocation (measured no
   worse anywhere, materially better behind a hub); a wedged probe is
   recovered by two USBDEVFS_RESET ioctls five seconds apart, or a
   replug. And the standing rule either way: ALWAYS check for
@@ -635,7 +657,20 @@ is loaded into the peripheral at reset.
 
 ### End state
 
-**Today's end state: THE DESK IS THE NUCLEO-G0B1RE AT E AND THE
+**The home desk:** ONE Atmel-ICE (`J42700051207`) and ONE CH340
+socket (the PC's port 1.1) serve every board in turn. AVR board A is
+the one plugged in, on `spi_loopback` with its PA4->PA5 jumper fitted
+(OK every second), after `test_avr_clock` a 15/15 (letter 5: no
+XOSC32K on this board - no AVR board carries one), `brio fuses A`
+read (BOOTSIZE 128, CODESIZE 0), and serial z 108 / sleep z 72 / spi z
+148 through the avrdude path. SAM board D is unplugged on
+`test_samc_freqm` with its supply jumper at 5 V; C is unplugged with
+its crystal dead (see "The SAM C21 boards"), jumper also back at 5 V;
+no wires anywhere but A's jumper. The G0 boards are unplugged too, in
+the state the paragraph below describes. What follows is the earlier
+desk.
+
+**The office end state: THE DESK IS THE NUCLEO-G0B1RE AT E AND THE
 NUCLEO-G031K8 AT G, TIED BY THE SIX-WIRE BUS LINK** of "The G0-to-G0 bus
 link" above - SPI1 to SPI1, I2C1 to I2C1, the same pin names at both
 ends, the two 2.2 kOhm pull-ups on E's side, a dedicated GND - every
