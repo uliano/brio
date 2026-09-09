@@ -165,7 +165,8 @@ comments justifying wrong restrictions. The antidote, in practice:
   -Os -c -I brio` takes seconds, no hardware; (3) negative
   tests: what must be refused must FAIL to compile; (4) the
   `test_<target>_<subject>` suite on the bench; (5) `brio prose`
-  clean over the files touched - a comment or a document is a reference
+  clean over the files touched, and `brio gate` for every change that
+  claims to move no image (a comments-only edit, a rename, a move) - a comment or a document is a reference
   for the code as it is, and a claim about another part of the tree is
   a POINTER the tool can check, never a statement that ages. The bench chip alone
   masks half the family (SWEVENTB, TCA1, PORTB proved it).
@@ -4318,6 +4319,11 @@ brio check all                  # the three in a row
 brio prose [paths...]           # the prose net: no dates/process words/Doxygen tags in
                                 # comments and docs, every cited path exists, ASCII only;
                                 # "review" lines are claims of absence to re-read, not errors
+brio gate [--against REF]       # THE BYTE-IDENTITY GATE: reference and working tree each built
+                                # with mtimes pinned and build dirs wiped, images compared per
+                                # preset, movers named (the three release presets, ~30 s)
+brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--strings: ignoring
+                                # what string literals say) - the gate for a comments-only claim
 (cd avrdx && cmake --build --preset avr128db48-release --target <app>)         # AVR release build (-Os)
 (cd avrdx && cmake --build --preset avr128db48-release --target <app>-upload)  # flash via Atmel-ICE (UPDI)
 (cd avrdx && cmake --build --preset avr128db48-debug --target <app>)           # AVR debug build, then F5
@@ -4448,6 +4454,8 @@ bench/                   its guts, a Python package:
                          - not a target list; no verb imports the file by name
   bench_boards.py        the manifest in the repository
   prose.py               `brio prose`, the prose net (see the definition of done)
+  gate.py                `brio gate`, the byte-identity gate over the images and
+                         the token-identity check over sources
   stress.py              `brio stress`, the host end of the UART suites: the same
                          xorshift the firmware generates, plus the baud and
                          frame changes only an OUTSIDE sender can make

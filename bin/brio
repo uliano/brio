@@ -9,6 +9,8 @@
     brio fuses <board> [name=value ...]
     brio check [avrdx|samc21|stm32g0|all] [filter]   the family compile fixtures
     brio prose [paths...]          the prose net (comments and documents)
+    brio gate [--against REF] [--preset P]...   images byte-identical to REF? (movers named)
+    brio gate --tokens [--strings] FILE...      sources token-identical to REF?
     brio stress ...                the host end of the UART suites
 
 Put bin/ on the PATH, or call it as bin/brio from anywhere in the tree."""
@@ -31,6 +33,9 @@ def main(argv):
     if verb == "prose":
         from bench import prose
         return prose.main([argv[0]] + rest)
+    if verb == "gate":
+        from bench import gate
+        return gate.main([argv[0] + " gate"] + rest)
     if verb == "stress":
         from bench import stress
         sys.argv = [argv[0] + " stress"] + rest
