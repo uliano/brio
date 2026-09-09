@@ -765,8 +765,8 @@ void te_averaging() {
               avg.span(),
               "), which is at or below the quantization - too small a "
               "signal for a comparison to mean anything. A source that "
-              "actually wanders needs a DAC or a wire, and this campaign "
-              "has neither.", crlf);
+              "actually wanders needs a DAC or a wire, and this suite "
+              "uses neither.", crlf);
     }
 
     // OVERSAMPLING AND DECIMATION is the OTHER column of the chapter: the

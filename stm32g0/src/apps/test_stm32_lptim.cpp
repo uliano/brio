@@ -969,8 +969,7 @@ void ta_block() {
     print(serial, "  CFGR while ENABLED: ", hex(cfgr_before), " -> wrote ",
           hex(cfgr_before | (7u << LPTIM_CFGR_PRESC_Pos)), " -> reads ",
           hex(cfgr_after), crlf);
-    bench.verdict("A FORBIDDEN WRITE IS NOT ONE THING ON THIS FAMILY (the "
-                  "analog campaign's finding, met again): 26.7.4 says CFGR "
+    bench.verdict("A FORBIDDEN WRITE IS NOT ONE THING ON THIS FAMILY: 26.7.4 says CFGR "
                   "must only be modified while the LPTIM is disabled, and the "
                   "store LANDS anyway - the register takes it, and what the "
                   "chapter forbids is what the COUNTER then does with it",

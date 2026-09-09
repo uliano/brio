@@ -1196,7 +1196,7 @@ void te_capture_lsi() {
     constexpr uint32_t watchdog_lsi_hz = 32'536;
 #endif
     print(serial, "  the watchdog's own reading of this die's LSI is ",
-          watchdog_lsi_hz, " Hz (test_stm32_platform letter i)", crlf);
+          watchdog_lsi_hz, " Hz (the platform suite's reading)", crlf);
     bench.verdict("and it agrees with the watchdog-timed reading of the SAME "
                   "oscillator on the SAME die to within 3 per cent - two "
                   "instruments sharing no mechanism",
@@ -1322,8 +1322,7 @@ void tf_pwm_input() {
                   "two one measurement and not two",
                   cap_width < cap_period);
     bench.verdict("the counter is reset ON the rising edge, so a period "
-                  "reads as its own tick count and not one less - the "
-                  "opposite of the samc21 TC's capture",
+                  "reads as its own tick count and not one less",
                   cap_period > 900u);
 
     quiet_everything();
@@ -1922,7 +1921,7 @@ void tk_errata() {
             second_toggled = second_toggled + 1u;
         }
     }
-    print(serial, "  the G0B1's 2.7.2 (ES0487's twin pending) staged 8 times: "
+    print(serial, "  the G0B1's 2.7.2 (ES0487 2.6.2 on this part) staged 8 times: "
                   "the first match (CNT = CCR = ARR) fired ", first_fired,
           " times, the counter wrapped ", wrapped,
           " times, and the SECOND match (CNT = CCR = 0, one counter "
@@ -1940,20 +1939,18 @@ void tk_errata() {
     // DMA), where this letter drives it once per period from software.
     bench.verdict("THE STAGED BEHAVIOUR DID NOT REPRODUCE ON THIS DIE - the "
                   "second compare raised its flag and toggled its output "
-                  "every round - the item being the G0B1's 2.7.2, whose twin "
-                  "in ES0487 is not in hand and is therefore not cited by a "
-                  "number this suite has not read",
+                  "every round - the item being the G0B1's 2.7.2, ES0487's 2.6.2",
                   second_fired == 8u && second_toggled == 8u);
 
     print(serial, "  the G0B1's 2.7.1 (one-pulse trigger lost in master-slave "
-                  "reset + trigger with MSM), ES0487's twin pending, NOT "
+                  "reset + trigger with MSM), ES0487's 2.6.1, NOT "
                   "staged: it needs the trigger to "
                   "arrive exactly at CNT = ARR of a cascaded master, which "
                   "nothing here can place. Its own workaround is the "
                   "driver's default - TimSlaveConfig::master_slave is false.",
           crlf);
     print(serial, "  the G0B1's 2.7.3 (output compare clear with an external "
-                  "reset), ES0487's twin pending, NOT "
+                  "reset), ES0487's 2.6.3, NOT "
                   "staged: ocref_clr comes from ETR or a comparator, and "
                   "this stratum has neither an ETR wire nor a COMP driver "
                   "(and this part has no comparator at all where the reserve "

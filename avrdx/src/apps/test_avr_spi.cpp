@@ -1012,7 +1012,7 @@ bool command(spilink::Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
           ": the first answer window carried");
     if (first_n == 0) print(serial, " nothing");
     for (uint8_t i = 0; i < first_n; ++i) print(serial, " ", hex(first_seen[i]));
-    print(serial, crlf, "      board B must be running `spi_peer`; its console '0' forces "
+    print(serial, crlf, "      the peer board must be running `spi_peer`; its console '0' forces "
                         "the dark client back.", crlf);
     (void)link_command_mode();
     return false;
@@ -1068,7 +1068,7 @@ bool ensure_link() {
         }
     }
     link_quiet = false;
-    print(serial, "  the peer did not answer. Board B must be running `spi_peer`; its "
+    print(serial, "  the peer did not answer. The peer board must be running `spi_peer`; its "
                   "console '0' forces it back to the dark client.", crlf);
     return false;
 }
@@ -1701,7 +1701,7 @@ void tp_loss() {
 // ---- q: a REAL host demotion -------------------------------------------------------
 
 void tq_demotion() {
-    print(serial, "q a REAL host demotion: board B drives the shared select wire low",
+    print(serial, "q a REAL host demotion: the peer board drives the shared select wire low",
           crlf);
     quiesce();
     if (!ensure_link()) {
@@ -1969,7 +1969,7 @@ void help() {
                   "ceiling | n mismatches | o SS mid-byte | p undrained client | "
                   "q real demotion | r Host SPI | s rebase    -> y = all of k..s", crlf);
     print(serial, "  NO WIRES of its own: the desk's PORTE link (A.PEn - B.PEn, n = 0..3) "
-                  "is SPI0 ALT1 straight across. Board B runs `spi_peer`, which stays DARK "
+                  "is SPI0 ALT1 straight across. The peer board runs `spi_peer`, which stays DARK "
                   "- it drives MISO only for one answer window - so z passes with the peer "
                   "attached", crlf);
 }

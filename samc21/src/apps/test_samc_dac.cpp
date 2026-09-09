@@ -649,8 +649,7 @@ void td_adc_intref_reference() {
           " counts = ", implied_off, " mV, VREFOE on ", ref_on, " counts = ",
           implied_on, " mV", crlf);
 
-    bench.verdict("THE ADC'S REFERENCE PATH DOES NOT NEED VREFOE - the gap "
-                  "adc.md has carried since its campaign, closed: a conversion "
+    bench.verdict("THE ADC'S REFERENCE PATH DOES NOT NEED VREFOE: a conversion "
                   "against REFSEL = INTREF works with the bit CLEAR",
                   ref_off > 100u && ref_off < 4000u);
     bench.verdict("...and the bit changes the reading by less than one per "
@@ -695,8 +694,7 @@ void te_dac_as_reference() {
           "reference at codes 512 / 768 / 1000: ", counts[0], " / ", counts[1],
           " / ", counts[2], " counts of 4096", crlf);
 
-    bench.verdict("REFSEL = DAC CONVERTS - the enumerator adc.hpp has carried "
-                  "unvalidated since its campaign is real silicon",
+    bench.verdict("REFSEL = DAC CONVERTS - adc.hpp's enumerator is real silicon",
                   ok && counts[0] > 100u && counts[0] < 4096u);
 
     // A conversion against a reference of V_ref reads in_mv/ref_mv x 4096.
@@ -976,8 +974,7 @@ void tg_comparator() {
               crlf);
     }
 
-    bench.verdict("ACNEGATIVE::DAC IS REAL - the enumerator ac.hpp has carried "
-                  "unvalidated since its campaign flips a comparator",
+    bench.verdict("ACNEGATIVE::DAC IS REAL - ac.hpp's enumerator flips a comparator",
                   found[0] > 0u && found[0] < 1023u);
     bench.verdict("and the three crossings land where the two dividers say, "
                   "to under three per cent of full scale",

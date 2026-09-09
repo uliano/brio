@@ -161,7 +161,7 @@ int main() {
     print(serial, crlf, "tc_readsync_probe", crlf);
 
     // ---- A: the driver's read_sync(), four times ----
-    print(serial, "A  reproduce (TC pair at 32768 Hz, 6 ms of running):", crlf);
+    print(serial, "A  the driver's read_sync() x4 (TC pair at 32768 Hz, 6 ms of running):", crlf);
     (void)watch_up(gen_slow);
     wait_ms(6);
     {
@@ -179,7 +179,7 @@ int main() {
             [] { return Watch::count32_raw(); }, "TC", tc_cmd);
 
     // ---- C: the locally built double-command read ----
-    print(serial, "C  fixed read (rise-then-fall) x4 after 6 ms:", crlf);
+    print(serial, "C  a locally built double-command read x4 after 6 ms:", crlf);
     (void)watch_up(gen_slow);
     wait_ms(6);
     {

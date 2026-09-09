@@ -701,9 +701,8 @@ void tc_pwm() {
           "2 x N x PER predicts ", expect_2per, ", a 2 x N x (PER+1) period "
           "would give ", expect_2per_plus, crlf);
     bench.verdict("THE CHAPTER'S DUAL-SLOPE FORMULA IS EXACT ON THIS SILICON: "
-                  "the period is 2 x PER counter ticks and NOT 2 x (PER+1) - "
-                  "the AVR TCD's printed formula was off by exactly that one, "
-                  "so it was worth two seconds of counting to find out",
+                  "the period is 2 x PER counter ticks and NOT 2 x (PER+1), "
+                  "which two seconds of counting settle",
                   near(dual, expect_2per, 3u) && !near(dual, expect_2per_plus, 3u));
 
     release_event_counter();

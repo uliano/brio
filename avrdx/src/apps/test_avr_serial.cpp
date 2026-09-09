@@ -820,7 +820,7 @@ bool command(link::Op op, const uint8_t* p = no_payload, uint8_t len = 0,
     print(serial, " (CTRLA=", hex(U4::regs().CTRLA), " CTRLB=", hex(U4::regs().CTRLB),
           " BAUD=", U4::baud_reg(), ")", crlf);
     if (first_edges == 0) {
-        print(serial, "      no edges at all: board B is not transmitting. It re-enters "
+        print(serial, "      no edges at all: the peer board is not transmitting. It re-enters "
                       "discovery by itself after ", link::rediscover_ms,
               " ms of quiet; '0' on its console forces it.", crlf);
     }
@@ -875,7 +875,7 @@ bool ensure_link() {
     }
     link_quiet = false;
     topo_known = false;
-    print(serial, "  the peer did not answer in either wiring. If board B has been "
+    print(serial, "  the peer did not answer in either wiring. If the peer board has been "
                   "running across a re-jumpering it should re-converge by itself within "
                   "a few seconds; pressing '0' on its console forces it.", crlf);
     return false;
@@ -1151,7 +1151,7 @@ void watch_incoming() {
 // at 60000 ticks would masquerade as 17 ppm - corrected below.
 
 void tx_clocks() {
-    print(serial, "x clock comparison: board B's 9-bit low pulses in board A's crystal time", crlf);
+    print(serial, "x clock comparison: the peer board's 9-bit low pulses in this board's crystal time", crlf);
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
     constexpr uint32_t rate = 3600;
@@ -1197,9 +1197,9 @@ void tx_clocks() {
               " ticks (nominal ", static_cast<uint32_t>(expected4 / 64u), ".",
               static_cast<uint32_t>((expected4 % 64u) * 10u / 64u),
               "), spread ", wmin, "..", wmax, crlf);
-        print(serial, "  board B runs ", b_fast >= 0 ? "+" : "-",
+        print(serial, "  the peer board runs ", b_fast >= 0 ? "+" : "-",
               static_cast<uint32_t>(b_fast >= 0 ? b_fast : -b_fast),
-              " ppm against board A's crystal (single tick = 17 ppm)", crlf);
+              " ppm against this board's crystal (single tick = 17 ppm)", crlf);
         verdict("the two clocks agree within 200 ppm",
                 b_fast > -200 && b_fast < 200);
     }
@@ -1257,7 +1257,7 @@ int8_t probe_source(uint16_t edges) {
 }
 
 void tv_wiring() {
-    print(serial, "v wiring probe - start board B's console command '2' now: this end "
+    print(serial, "v wiring probe - start the peer board's console command '2' now: this end "
                   "listens 6 s, then drives 6 s", crlf);
     quiesce();
     uint16_t edges[4] = {0, 0, 0, 0};
@@ -1273,7 +1273,7 @@ void tv_wiring() {
         const int8_t want = i == 0 ? 1 : (i == 1 ? 0 : (i == 2 ? 2 : -1));
         if (src != want) crossed = false;
     }
-    verdict("the desk carries the campaign wiring (PE0-PE1, PE1-PE0, PE2-PE2)", crossed);
+    verdict("the desk carries the crossed pair (PE0-PE1, PE1-PE0, PE2-PE2)", crossed);
     quiesce();
     (void)link_command_mode();
 }
@@ -1303,7 +1303,7 @@ void tj_link() {
         verdict("the peer is brio-b", same);
         verdict("the peer runs usart_peer", d.sanity == link::ident_sanity);
         if (!d.xtal) {
-            print(serial, "  NOTE: board B's 24 MHz crystal did not start - its rates come "
+            print(serial, "  NOTE: the peer board's 24 MHz crystal did not start - its rates come "
                           "from OSCHF", crlf);
         }
     } else {
@@ -1350,7 +1350,7 @@ void tj_link() {
     const int32_t nominal = static_cast<int32_t>(SysClock::hz / 9600u);
     const int32_t err_ppm = nominal ? ((static_cast<int32_t>(w) - nominal) * 10000L) / nominal : 0;
     print(serial, "  peer start bit at 9600: ", w, " DUT ticks (nominal ", nominal,
-          "), so board B's clock runs ", err_ppm <= 0 ? "+" : "-",
+          "), so the peer board's clock runs ", err_ppm <= 0 ? "+" : "-",
           static_cast<uint32_t>(err_ppm >= 0 ? err_ppm : -err_ppm) / 100u, ".",
           static_cast<uint32_t>(err_ppm >= 0 ? err_ppm : -err_ppm) % 100u,
           " % against the DUT's crystal", crlf);
@@ -1777,7 +1777,7 @@ void tn_waveforms() {
 // ---- o: auto-baud against a foreign sender ------------------------------------
 
 void to_autobaud_foreign() {
-    print(serial, "o auto-baud against board B, a genuinely foreign clock", crlf);
+    print(serial, "o auto-baud against the peer board, a genuinely foreign clock", crlf);
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
     const uint32_t rates[] = {9600, 57'600, 230'400, 123'456};
@@ -2506,11 +2506,11 @@ void help() {
     print(serial, "test_avr_serial, one board: a instances | b frames | c overflow | "
                   "d mpcm | e txc/dre | f baud on the wire | g rebase | h auto-baud | "
                   "i host spi", crlf);
-    print(serial, "  two boards (needs usart_peer on board B): j link | k baud matrix | "
+    print(serial, "  two boards (needs usart_peer on the peer board): j link | k baud matrix | "
                   "l frame matrix | m errors | n waveforms | o auto-baud foreign | "
                   "p mpcm | q sync roles | r rs-485 | s ircom | t rebase | u lbme pad",
           crlf);
-    print(serial, "  v wiring probe (with board B's '2') | w one-wire (needs the "
+    print(serial, "  v wiring probe (with the peer board's '2') | w one-wire (needs the "
                   "PE0-PE0 jumper) | x clock comparison (ppm); none of these is in y",
           crlf);
     print(serial, "  z = all single-board, y = all two-board", crlf);
@@ -2600,7 +2600,7 @@ int main() {
         else if (c == 'z' || c == 'Z') {
             const bool guarded = ask_peer_to_stand_off(stand_off_ms);
             if (guarded) {
-                print(serial, "  (shared line: board B asked to stay quiet, ",
+                print(serial, "  (shared line: the peer board asked to stay quiet, ",
                       stand_off_ms, " ms re-armed per test)", crlf);
             }
             run_set(single_board, guarded);

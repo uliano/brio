@@ -1824,7 +1824,7 @@ void th_bandgap() {
           yes_no(oe_off), ") the comparator flips at DAC code ", off_cross,
           ", with it SET at ", on_cross, crlf);
     bench.verdict("THE BANDGAP REACHES A COMPARATOR'S NEGATIVE INPUT AT ALL - "
-                  "the gap ac.md has carried since its campaign, closed: the "
+                  "the "
                   "output really does flip at a code a fifth of the way up the "
                   "supply and not somewhere a floating input would put it",
                   on_cross != 0xFFFFu && on_cross > 100u && on_cross < 400u);

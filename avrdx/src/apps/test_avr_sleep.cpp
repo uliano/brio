@@ -980,7 +980,7 @@ bool command(slink::Op op, const uint8_t* p = no_payload, uint8_t len = 0,
     }
     if (!link_quiet) {
         print(serial, "    LINK FAILURE op ", hex(slink::byte_of(op)),
-              ": board B did not acknowledge. It is sleep_peer on the shared PE0 wire; "
+              ": the peer board did not acknowledge. It is sleep_peer on the shared PE0 wire; "
               "'0' on its console forces command mode.", crlf);
     }
     (void)link_command_mode();
@@ -1000,7 +1000,7 @@ bool ensure_link() {
     const bool up = command(slink::Op::ping);
     link_quiet = false;
     if (!up) {
-        print(serial, "  board B did not answer on the shared PE0 wire. It must be "
+        print(serial, "  the peer board did not answer on the shared PE0 wire. It must be "
                       "running sleep_peer; '0' on its console forces command mode.", crlf);
     }
     return up;
@@ -1245,7 +1245,7 @@ void th_link() {
     print(serial, "h the link and the two measurement wires (nothing sleeps here)", crlf);
     quiesce();
     const bool up = ensure_link();
-    verdict("board B answers a ping on the shared PE0 wire", up);
+    verdict("the peer board answers a ping on the shared PE0 wire", up);
     if (!up) return;
 
     slink::Ident d{};
@@ -1257,7 +1257,7 @@ void th_link() {
         print(serial, "  peer: board ", label, ", CLK_PER from ",
               d.clock == slink::clock_crystal ? "XTAL" : "OSCHF", ", fw ",
               hex(d.version), crlf);
-        verdict("board B runs sleep_peer", d.sanity == slink::ident_sanity);
+        verdict("the peer board runs sleep_peer", d.sanity == slink::ident_sanity);
         verdict("and it says which clock its stopwatch really counts",
                 d.clock == slink::clock_crystal || d.clock == slink::clock_oschf);
     }
@@ -1327,9 +1327,9 @@ void th_link() {
 // CLASS, not an equality: idle must not cost a microsecond more than
 // staying awake, and the exact ticks are printed for both.
 void ti_idle_latency() {
-    print(serial, "i the awake baseline and the cost of IDLE, timed from board B", crlf);
+    print(serial, "i the awake baseline and the cost of IDLE, timed from the peer board", crlf);
     quiesce();
-    if (!ensure_link()) { verdict("board B is reachable", false); return; }
+    if (!ensure_link()) { verdict("the peer board is reachable", false); return; }
     Pit::period(PitPeriod::cyc8192);          // a 250 ms backstop, out of the way
 
     Train awake{}, idle{};
@@ -1370,7 +1370,7 @@ void ti_idle_latency() {
 void tj_standby_latency() {
     print(serial, "j STANDBY wake-up latency against six clock configurations", crlf);
     quiesce();
-    if (!ensure_link()) { verdict("board B is reachable", false); return; }
+    if (!ensure_link()) { verdict("the peer board is reachable", false); return; }
     Pit::period(PitPeriod::cyc8192);
 
     struct Leg { LegClock clk; bool perf; const char* what; };
@@ -1435,7 +1435,7 @@ void tj_standby_latency() {
 void tk_power_down_latency() {
     print(serial, "k POWER-DOWN wake-up latency on a fully asynchronous pin", crlf);
     quiesce();
-    if (!ensure_link()) { verdict("board B is reachable", false); return; }
+    if (!ensure_link()) { verdict("the peer board is reachable", false); return; }
     Pit::period(PitPeriod::cyc8192);
 
     struct Leg { LegClock clk; bool perf; uint8_t stage; const char* what; };
@@ -1593,7 +1593,7 @@ void tl_sfd() {
                   "wakes this board (SFD through LBME is itself a fact of this desk)",
           crlf);
     quiesce();
-    if (!ensure_link()) { verdict("board B is reachable", false); return; }
+    if (!ensure_link()) { verdict("the peer board is reachable", false); return; }
     // The PIT is only a backstop here, and it must stay out of the way:
     // a device that is AWAKE in the PIT's own vector when the start bit
     // arrives is not in standby, and would look like a failed wake-up.
@@ -1728,9 +1728,9 @@ bool twi_tenure(SleepMode m, bool sleeping, uint8_t first, slink::Report& r) {
 
 void tm_twi_wake() {
     print(serial, "m a TWI address match wakes this board from standby and from "
-                  "power-down (board B is the host on the office bus)", crlf);
+                  "power-down (the peer board is the host on the office bus)", crlf);
     quiesce();
-    if (!ensure_link()) { verdict("board B is reachable", false); return; }
+    if (!ensure_link()) { verdict("the peer board is reachable", false); return; }
     Pit::period(PitPeriod::cyc8192);
 
     verdict("the client comes up at 0x42 on TWI0's default pins",
@@ -1932,7 +1932,7 @@ void help() {
                   "c standby is real | d the RUNSTDBY chain | e a pin wakes from the deep "
                   "modes | f power-down stops the rest | g the voltage regulator | "
                   "n the CCL as a wake-up source    -> z = all of those", crlf);
-    print(serial, "  two-board (board B = sleep_peer): h the link and the two wires | "
+    print(serial, "  two-board (the peer board = sleep_peer): h the link and the two wires | "
                   "i the awake baseline and idle | j standby timed from outside | "
                   "k power-down timed from outside | l start-of-frame | "
                   "m a TWI address match    -> y = all of h..m", crlf);
@@ -2043,7 +2043,7 @@ int main() {
           ", RSTFR=", hex(why.raw), ")", crlf);
     print(serial, "  PD1/PD2 must be free of the bus jumpers: test e drives PD2 from the "
                   "event system and senses its own edge.", crlf);
-    print(serial, "  the two-board set y needs board B running sleep_peer: PE0 the shared "
+    print(serial, "  the two-board set y needs the peer board running sleep_peer: PE0 the shared "
                   "command wire, PE2 its stimulus in, PE3 the echo out, PA2/PA3 the bus.",
           crlf);
     if (hung) {

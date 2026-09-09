@@ -992,7 +992,7 @@ void tf_alarms() {
     bench.verdict("alarm A fires on its match, and it is the second it "
                   "named", fired && r.time.second == 5u);
     bench.verdict("it lands AT the match and not a whole second after it - "
-                  "unlike the SAM's counter compare",
+                  "a compare that stays armed",
                   fired && into_second < 200u);
 
     // The flag is W1C through RTC_SCR and comes down.

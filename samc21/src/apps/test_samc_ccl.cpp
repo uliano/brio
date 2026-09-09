@@ -1401,7 +1401,7 @@ void tf_events() {
                   caught_unhooked == 0u);
     bench.verdict("A SOFTWARE EVENT *DOES* CROSS AN ASYNCHRONOUS CHANNEL - "
                   "every single one of sixteen reaches this LUT, where "
-                  "test_samc_evsys letter d found none reaching a DMA "
+                  "none reaches a DMA "
                   "channel: what differs is the USER's input stage, not the "
                   "path",
                   caught_single == 16u);

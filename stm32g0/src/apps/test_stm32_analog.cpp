@@ -1390,8 +1390,8 @@ void tf_sequencer() {
           floating_up, " counts, with the pull-down ", floating_down, crlf);
     bench.verdict("7.3.13 IS LITERAL: the weak pulls are disabled by hardware "
                   "in analog mode, so a pad asked to pull up does NOT read "
-                  "full scale - the SAM's pull-walked analog stimulus has no "
-                  "twin here", floating_up < 3800u);
+                  "full scale, so a pull-walked analog stimulus does not exist "
+                  "on this family", floating_up < 3800u);
 
     // The bitmap face and the ordered one, both read off three values
     // that DIFFER.
@@ -3225,8 +3225,8 @@ void tn_comp_pads() {
                   "alternate function 7 carries COMP1's output, and the "
                   "pad's own input register follows it at both rails",
                   pad_high && value_high && !pad_low && !value_low);
-    bench.verdict("...and the EXTI line of THAT pad sees it - the exti "
-                  "campaign's finding that a line sees a pad its owner "
+    bench.verdict("...and the EXTI line of THAT pad sees it - a line sees a pad "
+                  "its owner "
                   "drives, holding for a PERIPHERAL that owns it and not "
                   "only for the CPU: six edges, six interrupts",
                   edges >= 6u);

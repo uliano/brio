@@ -2039,7 +2039,7 @@ void tk_relay() {
 // =============================================================================
 void banner() {
     print(serial, crlf, "test_samc_analog_dma - streaming DMA for the analog "
-                        "peripherals (board C, no wires)", crlf);
+                        "peripherals (no wires)", crlf);
     bench.menu();
     print(serial, "  z  run them all", crlf);
 }

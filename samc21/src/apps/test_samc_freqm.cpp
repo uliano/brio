@@ -392,7 +392,7 @@ void td_cross_check() {
     const uint32_t diff = osculp_hz > software_witness_hz
                               ? osculp_hz - software_witness_hz
                               : software_witness_hz - osculp_hz;
-    print(serial, "  the software witness (test_samc_platform letter c, via the "
+    print(serial, "  the software witness (the platform suite's, via the "
                   "watchdog) says ", software_witness_hz, " Hz; the two differ by ",
           diff, " Hz", crlf);
     bench.verdict("this hardware measurement agrees with the independent "

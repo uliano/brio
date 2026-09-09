@@ -428,7 +428,7 @@ void td_never_early() {
 void banner() {
     print(serial, crlf,
           "test_samc_timebase - the standby-surviving timebase "
-          "(board C, no wires)", crlf);
+          "(no wires)", crlf);
     bench.menu();
     print(serial, "  z  run them all", crlf);
 }

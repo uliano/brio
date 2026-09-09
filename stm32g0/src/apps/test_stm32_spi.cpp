@@ -1981,7 +1981,7 @@ void tf_crc() {
                   "exactly ONE frame more than its data - the frame NEITHER SIDE "
                   "WROTE, because after CRCNEXT the shifter is fed from the CRC "
                   "register and a store there would be one more data frame "
-                  "instead (the trap this letter's first version fell into)",
+                  "instead",
                   !host_crc_err && !peer_crc_err && crc_words[0] == ref_peer &&
                       frames_seen == n + 1u);
 
@@ -2429,8 +2429,7 @@ void ti_dma() {
     bench.verdict("a READ-ONLY request feeds 0xFF from a held cell (the DMA's "
                   "memory pointer simply does not increment) and a WRITE-ONLY "
                   "one drains into a held sink - the two sibling verbs "
-                  "start_fixed() and start_discard() this campaign added to "
-                  "stm32g0/dma.hpp",
+                  "start_fixed() and start_discard() of stm32g0/dma.hpp",
                   dummies && discarded);
 
     // The ladder with the CLIENT on raw engines too, so its ISR
@@ -3184,9 +3183,8 @@ void tk_i2s() {
                   "own clearing rule (\"cleared by a read operation on the "
                   "SPIx_SR register\") and a trap with teeth: a poll loop that "
                   "ASKS whether UDR is set is the thing that clears it, so the "
-                  "answer has to be taken from the one read that saw it - the "
-                  "first version of this leg polled the verb and reported no "
-                  "underrun at all",
+                  "answer has to be taken from the one read that saw it - a leg "
+                  "that polls the verb reports no underrun at all",
                   udr_cleared);
 
     // Back to SPI on both instances.

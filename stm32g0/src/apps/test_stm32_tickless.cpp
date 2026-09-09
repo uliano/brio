@@ -1466,7 +1466,7 @@ void ti_lap_wakes() {
           " us awake in the whole round; PLL back at the end=", pll_back, crlf);
     bench.verdict("A TEN-SECOND STOP COSTS FIVE LAP WAKES AND ONE FOR THE DEADLINE: six "
                   "LPTIM interrupts in all - the parked compare's CMPM rides the ARRM's "
-                  "own interrupt (the first version parked it mid-lap: ten), the deadline "
+                  "own interrupt (parked mid-lap it would be ten), the deadline "
                   "met",
                   Probe::blips == 1u && lptim_arrm == 5u && lptim_irqs == 6u &&
                       within(to_blip, wall_ms_for_kernel_ms(9990u),

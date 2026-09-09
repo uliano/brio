@@ -2243,7 +2243,7 @@ void help() {
                   "d address match | e the chapter's cases | f smart modes | "
                   "g quick command | h bus state and the injector | i isr bodies | "
                   "j rebase and the arbiter    -> z = all of a..j", crlf);
-    print(serial, "  TWO BOARDS (board B running twi_peer): k bring-up | l clock "
+    print(serial, "  TWO BOARDS (the peer board running twi_peer): k bring-up | l clock "
                   "stretching | m NACK injection | n multi-host arbitration | "
                   "o collision S4 | p bus recovery | q general call | r the three "
                   "speeds | s rebase    -> y = all of k..s", crlf);

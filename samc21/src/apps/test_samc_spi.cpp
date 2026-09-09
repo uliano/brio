@@ -1178,7 +1178,7 @@ void te_client() {
 
     if (!peer_act(Op::host_burst, a)) {
         bench.verdict("the peer accepted the host_burst command (its spi_peer must "
-                      "carry op 0x14 - reflash board A)",
+                      "carry op 0x14 - reflash the peer)",
                       false);
         return;
     }
@@ -1302,7 +1302,7 @@ void tf_wireless() {
               " us with 100 us of setup (delta ", delta, ")", crlf);
         bench.verdict("Request.cs_setup_us is spent between the CS assertion and "
                       "the first clock - at least the asked microseconds, and not "
-                      "wildly more (the avrdx field, verbatim)",
+                      "wildly more",
                       delta >= 100u && delta <= 130u);
     } else {
         bench.verdict("the crystal ruler is available for the cs_setup measurement",
@@ -1952,7 +1952,7 @@ int main() {
     print(serial, "  SERCOM1 function C: PA16 PAD0 (MOSI/DO), PA17 PAD1 (SCK), "
                   "PA18 PAD2 (SS, a GPIO chip select), PA19 PAD3 (MISO/DI)",
           crlf);
-    print(serial, "  peer: the other board running spi_peer (board D today), "
+    print(serial, "  peer: the other board running spi_peer, "
                   "commanded in band over the same four wires; the crystal ruler is ",
           ruler_ok ? "up" : "DOWN", crlf);
     print(serial, "  the protocol holds its own chip select ", hold_spins,

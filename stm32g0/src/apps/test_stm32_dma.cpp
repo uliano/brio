@@ -1377,8 +1377,8 @@ void tg_fixed_point() {
           "; slot-to-slot step ", step, " wrong in ", bad, " of 63 places", crlf);
     bench.verdict("CIRCULAR MODE PLAYS FOR EVER WITH THE CPU OUT OF IT: the "
                   "channel is still enabled after 25 ms with no interrupt "
-                  "armed, and CNDTR has moved - where the SAM's controller "
-                  "had to be re-armed from a handler once per lap",
+                  "armed, and CNDTR has moved - no handler re-arms anything "
+                  "per lap",
                   circ_ok && still_running && left_a != left_b);
     // ONE wrap boundary is legitimately not a step: the block restarted
     // at the buffer's base while the counter kept running.
@@ -1532,8 +1532,8 @@ void th_console_rate() {
                       "left the chip the same way",
                       bulk_bps > 11000u && bulk_bps < 12000u);
         bench.verdict("AND AT THIS RATE FEEDING IT BYTE BY BYTE COSTS NOTHING - "
-                      "the samc21 campaign measured the per-byte pump losing a "
-                      "third of the wire, but it measured it at MEGABAUD: here "
+                      "a per-byte pump loses a third of the wire at MEGABAUD, "
+                      "and here "
                       "the wire is five hundred times slower than the pump, the "
                       "ring is always full when a block ends, and every block "
                       "the engine gets is a long one. What the two feeds cost "

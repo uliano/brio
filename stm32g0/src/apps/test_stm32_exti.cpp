@@ -552,7 +552,7 @@ void tb_stimulus() {
     bench.verdict("THE EXTI SEES A PAD ITS OWNER IS DRIVING: the input "
                   "buffer stays live in output mode (7.3.1) and the "
                   "multiplexer selects a PORT, not a pin function - so this "
-                  "is not the SAM's PMUXEN situation at all",
+                  "is not a pull that survives the mux",
                   driven_rising && !driven_falling_seen);
 
     // --- and the one mode that hides a pad: analog, buffer off

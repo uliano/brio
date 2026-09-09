@@ -1807,7 +1807,7 @@ void ti_fault_b() {
                   "DIV = 8 and DIV = 9 give the SAME 512 on generator 7, "
                   "whose DIV field is eight bits - so 2^(DIV+1) is right up "
                   "to 2^(width+1) and a DIV past that buys nothing, which "
-                  "reconciles test_samc_clock letter f's 2/16/512 for DIV "
+                  "reconciles the clock suite's 2/16/512 for DIV "
                   "0/3/8 with the 1024 a bare reading would have predicted "
                   "here",
                   div8_hz != 0u &&

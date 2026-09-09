@@ -2238,7 +2238,7 @@ void ti_smbus() {
     // either. Which is why util/i2c_bus.hpp's per-bus timeout is the
     // arbiter's and not the engine's on all three targets.
     bench.verdict("A PEER'S HOLD DOES NOT TRIP IT - 32.4.12's 'SCL tied low' is this "
-                  "controller's own hold, the samc21's answer met again",
+                  "controller's own hold",
                   !peer_tripped);
     print(serial, "    (the tenure's own length is not this letter's subject: a "
                   "6 ms hold on every event of a 2-byte read is tens of "
@@ -2723,7 +2723,7 @@ void tm_errata() {
     } else {
         print(serial, "  the closing 'and the bus still works' leg wants the I2C2 "
                       "client and the self-link is not on the desk: no verdict "
-                      "claimed (letter n is the same statement against the SAM peer)",
+                      "claimed (letter n is the same statement against the far board)",
               crlf);
     }
 }

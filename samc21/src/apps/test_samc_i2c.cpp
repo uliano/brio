@@ -961,7 +961,7 @@ void ti_unstick() {
           pulses, " pulses", crlf);
     bench.verdict("unstick() clocks the stuck client free and counts the edge it "
                   "released on - the WIRE fix, beside the peripheral's own "
-                  "recovery (the avrdx verb's twin, measured the same way)",
+                  "recovery",
                   pulses >= 4u && pulses <= 5u);
     bench.verdict("and the bus is whole again: a command round trip is clean",
                   command(Op::ping));
@@ -1672,8 +1672,8 @@ int main() {
     print(serial, "  SERCOM3 function C: PA22 PAD0 (SDA), PA23 PAD1 (SCL); the "
                   "desk's 1.5k node, both boards at 5 V",
           crlf);
-    print(serial, "  peer: the other board running twi_peer (board C today, the "
-                  "samc21 port), commanded in band over the same two wires; BOTH "
+    print(serial, "  peer: the other board running twi_peer, commanded in band "
+                  "over the same two wires; BOTH "
                   "cores at 48 MHz - the clean pair took the glitch wall away "
                   "with the bundle (the comment at core_gen)",
           crlf);

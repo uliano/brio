@@ -1439,7 +1439,7 @@ void th_corrections() {
           " counts, ", base.raw_mean, " raw (span ", base.raw_span(), " raw)",
           crlf);
     print(serial, "  THE CORRECTIONS RUN IN RAW 24-BIT UNITS, which is this "
-          "campaign's central measurement and which 39.6.3.4's 'Data0 is an "
+          "suite's central measurement and which 39.6.3.4's 'Data0 is an "
           "unsigned integer defined on 16 bits' denies: 256 of them is one "
           "count of the specified datum", crlf);
 
