@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""brio - the one command of the bench.
+
+    brio list                      serial devices, USB probes, the manifest
+    brio flash <board> <app>       build the app for the board and flash it
+    brio run <board> <letter>      drive a suite's console, judge "ALL: N pass, M fail"
+    brio console <board>           the console device path and speed
+    brio duo <dut>:<cmd> <peer>:<script>
+    brio fuses <board> [name=value ...]
+    brio check [avrdx|samc21|stm32g0|all] [filter]   the family compile fixtures
+    brio prose [paths...]          the prose net (comments and documents)
+    brio stress ...                the host end of the UART suites
+
+Put bin/ on the PATH, or call it as bin/brio from anywhere in the tree."""
+
+import os
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+CHECKS = {"avrdx": "check_family.sh", "samc21": "check_samc21.sh", "stm32g0": "check_stm32g0.sh"}
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    verb, rest = argv[1], argv[2:]
+    if verb == "prose":
+        from bench import prose
+        return prose.main([argv[0]] + rest)
+    if verb == "stress":
+        from bench import stress
+        sys.argv = [argv[0] + " stress"] + rest
+        return stress.main()
+    if verb == "check":
+        which = rest[0] if rest else "all"
+        names = list(CHECKS) if which == "all" else [which]
+        status = 0
+        for n in names:
+            if n not in CHECKS:
+                print("brio check: unknown stratum %r (one of %s, all)" % (n, ", ".join(CHECKS)))
+                return 2
+            status |= subprocess.call([os.path.join(ROOT, "bench", CHECKS[n])] + rest[1:])
+        return status
+    from bench import cli
+    sys.argv = [argv[0]] + argv[1:]
+    return cli.main()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

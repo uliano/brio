@@ -8,8 +8,8 @@
 # MCU named on its "// mcu: <list>" line (what must be refused must be
 # refused at compile time).
 #
-# Usage: tools/check_family.sh            all TUs, all MCUs
-#        tools/check_family.sh tcb        only TUs/negatives matching "tcb"
+# Usage: bench/check_family.sh            all TUs, all MCUs
+#        bench/check_family.sh tcb        only TUs/negatives matching "tcb"
 set -u
 cd "$(dirname "$0")/.."
 

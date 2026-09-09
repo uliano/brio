@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""check_prose.py - the prose net: what a comment or a document may not say.
+"""bench/prose.py - the prose net: what a comment or a document may not say.
 
 Comments and documents in this repository are a reference for the code
 as it is (docs/README.md, docs/design/overview.md). Three things age
@@ -27,7 +27,7 @@ top-level README.md. Not read, on purpose: CLAUDE.md (a working log by
 design), docs/bench.md (the desk diary, until it is split), docs/*/vendor/
 (datasheet revisions carry dates of record), third_party/.
 
-Usage: tools/check_prose.py [paths...]   (no paths = the whole scope)
+Usage: brio prose [paths...]   (no paths = the whole scope)
 Exit status: 1 on any error, 0 otherwise. Review items never fail.
 """
 

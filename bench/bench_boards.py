@@ -9,10 +9,10 @@
 #                    board.
 #    2. IDENTITY   - this file: the boards actually on the desk, each with its
 #                    board type, its console and its programmer.
-#    3. ORCHESTRATION - tools/bench.py, which reads this manifest, resolves an
+#    3. ORCHESTRATION - bench/cli.py, which reads this manifest, resolves an
 #                    env, flashes and drives the consoles.
 #
-#  A board's NAME here ("A", "B", ...) is what bench.py commands take; it is a
+#  A board's NAME here ("A", "B", ...) is what brio commands take; it is a
 #  desk position, not a chip. Moving a chip to another position or another USB
 #  socket means editing this file - nothing else.
 #
@@ -32,7 +32,7 @@
 #  they carry the suite's verdicts.
 #
 #  PROGRAMMERS, first cut: WHICH ARCHITECTURE. The board's "board" type is
-#  the only statement of what chip sits at a desk position, and bench.py
+#  the only statement of what chip sits at a desk position, and brio
 #  derives from it which project builds for it and how firmware gets in:
 #  db28/db32/db48 are AVR-Dx written by avrdude over UPDI, c21j is a SAM C21
 #  written by OpenOCD over SWD. The desk-position LETTERS stay pure positions
@@ -57,7 +57,7 @@
 #    - EDBG-class probes over UPDI: {"type": "atmelice_updi"} or
 #      {"type": "pickit4_updi"}. These DO have USB serial numbers (the bench
 #      Atmel-ICE is J42700049508), but avrdude only needs to be told which one
-#      when TWO probes of the same kind are attached: set "serial" and bench.py
+#      when TWO probes of the same kind are attached: set "serial" and brio
 #      passes -P usb:<serial>; leave it None and avrdude takes the only one.
 #    - SerialUPDI adapters: {"type": "serialupdi", "port": ..., "baud": ...}
 #      -> avrdude -c serialupdi -P <port> -b <baud>. Their USB-serial chips are
@@ -71,7 +71,7 @@
 #  The bench suites read it back (avrdx/userrow.hpp board_id()) and print
 #  it in their banner, so a console names its own board. The "id" field
 #  below is the label this desk position is EXPECTED to carry - the human
-#  (or a future bench.py check) compares banner against manifest.
+#  (or a future brio check) compares banner against manifest.
 #
 #  TODAY'S REALITY (2026-09-02, evening): the Nucleo-G0B1RE joined the
 #  desk as position E (a direct USB port, not the hub) and is the board
@@ -89,10 +89,10 @@
 #  serial over SWD and by the reset-provokes-banner check on its console.
 # ============================================================================
 
-# The board types known to the build: keys of tools/bench.py's
+# The board types known to the build: keys of bench/cli.py's
 # BOARD_PRESET/MCU_OF_BOARD, mirroring cmake/avr-mcus.cmake. A board type
 # other than db48 needs the app to carry a "// build: boards" line, otherwise
-# there is no target to flash (bench.py says so).
+# there is no target to flash (brio says so).
 
 BOARDS = {
     "E": {
@@ -186,7 +186,7 @@ BOARDS = {
         # and F's, and the rule is: a probe reporting "no device connected"
         # against a live target is replugged as a whole before any other
         # diagnosis. The fallback, proven for a whole campaign: the
-        # ST-LINK's OWN mass-storage flasher (tools/bench.py's `stlink_msd`
+        # ST-LINK's OWN mass-storage flasher (bench/cli.py's `stlink_msd`
         # kind drops the .bin on the NODE_G031K8 drive; a bad file draws a
         # FAIL.TXT, a good image leaves none and its banner appears), under
         # which nothing can be halted, read over SWD or have DBGMCU_CR
@@ -245,7 +245,7 @@ BOARDS = {
         # IT IS CHECKED ON THE BOARD: test_samc_debug letter d reads the DID
         # through samc21/dsu.hpp and the four serial words through
         # samc21/nvm.hpp's DeviceSerial, prints them in exactly the format
-        # below, and verdicts them against these two constants. bench.py
+        # below, and verdicts them against these two constants. brio
         # still does not compare them itself (unlike the AVR "id", which a
         # banner carries), so this remains a by-hand check - just one that
         # now has a suite letter instead of an openocd incantation. The SWD

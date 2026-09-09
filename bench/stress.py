@@ -56,26 +56,26 @@ is a count of bytes, never a rate.
 
 USE
 
-    python3 tools/bench.py flash C test_samc_uart
-    python3 tools/uart_stress.py --letters efghijklmnp
+    brio flash C test_samc_uart
+    brio stress --letters efghijklmnp
 
-    python3 tools/uart_stress.py --letters h --repeat 5
-    python3 tools/uart_stress.py --port /dev/ttyUSB0 --letters k
+    brio stress --letters h --repeat 5
+    brio stress --port /dev/ttyUSB0 --letters k
 
 ON THE STM32G0 (board E, test_stm32_serial), whose console is the
 ST-LINK's own virtual COM port and is therefore addressed by-id:
 
-    python3 tools/bench.py flash E test_stm32_serial
-    python3 tools/uart_stress.py --letters ywv \
+    brio flash E test_stm32_serial
+    brio stress --letters ywv \
         --port /dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_\
 0670FF534871754867182752-if02
 
 and test_stm32_dma's letter u, whose ladder stops at that bridge's own
 ceiling - with letter w, and only with --beyond-vcp, for the rungs above:
 
-    python3 tools/bench.py flash E test_stm32_dma
-    python3 tools/uart_stress.py --letters u --port <board E's console>
-    python3 tools/uart_stress.py --letters w --beyond-vcp --port <the same>
+    brio flash E test_stm32_dma
+    brio stress --letters u --port <board E's console>
+    brio stress --letters w --beyond-vcp --port <the same>
 """
 import argparse
 import sys

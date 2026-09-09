@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Family compile check for the SAM C21 stratum (part of every driver's
-# definition of done, the samc21 twin of tools/check_family.sh).
+# definition of done, the samc21 twin of bench/check_family.sh).
 #
 # Positive: every test/family_samc21/*.cpp must COMPILE for every device
 # header named below - the E/G/J variants of the 18A, i.e. the three pin
@@ -13,8 +13,8 @@
 # No CMake coupling on purpose (same as check_family.sh): the compiler is
 # called directly, the whole sweep takes seconds and needs no hardware.
 #
-# Usage: tools/check_samc21.sh            all TUs, all variants
-#        tools/check_samc21.sh pin        only TUs/negatives matching "pin"
+# Usage: bench/check_samc21.sh            all TUs, all variants
+#        bench/check_samc21.sh pin        only TUs/negatives matching "pin"
 set -u
 cd "$(dirname "$0")/.."
 

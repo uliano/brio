@@ -1,19 +1,19 @@
-#!/usr/bin/env python3
 # ============================================================================
-#  bench.py - the multi-board bench ORCHESTRATOR: build, flash, drive.
+#  bench/cli.py - the multi-board bench ORCHESTRATOR: build, flash, drive.
+#  The command is bin/brio; this module is its verbs.
 #
 #  Run with any Python 3 that has pyserial installed (pip install --user
 #  pyserial):
 #
-#      python3 tools/bench.py list
-#      python3 tools/bench.py flash A test_avr_pin
-#      python3 tools/bench.py run A a
-#      python3 tools/bench.py console A
-#      python3 tools/bench.py duo A:a B:scripts/peer.txt
-#      python3 tools/bench.py fuses A
-#      python3 tools/bench.py fuses A bootsize=128 codesize=0
-#      python3 tools/bench.py fuses C
-#      python3 tools/bench.py fuses C bodvdd_hysteresis=1
+#      brio list
+#      brio flash A test_avr_pin
+#      brio run A a
+#      brio console A
+#      brio duo A:a B:scripts/peer.txt
+#      brio fuses A
+#      brio fuses A bootsize=128 codesize=0
+#      brio fuses C
+#      brio fuses C bodvdd_hysteresis=1
 #
 #  Three concerns, kept apart on purpose:
 #    1. BUILD   - one CMake target per app x board TYPE, auto-discovered from
@@ -21,8 +21,9 @@
 #                 (each project's CMakeLists.txt); a configure also (re)writes
 #                 that project's build-cmake/apps_<project>.json, which this
 #                 file reads. Never a target per physical board.
-#    2. IDENTITY- tools/bench_boards.py, the bench manifest: which board sits
-#                 where, on which console, behind which programmer.
+#    2. IDENTITY- the bench manifest (bench/manifest.py says where it is
+#                 loaded from): which board sits where, on which console,
+#                 behind which programmer.
 #    3. THIS    - resolves 1 against 2 and drives the hardware.
 #
 #  TWO ARCHITECTURES SHARE THIS TOOL. The board's TYPE decides everything
@@ -48,11 +49,11 @@ import subprocess
 import sys
 import time
 
-TOOLS = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(TOOLS)
-sys.path.insert(0, TOOLS)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
-import bench_boards as manifest          # noqa: E402
+from bench.manifest import load as _load_manifest, path as _manifest_path   # noqa: E402
+manifest = _load_manifest()
 
 try:
     import serial                        # pyserial
@@ -102,7 +103,7 @@ def board_type(btype):
     spec = BOARD_TYPES.get(btype)
     if spec is None:
         die("unknown board type '%s' (known: %s) - a new type needs an entry "
-            "in bench.py's BOARD_TYPES" % (btype, ", ".join(sorted(BOARD_TYPES))))
+            "in bench/cli.py's BOARD_TYPES" % (btype, ", ".join(sorted(BOARD_TYPES))))
     return spec
 
 PROMPT = "> "
@@ -121,7 +122,7 @@ def die(msg):
 def board_entry(name):
     entry = manifest.BOARDS.get(name)
     if entry is None:
-        die("no board '%s' in the manifest (have: %s) - edit tools/bench_boards.py"
+        die("no board '%s' in the manifest (have: %s) - edit the manifest"
             % (name, ", ".join(sorted(manifest.BOARDS)) or "none"))
     return entry
 
@@ -211,7 +212,7 @@ def console_path(name):
         die("board '%s' has no console in the manifest" % name)
     if not os.path.exists(path):
         die("console %s of board '%s' does not exist - is the board plugged "
-            "into the socket the manifest names? (bench.py list)" % (path, name))
+            "into the socket the manifest names? (brio list)" % (path, name))
     return path
 
 
@@ -270,7 +271,7 @@ def cmd_list(args):
               % (vid, pid, USB_PROGRAMMERS[vid], product, serial_no))
     print("")
 
-    print("Manifest (tools/bench_boards.py):")
+    print("Manifest (%s):" % os.path.relpath(_manifest_path(), ROOT))
     if not manifest.BOARDS:
         print("  (empty)")
     for name, entry in sorted(manifest.BOARDS.items()):
@@ -323,7 +324,7 @@ def avrdude_args(prog, mcu, hexfile, chip_erase=False):
     #       this bench). That is what --erase asks for and what it now passes;
     #       nothing else wipes an NvHeap.
     if prog["type"] == "serialupdi" and not os.path.exists(prog.get("port") or ""):
-        die("serialupdi port %s does not exist (bench.py list)" % prog.get("port"))
+        die("serialupdi port %s does not exist (brio list)" % prog.get("port"))
     erase = ["-e"] if chip_erase else []
     return avrdude_base(prog, mcu) + erase + ["-U", "flash:w:%s:i" % hexfile]
 
@@ -430,7 +431,7 @@ def msd_flash(prog, binfile, app):
     reads anyway.
 
     This kind exists because position G's debug port can go silent until
-    the board is replugged (tools/bench_boards.py carries the record): the
+    the board is replugged (the manifest carries the record): the
     MSD is then the one way in,
     and it is also why nothing here halts the core, clears DBGMCU_CR or
     reads anything back over SWD - the debug-in-Stop bits that openocd_args
@@ -442,7 +443,7 @@ def msd_flash(prog, binfile, app):
             "label, e.g. NODE_G031K8)")
     dev = os.path.realpath(os.path.join("/dev/disk/by-label", label))
     if not os.path.exists(dev):
-        die("no drive labelled %s - is the board plugged in? (bench.py list)"
+        die("no drive labelled %s - is the board plugged in? (brio list)"
             % label)
     block = os.path.basename(dev)
 
@@ -948,7 +949,7 @@ NVM_CMD_PBC = 0x44               # Page Buffer Clear
 NVM_CMD_INVALL = 0x46            # invalidate the read cache
 NVM_STATUS_ERRORS = 0x1C         # PROGE (2) | LOCKE (3) | NVME (4)
 
-DHCSR = 0xE000EDF0               # the debug register bench.py always leaves off
+DHCSR = 0xE000EDF0               # the debug register brio always leaves off
 DHCSR_DEBUG_OFF = 0xA05F0000
 
 
@@ -1051,7 +1052,7 @@ def _sam_bit_map_is_complete():
 
 
 assert _sam_bit_map_is_complete(), \
-    "bench.py: SAM_FUSES + SAM_PRESERVED must tile bits 0..63 of table 9-4"
+    "bench/cli.py: SAM_FUSES + SAM_PRESERVED must tile bits 0..63 of table 9-4"
 
 
 def sam_bit_span(first, width):
@@ -1532,8 +1533,8 @@ def split_pair(text, what):
 
 def main():
     ap = argparse.ArgumentParser(
-        prog="bench.py",
-        description="Multi-board bench orchestrator (manifest: tools/bench_boards.py)")
+        prog="brio",
+        description="Multi-board bench orchestrator (the manifest: bench/manifest.py)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("list", help="serial devices, USB programmers, manifest")
