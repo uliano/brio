@@ -108,12 +108,12 @@ The sweep proves it on every header the pack ships (22 positive TUs x
 12 headers, and every negative refused on each variant it names); the
 bench proves two of them.
 
-## The second silicon: the Nucleo-G071RB
+## The Nucleo-G071RB
 
 The **Nucleo-G071RB** (STM32G071RB, LQFP64, 128 KB single-bank flash,
 36 KB SRAM, the same board layout as the G0B1RE's - LD4 on PA5, the VCP
-on USART2 PA2/PA3) sits at manifest position `F`, tied to the G0B1RE by
-the six-wire bus link of [../bench.md](../bench.md). Its die reports
+on USART2 PA2/PA3) is tied to the G0B1RE by the six-wire bus link of
+[../bench.md](../bench.md). Its die reports
 **DEV_ID 0x460, REV_ID 0x2000** - ES0418 silicon revision B - and every
 bench suite prints that pair at boot through `DeviceIdcode::read()`
 ([platform.md](platform.md)), because a measurement that differs between
@@ -121,13 +121,13 @@ two boards is only a finding once the die it was taken on is on the
 record.
 
 **FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT**, and the same fourteen
-on the third silicon below. An app that builds for more than one board says so
+on the Nucleo-G031K8 below. An app that builds for more than one board says so
 in its `// build: boards = g0b1re,g071rb,g031k8` line; what a suite
 cannot do on a board it SKIPS BY NAME, printing the reserve's own fact
 and claiming no verdict, so a smaller count is a shorter list of claims
 and never a weaker one.
 
-| Suite | G0B1RE (E) | G071RB (F) | What skips there, and why |
+| Suite | G0B1RE | G071RB | What skips there, and why |
 |---|---|---|---|
 | `test_stm32_crc` | 27 | **27** | nothing - the one driver that needs no fact from the reserve |
 | `test_stm32_platform` | 53 (+ `i` 26) | **53** (+ `i` 26) | nothing |
@@ -141,7 +141,7 @@ and never a weaker one.
 | `test_stm32_dma` | 69 | **65** | DMA2's five channels, and letter `m`'s peripheral-to-peripheral destination |
 | `test_stm32_analog` | 139 | **136** | COMP3's register block and its whole signal path |
 | `test_stm32_serial` | 88 | **83** | LPUART2, and four verdicts to ES0418 2.2.4 ([usart.md](usart.md)) |
-| `test_stm32_spi` | 38 (peer) | **38** (peer) | the same self-link letters that skip on E; SPI3 and SPI2's I2S are absent |
+| `test_stm32_spi` | 38 (peer) | **38** (peer) | the same self-link letters that skip on the G0B1RE; SPI3 and SPI2's I2S are absent |
 | `test_stm32_i2c` | 54 (peer) | **54** (peer) | the same self-link letters; I2C3 is absent and I2C2 has no independent clock |
 | `test_stm32_nvm` | 85 | - | one flash bank: no storage attic ([nvm.md](nvm.md)) |
 | `test_stm32_journal` | 52 | - | the same |
@@ -166,12 +166,12 @@ All three boards have their presets (`stm32g0b1re-*`, `stm32g071rb-*`,
 `stm32g031k8-*`), linker scripts, crts and `bin/brio` board types,
 and `blink`, `console` and `probe` build for all three.
 
-## The third silicon: the Nucleo-G031K8
+## The Nucleo-G031K8
 
 The **Nucleo-G031K8** (STM32G031K8, a Nucleo-32: **LQFP32, 64 KB
 single-bank flash, 8 KB SRAM**, LD3 on PC6, the VCP on USART2 PA2/PA3)
-sits at manifest position `G`, carrying the six bus wires to the
-Nucleo-G0B1RE at E. Its die reports **DEV_ID 0x466, REV_ID 0x1003**.
+carries the six bus wires to the Nucleo-G0B1RE. Its die reports
+**DEV_ID 0x466, REV_ID 0x1003**.
 Its **LSE crystal runs** (LSERDY in about 900 ms at the lowest drive,
 32719..32753 Hz against the core) with the oscillator bridges at
 UM2591's default, so the RTC, the tickless timebase, the timed sleep
@@ -189,7 +189,7 @@ halted or read over SWD until the replug ([../bench.md](../bench.md)).
 
 **FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT.**
 
-| Suite | E | F | G | What skips on G, and why |
+| Suite | G0B1RE | G071RB | G031K8 | What skips on the G031K8, and why |
 |---|---|---|---|---|
 | `test_stm32_crc` | 27 | 27 | **27** | nothing - the boards line is the whole change |
 | `test_stm32_platform` | 53 (+ `i` 26) | 53 (+ `i` 26) | **53** (+ `i` 26) | nothing; the LED moves to PC6 and LSI reads 31400 Hz |

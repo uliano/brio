@@ -1,9 +1,9 @@
 # I2C (STM32G0)
 
-**PROVISIONAL.** The chapter is built whole and measured three times
-over - on the Nucleo's own self-link, and on the same two pads against
-two independent second chips, a SAM C21 and a second STM32G0; what is
-not covered is listed at the end, with the reason in each case.
+The chapter is built whole and measured three ways - on the Nucleo's
+own self-link, and on the same two pads against two other chips, a SAM
+C21 and another STM32G0; what is not covered is listed at the end, with
+the reason in each case.
 
 `brio/stm32g0/i2c.hpp` is RM0444 chapter 32 in the two strata every brio
 bus driver has: `I2c<n>`, the resource; `I2cHost<n, pins, TxEngine,
@@ -439,12 +439,13 @@ re-state its claim afterwards or every later completion is consumed by
 the wrong branch and answered `i2c_timeout` on a tenure that ran
 perfectly.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_i2c` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
 with the Nucleo-G0B1RE as its peer - the roles of the G0-to-G0 link
 exchanged - and scores **54/54**, the same 54 the G0B1RE scores hosting
-the other way. The self-link letters skip after the probe, as on E.
+the other way. The self-link letters skip after the probe, as on the
+G0B1RE.
 
 **TABLE 165's COLUMN MOVES WITH THE PART, AND THE SILICON SAYS SO.**
 There is no I2C3 (`i2c_present(3)` false, `I2c<3>` does not compile), and
@@ -480,7 +481,7 @@ REACHED, this suite's ratios being 4, 1 and 0.125; and 2.11.3, 2.11.5 and
 2.11.7 need the multi-master, NOSTRETCH-target and SMBus-target roles the
 SELF-LINK carries, so they are not staged on this board.
 
-## On the third silicon
+## On the STM32G031K8
 
 `test_stm32_i2c` runs ON THE WIRE on the Nucleo-G031K8 (DEV_ID 0x466,
 REV_ID 0x1003) and scores **54/54** - the same 54 the SAM C21 and the
@@ -503,7 +504,7 @@ refuse" verbs are asked of I2C2.
 
 The timing arithmetic, ES0548 2.10.1's floors (4, 10 and 20 MHz for Sm,
 Fm and Fm+) and the enable-protection rule - which on this chapter is
-REAL, unlike the SPI's - all hold as they do on the other two dies. The
+REAL, unlike the SPI's - all hold as they do on the LQFP64 parts. The
 console is **LPUART1** on PA2/PA3 at AF6, for [clock.md](clock.md)'s
 reason.
 
@@ -530,7 +531,7 @@ Implemented but not bench-verified:
 
 - **I2C3** - present on this part, exercised in the family fixture and
   in letter a's refusals, but its pads carry no wire here.
-- **The LQFP32's own self-link.** The third silicon bonds both ends of
+- **The LQFP32's own self-link.** The STM32G031K8 bonds both ends of
   it (I2C1 on PB8/PB9, I2C2 on PA11/PA12), so the eleven self-link
   letters are compiled there and probe for it at boot - but that desk
   carries the peer link on the same two pads, the probe answers no, and
@@ -553,13 +554,13 @@ Implemented but not bench-verified:
   RELOAD = 0, PECBYTE = 1" - the check rides target byte control, whose
   NBYTES the suite's pump does not re-arm.
 - **The SMBus ALERT**, which needs a wire to an SMBA pad.
-- **The second silicon runs the PEER and not the suite.** A
-  Nucleo-G071RB serves `twi_peer`'s stm32g0 port on the far end of the
-  bus - this driver's `I2cClient` and `I2cHost` on a second die,
-  exercised from the outside by every peer letter, including target
-  byte control and the target-transmit path - but `test_stm32_i2c`
-  itself has never been run ON it, so the self-link half and the
-  wireless letters are one G0B1RE's.
+- **The self-link roles on the STM32G071RB and the STM32G031K8**: the
+  eleven self-link letters - the own-address match, the NOSTRETCH
+  target, 10-bit addressing both ways, the PEC, the time-outs, the wake
+  from Stop, the whole stretching census, and with them ES0418's 2.11.3,
+  2.11.5 and 2.11.7 - skip on those boards because their PB8/PB9 carry
+  the peer link and the probe answers no (above). All are measured on
+  the STM32G0B1RE.
 - **Arbitration lost against a real second controller.** ARLO is
   seen on silicon (letter `r`'s wedge, held by the peer from its own
   GPIO), but a LIVE RACE - two controllers driving addresses at once and
@@ -572,7 +573,8 @@ Implemented but not bench-verified:
   does not fire when a phantom release comes - the SAM C21's answer
   too.
 
-Declined, with the reason:
+Declined, with the reason (what a wire or an instrument this bench has
+not got would measure):
 
 - **The filters' suppression itself.** A glitch needs a source on the
   net, and both ends of both wires are alternate functions with no third
@@ -587,9 +589,3 @@ Declined, with the reason:
   (921 vs 921 ns): 6.1.3 makes it a pad property and the period is
   TIMINGR's, so what the 20 mA buys is the EDGE, which no instrument on
   this board can see.
-
-On the second silicon (the Nucleo-G071RB), NOT COVERED for the same reason
-- they are SELF-LINK roles: **ES0418 2.11.3, 2.11.5 and 2.11.7** (the
-own-address match, the NOSTRETCH underrun, the SMBus slave timeout), the
-10-bit addressing both ways, the PEC, the time-outs, the wake from Stop
-and the whole stretching census. All are measured on the G0B1RE.

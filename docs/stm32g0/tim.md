@@ -1,12 +1,5 @@
 # Timers (STM32G0)
 
-> **PROVISIONAL.** The time base, the counting modes, the
-> capture/compare channels in both faces, the slave controller and the
-> master TRGO, the break/dead-time unit, the repetition counter and the
-> input multiplexer are implemented and bench-verified; the tasks over
-> them give `util/pwm_channel.hpp` and `util/meter_sampler.hpp` their
-> third silicon. What is still missing is in "Not covered yet".
-
 Documents of record: RM0444 Rev 6 - TIM1 ch. 21, TIM2/TIM3/TIM4 ch. 22,
 TIM6/TIM7 ch. 23, TIM14 ch. 24, TIM15/TIM16/TIM17 ch. 25, the timer
 clock 5.2.13, the interrupt table 12.3 (table 61); DS13560 Rev 5 table 7
@@ -481,7 +474,7 @@ ADC, and `test_stm32_analog` measures both (`tim6_trgo` and `tim7_trgo`
 as converter triggers) - so nothing here pretends to witness a TRGO the
 timer suite has no instrument for.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_tim` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
 and scores **114/114** against the G0B1RE's 118, the difference being
@@ -522,7 +515,7 @@ short pulses) and 2.8.5 (a sync trigger missed with a faster master
 clock) are not reached: no letter sets BKBID, and one clock feeds every
 timer.
 
-## On the third silicon
+## On the STM32G031K8
 
 `test_stm32_tim` scores **108 of 118** on the Nucleo-G031K8 (DEV_ID
 0x466, REV_ID 0x1003). WHAT THIS PART HAS NOT GOT is four of the ten
@@ -541,7 +534,7 @@ Nucleo-64s, LD3 = **PC6 = TIM2_CH3 = line 6** on the Nucleo-32
 (DS12992 table 16), both lines reporting on EXTI4_15. The duties read
 back 0/250/500/750/1000 per mille exactly and 200 rising edges arrive in
 200002 us, so the finding those letters carry - that an EXTI line sees a
-pad a PERIPHERAL is driving - holds on the third die and on a second
+pad a PERIPHERAL is driving - holds on this die and on a second
 port.
 
 **AND THE SAME LETTER IS WHERE A GPIO RULE IS MEASURED** - the one in
@@ -565,32 +558,43 @@ trigger missed by a slower slave, an item with no G0B1 twin - is not
 staged; and 2.6.5 (TIM16/TIM17 clocked by SYSCLK) is revision Z's
 alone.
 
-LSI on TIM16's capture reads **31434 Hz** here (E 32586, F 32339), and
+LSI on TIM16's capture reads **31434 Hz** here (the G0B1RE 32586, the
+G071RB 32339), and
 the cross-check is against the watchdog-timed figure of the SAME die
 (31400) rather than one board's number.
 
 ## Not covered yet
 
-Driver gaps: encoder and hall-sensor modes (`SMS` 1..3 are spelled and refused
-nowhere, but no task builds them and no bench signal exists for one);
-the ETR input's other sources (a pad, the comparators, LSE - only
-MCO into TIM2's ETR has run on silicon, as the dynamic clock's wall in
-[clock.md](clock.md)); the commutation event (`CR2.CCPC`/`CCUS`, `EGR.COMG`) and
-the `CCR5`/`CCR6` combined-PWM channels of TIM1; `CR2.TI1S` (the XOR of
-the three inputs); the break's comparator inputs (`TIMx_AF1`'s
-`BKCMPnE`); `TIMx_OR1`; the TIM1/TIM15 kernel-clock choice of PLLQCLK
-(RCC_CCIPR, 5.2.13) - this stratum's PLL drives the R output only;
-`DBGMCU`'s freeze bits (40.9.2); and the LPTIMs and IRTIM, which are
-their own chapters.
+Driver gaps, each with its reason:
 
-Implemented, not bench-verified: the output modes above `pwm2` (retriggerable one-pulse,
-combined and asymmetric PWM); `TimOnePulse` and `TimPeriodicTick` on
-silicon; `TimSlaveConfig::master_slave` (MSM), whose default is
-ES0548 2.7.1's own workaround; `BDTR.LOCK`, which is one-way and would
-cost a peripheral reset to undo; `OSSR`/`OSSI` other than clear;
-`CR1.UIFREMAP` and `count_update_flag()`; the capture polarity `both`;
-and every `TISEL` code but TIM16's LSI.
+- Encoder and hall-sensor modes: `SMS` 1..3 are spelled and refused
+  nowhere, but no task builds them and no bench signal exists for one;
+  born with their first user.
+- The commutation event (`CR2.CCPC`/`CCUS`, `EGR.COMG`) and the
+  `CCR5`/`CCR6` combined-PWM channels of TIM1 - a motor-control shape
+  with no user here, and `tim.hpp` builds four channels per timer.
+- `CR2.TI1S` (the XOR of the three inputs), the break's comparator
+  inputs (`TIMx_AF1`'s `BKCMPnE`) and `TIMx_OR1` - no user, no bench
+  signal.
+- The TIM1/TIM15 kernel-clock choice of PLLQCLK (RCC_CCIPR, 5.2.13):
+  this stratum's PLL drives the R output only ([clock.md](clock.md)).
+- `DBGMCU`'s freeze bits (40.9.2): nothing here halts a core to watch a
+  counter freeze (the LPTIM's twin verb is written and unmeasured for
+  the same reason, [lptim.md](lptim.md)).
 
-On the second silicon (the Nucleo-G071RB), NOT COVERED: **TIM4** in every
-respect - it does not exist there - and with it the two-timers-on-one-vector
-demonstration. Everything else of this chapter is measured on both.
+Implemented, not bench-verified:
+
+- The output modes above `pwm2` (retriggerable one-pulse, combined and
+  asymmetric PWM); `TimOnePulse` and `TimPeriodicTick` on silicon (no
+  suite instantiates either task - a letter running each against the
+  EXTI edge counter would measure them).
+- `TimSlaveConfig::master_slave` (MSM), whose default is ES0548 2.7.1's
+  own workaround; `BDTR.LOCK`, which is one-way and would cost a
+  peripheral reset to undo; `OSSR`/`OSSI` other than clear;
+  `CR1.UIFREMAP` and `count_update_flag()`; the capture polarity `both`.
+- The ETR input from a pad and from the comparators: MCO and LSE into
+  TIM2's ETR are what has run on silicon, as the dynamic clock's wall
+  and its Stop witness ([clock.md](clock.md)).
+- The `TISEL` codes no suite selects: TIM16's TI1 takes LSI, LSE and the
+  RTC wake-up on silicon ([rtc.md](rtc.md)) and TIM1's TI1 takes COMP1's
+  output ([comp.md](comp.md)); the remaining codes are compile-checked.

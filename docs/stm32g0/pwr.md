@@ -1,14 +1,5 @@
 # Power control and the sleep sites - the stopping half (STM32G0)
 
-> **PROVISIONAL.** Chapter 4's register surface is built whole and the
-> two `util/power.hpp` sites over it are bench-verified, including a
-> kernel that meets a deadline THROUGH a Stop. What cannot be staged on
-> this desk is the analog half - the PVD's crossing (VDD is the
-> ST-LINK's fixed 3.3 V), the wake-up pins (they need a wire) and sleep
-> CURRENT (there is no meter) - and what is deliberately not built is the
-> VBAT charger and the BOR levels, which are option bytes. The list is in
-> "Not covered yet".
-
 Documents of record: RM0444 Rev 6 ch. 4 (PWR) with 5.3 (what the RCC
 does to a low-power mode) and table 27 (what each peripheral does in
 one), DS13560 Rev 5 table 37 (the wake-up times), and errata ES0548
@@ -512,7 +503,7 @@ milliseconds of frozen span the resync then hands back; and a shared interrupt v
 must have that variable set by every letter that drives the peripheral
 by hand, or a warm run inherits the previous letter's behaviour.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_sleep` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
 0x2000) and scores **50/50**, every letter and every verdict the G0B1RE
@@ -545,7 +536,7 @@ G0B1/G0C1's) and has no PWR_PUCRE/PDCRE, port E being absent - so
 `pwr_wakeup_pin_count()` is 5 there and 6 on the G0B1RE, and a pin the
 part has not got is REFUSED rather than written.
 
-## On the third silicon
+## On the STM32G031K8
 
 `test_stm32_sleep` scores **50/50** in `z` on the Nucleo-G031K8 (DEV_ID
 0x466, REV_ID 0x1003), with `s` 6/6 and `u` 6/6 outside it, the ladder,
@@ -606,12 +597,14 @@ ARMED from low-power run stops the clocks like any Stop and wakes back
 into low-power run; which regulator held VCORE during it is not
 observable from a register (a meter question).
 
-The THIRD site's own gaps: it has been run on LPTIM1 and on LSE only -
-LPTIM2 as the site's instance and LSI as its source are configurations
-the family fixture compiles and the negatives fence, but no letter has
-slept on them; and the once-a-lap wake that consequence 1 predicts (a
-standing compare firing 64 seconds after a deadline-less round) is
-argued from the registers and has not been sat out on the bench.
+The LPTIM site's own gaps: its suite states LPTIM1 on LSE for every
+board (each fits a crystal) - LPTIM2 as the site's instance and LSI as
+its source are configurations the family fixture compiles and the
+negatives fence, and the site's letter sleeps on them the moment its
+`site_cfg` says so, which no build of the suite does; and the
+once-a-lap wake that consequence 1 predicts (a standing compare firing
+64 seconds after a deadline-less round) is argued from the registers
+and has not been sat out on the bench.
 
 The serial wake's own gaps: only USART2 has been used as a wake source
 (the EXTI lines of USART1 and USART3 are published and never armed), and
@@ -621,6 +614,5 @@ crossed with the other.
 Not stageable on this desk, and said so rather than left silent: the PVD
 crossing and the wake-up PINS (both want a supply or a wire this bench
 does not have), and SLEEP CURRENT, which is the number this whole
-chapter exists for and which needs a meter. The
-`experiments/energy/` tier is where that measurement belongs when it
-comes.
+chapter exists for and which needs a meter on the supply - a bench of
+its own, not a letter of this suite.

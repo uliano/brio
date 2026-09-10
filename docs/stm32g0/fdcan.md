@@ -1,15 +1,5 @@
 # FD controller area network (STM32G0)
 
-> **PROVISIONAL.** Chapter 36 is implemented whole - every register,
-> every field, every mode, the message RAM and both instances - and
-> almost all of it is bench-verified. What keeps the banner is a bench
-> and not a driver: this desk has NO TRANSCEIVER, NO WIRE AND NO SECOND
-> NODE, so everything that needs a bus - arbitration, a real
-> acknowledge, a foreign frame, bus-off from traffic - is measured
-> against the controller's own loop-back or is declared in "Not covered
-> yet" with its reason. The frame vocabulary is deliberately
-> TARGET-LOCAL and says so below.
-
 Documents of record: RM0444 Rev 6 - FDCAN ch. 36 whole, the subsystem's
 enable and reset 5.4.15/5.4.16 (`APBENR1.FDCANEN`, `APBRSTR1.FDCANRST`),
 the kernel-clock multiplexer 5.4.22 (`CCIPR2.FDCANSEL` - a DIFFERENT
@@ -514,7 +504,7 @@ power-down is released does not move it; inserting text before it moves
 it by exactly that many bytes; draining the console first does not help.
 No verdict rests on that line.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_fdcan` is the G0B1RE's alone: the FDCAN is the G0B1/G0C1
 class's peripheral and a G071RB has none, so `fdcan_present(1)` is false
@@ -525,7 +515,7 @@ the DLC coding, the element codecs) compiles on every header of the pack
 and is checked by `brio check stm32g0` there; only the
 register-facing half is gated.
 
-## On the third silicon
+## On the STM32G031K8
 
 There is no FDCAN on the G031 either (`fdcan_present(1)` is false), so
 `test_stm32_fdcan` stays the G0B1RE's alone. What the absence is worth
@@ -573,5 +563,5 @@ Implemented but not bench-verified, each with the reason:
 - **Three of the five pads per signal**: PC4/PC5 and PB8/PB9 are
   measured, while PA11/PA12, PD0/PD1, PD12/PD13 for FDCAN1 and
   PB0/PB1, PB5/PB6, PB12/PB13, PC2/PC3, PD14/PD15 for FDCAN2 are
-  compile-only here (and the port D pads are not bonded on this
-  package).
+  compile-only here (and of the port D pads the LQFP64 bonds PD0/PD1
+  alone - [port.md](port.md)'s survey).

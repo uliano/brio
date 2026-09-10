@@ -1,13 +1,5 @@
 # USART (STM32G0)
 
-> **PROVISIONAL.** Chapter 33 is implemented WHOLE - every field of
-> CR1/CR2/CR3/BRR/GTPR/RTOR/RQR/ISR/ICR/PRESC in both register views -
-> and almost all of it is bench-measured on one board with no wires.
-> What keeps the banner is in "Not covered yet" and every item there is
-> DECLINED WITH A REASON or IMPLEMENTED-AND-NOT-STAGED, not missing: the
-> synchronous DATA path and the synchronous SLAVE (they need a second
-> board), smartcard block mode (it needs a card), and a LIN network.
-
 Documents of record: RM0444 Rev 6 - USART ch. 33 (the implementation
 tables 183/184, the baud generator 33.5.7, the tolerance tables 188/189,
 auto-baud 33.5.9, mute mode 33.5.10, the character match 33.5.11, LIN
@@ -291,7 +283,7 @@ neither. `uart_engines_distinct()` lives here.
 
 ## Bench findings
 
-`test_stm32_serial`, board E (Nucleo-G0B1RE), WIRELESS. Two facts make
+`test_stm32_serial` on the Nucleo-G0B1RE, WIRELESS. Two facts make
 the whole chapter stageable on one board: CR3.HDSEL turns any instance
 into its own loop-back, and a pad handed to the RX alternate function is
 an INPUT whose internal pull the CPU can move in under a microsecond -
@@ -554,7 +546,7 @@ RTC's wake-up timer as the backstop:
   reaches further than the request path. Recorded as measured, not
   explained.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_serial` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
 0x2000) and scores **83/83** against the G0B1RE's 88.
@@ -606,7 +598,7 @@ ONEBIT on a noisy START bit) is not exercised - letter `f`'s ONEBIT rows
 run on a clean start bit - and 2.12.1 (an SPI-slave TC anticipated) has
 no letter, there being no synchronous slave on this desk.
 
-## On the third silicon
+## On the STM32G031K8
 
 `test_stm32_serial` scores **79 of 88** on the Nucleo-G031K8 (DEV_ID
 0x466, REV_ID 0x1003). This part has **USART1 and USART2 and nothing
@@ -624,7 +616,8 @@ with ES0548 2.2.4 staged - skips whole, having no wake line to arm.
 took them on the G071 is revision Z's alone on this part: ES0487 2.2.4
 is marked absent on revision Y, and the boot probe on PB3 agrees - four
 pad edges into the request generator move **4 words with the event mask
-alone and 4 with the interrupt mask armed** (F: 0 and 1 of 4). And
+alone and 4 with the interrupt mask armed** (the G071RB: 0 and 1 of
+4). And
 ES0548 2.11.1's twin, **ES0487 2.10.1**, applies on Y and REPRODUCES with
 its control in letter `f`: the glitch in the stop bit's second half
 reaches the byte, the one in the first half does not.
@@ -650,10 +643,11 @@ which is the letter's 2/2 as on the Nucleo-64s.
 
 Driver gaps: none. Every field of chapter 33 is implemented.
 
-Declined with a reason, and they are the banner:
+Declined with a reason:
 - **The synchronous DATA path.** The master's CK, its polarity, its
   phase and LBCL are all measured on the pad; a synchronous LINK needs
-  something at the other end to clock, and this desk has one board.
+  a second node on CK, TX and RX, and the wires this desk carries
+  between its boards are the SPI and I2C links.
 - **The synchronous SLAVE** (CR2.SLVEN, DIS_NSS, the underrun flag UDR):
   the register verbs exist on the resource, no task does, and neither is
   claimed to work.
@@ -676,9 +670,11 @@ Implemented, not bench-verified:
   through the resource).
 - The wake from Stop on any instance but USART2, and on Stop 1 (measured
   on an LPUART, docs/stm32g0/lpuart.md).
-- Every part but the G0B1 (the instance sets, the vectors, the
-  FULL/BASIC split): compile-only, pinned by the family fixture on all
-  twelve headers.
+- On the STM32G071RB, **the smartcard CK ladder, the synchronous
+  master's CK census and both IRTIM counting legs** - every one an edge
+  counter with no CPU, which is exactly the path ES0418 2.2.4 breaks on
+  that part (above); and on the STM32G031K8 the console's kernel-clock
+  legs and the wake from Stop, its USART2 being BASIC (above).
 - `SyncHost`, `IrdaLink` and `Smartcard` under a `DynamicClock`: no
   `rebase`, refused at `init` by `clock_follows`. (The `Uart` on PCLK
   IS driven through the ladder as the dynamic clock's rebased user -
@@ -691,10 +687,3 @@ carries both engines - so every verdict line of that suite left the chip
 through a `DmaTxEngine` and every letter arrived through a `DmaRxEngine`
 (docs/stm32g0/dma.md has the throughput table and the ST-LINK VCP's own
 921600 ceiling).
-
-On the second silicon (the Nucleo-G071RB), NOT COVERED, all four blocked by
-ES0418 2.2.4 rather than by a missing block: **the smartcard CK ladder**,
-**the synchronous master's CK census** and **both IRTIM counting legs** -
-every one of them an edge counter with no CPU, which is exactly the path
-that erratum breaks. USART5, USART6 and LPUART2 are absent there and are
-not claimed either.

@@ -1,14 +1,5 @@
 # Platform - what the kernel stands on (STM32G0)
 
-> **PROVISIONAL.** All three halves are here and bench-verified: the
-> WAKING half below (the critical section, the two idle hooks, the two
-> timebases - SysTick, and the tickless LPTIM one that counts through a
-> Stop - the NVIC, the crt), the FAILING half next door in
-> [reset.md](reset.md) (which reset happened, both watchdogs, the
-> HardFault breadcrumb across a real reset), and the STOPPING half in
-> [pwr.md](pwr.md) (PWR's mode ladder and the `SleepSite`s). What is
-> left is small and listed in "Not covered yet".
-
 Documents of record: RM0444 Rev 6 - the Cortex-M0+ summary ch. 12
 (NVIC) with ARM's ARMv6-M ARM behind it, and PWR ch. 4 for what a WFI
 here really enters ([pwr.md](pwr.md) owns that chapter) - and errata
@@ -367,7 +358,7 @@ core sits in WFI (the PC read over SWD is the instruction after the WFI,
 inside the kernel's idle path), which is the state README.md's HLA read
 caveat is about.
 
-## On the second silicon
+## On the STM32G071RB
 
 Every platform-level claim of this document holds on the Nucleo-G071RB
 (DEV_ID 0x460, REV_ID 0x2000): `test_stm32_platform` runs whole in
@@ -392,11 +383,11 @@ ends and the IWDG reboots the board. The meter and the awake-time verdict
 go together behind `tim_etrsel_has_mco()`; the lap count and the
 never-re-lock-the-PLL claim need no meter and stay.
 
-## On the third silicon
+## On the STM32G031K8
 
 `test_stm32_platform` runs whole on the Nucleo-G031K8 (DEV_ID 0x466,
 REV_ID 0x1003), letter `i` included over its six real resets, with the
-same letters and the same verdicts as on the other two dies. The
+same letters and the same verdicts as on the LQFP64 parts. The
 board's user LED is on PC6 (a Nucleo-32 fact), which nothing here
 judges.
 
@@ -417,12 +408,22 @@ about one desk.
 ## Not covered yet
 
 Driver gaps (this chapter's option space the stratum does not touch):
-- VTOR relocation; NVIC priorities are exposed but nothing assigns one.
-- A per-package pin-bonding table.
+- VTOR relocation, which nothing here needs while the vector table is
+  the crt's and sits where the part boots; born with its first user (a
+  bootloader).
+- NVIC priorities: exposed, and nothing assigns one, because the kernel
+  is flat - every interrupt is one hardware level above the loop, and a
+  priority scheme is the preemptive kernel's question
+  ([design/kernel.md](../design/kernel.md)).
+- A per-package pin-bonding table - [port.md](port.md) says why not.
 
-Implemented, not bench-verified: `Nvic::priority`, `abort()`'s and `HardFault_Handler`'s spins
-(the fault VECTOR is exercised, by `hard_fault_reset` - reset.md),
-the cortex-debug launch entry.
+Implemented, not bench-verified: `Nvic::priority` (nothing assigns one,
+above); `abort()`'s and `HardFault_Handler`'s spins (the fault VECTOR is
+exercised, by `hard_fault_reset` - [reset.md](reset.md); the spins are
+what runs when no body is bound, and every suite binds one). The
+cortex-debug launch entry ([README.md](README.md)) has not been driven
+end to end either; halt-and-dump through OpenOCD's own console is what
+this stratum's findings were taken with.
 
 The tickless timebase's two CONTRACTS, stated rather than checked
 because no register can check them: a masked window (PRIMASK held)
@@ -438,11 +439,13 @@ that near when the loop reaches its idle; a SysTick one-shot for those
 would be a second timebase for a case this cheap, and is not built.
 The tickless timebase's own gaps: the keystroke letter `u` (a UART
 byte as the foreign wake of a long `idle_until`) needs an operator and
-has not been run unattended; an LSI-clocked ticker has been the WITNESS
-on LPTIM2 and not yet the platform's own timebase in a program (the
-arithmetic and the wake are measured; a Stop on it is not).
-
-On the second silicon (the Nucleo-G071RB), NOT COVERED: **what a lap wake
-COSTS** in `test_stm32_tickless` letter `i`, whose meter is TIM2's ETR
-taking MCO. The lap COUNT and the never-re-lock-the-PLL claim are measured
-there; the microseconds are not.
+is outside `z`; an LSI-rooted ticker as the platform's OWN timebase -
+the suite's `tb_cfg` selects the crystal, which every bench board
+carries, so the LSI root runs only as the LPTIM2 witness of letter `h`
+(its arithmetic and its wake measured there); setting `tb_cfg.source`
+to `lsi` is the whole of the measurement, and the same letters, Stops
+included, then run on it. And on the STM32G071RB and the STM32G031K8,
+**what a lap wake COSTS** (letter `i`): its meter is TIM2's ETR taking
+MCO, an ETRSEL code of the G0B1/G0C1 alone, so the lap COUNT and the
+never-re-lock-the-PLL claim are measured on those parts and the
+microseconds are not.

@@ -1,16 +1,5 @@
 # LPUART (STM32G0)
 
-> **PROVISIONAL.** Chapter 34 is implemented whole and most of it is
-> bench-measured: both instances, all four kernel clocks, the twenty-bit
-> baud generator against the manual's own two tables, the FIFOs, the
-> prescaler, single-wire half-duplex, the shared vectors and the wake
-> from Stop 1 on the 32768 Hz crystal. What keeps the banner is in "Not
-> covered yet" - the features shared with chapter 33 that the USART's
-> own suite exercises on a USART and not here (mute mode, character
-> match, driver enable, flow control, the inversions), and the DMA
-> engine slots, which compile and have never carried a byte on an
-> LPUART.
-
 Documents of record: RM0444 Rev 6 - LPUART ch. 34 (the implementation
 tables 183/184 it shares with the USART, the baud generator 34.4.7 with
 its tables 198 and 199, the low-power management 34.4.14, the registers
@@ -210,7 +199,7 @@ millisecond, so the byte has to be waited for; reading RDR the instant
 the WFI returns reads an empty register and calls a working wake a lost
 byte.
 
-## On the second silicon
+## On the STM32G071RB
 
 The Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000) has **one LPUART and not
 two**: `lpuart_present(2)` is false, `Lpuart<2>` does not compile there,
@@ -238,7 +227,7 @@ bytes in with 0 wrong**. Not reproduced at that rate against that
 receiver, which is not a disproof - a jitter item is about margin, and a
 1063-byte sample at one baud on one bridge does not measure a margin.
 
-## On the third silicon
+## On the STM32G031K8
 
 LPUART1 exists on the G031 as on every G0, and here it **has a vector of
 its own**: `lpuart_irq(1)` is LPUART1_IRQn because there is no USART3 to
@@ -275,10 +264,5 @@ USART's own code, measured there on a USART):
 - 7- and 9-bit words, parity and two stop bits.
 - LPUART2 on any kernel clock but PCLK, and LPUART2 as a wake source
   (its EXTI line 35 is in the second register group; only LPUART1's 28
-  has been used to wake this board).
-- Every part but the G0B1: compile-only, pinned by the family fixture
-  on all twelve headers.
-
-On the second silicon (the Nucleo-G071RB), NOT COVERED: **LPUART2** - its
-own pad, its own LPUART2SEL field and its own share of USART2's vector.
-The part has one LPUART.
+  has been used to wake a board). LPUART2 exists on the G0B1 alone of
+  the parts on the bench, so that is the one part that can measure it.

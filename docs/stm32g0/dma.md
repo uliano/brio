@@ -1,11 +1,5 @@
 # DMA + DMAMUX (STM32G0)
 
-> **PROVISIONAL.** The controller's whole channel surface, the request
-> multiplexer with its synchronization block, its event generation and
-> its request generator, the two byte-transport engines and the two
-> block-stream engines are implemented and bench-verified. What is still
-> missing is in "Not covered yet".
-
 Documents of record: RM0444 Rev 6 - the DMA ch. 10, the DMAMUX ch. 11,
 the RCC's AHB enable and reset bits 5.4.9 / 5.4.5, the interrupt table
 12.3 (table 61); errata ES0548 Rev 3 items 2.4.1 and 2.5.1..2.5.4, read
@@ -412,9 +406,9 @@ and outside every verdict, keeps the two above it for whoever wants the
 numbers again; `uart_stress.py` declines a leg announced above 921600 in
 the same way, running it PASSIVELY (the port follows the announced rate
 and drains, but nothing is pumped) unless it is given `--beyond-vcp`.
-That ceiling is the tool's default only for board E's ST-LINK port,
-which is where it was measured: the CH340s on the other boards carry
-3 Mbaud and get none.
+That ceiling is the tool's default only for a Nucleo's ST-LINK port,
+which is where it was measured: a CH340 bridge carries 3 Mbaud and gets
+none.
 
 The reason is not tidiness but a lost tally. A leg pumped at a rate the
 wire will not take leaves the host's operating system delivering the
@@ -504,7 +498,7 @@ periods, rising moves 10 words, falling 10, both 20.
     line lands in the handler, and with none bound it lands in
     `Default_Handler` and never comes back.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_dma` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
 and scores **65/65** against the G0B1RE's 69, the four missing verdicts
@@ -539,7 +533,7 @@ alone would report this path healthy. Letter k's synchronization block is
 unaffected: its sync input is TIM14_OC (table 56 input 22) and not an
 EXTI line.
 
-## On the third silicon
+## On the STM32G031K8
 
 `test_stm32_dma` scores **62 of 69** on the Nucleo-G031K8 (DEV_ID 0x466,
 REV_ID 0x1003). The controller here is **DMA1 with FIVE channels** and a
@@ -553,8 +547,8 @@ between them", which is one claim on all three parts.
 **AND THE EXTI PATH INTO THE DMAMUX WORKS HERE.** ES0487 lists the
 DMAMUX-from-EXTI limitation (its 2.2.4, ES0418 2.2.4's twin) for
 revision Z alone, and this board is revision Y: `test_stm32_serial`'s
-boot probe moves 4 words for 4 pad edges with the event mask alone (F:
-0), so letter f's SWIER leg passes here for the right reason.
+boot probe moves 4 words for 4 pad edges with the event mask alone (the
+G071RB: 0), so letter f's SWIER leg passes here for the right reason.
 
 **THE CONSOLE GIVES ITS ENGINES BACK.** Two of the seven channels are
 the console's transmit and receive on the bigger parts; on five, the
@@ -574,8 +568,8 @@ the length that fits and the length printed beside it), which brings the
 image to 42348 bytes of flash and 6108 of RAM - the stack living in what
 is left.
 
-`BlockRelay` and the two block-stream engines run unchanged on the third
-silicon, as does `util/` entire.
+`BlockRelay` and the two block-stream engines run unchanged on this die,
+as does `util/` entire.
 
 ## Not covered yet
 
@@ -601,7 +595,12 @@ Driver gaps:
   and not measured; what IS measured is that a channel runs in Sleep and
   freezes in Stop with the bits at their reset values.
 
-Implemented but not bench-verified: nothing of the controller's own.
+Implemented but not bench-verified: nothing of the controller's own on
+the STM32G0B1RE. On the STM32G071RB and the STM32G031K8, 10.4.5's
+peripheral-to-peripheral transfer: the leg is arranged over TIM6's
+update moving TIM3's compare into TIM4's, and those parts have no TIM4
+(the STM32G031K8 no TIM6 either), so it skips by name there;
+rearranging it over the timers they have would measure it.
 
 Errata not staged, and why: 2.4.1 is a same-cycle coincidence between a
 hardware error and a CGIFx write, and the write does not exist in this
@@ -609,8 +608,3 @@ driver; 2.5.1 and 2.5.3 need two channels that can both overrun at once,
 which is the configuration their own workaround says to avoid; 2.5.2
 needs a trigger landing on the last request of a batch above two, which
 this suite's overrun leg deliberately steps around.
-
-On the second silicon (the Nucleo-G071RB), NOT COVERED: **DMA2's five
-channels at three widths**, the second bus master, and 10.4.5's
-peripheral-to-peripheral transfer, whose destination register is TIM4's.
-The part has neither.

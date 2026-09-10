@@ -58,11 +58,13 @@
  * this block measures a RATIO, and the absolute number it is turned into
  * is only ever as good as f_ref.
  *
- * NOT BUILT (docs/samc21/freqm.md carries the list): the DONE interrupt is
- * exposed as flags and an ISR body but nothing here waits on it - the
- * measurements this serves are short and polled; and the GCLK_IO pins as
- * measurement sources (44.5.1), which need a pin claim this header does
- * not make.
+ * NOT BUILT (docs/samc21/freqm.md carries the list): the GCLK_IO pins as
+ * measurement sources (44.5.1), which need a clock on a pad and a pin
+ * claim this header does not make. The DONE interrupt IS built - flags,
+ * `isr()`, `irq()` - and `measure()` polls only because the measurements
+ * it serves are short; a program that would rather sleep through one
+ * arms DONE and wakes on it (measured: a standby ended by this block's
+ * own interrupt, docs/samc21/freqm.md).
  */
 
 #pragma once

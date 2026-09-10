@@ -1,11 +1,5 @@
 # FLASH - embedded flash memory and the storage over it (STM32G0)
 
-> **PROVISIONAL.** The program and erase engine, the geometry, the option
-> bytes as a read-only decode and both storage backends are built and
-> bench-verified. What is deliberately left out is either a one-way
-> hazard (writing an option byte, the OTP, RDP) or a protection nothing
-> in brio sets yet. The list is in "Not covered yet".
-
 Documents of record: RM0444 Rev 6 ch. 3 (3.3.1 organization, 3.3.2 dual
 bank and table 12, 3.3.3 ECC, 3.3.6..3.3.9 program/erase/RWW, 3.4 option
 bytes, 3.5 protections, 3.6 interrupts, 3.7 registers), datasheet
@@ -401,13 +395,14 @@ had. That is what the `v` letter of each suite is for, and it is also why
 there is no way to wipe the storage from `bench.py`: `--erase` is refused
 on this target and nothing in the tree calls `mass_erase()`.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_nvm` and `test_stm32_journal` STAY THE G0B1RE's ALONE, and
 the reason is geometry rather than a driver gap. Both backends open on a
 storage attic in **bank 2** and a G071RB has one bank: `MainFlash` and
-`MainFlashJournalZone` answer `bad_geometry` there and refuse to mount,
-which is the survival-aware mount working. Giving a single-bank part a
+`MainFlashJournalZone` would answer `bad_geometry` there and refuse to
+mount - the survival-aware mount's own answer, by construction and not
+by a run, since neither suite builds for that board. Giving a single-bank part a
 storage zone is a DESIGN QUESTION and not a port - an erase or a program
 stalls the core that fetches from the same bank for the operation's whole
 duration (3.3.6), so a heap in bank 1 costs every caller a 22 ms freeze
@@ -415,7 +410,7 @@ and a journal's ordinary save 3 ms, where the two-bank arrangement costs
 nothing at all (the read-while-write measurement above). Until that
 question is answered, the two suites build for `g0b1re` only.
 
-## On the third silicon
+## On the STM32G031K8
 
 The Nucleo-G031K8 has **64 KB of flash in ONE bank**, so it is the G071's
 case again and for the same reason: `test_stm32_nvm` and
@@ -453,10 +448,16 @@ Implemented but not bench-verified:
   (ECCD, a double error) is stated and unexercised.
 - **RDERR and the PCROP read path**, which need a PCROP area to exist.
 - **`mass_erase()`** on either bank.
-- **A single-bank part, and a value-line part.** The other eleven headers
-  compile the driver and the family fixture proves the second bank's
-  registers - and, on the x0 line, the option bits and registers it has
-  not got - are reached only where they exist, but no such board has run
-  this code, and on a single-bank part
-  `MainFlashPartition::geometry_matches_silicon()` would (correctly)
-  close the storage.
+- **The program/erase engine and both storage backends on a single-bank
+  part.** The STM32G071RB and the STM32G031K8 run the wait-state,
+  identity and option-decode half of `flash.hpp` in every suite of
+  theirs, and nothing else of it: the two storage suites build for the
+  G0B1RE alone (above), so on a single-bank part
+  `MainFlashPartition::geometry_matches_silicon()` closing the storage
+  is what the code says and not what a board showed. Measuring it is
+  one build of `test_stm32_nvm` for such a board, whose letters would
+  then report the refusal - the design question of where a single-bank
+  storage zone goes is what that build waits for.
+- **A value-line (x0) part.** The family fixture proves the option bits
+  and registers the x0 line has not got are reached only where they
+  exist; no x0 board is on the bench.

@@ -19,9 +19,9 @@ guessable from a neighbour's (verify on st.com before citing).
 | STM32G0x1 reference manual | **RM0444 Rev 6** (December 2024) | symlink to `~/Documenti/Elettronica/STM32/STM32G0/rm0444-*.pdf` | the whole x1 line (G031/041/051/061/071/081/0B1/0C1); the x0 value line is RM0454 (same peripherals minus a few) |
 | STM32G0B1xB/xC/xE datasheet | **DS13560 Rev 5** (June 2024) | symlink to `.../stm32g0b1ce.pdf` | pinout, alternate-function tables 13..24 (the AF numbers no header carries), electrical characteristics |
 | STM32G0B1xB/xC/xE device errata | **ES0548 Rev 3** (October 2022) | symlink to `.../es0548-*.pdf` | silicon revisions A (REV_ID 0x1000) and Z (0x1001) in one document with a per-item column each |
-| STM32G071x8/xB device errata | **ES0418 Rev 5** (November 2023) | symlink to `.../es0418-*.pdf` | the SECOND SILICON's (the Nucleo-G071RB at desk position F, revision B); READ AT THE BENCH - see "The second silicon's errata" below |
-| STM32G031x4/x6/x8 datasheet | **DS12992 Rev 4** | not fetched as a PDF; the TEXT was read at the bench | the THIRD SILICON's: pin assignment (table 12 - the LQFP32 column is what says which pads exist), alternate-function tables 13..17, the low-power mode paragraphs of 3.7 |
-| STM32G031x4/x6/x8 device errata | **ES0487 Rev 6** (September 2023) | symlink to `.../es0487-stm32g031x4x6x8-device-errata-stmicroelectronics.pdf` | the THIRD SILICON's (the Nucleo-G031K8 at desk position G, revision Y); READ AT THE BENCH against the letters - see "The third silicon" below. st.com serves it to `curl` with a browser user agent where the same URL times out elsewhere |
+| STM32G071x8/xB device errata | **ES0418 Rev 5** (November 2023) | symlink to `.../es0418-*.pdf` | the STM32G071RB's (the Nucleo-G071RB, revision B); READ AT THE BENCH - see "STM32G071RB: its errata read at the bench" below |
+| STM32G031x4/x6/x8 datasheet | **DS12992 Rev 4** | not fetched as a PDF; the TEXT was read at the bench | the STM32G031K8's: pin assignment (table 12 - the LQFP32 column is what says which pads exist), alternate-function tables 13..17, the low-power mode paragraphs of 3.7 |
+| STM32G031x4/x6/x8 device errata | **ES0487 Rev 6** (September 2023) | symlink to `.../es0487-stm32g031x4x6x8-device-errata-stmicroelectronics.pdf` | the STM32G031K8's (the Nucleo-G031K8, revision Y); READ AT THE BENCH against the letters - see "STM32G031K8: ES0487 read against the letters" below. st.com serves it to `curl` with a browser user agent where the same URL times out elsewhere |
 | Getting started with STM32G0 hardware development | AN5096 Rev 4 (December 2025) | symlink to `.../an5096-*.pdf` | decoupling, clocks, boot pins |
 
 Canonical URLs (redirect to the current revision):
@@ -61,9 +61,9 @@ ARE in the repository (Apache-2.0 allows it) so a fresh clone builds:
 
 | Board | Part | IDCODE | Sheet | Read at the bench? |
 |---|---|---|---|---|
-| E, Nucleo-G0B1RE (MB1360) | STM32G0B1RE, 512 KB / 144 KB, LQFP64 | **0x10016467** (DEV_ID 0x467, REV_ID 0x1001 = **revision Z**, ES0548 table 2) | ES0548 Rev 3 | yes, in hand |
-| F, Nucleo-G071RB | STM32G071RB, 128 KB / 36 KB, LQFP64 | **0x20006460** (DEV_ID 0x460, REV_ID 0x2000 = **revision B**, ES0418 table 2) | ES0418 Rev 5 | yes, in hand |
-| G, Nucleo-G031K8 (Nucleo-32) | STM32G031K8, 64 KB / 8 KB, LQFP32 | **0x10036466** (DEV_ID 0x466, REV_ID 0x1003) | ES0487 | **NO - not obtained** |
+| Nucleo-G0B1RE (MB1360) | STM32G0B1RE, 512 KB / 144 KB, LQFP64 | **0x10016467** (DEV_ID 0x467, REV_ID 0x1001 = **revision Z**, ES0548 table 2) | ES0548 Rev 3 | yes, in hand |
+| Nucleo-G071RB | STM32G071RB, 128 KB / 36 KB, LQFP64 | **0x20006460** (DEV_ID 0x460, REV_ID 0x2000 = **revision B**, ES0418 table 2) | ES0418 Rev 5 | yes, in hand |
+| Nucleo-G031K8 (Nucleo-32) | STM32G031K8, 64 KB / 8 KB, LQFP32 | **0x10036466** (DEV_ID 0x466, REV_ID 0x1003 = **revision Y**, ES0487 table 2) | ES0487 Rev 6 | yes, in hand |
 
 Every bench suite prints `part DEV_ID .. REV_ID ..` at boot from
 `DeviceIdcode::read()`, because a measurement that differs between two
@@ -71,7 +71,7 @@ boards is only a finding once the die it was taken on is on the record.
 Read the IDCODE at the bring-up of any new board - the errata columns
 are per revision, and the SHEET is per part number.
 
-## Errata ES0548: what touches the bring-up (revision Z)
+## Errata ES0548 on revision Z: where each item is answered
 
 Encoded in code or stated where the code cannot enforce it:
 - **2.2.10 Prefetch failure when branching across flash memory banks**
@@ -142,20 +142,22 @@ Encoded in code or stated where the code cannot enforce it:
   then transmits nothing at all - so `prescaler()` refuses on such an
   instance rather than trusting the readback (usart.md).
 
-Read and NOT applicable to this bring-up (the peripheral is not
-driven yet): 2.2.1 (LSI), 2.2.2 (PWR wake-up flags), 2.2.3 (a flash
-double-word all-ones cannot be re-programmed to all zeros - the FLASH
-campaign's), 2.2.6 (PC13 disturbs LSE), 2.2.11 (RTC domain), 2.3.1
-(GPIO after Standby), 2.4.x/2.5.x (DMA/DMAMUX), 2.6.x (ADC), 2.7.x
-(TIM), 2.9.1 (RTC), 2.10.x (I2C), 2.12.x (SPI). Revision A only, absent
-on Z: 2.2.5, 2.2.7, 2.2.9, 2.6.5.
+Answered in the chapter documents that own them: 2.2.1 (LSI unstable
+across a VDD reset) in reset.md and rtc.md; 2.2.2 (PWR wake-up flags)
+in pwr.md; 2.2.3 (a flash double word holding all ones cannot be
+re-programmed to all zeros) in nvm.md; 2.2.6 (PC13 disturbs LSE),
+2.2.11 (the RTC domain reset) and 2.9.1 (RTC) in rtc.md; 2.4.1 and
+2.5.1..2.5.4 (DMA/DMAMUX) in dma.md; 2.6.x (ADC) in adc.md; 2.7.x (TIM)
+in tim.md; 2.10.x (I2C) in i2c.md; 2.12.x (SPI) in spi.md. Revision A
+only, absent on Z: 2.2.5, 2.2.7, 2.2.9, 2.3.1 (GPIO after a Standby
+wake-up), 2.6.5.
 
 **No item of ES0548 touches the CRC calculation unit** - a statement
 about the document, not a claim about the silicon (crc.md).
 
-## The second silicon: STM32G071RB, and its errata read at the bench
+## STM32G071RB: its errata read at the bench
 
-The Nucleo-G071RB at desk position F carries an **STM32G071RB, DBGMCU_IDCODE
+The Nucleo-G071RB carries an **STM32G071RB, DBGMCU_IDCODE
 DEV_ID 0x460, REV_ID 0x2000 = silicon revision B** (ES0418 table 2; Y is
 0x2002 and is the newer of the two). Every bench suite of this stratum
 prints that pair at boot, through `DeviceIdcode::read()` in `flash.hpp`,
@@ -211,9 +213,9 @@ headers, so a timer told to take MCO on a smaller part counts nothing, in
 silence - which wedged a suite whose own microsecond wait rode that timer
 ([../tim.md](../tim.md), [../clock.md](../clock.md)).
 
-## The third silicon: STM32G031K8, and ES0487 read against the letters
+## STM32G031K8: ES0487 read against the letters
 
-The Nucleo-G031K8 at desk position G reports **DEV_ID 0x466, REV_ID
+The Nucleo-G031K8 reports **DEV_ID 0x466, REV_ID
 0x1003**, which ES0487's table 2 names **revision Y** (0x1001 is Z).
 The sheet numbers its items on its own scale and A NUMBER DOES NOT
 TRAVEL BETWEEN SHEETS, so the table pairs each limitation BY TITLE with
@@ -221,9 +223,9 @@ its ES0548 twin; the suites' own prints still name the G0B1's number as
 the description being staged ("ES0487's twin pending" - true when they
 were written, the sheet arrived after), and the verdict is here.
 
-| ES0487 item, status on revision Y | ES0548 twin | Where a letter reaches it on G | What this die did |
+| ES0487 item, status on revision Y | ES0548 twin | Where a letter reaches it on the G031K8 | What this die did |
 |---|---|---|---|
-| **2.2.4** DMAMUX cannot be synchronized or triggered by EXTI - **ABSENT ON Y** (N on Z; the G071's ES0418 2.2.4, reproduced on F) | none | `test_stm32_serial`'s boot probe on PB3 | THE DIE AGREES: four pad edges into a request generator move **4 words with the event mask alone and 4 with the interrupt mask armed** (F: 0 and 1 of 4), so the four edge-counter verdicts that skip on F run here |
+| **2.2.4** DMAMUX cannot be synchronized or triggered by EXTI - **ABSENT ON Y** (N on Z; the G071's ES0418 2.2.4, reproduced on the G071RB) | none | `test_stm32_serial`'s boot probe on PB3 | THE DIE AGREES: four pad edges into a request generator move **4 words with the event mask alone and 4 with the interrupt mask armed** (F: 0 and 1 of 4), so the four edge-counter verdicts that skip on F run here |
 | **2.2.6** wakeup from Stop not effective with HSIDIV != 0 - N/N | 2.2.4 | `test_stm32_sleep` letter `g`, with its control | the hazard predicate is quiet at HSIDIV 0 and speaks as soon as the divider moves; an RTC wake is not a clock-request wake and a 250 ms Stop under HSIDIV /4 lasted its time. No USART subject: this part's USART2 cannot wake from Stop at all |
 | **2.2.2** WUFx set while configuring the pin - A/A | 2.2.2 | `test_stm32_sleep` letter `h` | `wakeup_pin()` clears WUFx as part of the configuration, so the flag cannot reach a caller - the workaround as code |
 | **2.2.1** unstable LSI when it clocks the RTC and VDD resets without the backup domain - P/P | 2.2.1 | - | NOT STAGED, and it weighs more on this board than on the other two: ITS RTC RUNS ON LSI. The workaround is a program's - on a power-on (BORRSTF) reset the backup domain before trusting it |
@@ -231,7 +233,7 @@ were written, the sheet arrived after), and the verdict is here.
 | **2.2.8** PC13 transitions disturb LSE - N/N | 2.2.6 | - | moot: PC13 reaches no pin and the LSE does not start |
 | **2.2.11** RTC domain corrupted on a missed power-on reset - A/A | 2.2.11 | - | not staged |
 | **2.3.1** DMA disable failure on a transfer error coinciding with a GIF clear - A/A; **2.4.1..2.4.4** the DMAMUX flags and the synchronization write - N/N/N/A | 2.4.1; 2.5.1..2.5.4 | dma.hpp | the same block as the other dies', item for item by title: whatever [dma.md](../dma.md) records for ES0548's holds here |
-| **2.5.1..2.5.4** ADC overrun flag, CFGR1 under ADEN, AWD1 in single mode, sampling one cycle longer - P/A/A/N | 2.6.1..2.6.4 | `test_stm32_analog`, adc.hpp | 2.5.2 is structural on every part (a configure with ADEN set is refused), as audited on F; **2.5.6** (offset out of specification) is Z only |
+| **2.5.1..2.5.4** ADC overrun flag, CFGR1 under ADEN, AWD1 in single mode, sampling one cycle longer - P/A/A/N | 2.6.1..2.6.4 | `test_stm32_analog`, adc.hpp | 2.5.2 is structural on every part (a configure with ADEN set is refused), as audited on the G071RB; **2.5.6** (offset out of specification) is Z only |
 | **2.6.2** consecutive compare event missed - N/N | 2.7.2 | `test_stm32_tim` letter `k`, staged with a control | did NOT reproduce in that staging: the second compare raised its flag and toggled its output 8 of 8 - unrefuted rather than disproved, as on the other two dies |
 | **2.6.1, 2.6.3** the one-pulse trigger, output-compare clear - P/P; **2.6.4** TIM1's sync trigger missed by a slower slave - N/N; **2.6.5** TIM16/17 clocked by SYSCLK | 2.7.1, 2.7.3; none; none | - | not staged (2.6.1 needs a trigger placed at CNT = ARR of a cascaded master, 2.6.3 an `ocref_clr` this part has no comparator for, 2.6.4 has no G0B1 twin and no letter); 2.6.5 is Z only |
 | **2.7.1, 2.7.2** LPTIM stuck in its interrupt on a disable / on a flag clear - A/A, P/P | 2.8.1, 2.8.2 | lptim.hpp, as code | unchanged: `disable()` IS the RCC reset, a thread-mode clear with an interrupt enabled is refused |

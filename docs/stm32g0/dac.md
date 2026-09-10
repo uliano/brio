@@ -1,15 +1,5 @@
 # DAC (STM32G0)
 
-> **PROVISIONAL.** The whole of chapter 16's register surface is
-> implemented - both channels, the eight output modes, the trigger
-> table, the three data formats and the dual holding register, the DMA
-> requests with their underrun report, the offset calibration and the
-> sample-and-hold times - and the parts a bench with no wires can reach
-> are verified: the transfer curve, the buffer's swing, the formats, and
-> a DMA-fed waveform paced by a timer. The wave generators, the
-> sample-and-hold mode and the user offset trim are written and NOT
-> measured. The list is in "Not covered yet".
-
 Documents of record: RM0444 Rev 6 ch. 16, with the DMAMUX request table
 55 and the vector table 12.3 (table 61); DS13560 Rev 5 table 12 (the
 pads) and table 64 (the DAC's electrical characteristics); errata
@@ -217,7 +207,7 @@ can and cannot measure about the comparator itself, is in
   the evidence is the handler count instead (eighteen calls, the same
   fact seen from the wrong side).
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_analog` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
 0x2000) and every DAC letter passes there unchanged: two channels, the
@@ -250,7 +240,7 @@ cannot be an output while that channel is in an on-chip-only mode) is not
 reached either: the one letter that uses `DacMode::internal_unbuffered`
 drives no pad while it holds.
 
-## On the third silicon
+## On the STM32G031K8
 
 **THERE IS NO DAC ON THE G031** (DEV_ID 0x466): 16.3's table gives the
 block to the G05x class and up, the header declares no `DAC1_BASE`, and

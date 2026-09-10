@@ -1,14 +1,5 @@
 # Voltage reference (STM32G0)
 
-> **PROVISIONAL, and deliberately so.** The whole of chapter 17 is
-> implemented - the four modes of table 91, the two scales, the ready
-> bit and the factory trim - and the block is READ on the bench and
-> NEVER ENABLED. The reason is in the first section and it is not going
-> to change until the board's VREF+ wiring is known from a schematic:
-> nothing inside the chip can tell a free VREF+ pin from one tied to
-> VDDA, and enabling the buffer on the second is a source driving into
-> a regulator. The list is in "Not covered yet".
-
 Documents of record: RM0444 Rev 6 ch. 17; DS13560 Rev 5 section 4
 (the LQFP64 pinout, where VREF+ is pin 7 in its own right), section 3.16
 and table 67 (the buffer's electrical characteristics); errata ES0548
@@ -94,7 +85,7 @@ can see: `Adc::vdda_mv()` puts it at 3310 mV, which is what a Nucleo's
 pin and with a separately supplied one, and it is exactly the ambiguity
 that keeps the buffer off.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_analog` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
 0x2000) and VREFBUF is present and behaves identically - the same three
@@ -103,7 +94,7 @@ the same VRR wait. Nothing here is per-part: `vrefbuf_present()` is true
 on every x1 header of the pack, and this is a case where "nothing
 differs" is the whole finding.
 
-## On the third silicon
+## On the STM32G031K8
 
 VREFBUF IS PRESENT on the G031 (`vrefbuf_present()` is true), so the
 shared VREF+ rail and `Ref`/`ref_mv()` are what they are on the other two
@@ -112,7 +103,16 @@ two of that rail's users ([dac.md](dac.md), [comp.md](comp.md)).
 
 ## Not covered yet
 
-**Implemented but not bench-verified - all of it, and on purpose:**
+Driver gaps, both declined with the reason:
+
+- A setter for VREFBUF_CCR.TRIM. 17.3.2's own note makes a user trim an
+  ascending sweep from zero, which is a calibration procedure and not a
+  setter, and nothing here has a reason to want it.
+- Table 91's ENVR = 0 + HIZ = 0 mode, for the reason above: on a board
+  that ties VREF+ to VDDA it is a path from the supply to ground.
+
+Implemented but not bench-verified - the buffer itself, and on purpose
+(above, "Why the buffer is never enabled here"):
 
 - `enable()` at either scale, and therefore VRR, the start-up time and
   the 2.048 V / 2.5 V levels themselves. Closing this gap does not need
@@ -122,10 +122,3 @@ two of that rail's users ([dac.md](dac.md), [comp.md](comp.md)).
 - The ADC, DAC and comparators against a reference that is not the
   supply. Every absolute millivolt this stratum reports today is
   ratiometric to VDDA, measured through VREFINT.
-
-**Deliberately absent:**
-
-- A setter for VREFBUF_CCR.TRIM. 17.3.2's own note makes a user trim an
-  ascending sweep from zero, which is a calibration procedure and not a
-  setter, and nothing here has a reason to want it.
-- Table 91's ENVR = 0 + HIZ = 0 mode, for the reason above.

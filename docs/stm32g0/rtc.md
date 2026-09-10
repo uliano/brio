@@ -1,15 +1,5 @@
 # RTC and the backup registers - the clock that outlives everything else (STM32G0)
 
-> **PROVISIONAL.** The RTC domain, the calendar, both alarms, the
-> periodic wake-up timer, the smooth calibrator, the reference-clock
-> detection, the sub-second shift, the five backup registers and the
-> TAMPER DETECTION half of chapter 31 are built and bench-verified. What
-> is left out is the RTC output pads, which want the one pin an erratum
-> makes hostile to the crystal, HSE/32 as a source, and a tamper on a
-> controlled EDGE - which is not a driver gap but a measured
-> impossibility on this board, arming a tamper input taking the pad away
-> from its port. The list is in "Not covered yet".
-
 Documents of record: RM0444 Rev 6 ch. 30 (RTC), ch. 31 (TAMP), 5.2.5 /
 5.2.6 / 5.2.12 / 5.4.23 (the RCC's side of the domain) and 4.1.2 (the
 PWR's), plus errata ES0548 Rev 3 - **2.9.1 is live on this silicon and
@@ -478,7 +468,7 @@ no pad.
   internal pull-up until the strobe releases it, and does afterwards.
   The same is true of PA8, which is CC1 - see [port.md](port.md).
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_rtc` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
 with the same letters and the same verdicts.
@@ -505,7 +495,7 @@ with the same letters and the same verdicts.
   driving the detector through the precharge and the board's own pulls
   rather than through a port output.
 
-## On the third silicon
+## On the STM32G031K8
 
 `test_stm32_rtc` claims 109 of its 125 verdicts in `z` on the
 Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003), with `w` (11 verdicts) and
@@ -553,16 +543,19 @@ Driver gaps (this chapter's option space the stratum does not touch):
   register set is the passive one), so there is nothing to build.
 
 Implemented, not bench-verified:
-- **A tamper on a controlled EDGE**, and the reason is measured rather
-  than assumed (above): arming a tamper input takes the pad from its
-  port, pulls included, so nothing inside this chip can produce one.
-  Everything the edge detector is asked here is asked over a STANDING
-  level, and 31.3.4's "no latency when TAMPFLT = 0" is therefore
-  unmeasured.
-- **TAMP_IN3**, which is PE6 on this device and a port this package does
-  not bond ([port.md](port.md)'s standing per-package gap), and the
-  third input's absence on the G071 and the G031 - compile-checked by
-  the family fixture, never run.
+- **A tamper on a controlled EDGE.** On the STM32G0B1RE the reason is
+  measured rather than assumed (above): arming a tamper input takes the
+  pad from its port, pulls included, so nothing inside that chip can
+  produce one, and everything the edge detector is asked is asked over
+  a STANDING level. On the STM32G071RB the pad STAYS the port's (above),
+  so a driven edge is producible there and no letter yet drives one;
+  that letter is what would measure 31.3.4's "no latency when
+  TAMPFLT = 0". On the STM32G031K8 the precharge is itself the edge
+  (above).
+- **TAMP_IN3**, which is PE6 on the STM32G0B1 and a port the LQFP64
+  does not bond ([port.md](port.md)'s standing per-package gap); its
+  ABSENCE on the STM32G071RB and the STM32G031K8 is measured (above:
+  `tamp_external_inputs()` finds two).
 - **`RtcDomain::lse_css` ARMED**, and this is a decline with a reason:
   5.4.23 reads the enable as one-way ("cannot be disabled, except after
   a LSE failure detection") while 5.x's own bit description offers a
@@ -574,5 +567,8 @@ Implemented, not bench-verified:
 - **`Rtc::timestamp_enable`'s own pad**: the RTC_TS route is PC13 and
   the timestamp is reached here through TAMPTS instead.
 
-Declined with the reason, and printed as such by the suite: nothing in
-this chapter. Every letter of `z` judges what it measures.
+Declined by name on the bench, each with its reading printed: on the
+STM32G071RB the strong claim that arming a tamper input takes the pad
+(above); on the STM32G031K8 31.3.4's edge caution and the TAMPPUDIS
+contrast (above). On the STM32G0B1RE nothing: every letter of `z`
+judges what it measures.

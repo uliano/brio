@@ -1,12 +1,5 @@
 # CRC calculation unit (STM32G0)
 
-> **PROVISIONAL.** Chapter 14 is implemented whole - every register,
-> every field, all three access widths, both reversals, the programmable
-> polynomial at all four sizes and the scratch register - and every one
-> of them is bench-verified. What keeps the banner is in "Not covered
-> yet": the unit is complete, its RELATIONSHIP to `util/crc.hpp` is a
-> util design question this stratum must not open on its own.
-
 Documents of record: RM0444 Rev 6 - CRC ch. 14, the AHB enable and reset
 5.4.8/5.4.4, the DMA request table 55 (which has NO CRC row). Errata
 ES0548 Rev 3: NO ITEM TOUCHES THE CRC - a statement about the document,
@@ -222,7 +215,7 @@ util service is a design question about the util level (a concept, a
 fallback, what a constexpr context does with a peripheral), and it is
 not this stratum's to open.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_crc` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
 with the same letters and the same verdicts as on the G0B1RE: every
@@ -232,11 +225,10 @@ unit has no per-part table cell of any kind and nothing here is gated,
 which makes this the only driver of this stratum that needs NOTHING
 from the reserve.
 
-## On the third silicon
+## On the STM32G031K8
 
 `test_stm32_crc` runs on the Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003)
-with the same letters and the same verdicts again: the third die of this
-family gives the same reset values, the same reversals and the same four
+with the same letters and the same verdicts again: this die gives the same reset values, the same reversals and the same four
 check values as the other two, and the suite needs nothing per-part
 beyond its `// build: boards =` line. The DMA-fed letter reads 16 KB of
 this program's own flash through DMA1's channel 1 at 36491 kB/s and gets
@@ -244,20 +236,15 @@ the CPU-fed number and the software reference's, as everywhere else.
 
 ## Not covered yet
 
-Driver gaps - things chapter 14 has and this file does not:
-
-- nothing.
+Driver gaps: none - chapter 14 is implemented whole. (Its relationship
+to `util/crc.hpp` is a design question, above, not a gap of this
+driver.)
 
 Implemented but not bench-verified:
 
 - **`release()`** - the gate is closed and the block reset, but no
   letter checks what a closed gate does to a running calculation
   (5.2.17's answer is measured for a READ, at the top of letter a).
-
-Declined, with the reason:
-
-- **The util hook**, above: a design question for `docs/design/`, not a
-  driver gap.
 - **A DMA channel narrower than a word.** `data_address()` is width
   agnostic and the suite feeds words; a byte-wide MEM2MEM channel into
   `CRC_DR` would exercise the narrow access from the DMA's side rather

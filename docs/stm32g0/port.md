@@ -1,17 +1,11 @@
 # GPIO (STM32G0)
 
-> **PROVISIONAL.** Mode, value, pull, output type, speed and the
-> alternate-function handoff are implemented, with the port clock
-> opened by every configuring verb; what a pin CANNOT do here by
-> design - sense edges and raise interrupts - belongs to the EXTI, and
-> that peripheral now has its own driver and its own document
-> ([exti.md](exti.md)). What is still missing is in "Not covered yet".
-
 Documents of record: RM0444 Rev 6, GPIO ch. 7 (the EXTI is ch. 13 and
 has its own driver and document; the AF-number-to-signal tables are the
 DATASHEET's,
 DS13560 tables 13..24), errata ES0548 Rev 3 item 2.3.1 (GPIO after a
-Standby wake-up; Standby is not entered yet). Driver:
+Standby wake-up - revision A only, so not this silicon's; the Standby
+itself is [pwr.md](pwr.md)'s). Driver:
 `stm32g0/pin.hpp`; the port-presence facts come from
 `stm32g0/device_tables.hpp`. The family fixture is
 `test/family_stm32g0/pin.cpp` plus two negatives under
@@ -182,7 +176,29 @@ disconnected function input's low one. The consequence for a driver is
 that handing a peripheral a hardware input means handing it the PAD, at
 the right AF, and not merely leaving the pin at the right level.
 
-## On the second silicon
+**Open-drain outputs are measured**, and by two users at once: an
+I2C bus IS an open-drain pair (both ends of `test_stm32_i2c`'s self-link
+run at AF6 with `open_drain`, carrying bytes at 100 k, 400 k and 1 M),
+and that suite's `unstick()` drives the same pads as open-drain GPIO -
+low by ODR, released to the bus's own pull-ups - to clock a stuck client
+free. See [i2c.md](i2c.md).
+
+**A SECOND DRIVE STRENGTH LIVES IN SYSCFG AND NOT IN GPIO**, which is
+worth knowing before reading `OSPEEDR` as the whole story:
+`SYSCFG_CFGR1` carries fast-mode-plus bits that raise an I2C pad's sink
+to 20 mA, in two flavours - per pad (PB6, PB7, PB8, PB9, PA9, PA10 and
+nothing else on this family) and per instance (`I2C1_FMP`, `I2C2_FMP`,
+`I2C3_FMP`, which reach every pad configured for that instance). 6.1.3
+adds that **with Fm+ enabled the pad's own speed control is ignored**.
+The reserve publishes both (`i2c_pad_fmp_bit()`,
+`i2c_instance_fmp_bit()`) and `I2cHost::fast_plus_drive()` spends them;
+PA11 and PA12 - this bench's own I2C2 pads - have no per-pad bit, so
+there the instance-wide one is the only route. One of those bits has a
+second claimant: PB9's is also `irtim.hpp`'s high-sink LED driver
+([irtim.md](irtim.md)), so a program driving an infrared LED on PB9
+cannot also run an Fm+ bus there.
+
+## On the STM32G071RB
 
 The Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000) is the same LQFP64
 package with the same pads, and every bench suite that walks one behaves
@@ -202,7 +218,7 @@ is DRIVABILITY and not the internal pull's authority, because
 drivability is the electrical question an alternate-function output
 actually asks.
 
-## On the third silicon
+## On the STM32G031K8
 
 The Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003) is an **LQFP32**, and
 what changes is the BONDING and nothing else in this chapter: PA0..PA15,
@@ -210,7 +226,7 @@ PB0..PB9, PC6, PC14, PC15 and PF2 (NRST) are pins, and PB10..PB15,
 PC0..PC5, PC7, PC13, PD0..PD3, PF0 and PF1 are not (DS12992 table 12) -
 so `gpio_port_present('D')` is TRUE on a part whose port D reaches no
 pin at all, which is why the package question belongs to a suite and
-never to the reserve. The input path behaves as on the other two dies;
+never to the reserve. The input path behaves as on the LQFP64 parts;
 there is no UCPD here, so PA8 and PB15 carry no dead-battery Rd and
 `ucpd_dead_battery()` REFUSES rather than writing a strobe bit that does
 not exist (`ucpd_present()` in the reserve is what a suite asks
@@ -241,37 +257,25 @@ answers yes to the first and no to the second.
 
 ## Not covered yet
 
-Driver gaps: the port lock (GPIOx_LCKR), the alternate-function tables
-as data (a
-per-package pin table, the SAM device-tables shape), the analog switch
-control and the 5 V-tolerance map (DS13560's FT pins - read the table
-before a mixed-voltage bench, never assume), erratum 2.3.1 (a
-Standby-wake pin's configuration).
+Driver gaps (not built):
 
-Implemented, not bench-verified: `PinSpeed` other than low,
-`PinSet`, `Port::out_toggle` on several pins at
-once, `Pin::pull` on its own, port clocks other than A's, and
-`ucpd_dead_battery()` on UCPD2 - whose two pads are PD0 and PD2, which
-this package does not bond.
+- **The port lock, GPIOx_LCKR.** Nothing in this stratum has a reason
+  to lock a pad's configuration; born with its first user.
+- **The alternate-function tables as data** (a per-package pin table,
+  the device-tables shape). The AF numbers are the DATASHEET's and no
+  device header carries a table to check a copy against, so a copy would
+  add a second source of the same numbers with nothing to judge it by;
+  each driver states its pads' AF beside their claim instead.
+- **The 5 V-tolerance map** (DS13560's FT pins). A datasheet fact this
+  driver does not encode: read the table before a mixed-voltage bench,
+  never assume. Born with its first mixed-voltage user.
 
-**Open-drain outputs are measured**, and by two users at once: an
-I2C bus IS an open-drain pair (both ends of `test_stm32_i2c`'s self-link
-run at AF6 with `open_drain`, carrying bytes at 100 k, 400 k and 1 M),
-and that suite's `unstick()` drives the same pads as open-drain GPIO -
-low by ODR, released to the bus's own pull-ups - to clock a stuck client
-free. See [i2c.md](i2c.md).
+Implemented but not bench-verified:
 
-**A SECOND DRIVE STRENGTH LIVES IN SYSCFG AND NOT IN GPIO**, which is
-worth knowing before reading `OSPEEDR` as the whole story:
-`SYSCFG_CFGR1` carries fast-mode-plus bits that raise an I2C pad's sink
-to 20 mA, in two flavours - per pad (PB6, PB7, PB8, PB9, PA9, PA10 and
-nothing else on this family) and per instance (`I2C1_FMP`, `I2C2_FMP`,
-`I2C3_FMP`, which reach every pad configured for that instance). 6.1.3
-adds that **with Fm+ enabled the pad's own speed control is ignored**.
-The reserve publishes both (`i2c_pad_fmp_bit()`,
-`i2c_instance_fmp_bit()`) and `I2cHost::fast_plus_drive()` spends them;
-PA11 and PA12 - this bench's own I2C2 pads - have no per-pad bit, so
-there the instance-wide one is the only route. One of those bits has a
-second claimant: PB9's is also `irtim.hpp`'s high-sink LED driver
-([irtim.md](irtim.md)), so a program driving an infrared LED on PB9
-cannot also run an Fm+ bus there.
+- **`PinSet`** and **`Port::out_toggle` on several pins at once** - no
+  suite claims a set or toggles more than one pin per store; a letter
+  doing either on two pads read back through IDR would measure them.
+- **`ucpd_dead_battery()` on UCPD2**, whose two pads are PD0 and PD2:
+  bonded on the LQFP64 (above), but nothing on the bench hangs on them,
+  so no letter spends the strobe there. The measurement is UCPD1's
+  (above): a pull-up read with and without the strobe.

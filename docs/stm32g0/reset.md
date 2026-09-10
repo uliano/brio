@@ -1,12 +1,5 @@
 # Reset and the two watchdogs - why the program is running, and how to end it (STM32G0)
 
-> **PROVISIONAL.** The reset flags, both watchdog chapters and the
-> fault-to-breadcrumb path are built and bench-verified. What is left
-> out is the OPTION-BYTE side of the story - the bits that decide
-> whether either watchdog is a hardware one and what they do in Stop and
-> Standby are read here and written nowhere - and the PWR half of
-> PWRRSTF. The list is in "Not covered yet".
-
 Documents of record: RM0444 Rev 6 - 5.1 (the three kinds of reset),
 5.4.24 (RCC_CSR), ch. 28 (IWDG), ch. 29 (WWDG), 5.2.14 (the watchdog
 clock), 40.10.3 (the debug freeze register) - with DS13560 Rev 5 table
@@ -244,7 +237,7 @@ verdicts), which reboots the board six times and resumes from a
   reset on a system reset, they stand on warm boots and are clear on
   cold ones.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_platform` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
 0x2000) and scores **53/53** in `z`, every letter and every verdict the
@@ -253,7 +246,7 @@ the critical section, SysTick's arithmetic, `delay_us`, and both
 watchdogs. Nothing in this chapter is per-part on the x1 line, and the
 `i` letter's six real resets behave the same way.
 
-## On the third silicon
+## On the STM32G031K8
 
 `test_stm32_platform`'s letter `i` runs its six real resets on the
 Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003) and scores **26/26**: the
@@ -282,11 +275,9 @@ Driver gaps (this chapter's option space the stratum does not touch):
   and a wrong option byte is a bricked board.
 - The NRST pin's three modes (reset input/output, reset input, PF2
   GPIO) - option bytes again.
-- The PWR side of PWRRSTF: the BOR levels and the brown-out detector
-  are not read or written here.
-- The RTC domain reset (`RCC_BDCR.BDRST`), which is the one thing that
-  would put this board's RTCEN/RTCSEL back - and ES0548 2.2.1's
-  workaround. It belongs to the RTC or the clock chapter, not here.
+- The BOR levels behind PWRRSTF - option bytes again (`flash.hpp`
+  decodes them read-only). The PVD, which is the PWR chapter's other
+  supply monitor, is built in [pwr.md](pwr.md).
 
 Implemented, not bench-verified:
 - `Iwdg::force_reset()` (the window-violation path; the WWDG's
@@ -299,6 +290,8 @@ Implemented, not bench-verified:
   as a REFRESHING recovery handler (29.4's second use), which no letter
   stages because activating the watchdog is one-way inside a power
   cycle.
-- LPWRRSTF and OBLRSTF: nothing here enters a low-power mode or
-  launches the option byte loader, so those two flags have never been
-  seen set.
+- LPWRRSTF and OBLRSTF, never seen set. LPWRRSTF needs `nRST_STOP` /
+  `nRST_STDBY` / `nRST_SHDW` cleared, and those are option bytes (above);
+  with them at their shipped value a Standby or Shutdown wake sets SBF
+  or looks like a power-on ([pwr.md](pwr.md)), never this flag. Nothing
+  launches the option byte loader.

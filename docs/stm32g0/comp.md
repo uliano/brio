@@ -1,17 +1,5 @@
 # Comparators (STM32G0)
 
-> **PROVISIONAL.** All of chapter 18's register surface is implemented -
-> the three input multiplexers, the hysteresis and the two speeds, the
-> polarity, the blanking sources, the window mode and its output
-> selector, the lock and the EXTI line each comparator publishes - and
-> everything a bench with no wires can reach is verified. A comparator's
-> non-inverting input is a pad and only a pad, and this family
-> disconnects a pad's own pull the moment it goes analog; what a FREE
-> pad can nevertheless be made to do is measured below, and what it
-> still cannot - a threshold measured against a level something is
-> HOLDING - is listed in "Not covered yet" with the numbers that decline
-> it.
-
 Documents of record: RM0444 Rev 6 ch. 18, with the EXTI line table
 13.5.1, the vector table 12.3 (table 61) and TIM1_TISEL / TIM1_AF1
 (21.4.27, 21.4.28); DS13560 Rev 5 table 12 (the input pads) and table 68
@@ -275,7 +263,7 @@ BLANKSEL bit for it is still written and read back, because a mask this
 driver refused to select would be a claim about a timer's channels and
 not about this chapter.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_analog` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
 0x2000), where **THERE ARE TWO COMPARATORS AND NOT THREE**: 18.1 gives
@@ -296,7 +284,7 @@ same shape as the G0B1RE's 687..1062 ns and 406..484 ns gap, with the
 DAC's settling and the poll loop still inside both absolutes and
 subtracted from neither.
 
-## On the third silicon
+## On the STM32G031K8
 
 **THERE IS NO COMPARATOR AT ALL ON THE G031** (DEV_ID 0x466): no
 COMP1_BASE, no COMP2_BASE, so `comp_present(n)` is false for every n,
@@ -313,6 +301,8 @@ are not implemented either, which is part of why this part's
 
 ## Not covered yet
 
+Driver gaps: none - chapter 18's register surface is implemented whole.
+
 **Implemented but not bench-verified:**
 
 - **The OFFSET and the three HYSTERESIS levels**, declined above with
@@ -327,14 +317,12 @@ are not implemented either, which is part of why this part's
   pair it does not build ([tim.md](tim.md)). The BLANKSEL bit is written
   and read back; the GATE is not seen.
 - COMP3's third plus input PE7, which the driver reports valid on this
-  DEVICE and which this PACKAGE may not bond - a per-package pin table
-  this stratum does not have ([port.md](port.md)).
+  DEVICE and which the LQFP64 does not bond (the bonding survey in
+  [port.md](port.md) reaches no port E pin) - a per-package pin table
+  this stratum does not have.
 - LOCK. It is offered, never set, and never will be by a re-runnable
   suite.
 - Everything in table 99 (the low-power modes): "comparator interrupts
   cause the device to exit Stop" is a sentence here and not a
-  measurement.
-
-On the second silicon (the Nucleo-G071RB), NOT COVERED: **COMP3** in every
-respect - its register block, its two plus pads and its EXTI line 20. The
-part has two comparators.
+  measurement. A Stop with a comparator's EXTI line unmasked and the DAC
+  stepped across its threshold would measure it.

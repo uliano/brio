@@ -1,15 +1,5 @@
 # Low-power timers (STM32G0)
 
-> **PROVISIONAL.** Chapter 26 is implemented whole - both instances,
-> every register and every field, the four kernel clocks, both counter
-> modes, the trigger and input multiplexers, the three waveforms, the
-> glitch filters, encoder mode, the two counter resets and the wake
-> line - and the tasks over it give `util/pwm_channel.hpp` its fourth
-> silicon, `util/power.hpp` its third sleep site on this target, and
-> the kernel its first TICKLESS timebase (`LptimTicker`,
-> [platform.md](platform.md)). What is still missing is in "Not
-> covered yet".
-
 Documents of record: RM0444 Rev 6 - LPTIM ch. 26, the kernel-clock
 multiplexer 5.4.21 (RCC_CCIPR), the bus enable and reset 5.4.19/5.4.11,
 the low-power modes 5.3 and 26.5, the EXTI line map table 65, the
@@ -444,7 +434,7 @@ above is measured on silicon:
   for TIM7's update, each body clearing and returning exactly the flags
   its own enable had asked for.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_lptim` runs whole on the Nucleo-G071RB (DEV_ID 0x460,
 REV_ID 0x2000): every letter and every verdict the G0B1RE gives. Both
@@ -458,7 +448,7 @@ signal, so `lptim_config_valid(1, {.trigger = comp3_out})` is FALSE there
 The corresponding ES0418 items are 2.9.1 and 2.9.2, word for word the
 G0B1's 2.8.1 and 2.8.2, and both are answered the same way.
 
-## On the third silicon
+## On the STM32G031K8
 
 On the Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003) four of
 `test_stm32_lptim`'s 82 verdicts are not claimed, each a skip by name,
@@ -508,13 +498,12 @@ Driver gaps - things chapter 26 has and this file does not:
 
 Implemented but not bench-verified:
 
-- **LPTIM2's ENCODER-shaped half, which does not exist**: nothing is
-  left to run there - the instance has no encoder and no second input,
-  and letter j measures the refusals. What letter j does NOT repeat on
-  the second instance is what would only say the same thing twice: the
-  prescaler ladder, PRELOAD, the two counter resets, the timeout
-  function and the Stop behaviour are LPTIM1's letters and are facts of
-  the shared design, not of an instance.
+- **LPTIM2's own copies of the shared design**: the prescaler ladder,
+  PRELOAD, the two counter resets, the timeout function and the Stop
+  behaviour are measured on LPTIM1 alone. LPTIM2 runs as the tickless
+  timebase's witness and in letter j's refusals (no encoder, no second
+  input - the instance has neither), and repeating LPTIM1's letters on
+  it would only say the same thing twice.
 - **The trigger rows this board cannot reach**: TAMP1, TAMP2 and
   TAMP_TRG3 (arming a tamper input erases the backup registers this
   stratum leans on - the same decline rtc.md makes), and COMP2_OUT and
@@ -525,13 +514,10 @@ Implemented but not bench-verified:
   half is not.
 - **`debug_freeze()`**: the DBG block's own gate is opened and the bit
   is written, but nothing here halts a core to watch the counter freeze.
-
-Declined, with the reason:
-
-- **The output rate at the PCLK extreme** (32 MHz with ARR = 1): no
-  counter this board can spare resolves it and the DMAMUX generator
-  cannot serve requests that fast. The claim is measured at the LSE end
-  instead, where it is exact.
+- **The output rate at the PCLK extreme** (32 MHz with ARR = 1),
+  declined: no counter this board can spare resolves it and the DMAMUX
+  generator cannot serve requests that fast. The claim is measured at
+  the LSE end instead, where it is exact.
 - **ES0548 2.8.1 is NOT STAGED and no verdict pretends it was.**
   Reproducing it needs the very `CR.ENABLE` clear this driver has no
   verb for; its own description calls the occurrence "very low"; and its

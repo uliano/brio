@@ -1,14 +1,5 @@
 # Infrared interface, IRTIM (STM32G0)
 
-> **PROVISIONAL.** Chapter 27 is two pages, three register bits and one
-> pad, and all three bits are implemented and bench-measured. What keeps
-> the banner is in "Not covered yet" and is all ELECTRICAL or
-> BOARD-SHAPED: the high-sink driver's current (the bit is proven to
-> stick, its effect needs an LED and a meter), the second IR_OUT pad
-> (PA13 is SWDIO on every Nucleo and this project never claims it), and
-> the second USART envelope, which is selected and read back but not
-> counted on the pad.
-
 Documents of record: RM0444 Rev 6 - IRTIM ch. 27 (figure 278, the
 envelope multiplexer's per-part note, the high-sink paragraph) and
 SYSCFG 6.1.3 (IR_MOD, IR_POL, I2C_PB9_FMP); DS13560 Rev 5 tables 13 and
@@ -130,7 +121,7 @@ is Reserved and `envelope()` refuses it with nothing written.
 **The high-sink bit sticks and clears**, which is the whole of what a
 board with no infrared LED can say about it.
 
-## On the second silicon
+## On the STM32G071RB
 
 The interface itself is unchanged on the Nucleo-G071RB (DEV_ID 0x460,
 REV_ID 0x2000): the three SYSCFG bits stick, IR_POL inverts, the envelope
@@ -148,7 +139,7 @@ stands. PB9 is also the pad the desk's I2C pull-up hangs on, so the
 letter's precondition is DRIVABILITY and not the internal pull's
 authority - [port.md](port.md) carries the rule.
 
-## On the third silicon
+## On the STM32G031K8
 
 The IRTIM's second envelope source follows the part: `irtim_second_usart()`
 is USART4 where the part has one and **USART2 here**, which is ch. 27's

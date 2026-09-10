@@ -1,9 +1,5 @@
 # FREQM - Frequency Meter (SAM C21)
 
-> **PROVISIONAL.** The chapter is small and fully built; what is left out
-> is the DONE interrupt as a wake source and the GCLK_IO pins as
-> measurement inputs. The list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 44 - and
 errata DS80000740S item **1.24.1, live on every silicon revision
 including this one, with no workaround offered**. Driver:
@@ -172,7 +168,6 @@ inside the chip.
   standing forever, and every measurement then returns nothing: SWRST is
   synchronized into a clock domain those channels feed.
 
-
 - **A measurement finishes while the CPU sleeps.** This block has no
   RUNSTDBY bit and does not need one: with the measured clock on the
   crystal generator and the REFERENCE on OSCULP32K - the opposite of
@@ -187,16 +182,15 @@ inside the chip.
 
 Driver gaps (not built):
 
-- **GCLK_IO pins as measurement inputs** (44.5.1): measuring an external
-  clock needs a pin claim this header does not make.
-- **A `DynamicClock` consumer.** The obvious use of this block is to
-  verify a clock switch actually happened, and there is no dynamic clock
-  on this target to verify.
+- **GCLK_IO pins as measurement inputs** (44.5.1). Measuring an external
+  clock needs a clock on a pad - a wire from another board or an
+  instrument, which nothing on the bench supplies - and a pin claim this
+  header does not make.
 
 Implemented but not bench-verified:
 
-- Operation on the E and G variants: compile-checked only. Neither the
-  block nor its channel numbers vary by package.
-- References other than OSCULP32K, and measurands other than generator 0
-  and generator 5. The routing is generator-agnostic by construction,
-  but only those have run.
+- **The ISR body, `Freqm::isr()`.** The DONE interrupt has ended a
+  standby on silicon (above, "A measurement finishes while the CPU
+  sleeps"), but that handler acknowledges through `clear_flags()`
+  directly, so the body's own flags-and-armed masking has not run.
+  Binding the body in that handler would measure it.

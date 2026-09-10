@@ -1,17 +1,5 @@
 # SPI / I2S (STM32G0)
 
-> **PROVISIONAL.** Chapter 35 is implemented whole - both roles, all
-> four modes, both bit orders, the eight baud prescalers, data sizes 4
-> to 16 bits with the FIFO threshold and the access-width rule, every
-> NSS arrangement, TI frame format, the hardware CRC in both lengths,
-> half-duplex and receive-only, the error flags with their clear
-> sequences, the DMA enables with their packing bits, and the I2S
-> personality with its four standards, three data lengths, prescaler
-> and master clock - and `SpiHost` gives `util/spi_bus.hpp` and
-> `util/bus_master.hpp` their THIRD silicon with not one line of
-> `util/` or `kernel/` changed. What is still missing is in "Not
-> covered yet".
-
 Documents of record: RM0444 Rev 6 - SPI/I2S ch. 35 (35.4's table 205 is
 the implementation table, 35.5 the SPI functional description with the
 configuration, enable and disable procedures of 35.5.7..35.5.9, the
@@ -555,13 +543,14 @@ HIGH after every init that drives it, letter `o` is deterministic, and
 letter `x` stays as the instrument that measures it. The DUT's own pads
 keep the driver's very-high: only the slave's edge lags the clock.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_spi` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
 with the Nucleo-G0B1RE as its peer - THE ROLES OF THE G0-TO-G0 LINK
 EXCHANGED, the same six wires, the same pin names at both ends - and
 scores **38/38**, the same 38 the G0B1RE scores hosting the other way.
-The self-link letters skip after the probe on this desk, as they do on E.
+The self-link letters skip after the probe on this desk, as they do on
+the G0B1RE.
 
 **THERE ARE TWO INSTANCES AND NOT THREE.** `spi_present(3)` is false, so
 `Spi<3>` does not compile there; SPI2's line is SPI2_IRQn rather than
@@ -586,7 +575,7 @@ G0B1's 2.12.1 and 2.12.2. Both are staged by letter `h`, which is a
 SELF-LINK letter: NOT STAGED on this board, and said so rather than
 assumed from the other die.
 
-## On the third silicon
+## On the STM32G031K8
 
 `test_stm32_spi` runs ON THE WIRE on the Nucleo-G031K8 (DEV_ID 0x466,
 REV_ID 0x1003) and scores **38/38** - the same 38 the SAM C21 and the
@@ -602,7 +591,7 @@ four pads are bonded on every package this stratum has met: what settles
 them is the desk, and an absent peer with the wires in place fails
 loudly.
 
-What the census still proves on a third die: the reserve's SPI roster and
+What the census still proves on this die: the reserve's SPI roster and
 the shared-vector derivation (SPI2's line is SPI1's no more, and it is
 shared with a third instance exactly where the part has one); table 209's
 reset values to the bit, the misaligned reset DS/FRXTH pair, 35.9.2's
@@ -695,14 +684,14 @@ on every header of the pack, but no silicon has run it:
   alone (SSM/SSI) counts a host's CPOL settling edge and is one bit
   early from the first frame, which is the same fact seen from the
   client's side.
-- **the second silicon runs the PEER and not the suite.** A
-  Nucleo-G071RB serves `spi_peer`'s stm32g0 port on the far end of the
-  link - the same driver's `SpiClient`, `SpiHost` and the two DMA
-  engines on a second die, exercised from the outside by every peer
-  letter - but `test_stm32_spi` itself has never been run ON it, so the
-  self-link half and the wireless letter `a` are one G0B1RE's.
+- **the self-link letters on the STM32G071RB and the STM32G031K8**:
+  ES0418 2.14.1 and 2.14.2 (the two BSY items), the frame matrix, the
+  eight BR codes host-to-host, NSS four ways, the CRC, TI mode, the OVR
+  and the whole I2S personality (SPI1's alone on the G071) - the G071RB's
+  desk carries the peer link on those pads and the LQFP32 bonds no SPI2
+  (above). All of them are measured on the STM32G0B1RE.
 
-**Declined, with the reason:**
+**Implemented, and the measurement declined with the reason:**
 
 - **the answer-turnaround ceiling of the ISR-driven client** (letter d):
   a ceiling needs a clock the CPU cannot gap and this core cannot make
@@ -727,10 +716,3 @@ on every header of the pack, but no silicon has run it:
   Closing that would need a receiver that counts PCM frames rather than
   half-words; the count is printed and the samples that arrive are
   value-exact.
-
-On the second silicon (the Nucleo-G071RB), NOT COVERED because the letters
-that would cover it are the SELF-LINK's and this desk does not carry it
-there: **ES0418 2.14.1 and 2.14.2** (the two BSY items), the frame matrix,
-the eight BR codes host-to-host, NSS four ways, the CRC, TI mode, the OVR
-and the whole I2S personality - which that part has on SPI1 alone. All of
-them are measured on the G0B1RE; none is claimed for the G071.

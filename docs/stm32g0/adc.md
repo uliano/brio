@@ -1,19 +1,5 @@
 # ADC (STM32G0)
 
-> **PROVISIONAL.** The whole of chapter 15 is implemented - the
-> regulator and the self calibration, both clock schemes, all four
-> resolutions and both alignments, the two sampling times with their
-> per-channel selector, both faces of the sequencer with their
-> handshake, continuous and discontinuous conversion, the eight hardware
-> triggers, the DMA request in both its modes, the three analog
-> watchdogs, the oversampler and the three internal channels - and all
-> of it is bench-verified, the low-power pair WAIT and AUTOFF and the
-> channel-to-pad map of every free external input included. What is NOT
-> here is what needs another board: VREF+ as anything but the board's
-> own supply, and a known VOLTAGE on an external input, which a
-> precharged pad cannot be for the reason measured below. The list is in
-> "Not covered yet".
-
 Documents of record: RM0444 Rev 6 ch. 15, with 5.4.13 (RCC_CCIPR.ADCSEL)
 and the vector table 12.3 (table 61); DS13560 Rev 5 tables 5, 6, 12, 27,
 62, 63, 65 and 66 (the factory calibration values and their addresses,
@@ -381,7 +367,7 @@ another board settles somewhere else.
   is what makes the swing legible at all. A known voltage on one of
   these pads still needs a wire.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_analog` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
 0x2000) and the ADC's half of it is unchanged: one converter, nineteen
@@ -410,7 +396,7 @@ The only ADC-side letter that moves is letter q's trigger census: table
 75's TIM4_TRGO row needs a TIM4, so a part without one walks five timer
 rows instead of six and says so.
 
-## On the third silicon
+## On the STM32G031K8
 
 On the Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003) `test_stm32_analog`
 claims **67 of its 139** verdicts, and the shortfall is not the ADC's:

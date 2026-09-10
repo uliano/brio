@@ -1,16 +1,5 @@
 # Clock - RCC, PWR (STM32G0)
 
-> **PROVISIONAL.** Two roots of the tree are implemented and
-> bench-verified - HSI16 through its divider, and HSI16 through the PLL
-> to the part's 64 MHz ceiling - as static tasks in all three voltage
-> regimes (Range 1, Range 2, low-power run) and as the members of a
-> DYNAMIC clock that moves SYSCLK between them under the running
-> program, with the bus prescalers pinned at 1, the flash latency
-> sequenced, and the peripheral clock enables, the kernel-clock
-> multiplexers and the clock output exposed as resource verbs.
-> Everything else the chapter offers is declared and refused. The list
-> is in "Not covered yet".
-
 Documents of record: RM0444 Rev 6 - RCC ch. 5 (the tree 5.2, the
 registers 5.4, the clock output 5.2.16), FLASH 3.3.4 (the latency table
 13 and the ordering rule), PWR 4.1.4 (voltage scaling) and 4.3.2
@@ -402,7 +391,7 @@ crystal):
   poll's own cost, 32 times the 64 MHz one - never early, the
   millisecond cap refused at every rate.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_clock` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
 0x2000): the four rungs of the pack, the regimes, the wait states, the
@@ -427,7 +416,7 @@ NAME rather than measure its own tick.
 The G071's RCC_CFGR MCOSEL and MCOPRE are **three bits** where the
 G0B1's are four (the headers' own masks): one clock output, not two.
 
-## On the third silicon
+## On the STM32G031K8
 
 `test_stm32_clock` claims 40 of its 42 verdicts on the Nucleo-G031K8
 (DEV_ID 0x466, REV_ID 0x1003): the whole ladder, all four rates, the ADC
@@ -480,9 +469,13 @@ Driver gaps:
   behind the RTC's back.
 - HPRE and PPRE other than 1 (a bus-dividing task, and `pclk_hz`
   becoming a real second rate); MCO2 and MCO on a pad; the CSS and
-  LSECSS; the RCC interrupts; the peripheral RESET registers beyond
-  the USART's own verb; the sleep-mode clock enables (IOPSMENR and
-  friends).
+  LSECSS; the RCC interrupts; the AHB and IOP reset registers as verbs
+  (the APB pair `apb1_reset`/`apb2_reset` exists and the drivers that
+  need a reset pulse it - the timers, the LPTIM, the SPI, the I2C, the
+  ADC, the DAC, the FDCAN - while the CRC pulses AHBRSTR itself and
+  nothing resets a GPIO port); the sleep-mode clock enables (IOPSMENR
+  and friends), which come out of reset all set and nothing here
+  clears.
 - The dynamic clock's fan-out for the timers (a `rebase` that keeps
   periods across a PSC change is not promisable at the prescaler's
   granularity - refused, stated) and for the USART personalities
@@ -491,15 +484,21 @@ Driver gaps:
   ([../design/clock.md](../design/clock.md), the caller picks the
   moment); what a rate COSTS in current (the meter question, the energy
   experiment's).
-- HSI16 trimming (RCC_ICSCR) and its measurement against LSE through
-  TIM14/16/17 (5.2.16) - the FREQM-style scale this board does not
-  have yet.
-- Flash: everything but the latency and the two accelerators.
+- HSI16 trimming (RCC_ICSCR.HSITRIM). The scale to trim against is
+  there - TIM16's capture of LSI or LSE through TISEL, no pad anywhere
+  (5.2.16, [tim.md](tim.md)), is what the timer and RTC suites weigh
+  the 32 kHz roots with - but nothing writes the trim; born with its
+  first user.
 
-Implemented, not bench-verified: `FlashAccel`'s setters; a `BasicTicker`
-program (the SysTick platform) rescaling under a kernel - the ticker's
-`rebase` is measured as a user, the tick's lateness across a switch
-(under one tick, by construction) is not.
+Implemented, not bench-verified: `FlashAccel`'s setters (PRFTEN is
+left at reset because of erratum 2.2.10, [nvm.md](nvm.md), and the two
+caches are read and never turned); a `BasicTicker` program (the SysTick
+platform) rescaling under a kernel - the ticker's `rebase` is measured
+as a user, the tick's lateness across a switch (under one tick, by
+construction) is not; and, on the STM32G071RB and the STM32G031K8,
+**`delay_us` at every rung** (letter `h`): judging a 20 us wait needs
+the 4 us MCO wall, and those parts' ETRSEL has no MCO code, so the LSE
+wall they fall back to carries every other letter and not that one.
 
 The kernel-clock multiplexer is bench-driven for all four codes on
 USART2 and on both LPUARTs ([usart.md](usart.md), [lpuart.md](lpuart.md)),
@@ -507,8 +506,3 @@ and CCIPR2's FDCAN field for its one reachable code
 - including a console that keeps talking at 115200 while its own clock
 moves under it. HSIKERON is written, read back and slept on; what it
 COSTS in current is the meter question this stratum keeps deferring.
-
-On the second silicon (the Nucleo-G071RB), NOT COVERED: **`delay_us` at
-every rung**, because judging a 20 us wait needs the 4 us MCO wall and
-that part's ETRSEL has no MCO code. The LSE wall it falls back to carries
-every other letter.

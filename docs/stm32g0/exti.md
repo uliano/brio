@@ -1,23 +1,14 @@
 # EXTI (STM32G0)
 
-> **PROVISIONAL.** The whole configurable-line fabric is implemented and
-> bench-verified through the sixteen GPIO lines: triggers, the software
-> trigger, both pending registers, both masks, the port multiplexer, the
-> three shared vectors and the CPU event out of WFE. What is NOT here is
-> everything that needs another driver or another chapter: the direct
-> lines' own peripherals, wake-up from Stop and Standby (there is no PWR
-> driver in this stratum), and the configurable non-GPIO lines (the PVD,
-> the comparators, VDDIO2 monitoring), whose numbers belong to drivers
-> that do not exist yet. The list is in "Not covered yet".
-
 Documents of record: RM0444 Rev 6, EXTI ch. 13; the vector table is
 table 61 (12.3), the low-power modes chapter 4, the GPIO chapter 7
 (where the pads come from). Errata ES0548 Rev 3 on silicon revision Z:
 **no item touches the EXTI**; the adjacent one is 2.3.1, GPIO
-configuration after a Standby wake-up, and Standby is not entered by
-anything in this stratum. Driver: `stm32g0/exti.hpp`; the per-part line
-facts come from `stm32g0/device_tables.hpp`. Bench suite:
-`test_stm32_exti` (board E). Family fixture
+configuration after a Standby wake-up, and it is revision A only
+([pwr.md](pwr.md), whose suite is what enters Standby). Driver:
+`stm32g0/exti.hpp`; the per-part line facts come from
+`stm32g0/device_tables.hpp`. Bench suite: `test_stm32_exti`. Family
+fixture
 `test/family_stm32g0/exti.cpp` plus three negatives under
 `brio check stm32g0`.
 
@@ -260,7 +251,7 @@ depends on a press - it cannot be staged from here - but the letter
 prints the level, so running `u` with the button held says what it
 should.
 
-## On the second silicon
+## On the STM32G071RB
 
 `test_stm32_exti` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
 0x2000), where the controller has FEWER LINES: `EXTI_IMR1_IM_Msk` is
@@ -285,7 +276,7 @@ IMPLEMENTED bits, where both dies agree bit for bit, and the residue is
 printed. An unimplemented mask bit does nothing either way, which is why
 this is a finding about the document and not about a program.
 
-## On the third silicon
+## On the STM32G031K8
 
 `test_stm32_exti` scores **85 of 89** on the Nucleo-G031K8 (DEV_ID 0x466,
 REV_ID 0x1003). The four not claimed are one leg and one letter, each
@@ -327,10 +318,12 @@ HEADER'S OWN COMMENT DISAGREES about those two and table 65 wins: CMSIS
 annotates the shared vector as "I2C2, I2C3 Interrupt (combined with EXTI
 24 and EXTI 22)", but line 24 is USART3's wake and I2C3 has no wake at
 all.
-Still open: the configurable non-GPIO lines PVD 16 and VDDIO2 34,
-reachable through `Exti` today but with no driver to publish their
-numbers or their vectors; and `SEVONPEND`, which changes what returns a
-WFE and belongs to a kernel pass rather than to this chapter.
+Still open: the configurable non-GPIO line VDDIO2 34, reachable through
+`Exti` today but with no driver to publish its number or its vector
+(PVD 16 is published by `pwr.hpp` as `pvd_exti_line`, and its crossing
+is not stageable on a board whose VDD is the probe's -
+[pwr.md](pwr.md)); and `SEVONPEND`, which changes what returns a WFE
+and belongs to a kernel pass rather than to this chapter.
 
 Wake-up from **Stop** through a direct line is covered: an LPTIM
 compare match leaves both Stop 0 and Stop 1 through line 29, measured in
@@ -344,12 +337,14 @@ the pending state.
 Implemented, not bench-verified: the second register group's own verbs
 (line 34's trigger, pending and software trigger - `VDDIO2` monitoring
 has no stimulus without a supply change); `ExtInt` on ports D, E and F
-(compile-checked on every header, and letter b's technique would carry
-straight over); `Exti::release()` on a direct line.
+(compile-checked on every header; letter b's pull-walk on a bonded
+port-D pad would carry straight over, and the LQFP64 bonds PD0..PD6);
+`Exti::release()` on a direct line (every release a suite spends is on a
+GPIO or a comparator line).
 
 Stated, not enforced: **one pin per line**. `exti_lines_distinct<>()`
 checks an application's declared set, and nothing makes an application
 declare one - the same kind of claim as an AF number, which no header
 of this family can check either. Errata ES0548 2.3.1 (a pad's
-configuration after a Standby wake-up) is stated on the driver and
-unreachable until something enters Standby.
+configuration after a Standby wake-up) is stated on the driver for the
+revision it names, which is not this silicon's.
