@@ -165,9 +165,6 @@ Implemented but not bench-verified, each with what would measure it:
   sleep cheaply - whether the latched event is consumed by the `wfi`
   or leaves the loop spinning is a current measurement with the probe
   detached (a core in debug mode never sleeps, QingKe V2 manual 5.1).
-- `delay_us` at the HSI rates (24 MHz and below): measured at 48 MHz
-  only; the clock suite that steps through the divider table is where
-  the other rates get their number.
 - The HPE's saving on a handler that calls into the kernel: the
   minimal handler was measured; a letter timing the USART handler's
   round trip both ways would put a number on the larger case.

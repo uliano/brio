@@ -41,3 +41,57 @@ void clock_verbs() {
     (void)Reset::init();
     (void)Slow::init();
 }
+
+// ---- the resource ----------------------------------------------------------
+void rcc_verbs() {
+    (void)Rcc::hsi_on();
+    (void)Rcc::hsi_ready();
+    Rcc::hsi(true);
+    (void)Rcc::hsi_calibration();
+    Rcc::hsi_trim(Rcc::hsi_trim());
+    Rcc::lsi(true);
+    (void)Rcc::lsi_on();
+    (void)Rcc::lsi_ready();
+    (void)Rcc::pll_on();
+    (void)Rcc::pll_ready();
+    (void)Rcc::sysclk_source();
+    Rcc::hpre(Rcc::hpre_code());
+    Rcc::mco(rcc_mco_sysclk);
+    (void)Rcc::mco();
+    Rcc::monitor(true);
+    (void)Rcc::monitor();
+    (void)Rcc::clock_failed();
+    Rcc::clear_clock_failed();
+    Rcc::failure_interrupt(false);
+    Rcc::clock(Bus::pb2, rcc_pb2_tim1, true);
+    (void)Rcc::clock(Bus::pb1, 1UL << 0);
+    Rcc::reset(Bus::pb2, rcc_pb2_tim1);
+}
+
+// ---- the runtime regime ----------------------------------------------------
+struct Follower {
+    static inline uint32_t hz = 0;
+    static void rebase(uint32_t next) { hz = next; }
+};
+static_assert(ClockUser<Follower>);
+
+using Dyn = DynamicClock<Fast, Follower>;
+static_assert(!Dyn::is_static);
+static_assert(Dyn::source_hz == 48'000'000);
+static_assert(Dyn::rate_count == 16);
+static_assert(Dyn::rate_hz(0) == 48'000'000 && Dyn::rate_hz(2) == 16'000'000);
+static_assert(Dyn::rate_hz(11) == 3'000'000 && Dyn::rate_hz(15) == 187'500);
+static_assert(Dyn::can_run_at(6'000'000) && !Dyn::can_run_at(10'000'000));
+static_assert(Dyn::rebases<Follower>);
+static_assert(!Dyn::rebases<int>);
+static_assert(clock_follows<Dyn, Follower>());
+static_assert(!clock_follows<Dyn, int>());
+
+void dynamic_verbs() {
+    (void)Dyn::init();
+    Dyn::set<6'000'000>();
+    (void)Dyn::set(3'000'000);
+    (void)Dyn::hz();
+    (void)Dyn::rate_index();
+    (void)clock_hz(Dyn{});
+}

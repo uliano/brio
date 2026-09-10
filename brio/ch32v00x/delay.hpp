@@ -21,13 +21,19 @@
  * folded to a constant for a compile-time Clock; the wait runs in 32
  * bits, and the 65536 us gate is what keeps the product from wrapping.
  *
- * Measured facts of this target go here as they are measured; today
- * the file states the contract and the arithmetic only.
+ * Under this target's DynamicClock the wait dispatches by rate index
+ * into a table expanded at compile time (armv6m/delay.hpp's shape).
+ *
+ * Measured on the CH32V006K8U6 at 48 MHz: delay_us(100) spends 4871
+ * cycles for 4800 asked, and twenty delay_us(500) take exactly ten
+ * ticks (test_ch32_platform letter d).
  */
 
 #pragma once
 
 #include <stdint.h>
+
+#include <array>
 
 #include "ch32v00x/device.hpp"
 #include "util/clock.hpp"
@@ -72,12 +78,27 @@ constexpr DelayRate delay_rate(uint32_t hz) {
     return true;
 }
 
+/// The per-rate factors of a DYNAMIC clock, expanded at compile time
+/// over its discrete-rate surface (rate_count, rate_hz(i)): one table
+/// in flash, indexed by rate_index() at wait time - which is why no
+/// division ever runs here.
+template <typename Clock>
+inline constexpr auto delay_rates = [] {
+    std::array<DelayRate, Clock::rate_count> table{};
+    for (uint8_t i = 0; i < Clock::rate_count; ++i) {
+        table[i] = delay_rate(Clock::rate_hz(i));
+    }
+    return table;
+}();
+
 template <typename Clock>
 [[nodiscard]] bool delay_us(Clock clock, uint32_t us) {
-    static_assert(Clock::is_static,
-                  "brio delay_us: this family has no dynamic clock yet - the per-rate "
-                  "table arrives with it");
-    return delay_us(delay_rate(clock_hz(clock)), us);
+    if constexpr (Clock::is_static) {
+        return delay_us(delay_rate(clock_hz(clock)), us);
+    } else {
+        (void)clock;
+        return delay_us(delay_rates<Clock>[Clock::rate_index()], us);
+    }
 }
 
 } // namespace brio

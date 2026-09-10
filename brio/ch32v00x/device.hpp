@@ -52,20 +52,55 @@ struct RccRegs {
 inline RccRegs* rcc() { return reinterpret_cast<RccRegs*>(hb_base + 0x1000); }
 
 /// RCC_CTLR
-inline constexpr uint32_t rcc_hsion   = 1UL << 0;
-inline constexpr uint32_t rcc_hsirdy  = 1UL << 1;
-inline constexpr uint32_t rcc_pllon   = 1UL << 24;
-inline constexpr uint32_t rcc_pllrdy  = 1UL << 25;
+inline constexpr uint32_t rcc_hsion        = 1UL << 0;
+inline constexpr uint32_t rcc_hsirdy       = 1UL << 1;
+inline constexpr uint32_t rcc_hsitrim_mask = 0x1FUL << 3;   ///< the user trim, 16 = centre
+inline constexpr uint32_t rcc_hsical_mask  = 0xFFUL << 8;   ///< the factory calibration, read-only
+inline constexpr uint32_t rcc_hseon        = 1UL << 16;
+inline constexpr uint32_t rcc_hserdy       = 1UL << 17;
+inline constexpr uint32_t rcc_hsebyp       = 1UL << 18;
+inline constexpr uint32_t rcc_csson        = 1UL << 19;     ///< HSE failure detection (needs HSE)
+inline constexpr uint32_t rcc_syscm_en     = 1UL << 21;     ///< the SYSTEM clock monitor
+inline constexpr uint32_t rcc_pllon        = 1UL << 24;
+inline constexpr uint32_t rcc_pllrdy       = 1UL << 25;
 
 /// RCC_CFGR0
-inline constexpr uint32_t rcc_sw_mask   = 0x3UL << 0;
-inline constexpr uint32_t rcc_sw_hsi    = 0x0UL << 0;
-inline constexpr uint32_t rcc_sw_pll    = 0x2UL << 0;
-inline constexpr uint32_t rcc_sws_mask  = 0x3UL << 2;
-inline constexpr uint32_t rcc_sws_hsi   = 0x0UL << 2;
-inline constexpr uint32_t rcc_sws_pll   = 0x2UL << 2;
-inline constexpr uint32_t rcc_hpre_mask = 0xFUL << 4;
-inline constexpr uint32_t rcc_pllsrc    = 1UL << 16;
+inline constexpr uint32_t rcc_sw_mask     = 0x3UL << 0;
+inline constexpr uint32_t rcc_sw_hsi      = 0x0UL << 0;
+inline constexpr uint32_t rcc_sw_pll      = 0x2UL << 0;
+inline constexpr uint32_t rcc_sws_mask    = 0x3UL << 2;
+inline constexpr uint32_t rcc_sws_hsi     = 0x0UL << 2;
+inline constexpr uint32_t rcc_sws_pll     = 0x2UL << 2;
+inline constexpr uint32_t rcc_hpre_mask   = 0xFUL << 4;
+inline constexpr uint32_t rcc_adcpre_mask = 0x1FUL << 11;
+inline constexpr uint32_t rcc_pllsrc      = 1UL << 16;
+inline constexpr uint32_t rcc_mco_mask    = 0x7UL << 24;    ///< 0xx off, 100 SYSCLK, 101 HSI, 110 HSE, 111 PLL
+inline constexpr uint32_t rcc_mco_sysclk  = 0x4UL << 24;
+inline constexpr uint32_t rcc_mco_hsi     = 0x5UL << 24;
+inline constexpr uint32_t rcc_mco_hse     = 0x6UL << 24;
+inline constexpr uint32_t rcc_mco_pll     = 0x7UL << 24;
+
+/// RCC_INTR: the ready flags (read), their enables, and the write-one
+/// clears - and the system clock failure interrupt enable.
+inline constexpr uint32_t rcc_lsirdyf   = 1UL << 0;
+inline constexpr uint32_t rcc_hsirdyf   = 1UL << 2;
+inline constexpr uint32_t rcc_hserdyf   = 1UL << 3;
+inline constexpr uint32_t rcc_pllrdyf   = 1UL << 4;
+inline constexpr uint32_t rcc_cssf      = 1UL << 7;
+inline constexpr uint32_t rcc_lsirdyie  = 1UL << 8;
+inline constexpr uint32_t rcc_sysclk_failie = 1UL << 9;
+inline constexpr uint32_t rcc_lsirdyc   = 1UL << 16;
+inline constexpr uint32_t rcc_hsirdyc   = 1UL << 18;
+inline constexpr uint32_t rcc_hserdyc   = 1UL << 19;
+inline constexpr uint32_t rcc_pllrdyc   = 1UL << 20;
+inline constexpr uint32_t rcc_cssc      = 1UL << 23;
+
+/// RCC_RSTSCKR: the LSI and the system clock failure flag live with the
+/// reset flags (reset.hpp names those).
+inline constexpr uint32_t rcc_lsion         = 1UL << 0;
+inline constexpr uint32_t rcc_lsirdy        = 1UL << 1;
+inline constexpr uint32_t rcc_sysclk_failif = 1UL << 8;    ///< write 0 to clear
+inline constexpr uint32_t lsi_hz = 128'000UL;              ///< nominal; the datasheet's spread is wide
 
 /// RCC_PB2PCENR: one bit per peripheral on the PB2 bus (RM 3.4.7).
 inline constexpr uint32_t rcc_pb2_afio   = 1UL << 0;

@@ -31,6 +31,7 @@ driver is measured on the bench.
 
 | Document | Content |
 |----------|---------|
+| [clock.md](clock.md) | RCC: the two roots (HSI, the doubling PLL), the one divider, `Clock` and the `DynamicClock` that walks the HPRE ladder with the users rebased and the wait states following (measured: 48 to 3 MHz and back, the console clean at every rung), `Rcc` (the HSI trim, the LSI - ready in 17 us -, the MCO, the system clock monitor, the peripheral gates) |
 | [nvm.md](nvm.md) | FLASH: the engine (fast page program as the ONLY way to write, the two locks, three erase grains), the constant partition (the linker's 40 KB, the heap's 16 KB, the journal's 6 KB attic) and the two media with THE PAGE AS THE CELL; measured: an erase and a program each under a millisecond with the core stalled, a sector erase seven times faster than a page's, and a page that ACCEPTS a second program between erases - the finding a smaller cell could rest on, not yet taken |
 | [platform.md](platform.md) | Platform: `Ch32v00xPlatform` (the csrrci critical section, the WFE-shaped `idle()` and the WFI rule that forces it, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the hardware prologue/epilogue MEASURED: 83 vs 92 cycles round trip, the default ON), the STK `BasicTicker`, `delay_us` on the STK counter, and the failing half - `Reset` (the flags as history, PINRSTF naming the pin alone on this family), `ResetReporter`, `fault_reset<P>()`; three real resets in the suite |
 
@@ -39,7 +40,6 @@ The headers not yet behind a document of their own:
 | Header | Content |
 |--------|---------|
 | [brio/ch32v00x/device.hpp](../../brio/ch32v00x/device.hpp) | The register map in the chapter's words: buses, RCC, GPIO, USART, FLASH_ACTLR, the core's STK and PFIC, the interrupt numbers |
-| [brio/ch32v00x/clock.hpp](../../brio/ch32v00x/clock.hpp) | `Clock<internal or pll, hz>`: HSI 24 MHz, the doubling PLL, the HPRE divider table, the flash wait states |
 | [brio/ch32v00x/pin.hpp](../../brio/ch32v00x/pin.hpp) | `Pin<'D', 5>`, `Port<'D'>`: the one-bit MODE this family has, pulls through OUTDR, the port clock opened by every configuring verb |
 | [brio/ch32v00x/usart.hpp](../../brio/ch32v00x/usart.hpp) | `Uart<1, P>`: the interrupt-driven byte transport (two rings, TXEIE armed and disarmed, errors read then cleared) |
 
@@ -279,9 +279,6 @@ Driver gaps, each with its reason:
   driven for real: the entry is written, the SVD is not fetched (the
   MounRiver package may carry one), and neither was needed to bring
   the target up.
-- HSE (the crystal on PA1/PA2) and LSI as clock roots: named in
-  `ClockSource`, refused at compile time, built with a board that
-  carries a crystal.
 
 Implemented but not bench-verified, each with what would measure it:
 
@@ -293,10 +290,6 @@ Implemented but not bench-verified, each with what would measure it:
 - `Pin` pulls, open-drain outputs and `analog()`: written from the
   chapter, exercised by no pad test yet - a pad test in the manner of
   the other targets' probe suites.
-- `Clock` at the HSI rates (24, 12, 8, 6, 4, 3 MHz and below) and its
-  `rebase` path: the console runs the PLL at 48 MHz; a clock suite
-  that steps through the divider table and reads the rate back on a
-  timer would cover the rest.
 - The USART's error counters (framing, noise, parity, hardware
   overrun): the paths are written; the stress suites that provoke
   each condition from the host side are what verifies them.
