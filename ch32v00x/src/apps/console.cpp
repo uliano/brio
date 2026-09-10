@@ -1,13 +1,15 @@
-// console - the brio kernel console on the CH32V00x: two active objects
-// over USART1, and the proof that the kernel this repository is built
-// around runs unchanged on a RISC-V core with sixteen registers and
-// eight kilobytes of RAM.
+// console - the brio kernel console on the CH32V00x: three active
+// objects over USART1, and the proof that the kernel this repository is
+// built around runs unchanged on a RISC-V core with sixteen registers
+// and eight kilobytes of RAM.
 //
 //   SerialPort  turns RX bytes into LineReceived events (ping-pong line
 //               buffers, backpressure on the ring - util/serial_port.hpp)
 //   Console     parses and routes each line, replies via blocking print,
-//               and owns a 1 Hz time event whose count says the kernel's
-//               timers are alive
+//               owns a 1 Hz time event whose count says the kernel's
+//               timers are alive, and drives the blinker BY POSTING
+//   Blinker     owns the LED: heartbeat time event at 1 Hz, manual
+//               LED ON|OFF|TOG commands arrive as posted SetLed events
 //
 // Everything above the glue is portable: the AOs, their events, their
 // queues, and every kernel and util header below them - the same files
@@ -20,10 +22,11 @@
 // free when SerialPort runs - see the scheduling contract in
 // serial_port.hpp.
 //
-// Wiring: none beyond the probe. The WCH-Link's own serial pins are
-// wired to PD5 (USART1_TX) and PD6 (USART1_RX) on this board, so the
-// debug cable carries the console too. Connect at 115200 8N1 and type:
-//   HELP | UPTIME | BEATS | ERR
+// Wiring: the WCH-Link's own serial pins are wired to PD5 (USART1_TX)
+// and PD6 (USART1_RX) on this board, so the debug cable carries the
+// console too; the module's LED is jumpered to PC0 (blink.cpp says
+// why that pin). Connect at 115200 8N1 and type:
+//   HELP | LED ON|OFF|TOG | UPTIME | BEATS | ERR
 //
 // Between keystrokes the CPU sleeps in WFI, woken by the system counter
 // or the USART. No polling anywhere.
@@ -35,6 +38,7 @@
 
 #include "ch32v00x/clock.hpp"
 #include "ch32v00x/pfic.hpp"
+#include "ch32v00x/pin.hpp"
 #include "ch32v00x/platform.hpp"
 #include "ch32v00x/ticker.hpp"
 #include "ch32v00x/usart.hpp"
@@ -62,8 +66,61 @@ constexpr Serial serial;           // tag for print(serial, ...)
 
 constexpr uint32_t console_baud = 115200;
 
+using Led = brio::Pin<'C', 0>;     // the jumpered LED
+
 // ---- events -----------------------------------------------------------------
-struct Beat {};
+struct Beat {};                                    // Console's own heartbeat
+struct Toggle {};                                  // Blinker's heartbeat
+struct SetLed { enum class Mode : uint8_t { on, off, tog } mode; };
+
+// ---- the blinker: owns the LED ----------------------------------------------
+struct Blinker : brio::Fsm<Blinker, Toggle, SetLed> {
+    static inline brio::EventQueue<Event, 2, P> queue;
+    static inline brio::TimeEvent<P, Blinker, Toggle> heartbeat{Toggle{}};
+
+    static void init() {
+        Led::output();
+        start(&beating);
+    }
+
+    static Status beating(const Event& e) {
+        return brio::match(e,
+            [](brio::Entry) {
+                heartbeat.arm_every(brio::ticks_from_ms<P>(500));
+                return handled();
+            },
+            [](brio::Exit) {
+                heartbeat.disarm();
+                return handled();
+            },
+            [](Toggle) {
+                Led::toggle();
+                return handled();
+            },
+            [](SetLed s) {
+                apply(s);
+                return transition(&manual);
+            },
+            [](auto) { return unhandled(); }
+        );
+    }
+
+    static Status manual(const Event& e) {
+        return brio::match(e,
+            [](SetLed s) { apply(s); return handled(); },
+            [](auto)     { return unhandled(); }
+        );
+    }
+
+private:
+    static void apply(SetLed s) {
+        switch (s.mode) {
+            case SetLed::Mode::on:  Led::set(); break;
+            case SetLed::Mode::off: Led::clear(); break;
+            case SetLed::Mode::tog: Led::toggle(); break;
+        }
+    }
+};
 
 // ---- the console: parses lines, replies, and counts its own heartbeat -------
 struct Console : brio::Fsm<Console, brio::LineReceived, Beat> {
@@ -111,7 +168,25 @@ private:
     }
 
     static void cmd_help(const Cmd&, Serial s) {
-        brio::print(s, "commands: HELP | UPTIME | BEATS | ERR", brio::crlf);
+        brio::print(s, "commands: HELP | LED ON|OFF|TOG | UPTIME | BEATS | ERR",
+                    brio::crlf);
+    }
+
+    static void cmd_led(const Cmd& cmd, Serial s) {
+        SetLed::Mode mode;
+        const char* arg = (cmd.argument_count == 1) ? cmd.arguments[0] : "";
+        if (brio::command_equals(arg, "ON")) {
+            mode = SetLed::Mode::on;
+        } else if (brio::command_equals(arg, "OFF")) {
+            mode = SetLed::Mode::off;
+        } else if (brio::command_equals(arg, "TOG")) {
+            mode = SetLed::Mode::tog;
+        } else {
+            brio::print(s, "usage: LED ON|OFF|TOG", brio::crlf);
+            return;
+        }
+        brio::post<Blinker>(SetLed{mode});
+        brio::print(s, "OK", brio::crlf);
     }
 
     static void cmd_uptime(const Cmd&, Serial s) {
@@ -128,6 +203,7 @@ private:
 
     static constexpr Router::Route routes[] = {
         {"HELP", cmd_help},
+        {"LED", cmd_led},
         {"UPTIME", cmd_uptime},
         {"BEATS", cmd_beats},
         {"ERR", cmd_err},
@@ -181,5 +257,5 @@ int main()
                     "), type HELP", brio::crlf, "> ");
     }
 
-    brio::Kernel<P, Console, SerialLines>::run();
+    brio::Kernel<P, Console, SerialLines, Blinker>::run();
 }

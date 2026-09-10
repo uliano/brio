@@ -325,7 +325,11 @@ public:
             current_page_ = p;
             report_.build_id = load32(image + 12);
             count_ = image[5];
-            for (uint8_t i = 0; i < count_; ++i) {
+            // version_valid() has bounded image[5] by max_blocks already;
+            // the second bound is for the compiler, which cannot see that
+            // through the member (gcc 15 for rv32e proves the loop's fifth
+            // iteration out of range and refuses it under -Werror).
+            for (uint8_t i = 0; i < count_ && i < max_blocks; ++i) {
                 index_[i] = load_entry(image + header_bytes +
                                        static_cast<uint16_t>(i) * entry_bytes);
             }

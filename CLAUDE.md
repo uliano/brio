@@ -322,7 +322,9 @@ brio check avrdx [name]         # every avrdx smoke TU compiles for all 8 DA/DB 
                                 # neg/ TUs must FAIL (definition of done)
 brio check samc21 [name]        # same for the samc21 stratum (E/G/J 18A headers)
 brio check stm32g0 [name]       # same for the stm32g0 stratum (ALL TWELVE G0 headers, x1 + x0)
-brio check all                  # the three in a row
+brio check ch32v00x [name]      # same for the ch32v00x stratum (one part today; util_all.cpp = the
+                                # whole of kernel/ and util/ through WCH's gcc 15.2)
+brio check all                  # the four in a row
 brio prose [paths...]           # the prose net: no dates/process words/Doxygen tags in
                                 # comments and docs, every cited path exists, ASCII only;
                                 # "review" lines are claims of absence to re-read, not errors
@@ -455,6 +457,8 @@ third_party/doctest/     vendored doctest.h (MIT, upstream doctest/doctest)
 third_party/samc21-dfp/  vendored Microchip.SAMC21_DFP include tree (Apache-2.0)
 third_party/cmsis-device-g0/  vendored ST cmsis-device-g0 v1.4.5 Include/ (Apache-2.0)
 test/family_stm32g0/     stm32g0 family smoke TUs + neg/, brio check stm32g0
+test/family_ch32v00x/    ch32v00x family smoke TUs + neg/, brio check ch32v00x
+                         (util_all.cpp: every kernel/util header over the platform)
 third_party/cmsis-core/  vendored ARM CMSIS-Core headers (Apache-2.0)
 bin/brio                 THE ONE COMMAND of the bench, dispatching on its first
                          argument; put bin/ on the PATH
@@ -464,7 +468,7 @@ cli/                     its guts, a Python package: main.py dispatches on the
                          the token-identity check over sources
   prose.py               `brio prose`, the prose net (see the definition of done)
   check.py               `brio check <stratum> [filter]` over cli/checks/, the
-                         three family compile fixtures kept as shell scripts
+                         four family compile fixtures kept as shell scripts
                          (zero CMake coupling, they call the cross compiler
                          directly)
   bench/                 THE BENCH HALF: the verbs that need a board

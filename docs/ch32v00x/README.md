@@ -154,6 +154,21 @@ and **the debugger's `step` does not take pending interrupts**, so a
 single-step through an unmask instruction proves nothing about whether
 an interrupt would be taken. A `launch.json` entry is not written yet.
 
+## The family check
+
+`brio check ch32v00x` compiles every smoke TU under
+`test/family_ch32v00x/` with the project's own flags and demands that
+every `neg/*.cpp` be refused (cli/checks/check_ch32v00x.sh, the
+RISC-V twin of the other three scripts; no CMake, no hardware, seconds).
+One part in its list today, since the stratum states the CH32V006K8
+alone; the loop is where the second part lands. What the sweep proves
+meanwhile is the toolchain: `util_all.cpp` includes EVERY kernel and
+util header and instantiates each service over this platform, so a
+construct WCH's gcc 15.2 rejected would show here first - one did (a
+loop-analysis false positive in util/nv_heap.hpp's mount, answered by
+a bound the compiler can see, byte-identical on the other three
+targets).
+
 ## Editor (clangd)
 
 `brio/ch32v00x/.clangd` and `ch32v00x/.clangd` route both trees at the
@@ -233,8 +248,6 @@ Driver gaps, each with its reason:
   pins each package bonds): `device.hpp` states the CH32V006K8 alone,
   and the table that tells the parts apart needs a second part on the
   desk to be written against something real.
-- `brio check ch32v00x`, the family smoke check: a fixture over one
-  part is the part's own build; it is written with the second part.
 - A debug configuration for the editor (`launch.json`) and the part's
   SVD for a register viewer: neither was needed to bring the target
   up, and MounRiver's package may carry the SVD.
