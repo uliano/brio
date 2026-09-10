@@ -520,21 +520,24 @@ reporters the stratum adds.
 | host | `HostPlatform::break_here()` records the call | - |
 
 The reset cause the boot cross-checks is spelled by the register's
-own nature: `Reset::take_flags()` on avrdx and stm32g0 (a history that
-ACCUMULATES until read and cleared) and `Reset::cause()` on samc21
-(RCAUSE, one exclusive cause). And the watchdog a program keeps alive
-is three resources under two names - not one verb, because the three
-contracts differ and the name each carries is its chapter's:
+own nature: `Reset::take_flags()` on avrdx, stm32g0 and ch32v00x (a
+history that ACCUMULATES until read and cleared) and `Reset::cause()`
+on samc21 (RCAUSE, one exclusive cause). And the watchdog a program
+keeps alive is four strata's resources under two names - not one verb,
+because the contracts differ and the name each carries is its
+chapter's:
 
 | stratum | the kick | what else the kick does |
 |---|---|---|
 | avrdx | `Watchdog::clear()` = the WDR instruction (`avrdx/reset.hpp`) | lands in two to three WDT cycles (two back to back are one); the FIRST after enabling window mode ACTIVATES the window and is not judged |
 | samc21 | `Watchdog::clear()` = key 0xA5 into CLEAR (`samc21/reset.hpp`) | a posted write, `sync()` to know it landed; any other key is a reset, which `force_reset()` spells on purpose |
 | stm32g0 | `Iwdg::refresh()` = 0xAAAA into KR, `Wwdg::refresh(counter)` = T[6:0] (`stm32g0/reset.hpp`) | the IWDG refresh RE-LOCKS PR/RLR/WINR; a refresh above the window value is a reset; the WWDG's takes the value to reload |
+| ch32v00x | `Iwdg::refresh()` = 0xAAAA into CTLR, `Wwdg::refresh(counter)` = T[6:0] (`ch32v00x/reset.hpp`) | the same two dogs minus the IWDG window; the WWDG's counter does not run until armed, so nothing about it can be timed unarmed and only the RCC pulse puts an armed one back |
+| ch32v00x | `Iwdg::refresh()` = 0xAAAA into CTLR, `Wwdg::refresh(counter)` = T[6:0] (`ch32v00x/reset.hpp`) | the same two dogs minus the IWDG window; the WWDG's counter does not run until armed, so nothing about it can be timed unarmed and only the RCC pulse puts an armed one back |
 
 A portable program that keeps a watchdog alive is not written yet; the
-common verb it would call is born with it, one level above these
-three, and each realization will spend its own rules under it.
+common verb it would call is born with it, one level above these, and
+each realization will spend its own rules under it.
 
 ## 11. Platform: what the machine provides (`kernel/platform.hpp`)
 

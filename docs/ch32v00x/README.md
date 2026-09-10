@@ -37,7 +37,7 @@ driver is measured on the bench.
 | [dma.md](dma.md) | DMA: seven channels where THE CHANNEL IS THE REQUEST (table 8-2, no multiplexer), the STM32F1's channel with every field read-only while enabled, one vector a channel, and the two engines the console's own USART runs on in the suite; measured: three widths exact at about six HCLK cycles an item, EN STAYING SET after a completed block, and no hole in the map raising the transfer error the chapter promises |
 | [spi.md](spi.md) | SPI: the F1's SPI with no FIFO and one register of its own (HSCR), 8/16-bit frames, the four modes, the select as a GPIO the request carries, `SpiHost` with the other strata's Request VERBATIM (pump or polled, engines on channels 2 and 3), `SpiClient`; measured: NO FIELD IS ENABLE-PROTECTED (seven of seven take a write under SPE), every path completing with nothing on MISO - the loopback letters wait for one jumper |
 | [i2c.md](i2c.md) | I2C: the F1's event machine on two vectors, the receive procedures by count, NO RISE-TIME REGISTER (the prose names one, the register list does not), `I2cHost` with the other strata's Request VERBATIM and i2c_bus.hpp's outcomes (engines on channels 6 and 7, a one-byte read on the pump), `I2cClient`, the unstick; measured: OADDR1's bit 14 reserved, the timing registers writable under PE - the wire letters wait for a peer board |
-| [platform.md](platform.md) | Platform: `Ch32v00xPlatform` (the csrrci critical section, the WFE-shaped `idle()` and the WFI rule that forces it, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the hardware prologue/epilogue MEASURED: 83 vs 92 cycles round trip, the default ON), the STK `BasicTicker`, `delay_us` on the STK counter, and the failing half - `Reset` (the flags as history, PINRSTF naming the pin alone on this family), `ResetReporter`, `fault_reset<P>()`; three real resets in the suite |
+| [platform.md](platform.md) | Platform: `Ch32v00xPlatform` (the csrrci critical section, the WFE-shaped `idle()` and the WFI rule that forces it, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the hardware prologue/epilogue MEASURED: 83 vs 92 cycles round trip, the default ON), the STK `BasicTicker`, `delay_us` on the STK counter, and the failing half - `Reset` (the flags as history, PINRSTF naming the pin alone on this family), `ResetReporter`, `fault_reset<P>()`, and the two watchdogs `Iwdg` and `Wwdg` (the IWDG biting at 255 ms for 258 computed at the measured LSI, the WWDG's step exact and ITS COUNTER NOT RUNNING UNARMED against the chapter's word); three real resets in the platform suite, three more in the watchdogs' |
 
 The headers not yet behind a document of their own:
 
@@ -271,10 +271,9 @@ Driver gaps, each with its reason:
   default pads is the one port the bench needs; USART2's default pads
   and every remap arrive with the first program that needs a second
   port or a moved pad.
-- TIM1/TIM2/TIM3, ADC, the OPA and the watchdogs: each is a chapter of
-  the reference manual with no user yet, and each is born with its
-  first user and its bench measurements, the way the other three
-  strata's were.
+- TIM1/TIM2/TIM3, ADC and the OPA: each is a chapter of the reference
+  manual with no user yet, and each is born with its first user and
+  its bench measurements, the way the other three strata's were.
 - The family tiering (which parts have USART2 and the OPCM, which
   pins each package bonds): `device.hpp` states the CH32V006K8 alone,
   and the table that tells the parts apart needs a second part on the

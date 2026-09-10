@@ -43,6 +43,19 @@ the findings below are the entries this document keeps in its place.
   in the high half); it reads back as SFTRSTF.
 - **`ebreak` with no debugger attached** is taken to the vector table's
   fault entry (index 3).
+- **The IWDG** (RM ch. 4) is a 12-bit down-counter on the LSI behind a
+  prescaler, started by a key and stopped by nothing but a reset; its
+  two setting registers take a write only after the unlock key and
+  read back only once their update flag has dropped (five LSI cycles).
+- **The WWDG** (RM ch. 5) is a 7-bit down-counter on HCLK/4096 behind
+  a second divider that resets when T6 falls and when it is refreshed
+  above its window, with an early warning one step before; WDGA is
+  cleared only by a reset - the RCC pulse on PB1PRSTR is one. **Its
+  counter does NOT run unarmed** (measured): 5.2.1's "free operation
+  regardless of whether the watchdog function is turned on" does not
+  describe this silicon.
+- **The two debug freezes** (IWDG_STOP, WWDG_STOP) are bits of a CORE
+  CSR, DBGMCU_CR at 0x7C0 (RM ch. 21), not a peripheral register.
 
 ## Types and verbs
 
@@ -75,7 +88,15 @@ division at wait time), and the failing half
 `Reset::flags/clear_flags/take_flags/software`, `ResetReporter` (the
 panic reporter that resets) and `fault_reset<P>()`, the fault vector's
 body that writes a kernel_fault record - never over one that already
-stands - and resets.
+stands - and resets. The two watchdogs live there too: `Iwdg`
+(`start()`, `configure(IwdgConfig)` - unlock, both fields, the
+bounded wait for the update flags -, `arm()` in the chapter's order,
+`refresh()`, `force_reset()`, `iwdg_timeout_ms(prescaler, reload,
+lsi_hz)` at a STATED LSI rate) and `Wwdg` (`configure(WwdgConfig)`
+refusing a window below 0x40, `start(t)`, `refresh(t)` with T6 always
+written set, `force_reset()`, `counter()`, the EWIF verbs and `isr()`,
+`wwdg_timeout_us(hclk, prescaler, t)`), each with its `debug_freeze()`
+over the CSR.
 
 ## How to use it
 
@@ -151,13 +172,36 @@ CH32V006K8U6 at 48 MHz. What it measured:
   a kernel_fault record carrying 0x51. The `.noinit` section does what
   the linker script and the crt promise.
 
+The watchdogs' suite is `test_ch32_watchdog` (15 verdicts in `z`, two
+letters ending in real resets):
+
+- **The IWDG bites when the arithmetic says**: /32 and a reload of 999
+  is 258 ms at the 124 kHz LSI the sleep chapter measured, and the
+  feeding stopped, the board rebooted with IWDGRSTF alone after 255 ms
+  (a .noinit token counting the loop's last millisecond). Fed every
+  60 ms it never bites; a fresh boot finds it off.
+- **The update flags cross in 41 us**: PVU seen, then down 2010 cycles
+  after the prescaler write - five LSI cycles, as 4.3.4 says.
+- **The WWDG's step is exact**: armed at /8, the first early warning
+  2064546 cycles after the start for 63 x 32768 = 2064384; fed from
+  its own early-warning handler it runs six warnings in 300 ms and
+  never bites; unfed it reboots with WWDGRSTF alone after 44 ms for
+  43.7 computed; a refresh made ABOVE the window (0x7F written under a
+  window of 0x50) reboots the board at once.
+- **The counter does not run unarmed** (the finding above), EWIF cannot
+  be set by software, and the RCC pulse on PB1PRSTR clears WDGA and
+  EWI - the one way to put an armed WWDG back without a reboot.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
 
-- The two watchdogs (RM ch. 4 and 5) and the watchdog verbs that would
-  join `Reset`: the timers phase's.
 - The PFIC's priorities and its two free vectored entries: no user.
+- The hardware-enabled IWDG (the IWDG_SW option byte): an option byte
+  write is the flash chapter's, and the bench part keeps the factory
+  option bytes.
+- The watchdogs' debug freeze as a measurement: what a halted core
+  does to a running dog is a debugger session, not a suite letter.
 
 Implemented but not bench-verified, each with what would measure it:
 

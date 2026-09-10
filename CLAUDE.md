@@ -1086,7 +1086,11 @@ brio/                    the framework, four strata:
                            software trigger) + ExtInt<Pin>
     reset.hpp              Reset (RSTSCKR's flags as history - PINRSTF names
                            the pin ALONE here -, software() through
-                           PFIC_CFGR), ResetReporter, fault_reset<P>()
+                           PFIC_CFGR), ResetReporter, fault_reset<P>() + the
+                           two watchdogs: Iwdg (a key starts it, only a
+                           reset stops it, the update flags waited for) and
+                           Wwdg (whose counter does NOT run unarmed, against
+                           the chapter; the RCC pulse is the way back)
     nvm.hpp                Flash: the engine (fast page program as the ONLY
                            write, two locks, three erase grains), refused
                            as a code beside STATR's errors

@@ -27,3 +27,39 @@ void reset_verbs() {
 [[noreturn]] void die() { panic<P, ResetReporter>(PanicCode::queue_overflow, 1); }
 
 [[noreturn]] void fault_body() { fault_reset<P>(0x51); }
+
+// ---- the two watchdogs (RM ch. 4 and 5) --------------------------------------
+static_assert(iwdg_divider(IwdgPrescaler::div256) == 256u);
+static_assert(iwdg_timeout_ms(IwdgPrescaler::div32, 999, 124'000UL) == 258u);
+static_assert(wwdg_timeout_us(48'000'000UL, WwdgPrescaler::div8, 0x7F) == 43690u);
+
+void watchdog_verbs() {
+    (void)Iwdg::arm({.prescaler = IwdgPrescaler::div64, .reload = 0x0FFF});
+    (void)Iwdg::configure({.prescaler = IwdgPrescaler::div4, .reload = 100});
+    Iwdg::refresh();
+    (void)Iwdg::busy();
+    (void)Iwdg::sync();
+    (void)Iwdg::prescaler();
+    (void)Iwdg::reload();
+    (void)Iwdg::status();
+    (void)Iwdg::debug_freeze();
+    Iwdg::debug_freeze(true);
+    Iwdg::force_reset();
+
+    (void)Wwdg::configure({.prescaler = WwdgPrescaler::div2, .window = 0x60, .early_wakeup = true});
+    Wwdg::start(0x7F);
+    Wwdg::refresh(0x70);
+    (void)Wwdg::enabled();
+    (void)Wwdg::counter();
+    (void)Wwdg::prescaler();
+    (void)Wwdg::window();
+    (void)Wwdg::early_wakeup_enabled();
+    (void)Wwdg::flag();
+    Wwdg::clear_flag();
+    (void)Wwdg::isr();
+    (void)Wwdg::bus_clock();
+    Wwdg::bus_clock(false);
+    (void)Wwdg::debug_freeze();
+    Wwdg::debug_freeze(false);
+    Wwdg::force_reset();
+}
