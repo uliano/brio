@@ -43,13 +43,14 @@
  * completes only when its run fills, which on an idle line is never,
  * so whoever owns the port decides how often to ask.
  *
+ * THE PADS COME FROM THE REMAP TABLES (afio.hpp, tables 7-10 and
+ * 7-11): the `remap` template parameter names a column, init() writes
+ * it into AFIO_PCFR1, and the Tx/Rx pins follow. USART2's default
+ * column puts TX on PA7, the CH32V006K8's reset pin, so USART2 is
+ * REFUSED at code 0 on this part and takes codes 1..6; its DMA
+ * requests are channels 6 and 7 (table 8-2), the same two I2C1 uses.
+ *
  * NOT COVERED YET:
- *  - USART2 (CH32V005/006/007 only): its pads want the AFIO remap
- *    registers this stratum does not touch yet, so it is refused at
- *    compile time rather than half-built. It arrives with the first
- *    program that needs a second port.
- *  - the alternate-function REMAPS themselves (RM 7.3, table 7-11 for
- *    USART2), so USART1 is reachable on its default pads only.
  *  - the chapter's other personalities - synchronous mode, half
  *    duplex, LIN, IrDA, smartcard, the hardware flow control pins, DMA
  *    - each of which is a task over this same resource on the other
@@ -60,6 +61,7 @@
 
 #include <stdint.h>
 
+#include "ch32v00x/afio.hpp"
 #include "ch32v00x/device.hpp"
 #include "ch32v00x/dma_engine.hpp"
 #include "ch32v00x/pfic.hpp"
@@ -79,22 +81,46 @@ struct UsartPads {
     uint8_t rx_pin;
 };
 
-/// USART1: TX on PD5, RX on PD6 - the pads the WCH-Link's own serial
-/// is wired to on the bench board.
-constexpr UsartPads usart_pads_for(uint8_t instance) {
-    return instance == 1 ? UsartPads{'D', 5, 'D', 6} : UsartPads{'\0', 0, '\0', 0};
+/// The pads of an instance under a remap code (afio.hpp's tables):
+/// USART1 at code 0 is TX PD5, RX PD6 - the pads the WCH-Link's own
+/// serial is wired to on the bench board.
+constexpr UsartPads usart_pads_for(uint8_t instance, uint8_t remap = 0) {
+    if (instance == 1) {
+        const UsartPadSet p = afio_usart1_pads(remap);
+        return UsartPads{p.tx.port, p.tx.pin, p.rx.port, p.rx.pin};
+    }
+    if (instance == 2) {
+        const UsartPadSet p = afio_usart2_pads(remap);
+        return UsartPads{p.tx.port, p.tx.pin, p.rx.port, p.rx.pin};
+    }
+    return UsartPads{'\0', 0, '\0', 0};
 }
 
 constexpr uint32_t usart_base_for(uint8_t instance) {
-    return instance == 1 ? pb2_base + 0x3800 : 0;
+    return instance == 1 ? pb2_base + 0x3800 : instance == 2 ? pb1_base + 0x4400 : 0;
 }
 
+/// USART1's gate is on the PB2 bus, USART2's on PB1.
+constexpr bool usart_on_pb2(uint8_t instance) { return instance == 1; }
 constexpr uint32_t usart_clock_for(uint8_t instance) {
-    return instance == 1 ? rcc_pb2_usart1 : 0;
+    return instance == 1 ? rcc_pb2_usart1 : instance == 2 ? rcc_pb1_usart2 : 0;
 }
 
 constexpr Irq usart_irq_for(uint8_t instance) {
-    return instance == 1 ? Irq::usart1 : Irq::usart1;
+    return instance == 2 ? Irq::usart2 : Irq::usart1;
+}
+
+/// Whether a remap code is legal for an instance on THIS PART: the
+/// table's range, and USART2's default column refused because its TX
+/// is the CH32V006K8's reset pin.
+constexpr bool usart_remap_valid(uint8_t instance, uint8_t remap) {
+    if (instance == 1) {
+        return remap < afio_usart1_codes;
+    }
+    if (instance == 2) {
+        return remap >= 1u && remap < afio_usart2_codes;
+    }
+    return false;
 }
 
 /**
@@ -109,12 +135,14 @@ constexpr Irq usart_irq_for(uint8_t instance) {
  * can be shared with a handler bare (atomic_width) or wants a guard.
  */
 template <uint8_t instance, typename P, uint16_t rx_size = 64, uint16_t tx_size = 64,
-          typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine>
+          typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine, uint8_t remap = 0>
 struct Uart {
     static_assert(usart_base_for(instance) != 0,
-                  "brio Uart: only USART1 is implemented on the CH32V00x today - "
-                  "USART2 exists on the CH32V005/006/007 and needs the AFIO remaps "
-                  "first (see this file's 'Not covered yet')");
+                  "brio Uart: this family has USART1 and USART2 (the CH32V005/006/007)");
+    static_assert(usart_remap_valid(instance, remap),
+                  "brio Uart: no such remap code for this instance (afio.hpp's tables 7-10 and "
+                  "7-11) - and USART2's default column is refused on the CH32V006K8, whose PA7 "
+                  "is the reset pin: it takes codes 1..6");
     // An engine is checked where it is named: sizeof demands a complete
     // type, so an engine's own static_asserts fire on the application's
     // line.
@@ -127,7 +155,8 @@ struct Uart {
     Uart() = default;   // a tag instance: constexpr Uart<1, P> serial;
 
     static constexpr uint8_t number = instance;
-    static constexpr UsartPads pads = usart_pads_for(instance);
+    static constexpr uint8_t remap_code = remap;
+    static constexpr UsartPads pads = usart_pads_for(instance, remap);
     static constexpr bool has_tx_engine = TxEngine::present;
     static constexpr bool has_rx_engine = RxEngine::present;
 
@@ -159,7 +188,16 @@ struct Uart {
             return false;
         }
 
-        rcc()->PB2PCENR |= usart_clock_for(instance);
+        if constexpr (usart_on_pb2(instance)) {
+            rcc()->PB2PCENR |= usart_clock_for(instance);
+        } else {
+            rcc()->PB1PCENR |= usart_clock_for(instance);
+        }
+        if constexpr (instance == 1) {
+            Afio::remap_usart1(remap);
+        } else {
+            Afio::remap_usart2(remap);
+        }
 
         Tx::function();          // alternate function, push-pull
         Rx::input();             // floating: the peer drives it

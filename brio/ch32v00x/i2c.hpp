@@ -68,6 +68,7 @@
 #include <optional>
 #include <type_traits>
 
+#include "ch32v00x/afio.hpp"
 #include "ch32v00x/delay.hpp"
 #include "ch32v00x/device.hpp"
 #include "ch32v00x/dma_engine.hpp"
@@ -232,19 +233,26 @@ constexpr uint32_t i2c_scl_hz(uint32_t pclk, I2cTiming t) {
     return pclk / (((t.ckcfgr & i2c_duty) != 0u ? 25UL : 3UL) * ccr);
 }
 
-/// Which pads carry the two lines: the default ones or nothing (no
-/// alternate-function number on this family; the remaps are AFIO's).
+/// Which pads carry the two lines, and the REMAP CODE that puts the
+/// peripheral on them (afio.hpp's table 7-13-1): init() writes it.
 struct I2cPins {
     Pad scl{};
     Pad sda{};
+    uint8_t remap = 0;
 };
+
+/// The pins of remap column `code`.
+constexpr I2cPins i2c1_pins_for(uint8_t code) {
+    const I2cPadSet p = afio_i2c1_pads(code);
+    return I2cPins{.scl = p.scl, .sda = p.sda, .remap = code};
+}
 
 /// I2C1's default pads on the CH32V006 (DS table 2-1-1): SCL PC2, SDA
 /// PC1.
-inline constexpr I2cPins i2c1_default_pins{.scl = {'C', 2}, .sda = {'C', 1}};
+inline constexpr I2cPins i2c1_default_pins = i2c1_pins_for(0);
 
 constexpr bool i2c_pins_valid(const I2cPins& p) {
-    return p.scl.valid() && p.sda.valid() && !(p.scl == p.sda);
+    return p.scl.valid() && p.sda.valid() && !(p.scl == p.sda) && p.remap < 8u;
 }
 
 /// A target's addresses (15.4): one 7- or 10-bit own address, an
@@ -503,6 +511,7 @@ public:
         duty_ = duty;
         S::bus_clock(true);
         S::reset();
+        Afio::remap_i2c1(pins.remap);
         rebase(clock_hz(clock));
         if (!valid_[0]) {
             return false;
@@ -1064,6 +1073,7 @@ public:
         Pfic::disable(S::error_irq());
         S::bus_clock(true);
         S::reset();
+        Afio::remap_i2c1(pins.remap);
         const auto t = i2c_timing_for(clock_hz(clock), I2cSpeed::standard_100k);
         if (!t) {
             return false;
@@ -1189,7 +1199,8 @@ static_assert(!i2c_timing_for(6'000'000UL, I2cSpeed::standard_100k).has_value())
 static_assert(!i2c_timing_for(3'000'000UL, I2cSpeed::fast_400k).has_value());
 static_assert(i2c_timing_for(8'000'000UL, I2cSpeed::standard_100k)->ckcfgr == 40u);
 
-static_assert(i2c_pins_valid(i2c1_default_pins));
+static_assert(i2c_pins_valid(i2c1_default_pins) && i2c_pins_valid(i2c1_pins_for(1)));
+static_assert(i2c1_pins_for(1).scl == Pad{'D', 1} && i2c1_pins_for(5).sda == Pad{'D', 1});
 static_assert(!i2c_pins_valid(I2cPins{.scl = {'C', 2}, .sda = {'C', 2}}));
 static_assert(i2c_address_config_valid(I2cAddressConfig{.own = 0x48}));
 static_assert(!i2c_address_config_valid(I2cAddressConfig{.own = 0x80}));

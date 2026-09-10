@@ -60,7 +60,9 @@
  * engine's select is a GPIO on purpose); the CRC beyond the resource's
  * verbs - born with a device that checks one; HSCR's high-speed read
  * mode, whose rate formula (16.3.1's note: HCLK/(BR+2)) the bench has
- * not measured.
+ * not measured. The pads come with their remap code (afio.hpp, table
+ * 7-12): spi1_pins_for(code) is a whole column, and init() writes the
+ * code.
  */
 
 #pragma once
@@ -70,6 +72,7 @@
 #include <optional>
 #include <type_traits>
 
+#include "ch32v00x/afio.hpp"
 #include "ch32v00x/delay.hpp"
 #include "ch32v00x/device.hpp"
 #include "ch32v00x/dma_engine.hpp"
@@ -210,26 +213,33 @@ enum class SpiDirection : uint8_t {
     half_duplex_in,    ///< BIDIMODE, BIDIOE clear: one line, receiving
 };
 
-/// Which pads carry the four signals. NO ALTERNATE-FUNCTION NUMBER: on
-/// this family a pad has one default function (the datasheet's pin
-/// table) and the remaps that would move it are AFIO's, which the
-/// stratum does not touch yet - so a pad here is the default one or
-/// nothing. A signal the program does not wire is an invalid Pad.
+/// Which pads carry the four signals, and the REMAP CODE that puts the
+/// peripheral on them (afio.hpp's table 7-12): init() writes the code
+/// into AFIO_PCFR1. No alternate-function number - a pad has the one
+/// function its column gives it. A signal the program does not wire is
+/// an invalid Pad.
 struct SpiPins {
     Pad sck{};
     Pad mosi{};
     Pad miso{};
     Pad nss{};
+    uint8_t remap = 0;
 };
+
+/// The pins of remap column `code`, every signal named.
+constexpr SpiPins spi1_pins_for(uint8_t code) {
+    const SpiPadSet p = afio_spi1_pads(code);
+    return SpiPins{.sck = p.sck, .mosi = p.mosi, .miso = p.miso, .nss = p.nss, .remap = code};
+}
 
 /// SPI1's default pads on the CH32V006 (DS table 2-1-1): SCK PC5, MOSI
 /// PC6, MISO PC7, NSS PC1.
-inline constexpr SpiPins spi1_default_pins{
-    .sck = {'C', 5}, .mosi = {'C', 6}, .miso = {'C', 7}, .nss = {'C', 1}};
+inline constexpr SpiPins spi1_default_pins = spi1_pins_for(0);
 
-/// A link needs SCK, and no two signals on one pad.
+/// A link needs SCK, no two signals on one pad, a remap code the table
+/// has.
 constexpr bool spi_pins_valid(const SpiPins& p) {
-    if (!p.sck.valid()) {
+    if (!p.sck.valid() || p.remap >= afio_spi1_codes) {
         return false;
     }
     const Pad pads[] = {p.sck, p.mosi, p.miso, p.nss};
@@ -627,6 +637,7 @@ public:
         }
         S::bus_clock(true);
         S::reset();
+        Afio::remap_spi1(pins.remap);
         applied_ = boot_config();
         if (!S::configure(applied_)) {
             return false;
@@ -1135,6 +1146,7 @@ public:
         Pfic::disable(S::irq());
         S::bus_clock(true);
         S::reset();
+        Afio::remap_spi1(pins.remap);
         if (!S::configure(config_of(cfg))) {
             return false;
         }
@@ -1271,9 +1283,11 @@ static_assert(spi_config_valid(SpiConfig{}));
 static_assert(!spi_config_valid(SpiConfig{.direction = SpiDirection::half_duplex_out, .crc = true}));
 static_assert(!spi_config_valid(SpiConfig{.crc = true, .crc_polynomial = 0}));
 static_assert(!spi_config_valid(SpiConfig{.role = SpiRole::client, .nss = SpiNss::hardware_output}));
-static_assert(spi_pins_valid(spi1_default_pins));
+static_assert(spi_pins_valid(spi1_default_pins) && spi_pins_valid(spi1_pins_for(4)));
+static_assert(spi1_pins_for(2).sck == Pad{'D', 2} && spi1_pins_for(2).remap == 2u);
 static_assert(!spi_pins_valid(SpiPins{.sck = {'C', 5}, .mosi = {'C', 5}}));
 static_assert(!spi_pins_valid(SpiPins{.mosi = {'C', 6}}));
+static_assert(!spi_pins_valid(SpiPins{.sck = {'C', 5}, .mosi = {'C', 6}, .remap = 7}));
 
 // The control words: mode 3 host at /16 under software select.
 static_assert(spi_ctlr1_of(SpiConfig{.mode = SpiMode::mode3, .clock = SpiClock::div16}) ==

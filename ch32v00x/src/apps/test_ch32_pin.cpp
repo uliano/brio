@@ -34,6 +34,9 @@
 //   f  THE SCANNER on the jumper: util/input_scanner.hpp's InputScanner
 //      over PD4 with PD2 driving it, InputEdge events on the flips and
 //      none on a held level
+//   g  THE REMAPS, wireless: AFIO_PCFR1's fields written and read back,
+//      TIM1's channel 1 forced high and low on its default pad and on
+//      column 3's (PC4), the pads read on INDR
 //
 // build: boards = v006k8
 // build: monitor_speed = 115200
@@ -42,6 +45,7 @@
 
 #include <variant>
 
+#include "ch32v00x/afio.hpp"
 #include "ch32v00x/clock.hpp"
 #include "ch32v00x/delay.hpp"
 #include "ch32v00x/exti.hpp"
@@ -49,6 +53,7 @@
 #include "ch32v00x/pin.hpp"
 #include "ch32v00x/platform.hpp"
 #include "ch32v00x/ticker.hpp"
+#include "ch32v00x/tim.hpp"
 #include "ch32v00x/usart.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/post.hpp"
@@ -473,6 +478,87 @@ void tf_scanner() {
     all_off();
 }
 
+// ===========================================================================
+// g - the remaps, wireless
+// ===========================================================================
+
+/// TIM1's channel 1 forced high or low through OCxM, the two pads of two
+/// columns read back on INDR: the column in force is the one whose pad
+/// follows the timer.
+struct RemapReading {
+    bool pd2_high, pd2_low, pc4_high, pc4_low;
+};
+
+RemapReading drive_and_read(uint8_t code) {
+    using T1 = Tim<1>;
+    T1::init();
+    (void)T1::remap(code);
+    (void)T1::configure({.prescaler = 0, .period = 999});
+    (void)T1::main_output(true);
+    Pin<'D', 2>::function();
+    Pin<'C', 4>::function();
+    RemapReading r{};
+    // PWM at a duty of everything, then of nothing, the counter running.
+    (void)T1::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 1000});
+    T1::enable(true);
+    (void)delay_us(clock, 50);
+    r.pd2_high = Pin<'D', 2>::read();
+    r.pc4_high = Pin<'C', 4>::read();
+    (void)T1::set_compare(0, 0);
+    (void)delay_us(clock, 50);
+    r.pd2_low = !Pin<'D', 2>::read();
+    r.pc4_low = !Pin<'C', 4>::read();
+    T1::enable(false);
+    Pin<'D', 2>::release();
+    Pin<'C', 4>::release();
+    T1::release();
+    (void)T1::remap(0);
+    return r;
+}
+
+void tg_remaps() {
+    all_off();
+    // The register: every field written and read back, the debug port
+    // left alone.
+    Afio::remap_tim1(9);
+    Afio::remap_tim2(7);
+    Afio::remap_usart1(9);
+    Afio::remap_usart2(6);
+    Afio::remap_spi1(6);
+    Afio::remap_i2c1(3);
+    Afio::remap_adc_injected_trigger(true);
+    Afio::remap_adc_rule_trigger(true);
+    const bool fields = Afio::tim1_remap() == 9u && Afio::tim2_remap() == 7u && Afio::usart1_remap() == 9u &&
+                        Afio::usart2_remap() == 6u && Afio::spi1_remap() == 6u && Afio::i2c1_remap() == 3u &&
+                        (afio_pcfr1() & (afio_adc_etrginj_rm | afio_adc_etrgreg_rm)) ==
+                            (afio_adc_etrginj_rm | afio_adc_etrgreg_rm);
+    const bool swd = Afio::debug_port_enabled();
+    print(serial, "  PCFR1 with every field at its top: ", hex(afio_pcfr1()), crlf);
+    Afio::remap_tim1(0);
+    Afio::remap_tim2(0);
+    Afio::remap_usart1(0);
+    Afio::remap_usart2(0);
+    Afio::remap_spi1(0);
+    Afio::remap_i2c1(0);
+    Afio::remap_adc_injected_trigger(false);
+    Afio::remap_adc_rule_trigger(false);
+    bench.verdict("every remap field of AFIO_PCFR1 reads back as written, the debug port untouched",
+                  fields && swd && afio_pcfr1() == 0u);
+
+    // TIM1's channel 1 on its default pad (PD2, column 0) and remapped
+    // to PC4 (column 3), the pads read back.
+    const RemapReading d = drive_and_read(0);
+    const RemapReading r = drive_and_read(3);
+    print(serial, "  TIM1_CH1 forced high/low - column 0: PD2 follows ", d.pd2_high && d.pd2_low, ", PC4 ",
+          d.pc4_high && d.pc4_low, "; column 3: PD2 ", r.pd2_high && r.pd2_low, ", PC4 follows ",
+          r.pc4_high && r.pc4_low, crlf);
+    bench.verdict("TIM1's channel 1 drives PD2 in the default column and PC4 in column 3 - table 7-8's "
+                  "remap, read on the pads with no wire",
+                  d.pd2_high && d.pd2_low && !(d.pc4_high && d.pc4_low) && r.pc4_high && r.pc4_low &&
+                      !(r.pd2_high && r.pd2_low));
+    all_off();
+}
+
 void banner() {
     print(serial, crlf, "test_ch32_pin - CH32V006K8 GPIO (RM ch. 7) and EXTI (6.4)", crlf);
     print(serial, "  the jumper for c, d and f: PD2 <-> PD4; ", jumper_present ? "PRESENT" : "ABSENT", crlf);
@@ -508,6 +594,7 @@ int main() {
     bench.letter('d', "THE EDGES on the jumper: rising, falling, both; the flag; the port select", td_edges);
     bench.letter('e', "the software trigger and the EVENT mode ending a WFE, wireless", te_soft_and_event);
     bench.letter('f', "THE SCANNER on the jumper: InputScanner over PD4 driven by PD2", tf_scanner);
+    bench.letter('g', "THE REMAPS, wireless: PCFR1's fields, TIM1_CH1 moved from PD2 to PC4", tg_remaps);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL48" : "FAILED",

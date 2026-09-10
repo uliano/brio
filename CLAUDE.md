@@ -271,9 +271,9 @@ gets its home in `docs/design/` when taken.
   flash media, the power modes, reset and the DMA each have their
   document and suite; SPI and I2C are written with their suites, the
   wire letters awaiting a jumper and a peer; the timers, the watchdogs
-  and the ADC have theirs, and the pad suite its wireless half. What
-  remains, in docs/ch32v00x/README.md's gap lists: the OPA chapter, the
-  AFIO remaps, the family tiering and
+  and the ADC have theirs, the pad suite its wireless half, the remaps
+  their tables. What remains, in docs/ch32v00x/README.md's gap lists:
+  the OPA chapter, the family tiering and
   `brio check ch32v00x` with a second part, a self-built upstream gcc 16
   for riscv32 with an rv32ec/ilp32e multilib (the stratum compiles with
   plain rv32ec_zmmul on purpose - WCH's `xw` extension is worth a few
@@ -1057,7 +1057,7 @@ brio/                    the framework, four strata:
                            family (an F1 nibble is right by accident), pulls
                            through OUTDR, the port clock opened by every
                            configuring verb
-    usart.hpp              Uart<1, P, rx, tx, TxEngine, RxEngine>: the
+    usart.hpp              Uart<1|2, P, rx, tx, TxEngine, RxEngine, remap>: the
                            interrupt-driven byte transport (two rings, TXEIE
                            armed/disarmed, errors read then cleared, BRR =
                            pclk/baud whole) with two OPTIONAL DMA engine
@@ -1094,6 +1094,11 @@ brio/                    the framework, four strata:
                            SCAN = one per rank; the STALL and recover()),
                            AnalogIn<Pin> deriving the channel, AdcInput
                            (VREFINT, the OPA), the sampler's converter surface
+    afio.hpp               the remap tables (7-8..7-15) as constexpr data +
+                           Afio's verbs over PCFR1; SpiPins/I2cPins carry the
+                           code, Uart takes it as a template parameter,
+                           Tim<n>::remap(code); USART2 refused at code 0 (its
+                           default TX is the K8's reset pin)
     exti.hpp               Exti (ten lines: eight pads via AFIO_EXTICR, the
                            PVD, the AWU; interrupt or event, edges, the
                            software trigger) + ExtInt<Pin>

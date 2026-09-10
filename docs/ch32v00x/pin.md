@@ -33,6 +33,15 @@ package bonds, table 2-1-1 for the pads).
   return); the flags are write-one-clear.
 - **SWIEVR raises a line enabled in INTENR** and nothing on a line
   enabled nowhere (measured).
+- **The remaps** (7.2.11, AFIO_PCFR1): one code per peripheral selects
+  a COLUMN of pads - ten columns for TIM1 and USART1, eight for TIM2,
+  seven for USART2 and SPI1, five for I2C1, one bit for each ADC
+  trigger pad, one for the crystal pads as GPIO; SWCFG = 100 turns the
+  debug port off until the next reset. USART2's default column puts TX
+  on PA7, the CH32V006K8's reset pin.
+- **A timer's forced output level reaches the pad only with the
+  counter enabled** (measured: OCxM force modes with CEN clear left
+  both pads low; a running PWM at full and zero duty drove them).
 
 ## Types and verbs
 
@@ -47,6 +56,16 @@ registers, `clock_on()` by every configuring verb, the mask verbs),
 line verbs: `interrupt()`, `event()`, `rising()`, `falling()`, `soft()`,
 `flag()`, `clear()`, `port()`) and `ExtInt<'D', 4>` (`init(rising,
 falling)` routing the line to the pad, the same verbs for one line).
+[brio/ch32v00x/afio.hpp](../../brio/ch32v00x/afio.hpp): the remap
+tables as constexpr data (`afio_tim1_pads(code)`, `afio_tim2_pads()`,
+`afio_usart1_pads()`, `afio_usart2_pads()`, `afio_spi1_pads()`,
+`afio_i2c1_pads()`, the two ADC trigger pads) and `Afio`'s verbs over
+PCFR1's fields, `disable_debug_port_until_reset()` spelled long. The
+drivers take their pads through it: `SpiPins`/`I2cPins` carry a
+`remap` code (`spi1_pins_for(code)`, `i2c1_pins_for(code)` are whole
+columns) and init() writes it, `Uart`'s last template parameter is the
+code (USART2 refused at 0 on this part), `Tim<n>::remap(code)` moves a
+timer and `TimPad` takes a column's pad.
 
 ## How to use it
 
@@ -84,15 +103,19 @@ has measured so far is the wireless half:
   of a line enabled nowhere, and one interrupt per trigger with the
   PFIC line open; **the event mode** ends a WFE eighteen cycles after
   the latched event, no flag raised.
+- **The remaps**: every field of PCFR1 reads back as written, and
+  TIM1's channel 1 drives PD2 in the default column and PC4 in column
+  3 - table 7-8's remap, read on the pads with no wire.
 
 ## Not covered yet
 
 Driver gaps, each with its reason:
 
-- The alternate-function remaps (AFIO_PCFR1): born with the first
-  driver that needs a moved pad.
 - The pin-level bonding table per package: the datasheet's until a
   second part gives it something to say.
+- The remap tables of the CH32V007 (TIM2's and I2C1's differ at one
+  column each): this file states the CH32V002/004/005/006 tables; the
+  second part tiers them.
 
 Implemented but not bench-verified, each with what would measure it:
 
@@ -102,3 +125,6 @@ Implemented but not bench-verified, each with what would measure it:
   driven pad - the suite's letters c, d and f on the jumper.
 - A pad wake out of a Standby (sleep.md's gap): the same jumper with a
   Standby armed.
+- The other peripherals on their remapped columns (USART2, which
+  exists on this package only remapped; SPI1's and I2C1's alternate
+  pads): each is a wire to a peer on the column's pads.

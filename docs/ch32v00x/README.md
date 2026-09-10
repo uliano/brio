@@ -39,7 +39,7 @@ driver is measured on the bench.
 | [i2c.md](i2c.md) | I2C: the F1's event machine on two vectors, the receive procedures by count, NO RISE-TIME REGISTER (the prose names one, the register list does not), `I2cHost` with the other strata's Request VERBATIM and i2c_bus.hpp's outcomes (engines on channels 6 and 7, a one-byte read on the pump), `I2cClient`, the unstick; measured: OADDR1's bit 14 reserved, the timing registers writable under PE - the wire letters wait for a peer board |
 | [tim.md](tim.md) | TIM: the F1's TIM1 and TIM2 under WCH's names (three bits the F1 has not, TIM2's dead-time pairs through DTCR, the 32-bit CHxCVR carrying a captured level) and TIM3, a streamlined block with no pad; the tasks (PwmChannel through TimPwm/TimPairPwm, the meters, one timer counting or gated by another); measured: the time base exact against the STK, a centre-aligned period 2 x ATRLR, TIM2 counting TIM1 and TIM1 counting TIM2 with no wire, a duty measured internally, the break staged from a pad's pull (BIF unclearable while it stands), and TIM3'S DMA REQUEST ONE-SHOT - probed nine ways, re-armed by the RCC pulse alone |
 | [adc.md](adc.md) | ADC: the F1's converter with a third control register (low power, three watchdogs that can RESET THE CHIP), the pads deriving their channel, VREFINT as the supply's ruler, both groups, the seven triggers a group, the DMA, util's AnalogSampler over it unchanged; measured: tCONV to the cycle at four settings (1.47 Msps at the top), six timer triggers and TIM3's pacing the injection group, the signed injected offsets, THE WATCHDOG SCAN (one watchdog per rank), the watchdog reset judged at the next boot - and THE STALL: a triggered, DMA-served run that occasionally stops converting until ADON is cycled |
-| [pin.md](pin.md) | GPIO and EXTI: the one-bit MODE nibble, pulls through OUTDR, BSHR/BCR, the ten lines (eight pads by port select, the PVD's and the AWU's), interrupt or event; measured: the pulls, the nibbles, the atomics, the software trigger raising a flag only on a line in INTENR, a line in event mode ending a WFE in eighteen cycles, port B's seven nibbles - the levels, the edges and the scanner on one jumper |
+| [pin.md](pin.md) | GPIO, EXTI and the REMAPS: the one-bit MODE nibble, pulls through OUTDR, BSHR/BCR, the ten lines (eight pads by port select, the PVD's and the AWU's), interrupt or event, AFIO_PCFR1's columns as constexpr tables every driver takes its pads from; measured: the pulls, the nibbles, the atomics, the software trigger raising a flag only on a line in INTENR, a line in event mode ending a WFE in eighteen cycles, port B's seven nibbles, TIM1's channel moved from PD2 to PC4 by its remap - the levels, the edges and the scanner on one jumper |
 | [platform.md](platform.md) | Platform: `Ch32v00xPlatform` (the csrrci critical section, the WFE-shaped `idle()` and the WFI rule that forces it, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the hardware prologue/epilogue MEASURED: 83 vs 92 cycles round trip, the default ON), the STK `BasicTicker`, `delay_us` on the STK counter, and the failing half - `Reset` (the flags as history, PINRSTF naming the pin alone on this family), `ResetReporter`, `fault_reset<P>()`, and the two watchdogs `Iwdg` and `Wwdg` (the IWDG biting at 255 ms for 258 computed at the measured LSI, the WWDG's step exact and ITS COUNTER NOT RUNNING UNARMED against the chapter's word); three real resets in the platform suite, three more in the watchdogs' |
 
 The headers not yet behind a document of their own:
@@ -47,7 +47,7 @@ The headers not yet behind a document of their own:
 | Header | Content |
 |--------|---------|
 | [brio/ch32v00x/device.hpp](../../brio/ch32v00x/device.hpp) | The register map in the chapter's words: buses, RCC, GPIO, USART, FLASH, the core's STK and PFIC, the interrupt numbers (the other blocks' maps live in their own headers) |
-| [brio/ch32v00x/usart.hpp](../../brio/ch32v00x/usart.hpp) | `Uart<1, P>`: the interrupt-driven byte transport (two rings, TXEIE armed and disarmed, errors read then cleared) and its two optional DMA engine slots (dma.md) |
+| [brio/ch32v00x/usart.hpp](../../brio/ch32v00x/usart.hpp) | `Uart<1, P>`: the interrupt-driven byte transport (two rings, TXEIE armed and disarmed, errors read then cleared), its two optional DMA engine slots (dma.md) and its remap code (pin.md); USART2 at codes 1..6 |
 
 The documents of record and their revisions: [vendor/README.md](vendor/README.md).
 
@@ -268,10 +268,9 @@ loudly.
 
 Driver gaps, each with its reason:
 
-- USART2 and the alternate-function REMAPS (AFIO_PCFR1): USART1 on its
-  default pads is the one port the bench needs; USART2's default pads
-  and every remap arrive with the first program that needs a second
-  port or a moved pad.
+- USART2 on the wire: it exists on this package only remapped (its
+  default TX is the reset pin) and the driver takes it at codes 1..6;
+  a peer on the column's pads would prove it.
 - The OPA/CMP (ch. 17): a chapter with no user yet, born with its
   first user and its bench measurements (a pad and a source), the way
   the other three strata's were.

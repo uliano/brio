@@ -18,8 +18,9 @@
  *                  pulses (the ADC's triggers) and DMA requests.
  *
  *  TimPad<pad>     a pad handed to a timer channel: the default pad of
- *                  the DATASHEET's table, since the remaps are AFIO's
- *                  and the stratum does not touch them yet.
+ *                  the datasheet's table, or the pad a remap column
+ *                  gives it (afio.hpp's afio_tim1_pads / afio_tim2_pads,
+ *                  with Tim<n>::remap(code) writing the column).
  *
  *  TASKS           TimPwm / TimPairPwm (util/pwm_channel.hpp's
  *                  PwmChannel, one and two outputs), TimPeriodMeter /
@@ -87,8 +88,7 @@
  * the encoder modes as a task (the resource has the three SMS codes;
  * a task needs an encoder on the desk); the COM event and the
  * commutation preload (CCPC/CCUS) - motor control's, no user; TIM3's
- * matches as ADC triggers - the ADC chapter's; the alternate-function
- * remaps of every pad - AFIO's.
+ * matches as ADC triggers - the ADC chapter's.
  */
 
 #pragma once
@@ -97,6 +97,7 @@
 
 #include <optional>
 
+#include "ch32v00x/afio.hpp"
 #include "ch32v00x/device.hpp"
 #include "ch32v00x/pfic.hpp"
 #include "ch32v00x/pin.hpp"
@@ -555,6 +556,26 @@ public:
         reset();
         bus_clock(false);
     }
+
+    /// The whole instance's pads moved to a column of afio.hpp's table
+    /// 7-8 (TIM1, ten codes) or 7-9-1 (TIM2, eight): the pads
+    /// afio_tim1_pads(code) / afio_tim2_pads(code) name are then the
+    /// ones a TimPad claims. Refused for a code the table has not.
+    static bool remap(uint8_t code) {
+        if constexpr (n == 1) {
+            if (code >= afio_tim1_codes) {
+                return false;
+            }
+            Afio::remap_tim1(code);
+        } else {
+            if (code >= afio_tim2_codes) {
+                return false;
+            }
+            Afio::remap_tim2(code);
+        }
+        return true;
+    }
+    static uint8_t remap() { return n == 1 ? Afio::tim1_remap() : Afio::tim2_remap(); }
 
     // ---- the time base ---------------------------------------------------------
 
