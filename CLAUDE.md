@@ -56,15 +56,21 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   document's own findings cover is deleted; a document with nothing in
   either list has no such section. The public voice names a silicon by
   its PART and never by an ordinal (no "second/third silicon"), and no
-  desk position (board A..G) appears outside bench.md. The state of the
+  desk position (board A..G) appears outside private/. The state of the
   driver work is readable in each target's document map, the second
   section of its README.md (docs/README.md is one row per target and
   the rules). The Multislope assessment (every
   acrobatic piece maps to fixed routes + tasks on resources + config
   structs; the 64-cycle snapshot stays in the ISR body) lives in
   memory and in the track entry below, not in docs.
-- `docs/bench.md` - the board, the wiring and the apps as they are
-  today. The volatile end.
+- `docs/boards/` and `docs/probes/` - one page per board brio is
+  tested on (what it carries, its manifest type, its documents) and
+  one per probe (the flash mechanisms and their traps); `brio apps`
+  lists the apps from their own headers. THE DESK - which board is
+  plugged in where, the incidents, the end state - is `private/`, a
+  git-ignored nested repository: `private/bench_boards.py` (the real
+  manifest, loaded before the public example), `private/bench.md`
+  (the diary), `private/TODO.md`.
 - `docs/avrdx/vendor/README.md` - the datasheets/errata by document
   number and the chapters we use; PDFs are local symlinks
   (git-ignored), cite by SECTION as "DS40002247B 16.5.2" (pages move
@@ -4406,7 +4412,7 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
 ```
 
 - The multi-board bench, three separate concerns (detail:
-  `docs/bench.md`): BUILD = one CMake target per app x board TYPE
+  `docs/boards/README.md`): BUILD = one CMake target per app x board TYPE
   (`// build: boards = db28,db32,db48` in the app header; `db48` is the
   default when the line is absent; a configure targets exactly one
   package, so switching `configurePreset` switches which apps' targets
@@ -4443,7 +4449,7 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   `Clock<ClockSource::crystal, 24'000'000>` - no 32k crystal (do not
   enable XOSC32K), serial on USART2 ALT1 PF4/PF5.
 - Full detail and rationale: `docs/avrdx/README.md`,
-  `docs/host/README.md`, `docs/bench.md`.
+  `docs/host/README.md`, `docs/boards/README.md`, `docs/probes/README.md`.
 
 ## Layout
 
@@ -4543,7 +4549,7 @@ experiments/             one SELF-CONTAINED directory per cross-cutting bench
                          (DynamicClock-deferral verdict; the SAM as
                          stimulus + judge + meter for an AVR DUT)
 docs/                    README (map + rules), design/, <target>/ (avrdx/, samc21/,
-                         host/), bench.md
+                         host/), boards/, probes/
 brio/.clangd             per-stratum clangd routing: the framework default is
                          the host database; avrdx/.clangd and samc21/.clangd
                          (in brio/ AND in each project dir) override with

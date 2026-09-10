@@ -1,11 +1,11 @@
-# The bench
+# The desk (private diary)
 
-The board, the wiring and the apps as they are TODAY. This page is the
-volatile end of the documentation: apps are disposable tools that test
-the framework's ideas and will not survive in their current form;
-nothing in `docs/design/` or in the target pages depends on them.
-Every app documents itself in its own header comment - this table is
-only the map.
+The boards, the wiring and the apps as they are TODAY on this desk:
+positions, incidents, end states, die serials. PRIVATE - nothing under
+docs/ depends on it (the public board and probe pages are
+docs/boards/ and docs/probes/, and a suite's own header comment says
+what it needs wired). The text below is the diary as it accumulated,
+kept as it was written.
 
 ## Boards
 

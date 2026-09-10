@@ -13,7 +13,7 @@ is declaredly AVR, the ISR binding pattern, ...) is in
 
 Bench MCU: **AVR128DB48** (48-pin, 128 KB flash, 16 KB SRAM),
 programmed and debugged with an **Atmel-ICE** over UPDI. Board wiring
-and external chips: [../bench.md](../bench.md).
+and what the board carries: [../boards/avr128db48.md](../boards/avr128db48.md).
 
 ## The documents
 
@@ -135,7 +135,7 @@ flag, so there is no "last one wins" hazard to guard against.
   and nothing more; only the programmer writes them, so they are a
   property of the chip on the desk and live behind
   `brio fuses <board> [name=value ...]` (see
-  [../bench.md](../bench.md) for the standing geometry). The one that
+  [../boards/avr128db48.md](../boards/avr128db48.md) for the standing geometry). The one that
   matters to the build is `BOOTSIZE`: with its shipping default of 0
   the whole Flash is one BOOT section and no software can write any
   Flash at all.
@@ -185,7 +185,7 @@ configurePreset) - the app becomes a target only when the currently
 configured package is in its list, so switching configurePreset in the
 CMake Tools status bar switches which apps show up in the Target
 dropdown. A target is a build, never a physical board: the boards on
-the desk live in the bench manifest, see [../bench.md](../bench.md).
+the desk live in the bench manifest, see [../boards/README.md](../boards/README.md).
 
 ## Clock, delay and timebase
 

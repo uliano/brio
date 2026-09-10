@@ -251,5 +251,5 @@ found the hard way and belong beside the errata because they look like
 them until they are named: **Shutdown powers the LSI down** (DS12992
 3.7.4 - it is in the datasheet, not in an errata sheet, and it means an
 RTC on LSI cannot end a Shutdown), and **the debug port can go silent**
-until the board is replugged (`docs/bench.md` - a state of the ST-LINK
+until the board is replugged ([../../probes/st-link.md](../../probes/st-link.md) - a state of the ST-LINK
 half, not a silicon claim).

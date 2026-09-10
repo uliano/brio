@@ -529,7 +529,7 @@ detector after 19.9 ms as if held (on a board whose free pads drift
 down it never does), and PA0 released from a pull-down reads 1 again
 within 200 ms - so the TAMPPUDIS contrast, which needs a free pad that
 drifts LOW, has no stimulus and the leg declines by name with the pad's
-reading printed ([../bench.md](../bench.md) carries the desk fact).
+reading printed ([../boards/nucleo-g031k8.md](../boards/nucleo-g031k8.md) carries the board fact).
 
 ## Not covered yet
 

@@ -152,8 +152,10 @@ and `brio prose` the prose net. `brio --help` lists the rest.
 Everything target-specific - toolchain, board, probe, debugger, its
 quirks - is documented per target in each target's folder under [docs/](docs/).
 The apps are the framework's test bench: disposable by design, they
-document themselves in their own header comment, and their current
-wiring lives in [docs/bench.md](docs/bench.md).
+document themselves in their own header comment (`brio apps` lists
+them), and what a suite needs wired is in that comment. The boards and
+the probes brio is tested with are [docs/boards/](docs/boards/) and
+[docs/probes/](docs/probes/).
 
 ## Status
 

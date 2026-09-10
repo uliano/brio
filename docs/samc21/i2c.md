@@ -53,7 +53,7 @@ consequences:
   A client must follow foreign edges wherever they land; per-edge
   glitches reset its machinery every time.
 - **AND THE FIX IS MEASURED, NOT JUST NAMED - with its confound
-  stated.** With the I2C pair wired SHORT AND SEPARATE (bench.md) the
+  stated.** With the I2C pair wired SHORT AND SEPARATE the
   wall is gone: the whole suite runs with BOTH ends' cores at 48 MHz -
   the peer's client serves the command channel at the very rate that is
   stone deaf on the bundle, the client letter takes a foreign 100 kHz

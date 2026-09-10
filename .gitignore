@@ -35,5 +35,8 @@ experiments/*/logs/
 docs/*/vendor/*.pdf
 docs/*/vendor/extracts/
 
-# personal notes, never published
-TODO.md
+
+# The private nested repository: the real bench manifest, the desk diary,
+# the notes - never published, never a submodule (cli/bench/manifest.py
+# looks for private/bench_boards.py first).
+private/

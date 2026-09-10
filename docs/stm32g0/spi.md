@@ -16,7 +16,8 @@ bus vocabulary above it is `util/spi_bus.hpp` over
 The per-instance presence, APB register, vector, I2S capability, I2S
 clock selector and DMAMUX facts come from `stm32g0/device_tables.hpp`.
 Bench suite: `test_stm32_spi`, and it carries TWO INSTRUMENTS on one set
-of pads because the desk carries either (see [../bench.md](../bench.md)):
+of pads because a desk carries either (the suite probes for the wire at
+boot; its header comment is the map):
 letters `a`..`m` (89 verdicts) run on the Nucleo's own SPI1-to-SPI2
 self-link, letters `n`..`r` (20 verdicts) on the link to a PEER BOARD
 running `spi_peer`, commanded in band over

@@ -144,8 +144,8 @@ bench proves two of them.
 
 The **Nucleo-G071RB** (STM32G071RB, LQFP64, 128 KB single-bank flash,
 36 KB SRAM, the same board layout as the G0B1RE's - LD4 on PA5, the VCP
-on USART2 PA2/PA3) is tied to the G0B1RE by the six-wire bus link of
-[../bench.md](../bench.md). Its die reports
+on USART2 PA2/PA3) is tied to the G0B1RE by the six-wire bus link the
+two bus suites' header comments describe. Its die reports
 **DEV_ID 0x460, REV_ID 0x2000** - ES0418 silicon revision B - and every
 bench suite prints that pair at boot through `DeviceIdcode::read()`
 ([platform.md](platform.md)), because a measurement that differs between
@@ -217,7 +217,7 @@ TAMPPUDIS contrast; and **its debug port can go silent** - a state of
 the board's ST-LINK half that only unplugging the board clears - in
 which case the ST-LINK's own mass-storage flasher is the way in
 (`bin/brio`'s `stlink_msd` programmer kind) and nothing can be
-halted or read over SWD until the replug ([../bench.md](../bench.md)).
+halted or read over SWD until the replug ([../probes/st-link.md](../probes/st-link.md)).
 
 **FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT.**
 

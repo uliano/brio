@@ -1,6 +1,7 @@
 """brio - the one command of the bench and of the repository.
 
     brio list                      serial devices, USB probes, the manifest
+    brio apps [project] [filter]   the roster of the apps, from their own headers
     brio flash <board> <app>       build the app for the board and flash it
     brio run <board> <letter>      drive a suite's console, judge "ALL: N pass, M fail"
     brio console <board>           the console device path and speed
@@ -13,7 +14,7 @@
     brio gate --tokens [--strings] FILE...      sources token-identical to REF?
 
 The first six need a board on the desk and live in cli/bench/; the
-last three need none. Put bin/ on the PATH, or call bin/brio from
+others need none. Put bin/ on the PATH, or call bin/brio from
 anywhere in the tree."""
 
 import sys
@@ -27,6 +28,9 @@ def main(argv):
         return 0
     verb, rest = argv[1], argv[2:]
     prog = argv[0] + " " + verb
+    if verb == "apps":
+        from cli import apps
+        return apps.main([prog] + rest)
     if verb == "prose":
         from cli import prose
         return prose.main([prog] + rest)

@@ -11,8 +11,8 @@
 // TWO INSTRUMENTS, ONE SET OF PADS, AND THE SUITE ASKS THE WIRE WHICH
 // ONE IS ON THE DESK.
 //
-// (1) THE BOARD'S OWN SELF-LINK (docs/bench.md, "The Nucleo-G0B1RE's
-// self-link"): SPI1 the host and SPI2 the client, four wires between
+// (1) THE BOARD'S OWN SELF-LINK: SPI1 the host and SPI2 the client,
+// four wires between
 // them -
 //
 //   SCK   PB3  AF0  ->  PB10 AF5
@@ -31,8 +31,7 @@
 // (2) THE PEER LINK: the SAME four SPI1 pads reach a SECOND BOARD
 // running `spi_peer`, and EITHER instrument is valid - the peer names
 // itself in its `ident` (fw 0x01xx = the AVR, 0x02xx = the SAM C21,
-// 0x03xx = a second STM32G0), and docs/bench.md says which one is
-// fitted -
+// 0x03xx = another STM32G0), and the desk says which one is fitted -
 //
 //   SCK   PB3  AF0  ->  a SAM C21's PA17 SERCOM1 PAD[1],  or PB3  AF0
 //   MOSI  PB5  AF0  ->  a SAM C21's PA16 SERCOM1 PAD[0],  or PB5  AF0
@@ -502,8 +501,9 @@ void settle() { settle_ms(spilink::settle_ms); }
 // THE SELF-LINK IS NOT A PROPERTY OF THIS BOARD, it is four jumpers, and
 // they have already moved: the same SPI1 pads now carry the link to a
 // PEER BOARD running `spi_peer`, and SPI2's four pads are on nothing
-// (docs/bench.md). So the suite ASKS THE WIRE
-// which desk it is on, once, before any letter runs, and the letters
+// (the two wirings are the same jumpers at different ends). So the
+// suite ASKS THE WIRE which desk it is on, once, before any letter runs,
+// and the letters
 // that need two peripherals on four wires SKIP THEMSELVES - by name,
 // with the reason printed - when the answer is no. A skipped letter
 // claims nothing and scores no verdict either way.
@@ -586,7 +586,7 @@ bool need_self_link() {
           "OWN self-link (SPI1 PB3/PB4/PB5/PA15 to SPI2 PB10/PC2/PD4/PB12) and "
           "the probe says those four wires are not on the desk. They carry the "
           "link to the PEER BOARD today - letters n..r are the instrument this "
-          "desk has (docs/bench.md).",
+          "desk has.",
           crlf);
     return false;
 }
@@ -823,7 +823,7 @@ bool need_peer() {
               "  SKIPPED, no verdict claimed: this letter's instrument is the PEER "
               "BOARD running `spi_peer`, and the probe says these four pads carry "
               "the board's OWN self-link today - the two wirings are the same "
-              "jumpers at different ends (docs/bench.md). Letters b..l are the "
+              "jumpers at different ends. Letters b..l are the "
               "instrument this desk has.",
               crlf);
         return false;

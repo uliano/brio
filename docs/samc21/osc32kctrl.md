@@ -180,8 +180,8 @@ Implemented but not bench-verified:
   silicon. Its startup codes, the external-clock mode (XTALEN clear),
   the failure detector and `switch_back()` are all in that state; a
   board with a 32.768 kHz crystal on PA00/PA01 is what measures them
-  ([../bench.md](../bench.md) says which one carries it), and no letter
-  starts it yet.
+  ([../boards/samc21j.md](../boards/samc21j.md): the crystal is
+  optional on the design), and no letter starts it yet.
 - `on_demand` on either internal oscillator: set and read back, never
   observed to gate anything. (`run_standby` on OSC32K is observed
   across a standby, both ways - [clock.md](clock.md) records what a

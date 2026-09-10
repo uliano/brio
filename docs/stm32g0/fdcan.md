@@ -217,7 +217,8 @@ both AF3, both proven to follow their own internal pull before either is
 claimed and both left in analog mode after (PB8/PB9 carry this desk's
 I2C self-link and its 2.2 k pull-ups, and a pad an external pull holds
 up cannot be pulled dominant by its own 40 k, which the error machine
-below needs - [../bench.md](../bench.md)). FDCAN2 is exercised
+below needs - the suite's own header comment says where its pads
+are). FDCAN2 is exercised
 **without a pad at all**, because internal loop-back needs none. Three
 instruments make the chapter measurable with nothing attached: `TEST.TX
 = 01` counted by a DMAMUX request generator on the pad's EXTI line with

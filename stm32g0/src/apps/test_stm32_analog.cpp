@@ -3804,7 +3804,7 @@ void tp_dac_triggers() {
     // line 9 and the EXTI's own port selection and edge are what put it
     // there. PC9 AND NOT PB9: a pad an external 2.2 k pull-up holds up
     // will not follow its own internal pull-down, and PB9 is where a
-    // wired I2C bus puts one (docs/bench.md).
+    // wired I2C bus puts one (the I2C suite's self-link).
     PadC9::input(PinPull::down);
     (void)delay_us(clock, 300);
     const bool c9_low = !PadC9::read();

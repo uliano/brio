@@ -194,8 +194,8 @@ can and cannot measure about the comparator itself, is in
   and are started, allowed one edge and stopped; and **EXTI 9 through a
   pull-walked PC9**, the one row of the multiplexer that is a PAD, with
   the line's port selected in the EXTI and its sense rising - PC9 and
-  not PB9, which the desk's I2C self-link holds up
-  ([../bench.md](../bench.md)).
+  not PB9, which an I2C self-link on the Nucleo holds up (the suite's
+  own header comment says where it wires).
 - **The DMA underrun, staged**: a converter asking for a DMA with NO
   channel armed at all raises DMAUDR on the trigger after the first,
   and the flag is clear before. It is write-one-to-clear and comes

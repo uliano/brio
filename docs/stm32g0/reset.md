@@ -258,7 +258,7 @@ LSI at **31400 Hz** ([platform.md](platform.md)).
 
 **WHEN THIS BOARD'S DEBUG PORT GOES SILENT, THE RESET IS THE ONLY WAY
 BACK IN.** Its ST-LINK half can stop answering until the board is
-replugged ([bench.md](../bench.md)); in that state nothing can be halted
+replugged ([../probes/st-link.md](../probes/st-link.md)); in that state nothing can be halted
 or reset from the host, and a wedged image is recovered by flashing
 another through the ST-LINK's mass-storage flasher, which resets the
 part under NRST. That is the way back from a Shutdown entered with the

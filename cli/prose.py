@@ -24,8 +24,8 @@ reads, as an ERROR.
 Scope: comments of every .hpp/.cpp under brio/, the three build
 projects' src/ trees and experiments/; every .md under docs/ and the
 top-level README.md. Not read, on purpose: CLAUDE.md (a working log by
-design), docs/bench.md (the desk diary, until it is split), docs/*/vendor/
-(datasheet revisions carry dates of record), third_party/.
+design), private/ (the desk diary), docs/*/vendor/ (datasheet revisions
+carry dates of record), third_party/.
 
 Usage: brio prose [paths...]   (no paths = the whole scope)
 Exit status: 1 on any error, 0 otherwise. Review items never fail.
@@ -40,8 +40,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOURCE_ROOTS = ["brio", "avrdx/src", "samc21/src", "stm32g0/src", "experiments"]
 DOC_ROOTS = ["docs"]
 DOC_FILES = ["README.md"]
-EXCLUDE_DIRS = ("third_party", "build-cmake", ".git")
-EXCLUDE_FILES = ("docs/bench.md",)
+EXCLUDE_DIRS = ("third_party", "build-cmake", ".git", "private")
+EXCLUDE_FILES = ()
 EXCLUDE_GLOBS = ("/vendor/",)
 
 ERROR_PATTERNS = [

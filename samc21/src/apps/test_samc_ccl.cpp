@@ -179,7 +179,7 @@ uint32_t lcg(uint32_t modulus) {
 
 /// A pad is usable as a stimulus only if it FOLLOWS ITS OWN PULL with
 /// nothing else on it. Proved before anything relies on it (the board's
-/// own button pad, PB22, does not - docs/bench.md records that).
+/// own button pad, PB22, does not - the board's page records that).
 template <class P>
 bool pad_is_free() {
     // Three attempts, because a pad this suite has just handed back can

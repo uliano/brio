@@ -112,8 +112,8 @@ read-modify-write through EAR + WAP with the core halted, the old row
 printed first, the new one read back and diffed, the BODCORE calibration
 and Reserved bits carried across untouched, no raw bit escape, and
 BOOTPROT, LOCK and ALWAYS-ON behind an acknowledgement flag. Neither the
-driver nor the tool reaches the security bit. See
-[../bench.md](../bench.md).
+driver nor the tool reaches the security bit
+([../probes/atmel-ice.md](../probes/atmel-ice.md)).
 
 Note that the device header's `NVMCTRL_USER_PAGE_OFFSET` is 0x00800000,
 the base of the whole auxiliary space, and NOT the user row: the two

@@ -81,8 +81,8 @@ Facts that matter to code:
   bit per instance): TCB0 PA2 / PF4, TCB1 PA3 / PF5, TCB2 PC0 / PB4,
   TCB3 PB5 / PC1, TCB4 PG3 / PC6 (the TCB4 ALT1 is dead on every
   silicon revision, errata 2.13.2). TCB2's default PC0 collides with
-  TCA0's PORTC WO0 route; the board-level collisions are in
-  [bench.md](../bench.md).
+  TCA0's PORTC WO0 route; which of the two a board uses is the
+  application's to decide, pad by pad.
 - **32-bit capture**: two TCBs, the LSB one clocked from the source
   with `CASCADE = 0`, the MSB one clocked from the LSB's `OVF` event
   (`COUNT` user) with `CASCADE = 1` (delays its CAPT input by one

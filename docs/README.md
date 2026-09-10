@@ -45,7 +45,8 @@ that target's own documents, one per peripheral driver:
 | STM32G0 (`brio/stm32g0/`) | [stm32g0/README.md](stm32g0/README.md) - Toolchain, the three Nucleo boards, ST-LINK upload and debug, the SWD-under-WFI caveat, and FAMILY COVERAGE: both the x1 line and the x0 value line, the stratum compiling on all twelve headers of the pack with every vector derived from peripheral presence; then its documents |
 | the ARMv6-M core stratum (`brio/armv6m/`) | [armv6m/README.md](armv6m/README.md) - what the two Cortex-M0+ families share: NVIC + PRIMASK, the SysTick ticker and the microsecond busy-wait on SysTick's counter, the include-order contract, what stays per family |
 | host (`brio/host/`) | [host/README.md](host/README.md) - The native test target: HostPlatform, doctest suites |
-| the bench | [bench.md](bench.md) - The board, the wiring and the apps as they are today (volatile) |
+| the boards | [boards/README.md](boards/README.md) - how a board joins the bench (build by type, the manifest, `bin/brio`), then one page per board brio is tested on |
+| the probes | [probes/README.md](probes/README.md) - the flash mechanisms `bin/brio` knows, then one page per probe |
 
 ## Rules of this directory
 
@@ -61,7 +62,7 @@ that target's own documents, one per peripheral driver:
   state principles, contracts and tradeoffs - they never describe or
   reference individual apps (apps are disposable and must be free to
   change without touching the foundations). Apps document themselves
-  in their own header comment and are listed in `bench.md`.
+  in their own header comment; `brio apps` lists them.
   THE ONE EXCEPTION IS APPARATUS: a document may name the firmware a
   reader needs in order to reproduce a measurement it reports - a
   reference suite (`test_<target>_<subject>`, which must keep passing)
@@ -129,6 +130,8 @@ that target's own documents, one per peripheral driver:
 
 ## What does NOT belong here
 
-- Bench diary and hardware bring-up state beyond the current wiring
-  (`bench.md`): session memory.
+- The desk itself - which board is plugged in where, its incidents
+  and end states: the user's own private notes, never this directory.
+  What a board IS lives in `boards/`, what a probe does in `probes/`,
+  what a suite needs wired in the suite's own header comment.
 - The assistant's working notes: `CLAUDE.md`.

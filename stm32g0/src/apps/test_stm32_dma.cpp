@@ -2781,10 +2781,11 @@ void tm_dma2_and_p2p() {
 // THE ALARM'S CLOCK IS A BOARD FACT and not a part's. What the leg needs
 // is a clock a Stop does not take away - 26.5's table: "no effect when
 // the LPTIM is clocked by LSE or LSI" - and the two Nucleo-64s carry a
-// 32.768 kHz crystal that has been claimed and measured. NO LSE IS
-// RECORDED FOR THE NUCLEO-32 (docs/bench.md: the board is not on the
-// desk and its pads are still the user manual's), so there it takes the
-// other clock of that sentence, the LSI, which needs no crystal. The
+// 32.768 kHz crystal that has been claimed and measured. On the
+// Nucleo-32 the leg takes the other clock of that sentence, the LSI,
+// which needs no crystal - a crystal there depends on the board's
+// oscillator bridges (docs/boards/nucleo-g031k8.md), and a wake is a
+// wake on either. The
 // compare is the same 1966 counts either way - 60 ms of a 32768 Hz LSE,
 // about 61 of a nominal 32 kHz LSI - because what this leg asks of the
 // alarm is a WAKE and not a time.

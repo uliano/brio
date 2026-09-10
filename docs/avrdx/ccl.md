@@ -79,8 +79,8 @@ Facts that matter to code:
   and events, and the driver refuses only its pin faces
   (`has_pins`/`has_alt_pin` are the facts; a re-init away from
   `output_pin` releases the previously taken pin). LUT1's pins PC0..PC3 coincide with TCA0's
-  PORTC route WO0..3 (the board-level collisions are in
-  [bench.md](../bench.md)). `OUTEN`
+  PORTC route WO0..3 (which of the two a board uses is the
+  application's to decide, pad by pad). `OUTEN`
   drives the pin; the pin's direction must be set by PORT.
 - **Errata 2.4.2**: LINK into LUT3 dead - on DB only rev A4 and the
   28/32-pin parts; on DA the same item is never fixed on 28/32-pin

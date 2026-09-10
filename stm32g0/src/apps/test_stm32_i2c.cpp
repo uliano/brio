@@ -11,8 +11,8 @@
 // TWO INSTRUMENTS, ONE PAIR OF PADS, AND THE SUITE ASKS THE WIRE WHICH
 // ONE IS ON THE DESK.
 //
-// (1) THE BOARD'S OWN SELF-LINK (docs/bench.md, "The Nucleo-G0B1RE's
-// self-link"): I2C1 the host and I2C2 the client, two wires between
+// (1) THE BOARD'S OWN SELF-LINK: I2C1 the host and I2C2 the client,
+// two wires between
 // them, each with a 2.2 kOhm pull-up to 3V3 -
 //
 //   SCL   PB8  AF6  <->  PA11 AF6
@@ -26,7 +26,7 @@
 // (2) THE PEER BUS: the SAME two pads and the SAME pull-ups reach a
 // SECOND BOARD running `twi_peer`, and EITHER instrument is valid - the
 // peer names itself in its `ident` (fw 0x01xx = the AVR, 0x02xx = the
-// SAM C21, 0x03xx = a second STM32G0), and docs/bench.md says which one
+// SAM C21, 0x03xx = another STM32G0), and the desk says which one
 // is fitted -
 //
 //   SCL   PB8  AF6  <->  a SAM C21's PA23 SERCOM3 PAD[1], or PB8 AF6
@@ -708,7 +708,8 @@ void settle_ms(uint32_t ms) {
 // THE SELF-LINK IS NOT A PROPERTY OF THIS BOARD, it is two jumpers, and
 // they have already moved: PB8/PB9 now carry the bus to a PEER BOARD
 // running `twi_peer`, and I2C2's pads are on nothing
-// (docs/bench.md). So the suite ASKS THE WIRE which desk it is on, once,
+// (the same jumpers at different ends). So the suite ASKS THE WIRE
+// which desk it is on, once,
 // before any letter runs, and the letters whose second node is I2C2 SKIP
 // THEMSELVES - by name, with the reason printed - when the answer is no.
 // A skipped letter claims nothing and scores no verdict either way.
@@ -779,7 +780,7 @@ bool need_self_link() {
           "  SKIPPED, no verdict claimed: this letter's second node is the board's "
           "OWN I2C2 client (PA11/PA12) and the probe says the two self-link wires "
           "are not on the desk. PB8/PB9 carry the bus to the PEER BOARD today "
-          "- letters n..r are the instrument this desk has (docs/bench.md).",
+          "- letters n..r are the instrument this desk has.",
           crlf);
     return false;
 }
@@ -944,7 +945,7 @@ bool need_peer() {
               "  SKIPPED, no verdict claimed: this letter's instrument is the "
               "PEER BOARD running `twi_peer`, and the probe says these two pads "
               "carry the board's OWN self-link today - the two wirings are the "
-              "same jumpers at different ends (docs/bench.md). Letters b..m are "
+              "same jumpers at different ends. Letters b..m are "
               "the instrument this desk has.",
               crlf);
         return false;

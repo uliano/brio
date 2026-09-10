@@ -395,7 +395,7 @@ judges.
 letter `i` implies **31400 Hz** where the G0B1RE reads 32536 and the
 G071RB 32295 - all three inside DS12992/DS13560 table 46's 29.5..34 kHz,
 and none of them each other. The board's crystal runs, so this is the
-rate of the LSI witness letters alone ([bench.md](../bench.md)).
+rate of the LSI witness letters alone ([../boards/nucleo-g031k8.md](../boards/nucleo-g031k8.md)).
 
 **AND LSIRDY IS A READING ABOUT THE RTC DOMAIN AND NOT ABOUT THE
 WATCHDOG**: LSIRDY stands with LSION clear exactly where RCC_BDCR holds

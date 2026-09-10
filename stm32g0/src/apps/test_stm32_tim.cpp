@@ -381,7 +381,7 @@ bool pad_follows_pull() {
 }
 
 /// A pad an external pull-up holds UP (a wired I2C bus puts 2.2 k on
-/// PB8/PB9 - docs/bench.md) cannot follow its internal pull-down, and is
+/// PB8/PB9 - the I2C suite's self-link) cannot follow its internal pull-down, and is
 /// still a pad this suite may DRIVE: a push-pull output beats 2.2 k.
 /// Free means either.
 template <class Pad>
@@ -2337,7 +2337,7 @@ void tl_six_instances() {
     const bool b6 = pad_follows_pull<PadB6>();
     const bool b7 = pad_follows_pull<PadB7>();
     // PB8 and PB9 are where a wired I2C bus puts its 2.2 k pull-ups on
-    // the Nucleo-64s (docs/bench.md): there they cannot follow an
+    // the Nucleo-64s (the I2C suite's self-link): there they cannot follow an
     // internal pull-down any more, and a push-pull driver still owns them
     // - which is all this letter asks. On a board with nothing on the
     // pads the same verb takes the plain pull-walk's answer.

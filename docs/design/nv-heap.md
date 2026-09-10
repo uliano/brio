@@ -181,7 +181,7 @@ level:
 A heap survives a reboot because flash is flash. It survives a REFLASH
 only because of a programming CONVENTION: the tool writes the image's
 own pages and leaves the rest of the part alone. That is a property of
-how the bench flashes (see [bench.md](../bench.md)), not of the silicon
+how the bench flashes (see [../probes/atmel-ice.md](../probes/atmel-ice.md)), not of the silicon
 - flash has no EESAVE twin, and a chip erase takes everything, map
 included. Nothing in the design hides this: a wiped heap mounts as an
 empty one, and the application is told.

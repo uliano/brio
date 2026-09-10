@@ -41,8 +41,9 @@
 // mode afterwards. THE CHOICE OF PADS IS ELECTRICAL: a pad an external
 // pull-up holds up cannot be pulled dominant by its own 40 k, and this
 // suite's error machine needs exactly that, so a pad carrying a wired
-// bus with its own pull-ups will not serve (docs/bench.md says which
-// pads the wiring occupies). FDCAN2 is exercised WITHOUT A PAD
+// bus with its own pull-ups will not serve (the I2C suite's self-link
+// occupies PB8/PB9, the SPI suite's PB3/PB4/PB5/PA15 and SPI2's four).
+// FDCAN2 is exercised WITHOUT A PAD
 // throughout.
 // PA2/PA3 are the console, PA5 is LD4, PA13/PA14 the SWD, PC13 the
 // button, PC14/PC15 the LSE crystal.

@@ -29,7 +29,7 @@ on validation data" (table 39-7; no typical value is published). A
 chip erase spends one of those cycles on every page at once, which is
 why the bench reflashes page-selectively (avrdude's default on these
 parts) and reserves the chip erase for `brio flash --erase` - the
-three measured erase regimes are in docs/bench.md.
+three measured erase regimes are in [../probes/atmel-ice.md](../probes/atmel-ice.md).
 
 That table is the whole division of labour. Flash is for big,
 re-provisionable payloads - a font, a table, anything the programmer
@@ -382,7 +382,7 @@ left to each app:
   above. It is the NEWEST SOURCE TIMESTAMP rather than the time of the
   link, and that is a bench requirement, not a preference: an unchanged
   tree must relink to the same bytes or reflashing it stops being safe
-  (see [bench.md](../bench.md) on the three erase regimes). An image
+  (see [../probes/atmel-ice.md](../probes/atmel-ice.md) on the three erase regimes). An image
   that never names the heap never references the symbol and pays
   nothing for it.
 

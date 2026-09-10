@@ -244,7 +244,7 @@ A client answering a stream (the one-ahead pump):
   bench: SAM SERCOM1 function C (PA16 MOSI, PA17 SCK, PA18 SS, PA19
   MISO) against an AVR128DB48 peer's SPI0 ALT1 (PE0-PE3), both boards
   at 5 V. And the SAM-SAM five-wire bench (both boards' PA16..PA19
-  straight through plus GND, [bench.md](../bench.md)), which is where
+  straight through plus GND), which is where
   the DMA findings below are measured. On either desk the same wires
   carry a board as host (DOPO row 0x0) and as client (row 0x2).
 - All four transfer modes x both bit orders byte-exact in both
