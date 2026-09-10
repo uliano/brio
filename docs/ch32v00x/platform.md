@@ -51,7 +51,10 @@ is the concept member for member: `CriticalSection` is pfic.hpp's
 `InterruptGuard` (one `csrrci` reads and clears mstatus.MIE, the
 destructor restores only what it found set), `idle()` is the WFE
 sequence above followed by the unmask, `break_here()` is `ebreak`,
-`atomic_width` 4, the breadcrumb in `.noinit`. The interrupt verbs and
+`atomic_width` 4, the breadcrumb in `.noinit` - and with a Standby
+armed (SLEEPDEEP set by [sleep.md](sleep.md)'s site) `idle()` holds
+the ticker off across the WFE, since a tick turning pending would end
+it before the Standby began. The interrupt verbs and
 the per-line enables are [brio/ch32v00x/pfic.hpp](../../brio/ch32v00x/pfic.hpp):
 `enable/disable/enabled/pending/set_pending/clear_pending/active`
 (the manual's ISR bank is the ENABLE status and its IPR the pending
@@ -152,9 +155,6 @@ CH32V006K8U6 at 48 MHz. What it measured:
 
 Driver gaps, each with its reason:
 
-- A sleep site over the Sleep and Standby modes of RM ch. 2 and the
-  AWU as its alarm: the power phase's, born with the bench meter that
-  measures it.
 - The two watchdogs (RM ch. 4 and 5) and the watchdog verbs that would
   join `Reset`: the timers phase's.
 - The PFIC's priorities and its two free vectored entries: no user.
@@ -165,6 +165,8 @@ Implemented but not bench-verified, each with what would measure it:
   sleep cheaply - whether the latched event is consumed by the `wfi`
   or leaves the loop spinning is a current measurement with the probe
   detached (a core in debug mode never sleeps, QingKe V2 manual 5.1).
+  The Standby it enters when [sleep.md](sleep.md)'s site has armed one
+  is measured the same way.
 - The HPE's saving on a handler that calls into the kernel: the
   minimal handler was measured; a letter timing the USART handler's
   round trip both ways would put a number on the larger case.

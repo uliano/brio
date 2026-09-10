@@ -32,6 +32,7 @@ driver is measured on the bench.
 | Document | Content |
 |----------|---------|
 | [clock.md](clock.md) | RCC: the two roots (HSI, the doubling PLL), the one divider, `Clock` and the `DynamicClock` that walks the HPRE ladder with the users rebased and the wait states following (measured: 48 to 3 MHz and back, the console clean at every rung), `Rcc` (the HSI trim, the LSI - ready in 17 us -, the MCO, the system clock monitor, the peripheral gates) |
+| [sleep.md](sleep.md) | PWR: Sleep and Standby through the site contract (light is Sleep, standby and deep both Standby), the AWU as the alarm of a timed site with the LSI MEASURED against the STK (124 kHz on this part) and the frozen span handed back less the ticks counted awake; measured: a 300 ms Standby ended by the AWU, the core waking on the HSI and the PLL restored, the event due and never early - and the PWR gate that answers rubbish until opened |
 | [nvm.md](nvm.md) | FLASH: the engine (fast page program as the ONLY way to write, the two locks, three erase grains), the constant partition (the linker's 40 KB, the heap's 16 KB, the journal's 6 KB attic) and the two media with THE PAGE AS THE CELL; measured: an erase and a program each under a millisecond with the core stalled, a sector erase seven times faster than a page's, and a page that ACCEPTS a second program between erases - the finding a smaller cell could rest on, not yet taken |
 | [platform.md](platform.md) | Platform: `Ch32v00xPlatform` (the csrrci critical section, the WFE-shaped `idle()` and the WFI rule that forces it, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the hardware prologue/epilogue MEASURED: 83 vs 92 cycles round trip, the default ON), the STK `BasicTicker`, `delay_us` on the STK counter, and the failing half - `Reset` (the flags as history, PINRSTF naming the pin alone on this family), `ResetReporter`, `fault_reset<P>()`; three real resets in the suite |
 
@@ -40,6 +41,7 @@ The headers not yet behind a document of their own:
 | Header | Content |
 |--------|---------|
 | [brio/ch32v00x/device.hpp](../../brio/ch32v00x/device.hpp) | The register map in the chapter's words: buses, RCC, GPIO, USART, FLASH_ACTLR, the core's STK and PFIC, the interrupt numbers |
+| [brio/ch32v00x/exti.hpp](../../brio/ch32v00x/exti.hpp) | `Exti` (the ten lines: eight pads through AFIO_EXTICR, the PVD, the AWU; interrupt or event, edges, the software trigger, the flags) and `ExtInt<Pin>` - the resource sleep.md's AWU stands on; its own page comes with the pad test |
 | [brio/ch32v00x/pin.hpp](../../brio/ch32v00x/pin.hpp) | `Pin<'D', 5>`, `Port<'D'>`: the one-bit MODE this family has, pulls through OUTDR, the port clock opened by every configuring verb |
 | [brio/ch32v00x/usart.hpp](../../brio/ch32v00x/usart.hpp) | `Uart<1, P>`: the interrupt-driven byte transport (two rings, TXEIE armed and disarmed, errors read then cleared) |
 
@@ -266,8 +268,8 @@ Driver gaps, each with its reason:
   default pads is the one port the bench needs; USART2's default pads
   and every remap arrive with the first program that needs a second
   port or a moved pad.
-- EXTI, TIM1/TIM2, ADC, I2C, SPI, DMA, the OPA, the watchdogs and the
-  power modes (Sleep/Standby, the AWU): each is a chapter
+- TIM1/TIM2/TIM3, ADC, I2C, SPI, DMA, the OPA and the watchdogs: each
+  is a chapter
   of the reference manual with no user yet, and each is born with
   its first user and its bench measurements, the way the other three
   strata's were.
@@ -282,11 +284,10 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The idle path's power: the WFE-shaped sleep is proven to sleep and
-  wake (`test_ch32_platform` letter b) but not to sleep cheaply -
-  whether the latched event is consumed by the `wfi` or leaves the
-  loop spinning is a current measurement on a bench meter, with the
-  probe detached (a core in debug mode never sleeps).
+- The idle path's power, and Standby's: both are proven to sleep and
+  wake (`test_ch32_platform` letter b, `test_ch32_sleep` letter d)
+  but not to sleep cheaply - a current measurement on a bench meter,
+  with the probe detached (a core in debug mode never sleeps).
 - `Pin` pulls, open-drain outputs and `analog()`: written from the
   chapter, exercised by no pad test yet - a pad test in the manner of
   the other targets' probe suites.

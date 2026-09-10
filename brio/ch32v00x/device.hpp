@@ -102,6 +102,16 @@ inline constexpr uint32_t rcc_lsirdy        = 1UL << 1;
 inline constexpr uint32_t rcc_sysclk_failif = 1UL << 8;    ///< write 0 to clear
 inline constexpr uint32_t lsi_hz = 128'000UL;              ///< nominal; the datasheet's spread is wide
 
+/// RCC_PB1PCENR: one bit per peripheral on the PB1 bus (RM 3.4.8).
+/// PWR is one of them: its registers read as rubbish until its gate
+/// is open, which is the first thing sleep.hpp does.
+inline constexpr uint32_t rcc_pb1_tim2   = 1UL << 0;
+inline constexpr uint32_t rcc_pb1_tim3   = 1UL << 2;
+inline constexpr uint32_t rcc_pb1_wwdg   = 1UL << 11;
+inline constexpr uint32_t rcc_pb1_usart2 = 1UL << 17;
+inline constexpr uint32_t rcc_pb1_i2c1   = 1UL << 21;
+inline constexpr uint32_t rcc_pb1_pwr    = 1UL << 28;
+
 /// RCC_PB2PCENR: one bit per peripheral on the PB2 bus (RM 3.4.7).
 inline constexpr uint32_t rcc_pb2_afio   = 1UL << 0;
 inline constexpr uint32_t rcc_pb2_gpioa  = 1UL << 2;

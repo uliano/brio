@@ -219,6 +219,11 @@ struct Clock {
      * the switch never takes - the caller decides what to say about a
      * boot that stayed on the reset clock.
      */
+    /// After a Standby the hardware has switched SYSCLK to the HSI and
+    /// turned the PLL off (RM 2.3.3): the tree is put back by running
+    /// init() again, which is what a sleep site calls on its way out.
+    static bool restore() { return init(); }
+
     static bool init() {
         // Wait states first: at boot the core runs at the reset rate (8
         // MHz, zero waits), so this can only raise them, which is the
@@ -316,6 +321,18 @@ struct DynamicClock {
         const bool ok = Boot::init();
         hz_ = Boot::hz;
         idx_ = 0;
+        return ok;
+    }
+
+    /// After a Standby: the root back up (Boot's init, which also puts
+    /// HPRE at 1 and the wait states at the root's), then the CURRENT
+    /// rate's divider and wait states again. The users are told nothing:
+    /// their rate never changed, only the silicon forgot it.
+    static bool restore() {
+        const bool ok = Boot::init();
+        flash_ctl()->ACTLR = flash_latency_for(Boot::hz);
+        Rcc::hpre(idx_);
+        flash_ctl()->ACTLR = flash_latency_for(hz_);
         return ok;
     }
 

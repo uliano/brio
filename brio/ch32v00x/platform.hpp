@@ -76,15 +76,35 @@ struct Ch32v00xPlatform {
      * it each time; SEVONPEND is sticky but costs nothing to re-assert
      * in the same store.
      *
-     * WHAT DEPTH. SLEEPDEEP stays as found: out of reset it is clear,
-     * so this is the plain Sleep of QingKe 5.1 (the core clock gated,
-     * STK and the wake logic alive). A sleep site that arms a deeper
-     * mode above this hook is born with its first user, and the hook
-     * then takes what it finds, as on the other strata.
+     * WHAT DEPTH. SLEEPDEEP as found: out of reset it is clear, so this
+     * is the plain Sleep of QingKe 5.1 (the core clock gated, STK and
+     * the wake logic alive), and with ch32v00x/sleep.hpp's site having
+     * armed a Standby the same instruction is that Standby. The hook
+     * takes what it finds, as on the other strata - with one thing it
+     * does for a Standby, because only this hook can: THE TICK IS HELD
+     * OFF ACROSS IT. The STK fires every millisecond, and a tick turning
+     * pending is an event that ends the WFE before the Standby begins
+     * (the SAM's SysTick had the same power, and its idle() holds it
+     * off the same way). So with SLEEPDEEP armed the timebase is paused
+     * and its pending bit cleared before the sleep, and resumed after;
+     * kernel time stands still for exactly the slept span, which the
+     * timed site hands back. A stale latched event (a USART interrupt
+     * from just before) still ends the first WFE at once: the kernel
+     * loop simply turns and sleeps again, which is why a program that
+     * wants a Standby lets the loop idle and does not call this once.
      */
     static void idle() {
+        const bool deep = (pfic_sctlr() & sctlr_sleepdeep) != 0u;
+        if (deep) {
+            TB::pause();
+            stk()->SR = 0;
+            Pfic::clear_pending(Irq::systick);
+        }
         pfic_sctlr() = (pfic_sctlr() | sctlr_wfitowfe | sctlr_sevonpend) & ~sctlr_setevent;
         __asm__ volatile("wfi" ::: "memory");
+        if (deep) {
+            TB::resume();
+        }
         enable_interrupts();
     }
 

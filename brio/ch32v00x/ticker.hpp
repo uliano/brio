@@ -179,6 +179,27 @@ public:
     /// Exact seconds since init() (wraps after ~136 years)
     static uint32_t secs() { return read_shared(m_secs); }
 
+    /**
+     * Advance kernel time by `n` ticks IN ONE STEP - the resync verb a
+     * timed sleep site calls after a Standby that stopped this counter
+     * (sleep.hpp): the frozen span, and only that, handed back so time
+     * events matured during the sleep are seen as due on the next loop
+     * pass. Under the guard, so the handler's own tick cannot interleave
+     * a half-updated second boundary.
+     */
+    static void advance(uint32_t n) {
+        InterruptGuard guard;
+        m_ticks += n;
+        const uint32_t f = static_cast<uint32_t>(m_frac) + n;
+        m_secs += f / tps;
+        m_frac = static_cast<uint16_t>(f % tps);
+    }
+
+    /// Stop the periodic interrupt without losing the counters; time
+    /// stands still while paused, resume() picks up where it was.
+    static void pause() { stk()->CTLR = stk()->CTLR & ~stk_stie; }
+    static void resume() { stk()->CTLR = stk()->CTLR | stk_stie; }
+
     /// Follow a clock that changed rate: reprogram the compare, keeping
     /// the counters. The tick in progress loses its phase - late, never
     /// early, the same promise kernel/time.hpp makes.
