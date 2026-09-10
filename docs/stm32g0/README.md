@@ -339,13 +339,19 @@ states are measured in `test_stm32_sleep` letter c.
 
 ## Debugging (cortex-debug + OpenOCD)
 
-The launch config is "Debug STM32G0 (OpenOCD, Nucleo-G0B1RE)" in
-`.vscode/launch.json`: the SAM entry's shape with the two ST config
-files, `adapter serial` through `openOCDPreConfigLaunchCommands`, and
-`svdPath` at `stm32g0/svd/STM32G0B1.svd`. CMake Tools' Active Folder
-must be `stm32g0/` and its launch target the app to debug. Not yet
-exercised at the bench (mature tooling gets the light verification
-policy).
+One launch config per part in `.vscode/launch.json` ("Debug STM32G0B1RE
+(OpenOCD, Nucleo-G0B1RE)" and its G071RB and G031K8 siblings): the SAM
+entry's shape with the two ST config files and the part's own SVD from
+`stm32g0/svd/` for the Peripheral Viewer; no probe named, so the one
+ST-LINK attached is taken (with several, `adapter serial` goes through
+`openOCDPreConfigLaunchCommands`). CMake Tools' Active Folder must be
+`stm32g0/`, its configure preset the part's `-debug` one and its
+launch target the app to debug. Verified on the Nucleo-G071RB, from
+VS Code and from the command line with the same OpenOCD and gdb: load,
+reset-halt, a breakpoint at `main` hit, source lines stepped. A session leaves
+DBGMCU_CR.DBG_STOP set (the target script's doing) until a power-on or
+a `brio flash`, which clears it - a Stop measured right after a debug
+session does not stop the clocks.
 
 ## Editor (clangd)
 

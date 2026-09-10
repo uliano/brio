@@ -4583,7 +4583,7 @@ Only used if bit TEN1 = 1 (DAC channel1 trigger enabled).</description>
             <name>MAMP1</name>
             <description>DAC channel1 mask/amplitude selector
 These bits are written by software to select mask in wave generation mode or amplitude in triangle generation mode.
-? 1011: Unmask bits[11:0] of LFSR/ triangle amplitude equal to 4095</description>
+>= 1011: Unmask bits[11:0] of LFSR/ triangle amplitude equal to 4095</description>
             <bitOffset>8</bitOffset>
             <bitWidth>4</bitWidth>
             <access>read-write</access>
@@ -4809,7 +4809,7 @@ These bits are available only on dual-channel DACs. Refer to implementation.</de
             <name>MAMP2</name>
             <description>DAC channel2 mask/amplitude selector
 These bits are written by software to select mask in wave generation mode or amplitude in triangle generation mode.
-? 1011: Unmask bits[11:0] of LFSR/ triangle amplitude equal to 4095
+>= 1011: Unmask bits[11:0] of LFSR/ triangle amplitude equal to 4095
 Note: These bits are available only on dual-channel DACs. Refer to implementation.</description>
             <bitOffset>24</bitOffset>
             <bitWidth>4</bitWidth>
@@ -13132,7 +13132,7 @@ These are protected write (P) bits, write access is possible only when the bit 1
                 <name>TCP</name>
                 <description>Timestamp counter prescaler
 Configures the timestamp and timeout counters time unit in multiples of CAN bit times
-[1 ??? 16].
+[1 ... 16].
 The actual interpretation by the hardware of this value is such that one more than the value programmed here is used.
 In CAN FD mode the internal timestamp counter TCP does not provide a constant time base due to the different CAN bit times between arbitration phase and data phase. Thus CAN FD requires an external counter for timestamp generation (TSS = 10).
 These are protected write (P) bits, write access is possible only when the bit 1 [CCE] and bit 0 [INIT] of CCCR register are set to 1.</description>
@@ -13154,7 +13154,7 @@ These are protected write (P) bits, write access is possible only when the bit 1
               <field>
                 <name>TSC</name>
                 <description>Timestamp counter
-The internal/external timestamp counter value is captured on start of frame (both Rx and Tx). When TSCC[TSS] = 01, the timestamp counter is incremented in multiples of CAN bit times [1 ??? 16] depending on the configuration of TSCC[TCP]. A wrap around sets interrupt flag IR[TSW]. Write access resets the counter to 0.
+The internal/external timestamp counter value is captured on start of frame (both Rx and Tx). When TSCC[TSS] = 01, the timestamp counter is incremented in multiples of CAN bit times [1 ... 16] depending on the configuration of TSCC[TCP]. A wrap around sets interrupt flag IR[TSW]. Write access resets the counter to 0.
 When TSCC.TSS = 10, TSC reflects the external timestamp counter value. A write access has no impact.</description>
                 <bitOffset>0</bitOffset>
                 <bitWidth>16</bitWidth>
@@ -13244,7 +13244,7 @@ Start value of the timeout counter (down-counter). Configures the timeout period
               <field>
                 <name>TOC</name>
                 <description>Timeout counter
-The timeout counter is decremented in multiples of CAN bit times [1 ??? 16] depending on the configuration of TSCC.TCP. When decremented to 0, interrupt flag IR.TOO is set and the Timeout Counter is stopped. Start and reset/restart conditions are configured via TOCC.TOS.</description>
+The timeout counter is decremented in multiples of CAN bit times [1 ... 16] depending on the configuration of TSCC.TCP. When decremented to 0, interrupt flag IR.TOO is set and the Timeout Counter is stopped. Start and reset/restart conditions are configured via TOCC.TOS.</description>
                 <bitOffset>0</bitOffset>
                 <bitWidth>16</bitWidth>
                 <access>read-write</access>
@@ -19376,10 +19376,10 @@ SFT bits are set by software. In the SFT = 0x0 configuration, the number of nomi
             <name>RXTOL</name>
             <description>Rx-tolerance
 The RXTOL bit is set and cleared by software.
-Start-bit, +/- 200 ?s rise, +/- 200 ?s fall
-Data-bit: +/- 200 ?s rise. +/- 350 ?s fall
-Start-bit: +/- 400 ?s rise, +/- 400 ?s fall
-Data-bit: +/-300 ?s rise, +/- 500 ?s fall</description>
+Start-bit, +/- 200 us rise, +/- 200 us fall
+Data-bit: +/- 200 us rise. +/- 350 us fall
+Start-bit: +/- 400 us rise, +/- 400 us fall
+Data-bit: +/-300 us rise, +/- 500 us fall</description>
             <bitOffset>3</bitOffset>
             <bitWidth>1</bitWidth>
             <access>read-write</access>
@@ -22387,7 +22387,7 @@ This bit enables the receiver. It is set and cleared by software.</description>
                 <name>TE</name>
                 <description>Transmitter enable
 This bit enables the transmitter. It is set and cleared by software.
-Note: During transmission, a low pulse on the TE bit (???0??? followed by ???1???) sends a preamble (idle line) after the current word. In order to generate an idle character, the TE must not be immediately written to 1. In order to ensure the required duration, the software can poll the TEACK bit in the LPUART_ISR register.
+Note: During transmission, a low pulse on the TE bit ("0" followed by "1") sends a preamble (idle line) after the current word. In order to generate an idle character, the TE must not be immediately written to 1. In order to ensure the required duration, the software can poll the TEACK bit in the LPUART_ISR register.
 When TE is set there is a 1 bit-time delay before the transmission starts.</description>
                 <bitOffset>3</bitOffset>
                 <bitWidth>1</bitWidth>
@@ -22790,7 +22790,7 @@ This bit enables the receiver. It is set and cleared by software.</description>
                 <name>TE</name>
                 <description>Transmitter enable
 This bit enables the transmitter. It is set and cleared by software.
-Note: During transmission, a low pulse on the TE bit (???0??? followed by ???1???) sends a preamble (idle line) after the current word. In order to generate an idle character, the TE must not be immediately written to 1. In order to ensure the required duration, the software can poll the TEACK bit in the LPUART_ISR register.
+Note: During transmission, a low pulse on the TE bit ("0" followed by "1") sends a preamble (idle line) after the current word. In order to generate an idle character, the TE must not be immediately written to 1. In order to ensure the required duration, the software can poll the TEACK bit in the LPUART_ISR register.
 When TE is set there is a 1 bit-time delay before the transmission starts.</description>
                 <bitOffset>3</bitOffset>
                 <bitWidth>1</bitWidth>
@@ -29369,12 +29369,12 @@ TAMPTS is valid even if TSE = 0 in the RTC_CR register. Timestamp flag is set af
                 <description>RTC_OUT2 output enable
 Setting this bit allows to remap the RTC outputs on RTC_OUT2 as follows:
 OUT2EN = 0: RTC output 2 disable
-If OSEL ??  00 or TAMPOE = 1: TAMPALRM is output on RTC_OUT1
+If OSEL != 00 or TAMPOE = 1: TAMPALRM is output on RTC_OUT1
 If OSEL = 00 and TAMPOE = 0 and COE = 1: CALIB is output on RTC_OUT1
 OUT2EN = 1: RTC output 2 enable
-If (OSEL ??  00 or TAMPOE = 1) and COE = 0: TAMPALRM is output on RTC_OUT2
+If (OSEL != 00 or TAMPOE = 1) and COE = 0: TAMPALRM is output on RTC_OUT2
 If OSEL = 00 and TAMPOE = 0 and COE = 1: CALIB is output on RTC_OUT2
-If (OSEL??  00 or TAMPOE = 1) and COE = 1: CALIB is output on RTC_OUT2 and TAMPALRM is output on RTC_OUT1.</description>
+If (OSEL!= 00 or TAMPOE = 1) and COE = 1: CALIB is output on RTC_OUT2 and TAMPALRM is output on RTC_OUT1.</description>
                 <bitOffset>31</bitOffset>
                 <bitWidth>1</bitWidth>
                 <access>read-write</access>
@@ -29441,7 +29441,7 @@ Note: CALM[1:0] are stuck at 00 when CALW8 = 1. Refer to digital calibration.</d
               <field>
                 <name>CALP</name>
                 <description>Increase frequency of RTC by 488.5 ppm
-This feature is intended to be used in conjunction with CALM, which lowers the frequency of the calendar with a fine resolution. if the input frequency is 32768 Hz, the number of RTCCLK pulses added during a 32-second window is calculated as follows: (512 ?? CALP) - CALM.
+This feature is intended to be used in conjunction with CALM, which lowers the frequency of the calendar with a fine resolution. if the input frequency is 32768 Hz, the number of RTCCLK pulses added during a 32-second window is calculated as follows: (512 x CALP) - CALM.
 Refer to .</description>
                 <bitOffset>15</bitOffset>
                 <bitWidth>1</bitWidth>
@@ -30821,7 +30821,7 @@ This bit controls the generation of an interrupt when an error condition occurs 
                 <name>DS</name>
                 <description>Data size
 These bits configure the data length for SPI transfers.
-If software attempts to write one of the ???Not used??? values, they are forced to the value ???0111???
+If software attempts to write one of the "Not used" values, they are forced to the value "0111"
 (8-bit)
 Note: These bits are not used in I2S mode.</description>
                 <bitOffset>8</bitOffset>
@@ -30936,7 +30936,7 @@ Note: This bit is not used in I2S mode.</description>
                 <description>Last DMA transfer for reception
 This bit is used in data packing mode, to define if the total number of data to receive by DMA is odd or even. It has significance only if the RXDMAEN bit in the SPI_CR2 register is set and if packing mode is used (data length =&lt; 8-bit and write access to SPI_DR is 16-bit wide). It has to be written when the SPI is disabled (SPE = 0 in the SPI_CR1 register).
 Note: Refer to  if the CRCEN bit is set.
-This bit is not used in I??S mode.</description>
+This bit is not used in I2S mode.</description>
                 <bitOffset>13</bitOffset>
                 <bitWidth>1</bitWidth>
                 <access>read-write</access>
@@ -30958,7 +30958,7 @@ This bit is not used in I??S mode.</description>
                 <description>Last DMA transfer for transmission
 This bit is used in data packing mode, to define if the total number of data to transmit by DMA is odd or even. It has significance only if the TXDMAEN bit in the SPI_CR2 register is set and if packing mode is used (data length =&lt; 8-bit and write access to SPI_DR is 16-bit wide). It has to be written when the SPI is disabled (SPE = 0 in the SPI_CR1 register).
 Note: Refer to  if the CRCEN bit is set.
-This bit is not used in I??S mode.</description>
+This bit is not used in I2S mode.</description>
                 <bitOffset>14</bitOffset>
                 <bitWidth>1</bitWidth>
                 <access>read-write</access>
@@ -31173,7 +31173,7 @@ This flag is set by hardware and reset when SPI_SR is read by software.</descrip
                 <name>FRLVL</name>
                 <description>FIFO reception level
 These bits are set and cleared by hardware.
-Note: These bits are not used in I??S mode and in SPI receive-only mode while CRC calculation is enabled.</description>
+Note: These bits are not used in I2S mode and in SPI receive-only mode while CRC calculation is enabled.</description>
                 <bitOffset>9</bitOffset>
                 <bitWidth>2</bitWidth>
                 <access>read-only</access>
@@ -31868,12 +31868,12 @@ If TAMPFLT = 00 Tamper 1 input falling edge and low level triggers a tamper dete
                 <enumeratedValues>
                   <enumeratedValue>
                     <name>B_0x0</name>
-                    <description>If TAMPFLT ??  00 Tamper 1 input staying low triggers a tamper detection event.</description>
+                    <description>If TAMPFLT != 00 Tamper 1 input staying low triggers a tamper detection event.</description>
                     <value>0x0</value>
                   </enumeratedValue>
                   <enumeratedValue>
                     <name>B_0x1</name>
-                    <description>If TAMPFLT ??  00 Tamper 1 input staying high triggers a tamper detection event.</description>
+                    <description>If TAMPFLT != 00 Tamper 1 input staying high triggers a tamper detection event.</description>
                     <value>0x1</value>
                   </enumeratedValue>
                 </enumeratedValues>
@@ -31889,12 +31889,12 @@ If TAMPFLT = 00 Tamper 2 input falling edge and low level triggers a tamper dete
                 <enumeratedValues>
                   <enumeratedValue>
                     <name>B_0x0</name>
-                    <description>If TAMPFLT ??  00 Tamper 2 input staying low triggers a tamper detection event.</description>
+                    <description>If TAMPFLT != 00 Tamper 2 input staying low triggers a tamper detection event.</description>
                     <value>0x0</value>
                   </enumeratedValue>
                   <enumeratedValue>
                     <name>B_0x1</name>
-                    <description>If TAMPFLT ??  00 Tamper 2 input staying high triggers a tamper detection event.</description>
+                    <description>If TAMPFLT != 00 Tamper 2 input staying high triggers a tamper detection event.</description>
                     <value>0x1</value>
                   </enumeratedValue>
                 </enumeratedValues>
@@ -34247,7 +34247,7 @@ The PWM mode can be used without validating the preload register only in one pul
                 <description>Output Compare 1 mode
 These bits define the behavior of the output reference signal OC1REF from which OC1 and OC1N are derived. OC1REF is active high whereas OC1 and OC1N active level depends on CC1P and CC1NP bits.
 Note: These bits can not be modified as long as LOCK level 3 has been programmed (LOCK bits in TIMx_BDTR register) and CC1S='00' (the channel is configured in output).
-Note: In PWM mode, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from ???frozen??? mode to ???PWM??? mode.
+Note: In PWM mode, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from "frozen" mode to "PWM" mode.
 Note: On channels having a complementary output, this bit field is preloaded. If the CCPC bit is set in the TIMx_CR2 register then the OC1M active bits take the new value from the preloaded bits only when a COM event is generated.
 Note: The OC1M[3] bit is not contiguous, located in bit 16.</description>
                 <bitOffset>4</bitOffset>
@@ -34414,7 +34414,7 @@ Refer to OC1CE description.</description>
                 <description>Output Compare 1 mode
 These bits define the behavior of the output reference signal OC1REF from which OC1 and OC1N are derived. OC1REF is active high whereas OC1 and OC1N active level depends on CC1P and CC1NP bits.
 Note: These bits can not be modified as long as LOCK level 3 has been programmed (LOCK bits in TIMx_BDTR register) and CC1S='00' (the channel is configured in output).
-Note: In PWM mode, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from ???frozen??? mode to ???PWM??? mode.
+Note: In PWM mode, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from "frozen" mode to "PWM" mode.
 Note: On channels having a complementary output, this bit field is preloaded. If the CCPC bit is set in the TIMx_CR2 register then the OC1M active bits take the new value from the preloaded bits only when a COM event is generated.
 Note: The OC1M[3] bit is not contiguous, located in bit 16.</description>
                 <bitOffset>16</bitOffset>
@@ -35064,7 +35064,7 @@ On channels having a complementary output, this bit is preloaded. If the CCPC bi
 CC1 channel configured as output:
 CC1 channel configured as input:
 This bit is used in conjunction with CC1P to define the polarity of TI1FP1 and TI2FP1. Refer to CC1P description.
-Note: This bit is not writable as soon as LOCK level 2 or 3 has been programmed (LOCK bits in TIMx_BDTR register) and CC1S=???00??? (channel configured as output).
+Note: This bit is not writable as soon as LOCK level 2 or 3 has been programmed (LOCK bits in TIMx_BDTR register) and CC1S="00" (channel configured as output).
 On channels having a complementary output, this bit is preloaded. If the CCPC bit is set in the TIMx_CR2 register then the CC1NP active bit takes the new value from the preloaded bit only when a Commutation event is generated.</description>
             <bitOffset>3</bitOffset>
             <bitWidth>1</bitWidth>
@@ -35242,7 +35242,7 @@ This bit is a read-only copy of the UIF bit of the TIMx_ISR register. If the UIF
             <name>PSC</name>
             <description>Prescaler value
 The counter clock frequency (CK_CNT) is equal to fCK_PSC / (PSC[15:0] + 1).
-PSC contains the value to be loaded in the active prescaler register at each update event (including when the counter is cleared through UG bit of TIMx_EGR register or through trigger controller when configured in ???reset mode???).</description>
+PSC contains the value to be loaded in the active prescaler register at each update event (including when the counter is cleared through UG bit of TIMx_EGR register or through trigger controller when configured in "reset mode").</description>
             <bitOffset>0</bitOffset>
             <bitWidth>16</bitWidth>
             <access>read-write</access>
@@ -35374,9 +35374,9 @@ DTG[7:5]=110 =&gt; DT=(32+DTG[4:0])xtDTG with tDTG=8xtDTS.
 DTG[7:5]=111 =&gt; DT=(32+DTG[4:0])xtDTG with tDTG=16xtDTS.
 Example if tDTS=125 ns (8 MHz), dead-time possible values are:
 0 to 15875 ns by 125 ns steps,
-16 ??s to 31750 ns  by 250 ns steps,
-32 ??s to 63 ??s by 1 ??s steps,
-64 ??s to 126 ??s by 2 ??s steps
+16 us to 31750 ns  by 250 ns steps,
+32 us to 63 us by 1 us steps,
+64 us to 126 us by 2 us steps
 Note: This bit-field can not be modified as long as LOCK level 1, 2 or 3 has been programmed (LOCK bits in TIMx_BDTR register).</description>
             <bitOffset>0</bitOffset>
             <bitWidth>8</bitWidth>
@@ -36736,12 +36736,12 @@ This bit-field indicates the division ratio between the timer clock (CK_INT) fre
               </enumeratedValue>
               <enumeratedValue>
                 <name>B_0x1</name>
-                <description>tDTS = 2 ?? tCK_INT</description>
+                <description>tDTS = 2 x tCK_INT</description>
                 <value>0x1</value>
               </enumeratedValue>
               <enumeratedValue>
                 <name>B_0x2</name>
-                <description>tDTS = 4 ?? tCK_INT</description>
+                <description>tDTS = 4 x tCK_INT</description>
                 <value>0x2</value>
               </enumeratedValue>
             </enumeratedValues>
@@ -37954,7 +37954,7 @@ Note: CC2S bits are writable only when the channel is OFF (CC2E = 0 in TIMx_CCER
                 <name>OC1M1</name>
                 <description>Output compare 1 mode
 These bits define the behavior of the output reference signal OC1REF from which OC1 and OC1N are derived. OC1REF is active high whereas OC1 and OC1N active level depends on CC1P and CC1NP bits.
-Note: In PWM mode, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from ???frozen??? mode to ???PWM??? mode.
+Note: In PWM mode, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from "frozen" mode to "PWM" mode.
 Note: The OC1M[3] bit is not contiguous, located in bit 16.</description>
                 <bitOffset>4</bitOffset>
               
@@ -39415,12 +39415,12 @@ This bit-field indicates the division ratio between the timer clock (CK_INT) fre
               </enumeratedValue>
               <enumeratedValue>
                 <name>B_0x1</name>
-                <description>tDTS = 2 ?? tCK_INT</description>
+                <description>tDTS = 2 x tCK_INT</description>
                 <value>0x1</value>
               </enumeratedValue>
               <enumeratedValue>
                 <name>B_0x2</name>
-                <description>tDTS = 4 ?? tCK_INT</description>
+                <description>tDTS = 4 x tCK_INT</description>
                 <value>0x2</value>
               </enumeratedValue>
             </enumeratedValues>
@@ -41312,7 +41312,7 @@ The PWM mode can be used without validating the preload register only in one pul
               <description>Output Compare 1 mode
 These bits define the behavior of the output reference signal OC1REF from which OC1 and OC1N are derived. OC1REF is active high whereas OC1 and OC1N active level depends on CC1P and CC1NP bits.
 Note: These bits can not be modified as long as LOCK level 3 has been programmed (LOCK bits in TIMx_BDTR register) and CC1S='00' (the channel is configured in output).
-In PWM mode, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from ???frozen??? mode to ???PWM??? mode.
+In PWM mode, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from "frozen" mode to "PWM" mode.
 On channels that have a complementary output, this bit field is preloaded. If the CCPC bit is set in the TIMx_CR2 register then the OC1M active bits take the new value from the preloaded bits only when a COM event is generated.
 The OC1M[3] bit is not contiguous, located in bit 16.</description>
               <bitOffset>4</bitOffset>
@@ -41438,7 +41438,7 @@ Note: CC2S bits are writable only when the channel is OFF (CC2E = '0' in TIMx_CC
               <description>Output Compare 1 mode
 These bits define the behavior of the output reference signal OC1REF from which OC1 and OC1N are derived. OC1REF is active high whereas OC1 and OC1N active level depends on CC1P and CC1NP bits.
 Note: These bits can not be modified as long as LOCK level 3 has been programmed (LOCK bits in TIMx_BDTR register) and CC1S='00' (the channel is configured in output).
-In PWM mode, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from ???frozen??? mode to ???PWM??? mode.
+In PWM mode, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from "frozen" mode to "PWM" mode.
 On channels that have a complementary output, this bit field is preloaded. If the CCPC bit is set in the TIMx_CR2 register then the OC1M active bits take the new value from the preloaded bits only when a COM event is generated.
 The OC1M[3] bit is not contiguous, located in bit 16.</description>
               <bitOffset>16</bitOffset>
@@ -41807,7 +41807,7 @@ CC1 channel configured as output:
 CC1 channel configured as input:
 This bit is used in conjunction with CC1P to define the polarity of TI1FP1 and TI2FP1. Refer
 to CC1P description.
-Note: This bit is not writable as soon as LOCK level 2 or 3 has been programmed (LOCK bits in TIMx_BDTR register) and CC1S=???00??? (the channel is configured in output).
+Note: This bit is not writable as soon as LOCK level 2 or 3 has been programmed (LOCK bits in TIMx_BDTR register) and CC1S="00" (the channel is configured in output).
 On channels that have a complementary output, this bit is preloaded. If the CCPC bit is set in the TIMx_CR2 register then the CC1NP active bit takes the new value from the preloaded bit only when a Commutation event is generated.</description>
               <bitOffset>3</bitOffset>
               <bitWidth>1</bitWidth>
@@ -41979,9 +41979,9 @@ DTG[7:5]=110 =&gt; DT=(32+DTG[4:0])xtdtg with Tdtg=8xtDTS
 DTG[7:5]=111 =&gt; DT=(32+DTG[4:0])xtdtg with Tdtg=16xtDTS
 Example if TDTS=125ns (8MHz), dead-time possible values are:
 0 to 15875 ns by 125 ns steps,
-16 ??s to 31750 ns by 250 ns steps,
-32 ??s to 63 ??s by 1 ??s steps,
-64 ??s to 126 ??s by 2 ??s steps
+16 us to 31750 ns by 250 ns steps,
+32 us to 63 us by 1 us steps,
+64 us to 126 us by 2 us steps
 Note: This bit-field can not be modified as long as LOCK level 1, 2 or 3 has been programmed (LOCK bits in TIMx_BDTR register).</description>
               <bitOffset>0</bitOffset>
               <bitWidth>8</bitWidth>
@@ -43318,7 +43318,7 @@ The PWM mode can be used without validating the preload register only in one pul
 These bits define the behavior of the output reference signal OC1REF from which OC1 and OC1N are derived. OC1REF is active high whereas OC1 and OC1N active level depends on CC1P and CC1NP bits.
 All other values: Reserved
 Note: These bits can not be modified as long as LOCK level 3 has been programmed (LOCK bits in TIMx_BDTR register) and CC1S='00' (the channel is configured in output).
-In PWM mode 1 or 2, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from ???frozen??? mode to ???PWM??? mode.
+In PWM mode 1 or 2, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from "frozen" mode to "PWM" mode.
 The OC1M[3] bit is not contiguous, located in bit 16.</description>
                 <bitOffset>4</bitOffset>
           
@@ -43373,7 +43373,7 @@ The OC1M[3] bit is not contiguous, located in bit 16.</description>
 These bits define the behavior of the output reference signal OC1REF from which OC1 and OC1N are derived. OC1REF is active high whereas OC1 and OC1N active level depends on CC1P and CC1NP bits.
 All other values: Reserved
 Note: These bits can not be modified as long as LOCK level 3 has been programmed (LOCK bits in TIMx_BDTR register) and CC1S='00' (the channel is configured in output).
-In PWM mode 1 or 2, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from ???frozen??? mode to ???PWM??? mode.
+In PWM mode 1 or 2, the OCREF level changes only when the result of the comparison changes or when the output compare mode switches from "frozen" mode to "PWM" mode.
 The OC1M[3] bit is not contiguous, located in bit 16.</description>
                 <bitOffset>16</bitOffset>
               
@@ -43662,7 +43662,7 @@ CC1 channel configured as output:
 CC1 channel configured as input:
 This bit is used in conjunction with CC1P to define the polarity of TI1FP1 and TI2FP1. Refer
 to the description of CC1P.
-Note: This bit is not writable as soon as LOCK level 2 or 3 has been programmed (LOCK bits in TIMx_BDTR register) and CC1S=???00??? (the channel is configured in output).
+Note: This bit is not writable as soon as LOCK level 2 or 3 has been programmed (LOCK bits in TIMx_BDTR register) and CC1S="00" (the channel is configured in output).
 On channels that have a complementary output, this bit is preloaded. If the CCPC bit is set in the TIMx_CR2 register then the CC1NP active bit takes the new value from the preloaded bit only when a commutation event is generated.</description>
             <bitOffset>3</bitOffset>
             <bitWidth>1</bitWidth>
@@ -43793,9 +43793,9 @@ DTG[7:5]=110 =&gt; DT=(32+DTG[4:0])xtdtg with Tdtg=8xtDTS
 DTG[7:5]=111 =&gt; DT=(32+DTG[4:0])xtdtg with Tdtg=16xtDTS
 Example if TDTS=125ns (8MHz), dead-time possible values are:
 0 to 15875 ns by 125 ns steps,
-16 ??s to 31750 ns by 250 ns steps,
-32 ??s to 63 ??s by 1 ??s steps,
-64 ??s to 126 ??s by 2 ??s steps
+16 us to 31750 ns by 250 ns steps,
+32 us to 63 us by 1 us steps,
+64 us to 126 us by 2 us steps
 Note: This bit-field can not be modified as long as LOCK level 1, 2 or 3 has been programmed (LOCK bits in TIMx_BDTR register).</description>
             <bitOffset>0</bitOffset>
             <bitWidth>8</bitWidth>
@@ -45915,7 +45915,7 @@ Setting the bit clears the FRSEVT flag in the UCPD_SR register.</description>
               <field>
                 <name>TXORDSET</name>
                 <description>Ordered set to transmit
-The bitfield determines a full 20-bit sequence to transmit, consisting of four K-codes, each of five bits, defining the packet to transmit. The bit 0 (bit 0 of K-code1) is the first, the bit 19 (bit 4 of K?code4) the last.</description>
+The bitfield determines a full 20-bit sequence to transmit, consisting of four K-codes, each of five bits, defining the packet to transmit. The bit 0 (bit 0 of K-code1) is the first, the bit 19 (bit 4 of K-code4) the last.</description>
                 <bitOffset>0</bitOffset>
                 <bitWidth>20</bitWidth>
                 <access>read-write</access>
@@ -46046,19 +46046,19 @@ The bitfield is modified by software and by hardware. It contains the number of 
               </field>
               <field>
                 <name>RXSOP3OF4</name>
-                <description>The bit indicates the number of correct K?codes. For debug purposes only.</description>
+                <description>The bit indicates the number of correct K-codes. For debug purposes only.</description>
                 <bitOffset>3</bitOffset>
                 <bitWidth>1</bitWidth>
                 <access>read-only</access>
                 <enumeratedValues>
                   <enumeratedValue>
                     <name>B_0x0</name>
-                    <description>4 correct K?codes out of 4?</description>
+                    <description>4 correct K-codes out of 4-</description>
                     <value>0x0</value>
                   </enumeratedValue>
                   <enumeratedValue>
                     <name>B_0x1</name>
-                    <description>3 correct K?codes out of 4?</description>
+                    <description>3 correct K-codes out of 4-</description>
                     <value>0x1</value>
                   </enumeratedValue>
                 </enumeratedValues>
@@ -46073,27 +46073,27 @@ Others: Invalid</description>
                 <enumeratedValues>
                   <enumeratedValue>
                     <name>B_0x0</name>
-                    <description>No K?code corrupted</description>
+                    <description>No K-code corrupted</description>
                     <value>0x0</value>
                   </enumeratedValue>
                   <enumeratedValue>
                     <name>B_0x1</name>
-                    <description>First K?code corrupted</description>
+                    <description>First K-code corrupted</description>
                     <value>0x1</value>
                   </enumeratedValue>
                   <enumeratedValue>
                     <name>B_0x2</name>
-                    <description>Second K?code corrupted</description>
+                    <description>Second K-code corrupted</description>
                     <value>0x2</value>
                   </enumeratedValue>
                   <enumeratedValue>
                     <name>B_0x3</name>
-                    <description>Third K?code corrupted</description>
+                    <description>Third K-code corrupted</description>
                     <value>0x3</value>
                   </enumeratedValue>
                   <enumeratedValue>
                     <name>B_0x4</name>
-                    <description>Fourth K?code corrupted</description>
+                    <description>Fourth K-code corrupted</description>
                     <value>0x4</value>
                   </enumeratedValue>
                 </enumeratedValues>
@@ -46177,7 +46177,7 @@ The bitfield may return a spurious value when a byte reception is ongoing (the R
               <field>
                 <name>RXSOPX1</name>
                 <description>Ordered set 1 received
-The bitfield contains a full 20-bit sequence received, consisting of four K?codes, each of five bits. The bit 0 (bit 0 of K?code1) is receive first, the bit 19 (bit 4 of K?code4) last.</description>
+The bitfield contains a full 20-bit sequence received, consisting of four K-codes, each of five bits. The bit 0 (bit 0 of K-code1) is receive first, the bit 19 (bit 4 of K-code4) last.</description>
                 <bitOffset>0</bitOffset>
                 <bitWidth>20</bitWidth>
                 <access>read-write</access>
@@ -46196,7 +46196,7 @@ The bitfield contains a full 20-bit sequence received, consisting of four K?code
               <field>
                 <name>RXSOPX2</name>
                 <description>Ordered set 2 received
-The bitfield contains a full 20-bit sequence received, consisting of four K?codes, each of five bits. The bit 0 (bit 0 of K?code1) is receive first, the bit 19 (bit 4 of K?code4) last.</description>
+The bitfield contains a full 20-bit sequence received, consisting of four K-codes, each of five bits. The bit 0 (bit 0 of K-code1) is receive first, the bit 19 (bit 4 of K-code4) last.</description>
                 <bitOffset>0</bitOffset>
                 <bitWidth>20</bitWidth>
                 <access>read-write</access>
@@ -49725,7 +49725,7 @@ Software must write in this field the 4-bit address used to identify the channel
 Device mode
 These bits contain the information about the endpoint status, listed in . These bits can be toggled by the software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STTX bits to NAK, when a correct transfer has occurred (VTTX=1) corresponding to a IN or SETUP (control only) transaction addressed to this channel/endpoint. It then waits for the software to prepare the next set of data to be transmitted.
 Double-buffered bulk endpoints implement a special transaction flow control, which controls the status based on buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can only be ???VALID??? or ???DISABLED???. Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can only be "VALID" or "DISABLED". Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 Same as STRX behaviour but for IN transactions (TBC)</description>
                 <bitOffset>4</bitOffset>
@@ -49793,7 +49793,7 @@ This bit is set by the software to send a SETUP transaction on a control endpoin
 Device mode
 These bits contain information about the endpoint status, which are listed in Reception status encoding on page 2000.These bits can be toggled by software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STRX bits to NAK when a correct transfer has occurred (VTRX=1) corresponding to a OUT or SETUP (control only) transaction addressed to this endpoint, so the software has the time to elaborate the received data before it acknowledge a new transaction
 Double-buffered bulk endpoints implement a special transaction flow control, which control the status based upon buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can be only ???VALID??? or ???DISABLED???, so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can be only "VALID" or "DISABLED", so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 These bits are the host application controls to start, retry, or abort host transactions driven by the channel.
 These bits also contain information about the device answer to the last IN channel transaction and report the current status of the channel according to the following STRX table of states:
@@ -49923,7 +49923,7 @@ Software must write in this field the 4-bit address used to identify the channel
 Device mode
 These bits contain the information about the endpoint status, listed in . These bits can be toggled by the software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STTX bits to NAK, when a correct transfer has occurred (VTTX=1) corresponding to a IN or SETUP (control only) transaction addressed to this channel/endpoint. It then waits for the software to prepare the next set of data to be transmitted.
 Double-buffered bulk endpoints implement a special transaction flow control, which controls the status based on buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can only be ???VALID??? or ???DISABLED???. Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can only be "VALID" or "DISABLED". Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 Same as STRX behaviour but for IN transactions (TBC)</description>
                 <bitOffset>4</bitOffset>
@@ -49991,7 +49991,7 @@ This bit is set by the software to send a SETUP transaction on a control endpoin
 Device mode
 These bits contain information about the endpoint status, which are listed in Reception status encoding on page 2000.These bits can be toggled by software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STRX bits to NAK when a correct transfer has occurred (VTRX=1) corresponding to a OUT or SETUP (control only) transaction addressed to this endpoint, so the software has the time to elaborate the received data before it acknowledge a new transaction
 Double-buffered bulk endpoints implement a special transaction flow control, which control the status based upon buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can be only ???VALID??? or ???DISABLED???, so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can be only "VALID" or "DISABLED", so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 These bits are the host application controls to start, retry, or abort host transactions driven by the channel.
 These bits also contain information about the device answer to the last IN channel transaction and report the current status of the channel according to the following STRX table of states:
@@ -50121,7 +50121,7 @@ Software must write in this field the 4-bit address used to identify the channel
 Device mode
 These bits contain the information about the endpoint status, listed in . These bits can be toggled by the software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STTX bits to NAK, when a correct transfer has occurred (VTTX=1) corresponding to a IN or SETUP (control only) transaction addressed to this channel/endpoint. It then waits for the software to prepare the next set of data to be transmitted.
 Double-buffered bulk endpoints implement a special transaction flow control, which controls the status based on buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can only be ???VALID??? or ???DISABLED???. Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can only be "VALID" or "DISABLED". Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 Same as STRX behaviour but for IN transactions (TBC)</description>
                 <bitOffset>4</bitOffset>
@@ -50189,7 +50189,7 @@ This bit is set by the software to send a SETUP transaction on a control endpoin
 Device mode
 These bits contain information about the endpoint status, which are listed in Reception status encoding on page 2000.These bits can be toggled by software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STRX bits to NAK when a correct transfer has occurred (VTRX=1) corresponding to a OUT or SETUP (control only) transaction addressed to this endpoint, so the software has the time to elaborate the received data before it acknowledge a new transaction
 Double-buffered bulk endpoints implement a special transaction flow control, which control the status based upon buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can be only ???VALID??? or ???DISABLED???, so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can be only "VALID" or "DISABLED", so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 These bits are the host application controls to start, retry, or abort host transactions driven by the channel.
 These bits also contain information about the device answer to the last IN channel transaction and report the current status of the channel according to the following STRX table of states:
@@ -50319,7 +50319,7 @@ Software must write in this field the 4-bit address used to identify the channel
 Device mode
 These bits contain the information about the endpoint status, listed in . These bits can be toggled by the software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STTX bits to NAK, when a correct transfer has occurred (VTTX=1) corresponding to a IN or SETUP (control only) transaction addressed to this channel/endpoint. It then waits for the software to prepare the next set of data to be transmitted.
 Double-buffered bulk endpoints implement a special transaction flow control, which controls the status based on buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can only be ???VALID??? or ???DISABLED???. Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can only be "VALID" or "DISABLED". Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 Same as STRX behaviour but for IN transactions (TBC)</description>
                 <bitOffset>4</bitOffset>
@@ -50387,7 +50387,7 @@ This bit is set by the software to send a SETUP transaction on a control endpoin
 Device mode
 These bits contain information about the endpoint status, which are listed in Reception status encoding on page 2000.These bits can be toggled by software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STRX bits to NAK when a correct transfer has occurred (VTRX=1) corresponding to a OUT or SETUP (control only) transaction addressed to this endpoint, so the software has the time to elaborate the received data before it acknowledge a new transaction
 Double-buffered bulk endpoints implement a special transaction flow control, which control the status based upon buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can be only ???VALID??? or ???DISABLED???, so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can be only "VALID" or "DISABLED", so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 These bits are the host application controls to start, retry, or abort host transactions driven by the channel.
 These bits also contain information about the device answer to the last IN channel transaction and report the current status of the channel according to the following STRX table of states:
@@ -50517,7 +50517,7 @@ Software must write in this field the 4-bit address used to identify the channel
 Device mode
 These bits contain the information about the endpoint status, listed in . These bits can be toggled by the software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STTX bits to NAK, when a correct transfer has occurred (VTTX=1) corresponding to a IN or SETUP (control only) transaction addressed to this channel/endpoint. It then waits for the software to prepare the next set of data to be transmitted.
 Double-buffered bulk endpoints implement a special transaction flow control, which controls the status based on buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can only be ???VALID??? or ???DISABLED???. Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can only be "VALID" or "DISABLED". Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 Same as STRX behaviour but for IN transactions (TBC)</description>
                 <bitOffset>4</bitOffset>
@@ -50585,7 +50585,7 @@ This bit is set by the software to send a SETUP transaction on a control endpoin
 Device mode
 These bits contain information about the endpoint status, which are listed in Reception status encoding on page 2000.These bits can be toggled by software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STRX bits to NAK when a correct transfer has occurred (VTRX=1) corresponding to a OUT or SETUP (control only) transaction addressed to this endpoint, so the software has the time to elaborate the received data before it acknowledge a new transaction
 Double-buffered bulk endpoints implement a special transaction flow control, which control the status based upon buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can be only ???VALID??? or ???DISABLED???, so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can be only "VALID" or "DISABLED", so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 These bits are the host application controls to start, retry, or abort host transactions driven by the channel.
 These bits also contain information about the device answer to the last IN channel transaction and report the current status of the channel according to the following STRX table of states:
@@ -50715,7 +50715,7 @@ Software must write in this field the 4-bit address used to identify the channel
 Device mode
 These bits contain the information about the endpoint status, listed in . These bits can be toggled by the software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STTX bits to NAK, when a correct transfer has occurred (VTTX=1) corresponding to a IN or SETUP (control only) transaction addressed to this channel/endpoint. It then waits for the software to prepare the next set of data to be transmitted.
 Double-buffered bulk endpoints implement a special transaction flow control, which controls the status based on buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can only be ???VALID??? or ???DISABLED???. Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can only be "VALID" or "DISABLED". Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 Same as STRX behaviour but for IN transactions (TBC)</description>
                 <bitOffset>4</bitOffset>
@@ -50783,7 +50783,7 @@ This bit is set by the software to send a SETUP transaction on a control endpoin
 Device mode
 These bits contain information about the endpoint status, which are listed in Reception status encoding on page 2000.These bits can be toggled by software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STRX bits to NAK when a correct transfer has occurred (VTRX=1) corresponding to a OUT or SETUP (control only) transaction addressed to this endpoint, so the software has the time to elaborate the received data before it acknowledge a new transaction
 Double-buffered bulk endpoints implement a special transaction flow control, which control the status based upon buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can be only ???VALID??? or ???DISABLED???, so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can be only "VALID" or "DISABLED", so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 These bits are the host application controls to start, retry, or abort host transactions driven by the channel.
 These bits also contain information about the device answer to the last IN channel transaction and report the current status of the channel according to the following STRX table of states:
@@ -50913,7 +50913,7 @@ Software must write in this field the 4-bit address used to identify the channel
 Device mode
 These bits contain the information about the endpoint status, listed in . These bits can be toggled by the software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STTX bits to NAK, when a correct transfer has occurred (VTTX=1) corresponding to a IN or SETUP (control only) transaction addressed to this channel/endpoint. It then waits for the software to prepare the next set of data to be transmitted.
 Double-buffered bulk endpoints implement a special transaction flow control, which controls the status based on buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can only be ???VALID??? or ???DISABLED???. Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can only be "VALID" or "DISABLED". Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 Same as STRX behaviour but for IN transactions (TBC)</description>
                 <bitOffset>4</bitOffset>
@@ -50981,7 +50981,7 @@ This bit is set by the software to send a SETUP transaction on a control endpoin
 Device mode
 These bits contain information about the endpoint status, which are listed in Reception status encoding on page 2000.These bits can be toggled by software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STRX bits to NAK when a correct transfer has occurred (VTRX=1) corresponding to a OUT or SETUP (control only) transaction addressed to this endpoint, so the software has the time to elaborate the received data before it acknowledge a new transaction
 Double-buffered bulk endpoints implement a special transaction flow control, which control the status based upon buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can be only ???VALID??? or ???DISABLED???, so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can be only "VALID" or "DISABLED", so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 These bits are the host application controls to start, retry, or abort host transactions driven by the channel.
 These bits also contain information about the device answer to the last IN channel transaction and report the current status of the channel according to the following STRX table of states:
@@ -51111,7 +51111,7 @@ Software must write in this field the 4-bit address used to identify the channel
 Device mode
 These bits contain the information about the endpoint status, listed in . These bits can be toggled by the software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STTX bits to NAK, when a correct transfer has occurred (VTTX=1) corresponding to a IN or SETUP (control only) transaction addressed to this channel/endpoint. It then waits for the software to prepare the next set of data to be transmitted.
 Double-buffered bulk endpoints implement a special transaction flow control, which controls the status based on buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can only be ???VALID??? or ???DISABLED???. Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can only be "VALID" or "DISABLED". Therefore, the hardware cannot change the status of the channel/endpoint/channel after a successful transaction. If the software sets the STTX bits to 'STALL' or 'NAK' for an Isochronous channel/endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 Same as STRX behaviour but for IN transactions (TBC)</description>
                 <bitOffset>4</bitOffset>
@@ -51179,7 +51179,7 @@ This bit is set by the software to send a SETUP transaction on a control endpoin
 Device mode
 These bits contain information about the endpoint status, which are listed in Reception status encoding on page 2000.These bits can be toggled by software to initialize their value. When the application software writes '0, the value remains unchanged, while writing '1 makes the bit value toggle. Hardware sets the STRX bits to NAK when a correct transfer has occurred (VTRX=1) corresponding to a OUT or SETUP (control only) transaction addressed to this endpoint, so the software has the time to elaborate the received data before it acknowledge a new transaction
 Double-buffered bulk endpoints implement a special transaction flow control, which control the status based upon buffer availability condition (Refer to endpoints).
-If the endpoint is defined as Isochronous, its status can be only ???VALID??? or ???DISABLED???, so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
+If the endpoint is defined as Isochronous, its status can be only "VALID" or "DISABLED", so that the hardware cannot change the status of the endpoint after a successful transaction. If the software sets the STRX bits to 'STALL' or 'NAK' for an Isochronous endpoint, the USB peripheral behavior is not defined. These bits are read/write but they can be only toggled by writing '1.
 Host mode
 These bits are the host application controls to start, retry, or abort host transactions driven by the channel.
 These bits also contain information about the device answer to the last IN channel transaction and report the current status of the channel according to the following STRX table of states:

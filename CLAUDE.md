@@ -423,8 +423,8 @@ stm32g0/                 the STM32G0 build project, same shape again (the
                          part number selects define + ld + crt + board
                          name: presets for the G0B1RE, the G071RB and the
                          G031K8, ld/<part>.ld and src/glue/startup_<header>
-                         .cpp for each; ST-LINK upload target;
-                         svd/STM32G0B1.svd)
+                         .cpp for each; ST-LINK upload target; svd/ with
+                         ST's SVD per part)
 test/CMakeLists.txt      the host test project (independent - one CMake
                          configure has exactly one compiler):
                          one executable + ctest entry per test_*/main.cpp

@@ -107,15 +107,13 @@
             "runToEntryPoint": "main"
         },
         {
-            // The STM32G0 Nucleos through the board's own
-            // ST-LINK/V2.1 - same cortex-debug + OpenOCD shape as the SAM
-            // entry, the ST-LINK interface script instead of CMSIS-DAP,
-            // ST's stm32g0x target script, and the SVD vendored from ST's
-            // pack (stm32g0/svd/STM32G0B1.svd - the G071 and the G031 are
-            // strict subsets of it, so the peripheral viewer reads them
-            // through the same file; a peripheral a part has not got just
-            // reads zero). One entry serves the three Nucleos: with one
-            // ST-LINK attached OpenOCD takes it; with several, add
+            // The STM32G0 Nucleos through the board's own ST-LINK/V2.1 -
+            // same cortex-debug + OpenOCD shape as the SAM entry, the
+            // ST-LINK interface script instead of CMSIS-DAP, ST's stm32g0x
+            // target script, and ST's SVD for the part (stm32g0/svd/, one
+            // per part - the peripheral viewer shows what the die has).
+            // One entry per part, none naming a probe: with one ST-LINK
+            // attached OpenOCD takes it; with several, add
             // "openOCDPreConfigLaunchCommands": ["adapter serial <sn>"]
             // (the desk's copy of this file does). CMake Tools' Active
             // Folder must be stm32g0/, its configure preset the part's
@@ -125,7 +123,7 @@
             // or a `brio flash`, which clears it.
             "type": "cortex-debug",
             "request": "launch",
-            "name": "Debug STM32G0 (OpenOCD, ST-LINK)",
+            "name": "Debug STM32G0B1RE (OpenOCD, Nucleo-G0B1RE)",
             "cwd": "${workspaceFolder}",
             "executable": "${command:cmake.launchTargetPath}",
             "servertype": "openocd",
@@ -137,6 +135,40 @@
                 "target/stm32g0x.cfg"
             ],
             "svdPath": "${workspaceFolder}/stm32g0/svd/STM32G0B1.svd",
+            "runToEntryPoint": "main"
+        },
+        {
+            "type": "cortex-debug",
+            "request": "launch",
+            "name": "Debug STM32G071RB (OpenOCD, Nucleo-G071RB)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${command:cmake.launchTargetPath}",
+            "servertype": "openocd",
+            "serverpath": "/sw/openocd/bin/openocd",
+            "gdbPath": "/sw/arm-none-eabi/bin/arm-none-eabi-gdb",
+            "objdumpPath": "/sw/arm-none-eabi/bin/arm-none-eabi-objdump",
+            "configFiles": [
+                "interface/stlink.cfg",
+                "target/stm32g0x.cfg"
+            ],
+            "svdPath": "${workspaceFolder}/stm32g0/svd/STM32G071.svd",
+            "runToEntryPoint": "main"
+        },
+        {
+            "type": "cortex-debug",
+            "request": "launch",
+            "name": "Debug STM32G031K8 (OpenOCD, Nucleo-G031K8)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${command:cmake.launchTargetPath}",
+            "servertype": "openocd",
+            "serverpath": "/sw/openocd/bin/openocd",
+            "gdbPath": "/sw/arm-none-eabi/bin/arm-none-eabi-gdb",
+            "objdumpPath": "/sw/arm-none-eabi/bin/arm-none-eabi-objdump",
+            "configFiles": [
+                "interface/stlink.cfg",
+                "target/stm32g0x.cfg"
+            ],
+            "svdPath": "${workspaceFolder}/stm32g0/svd/STM32G031.svd",
             "runToEntryPoint": "main"
         }
     ]

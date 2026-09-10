@@ -50,12 +50,14 @@ ARE in the repository (Apache-2.0 allows it) so a fresh clone builds:
   them for the handler NAMES only (`stm32g0/src/glue/`).
 - `third_party/cmsis-core/` - the CMSIS-Core headers the device header
   includes (ARM CMSIS_5 5.9.0), shared with the samc21 stratum.
-- `stm32g0/svd/STM32G0B1.svd` - ST's SVD for the debug Peripheral
-  Viewer (Apache-2.0, from the cmsis-svd-data mirror of ST's pack),
-  with its description text SANITIZED TO ASCII (the repo rule): ST's
-  file carries double-encoded non-breaking spaces and curly quotes,
-  mapped to plain ones, and a few symbols (micro, greater-or-equal)
-  replaced by `?`. Register data untouched, the XML re-parsed.
+- `stm32g0/svd/STM32G0B1.svd`, `STM32G071.svd`, `STM32G031.svd` - ST's
+  SVDs for the debug Peripheral Viewer, one per bench part (Apache-2.0,
+  from the cmsis-svd-data mirror of ST's pack), with their description
+  text SANITIZED TO ASCII (the repo rule): ST's files carry
+  double-encoded non-breaking spaces and curly quotes, mapped to plain
+  ones, and a few symbols spelled out (micro as `u`, greater-or-equal
+  as `>=`, not-equal as `!=`, the ellipsis as `...`). Register data
+  untouched, every file re-parsed as XML.
 
 ## The bench chips, all three
 
