@@ -52,6 +52,40 @@ enum class PinDrive : uint8_t { push_pull, open_drain };
 /// Input pull, for `input`. The direction lives in OUTDR (see header).
 enum class PinPull : uint8_t { none, up, down };
 
+/// A pad named at compile time - port letter and pin number - for the
+/// pin tables a driver carries (which pads a peripheral's signals sit
+/// on). `valid()` false is "no such pad": a signal the program does not
+/// wire.
+struct Pad {
+    char port = 0;
+    uint8_t pin = 0;
+
+    constexpr bool valid() const { return port != 0; }
+    constexpr bool operator==(const Pad&) const = default;
+};
+
+/// A pin as a RUNTIME value: the port's registers and the mask. What a
+/// bus request carries for its chip select, so the bus AO can drive a
+/// pin it does not know the type of. The stores are BSHR/BCR, atomic
+/// against a handler on another pin of the same port. A null PinRef
+/// (the default) drives nothing. Build one with Pin<...>::ref().
+struct PinRef {
+    GpioRegs* port = nullptr;
+    uint32_t mask = 0;
+
+    void set() const {
+        if (port != nullptr) {
+            port->BSHR = mask & 0xFFFFu;
+        }
+    }
+    void clear() const {
+        if (port != nullptr) {
+            port->BCR = mask & 0xFFFFu;
+        }
+    }
+    constexpr bool valid() const { return port != nullptr; }
+};
+
 /// The CNF/MODE nibble for a configuration (RM 7.3.1.1).
 constexpr uint32_t pin_nibble(PinMode mode, PinDrive drive) {
     switch (mode) {
@@ -134,6 +168,10 @@ struct Pin {
     static constexpr char port_letter = L;
     static constexpr uint8_t pin_number = N;
     static constexpr uint32_t mask = 1UL << N;
+    static constexpr Pad pad{L, N};
+
+    /// The runtime descriptor (see PinRef).
+    static PinRef ref() { return {&P::regs(), mask}; }
 
     // ---- PwmChannel (util/pwm_channel.hpp) --------------------------------
     static constexpr uint16_t max = 1;

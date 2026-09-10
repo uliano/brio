@@ -269,9 +269,10 @@ gets its home in `docs/design/` when taken.
   console runs on the CH32V006K8U6 at 48 MHz over USART1, on WCH's gcc
   15.2 and WCH's OpenOCD fork through a WCH-Link; the clock, the
   flash media, the power modes, reset and the DMA each have their
-  document and suite. What remains, in docs/ch32v00x/README.md's gap
-  lists: the chapters (TIM, ADC, I2C, SPI, the pad test that gives
-  EXTI its page), the family tiering and
+  document and suite; SPI and I2C are written with their suites, the
+  wire letters awaiting a jumper and a peer. What remains, in
+  docs/ch32v00x/README.md's gap lists: the chapters (TIM, ADC, the pad
+  test that gives EXTI its page), the family tiering and
   `brio check ch32v00x` with a second part, a self-built upstream gcc 16
   for riscv32 with an rv32ec/ilp32e multilib (the stratum compiles with
   plain rv32ec_zmmul on purpose - WCH's `xw` extension is worth a few
@@ -1069,6 +1070,17 @@ brio/                    the framework, four strata:
                            channel; every store refused while EN is set,
                            which stays set after a completed block) +
                            DmaTxEngine/DmaRxEngine<ch, Elem>
+    spi.hpp                Spi<1> resource (the F1's SPI, no FIFO, HSCR) +
+                           SpiHost<1, pins, TxEngine, RxEngine> (the other
+                           strata's Request VERBATIM: pump on RXNE or polled,
+                           engines on channels 3/2 only) + SpiClient
+    i2c.hpp                I2c<1> resource (the F1's event machine, NO rise-
+                           time register, CCR rounded up) + I2cHost<1, pins,
+                           TxEngine, RxEngine> (one tenure = write / read /
+                           write-then-read / probe, the receive procedure by
+                           count, two vectors, engines on channels 6/7, the
+                           unstick) + I2cClient (a polled surface + two ISR
+                           bodies reporting I2cClientEvent)
     exti.hpp               Exti (ten lines: eight pads via AFIO_EXTICR, the
                            PVD, the AWU; interrupt or event, edges, the
                            software trigger) + ExtInt<Pin>
