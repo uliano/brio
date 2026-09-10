@@ -272,8 +272,9 @@ gets its home in `docs/design/` when taken.
   document and suite; SPI and I2C are written with their suites, the
   wire letters awaiting a jumper and a peer; the timers, the watchdogs
   and the ADC have theirs, the pad suite its wireless half, the remaps
-  their tables. What remains, in docs/ch32v00x/README.md's gap lists:
-  the OPA chapter, the family tiering and
+  their tables, the OPA its lock and its path into the ADC. What
+  remains, in docs/ch32v00x/README.md's gap lists: the family tiering
+  and
   `brio check ch32v00x` with a second part, a self-built upstream gcc 16
   for riscv32 with an rv32ec/ilp32e multilib (the stratum compiles with
   plain rv32ec_zmmul on purpose - WCH's `xw` extension is worth a few
@@ -1099,6 +1100,10 @@ brio/                    the framework, four strata:
                            code, Uart takes it as a template parameter,
                            Tim<n>::remap(code); USART2 refused at code 0 (its
                            default TX is the K8's reset pin)
+    opa.hpp                Opa (the key-locked amplifier: four positive pads,
+                           a negative pad or a PGA gain, the differential
+                           PGA, the bias, the output always on ADC channel 9;
+                           CMP2's verbs answering false on the V006)
     exti.hpp               Exti (ten lines: eight pads via AFIO_EXTICR, the
                            PVD, the AWU; interrupt or event, edges, the
                            software trigger) + ExtInt<Pin>
