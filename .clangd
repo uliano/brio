@@ -20,3 +20,13 @@ Diagnostics:
   Suppress: [unneeded-internal-declaration, unused-const-variable]
   Includes:
     IgnoreHeader: [sam.h]
+
+# The host tests are built with an EXPLICIT UBSan check set (test/
+# CMakeLists.txt), and that set is spelled for gcc: bounds-strict has no
+# clang equivalent, so clang's driver refuses the whole -fsanitize=
+# argument and every header parsed against the host database opens with a
+# hard error on line 1. Instrumentation says nothing to a parser - the
+# flag is dropped here, at the editor layer, and the check set the tests
+# actually run under stays untouched.
+CompileFlags:
+  Remove: [-fsanitize=*]
