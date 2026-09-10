@@ -15,6 +15,35 @@ Bench MCU: **AVR128DB48** (48-pin, 128 KB flash, 16 KB SRAM),
 programmed and debugged with an **Atmel-ICE** over UPDI. Board wiring
 and external chips: [../bench.md](../bench.md).
 
+## The documents
+
+One document per peripheral driver, in the shape
+[../README.md](../README.md) prescribes; the vendor page carries the
+documents of record.
+
+| Document | Content |
+|----------|---------|
+| [platform.md](platform.md) | Platform: what the kernel stands on - `AvrPlatform` (critical section, idle and the SLPCTRL erratum, timebase, atomic_width, the `.noinit` breadcrumb), the short-wait role with both delay paths measured, `Sleep`/`Vreg` over all three sleep modes and the regulator plus `AvrSleepSite`, the adapter that carries the power model onto them, and `Reset`/`Watchdog` over RSTCTRL and the WDT; not covered: idle detection and the RUNSTDBY policy, the BOD, the sleep current, and the wake-up sources a lone board cannot produce |
+| [clkctrl.md](clkctrl.md) | CLKCTRL: oscillators, PLL, main clock mux/prescaler/CLKOUT, clock failure detection (DB) as resources; Clock/DynamicClock as tasks, DA external clock datasheet-trusted; not covered: the unbenched paths (XOSC32K, PLL, DA silicon) |
+| [evsys.md](evsys.md) | EVSYS: the full typed vocabulary (generators and users, package-gated) + run-time connect/disconnect; not covered: static allocation, the vocabulary no driver exercises yet |
+| [vref.md](vref.md) | VREF: the reference selector - levels, headroom, how the ADC/DAC name it |
+| [dac.md](dac.md) | DAC: the 10-bit actuator - buffered/unbuffered outputs, the slow fall on a bare pin, usage |
+| [adc.md](adc.md) | ADC: one task with knobs - inputs as types, triggers, accumulation, window (signed too), results as events, DB-only inputs gated; not covered: pin-level input legality, the standby paths |
+| [nvm.md](nvm.md) | NVMCTRL: the `Nvm` resource - the four memories and what each is for, the Flash sections as a compile-time claim cross-checked against the fuses, ELPM/SPM only (never the data-space window), the command model, the one-way protections, the vector-table invariant every image carries, and the multi-page-erase erratum guarded page by page - plus the services over it (typed record, interrupt-paced writer AO, persistent panic record); not covered: a boot loader, any flash policy, DA silicon |
+| [userrow.md](userrow.md) | USERROW: the board identity label - survives chip erase, written once over UPDI, read into every suite banner by board_id() |
+| [port.md](port.md) | PORT: Port<L> resource, Pin (one-store PinConfig, senses, flags), PinSet across ports on the multi-pin engine, PinRef; not covered: INLVL/slew measurements, the fully-async wake |
+| [usart.md](usart.md) | USART: the `Usart<n>` resource - routes incl. the pinless one, every frame format, the receiver modes, the errata verbs - and the tasks over it (`Uart`, `OneWire`, `Rs485`, `SyncHost`/`SyncClient`, `MspiHost`, `IrdaLink`, `AutoBaud`); not bench-verified: everything that needs a second board |
+| [spi.md](spi.md) | SPI: the `Spi<n>` resource - the per-package route table with the errata that beats it, both roles, the seven rates, both INTFLAGS layouts and their clear disciplines, the host demotion - and the tasks over it (`SpiHost` transfer engine, `SpiClient`); not bench-verified: everything that needs a second device on the wire |
+| [twi.md](twi.md) | TWI: the `Twi<n>` resource - the per-package route table with its dual pin pairs, the three errata as code, the chapter's own baud arithmetic with the bus's edges as arguments, both halves - and the tasks over it (`I2cHost` transfer engine, `I2cClient` including Dual mode); not bench-verified: everything that needs a second, independent device on the wire |
+| [rtc.md](rtc.md) | RTC/PIT: RtcClock/Rtc/Pit resources (one clock for both functions, counter with period and compare, crystal error correction, the busy flags) + BasicTicker over the PIT; not covered: the crystal and external-clock sources, the standby and debug-run paths |
+| [tca.md](tca.md) | TCA: the Tca resource (normal mode, buffered compares, event inputs, commands) + tasks TcaPwm/TcaPwm16/FrequencyGenerator/Heartbeat/EventCounter; not covered: the split halves' counters as verbs |
+| [tcb.md](tcb.md) | TCB: the Tcb resource (eight modes, event clock/capture, cascade, routes) + tasks PeriodicTick/Timeout/OneShotPulse/PulseCounter/CascadedCounter/meters/Pwm8; not covered: pin-level bonding within a port |
+| [tcd.md](tcd.md) | TCD: the `Tcd<0>` resource - the full chapter with its three synchronization disciplines enforced by the verbs, the per-package route table, the input-mode validity table and the errata that shrink it, the 12-bit captures and their read discipline, dithering - plus `TcdPwm`, the complementary pair with dead time, and the PLL made observable through it; not covered: the usage types waiting for their first user, the external clock source, two errata that would not reproduce on this die |
+| [ccl.md](ccl.md) | CCL: Ccl + Lut<n> resources (inputs menu, truth table, filter/edge, clocks, pins, the whole-block reconfiguration erratum) + ToggleFlipFlop; not covered: typed per-input instance legality |
+| [ac.md](ac.md) | AC: the Ac<n> resource (inputs and DACREF, hysteresis/power, pin/event/interrupt, window) + Threshold/Window; not covered: pin-level bonding (PD0, PC6 on small packages) |
+| [opamp.md](opamp.md) | OPAMP (**DB only**): the `OpampSystem` block (the one ENABLE, the TIMEBASE that makes a settle time mean microseconds, and the ClockUser hook that keeps it true across a rebase) + `Opamp<n>` - both input multiplexers with their per-instance link codes, the 16R ladder and its eight exact gains, the output driver, the three enable regimes, the internal timer and READY, the four event users and the offset trim - plus the tasks `OpampFollower`, `OpampPga`, `OpampInvertingPga` and the chapter's three-op-amp `InstrumentationAmp`; not covered: the integrator usage type (external R and C, and a DUMP policy), RUNSTBY, IRSEL's electrical effect |
+| [vendor/README.md](vendor/README.md) | The datasheets/errata the stratum is written against, by document number (PDFs kept local, not in git) |
+
 ## Toolchain
 
 Self-built **avr-gcc 16.2** + avr-libc + avr-gdb 17.2 + avrdude 8.1
