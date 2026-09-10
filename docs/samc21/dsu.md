@@ -154,9 +154,11 @@ Test a block of SRAM the program has finished with:
 (Cortex-M0+), FAMILY 2 (5V Industrial - the SAM C), SERIES 1 (the
 CAN-bearing series, so a C21 and not a C20), DIE 0, REVISION 5 = **rev
 F**, DEVSEL 0x00. The factory 128-bit die serial `samc21/nvm.hpp` reads
-comes back matching the one the bench manifest
-(`cli/bench/bench_boards.py`) records for the board. The CoreSight
-PARTNUM is 0xCD0, table 13-2's "a DSU is present".
+is stable across reads and printed in the bench manifest's own format
+(`die_serial` in `cli/bench/bench_boards.py`), because WHICH board this
+is belongs to the manifest and the tool, not to a firmware that cannot
+know its desk position. The CoreSight PARTNUM is 0xCD0, table 13-2's
+"a DSU is present".
 
 **The CRC32 engine is the standard CRC-32**, matched against a table-free
 bitwise reference over the same bytes at 16, 256 and 1024 words of flash

@@ -842,13 +842,9 @@ void tc_resume() {
 // DSU letter d - board identity
 // =============================================================================
 //
-// THE OPERATIONAL DELIVERABLE. cli/bench/bench_boards.py records each
-// board's factory 128-bit die serial and its DSU DID; these four words
-// are that record for the board this image is built for, and the
-// verdict is the check that the chip in hand is that board.
-constexpr uint32_t manifest_serial[4] = {
-    0xF9E78960UL, 0x51574841UL, 0x59202020UL, 0xFF160321UL,
-};
+// The DID docs/samc21/vendor/README.md recorded over SWD at bring-up: a
+// PART fact (every ATSAMC21J18A of this revision reads it), where the
+// die serial is a BOARD fact and stays the manifest's to compare.
 constexpr uint32_t manifest_did = 0x11010500UL;
 
 void td_identity() {
@@ -881,16 +877,21 @@ void td_identity() {
           hex8(serial_words.word[1], b1), "-", hex8(serial_words.word[2], b2),
           "-", hex8(serial_words.word[3], b3), crlf);
 
-    bool serial_matches = true;
+    // WHICH board this is belongs to the bench manifest and the tool
+    // that reads it, not to a firmware that cannot know its desk
+    // position: the serial is printed in the manifest's own format for
+    // that comparison, and what the firmware judges is that the words
+    // are a serial - stable across two reads, neither blank nor erased.
+    const DeviceSerial again = DeviceSerial::read();
+    bool stable = true;
     for (uint8_t i = 0; i < 4u; ++i) {
-        if (serial_words.word[i] != manifest_serial[i]) {
-            serial_matches = false;
+        if (serial_words.word[i] != again.word[i]) {
+            stable = false;
         }
     }
-    bench.verdict("the factory die serial matches the one the bench manifest "
-                  "(cli/bench/bench_boards.py) carries for this board - THE BOARD "
-                  "IS THE BOARD",
-                  serial_matches);
+    bench.verdict("the factory die serial reads the same twice (its identity "
+                  "is the manifest's die_serial, compared there)",
+                  stable);
     bench.verdict("and it is not a blank or an erased word",
                   serial_words.word[0] != 0u &&
                       serial_words.word[0] != 0xFFFFFFFFUL);
