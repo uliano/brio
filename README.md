@@ -178,3 +178,10 @@ realizations - the AO contract, the bus vocabularies, the power model,
 the storage classes, the analog and metering services, the clock model -
 are the ones a program can lean on. Clean-room with respect to QP: the
 concepts come from Samek's book, never the QP source.
+
+## License
+
+brio is released under the MIT license ([LICENSE](LICENSE)): use it,
+change it, ship it, keep the notice with it. The vendored components
+under [third_party/](third_party/) keep their own licenses - doctest
+(MIT), CMSIS-Core, cmsis-device-g0 and the SAM C21 DFP (Apache-2.0).

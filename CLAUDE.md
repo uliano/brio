@@ -301,8 +301,6 @@ gets its home in `docs/design/` when taken.
   isolation (`import brio.avrdx` would not leak `avr/io.h` above the
   target stratum), not build speed; the blocker is the language server.
   Revisit with the board files.
-- **Housekeeping.** No LICENSE file yet (the repository is public at
-  github.com/uliano/brio).
 
 ## Build, test, debug (the must-knows)
 
