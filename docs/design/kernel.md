@@ -459,6 +459,20 @@ at run time - the deadline next to the AO is a literal in flash. It
 also works at run time (then the 64-bit multiply is real: prefer
 precomputing on 8-bit targets).
 
+### Realizations: the timebase
+
+What is common is the whole of it: `P::now()` in ticks, `ticks_per_second`,
+`TimeEvent` and `TimeEvents::process()` are the kernel's and run
+unchanged on every stratum. What differs is the counter under `now()`
+and what it does while the core sleeps.
+
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | `Ticker` = `BasicTicker<1024>` over the RTC's PIT (`avrdx/ticker.hpp`) | 1024 Hz; the PIT runs on the 32 kHz oscillator, so the tick keeps counting through every sleep mode |
+| samc21 | `Ticker` = `BasicTicker<1000>` over SysTick (`armv6m/ticker.hpp`, included by `samc21/ticker.hpp`) | 1000 Hz; SysTick rides the CPU clock and STOPS in standby - `advance(n)` is the landing point of the resync the timed sleep site makes from the RTC ([power.md](power.md)) |
+| stm32g0 | the same SysTick `Ticker`, or `LptimTicker<cfg>` (`stm32g0/lptim_ticker.hpp`) | SysTick 1000 Hz, stopped by a Stop and paused by the sites; or 1024 Hz on the LPTIM's count shifted right, COUNTING THROUGH a Stop and satisfying `Tickless` - the one platform that offers `idle_until` (section 11) |
+| host | a virtual clock the test advances (`host/platform.hpp`) | 1000 Hz nominal; time is arithmetic, which is what makes drift and re-arm testable to the tick |
+
 ## 10. Failures: overflow and panic (`kernel/panic.hpp`)
 
 Overflow is section 5's counter. **Panic** is the one hook for
@@ -466,14 +480,47 @@ unrecoverable failures: `panic<P, Reporter>(code, ctx)` is
 `[[noreturn]]`: mask interrupts for good -> write the breadcrumb
 (`PanicRecord{magic, code, context}`) into the platform's
 reset-surviving storage -> `P::break_here()` (stops the debugger if
-one is attached, does nothing otherwise) -> hand over to the
-app-chosen `Reporter`. The kernel knows no LED: `HaltReporter`
+one is attached; with none it does what the core does with a
+breakpoint instruction, which is nothing on the AVR and a HardFault on
+the two ARMv6-M strata - where the fault body is then the path that
+runs, see below) -> hand over to the app-chosen `Reporter`. The kernel knows no LED: `HaltReporter`
 (interrupts masked + forever loop) is the stock default;
 blinkers, watchdog resetters and their compositions are target/app
 code. Because the breadcrumb is written BEFORE any reporter runs, the
 information is safe whatever the manifestation does; at boot
 `take_panic_record<P>()` returns it once and clears it (cross-check
 the reset-cause register for the full story).
+
+### Realizations: where a panic goes
+
+Common to all: the `PanicRecord` in `.noinit` (on the host, a static),
+`panic<P, Reporter>()`, `take_panic_record<P>()` and `HaltReporter`.
+What differs is what the breakpoint does with no debugger, and which
+reporters the stratum adds.
+
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | `AvrPlatform::break_here()` = BREAK, a NOP with no OCD, so the reporter always runs | `PersistentPanic<Store>` (`util/persistent_panic.hpp` over `EepromStore`): the record in the EEPROM, which a power loss does not erase |
+| samc21 | `SamPlatform::break_here()` = BKPT, a HardFault with DHCSR.C_DEBUGEN clear (the reporter never runs; `bin/brio` clears the bit after every flash) | `ResetReporter` and `hard_fault_reset<P>()` (`samc21/reset.hpp`: the record written, then a reset so it is read at the next boot - the fault body refusing to overwrite a record `panic()` wrote); `TracingReporter` / `hard_fault_trace_reset<P, Store>()` (`samc21/postmortem.hpp`: the MTB's last packets beside the record); `JournalPanic` over `RwweeJournalZone` (the record in flash, through a power loss) |
+| stm32g0 | `Stm32g0Platform::break_here()`, the same BKPT and the same escalation | `ResetReporter` and `hard_fault_reset<P>()` (`stm32g0/reset.hpp`); `JournalPanic` over `MainFlashJournalZone`; no trace unit on this core |
+| host | `HostPlatform::break_here()` records the call | - |
+
+The reset cause the boot cross-checks is spelled by the register's
+own nature: `Reset::take_flags()` on avrdx and stm32g0 (a history that
+ACCUMULATES until read and cleared) and `Reset::cause()` on samc21
+(RCAUSE, one exclusive cause). And the watchdog a program keeps alive
+is three resources under two names - not one verb, because the three
+contracts differ and the name each carries is its chapter's:
+
+| stratum | the kick | what else the kick does |
+|---|---|---|
+| avrdx | `Watchdog::clear()` = the WDR instruction (`avrdx/reset.hpp`) | lands in two to three WDT cycles (two back to back are one); the FIRST after enabling window mode ACTIVATES the window and is not judged |
+| samc21 | `Watchdog::clear()` = key 0xA5 into CLEAR (`samc21/reset.hpp`) | a posted write, `sync()` to know it landed; any other key is a reset, which `force_reset()` spells on purpose |
+| stm32g0 | `Iwdg::refresh()` = 0xAAAA into KR, `Wwdg::refresh(counter)` = T[6:0] (`stm32g0/reset.hpp`) | the IWDG refresh RE-LOCKS PR/RLR/WINR; a refresh above the window value is a reset; the WWDG's takes the value to reload |
+
+A portable program that keeps a watchdog alive is not written yet; the
+common verb it would call is born with it, one level above these
+three, and each realization will spend its own rules under it.
 
 ## 11. Platform: what the machine provides (`kernel/platform.hpp`)
 
@@ -521,6 +568,20 @@ idle/break - time becomes deterministic arithmetic in tests
 (`ctest --preset host`), which is why the host tests cover first what
 is hard to provoke on real hardware: queue overflow, entry/exit
 ordering, drift-free re-arm, scan priority, MPSC stress.
+
+### Realizations: the platform
+
+Common to all four: the concept above, member for member - the
+critical section, `idle()`, `now()`, `ticks_per_second`,
+`atomic_width`, `panic_record()`, `break_here()`. What differs is what
+each member costs or does on its core.
+
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | `AvrPlatform` (`avrdx/platform.hpp`) | `atomic_width` 1 (a 16-bit `Ring` index takes the guarded path); `idle()` sleeps in IDLE unless the power manager has armed a deeper mode, which it then honours; `break_here()` is BREAK, a NOP with no OCD |
+| samc21 | `SamPlatform` (`samc21/platform.hpp`) | `atomic_width` 4; `idle()` takes whatever PM.SLEEPCFG holds (SCR.SLEEPDEEP is never written) with the SysTick interrupt held off across a standby WFI - erratum 1.8.13's workaround; `break_here()` is BKPT and escalates with no debugger (section 10) |
+| stm32g0 | `Stm32g0Platform<TB>` (`stm32g0/platform.hpp`) | templated on its timebase; `idle()` is WFI = Sleep, the sites arm the deeper Stops; `idle_until()` exists exactly when `TB` satisfies `Tickless` (the LPTIM timebase); `atomic_width` 4; BKPT as the SAM's |
+| host | `HostPlatform` (`host/platform.hpp`) | a depth-counting critical section, a virtual clock, recording `idle()` and `break_here()`; `atomic_width` 4 - `Ring`'s guarded path is covered by a second host platform stating 1 in its own test |
 
 **C++ note - `if constexpr`.** `if constexpr (cond)` (C++17) with a
 compile-time condition discards the untaken branch entirely - it is

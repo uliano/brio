@@ -2,20 +2,38 @@
 
 Bytes below, line events above, ownership by reference.
 
-## Uart driver (`avrdx/usart.hpp`)
+## The Uart task
 
-`Uart<n, Route, rx_size, tx_size>` - static interrupt-driven byte
-transport: SPSC rings on both sides ([ring.md](ring.md)), ISR bodies
-(`rxc()`, `dre()`) bound by the app, RXDATAH error counters (named
-statics, inspectable from gdb). Ring defaults 64/256: 8-bit indices on
-both sides, hence lock-free on AVR - neither the ISRs nor `write_byte`
-mask interrupts. The driver moves bytes and nothing else; `brio::print`
-formats on top of any ByteSink.
+`Uart<n, ...>` - the static, interrupt-driven byte transport every
+stratum spells the same way: SPSC rings on both sides
+([ring.md](ring.md)), ISR bodies the app binds to its vectors, the
+error counters as named statics (inspectable from gdb). Ring defaults
+64/256: 8-bit indices on both sides, hence lock-free on every stratum,
+the AVR included - neither the ISRs nor `write_byte` mask interrupts.
+The driver moves bytes and nothing else; `brio::print` formats on top
+of any ByteSink.
 
-`rxc()` returns the RX ring's empty -> non-empty EDGE: the app ISR
-glue posts one `RxActivity` event on true. No event flood, no lost
-wakeup - only draining empties the ring, so the next byte is an edge
-again.
+The receive-side ISR body returns the RX ring's empty -> non-empty
+EDGE: the app ISR glue posts one `RxActivity` event on true. No event
+flood, no lost wakeup - only draining empties the ring, so the next
+byte is an edge again.
+
+### Realizations
+
+Common to the three: fifteen verbs spelled identically - `init(clock,
+baud)`, `write`, `write_byte`, `read_byte`, `rx_pending`, `tx_idle`,
+`can_baud`, `actual_baud`, `min_hz_for`, `rebase`, `clear_errors` and
+the four counters `frame_errors`, `parity_errors`, `rx_overruns`,
+`hw_overruns` - the two rings, and the edge contract above. What
+differs is how the pins are named, how many vectors the silicon gives
+the port, and what each family's port has that the others' has not.
+
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | `Uart<n, Route, rx_size, tx_size>` (`avrdx/usart.hpp`) | the pins are a PORTMUX `Route`; THREE vectors, so the bodies are `rxc()` (the edge) and `dre()`; no `release()` - the resource's teardown is `Usart<n>`'s |
+| samc21 | `Uart<n, UartPads, rx_size, tx_size, TxEngine, RxEngine>` (`samc21/sercom.hpp`) | the pins are SERCOM pads with their pins; ONE vector, `isr()` returns the edge; two OPTIONAL DMA engine slots (`NoDmaEngine` by default, compiling to nothing) with `dma_isr()`, `dma_faults()`, `harvest()`, `write_bulk()`/`read_bulk()`; `release()` |
+| stm32g0 | `Uart<n, UartPins, rx_size, tx_size, TxEngine, RxEngine, opts>` = `UartTask<Usart<n>, ...>` (`stm32g0/usart.hpp`) | the pins carry their AF; one vector and `isr()`; the same engine slots and bulk verbs; `UartOptions` as one trailing parameter (FIFO thresholds, single wire, ...); `set_baud()` on the task, `kernel_hz()` (the kernel-clock multiplexer), `noise_errors()` (NE exists here alone), `wakes()` (the wake from Stop); the same task over an LPUART is `LpUart` (`stm32g0/lpuart.hpp`) |
+| host | none | `SerialPort` is host-tested over a scripted `ByteTransport` |
 
 ## SerialPort (`util/serial_port.hpp`)
 

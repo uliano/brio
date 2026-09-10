@@ -343,8 +343,35 @@ gets its dated home in `docs/design/` when taken.
   citations retargeted, and seven console strings moved as declared
   movers (token-identical with literals blanked). The E/G "compile-
   checked only" line left the twelve samc21 documents that repeated a
-  platform fact. NEXT: the remaining realizations tables, then the
-  public/private cut.
+  platform fact. THE REALIZATIONS TABLES DONE THE SAME DAY (the
+  user's framing: brio presents ONE interface where it can, and the
+  exceptions must be documented and findable - the tables ARE that
+  documentation): every design page whose contract has more than one
+  realization carries `### Realizations` right after the contract
+  (kernel.md x3 - platform, timebase, panic/reset/watchdog; ring;
+  clock + delay_us; serial, rewritten target-independent; spi-bus and
+  i2c-bus extended with the verbs and the client rows; power; nv-heap;
+  nv-journal; block-stream; meters; analog; overview.md carries the
+  pin and PWM tables plus THE INDEX with the exception in one phrase
+  per contract), the rule in docs/README.md, README.md pointing at the
+  index. THE CENSUS BEHIND THEM (memory realizations-tables-census,
+  the user's rulings): respect the silicon's divergences; reconcile
+  only REAL synonyms after checking the function - A = four (the AVR's
+  `pullup`/`input` vs `pull(PinPull)` with no `down` on the AVR,
+  `clock_ok` vs `speed_ok`, `input_enable` vs the AVR's pair with its
+  ISC caveat, the SPI chooser's name and home); B = features missing
+  on one stratum under a common spelling (`SpiHost::status()`/
+  `prime()`, `Uart::release()` on the AVR, the SpiClient preload
+  constant STILL UNPUBLISHED); C = traps never to reconcile
+  (`Pin::release()` = PMUXEN off on the SAM and analog on the G0;
+  `TimIntervalMeter` is not a pulse-width meter; `actual_scl_hz` vs
+  `scl_hz`; `bus_state` vs `idle`; `quick_command` a hardware mode;
+  `delay_us`'s cap; the WATCHDOG KICK - `clear()`/`clear()`/`refresh()`
+  under three contracts, ruled C with a "keeper" concept one level up
+  as the future reconciliation, TODO.md item 2). kernel.md's own
+  "break_here() does nothing otherwise" - the false contract the voice
+  pass had fixed in the header - is fixed in the page too. NEXT: the A
+  renames under the gate (one commit), then the public/private cut.
 
 - **Borrowed, phase 2 (debug epoch).** `Borrowed<T, Lease::dispatch>`
   is a plain pointer today. Planned: in debug builds an 8-bit lender

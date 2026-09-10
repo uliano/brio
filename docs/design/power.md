@@ -11,11 +11,22 @@ it - is each target's, documented in that target's folder
 (`docs/avrdx/platform.md`).
 
 Contracts and services: `util/power.hpp`. The kernel question it needs:
-`TimeEvents<P>::ticks_to_next()` (`kernel/time_event.hpp`). The
-realizations: `AvrSleepSite` over `Sleep` in `avrdx/sleep.hpp`,
-`SamSleepSite` and `SamTimedSleepSite` over `Pm` in `samc21/sleep.hpp`,
-and `Stm32g0SleepSite`, `Stm32g0TimedSleepSite` and
-`Stm32g0LptimTimedSleepSite` over `Pwr` in `stm32g0/sleep.hpp`.
+`TimeEvents<P>::ticks_to_next()` (`kernel/time_event.hpp`).
+
+### Realizations
+
+Common to all: `SleepDepth`, the `SleepSite` concept (`arm`, `disarm`,
+`armed`), `PowerManager`, `PowerLock`, the vote round and the deadline
+guard - none of `util/power.hpp` is per target, and every realization
+below ran it unchanged. What differs is the LADDER each family can
+offer, and whether the kernel tick survives the rung.
+
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | `AvrSleepSite` over `Sleep` (`avrdx/sleep.hpp`) | the ladder is the identity: `light` -> IDLE, `standby` -> STANDBY, `deep` -> POWER-DOWN; the tick (the RTC's PIT on the 32 kHz oscillator) runs through every rung, so nothing needs resyncing |
+| samc21 | `SamSleepSite` and `SamTimedSleepSite` over `Pm` (`samc21/sleep.hpp`) | `light` -> IDLE2 (IDLE0 is the reset value, so `armed()` could not read it back), `standby` AND `deep` -> STANDBY (nothing deeper exists; `armed()` reports `standby` for a `deep` request); the tick stops in standby, so the plain site restricts standby to a program with no time event armed and the TIMED site lifts that with the RTC as alarm and witness (below) |
+| stm32g0 | `Stm32g0SleepSite`, `Stm32g0TimedSleepSite` and `Stm32g0LptimTimedSleepSite` over `Pwr` (`stm32g0/sleep.hpp`) | `none` AND `light` -> Sleep (the only mode between Sleep and Stop wants the whole program at 2 MHz, which a site may not do), `standby` -> Stop 0, `deep` -> Stop 1; Standby and Shutdown are OFF the ladder because the program does not resume; a SYSCLK restore and a ticker pause ride the two verbs; the timed sites take the RTC or the LPTIM as alarm and witness, and both refuse a `Tickless` platform, whose timebase counts through the Stop by itself |
+| host | none | the model's round, guard and locks are host-tested against a scripted site (`test_power`) |
 
 **The model holds on the SAM C21 with no change.**
 On the SAM C21 the vote round, the unanimity rule, the `PowerLock`

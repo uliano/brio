@@ -53,11 +53,23 @@ limit) and then decides, with `if constexpr`:
   by hand.
 
 So `Ring<uint8_t, 1024, AvrPlatform>` silently takes the guard and
-`Ring<uint8_t, 1024, SomeArmPlatform>` is lock-free, with the same
-source. Nobody chooses; the platform states a truth, generic code
-draws the consequence. This is the pattern the generalization rule
-asks for: no `#ifdef`, no per-use knob, no hidden default (a default
-platform in Ring would smuggle an AVR include into `util/`).
+`Ring<uint8_t, 1024, SamPlatform>` is lock-free, with the same source.
+Nobody chooses; the platform states a truth, generic code draws the
+consequence. This is the pattern the generalization rule asks for: no
+`#ifdef`, no per-use knob, no hidden default (a default platform in
+Ring would smuggle an AVR include into `util/`).
+
+### Realizations
+
+The ring is one header on every stratum; the only thing that varies is
+the one constant it reads and therefore the path a given size takes.
+
+| stratum | `atomic_width` | the path a ring takes |
+|---|---|---|
+| avrdx | 1 | lock-free up to 256 slots (an 8-bit index), guarded above - the console's 256-byte rings are lock-free, a 1024-slot one is not |
+| samc21 | 4 | lock-free at every size this framework declares (a 32-bit index is one access) |
+| stm32g0 | 4 | the same |
+| host | 4, and a second test platform stating 1 | both paths run under the same suite (`test_ring`), the guarded one on the platform that states 1 |
 
 The extra template parameter is the honest price, and it is the same
 price `EventQueue`, `SerialPort`, `SpiBus` and `Kernel` already pay:

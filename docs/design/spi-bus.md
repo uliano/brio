@@ -12,7 +12,7 @@ form ([i2c-bus.md](i2c-bus.md) shares the same arbiter).
      SpiBus<Bus, P>          util/spi_bus.hpp   arbitration + replies
          |  Bus::start(req)
          v
-     SpiHost<n> engine      avrdx/spi.hpp     CS/DC, per-byte ISR pump
+     SpiHost<n> engine      <stratum>/spi.hpp   CS/DC, per-byte ISR pump
          |
      ISR glue in the app    posts TransferDone{status} on completion
 ```
@@ -23,19 +23,43 @@ silicon. The app's ISR binds the vector, as always.
 
 ### Realizations
 
-| target | engine | what it adds to the Request |
-|---|---|---|
-| avrdx | `avrdx/spi.hpp` | - |
-| samc21 | `samc21/spi.hpp` | the rate as a `baud` divisor rather than a division enum |
-| stm32g0 | `stm32g0/spi.hpp` | a frame size, 4 to 16 bits, eight by default |
+Common to the three: the Request field for field (`cs`, `dc`, `cmd`,
+`cmd_len`, `tx`, `rx`, `len`, `reply`, `mode`, `polled`, `cs_setup_us`),
+the engine verbs `init`, `start`, `isr`, `rebase`, `recover`, `release`,
+`sck_hz`, `max_sck_hz`, and the vocabulary `SpiMode` / `SpiDone` /
+`spi_*`. An 8-bit request is spelled identically on all three, and each
+engine is measured against a real client on the wire: transactions
+queued from one dispatch, a rejection when the queue is full, both
+sleep votes, and the per-bus timeout with `recover()`.
 
-An 8-bit request is spelled identically on all three, and each engine is
-measured against a real client on the wire: transactions queued from one
-dispatch, a rejection when the queue is full, both sleep votes, and the
-per-bus timeout with `recover()`. The three peripherals share almost
-nothing below the contract - a shift register with a two-deep buffer, a
-SERCOM with a pad matrix, and an SPI with a FIFO and a frame size - which
-is what makes the descriptor's survival worth recording.
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | `SpiHost<n, route>` (`avrdx/spi.hpp`) | the rate is a `SpiClock` division enum, with `ceiling_clock()` the optional SCK ceiling a rebase re-resolves; the chooser is the free function `spi_clock_for(clk_per_hz, max_sck_hz)`; no `status()` (with no DMA engine every completion is `spi_ok`, and the glue posts that constant) and no `prime()` |
+| samc21 | `SpiHost<n, pads, TxEngine, RxEngine>` (`samc21/spi.hpp`) | the rate is a `uint8_t baud` DIVISOR (the SERCOM's own register), so the ceiling is `ceiling_baud()` and the chooser `baud_for(hz)`; two optional DMA engine slots carrying the data phase (`dma_isr`, `status()` = `spi_ok` or `spi_dma_fault`); `prime(mode, baud)` for a caller framing the select by hand; `reference_hz()` = the stated GCLK rate |
+| stm32g0 | `SpiHost<n, pins, TxEngine, RxEngine>` (`stm32g0/spi.hpp`) | a frame size in the Request (`bits`, 4 to 16, eight by default) with `cmd_len`/`len` counted in FRAMES; the `SpiClock` enum with `ceiling_clock()` and the chooser `clock_for(hz)`; the engine slots, `status()` and `prime(mode, clock, bits)` as the SAM's; `bit_order()`/`lsb_first()` on the task; `claim_nss_pad()` for a hardware NSS; `reference_hz()` = PCLK |
+| host | none | `SpiBus` is host-tested over a fake `Bus` (`test_spi_bus`, `test_bus_master`) |
+
+Two of those differences are ONE thing spelled three ways and are
+recorded as such: the rate's unit (an enum on two strata, a divisor on
+one - an open decision, since a ceiling in hertz would serve all three)
+and the chooser's name and home (`spi_clock_for` / `baud_for` /
+`clock_for`). The verbs the AVR lacks - `status()`, `prime()` - are
+the same function where they exist and would cost nothing there.
+
+The client side is deliberately NOT one surface: `SpiClient` on each
+stratum is the application's protocol over that silicon's own client
+half (a shift register with a two-deep buffer, a SERCOM with PLOADEN, an
+SPI with a two-deep FIFO), and the three peers of the bench converge on
+one algorithm - one answer kept queued ahead of what the host has
+clocked - whose only per-silicon parameter is HOW MANY frames must be
+queued before the host's clock arrives (one, one, two). That integer is
+the one thing a portable client would need, and it is not yet
+published by the three as a constant.
+
+The three peripherals share almost nothing below the contract - a
+shift register with a two-deep buffer, a SERCOM with a pad matrix, and
+an SPI with a FIFO and a frame size - which is what makes the
+descriptor's survival worth recording.
 
 `SpiBus` is an alias of `BusMaster<Bus, P>` (`util/bus_master.hpp`),
 the arbiter shared with I2C - see [i2c-bus.md](i2c-bus.md).

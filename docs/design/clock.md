@@ -56,6 +56,29 @@ The two are sibling types with the same driver-facing surface: a
 driver written for `init(clock)` + `clock_hz(clock)` serves both, and
 adds one function - `rebase(hz)` - to serve the dynamic one.
 
+### Realizations
+
+Common to all three: `Clock<ClockSource::internal, hz>` and
+`Clock<ClockSource::crystal, hz>` spelled identically, `Clock::hz` as
+the one rate truth, `clock_hz(clock)` and the `ClockUser` contract
+(`util/clock.hpp`), and `delay_us(clock, us)` reading its budget from
+it. What differs is the shape of the DYNAMIC regime - which is where
+each family's own clock tree shows through - and the sources beyond
+the two every part has.
+
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | `Clock<src, hz, div>` and `DynamicClock<Boot, Users...>` (`avrdx/clock.hpp`) | the dynamic set is the boot rate over the twelve main prescalers; `set<hz>()`/`set(hz)` fan `rebase` out then switch; `ClockSource` adds `external`, `osc32k`, `xosc32k`; `delay_us` returns nothing - it has no cap |
+| samc21 | `Clock<src, hz>` alone (`samc21/clock.hpp`) | NO dynamic clock, by position: every peripheral has a generic clock channel of its own, so "one rate for everything" is not this family's shape (below); `Clock` builds `internal` alone today, the crystal and the DPLL are resources the program runs the CPU from by hand; `ClockSource` adds `dpll` |
+| stm32g0 | `Clock<src, hz, regime>` and `DynamicClock<Rates<R0, R1, ...>, Users...>` (`stm32g0/clock.hpp`) | a rate is a TUPLE (root, VCORE range, regulator) and the dynamic set an EXPLICIT PACK of such tuples, R0 the boot rate; `PowerRegime` sequences table 13's latency and the range around a switch; `restore()` after a Stop; `ClockSource` adds `pll`, `lsi`, `lse` (the 32 kHz roots under ST's names) |
+| host | none | the host tests run on the virtual clock of `HostPlatform`; nothing there has a rate |
+
+`delay_us` is one name with one difference of contract: on the two
+ARMv6-M strata it is capped below one kernel tick and REFUSES (a
+`bool`, nothing spent) a wait that long - a tick or more is `TimeEvent`
+territory - where the AVR's has no cap and returns nothing
+(`avrdx/delay.hpp`, `armv6m/delay.hpp`).
+
 ## A rate change is a synchronous fan-out, not an event
 
 When a dynamic clock switches, every driver that derived something

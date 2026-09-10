@@ -108,7 +108,11 @@ implemented and bench-verified, and everything `kernel/` and `util/`
 claim holds there - or **in bring-up**, where the stratum exists, part
 of it is proven on silicon, and the rest is still to be validated. This
 table is the one place that question is answered: no source file carries
-its own list of the targets it was tried on.
+its own list of the targets it was tried on. Where a contract's
+realizations differ - and where they are one interface - is the
+REALIZATIONS TABLES, one per design page, indexed in
+[docs/design/overview.md](docs/design/overview.md) ("One interface
+where it can, its exceptions where a reader looks").
 
 | Target | State | Bench silicon | Notes |
 |--------|-------|---------------|-------|

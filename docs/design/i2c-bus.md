@@ -43,7 +43,7 @@ can observe:
      I2cBus<Bus, P>          util/i2c_bus.hpp   = BusMaster: arbitration + replies
          |  Bus::start(req)
          v
-     I2cHost<n> engine       avrdx/twi.hpp     START/Sr/STOP, ACK policy, per-byte ISR
+     I2cHost<n> engine       <stratum>/{twi,i2c}.hpp   START/Sr/STOP, ACK policy, per-byte ISR
          |
      ISR glue in the app     posts TransferDone{I2cHw::status()} on completion
 ```
@@ -55,17 +55,41 @@ silicon's own resource. The app's ISR binds the vector.
 
 ### Realizations
 
-| target | engine | resource under it |
-|---|---|---|
-| avrdx | `avrdx/twi.hpp` | `Twi<n>`, which carries the client half too - see [twi.md](../avrdx/twi.md) |
-| samc21 | `samc21/i2c.hpp` | `I2cm<n>` and `I2cs<n>`, two resources over one SERCOM |
-| stm32g0 | `stm32g0/i2c.hpp` | `I2c<n>`, whose whole bus timing lives in one TIMINGR word |
+Common to the three: the Request field for field (`addr`, `tx`,
+`tx_len`, `rx`, `rx_len`, `reply`, `speed`), `I2cSpeed` word for word,
+the engine verbs `init`, `start`, `isr`, `status`, `rebase`,
+`recover`, `release`, `unstick`, the empty probe (both lengths zero)
+served by all three, and the vocabulary `I2cDone` / `i2c_*` produced
+ON THE WIRE by each. What differs is the resource under the task and
+the shape of the rate arithmetic each chapter imposes.
 
-The Request is field for field the same on the three, and the three
-peripherals share almost nothing below it - a TWI with its own baud
-three-step, a SERCOM with a select-then-use register file, and an I2C
-with one timing word - which is what makes the descriptor's survival
-worth recording.
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | `I2cHost<n, route>` over `Twi<n>` (`avrdx/twi.hpp`), a resource that carries the client half too | the rate readback is `actual_scl_hz(t_rise_ns)` - what the register in force gives, under the chapter's rise-time budget; `clock_ok(speed)` asks whether the clock in force can make a speed; `quick_command(bool)` is the TWI's own hardware MODE (QCEN: every request an address-only frame); `bus_state()` is the WIRE's state from the bus monitor; `speed()`, `baud()` |
+| samc21 | `I2cHost<n, pads>` over `I2cm<n>` (`samc21/i2c.hpp`; `I2cs<n>` is the client's resource, two over one SERCOM) | `init` takes the STATED core rate (`reference_hz()`); the rates are a per-speed cache: `speed_ok(speed)`, `scl_hz(speed)`, `baud_of(speed)`; `idle()` is the ENGINE's phase, not the wire's |
+| stm32g0 | `I2cHost<n, pins, TxEngine, RxEngine>` over `I2c<n>` (`stm32g0/i2c.hpp`, one TIMINGR word) | the same stated rate and per-speed cache (`speed_ok`, `scl_hz`, `timing_of`, `kernel_hz()` for the kernel-clock multiplexer); two optional DMA engine slots with `dma_isr()`; `fast_plus_drive()` (SYSCFG's Fm+ pad drive); `spurious_bus_errors()` (an erratum's counter); `idle()` as the SAM's |
+| host | none | `I2cBus` = `BusMaster`, host-tested through the SPI alias (`test_spi_bus`, `test_bus_master` - the same class) |
+
+One of those differences is a spelling and is recorded as such:
+`clock_ok(speed)` (avrdx) and `speed_ok(speed)` (the other two) ask
+the same question. The others are not: `actual_scl_hz` and `scl_hz`
+answer different questions (the register in force against a cached
+speed), `bus_state()` and `idle()` look at different things (the wire
+against the engine), and `quick_command` is a hardware mode the other
+two families do not have (their empty probe is the same tenure with no
+data, which the AVR serves too).
+
+The client side is three surfaces by position (`I2cClient` on each
+stratum, the application's protocol over `Twi<n>` / `I2cs<n>` /
+`I2c<n>`): samc21 and stm32g0 speak one vocabulary back
+(`addressed`, `data_ready`, `stop_seen`, `give`/`take`, `host_reads`),
+the AVR's is its own (`addressed`, `data_ready`, `receive`/`respond`,
+`complete`) - a convergence of two, not a task.
+
+The three peripherals share almost nothing below the contract - a TWI
+with its own baud three-step, a SERCOM with a select-then-use register
+file, and an I2C with one timing word - which is what makes the
+descriptor's survival worth recording.
 
 ## The transaction descriptor (`I2cHost<n>::Request`)
 

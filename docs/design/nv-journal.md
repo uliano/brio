@@ -159,6 +159,21 @@ question is OPEN now that the STM32G0 runs the journal too, and it
 stays a question until a real cross-target application asks it; until
 then two spellings, each honest about its silicon, is the smaller lie.
 
+### Realizations
+
+Common to all: `NvJournal<Media, max_ids, max_payload, half_pages>` and
+`JournalPanic` over any `FlashMedia`, the entry format, the two halves
+and the reserve - the header is the same file on every stratum that
+has a journal. What differs is which array lends the two halves, and
+whether the family needs a journal at all.
+
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | none | this family has an EEPROM, and its small values are `NvRecord` over `EepromStore` (`util/nv_record.hpp`, `avrdx/nvm.hpp`); the journal is host-tested on this family's 512 / 2 geometry and born here with its first user |
+| samc21 | `RwweeJournalZone` (`samc21/nvm_flash.hpp`), rows 28..31 of the RWWEE partition | 256 / 64 - the attic the heap's rows leave; `JournalPanic` over it is the breadcrumb that survives a POWER LOSS, the `.noinit` one surviving resets alone |
+| stm32g0 | `MainFlashJournalZone` (`stm32g0/nvm_flash.hpp`), the top of bank 2 | 2048 / 8; the same panic reserve, the same read-while-write property; absent on a single-bank part until the storage geometry there is decided |
+| host | `SimFlash<Erase, Cell>` at three geometries | 256/64, 2048/8 and 512/2 (the one where a header spans cells), with power cuts at every program unit of a save and a collection |
+
 ## What a new target inherits
 
 Nothing here is target-specific, so a new part gets the journal by

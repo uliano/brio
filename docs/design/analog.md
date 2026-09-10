@@ -6,8 +6,27 @@ and the active objects that want its numbers: the arithmetic
 host-tested) and the **AnalogSampler** (`util/analog_sampler.hpp`): the
 active object that owns one converter, walks a fixed list of inputs
 and publishes every result as a value event. The converter itself, its
-configuration knobs and its reference levels are each target's
-(`docs/avrdx/adc.md`, `vref.md`, `dac.md`).
+configuration knobs and its reference levels are each target's.
+
+### Realizations
+
+Common to all: `adc_mv`/`dac_code` and their kin, `AnalogSampler` and
+the two concepts it asks of a converter - `start()`, `selected()`,
+`select(in)`, `input_code(in)` - which every converter below satisfies
+with those spellings, and `Ref` + `ref_mv()` as NAMES. What differs is
+what a reference IS on each family (which is why `Ref`'s enumerators
+are three vocabularies and not one), how an input pad is named, and
+the DAC's shape.
+
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | `Adc<0>` and `AnalogIn<Pin>` (`avrdx/adc.hpp`); `Dac<0>` with `set(code)`/`set_mv()` (`avrdx/dac.hpp`); `Ref` in `avrdx/vref.hpp` | `Ref` names a VOLTAGE (`v1024`, `v2048`, `v2500`, `v4096`, `vdd`, `vrefa`) - the VREF block selects one for each consumer; the ADC is one instance spelled with its number |
+| samc21 | `Adc<n>` for two converters in a host/client pair and `AnalogIn<Pin>` (`samc21/adc.hpp`); `Dac` (a monostate) with `set(value)` returning `bool` (`samc21/dac.hpp`); `Ref` in `samc21/adc.hpp` | there is no shared reference block, so `Ref` names a SOURCE of the ADC's own REFSEL (`intref`, `vddana_div1p6`, `vddana_div2`, `vrefa`, `dac`, `vddana`) and the DAC and the SDADC carry enums of their own (`DacRef`, `SdadcRef`); a synchronized write waits before storing, hence the `bool`; the SDADC and the TSENS are converters of their own shape, not `AnalogConverter`s |
+| stm32g0 | `Adc` (a monostate) and `AnalogIn<Pin, channel>` (`stm32g0/adc.hpp`); `Dac` with `write(channel, code)` (`stm32g0/dac.hpp`); `Ref` in `stm32g0/vref.hpp` | ONE rail, VREF+, shared by the ADC, the DAC and the comparators, so `Ref` names what that pin carries (`external`, `buffer_2v048`, `buffer_2v5`); an input states its CHANNEL beside its pin, no header table mapping one to the other; the DAC has two channels, so its verb takes one and is spelled `write` |
+| host | none | the arithmetic is host-tested (`test_analog`), the sampler against a scripted converter (`test_analog_sampler`) |
+
+The DAC's verb is one spelling apart (`set` on two strata, `write` on
+the one whose signature carries a channel) and is recorded as such.
 
 ## The sampler is a usage type, not an application
 
@@ -95,4 +114,4 @@ may not (overview.md, "Authority of util/").
 | `AnalogSample{index, value}` | `util/analog_sampler.hpp` | published to the subscribers |
 | `Ref`, `ref_mv` | each target's vref header | this silicon's reference levels |
 
-Target pages: [../avrdx/adc.md](../avrdx/adc.md), [../avrdx/vref.md](../avrdx/vref.md), [../avrdx/dac.md](../avrdx/dac.md).
+Target pages: [../avrdx/adc.md](../avrdx/adc.md), [../avrdx/vref.md](../avrdx/vref.md), [../avrdx/dac.md](../avrdx/dac.md); [../samc21/adc.md](../samc21/adc.md), [../samc21/dac.md](../samc21/dac.md), [../samc21/sdadc.md](../samc21/sdadc.md), [../samc21/tsens.md](../samc21/tsens.md); [../stm32g0/adc.md](../stm32g0/adc.md), [../stm32g0/vref.md](../stm32g0/vref.md), [../stm32g0/dac.md](../stm32g0/dac.md).

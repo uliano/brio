@@ -49,6 +49,20 @@ than plumbing:
 - **`build_id()` is diagnostic.** It is recorded in every map version
   and nothing decides on it. Validity is the checksum's business.
 
+### Realizations
+
+Common to all: the concept, and `NvHeap<Media, max_blocks, map_pages>`
+over it unchanged - the same header mounted, allocated, sealed and
+re-found a block on every media below. What differs is the array each
+family lends, which is where the two granularities come from.
+
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | `NvmFlash` over the main array (`avrdx/nvm_flash.hpp`) | 512 / 2; the zones come from the linker's own symbols (the free flash of THIS image, with the BOOT section as floor), so a reflash can land on a block and the bench tool warns before it does; a write stalls the CPU for the page's whole erase |
+| samc21 | `RwweeFlash` over the RWWEE array (`samc21/nvm_flash.hpp`), rows 0..27 of the one partition | 256 / 64; the zone is a CONSTANT (no linker section reaches that array); writing it stalls nothing (read-while-write), and it is four times as durable as the main array |
+| stm32g0 | `MainFlash` over bank 2 (`stm32g0/nvm_flash.hpp`) | 2048 / 8, the ECC-guarded double word programmed once; the storage attic is the whole second bank, the program in bank 1 (erratum 2.2.10's own reason), so a write stalls nothing - which makes the single-bank parts a design question and not a port |
+| host | `SimFlash<Erase, Cell>` (`host/sim_flash.hpp`) | any geometry, a power switch that opens between program units, a simulated reflash, wear counters - what the power-cut sweeps run on |
+
 ## The map pair
 
 All the bookkeeping is one structure, held in the last `map_pages` erase

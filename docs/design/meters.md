@@ -13,9 +13,25 @@ between them they separate the two paces:
 - **`MeterSampler`** (same header) - the active object that walks a
   fixed list of sources on ITS own period and publishes what is fresh.
 
-The meters themselves are each target's (`docs/avrdx/tcb.md`:
-`FrequencyMeter`, `PulseWidthMeter`, `DutyMeter`). Nothing here
-configures hardware or names a timer.
+The meters themselves are each target's. Nothing here configures
+hardware or names a timer.
+
+### Realizations
+
+Common to all: the `MeterSource` concept is satisfied by the
+`MeterLatch` itself, and `MeterSampler` walks latches - so the target's
+meters are all of one shape on the three strata: a task over a timer
+in a capture mode whose reading verbs a capture ISR calls to fill the
+latch (`period_ticks()`, `width_ticks()`). What differs is which
+timers offer which capture, and one meter that measures a different
+thing under a similar name.
+
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | `FrequencyMeter<Tcb>`, `PulseWidthMeter<Tcb>`, `DutyMeter<Tcb>` (`avrdx/tcb.hpp`) | one TCB per meter (frequency, pulse width, or both as one `reading()` of period then width); the tasks are `ClockUser`s, their `hz()`/`us()` conversions following a rebase |
+| samc21 | `TcPeriodMeter<Tc>` (period AND width, EVACT = PPW), `TcPulseWidthMeter<Tc>` (the HIGH time alone, EVACT = PW) (`samc21/tc.hpp`) | the input reaches the capture through the event system (an EIC line or a CCL LUT as generator), never a pad directly |
+| stm32g0 | `TimPeriodMeter<Tim>` (period and width, PWM input mode - a slave controller and two channels) and `TimIntervalMeter<Tim, ch>` (`stm32g0/tim.hpp`) | `TimIntervalMeter` is NOT a pulse-width meter: it measures the INTERVAL between consecutive edges on ONE channel of a free-running counter, by subtraction, which is what a single-channel timer can offer (`interval()`, one value of state, for the capture handler alone) |
+| host | a scripted latch (`test_meter_sampler`) | the sampler's discard-stale and labelling tested to the tick |
 
 ```
 edge -> capture ISR -> MeterLatch::store()      as fast as the wire

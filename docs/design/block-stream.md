@@ -22,8 +22,8 @@ then, it moves in the open.
 ## The two concepts
 
 The contract is about BLOCKS, not about DMA. Nothing below asks how a
-buffer gets full or drained; on the SAM C21 both concepts are satisfied
-by DMA engines (`samc21/dmac.hpp`), and a machine with no DMA can satisfy
+buffer gets full or drained; on the two ARMv6-M strata both concepts
+are satisfied by DMA engines, and a machine with no DMA can satisfy
 them from an interrupt handler filling the same buffers.
 
 - **`BlockSource`** - the capture shape: `element` (the sample type),
@@ -43,6 +43,22 @@ them from an interrupt handler filling the same buffers.
   `laps()` moving is the one fact that says the stream is alive. The
   concept exists so the next platform's playback has a contract to meet,
   exactly as `BlockSource` does for capture.
+
+### Realizations
+
+Common to all: the two concepts, `BlockRelay`, and the engine NAMES -
+the two strata that have engines spell all four identically
+(`DmaTxEngine`, `DmaRxEngine`, `DmaLoopEngine`, `DmaPingPongEngine`),
+with the element type as the beat and the same
+`kick`/`abandon`/`faults`/`harvest` hardening. What differs is what the
+controller under them can do.
+
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | none | this family has no DMA; an interrupt-fed source satisfying `BlockSource` from a handler is the stated shape and is born with its first user |
+| samc21 | `DmaPingPongEngine` (a `BlockSource`) and `DmaLoopEngine` (a `BlockPlayer`) in `samc21/dmac.hpp` | no hardware circular mode, so BOTH re-arm from the block-complete interrupt (a self-linked descriptor would leave erratum 1.10.4 nothing to judge a corrupted write-back against); neither kicks on its re-arm |
+| stm32g0 | the same two names in `stm32g0/dma.hpp` | the player rides the controller's HARDWARE CIRCULAR MODE (the lap interrupt only counts); the source cannot (skip-rather-tear is undecidable after the edge, below) and stops itself at every block |
+| host | a scripted ping-pong source (`test_block_stream`) | honest to the engines' contract - overrun skips the lap, release restarts - so the relay's loan timing and stall drain are tested to the dispatch |
 
 ## BlockRelay
 

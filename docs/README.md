@@ -192,6 +192,18 @@ The bench:
   want the call, not the header), *bench findings* (the
   facts the test suite established, with its name). Tracks, guiding
   applications and history live in CLAUDE.md and memory, never here.
+- **A contract with more than one realization carries a realizations
+  table.** In the design page that owns the contract, `### Realizations`
+  right after the contract's statement: one sentence for what is
+  common, then one row per stratum in a fixed order (avrdx, samc21,
+  stm32g0, host) - the realization (header and type) and ONLY what
+  lies beyond the contract there, `-` for nothing, an absent
+  realization a row too, with its reason. Names are strata, never
+  boards. A spelling of the same function is recorded as a spelling;
+  a different function under a shared name as a trap. The index of
+  every table is in `design/overview.md` ("One interface where it
+  can"); headers never cite another stratum's - the table is the one
+  home of the cross-target view.
 - **Today's truth only, no change history.** A doc says what is,
   never what it used to be, when it was reorganized or what something
   was called before. Rationale and rejected alternatives are welcome

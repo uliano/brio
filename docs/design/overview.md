@@ -251,13 +251,16 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   family would get its own core stratum the same way, at its second
   member, never earlier.
 - **Board facts vs device facts.** Which timer reaches which port,
-  which USART sits on which pins per route, are facts of the DEVICE
-  (today tables inside `tca.hpp`, `usart.hpp` - the seed of a per-family
-  header). Which timer drives which LEDs, which pins are buttons, which
+  which USART sits on which pins per route, are facts of the DEVICE:
+  on the AVR tables inside `tca.hpp`, `usart.hpp`, on the two ARMv6-M
+  strata the RESERVE (`samc21/device_tables.hpp`,
+  `stm32g0/device_tables.hpp` - the one file where the preprocessor
+  may probe a vendor macro, exporting what it finds as constexpr
+  data). Which timer drives which LEDs, which pins are buttons, which
   vectors bind to which driver bodies, are facts of the BOARD: they
   belong in a per-board unit that can also list resource claims and
-  reject a double use at compile time. Both are built on the second
-  target, when there is something to compare.
+  reject a double use at compile time - born with the first portable
+  example application.
 - **A driver covers its family, not its bench chip.** brio is a
   framework: the target is the whole device range (every instance,
   every mode, every routing option of the chapter's register
@@ -283,6 +286,67 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   fact stated in a doc or header comment ("this LUT has no ALT1")
   either has a guard in the code or is listed as a driver gap -
   knowledge the code does not enforce is a bug deferred.
+
+### One interface where it can, its exceptions where a reader looks
+
+The rule above - task names the same on every target, resources per
+target - is the claim; the REALIZATIONS TABLES are where it is
+checked. Every design page whose contract has more than one
+realization carries a `### Realizations` section right after the
+contract it documents: one sentence saying what is common, then one
+row per stratum in a fixed order (avrdx, samc21, stm32g0, host) with
+the realization - header and type - and ONLY what lies beyond the
+contract there (`-` for nothing; an absent realization is a row too,
+with its reason). The names in those rows are strata, never boards.
+A difference that is a SPELLING of the same function is recorded as
+such; a difference of function under a shared name is recorded as a
+trap. This is the one home of the cross-target view: a header never
+cites another stratum's.
+
+| contract | its table | the exception in one phrase |
+|---|---|---|
+| the platform | [kernel.md](kernel.md), section 11 | `atomic_width` 1 on the AVR; `idle()` takes the armed mode three different ways; a breakpoint is a NOP or a HardFault; `idle_until` on the tickless G0 alone |
+| the timebase | [kernel.md](kernel.md), section 9 | the AVR's tick runs through every sleep; SysTick stops in standby and a Stop; the LPTIM one counts through and is tickless |
+| panic, reset, watchdog | [kernel.md](kernel.md), section 10 | the record's survival (EEPROM, RWWEE journal, bank 2); the fault body as the panic path on the ARM strata; the watchdog kick under two names and three contracts |
+| the ring | [ring.md](ring.md) | the atomic width alone |
+| the clock | [clock.md](clock.md) | prescalers (AVR), no dynamic clock by position (SAM), a pack of rate tuples with a regime (G0); `delay_us` capped on the ARM strata |
+| the Uart | [serial.md](serial.md) | three ways to name pins, one or three vectors, DMA slots and bulk verbs on two strata |
+| the SPI bus | [spi-bus.md](spi-bus.md) | the rate's unit (an enum or a divisor), a frame size on the G0, `status()`/`prime()` absent on the AVR, the client three surfaces by position |
+| the I2C bus | [i2c-bus.md](i2c-bus.md) | the rate arithmetic's shape, `clock_ok`/`speed_ok` a spelling, `actual_scl_hz`/`scl_hz` and `bus_state`/`idle` NOT one |
+| the power model | [power.md](power.md) | each family's ladder mapping; where the tick stops and which site resyncs it |
+| flash storage | [nv-heap.md](nv-heap.md), [nv-journal.md](nv-journal.md) | the geometries; the AVR keeps its small values in the EEPROM |
+| block streams | [block-stream.md](block-stream.md) | the engine names identical on the two strata that have DMA; the circular mode serves a player and not a source |
+| meters | [meters.md](meters.md) | `TimIntervalMeter` is not a pulse-width meter |
+| analog | [analog.md](analog.md) | `Ref` is three vocabularies because a reference is three different things; `set`/`write` on the DAC |
+| pins and PWM channels | below | - |
+
+Two contracts have no design page of their own and keep their tables
+here.
+
+**Pins.** Common to the three: `Pin<'A', 5>` and `PinRef`, `set` /
+`clear` / `toggle` / `read` / `output` / `input` / `is_output` /
+`port` / `ref` / `configure(PinConfig)`, and `duty()` (a `Pin` is a
+`PwmChannel` of one step). What differs is what a pad can be told to
+do, and how it is handed to a peripheral.
+
+| stratum | realization | beyond the contract |
+|---|---|---|
+| avrdx | `Pin` in `avrdx/pin.hpp` | `pullup(bool)` - ONE direction, the family has no pull-down - where the other two spell `pull(PinPull)` (a spelling); `sense()`, `flag()`, `clear_flag()` (the pin interrupts are the PORT's here), `invert()`, `disable_digital_input()`/`enable_digital_input()` (the input buffer, in a field shared with the sense); no `function()`/`release()` - a pad is handed to a peripheral by that peripheral's PORTMUX route; `PinSet` |
+| samc21 | `Pin` in `samc21/pin.hpp` | `pull(PinPull)`, `input(PinPull)`; `function(PinFunction)` hands the pad to a peripheral function letter and `release()` takes PMUXEN off - the pin back to PORT as it was; `input_enable(bool)` (INEN, the same buffer the AVR's pair switches); `strong_drive()`; the WRCONFIG multi-pin engine (`configure_mask`); no `PinSet` |
+| stm32g0 | `Pin` in `stm32g0/pin.hpp` | `pull(PinPull)`, `input(PinPull)`; `function(PinFunction)` with the AF number, and `release()` = `analog()`, the reset state - THE SAME NAME AS THE SAM'S WITH A DIFFERENT LANDING; `output(level)` before the mode (the port-clock rule); `analog()` is a MODE, not the input buffer alone; `read_out()`; speed and open drain in `PinConfig`; `PinSet` |
+| host | none | - |
+
+**PWM channels.** Common to the three: the `PwmChannel` concept
+(`max` + `duty(v)`, `util/pwm_channel.hpp`), `RgbLamp` over any three,
+and `Pin` as the one-step channel. The realizations are named for
+their timer, and an application picks one in its board file:
+
+| stratum | realizations | beyond the contract |
+|---|---|---|
+| avrdx | `TcaPwm<n, port>::Channel<ch>` (six 8-bit channels of a split TCA), `TcaPwm16`, `TcaPwmCentered` (dual slope, OVF at the centre), `Pwm8<Tcb>`, `TcdPwm<route>` (the complementary pair with dead time, on the TCD) | the TCA and TCB channels are ratiometric on purpose and NOT `ClockUser`s (a duty survives a clock change, the frequency moves with it); `TcdPwm` is one when the TCD runs on CLK_PER and was asked for a rate in hertz, and follows nothing otherwise |
+| samc21 | `TcPwm`, `TcPwm8`, `TccPwm` (a caller-chosen max), `TccPairPwm` (the complementary pair with dead time) | - |
+| stm32g0 | `TimPwm`, `TimPairPwm` (the complementary pair, on the timers with a break and dead-time unit), `LptimPwm` (on a timer that keeps counting in Stop) | the timers refuse a dynamic clock: their periods are PCLK cycles and no rebase can keep them |
+| host | none | - |
 
 ## Style rules
 
