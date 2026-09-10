@@ -1778,6 +1778,15 @@ public:
 
     // ---- the byte surface -----------------------------------------------------
 
+    /// HOW MANY ANSWERS MUST BE QUEUED AHEAD of the character the host is
+    /// about to clock for them to reach the wire in order - the one
+    /// integer that differs between this family's client pump and the
+    /// other strata's. TWO here: the three-SCK-cycle rule makes a write
+    /// made in the inter-character gap mature one character LATE, so the
+    /// pump preloads b0 into the shifter, parks b1 in DATA at once, and
+    /// on every received character writes the next-plus-one.
+    static constexpr uint8_t frames_ahead = 2;
+
     /// Load the next character to shift out. While SS is HIGH and
     /// CTRLB.PLOADEN is set this reaches the shift register directly
     /// (32.6.3.2); otherwise it lands in DATA and takes up to three SCK

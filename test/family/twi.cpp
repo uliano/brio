@@ -275,7 +275,7 @@ void use_resource() {
     T0::bus_timing(250, 200);
     (void)T0::rise_ns();
     (void)T0::fall_ns();
-    (void)T0::clock_ok(I2cSpeed::fast_400k);
+    (void)T0::speed_ok(I2cSpeed::fast_400k);
     (void)T0::set_speed(I2cSpeed::standard_100k);
     (void)T0::speed();
     (void)T0::actual_scl_hz(0);
@@ -299,7 +299,8 @@ void use_tasks() {
     (void)Host0::actual_scl_hz(300u);
     (void)Host0::baud();
     (void)Host0::speed();
-    (void)Host0::clock_ok();
+    (void)Host0::speed_ok();
+    (void)Host0::speed_ok(I2cSpeed::fast_400k);
     Host0::quick_command(true);
     (void)Host0::quick_command();
     Host0::recover();

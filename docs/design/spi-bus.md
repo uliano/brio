@@ -34,27 +34,27 @@ sleep votes, and the per-bus timeout with `recover()`.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
-| avrdx | `SpiHost<n, route>` (`avrdx/spi.hpp`) | the rate is a `SpiClock` division enum, with `ceiling_clock()` the optional SCK ceiling a rebase re-resolves; the chooser is the free function `spi_clock_for(clk_per_hz, max_sck_hz)`; no `status()` (with no DMA engine every completion is `spi_ok`, and the glue posts that constant) and no `prime()` |
+| avrdx | `SpiHost<n, route>` (`avrdx/spi.hpp`) | the rate is a `SpiClock` division enum, with `ceiling_clock()` the optional SCK ceiling a rebase re-resolves and `clock_for(hz)` the chooser (`spi_clock_for(clk_per_hz, hz)` is the same arithmetic with the clock stated); `status()` is always `spi_ok` - no DMA path, no fault of its own; `prime(mode, clock)` as on the other two |
 | samc21 | `SpiHost<n, pads, TxEngine, RxEngine>` (`samc21/spi.hpp`) | the rate is a `uint8_t baud` DIVISOR (the SERCOM's own register), so the ceiling is `ceiling_baud()` and the chooser `baud_for(hz)`; two optional DMA engine slots carrying the data phase (`dma_isr`, `status()` = `spi_ok` or `spi_dma_fault`); `prime(mode, baud)` for a caller framing the select by hand; `reference_hz()` = the stated GCLK rate |
 | stm32g0 | `SpiHost<n, pins, TxEngine, RxEngine>` (`stm32g0/spi.hpp`) | a frame size in the Request (`bits`, 4 to 16, eight by default) with `cmd_len`/`len` counted in FRAMES; the `SpiClock` enum with `ceiling_clock()` and the chooser `clock_for(hz)`; the engine slots, `status()` and `prime(mode, clock, bits)` as the SAM's; `bit_order()`/`lsb_first()` on the task; `claim_nss_pad()` for a hardware NSS; `reference_hz()` = PCLK |
 | host | none | `SpiBus` is host-tested over a fake `Bus` (`test_spi_bus`, `test_bus_master`) |
 
-Two of those differences are ONE thing spelled three ways and are
-recorded as such: the rate's unit (an enum on two strata, a divisor on
-one - an open decision, since a ceiling in hertz would serve all three)
-and the chooser's name and home (`spi_clock_for` / `baud_for` /
-`clock_for`). The verbs the AVR lacks - `status()`, `prime()` - are
-the same function where they exist and would cost nothing there.
+One of those differences is ONE thing spelled two ways and is
+recorded as such: the rate's unit - an enum on two strata, a divisor
+on one, with the ceiling and the chooser named for it (`ceiling_baud`/
+`baud_for` against `ceiling_clock`/`clock_for`) - an open decision,
+since a ceiling in hertz would serve all three.
 
 The client side is deliberately NOT one surface: `SpiClient` on each
 stratum is the application's protocol over that silicon's own client
 half (a shift register with a two-deep buffer, a SERCOM with PLOADEN, an
 SPI with a two-deep FIFO), and the three peers of the bench converge on
-one algorithm - one answer kept queued ahead of what the host has
-clocked - whose only per-silicon parameter is HOW MANY frames must be
-queued before the host's clock arrives (one, one, two). That integer is
-the one thing a portable client would need, and it is not yet
-published by the three as a constant.
+one algorithm - answers kept queued ahead of what the host has
+clocked - whose only per-silicon parameter is HOW MANY must be queued
+ahead (one on the AVR, two on the SAM for its three-SCK-cycle rule,
+two on the G0 for its FIFO). That integer is the one thing a portable
+client would need, and each `SpiClient` publishes it as
+`frames_ahead`.
 
 The three peripherals share almost nothing below the contract - a
 shift register with a two-deep buffer, a SERCOM with a pad matrix, and

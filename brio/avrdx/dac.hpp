@@ -76,7 +76,7 @@ public:
         Vref::dac0(cfg.reference, cfg.reference_always_on);
         ref_ = cfg.reference;
         if (cfg.output_pin) {
-            OutPin::disable_digital_input();  // 34.3.1: input disabled on the DAC pin
+            OutPin::input_enable(false);      // 34.3.1: input disabled on the DAC pin
         }
         regs().DATA = 0;
         regs().CTRLA = static_cast<uint8_t>(

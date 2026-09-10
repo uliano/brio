@@ -20,19 +20,20 @@ byte is an edge again.
 
 ### Realizations
 
-Common to the three: fifteen verbs spelled identically - `init(clock,
-baud)`, `write`, `write_byte`, `read_byte`, `rx_pending`, `tx_idle`,
-`can_baud`, `actual_baud`, `min_hz_for`, `rebase`, `clear_errors` and
-the four counters `frame_errors`, `parity_errors`, `rx_overruns`,
-`hw_overruns` - the two rings, and the edge contract above. What
+Common to the three: seventeen verbs spelled identically - `init(clock,
+baud)`, `set_baud(hz, baud)`, `release`, `write`, `write_byte`,
+`read_byte`, `rx_pending`, `tx_idle`, `can_baud`, `actual_baud`,
+`min_hz_for`, `rebase`, `clear_errors` and the four counters
+`frame_errors`, `parity_errors`, `rx_overruns`, `hw_overruns` - the
+two rings, and the edge contract above. What
 differs is how the pins are named, how many vectors the silicon gives
 the port, and what each family's port has that the others' has not.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
-| avrdx | `Uart<n, Route, rx_size, tx_size>` (`avrdx/usart.hpp`) | the pins are a PORTMUX `Route`; THREE vectors, so the bodies are `rxc()` (the edge) and `dre()`; no `release()` - the resource's teardown is `Usart<n>`'s |
-| samc21 | `Uart<n, UartPads, rx_size, tx_size, TxEngine, RxEngine>` (`samc21/sercom.hpp`) | the pins are SERCOM pads with their pins; ONE vector, `isr()` returns the edge; two OPTIONAL DMA engine slots (`NoDmaEngine` by default, compiling to nothing) with `dma_isr()`, `dma_faults()`, `harvest()`, `write_bulk()`/`read_bulk()`; `release()` |
-| stm32g0 | `Uart<n, UartPins, rx_size, tx_size, TxEngine, RxEngine, opts>` = `UartTask<Usart<n>, ...>` (`stm32g0/usart.hpp`) | the pins carry their AF; one vector and `isr()`; the same engine slots and bulk verbs; `UartOptions` as one trailing parameter (FIFO thresholds, single wire, ...); `set_baud()` on the task, `kernel_hz()` (the kernel-clock multiplexer), `noise_errors()` (NE exists here alone), `wakes()` (the wake from Stop); the same task over an LPUART is `LpUart` (`stm32g0/lpuart.hpp`) |
+| avrdx | `Uart<n, Route, rx_size, tx_size>` (`avrdx/usart.hpp`) | the pins are a PORTMUX `Route`; THREE vectors, so the bodies are `rxc()` (the edge) and `dre()`; `set_baud()` and `release()` as on the other two |
+| samc21 | `Uart<n, UartPads, rx_size, tx_size, TxEngine, RxEngine>` (`samc21/sercom.hpp`) | the pins are SERCOM pads with their pins; ONE vector, `isr()` returns the edge; two OPTIONAL DMA engine slots (`NoDmaEngine` by default, compiling to nothing) with `dma_isr()`, `dma_faults()`, `harvest()`, `write_bulk()`/`read_bulk()` |
+| stm32g0 | `Uart<n, UartPins, rx_size, tx_size, TxEngine, RxEngine, opts>` = `UartTask<Usart<n>, ...>` (`stm32g0/usart.hpp`) | the pins carry their AF; one vector and `isr()`; the same engine slots and bulk verbs; `UartOptions` as one trailing parameter (FIFO thresholds, single wire, ...); `kernel_hz()` (the kernel-clock multiplexer), `noise_errors()` (NE exists here alone), `wakes()` (the wake from Stop); the same task over an LPUART is `LpUart` (`stm32g0/lpuart.hpp`) |
 | host | none | `SerialPort` is host-tested over a scripted `ByteTransport` |
 
 ## SerialPort (`util/serial_port.hpp`)

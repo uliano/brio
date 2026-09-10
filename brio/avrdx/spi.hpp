@@ -912,6 +912,29 @@ public:
     static std::optional<SpiClock> ceiling_clock() { return ceiling_; }
     /// What SCK a request at this division really runs at.
     static uint32_t sck_hz(SpiClock c) { return spi_sck_hz(clk_per_hz_, clamp(c)); }
+    /// The fastest division at or below `max_sck_hz` at the peripheral
+    /// clock last seen - `spi_clock_for()` with this engine's own rate
+    /// filled in; nothing when even the slowest is too fast.
+    static std::optional<SpiClock> clock_for(uint32_t max_sck_hz) {
+        return spi_clock_for(clk_per_hz_, max_sck_hz);
+    }
+
+    /// The engine's completion status, read by the app glue for the
+    /// TransferDone payload: always spi_ok on this engine, which has no
+    /// DMA path and therefore no fault of its own to report - the verb
+    /// exists so the glue is spelled the same way on every stratum.
+    static constexpr uint8_t status() { return spi_ok; }
+
+    /// FOR CALLERS THAT FRAME THE SELECT WINDOW THEMSELVES (Request.cs
+    /// null). start() applies a request's mode before it asserts the
+    /// request's own cs, so an engine-owned select window always opens
+    /// with SCK settled at the new idle level - but a caller driving CS
+    /// by hand inverts that order, and a mode change is a CPOL FLIP ON
+    /// THE WIRE (the SCK pad moves to the new idle level while the
+    /// peripheral is off): flipped inside an open select window it is
+    /// one extra edge a selected client can count into the character.
+    /// Prime FIRST, then assert the select.
+    static void prime(SpiMode mode, SpiClock clock) { apply_mode(mode, clamp(clock)); }
 
     /// Begin a transaction (called by SpiBus from main context).
     /// Returns true when the transaction completed synchronously
@@ -1174,6 +1197,14 @@ public:
             return (port_by_letter(sl.port).IN & (1u << sl.pin)) == 0;
         }
     }
+
+    /// HOW MANY ANSWERS MUST BE QUEUED AHEAD of the frame the host is
+    /// about to clock for them to reach the wire in order - the one
+    /// integer that differs between this family's client pump and the
+    /// other strata's. ONE here: the byte written last goes out with the
+    /// next clock, so a write made in the gap after IF is in time (with
+    /// BUFWR two can be queued, but one is what the pump needs).
+    static constexpr uint8_t frames_ahead = 1;
 
     /// Load what the next clocked byte will carry out. While SS is high
     /// this is the answer prepared for the coming frame; in normal mode

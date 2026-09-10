@@ -135,7 +135,7 @@ private:
 // ---- target glue ------------------------------------------------------------
 ISR(SPI0_INT_vect) {
     if (SpiHw::isr()) {
-        brio::post<Bus>(brio::TransferDone{brio::spi_ok});
+        brio::post<Bus>(brio::TransferDone{SpiHw::status()});
     }
 }
 ISR(USART2_RXC_vect) { Serial::rxc(); }            // console is output-only here

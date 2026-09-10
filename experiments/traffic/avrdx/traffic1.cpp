@@ -156,7 +156,7 @@ struct Buttons : brio::Fsm<Buttons, Tick> {
     // what this AO owns, then start(&initial_state): arm the machine
     // and deliver its first Entry - synchronously, right here.
     static void init() {
-        Keys::input(true);                                  // inputs, pull-ups: idle high
+        Keys::input(brio::PinPull::up);                                // inputs, pull-ups: idle high
         start(&sampling);
     }
 

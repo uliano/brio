@@ -91,7 +91,7 @@
  *    refused rather than silently run on slew-limited pads;
  *  - CLK_PER must be at least four times f_SCL for the bus-error
  *    detector to work at all (29.5.6 BUSERR) and for the client's Stop
- *    interrupt (PIEN, 29.5.10). clock_ok() is the readback of that
+ *    interrupt (PIEN, 29.5.10). speed_ok() is the readback of that
  *    condition; the tasks report it, they do not enforce it (a slower
  *    main clock is legal, it only blinds those two features);
  *  - two vectors, two ISR bodies: TWIn_TWIM_vect (host: RIF/WIF) and
@@ -1022,7 +1022,9 @@ public:
     /// baud arithmetic reads it). init() does it itself; the half that
     /// joins an already-running instance uses this.
     static void note_clock(uint32_t hz) { clk_per_hz_ = hz; }
-    static bool clock_ok(I2cSpeed s) { return twi_clock_ok(clk_per_hz_, s); }
+    /// Can the peripheral clock last seen make `s` (CLK_PER >= 4 x f_SCL,
+    /// the condition the bus-error detector needs)?
+    static bool speed_ok(I2cSpeed s) { return twi_clock_ok(clk_per_hz_, s); }
     /// The speed the last set_speed()/init() programmed.
     static I2cSpeed speed() { return speed_; }
 
@@ -1343,8 +1345,10 @@ public:
     static uint32_t actual_scl_hz(uint32_t t_rise_ns = 0) { return T::actual_scl_hz(t_rise_ns); }
     static uint8_t baud() { return T::baud(); }
     static I2cSpeed speed() { return T::speed(); }
-    /// CLK_PER >= 4 x f_SCL, the condition the bus error detector needs.
-    static bool clock_ok() { return T::clock_ok(T::speed()); }
+    /// CLK_PER >= 4 x f_SCL, the condition the bus error detector needs:
+    /// for the speed in force, or for a speed asked about.
+    static bool speed_ok() { return T::speed_ok(T::speed()); }
+    static bool speed_ok(I2cSpeed s) { return T::speed_ok(s); }
 
     /// QCEN: every request becomes an address-only frame (29.3.3.5) and
     /// its data spans are ignored - the shape a quick command has.

@@ -2408,6 +2408,13 @@ public:
     /// from reading this one's leftovers).
     static bool disable() { return S::disable(); }
 
+    /// HOW MANY ANSWERS MUST BE QUEUED AHEAD of the frame the host is
+    /// about to clock for them to reach the wire in order - the one
+    /// integer that differs between this family's client pump and the
+    /// other strata's. TWO here: the FIFO has already handed the shifter
+    /// its frame by the time a write made in the gap after RXNE lands.
+    static constexpr uint8_t frames_ahead = 2;
+
     /// Load the next frame to shift out. Two of these before the first
     /// clock is the one-ahead opening; one per received frame keeps it.
     static void write(uint16_t v) { S::data(bits_, v); }

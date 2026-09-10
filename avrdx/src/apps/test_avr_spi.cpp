@@ -148,7 +148,7 @@ void quiesce() {
     Miso::clear();
     Ss::input();
     Ss::set();
-    Ss::pullup(false);
+    Ss::pull(PinPull::none);
     Ss::invert(false);
     engine_mode = false;
     engine_done = false;
@@ -649,12 +649,12 @@ void tg_demotion() {
 
     // With SSD set the pin is nobody's business.
     verdict("host init with SSD = 1", host(SpiClock::div128));
-    Ss::pullup(true);
+    Ss::pull(PinPull::up);
     Ss::invert(true);
     delay_us(clock, 20);
     const bool ssd_immune = S0::is_host() && !S0::demoted();
     Ss::invert(false);
-    Ss::pullup(false);
+    Ss::pull(PinPull::none);
     verdict("SSD = 1 ignores an SS pin seen low", ssd_immune);
     miso_level(true);
     const auto v = xfer(0x00);
@@ -932,7 +932,7 @@ void cs_release() { Ss::set(); }
 /// SPI0 as the command channel's host, and PE3 as its chip select.
 bool link_command_mode() {
     Ss::invert(false);
-    Ss::pullup(false);
+    Ss::pull(PinPull::none);
     Ss::set();
     Ss::output();
     const bool ok = S0::init({.route = SpiRoute::alt1,

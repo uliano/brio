@@ -395,6 +395,7 @@ void host_verbs() {
 void client_verbs() {
     constexpr SysClock clock;
     (void)Peer::init(clock);
+    static_assert(Peer::frames_ahead == 2);
     (void)Peer::init(clock, {.mode = SpiMode::mode1,
                              .lsb_first = true,
                              .preload = true,

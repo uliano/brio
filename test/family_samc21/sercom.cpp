@@ -67,6 +67,7 @@ static_assert(Serial::generator == 0);
 static_assert(Serial::min_hz_for(115200) == 1'843'200);
 static_assert(Serial::can_baud(48'000'000, 115200));
 static_assert(!Serial::can_baud(1'000'000, 115200));
+void serial_set_baud() { (void)Serial::set_baud(48'000'000u, 9'600u); }
 
 // ---- the register words -----------------------------------------------------
 constexpr SercomUartConfig console_cfg{

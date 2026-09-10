@@ -108,7 +108,7 @@ bool engaged() { return engaged_until != 0 && Ticker::millis() < engaged_until; 
 /// outlive that action.
 void hold_ss_up() {
     SsPin::invert(false);
-    SsPin::pullup(true);
+    SsPin::pull(PinPull::up);
 }
 
 /// DARK: normal mode, mode 0, MSb first, MISO NOT driven. Everything
@@ -425,7 +425,7 @@ spilink::Report run_ss_pulse(const spilink::Params& a) {
     const uint8_t cpu = cycles_per_us(SysClock::hz);
     Raw::release();
     if (a.aux8) delay_us_runtime(cpu, static_cast<uint32_t>(a.aux8) * 1000u);
-    SsPin::pullup(false);
+    SsPin::pull(PinPull::none);
     SsPin::clear();
     SsPin::output();
     delay_us_runtime(cpu, a.aux16 ? a.aux16 : 1000u);
@@ -492,7 +492,7 @@ spilink::Report run_host_burst(const spilink::Params& a) {
     // The chip select, by hand: SSD = 1 leaves the pin to PORT, which is
     // the same arrangement the DUT's own host uses.
     SsPin::invert(false);
-    SsPin::pullup(false);
+    SsPin::pull(PinPull::none);
     SsPin::set();
     SsPin::output();
     delay_us_runtime(cpu, 200u);

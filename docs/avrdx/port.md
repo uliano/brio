@@ -63,10 +63,10 @@ Facts that matter to code:
 
 | Entity | Verbs |
 |--------|-------|
-| `PinConfig` | `invert`, `pullup`, `input_level` (`PinLevel::schmitt/ttl`, DB only - the field exists only where the silicon has it), `sense` (`PinSense`: none, both, rising, falling, input_disable, level_low) |
-| `Pin<'A', 5>` | `output`/`input`, `set`/`clear`/`toggle`/`read`/`is_output` (VPORT, single cycle), `configure(cfg)` (the whole PINnCTRL in ONE store), the single-field RMW verbs `invert`/`pullup`/`sense`, `flag`/`clear_flag` (this pin's W1C bit), `pinctrl()`, `ref()` (runtime PinRef), `fully_async` (Px2/Px6), PwmChannel (max 1), `disable_digital_input`/`enable_digital_input` |
+| `PinConfig` | `invert`, `pull` (`PinPull`: none, up - the family has no pull-down, so the enum has no `down`), `input_level` (`PinLevel::schmitt/ttl`, DB only - the field exists only where the silicon has it), `sense` (`PinSense`: none, both, rising, falling, input_disable, level_low) |
+| `Pin<'A', 5>` | `output`/`input(pull)`, `set`/`clear`/`toggle`/`read`/`is_output` (VPORT, single cycle), `configure(cfg)` (the whole PINnCTRL in ONE store), the single-field RMW verbs `invert`/`pull`/`sense`, `input_enable(bool)` (the digital input buffer - a code of the ISC field, so it leaves an armed sense at INTDISABLE), `flag`/`clear_flag` (this pin's W1C bit), `pinctrl()`, `ref()` (runtime PinRef), `fully_async` (Px2/Px6), PwmChannel (max 1) |
 | `Port<'C'>` | the port's own registers: `in`/`dir_set`/`dir_clear`/`out_set`/`out_clear`/`out_toggle` (masks), `flags`/`clear_flags(mask)`, `take_flags` (ISR body of PORTx_PORT_vect: the fired mask, cleared), `slew_limit(bool)`/`slew_limit()`, `configure_mask(pins, cfg)` (the multi-pin engine), `regs()`/`vregs()` |
-| `PinSet<Pins...>` | up to 8 pins on ANY ports as one bit mask: `input(pullup)`, `output`, `read`, `write`, `configure(cfg)` (grouped BY PORT at compile time: one mirrored PINCONFIG store plus one PINCTRLUPD per involved port - the set behaves like a single register), `port_mask<'C'>()` |
+| `PinSet<Pins...>` | up to 8 pins on ANY ports as one bit mask: `input(pull)`, `output`, `read`, `write`, `configure(cfg)` (grouped BY PORT at compile time: one mirrored PINCONFIG store plus one PINCTRLUPD per involved port - the set behaves like a single register), `port_mask<'C'>()` |
 | `PinRef` | the runtime descriptor (3 bytes): a pin inside a request event; null = no-op |
 
 ## How to use it
@@ -76,7 +76,7 @@ A button with an interrupt (the classic):
 ```cpp
 using Button = brio::Pin<'A', 2>;                 // PA2: fully async - wakes from standby
 Button::input();
-Button::configure({.pullup = true, .sense = brio::PinSense::falling});
+Button::configure({.pull = brio::PinPull::up, .sense = brio::PinSense::falling});
 ISR(PORTA_PORT_vect) {
     const uint8_t who = brio::Port<'A'>::take_flags();
     if (who & Button::mask) post<Ui>(Pressed{});
@@ -89,7 +89,7 @@ A row of keys on two ports, configured as one register:
 using Keys = brio::PinSet<brio::Pin<'A', 2>, brio::Pin<'A', 3>,
                           brio::Pin<'C', 6>, brio::Pin<'C', 7>>;
 Keys::input();
-Keys::configure({.pullup = true, .sense = brio::PinSense::both});
+Keys::configure({.pull = brio::PinPull::up, .sense = brio::PinSense::both});
 const uint8_t raw = ~Keys::read() & Keys::mask;   // active-low
 ```
 

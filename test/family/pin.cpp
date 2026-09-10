@@ -8,7 +8,7 @@ using namespace brio;
 void pin_common() {
     using P = Pin<'D', 3>;
     P::output();
-    P::configure({.pullup = true, .sense = PinSense::falling});
+    P::configure({.pull = PinPull::up, .sense = PinSense::falling});
     P::sense(PinSense::level_low);
     (void)P::flag(); P::clear_flag();
     P::configure({.sense = PinSense::input_disable});
@@ -21,11 +21,11 @@ void pin_common() {
     (void)PA::in(); (void)PA::flags(); PA::clear_flags(0xFF);
     (void)PA::take_flags();
     PA::slew_limit(true); (void)PA::slew_limit();
-    PA::configure_mask(0x0C, {.pullup = true});
+    PA::configure_mask(0x0C, {.pull = PinPull::up});
 
     using Keys = PinSet<Pin<'A', 2>, Pin<'A', 3>, Pin<'C', 0>, Pin<'D', 5>>;
-    Keys::input(true);
-    Keys::configure({.pullup = true, .sense = PinSense::both});
+    Keys::input(PinPull::up);
+    Keys::configure({.pull = PinPull::up, .sense = PinSense::both});
     static_assert(Keys::port_mask<'A'>() == 0x0C);
     static_assert(Keys::port_mask<'C'>() == 0x01);
     static_assert(Keys::port_mask<'F'>() == 0);

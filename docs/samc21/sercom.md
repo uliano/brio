@@ -96,7 +96,9 @@ whatever drives it.
   `isr()` as the ONE handler body honouring the edge-return contract
   (true on the RX ring's empty-to-non-empty transition - the kernel
   wakeup), try-semantics `write_byte`, `read_byte`, error counters,
-  `rebase(hz)` for the day a dynamic clock exists, `release()`. Init
+  `rebase(hz)` for the day a dynamic clock exists, `set_baud(hz,
+  baud)` (a new rate under the running port, once TX is idle),
+  `release()`. Init
   order is deliberate: clocks, reset, configure,
   enable, and only THEN the pads to the SERCOM - the transmitter
   idles high before the pad leaves PORT, so no glitch start bit

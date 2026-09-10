@@ -166,7 +166,7 @@ void t5_pullup() {
     print(serial, "5 pull-up on an input reads high", crlf);
     quiesce();
     D3::input();
-    D3::configure({.pullup = true});
+    D3::configure({.pull = PinPull::up});
     delay_us(clock, 5);
     verdict("PD3 with pull-up reads 1", D3::read());
     D3::configure({});
@@ -199,7 +199,7 @@ void t7_multipin() {
     quiesce();
     using Set = PinSet<D3, C6, C7>;
     static_assert(Set::port_mask<'D'>() == 0x08 && Set::port_mask<'C'>() == 0xC0);
-    const PinConfig cfg{.pullup = true, .sense = PinSense::both};
+    const PinConfig cfg{.pull = PinPull::up, .sense = PinSense::both};
     Set::configure(cfg);
     const uint8_t want = pin_ctrl_byte(cfg);
     verdict("PD3 PINCTRL matches", D3::pinctrl() == want);

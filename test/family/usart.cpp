@@ -233,9 +233,11 @@ void usart_transport() {
         constexpr SysClock clock;
         T::init(clock, 115'200u);
         T::rebase(12'000'000u);
+        (void)T::set_baud(24'000'000u, 9'600u);
         (void)T::can_baud(24'000'000u, 460'800u);
         (void)T::min_hz_for(460'800u);
         (void)T::actual_baud(24'000'000u);
+        T::release();
         (void)T::rxc();
         T::dre();
         (void)T::write_byte('x');

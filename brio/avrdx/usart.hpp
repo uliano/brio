@@ -1026,6 +1026,38 @@ public:
         U::baud_reg(usart_baud_reg(hz, m_baud));
     }
 
+    /**
+     * Change the rate under the running port: BAUD rewritten for `baud`
+     * at the peripheral clock `hz`, once the TX side has gone idle the
+     * way rebase() waits for it. False, and nothing written, when the
+     * generator cannot express the rate. Main context only, and the
+     * caller owns the agreement with whatever is on the other end: a
+     * receiver still at the old rate reads noise.
+     */
+    static bool set_baud(uint32_t hz, uint32_t baud) {
+        if (!can_baud(hz, baud)) return false;
+        while (!m_tx.empty()) {
+        }
+        while (!U::dre_flag()) {
+        }
+        const uint32_t old_hz = static_cast<uint32_t>(U::baud_reg()) * m_baud / 4u;
+        delay_us_runtime(cycles_per_us(old_hz), 2u * (10'000'000u / m_baud) + 2u);
+        U::baud_reg(usart_baud_reg(hz, baud));
+        m_baud = baud;
+        return true;
+    }
+
+    /// Stop the transport and hand the instance back: the RXC interrupt
+    /// off, the resource's own teardown (interrupts, PORTMUX to NONE, the
+    /// pins returned to inputs), the rings left as they are - init()
+    /// drains them. The ISR bodies bound to the vectors stay bound and
+    /// simply see nothing.
+    static void release() {
+        U::enable_rxc_interrupt(false);
+        U::release();
+        m_baud = 0;
+    }
+
     /// The minimum usable rate for a baud: BAUD must be >= 64 (16 * baud
     /// per the normal-speed formula). rebase() to a slower clock than
     /// this leaves the USART unable to hit the baud - check before.

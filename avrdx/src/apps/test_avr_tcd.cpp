@@ -373,7 +373,7 @@ void ta_routes() {
         // ALT2: PF0 = WOA, PF1 = WOB. PORTF pin events live on channels
         // 4-5. PF1 gets a pull-up so an UNDRIVEN pad reads a steady high
         // (zero edges) instead of floating.
-        Pin<'F', 1>::pullup(true);
+        Pin<'F', 1>::pull(PinPull::up);
         c.route = TcdRoute::alt2;
         verdict("ALT2, WOB only: init", D::init(c));
         ChTcd::source(EvPin<Pin<'F', 1>>{});
@@ -390,7 +390,7 @@ void ta_routes() {
         delay_us(clock, 20'000);
         const uint16_t alt_both = Edges::count();
         (void)D::release();
-        Pin<'F', 1>::pullup(false);
+        Pin<'F', 1>::pull(PinPull::none);
 
         print(serial, "    ALT2 route: CMPBEN alone -> ", alt_b_only,
               " WOB edges; CMPAEN + CMPBEN -> ", alt_both, " edges (20 ms)", crlf);
@@ -1840,7 +1840,7 @@ int main() {
     // released TCD hands them back to PORT as inputs: a pull-up keeps an
     // undriven probe pin at a steady level instead of letting it toggle
     // on noise and feed the meters nonsense.
-    PinSet<WoaPin, WobPin, WocPin, WodPin>::configure({.pullup = true});
+    PinSet<WoaPin, WobPin, WocPin, WodPin>::configure({.pull = PinPull::up});
     sei();
     auto board = board_id();
     if (board.empty()) board = "?";

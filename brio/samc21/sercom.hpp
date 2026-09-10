@@ -1110,6 +1110,33 @@ public:
         (void)S::enable(true);
     }
 
+    /**
+     * Change the rate under the running port: BAUD rewritten for `baud`
+     * at the reference clock `hz`, once the TX side has gone idle the
+     * way rebase() waits for it (the same two bounded waits). False, and
+     * nothing written, when the generator cannot express the rate. Main
+     * context only; the caller owns the agreement with the other end.
+     */
+    static bool set_baud(uint32_t hz, uint32_t baud) {
+        const std::optional<uint16_t> reg = sercom_baud_reg(hz, baud);
+        if (!reg) {
+            return false;
+        }
+        constexpr uint32_t ring_drain_spins = 8'000'000u;
+        constexpr uint32_t frame_spins = 200'000u;
+        uint32_t spins = ring_drain_spins;
+        while (!m_tx.empty() && spins-- != 0u) {
+        }
+        spins = frame_spins;
+        while (!S::txc_flag() && spins-- != 0u) {
+        }
+        (void)S::enable(false);
+        S::baud_reg(*reg);
+        (void)S::enable(true);
+        m_baud = baud;
+        return true;
+    }
+
     /// The slowest core clock that can still produce `baud` (the mode's
     /// own f_baud <= f_ref/16). A rebase() below this leaves the USART
     /// unable to hit the rate - check before.

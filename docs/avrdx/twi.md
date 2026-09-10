@@ -87,7 +87,7 @@ to the direction bit. Software still issues the STOP.
 **Two conditions the chapter attaches to CLK_PER**: the bus error
 detector (29.5.6) and the client's Stop interrupt (29.5.10) both need
 the main clock to be at least four times f_SCL. The driver reports that
-condition (`clock_ok()`); it does not enforce it, because a slower clock
+condition (`speed_ok()`); it does not enforce it, because a slower clock
 is legal and only blinds those two features.
 
 ### The routes

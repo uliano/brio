@@ -209,7 +209,11 @@ item a reader would apply without checking the row.
 - **`SpiClient<n, pads>`** - the polled surface plus ISR bodies:
   preload, SSDE, address recognition (FORM = 0x2 with AMODE/ADDR),
   `drive_output()` for a dark listener on a shared harness,
-  `selected()` as a live pad read (there is no status bit for SS).
+  `selected()` as a live pad read (there is no status bit for SS), and
+  `frames_ahead` (TWO: how many answers a pump must keep queued ahead
+  of the host's clock, the three-SCK-cycle rule's own number - the one
+  integer that differs between this family's client pump and the
+  other strata's).
 
 ## How to use
 

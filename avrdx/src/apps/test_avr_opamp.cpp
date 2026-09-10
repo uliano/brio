@@ -1023,7 +1023,7 @@ void ti_events() {
     LevelPin::output();
     ChLevel::source(EvPin<LevelPin>{});
     Op0::release();
-    Op0Out::configure({.pullup = true, .sense = PinSense::input_disable});
+    Op0Out::configure({.pull = PinPull::up, .sense = PinSense::input_disable});
     delay_us(clock, 500);
     const int32_t pulled_up = static_cast<int32_t>(measure_x256<Op0Out>());
     verdict("with the op amp OFF, the pull-up alone takes PD2 to the rail",
@@ -1033,7 +1033,7 @@ void ti_events() {
             Op0::init({.positive = OpampPos::vdd_div2, .negative = OpampNeg::out,
                        .output = OpampOutput::off,
                        .mode = OpampMode::software_with_events, .settle_us = 20}));
-    Op0Out::configure({.pullup = true, .sense = PinSense::input_disable});
+    Op0Out::configure({.pull = PinPull::up, .sense = PinSense::input_disable});
     Op0::drive_on(ChLevel{});
     Op0::wait_settled();
     delay_us(clock, 500);

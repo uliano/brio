@@ -93,6 +93,8 @@ static_assert(spi_pin(0, SpiRoute::alt1, SpiSignal::ss).bonded);        // PE3
 static_assert(!spi_pin(1, SpiRoute::alt2, SpiSignal::sck).bonded);      // no PB6 here
 void use_48() {
     (void)SpiHost<0, SpiRoute::alt1>::init(SysClock{}, 2'000'000u);
+    (void)SpiHost<0, SpiRoute::alt1>::clock_for(1'000'000u);
+    SpiHost<0, SpiRoute::alt1>::prime(SpiMode::mode3, SpiClock::div16);
     (void)SpiClient<0, SpiRoute::alt1>::init();
     (void)SpiHost<1, SpiRoute::alt1>::init(SysClock{});
 }
@@ -121,6 +123,8 @@ static_assert(Host0::available);
 static_assert(Pinless::available);
 static_assert(Client1::available);
 static_assert(!SpiClient<0, SpiRoute::none>::available);
+static_assert(Host0::status() == spi_ok);       // no engine, no fault of its own
+static_assert(Client1::frames_ahead == 1);       // the client pump's one integer
 
 void use_resource() {
     (void)S0::init<SpiConfig{.route = SpiRoute::def, .clock = SpiClock::div32}>();

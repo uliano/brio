@@ -149,7 +149,10 @@ the unused top bits ignored on the way out and read back as zero.
 
 `SpiClient<n, pins>` - the other end: `init(clock, Config)`,
 `enable(first, second)` (SPE up with the first TWO answers already in
-the FIFO), `write`, `poll`, `selected()` (a live read of the NSS PAD -
+the FIFO), `frames_ahead` (TWO, the FIFO's own number: how many answers
+a pump must keep queued ahead of the host's clock - the one integer
+that differs between this family's client pump and the other
+strata's), `write`, `poll`, `selected()` (a live read of the NSS PAD -
 the peripheral publishes no such status bit), `drive_output` (the dark
 listener), the error accessors, `isr()`, `disable()`, `release()`.
 

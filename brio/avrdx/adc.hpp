@@ -331,7 +331,7 @@ public:
     /// effect at the next conversion. With init_delay != 0 see flush().
     template <typename P>
     static void select(AnalogIn<P>) {
-        P::disable_digital_input();
+        P::input_enable(false);
         regs().MUXPOS = AnalogIn<P>::code;
     }
     static void select(AdcInput in) { regs().MUXPOS = static_cast<uint8_t>(in); }
@@ -341,7 +341,7 @@ public:
     template <typename Pp, typename Pn>
     static void select(AnalogIn<Pp> p, AnalogIn<Pn>) {
         static_assert(AnalogIn<Pn>::negative_ok, "AIN16-21 (PF0-5) cannot be a negative input");
-        Pn::disable_digital_input();
+        Pn::input_enable(false);
         select(p);
         regs().MUXNEG = AnalogIn<Pn>::code;
     }

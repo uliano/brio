@@ -310,9 +310,9 @@ cites another stratum's.
 | panic, reset, watchdog | [kernel.md](kernel.md), section 10 | the record's survival (EEPROM, RWWEE journal, bank 2); the fault body as the panic path on the ARM strata; the watchdog kick under two names and three contracts |
 | the ring | [ring.md](ring.md) | the atomic width alone |
 | the clock | [clock.md](clock.md) | prescalers (AVR), no dynamic clock by position (SAM), a pack of rate tuples with a regime (G0); `delay_us` capped on the ARM strata |
-| the Uart | [serial.md](serial.md) | three ways to name pins, one or three vectors, DMA slots and bulk verbs on two strata |
-| the SPI bus | [spi-bus.md](spi-bus.md) | the rate's unit (an enum or a divisor), a frame size on the G0, `status()`/`prime()` absent on the AVR, the client three surfaces by position |
-| the I2C bus | [i2c-bus.md](i2c-bus.md) | the rate arithmetic's shape, `clock_ok`/`speed_ok` a spelling, `actual_scl_hz`/`scl_hz` and `bus_state`/`idle` NOT one |
+| the Uart | [serial.md](serial.md) | seventeen verbs in common; three ways to name pins, one or three vectors, DMA slots and bulk verbs on two strata |
+| the SPI bus | [spi-bus.md](spi-bus.md) | the rate's unit (an enum or a divisor), a frame size on the G0, the client three surfaces by position with one published integer in common |
+| the I2C bus | [i2c-bus.md](i2c-bus.md) | the rate arithmetic's shape; `actual_scl_hz`/`scl_hz` and `bus_state`/`idle` are NOT one function under two names |
 | the power model | [power.md](power.md) | each family's ladder mapping; where the tick stops and which site resyncs it |
 | flash storage | [nv-heap.md](nv-heap.md), [nv-journal.md](nv-journal.md) | the geometries; the AVR keeps its small values in the EEPROM |
 | block streams | [block-stream.md](block-stream.md) | the engine names identical on the two strata that have DMA; the circular mode serves a player and not a source |
@@ -324,16 +324,16 @@ Two contracts have no design page of their own and keep their tables
 here.
 
 **Pins.** Common to the three: `Pin<'A', 5>` and `PinRef`, `set` /
-`clear` / `toggle` / `read` / `output` / `input` / `is_output` /
-`port` / `ref` / `configure(PinConfig)`, and `duty()` (a `Pin` is a
-`PwmChannel` of one step). What differs is what a pad can be told to
-do, and how it is handed to a peripheral.
+`clear` / `toggle` / `read` / `output` / `input(PinPull)` / `pull(PinPull)`
+/ `is_output` / `port` / `ref` / `configure(PinConfig)`, and `duty()` (a
+`Pin` is a `PwmChannel` of one step). What differs is what a pad can be
+told to do, and how it is handed to a peripheral.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
-| avrdx | `Pin` in `avrdx/pin.hpp` | `pullup(bool)` - ONE direction, the family has no pull-down - where the other two spell `pull(PinPull)` (a spelling); `sense()`, `flag()`, `clear_flag()` (the pin interrupts are the PORT's here), `invert()`, `disable_digital_input()`/`enable_digital_input()` (the input buffer, in a field shared with the sense); no `function()`/`release()` - a pad is handed to a peripheral by that peripheral's PORTMUX route; `PinSet` |
-| samc21 | `Pin` in `samc21/pin.hpp` | `pull(PinPull)`, `input(PinPull)`; `function(PinFunction)` hands the pad to a peripheral function letter and `release()` takes PMUXEN off - the pin back to PORT as it was; `input_enable(bool)` (INEN, the same buffer the AVR's pair switches); `strong_drive()`; the WRCONFIG multi-pin engine (`configure_mask`); no `PinSet` |
-| stm32g0 | `Pin` in `stm32g0/pin.hpp` | `pull(PinPull)`, `input(PinPull)`; `function(PinFunction)` with the AF number, and `release()` = `analog()`, the reset state - THE SAME NAME AS THE SAM'S WITH A DIFFERENT LANDING; `output(level)` before the mode (the port-clock rule); `analog()` is a MODE, not the input buffer alone; `read_out()`; speed and open drain in `PinConfig`; `PinSet` |
+| avrdx | `Pin` in `avrdx/pin.hpp` | `pull(PinPull)` and `input(PinPull)` as on the other two, with a `PinPull` that has no `down` - the family has no pull-down, and the missing enumerator is the refusal; `sense()`, `flag()`, `clear_flag()` (the pin interrupts are the PORT's here), `invert()`, `input_enable(bool)` (the input buffer, in a field shared with the sense: it leaves an armed sense at INTDISABLE); no `function()`/`release()` - a pad is handed to a peripheral by that peripheral's PORTMUX route; `PinSet` |
+| samc21 | `Pin` in `samc21/pin.hpp` | `function(PinFunction)` hands the pad to a peripheral function letter and `release()` takes PMUXEN off - the pin back to PORT as it was; `input_enable(bool)` (INEN, the same buffer with no sense beside it); `strong_drive()`; the WRCONFIG multi-pin engine (`configure_mask`); no `PinSet` |
+| stm32g0 | `Pin` in `stm32g0/pin.hpp` | `function(PinFunction)` with the AF number, and `release()` = `analog()`, the reset state - THE SAME NAME AS THE SAM'S WITH A DIFFERENT LANDING; `output(level)` before the mode (the port-clock rule); `analog()` is a MODE, not the input buffer alone; `read_out()`; speed and open drain in `PinConfig`; `PinSet` |
 | host | none | - |
 
 **PWM channels.** Common to the three: the `PwmChannel` concept

@@ -625,7 +625,7 @@ void tb_speeds() {
           " Hz (this desk's measured rise)", crlf);
     verdict("actual_scl_hz never claims more than the nominal rate",
             Host::actual_scl_hz(0) <= 100'000u);
-    verdict("CLK_PER is at least four times SCL", Host::clock_ok());
+    verdict("CLK_PER is at least four times SCL", Host::speed_ok());
     quiesce();
 }
 

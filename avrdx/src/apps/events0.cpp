@@ -75,8 +75,7 @@ struct Cycler : brio::Fsm<Cycler, Next> {
     static inline brio::TimeEvent<P, Cycler, Next> phase{Next{}};
 
     static void init() {
-        Button0::input();
-        Button0::pullup(true);
+        Button0::input(brio::PinPull::up);
         // The probe user listens to channel 1 for the whole run; only
         // the channel's GENERATOR changes with the state.
         brio::EvOut<ProbePin>::listen(ProbeChannel{});

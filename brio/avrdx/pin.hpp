@@ -13,7 +13,7 @@
 //                  mask operations;
 //  Pin<'A', 5>     the per-pin face: direction/value on VPORT (SBI/
 //                  CBI), configure(PinConfig) as ONE PINnCTRL store
-//                  (invert, pullup, input level, sense), the single-
+//                  (invert, pull, input level, sense), the single-
 //                  field RMW verbs, flag()/clear_flag(); a PwmChannel
 //                  (max 1) and a PinRef factory;
 //  PinSet<...>     up to 8 pins on any ports as one bit mask; its
@@ -23,7 +23,7 @@
 //   using Led = brio::Pin<'A', 5>;   // PA5
 //   Led::output();                 // PORTA.DIRSET = PIN5_bm
 //   Led::toggle();                 // PORTA.OUTTGL = PIN5_bm
-//   Led::configure({.pullup = true, .sense = brio::PinSense::falling});
+//   Led::configure({.pull = brio::PinPull::up, .sense = brio::PinSense::falling});
 //   ISR(PORTA_PORT_vect) { const uint8_t who = brio::Port<'A'>::take_flags(); ... }
 
 namespace brio {
@@ -132,9 +132,16 @@ enum class PinLevel : uint8_t { schmitt = 0, ttl = PORT_INLVL_bm };
 /// INVEN toggled in the same cycle as an ISC change does not raise
 /// the inversion edge's interrupt - for configuration that is exactly
 /// the desired quietness (and single fields keep their RMW verbs).
+/// The internal pull: ONE direction on this family (PORT has PULLUPEN
+/// and nothing else), so the enum has no `down` - a request for one is
+/// a name that does not exist rather than a bit that does nothing. The
+/// same vocabulary the other strata spell, less the direction this
+/// silicon has not got.
+enum class PinPull : uint8_t { none, up };
+
 struct PinConfig {
     bool invert = false;
-    bool pullup = false;      ///< only effective while the pin is an input
+    PinPull pull = PinPull::none;   ///< only effective while the pin is an input
 #ifdef PORT_INLVL_bm
     PinLevel input_level = PinLevel::schmitt;
 #endif
@@ -144,7 +151,7 @@ struct PinConfig {
 constexpr uint8_t pin_ctrl_byte(const PinConfig& c) {
     return static_cast<uint8_t>(
         (c.invert ? PORT_INVEN_bm : 0) |
-        (c.pullup ? PORT_PULLUPEN_bm : 0) |
+        (c.pull == PinPull::up ? PORT_PULLUPEN_bm : 0) |
 #ifdef PORT_INLVL_bm
         static_cast<uint8_t>(c.input_level) |
 #endif
@@ -275,13 +282,18 @@ struct Pin {
     static void set()    { vport().OUT |= mask; }
     static void clear()  { vport().OUT &= ~mask; }
     static void output() { port().DIRSET = mask; }
-    static void input()  { port().DIRCLR = mask; }
+    /// Input, with the pull it is asked for - `none` clears one that was
+    /// there, as the same verb does on every stratum.
+    static void input(PinPull p = PinPull::none) {
+        port().DIRCLR = mask;
+        pull(p);
+    }
     static bool read()   { return vport().IN & mask; }
     /// This pin's DIR bit: driven by PORT or by a peripheral that took
     /// the position (a route's teardown is checked with it).
     static bool is_output() { return vport().DIR & mask; }
 
-    /// The whole PINnCTRL in ONE store (invert + pullup + input level
+    /// The whole PINnCTRL in ONE store (invert + pull + input level
     /// + sense): the way to (re)configure - no intermediate states,
     /// no INVEN/ISC same-cycle surprises. The single-field verbs
     /// below RMW the same register: main-vs-ISR discipline is the
@@ -308,20 +320,23 @@ struct Pin {
         else pinctrl() &= ~PORT_INVEN_bm;
     }
 
-    // Internal pull-up (only effective when pin is input)
-    static void pullup(bool enable) {
-        if (enable) pinctrl() |= PORT_PULLUPEN_bm;
+    /// The internal pull (PULLUPEN; only effective while the pin is an
+    /// input). `PinPull` has no `down` here - see the enum.
+    static void pull(PinPull p) {
+        if (p == PinPull::up) pinctrl() |= PORT_PULLUPEN_bm;
         else pinctrl() &= ~PORT_PULLUPEN_bm;
     }
 
-    // Disable digital input buffer (saves power for analog pins)
-    static void disable_digital_input() {
-        pinctrl() = (pinctrl() & ~PORT_ISC_gm) | PORT_ISC_INPUT_DISABLE_gc;
-    }
-
-    // Enable digital input buffer (default state)
-    static void enable_digital_input() {
-        pinctrl() = (pinctrl() & ~PORT_ISC_gm) | PORT_ISC_INTDISABLE_gc;
+    /// The digital input buffer: off saves power on a pad used as analog
+    /// (and freezes IN at its last value), on is the reset state. ON
+    /// THIS FAMILY the buffer's switch is a code of the ISC field, the
+    /// same field the interrupt sense lives in: `input_enable(true)`
+    /// leaves the field at INTDISABLE, so a sense armed with `sense()`
+    /// is gone afterwards - re-arm it, or configure both in one store
+    /// with `configure()`.
+    static void input_enable(bool on) {
+        pinctrl() = static_cast<uint8_t>((pinctrl() & ~PORT_ISC_gm) |
+                                         (on ? PORT_ISC_INTDISABLE_gc : PORT_ISC_INPUT_DISABLE_gc));
     }
 };
 
@@ -335,7 +350,7 @@ static_assert(PwmChannel<Pin<'A', 0>>);
  * writing the port by hand - and the pins need not share a port.
  *
  *   using Keys = brio::PinSet<brio::Pin<'A', 2>, brio::Pin<'A', 3>>;
- *   Keys::input(true);                 // inputs with pull-ups
+ *   Keys::input(PinPull::up);          // inputs with pull-ups
  *   const uint8_t raw = ~Keys::read() & Keys::mask;   // active-low
  */
 template <typename... Pins>
@@ -346,9 +361,8 @@ struct PinSet {
     static constexpr uint8_t count = sizeof...(Pins);
     static constexpr uint8_t mask = static_cast<uint8_t>((1u << count) - 1u);
 
-    static void input(bool pullup = false) {
-        (Pins::input(), ...);
-        (Pins::pullup(pullup), ...);
+    static void input(PinPull p = PinPull::none) {
+        (Pins::input(p), ...);
     }
     static void output() { (Pins::output(), ...); }
 

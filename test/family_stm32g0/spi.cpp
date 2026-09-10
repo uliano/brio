@@ -124,6 +124,7 @@ static_assert(spi_pins_valid(SpiPins{.sck = {'B', 3}, .miso = {}, .mosi = {'B', 
 
 using Host = SpiHost<1, host_pins>;
 using Peer = SpiClient<2, client_pins>;
+static_assert(Peer::frames_ahead == 2);
 using Tx = DmaTxEngine<1, 1>;
 using Rx = DmaRxEngine<1, 2>;
 using EngineHost = SpiHost<1, host_pins, Tx, Rx>;
