@@ -335,7 +335,7 @@ brio prose [paths...]           # the prose net: no dates/process words/Doxygen 
                                 # "review" lines are claims of absence to re-read, not errors
 brio gate [--against REF]       # THE BYTE-IDENTITY GATE: reference and working tree each built
                                 # with mtimes pinned and build dirs wiped, images compared per
-                                # preset, movers named (the three release presets, ~30 s)
+                                # preset, movers named (the four release presets, ~40 s)
 brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--strings: ignoring
                                 # what string literals say) - the gate for a comments-only claim
 (cd avrdx && cmake --build --preset avr128db48-release --target <app>)         # AVR release build (-Os)

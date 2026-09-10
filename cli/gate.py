@@ -7,7 +7,7 @@ carry is the newest source mtime) and the build directories wiped
 (ninja relinks stale objects otherwise), and the images are compared
 by md5 - per preset, identical count and movers by name.
 
-    brio gate                          HEAD vs the working tree, the three release presets
+    brio gate                          HEAD vs the working tree, the four release presets
     brio gate --against <ref>          another reference commit
     brio gate --preset avr128db48-release --preset samc21j-release
     brio gate --keep                   leave the two trees in place for a look
@@ -35,11 +35,11 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PINNED = 1767225600  # 2026-01-01 00:00:00 UTC, any fixed instant will do
-DEFAULT_PRESETS = ("avr128db48-release", "samc21j-release", "stm32g0b1re-release")
+DEFAULT_PRESETS = ("avr128db48-release", "samc21j-release", "stm32g0b1re-release", "ch32v006k8-release")
 
 
 def project_of(preset):
-    for prefix, project in (("avr", "avrdx"), ("samc21", "samc21"), ("stm32g0", "stm32g0")):
+    for prefix, project in (("avr", "avrdx"), ("samc21", "samc21"), ("stm32g0", "stm32g0"), ("ch32v0", "ch32v00x")):
         if preset.startswith(prefix):
             return project
     raise SystemExit("brio gate: no project for preset %r" % preset)
@@ -195,7 +195,7 @@ def main(argv):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--against", default="HEAD", metavar="REF", help="the reference commit (default HEAD)")
     ap.add_argument("--preset", action="append", metavar="PRESET",
-                    help="a preset to build and compare (repeatable; default: the three release presets)")
+                    help="a preset to build and compare (repeatable; default: the four release presets)")
     ap.add_argument("--keep", action="store_true", help="keep the two built trees")
     ap.add_argument("--tokens", action="store_true", help="token-identity of FILES instead of images")
     ap.add_argument("--strings", action="store_true", help="with --tokens: blank string literal contents")
