@@ -34,6 +34,20 @@ The only concurrency in the system is **ISR versus main loop**, and
 ISRs are allowed to do exactly one kernel thing: `post()` an event
 (a few bytes copied inside a brief critical section).
 
+That is the whole concurrency model, and its other half is stated as
+plainly: **an ISR body runs to completion too - no interrupt nests
+over another.** There are two contexts, one boundary between them,
+and one primitive that guards it. Every service that an ISR touches
+is built for exactly that boundary and no other: `EventQueue` masks
+interrupts around its copies, `MeterLatch` and `Trace` around their
+one index, `Ring` is single-producer/single-consumer because one side
+is an ISR and the other the loop. An interrupt that could preempt an
+interrupt would be a third kind of context, and every driver whose
+two vectors share a state machine would become a design question -
+for a latency that brio buys with short bodies and DMA instead, means
+the smallest core has. Nothing that needed nesting would run on the
+AVR, so nothing in brio may need it.
+
 This is the "QV" flavor of active objects (cooperative, one stack,
 priority by scan order) described in Samek's book, written from
 scratch (clean room: concepts only, never the QP source).
@@ -540,6 +554,19 @@ target's include: the app names its platform once):
 - `panic_record()`: a reference to a `PanicRecord` in storage that
   survives reset without being zeroed by startup code.
 
+And one promise that has no member because it is a fact about the
+whole machine: **an ISR body is not interrupted by another ISR body**
+(section 1). The platform is where it is kept, and each keeps it its
+own way - the AVR by architecture (the I flag falls on entry and no
+handler restores it early), the two Cortex-M0+ families by leaving
+every NVIC line at the same priority (equal priorities never preempt
+one another; `Nvic::priority()` in `armv6m/nvic.hpp` is the one door,
+and no driver opens it), the CH32V00x by leaving `INTSYSCR.INESTEN`
+at its reset value in the crt. A driver whose two vectors share one
+state machine (a UART with its DMA channels) counts on this promise,
+and a target that broke it would have to give such drivers guards of
+their own.
+
 One member is OPTIONAL and outside the concept, for a platform whose
 timebase keeps counting while the core sleeps (a low-power timer
 rather than a tick interrupt): `idle_until(std::optional<uint32_t>
@@ -560,8 +587,10 @@ concept has to name it and `panic.hpp` (which owns the semantics)
 sits above the concept in the include graph.
 
 Every target stratum ships its implementation as `<stratum>/platform.hpp`
-(`AvrPlatform`, `SamPlatform`, `Stm32g0Platform<TB>` - the last one
-templated on its timebase, see each target's `platform.md`);
+(`AvrPlatform`, `SamPlatform`, `Stm32g0Platform<TB>`,
+`Ch32v00xPlatform<TB>` - the last two templated on their timebase, see
+each target's `platform.md`, or the header itself where the target is
+in bring-up);
 `HostPlatform` (`host/platform.hpp`) gives a depth-counting
 critical section, a test-controlled virtual clock and recording
 idle/break - time becomes deterministic arithmetic in tests
@@ -571,7 +600,7 @@ ordering, drift-free re-arm, scan priority, MPSC stress.
 
 ### Realizations: the platform
 
-Common to all four: the concept above, member for member - the
+Common to all five: the concept above, member for member - the
 critical section, `idle()`, `now()`, `ticks_per_second`,
 `atomic_width`, `panic_record()`, `break_here()`. What differs is what
 each member costs or does on its core.
@@ -581,6 +610,7 @@ each member costs or does on its core.
 | avrdx | `AvrPlatform` (`avrdx/platform.hpp`) | `atomic_width` 1 (a 16-bit `Ring` index takes the guarded path); `idle()` sleeps in IDLE unless the power manager has armed a deeper mode, which it then honours; `break_here()` is BREAK, a NOP with no OCD |
 | samc21 | `SamPlatform` (`samc21/platform.hpp`) | `atomic_width` 4; `idle()` takes whatever PM.SLEEPCFG holds (SCR.SLEEPDEEP is never written) with the SysTick interrupt held off across a standby WFI - erratum 1.8.13's workaround; `break_here()` is BKPT and escalates with no debugger (section 10) |
 | stm32g0 | `Stm32g0Platform<TB>` (`stm32g0/platform.hpp`) | templated on its timebase; `idle()` is WFI = Sleep, the sites arm the deeper Stops; `idle_until()` exists exactly when `TB` satisfies `Tickless` (the LPTIM timebase); `atomic_width` 4; BKPT as the SAM's |
+| ch32v00x | `Ch32v00xPlatform<TB>` (`ch32v00x/platform.hpp`) | templated on its timebase like the G0's; `atomic_width` 4; the critical section is a `csrrci` on mstatus.MIE; `idle()` is NOT a WFI but a WFE (PFIC_SCTLR.WFITOWFE + SEVONPEND), because this core's WFI wakes only for an interrupt it can take and would sleep past a pending one with MIE clear - the latched event closes the lost-wakeup window instead of instruction order; `break_here()` is `ebreak`, escalating to the fault vector with no debugger ([../ch32v00x/README.md](../ch32v00x/README.md)) |
 | host | `HostPlatform` (`host/platform.hpp`) | a depth-counting critical section, a virtual clock, recording `idle()` and `break_here()`; `atomic_width` 4 - `Ring`'s guarded path is covered by a second host platform stating 1 in its own test |
 
 **C++ note - `if constexpr`.** `if constexpr (cond)` (C++17) with a

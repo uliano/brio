@@ -150,7 +150,10 @@ disturb:
 - **kernel ideas** - fairly stable: the AO contract (`Event`, `queue`,
   `init`, `dispatch`), value events per-AO variant, the two loans
   (`Lease::dispatch` / `Lease::reply`), post/publish/reply, priority =
-  pack order, timers post events, panic breadcrumb, Platform concept;
+  pack order, timers post events, panic breadcrumb, Platform concept,
+  TWO CONTEXTS AND ONE BOUNDARY (ISR over main, and an ISR body runs to
+  completion too - no interrupt nests over another, on any target;
+  design/kernel.md section 1 and the platform promise in section 11);
 - **util/ services and target drivers** - important, here to stay,
   but expected to change (possibly radically) as targets are added;
 - **apps** - incidental test tools; they will not survive in their
