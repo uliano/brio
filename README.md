@@ -168,7 +168,13 @@ through SPI), the power model with its sleep sites, the flash storage
 classes, and the analog and metering services. Each target's own
 chapters are covered by the reference suites its documentation names.
 
-brio is under continuous, deliberately radical revision: nothing below
-the kernel contract is considered done (see the governing rule in
-[overview.md](docs/design/overview.md)). Clean-room with respect to QP:
-the concepts come from Samek's book, never the QP source.
+brio is still revised freely: nothing below the kernel contract is
+promised stable, and where a limitation can be removed by rewriting
+what sits below, the rewrite wins (the governing rule in
+[overview.md](docs/design/overview.md)). What has settled is measured
+rather than declared: the kernel and the services above it reached each
+new family unchanged, and the contracts that survived three
+realizations - the AO contract, the bus vocabularies, the power model,
+the storage classes, the analog and metering services, the clock model -
+are the ones a program can lean on. Clean-room with respect to QP: the
+concepts come from Samek's book, never the QP source.
