@@ -1,17 +1,5 @@
 # SPI - the serial peripheral interface (AVR DA/DB)
 
-> **PROVISIONAL.** The chapter's register description is covered in full
-> and both bench halves pass: the single-board one (routes and teardown,
-> all seven bit rates measured on SCK, the data path, the transfer
-> modes' idle levels, the write collision, buffer mode's four flags, the
-> host demotion, both ISR bodies, a clock rebase under an SCK ceiling,
-> the transfer engine) and the two-board one against a real client
-> (every mode, bit order and buffering regime, the client's SCK ceiling,
-> deliberate mismatches, SS mid-byte, client-side loss, a real multi-host
-> demotion, the USART's Host SPI mode). What is left is a client-side AO,
-> sleep, the routes this desk cannot reach and the electricals as timing.
-> The list is in "Not covered yet".
-
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (SPI
 chapter 28, PORTMUX chapter 17, electricals 39.15), errata DS80000915F
 (2.11.1 and clarifications 3.5.1, 3.5.2, 3.7.3) and, for the DA parts,
@@ -366,10 +354,9 @@ client selects itself with INVEN on its own pulled-up SS pin.
   the resource's ISR bodies, and the AO that would sit on it (the mirror
   of `BusMaster` for a client) is not written - it will be born with its
   first user;
-- no wake-from-idle path: the chapter lists it as a feature, this driver
-  has no sleep story and neither has the rest of `avrdx/` yet;
 - the engine's SCK ceiling clamps a request DOWN silently; it does not
-  report that it did;
+  report that it did - a stated caveat, since a slower transfer is
+  still a correct one;
 - `recover()` and the timed `SpiBus` over it are host-tested and
   compile-proven on every package, but no wedge has been staged on AVR
   silicon (a demotion mid-transfer is the staging that would do it -
@@ -378,6 +365,9 @@ client selects itself with INVEN on its own pulled-up SS pin.
 
 **Implemented but not bench-verified:**
 
+- an SPI interrupt as the wake from Idle (28.3.5's feature): the sleep
+  story is [platform.md](platform.md)'s and no letter of either suite
+  sleeps with a transfer pending;
 - MULTI-HOST arbitration as a protocol: the demotion mechanism is
   measured on the wire (above), but two hosts actually contending for
   one bus - and the driver's part in resolving it - is not written and

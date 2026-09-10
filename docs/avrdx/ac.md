@@ -1,19 +1,14 @@
 # AC - the analog comparators (AVR DA/DB)
 
-> **PROVISIONAL.** The register option space is fully exposed with
-> the port-level input guards in place (the PORTE positives refused
-> where the package lacks them), and pin-vs-pin, all three
-> instances, INVERT, both OUT pins and the window senses are
-> bench-verified; what remains is pin-level bonding and the analog
-> timing measurements - the gaps are in "Not covered yet". Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (AC
-> chapter 32, electricals 39.17, PORTMUX 17.3.10, EVSYS 16 generators
-> 0x20-0x22, I/O multiplexing chapter 3), errata DS80000915F (no AC
-> silicon erratum; the data sheet clarification 3.7.4 adds
-> tDACREF). Complements: TB3211 "Getting Started with AC" (see
-> [vendor/README.md](vendor/README.md)). Driver: `avrdx/ac.hpp`
-> (`Ac<n>`, `Threshold`, `Window`); the reference is `Vref::ac` in
-> `avrdx/vref.hpp` ([vref.md](vref.md)); the OUT event in
-> `avrdx/evsys.hpp`. Reference test: `test_avr_timer` (test m).
+Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (AC
+chapter 32, electricals 39.17, PORTMUX 17.3.10, EVSYS 16 generators
+0x20-0x22, I/O multiplexing chapter 3), errata DS80000915F (no AC
+silicon erratum; the data sheet clarification 3.7.4 adds tDACREF).
+Complements: TB3211 "Getting Started with AC" (see
+[vendor/README.md](vendor/README.md)). Driver: `avrdx/ac.hpp` (`Ac<n>`,
+`Threshold`, `Window`); the reference is `Vref::ac` in `avrdx/vref.hpp`
+([vref.md](vref.md)); the OUT event in `avrdx/evsys.hpp`. Reference
+test: `test_avr_timer` (test m).
 
 ## What the silicon does
 

@@ -1,9 +1,5 @@
 # NvJournal - small values kept in flash
 
-> **PROVISIONAL.** The journal, its entry format and its verbs are
-> implemented and verified on the host and on the bench; what is missing
-> is listed in "Not covered yet" at the end.
-
 The target-independent design of the small-value store:
 [`util/nv_journal.hpp`](../../brio/util/nv_journal.hpp) (the journal and
 the `JournalPanic` reporter), over the same `FlashMedia` contract
@@ -163,7 +159,7 @@ question is OPEN now that the STM32G0 runs the journal too, and it
 stays a question until a real cross-target application asks it; until
 then two spellings, each honest about its silicon, is the smaller lie.
 
-## What a second target inherits
+## What a new target inherits
 
 Nothing here is target-specific, so a new part gets the journal by
 writing its own `FlashMedia` and nothing else - a claim that became a

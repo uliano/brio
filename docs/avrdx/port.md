@@ -1,12 +1,5 @@
 # PORT - the I/O pins (AVR DA/DB)
 
-> **PROVISIONAL.** The pin and port surface is covered in full and
-> bench-verified (senses, flags, the multi-pin engine, the one-store
-> configuration); what remains is what this bench cannot measure -
-> the INLVL thresholds, the slew rate's effect, the fully-async wake
-> - and the pin-level bonding deferral. The gaps are in "Not covered
-> yet".
-
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
 (PORT chapter 18, I/O multiplexing chapter 3), errata DS80000915F
 (2.9.1 PD0 floating input on 28/32-pin; 2.2.4 VPORT stores after a
@@ -132,5 +125,6 @@ Implemented but not bench-verified:
 - The INLVL thresholds (needs analog levels) and the slew rate's
   electrical effect (needs a scope) - both are configuration
   read-back only today.
-- The fully-async wake of Px2/Px6 from standby.
-- The PA2..PA5 buttons as a human-in-the-loop extra.
+- The fully-async wake of Px2/Px6 from STANDBY: it is measured from
+  power-down, the deeper mode ([platform.md](platform.md)), and not
+  separately witnessed from standby.

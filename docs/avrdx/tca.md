@@ -1,18 +1,12 @@
 # TCA - the 16-bit timer/counter type A (AVR DA/DB)
 
-> **PROVISIONAL.** Normal mode, the PORTMUX routes (the device
-> header's exact set, per package), CTRLC and the split-mode
-> flag/interrupt surface are covered and bench-verified, and the
-> dual-slope modes have their task (TcaPwmCentered); the split
-> halves' counters as an API are not - the gaps are in "Not covered
-> yet". Documents of
-> record: AVR128DB28/32/48/64 data sheet DS40002247B (TCA chapter
-> 23, PORTMUX 17.3.7, EVSYS 16 generators 0x80-0x8E / users 0x1A-0x1D),
-> errata DS80000915F (2.12.1). Complements: TB3217 "Getting Started
-> with TCA", AN2434 (quadrature decoding with CCL + TCA + TCB) - see
-> [vendor/README.md](vendor/README.md). Driver: `avrdx/tca.hpp` (the
-> `Tca<n>` resource and the tasks), the TCA event vocabulary in
-> `avrdx/evsys.hpp`. Reference test: `test_avr_timer`.
+Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCA
+chapter 23, PORTMUX 17.3.7, EVSYS 16 generators 0x80-0x8E / users
+0x1A-0x1D), errata DS80000915F (2.12.1). Complements: TB3217 "Getting
+Started with TCA", AN2434 (quadrature decoding with CCL + TCA + TCB) -
+see [vendor/README.md](vendor/README.md). Driver: `avrdx/tca.hpp` (the
+`Tca<n>` resource and the tasks), the TCA event vocabulary in
+`avrdx/evsys.hpp`. Reference test: `test_avr_timer`.
 
 ## What the silicon does
 
@@ -242,8 +236,9 @@ Implemented but not bench-verified:
 - Event input B restart actions; count_anyedge/count_while_high on
   input A; FRQ phase-offset outputs on CMP1/CMP2; ALUPD multi-register
   updates; the UPDATE command.
-- TCA1 on PORTC (WO0..2) - not testable on this bench; the PORTG and
-  TCA1 PORTE routes (compile-verified on the 64-pin headers, no such
-  part on the bench).
+- TCA1's PORTC route (WO0..2 on PC4..PC6): compile-verified and never
+  driven - the suite's own WO read-back would measure it on those pads;
+  the PORTG and TCA1 PORTE routes (compile-verified on the 64-pin
+  headers, no such part on the bench).
 - Errata 2.12.1 is documented, not worked around (no down-counting
   FRQ user; B0 silicon is not affected).

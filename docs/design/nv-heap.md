@@ -1,9 +1,5 @@
 # NvHeap - blocks of flash that outlive the program
 
-> **PROVISIONAL.** The allocator, its map format and its verbs are
-> implemented and verified on the host and on the bench; what is missing
-> is listed in "Not covered yet" at the end.
-
 The target-independent design of the flash block allocator:
 [`util/nv_heap.hpp`](../../brio/util/nv_heap.hpp) (the allocator
 and the `FlashMedia` contract), with

@@ -1,18 +1,13 @@
 # CCL - the configurable custom logic (AVR DA/DB)
 
-> **PROVISIONAL.** The register option space is fully exposed with
-> the package and legality guards in place (LUT counts and pin
-> existence from the device header, LUT3-ALT refused), and the
-> sequencers, LINK, peripheral inputs and filter delays are
-> bench-verified; the typed per-input instance legality is not - the
-> gaps are in "Not covered yet". Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (CCL
-> chapter 31, PORTMUX 17.3.2, EVSYS 16 generators 0x10-0x15 / users
-> 0x00-0x0B, I/O multiplexing chapter 3), errata DS80000915F (2.4.1,
-> 2.4.2). Complements: TB3218 "Getting Started with CCL", AN2434, the
-> Microchip example `avr128db48-blink-led-ccl` (see
-> [vendor/README.md](vendor/README.md)). Driver: `avrdx/ccl.hpp` (`Ccl`,
-> `Lut<n>`, `ToggleFlipFlop<pair>`), the LUT event vocabulary in
-> `avrdx/evsys.hpp`. Reference test: `test_avr_timer` (test c).
+Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (CCL
+chapter 31, PORTMUX 17.3.2, EVSYS 16 generators 0x10-0x15 / users
+0x00-0x0B, I/O multiplexing chapter 3), errata DS80000915F (2.4.1,
+2.4.2). Complements: TB3218 "Getting Started with CCL", AN2434, the
+Microchip example `avr128db48-blink-led-ccl` (see
+[vendor/README.md](vendor/README.md)). Driver: `avrdx/ccl.hpp` (`Ccl`,
+`Lut<n>`, `ToggleFlipFlop<pair>`), the LUT event vocabulary in
+`avrdx/evsys.hpp`. Reference test: `test_avr_timer` (test c).
 
 ## What the silicon does
 
@@ -195,7 +190,7 @@ source ENDED each sleep is read off the counts taken inside the sleep.
 Driver gaps:
 
 - Typed per-input legality of the peripheral instances (today: the
-  enum + the table above).
+  enum + the table above); born with its first user.
 
 Implemented but not bench-verified:
 

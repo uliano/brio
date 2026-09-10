@@ -1,14 +1,5 @@
 # Platform - what the kernel stands on (AVR DA/DB)
 
-> **PROVISIONAL.** The four blocks this page covers - SLPCTRL, its
-> voltage regulator, RSTCTRL and the WDT - are described in full and
-> every claim below is measured, wake-up latencies included. What is
-> missing is not mechanism but POLICY and the measurements this desk
-> cannot make: the power-manager active object that would decide when
-> an application may stop its clocks, the BOD's voltage-level monitor
-> and MVIO as wake-up sources, and the sleep CURRENT, which needs a
-> bench supply and not a stopwatch. The list is in "Not covered yet".
-
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B -
 SLPCTRL chapter 13, RSTCTRL chapter 14, WDT chapter 22, the CPU's
 Configuration Change Protection in 7.4.6 - plus errata DS80000915F
@@ -515,8 +506,8 @@ tick being 30.18 us.
 A sleeping chip cannot time its own return: the only clock power-down
 leaves running is the PIT's, and the counter that would measure the
 restart is the one the mode stops. So the ruler is off-chip.
-`test_avr_sleep`'s two-board set `y` drives board B over a one-wire
-link: B zeroes a 32-bit CLK_PER stopwatch and raises a stimulus pin in
+`test_avr_sleep`'s two-board set `y` drives the peer board over a
+one-wire link: the peer zeroes a 32-bit CLK_PER stopwatch and raises a stimulus pin in
 the same instruction pair, this board's PORT ISR raises an echo pin as
 its first statement, and that edge CAPTURES the stopwatch through B's
 event system. One tick is 41.7 ns (B's OSCHF at 24 MHz nominal, a
@@ -576,7 +567,7 @@ shots.
   every clock in the device stopped. Eight shots per configuration,
   three configurations, no misses.
 - **A TWI address match wakes from both deep modes, and the wire pays.**
-  This board as a client at 0x42 on the office bus, board B writing
+  This board as a client at 0x42 on the office bus, the peer writing
   three bytes at 100 kHz: the tenure lasts 418.7 us with this board
   awake, **418.7 us out of standby** with the main clock kept alive
   (the 1.8 us wake is invisible under a 10 us SCL bit) and **2197 us
@@ -594,7 +585,7 @@ shots.
 
 ### The power manager on this target
 
-Established by `test_avr_power` on board B at 5 V with nothing wired.
+Established by `test_avr_power` at 5 V with nothing wired.
 It is the only suite here that runs the KERNEL: the object under test
 is an active object, so the rounds go through real queues and real
 dispatch, and only the loop is the suite's.

@@ -1,24 +1,5 @@
 # TWI - the two-wire interface (AVR DA/DB)
 
-> **PROVISIONAL.** The chapter's register description is covered in full
-> and both bench halves pass. Single board: the route table and its
-> refusals, the three bus speeds measured against the chapter's own baud
-> equations, a host talking to a client of the same instance on the same
-> pins (combined) and on the route's second pin pair (dual), the whole
-> address-match space, the host cases M1..M3 and the client cases
-> S1..S3, both Smart modes, Quick Command counted in SCL edges, the bus
-> state machine driven by a bit-bang injector, both ISR bodies and a
-> clock rebase under traffic. Two boards: clock stretching by a foreign
-> client, injected address and data NACKs, multi-host arbitration with
-> ARBLOST positively observed on both sides, the collision case S4, bus
-> recovery against a really stuck SDA, a General Call answered by two
-> chips, the three speeds against a real device, and a client that wakes
-> its chip on the address match. What is left is 10-bit addressing beyond
-> the recognition note, the debug-run path, SMBus input levels as an
-> electrical fact, the timings of 39.16, and multi-host as a driver
-> POLICY - arbitration is measured, a policy layer is not designed. The
-> list is in "Not covered yet".
-
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TWI
 chapter 29, PORTMUX chapter 17, electricals 39.16), errata DS80000915F
 (2.15.1, 2.15.2) and, for the DA parts, DS80000882C (2.14.1, 2.14.2,
@@ -541,7 +522,7 @@ second chip** is the same 10 SCL rising edges as against the instance's
 own client, with `i2c_ok`; to an address nobody holds it is
 `i2c_nack_addr`.
 
-**Board B costs the bus nothing electrically, and everything in
+**The peer costs the bus nothing electrically, and everything in
 latency.** With the peer's client enabled on the same node the minimum
 SCL period is 244 / 82 / 34 ticks at Sm / Fm / Fm+ - the same numbers
 the bus measures with the DUT alone, so the extra tap adds no rise time
@@ -561,7 +542,7 @@ every exchange across the wire was exact.
 
 **A CLIENT WAKES ITS CHIP ON THE ADDRESS MATCH, AND THE WIRE PAYS FOR
 IT.** Measured by `test_avr_sleep` test m, which owns the sleep modes:
-this board is a client at 0x42 on the same office bus while board B
+this board is a client at 0x42 on the same office bus while the peer
 writes three bytes at 100 kHz, and B times the whole tenure on its own
 32-bit counter. Awake, the tenure is **418.7 us**. Out of STANDBY with
 the main clock kept alive it is **418.7 us again** - the wake costs
@@ -594,14 +575,6 @@ implement):
   byte when SADDR[7:3] is 0b11110 and the second byte is software's job
   (29.3.3.6); neither the client task nor the host's `Request` has a
   shape for it.
-- **The timed bus on THIS silicon.** The stuck-bus watchdog lives
-  where it belongs: `I2cBus`'s per-bus `timeout_ticks` notices a tenure
-  that never answers, calls this engine's `recover()` (the errata's
-  ENABLE cycle - exactly the verb the contract names as its model) and
-  replies `i2c_timeout` ([i2c-bus.md](../design/i2c-bus.md)). It is
-  host-tested and compile-proven over `I2cHost` on every package; no
-  AVR bench has staged the wedge - the SAM C21's `test_samc_i2c`
-  letter l is the mechanism's silicon witness.
 - **Multi-host as a policy.** Arbitration is measured and the engine
   reports `i2c_arb_lost`, but nothing above the engine decides what to
   do with it: a retry policy, a back-off, a bus AO that knows it shares
@@ -612,6 +585,14 @@ implement):
 
 **Implemented but not bench-verified**:
 
+- **The timed bus on THIS silicon.** `I2cBus`'s per-bus `timeout_ticks`
+  notices a tenure that never answers, calls this engine's `recover()`
+  (the errata's ENABLE cycle - exactly the verb the contract names as
+  its model) and replies `i2c_timeout`
+  ([i2c-bus.md](../design/i2c-bus.md)). It is host-tested and
+  compile-proven over `I2cHost` on every package; no AVR bench has
+  staged the wedge - a peer holding SDA through a tenure, as the SAM
+  C21's suite does, is the staging.
 - CTRLA.SDASETUP: the knob that shapes the client's own setup-time
   stretch is exposed and written, but its two settings are not measured
   apart on the wire;

@@ -1,14 +1,9 @@
 # EVSYS - the event system (AVR DA/DB)
 
-> **PROVISIONAL.** The typed vocabulary now covers the chapter's
-> full generator and user tables (the instance counts and DB-only
-> rows gated by the device header); what remains unverified is the
-> vocabulary no driver exercises yet, and the static allocator is
-> still sugar-to-be - see "Not covered yet". Documents of record: AVR128DB28/32/48/64 data
-> sheet DS40002247B (EVSYS chapter 16, PORTMUX 17.5.1), errata
-> DS80000915F (no EVSYS items). Driver: `avrdx/evsys.hpp`. Reference
-> test: `test_avr_timer` (TCB capture and count by event, CCL LUT
-> routing, AC OUT as generator).
+Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (EVSYS
+chapter 16, PORTMUX 17.5.1), errata DS80000915F (no EVSYS items).
+Driver: `avrdx/evsys.hpp`. Reference test: `test_avr_timer` (TCB capture
+and count by event, CCL LUT routing, AC OUT as generator).
 
 "Event" on this page is the HARDWARE event of the data sheet - a
 signal on an internal wire - not the kernel's queued value; the bridge
@@ -167,9 +162,12 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- the freshly filled vocabulary (UPDI/MVIO/ZCD/OPAMP/USART/SPI/TCD
-  generators, IRDA/TCD/OPAMP users): codes verified against the
-  device header's own enums, no driver exercises them yet;
+- the vocabulary no driver exercises yet - the UPDI, MVIO and ZCD
+  generators, the USART XCK and SPI SCK generators, the IRDA user:
+  codes verified against the device header's own enums, never routed
+  (the OPAMP's READY generator and its four users, and the TCD's
+  generators and both inputs, run in their own suites -
+  [opamp.md](opamp.md), [tcd.md](tcd.md));
 - the software event's inversion-on-level behavior (a low pulse on a
   channel held high);
 - asynchronous delivery in standby (an async user with no clock);

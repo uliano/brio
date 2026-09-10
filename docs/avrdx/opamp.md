@@ -1,25 +1,16 @@
 # OPAMP - analog signal conditioning (AVR DB only)
 
-> **PROVISIONAL.** The whole chapter's register description is
-> exposed and the whole option space that needs no external component
-> is bench-measured - every ladder gain in both topologies, every
-> internal source, both op-to-op links, the instrumentation recipe,
-> the internal timer to the tick, the offset trim and all four event
-> users. What remains is the integrator as a usage type (it needs an
-> external R and C and a DUMP policy), standby behaviour, and the
-> current figures the A4-only errata talk about; the list is in
-> "Not covered yet". Documents of record: AVR128DB28/32/48/64 data
-> sheet DS40002247B (OPAMP chapter 35, electricals 39.20 and typical
-> characteristics 40.11, EVSYS 16 - generators 0x34-0x36 and users
-> 0x2A-0x35, I/O multiplexing chapter 3), errata DS80000915F
-> (items 2.8.1 and 2.8.2, both rev. A4 only). The DA family has no
-> OPAMP peripheral and its errata document has no such section.
-> Driver: `avrdx/opamp.hpp` (`OpampSystem`, `Opamp<n>`,
-> `OpampFollower`, `OpampPga`, `OpampInvertingPga`,
-> `InstrumentationAmp`); the event vocabulary is `EvOpampReady` and
-> `EvOpampCtl` in `avrdx/evsys.hpp` ([evsys.md](evsys.md)); the DAC
-> entries mean the BUFFERED DAC output ([dac.md](dac.md)). Reference
-> test: `test_avr_opamp`.
+Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (OPAMP
+chapter 35, electricals 39.20 and typical characteristics 40.11, EVSYS
+16 - generators 0x34-0x36 and users 0x2A-0x35, I/O multiplexing chapter
+3), errata DS80000915F (items 2.8.1 and 2.8.2, both rev. A4 only). The
+DA family has no OPAMP peripheral and its errata document has no such
+section. Driver: `avrdx/opamp.hpp` (`OpampSystem`, `Opamp<n>`,
+`OpampFollower`, `OpampPga`, `OpampInvertingPga`, `InstrumentationAmp`);
+the event vocabulary is `EvOpampReady` and `EvOpampCtl` in
+`avrdx/evsys.hpp` ([evsys.md](evsys.md)); the DAC entries mean the
+BUFFERED DAC output ([dac.md](dac.md)). Reference test:
+`test_avr_opamp`.
 
 ## What the silicon does
 

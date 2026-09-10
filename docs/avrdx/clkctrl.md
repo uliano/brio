@@ -1,12 +1,5 @@
 # CLKCTRL - the clock controller (AVR DA/DB)
 
-> **PROVISIONAL.** Complete and bench-verified on the DB (the CFD
-> block, DB-only silicon, is compiled out on the DA by its header
-> symbol); the DA's direct external clock input is implemented
-> DATASHEET-TRUSTED (no DA part on the bench yet), the configuration
-> latches are handled and the task's restrictions are deliberate -
-> what remains is in "Not covered yet".
-
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
 (CLKCTRL chapter, electricals 39.10 and 39.3), errata DS80000915F
 (2.5.1-2.5.4). Driver: `avrdx/clock.hpp` (resources `Oschf`, `Osc32k`,

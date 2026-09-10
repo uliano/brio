@@ -1,13 +1,5 @@
 # RTC / PIT - the real-time counter and periodic interrupt timer (AVR DA/DB)
 
-> **PROVISIONAL.** The chapter's register description is covered in
-> full and bench-verified on the internal oscillator, standby and
-> power-down included; what remains is what this bench cannot reach -
-> the 32.768 kHz crystal and the external clock (neither is fitted on
-> the board), the debug-run paths (no halted CPU in a suite) and the
-> tasks that would drive an application through a sleep. The list is
-> in "Not covered yet".
-
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (RTC
 chapter 26), errata DS80000915F and, for the DA parts, DS80000882C -
 neither lists an RTC item; the one that touches this peripheral is

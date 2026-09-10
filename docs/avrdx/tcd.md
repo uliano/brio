@@ -1,20 +1,12 @@
 # TCD - the 12-bit timer/counter type D (AVR DA/DB)
 
-> **PROVISIONAL.** The whole chapter-25 register description is
-> exposed, the three synchronization disciplines are enforced by the
-> verbs rather than left to the caller, the package route table carries
-> the pin-level bonding facts, and the input-mode validity table plus
-> two of the three TCD errata are refusals at compile time and at run
-> time. What remains is in "Not covered yet": one usage type is built
-> (the complementary pair) and the others wait for their first user,
-> the external clock source has no wiring here, and two errata could
-> not be provoked on this die. Documents of record: AVR128DB28/32/48/64
-> data sheet DS40002247B (TCD chapter 25, PORTMUX 17.5, EVSYS 16
-> generators 0xB0-0xB3 / users, CLKCTRL 12.3.5, electricals 39.10.5),
-> errata DS80000915F (2.14.1-2.14.3, 2.5.3, 2.5.4) and DS80000882C
-> (2.13.1-2.13.3, 2.4.1). Driver: `avrdx/tcd.hpp` (`Tcd<0>`,
-> `TcdPwm<route>`), the TCD event vocabulary in `avrdx/evsys.hpp`, the
-> PLL in `avrdx/clock.hpp`. Reference test: `test_avr_tcd`.
+Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCD
+chapter 25, PORTMUX 17.5, EVSYS 16 generators 0xB0-0xB3 / users, CLKCTRL
+12.3.5, electricals 39.10.5), errata DS80000915F (2.14.1-2.14.3, 2.5.3,
+2.5.4) and DS80000882C (2.13.1-2.13.3, 2.4.1). Driver: `avrdx/tcd.hpp`
+(`Tcd<0>`, `TcdPwm<route>`), the TCD event vocabulary in
+`avrdx/evsys.hpp`, the PLL in `avrdx/clock.hpp`. Reference test:
+`test_avr_tcd`.
 
 ## What the silicon does
 

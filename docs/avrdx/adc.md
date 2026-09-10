@@ -1,11 +1,5 @@
 # ADC - the 12-bit analog-to-digital converter (AVR DA/DB)
 
-> **PROVISIONAL.** The conversion machinery, DBGRUN, the signed
-> window, the DACREF inputs and the live rebase are covered and
-> bench-verified, and the DB-only inputs are gated by the device
-> header; what remains is pin-level input legality and the standby
-> paths - the gaps are in "Not covered yet".
-
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (ADC
 chapter, electricals 39.18), errata DS80000915F (2.3.1, 2.3.2).
 Driver: `avrdx/adc.hpp`; `Ref` from `avrdx/vref.hpp`, counts <-> mV arithmetic in `util/analog.hpp`

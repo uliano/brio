@@ -1,9 +1,5 @@
 # NVMCTRL - the nonvolatile memories
 
-> **PROVISIONAL.** The chapter's register description, both errata
-> documents and the whole command set are implemented and bench
-> verified; what is missing is listed in "Not covered yet" at the end.
-
 Documents of record: data sheet **DS40002247B** chapter 11 (NVMCTRL),
 chapter 15 (CPUINT, for the vector-table bit) and section 39.8 (the
 memory programming times); errata **DS80000915F** 2.7.1 / 2.7.2 (AVR
@@ -529,12 +525,15 @@ Driver gaps - the chapter's features this driver does not implement:
 - **No bootloader.** Nothing here writes BOOT (nothing can), and no
   boot loader is built. The door is left open at zero cost: BOOTSIZE 1
   is 512 bytes, which is what an Optiboot-DX fits in.
-- **No flash JOURNAL.** Wear levelling of payload pages, a log or ring
-  structure, a second copy - none of it exists, and a policy of that
-  kind needs a user with real numbers behind it. What does exist is a
-  block store: `NvmFlash` above carries the allocator described in
-  [design/nv-heap.md](../design/nv-heap.md), which covers "a table that
-  survives" and deliberately not "a log that grows".
+- **No wear levelling of payload pages and no growing log**, because a
+  policy of that kind needs a user with real numbers behind it. What
+  does exist is a block store - `NvmFlash` above carries the allocator
+  of [design/nv-heap.md](../design/nv-heap.md), "a table that
+  survives" - and, over the same `FlashMedia`, the small-value journal
+  of [design/nv-journal.md](../design/nv-journal.md), host-tested on
+  this family's 512/2 geometry and never mounted on an AVR: this family
+  has a real EEPROM for small values (`NvRecord` over `EepromStore`),
+  so the journal is born here with its first user.
 - **No fuse writing**, because the silicon has none from software; and
   no chip-erase commands, deliberately (above).
 - **`NVMCTRL.DATA` and `NVMCTRL.ADDR` are not exposed.** They report

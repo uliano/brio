@@ -1,14 +1,5 @@
 # USART - the serial port (AVR DA/DB)
 
-> **PROVISIONAL.** The chapter's register description is covered in full
-> and almost everything is now bench-verified against a second board -
-> cross frame formats, injected errors, a foreign auto-baud sender, both
-> synchronous roles on a real XCK, RS-485 drive-enable timing, IrDA
-> pulses, MPCM and the one-wire bus, Host SPI against a real SPI client,
-> and start-of-frame detection out of a real standby. What is still
-> unmeasured is a handful of routes and two DBGRUN-class knobs; the LIN
-> protocol layer is not built. The list is in "Not covered yet".
-
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (USART
 chapter 27, PORTMUX chapter 17, electricals 39.14), errata
 DS80000915F 2.16.1-2.16.3 and, for the DA parts, DS80000882C
@@ -211,10 +202,10 @@ U::disarm_start_of_frame();         // first thing on the way back
 
 ## Bench findings
 
-`test_avr_serial` runs on board A (`brio-a`, AVR128DB48 rev. A5, 24 MHz
-crystal, 5 V) and has two halves: `z` is the SINGLE-BOARD set (9 tests,
+`test_avr_serial` runs on an AVR128DB48 rev. A5 (24 MHz crystal, 5 V)
+and has two halves: `z` is the SINGLE-BOARD set (9 tests,
 108 verdicts, nothing to wire) and `y` is the TWO-BOARD set (12 tests,
-103 verdicts) against board B running `usart_peer`, an instrument driven
+103 verdicts) against a peer board running `usart_peer`, an instrument driven
 IN BAND over the very link under test. Two more commands stand outside
 `y` because they depend on how the desk is jumpered: `v`, the wiring
 probe, and `w`, the one-wire bus (6 verdicts on the shared-line desk; it
@@ -223,10 +214,10 @@ skips itself on the crossed pair).
 ### The two boards, and what they cost the measurements
 
 - **The two boards' clocks agree to the tick**: a stream of 0xFF frames
-  at 9600 puts board B's start bit - the only low pulse on the line - at
-  **2500 CLK_PER ticks against a nominal 2500**, measured in board A's
+  at 9600 puts the peer's start bit - the only low pulse on the line - at
+  **2500 CLK_PER ticks against a nominal 2500**, measured in the DUT's
   crystal time. The auto-baud findings below were measured against a
-  genuinely foreign clock: board B on its internal OSCHF, **+0.24 to
+  genuinely foreign clock: the peer on its internal OSCHF, **+0.24 to
   +0.28 % fast** - the offset every learned BAUD reproduced. (Running a
   board on OSCHF recreates that condition at will.)
 - **The link topology is discovered, not assumed, and never latched.**
@@ -250,8 +241,8 @@ skips itself on the crossed pair).
   the timing all behave - but LBME delivers nothing at all, so the driver
   refuses loop-back and open drain on a pinless route. And with the
   instance routed, a receiver in loop-back reads frames that ANOTHER
-  BOARD drives onto that pad: board B bit-banged 0x5A onto board A's TXD
-  while board A held the pin as an input under its pull-up (the errata
+  BOARD drives onto that pad: the peer bit-banged 0x5A onto the DUT's TXD
+  while the DUT held the pin as an input under its pull-up (the errata
   2.16.1 open-drain discipline) and every frame arrived clean. One-wire
   collision detection is therefore electrically real, not just a
   register feature.
@@ -286,16 +277,16 @@ skips itself on the crossed pair).
   receiver configured for one, and the reverse, are both clean, because
   the receiver never looks past the first stop bit.
 - **Where FERR really begins.** Table 27-4 recommends -4.19/+4.14 % for
-  D = 9 (8N1). With board B's USART deliberately off rate and sending
-  0x00 - the frame whose stop bit has the least margin - board A stayed
+  D = 9 (8N1). With the peer's USART deliberately off rate and sending
+  0x00 - the frame whose stop bit has the least margin - the DUT stayed
   clean at +4 % and -5 % and flagged FERR on every frame from **+5 %**
-  and **-6 %**. Bit-banged from board B with a four-bit idle between
+  and **-6 %**. Bit-banged from the peer with a four-bit idle between
   frames, the negative side matched (**clean to -4 %, FERR from -5 %**)
   and the positive side never flagged at all up to +6 %: a sender that
   is too FAST finishes early, so the stop-bit sample lands on the idle
   line, which is high anyway. Only a slow sender pushes a low data bit
   under that sample.
-- **A start bit has to last most of a bit.** Board B put low pulses of
+- **A start bit has to last most of a bit.** The peer put low pulses of
   6, 30, 150, 625, 1250, 1562, 1875 and 2500 CPU cycles on an otherwise
   idle line, against a 9600 receiver whose bit is 2500 cycles. Nothing
   at or below **625 cycles (a quarter bit)** was ever taken as a start
@@ -317,11 +308,11 @@ skips itself on the crossed pair).
   and +44 % for WDW2, and beyond +44 % for WDW3. Halved, that is
   14-16 %, 16-18 %, 20-22 % and >22 % of a bit pair - the documented
   15 %, 18 %, 21 % and 25 % windows, measured.
-- **Auto-baud against a foreign clock works, and measures it.** Board B
+- **Auto-baud against a foreign clock works, and measures it.** The peer
   sent a break, a 0x55 sync field and payload at 9600, 57 600, 230 400
   and an odd 123 456 baud, from its own oscillator. Both GENAUTO (with
   WFB armed) and LINAUTO learned the rate, and the BAUD they wrote was
-  consistently **-0.17 to -0.25 %** away from the value board A computes
+  consistently **-0.17 to -0.25 %** away from the value the DUT computes
   for the same nominal rate - exactly the sender's OSCHF offset measured
   above, and nothing else. The payload then arrived clean at the learned
   rate.
@@ -343,7 +334,7 @@ skips itself on the crossed pair).
   BDF clear; after `recover()` (errata 2.16.3's RXEN toggle) the very
   next sync field is learned.
 - **A break from outside is a frame error with data zero.** Twenty bit
-  times of low from board B's PORT arrive at a normal receiver as one
+  times of low from the peer's PORT arrive at a normal receiver as one
   frame with FERR and 0x00.
 - **The receive FIFO keeps three frames, and the third is the NEWEST.**
   Eight frames flooded at full rate with nothing read leave exactly
@@ -352,7 +343,7 @@ skips itself on the crossed pair).
   while the buffer stays full. BUFOVF marks that third frame and only
   it, and draining is the whole recovery. Measured both in loop-back and
   from the other board.
-- **Parity errors are counted, not delivered.** Board B sending odd
+- **Parity errors are counted, not delivered.** The peer sending odd
   parity into a receiver configured for even flags PERR on every frame,
   and the data is still readable in the resource's `UsartFrame`; through
   the `Uart` task the same six frames arrive as six parity errors and
@@ -374,7 +365,7 @@ skips itself on the crossed pair).
   has to use NINE data bits, and its ninth bit lands in the receiver's
   first stop-bit slot.
 - **RS-485's XDIR is exactly guard + frame.** Measured on PE3 with a TCB
-  pulse-width meter through the event system, with board B receiving the
+  pulse-width meter through the event system, with the peer receiving the
   frames: **27 500 CLK_PER ticks at 9600** against an expected 27 500
   (one baud clock of guard plus ten frame bits, exact) and **2290-2291
   at 115 200** against an expected 2288.
@@ -394,22 +385,22 @@ skips itself on the crossed pair).
   where it exceeds three of sixteen samples.
 - **The one-wire bus works, collision detection included.** With the two
   TXD pads jumpered and both boards in LBME + ODME (pads left as inputs
-  under their pull-ups, errata 2.16.1), the DUT and board B exchanged
+  under their pull-ups, errata 2.16.1), the DUT and the peer exchanged
   frames half duplex at 19 200 with an explicit talk/listen turnaround:
-  every frame came back through the DUT's own echo path and board B
-  answered each one. Then, with board B commanded to transmit into the
+  every frame came back through the DUT's own echo path and the peer
+  answered each one. Then, with the peer commanded to transmit into the
   DUT's NEXT frame 150 us after the trigger, the echo of an all-ones
   frame differed from what was sent - the open-drain wired-AND of two
   transmitters, seen exactly where 27.3.3.2.6 says to look for it. A
   responder cannot collide with the frame that triggered it: it only
   knows a frame began once it has all of it.
 - **Both synchronous roles work on a real XCK.** With the DUT as
-  SyncHost driving XCK on PE2 and board B as a client, eight frames
+  SyncHost driving XCK on PE2 and the peer as a client, eight frames
   arrived with an exact checksum and zero errors at **100 kHz and
   1 MHz**, in **both INVEN phases** (host and client must invert
   together: INVEN on the host's output inverts the physical waveform, so
   a client that does not follow samples on the wrong edge). With the
-  roles reversed - board B driving XCK, the DUT as SyncClient - the same
+  roles reversed - the peer driving XCK, the DUT as SyncClient - the same
   eight frames arrived exactly at both rates. **The client's CLK_PER/4
   ceiling is real**: at an XCK of 12 MHz, twice the 6 MHz ceiling at
   CLK_PER = 24 MHz, the DUT reads seven or eight frames whose checksum
@@ -452,8 +443,8 @@ skips itself on the crossed pair).
 
 Measured by `test_avr_sleep` (set `y`, 10 verdicts on this alone) rather
 than by `test_avr_serial`: it needs a device that is genuinely asleep,
-and that suite owns the sleep modes. Board B sends one commanded byte at
-a commanded rate on the shared one-wire link while board A waits in
+and that suite owns the sleep modes. The peer sends one commanded byte at
+a commanded rate on the shared one-wire link while the DUT waits in
 Standby with `SFDEN` armed and `RXSIE` on. Three main-clock restart
 times are swept - a crystal (1.77 ms), OSCHF with the regulator asleep
 (313 us) and OSCHF with `PMODE = FULL` (23.6 us), all measured in

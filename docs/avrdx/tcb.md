@@ -1,18 +1,14 @@
 # TCB - the 16-bit timer/counter type B (AVR DA/DB)
 
-> **PROVISIONAL.** The resource covers the chapter's full option
-> space on every instance of every package (TCB4 included, gated by
-> the device header), the microsecond-speaking tasks honor the clock
-> contract (ClockUsers), and the whole set is bench-verified on
-> TCB0..TCB3; what remains is in "Not covered yet". Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCB
-> chapter 24, PORTMUX 17.3.8, EVSYS 16 generators 0xA0-0xA9 / users
-> 0x1E-0x27), errata DS80000915F (2.13.1, 2.13.2). Complements: TB3214
-> "Getting Started with TCB" and the Microchip examples
-> `avr128da48-getting-started-with-tcb`,
-> `avr128da48-tcb-frequency-dutycycle-measurement` (see
-> [vendor/README.md](vendor/README.md)). Driver: `avrdx/tcb.hpp` (the
-> `Tcb<n>` resource and the tasks), the TCB event vocabulary in
-> `avrdx/evsys.hpp`. Reference test: `test_avr_timer`.
+Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCB
+chapter 24, PORTMUX 17.3.8, EVSYS 16 generators 0xA0-0xA9 / users
+0x1E-0x27), errata DS80000915F (2.13.1, 2.13.2). Complements: TB3214
+"Getting Started with TCB" and the Microchip examples
+`avr128da48-getting-started-with-tcb`,
+`avr128da48-tcb-frequency-dutycycle-measurement` (see
+[vendor/README.md](vendor/README.md)). Driver: `avrdx/tcb.hpp` (the
+`Tcb<n>` resource and the tasks), the TCB event vocabulary in
+`avrdx/evsys.hpp`. Reference test: `test_avr_timer`.
 
 ## What the silicon does
 
@@ -280,6 +276,3 @@ Implemented but not bench-verified:
 - The ALT1 positions of TCB0/TCB1 (PF4/PF5 are the console; the ALT1
   mechanism itself is verified on TCB2 - moving the console to free
   them is a wiring job).
-- Event-paced captures inside the kernel (an AO owning a meter and
-  publishing Hz/period/duty readings as events, the way AnalogSampler
-  owns the ADC) - a util/ usage type for when an app needs it.
