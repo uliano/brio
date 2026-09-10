@@ -57,7 +57,9 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   either list has no such section. The public voice names a silicon by
   its PART and never by an ordinal (no "second/third silicon"), and no
   desk position (board A..G) appears outside bench.md. The state of the
-  driver work is readable in the docs map. The Multislope assessment (every
+  driver work is readable in each target's document map, the second
+  section of its README.md (docs/README.md is one row per target and
+  the rules). The Multislope assessment (every
   acrobatic piece maps to fixed routes + tasks on resources + config
   structs; the 64-cycle snapshot stays in the ISR body) lives in
   memory and in the track entry below, not in docs.
