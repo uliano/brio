@@ -267,9 +267,11 @@ gets its home in `docs/design/` when taken.
 - **The CH32V00x stratum, from bring-up to supported.** `brio/ch32v00x/`
   and `ch32v00x/` exist (`in bring-up` in README.md's table): the kernel
   console runs on the CH32V006K8U6 at 48 MHz over USART1, on WCH's gcc
-  15.2 and WCH's OpenOCD fork through a WCH-Link. What remains, in
-  docs/ch32v00x/README.md's gap lists: the chapters (EXTI, TIM, ADC,
-  I2C, SPI, DMA, flash, the power modes, reset), the family tiering and
+  15.2 and WCH's OpenOCD fork through a WCH-Link; the clock, the
+  flash media, the power modes, reset and the DMA each have their
+  document and suite. What remains, in docs/ch32v00x/README.md's gap
+  lists: the chapters (TIM, ADC, I2C, SPI, the pad test that gives
+  EXTI its page), the family tiering and
   `brio check ch32v00x` with a second part, a self-built upstream gcc 16
   for riscv32 with an rv32ec/ilp32e multilib (the stratum compiles with
   plain rv32ec_zmmul on purpose - WCH's `xw` extension is worth a few
@@ -1041,23 +1043,58 @@ brio/                    the framework, four strata:
     ticker.hpp             BasicTicker over the core's STK (up-count, STRE
                            auto-reload, CNTIF cleared by the handler),
                            Ticker = 1000 Hz
-    clock.hpp              Clock<internal|pll, hz>: HSI 24 MHz, the doubling
-                           PLL (48 MHz), the HPRE divider table, flash wait
-                           states first; pclk_hz = hz (no APB prescaler)
+    clock.hpp              Rcc (the HSI trim, the LSI, the PLL, the HPRE
+                           divider, the MCO, the clock monitor, the
+                           peripheral gates) + Clock<internal|pll, hz>
+                           (flash wait states first; pclk_hz = hz, no APB
+                           prescaler) + DynamicClock<Boot, Users...> over the
+                           HPRE ladder, restore() after a Standby
+    delay.hpp              delay_us(clock, us) on the STK counter: at least,
+                           never early, refused at one tick and beyond
     pin.hpp                Pin<'D',5> / Port<'D'>: the ONE-BIT MODE of this
                            family (an F1 nibble is right by accident), pulls
                            through OUTDR, the port clock opened by every
                            configuring verb
-    usart.hpp              Uart<1, P>: the interrupt-driven byte transport
-                           (two rings, TXEIE armed/disarmed, errors read then
-                           cleared, BRR = pclk/baud whole); USART1 on its
-                           default pads PD5/PD6, USART2 refused until the
-                           remaps exist
+    usart.hpp              Uart<1, P, rx, tx, TxEngine, RxEngine>: the
+                           interrupt-driven byte transport (two rings, TXEIE
+                           armed/disarmed, errors read then cleared, BRR =
+                           pclk/baud whole) with two OPTIONAL DMA engine
+                           slots (harvest() the verb that publishes a
+                           receive run); USART1 on its default pads PD5/PD6,
+                           USART2 refused until the remaps exist
+    dma_engine.hpp         NoDmaEngine, the empty slot's tag, and the rule
+                           that two engines of one transport name two channels
+    dma.hpp                Dma + DmaChannel<1..7> (THE CHANNEL IS THE
+                           REQUEST: no multiplexer, table 8-2 names the
+                           channel; every store refused while EN is set,
+                           which stays set after a completed block) +
+                           DmaTxEngine/DmaRxEngine<ch, Elem>
+    exti.hpp               Exti (ten lines: eight pads via AFIO_EXTICR, the
+                           PVD, the AWU; interrupt or event, edges, the
+                           software trigger) + ExtInt<Pin>
+    reset.hpp              Reset (RSTSCKR's flags as history - PINRSTF names
+                           the pin ALONE here -, software() through
+                           PFIC_CFGR), ResetReporter, fault_reset<P>()
+    nvm.hpp                Flash: the engine (fast page program as the ONLY
+                           write, two locks, three erase grains), refused
+                           as a code beside STATR's errors
+    nvm_flash.hpp          MainFlashPartition (the linker's 40 KB, the heap's
+                           16 KB, the journal's 6 KB attic) + MainFlash and
+                           MainFlashJournalZone, the two FlashMedia with THE
+                           PAGE AS THE CELL (256 B)
+    sleep.hpp              Pwr (Sleep/Standby, the LDO, the PVD; every verb
+                           opens the PB1 gate first), Awu (the LSI alarm on
+                           EXTI line 9), Ch32SleepSite (light = Sleep,
+                           standby and deep = Standby, restore() after) and
+                           Ch32TimedSleepSite (the LSI MEASURED at init, the
+                           span handed back less the ticks counted awake)
     platform.hpp           Ch32v00xPlatform<TB = Ticker>: idle() is a WFE,
                            not a WFI - this core's WFI wakes only for an
                            interrupt it can TAKE, so "sleep then unmask"
                            deadlocks; WFITOWFE + SEVONPEND latch the wake
-                           instead; ebreak; .noinit breadcrumb; atomic_width 4
+                           instead, and with SLEEPDEEP armed the ticker is
+                           paused across the sleep; ebreak; .noinit
+                           breadcrumb; atomic_width 4
   host/                  the test target
     platform.hpp           HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

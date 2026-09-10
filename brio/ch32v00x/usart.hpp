@@ -30,6 +30,19 @@
  * pushed: a corrupted byte in a line assembler is worse than a gap,
  * and the counter says it happened.
  *
+ * TWO OPTIONAL DMA ENGINE SLOTS, the STM32G0 stratum's shape: a
+ * transmit engine drains the TX ring by contiguous runs (the ring's
+ * read_span, consumed by exactly what the block carried when it
+ * completes) and a receive engine fills the RX ring's free run
+ * (write_span, published by what harvest() finds arrived). Without an
+ * engine the slot is the NoDmaEngine tag and every engine branch is
+ * compiled out. With a receive engine RXNE is the channel's, so the
+ * error flags are read once per harvest and counted against the run,
+ * not the byte - a console that wants exact attribution takes no RX
+ * engine. And harvest() is a VERB, not an interrupt: a receive block
+ * completes only when its run fills, which on an idle line is never,
+ * so whoever owns the port decides how often to ask.
+ *
  * NOT COVERED YET:
  *  - USART2 (CH32V005/006/007 only): its pads want the AFIO remap
  *    registers this stratum does not touch yet, so it is refused at
@@ -48,6 +61,7 @@
 #include <stdint.h>
 
 #include "ch32v00x/device.hpp"
+#include "ch32v00x/dma_engine.hpp"
 #include "ch32v00x/pfic.hpp"
 #include "ch32v00x/pin.hpp"
 #include "util/clock.hpp"
@@ -94,17 +108,28 @@ constexpr Irq usart_irq_for(uint8_t instance) {
  * `P` is the platform, which the rings need to know whether an index
  * can be shared with a handler bare (atomic_width) or wants a guard.
  */
-template <uint8_t instance, typename P, uint16_t rx_size = 64, uint16_t tx_size = 64>
+template <uint8_t instance, typename P, uint16_t rx_size = 64, uint16_t tx_size = 64,
+          typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine>
 struct Uart {
     static_assert(usart_base_for(instance) != 0,
                   "brio Uart: only USART1 is implemented on the CH32V00x today - "
                   "USART2 exists on the CH32V005/006/007 and needs the AFIO remaps "
                   "first (see this file's 'Not covered yet')");
+    // An engine is checked where it is named: sizeof demands a complete
+    // type, so an engine's own static_asserts fire on the application's
+    // line.
+    static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
+                  "the engine slots must name a complete type: a DmaTxEngine / "
+                  "DmaRxEngine from ch32v00x/dma.hpp, or NoDmaEngine (the default)");
+    static_assert(dma_engines_distinct<TxEngine, RxEngine>(),
+                  "the two engines of a Uart must not share a DMA channel");
 
     Uart() = default;   // a tag instance: constexpr Uart<1, P> serial;
 
     static constexpr uint8_t number = instance;
     static constexpr UsartPads pads = usart_pads_for(instance);
+    static constexpr bool has_tx_engine = TxEngine::present;
+    static constexpr bool has_rx_engine = RxEngine::present;
 
     using Tx = Pin<pads.tx_port, pads.tx_pin>;
     using Rx = Pin<pads.rx_port, pads.rx_pin>;
@@ -141,18 +166,112 @@ struct Uart {
 
         regs().CTLR1 = 0;        // configure with the port disabled
         regs().CTLR2 = 0;        // one stop bit
-        regs().CTLR3 = 0;        // no flow control, no DMA
+        uint16_t ctlr3 = 0;      // no flow control; the DMA requests if an engine is named
+        if constexpr (has_tx_engine) { ctlr3 |= usart_dmat; }
+        if constexpr (has_rx_engine) { ctlr3 |= usart_dmar; }
+        regs().CTLR3 = ctlr3;
         regs().BRR = static_cast<uint16_t>(brr);
-        regs().CTLR1 = usart_ue | usart_te | usart_re | usart_rxneie;
+        // RXNE is the receive channel's when an engine has it.
+        regs().CTLR1 = static_cast<uint16_t>(usart_ue | usart_te | usart_re |
+                                             (has_rx_engine ? 0u : usart_rxneie));
         m_baud = baud;
 
         m_tx.clear();
         m_rx.clear();
         clear_errors();
+        m_dma_faults = 0;
+
+        if constexpr (has_rx_engine) {
+            RxEngine::arm(&regs().DATAR);
+            rearm_rx();
+        }
+        if constexpr (has_tx_engine) {
+            TxEngine::arm(&regs().DATAR);
+        }
 
         Pfic::enable(usart_irq_for(instance));
         return true;
     }
+
+    /**
+     * The ISR body of WHICHEVER DMA channel this transport owns - call
+     * it from the vector(s) the engines' channels report on:
+     *
+     *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() { (void)Serial::dma_isr(); }
+     *
+     * Each engine reads only its own channel's flags, so this is safe on
+     * a vector another channel of the program shares nothing with. On
+     * the transmit channel a completion releases exactly the block's
+     * bytes from the ring and starts the next run; on the receive
+     * channel nothing is published here - harvest() does that.
+     */
+    [[gnu::always_inline]] static bool dma_isr() {
+        bool mine = false;
+        if constexpr (has_tx_engine) {
+            const uint8_t f = TxEngine::service();
+            if ((f & TxEngine::flag_error) != 0u) {
+                (void)TxEngine::abandon();
+                m_dma_faults = m_dma_faults + 1u;
+                mine = true;
+            } else if ((f & TxEngine::flag_complete) != 0u) {
+                m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
+                pump_tx();
+                mine = true;
+            }
+        }
+        if constexpr (has_rx_engine) {
+            const uint8_t f = RxEngine::service();
+            if ((f & RxEngine::flag_error) != 0u) {
+                (void)RxEngine::abandon();
+                m_dma_faults = m_dma_faults + 1u;
+                mine = true;
+            } else if ((f & RxEngine::flag_complete) != 0u) {
+                mine = true;   // the run filled: harvest() publishes and re-arms
+            }
+        }
+        return mine;
+    }
+
+    /**
+     * Ask the receive engine what has arrived, and publish it. A verb,
+     * not an interrupt (see the file header): the owner decides how
+     * often, a kernel TimeEvent every few ticks is the shape. Returns
+     * the same edge isr() does - the ring went from empty to non-empty
+     * - so the same kernel glue posts RxActivity on true. False, and
+     * free, without an engine.
+     */
+    static bool harvest() {
+        if constexpr (!has_rx_engine) {
+            return false;
+        } else {
+            // The error flags once, at harvest granularity, cleared by
+            // the STATR-then-DATAR read the chapter prescribes.
+            const uint16_t status = regs().STATR;
+            if ((status & (usart_fe | usart_ne | usart_pe | usart_ore)) != 0u) {
+                if ((status & usart_fe) != 0u) { bump(m_frame_errors); }
+                if ((status & usart_ne) != 0u) { bump(m_noise_errors); }
+                if ((status & usart_pe) != 0u) { bump(m_parity_errors); }
+                if ((status & usart_ore) != 0u) { bump(m_hw_overruns); }
+                (void)regs().DATAR;
+            }
+            const bool was_empty = m_rx.empty();
+            const uint16_t fresh = RxEngine::take();
+            if (fresh != 0u) {
+                m_rx.publish(static_cast<typename decltype(m_rx)::index_t>(fresh));
+            }
+            // The silicon is asked first and the arithmetic second: a
+            // channel that is not running gets a new run whatever the
+            // count says.
+            if (RxEngine::idle() || RxEngine::full() || RxEngine::capacity() == 0u) {
+                rearm_rx();
+            }
+            return was_empty && !m_rx.empty();
+        }
+    }
+
+    /// Transfer errors the engines reported (a fault is a block thrown
+    /// away). Always 0, and free, without an engine.
+    static uint16_t dma_faults() { return m_dma_faults; }
 
     /// The divisor this clock and baud ask for: pclk/baud in sixteenths,
     /// rounded to nearest so the error is halved.
@@ -180,7 +299,7 @@ struct Uart {
 
         const uint16_t status = regs().STATR;
 
-        if ((status & usart_rxne) != 0u) {
+        if (!has_rx_engine && (status & usart_rxne) != 0u) {
             const uint8_t byte = static_cast<uint8_t>(regs().DATAR & 0xFFu);
             if ((status & (usart_fe | usart_ne | usart_pe | usart_ore)) != 0u) {
                 if ((status & usart_fe) != 0u) { bump(m_frame_errors); }
@@ -197,7 +316,7 @@ struct Uart {
             }
         }
 
-        if ((status & usart_txe) != 0u && (regs().CTLR1 & usart_txeie) != 0u) {
+        if (!has_tx_engine && (status & usart_txe) != 0u && (regs().CTLR1 & usart_txeie) != 0u) {
             if (const auto next = m_tx.pop()) {
                 regs().DATAR = *next;
             } else {
@@ -213,11 +332,22 @@ struct Uart {
     // ---- byte transport (ByteSink / ByteSource) ---------------------------
 
     /// Queue one byte; false when the TX ring is full (print() spins).
+    /// Without an engine TXE is armed; with one the engine is nudged -
+    /// and a REFUSED byte nudges too, since the ring is full exactly
+    /// when nothing is draining it and print() would otherwise spin on
+    /// a transport nobody poked.
     static bool write_byte(uint8_t b) {
         if (!m_tx.push(b)) {
+            if constexpr (has_tx_engine) {
+                pump_tx();
+            }
             return false;
         }
-        regs().CTLR1 = static_cast<uint16_t>(regs().CTLR1 | usart_txeie);
+        if constexpr (has_tx_engine) {
+            pump_tx();
+        } else {
+            regs().CTLR1 = static_cast<uint16_t>(regs().CTLR1 | usart_txeie);
+        }
         return true;
     }
 
@@ -253,7 +383,11 @@ struct Uart {
     /// Follow a clock that changed rate. Drains what is in flight first:
     /// a byte half out at the old rate would finish at the new one.
     static void rebase(uint32_t hz) {
-        while (!m_tx.empty()) { }
+        while (!m_tx.empty()) {
+            if constexpr (has_tx_engine) {
+                pump_tx();
+            }
+        }
         const uint32_t baud = actual_baud_cached();
         const uint32_t brr = divisor_for(hz, baud);
         if (brr >= 16u && brr <= 0xFFFFu) {
@@ -262,6 +396,37 @@ struct Uart {
     }
 
 private:
+    /// Start the next contiguous run of the TX ring on the engine, if it
+    /// is idle and there is one. Under the guard: the completion path
+    /// runs in the channel's handler.
+    static void pump_tx() {
+        if constexpr (has_tx_engine) {
+            typename P::CriticalSection cs;
+            if (TxEngine::busy()) {
+                return;
+            }
+            const auto run = m_tx.read_span();
+            if (run.empty()) {
+                return;
+            }
+            (void)TxEngine::start(run.data(), static_cast<uint16_t>(run.size()));
+        }
+    }
+
+    /// Point the receive engine at the ring's next free run. No room is
+    /// a byte lost before it arrives, counted as the software overrun
+    /// it is.
+    static void rearm_rx() {
+        if constexpr (has_rx_engine) {
+            const auto room = m_rx.write_span();
+            if (room.empty()) {
+                bump(m_rx_overruns);
+                return;
+            }
+            (void)RxEngine::start(room.data(), static_cast<uint16_t>(room.size()));
+        }
+    }
+
     /// Saturating: a counter that wrapped would understate the damage.
     static void bump(uint16_t& counter) {
         if (counter != 0xFFFFu) {
@@ -280,6 +445,7 @@ private:
     static inline uint16_t m_parity_errors = 0;
     static inline uint16_t m_noise_errors = 0;
     static inline uint16_t m_hw_overruns = 0;
+    static inline uint16_t m_dma_faults = 0;
 };
 
 } // namespace brio

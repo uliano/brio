@@ -175,6 +175,10 @@ inline constexpr uint16_t usart_rxne = 1U << 5;
 inline constexpr uint16_t usart_tc   = 1U << 6;
 inline constexpr uint16_t usart_txe  = 1U << 7;
 
+/// USART_CTLR3
+inline constexpr uint16_t usart_dmar   = 1U << 6;
+inline constexpr uint16_t usart_dmat   = 1U << 7;
+
 /// USART_CTLR1
 inline constexpr uint16_t usart_re     = 1U << 2;
 inline constexpr uint16_t usart_te     = 1U << 3;
