@@ -1,0 +1,6 @@
+# clangd config for the CH32V00x project: it is its OWN CMake project
+# (ch32v00x/CMakeLists.txt) with its own compile_commands.json emitted
+# at ../build-cmake/ch32v006k8-release - point clangd straight at it, so
+# an app here parses with the RISC-V compiler's real command line.
+CompileFlags:
+  CompilationDatabase: ../build-cmake/ch32v006k8-release

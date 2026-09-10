@@ -13,6 +13,7 @@ the user's own manifest, below.
 | ST Nucleo-G0B1RE | `g0b1re` | [nucleo-g0b1re.md](nucleo-g0b1re.md) |
 | ST Nucleo-G071RB | `g071rb` | [nucleo-g071rb.md](nucleo-g071rb.md) |
 | ST Nucleo-G031K8 | `g031k8` | [nucleo-g031k8.md](nucleo-g031k8.md) |
+| a CH32V006K8U6 module | `v006k8` | [ch32v006k8.md](ch32v006k8.md) |
 
 ## How a board joins the bench
 

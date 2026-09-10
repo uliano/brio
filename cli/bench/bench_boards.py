@@ -27,6 +27,8 @@
 #      c21j             SAM C21, written by OpenOCD over SWD (CMSIS-DAP)
 #      g0b1re g071rb g031k8   STM32G0 Nucleos, written by OpenOCD over SWD
 #                       through the board's own ST-LINK
+#      v006k8           CH32V006K8, written by WCH's OpenOCD fork through a
+#                       WCH-Link (SDI, WCH's own debug transport)
 #
 #  CONSOLES. A board with a serial-less USB bridge (a CH340 has no unique
 #  serial: two of them collide in /dev/serial/by-id) is addressed by
@@ -46,6 +48,10 @@
 #    stlink_msd         the ST-LINK's mass-storage flasher, the fallback when
 #                       its debug port does not answer: {"type": "stlink_msd",
 #                       "label": "NODE_G031K8"} (the drive's volume label)
+#    wch_link           a WCH-Link (RISC-V mode) driven by WCH's OpenOCD fork
+#                       (WCH_OPENOCD below); the same device carries a serial
+#                       port, which is the CH32 board's console when its
+#                       USART is wired to the probe's TX/RX pins
 #
 #  IDENTITY IN THE CHIP. An "id" is the label an AVR board carries in its
 #  USERROW (avrdx/userrow.hpp: written once over UPDI, printed by every
@@ -97,6 +103,18 @@ BOARDS = {
         "console": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_222222222222222222222222-if02",
         "programmer": {"type": "openocd_stlink", "serial": "222222222222222222222222"},
     },
+    "I": {
+        # A CH32V006K8 board on a WCH-Link: the probe's serial pins wired
+        # to the board's USART1 (PD5/PD6), so one USB cable carries the
+        # debug transport and the console. The WCH-Link carries a real
+        # USB serial, so its CDC port (interface -if01) is addressed
+        # by-id, stable across sockets.
+        "board": "v006k8",
+        "id": None,
+        "device_uid": None,
+        "console": "/dev/serial/by-id/usb-wch.cn_WCH-Link_333333333333-if01",
+        "programmer": {"type": "wch_link", "serial": "333333333333"},
+    },
 }
 
 # The console speed a suite is driven at when its app declares none
@@ -107,3 +125,6 @@ DEFAULT_MONITOR_SPEED = 460800
 # (docs/avrdx/README.md, docs/samc21/README.md), never a distribution's.
 AVRDUDE = "/sw/avr/bin/avrdude"
 OPENOCD = "/sw/openocd/bin/openocd"
+# WCH's OpenOCD fork for the WCH-Link (docs/ch32v00x/README.md): a
+# different program from the one above, kept apart under /sw.
+WCH_OPENOCD = "/sw/wch-openocd/bin/openocd"

@@ -1,0 +1,6 @@
+# The ch32v00x stratum parses against the CH32V00x project's database:
+# these headers are RV32EC and only that compiler's flags describe them.
+# Overrides the framework default (brio/.clangd, host flags). Path
+# relative to this file.
+CompileFlags:
+  CompilationDatabase: ../../build-cmake/ch32v006k8-release

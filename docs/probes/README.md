@@ -11,6 +11,7 @@ flash MECHANISMS `bin/brio` knows - the `"type"` of a board's
 | `openocd_cmsisdap` | an [Atmel-ICE](atmel-ice.md) (or any CMSIS-DAP probe), OpenOCD | SWD | the SAM C21 boards |
 | `openocd_stlink` | a Nucleo's own [ST-LINK](st-link.md), OpenOCD | SWD | the STM32G0 Nucleos |
 | `stlink_msd` | the ST-LINK's mass-storage flasher | USB drive | the STM32G0 Nucleos, when the debug port does not answer |
+| `wch_link` | a [WCH-Link](wch-link.md), WCH's OpenOCD fork | SDI (1-wire) | the CH32V00x board |
 
 Rules that hold for every probe: a probe is SINGLE-CLIENT (close the
 debug session before flashing); a probe is addressed by its own USB

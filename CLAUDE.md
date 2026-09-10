@@ -41,7 +41,8 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   implementation as the fixed point the next platform is measured
   against).
 - `docs/<target>/` - one folder per target, mirroring
-  `brio/<target>/` (`avrdx/`, `samc21/`, `host/`): `README.md` is the
+  `brio/<target>/` (`avrdx/`, `samc21/`, `stm32g0/`, `ch32v00x/`,
+  `host/`): `README.md` is the
   operational page (toolchain, board, probe, debugger and their
   quirks); next to it ONE document per peripheral in the shape
   docs/README.md prescribes (documents of record -> what the silicon
@@ -96,7 +97,7 @@ This file has no decision log any more: the former log was migrated to
 `brio` (`brio/`) is a header-only C++23 (gnu++23) framework for
 bare-metal MCUs built around a cooperative active-object kernel,
 written clean-room after Samek's book (never the QP source). One flat
-namespace `brio`; seven strata under `brio/` - `kernel/` (pure
+namespace `brio`; eight strata under `brio/` - `kernel/` (pure
 logic, includes nothing of brio), `util/` (services over the kernel),
 `armv6m/` (the CORE stratum both Cortex-M0+ families include after
 their device header: NVIC + PRIMASK guard, the SysTick ticker),
@@ -104,15 +105,17 @@ their device header: NVIC + PRIMASK guard, the SysTick ticker),
 AVR128DB48), `samc21/` (everything that knows `sam.h`: SAM C21,
 Cortex-M0+, bench chip ATSAMC21J18A), `stm32g0/` (everything that
 knows `stm32g0xx.h`: STM32G0, Cortex-M0+, bench chip STM32G0B1RE on
-a Nucleo-64), `host/` (the native test
+a Nucleo-64), `ch32v00x/` (everything that knows the CH32V00x: WCH's
+QingKe V2C, RV32EC, bench chip CH32V006K8U6 - NO vendor header, the
+register map is the stratum's own device.hpp), `host/` (the native test
 target). Includes carry the stratum prefix
-(`#include "avrdx/usart.hpp"`). The builds are four sibling CMake
+(`#include "avrdx/usart.hpp"`). The builds are five sibling CMake
 projects, PEERS - the repo root is not a CMake project: `avrdx/`,
-`samc21/` and `stm32g0/` (each with its own toolchain file and presets,
-Ninja, emitting into the shared `build-cmake/`) auto-discover one
-`main()` per `src/apps/<app>.cpp` at configure time from its own
-`// build:` header comment; host tests in `test/` are the fourth
-project (host g++, no cross toolchain), run via `ctest`. ONE NAME PER ARCHITECTURE,
+`samc21/`, `stm32g0/` and `ch32v00x/` (each with its own toolchain file
+and presets, Ninja, emitting into the shared `build-cmake/`)
+auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
+from its own `// build:` header comment; host tests in `test/` are the
+fifth project (host g++, no cross toolchain), run via `ctest`. ONE NAME PER ARCHITECTURE,
 the same key on three axes: `brio/<arch>/` (stratum),
 `docs/<arch>/` (docs), `<arch>/` (build project); chip precision
 lives in preset names, per-chip ld/svd files and the `*_MCU` cache
@@ -258,15 +261,18 @@ gets its home in `docs/design/` when taken.
   and "the element type is the beat" (the DMA engines' rule) is the
   answer the SPI Request does not yet spell; measured on a block of
   16-bit pixels, not imagined.
-- **A RISC-V stratum: CH32V00x** (QingKe V2, RV32EC; the CH32V003 at
-  16 KB / 2 KB is the most extreme point brio can touch). One family
-  first, by the stratum-naming rule; a `qingke/` core stratum only at a
-  second family. Phase 0 needs no hardware: upstream gcc 16 self-built
-  for riscv32 with an rv32ec/ilp32e multilib (WCH's own gcc carries a
-  proprietary compressed extension worth a few per cent, measured, not
-  worth a vendor binary), the C library question for rv32e, kernel +
-  blink + console sized against 2 KB; the probe (WCH-LinkE, driven by
-  minichlink or WCH's OpenOCD fork) is the one real hole.
+- **The CH32V00x stratum, from bring-up to supported.** `brio/ch32v00x/`
+  and `ch32v00x/` exist (`in bring-up` in README.md's table): the kernel
+  console runs on the CH32V006K8U6 at 48 MHz over USART1, on WCH's gcc
+  15.2 and WCH's OpenOCD fork through a WCH-Link. What remains, in
+  docs/ch32v00x/README.md's gap lists: the chapters (EXTI, TIM, ADC,
+  I2C, SPI, DMA, flash, the power modes, reset), the family tiering and
+  `brio check ch32v00x` with a second part, a self-built upstream gcc 16
+  for riscv32 with an rv32ec/ilp32e multilib (the stratum compiles with
+  plain rv32ec_zmmul on purpose - WCH's `xw` extension is worth a few
+  per cent and only their compiler emits it), and the CH32V003 at 16 KB
+  / 2 KB as the most extreme point brio can touch. A `qingke/` core
+  stratum only at a second QingKe family.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit.
@@ -329,6 +335,8 @@ brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--s
 (cd samc21 && cmake --build --preset samc21j-release --target <app>-upload)     # flash via OpenOCD (SWD)
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)          # STM32G0 release build
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash via OpenOCD (ST-LINK)
+(cd ch32v00x && cmake --build --preset ch32v006k8-release --target <app>)          # CH32V00x release build (WCH gcc 15)
+(cd ch32v00x && cmake --build --preset ch32v006k8-release --target <app>-upload)   # flash via WCH's OpenOCD fork (WCH-Link)
 # apps are auto-discovered from <project>/src/apps/*.cpp - plus
 # experiments/*/{avrdx,samc21}/*.cpp, each experiment's per-arch app
 # halves - at every configure; no generation step; a new/removed app
@@ -425,6 +433,15 @@ stm32g0/                 the STM32G0 build project, same shape again (the
                          G031K8, ld/<part>.ld and src/glue/startup_<header>
                          .cpp for each; ST-LINK upload target; svd/ with
                          ST's SVD per part)
+ch32v00x/                the CH32V00x build project, the fifth of the shape
+                         (cmake/toolchain-riscv.cmake on /sw/wch-riscv,
+                         CH32V00X_ARCH = rv32ec_zmmul by choice, one preset
+                         pair for the CH32V006K8, ld/ch32v006k8.ld,
+                         src/glue/startup_ch32v00x.S - the table whose
+                         first word is an INSTRUCTION and whose handler
+                         names are the project's own - and the upload
+                         target on WCH's OpenOCD fork); no vendor header,
+                         so no device-select define
 test/CMakeLists.txt      the host test project (independent - one CMake
                          configure has exactly one compiler):
                          one executable + ctest entry per test_*/main.cpp
@@ -453,7 +470,8 @@ cli/                     its guts, a Python package: main.py dispatches on the
     common.py            what every bench verb needs: the manifest, BOARD_TYPES
                          (a board type -> its project, preset, mcu and flash
                          mechanism: db* -> avrdx/avrdude/UPDI, c21j ->
-                         samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/ST-LINK),
+                         samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/ST-LINK,
+                         v006k8 -> ch32v00x/WCH's OpenOCD fork/WCH-Link),
                          the per-project app rosters build-cmake/apps_{avrdx,
                          samc21,stm32g0}.json (each project writes its own at
                          every configure - separate files because app NAMES
@@ -1001,6 +1019,38 @@ brio/                    the framework, four strata:
                            rules the silicon and ES0548 2.8.2 dictate; the
                            platform's template argument for a program with
                            no periodic interrupt
+  ch32v00x/              everything that knows the CH32V00x (WCH QingKe V2C,
+                         RV32EC) - and NO vendor header: the map is the
+                         stratum's own
+    device.hpp             the register map in the chapter's words (RCC, GPIO,
+                           USART, FLASH_ACTLR, the core's STK and PFIC), the
+                           interrupt numbers = the vector table's word
+                           indices; states the CH32V006K8 alone until a
+                           second part gives the tiering something to say
+    pfic.hpp               InterruptGuard (csrrci read-and-clear of
+                           mstatus.MIE), enable/disable/readback, Pfic per-
+                           line enables (write-one registers; the manual's
+                           ISR bank is the ENABLE status, IPR the pending)
+    ticker.hpp             BasicTicker over the core's STK (up-count, STRE
+                           auto-reload, CNTIF cleared by the handler),
+                           Ticker = 1000 Hz
+    clock.hpp              Clock<internal|pll, hz>: HSI 24 MHz, the doubling
+                           PLL (48 MHz), the HPRE divider table, flash wait
+                           states first; pclk_hz = hz (no APB prescaler)
+    pin.hpp                Pin<'D',5> / Port<'D'>: the ONE-BIT MODE of this
+                           family (an F1 nibble is right by accident), pulls
+                           through OUTDR, the port clock opened by every
+                           configuring verb
+    usart.hpp              Uart<1, P>: the interrupt-driven byte transport
+                           (two rings, TXEIE armed/disarmed, errors read then
+                           cleared, BRR = pclk/baud whole); USART1 on its
+                           default pads PD5/PD6, USART2 refused until the
+                           remaps exist
+    platform.hpp           Ch32v00xPlatform<TB = Ticker>: idle() is a WFE,
+                           not a WFI - this core's WFI wakes only for an
+                           interrupt it can TAKE, so "sleep then unmask"
+                           deadlocks; WFITOWFE + SEVONPEND latch the wake
+                           instead; ebreak; .noinit breadcrumb; atomic_width 4
   host/                  the test target
     platform.hpp           HostPlatform (virtual clock, recording idle/break)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests

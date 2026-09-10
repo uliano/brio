@@ -13,13 +13,14 @@
     //     database instead of the root AVR one). ---
     "clangd.enable": true,
     "clangd.arguments": [
-        "--query-driver=/sw/avr*/bin/avr-g++,/sw/gcc*/bin/g++,/sw/arm-none-eabi*/bin/arm-none-eabi-g++"
+        "--query-driver=/sw/avr*/bin/avr-g++,/sw/gcc*/bin/g++,/sw/arm-none-eabi*/bin/arm-none-eabi-g++,/sw/wch-riscv*/bin/riscv32-wch-elf-g++"
     ],
     "C_Cpp.intelliSenseEngine": "disabled",
 
-    // --- CMake Tools: four independent CMake projects share this workspace
+    // --- CMake Tools: five independent CMake projects share this workspace
     //     folder - avrdx/ (avr-g++), test/ (host g++), samc21/ and
-    //     stm32g0/ (arm-none-eabi-g++), each with its own toolchain since
+    //     stm32g0/ (arm-none-eabi-g++), ch32v00x/ (riscv32-wch-elf-g++),
+    //     each with its own toolchain since
     //     one CMake configure has exactly one compiler. The REPO ROOT is
     //     deliberately NOT a CMake project: it was the Active Folder's
     //     silent reset target, and the platforms are peers. This shows an
@@ -32,7 +33,8 @@
         "${workspaceFolder}/avrdx",
         "${workspaceFolder}/test",
         "${workspaceFolder}/samc21",
-        "${workspaceFolder}/stm32g0"
+        "${workspaceFolder}/stm32g0",
+        "${workspaceFolder}/ch32v00x"
     ],
 
     // CMake Tools 1.23+ defaults cmake.options.statusBarVisibility to

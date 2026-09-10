@@ -115,6 +115,32 @@ def openocd_args(prog, elffile, target_cfg):
     return argv
 
 
+def wch_openocd_args(prog, elffile):
+    """WCH's OpenOCD fork over a WCH-Link (programmer type "wch_link"):
+    the only OpenOCD that speaks the probe's SDI transport, a separate
+    binary from the SWD paths' 0.12.0 release, named by the manifest's
+    WCH_OPENOCD. Its target script is the vendor's own wch-riscv.cfg,
+    which lives beside the binary and not in a scripts tree. The same
+    invocation ch32v00x/CMakeLists.txt's <app>-upload target uses.
+
+    `program ... verify` then `reset run` leaves the chip RUNNING, the
+    end state of every other path. No debug-enable is taken back down
+    afterwards: `break_here()` on this core is an ebreak, which with no
+    debugger attached escalates to the fault vector rather than halting
+    the core, so a probe-less power-on and a just-flashed board behave
+    the same way. Nothing here names the probe: the fork's adapter
+    selection is untested with two WCH-Links attached, and the desk has
+    one."""
+    if prog["type"] != "wch_link":
+        die("programmer type '%s' is not a WCH-Link" % prog["type"])
+    openocd = getattr(manifest, "WCH_OPENOCD", "/sw/wch-openocd/bin/openocd")
+    cfg = os.path.join(os.path.dirname(openocd), "wch-riscv.cfg")
+    return [openocd, "-f", cfg,
+            "-c", "program %s verify" % elffile,
+            "-c", "reset run",
+            "-c", "exit"]
+
+
 def openocd_interface(prog):
     """The `-f interface/... -c adapter serial ...` half of an OpenOCD
     command line, from the manifest's programmer entry. The HID backend
@@ -273,6 +299,11 @@ def cmd_flash(args):
         if not os.path.isfile(os.path.join(ROOT, elffile)):
             die("no %s after the build" % elffile)
         argv = openocd_args(prog, elffile, spec["target_cfg"])
+    elif spec["flash"] == "wch_openocd":
+        elffile = os.path.join("build-cmake", preset, args.app + ".elf")
+        if not os.path.isfile(os.path.join(ROOT, elffile)):
+            die("no %s after the build" % elffile)
+        argv = wch_openocd_args(prog, elffile)
     else:
         hexfile = os.path.join("build-cmake", preset, args.app + ".hex")
         if not os.path.isfile(os.path.join(ROOT, hexfile)):

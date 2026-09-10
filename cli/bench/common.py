@@ -55,6 +55,12 @@ BOARD_TYPES = {
     "g031k8": {"project": "stm32g0", "preset": "stm32g031k8-release",
                "mcu": "stm32g031k8", "flash": "openocd",
                "target_cfg": "target/stm32g0x.cfg"},
+    # The CH32V006K8 (QingKe V2C, RV32EC): the RISC-V target, written by
+    # WCH's OpenOCD fork through a WCH-Link - a different program from
+    # the SWD paths' OpenOCD, hence its own mechanism (flash.py's
+    # wch_openocd_args) and its own path in the manifest (WCH_OPENOCD).
+    "v006k8": {"project": "ch32v00x", "preset": "ch32v006k8-release",
+               "mcu": "ch32v006k8", "flash": "wch_openocd"},
 }
 
 
@@ -183,6 +189,9 @@ USB_PROGRAMMERS = {
     "03eb": "Atmel",
     "04d8": "Microchip",
     "0483": "STMicro",     # the Nucleo boards' on-board ST-LINK
+    "1a86": "WCH",         # a WCH-Link in RISC-V mode (8010); the same
+                           # vendor id is every CH340 console's, but a
+                           # CH340 is a tty, not a probe (see below)
 }
 
 
@@ -201,6 +210,8 @@ def usb_programmers():
         vid = attr("idVendor").lower()
         if vid not in USB_PROGRAMMERS:
             continue
+        if vid == "1a86" and attr("idProduct").lower() not in ("8010", "8012"):
+            continue   # a CH340 serial bridge, not a WCH-Link
         found.append((vid, attr("idProduct"), attr("product") or "?",
                       attr("serial") or "(no serial)"))
     return found

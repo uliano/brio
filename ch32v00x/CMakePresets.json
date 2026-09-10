@@ -1,0 +1,29 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "ch32v006k8-release",
+            "displayName": "CH32V006K8 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v006k8-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32V00X_MCU": "ch32v006k8"
+            }
+        },
+        {
+            "name": "ch32v006k8-debug",
+            "displayName": "CH32V006K8 (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v006k8-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CH32V00X_MCU": "ch32v006k8"
+            }
+        }
+    ],
+    "buildPresets": [
+        { "name": "ch32v006k8-release", "configurePreset": "ch32v006k8-release" },
+        { "name": "ch32v006k8-debug", "configurePreset": "ch32v006k8-debug" }
+    ]
+}
