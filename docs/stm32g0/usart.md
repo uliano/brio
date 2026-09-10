@@ -562,7 +562,7 @@ neither LPUART, so the synchronous row of table 184 still cuts
 USART-vs-LPUART and not FULL-vs-BASIC; and PRESC still takes a value and
 reads it back on a BASIC instance while the transmitter then emits
 NOTHING (90 us of nine zero bits at /1 and no frame at all at /16), which
-is the same finding on a second die.
+is the same finding on another die.
 
 **THE WAKE LINE FOLLOWS THE COLUMN AND NOT THE INSTANCE NUMBER**: with
 USART3 BASIC here, `usart_exti_line(3)` is 0xFF and the part has three

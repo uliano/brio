@@ -46,12 +46,18 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   quirks); next to it ONE document per peripheral in the shape
   docs/README.md prescribes (documents of record -> what the silicon
   does -> types and verbs -> how to use it, one example per use ->
-  bench findings -> for provisional ones, "Not covered yet"). Only
-  INCOMPLETE docs are marked: PROVISIONAL banner + closing "Not
-  covered yet" (driver gaps kept distinct from implemented-but-not-
-  bench-verified); a complete doc has NO banner and no gap list -
-  never mark a doc complete while it still lists gaps. The state of
-  the driver work is readable in the docs map. The Multislope assessment (every
+  bench findings -> "Not covered yet"). No document carries a banner:
+  maturity is a property of the PLATFORM, stated once in README.md's
+  target table (`supported` / `in bring-up`). Every document closes
+  with "Not covered yet" as TWO LISTS - driver gaps, each with its
+  REASON (a wire, a peer board, a meter, a supply; born with its first
+  user; declined because ...) kept distinct from implemented-but-not-
+  bench-verified, each with what would measure it - and a "gap" the
+  document's own findings cover is deleted; a document with nothing in
+  either list has no such section. The public voice names a silicon by
+  its PART and never by an ordinal (no "second/third silicon"), and no
+  desk position (board A..G) appears outside bench.md. The state of the
+  driver work is readable in the docs map. The Multislope assessment (every
   acrobatic piece maps to fixed routes + tasks on resources + config
   structs; the 64-cycle snapshot stays in the ISR body) lives in
   memory and in the track entry below, not in docs.
@@ -182,10 +188,11 @@ comments justifying wrong restrictions. The antidote, in practice:
   either has a guard in the code or sits in "Not covered yet".
 - **Docs are a reference for the CURRENT version** (rules:
   docs/README.md): no history, no dates, no work narrative, no app
-  names (test suites excepted); only INCOMPLETE docs are marked
-  (PROVISIONAL + "Not covered yet", driver gaps separate from
-  implemented-but-not-bench-verified); doc and code move in the same
-  change. Never mark a doc complete while it lists gaps.
+  names (test suites excepted); no banner, "Not covered yet" as two
+  lists with a reason on every item (driver gaps separate from
+  implemented-but-not-bench-verified), nothing listed that the
+  document's own findings cover; doc and code move in the same
+  change.
 - **When the user refines the method, write it to memory in the same
   session** - the next context must start from the agreed method, not
   regress to the instinctive minimum.
@@ -319,8 +326,25 @@ gets its dated home in `docs/design/` when taken.
   a forward-looking design position and stays where "X is the
   precedent" goes; and a document may name APPARATUS - a reference
   suite and the peer firmware it talks to - but not a probe, which is
-  disposable (docs/README.md carries the rule). NEXT: the gap lists and
-  what replaces PROVISIONAL.
+  disposable (docs/README.md carries the rule). THE GAP-LIST
+  RECONCILIATION DONE 2026-09-10, BY FABLE'S OWN HAND with the user
+  reading every list (four commits, one per stratum plus the sweep):
+  every target document and the two design storage pages under the
+  new rule - no banner, two lists, a reason on every item, what the
+  findings cover deleted - with FEATURE GAPS FALSIFIED BY THE TREE
+  ITSELF in some forty places (drivers declared absent that exist:
+  PWR, PAC, SUPC, EVSYS, MTB, the journal, the meter AO; "compile-only"
+  parts that ran whole suites; "never routed" codes three suites
+  route; a BUILT timebase listed under "Not covered yet"; a refusal
+  presented as a measurement; two map lines the map never had), the
+  stm32g0 per-part sections renamed BY PART on the user's ruling (no
+  ordinals, no desk letters in the public part - memory
+  public-voice-no-ordinals), the stale `bench.py` / `uart_stress.py`
+  citations retargeted, and seven console strings moved as declared
+  movers (token-identical with literals blanked). The E/G "compile-
+  checked only" line left the twelve samc21 documents that repeated a
+  platform fact. NEXT: the remaining realizations tables, then the
+  public/private cut.
 
 - **Borrowed, phase 2 (debug epoch).** `Borrowed<T, Lease::dispatch>`
   is a plain pointer today. Planned: in debug builds an 8-bit lender

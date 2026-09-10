@@ -38,7 +38,7 @@ than plumbing:
   `write_cell` the program unit, and they are separate constants because
   the word "page" is vendor-contested: 512 and 2 on an AVR Dx, 2048 and
   8 on an STM32G0, rows and pages again on a SAM C21. Code that assumes
-  one number is code that is wrong on the second target.
+  one number is code that is wrong on the next target.
 - **A program unit is written ONCE between erases.** The contract says
   so, and the allocator obeys it everywhere - which is what keeps
   ECC-guarded flash (the G0's double-word) happy without a special case.

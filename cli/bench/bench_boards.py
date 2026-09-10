@@ -96,7 +96,7 @@
 
 BOARDS = {
     "E": {
-        # The third architecture (2026-09-02): an ST Nucleo-G0B1RE
+        # The STM32G0 stratum's bench chip: an ST Nucleo-G0B1RE
         # (MB1360) - STM32G0B1RE, Cortex-M0+, 512 KB dual-bank flash,
         # 144 KB SRAM, DBGMCU_IDCODE 0x10016467 (DEV_ID 0x467 = G0B1/G0C1,
         # REV_ID 0x1001 = silicon revision Z in ES0548's table 2), read
@@ -119,7 +119,7 @@ BOARDS = {
         "programmer": {"type": "openocd_stlink", "serial": "0670FF534871754867182752"},
     },
     "F": {
-        # The SECOND SILICON of the third architecture: an ST Nucleo-G071RB.
+        # The x1 line's other LQFP64 part: an ST Nucleo-G071RB.
         # Its board number is NOT recorded here because it was never
         # verified, and the morpho numbering that would follow from it is
         # therefore not to be assumed either: EVERY WIRE ON THIS BOARD IS
@@ -150,7 +150,7 @@ BOARDS = {
         "programmer": {"type": "openocd_stlink", "serial": "066FFF534871754867235316"},
     },
     "G": {
-        # The second silicon's OTHER HALF: an ST Nucleo-G031K8, a Nucleo-32
+        # The LQFP32 part: an ST Nucleo-G031K8, a Nucleo-32
         # (MB1455; it carries the six bus wires to E - docs/bench.md's
         # "The G0-to-G0 bus link"). STM32G031K8, Cortex-M0+, 64 KB
         # single-bank flash, 8 KB SRAM, LQFP32: DBGMCU_IDCODE 0x10036466

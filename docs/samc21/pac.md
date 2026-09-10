@@ -232,7 +232,7 @@ Driver gaps - features of ch. 11 not built:
 - **No guard type and no policy.** See "The design position" above.
   Whatever brio grows here is born with its first user.
 - **No `util/` concept.** Nothing target-independent speaks write
-  protection, and nothing here proposes a contract until a second family
+  protection, and nothing here proposes a contract until another family
   says what the portable shape is - the more so because erratum 1.13.3
   shows the guarantee is not uniform even on this one.
 - **The ERR interrupt is exposed and never used.** Flags, an enable and

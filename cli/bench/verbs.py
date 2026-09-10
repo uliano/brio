@@ -37,7 +37,7 @@
 #  are OBSERVABILITY ONLY: firmware never goes in through them, they only
 #  carry the suite's verdicts back.
 #
-#  The campaign shape: board A = the DUT running a test suite, board B = a
+#  The two-board shape: one board = the DUT running a test suite, the other = a
 #  scriptable instrument peer (clock stretching, NACK injection, arbitration).
 #  `duo` is that shape; with one board on the desk it cannot yet be exercised.
 import argparse

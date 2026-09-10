@@ -887,8 +887,9 @@ void td_identity() {
             serial_matches = false;
         }
     }
-    bench.verdict("the factory die serial matches the one board C carries in "
-                  "cli/bench/bench_boards.py - THE BOARD IS THE BOARD",
+    bench.verdict("the factory die serial matches the one the bench manifest "
+                  "(cli/bench/bench_boards.py) carries for this board - THE BOARD "
+                  "IS THE BOARD",
                   serial_matches);
     bench.verdict("and it is not a blank or an erased word",
                   serial_words.word[0] != 0u &&

@@ -17,21 +17,21 @@ realizations: `AvrSleepSite` over `Sleep` in `avrdx/sleep.hpp`,
 and `Stm32g0SleepSite`, `Stm32g0TimedSleepSite` and
 `Stm32g0LptimTimedSleepSite` over `Pwr` in `stm32g0/sleep.hpp`.
 
-**The model has a second silicon under it, and it needed no change.**
+**The model holds on the SAM C21 with no change.**
 On the SAM C21 the vote round, the unanimity rule, the `PowerLock`
 ceilings, the deadline guard and the first-event-after-wake contract
 all run on the real kernel with two voters, with `util/power.hpp`
-untouched. Two things the second target did do is prove out: the
+untouched. Two things that family did prove out: the
 never-deeper mapping is no longer the identity (that family's deepest
 stop is STANDBY, so `deep` maps to it and `armed()` reports what was
 really taken), and the duty the section below places on a platform's
 idle path turned out to cost nothing there - PM.SLEEPCFG already IS
 the armed mode, so the hook takes it by not touching it. What the
-second target adds is a target-level restriction the model does not
+SAM C21 adds is a target-level restriction the model does not
 express: its kernel tick stops in standby, so an application there may
 only ask for standby with no time event armed (`docs/samc21/platform.md`).
 
-**A third silicon, still with no change.** On the STM32G0 the
+**And on the STM32G0, still with no change.** There the
 `SleepSite`'s two verbs absorbed everything that family asks of a
 sleeper - a SYSCLK restore after a Stop (the part comes back on
 HSI16, 5.3 of its manual) and a kernel-ticker pause across it - with
@@ -39,7 +39,7 @@ no new member of the concept; the vote round, the deadline guard and
 the first-event-after-wake contract ran unmodified, and that last
 convention is more load-bearing there than anywhere: without the
 wake path's `SleepRequested{none}` the clock would stay at 16 MHz and
-the tick paused. Two frictions the third target recorded, neither a
+the tick paused. Two frictions that family recorded, neither a
 contradiction: the never-deeper rule can COLLAPSE two rungs onto one
 silicon state (`light` maps to Sleep like `none`, because the only
 mode between Sleep and Stop wants the whole program at 2 MHz), and

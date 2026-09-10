@@ -504,7 +504,7 @@ could not place this turn); and it must never sleep PAST a deadline it
 was given - waking at or after it, late is legal and early is not, the
 time contract's own "at least". The loop detects it by `requires` and
 otherwise compiles `idle()` alone, so the two shapes of platform cost
-each other nothing. The STM32G0 is the first target with such a
+each other nothing. The STM32G0 is the one target with such a
 timebase ([../stm32g0/platform.md](../stm32g0/platform.md)).
 
 `PanicRecord` is defined in `platform.hpp`, not in `panic.hpp`, on

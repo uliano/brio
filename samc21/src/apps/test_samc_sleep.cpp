@@ -1068,7 +1068,7 @@ void td_standby() {
     // The bill is dominated by the clock chain's restart; letter f
     // itemizes it.
     bench.verdict("and the bill is microseconds, not the milliseconds a crystal "
-                  "restart costs on the first target",
+                  "restart costs where the crystal stops for the sleep",
                   cost_stby - cost_idle < 1'000'000);
 
     // A second wake source, and the one that proves the watchdog runs in
@@ -1366,8 +1366,8 @@ void tf_survivors() {
     // bill at all: a 24 MHz crystal that DID stop would cost about
     // 1.77 ms to come back, out of every deep sleep.
     print(serial, "  so a standby on this board costs NO crystal restart, where "
-          "the same crystal on the first target cost 1.77 ms out of every deep "
-          "sleep", crlf);
+          "a crystal that stops for the sleep costs its restart - milliseconds - "
+          "out of every deep sleep", crlf);
     // The status flag is a separate trap and gets its own verdict: it is
     // set at the wake in every leg, so it could not have distinguished
     // the cases even if they had differed.

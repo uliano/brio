@@ -7,7 +7,7 @@ active object that hands filled buffers to subscribers.
 ## Why this exists before its second implementation
 
 Every other util contract earned its shape the same way: built against
-one target, then validated by a second silicon implementing it untouched
+one target, then validated by another silicon implementing it untouched
 (the ring, the clock contracts, `FlashMedia`, `SleepSite`, `PwmChannel`,
 `MeterSource`, the analog pair). Block streams invert the order on
 purpose. Waveform playback and burst capture are generic applications -

@@ -2,16 +2,16 @@
 
 An energy experiment on the question brio answered differently on its
 two targets: the AVR stratum has `DynamicClock` (rebase fan-out, the
-app speaks Hz); the SAM stratum deliberately does not (ruling: per-
+app speaks Hz); the SAM stratum deliberately does not (the position: per-
 peripheral GCLK channels make "one rate for everything" an AVR
 assumption - the question reopens with its first real consumer). This
 experiment measures, on the AVR - the target that CAN do both - whether
 adapting the CPU clock to a variable compute load ever beats a fixed
-clock plus sleep, in joules. The verdict feeds the SAM ruling and the
-third target's design.
+clock plus sleep, in joules. The verdict feeds the SAM position and the
+STM32G0's design.
 
 This directory is SELF-CONTAINED: both firmware halves, their shared
-wire contract, the campaign driver, the analysis, and this document.
+wire contract, the run driver, the analysis, and this document.
 Nothing under docs/ references it (house rule: experiments document
 themselves).
 
@@ -51,7 +51,7 @@ A plausible LiPo product with two genuinely different compute regimes:
   (filter + CRC-16), deadline T_proc. A missed deadline DISQUALIFIES
   the run - it is not "efficient".
 
-Three strategies, one DUT binary (`avrdx/energy_logger.cpp`):
+Three strategies, one DUT binary (`experiments/energy/avrdx/energy_logger.cpp`):
 
 1. `sprint` - fixed 24 MHz; CPU in standby, the ADC free-running with
    its window comparator as the only wake. Peripherals watch.
@@ -60,7 +60,7 @@ Three strategies, one DUT binary (`avrdx/energy_logger.cpp`):
    switch/rebase cost (measured by its own letter) and the idle floor.
 3. `static_low` - the minimum fixed clock that meets T_proc (4-8 MHz),
    standby + window-compare watching like sprint. The true SAM-side
-   alternative: if it beats pace everywhere, the ruling stands.
+   alternative: if it beats pace everywhere, the position stands.
 
 Map axes: lambda in 0.2..50 Hz x W in 1e4..1e6 cycles, only points
 feasible for ALL strategies. Corner letters: lambda->0 (the watching
@@ -68,7 +68,7 @@ floors) and duty-100% (measures the true I0 and k of THIS die).
 
 ## The instrument: the SAM C21 is three things at once
 
-`samc21/energy_meter.cpp` on bench board C:
+`experiments/energy/samc21/energy_meter.cpp` on the SAM C21 board:
 
 - THE WORLD: its DAC (PA02) plays a seeded burst schedule as a real
   analog stimulus into the DUT's ADC pin - same seed, identical event
@@ -202,7 +202,7 @@ VERIFIED per run: the meter prints the first schedule arrivals derived
 from the seed, run.py compares them against its own generator - a
 golden vector in every log; divergence invalidates the run.
 
-## Campaign driver and analysis
+## Run driver and analysis
 
 - `run.py` - drives both consoles via bin/brio + the bench
   manifest. Human-centric: live per-slice progress (mean/max current,

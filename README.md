@@ -10,9 +10,9 @@ first. Written in C++23 (gnu++23), header-only, in one flat namespace
 The kernel knows nothing about the silicon it runs on. Today it runs
 on **AVR DA/DB** (an AVR128DB48 on the bench), on **SAM C21**
 (Cortex-M0+, an ATSAMC21J18A) and on **STM32G0** (Cortex-M0+ from the
-other vendor, an STM32G0B1RE on a Nucleo-64) - the second and the
-third architecture each compiled the kernel and its services
-unchanged, which was the design's promise.
+other vendor, an STM32G0B1RE on a Nucleo-64) - each of the two
+Cortex-M0+ families compiled the kernel and its services unchanged,
+which was the design's promise.
 
 ## What an application looks like
 

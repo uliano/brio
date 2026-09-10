@@ -143,7 +143,7 @@ def msd_flash(prog, binfile, app):
     image is running is its banner on the console, which is what `run`
     reads anyway.
 
-    This kind exists because position G's debug port can go silent until
+    This kind exists because a Nucleo-32's debug port can go silent until
     the board is replugged (the manifest carries the record): the
     MSD is then the one way in,
     and it is also why nothing here halts the core, clears DBGMCU_CR or

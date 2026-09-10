@@ -398,7 +398,7 @@ Driver gaps (not built):
   `ToggleFlipFlop` equivalent of the AVR's, no debounce, no PWM gate.
   They are born with their first user, as everywhere in this stratum.
 - **A `util/` contract.** Nothing in `util/` speaks logic fabric, and
-  nothing here proposes one until a second family's CCL says what the
+  nothing here proposes one until another family's CCL says what the
   portable shape is.
 - **The N-variant input codes** ALT2TC and ASYNCEVENT are named in the
   vocabulary and refused on this family. If a C20/C21 N ever arrives,

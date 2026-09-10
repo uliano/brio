@@ -2465,7 +2465,7 @@ void tl_six_instances() {
 void banner() {
     print(serial, crlf,
           "test_stm32_tim - the G0 timers (RM0444 ch. 21..25): PwmChannel "
-          "and MeterSampler on the third silicon, wireless, clk=",
+          "and MeterSampler on this silicon, wireless, clk=",
           SysClock::hz, " Hz", crlf);
     bench.menu();
 }

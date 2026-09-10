@@ -134,7 +134,7 @@ choice (a frugal watcher on a fixed clock beat the adaptive program by
 27 %). On a family without voltage scaling, that is the argument for
 leaving the clock alone. The STM32G0 HAS a second voltage range and a low-power
 regulator whose whole point is running at 2 MHz cheaply - the one lever
-the first target lacked - so there the question is open, not answered.
+the AVR lacks - so there the question is open, not answered.
 
 **The STM32G0 has one, and its rate is a tuple.** The consumer that
 opened it is the energy experiment's own STM32G0 instance (the SAM at

@@ -117,7 +117,7 @@ readable at a glance.
 | `avrdx/` | `kernel/`, `util/` | everything that knows `avr/io.h`: drivers + AvrPlatform |
 | `host/` | `kernel/`, `util/` | the test "target": HostPlatform |
 
-Two targets never meet in one binary, so the second target's stratum
+Two targets never meet in one binary, so another target's stratum
 is a sibling of `avrdx/` and the flat namespace stays collision-free.
 One library, not one per stratum: discipline comes from this rule,
 multi-library would add ceremony without enforcement. Shared
@@ -238,7 +238,7 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   a RISC-V core, on a chip with per-pin alternate functions instead of
   per-timer routing: the answer decides what goes above the concept
   boundary (little) and what stays in the target file (most). Nothing
-  written for AVR may make the second target harder than it already is.
+  written for AVR may make another target harder than it already is.
 - **A core stratum sits between util/ and the families that share
   a core.** `armv6m/` holds what ARM designed and every Cortex-M0/M0+
   vendor ships unchanged - the NVIC and PRIMASK guard, the SysTick

@@ -105,7 +105,7 @@ enum class Op : uint8_t {
     arb = 0x11,         ///< combined: a client AND a host racing the DUT for the bus
     coll = 0x12,        ///< a client sharing ONE address with the DUT's own (S4)
     hold_sda = 0x13,    ///< a stuck client: SDA held low from PORT, released by SCL
-    quiet = 0x14,       ///< the TWI released entirely: board B off the wire
+    quiet = 0x14,       ///< the TWI released entirely: the peer off the wire
 
     ack = 0x40,
     nak = 0x41,

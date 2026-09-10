@@ -1431,8 +1431,8 @@ void tk_kernel() {
 
     bus_ao_live = false;
     bench.verdict("NOT ONE LINE of util/i2c_bus.hpp, util/bus_master.hpp or "
-                  "kernel/ was changed for this architecture - the vocabulary's "
-                  "second silicon ran the contract as written",
+                  "kernel/ was changed for this architecture - the vocabulary ran "
+                  "the contract as written on this silicon",
                   true);
 }
 

@@ -156,7 +156,7 @@ volatile uint16_t pit_irqs = 0;
 volatile uint16_t pad_irqs = 0;
 volatile uint16_t waker_irqs = 0;
 volatile uint16_t rtc_irqs = 0;
-volatile uint16_t wake_irqs = 0;      ///< PORTE: board B's stimulus on PE2
+volatile uint16_t wake_irqs = 0;      ///< PORTE: the peer's stimulus on PE2
 volatile uint16_t ccl_irqs = 0;       ///< the CCL LUT interrupt (test n)
 volatile uint16_t sfd_irqs = 0;       ///< USART4 RXSIF: a start bit in standby
 volatile uint16_t twis_addr = 0;      ///< TWI client: address matches
@@ -871,7 +871,7 @@ void tg_vreg() {
 //    is an event that latches the stopwatch into a capture register.
 //    The number that comes back is therefore
 //
-//      B's stimulus -> this chip's wake-up -> ISR prologue -> the store
+//      the peer's stimulus -> this chip's wake-up -> ISR prologue -> the store
 //
 //    in B's CLK_PER ticks (24 MHz nominal from ITS OSCHF - a per-cent
 //    class reference, ample for microsecond-to-millisecond figures). The

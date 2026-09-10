@@ -86,7 +86,7 @@ enum class Op : uint8_t {
     report = 0x03,     ///< ack + Report of the last action
     gaps = 0x04,       ///< ack + Gaps page starting at payload[0]
 
-    pulse = 0x10,      ///< N stimulus edges on PE2, each timed to A's echo
+    pulse = 0x10,      ///< N stimulus edges on PE2, each timed to the DUT's echo
     capture = 0x11,    ///< arm the stopwatch and wait for ONE echo (wire sanity)
     sfd_byte = 0x12,   ///< one byte on the PE0 one-wire at a foreign baud
     twi_write = 0x13,  ///< one host write tenure on the desk I2C bus, timed

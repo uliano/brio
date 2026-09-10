@@ -27,7 +27,7 @@
 //     second implementation exactly so that friction would show up as a
 //     concept that does not fit. These static_asserts are that
 //     measurement: DmaLoopEngine is a BlockPlayer and DmaPingPongEngine a
-//     BlockSource at every width, unchanged, on the third architecture -
+//     BlockSource at every width, unchanged, on this architecture -
 //     and DmaTxEngine is NEITHER, which is what makes the two concepts
 //     say something (test/family_stm32g0/neg/dma_tx_engine_is_no_source.cpp
 //     is the refusal side of the same claim).

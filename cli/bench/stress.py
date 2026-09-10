@@ -30,7 +30,7 @@ ASLEEP needs - the bytes have to arrive while it is in Stop, not before
 it gets there and not after it has given up.
 
 THE LEGS STOP AT THE BRIDGE'S CEILING. A USB-serial bridge carries only
-what it carries: the ST-LINK's virtual COM port on board E is byte-exact
+what it carries: a Nucleo's ST-LINK virtual COM port is byte-exact
 to 921600 in both directions, corrupt at 2 Mbaud, and at 3 Mbaud seven
 bytes of twelve thousand arrive. Pumping AT such a rate costs more than
 the wasted bytes - the operating system goes on delivering the queue
@@ -62,7 +62,7 @@ USE
     brio stress --letters h --repeat 5
     brio stress --port /dev/ttyUSB0 --letters k
 
-ON THE STM32G0 (board E, test_stm32_serial), whose console is the
+ON THE STM32G0 (test_stm32_serial), whose console is the
 ST-LINK's own virtual COM port and is therefore addressed by-id:
 
     brio flash E test_stm32_serial
@@ -74,7 +74,7 @@ and test_stm32_dma's letter u, whose ladder stops at that bridge's own
 ceiling - with letter w, and only with --beyond-vcp, for the rungs above:
 
     brio flash E test_stm32_dma
-    brio stress --letters u --port <board E's console>
+    brio stress --letters u --port <the Nucleo's console>
     brio stress --letters w --beyond-vcp --port <the same>
 """
 import argparse
@@ -90,7 +90,7 @@ DEFAULT_PORT = "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0"
 CONSOLE_BAUD = 115200
 LFSR_SEED = 0x12345678
 # The highest rate any bridge on this desk is MEASURED to carry byte-exact
-# (board E's ST-LINK VCP; the CH340s reach 3 Mbaud and say so with
+# (the ST-LINK VCP; the CH340s reach 3 Mbaud and say so with
 # --beyond-vcp). Above it a leg is passive unless asked for.
 VCP_CEILING = 921600
 
@@ -119,7 +119,7 @@ def default_ceiling(port):
     """The rate this BRIDGE is measured to carry byte-exact, or None.
 
     It is a property of the wire and not of the board, so it is decided
-    by which port was opened: board E's console is the ST-LINK's own
+    by which port was opened: a Nucleo's console is the ST-LINK's own
     virtual COM port, measured corrupt above 921600 (docs/stm32g0/
     dma.md), while the CH340s on the AVR and SAM boards carry 3 Mbaud
     (docs/samc21/sercom.md) and get no ceiling at all. `--ceiling` and
@@ -335,7 +335,7 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", default=DEFAULT_PORT,
-                    help="the board's console (default: bench board C)")
+                    help="the board's console (default: the manifest's SAM board)")
     ap.add_argument("--letters", default="efghijklmnp",
                     help="which suite letters to drive, in order (the "
                          "default is the SAM's test_samc_uart, which is what "
@@ -349,7 +349,7 @@ def main():
                          "byte-exact; a leg announced above it is run "
                          "PASSIVELY (the port follows the rate and drains, "
                          "but nothing is pumped). The default is 921600 for "
-                         "board E's ST-LINK virtual COM port, measured, and "
+                         "the ST-LINK virtual COM port, measured, and "
                          "none for any other port - the CH340s carry 3 Mbaud")
     ap.add_argument("--beyond-vcp", action="store_true",
                     help="lift that ceiling and pump at whatever the board "

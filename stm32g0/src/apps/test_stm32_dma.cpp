@@ -1789,7 +1789,7 @@ void ti_timer_round_trip() {
 
 // ---- j: BlockRelay inside a real kernel ---------------------------------------
 //
-// The util level, unchanged, on the third architecture: an AO that lends
+// The util level, unchanged, on this architecture: an AO that lends
 // each filled block to its subscribers for exactly one dispatch and hands
 // it back on the next. The source is the ping-pong engine over the paced
 // TIM3 -> TIM2->CNT chain, so every block CHECKS ITSELF - consecutive

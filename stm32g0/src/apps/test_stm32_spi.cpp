@@ -2822,7 +2822,7 @@ void tj_kernel() {
           ", busy ", busy_votes, " ok=", busy_vote ? 1 : 0, " with ", busy_replies,
           " of ", kl::queued, " transactions done", crlf);
     bench.verdict("an IDLE bus votes ok on a PrepareSleep and a BUSY one votes "
-                  "AGAINST it - the arbiter is a voter on the third target too, "
+                  "AGAINST it - the arbiter is a voter on this target too, "
                   "and the four transactions the busy vote was taken across all "
                   "finished afterwards",
                   idle_votes == 1u && idle_vote && busy_votes == 1u && !busy_vote &&

@@ -1682,8 +1682,8 @@ void tg_kernel() {
     Cs::set();
     Cs::output();
     bench.verdict("NOT ONE LINE of util/spi_bus.hpp, util/bus_master.hpp or kernel/ "
-                  "was changed for this architecture - the arbiter's second silicon "
-                  "ran the contract as written",
+                  "was changed for this architecture - the arbiter ran the contract "
+                  "as written on this silicon",
                   true);
 }
 

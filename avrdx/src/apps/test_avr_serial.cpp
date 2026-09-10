@@ -2042,7 +2042,7 @@ void tq_sync() {
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
     if (shared_line()) {
-        print(serial, "  SKIPPED: a synchronous link needs XCK wired across (A.PE2-B.PE2) "
+        print(serial, "  SKIPPED: a synchronous link needs XCK wired across (PE2 to PE2) "
                       "AND data on the crossed pair; this desk has one shared wire", crlf);
         return;
     }
@@ -2425,7 +2425,7 @@ void tu_lbme_pad() {
 
 void tw_onewire() {
     print(serial, "w one-wire on a SHARED line - REQUIRES THE TWO TXD PADS JUMPERED "
-                  "(A.PE0 - B.PE0)", crlf);
+                  "(PE0 to PE0)", crlf);
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
     if (!shared_line()) {
