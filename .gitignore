@@ -40,3 +40,6 @@ docs/*/vendor/extracts/
 # the notes - never published, never a submodule (cli/bench/manifest.py
 # looks for private/bench_boards.py first).
 private/
+
+# Personal settings for the assistant (Claude Code loads it; never published).
+CLAUDE.local.md

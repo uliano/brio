@@ -121,9 +121,15 @@ find_program(AVR_OBJDUMP avr-objdump PATHS "${AVR_TOOLCHAIN_DIR}/bin" NO_DEFAULT
 
 # --- Flash over UPDI (Atmel-ICE). -P usb:<serial> disambiguates which
 #     Atmel-ICE when more than one is attached (bin/brio does the same
-#     via its manifest); default here is board A's probe (bin/brio
-#     list). Override with -DAVR_PROBE_SERIAL=... for board B or another desk.
-set(AVR_PROBE_SERIAL "J42700051207" CACHE STRING "Atmel-ICE serial to flash/debug through (brio list)")
+#     from its manifest, which is the way to flash a desk with several
+#     boards). Empty = the only probe attached; set it with
+#     -DAVR_PROBE_SERIAL=<serial> (bin/brio list prints them).
+set(AVR_PROBE_SERIAL "" CACHE STRING "Atmel-ICE serial to flash/debug through (empty: the only one attached)")
+if(AVR_PROBE_SERIAL STREQUAL "")
+    set(AVR_PROBE_PORT "usb")
+else()
+    set(AVR_PROBE_PORT "usb:${AVR_PROBE_SERIAL}")
+endif()
 
 # --- The build id every image carries: avrdx/nvm_flash.hpp records it in
 #     every map version of a flash NvHeap, where it is a DIAGNOSTIC and
@@ -218,7 +224,7 @@ function(avr_add_app name)
 
     add_custom_target(${name}-upload
         COMMAND ${AVR_TOOLCHAIN_DIR}/bin/avrdude -p ${AVR_MCU} -c atmelice_updi
-            -P usb:${AVR_PROBE_SERIAL}
+            -P ${AVR_PROBE_PORT}
             -U flash:w:$<TARGET_FILE_DIR:${name}>/${name}.hex:i
         DEPENDS ${name}
         VERBATIM

@@ -76,7 +76,15 @@ find_program(ARM_SIZE arm-none-eabi-size PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEF
 find_program(ARM_OBJDUMP arm-none-eabi-objdump PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 
 set(STM32G0_OPENOCD "/sw/openocd/bin/openocd" CACHE FILEPATH "OpenOCD with ST-LINK + stm32g0x support")
-set(STM32G0_PROBE_SERIAL "0670FF534871754867182752" CACHE STRING "ST-LINK serial to flash/debug through")
+# `adapter serial` disambiguates which ST-LINK when more than one Nucleo
+# is attached; empty = the only one (bin/brio takes the serial from its
+# manifest instead).
+set(STM32G0_PROBE_SERIAL "" CACHE STRING "ST-LINK serial to flash/debug through (empty: the only one attached)")
+if(STM32G0_PROBE_SERIAL STREQUAL "")
+    set(STM32G0_ADAPTER_SERIAL "")
+else()
+    set(STM32G0_ADAPTER_SERIAL -c "adapter serial ${STM32G0_PROBE_SERIAL}")
+endif()
 
 set(STM32G0_NVHEAP_BUILD_ID 0)
 file(GLOB_RECURSE _nvheap_id_sources CONFIGURE_DEPENDS
@@ -154,7 +162,7 @@ function(stm32_add_app name)
     add_custom_target(${name}-upload
         COMMAND ${STM32G0_OPENOCD}
             -f interface/stlink.cfg
-            -c "adapter serial ${STM32G0_PROBE_SERIAL}"
+            ${STM32G0_ADAPTER_SERIAL}
             -f target/stm32g0x.cfg
             -c "program $<TARGET_FILE:${name}> verify"
             -c "reset run"

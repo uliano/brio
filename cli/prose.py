@@ -22,10 +22,10 @@ Plus the repo's own ASCII rule (every byte <= 127) on every file it
 reads, as an ERROR.
 
 Scope: comments of every .hpp/.cpp under brio/, the three build
-projects' src/ trees and experiments/; every .md under docs/ and the
-top-level README.md. Not read, on purpose: CLAUDE.md (a working log by
-design), private/ (the desk diary), docs/*/vendor/ (datasheet revisions
-carry dates of record), third_party/.
+projects' src/ trees and experiments/; every .md under docs/, the
+top-level README.md and CLAUDE.md (the manual is public text too). Not
+read, on purpose: private/ (the desk diary), docs/*/vendor/ (datasheet
+revisions carry dates of record), third_party/.
 
 Usage: brio prose [paths...]   (no paths = the whole scope)
 Exit status: 1 on any error, 0 otherwise. Review items never fail.
@@ -39,7 +39,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SOURCE_ROOTS = ["brio", "avrdx/src", "samc21/src", "stm32g0/src", "experiments"]
 DOC_ROOTS = ["docs"]
-DOC_FILES = ["README.md"]
+DOC_FILES = ["README.md", "CLAUDE.md"]
 EXCLUDE_DIRS = ("third_party", "build-cmake", ".git", "private")
 EXCLUDE_FILES = ()
 EXCLUDE_GLOBS = ("/vendor/",)
@@ -53,6 +53,11 @@ ERROR_PATTERNS = [
     (re.compile(r"@(brief|date|param|return|author|tparam|class|struct|file)\b"), "a Doxygen tag"),
     (re.compile(r"\bValidated on:"), "a per-file validation list"),
     (re.compile(r"platformio", re.I), "PlatformIO"),
+    # The public voice: a silicon is named by its part, never by the
+    # order it arrived in, and a desk position is the private diary's.
+    (re.compile(r"\b(first|second|third|fourth) (silicon|target|architecture|die)\b", re.I),
+     "an ordinal silicon (name the part)"),
+    (re.compile(r"\b(board|position)s? [A-G]\b(?![A-Za-z0-9_])"), "a desk position (board A..G)"),
 ]
 
 REVIEW_PATTERNS = [

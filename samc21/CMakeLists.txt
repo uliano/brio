@@ -75,9 +75,15 @@ find_program(ARM_OBJDUMP arm-none-eabi-objdump PATHS "${ARM_TOOLCHAIN_DIR}/bin" 
 #     probe (the at91samd flash driver auto-probes the geometry from the
 #     DSU DID). `adapter serial` disambiguates which Atmel-ICE when more
 #     than one is attached - same concern as the AVR project's
-#     AVR_PROBE_SERIAL; default is the SAM board's probe on this desk.
+#     AVR_PROBE_SERIAL. Empty = the only probe attached (bin/brio takes
+#     the serial from its manifest instead).
 set(SAMC21_OPENOCD "/sw/openocd/bin/openocd" CACHE FILEPATH "OpenOCD with CMSIS-DAP + at91samd support")
-set(SAMC21_PROBE_SERIAL "J42700049508" CACHE STRING "Atmel-ICE serial to flash/debug through")
+set(SAMC21_PROBE_SERIAL "" CACHE STRING "Atmel-ICE serial to flash/debug through (empty: the only one attached)")
+if(SAMC21_PROBE_SERIAL STREQUAL "")
+    set(SAMC21_ADAPTER_SERIAL "")
+else()
+    set(SAMC21_ADAPTER_SERIAL -c "adapter serial ${SAMC21_PROBE_SERIAL}")
+endif()
 
 # --- The build id every image carries: samc21/nvm_flash.hpp records it in
 #     every map version of a flash NvHeap, where it is a DIAGNOSTIC and
@@ -164,7 +170,7 @@ function(sam_add_app name)
     add_custom_target(${name}-upload
         COMMAND ${SAMC21_OPENOCD}
             -f interface/cmsis-dap.cfg
-            -c "adapter serial ${SAMC21_PROBE_SERIAL}"
+            ${SAMC21_ADAPTER_SERIAL}
             -f target/at91samdXX.cfg
             -c "program $<TARGET_FILE:${name}> verify reset exit"
         DEPENDS ${name}

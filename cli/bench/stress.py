@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""uart_stress - the host end of test_samc_uart.
+"""brio stress - the host end of test_samc_uart and of the STM32G0 serial suites.
 
 The suite's own console is the wire under test, so every streaming letter
 needs a peer that can pump a known pattern, verify what comes back, and
@@ -57,23 +57,21 @@ is a count of bytes, never a rate.
 USE
 
     brio flash C test_samc_uart
-    brio stress --letters efghijklmnp
+    brio stress --board <board> --letters efghijklmnp
 
-    brio stress --letters h --repeat 5
+    brio stress --board <board> --letters h --repeat 5
     brio stress --port /dev/ttyUSB0 --letters k
 
 ON THE STM32G0 (test_stm32_serial), whose console is the
 ST-LINK's own virtual COM port and is therefore addressed by-id:
 
-    brio flash E test_stm32_serial
-    brio stress --letters ywv \
-        --port /dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_\
-0670FF534871754867182752-if02
+    brio flash <board> test_stm32_serial
+    brio stress --letters ywv --board <board>
 
 and test_stm32_dma's letter u, whose ladder stops at that bridge's own
 ceiling - with letter w, and only with --beyond-vcp, for the rungs above:
 
-    brio flash E test_stm32_dma
+    brio flash <board> test_stm32_dma
     brio stress --letters u --port <the Nucleo's console>
     brio stress --letters w --beyond-vcp --port <the same>
 """
@@ -84,9 +82,8 @@ import time
 try:
     import serial
 except ImportError:
-    sys.exit("uart_stress: pyserial is missing (pip install pyserial)")
+    sys.exit("brio stress: pyserial is missing (pip install pyserial)")
 
-DEFAULT_PORT = "/dev/serial/by-path/pci-0000:67:00.0-usb-0:1.2:1.0-port0"
 CONSOLE_BAUD = 115200
 LFSR_SEED = 0x12345678
 # The highest rate any bridge on this desk is MEASURED to carry byte-exact
@@ -334,15 +331,17 @@ class Board:
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--port", default=DEFAULT_PORT,
-                    help="the board's console (default: the manifest's SAM board)")
+    ap.add_argument("--board", default=None,
+                    help="the manifest position whose console to drive "
+                         "(the console path and the by-id/by-path question "
+                         "are the manifest's)")
+    ap.add_argument("--port", default=None,
+                    help="the console device, when it is not a manifest board's")
     ap.add_argument("--letters", default="efghijklmnp",
                     help="which suite letters to drive, in order (the "
-                         "default is the SAM's test_samc_uart, which is what "
-                         "DEFAULT_PORT points at; the STM32G0's "
+                         "default is the SAM's test_samc_uart; the STM32G0's "
                          "test_stm32_serial wants 'ywv', test_stm32_dma "
-                         "wants 'u' - or 'w' with --beyond-vcp - all with an "
-                         "explicit --port)")
+                         "wants 'u' - or 'w' with --beyond-vcp)")
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--ceiling", type=int, default=None,
                     help="the highest rate this bridge is trusted to carry "
@@ -360,6 +359,12 @@ def main():
                     help="do not echo the board's console")
     args = ap.parse_args()
 
+    if args.port is None:
+        if not args.board:
+            sys.exit("brio stress: say which console - --board <manifest position> "
+                     "or --port <device>")
+        from cli.bench import common
+        args.port = common.console_path(args.board)
     if args.beyond_vcp:
         ceiling = None
     elif args.ceiling is not None:
