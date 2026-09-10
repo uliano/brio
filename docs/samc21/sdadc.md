@@ -1,14 +1,5 @@
 # SDADC - Sigma-Delta Analog-to-Digital Converter (SAM C21)
 
-> **PROVISIONAL.** The whole of chapter 39 is implemented and most of it
-> is bench-verified, but this board cannot put a DC voltage other than a
-> rail across a differential pair: the DAC does not reach an SDADC input
-> (it reaches this converter only as a REFERENCE), so every non-rail
-> input here is a PWM waveform averaged by the converter's own decimation
-> filter. What that cannot answer, plus sleep, the external reference at
-> anything but a rail and the analog control's undocumented fields, is in
-> "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 39, the SDADC
 characteristics of tables 45-26, 45-27, 45-28 and 45-29, and the event
 tables of ch. 29 - and errata DS80000740S, read on the **E/G/J row at
@@ -385,7 +376,7 @@ down to 139.
 
 ## Bench findings
 
-Board C, ATSAMC21J18A rev F, VDD about 5.15 V (the suite refines it to
+The ATSAMC21J18A on the bench, rev F, VDD about 5.15 V (the suite refines it to
 5197 mV from the bandgap), wireless. CLK_SDADC 6 MHz off GCLK generator 0
 unless stated; times are ruled by the board's 24 MHz **crystal**, since
 OSC48M is 5100 ppm slow. Counts are of the SIGNED 16-bit datum
@@ -676,13 +667,6 @@ the same vector.
 
 Driver gaps:
 
-- **The converter as a WAKE source**, and erratum 1.8.7's SleepWalking
-  obligation on SWTRIG: exercising the second needs a DMA write during
-  a standby, which is [dmac.md](dmac.md)'s own gap - the sleep
-  measurement above sidesteps it by free-running, which is the
-  erratum's own escape (a free-running converter writes no trigger).
-  `CTRLA.ONDEMAND` is written and read back and nothing distinguishes
-  it here.
 - **`ANACTRL.CTLSDADC` and `ANACTRL.BUFTEST` stay DECLINED, and this is
   the reason rather than an omission.** 39.8.21 calls the first
   "Debug/Characterization" and lists no values for it, and gives the
@@ -693,11 +677,16 @@ Driver gaps:
 - **`REFCTRL.REFRANGE`** is exposed and proven to be a real field, and
   no document of record says what it selects. No measurement has looked
   for an effect.
-- **The E and G packages** are compile-only, as everywhere in this
-  stratum: only the J has a board.
 
 Implemented but not bench-verified:
 
+- **The converter as a WAKE source**, and erratum 1.8.7's SleepWalking
+  obligation on SWTRIG: exercising the second needs a DMA write during
+  a standby, which is [dmac.md](dmac.md)'s own gap - the sleep
+  measurement above sidesteps it by free-running, which is the
+  erratum's own escape (a free-running converter writes no trigger).
+  `CTRLA.ONDEMAND` is written and read back and nothing distinguishes
+  it here.
 - **`DBGCTRL.DBGRUN`** is written and its survival across a software
   reset measured; its effect under a halted debugger is untested.
 - **`util/analog_sampler.hpp`** has NOT been given this converter. Its

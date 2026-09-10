@@ -1,10 +1,5 @@
 # PAC - Peripheral Access Controller (SAM C21)
 
-> **PROVISIONAL.** The chapter's whole register surface is built, but the
-> driver is MECHANISM ONLY: there is no guard type, no policy and no
-> `util/` contract, and nothing in brio turns write protection on. What
-> is missing and why is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 11 - and
 errata DS80000740S, which has **no PAC section at all**: not one of items
 1.1..1.25 names this chapter. What exists instead is a set of items in

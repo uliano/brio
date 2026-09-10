@@ -1,15 +1,5 @@
 # Platform - what the kernel stands on (SAM C21)
 
-> **PROVISIONAL.** The waking half (critical section, idle hook,
-> SysTick timebase, NVIC, crt) and the STOPPING half (PM's three sleep
-> modes, the `SleepSite` and the power model above it) are both here;
-> the FAILING half has its own document, [reset.md](reset.md). What
-> remains is in "Not covered yet" - above all a measurement this bench
-> cannot make (sleep current) and the RTC-backed timebase that would
-> lift the standby restriction stated below. "Sleep, peripheral by
-> peripheral" is the transversal half: what the rest of the die does
-> while the core is stopped.
-
 Documents of record: SAM C20/C21 data sheet DS60001479M - the
 Cortex-M0+ processor summary ch. 4 with ARM's ARMv6-M ARM behind it,
 PM (power manager) ch. 19 - and errata DS80000740S (1.8.13, 1.8.14,
@@ -515,9 +505,9 @@ between. The one-way sentence is about the CLOCK inside the block and
 not about the mask that gates it; the driver's comment stands as a
 warning and the measurement is what a caller can rely on.
 
-## Not covered yet
+## The timebase that survives standby
 
-**The timebase that survives standby: BUILT** (`SamTimedSleepSite`,
+**BUILT** (`SamTimedSleepSite`,
 samc21/sleep.hpp; suite `test_samc_timebase`). The RTC on OSCULP32K is
 the ALARM (a COMP0 wake placed on `ticks_to_next()`, rounded UP) and
 the WITNESS (the frozen span, converted DOWN against a rate the caller
@@ -541,38 +531,31 @@ the manager, even with `SleepRequested{none}`) is LOAD-BEARING with
 this site and stated on it. `SamSleepSite` is the plain site for
 programs that accept the restriction.
 
+## Not covered yet
+
 Driver gaps (not built):
-- **PAC.** Chapter 19's registers are optionally PAC write-protected
-  (19.5.7) and brio has no PAC driver, so the protection is left as
-  reset leaves it - off.
+- **Write protection of chapter 19's registers** (19.5.7): `samc21/
+  pac.hpp` is mechanism only and nothing in brio turns protection on
+  ([pac.md](pac.md)), so it is left as reset leaves it - off.
 - **SLEEPONEXIT**, the ARM feature 19.6.3.3.1 mentions (re-enter the
   armed mode when the CPU leaves the lowest-priority ISR). It would be
   a different shape of idle path and no AO wants it yet.
-- MTB trace and the MPU.
-- DIVAS (the memory-mapped divider; gcc emits software division
-  unless taught otherwise).
+- **The MPU**: nothing here needs memory protection; born with its
+  first user. (The MTB trace is built - [mtb.md](mtb.md) - and DIVAS
+  as the toolchain's division is ruled out, [divas.md](divas.md).)
 
 Implemented but not bench-verified:
-- `break_here()` with no debugger attached. It is REACHED
-  deliberately - `test_samc_platform` letter i runs a panic() through
-  it - but what it does depends on DHCSR.C_DEBUGEN: with a probe
-  attached the core HALTS on the BKPT instead of faulting, and that
-  bit survives every software reset (table 18-1 resets the debug logic
-  only on a power-on or external reset). See [reset.md](reset.md),
-  "the BKPT hazard".
 - `Nvic::set_pending` as a software interrupt source; priorities
   other than the reset default (every line runs at 0 today, so
   handler-vs-handler preemption is unexercised).
 - A `BasicTicker` rate other than 1000 (the 125 Hz instantiation is
   compile-checked by the family TU only).
-- **Sleep CURRENT.** Everything above is time, because this bench has
-  no supply meter on the board. What a standby actually saves - and
-  what BBIASHS, VREGSMOD and erratum 1.8.5 do to it - is a manual
-  measurement with an ammeter in the supply, and nothing here claims
-  it.
-- **Sleep current, again**, and it is the biggest gap in the section
-  above: every "keeps running" there is a COUNT and never a microamp.
-  Erratum 1.3.1 and erratum 1.8.5 are both consumption claims and both
+- **Sleep CURRENT**, the biggest gap of the two sleep sections:
+  everything above is time, and every "keeps running" is a COUNT and
+  never a microamp, because this bench has no supply meter on the
+  board. What a standby actually saves - and what BBIASHS, VREGSMOD and
+  erratum 1.8.5 do to it - is a measurement with an ammeter in the
+  supply; errata 1.3.1 and 1.8.5 are both consumption claims and both
   are therefore out of reach.
 - **The DMAC across a standby** (25.6.7 and erratum 1.8.7's list of
   registers a SleepWalking DMA write may not reach). Nothing here

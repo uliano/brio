@@ -1,14 +1,5 @@
 # RTC - Real-Time Counter (SAM C21)
 
-> **PROVISIONAL.** The whole of chapter 24 is implemented and
-> bench-verified in all three modes. What is NOT here is any TASK over
-> it (an alarm clock, a slow periodic source, a power-pass timebase -
-> each is a policy and is born with its first user), anything about
-> sleep and wake, and one measurement the board cannot make: the
-> frequency correction's per-step linearity, because the trim's whole
-> range is smaller than the short-term wander of every clock this board
-> can give the RTC. The list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 24, plus
 21.6.7 for the clock selection that lives in another chapter - and
 errata DS80000740S items 1.16.1, 1.16.2, 1.16.3 and 1.8.7, of which
@@ -399,12 +390,12 @@ flags together. 24.6.2.3's note is exact.
 ## Not covered yet
 
 Driver gaps:
-- **No tasks at all**, deliberately: an alarm clock, a slow periodic
-  source and a power-manager timebase are each a policy, and each is
-  born with its first user.
-- **The RTC is not the kernel timebase.** `samc21/ticker.hpp` stays on
-  SysTick and says why; the RTC is what is wanted when SysTick stops in
-  standby.
+- **No alarm-clock or slow-periodic task**, deliberately: each is a
+  policy, born with its first user. The one program-level user of this
+  counter is `SamTimedSleepSite` (`samc21/sleep.hpp`), which arms COMP0
+  as the alarm and reads the counter as the witness across a standby
+  while SysTick stays the kernel's ticker ([platform.md](platform.md),
+  "The timebase that survives standby").
 - **Erratum 1.8.7's caveat** - that a DMA write to RTC.COUNT during
   standby SleepWalking may not land - is stated and unexercised: it
   needs the DMAC across a sleep, which is [dmac.md](dmac.md)'s own gap.
@@ -426,9 +417,8 @@ Implemented but not bench-verified:
   is already proven by the two readings of the same word.
 - **`Rtc::release()`** and `bus_clock(false)`, which would make the
   block unreachable, are never called by the suite.
-- **The XOSC1K / XOSC32K clock selects**, because this board carries no
-  32 kHz crystal ([osc32kctrl.md](osc32kctrl.md) says the same of the
-  oscillator itself).
+- **The XOSC1K / XOSC32K clock selects**, which wait for the 32 kHz
+  pass of [osc32kctrl.md](osc32kctrl.md).
 - **`debug_run(true)` under an actual halted debugger.** The bit is set
   and proven to survive a software reset; nobody has halted the core to
   watch the counter keep going.

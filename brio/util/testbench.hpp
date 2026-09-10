@@ -20,7 +20,7 @@
  *       FAIL  <name>
  *       -> N pass, M fail              (that letter's tally, blank line)
  *     ALL: N pass, M fail              (the all-key's total)
- *     >                                (the prompt bench.py waits for)
+ *     >                                (the prompt bin/brio waits for)
  *
  * A suite prints its OWN measurements between verdicts with plain
  * print(): the bench is about the scaffolding, not about what a test has
@@ -65,7 +65,7 @@
 
 namespace brio {
 
-/// The letter menu, the verdict lines and the two tallies bench.py reads.
+/// The letter menu, the verdict lines and the two tallies bin/brio reads.
 /// `max_letters` bounds the static table; registration beyond it fails.
 template <ByteSink Sink, uint8_t max_letters = 24>
 class TestBench {
@@ -146,7 +146,7 @@ public:
      * Run what `c` names. A registered letter prints its title, runs
      * with the counters cleared and closes with its tally. The all-key
      * runs every letter marked in_all, in REGISTRATION order, and closes
-     * with the ALL: line bench.py's default marker waits for.
+     * with the ALL: line bin/brio's default marker waits for.
      *
      * Nothing at all is printed for an unregistered key: what to say
      * about it is the app's business.
@@ -173,7 +173,7 @@ public:
         return Totals{passed_, failed_};
     }
 
-    /// The "> " bench.py waits for after the ALL: marker.
+    /// The "> " bin/brio waits for after the ALL: marker.
     void prompt() const { print(Sink{}, "> "); }
 
     /// The tally of the letter that just ran (or is running).

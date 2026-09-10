@@ -1,10 +1,5 @@
 # EVSYS - the Event System (SAM C21)
 
-> **PROVISIONAL.** The fabric is built and bench-verified end to end.
-> What is deliberately NOT here is the vocabulary - the tables of 95
-> generators and 47 users - and SleepWalking. The list is in "Not covered
-> yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 29 - and
 errata DS80000740S items 1.12.1, 1.12.3 and 1.12.4, **all three live on
 every silicon revision including this one** (1.12.2 is revisions B..E and
@@ -181,18 +176,18 @@ Driver gaps (deliberate):
   measured on the propagation path (see "Bench findings"); an EVSYS
   overrun or detection interrupt leaving a standby is not.
 - **The channel interrupt as a program's event hook.** `isr()` and the
-  flags exist and are exercised, but nothing in the framework yet turns
-  an EVSYS interrupt into a kernel event.
+  flags exist and are exercised, but nothing in the framework turns an
+  EVSYS interrupt into a kernel event; born with its first user.
 
 Implemented but not bench-verified:
 
-- **Most real generators.** Every event in *this* suite is a software
-  one, so `CHANNELn.EVGEN` is only ever written as zero here. The EIC
-  publishes generator codes, and `test_samc_eic` exercises EVGEN, the
-  resynchronized and asynchronous paths and rising edge detection with a
-  real hardware generator - the other ninety-odd codes wait for their
-  own drivers.
-- Falling and both-edge detection; `overrun` actually being raised
+- **The generator codes no driver spends.** Every event in *this*
+  suite is a software one, so `CHANNELn.EVGEN` is only ever written as
+  zero here; the real generators are measured by the drivers that
+  publish them - the EIC, the AC, the TC and TCC, the RTC, the three
+  converters, the TSENS, the CCL - each in its own suite, with the DMAC,
+  the PORT and the same peripherals as users. A code whose peripheral
+  has no driver here is compile-checked at most.
+- Falling-edge detection on its own (both-edge detection runs in the
+  AC's and the TCC's suites); `overrun` actually being raised
   (provoking one needs a generator faster than its user).
-- Operation on the E and G variants: compile-checked only. Nothing in
-  this chapter varies by package.

@@ -226,7 +226,7 @@ verdicts), which reboots the board six times and resumes from a
   through `ResetReporter` comes back with its code and context byte
   intact; a UDF three instructions later comes back as `kernel_fault`
   with the context the fault body was given. With C_DEBUGEN cleared by
-  `bench.py`, `panic()`'s closing BKPT escalates into the fault handler
+  `bin/brio`, `panic()`'s closing BKPT escalates into the fault handler
   - so the reset may come from either path, and the record survives
   only because `hard_fault_reset()` refuses to overwrite a valid one.
 - **WDGA is cleared by the reset** (29.5.1 confirmed): the boot after a

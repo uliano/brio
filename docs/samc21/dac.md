@@ -1,13 +1,5 @@
 # DAC - Digital-to-Analog Converter (SAM C21)
 
-> **PROVISIONAL.** The whole of chapter 41 is implemented and most of it
-> is bench-verified through the ADC and the AC on the same die,
-> dithering and both interrupts included. What is NOT verified is the
-> external reference VREFA (the pin is on PA03 and nothing on this board
-> drives it within table 45-30's range) and the voltage pump, which
-> switches itself at a supply this board never visits. The list is in
-> "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 41, the DAC
 characteristics of tables 45-30, 45-31 and 45-32, and the event tables
 of ch. 29 - and errata DS80000740S, read on the **E/G/J row at revision
@@ -233,7 +225,7 @@ boundary over thousands of laps.
 
 ## Bench findings
 
-Board C, ATSAMC21J18A rev F, VDD about 5.15 V, wireless. Voltages are
+The ATSAMC21J18A on the bench, rev F, VDD about 5.15 V, wireless. Voltages are
 ADC counts of 4096 against VDDANA unless stated; times are ruled by the
 board's 24 MHz crystal.
 
@@ -434,7 +426,9 @@ carries that information, and leaves EMPTY to whoever feeds the buffer.
 
 ## Not covered yet
 
-Driver gaps:
+Driver gaps: none - chapter 41 is implemented whole.
+
+Implemented but not bench-verified, each with what it waits for:
 - **VREFA** (`DacRef::vrefa`): the pin is PA03 and `claim_vrefa<P>()`
   hands it over, but nothing on this board drives it, and driving it
   from PORT would put it at VDD - outside table 45-30's
@@ -455,8 +449,6 @@ Driver gaps:
   here is what the DAC's output does electrically while the SDADC loads
   it: the disturbance is seen through the ADC watching the pad, and the
   load itself is not characterised.
-
-Implemented but not bench-verified:
 - **`DBGCTRL.DBGRUN`** is written and read back at the offset the device
   header gives (0x14, against the register summary's 0x18 - the header
   wins, measured); its effect under a halted debugger is untested.

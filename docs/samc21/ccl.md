@@ -1,13 +1,5 @@
 # CCL - Configurable Custom Logic (SAM C21)
 
-> **PROVISIONAL.** The whole register file is implemented and
-> bench-verified - every INSEL source, both output stages, the edge
-> detector, all four sequential modules, both event directions and all
-> four errata. What is not covered is standby operation (CTRL.RUNSTDBY
-> is written and read back but no LUT has been watched across a sleep),
-> the E and G variants (compile-only), and a `util/` usage type. The
-> list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet **DS60001479M** ch. 37
 (the CCL), ch. 29 (the event system's tables), ch. 6 (the I/O
 multiplexing) and silicon errata **DS80000740S** 1.7.1..1.7.4 and
@@ -419,10 +411,11 @@ Implemented but not bench-verified:
   them are measured (the synchronizer and the filter - see "Bench
   findings"); an edged LUT and a flip-flop pair in a standby are the
   same sentence and are not separately witnessed.
-- **The E and G variants**, compile-only: the pad map is asserted per
-  variant out of the device header (`test/family_samc21/ccl.cpp`) and two
-  negatives refuse the pads those packages lack, but no such board
-  exists here. LUT3 with no pins has never been *run*.
+- **LUT3 with no pins of its own** (the E and G packages), which has
+  never been *run* - reachable only through events, a link or a
+  sequencer there; the pad map is asserted per variant out of the device
+  header (`test/family_samc21/ccl.cpp`) and two negatives refuse the
+  pads those packages lack.
 - **The glitch filter as a glitch filter.** Its delay is measured
   exactly; its rejection is not, because nothing on this bench produces
   a glitch narrower than a GCLK_CCL period into a CCL input.

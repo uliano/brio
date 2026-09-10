@@ -1,11 +1,5 @@
 # RSTC and WDT - why the program is running, and how to end it (SAM C21)
 
-> **PROVISIONAL.** Both chapters are built and bench-verified, and the
-> fault-to-breadcrumb path with them. What is left out is the SUPC side
-> of the reset story - BODVDD and BODCORE are sources named here and
-> configured in a chapter that has no driver - and the two always-on
-> behaviours no test may provoke. The list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 18 (RSTC) and
 ch. 23 (WDT), with the fuse mapping in 9.3 and the reset-effect matrix in
 table 18-1 - and errata DS80000740S, where **neither module has an item**:
@@ -207,7 +201,7 @@ panic<SamPlatform, ResetReporter>(PanicCode::assert_failed, my_context);
 
 From `test_samc_platform`, whose letter `i` sits outside `z`: it
 reboots the board six times and must be asked for by name, with
-`bench.py run C i --expect="->"`. Nothing to wire, and nothing costs
+`brio run <board> i --expect="->"`. Nothing to wire, and nothing costs
 endurance.
 
 - **The fuse row and the watchdog registers agree**, field by field:
@@ -266,19 +260,18 @@ endurance.
 
 Driver gaps (not built):
 
-- **SUPC** (ch. 22) entirely, and with it the configuration behind two of
-  the six reset causes: BODVDD and BODCORE are named by `ResetCause` and
-  set up by a chapter that has no driver. The user row's BODVDD level,
-  disable and action fields are read by `samc21/nvm.hpp` and acted on by
-  nobody.
 - **Vector table relocation** (VTOR): a bootloader would want it, nothing
-  else does.
+  else does; born with its first user.
 - **The external reset pin** as a source this code can provoke - only the
   operator can pull it, so `ResetCause::external` is decoded and never
   produced here.
 
 Implemented but not bench-verified:
 
+- **The two brown-out causes.** `ResetCause::bodvdd` and `bodcore` are
+  decoded here and never produced: their detectors are
+  [supc.md](supc.md)'s, and nothing on the bench forces a brown-out (the
+  supply is not a program's to dip).
 - **Always-on mode.** `WdtConfig::always_on` is written and read back in
   the family fixture and never set on hardware: it can be undone only by
   a power-on reset, so a test that armed it would leave a board resetting
@@ -288,5 +281,3 @@ Implemented but not bench-verified:
   off.
 - `Reset::warm()` as a decision: the RTC surviving a user reset is
   table 18-1's claim, and nothing here observes it.
-- Operation on the E and G variants: compile-checked only. Neither module
-  varies by package.

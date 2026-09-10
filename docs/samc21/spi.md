@@ -1,11 +1,5 @@
 # SERCOM SPI (SAM C21)
 
-> **PROVISIONAL.** Both roles are built and bench-verified against a
-> real second board - an AVR128DB48 peer and a second SAM C21 - and
-> util's bus vocabulary runs over the host
-> engine unchanged. What is deliberately still open is listed under
-> "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 32 (over the
 shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 `samc21/spi.hpp` over `Sercom<n>`'s instance facts ([sercom.md](sercom.md)
@@ -274,8 +268,14 @@ A client answering a stream (the one-ahead pump):
 
 ## Not covered yet
 
+Driver gaps (not built): **DMA engine slots on `SpiClient`** - the peer
+drives its channels through the raw engines, and a slot on the task
+waits for a device-shaped user.
+
+Implemented but not bench-verified:
+
 - Sleep: RUNSTDBY on silicon, SSDE as a wake source, erratum 1.17.20's
-  standby cost.
+  standby cost - no letter sleeps this bus.
 - On silicon: SSDE/SSL, address recognition (FORM = 0x2 - refusals are
   compile-checked, matching is not bench-verified), 9-bit characters
   through a real two-board transfer (loop-back only), IBON = 0's
@@ -294,19 +294,22 @@ A client answering a stream (the one-ahead pump):
 - The 24 MHz loop-back rung's attribution (transmit vs receive
   sampling at f_ref/2) - the wired ladder brackets it between 6 and
   8 MHz for the full link, but the single-board question stands.
-- `SercomPadPin`'s pin-reaches-pad claim is still the caller's
-  (sercom.md's open device-table question, unchanged here).
-- THE PEER'S SELECT-WAIT WEDGE, neutralized but not explained. A peer
-  that opens its exchange window by spinning on the select READ can
-  enter a persistent state - until its board is reset, about once in
-  five `z` runs - where that read never fires while its SPI HARDWARE
-  demonstrably shifts: the host reads the preloads and then the echo,
-  the software window reads nothing. On the wire the select is real
-  (driven low over SWD, and the wedged peer's own status reads it LOW),
-  so the wedge lives between the pad and that wait. The exchange loop
-  therefore polls RXC directly - a byte can only arrive while selected,
-  and apply_cfg has just cleared the buffers - and samples the select
-  purely as TELEMETRY the Report carries (aux1..aux3), which removes
-  the symptom without explaining it. What the state is remains
-  unhunted, a question on the AVR side of the link (the peer plus its
-  pin read path) with the telemetry in place to catch it in the act.
+
+Stated, not enforced: `SercomPadPin`'s pin-reaches-pad claim is the
+caller's (sercom.md's open device-table question, unchanged here).
+
+Open, and outside this driver: THE PEER'S SELECT-WAIT WEDGE,
+neutralized but not explained. A peer that opens its exchange window by
+spinning on the select READ can enter a persistent state - until its
+board is reset, about once in five `z` runs - where that read never
+fires while its SPI HARDWARE demonstrably shifts: the host reads the
+preloads and then the echo, the software window reads nothing. On the
+wire the select is real (driven low over SWD, and the wedged peer's own
+status reads it LOW), so the wedge lives between the pad and that wait.
+The exchange loop therefore polls RXC directly - a byte can only arrive
+while selected, and apply_cfg has just cleared the buffers - and
+samples the select purely as TELEMETRY the Report carries
+(aux1..aux3), which removes the symptom without explaining it. What
+the state is remains unhunted, a question on the AVR side of the link
+(the peer plus its pin read path) with the telemetry in place to catch
+it in the act.

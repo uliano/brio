@@ -1,12 +1,5 @@
 # SUPC - Supply Controller (SAM C21)
 
-> **PROVISIONAL.** Configuration, status and the bandgap loop are
-> implemented and bench-verified. What is NOT here is anything that
-> forces a brown-out - the supply is not a program's to dip - so the
-> RESET and INT actions are configured and read back but never fired;
-> and the standby behaviour of all three blocks belongs to the power
-> pass. The list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 22, the
 NVM user row mapping of table 9-4, and the BODVDD and regulator
 characteristics of tables 45-18 and 45-20 - and errata DS80000740S
@@ -193,11 +186,10 @@ Driver gaps:
   crossing and nothing on this board can make one while the CPU is
   stopped. What that costs is measured rather than assumed - see "Bench
   findings" - and forcing a brown-out stays out of scope.
-- **`Vreg::run_standby`** (erratum 1.8.14's workaround) and
-  `VrefConfig::run_standby` / `on_demand` (table 22-1): all written and
-  read back, none observed across a sleep. The regulator's own bit is
-  exercised for a different purpose in [platform.md](platform.md),
-  where it moved nothing measurable.
+- **`VrefConfig::run_standby` / `on_demand`** (table 22-1): written
+  and read back, never observed across a sleep. (`Vreg::run_standby`,
+  erratum 1.8.14's workaround, IS measured across one: it moves the
+  wake time by nothing, [platform.md](platform.md).)
 - **BODCORE is read-only by design** and will stay so: its calibration
   is a production value the user row marks DO NOT CHANGE.
 - No level-to-millivolt conversion is offered, because the datasheet's
@@ -207,8 +199,6 @@ Driver gaps:
 Implemented but not bench-verified:
 - `BodPrescaler` codes other than div2, and the sampling latency they
   buy.
-- `Vref::level()` 4.096 V as a working reference for a converter - it
-  was only used as a comparison level here.
 - `Supc::bus_clock(false)`, which would make the block unreachable and
   has never been exercised.
 - BODVDD hysteresis is configured and read back, never measured: at

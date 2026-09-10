@@ -1,14 +1,5 @@
 # Clock - OSCCTRL, GCLK, MCLK (SAM C21)
 
-> **PROVISIONAL.** All three OSCCTRL roots are implemented and
-> bench-verified as RESOURCES - the internal oscillator, the external
-> crystal and the FDPLL - and the CPU has been run from the DPLL and
-> brought back. What is still single-rooted is the TASK:
-> `Clock<source, hz>` implements `ClockSource::internal` only, because
-> which root CLK_MAIN takes, and who is told when it moves, is the
-> `DynamicClock` design decision this target has not taken. The list
-> is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M - GCLK ch. 16,
 MCLK ch. 17, OSCCTRL ch. 20, the DPLL and RC characteristics of tables
 45-52 and 45-57, the flash wait-state table 45-41 - and errata
@@ -381,7 +372,8 @@ Implemented but not bench-verified:
 - Rates other than 48 MHz for the main clock (the arithmetic is
   compile-checked; only the undivided rate has run).
 - The DPLL's `DpllFilter`, `low_power` and `wake_up_fast`, and the
-  XOSC32K reference (this board has no 32 kHz crystal). Only the
-  default filter, lock-bypass and the XOSC/GCLK references have run.
+  XOSC32K reference (which waits for the 32 kHz pass of
+  [osc32kctrl.md](osc32kctrl.md)). Only the default filter, lock-bypass
+  and the XOSC/GCLK references have run.
 - `XoscConfig::automatic_gain` is written in a configuration the
   family fixture compiles, but no measurement distinguishes it.

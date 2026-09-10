@@ -1,12 +1,5 @@
 # TC - Timer/Counter (SAM C21)
 
-> **PROVISIONAL.** The whole chapter is built and bench-verified except
-> the N-variant capture modes (which this family's device header does not
-> even declare) and sleep. One measurement the suite deliberately
-> DECLINES to make is listed too: capture on an I/O pin cannot be given a
-> controlled edge on a board with no wires. The list is in "Not covered
-> yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 35 - and
 errata DS80000740S items 1.20.1 to 1.20.3, of which **one is this
 silicon**. Driver: `samc21/tc.hpp`. Family fixture
@@ -372,7 +365,3 @@ Implemented but not bench-verified:
 - **`count_down` with a capture action**, and **`debug_run`** beyond the
   bit being writable - a halted debugger is out of a console suite's
   reach.
-- **Operation on the E and G variants**: compile-checked only. The block
-  is identical across the family; what differs is which pads carry a
-  waveform output, and that is exactly what the family fixture asserts
-  per variant.

@@ -1,17 +1,5 @@
 # SERCOM - USART mode (SAM C21)
 
-> **PROVISIONAL.** The asynchronous, internal-clock, 16x-arithmetic
-> USART is implemented and bench-verified end to end - the console
-> personality - including the two OPTIONAL DMA engines (transmit and
-> receive, each compiling to zero when not named). The SPI and I2C
-> personalities (host and client, both) are BUILT and live in their own
-> headers and pages ([spi.md](spi.md), [i2c.md](i2c.md)); they reach
-> the registers through `Sercom<n>::spi_regs()` /
-> `i2cm_regs()`/`i2cs_regs()` and share this class's per-instance
-> facts. The USART chapter's own long tail (fractional baud,
-> synchronous mode, handshaking, LIN, IrDA, auto-baud) stays declared,
-> not built. The list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M - SERCOM
 common ch. 30 (the baud generator, 30.6.2.3 table 30-2), USART
 ch. 31 - and errata DS80000740S items 1.17.15 and 1.17.16, both
@@ -371,10 +359,13 @@ Driver gaps (not built):
   DBGCTRL policy (1.17.4: DBGSTOP does not actually halt
   transmission - the field is exposed, the erratum named).
 - A per-package pad table (which pins reach which pads): the same
-  device-table job the PORT driver leaves open.
+  device-table job [port.md](port.md) leaves open, born with its first
+  user.
 
 Implemented but not bench-verified:
 - `rebase()` (no dynamic clock exists on this target to drive it);
-  nine-bit frames (this transport's rings are bytes); instances other
-  than SERCOM5; `release()` beyond the suite's own transport handovers;
-  operation on the E/G variants (compile-checked only).
+  nine-bit frames (this transport's rings are bytes); the USART
+  personality on instances other than SERCOM5 (SERCOM1 and SERCOM3 run
+  the SPI and the I2C personalities on silicon, [spi.md](spi.md) and
+  [i2c.md](i2c.md), the USART only the console's instance); `release()`
+  beyond the suite's own transport handovers.

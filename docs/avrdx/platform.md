@@ -432,7 +432,7 @@ subtracted and interrupts masked.
 - **`break_here()` falls through as a plain NOP** with no debugger
   attached - the suite goes on running past it.
 - **A UPDI flash shows as `RSTFR` 0x20**, which is how a fresh boot
-  after `bench.py flash` is told apart from every other start.
+  after `brio flash` is told apart from every other start.
 
 ### The sleep modes
 

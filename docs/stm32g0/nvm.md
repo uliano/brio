@@ -392,7 +392,7 @@ coming back. Measured both ways: `test_stm32_nvm`'s three heap blocks
 came back byte-exact after `test_stm32_journal` had been flashed over
 bank 1, and the journal's six values came back after `test_stm32_nvm`
 had. That is what the `v` letter of each suite is for, and it is also why
-there is no way to wipe the storage from `bench.py`: `--erase` is refused
+there is no way to wipe the storage from `bin/brio`: `--erase` is refused
 on this target and nothing in the tree calls `mass_erase()`.
 
 ## On the STM32G071RB
@@ -426,7 +426,7 @@ asks for on this die as on the others.
 Driver gaps:
 
 - **Writing an option byte.** There is no OPTKEYR, OPTSTRT or OBL_LAUNCH
-  verb, on purpose (see above). Provisioning wants a `bench.py` verb over
+  verb, on purpose (see above). Provisioning wants a `bin/brio` verb over
   SWD, as the samc21's user row has.
 - **Setting WRP, PCROP or the securable area, and RDP.** Read-only decode
   only. Each of them is an option-byte write, and RDP Level 2 is one-way.

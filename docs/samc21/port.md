@@ -1,11 +1,5 @@
 # PORT (SAM C21)
 
-> **PROVISIONAL.** Direction, value, pulls, drive strength, the
-> peripheral-function handoff and the multi-pin engine are
-> implemented; what a pin CANNOT do here by design - sense edges and
-> raise interrupts - belongs to the EIC, a separate peripheral with its
-> own driver ([eic.md](eic.md)). The list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M, PORT ch. 28
 (the EIC, for contrast, is ch. 26). Driver: `samc21/pin.hpp`. The
 family fixture is `test/family_samc21/pin.cpp` plus the two port-C
@@ -147,8 +141,11 @@ brio::Pin<'B', 31>::function(brio::PinFunction::d, {.input_enable = true});
 ## Not covered yet
 
 Driver gaps (not built):
-- A `PinSet` analog (the AVR's cross-port mask type has no user here
-  yet) and the per-package pin-bonding tables.
+- A `PinSet` analog (a cross-port mask type has no user here yet; born
+  with its first) and a port-level bonding table - which pads a package
+  bonds at all. The reserve (`samc21/device_tables.hpp`) carries the
+  per-PERIPHERAL pad maps the drivers need and no general one; a
+  general one is born with its first user.
 - **CTRL's continuous input sampling** (28.8.1), which 28.6.5 requires
   for a pin read through the IOBUS. Nothing here reads a pin that way.
 - **The IOBUS window itself.** Reached in [dsu.md](dsu.md) for erratum
@@ -156,9 +153,12 @@ Driver gaps (not built):
   it, IN and CTRL read zero); this driver uses the APB addresses only.
 
 Implemented but not bench-verified:
-- Pulls (up and down), `strong_drive`, `configure_mask`/
-  `function_mask` over WRCONFIG, `release()` - all family-compiled,
-  none observed electrically yet.
+- `strong_drive` and the WRCONFIG multi-pin verbs `configure_mask`/
+  `function_mask`: family-compiled, and no suite spends them (a letter
+  configuring two pads in one store and reading both back would measure
+  the engine; the drive strength wants a load and a meter). The pulls
+  and `release()` are what every pad-driven letter of this stratum
+  stands on (above).
 - **Event inputs 1..3 and the SET / CLEAR actions**: input 0 carries the
   OUT and TGL measurements and input 1 the AC's stimulus, both with
   EVACT = OUT; SET and CLR are written, read back and never watched.

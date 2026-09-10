@@ -1,12 +1,5 @@
 # DMAC (SAM C21)
 
-> **PROVISIONAL.** The block, the twelve channels, memory-to-memory
-> transfers, mid-block harvesting with the erratum-1.10.4 validation,
-> and the four engines - two serial, two streaming - are implemented
-> and bench-verified. The CRC engine, linked descriptor lists, the
-> event system hooks and the standby sequence are declared, not built.
-> The list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 25 - NOT
 ch. 19, where an older revision's numbering put it - and errata
 DS80000740S items 1.10.1..1.10.4, the whole matrix re-read against
@@ -615,14 +608,16 @@ Driver gaps (not built):
   with EVACT `trigger` and EVIE set from a software event, so that
   path is silicon-tested. EVOE and EVOSEL - the DMAC as an event
   GENERATOR - and the other EVACT values remain untested from here.
-- QOSCTRL (left at reset), RUNSTDBY and the 25.6.7 standby sequence
-  (sleep on this target is [platform.md](platform.md)'s).
-- Trigger codes beyond the two SERCOM pairs - each arrives with the
-  driver that owns its peripheral.
+- QOSCTRL (left at reset), RUNSTDBY and the 25.6.7 standby sequence:
+  no letter streams DMA through a standby, and it is the one block
+  [platform.md](platform.md)'s transversal sleep section leaves
+  unmeasured.
+- Trigger codes no driver spends: the SERCOMs', the three converters',
+  the TSENS's and the timers' are measured with their drivers; a
+  peripheral with no driver here publishes none.
 
 Implemented but not bench-verified:
 - Step sizes beyond x1 and STEPSEL=source (the arithmetic is
   fixture-pinned, no bench letter walks a strided buffer).
 - Round-robin arbitration and DBGRUN (`DmacConfig` writes them; no
   letter measures them).
-- The E and G variants (compile-checked by the family fixture only).

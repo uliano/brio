@@ -1,11 +1,5 @@
 # TCC - Timer/Counter for Control Applications (SAM C21)
 
-> **PROVISIONAL.** The whole chapter is built and bench-verified except
-> the advanced capture actions, the debug-fault state and sleep. Two
-> errata are recorded as UNREPRODUCED rather than disproved - 1.21.7 and
-> 1.21.8 - and 1.21.5 is stated and not exercised. The list is in "Not
-> covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 36 - and
 errata DS80000740S items 1.21.1 to 1.21.11, of which **seven are live on
 this silicon**. Driver: `samc21/tcc.hpp`, with its per-instance and
@@ -544,10 +538,8 @@ throughout, no stream overran, and no write-back reading was refused
 Driver gaps (deliberate):
 
 - **CTRLA.DMAOS**, the one-shot DMA trigger of 36.6.5.1: a configuration
-  field only. The per-cycle trigger is bench-verified (above).
-- **The TCC as a WAKE source.** 36.6.6's counting half is measured (see
-  "Bench findings"); no TCC interrupt has ever left a sleep, and the
-  fault inputs in a standby are untouched.
+  field only, because the per-cycle trigger is what every stream here
+  wants (bench-verified, above); born with its first user.
 - **The debug fault.** `fault_on_debug()` sets DBGCTRL.FDDBD and
   `debug_fault_state()` reads STATUS.DFS, but staging a halted debugger
   is not something a console suite can do.
@@ -571,6 +563,9 @@ Not judged, and deliberately so:
 
 Implemented but not bench-verified:
 
+- **The TCC as a WAKE source.** 36.6.6's counting half is measured (see
+  "Bench findings"); no TCC interrupt has ever left a sleep, and the
+  fault inputs in a standby are untouched.
 - **The `alternate` fault source** (FCTRLn.SRC = ALTFAULT, one fault
   taking the other's state at the end of the previous period).
 - **The advanced capture actions** (CAPTMIN/CAPTMAX/LOCMIN/LOCMAX/

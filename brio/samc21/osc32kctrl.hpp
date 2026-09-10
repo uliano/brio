@@ -62,9 +62,9 @@
  * the column.
  *
  * NOT BUILT (docs/samc21/osc32kctrl.md carries the list): the CFD's event
- * output (EVCTRL.CFDEO), and XOSC32K itself is written and
- * family-compiled but cannot be exercised here because the bench board
- * carries no 32 kHz crystal.
+ * output (EVCTRL.CFDEO); and XOSC32K itself is written and
+ * family-compiled and has not run on silicon - it wants a board with a
+ * 32 kHz crystal.
  */
 
 #pragma once

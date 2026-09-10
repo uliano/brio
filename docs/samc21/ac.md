@@ -1,14 +1,5 @@
 # AC (SAM C21)
 
-> **PROVISIONAL.** The block, all four comparators in continuous and
-> single-shot mode, the VDD scaler, filters, hysteresis, the DAC and
-> bandgap negative inputs, both output routings, flags and interrupts,
-> BOTH WINDOWS, both event directions with their inversion, the 40.6.10
-> offset procedure and per-package input legality are built and
-> bench-verified. What remains is a window across a sleep, DBGCTRL
-> policy, and the two J-only pad inputs of the COMP2/3 pair. The list is
-> in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 40 and
 the electrical characteristics table 45-34 (whose note 4 states the
 propagation delay is measured on "ACOUT (AC direct output)" and
@@ -430,15 +421,17 @@ read-and-clear body returns the comparator's own bit.
 ## Not covered yet
 
 Driver gaps (not built):
-- **The window monitor in sleep.** 40.6.14's two sequences are measured
-  for a single comparator (see "Bench findings"); a WINDOW across a
-  standby, and 40.6.14's rule that both comparators of a pair must
-  share RUNSTDBY, are stated and unexercised.
-- **DBGCTRL policy.**
+- **A DBGCTRL policy** (whether a comparator keeps running under a
+  halted debugger): the bit is exposed and nothing chooses for it - a
+  halted core is out of a console suite's reach, and no user has asked.
 
 Implemented but not bench-verified:
+- **A window across a standby.** 40.6.14's two sequences are measured
+  for a single comparator (see "Bench findings"); a WINDOW across a
+  standby, and 40.6.14's rule that both comparators of a pair must
+  share RUNSTDBY, are stated and unexercised - the same letter with a
+  pair armed would measure them.
 - **AIN6 and AIN7** (PB05 and PB06), the two J-only inputs of the
   COMP2/3 pair: their per-package legality is compile-asserted per
   variant and neither pad has ever carried a comparison - the pair's
   measured facts all come through AIN4, which is the DAC's own pad.
-- **Operation on the E and G variants**: compile-checked only.

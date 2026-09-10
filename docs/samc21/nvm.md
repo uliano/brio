@@ -1,10 +1,5 @@
 # NVMCTRL - Non-Volatile Memory Controller (SAM C21)
 
-> **PROVISIONAL.** The chapter's programming, protection and description
-> surfaces are built and bench-verified; what is deliberately left out is
-> either a one-way hazard (the security bit) or waits for another driver.
-> The list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 27, with the
 memory map and the factory areas in ch. 9 (9.3 user row, 9.4 and 9.5
 calibration, 9.6 serial number) and the timing and endurance numbers in
@@ -411,7 +406,7 @@ Implemented but not bench-verified:
   the sleep modes that give it meaning.
 - `Nvm::isr()` from a real handler - every command in the suite is
   awaited by polling READY, and the vector is deliberately unbound.
-- Operation on the E and G variants, and on the 15/16/17 flash sizes:
-  compile-checked only. The geometry comes from the device header, so a
-  smaller part is expected to work, and `geometry_matches()` is the
-  runtime check that would catch it not doing so.
+- The 15/16/17 flash sizes: compile-checked only. The geometry comes
+  from the device header, so a smaller part is expected to work, and
+  `geometry_matches()` is the runtime check that would catch it not
+  doing so.

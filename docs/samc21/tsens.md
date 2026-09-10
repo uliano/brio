@@ -1,11 +1,5 @@
 # TSENS - Temperature Sensor (SAM C21)
 
-> **PROVISIONAL.** The whole register description is built and bench-run,
-> but the chapter's sleep half (table 43-1) has never been entered, the
-> hysteresis window modes have never been made to cross a threshold and
-> come back, and no absolute accuracy is claimed - this bench has no
-> thermometer. The list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 43, table 9-6
 (the NVM Temperature Calibration Area), tables 45-37 / 46-9 (the accuracy)
 - and errata DS80000740S item **1.19.1, live on every silicon revision
@@ -505,9 +499,6 @@ rather than a dropped store.
 
 Driver gaps (not built):
 
-- **The block as a WAKE source.** RESRDY, WINMON, OVERRUN and OVF have
-  never driven the NVIC out of a sleep; table 43-1's rows are measured
-  (see "Bench findings") through an event witness and not an interrupt.
 - **A `MeterSource` or sampler adapter.** `util/analog_sampler.hpp`'s
   converter concept wants an unsigned reading and a `void select()`; this
   block has neither a channel to select nor an unsigned datum. Whether the
@@ -516,6 +507,9 @@ Driver gaps (not built):
 
 Implemented but not bench-verified:
 
+- **The block as a WAKE source.** RESRDY, WINMON, OVERRUN and OVF have
+  never driven the NVIC out of a sleep; table 43-1's rows are measured
+  (see "Bench findings") through an event witness and not an interrupt.
 - **Absolute accuracy, in any form.** There is no thermometer on this
   bench. Everything above is a ratio, a difference, a repeatability figure
   or a plausibility band, and table 45-37's -11.3 .. +6.2 C is untested
@@ -534,5 +528,3 @@ Implemented but not bench-verified:
   never been provoked - deliberately, since proving it costs a HardFault.
   If the silicon in fact discards silently, the API is stricter than it
   needs to be.
-- **The E and G variants**: compile-checked only. Neither the block nor
-  any of its numbers varies by package, and the chapter has no pads.

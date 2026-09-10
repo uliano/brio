@@ -1,11 +1,5 @@
 # EIC - the External Interrupt Controller (SAM C21)
 
-> **PROVISIONAL.** The whole chapter is built and bench-verified except
-> the debouncer, which exists only on the C20/C21 **N** variants and is
-> not even declared by this family's device header, and sleep/wake
-> behaviour, which belongs to the power pass. The list is in "Not covered
-> yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 26 - and
 errata DS80000740S items 1.11.1 to 1.11.6, of which **exactly one is
 this silicon** (see below). Driver: `samc21/eic.hpp`. Family fixture
@@ -318,9 +312,11 @@ Driver gaps (deliberate):
 
 Implemented but not bench-verified:
 
-- **Falling-edge and level senses through EVSYS** (only a rising edge has
-  been routed), and `EicSense::low` as an interrupt (only `high` has been
-  used as a level).
+- **The falling-edge and low-level senses through EVSYS** - a rising
+  edge is what this suite routes, and a HIGH level is what the timer
+  suites route (its event output a copy of the pad, [tc.md](tc.md) and
+  [tcc.md](tcc.md)); and `EicSense::low` as an interrupt (only `high`
+  has been used as a level).
 - **The NMI's filter and its synchronous detection**: the bench NMI is
   edge-sensed and asynchronous by deliberate choice, because a level NMI
   on a board whose pads are not all known cannot be recovered from
@@ -329,6 +325,3 @@ Implemented but not bench-verified:
   runs the EIC at ~32 kHz (OSCULP32K, directly or through a generator),
   which is what makes the filter's threshold visible; a filter designed
   around a megahertz GCLK_EIC is untested.
-- **Operation on the E and G variants**: compile-checked only. The block
-  is identical across the family; what differs is which pads are bonded,
-  and that is exactly what the family fixture asserts per variant.

@@ -1,13 +1,5 @@
 # SERCOM I2C (SAM C21)
 
-> **PROVISIONAL.** Both register sets are built and BOTH roles are
-> bench-verified end to end against a real second board - the client
-> first against the AVR peer's bit-banged host (the bundle desk), then
-> in full against the samc21 peer's real 100 kHz host on the clean pair,
-> where the whole suite runs with BOTH cores at 48 MHz and
-> fast-mode-plus on the wire. util's bus vocabulary runs over the host
-> engine unchanged. What remains open is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 33 (over
 the shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 `samc21/i2c.hpp` over `Sercom<n>`'s instance facts (sercom.md owns the
@@ -271,24 +263,40 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
 
 ## Not covered yet
 
-- Multi-host arbitration with both hosts LIVE - and the two-node C21
-  desk has a REASONED wall in front of it: the AVR's deterministic race
-  arms both held STARTs against a bit-banged Busy and releases them on
-  one edge, but ON THIS SILICON a START parked behind a phantom-Start
+Driver gaps (not built), each with its reason:
+
+- **DMA engine slots** on `I2cHost` and `I2cClient`: the trigger codes
+  are published, the engines wait for a user (born with its first).
+- **The 4-wire PINOUT** (CTRLA.PINOUT, an external transceiver's
+  shape): no user and no transceiver on the bench.
+- **High-speed mode**: REFUSED, because errata 1.17.7 and 1.17.9 break
+  its repeated starts with no workaround.
+- **10-bit HOST addressing**: the register surface only - the Request
+  is 7-bit on every target, and `design/i2c-bus.md` records that the
+  arbiter's descriptor has no shape for it.
+
+Implemented but not bench-verified:
+
+- **Multi-host arbitration with both hosts LIVE** - and the two-node
+  C21 desk has a REASONED wall in front of it: the AVR's deterministic
+  race arms both held STARTs against a bit-banged Busy and releases them
+  on one edge, but ON THIS SILICON a START parked behind a phantom-Start
   hold DOES NOT FIRE when the hold releases (measured, letter g's
   timeline) - the rendezvous primitive itself is absent. A real race
-  here wants a third node (or the AVR back on the bus as the
-  injector). The parked-START behaviour and the ARBLOST/BUSERR
-  classification are measured; a live collision is not.
-- MEXTTOEN on silicon (the host's own cumulative-extend flavour;
+  here wants a third node (or the AVR back on the bus as the injector).
+  The parked-START behaviour and the ARBLOST/BUSERR classification are
+  measured; a live collision is not.
+- **MEXTTOEN** on silicon (the host's own cumulative-extend flavour;
   LOWTOUT and SEXT are measured - see the findings - and MEXT shares
   their machinery and their host-side-only scope by the same CTRLA
-  wording). XOSC32K remains the one unexercised 32 kHz source (board
-  D's crystal is its occasion); the letter runs on a FREQM-weighed
-  OSC32K with the factory trim.
-- Smart mode and quick command on silicon; DMA (the trigger codes are
-  published; engines wait for a user); 4-wire PINOUT; High-speed mode
-  (refused - errata); 10-bit HOST addressing (register surface only);
-  sleep/RUNSTDBY, the address-match wake included.
-- `SercomPadPin`'s pin-reaches-pad claim and table 6-7's I2C-capable
-  list both remain the caller's stated obligations.
+  wording).
+- **XOSC32K as the time-outs' 32 kHz source**: the letter runs on a
+  FREQM-weighed OSC32K with the factory trim; the crystal source waits
+  for the 32 kHz pass of [osc32kctrl.md](osc32kctrl.md).
+- **Smart mode and the quick command** on silicon: written and read
+  back, no tenure has used either.
+- **Sleep and RUNSTDBY**, the address-match wake included: no letter
+  sleeps this bus.
+
+Stated, not enforced: `SercomPadPin`'s pin-reaches-pad claim and table
+6-7's I2C-capable list both remain the caller's obligations.

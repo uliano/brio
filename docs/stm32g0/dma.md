@@ -403,7 +403,7 @@ carrying the wrong data.
 the wire.** Letter `u` runs the three rates the bridge is proven to
 carry - 115200, 460800, 921600, six legs - and letter `w`, outside `z`
 and outside every verdict, keeps the two above it for whoever wants the
-numbers again; `uart_stress.py` declines a leg announced above 921600 in
+numbers again; `brio stress` declines a leg announced above 921600 in
 the same way, running it PASSIVELY (the port follows the announced rate
 and drains, but nothing is pumped) unless it is given `--beyond-vcp`.
 That ceiling is the tool's default only for a Nucleo's ST-LINK port,

@@ -1,10 +1,5 @@
 # OSC32KCTRL - the 32.768 kHz oscillators (SAM C21)
 
-> **PROVISIONAL.** The chapter is built; XOSC32K is written and
-> family-compiled but cannot be exercised - the bench board carries no
-> 32 kHz crystal - and the clock-failure detector's event output waits
-> for an EVSYS driver. The list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 21, with the
 calibration area in 9.4 - and errata DS80000740S, where **neither item
 touching this chapter applies to this silicon**: 1.1.1 (the CFD's
@@ -170,24 +165,26 @@ are unaffected; the crystal-scale values live in
 
 Driver gaps (not built):
 
-- **The CFD's event output** (EVCTRL.CFDEO): no EVSYS driver on this
-  target, so the failure detector can raise an interrupt but not an
-  event.
+- **The CFD's event output** (EVCTRL.CFDEO): the failure detector can
+  raise an interrupt and not an event, because nothing here consumes
+  one - the generator code is not even published; born with its first
+  user (the EVSYS fabric itself is [evsys.md](evsys.md)'s).
 - **A ClockUser relationship.** These oscillators feed generators, and
-  nothing here tells a driver its clock moved - the same gap
-  `clock.md` records for the target as a whole.
+  nothing here tells a driver its clock moved: this target has no
+  dynamic clock, a position [clock.md](clock.md) states, and the question
+  reopens with its first consumer.
 
 Implemented but not bench-verified:
 
-- **XOSC32K entirely**: written and family-compiled, and it cannot be
-  exercised on this board, which has no 32 kHz crystal. Its startup
-  codes, the external-clock mode (XTALEN clear), the failure detector
-  and `switch_back()` are all in that state.
+- **XOSC32K entirely**: written and family-compiled, never started on
+  silicon. Its startup codes, the external-clock mode (XTALEN clear),
+  the failure detector and `switch_back()` are all in that state; a
+  board with a 32.768 kHz crystal on PA00/PA01 is what measures them
+  ([../bench.md](../bench.md) says which one carries it), and no letter
+  starts it yet.
 - `on_demand` on either internal oscillator: set and read back, never
   observed to gate anything. (`run_standby` on OSC32K is observed
   across a standby, both ways - [clock.md](clock.md) records what a
   peripheral's request does with and without it.)
 - `lock()` on any of the three: writing it would freeze the
   configuration until someone unplugged the board, so no test sets it.
-- Operation on the E and G variants: compile-checked only. Nothing in
-  this chapter varies by package.

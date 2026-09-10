@@ -261,8 +261,8 @@ repo root: `<app>.elf/.bin/.hex`, `firmware-<app>.map`, `<app>.lst`. A
 configure also writes this project's app roster,
 `build-cmake/apps_stm32g0.json`, which `bin/brio` reads: the
 board TYPE `g0b1re` is what tells that tool to build here and to flash
-through OpenOCD's ST-LINK interface (`bench.py flash E <app>`). NB
-`bench.py run` speaks the bench SUITES' single-letter grammar (no
+through OpenOCD's ST-LINK interface (`brio flash <board> <app>`). NB
+`brio run` speaks the bench SUITES' single-letter grammar (no
 line terminator): the line-oriented `console` app is driven with any
 serial monitor, or pyserial, at 115200 8N1.
 

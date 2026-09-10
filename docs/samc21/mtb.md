@@ -1,9 +1,5 @@
 # MTB - Micro Trace Buffer (SAM C21)
 
-> **PROVISIONAL.** The four programmable registers, the packet format and
-> the post-mortem path across a reset are built and measured, but there
-> is no decoder above the packet pair. The list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M **10.3** (a
 section, not a chapter - it names the four registers and then defers to
 the ARM CoreSight MTB-M0+ Technical Reference Manual, which is **not**

@@ -1,15 +1,5 @@
 # ADC - Analog-to-Digital Converter (SAM C21)
 
-> **PROVISIONAL.** Both converters are implemented over the whole
-> chapter and bench-verified, and `util/analog_sampler.hpp` runs on top
-> of them unchanged. The reference selections and `AdcInput::dac` are
-> exercised against the DAC on the same die ([dac.md](dac.md)), and so
-> are the host/client pair, the automatic sequence, differential mode and
-> the two input-stage knobs. What is
-> NOT here: VREFA needs a pin nothing drives, sleep belongs to the power
-> pass, and none of the three interrupts has driven the vector. The list
-> is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 38, the ADC
 characteristics of table 45-22, the NVM software calibration area of
 table 9-5, and the event tables of ch. 29 - and errata DS80000740S
@@ -525,13 +515,6 @@ the E/G/J row and is not this silicon.
 ## Not covered yet
 
 Driver gaps:
-- **The ADC as a WAKE source**: RESRDY, WINMON and OVERRUN have never
-  driven the NVIC out of a sleep. Table 38-4 itself is measured (see
-  "Bench findings"); what is missing is the interrupt half - and none of
-  the three has ever driven the vector at all, awake or asleep.
-- **VREFA** (`Ref::vrefa`) is encodable and unreachable: the pin is PA03
-  and nothing on this board drives it inside table 45-30's range. Needs
-  a wire.
 - **No temperature reading.** On this family the sensor is the separate
   TSENS peripheral (ch. 43), not an ADC channel; its driver is
   `samc21/tsens.hpp` ([tsens.md](tsens.md)), fed the calibration
@@ -540,6 +523,13 @@ Driver gaps:
   generic clock channel and a main-clock change does not move CLK_ADC.
 
 Implemented but not bench-verified:
+- **The ADC as a WAKE source**: RESRDY, WINMON and OVERRUN have never
+  driven the NVIC out of a sleep. Table 38-4 itself is measured (see
+  "Bench findings") through an event witness; the interrupt half of it
+  is not.
+- **VREFA** (`Ref::vrefa`) is encodable and unreachable: the pin is PA03
+  and nothing on this board drives it inside table 45-30's range. Needs
+  a wire.
 - **`CTRLC.LEFTADJ`**, written and never read back. (The DAC's own
   LEFTADJ is measured - [dac.md](dac.md) - and this one is a different
   register in a different chapter.)

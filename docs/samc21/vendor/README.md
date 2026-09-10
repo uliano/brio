@@ -50,11 +50,10 @@ Pack source: `https://packs.download.microchip.com/`
 
 ## The bench chip
 
-ATSAMC21J18A on the user's C21J rev 1.1 board. DSU DID reads
-**0x11010500** (verified over SWD 2026-08-27, exact match with the
-ATDF's declared value): DEVSEL 0x00 = SAMC21J18A, DIE.REVISION 5 =
-**silicon rev F**. Read the DID at bring-up of any new board - the
-errata matrix is per-revision.
+ATSAMC21J18A on a C21J rev 1.1 board. DSU DID reads **0x11010500**
+(read over SWD, an exact match with the ATDF's declared value): DEVSEL
+0x00 = SAMC21J18A, DIE.REVISION 5 = **silicon rev F**. Read the DID at
+bring-up of any new board - the errata matrix is per-revision.
 
 ## Errata DS80000740S: what touches the bring-up (silicon rev F)
 

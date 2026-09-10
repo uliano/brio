@@ -1,10 +1,5 @@
 # DIVAS - Divide and Square Root Accelerator (SAM C21)
 
-> **PROVISIONAL.** The whole of a small chapter is built and measured,
-> but the decision the measurements exist for - whether to make this
-> block the toolchain's division - is deliberately NOT taken here. See
-> "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 14 - and
 errata DS80000740S, which has **no DIVAS section**. Driver:
 `samc21/divas.hpp`. Family fixture `test/family_samc21/divas.cpp`; the bench

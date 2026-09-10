@@ -78,7 +78,7 @@ at the repo root: `<app>.elf/.bin/.hex`, `firmware-<app>.map`,
 `build-cmake/apps_samc21.json`, which `bin/brio` reads: the board's
 TYPE (`c21j`) is what tells that tool to build here and to flash
 through OpenOCD instead of avrdude, so a SAM suite is driven exactly
-like an AVR one (`bench.py flash C <app>`, `bench.py run C z`). The
+like an AVR one (`brio flash <board> <app>`, `brio run <board> z`). The
 `-upload` target remains the flash path that needs no manifest.
 
 ## Upload (OpenOCD, SWD)

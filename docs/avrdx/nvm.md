@@ -32,7 +32,7 @@ of the older AVR families - the DB datasheet lowered it to 1k "based
 on validation data" (table 39-7; no typical value is published). A
 chip erase spends one of those cycles on every page at once, which is
 why the bench reflashes page-selectively (avrdude's default on these
-parts) and reserves the chip erase for `bench.py flash --erase` - the
+parts) and reserves the chip erase for `brio flash --erase` - the
 three measured erase regimes are in docs/bench.md.
 
 That table is the whole division of labour. Flash is for big,
@@ -205,7 +205,7 @@ same call that `erase()` refuses, this one performs. Applications use
 EECHER is NOT, and one mistaken call would erase every setting a
 product has ever stored. Erasing a whole memory is a provisioning act
 and goes through the programmer. Fuse writing is not offered because
-the silicon does not offer it (11.3.1.5): use `bench.py fuses`.
+the silicon does not offer it (11.3.1.5): use `brio fuses`.
 
 ## How to use it
 

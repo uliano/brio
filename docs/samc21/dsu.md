@@ -1,9 +1,5 @@
 # DSU - Device Service Unit (SAM C21)
 
-> **PROVISIONAL.** Everything chapter 13 offers to code running ON the
-> device is built; what a debug PROBE uses it for is not, and chip erase
-> is deliberately absent. The list is in "Not covered yet".
-
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 13 - and
 errata DS80000740S, which has **no DSU section**. The one item touching
 this chapter's subject matter is **1.8.15 (Device)**: the Program and
@@ -158,8 +154,8 @@ Test a block of SRAM the program has finished with:
 (Cortex-M0+), FAMILY 2 (5V Industrial - the SAM C), SERIES 1 (the
 CAN-bearing series, so a C21 and not a C20), DIE 0, REVISION 5 = **rev
 F**, DEVSEL 0x00. The factory 128-bit die serial `samc21/nvm.hpp` reads
-comes back as **f9e78960-51574841-59202020-ff160321**, matching the
-string `cli/bench/bench_boards.py` records for desk position C. The CoreSight
+comes back matching the one the bench manifest
+(`cli/bench/bench_boards.py`) records for the board. The CoreSight
 PARTNUM is 0xCD0, table 13-2's "a DSU is present".
 
 **The CRC32 engine is the standard CRC-32**, matched against a table-free
