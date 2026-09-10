@@ -270,9 +270,10 @@ gets its home in `docs/design/` when taken.
   15.2 and WCH's OpenOCD fork through a WCH-Link; the clock, the
   flash media, the power modes, reset and the DMA each have their
   document and suite; SPI and I2C are written with their suites, the
-  wire letters awaiting a jumper and a peer. What remains, in
-  docs/ch32v00x/README.md's gap lists: the chapters (TIM, ADC, the pad
-  test that gives EXTI its page), the family tiering and
+  wire letters awaiting a jumper and a peer; the timers and the
+  watchdogs have theirs. What remains, in docs/ch32v00x/README.md's
+  gap lists: the chapters (ADC, the OPA, the pad test that gives EXTI
+  its page), the family tiering and
   `brio check ch32v00x` with a second part, a self-built upstream gcc 16
   for riscv32 with an rv32ec/ilp32e multilib (the stratum compiles with
   plain rv32ec_zmmul on purpose - WCH's `xw` extension is worth a few
@@ -1081,6 +1082,13 @@ brio/                    the framework, four strata:
                            count, two vectors, engines on channels 6/7, the
                            unstick) + I2cClient (a polled surface + two ISR
                            bodies reporting I2cClientEvent)
+    tim.hpp                Tim<1|2> (the F1's timers under WCH's names, TIM2's
+                           dead-time pairs via DTCR, CAPLVL/CAPOV/OE_MODE) +
+                           Tim3 (the streamlined block: no pad, no interrupt,
+                           a ONE-SHOT DMA request) + TimPad + the tasks
+                           (TimPwm/TimPairPwm, TimPeriodMeter/TimIntervalMeter,
+                           TimEventCounter/TimGatedCounter, TimPeriodicTick,
+                           TimOnePulse)
     exti.hpp               Exti (ten lines: eight pads via AFIO_EXTICR, the
                            PVD, the AWU; interrupt or event, edges, the
                            software trigger) + ExtInt<Pin>
