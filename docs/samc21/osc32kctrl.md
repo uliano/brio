@@ -153,9 +153,22 @@ are unaffected; the crystal-scale values live in
   the measurements in [freqm.md](freqm.md) and [reset.md](reset.md) -
   all of which share the OSC48M scale rather than witnessing it
   independently.
-- **A missing crystal is a false return, not a hang.** XOSC32K started
-  on a board with no 32 kHz crystal never raises its ready flag, and the
-  bounded wait reports that instead of spinning.
+- **XOSC32K, both ways.** The 32.768 kHz crystal is optional on the
+  board design, and letter a of `test_samc_osc32k` judges whichever
+  case it finds. On a board WITHOUT one, the start is a false return
+  and not a hang: the ready flag never rises and the bounded wait
+  reports that instead of spinning. On a board WITH one, the flag
+  rises inside the bound with `startup` 0, a generator takes the
+  crystal, and the meter weighs it at 32545..32553 Hz on OSC48M's
+  scale - a scale that is itself some seven per mille off on that die,
+  which puts the crystal within OSC48M's own error of nominal and says
+  no more: a per-cent ruler tells a 32 kHz resonance from an inverter
+  ringing on its load capacitors, it does not grade a crystal that is
+  good to tens of ppm (the 24 MHz crystal is the ruler for that,
+  [rtc.md](rtc.md)'s instrument). After the disable the READY FLAG
+  STANDS FOR A WHILE - 265..356 polling turns at 48 MHz, a few tens of
+  microseconds, the order of one 32 kHz period - and then falls; a
+  verdict taken at the store reads it still set.
 - **A generator cannot be moved off a stopped source** (16.6.2.6):
   stopping OSC32K while generator 5 still points at it leaves that
   generator unroutable and every later measurement empty. The rule is
@@ -176,12 +189,16 @@ Driver gaps (not built):
 
 Implemented but not bench-verified:
 
-- **XOSC32K entirely**: written and family-compiled, never started on
-  silicon. Its startup codes, the external-clock mode (XTALEN clear),
-  the failure detector and `switch_back()` are all in that state; a
-  board with a 32.768 kHz crystal on PA00/PA01 is what measures them
-  ([../boards/samc21j.md](../boards/samc21j.md): the crystal is
-  optional on the design), and no letter starts it yet.
+- **XOSC32K beyond its start and its frequency**: the startup codes
+  other than 0 (the crystal is only ever started with no masking), the
+  external-clock mode (XTALEN clear - it needs a clock source on
+  XIN32, and the board has a crystal there), the failure detector and
+  `switch_back()` (a crystal failure has to be induced: clearing XTALEN
+  under a running detector, the way [clock.md](clock.md) induces one
+  on the 24 MHz block, is the candidate, not tried here), `enable_1k`,
+  and the crystal's
+  ACCURACY - measured only on OSC48M's per-cent scale, where the 24 MHz
+  crystal would give it in ppm.
 - `on_demand` on either internal oscillator: set and read back, never
   observed to gate anything. (`run_standby` on OSC32K is observed
   across a standby, both ways - [clock.md](clock.md) records what a

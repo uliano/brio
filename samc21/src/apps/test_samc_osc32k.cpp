@@ -6,7 +6,9 @@
 // meant to keep passing through every later restructuring of the driver
 // under it.
 //
-// NOTHING TO WIRE. Every oscillator here is on the die.
+// NOTHING TO WIRE. Every oscillator here is on the die - or, for
+// XOSC32K, on the board: the 32.768 kHz crystal is optional on this
+// board design, and letter a judges whichever case it finds.
 //
 // THE INSTRUMENT IS THE FREQUENCY METER (samc21/freqm.hpp). Each
 // oscillator is routed to a GCLK generator and measured against OSC48M -
@@ -18,7 +20,9 @@
 //
 // What is exercised, letter by letter:
 //   a  the block: the RTC clock select, the status and interrupt
-//      surface, and the refusals the registers alone could not express
+//      surface, the refusals the registers alone could not express,
+//      and XOSC32K - a bounded no-crystal start on a board without,
+//      the crystal started and weighed on a board with one
 //   b  THE FACTORY TRIM, measured: OSC32K started untrimmed and then
 //      retrimmed with the production value, with the meter on both
 //   c  the three roots side by side, in hertz, and OSCULP32K's trim
@@ -158,15 +162,46 @@ void ta_block() {
     bench.verdict("OSCULP32K refuses a trim past its five-bit field",
                   !Osculp32k::calib(0x20));
 
-    // XOSC32K: THE BOARD HAS NO 32 kHz CRYSTAL, so this is what a
-    // missing crystal looks like - a bounded wait that ends with the
-    // ready flag still low, reported rather than hung on.
+    // XOSC32K: THE CRYSTAL IS OPTIONAL ON THIS BOARD DESIGN, so the
+    // letter judges whichever case the board presents. Without one the
+    // start is a bounded wait that ends with the ready flag still low,
+    // reported rather than hung on; with one the flag rises and the
+    // meter then weighs the crystal on OSC48M's scale - which puts a
+    // per-cent band on a crystal that is good to tens of ppm, enough to
+    // tell a 32 kHz resonance from an inverter ringing on its load
+    // capacitors, not enough to grade the crystal.
     const bool crystal = Xosc32k::init(Xosc32kConfig{.crystal = true}, 4'000'000UL);
+    print(serial, "  XOSC32K start attempt -> ", crystal ? "READY" : "never ready", crlf);
+    if (!crystal) {
+        Xosc32k::stop();
+        bench.verdict("a crystal that is not there is a false return and not a hang",
+                      !crystal);
+        return;
+    }
+    const bool routed = route_slow(GclkSource::xosc32k);
+    bench.verdict("the generator takes XOSC32K", routed);
+    const auto hz = routed ? measure_slow_hz() : std::nullopt;
+    bench.verdict("the crystal measures", hz.has_value());
+    if (hz) {
+        print(serial, "  XOSC32K -> ", *hz, " Hz (", per_mille_off(*hz),
+              " per mille off, through OSC48M's own error)", crlf);
+        bench.verdict("and it is a 32 kHz crystal, within 3% of nominal on the RC's scale",
+                      per_mille_off(*hz) <= 30u);
+    }
+    // Back onto a running root before the crystal stops: a generator
+    // cannot be moved off a stopped source.
+    (void)route_slow(GclkSource::osculp32k);
     Xosc32k::stop();
-    print(serial, "  XOSC32K start attempt -> ", crystal ? "READY" : "never ready",
-          " (this board carries no 32 kHz crystal)", crlf);
-    bench.verdict("a crystal that is not there is a false return and not a hang",
-                  !crystal);
+    // The ready flag does not fall with the store: count the polling
+    // turns it stands for after the disable, bounded.
+    uint32_t turns = 0;
+    while (Xosc32k::ready() && turns < 1'000'000UL) {
+        ++turns;
+    }
+    print(serial, "  after the disable the ready flag stood for ", turns,
+          " polling turns", crlf);
+    bench.verdict("XOSC32K stops and its ready flag falls, not at the store but soon after",
+                  !Xosc32k::enabled() && turns < 1'000'000UL);
 }
 
 // =============================================================================
