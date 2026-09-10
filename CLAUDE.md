@@ -270,10 +270,10 @@ gets its home in `docs/design/` when taken.
   15.2 and WCH's OpenOCD fork through a WCH-Link; the clock, the
   flash media, the power modes, reset and the DMA each have their
   document and suite; SPI and I2C are written with their suites, the
-  wire letters awaiting a jumper and a peer; the timers and the
-  watchdogs have theirs. What remains, in docs/ch32v00x/README.md's
-  gap lists: the chapters (ADC, the OPA, the pad test that gives EXTI
-  its page), the family tiering and
+  wire letters awaiting a jumper and a peer; the timers, the watchdogs
+  and the ADC have theirs. What remains, in docs/ch32v00x/README.md's
+  gap lists: the OPA chapter, the pad test that gives EXTI its page,
+  the family tiering and
   `brio check ch32v00x` with a second part, a self-built upstream gcc 16
   for riscv32 with an rv32ec/ilp32e multilib (the stratum compiles with
   plain rv32ec_zmmul on purpose - WCH's `xw` extension is worth a few
@@ -1089,6 +1089,11 @@ brio/                    the framework, four strata:
                            (TimPwm/TimPairPwm, TimPeriodMeter/TimIntervalMeter,
                            TimEventCounter/TimGatedCounter, TimPeriodicTick,
                            TimOnePulse)
+    adc.hpp                Adc (the F1's converter + CTLR3: low power, three
+                           watchdogs that can reset the chip, THE WATCHDOG
+                           SCAN = one per rank; the STALL and recover()),
+                           AnalogIn<Pin> deriving the channel, AdcInput
+                           (VREFINT, the OPA), the sampler's converter surface
     exti.hpp               Exti (ten lines: eight pads via AFIO_EXTICR, the
                            PVD, the AWU; interrupt or event, edges, the
                            software trigger) + ExtInt<Pin>
