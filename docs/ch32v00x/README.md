@@ -42,6 +42,8 @@ The headers not yet behind a document of their own:
 | [brio/ch32v00x/pin.hpp](../../brio/ch32v00x/pin.hpp) | `Pin<'D', 5>`, `Port<'D'>`: the one-bit MODE this family has, pulls through OUTDR, the port clock opened by every configuring verb |
 | [brio/ch32v00x/usart.hpp](../../brio/ch32v00x/usart.hpp) | `Uart<1, P>`: the interrupt-driven byte transport (two rings, TXEIE armed and disarmed, errors read then cleared) |
 
+The documents of record and their revisions: [vendor/README.md](vendor/README.md).
+
 ## Toolchain
 
 WCH's `riscv32-wch-elf` gcc **15.2.0** at `/sw/wch-riscv` (a symlink to
@@ -154,14 +156,19 @@ probe-less power-on behave the same way.
 
 The fork starts a gdb server on port 3333 (`Info : starting gdb server
 for wch_riscv.cpu.0 on 3333`), and the toolchain carries
-`riscv32-wch-elf-gdb`. What was used so far, and is enough for a
-bring-up, is OpenOCD's own console: `halt`, `reg pc`, `reg mstatus`,
-`reg mcause`, `mdw`, `step`, `resume`. Two facts about it: **a core in
-debug mode cannot enter any sleep** (QingKe V2 manual 5.1), so the
-idle path's behaviour is not observable with the probe halted on it;
-and **the debugger's `step` does not take pending interrupts**, so a
+`riscv32-wch-elf-gdb`. What the bring-up used, and is enough for one,
+is OpenOCD's own console: `halt`, `reg pc`, `reg mstatus`, `reg
+mcause`, `mdw`, `step`, `resume`. `.vscode/launch.json` carries a
+cppdbg entry over the same server ("Debug CH32V006K8"), the AVR entry's
+shape: the fork launched by the editor, gdb connecting by hand in
+setupCommands, `load` through the fork's flash driver, a stop on
+main() - written from the console dialogue and not yet driven from
+the editor. Two facts about the core in a session: **a core in debug
+mode cannot enter any sleep** (QingKe V2 manual 5.1), so the idle
+path's behaviour is not observable with the probe halted on it; and
+**the debugger's `step` does not take pending interrupts**, so a
 single-step through an unmask instruction proves nothing about whether
-an interrupt would be taken. A `launch.json` entry is not written yet.
+an interrupt would be taken.
 
 ## The family check
 
@@ -266,9 +273,10 @@ Driver gaps, each with its reason:
   pins each package bonds): `device.hpp` states the CH32V006K8 alone,
   and the table that tells the parts apart needs a second part on the
   desk to be written against something real.
-- A debug configuration for the editor (`launch.json`) and the part's
-  SVD for a register viewer: neither was needed to bring the target
-  up, and MounRiver's package may carry the SVD.
+- The part's SVD for a register viewer, and the editor debug entry
+  driven for real: the entry is written, the SVD is not fetched (the
+  MounRiver package may carry one), and neither was needed to bring
+  the target up.
 - HSE (the crystal on PA1/PA2) and LSI as clock roots: named in
   `ClockSource`, refused at compile time, built with a board that
   carries a crystal.

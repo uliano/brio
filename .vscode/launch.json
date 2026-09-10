@@ -170,6 +170,42 @@
             ],
             "svdPath": "${workspaceFolder}/stm32g0/svd/STM32G031.svd",
             "runToEntryPoint": "main"
+        },
+        {
+            // The CH32V006 module over a WCH-Link: RISC-V, so cppdbg over a
+            // gdb server, the AVR entry's shape - WCH's OpenOCD fork
+            // (/sw/wch-openocd, the only one that speaks the probe's SDI
+            // transport) launched by cppdbg itself and listening on 3333,
+            // riscv32-wch-elf-gdb from the vendor toolchain in front of it.
+            // The ELF is loaded by gdb (`load` runs the fork's flash driver)
+            // and the session lands on main(). The active configurePreset
+            // must be ch32v006k8-debug for -Og -g3 -fno-inline debug info.
+            // Two facts of this core for a session (docs/ch32v00x/README.md):
+            // a core in debug mode never sleeps, so nothing about idle()'s
+            // power is observable here; and `step` does not take pending
+            // interrupts. UNTESTED from the editor yet: written from the
+            // fork's own console dialogue (halt, reg, mdw, step, resume)
+            // and the cppdbg findings the AVR entry records.
+            "type": "cppdbg",
+            "request": "launch",
+            "name": "Debug CH32V006K8 (WCH OpenOCD, WCH-Link)",
+            "cwd": "${workspaceFolder}",
+            "program": "${command:cmake.launchTargetPath}",
+            "stopAtEntry": true,
+            "miMode": "gdb",
+            "miDebuggerPath": "/sw/wch-riscv/bin/riscv32-wch-elf-gdb",
+            "debugServerPath": "/sw/wch-openocd/bin/openocd",
+            "debugServerArgs": "-f /sw/wch-openocd/bin/wch-riscv.cfg",
+            "serverLaunchTimeout": 10000,
+            "serverStarted": "Listening on port 3333",
+            "setupCommands": [
+                { "text": "file ${command:cmake.launchTargetPath}" },
+                { "text": "target remote localhost:3333" },
+                { "text": "monitor reset halt" },
+                { "text": "load" },
+                { "text": "set breakpoint always-inserted off" }
+            ],
+            "internalConsoleOptions": "openOnSessionStart"
         }
     ]
 }
