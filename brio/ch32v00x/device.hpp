@@ -185,6 +185,12 @@ struct PficRegs {
     volatile uint32_t IENR[8];    ///< 0x100 write 1 to ENABLE a line
     uint8_t RESERVED2[0x60];
     volatile uint32_t IRER[8];    ///< 0x180 write 1 to DISABLE a line
+    uint8_t RESERVED3[0x60];
+    volatile uint32_t IPSR[8];    ///< 0x200 write 1 to SET a line pending
+    uint8_t RESERVED4[0x60];
+    volatile uint32_t IPRR[8];    ///< 0x280 write 1 to CLEAR a pending line
+    uint8_t RESERVED5[0x60];
+    volatile uint32_t IACTR[8];   ///< 0x300 active (being serviced), read-only
 };
 
 inline PficRegs* pfic() { return reinterpret_cast<PficRegs*>(0xE000E000UL); }

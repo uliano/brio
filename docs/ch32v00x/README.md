@@ -29,12 +29,15 @@ young enough that each header is still its own document of record.
 The map below names them, and each row becomes a page as its
 driver is measured on the bench.
 
+| Document | Content |
+|----------|---------|
+| [platform.md](platform.md) | Platform: `Ch32v00xPlatform` (the csrrci critical section, the WFE-shaped `idle()` and the WFI rule that forces it, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the hardware prologue/epilogue MEASURED: 83 vs 92 cycles round trip, the default ON), the STK `BasicTicker`, `delay_us` on the STK counter, and the failing half - `Reset` (the flags as history, PINRSTF naming the pin alone on this family), `ResetReporter`, `fault_reset<P>()`; three real resets in the suite |
+
+The headers not yet behind a document of their own:
+
 | Header | Content |
 |--------|---------|
 | [brio/ch32v00x/device.hpp](../../brio/ch32v00x/device.hpp) | The register map in the chapter's words: buses, RCC, GPIO, USART, FLASH_ACTLR, the core's STK and PFIC, the interrupt numbers |
-| [brio/ch32v00x/platform.hpp](../../brio/ch32v00x/platform.hpp) | `Ch32v00xPlatform`: the CriticalSection on mstatus.MIE, the WFE-shaped `idle()` and why, `ebreak`, the `.noinit` breadcrumb, atomic_width 4 |
-| [brio/ch32v00x/pfic.hpp](../../brio/ch32v00x/pfic.hpp) | `InterruptGuard` (csrrci read-and-clear), the enable/disable/readback verbs, `Pfic` per-line enables |
-| [brio/ch32v00x/ticker.hpp](../../brio/ch32v00x/ticker.hpp) | `BasicTicker` over the core's STK counter (up-count, auto-reload, the flag the handler must clear), `Ticker` at 1000 Hz |
 | [brio/ch32v00x/clock.hpp](../../brio/ch32v00x/clock.hpp) | `Clock<internal or pll, hz>`: HSI 24 MHz, the doubling PLL, the HPRE divider table, the flash wait states |
 | [brio/ch32v00x/pin.hpp](../../brio/ch32v00x/pin.hpp) | `Pin<'D', 5>`, `Port<'D'>`: the one-bit MODE this family has, pulls through OUTDR, the port clock opened by every configuring verb |
 | [brio/ch32v00x/usart.hpp](../../brio/ch32v00x/usart.hpp) | `Uart<1, P>`: the interrupt-driven byte transport (two rings, TXEIE armed and disarmed, errors read then cleared) |
@@ -61,12 +64,18 @@ WCH's compiler - deliberately not the default (`CH32V00X_ARCH` in the
 cache variables), so a self-built upstream toolchain can take this
 file's place when it exists and the code will not care.
 
-**Interrupt handlers are plain gcc.** The crt leaves INTSYSCR at its
-reset value - hardware stacking and interrupt nesting off - so a
-handler is a `[[gnu::interrupt]]` function that saves what it uses in
-software and ends in MRET. WCH's own startup turns both on and needs
-their compiler's `WCH-Interrupt-fast` attribute; the hardware stack is
-an optimization to measure, not an assumption to build on.
+**Interrupt handlers carry ONE attribute, `BRIO_CH32_INTERRUPT`**,
+and which attribute it is belongs to the image: with the project's
+`CH32V00X_HPE` option (ON by default) the crt sets INTSYSCR.HWSTKEN
+and the handlers are declared with WCH's `WCH-Interrupt-fast`, the
+core pushing and popping the caller-saved registers itself; with it
+off, a handler is a plain `[[gnu::interrupt]]` function. One option for
+the whole image, because a fast handler under an HPE that is off
+corrupts the program it interrupted. Interrupt nesting is never turned
+on. What the hardware prologue is worth was measured before it became
+the default - nine cycles on a minimal round trip
+([platform.md](platform.md)); the price is the vendor attribute, which
+WCH's gcc has and an upstream gcc gets from the fast-interrupt patch.
 
 ## Board and build
 
@@ -229,6 +238,15 @@ loudly.
   is the ENABLE status and its IPR the PENDING status; the enable
   registers themselves (IENR/IRER) are write-only and read as zero.
   `Pfic::enabled()` and `Pfic::pending()` read the right bank.
+- **PINRSTF names the pin alone.** On the STM32 register this one
+  descends from the pin flag is raised beside every system reset; here
+  a software reset boots to SFTRSTF and nothing else (measured). The
+  flags mean what they say, and `reset.hpp` says so.
+- **The hardware prologue is worth nine cycles on a minimal handler**
+  (83 against 92 for the whole round trip), not the order of magnitude
+  a "fast interrupt" suggests: the ten registers reach the stack either
+  way, and what the hardware saves is the prologue's fetch. The numbers
+  and the reasoning are in [platform.md](platform.md).
 
 ## Not covered yet
 
@@ -239,8 +257,8 @@ Driver gaps, each with its reason:
   and every remap arrive with the first program that needs a second
   port or a moved pad.
 - EXTI, TIM1/TIM2, ADC, I2C, SPI, DMA, the OPA, the watchdogs, the
-  flash program/erase engine, the power modes (Sleep/Standby, the AWU)
-  and a reset.hpp that says which reset happened: each is a chapter
+  flash program/erase engine and the power modes (Sleep/Standby, the
+  AWU): each is a chapter
   of the reference manual with no user yet, and each is born with
   its first user and its bench measurements, the way the other three
   strata's were.
@@ -257,8 +275,8 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The idle path's power: the WFE-shaped sleep is proven functionally
-  (the console wakes on every byte and every tick) but not measured -
+- The idle path's power: the WFE-shaped sleep is proven to sleep and
+  wake (`test_ch32_platform` letter b) but not to sleep cheaply -
   whether the latched event is consumed by the `wfi` or leaves the
   loop spinning is a current measurement on a bench meter, with the
   probe detached (a core in debug mode never sleeps).
@@ -269,9 +287,6 @@ Implemented but not bench-verified, each with what would measure it:
   `rebase` path: the console runs the PLL at 48 MHz; a clock suite
   that steps through the divider table and reads the rate back on a
   timer would cover the rest.
-- The `.noinit` panic breadcrumb across a reset: the section is placed
-  and the crt skips it, but no program has yet written a record,
-  reset, and read it back.
 - The USART's error counters (framing, noise, parity, hardware
   overrun): the paths are written; the stress suites that provoke
   each condition from the host side are what verifies them.

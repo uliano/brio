@@ -9,6 +9,11 @@
 # nothing in the compile yet; the loop is where the second part and its
 # tiering will land. What the sweep proves meanwhile is that WCH's gcc
 # 15.2 accepts every construct brio is written with (util_all.cpp).
+# Every positive is compiled BOTH WAYS the project can build an image:
+# with the core's hardware prologue/epilogue (-DBRIO_CH32_HPE=1, the
+# CH32V00X_HPE option, WCH's interrupt attribute) and without it (gcc's
+# own prologue), since pfic.hpp's BRIO_CH32_INTERRUPT is one spelling
+# with two expansions and a fixture that binds a vector proves both.
 # Negative: every test/family_ch32v00x/neg/*.cpp must FAIL to compile
 # for each part named on its "// mcu: <list>" line.
 #
@@ -32,13 +37,15 @@ for tu in test/family_ch32v00x/*.cpp; do
     case "$tu" in *"$FILTER"*) ;; *) continue ;; esac
     line="$(basename "$tu" .cpp):"
     for part in $PARTS; do
-        if $CXX $FLAGS "$tu" -o /dev/null 2>/tmp/check_ch32v00x_err; then
-            line="$line $part"
-        else
-            line="$line $part:FAIL"
-            fail=1
-            sed "s/^/    /" /tmp/check_ch32v00x_err | head -15
-        fi
+        for hpe in 0 1; do
+            if $CXX $FLAGS -DBRIO_CH32_HPE=$hpe "$tu" -o /dev/null 2>/tmp/check_ch32v00x_err; then
+                line="$line $part/hpe$hpe"
+            else
+                line="$line $part/hpe$hpe:FAIL"
+                fail=1
+                sed "s/^/    /" /tmp/check_ch32v00x_err | head -15
+            fi
+        done
     done
     echo "POS $line"
 done

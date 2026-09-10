@@ -91,5 +91,11 @@ void interrupt_verbs() {
     Pfic::enable(Irq::usart1);
     (void)Pfic::enabled(Irq::usart1);
     (void)Pfic::pending(Irq::usart1);
+    Pfic::set_pending(Irq::software);
+    Pfic::clear_pending(Irq::software);
+    (void)Pfic::active(Irq::software);
     Pfic::disable(Irq::usart1);
 }
+
+// The handler attribute is one spelling, whichever way the image is built.
+extern "C" BRIO_CH32_INTERRUPT void software_handler() { Pfic::clear_pending(Irq::software); }

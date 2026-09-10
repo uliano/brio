@@ -230,12 +230,12 @@ void Console::cmd_err(const Cmd&, Serial s) {
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-// The two vectors this program owns. `interrupt` is what makes gcc end
-// them with MRET: this project's crt leaves the core's hardware
-// stacking off (see src/glue/startup_ch32v00x.S).
-extern "C" [[gnu::interrupt]] void systick_handler() { brio::Ticker::tick(); }
+// The two vectors this program owns. BRIO_CH32_INTERRUPT is the one
+// spelling of the handler attribute on this target - the hardware
+// prologue's or gcc's, whichever the image was built for (pfic.hpp).
+extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
 
-extern "C" [[gnu::interrupt]] void usart1_handler() {
+extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
     if (Serial::isr()) {
         brio::post<SerialLines>(brio::RxActivity{});
     }

@@ -17,16 +17,18 @@
  * WEAK alias for default_handler (a spin), and an app binds one by
  * defining the strong symbol -
  *
- *   extern "C" [[gnu::interrupt]] void systick_handler() { brio::Ticker::tick(); }
- *   extern "C" [[gnu::interrupt]] void usart1_handler() { Serial::isr(); }
+ *   extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+ *   extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { Serial::isr(); }
  *
- * The `interrupt` attribute is what makes gcc end the function with
- * MRET and save what it clobbers; it is required, because this crt
- * leaves INTSYSCR at its reset value - hardware stacking and interrupt
- * nesting OFF (RM 6.5.3.1). WCH's own startup turns both on and uses
- * their compiler's "WCH-Interrupt-fast" attribute instead; not doing so
- * keeps this stratum compilable by an upstream gcc, and the hardware
- * stack becomes a measured optimization rather than an assumption.
+ * The attribute is what makes gcc end the function with MRET, and
+ * WHICH attribute is the project's CH32V00X_HPE option (BRIO_CH32_HPE
+ * here): with it, this crt sets INTSYSCR.HWSTKEN and the handlers are
+ * declared "WCH-Interrupt-fast" - the ten caller-saved registers pushed
+ * and popped by the hardware (QingKe V2 manual 3.4) and no prologue in
+ * the handler; without it, INTSYSCR stays at its reset value and a
+ * handler saves what it clobbers in software. Interrupt NESTING
+ * (INESTEN) is never set: the kernel's rule (docs/design/kernel.md) is
+ * that an ISR body runs to completion, on every target.
  *
  * THE NAMES ARE OURS. There is no vendor header in this build (see
  * brio/ch32v00x/device.hpp), so no vendor spelling is being honoured:
@@ -120,9 +122,14 @@ reset_handler:
 2:
     /* mstatus: machine mode, interrupts still masked - main() enables
        them when its drivers are up. mtvec: this table, vectored, with
-       absolute addresses. */
+       absolute addresses. INTSYSCR: the hardware stack if the image was
+       built for it, nesting never. */
     li      t0, 0x1880
     csrw    mstatus, t0
+#if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
+    li      t0, 0x1
+    csrw    0x804, t0
+#endif
     la      t0, _start
     ori     t0, t0, 3
     csrw    mtvec, t0

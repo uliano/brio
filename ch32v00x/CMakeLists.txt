@@ -55,9 +55,27 @@ set(CH32V00X_MCU "ch32v006k8" CACHE STRING "target CH32V00x part, e.g. ch32v006k
 set(CH32V00X_ARCH "rv32ec_zmmul" CACHE STRING "-march for this family (rv32ec_zmmul_xw needs WCH's gcc)")
 set(CH32V00X_ABI "ilp32e" CACHE STRING "-mabi for this family")
 
+# --- The core's hardware prologue/epilogue (HPE): with it on, the crt
+#     sets INTSYSCR.HWSTKEN and every handler is declared with WCH's
+#     `interrupt("WCH-Interrupt-fast")` attribute (through pfic.hpp's
+#     BRIO_CH32_INTERRUPT), so the ten caller-saved registers are pushed
+#     and popped by the hardware instead of by each handler's prologue.
+#     ONE SWITCH FOR THE WHOLE IMAGE, on purpose: a fast handler under
+#     an HPE that is off corrupts the interrupted program, so the crt
+#     bit and the attribute must never disagree. Interrupt NESTING stays
+#     off either way (the kernel's rule, docs/design/kernel.md). Needs
+#     WCH's gcc, or an upstream gcc with the fast-interrupt patch.
+option(CH32V00X_HPE "hardware prologue/epilogue for every interrupt handler" ON)
+if(CH32V00X_HPE)
+    set(CH32V00X_HPE_DEFINE -DBRIO_CH32_HPE=1)
+else()
+    set(CH32V00X_HPE_DEFINE "")
+endif()
+
 set(BRIO_COMMON_FLAGS
     -march=${CH32V00X_ARCH}
     -mabi=${CH32V00X_ABI}
+    ${CH32V00X_HPE_DEFINE}
     -Wall -Wextra -Werror
     -ffunction-sections -fdata-sections
 )

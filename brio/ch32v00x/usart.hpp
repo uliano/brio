@@ -89,7 +89,7 @@ constexpr Irq usart_irq_for(uint8_t instance) {
  *   using Serial = brio::Uart<1>;
  *   constexpr Serial serial;                 // tag for print(serial, ...)
  *   Serial::init(clock, 115200);
- *   extern "C" [[gnu::interrupt]] void usart1_handler() { Serial::isr(); }
+ *   extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { Serial::isr(); }
  *
  * `P` is the platform, which the rings need to know whether an index
  * can be shared with a handler bare (atomic_width) or wants a guard.

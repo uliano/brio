@@ -52,7 +52,7 @@
  * ```cpp
  * #include "ch32v00x/ticker.hpp"
  *
- * extern "C" [[gnu::interrupt]] void systick_handler() { brio::Ticker::tick(); }
+ * extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
  *
  * int main() {
  *     SysClock::init();
