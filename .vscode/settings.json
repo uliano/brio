@@ -17,18 +17,22 @@
     ],
     "C_Cpp.intelliSenseEngine": "disabled",
 
-    // --- CMake Tools: three independent CMake projects share this workspace
-    //     folder - avrdx/ (avr-g++), test/ (host g++) and samc21/
-    //     (arm-none-eabi-g++), each with its own toolchain since one CMake
-    //     configure has exactly one compiler. The REPO ROOT is deliberately
-    //     NOT a CMake project any more: it was the Active Folder's silent
-    //     reset target, and the platforms are peers now. This shows an
+    // --- CMake Tools: four independent CMake projects share this workspace
+    //     folder - avrdx/ (avr-g++), test/ (host g++), samc21/ and
+    //     stm32g0/ (arm-none-eabi-g++), each with its own toolchain since
+    //     one CMake configure has exactly one compiler. The REPO ROOT is
+    //     deliberately NOT a CMake project: it was the Active Folder's
+    //     silent reset target, and the platforms are peers. This shows an
     //     Active Folder picker in the status bar alongside the usual
-    //     configure-preset/target pickers; no multi-root workspace needed. ---
+    //     configure-preset/target pickers; no multi-root workspace needed.
+    //     A debug session (launch.json) resolves its executable from the
+    //     ACTIVE folder's launch target, so the folder, its debug preset
+    //     and the app are chosen here first. ---
     "cmake.sourceDirectory": [
         "${workspaceFolder}/avrdx",
         "${workspaceFolder}/test",
-        "${workspaceFolder}/samc21"
+        "${workspaceFolder}/samc21",
+        "${workspaceFolder}/stm32g0"
     ],
 
     // CMake Tools 1.23+ defaults cmake.options.statusBarVisibility to

@@ -111,11 +111,21 @@
             // ST-LINK/V2.1 - same cortex-debug + OpenOCD shape as the SAM
             // entry, the ST-LINK interface script instead of CMSIS-DAP,
             // ST's stm32g0x target script, and the SVD vendored from ST's
-            // pack (stm32g0/svd/STM32G0B1.svd). CMake Tools' Active Folder
-            // must be stm32g0/ and its launch target the app to debug.
+            // pack (stm32g0/svd/STM32G0B1.svd - the G071 and the G031 are
+            // strict subsets of it, so the peripheral viewer reads them
+            // through the same file; a peripheral a part has not got just
+            // reads zero). One entry serves the three Nucleos: with one
+            // ST-LINK attached OpenOCD takes it; with several, add
+            // "openOCDPreConfigLaunchCommands": ["adapter serial <sn>"]
+            // (the desk's copy of this file does). CMake Tools' Active
+            // Folder must be stm32g0/, its configure preset the part's
+            // -debug one and its launch target the app to debug. After a
+            // session DBGMCU_CR keeps the DBG_STOP bit the target script
+            // sets (a Stop no longer stops the clocks) until a power-on
+            // or a `brio flash`, which clears it.
             "type": "cortex-debug",
             "request": "launch",
-            "name": "Debug STM32G0 (OpenOCD, Nucleo-G0B1RE)",
+            "name": "Debug STM32G0 (OpenOCD, ST-LINK)",
             "cwd": "${workspaceFolder}",
             "executable": "${command:cmake.launchTargetPath}",
             "servertype": "openocd",
