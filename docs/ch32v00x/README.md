@@ -264,6 +264,20 @@ loudly.
   a "fast interrupt" suggests: the ten registers reach the stack either
   way, and what the hardware saves is the prologue's fetch. The numbers
   and the reasoning are in [platform.md](platform.md).
+- **A DMA request that is never cleared is served ONCE**: TIM3's
+  channel 3 and 4 matches move one transfer after a reset of the block
+  and never another, whatever is rewritten or toggled ([tim.md](tim.md));
+  a DMA read of a hole in the map completes as a normal block and no
+  TEIF comes ([dma.md](dma.md)).
+- **The ADC can stop converting under a hardware trigger served by
+  the DMA** while the CPU works the peripheral buses - STRT standing,
+  no EOC - and only an ADON cycle revives it ([adc.md](adc.md),
+  `Adc::recover()`); the cause is not found.
+- **The chapters promise protections the silicon does not keep**: no
+  SPI control field is enable-protected, the I2C's timing registers
+  take a write under PE, the WWDG's counter does not run until armed
+  and its BIF cannot be cleared while the input stands. Each is a
+  refusal in the driver where the chapter's rule matters.
 
 ## Not covered yet
 
@@ -280,6 +294,12 @@ Driver gaps, each with its reason:
   driven for real: the entry is written, the SVD is not fetched (the
   MounRiver package may carry one), and neither was needed to bring
   the target up.
+- The DMA burst of the timers (DMACFGR/DMAADR), the front-end polling
+  of the OPA, TouchKey, the DBG freezes of the timers, EXTEN's lock-up
+  monitor: each a mode with no user, each named in its chapter's
+  document.
+- A `qingke/` core stratum: factored at the second RISC-V family,
+  never earlier (the armv6m rule).
 
 Implemented but not bench-verified, each with what would measure it:
 
@@ -293,3 +313,6 @@ Implemented but not bench-verified, each with what would measure it:
 - The USART's error counters (framing, noise, parity, hardware
   overrun): the paths are written; the stress suites that provoke
   each condition from the host side are what verifies them.
+- Every wire letter of the suites: the SPI loopback (one jumper), the
+  I2C peer (a board running `twi_peer`), the timer captures and the pad
+  levels (one jumper) - each document's own second list names them.
