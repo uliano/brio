@@ -11,9 +11,14 @@
  * the initial stack pointer, and it is why .vectors must be KEPT first
  * in .text and why the crt sets the stack pointer itself.
  *
- * 62 K, not 64: the top two kilobytes of the flash array are the boot
- * loader's, and the user program's space ends where the datasheet says
- * it does.
+ * THE LINKER GETS 40 K OF THE 62. The array is one, and the storage
+ * classes (brio/ch32v00x/nvm_flash.hpp: the NvHeap's 16 KB and the
+ * NvJournal's 6 KB attic) live in its top 22 KB as a CONSTANT
+ * partition - so `rom` stops at 0xA000 and nothing the compiler emits
+ * can land above it. `__brio_rom_end` below is that boundary read back
+ * as a value: the media compare it with their floor and refuse to open
+ * if this script is ever edited past it. 62 K and not 64 because the
+ * top two kilobytes of the flash array are the boot loader's.
  *
  * .noinit is NOLOAD and the crt neither loads nor zeroes it, which is
  * what lets the kernel's PanicRecord breadcrumb survive a warm reset.
@@ -21,7 +26,7 @@
 
 MEMORY
 {
-    rom (rx)  : ORIGIN = 0x00000000, LENGTH = 62K
+    rom (rx)  : ORIGIN = 0x00000000, LENGTH = 40K
     ram (rwx) : ORIGIN = 0x20000000, LENGTH = 8K
 }
 
@@ -82,4 +87,8 @@ SECTIONS
     } > ram
 
     __stack_top = ORIGIN(ram) + LENGTH(ram);
+
+    /* One past the last byte the linker may place: the storage floor.
+       brio/ch32v00x/nvm_flash.hpp reads it as a value. */
+    __brio_rom_end = ORIGIN(rom) + LENGTH(rom);
 }

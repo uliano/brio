@@ -139,10 +139,48 @@ inline constexpr uint16_t usart_ue     = 1U << 13;
 
 // ---- FLASH (RM ch. 18) ----------------------------------------------------
 struct FlashRegs {
-    volatile uint32_t ACTLR;      ///< 0x00 LATENCY[1:0]
+    volatile uint32_t ACTLR;         ///< 0x00 LATENCY[1:0]
+    volatile uint32_t KEYR;          ///< 0x04 the FPEC unlock keys (write-only)
+    volatile uint32_t OBKEYR;        ///< 0x08 the option-byte unlock keys (write-only)
+    volatile uint32_t STATR;         ///< 0x0c BSY, WRPRTERR, EOP, the boot bits
+    volatile uint32_t CTLR;          ///< 0x10 PER, MER, OBER, STRT, LOCK, FLOCK, FTPG, FTER, BUFLOAD, BUFRST
+    volatile uint32_t ADDR;          ///< 0x14 the page to program or erase (write-only)
+    uint32_t RESERVED0;              ///< 0x18
+    volatile uint32_t OBR;           ///< 0x1c the option bytes as loaded
+    volatile uint32_t WPR;           ///< 0x20 write protection, one bit per 2 KB
+    volatile uint32_t MODEKEYR;      ///< 0x24 the fast-programming unlock keys (write-only)
+    volatile uint32_t BOOT_MODEKEYR; ///< 0x28
 };
 
 inline FlashRegs* flash_ctl() { return reinterpret_cast<FlashRegs*>(hb_base + 0x2000); }
+
+/// The two keys, written in this order and consecutively to KEYR (the
+/// FPEC lock) and to MODEKEYR (the fast-programming lock); a wrong
+/// sequence locks the block until the next system reset (RM 18.4.2).
+inline constexpr uint32_t flash_key1 = 0x45670123UL;
+inline constexpr uint32_t flash_key2 = 0xCDEF89ABUL;
+
+/// FLASH_STATR
+inline constexpr uint32_t flash_bsy       = 1UL << 0;
+inline constexpr uint32_t flash_wrprterr  = 1UL << 4;   ///< write-1-clear
+inline constexpr uint32_t flash_eop       = 1UL << 5;   ///< write-1-clear
+inline constexpr uint32_t flash_boot_lock = 1UL << 15;
+
+/// FLASH_CTLR
+inline constexpr uint32_t flash_per     = 1UL << 1;    ///< sector (1 KB) erase
+inline constexpr uint32_t flash_mer     = 1UL << 2;    ///< whole array erase
+inline constexpr uint32_t flash_ober    = 1UL << 5;    ///< option bytes erase
+inline constexpr uint32_t flash_strt    = 1UL << 6;
+inline constexpr uint32_t flash_lock    = 1UL << 7;
+inline constexpr uint32_t flash_obwre   = 1UL << 9;
+inline constexpr uint32_t flash_errie   = 1UL << 10;
+inline constexpr uint32_t flash_eopie   = 1UL << 12;
+inline constexpr uint32_t flash_flock   = 1UL << 15;   ///< the fast-programming lock
+inline constexpr uint32_t flash_ftpg    = 1UL << 16;   ///< fast page (256 B) program
+inline constexpr uint32_t flash_fter    = 1UL << 17;   ///< fast page (256 B) erase
+inline constexpr uint32_t flash_bufload = 1UL << 18;
+inline constexpr uint32_t flash_bufrst  = 1UL << 19;
+inline constexpr uint32_t flash_ber32   = 1UL << 23;   ///< 32 KB block erase
 
 /// RM 18.3.1: 0 waits to 15 MHz, 1 wait to 24 MHz, 2 waits to 48 MHz.
 constexpr uint32_t flash_latency_for(uint32_t hz) {

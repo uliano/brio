@@ -84,6 +84,26 @@ find_program(RISCV_OBJCOPY riscv32-wch-elf-objcopy PATHS "${RISCV_TOOLCHAIN_DIR}
 find_program(RISCV_SIZE riscv32-wch-elf-size PATHS "${RISCV_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 find_program(RISCV_OBJDUMP riscv32-wch-elf-objdump PATHS "${RISCV_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 
+# The NVHEAP build-id defsym, as on the other three projects: a property
+# of util/nv_heap.hpp (the media record it in every map version), the
+# newest source mtime, so an unchanged tree relinks to the same bytes;
+# an image that never names an NvHeap never references the symbol.
+set(CH32V00X_NVHEAP_BUILD_ID 0)
+file(GLOB_RECURSE _nvheap_id_sources CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/../brio/*.cpp" "${CMAKE_SOURCE_DIR}/../brio/*.hpp"
+    "${CMAKE_SOURCE_DIR}/../brio/*.c"   "${CMAKE_SOURCE_DIR}/../brio/*.h"
+    "${CMAKE_SOURCE_DIR}/../brio/*.S"
+    "${CMAKE_SOURCE_DIR}/src/*.cpp" "${CMAKE_SOURCE_DIR}/src/*.hpp"
+    "${CMAKE_SOURCE_DIR}/src/*.c"   "${CMAKE_SOURCE_DIR}/src/*.h"
+    "${CMAKE_SOURCE_DIR}/src/*.S"
+)
+foreach(_f IN LISTS _nvheap_id_sources)
+    file(TIMESTAMP "${_f}" _ts "%s")
+    if(_ts GREATER CH32V00X_NVHEAP_BUILD_ID)
+        set(CH32V00X_NVHEAP_BUILD_ID "${_ts}")
+    endif()
+endforeach()
+
 set(CH32V00X_OPENOCD "/sw/wch-openocd/bin/openocd" CACHE FILEPATH "WCH's OpenOCD fork (SDI transport)")
 set(CH32V00X_OPENOCD_CFG "/sw/wch-openocd/bin/wch-riscv.cfg" CACHE FILEPATH "its RISC-V target config")
 
@@ -123,6 +143,7 @@ function(ch32_add_app name)
         -T${CMAKE_SOURCE_DIR}/ld/${CH32V00X_MCU}.ld
         -Wl,--gc-sections
         -Wl,-Map,$<TARGET_FILE_DIR:${name}>/firmware-${name}.map
+        -Wl,--defsym,__nvheap_build_id=${CH32V00X_NVHEAP_BUILD_ID}
     )
     set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
         ${CMAKE_SOURCE_DIR}/ld/${CH32V00X_MCU}.ld)

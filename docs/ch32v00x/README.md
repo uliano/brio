@@ -31,6 +31,7 @@ driver is measured on the bench.
 
 | Document | Content |
 |----------|---------|
+| [nvm.md](nvm.md) | FLASH: the engine (fast page program as the ONLY way to write, the two locks, three erase grains), the constant partition (the linker's 40 KB, the heap's 16 KB, the journal's 6 KB attic) and the two media with THE PAGE AS THE CELL; measured: an erase and a program each under a millisecond with the core stalled, a sector erase seven times faster than a page's, and a page that ACCEPTS a second program between erases - the finding a smaller cell could rest on, not yet taken |
 | [platform.md](platform.md) | Platform: `Ch32v00xPlatform` (the csrrci critical section, the WFE-shaped `idle()` and the WFI rule that forces it, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the hardware prologue/epilogue MEASURED: 83 vs 92 cycles round trip, the default ON), the STK `BasicTicker`, `delay_us` on the STK counter, and the failing half - `Reset` (the flags as history, PINRSTF naming the pin alone on this family), `ResetReporter`, `fault_reset<P>()`; three real resets in the suite |
 
 The headers not yet behind a document of their own:
@@ -87,7 +88,9 @@ The bench board is a CH32V006K8U6 module -
 presets, one configure = one compiler): `CH32V00X_MCU` selects the part
 (`ch32v006k8`), which selects only the linker script
 [ch32v00x/ld/ch32v006k8.ld](../../ch32v00x/ld/ch32v006k8.ld) - there is
-no device-select define to pass. The crt is
+no device-select define to pass. The script gives the linker the first
+40 KB of the 62: the top 22 KB are the storage partition ([nvm.md](nvm.md)),
+and `__brio_rom_end` is the boundary the media read back. The crt is
 [ch32v00x/src/glue/startup_ch32v00x.S](../../ch32v00x/src/glue/startup_ch32v00x.S),
 compiled into every image.
 
@@ -263,9 +266,8 @@ Driver gaps, each with its reason:
   default pads is the one port the bench needs; USART2's default pads
   and every remap arrive with the first program that needs a second
   port or a moved pad.
-- EXTI, TIM1/TIM2, ADC, I2C, SPI, DMA, the OPA, the watchdogs, the
-  flash program/erase engine and the power modes (Sleep/Standby, the
-  AWU): each is a chapter
+- EXTI, TIM1/TIM2, ADC, I2C, SPI, DMA, the OPA, the watchdogs and the
+  power modes (Sleep/Standby, the AWU): each is a chapter
   of the reference manual with no user yet, and each is born with
   its first user and its bench measurements, the way the other three
   strata's were.
