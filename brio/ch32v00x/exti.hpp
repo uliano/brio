@@ -16,9 +16,11 @@
  * INTERRUPT OR EVENT. A line enabled in INTENR raises its flag, and
  * through the PFIC its vector; a line enabled in EVENR raises a WAKE
  * EVENT instead - what ends a WFE with no handler run and no flag to
- * clear (6.4.2). The flags are write-one-clear. SWIEVR raises a line
+ * clear (6.4.2, measured: eighteen cycles from a latched event to the
+ * WFE's return). The flags are write-one-clear. SWIEVR raises a line
  * by software, which is how a program tests its own wiring without a
- * pad.
+ * pad - ON A LINE ENABLED IN INTENR: a line enabled nowhere raises no
+ * flag from it (measured).
  *
  * `ExtInt<Pin>` is the pad-facing task: the port select, the edges,
  * the enables, the flag - the shape of the SAM's ExtInt over its EIC.

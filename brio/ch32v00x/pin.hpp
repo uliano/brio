@@ -27,12 +27,17 @@
  * would be a decision about the whole port, and this file only speaks
  * about pins.
  *
+ * THE BONDING SHOWS IN THE REGISTERS: port B of the CH32V006 has seven
+ * pins (PB0..PB6, DS 2.1), and its eighth configuration nibble reads
+ * zero after a reset where the seven read 0x4 (measured). The pin-level
+ * table of which pins each package brings out is still the datasheet's.
+ *
  * NOT COVERED YET: the alternate-function REMAPS (AFIO_PCFR1), so a
  * peripheral is reachable only on its default pins - they arrive with
  * the first driver that needs a remapped pad; the pin-level bonding
  * table (which pins a package actually brings out), which needs the
- * second part to be worth writing; and the external interrupt lines,
- * which belong to an exti.hpp born with their first user.
+ * second part to be worth writing. The external interrupt lines are
+ * exti.hpp's.
  */
 
 #pragma once

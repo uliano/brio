@@ -271,9 +271,9 @@ gets its home in `docs/design/` when taken.
   flash media, the power modes, reset and the DMA each have their
   document and suite; SPI and I2C are written with their suites, the
   wire letters awaiting a jumper and a peer; the timers, the watchdogs
-  and the ADC have theirs. What remains, in docs/ch32v00x/README.md's
-  gap lists: the OPA chapter, the pad test that gives EXTI its page,
-  the family tiering and
+  and the ADC have theirs, and the pad suite its wireless half. What
+  remains, in docs/ch32v00x/README.md's gap lists: the OPA chapter, the
+  AFIO remaps, the family tiering and
   `brio check ch32v00x` with a second part, a self-built upstream gcc 16
   for riscv32 with an rv32ec/ilp32e multilib (the stratum compiles with
   plain rv32ec_zmmul on purpose - WCH's `xw` extension is worth a few
