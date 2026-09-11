@@ -23,20 +23,23 @@ silicon. The app's ISR binds the vector, as always.
 
 ### Realizations
 
-Common to the three: the Request field for field (`cs`, `dc`, `cmd`,
+Common to the four: the Request field for field (`cs`, `dc`, `cmd`,
 `cmd_len`, `tx`, `rx`, `len`, `reply`, `mode`, `polled`, `cs_setup_us`),
 the engine verbs `init`, `start`, `isr`, `rebase`, `recover`, `release`,
 `sck_hz`, `max_sck_hz`, and the vocabulary `SpiMode` / `SpiDone` /
-`spi_*`. An 8-bit request is spelled identically on all three, and each
-engine is measured against a real client on the wire: transactions
+`spi_*`. An 8-bit request is spelled identically on all four, and each
+engine is measured against a real client on the wire - transactions
 queued from one dispatch, a rejection when the queue is full, both
-sleep votes, and the per-bus timeout with `recover()`.
+sleep votes, and the per-bus timeout with `recover()` - on the three
+platforms marked supported; the CH32V00x's wire letters wait for their
+jumper ([the target's document map](../ch32v00x/README.md)).
 
 | stratum | realization | beyond the contract |
 |---|---|---|
 | avrdx | `SpiHost<n, route>` (`avrdx/spi.hpp`) | the rate is a `SpiClock` division enum, with `ceiling_clock()` the optional SCK ceiling a rebase re-resolves and `clock_for(hz)` the chooser (`spi_clock_for(clk_per_hz, hz)` is the same arithmetic with the clock stated); `status()` is always `spi_ok` - no DMA path, no fault of its own; `prime(mode, clock)` as on the other two |
 | samc21 | `SpiHost<n, pads, TxEngine, RxEngine>` (`samc21/spi.hpp`) | the rate is a `uint8_t baud` DIVISOR (the SERCOM's own register), so the ceiling is `ceiling_baud()` and the chooser `baud_for(hz)`; two optional DMA engine slots carrying the data phase (`dma_isr`, `status()` = `spi_ok` or `spi_dma_fault`); `prime(mode, baud)` for a caller framing the select by hand; `reference_hz()` = the stated GCLK rate |
 | stm32g0 | `SpiHost<n, pins, TxEngine, RxEngine>` (`stm32g0/spi.hpp`) | a frame size in the Request (`bits`, 4 to 16, eight by default) with `cmd_len`/`len` counted in FRAMES; the `SpiClock` enum with `ceiling_clock()` and the chooser `clock_for(hz)`; the engine slots, `status()` and `prime(mode, clock, bits)` as the SAM's; `bit_order()`/`lsb_first()` on the task; `claim_nss_pad()` for a hardware NSS; `reference_hz()` = PCLK |
+| ch32v00x | `SpiHost<1, pins, TxEngine, RxEngine>` (`ch32v00x/spi.hpp`) | the G0's surface on the F1's peripheral: `bits` is 8 or 16 (the two widths this SPI has), the `SpiClock` enum runs div2..div256 with `ceiling_clock()` and `clock_for(hz)`, `prime(mode, clock, bits)`, `bit_order()`/`lsb_first()`, `claim_nss_pad()`, `status()` = `spi_ok` or `spi_dma_fault`; the engine slots are FIXED to DMA channels 3 (TX) and 2 (RX), because on this family the channel IS the request; `reference_hz()` = HCLK, there being no APB prescaler |
 | host | none | `SpiBus` is host-tested over a fake `Bus` (`test_spi_bus`, `test_bus_master`) |
 
 One of those differences is ONE thing spelled two ways and is
@@ -48,17 +51,18 @@ since a ceiling in hertz would serve all three.
 The client side is deliberately NOT one surface: `SpiClient` on each
 stratum is the application's protocol over that silicon's own client
 half (a shift register with a two-deep buffer, a SERCOM with PLOADEN, an
-SPI with a two-deep FIFO), and the three peers of the bench converge on
-one algorithm - answers kept queued ahead of what the host has
-clocked - whose only per-silicon parameter is HOW MANY must be queued
-ahead (one on the AVR, two on the SAM for its three-SCK-cycle rule,
-two on the G0 for its FIFO). That integer is the one thing a portable
-client would need, and each `SpiClient` publishes it as
-`frames_ahead`.
+SPI with a two-deep FIFO, the F1's single data register), and the peers
+of the bench converge on one algorithm - answers kept queued ahead of
+what the host has clocked - whose only per-silicon parameter is HOW
+MANY must be queued ahead (one on the AVR, two on the SAM for its
+three-SCK-cycle rule, two on the G0 for its FIFO, one on the CH32V00x).
+That integer is the one thing a portable client would need, and each
+`SpiClient` publishes it as `frames_ahead`.
 
-The three peripherals share almost nothing below the contract - a
-shift register with a two-deep buffer, a SERCOM with a pad matrix, and
-an SPI with a FIFO and a frame size - which is what makes the
+The four peripherals share almost nothing below the contract - a
+shift register with a two-deep buffer, a SERCOM with a pad matrix, an
+SPI with a FIFO and a frame size, and one with no FIFO at all and a
+DMA channel per direction - which is what makes the
 descriptor's survival worth recording.
 
 `SpiBus` is an alias of `BusMaster<Bus, P>` (`util/bus_master.hpp`),
