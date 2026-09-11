@@ -63,6 +63,10 @@ static_assert(twi_scl_hz_at(24'000'000u, 115, 1000u) == 90'909u);
 static_assert(twi_period_ticks(24'000'000u, 10, 0) == 30u);
 // A clock the divider cannot span: BAUD would have to exceed 255.
 static_assert(!twi_baud_for(64'000'000u, I2cSpeed::standard_100k).has_value());
+// ...or go below 0: 1 MHz needs more than 10 ticks of an 8 MHz clock,
+// so the speed is refused there, not approximated; 12 MHz reaches it.
+static_assert(!twi_baud_for(8'000'000u, I2cSpeed::fast_plus_1m).has_value());
+static_assert(twi_baud_for(12'000'000u, I2cSpeed::fast_plus_1m).has_value());
 static_assert(twi_clock_ok(24'000'000u, I2cSpeed::fast_plus_1m));
 static_assert(!twi_clock_ok(2'000'000u, I2cSpeed::fast_plus_1m));
 

@@ -22,7 +22,11 @@ aliases cost zero flash.
 Status codes are one byte, split by ownership: `bus_ok = 0` and
 `bus_rejected = 1` are the arbiter's; every value from
 `bus_engine_status = 2` up belongs to the engine's vocabulary and
-travels untouched from `TransferDone` to the requester's reply. SPI
+travels untouched from `TransferDone` to the requester's reply. The
+engine borrows `i2c_rejected` (= `bus_rejected`) for the one refusal
+it makes on its own, a speed the clock in force cannot produce: the
+same meaning for the requester either way - nothing was executed, no
+byte moved. SPI
 has no wire-level outcome to report (no ACK, no arbitration), so its
 vocabulary is exactly the arbiter's; I2C adds the four an I2C master
 can observe:
@@ -111,7 +115,17 @@ another client from slipping in between - the SPI rule "the request is
 the complete script of one bus tenure" holds verbatim. The probe is
 what a scanner sends and, unlike the SPI zero-length request, it does
 touch the wire (its address phase IS the transaction), so `start()`
-is always asynchronous on I2C: every request ends in a `TransferDone`.
+is asynchronous on I2C whenever the wire moves: every such request
+ends in a `TransferDone`. The one synchronous completion is the
+REFUSAL: a request naming a speed the clock in force cannot produce
+(`speed_ok(speed)` says so) is answered `i2c_rejected` inside
+`start()`, through the engine's `status()`, no byte moved - never run
+at a rate nobody asked for, and never approximated in silence. The
+arbiter replies with `status()` on every synchronous return
+(`util/bus_master.hpp`'s contract), so the requester sees the refusal
+in the same `I2cDone` as any outcome of the wire; the completion
+policy does not judge it, and no retry would change it. Every engine
+refuses the same way: status set, nothing armed, true returned.
 
 The tx and rx buffers are `Lease::reply` loans and say so in their
 field types: the requester keeps them alive and untouched until its

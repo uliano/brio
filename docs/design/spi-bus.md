@@ -151,7 +151,8 @@ latent bug for every multi-device configuration.
 
 `Bus::start(req)` returns bool: FALSE = the transfer runs on the SPI
 interrupt and a `TransferDone` will arrive later; TRUE = it completed
-SYNCHRONOUSLY inside start(). The choice travels per-request in a
+SYNCHRONOUSLY inside start(), and the arbiter replies with whatever
+the engine's `status()` reports. The choice travels per-request in a
 `polled` flag - like the clock, the client knows its transaction.
 
 - **ISR pump** (default): one byte per interrupt (no DMA on AVR Dx).
@@ -179,6 +180,20 @@ draining the pending FIFO through any further synchronous requests
 flight. Both styles interleave freely on one bus. A zero-total-length
 request completes on the spot, wire untouched - the reply still
 arrives (no silent hang).
+
+A synchronous completion is not a success by definition. On an engine
+with DMA slots a polled request still moves its bulk over the engines
+and `start()` waits on their completion with a bounded budget; a block
+that never completes (a channel the silicon stopped, a clock that
+stopped, the DMA vector left unbound) ends the request inside
+`start()` with `spi_dma_fault` in `status()`, CS raised, and that code
+is what the requester's `SpiDone` carries - the same code the
+asynchronous path reports through `TransferDone`. The completion
+policy (`util/bus_master.hpp`) judges asynchronous completions only:
+a retry of a failure reported inside `start()` would run inside the
+same dispatch, compounding the blocking the polled client bounded on
+purpose, so the failure reaches that requester as it is and the
+decision to try again is its own.
 
 ## Two silicon facts the engine honours
 

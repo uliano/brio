@@ -108,7 +108,12 @@ inequalities. The SMBus time-outs have the same pair,
 `I2cHost<n, pins, TxEngine, RxEngine>` is the engine: one Request is one
 bus tenure in the four shapes I2C devices use (write, read,
 write-then-read joined by a repeated START, and the empty probe),
-always asynchronous, with the `i2c_*` codes produced on the wire.
+asynchronous whenever the wire moves, with the `i2c_*` codes produced
+on the wire; the two failures that move nothing - a speed this kernel
+clock cannot produce (`i2c_rejected`) and a START still standing from
+a tenure the peripheral never closed (`i2c_bus_error`) - complete
+inside `start()` and reach the requester through the arbiter all the
+same.
 `init(clock, kernel, filters, bus)`, `rebase(hz)` (a ClockUser),
 `speed_ok()`, `scl_hz()`, `start()`, `isr()`, `dma_isr()`, `status()`,
 `recover()`, `unstick()`, `fast_plus_drive()` and

@@ -1951,10 +1951,12 @@ public:
     // ---- the transfer -------------------------------------------------------
 
     /// Begin one bus tenure (called by I2cBus from main context).
-    /// Returns false ALWAYS on success - the tenure runs on the ISR and a
-    /// TransferDone{status()} follows - and true only for the degenerate
-    /// failure the reply must not wait for: a speed this kernel clock
-    /// cannot produce. That is the I2cHost contract
+    /// Returns false whenever the wire moves - the tenure runs on the
+    /// ISR and a TransferDone{status()} follows - and true for the two
+    /// failures that move nothing, answered through status(): a speed
+    /// this kernel clock cannot produce (i2c_rejected), and a START
+    /// still standing from a tenure the peripheral never closed
+    /// (i2c_bus_error). That is the I2cHost contract
     /// (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
         req_ = r;

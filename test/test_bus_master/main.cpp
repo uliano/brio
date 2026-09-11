@@ -1,7 +1,9 @@
 // Host tests for util/bus_master.hpp: the arbiter itself (FIFO order,
 // reject-when-full, the ReplyTo completion, both engine completion
-// styles), the completion-policy hook (pass-through by default, a
-// retry ladder, the per-request attempt counter, and a retrying master
+// styles - a synchronous one answered with what the engine's status()
+// reports, a failure included), the completion-policy hook (pass-through
+// by default, a retry ladder, the per-request attempt counter, a
+// synchronous failure delivered unjudged, and a retrying master
 // voting NOT-OK on a PrepareSleep), and the per-bus timeout (a transfer
 // that never answers is recovered and answered bus_timeout; both halves
 // of the race with the real completion staged deterministically on the
@@ -38,8 +40,9 @@ constexpr uint8_t engine_other = brio::bus_engine_status + 1;  // 3
 
 /**
  * A scripted engine. `synchronous` makes start() complete inside itself
- * (the polled/degenerate style the contract allows); otherwise the
- * transfer stays in flight until the test posts a TransferDone.
+ * (the polled/degenerate style the contract allows) with whatever
+ * `status_` holds - the arbiter reads status() for the reply; otherwise
+ * the transfer stays in flight until the test posts a TransferDone.
  */
 template <int Tag>
 struct FakeBus {
@@ -49,14 +52,17 @@ struct FakeBus {
     };
     static inline std::vector<uint8_t> started;
     static inline bool synchronous = false;
+    static inline uint8_t status_ = bus_ok;
 
     static bool start(const Request& r) {
         started.push_back(r.id);
         return synchronous;
     }
+    static uint8_t status() { return status_; }
     static void reset() {
         started.clear();
         synchronous = false;
+        status_ = bus_ok;
     }
 };
 
@@ -117,6 +123,7 @@ struct RecoverableBus {
         started.push_back(r.id);
         return synchronous;
     }
+    static uint8_t status() { return bus_ok; }
     static void recover() {
         ++recovered;
         if (on_recover != nullptr) {
@@ -316,6 +323,28 @@ TEST_CASE("a synchronous engine completes inside start() and drains the FIFO") {
     CHECK(PlainClient::votes == std::vector<bool>{true});
 }
 
+TEST_CASE("a synchronous failure is answered with the engine's own status") {
+    reset_plain();
+    PlainEngine::synchronous = true;
+    // A polled transfer that failed inside start() (a DMA block that
+    // never completed) or a request refused without moving a byte: the
+    // reply carries status(), not a bus_ok the arbiter assumed. The
+    // FIFO keeps draining through it.
+    PlainEngine::status_ = engine_fault;
+    brio::post<Plain>(plain_req(1));
+    brio::post<Plain>(plain_req(2));
+    pump(false);
+    PlainEngine::status_ = bus_ok;
+    brio::post<Plain>(plain_req(3));
+    pump(false);
+    CHECK(PlainEngine::started == std::vector<uint8_t>{1, 2, 3});
+    CHECK(PlainClient::done == std::vector<uint8_t>{engine_fault, engine_fault, bus_ok});
+    brio::post<Plain>(PrepareSleep{SleepDepth::standby,
+                                   brio::reply_to<PlainClient, SleepVote>()});
+    pump(false);
+    CHECK(PlainClient::votes == std::vector<bool>{true});
+}
+
 TEST_CASE("an idle bus votes yes, a busy one votes no") {
     reset_plain();
     brio::post<Plain>(PrepareSleep{SleepDepth::standby,
@@ -424,6 +453,35 @@ TEST_CASE("a retry that completes inside start() answers and drains the queue") 
     pump(true);
     CHECK(RetryEngine::started == std::vector<uint8_t>{5, 5, 6});
     CHECK(RetryClient::done == std::vector<uint8_t>{bus_ok, bus_ok});
+    CHECK(Retrying::attempt() == 0);
+}
+
+TEST_CASE("a synchronous failure is delivered unjudged: the policy is not consulted") {
+    reset_retry();
+    RetryEngine::synchronous = true;
+    RetryEngine::status_ = engine_fault;
+    brio::post<Retrying>(retry_req(7));
+    pump(true);
+    // No retry, no call on the hook: the requester holds the decision.
+    CHECK(RetryEngine::started == std::vector<uint8_t>{7});
+    CHECK(RetryClient::done == std::vector<uint8_t>{engine_fault});
+    CHECK(Policy2::asked == 0);
+    CHECK(Retrying::attempt() == 0);
+}
+
+TEST_CASE("a retry that fails inside start() answers that failure and stops the ladder") {
+    reset_retry();
+    brio::post<Retrying>(retry_req(8));
+    pump(true);
+    RetryEngine::synchronous = true;           // the retry will finish at once...
+    RetryEngine::status_ = engine_other;       // ...and fail there
+    brio::post<Retrying>(TransferDone{engine_fault});
+    pump(true);
+    // The asynchronous failure was judged (one call, one retry); the
+    // synchronous one is the answer, whatever attempts remain.
+    CHECK(RetryEngine::started == std::vector<uint8_t>{8, 8});
+    CHECK(RetryClient::done == std::vector<uint8_t>{engine_other});
+    CHECK(Policy2::asked == 1);
     CHECK(Retrying::attempt() == 0);
 }
 

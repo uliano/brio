@@ -53,6 +53,9 @@
 //   h  THE KERNEL against the peer: I2cBus (= BusMaster) over I2cHost,
 //      the NACK in its place, the rejection, both votes, and the
 //      wedge the PEER holds answered by the per-bus timeout
+//   i  THE REFUSAL, wireless: a speed the clock cannot make is answered
+//      i2c_rejected inside start() and delivered through the arbiter,
+//      the wire and the vector untouched
 //   k  THE STUCK BUS: the peer holding SDA, and unstick() counting
 //      the clocks until it lets go
 //
@@ -924,6 +927,46 @@ void fill_pattern(uint8_t* p, uint16_t n, uint8_t seed) {
     }
 }
 
+// ===========================================================================
+// i - the refusal, wireless
+// ===========================================================================
+
+/// A speed the clock in force cannot make is refused INSIDE start() and
+/// reaches the requester through the arbiter as i2c_rejected - the one
+/// synchronous completion of an I2C engine - with the wire and the
+/// vector untouched. The clock itself is not moved: rebase() is told a
+/// rate below 15.10.2's window, which empties the timing table, and
+/// told 48 MHz again after.
+void ti_refusal() {
+    host_ready();
+    kl::BusKernel::init_all();
+    bus_ao_live = true;
+    Host::rebase(6'000'000UL);
+    bench.verdict("told 6 MHz, speed_ok says no to both speeds (below 15.10.2's window)",
+                  !Host::speed_ok(I2cSpeed::standard_100k) && !Host::speed_ok(I2cSpeed::fast_400k));
+    kl::Probe::clear_tally();
+    const uint32_t entries = host_isr_entries;
+    fill_pattern(kl::out_a, 4, 0x05);
+    post<kl::I2cArb>(kl::request(nobody_addr, kl::out_a));
+    kl::pump_until(1, 100);
+    // STAR2's BUSY is the WIRE's level (both lines read low with no
+    // pull-ups on this module); MSL is ours - it would stand had a
+    // START gone out.
+    print(serial, "  the request at 400 kHz replied ", kl::Probe::replies[0], " (i2c_rejected = ",
+          i2c_rejected, "), STAR2=", hex(H::status2()), " (BUSY is the wire's level), event vector "
+          "entries ", host_isr_entries - entries, crlf);
+    bench.verdict("answered i2c_rejected inside start() and delivered through the arbiter, no "
+                  "START issued (MSL clear) and the vector never entered",
+                  kl::Probe::n == 1u && kl::Probe::replies[0] == i2c_rejected &&
+                      host_isr_entries == entries && (H::status2() & i2c_msl) == 0u);
+    bench.verdict("the arbiter's own tally stays at zero (its rejection is the full queue's)",
+                  kl::I2cArb::rejected_count() == 0u);
+    Host::rebase(SysClock::hz);
+    bench.verdict("told 48 MHz again, both speeds are back",
+                  Host::speed_ok(I2cSpeed::standard_100k) && Host::speed_ok(I2cSpeed::fast_400k));
+    bus_ao_live = false;
+}
+
 void th_kernel() {
     if (!need_peer()) {
         return;
@@ -1169,6 +1212,8 @@ int main() {
     bench.letter('g', "THE DMA ENGINES on channels 6 and 7 against the peer", tg_dma);
     bench.letter('h', "THE KERNEL: I2cBus over I2cHost, the rejection, the votes, the "
                       "wedge answered by the timeout", th_kernel);
+    bench.letter('i', "THE REFUSAL, wireless: a speed the clock cannot make, i2c_rejected "
+                      "inside start() through the arbiter", ti_refusal);
     bench.letter('k', "the stuck bus: the peer holding SDA, unstick() counting", tk_unstick);
 
     if (serial_ok) {

@@ -365,7 +365,10 @@ constexpr bool twi_needs_fm_plus(I2cSpeed s) { return s == I2cSpeed::fast_plus_1
  * first term and step 3 round UP, the rise term DOWN, all three of
  * which lengthen the period.
  *
- * Empty when even BAUD = 255 cannot reach the speed at this clock.
+ * Empty when the register cannot hold the solution: a BAUD below 0
+ * (the divider cannot go that fast at this clock - even BAUD = 0 gives
+ * a slower SCL than asked, and a speed is never approximated in
+ * silence) or above 255 (nor that slow).
  */
 constexpr std::optional<uint8_t> twi_baud_for(uint32_t clk_hz, I2cSpeed s,
                                               uint32_t rise_ns = 0, uint32_t fall_ns = 0) {
@@ -376,7 +379,7 @@ constexpr std::optional<uint8_t> twi_baud_for(uint32_t clk_hz, I2cSpeed s,
     const uint64_t rise = static_cast<uint64_t>(clk_hz) * rise_ns / 2'000'000'000ull;
     const int32_t first = static_cast<int32_t>((clk_hz + 2 * f_scl - 1) / (2 * f_scl));
     int32_t baud = first - 5 - static_cast<int32_t>(rise);
-    if (baud < 0) baud = 0;
+    if (baud < 0) return {};
     // tLOW = (BAUD + 5)/f_CLK - tOF, in nanoseconds, against the floor.
     const uint64_t low_ns = static_cast<uint64_t>(baud + 5) * 1'000'000'000ull / clk_hz;
     if (low_ns < static_cast<uint64_t>(twi_low_min_ns(s)) + fall_ns) {
@@ -566,6 +569,7 @@ public:
             force_idle();                   // 29.3.2.1.1: the bus is ours to declare idle
         }
         clk_per_hz_ = clk_per_hz;
+        refresh_reachable();
         return true;
     }
 
@@ -1013,18 +1017,27 @@ public:
         return static_cast<TwiRoute>((PORTMUX.TWIROUTEA & gm) >> gp);
     }
 
-    /// The peripheral clock last seen by init()/rebase(), and whether it
-    /// is at least four times a speed's SCL - the condition the bus
-    /// error detector (29.5.6) and the client Stop interrupt (29.5.10)
-    /// need. Not enforced: a slower clock is legal, it only blinds them.
+    /// The peripheral clock last seen by init()/rebase().
     static uint32_t clk_per_hz() { return clk_per_hz_; }
     /// Record the peripheral clock without reprogramming anything (the
     /// baud arithmetic reads it). init() does it itself; the half that
     /// joins an already-running instance uses this.
-    static void note_clock(uint32_t hz) { clk_per_hz_ = hz; }
-    /// Can the peripheral clock last seen make `s` (CLK_PER >= 4 x f_SCL,
-    /// the condition the bus-error detector needs)?
-    static bool speed_ok(I2cSpeed s) { return twi_clock_ok(clk_per_hz_, s); }
+    static void note_clock(uint32_t hz) {
+        clk_per_hz_ = hz;
+        refresh_reachable();
+    }
+    /// Can the divider make `s` at the peripheral clock last seen and
+    /// the bus timing declared - a BAUD the register holds, with the
+    /// period at or above the request (twi_baud_for)? A speed that is
+    /// not is REFUSED by the host engine, never approximated: the
+    /// fastest the divider goes is CLK_PER/10, so reachability implies
+    /// the chapter's CLK_PER >= 4 x f_SCL (twi_clock_ok), the condition
+    /// the bus error detector (29.5.6) and the client Stop interrupt
+    /// (29.5.10) need. Cached per speed: recomputed whenever the clock
+    /// or the timing moves, never at a request.
+    static bool speed_ok(I2cSpeed s) {
+        return ((reachable_ >> static_cast<uint8_t>(s)) & 1u) != 0u;
+    }
     /// The speed the last set_speed()/init() programmed.
     static I2cSpeed speed() { return speed_; }
 
@@ -1038,6 +1051,7 @@ public:
     static void bus_timing(uint16_t rise_ns, uint16_t fall_ns) {
         rise_ns_ = rise_ns;
         fall_ns_ = fall_ns;
+        refresh_reachable();
     }
     static uint16_t rise_ns() { return rise_ns_; }
     static uint16_t fall_ns() { return fall_ns_; }
@@ -1059,9 +1073,12 @@ public:
     }
 
     /// A clock change: MBAUD is derived from CLK_PER, so it is recomputed
-    /// for the speed in force. False when that speed no longer fits.
+    /// for the speed in force. False when that speed no longer fits -
+    /// MBAUD then stays as it was, and speed_ok() says no for that
+    /// speed until the clock moves again, so no request runs on it.
     static bool rebase(uint32_t hz) {
         clk_per_hz_ = hz;
+        refresh_reachable();
         return set_speed(speed_);
     }
 
@@ -1163,11 +1180,26 @@ private:
         port.DIRCLR = static_cast<uint8_t>(1u << p.pin);
     }
 
+    /// The per-speed cache behind speed_ok(): bit s set when
+    /// twi_baud_for() has a solution for speed s at the clock and
+    /// timing in force. Three speeds, three divisions, at a clock or
+    /// timing change only.
+    static void refresh_reachable() {
+        uint8_t bits = 0;
+        for (uint8_t i = 0; i < 3u; ++i) {
+            if (twi_baud_for(clk_per_hz_, static_cast<I2cSpeed>(i), rise_ns_, fall_ns_)) {
+                bits = static_cast<uint8_t>(bits | (1u << i));
+            }
+        }
+        reachable_ = bits;
+    }
+
     static inline TwiRoute route_ = TwiRoute::def;
     static inline I2cSpeed speed_ = I2cSpeed::standard_100k;
     static inline uint32_t clk_per_hz_ = 0;
     static inline uint16_t rise_ns_ = 0;   ///< 0 = the mode's specification maximum
     static inline uint16_t fall_ns_ = 0;
+    static inline uint8_t reachable_ = 0;  ///< speed_ok()'s cache, a bit per speed
 };
 
 // ---- tasks ------------------------------------------------------------------
@@ -1345,8 +1377,10 @@ public:
     static uint32_t actual_scl_hz(uint32_t t_rise_ns = 0) { return T::actual_scl_hz(t_rise_ns); }
     static uint8_t baud() { return T::baud(); }
     static I2cSpeed speed() { return T::speed(); }
-    /// CLK_PER >= 4 x f_SCL, the condition the bus error detector needs:
-    /// for the speed in force, or for a speed asked about.
+    /// Can the divider make a speed at the clock in force (Twi<n>::
+    /// speed_ok - which implies the chapter's CLK_PER >= 4 x f_SCL): the
+    /// speed in force, or one asked about. A Request naming a speed that
+    /// is not is answered i2c_rejected inside start(), no byte moved.
     static bool speed_ok() { return T::speed_ok(T::speed()); }
     static bool speed_ok(I2cSpeed s) { return T::speed_ok(s); }
 
@@ -1356,12 +1390,19 @@ public:
     static bool quick_command() { return T::quick_command(); }
 
     /// Begin a transaction (called by the bus AO from main context).
-    /// Always asynchronous: returns false and a TransferDone{status()}
-    /// follows from the ISR glue - even the empty probe ends on the wire
-    /// (its address phase IS the transaction).
+    /// Asynchronous whenever the wire moves: returns false and a
+    /// TransferDone{status()} follows from the ISR glue - even the empty
+    /// probe ends on the wire (its address phase IS the transaction).
+    /// True only for the one refusal that moves nothing: a speed the
+    /// divider cannot make at the clock in force, answered i2c_rejected
+    /// through status() - the I2cHost contract (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
         req_ = r;
         pos_ = 0;
+        if (!T::speed_ok(r.speed)) {
+            status_ = i2c_rejected;   // nothing armed: no ISR will follow
+            return true;
+        }
         status_ = i2c_ok;
         quick_ = T::quick_command();
         if (r.speed != T::speed()) {

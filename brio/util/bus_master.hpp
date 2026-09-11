@@ -31,9 +31,16 @@
  *    runs on its ISR and the app's ISR glue posts TransferDone{status}
  *    to this AO when it ends (same pattern as the uart RxActivity
  *    edge). TRUE = the transaction COMPLETED SYNCHRONOUSLY inside
- *    start() (polled bulk transfers, degenerate empty requests): the
- *    reply is sent right away with bus_ok and no TransferDone must
- *    follow for it. Both styles interleave freely on one bus.
+ *    start() - polled bulk transfers, degenerate empty requests, and a
+ *    request the engine REFUSES without moving a byte: the reply is
+ *    sent right away with whatever Bus::status() reports (bus_ok as a
+ *    rule; the engine's own code when the synchronous path failed - a
+ *    polled DMA block that never completed, a bus speed the clock in
+ *    force cannot produce) and no TransferDone must follow for it.
+ *    Both styles interleave freely on one bus.
+ *  - Bus::status() -> uint8_t: the last completion's code, the one the
+ *    app's ISR glue puts in TransferDone and the one this AO reads
+ *    right after a synchronous start().
  *  - Status codes: bus_ok and bus_rejected are the arbiter's; every
  *    value >= bus_engine_status belongs to the engine's vocabulary
  *    (see i2c_bus.hpp) and travels untouched from TransferDone to the
@@ -185,9 +192,13 @@ enum class BusAction : uint8_t {
  * must be a pure decision - the place for a recovery ladder's ACTIONS
  * (a bus reset, a clock pulse train) is the engine, not here.
  *
- * Note that the hook sees ASYNCHRONOUS completions only: a transfer the
- * engine finishes inside start() reported bus_ok by that very fact, and
- * there is nothing for a policy to judge.
+ * The hook judges ASYNCHRONOUS completions only. A failure the engine
+ * reports inside start() (Bus::status() after a synchronous return)
+ * goes to the requester as it is: a retry there would run inside the
+ * same dispatch, compounding the blocking a polled request's client
+ * bounded on purpose - and the one synchronous refusal on I2C, a speed
+ * the clock cannot produce, is a fact no retry changes. Whether to try
+ * again is that requester's decision, made with its reply in hand.
  */
 struct BusPassThrough {
     static constexpr bool never_retries = true;
@@ -240,6 +251,9 @@ class BusMaster
     using Base = detail::BusMasterFsm<timed, BusMaster, typename Bus::Request>;
     using Request = typename Bus::Request;
 
+    static_assert(requires { { Bus::status() } -> std::convertible_to<uint8_t>; },
+                  "a Bus reports its last completion in status(): the reply of a synchronous "
+                  "start() and the TransferDone payload of an asynchronous one");
     static_assert(!timed || requires { Bus::recover(); },
                   "a timed BusMaster needs Bus::recover(): the verb that puts a dead "
                   "engine back where start() is legal again. The WIRE is not its job - "
@@ -382,10 +396,11 @@ private:
                             arm_timeout();              // a new wire transfer
                             return Base::handled();     // the retry is in flight
                         }
-                        // The retry finished inside start(): bus_ok by
-                        // that fact, and the request is answered.
+                        // The retry finished inside start(): answered
+                        // with what the engine reports, unjudged - the
+                        // hook sees asynchronous completions only.
                         attempt_ = 0;
-                        active_reply_.send(BusDone{bus_ok});
+                        active_reply_.send(BusDone{Bus::status()});
                         if (pending_count_ > 0 && begin_chain(pending_pop())) {
                             return Base::handled();
                         }
@@ -479,8 +494,9 @@ private:
     }
 
     /// Start r and keep draining the pending FIFO through synchronous
-    /// completions. Returns true when a transfer went asynchronous
-    /// (its TransferDone will arrive), false when everything finished.
+    /// completions, each answered with what the engine reports. Returns
+    /// true when a transfer went asynchronous (its TransferDone will
+    /// arrive), false when everything finished.
     static bool begin_chain(Request r) {
         for (;;) {
             if constexpr (may_retry) {
@@ -492,7 +508,7 @@ private:
                 arm_timeout();
                 return true;
             }
-            active_reply_.send(BusDone{bus_ok});
+            active_reply_.send(BusDone{Bus::status()});
             if (pending_count_ == 0) {
                 return false;
             }

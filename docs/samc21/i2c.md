@@ -186,11 +186,13 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   (= BusMaster) drives: the I2cHost Request every target shares, field
   for field ({addr, tx, tx_len, rx, rx_len, ReplyTo<I2cDone>, speed};
   one tenure = write, read, or write-then-read on a repeated START; the
-  empty request is the address probe), ALWAYS asynchronous, one
-  interrupt per byte
+  empty request is the address probe), asynchronous whenever the wire
+  moves, one interrupt per byte
   (MB/SB), the i2c_* status vocabulary on the wire
   (nack_addr/nack_data/arb_lost/bus_error), per-speed register pairs
-  cached with `speed_ok()` and the refused-not-slowed rule,
+  cached with `speed_ok()` and the refused-not-slowed rule (a speed
+  the core cannot make is answered `i2c_rejected` inside `start()`,
+  the one synchronous completion, delivered through the arbiter),
   `unstick()` - nine open-drain pulses and a Stop by hand, which leaves
   a HEALTHY wire untouched (SDA read first; zero pulses is the answer
   and the action) - and `recover()`, the init() tail re-run from the

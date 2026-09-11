@@ -86,9 +86,19 @@ to the direction bit. Software still issues the STOP.
 
 **Two conditions the chapter attaches to CLK_PER**: the bus error
 detector (29.5.6) and the client's Stop interrupt (29.5.10) both need
-the main clock to be at least four times f_SCL. The driver reports that
-condition (`speed_ok()`); it does not enforce it, because a slower clock
-is legal and only blinds those two features.
+the main clock to be at least four times f_SCL (`twi_clock_ok`). The
+resource's `speed_ok(speed)` asks a stronger question - can the
+divider make the speed at the clock and the bus timing in force, a
+BAUD the register holds with the period at or above the request - and
+that one IS enforced: `twi_baud_for` has no solution below BAUD 0 (the
+divider cannot go that fast: BAUD = 0 is CLK_PER/10, so any reachable
+speed also satisfies the four-times condition) or above 255, the
+resource refuses to program such a speed, and the host engine refuses
+a request naming it. The answer is cached per speed and recomputed
+when the clock or the timing moves, never at a request. The client
+side keeps the four-times condition as a readback only (`max_scl_hz`,
+`can_follow`): a slower clock is legal there and only blinds those two
+features.
 
 ### The routes
 
@@ -208,13 +218,20 @@ PORTMUX code and nothing else. [The contract the tasks implement](../design/i2c-
 **`I2cHost<n, route>`** is the transfer engine the bus AO drives. One
 `Request` is ONE bus tenure - `{addr, tx span, rx span, reply, speed}` -
 in the four shapes I2C devices actually use (write, read, write-then-read
-with a repeated START, probe); `start()` is always asynchronous and
-`isr()` is the per-byte pump that reports through `status()`. It is a
-`ClockUser`: `rebase` re-derives MBAUD. A speed CHANGE costs an ENABLE
-cycle and a force-idle, because MBAUD may not be written under a running
-host - paid at `start()`, only when the speed actually moves, never per
-byte. `quick_command(true)` turns every request into an address-only
-frame.
+with a repeated START, probe); `start()` is asynchronous whenever the
+wire moves and `isr()` is the per-byte pump that reports through
+`status()`. The one synchronous completion is the refusal: a request
+naming a speed the divider cannot make at the clock in force
+(`speed_ok(speed)` is false) is answered `i2c_rejected` inside
+`start()`, no byte moved, and the arbiter delivers that status like any
+outcome of the wire - the contract every stratum's engine follows. It
+is a `ClockUser`: `rebase` re-derives MBAUD, and when the speed in force
+no longer fits the new clock MBAUD stays as it was and every request at
+that speed is refused until the clock moves again. A speed CHANGE costs
+an ENABLE cycle and a force-idle, because MBAUD may not be written under
+a running host - paid at `start()`, only when the speed actually moves,
+never per byte. `quick_command(true)` turns every request into an
+address-only frame.
 
 **`I2cClient<n, route, on_dual_pins>`** is the other end: the whole
 address-match space as options, the four cases as verbs - `respond`

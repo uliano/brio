@@ -36,6 +36,7 @@ struct FakeBus {
         ReplyTo<BusDone> reply;
     };
     static bool start(const Request&) { return false; }
+    static uint8_t status() { return bus_ok; }
 };
 
 using Bus = BusMaster<FakeBus, P>;

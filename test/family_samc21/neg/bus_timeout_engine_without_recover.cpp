@@ -16,6 +16,7 @@ struct NoRecoverEngine {
         ReplyTo<BusDone> reply;
     };
     static bool start(const Request&) { return true; }
+    static uint8_t status() { return bus_ok; }
     // no recover()
 };
 

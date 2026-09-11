@@ -60,8 +60,9 @@ pads).
   rest. `error_isr()` is the error vector's: a NACK becomes
   `i2c_nack_addr` or `i2c_nack_data` by the phase it landed in, ARLO
   `i2c_arb_lost`, the rest `i2c_bus_error`. A speed the clock cannot
-  produce is answered `i2c_rejected` ASYNCHRONOUSLY, the event vector
-  pended by software, so the arbiter's contract holds. `unstick()`
+  produce is answered `i2c_rejected` inside `start()` - the one
+  synchronous completion, delivered through the arbiter with the wire
+  and the vector untouched. `unstick()`
   clocks a stuck client free by hand and `recover()` puts the
   peripheral back (SWRST, the timing rewritten). The engine slots are
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither: a write

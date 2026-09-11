@@ -1005,11 +1005,11 @@ public:
     static bool idle() { return phase_ == Phase::idle; }
 
     /// Begin one bus tenure (called by I2cBus from main context). Returns
-    /// false ALWAYS on success - the tenure runs on the ISR and a
-    /// TransferDone{status()} follows - and true only for the degenerate
-    /// failure the reply must not wait for: a request whose speed cannot
-    /// be programmed. That is the I2cHost contract util/bus_master.hpp is
-    /// written against.
+    /// false whenever the wire moves - the tenure runs on the ISR and a
+    /// TransferDone{status()} follows - and true only for the one failure
+    /// that moves nothing, answered i2c_rejected through status(): a
+    /// request whose speed cannot be programmed. That is the I2cHost
+    /// contract (docs/design/i2c-bus.md).
     ///
     /// A tenure against a BUSY bus is the silicon's to hold: writing ADDR
     /// while another host owns the wire parks the START until the bus

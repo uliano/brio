@@ -432,9 +432,9 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * comes back as i2c_bus.hpp's codes through TransferDone{status()}.
  *
  * `speed` names a row of the timing table init() solves for the bus
- * clock; a speed the clock cannot produce is answered i2c_rejected -
- * asynchronously, through the event vector pended by software, so the
- * arbiter's contract (a synchronous return means bus_ok) holds.
+ * clock; a speed the clock cannot produce is answered i2c_rejected
+ * inside start(), no byte moved - the one synchronous completion of
+ * an I2C engine, and the arbiter replies with status() for it.
  *
  * THE ENGINE SLOTS: `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or
  * neither. A write phase runs on the transmit engine; a read phase of
@@ -561,19 +561,21 @@ public:
 
     // ---- the transfer -------------------------------------------------------
 
-    /// Begin a tenure (I2cBus calls it from main context). Always false:
-    /// every tenure - the rejected one included - completes on the
-    /// event vector, and a TransferDone follows.
+    /// Begin a tenure (I2cBus calls it from main context). False
+    /// whenever the wire moves: the tenure completes on the event
+    /// vector and a TransferDone{status()} follows. True only for the
+    /// one refusal that moves nothing - a speed the clock cannot
+    /// produce, answered i2c_rejected through status() - the I2cHost
+    /// contract (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
         req_ = r;
         pos_ = 0;
-        status_ = i2c_ok;
         if (!speed_ok(r.speed)) {
             status_ = i2c_rejected;
-            phase_ = Phase::rejected;
-            Pfic::set_pending(S::event_irq());   // isr() answers from the vector
-            return false;
+            phase_ = Phase::idle;
+            return true;
         }
+        status_ = i2c_ok;
         apply(r.speed);
         // A STOP still on its way out, or a bus another host holds: a
         // bounded wait, then the START is issued regardless and the
@@ -598,10 +600,6 @@ public:
         switch (phase_) {
             case Phase::idle:
                 return false;
-
-            case Phase::rejected:
-                Pfic::clear_pending(S::event_irq());
-                return finish(i2c_rejected);
 
             case Phase::start_tx:
             case Phase::start_rx:
@@ -690,7 +688,7 @@ public:
             return false;
         }
         S::clear_errors(errs);
-        if (phase_ == Phase::idle || phase_ == Phase::rejected) {
+        if (phase_ == Phase::idle) {
             return false;
         }
         uint8_t st = i2c_bus_error;
@@ -831,7 +829,7 @@ public:
 
 private:
     enum class Phase : uint8_t {
-        idle, rejected, start_tx, start_rx, addr_tx, addr_rx, tx, tx_dma, rx, rx_dma,
+        idle, start_tx, start_rx, addr_tx, addr_rx, tx, tx_dma, rx, rx_dma,
     };
 
     static_assert([] {

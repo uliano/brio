@@ -105,6 +105,7 @@ struct FakeBus {
         ++started;
         return false;
     }
+    static uint8_t status() { return bus_ok; }
 };
 
 using Bus = BusMaster<FakeBus, P>;

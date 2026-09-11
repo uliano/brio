@@ -10,7 +10,9 @@
 // Smart modes, Quick Command counted in SCL edges, the bus state
 // machine driven by a bit-banged injector on a third tap of the same
 // bus, the two ISR bodies, and a clock rebase under traffic with the
-// I2cBus/BusMaster stack riding the engine.
+// I2cBus/BusMaster stack riding the engine - including the speed the
+// slowed clock cannot make, refused inside start() and answered
+// i2c_rejected through the arbiter.
 //
 // Reference test of avrdx/twi.hpp (docs/avrdx/twi.md): keep it passing.
 //
@@ -625,7 +627,8 @@ void tb_speeds() {
           " Hz (this desk's measured rise)", crlf);
     verdict("actual_scl_hz never claims more than the nominal rate",
             Host::actual_scl_hz(0) <= 100'000u);
-    verdict("CLK_PER is at least four times SCL", Host::speed_ok());
+    verdict("the divider reaches the speed in force (so CLK_PER is at least four times SCL)",
+            Host::speed_ok() && twi_clock_ok(SysClock::hz, Host::speed()));
     quiesce();
 }
 
@@ -1357,6 +1360,32 @@ void tj_rebase() {
             replied && status == i2c_ok && cl_rx_n == 1 && cl_rx[0] == 0x7B &&
             rx_buf[0] == 0x33 && rx_buf[1] == 0x34);
     verdict("the arbiter rejected nothing", Bus::rejected_count() == 0);
+
+    // A speed the clock in force cannot make is refused INSIDE start()
+    // and reaches the requester through the arbiter as i2c_rejected: at
+    // 6 MHz a 1 MHz bus would need a negative MBAUD. Nothing moves on
+    // the wire, and the arbiter's own tally stays (its rejection is the
+    // full FIFO's, a different fact).
+    verdict("switch to 6 MHz", DynClock::set(6'000'000u));
+    verdict("speed_ok says no to 1 MHz at 6 MHz, yes to 100 kHz",
+            !Host::speed_ok(I2cSpeed::fast_plus_1m) && Host::speed_ok(I2cSpeed::standard_100k));
+    cl_reset();
+    replied = false;
+    status = 0xFF;
+    post<Bus>(Host::Request{client_addr, lend<Lease::reply>(tx_buf), 1, {}, 0, reply_to<Sink, I2cDone>(),
+                            I2cSpeed::fast_plus_1m});
+    for (uint32_t i = 0; i < 100'000u && !replied; ++i) {
+        if (const auto e = Bus::queue.pop()) Bus::dispatch(*e);
+        if (const auto r = Sink::queue.pop()) {
+            replied = true;
+            status = r->status;
+        }
+    }
+    print(serial, "  a 1 MHz request at 6 MHz replied ", status, " (i2c_rejected = ", i2c_rejected,
+          "), the client saw ", cl_rx_n, " bytes", crlf);
+    verdict("the request is answered i2c_rejected inside start(), the wire untouched",
+            replied && status == i2c_rejected && cl_rx_n == 0 && Bus::rejected_count() == 0);
+    verdict("back to 24 MHz", DynClock::set(24'000'000u));
 
     quiesce();
 }
