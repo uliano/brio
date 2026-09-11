@@ -82,8 +82,18 @@ def openocd_args(prog, elffile, target_cfg):
     try. A wedged probe is recovered by two USBDEVFS_RESET ioctls five
     seconds apart (or a replug)."""
     argv = [manifest.OPENOCD] + openocd_interface(prog)
-    argv += ["-f", target_cfg,
-             "-c", "program %s verify" % elffile]
+    argv += ["-f", target_cfg]
+    if "stm32g0" in target_cfg:
+        # CONNECT UNDER RESET. This verb leaves a G0 as a power-on would
+        # (DBGMCU_CR clear, below), so a program that then enters a Stop
+        # or a Standby is a board the probe cannot attach to any more:
+        # "init mode failed (unable to connect to the target)" at the
+        # next flash, measured with a suite whose last letter sleeps in
+        # Stop 1. The Nucleo's ST-LINK drives NRST, so the port is
+        # opened with the core held in reset and no program running -
+        # the same connection whatever state the last image left.
+        argv += ["-c", "reset_config srst_only srst_nogate connect_assert_srst"]
+    argv += ["-c", "program %s verify" % elffile]
     if "stm32g0" in target_cfg:
         # AND THE DEBUG-IN-STOP BITS ARE TAKEN BACK DOWN, AFTER THE LAST
         # RESET. OpenOCD's own target/stm32g0x.cfg sets DBGMCU_CR.DBG_STOP
