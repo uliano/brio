@@ -63,6 +63,10 @@
 //      clocks until it lets go, and the STOPF its hand-made STOP leaves
 //      taken once by the event vector
 //
+// With the peer attached `z` outlasts `brio run`'s default 60 s (the
+// peer's command windows are hundreds of milliseconds each): pass
+// `--timeout 400`.
+//
 // build: boards = v006k8
 // build: monitor_speed = 115200
 
