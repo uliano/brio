@@ -500,17 +500,24 @@ void t14_vrefa() {
     dac_default(Ref::v2048);
     A::init(clock, AdcConfig{.reference = Ref::vrefa, .sample_length = internal_sample_length});
     A::select(AdcInput::dac0);
+    // THE PAD IS THE INTERNAL NODE PLUS THE BUFFER'S OFFSET: VREFA comes
+    // off PD6 through the output buffer, the ADC reads DAC0 before it,
+    // so full scale is short by that offset over the level - the same
+    // +-20 mV test 5 grants the buffer, here in counts of each level
+    // (79 at 1.04 V, 40 at 2.04 V). A fixed 30 was a 5 V die's luck.
     bool ok = true;
     for (uint16_t code = 520; code <= 1020; code += 250) {   // >= 1.04 V (VREFA min 1.024)
         D::set(code);
         delay_us(clock, 300);
         A::flush();
         const uint16_t r = read_avg(8);
-        print(serial, "  DAC ", code, " (", dac_mv(code, D::steps, 2048), " mV) as VREFA: ADC(dac0) = ", r,
-              " (exp ~4095)", crlf);
-        if (!near(r, 4095, 30)) ok = false;
+        const uint16_t mv = dac_mv(code, D::steps, 2048);
+        const uint16_t tol = static_cast<uint16_t>(4095UL * 20u / mv);
+        print(serial, "  DAC ", code, " (", mv, " mV) as VREFA: ADC(dac0) = ", r, " (exp 4095 -", tol, "..+0)",
+              crlf);
+        if (!near(r, 4095, tol)) ok = false;
     }
-    verdict("full scale for every VREFA level", ok);
+    verdict("full scale for every VREFA level, within the buffer's 20 mV", ok);
     // and VDD/10 against a known VREFA: 3300/10 = 330 mV / (DAC 1023 = 2046 mV) * 4096
     D::set(1023);
     delay_us(clock, 300);
