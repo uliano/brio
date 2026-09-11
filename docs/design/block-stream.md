@@ -47,7 +47,7 @@ them from an interrupt handler filling the same buffers.
 ### Realizations
 
 Common to all: the two concepts, `BlockRelay`, and the engine NAMES -
-the two strata that have engines spell all four identically
+the two strata that have block engines spell all four identically
 (`DmaTxEngine`, `DmaRxEngine`, `DmaLoopEngine`, `DmaPingPongEngine`),
 with the element type as the beat and the same
 `kick`/`abandon`/`faults`/`harvest` hardening. What differs is what the
@@ -58,6 +58,7 @@ controller under them can do.
 | avrdx | none | this family has no DMA; an interrupt-fed source satisfying `BlockSource` from a handler is the stated shape and is born with its first user |
 | samc21 | `DmaPingPongEngine` (a `BlockSource`) and `DmaLoopEngine` (a `BlockPlayer`) in `samc21/dmac.hpp` | no hardware circular mode, so BOTH re-arm from the block-complete interrupt (a self-linked descriptor would leave erratum 1.10.4 nothing to judge a corrupted write-back against); neither kicks on its re-arm |
 | stm32g0 | the same two names in `stm32g0/dma.hpp` | the player rides the controller's HARDWARE CIRCULAR MODE (the lap interrupt only counts); the source cannot (skip-rather-tear is undecidable after the edge, below) and stops itself at every block |
+| ch32v00x | none yet: `DmaTxEngine` and `DmaRxEngine` alone in `ch32v00x/dma.hpp` | the controller has a circular mode (CFGR.CIRC) and no multiplexer - the channel is the request - so the two block engines would be the G0's shape on seven fixed channels; born with their first block user on this family, a source the ADC's stall makes worth measuring first ([the target's document](../ch32v00x/dma.md)) |
 | host | a scripted ping-pong source (`test_block_stream`) | honest to the engines' contract - overrun skips the lap, release restarts - so the relay's loan timing and stall drain are tested to the dispatch |
 
 ## BlockRelay

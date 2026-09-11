@@ -294,7 +294,8 @@ target - is the claim; the REALIZATIONS TABLES are where it is
 checked. Every design page whose contract has more than one
 realization carries a `### Realizations` section right after the
 contract it documents: one sentence saying what is common, then one
-row per stratum in a fixed order (avrdx, samc21, stm32g0, host) with
+row per stratum in a fixed order (avrdx, samc21, stm32g0, ch32v00x,
+host) with
 the realization - header and type - and ONLY what lies beyond the
 contract there (`-` for nothing; an absent realization is a row too,
 with its reason). The names in those rows are strata, never boards.
@@ -309,31 +310,33 @@ cites another stratum's.
 | the timebase | [kernel.md](kernel.md), section 9 | the AVR's tick runs through every sleep; SysTick stops in standby and a Stop; the LPTIM one counts through and is tickless |
 | panic, reset, watchdog | [kernel.md](kernel.md), section 10 | the record's survival (EEPROM, RWWEE journal, bank 2); the fault body as the panic path on the ARM strata; the watchdog kick under two names and three contracts |
 | the ring | [ring.md](ring.md) | the atomic width alone |
-| the clock | [clock.md](clock.md) | prescalers (AVR), no dynamic clock by position (SAM), a pack of rate tuples with a regime (G0); `delay_us` capped on the ARM strata |
-| the Uart | [serial.md](serial.md) | seventeen verbs in common; three ways to name pins, one or three vectors, DMA slots and bulk verbs on two strata |
-| the SPI bus | [spi-bus.md](spi-bus.md) | the rate's unit (an enum or a divisor), a frame size on the G0, the client three surfaces by position with one published integer in common |
+| the clock | [clock.md](clock.md) | prescalers (AVR), no dynamic clock by position (SAM), a pack of rate tuples with a regime (G0), one divider under one root (CH32V00x); `delay_us` capped on the 32-bit strata |
+| the Uart | [serial.md](serial.md) | seventeen verbs in common; four ways to name pins, one or three vectors, DMA slots on three strata and bulk verbs on two |
+| the SPI bus | [spi-bus.md](spi-bus.md) | the rate's unit (an enum or a divisor), a frame size on the G0 and the CH32V00x, the client four surfaces by position with one published integer in common |
 | the I2C bus | [i2c-bus.md](i2c-bus.md) | the rate arithmetic's shape; `actual_scl_hz`/`scl_hz` and `bus_state`/`idle` are NOT one function under two names |
 | the power model | [power.md](power.md) | each family's ladder mapping; where the tick stops and which site resyncs it |
 | flash storage | [nv-heap.md](nv-heap.md), [nv-journal.md](nv-journal.md) | the geometries; the AVR keeps its small values in the EEPROM |
-| block streams | [block-stream.md](block-stream.md) | the engine names identical on the two strata that have DMA; the circular mode serves a player and not a source |
+| block streams | [block-stream.md](block-stream.md) | the engine names identical on the two strata that have block engines, the CH32V00x's transfer engines waiting for a block user; the circular mode serves a player and not a source |
 | meters | [meters.md](meters.md) | `TimIntervalMeter` is not a pulse-width meter |
-| analog | [analog.md](analog.md) | `Ref` is three vocabularies because a reference is three different things; `set`/`write` on the DAC |
+| analog | [analog.md](analog.md) | `Ref` is four vocabularies because a reference is four different things, one of them the rail alone; `set`/`write` on the DAC |
 | pins and PWM channels | below | - |
 
 Two contracts have no design page of their own and keep their tables
 here.
 
-**Pins.** Common to the three: `Pin<'A', 5>` and `PinRef`, `set` /
-`clear` / `toggle` / `read` / `output` / `input(PinPull)` / `pull(PinPull)`
-/ `is_output` / `port` / `ref` / `configure(PinConfig)`, and `duty()` (a
-`Pin` is a `PwmChannel` of one step). What differs is what a pad can be
-told to do, and how it is handed to a peripheral.
+**Pins.** Common to all: `Pin<'A', 5>` and `PinRef`, `set` /
+`clear` / `toggle` / `read` / `output` / `input(PinPull)` / `port` /
+`ref`, and `duty()` (a `Pin` is a `PwmChannel` of one step); the three
+platforms marked supported add `pull(PinPull)` / `is_output` /
+`configure(PinConfig)`. What differs is what a pad can be told to do,
+and how it is handed to a peripheral.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
 | avrdx | `Pin` in `avrdx/pin.hpp` | `pull(PinPull)` and `input(PinPull)` as on the other two, with a `PinPull` that has no `down` - the family has no pull-down, and the missing enumerator is the refusal; `sense()`, `flag()`, `clear_flag()` (the pin interrupts are the PORT's here), `invert()`, `input_enable(bool)` (the input buffer, in a field shared with the sense: it leaves an armed sense at INTDISABLE); no `function()`/`release()` - a pad is handed to a peripheral by that peripheral's PORTMUX route; `PinSet` |
 | samc21 | `Pin` in `samc21/pin.hpp` | `function(PinFunction)` hands the pad to a peripheral function letter and `release()` takes PMUXEN off - the pin back to PORT as it was; `input_enable(bool)` (INEN, the same buffer with no sense beside it); `strong_drive()`; the WRCONFIG multi-pin engine (`configure_mask`); no `PinSet` |
 | stm32g0 | `Pin` in `stm32g0/pin.hpp` | `function(PinFunction)` with the AF number, and `release()` = `analog()`, the reset state - THE SAME NAME AS THE SAM'S WITH A DIFFERENT LANDING; `output(level)` before the mode (the port-clock rule); `analog()` is a MODE, not the input buffer alone; `read_out()`; speed and open drain in `PinConfig`; `PinSet` |
+| ch32v00x | `Pin` in `ch32v00x/pin.hpp` | `function(PinDrive)` takes NO selector: a pad has one default alternate function on this family and the remaps that move it are AFIO's (`ch32v00x/afio.hpp`, a verb of the resource that owns the pad); `release()` is the reset state, a FLOATING INPUT, and `analog()` a separate landing - the G0's equation of the two does not hold here; `input(PinPull)` pulls through the output register (the one-bit mode of this family); no `pull()`, `is_output` or `PinConfig` |
 | host | none | - |
 
 **PWM channels.** Common to the three: the `PwmChannel` concept
@@ -346,6 +349,7 @@ their timer, and an application picks one in its board file:
 | avrdx | `TcaPwm<n, port>::Channel<ch>` (six 8-bit channels of a split TCA), `TcaPwm16`, `TcaPwmCentered` (dual slope, OVF at the centre), `Pwm8<Tcb>`, `TcdPwm<route>` (the complementary pair with dead time, on the TCD) | the TCA and TCB channels are ratiometric on purpose and NOT `ClockUser`s (a duty survives a clock change, the frequency moves with it); `TcdPwm` is one when the TCD runs on CLK_PER and was asked for a rate in hertz, and follows nothing otherwise |
 | samc21 | `TcPwm`, `TcPwm8`, `TccPwm` (a caller-chosen max), `TccPairPwm` (the complementary pair with dead time) | - |
 | stm32g0 | `TimPwm`, `TimPairPwm` (the complementary pair, on the timers with a break and dead-time unit), `LptimPwm` (on a timer that keeps counting in Stop) | the timers refuse a dynamic clock: their periods are PCLK cycles and no rebase can keep them |
+| ch32v00x | `TimPwm<Tim, ch, top>`, `TimPairPwm<Tim, ch, top>` (the complementary pair: under TIM1's break unit as OCx/OCxN, or on TIM2 as channel ch with channel ch + 2 under DTCR, the dead time in each block's own unit) (`ch32v00x/tim.hpp`) | the G0's two names on the F1's timers; a TIM2 pair costs two channels where a TIM1 pair costs one; the timers take a static clock alone, as on the G0 |
 | host | none | - |
 
 ## Style rules

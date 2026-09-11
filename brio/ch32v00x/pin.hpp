@@ -215,9 +215,9 @@ struct Pin {
     static void analog() { P::configure(N, pin_nibble(PinMode::analog, PinDrive::push_pull)); }
 
     /// Hand the pad to its peripheral. Which peripheral is not a choice
-    /// on this family: a pin has ONE default alternate function (the
-    /// datasheet's pin table), and the remaps that would move it live in
-    /// AFIO, which this stratum does not touch yet.
+    /// here: a pin has ONE default alternate function (the datasheet's
+    /// pin table), and the remaps that would move it are AFIO's
+    /// (ch32v00x/afio.hpp), a verb of the resource that owns the pad.
     static void function(PinDrive drive = PinDrive::push_pull) {
         P::configure(N, pin_nibble(PinMode::alternate, drive));
     }

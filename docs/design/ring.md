@@ -69,6 +69,7 @@ the one constant it reads and therefore the path a given size takes.
 | avrdx | 1 | lock-free up to 256 slots (an 8-bit index), guarded above - the console's 256-byte rings are lock-free, a 1024-slot one is not |
 | samc21 | 4 | lock-free at every size this framework declares (a 32-bit index is one access) |
 | stm32g0 | 4 | the same |
+| ch32v00x | 4 | the same - a 32-bit index is one access on this core too |
 | host | 4, and a second test platform stating 1 | both paths run under the same suite (`test_ring`), the guarded one on the platform that states 1 |
 
 The extra template parameter is the honest price, and it is the same

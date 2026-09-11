@@ -485,6 +485,7 @@ and what it does while the core sleeps.
 | avrdx | `Ticker` = `BasicTicker<1024>` over the RTC's PIT (`avrdx/ticker.hpp`) | 1024 Hz; the PIT runs on the 32 kHz oscillator, so the tick keeps counting through every sleep mode |
 | samc21 | `Ticker` = `BasicTicker<1000>` over SysTick (`armv6m/ticker.hpp`, included by `samc21/ticker.hpp`) | 1000 Hz; SysTick rides the CPU clock and STOPS in standby - `advance(n)` is the landing point of the resync the timed sleep site makes from the RTC ([power.md](power.md)) |
 | stm32g0 | the same SysTick `Ticker`, or `LptimTicker<cfg>` (`stm32g0/lptim_ticker.hpp`) | SysTick 1000 Hz, stopped by a Stop and paused by the sites; or 1024 Hz on the LPTIM's count shifted right, COUNTING THROUGH a Stop and satisfying `Tickless` - the one platform that offers `idle_until` (section 11) |
+| ch32v00x | `Ticker` = `BasicTicker<1000>` over the core's STK (`ch32v00x/ticker.hpp`) | 1000 Hz; the STK counts UP against a compare with auto-reload and rides HCLK, so it stops in a Standby - `advance(n)` is where the timed sleep site lands the span the AWU alarm measured ([power.md](power.md)), and `pause()`/`resume()` hold the tick across a sleep whose wake runs on the HSI |
 | host | a virtual clock the test advances (`host/platform.hpp`) | 1000 Hz nominal; time is arithmetic, which is what makes drift and re-arm testable to the tick |
 
 ## 10. Failures: overflow and panic (`kernel/panic.hpp`)
@@ -517,6 +518,7 @@ reporters the stratum adds.
 | avrdx | `AvrPlatform::break_here()` = BREAK, a NOP with no OCD, so the reporter always runs | `PersistentPanic<Store>` (`util/persistent_panic.hpp` over `EepromStore`): the record in the EEPROM, which a power loss does not erase |
 | samc21 | `SamPlatform::break_here()` = BKPT, a HardFault with DHCSR.C_DEBUGEN clear (the reporter never runs; `bin/brio` clears the bit after every flash) | `ResetReporter` and `hard_fault_reset<P>()` (`samc21/reset.hpp`: the record written, then a reset so it is read at the next boot - the fault body refusing to overwrite a record `panic()` wrote); `TracingReporter` / `hard_fault_trace_reset<P, Store>()` (`samc21/postmortem.hpp`: the MTB's last packets beside the record); `JournalPanic` over `RwweeJournalZone` (the record in flash, through a power loss) |
 | stm32g0 | `Stm32g0Platform::break_here()`, the same BKPT and the same escalation | `ResetReporter` and `hard_fault_reset<P>()` (`stm32g0/reset.hpp`); `JournalPanic` over `MainFlashJournalZone`; no trace unit on this core |
+| ch32v00x | `Ch32v00xPlatform::break_here()` = `ebreak`, the breakpoint exception with no debugger, escalating to the fault vector the app binds | `ResetReporter` and `fault_reset<P>()` (`ch32v00x/reset.hpp`: the record written, then a reset through PFIC_CFGR, the fault body refusing to overwrite a record `panic()` wrote); `JournalPanic` over `MainFlashJournalZone` is available and unexercised on this family; no trace unit |
 | host | `HostPlatform::break_here()` records the call | - |
 
 The reset cause the boot cross-checks is spelled by the register's
