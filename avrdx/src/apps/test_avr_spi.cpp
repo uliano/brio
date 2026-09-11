@@ -1205,13 +1205,17 @@ void dump_exchange(const Exchange& e, const Verify& v, const spilink::Report& r)
 
 // ---- k: the bring-up ------------------------------------------------------------
 
-bool same_label(const char* a, const char* b) {
-    for (uint8_t i = 0; i < 8; ++i) {
-        if (a[i] != b[i]) return false;
-        if (a[i] == 0) return true;
+/// Is `label` (an Ident's NUL-padded USERROW label) this board's own id?
+bool same_board(const char* label, std::string_view mine) {
+    uint8_t n = 0;
+    while (n < 8 && label[n] != 0) ++n;
+    if (n != mine.size()) return false;
+    for (uint8_t i = 0; i < n; ++i) {
+        if (label[i] != mine[i]) return false;
     }
     return true;
 }
+
 
 void tk_bringup() {
     print(serial, "k two boards: the command channel over SPI0 ALT1, the peer's identity, "
@@ -1229,7 +1233,11 @@ void tk_bringup() {
           " fw=", hex(d.version), crlf);
     verdict("ident comes back", got);
     verdict("the sanity byte names spi_peer", got && d.sanity == spilink::ident_sanity);
-    verdict("the peer is board brio-b", got && same_label(label, "brio-b"));
+    // A SECOND CHIP, not a name: the label is a USERROW id like this
+    // board's own, and the half needs only that it is NOT this board -
+    // which board sits where is the manifest's, never the firmware's.
+    verdict("the peer names a board, and not this one",
+            got && label[0] != 0 && !same_board(label, board_id()));
     verdict("the peer's 24 MHz crystal started", got && d.xtal == 1);
 
     // A frame with an op the protocol knows and a checksum that does

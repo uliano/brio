@@ -1391,6 +1391,17 @@ void tj_rebase() {
 }
 
 // ==== TWO BOARDS (k..s): the far board runs twi_peer ==========================
+
+/// Is `label` (an Ident's NUL-padded USERROW label) this board's own id?
+bool same_board(const char* label, std::string_view mine) {
+    uint8_t n = 0;
+    while (n < 8 && label[n] != 0) ++n;
+    if (n != mine.size()) return false;
+    for (uint8_t i = 0; i < n; ++i) {
+        if (label[i] != mine[i]) return false;
+    }
+    return true;
+}
 //
 // The command channel is the bus itself: a WRITE tenure to
 // twilink::command_addr carries one command frame, a READ tenure of
@@ -1510,9 +1521,12 @@ void tk_bringup() {
           " fw=", hex(d.version), crlf);
     verdict("the ident frame came back", got);
     verdict("its sanity byte says twi_peer", d.sanity == twilink::ident_sanity);
-    verdict("the peer names itself brio-b",
-            d.label[0] == 'b' && d.label[1] == 'r' && d.label[2] == 'i' &&
-            d.label[3] == 'o' && d.label[4] == '-' && d.label[5] == 'b');
+    // A SECOND CHIP, not a name: the peer's label is a USERROW id like
+    // this board's own, and what the two-board half needs of it is
+    // only that it is NOT this board. Which board sits where is the
+    // manifest's business, never the firmware's.
+    verdict("the peer names a board, and not this one",
+            got && d.label[0] != 0 && !same_board(d.label, board_id()));
     verdict("the peer's 24 MHz crystal started (its byte turnaround is the "
             "crystal's)", d.xtal == 1);
 
