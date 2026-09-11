@@ -65,10 +65,8 @@ Common to the four: the Request field for field (`addr`, `tx`,
 engine verbs `init`, `start`, `isr`, `status`, `rebase`, `recover`,
 `release`, `unstick`, the empty probe (both lengths zero) served by
 all four, and the vocabulary `I2cDone` / `i2c_*` produced ON THE WIRE
-by each - measured against a second chip on the three platforms marked
-supported, the CH32V00x's wire letters waiting for their peer ([the
-target's document map](../ch32v00x/README.md)). What differs is the
-resource under the task and the shape of the rate arithmetic each
+by each - measured against a second chip on all four. What differs is
+the resource under the task and the shape of the rate arithmetic each
 chapter imposes.
 
 | stratum | realization | beyond the contract |
@@ -76,7 +74,7 @@ chapter imposes.
 | avrdx | `I2cHost<n, route>` over `Twi<n>` (`avrdx/twi.hpp`), a resource that carries the client half too | the rate readback is `actual_scl_hz(t_rise_ns)` - what the register in force gives, under the chapter's rise-time budget; `speed_ok(speed)` as on the other two, plus `speed_ok()` for the speed in force; `quick_command(bool)` is the TWI's own hardware MODE (QCEN: every request an address-only frame); `bus_state()` is the WIRE's state from the bus monitor; `speed()`, `baud()` |
 | samc21 | `I2cHost<n, pads>` over `I2cm<n>` (`samc21/i2c.hpp`; `I2cs<n>` is the client's resource, two over one SERCOM) | `init` takes the STATED core rate (`reference_hz()`); the rates are a per-speed cache: `speed_ok(speed)`, `scl_hz(speed)`, `baud_of(speed)`; `idle()` is the ENGINE's phase, not the wire's |
 | stm32g0 | `I2cHost<n, pins, TxEngine, RxEngine>` over `I2c<n>` (`stm32g0/i2c.hpp`, one TIMINGR word) | the same stated rate and per-speed cache (`speed_ok`, `scl_hz`, `timing_of`, `kernel_hz()` for the kernel-clock multiplexer); two optional DMA engine slots with `dma_isr()`; `fast_plus_drive()` (SYSCFG's Fm+ pad drive); `spurious_bus_errors()` (an erratum's counter); `idle()` as the SAM's |
-| ch32v00x | `I2cHost<1, pins, TxEngine, RxEngine>` over `I2c<1>` (`ch32v00x/i2c.hpp`, the F1's event machine with no rise-time register) | the stated bus rate and the per-speed cache as the SAM's (`speed_ok`, `scl_hz`, `timing_of`, `reference_hz()` = HCLK); a `duty` at init (fast mode's 2 or 16/9 shape); TWO vectors, `isr()` for the events and `error_isr()` for AF/ARLO/BERR; the engine slots FIXED to DMA channels 6 (TX) and 7 (RX) with `dma_isr()`, a one-byte read kept on the pump; `unstick()` returns the clocks it took |
+| ch32v00x | `I2cHost<1, pins, TxEngine, RxEngine>` over `I2c<1>` (`ch32v00x/i2c.hpp`, the F1's event machine with no rise-time register) | the stated bus rate and the per-speed cache as the SAM's (`speed_ok`, `scl_hz`, `timing_of`, `reference_hz()` = HCLK); a `duty` at init (fast mode's 2 or 16/9 shape); TWO vectors, `isr()` for the events and `error_isr()` for AF/ARLO/BERR; the engine slots FIXED to DMA channels 6 (TX) and 7 (RX) with `dma_isr()`, a one-byte read kept on the pump; `unstick()` returns the clocks it took; `start()` WAITS, bounded, for the last STOP to leave (the F1 lineage cannot queue a START behind one) - the one engine whose `start()` spends dispatch time on the bus |
 | host | none | `I2cBus` = `BusMaster`, host-tested through the SPI alias (`test_spi_bus`, `test_bus_master` - the same class) |
 
 None of those differences is a spelling of the same function:
@@ -164,11 +162,11 @@ times are arguments rather than assumptions, belongs to the engine:
 
 ## The per-bus timeout
 
-A client holding SDA low forever leaves a tenure in flight: the kernel
-keeps running (nothing blocks) but the bus AO stays busy and later
-requests pile up until rejected - loud, but not recovered. And no
-silicon fixes this, ON ANY OF THE THREE MEASURED (the CH32V00x's wedge
-letter waits for its peer): the SAM SERCOM's SMBus
+A client holding a line low forever - SDA, or the clock in mid-byte -
+leaves a tenure in flight: the kernel keeps running (nothing blocks)
+but the bus AO stays busy and later requests pile up until rejected -
+loud, but not recovered. And no silicon answers a held clock, ON ANY
+OF THE FOUR: the SAM SERCOM's SMBus
 time-outs police the HOST'S OWN clock hold, not a wire a client wedged
 (measured - [i2c.md](../samc21/i2c.md)); the AVR's TWI has none at all;
 and the STM32G0's - which RM0444 32.4.12 describes in words that read
@@ -177,9 +175,17 @@ a control on each side and answer the same way: the host's own unserved
 hold trips TIMEOUTA, a peer's 6 ms hold trips neither TIMEOUTA nor
 TIMEOUTB ([i2c.md](../stm32g0/i2c.md)). On that part a wedged SDA does
 not even raise an error: the START simply PARKS with BUSY standing,
-which is the AVR's and the SAM's behaviour met a third time. So the
-timeout is the ARBITER'S - the one object that knows a completion is
-owed, living in the kernel that has TimeEvents.
+which is the AVR's and the SAM's behaviour met a third time. The
+CH32V00x's F1-lineage I2C has no clock-low timeout either - a client
+holding SCL for 45 ms stands until the arbiter answers at its 20 - and
+it is the one that answers a wedged SDA by itself: its START into a
+busy bus comes back ARLO at once, so the requester reads
+`i2c_arb_lost` well before any limit ([i2c.md](../ch32v00x/i2c.md)). The
+same held SDA, two honest replies - parked and timed out on three
+strata, refused by the silicon on the fourth - which a requester reads
+alike, "the bus is not mine", the recovery ladder staying the
+application's. So the timeout is the ARBITER'S - the one object that
+knows a completion is owed, living in the kernel that has TimeEvents.
 
 `BusMaster`'s `timeout_ticks` template argument (surfaced here as
 `I2cBus`'s) arms a one-shot TimeEvent for every tenure that goes

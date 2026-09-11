@@ -36,7 +36,7 @@ driver is measured on the bench.
 | [nvm.md](nvm.md) | FLASH: the engine (fast page program as the ONLY way to write, the two locks, three erase grains), the constant partition (the linker's 40 KB, the heap's 16 KB, the journal's 6 KB attic) and the two media with THE PAGE AS THE CELL; measured: an erase and a program each under a millisecond with the core stalled, a sector erase seven times faster than a page's, and a page that ACCEPTS a second program between erases - the finding a smaller cell could rest on, not yet taken |
 | [dma.md](dma.md) | DMA: seven channels where THE CHANNEL IS THE REQUEST (table 8-2, no multiplexer), the STM32F1's channel with every field read-only while enabled, one vector a channel, and the two engines the console's own USART runs on in the suite; measured: three widths exact at about six HCLK cycles an item, EN STAYING SET after a completed block, and no hole in the map raising the transfer error the chapter promises |
 | [spi.md](spi.md) | SPI: the F1's SPI with no FIFO and one register of its own (HSCR), 8/16-bit frames, the four modes, the select as a GPIO the request carries, `SpiHost` with the other strata's Request VERBATIM (pump or polled, engines on channels 2 and 3), `SpiClient`; measured: NO FIELD IS ENABLE-PROTECTED (seven of seven take a write under SPE), every path completing with nothing on MISO - the loopback letters wait for one jumper |
-| [i2c.md](i2c.md) | I2C: the F1's event machine on two vectors, the receive procedures by count, NO RISE-TIME REGISTER (the prose names one, the register list does not), `I2cHost` with the other strata's Request VERBATIM and i2c_bus.hpp's outcomes (engines on channels 6 and 7, a one-byte read on the pump), `I2cClient`, the unstick; measured: OADDR1's bit 14 reserved, the timing registers writable under PE - the wire letters wait for a peer board |
+| [i2c.md](i2c.md) | I2C: the F1's event machine on two vectors, the receive procedures by count, NO RISE-TIME REGISTER (the prose names one, the register list does not), `I2cHost` with the other strata's Request VERBATIM and i2c_bus.hpp's outcomes (engines on channels 6 and 7, a one-byte read on the pump), `I2cClient`, the unstick; measured against a peer board: every tenure shape byte-exact, the two speeds, the DMA engines, the arbiter with a held SDA answered ARLO by the silicon and a held clock by the per-bus timeout, a STOPF the slave half raises on a STOP it was not addressed in; OADDR1's bit 14 reserved, the timing registers writable under PE |
 | [tim.md](tim.md) | TIM: the F1's TIM1 and TIM2 under WCH's names (three bits the F1 has not, TIM2's dead-time pairs through DTCR, the 32-bit CHxCVR carrying a captured level) and TIM3, a streamlined block with no pad; the tasks (PwmChannel through TimPwm/TimPairPwm, the meters, one timer counting or gated by another); measured: the time base exact against the STK, a centre-aligned period 2 x ATRLR, TIM2 counting TIM1 and TIM1 counting TIM2 with no wire, a duty measured internally, the break staged from a pad's pull (BIF unclearable while it stands), and TIM3'S DMA REQUEST ONE-SHOT - probed nine ways, re-armed by the RCC pulse alone |
 | [adc.md](adc.md) | ADC: the F1's converter with a third control register (low power, three watchdogs that can RESET THE CHIP), the pads deriving their channel, VREFINT as the supply's ruler, both groups, the seven triggers a group, the DMA, util's AnalogSampler over it unchanged; measured: tCONV to the cycle at four settings (1.47 Msps at the top), six timer triggers and TIM3's pacing the injection group, the signed injected offsets, THE WATCHDOG SCAN (one watchdog per rank), the watchdog reset judged at the next boot - and THE STALL: a triggered, DMA-served run that occasionally stops converting until ADON is cycled |
 | [pin.md](pin.md) | GPIO, EXTI and the REMAPS: the one-bit MODE nibble, pulls through OUTDR, BSHR/BCR, the ten lines (eight pads by port select, the PVD's and the AWU's), interrupt or event, AFIO_PCFR1's columns as constexpr tables every driver takes its pads from; measured: the pulls, the nibbles, the atomics, the software trigger raising a flag only on a line in INTENR, a line in event mode ending a WFE in eighteen cycles, port B's seven nibbles, TIM1's channel moved from PD2 to PC4 by its remap - the levels, the edges and the scanner on one jumper |
@@ -273,6 +273,12 @@ loudly.
   the DMA** while the CPU works the peripheral buses - STRT standing,
   no EOC - and only an ADON cycle revives it ([adc.md](adc.md),
   `Adc::recover()`); the cause is not found.
+- **A START into a busy bus is answered, not parked**: against a peer
+  holding SDA low the I2C's START comes back ARLO at once, where the
+  other three strata's peripherals park it until the bus frees; and no
+  CTLR1 write may happen while the host's own STOP stands (the F1
+  lineage's rule), so this engine's `start()` is the one that waits,
+  bounded, for that STOP to leave ([i2c.md](i2c.md)).
 - **The chapters promise protections the silicon does not keep**: no
   SPI control field is enable-protected, the I2C's timing registers
   take a write under PE, the WWDG's counter does not run until armed
@@ -313,6 +319,6 @@ Implemented but not bench-verified, each with what would measure it:
 - The USART's error counters (framing, noise, parity, hardware
   overrun): the paths are written; the stress suites that provoke
   each condition from the host side are what verifies them.
-- Every wire letter of the suites: the SPI loopback (one jumper), the
-  I2C peer (a board running `twi_peer`), the timer captures and the pad
-  levels (one jumper) - each document's own second list names them.
+- The wire letters still waiting for their jumpers: the SPI loopback,
+  the timer captures and the pad levels - each document's own second
+  list names them.

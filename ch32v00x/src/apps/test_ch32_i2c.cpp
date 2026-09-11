@@ -51,13 +51,17 @@
 //   f  the two speeds against a second chip, byte-exact both ways
 //   g  THE DMA ENGINES: the same shapes on channels 6 and 7
 //   h  THE KERNEL against the peer: I2cBus (= BusMaster) over I2cHost,
-//      the NACK in its place, the rejection, both votes, and the
-//      wedge the PEER holds answered by the per-bus timeout
+//      the NACK in its place, the rejection, both votes, and two
+//      wedges the PEER holds: SDA, which this silicon answers by itself
+//      (a START into a held line is ARLO), and the CLOCK past the limit,
+//      which only the per-bus timeout answers - then the recover()ed
+//      engine carrying the next tenure
 //   i  THE REFUSAL, wireless: a speed the clock cannot make is answered
 //      i2c_rejected inside start() and delivered through the arbiter,
 //      the wire and the vector untouched
-//   k  THE STUCK BUS: the peer holding SDA, and unstick() counting
-//      the clocks until it lets go
+//   k  THE STUCK BUS: the peer holding SDA, unstick() counting the
+//      clocks until it lets go, and the STOPF its hand-made STOP leaves
+//      taken once by the event vector
 //
 // build: boards = v006k8
 // build: monitor_speed = 115200
@@ -119,6 +123,11 @@ volatile uint32_t error_isr_entries = 0;
 /// one tenure is silenced and the fact reported.
 constexpr uint32_t host_isr_budget = 60'000;
 volatile bool host_stormed = false;
+/// What the storm guard saw when it last fired - wherever that was, in a
+/// tenure or between two - so a STALL line can say why the vector was off.
+volatile uint32_t storms = 0;
+volatile uint16_t storm_s1 = 0;
+volatile uint16_t storm_s2 = 0;
 
 uint8_t tx_buf[64];
 uint8_t rx_buf[64];
@@ -169,8 +178,10 @@ uint8_t host_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx
     }
     if (!host_done) {
         print(serial, "    STALL: STAR1=", hex(H::status1()), " STAR2=", hex(H::status2()),
-              " CTLR1=", hex(H::regs().CTLR1), " ev entries ", host_isr_entries, " er ",
-              error_isr_entries, host_stormed ? " STORMED" : "", crlf);
+              " CTLR1=", hex(H::regs().CTLR1), " CTLR2=", hex(H::regs().CTLR2), " ev entries ",
+              host_isr_entries, " er ", error_isr_entries, host_stormed ? " STORMED" : "",
+              "; storms so far ", storms, " (last at STAR1=", hex(storm_s1), " STAR2=", hex(storm_s2),
+              ")", crlf);
         (void)Host::recover();
         return no_answer;
     }
@@ -813,6 +824,10 @@ void tg_dma() {
     const uint8_t r1 = dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf + 12, 1, link_speed);
     DmaHost::release();
     dma_host_live = false;
+    // The plain host is the command channel's, and the DMA host's
+    // release() left the instance off: it is brought back before the
+    // report is asked for.
+    host_ready();
     settle_ms(450);
     twilink::Report r{};
     const bool rep = peer_report(r);
@@ -1082,8 +1097,63 @@ void th_kernel() {
     post<kl::I2cArb>(kl::request(twilink::dut_addr, kl::out_a));
     kl::pump_until(1, 300);
     print(serial, "  after the release: replies ", kl::Probe::n, " status ", kl::Probe::replies[0], crlf);
-    bench.verdict("THE SAME BUS AO carries the next tenure to i2c_ok after recover()",
+    bench.verdict("THE SAME BUS AO carries the next tenure to i2c_ok after the wedge",
                   re && kl::Probe::n == 1u && kl::Probe::replies[0] == i2c_ok);
+
+    // THE CLOCK HELD past the limit: the wedge this silicon cannot answer
+    // by itself - the F1 lineage's I2C has no clock-low timeout - so the
+    // per-bus timeout must. The peer stretches the first data byte of a
+    // write for 45 ms under the arbiter's 20.
+    bus_ao_live = false;
+    settle_ms(400);
+    link_ready();
+    twilink::Params held{};
+    held.count = 16;
+    held.ms = 300;
+    held.addr = twilink::dut_addr;
+    held.hold_us = 45'000;
+    const bool armed_clock = peer_act(Op::serve, held);
+    bus_ao_live = true;
+    if (!armed_clock) {
+        bench.verdict("the peer accepted the 45 ms stretch", false);
+        bus_ao_live = false;
+        return;
+    }
+    kl::drain(5);
+    kl::Probe::clear_tally();
+    const uint8_t stale_before = kl::I2cArb::stale_events();
+    post<kl::I2cArb>(kl::request(twilink::dut_addr, kl::out_a));
+    const uint32_t t1 = Ticker::ticks();
+    kl::pump_until(1, 400);
+    const uint32_t took_clock = Ticker::ticks() - t1;
+    const bool scl_low = !SclPin::read();
+    print(serial, "  the tenure into a held CLOCK answered ", kl::Probe::n, " with status ",
+          kl::Probe::replies[0], " after ", took_clock, " ms (limit 20, hold 45); SCL still low at "
+          "the reply: ", scl_low ? "yes" : "no", crlf);
+    bench.verdict("a client holding the CLOCK past the limit is answered i2c_timeout ON THE "
+                  "ARBITER'S CLOCK - the one wedge the silicon cannot answer by itself",
+                  kl::Probe::n == 1u && kl::Probe::replies[0] == i2c_timeout && took_clock >= 20u &&
+                      took_clock <= 30u);
+    kl::drain(100);
+    bus_ao_live = false;
+    settle_ms(400);
+    link_ready();
+    twilink::Params after{};
+    after.count = 64;
+    after.ms = 250;
+    after.addr = twilink::dut_addr;
+    after.seed = 0x91;
+    const bool re2 = peer_act(Op::serve, after);
+    bus_ao_live = true;
+    kl::drain(20);
+    kl::Probe::clear_tally();
+    post<kl::I2cArb>(kl::request(twilink::dut_addr, kl::out_a));
+    kl::pump_until(1, 300);
+    print(serial, "  after the clock came back: replies ", kl::Probe::n, " status ", kl::Probe::replies[0],
+          ", stale events ", kl::I2cArb::stale_events() - stale_before, crlf);
+    bench.verdict("the recover()ed engine carries the next tenure to i2c_ok through the same "
+                  "arbiter",
+                  re2 && kl::Probe::n == 1u && kl::Probe::replies[0] == i2c_ok);
     bus_ao_live = false;
     settle_ms(300);
 }
@@ -1112,6 +1182,12 @@ void tk_unstick() {
     }
     settle_ms(5);
     const bool held = !SdaPin::read();
+    // The STOP unstick() makes by hand is seen by the instance's own
+    // slave half, which raises STOPF: the event vector must take it
+    // ONCE and clear it, not re-enter without end. Counted from before
+    // the call: the entry comes the moment unstick() re-enables the line.
+    host_isr_entries = 0;
+    const uint32_t storms_before = storms;
     const uint8_t pulses = Host::unstick();
     print(serial, "  SDA held by the peer: ", held ? "yes" : "no", "; unstick() clocked ", pulses,
           " pulse(s) before it let go", crlf);
@@ -1119,6 +1195,12 @@ void tk_unstick() {
     bench.verdict("unstick() clocked until the client released - a handful of pulses, never 0xFF",
                   pulses >= 1u && pulses <= 9u);
     settle_ms(450);
+    const uint32_t idle_entries = host_isr_entries;
+    print(serial, "  the event vector, idle, after the hand-made STOP: ", idle_entries, " entries, STAR1=",
+          hex(H::status1()), crlf);
+    bench.verdict("the STOPF the hand-made STOP leaves is taken once and cleared - no storm on "
+                  "the event vector",
+                  idle_entries <= 2u && storms == storms_before && (H::status1() & i2c_stopf) == 0u);
     const uint8_t after = Host::unstick();
     bench.verdict("with the wire free again unstick() clocks nothing", after == 0u);
     bench.verdict("and the command channel is back", command(Op::ping));
@@ -1141,6 +1223,9 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
     host_isr_entries = host_isr_entries + 1u;
     if (host_isr_entries > host_isr_budget) {
         host_stormed = true;
+        storms = storms + 1u;
+        storm_s1 = H::status1();
+        storm_s2 = H::status2();
         H::event_interrupt(false);
         H::buffer_interrupt(false);
         return;
@@ -1210,8 +1295,8 @@ int main() {
                  te_vocabulary);
     bench.letter('f', "the two speeds against a second chip, timed", tf_speeds);
     bench.letter('g', "THE DMA ENGINES on channels 6 and 7 against the peer", tg_dma);
-    bench.letter('h', "THE KERNEL: I2cBus over I2cHost, the rejection, the votes, the "
-                      "wedge answered by the timeout", th_kernel);
+    bench.letter('h', "THE KERNEL: I2cBus over I2cHost, the rejection, the votes, a held SDA "
+                      "and a held clock answered in their place", th_kernel);
     bench.letter('i', "THE REFUSAL, wireless: a speed the clock cannot make, i2c_rejected "
                       "inside start() through the arbiter", ti_refusal);
     bench.letter('k', "the stuck bus: the peer holding SDA, unstick() counting", tk_unstick);

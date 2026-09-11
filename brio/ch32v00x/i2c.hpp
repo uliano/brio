@@ -547,7 +547,7 @@ public:
             valid_[i] = t.has_value();
             table_[i] = t.value_or(I2cTiming{});
         }
-        half_bit_rate_ = delay_rate(hz);
+        delay_rate_ = delay_rate(hz);
         if (S::enabled() && valid_[static_cast<uint8_t>(applied_)]) {
             S::timing(table_[static_cast<uint8_t>(applied_)]);
             S::enable();
@@ -576,14 +576,29 @@ public:
             return true;
         }
         status_ = i2c_ok;
+        phase_ = (r.tx_len == 0u && r.rx_len != 0u) ? Phase::start_rx : Phase::start_tx;
+        // The last tenure's STOP may still be on its way out: STOP stands
+        // in CTLR1 until the condition is on the wire, and a client that
+        // stretches the clock after the last acknowledge holds it there.
+        // CTLR1 must not be written while STOP stands - a second STOP
+        // request otherwise, the F1 lineage's rule - so it is waited for
+        // before anything writes CTLR1, a speed change's PE cycle
+        // included, BOUNDED IN TIME (stop_drain_us). A clock held past
+        // the bound is a wedge: the tenure PARKS - no START and no vector
+        // - for the per-bus timeout to answer.
+        if (!wait_for_us([] { return !S::stopping(); }, stop_drain_us)) {
+            return false;
+        }
+        // BUSY clears a moment after our STOP is seen; a bus still busy
+        // after bus_free_us is someone else's. On this silicon a START
+        // into a busy bus does not wait for it to free: measured with a
+        // peer holding SDA low, the START is answered ARLO, and
+        // i2c_arb_lost is the reply - the wire's own answer, in its place,
+        // inside any per-bus timeout.
+        (void)wait_for_us([] { return !S::busy(); }, bus_free_us);
         apply(r.speed);
-        // A STOP still on its way out, or a bus another host holds: a
-        // bounded wait, then the START is issued regardless and the
-        // wire's answer (an ARLO or a BERR) comes back as a status.
-        (void)wait_until([] { return !S::stopping() && !S::busy(); });
         S::pos(false);
         S::ack(false);
-        phase_ = (r.tx_len == 0u && r.rx_len != 0u) ? Phase::start_rx : Phase::start_tx;
         S::buffer_interrupt(false);
         S::start();
         return false;
@@ -597,8 +612,24 @@ public:
     /// posts TransferDone on.
     [[gnu::always_inline]] static bool isr() {
         const uint16_t s1 = S::status1();
+        // STOPF is the SLAVE half's flag - a STOP seen after a START this
+        // host did not issue: another master's, or the one unstick()
+        // makes by hand - and ITEVTEN routes it here in every phase.
+        // Left standing it re-enters this vector without end (measured:
+        // the storm after an unstick). Its sequence ends in a CTLR1
+        // write, which must not happen while START or STOP stands, so it
+        // waits for them to leave - a bit time at most.
+        if ((s1 & i2c_stopf) != 0u && !S::starting() && !S::stopping()) {
+            S::clear_stopf();
+        }
         switch (phase_) {
             case Phase::idle:
+                // Nothing in flight: an ADDR here is the slave half's
+                // too, and its sequence (STAR1 read above, then STAR2)
+                // writes nothing.
+                if ((s1 & i2c_addr) != 0u) {
+                    (void)S::status2();
+                }
                 return false;
 
             case Phase::start_tx:
@@ -990,6 +1021,33 @@ private:
         S::enable();
     }
 
+    /// How long start() waits for the last tenure's STOP to leave the
+    /// wire. A STOP takes a bit period; what can hold it longer is a
+    /// slow client stretching the clock after the last acknowledge while
+    /// it digests a write, and five milliseconds - a fifth of SMBus's
+    /// 25 ms clock-low limit - is the bound. What start() spends here is
+    /// the kernel dispatch's time, which is why it is bounded at all.
+    static constexpr uint16_t stop_drain_us = 5'000;
+
+    /// How long start() then waits for BUSY to clear: our STOP seen by
+    /// the bus takes a moment, another device's traffic takes longer.
+    static constexpr uint16_t bus_free_us = 100;
+
+    /// Poll `pred` for at least `us` microseconds, timed on the STK
+    /// (delay.hpp); true as soon as it holds. delay_us() refuses when the
+    /// STK is not running, and the bound is then a count of polls - a
+    /// bound still.
+    template <typename Pred>
+    static bool wait_for_us(Pred pred, uint16_t us) {
+        for (uint16_t t = 0; t < us; ++t) {
+            if (pred()) {
+                return true;
+            }
+            (void)delay_us(delay_rate_, 1);
+        }
+        return pred();
+    }
+
     template <typename Pred>
     static bool wait_until(Pred pred) {
         for (uint32_t spins = 100'000u; spins != 0u; --spins) {
@@ -1001,7 +1059,7 @@ private:
     }
 
     /// Half a standard-mode bit, for the unstick.
-    static void spin_half_bit() { (void)delay_us(half_bit_rate_, 5); }
+    static void spin_half_bit() { (void)delay_us(delay_rate_, 5); }
 
     static inline Request req_{};
     static inline uint8_t pos_ = 0;
@@ -1012,7 +1070,7 @@ private:
     static inline uint32_t pclk_hz_ = 0;
     static inline I2cTiming table_[i2c_speed_count]{};
     static inline bool valid_[i2c_speed_count]{};
-    static inline DelayRate half_bit_rate_{};
+    static inline DelayRate delay_rate_{};
 };
 
 // =============================================================================

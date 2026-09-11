@@ -34,6 +34,19 @@ pads).
 - **The default pads on the CH32V006** are SCL PC2 and SDA PC1 (table
   2-1-1). An alternate-function open-drain pad has no internal pull on
   this family: the pull-ups are the wire's.
+- **A START into a busy bus is answered ARLO** (measured): with a peer
+  holding SDA low, the START comes back as arbitration lost at once.
+  The other strata's peripherals PARK such a START until the bus frees;
+  this one answers, and `i2c_arb_lost` is the wire's own word for "not
+  our bus".
+- **A client holding SCL is answered by nothing** (measured): the F1
+  lineage's I2C has no clock-low timeout, and a 45 ms stretch stands
+  with no flag raised - the per-bus timeout is the only answer.
+- **The slave half raises STOPF on a STOP it was not addressed in**
+  (measured): after the START and STOP `unstick()` puts on the wire by
+  hand - no address byte completed, ACK clear - STOPF stands with
+  nothing in flight, and ITEVTEN routes it to the event vector, which
+  it re-enters without end until its sequence clears it.
 
 ## Types and verbs
 
@@ -62,7 +75,15 @@ pads).
   `i2c_arb_lost`, the rest `i2c_bus_error`. A speed the clock cannot
   produce is answered `i2c_rejected` inside `start()` - the one
   synchronous completion, delivered through the arbiter with the wire
-  and the vector untouched. `unstick()`
+  and the vector untouched. Before its START, `start()` waits for the
+  last tenure's STOP to leave CTLR1 - no CTLR1 write may happen while
+  STOP stands, and a client stretching the clock after the last
+  acknowledge holds it there - for up to 5 ms of the dispatch's time,
+  then for BUSY to clear for up to 100 us; a clock held past the first
+  bound PARKS the tenure (no START, no vector) for the per-bus timeout,
+  and a bus still busy after the second gets its START anyway, which
+  this silicon answers ARLO. `isr()` clears a STOPF the slave half
+  raises in any phase, once no START or STOP stands. `unstick()`
   clocks a stuck client free by hand and `recover()` puts the
   peripheral back (SWRST, the timing rewritten). The engine slots are
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither: a write
@@ -102,14 +123,40 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
 
 The reference suite is `test_ch32_i2c` on the CH32V006K8U6 at 48 MHz:
 its wire letters talk to a PEER BOARD running `twi_peer` (the shared
-twi_link protocol, the peer's pull-ups) and decline when the wire
-reads low. What the desk has measured so far is its wireless letter:
+twi_link protocol, the peer's pull-ups, both boards at 3.3 V) and
+decline when the wire reads low. Against a SAM C21 peer:
 
 - **The reset values are table 15-1's**, both speeds resolve exactly
   at 48 MHz (CCR 240 and 40), the own addresses land as spelled.
 - **OADDR1's bit 14 reads zero** when written: reserved, not the F1's
   fixed one.
 - **CKCFGR and FREQ take a write with PE set**: no enable lock.
+- **The scan**: 112 addresses probed with the empty request in 14 ms,
+  the peer's command address the only answer, every other one
+  `i2c_nack_addr`.
+- **Every tenure shape is byte-exact** - write, read, write-then-read on
+  a repeated START, the four receive procedures by count (1, 2, 3 and
+  4 bytes, each counted by the peer), the general call - and so is the
+  vocabulary: a NACK on the address and on a commanded byte come back
+  as `i2c_nack_addr` and `i2c_nack_data`.
+- **Stretching is flow control**: a client stretching every byte of an
+  8-byte write by 2 ms makes the tenure 16 ms long and it completes
+  `i2c_ok`.
+- **The two speeds on the wire**: an 8-byte write at 100 kHz runs at
+  about 93 kHz, at 400 kHz about 324 kHz - CCR rounded up, the wire's
+  rise time and the interrupt turnaround between bytes all counted -
+  byte-exact both ways.
+- **The DMA engines** on channels 6 and 7 carry a 16-byte write, a
+  16-byte read and a write-then-read; the two-byte read ends on LAST's
+  NACK, the one-byte read stays on the pump; no transfer fault.
+- **The arbiter over the engine** carries queued tenures in order with
+  a NACK delivered in its place, rejects what its queue cannot hold,
+  votes for a sleep idle and against it busy. A held SDA is answered
+  `i2c_arb_lost` in the same millisecond, the line still low; a clock
+  held for 45 ms is answered `i2c_timeout` at the arbiter's 20, and
+  the `recover()`ed engine carries the next tenure `i2c_ok`.
+- **`unstick()`** clocks four pulses before the peer lets SDA go; the
+  STOPF its hand-made STOP leaves is taken by the event vector once.
 
 ## Not covered yet
 
@@ -127,10 +174,8 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **Every tenure on the wire**: the scan, the peer's command channel,
-  the shapes (write, read, write-then-read, the four receive
-  procedures by count, the general call), the vocabulary (NACK on the
-  address and on a byte), stretching, the two speeds timed, the DMA
-  engines, the arbiter with the peer's wedge answered by the timeout,
-  the unstick - the suite's letters b..k against a peer board.
-- The client side against a foreign host.
+- The client side against a foreign host: the peer's host half (its
+  `arb` and `coll` commands) addressing this instance.
+- A START into a wire ANOTHER HOST is clocking: ARLO is measured only
+  against a held SDA; what the START puts on a live wire wants the
+  peer's `arb` race and a scope.

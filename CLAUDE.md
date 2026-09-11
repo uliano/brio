@@ -269,8 +269,8 @@ gets its home in `docs/design/` when taken.
   console runs on the CH32V006K8U6 at 48 MHz over USART1, on WCH's gcc
   15.2 and WCH's OpenOCD fork through a WCH-Link; the clock, the
   flash media, the power modes, reset and the DMA each have their
-  document and suite; SPI and I2C are written with their suites, the
-  wire letters awaiting a jumper and a peer; the timers, the watchdogs
+  document and suite; I2C's wire letters pass against a peer board and
+  SPI's await their jumper; the timers, the watchdogs
   and the ADC have theirs, the pad suite its wireless half, the remaps
   their tables, the OPA its lock and its path into the ADC. What
   remains, in docs/ch32v00x/README.md's gap lists: the family tiering
