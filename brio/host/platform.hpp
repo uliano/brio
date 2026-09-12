@@ -32,6 +32,7 @@ struct HostPlatform {
     };
 
     static inline uint32_t ticks = 0;       ///< advanced by the test
+    static inline uint8_t current_core = 0; ///< which core "runs" (HostCore below)
     static inline uint32_t idle_calls = 0;  ///< how many times idle() ran
     static inline uint32_t break_calls = 0; ///< how many times break_here() ran
 
@@ -57,6 +58,7 @@ struct HostPlatform {
 
     static void reset() {
         ticks = 0;
+        current_core = 0;
         idle_calls = 0;
         break_calls = 0;
         CriticalSection::depth = 0;
@@ -65,5 +67,47 @@ struct HostPlatform {
 };
 
 static_assert(Platform<HostPlatform>);
+
+/// A doorbell on the host: the rings counted, the pending bells a
+/// number a test reads and pops. `pending` saturates at 8 the way a
+/// hardware FIFO would stop taking bells.
+template <uint8_t core>
+struct HostDoorbell {
+    static inline uint32_t rings = 0;
+    static inline uint8_t pending = 0;
+    static inline uint32_t pops = 0;
+    static inline bool enabled = false;
+
+    static void ring() {
+        ++rings;
+        if (pending < 8u) {
+            ++pending;
+        }
+    }
+    static void pop_all() {
+        pending = 0;
+        ++pops;
+    }
+    static void enable() { enabled = true; }
+    static void reset() {
+        rings = 0;
+        pending = 0;
+        pops = 0;
+        enabled = false;
+    }
+};
+
+/// One core of a two-core host: the same platform, told apart by type
+/// (the kernel statics are keyed by it) and carrying the two optional
+/// members a multi-core platform has (kernel/platform.hpp) - `core`,
+/// `on_own_core()` against the test-set `HostPlatform::current_core`,
+/// and a `Doorbell`. The counters and the breadcrumb are the base's:
+/// one set, shared, as a test wants them.
+template <uint8_t n>
+struct HostCore : HostPlatform {
+    static constexpr uint8_t core = n;
+    using Doorbell = HostDoorbell<n>;
+    static bool on_own_core() { return current_core == n; }
+};
 
 } // namespace brio

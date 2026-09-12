@@ -52,6 +52,13 @@ This is the "QV" flavor of active objects (cooperative, one stack,
 priority by scan order) described in Samek's book, written from
 scratch (clean room: concepts only, never the QP source).
 
+**A chip with two cores runs two of these kernels, not one on two
+cores.** Every guarantee above is a statement about ONE core's loop,
+so a second core adds exactly one more boundary - core against core -
+and the model closes it as it closed the first: a fixed set of
+bridges, one primitive per boundary, and no AO ever sees either.
+Section 12 states it; `util/inbox.hpp` is the bridge.
+
 Everything is a **monostate**: AOs, drivers, queues' owners, the
 kernel itself are classes with no instances and only static members,
 selected by type. Priority, wiring and subscriptions are types and
@@ -282,6 +289,17 @@ running: release default) or `panic` (debug builds, where
 `break_here()` stops the debugger on the undersized queue). No
 bool-returning post spreading untested error branches.
 
+**The queue belongs to one core.** Its critical section masks the
+interrupts of the core that takes it, so on a chip with two cores a
+push from the other core would race the owner: the queue names its
+platform (`EventQueue::Platform`), and a platform that can tell which
+core is running (`on_own_core()`, section 11) makes `push` REFUSE a
+copy from the wrong core before it touches anything - dropped and
+counted as a **mispost**, the same economy as overflow, and a witness
+of a programming error rather than a statistic. A single-core
+platform has no such member, and its queues carry neither the check
+nor the counter's byte.
+
 **C++ note - `std::optional` returns.** `pop()` returns
 `std::optional<E>` (C++17): "an E, or nothing". The caller writes `if
 (auto e = q.pop()) dispatch(*e);` and cannot forget to test, where a
@@ -349,6 +367,12 @@ Three primitives, one rule each:
   hold `Payload` fails to compile at the `reply_to` site. This is the
   return channel of every bus AO, whose request queue doubles as the
   bus arbiter.
+
+All three are ONE core's primitives. The fourth, `send<Ao>(ev)`, is
+the crossing verb of a two-core chip (section 12): an event to an AO
+that lives on the other core, through its inbox and a doorbell; and
+`send_reply_to<Ao, Payload>()` builds the capsule of a request that
+crosses, whose reply crosses back the same way.
 
 **C++ note - fold expressions and thunks.** `publish` is one line:
 `(post<Aos>(e), ...);` - a C++17 fold over the parameter pack with
@@ -590,9 +614,18 @@ purpose: it is the one kernel data type a Platform must host, so the
 concept has to name it and `panic.hpp` (which owns the semantics)
 sits above the concept in the include graph.
 
+Two more OPTIONAL members belong to a platform that is ONE CORE OF
+SEVERAL - one platform type per core, since the kernel's statics are
+keyed by P and the type is therefore the core's identity: `on_own_core()`
+(section 5's mispost check) and `Doorbell`, the type the bridge rings
+when an event is sent to an AO of that core (section 12). Both are
+detected by `requires`; a single-core platform has neither and
+compiles nothing for them.
+
 Every target stratum ships its implementation as `<stratum>/platform.hpp`
 (`AvrPlatform`, `SamPlatform`, `Stm32g0Platform<TB>`,
-`Ch32v00xPlatform<TB>` - the last two templated on their timebase, see
+`Ch32v00xPlatform<TB>`, `Rp2040Platform<core, TB>` - the last three
+templated on their timebase, the last one on its core too, see
 each target's `platform.md`);
 `HostPlatform` (`host/platform.hpp`) gives a depth-counting
 critical section, a test-controlled virtual clock and recording
@@ -614,7 +647,8 @@ each member costs or does on its core.
 | samc21 | `SamPlatform` (`samc21/platform.hpp`) | `atomic_width` 4; `idle()` takes whatever PM.SLEEPCFG holds (SCR.SLEEPDEEP is never written) with the SysTick interrupt held off across a standby WFI - erratum 1.8.13's workaround; `break_here()` is BKPT and escalates with no debugger (section 10) |
 | stm32g0 | `Stm32g0Platform<TB>` (`stm32g0/platform.hpp`) | templated on its timebase; `idle()` is WFI = Sleep, the sites arm the deeper Stops; `idle_until()` exists exactly when `TB` satisfies `Tickless` (the LPTIM timebase); `atomic_width` 4; BKPT as the SAM's |
 | ch32v00x | `Ch32v00xPlatform<TB>` (`ch32v00x/platform.hpp`) | templated on its timebase like the G0's; `atomic_width` 4; the critical section is a `csrrci` on mstatus.MIE; `idle()` is NOT a WFI but a WFE (PFIC_SCTLR.WFITOWFE + SEVONPEND), because this core's WFI wakes only for an interrupt it can take and would sleep past a pending one with MIE clear - the latched event closes the lost-wakeup window instead of instruction order; `break_here()` is `ebreak`, escalating to the fault vector with no debugger ([../ch32v00x/README.md](../ch32v00x/README.md)) |
-| host | `HostPlatform` (`host/platform.hpp`) | a depth-counting critical section, a virtual clock, recording `idle()` and `break_here()`; `atomic_width` 4 - `Ring`'s guarded path is covered by a second host platform stating 1 in its own test |
+| rp2040 | `Rp2040Platform<core, TB>` (`rp2040/platform.hpp`) | one type per core, templated on the core and its timebase (the core's own SysTick ticker); the critical section is PRIMASK, per core; `idle()` is WFI; `atomic_width` 4; BKPT as the SAM's; `on_own_core()` reads SIO's CPUID and `Doorbell` is the SIO FIFO towards the core ([../rp2040/multicore.md](../rp2040/multicore.md)) |
+| host | `HostPlatform` (`host/platform.hpp`) | a depth-counting critical section, a virtual clock, recording `idle()` and `break_here()`; `atomic_width` 4 - `Ring`'s guarded path is covered by a second host platform stating 1 in its own test; `HostCore<n>` adds the two members of a core of several over a test-set current core and a counting doorbell |
 
 **C++ note - `if constexpr`.** `if constexpr (cond)` (C++17) with a
 compile-time condition discards the untaken branch entirely - it is
@@ -624,15 +658,95 @@ select code paths on platform facts (`atomic_width`) and, with
 C++23), to turn "peripheral not present on this device" into a clear
 compile error instead of a template failure.
 
-## 12. Reference index
+## 12. Two cores: two kernels and a bridge (`util/inbox.hpp`)
+
+A chip with two cores runs **two kernels**, `Kernel<P0, ...>` and
+`Kernel<P1, ...>`, over two DISJOINT packs, one platform type per core
+(section 11): each core is exactly the model of section 1, every
+invariant stated per core - run-to-completion, no nesting, pack-order
+priority, the critical section, `TimeEvents<P>`, the queue typed by
+P - and every kernel static a monostate keyed by P, so the type IS
+the core. Never one kernel on two cores: pack-order priority would
+lose its meaning, dispatch loans would break (the lender re-dispatching
+on one core while the borrower reads on the other), every push and pop
+would pay a lock the smallest cores have not got, and the gain - load
+balancing - is what a static system does not want.
+
+The rules, each enforced where the compiler can see it:
+
+1. **Every AO lives on one core**: its queue's platform says which,
+   and `Kernel` refuses an AO whose queue is another platform's;
+   `TimeEvent<P, Ao, Ev>` refuses an AO of another core (a timer posts
+   locally: two SysTicks have two phases and a tick count means
+   nothing across). Both through `queue_on<Ao, P>()`.
+2. **Every peripheral and interrupt line has an owner core**: the one
+   whose kernel hosts the driver and calls its `init`, which enables
+   the line in ITS interrupt controller. On a chip where every line
+   reaches both controllers, a line enabled on both runs its handler
+   twice.
+3. **No shared memory outside the bridge**: "AOs share nothing but
+   events" becomes a hard rule between cores.
+4. **Across the bridge only values and `Lease::reply` loans.** A
+   `Lease::dispatch` loan never crosses: its correctness IS pack order,
+   and `lends_ok` already refuses a borrower outside the pack (an
+   absent borrower's index is the pack's size).
+5. **Time is per core.** `now()` and the timers are the core's; a
+   timestamp that crosses is the chip's shared timer's, where one
+   exists.
+
+**The bridge** is one `Inbox<Ao>` per AO that receives from the other
+core: a ring of `Ao::Event` sized by the AO (`inbox_depth`, 8 by
+default), its slots and head written by the SENDING core only under
+that core's critical section (so its loop and ISRs serialize as they
+do around `post`), its tail by the receiving core only, one slot
+sacrificed so no counter is shared; the sender writes the slot, a
+release fence, the head - the receiver reads the head, an acquire
+fence, the slot (`std::atomic_thread_fence`: a data memory barrier
+where the core needs one, nothing where it does not). No atomic
+read-modify-write is needed and none is used. `send<Ao>(ev)` copies
+and rings the receiving core's **doorbell** (`P::Doorbell::ring()`);
+the receiving core's vector runs `Inboxes<Aos...>::isr()`, which pops
+EVERY bell FIRST, fences, then drains every inbox into ordinary local
+`post<Ao>()` calls - bells first, so a send that lands during the
+drain rings a bell the next pass will see; the reverse order loses a
+wakeup exactly as reading data before clearing its flag does. A full
+inbox drops and counts (`overflows()`), like a full queue: nobody
+waits, so nothing deadlocks; what a lost crossing costs is the
+requester's timeout, as a lost reply already does. `publish` stays
+local (one `send` per remote subscriber, written where the publisher
+knows it crosses), `send_reply_to<Ao, Payload>()` builds the capsule
+of a request that crosses.
+
+**Ordering, stated so nobody relies on more**: first-in first-out per
+inbox; two events to one AO, one sent and one posted, may be
+dispatched in either order - today's ISR-versus-loop pushes.
+
+**Why it costs the single-core targets nothing**: the bridge is a
+util service nobody instantiates there; the kernel's touches are two
+`static_assert`s, a `requires`-guarded check whose counter is an
+empty base where the platform cannot tell its core, a capsule factory
+nobody calls, and a ticker tag that is a type - the byte-identity
+gate proves every image of every single-core target unchanged.
+
+**The one realization** is the RP2040's ([../rp2040/multicore.md](../rp2040/multicore.md)):
+two Cortex-M0+ cores with an interrupt line per core behind a pair of
+hardware FIFOs (the doorbell), a bootrom protocol that launches core 1
+into its kernel, a power-on state machine that puts it back. Measured
+there: a crossing and its return in ten microseconds, fifty thousand
+events a second each way for a second without a loss, and under
+saturation every loss counted where it happened - the two accounts
+balance. The host proves the protocol deterministically (`test_inbox`:
+two `HostCore` platforms stepped by hand).
+
+## 13. Reference index
 
 | Entity | Header | Role |
 |--------|--------|------|
-| `ActiveObject` (concept) | `active_object.hpp` | what Kernel requires of an AO |
-| `Platform` (concept), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (+ the optional `idle_until`) |
-| `EventQueue<E, depth, P>` | `event_queue.hpp` | per-AO MPSC queue, overflow counter |
+| `ActiveObject` (concept), `queue_on<Ao, P>` | `active_object.hpp` | what Kernel requires of an AO; whether an AO's queue is P's (its core) |
+| `Platform` (concept), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (+ the optional `idle_until`, `on_own_core`, `Doorbell`) |
+| `EventQueue<E, depth, P>`, `CoreAware` | `event_queue.hpp` | per-AO MPSC queue, overflow counter, the mispost check of a core-aware platform |
 | `Overloaded`, `match`, `Entry`, `Exit`, `Fsm<Derived, Alts...>` | `fsm.hpp` | variant dispatch helpers, state machine base, Event, Status |
-| `post`, `Subscribers`, `publish`, `ReplyTo`, `reply_to` | `post.hpp` | delivery primitives |
+| `post`, `Subscribers`, `publish`, `ReplyTo` (incl. `through`), `reply_to` | `post.hpp` | delivery primitives (the crossing `send` is util/inbox.hpp's, section 12) |
 | `Borrowed<T, Lease>`, `Lease` | `borrowed.hpp` | pointer payloads with their lease in the type |
 | `Pack<Aos...>`, `Kernel<P, Aos...>` | `kernel.hpp` | pack ordering questions (index, lends_ok); the loop: init_all/step/idle_if_empty/run |
 | `TimeEvents<P>` (incl. `ticks_to_next`, `next_deadline`), `TimeEvent<P, Ao, Ev>` | `time_event.hpp` | armed list + owned time events |
@@ -645,7 +759,7 @@ outside `kernel/` and the standard freestanding library):
     platform.hpp        <- event_queue.hpp, time.hpp, panic.hpp,
                            time_event.hpp, kernel.hpp
     fsm.hpp             <- post.hpp
-    active_object.hpp   <- kernel.hpp
+    active_object.hpp   <- time_event.hpp, kernel.hpp
     post.hpp            <- time_event.hpp, kernel.hpp
     time_event.hpp      <- kernel.hpp
     borrowed.hpp        <- (util/ producers of loans; nothing in kernel/)

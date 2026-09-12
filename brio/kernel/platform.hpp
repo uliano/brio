@@ -58,6 +58,19 @@
  *    waking at or after it is the contract, late is legal, early is not
  *    (kernel/time.hpp's "at least"). How the wake is placed is the
  *    platform's business; the kernel only relies on the contract.
+ *
+ * Optional members of a platform that is ONE CORE OF SEVERAL (a chip
+ * running a kernel per core, one platform type per core - the kernel
+ * statics are keyed by P, so the type IS the core), detected the same
+ * way; a single-core platform has neither and compiles nothing for them:
+ *  - on_own_core() -> bool: whether the calling core is this platform's.
+ *    EventQueue::push refuses a copy from another core with it (a
+ *    queue's critical section guards one core), counting the mispost.
+ *  - Doorbell: the type util/inbox.hpp rings when an event is sent to
+ *    an AO of this platform from another core - `ring()` from the
+ *    sending core, `pop_all()` and `enable()` on this one - over
+ *    whatever the chip has between its cores (a hardware FIFO with an
+ *    interrupt line per core on the RP2040, a counter on the host).
  */
 
 #pragma once

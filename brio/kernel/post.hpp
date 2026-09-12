@@ -91,6 +91,14 @@ public:
         return ReplyTo{&thunk_for<Ao>};
     }
 
+    /// A capsule around a thunk of the caller's own: the road a reply
+    /// takes when post<Ao> is not it - util/inbox.hpp's send_reply_to
+    /// builds the capsule that crosses to the requester's core.
+    template <void (*fn)(const Payload&)>
+    static constexpr ReplyTo through() {
+        return ReplyTo{fn};
+    }
+
 private:
     constexpr explicit ReplyTo(Thunk t) : thunk_(t) {}
 

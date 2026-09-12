@@ -40,6 +40,7 @@
 
 #include <concepts>
 #include <optional>
+#include <type_traits>
 
 namespace brio {
 
@@ -51,5 +52,21 @@ concept ActiveObject = requires(const typename A::Event& e) {
     { A::queue.pop() } -> std::same_as<std::optional<typename A::Event>>;
     { A::queue.empty() } -> std::same_as<bool>;
 };
+
+/// The platform an AO's queue is guarded by, when the queue names it
+/// (EventQueue does): on a chip with more than one core this is the
+/// AO's core. Kernel and TimeEvent check it against their own P, so an
+/// AO sits in the pack of its own core's kernel and a timer posts to an
+/// AO of its own core - or does not compile. A queue that names no
+/// platform (a hand-rolled one in a test) is trusted.
+template <typename Ao, typename P>
+constexpr bool queue_on() {
+    using Q = std::remove_cvref_t<decltype(Ao::queue)>;
+    if constexpr (requires { typename Q::Platform; }) {
+        return std::same_as<typename Q::Platform, P>;
+    } else {
+        return true;
+    }
+}
 
 } // namespace brio

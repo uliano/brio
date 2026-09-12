@@ -30,6 +30,7 @@
 #include <stdint.h>
 #include <optional>
 
+#include "kernel/active_object.hpp"
 #include "kernel/platform.hpp"
 #include "kernel/post.hpp"
 
@@ -182,6 +183,10 @@ private:
 template <Platform P, typename Ao, typename Ev>
 class TimeEvent : public TimeEvents<P>::Base {
     using Base = typename TimeEvents<P>::Base;
+    static_assert(queue_on<Ao, P>(),
+                  "a TimeEvent posts to an AO of its own platform: on a chip with two "
+                  "cores a timer of one core cannot feed an AO of the other "
+                  "(kernel/active_object.hpp)");
 
 public:
     constexpr explicit TimeEvent(const Ev& payload)

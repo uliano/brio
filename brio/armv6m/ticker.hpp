@@ -3,12 +3,22 @@
  *
  * SysTick is ARM's, not the vendor's: a 24-bit down-counter on the
  * processor clock with one interrupt, present on every Cortex-M0+ - and
- * this monostate ticker over it is the same on the SAM C21 and the
- * STM32G0 to the instruction, which is why it lives here. What differs
- * per family sits in the family's own ticker.hpp: the alias `Ticker`
- * (the project-wide rate), any guard the family's errata demand
+ * this monostate ticker over it is the same on the SAM C21, the STM32G0
+ * and the RP2040 to the instruction, which is why it lives here. What
+ * differs per family sits in the family's own ticker.hpp: the alias
+ * `Ticker` (the project-wide rate), any guard the family's errata demand
  * (samc21/ticker.hpp's SysTickInterruptGuard), and the caveats a family's
  * sleep modes attach to a core-clocked timebase.
+ *
+ * ONE TICKER PER CORE. SysTick is core-private, so a chip with two cores
+ * has two of them and a program with a kernel on each core has two
+ * timebases - equal rates, different phases. The counters here are
+ * statics keyed by the template arguments, so the second parameter,
+ * `Tag`, is what tells the two apart: a single-core family leaves it at
+ * its default (one ticker, the same type as before), the RP2040's
+ * ticker.hpp names one tag per core. The tag is a type and nothing
+ * else: no byte of code or data depends on it, which is what the
+ * byte-identity gate proves for the single-core families.
  *
  * WHY SYSTICK AND NOT A VENDOR TIMER. SysTick is core-private: no
  * application can use it for PWM, capture or anything else, so claiming
@@ -82,8 +92,10 @@
 namespace brio {
 
 /// Static (monostate) time tracker driven by the SysTick interrupt.
-/// `tps` is the tick frequency in Hz and must divide 1000 exactly.
-template <uint16_t tps = 1000>
+/// `tps` is the tick frequency in Hz and must divide 1000 exactly;
+/// `Tag` distinguishes the tickers of a multi-core chip (the file
+/// header), void on a single core.
+template <uint16_t tps = 1000, typename Tag = void>
 class BasicTicker {
     static_assert(tps > 0, "ticks per second must be positive");
     static_assert(1000u % tps == 0u,

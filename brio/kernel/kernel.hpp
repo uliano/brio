@@ -86,6 +86,10 @@ class Kernel {
     static_assert((Pack<Aos...>::template lends_ok<Aos>() && ...),
                   "a Lease::dispatch borrower must precede its lender in "
                   "the Kernel pack (see kernel/borrowed.hpp)");
+    static_assert((queue_on<Aos, P>() && ...),
+                  "every AO in a Kernel's pack lives on the kernel's platform: its "
+                  "queue is guarded by that platform's critical section, and on a "
+                  "chip with two cores the platform IS the core (kernel/active_object.hpp)");
 
 public:
     Kernel() = delete;
