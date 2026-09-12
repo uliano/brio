@@ -272,6 +272,30 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   fails to compile - and its `test_<target>_<subject>` suite passes on
   the bench. The family compile costs seconds and needs no hardware;
   the bench chip alone masks half the family.
+- **A suite's image fits the family's smallest chip.** A bench suite
+  is a menu of letters over the console, and its IMAGE is a sum: the
+  base every image carries (crt, transport, TestBench, print), the
+  driver under test, the letters, and the verdict prose - which
+  weighs as much as the code it judges. The unit of that sum is the
+  GROUP of letters an image carries, and the size of a group is
+  bounded by the smallest chip of the family, flash and RAM alike:
+  letters that exercise what every part has are grouped so that each
+  image links on the smallest part (the linker script is the guard -
+  an image over the part's memory does not link), while letters that
+  exercise what only the larger parts have (a third timer, a second
+  USART) build only where the peripheral exists and may be grouped as
+  large as that part allows. The verdict prose is never shortened to
+  make room: bytes come from regrouping, not from a console that
+  says less. The mechanism keeps ONE source per suite: the suite
+  declares its groups in its build header, the build of a part that
+  cannot hold it whole emits one image per group with the group's
+  letters named to the TestBench, which registers those alone (so
+  the others are never referenced and the linker drops them with
+  their prose), and every other part's build emits the whole suite
+  as one image. On the CH32V00x, whose smallest part has 16 KB of
+  flash and 2 KB of RAM, this rule is what decides the shape of every
+  suite; on the other three families the bench chip is not the
+  family's smallest and the rule costs nothing yet.
 - **Package variability, the pattern.** The device header is the
   authority, at three granularities. A missing INSTANCE is compiled
   out in tiers on its header symbol (`#if defined(TCB4)`). An instance

@@ -31,7 +31,7 @@
 // Between keystrokes the CPU sleeps in WFI, woken by the system counter
 // or the USART. No polling anywhere.
 //
-// build: boards = v006k8
+// build: boards = v006k8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -251,7 +251,7 @@ int main()
     // Guarded: print() BLOCKS until the transport accepts each byte, so
     // printing into a port that failed to come up would never return.
     if (serial_ok) {
-        brio::print(serial, brio::crlf, "CH32V006K8 brio console (clk=",
+        brio::print(serial, brio::crlf, brio::device::part_name, " brio console (clk=",
                     clock_ok ? "PLL48" : "FAILED", ", tick=",
                     tick_ok ? "STK" : "FAILED",
                     "), type HELP", brio::crlf, "> ");

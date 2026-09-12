@@ -95,7 +95,7 @@ portability readable at a glance:
 | `armv6m/` | what ARM designed into every Cortex-M0/M0+ and both ARM families share: NVIC + PRIMASK guard, the SysTick ticker | `util/` (and the including family's device header) |
 | `samc21/` | everything that knows `sam.h` (Cortex-M0+): clock tree, pins, SERCOM UART, `SamPlatform`; its NVIC and ticker are `armv6m/`'s | `kernel/`, `util/`, `armv6m/` |
 | `stm32g0/` | everything that knows `stm32g0xx.h` (Cortex-M0+): RCC/PLL, GPIO, USART, `Stm32g0Platform`; its NVIC and ticker are `armv6m/`'s | `kernel/`, `util/`, `armv6m/` |
-| `ch32v00x/` | everything that knows the CH32V00x (QingKe V2C, RV32EC - the smallest core brio runs on): its own register map (no vendor header), RCC/PLL, GPIO, USART, the PFIC guard, the STK ticker, `Ch32v00xPlatform` | `kernel/`, `util/` |
+| `ch32v00x/` | everything that knows the CH32V00x (QingKe V2C, RV32EC - the smallest core brio runs on): its own register map (no vendor header), the clock, the pads and their remaps, USART, SPI, I2C, DMA, the timers, the ADC and the OPA, flash and the two watchdogs, sleep, the PFIC guard, the STK ticker, `Ch32v00xPlatform` | `kernel/`, `util/` |
 | `host/` | `HostPlatform`: the native test "target" (virtual clock, recording idle/break) | `kernel/` |
 
 Targets are siblings, never meet in one binary, and are the only place
@@ -120,7 +120,7 @@ where it can, its exceptions where a reader looks").
 | AVR DA/DB (`avrdx/`) | supported | AVR128DB48 | avr-gcc 16.2, see [docs/avrdx/README.md](docs/avrdx/README.md) |
 | SAM C21 (`samc21/`) | supported | ATSAMC21J18A | arm-none-eabi-gcc 16.2, SysTick tick at 1000 Hz against the AVR's 1024 - the kernel tick's opacity, exercised for real; see [docs/samc21/README.md](docs/samc21/README.md) |
 | STM32G0 (`stm32g0/`) | supported | STM32G0B1RE, STM32G071RB, STM32G031K8 | arm-none-eabi-gcc 16.2, HSI16 x PLL at 64 MHz, the third clock model (shared bus prescalers + per-peripheral enables) and a tickless timebase option; see [docs/stm32g0/README.md](docs/stm32g0/README.md) |
-| CH32V00x (`ch32v00x/`) | in bring-up | CH32V006K8U6 | WCH's riscv32 gcc 15.2, RV32EC (sixteen registers, 8 KB of RAM), HSI x2 at 48 MHz, the kernel console alive over the WCH-Link's own serial; see [docs/ch32v00x/README.md](docs/ch32v00x/README.md) |
+| CH32V00x (`ch32v00x/`) | supported | CH32V006K8U6 | WCH's riscv32 gcc 15.2 with its `xw` extension, RV32EC (sixteen registers, 8 KB of RAM - the smallest core brio runs on), HSI x2 at 48 MHz, its own register map with no vendor header, the console on the WCH-Link's own serial; the CH32V003F4P6 (16 KB, 2 KB, no multiplier) is the family's second and last part, supported on the same stratum with its own part table, presets and ISA - every chapter tiered for it, its suites green on the board as group images, the buses on the wire against a peer, the smallest silicon brio runs on; see [docs/ch32v00x/README.md](docs/ch32v00x/README.md) |
 | host (`host/`) | supported | - | doctest suites, `cd test && ctest --preset host`, see [docs/host/README.md](docs/host/README.md) |
 
 ## Building and testing

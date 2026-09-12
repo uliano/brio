@@ -14,6 +14,7 @@ the user's own manifest, below.
 | ST Nucleo-G071RB | `g071rb` | [nucleo-g071rb.md](nucleo-g071rb.md) |
 | ST Nucleo-G031K8 | `g031k8` | [nucleo-g031k8.md](nucleo-g031k8.md) |
 | a CH32V006K8U6 module | `v006k8` | [ch32v006k8.md](ch32v006k8.md) |
+| WCH's CH32V003F4P6 evaluation board | `v003f4` | [ch32v003f4.md](ch32v003f4.md) |
 
 ## How a board joins the bench
 
@@ -25,7 +26,15 @@ Three concerns, deliberately kept apart:
    (`// build: boards = db28,db32,db48`; `// build: boards =
    g0b1re,g071rb,g031k8`); a configure targets exactly one package
    (one `configurePreset` per package), so switching preset switches
-   the board. Never a target per physical board.
+   the board. Never a target per physical board. A suite whose whole
+   image does not fit a part of its family declares its GROUPS of
+   letters (`// build: groups = abg,cdf,e`): on a board type the
+   project lists as splitting (the CH32V00x's `v003f4`) the suite
+   builds as one image per group - `<app>-1`, `<app>-2`, ... - each
+   carrying the letters its group names and registering those alone
+   (`util/testbench.hpp`'s selection), while on every other board the
+   suite is one image with every letter (design/overview.md, "A
+   suite's image fits the family's smallest chip").
 2. **Identity** - the bench MANIFEST, `cli/bench/bench_boards.py`: a
    plain dict naming each board on the desk by a POSITION (a letter),
    its type, the label the chip is expected to carry, its console and
@@ -37,7 +46,10 @@ Three concerns, deliberately kept apart:
    `brio flash A test_avr_pin` builds the app for A's type and flashes
    it through A's programmer, `brio run A z` drives A's console and
    judges the suite's `ALL: N pass, M fail` line, `brio console A`
-   prints the device path and speed for a monitor of your own.
+   prints the device path and speed for a monitor of your own. On a
+   board that splits a suite, `brio flash` takes the group image's
+   name (`test_ch32_tim-2`) and refuses the bare name with the list of
+   its images; `brio run` judges each image's own ALL: line.
 
 **The board type carries the architecture**: `db28`/`db32`/`db48` are
 AVR DA/DB parts built by the `avrdx/` project and written by avrdude

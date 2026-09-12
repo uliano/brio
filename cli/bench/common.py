@@ -61,6 +61,8 @@ BOARD_TYPES = {
     # wch_openocd_args) and its own path in the manifest (WCH_OPENOCD).
     "v006k8": {"project": "ch32v00x", "preset": "ch32v006k8-release",
                "mcu": "ch32v006k8", "flash": "wch_openocd"},
+    "v003f4": {"project": "ch32v00x", "preset": "ch32v003f4-release",
+               "mcu": "ch32v003f4", "flash": "wch_openocd"},
 }
 
 
@@ -92,33 +94,65 @@ def board_entry(name):
     return entry
 
 
-def apps_manifest(project):
+def apps_roster(project):
     """One project's app roster as CMake discovered it at its last configure -
     written fresh by any one `cmake --preset ...` of THAT project, regardless
     of which chip variant it targets (the scan is of source comments, not of
-    what that configure happens to build). {app: {"boards": [...],
-    "monitor_speed": int|None, ...}}."""
+    what that configure happens to build). {"split_boards": [...] (the
+    board types on which a suite with groups builds as one image per
+    group - absent on a project with none), "apps": {app: {"boards": [...],
+    "groups": [...]|None, "monitor_speed": int|None}}}."""
     path = os.path.join(ROOT, "build-cmake", "apps_%s.json" % project)
     if not os.path.isfile(path):
         die("build-cmake/apps_%s.json not found - configure the %s/ project "
             "first (cd %s && cmake --preset <a release preset>)"
             % (project, project, project))
     with open(path, encoding="ascii") as f:
-        return json.load(f)["apps"]
+        return json.load(f)
+
+
+def apps_manifest(project):
+    """The roster's apps alone: {app: {"boards": [...], "groups": [...]|None,
+    "monitor_speed": int|None}}."""
+    return apps_roster(project)["apps"]
 
 
 def resolve_app(name, app):
     """(app info, board type) for an app on a physical board; a clear error
     if the app was never built for that board type (no
-    '// build: boards' line naming it)."""
+    '// build: boards' line naming it). On a board type the roster lists
+    under "split_boards", a suite with groups is not one image but
+    "<app>-1", "<app>-2", ... (one per group of letters): those names
+    resolve to the app, and the bare name is refused with the list."""
     entry = board_entry(name)
     btype = entry["board"]
     spec = board_type(btype)
-    apps = apps_manifest(spec["project"])
-    if app not in apps:
+    roster = apps_roster(spec["project"])
+    apps = roster["apps"]
+    split = roster.get("split_boards", [])
+    base, group = app, None
+    m = re.match(r"^(.+)-([0-9]+)$", app)
+    if app not in apps and m and m.group(1) in apps:
+        base, group = m.group(1), int(m.group(2))
+    if base not in apps:
         die("no app '%s' under %s/src/apps/ (known to the last cmake configure "
             "of that project)" % (app, spec["project"]))
-    info = apps[app]
+    info = apps[base]
+    groups = info.get("groups") or []
+    if btype in split and groups:
+        if group is None:
+            die("app '%s' is not one image on board '%s' (type %s) but %d, one "
+                "per group of letters: %s"
+                % (base, name, btype, len(groups),
+                   ", ".join("%s-%d (%s)" % (base, i + 1, g)
+                             for i, g in enumerate(groups))))
+        if not 1 <= group <= len(groups):
+            die("app '%s' has %d group images on board '%s' (type %s): %s"
+                % (base, len(groups), name, btype,
+                   ", ".join("%s-%d" % (base, i + 1) for i in range(len(groups)))))
+    elif group is not None:
+        die("app '%s' is one image on board '%s' (type %s): flash '%s'"
+            % (base, name, btype, base))
     if btype not in info["boards"]:
         default = "db48" if spec["project"] == "avrdx" else "c21j"
         hint = ("" if btype == default else

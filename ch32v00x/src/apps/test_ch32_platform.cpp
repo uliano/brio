@@ -48,7 +48,7 @@
 //      through ebreak with no debugger attached (the fault vector's
 //      own record, kernel_fault).
 //
-// build: boards = v006k8
+// build: boards = v006k8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -457,7 +457,7 @@ void ti_resume() {
 }
 
 void banner() {
-    print(serial, crlf, "test_ch32_platform - CH32V006K8 (clk=48 MHz PLL, tick=STK 1000 Hz)",
+    print(serial, crlf, "test_ch32_platform - ", device::part_name, " (clk=48 MHz PLL, tick=STK 1000 Hz)",
           crlf);
     bench.menu();
 }
@@ -529,6 +529,7 @@ int main() {
         } else if (!bench.handle(static_cast<char>(c))) {
             brio::print(serial, "unknown letter (? for the menu)", brio::crlf);
         }
+        brio::print(serial, "  stack: ", brio::stack_untouched(), " B never touched", brio::crlf);
         bench.prompt();
     }
 }

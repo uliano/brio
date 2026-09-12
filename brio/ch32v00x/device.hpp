@@ -11,12 +11,13 @@
  *
  * WHAT THAT COSTS. The other 32-bit strata ask the device header which
  * instances exist (`#if defined(TCB4)`); here there is nothing to ask,
- * so per-part variability has to be stated. Today the file states ONE
- * part, the CH32V006K8U6 on the bench, and every constant below is
- * that part's. The family tiering - which ports are bonded on which
- * package, which parts have USART2 and the OPCM - is born with the
- * second part, the same way samc21/device_tables.hpp was born with a
- * real second package to answer.
+ * so per-part variability has to be STATED: the build names the part
+ * (CH32V003 or CH32V006, from CH32V00X_MCU), this file asks that
+ * definition ONCE and includes the part's own table from parts/, and
+ * every driver reads the facts as `device::` constexpr values - the
+ * memories, the page, the bonded ports, the instances, the GPIO mode
+ * width, AFIO's register order, what the USART has. Two parts are the
+ * whole family brio builds for.
  *
  * Register STRUCTS mirror the chapter's own field names and order, so
  * a reader can hold the manual beside the code. They are the only
@@ -34,6 +35,20 @@ namespace brio {
 inline constexpr uint32_t pb1_base = 0x40000000UL;
 inline constexpr uint32_t pb2_base = 0x40010000UL;
 inline constexpr uint32_t hb_base  = 0x40020000UL;
+
+} // namespace brio
+
+// ---- the part -------------------------------------------------------------
+// The one place the build's part definition is asked (the file header).
+#if defined(CH32V003)
+#include "ch32v00x/parts/ch32v003.hpp"
+#elif defined(CH32V006)
+#include "ch32v00x/parts/ch32v006.hpp"
+#else
+#error "brio ch32v00x: the build must define the part, CH32V003 or CH32V006 (ch32v00x/CMakeLists.txt derives it from CH32V00X_MCU)"
+#endif
+
+namespace brio {
 
 // ---- RCC (RM ch. 3) -------------------------------------------------------
 struct RccRegs {
@@ -67,9 +82,11 @@ inline constexpr uint32_t rcc_pllrdy       = 1UL << 25;
 /// RCC_CFGR0
 inline constexpr uint32_t rcc_sw_mask     = 0x3UL << 0;
 inline constexpr uint32_t rcc_sw_hsi      = 0x0UL << 0;
+inline constexpr uint32_t rcc_sw_hse      = 0x1UL << 0;
 inline constexpr uint32_t rcc_sw_pll      = 0x2UL << 0;
 inline constexpr uint32_t rcc_sws_mask    = 0x3UL << 2;
 inline constexpr uint32_t rcc_sws_hsi     = 0x0UL << 2;
+inline constexpr uint32_t rcc_sws_hse     = 0x1UL << 2;
 inline constexpr uint32_t rcc_sws_pll     = 0x2UL << 2;
 inline constexpr uint32_t rcc_hpre_mask   = 0xFUL << 4;
 inline constexpr uint32_t rcc_adcpre_mask = 0x1FUL << 11;
@@ -108,7 +125,6 @@ inline constexpr uint32_t lsi_hz = 128'000UL;              ///< nominal; the dat
 inline constexpr uint32_t rcc_pb1_tim2   = 1UL << 0;
 inline constexpr uint32_t rcc_pb1_tim3   = 1UL << 2;
 inline constexpr uint32_t rcc_pb1_wwdg   = 1UL << 11;
-inline constexpr uint32_t rcc_pb1_usart2 = 1UL << 17;
 inline constexpr uint32_t rcc_pb1_i2c1   = 1UL << 21;
 inline constexpr uint32_t rcc_pb1_pwr    = 1UL << 28;
 
@@ -122,6 +138,10 @@ inline constexpr uint32_t rcc_pb2_adc1   = 1UL << 9;
 inline constexpr uint32_t rcc_pb2_tim1   = 1UL << 11;
 inline constexpr uint32_t rcc_pb2_spi1   = 1UL << 12;
 inline constexpr uint32_t rcc_pb2_usart1 = 1UL << 14;
+/// USART2's registers sit in the PB1 address space (0x40004400) but its
+/// gate and its reset are PB2's bit 13 (3.4.4, 3.4.7): the bus a block
+/// answers on and the register that clocks it are two facts.
+inline constexpr uint32_t rcc_pb2_usart2 = 1UL << 13;
 
 // ---- GPIO (RM ch. 10) -----------------------------------------------------
 // One configuration register: this family bonds at most eight pins per
@@ -137,11 +157,12 @@ struct GpioRegs {
     volatile uint32_t LCKR;       ///< 0x18 configuration lock
 };
 
-/// The ports this stratum knows, in letter order. A letter with no
-/// entry here is refused at compile time (pin.hpp).
+/// The ports this part has, in letter order. A letter with no entry
+/// here is refused at compile time (pin.hpp); port B is the CH32V006's
+/// (device::has_port_b).
 inline constexpr uint32_t gpio_base_for(char port) {
     return port == 'A' ? pb2_base + 0x0800 :
-           port == 'B' ? pb2_base + 0x0c00 :
+           port == 'B' ? (device::has_port_b ? pb2_base + 0x0c00 : 0) :
            port == 'C' ? pb2_base + 0x1000 :
            port == 'D' ? pb2_base + 0x1400 : 0;
 }
@@ -153,7 +174,7 @@ inline constexpr uint32_t gpio_clock_for(char port) {
            port == 'D' ? rcc_pb2_gpiod : 0;
 }
 
-// ---- USART (RM ch. 16) ----------------------------------------------------
+// ---- USART (RM ch. 14) ----------------------------------------------------
 // Sixteen-bit registers on word-aligned addresses, the F1 shape.
 struct UsartRegs {
     volatile uint16_t STATR;  uint16_t RESERVED0;   ///< 0x00
@@ -165,7 +186,10 @@ struct UsartRegs {
     volatile uint16_t GPR;    uint16_t RESERVED6;   ///< 0x18
 };
 
-/// USART_STATR
+/// USART_STATR (14.8.1). PE, FE, NE, ORE and IDLE are read-only and
+/// cleared by the STATR-then-DATAR read sequence; RXNE is cleared by
+/// a DATAR read and TXE by a DATAR write; RXNE, TC, LBD and CTS are
+/// also write-zero-to-clear (`usart_statr_rw0`).
 inline constexpr uint16_t usart_pe   = 1U << 0;
 inline constexpr uint16_t usart_fe   = 1U << 1;
 inline constexpr uint16_t usart_ne   = 1U << 2;
@@ -174,17 +198,60 @@ inline constexpr uint16_t usart_idle = 1U << 4;
 inline constexpr uint16_t usart_rxne = 1U << 5;
 inline constexpr uint16_t usart_tc   = 1U << 6;
 inline constexpr uint16_t usart_txe  = 1U << 7;
+inline constexpr uint16_t usart_lbd  = 1U << 8;
+inline constexpr uint16_t usart_cts  = 1U << 9;
+inline constexpr uint16_t usart_statr_rw0 = usart_rxne | usart_tc | usart_lbd | usart_cts;
 
-/// USART_CTLR3
-inline constexpr uint16_t usart_dmar   = 1U << 6;
-inline constexpr uint16_t usart_dmat   = 1U << 7;
-
-/// USART_CTLR1
+/// USART_CTLR1 (14.8.4)
+inline constexpr uint16_t usart_sbk    = 1U << 0;    ///< send a break (self-clearing)
+inline constexpr uint16_t usart_rwu    = 1U << 1;    ///< receiver in mute
 inline constexpr uint16_t usart_re     = 1U << 2;
 inline constexpr uint16_t usart_te     = 1U << 3;
-inline constexpr uint16_t usart_txeie  = 1U << 7;
+inline constexpr uint16_t usart_idleie = 1U << 4;
 inline constexpr uint16_t usart_rxneie = 1U << 5;
+inline constexpr uint16_t usart_tcie   = 1U << 6;
+inline constexpr uint16_t usart_txeie  = 1U << 7;
+inline constexpr uint16_t usart_peie   = 1U << 8;
+inline constexpr uint16_t usart_ps     = 1U << 9;    ///< 1: odd parity
+inline constexpr uint16_t usart_pce    = 1U << 10;
+inline constexpr uint16_t usart_wake   = 1U << 11;   ///< 1: address mark wakes, 0: idle line
+inline constexpr uint16_t usart_m      = 1U << 12;   ///< 1: 9-bit word
 inline constexpr uint16_t usart_ue     = 1U << 13;
+
+/// USART_CTLR2 (14.8.5; the CH32V003's 12.10.5). Bits 11:8 are the
+/// F1's synchronous mode - CLKEN, CPOL, CPHA, LBCL - which the
+/// CH32V003 has and the CH32V006 has not (reserved there, measured:
+/// they do not stick); device::usart_has_synchronous says which.
+inline constexpr uint16_t usart_add_mask   = 0xFU << 0;   ///< the mute address, 4 bits
+inline constexpr uint16_t usart_lbdl       = 1U << 5;     ///< 1: 11-bit break detection, 0: 10
+inline constexpr uint16_t usart_lbdie      = 1U << 6;
+inline constexpr uint16_t usart_lbcl       = 1U << 8;     ///< the clock pulse of the last data bit too
+inline constexpr uint16_t usart_cpha       = 1U << 9;     ///< 1: capture on the second edge
+inline constexpr uint16_t usart_cpol       = 1U << 10;    ///< 1: CK idles high
+inline constexpr uint16_t usart_clken      = 1U << 11;    ///< the CK pad driven
+inline constexpr uint16_t usart_stop_mask  = 0x3U << 12;  ///< 00 one, 01 half, 10 two, 11 one and a half
+inline constexpr uint16_t usart_stop_shift = 12;
+inline constexpr uint16_t usart_linen      = 1U << 14;
+
+/// USART_CTLR3 (14.8.6; the CH32V003's 12.10.6). Bits 5:4 are the
+/// F1's smartcard, SCEN and NACK: the CH32V003's (no verb - no card on
+/// the desk), reserved on the CH32V006.
+inline constexpr uint16_t usart_eie    = 1U << 0;    ///< FE/ORE/NE interrupt, under DMAR
+inline constexpr uint16_t usart_iren   = 1U << 1;
+inline constexpr uint16_t usart_irlp   = 1U << 2;
+inline constexpr uint16_t usart_hdsel  = 1U << 3;
+inline constexpr uint16_t usart_nack   = 1U << 4;    ///< CH32V003
+inline constexpr uint16_t usart_scen   = 1U << 5;    ///< CH32V003
+inline constexpr uint16_t usart_dmar   = 1U << 6;
+inline constexpr uint16_t usart_dmat   = 1U << 7;
+inline constexpr uint16_t usart_rtse   = 1U << 8;
+inline constexpr uint16_t usart_ctse   = 1U << 9;
+inline constexpr uint16_t usart_ctsie  = 1U << 10;
+
+/// USART_GPR (14.8.7; the CH32V003's 12.10.7): PSC, the IrDA
+/// prescaler, and on the CH32V003 the smartcard's guard time above it.
+inline constexpr uint16_t usart_psc_mask = 0xFFU;
+inline constexpr uint16_t usart_gt_mask  = 0xFF00U;   ///< CH32V003
 
 // ---- FLASH (RM ch. 18) ----------------------------------------------------
 struct FlashRegs {
@@ -225,16 +292,31 @@ inline constexpr uint32_t flash_obwre   = 1UL << 9;
 inline constexpr uint32_t flash_errie   = 1UL << 10;
 inline constexpr uint32_t flash_eopie   = 1UL << 12;
 inline constexpr uint32_t flash_flock   = 1UL << 15;   ///< the fast-programming lock
-inline constexpr uint32_t flash_ftpg    = 1UL << 16;   ///< fast page (256 B) program
-inline constexpr uint32_t flash_fter    = 1UL << 17;   ///< fast page (256 B) erase
+inline constexpr uint32_t flash_ftpg    = 1UL << 16;   ///< fast page program (device::flash_page_bytes)
+inline constexpr uint32_t flash_fter    = 1UL << 17;   ///< fast page erase
 inline constexpr uint32_t flash_bufload = 1UL << 18;
 inline constexpr uint32_t flash_bufrst  = 1UL << 19;
-inline constexpr uint32_t flash_ber32   = 1UL << 23;   ///< 32 KB block erase
+inline constexpr uint32_t flash_ber32   = 1UL << 23;   ///< 32 KB block erase (device::flash_has_block_erase)
+inline constexpr uint32_t flash_pg      = 1UL << 0;    ///< the standard halfword program (device::flash_has_halfword_program)
 
-/// RM 18.3.1: 0 waits to 15 MHz, 1 wait to 24 MHz, 2 waits to 48 MHz.
-constexpr uint32_t flash_latency_for(uint32_t hz) {
-    return hz <= 15'000'000UL ? 0UL : hz <= 24'000'000UL ? 1UL : 2UL;
-}
+/// The wait states a rate needs: the part's own table (parts/).
+using device::flash_latency_for;
+
+// ---- EXTEND (RM ch. 20; CH32V003 RM ch. 17) -------------------------------
+/// One register on the HB bus, reset only by a system reset. What it
+/// holds is the part's: the lock-up monitor on both parts (LKUPEN,
+/// enabled at reset, and its RW1 flag); the TIM2 DMA remap on the
+/// CH32V006; on the CH32V003 the OPA's three bits and the core
+/// voltage trim (opa.hpp spells the OPA's).
+struct ExtenRegs {
+    volatile uint32_t CTR;        ///< 0x00 EXTEND_CTR, reset 0x00000400
+};
+
+inline ExtenRegs* exten() { return reinterpret_cast<ExtenRegs*>(hb_base + 0x3800); }
+
+inline constexpr uint32_t exten_lkupen  = 1UL << 6;
+inline constexpr uint32_t exten_lkuprst = 1UL << 7;    ///< write-1-clear: mask it out of a read-modify-write
+inline constexpr uint32_t exten_tim2_dma_remap = 1UL << 16;   ///< CH32V006 alone
 
 // ---- the core's own two blocks (QingKe V2 manual, RM ch. 6) ---------------
 struct StkRegs {
@@ -319,8 +401,8 @@ enum class Irq : uint8_t {
     tim1_trg_com   = 36,
     tim1_cc        = 37,
     tim2           = 38,
-    usart2         = 39,   ///< CH32V005/006/007 only
-    opcm           = 40,   ///< CH32V005/006/007 only
+    usart2         = 39,   ///< CH32V005/006/007 only (device::has_usart2)
+    opcm           = 40,   ///< CH32V005/006/007 only (device::has_opa_block)
 };
 
 } // namespace brio

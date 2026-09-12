@@ -29,7 +29,8 @@
  *
  * USE:
  *
- *     brio::TestBench<Serial> bench;          // 'z' = the all-key
+ *     brio::TestBench<Serial> bench;          // 'z' = the all-key; sized
+ *                                             // by the build's selection
  *     ...
  *     bench.letter('a', "the block and its registers", ta_block);
  *     bench.letter('v', "verify the survivors", tv_verify, false);  // not in z
@@ -65,9 +66,68 @@
 
 namespace brio {
 
+/**
+ * The letters an image carries. A suite whose whole image does not fit
+ * a part of its family declares its GROUPS of letters in its build
+ * header (`// build: groups = abg,cdf,e`), and on such a part the build
+ * emits one image per group, defining BRIO_TEST_LETTERS as that group's
+ * keys; every other image carries every letter (design/overview.md, "A
+ * suite's image fits the family's smallest chip"). letter() registers
+ * nothing for a key outside the selection, so a letter the image does
+ * not carry is never referenced and the linker drops it with its
+ * verdict prose - the SOURCE is the same in every image, and the menu
+ * says which letters this one holds.
+ */
+#ifdef BRIO_TEST_LETTERS
+inline constexpr const char* test_letters = BRIO_TEST_LETTERS;
+#else
+inline constexpr const char* test_letters = nullptr;
+#endif
+
+/// The selection as one bit per letter 'a'..'z', every bit set when the
+/// build named none: an integer constant, so that letter()'s check on a
+/// literal key folds to a constant at every call site - a loop over the
+/// string would not have to, and a check that survives keeps the
+/// test's address alive in main.
+constexpr uint32_t test_letter_mask() {
+    if (test_letters == nullptr) {
+        return 0x03FFFFFFUL;
+    }
+    uint32_t mask = 0;
+    for (const char* p = test_letters; *p != '\0'; ++p) {
+        if (*p >= 'a' && *p <= 'z') {
+            mask |= 1UL << (*p - 'a');
+        }
+    }
+    return mask;
+}
+inline constexpr uint32_t test_letters_carried = test_letter_mask();
+
+/// Whether this image carries `key`: every key when the build named no
+/// selection; a key outside 'a'..'z' is always carried.
+constexpr bool test_letter_carried(char key) {
+    if (key < 'a' || key > 'z') {
+        return true;
+    }
+    return ((test_letters_carried >> (key - 'a')) & 1UL) != 0u;
+}
+
+/// The registry's default size: a whole suite's 24, or the selection's
+/// count - the table is .data, and a 2 KB part counts every byte of it.
+constexpr uint8_t test_letters_default_max() {
+    if (test_letters == nullptr) {
+        return 24;
+    }
+    uint8_t n = 0;
+    for (const char* p = test_letters; *p != '\0'; ++p) {
+        ++n;
+    }
+    return n;
+}
+
 /// The letter menu, the verdict lines and the two tallies bin/brio reads.
 /// `max_letters` bounds the static table; registration beyond it fails.
-template <ByteSink Sink, uint8_t max_letters = 24>
+template <ByteSink Sink, uint8_t max_letters = test_letters_default_max()>
 class TestBench {
 public:
     /// A test is a plain function: it prints what it measured and calls
@@ -95,18 +155,16 @@ public:
      * False when the table is full, when the key is already taken, or
      * when it collides with the all-key. Registration happens once at
      * startup, so a false return is a programming error the app can
-     * report - it is not a runtime condition to recover from.
+     * report - it is not a runtime condition to recover from. A key
+     * this image does not carry (test_letter_carried) is accepted and
+     * not registered: the decision is at the call site, always inlined,
+     * so the test's address is never taken in that image.
      */
-    bool letter(char key, const char* title, TestFn fn, bool in_all = true) {
-        if (count_ == max_letters || fn == nullptr) {
-            return false;
+    [[gnu::always_inline]] bool letter(char key, const char* title, TestFn fn, bool in_all = true) {
+        if (!test_letter_carried(key)) {
+            return true;
         }
-        if (is_all_key(key) || find(key) != nullptr) {
-            return false;
-        }
-        letters_[count_] = Entry{key, title, fn, in_all};
-        ++count_;
-        return true;
+        return register_letter(key, title, fn, in_all);
     }
 
     /// The letter list, one per line, with the all-key last. A suite
@@ -121,6 +179,10 @@ public:
             }
         }
         print(Sink{}, "  ", all_key_, "  every letter above", crlf);
+        if (test_letters != nullptr) {
+            print(Sink{}, "  (this image carries the letters ", test_letters,
+                  " of the suite; the other letters are in its other images)", crlf);
+        }
     }
 
     /// One verdict line, and one tick on the tally.
@@ -220,6 +282,18 @@ private:
             }
         }
         return nullptr;
+    }
+
+    bool register_letter(char key, const char* title, TestFn fn, bool in_all) {
+        if (count_ == max_letters || fn == nullptr) {
+            return false;
+        }
+        if (is_all_key(key) || find(key) != nullptr) {
+            return false;
+        }
+        letters_[count_] = Entry{key, title, fn, in_all};
+        ++count_;
+        return true;
     }
 
     void count_verdict(bool ok) {

@@ -8,10 +8,11 @@
 #  compiler in this repository that is not self-built and not at the
 #  project's usual version: what it brings that upstream gcc does not is
 #  a multilib set for rv32e (upstream gcc has to be built with one) and
-#  WCH's proprietary "xw" compressed extension. This stratum does not
-#  use xw - the default -march below is plain rv32ec plus zmmul, which
-#  any RISC-V gcc can produce - so a self-built upstream toolchain can
-#  take this file's place when it exists, and the code will not care.
+#  WCH's proprietary "xw" compressed extension. This family USES xw:
+#  CMakeLists.txt's default -march is the part's full ISA under this
+#  compiler, by choice (the family's smallest part has 16 KB of flash
+#  and every per-cent counts there), so an upstream toolchain is not
+#  a drop-in for this file - it would build the code, without xw.
 #
 #  CMAKE_SYSTEM_NAME Generic + STATIC_LIBRARY try_compile: freestanding
 #  target, no OS, and no working default executable until a linker

@@ -264,26 +264,33 @@ gets its home in `docs/design/` when taken.
   and "the element type is the beat" (the DMA engines' rule) is the
   answer the SPI Request does not yet spell; measured on a block of
   16-bit pixels, not imagined.
-- **The CH32V00x stratum, from bring-up to supported.** `brio/ch32v00x/`
-  and `ch32v00x/` exist (`in bring-up` in README.md's table): the kernel
-  console runs on the CH32V006K8U6 at 48 MHz over USART1, on WCH's gcc
-  15.2 and WCH's OpenOCD fork through a WCH-Link; the clock, the
-  flash media, the power modes, reset and the DMA each have their
-  document and suite; I2C's wire letters pass against a peer board and
-  SPI's await their jumper; the timers, the watchdogs
-  and the ADC have theirs, the pad suite its wireless half, the remaps
-  their tables, the OPA its lock and its path into the ADC. What
-  remains, in docs/ch32v00x/README.md's gap lists: the family tiering
-  and
-  `brio check ch32v00x` with a second part, a self-built upstream gcc 16
-  for riscv32 with an rv32ec/ilp32e multilib (the stratum compiles with
-  plain rv32ec_zmmul on purpose - WCH's `xw` extension is worth a few
-  per cent and only their compiler emits it), and the CH32V003 at 16 KB
-  / 2 KB as the most extreme point brio can touch. A `qingke/` core
+- **The CH32V00x stratum's second part.** `brio/ch32v00x/` and
+  `ch32v00x/` are `supported` on the CH32V006K8U6 (README.md's table):
+  every chapter of the reference manual has its document and its
+  suite green on the module, the bus chapters on the wire (I2C against
+  a peer board, SPI and the USART on the module's own jumpers), on
+  WCH's gcc 15.2 and WCH's OpenOCD fork through a WCH-Link. What
+  remains: the CH32V003F4P6 as the SECOND AND LAST part of the family
+  (these two parts and no more, by decision) - its tier is OPEN: the
+  part table, the two-part check matrix, the presets, the console and
+  the platform suite are on the board, and six chapters (ADC, OPA,
+  sleep, the timers, SPI, I2C) are closed on it by name until written
+  against its own register description (docs/ch32v00x/README.md's gap
+  list; its reference manual is not on the desk). It is the most
+  extreme point brio can touch - 16 KB of flash and 2 KB of RAM, the
+  QingKe V2A with no multiplier. For its sake, this family is built
+  by WCH's gcc with the `xw` extension
+  and the hardware prologue (both measured: one to two per cent and
+  8..220 bytes an image), so no upstream gcc is sought for it; and
+  its suites are shaped by the smallest-chip rule (design/overview.md,
+  "A suite's image fits the family's smallest chip"). A `qingke/` core
   stratum only at a second QingKe family.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
-  domain, one logical unit on the host side, an .md per unit.
+  domain, one logical unit on the host side, an .md per unit - the
+  group being the unit an image carries, sized by the family's
+  smallest chip (the rule in design/overview.md; the CH32V00x is where
+  it bites first).
 - **Queued**: the SAM's CAN (two transceivers and the util vocabulary a
   shared frame type must carry), the energy experiment's G0 instance,
   Multislope (an application), avrdx -> avrxt when a part proves it.
@@ -373,7 +380,9 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   (`// build: boards = db28,db32,db48` in the app header; `db48` is the
   default when the line is absent; a configure targets exactly one
   package, so switching `configurePreset` switches which apps' targets
-  exist), IDENTITY = the manifest `cli/bench/bench_boards.py` (which board
+  exist; `// build: groups = abg,cdf` splits a suite into one image per
+  group on a board type its project lists as splitting - the CH32V003 -
+  and changes nothing elsewhere), IDENTITY = the manifest `cli/bench/bench_boards.py` (which board
   sits where, its console by `/dev/serial/by-path` because the CH340s
   have no USB serial, its programmer), ORCHESTRATION = `bin/brio`.
   Never a target per physical board. `family_probe` carries the matrix
@@ -445,13 +454,21 @@ stm32g0/                 the STM32G0 build project, same shape again (the
                          ST's SVD per part)
 ch32v00x/                the CH32V00x build project, the fifth of the shape
                          (cmake/toolchain-riscv.cmake on /sw/wch-riscv,
-                         CH32V00X_ARCH = rv32ec_zmmul by choice, one preset
-                         pair for the CH32V006K8, ld/ch32v006k8.ld,
-                         src/glue/startup_ch32v00x.S - the table whose
-                         first word is an INSTRUCTION and whose handler
-                         names are the project's own - and the upload
-                         target on WCH's OpenOCD fork); no vendor header,
-                         so no device-select define
+                         CH32V00X_MCU naming the part and deriving from it
+                         the PART DEFINITION (CH32V006 / CH32V003, what
+                         device.hpp asks - no vendor header, so the build
+                         states the part), the ISA (rv32ec_zmmul_xw / rv32ec_xw,
+                         each part's full ISA under WCH's gcc, xw theirs
+                         alone) and ld/<part>.ld; two preset pairs, one
+                         per part; src/glue/startup_ch32v00x.S - the table
+                         whose first word is an INSTRUCTION and whose
+                         handler names are the project's own, two entries
+                         shorter on the CH32V003 - and the upload target on
+                         WCH's OpenOCD fork, the probe named by serial; the
+                         GROUP axis: on the CH32V003 a suite with a
+                         "// build: groups" line builds as one image per
+                         group, <app>-<n>, the crt PAINTS the free RAM so a
+                         suite reports how much stack it never touched
 test/CMakeLists.txt      the host test project (independent - one CMake
                          configure has exactly one compiler):
                          one executable + ctest entry per test_*/main.cpp
@@ -1035,10 +1052,16 @@ brio/                    the framework, four strata:
                          RV32EC) - and NO vendor header: the map is the
                          stratum's own
     device.hpp             the register map in the chapter's words (RCC, GPIO,
-                           USART, FLASH_ACTLR, the core's STK and PFIC), the
+                           USART, FLASH, the core's STK and PFIC), the
                            interrupt numbers = the vector table's word
-                           indices; states the CH32V006K8 alone until a
-                           second part gives the tiering something to say
+                           indices; asks the build's part definition ONCE
+                           and includes parts/ch32v003.hpp or
+                           parts/ch32v006.hpp - the RESERVE of this family:
+                           the memories, the flash page, the bonded ports,
+                           the instances, the GPIO mode width, AFIO's
+                           register order, what the USART has, as constexpr
+                           facts every driver branches on with if constexpr
+                           (two macros for per-instance code)
     pfic.hpp               InterruptGuard (csrrci read-and-clear of
                            mstatus.MIE), enable/disable/readback, Pfic per-
                            line enables (write-one registers; the manual's
@@ -1058,13 +1081,18 @@ brio/                    the framework, four strata:
                            family (an F1 nibble is right by accident), pulls
                            through OUTDR, the port clock opened by every
                            configuring verb
-    usart.hpp              Uart<1|2, P, rx, tx, TxEngine, RxEngine, remap>: the
-                           interrupt-driven byte transport (two rings, TXEIE
-                           armed/disarmed, errors read then cleared, BRR =
-                           pclk/baud whole) with two OPTIONAL DMA engine
-                           slots (harvest() the verb that publishes a
-                           receive run); USART1 on its default pads PD5/PD6,
-                           USART2 refused until the remaps exist
+    usart.hpp              Usart<n>: the RESOURCE over the whole of RM ch. 14
+                           (the frame, the divisor, mute with both wakes,
+                           LIN's break, half duplex - a BUS here, not a loop
+                           -, IrDA, CTS/RTS, DMA, every flag; no synchronous
+                           mode and no smartcard on this silicon, stated as
+                           facts) + Uart<1|2, P, rx, tx, TxEngine, RxEngine,
+                           remap, opts>: the interrupt-driven byte transport
+                           on it (two rings, TXEIE armed/disarmed, errors
+                           read then cleared, BRR = pclk/baud whole) with
+                           two OPTIONAL DMA engine slots (harvest() the verb
+                           that publishes a receive run) and trailing
+                           options that cost nothing; USART2 on columns 1..6
     dma_engine.hpp         NoDmaEngine, the empty slot's tag, and the rule
                            that two engines of one transport name two channels
     dma.hpp                Dma + DmaChannel<1..7> (THE CHANNEL IS THE

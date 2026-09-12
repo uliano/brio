@@ -39,6 +39,18 @@ def head_line(path):
     return ""
 
 
+def groups_line(path):
+    """The groups of letters the app's '// build: groups' line names, or
+    None: the images it splits into on a board type its project lists as
+    splitting (its CMakeLists.txt's SPLIT_BOARDS)."""
+    with open(path, encoding="ascii", errors="replace") as f:
+        for raw in f:
+            m = re.match(r"\s*//\s*build:\s*groups\s*=\s*(.*)", raw)
+            if m:
+                return m.group(1).strip()
+    return None
+
+
 def boards_line(path):
     with open(path, encoding="utf-8", errors="replace") as fh:
         for raw in fh:
@@ -58,7 +70,7 @@ def roster(projects):
         for p in paths:
             name = os.path.splitext(os.path.basename(p))[0]
             where = os.path.relpath(os.path.dirname(p), ROOT)
-            rows.append((project, name, boards_line(p), head_line(p), where))
+            rows.append((project, name, boards_line(p), groups_line(p), head_line(p), where))
     return rows
 
 
@@ -76,11 +88,13 @@ def main(argv):
         print("brio apps: nothing matches")
         return 1
     width = max(len(r[1]) for r in rows)
-    for project, name, boards, head, where in rows:
+    for project, name, boards, groups, head, where in rows:
         tag = project if not where.startswith("experiments") else where.split(os.sep)[1] + "/" + project
         line = "%-8s %-*s" % (tag, width, name)
         if boards:
             line += "  [%s]" % boards
+        if groups:
+            line += "  [groups %s]" % groups
         if head:
             line += "  " + head
         print(line)

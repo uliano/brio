@@ -12,6 +12,26 @@
             }
         },
         {
+            "name": "ch32v003f4-release",
+            "displayName": "CH32V003F4 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v003f4-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32V00X_MCU": "ch32v003f4"
+            }
+        },
+        {
+            "name": "ch32v003f4-debug",
+            "displayName": "CH32V003F4 (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v003f4-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CH32V00X_MCU": "ch32v003f4"
+            }
+        },
+        {
             "name": "ch32v006k8-debug",
             "displayName": "CH32V006K8 (debug, -Og)",
             "generator": "Ninja",
@@ -24,6 +44,8 @@
     ],
     "buildPresets": [
         { "name": "ch32v006k8-release", "configurePreset": "ch32v006k8-release" },
+        { "name": "ch32v003f4-release", "configurePreset": "ch32v003f4-release" },
+        { "name": "ch32v003f4-debug", "configurePreset": "ch32v003f4-debug" },
         { "name": "ch32v006k8-debug", "configurePreset": "ch32v006k8-debug" }
     ]
 }

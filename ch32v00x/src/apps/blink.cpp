@@ -16,7 +16,7 @@
 // five packages of the family, no bus and no analog function on it,
 // TIM2_CH3 as its alternate function (a dimmable LED, one day).
 //
-// build: boards = v006k8
+// build: boards = v006k8,v003f4
 
 #include <stdint.h>
 

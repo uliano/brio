@@ -149,6 +149,28 @@ private:
     [[gnu::section(".noinit")]] static inline PanicRecord panic_record_;
 };
 
+/**
+ * How many bytes of the stack no call has reached since reset. The crt
+ * paints the free RAM between the last section the linker placed
+ * (`__stack_floor`, one past .noinit) and the stack top with one
+ * pattern; this walks up from the floor until the pattern breaks. The
+ * number is the margin a program has on a part with 2 KB of RAM - and
+ * zero means the stack has already run into the data below it, which
+ * no other symptom names. A word of the pattern legitimately on the
+ * stack ends the walk early: the answer errs on the small side.
+ */
+extern "C" uint32_t __stack_floor[];
+extern "C" uint32_t __stack_top[];
+inline uint32_t stack_untouched() {
+    const volatile uint32_t* p = __stack_floor;
+    uint32_t n = 0;
+    while (p < __stack_top && *p == 0xA5A5A5A5UL) {
+        ++p;
+        n += 4u;
+    }
+    return n;
+}
+
 static_assert(Platform<Ch32v00xPlatform<>>);
 
 } // namespace brio

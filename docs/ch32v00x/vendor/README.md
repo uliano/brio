@@ -19,6 +19,9 @@ trusted.
 | QingKe V2 microprocessor manual | **V1.3** | `QingKeV2_Processor_Manual.PDF` | the core: mstatus on interrupt entry (2.2), the PFIC register set (3.1), the hardware prologue/epilogue (3.4), the vector table free entries (3.5), what wakes a WFI and a WFE (5.2), the debug module (ch. 6), the CSRs (ch. 7) |
 | WCH-Link user manual | **V2.4** | `WCH-LinkUserManual.PDF` | the probe: modes, the pin table per family (table 6: SWDIO = PD1, SWCLK = PB3 for this one), the firmware update path |
 | CH32V006 EVT | the package dated by its own list file | `CH32V006EVT.ZIP` | WCH's SDK and examples - NOT used by the build (its licence is written for software running on WCH parts) but the only vendor voice on silicon habits: the startup's INTSYSCR and mtvec settings, `GPIO_IPD_Unused` pulling every unused pad down, the clock-setting sequences |
+| CH32V003 datasheet | **V1.6** | `CH32V003DS0.PDF` | the second part: the memories (1.4.2), the TSSOP20 pin table with the default and remapped functions (2.2), the flash page of 64 bytes (table 3-14), the electrical characteristics |
+| CH32V003 reference manual | **V1.9** | `CH32V003RM.PDF` | the document of record for the chapters that differ on the CH32V003: RCC ch. 3 (no clock monitor), PFIC ch. 6, GPIO/AFIO ch. 7 (the two-bit MODE, PCFR1 at 0x04 with the F1's fields, tables 7-8 to 7-14), DMA ch. 8, ADC ch. 9, the timers ch. 10 and 11 (no dead time on TIM2), USART ch. 12 (the synchronous mode and the smartcard), I2C ch. 13 (the rise-time register), SPI ch. 14, FLASH ch. 16, EXTEND ch. 17 (the OPA's three bits) |
+| CH32V003 EVT | the package dated by its own list file | `CH32V003EVT.ZIP` | WCH's SDK for the part: its `startup_ch32v00x.S` (INTSYSCR 0x3 - the hardware stack and NESTING, which brio keeps off), its core header's SRAM-resident WFE with a clock-dependent spin, and its peripheral headers, the one local voice on the CH32V003's register bits until the manual is on the desk |
 
 NO ERRATA SHEET. WCH publishes none for this family that the desk
 could find; check the download page before each chapter, and until one
@@ -29,6 +32,5 @@ an interrupt it can take, and a MIE that interrupt entry does not
 clear.
 
 The desk's copies live in `~/Documenti/Elettronica/WCH/`, together
-with the CH32V003's own datasheet and EVT (a different reference
-manual, CH32V003RM, if that part ever joins the stratum) and the
-factory image dumped from the bench module before its first flash.
+with the factory image dumped from the bench module before its first
+flash.

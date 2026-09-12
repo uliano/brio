@@ -87,8 +87,10 @@ _start:
     .word   tim1_trg_com_handler   /* 36 */
     .word   tim1_cc_handler        /* 37 */
     .word   tim2_handler           /* 38 */
+#if defined(CH32V006)
     .word   usart2_handler         /* 39 CH32V005/006/007 only */
     .word   opcm_handler           /* 40 CH32V005/006/007 only */
+#endif
     .option rvc
 
     .section .text.startup, "ax", @progbits
@@ -117,6 +119,18 @@ reset_handler:
     la      a1, __bss_end
     bgeu    a0, a1, 2f
 1:  sw      zero, (a0)
+    addi    a0, a0, 4
+    bltu    a0, a1, 1b
+2:
+    /* The free RAM between the last placed section and the stack top
+       is painted, so that stack_untouched() (brio/ch32v00x/platform.hpp)
+       can say how deep the stack ever reached. Nothing is on the stack
+       yet: this runs before the first call. */
+    la      a0, __stack_floor
+    la      a1, __stack_top
+    li      t0, 0xA5A5A5A5
+    bgeu    a0, a1, 2f
+1:  sw      t0, (a0)
     addi    a0, a0, 4
     bltu    a0, a1, 1b
 2:

@@ -1,7 +1,8 @@
 /* ============================================================================
- * ch32v006k8.ld - hand-written linker script for the CH32V006K8
- * (62 KB flash at 0x0000_0000 and 8 KB SRAM at 0x2000_0000 - CH32V006
- * datasheet V2.0, table 1-1).
+ * ch32v003f4.ld - hand-written linker script for the CH32V003F4
+ * (16 KB flash at 0x0000_0000 and 2 KB SRAM at 0x2000_0000 - CH32V003
+ * datasheet V1.6, 1.4.2; the 1920-byte boot loader lives in its own
+ * system area, not in this array).
  *
  * FLASH AT ZERO, AND WHY THE FIRST WORD IS AN INSTRUCTION. This core
  * fetches its first instruction from address 0, so the image starts
@@ -11,14 +12,14 @@
  * the initial stack pointer, and it is why .vectors must be KEPT first
  * in .text and why the crt sets the stack pointer itself.
  *
- * THE LINKER GETS 40 K OF THE 62. The array is one, and the storage
- * classes (brio/ch32v00x/nvm_flash.hpp: the NvHeap's 16 KB and the
- * NvJournal's 6 KB attic) live in its top 22 KB as a CONSTANT
- * partition - so `rom` stops at 0xA000 and nothing the compiler emits
- * can land above it. `__brio_rom_end` below is that boundary read back
- * as a value: the media compare it with their floor and refuse to open
- * if this script is ever edited past it. 62 K and not 64 because the
- * top two kilobytes of the flash array are the boot loader's.
+ * THE LINKER GETS 15 K OF THE 16. The array is one, and the storage
+ * class (brio/ch32v00x/nvm_flash.hpp: the NvJournal's 1 KB attic of
+ * sixteen 64-byte pages - no heap, a 16 KB array has no room for a
+ * block allocator) lives in its top kilobyte as a CONSTANT partition -
+ * so `rom` stops at 0x3C00 and nothing the compiler emits can land
+ * above it. `__brio_rom_end` below is that boundary read back as a
+ * value: the media compare it with their floor and refuse to open if
+ * this script is ever edited past it.
  *
  * .noinit is NOLOAD and the crt neither loads nor zeroes it, which is
  * what lets the kernel's PanicRecord breadcrumb survive a warm reset.
@@ -26,8 +27,8 @@
 
 MEMORY
 {
-    rom (rx)  : ORIGIN = 0x00000000, LENGTH = 40K
-    ram (rwx) : ORIGIN = 0x20000000, LENGTH = 8K
+    rom (rx)  : ORIGIN = 0x00000000, LENGTH = 15K
+    ram (rwx) : ORIGIN = 0x20000000, LENGTH = 2K
 }
 
 ENTRY(reset_handler)

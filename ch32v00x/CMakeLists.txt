@@ -13,16 +13,21 @@
 #  header. WCH ships its register definitions inside the EVT package,
 #  whose licence is written for software running on WCH parts, so this
 #  target compiles against brio/ch32v00x/device.hpp instead - the map
-#  read off the reference manual. There is therefore no device-select
-#  define to pass, and the part number selects only the linker script.
+#  read off the reference manual. The part is therefore a definition of
+#  THIS build's making (CH32V006 or CH32V003, from the part number),
+#  asked once in device.hpp, which includes the part's own table.
 #
-#  THE ARCHITECTURE STRING IS A CHOICE, not a fact of the part: the core
-#  is RV32EC with the multiply-only "m" (misa reads 0x40801014: E, C, M
-#  and one non-standard extension), so rv32ec_zmmul is what the compiler
-#  is told. WCH's own gcc could also emit their "xw" compressed
-#  extension (rv32ec_zmmul_xw, worth a few per cent of code size); it is
-#  deliberately NOT the default, because an image that uses it can only
-#  be built by WCH's compiler.
+#  THE ARCHITECTURE STRING IS THE PART'S FULL ISA UNDER WCH'S GCC. The
+#  core is RV32EC with the multiply-only "m" (misa reads 0x40801014: E,
+#  C, M and one non-standard extension); the non-standard extension is
+#  WCH's "xw" compressed set, which only their compiler emits, and the
+#  default below asks for all of it: rv32ec_zmmul_xw. xw is worth one
+#  to two per cent of every image (measured over the suites: 72 to 516
+#  bytes each), and the family's smallest part - the CH32V003, 16 KB of
+#  flash and 2 KB of RAM - turns those bytes into the choice: this
+#  family is built with the vendor compiler and its extension, and an upstream
+#  gcc, which has no xw, is not a drop-in here. The part number selects
+#  the string: rv32ec_xw on the CH32V003, whose core has no multiplier.
 #
 #  Flash/debug: WCH's OpenOCD fork at /sw/wch-openocd, the only OpenOCD
 #  that speaks the WCH-Link's SDI transport. The probe's own serial
@@ -49,10 +54,27 @@ foreach(lang C CXX)
 endforeach()
 
 # --- Which part this configure targets: the part number in lower case,
-#     without the package and temperature suffix (ch32v006k8). It picks
-#     the linker script, ld/<part>.ld, and nothing else.
-set(CH32V00X_MCU "ch32v006k8" CACHE STRING "target CH32V00x part, e.g. ch32v006k8")
-set(CH32V00X_ARCH "rv32ec_zmmul" CACHE STRING "-march for this family (rv32ec_zmmul_xw needs WCH's gcc)")
+#     without the package and temperature suffix (ch32v006k8, ch32v003f4).
+#     It picks the linker script ld/<part>.ld, the part DEFINITION the
+#     stratum's device.hpp asks (CH32V006 / CH32V003: the family has no
+#     vendor header, so the build states the part) and, unless overridden,
+#     the ISA: the CH32V006's QingKe V2C has the multiplier, the
+#     CH32V003's V2A has not.
+set(CH32V00X_MCU "ch32v006k8" CACHE STRING "target CH32V00x part: ch32v006k8 or ch32v003f4")
+string(SUBSTRING "${CH32V00X_MCU}" 0 8 _ch32_part)
+string(TOUPPER "${_ch32_part}" CH32V00X_PART_DEFINE)                  # CH32V006 / CH32V003
+if(NOT CH32V00X_PART_DEFINE MATCHES "^CH32V00[36]$")
+    message(FATAL_ERROR "CH32V00X_MCU '${CH32V00X_MCU}': the part must be a CH32V006 or a CH32V003")
+endif()
+if(CH32V00X_PART_DEFINE STREQUAL "CH32V003")
+    set(_ch32_arch_default "rv32ec_xw")
+else()
+    set(_ch32_arch_default "rv32ec_zmmul_xw")
+endif()
+set(CH32V00X_ARCH "${_ch32_arch_default}" CACHE STRING "-march for this part: its full ISA under WCH's gcc (xw is theirs alone); empty = the part's default")
+if("${CH32V00X_ARCH}" STREQUAL "")
+    set(CH32V00X_ARCH "${_ch32_arch_default}")
+endif()
 set(CH32V00X_ABI "ilp32e" CACHE STRING "-mabi for this family")
 
 # --- The core's hardware prologue/epilogue (HPE): with it on, the crt
@@ -75,6 +97,7 @@ endif()
 set(BRIO_COMMON_FLAGS
     -march=${CH32V00X_ARCH}
     -mabi=${CH32V00X_ABI}
+    -D${CH32V00X_PART_DEFINE}
     ${CH32V00X_HPE_DEFINE}
     -Wall -Wextra -Werror
     -ffunction-sections -fdata-sections
@@ -176,7 +199,21 @@ endfunction()
 #     ../experiments/*/ch32v00x/<app>.cpp - becomes a target, gated by
 #     its own "// build: boards = ..." header comment (default: v006k8,
 #     the bench board).
+#
+#     The GROUP axis (design/overview.md, "A suite's image fits the
+#     family's smallest chip"): a suite whose whole image does not fit
+#     the CH32V003's 15 KB declares its groups of letters in the same
+#     header ("// build: groups = abg,cdf,e"). On a board of
+#     CH32V00X_SPLIT_BOARDS the app then builds as one image PER GROUP -
+#     <app>-1, <app>-2, ... - each compiled with BRIO_TEST_LETTERS set to
+#     its group's keys, which util/testbench.hpp reads to register those
+#     letters alone; on every other board the app is ONE image carrying
+#     every letter, and a groups line changes nothing there. The roster
+#     names the split boards and each app's groups, so bin/brio can
+#     resolve "<app>-<n>" and refuse the bare name where it is not an
+#     image.
 string(SUBSTRING "${CH32V00X_MCU}" 4 6 CH32V00X_BOARD)          # v006k8
+set(CH32V00X_SPLIT_BOARDS v003f4)
 
 file(GLOB APP_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/src/apps/*.cpp"
@@ -188,6 +225,7 @@ foreach(_app_path IN LISTS APP_SOURCES)
     get_filename_component(_app "${_app_path}" NAME_WE)
 
     set(_boards v006k8)
+    set(_groups "")
     set(_monitor_speed "")
 
     file(STRINGS "${_app_path}" _build_lines REGEX "^// build:")
@@ -201,6 +239,13 @@ foreach(_app_path IN LISTS APP_SOURCES)
                 foreach(_b IN LISTS _boards_raw)
                     string(STRIP "${_b}" _b)
                     list(APPEND _boards "${_b}")
+                endforeach()
+            elseif(_key STREQUAL "groups")
+                string(REPLACE "," ";" _groups_raw "${_value}")
+                set(_groups "")
+                foreach(_g IN LISTS _groups_raw)
+                    string(STRIP "${_g}" _g)
+                    list(APPEND _groups "${_g}")
                 endforeach()
             elseif(_key STREQUAL "monitor_speed")
                 set(_monitor_speed "${_value}")
@@ -221,7 +266,20 @@ foreach(_app_path IN LISTS APP_SOURCES)
             set(_boards_json "${_boards_json},\"${_b}\"")
         endif()
     endforeach()
-    set(_entry "\"${_app}\":{\"boards\":[${_boards_json}],\"monitor_speed\":${_speed_json}}")
+    if(_groups STREQUAL "")
+        set(_groups_json "null")
+    else()
+        set(_groups_json "")
+        foreach(_g IN LISTS _groups)
+            if(_groups_json STREQUAL "")
+                set(_groups_json "\"${_g}\"")
+            else()
+                set(_groups_json "${_groups_json},\"${_g}\"")
+            endif()
+        endforeach()
+        set(_groups_json "[${_groups_json}]")
+    endif()
+    set(_entry "\"${_app}\":{\"boards\":[${_boards_json}],\"groups\":${_groups_json},\"monitor_speed\":${_speed_json}}")
     if(_manifest_entries STREQUAL "")
         set(_manifest_entries "${_entry}")
     else()
@@ -229,11 +287,30 @@ foreach(_app_path IN LISTS APP_SOURCES)
     endif()
 
     if(CH32V00X_BOARD IN_LIST _boards)
-        ch32_add_app(${_app} ${_app_path})
+        if(CH32V00X_BOARD IN_LIST CH32V00X_SPLIT_BOARDS AND NOT _groups STREQUAL "")
+            set(_i 0)
+            foreach(_g IN LISTS _groups)
+                math(EXPR _i "${_i} + 1")
+                ch32_add_app(${_app}-${_i} ${_app_path})
+                target_compile_definitions(${_app}-${_i} PRIVATE "BRIO_TEST_LETTERS=\"${_g}\"")
+            endforeach()
+        else()
+            ch32_add_app(${_app} ${_app_path})
+        endif()
     endif()
 endforeach()
 
 # This project's app roster for bin/brio (apps_ch32v00x.json): a
-# separate file because app names collide across the trees.
+# separate file because app names collide across the trees. It names
+# the boards that split a suite into its group images, so the verbs can
+# resolve "<app>-<n>" there and refuse the bare name.
+set(_split_json "")
+foreach(_b IN LISTS CH32V00X_SPLIT_BOARDS)
+    if(_split_json STREQUAL "")
+        set(_split_json "\"${_b}\"")
+    else()
+        set(_split_json "${_split_json},\"${_b}\"")
+    endif()
+endforeach()
 file(WRITE "${CMAKE_SOURCE_DIR}/../build-cmake/apps_ch32v00x.json"
-    "{\n  \"apps\": {\n    ${_manifest_entries}\n  }\n}\n")
+    "{\n  \"split_boards\": [${_split_json}],\n  \"apps\": {\n    ${_manifest_entries}\n  }\n}\n")

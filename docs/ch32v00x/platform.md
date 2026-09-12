@@ -78,6 +78,13 @@ and to gcc's plain `interrupt` otherwise - one option for the whole
 image, because a fast handler under an HPE that is off corrupts the
 program it interrupted. Interrupt nesting is never enabled: the
 kernel's rule ([../design/kernel.md](../design/kernel.md), section 1).
+`stack_untouched()` is the RAM ledger: the crt paints the free RAM
+between the last section the linker placed and the stack top with one
+pattern before the first call, and the verb walks up from that floor
+until the pattern breaks - how many bytes of stack no call has reached
+since reset, the margin a program has on a part with 2 KB, zero
+meaning the stack has run into the data below it. Every suite prints
+it after each command.
 
 The timebase is [brio/ch32v00x/ticker.hpp](../../brio/ch32v00x/ticker.hpp)'s
 `BasicTicker<tps>` over the STK (`Ticker` at 1000 Hz), the busy-wait
@@ -172,7 +179,8 @@ CH32V006K8U6 at 48 MHz. What it measured:
   a kernel_fault record carrying 0x51. The `.noinit` section does what
   the linker script and the crt promise.
 
-The watchdogs' suite is `test_ch32_watchdog` (15 verdicts in `z`, two
+The watchdogs' suite is `test_ch32_watchdog` (15 verdicts in `z` on
+either part, two
 letters ending in real resets):
 
 - **The IWDG bites when the arithmetic says**: /32 and a reload of 999
@@ -191,6 +199,20 @@ letters ending in real resets):
 - **The counter does not run unarmed** (the finding above), EWIF cannot
   be set by software, and the RCC pulse on PB1PRSTR clears WDGA and
   EWI - the one way to put an armed WWDG back without a reboot.
+
+## On the CH32V003F4P6
+
+The same suite, the same 30 verdicts, on the family's smallest part
+([../boards/ch32v003f4.md](../boards/ch32v003f4.md)) built as
+`rv32ec_xw`: the reset flags and their history, the critical section,
+the STK timebase (CMP 47999 at 48 MHz), `delay_us` (100 us in 4858
+cycles), and `idle()` through the WFI-to-WFE conversion sleeping and
+waking on the tick as on the CH32V006 - the SRAM-resident WFE the
+vendor's CH32V003 package runs is not needed for a Sleep; whether a
+Standby needs it is the sleep tier's question. The QingKe V2A takes an
+interrupt FASTER than the V2C: with the hardware prologue, 24 cycles
+to the handler's first statement, 16 through a minimal body, 26 back
+to the raiser - 66 for the whole trip against the V2C's 83.
 
 ## Not covered yet
 

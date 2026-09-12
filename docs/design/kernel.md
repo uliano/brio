@@ -593,8 +593,7 @@ sits above the concept in the include graph.
 Every target stratum ships its implementation as `<stratum>/platform.hpp`
 (`AvrPlatform`, `SamPlatform`, `Stm32g0Platform<TB>`,
 `Ch32v00xPlatform<TB>` - the last two templated on their timebase, see
-each target's `platform.md`, or the header itself where the target is
-in bring-up);
+each target's `platform.md`);
 `HostPlatform` (`host/platform.hpp`) gives a depth-counting
 critical section, a test-controlled virtual clock and recording
 idle/break - time becomes deterministic arithmetic in tests

@@ -3,12 +3,14 @@
 # definition of done, the RISC-V twin of cli/checks/check_stm32g0.sh).
 #
 # Positive: every test/family_ch32v00x/*.cpp must COMPILE for every part
-# in PARTS with the project's own flags. There is ONE part today - the
-# stratum's map (brio/ch32v00x/device.hpp) states the CH32V006K8 alone
-# and no vendor header exists to select another - so the part changes
-# nothing in the compile yet; the loop is where the second part and its
-# tiering will land. What the sweep proves meanwhile is that WCH's gcc
-# 15.2 accepts every construct brio is written with (util_all.cpp).
+# in PARTS with the project's own flags - the part's definition
+# (CH32V006 / CH32V003, what device.hpp asks for its table) and the
+# part's ISA (the CH32V003's core has no multiplier) - or, when the TU
+# carries a "// mcu: <list>" line, for those parts alone: the chapters
+# not yet tiered for the CH32V003 are closed on it by an #error in
+# their header, and their fixtures say so. What the sweep also proves
+# is that WCH's gcc 15.2 accepts every construct brio is written with
+# (util_all.cpp).
 # Every positive is compiled BOTH WAYS the project can build an image:
 # with the core's hardware prologue/epilogue (-DBRIO_CH32_HPE=1, the
 # CH32V00X_HPE option, WCH's interrupt attribute) and without it (gcc's
@@ -26,19 +28,30 @@ set -u
 cd "$(dirname "$0")/../.."
 
 CXX=/sw/wch-riscv/bin/riscv32-wch-elf-g++
-FLAGS="-march=rv32ec_zmmul -mabi=ilp32e -std=gnu++23 -Os \
-       -Wall -Wextra -Werror -fno-exceptions -fno-rtti -c -Ibrio"
-PARTS="ch32v006k8"
+COMMON="-mabi=ilp32e -std=gnu++23 -Os -Wall -Wextra -Werror -fno-exceptions -fno-rtti -c -Ibrio"
+PARTS="ch32v006k8 ch32v003f4"
 FILTER="${1:-}"
 fail=0
+
+# The part's own flags: the same two facts ch32v00x/CMakeLists.txt derives
+# from CH32V00X_MCU.
+part_flags() {
+    case "$1" in
+        ch32v006k8) echo "-march=rv32ec_zmmul_xw -DCH32V006 $COMMON" ;;
+        ch32v003f4) echo "-march=rv32ec_xw -DCH32V003 $COMMON" ;;
+        *) echo "unknown part $1" >&2; exit 2 ;;
+    esac
+}
 
 for tu in test/family_ch32v00x/*.cpp; do
     [ -e "$tu" ] || continue
     case "$tu" in *"$FILTER"*) ;; *) continue ;; esac
     line="$(basename "$tu" .cpp):"
-    for part in $PARTS; do
+    parts="$(sed -n 's|^// mcu:||p' "$tu")"
+    [ -n "$parts" ] || parts="$PARTS"
+    for part in $parts; do
         for hpe in 0 1; do
-            if $CXX $FLAGS -DBRIO_CH32_HPE=$hpe "$tu" -o /dev/null 2>/tmp/check_ch32v00x_err; then
+            if $CXX $(part_flags "$part") -DBRIO_CH32_HPE=$hpe "$tu" -o /dev/null 2>/tmp/check_ch32v00x_err; then
                 line="$line $part/hpe$hpe"
             else
                 line="$line $part/hpe$hpe:FAIL"
@@ -59,7 +72,7 @@ for tu in test/family_ch32v00x/neg/*.cpp; do
     fi
     line="$(basename "$tu" .cpp):"
     for part in $parts; do
-        if $CXX $FLAGS "$tu" -o /dev/null 2>/dev/null; then
+        if $CXX $(part_flags "$part") "$tu" -o /dev/null 2>/dev/null; then
             line="$line $part:COMPILED(BAD)"
             fail=1
         else

@@ -138,17 +138,21 @@ def wch_openocd_args(prog, elffile):
     afterwards: `break_here()` on this core is an ebreak, which with no
     debugger attached escalates to the fault vector rather than halting
     the core, so a probe-less power-on and a just-flashed board behave
-    the same way. Nothing here names the probe: the fork's adapter
-    selection is untested with two WCH-Links attached, and the desk has
-    one."""
+    the same way. The probe is named by its USB serial when the manifest
+    gives one (`adapter serial`, before the target script - the fork
+    honours it, and with two WCH-Links attached each answers its own
+    chip)."""
     if prog["type"] != "wch_link":
         die("programmer type '%s' is not a WCH-Link" % prog["type"])
     openocd = getattr(manifest, "WCH_OPENOCD", "/sw/wch-openocd/bin/openocd")
     cfg = os.path.join(os.path.dirname(openocd), "wch-riscv.cfg")
-    return [openocd, "-f", cfg,
-            "-c", "program %s verify" % elffile,
-            "-c", "reset run",
-            "-c", "exit"]
+    argv = [openocd]
+    if prog.get("serial"):
+        argv += ["-c", "adapter serial %s" % prog["serial"]]
+    return argv + ["-f", cfg,
+                   "-c", "program %s verify" % elffile,
+                   "-c", "reset run",
+                   "-c", "exit"]
 
 
 def openocd_interface(prog):
@@ -271,7 +275,7 @@ def msd_flash(prog, binfile, app):
 
 
 def cmd_flash(args):
-    info, btype = resolve_app(args.name, args.app)
+    btype = board_entry(args.name)["board"]
     spec = board_type(btype)
     project, preset = spec["project"], spec["preset"]
     # Refuse an impossible request BEFORE spending a build on it.
@@ -290,6 +294,9 @@ def cmd_flash(args):
     rc = subprocess.call(["cmake", "--preset", preset], cwd=projdir)
     if rc != 0:
         return rc
+    # The roster is fresh now: an app whose "// build:" lines changed
+    # since the last configure resolves as it is today.
+    info, btype = resolve_app(args.name, args.app)
     rc = subprocess.call(["cmake", "--build", "--preset", preset,
                           "--target", args.app], cwd=projdir)
     if rc != 0:

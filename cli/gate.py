@@ -7,7 +7,7 @@ carry is the newest source mtime) and the build directories wiped
 (ninja relinks stale objects otherwise), and the images are compared
 by md5 - per preset, identical count and movers by name.
 
-    brio gate                          HEAD vs the working tree, the four release presets
+    brio gate                          HEAD vs the working tree, the five release presets
     brio gate --against <ref>          another reference commit
     brio gate --preset avr128db48-release --preset samc21j-release
     brio gate --keep                   leave the two trees in place for a look
@@ -26,6 +26,7 @@ Exit status 0 when every image (or every file) is identical, 1 otherwise."""
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -35,7 +36,8 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PINNED = 1767225600  # 2026-01-01 00:00:00 UTC, any fixed instant will do
-DEFAULT_PRESETS = ("avr128db48-release", "samc21j-release", "stm32g0b1re-release", "ch32v006k8-release")
+DEFAULT_PRESETS = ("avr128db48-release", "samc21j-release", "stm32g0b1re-release", "ch32v006k8-release",
+                   "ch32v003f4-release")
 
 
 def project_of(preset):
@@ -93,6 +95,18 @@ def make_work_tree(where):
             shutil.copy2(src, dst)
 
 
+def preset_exists(tree, preset):
+    """Whether a tree's project knows the preset at all - a preset born
+    in the working tree has no images in the reference, which is a state
+    to report (every image new), not a build failure."""
+    path = os.path.join(tree, project_of(preset), "CMakePresets.json")
+    try:
+        with open(path, encoding="ascii") as f:
+            return any(p.get("name") == preset for p in json.load(f).get("configurePresets", []))
+    except (OSError, ValueError):
+        return False
+
+
 def build(tree, preset):
     project = project_of(preset)
     cwd = os.path.join(tree, project)
@@ -122,7 +136,7 @@ def gate_images(ref, presets, keep):
         pin(ref_tree)
         pin(work_tree)
         for preset in presets:
-            a = build(ref_tree, preset)
+            a = {} if not preset_exists(ref_tree, preset) else build(ref_tree, preset)
             b = build(work_tree, preset)
             if a is None or b is None:
                 print("%s: BUILD FAILED in the %s tree" % (preset, "reference" if a is None else "working"))
@@ -132,7 +146,10 @@ def gate_images(ref, presets, keep):
             movers = sorted(n for n in a if n in b and a[n] != b[n])
             new = sorted(n for n in b if n not in a)
             gone = sorted(n for n in a if n not in b)
-            line = "%s: %d/%d byte-identical" % (preset, len(same), len(a))
+            if not a:
+                line = "%s: absent in the reference" % preset
+            else:
+                line = "%s: %d/%d byte-identical" % (preset, len(same), len(a))
             if movers:
                 line += "; MOVERS: " + " ".join(movers)
                 status = 1
@@ -195,7 +212,7 @@ def main(argv):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--against", default="HEAD", metavar="REF", help="the reference commit (default HEAD)")
     ap.add_argument("--preset", action="append", metavar="PRESET",
-                    help="a preset to build and compare (repeatable; default: the four release presets)")
+                    help="a preset to build and compare (repeatable; default: the five release presets)")
     ap.add_argument("--keep", action="store_true", help="keep the two built trees")
     ap.add_argument("--tokens", action="store_true", help="token-identity of FILES instead of images")
     ap.add_argument("--strings", action="store_true", help="with --tokens: blank string literal contents")
