@@ -302,10 +302,10 @@ gets its home in `docs/design/` when taken.
   platform type per core, util/inbox.hpp's bridge, the launch through
   the bootrom's protocol - design/kernel.md section 12 and
   docs/rp2040/multicore.md, measured by test_rp2040_multicore. What
-  remains: the chapters (PWM, ADC, RTC, PIO, the flash, power - the
-  DMA, the SPI and the I2C are done, the engines in the UART's and
-  the two bus hosts' slots), a console on core 1, the Pico H as the
-  reference board.
+  remains: the chapters (ADC, RTC, PIO, the flash, power - the DMA,
+  the SPI, the I2C and the PWM are done, the engines in the UART's
+  and the two bus hosts' slots and on the PWM's wrap), a console on
+  core 1, the Pico H as the reference board.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -1289,6 +1289,16 @@ brio/                    the framework, four strata:
                            read, the engines serving a read phase from a fixed
                            command cell) + I2cClient<n, pins> (RD_REQ holds SCL,
                            one I2cClientEvent per service())
+    pwm.hpp                the PWM block (4.5): Pwm (the global enable for
+                           lockstep, the four interrupt registers) +
+                           PwmSlice<n> (a 16-bit counter, TOP, two levels,
+                           the 8.4 divider, phase-correct, the B pin as gate
+                           or clock, the phase nudges; configure() from
+                           scratch, the vendor's order) + the tasks PwmOutput
+                           (PwmChannel, max = TOP + 1), PwmPair (a dead time
+                           by arithmetic), PwmEdgeCounter / PwmLevelCounter
+                           (a frequency and a duty with no capture unit),
+                           PwmPeriodicTick
     dma_engine.hpp         NoDmaEngine, the empty slot's tag
     uart.hpp               Pl011<n> resource (the FIFOs, the divisor and its
                            latching write, the loop-back, the interrupt trio
