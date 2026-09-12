@@ -192,8 +192,8 @@ Driver gaps, each with its reason:
 - The loop and ping-pong engines the other strata keep for a block
   stream (util/block_stream.hpp): born with the ADC chapter, their
   first user here.
-- The engines on SPI, I2C and the PWM: with their chapters; the
-  requests are named already.
+- The engines on I2C and the PWM: with their chapters; the requests
+  are named already (the SPI's are in its host, [spi.md](spi.md)).
 - `DmaSniffCalc::crc32_reversed`, `crc16_reversed` and `even_parity`,
   and the BSWAP option: written from 2.5.5.2 and not measured; a
   letter with their software twins.
@@ -205,7 +205,5 @@ Implemented but not bench-verified, each with what would measure it:
 
 - A write bus error (WRITE_ERROR): the suite provokes a read error;
   a block writing into the hole.
-- `start_fixed()` and `start_discard()` (the bus engines' halves): the
-  SPI chapter, whose full-duplex reads want them.
 - An engine on line 1 served by core 1: the multicore suite with a
   transport on core 1 - the routing is the same verb.

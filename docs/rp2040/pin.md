@@ -97,9 +97,10 @@ Driver gaps, each with its reason:
   workaround of E5, which brio has no USB to need).
 - `PADS_BANK0.VOLTAGE_SELECT` for a 1.8 V IOVDD: a supply no board
   here has.
-- `PinRef` and `PinSet` (the other families' run-time descriptor and
-  multi-pin set): born with their first portable user on this
-  family; `Gpio::outputs` covers the bank-wide case today.
+- `PinSet` (the other families' multi-pin set): born with its first
+  portable user on this family; `Gpio::outputs` covers the bank-wide
+  case today. `PinRef`, the run-time descriptor, exists (a bus
+  request's select line, [spi.md](spi.md)).
 
 Implemented but not bench-verified, each with what would measure it:
 

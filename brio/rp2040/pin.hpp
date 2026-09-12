@@ -180,6 +180,27 @@ struct Gpio {
  * One pin as a type. Also a PwmChannel of one level (util/pwm_channel.hpp):
  * `max` 1, `duty(v)` = set or clear.
  */
+/// A pin named at RUN TIME - what a bus request carries as its chip
+/// select or D/C line (rp2040/spi.hpp's Request): the pin number, or
+/// none. Every verb is a SIO word access on the pin's bit; a null
+/// reference does nothing and reads false.
+struct PinRef {
+    uint8_t pin = 0xFFu;
+
+    constexpr bool valid() const { return pin < gpio_count; }
+    void set() const {
+        if (valid()) { SIO->GPIO_OUT_SET = 1u << pin; }
+    }
+    void clear() const {
+        if (valid()) { SIO->GPIO_OUT_CLR = 1u << pin; }
+    }
+    void toggle() const {
+        if (valid()) { SIO->GPIO_OUT_XOR = 1u << pin; }
+    }
+    bool read() const { return valid() && (SIO->GPIO_IN & (1u << pin)) != 0u; }
+    bool read_out() const { return valid() && (SIO->GPIO_OUT & (1u << pin)) != 0u; }
+};
+
 template <uint8_t n>
 struct Pin {
     static_assert(n < gpio_count, "the RP2040's user bank has thirty pins, GPIO0..GPIO29");
@@ -206,6 +227,9 @@ struct Pin {
         Gpio::function(n, fn, cfg);
     }
     static void release() { Gpio::release(n); }
+
+    /// This pin as a run-time reference (a bus request's select line).
+    static constexpr PinRef ref() { return PinRef{n}; }
 
     static void set() { SIO->GPIO_OUT_SET = mask; }
     static void clear() { SIO->GPIO_OUT_CLR = mask; }

@@ -302,9 +302,10 @@ gets its home in `docs/design/` when taken.
   platform type per core, util/inbox.hpp's bridge, the launch through
   the bootrom's protocol - design/kernel.md section 12 and
   docs/rp2040/multicore.md, measured by test_rp2040_multicore. What
-  remains: the chapters (SPI, I2C, PWM, ADC, RTC, PIO, the flash,
-  power - the DMA is done, its engines in the UART's slots), a
-  console on core 1, the Pico H as the reference board.
+  remains: the chapters (I2C, PWM, ADC, RTC, PIO, the flash, power -
+  the DMA and the SPI are done, the engines in the UART's and the
+  SPI host's slots), a console on core 1, the Pico H as the reference
+  board.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -1267,6 +1268,18 @@ brio/                    the framework, four strata:
     pin.hpp                Gpio (the bank: SIO word-wide verbs, the per-pin
                            CTRL and PAD registers, both blocks released by
                            every configuring verb) + Pin<n> (no port letter)
+                           + PinRef (a pin named at run time: a bus request's
+                           select)
+    spi.hpp                the PL022 (4.4): Pl022<n> resource (the prescaler
+                           pair, 4..16-bit frames, the three framings, LBM,
+                           the interrupt trio) + SpiHost<n, pins, engines>
+                           (the other strata's Request verbatim, the pump
+                           keeping eight frames in flight, loopback() as the
+                           wireless instrument, the engines on any two
+                           channels) + SpiClient<n, pins> (framing on its
+                           select pad, eight answers ahead, the dark listener
+                           by releasing the pad - SOD does not; ONE frame per
+                           select window in modes 0 and 2)
     dma_engine.hpp         NoDmaEngine, the empty slot's tag
     uart.hpp               Pl011<n> resource (the FIFOs, the divisor and its
                            latching write, the loop-back, the interrupt trio
