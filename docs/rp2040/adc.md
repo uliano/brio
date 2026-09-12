@@ -34,7 +34,10 @@ pin - on the boards here the 3.3 V rail through a filter - and
 nothing selectable. The sensor is a diode's Vbe, 706 mV at 27 C with
 -1.721 mV per degree, its bias switched on apart from the converter.
 Erratum RP2040-E11: the DNL peaks at four codes (512, 1536, 2560,
-3584), the ENOB is 8.7 bits, no workaround.
+3584), the ENOB is 8.7 bits, no workaround. Erratum RP2040-E6: the
+digital input of GPIO 26..29 is enabled after RUN on the B0 and B1
+silicon (the B2 bootrom disables it) - the analog claim disables it
+on every revision.
 
 Three facts measured that the chapter states differently or not at
 all: the block's reset does not complete without clk_adc running

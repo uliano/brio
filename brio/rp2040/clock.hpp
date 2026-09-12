@@ -15,8 +15,8 @@
  *    Rosc     the ring oscillator (2.17): running/stable, start and stop
  *             - never a rate, so never a Clock
  *    Clocks   the clock generators (2.15): clk_ref and clk_sys with their
- *             GLITCHLESS mux and their aux mux, clk_peri and clk_adc
- *             with their aux mux alone
+ *             GLITCHLESS mux and their aux mux, clk_peri, clk_adc and
+ *             clk_rtc with their aux mux alone
  *             and enable - and the switching sequences of 2.15.3.2,
  *             which are the whole point of the block
  *    FreqCounter  the frequency counter (2.15.4): any root or generator
@@ -355,6 +355,16 @@ enum class AdcAux : uint8_t {
     gpin1 = CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_GPIN1,
 };
 
+/// clk_rtc's aux sources (CLK_RTC_CTRL.AUXSRC).
+enum class RtcAux : uint8_t {
+    pll_usb = CLOCKS_CLK_RTC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+    pll_sys = CLOCKS_CLK_RTC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+    rosc = CLOCKS_CLK_RTC_CTRL_AUXSRC_VALUE_ROSC_CLKSRC_PH,
+    xosc = CLOCKS_CLK_RTC_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,
+    gpin0 = CLOCKS_CLK_RTC_CTRL_AUXSRC_VALUE_CLKSRC_GPIN0,
+    gpin1 = CLOCKS_CLK_RTC_CTRL_AUXSRC_VALUE_CLKSRC_GPIN1,
+};
+
 /// clk_sys's aux sources (CLK_SYS_CTRL.AUXSRC).
 enum class SysAux : uint8_t {
     pll_sys = CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
@@ -458,6 +468,32 @@ struct Clocks {
         hw_set(CLOCKS->CLK_ADC_CTRL, CLOCKS_CLK_ADC_CTRL_ENABLE_BITS);
     }
     static void adc_stop() { hw_clear(CLOCKS->CLK_ADC_CTRL, CLOCKS_CLK_ADC_CTRL_ENABLE_BITS); }
+
+    /// clk_rtc onto `aux` through its 24.8 divider (`div_int` 1..2^24 - 1
+    /// and `div_frac` in 256ths; the crystal over 256 is 46875 Hz, the
+    /// chapter's example), the same stop-select-start. The RTC wants 1
+    /// to 65536 Hz of it (4.8.4).
+    static void rtc_select(RtcAux aux, uint32_t div_int, uint8_t div_frac = 0) {
+        hw_clear(CLOCKS->CLK_RTC_CTRL, CLOCKS_CLK_RTC_CTRL_ENABLE_BITS);
+        for (uint32_t spins = 64u; spins != 0u; --spins) {
+            __NOP();
+        }
+        CLOCKS->CLK_RTC_DIV = ((div_int << CLOCKS_CLK_RTC_DIV_INT_LSB) & CLOCKS_CLK_RTC_DIV_INT_BITS) | div_frac;
+        hw_write_masked(CLOCKS->CLK_RTC_CTRL,
+                        static_cast<uint32_t>(aux) << CLOCKS_CLK_RTC_CTRL_AUXSRC_LSB,
+                        CLOCKS_CLK_RTC_CTRL_AUXSRC_BITS);
+        hw_set(CLOCKS->CLK_RTC_CTRL, CLOCKS_CLK_RTC_CTRL_ENABLE_BITS);
+    }
+    static void rtc_stop() { hw_clear(CLOCKS->CLK_RTC_CTRL, CLOCKS_CLK_RTC_CTRL_ENABLE_BITS); }
+    static bool rtc_enabled() {
+        return (CLOCKS->CLK_RTC_CTRL & CLOCKS_CLK_RTC_CTRL_ENABLE_BITS) != 0u;
+    }
+    static RtcAux rtc_source() {
+        return static_cast<RtcAux>((CLOCKS->CLK_RTC_CTRL & CLOCKS_CLK_RTC_CTRL_AUXSRC_BITS) >>
+                                   CLOCKS_CLK_RTC_CTRL_AUXSRC_LSB);
+    }
+    /// The divider as it stands, in 256ths.
+    static uint32_t rtc_divider256() { return CLOCKS->CLK_RTC_DIV; }
     static bool adc_enabled() {
         return (CLOCKS->CLK_ADC_CTRL & CLOCKS_CLK_ADC_CTRL_ENABLE_BITS) != 0u;
     }

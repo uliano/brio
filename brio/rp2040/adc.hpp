@@ -21,7 +21,9 @@
  *  AnalogIn<Pin>  a pad handed to its input: GPIO 26..29 are inputs 0..3
  *                 (4.9.2.1), stated here once; the claim turns the pad's
  *                 digital input buffer off and disables its output
- *                 (4.9's note: the converter reads the bare pad).
+ *                 (4.9's note: the converter reads the bare pad -
+ *                 erratum RP2040-E6's workaround, which the B2 bootrom
+ *                 applies at boot and the claim applies again).
  *
  *  AdcInput       the five inputs by name, the temperature sensor the
  *                 fifth (AINSEL 4, 4.9.5).

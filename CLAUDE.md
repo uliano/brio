@@ -302,8 +302,8 @@ gets its home in `docs/design/` when taken.
   platform type per core, util/inbox.hpp's bridge, the launch through
   the bootrom's protocol - design/kernel.md section 12 and
   docs/rp2040/multicore.md, measured by test_rp2040_multicore. What
-  remains: the chapters (RTC, PIO, the flash, power - the DMA, the
-  SPI, the I2C, the PWM and the ADC are done, the engines in the
+  remains: the chapters (PIO, the flash, power - the DMA, the SPI,
+  the I2C, the PWM, the ADC and the RTC are done, the engines in the
   UART's and the two bus hosts' slots, on the PWM's wrap and on the
   ADC's FIFO), a console on core 1, the Pico H as the reference
   board.
@@ -1265,8 +1265,8 @@ brio/                    the framework, four strata:
     clock.hpp              the FOURTH clock model: Xosc (startup delay),
                            PllSys and PllUsb (one PllBlock; the exact-ratio
                            search at compile time), Clocks (the glitchless
-                           and aux muxes of clk_ref / clk_sys, clk_peri and
-                           clk_adc) + Clock<crystal|pll, hz, xtal>
+                           and aux muxes of clk_ref / clk_sys, clk_peri,
+                           clk_adc and clk_rtc) + Clock<crystal|pll, hz, xtal>
     pin.hpp                Gpio (the bank: SIO word-wide verbs, the per-pin
                            CTRL and PAD registers, both blocks released by
                            every configuring verb) + Pin<n> (no port letter)
@@ -1300,6 +1300,14 @@ brio/                    the framework, four strata:
                            surface) + AnalogIn<Pin> (GPIO 26..29) + AdcInput
                            (the sensor the fifth) + Ref::vref_pin, the board's
                            millivolts stated by the application
+    rtc.hpp                the RTC (4.8): Rtc, a monostate (clk_rtc from the
+                           crystal over 256, the set that waits for the read
+                           path and undoes the enable's own tick, the read
+                           RTC_0 then RTC_1, the load while running, one alarm
+                           on any subset of the seven fields whose ISR body
+                           masks the line and disarms the match) +
+                           RtcDateTime / RtcAlarm and the calendar arithmetic
+                           the silicon has not (both leap rules, the weekday)
     pwm.hpp                the PWM block (4.5): Pwm (the global enable for
                            lockstep, the four interrupt registers) +
                            PwmSlice<n> (a 16-bit counter, TOP, two levels,

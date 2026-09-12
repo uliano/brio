@@ -68,10 +68,12 @@ oscillators are unreliable; E10: ROSC's BADWRITE is.
   `config` read back, `stop`), `Rosc` (`running`, `stable`, `start`,
   `stop`), `Clocks` (`ref_select`, `sys_from_ref`, `sys_from_aux`,
   `sys_source`, the two dividers and `sys_divider()` read back,
-  `peri_select`, `peri_enabled`, `peri_source`, and clk_adc's
-  `adc_select(aux, div)`, `adc_stop`, `adc_enabled`, `adc_source` -
-  the same stop-select-start as clk_peri, a generator with an aux mux
-  alone) with `RefSource`, `SysAux`, `PeriAux`, `AdcAux`.
+  `peri_select`, `peri_enabled`, `peri_source`, clk_adc's
+  `adc_select(aux, div)`, `adc_stop`, `adc_enabled`, `adc_source`, and
+  clk_rtc's `rtc_select(aux, div_int, div_frac)`, `rtc_stop`,
+  `rtc_enabled`, `rtc_source`, `rtc_divider256` - the same
+  stop-select-start as clk_peri, generators with an aux mux alone)
+  with `RefSource`, `SysAux`, `PeriAux`, `AdcAux`, `RtcAux`.
 - `FreqCounter::count_hz(source, ref_hz, interval = 15)` - a
   `CountSource` (every root and generator) counted against clk_ref
   over 2^interval microseconds, in hertz; nullopt when the source
