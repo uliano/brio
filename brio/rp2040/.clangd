@@ -1,0 +1,7 @@
+# The rp2040 stratum parses against the RP2040 project's database:
+# headers here include "RP2040.h" and need the arm-none-eabi driver and
+# the vendored pico-sdk include paths. Overrides the framework default
+# (brio/.clangd, host flags) - the same routing brio/stm32g0/.clangd does
+# for its architecture. Path relative to this file.
+CompileFlags:
+  CompilationDatabase: ../../build-cmake/rp2040-release

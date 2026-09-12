@@ -27,8 +27,12 @@
 #      c21j             SAM C21, written by OpenOCD over SWD (CMSIS-DAP)
 #      g0b1re g071rb g031k8   STM32G0 Nucleos, written by OpenOCD over SWD
 #                       through the board's own ST-LINK
-#      v006k8           CH32V006K8, written by WCH's OpenOCD fork through a
-#                       WCH-Link (SDI, WCH's own debug transport)
+#      v006k8 v003f4    CH32V006K8 / CH32V003F4, written by WCH's OpenOCD
+#                       fork through a WCH-Link (SDI, WCH's own debug transport)
+#      pico picow weact2040   RP2040 boards (a Raspberry Pi Pico / Pico H, a
+#                       Pico W, a WeAct board), written by OpenOCD over
+#                       multidrop SWD through a CMSIS-DAP probe - the
+#                       Raspberry Pi Debug Probe
 #
 #  CONSOLES. A board with a serial-less USB bridge (a CH340 has no unique
 #  serial: two of them collide in /dev/serial/by-id) is addressed by
@@ -42,7 +46,12 @@
 #                       "serial" only when two probes of the kind are attached
 #    serialupdi         {"type": "serialupdi", "port": ..., "baud": ...}
 #    openocd_cmsisdap   OpenOCD driving an Atmel-ICE (or any CMSIS-DAP probe)
-#                       over SWD; "serial" = the probe's USB serial
+#                       over SWD; "serial" = the probe's USB serial; "backend"
+#                       = "hid" (the default, the ICE) or "usb_bulk" (a
+#                       CMSIS-DAP v2 probe, the Raspberry Pi Debug Probe);
+#                       "openocd" = this probe's own OpenOCD binary when the
+#                       shared OPENOCD below will not do (an RP2040 board
+#                       whose flash chip the 0.12.0 release does not know)
 #    openocd_stlink     OpenOCD driving an ST-LINK; "serial" = its USB serial
 #                       (the same device carries the Nucleo's console)
 #    stlink_msd         the ST-LINK's mass-storage flasher, the fallback when
@@ -102,6 +111,17 @@ BOARDS = {
         "device_uid": None,
         "console": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_222222222222222222222222-if02",
         "programmer": {"type": "openocd_stlink", "serial": "222222222222222222222222"},
+    },
+    "K": {
+        # A WeAct RP2040 board on a Raspberry Pi Debug Probe: port D on
+        # the board's SWD header, port U crossed onto GP0/GP1 (UART0),
+        # so the probe's own CDC port (interface -if01, a real USB
+        # serial) is the console. CMSIS-DAP v2 = the usb_bulk backend.
+        "board": "weact2040",
+        "id": None,
+        "console": "/dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__E666666666666666-if01",
+        "programmer": {"type": "openocd_cmsisdap", "serial": "E666666666666666",
+                       "backend": "usb_bulk"},
     },
     "I": {
         # A CH32V006K8 board on a WCH-Link: the probe's serial pins wired

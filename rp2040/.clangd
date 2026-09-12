@@ -1,0 +1,7 @@
+# clangd config for the RP2040 project: rp2040/ is its OWN CMake project
+# (rp2040/CMakeLists.txt) with its own compile_commands.json emitted at
+# ../build-cmake/rp2040-release - point clangd straight at it (the
+# stm32g0/.clangd pattern). clang parses -mcpu=cortex-m0plus natively and
+# there is no device-select define on this family: one chip, one header.
+CompileFlags:
+  CompilationDatabase: ../build-cmake/rp2040-release

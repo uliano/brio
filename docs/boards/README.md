@@ -15,6 +15,8 @@ the user's own manifest, below.
 | ST Nucleo-G031K8 | `g031k8` | [nucleo-g031k8.md](nucleo-g031k8.md) |
 | a CH32V006K8U6 module | `v006k8` | [ch32v006k8.md](ch32v006k8.md) |
 | WCH's CH32V003F4P6 evaluation board | `v003f4` | [ch32v003f4.md](ch32v003f4.md) |
+| Raspberry Pi Pico | `pico` | [pico.md](pico.md) |
+| a WeAct RP2040 board | `weact2040` | [weact-rp2040.md](weact-rp2040.md) |
 
 ## How a board joins the bench
 
@@ -55,8 +57,12 @@ Three concerns, deliberately kept apart:
 AVR DA/DB parts built by the `avrdx/` project and written by avrdude
 over UPDI; `c21j` a SAM C21 built by `samc21/` and written by OpenOCD
 over SWD; `g0b1re`/`g071rb`/`g031k8` the STM32G0 Nucleos built by
-`stm32g0/` and written by OpenOCD through the board's own ST-LINK. The
-table of types is `BOARD_TYPES` in `cli/bench/common.py`.
+`stm32g0/` and written by OpenOCD through the board's own ST-LINK;
+`v006k8`/`v003f4` the CH32V00x parts built by `ch32v00x/` and written
+by WCH's OpenOCD fork through a WCH-Link; `pico`/`picow`/`weact2040`
+the RP2040 boards built by `rp2040/` and written by OpenOCD through a
+CMSIS-DAP probe, the Raspberry Pi Debug Probe. The table of types is
+`BOARD_TYPES` in `cli/bench/common.py`.
 
 **Consoles** are observability only - firmware never goes in through
 them. A bridge with no USB serial (a CH340) is addressed by
@@ -65,7 +71,7 @@ CH340s collide in `by-id`); a bridge with a real serial (a Nucleo's
 ST-LINK) by `/dev/serial/by-id`, stable across sockets. **Programmers**
 are addressed by their own USB serial, and only need one when two of
 a kind are attached. The kinds - `atmelice_updi`, `serialupdi`,
-`openocd_cmsisdap`, `openocd_stlink`, `stlink_msd` - are
+`openocd_cmsisdap`, `openocd_stlink`, `stlink_msd`, `wch_link` - are
 [../probes/README.md](../probes/README.md)'s.
 
 **Identity in the chip.** Boards of one kind are indistinguishable by

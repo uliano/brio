@@ -63,6 +63,28 @@ BOARD_TYPES = {
                "mcu": "ch32v006k8", "flash": "wch_openocd"},
     "v003f4": {"project": "ch32v00x", "preset": "ch32v003f4-release",
                "mcu": "ch32v003f4", "flash": "wch_openocd"},
+    # The RP2040 boards: one chip, one preset per FLASH GEOMETRY (the
+    # rp2040 project's own rule), so a Raspberry Pi Pico / Pico H and a
+    # 2 MB WeAct board share rp2040-release and differ only as board
+    # types - what an app's "// build: boards" line names and what a
+    # docs/boards page describes. Written by OpenOCD over multidrop SWD
+    # through a CMSIS-DAP probe (the Raspberry Pi Debug Probe, USB bulk
+    # backend) and target/rp2040.cfg; the flash driver identifies the
+    # QSPI chip itself, and a chip the 0.12.0 release does not know (a
+    # WeAct board's Zetta ZD25Q16) needs the programmer entry's own
+    # "openocd" (flash.py).
+    "pico": {"project": "rp2040", "preset": "rp2040-release",
+             "mcu": "rp2040", "flash": "openocd",
+             "target_cfg": "target/rp2040.cfg"},
+    "weact2040": {"project": "rp2040", "preset": "rp2040-release",
+                  "mcu": "rp2040", "flash": "openocd",
+                  "target_cfg": "target/rp2040.cfg"},
+    # A Pico W: the same chip and flash as a Pico, but GP23/24/25/29 are
+    # the radio's and the LED is on the radio chip - a board type of its
+    # own so that an app which drives those pins can leave it out.
+    "picow": {"project": "rp2040", "preset": "rp2040-release",
+              "mcu": "rp2040", "flash": "openocd",
+              "target_cfg": "target/rp2040.cfg"},
 }
 
 
@@ -154,7 +176,7 @@ def resolve_app(name, app):
         die("app '%s' is one image on board '%s' (type %s): flash '%s'"
             % (base, name, btype, base))
     if btype not in info["boards"]:
-        default = "db48" if spec["project"] == "avrdx" else "c21j"
+        default = {"avrdx": "db48", "rp2040": "pico"}.get(spec["project"], "c21j")
         hint = ("" if btype == default else
                 " - add a '// build: boards = %s' line to %s/src/apps/%s.cpp "
                 "and reconfigure" % (btype, spec["project"], app))
@@ -226,6 +248,10 @@ USB_PROGRAMMERS = {
     "1a86": "WCH",         # a WCH-Link in RISC-V mode (8010); the same
                            # vendor id is every CH340 console's, but a
                            # CH340 is a tty, not a probe (see below)
+    "2e8a": "Raspberry Pi",   # the Debug Probe (000c) or a Pico running
+                              # the debugprobe firmware (0004); the same
+                              # vendor id is an RP2040 in BOOTSEL (0003),
+                              # a drive and not a probe (see below)
 }
 
 
@@ -246,6 +272,8 @@ def usb_programmers():
             continue
         if vid == "1a86" and attr("idProduct").lower() not in ("8010", "8012"):
             continue   # a CH340 serial bridge, not a WCH-Link
+        if vid == "2e8a" and attr("idProduct").lower() not in ("000c", "0004"):
+            continue   # an RP2040 in its bootloader, not a probe
         found.append((vid, attr("idProduct"), attr("product") or "?",
                       attr("serial") or "(no serial)"))
     return found

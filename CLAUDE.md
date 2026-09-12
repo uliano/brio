@@ -97,25 +97,28 @@ This file has no decision log any more: the former log was migrated to
 `brio` (`brio/`) is a header-only C++23 (gnu++23) framework for
 bare-metal MCUs built around a cooperative active-object kernel,
 written clean-room after Samek's book (never the QP source). One flat
-namespace `brio`; eight strata under `brio/` - `kernel/` (pure
+namespace `brio`; nine strata under `brio/` - `kernel/` (pure
 logic, includes nothing of brio), `util/` (services over the kernel),
-`armv6m/` (the CORE stratum both Cortex-M0+ families include after
-their device header: NVIC + PRIMASK guard, the SysTick ticker),
+`armv6m/` (the CORE stratum the three Cortex-M0+ families include
+after their device header: NVIC + PRIMASK guard, the SysTick ticker),
 `avrdx/` (everything that knows `avr/io.h`: AVR DA/DB, bench chip
 AVR128DB48), `samc21/` (everything that knows `sam.h`: SAM C21,
 Cortex-M0+, bench chip ATSAMC21J18A), `stm32g0/` (everything that
 knows `stm32g0xx.h`: STM32G0, Cortex-M0+, bench chip STM32G0B1RE on
 a Nucleo-64), `ch32v00x/` (everything that knows the CH32V00x: WCH's
 QingKe V2C, RV32EC, bench chip CH32V006K8U6 - NO vendor header, the
-register map is the stratum's own device.hpp), `host/` (the native test
+register map is the stratum's own device.hpp), `rp2040/` (everything
+that knows the RP2040: Raspberry Pi's dual Cortex-M0+, bench chip an
+RP2040 B2 on a Raspberry Pi Pico and on a WeAct board, the pico-sdk's CMSIS header and register
+definitions vendored, brio on core 0 today), `host/` (the native test
 target). Includes carry the stratum prefix
-(`#include "avrdx/usart.hpp"`). The builds are five sibling CMake
+(`#include "avrdx/usart.hpp"`). The builds are six sibling CMake
 projects, PEERS - the repo root is not a CMake project: `avrdx/`,
-`samc21/`, `stm32g0/` and `ch32v00x/` (each with its own toolchain file
+`samc21/`, `stm32g0/`, `ch32v00x/` and `rp2040/` (each with its own toolchain file
 and presets, Ninja, emitting into the shared `build-cmake/`)
 auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
 from its own `// build:` header comment; host tests in `test/` are the
-fifth project (host g++, no cross toolchain), run via `ctest`. ONE NAME PER ARCHITECTURE,
+sixth project (host g++, no cross toolchain), run via `ctest`. ONE NAME PER ARCHITECTURE,
 the same key on three axes: `brio/<arch>/` (stratum),
 `docs/<arch>/` (docs), `<arch>/` (build project); chip precision
 lives in preset names, per-chip ld/svd files and the `*_MCU` cache
@@ -131,8 +134,8 @@ of its x1 twin: the same IP under the same register names) - the
 stratum compiles on all twelve G0 headers of the pack with the reserve
 deriving every vector from PERIPHERAL PRESENCE and no device name
 spelled anywhere, the bench proof on x0 silicon pending a board. The
-`armv6m/` core stratum (nvic, ticker, delay) is what the two Cortex-M0+
-families share, factored with both in hand and every image of both
+`armv6m/` core stratum (nvic, ticker, delay) is what the three Cortex-M0+
+families share (the RP2040 joined as the third), factored with the first two in hand and every image of both
 byte-identical before and after; a RISC-V core stratum would be
 factored the same way, at its second family, never earlier.
 
@@ -285,6 +288,23 @@ gets its home in `docs/design/` when taken.
   its suites are shaped by the smallest-chip rule (design/overview.md,
   "A suite's image fits the family's smallest chip"). A `qingke/` core
   stratum only at a second QingKe family.
+- **The RP2040 stratum, in bring-up.** `brio/rp2040/` and `rp2040/`
+  exist (`in bring-up` in README.md's table): the pico-sdk's device
+  description vendored, the boot stage checked in as bytes, its own
+  crt with the SDK's handler names, the platform, the reset
+  controller, the clock (crystal x PLL at 125 MHz), GPIO and the PL011
+  UART with their documents and the family fixture; the pin-check
+  wave runs on a WeAct board through the Raspberry Pi Debug Probe and
+  an OpenOCD built from git (the release does not know the board's
+  Zetta flash). The bring-up suites (platform, clock, serial) and the
+  timer, watchdog and reset drivers are green on the Pico and the
+  WeAct board, and THE SECOND CORE RUNS A KERNEL OF ITS OWN: one
+  platform type per core, util/inbox.hpp's bridge, the launch through
+  the bootrom's protocol - design/kernel.md section 12 and
+  docs/rp2040/multicore.md, measured by test_rp2040_multicore. What
+  remains: the chapters (DMA, SPI, I2C, PWM, ADC, RTC, PIO, the
+  flash, power), a console on core 1, the Pico H as the reference
+  board.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -336,7 +356,8 @@ brio check samc21 [name]        # same for the samc21 stratum (E/G/J 18A headers
 brio check stm32g0 [name]       # same for the stm32g0 stratum (ALL TWELVE G0 headers, x1 + x0)
 brio check ch32v00x [name]      # same for the ch32v00x stratum (one part today; util_all.cpp = the
                                 # whole of kernel/ and util/ through WCH's gcc 15.2)
-brio check all                  # the four in a row
+brio check rp2040 [name]        # same for the rp2040 stratum (one chip: every header's verbs, util_all.cpp)
+brio check all                  # the five in a row
 brio prose [paths...]           # the prose net: no dates/process words/Doxygen tags in
                                 # comments and docs, every cited path exists, ASCII only;
                                 # "review" lines are claims of absence to re-read, not errors
@@ -354,6 +375,8 @@ brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--s
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash via OpenOCD (ST-LINK)
 (cd ch32v00x && cmake --build --preset ch32v006k8-release --target <app>)          # CH32V00x release build (WCH gcc 15)
 (cd ch32v00x && cmake --build --preset ch32v006k8-release --target <app>-upload)   # flash via WCH's OpenOCD fork (WCH-Link)
+(cd rp2040 && cmake --build --preset rp2040-release --target <app>)              # RP2040 release build
+(cd rp2040 && cmake --build --preset rp2040-release --target <app>-upload)       # flash via OpenOCD (the Debug Probe, CMSIS-DAP)
 # apps are auto-discovered from <project>/src/apps/*.cpp - plus
 # experiments/*/{avrdx,samc21}/*.cpp, each experiment's per-arch app
 # halves - at every configure; no generation step; a new/removed app
@@ -394,7 +417,11 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   0.12.0 at `/sw/openocd` (`/sw/src/build-openocd.sh`, from the release
   tarball: CMSIS-DAP on hidapi + ST-LINK; the manifest's OPENOCD, the
   two ARM projects' `*_OPENOCD` cache variables and launch.json all
-  point there), each by absolute path; never a system-packaged one. Never add
+  point there), each by absolute path; never a system-packaged one.
+  A second OpenOCD built from git at a pinned commit
+  (`/sw/openocd-git-bedefa2`, `/sw/src/build-openocd-git.sh`) writes the
+  RP2040 boards whose flash chip the release does not know, named per
+  programmer in the manifest; the release build stays everyone else's. Never add
   `-mrelax` on AVR (PyAvrOCD refuses the ELF).
   No `-flto` (never added, so nothing to strip) and no `-DF_CPU` (never
   added either: the clock rate has one truth, `Clock::hz`; avr-libc's
@@ -481,7 +508,12 @@ third_party/cmsis-device-g0/  vendored ST cmsis-device-g0 v1.4.5 Include/ (Apach
 test/family_stm32g0/     stm32g0 family smoke TUs + neg/, brio check stm32g0
 test/family_ch32v00x/    ch32v00x family smoke TUs + neg/, brio check ch32v00x
                          (util_all.cpp: every kernel/util header over the platform)
+test/family_rp2040/      rp2040 family smoke TUs + neg/, brio check rp2040 (one
+                         chip, one header: every verb of every header, util_all.cpp)
 third_party/cmsis-core/  vendored ARM CMSIS-Core headers (Apache-2.0)
+third_party/pico-sdk/    vendored pico-sdk 2.3.1 subset (BSD-3): the CMSIS device
+                         header RP2040.h and the hardware/regs bit-field headers,
+                         the two halves of the SVD; never the SDK runtime
 bin/brio                 THE ONE COMMAND of the bench, dispatching on its first
                          argument; put bin/ on the PATH
 cli/                     its guts, a Python package: main.py dispatches on the
@@ -500,7 +532,8 @@ cli/                     its guts, a Python package: main.py dispatches on the
                          (a board type -> its project, preset, mcu and flash
                          mechanism: db* -> avrdx/avrdude/UPDI, c21j ->
                          samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/ST-LINK,
-                         v006k8 -> ch32v00x/WCH's OpenOCD fork/WCH-Link),
+                         v006k8 -> ch32v00x/WCH's OpenOCD fork/WCH-Link,
+                         pico/picow/weact2040 -> rp2040/OpenOCD/the Debug Probe),
                          the per-project app rosters build-cmake/apps_{avrdx,
                          samc21,stm32g0}.json (each project writes its own at
                          every configure - separate files because app NAMES
@@ -647,6 +680,16 @@ brio/                    the framework, four strata:
                            NvStore + boot-side take()
     ring.hpp               Ring<T, size, P> SPSC FIFO, lock-free when the
                            index fits P::atomic_width, guarded otherwise
+    inbox.hpp              THE BRIDGE BETWEEN TWO KERNELS ON TWO CORES
+                           (design/kernel.md sec. 12): Inbox<Ao> (a ring of
+                           Ao::Event written by the sending core under its
+                           own guard, read by the receiving core, a fence
+                           pair and no shared counter), send<Ao>(ev) beside
+                           post, Inboxes<Aos...>::isr() (the doorbell's ISR
+                           body: bells popped FIRST, then every inbox drained
+                           into local posts), send_reply_to<Ao, Payload>();
+                           nothing here is instantiated on a single-core
+                           target
     testbench.hpp          TestBench<Sink, max_letters>: the bench suite
                            grammar in one place - letter registry, verdict
                            lines, per-letter tally and the ALL: total
@@ -991,7 +1034,7 @@ brio/                    the framework, four strata:
                            SIBLING of the kernel's PanicRecord and not an
                            extension of it - a hardware trace is silicon
                            this stratum happens to have
-  armv6m/                the CORE stratum: what both Cortex-M0+ families share
+  armv6m/                the CORE stratum: what the three Cortex-M0+ families share
     nvic.hpp               InterruptGuard (PRIMASK) + Nvic + irq_priority_levels
                            - reads CMSIS-Core only, #errors if included before
                            a device header (the family's nvic.hpp does both)
@@ -1162,8 +1205,72 @@ brio/                    the framework, four strata:
                            instead, and with SLEEPDEEP armed the ticker is
                            paused across the sleep; ebreak; .noinit
                            breadcrumb; atomic_width 4
+  rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
+                         Cortex-M0+): the pico-sdk's CMSIS header + regs headers
+                         are the device description (third_party/pico-sdk/)
+    device.hpp             RP2040.h + every hardware/regs header but addressmap.h
+                           (its *_BASE macros are the CMSIS header's), and the
+                           atomic register aliases of 2.1.2 as hw_set/hw_clear/
+                           hw_xor/hw_write_masked
+    nvic.hpp               device.hpp + armv6m/nvic.hpp: TWO NVICs, every line
+                           reaching both, a line enabled by one core
+    ticker.hpp             armv6m/ticker.hpp + CoreTicker<core> (1000 Hz, one
+                           per SysTick through BasicTicker's tag) and Ticker =
+                           core 0's
+    delay.hpp              armv6m/delay.hpp on clk_sys
+    platform.hpp           Rp2040Platform<core = 0, TB = CoreTicker<core>>:
+                           ONE PLATFORM TYPE PER CORE (the kernel statics are
+                           keyed by it, so the type is the core), the PRIMASK
+                           critical section that is PER CORE, WFI idle, a
+                           .noinit breadcrumb per core, atomic_width 4,
+                           core_id(), and the two optional members of a core
+                           of several: on_own_core() (CPUID: a post to the
+                           other core's queue is refused and counted) and
+                           Doorbell (the SIO FIFO towards this core)
+    multicore.hpp          SioDoorbell<core> (the inter-core FIFO as the
+                           bridge's bell: ring from the other core, pop_all /
+                           enable on this one) + Core1 (launch = the power-on
+                           state machine's reset of core 1 THEN the bootrom's
+                           six-word FIFO protocol; protocol alone; reset) -
+                           SYSRESETREQ resets one core, so a launch resets
+                           first and a probe's reset of core 0 is not a reboot
+    timer.hpp              Timer: the 64-bit microsecond ruler on the watchdog
+                           tick (raw-pair read from any context, the latched
+                           pair for one), four alarms with their lines,
+                           DBGPAUSE CLEARED at init (a halted core would freeze
+                           the other core's ruler)
+    watchdog.hpp           WatchdogTick + Watchdog (E1's double decrement as
+                           code, PSM WDSEL selecting everything but the
+                           oscillators, force_reset = the chip's one software
+                           reboot) + Scratch<0..3> (the bootrom's four refused)
+    reset.hpp              Reset (the causes as a HISTORY: chip-level flags
+                           for the life of the supply, REASON the last watchdog
+                           event; software() = the watchdog's trigger, the
+                           CHIP; core() = SYSRESETREQ, this core alone, no
+                           mark), ResetReporter, fault_reset<P>()
+    resets.hpp             RESETS: the gate on every peripheral (held in reset
+                           at power-up, released with a RESET_DONE wait);
+                           ResetBlock masks
+    sysinfo.hpp            ChipId (manufacturer, part, the silicon revision
+                           the errata key on)
+    clock.hpp              the FOURTH clock model: Xosc (startup delay),
+                           PllSys (the exact-ratio search at compile time),
+                           Clocks (the glitchless and aux muxes of clk_ref /
+                           clk_sys, clk_peri) + Clock<crystal|pll, hz, xtal>
+    pin.hpp                Gpio (the bank: SIO word-wide verbs, the per-pin
+                           CTRL and PAD registers, both blocks released by
+                           every configuring verb) + Pin<n> (no port letter)
+    dma_engine.hpp         NoDmaEngine, the empty slot's tag
+    uart.hpp               Pl011<n> resource (the FIFOs, the divisor and its
+                           latching write, the interrupt trio through the
+                           aliases) + Uart<n, pins, rx, tx, engines>: the byte
+                           transport whose write_byte PENDS THE LINE, because
+                           the PL011's transmit interrupt is a transition
   host/                  the test target
     platform.hpp           HostPlatform (virtual clock, recording idle/break)
+                           + HostCore<n> (the two-core host: the same platform
+                           by type, a test-set current core, a counting
+                           doorbell) for test_inbox
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests
                            (configurable geometry, power-cut injection,
                            simulated reflash, wear counters)

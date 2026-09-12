@@ -44,8 +44,9 @@ def avrdude_args(prog, mcu, hexfile, chip_erase=False):
 
 def openocd_args(prog, elffile, target_cfg):
     """OpenOCD over SWD: the probe KIND is the manifest's ("openocd_cmsisdap"
-    = an Atmel-ICE, "openocd_stlink" = a Nucleo's on-board ST-LINK), the
-    target script the board TYPE's (BOARD_TYPES). Otherwise the same invocation
+    = an Atmel-ICE or a Raspberry Pi Debug Probe, "openocd_stlink" = a
+    Nucleo's on-board ST-LINK), the target script the board TYPE's
+    (BOARD_TYPES). Otherwise the same invocation
     samc21/CMakeLists.txt's <app>-upload target uses - except that the probe
     is named by THE MANIFEST, not by the CMake cache. Identity is the
     manifest's concern (a second SAM board means a second probe), and this
@@ -81,8 +82,31 @@ def openocd_args(prog, elffile, target_cfg):
     attempts; the HID transport ran the same flashes clean on the first
     try. A wedged probe is recovered by two USBDEVFS_RESET ioctls five
     seconds apart (or a replug)."""
-    argv = [manifest.OPENOCD] + openocd_interface(prog)
+    # THE BINARY IS THE PROGRAMMER'S TO CHOOSE: the manifest's OPENOCD
+    # unless the entry names its own "openocd" - a board whose flash the
+    # release build does not know (an RP2040 behind a Zetta ZD25Q16:
+    # "Unknown flash device (ID 0x001560ba)" from 0.12.0, identified by
+    # a build from git) is written by the build that knows it, and
+    # nothing else on the desk moves.
+    argv = [prog.get("openocd") or manifest.OPENOCD] + openocd_interface(prog)
+    if "rp2040" in target_cfg:
+        # CORE 0 ALONE. The target script's default makes BOTH cores
+        # OpenOCD's (an SMP pair): programming halts both, the reset
+        # runs both, and core 1 is left with C_DEBUGEN set - so a BKPT on
+        # core 1 (a panic there) HALTS it instead of faulting, and a
+        # halted core pauses the chip's system timer (TIMER.DBGPAUSE at
+        # its reset value): the running core's clock stops with it.
+        # Measured: a program that launched core 1 at boot found it back
+        # in the bootrom a moment later (OpenOCD's second reset), and a
+        # panic on core 1 froze core 0's time. With USE_CORE 0 OpenOCD
+        # never touches core 1: the chip reset core 0 requests puts core
+        # 1 into the bootrom's wait loop, and nothing enables its debug.
+        argv += ["-c", "set USE_CORE 0"]
     argv += ["-f", target_cfg]
+    if "rp2040" in target_cfg:
+        # Multidrop SWD at a rate the Debug Probe sustains; the 0.12.0
+        # target script sets none.
+        argv += ["-c", "adapter speed 5000"]
     if "stm32g0" in target_cfg:
         # CONNECT UNDER RESET. This verb leaves a G0 as a power-on would
         # (DBGMCU_CR clear, below), so a program that then enters a Stop
@@ -162,7 +186,11 @@ def openocd_interface(prog):
     and is addressed by its real USB serial."""
     kind = prog["type"]
     if kind == "openocd_cmsisdap":
-        argv = ["-f", "interface/cmsis-dap.cfg", "-c", "cmsis_dap_backend hid"]
+        # The backend is the probe's: "hid" (the default, the Atmel-ICE's
+        # - see openocd_args) or "usb_bulk" (a CMSIS-DAP v2 probe such as
+        # the Raspberry Pi Debug Probe, which has no HID interface at all).
+        argv = ["-f", "interface/cmsis-dap.cfg",
+                "-c", "cmsis_dap_backend %s" % prog.get("backend", "hid")]
     elif kind == "openocd_stlink":
         argv = ["-f", "interface/stlink.cfg"]
     else:
