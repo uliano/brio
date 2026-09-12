@@ -9,11 +9,14 @@
  *             the startup delay in units of 256 crystal periods, the
  *             STABLE flag a bounded wait watches
  *    PllSys   the system PLL (2.18): REFDIV, FBDIV, the two post
- *             dividers, the power bits, the LOCK flag
+ *             dividers, the power bits, the LOCK flag - and PllUsb, the
+ *             same block at the USB PLL's address (48 MHz for the USB
+ *             controller and for the converter's clk_adc)
  *    Rosc     the ring oscillator (2.17): running/stable, start and stop
  *             - never a rate, so never a Clock
  *    Clocks   the clock generators (2.15): clk_ref and clk_sys with their
- *             GLITCHLESS mux and their aux mux, clk_peri with its aux mux
+ *             GLITCHLESS mux and their aux mux, clk_peri and clk_adc
+ *             with their aux mux alone
  *             and enable - and the switching sequences of 2.15.3.2,
  *             which are the whole point of the block
  *    FreqCounter  the frequency counter (2.15.4): any root or generator
@@ -227,23 +230,28 @@ struct Xosc {
     }
 };
 
-// ---- the system PLL ------------------------------------------------------------
+// ---- the two PLLs ---------------------------------------------------------------
 
-struct PllSys {
-    PllSys() = delete;
+/// One PLL block (2.18): the system PLL and the USB PLL are the same
+/// register file at two addresses behind two reset bits.
+template <uint32_t base, uint32_t reset_bit>
+struct PllBlock {
+    PllBlock() = delete;
+
+    static PLL_SYS_Type& regs() { return *reinterpret_cast<PLL_SYS_Type*>(base); }
 
     /// Bring the PLL up on `cfg` (2.18.3's sequence): out of reset,
     /// dividers written while powered down, VCO powered, LOCK waited for,
     /// post dividers set and powered. False when LOCK did not rise; the
     /// PLL is then powered down again.
     static bool init(const PllConfig& cfg) {
-        if (!Resets::cycle(ResetBlock::pll_sys)) {
+        if (!Resets::cycle(reset_bit)) {
             return false;
         }
-        PLL_SYS->CS = cfg.refdiv & PLL_CS_REFDIV_BITS;
-        PLL_SYS->FBDIV_INT = cfg.fbdiv & PLL_FBDIV_INT_BITS;
+        regs().CS = cfg.refdiv & PLL_CS_REFDIV_BITS;
+        regs().FBDIV_INT = cfg.fbdiv & PLL_FBDIV_INT_BITS;
         // VCO and the reference on, the post dividers still off.
-        hw_clear(PLL_SYS->PWR, PLL_PWR_PD_BITS | PLL_PWR_VCOPD_BITS);
+        hw_clear(regs().PWR, PLL_PWR_PD_BITS | PLL_PWR_VCOPD_BITS);
         bool locked_now = false;
         for (uint32_t spins = 1'000'000u; spins != 0u; --spins) {
             if (locked()) {
@@ -255,30 +263,35 @@ struct PllSys {
             stop();
             return false;
         }
-        PLL_SYS->PRIM = (static_cast<uint32_t>(cfg.postdiv1) << PLL_PRIM_POSTDIV1_LSB) |
+        regs().PRIM = (static_cast<uint32_t>(cfg.postdiv1) << PLL_PRIM_POSTDIV1_LSB) |
                         (static_cast<uint32_t>(cfg.postdiv2) << PLL_PRIM_POSTDIV2_LSB);
-        hw_clear(PLL_SYS->PWR, PLL_PWR_POSTDIVPD_BITS);
+        hw_clear(regs().PWR, PLL_PWR_POSTDIVPD_BITS);
         return true;
     }
 
-    static bool locked() { return (PLL_SYS->CS & PLL_CS_LOCK_BITS) != 0u; }
+    static bool locked() { return (regs().CS & PLL_CS_LOCK_BITS) != 0u; }
 
     /// The dividers as the registers hold them.
     static PllConfig config() {
         return PllConfig{
-            .refdiv = static_cast<uint8_t>(PLL_SYS->CS & PLL_CS_REFDIV_BITS),
-            .fbdiv = static_cast<uint16_t>(PLL_SYS->FBDIV_INT & PLL_FBDIV_INT_BITS),
-            .postdiv1 = static_cast<uint8_t>((PLL_SYS->PRIM & PLL_PRIM_POSTDIV1_BITS) >>
+            .refdiv = static_cast<uint8_t>(regs().CS & PLL_CS_REFDIV_BITS),
+            .fbdiv = static_cast<uint16_t>(regs().FBDIV_INT & PLL_FBDIV_INT_BITS),
+            .postdiv1 = static_cast<uint8_t>((regs().PRIM & PLL_PRIM_POSTDIV1_BITS) >>
                                              PLL_PRIM_POSTDIV1_LSB),
-            .postdiv2 = static_cast<uint8_t>((PLL_SYS->PRIM & PLL_PRIM_POSTDIV2_BITS) >>
+            .postdiv2 = static_cast<uint8_t>((regs().PRIM & PLL_PRIM_POSTDIV2_BITS) >>
                                              PLL_PRIM_POSTDIV2_LSB)};
     }
 
     /// Power the PLL down. Only with nothing clocked from it.
     static void stop() {
-        hw_set(PLL_SYS->PWR, PLL_PWR_PD_BITS | PLL_PWR_VCOPD_BITS | PLL_PWR_POSTDIVPD_BITS);
+        hw_set(regs().PWR, PLL_PWR_PD_BITS | PLL_PWR_VCOPD_BITS | PLL_PWR_POSTDIVPD_BITS);
     }
 };
+
+/// The system PLL: clk_sys's source under Clock<ClockSource::pll>.
+using PllSys = PllBlock<PLL_SYS_BASE, ResetBlock::pll_sys>;
+/// The USB PLL: 48 MHz for the USB controller and for clk_adc.
+using PllUsb = PllBlock<PLL_USB_BASE, ResetBlock::pll_usb>;
 
 constexpr bool operator==(const PllConfig& a, const PllConfig& b) {
     return a.refdiv == b.refdiv && a.fbdiv == b.fbdiv && a.postdiv1 == b.postdiv1 &&
@@ -330,6 +343,16 @@ enum class RefSource : uint8_t {
     rosc = CLOCKS_CLK_REF_CTRL_SRC_VALUE_ROSC_CLKSRC_PH,
     aux = CLOCKS_CLK_REF_CTRL_SRC_VALUE_CLKSRC_CLK_REF_AUX,
     xosc = CLOCKS_CLK_REF_CTRL_SRC_VALUE_XOSC_CLKSRC,
+};
+
+/// clk_adc's aux sources (CLK_ADC_CTRL.AUXSRC).
+enum class AdcAux : uint8_t {
+    pll_usb = CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+    pll_sys = CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+    rosc = CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_ROSC_CLKSRC_PH,
+    xosc = CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,
+    gpin0 = CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_GPIN0,
+    gpin1 = CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_GPIN1,
 };
 
 /// clk_sys's aux sources (CLK_SYS_CTRL.AUXSRC).
@@ -418,6 +441,29 @@ struct Clocks {
 
     static bool peri_enabled() {
         return (CLOCKS->CLK_PERI_CTRL & CLOCKS_CLK_PERI_CTRL_ENABLE_BITS) != 0u;
+    }
+
+    /// clk_adc onto `aux` through its two-bit integer divider (1..3),
+    /// the same stop-select-start as clk_peri: the generator has no
+    /// glitchless mux. The converter wants 48 MHz (4.9.2): the USB PLL.
+    static void adc_select(AdcAux aux, uint8_t div = 1) {
+        hw_clear(CLOCKS->CLK_ADC_CTRL, CLOCKS_CLK_ADC_CTRL_ENABLE_BITS);
+        for (uint32_t spins = 64u; spins != 0u; --spins) {
+            __NOP();
+        }
+        CLOCKS->CLK_ADC_DIV = (static_cast<uint32_t>(div) << CLOCKS_CLK_ADC_DIV_INT_LSB) & CLOCKS_CLK_ADC_DIV_INT_BITS;
+        hw_write_masked(CLOCKS->CLK_ADC_CTRL,
+                        static_cast<uint32_t>(aux) << CLOCKS_CLK_ADC_CTRL_AUXSRC_LSB,
+                        CLOCKS_CLK_ADC_CTRL_AUXSRC_BITS);
+        hw_set(CLOCKS->CLK_ADC_CTRL, CLOCKS_CLK_ADC_CTRL_ENABLE_BITS);
+    }
+    static void adc_stop() { hw_clear(CLOCKS->CLK_ADC_CTRL, CLOCKS_CLK_ADC_CTRL_ENABLE_BITS); }
+    static bool adc_enabled() {
+        return (CLOCKS->CLK_ADC_CTRL & CLOCKS_CLK_ADC_CTRL_ENABLE_BITS) != 0u;
+    }
+    static AdcAux adc_source() {
+        return static_cast<AdcAux>((CLOCKS->CLK_ADC_CTRL & CLOCKS_CLK_ADC_CTRL_AUXSRC_BITS) >>
+                                   CLOCKS_CLK_ADC_CTRL_AUXSRC_LSB);
     }
     static PeriAux peri_source() {
         return static_cast<PeriAux>((CLOCKS->CLK_PERI_CTRL & CLOCKS_CLK_PERI_CTRL_AUXSRC_BITS) >>

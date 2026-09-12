@@ -302,10 +302,11 @@ gets its home in `docs/design/` when taken.
   platform type per core, util/inbox.hpp's bridge, the launch through
   the bootrom's protocol - design/kernel.md section 12 and
   docs/rp2040/multicore.md, measured by test_rp2040_multicore. What
-  remains: the chapters (ADC, RTC, PIO, the flash, power - the DMA,
-  the SPI, the I2C and the PWM are done, the engines in the UART's
-  and the two bus hosts' slots and on the PWM's wrap), a console on
-  core 1, the Pico H as the reference board.
+  remains: the chapters (RTC, PIO, the flash, power - the DMA, the
+  SPI, the I2C, the PWM and the ADC are done, the engines in the
+  UART's and the two bus hosts' slots, on the PWM's wrap and on the
+  ADC's FIFO), a console on core 1, the Pico H as the reference
+  board.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -1262,9 +1263,10 @@ brio/                    the framework, four strata:
     sysinfo.hpp            ChipId (manufacturer, part, the silicon revision
                            the errata key on)
     clock.hpp              the FOURTH clock model: Xosc (startup delay),
-                           PllSys (the exact-ratio search at compile time),
-                           Clocks (the glitchless and aux muxes of clk_ref /
-                           clk_sys, clk_peri) + Clock<crystal|pll, hz, xtal>
+                           PllSys and PllUsb (one PllBlock; the exact-ratio
+                           search at compile time), Clocks (the glitchless
+                           and aux muxes of clk_ref / clk_sys, clk_peri and
+                           clk_adc) + Clock<crystal|pll, hz, xtal>
     pin.hpp                Gpio (the bank: SIO word-wide verbs, the per-pin
                            CTRL and PAD registers, both blocks released by
                            every configuring verb) + Pin<n> (no port letter)
@@ -1289,6 +1291,15 @@ brio/                    the framework, four strata:
                            read, the engines serving a read phase from a fixed
                            command cell) + I2cClient<n, pins> (RD_REQ holds SCL,
                            one I2cClientEvent per service())
+    adc.hpp                the ADC (4.9): Adc, a monostate (its own clock from
+                           the USB PLL or the crystal, the one-shot and the
+                           free run paced by the 16.8 divider under the
+                           conversion's 96-cycle floor, the round-robin, the
+                           eight-entry FIFO as interrupt and DMA request, the
+                           shift, the error flag; the sampler's converter
+                           surface) + AnalogIn<Pin> (GPIO 26..29) + AdcInput
+                           (the sensor the fifth) + Ref::vref_pin, the board's
+                           millivolts stated by the application
     pwm.hpp                the PWM block (4.5): Pwm (the global enable for
                            lockstep, the four interrupt registers) +
                            PwmSlice<n> (a 16-bit counter, TOP, two levels,

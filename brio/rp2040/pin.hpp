@@ -156,6 +156,19 @@ struct Gpio {
         ctrl(n) = static_cast<uint32_t>(fn) << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
     }
 
+    /// Pin `n` as an ANALOG input (4.9's note): the pad's digital input
+    /// buffer off and its output disabled, no pull, no function - the
+    /// converter reads the bare pad.
+    static void analog(uint8_t n, PinPull pull = PinPull::none) {
+        (void)ready();
+        oe_clear(1u << n);
+        ctrl(n) = static_cast<uint32_t>(PinFunction::none) << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+        uint32_t v = PADS_BANK0_GPIO0_OD_BITS;
+        if (pull == PinPull::up || pull == PinPull::keeper) { v |= PADS_BANK0_GPIO0_PUE_BITS; }
+        if (pull == PinPull::down || pull == PinPull::keeper) { v |= PADS_BANK0_GPIO0_PDE_BITS; }
+        pad(n) = v;
+    }
+
     /// Back to the reset state: no owner, the pad an input with its
     /// pull-down, SIO's output enable off.
     static void release(uint8_t n) {
@@ -227,6 +240,8 @@ struct Pin {
         Gpio::function(n, fn, cfg);
     }
     static void release() { Gpio::release(n); }
+    /// The bare pad for the converter (Gpio::analog), a pull optional.
+    static void analog(PinPull pull = PinPull::none) { Gpio::analog(n, pull); }
 
     /// This pin as a run-time reference (a bus request's select line).
     static constexpr PinRef ref() { return PinRef{n}; }

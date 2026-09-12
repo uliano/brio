@@ -63,12 +63,15 @@ oscillators are unreliable; E10: ROSC's BADWRITE is.
   post divider first; a rate with no exact ratio is a compile error.
   `xosc_startup_delay(crystal_hz, settle_us)`.
 - `Xosc` (init with the delay - a stable crystal is kept -, `stable`,
-  `enabled`, `startup_delay`, `stop`), `PllSys` (init with a
-  `PllConfig`, `locked`, `config` read back, `stop`), `Rosc`
-  (`running`, `stable`, `start`, `stop`), `Clocks` (`ref_select`,
-  `sys_from_ref`, `sys_from_aux`, `sys_source`, the two dividers and
-  `sys_divider()` read back, `peri_select`, `peri_enabled`,
-  `peri_source`) with `RefSource`, `SysAux`, `PeriAux`.
+  `enabled`, `startup_delay`, `stop`), `PllSys` and `PllUsb` (one
+  `PllBlock` at two addresses: init with a `PllConfig`, `locked`,
+  `config` read back, `stop`), `Rosc` (`running`, `stable`, `start`,
+  `stop`), `Clocks` (`ref_select`, `sys_from_ref`, `sys_from_aux`,
+  `sys_source`, the two dividers and `sys_divider()` read back,
+  `peri_select`, `peri_enabled`, `peri_source`, and clk_adc's
+  `adc_select(aux, div)`, `adc_stop`, `adc_enabled`, `adc_source` -
+  the same stop-select-start as clk_peri, a generator with an aux mux
+  alone) with `RefSource`, `SysAux`, `PeriAux`, `AdcAux`.
 - `FreqCounter::count_hz(source, ref_hz, interval = 15)` - a
   `CountSource` (every root and generator) counted against clk_ref
   over 2^interval microseconds, in hertz; nullopt when the source

@@ -47,6 +47,9 @@ disabled by the B2 one).
   `outputs(mask, cfg)` (every pin of a mask a software output at once).
 - `Pin<n>` - one pin as a type, no port letter: `output(cfg)`,
   `output(level, cfg)`, `input(pull)`, `function(fn, cfg)`, `release()`,
+  `analog(pull)` (the bare pad for the converter: the digital input
+  buffer off, the output disabled, a pull optional - `Gpio::analog(n,
+  pull)` by number),
   `set`, `clear`, `toggle`, `read` (the pad, whoever owns it),
   `read_out`, `is_output`, `function()`, `pull(p)`; a PwmChannel of one
   level (`max` 1, `duty`).
