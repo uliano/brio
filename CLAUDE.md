@@ -302,10 +302,10 @@ gets its home in `docs/design/` when taken.
   platform type per core, util/inbox.hpp's bridge, the launch through
   the bootrom's protocol - design/kernel.md section 12 and
   docs/rp2040/multicore.md, measured by test_rp2040_multicore. What
-  remains: the chapters (I2C, PWM, ADC, RTC, PIO, the flash, power -
-  the DMA and the SPI are done, the engines in the UART's and the
-  SPI host's slots), a console on core 1, the Pico H as the reference
-  board.
+  remains: the chapters (PWM, ADC, RTC, PIO, the flash, power - the
+  DMA, the SPI and the I2C are done, the engines in the UART's and
+  the two bus hosts' slots), a console on core 1, the Pico H as the
+  reference board.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -1280,6 +1280,15 @@ brio/                    the framework, four strata:
                            select pad, eight answers ahead, the dark listener
                            by releasing the pad - SOD does not; ONE frame per
                            select window in modes 0 and 2)
+    i2c.hpp                the DW_apb_i2c (4.3): DwApbI2c<n> resource (a COMMAND
+                           FIFO whose entries carry RESTART and STOP, the counts
+                           per speed with the cycles the block adds subtracted,
+                           one TX_ABRT with its source decoded, the read-to-clear
+                           sources) + I2cHost<n, pins, engines> (the other
+                           strata's Request verbatim, the probe as a one-byte
+                           read, the engines serving a read phase from a fixed
+                           command cell) + I2cClient<n, pins> (RD_REQ holds SCL,
+                           one I2cClientEvent per service())
     dma_engine.hpp         NoDmaEngine, the empty slot's tag
     uart.hpp               Pl011<n> resource (the FIFOs, the divisor and its
                            latching write, the loop-back, the interrupt trio

@@ -59,13 +59,15 @@ silicon's own resource. The app's ISR binds the vector.
 
 ### Realizations
 
-Common to the four: the Request field for field (`addr`, `tx`,
+Common to the five: the Request field for field (`addr`, `tx`,
 `tx_len`, `rx`, `rx_len`, `reply`, `speed`), `I2cSpeed` word for word
 (the CH32V00x's stops at `fast_400k`: its peripheral has no Fm+), the
 engine verbs `init`, `start`, `isr`, `status`, `rebase`, `recover`,
 `release`, `unstick`, the empty probe (both lengths zero) served by
-all four, and the vocabulary `I2cDone` / `i2c_*` produced ON THE WIRE
-by each - measured against a second chip on all four. What differs is
+all five - on the RP2040 as a one-byte read, its command FIFO having
+no address-only entry -, and the vocabulary `I2cDone` / `i2c_*`
+produced ON THE WIRE by each - measured against a second chip on four
+and against the chip's other instance on the RP2040. What differs is
 the resource under the task and the shape of the rate arithmetic each
 chapter imposes.
 
@@ -75,6 +77,7 @@ chapter imposes.
 | samc21 | `I2cHost<n, pads>` over `I2cm<n>` (`samc21/i2c.hpp`; `I2cs<n>` is the client's resource, two over one SERCOM) | `init` takes the STATED core rate (`reference_hz()`); the rates are a per-speed cache: `speed_ok(speed)`, `scl_hz(speed)`, `baud_of(speed)`; `idle()` is the ENGINE's phase, not the wire's |
 | stm32g0 | `I2cHost<n, pins, TxEngine, RxEngine>` over `I2c<n>` (`stm32g0/i2c.hpp`, one TIMINGR word) | the same stated rate and per-speed cache (`speed_ok`, `scl_hz`, `timing_of`, `kernel_hz()` for the kernel-clock multiplexer); two optional DMA engine slots with `dma_isr()`; `fast_plus_drive()` (SYSCFG's Fm+ pad drive); `spurious_bus_errors()` (an erratum's counter); `idle()` as the SAM's |
 | ch32v00x | `I2cHost<1, pins, TxEngine, RxEngine>` over `I2c<1>` (`ch32v00x/i2c.hpp`, the F1's event machine with no rise-time register) | the stated bus rate and the per-speed cache as the SAM's (`speed_ok`, `scl_hz`, `timing_of`, `reference_hz()` = HCLK); a `duty` at init (fast mode's 2 or 16/9 shape); TWO vectors, `isr()` for the events and `error_isr()` for AF/ARLO/BERR; the engine slots FIXED to DMA channels 6 (TX) and 7 (RX) with `dma_isr()`, a one-byte read kept on the pump; `unstick()` returns the clocks it took; `start()` WAITS, bounded, for the last STOP to leave (the F1 lineage cannot queue a START behind one) - the one engine whose `start()` spends dispatch time on the bus |
+| rp2040 | `I2cHost<n, pins, TxEngine, RxEngine>` over `DwApbI2c<n>` (`rp2040/i2c.hpp`, the Synopsys command FIFO: an entry carries its RESTART and STOP bits, one TX_ABRT carries every failure) | the stated rate (clk_sys, `reference_hz()`) and the per-speed cache as the SAM's (`speed_ok`, `scl_hz`, `timing_of`); `idle()` as the SAM's; `start()` answers a SECOND refusal synchronously, i2c_bus_error for a block that would not disable to take the address (IC_TAR takes a write only with ENABLE clear); the probe is a one-byte read; the engine slots serve the READ phase alone (a transmit engine of uint16_t entries pouring one plain read command from a fixed cell, the receive engine collecting) with `dma_isr()`; `unstick()` returns the clocks it took; `recover()` resets the block through the reset controller, the one way out of a host holding SCL with no STOP in sight |
 | host | none | `I2cBus` = `BusMaster`, host-tested through the SPI alias (`test_spi_bus`, `test_bus_master` - the same class) |
 
 None of those differences is a spelling of the same function:
@@ -84,21 +87,25 @@ speed), `bus_state()` and `idle()` look at different things (the wire
 against the engine), and `quick_command` is a hardware mode the other
 families do not have (their empty probe is the same tenure with no
 data, which the AVR serves too). `speed_ok(speed)` is one verb on the
-four.
+five.
 
-The client side is four surfaces by position (`I2cClient` on each
+The client side is five surfaces by position (`I2cClient` on each
 stratum, the application's protocol over `Twi<n>` / `I2cs<n>` /
-`I2c<n>` / `I2c<1>`): samc21, stm32g0 and ch32v00x speak one
-vocabulary back (`addressed`, `data_ready`, `stop_seen`, `give`/`take`,
-`host_reads`; the CH32V00x adds `service()`, one `I2cClientEvent` per
-ISR body), the
+`I2c<n>` / `I2c<1>` / `DwApbI2c<n>`): samc21, stm32g0, ch32v00x and
+rp2040 speak one vocabulary back (`addressed`, `data_ready`,
+`stop_seen`, `give`/`take`, `host_reads`; the CH32V00x and the RP2040
+add `service()`, one `I2cClientEvent` per ISR body; the RP2040 has no
+`addressed`, its block raising no address-match event - a tenure is
+known by its first byte or its first read request, and the clock
+stretch of a read request is the block's own), the
 AVR's is its own (`addressed`, `data_ready`, `receive`/`respond`,
-`complete`) - a convergence of three, not a task.
+`complete`) - a convergence of four, not a task.
 
-The four peripherals share almost nothing below the contract - a TWI
+The five peripherals share almost nothing below the contract - a TWI
 with its own baud three-step, a SERCOM with a select-then-use register
-file, an I2C with one timing word, and the F1's event machine with a
-clock register and no rise-time one - which is what makes the
+file, an I2C with one timing word, the F1's event machine with a
+clock register and no rise-time one, and a command FIFO whose entries
+carry the bus conditions as bits - which is what makes the
 descriptor's survival worth recording.
 
 ## The transaction descriptor (`I2cHost<n>::Request`)
@@ -166,7 +173,7 @@ A client holding a line low forever - SDA, or the clock in mid-byte -
 leaves a tenure in flight: the kernel keeps running (nothing blocks)
 but the bus AO stays busy and later requests pile up until rejected -
 loud, but not recovered. And no silicon answers a held clock, ON ANY
-OF THE FOUR: the SAM SERCOM's SMBus
+OF THE FIVE: the SAM SERCOM's SMBus
 time-outs police the HOST'S OWN clock hold, not a wire a client wedged
 (measured - [i2c.md](../samc21/i2c.md)); the AVR's TWI has none at all;
 and the STM32G0's - which RM0444 32.4.12 describes in words that read
@@ -181,6 +188,9 @@ holding SCL for 45 ms stands until the arbiter answers at its 20 - and
 it is the one that answers a wedged SDA by itself: its START into a
 busy bus comes back ARLO at once, so the requester reads
 `i2c_arb_lost` well before any limit ([i2c.md](../ch32v00x/i2c.md)). The
+RP2040's DW_apb_i2c has no clock-low timeout either: a client holding
+SCL through a read request it never serves stands until the arbiter
+answers at its 20 ms ([i2c.md](../rp2040/i2c.md)). The
 same held SDA, two honest replies - parked and timed out on three
 strata, refused by the silicon on the fourth - which a requester reads
 alike, "the bus is not mine", the recovery ladder staying the
@@ -194,7 +204,8 @@ asynchronous. If it matures first, the engine is declared dead:
 (the AVR `I2cHost`'s ENABLE-cycle errata work-around, the SAM's cached
 re-init, the G0's PE cycle - which RM0444 32.4.6 offers for
 exactly this, "restores the normal operation ... by toggling the PE
-bit"), the requester is answered `i2c_timeout` in its place, and
+bit" -, the RP2040's block reset through the reset controller, because
+a host holding SCL with no STOP in sight never disables), the requester is answered `i2c_timeout` in its place, and
 the queue moves on. The races with the real completion are closed by
 construction (a sequence number and a drain state - the whole story in
 `util/bus_master.hpp`, staged deterministically in the host suite).
