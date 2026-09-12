@@ -381,6 +381,7 @@ struct Rtc {
     static void interrupt(bool on) {
         if (on) { hw_set(regs().INTE, RTC_INTE_RTC_BITS); } else { hw_clear(regs().INTE, RTC_INTE_RTC_BITS); }
     }
+    static bool interrupt_enabled() { return (regs().INTE & RTC_INTE_RTC_BITS) != 0u; }
     static bool raw_pending() { return (regs().INTR & RTC_INTR_RTC_BITS) != 0u; }
     static bool pending() { return (regs().INTS & RTC_INTS_RTC_BITS) != 0u; }
     static void force(bool on) {

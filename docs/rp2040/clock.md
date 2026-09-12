@@ -66,14 +66,17 @@ oscillators are unreliable; E10: ROSC's BADWRITE is.
   `enabled`, `startup_delay`, `stop`), `PllSys` and `PllUsb` (one
   `PllBlock` at two addresses: init with a `PllConfig`, `locked`,
   `config` read back, `stop`), `Rosc` (`running`, `stable`, `start`,
-  `stop`), `Clocks` (`ref_select`, `sys_from_ref`, `sys_from_aux`,
+  `stop`, `dormant` - the keyword, each waiting for STABLE after the
+  wake), `Clocks` (`ref_select`, `sys_from_ref`, `sys_from_aux`,
   `sys_source`, the two dividers and `sys_divider()` read back,
   `peri_select`, `peri_enabled`, `peri_source`, clk_adc's
   `adc_select(aux, div)`, `adc_stop`, `adc_enabled`, `adc_source`, and
   clk_rtc's `rtc_select(aux, div_int, div_frac)`, `rtc_stop`,
   `rtc_enabled`, `rtc_source`, `rtc_divider256` - the same
-  stop-select-start as clk_peri, generators with an aux mux alone)
-  with `RefSource`, `SysAux`, `PeriAux`, `AdcAux`, `RtcAux`.
+  stop-select-start as clk_peri, generators with an aux mux alone;
+  the top-level gates `sleep_enables` / `wake_enables` / `enabled` on
+  a `SleepClocks` and the named sets, [sleep.md](sleep.md)) with
+  `RefSource`, `SysAux`, `PeriAux`, `AdcAux`, `RtcAux`.
 - `FreqCounter::count_hz(source, ref_hz, interval = 15)` - a
   `CountSource` (every root and generator) counted against clk_ref
   over 2^interval microseconds, in hertz; nullopt when the source
@@ -184,8 +187,6 @@ Driver gaps, each with its reason:
   regulator setting serves the whole range) and clk_peri's
   independence makes a change cheap - built when a program wants to
   scale, in the STM32G0's `Rates<>` shape.
-- DORMANT and the sleep-mode clock enables: `util/power.hpp`'s sites,
-  born with the first power-aware program.
 - The ring oscillator's configuration (its frequency range, drive
   stages and divider): never a clock truth, so never a `Clock`; start
   and stop are the verbs, the rest waits for a use.

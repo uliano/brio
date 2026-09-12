@@ -21,7 +21,8 @@
  * The platform offers no idle_until(): SysTick rides clk_sys, and
  * nothing of this chip's sleeping short of DORMANT stops clk_sys, so
  * the plain idle() path is the whole story here and the loop compiles
- * nothing else.
+ * nothing else. What the idle path does offer is `sleep_hook`, the
+ * one entry a DORMANT needs (below).
  *
  * CriticalSection is rp2040/nvic.hpp's InterruptGuard: save PRIMASK,
  * cpsid i, restore on scope exit. Nesting-correct, and the CMSIS
@@ -92,10 +93,25 @@ struct Rp2040Platform {
     /// The DSB is the ARM recommendation for WFI: it retires the posted
     /// writes before the core stops.
     static void idle() {
-        __DSB();
-        __WFI();
+        if (sleep_hook != nullptr) {
+            sleep_hook();
+        } else {
+            __DSB();
+            __WFI();
+        }
         __enable_irq();
     }
+
+    /// THE ONE STOP THAT IS NOT A WFI. The chip's DORMANT state is
+    /// entered by a register write, not by the sleep instruction, so a
+    /// site that arms it hands the idle path the function that does it
+    /// (rp2040/sleep.hpp: the clocks onto the oscillator, the keyword,
+    /// the tree restored after the wake) and takes it back when it
+    /// disarms. Called with interrupts masked, like the WFI it replaces,
+    /// and with the same closure of the lost-wakeup window: a wake that
+    /// is already pending ends the dormant state at once. Null = the
+    /// WFI, which is every other rung of the ladder.
+    static inline void (*sleep_hook)() = nullptr;
 
     /// PRIMASK readback: the one bit CriticalSection saves and restores.
     static bool interrupts_enabled() { return brio::interrupts_enabled(); }

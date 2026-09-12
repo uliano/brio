@@ -302,11 +302,12 @@ gets its home in `docs/design/` when taken.
   platform type per core, util/inbox.hpp's bridge, the launch through
   the bootrom's protocol - design/kernel.md section 12 and
   docs/rp2040/multicore.md, measured by test_rp2040_multicore. What
-  remains: the power chapter (the DMA, the SPI, the I2C, the PWM, the
-  ADC, the RTC, the PIO and the flash are done - the engines in the
-  UART's and the two bus hosts' slots, on the PWM's wrap, the ADC's
-  FIFO and the PIO's; the heap and the journal on the top of the QSPI
-  chip), a console on core 1, the Pico H as the reference board.
+  remains: a console on core 1, the Pico H as the reference board,
+  the suites re-run on a Pico (every chapter is written and measured
+  on the WeAct board - the DMA, the SPI, the I2C, the PWM, the ADC,
+  the RTC, the PIO, the flash with the heap and the journal at the
+  top of the QSPI chip, the power chapter with its SLEEP state and
+  DORMANT).
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -1270,6 +1271,13 @@ brio/                    the framework, four strata:
     pin.hpp                Gpio (the bank: SIO word-wide verbs, the per-pin
                            CTRL and PAD registers, both blocks released by
                            every configuring verb) + Pin<n> (no port letter)
+    sleep.hpp              DormantWake (the IO bank's dormant-wake events)
+                           + Rp2040SleepSite (light = WFI, standby = the
+                           SLEEP state under the program's SLEEP_ENx gates,
+                           deep = DORMANT through the platform's sleep_hook,
+                           refused with no way back) + Rp2040TimedSleepSite
+                           (the timer as alarm and witness, the calendar for
+                           a dormant on the ring oscillator)
                            + PinRef (a pin named at run time: a bus request's
                            select)
     spi.hpp                the PL022 (4.4): Pl022<n> resource (the prescaler

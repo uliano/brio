@@ -228,6 +228,19 @@ struct Xosc {
         hw_write_masked(XOSC->CTRL, XOSC_CTRL_ENABLE_VALUE_DISABLE << XOSC_CTRL_ENABLE_LSB,
                         XOSC_CTRL_ENABLE_BITS);
     }
+
+    /// DORMANT (2.16.5): the oscillator stops on the keyword and with it
+    /// every clock derived from it - the core's included when clk_sys
+    /// runs on it, so this call returns only once a configured wake
+    /// (a GPIO dormant-wake event or the RTC's interrupt) has restarted
+    /// the oscillator and it is STABLE again. WITH NO WAKE CONFIGURED IT
+    /// NEVER RETURNS; rp2040/sleep.hpp's site refuses to arm that. The
+    /// PLLs are not stopped by the silicon: stop them first.
+    static void dormant() {
+        XOSC->DORMANT = XOSC_DORMANT_VALUE_DORMANT;
+        while (!stable()) {
+        }
+    }
 };
 
 // ---- the two PLLs ---------------------------------------------------------------
@@ -334,6 +347,15 @@ struct Rosc {
         hw_write_masked(ROSC->CTRL, ROSC_CTRL_ENABLE_VALUE_DISABLE << ROSC_CTRL_ENABLE_LSB,
                         ROSC_CTRL_ENABLE_BITS);
     }
+
+    /// DORMANT (2.17.7): the same keyword as the crystal's, the same
+    /// contract - returns once a configured wake has restarted it, a
+    /// microsecond's restart against the crystal's milliseconds.
+    static void dormant() {
+        ROSC->DORMANT = ROSC_DORMANT_VALUE_DORMANT;
+        while (!stable()) {
+        }
+    }
 };
 
 // ---- the clock generators ---------------------------------------------------------
@@ -385,6 +407,50 @@ enum class PeriAux : uint8_t {
     gpin0 = CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_GPIN0,
     gpin1 = CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_GPIN1,
 };
+
+/// One bit per clock endpoint in the two gate registers (2.11.1: the
+/// same layout for SLEEP_ENx and WAKE_ENx): `en0` the CLOCKS_SLEEP_EN0
+/// bits, `en1` the fifteen of SLEEP_EN1. The named sets below are the
+/// ones a program composes from.
+struct SleepClocks {
+    uint32_t en0 = 0xFFFF'FFFFu;
+    uint32_t en1 = CLOCKS_SLEEP_EN1_BITS;
+
+    constexpr SleepClocks operator|(SleepClocks o) const { return {en0 | o.en0, en1 | o.en1}; }
+    constexpr SleepClocks operator&(SleepClocks o) const { return {en0 & o.en0, en1 & o.en1}; }
+    constexpr SleepClocks operator~() const { return {~en0, ~en1 & CLOCKS_SLEEP_EN1_BITS}; }
+    constexpr bool operator==(const SleepClocks&) const = default;
+};
+
+/// Every gate open: the reset value, and a standby that prunes nothing.
+inline constexpr SleepClocks sleep_clocks_all{};
+/// Every gate shut.
+inline constexpr SleepClocks sleep_clocks_none{0u, 0u};
+/// What a core needs to wake and run again (2.11.2's minimum, made
+/// explicit): the bus fabric and its controller, the six SRAM banks,
+/// the ROM and the XIP cache, the SIO, the pads and the IO controller,
+/// the clock and reset infrastructure (CLOCKS, PSM, SYSCFG, the two
+/// oscillators, the system PLL), the system timer with the watchdog
+/// whose tick it counts. A standby keeps these and adds its wake
+/// sources.
+inline constexpr SleepClocks sleep_clocks_core{
+    CLOCKS_SLEEP_EN0_CLK_SYS_SRAM3_BITS | CLOCKS_SLEEP_EN0_CLK_SYS_SRAM2_BITS |
+        CLOCKS_SLEEP_EN0_CLK_SYS_SRAM1_BITS | CLOCKS_SLEEP_EN0_CLK_SYS_SRAM0_BITS |
+        CLOCKS_SLEEP_EN0_CLK_SYS_SIO_BITS | CLOCKS_SLEEP_EN0_CLK_SYS_ROSC_BITS |
+        CLOCKS_SLEEP_EN0_CLK_SYS_ROM_BITS | CLOCKS_SLEEP_EN0_CLK_SYS_PSM_BITS |
+        CLOCKS_SLEEP_EN0_CLK_SYS_PLL_SYS_BITS | CLOCKS_SLEEP_EN0_CLK_SYS_PADS_BITS |
+        CLOCKS_SLEEP_EN0_CLK_SYS_IO_BITS | CLOCKS_SLEEP_EN0_CLK_SYS_BUSFABRIC_BITS |
+        CLOCKS_SLEEP_EN0_CLK_SYS_BUSCTRL_BITS | CLOCKS_SLEEP_EN0_CLK_SYS_CLOCKS_BITS,
+    CLOCKS_SLEEP_EN1_CLK_SYS_XOSC_BITS | CLOCKS_SLEEP_EN1_CLK_SYS_XIP_BITS |
+        CLOCKS_SLEEP_EN1_CLK_SYS_WATCHDOG_BITS | CLOCKS_SLEEP_EN1_CLK_SYS_TIMER_BITS |
+        CLOCKS_SLEEP_EN1_CLK_SYS_SYSCFG_BITS | CLOCKS_SLEEP_EN1_CLK_SYS_SRAM5_BITS |
+        CLOCKS_SLEEP_EN1_CLK_SYS_SRAM4_BITS};
+/// The two UARTs, the calendar, the DMA: the wake sources a program adds.
+inline constexpr SleepClocks sleep_clocks_uart0{0u, CLOCKS_SLEEP_EN1_CLK_SYS_UART0_BITS | CLOCKS_SLEEP_EN1_CLK_PERI_UART0_BITS};
+inline constexpr SleepClocks sleep_clocks_uart1{0u, CLOCKS_SLEEP_EN1_CLK_SYS_UART1_BITS | CLOCKS_SLEEP_EN1_CLK_PERI_UART1_BITS};
+inline constexpr SleepClocks sleep_clocks_rtc{CLOCKS_SLEEP_EN0_CLK_SYS_RTC_BITS | CLOCKS_SLEEP_EN0_CLK_RTC_RTC_BITS, 0u};
+inline constexpr SleepClocks sleep_clocks_dma{CLOCKS_SLEEP_EN0_CLK_SYS_DMA_BITS, 0u};
+inline constexpr SleepClocks sleep_clocks_pwm{CLOCKS_SLEEP_EN0_CLK_SYS_PWM_BITS, 0u};
 
 struct Clocks {
     Clocks() = delete;
@@ -507,6 +573,33 @@ struct Clocks {
     }
     static uint32_t sys_divider() {
         return (CLOCKS->CLK_SYS_DIV & CLOCKS_CLK_SYS_DIV_INT_BITS) >> CLOCKS_CLK_SYS_DIV_INT_LSB;
+    }
+
+    // ---- the top-level clock gates (2.11.1) ----------------------------------
+
+    /// The gates that apply while the chip is in its SLEEP state (both
+    /// cores asleep with SLEEPDEEP, the DMA idle): what rp2040/sleep.hpp's
+    /// site arms a standby with. All open at reset.
+    static void sleep_enables(SleepClocks c) {
+        CLOCKS->SLEEP_EN0 = c.en0;
+        CLOCKS->SLEEP_EN1 = c.en1 & CLOCKS_SLEEP_EN1_BITS;
+    }
+    static SleepClocks sleep_enables() {
+        return {.en0 = CLOCKS->SLEEP_EN0, .en1 = CLOCKS->SLEEP_EN1 & CLOCKS_SLEEP_EN1_BITS};
+    }
+    /// The gates that apply awake: a peripheral gated here is off until
+    /// the gate opens again, its state kept. All open at reset.
+    static void wake_enables(SleepClocks c) {
+        CLOCKS->WAKE_EN0 = c.en0;
+        CLOCKS->WAKE_EN1 = c.en1 & CLOCKS_WAKE_EN1_BITS;
+    }
+    static SleepClocks wake_enables() {
+        return {.en0 = CLOCKS->WAKE_EN0, .en1 = CLOCKS->WAKE_EN1 & CLOCKS_WAKE_EN1_BITS};
+    }
+    /// The gates as they stand this instant (ENABLED0/1): the wake set,
+    /// read from an awake core.
+    static SleepClocks enabled() {
+        return {.en0 = CLOCKS->ENABLED0, .en1 = CLOCKS->ENABLED1 & CLOCKS_ENABLED1_BITS};
     }
 
 private:

@@ -53,7 +53,9 @@ nothing short of the DORMANT state stops.
   (it excludes this core's handlers and nothing of the other core);
   `idle()` = DSB, WFI, unmask - the core's clock stops, everything
   else runs, and with both cores and the DMA asleep the clock enables
-  switch to their SLEEP_EN set (all enabled at reset); `now()`,
+  switch to their SLEEP_EN set (all enabled at reset; the SLEEP state
+  and the `sleep_hook` a dormant site installs in place of the WFI
+  are [sleep.md](sleep.md)'s); `now()`,
   `ticks_per_second` 1000, `atomic_width` 4, `panic_record()` in
   `.noinit`, `break_here()` = BKPT; `core_id()` = SIO's CPUID.
 - `Ticker` = `BasicTicker<1000>` on SysTick, `SysTickCounter` for a
@@ -164,8 +166,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The clock enables in sleep (SLEEP_EN0/1) taking effect: a current
-  meter on the supply with both cores and the DMA idle.
 - `Resets::hold` on a running block and the block's state afterwards:
   a `test_rp2040_clock` letter cycling a UART and reading its
   registers at their reset values.

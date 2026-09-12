@@ -135,9 +135,9 @@ Driver gaps, each with its reason:
 - The one-pulse-per-second reference on GPIO 20 (`RtcClock::gpin0_1hz`):
   selected and divided by one; a GPS or a second board's 1 Hz on the
   wire would measure it.
-- The dormant wake by the alarm (4.8.5.5): the sleep and dormant
-  states belong to the power chapter, where the alarm is the wake
-  source.
+- The dormant wake by the alarm (4.8.5.5) is [sleep.md](sleep.md)'s
+  measurement: the ring oscillator dormant, the crystal keeping
+  clk_rtc, the alarm the wake.
 - The calendar across a chip reset: the block is not in the core's
   reset scope, and whether the watchdog's PSM selection spares it is a
   reset chapter's measurement across a reboot.
