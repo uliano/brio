@@ -22,6 +22,7 @@ cd "$(dirname "$0")/../.."
 CXX=/sw/arm-none-eabi/bin/arm-none-eabi-g++
 FLAGS="-mcpu=cortex-m0plus -mthumb -mfloat-abi=soft -std=gnu++23 -Os \
        -Wall -Wextra -Werror -fno-exceptions -fno-rtti -c \
+       -DBRIO_RP2040_FLASH_KB=2048 \
        -Ibrio -Ithird_party/pico-sdk/CMSIS -Ithird_party/pico-sdk -Ithird_party/cmsis-core"
 FILTER="${1:-}"
 fail=0

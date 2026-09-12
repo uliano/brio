@@ -78,6 +78,7 @@ set(BRIO_COMMON_FLAGS
     -mfloat-abi=soft
     -Wall -Wextra -Werror
     -ffunction-sections -fdata-sections
+    -DBRIO_RP2040_FLASH_KB=${RP2040_FLASH_KB}   # what brio/rp2040/flash.hpp sizes the chip by
 )
 
 find_program(ARM_OBJCOPY arm-none-eabi-objcopy PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
@@ -148,6 +149,7 @@ function(rp2040_add_app name)
         -nostartfiles
         -T${CMAKE_SOURCE_DIR}/ld/${RP2040_LD}.ld
         -Wl,--gc-sections
+        -Wl,--no-warn-rwx-segments   # .data carries .ram_text, the code that runs with the flash disconnected (ld/)
         -Wl,-Map,$<TARGET_FILE_DIR:${name}>/firmware-${name}.map
         -Wl,--defsym,__nvheap_build_id=${RP2040_NVHEAP_BUILD_ID}
     )

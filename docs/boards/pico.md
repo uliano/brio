@@ -33,8 +33,8 @@ its section 1.4 ([../rp2040/vendor/README.md](../rp2040/vendor/README.md)).
   a UF2 made from the image's `.bin` (the recovery path, measured
   too).
 - **Identity**: the RP2040 has no die serial; the flash chip's unique
-  id, read over the SSI, is the identity to come. The manifest's `id`
-  is empty.
+  id (`Flash::unique_id()`, 4Bh over the SSI) is the board's. The
+  manifest's `id` is empty.
 - Manifest type `pico`; the same type serves a Pico H. The 2 MB
   flash shares the `rp2040-*` presets with the WeAct board.
 

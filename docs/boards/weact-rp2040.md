@@ -29,8 +29,8 @@ two header rows. Design files: WeAct's own repository
   here (a Pico's VBUS sense and VSYS/3), GP23 is the button (a Pico's
   regulator PS pin). ADC_VREF is on the header.
 - **Identity**: the RP2040 has no die serial; the flash chip's unique
-  id, read over the SSI, is the identity to come. The manifest's `id`
-  is empty.
+  id (`Flash::unique_id()`, 4Bh over the SSI) is the board's. The
+  manifest's `id` is empty.
 - Manifest type `weact2040`; the 2 MB flash shares the `rp2040-*`
   presets with a Pico. A 16 MB variant would want its own linker
   script and preset.

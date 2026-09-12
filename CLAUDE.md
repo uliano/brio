@@ -302,11 +302,11 @@ gets its home in `docs/design/` when taken.
   platform type per core, util/inbox.hpp's bridge, the launch through
   the bootrom's protocol - design/kernel.md section 12 and
   docs/rp2040/multicore.md, measured by test_rp2040_multicore. What
-  remains: the chapters (the flash, power - the DMA, the SPI, the
-  I2C, the PWM, the ADC, the RTC and the PIO are done, the engines in
-  the UART's and the two bus hosts' slots, on the PWM's wrap, the
-  ADC's FIFO and the PIO's), a console on core 1, the Pico H as the
-  reference board.
+  remains: the power chapter (the DMA, the SPI, the I2C, the PWM, the
+  ADC, the RTC, the PIO and the flash are done - the engines in the
+  UART's and the two bus hosts' slots, on the PWM's wrap, the ADC's
+  FIFO and the PIO's; the heap and the journal on the top of the QSPI
+  chip), a console on core 1, the Pico H as the reference board.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -1328,6 +1328,17 @@ brio/                    the framework, four strata:
                            (a frequency and a duty with no capture unit),
                            PwmPeriodicTick
     dma_engine.hpp         NoDmaEngine, the empty slot's tag
+    flash.hpp              the external QSPI chip: Flash (the bootrom's
+                           six functions found by code, every erase /
+                           program / raw command a WINDOW with the flash
+                           disconnected - .ram_text, interrupts masked,
+                           the second stage's SRAM copy re-entered -,
+                           the JEDEC / unique / status ids) + Xip (the
+                           cache, its counters)
+    nvm_flash.hpp          QspiFlashPartition (the top 64 KB the linker's
+                           flash region stops short of) + QspiFlash and
+                           QspiFlashJournalZone, the two FlashMedia
+                           (4096 / 256)
     uart.hpp               Pl011<n> resource (the FIFOs, the divisor and its
                            latching write, the loop-back, the interrupt trio
                            through the aliases) + Uart<n, pins, rx, tx, engines>:

@@ -28,6 +28,19 @@
  *    grows down through scratch_y and would then run into scratch_x
  *    with no hardware guard. Four kilobytes per core.
  *
+ *  - THE TOP 64 KB OF THE FLASH ARE NOT THE LINKER'S: they are the
+ *    storage partition of brio/rp2040/nvm_flash.hpp (the block heap and
+ *    the value journal), a constant of that header, so `flash` stops at
+ *    1984K and `__brio_flash_end` says where; the header reads the
+ *    symbol back and closes the storage if a script ever grew past it.
+ *
+ *  - CODE THAT RUNS WITH THE FLASH DISCONNECTED lives in `.ram_text`,
+ *    an input section placed inside .data so the crt's copy loop moves
+ *    it into SRAM with the initialized data: brio/rp2040/flash.hpp's
+ *    engine calls the bootrom's flash functions from there, because
+ *    while a sector is erased or a page programmed the XIP window is
+ *    not there to fetch from.
+ *
  * The .data/.bss/.noinit sections take the main 256 KB. .noinit is
  * NOLOAD and excluded from the crt's zero-fill: kernel/platform.hpp's
  * PanicRecord lives there and must survive a reset, as on every target.
@@ -37,7 +50,7 @@
 
 MEMORY
 {
-    flash (rx)      : ORIGIN = 0x10000000, LENGTH = 2048K
+    flash (rx)      : ORIGIN = 0x10000000, LENGTH = 1984K   /* 2048K less the 64K storage partition */
     ram (rwx)       : ORIGIN = 0x20000000, LENGTH = 256K
     scratch_x (rwx) : ORIGIN = 0x20040000, LENGTH = 4K
     scratch_y (rwx) : ORIGIN = 0x20041000, LENGTH = 4K
@@ -83,6 +96,8 @@ SECTIONS
     {
         . = ALIGN(4);
         __data_start = .;
+        *(.ram_text .ram_text.*)
+        . = ALIGN(4);
         *(.data .data.*)
         . = ALIGN(4);
         __data_end = .;
@@ -105,6 +120,10 @@ SECTIONS
         . = ALIGN(4);
         *(.noinit .noinit.*)
     } > ram
+
+    /* One past the last flash byte the linker may place: the storage
+       partition's floor, read back by brio/rp2040/nvm_flash.hpp. */
+    __brio_flash_end = ORIGIN(flash) + LENGTH(flash);
 
     /* Core 0's stack: the whole of the upper unstriped bank. */
     __stack_top = ORIGIN(scratch_y) + LENGTH(scratch_y);
