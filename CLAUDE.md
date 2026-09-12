@@ -302,11 +302,11 @@ gets its home in `docs/design/` when taken.
   platform type per core, util/inbox.hpp's bridge, the launch through
   the bootrom's protocol - design/kernel.md section 12 and
   docs/rp2040/multicore.md, measured by test_rp2040_multicore. What
-  remains: the chapters (PIO, the flash, power - the DMA, the SPI,
-  the I2C, the PWM, the ADC and the RTC are done, the engines in the
-  UART's and the two bus hosts' slots, on the PWM's wrap and on the
-  ADC's FIFO), a console on core 1, the Pico H as the reference
-  board.
+  remains: the chapters (the flash, power - the DMA, the SPI, the
+  I2C, the PWM, the ADC, the RTC and the PIO are done, the engines in
+  the UART's and the two bus hosts' slots, on the PWM's wrap, the
+  ADC's FIFO and the PIO's), a console on core 1, the Pico H as the
+  reference board.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -1308,6 +1308,15 @@ brio/                    the framework, four strata:
                            masks the line and disarms the match) +
                            RtcDateTime / RtcAlarm and the calendar arithmetic
                            the silicon has not (both leap rules, the weekday)
+    pio.hpp                the PIO (chapter 3): the nine instructions as
+                           constexpr encoders (side-set and delay folded in,
+                           JMPs relocated at load), PioProgram<N>, Pio<n> (the
+                           memory with a first-fit placer, the enables and
+                           restarts, the flags, the two lines), PioSm<n, sm>
+                           (the configuration, the FIFOs, an instruction on
+                           the side, the pins claimed by a SET) + the
+                           chapter's programs as tasks: PioUartTx / PioUartRx,
+                           PioSquareWave, PioPwm (a PwmChannel)
     pwm.hpp                the PWM block (4.5): Pwm (the global enable for
                            lockstep, the four interrupt registers) +
                            PwmSlice<n> (a 16-bit counter, TOP, two levels,
