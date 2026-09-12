@@ -302,9 +302,9 @@ gets its home in `docs/design/` when taken.
   platform type per core, util/inbox.hpp's bridge, the launch through
   the bootrom's protocol - design/kernel.md section 12 and
   docs/rp2040/multicore.md, measured by test_rp2040_multicore. What
-  remains: the chapters (DMA, SPI, I2C, PWM, ADC, RTC, PIO, the
-  flash, power), a console on core 1, the Pico H as the reference
-  board.
+  remains: the chapters (SPI, I2C, PWM, ADC, RTC, PIO, the flash,
+  power - the DMA is done, its engines in the UART's slots), a
+  console on core 1, the Pico H as the reference board.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -1136,7 +1136,14 @@ brio/                    the framework, four strata:
                            two OPTIONAL DMA engine slots (harvest() the verb
                            that publishes a receive run) and trailing
                            options that cost nothing; USART2 on columns 1..6
-    dma_engine.hpp         NoDmaEngine, the empty slot's tag, and the rule
+    dma_engine.hpp         NoDmaEngine, the empty slot's tag, and the request
+                           numbers (Dreq, table 119) a transport names
+    dma.hpp                the DMA (2.5): Dma (the block), DmaChannel<0..11>
+                           (prepare/load/trigger, the abort with E13's
+                           workaround, progress from TRANS_COUNT per E12),
+                           DmaLine<0|1> (one per core by convention),
+                           DmaTimer<n>, DmaSniffer, and DmaTxEngine/DmaRxEngine
+                           <ch, Elem, line> for the transports' slots, and the rule
                            that two engines of one transport name two channels
     dma.hpp                Dma + DmaChannel<1..7> (THE CHANNEL IS THE
                            REQUEST: no multiplexer, table 8-2 names the
@@ -1262,10 +1269,13 @@ brio/                    the framework, four strata:
                            every configuring verb) + Pin<n> (no port letter)
     dma_engine.hpp         NoDmaEngine, the empty slot's tag
     uart.hpp               Pl011<n> resource (the FIFOs, the divisor and its
-                           latching write, the interrupt trio through the
-                           aliases) + Uart<n, pins, rx, tx, engines>: the byte
-                           transport whose write_byte PENDS THE LINE, because
-                           the PL011's transmit interrupt is a transition
+                           latching write, the loop-back, the interrupt trio
+                           through the aliases) + Uart<n, pins, rx, tx, engines>:
+                           the byte transport whose write_byte PENDS THE LINE,
+                           because the PL011's transmit interrupt is a
+                           transition; with engines, dma_isr() and harvest()
+                           (the RX pad before the receiver, the FIFO emptied
+                           and the credits cleared before a run)
   host/                  the test target
     platform.hpp           HostPlatform (virtual clock, recording idle/break)
                            + HostCore<n> (the two-core host: the same platform

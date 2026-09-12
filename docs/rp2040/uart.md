@@ -69,8 +69,15 @@ function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
   `release()`; the counters `rx_overruns` (ring), `frame_errors`,
   `parity_errors`, `break_errors` (a break entry carries FE too, and
   both are counted), `hw_overruns` (one per overrun event, from
-  UARTRSR), `clear_errors`. The engine slots take `NoDmaEngine`
-  until `dma.hpp` exists.
+  UARTRSR), `clear_errors`. The two engine slots take `dma.hpp`'s
+  `DmaTxEngine` / `DmaRxEngine` ([dma.md](dma.md)): with a transmit
+  engine the ring's runs leave as DMA blocks and `dma_isr()` (the
+  line's ISR body) releases each and starts the next; with a receive
+  engine the run is filled straight from UARTDR, `harvest()`
+  publishes what TRANS_COUNT says has landed and re-arms, the
+  completion re-arms from the line, and UARTRSR's sticky errors are
+  read per harvest (the engine moves bytes, not the entries' flags);
+  `dma_faults()` counts the blocks abandoned after a bus error.
 
 HOW THE TRANSMITTER STARTS, because the interrupt is a transition:
 `write_byte` queues the byte and PENDS THE INSTANCE'S LINE in the
@@ -140,6 +147,12 @@ extern "C" void isr_uart0() {
   the eighth data bit lands where the parity bit is expected - 30
   parity errors counted and dropped, 34 frames accepted, no frame
   error - the attribution per entry, on a real wire.
+- THE ENGINES (`test_rp2040_dma`): 4096 bytes through the loop-back
+  at 3 Mbaud with an engine in each slot, byte-exact, 22 interrupts
+  where the interrupt-driven transport takes 520; the two traps of a
+  receive engine - a break taken at enable over a low pad, and the
+  request credits that outlive a completed run - are the transport's
+  business now ([dma.md](dma.md)).
 - THROUGH THE DEBUG PROBE'S BRIDGE, the console's own ladder fed by
   the host: byte-exact at 115200, 460800, 921600, 1 M, 2 M and 3 M
   baud (142 KB at 3 M with no error and no overrun, host to board);
@@ -167,8 +180,6 @@ Driver gaps, each with its reason:
 - IrDA (SIR, the low-power counter): an IrDA transceiver.
 - The stick-parity bit (SPS): born with a first protocol that uses
   it (a nine-bit address mark).
-- The DMA engines (UARTDMACR, the request lines): with `dma.hpp`; the
-  slots are shaped and empty.
 - The FIFO trigger levels other than the task's half and eighth: a
   program with a reason to move them; the resource writes any pair.
 

@@ -51,6 +51,24 @@
  *  - the line's interrupt is ONE NVIC line per instance (UART0_IRQ,
  *    UART1_IRQ, table 2.3.2), the app binds isr_uart0 / isr_uart1.
  *
+ * THE ENGINE SLOTS (rp2040/dma.hpp's DmaTxEngine / DmaRxEngine, the
+ * other families' shape). With a TRANSMIT engine the handler never
+ * touches the transmit FIFO: write_byte() and write_bulk() queue into
+ * the ring and pump_tx() starts a block over the ring's contiguous run
+ * whenever the engine is idle; the block's completion - on the DMA
+ * line the engine reports on, dma_isr() - releases exactly that run
+ * and starts the next. The DREQ (UARTDMACR.TXDMAE, the transmit FIFO's
+ * own request) paces it, credit by credit (2.5.3.2), so no kick is
+ * ever needed. With a RECEIVE engine the receive interrupts stay off
+ * and the engine fills the ring's free run straight from UARTDR; what
+ * has arrived is read off TRANS_COUNT by harvest(), a VERB the owner
+ * calls at its own pace (a kernel TimeEvent every few ticks is the
+ * shape), which publishes it and re-arms the run - and reads UARTRSR
+ * once per harvest, since the engine moves BYTES and the per-entry
+ * error flags of UARTDR are not among them: an error is counted
+ * against the harvested run, not a byte. The DMA and the handler never
+ * touch one FIFO at once (2.5.3.2's rule).
+ *
  * THE PINS. UART0 and UART1 each reach four TX pads and four RX pads
  * under function 2 (2.19.2, table 279), fixed per instance: UART0 TX on
  * GPIO 0, 12, 16, 28 and RX on 1, 13, 17, 29; UART1 TX on 4, 8, 20, 24
@@ -390,9 +408,6 @@ class Uart {
                   "(datasheet 2.19.2, table 279)");
     static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
                   "the engine slots must name a complete type");
-    static_assert(!TxEngine::present && !RxEngine::present,
-                  "the DMA engines of this stratum arrive with rp2040/dma.hpp; the slots "
-                  "take NoDmaEngine until then");
     static_assert(uart_engines_distinct<TxEngine, RxEngine>(),
                   "the transmit and receive engines must use DIFFERENT DMA channels");
 
@@ -412,6 +427,7 @@ class Uart {
     static inline volatile uint8_t m_parity_errors = 0; // PE: byte dropped
     static inline volatile uint8_t m_break_errors = 0;  // BE: a break, dropped
     static inline volatile uint8_t m_hw_overruns = 0;   // OE: the FIFO was full when a frame landed (UARTRSR)
+    static inline volatile uint16_t m_dma_faults = 0;   // blocks the engines threw away
     static inline uint32_t m_baud = 0;                  // for rebase()
 
 public:
@@ -472,16 +488,37 @@ public:
         }
         U::clear_pending(UartInterrupt::all);
         U::interrupts(UartInterrupt::all, false);
-        U::interrupts(UartInterrupt::rx | UartInterrupt::rx_timeout, true);
-        U::enable(true);
-
-        // The pads go to the UART only now, with the transmitter
-        // already enabled and its line idling high: handing the pad
-        // over first would show whatever a disabled block drives. RX
-        // gets a pull-up so an unconnected line reads idle rather than
-        // a break (the pad's reset pull is DOWN).
-        TxPin::function(PinFunction::uart);
+        if constexpr (!has_rx_engine) {
+            U::interrupts(UartInterrupt::rx | UartInterrupt::rx_timeout, true);
+        }
+        // THE RX PAD FIRST, with its pull-up, before the receiver is
+        // enabled: the pad's reset pull is DOWN, and a receiver enabled
+        // over a low line takes a BREAK - a zero byte flagged BE that the
+        // handler would drop by its flags but a receive ENGINE, which
+        // moves bytes and not flags, would deliver at the head of every
+        // run (measured, a wire from a silent peer on the pad). The TX
+        // pad goes over only after the transmitter is enabled and its
+        // line idles high: handing it over first would show whatever a
+        // disabled block drives.
         RxPin::function(PinFunction::uart, {.pull = PinPull::up});
+        U::enable(true);
+        TxPin::function(PinFunction::uart);
+        // And the receive FIFO is EMPTIED before an engine takes it:
+        // whatever a peer put on the line between the reset and here
+        // is not this life's traffic.
+        while (!U::rx_empty()) {
+            (void)U::read_data();
+        }
+        U::clear_receive_status();
+        m_dma_faults = 0;
+        if constexpr (has_tx_engine) {
+            TxEngine::arm(&U::regs().UARTDR, n == 0 ? Dreq::uart0_tx : Dreq::uart1_tx);
+        }
+        if constexpr (has_rx_engine) {
+            RxEngine::arm(&U::regs().UARTDR, n == 0 ? Dreq::uart0_rx : Dreq::uart1_rx);
+            rearm_rx();
+        }
+        U::dma_requests(has_tx_engine, has_rx_engine);   // after the channels stand (port())
 
         Nvic::enable(U::irq());
         return true;
@@ -498,9 +535,9 @@ public:
             return;   // the new rate cannot carry this baud: nothing better to do
         }
         drain();
-        U::enable(false);
+        port(false);
         (void)U::divisor(*d);
-        U::enable(true);
+        port(true);
     }
 
     /// Change the rate under the running port, once the TX side is
@@ -513,9 +550,9 @@ public:
             return false;
         }
         drain();
-        U::enable(false);
+        port(false);
         (void)U::divisor(*d);
-        U::enable(true);
+        port(true);
         m_baud = baud;
         return true;
     }
@@ -529,9 +566,9 @@ public:
             return false;
         }
         drain();
-        U::enable(false);
+        port(false);
         const bool ok = U::line_control(format, true);
-        U::enable(true);
+        port(true);
         return ok;
     }
 
@@ -539,9 +576,9 @@ public:
     /// into the receiver, the RX pad ignored while on. Main context.
     static bool loopback(bool on) {
         drain();
-        U::enable(false);
+        port(false);
         const bool ok = U::loopback(on);
-        U::enable(true);
+        port(true);
         return ok;
     }
 
@@ -562,6 +599,13 @@ public:
     static void release() {
         Nvic::disable(U::irq());
         U::interrupts(UartInterrupt::all, false);
+        if constexpr (has_tx_engine) {
+            TxEngine::stop();
+        }
+        if constexpr (has_rx_engine) {
+            RxEngine::stop();
+        }
+        U::dma_requests(false, false);
         U::enable(false);
         TxPin::release();
         RxPin::release();
@@ -586,12 +630,96 @@ public:
     [[gnu::always_inline]] static bool isr() {
         const uint32_t active = U::pending();
         bool edge = false;
-        if ((active & (UartInterrupt::rx | UartInterrupt::rx_timeout)) != 0u) {
-            edge = receive();
+        if constexpr (!has_rx_engine) {
+            if ((active & (UartInterrupt::rx | UartInterrupt::rx_timeout)) != 0u) {
+                edge = receive();
+            }
+        } else {
+            (void)active;
         }
-        feed();
+        if constexpr (!has_tx_engine) {
+            feed();
+        }
         return edge;
     }
+
+    /**
+     * The ISR body of the DMA LINE this transport's engines report on -
+     * the app binds isr_dma_0 (or isr_dma_1) to it:
+     *
+     *     extern "C" void isr_dma_0() { (void)Serial::dma_isr(); }
+     *
+     * Each engine reads only its own channel's status, so a line other
+     * channels of the program report on is shared safely. A transmit
+     * completion releases exactly the block's bytes from the ring and
+     * starts the next run; a receive completion is left to harvest().
+     * Returns true when something of this transport's was served.
+     */
+    [[gnu::always_inline]] static bool dma_isr() {
+        bool mine = false;
+        if constexpr (has_tx_engine) {
+            const uint8_t f = TxEngine::service();
+            if ((f & TxEngine::flag_error) != 0u) {
+                (void)TxEngine::abandon();
+                m_dma_faults = m_dma_faults + 1u;
+                mine = true;
+            } else if ((f & TxEngine::flag_complete) != 0u) {
+                m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
+                pump_tx();
+                mine = true;
+            }
+        }
+        if constexpr (has_rx_engine) {
+            const uint8_t f = RxEngine::service();
+            if ((f & RxEngine::flag_error) != 0u) {
+                (void)RxEngine::abandon();
+                m_dma_faults = m_dma_faults + 1u;
+                mine = true;
+            } else if ((f & RxEngine::flag_complete) != 0u) {
+                // The run filled: published and re-armed HERE, not left to
+                // harvest() - at 3 Mbaud the 32-deep FIFO overflows 100 us
+                // after the run ends, and the credits the overflow leaves
+                // behind would be spent reading nothing (measured).
+                publish_rx();
+                rearm_rx();
+                mine = true;
+            }
+        }
+        return mine;
+    }
+
+    /**
+     * Ask the receive engine what has arrived, and publish it (the file
+     * header). Returns the same edge isr() does - the ring went from
+     * empty to non-empty. False, and free, without an engine.
+     */
+    static bool harvest() {
+        if constexpr (!has_rx_engine) {
+            return false;
+        } else {
+            const uint32_t status = U::receive_status();
+            if (status != 0u) {
+                if ((status & UART_UARTRSR_FE_BITS) != 0u) { m_frame_errors = m_frame_errors + 1; }
+                if ((status & UART_UARTRSR_PE_BITS) != 0u) { m_parity_errors = m_parity_errors + 1; }
+                if ((status & UART_UARTRSR_BE_BITS) != 0u) { m_break_errors = m_break_errors + 1; }
+                if ((status & UART_UARTRSR_OE_BITS) != 0u) { m_hw_overruns = m_hw_overruns + 1; }
+                U::clear_receive_status();
+            }
+            // The ring's producer side is shared with the line's handler
+            // (a completion publishes and re-arms there): under the guard.
+            InterruptGuard guard;
+            const bool was_empty = m_rx.empty();
+            publish_rx();
+            if (RxEngine::idle() || RxEngine::full() || RxEngine::capacity() == 0u) {
+                rearm_rx();
+            }
+            return was_empty && !m_rx.empty();
+        }
+    }
+
+    /// Blocks the engines threw away after a bus error. Zero, and free,
+    /// without an engine.
+    static uint16_t dma_faults() { return m_dma_faults; }
 
     // ---- byte transport (satisfies ByteSink / ByteSource) -----------------
 
@@ -600,10 +728,10 @@ public:
     /// the handler is the FIFO's one feeder.
     static bool write_byte(uint8_t b) {
         if (!m_tx.push(b)) {
-            Nvic::set_pending(U::irq());   // a refused byte still nudges: see below
+            nudge();   // a refused byte still nudges: see below
             return false;
         }
-        Nvic::set_pending(U::irq());
+        nudge();
         return true;
     }
 
@@ -645,7 +773,7 @@ public:
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
             done += take;
         }
-        Nvic::set_pending(U::irq());
+        nudge();
         return done;
     }
 
@@ -670,8 +798,15 @@ public:
     }
 
     static bool rx_pending() { return !m_rx.empty(); }
-    /// Nothing queued, nothing in the FIFO, nothing in the shifter.
-    static bool tx_idle() { return m_tx.empty() && !U::busy(); }
+    /// Nothing queued, no block in flight, nothing in the FIFO, nothing
+    /// in the shifter.
+    static bool tx_idle() {
+        if constexpr (has_tx_engine) {
+            return m_tx.empty() && !TxEngine::busy() && !U::busy();
+        } else {
+            return m_tx.empty() && !U::busy();
+        }
+    }
 
     // ---- diagnostics ------------------------------------------------------
 
@@ -689,6 +824,73 @@ public:
     }
 
 private:
+    /// The port off or on WITH ITS DMA REQUESTS: the requests cleared
+    /// before the UART is disabled and set again after it is enabled,
+    /// because the PL011 re-asserts a request when the UART comes back
+    /// with RXDMAE set - and a request on an EMPTY receive FIFO is one
+    /// credit the DMA spends reading nothing (measured: a zero byte at
+    /// the head of every run after a loop-back or a format change).
+    static void port(bool on) {
+        if (on) {
+            U::enable(true);
+            U::dma_requests(has_tx_engine, has_rx_engine);
+        } else {
+            U::dma_requests(false, false);
+            U::enable(false);
+        }
+    }
+
+    /// What a queued byte does to get moving: pend the handler (the
+    /// FIFO's one feeder) without an engine, start a block with one.
+    static void nudge() {
+        if constexpr (has_tx_engine) {
+            pump_tx();
+        } else {
+            Nvic::set_pending(U::irq());
+        }
+    }
+
+    /// Start the next contiguous run of the TX ring on the engine, if it
+    /// is idle and there is one. Under the guard: the completion path
+    /// runs on the DMA line.
+    static void pump_tx() {
+        if constexpr (has_tx_engine) {
+            InterruptGuard guard;
+            if (TxEngine::busy()) {
+                return;
+            }
+            const auto run = m_tx.read_span();
+            if (run.empty()) {
+                return;
+            }
+            (void)TxEngine::start(run.data(), static_cast<uint32_t>(run.size()));
+        }
+    }
+
+    /// What the receive engine has landed since the last look, handed to
+    /// the ring's consumer.
+    static void publish_rx() {
+        if constexpr (has_rx_engine) {
+            const uint32_t fresh = RxEngine::take();
+            if (fresh != 0u) {
+                m_rx.publish(static_cast<typename decltype(m_rx)::index_t>(fresh));
+            }
+        }
+    }
+
+    /// Point the receive engine at the ring's next free run. No room is
+    /// bytes lost before they arrive, counted as the ring overrun it is.
+    static void rearm_rx() {
+        if constexpr (has_rx_engine) {
+            const auto room = m_rx.write_span();
+            if (room.empty()) {
+                m_rx_overruns = m_rx_overruns + 1;
+                return;
+            }
+            (void)RxEngine::start(room.data(), static_cast<uint32_t>(room.size()));
+        }
+    }
+
     /// Drain the receive FIFO into the ring, attributing each entry's
     /// error flags to its own byte. Returns the ring's empty -> non-empty
     /// edge.
