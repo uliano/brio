@@ -27,6 +27,13 @@
  * would be a decision about the whole port, and this file only speaks
  * about pins.
  *
+ * TWO PARTS, TWO MODE FIELDS. The CH32V006's MODE is one bit (the
+ * second reserved); the CH32V003's is the F1's two, with a speed, and
+ * this file drives its outputs at that part's top speed - so a nibble
+ * spelled here lands right on both (device::gpio_mode_output). Port B
+ * is the CH32V006's alone: a Pin on it does not compile for the
+ * CH32V003 (device::has_port_b through gpio_base_for).
+ *
  * THE BONDING SHOWS IN THE REGISTERS: port B of the CH32V006 has seven
  * pins (PB0..PB6, DS 2.1), and its eighth configuration nibble reads
  * zero after a reset where the seven read 0x4 (measured). The pin-level
@@ -93,13 +100,17 @@ struct PinRef {
 
 /// The CNF/MODE nibble for a configuration (RM 7.3.1.1).
 constexpr uint32_t pin_nibble(PinMode mode, PinDrive drive) {
+    // The output MODE code is the part's (device::gpio_mode_output): a
+    // single bit on the CH32V006, the F1's two bits with a speed on the
+    // CH32V003, where the stratum drives at the top speed.
+    const uint32_t out = device::gpio_mode_output;
     switch (mode) {
         case PinMode::analog:    return 0x0u;                                   // CNF 00, MODE 0
         case PinMode::input:     return 0x4u;                                   // CNF 01 floating
-        case PinMode::output:    return (drive == PinDrive::push_pull) ? 0x1u   // CNF 00, MODE 1
-                                                                       : 0x5u;  // CNF 01, MODE 1
-        case PinMode::alternate: return (drive == PinDrive::push_pull) ? 0x9u   // CNF 10, MODE 1
-                                                                       : 0xDu;  // CNF 11, MODE 1
+        case PinMode::output:    return (drive == PinDrive::push_pull) ? (0x0u | out)   // CNF 00, MODE out
+                                                                       : (0x4u | out);  // CNF 01, MODE out
+        case PinMode::alternate: return (drive == PinDrive::push_pull) ? (0x8u | out)   // CNF 10, MODE out
+                                                                       : (0xCu | out);  // CNF 11, MODE out
     }
     return 0x4u;
 }

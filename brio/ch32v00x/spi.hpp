@@ -67,6 +67,7 @@
 
 #pragma once
 
+
 #include <stdint.h>
 
 #include <optional>
@@ -871,6 +872,7 @@ public:
     static bool recover() {
         req_.cs.set();
         if constexpr (has_engines) {
+            S::dma_requests(false, false);
             (void)TxEngine::abandon();
             RxEngine::stop();
             RxEngine::arm(S::data_address());
@@ -933,6 +935,15 @@ private:
     static void launch_dma() {
         dma_done_ = false;
         dma_active_ = true;
+        // THE REQUESTS ARE ARMED AROUND THE ENGINES AND NOWHERE ELSE. A
+        // request that rises while its channel is disabled is LATCHED by
+        // the controller and served at the channel's next enable
+        // (measured: with RXDMAEN standing, the echo of a command frame
+        // pumped by hand - or the stale frame a previous transaction left
+        // in DATAR - lands as the block's first byte and the block comes
+        // back shifted by one). So RXDMAEN is raised only once the receive
+        // channel is enabled, TXDMAEN only once the transmit one is, and
+        // finish_dma() drops both.
         // The RECEIVE channel first: its request rises only when a frame
         // has come back, and the transmit side is what starts the clock.
         if (req_.rx.get() != nullptr) {
@@ -940,16 +951,19 @@ private:
         } else {
             (void)RxEngine::start_discard(&rx_sink_, req_.len);
         }
+        S::dma_requests(false, true);
         if (req_.tx.get() != nullptr) {
             (void)TxEngine::start(req_.tx.get(), req_.len);
         } else {
             (void)TxEngine::start_fixed(&tx_dummy_, req_.len);
         }
+        S::dma_requests(true, true);
     }
 
     /// One exit for the data phase. True when the ISR-style caller
     /// should post completion.
     static bool finish_dma(uint8_t st) {
+        S::dma_requests(false, false);
         if (st != spi_ok) {
             status_ = st;
             (void)TxEngine::abandon();
@@ -976,6 +990,7 @@ private:
         while (!dma_done_ && spins-- != 0u) {
         }
         if (!dma_done_) {
+            S::dma_requests(false, false);
             (void)TxEngine::abandon();
             RxEngine::stop();
             RxEngine::arm(S::data_address());
@@ -999,10 +1014,8 @@ private:
         c.bits = SpiDataSize::bits8;
         c.clock = ceiling_ ? *ceiling_ : SpiClock::div16;
         c.nss = SpiNss::software;
-        if constexpr (has_engines) {
-            c.dma_transmit = true;
-            c.dma_receive = true;
-        }
+        // The DMA requests are NOT part of the applied configuration:
+        // launch_dma() raises them around the engines (see there).
         return c;
     }
 
@@ -1283,8 +1296,13 @@ static_assert(spi_config_valid(SpiConfig{}));
 static_assert(!spi_config_valid(SpiConfig{.direction = SpiDirection::half_duplex_out, .crc = true}));
 static_assert(!spi_config_valid(SpiConfig{.crc = true, .crc_polynomial = 0}));
 static_assert(!spi_config_valid(SpiConfig{.role = SpiRole::client, .nss = SpiNss::hardware_output}));
+#if BRIO_CH32_PART_V006
 static_assert(spi_pins_valid(spi1_default_pins) && spi_pins_valid(spi1_pins_for(4)));
 static_assert(spi1_pins_for(2).sck == Pad{'D', 2} && spi1_pins_for(2).remap == 2u);
+#else
+static_assert(spi_pins_valid(spi1_default_pins) && spi_pins_valid(spi1_pins_for(1)));
+static_assert(spi1_pins_for(1).nss == Pad{'C', 0} && spi1_pins_for(1).sck == Pad{'C', 5} && spi1_pins_for(1).remap == 1u);
+#endif
 static_assert(!spi_pins_valid(SpiPins{.sck = {'C', 5}, .mosi = {'C', 5}}));
 static_assert(!spi_pins_valid(SpiPins{.mosi = {'C', 6}}));
 static_assert(!spi_pins_valid(SpiPins{.sck = {'C', 5}, .mosi = {'C', 6}, .remap = 7}));

@@ -80,16 +80,17 @@ namespace brio {
 struct MainFlashPartition {
     MainFlashPartition() = delete;
 
-    static constexpr uint32_t page = Flash::page_size;                 // 256
-    static constexpr uint32_t storage_base = 40u * 1024u;              // 0xA000
-    static constexpr uint32_t storage_end = Flash::array_bytes;        // 0xF800
-    static constexpr uint32_t journal_pages = 24;
-    static constexpr uint32_t journal_bytes = journal_pages * page;    // 6 KB
-    static constexpr uint32_t journal_base = storage_end - journal_bytes;   // 0xE000
-    static constexpr uint32_t heap_end = journal_base;
+    static constexpr uint32_t page = Flash::page_size;                 // 256 on the CH32V006, 64 on the CH32V003
+    static constexpr uint32_t storage_base = device::flash_program_bytes;   // 0xA000 on the CH32V006, 0x3C00 on the CH32V003
+    static constexpr uint32_t storage_end = Flash::array_bytes;        // 0xF800 / 0x4000
+    static constexpr uint32_t journal_pages = device::flash_journal_pages;
+    static constexpr uint32_t journal_bytes = journal_pages * page;    // 6 KB / 1 KB
+    static constexpr uint32_t journal_base = storage_end - journal_bytes;   // 0xE000 / 0x3C00
+    static constexpr uint32_t heap_end = journal_base;                 // the heap's share: 16 KB on the CH32V006, none on the CH32V003
 
     static_assert(storage_base % page == 0u && journal_base % page == 0u);
-    static_assert(storage_base < journal_base && journal_base < storage_end);
+    static_assert(storage_base <= journal_base && journal_base < storage_end);
+    static_assert((storage_base < journal_base) == device::has_flash_heap);
 
     /// Does the linker script still stop where this partition assumes?
     static bool geometry_matches_silicon() {
@@ -160,6 +161,7 @@ struct MainFlashOps {
 
 } // namespace detail
 
+#if BRIO_CH32_HAS_FLASH_HEAP
 /// The heap's share behind the FlashMedia contract.
 struct MainFlash {
     MainFlash() = delete;
@@ -192,6 +194,7 @@ struct MainFlash {
 static_assert(FlashMedia<MainFlash>);
 static_assert(MainFlash::flash_end % MainFlash::erase_size == 0u);
 static_assert(MainFlash::flash_end / MainFlash::erase_size <= 0xFFFFu);
+#endif   // the CH32V003's array has no heap share (device::has_flash_heap)
 
 /// The journal's share: the attic, the top 24 pages.
 struct MainFlashJournalZone {

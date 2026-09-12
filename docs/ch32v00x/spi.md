@@ -29,6 +29,14 @@ the pads).
   write to each of the seven lands with SPE set. The driver's
   refusals and its disable/enable pair are the only protection there
   is.
+- **A DMA request that rises while its channel is disabled is
+  LATCHED** and served at the channel's next enable (measured: with
+  RXDMAEN standing through a command phase pumped by hand, the
+  command's echo landed as the block's first byte; with it standing
+  between transactions, the stale frame in DATAR did - every engined
+  block after the first came back shifted by one). The host raises
+  RXDMAEN only once the receive channel is enabled, TXDMAEN only once
+  the transmit one is, and drops both at the block's end.
 - **The DMA requests are channels 2 (receive) and 3 (transmit)**,
   table 8-2 - the channel is the request on this family.
 - **The default pads on the CH32V006** are SCK PC5, MOSI PC6, MISO PC7,
@@ -107,10 +115,27 @@ both calling `Bus::dma_isr()` the same way.
 
 ## Bench findings
 
-The reference suite is `test_ch32_spi` on the CH32V006K8U6 at 48 MHz:
-its wire letters run on ONE JUMPER, MOSI (PC6) to MISO (PC7), and
-decline without it. What the desk has measured so far is its wireless
-letter:
+The reference suite is `test_ch32_spi`, two instruments on the same
+pads and never both: five letters on ONE JUMPER (MOSI PC6 to MISO
+PC7, declining without it) and five against a PEER BOARD running
+`spi_peer` on five wires (SCK PC5, MOSI PC6, MISO PC7, the GPIO chip
+select PC3 to the peer's SS, GND - the other strata's spi_link
+protocol, commanded in band), plus the wireless letter and a slip
+probe outside `z`. On the CH32V006K8U6 at 48 MHz the image is one (30
+verdicts on the loop, 25 with the peer); on the CH32V003F4P6 it is
+seven group images (letters a, b and e; c and d; f; n and o; p; q; r
+and x - the part's 15 KB and 2 KB decide the cut, design/overview.md,
+and the kernel letter against the peer is alone because its stack
+wants the room). Both instruments have been on both boards, with the
+same numbers on each. The jumper is PROBED AT EVERY LETTER, never
+trusted from the boot (the desk changes hands between letters: the
+wires moved to the peer under a running image once, and a cached
+"present" sent the loop letters against the peer); the probe pulls
+MISO AGAINST the level it drives on MOSI, because a floating PC7
+echoes PC6 with no wire (measured on the CH32V003F4P6). The peer
+findings below are against a SAM C21 at 3.3 V, and a missing ground
+wire between the boards shows as an intermittent link with the peer
+nak-ing corrupted frames (measured), not as silence.
 
 - **The reset values are table 16-2's** (STATR 0x0002 with TXE up,
   CRCR 0x0007), and a control word lands as spelled.
@@ -121,6 +146,54 @@ letter:
   interrupts for sixteen frames), the polled path, the DMA engines
   ISR-completed and polled, each transaction ending and releasing the
   select.
+- **On the loop, the pump**: the four modes at 8 and 16 bits, sixteen
+  frames each, byte-exact with one interrupt per frame; a two-frame
+  command phase then eight data frames, the data exact and the
+  command's echo discarded; a read with no out buffer clocks 0xFF
+  dummies; the select released after every transaction.
+- **The polled path at every rate**: all eight BR codes carry 64
+  bytes byte-exact, from 215 cycles a frame at /2 (the wire alone 2)
+  to 2243 at /256 (the wire alone 258) - the per-frame cost is the
+  poll, not the clock, until the divider is the larger of the two.
+- **The engines**: a 128-byte block at /2 in 3928 cycles (30 a frame,
+  the wire alone 16) with no transfer fault; a command frame on the
+  pump then 32 data frames on the engines, exact; a polled request on
+  the engines completing inside start(), exact; 16-bit frames falling
+  back to the pump; a read with no out buffer through the transmit
+  engine's fixed 0xFF cell.
+- **The hardware CRC is the arithmetic**: TXCRCR over six frames is
+  what a bitwise loop over the same polynomial computes (0x5A), the
+  receiver's RXCRCR over the looped-back frames is the same number,
+  the CRC frame read back is that value and CRCERR stands down.
+- **The kernel over it, unchanged**: four transactions through SpiBus
+  with four replies, ISR-pumped and polled interleaved on one bus; six
+  posted into a four-deep queue, one rejected at once and every
+  request answered exactly once; an idle bus votes for the sleep and
+  a busy one against it.
+- **The peer's command channel** at HCLK/256 = 187 kHz: the ident
+  names spi_peer on another architecture, ten of ten pings answered,
+  one frame per select window.
+- **The matrix against the peer**: all four transfer modes byte-exact
+  in both directions, LSb first with both ends agreeing byte-exact
+  too, and a bit-order mismatch an EXACT two-way bit reversal; 0 of 40
+  bursts slipped over ten rounds of each mode, on either part.
+- **The BR ladder against the peer** holds to HCLK/4 = 12 MHz exact
+  both ways and breaks at HCLK/2 = 24 MHz - where the peer still hears
+  every character exact, so the boundary is its answer reload and not
+  the wire.
+- **The kernel against the peer**: four transactions queued from one
+  dispatch in ONE select window come back in order, every one spi_ok,
+  the 32 bytes read by the peer board byte-exact.
+- **The roles invert**: this board as a CLIENT on the pads it hosts
+  with, SOFTWARE-SELECTED (the NSS pad of the default column is PC1,
+  the I2C's SDA on a desk carrying both buses), reads twelve frames
+  the foreign host clocks at 1.5 MHz byte-exact, and the host reads
+  the answer stream byte-exact from the first frame. THE SELECT EDGE
+  IS THE START EVEN WITHOUT A SELECT PAD (measured): a client enabled
+  during the peer's lead-in counted the peer's own pad reconfiguration
+  as a clock edge and read every frame one bit late (0x16 for 0x2C),
+  so the shifter is enabled only once the peer's SS reads low on PC3,
+  inside the 20 us it leaves before the first byte.
 
 ## Not covered yet
 
@@ -133,15 +206,12 @@ Driver gaps, each with its reason:
   has SSOE and the multi-host input for a program that wants them.
 - The CRC as part of a Request: the resource's verbs exist, born into a
   tenure shape with a device that checks one.
-- A client against a foreign host: the peer protocol (the other
-  strata's spi_link) on a second board.
+- The client on its hardware NSS input against a foreign host: the
+  default column's NSS pad is the I2C's SDA on the desk, so the peer
+  letters select the client in software; the remap column (NSS on
+  PC0) would free it, on a desk without the LED there.
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The loopback letters**: the four modes at both widths through the
-  pump, every BR code on the polled path timed, the engines with and
-  without a command phase, the CRC against a bitwise reference, the
-  arbiter's replies and votes - the suite's letters b..f on the one
-  jumper.
 - HSCR's high-speed read mode: its rate formula against a scope on
   SCK.

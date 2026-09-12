@@ -93,6 +93,7 @@
 
 #pragma once
 
+
 #include <stdint.h>
 
 #include <optional>
@@ -233,10 +234,15 @@ constexpr bool tim_present(uint8_t n) { return n == 1 || n == 2; }
 constexpr uint8_t tim_channels(uint8_t n) { return tim_present(n) ? 4u : 0u; }
 /// OCxN outputs: TIM1's channels 1..3 through the break unit; TIM2's
 /// channels 1 and 2 through DTCR, riding channels 3 and 4.
-constexpr uint8_t tim_complementary_channels(uint8_t n) { return n == 1 ? 3u : n == 2 ? 2u : 0u; }
+/// TIM1's three complementary outputs on both parts; TIM2's two pairs
+/// under DTCR on the CH32V006 alone (the CH32V003's TIM2 has no
+/// dead-time generator - device::tim2_has_dead_time).
+constexpr uint8_t tim_complementary_channels(uint8_t n) {
+    return n == 1 ? 3u : (n == 2 && device::tim2_has_dead_time) ? 2u : 0u;
+}
 constexpr bool tim_has_break(uint8_t n) { return n == 1; }
 constexpr bool tim_has_repetition(uint8_t n) { return n == 1; }
-constexpr bool tim_has_dead_time_pairs(uint8_t n) { return n == 2; }
+constexpr bool tim_has_dead_time_pairs(uint8_t n) { return n == 2 && device::tim2_has_dead_time; }
 constexpr bool tim_has_slave_mode(uint8_t n) { return tim_present(n); }
 constexpr bool tim_has_external_trigger(uint8_t n) { return tim_present(n); }
 
@@ -593,7 +599,11 @@ public:
     }
 
     /// Write the time base and leave the counter STOPPED: PSC and ATRLR
-    /// written, CTLR1 assembled in one store, CNT zeroed, then UG loads
+    /// written, CTLR1 assembled in one store, the slave controller back
+    /// at its reset (SMCFGR zero: a free-running counter until a verb
+    /// after this one says otherwise - a TimPeriodMeter's reset-on-TI1
+    /// must not outlive it into the next task's setup on the same timer,
+    /// where every interval would read zero), CNT zeroed, then UG loads
     /// both shadows and the UIF it raised is cleared.
     static bool configure(const TimConfig& c) {
         if (!config_valid(c)) {
@@ -601,6 +611,7 @@ public:
         }
         TimRegs& t = regs();
         t.CTLR1 = static_cast<uint16_t>(t.CTLR1 & ~tim_cen);
+        t.SMCFGR = 0;
         t.PSC = c.prescaler;
         t.ATRLR = c.period;
         if constexpr (has_repetition) {
@@ -977,6 +988,7 @@ private:
     }
 };
 
+#if BRIO_CH32_HAS_TIM3
 // =============================================================================
 // Tim3: the streamlined timer (ch. 13), CH32V006/007
 // =============================================================================
@@ -1108,6 +1120,7 @@ private:
         }
     }
 };
+#endif   // BRIO_CH32_HAS_TIM3
 
 // =============================================================================
 // The tasks
@@ -1383,6 +1396,13 @@ struct TimOnePulse {
         if constexpr (T::has_break) {
             (void)T::main_output(true);
         }
+        // configure() issued its UG before the channel existed, and the
+        // compare is preloaded (this file's default): without one more
+        // update here the shadow compare is still 0 when the trigger
+        // comes, PWM mode 2 is active from the first count, and the pad
+        // rises at the trigger and falls at the period - a pulse of
+        // delay + width + 1 (measured before this line existed).
+        T::update();
         return true;
     }
     static void fire() { T::enable(true); }
@@ -1403,7 +1423,7 @@ static_assert(tim_internal_trigger(2, 0) == 1u && tim_internal_trigger(1, 1) == 
               tim_internal_trigger(1, 0) == 0u);
 static_assert(tim_trigger_index_for(2, 1) == 0u && tim_trigger_index_for(1, 2) == 1u &&
               tim_trigger_index_for(1, 1) == 0xFFu);
-static_assert(tim_complementary_channels(1) == 3u && tim_complementary_channels(2) == 2u);
+static_assert(tim_complementary_channels(1) == 3u && tim_complementary_channels(2) == (device::tim2_has_dead_time ? 2u : 0u));
 static_assert(!tim_pair_dead_time_valid({.ticks = 0}) && tim_pair_dead_time_valid({.ticks = 16}) &&
               !tim_pair_dead_time_valid({.ticks = 17}));
 static_assert(sizeof(TimRegs) == 0x50 && offsetof(TimRegs, CHCVR) == 0x34 && offsetof(TimRegs, BDTR) == 0x44);

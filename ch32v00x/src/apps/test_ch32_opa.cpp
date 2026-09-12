@@ -1,7 +1,8 @@
 // test_ch32_opa - the reference bench suite for the CH32V00x's OPA:
-// ch32v00x/opa.hpp over RM ch. 17, measured with NO WIRE - the two
-// inputs at the levels their own pulls give them, the output read on
-// the ADC's channel 9, the bias reference as the known voltage.
+// ch32v00x/opa.hpp over RM ch. 17 of each part, measured with NO WIRE
+// - the inputs at the levels their own pulls give them, the output
+// read on the ADC's channel the part routes it to (9 on the CH32V006,
+// an internal route; 7 on the CH32V003, the pad PD4 itself).
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -9,20 +10,27 @@
 //
 // NOTHING TO WIRE. PA2 (the positive input, OPA_CHP0) and PA4 (the
 // differential PGA's negative input) are read through their internal
-// pulls; PC0 is the LED.
+// pulls on the CH32V006; on the CH32V003 PA2 and PD0 (OPN1) are the
+// two inputs and PD4 the output pad; PC0 is the LED.
 //
 // What is exercised, letter by letter:
 //   a  the block, WIRELESS: the lock as found, the key pair, the
-//      refusals, a configuration read back, the lock's one-way
-//   b  THE PGA INTO THE ADC: the positive input pulled down and up
-//      through a gain of 4, the output on channel 9 at the rails
-//   c  THE DIFFERENTIAL PGA: its sign from the inputs at opposite
-//      rails - and the finding that its input network is not one a
-//      pad's pull can drive, so the bias reference stays unmeasured
-//   d  CMP2: the key lifts the lock, and CMP_EN2 does not take on this
-//      part - the comparators are the CH32V007's
+//      refusals, a configuration read back - on the CH32V003 the three
+//      bits of EXTEND_CTR, no lock, the other part's selections refused
+//   b  THE OPA INTO THE ADC: on the CH32V006 the positive input pulled
+//      down and up through a gain of 4, the output on channel 9 at the
+//      rails; on the CH32V003 the amplifier open-loop as a comparator,
+//      PA2 against PD0 through their pulls, the output PD4 at the rails
+//      on channel 7
+//   c  (CH32V006) THE DIFFERENTIAL PGA: its sign from the inputs at
+//      opposite rails - and the finding that its input network is not
+//      one a pad's pull can drive, so the bias reference stays
+//      unmeasured
+//   d  CMP2: the key lifts the lock, and CMP_EN2 does not take on the
+//      CH32V006 - the comparators are the CH32V007's; on the CH32V003
+//      there is no comparator and the verbs say so
 //
-// build: boards = v006k8
+// build: boards = v006k8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -51,7 +59,14 @@ using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
 using Led = Pin<'C', 0>;
 using PosPad = Pin<'A', 2>;
-using NegPad = Pin<'A', 4>;
+using NegPad = Pin<'A', 4>;        ///< the differential PGA's (CH32V006)
+using NegPadV003 = Pin<'D', 0>;    ///< OPN1 (CH32V003)
+using OutPad = Pin<'D', 4>;        ///< the CH32V003's output, read as ADC channel 7
+
+/// A count spoken at 12 bits, scaled to the part's full scale.
+constexpr uint16_t scaled(uint16_t counts12) {
+    return static_cast<uint16_t>((static_cast<uint32_t>(counts12) * adc_steps) / 4096u);
+}
 
 TestBench<Serial> bench;
 
@@ -61,16 +76,19 @@ void console_drain() {
     (void)delay_us(clock, 500);
 }
 
-/// The ADC on channel 9 at a slow sample, settled.
+/// The ADC on the OPA's channel at a slow sample, settled.
 uint16_t read_opa() {
-    Adc::select(AdcInput::opa);
+    Adc::select_channel(Opa::adc_channel);
     (void)delay_us(clock, 200);
     return Adc::read_settled(4);
 }
 
 void adc_ready() {
     (void)Adc::init(clock, {.prescaler_code = 0x18});
-    Adc::sample_time_all(AdcSampleTime::cycles239_5);
+    Adc::sample_time_all(adc_sample_longest);
+    if constexpr (!Opa::has_block) {
+        AnalogIn<OutPad>::claim();   // the output pad is the ADC's input
+    }
 }
 
 // ===========================================================================
@@ -78,28 +96,53 @@ void adc_ready() {
 // ===========================================================================
 
 void ta_block() {
-    print(serial, "  as found: CTLR1=", hex(Opa::ctlr1()), " CTLR2=", hex(Opa::regs().CTLR2), " locked=",
-          Opa::locked(), crlf);
-    // The lock stands at reset: a configuration is refused, and takes
-    // after the key pair.
-    const bool refused_locked = Opa::locked() && !Opa::configure({});
-    Opa::unlock();
-    const bool unlocked = !Opa::locked();
-    const bool took = Opa::configure({.positive = OpaPositive::pd3, .negative = OpaNegative::gain16,
-                                      .output = OpaOutput::pa5, .bias = OpaBias::vdd_over_4, .high_speed = true});
-    const uint32_t expected = (1UL << 1) | (2UL << 4) | (5UL << 8) | opa_fb_en1 | opa_vben | opa_vbsel |
-                              (3UL << 18) | opa_hs1;
-    print(serial, "  after the keys: locked=", Opa::locked(), " CTLR1=", hex(Opa::ctlr1()), " (", hex(expected),
-          " spelled)", crlf);
-    bench.verdict("OPA_LOCK stands at reset and refuses a configuration; the key pair lifts it",
-                  refused_locked && unlocked);
-    bench.verdict("a configuration lands as spelled (PSEL, NSEL, MODE, FB, VBEN/VBSEL, HS)",
-                  took && (Opa::ctlr1() & ~opa_lock & ~opa_en1) == expected);
-    bench.verdict("the refusals: a PGA gain without the feedback, gain 32 differential, a bias without a gain",
-                  !opa_config_valid({.negative = OpaNegative::gain8, .feedback = false}) &&
-                      !opa_config_valid({.negative = OpaNegative::gain32, .differential = true}) &&
-                      !opa_config_valid({.negative = OpaNegative::pa1, .bias = OpaBias::vdd_over_2}));
-    (void)Opa::configure({});
+    if constexpr (Opa::has_block) {
+        print(serial, "  as found: CTLR1=", hex(Opa::control()), " CTLR2=", hex(Opa::regs().CTLR2), " locked=",
+              Opa::locked(), crlf);
+        // The lock stands at reset: a configuration is refused, and takes
+        // after the key pair.
+        const bool refused_locked = Opa::locked() && !Opa::configure({});
+        Opa::unlock();
+        const bool unlocked = !Opa::locked();
+        const bool took = Opa::configure({.positive = OpaPositive::pd3, .negative = OpaNegative::gain16,
+                                          .output = OpaOutput::pa5, .bias = OpaBias::vdd_over_4, .high_speed = true});
+        const uint32_t expected = (1UL << 1) | (2UL << 4) | (5UL << 8) | opa_fb_en1 | opa_vben | opa_vbsel |
+                                  (3UL << 18) | opa_hs1;
+        print(serial, "  after the keys: locked=", Opa::locked(), " CTLR1=", hex(Opa::control()), " (", hex(expected),
+              " spelled)", crlf);
+        bench.verdict("OPA_LOCK stands at reset and refuses a configuration; the key pair lifts it",
+                      refused_locked && unlocked);
+        bench.verdict("a configuration lands as spelled (PSEL, NSEL, MODE, FB, VBEN/VBSEL, HS)",
+                      took && (Opa::control() & ~opa_lock & ~opa_en1) == expected);
+        bench.verdict("the refusals: a PGA gain without the feedback, gain 32 differential, a bias without a gain",
+                      !opa_config_valid({.negative = OpaNegative::gain8, .feedback = false}) &&
+                          !opa_config_valid({.negative = OpaNegative::gain32, .differential = true}) &&
+                          !opa_config_valid({.negative = OpaNegative::pa1, .bias = OpaBias::vdd_over_2}));
+        (void)Opa::configure({});
+    } else {
+        // Three bits of EXTEND_CTR, no lock: the register as found (the
+        // lock-up monitor's LKUPEN is its reset value), the two
+        // selections written and read back, the enable, and the other
+        // part's selections refused.
+        print(serial, "  as found: EXTEND_CTR=", hex(Opa::control()), " locked=", Opa::locked(), crlf);
+        const bool never_locked = !Opa::locked() && !Opa::lock() && !Opa::locked();
+        const bool took = Opa::configure({.positive = OpaPositive::pd7, .negative = OpaNegative::pd0});
+        const bool spelled = (Opa::control() & opa_exten_mask) == (opa_exten_psel | opa_exten_nsel);
+        Opa::enable(true);
+        const bool on = Opa::enabled() && (Opa::control() & opa_exten_en) != 0u;
+        Opa::enable(false);
+        const bool back = Opa::configure({}) && (Opa::control() & opa_exten_mask) == 0u && !Opa::enabled();
+        print(serial, "  PSEL+NSEL written: EXTEND_CTR=", hex(Opa::control()), " (after the default again)", crlf);
+        bench.verdict("no lock on this part: never locked, lock() answers false", never_locked);
+        bench.verdict("OPA_PSEL and OPA_NSEL land as spelled and the enable is its own bit, LKUPEN untouched",
+                      took && spelled && on && back && (Opa::control() & exten_lkupen) != 0u);
+        bench.verdict("the refusals: PD3 as the positive input, a PGA gain, the internal output, the feedback "
+                      "switch, a bias, the high-speed mode - the other part's OPA",
+                      !opa_config_valid({.positive = OpaPositive::pd3}) &&
+                          !opa_config_valid({.negative = OpaNegative::gain4, .feedback = true}) &&
+                          !opa_config_valid({.output = OpaOutput::internal}) && !opa_config_valid({.feedback = true}) &&
+                          !opa_config_valid({.bias = OpaBias::vdd_over_2}) && !opa_config_valid({.high_speed = true}));
+    }
 }
 
 // ===========================================================================
@@ -109,22 +152,51 @@ void ta_block() {
 void tb_pga() {
     adc_ready();
     Opa::unlock();
-    (void)Opa::configure({.positive = OpaPositive::pa2, .negative = OpaNegative::gain4, .output = OpaOutput::internal});
-    Opa::enable(true);
-    PosPad::input(PinPull::down);
-    console_drain();
-    const uint16_t low = read_opa();
-    PosPad::input(PinPull::up);
-    console_drain();
-    const uint16_t high = read_opa();
-    Opa::enable(false);
-    const uint16_t off = read_opa();
-    PosPad::release();
-    print(serial, "  PGA x4, PA2 pulled down: channel 9 reads ", low, "; pulled up: ", high, "; the OPA off: ", off,
-          crlf);
-    bench.verdict("the PGA's output reaches the ADC's channel 9: near zero with the input low, saturated with "
-                  "it high",
-                  low <= 100u && high >= 3900u);
+    if constexpr (Opa::has_block) {
+        (void)Opa::configure({.positive = OpaPositive::pa2, .negative = OpaNegative::gain4, .output = OpaOutput::internal});
+        Opa::enable(true);
+        PosPad::input(PinPull::down);
+        console_drain();
+        const uint16_t low = read_opa();
+        PosPad::input(PinPull::up);
+        console_drain();
+        const uint16_t high = read_opa();
+        Opa::enable(false);
+        const uint16_t off = read_opa();
+        PosPad::release();
+        print(serial, "  PGA x4, PA2 pulled down: channel 9 reads ", low, "; pulled up: ", high, "; the OPA off: ", off,
+              crlf);
+        bench.verdict("the PGA's output reaches the ADC's channel 9: near zero with the input low, saturated with "
+                      "it high",
+                      low <= scaled(100) && high >= scaled(3900));
+    } else {
+        // No gain and no feedback switch: the amplifier open-loop is a
+        // comparator of its two pads. PA2 (OPP0) against PD0 (OPN1),
+        // each through its own pull, the output PD4 read on channel 7.
+        (void)Opa::configure({.positive = OpaPositive::pa2, .negative = OpaNegative::pd0});
+        Opa::enable(true);
+        PosPad::input(PinPull::down);
+        NegPadV003::input(PinPull::up);
+        console_drain();
+        const uint16_t low = read_opa();
+        PosPad::input(PinPull::up);
+        NegPadV003::input(PinPull::down);
+        console_drain();
+        const uint16_t high = read_opa();
+        Opa::enable(false);
+        PosPad::release();
+        NegPadV003::release();
+        OutPad::input(PinPull::down);
+        (void)delay_us(clock, 100);
+        AnalogIn<OutPad>::claim();
+        const uint16_t off = read_opa();
+        OutPad::release();
+        print(serial, "  open-loop, PA2 down / PD0 up: PD4 on channel 7 reads ", low, "; PA2 up / PD0 down: ", high,
+              "; the OPA off, PD4 released: ", off, crlf);
+        bench.verdict("the amplifier open-loop drives PD4 to the rail its inputs order: low with P below N, high "
+                      "with P above N, on the ADC's channel 7",
+                      low <= scaled(100) && high >= scaled(3900));
+    }
     Adc::release();
 }
 
@@ -197,17 +269,24 @@ void td_cmp2() {
     const bool unlocked = !Opa::cmp_locked();
     const bool on = Opa::cmp2_enable(true) && Opa::cmp2_enabled();
     (void)Opa::cmp2_enable(false);
-    print(serial, "  CMP2: CMP_KEY lifts the lock ", unlocked, ", CMP_EN2 takes ", on, "; CTLR2=", hex(Opa::regs().CTLR2),
-          crlf);
-    print(serial, "  -> ", on ? "CMP2 enables on this part"
-                             : "CMP_EN2 DOES NOT TAKE on the CH32V006: the comparators are the CH32V007's (17's "
-                               "opening paragraph), the lock alone answers",
-          crlf);
-    bench.verdict("CMP_KEY lifts CMP_LOCK; whether CMP_EN2 takes is the finding above", unlocked);
+    if constexpr (Opa::has_block) {
+        print(serial, "  CMP2: CMP_KEY lifts the lock ", unlocked, ", CMP_EN2 takes ", on, "; CTLR2=",
+              hex(Opa::regs().CTLR2), crlf);
+        print(serial, "  -> ", on ? "CMP2 enables on this part"
+                                 : "CMP_EN2 DOES NOT TAKE on the CH32V006: the comparators are the CH32V007's (17's "
+                                   "opening paragraph), the lock alone answers",
+              crlf);
+        bench.verdict("CMP_KEY lifts CMP_LOCK; whether CMP_EN2 takes is the finding above", unlocked);
+    } else {
+        print(serial, "  CMP2: no comparator on this part - the lock never lifts (", !unlocked, "), the enable never "
+              "takes (", !on, ")", crlf);
+        bench.verdict("the CMP2 verbs answer as a part with no comparator: locked for good, nothing enabled",
+                      !unlocked && !on && !Opa::cmp2_enabled());
+    }
 }
 
 void banner() {
-    print(serial, crlf, "test_ch32_opa - CH32V006K8 OPA (RM ch. 17), nothing to wire", crlf);
+    print(serial, crlf, "test_ch32_opa - ", device::part_name, " OPA (RM ch. 17), nothing to wire", crlf);
     bench.menu();
 }
 
@@ -224,8 +303,10 @@ int main() {
     brio::enable_interrupts();
 
     bench.letter('a', "the block, wireless: the lock as found, the keys, a configuration, the refusals", ta_block);
-    bench.letter('b', "THE PGA into the ADC's channel 9: the input at both rails", tb_pga);
-    bench.letter('c', "THE DIFFERENTIAL PGA: its sign at the rails, the bias unmeasurable through pulls", tc_bias);
+    bench.letter('b', "THE OPA into the ADC: the inputs at the rails through their pulls", tb_pga);
+    if constexpr (Opa::has_block) {
+        bench.letter('c', "THE DIFFERENTIAL PGA: its sign at the rails, the bias unmeasurable through pulls", tc_bias);
+    }
     bench.letter('d', "CMP2: the key lifts the lock, CMP_EN2 on this part", td_cmp2);
 
     if (serial_ok) {
@@ -250,6 +331,7 @@ int main() {
         } else if (!bench.handle(static_cast<char>(c))) {
             brio::print(serial, "unknown letter (? for the menu)", brio::crlf);
         }
+        brio::print(serial, "  stack: ", brio::stack_untouched(), " B never touched", brio::crlf);
         bench.prompt();
     }
 }

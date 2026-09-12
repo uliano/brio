@@ -1,7 +1,6 @@
-// mcu: ch32v006k8
-// HSE is named in ClockSource and not implemented: asking for it is a
-// compile error with an explanation, not a wrong clock.
+// mcu: ch32v006k8 ch32v003f4
+// The HSE takes 4 to 25 MHz (RM 3.3.2): a 30 MHz crystal must be REFUSED.
 #include "ch32v00x/clock.hpp"
 
-using Xtal = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+using Xtal = brio::Clock<brio::ClockSource::crystal, 30'000'000, 30'000'000>;
 void f() { (void)Xtal::init(); }

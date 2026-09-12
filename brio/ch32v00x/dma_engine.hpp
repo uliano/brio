@@ -21,6 +21,18 @@ struct NoDmaEngine {
     static constexpr bool present = false;
 };
 
+/// The channel an engine sits on - 0 for the empty slot, which has
+/// none - so a transport can check table 8-2 against a named engine
+/// without asking the tag for a member it has not got.
+template <typename E>
+constexpr uint8_t dma_engine_channel() {
+    if constexpr (E::present) {
+        return E::channel;
+    } else {
+        return 0;
+    }
+}
+
 /// Two engines on one transport must not name the same channel: a
 /// channel moves data ONE way. Generic over any engine that says
 /// `present` and `channel`.

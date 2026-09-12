@@ -6,7 +6,9 @@ LSI - and the two sleep sites that run util/power.hpp's model over
 them, the model unchanged here as on the other three. Documents of record:
 the CH32V00X reference manual V1.5 (2.3 for the modes, 2.3.4 and
 2.4.3..2.4.5 for the AWU, 6.4 for the EXTI lines the wake sources are),
-the QingKe V2 manual V1.3 (5.1 and 5.2 for what a WFI and a WFE do).
+the CH32V003 reference manual V1.9 (its ch. 2, the same shape with its
+own PVD table), the QingKe V2 manual V1.3 (5.1 and 5.2 for what a WFI
+and a WFE do).
 
 ## What the silicon does
 
@@ -30,12 +32,22 @@ the QingKe V2 manual V1.3 (5.1 and 5.2 for what a WFI and a WFE do).
   it.
 - **A tick that turns pending ends a WFE** with SEVONPEND set, so a
   running STK never lets a Standby begin.
+- **The two parts differ in PWR_CTLR alone**: the AWU's window,
+  prescaler table and line are the same, and so is the PVD's flag;
+  the PVD's threshold field is two bits from 1.87 to 2.66 V on the
+  CH32V006 and three bits from 2.85 to 4.4 V on the CH32V003 (whose
+  supply runs to 5.5 V), and the CH32V003 has neither LDO_MODE nor
+  FLASH_LP.
 
 ## Types and verbs
 
 [brio/ch32v00x/sleep.hpp](../../brio/ch32v00x/sleep.hpp): `Pwr`
-(`standby(bool)`, the regulator's `ldo()` modes, `pvd(on, level)` and
-`supply_low()`, `flash_low_power()`; every verb opens the PB1 gate
+(`standby(bool)`, the regulator's `ldo()` modes and `flash_low_power()`
+- the CH32V006's, writing nothing and reading the reset state on the
+CH32V003 -, `pvd(on, level)` and `supply_low()` with `PvdLevel` naming
+each part's own thresholds, `pvd_rising_mv()` / `pvd_falling_mv()`
+saying what a level is and `pvd_level_lowest` / `pvd_level_highest`
+spelling the ends of either ladder; every verb opens the PB1 gate
 first), `Awu` (`init()` turning the LSI on and arming line 9 as an
 EXTI interrupt line WITHOUT the PFIC - a flag to poll and a pending
 bit a WFE wakes on -, `arm(prescaler, window)`, `fired()`, `clear()`
@@ -79,29 +91,36 @@ are at the HSI's rate.
 
 ## Bench findings
 
-The reference suite is `test_ch32_sleep` (29 verdicts in `z`) on the
-CH32V006K8U6 at 48 MHz, the probe attached (so no current was drawn
-into a number - the meter with the probe detached is the desk's next
-step).
+The reference suite is `test_ch32_sleep` (29 verdicts in `z` on the
+CH32V006K8U6, 28 on the CH32V003F4P6) at 48 MHz, the probe attached
+(so no current was drawn into a number - the meter with the probe
+detached is the desk's next step).
 
-- **The LSI runs at 124 kHz on this part** (123.7..124.6 kHz across
-  measurements, -3% of nominal), and a prescaled window scales as the
-  divider says within 1% (8 counts at /128 against 64 undivided:
-  391087 cycles for 394432 expected).
-- **Standby is entered and left.** A time event 300 ms out, the timed
-  site placing the AWU at prescaler /1024, window 35 (297 ticks for
-  the 296 that remained at arm time - rounded up, the "at least"), two
-  `idle()` turns (the first ended by a stale event), the AWU firing,
-  SYSCLK read as the HSI at the wake and the PLL back after `disarm()`,
-  kernel time advanced by 280 ticks - the span less the seventeen the
-  core spent awake printing and waking - and the event due, not early,
-  and matured by the next `process()`.
+- **The LSI runs at 124 kHz on the CH32V006** (123.7..124.6 kHz across
+  measurements, -3% of nominal) and at 125 kHz on the CH32V003
+  (124.6..125.8 kHz, -2%), and a prescaled window scales as the
+  divider says within 1% on both (8 counts at /128 against 64
+  undivided: 391087 cycles for 394432 expected on the first, 388665
+  for 392960 on the second).
+- **Standby is entered and left, on both parts.** A time event 300 ms
+  out, the timed site placing the AWU at prescaler /1024, window 35
+  (297 ticks for the 296 that remained at arm time - rounded up, the
+  "at least"; window 36 for 303 ticks on the CH32V003 at its LSI),
+  two `idle()` turns (the first ended by a stale event), the AWU
+  firing, SYSCLK read as the HSI at the wake and the PLL back after
+  `disarm()`, kernel time advanced by 280 ticks (286 on the CH32V003) -
+  the span less what the core spent awake printing and waking - and
+  the event due, not early, and matured by the next `process()`.
 - **Sleep is a light sleep**: armed light, two `idle()` calls cover a
   tick, the tick counts through it.
 - **A disarm with no alarm fired advances by nothing**, the clock
   untouched: the accounting's other branch.
-- **The PVD at 2.66 V reads a 3.3 V supply as not low**; the regulator
-  is in its normal 1.2 V mode as found.
+- **The PVD ladder brackets the supply**: on the CH32V006 no level
+  reads low - the ladder ends at 2.66 V under a 3.3 V board - and the
+  regulator is in its normal 1.2 V mode as found; on the CH32V003
+  board the supply reads not low at the 3.3 V level and low from the
+  3.5 V one, so it sits between 3.15 and 3.5 V - the ADC's VREFINT
+  puts it at 3.27 V (adc.md).
 
 ## Not covered yet
 

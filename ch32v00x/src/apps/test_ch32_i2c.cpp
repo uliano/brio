@@ -34,7 +34,9 @@
 // share its registers and not their statics.
 //
 // What is exercised, letter by letter:
-//   a  the block, WIRELESS: the reset values, the timing arithmetic
+//   a  the block, WIRELESS: the reset values, the timing arithmetic -
+//      and, with a peer on the wire, each line's RISE TIME from the
+//      pad (a meter at rest cannot tell a pull-up from a leakage)
 //      and the refusals, the enable protection MEASURED field by
 //      field (what CKCFGR and FREQ do with PE set)
 //   b  THE SCAN: every address 0x08..0x77 probed with the empty
@@ -67,7 +69,11 @@
 // peer's command windows are hundreds of milliseconds each): pass
 // `--timeout 400`.
 //
-// build: boards = v006k8
+// build: boards = v006k8,v003f4
+// build: groups = aiw,bc,de,fg,k
+// (the kernel letter h is in no group of the CH32V003 build: its image
+// alone is 216 bytes over the part's 15 KB, and its prose is not for
+// shortening - it runs on the CH32V006)
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -223,6 +229,30 @@ uint8_t dma_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
 /// The wire has pull-ups: both lines read high with nothing driving.
 bool wire_pulled_up() {
     return SclPin::read() && SdaPin::read();
+}
+
+/// THE WIRE'S RISE TIME, in HCLK cycles: the pad pulled low as an
+/// open-drain output for a while, released as an input, and the cycles
+/// until it reads high counted - the pull-up's strength against the
+/// wire's capacitance, which a meter at rest cannot tell (a 40 kOhm
+/// internal pull reads 3.3 V too, and misses a 100 kHz bit). 0xFFFF =
+/// never rose within the budget.
+template <class P>
+uint32_t rise_cycles() {
+    P::output(false, PinDrive::open_drain);
+    (void)delay_us(clock, 20);
+    // The STK reloads every tick: the difference is taken modulo the
+    // period, which holds for any rise under a millisecond.
+    const uint32_t period = stk()->CMP + 1u;
+    const uint32_t t0 = stk()->CNT;
+    P::input(PinPull::none);
+    uint32_t n = 0;
+    while (!P::read() && n < 0xFFFFu) {
+        ++n;
+    }
+    const uint32_t t1 = stk()->CNT;
+    P::release();
+    return n >= 0xFFFFu ? 0xFFFFu : (t1 >= t0 ? t1 - t0 : t1 + period - t0);
 }
 
 // ===========================================================================
@@ -433,6 +463,35 @@ void ta_block() {
     print(serial, "  pull-ups on the wire: ", wire_pulled_up() ? "yes (a peer is connected)"
                                                                  : "NO - both lines low",
           crlf);
+    if (wire_pulled_up()) {
+        const uint32_t scl = rise_cycles<SclPin>();
+        const uint32_t sda = rise_cycles<SdaPin>();
+        print(serial, "  rise from low, released: SCL ", scl, " cycles (", scl / (SysClock::hz / 1'000'000u),
+              " us), SDA ", sda, " cycles (", sda / (SysClock::hz / 1'000'000u), " us) - a 100 kHz bit is 10 us",
+              crlf);
+    }
+}
+
+// ===========================================================================
+// w - the wire probe (outside z)
+// ===========================================================================
+
+/// Each line held low by this board for half a second, then released:
+/// the other end's own reading says whether the wire reaches it - a
+/// peer's console, a meter, a scope. No verdict.
+void tw_wire_probe() {
+    print(serial, "  holding SDA low for 500 ms...", crlf);
+    console_drain();
+    SdaPin::output(false, PinDrive::open_drain);
+    settle_ms(500);
+    SdaPin::release();
+    print(serial, "  released; holding SCL low for 500 ms...", crlf);
+    console_drain();
+    SclPin::output(false, PinDrive::open_drain);
+    settle_ms(500);
+    SclPin::release();
+    print(serial, "  released. Rise after each: SDA ", rise_cycles<SdaPin>(), " cycles, SCL ", rise_cycles<SclPin>(),
+          " cycles (a probe: no verdict)", crlf);
 }
 
 // ===========================================================================
@@ -466,6 +525,16 @@ void tb_scan() {
     const uint32_t took = Ticker::millis() - t0;
     print(serial, "  112 addresses probed in ", took, " ms: ", n_found, " answered, ", nacks,
           " nobody-home, ", others, " other", crlf);
+    if (others != 0u) {
+        // What "other" was, for the record: the last probe's status and
+        // the vectors' entry counts (i2c_bus_error = 4, i2c_arb_lost = 5,
+        // i2c_timeout = 6, i2c_rejected = 7 in util/i2c_bus.hpp's order).
+        const uint8_t st = host_tenure(0x77, nullptr, 0, nullptr, 0, I2cSpeed::standard_100k);
+        print(serial, "    the last probe's status ", st, " (ok ", i2c_ok, " nack_addr ", i2c_nack_addr,
+              " bus_error ", i2c_bus_error, " arb_lost ", i2c_arb_lost, " timeout ", i2c_timeout, "), ev entries ",
+              host_isr_entries, " er ", error_isr_entries, " STAR1=", hex(H::status1()), " STAR2=",
+              hex(H::status2()), " CTLR1=", hex(H::regs().CTLR1), " PCFR1=", hex(afio_pcfr1()), crlf);
+    }
     for (uint8_t i = 0; i < n_found && i < 8u; ++i) {
         print(serial, "    ", hex(found[i]), (found[i] == twilink::command_addr)
                                                  ? "  <- twi_peer's command address"
@@ -1304,6 +1373,8 @@ int main() {
     bench.letter('i', "THE REFUSAL, wireless: a speed the clock cannot make, i2c_rejected "
                       "inside start() through the arbiter", ti_refusal);
     bench.letter('k', "the stuck bus: the peer holding SDA, unstick() counting", tk_unstick);
+    bench.letter('w', "the wire probe: each line held low for 500 ms, for the other end to read (no verdict)",
+                 tw_wire_probe, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL48" : "FAILED",
@@ -1327,6 +1398,7 @@ int main() {
         } else if (!bench.handle(static_cast<char>(c))) {
             brio::print(serial, "unknown letter (? for the menu)", brio::crlf);
         }
+        brio::print(serial, "  stack: ", brio::stack_untouched(), " B never touched", brio::crlf);
         bench.prompt();
     }
 }

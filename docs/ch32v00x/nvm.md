@@ -9,19 +9,22 @@ procedures), the CH32V006 datasheet V2.0 (the array's size per part).
 
 ## What the silicon does
 
-- **One array, 62 KB, 248 pages of 256 bytes**, at address 0 (where
-  the core fetches from) and aliased at 0x0800 0000 (the address the
-  chapter's procedures write through). No second bank, no
-  read-while-write: a program or erase stalls the core for its
-  duration.
-- **Programming is by whole page only.** The main memory is written by
-  FAST PAGE PROGRAMMING (18.4.5): 64 words loaded one by one into an
-  internal 256-byte buffer, each followed by BUFLOAD, then one STRT.
-  There is no half-word PG mode on this family - FLASH_CTLR has no
-  such bit.
-- **Three erase grains**: the fast page of 256 bytes (FTER), the
-  standard sector of 1 KB (PER), the whole array (MER), plus a 32 KB
-  block erase (BER32) for the lower half of the array.
+- **One array, a page its unit**: 62 KB in 248 pages of 256 bytes on
+  the CH32V006, 16 KB in 256 pages of 64 bytes on the CH32V003
+  (`device::flash_page_bytes`), at address 0 (where the core fetches
+  from) and aliased at 0x0800 0000 (the address the chapter's
+  procedures write through). No second bank, no read-while-write: a
+  program or erase stalls the core for its duration.
+- **Programming is by whole page.** The main memory is written by FAST
+  PAGE PROGRAMMING (18.4.5): the page's words loaded one by one into
+  an internal buffer (64 on the CH32V006, 16 on the CH32V003), each
+  followed by BUFLOAD, then one STRT. The CH32V006's FLASH_CTLR has no
+  half-word PG mode; the CH32V003's has the standard one (its bit 0),
+  which this driver does not use - the page is the write cell on both
+  parts (the gap list says what would decide otherwise).
+- **Three erase grains**: the fast page (FTER), the standard sector of
+  1 KB (PER), the whole array (MER), plus on the CH32V006 a 32 KB block
+  erase (BER32) for the lower half of the array.
 - **Two locks.** KEYR's key pair opens the FPEC (LOCK), MODEKEYR's the
   fast operations (FLOCK); each pair must be written in order and
   consecutively, and a wrong sequence locks the block until the next
@@ -44,19 +47,26 @@ silicon error. Every address the engine takes is the array's own,
 from 0, and `alias_of()` adds 0x0800 0000 where the chapter wants it.
 
 [brio/ch32v00x/nvm_flash.hpp](../../brio/ch32v00x/nvm_flash.hpp) draws
-a CONSTANT PARTITION: the linker script gives the linker the first
-40 KB only and states the boundary as `__brio_rom_end`, the media read
-it back and refuse to open (a zone with its floor at its ceiling) if
-the script is ever edited past their floor. Above it, `MainFlash` is
-the heap's 16 KB (0xA000..0xE000, 64 pages, the map pair in the top
-two) and `MainFlashJournalZone` the journal's 6 KB attic
-(0xE000..0xF800, 24 pages, two halves of twelve). Both declare
-`erase_size = write_cell = 256`: THE PAGE IS THE CELL, and every
-journal entry and every heap append costs a page (a half of twelve
-pages holds twelve entries; the geometry assertion allows up to ten
-ids). Both open the locks around the one operation and shut them
-after; the bounds check on every program and erase is what keeps a
-miscounting heap from programming the running image.
+a CONSTANT PARTITION, each part's (`device::flash_program_bytes`,
+`device::flash_journal_pages`): the linker script gives the linker the
+first 40 KB of the CH32V006's array and the first 15 KB of the
+CH32V003's, and states the boundary as `__brio_rom_end`; the media
+read it back and refuse to open (a zone with its floor at its ceiling)
+if the script is ever edited past their floor. Above it, on the
+CH32V006, `MainFlash` is the heap's 16 KB (0xA000..0xE000, 64 pages,
+the map pair in the top two) and `MainFlashJournalZone` the journal's
+6 KB attic (0xE000..0xF800, 24 pages, two halves of twelve); on the
+CH32V003 the partition is the journal's 1 KB attic alone
+(0x3C00..0x4000, 16 pages of 64 bytes, two halves of eight) - there
+is no heap share on a 16 KB array and no `MainFlash` there
+(`BRIO_CH32_HAS_FLASH_HEAP`). Both media declare `erase_size =
+write_cell =` the page: THE PAGE IS THE CELL, and every journal entry
+and every heap append costs a page (a half of twelve pages holds
+twelve entries, of eight eight; the geometry assertion allows up to
+ten ids on the CH32V006 and six on the CH32V003). Both open the locks
+around the one operation and shut them after; the bounds check on
+every program and erase is what keeps a miscounting heap from
+programming the running image.
 
 ## How to use it
 
@@ -81,11 +91,17 @@ turn as a save.
 ## Bench findings
 
 The reference suite is `test_ch32_nvm` (43 verdicts in `z`; letter `w`
-wipes the partition), on the CH32V006K8U6 at 48 MHz.
+wipes the partition) on the CH32V006K8U6 at 48 MHz, and 34 on the
+CH32V003F4P6 - one source: no heap letter there, the page letters on
+the attic's pages, the sector letter erasing the attic itself, the
+journal at eight cells a half.
 
-- **The engine, measured with the core stalled**: a fast page erase
-  928 us and a fast page program 865 us (44575 and 41524 HCLK cycles,
-  both under one kernel tick); a 1 KB SECTOR erase 127 us - the
+- **The engine, measured with the core stalled**: on the CH32V006 a
+  fast page erase 928 us and a fast page program 865 us (44575 and
+  41524 HCLK cycles, both under one kernel tick); on the CH32V003 a
+  64-byte page erases in 136 us (6535 cycles) and programs in 914 us
+  (43886 cycles) - the program is a quarter of the bytes for the same
+  time, the erase seven times quicker; a 1 KB SECTOR erase 127 us - the
   standard erase of four pages is seven times faster than the "fast"
   erase of one, which is the opposite of what the names say. The
   media erase by page because the heap and the journal count in erase
@@ -125,8 +141,13 @@ Driver gaps, each with its reason:
   IWDG_SW, the standby reset) and the write-protection units as verbs:
   the `brio fuses` work for this target, where a wrong write costs a
   chip erase and deserves its own session.
-- The 32 KB block erase and the whole-array erase: no user; the probe
-  erases what it programs.
+- The 32 KB block erase (the CH32V006's) and the whole-array erase: no
+  user; the probe erases what it programs.
+- The CH32V003's half-word program mode: the page is the write cell on
+  both parts, and a two-byte cell for the journal - 256 saves a half in
+  place of 8 - is a decision the journal's cost per save on the bench
+  would make, with the part's endurance under partial-page writes
+  measured first.
 - The BOOT area and the boot-mode bits of STATR: the serial ISP path
   is the probe's business until a program needs to hand itself over.
 - The flash interrupts (EOPIE, ERRIE): every operation here is polled

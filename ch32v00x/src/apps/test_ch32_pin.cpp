@@ -38,7 +38,7 @@
 //      TIM1's channel 1 forced high and low on its default pad and on
 //      column 3's (PC4), the pads read on INDR
 //
-// build: boards = v006k8
+// build: boards = v006k8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -83,11 +83,14 @@ volatile uint32_t line_interrupts = 0;
 volatile uint32_t line_flags_seen = 0;
 bool jumper_present = false;
 
+/// The sensor's pull is set AGAINST the driven level, so a floating pad
+/// echoing its neighbour is not taken for the wire (a wire beats a pull).
 bool probe_jumper() {
-    Sensor::input();
+    Sensor::input(PinPull::down);
     Driver::output(true);
     (void)delay_us(clock, 5);
     const bool high = Sensor::read();
+    Sensor::input(PinPull::up);
     Driver::clear();
     (void)delay_us(clock, 5);
     const bool low = !Sensor::read();
@@ -124,7 +127,10 @@ void all_off() {
 
 void ta_ports() {
     all_off();
-    // A port's clock gate: PB2PCENR's bit, opened by the first configuring verb.
+    // A port's clock gate: PB2PCENR's bit, opened by the first configuring
+    // verb - port B on the CH32V006 (seven pins bonded, the eighth nibble
+    // reading zero), port C on the CH32V003, which has no port B.
+#if BRIO_CH32_PART_V006
     rcc()->PB2PCENR &= ~rcc_pb2_gpiob;
     const bool closed = (rcc()->PB2PCENR & rcc_pb2_gpiob) == 0u;
     Pin<'B', 0>::input();
@@ -139,6 +145,20 @@ void ta_ports() {
     bench.verdict("a reset port holds 0x4 in every nibble it has (floating input, RM 7.3.1.1) - seven on "
                   "port B, whose eighth reads zero",
                   (Port<'B'>::regs().CFGLR & 0x0FFFFFFFu) == 0x04444444u);
+#else
+    rcc()->PB2PCENR &= ~rcc_pb2_gpioc;
+    const bool closed = (rcc()->PB2PCENR & rcc_pb2_gpioc) == 0u;
+    Pin<'C', 3>::input();
+    const bool opened = (rcc()->PB2PCENR & rcc_pb2_gpioc) != 0u;
+    bench.verdict("a configuring verb opens the port's clock gate (GPIOC, closed, then PC3 configured)",
+                  closed && opened);
+    rcc()->PB2PRSTR |= rcc_pb2_gpioc;
+    rcc()->PB2PRSTR &= ~rcc_pb2_gpioc;
+    print(serial, "  GPIOC after its reset pulse: CFGLR=", hex(Port<'C'>::regs().CFGLR), " OUTDR=",
+          hex(Port<'C'>::regs().OUTDR), " (port C bonds PC0..PC7: eight nibbles)", crlf);
+    bench.verdict("a reset port holds 0x4 in every nibble it has (floating input, RM 7.3.1.1) - eight on port C",
+                  Port<'C'>::regs().CFGLR == 0x44444444u);
+#endif
     // Every nibble pin_nibble() spells, written to PD2 and read back.
     struct Case {
         const char* name;
@@ -146,12 +166,15 @@ void ta_ports() {
         PinDrive drive;
         uint32_t nibble;
     };
+    // The output MODE code is the part's (device::gpio_mode_output): 1
+    // on the CH32V006, 3 (30 MHz) on the CH32V003.
+    const uint32_t out = device::gpio_mode_output;
     const Case cases[] = {{"analog", PinMode::analog, PinDrive::push_pull, 0x0},
                           {"input", PinMode::input, PinDrive::push_pull, 0x4},
-                          {"output push-pull", PinMode::output, PinDrive::push_pull, 0x1},
-                          {"output open-drain", PinMode::output, PinDrive::open_drain, 0x5},
-                          {"alternate push-pull", PinMode::alternate, PinDrive::push_pull, 0x9},
-                          {"alternate open-drain", PinMode::alternate, PinDrive::open_drain, 0xD}};
+                          {"output push-pull", PinMode::output, PinDrive::push_pull, 0x0u | out},
+                          {"output open-drain", PinMode::output, PinDrive::open_drain, 0x4u | out},
+                          {"alternate push-pull", PinMode::alternate, PinDrive::push_pull, 0x8u | out},
+                          {"alternate open-drain", PinMode::alternate, PinDrive::open_drain, 0xCu | out}};
     uint8_t right = 0;
     for (const Case& c : cases) {
         Port<'D'>::configure(2, pin_nibble(c.mode, c.drive));
@@ -161,7 +184,7 @@ void ta_ports() {
         }
     }
     Driver::release();
-    bench.verdict("the six nibbles land as spelled (MODE one bit, CNF two) and read back", right == 6u);
+    bench.verdict("the six nibbles land as spelled (the part's MODE code, CNF two) and read back", right == 6u);
     // BSHR sets from its low half and clears from its high half; BCR
     // clears; the toggle is one BSHR store.
     Driver::output(false);
@@ -309,16 +332,32 @@ void td_edges() {
           crlf);
     bench.verdict("line 4 counts five rising, five falling and ten of both edges, one interrupt each",
                   r == 5u && f == 5u && b == 10u);
-    // The flag as a poll, no interrupt: it stands until cleared.
+    // The flag as a poll. A line enabled nowhere raises no flag on an
+    // edge - the software trigger's rule (exti.hpp) holds for the pad's
+    // edges too - so a poller enables the line in INTENR and masks its
+    // vector at the PFIC; the flag then stands until written one.
     Line::init(true, false);
+    Line::interrupt(false);
     Line::clear();
+    Driver::clear();
+    Driver::set();
+    (void)delay_us(clock, 5);
+    const bool nowhere_silent = !Line::flag();
+    Pfic::disable(Irq::exti7_0);
+    Line::interrupt(true);
     Driver::clear();
     Driver::set();
     (void)delay_us(clock, 5);
     const bool flag_up = Line::flag();
     Line::clear();
     const bool flag_down = !Line::flag();
-    bench.verdict("the flag rises on the edge with the interrupt off and is cleared by writing one",
+    Line::interrupt(false);
+    print(serial, "  an edge on the line enabled nowhere: flag ", nowhere_silent ? "down" : "UP",
+          "; in INTENR with the vector masked: flag ", flag_up ? "up" : "DOWN", ", after writing one: ",
+          flag_down ? "down" : "UP", crlf);
+    bench.verdict("an edge on a line enabled nowhere raises no flag - the software trigger's rule holds for pads",
+                  nowhere_silent);
+    bench.verdict("the flag rises on the edge of a line in INTENR with its vector masked, and is cleared by writing one",
                   flag_up && flag_down);
     // The other port on the same line number: PC4 selected instead of
     // PD4, PD2's toggles reach nothing.
@@ -516,22 +555,52 @@ RemapReading drive_and_read(uint8_t code) {
     return r;
 }
 
+/// Let every byte the console holds leave the wire: the ring empty,
+/// then the two frames still in DATAR and the shifter.
+void console_drain() {
+    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
+    }
+    (void)delay_us(clock, 250);
+}
+
 void tg_remaps() {
     all_off();
+    // USART1 is about to be moved to another column - the CONSOLE's own
+    // pads - so nothing may be in flight on it: a byte still in the ring
+    // would leave on a pad the probe does not listen to (measured: the
+    // tail of the previous letter's lines lost, six bytes of line noise
+    // in their place).
+    console_drain();
     // The register: every field written and read back, the debug port
     // left alone.
-    Afio::remap_tim1(9);
-    Afio::remap_tim2(7);
-    Afio::remap_usart1(9);
+    // Every field at its top code, each part's - and read back through
+    // the same verbs.
+    const uint8_t tim1_top = afio_tim1_codes - 1u;
+    const uint8_t tim2_top = afio_tim2_codes - 1u;
+    const uint8_t usart1_top = afio_usart1_codes - 1u;
+    const uint8_t spi1_top = afio_spi1_codes - 1u;
+    const uint8_t i2c1_top = afio_i2c1_codes - 1u;
+    // TIM1_CH1 from the LSI, first: on the CH32V006 that is the code's
+    // top two bits (11xx), so it is probed from code 0 and put back
+    // before the columns are written.
+    Afio::remap_tim1(0);
+    Afio::tim1_ch1_from_lsi(true);
+    const bool lsi_bit = afio_tim1_ch1_is_lsi(Afio::tim1_remap()) || (afio_pcfr1() & (1UL << 23)) != 0u;
+    Afio::tim1_ch1_from_lsi(false);
+    const bool lsi_off = Afio::tim1_remap() == 0u && (afio_pcfr1() & (1UL << 23)) == 0u;
+    Afio::remap_tim1(tim1_top);
+    Afio::remap_tim2(tim2_top);
+    Afio::remap_usart1(usart1_top);
     Afio::remap_usart2(6);
-    Afio::remap_spi1(6);
-    Afio::remap_i2c1(3);
+    Afio::remap_spi1(spi1_top);
+    Afio::remap_i2c1(i2c1_top);
     Afio::remap_adc_injected_trigger(true);
     Afio::remap_adc_rule_trigger(true);
-    const bool fields = Afio::tim1_remap() == 9u && Afio::tim2_remap() == 7u && Afio::usart1_remap() == 9u &&
-                        Afio::usart2_remap() == 6u && Afio::spi1_remap() == 6u && Afio::i2c1_remap() == 3u &&
+    const bool fields = Afio::tim1_remap() == tim1_top && Afio::tim2_remap() == tim2_top &&
+                        Afio::usart1_remap() == usart1_top && Afio::usart2_remap() == (device::has_usart2 ? 6u : 0u) &&
+                        Afio::spi1_remap() == spi1_top && Afio::i2c1_remap() == i2c1_top &&
                         (afio_pcfr1() & (afio_adc_etrginj_rm | afio_adc_etrgreg_rm)) ==
-                            (afio_adc_etrginj_rm | afio_adc_etrgreg_rm);
+                            (afio_adc_etrginj_rm | afio_adc_etrgreg_rm) && lsi_bit && lsi_off;
     const bool swd = Afio::debug_port_enabled();
     print(serial, "  PCFR1 with every field at its top: ", hex(afio_pcfr1()), crlf);
     Afio::remap_tim1(0);
@@ -560,7 +629,7 @@ void tg_remaps() {
 }
 
 void banner() {
-    print(serial, crlf, "test_ch32_pin - CH32V006K8 GPIO (RM ch. 7) and EXTI (6.4)", crlf);
+    print(serial, crlf, "test_ch32_pin - ", device::part_name, " GPIO (RM ch. 7) and EXTI (6.4)", crlf);
     print(serial, "  the jumper for c, d and f: PD2 <-> PD4; ", jumper_present ? "PRESENT" : "ABSENT", crlf);
     bench.menu();
 }
@@ -618,6 +687,7 @@ int main() {
         } else if (!bench.handle(static_cast<char>(c))) {
             brio::print(serial, "unknown letter (? for the menu)", brio::crlf);
         }
+        brio::print(serial, "  stack: ", brio::stack_untouched(), " B never touched", brio::crlf);
         bench.prompt();
     }
 }

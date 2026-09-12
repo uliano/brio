@@ -13,6 +13,12 @@
 // writes flash, so the counts are kept small on purpose: a run of `z`
 // costs a few dozen page erases out of the part's endurance.
 //
+// TWO PARTS: on the CH32V006 the partition is the heap's 16 KB and the
+// journal's 6 KB attic of 256-byte pages; on the CH32V003 it is the
+// journal's 1 KB attic of 64-byte pages alone, so letter e (the heap)
+// builds only where the heap is, the page letters take the attic's
+// pages, and the sector letter erases the attic itself - one sector.
+//
 // What is exercised, letter by letter:
 //   a  the engine and the partition: the locks as found at boot and as
 //      opened and shut, the write-protection register, the linker's
@@ -39,7 +45,7 @@
 //      virgin flash. Run it when a letter's expectations depend on an
 //      empty heap.
 //
-// build: boards = v006k8
+// build: boards = v006k8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -76,10 +82,15 @@ using Led = Pin<'C', 0>;
 
 TestBench<Serial> bench;
 
+#if BRIO_CH32_HAS_FLASH_HEAP
 using Heap = NvHeap<MainFlash, 8, 2>;
-using Journal = NvJournal<MainFlashJournalZone, 6, 32, 12>;
+#endif
+// Half the attic a half: 12 one-page cells on the CH32V006, 8 on the CH32V003.
+using Journal = NvJournal<MainFlashJournalZone, 6, 32, MainFlashPartition::journal_pages / 2u>;
 
+#if BRIO_CH32_HAS_FLASH_HEAP
 Heap heap;
+#endif
 Journal journal;
 
 constexpr uint16_t heap_record = 0x0601;
@@ -157,21 +168,29 @@ void ta_engine() {
     bench.verdict("the linker's boundary is the partition's floor",
                   rom_end == MainFlashPartition::storage_base &&
                       MainFlashPartition::geometry_matches_silicon());
-    const auto hz = MainFlash::zones();
     const auto jz = MainFlashJournalZone::zones();
+#if BRIO_CH32_HAS_FLASH_HEAP
+    const auto hz = MainFlash::zones();
     bench.verdict("the heap's zone is the 16 KB between the floor and the attic",
                   hz[0].floor == 0xA000u && hz[0].ceiling == 0xE000u && hz[0].size() == 16u * 1024u);
     bench.verdict("the journal's zone is the 6 KB attic",
                   jz[0].floor == 0xE000u && jz[0].ceiling == 0xF800u);
     bench.verdict("the build id is the link's epoch, not zero",
                   MainFlash::build_id() != 0u);
+#else
+    bench.verdict("the journal's zone is the 1 KB attic, and the partition is nothing else",
+                  jz[0].floor == 0x3C00u && jz[0].ceiling == 0x4000u &&
+                      MainFlashPartition::heap_end == MainFlashPartition::storage_base);
+    bench.verdict("the build id is the link's epoch, not zero",
+                  MainFlashJournalZone::build_id() != 0u);
+#endif
 }
 
 // ---------------------------------------------------------------------------
 // b - one page, erased, programmed, erased
 // ---------------------------------------------------------------------------
 void tb_page() {
-    const uint32_t page = MainFlashPartition::storage_base;   // the heap's first page
+    const uint32_t page = MainFlashPartition::storage_base;   // the partition's first page
 
     uint32_t c0 = cycles_now();
     uint32_t err = engine_erase(page);
@@ -206,12 +225,17 @@ void tb_page() {
     bench.verdict("program_page() refuses a misaligned address",
                   engine_program(page + 4u, page_buf) != 0u);
     bench.verdict("and a span that is not a whole page",
-                  engine_program(page, std::span<const uint8_t>(page_buf, 64)) != 0u);
+                  engine_program(page, std::span<const uint8_t>(page_buf, Flash::page_size / 2u)) != 0u);
     // And the media's bounds: the image is not programmable through it.
+#if BRIO_CH32_HAS_FLASH_HEAP
     bench.verdict("the media refuses an address below the storage floor",
                   !MainFlash::program(0x8000u, page_buf));
     bench.verdict("and one in the journal's attic",
                   !MainFlash::program(MainFlashPartition::journal_base, page_buf));
+#else
+    bench.verdict("the media refuses an address below the attic",
+                  !MainFlashJournalZone::program(0x2000u, page_buf));
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -274,17 +298,23 @@ void tc_reprogram() {
 // d - the sector erase
 // ---------------------------------------------------------------------------
 void td_sector() {
-    const uint32_t sector = MainFlashPartition::storage_base + 2u * Flash::sector_size;
-    // Four pages programmed, one sector erase takes all four down.
+#if BRIO_CH32_HAS_FLASH_HEAP
+    const uint32_t sector = MainFlashPartition::storage_base + 2u * Flash::sector_size;   // in the heap's share
+#else
+    const uint32_t sector = MainFlashPartition::storage_base;   // the attic IS one sector
+#endif
+    // Every page of the sector programmed (four of 256 bytes, or sixteen
+    // of 64), one sector erase takes them all down.
+    constexpr uint32_t pages = Flash::sector_size / Flash::page_size;
     for (uint32_t i = 0; i < Flash::page_size; ++i) {
         page_buf[i] = static_cast<uint8_t>(i);
     }
     bool programmed = true;
-    for (uint32_t p = 0; p < 4u; ++p) {
+    for (uint32_t p = 0; p < pages; ++p) {
         (void)engine_erase(sector + p * Flash::page_size);
         programmed = programmed && engine_program(sector + p * Flash::page_size, page_buf) == 0u;
     }
-    bench.verdict("four pages of a sector programmed", programmed);
+    bench.verdict("every page of a sector programmed", programmed);
 
     const uint32_t c0 = cycles_now();
     uint32_t err = 0xFFFF'FFFFu;
@@ -297,10 +327,10 @@ void td_sector() {
           cycles / 48u, " us)", crlf);
     bench.verdict("the sector erase completes without error", err == 0u);
     bool clean = true;
-    for (uint32_t p = 0; p < 4u; ++p) {
+    for (uint32_t p = 0; p < pages; ++p) {
         clean = clean && page_is(sector + p * Flash::page_size, 0xFF);
     }
-    bench.verdict("and all four pages read 0xFF", clean);
+    bench.verdict("and every page of it reads 0xFF", clean);
     bench.verdict("erase_sector() refuses a misaligned address",
                   Flash::unlock() && Flash::erase_sector(sector + 256u) != 0u);
     Flash::lock();
@@ -309,6 +339,7 @@ void td_sector() {
 // ---------------------------------------------------------------------------
 // e - the heap
 // ---------------------------------------------------------------------------
+#if BRIO_CH32_HAS_FLASH_HEAP
 void te_heap() {
     const auto& r = heap.mount();
     print(serial, "  heap mount: status=", static_cast<uint8_t>(r.status),
@@ -358,6 +389,7 @@ void te_heap() {
     }
     bench.verdict("and its payload reads back byte-exact", exact);
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // f - the journal
@@ -369,8 +401,8 @@ void tf_journal() {
     print(serial, "  journal mount: status=", static_cast<uint8_t>(r.status),
           " live=", r.live, " torn=", r.torn, " active=", r.active,
           " seq=", r.seq, " used=", r.used_cells, "/", Journal::half_cells, crlf);
-    bench.verdict("the journal mounts in the attic (twelve one-page cells a half)",
-                  r.mounted() && Journal::half_cells == 12u);
+    bench.verdict("the journal mounts in the attic (one-page cells, half the attic's pages a half)",
+                  r.mounted() && Journal::half_cells == MainFlashPartition::journal_pages / 2u);
     if (!r.mounted()) {
         return;
     }
@@ -384,9 +416,9 @@ void tf_journal() {
     bench.verdict("a load of the wrong width is refused",
                   !journal.load<uint32_t>(id_cal).has_value());
 
-    // Enough saves to force a collection: a half holds twelve cells and
-    // the reserve keeps one back, so churning a second id past that
-    // point ping-pongs the halves.
+    // Enough saves to force a collection: a half holds twelve cells (eight
+    // on the CH32V003) and the reserve keeps one back, so churning a
+    // second id past that point ping-pongs the halves.
     bool churned = true;
     uint8_t k = 0;
     for (; k < 16u; ++k) {
@@ -443,7 +475,8 @@ void tw_wipe() {
 }
 
 void banner() {
-    print(serial, crlf, "test_ch32_nvm - CH32V006K8 (clk=48 MHz PLL, storage 0xA000..0xF800)",
+    print(serial, crlf, "test_ch32_nvm - ", device::part_name, " (clk=48 MHz PLL, storage ",
+          hex(MainFlashPartition::storage_base), "..", hex(MainFlashPartition::storage_end), ")",
           crlf);
     bench.menu();
 }
@@ -464,7 +497,9 @@ int main() {
     bench.letter('b', "one page: erased, programmed, erased", tb_page);
     bench.letter('c', "a second program between erases?", tc_reprogram);
     bench.letter('d', "the sector erase", td_sector);
+#if BRIO_CH32_HAS_FLASH_HEAP
     bench.letter('e', "the heap on a page-celled media", te_heap);
+#endif
     bench.letter('f', "the journal in the attic, and its reserve", tf_journal);
     bench.letter('w', "WIPE the storage partition", tw_wipe, false);
 
@@ -490,6 +525,7 @@ int main() {
         } else if (!bench.handle(static_cast<char>(c))) {
             brio::print(serial, "unknown letter (? for the menu)", brio::crlf);
         }
+        brio::print(serial, "  stack: ", brio::stack_untouched(), " B never touched", brio::crlf);
         bench.prompt();
     }
 }

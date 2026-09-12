@@ -1,4 +1,5 @@
-// Sleep family smoke TU: PWR's verbs, the AWU's arithmetic, the two
+// Sleep family smoke TU, both parts: PWR's verbs, the AWU's arithmetic
+// (the same table on both), each part's PVD levels, the two
 // sites satisfying util/power.hpp's SleepSite over a static and a
 // dynamic clock, and a PowerManager over each.
 #include "ch32v00x/clock.hpp"
@@ -21,6 +22,10 @@ static_assert(awu_prescaler_divider(14) == 10240 && awu_prescaler_divider(15) ==
 static_assert(Awu::period_us(13, 63, 128'000) == 2'048'000);   // the longest at the nominal rate
 static_assert(Awu::period_us(0, 0, 128'000) == 7);
 static_assert(exti_line_awu == 9 && exti_line_pvd == 8);
+// Each part's PVD table: the lowest and the highest rising threshold.
+static_assert(pvd_rising_mv(pvd_level_lowest) == (device::part == Ch32Part::v003 ? 2850u : 1870u));
+static_assert(pvd_rising_mv(pvd_level_highest) == (device::part == Ch32Part::v003 ? 4400u : 2660u));
+static_assert(pwr_pls_mask == (device::part == Ch32Part::v003 ? 0xE0u : 0x60u));
 
 using Plain = Ch32SleepSite<Fast>;
 using Timed = Ch32TimedSleepSite<P, Fast>;
@@ -37,7 +42,8 @@ void sleep_verbs() {
     (void)Pwr::standby();
     Pwr::ldo(pwr_ldo_saving);
     (void)Pwr::ldo();
-    Pwr::pvd(true, PvdLevel::v2_43);
+    Pwr::pvd(true, pvd_level_highest);
+    Pwr::pvd(true);
     (void)Pwr::pvd();
     (void)Pwr::supply_low();
     Pwr::flash_low_power(true);

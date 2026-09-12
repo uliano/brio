@@ -17,12 +17,15 @@ using SysClock = Clock<ClockSource::pll, 48'000'000>;
 static_assert(tim_base_for(1) == 0x40012C00 && tim_base_for(2) == 0x40000000 && tim3_base == 0x40000800);
 static_assert(tim_clock_hz(SysClock{}) == 48'000'000UL);
 static_assert(Tim<1>::has_break && !Tim<2>::has_break);
-static_assert(!Tim<1>::has_dead_time_pairs && Tim<2>::has_dead_time_pairs);
+static_assert(!Tim<1>::has_dead_time_pairs && Tim<2>::has_dead_time_pairs == device::tim2_has_dead_time);
 static_assert(Tim<1>::update_irq() == Irq::tim1_up && Tim<2>::update_irq() == Irq::tim2 &&
               Tim<2>::cc_irq() == Irq::tim2);
 
 static_assert(PwmChannel<TimPwm<Tim<1>, 0, 1000>> && PwmChannel<TimPwm<Tim<2>, 3, 255>>);
-static_assert(PwmChannel<TimPairPwm<Tim<1>, 2, 1000>> && PwmChannel<TimPairPwm<Tim<2>, 1, 1000>>);
+static_assert(PwmChannel<TimPairPwm<Tim<1>, 2, 1000>>);
+#if BRIO_CH32_PART_V006
+static_assert(PwmChannel<TimPairPwm<Tim<2>, 1, 1000>>);   // TIM2's pairs under DTCR, the CH32V006's
+#endif
 
 using Pad1 = TimPad<tim_default_pads::tim1_ch1>;
 using Pad2 = TimPad<Pad{'D', 4}>;
@@ -67,13 +70,16 @@ void resource_verbs() {
     (void)T::external_trigger({.inverted = true, .prescaler = 2, .filter = 3, .clock_mode2 = true});
     (void)T::break_dead_time({.dead_time = 0x81, .break_enable = true, .lock = 1});
     (void)T::main_output(true); (void)T::main_output(); (void)T::dead_time_code();
+#if BRIO_CH32_PART_V006
     (void)T::pair_dead_time(0, {.ticks = 4, .active_low = true}); (void)T::pair_dead_time_ticks(0);
+#endif
     T::release();
 }
 
 void all_resources() {
     resource_verbs<1>();
     resource_verbs<2>();
+#if BRIO_CH32_HAS_TIM3
     Tim3::init();
     (void)Tim3::configure({.period = 999, .direction = TimDirection::up, .alignment = TimAlignment::edge,
                            .auto_reload_preload = true, .update_disable = false, .clocked_by_tim1 = true});
@@ -81,6 +87,7 @@ void all_resources() {
     (void)Tim3::compare(3); (void)Tim3::set_compare(0, 500); (void)Tim3::compare_preload(0, true);
     (void)Tim3::dma_request(2, true); (void)Tim3::dma_request(0, true);
     Tim3::reset();
+#endif
 }
 
 using Latch = MeterLatch<uint16_t, P, 0>;
@@ -89,8 +96,10 @@ template <class T>
 void tasks() {
     (void)TimPwm<T, 0, 1000>::setup(47);
     TimPwm<T, 0, 1000>::duty(250); (void)TimPwm<T, 0, 1000>::duty();
-    (void)TimPairPwm<T, 1, 1000>::setup(0, 4);
-    TimPairPwm<T, 1, 1000>::duty(500); (void)TimPairPwm<T, 1, 1000>::dead_time_ticks();
+    if constexpr (T::has_break || T::has_dead_time_pairs) {   // TIM2's pairs are the CH32V006's
+        (void)TimPairPwm<T, 1, 1000>::setup(0, 4);
+        TimPairPwm<T, 1, 1000>::duty(500); (void)TimPairPwm<T, 1, 1000>::dead_time_ticks();
+    }
     (void)TimPeriodMeter<T>::setup(0, 3, true);
     (void)TimPeriodMeter<T>::period_ticks(); (void)TimPeriodMeter<T>::width_ticks();
     (void)TimIntervalMeter<T, 2>::setup(0, 0, TimCapturePolarity::falling, TimCapturePrescaler::every8);

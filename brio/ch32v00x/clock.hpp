@@ -39,20 +39,32 @@
  * surface (rate_count, rate_hz, rate_index) is what a delay table
  * indexes by.
  *
- * WHAT IS NOT HERE. HSE (the crystal input this package bonds on
- * PA1/PA2) and the LSI as a SYSCLK root are named in ClockSource so
- * that asking for one is a compile error with an explanation rather
- * than a wrong clock, and they are built when a board needs them; the
- * CSS, which watches an HSE, waits with it. A root switch at run time
- * (PLL on and off) is not a DynamicClock rate: two clocks of different
- * roots are two programs, and the divider is what a running program
- * changes.
+ * THE HSE (RM 3.3.2): a crystal on PA1/PA2, 4..25 MHz, or an external
+ * clock into PA1 with HSEBYP - as SYSCLK itself (ClockSource::crystal
+ * / external) or as the PLL's source (ClockSource::pll with the
+ * crystal's rate named): `Clock<ClockSource::pll, 48'000'000,
+ * 24'000'000>` is the PLL doubling a 24 MHz crystal. HSEON, then
+ * HSERDY within a bounded wait (a missing crystal returns false and
+ * leaves the boot on the reset clock), PLLSRC chosen before the PLL is
+ * turned on, and the crystal pads handed to the oscillator through
+ * AFIO (`Afio::pa1_pa2_gpio(false)`, a bit whose sense differs per
+ * part). The CSS (RM 3.3.6): `Rcc::css(true)` arms the clock security
+ * system once the HSE is ready; a failing HSE then switches SYSCLK to
+ * the HSI, turns the HSE and the PLL off, raises CSSF and the NMI, and
+ * brakes TIM1.
+ *
+ * WHAT IS NOT HERE. The LSI as a SYSCLK root is named in ClockSource
+ * so that asking for it is a compile error with an explanation rather
+ * than a wrong clock. A root switch at run time (PLL on and off) is
+ * not a DynamicClock rate: two clocks of different roots are two
+ * programs, and the divider is what a running program changes.
  */
 
 #pragma once
 
 #include <stdint.h>
 
+#include "ch32v00x/afio.hpp"
 #include "ch32v00x/device.hpp"
 #include "util/clock.hpp"
 
@@ -62,9 +74,9 @@ namespace brio {
 enum class ClockSource : uint8_t {
     internal,   ///< HSI, the 24 MHz internal RC
     pll,        ///< the PLL, which doubles its source (HSI: 48 MHz)
-    crystal,    ///< HSE with a crystal on PA1/PA2 - not implemented yet
-    external,   ///< HSE in bypass - not implemented yet
-    lsi,        ///< the 128 kHz internal RC as SYSCLK - not implemented yet
+    crystal,    ///< HSE with a crystal on PA1/PA2, its rate the third parameter
+    external,   ///< HSE in bypass: a clock into PA1, its rate the third parameter
+    lsi,        ///< the 128 kHz internal RC as SYSCLK - not implemented
 };
 
 inline constexpr uint32_t hsi_hz = 24'000'000UL;
@@ -133,9 +145,29 @@ struct Rcc {
         if (on) { rcc()->RSTSCKR |= rcc_lsion; } else { rcc()->RSTSCKR &= ~rcc_lsion; }
     }
 
+    // ---- HSE: the crystal, or a clock into PA1 (RM 3.3.2) -----------------
+    static bool hse_on() { return (rcc()->CTLR & rcc_hseon) != 0u; }
+    static bool hse_ready() { return (rcc()->CTLR & rcc_hserdy) != 0u; }
+    static void hse(bool on) {
+        if (on) { rcc()->CTLR |= rcc_hseon; } else { rcc()->CTLR &= ~rcc_hseon; }
+    }
+    /// HSEBYP: written with HSEON clear (3.3.2's order).
+    static void hse_bypass(bool on) {
+        if (on) { rcc()->CTLR |= rcc_hsebyp; } else { rcc()->CTLR &= ~rcc_hsebyp; }
+    }
+    static bool hse_bypass() { return (rcc()->CTLR & rcc_hsebyp) != 0u; }
+    // ---- CSS: the clock security system on the HSE (RM 3.3.6) -------------
+    /// Armed once the HSE is ready; the hardware disarms it with the HSE.
+    static void css(bool on) {
+        if (on) { rcc()->CTLR |= rcc_csson; } else { rcc()->CTLR &= ~rcc_csson; }
+    }
+    static bool css() { return (rcc()->CTLR & rcc_csson) != 0u; }
+    static bool css_failed() { return (rcc()->INTR & rcc_cssf) != 0u; }
+    static void clear_css_failed() { rcc()->INTR |= rcc_cssc; }
     // ---- PLL: the doubler --------------------------------------------------
     static bool pll_on() { return (rcc()->CTLR & rcc_pllon) != 0u; }
     static bool pll_ready() { return (rcc()->CTLR & rcc_pllrdy) != 0u; }
+    static bool pll_from_hse() { return (rcc()->CFGR0 & rcc_pllsrc) != 0u; }
 
     // ---- the switch and the divider as they stand ------------------------
     static uint32_t sysclk_source() { return rcc()->CFGR0 & rcc_sws_mask; }
@@ -152,18 +184,31 @@ struct Rcc {
     }
     static uint32_t mco() { return rcc()->CFGR0 & rcc_mco_mask; }
 
-    // ---- SCM: the system clock monitor (RM 3.3.7) --------------------------
+    // ---- SCM: the system clock monitor (RM 3.3.7), the CH32V006's ---------
     /// With SYSCM_EN set, a system clock failure raises SYSCLK_FAILIF,
-    /// brakes TIM1, and interrupts through the RCC line if enabled.
+    /// brakes TIM1, and interrupts through the RCC line if enabled. The
+    /// CH32V003 has no such monitor (device::has_clock_monitor): the
+    /// verbs write nothing and read false there.
+    static constexpr bool has_monitor = device::has_clock_monitor;
     static void monitor(bool on) {
-        if (on) { rcc()->CTLR |= rcc_syscm_en; } else { rcc()->CTLR &= ~rcc_syscm_en; }
+        if constexpr (has_monitor) {
+            if (on) { rcc()->CTLR |= rcc_syscm_en; } else { rcc()->CTLR &= ~rcc_syscm_en; }
+        } else {
+            (void)on;
+        }
     }
-    static bool monitor() { return (rcc()->CTLR & rcc_syscm_en) != 0u; }
-    static bool clock_failed() { return (rcc()->RSTSCKR & rcc_sysclk_failif) != 0u; }
+    static bool monitor() { return has_monitor && (rcc()->CTLR & rcc_syscm_en) != 0u; }
+    static bool clock_failed() { return has_monitor && (rcc()->RSTSCKR & rcc_sysclk_failif) != 0u; }
     /// Write 0 to clear (RW0).
-    static void clear_clock_failed() { rcc()->RSTSCKR &= ~rcc_sysclk_failif; }
+    static void clear_clock_failed() {
+        if constexpr (has_monitor) { rcc()->RSTSCKR &= ~rcc_sysclk_failif; }
+    }
     static void failure_interrupt(bool on) {
-        if (on) { rcc()->INTR |= rcc_sysclk_failie; } else { rcc()->INTR &= ~rcc_sysclk_failie; }
+        if constexpr (has_monitor) {
+            if (on) { rcc()->INTR |= rcc_sysclk_failie; } else { rcc()->INTR &= ~rcc_sysclk_failie; }
+        } else {
+            (void)on;
+        }
     }
 
     // ---- the peripheral gates --------------------------------------------
@@ -194,24 +239,36 @@ struct Rcc {
  *   SysClock::init();                // first thing in main()
  *   Serial::init(clock, 115200);     // drivers ask the tag
  */
-template <ClockSource src, uint32_t target_hz>
+template <ClockSource src, uint32_t target_hz, uint32_t xtal_hz = 0>
 struct Clock {
     static constexpr ClockSource source = src;
     static constexpr uint32_t hz = target_hz;        ///< HCLK
     static constexpr uint32_t pclk_hz = target_hz;   ///< PB1/PB2 = HCLK here
     static constexpr bool is_static = true;
 
-    /// SYSCLK before HPRE: the root's own rate.
-    static constexpr uint32_t sysclk_hz = (src == ClockSource::pll) ? 2u * hsi_hz : hsi_hz;
+    /// The HSE's part in this clock: SYSCLK itself, or the PLL's source
+    /// when a crystal rate is named beside ClockSource::pll.
+    static constexpr bool uses_hse = src == ClockSource::crystal || src == ClockSource::external ||
+                                     (src == ClockSource::pll && xtal_hz != 0u);
+    static constexpr uint32_t crystal_hz = xtal_hz;
+    /// The root before the PLL: the HSI, or the HSE at the rate named.
+    static constexpr uint32_t root_hz = uses_hse ? xtal_hz : hsi_hz;
+    /// SYSCLK before HPRE: the root's own rate, doubled by the PLL.
+    static constexpr uint32_t sysclk_hz = (src == ClockSource::pll) ? 2u * root_hz : root_hz;
     static constexpr uint8_t hpre_code = hpre_for(sysclk_hz, target_hz);
 
-    static_assert(src == ClockSource::internal || src == ClockSource::pll,
-                  "brio Clock: only ClockSource::internal (HSI) and ClockSource::pll "
-                  "(HSI x2) are implemented on the CH32V00x - HSE and LSI arrive with "
-                  "their first board");
+    static_assert(src != ClockSource::lsi,
+                  "brio Clock: the LSI as SYSCLK is not implemented on the CH32V00x");
+    static_assert(src != ClockSource::internal || xtal_hz == 0u,
+                  "brio Clock: the HSI has no crystal rate to name");
+    static_assert((src != ClockSource::crystal && src != ClockSource::external) || xtal_hz != 0u,
+                  "brio Clock: a crystal or an external clock is named with its rate, the third parameter");
+    static_assert(!uses_hse || (xtal_hz >= device::hse_min_hz && xtal_hz <= device::hse_max_hz),
+                  "brio Clock: the HSE takes 4 to 25 MHz (RM 3.3.2)");
     static_assert(hpre_code != 0xFF,
                   "brio Clock: this rate is not the root divided by an HPRE divider "
-                  "(1..8, then 16, 32, 64, 128, 256) - HSI is 24 MHz, the PLL 48 MHz");
+                  "(1..8, then 16, 32, 64, 128, 256) - HSI is 24 MHz, the PLL doubles its source");
+    static_assert(sysclk_hz <= sysclk_max_hz, "SYSCLK must not exceed 48 MHz: a PLL from a crystal above 24 MHz cannot be");
     static_assert(target_hz <= sysclk_max_hz, "HCLK must not exceed 48 MHz");
 
     /**
@@ -235,6 +292,23 @@ struct Clock {
         cfgr |= static_cast<uint32_t>(hpre_code) << 4;
         rcc()->CFGR0 = cfgr;
 
+        if constexpr (uses_hse) {
+            // The crystal pads to the oscillator, HSEBYP with HSEON clear
+            // (3.3.2's order), then HSEON and a bounded wait for HSERDY:
+            // a crystal that never starts leaves the boot on the reset
+            // clock with a false to say so.
+            Afio::pa1_pa2_gpio(false);
+            rcc()->CTLR &= ~rcc_hseon;
+            if constexpr (src == ClockSource::external) {
+                rcc()->CTLR |= rcc_hsebyp;
+            } else {
+                rcc()->CTLR &= ~rcc_hsebyp;
+            }
+            rcc()->CTLR |= rcc_hseon;
+            if (!wait_for([] { return (rcc()->CTLR & rcc_hserdy) != 0u; })) {
+                return false;
+            }
+        }
         if constexpr (src == ClockSource::internal) {
             // HSI is on out of reset; a program that stopped it is
             // asking for it back here.
@@ -246,12 +320,21 @@ struct Clock {
             cfgr = (cfgr & ~rcc_sw_mask) | rcc_sw_hsi;
             rcc()->CFGR0 = cfgr;
             return wait_for([] { return (rcc()->CFGR0 & rcc_sws_mask) == rcc_sws_hsi; });
+        } else if constexpr (src == ClockSource::crystal || src == ClockSource::external) {
+            cfgr = rcc()->CFGR0;
+            cfgr = (cfgr & ~rcc_sw_mask) | rcc_sw_hse;
+            rcc()->CFGR0 = cfgr;
+            return wait_for([] { return (rcc()->CFGR0 & rcc_sws_mask) == rcc_sws_hse; });
         } else {
-            // PLLSRC = 0 is HSI; RM 3.3.4 wants the source chosen
-            // BEFORE the PLL is turned on, and it cannot be changed
-            // while the PLL runs.
+            // PLLSRC: 0 is the HSI, 1 the HSE undivided; RM 3.3.4 wants
+            // the source chosen BEFORE the PLL is turned on, and it
+            // cannot be changed while the PLL runs.
             rcc()->CTLR &= ~rcc_pllon;
-            rcc()->CFGR0 &= ~rcc_pllsrc;
+            if constexpr (uses_hse) {
+                rcc()->CFGR0 |= rcc_pllsrc;
+            } else {
+                rcc()->CFGR0 &= ~rcc_pllsrc;
+            }
             rcc()->CTLR |= rcc_pllon;
             if (!wait_for([] { return (rcc()->CTLR & rcc_pllrdy) != 0u; })) {
                 return false;

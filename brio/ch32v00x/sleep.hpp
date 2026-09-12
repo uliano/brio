@@ -48,6 +48,15 @@
  * The regulator's modes (LDO_MODE), the flash's low-power setting and
  * the PVD are exposed as verbs of `Pwr` and judged by no site: what
  * they are worth is a current on the bench meter.
+ *
+ * THE TWO PARTS (device::): the modes, the AWU - its window, its
+ * prescaler table, its line - and the PVD's flag are the same on the
+ * CH32V003 and the CH32V006. What differs is the PVD's threshold
+ * field (three bits from 2.85 to 4.4 V on the CH32V003, whose supply
+ * runs to 5.5 V; two bits from 1.87 to 2.66 V on the CH32V006), so
+ * `PvdLevel` names each part's own levels and `pvd_rising_mv()` says
+ * what a level is; and the CH32V003 has neither LDO_MODE nor FLASH_LP,
+ * whose verbs write nothing and read the reset state there.
  */
 
 #pragma once
@@ -55,6 +64,7 @@
 #include <stdint.h>
 
 #include <optional>
+#include <type_traits>
 
 #include "ch32v00x/clock.hpp"
 #include "ch32v00x/device.hpp"
@@ -83,13 +93,45 @@ inline constexpr uint32_t pwr_ldo_low      = 0x1UL << 2;   ///< 1.0 V
 inline constexpr uint32_t pwr_ldo_normal   = 0x2UL << 2;   ///< 1.2 V, the reset value
 inline constexpr uint32_t pwr_ldo_saving   = 0x3UL << 2;   ///< 1.0 V, "energy saving"
 inline constexpr uint32_t pwr_pvde         = 1UL << 4;
-inline constexpr uint32_t pwr_pls_mask     = 0x3UL << 5;
+inline constexpr uint32_t pwr_pls_mask     = ((1UL << device::pvd_level_bits) - 1u) << 5;
 inline constexpr uint32_t pwr_flash_lp_reg = 1UL << 9;
 inline constexpr uint32_t pwr_pvd0         = 1UL << 2;     ///< in CSR: below the threshold
 inline constexpr uint32_t pwr_awuen        = 1UL << 1;
 
-/// PWR_CTLR.PLS: the PVD's threshold (RM 2.4.1).
-enum class PvdLevel : uint8_t { v1_87 = 0, v2_23 = 1, v2_43 = 2, v2_66 = 3 };
+/// PWR_CTLR.PLS: the PVD's threshold, each part's own table (RM 2.4.1
+/// of each manual; the rising edge names the level, the falling one
+/// sits 20 mV below on the CH32V006 and 150..200 mV below on the
+/// CH32V003).
+enum class PvdLevelCh32v006 : uint8_t { v1_87 = 0, v2_23 = 1, v2_43 = 2, v2_66 = 3 };
+enum class PvdLevelCh32v003 : uint8_t { v2_85 = 0, v3_05 = 1, v3_3 = 2, v3_5 = 3, v3_7 = 4, v3_9 = 5, v4_1 = 6, v4_4 = 7 };
+using PvdLevel = std::conditional_t<device::part == Ch32Part::v003, PvdLevelCh32v003, PvdLevelCh32v006>;
+
+/// The rising threshold of a level, in millivolts.
+constexpr uint32_t pvd_rising_mv(PvdLevel level) {
+    if constexpr (device::part == Ch32Part::v003) {
+        constexpr uint32_t table[8] = {2850, 3050, 3300, 3500, 3700, 3900, 4100, 4400};
+        return table[static_cast<uint8_t>(level) & 7u];
+    } else {
+        constexpr uint32_t table[4] = {1870, 2230, 2430, 2660};
+        return table[static_cast<uint8_t>(level) & 3u];
+    }
+}
+/// The falling threshold of a level, in millivolts: where PVD0 clears
+/// again once VDD climbs back (the hysteresis of each manual's table).
+constexpr uint32_t pvd_falling_mv(PvdLevel level) {
+    if constexpr (device::part == Ch32Part::v003) {
+        constexpr uint32_t table[8] = {2700, 2900, 3150, 3300, 3500, 3700, 3900, 4200};
+        return table[static_cast<uint8_t>(level) & 7u];
+    } else {
+        constexpr uint32_t table[4] = {1850, 2210, 2410, 2600};
+        return table[static_cast<uint8_t>(level) & 3u];
+    }
+}
+/// The lowest and the highest level of the part, for a program that
+/// wants a threshold without naming a voltage.
+inline constexpr PvdLevel pvd_level_lowest = static_cast<PvdLevel>(0);
+inline constexpr PvdLevel pvd_level_highest = static_cast<PvdLevel>((1u << device::pvd_level_bits) - 1u);
+static_assert(pvd_rising_mv(pvd_level_lowest) < pvd_rising_mv(pvd_level_highest));
 
 /// The power controller, monostate. Its gate on the PB1 bus is opened
 /// by every verb: a PWR register read through a closed gate answers
@@ -107,10 +149,28 @@ struct Pwr {
     }
     static bool standby() { open(); return (pwr()->CTLR & pwr_pdds) != 0u; }
 
-    static void ldo(uint32_t mode) { open(); pwr()->CTLR = (pwr()->CTLR & ~pwr_ldo_mask) | (mode & pwr_ldo_mask); }
-    static uint32_t ldo() { open(); return pwr()->CTLR & pwr_ldo_mask; }
+    /// The regulator's mode (one of the pwr_ldo_* codes): the CH32V006's
+    /// alone (device::pwr_has_ldo_modes) - on the CH32V003 the verb
+    /// writes nothing and reads the normal mode, which is all that
+    /// part has.
+    static void ldo(uint32_t mode) {
+        if constexpr (device::pwr_has_ldo_modes) {
+            open();
+            pwr()->CTLR = (pwr()->CTLR & ~pwr_ldo_mask) | (mode & pwr_ldo_mask);
+        } else {
+            (void)mode;
+        }
+    }
+    static uint32_t ldo() {
+        if constexpr (device::pwr_has_ldo_modes) {
+            open();
+            return pwr()->CTLR & pwr_ldo_mask;
+        } else {
+            return pwr_ldo_normal;
+        }
+    }
 
-    static void pvd(bool on, PvdLevel level = PvdLevel::v2_23) {
+    static void pvd(bool on, PvdLevel level = pvd_level_lowest) {
         open();
         uint32_t c = pwr()->CTLR & ~(pwr_pvde | pwr_pls_mask);
         c |= static_cast<uint32_t>(level) << 5;
@@ -121,9 +181,15 @@ struct Pwr {
     /// True while VDD sits below the PVD's threshold.
     static bool supply_low() { open(); return (pwr()->CSR & pwr_pvd0) != 0u; }
 
+    /// The flash's low-power setting: the CH32V006's alone
+    /// (device::pwr_has_flash_low_power); nothing written on the CH32V003.
     static void flash_low_power(bool on) {
-        open();
-        if (on) { pwr()->CTLR |= pwr_flash_lp_reg; } else { pwr()->CTLR &= ~pwr_flash_lp_reg; }
+        if constexpr (device::pwr_has_flash_low_power) {
+            open();
+            if (on) { pwr()->CTLR |= pwr_flash_lp_reg; } else { pwr()->CTLR &= ~pwr_flash_lp_reg; }
+        } else {
+            (void)on;
+        }
     }
 };
 

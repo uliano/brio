@@ -35,7 +35,7 @@
 //      running down to 0x3F with no refresh (timed), then a refresh
 //      made ABOVE the window
 //
-// build: boards = v006k8
+// build: boards = v006k8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -119,15 +119,22 @@ void console_drain() {
     (void)delay_us(clock, 500);
 }
 
-/// The STK as a stopwatch (cycles), folded with the tick count.
+/// The STK as a stopwatch (cycles), folded with the tick count. The
+/// counter reloads at CMP and raises CNTIF; the handler that counts the
+/// tick runs an interrupt latency LATER, so a sample taken in between
+/// would read one period low (test_ch32_tim measured it: about one
+/// sample in a million). CNTIF read on both sides of CNT says whether
+/// the wrap is already in the counter and not yet in the tick.
 uint32_t cycles_now() {
     const uint32_t period = stk()->CMP + 1u;
     for (;;) {
         const uint32_t t0 = Ticker::ticks();
+        const bool wrapped0 = (stk()->SR & stk_cntif) != 0u;
         const uint32_t cnt = stk()->CNT;
+        const bool wrapped1 = (stk()->SR & stk_cntif) != 0u;
         const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * period + cnt;
+        if (t0 == t1 && wrapped0 == wrapped1) {
+            return (t0 + (wrapped1 ? 1u : 0u)) * period + cnt;
         }
     }
 }
@@ -415,7 +422,7 @@ void resume_after_reset() {
 }
 
 void banner() {
-    print(serial, crlf, "test_ch32_watchdog - CH32V006K8 IWDG and WWDG (RM ch. 4 and 5)", crlf);
+    print(serial, crlf, "test_ch32_watchdog - ", device::part_name, " IWDG and WWDG (RM ch. 4 and 5)", crlf);
     print(serial, "  boot flags ", hex(boot_flags), "; the IWDG is ", iwdg_running ? "RUNNING (fed by the loop)"
                                                                                  : "off", crlf);
     bench.menu();
@@ -475,6 +482,7 @@ int main() {
         } else if (!bench.handle(static_cast<char>(c))) {
             brio::print(serial, "unknown letter (? for the menu)", brio::crlf);
         }
+        brio::print(serial, "  stack: ", brio::stack_untouched(), " B never touched", brio::crlf);
         bench.prompt();
     }
 }

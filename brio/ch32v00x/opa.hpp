@@ -1,17 +1,19 @@
 /*
  * opa.hpp
  *
- * The operational amplifier of the CH32V00x (RM ch. 17): one OPA with a
- * selectable positive input (four pads), a negative input that is a pad
- * or an internal gain of 4, 8, 16 or 32 (the PGA, with a 192 kOhm
- * feedback the block switches in), a differential PGA whose negative
- * side is PA4, a bias reference of VDD/2 or VDD/4 for the PGA, a
- * high-speed mode, an output that is a pad (PD4 or PA5) and ALWAYS the
- * ADC's channel 9 - and the comparator CMP2 that reads the OPA's
- * output against that same bias. The chapter's second comparator, CMP1
- * with its own pads, exists on the CH32V007 alone (17's opening
- * paragraph), so this file spells CMP2 and the polling and leaves CMP1
- * for the part that has it.
+ * The operational amplifier of the CH32V00x, in two shapes the part
+ * decides (device::has_opa_block):
+ *
+ * ON THE CH32V006 (RM ch. 17) one OPA with a selectable positive input
+ * (four pads), a negative input that is a pad or an internal gain of
+ * 4, 8, 16 or 32 (the PGA, with a 192 kOhm feedback the block
+ * switches in), a differential PGA whose negative side is PA4, a bias
+ * reference of VDD/2 or VDD/4 for the PGA, a high-speed mode, an
+ * output that is a pad (PD4 or PA5) and ALWAYS the ADC's channel 9 -
+ * and the comparator CMP2 that reads the OPA's output against that
+ * same bias. The chapter's second comparator, CMP1 with its own pads,
+ * exists on the CH32V007 alone (17's opening paragraph), so this file
+ * spells CMP2 and the polling and leaves CMP1 for the part that has it.
  *
  * THE LOCKS. OPA_CTLR1.OPA_LOCK is SET at reset: nothing in the register
  * takes a write until the two keys go into OPA_KEY in order (17.3.5,
@@ -33,13 +35,27 @@
  * opening paragraph says of the CMP module; the verbs stay for the
  * part that has them and answer false here.
  *
+ * ON THE CH32V003 (its RM ch. 17) the OPA is THREE BITS OF EXTEND_CTR:
+ * OPA_EN, OPA_PSEL (channel 0 = PA2, 1 = PD7) and OPA_NSEL (0 = PA1,
+ * 1 = PD0); the output is the pad PD4 and nothing else, read by the
+ * ADC as its channel 7 THROUGH THAT PAD (no internal route: PD4 must
+ * be an analog input for the reading). No key, no lock, no gain, no
+ * feedback switch (a resistor across the pads closes the loop), no
+ * bias, no comparator. The same OpaConfig spells it: the selections
+ * the part has are the first two codes of each enum, and everything
+ * else is REFUSED by opa_config_valid() - so a configuration written
+ * for one part is not silently a different one on the other. The
+ * lock verbs answer as a block with no lock (never locked, lock()
+ * false), the CMP2 verbs as a part with no comparator.
+ *
  * NOT COVERED YET: the front-end POLLING (CFGR1/CFGR2: three P-side
  * channels sampled in turn on a timer trigger, each into the ADC, with
  * a per-channel window and a reset on a fault) - the shape of a task
  * this stratum has no user for; CMP2's output as TIM1's break source
  * (BKIN_CFG) and its filter - the break unit's, born with a
  * measurement; the OPA on an external feedback (a resistor across the
- * pads) - a wire.
+ * pads) - a wire; EXTEND_CTR's other bits (the lock-up monitor on
+ * both parts, LDOTRIM on the CH32V003) - no user.
  */
 
 #pragma once
@@ -51,6 +67,7 @@
 
 namespace brio {
 
+// ---- the CH32V006's block (RM ch. 17) ------------------------------------
 struct OpaRegs {
     volatile uint32_t CFGR1;     ///< 0x00 the polling
     volatile uint32_t CTLR1;     ///< 0x04 the OPA
@@ -89,10 +106,19 @@ inline constexpr uint32_t opa_cmp_filt_sel = 1UL << 25;
 inline constexpr uint32_t opa_cmp_bkin_mask = 3UL << 26;
 inline constexpr uint32_t opa_cmp_lock     = 1UL << 31;
 
-/// PSEL1: the positive input's pad.
+// ---- the CH32V003's three bits of EXTEND_CTR (its RM 17.2.1) -------------
+inline constexpr uint32_t opa_exten_en   = 1UL << 16;
+inline constexpr uint32_t opa_exten_nsel = 1UL << 17;
+inline constexpr uint32_t opa_exten_psel = 1UL << 18;
+inline constexpr uint32_t opa_exten_mask = opa_exten_en | opa_exten_nsel | opa_exten_psel;
+
+/// PSEL1: the positive input's pad. The CH32V003 has the first two
+/// (its OPA_PSEL channels 0 and 1, the same pads).
 enum class OpaPositive : uint8_t { pa2 = 0, pd7 = 1, pd3 = 2, pd1 = 3 };
 
 /// NSEL1: the negative input - a pad, or the internal gain of a PGA.
+/// The CH32V003 has the two pads (its OPA_NSEL channels 0 and 1) and
+/// no gain.
 enum class OpaNegative : uint8_t {
     pa1 = 0,        ///< OPA_CHN0
     pd0 = 1,        ///< OPA_CHN1
@@ -118,6 +144,7 @@ constexpr uint8_t opa_gain_of(OpaNegative n) {
 }
 
 /// MODE1: where the output goes beside the ADC's channel 9 and CMP2.
+/// On the CH32V003 the output is PD4 and nothing else.
 enum class OpaOutput : uint8_t { pd4 = 0, pa5 = 1, internal = 2 };
 
 /// The PGA's bias reference (VBSEL, under VBEN).
@@ -126,11 +153,14 @@ enum class OpaBias : uint8_t { none, vdd_over_2, vdd_over_4 };
 /// VBCMPSEL: CMP2's negative reference (table 17-3), or off.
 enum class OpaCmp2Reference : uint8_t { code0 = 0, code1 = 1, code2 = 2, off = 3 };
 
+/// The defaults follow the part: the CH32V003's OPA has no internal
+/// output and no feedback switch, so a config that names neither is
+/// valid on both.
 struct OpaConfig {
     OpaPositive positive = OpaPositive::pa2;
-    OpaNegative negative = OpaNegative::gain4;
-    OpaOutput output = OpaOutput::internal;
-    bool feedback = true;            ///< FB_EN1: MUST be set in the PGA modes (17.3.2's note)
+    OpaNegative negative = device::has_opa_block ? OpaNegative::gain4 : OpaNegative::pa1;
+    OpaOutput output = device::has_opa_block ? OpaOutput::internal : OpaOutput::pd4;
+    bool feedback = device::has_opa_block;   ///< FB_EN1: MUST be set in the PGA modes (17.3.2's note)
     bool differential = false;       ///< PGADIF: the negative side is PA4
     OpaBias bias = OpaBias::none;    ///< VBEN/VBSEL
     bool high_speed = false;         ///< OPA_HS1, 40 V/us
@@ -139,20 +169,33 @@ struct OpaConfig {
 
 /// The refusals the chapter states: a PGA gain wants the feedback
 /// switched in, the differential PGA has no gain 32, a bias reference
-/// only under a PGA gain.
+/// only under a PGA gain. On the CH32V003 everything its three bits
+/// cannot spell is refused: a positive pad beyond the two, a gain or
+/// `off` on the negative side, an output that is not PD4, the
+/// feedback switch, the differential mode, a bias, the high-speed
+/// mode, a CMP2 reference.
 constexpr bool opa_config_valid(const OpaConfig& c) {
-    if (opa_negative_is_gain(c.negative) && !c.feedback) {
-        return false;
+    if constexpr (!device::has_opa_block) {
+        return (c.positive == OpaPositive::pa2 || c.positive == OpaPositive::pd7) &&
+               (c.negative == OpaNegative::pa1 || c.negative == OpaNegative::pd0) &&
+               c.output == OpaOutput::pd4 && !c.feedback && !c.differential && c.bias == OpaBias::none &&
+               !c.high_speed && c.cmp2_reference == OpaCmp2Reference::off;
+    } else {
+        if (opa_negative_is_gain(c.negative) && !c.feedback) {
+            return false;
+        }
+        if (c.differential && (c.negative == OpaNegative::gain32 || !opa_negative_is_gain(c.negative))) {
+            return false;
+        }
+        if (c.bias != OpaBias::none && !opa_negative_is_gain(c.negative)) {
+            return false;
+        }
+        return true;
     }
-    if (c.differential && (c.negative == OpaNegative::gain32 || !opa_negative_is_gain(c.negative))) {
-        return false;
-    }
-    if (c.bias != OpaBias::none && !opa_negative_is_gain(c.negative)) {
-        return false;
-    }
-    return true;
 }
 
+/// OPA_CTLR1's image of a config (the CH32V006), the enable and the
+/// lock left out.
 constexpr uint32_t opa_ctlr1_of(const OpaConfig& c) {
     uint32_t v = 0;
     v |= static_cast<uint32_t>(c.output) << 1;
@@ -166,6 +209,16 @@ constexpr uint32_t opa_ctlr1_of(const OpaConfig& c) {
     }
     v |= static_cast<uint32_t>(c.cmp2_reference) << 18;
     if (c.high_speed) { v |= opa_hs1; }
+    return v;
+}
+
+/// EXTEND_CTR's image of a config (the CH32V003): the two selections,
+/// the enable left out. Only meaningful for a config opa_config_valid()
+/// accepts on that part.
+constexpr uint32_t opa_exten_of(const OpaConfig& c) {
+    uint32_t v = 0;
+    if (c.positive == OpaPositive::pd7) { v |= opa_exten_psel; }
+    if (c.negative == OpaNegative::pd0) { v |= opa_exten_nsel; }
     return v;
 }
 
@@ -187,9 +240,11 @@ constexpr Pad opa_output_pad(OpaOutput o) {
 }
 
 /**
- * The OPA, a monostate. Every configuring verb needs the block unlocked
- * (unlock() first, once per reset); the ADC reads the output on its
- * channel 9 whatever the output selection.
+ * The OPA, a monostate. On the CH32V006 every configuring verb needs
+ * the block unlocked (unlock() first, once per reset) and the ADC
+ * reads the output on its channel 9 whatever the output selection; on
+ * the CH32V003 unlock() is nothing, the output is the pad PD4 and the
+ * ADC reads it on channel 7 through an analog-input PD4.
  *
  *   Opa::unlock();
  *   Opa::configure({.positive = OpaPositive::pa2, .negative = OpaNegative::gain8});
@@ -198,63 +253,151 @@ constexpr Pad opa_output_pad(OpaOutput o) {
 struct Opa {
     Opa() = delete;
 
+    /// The CH32V006's block; on the CH32V003 nothing lives there.
     static OpaRegs& regs() { return *opa(); }
-    /// The ADC channel the output is always on (17's overview).
-    static constexpr uint8_t adc_channel = 9;
+    /// The ADC channel the output is on: 9 on the CH32V006 (an
+    /// internal route, always), 7 on the CH32V003 (PD4's own channel,
+    /// through the pad).
+    static constexpr uint8_t adc_channel = device::opa_adc_channel;
+    /// Whether the part has the key-locked block (the gains, the
+    /// bias, the differential PGA, the output selection, CMP2).
+    static constexpr bool has_block = device::has_opa_block;
 
-    /// The key pair, in order. Nothing takes before this.
+    /// The key pair, in order. Nothing takes before this on the
+    /// CH32V006; nothing to do on the CH32V003.
     static void unlock() {
-        regs().OPA_KEY = opa_key1;
-        regs().OPA_KEY = opa_key2;
+        if constexpr (has_block) {
+            regs().OPA_KEY = opa_key1;
+            regs().OPA_KEY = opa_key2;
+        }
     }
-    /// One-way until the next system reset.
-    static void lock() { regs().CTLR1 |= opa_lock; }
-    static bool locked() { return (regs().CTLR1 & opa_lock) != 0u; }
+    /// One-way until the next system reset. True when the lock stands
+    /// after the write - never on the CH32V003, which has none.
+    static bool lock() {
+        if constexpr (has_block) {
+            regs().CTLR1 |= opa_lock;
+        }
+        return locked();
+    }
+    static bool locked() {
+        if constexpr (has_block) {
+            return (regs().CTLR1 & opa_lock) != 0u;
+        } else {
+            return false;
+        }
+    }
 
     /// The whole configuration, the enable left as it is. False for a
-    /// config the chapter refuses, or with the block locked.
+    /// config the part refuses, or with the block locked.
     static bool configure(const OpaConfig& c) {
         if (!opa_config_valid(c) || locked()) {
             return false;
         }
-        regs().CTLR1 = (regs().CTLR1 & opa_en1) | opa_ctlr1_of(c);
+        if constexpr (has_block) {
+            regs().CTLR1 = (regs().CTLR1 & opa_en1) | opa_ctlr1_of(c);
+        } else {
+            // A read-modify-write over EXTEND_CTR: LKUPRST is write-1-
+            // clear, so a set flag is masked out of the write-back.
+            const uint32_t v = exten()->CTR & ~(opa_exten_psel | opa_exten_nsel | exten_lkuprst);
+            exten()->CTR = v | opa_exten_of(c);
+        }
         return true;
     }
     static void enable(bool on) {
-        regs().CTLR1 = on ? (regs().CTLR1 | opa_en1) : (regs().CTLR1 & ~opa_en1);
+        if constexpr (has_block) {
+            regs().CTLR1 = on ? (regs().CTLR1 | opa_en1) : (regs().CTLR1 & ~opa_en1);
+        } else {
+            const uint32_t v = exten()->CTR & ~(opa_exten_en | exten_lkuprst);
+            exten()->CTR = on ? (v | opa_exten_en) : v;
+        }
     }
-    static bool enabled() { return (regs().CTLR1 & opa_en1) != 0u; }
-    static uint32_t ctlr1() { return regs().CTLR1; }
+    static bool enabled() {
+        if constexpr (has_block) {
+            return (regs().CTLR1 & opa_en1) != 0u;
+        } else {
+            return (exten()->CTR & opa_exten_en) != 0u;
+        }
+    }
+    /// The register the OPA lives in, as it reads: OPA_CTLR1 on the
+    /// CH32V006, EXTEND_CTR on the CH32V003.
+    static uint32_t control() {
+        if constexpr (has_block) {
+            return regs().CTLR1;
+        } else {
+            return exten()->CTR;
+        }
+    }
 
     // ---- CMP2: the OPA's output against the bias reference ------------------
+    // The CH32V006's block; on the CH32V003 there is no comparator and
+    // the verbs answer as a locked block that never unlocks.
 
     static void cmp_unlock() {
-        regs().CMP_KEY = opa_key1;
-        regs().CMP_KEY = opa_key2;
+        if constexpr (has_block) {
+            regs().CMP_KEY = opa_key1;
+            regs().CMP_KEY = opa_key2;
+        }
     }
-    static void cmp_lock() { regs().CTLR2 |= opa_cmp_lock; }
-    static bool cmp_locked() { return (regs().CTLR2 & opa_cmp_lock) != 0u; }
+    static void cmp_lock() {
+        if constexpr (has_block) {
+            regs().CTLR2 |= opa_cmp_lock;
+        }
+    }
+    static bool cmp_locked() {
+        if constexpr (has_block) {
+            return (regs().CTLR2 & opa_cmp_lock) != 0u;
+        } else {
+            return true;
+        }
+    }
     /// True when the bit TOOK - which on the CH32V006 it does not (the
-    /// file header).
+    /// file header), and on the CH32V003 there is no bit.
     static bool cmp2_enable(bool on) {
         if (cmp_locked()) {
             return false;
         }
-        regs().CTLR2 = on ? (regs().CTLR2 | opa_cmp_en2) : (regs().CTLR2 & ~opa_cmp_en2);
+        if constexpr (has_block) {
+            regs().CTLR2 = on ? (regs().CTLR2 | opa_cmp_en2) : (regs().CTLR2 & ~opa_cmp_en2);
+        }
         return cmp2_enabled() == on;
     }
-    static bool cmp2_enabled() { return (regs().CTLR2 & opa_cmp_en2) != 0u; }
+    static bool cmp2_enabled() {
+        if constexpr (has_block) {
+            return (regs().CTLR2 & opa_cmp_en2) != 0u;
+        } else {
+            return false;
+        }
+    }
 };
 
-// The chapter's refusals, pinned.
+// The chapter's refusals, pinned - each part's, under the same `if
+// constexpr` the verbs branch on.
+constexpr bool opa_refusals_pinned() {
+    if constexpr (device::has_opa_block) {
+        return !opa_config_valid(OpaConfig{.negative = OpaNegative::gain8, .feedback = false}) &&
+               !opa_config_valid(OpaConfig{.negative = OpaNegative::gain32, .differential = true}) &&
+               !opa_config_valid(OpaConfig{.negative = OpaNegative::pa1, .bias = OpaBias::vdd_over_2}) &&
+               opa_config_valid(OpaConfig{.negative = OpaNegative::gain16, .differential = true,
+                                          .bias = OpaBias::vdd_over_4}) &&
+               opa_ctlr1_of(OpaConfig{.positive = OpaPositive::pd3, .negative = OpaNegative::gain8,
+                                      .output = OpaOutput::pd4, .bias = OpaBias::vdd_over_4}) ==
+                   ((2UL << 4) | (4UL << 8) | opa_fb_en1 | opa_vben | opa_vbsel | (3UL << 18)) &&
+               Opa::adc_channel == 9u;
+    } else {
+        return !opa_config_valid(OpaConfig{.positive = OpaPositive::pd3}) &&
+               !opa_config_valid(OpaConfig{.negative = OpaNegative::gain4, .feedback = true}) &&
+               !opa_config_valid(OpaConfig{.negative = OpaNegative::off}) &&
+               !opa_config_valid(OpaConfig{.output = OpaOutput::internal}) &&
+               !opa_config_valid(OpaConfig{.feedback = true}) &&
+               !opa_config_valid(OpaConfig{.high_speed = true}) &&
+               opa_exten_of(OpaConfig{.positive = OpaPositive::pd7, .negative = OpaNegative::pd0}) ==
+                   (opa_exten_psel | opa_exten_nsel) &&
+               opa_exten_of(OpaConfig{}) == 0u && Opa::adc_channel == 7u;
+    }
+}
 static_assert(opa_config_valid(OpaConfig{}));
-static_assert(!opa_config_valid(OpaConfig{.negative = OpaNegative::gain8, .feedback = false}));
-static_assert(!opa_config_valid(OpaConfig{.negative = OpaNegative::gain32, .differential = true}));
-static_assert(!opa_config_valid(OpaConfig{.negative = OpaNegative::pa1, .bias = OpaBias::vdd_over_2}));
-static_assert(opa_config_valid(OpaConfig{.negative = OpaNegative::gain16, .differential = true, .bias = OpaBias::vdd_over_4}));
-static_assert(opa_ctlr1_of(OpaConfig{.positive = OpaPositive::pd3, .negative = OpaNegative::gain8,
-                                     .output = OpaOutput::pd4, .bias = OpaBias::vdd_over_4}) ==
-              ((2UL << 4) | (4UL << 8) | opa_fb_en1 | opa_vben | opa_vbsel | (3UL << 18)));
+static_assert(opa_config_valid(OpaConfig{.positive = OpaPositive::pd7, .negative = OpaNegative::pd0}));
+static_assert(opa_refusals_pinned());
 static_assert(opa_gain_of(OpaNegative::gain32) == 32u && opa_gain_of(OpaNegative::pa1) == 1u);
 static_assert(opa_positive_pad(OpaPositive::pd7) == Pad{'D', 7} && opa_output_pad(OpaOutput::internal) == Pad{});
 

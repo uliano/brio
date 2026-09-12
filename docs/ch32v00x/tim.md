@@ -58,13 +58,22 @@ the default pads).
   PC5; TIM2 CH1/ETR on PD4, CH2..4 on PD3, PC0, PD7. The remaps are
   AFIO's, not touched yet.
 
+- **Two parts**: TIM1 and TIM2 are the same on the CH32V003 and the
+  CH32V006; TIM3 is the CH32V006's (`BRIO_CH32_HAS_TIM3`), and so is
+  TIM2's dead-time generator DTCR - the CH32V003's TIM2 "lacks
+  dead-time generation" (its RM 11.2), so `tim_complementary_channels(2)`
+  is 0 there and a TimPairPwm over its TIM2 does not compile. CAPLVL
+  and CAPOV exist on both. The remap columns are each part's
+  ([pin.md](pin.md)).
+
 ## Types and verbs
 
 [brio/ch32v00x/tim.hpp](../../brio/ch32v00x/tim.hpp):
 
 - `Tim<n>`, n = 1 or 2: `init()`/`release()`, `configure(TimConfig)`
   (the time base, the counting mode, the three WCH bits, RPTCR on
-  TIM1; the counter left stopped, UG run, UIF cleared), `enable()`,
+  TIM1; SMCFGR back at zero, the counter left stopped, UG run, UIF
+  cleared), `enable()`,
   `count()`, `period()`, `prescaler()`, the software events, the flags
   and `clear_flags()`, `interrupts(mask, on)` for DMAINTENR's
   interrupt AND DMA enables, `isr()` (the raised-and-enabled flags,
@@ -92,7 +101,8 @@ the default pads).
   the difference in the counter's modulus), `TimEventCounter<T>` (a
   timer clocked by another's trigger), `TimGatedCounter<T>` (a timer
   gated by another's OCxREF), `TimPeriodicTick<T>`, `TimOnePulse<T,
-  ch>`.
+  ch>` (the delay loaded into the shadow compare by an update of its
+  own, before the trigger can come).
 - The arithmetic: `tim_dead_time_ticks(code)`/`tim_dead_time_code(
   ticks)` for BDTR's four ranges, `tim_internal_trigger()`/
   `tim_trigger_index_for()` for table 11-2, `tim_clock_hz(clock)` (a
@@ -125,9 +135,12 @@ The vectors: `tim1_up_handler`, `tim1_cc_handler`, `tim1_trg_com_handler`,
 
 ## Bench findings
 
-The reference suite is `test_ch32_tim` (19 verdicts in `z`, two
-letters on one jumper, one probe letter outside `z`) on the
-CH32V006K8U6 at 48 MHz.
+The reference suite is `test_ch32_tim` (25 verdicts in `z`, two of
+its letters on the jumper PD2 to PD4, one probe letter outside `z`)
+on the CH32V006K8U6 at 48 MHz, and 16 on the CH32V003F4P6, whose
+image has no TIM3 letter and whose jumper letters decline without the
+wire - the two parts' images are one source, the facts letter
+refusing a pair dead time on TIM2 where the part has none.
 
 - **The time base is exact**: TIM2 at 1 MHz against the STK, 100001
   counts in 100001 us; a TimPeriodicTick at 1 kHz delivers 199..200
@@ -144,6 +157,23 @@ CH32V006K8U6 at 48 MHz.
   100 ms) and HCLK undivided on CK_INT (24086 counts in 500 us); its
   channel 3 match reached DMA channel 1 with the sink holding the
   source - ONCE, the one-shot finding above, probed nine ways.
+- **The captures, on the jumper**: TimPeriodMeter reads TIM1's 10 kHz
+  PWM to the count at three duties (period 4799, widths 1199, 2399
+  and 4319 for 1200, 2400 and 4320; about 202 captures in 20 ms);
+  TimIntervalMeter reads seven intervals of exactly 4800 counts; a
+  CHCVR read clears the channel's capture flag, which is what lets a
+  poller wait on the flag and take the value in one verb.
+- **A slave mode outlives every verb that does not name it**: the
+  reset-on-TI1 a period meter arms would reset the counter at each
+  edge of the next task set up on the same timer, and every interval
+  would read zero - which is why `configure()` returns SMCFGR to
+  zero.
+- **One pulse, fired by software and captured**: 101 us for 100 asked
+  after a 50 us delay, the counter stopped by OPM. A preloaded compare
+  that has seen no update is zero in the shadow, and PWM mode 2 is
+  then active from the first count - the pulse runs from the trigger
+  to the period, delay + width + 1 (measured) - so `TimOnePulse::
+  setup` ends with an update of its own.
 - **The break, staged from the pad's own pull**: PC2 pulled down with
   BKP active-high leaves MOE set; pulled up, MOE drops by hardware and
   BIF rises - and stands, unclearable, while the input does; under
@@ -166,9 +196,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The captures**: TimPeriodMeter at three duties, TimIntervalMeter,
-  TimOnePulse's width - the suite's letters f and g on the jumper PD2
-  to PD4.
 - The complementary outputs and their dead time on both timers, the
   idle states, the polarities: two pads on a scope or a logic analyser.
 - The external trigger (ETR) and the external clock mode 2: a signal

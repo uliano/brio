@@ -53,10 +53,10 @@ namespace brio {
 struct Flash {
     Flash() = delete;
 
-    static constexpr uint32_t page_size = 256;      ///< the fast program AND erase unit
+    static constexpr uint32_t page_size = device::flash_page_bytes;   ///< the fast program AND erase unit: 256 on the CH32V006, 64 on the CH32V003
     static constexpr uint32_t sector_size = 1024;   ///< the standard erase unit
     static constexpr uint32_t alias_base = 0x08000000UL;
-    static constexpr uint32_t array_bytes = 62u * 1024u;   ///< the CH32V006K8's
+    static constexpr uint32_t array_bytes = device::flash_bytes;   ///< 62 KB on the CH32V006 (the boot area apart), 16 on the CH32V003
 
     /// How long an operation may take before the engine gives up, in
     /// polls: a page erase is a few milliseconds, and a stuck BSY is a

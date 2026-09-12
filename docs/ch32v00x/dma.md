@@ -124,8 +124,8 @@ bits it returns.
 ## Bench findings
 
 The reference suite is `test_ch32_dma` (23 verdicts in `z`, two more
-in its interactive letter) on the CH32V006K8U6 at 48 MHz, ITS OWN
-CONSOLE ON THE TWO ENGINES: every line it printed left the ring on a
+in its interactive letter) on the CH32V006K8U6 and, the same 23, on
+the CH32V003F4P6, both at 48 MHz, ITS OWN CONSOLE ON THE TWO ENGINES: every line it printed left the ring on a
 transmit block, every keystroke arrived through a harvest.
 
 - **Memory to memory, three widths, exact**: 64 bytes, 32 half-words

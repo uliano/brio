@@ -1,4 +1,4 @@
-// mcu: ch32v006k8
+// mcu: ch32v006k8 ch32v003f4
 // A channel moves data ONE way: a Uart whose two engines name the same
 // channel must be REFUSED at the application's line.
 #include "ch32v00x/dma.hpp"

@@ -2,7 +2,9 @@
 // ch32v00x/tim.hpp's Tim<1>, Tim<2> and Tim3 over RM ch. 11, 12 and 13,
 // most of it with NO WIRE - one timer clocking another, gating another,
 // the break staged from a pad's own pull - and one jumper for the
-// captures.
+// captures. TIM3 is the CH32V006's: letters e and x, and the TIM3
+// clauses of letter a, build where the part has it; the rest is the
+// same on both parts.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -43,7 +45,7 @@
 //   i  THE BREAK, wireless: PC2 pulled up with BKP active-high drops
 //      MOE and raises BIF; pulled down, the outputs come back under AOE
 //
-// build: boards = v006k8
+// build: boards = v006k8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -94,14 +96,24 @@ void settle_ms(uint32_t ms) {
     }
 }
 
+/// Cycles since boot from the tick count and the STK's own counter. The
+/// counter reloads at CMP and raises CNTIF; the handler that counts the
+/// tick runs an interrupt latency LATER, so a sample taken in between
+/// would read one period low (measured: about one sample in a million,
+/// and a window that starts within a period of the wrap then ends at
+/// once, its unsigned difference wrapped). CNTIF read on both sides of
+/// CNT says whether the wrap is already in the counter and not yet in
+/// the tick.
 uint32_t cycles_now() {
     const uint32_t period = stk()->CMP + 1u;
     for (;;) {
         const uint32_t t0 = Ticker::ticks();
+        const bool wrapped0 = (stk()->SR & stk_cntif) != 0u;
         const uint32_t cnt = stk()->CNT;
+        const bool wrapped1 = (stk()->SR & stk_cntif) != 0u;
         const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * period + cnt;
+        if (t0 == t1 && wrapped0 == wrapped1) {
+            return (t0 + (wrapped1 ? 1u : 0u)) * period + cnt;
         }
     }
 }
@@ -116,11 +128,14 @@ void spin_cycles(uint32_t cycles) {
 }
 constexpr uint32_t cycles_100ms = 4'800'000UL;
 
+/// The sensor's pull is set AGAINST the driven level, so a floating pad
+/// echoing its neighbour is not taken for the wire (a wire beats a pull).
 bool probe_jumper() {
-    InPad::pin::input();
+    InPad::pin::input(PinPull::down);
     OutPad::pin::output(true);
     (void)delay_us(clock, 5);
     const bool high = InPad::pin::read();
+    InPad::pin::input(PinPull::up);
     OutPad::pin::clear();
     (void)delay_us(clock, 5);
     const bool low = !InPad::pin::read();
@@ -149,7 +164,9 @@ void all_off() {
     Pfic::disable(Irq::dma1_channel1);
     T1::init();
     T2::init();
+#if BRIO_CH32_HAS_TIM3
     Tim3::init();
+#endif
     DmaChannel<1>::stop();
     OutPad::release();
     InPad::release();
@@ -167,8 +184,9 @@ void all_off() {
 void ta_blocks() {
     all_off();
     print(serial, "  TIM1: CTLR1=", hex(T1::regs().CTLR1), " ATRLR=", hex(T1::regs().ATRLR), " BDTR=",
-          hex(T1::regs().BDTR), "; TIM2: ATRLR=", hex(T2::regs().ATRLR), " DTCR=", hex(T2::regs().BDTR),
-          "; TIM3: CTLR1=", hex(Tim3::regs().CTLR1), " ATRLR=", hex(Tim3::regs().ATRLR), crlf);
+          hex(T1::regs().BDTR), "; TIM2: ATRLR=", hex(T2::regs().ATRLR), " DTCR=", hex(T2::regs().BDTR));
+#if BRIO_CH32_HAS_TIM3
+    print(serial, "; TIM3: CTLR1=", hex(Tim3::regs().CTLR1), " ATRLR=", hex(Tim3::regs().ATRLR), crlf);
     bench.verdict("the reset values are the tables' (ATRLR 0xFFFF on all three, the rest zero)",
                   T1::regs().CTLR1 == 0u && T1::regs().ATRLR == 0xFFFFu && T1::regs().BDTR == 0u &&
                       T2::regs().ATRLR == 0xFFFFu && Tim3::regs().ATRLR == 0xFFFFu);
@@ -177,6 +195,16 @@ void ta_blocks() {
                   !T2::configure({.period = 10, .repetition = 1}) && !T2::break_dead_time({}) &&
                       !T1::pair_dead_time(0, {.ticks = 2}) && !Tim3::dma_request(0, true) &&
                       Tim3::dma_request(2, true));
+#else
+    print(serial, " (this part has no TIM3, and no dead time on TIM2)", crlf);
+    bench.verdict("the reset values are the tables' (ATRLR 0xFFFF on both, the rest zero)",
+                  T1::regs().CTLR1 == 0u && T1::regs().ATRLR == 0xFFFFu && T1::regs().BDTR == 0u &&
+                      T2::regs().ATRLR == 0xFFFFu);
+    bench.verdict("the facts as refusals: a repetition on TIM2, a break on TIM2, a pair dead time on "
+                  "TIM1 and on TIM2",
+                  !T2::configure({.period = 10, .repetition = 1}) && !T2::break_dead_time({}) &&
+                      !T1::pair_dead_time(0, {.ticks = 2}) && !T2::pair_dead_time(0, {.ticks = 2}));
+#endif
     bench.verdict("the refusals of the chapter: a period of zero, a gated mode on TI1's edge "
                   "detector, an ITR nothing is wired to",
                   !T1::configure({.period = 0}) &&
@@ -339,6 +367,7 @@ void td_cross() {
 // e - TIM3
 // ===========================================================================
 
+#if BRIO_CH32_HAS_TIM3
 void te_tim3() {
     all_off();
     // TIM1's TRGO at 10 kHz clocks TIM3 (external clock mode 1).
@@ -415,6 +444,8 @@ void te_tim3() {
     all_off();
 }
 
+#endif
+
 // ===========================================================================
 // f - the captures on the jumper
 // ===========================================================================
@@ -460,9 +491,22 @@ void tf_capture() {
                   exact == 3u);
     bench.verdict("about 200 captures in 20 ms at 10 kHz", t2_captures >= 195u && t2_captures <= 205u);
 
-    // The interval meter: rising edges 4800 apart.
+    // A CHCVR read clears the channel's flag (11.4.5): what lets a
+    // poller wait on the flag and take the value in one verb.
     (void)Edges::setup(0, 0);
+    T2::clear_flags(Edges::capture_flag);
+    while (!T2::flag(Edges::capture_flag)) {
+    }
+    (void)T2::compare(0);
+    const bool read_cleared = !T2::flag(Edges::capture_flag);
+    bench.verdict("reading CHCVR clears the channel's capture flag", read_cleared);
+    // The interval meter: rising edges 4800 apart, on the free-running
+    // counter Edges::setup's configure() re-established after the
+    // period meter's reset-on-TI1.
+    Edges::restart();
     uint8_t good = 0;
+    uint16_t lo = 0xFFFFu;
+    uint16_t hi = 0;
     for (uint8_t k = 0; k < 8u; ++k) {
         while (!T2::flag(Edges::capture_flag)) {
         }
@@ -470,10 +514,12 @@ void tf_capture() {
             if (*d >= 4799u && *d <= 4801u) {
                 ++good;
             }
+            lo = *d < lo ? *d : lo;
+            hi = *d > hi ? *d : hi;
         }
     }
-    print(serial, "  TimIntervalMeter: ", good, " of 7 intervals at 4800 counts (the first has no predecessor)",
-          crlf);
+    print(serial, "  TimIntervalMeter: ", good, " of 7 intervals at 4800 counts (", lo, "..", hi,
+          "; the first has no predecessor)", crlf);
     bench.verdict("TimIntervalMeter reads the period between rising edges", good == 7u);
     all_off();
 }
@@ -562,6 +608,7 @@ void ti_break() {
 // x - TIM3's DMA request, probed (outside z)
 // ===========================================================================
 
+#if BRIO_CH32_HAS_TIM3
 void tx_tim3_dma_probe() {
     all_off();
     static const uint32_t source = 0xC0FFEE01u;
@@ -773,9 +820,10 @@ void tx_tim3_dma_probe() {
     all_off();
     print(serial, "  (a probe: no verdict)", crlf);
 }
+#endif
 
 void banner() {
-    print(serial, crlf, "test_ch32_tim - CH32V006K8 TIM1, TIM2 and TIM3 (RM ch. 11, 12, 13)", crlf);
+    print(serial, crlf, "test_ch32_tim - ", device::part_name, " TIM1, TIM2 and TIM3 (RM ch. 11, 12, 13)", crlf);
     print(serial, "  the jumper for f and g: PD2 (TIM1_CH1) <-> PD4 (TIM2_CH1); ", jumper_present ? "PRESENT"
                                                                                                       : "ABSENT",
           crlf);
@@ -800,6 +848,7 @@ extern "C" BRIO_CH32_INTERRUPT void tim1_brk_handler() {
         T1::interrupts(T1::break_interrupt, false);
     }
 }
+
 extern "C" BRIO_CH32_INTERRUPT void tim2_handler() {
     const uint16_t f = T2::isr();
     if ((f & T2::update_flag) != 0u) {
@@ -824,11 +873,15 @@ int main() {
     bench.letter('b', "the time base against the STK, and a 1 kHz tick counted", tb_timebase);
     bench.letter('c', "the periods: edge, centre-aligned measured, the repetition counter", tc_periods);
     bench.letter('d', "one timer measuring another with no wire: ITR both ways, gated duty", td_cross);
+#if BRIO_CH32_HAS_TIM3
     bench.letter('e', "TIM3: clocked by TIM1, on CK_INT, its match pacing a DMA channel", te_tim3);
+#endif
     bench.letter('f', "THE CAPTURES on the jumper: period meter at three duties, interval meter", tf_capture);
     bench.letter('g', "ONE PULSE on the jumper, fired by software and captured", tg_one_pulse);
     bench.letter('i', "the break, wireless: the pad's pull as BKIN, MOE dropped, AOE", ti_break);
+#if BRIO_CH32_HAS_TIM3
     bench.letter('x', "TIM3's DMA request probed five ways (no verdict)", tx_tim3_dma_probe, false);
+#endif
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL48" : "FAILED",
@@ -852,6 +905,7 @@ int main() {
         } else if (!bench.handle(static_cast<char>(c))) {
             brio::print(serial, "unknown letter (? for the menu)", brio::crlf);
         }
+        brio::print(serial, "  stack: ", brio::stack_untouched(), " B never touched", brio::crlf);
         bench.prompt();
     }
 }

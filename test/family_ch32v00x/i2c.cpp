@@ -1,4 +1,5 @@
-// I2C family smoke TU: ch32v00x/i2c.hpp's resource, host and client
+// I2C family smoke TU, both parts (the block is the same register
+// description on each): ch32v00x/i2c.hpp's resource, host and client
 // instantiated, the host in both engine arrangements and under the
 // I2cBus arbiter of util/i2c_bus.hpp - instantiation only, no main(),
 // no hardware. The clock arithmetic is pinned in the header; what this

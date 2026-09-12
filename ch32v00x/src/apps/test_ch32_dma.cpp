@@ -30,7 +30,7 @@
 //   f  the console's receive engine: what the harvest publishes is
 //      what was typed - this letter asks for a line and echoes it
 //
-// build: boards = v006k8
+// build: boards = v006k8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -302,7 +302,7 @@ void tf_rx_engine() {
 }
 
 void banner() {
-    print(serial, crlf, "test_ch32_dma - CH32V006K8 (console on DMA channels 4 and 5)", crlf);
+    print(serial, crlf, "test_ch32_dma - ", device::part_name, " (console on DMA channels 4 and 5)", crlf);
     bench.menu();
 }
 
@@ -359,6 +359,7 @@ int main() {
         } else if (!bench.handle(static_cast<char>(c))) {
             brio::print(serial, "unknown letter (? for the menu)", brio::crlf);
         }
+        brio::print(serial, "  stack: ", brio::stack_untouched(), " B never touched", brio::crlf);
         bench.prompt();
     }
 }

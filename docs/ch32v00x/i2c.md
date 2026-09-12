@@ -3,10 +3,14 @@
 The one I2C of RM ch. 15 - host and client, 7- and 10-bit addresses,
 dual addressing and the general call, two speeds, clock stretching,
 PEC, two DMA requests - and the host engine util/i2c_bus.hpp's arbiter
-drives on this silicon as on the other three. Documents of record: the
-CH32V00X reference manual V1.5 (15.3 for the host's event sequences,
-15.4 for the target's, 15.5 for the errors, 15.8 for the DMA, 15.10
-for the registers), the CH32V006 datasheet V2.0 (table 2-1-1 for the
+drives on this silicon as on the other three. The same register
+description on both parts: the CH32V003's chapter 13 is the CH32V006's
+chapter 15 word for word, the same block at the same address, the
+same two DMA channels, the same default pads. Documents of record:
+the CH32V00X reference manual V1.5 (15.3 for the host's event
+sequences, 15.4 for the target's, 15.5 for the errors, 15.8 for the
+DMA, 15.10 for the registers), the CH32V003 reference manual V1.9
+(ch. 13, table 13-1), the CH32V006 datasheet V2.0 (table 2-1-1 for the
 pads).
 
 ## What the silicon does
@@ -17,10 +21,12 @@ pads).
   until it runs (SB: read STAR1, write the address; ADDR: read STAR1
   then STAR2; the two-byte and N-byte receive procedures with their
   ACK and POS choreography).
-- **NO RISE-TIME REGISTER.** 15.3's prose names an "R16_I2C1_RTR" that
-  table 15-1 does not list; the block ends at CKCFGR. The SCL timing
-  is CCR under F/S and DUTY, and CTLR2.FREQ must hold the bus clock in
-  MHz between 8 and 48 (15.10.2) - below 8 MHz no speed is legal.
+- **NO RISE-TIME REGISTER, ON EITHER PART.** 15.3's prose names an
+  "R16_I2C1_RTR" that table 15-1 does not list, and the CH32V003's
+  13.3 does the same against its table 13-1; both blocks end at
+  CKCFGR, and so do the vendor's own headers. The SCL timing is CCR
+  under F/S and DUTY, and CTLR2.FREQ must hold the bus clock in MHz
+  between 8 and 48 (15.10.2) - below 8 MHz no speed is legal.
 - **The CCR arithmetic is the F1's** (stated by the vendor's init, not
   by the register description): standard mode SCL = pclk / (2 x CCR),
   fast mode pclk / (3 x CCR) at DUTY 2 or pclk / (25 x CCR) at 16/9.
@@ -31,9 +37,10 @@ pads).
 - **The DMA requests are channels 6 (transmit) and 7 (receive)**, table
   8-2, and CTLR2.LAST makes the controller NACK the last byte a
   receive block takes.
-- **The default pads on the CH32V006** are SCL PC2 and SDA PC1 (table
-  2-1-1). An alternate-function open-drain pad has no internal pull on
-  this family: the pull-ups are the wire's.
+- **The default pads** are SCL PC2 and SDA PC1 on both parts (table
+  2-1-1 of each datasheet; the remap columns are each part's own,
+  pin.md). An alternate-function open-drain pad has no internal pull
+  on this family: the pull-ups are the wire's.
 - **A START into a busy bus is answered ARLO** (measured): with a peer
   holding SDA low, the START comes back as arbitration lost at once.
   The other strata's peripherals PARK such a START until the bus frees;
@@ -124,10 +131,24 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
 The reference suite is `test_ch32_i2c` on the CH32V006K8U6 at 48 MHz:
 its wire letters talk to a PEER BOARD running `twi_peer` (the shared
 twi_link protocol, the peer's pull-ups, both boards at 3.3 V) and
-decline when the wire reads low. Against a SAM C21 peer:
+decline when the wire reads low. On the CH32V003F4P6 it builds as five
+group images: 38 verdicts green there against the same SAM C21 peer
+on the same two pads (the scan in 13 ms, every tenure shape and
+receive procedure byte-exact, the two speeds at 94 and 330 kHz on
+the wire, the DMA engines, the held SDA freed by four pulses); the
+kernel letter is left out of that build, its image alone 216 bytes
+over the part's 15 KB. Against a SAM C21 peer:
 
 - **The reset values are table 15-1's**, both speeds resolve exactly
   at 48 MHz (CCR 240 and 40), the own addresses land as spelled.
+- **The wire's rise time, measured from the pad** (the wireless
+  letter pulls each line low as an open-drain output, releases it and
+  counts the cycles until it reads high): 1 us on either line with
+  the peer's 1.5 kOhm pull-ups - and 283 us on a line whose pull-up
+  it was NOT on, which a meter at rest reported as 3.3 V all the
+  same. A slow line is what the scan's `i2c_arb_lost` on every START
+  looks like from the register side, and the probe is the one that
+  tells a pull-up from a leakage.
 - **OADDR1's bit 14 reads zero** when written: reserved, not the F1's
   fixed one.
 - **CKCFGR and FREQ take a write with PE set**: no enable lock.
@@ -174,6 +195,12 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- The kernel letter on the CH32V003, which no group image of the
+  part holds (the suite's header says which letters each image
+  carries): the arbiter over the engine is proven on the CH32V006, and
+  that run stands for both parts by decision - the block, the engine
+  and the arbiter are the same code on the same registers, and the
+  wire letters around it run green on the CH32V003.
 - The client side against a foreign host: the peer's host half (its
   `arb` and `coll` commands) addressing this instance.
 - A START into a wire ANOTHER HOST is clocking: ARLO is measured only

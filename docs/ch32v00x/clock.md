@@ -10,12 +10,16 @@ and LSI's accuracy, the MCO's pad).
 
 ## What the silicon does
 
-- **Two roots for SYSCLK**: the 24 MHz internal RC (HSI, on out of
+- **Three roots for SYSCLK**: the 24 MHz internal RC (HSI, on out of
   reset, factory-calibrated through HSICAL and nudged by a five-bit
-  HSITRIM) and the PLL, which has NO ratio to choose - it doubles its
-  source, so the HSI gives 48 MHz and nothing else. The HSE input
-  (PA1/PA2, a crystal or a bypassed clock) is the third root and the
-  PLL's other source.
+  HSITRIM), the HSE (a crystal of 4 to 25 MHz on PA1/PA2, or a clock
+  into PA1 with HSEBYP) and the PLL, which has NO ratio to choose - it
+  doubles its source, the HSI or the HSE undivided (PLLSRC), so 48 MHz
+  comes from the HSI or from a 24 MHz crystal and a PLL from a crystal
+  above 24 MHz cannot be. The crystal pads are handed to the
+  oscillator by one AFIO bit whose sense differs per part
+  ([pin.md](pin.md)); HSERDY says the oscillator runs, and a root
+  switch waits for it within a bounded turn count.
 - **One divider, HPRE**, between SYSCLK and HCLK: sixteen codes, 0..7
   dividing by 1..8 and 8..15 by 2, 4, 8, 16, 32, 64, 128, 256 - three
   dividers with two spellings. Its reset value is /3, so the chip wakes
@@ -23,21 +27,29 @@ and LSI's accuracy, the MCO's pad).
   HCLK.
 - **The 128 kHz LSI**, the watchdog's and the auto-wakeup's root,
   lives with the reset flags in RCC_RSTSCKR (LSION/LSIRDY).
-- **Two supervisors**: the CSS watches an HSE and falls back to the HSI
-  on its failure; the SCM (SYSCM_EN) watches the SYSTEM clock, raising
-  SYSCLK_FAILIF, braking TIM1 and, if enabled, interrupting on the RCC
-  line.
-- **MCO on PC4** outputs SYSCLK, the HSI, the HSE or the PLL.
-- **The flash wants wait states by rate** (RM 18.3.1): 0 to 15 MHz, 1
-  to 24, 2 to 48.
+- **Two supervisors, one of them the CH32V006's alone**: the CSS
+  (CSSON) watches a ready HSE and, on its failure, switches SYSCLK to
+  the HSI, turns the HSE and the PLL off, raises CSSF and the NMI and
+  brakes TIM1 - on both parts; the SCM (SYSCM_EN) watches the SYSTEM
+  clock, raising SYSCLK_FAILIF, braking TIM1 and, if enabled,
+  interrupting on the RCC line - and the CH32V003 has no such monitor
+  (its CTLR bits 23:20 are reserved: `Rcc::has_monitor`).
+- **MCO on PC4** outputs SYSCLK, the HSI, the HSE or the PLL, on both.
+- **The flash wants wait states by rate**, the part's table: 0 to 15
+  MHz, 1 to 24, 2 to 48 on the CH32V006 (RM 18.3.1); 0 to 24 and 1 to
+  48 on the CH32V003.
 
 ## Types and verbs
 
 [brio/ch32v00x/clock.hpp](../../brio/ch32v00x/clock.hpp): `Clock<src,
-hz>` is the static main clock - `internal` (HSI through HPRE) or `pll`
-(HSI x2 through HPRE), the rate checked at compile time against the
-divider table, `init()` setting the wait states first and returning
-false for a root that never comes ready. `DynamicClock<Boot,
+hz, xtal_hz>` is the static main clock - `internal` (HSI through
+HPRE), `crystal` or `external` (the HSE at the rate named third,
+through HPRE), `pll` (the HSI doubled, or the crystal named third
+doubled: `Clock<ClockSource::pll, 48'000'000, 24'000'000>`), the rate
+and the crystal checked at compile time against the divider table and
+the HSE's 4..25 MHz, `init()` setting the wait states first, handing
+the crystal pads to the oscillator and returning false for a root that
+never comes ready. `DynamicClock<Boot,
 Users...>` is the runtime regime in the AVR's shape: Boot names the
 root at its undivided rate, `set<hz>()` / `set(hz)` name the new rate,
 rebase every user in list order, then move HPRE - wait states raised
@@ -45,8 +57,11 @@ before a rise and lowered after a fall - and the discrete-rate surface
 (`rate_count` 16, `rate_hz(i)`, `rate_index()`) is what
 [brio/ch32v00x/delay.hpp](../../brio/ch32v00x/delay.hpp)'s per-rate
 table indexes by. `Rcc` is the resource: the HSI and its trim, the
-LSI, the PLL's state, the switch and the divider as they stand, the
-MCO, the monitor and its failure flag, and `clock(bus, mask, on)` /
+HSE (`hse()`, `hse_ready()`, `hse_bypass()`) and its CSS (`css()`,
+`css_failed()`, `clear_css_failed()`), the LSI, the PLL's state and
+source (`pll_from_hse()`), the switch and the divider as they stand,
+the MCO, the monitor and its failure flag (writing nothing and
+reading false on a part without one), and `clock(bus, mask, on)` /
 `reset(bus, mask)` for the peripheral gates on the HB, PB2 and PB1
 buses - the verbs every configuring driver opens its own gate with.
 
@@ -68,8 +83,11 @@ folds the rate at compile time.
 
 ## Bench findings
 
-The reference suite is `test_ch32_clock` (27 verdicts in `z`) on the
-CH32V006K8U6.
+The reference suite is `test_ch32_clock` (32 verdicts in `z` on the
+CH32V006K8U6, 30 on the CH32V003F4P6), rooted on the 24 MHz crystal
+both bench boards carry through the PLL - so every letter is a
+measurement of the HSE path, and the console reading clean at 115200
+its first proof.
 
 - **The ladder holds at every rung.** 48 -> 24 -> 16 -> 12 -> 6 -> 3 MHz
   and back: at each rate the HPRE code and the wait states are what
@@ -81,23 +99,27 @@ CH32V006K8U6.
   refused with nothing changed.
 - **The LSI is ready 17 us after LSION** (862 HCLK cycles, 56 polls),
   and drops its ready bit once stopped.
-- **The HSI trim takes a step each way** and the console still reads
-  at the nudged rate - one step is inside the UART's tolerance. What a
-  step is worth in hertz needs a counter on the MCO.
-- **The monitor turns on and sees no failure** on a running clock;
-  the MCO takes its selections; a PB1 gate opens, resets and closes.
-- **The tree at boot** after `Clock<pll, 48 MHz>::init()`: SWS = PLL,
-  HPRE = 1, HSI on with its trim at 16, PLL locked, LSI off, two wait
-  states.
+- **The HSI trim takes a step each way**, and on a crystal root the
+  console's rate does not move with it. What a step is worth in hertz
+  needs a counter on the MCO.
+- **The monitor turns on and sees no failure** on a running clock
+  (the CH32V006); on the CH32V003 the verb writes nothing and reads
+  false. The MCO takes its selections; a PB1 gate opens, resets and
+  closes, on both.
+- **The HSE**: on both boards the crystal is on and ready at boot, the
+  PLL's source reads the HSE, the crystal pads read as the
+  oscillator's in each part's own sense (the CH32V006's bit clear, the
+  CH32V003's set), and the CSS arms on the ready HSE and reports no
+  failure, then disarms. A failure itself is not provoked (an NMI this
+  suite does not bind).
+- **The tree at boot** after `Clock<pll, 48 MHz, 24 MHz>::init()`: SWS
+  = PLL, HPRE = 1, HSE and HSI on, the trim at 16, PLL locked from the
+  HSE, LSI off, the part's wait states.
 
 ## Not covered yet
 
 Driver gaps, each with its reason:
 
-- HSE as a root, in both forms, and the CSS that watches it: the
-  module has no crystal, and a root that cannot be tried is not
-  offered - `ClockSource::crystal` and `::external` refuse at compile
-  time until a board carries one.
 - The LSI as SYSCLK: no user, and a program that wanted it would want
   the whole power chapter with it.
 - The ADC prescaler and clock mode bits of CFGR0: the ADC chapter's.
@@ -116,5 +138,11 @@ Implemented but not bench-verified, each with what would measure it:
   clean at each rung (within UART tolerance) and by tick counts that
   the rate itself clocks; a counter on the MCO (PC4) is what turns
   that into parts per million, and what the trim steps are worth.
-- The system clock monitor's failure path: no failure can be provoked
-  without a root that can be made to fail, which is an HSE.
+- The system clock monitor's failure path and the CSS's: a failure
+  needs a crystal that stops, which a soldered one does not; the CSS's
+  NMI also needs a handler bound by the program that arms it.
+- The HSE as SYSCLK itself (`ClockSource::crystal` and `::external`
+  without the PLL) and the bypass: compiled and refused where the
+  chapter refuses (the rate outside 4..25 MHz, a PLL past 48 MHz, a
+  crystal not named); measured only as the PLL's source, since the
+  suites run at 48 MHz.

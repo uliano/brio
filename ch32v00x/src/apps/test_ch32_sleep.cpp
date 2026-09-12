@@ -31,7 +31,7 @@
 //      window while the console's own byte is the wake - the site
 //      advances by nothing, honestly, and says so
 //
-// build: boards = v006k8
+// build: boards = v006k8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -120,13 +120,44 @@ void ta_found() {
     bench.verdict("Sleep is what a deep instruction would give as found (PDDS clear)",
                   !Pwr::standby());
     bench.verdict("SLEEPDEEP is clear as found", (pfic_sctlr() & sctlr_sleepdeep) == 0u);
-    bench.verdict("the regulator is in normal mode (1.2 V)", Pwr::ldo() == pwr_ldo_normal);
+    if constexpr (device::pwr_has_ldo_modes) {
+        bench.verdict("the regulator is in normal mode (1.2 V)", Pwr::ldo() == pwr_ldo_normal);
+    } else {
+        print(serial, "  (no LDO_MODE on this part: the regulator has one mode)", crlf);
+    }
     bench.verdict("the PVD is off", !Pwr::pvd());
-    Pwr::pvd(true, PvdLevel::v2_66);
-    (void)delay_us(clock, 100);
-    print(serial, "  PVD at 2.66 V: supply_low=", Pwr::supply_low(), crlf);
-    bench.verdict("with the PVD on at 2.66 V a 3.3 V supply reads NOT low", !Pwr::supply_low());
+    // THE PVD LADDER: every level of the part from the lowest up, the
+    // flag read at each - the supply is bracketed between the last
+    // level that reads not low and the first that reads low (a 3.3 V
+    // board never reads low on the CH32V006, whose ladder ends at
+    // 2.66 V; on the CH32V003 it falls between 3.05 and 3.5 V).
+    bool monotonic = true;
+    bool low_seen = false;
+    uint32_t last_not_low_mv = 0;
+    uint32_t first_low_mv = 0;
+    for (uint8_t code = 0; code <= static_cast<uint8_t>(pvd_level_highest); ++code) {
+        const PvdLevel level = static_cast<PvdLevel>(code);
+        Pwr::pvd(true, level);
+        (void)delay_us(clock, 100);
+        const bool low = Pwr::supply_low();
+        if (low) {
+            if (!low_seen) { first_low_mv = pvd_rising_mv(level); }
+            low_seen = true;
+        } else {
+            if (low_seen) { monotonic = false; }
+            last_not_low_mv = pvd_rising_mv(level);
+        }
+    }
     Pwr::pvd(false);
+    print(serial, "  PVD ladder: not low up to ", last_not_low_mv, " mV rising");
+    if (low_seen) {
+        print(serial, ", low from ", first_low_mv, " mV rising", crlf);
+    } else {
+        print(serial, ", never low (the ladder ends under the supply)", crlf);
+    }
+    bench.verdict("the PVD ladder: the supply reads NOT low at the part's lowest threshold, and once low "
+                  "stays low up the ladder",
+                  monotonic && last_not_low_mv > 0u);
     bench.verdict("the AWU's longest period at the nominal LSI is 2.048 s (window 63, /4096)",
                   Awu::period_us(13, 63, 128'000) == 2'048'000u);
     bench.verdict("the AWU is off", !Awu::enabled());
@@ -278,7 +309,7 @@ void te_other_wake() {
 }
 
 void banner() {
-    print(serial, crlf, "test_ch32_sleep - CH32V006K8 (Sleep, Standby, the AWU on the LSI)", crlf);
+    print(serial, crlf, "test_ch32_sleep - ", device::part_name, " (Sleep, Standby, the AWU on the LSI)", crlf);
     bench.menu();
 }
 
@@ -322,6 +353,7 @@ int main() {
         } else if (!bench.handle(static_cast<char>(c))) {
             brio::print(serial, "unknown letter (? for the menu)", brio::crlf);
         }
+        brio::print(serial, "  stack: ", brio::stack_untouched(), " B never touched", brio::crlf);
         bench.prompt();
     }
 }

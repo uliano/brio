@@ -32,13 +32,27 @@ package bonds, table 2-1-1 for the pads).
   flag (measured: eighteen cycles from a latched event to the WFE's
   return); the flags are write-one-clear.
 - **SWIEVR raises a line enabled in INTENR** and nothing on a line
-  enabled nowhere (measured).
+  enabled nowhere (measured) - and a pad's edge obeys the same rule:
+  a line enabled nowhere raises no flag on it, a line in INTENR with
+  its PFIC line masked raises the flag and leaves it standing for a
+  poller (measured).
 - **The remaps** (7.2.11, AFIO_PCFR1): one code per peripheral selects
-  a COLUMN of pads - ten columns for TIM1 and USART1, eight for TIM2,
-  seven for USART2 and SPI1, five for I2C1, one bit for each ADC
-  trigger pad, one for the crystal pads as GPIO; SWCFG = 100 turns the
-  debug port off until the next reset. USART2's default column puts TX
-  on PA7, the CH32V006K8's reset pin.
+  a COLUMN of pads. On the CH32V006, ten columns for TIM1 and USART1,
+  eight for TIM2, seven for USART2 and SPI1, five for I2C1, one bit
+  for each ADC trigger pad, one for the crystal pads as GPIO, the
+  register at offset 0x0C. On the CH32V003 the register is the F1's,
+  at offset 0x04: four columns for TIM1, TIM2 and USART1 (whose fourth
+  carries the CK pad of its synchronous mode), two for SPI1, three for
+  I2C1 (a low bit and a high one), TIM1_IREMAP feeding TIM1_CH1 from
+  the LSI, the ADC trigger bits one lower, and the crystal pads' bit
+  at 15 with the OPPOSITE sense - set for a crystal. SWCFG = 100 turns
+  the debug port off until the next reset, on both. USART2's default
+  column puts TX on PA7, the CH32V006K8's reset pin; the CH32V003 has
+  no USART2.
+- **MODE is one bit on the CH32V006 and two on the CH32V003** (its
+  RM 7.3.1.1: 01 output at 10 MHz, 10 at 2 MHz, 11 at 30 MHz): the
+  stratum drives the CH32V003's outputs at the top speed, so a nibble
+  spelled through `pin_nibble()` lands right on both.
 - **A timer's forced output level reaches the pad only with the
   counter enabled** (measured: OCxM force modes with CEN clear left
   both pads low; a running PWM at full and zero duty drove them).
@@ -89,9 +103,19 @@ and publishes an `InputEdge` per debounced flip.
 
 ## Bench findings
 
-The reference suite is `test_ch32_pin` (8 verdicts in `z`, three
-letters on the jumper PD2 to PD4) on the CH32V006K8U6. What the desk
-has measured so far is the wireless half:
+The reference suite is `test_ch32_pin` (18 verdicts in `z` on the
+CH32V006K8U6; three of its letters sit on the jumper PD2 to PD4 and
+decline, claiming no verdict, on a board without it - 10 verdicts on
+the CH32V003F4P6 so). On the CH32V003 the port letter takes port C (no
+port B there), the nibble letter the part's MODE code, the remap
+letter the part's columns - and the remap letter DRAINS THE CONSOLE
+before it moves USART1, whose pads are the console's own (measured:
+without the drain, the bytes still in the ring leave on the moved pad
+and six bytes of line noise take their place). The jumper probe of
+every suite pulls the sensing pad AGAINST the level it drives on the
+other: a floating pad echoes its neighbour (measured on the
+CH32V003F4P6's PC6/PC7), and a probe reading the echo would take it
+for the wire:
 
 - **The gate, the nibbles, the atomics**: a configuring verb opens the
   port's clock; a reset port reads 0x4 in every nibble it has; the six
@@ -106,6 +130,20 @@ has measured so far is the wireless half:
 - **The remaps**: every field of PCFR1 reads back as written, and
   TIM1's channel 1 drives PD2 in the default column and PC4 in column
   3 - table 7-8's remap, read on the pads with no wire.
+- **The levels, on the jumper**: a push-pull output drives the far pad
+  high and low; an open-drain output pulls it low and lets its
+  pull-up have it otherwise; an analog pad's input buffer is off
+  (INDR zero with the pad high) where an input's is on.
+- **The edges, on the jumper**: line 4 counts five rising, five
+  falling and ten of both edges of PD2's ten toggles, one interrupt
+  each; an edge on a line enabled nowhere raises no flag; the flag of
+  a line in INTENR with its vector masked rises on the edge and is
+  cleared by writing one; routed to PC4 by AFIO_EXTICR the line hears
+  nothing of PD4.
+- **The scanner, on the jumper**: util's InputScanner over PD4 with
+  PD2 driving it is silent at start and on a held level, publishes
+  one InputEdge per flip with the new state, and swallows a glitch
+  shorter than its debounce.
 
 ## Not covered yet
 
@@ -114,15 +152,11 @@ Driver gaps, each with its reason:
 - The pin-level bonding table per package: the datasheet's until a
   second part gives it something to say.
 - The remap tables of the CH32V007 (TIM2's and I2C1's differ at one
-  column each): this file states the CH32V002/004/005/006 tables; the
-  second part tiers them.
+  column each): this file states the CH32V002/004/005/006 tables and
+  the CH32V003's.
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The levels, the edges and the scanner**: a push-pull output driving
-  the far pad, an open-drain output against its pull-up, the edge
-  counts on line 4, the port select, and util's InputScanner over a
-  driven pad - the suite's letters c, d and f on the jumper.
 - A pad wake out of a Standby (sleep.md's gap): the same jumper with a
   Standby armed.
 - The other peripherals on their remapped columns (USART2, which

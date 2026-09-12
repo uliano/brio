@@ -50,7 +50,7 @@ inline ExtiRegs* exti() { return reinterpret_cast<ExtiRegs*>(pb2_base + 0x0400);
 
 /// AFIO_EXTICR: two bits per line 0..7 selecting the port.
 inline volatile uint32_t& afio_exticr() {
-    return *reinterpret_cast<volatile uint32_t*>(pb2_base + 0x0008);
+    return *reinterpret_cast<volatile uint32_t*>(pb2_base + device::afio_exticr_offset);
 }
 
 /// The two internal lines.

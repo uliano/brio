@@ -17,13 +17,28 @@ static_assert(hpre_for(48'000'000, 3'000'000) == 11);
 static_assert(hpre_for(24'000'000, 10'000'000) == 0xFF); // no divider reaches it
 static_assert(hpre_for(24'000'000, 0) == 0xFF);
 
-// RM 18.3.1's three columns.
+// The wait-state table, the part's: RM 18.3.1's three columns on the
+// CH32V006, two on the CH32V003.
 static_assert(flash_latency_for(8'000'000) == 0);
+#if defined(CH32V006)
 static_assert(flash_latency_for(15'000'000) == 0);
 static_assert(flash_latency_for(24'000'000) == 1);
 static_assert(flash_latency_for(48'000'000) == 2);
+#else
+static_assert(flash_latency_for(24'000'000) == 0);
+static_assert(flash_latency_for(48'000'000) == 1);
+#endif
 
 using Fast = Clock<ClockSource::pll, 48'000'000>;
+// The HSE: a crystal as SYSCLK, an external clock in bypass, the PLL
+// doubling a crystal - the rate named as the third parameter.
+using Xtal = Clock<ClockSource::crystal, 24'000'000, 24'000'000>;
+using XtalHalf = Clock<ClockSource::crystal, 12'000'000, 24'000'000>;
+using Ext = Clock<ClockSource::external, 25'000'000, 25'000'000>;
+using PllXtal = Clock<ClockSource::pll, 48'000'000, 24'000'000>;
+static_assert(Xtal::uses_hse && Ext::uses_hse && PllXtal::uses_hse && !Fast::uses_hse);
+static_assert(Xtal::sysclk_hz == 24'000'000 && PllXtal::sysclk_hz == 48'000'000 && XtalHalf::hpre_code == 1);
+static_assert(PllXtal::root_hz == 24'000'000 && Fast::root_hz == 24'000'000);
 using Full = Clock<ClockSource::internal, 24'000'000>;
 using Reset = Clock<ClockSource::internal, 8'000'000>;
 using Slow = Clock<ClockSource::pll, 3'000'000>;
@@ -34,6 +49,19 @@ static_assert(Full::sysclk_hz == 24'000'000 && Full::hpre_code == 0);
 static_assert(Reset::hpre_code == 2);
 static_assert(Slow::hpre_code == 11);
 static_assert(clock_hz(Fast{}) == 48'000'000);
+
+void hse_verbs() {
+    (void)Xtal::init();
+    (void)XtalHalf::init();
+    (void)Ext::init();
+    (void)PllXtal::init();
+    (void)PllXtal::restore();
+    Rcc::hse(true); (void)Rcc::hse_on(); (void)Rcc::hse_ready();
+    Rcc::hse_bypass(false); (void)Rcc::hse_bypass();
+    Rcc::css(true); (void)Rcc::css(); (void)Rcc::css_failed(); Rcc::clear_css_failed();
+    (void)Rcc::pll_from_hse();
+    Rcc::monitor(false); (void)Rcc::monitor(); (void)Rcc::clock_failed(); Rcc::clear_clock_failed();
+}
 
 void clock_verbs() {
     (void)Fast::init();

@@ -1,4 +1,4 @@
-// mcu: ch32v006k8
+// mcu: ch32v006k8 ch32v003f4
 // The family has ports A..D: a port letter outside them is refused.
 #include "ch32v00x/pin.hpp"
 

@@ -37,9 +37,11 @@
  * during a tenure: TxE and RxNE interrupt only while the byte pump
  * needs them, BTF (under ITEVTEN alone) carries the rest.
  *
- * THERE IS NO RISE-TIME REGISTER. 15.3's text names an "R16_I2C1_RTR"
- * the register list (table 15-1) does not carry, and the vendor's own
- * header ends the block at CKCFGR: the SCL timing is CKCFGR alone
+ * THERE IS NO RISE-TIME REGISTER, ON EITHER PART. 15.3's text names an
+ * "R16_I2C1_RTR" the register list (table 15-1) does not carry - the
+ * CH32V003's manual does the same in its 13.3 against its table 13-1
+ * - and the vendor's own headers end the block at CKCFGR on both: the
+ * SCL timing is CKCFGR alone
  * (CCR under F/S and DUTY), and FREQ in CTLR2 must state the bus clock
  * in MHz, 8 to 48 (15.10.2) - below 8 MHz no speed is legal and init()
  * refuses. The CCR arithmetic is the F1's: standard mode divides by
@@ -47,7 +49,7 @@
  * rounded UP here so a bus never runs faster than asked.
  *
  * THE DMA REQUESTS ARE CHANNELS 6 (transmit) and 7 (receive), table
- * 8-2, and an engine on any other channel is refused. With engines a
+ * 8-2 of both manuals, and an engine on any other channel is refused. With engines a
  * write phase of any length and a read phase of two bytes or more run
  * on them (CTLR2.LAST makes the controller NACK the last byte a
  * receive block takes, 15.10.2); a one-byte read stays on the pump,
@@ -1256,7 +1258,10 @@ static_assert(!i2c_timing_for(3'000'000UL, I2cSpeed::fast_400k).has_value());
 static_assert(i2c_timing_for(8'000'000UL, I2cSpeed::standard_100k)->ckcfgr == 40u);
 
 static_assert(i2c_pins_valid(i2c1_default_pins) && i2c_pins_valid(i2c1_pins_for(1)));
-static_assert(i2c1_pins_for(1).scl == Pad{'D', 1} && i2c1_pins_for(5).sda == Pad{'D', 1});
+// Each part's remap table (afio.hpp): code 1 is PD1/PD0 on both.
+static_assert(i2c1_pins_for(1).scl == Pad{'D', 1} && i2c1_pins_for(1).sda == Pad{'D', 0});
+static_assert(device::part == Ch32Part::v003 ? i2c1_pins_for(2).sda == Pad{'C', 6}
+                                             : i2c1_pins_for(5).sda == Pad{'D', 1});
 static_assert(!i2c_pins_valid(I2cPins{.scl = {'C', 2}, .sda = {'C', 2}}));
 static_assert(i2c_address_config_valid(I2cAddressConfig{.own = 0x48}));
 static_assert(!i2c_address_config_valid(I2cAddressConfig{.own = 0x80}));

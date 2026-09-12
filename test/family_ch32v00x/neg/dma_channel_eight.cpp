@@ -1,4 +1,4 @@
-// mcu: ch32v006k8
+// mcu: ch32v006k8 ch32v003f4
 // The CH32V00x DMA has channels 1..7: an eighth must be REFUSED at
 // compile time, not addressed past the block.
 #include "ch32v00x/dma.hpp"
