@@ -143,7 +143,7 @@ and `Smartcard` REFUSE (no `rebase`); the FDCAN and the window watchdog
 take the bus rate as a number and keep it; the LPTIM, the RTC and the
 IWDG never see SYSCLK at all. `delay_us` dispatches on the rate index
 into a per-rate table built at compile time - no division at wait time
-([../armv6m/README.md](../armv6m/README.md)).
+([../cortexm/README.md](../cortexm/README.md)).
 
 **The clock output reaches the timers with no pad.** RCC_CFGR.MCOSEL /
 MCOPRE put one of the tree's clocks, prescaled by a power of two, on a

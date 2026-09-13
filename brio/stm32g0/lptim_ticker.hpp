@@ -64,9 +64,9 @@
  * ticks). Everything else - the lap, the compare rules, the floor - is
  * the same: they are properties of the counter, not of its clock.
  *
- * SYSTICK STAYS ON, INTERRUPT-LESS. armv6m/delay.hpp counts cycles on
+ * SYSTICK STAYS ON, INTERRUPT-LESS. cortexm/delay.hpp counts cycles on
  * SysTick's VAL and never needs its interrupt, so init() starts it as
- * armv6m/ticker.hpp's SysTickCounter (same reload rule, no TICKINT):
+ * cortexm/ticker.hpp's SysTickCounter (same reload rule, no TICKINT):
  * delay_us works by construction and a program on this timebase binds
  * NOTHING to SysTick_Handler. The Stop modes stop SysTick with HCLK as
  * before; a busy-wait is awake by definition.

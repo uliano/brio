@@ -7,9 +7,9 @@ PM (power manager) ch. 19 - and errata DS80000740S (1.8.13, 1.8.14,
 Drivers: `samc21/platform.hpp` (`SamPlatform`, this target's
 realization of the kernel's `Platform` concept), `samc21/nvic.hpp`
 and `samc21/ticker.hpp` (this family's includes of the core stratum's
-`armv6m/nvic.hpp` - `InterruptGuard`, `Nvic` - and
-`armv6m/ticker.hpp` - `BasicTicker` - plus the SAM's own
-`SysTickInterruptGuard` and `Ticker` alias; [../armv6m/README.md](../armv6m/README.md)), `samc21/delay.hpp` (`delay_us`, the capped
+`cortexm/nvic.hpp` - `InterruptGuard`, `Nvic` - and
+`cortexm/ticker.hpp` - `BasicTicker` - plus the SAM's own
+`SysTickInterruptGuard` and `Ticker` alias; [../cortexm/README.md](../cortexm/README.md)), `samc21/delay.hpp` (`delay_us`, the capped
 microsecond busy-wait over SysTick), `samc21/sleep.hpp` (`Pm`,
 `SamSleepSite`); the
 target-independent power model above the last of these is
@@ -209,8 +209,8 @@ prove dead, and newlib's abort would defeat the no-syscalls rule - so
 the crt defines `abort()` as a spin (not a BKPT: with no debugger a
 BKPT becomes a HardFault and the frame that got there is gone).
 
-**`delay_us(clock, us)`** (samc21/delay.hpp, which is `armv6m/delay.hpp`
-plus this family's measured facts - [../armv6m/README.md](../armv6m/README.md)) - the microsecond busy-wait,
+**`delay_us(clock, us)`** (samc21/delay.hpp, which is `cortexm/delay.hpp`
+plus this family's measured facts - [../cortexm/README.md](../cortexm/README.md)) - the microsecond busy-wait,
 timed on SysTick's own counter and CAPPED BELOW ONE KERNEL TICK by
 contract: a wait of a tick or more is TimeEvent territory, and the call
 REFUSES it (false, no time spent) instead of serving a latency bug -

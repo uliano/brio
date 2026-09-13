@@ -71,7 +71,7 @@ REVIEW_PATTERNS = [
 
 PATH_RE = re.compile(
     r"(?<![/A-Za-z0-9_.-])"
-    r"(?:brio|docs|tools|bench|cli|bin|avrdx|samc21|stm32g0|armv6m|kernel|util|host|test|experiments)"
+    r"(?:brio|docs|tools|bench|cli|bin|avrdx|samc21|stm32g0|cortexm|kernel|util|host|test|experiments)"
     r"/[A-Za-z0-9_][A-Za-z0-9_./-]*(?:\.(?:hpp|cpp|md|py|sh|json|svg|ld|cmake|txt)|(?<=bin/brio))\b"
 )
 

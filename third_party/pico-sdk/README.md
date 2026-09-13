@@ -10,7 +10,7 @@ LICENSE.TXT), the RP2040's device description in the form the
   `*_Type` structs, the instance pointers (`UART0`, `SIO`, `RESETS`,
   ...), the `IRQn_Type` enumerators, the core's revision and priority
   width, and the include of `core_cm0plus.h` (from
-  `third_party/cmsis-core/`). The stratum's `armv6m/` core files are
+  `third_party/cmsis-core/`). The stratum's `cortexm/` core files are
   written against exactly that contract. `system_RP2040.h` declares
   `SystemInit`/`SystemCoreClock` and nothing here defines or calls
   them: brio's clock has one truth, `Clock::hz`.

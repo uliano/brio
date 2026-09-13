@@ -4,7 +4,7 @@
  * The kernel timebase of this target, on the Cortex-M0+ SysTick.
  *
  * THE TICKER ITSELF IS THE CORE STRATUM'S: `BasicTicker` lives in
- * armv6m/ticker.hpp. What is SAM about this file is what stays in it -
+ * cortexm/ticker.hpp. What is SAM about this file is what stays in it -
  * the `Ticker` alias that fixes the project-wide rate, the erratum guard
  * below, and this comment's account of what standby does to a
  * core-clocked timebase. The class's own contract (rates that divide
@@ -91,7 +91,7 @@
 #include "sam.h"
 
 #include "samc21/nvic.hpp"
-#include "armv6m/ticker.hpp"
+#include "cortexm/ticker.hpp"
 
 namespace brio {
 

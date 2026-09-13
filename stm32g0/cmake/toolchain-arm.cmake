@@ -1,6 +1,6 @@
 # ============================================================================
 #  toolchain-arm.cmake - cross toolchain for the STM32G0 family (Cortex-M0+) - the samc21
-#  file verbatim: same compiler, same core; the armv6m factoring pass may
+#  file verbatim: same compiler, same core; the cortexm factoring pass may
 #  make the two one file.
 #
 #  The project's own arm-none-eabi-gcc 16.2 at /sw/arm-none-eabi (self-built,

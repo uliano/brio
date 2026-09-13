@@ -102,7 +102,7 @@ bare-metal MCUs built around a cooperative active-object kernel,
 written clean-room after Samek's book (never the QP source). One flat
 namespace `brio`; ten strata under `brio/` - `kernel/` (pure
 logic, includes nothing of brio), `util/` (services over the kernel),
-`armv6m/` (the CORE stratum the three Cortex-M0+ families - and the
+`cortexm/` (the CORE stratum the three Cortex-M0+ families - and the
 Cortex-M4 one, the same programmer's model - include after their device
 header: NVIC + PRIMASK guard, the SysTick ticker),
 `avrdx/` (everything that knows `avr/io.h`: AVR DA/DB, bench chip
@@ -142,9 +142,11 @@ of its x1 twin: the same IP under the same register names) - the
 stratum compiles on all twelve G0 headers of the pack with the reserve
 deriving every vector from PERIPHERAL PRESENCE and no device name
 spelled anywhere, the bench proof on x0 silicon pending a board. The
-`armv6m/` core stratum (nvic, ticker, delay) is what the three Cortex-M0+
-families share (the RP2040 joined as the third), factored with the first two in hand and every image of both
-byte-identical before and after; a RISC-V core stratum would be
+`cortexm/` core stratum (nvic, ticker, delay) is what the four Cortex-M
+families share - three M0+ and the M4, the same programmer's model for
+SysTick, the NVIC's enables and PRIMASK - factored with the first two in
+hand and every image byte-identical before and after, renamed from its
+architecture to its core family when the M4 joined, under the same gate; a RISC-V core stratum would be
 factored the same way, at its second family, never earlier.
 
 ## Governing rule and stability hierarchy
@@ -310,9 +312,8 @@ gets its home in `docs/design/` when taken.
   DWC2 OTG FS controller for util/usb - both OTG connectors are cabled
   -, and on the F429 alone FMC + LTDC + DMA2D, the memory-mapped display
   tier); the frequency ladders of the five part classes whose manuals
-  are not on the desk; the `armv6m/` -> `cortexm/` rename now that
-  another architecture includes those files; the debuggers (cortex-debug
-  entries written, not driven). Tenuto only, the equal-priority
+  are not on the desk; the debuggers (cortex-debug entries written,
+  not driven). Tenuto only, the equal-priority
   promise kept; Rubato and BASEPRI are another type and another day.
 - **The RP2040 stratum.** `brio/rp2040/` and `rp2040/` are
   `supported` on the RP2040 (README.md's table) on a Raspberry Pi
@@ -873,12 +874,12 @@ brio/                    the framework, four strata:
                            (listen/unlisten); concepts EventGenerator/
                            EventUser; tables on demand
   samc21/                  everything that knows sam.h (SAM C21, Cortex-M0+)
-    nvic.hpp               "sam.h" + armv6m/nvic.hpp (the guard and Nvic live there)
+    nvic.hpp               "sam.h" + cortexm/nvic.hpp (the guard and Nvic live there)
     platform.hpp           SamPlatform (idle takes whatever PM.SLEEPCFG holds -
                            SCR.SLEEPDEEP is never written - with erratum
                            1.8.13's guard around a standby WFI; BKPT, .noinit
                            breadcrumb, atomic_width 4)
-    ticker.hpp             armv6m/ticker.hpp's BasicTicker (Ticker = 1000 Hz,
+    ticker.hpp             cortexm/ticker.hpp's BasicTicker (Ticker = 1000 Hz,
                            advance(n) the standby resync's landing point) +
                            SysTickInterruptGuard, erratum 1.8.13's workaround
                            in the file that owns the register. The tick stops
@@ -1101,7 +1102,7 @@ brio/                    the framework, four strata:
                            SIBLING of the kernel's PanicRecord and not an
                            extension of it - a hardware trace is silicon
                            this stratum happens to have
-  armv6m/                the CORE stratum: what the three Cortex-M0+ families share
+  cortexm/               the CORE stratum: what the four Cortex-M families share
     nvic.hpp               InterruptGuard (PRIMASK) + Nvic + irq_priority_levels
                            - reads CMSIS-Core only, #errors if included before
                            a device header (the family's nvic.hpp does both)
@@ -1126,8 +1127,8 @@ brio/                    the framework, four strata:
                            Also the handler NAMES an app on more than
                            one board binds (BRIO_STM32G0_*_HANDLER), the
                            same presence rule as macros
-    nvic.hpp               "stm32g0xx.h" + armv6m/nvic.hpp
-    ticker.hpp             armv6m/ticker.hpp + the Ticker alias (1000 Hz)
+    nvic.hpp               "stm32g0xx.h" + cortexm/nvic.hpp
+    ticker.hpp             cortexm/ticker.hpp + the Ticker alias (1000 Hz)
     platform.hpp           Stm32g0Platform<TB = Ticker> (WFI = Sleep mode,
                            SLEEPDEEP never written; BKPT; .noinit breadcrumb;
                            atomic_width 4) + the Tickless<TB> concept and the
@@ -1280,14 +1281,14 @@ brio/                    the framework, four strata:
                            paused across the sleep; ebreak; .noinit
                            breadcrumb; atomic_width 4
   stm32f4/               everything that knows stm32f4xx.h (STM32F4, Cortex-M4F):
-                         brio's first ARMv7-M family on the armv6m/ core files
+                         brio's first ARMv7-M family on the cortexm/ core files
     device_tables.hpp      THE RESERVE: GPIO ports A..K, the serial instances
                            1..10 (bus, gate, vector, FULL by the U(S)ART name),
                            the regulator's VOS width and over-drive pair, and
                            THE FREQUENCY LADDERS keyed on the device-select
                            define - known for the F405, F42x/F43x, F446 and
                            F411 classes, refused elsewhere
-    nvic.hpp / ticker.hpp / delay.hpp  the device header + the armv6m/ file:
+    nvic.hpp / ticker.hpp / delay.hpp  the device header + the cortexm/ file:
                            PRIMASK the one mask on a core that has BASEPRI,
                            SysTick at 1000 Hz, delay_us on VAL
     platform.hpp           Stm32f4Platform<TB>: WFI = Sleep, SLEEPDEEP never
@@ -1322,12 +1323,12 @@ brio/                    the framework, four strata:
                            (its *_BASE macros are the CMSIS header's), and the
                            atomic register aliases of 2.1.2 as hw_set/hw_clear/
                            hw_xor/hw_write_masked
-    nvic.hpp               device.hpp + armv6m/nvic.hpp: TWO NVICs, every line
+    nvic.hpp               device.hpp + cortexm/nvic.hpp: TWO NVICs, every line
                            reaching both, a line enabled by one core
-    ticker.hpp             armv6m/ticker.hpp + CoreTicker<core> (1000 Hz, one
+    ticker.hpp             cortexm/ticker.hpp + CoreTicker<core> (1000 Hz, one
                            per SysTick through BasicTicker's tag) and Ticker =
                            core 0's
-    delay.hpp              armv6m/delay.hpp on clk_sys
+    delay.hpp              cortexm/delay.hpp on clk_sys
     platform.hpp           Rp2040Platform<core = 0, TB = CoreTicker<core>>:
                            ONE PLATFORM TYPE PER CORE (the kernel statics are
                            keyed by it, so the type is the core), the PRIMASK

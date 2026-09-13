@@ -8,7 +8,7 @@
  * nothing - every TIM and the RTC stay free.
  *
  * THE TICKER ITSELF IS THE CORE STRATUM'S: `BasicTicker` lives in
- * armv6m/ticker.hpp, the SysTick of ARMv7-M being the SysTick of
+ * cortexm/ticker.hpp, the SysTick of ARMv7-M being the SysTick of
  * ARMv6-M register for register (PM0214 4.5). What is STM32F4 about
  * this file is what stays in it: the `Ticker` alias that fixes the
  * project-wide rate, and this comment's account of what the low-power
@@ -47,7 +47,7 @@
 #include "stm32f4xx.h"
 
 #include "stm32f4/nvic.hpp"
-#include "armv6m/ticker.hpp"
+#include "cortexm/ticker.hpp"
 
 namespace brio {
 

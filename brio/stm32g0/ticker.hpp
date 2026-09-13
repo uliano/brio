@@ -8,7 +8,7 @@
  * nothing - every TIM, the LPTIMs and the RTC stay free.
  *
  * THE TICKER ITSELF IS THE CORE STRATUM'S: `BasicTicker` lives in
- * armv6m/ticker.hpp, since it is ARMv6-M and not ST. What is STM32G0
+ * cortexm/ticker.hpp, since it is the Cortex-M's and not ST. What is STM32G0
  * about this file is what stays in it: the `Ticker` alias that fixes
  * the project-wide rate, and this comment's account of what the Stop
  * modes do to a core-clocked timebase. The class's own contract is
@@ -49,7 +49,7 @@
  * clock's rate. Under this target's DynamicClock (stm32g0/clock.hpp)
  * the ticker is a ClockUser - rebase(hz) reprograms the reload and
  * restarts the period, losing the phase of the tick in progress, late
- * and never early (armv6m/ticker.hpp) - and a program that minds that
+ * and never early (cortexm/ticker.hpp) - and a program that minds that
  * runs tickless on the LPTIM instead, off SYSCLK altogether. init()'s
  * clock_follows assertion refuses a dynamic clock that forgot to list
  * the ticker.
@@ -60,7 +60,7 @@
  * sleep lasts. stm32g0/sleep.hpp holds the two answers to that: a site
  * that restricts the depth while a deadline is near, and timed sites
  * that place an alarm on a clock which does keep running and hand the
- * frozen span back through `advance()` (armv6m/ticker.hpp). Sleep mode
+ * frozen span back through `advance()` (cortexm/ticker.hpp). Sleep mode
  * proper (WFI with SLEEPDEEP clear, what Stm32g0Platform::idle() does)
  * keeps HCLK and SysTick running.
  *
@@ -85,7 +85,7 @@
 #include "stm32g0xx.h"
 
 #include "stm32g0/nvic.hpp"
-#include "armv6m/ticker.hpp"
+#include "cortexm/ticker.hpp"
 
 namespace brio {
 

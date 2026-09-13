@@ -702,7 +702,7 @@ struct Rates {
  *   SysClock::set<2'000'000>();       // the users rebased, then Slow
  *
  * The discrete-rate surface (docs/design/clock.md) is the pack's:
- * rate_count, rate_hz(i), rate_index() - what armv6m/delay.hpp
+ * rate_count, rate_hz(i), rate_index() - what cortexm/delay.hpp
  * dispatches on so that no division runs at wait time. Two rates may
  * share an hz (16 MHz in Range 1 and in Range 2 are different tuples):
  * set<hz>() and set(hz) take the FIRST that matches, set_index<i>() /

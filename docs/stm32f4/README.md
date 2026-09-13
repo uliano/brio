@@ -3,7 +3,7 @@
 The operational page for brio's STM32F4 target: an ARM Cortex-M4F
 (STM32F429ZI on the bench, on an ST STM32F429I-DISC1; an STM32F446RE on
 a Nucleo-F446RE and an STM32F411CE on a WeAct black pill beside it) -
-brio's first ARMv7-M family, which includes the `armv6m/` core stratum
+brio's first ARMv7-M family, which includes the `cortexm/` core stratum
 unchanged because SysTick, the NVIC's enables and PRIMASK are the same
 programmer's model on both architectures. `kernel/` and `util/` run
 here as written: time events pacing a pin, and the full console over
@@ -40,7 +40,7 @@ IS USED, NOT CARRIED: brio has no floats, so the hard ABI costs
 nothing today, and a program that wants one pays no ABI break across
 every image; the crt enables the coprocessor (CPACR) before the first
 C++ instruction because under the hard ABI a float may sit in an s
-register anywhere. What is Cortex-M and not ST lives in the `armv6m/`
+register anywhere. What is Cortex-M and not ST lives in the `cortexm/`
 core stratum, so `nvic.hpp`, `ticker.hpp` and `delay.hpp` here are the
 device header plus that core file plus this family's own facts.
 

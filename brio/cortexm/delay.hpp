@@ -18,17 +18,18 @@
  * an analog settle, a protocol gap.
  *
  * WHY SYSTICK AND NOT A COUNTED LOOP. The Cortex-M0+ has no cycle counter
- * (DWT arrives with the M3), and a counted loop is not
+ * (DWT arrives with the M3, and the M4 families keep this path for the
+ * one code), and a counted loop is not
  * cycle-deterministic through flash wait states, prefetch and code
  * placement - a calibrated app-local spin is an honest workaround, not a
  * foundation. SysTick IS a cycle counter in all but name:
- * armv6m/ticker.hpp clocks it from the processor clock (CLKSOURCE = 1)
+ * cortexm/ticker.hpp clocks it from the processor clock (CLKSOURCE = 1)
  * and reloads it every 1/tps second, so VAL is the current tick's phase
  * in CPU cycles - 20.8 ns of resolution at the SAM C21's 48 MHz, 15.6 ns
  * at the STM32G0's 64.
  *
  * THE OWNERSHIP LINE: SysTick belongs to its one writer - the BasicTicker
- * that is the kernel timebase, or armv6m/ticker.hpp's SysTickCounter
+ * that is the kernel timebase, or cortexm/ticker.hpp's SysTickCounter
  * where the timebase is elsewhere - IN WRITING: a store to VAL clears
  * the counter and would skew the tick - but reading
  * VAL has no side effect at all. The one CTRL read below tests ENABLE;
@@ -82,7 +83,7 @@
 #include <array>
 
 #if !defined(__CM0PLUS_REV) && !defined(__CM0_REV) && !defined(__CM4_REV)
-#error "armv6m/delay.hpp: include the family's device header first (samc21/delay.hpp, stm32g0/delay.hpp, rp2040/delay.hpp and stm32f4/delay.hpp do)"
+#error "cortexm/delay.hpp: include the family's device header first (samc21/delay.hpp, stm32g0/delay.hpp, rp2040/delay.hpp and stm32f4/delay.hpp do)"
 #endif
 
 #include "util/clock.hpp"

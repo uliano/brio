@@ -10,12 +10,12 @@ touches this chapter on revision Z). Drivers:
 realization of the kernel's `Platform` concept, templated on its
 timebase, and the `Tickless` concept), `stm32g0/ticker.hpp` (the
 SysTick `Ticker`: this family's include of the core stratum's
-`armv6m/ticker.hpp` - `BasicTicker`, `SysTickCounter`),
+`cortexm/ticker.hpp` - `BasicTicker`, `SysTickCounter`),
 `stm32g0/lptim_ticker.hpp` (`LptimTicker`, the tickless timebase over
 [lptim.md](lptim.md)'s driver), `stm32g0/delay.hpp` (the microsecond
 busy-wait), `stm32g0/reset.hpp` ([reset.md](reset.md)),
-`stm32g0/nvic.hpp` (`armv6m/nvic.hpp` - `InterruptGuard`, `Nvic`;
-[../armv6m/README.md](../armv6m/README.md)). The
+`stm32g0/nvic.hpp` (`cortexm/nvic.hpp` - `InterruptGuard`, `Nvic`;
+[../cortexm/README.md](../cortexm/README.md)). The
 crt is `stm32g0/src/glue/startup_stm32g0b1.cpp` +
 `stm32g0/ld/stm32g0b1re.ld` in the build project. The family fixtures
 are `test/family_stm32g0/platform.cpp` and `lptim_ticker.cpp` under
@@ -152,7 +152,7 @@ BKPT with no debugger escalates to the crt's distinct
   late on a slow one), and a program that has measured its LSI (the
   rtc suite's TIM16 capture: 32586 Hz on the bench die) states that.
 - `InterruptGuard`, `enable_interrupts()`, `disable_interrupts()`,
-  `interrupts_enabled()`, `irq_priority_levels` (4) - armv6m/nvic.hpp
+  `interrupts_enabled()`, `irq_priority_levels` (4) - cortexm/nvic.hpp
   through stm32g0/nvic.hpp.
 - `Nvic` - `enable`/`disable`/`enabled`, `set_pending`/`clear_pending`/
   `pending`, `priority` (refuses a level the core does not have), by
@@ -166,7 +166,7 @@ BKPT with no debugger escalates to the crt's distinct
   `running()`: SysTick counting with no interrupt, the same reload, for
   a program whose timebase is the LPTIM (`LptimTicker::init` calls it).
 - `delay_us(clock, us)` / `delay_us(DelayRate, us)` +
-  `delay_rate(hz)` - stm32g0/delay.hpp, which is `armv6m/delay.hpp`
+  `delay_rate(hz)` - stm32g0/delay.hpp, which is `cortexm/delay.hpp`
   plus this family's measured facts: a busy-wait of AT LEAST `us`
   microseconds on SysTick's VAL, CAPPED BELOW ONE SYSTICK PERIOD - one
   millisecond, one kernel tick on the SysTick timebase and 1.024 on the

@@ -21,7 +21,7 @@
  * whatever depth a sleep site armed. The plain sleep site is the only
  * site such a program takes (the timed ones refuse it at compile time:
  * nothing stands still, nothing needs repairing), and SysTick keeps
- * running interrupt-less as armv6m/delay.hpp's cycle counter. The
+ * running interrupt-less as cortexm/delay.hpp's cycle counter. The
  * price: one LPTIM, its vector bound by the app to the ticker's isr().
  *
  * CriticalSection is stm32g0/nvic.hpp's InterruptGuard: save PRIMASK,

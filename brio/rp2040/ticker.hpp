@@ -4,7 +4,7 @@
  * The kernel timebase of this target, on the Cortex-M0+ SysTick.
  *
  * THE TICKER ITSELF IS THE CORE STRATUM'S: `BasicTicker` lives in
- * armv6m/ticker.hpp, since it is ARMv6-M and not Raspberry Pi's. What
+ * cortexm/ticker.hpp, since it is the Cortex-M's and not Raspberry Pi's. What
  * is the RP2040's here is the `Ticker` alias that fixes the
  * project-wide rate, and the two facts below.
  *
@@ -47,11 +47,11 @@
 #include "rp2040/device.hpp"
 
 #include "rp2040/nvic.hpp"
-#include "armv6m/ticker.hpp"
+#include "cortexm/ticker.hpp"
 
 namespace brio {
 
-/// The tag that keeps the two cores' tickers apart (armv6m/ticker.hpp).
+/// The tag that keeps the two cores' tickers apart (cortexm/ticker.hpp).
 template <uint8_t core>
 struct CoreTag {
     static_assert(core < 2u, "the RP2040 has two cores, 0 and 1");

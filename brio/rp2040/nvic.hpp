@@ -3,8 +3,8 @@
  *
  * Interrupt control on the RP2040: the device header, then the core
  * stratum. InterruptGuard, the enable/disable/readback verbs, the Nvic
- * resource and irq_priority_levels are ARMv6-M and not Raspberry Pi's,
- * so they live in armv6m/nvic.hpp; this header is the RP2040's include
+ * resource and irq_priority_levels are the Cortex-M's and not Raspberry Pi's,
+ * so they live in cortexm/nvic.hpp; this header is the RP2040's include
  * of it, after RP2040.h has declared the IRQn enumerators and the
  * priority width (two bits, four levels) the core file is written
  * against. It sits at the BOTTOM of the rp2040/ stratum: ticker.hpp
@@ -33,4 +33,4 @@
 
 #include "rp2040/device.hpp"
 
-#include "armv6m/nvic.hpp"
+#include "cortexm/nvic.hpp"

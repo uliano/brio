@@ -2,7 +2,7 @@
 
 The operational page for brio's STM32G0 target: an ARM Cortex-M0+
 (STM32G0B1RE on the bench, on an ST Nucleo-64), an ARMv6-M family that
-shares the `armv6m/` core stratum with the SAM C21. `kernel/` and
+shares the `cortexm/` core stratum with the SAM C21. `kernel/` and
 `util/` run here as written: time events pacing a pin, and the full
 console over the board's own virtual COM port.
 
@@ -51,7 +51,7 @@ same compiler, flags and linker discipline as the samc21 project
 `CMAKE_SYSTEM_NAME Generic`, `STATIC_LIBRARY` try-compile,
 `--specs=nano.specs -nostartfiles`, deliberately NO syscall stubs so
 an accidental `_sbrk`/`_write` fails the link). What is ARMv6-M and not
-ST lives in the `armv6m/` core stratum, so `nvic.hpp`, `ticker.hpp` and
+ST lives in the `cortexm/` core stratum, so `nvic.hpp`, `ticker.hpp` and
 `delay.hpp` here are the device header plus that core file plus this
 family's own facts.
 

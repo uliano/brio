@@ -4,8 +4,8 @@
  * Interrupt control on the STM32F4: the device header, then the core
  * stratum. InterruptGuard, the enable/disable/readback verbs, the Nvic
  * resource and irq_priority_levels are the Cortex-M's and not ST's, so
- * they live in armv6m/nvic.hpp - the file the three Cortex-M0+ families
- * share, and which this Cortex-M4 family includes unchanged: SysTick,
+ * they live in cortexm/nvic.hpp - the file the three Cortex-M0+ families
+ * share and this Cortex-M4 family includes unchanged: SysTick,
  * the NVIC's enable/pend/priority registers and PRIMASK have the same
  * programmer's model on ARMv7-M (PM0214 4.3, 4.4). This header is the
  * STM32F4's include of it, after "stm32f4xx.h" has declared the IRQn
@@ -32,4 +32,4 @@
 
 #include "stm32f4xx.h"
 
-#include "armv6m/nvic.hpp"
+#include "cortexm/nvic.hpp"

@@ -3,8 +3,8 @@
  *
  * Interrupt control on the STM32G0: the device header, then the core
  * stratum. InterruptGuard, the enable/disable/readback verbs, the Nvic
- * resource and irq_priority_levels are ARMv6-M and not ST, so they live
- * in armv6m/nvic.hpp; this header is the STM32G0's include of it, after
+ * resource and irq_priority_levels are the Cortex-M's and not ST, so they live
+ * in cortexm/nvic.hpp; this header is the STM32G0's include of it, after
  * "stm32g0xx.h" has declared the IRQn enumerators and the priority
  * width the core file is written against.
  *
@@ -28,4 +28,4 @@
 
 #include "stm32g0xx.h"
 
-#include "armv6m/nvic.hpp"
+#include "cortexm/nvic.hpp"

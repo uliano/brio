@@ -1530,7 +1530,7 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * THE PER-REQUEST CHIP-SELECT DELAY:
  * cs_setup_us is spent spinning in start() (main context, bounded by the
  * byte) between the CS assertion and the first clock, timed by
- * armv6m/delay.hpp on a rate init()/rebase() keep current. It is served
+ * cortexm/delay.hpp on a rate init()/rebase() keep current. It is served
  * only while a Ticker runs (delay_us's own contract) and is capped below
  * one kernel tick - both stated there, neither reachable with a uint8_t
  * of microseconds on a 1000 Hz ticker.
@@ -1754,7 +1754,7 @@ public:
         pclk_hz_ = hz;
         ceiling_ = ceiling_hz_ ? spi_rate_for(hz, ceiling_hz_) : std::optional<SpiClock>{};
         // The one division delay_rate() costs is paid here, never at
-        // wait time (armv6m/delay.hpp's contract).
+        // wait time (cortexm/delay.hpp's contract).
         cs_rate_ = delay_rate(hz);
     }
 

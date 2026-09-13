@@ -2,7 +2,7 @@
 
 The operational page for brio's RP2040 target: Raspberry Pi's chip
 with two ARM Cortex-M0+ cores, an ARMv6-M family that shares the
-`armv6m/` core stratum with the SAM C21 and the STM32G0. A
+`cortexm/` core stratum with the SAM C21 and the STM32G0. A
 single-core program runs on core 0 - one kernel, one SysTick, the
 other core asleep in the bootrom - and the second core, the design
 point the stratum was opened for, runs a kernel of its own
@@ -53,7 +53,7 @@ projects (`rp2040/cmake/toolchain-arm.cmake` is that file verbatim:
 `CMAKE_SYSTEM_NAME Generic`, `STATIC_LIBRARY` try-compile,
 `--specs=nano.specs -nostartfiles`, deliberately NO syscall stubs so
 an accidental `_sbrk`/`_write` fails the link). What is ARMv6-M and not
-Raspberry Pi's lives in the `armv6m/` core stratum, so `nvic.hpp`,
+Raspberry Pi's lives in the `cortexm/` core stratum, so `nvic.hpp`,
 `ticker.hpp` and `delay.hpp` here are the device header plus that core
 file plus this family's own facts.
 

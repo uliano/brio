@@ -8,7 +8,7 @@
  * families: the system counter is core-private, so claiming it costs
  * the application nothing - TIM1, TIM2 and every other block stay
  * free. It is not the ARM SysTick though, and this file is not
- * armv6m/ticker.hpp with different names: the counter here counts UP to
+ * cortexm/ticker.hpp with different names: the counter here counts UP to
  * a compare value, reloads to zero by itself when STRE is set, and
  * raises a flag in a status register that the handler must CLEAR. A
  * core stratum shared with a second QingKe family would start from

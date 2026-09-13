@@ -1,6 +1,6 @@
 // Platform family smoke TU: the STM32F4 realization of the kernel's
 // Platform concept (Stm32f4Platform<TB>), the SysTick timebase it takes
-// by default and the interrupt-control verbs below it - the armv6m core
+// by default and the interrupt-control verbs below it - the cortexm core
 // files included by a Cortex-M4 header, which is what this TU proves
 // compiles on every header of the pack. IRQn_Type is where the headers
 // differ, so this TU names a line every F4 has (USART1_IRQn).

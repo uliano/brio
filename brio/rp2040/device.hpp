@@ -7,7 +7,7 @@
  * priority width, core_cm0plus.h behind it) and the pico-sdk's
  * bit-field definitions for every register of every block - both from
  * third_party/pico-sdk/, the SVD's two halves. Every header of this
- * stratum includes this one first; the `armv6m/` core files are
+ * stratum includes this one first; the `cortexm/` core files are
  * written against the CMSIS half and refuse to be included before it.
  *
  * WHY TWO HALVES. The CMSIS header names the registers (UART0->UARTFR)

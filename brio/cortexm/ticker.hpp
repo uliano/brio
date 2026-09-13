@@ -2,7 +2,7 @@
  * ticker.hpp - the CORE stratum: the kernel timebase on SysTick.
  *
  * SysTick is ARM's, not the vendor's: a 24-bit down-counter on the
- * processor clock with one interrupt, present on every Cortex-M0+ - and
+ * processor clock with one interrupt, present on every Cortex-M - and
  * this monostate ticker over it is the same on the SAM C21, the STM32G0
  * and the RP2040 to the instruction, which is why it lives here. What
  * differs per family sits in the family's own ticker.hpp: the alias
@@ -82,10 +82,10 @@
 #include <stdint.h>
 
 #if !defined(__CM0PLUS_REV) && !defined(__CM0_REV) && !defined(__CM4_REV)
-#error "armv6m/ticker.hpp: include the family's device header first (samc21/ticker.hpp, stm32g0/ticker.hpp, rp2040/ticker.hpp and stm32f4/ticker.hpp do)"
+#error "cortexm/ticker.hpp: include the family's device header first (samc21/ticker.hpp, stm32g0/ticker.hpp, rp2040/ticker.hpp and stm32f4/ticker.hpp do)"
 #endif
 
-#include "armv6m/nvic.hpp"
+#include "cortexm/nvic.hpp"
 #include "util/clock.hpp"
 #include "util/timestamp.hpp"
 
@@ -271,7 +271,7 @@ public:
  * SysTickCounter: SysTick as a bare cycle counter, no interrupt, for a
  * program whose KERNEL TIMEBASE is elsewhere (stm32g0/lptim_ticker.hpp
  * counts kernel time on a low-power timer that runs through a Stop).
- * armv6m/delay.hpp reads SysTick's VAL against LOAD and tests ENABLE
+ * cortexm/delay.hpp reads SysTick's VAL against LOAD and tests ENABLE
  * only - it never needs the interrupt - so this is what keeps delay_us
  * working when BasicTicker is not the program's ticker. Same reload
  * rule and the same 24-bit refusal as BasicTicker::init(), so the

@@ -1,7 +1,7 @@
 /*
  * delay.hpp
  *
- * Microsecond busy-waits on the STK counter: armv6m/delay.hpp's
+ * Microsecond busy-waits on the STK counter: cortexm/delay.hpp's
  * contract on this core - "at least", never early, CAPPED BELOW ONE
  * TICK PERIOD (a wait of a millisecond or more is TimeEvent territory
  * and is REFUSED, false and no time spent, rather than served as a
@@ -22,7 +22,7 @@
  * bits, and the 65536 us gate is what keeps the product from wrapping.
  *
  * Under this target's DynamicClock the wait dispatches by rate index
- * into a table expanded at compile time (armv6m/delay.hpp's shape).
+ * into a table expanded at compile time (cortexm/delay.hpp's shape).
  *
  * Measured on the CH32V006K8U6 at 48 MHz: delay_us(100) spends 4871
  * cycles for 4800 asked, and twenty delay_us(500) take exactly ten

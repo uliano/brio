@@ -6,7 +6,7 @@ lines), 2.6 (memory: the SRAM banks), 2.7 and 2.8 (boot sequence,
 bootrom, the second stage), 2.14 (subsystem resets), 2.20 (SYSINFO);
 Appendix B. The drivers: `brio/rp2040/platform.hpp`, `nvic.hpp`,
 `ticker.hpp`, `delay.hpp`, `resets.hpp`, `sysinfo.hpp` over
-`brio/armv6m/`; the crt `rp2040/src/glue/startup_rp2040.cpp`, the
+`brio/cortexm/`; the crt `rp2040/src/glue/startup_rp2040.cpp`, the
 second stage `rp2040/src/glue/boot2_*.S`, the linker script
 `rp2040/ld/rp2040_2m.ld`. The reference suite: `test_rp2040_platform`
 (the boot state, the ticker against the system timer, `delay_us`, the
@@ -49,7 +49,7 @@ nothing short of the DORMANT state stops.
 ## Types and verbs
 
 - `Rp2040Platform<TB = Ticker>` - the kernel's Platform:
-  `CriticalSection` = the PRIMASK guard of `armv6m/nvic.hpp`, PER CORE
+  `CriticalSection` = the PRIMASK guard of `cortexm/nvic.hpp`, PER CORE
   (it excludes this core's handlers and nothing of the other core);
   `idle()` = DSB, WFI, unmask - the core's clock stops, everything
   else runs, and with both cores and the DMA asleep the clock enables

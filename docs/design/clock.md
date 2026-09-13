@@ -79,7 +79,7 @@ the two every part has.
 ARMv6-M strata and on the QingKe one it is capped below one kernel
 tick and REFUSES (a `bool`, nothing spent) a wait that long - a tick
 or more is `TimeEvent` territory - where the AVR's has no cap and
-returns nothing (`avrdx/delay.hpp`, `armv6m/delay.hpp`,
+returns nothing (`avrdx/delay.hpp`, `cortexm/delay.hpp`,
 `ch32v00x/delay.hpp`).
 
 ## A rate change is a synchronous fan-out, not an event
@@ -265,7 +265,7 @@ USART personalities without a `rebase` refuse a dynamic clock at their
 | `Clock<source, hz>` | `samc21/clock.hpp` | the SAM C21's static clock (no dynamic one - see above) |
 | `Clock<source, hz, regime>` | `stm32g0/clock.hpp` | the STM32G0's static clock, with its voltage regime |
 | `DynamicClock<Rates<...>, Users...>` | `stm32g0/clock.hpp` | the STM32G0's dynamic clock over a pack of rate tuples |
-| `delay_us(clock, us)`, `delay_rates<Clock>` | `armv6m/delay.hpp` | both Cortex-M0+ families' short wait, on SysTick's counter; the per-rate table of a dynamic clock |
+| `delay_us(clock, us)`, `delay_rates<Clock>` | `cortexm/delay.hpp` | both Cortex-M0+ families' short wait, on SysTick's counter; the per-rate table of a dynamic clock |
 
 Target pages: [../avrdx/README.md](../avrdx/README.md),
 [../samc21/clock.md](../samc21/clock.md),

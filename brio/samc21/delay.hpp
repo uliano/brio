@@ -1,8 +1,8 @@
 /*
  * delay.hpp
  *
- * Microsecond busy-waits for the SAM C21 stratum: armv6m/delay.hpp's
- * `delay_us` / `delay_rate` / `DelayRate` (docs/armv6m/README.md).
+ * Microsecond busy-waits for the SAM C21 stratum: cortexm/delay.hpp's
+ * `delay_us` / `delay_rate` / `DelayRate` (docs/cortexm/README.md).
  * What is the SAM C21's here is what was measured on it: the division
  * this file refuses to run at wait time costs about 4 us a call on this
  * core; VAL is 20.8 ns of resolution at 48 MHz; the wait is correct
@@ -17,5 +17,5 @@
 
 #include "sam.h"
 
-#include "armv6m/delay.hpp"
+#include "cortexm/delay.hpp"
 #include "samc21/clock.hpp"

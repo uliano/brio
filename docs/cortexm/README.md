@@ -1,10 +1,11 @@
-# Core stratum: ARMv6-M (`armv6m/`)
+# Core stratum: Cortex-M (`cortexm/`)
 
 The one directory under `brio/` that is neither target-independent
-nor a target: what ARM designed into every Cortex-M0/M0+ and every
-vendor ships unchanged - the NVIC and PRIMASK (`armv6m/nvic.hpp`:
+nor a target: what ARM designed into every Cortex-M - the M0/M0+ of
+three families and the M4 of a fourth, the same programmer's model on
+ARMv6-M and ARMv7-M - and every vendor ships unchanged - the NVIC and PRIMASK (`cortexm/nvic.hpp`:
 `InterruptGuard`, the global enable/disable/readback verbs, `Nvic`,
-`irq_priority_levels`), the SysTick timebase (`armv6m/ticker.hpp`:
+`irq_priority_levels`), the SysTick timebase (`cortexm/ticker.hpp`:
 `BasicTicker`, and `SysTickCounter` - SysTick as a bare cycle counter
 with no interrupt, for a program whose kernel timebase is elsewhere,
 such as the STM32G0's tickless LPTIM one; both are `ClockUser`s whose
@@ -14,7 +15,7 @@ phase of the tick in progress, under a tick, late and never early;
 both measured at every rung of the STM32G0's ladder, the ticker holding
 1000 Hz against the crystal at 64, 16 and 2 MHz)
 and the microsecond busy-wait on SysTick's own counter
-(`armv6m/delay.hpp`: `delay_us`, `delay_rate`, `DelayRate` - "at
+(`cortexm/delay.hpp`: `delay_us`, `delay_rate`, `DelayRate` - "at
 least", never early, capped below one SysTick period of one
 millisecond, no division at wait time: folded for a static clock,
 and for a dynamic one selected by its rate index out of `delay_rates`,
@@ -43,22 +44,23 @@ image byte-identical before and after.
   project-wide `Ticker` alias (each family's ticker.hpp states its
   rate).
 
-## A fourth user, on another architecture
+## Two architectures, one stratum
 
 The STM32F4 stratum (Cortex-M4, ARMv7-M) includes these three files
 unchanged: SysTick, the NVIC's enable/pend/priority registers and
 PRIMASK have the same programmer's model on ARMv7-M, and the files
-read nothing else. What ARMv7-M adds - BASEPRI, the sixteen priority
-levels, the FPU, the configurable faults - stays in `stm32f4/`, unused
-by the cooperative kernel, until a second ARMv7-M family proves what is
-shared (the rule by which this stratum was born at the second
-Cortex-M0+ family). The guards accept the Cortex-M4 core header beside
-the M0/M0+ ones; the directory's NAME is the transitional part - the
-files are every Cortex-M's, and the rename that says so is owed.
+read nothing else - which is why the stratum is named for the CORE
+family and not for an architecture. What ARMv7-M adds - BASEPRI, the
+sixteen priority levels, the FPU, the configurable faults - stays in
+`stm32f4/`, unused by the cooperative kernel, until another ARMv7-M
+family proves what is shared (the rule by which this stratum was born
+at the second Cortex-M0+ family): an `armv7m/` would sit BESIDE this
+one, holding what v7-M adds, as an `armv8m/` would for the M33s. The
+guards accept the M0, M0+ and M4 core headers.
 
 ## The include-order contract
 
-An armv6m header does not include a device header - it cannot know
+An cortexm header does not include a device header - it cannot know
 which - and it refuses to be included before one (`#error`): the CMSIS
 core header it is written against is brought in BY the device header,
 after the device has declared its IRQn enumerators and priority width.
@@ -69,6 +71,6 @@ directly.
 
 ## Editor
 
-`brio/armv6m/.clangd` parses these files against the SAM project's
-database (the older of the two users), so the CMSIS symbols resolve;
-the STM32G0 project compiles them with its own flags at build time.
+`brio/cortexm/.clangd` parses these files against the SAM project's
+database (the oldest of the users), so the CMSIS symbols resolve; the
+other three projects compile them with their own flags at build time.

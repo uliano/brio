@@ -511,10 +511,10 @@ and what it does while the core sleeps.
 | stratum | realization | beyond the contract |
 |---|---|---|
 | avrdx | `Ticker` = `BasicTicker<1024>` over the RTC's PIT (`avrdx/ticker.hpp`) | 1024 Hz; the PIT runs on the 32 kHz oscillator, so the tick keeps counting through every sleep mode |
-| samc21 | `Ticker` = `BasicTicker<1000>` over SysTick (`armv6m/ticker.hpp`, included by `samc21/ticker.hpp`) | 1000 Hz; SysTick rides the CPU clock and STOPS in standby - `advance(n)` is the landing point of the resync the timed sleep site makes from the RTC ([power.md](power.md)) |
+| samc21 | `Ticker` = `BasicTicker<1000>` over SysTick (`cortexm/ticker.hpp`, included by `samc21/ticker.hpp`) | 1000 Hz; SysTick rides the CPU clock and STOPS in standby - `advance(n)` is the landing point of the resync the timed sleep site makes from the RTC ([power.md](power.md)) |
 | stm32g0 | the same SysTick `Ticker`, or `LptimTicker<cfg>` (`stm32g0/lptim_ticker.hpp`) | SysTick 1000 Hz, stopped by a Stop and paused by the sites; or 1024 Hz on the LPTIM's count shifted right, COUNTING THROUGH a Stop and satisfying `Tickless` - the one platform that offers `idle_until` (section 11) |
 | ch32v00x | `Ticker` = `BasicTicker<1000>` over the core's STK (`ch32v00x/ticker.hpp`) | 1000 Hz; the STK counts UP against a compare with auto-reload and rides HCLK, so it stops in a Standby - `advance(n)` is where the timed sleep site lands the span the AWU alarm measured ([power.md](power.md)), and `pause()`/`resume()` hold the tick across a sleep whose wake runs on the HSI |
-| stm32f4 | the same SysTick `Ticker` (`armv6m/ticker.hpp`, included by `stm32f4/ticker.hpp`) | 1000 Hz on a 24-bit reload that fits at 180 MHz (179999); SysTick rides HCLK and stops in Stop - the power chapter's sites are where that gets repaired |
+| stm32f4 | the same SysTick `Ticker` (`cortexm/ticker.hpp`, included by `stm32f4/ticker.hpp`) | 1000 Hz on a 24-bit reload that fits at 180 MHz (179999); SysTick rides HCLK and stops in Stop - the power chapter's sites are where that gets repaired |
 | host | a virtual clock the test advances (`host/platform.hpp`) | 1000 Hz nominal; time is arithmetic, which is what makes drift and re-arm testable to the tick |
 
 ## 10. Failures: overflow and panic (`kernel/panic.hpp`)
@@ -594,7 +594,7 @@ whole machine: **an ISR body is not interrupted by another ISR body**
 own way - the AVR by architecture (the I flag falls on entry and no
 handler restores it early), the two Cortex-M0+ families by leaving
 every NVIC line at the same priority (equal priorities never preempt
-one another; `Nvic::priority()` in `armv6m/nvic.hpp` is the one door,
+one another; `Nvic::priority()` in `cortexm/nvic.hpp` is the one door,
 and no driver opens it), the CH32V00x by leaving `INTSYSCR.INESTEN`
 at its reset value in the crt. A driver whose two vectors share one
 state machine (a UART with its DMA channels) counts on this promise,

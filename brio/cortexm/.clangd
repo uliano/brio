@@ -1,0 +1,7 @@
+# The cortexm core stratum has no database of its own (it is included by
+# the samc21, stm32g0, rp2040 and stm32f4 strata, each after its own
+# device header); parse it against the SAM project's database, the oldest
+# of its users, so the CMSIS core symbols resolve. Path relative to this
+# file.
+CompileFlags:
+  CompilationDatabase: ../../build-cmake/samc21j-release

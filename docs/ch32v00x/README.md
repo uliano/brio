@@ -379,7 +379,7 @@ Driver gaps, each with its reason:
   monitor: each a mode with no user, each named in its chapter's
   document.
 - A `qingke/` core stratum: factored at the second RISC-V family,
-  never earlier (the armv6m rule).
+  never earlier (the cortexm rule).
 
 Implemented but not bench-verified, each with what would measure it:
 

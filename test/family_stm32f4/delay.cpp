@@ -1,6 +1,6 @@
 // Delay family smoke TU: the core stratum's delay_us over a Cortex-M4
 // header - the include-order contract (the device header first, then
-// armv6m/delay.hpp) and the static-clock fold, on every header.
+// cortexm/delay.hpp) and the static-clock fold, on every header.
 #include "stm32f4/clock.hpp"
 #include "stm32f4/delay.hpp"
 

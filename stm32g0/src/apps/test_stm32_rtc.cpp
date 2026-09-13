@@ -1453,7 +1453,7 @@ inline bool is_wrap(uint16_t prev, uint16_t ss) {
 }
 
 /// A wait longer than delay_us() may serve. THE CAP IS THE CONTRACT:
-/// armv6m/delay.hpp refuses anything a kernel tick or longer and spends
+/// cortexm/delay.hpp refuses anything a kernel tick or longer and spends
 /// NO time doing it, which is exactly right for the busy-wait and wrong
 /// for a letter that wants to sit out a tamper's sampling window: a
 /// request of 60 ms is refused outright and no time is spent.

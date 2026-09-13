@@ -240,7 +240,7 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   boundary (little) and what stays in the target file (most). Nothing
   written for AVR may make another target harder than it already is.
 - **A core stratum sits between util/ and the families that share
-  a core.** `armv6m/` holds what ARM designed and every Cortex-M0/M0+
+  a core.** `cortexm/` holds what ARM designed and every Cortex-M
   vendor ships unchanged - the NVIC and PRIMASK guard, the SysTick
   ticker - and nothing of any vendor: it reads CMSIS-Core symbols only
   and refuses to be included before a family's device header, which

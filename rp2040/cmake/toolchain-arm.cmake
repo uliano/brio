@@ -1,6 +1,6 @@
 # ============================================================================
 #  toolchain-arm.cmake - cross toolchain for the RP2040 (Cortex-M0+) - the
-#  samc21 and stm32g0 file verbatim: same compiler, same core; the armv6m
+#  samc21 and stm32g0 file verbatim: same compiler, same core; the cortexm
 #  factoring pass may make the three one file.
 #
 #  The project's own arm-none-eabi-gcc 16.2 at /sw/arm-none-eabi (self-built,

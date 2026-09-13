@@ -14,10 +14,10 @@ code, and 2.1.2 is a note for the day a float divides in a handler.
 Drivers: `stm32f4/platform.hpp` (`Stm32f4Platform<TB>`, this target's
 realization of the kernel's `Platform` concept, templated on its
 timebase), `stm32f4/ticker.hpp` (the SysTick `Ticker`: this family's
-include of the core stratum's `armv6m/ticker.hpp` - `BasicTicker`,
+include of the core stratum's `cortexm/ticker.hpp` - `BasicTicker`,
 `SysTickCounter`), `stm32f4/delay.hpp` (the microsecond busy-wait),
-`stm32f4/nvic.hpp` (`armv6m/nvic.hpp` - `InterruptGuard`, `Nvic`;
-[../armv6m/README.md](../armv6m/README.md)). The crt is
+`stm32f4/nvic.hpp` (`cortexm/nvic.hpp` - `InterruptGuard`, `Nvic`;
+[../cortexm/README.md](../cortexm/README.md)). The crt is
 `stm32f4/src/glue/startup_stm32f4{29,46,11}.cpp` + `stm32f4/ld/<part>.ld`
 in the build project. The family fixture is
 `test/family_stm32f4/platform.cpp` under `brio check stm32f4`. The
@@ -93,7 +93,7 @@ pending bit is one bit, five periods under it are one interrupt.
 for the sleep's duration - the sleep sites of the power chapter are
 where that gets repaired.
 
-**`delay_us` reads SysTick's VAL** (`armv6m/delay.hpp`: at least, never
+**`delay_us` reads SysTick's VAL** (`cortexm/delay.hpp`: at least, never
 early, capped below one tick, no division at wait time - a rule that
 costs this core nothing, ARMv7-M having UDIV, and is kept for the one
 code path). VAL is 5.6 ns of resolution at 180 MHz; the call's own
@@ -110,17 +110,17 @@ overhead is about 150 cycles at 180 MHz and 50 at 100 MHz (measured:
   end the same way), `now()`/`ticks_per_second` (the timebase's),
   `atomic_width` 4, `panic_record()` in `.noinit`. No `idle_until()`: no
   timebase of this family counts through Stop yet.
-- `Ticker` = `BasicTicker<1000>` (`armv6m/ticker.hpp`): `init(clock)`
+- `Ticker` = `BasicTicker<1000>` (`cortexm/ticker.hpp`): `init(clock)`
   (the reload from the clock's rate, refused when it does not fit),
   `tick()` (the ISR body the app binds to `SysTick_Handler`), `ticks()`,
   `millis()`, `secs()`, `now(TimeStamp&)`, `rebase(hz)` for a dynamic
   clock, `advance(n)` for a sleep site's resync.
 - `delay_us(clock, us)` / `delay_us(DelayRate, us)`, `delay_rate(hz)`
-  (`armv6m/delay.hpp`).
+  (`cortexm/delay.hpp`).
 - `InterruptGuard`, `enable_interrupts()`, `disable_interrupts()`,
   `interrupts_enabled()`, `Nvic` (enable/disable/enabled, set_pending/
   clear_pending/pending, priority get/set over sixteen levels),
-  `irq_priority_levels` = 16 (`armv6m/nvic.hpp`).
+  `irq_priority_levels` = 16 (`cortexm/nvic.hpp`).
 - The crt: `Reset_Handler` (CPACR, .data, .bss, .preinit_array,
   .init_array, main), `Default_Handler` and the weak `HardFault_Handler`
   spins, `abort()`, every peripheral vector as a weak alias the app

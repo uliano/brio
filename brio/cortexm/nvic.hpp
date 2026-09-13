@@ -1,13 +1,14 @@
 /*
  * nvic.hpp - the CORE stratum, first file.
  *
- * Interrupt control on any ARMv6-M core (Cortex-M0/M0+): the core's own
- * NVIC (enable / disable / pend one peripheral line, and its priority)
- * plus the single global mask every brio critical section rides on,
- * PRIMASK. Nothing in this file knows a vendor: it is the part of a
- * Cortex-M0+ target that ARM designed. Each family's own nvic.hpp -
- * `samc21/nvic.hpp`, `stm32g0/nvic.hpp` - is the include that selects
- * the device, and then this file.
+ * Interrupt control on any Cortex-M core: the core's own NVIC (enable /
+ * disable / pend one peripheral line, and its priority) plus the single
+ * global mask every brio critical section rides on, PRIMASK. Nothing in
+ * this file knows a vendor: it is the part of a Cortex-M target that ARM
+ * designed, the same programmer's model on ARMv6-M (the M0/M0+) and on
+ * ARMv7-M (the M4). Each family's own nvic.hpp - `samc21/nvic.hpp`,
+ * `stm32g0/nvic.hpp`, `rp2040/nvic.hpp`, `stm32f4/nvic.hpp` - is the
+ * include that selects the device, and then this file.
  *
  * WHAT A FAMILY OWES BEFORE INCLUDING THIS: its device header. The
  * CMSIS core header this file relies on (core_cm0plus.h: the PRIMASK
@@ -16,12 +17,14 @@
  * its IRQn enumerators and priority width - so a family's nvic.hpp
  * includes "sam.h" or "stm32g0xx.h" and then this file, and this file
  * refuses to be included first. That is the one include-order contract
- * of the armv6m stratum, and every file here states it.
+ * of the cortexm stratum, and every file here states it.
  *
- * PRIMASK and nothing else: ARMv6-M has no BASEPRI, so masking is
- * all-or-nothing - there is no "mask everything below priority N". The
- * NVIC priorities below therefore order PREEMPTION between handlers,
- * never the reach of a critical section.
+ * PRIMASK and nothing else: ARMv6-M has no BASEPRI, so masking there is
+ * all-or-nothing - there is no "mask everything below priority N" - and
+ * where the core has one (ARMv7-M) brio does not use it, so that the
+ * kernel's promise reads the same on every family. The NVIC priorities
+ * below therefore order PREEMPTION between handlers, never the reach of
+ * a critical section.
  *
  * NOT here (declared, not built): the fault/exception configuration,
  * NVIC_SystemReset and the vector-table relocation - they belong with
@@ -34,15 +37,15 @@
 #include <stdint.h>
 
 #if !defined(__CM0PLUS_REV) && !defined(__CM0_REV) && !defined(__CM4_REV)
-#error "armv6m/nvic.hpp: include the family's device header first (samc21/nvic.hpp, stm32g0/nvic.hpp, rp2040/nvic.hpp and stm32f4/nvic.hpp do) - the CMSIS core header it brings is what this file is written against"
+#error "cortexm/nvic.hpp: include the family's device header first (samc21/nvic.hpp, stm32g0/nvic.hpp, rp2040/nvic.hpp and stm32f4/nvic.hpp do) - the CMSIS core header it brings is what this file is written against"
 #endif
 
 namespace brio {
 
 /// Number of distinct NVIC priority levels: the core implements
-/// __NVIC_PRIO_BITS high bits of an 8-bit field (2 on both families here
-/// -> four levels, 0 the most urgent). The device header is the
-/// authority.
+/// __NVIC_PRIO_BITS high bits of an 8-bit field (2 on the M0+ families
+/// -> four levels, 4 on the M4 -> sixteen; 0 the most urgent). The
+/// device header is the authority.
 inline constexpr uint8_t irq_priority_levels = 1u << __NVIC_PRIO_BITS;
 
 /**
