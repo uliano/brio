@@ -254,6 +254,24 @@ struct Rcc {
     /// switches SYSCLK to HSI and raises the CSS interrupt on the NMI.
     static void css(bool on) { bit(RCC->CR, RCC_CR_CSSON, on); }
 
+    // ---- LSI (7.2.8, 7.3.21): the low-speed RC, 32 kHz nominal -----------------
+    //
+    // Not a SYSCLK root and not a Clock task's business: this oscillator
+    // is what the independent watchdog counts and what the RTC may run
+    // on, so the verbs live here (the block's owner) and the chapters
+    // above call them. IT SITS IN RCC_CSR, whose top eight bits are the
+    // RESET FLAGS (stm32f4/reset.hpp): every write here is a
+    // read-modify-write that leaves them alone, which is safe because
+    // RMVF reads as zero and writing zero to it has no effect.
+    //
+    // LSIRDY is not a witness of LSION alone: a started IWDG forces the
+    // oscillator on (7.2.9) and so does an RTC whose clock select names
+    // it, and neither sets LSION.
+    static void lsi_enable(bool on) { bit(RCC->CSR, RCC_CSR_LSION, on); }
+    static bool lsi_enabled() { return (RCC->CSR & RCC_CSR_LSION) != 0u; }
+    static bool lsi_ready() { return (RCC->CSR & RCC_CSR_LSIRDY) != 0u; }
+    static bool lsi_wait_ready() { return wait(RCC->CSR, RCC_CSR_LSIRDY, true); }
+
     // ---- the main PLL (7.3.2) -------------------------------------------------------
     static void pll_enable(bool on) { bit(RCC->CR, RCC_CR_PLLON, on); }
     static bool pll_ready() { return (RCC->CR & RCC_CR_PLLRDY) != 0u; }

@@ -304,8 +304,10 @@ gets its home in `docs/design/` when taken.
   standalone STLINK-V3) with kernel/ and util/ untouched - the platform,
   the clock (the regulator scale and over-drive sequenced, the APB
   prescalers unpinned), the pins and the USART with their documents,
-  the family check over all twenty-three headers. What remains: every
-  other chapter (the reset causes and watchdogs first, then FLASH with
+  the family check over all twenty-three headers; then the reset
+  chapter (the flags, both watchdogs, the four fault vectors, seven real
+  resets measured) and the EXTI + SYSCFG chapter. What remains: every
+  other chapter (FLASH with
   its UNEVEN sectors - a design point for nv-heap.md before the NVM
   chapter -, the stream-and-FIFO DMA, the timers, ADC/DAC, PWR's Stop
   modes with a dynamic clock's way down, RTC, EXTI, SPI/I2S, I2C, the
@@ -1287,7 +1289,9 @@ brio/                    the framework, four strata:
                            the regulator's VOS width and over-drive pair, and
                            THE FREQUENCY LADDERS keyed on the device-select
                            define - known for the F405, F42x/F43x, F446 and
-                           F411 classes, refused elsewhere
+                           F411 classes, refused elsewhere; the watchdogs'
+                           and the EXTI's per-part facts (implemented lines,
+                           port codes, per-line vectors) appended by chapter
     nvic.hpp / ticker.hpp / delay.hpp  the device header + the cortexm/ file:
                            PRIMASK the one mask on a core that has BASEPRI,
                            SysTick at 1000 Hz, delay_us on VAL
@@ -1310,6 +1314,34 @@ brio/                    the framework, four strata:
                            block without a BRR (BSRR's upper half), the port
                            clock on AHB1 opened by every configuring verb,
                            input floating as the reset state
+    reset.hpp              Reset (RCC_CSR's seven flags as a HISTORY - PINRSTF
+                           raised by every internal source too -, RMVF, and
+                           software() through SYSRESETREQ) + Iwdg (NO window on
+                           this family; the keyed registers that do not update
+                           until the start key, so arm() starts first; the LSI
+                           as the only witness) + Wwdg (PCLK1/4096/2^WDGTB with
+                           a TWO-bit WDGTB, the free-running counter, in_window()
+                           and EWIF all measurable with WDGA clear) + Faults (the
+                           three configurable fault vectors, the CCR traps, and
+                           CFSR/HFSR/MMFAR/BFAR as a twelve-byte FaultRecord the
+                           APPLICATION banks) + ResetReporter and
+                           hard_fault_reset<P>()
+    syscfg.hpp             Syscfg: the block the EXTI's pin multiplexer lives
+                           in - the APB2 gate that is CLOSED at reset and
+                           that every verb (reads included) opens, EXTICR,
+                           the memory map read-only, the I/O compensation
+                           cell, the Ethernet PHY select
+    exti.hpp               EXTI: Exti (the 23 lines - sixteen pin lines
+                           numbered by the PIN NUMBER, the rest peripheral
+                           wake-ups derived from the peripherals' presence -
+                           the edge senses, ONE rc_w1 pending bit that
+                           exists only while the interrupt is unmasked, the
+                           software trigger that obeys the mask and does not
+                           self-clear, the vectors and the ISR body that
+                           clears first) + ExtInt<Pin> (the pad's face,
+                           REFUSING a line another port is using, steal()
+                           the override) + ExtiLine<n> (a wake-up named as a
+                           constant, refused where the part has none)
     dma_engine.hpp         NoDmaEngine, the empty slot's tag
     usart.hpp              Usart<n> resource over the classic SR/DR/BRR chapter
                            (mute, LIN, IrDA, smartcard, synchronous, flow

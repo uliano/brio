@@ -548,14 +548,14 @@ reporters the stratum adds.
 | samc21 | `SamPlatform::break_here()` = BKPT, a HardFault with DHCSR.C_DEBUGEN clear (the reporter never runs; `bin/brio` clears the bit after every flash) | `ResetReporter` and `hard_fault_reset<P>()` (`samc21/reset.hpp`: the record written, then a reset so it is read at the next boot - the fault body refusing to overwrite a record `panic()` wrote); `TracingReporter` / `hard_fault_trace_reset<P, Store>()` (`samc21/postmortem.hpp`: the MTB's last packets beside the record); `JournalPanic` over `RwweeJournalZone` (the record in flash, through a power loss) |
 | stm32g0 | `Stm32g0Platform::break_here()`, the same BKPT and the same escalation | `ResetReporter` and `hard_fault_reset<P>()` (`stm32g0/reset.hpp`); `JournalPanic` over `MainFlashJournalZone`; no trace unit on this core |
 | ch32v00x | `Ch32v00xPlatform::break_here()` = `ebreak`, the breakpoint exception with no debugger, escalating to the fault vector the app binds | `ResetReporter` and `fault_reset<P>()` (`ch32v00x/reset.hpp`: the record written, then a reset through PFIC_CFGR, the fault body refusing to overwrite a record `panic()` wrote); `JournalPanic` over `MainFlashJournalZone` is available and unexercised on this family; no trace unit |
-| stm32f4 | `Stm32f4Platform::break_here()`, the same BKPT and the same escalation - to a `HardFault_Handler` spin the crt provides, the three configurable faults disabled at reset | no reporter beyond `HaltReporter` yet: the reset chapter brings `ResetReporter` and the fault bodies |
+| stm32f4 | `Stm32f4Platform::break_here()`, the same BKPT and the same escalation | `ResetReporter` and `hard_fault_reset<P>()` (`stm32f4/reset.hpp`: the record written, then a reset so it is read at the next boot - the fault body refusing to overwrite a record `panic()` wrote, and serving the three CONFIGURABLE fault vectors too where a program enables them); `Faults::read()` gathers CFSR/HFSR/MMFAR/BFAR into a twelve-byte record the APPLICATION banks, the driver owning no storage; no trace unit on this core |
 | host | `HostPlatform::break_here()` records the call | - |
 
 The reset cause the boot cross-checks is spelled by the register's
-own nature: `Reset::take_flags()` on avrdx, stm32g0 and ch32v00x (a
+own nature: `Reset::take_flags()` on avrdx, stm32g0, ch32v00x and stm32f4 (a
 history that ACCUMULATES until read and cleared) and `Reset::cause()`
 on samc21 (RCAUSE, one exclusive cause). And the watchdog a program
-keeps alive is four strata's resources under two names - not one verb,
+keeps alive is five strata's resources under two names - not one verb,
 because the contracts differ and the name each carries is its
 chapter's:
 
@@ -565,6 +565,7 @@ chapter's:
 | samc21 | `Watchdog::clear()` = key 0xA5 into CLEAR (`samc21/reset.hpp`) | a posted write, `sync()` to know it landed; any other key is a reset, which `force_reset()` spells on purpose |
 | stm32g0 | `Iwdg::refresh()` = 0xAAAA into KR, `Wwdg::refresh(counter)` = T[6:0] (`stm32g0/reset.hpp`) | the IWDG refresh RE-LOCKS PR/RLR/WINR; a refresh above the window value is a reset; the WWDG's takes the value to reload |
 | ch32v00x | `Iwdg::refresh()` = 0xAAAA into CTLR, `Wwdg::refresh(counter)` = T[6:0] (`ch32v00x/reset.hpp`) | the same two dogs minus the IWDG window; the WWDG's counter does not run until armed, so nothing about it can be timed unarmed and only the RCC pulse puts an armed one back |
+| stm32f4 | `Iwdg::refresh()` = 0xAAAA into KR, `Wwdg::refresh(counter)` = T[6:0] (`stm32f4/reset.hpp`) | the same two dogs minus the IWDG window; the IWDG's keyed registers do not update until the start key, so `arm()` starts before it configures, and the reset the watchdog causes really does stop it; the WWDG's counter free-runs unarmed and `in_window()` says when a refresh is legal |
 
 A portable program that keeps a watchdog alive is not written yet; the
 common verb it would call is born with it, one level above these, and

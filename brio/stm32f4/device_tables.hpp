@@ -407,4 +407,193 @@ inline constexpr uint32_t device_uid_base = UID_BASE;
 inline constexpr uint32_t flash_size_register = FLASHSIZE_BASE;
 inline constexpr uint32_t package_register = PACKAGE_BASE;
 
+// ---- reset and watchdogs ------------------------------------------------------
+
+/// Whether the independent watchdog has a WINDOW register (IWDG_WINR and
+/// its WVU update bit). NO header of this pack declares one - the F4's
+/// IWDG is four registers and an early refresh is not a reset here - and
+/// stm32f4/reset.hpp offers no window verb because of it. The probe is
+/// what makes that a checked fact rather than a claim.
+constexpr bool iwdg_has_window() {
+#if defined(IWDG_WINR_WIN)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// How many codes the window watchdog's prescaler field holds: FOUR on
+/// this family (WDGTB is two bits, /1 to /8), read off the header's own
+/// mask rather than counted by hand.
+constexpr uint8_t wwdg_prescaler_codes() {
+    return static_cast<uint8_t>((WWDG_CFR_WDGTB_Msk >> WWDG_CFR_WDGTB_Pos) + 1u);
+}
+
+/// Whether this device has the window watchdog at all (every part of the
+/// pack does; the probe is the reserve's habit, not a doubt).
+constexpr bool wwdg_present() {
+#if defined(WWDG_BASE)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// The window watchdog's NVIC line - position 0 of the vector table on
+/// every part of this family, and its alone. An IRQn is an enumerator
+/// the preprocessor cannot probe, so the guard is the instance's
+/// base-address macro, as it is for the serial instances above.
+constexpr IRQn_Type wwdg_irq() {
+#if defined(WWDG_BASE)
+    return WWDG_IRQn;
+#else
+    return NonMaskableInt_IRQn;   // unreachable: callers check wwdg_present first
+#endif
+}
+
+// ---- EXTI and SYSCFG ----------------------------------------------------------
+//
+// WHAT DIFFERS ACROSS THE FAMILY HERE is which of the lines above 15
+// exist, and that is decided by WHICH PERIPHERAL IS WIRED TO EACH -
+// RM0090 12.2.5, RM0390 10.2.5, RM0383 10.2.5 list them line by line, and
+// the three lists differ exactly where the silicon differs. So the mask
+// below is built from the PERIPHERALS' base-address macros and not from a
+// per-part table: the Ethernet wake-up line exists where the device header
+// declares an Ethernet MAC, the USB OTG HS wake-up line where it declares
+// that controller, and so on. The device header corroborates it a second
+// way, which is worth knowing when reading the code: the wake-up VECTORS
+// (ETH_WKUP_IRQn, OTG_HS_WKUP_IRQn, OTG_FS_WKUP_IRQn) are declared on
+// exactly the same headers.
+//
+// The EXTI's own bit masks are NOT an authority for lines 16..22: the pack
+// spells EXTI_IMR_MR18, MR19 and MR20 on every header, including parts
+// with no USB and no Ethernet at all. Above 22 the header IS the only
+// authority, and it is used: EXTI_IMR_MR23 is declared on the parts that
+// have a 24th line and on no other.
+
+/// The sixteen GPIO lines - one per PIN NUMBER, on every part of the
+/// family (RM0090 12.2.5: the port is what SYSCFG_EXTICR selects).
+inline constexpr uint8_t exti_gpio_lines = 16;
+
+/// The SYSCFG_EXTICR code for GPIO port `letter` (0 for A, 1 for B, ...
+/// RM0090 9.2.3), 0xFF when this device has no such port. The encoding is
+/// contiguous over the eleven ports, so the letter's distance from 'A' IS
+/// the code; the presence check is the reserve's own port table.
+constexpr uint8_t exti_port_code(char letter) {
+    if (!gpio_port_present(letter)) {
+        return 0xFFu;
+    }
+    return static_cast<uint8_t>(letter - 'A');
+}
+
+/// Which EXTI lines this device implements, bit x = line x (RM0090
+/// 12.2.5 and its RM0390/RM0383 twins - see the note above for why the
+/// peripherals decide and not the EXTI's own bit macros).
+constexpr uint32_t exti_implemented_mask() {
+    uint32_t m = 0x0000FFFFu;   // the sixteen GPIO lines: every part
+    m |= 1UL << 16;             // PVD output - every part has the supply monitor
+    m |= 1UL << 17;             // RTC alarm
+#if defined(USB_OTG_FS_PERIPH_BASE)
+    m |= 1UL << 18;             // USB OTG FS wake-up
+#endif
+#if defined(ETH_BASE)
+    m |= 1UL << 19;             // Ethernet wake-up
+#endif
+#if defined(USB_OTG_HS_PERIPH_BASE)
+    m |= 1UL << 20;             // USB OTG HS (in FS mode) wake-up
+#endif
+    m |= 1UL << 21;             // RTC tamper and timestamp
+    m |= 1UL << 22;             // RTC wake-up
+#if defined(EXTI_IMR_MR23)
+    // A 24th line on the parts that declare it, and the header is the
+    // whole authority: what is wired there is the business of a reference
+    // manual this project has not read, so nothing here names it. The
+    // parts that declare it are exactly the parts with an LPTIM1
+    // (test/family_stm32f4/exti.cpp asserts that on every header).
+    m |= 1UL << 23;
+#endif
+    return m;
+}
+
+constexpr bool exti_line_implemented(uint8_t line) {
+    return line < 32u && (exti_implemented_mask() & (1UL << line)) != 0u;
+}
+
+/// The NVIC line an EXTI line interrupts on (RM0090 tables 62 and 63, one
+/// per part class): lines 0..4 one vector each, 5..9 and 10..15 grouped,
+/// and every line above 15 the vector of the peripheral wired to it. Only
+/// meaningful for an implemented line - callers ask
+/// exti_line_implemented() first - and NonMaskableInt_IRQn otherwise, the
+/// reserve's one unreachable value.
+constexpr IRQn_Type exti_line_irq(uint8_t line) {
+    switch (line) {
+        case 0: return EXTI0_IRQn;
+        case 1: return EXTI1_IRQn;
+        case 2: return EXTI2_IRQn;
+        case 3: return EXTI3_IRQn;
+        case 4: return EXTI4_IRQn;
+        case 5: case 6: case 7: case 8: case 9: return EXTI9_5_IRQn;
+        case 10: case 11: case 12: case 13: case 14: case 15: return EXTI15_10_IRQn;
+        case 16: return PVD_IRQn;
+        case 17: return RTC_Alarm_IRQn;
+#if defined(USB_OTG_FS_PERIPH_BASE)
+        case 18: return OTG_FS_WKUP_IRQn;
+#endif
+#if defined(ETH_BASE)
+        case 19: return ETH_WKUP_IRQn;
+#endif
+#if defined(USB_OTG_HS_PERIPH_BASE)
+        case 20: return OTG_HS_WKUP_IRQn;
+#endif
+        case 21: return TAMP_STAMP_IRQn;
+        case 22: return RTC_WKUP_IRQn;
+        default: return NonMaskableInt_IRQn;
+    }
+}
+
+/// The lines one vector answers for, as a mask - what a handler hands
+/// Exti::isr() so that it can neither consume nor be confused by another
+/// vector's pending bits. Zero for a vector that is not the EXTI's.
+constexpr uint32_t exti_vector_lines(IRQn_Type v) {
+    switch (v) {
+        case EXTI0_IRQn: return 1UL << 0;
+        case EXTI1_IRQn: return 1UL << 1;
+        case EXTI2_IRQn: return 1UL << 2;
+        case EXTI3_IRQn: return 1UL << 3;
+        case EXTI4_IRQn: return 1UL << 4;
+        case EXTI9_5_IRQn: return 0x000003E0UL;
+        case EXTI15_10_IRQn: return 0x0000FC00UL;
+        case PVD_IRQn: return 1UL << 16;
+        case RTC_Alarm_IRQn: return 1UL << 17;
+#if defined(USB_OTG_FS_PERIPH_BASE)
+        case OTG_FS_WKUP_IRQn: return 1UL << 18;
+#endif
+#if defined(ETH_BASE)
+        case ETH_WKUP_IRQn: return 1UL << 19;
+#endif
+#if defined(USB_OTG_HS_PERIPH_BASE)
+        case OTG_HS_WKUP_IRQn: return 1UL << 20;
+#endif
+        case TAMP_STAMP_IRQn: return 1UL << 21;
+        case RTC_WKUP_IRQn: return 1UL << 22;
+        default: return 0;
+    }
+}
+
+/// SYSCFG's enable bit in RCC_APB2ENR (RM0090 7.3.14): the gate that has
+/// to be open before the EXTI's GPIO multiplexer can be written at all.
+inline constexpr uint32_t syscfg_clock_mask = RCC_APB2ENR_SYSCFGEN;
+
+/// SYSCFG_PMC's Ethernet PHY interface select (RM0090 9.2.2), 0 on a part
+/// whose header does not declare the bit - which is every part with no
+/// Ethernet MAC, plus the F405/F415, whose header declares the MAC's PHY
+/// selector without the MAC.
+constexpr uint32_t syscfg_phy_select_mask() {
+#if defined(SYSCFG_PMC_MII_RMII_SEL)
+    return SYSCFG_PMC_MII_RMII_SEL;
+#else
+    return 0;
+#endif
+}
+
 } // namespace brio
