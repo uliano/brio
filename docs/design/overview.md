@@ -375,6 +375,7 @@ their timer, and an application picks one in its board file:
 | samc21 | `TcPwm`, `TcPwm8`, `TccPwm` (a caller-chosen max), `TccPairPwm` (the complementary pair with dead time) | - |
 | stm32g0 | `TimPwm`, `TimPairPwm` (the complementary pair, on the timers with a break and dead-time unit), `LptimPwm` (on a timer that keeps counting in Stop) | the timers refuse a dynamic clock: their periods are PCLK cycles and no rebase can keep them |
 | ch32v00x | `TimPwm<Tim, ch, top>`, `TimPairPwm<Tim, ch, top>` (the complementary pair: under TIM1's break unit as OCx/OCxN, or on TIM2 as channel ch with channel ch + 2 under DTCR, the dead time in each block's own unit) (`ch32v00x/tim.hpp`) | the G0's two names on the F1's timers; a TIM2 pair costs two channels where a TIM1 pair costs one; the timers take a static clock alone, as on the G0 |
+| stm32f4 | `TimPwm<Tim, ch, top>`, `TimPairPwm<Tim, ch, top>` (the complementary pair with dead time, on TIM1 and TIM8 alone) (`stm32f4/tim.hpp`) | the G0's two names on this family's timers; the dead time is counted in tDTS - the timer clock divided by CR1.CKD and NOT by the counter's prescaler - so a pair holds the same absolute dead time at every PWM frequency; the timers take a static clock alone, as on the G0, and what they count is HCLK or twice their APB clock (RCC_DCKCFGR's TIMPRE), never the bus rate |
 | host | none | - |
 
 ## Style rules

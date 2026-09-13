@@ -328,6 +328,30 @@ struct Rcc {
     static uint8_t apb2_divider() { return divider_of((RCC->CFGR & RCC_CFGR_PPRE2_Msk) >> RCC_CFGR_PPRE2_Pos); }
     static bool ahb_undivided() { return (RCC->CFGR & RCC_CFGR_HPRE_3) == 0u; }
 
+    // ---- RCC_DCKCFGR.TIMPRE (7.3.24) -----------------------------------------------
+    /// THE TIMERS' OWN PRESCALER RULE, and the one thing in this block
+    /// that is not the timers' chapter's: a timer counts HCLK when its APB
+    /// prescaler is 1, and TWICE its APB clock when it is divided - unless
+    /// this bit is set, and then it counts HCLK at a prescaler of 1 OR 2
+    /// and four times PCLK beyond. Clear out of reset, and absent
+    /// altogether on the F405/F407/F415/F417 headers, where the reader
+    /// answers false and the setter writes nothing. What the bit means for
+    /// a given instance is stm32f4/tim.hpp's `tim_clock_hz()`.
+    static void timpre(bool on) {
+#if defined(RCC_DCKCFGR_TIMPRE)
+        bit(RCC->DCKCFGR, RCC_DCKCFGR_TIMPRE, on);
+#else
+        (void)on;
+#endif
+    }
+    static bool timpre() {
+#if defined(RCC_DCKCFGR_TIMPRE)
+        return (RCC->DCKCFGR & RCC_DCKCFGR_TIMPRE) != 0u;
+#else
+        return false;
+#endif
+    }
+
     // ---- MCO (7.3.3): the two clock outputs -------------------------------------------
     /// MCO1 on PA8: 00 HSI, 01 LSE, 10 HSE, 11 PLL; the prescaler 1..5
     /// (codes 0xx = 1, 100..111 = 2..5). The pad is the caller's.

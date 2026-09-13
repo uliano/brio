@@ -945,4 +945,408 @@ constexpr bool usart_dma_placement_valid(uint8_t n, bool transmit, uint8_t contr
     return false;
 }
 
+// ---- timers -------------------------------------------------------------------
+//
+// WHAT THE HEADER CAN ANSWER AND WHAT IT CANNOT, and this chapter is where
+// the two halves are furthest apart:
+//  - WHICH TIMERS EXIST is the header's, three ways over: TIMn_BASE, the
+//    RCC enable/reset masks and the IRQn enumerators. The F42x/F43x, F446,
+//    F405 class, F412, F413/F423 and F469/F479 carry TIM1..TIM14; the
+//    F401 and F411 have TIM1..TIM5 and TIM9..TIM11 and no other; the F410
+//    has TIM1, TIM5, TIM6, TIM9 and TIM11 alone. Every one of those
+//    statements is a probe below and not a list.
+//  - WHAT A TIMER IS - counter width, how many channels, complementary
+//    outputs, a slave controller, a repetition counter, an external
+//    trigger, DMA - IS NOT IN THE DEVICE HEADER AT ALL. There is ONE
+//    TIM_TypeDef and every register is a member of it on every instance,
+//    so `TIM11->SMCR` compiles and writes a hole in the address map. Those
+//    facts are the REFERENCE MANUALS' (RM0090 ch. 17..20, RM0390 ch. 15..18,
+//    RM0383 ch. 12..14, each chapter's ".2 main features" and register
+//    map), they are the same on every part of the family, and they are
+//    spelled out below keyed by instance NUMBER and gated by the header's
+//    own presence probe. Every verb of stm32f4/tim.hpp that names a
+//    register an instance does not implement refuses instead of storing.
+//  - THE PAD MAP IS THE DATASHEET'S (DS10314 table 9, DS10693 table 11,
+//    the F429's table 12) and is not here at all, for the reason
+//    stm32f4/pin.hpp gives once for the whole stratum: no symbol of the
+//    device header carries it. A timer pad is a `PinSel` the caller
+//    writes and the bench is the only check there is.
+
+/// Register block base of TIMn (n = 1..14), 0 when the device has not got
+/// it. TIM1, TIM5, TIM9 and TIM11 are on every part of the pack.
+constexpr uint32_t tim_base(uint8_t n) {
+    switch (n) {
+#if defined(TIM1_BASE)
+        case 1: return TIM1_BASE;
+#endif
+#if defined(TIM2_BASE)
+        case 2: return TIM2_BASE;
+#endif
+#if defined(TIM3_BASE)
+        case 3: return TIM3_BASE;
+#endif
+#if defined(TIM4_BASE)
+        case 4: return TIM4_BASE;
+#endif
+#if defined(TIM5_BASE)
+        case 5: return TIM5_BASE;
+#endif
+#if defined(TIM6_BASE)
+        case 6: return TIM6_BASE;
+#endif
+#if defined(TIM7_BASE)
+        case 7: return TIM7_BASE;
+#endif
+#if defined(TIM8_BASE)
+        case 8: return TIM8_BASE;
+#endif
+#if defined(TIM9_BASE)
+        case 9: return TIM9_BASE;
+#endif
+#if defined(TIM10_BASE)
+        case 10: return TIM10_BASE;
+#endif
+#if defined(TIM11_BASE)
+        case 11: return TIM11_BASE;
+#endif
+#if defined(TIM12_BASE)
+        case 12: return TIM12_BASE;
+#endif
+#if defined(TIM13_BASE)
+        case 13: return TIM13_BASE;
+#endif
+#if defined(TIM14_BASE)
+        case 14: return TIM14_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool tim_present(uint8_t n) { return tim_base(n) != 0u; }
+
+/// Which APB carries TIMn, and its enable/reset bit in that bus's ENR and
+/// RSTR. TIM1, TIM8 and TIM9..TIM11 are the APB2 instances of this family;
+/// TIM2..TIM7 and TIM12..TIM14 sit on APB1 (RM0090 table 1). `enable_mask`
+/// 0 means "no such instance".
+struct TimBusClock {
+    bool apb2 = false;
+    uint32_t enable_mask = 0;
+    uint32_t reset_mask = 0;
+};
+
+constexpr TimBusClock tim_bus_clock(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APB2ENR_TIM1EN)
+        case 1: return {true, RCC_APB2ENR_TIM1EN, RCC_APB2RSTR_TIM1RST};
+#endif
+#if defined(RCC_APB1ENR_TIM2EN)
+        case 2: return {false, RCC_APB1ENR_TIM2EN, RCC_APB1RSTR_TIM2RST};
+#endif
+#if defined(RCC_APB1ENR_TIM3EN)
+        case 3: return {false, RCC_APB1ENR_TIM3EN, RCC_APB1RSTR_TIM3RST};
+#endif
+#if defined(RCC_APB1ENR_TIM4EN)
+        case 4: return {false, RCC_APB1ENR_TIM4EN, RCC_APB1RSTR_TIM4RST};
+#endif
+#if defined(RCC_APB1ENR_TIM5EN)
+        case 5: return {false, RCC_APB1ENR_TIM5EN, RCC_APB1RSTR_TIM5RST};
+#endif
+#if defined(RCC_APB1ENR_TIM6EN)
+        case 6: return {false, RCC_APB1ENR_TIM6EN, RCC_APB1RSTR_TIM6RST};
+#endif
+#if defined(RCC_APB1ENR_TIM7EN)
+        case 7: return {false, RCC_APB1ENR_TIM7EN, RCC_APB1RSTR_TIM7RST};
+#endif
+#if defined(RCC_APB2ENR_TIM8EN)
+        case 8: return {true, RCC_APB2ENR_TIM8EN, RCC_APB2RSTR_TIM8RST};
+#endif
+#if defined(RCC_APB2ENR_TIM9EN)
+        case 9: return {true, RCC_APB2ENR_TIM9EN, RCC_APB2RSTR_TIM9RST};
+#endif
+#if defined(RCC_APB2ENR_TIM10EN)
+        case 10: return {true, RCC_APB2ENR_TIM10EN, RCC_APB2RSTR_TIM10RST};
+#endif
+#if defined(RCC_APB2ENR_TIM11EN)
+        case 11: return {true, RCC_APB2ENR_TIM11EN, RCC_APB2RSTR_TIM11RST};
+#endif
+#if defined(RCC_APB1ENR_TIM12EN)
+        case 12: return {false, RCC_APB1ENR_TIM12EN, RCC_APB1RSTR_TIM12RST};
+#endif
+#if defined(RCC_APB1ENR_TIM13EN)
+        case 13: return {false, RCC_APB1ENR_TIM13EN, RCC_APB1RSTR_TIM13RST};
+#endif
+#if defined(RCC_APB1ENR_TIM14EN)
+        case 14: return {false, RCC_APB1ENR_TIM14EN, RCC_APB1RSTR_TIM14RST};
+#endif
+        default: return {};
+    }
+}
+
+/// Counter width in BITS: TIM2 and TIM5 are the family's two 32-bit
+/// counters, every other timer is 16-bit (RM0090 18.1). 0 for an instance
+/// this device has not got.
+constexpr uint8_t tim_counter_bits(uint8_t n) {
+    if (!tim_present(n)) {
+        return 0;
+    }
+    return (n == 2u || n == 5u) ? 32u : 16u;
+}
+
+/// The largest ARR / CNT / CCR this counter holds.
+constexpr uint32_t tim_max_period(uint8_t n) {
+    const uint8_t bits = tim_counter_bits(n);
+    return bits == 32u ? 0xFFFFFFFFUL : (bits == 16u ? 0xFFFFUL : 0UL);
+}
+
+/// Capture/compare channels: four on TIM1/TIM8 and TIM2..TIM5, two on
+/// TIM9/TIM12, one on TIM10/TIM11/TIM13/TIM14, none at all on the basic
+/// TIM6/TIM7 (each chapter's ".2 main features").
+constexpr uint8_t tim_channels(uint8_t n) {
+    if (!tim_present(n)) {
+        return 0;
+    }
+    switch (n) {
+        case 1: case 2: case 3: case 4: case 5: case 8: return 4;
+        case 9: case 12: return 2;
+        case 10: case 11: case 13: case 14: return 1;
+        default: return 0;   // TIM6, TIM7
+    }
+}
+
+/// Complementary outputs (CCxNE, and the OISxN idle levels): channels
+/// 1..3 of the two advanced-control timers and nowhere else (RM0090 17.2).
+constexpr uint8_t tim_complementary_channels(uint8_t n) {
+    if (!tim_present(n)) {
+        return 0;
+    }
+    return (n == 1u || n == 8u) ? 3u : 0u;
+}
+
+/// TIMx_SMCR - a slave controller at all. TIM10/TIM11/TIM13/TIM14 have no
+/// such register and the basic timers have none either.
+constexpr bool tim_has_slave_mode(uint8_t n) {
+    if (!tim_present(n)) {
+        return false;
+    }
+    switch (n) {
+        case 1: case 2: case 3: case 4: case 5: case 8: case 9: case 12: return true;
+        default: return false;
+    }
+}
+
+/// SMS's encoder codes 001..011, which are RESERVED on TIM9/TIM12
+/// (RM0383 14.4.2) - so only the four-channel timers count a quadrature
+/// pair.
+constexpr bool tim_has_encoder(uint8_t n) {
+    if (!tim_present(n)) {
+        return false;
+    }
+    switch (n) {
+        case 1: case 2: case 3: case 4: case 5: case 8: return true;
+        default: return false;
+    }
+}
+
+/// TIMx_CR2 and its MMS field - TRGO. TIM9..TIM14 have NO CR2 at all
+/// (their register maps jump from CR1 to SMCR), so they can drive no
+/// slave; the basic timers have one with MMS alone.
+constexpr bool tim_has_master_mode(uint8_t n) {
+    if (!tim_present(n)) {
+        return false;
+    }
+    switch (n) {
+        case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 8: return true;
+        default: return false;
+    }
+}
+
+/// TIMx_BDTR: the break input and the dead-time generator, the two
+/// advanced-control timers' alone.
+constexpr bool tim_has_break(uint8_t n) { return tim_complementary_channels(n) != 0u; }
+
+/// TIMx_RCR, the repetition counter - the same two.
+constexpr bool tim_has_repetition(uint8_t n) { return tim_has_break(n); }
+
+/// CR1.DIR and CR1.CMS: down-counting and centre-aligned counting, on the
+/// four-channel timers alone (TIM9..TIM14 count up, the basic timers too).
+constexpr bool tim_has_direction(uint8_t n) { return tim_has_encoder(n); }
+constexpr bool tim_has_center_aligned(uint8_t n) { return tim_has_encoder(n); }
+
+/// CR1.CKD, the tDTS divider the input filters and the dead-time generator
+/// are counted in: every timer with a channel, and not the basic pair.
+constexpr bool tim_has_clock_division(uint8_t n) {
+    return tim_present(n) && tim_channels(n) != 0u;
+}
+
+/// The ETR input and SMCR's ETF/ETPS/ECE/ETP half (external clock mode 2):
+/// the four-channel timers alone. CCMRx's OCxCE (clear the output on
+/// ocref_clr) is the same set, ocref_clr being ETRF.
+constexpr bool tim_has_external_trigger(uint8_t n) { return tim_has_encoder(n); }
+
+/// CR2.TI1S, the XOR of the first three channel inputs on TI1 (RM0090
+/// 17.3.17): the four-channel timers'.
+constexpr bool tim_has_ti1_xor(uint8_t n) { return tim_has_encoder(n); }
+
+/// DIER's UDE/TDE/CCxDE request enables. TIM9..TIM14 have no DMA of any
+/// kind (their DIER is four bits wide); the basic timers have UDE alone.
+constexpr bool tim_has_dma_request(uint8_t n) {
+    return tim_present(n) && n <= 8u;
+}
+
+/// TIMx_DCR and TIMx_DMAR, the burst engine that turns ONE request into a
+/// walk over consecutive registers: the four-channel timers'. The basic
+/// timers' register map stops at ARR.
+constexpr bool tim_has_dma_burst(uint8_t n) { return tim_has_encoder(n); }
+
+/// TIMx_OR, the option register - the input and trigger remaps that make
+/// this chapter measurable with no wire. Only TIM2 (ITR1_RMP), TIM5
+/// (TI4_RMP) and TIM11 (TI1_RMP) have one (RM0090 18.4.19, 18.4.20,
+/// 19.5.11).
+constexpr bool tim_has_option_register(uint8_t n) {
+    return tim_present(n) && (n == 2u || n == 5u || n == 11u);
+}
+
+/// Where that instance's field sits in TIMx_OR, 0xFF for an instance with
+/// no option register. The three positions are the header's own *_Pos
+/// macros, and the pack declares each only where the instance it belongs
+/// to exists - TIM_OR_ITR1_RMP_Pos is absent on exactly the three F410
+/// headers, which are exactly the parts with no TIM2.
+constexpr uint8_t tim_option_pos(uint8_t n) {
+    if (!tim_present(n)) {
+        return 0xFFu;
+    }
+    switch (n) {
+#if defined(TIM_OR_ITR1_RMP_Pos)
+        case 2: return TIM_OR_ITR1_RMP_Pos;
+#endif
+#if defined(TIM_OR_TI4_RMP_Pos)
+        case 5: return TIM_OR_TI4_RMP_Pos;
+#endif
+#if defined(TIM_OR_TI1_RMP_Pos)
+        case 11: return TIM_OR_TI1_RMP_Pos;
+#endif
+        default: return 0xFFu;
+    }
+}
+
+/// THE VECTORS. On this family the two advanced-control timers have FOUR
+/// lines each - break, update, trigger/commutation, capture/compare - and
+/// three of the four are SHARED with a small general-purpose timer
+/// (TIM1_BRK_TIM9, TIM1_UP_TIM10, TIM1_TRG_COM_TIM11 and the TIM8 twins
+/// with TIM12, TIM13, TIM14). Every other timer reports everything on one
+/// line of its own, except TIM6, which shares with the DAC where there is
+/// one. IRQn values are enumerators the preprocessor cannot probe, so each
+/// name is DERIVED FROM THE PRESENCE of what shares it, exactly as
+/// usart_irq() and exti_line_irq() are.
+///
+/// tim_irq() is where the UPDATE event arrives, which is the line a timer
+/// with one vector answers everything on. NonMaskableInt_IRQn for a timer
+/// the device has not got - unreachable, Tim<n> refusing it first.
+constexpr IRQn_Type tim_irq(uint8_t n) {
+    switch (n) {
+        case 1:
+#if defined(TIM10_BASE)
+            return TIM1_UP_TIM10_IRQn;
+#else
+            return TIM1_UP_IRQn;
+#endif
+#if defined(TIM2_BASE)
+        case 2: return TIM2_IRQn;
+#endif
+#if defined(TIM3_BASE)
+        case 3: return TIM3_IRQn;
+#endif
+#if defined(TIM4_BASE)
+        case 4: return TIM4_IRQn;
+#endif
+#if defined(TIM5_BASE)
+        case 5: return TIM5_IRQn;
+#endif
+#if defined(TIM6_BASE) && defined(DAC_BASE)
+        case 6: return TIM6_DAC_IRQn;
+#elif defined(TIM6_BASE)
+        case 6: return TIM6_IRQn;
+#endif
+#if defined(TIM7_BASE)
+        case 7: return TIM7_IRQn;
+#endif
+#if defined(TIM8_BASE)
+        case 8: return TIM8_UP_TIM13_IRQn;
+#endif
+#if defined(TIM9_BASE)
+        case 9: return TIM1_BRK_TIM9_IRQn;
+#endif
+#if defined(TIM10_BASE)
+        case 10: return TIM1_UP_TIM10_IRQn;
+#endif
+#if defined(TIM11_BASE)
+        case 11: return TIM1_TRG_COM_TIM11_IRQn;
+#endif
+#if defined(TIM12_BASE)
+        case 12: return TIM8_BRK_TIM12_IRQn;
+#endif
+#if defined(TIM13_BASE)
+        case 13: return TIM8_UP_TIM13_IRQn;
+#endif
+#if defined(TIM14_BASE)
+        case 14: return TIM8_TRG_COM_TIM14_IRQn;
+#endif
+        default: return NonMaskableInt_IRQn;
+    }
+}
+
+/// The capture/compare line: its own on the advanced-control timers,
+/// tim_irq() everywhere else - which is what lets a handler bind both
+/// without asking whether they are two.
+constexpr IRQn_Type tim_cc_irq(uint8_t n) {
+    switch (n) {
+        case 1: return TIM1_CC_IRQn;
+#if defined(TIM8_BASE)
+        case 8: return TIM8_CC_IRQn;
+#endif
+        default: return tim_irq(n);
+    }
+}
+
+/// The break line, and the trigger/commutation line: the same two timers'
+/// third and fourth vectors.
+constexpr IRQn_Type tim_break_irq(uint8_t n) {
+    switch (n) {
+        case 1: return TIM1_BRK_TIM9_IRQn;
+#if defined(TIM8_BASE)
+        case 8: return TIM8_BRK_TIM12_IRQn;
+#endif
+        default: return tim_irq(n);
+    }
+}
+
+constexpr IRQn_Type tim_trigger_irq(uint8_t n) {
+    switch (n) {
+        case 1: return TIM1_TRG_COM_TIM11_IRQn;
+#if defined(TIM8_BASE)
+        case 8: return TIM8_TRG_COM_TIM14_IRQn;
+#endif
+        default: return tim_irq(n);
+    }
+}
+
+/// Are this timer's four event groups spread over four DIFFERENT vectors?
+/// True for the advanced-control pair alone.
+constexpr bool tim_has_split_vectors(uint8_t n) {
+    return tim_present(n) && (n == 1u || n == 8u);
+}
+
+/// Whether RCC_DCKCFGR carries TIMPRE, the bit that decides whether a
+/// timer on a divided APB runs at twice or four times its bus clock
+/// (RM0383 6.3.24, RM0090 7.3.24). The F405/F407/F415/F417 headers declare
+/// no such bit - that class's timers are always at twice - and every other
+/// header of the pack does.
+constexpr bool rcc_has_timpre() {
+#if defined(RCC_DCKCFGR_TIMPRE)
+    return true;
+#else
+    return false;
+#endif
+}
+
 } // namespace brio

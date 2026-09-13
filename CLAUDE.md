@@ -311,7 +311,7 @@ gets its home in `docs/design/` when taken.
   ALONE - no FlashMedia here: the family's uneven sectors sit low in the
   bank where the vector table lives, so a fixed NV zone would partition
   every image's linker script, and the NV stack is deferred to its own
-  review, below -, the timers, ADC/DAC, PWR's
+  review, below -, ADC/DAC, PWR's
   Stop modes with a dynamic clock's way down, SPI/I2S, I2C, the
   DWC2 OTG FS controller for util/usb - both OTG connectors are cabled
   -, and on the F429 alone FMC + LTDC + DMA2D, the memory-mapped display
@@ -1391,6 +1391,24 @@ brio/                    the framework, four strata:
                            registers, and three ISR bodies that clear their own
                            EXTI line through exti.hpp and loop over the standing
                            flags - 2.8.3's workaround)
+    tim.hpp                the timers (ch. 17..20): Tim<n> over one TIMx block
+                           whose GEOMETRY is the manual's and not the header's
+                           (two 32-bit counters, the break unit and RCR on the
+                           advanced pair alone, TIM9/TIM12 slaving with no
+                           encoder and no ETR, TIM9..TIM14 with no CR2 and so
+                           no TRGO, TIM6/TIM7 with no channel) - the time base
+                           with its two shadow registers, the channels in both
+                           faces (CCyS writable only with the channel off), the
+                           slave controller and the master TRGO, the internal
+                           trigger table with the TIM8 entries derived from
+                           presence, the option registers of TIM2/TIM5/TIM11
+                           that reach the LSE, the LSI, the RTC wake-up and
+                           HSE_RTC with no pad, the break and dead time, the
+                           DMA burst engine, the rc_w0 flags and FOUR vectors
+                           on TIM1/TIM8 three of which are shared + TimPad and
+                           the nine tasks (TimPwm, TimPairPwm, TimPeriodMeter,
+                           TimIntervalMeter, TimEventCounter, TimGatedCounter,
+                           TimPeriodicTick, TimOnePulse, TimEncoder)
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)
