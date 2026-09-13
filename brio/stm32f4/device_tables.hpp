@@ -596,4 +596,100 @@ constexpr uint32_t syscfg_phy_select_mask() {
 #endif
 }
 
+// ---- RTC and the backup domain ------------------------------------------------
+
+/// How many RTC_BKPxR words this part has, read off the DEVICE HEADER's
+/// own register block: the backup registers are the tail of RTC_TypeDef,
+/// so the struct's size minus where they start IS their count. Twenty
+/// (80 bytes) on every header of the pack, and derived rather than
+/// written down so a variant with fewer describes itself.
+constexpr uint8_t rtc_backup_registers() {
+    return static_cast<uint8_t>((sizeof(RTC_TypeDef) - offsetof(RTC_TypeDef, BKP0R)) /
+                                sizeof(uint32_t));
+}
+
+/// Whether RCC_BDCR carries LSEMOD, the LSE's high-drive bit - the F410,
+/// F411, F412, F413/F423, F446 and F469/F479 headers declare it, the
+/// F401, F405 class and F42x/F43x do not.
+constexpr bool rtc_has_lse_mode() {
+#if defined(RCC_BDCR_LSEMOD)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/**
+ * The RTC's additional-function facts - AND THE DEVICE HEADER CANNOT BE
+ * ASKED FOR THEM, which is why they are keyed on the device-select define
+ * like the frequency ladders above.
+ *
+ * ST's headers declare ONE set of RTC bit masks for the whole family:
+ * RTC_TAFCR_TAMP2E, RTC_TAFCR_TAMP2TRG and RTC_ISR_TAMP2F are defined on
+ * every part, the F411 included, where RM0383 17.3.13 says "one tamper
+ * detection input is available" and 17.6.17 leaves TSINSEL's and
+ * TAMP1INSEL's 1 Reserved. So the count is the reference manual's:
+ * two inputs with a second RTC pad on the F405 class and the F42x/F43x
+ * (RM0090 8.3.15: RTC_AF1 = PC13, RTC_AF2 = PI8) and on the F446
+ * (RM0390 7.3.15: RTC_AF2 = PA0), one on the F411 (RM0383 17.2).
+ *
+ * A part class whose manual is not on the desk gets `known == false` and
+ * the ONE input every manual read documents (RTC_AF1); the second, and
+ * the pad selects that reach RTC_AF2, are refused there rather than
+ * guessed - a tamper detection erases the backup registers, so an armed
+ * input that does not exist is a silent hole and an armed input that
+ * does is a wiped breadcrumb.
+ */
+struct RtcPadFacts {
+    bool known = false;
+    uint8_t tamper_inputs = 1;   ///< TAMPER1 on RTC_AF1 everywhere; 2 where AF2 exists
+    bool has_af2 = false;        ///< the second RTC pad, TSINSEL/TAMP1INSEL's 1
+    char af2_port = 0;           ///< 'I' on the F42x/F43x (PI8), 'A' on the F446 (PA0)
+    uint8_t af2_pin = 0;
+};
+
+constexpr RtcPadFacts rtc_pad_facts() {
+    RtcPadFacts f{};
+#if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx) || \
+    defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx)
+    f.known = true;
+    f.tamper_inputs = 2;
+    f.has_af2 = true;
+    f.af2_port = 'I';
+    f.af2_pin = 8;
+#elif defined(STM32F446xx)
+    f.known = true;
+    f.tamper_inputs = 2;
+    f.has_af2 = true;
+    f.af2_port = 'A';
+    f.af2_pin = 0;
+#elif defined(STM32F411xE)
+    f.known = true;
+    f.tamper_inputs = 1;
+#endif
+    return f;
+}
+
+/// RTC_AF1, the pad every manual read puts the tamper, the timestamp and
+/// RTC_OUT on: PC13 on the F405 class, the F42x/F43x, the F446 and the
+/// F411 alike (RM0090 8.3.15, RM0390 7.3.15, RM0383 figure 159's note).
+inline constexpr char rtc_af1_port = 'C';
+inline constexpr uint8_t rtc_af1_pin = 13;
+
+/// The three EXTI lines this peripheral's interrupts reach the NVIC
+/// through, and they are CONFIGURABLE lines here (unlike the STM32G0's
+/// direct ones): the rising edge must be selected, the mask opened and
+/// the pending bit cleared in the handler. RM0383 10.2.5, RM0090 12.2.5
+/// and RM0390 11.2.5 agree line for line.
+inline constexpr uint8_t rtc_alarm_exti_line = 17;
+inline constexpr uint8_t rtc_tamper_stamp_exti_line = 21;
+inline constexpr uint8_t rtc_wakeup_exti_line = 22;
+
+/// The three vectors. Every header of the pack declares all three, so
+/// these need no presence guard - what differs across the family is what
+/// is BEHIND them, not whether they exist.
+constexpr IRQn_Type rtc_alarm_irq() { return RTC_Alarm_IRQn; }
+constexpr IRQn_Type rtc_wakeup_irq() { return RTC_WKUP_IRQn; }
+constexpr IRQn_Type rtc_tamper_stamp_irq() { return TAMP_STAMP_IRQn; }
+
 } // namespace brio

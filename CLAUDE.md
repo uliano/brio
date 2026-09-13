@@ -1291,7 +1291,11 @@ brio/                    the framework, four strata:
                            define - known for the F405, F42x/F43x, F446 and
                            F411 classes, refused elsewhere; the watchdogs'
                            and the EXTI's per-part facts (implemented lines,
-                           port codes, per-line vectors) appended by chapter
+                           port codes, per-line vectors) appended by chapter;
+                           the backup-register count read off RTC_TypeDef
+                           itself and the RTC's pad facts keyed on the part
+                           class (ST declares TAMP2E on every header, so the
+                           count of tamper inputs is the manual's)
     nvic.hpp / ticker.hpp / delay.hpp  the device header + the cortexm/ file:
                            PRIMASK the one mask on a core that has BASEPRI,
                            SysTick at 1000 Hz, delay_us on VAL
@@ -1348,6 +1352,20 @@ brio/                    the framework, four strata:
                            control, DMA requests, every flag) + Uart<n, pins,
                            ...> task with the other strata's surface, the
                            divisor from the instance's own APB clock
+    rtc.hpp                RTC + the backup domain (ch. 17): RtcDomain (PWR_CR's
+                           DBP with the manual's read back, the whole of RCC_BDCR
+                           - LSE, its bypass and drive, RTCSEL one-way with BDRST
+                           the way back, RTCEN -, RCC_CFGR's RTCPRE; the LSI
+                           stays Rcc's) + Rtc (the keys, initialization mode with
+                           ES0287 2.8.4's workaround on every exit, the BCD
+                           calendar read under 2.8.2's re-read, both alarms with
+                           their sub-second match, the wake-up timer, the smooth
+                           and coarse calibrators and the interlock between them,
+                           the shift, the timestamp, one or two tamper inputs, the
+                           RTC_OUT pad all of them share, the twenty backup
+                           registers, and three ISR bodies that clear their own
+                           EXTI line through exti.hpp and loop over the standing
+                           flags - 2.8.3's workaround)
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)

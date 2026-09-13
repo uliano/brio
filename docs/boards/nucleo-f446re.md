@@ -10,7 +10,8 @@ manual UM1724.
   ST-LINK's **8 MHz MCO into HSE in bypass** (SB16 and SB50 fitted, the
   board's default from revision C-02) through the PLL to **180 MHz in
   over-drive**, PCLK1 45 MHz, PCLK2 90 MHz. No HSE crystal is fitted
-  (X3 not provided); no LSE crystal either (X2 not provided).
+  (X3 not provided); the LSE crystal X2 IS fitted and runs (32769.3 Hz,
+  +40 ppm against the core clock, ready 280 ms after LSEON - measured).
 - **Supply**: 3.3 V (the target rail reads about 3.26 V).
 - **LED** LD2 on PA5; **button** B1 on PC13.
 - **Console**: the on-board ST-LINK's virtual COM port on USART2, PA2
