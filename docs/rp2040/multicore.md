@@ -139,6 +139,13 @@ events), every fact about core 1 carried by an event that crossed:
   the other platform's record), a halted core 1 answers nothing,
   `Core1::reset()` puts it back into the bootrom and a new launch
   brings it back answering.
+- TWO KERNELS, TWO CONSOLES: a program with the console's three
+  active objects on core 0 over UART0 and the same two on core 1 over
+  UART1, each on a Debug Probe's bridge, answers HELP, UPTIME (each
+  core's own ticker), ERR and CORE on both with every counter at
+  zero; the LED command typed on core 1 is a send across the bridge
+  to core 0's Blinker, and the pin follows it (read through the
+  debugger after ON, OFF and TOG).
 - THE PROBE TRAP. OpenOCD's target script takes both cores as an SMP
   pair by default: programming halts both, and core 1 is left with
   C_DEBUGEN set and, once, halted (DHCSR 0x00030003 read back) - a
@@ -158,10 +165,6 @@ events), every fact about core 1 carried by an event that crossed:
 
 Driver gaps, each with its reason:
 
-- A console on core 1 (UART1 on the second probe's bridge): the pins
-  are the serial suite's cross link today; a wire change when a
-  program wants core 1 to speak for itself, the bridge carries its
-  facts meanwhile.
 - The SIO spinlocks, dividers and interpolators: nothing in the model
   wants a lock, and the rest waits for a program.
 - Per-core GPIO interrupts (IO_BANK0's PROC0/PROC1 enables) and the
@@ -177,8 +180,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- Two kernels each with a console: the wire change above and a
-  `brio duo` of the two consoles.
 - A `Lease::reply` buffer crossing inside a request and back inside
   the reply: a letter with a buffer-carrying request; the fences are
   the inbox's and the host test covers the capsule.

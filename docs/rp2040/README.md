@@ -2,12 +2,13 @@
 
 The operational page for brio's RP2040 target: Raspberry Pi's chip
 with two ARM Cortex-M0+ cores, an ARMv6-M family that shares the
-`armv6m/` core stratum with the SAM C21 and the STM32G0. brio runs
-on core 0 today - one kernel, one SysTick, the other core asleep in
-the bootrom - and the second core, the design point the stratum was
-opened for, runs a kernel of its own (design/kernel.md section 12,
-[multicore.md](multicore.md)): two kernels, one per core, and the
-inbox bridge between them. `kernel/` and `util/` compile here as
+`armv6m/` core stratum with the SAM C21 and the STM32G0. A
+single-core program runs on core 0 - one kernel, one SysTick, the
+other core asleep in the bootrom - and the second core, the design
+point the stratum was opened for, runs a kernel of its own
+(design/kernel.md section 12, [multicore.md](multicore.md)): two
+kernels, one per core, the inbox bridge between them, a console for
+each when a second bridge is wired. `kernel/` and `util/` compile here as
 written (`test/family_rp2040/util_all.cpp` is the whole of both over
 the platform).
 
@@ -182,7 +183,9 @@ The Debug Probe's UART bridge is the console: its port U, crossed
 onto GP0 (TX) / GP1 (RX) = UART0 under function 2, enumerates as a
 CDC port under the probe's own USB serial, so the console is
 addressed by `/dev/serial/by-id` and never moves with the socket.
-Console apps run 115200 8N1. Measured: the divisor at 125 MHz is
+A second bridge crossed onto GP4 (TX) / GP5 (RX) = UART1 is the
+console of a kernel on core 1, the same way. Console apps run 115200
+8N1. Measured: the divisor at 125 MHz is
 67 + 52/64 (the datasheet's own example, 115207 baud), the console's
 banner, echo and command replies pass in both directions with the
 frame, parity, break and overrun counters at zero, and the kernel's

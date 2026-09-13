@@ -110,7 +110,7 @@ QingKe V2C, RV32EC, bench chip CH32V006K8U6 - NO vendor header, the
 register map is the stratum's own device.hpp), `rp2040/` (everything
 that knows the RP2040: Raspberry Pi's dual Cortex-M0+, bench chip an
 RP2040 B2 on a Raspberry Pi Pico and on a WeAct board, the pico-sdk's CMSIS header and register
-definitions vendored, brio on core 0 today), `host/` (the native test
+definitions vendored, a kernel per core), `host/` (the native test
 target). Includes carry the stratum prefix
 (`#include "avrdx/usart.hpp"`). The builds are six sibling CMake
 projects, PEERS - the repo root is not a CMake project: `avrdx/`,
@@ -288,25 +288,23 @@ gets its home in `docs/design/` when taken.
   its suites are shaped by the smallest-chip rule (design/overview.md,
   "A suite's image fits the family's smallest chip"). A `qingke/` core
   stratum only at a second QingKe family.
-- **The RP2040 stratum, in bring-up.** `brio/rp2040/` and `rp2040/`
-  exist (`in bring-up` in README.md's table): the pico-sdk's device
-  description vendored, the boot stage checked in as bytes, its own
-  crt with the SDK's handler names, the platform, the reset
-  controller, the clock (crystal x PLL at 125 MHz), GPIO and the PL011
-  UART with their documents and the family fixture; the pin-check
-  wave runs on a WeAct board through the Raspberry Pi Debug Probe and
-  an OpenOCD built from git (the release does not know the board's
-  Zetta flash). The bring-up suites (platform, clock, serial) and the
-  timer, watchdog and reset drivers are green on the Pico and the
-  WeAct board, and THE SECOND CORE RUNS A KERNEL OF ITS OWN: one
-  platform type per core, util/inbox.hpp's bridge, the launch through
-  the bootrom's protocol - design/kernel.md section 12 and
-  docs/rp2040/multicore.md, measured by test_rp2040_multicore. What
-  remains: a console on core 1, the Pico H as the reference board,
-  the `supported` call (every chapter is written and measured on both
-  boards - the DMA, the SPI, the I2C, the PWM, the ADC, the RTC, the
-  PIO, the flash with the heap and the journal at the top of the QSPI
-  chip, the power chapter with its SLEEP state and DORMANT).
+- **The RP2040 stratum.** `brio/rp2040/` and `rp2040/` are
+  `supported` on the RP2040 (README.md's table) on a Raspberry Pi
+  Pico and a WeAct board: every chapter of the datasheet's plan has
+  its document and its suite green on both boards - the platform, the
+  clock, the PL011 UART, the timer, the watchdog and the resets, the
+  DMA, the SPI, the I2C, the PWM, the ADC, the RTC, the PIO, the
+  flash with the heap and the journal at the top of the QSPI chip,
+  the power chapter with the SLEEP state and DORMANT - and THE SECOND
+  CORE RUNS A KERNEL OF ITS OWN: one platform type per core,
+  util/inbox.hpp's bridge, the launch through the bootrom's protocol,
+  a console per core over two probe bridges (design/kernel.md section
+  12, docs/rp2040/multicore.md). The pico-sdk's device description is
+  vendored, the boot stage checked in as bytes, the crt its own; the
+  WeAct board's Zetta flash wants the OpenOCD built from git. What
+  remains is in the documents' gap lists (a power vote across the
+  cores, the bus fabric's counters, the USB controller with the
+  device stack of the roadmap).
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
