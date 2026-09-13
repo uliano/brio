@@ -2403,4 +2403,256 @@ constexpr uint32_t pwr_backup_sram_clock_mask() {
 #endif
 }
 
+// ---- I2C ----------------------------------------------------------------------
+//
+// WHAT THE HEADER ANSWERS AND WHAT IT DOES NOT, for RM0090 ch. 27 (RM0390
+// ch. 24, RM0383 ch. 18):
+//  - WHICH INSTANCES EXIST, their gate and their TWO vectors: the header,
+//    three ways over (I2Cn_BASE, RCC_APB1ENR_I2CnEN, I2Cn_EV_IRQn /
+//    I2Cn_ER_IRQn). I2C1 and I2C2 are on every part of the pack; I2C3 is
+//    absent on the F410 alone.
+//  - WHICH BUS: APB1, on every instance of every part - and the question
+//    is put to the enable bit's own register rather than written down as
+//    a rule, exactly as spi_on_apb2() puts it.
+//  - WHETHER THE NOISE FILTER REGISTER IS THERE: the header again, and it
+//    is the one place this chapter varies. I2C_FLTR at offset 0x24 is
+//    absent from the I2C_TypeDef of the F405 class (F405/F415/F407/F417)
+//    - RM0090 27.3.5 gives the digital filter to the F42xxx and F43xxx
+//    alone - and present on every other part of the pack. The STRUCT
+//    FIELD is what a driver would touch and the BIT DEFINITIONS come and
+//    go with it, so the presence question is put to I2C_FLTR_ANOFF, a
+//    symbol the preprocessor can probe.
+//  - WHERE THE DMA REQUESTS SIT: the request mapping tables, keyed per
+//    part class as every other chapter's slice of them is.
+
+constexpr uint32_t i2c_base(uint8_t n) {
+    switch (n) {
+#if defined(I2C1_BASE)
+        case 1: return I2C1_BASE;
+#endif
+#if defined(I2C2_BASE)
+        case 2: return I2C2_BASE;
+#endif
+#if defined(I2C3_BASE)
+        case 3: return I2C3_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool i2c_present(uint8_t n) { return i2c_base(n) != 0u; }
+
+/// Asked of the enable bit's own register: no part of this family puts an
+/// I2C on APB2, and this answers false everywhere rather than saying so
+/// twice.
+constexpr bool i2c_on_apb2(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APB2ENR_I2C1EN)
+        case 1: return true;
+#endif
+#if defined(RCC_APB2ENR_I2C2EN)
+        case 2: return true;
+#endif
+#if defined(RCC_APB2ENR_I2C3EN)
+        case 3: return true;
+#endif
+        default: return false;
+    }
+}
+
+/// The instance's enable bit; the same position resets it in RCC_APB1RSTR.
+constexpr uint32_t i2c_clock_mask(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APB1ENR_I2C1EN)
+        case 1: return RCC_APB1ENR_I2C1EN;
+#endif
+#if defined(RCC_APB1ENR_I2C2EN)
+        case 2: return RCC_APB1ENR_I2C2EN;
+#endif
+#if defined(RCC_APB1ENR_I2C3EN)
+        case 3: return RCC_APB1ENR_I2C3EN;
+#endif
+        default: return 0;
+    }
+}
+
+/// TWO VECTORS PER INSTANCE (27.4): the events on one, the errors on the
+/// other. An IRQn is an enumerator the preprocessor cannot probe, so each
+/// is guarded by its instance's base macro.
+constexpr IRQn_Type i2c_event_irq(uint8_t n) {
+    switch (n) {
+#if defined(I2C1_BASE)
+        case 1: return I2C1_EV_IRQn;
+#endif
+#if defined(I2C2_BASE)
+        case 2: return I2C2_EV_IRQn;
+#endif
+#if defined(I2C3_BASE)
+        case 3: return I2C3_EV_IRQn;
+#endif
+        default: return NonMaskableInt_IRQn;
+    }
+}
+
+constexpr IRQn_Type i2c_error_irq(uint8_t n) {
+    switch (n) {
+#if defined(I2C1_BASE)
+        case 1: return I2C1_ER_IRQn;
+#endif
+#if defined(I2C2_BASE)
+        case 2: return I2C2_ER_IRQn;
+#endif
+#if defined(I2C3_BASE)
+        case 3: return I2C3_ER_IRQn;
+#endif
+        default: return NonMaskableInt_IRQn;
+    }
+}
+
+/// Whether I2C_FLTR's two fields exist on this part - the analog filter's
+/// off switch and the digital filter's length.
+constexpr bool i2c_has_filter() {
+#if defined(I2C_FLTR_ANOFF)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/**
+ * The I2C slice of the DMA request mapping (RM0090 table 43, RM0390 table
+ * 28, RM0383 table 27) - every cell is on DMA1, this block having no
+ * request on the other controller. Keyed per part class like every other
+ * chapter's slice, and the three classes DISAGREE:
+ *  - the F405 class and the F42x/F43x have one cell for I2C3_RX;
+ *  - the F446 adds a second (DMA1 stream 1, channel 1);
+ *  - the F411 has that one too, AND a third cell for I2C1_TX (stream 1,
+ *    channel 0) and a second for I2C3_TX (stream 5, channel 6).
+ */
+constexpr DmaPlacements i2c_dma_placements(uint8_t n, bool transmit) {
+    DmaPlacements p{};
+#if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || \
+    defined(STM32F417xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
+    defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx) || \
+    defined(STM32F411xE)
+    p.known = true;
+    if (!i2c_present(n)) {
+        return p;   // the class's table is read, this part has no such instance
+    }
+    switch (n) {
+        case 1:
+            if (transmit) {
+                p.count = 2;
+                p.at[0] = {1, 6, 1};
+                p.at[1] = {1, 7, 1};
+#if defined(STM32F411xE)
+                // RM0383 table 27, channel 0 stream 1 - the F411's alone.
+                p.count = 3;
+                p.at[2] = {1, 1, 0};
+#endif
+            } else {
+                p.count = 2;
+                p.at[0] = {1, 0, 1};
+                p.at[1] = {1, 5, 1};
+            }
+            break;
+        case 2:
+            if (transmit) {
+                p.count = 1;
+                p.at[0] = {1, 7, 7};
+            } else {
+                p.count = 2;
+                p.at[0] = {1, 2, 7};
+                p.at[1] = {1, 3, 7};
+            }
+            break;
+        case 3:
+            if (transmit) {
+                p.count = 1;
+                p.at[0] = {1, 4, 3};
+#if defined(STM32F411xE)
+                // RM0383 table 27, channel 6 stream 5.
+                p.count = 2;
+                p.at[1] = {1, 5, 6};
+#endif
+            } else {
+                p.count = 1;
+                p.at[0] = {1, 2, 3};
+#if defined(STM32F446xx) || defined(STM32F411xE)
+                // RM0390 table 28 and RM0383 table 27, channel 1 stream 1.
+                p.count = 2;
+                p.at[1] = {1, 1, 1};
+#endif
+            }
+            break;
+        default: break;
+    }
+#else
+    (void)n;
+    (void)transmit;
+#endif
+    return p;
+}
+
+/// Whether (controller, stream, channel) is a cell instance `n`'s request
+/// is wired to. False on a part whose table was not read, and false for an
+/// instance the read table has no row for - both refusals, never a guess.
+constexpr bool i2c_dma_placement_valid(uint8_t n, bool transmit, uint8_t controller,
+                                       uint8_t stream, uint8_t channel) {
+    const DmaPlacements p = i2c_dma_placements(n, transmit);
+    if (!p.known) {
+        return false;
+    }
+    for (uint8_t i = 0; i < p.count; ++i) {
+        if (p.at[i].controller == controller && p.at[i].stream == stream &&
+            p.at[i].channel == channel) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * FMPI2C1 - FACTS ONLY, AND NO DRIVER. The Fast-mode Plus I2C some parts
+ * of this family carry (the F410, F412, F413/F423 and F446) is NOT this
+ * chapter's block wearing another name: it is the register file of the
+ * STM32G0's I2C - one TIMINGR word, ISR/ICR, a byte counter, autoend -
+ * so it is another chapter, and stm32f4/i2c.hpp does not touch it. What
+ * is published here is what the header knows, so that a program can see
+ * the instance exists and a document can say what is missing.
+ */
+constexpr uint32_t fmpi2c_base() {
+#if defined(FMPI2C1_BASE)
+    return FMPI2C1_BASE;
+#else
+    return 0u;
+#endif
+}
+
+constexpr bool fmpi2c_present() { return fmpi2c_base() != 0u; }
+
+constexpr uint32_t fmpi2c_clock_mask() {
+#if defined(RCC_APB1ENR_FMPI2C1EN)
+    return RCC_APB1ENR_FMPI2C1EN;
+#else
+    return 0u;
+#endif
+}
+
+constexpr IRQn_Type fmpi2c_event_irq() {
+#if defined(FMPI2C1_BASE)
+    return FMPI2C1_EV_IRQn;
+#else
+    return NonMaskableInt_IRQn;
+#endif
+}
+
+constexpr IRQn_Type fmpi2c_error_irq() {
+#if defined(FMPI2C1_BASE)
+    return FMPI2C1_ER_IRQn;
+#else
+    return NonMaskableInt_IRQn;
+#endif
+}
+
 } // namespace brio

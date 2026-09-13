@@ -311,7 +311,8 @@ gets its home in `docs/design/` when taken.
   ALONE - no FlashMedia here: the family's uneven sectors sit low in the
   bank where the vector table lives, so a fixed NV zone would partition
   every image's linker script, and the NV stack is deferred to its own
-  review, below -, I2C, and on the F429 alone FMC + LTDC + DMA2D, the
+  review, below -, the FMPI2C1 of the F410/F412/F413/F446 as a chapter
+  of its own, and on the F429 alone FMC + LTDC + DMA2D, the
   memory-mapped display tier); the frequency ladders of the five part classes whose manuals
   are not on the desk; the debuggers (cortex-debug entries written,
   not driven). Tenuto only, the equal-priority
@@ -1470,6 +1471,22 @@ brio/                    the framework, four strata:
                            engines on the request mapping's own cells,
                            sck_speed() because 2.12.4 makes the SCK pad's slew
                            class a correctness parameter) + SpiClient<n, pins>
+    i2c.hpp                I2C (ch. 27): I2c<n> the resource over the whole
+                           chapter - the F1 lineage's event machine, the
+                           clock arithmetic in THREE registers (FREQ, CCR
+                           under F/S and DUTY, TRISE from the wire's rise
+                           time), the two noise filters where the part has
+                           them, 7- and 10-bit own addresses with the dual
+                           address and the general call, SMBus and PEC, the
+                           DMA requests with LAST, every flag with the
+                           SEQUENCE that clears it, TWO vectors - +
+                           I2cHost<n, pins, TxEngine, RxEngine> with the
+                           other strata's Request VERBATIM (the receive
+                           procedure by count, a BUS ERROR counted and never
+                           acted on per ES0206 2.10.1, recover() the SWRST
+                           2.10.3 prescribes, the pads handed over BEFORE
+                           that reset because BUSY watches the peripheral's
+                           own inputs) + I2cClient<n, pins>
     usb.hpp                USB OTG in DEVICE MODE (ch. 22 / 31 / 34-35):
                            UsbOtg<core> - ONE template over the two DWC2
                            cores this family may carry (UsbFs on PA11/PA12,

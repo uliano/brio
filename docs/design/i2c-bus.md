@@ -59,15 +59,17 @@ silicon's own resource. The app's ISR binds the vector.
 
 ### Realizations
 
-Common to the five: the Request field for field (`addr`, `tx`,
+Common to the six: the Request field for field (`addr`, `tx`,
 `tx_len`, `rx`, `rx_len`, `reply`, `speed`), `I2cSpeed` word for word
-(the CH32V00x's stops at `fast_400k`: its peripheral has no Fm+), the
+(the CH32V00x's and the STM32F4's stop at `fast_400k`: their peripherals
+have no Fm+), the
 engine verbs `init`, `start`, `isr`, `status`, `rebase`, `recover`,
 `release`, `unstick`, the empty probe (both lengths zero) served by
-all five - on the RP2040 as a one-byte read, its command FIFO having
+all six - on the RP2040 as a one-byte read, its command FIFO having
 no address-only entry -, and the vocabulary `I2cDone` / `i2c_*`
-produced ON THE WIRE by each - measured against a second chip on four
-and against the chip's other instance on the RP2040. What differs is
+produced ON THE WIRE by each - measured against a second chip on four,
+against the chip's other instance on the RP2040 and against the touch
+controller its board carries on the STM32F4. What differs is
 the resource under the task and the shape of the rate arithmetic each
 chapter imposes.
 
@@ -78,6 +80,7 @@ chapter imposes.
 | stm32g0 | `I2cHost<n, pins, TxEngine, RxEngine>` over `I2c<n>` (`stm32g0/i2c.hpp`, one TIMINGR word) | the same stated rate and per-speed cache (`speed_ok`, `scl_hz`, `timing_of`, `kernel_hz()` for the kernel-clock multiplexer); two optional DMA engine slots with `dma_isr()`; `fast_plus_drive()` (SYSCFG's Fm+ pad drive); `spurious_bus_errors()` (an erratum's counter); `idle()` as the SAM's |
 | ch32v00x | `I2cHost<1, pins, TxEngine, RxEngine>` over `I2c<1>` (`ch32v00x/i2c.hpp`, the F1's event machine with no rise-time register) | the stated bus rate and the per-speed cache as the SAM's (`speed_ok`, `scl_hz`, `timing_of`, `reference_hz()` = HCLK); a `duty` at init (fast mode's 2 or 16/9 shape); TWO vectors, `isr()` for the events and `error_isr()` for AF/ARLO/BERR; the engine slots FIXED to DMA channels 6 (TX) and 7 (RX) with `dma_isr()`, a one-byte read kept on the pump; `unstick()` returns the clocks it took; `start()` WAITS, bounded, for the last STOP to leave (the F1 lineage cannot queue a START behind one) - the one engine whose `start()` spends dispatch time on the bus |
 | rp2040 | `I2cHost<n, pins, TxEngine, RxEngine>` over `DwApbI2c<n>` (`rp2040/i2c.hpp`, the Synopsys command FIFO: an entry carries its RESTART and STOP bits, one TX_ABRT carries every failure) | the stated rate (clk_sys, `reference_hz()`) and the per-speed cache as the SAM's (`speed_ok`, `scl_hz`, `timing_of`); `idle()` as the SAM's; `start()` answers a SECOND refusal synchronously, i2c_bus_error for a block that would not disable to take the address (IC_TAR takes a write only with ENABLE clear); the probe is a one-byte read; the engine slots serve the READ phase alone (a transmit engine of uint16_t entries pouring one plain read command from a fixed cell, the receive engine collecting) with `dma_isr()`; `unstick()` returns the clocks it took; `recover()` resets the block through the reset controller, the one way out of a host holding SCL with no STOP in sight |
+| stm32f4 | `I2cHost<n, pins, TxEngine, RxEngine>` over `I2c<n>` (`stm32f4/i2c.hpp`, the F1's event machine WITH the rise-time register the CH32V00x's has not) | the stated bus rate and the per-speed cache as the SAM's (`speed_ok`, `scl_hz`, `timing_of`, `reference_hz()` = the instance's own APB1 clock); an `I2cHostConfig` at init (fast mode's duty shape, the wire's two rise times, the noise filters); `digital_filter_max()` (table 122's ceiling, advice and not a refusal) and `repeated_start_setup_at_risk()` (an erratum's window a write-then-read sits in); `spurious_bus_errors()` as the G0's - and here a BUS ERROR never ends a tenure at all, the manual and the erratum agreeing that a controller's transfer is unaffected; TWO vectors, `isr()` and `error_isr()`; the engine slots on the request mapping's own cells with `dma_isr()`, a one-byte read kept on the pump; `unstick()` returns the pulses it took; `start()` WAITS, bounded, for the last STOP to leave, as the CH32V00x's does; `claim_smba_pad()` for the SMBus alert |
 | host | none | `I2cBus` = `BusMaster`, host-tested through the SPI alias (`test_spi_bus`, `test_bus_master` - the same class) |
 
 None of those differences is a spelling of the same function:
