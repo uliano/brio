@@ -105,7 +105,10 @@ TX and RX inside the chip and leaves the RX pad alone.
   return), `write_byte`, `read_byte`, `write`, `write_bulk`,
   `read_bulk`, `rx_pending`, `tx_idle`, the counters `rx_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `hw_overruns`,
-  `clear_errors`, `rebase(hz)`, `set_baud(hz, baud)`, `divisor_for`,
+  `clear_errors`, `rebase(hz)` (the ClockUser verb: `hz` is SYSCLK and
+  the bus rate is DERIVED from it with `apb_hz_at`, not read back from
+  the RCC, because a dynamic clock fans the new rate out BEFORE the
+  prescalers move), `set_baud(hz, baud)`, `divisor_for`,
   `min_hz_for`, `can_baud`, `actual_baud(fck)`, `kernel_hz<Clock>()`,
   `release()`. Refused at compile time: invalid or coincident pads, an
   engine slot naming anything but `NoDmaEngine`, flow control on a
@@ -159,6 +162,15 @@ verbs on the same instance.
 - The black pill's RX pad, unconnected before the bridge's wires were
   crossed right, read idle under its pull-up: an empty RX ring and no
   framing noise, which is what pointed at the wiring.
+- `rebase(hz)` carries the console across a whole rate ladder: six
+  rates from 180 MHz down to the 16 MHz HSI and back, the bus divider
+  changing from /4 to /1 under it, every line legible
+  ([clock.md](clock.md), `test_stm32f4_power` letter f).
+- AND `tx_idle()` IS NOT THE WIRE: it reports the transport's ring, and
+  the last character is still in the shift register when it answers
+  true. A Stop taken there truncates that character - measured, the
+  line's own CRLF lost - so a program that stops its clocks waits for
+  the USART's TC as well ([pwr.md](pwr.md)).
 
 ## Not covered yet
 
@@ -180,8 +192,8 @@ duplex (a second board on the wire), IrDA (an IR pair), the smartcard
 (no card on the desk), the synchronous clock (a timer capture on CK -
 the timer chapter's ruler), CTS/RTS flow control (a peer that asserts
 them), the DMAT/DMAR bits (the DMA chapter), the IDLE/TC/PE/CTS/LBD
-interrupt enables, `set_baud` and `rebase` at run time (no dynamic
-clock, no rate change yet), `write_bulk`/`read_bulk` (compiled, the
+interrupt enables, `set_baud` at run time (nothing changes the LINK's
+rate with the clock standing still), `write_bulk`/`read_bulk` (compiled, the
 console writes bytes), `release()`, the instances beyond the consoles'
 (USART3, USART6, the UARTs - compiled on every header that has them,
 none driven), the frame formats beyond 8N1 (parity and two stops

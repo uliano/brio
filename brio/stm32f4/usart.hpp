@@ -1009,9 +1009,12 @@ public:
     }
 
     /// The core clock changed (DynamicClock fan-out): keep the same bit
-    /// rate at the new APB rate. `hz` is SYSCLK; the APB divider in force
-    /// is read back from the RCC. Drains what is in flight first. Main
-    /// context only.
+    /// rate at the new APB rate. `hz` is SYSCLK, and the bus rate is
+    /// DERIVED from it (`apb_hz_at`, clock.hpp's one statement of the
+    /// prescaler rule) and NOT read back from the RCC - the fan-out runs
+    /// before anything moves, so the register still holds the divider of
+    /// the rate being left. Drains what is in flight first, at the old
+    /// rate, which is why the fan-out is where it is. Main context only.
     static void rebase(uint32_t hz) {
         constexpr uint32_t ring_drain_spins = 8'000'000u;
         constexpr uint32_t frame_spins = 200'000u;
@@ -1021,8 +1024,7 @@ public:
         spins = frame_spins;
         while ((S::status() & UsartFlag::tc) == 0u && spins-- != 0u) {
         }
-        const uint32_t fck = hz / (S::on_apb2 ? Rcc::apb2_divider() : Rcc::apb1_divider());
-        const std::optional<uint16_t> reg = divisor_for(fck, m_baud);
+        const std::optional<uint16_t> reg = divisor_for(apb_hz_at(hz, S::on_apb2), m_baud);
         if (!reg) {
             return;
         }

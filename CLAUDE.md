@@ -311,11 +311,8 @@ gets its home in `docs/design/` when taken.
   ALONE - no FlashMedia here: the family's uneven sectors sit low in the
   bank where the vector table lives, so a fixed NV zone would partition
   every image's linker script, and the NV stack is deferred to its own
-  review, below -, PWR's
-  Stop modes with a dynamic clock's way down, SPI/I2S, I2C, the
-  DWC2 OTG FS controller for util/usb - both OTG connectors are cabled
-  -, and on the F429 alone FMC + LTDC + DMA2D, the memory-mapped display
-  tier); the frequency ladders of the five part classes whose manuals
+  review, below -, I2C, and on the F429 alone FMC + LTDC + DMA2D, the
+  memory-mapped display tier); the frequency ladders of the five part classes whose manuals
   are not on the desk; the debuggers (cortex-debug entries written,
   not driven). Tenuto only, the equal-priority
   promise kept; Rubato and BASEPRI are another type and another day.
@@ -1313,8 +1310,25 @@ brio/                    the framework, four strata:
                            SysTick at 1000 Hz, delay_us on VAL
     platform.hpp           Stm32f4Platform<TB>: WFI = Sleep, SLEEPDEEP never
                            written; BKPT; .noinit breadcrumb; atomic_width 4
-    pwr.hpp                Pwr: the APB1 gate, VoltageScale (one bit or two),
-                           the over-drive pair (ODEN/ODRDY, ODSWEN/ODSWRDY)
+    pwr.hpp                Pwr: the whole power controller - the APB1 gate,
+                           VoltageScale (one bit or two), the over-drive pair
+                           (ODEN/ODRDY, ODSWEN/ODSWRDY, and an exit that waits
+                           ODSWRDY down), the Sleep/Stop/Standby ladder as
+                           SLEEPDEEP + PDDS with StopConfig's four price bits
+                           (LPDS, FPDS, the low-voltage pair, under-drive), the
+                           wake-up pins and the ONE flag they share with the
+                           RTC, ES0298 2.2.4's Standby sequence, the PVD with
+                           its part-class thresholds, the backup regulator, and
+                           the three DBGMCU bits a probe leaves behind
+    sleep.hpp              Stm32f4SleepSite (light -> Sleep, standby -> a Stop
+                           on the main regulator, deep -> the low-power one
+                           with the flash in power-down; Standby off the ladder
+                           and every arm() CLEARING PDDS to keep it there; the
+                           SYSCLK restore after a Stop and the ticker paused
+                           across one - ES0298 2.2.1) and Stm32f4TimedSleepSite
+                           (the RTC's wake-up timer as alarm and its sub-second
+                           counter as witness, the frozen span handed to
+                           Ticker::advance(), the four-act ISR)
     flash.hpp              FlashWaitStates (the readback rule), FlashAccel (the
                            ART's prefetch and caches), DeviceUid /
                            flash_size_kbytes / DeviceIdcode
@@ -1325,7 +1339,11 @@ brio/                    the framework, four strata:
                            compile time, the regulator scale and over-drive
                            sequenced in the manual's order, pclk1_hz/pclk2_hz
                            beside hz, apb_hz(clock, bus) for a peripheral's
-                           own rate
+                           own rate + Rates<> and DynamicClock<Rates<...>,
+                           Users...>: the pack of rate TUPLES, the switch that
+                           PARKS ON THE HSI (neither the PLL nor the scale nor
+                           the over-drive bits may be written otherwise, so one
+                           order serves both directions), restore() after a Stop
     pin.hpp                Pin<'A',5> / Port<'A'> / PinRef over GPIOx: the G0's
                            block without a BRR (BSRR's upper half), the port
                            clock on AHB1 opened by every configuring verb,
@@ -1436,6 +1454,40 @@ brio/                    the framework, four strata:
                            HARDWARE trigger raises and the underrun it leaves,
                            and the ISR body on TIM6's vector; absent where the
                            header declares no DAC_BASE
+    spi.hpp                SPI and I2S (ch. 28): Spi<n> the resource over the
+                           whole chapter - the F1 lineage's block with no FIFO,
+                           eight rates off the instance's OWN APB clock, three
+                           NSS arrangements, the simplex and bidirectional line
+                           modes, the CRC unit whose polynomial must be ODD
+                           (ES0206 2.12.3), the TI framing, flags cleared by
+                           READ SEQUENCES and a disable that ignores BSY in
+                           master receive-only (2.12.1) - + I2s<n> / I2sExt<n>,
+                           the same block in its audio face (the four standards,
+                           PCM's two frames, the I2SDIV/ODD arithmetic against
+                           the audio PLL, the extension block the F446 has not)
+                           + SpiHost<n, pins, TxEngine, RxEngine> with the other
+                           strata's Request VERBATIM (the pump on RXNE, the
+                           engines on the request mapping's own cells,
+                           sck_speed() because 2.12.4 makes the SCK pad's slew
+                           class a correctness parameter) + SpiClient<n, pins>
+    usb.hpp                USB OTG in DEVICE MODE (ch. 22 / 31 / 34-35):
+                           UsbOtg<core> - ONE template over the two DWC2
+                           cores this family may carry (UsbFs on PA11/PA12,
+                           UsbHs through its OWN full-speed PHY on PB14/
+                           PB15) - realizing util/usb's UsbController at
+                           the packet: the core reset and the 25 ms after
+                           device mode is forced, the FIFO map the program
+                           writes by hand out of a 320-word budget (a claim
+                           past it REFUSED), the shared receive FIFO drained
+                           to its first data packet a pass, an OUT transfer
+                           of as many packets as a class has armed
+                           (out_slots) because this core has no double
+                           buffer, one packet per IN transfer with the
+                           empty-level interrupt behind it, the address
+                           written BEFORE the status stage because 22.17.5
+                           and not chapter 9 is what the silicon obeys, and
+                           the two device-mode errata as code (the guarded
+                           FIFO write, the address never read back)
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)

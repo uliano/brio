@@ -9,15 +9,18 @@ an RCC peripheral clock enabling", every enable verb here reads its
 register back) and ES0206 2.2.12 (over-drive unavailable on silicon
 revisions A and Y - the DISC1's part is revision 4/5/B, REV_ID 0x2003,
 and over-drive is measured on it). Drivers: `stm32f4/clock.hpp` (`Rcc`,
-`Clock<source, hz, hse_hz, hse_mode>`, `apb_hz`), `stm32f4/pwr.hpp`
-(`Pwr`: the bus gate, `VoltageScale`, the over-drive pair),
-`stm32f4/flash.hpp` (`FlashWaitStates`, `FlashAccel`, and the device
-signature: `DeviceUid`, `flash_size_kbytes`, `DeviceIdcode`). The
-family fixture is `test/family_stm32f4/clock.cpp` with the negatives
-that refuse an unreachable PLL ratio, a rate above the part's ceiling,
-a rate on a part whose ladder was not read, a divided HSI and an HSE
-root without its rate. The reference suite is `test_stm32f4_platform`,
-letter e.
+`Clock<source, hz, hse_hz, hse_mode>`, `Rates<>` +
+`DynamicClock<Rates<...>, Users...>`, `apb_hz`), `stm32f4/pwr.hpp`
+(`Pwr`: the bus gate, `VoltageScale`, the over-drive pair; the rest of
+that block is [pwr.md](pwr.md)'s), `stm32f4/flash.hpp`
+(`FlashWaitStates`, `FlashAccel`, and the device signature: `DeviceUid`,
+`flash_size_kbytes`, `DeviceIdcode`). The family fixtures are
+`test/family_stm32f4/clock.cpp` and `power.cpp` with the negatives that
+refuse an unreachable PLL ratio, a rate above the part's ceiling, a rate
+on a part whose ladder was not read, a divided HSI, an HSE root without
+its rate, a dynamic rate the pack does not name and a position past its
+end. The reference suites are `test_stm32f4_platform` letter e for the
+static clock and `test_stm32f4_power` letter f for the dynamic one.
 
 ## What the silicon does
 
@@ -91,6 +94,21 @@ reset values differ by class). A rate at or below 16 MHz needs none of
 the ladder: `Clock<hsi, 16 MHz>` compiles on every header and writes
 nothing but the accelerator's enables.
 
+**And the way DOWN is not the way up backwards - it is a park.** The
+manuals give two orderings (3.5.1: the flash latency first on the way
+up, last on the way down; 5.1.4: the scale up before the rate and down
+after it), and on this family they collapse into one, because three
+stores are refused where a fall would want them: PLLCFGR "can be written
+only when the PLL is disabled" (7.3.2), the regulator scale "can be
+modified only when the PLL is OFF and the HSI or HSE clock source is
+selected as system clock source" (5.1.4), and ODEN and ODSWEN are
+writable only "when the HSI or HSE is selected as system clock". So a
+switch between any two PLL rates HAS to pass through a root - the
+`DynamicClock` below parks on the HSI, stops the PLL and leaves
+over-drive - and after the park the machine is at 16 MHz, so everything
+that follows is a RISE and the rising order is the only one needed. The
+park is what a switch costs, and it is measured.
+
 ## Types and verbs
 
 - `Rcc` (monostate) - `hsi_enable`/`hsi_ready`/`hsi_wait_ready`;
@@ -125,13 +143,33 @@ nothing but the accelerator's enables.
   than the root's, a PLL ratio with no exact solution, a rate above the
   ladder or on a part whose ladder is unknown.
 - `apb_hz(clock, on_apb2)` - the bus rate a peripheral's divisor
-  divides, folding for a static clock.
+  divides, folding for a static clock; `apb_divider_at(hclk, on_apb2)`
+  and `apb_hz_at(hclk, on_apb2)` - THE PRESCALER RULE IN ONE PLACE,
+  which `Clock`'s `apb1_div`/`apb2_div` fold and which a driver rebased
+  by the dynamic clock calls with the NEW rate (the RCC still holds the
+  old divider at that moment).
+- `Rates<R0, R1, ...>` - the pack of rates a `DynamicClock` may run at,
+  each a static `Clock` task, R0 the boot rate.
+- `DynamicClock<Rates<...>, Users...>` - `is_static == false`, `hz()`,
+  `pclk1_hz()`, `pclk2_hz()`, `usb_hz()`; the discrete-rate surface
+  `rate_count`, `rate_hz(i)`, `rate_index()`, `rate_pclk1_hz(i)`,
+  `rate_pclk2_hz(i)`, `rate_source(i)`, `rate_regime(i)`,
+  `rate_wait_states(i)`, `regime()`; `index_of(hz)`, `can_run_at(hz)`,
+  `rebases<U>`; `init()` (the boot rate, no fan-out), `set<hz>()`,
+  `set(hz)`, `set_index<i>()`, `set_index(i)`, `restore()` (the CURRENT
+  rate again after a Stop, no fan-out) and `switching()`. Refused at
+  compile time: an empty or over-long pack, a rate that is not a static
+  `Clock`, a rate the pack does not name, a position past its end,
+  `F_CPU` defined.
 - `Pwr` (monostate) - `bus_clock(on)` (APB1ENR.PWREN with the readback;
   every other verb opens it first), `scale(VoltageScale)`/`scale()`/
   `scale_exists`/`scale_ready`, `has_over_drive`, `over_drive_enter`
-  (ODEN, ODRDY, ODSWEN, ODSWRDY, each waited for), `over_drive_exit`
-  (both bits at once), `over_drive_active`. `VoltageScale::scale3 |
-  scale2 | scale1`.
+  (ODEN, ODRDY, ODSWEN, ODSWRDY, each waited for), `over_drive_ready`,
+  `over_drive_exit` (both bits at once, then ODSWRDY waited DOWN -
+  5.1.4's sequence 1 complete), `over_drive_active`.
+  `VoltageScale::scale3 | scale2 | scale1`. The rest of the block - the
+  Sleep/Stop/Standby ladder, the wake-up pins, the PVD, the backup
+  regulator, the debugger's low-power bits - is [pwr.md](pwr.md)'s.
 - `FlashWaitStates` - `get`, `set(ws)` with the readback, `needed_for
   (hclk)` from the ladder, `max_latency` from the field's width.
   `FlashAccel` - `prefetch`, `icache`, `dcache` set/get, `icache_reset`/
@@ -161,6 +199,27 @@ const bool clock_ok = SysClock::init();   // false: a root did not come up - see
 A peripheral's rate: `brio::apb_hz(clock, brio::Usart<2>::on_apb2)`
 gives 45 MHz at 180; `clock_hz(clock)` stays 180 MHz for the
 timebase and `delay_us`.
+
+A program that moves between rates names the pack and the users it
+rebases; the first rate is the boot rate, and a driver left out of the
+list does not compile:
+
+```cpp
+using Top  = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000, brio::HseMode::bypass>;
+using Mid  = brio::Clock<brio::ClockSource::pll_hse,  48'000'000, 8'000'000, brio::HseMode::bypass>;
+using Rest = brio::Clock<brio::ClockSource::hsi,      16'000'000>;
+
+using SysClock = brio::DynamicClock<brio::Rates<Top, Mid, Rest>, brio::Ticker, Serial>;
+constexpr SysClock clock;
+
+SysClock::init();                 // Top: 180 MHz in over-drive
+SysClock::set<16'000'000>();      // the users rebased, then the park and the HSI
+SysClock::set_index(0);           // ... and back up
+```
+
+`restore()` is what a sleep site calls after a Stop
+([pwr.md](pwr.md)): the CURRENT rate again, with no fan-out, because
+the users already hold the divisors for it.
 
 ## Bench findings
 
@@ -196,17 +255,32 @@ three boards:
   (`brio check stm32f4`); the F401, F410, F412, F413 and F469 headers
   refuse 84 MHz by name.
 
+**The dynamic clock, walked** (`test_stm32f4_power` letter f, on the
+Nucleo-F446RE): a pack of six rates from the top down to the HSI, the
+kernel ticker and the console among the users it rebases. Each rate
+weighed as 100 kernel ticks against the LSE crystal, which is what says
+the PLL, the prescalers and the ticker's reload all followed:
+
+| rate | PCLK1 / PCLK2 | wait states | regulator | 100 ticks measured |
+|---|---|---|---|---|
+| 180 MHz | 45 / 90 MHz | 5 | scale 1 + over-drive | 99975 us (250 ppm fast) |
+| 168 MHz | 42 / 84 MHz | 5 | scale 1 | 100006 us (60 ppm slow) |
+| 120 MHz | 30 / 60 MHz | 3 | scale 3 | 100006 us (60 ppm slow) |
+| 84 MHz | 42 / 84 MHz | 2 | scale 3 | 100006 us (60 ppm slow) |
+| 48 MHz | 24 / 48 MHz | 1 | scale 3 | 100006 us (60 ppm slow) |
+| 16 MHz HSI | 16 / 16 MHz | 0 | scale 3 | 99548 us (4520 ppm fast) |
+
+The five HSE-rooted rates land within 250 ppm of the crystal; the HSI is
+4520 ppm fast, which is an RC oscillator inside its own specification
+and not a defect. A switch costs **111 us in either direction**, six
+switches each way, and the two are equal because the park on the HSI is
+what dominates both. No APB was ever left above its ceiling, and the
+console spoke at every rate - the verdict lines themselves are that
+evidence.
+
 ## Not covered yet
 
 Driver gaps:
-- A DYNAMIC clock (the STM32G0's `Rates<>` pack and direction-aware
-  switch), and the way DOWN in general: `init()` runs once from the
-  reset state, and a fall's order (frequency first, latency after, then
-  the scale) is written nowhere; born with the power chapter, whose Stop
-  mode undoes both the PLL and the over-drive and needs a `restore()`.
-- `over_drive_exit`'s sequence under a running program (the verb exists
-  and is unexercised - nothing leaves over-drive yet), the under-drive
-  mode of Stop, the regulator's low-power modes: the power chapter's.
 - The AHB prescaler (HPRE other than 1), LSI and LSE as roots or as
   anything (the RTC chapter's), the I2S and SAI PLLs (PLLI2S, PLLSAI -
   the audio and LTDC chapters'), the F446's PLLR output, DCKCFGR's
@@ -227,9 +301,9 @@ Implemented, not bench-verified: `Rcc::css`, `mco1`/`mco2` (no pad
 driven, no counter on the other end), `ahb2_clock`/`ahb3_clock` and the
 reset pulses (no driver on those buses yet), `FlashAccel`'s individual
 setters and the cache resets (`enable_all` is what runs), `Pwr::scale`
-at scale 2 and 3 (every board runs at scale 1: 180 MHz needs it, and
-the F411's 100 MHz does too), `Pwr::over_drive_exit`, the one-bit VOS
-path of the F405 class (compiled on its headers, no board),
-`Clock<hsi>` and `Clock<hse>` undivided at run time (compiled
-everywhere, never flashed - the boards run the PLL), and a PLL from HSI
-(`pll_hsi`; the boards' roots are their HSEs).
+at scale 2 (the dynamic pack's rates land on scale 1 and scale 3 - no
+rate between 120 and 144 MHz was named), the one-bit VOS path of the
+F405 class (compiled on its headers, no board), `Clock<hse>` undivided
+at run time (compiled everywhere, never flashed - the boards run the
+PLL or the HSI), and a PLL from HSI (`pll_hsi`; the boards' roots are
+their HSEs).

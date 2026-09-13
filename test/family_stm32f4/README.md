@@ -18,7 +18,12 @@ class, UART7/8 on the F42x/F43x, F413 and F469 classes, UART9/10 on the
 F413 alone) and the FULL/not split that rides on the name (the UARTs
 have no synchronous mode, smartcard or flow control), the regulator (one VOS bit on the F405 class, two
 elsewhere; the over-drive pair on the F42x/F43x, F446 and F469 classes
-alone), the flash latency field's width, and THE FREQUENCY LADDERS -
+alone, and beside it the under-drive field, the
+low-voltage-in-deep-sleep pair and the FISSR/FMSSR pair, each present on
+its own set of headers), how many WKUPx pins are bonded (one, two or
+three) and which pads they are, the PVD's thresholds in volts, the
+backup SRAM behind BRE, the flash latency field's width, and THE
+FREQUENCY LADDERS -
 which the reserve knows for four part classes and refuses to guess for
 the rest: on an F401, F410, F412, F413 or F469 header a `Clock` above
 16 MHz is a compile error, and the positive TU proves the 16 MHz reset

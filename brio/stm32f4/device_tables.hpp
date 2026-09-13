@@ -859,7 +859,7 @@ struct DmaPlacement {
 struct DmaPlacements {
     bool known = false;       ///< false: this part class's table was not read
     uint8_t count = 0;
-    DmaPlacement at[2] = {};
+    DmaPlacement at[3] = {};  ///< three: RM0383's SPI1_TX, SPI4_RX and SPI5_TX have three cells each
 };
 
 constexpr DmaPlacements usart_dma_placements(uint8_t n, bool transmit) {
@@ -1665,6 +1665,742 @@ constexpr bool dac_dma_placement_valid(uint8_t dac_channel, uint8_t controller, 
         }
     }
     return false;
+}
+
+// ---- SPI and I2S --------------------------------------------------------------
+//
+// WHAT THE HEADER ANSWERS AND WHAT IT DOES NOT, for RM0090 ch. 28 (RM0390
+// ch. 26, RM0383 ch. 20):
+//  - WHICH INSTANCES EXIST, which bus each sits on, which gate and which
+//    vector: the header, three ways over (SPIn_BASE, RCC_APBxENR_SPInEN,
+//    SPIn_IRQn). This family is regular here - SPI1, SPI4, SPI5 and SPI6
+//    on APB2, SPI2 and SPI3 on APB1, ONE vector each, shared with nothing.
+//  - WHETHER AN INSTANCE HAS THE I2S FACE: not the header's. Every
+//    SPI_TypeDef of the pack declares I2SCFGR and I2SPR, on instances the
+//    manual gives no I2S at all, so the register block cannot be asked.
+//    The manuals' memory maps are the authority and they DISAGREE ACROSS
+//    CLASSES, so the fact is keyed on the part class like the frequency
+//    ladders, and a class whose manual was not read reports `known` false.
+//  - HOW THE I2S CLOCK IS SELECTED: the header, by which selector it
+//    declares - RCC_CFGR.I2SSRC (one bit, PLLI2S_R or the I2S_CKIN pad),
+//    RCC_DCKCFGR's I2S1SRC/I2S2SRC pair (two bits each, four sources) or
+//    RCC_DCKCFGR.I2SSRC alone on a part with no PLLI2S at all.
+//  - WHERE THE DMA REQUESTS SIT: the request mapping tables, keyed per
+//    part class as every other chapter's slice of them is.
+
+constexpr uint32_t spi_base(uint8_t n) {
+    switch (n) {
+#if defined(SPI1_BASE)
+        case 1: return SPI1_BASE;
+#endif
+#if defined(SPI2_BASE)
+        case 2: return SPI2_BASE;
+#endif
+#if defined(SPI3_BASE)
+        case 3: return SPI3_BASE;
+#endif
+#if defined(SPI4_BASE)
+        case 4: return SPI4_BASE;
+#endif
+#if defined(SPI5_BASE)
+        case 5: return SPI5_BASE;
+#endif
+#if defined(SPI6_BASE)
+        case 6: return SPI6_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool spi_present(uint8_t n) { return spi_base(n) != 0u; }
+
+/// The APB2 instances are SPI1, SPI4, SPI5 and SPI6; SPI2 and SPI3 are on
+/// APB1. Asked of the enable bit's own register, so the answer comes from
+/// the header and not from a rule written down twice.
+constexpr bool spi_on_apb2(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APB2ENR_SPI1EN)
+        case 1: return true;
+#endif
+#if defined(RCC_APB2ENR_SPI4EN)
+        case 4: return true;
+#endif
+#if defined(RCC_APB2ENR_SPI5EN)
+        case 5: return true;
+#endif
+#if defined(RCC_APB2ENR_SPI6EN)
+        case 6: return true;
+#endif
+        default: return false;
+    }
+}
+
+/// The instance's enable bit; the same position resets it in the bus's
+/// RCC_APBxRSTR.
+constexpr uint32_t spi_clock_mask(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APB2ENR_SPI1EN)
+        case 1: return RCC_APB2ENR_SPI1EN;
+#endif
+#if defined(RCC_APB1ENR_SPI2EN)
+        case 2: return RCC_APB1ENR_SPI2EN;
+#endif
+#if defined(RCC_APB1ENR_SPI3EN)
+        case 3: return RCC_APB1ENR_SPI3EN;
+#endif
+#if defined(RCC_APB2ENR_SPI4EN)
+        case 4: return RCC_APB2ENR_SPI4EN;
+#endif
+#if defined(RCC_APB2ENR_SPI5EN)
+        case 5: return RCC_APB2ENR_SPI5EN;
+#endif
+#if defined(RCC_APB2ENR_SPI6EN)
+        case 6: return RCC_APB2ENR_SPI6EN;
+#endif
+        default: return 0;
+    }
+}
+
+/// ONE VECTOR PER INSTANCE. An IRQn is an enumerator the preprocessor
+/// cannot probe, so each is guarded by its instance's base macro.
+constexpr IRQn_Type spi_irq(uint8_t n) {
+    switch (n) {
+#if defined(SPI1_BASE)
+        case 1: return SPI1_IRQn;
+#endif
+#if defined(SPI2_BASE)
+        case 2: return SPI2_IRQn;
+#endif
+#if defined(SPI3_BASE)
+        case 3: return SPI3_IRQn;
+#endif
+#if defined(SPI4_BASE)
+        case 4: return SPI4_IRQn;
+#endif
+#if defined(SPI5_BASE)
+        case 5: return SPI5_IRQn;
+#endif
+#if defined(SPI6_BASE)
+        case 6: return SPI6_IRQn;
+#endif
+        default: return NonMaskableInt_IRQn;
+    }
+}
+
+/// The full-duplex I2S extension blocks (RM0090 28.4.2): a second, always
+/// SLAVE, register block sharing SPI2's or SPI3's clock and word select.
+/// Absent where the header declares no base - the F446 is the part class
+/// that has none and pairs two whole instances instead (RM0390 26.6.2).
+constexpr uint32_t i2s_ext_base(uint8_t n) {
+    switch (n) {
+#if defined(I2S2ext_BASE)
+        case 2: return I2S2ext_BASE;
+#endif
+#if defined(I2S3ext_BASE)
+        case 3: return I2S3ext_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool i2s_ext_present(uint8_t n) { return i2s_ext_base(n) != 0u; }
+
+/// How this part selects the I2S kernel clock.
+enum class I2sClockSelect : uint8_t {
+    none,          ///< no selector at all
+    cfgr,          ///< RCC_CFGR.I2SSRC: one bit, PLLI2S_R or the I2S_CKIN pad
+    dckcfgr_one,   ///< RCC_DCKCFGR.I2SSRC: two bits, on a part with no PLLI2S
+    dckcfgr_pair,  ///< RCC_DCKCFGR's I2S1SRC and I2S2SRC: two bits EACH, and
+                   ///< the numbering is BY APB BUS and not by instance -
+                   ///< I2S1SRC is the APB1 instances', I2S2SRC the APB2 ones'
+                   ///< (RM0390 6.3.24). A trap the names invite.
+};
+
+constexpr I2sClockSelect i2s_clock_select() {
+#if defined(RCC_DCKCFGR_I2S1SRC)
+    return I2sClockSelect::dckcfgr_pair;
+#elif defined(RCC_DCKCFGR_I2SSRC)
+    return I2sClockSelect::dckcfgr_one;
+#elif defined(RCC_CFGR_I2SSRC)
+    return I2sClockSelect::cfgr;
+#else
+    return I2sClockSelect::none;
+#endif
+}
+
+/// Whether this part has the dedicated audio PLL at all (the F410 class
+/// has not, and selects its I2S clock between the main PLL and the pad).
+constexpr bool plli2s_present() {
+#if defined(RCC_CR_PLLI2SON)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// Whether PLLI2SCFGR carries its OWN input divider: where it does not,
+/// the audio PLL divides the MAIN PLL's M (RM0090 7.3.23).
+constexpr bool plli2s_has_m() {
+#if defined(RCC_PLLI2SCFGR_PLLI2SM_Pos)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/**
+ * WHICH INSTANCES WEAR THE I2S FACE, and the extension blocks, per part
+ * class - the manuals' memory maps:
+ *  - the F405 class and the F42x/F43x class: I2S2 and I2S3 alone
+ *    (RM0090 28.2.2, "Both I2S (I2S2 and I2S3)"), with I2S2ext/I2S3ext;
+ *  - the F411: SPI1/I2S1 through SPI5/I2S5, every instance (RM0383 2.3);
+ *  - the F446: I2S2 and I2S3 (RM0390 2.3 names SPI1 and SPI4 with no I2S),
+ *    and NO extension block - full duplex there is two instances paired.
+ * A class whose manual was not read answers `known` false, and
+ * stm32f4/spi.hpp refuses `I2s<n>` on it rather than guess.
+ */
+struct SpiI2sFacts {
+    bool known = false;
+    uint8_t instances = 0;      ///< bit n-1 set: instance n has the I2S face
+    bool ext_blocks = false;    ///< I2S2ext / I2S3ext exist on this class
+};
+
+constexpr SpiI2sFacts spi_i2s_facts() {
+#if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx) || \
+    defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx)
+    return SpiI2sFacts{true, 0x06u, true};    // SPI2, SPI3
+#elif defined(STM32F411xE)
+    return SpiI2sFacts{true, 0x1Fu, true};    // SPI1..SPI5
+#elif defined(STM32F446xx)
+    return SpiI2sFacts{true, 0x06u, false};   // SPI2, SPI3; no extension block
+#else
+    return SpiI2sFacts{};
+#endif
+}
+
+constexpr bool spi_i2s_capable(uint8_t n) {
+    const SpiI2sFacts f = spi_i2s_facts();
+    return f.known && n >= 1u && n <= 6u && (f.instances & (1u << (n - 1u))) != 0u;
+}
+
+/**
+ * WHERE AN SPI INSTANCE'S DMA REQUESTS SIT - the SPI slice of the request
+ * mapping (RM0090 tables 43 and 44, RM0390 tables 28 and 29, RM0383
+ * tables 27 and 28), keyed on the part class for the reason the serial
+ * slice is: no device header carries a request mapping, and the tables
+ * differ by part.
+ *
+ * UP TO THREE CELLS, where the serial and analog slices need two: the
+ * F411's table gives SPI1_TX, SPI4_RX and SPI5_TX three cells each (DMA2
+ * stream 2 channel 2 for SPI1_TX, stream 4 channel 4 for SPI4_RX, stream
+ * 5 channel 5 for SPI5_TX are the extra ones no other manual shows) - the
+ * shared `DmaPlacements` list is three wide for their sake.
+ */
+
+constexpr DmaPlacements spi_dma_placements(uint8_t n, bool transmit) {
+    DmaPlacements p{};
+#if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || \
+    defined(STM32F417xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
+    defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx) || \
+    defined(STM32F411xE)
+    p.known = true;
+    if (!spi_present(n)) {
+        return p;   // the class's table is read, this part has no such instance
+    }
+    switch (n) {
+        case 1:
+            if (transmit) {
+                p.count = 2;
+                p.at[0] = {2, 3, 3};
+                p.at[1] = {2, 5, 3};
+#if defined(STM32F411xE)
+                // RM0383 table 28, channel 2 stream 2 - the F411's alone.
+                p.count = 3;
+                p.at[2] = {2, 2, 2};
+#endif
+            } else {
+                p.count = 2;
+                p.at[0] = {2, 0, 3};
+                p.at[1] = {2, 2, 3};
+            }
+            break;
+        case 2:
+            p.count = 1;
+            p.at[0] = transmit ? DmaPlacement{1, 4, 0} : DmaPlacement{1, 3, 0};
+            break;
+        case 3:
+            p.count = 2;
+            if (transmit) { p.at[0] = {1, 5, 0}; p.at[1] = {1, 7, 0}; }
+            else          { p.at[0] = {1, 0, 0}; p.at[1] = {1, 2, 0}; }
+            break;
+        case 4:
+            if (transmit) {
+                p.count = 2;
+                p.at[0] = {2, 1, 4};
+                p.at[1] = {2, 4, 5};
+            } else {
+                p.count = 2;
+                p.at[0] = {2, 0, 4};
+                p.at[1] = {2, 3, 5};
+#if defined(STM32F411xE)
+                // RM0383 table 28, channel 4 stream 4 - the F411's alone.
+                p.count = 3;
+                p.at[2] = {2, 4, 4};
+#endif
+            }
+            break;
+        case 5:
+            if (transmit) {
+                p.count = 2;
+                p.at[0] = {2, 4, 2};
+                p.at[1] = {2, 6, 7};
+#if defined(STM32F411xE)
+                // RM0383 table 28, channel 5 stream 5 - the F411's alone.
+                p.count = 3;
+                p.at[2] = {2, 5, 5};
+#endif
+            } else {
+                p.count = 2;
+                p.at[0] = {2, 3, 2};
+                p.at[1] = {2, 5, 7};
+            }
+            break;
+        case 6:
+            p.count = 1;
+            p.at[0] = transmit ? DmaPlacement{2, 5, 1} : DmaPlacement{2, 6, 1};
+            break;
+        default: break;
+    }
+#else
+    (void)n;
+    (void)transmit;
+#endif
+    return p;
+}
+
+/// Whether (controller, stream, channel) is a cell instance `n`'s request
+/// is wired to. False on a part whose table was not read, and false for an
+/// instance the read table has no row for - both refusals, never a guess.
+constexpr bool spi_dma_placement_valid(uint8_t n, bool transmit, uint8_t controller,
+                                       uint8_t stream, uint8_t channel) {
+    const DmaPlacements p = spi_dma_placements(n, transmit);
+    if (!p.known) {
+        return false;
+    }
+    for (uint8_t i = 0; i < p.count; ++i) {
+        if (p.at[i].controller == controller && p.at[i].stream == stream &&
+            p.at[i].channel == channel) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ---- the USB OTG controllers ----------------------------------------------------
+//
+// This family carries up to TWO instances of the same Synopsys DWC2 core:
+// OTG_FS, whose PHY is full speed and on chip, and OTG_HS, which drives a
+// ULPI transceiver at high speed and ALSO has a full-speed PHY of its own
+// (RM0090 34 and 35, RM0390 31 and 32, RM0383 22). Seen from device mode
+// at full speed the two are one programmer's model at two base addresses,
+// which is why the driver is one template over the core below and not two
+// drivers. What differs is a handful of facts, and the header carries
+// most of them.
+//
+// WHAT THE HEADER ANSWERS: whether the part has each core at all (the
+// F410 has neither, the F401/F411/F412/F413 have the FS core alone, the
+// F405 class, the F42x/F43x, the F446 and the F469/F479 have both), the
+// base addresses, the bus each one's gate sits on, and which of the three
+// GCCFG generations the part has - the one thing about VBUS a program
+// must know to free the pad.
+//
+// WHAT THE MANUALS ANSWER, and is therefore stated here as a constant per
+// CORE with its section: the FIFO RAM (1.25 Kbyte on the FS core, 4 Kbyte
+// on the HS one - RM0383 22.2.1, RM0090 35.2.1) and how many device
+// endpoint numbers the core instantiates. The counts below are the ones
+// every manual on the desk states for its core (RM0383 22.2.3, RM0090
+// 34.2.3 and 35.2.3, RM0390 31.2.3): four bidirectional numbers on the FS
+// core - endpoint zero and three more - and six on the HS one. A part
+// class whose manual was not read may bond more; taking the number the
+// read manuals agree on can only leave an endpoint unused, never invent
+// one.
+//
+// THE PADS are the datasheets' (DS10314 table 9, DS10693 table 11, the
+// F429's table 12) and are fixed: the FS PHY is bonded to PA11 and PA12
+// at AF10, the HS core's own full-speed PHY to PB14 and PB15 at AF12.
+
+/// The two OTG cores of this family, as the manuals name them.
+enum class OtgCore : uint8_t { fs, hs };
+
+/// How this part's GCCFG says "there is no VBUS pad, take VBUS as valid".
+/// The register was respun twice inside the family and the device header
+/// is the authority on which one a part has:
+///  - `no_vbus_sense`: the first layout (VBUSASEN / VBUSBSEN / SOFOUTEN /
+///    NOVBUSSENS), on the F401, F405 class, F411 and F42x/F43x. Setting
+///    NOVBUSSENS frees the pad.
+///  - `vbus_detect`: the later one (PWRDWN and VBDEN alone, the F446 and
+///    F469/F479; the F412/F413 add the battery-charging detector to it).
+///    Clearing VBDEN frees the pad, and the session-valid OVERRIDE pair
+///    in GOTGCTL is what then tells the core a session is on.
+///  - `none`: the part has no OTG core.
+enum class OtgVbusStyle : uint8_t { none, no_vbus_sense, vbus_detect };
+
+/// Everything a driver needs to reach one core, or `present == false`.
+struct OtgFacts {
+    bool present = false;
+    uint32_t base = 0;
+    bool gate_on_ahb1 = false;   ///< the FS core's gate is on AHB2, the HS core's on AHB1
+    uint32_t clock_mask = 0;
+    uint32_t reset_mask = 0;
+    uint32_t ulpi_clock_mask = 0;   ///< the HS core's ULPI clock gate, left CLOSED on the embedded PHY
+    uint16_t fifo_words = 0;        ///< the dedicated FIFO RAM, in 32-bit words
+    uint8_t endpoints = 0;          ///< device endpoint NUMBERS, endpoint zero counted
+    bool phy_select_writable = false;   ///< GUSBCFG.PHYSEL: read-only 1 on the FS core, written on the HS one
+    char dm_port = 0;
+    uint8_t dm_pin = 0;
+    char dp_port = 0;
+    uint8_t dp_pin = 0;
+    uint8_t pad_function = 0;   ///< the AF number both pads take
+};
+
+constexpr OtgFacts otg_facts(OtgCore core) {
+    if (core == OtgCore::fs) {
+#if defined(USB_OTG_FS_PERIPH_BASE)
+        return OtgFacts{true,
+                        USB_OTG_FS_PERIPH_BASE,
+                        false,
+                        RCC_AHB2ENR_OTGFSEN,
+                        RCC_AHB2RSTR_OTGFSRST,
+                        0,
+                        320,
+                        4,
+                        false,
+                        'A', 11, 'A', 12, 10};
+#else
+        return OtgFacts{};
+#endif
+    }
+#if defined(USB_OTG_HS_PERIPH_BASE)
+    return OtgFacts{true,
+                    USB_OTG_HS_PERIPH_BASE,
+                    true,
+                    RCC_AHB1ENR_OTGHSEN,
+                    RCC_AHB1RSTR_OTGHRST,
+                    RCC_AHB1ENR_OTGHSULPIEN,
+                    1024,
+                    6,
+                    true,
+                    'B', 14, 'B', 15, 12};
+#else
+    return OtgFacts{};
+#endif
+}
+
+constexpr bool otg_present(OtgCore core) { return otg_facts(core).present; }
+
+/// The core's global interrupt line. NonMaskableInt_IRQn where the part
+/// has no such core - the enumerators are not preprocessor-visible, so
+/// every arm of this switch is guarded by the instance's base macro, as
+/// everywhere else in this file.
+constexpr IRQn_Type otg_irq(OtgCore core) {
+    if (core == OtgCore::fs) {
+#if defined(USB_OTG_FS_PERIPH_BASE)
+        return OTG_FS_IRQn;
+#else
+        return NonMaskableInt_IRQn;
+#endif
+    }
+#if defined(USB_OTG_HS_PERIPH_BASE)
+    return OTG_HS_IRQn;
+#else
+    return NonMaskableInt_IRQn;
+#endif
+}
+
+/// The core's wake-up line through the EXTI (line 18 for the FS core,
+/// line 20 for the HS one - exti_line_irq() answers the same vector).
+constexpr IRQn_Type otg_wakeup_irq(OtgCore core) {
+    if (core == OtgCore::fs) {
+#if defined(USB_OTG_FS_PERIPH_BASE)
+        return OTG_FS_WKUP_IRQn;
+#else
+        return NonMaskableInt_IRQn;
+#endif
+    }
+#if defined(USB_OTG_HS_PERIPH_BASE)
+    return OTG_HS_WKUP_IRQn;
+#else
+    return NonMaskableInt_IRQn;
+#endif
+}
+
+constexpr uint32_t otg_wakeup_exti_line(OtgCore core) { return core == OtgCore::fs ? 18u : 20u; }
+
+/// Which GCCFG layout this part has. The three generations are told apart
+/// by the bit names the header declares and by nothing else.
+constexpr OtgVbusStyle otg_vbus_style() {
+#if defined(USB_OTG_GCCFG_NOVBUSSENS)
+    return OtgVbusStyle::no_vbus_sense;
+#elif defined(USB_OTG_GCCFG_VBDEN)
+    return OtgVbusStyle::vbus_detect;
+#else
+    return OtgVbusStyle::none;
+#endif
+}
+
+/// Whether GOTGCTL carries the B-session-valid OVERRIDE pair (BVALOEN and
+/// BVALOVAL), which is how a part of the later generation is told a
+/// session is on with the VBUS pad given away.
+constexpr bool otg_has_session_override() {
+#if defined(USB_OTG_GOTGCTL_BVALOEN)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// The two GOTGCTL bits that force B-session-valid, or 0 where the part
+/// has no such override.
+constexpr uint32_t otg_session_override_bits() {
+#if defined(USB_OTG_GOTGCTL_BVALOEN)
+    return USB_OTG_GOTGCTL_BVALOEN | USB_OTG_GOTGCTL_BVALOVAL;
+#else
+    return 0;
+#endif
+}
+
+/// GOTGCTL's "a B-session is valid" status bit. The two GCCFG generations
+/// brought two SPELLINGS of the same bit (BSVLD and BSESVLD) at the same
+/// position, so the name is a fact of the header and not of the silicon.
+constexpr uint32_t otg_session_valid_bit() {
+#if defined(USB_OTG_GOTGCTL_BSVLD)
+    return USB_OTG_GOTGCTL_BSVLD;
+#elif defined(USB_OTG_GOTGCTL_BSESVLD)
+    return USB_OTG_GOTGCTL_BSESVLD;
+#else
+    return 0;
+#endif
+}
+
+/// The whole GCCFG value a DEVICE wants: the transceiver powered up, and
+/// either the VBUS pad given away (the core then takes VBUS as valid at
+/// all times) or the B-device comparator watching it. Which bits say that
+/// is the part's GCCFG generation, so the value is computed here and the
+/// driver writes it without asking the preprocessor anything.
+constexpr uint32_t otg_gccfg_device(bool sense_vbus) {
+#if defined(USB_OTG_GCCFG_NOVBUSSENS)
+    return USB_OTG_GCCFG_PWRDWN |
+           (sense_vbus ? USB_OTG_GCCFG_VBUSBSEN : USB_OTG_GCCFG_NOVBUSSENS);
+#elif defined(USB_OTG_GCCFG_VBDEN)
+    return USB_OTG_GCCFG_PWRDWN | (sense_vbus ? USB_OTG_GCCFG_VBDEN : 0u);
+#else
+    (void)sense_vbus;
+    return 0;
+#endif
+}
+
+/// GUSBCFG.TRDT for an AHB rate, RM0383 table 132 (RM0090 and RM0390 carry
+/// the same table): the turnaround the core adds so a slow AHB still
+/// answers an IN token in time. 0 means the rate is below the 14.2 MHz
+/// floor the chapter's own caution states (RM0383 22.3.3), where no TRDT
+/// value serves.
+constexpr uint8_t otg_turnaround_for(uint32_t ahb_hz) {
+    if (ahb_hz >= 32'000'000u) { return 0x6; }
+    if (ahb_hz >= 27'500'000u) { return 0x7; }
+    if (ahb_hz >= 24'000'000u) { return 0x8; }
+    if (ahb_hz >= 21'800'000u) { return 0x9; }
+    if (ahb_hz >= 20'000'000u) { return 0xA; }
+    if (ahb_hz >= 18'500'000u) { return 0xB; }
+    if (ahb_hz >= 17'200'000u) { return 0xC; }
+    if (ahb_hz >= 16'000'000u) { return 0xD; }
+    if (ahb_hz >= 15'000'000u) { return 0xE; }
+    if (ahb_hz >= 14'200'000u) { return 0xF; }
+    return 0;
+}
+
+// ---- power --------------------------------------------------------------------
+//
+// The regulator's own facts - the VOS width, the over-drive pair and the
+// frequency ladders - are up in "the regulator and the clock ladders",
+// where the clock task needs them. What is here is the rest of the PWR
+// chapter: which optional fields this part's PWR_CR and PWR_CSR carry, and
+// the two things the header cannot be asked for (the PVD's thresholds in
+// volts, and which pad each wake-up pin is).
+
+/// PWR_CR's under-drive field (UDEN[1:0]) and PWR_CSR's UDRDY: the
+/// F42x/F43x, F446 and F469/F479 classes, the same set as the over-drive
+/// pair - the two are the halves of one option.
+constexpr bool pwr_has_under_drive() {
+#if defined(PWR_CR_UDEN)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// PWR_CR's low-voltage-in-deep-sleep pair. RM0383 5.4.1 spells them
+/// MRLVDS and LPLVDS, RM0390 5.4.1 spells the same two bits MRUDS and
+/// LPUDS; ST's headers use the first spelling everywhere the bits exist,
+/// which is every part but the F405/F407/F415/F417 class.
+constexpr bool pwr_has_low_voltage_stop() {
+#if defined(PWR_CR_MRLVDS)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// PWR_CR's FISSR and FMSSR - stopping the flash interface, or the flash
+/// itself, WHILE THE SYSTEM RUNS. Absent on the F401, the F405 class and
+/// the F42x/F43x; present from the F410 up and on the F446.
+constexpr bool pwr_has_flash_stop_while_run() {
+#if defined(PWR_CR_FISSR)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// PWR_CR.ADCDC1, the bit AN4073 owns: present everywhere but the F405
+/// class.
+constexpr bool pwr_has_adcdc1() {
+#if defined(PWR_CR_ADCDC1)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// PWR_CSR's enable bit for wake-up pin `n` (1-based), 0 when this part
+/// has no such pin. The parts with ONE pin call the bit EWUP and put it
+/// at bit 8, which is exactly where the parts with several put EWUP1 - so
+/// pin 1 is the same pin under both spellings, and the header's own
+/// symbols answer for the rest.
+constexpr uint32_t pwr_wakeup_pin_mask(uint8_t n) {
+    switch (n) {
+        case 1:
+#if defined(PWR_CSR_EWUP1)
+            return PWR_CSR_EWUP1;
+#elif defined(PWR_CSR_EWUP)
+            return PWR_CSR_EWUP;
+#else
+            return 0u;
+#endif
+        case 2:
+#if defined(PWR_CSR_EWUP2)
+            return PWR_CSR_EWUP2;
+#else
+            return 0u;
+#endif
+        case 3:
+#if defined(PWR_CSR_EWUP3)
+            return PWR_CSR_EWUP3;
+#else
+            return 0u;
+#endif
+        default:
+            return 0u;
+    }
+}
+
+/// How many WKUPx pins this part bonds: one on the F401, the F405 class,
+/// the F411 and the F42x/F43x and F469/F479; two on the F446; three on
+/// the F410, F412 and F413/F423.
+constexpr uint8_t pwr_wakeup_pin_count() {
+    uint8_t n = 0;
+    while (n < 3u && pwr_wakeup_pin_mask(static_cast<uint8_t>(n + 1u)) != 0u) {
+        ++n;
+    }
+    return n;
+}
+
+/**
+ * Which PAD a wake-up pin is, AND THE DEVICE HEADER CANNOT BE ASKED - the
+ * bonding is the datasheet's, so this is keyed on the device-select define
+ * like the frequency ladders and the RTC's pads.
+ *
+ * WKUP1 is PA0 on every part read, and the datasheets label that pad
+ * PA0-WKUP. The second pin of the F446 is PC13 (DS10693 table 11 names it
+ * WKUP1 there, counting from zero where PWR_CSR's EWUP2 counts from one -
+ * the register is what this file follows). A class whose datasheet is not
+ * on the desk gets `known == false` for every pin past the first: an
+ * enable written for a pad nobody identified would arm an input the
+ * application cannot reason about.
+ */
+struct PwrWakeupPad {
+    bool known = false;
+    char port = 0;
+    uint8_t pin = 0;
+};
+
+constexpr PwrWakeupPad pwr_wakeup_pad(uint8_t n) {
+    PwrWakeupPad p{};
+    if (pwr_wakeup_pin_mask(n) == 0u) {
+        return p;
+    }
+    if (n == 1u) {
+        // Every datasheet of this family labels the pad PA0-WKUP.
+        p.known = true;
+        p.port = 'A';
+        p.pin = 0;
+        return p;
+    }
+#if defined(STM32F446xx)
+    if (n == 2u) {
+        p.known = true;
+        p.port = 'C';
+        p.pin = 13;
+    }
+#endif
+    return p;
+}
+
+/**
+ * The eight PVD thresholds PLS[2:0] selects, in MILLIVOLTS - the
+ * reference manual's table and not the header's, and it differs by part
+ * class: RM0090 5.4.1 and 5.5.1 and RM0390 5.4.1 give 2.0, 2.1, 2.3, 2.5,
+ * 2.6, 2.7, 2.8 and 2.9 V; RM0383 5.4.1 gives 2.2, 2.3, 2.4, 2.5, 2.6,
+ * 2.7, 2.8 and 2.9 V. A class whose manual is not on the desk gets
+ * `known == false` and no millivolts: the CODE is still writable there
+ * (the field is the same three bits on every part), but what it means in
+ * volts is refused rather than guessed.
+ */
+struct PvdLevels {
+    bool known = false;
+    uint16_t mv[8] = {};
+};
+
+constexpr PvdLevels pwr_pvd_levels() {
+    PvdLevels l{};
+#if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx) || \
+    defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx) || \
+    defined(STM32F446xx)
+    l.known = true;
+    l.mv[0] = 2000; l.mv[1] = 2100; l.mv[2] = 2300; l.mv[3] = 2500;
+    l.mv[4] = 2600; l.mv[5] = 2700; l.mv[6] = 2800; l.mv[7] = 2900;
+#elif defined(STM32F411xE)
+    l.known = true;
+    l.mv[0] = 2200; l.mv[1] = 2300; l.mv[2] = 2400; l.mv[3] = 2500;
+    l.mv[4] = 2600; l.mv[5] = 2700; l.mv[6] = 2800; l.mv[7] = 2900;
+#endif
+    return l;
+}
+
+/// The EXTI line the PVD's output raises - a CONFIGURABLE line on this
+/// family (RM0090 12.2.5, RM0390 11.2.5, RM0383 10.2.5), so a sense must
+/// be chosen before anything is pending. Published here per the stratum's
+/// rule that a peripheral owns its own line number.
+inline constexpr uint8_t pwr_pvd_exti_line = 16;
+
+/// RCC_AHB1ENR's gate on the 4 KB backup SRAM the backup regulator keeps
+/// alive; 0 where the part has no backup SRAM (the F401, F410, F411 and
+/// F412/F413 classes), whose PWR_CSR still carries BRE and BRR.
+constexpr uint32_t pwr_backup_sram_clock_mask() {
+#if defined(RCC_AHB1ENR_BKPSRAMEN)
+    return RCC_AHB1ENR_BKPSRAMEN;
+#else
+    return 0u;
+#endif
 }
 
 } // namespace brio
