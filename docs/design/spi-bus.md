@@ -23,11 +23,11 @@ silicon. The app's ISR binds the vector, as always.
 
 ### Realizations
 
-Common to the five: the Request field for field (`cs`, `dc`, `cmd`,
+Common to the six: the Request field for field (`cs`, `dc`, `cmd`,
 `cmd_len`, `tx`, `rx`, `len`, `reply`, `mode`, `polled`, `cs_setup_us`),
 the engine verbs `init`, `start`, `isr`, `rebase`, `recover`, `release`,
 `sck_hz`, `max_sck_hz`, and the vocabulary `SpiMode` / `SpiDone` /
-`spi_*`. An 8-bit request is spelled identically on all five, and each
+`spi_*`. An 8-bit request is spelled identically on all six, and each
 engine is measured against a real client on the wire - transactions
 queued from one dispatch, a rejection when the queue is full, both
 sleep votes, and the per-bus timeout with `recover()` - on the three
@@ -41,6 +41,7 @@ jumper ([the target's document map](../ch32v00x/README.md)).
 | stm32g0 | `SpiHost<n, pins, TxEngine, RxEngine>` (`stm32g0/spi.hpp`) | a frame size in the Request (`bits`, 4 to 16, eight by default) with `cmd_len`/`len` counted in FRAMES; the `SpiClock` enum with `ceiling_clock()` and the chooser `clock_for(hz)`; the engine slots, `status()` and `prime(mode, clock, bits)` as the SAM's; `bit_order()`/`lsb_first()` on the task; `claim_nss_pad()` for a hardware NSS; `reference_hz()` = PCLK |
 | ch32v00x | `SpiHost<1, pins, TxEngine, RxEngine>` (`ch32v00x/spi.hpp`) | the G0's surface on the F1's peripheral: `bits` is 8 or 16 (the two widths this SPI has), the `SpiClock` enum runs div2..div256 with `ceiling_clock()` and `clock_for(hz)`, `prime(mode, clock, bits)`, `bit_order()`/`lsb_first()`, `claim_nss_pad()`, `status()` = `spi_ok` or `spi_dma_fault`; the engine slots are FIXED to DMA channels 3 (TX) and 2 (RX), because on this family the channel IS the request; `reference_hz()` = HCLK, there being no APB prescaler |
 | rp2040 | `SpiHost<n, pins, TxEngine, RxEngine>` (`rp2040/spi.hpp`) | the PL022: `bits` 8 or 16 in the Request (the resource takes 4..16), the rate a `SpiClock` PAIR (an even prescaler and a serial clock rate, `SpiClocks::div2..div256` the named ones) with `ceiling_clock()` and `clock_for(hz)`, `prime(mode, clock, bits)`, `loopback(on)` kept through re-application, the engine slots on ANY two channels told the instance's requests, `status()` = `spi_ok` or `spi_dma_fault`; `reference_hz()` = clk_peri; the pump keeps eight frames in flight through the FIFOs |
+| stm32f4 | `SpiHost<n, pins, TxEngine, RxEngine>` (`stm32f4/spi.hpp`) | the F1 lineage's block, so `bits` is 8 or 16 as on the CH32V00x; the `SpiClock` enum runs div2..div256 off THE INSTANCE'S OWN APB CLOCK (`reference_hz()` is PCLK1 or PCLK2, never SYSCLK) with `ceiling_clock()` and `clock_for(hz)`, `prime(mode, clock, bits)`, `bit_order()`/`lsb_first()`, `claim_nss_pad()`, `status()` = `spi_ok` or `spi_dma_fault`; the engine slots take a (controller, stream, channel) CELL of the request mapping, checked per part class and refused on a class whose manual was not read; and two verbs no other stratum has - `sck_speed()` beside `errata_apb_ceiling_hz()`/`within_errata_ceiling()`, because ES0206 2.12.4 makes the SCK PAD's slew class decide whether the last received bit is captured |
 | host | none | `SpiBus` is host-tested over a fake `Bus` (`test_spi_bus`, `test_bus_master`) |
 
 One of those differences is ONE thing spelled two ways and is
@@ -57,17 +58,18 @@ of the bench converge on one algorithm - answers kept queued ahead of
 what the host has clocked - whose only per-silicon parameter is HOW
 MANY must be queued ahead (one on the AVR, two on the SAM for its
 three-SCK-cycle rule, two on the G0 for its FIFO, one on the CH32V00x,
-eight on the RP2040's FIFO - whose client also takes one frame per
+eight on the RP2040's FIFO, one on the STM32F4 - whose RP2040 client also takes one frame per
 select window in modes 0 and 2, [the target's document](../rp2040/spi.md)).
 That integer is the one thing a portable client would need, and each
 `SpiClient` publishes it as `frames_ahead`.
 
-The five peripherals share almost nothing below the contract - a
+The six peripherals share almost nothing below the contract - a
 shift register with a two-deep buffer, a SERCOM with a pad matrix, an
 SPI with a FIFO and a frame size, one with no FIFO at all and a DMA
-channel per direction, and a PL022 with two eight-deep FIFOs and a
-request any channel takes - which is what makes the descriptor's
-survival worth recording.
+channel per direction, a PL022 with two eight-deep FIFOs and a
+request any channel takes, and an F1-lineage block with no FIFO whose
+SCK PAD is a correctness parameter - which is what makes the
+descriptor's survival worth recording.
 
 `SpiBus` is an alias of `BusMaster<Bus, P>` (`util/bus_master.hpp`),
 the arbiter shared with I2C - see [i2c-bus.md](i2c-bus.md).
