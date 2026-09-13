@@ -307,10 +307,12 @@ gets its home in `docs/design/` when taken.
   the family check over all twenty-three headers; then the reset
   chapter (the flags, both watchdogs, the four fault vectors, seven real
   resets measured) and the EXTI + SYSCFG chapter. What remains: every
-  other chapter (FLASH with
-  its UNEVEN sectors - a design point for nv-heap.md before the NVM
-  chapter -, the stream-and-FIFO DMA, the timers, ADC/DAC, PWR's Stop
-  modes with a dynamic clock's way down, RTC, EXTI, SPI/I2S, I2C, the
+  other chapter (FLASH as the program/erase engine and the option bytes
+  ALONE - no FlashMedia here: the family's uneven sectors sit low in the
+  bank where the vector table lives, so a fixed NV zone would partition
+  every image's linker script, and the NV stack is deferred to its own
+  review, below -, the stream-and-FIFO DMA, the timers, ADC/DAC, PWR's
+  Stop modes with a dynamic clock's way down, SPI/I2S, I2C, the
   DWC2 OTG FS controller for util/usb - both OTG connectors are cabled
   -, and on the F429 alone FMC + LTDC + DMA2D, the memory-mapped display
   tier); the frequency ladders of the five part classes whose manuals
@@ -335,6 +337,16 @@ gets its home in `docs/design/` when taken.
   cores, the bus fabric's counters). The USB device stack
   (util/usb/) was born here, with its CDC console on the chip's own
   connector.
+- **The NV stack reviewed as a whole.** The flash heap and the journal
+  were born where flash was cheap to partition (a zone off the end of
+  the image on the AVR, the top of the array elsewhere) and carried to
+  every target since for coherence; the STM32F4 is the first family
+  where the geometry pushes back (16 KB sectors only at the bottom of
+  the bank, 128 KB above), and the question it raises is prior to the
+  design point it seemed to pose: WHICH programs need a flash-backed
+  store, which need the heap's blocks against the journal's small
+  values, and whether a zone at a fixed address is worth a partition
+  every image pays. Until that review, no FlashMedia on the STM32F4.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
