@@ -304,18 +304,21 @@ gets its home in `docs/design/` when taken.
   standalone STLINK-V3) with kernel/ and util/ untouched - the platform,
   the clock (the regulator scale and over-drive sequenced, the APB
   prescalers unpinned), the pins and the USART with their documents,
-  the family check over all twenty-three headers; then the reset
-  chapter (the flags, both watchdogs, the four fault vectors, seven real
-  resets measured) and the EXTI + SYSCFG chapter. What remains: every
-  other chapter (FLASH as the program/erase engine and the option bytes
-  ALONE - no FlashMedia here: the family's uneven sectors sit low in the
-  bank where the vector table lives, so a fixed NV zone would partition
-  every image's linker script, and the NV stack is deferred to its own
-  review, below -, the FMPI2C1 of the F410/F412/F413/F446 as a chapter
-  of its own, and on the F429 alone FMC + LTDC + DMA2D, the
-  memory-mapped display tier); the frequency ladders of the five part classes whose manuals
-  are not on the desk; the debuggers (cortex-debug entries written,
-  not driven). Tenuto only, the equal-priority
+  the family check over all twenty-three headers; then chapter by
+  chapter, each with its document and its suite green on every board it
+  builds for: reset and the watchdogs, EXTI + SYSCFG, the RTC and the
+  backup domain, the DMA (the Uart's engine slots filled), the timers,
+  the ADC and the DAC (read back on the pad they share), SPI/I2S and I2C
+  (against the gyroscope and the touch controller a board carries), the
+  USB OTG core for util/usb (the console on the black pill's own
+  connector), PWR with the sleep sites and the dynamic clock, and the
+  flash interface as the ENGINE alone (no FlashMedia, by the NV review's
+  decision below). What remains: the small blocks (CRC, RNG, bxCAN in
+  loopback), the FMPI2C1 of the F410/F412/F413/F446 as a chapter of its
+  own, and on the F429 alone FMC + SDRAM, then LTDC + DMA2D, the
+  memory-mapped display tier; the frequency ladders of the five part
+  classes whose manuals are not on the desk; the debuggers (cortex-debug
+  entries written, not driven). Tenuto only, the equal-priority
   promise kept; Rubato and BASEPRI are another type and another day.
 - **The RP2040 stratum.** `brio/rp2040/` and `rp2040/` are
   `supported` on the RP2040 (README.md's table) on a Raspberry Pi
@@ -1305,7 +1308,11 @@ brio/                    the framework, four strata:
                            the backup-register count read off RTC_TypeDef
                            itself and the RTC's pad facts keyed on the part
                            class (ST declares TAMP2E on every header, so the
-                           count of tamper inputs is the manual's)
+                           count of tamper inputs is the manual's); and the
+                           flash interface's per-class facts, the chapter where
+                           the device header is wrong in BOTH directions (a
+                           second bank's bits declared on a part that has one
+                           bank, a PCROP bit omitted on a part that has it)
     nvic.hpp / ticker.hpp / delay.hpp  the device header + the cortexm/ file:
                            PRIMASK the one mask on a core that has BASEPRI,
                            SysTick at 1000 Hz, delay_us on VAL
@@ -1330,9 +1337,22 @@ brio/                    the framework, four strata:
                            (the RTC's wake-up timer as alarm and its sub-second
                            counter as witness, the frozen span handed to
                            Ticker::advance(), the four-act ISR)
-    flash.hpp              FlashWaitStates (the readback rule), FlashAccel (the
-                           ART's prefetch and caches), DeviceUid /
-                           flash_size_kbytes / DeviceIdcode
+    flash.hpp              the whole of chapter 3. For the clock task:
+                           FlashWaitStates (the readback rule) and FlashAccel
+                           (the ART's prefetch, both caches, and the flush an
+                           erase asks for). Then the write side: the sector map
+                           COMPUTED from the size register (four of 16 Kbytes,
+                           one of 64, 128 to the end of the bank), the keyed
+                           lock, the program and erase engine with the
+                           PARALLELISM AS A TEMPLATE PARAMETER because it is
+                           the store instruction (x64 refused for want of VPP),
+                           the four malformed sequences a suite stages on
+                           purpose and the fifth that locks the engine until
+                           reset, the interrupt - and FlashOptions, every option
+                           byte decoded with nWRP the only one written, through
+                           a half-word store that keeps the RDP byte out of the
+                           data path; no FlashMedia, by the NV review's decision.
+                           DeviceUid / flash_size_kbytes / DeviceIdcode
     clock.hpp              Rcc (HSI, HSE crystal or bypass, the main PLL, the
                            switch, the APB prescalers, the enables with the
                            errata readback, the resets, MCO1/2) + Clock<src,

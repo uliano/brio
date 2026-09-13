@@ -2655,4 +2655,184 @@ constexpr IRQn_Type fmpi2c_error_irq() {
 #endif
 }
 
+// ---- the embedded flash memory interface --------------------------------------
+//
+// THE HEADER IS NOT THE AUTHORITY IN THIS CHAPTER, and it is the clearest
+// case of it in the whole stratum: ST declares one FLASH_TypeDef and one
+// set of bit masks for a whole marketing line, so the F446's header carries
+// `FLASH_CR_MER2`, `FLASH_OPTCR_DB1M` and `FLASH_OPTCR_BFB2` - three bits of
+// a SECOND BANK that part has not got (RM0390 3.3: 512 Kbytes, one bank,
+// eight sectors, and a FLASH_CR whose SNB is four bits) - while the F411's
+// header does NOT carry `FLASH_OPTCR_SPRMOD`, a bit RM0383 3.6.5 describes
+// in full. Both directions of error in one chapter.
+//
+// So what a part's flash interface IS comes from the REFERENCE MANUAL and is
+// keyed on the device-select define, as the frequency ladders and the RTC's
+// pads are, and it is stated only for the classes whose chapter 3 was read:
+// RM0090 3.3 (the F405/F407/F415/F417 class), RM0090 3.4 (the F42x/F43x
+// class), RM0390 3.3 (the F446), RM0383 3.3 (the F411). A header outside
+// those gets `known == false`: stm32f4/flash.hpp then has no sector map to
+// name, so it refuses every erase there rather than aim SNB at a guess -
+// while PROGRAMMING, which needs no map at all, keeps working everywhere.
+//
+// ONE FACT IS THE SAME IN ALL FOUR CHAPTERS and is therefore a rule and not
+// a table: a bank's sectors are FOUR of 16 Kbytes, then ONE of 64, then 128
+// Kbytes to the end of the bank (RM0090 tables 5, 6, 8, 9 and 10, RM0390
+// table 4, RM0383 table 4). How many there are is the flash size register's
+// business at run time, which is why the map is computed in flash.hpp and
+// only its SHAPE is here.
+
+/// What one part class's flash interface is - the reference manual's
+/// answers to the questions the device header answers wrongly or not at
+/// all. `known` false means the chapter was not read for this part.
+struct FlashFacts {
+    bool known = false;
+    /// Sectors in ONE bank at most - twelve where a bank may reach 1 Mbyte
+    /// (the F405 and F42x/F43x classes), eight on the 512 Kbyte parts.
+    uint8_t max_sectors_per_bank = 0;
+    /// FLASH_CR.SNB's width: five bits only where the sector numbering has
+    /// to carry a bank (RM0090 3.9.8), four everywhere else.
+    uint8_t snb_bits = 4;
+    /// A second bank exists, or an option bit can make one (RM0090 3.4).
+    bool dual_bank_capable = false;
+    /// OPTCR.DB1M - a 1 Mbyte part split into two 512 Kbyte banks.
+    bool has_dual_bank_option = false;
+    /// OPTCR.BFB2 - the boot from bank 2.
+    bool has_dual_bank_boot = false;
+    /// OPTCR.SPRMOD - nWRPi selecting PCROP instead of write protection.
+    bool has_pcrop_mode = false;
+    /// FLASH_SR.RDERR - the flag a D-bus read of a PCROPed sector raises.
+    bool has_read_error = false;
+    /// How many nWRP bits one OPTCR carries: one per sector of its bank.
+    uint8_t wrp_bits = 0;
+    /// FLASH_OPTCR1 - bank 2's write protection, the dual-bank parts' alone.
+    bool has_option_register1 = false;
+};
+
+constexpr FlashFacts flash_facts() {
+    FlashFacts f{};
+#if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx)
+    // RM0090 3.3 and 3.9.7/3.9.9: up to 1 Mbyte in one bank of twelve
+    // sectors, SNB four bits, nWRP twelve bits, no PCROP, no RDERR, no
+    // second bank of any kind.
+    f.known = true;
+    f.max_sectors_per_bank = 12;
+    f.wrp_bits = 12;
+#elif defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx)
+    // RM0090 3.4, 3.9.8, 3.9.10 and 3.9.11: two banks of twelve sectors,
+    // SNB five bits (sectors 12..23 encoded 16..27), nWRP twelve bits in
+    // each of OPTCR and OPTCR1, PCROP, RDERR, DB1M and BFB2.
+    f.known = true;
+    f.max_sectors_per_bank = 12;
+    f.snb_bits = 5;
+    f.dual_bank_capable = true;
+    f.has_dual_bank_option = true;
+    f.has_dual_bank_boot = true;
+    f.has_pcrop_mode = true;
+    f.has_read_error = true;
+    f.wrp_bits = 12;
+    f.has_option_register1 = true;
+#elif defined(STM32F446xx)
+    // RM0390 3.3 and 3.7.5/3.7.6: 512 Kbytes in ONE bank of eight sectors,
+    // SNB four bits, nWRP eight bits, PCROP and RDERR - and no MER2, no
+    // DB1M and no BFB2 whatever the device header declares.
+    f.known = true;
+    f.max_sectors_per_bank = 8;
+    f.has_pcrop_mode = true;
+    f.has_read_error = true;
+    f.wrp_bits = 8;
+#elif defined(STM32F411xE)
+    // RM0383 3.3, 3.8.5 and 3.8.6: 512 Kbytes in one bank of eight
+    // sectors, SNB four bits, nWRP eight bits, PCROP (3.6.5) and RDERR
+    // (3.8.4 bit 8) - the PCROP bit the header does not declare.
+    f.known = true;
+    f.max_sectors_per_bank = 8;
+    f.has_pcrop_mode = true;
+    f.has_read_error = true;
+    f.wrp_bits = 8;
+#endif
+    return f;
+}
+
+/// The sector shape every chapter read states, in bytes: four of the
+/// first size, one of the second, the rest of the third, per bank.
+inline constexpr uint32_t flash_small_sector_bytes = 16u * 1024u;
+inline constexpr uint8_t flash_small_sectors = 4;
+inline constexpr uint32_t flash_middle_sector_bytes = 64u * 1024u;
+inline constexpr uint32_t flash_large_sector_bytes = 128u * 1024u;
+
+/// The first sector NUMBER of bank 2 (RM0090 tables 6 and 7: bank 1 ends
+/// at eleven whatever its size, and bank 2 starts at twelve).
+inline constexpr uint8_t flash_bank2_first_sector = 12;
+
+/// FLASH_CR.SNB for sector `n`: its own number in bank 1, and four more
+/// than its number in bank 2 - RM0090 3.9.8 leaves 12..15 "not allowed"
+/// and starts bank 2 at 0b10000.
+constexpr uint8_t flash_sector_number_code(uint8_t n) {
+    return n >= flash_bank2_first_sector ? static_cast<uint8_t>(n + 4u) : n;
+}
+
+/// FLASH_SR.RDERR where the part has it, 0 where it has none - the one
+/// flag of this chapter the device header gets right on every part of the
+/// pack (test/family_stm32f4/flash.cpp asserts the two agree wherever the
+/// manual was read).
+constexpr uint32_t flash_read_error_flag() {
+#if defined(FLASH_SR_RDERR)
+    return FLASH_SR_RDERR;
+#else
+    return 0u;
+#endif
+}
+
+/// FLASH_CR's bank-2 mass erase where the manual has one, 0 elsewhere.
+/// THE NAME IS THE HEADER'S: RM0090 3.9.8 calls the bit MER1 and the pack
+/// spells it `FLASH_CR_MER2`, same bit 15 - and it declares it on the F446
+/// too, which has no bank 2, so `flash_facts()` and not the macro decides
+/// whether this mask may ever be stored.
+constexpr uint32_t flash_bank2_mass_erase_mask() {
+#if defined(FLASH_CR_MER2)
+    return FLASH_CR_MER2;
+#else
+    return 0u;
+#endif
+}
+
+/// OPTCR.SPRMOD where the part has it. RM0383 3.6.5 gives the F411 PCROP
+/// and its header does not declare the bit, so the position is stated here
+/// rather than probed: bit 31 in every manual that has it.
+constexpr uint32_t flash_pcrop_mode_mask() {
+    return flash_facts().has_pcrop_mode ? (1UL << 31) : 0u;
+}
+
+/// OPTCR.DB1M and OPTCR.BFB2, by the same rule (bits 30 and 4).
+constexpr uint32_t flash_dual_bank_option_mask() {
+    return flash_facts().has_dual_bank_option ? (1UL << 30) : 0u;
+}
+constexpr uint32_t flash_dual_bank_boot_mask() {
+    return flash_facts().has_dual_bank_boot ? (1UL << 4) : 0u;
+}
+
+/// The system memory, the OTP area and the option bytes: the same
+/// addresses in all four chapters (RM0090 tables 5 and 6, RM0390 table 4,
+/// RM0383 table 4). The second option-byte block is bank 2's.
+inline constexpr uint32_t flash_system_memory_base = 0x1FFF0000UL;
+inline constexpr uint32_t flash_system_memory_bytes = 30u * 1024u;
+inline constexpr uint32_t flash_otp_base = 0x1FFF7800UL;
+inline constexpr uint32_t flash_otp_bytes = 512;
+inline constexpr uint32_t flash_otp_lock_base = 0x1FFF7A00UL;
+inline constexpr uint32_t flash_otp_blocks = 16;
+inline constexpr uint32_t flash_option_bytes_base = 0x1FFFC000UL;
+inline constexpr uint32_t flash_option_bytes_base_bank2 = 0x1FFEC000UL;
+
+/// The flash interface's NVIC line - position 4 on every part of this
+/// family, and its alone. Guarded like every vector verb here by a
+/// base-address macro, this block's own.
+constexpr IRQn_Type flash_irq() {
+#if defined(FLASH_R_BASE)
+    return FLASH_IRQn;
+#else
+    return NonMaskableInt_IRQn;
+#endif
+}
+
 } // namespace brio
