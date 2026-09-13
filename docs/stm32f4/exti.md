@@ -324,10 +324,12 @@ outside `z` and fails when nobody is at the desk.
 
 Driver gaps:
 
-- `SYSCFG_CFGR` (the FMPI2C1 Fm+ drive on the parts that have it) and
-  `SYSCFG_PMC`'s `ADCxDC2` bits: each belongs to a peripheral chapter with
-  no driver in this stratum, and each is a struct member on some headers
-  only - born with their first user.
+- `SYSCFG_PMC`'s `ADCxDC2` bits: they belong to a peripheral chapter with
+  no driver in this stratum, and they are struct members on some headers
+  only - born with their first user. (`SYSCFG_CFGR`, the other such
+  register, was one of these until the Fast-mode Plus I2C arrived: its two
+  pad-drive bits are `Syscfg::fast_mode_plus()`, and
+  [fmpi2c.md](fmpi2c.md) is what uses them.)
 - `SYSCFG_MEMRMP` is read and never written: moving what lives at address 0
   under a running program is a boot decision the BOOT pins already made,
   and the swap bits the bigger parts add there (the FMC/FSMC bank swap, the

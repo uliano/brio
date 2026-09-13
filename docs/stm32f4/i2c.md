@@ -384,13 +384,9 @@ Driver gaps, each with its reason:
 - The general call as a HOST verb (a broadcast write to address 0):
   the resource enables the target side's recognition, and no portable
   program needs the other half yet.
-- FMPI2C1 - the Fast-mode Plus I2C of the F410, F412, F413/F423 and
-  F446 - is ANOTHER BLOCK, the STM32G0's register file (one TIMINGR
-  word, ISR/ICR, a byte counter, autoend) under another name. It has
-  its own chapter (RM0390 ch. 23) and will have its own driver; the
-  reserve publishes only what the header knows of it.
-- A wake from Stop on an address match: this family's I2C has no such
-  wake-up (the FMPI2C does), so there is nothing to build.
+- A wake from Stop on an address match: no I2C of this family has one -
+  neither this block nor the FMPI2C beside it on some parts
+  ([fmpi2c.md](fmpi2c.md)) - so there is nothing to build.
 - The recovery LADDER - when to unstick, when to retry, when to take a
   bus out of service - is the application's or a future policy type's,
   as on every other stratum.

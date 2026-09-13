@@ -314,9 +314,10 @@ gets its home in `docs/design/` when taken.
   connector), PWR with the sleep sites and the dynamic clock, and the
   flash interface as the ENGINE alone (no FlashMedia, by the NV review's
   decision below), the CRC unit, the RNG (written for the parts that
-  have one, unmeasured) and the bxCAN in loopback. What remains: the
-  FMPI2C1 of the F410/F412/F413/F446 as a chapter of its
-  own, and on the F429 alone FMC + SDRAM, then LTDC + DMA2D, the
+  have one, unmeasured), the bxCAN in loopback and the FMPI2C1 of the
+  F410/F412/F413/F446 - the STM32G0's I2C under another name, measured
+  on a bus with no device on it. What remains: on the F429 alone FMC +
+  SDRAM, then LTDC + DMA2D, the
   memory-mapped display tier; the frequency ladders of the five part
   classes whose manuals are not on the desk; the debuggers (cortex-debug
   entries written, not driven). Tenuto only, the equal-priority
@@ -1508,6 +1509,21 @@ brio/                    the framework, four strata:
                            2.10.3 prescribes, the pads handed over BEFORE
                            that reset because BUSY watches the peripheral's
                            own inputs) + I2cClient<n, pins>
+    fmpi2c.hpp             FMPI2C (RM0390 ch. 23): the SECOND I2C design some
+                           parts of this family carry - the STM32G0's register
+                           file under another name, so FmpI2c<n> is that
+                           driver's resource with an Fmp prefix (one TIMINGR
+                           word solved both ways against tables 134/135, the
+                           byte counter with RELOAD and AUTOEND, two own
+                           addresses with a mask, the SMBus half with both
+                           time-outs) - and this family's own differences: TWO
+                           vectors, a kernel clock chosen in RCC_DCKCFGR2 (the
+                           APB, SYSCLK or the HSI), the Fm+ pad drive in
+                           SYSCFG, and NO wake from Stop (table 127's dash,
+                           and the header has no WUPEN) + FmpI2cHost<n, pins,
+                           TxEngine, RxEngine> with I2cHost's parameter list
+                           and Request VERBATIM, so a program changes one type
+                           name to move between the two blocks + FmpI2cClient
     usb.hpp                USB OTG in DEVICE MODE (ch. 22 / 31 / 34-35):
                            UsbOtg<core> - ONE template over the two DWC2
                            cores this family may carry (UsbFs on PA11/PA12,

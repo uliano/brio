@@ -27,11 +27,12 @@
  * Nothing here ever closes it - a second user of SYSCFG would lose its
  * block; that is a program-wide decision and clock(false) exists for it.
  *
- * WHAT THIS FILE DOES NOT CARRY. SYSCFG_CFGR (the FMPI2C1 Fm+ drive on the
- * F446 and F410) and SYSCFG_PMC's ADCxDC2 bits are struct members and bit
- * masks that exist on some headers and not others, and each belongs to a
- * peripheral chapter that has no driver in this stratum yet; they will be
- * born with their first user. MEMRMP is READ ONLY here on purpose: moving
+ * WHAT THIS FILE DOES NOT CARRY. SYSCFG_PMC's ADCxDC2 bits are struct
+ * members and bit masks that exist on some headers and not others, and
+ * they belong to a peripheral chapter that has no driver in this stratum
+ * yet; they will be born with their first user. SYSCFG_CFGR - the FMPI2C1
+ * Fm+ pad drive - was such a case until stm32f4/fmpi2c.hpp arrived, and is
+ * here now. MEMRMP is READ ONLY here on purpose: moving
  * what lives at address 0 under a running program is not a verb, it is a
  * boot decision the BOOT pins already made.
  *
@@ -189,6 +190,66 @@ public:
         } else {
             return false;
         }
+    }
+
+    // ---- the Fm+ pad drive (RM0390 8.2.5) ----------------------------------
+
+    /// Whether this device has SYSCFG_CFGR at all - the parts that carry
+    /// the Fast-mode Plus I2C, and only those.
+    static constexpr bool has_fast_mode_plus() {
+#if defined(SYSCFG_CFGR_FMPI2C1_SCL)
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    /**
+     * The 20 mA output drive the FMPI2C1's two lines need to reach Fast-mode
+     * Plus, as SYSCFG_CFGR holds it: ONE BIT PER SIGNAL and not per pad, so
+     * whichever pad carries FMPI2C1_SCL takes the SCL bit's drive. Answers
+     * false and changes nothing on a part without the register (which is
+     * every part without the peripheral).
+     *
+     * The peripheral's own driver is stm32f4/fmpi2c.hpp; this is the one
+     * bit pair of the pad side, kept here because SYSCFG is one block with
+     * one clock gate and one owner.
+     */
+    static bool fast_mode_plus(bool scl, bool sda) {
+#if defined(SYSCFG_CFGR_FMPI2C1_SCL)
+        clock(true);
+        uint32_t v = regs().CFGR & ~(SYSCFG_CFGR_FMPI2C1_SCL | SYSCFG_CFGR_FMPI2C1_SDA);
+        if (scl) {
+            v |= SYSCFG_CFGR_FMPI2C1_SCL;
+        }
+        if (sda) {
+            v |= SYSCFG_CFGR_FMPI2C1_SDA;
+        }
+        regs().CFGR = v;
+        return true;
+#else
+        (void)scl;
+        (void)sda;
+        return false;
+#endif
+    }
+
+    static bool fast_mode_plus_scl() {
+#if defined(SYSCFG_CFGR_FMPI2C1_SCL)
+        clock(true);
+        return (regs().CFGR & SYSCFG_CFGR_FMPI2C1_SCL) != 0u;
+#else
+        return false;
+#endif
+    }
+
+    static bool fast_mode_plus_sda() {
+#if defined(SYSCFG_CFGR_FMPI2C1_SDA)
+        clock(true);
+        return (regs().CFGR & SYSCFG_CFGR_FMPI2C1_SDA) != 0u;
+#else
+        return false;
+#endif
     }
 };
 

@@ -2613,13 +2613,13 @@ constexpr bool i2c_dma_placement_valid(uint8_t n, bool transmit, uint8_t control
 }
 
 /**
- * FMPI2C1 - FACTS ONLY, AND NO DRIVER. The Fast-mode Plus I2C some parts
- * of this family carry (the F410, F412, F413/F423 and F446) is NOT this
- * chapter's block wearing another name: it is the register file of the
- * STM32G0's I2C - one TIMINGR word, ISR/ICR, a byte counter, autoend -
- * so it is another chapter, and stm32f4/i2c.hpp does not touch it. What
- * is published here is what the header knows, so that a program can see
- * the instance exists and a document can say what is missing.
+ * FMPI2C1 - THE FACTS THE I2C CHAPTER PUBLISHES. The Fast-mode Plus I2C
+ * some parts of this family carry (the F410, F412, F413/F423 and F446) is
+ * NOT this chapter's block wearing another name: it is the register file
+ * of the STM32G0's I2C - one TIMINGR word, ISR/ICR, a byte counter,
+ * autoend - so it is another chapter, stm32f4/fmpi2c.hpp, whose own
+ * section sits at the end of this file; stm32f4/i2c.hpp does not touch
+ * it. What is published here is what the header knows.
  */
 constexpr uint32_t fmpi2c_base() {
 #if defined(FMPI2C1_BASE)
@@ -3068,6 +3068,86 @@ constexpr bool can_ttcm_erratum() {
 #else
     return false;
 #endif
+}
+
+// ---- fmpi2c ---------------------------------------------------------------------
+//
+// The Fast-mode Plus I2C (RM0390 ch. 23) - the block the F410, F412,
+// F413/F423 and F446 carry beside the three of the I2C chapter. Its
+// instance, gate and vectors are published above, beside the other I2C's;
+// what belongs here is what the CHAPTER's own driver asks and the header
+// alone cannot answer.
+//
+// WHAT THE HEADER ANSWERS: whether the block is there (FMPI2C1_BASE), its
+// gate (RCC_APB1ENR_FMPI2C1EN), its two vectors, its kernel-clock selector
+// (RCC_DCKCFGR2_FMPI2C1SEL) and whether CR1 has a wake-up enable at all.
+// WHAT IT DOES NOT: the implementation table's SMBus row and the DMA
+// request mapping, both facts of a REFERENCE MANUAL, and only the F446's
+// is on this desk.
+
+/// Whether the device header knows a WUPEN bit in this block's CR1 - the
+/// STM32G0's identical register file has one at bit 18 and this family's
+/// has not. RM0390 table 127 puts a dash against "Wakeup from Stop mode"
+/// and 23.7.1 makes bit 18 reserved; the header agrees, on every part of
+/// the pack, which is what this probe reports.
+constexpr bool fmpi2c_has_wakeup() {
+#if defined(FMPI2C_CR1_WUPEN)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// Whether a manual on this desk CLAIMS the SMBus/PMBus half for this
+/// part's FMPI2C1 (RM0390 table 127's row, for the F446). False means "no
+/// manual read", not "absent": the other three part classes that carry the
+/// block have their own manuals and this project has not got them. Nothing
+/// refuses on it - 23.7.6 makes TIMEOUTR read back zero where the half is
+/// missing, so the SILICON answers, and FmpI2c::smbus_probe() asks it.
+constexpr bool fmpi2c_smbus_claimed() {
+#if defined(STM32F446xx)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/**
+ * The FMPI2C slice of the DMA request mapping (RM0390 table 28): ONE cell
+ * per direction, both on DMA1 channel 2 - the receive request on stream 2
+ * and the transmit on stream 5. Keyed per part class like every other
+ * chapter's slice; only the F446's manual was read, so on the F410, F412
+ * and F413/F423 the table is unknown and an engine is refused there rather
+ * than run on a guessed stream.
+ */
+constexpr DmaPlacements fmpi2c_dma_placements(bool transmit) {
+    DmaPlacements p{};
+#if defined(STM32F446xx)
+    p.known = true;
+    p.count = 1;
+    p.at[0] = transmit ? DmaPlacement{1, 5, 2} : DmaPlacement{1, 2, 2};
+#else
+    (void)transmit;
+#endif
+    return p;
+}
+
+/// Whether (controller, stream, channel) is the cell this block's request
+/// is wired to. False on a part whose table was not read - a refusal, never
+/// a guess.
+constexpr bool fmpi2c_dma_placement_valid(bool transmit, uint8_t controller, uint8_t stream,
+                                          uint8_t channel) {
+    const DmaPlacements p = fmpi2c_dma_placements(transmit);
+    if (!p.known) {
+        return false;
+    }
+    for (uint8_t i = 0; i < p.count; ++i) {
+        if (p.at[i].controller == controller && p.at[i].stream == stream &&
+            p.at[i].channel == channel) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace brio

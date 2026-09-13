@@ -527,6 +527,38 @@ struct Rcc {
 #endif
     }
 
+    /**
+     * The FMPI2C1 kernel-clock multiplexer, on the parts that carry that
+     * block: RCC_DCKCFGR2's FMPI2C1SEL (RM0390 6.3.27, where ST spells the
+     * field "I2C4 kernel clock source selection" - I2C4 and FMPI2C1 being
+     * one peripheral under two names, ES0298 2.12.10).
+     *
+     * `code` is the field's own: 0 the peripheral's APB clock, 1 SYSCLK, 2
+     * the HSI, 3 the APB clock again ("same as 00"). Two bits, so no code
+     * is refused here; what a driver may name is its own enum's business
+     * (stm32f4/fmpi2c.hpp's FmpI2cClock). False - nothing written - on a
+     * part with no such peripheral.
+     */
+    static bool fmpi2c_kernel_clock(uint8_t code) {
+#if defined(RCC_DCKCFGR2_FMPI2C1SEL)
+        RCC->DCKCFGR2 = (RCC->DCKCFGR2 & ~RCC_DCKCFGR2_FMPI2C1SEL_Msk) |
+                        ((static_cast<uint32_t>(code) & 0x3u) << RCC_DCKCFGR2_FMPI2C1SEL_Pos);
+        return true;
+#else
+        (void)code;
+        return false;
+#endif
+    }
+
+    static uint8_t fmpi2c_kernel_clock() {
+#if defined(RCC_DCKCFGR2_FMPI2C1SEL)
+        return static_cast<uint8_t>((RCC->DCKCFGR2 & RCC_DCKCFGR2_FMPI2C1SEL_Msk) >>
+                                    RCC_DCKCFGR2_FMPI2C1SEL_Pos);
+#else
+        return 0;
+#endif
+    }
+
     // ---- SYSCLK (7.3.3) --------------------------------------------------------------
     static void sysclk_select(SysclkSource s) {
         RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW_Msk) | (static_cast<uint32_t>(s) << RCC_CFGR_SW_Pos);
