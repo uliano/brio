@@ -340,6 +340,23 @@ judges nothing. The STM32F429 did not show it at 180 MHz. `stop()` recovers
 such a stream like any other. A program that starts two streams of one
 controller together gives the second enable a few cycles.
 
+**A completed memory-to-memory stream hangs on its next block - on the
+STM32F446.** After a memory-to-memory block has run to completion on a
+stream of that part, the next block on the SAME stream reads its first
+sixteen bytes into the FIFO and never writes them out: EN stays set, no
+flag rises, SxNDTR stops sixteen short (or at zero for a 16-byte block),
+FS reads full - whatever the size (16 to 2048 bytes), the threshold, the
+burst, the destination, the flags cleared in between, SxCR and SxFCR put
+back to their reset values, or a second stream running alongside. An
+ABORTED first block leaves no such mark, another stream's completion does
+not poison this one, peripheral streams are unaffected, and the
+controller's reset through the RCC is the one recovery found: `abort()`
+cannot bring EN down. The STM32F429 and the STM32F411 run blocks back to
+back without it. No errata sheet has an item for this. Until its cause is
+known, a program on the STM32F446 that runs memory-to-memory blocks in a
+row takes `Dma<n>::init()` (a reset) between them - which is what every
+letter of the suite does after letter b has measured the behaviour.
+
 **The abort's wait is real and short**: EN comes down in 33 core cycles on
 an idle stream and 74 on one in the middle of a memory-to-memory block -
 the flush - and the flush sets TCIF, so an abort looks like a completion to
@@ -458,6 +475,8 @@ Implemented but not bench-verified, each with what would measure it:
 - **ES0287 2.2.11** (the F411's DMA2 corruption on concurrent AHB and APB2
   requests) is stated as a caller obligation and not measured: it wants a
   QUADSPI, an FSMC or a GPIO register as a DMA destination on that part.
-- **The STM32F446.** The suite builds for it with its own console cells
-  and has run on the STM32F429 and the STM32F411; the numbers above are
-  the STM32F429's unless a part is named.
+- **The cause of the STM32F446's stuck stream.** Measured and worked
+  around above, not explained: what would explain it is a register-level
+  comparison against a sequence known to work on that part (ST's own
+  library's memory-to-memory path, run on the same board), or an errata
+  item ST has not published.
