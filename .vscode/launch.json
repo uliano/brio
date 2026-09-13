@@ -172,6 +172,81 @@
             "runToEntryPoint": "main"
         },
         {
+            // The STM32F4 boards: cortex-debug over OpenOCD, the G0 entries'
+            // shape with the stm32f4x target script and the part's own SVD.
+            // CMake Tools' Active Folder must be stm32f4/, its configure
+            // preset the part's -debug one, its launch target the app. No
+            // probe named: with more than one ST-LINK attached, add
+            // "openOCDLaunchCommands": ["adapter serial <s>"]. NOT YET
+            // DRIVEN from the editor: halt-and-dump through OpenOCD's own
+            // console is what the bring-up used (docs/stm32f4/README.md).
+            "type": "cortex-debug",
+            "request": "launch",
+            "name": "Debug STM32F429ZI (OpenOCD, STM32F429I-DISC1)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${command:cmake.launchTargetPath}",
+            "servertype": "openocd",
+            "serverpath": "/sw/openocd/bin/openocd",
+            "gdbPath": "/sw/arm-none-eabi/bin/arm-none-eabi-gdb",
+            "objdumpPath": "/sw/arm-none-eabi/bin/arm-none-eabi-objdump",
+            "configFiles": [
+                "interface/stlink.cfg",
+                "target/stm32f4x.cfg"
+            ],
+            "svdPath": "${workspaceFolder}/stm32f4/svd/STM32F429.svd",
+            "runToEntryPoint": "main"
+        },
+        {
+            // The STM32F4 boards: cortex-debug over OpenOCD, the G0 entries'
+            // shape with the stm32f4x target script and the part's own SVD.
+            // CMake Tools' Active Folder must be stm32f4/, its configure
+            // preset the part's -debug one, its launch target the app. No
+            // probe named: with more than one ST-LINK attached, add
+            // "openOCDLaunchCommands": ["adapter serial <s>"]. NOT YET
+            // DRIVEN from the editor: halt-and-dump through OpenOCD's own
+            // console is what the bring-up used (docs/stm32f4/README.md).
+            "type": "cortex-debug",
+            "request": "launch",
+            "name": "Debug STM32F446RE (OpenOCD, Nucleo-F446RE)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${command:cmake.launchTargetPath}",
+            "servertype": "openocd",
+            "serverpath": "/sw/openocd/bin/openocd",
+            "gdbPath": "/sw/arm-none-eabi/bin/arm-none-eabi-gdb",
+            "objdumpPath": "/sw/arm-none-eabi/bin/arm-none-eabi-objdump",
+            "configFiles": [
+                "interface/stlink.cfg",
+                "target/stm32f4x.cfg"
+            ],
+            "svdPath": "${workspaceFolder}/stm32f4/svd/STM32F446.svd",
+            "runToEntryPoint": "main"
+        },
+        {
+            // The STM32F4 boards: cortex-debug over OpenOCD, the G0 entries'
+            // shape with the stm32f4x target script and the part's own SVD.
+            // CMake Tools' Active Folder must be stm32f4/, its configure
+            // preset the part's -debug one, its launch target the app. No
+            // probe named: with more than one ST-LINK attached, add
+            // "openOCDLaunchCommands": ["adapter serial <s>"]. NOT YET
+            // DRIVEN from the editor: halt-and-dump through OpenOCD's own
+            // console is what the bring-up used (docs/stm32f4/README.md).
+            "type": "cortex-debug",
+            "request": "launch",
+            "name": "Debug STM32F411CE (OpenOCD, black pill, STLINK-V3)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${command:cmake.launchTargetPath}",
+            "servertype": "openocd",
+            "serverpath": "/sw/openocd/bin/openocd",
+            "gdbPath": "/sw/arm-none-eabi/bin/arm-none-eabi-gdb",
+            "objdumpPath": "/sw/arm-none-eabi/bin/arm-none-eabi-objdump",
+            "configFiles": [
+                "interface/stlink.cfg",
+                "target/stm32f4x.cfg"
+            ],
+            "svdPath": "${workspaceFolder}/stm32f4/svd/STM32F411.svd",
+            "runToEntryPoint": "main"
+        },
+        {
             // The CH32V006 module over a WCH-Link: RISC-V, so cppdbg over a
             // gdb server, the AVR entry's shape - WCH's OpenOCD fork
             // (/sw/wch-openocd, the only one that speaks the probe's SDI

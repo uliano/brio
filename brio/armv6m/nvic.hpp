@@ -33,8 +33,8 @@
 
 #include <stdint.h>
 
-#if !defined(__CM0PLUS_REV) && !defined(__CM0_REV)
-#error "armv6m/nvic.hpp: include the family's device header first (samc21/nvic.hpp and stm32g0/nvic.hpp do) - the CMSIS core header it brings is what this file is written against"
+#if !defined(__CM0PLUS_REV) && !defined(__CM0_REV) && !defined(__CM4_REV)
+#error "armv6m/nvic.hpp: include the family's device header first (samc21/nvic.hpp, stm32g0/nvic.hpp, rp2040/nvic.hpp and stm32f4/nvic.hpp do) - the CMSIS core header it brings is what this file is written against"
 #endif
 
 namespace brio {

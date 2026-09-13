@@ -100,10 +100,11 @@ This file has no decision log any more: the former log was migrated to
 `brio` (`brio/`) is a header-only C++23 (gnu++23) framework for
 bare-metal MCUs built around a cooperative active-object kernel,
 written clean-room after Samek's book (never the QP source). One flat
-namespace `brio`; nine strata under `brio/` - `kernel/` (pure
+namespace `brio`; ten strata under `brio/` - `kernel/` (pure
 logic, includes nothing of brio), `util/` (services over the kernel),
-`armv6m/` (the CORE stratum the three Cortex-M0+ families include
-after their device header: NVIC + PRIMASK guard, the SysTick ticker),
+`armv6m/` (the CORE stratum the three Cortex-M0+ families - and the
+Cortex-M4 one, the same programmer's model - include after their device
+header: NVIC + PRIMASK guard, the SysTick ticker),
 `avrdx/` (everything that knows `avr/io.h`: AVR DA/DB, bench chip
 AVR128DB48), `samc21/` (everything that knows `sam.h`: SAM C21,
 Cortex-M0+, bench chip ATSAMC21J18A), `stm32g0/` (everything that
@@ -113,15 +114,19 @@ QingKe V2C, RV32EC, bench chip CH32V006K8U6 - NO vendor header, the
 register map is the stratum's own device.hpp), `rp2040/` (everything
 that knows the RP2040: Raspberry Pi's dual Cortex-M0+, bench chip an
 RP2040 B2 on a Raspberry Pi Pico and on a WeAct board, the pico-sdk's CMSIS header and register
-definitions vendored, a kernel per core), `host/` (the native test
+definitions vendored, a kernel per core), `stm32f4/` (everything that
+knows `stm32f4xx.h`: STM32F4, Cortex-M4F - brio's first ARMv7-M family,
+built with the hard-float ABI, the FPU enabled by the crt; bench chips
+STM32F429ZI on an STM32F429I-DISC1, STM32F446RE on a Nucleo-64,
+STM32F411CE on a WeAct black pill), `host/` (the native test
 target). Includes carry the stratum prefix
-(`#include "avrdx/usart.hpp"`). The builds are six sibling CMake
+(`#include "avrdx/usart.hpp"`). The builds are seven sibling CMake
 projects, PEERS - the repo root is not a CMake project: `avrdx/`,
-`samc21/`, `stm32g0/`, `ch32v00x/` and `rp2040/` (each with its own toolchain file
+`samc21/`, `stm32g0/`, `ch32v00x/`, `rp2040/` and `stm32f4/` (each with its own toolchain file
 and presets, Ninja, emitting into the shared `build-cmake/`)
 auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
 from its own `// build:` header comment; host tests in `test/` are the
-sixth project (host g++, no cross toolchain), run via `ctest`. ONE NAME PER ARCHITECTURE,
+seventh project (host g++, no cross toolchain), run via `ctest`. ONE NAME PER ARCHITECTURE,
 the same key on three axes: `brio/<arch>/` (stratum),
 `docs/<arch>/` (docs), `<arch>/` (build project); chip precision
 lives in preset names, per-chip ld/svd files and the `*_MCU` cache
@@ -291,6 +296,24 @@ gets its home in `docs/design/` when taken.
   its suites are shaped by the smallest-chip rule (design/overview.md,
   "A suite's image fits the family's smallest chip"). A `qingke/` core
   stratum only at a second QingKe family.
+- **The STM32F4 stratum, in bring-up.** `brio/stm32f4/` and `stm32f4/`
+  run the kernel console and the platform suite on three boards
+  (STM32F429I-DISC1, Nucleo-F446RE, an STM32F411CE black pill on a
+  standalone STLINK-V3) with kernel/ and util/ untouched - the platform,
+  the clock (the regulator scale and over-drive sequenced, the APB
+  prescalers unpinned), the pins and the USART with their documents,
+  the family check over all twenty-three headers. What remains: every
+  other chapter (the reset causes and watchdogs first, then FLASH with
+  its UNEVEN sectors - a design point for nv-heap.md before the NVM
+  chapter -, the stream-and-FIFO DMA, the timers, ADC/DAC, PWR's Stop
+  modes with a dynamic clock's way down, RTC, EXTI, SPI/I2S, I2C, the
+  DWC2 OTG FS controller for util/usb - both OTG connectors are cabled
+  -, and on the F429 alone FMC + LTDC + DMA2D, the memory-mapped display
+  tier); the frequency ladders of the five part classes whose manuals
+  are not on the desk; the `armv6m/` -> `cortexm/` rename now that
+  another architecture includes those files; the debuggers (cortex-debug
+  entries written, not driven). Tenuto only, the equal-priority
+  promise kept; Rubato and BASEPRI are another type and another day.
 - **The RP2040 stratum.** `brio/rp2040/` and `rp2040/` are
   `supported` on the RP2040 (README.md's table) on a Raspberry Pi
   Pico and a WeAct board: every chapter of the datasheet's plan has
@@ -362,7 +385,9 @@ brio check stm32g0 [name]       # same for the stm32g0 stratum (ALL TWELVE G0 he
 brio check ch32v00x [name]      # same for the ch32v00x stratum (one part today; util_all.cpp = the
                                 # whole of kernel/ and util/ through WCH's gcc 15.2)
 brio check rp2040 [name]        # same for the rp2040 stratum (one chip: every header's verbs, util_all.cpp)
-brio check all                  # the five in a row
+brio check stm32f4 [name]       # same for the stm32f4 stratum (ALL TWENTY-THREE F4 headers; the ladder
+                                # refused by name where no manual was read)
+brio check all                  # the six in a row
 brio prose [paths...]           # the prose net: no dates/process words/Doxygen tags in
                                 # comments and docs, every cited path exists, ASCII only;
                                 # "review" lines are claims of absence to re-read, not errors
@@ -382,6 +407,8 @@ brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--s
 (cd ch32v00x && cmake --build --preset ch32v006k8-release --target <app>-upload)   # flash via WCH's OpenOCD fork (WCH-Link)
 (cd rp2040 && cmake --build --preset rp2040-release --target <app>)              # RP2040 release build
 (cd rp2040 && cmake --build --preset rp2040-release --target <app>-upload)       # flash via OpenOCD (the Debug Probe, CMSIS-DAP)
+(cd stm32f4 && cmake --build --preset stm32f429zi-release --target <app>)        # STM32F4 release build (hard-float)
+(cd stm32f4 && cmake --build --preset stm32f429zi-release --target <app>-upload) # flash via OpenOCD (the board's ST-LINK)
 # apps are auto-discovered from <project>/src/apps/*.cpp - plus
 # experiments/*/{avrdx,samc21}/*.cpp, each experiment's per-arch app
 # halves - at every configure; no generation step; a new/removed app
@@ -501,6 +528,16 @@ ch32v00x/                the CH32V00x build project, the fifth of the shape
                          "// build: groups" line builds as one image per
                          group, <app>-<n>, the crt PAINTS the free RAM so a
                          suite reports how much stack it never touched
+stm32f4/                 the STM32F4 build project, the sixth of the shape: a
+                         PART TABLE (cmake/stm32f4-parts.cmake: the part number
+                         -> ST's irregular device define, the crt stem, the
+                         board type) instead of substring arithmetic; presets
+                         for the F429ZI, the F446RE and the F411CE; the hard-
+                         float flags; ld/<part>.ld (the F429's CCM a named
+                         region nothing is placed in); src/glue/startup_stm32f4
+                         {29,46,11}.cpp - ST's handler names, the FPU's CPACR
+                         enabled before .data, holes where another part has a
+                         peripheral; svd/ with ST's SVD per part
 test/CMakeLists.txt      the host test project (independent - one CMake
                          configure has exactly one compiler):
                          one executable + ctest entry per test_*/main.cpp
@@ -515,6 +552,11 @@ test/family_ch32v00x/    ch32v00x family smoke TUs + neg/, brio check ch32v00x
                          (util_all.cpp: every kernel/util header over the platform)
 test/family_rp2040/      rp2040 family smoke TUs + neg/, brio check rp2040 (one
                          chip, one header: every verb of every header, util_all.cpp)
+test/family_stm32f4/     stm32f4 family smoke TUs + neg/, brio check stm32f4 (ALL
+                         TWENTY-THREE F4 headers; the reset rate everywhere, the
+                         ladder-dependent rates where the reserve knows the ladder)
+third_party/cmsis-device-f4/  vendored ST cmsis-device-f4 v2.6.9 Include/ (Apache-2.0):
+                         every F4 part's header, the umbrella stm32f4xx.h
 third_party/cmsis-core/  vendored ARM CMSIS-Core headers (Apache-2.0)
 third_party/pico-sdk/    vendored pico-sdk 2.3.1 subset (BSD-3): the CMSIS device
                          header RP2040.h and the hardware/regs bit-field headers,
@@ -538,7 +580,8 @@ cli/                     its guts, a Python package: main.py dispatches on the
                          mechanism: db* -> avrdx/avrdude/UPDI, c21j ->
                          samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/ST-LINK,
                          v006k8 -> ch32v00x/WCH's OpenOCD fork/WCH-Link,
-                         pico/picow/weact2040 -> rp2040/OpenOCD/the Debug Probe),
+                         pico/picow/weact2040 -> rp2040/OpenOCD/the Debug Probe,
+                         f429zi/f446re/f411ce -> stm32f4/OpenOCD/an ST-LINK),
                          the per-project app rosters build-cmake/apps_{avrdx,
                          samc21,stm32g0}.json (each project writes its own at
                          every configure - separate files because app NAMES
@@ -1236,6 +1279,42 @@ brio/                    the framework, four strata:
                            instead, and with SLEEPDEEP armed the ticker is
                            paused across the sleep; ebreak; .noinit
                            breadcrumb; atomic_width 4
+  stm32f4/               everything that knows stm32f4xx.h (STM32F4, Cortex-M4F):
+                         brio's first ARMv7-M family on the armv6m/ core files
+    device_tables.hpp      THE RESERVE: GPIO ports A..K, the serial instances
+                           1..10 (bus, gate, vector, FULL by the U(S)ART name),
+                           the regulator's VOS width and over-drive pair, and
+                           THE FREQUENCY LADDERS keyed on the device-select
+                           define - known for the F405, F42x/F43x, F446 and
+                           F411 classes, refused elsewhere
+    nvic.hpp / ticker.hpp / delay.hpp  the device header + the armv6m/ file:
+                           PRIMASK the one mask on a core that has BASEPRI,
+                           SysTick at 1000 Hz, delay_us on VAL
+    platform.hpp           Stm32f4Platform<TB>: WFI = Sleep, SLEEPDEEP never
+                           written; BKPT; .noinit breadcrumb; atomic_width 4
+    pwr.hpp                Pwr: the APB1 gate, VoltageScale (one bit or two),
+                           the over-drive pair (ODEN/ODRDY, ODSWEN/ODSWRDY)
+    flash.hpp              FlashWaitStates (the readback rule), FlashAccel (the
+                           ART's prefetch and caches), DeviceUid /
+                           flash_size_kbytes / DeviceIdcode
+    clock.hpp              Rcc (HSI, HSE crystal or bypass, the main PLL, the
+                           switch, the APB prescalers, the enables with the
+                           errata readback, the resets, MCO1/2) + Clock<src,
+                           hz, hse_hz, hse_mode>: the exact PLL ratio at
+                           compile time, the regulator scale and over-drive
+                           sequenced in the manual's order, pclk1_hz/pclk2_hz
+                           beside hz, apb_hz(clock, bus) for a peripheral's
+                           own rate
+    pin.hpp                Pin<'A',5> / Port<'A'> / PinRef over GPIOx: the G0's
+                           block without a BRR (BSRR's upper half), the port
+                           clock on AHB1 opened by every configuring verb,
+                           input floating as the reset state
+    dma_engine.hpp         NoDmaEngine, the empty slot's tag
+    usart.hpp              Usart<n> resource over the classic SR/DR/BRR chapter
+                           (mute, LIN, IrDA, smartcard, synchronous, flow
+                           control, DMA requests, every flag) + Uart<n, pins,
+                           ...> task with the other strata's surface, the
+                           divisor from the instance's own APB clock
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)

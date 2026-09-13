@@ -8,7 +8,7 @@ rationale and the contracts between layers, as they are today.
 
 The directory mirrors the strata of `brio/`: `design/` is the
 target-independent framework (kernel, services, the models every
-target realizes); one folder per target (`avrdx/`, `samc21/`, `stm32g0/`, `ch32v00x/`, `rp2040/`, `host/`) holds
+target realizes); one folder per target (`avrdx/`, `samc21/`, `stm32g0/`, `ch32v00x/`, `rp2040/`, `stm32f4/`, `host/`) holds
 that target's operational page (`README.md`), one document per
 peripheral driver, and its vendor documents. Within each, ordered by
 stability - the kernel's ideas are settled enough to build on, the
@@ -46,7 +46,8 @@ that target's own documents, one per peripheral driver:
 | STM32G0 (`brio/stm32g0/`) | [stm32g0/README.md](stm32g0/README.md) - Toolchain, the three Nucleo boards, ST-LINK upload and debug, the SWD-under-WFI caveat, and FAMILY COVERAGE: both the x1 line and the x0 value line, the stratum compiling on all twelve headers of the pack with every vector derived from peripheral presence; then its documents |
 | CH32V00x (`brio/ch32v00x/`) | [ch32v00x/README.md](ch32v00x/README.md) - Toolchain (WCH's gcc 15 with its xw extension, each part's full ISA), the two boards and the part table the build states, the WCH-Link and WCH's OpenOCD fork, the console on the probe's own serial, and what the QingKe V2 core taught the stratum (a WFI that wakes only for an interrupt it can take, the MIE not cleared on entry); then its documents - one per chapter of the reference manual, each with what the CH32V006K8 measured with no wire and what waits for a jumper or a peer |
 | RP2040 (`brio/rp2040/`) | [rp2040/README.md](rp2040/README.md) - Toolchain (the pico-sdk's CMSIS header and register definitions vendored, no SDK runtime, the boot stage checked in as bytes), the WeAct board, the Debug Probe and which OpenOCD the flash chip demands, the two cores and the one brio runs on today; then its documents |
-| the ARMv6-M core stratum (`brio/armv6m/`) | [armv6m/README.md](armv6m/README.md) - what the three Cortex-M0+ families share: NVIC + PRIMASK, the SysTick ticker and the microsecond busy-wait on SysTick's counter, the include-order contract, what stays per family |
+| STM32F4 (`brio/stm32f4/`) | [stm32f4/README.md](stm32f4/README.md) - Toolchain (the hard-float ABI, the FPU enabled by the crt), the three boards (an STM32F429I-DISC1, a Nucleo-F446RE, an STM32F411CE black pill on a standalone STLINK-V3), ST-LINK upload, the HLA caveat, and FAMILY COVERAGE: twenty-three headers, the frequency ladders keyed on the part class and refused where no manual was read; then its documents |
+| the ARMv6-M core stratum (`brio/armv6m/`) | [armv6m/README.md](armv6m/README.md) - what the three Cortex-M0+ families and the Cortex-M4 one share: NVIC + PRIMASK, the SysTick ticker and the microsecond busy-wait on SysTick's counter, the include-order contract, what stays per family |
 | host (`brio/host/`) | [host/README.md](host/README.md) - The native test target: HostPlatform, doctest suites |
 | the boards | [boards/README.md](boards/README.md) - how a board joins the bench (build by type, the manifest, `bin/brio`), then one page per board brio is tested on |
 | the probes | [probes/README.md](probes/README.md) - the flash mechanisms `bin/brio` knows, then one page per probe |

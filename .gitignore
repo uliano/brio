@@ -43,3 +43,6 @@ private/
 
 # Personal settings for the assistant (Claude Code loads it; never published).
 CLAUDE.local.md
+
+# The harness's isolated worktrees for delegated agents: their own checkouts, never content.
+.claude/worktrees/

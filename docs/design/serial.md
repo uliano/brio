@@ -20,7 +20,7 @@ byte is an edge again.
 
 ### Realizations
 
-Common to the three: seventeen verbs spelled identically - `init(clock,
+Common to the five: seventeen verbs spelled identically - `init(clock,
 baud)`, `set_baud(hz, baud)`, `release`, `write`, `write_byte`,
 `read_byte`, `rx_pending`, `tx_idle`, `can_baud`, `actual_baud`,
 `min_hz_for`, `rebase`, `clear_errors` and the four counters
@@ -35,6 +35,7 @@ the port, and what each family's port has that the others' has not.
 | samc21 | `Uart<n, UartPads, rx_size, tx_size, TxEngine, RxEngine>` (`samc21/sercom.hpp`) | the pins are SERCOM pads with their pins; ONE vector, `isr()` returns the edge; two OPTIONAL DMA engine slots (`NoDmaEngine` by default, compiling to nothing) with `dma_isr()`, `dma_faults()`, `harvest()`, `write_bulk()`/`read_bulk()` |
 | stm32g0 | `Uart<n, UartPins, rx_size, tx_size, TxEngine, RxEngine, opts>` = `UartTask<Usart<n>, ...>` (`stm32g0/usart.hpp`) | the pins carry their AF; one vector and `isr()`; the same engine slots and bulk verbs; `UartOptions` as one trailing parameter (FIFO thresholds, single wire, ...); `kernel_hz()` (the kernel-clock multiplexer), `noise_errors()` (NE exists here alone), `wakes()` (the wake from Stop); the same task over an LPUART is `LpUart` (`stm32g0/lpuart.hpp`) |
 | ch32v00x | `Uart<n, P, rx_size, tx_size, TxEngine, RxEngine, remap, opts>` = the task over `Usart<n>` (`ch32v00x/usart.hpp`) | the pins are the instance's own under a REMAP CODE (`afio.hpp`'s tables), the code a template parameter; one vector and `isr()`; the same engine slots with `dma_isr()`, `dma_faults()` and `harvest()`, on the channels table 8-2 gives the instance (the channel IS the request on this family, an engine elsewhere refused); USART2 refused at code 0, whose TX is the K8 package's reset pin; `UartOptions` as one trailing parameter (the frame, a single wire that is a BUS and not a loop on this silicon, the flow-control pair); BRR is PCLK over the baud, whole - no separate fractional field and no kernel-clock multiplexer |
+| stm32f4 | `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine, opts>` (`stm32f4/usart.hpp`) | the classic SR/DR/BRR block (the CH32V00x's under ST's names): flags cleared by read sequences, the divisor in sixteenths or eighths (OVER8); the pads as `PinSel`s with the datasheet's AF; ten instances at most with a vector each, the U(S)ART name deciding FULL or not; the divisor from the instance's OWN APB clock (`apb_hz`), because the two buses run below HCLK; the engine slots hold the empty tag until the DMA chapter ([../stm32f4/usart.md](../stm32f4/usart.md)) |
 | host | none | `SerialPort` is host-tested over a scripted `ByteTransport` |
 
 ## SerialPort (`util/serial_port.hpp`)

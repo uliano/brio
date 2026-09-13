@@ -55,6 +55,21 @@ BOARD_TYPES = {
     "g031k8": {"project": "stm32g0", "preset": "stm32g031k8-release",
                "mcu": "stm32g031k8", "flash": "openocd",
                "target_cfg": "target/stm32g0x.cfg"},
+    # The STM32F4 boards, each a part of its own behind an ST-LINK:
+    # the STM32F429I-DISC1 (F429ZI, the ST-LINK/V2-B on board), the
+    # Nucleo-F446RE (F446RE, the V2-1 on board) and a WeAct black pill
+    # (F411CE, a standalone STLINK-V3 on its SWD header). OpenOCD's
+    # stm32f4x target script (the stm32f2x flash driver underneath); the
+    # probe named by serial as on the G0 Nucleos.
+    "f429zi": {"project": "stm32f4", "preset": "stm32f429zi-release",
+               "mcu": "stm32f429zi", "flash": "openocd",
+               "target_cfg": "target/stm32f4x.cfg"},
+    "f446re": {"project": "stm32f4", "preset": "stm32f446re-release",
+               "mcu": "stm32f446re", "flash": "openocd",
+               "target_cfg": "target/stm32f4x.cfg"},
+    "f411ce": {"project": "stm32f4", "preset": "stm32f411ce-release",
+               "mcu": "stm32f411ce", "flash": "openocd",
+               "target_cfg": "target/stm32f4x.cfg"},
     # The CH32V006K8 (QingKe V2C, RV32EC): the RISC-V target, written by
     # WCH's OpenOCD fork through a WCH-Link - a different program from
     # the SWD paths' OpenOCD, hence its own mechanism (flash.py's

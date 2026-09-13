@@ -1,4 +1,4 @@
-"""brio check [avrdx|samc21|stm32g0|ch32v00x|rp2040|all] [filter] - the family compile
+"""brio check [avrdx|samc21|stm32g0|ch32v00x|rp2040|stm32f4|all] [filter] - the family compile
 fixtures: every smoke TU under test/family*/ compiles for every package
 or variant of the stratum, and every negative TU is REFUSED. The
 fixtures are the five shell scripts under cli/checks/ (they call the
@@ -16,6 +16,7 @@ SCRIPTS = {
     "stm32g0": "check_stm32g0.sh",
     "ch32v00x": "check_ch32v00x.sh",
     "rp2040": "check_rp2040.sh",
+    "stm32f4": "check_stm32f4.sh",
 }
 
 

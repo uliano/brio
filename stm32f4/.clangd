@@ -1,0 +1,8 @@
+# clangd config for the STM32F4 project: stm32f4/ is its OWN CMake project
+# (stm32f4/CMakeLists.txt) with its own compile_commands.json emitted at
+# ../build-cmake/stm32f429zi-release - point clangd straight at it (the
+# stm32g0/.clangd pattern). clang parses -mcpu=cortex-m4 -mfpu=fpv4-sp-d16
+# natively and the device is a plain -D define (STM32F429xx), so no
+# macro-delta machinery.
+CompileFlags:
+  CompilationDatabase: ../build-cmake/stm32f429zi-release

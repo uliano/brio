@@ -17,6 +17,9 @@ the user's own manifest, below.
 | WCH's CH32V003F4P6 evaluation board | `v003f4` | [ch32v003f4.md](ch32v003f4.md) |
 | Raspberry Pi Pico | `pico` | [pico.md](pico.md) |
 | a WeAct RP2040 board | `weact2040` | [weact-rp2040.md](weact-rp2040.md) |
+| ST STM32F429I-DISC1 | `f429zi` | [stm32f429i-disc1.md](stm32f429i-disc1.md) |
+| ST Nucleo-F446RE | `f446re` | [nucleo-f446re.md](nucleo-f446re.md) |
+| a WeAct STM32F411CE black pill | `f411ce` | [blackpill-f411ce.md](blackpill-f411ce.md) |
 
 ## How a board joins the bench
 
@@ -61,7 +64,9 @@ over SWD; `g0b1re`/`g071rb`/`g031k8` the STM32G0 Nucleos built by
 `v006k8`/`v003f4` the CH32V00x parts built by `ch32v00x/` and written
 by WCH's OpenOCD fork through a WCH-Link; `pico`/`picow`/`weact2040`
 the RP2040 boards built by `rp2040/` and written by OpenOCD through a
-CMSIS-DAP probe, the Raspberry Pi Debug Probe. The table of types is
+CMSIS-DAP probe, the Raspberry Pi Debug Probe; `f429zi`/`f446re`/
+`f411ce` the STM32F4 boards built by `stm32f4/` and written by OpenOCD
+through an ST-LINK (the boards' own, or a standalone V3). The table of types is
 `BOARD_TYPES` in `cli/bench/common.py`.
 
 **Consoles** are observability only - firmware never goes in through

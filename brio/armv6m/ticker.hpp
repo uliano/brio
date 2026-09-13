@@ -81,8 +81,8 @@
 
 #include <stdint.h>
 
-#if !defined(__CM0PLUS_REV) && !defined(__CM0_REV)
-#error "armv6m/ticker.hpp: include the family's device header first (samc21/ticker.hpp and stm32g0/ticker.hpp do)"
+#if !defined(__CM0PLUS_REV) && !defined(__CM0_REV) && !defined(__CM4_REV)
+#error "armv6m/ticker.hpp: include the family's device header first (samc21/ticker.hpp, stm32g0/ticker.hpp, rp2040/ticker.hpp and stm32f4/ticker.hpp do)"
 #endif
 
 #include "armv6m/nvic.hpp"

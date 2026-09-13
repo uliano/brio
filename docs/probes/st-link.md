@@ -1,14 +1,18 @@
 # ST-LINK
 
-The ST-LINK/V2.1 every Nucleo carries on board: probe and console in ONE
-USB device with a real serial, so the bench manifest addresses both by
-it - the console as `/dev/serial/by-id/...<serial>-if02`, the probe as
-`adapter serial <serial>`.
+The ST-LINK/V2.1 every Nucleo carries on board, the V2-B of the
+STM32F429I-DISC1, and the standalone STLINK-V3 (its own UART bridge as
+the console): probe and console in ONE USB device with a real serial,
+so the bench manifest addresses both by it - the console as
+`/dev/serial/by-id/...<serial>-if02`, the probe as `adapter serial
+<serial>`.
 
 - `brio flash <board> <app>` runs OpenOCD (`/sw/openocd/bin/openocd`,
-  the 0.12.0 release) with `interface/stlink.cfg` +
-  `target/stm32g0x.cfg` (the stm32l4x flash driver underneath, which
-  serves the G0) + `program <app>.elf verify reset exit`.
+  the 0.12.0 release) with `interface/stlink.cfg` + the family's target
+  script - `target/stm32g0x.cfg` (the stm32l4x flash driver underneath,
+  which serves the G0), `target/stm32f4x.cfg` (the stm32f2x driver,
+  which identifies the part and its flash size itself) - + `program
+  <app>.elf verify reset exit`.
 - **OpenOCD's `stm32g0x.cfg` writes DBGMCU_CR.DBG_STOP at every
   examination**, which keeps HCLK and SysTick running inside a Stop and
   survives every reset but a power-on - a board that was ever examined
@@ -39,5 +43,10 @@ it - the console as `/dev/serial/by-id/...<serial>-if02`, the probe as
 - **Debugging**: cortex-debug over OpenOCD, the launch entry in
   `.vscode/launch.json` ([../stm32g0/README.md](../stm32g0/README.md)).
 
-Not yet driven by brio: an ST-LINK/V3 as a standalone probe, for a
-self-built STM board.
+- **The STLINK-V3 as a standalone probe** (firmware V3J16M9B5S1, on the
+  black pill's four-pin SWD header): the same `interface/stlink.cfg`,
+  attach without NRST works on a firmware that leaves the debug pads
+  alone; its UART bridge is a second CDC port under the same serial and
+  serves as the board's console - its RX to the target's TX. The
+  connector's TX/RX labels proved ambiguous on the desk: no banner at
+  boot means swap the two wires.

@@ -1,0 +1,73 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "stm32f429zi-release",
+            "displayName": "STM32F429ZI (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32f429zi-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "STM32F4_MCU": "stm32f429zi"
+            }
+        },
+        {
+            "name": "stm32f429zi-debug",
+            "displayName": "STM32F429ZI (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32f429zi-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "STM32F4_MCU": "stm32f429zi"
+            }
+        },
+        {
+            "name": "stm32f446re-release",
+            "displayName": "STM32F446RE (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32f446re-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "STM32F4_MCU": "stm32f446re"
+            }
+        },
+        {
+            "name": "stm32f446re-debug",
+            "displayName": "STM32F446RE (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32f446re-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "STM32F4_MCU": "stm32f446re"
+            }
+        },
+        {
+            "name": "stm32f411ce-release",
+            "displayName": "STM32F411CE (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32f411ce-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "STM32F4_MCU": "stm32f411ce"
+            }
+        },
+        {
+            "name": "stm32f411ce-debug",
+            "displayName": "STM32F411CE (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32f411ce-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "STM32F4_MCU": "stm32f411ce"
+            }
+        }
+    ],
+    "buildPresets": [
+        { "name": "stm32f429zi-release", "configurePreset": "stm32f429zi-release" },
+        { "name": "stm32f429zi-debug",   "configurePreset": "stm32f429zi-debug" },
+        { "name": "stm32f446re-release", "configurePreset": "stm32f446re-release" },
+        { "name": "stm32f446re-debug",   "configurePreset": "stm32f446re-debug" },
+        { "name": "stm32f411ce-release", "configurePreset": "stm32f411ce-release" },
+        { "name": "stm32f411ce-debug",   "configurePreset": "stm32f411ce-debug" }
+    ]
+}

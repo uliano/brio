@@ -58,7 +58,7 @@ adds one function - `rebase(hz)` - to serve the dynamic one.
 
 ### Realizations
 
-Common to all four: `Clock<ClockSource::internal, hz>` and
+Common to all five: `Clock<ClockSource::internal, hz>` and
 `Clock<ClockSource::crystal, hz>` spelled identically, `Clock::hz` as
 the one rate truth, `clock_hz(clock)` and the `ClockUser` contract
 (`util/clock.hpp`), and `delay_us(clock, us)` reading its budget from
@@ -72,6 +72,7 @@ the two every part has.
 | samc21 | `Clock<src, hz>` alone (`samc21/clock.hpp`) | NO dynamic clock, by position: every peripheral has a generic clock channel of its own, so "one rate for everything" is not this family's shape (below); `Clock` builds `internal` alone today, the crystal and the DPLL are resources the program runs the CPU from by hand; `ClockSource` adds `dpll` |
 | stm32g0 | `Clock<src, hz, regime>` and `DynamicClock<Rates<R0, R1, ...>, Users...>` (`stm32g0/clock.hpp`) | a rate is a TUPLE (root, VCORE range, regulator) and the dynamic set an EXPLICIT PACK of such tuples, R0 the boot rate; `PowerRegime` sequences table 13's latency and the range around a switch; `restore()` after a Stop; `ClockSource` adds `pll`, `lsi`, `lse` (the 32 kHz roots under ST's names) |
 | ch32v00x | `Clock<src, hz>` and `DynamicClock<Boot, Users...>` (`ch32v00x/clock.hpp`) | the AVR's shape, the simplest of the four: one root (the HSI, or `ClockSource::pll` - the PLL is a fixed doubler of it) and one divider, HPRE, so the dynamic set is the boot rate over the divider's ladder; `set<hz>()`/`set(hz)` fan `rebase` out then move the divider, the flash wait states raised before a rise and lowered after a fall; `restore()` puts the rate back after a Standby, from which the core wakes on the HSI; `crystal` is named and refused until a board carries one; `delay_us` on the STK counter, refused at a tick period or more |
+| stm32f4 | `Clock<src, hz, hse_hz, hse_mode>` alone (`stm32f4/clock.hpp`) | the STM32G0's model with the APB prescalers UNPINNED: `pclk1_hz`/`pclk2_hz` beside `hz` (45 and 90 MHz at 180) and `apb_hz(clock, bus)` for a peripheral's own rate, `clock_hz` still HCLK; the sources spell the root (`hsi`, `hse`, `pll_hsi`, `pll_hse` with the HSE's rate and mode); the way up in the manual's order - the regulator scale, the PLL, over-drive, the latency read back - and the frequency LADDERS keyed on the part class in the reserve, a rate refused where no manual was read; no dynamic clock yet - the way down is the power chapter's ([../stm32f4/clock.md](../stm32f4/clock.md)) |
 | host | none | the host tests run on the virtual clock of `HostPlatform`; nothing there has a rate |
 
 `delay_us` is one name with one difference of contract: on the two

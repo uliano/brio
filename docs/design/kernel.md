@@ -514,6 +514,7 @@ and what it does while the core sleeps.
 | samc21 | `Ticker` = `BasicTicker<1000>` over SysTick (`armv6m/ticker.hpp`, included by `samc21/ticker.hpp`) | 1000 Hz; SysTick rides the CPU clock and STOPS in standby - `advance(n)` is the landing point of the resync the timed sleep site makes from the RTC ([power.md](power.md)) |
 | stm32g0 | the same SysTick `Ticker`, or `LptimTicker<cfg>` (`stm32g0/lptim_ticker.hpp`) | SysTick 1000 Hz, stopped by a Stop and paused by the sites; or 1024 Hz on the LPTIM's count shifted right, COUNTING THROUGH a Stop and satisfying `Tickless` - the one platform that offers `idle_until` (section 11) |
 | ch32v00x | `Ticker` = `BasicTicker<1000>` over the core's STK (`ch32v00x/ticker.hpp`) | 1000 Hz; the STK counts UP against a compare with auto-reload and rides HCLK, so it stops in a Standby - `advance(n)` is where the timed sleep site lands the span the AWU alarm measured ([power.md](power.md)), and `pause()`/`resume()` hold the tick across a sleep whose wake runs on the HSI |
+| stm32f4 | the same SysTick `Ticker` (`armv6m/ticker.hpp`, included by `stm32f4/ticker.hpp`) | 1000 Hz on a 24-bit reload that fits at 180 MHz (179999); SysTick rides HCLK and stops in Stop - the power chapter's sites are where that gets repaired |
 | host | a virtual clock the test advances (`host/platform.hpp`) | 1000 Hz nominal; time is arithmetic, which is what makes drift and re-arm testable to the tick |
 
 ## 10. Failures: overflow and panic (`kernel/panic.hpp`)
@@ -547,6 +548,7 @@ reporters the stratum adds.
 | samc21 | `SamPlatform::break_here()` = BKPT, a HardFault with DHCSR.C_DEBUGEN clear (the reporter never runs; `bin/brio` clears the bit after every flash) | `ResetReporter` and `hard_fault_reset<P>()` (`samc21/reset.hpp`: the record written, then a reset so it is read at the next boot - the fault body refusing to overwrite a record `panic()` wrote); `TracingReporter` / `hard_fault_trace_reset<P, Store>()` (`samc21/postmortem.hpp`: the MTB's last packets beside the record); `JournalPanic` over `RwweeJournalZone` (the record in flash, through a power loss) |
 | stm32g0 | `Stm32g0Platform::break_here()`, the same BKPT and the same escalation | `ResetReporter` and `hard_fault_reset<P>()` (`stm32g0/reset.hpp`); `JournalPanic` over `MainFlashJournalZone`; no trace unit on this core |
 | ch32v00x | `Ch32v00xPlatform::break_here()` = `ebreak`, the breakpoint exception with no debugger, escalating to the fault vector the app binds | `ResetReporter` and `fault_reset<P>()` (`ch32v00x/reset.hpp`: the record written, then a reset through PFIC_CFGR, the fault body refusing to overwrite a record `panic()` wrote); `JournalPanic` over `MainFlashJournalZone` is available and unexercised on this family; no trace unit |
+| stm32f4 | `Stm32f4Platform::break_here()`, the same BKPT and the same escalation - to a `HardFault_Handler` spin the crt provides, the three configurable faults disabled at reset | no reporter beyond `HaltReporter` yet: the reset chapter brings `ResetReporter` and the fault bodies |
 | host | `HostPlatform::break_here()` records the call | - |
 
 The reset cause the boot cross-checks is spelled by the register's
@@ -640,7 +642,7 @@ ordering, drift-free re-arm, scan priority, MPSC stress.
 
 ### Realizations: the platform
 
-Common to all five: the concept above, member for member - the
+Common to all six: the concept above, member for member - the
 critical section, `idle()`, `now()`, `ticks_per_second`,
 `atomic_width`, `panic_record()`, `break_here()`. What differs is what
 each member costs or does on its core.
@@ -652,6 +654,7 @@ each member costs or does on its core.
 | stm32g0 | `Stm32g0Platform<TB>` (`stm32g0/platform.hpp`) | templated on its timebase; `idle()` is WFI = Sleep, the sites arm the deeper Stops; `idle_until()` exists exactly when `TB` satisfies `Tickless` (the LPTIM timebase); `atomic_width` 4; BKPT as the SAM's |
 | ch32v00x | `Ch32v00xPlatform<TB>` (`ch32v00x/platform.hpp`) | templated on its timebase like the G0's; `atomic_width` 4; the critical section is a `csrrci` on mstatus.MIE; `idle()` is NOT a WFI but a WFE (PFIC_SCTLR.WFITOWFE + SEVONPEND), because this core's WFI wakes only for an interrupt it can take and would sleep past a pending one with MIE clear - the latched event closes the lost-wakeup window instead of instruction order; `break_here()` is `ebreak`, escalating to the fault vector with no debugger ([../ch32v00x/README.md](../ch32v00x/README.md)) |
 | rp2040 | `Rp2040Platform<core, TB>` (`rp2040/platform.hpp`) | one type per core, templated on the core and its timebase (the core's own SysTick ticker); the critical section is PRIMASK, per core; `idle()` is WFI; `atomic_width` 4; BKPT as the SAM's; `on_own_core()` reads SIO's CPUID and `Doorbell` is the SIO FIFO towards the core ([../rp2040/multicore.md](../rp2040/multicore.md)) |
+| stm32f4 | `Stm32f4Platform<TB>` (`stm32f4/platform.hpp`) | templated on its timebase like the G0's, with no Tickless timebase on this family yet, so no `idle_until()`; `idle()` is WFI = Sleep, SLEEPDEEP never written; the critical section is PRIMASK on a core that HAS BASEPRI and does not use it - the promise kept by one priority for every line, as the SAM does; `atomic_width` 4; BKPT as the SAM's, on a core that could read DHCSR and does not ([../stm32f4/platform.md](../stm32f4/platform.md)) |
 | host | `HostPlatform` (`host/platform.hpp`) | a depth-counting critical section, a virtual clock, recording `idle()` and `break_here()`; `atomic_width` 4 - `Ring`'s guarded path is covered by a second host platform stating 1 in its own test; `HostCore<n>` adds the two members of a core of several over a test-set current core and a counting doorbell |
 
 **C++ note - `if constexpr`.** `if constexpr (cond)` (C++17) with a

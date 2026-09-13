@@ -17,9 +17,9 @@
     ],
     "C_Cpp.intelliSenseEngine": "disabled",
 
-    // --- CMake Tools: five independent CMake projects share this workspace
-    //     folder - avrdx/ (avr-g++), test/ (host g++), samc21/ and
-    //     stm32g0/ (arm-none-eabi-g++), ch32v00x/ (riscv32-wch-elf-g++),
+    // --- CMake Tools: seven independent CMake projects share this workspace
+    //     folder - avrdx/ (avr-g++), test/ (host g++), samc21/, stm32g0/,
+    //     rp2040/ and stm32f4/ (arm-none-eabi-g++), ch32v00x/ (riscv32-wch-elf-g++),
     //     each with its own toolchain since
     //     one CMake configure has exactly one compiler. The REPO ROOT is
     //     deliberately NOT a CMake project: it was the Active Folder's
@@ -34,7 +34,9 @@
         "${workspaceFolder}/test",
         "${workspaceFolder}/samc21",
         "${workspaceFolder}/stm32g0",
-        "${workspaceFolder}/ch32v00x"
+        "${workspaceFolder}/ch32v00x",
+        "${workspaceFolder}/rp2040",
+        "${workspaceFolder}/stm32f4"
     ],
 
     // CMake Tools 1.23+ defaults cmake.options.statusBarVisibility to

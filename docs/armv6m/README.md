@@ -43,6 +43,19 @@ image byte-identical before and after.
   project-wide `Ticker` alias (each family's ticker.hpp states its
   rate).
 
+## A fourth user, on another architecture
+
+The STM32F4 stratum (Cortex-M4, ARMv7-M) includes these three files
+unchanged: SysTick, the NVIC's enable/pend/priority registers and
+PRIMASK have the same programmer's model on ARMv7-M, and the files
+read nothing else. What ARMv7-M adds - BASEPRI, the sixteen priority
+levels, the FPU, the configurable faults - stays in `stm32f4/`, unused
+by the cooperative kernel, until a second ARMv7-M family proves what is
+shared (the rule by which this stratum was born at the second
+Cortex-M0+ family). The guards accept the Cortex-M4 core header beside
+the M0/M0+ ones; the directory's NAME is the transitional part - the
+files are every Cortex-M's, and the rename that says so is owed.
+
 ## The include-order contract
 
 An armv6m header does not include a device header - it cannot know

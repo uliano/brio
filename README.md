@@ -84,7 +84,7 @@ The full rationale, decision by decision, is in
 
 <sub>[open the diagram full size](https://raw.githubusercontent.com/uliano/brio/main/docs/design/architecture.svg) (zoomable in the browser)</sub>
 
-`brio/` has nine strata; the include prefix makes a file's
+`brio/` has ten strata; the include prefix makes a file's
 portability readable at a glance:
 
 | Stratum | Contains | Depends on |
@@ -92,9 +92,10 @@ portability readable at a glance:
 | `kernel/` | queues, scheduler, FSM, delivery, time events, panic - pure logic | nothing of brio |
 | `util/` | services on top of the kernel: `SerialPort`, `BusMaster` (SPI/I2C arbiter), `print`, `Ring`, line parsers | `kernel/` |
 | `avrdx/` | everything that knows `avr/io.h`: clock, pins, UART, SPI, TWI, ticker, `AvrPlatform` | `kernel/`, `util/` |
-| `armv6m/` | what ARM designed into every Cortex-M0/M0+ and both ARM families share: NVIC + PRIMASK guard, the SysTick ticker | `util/` (and the including family's device header) |
+| `armv6m/` | what ARM designed into every Cortex-M and the four ARM families share: NVIC + PRIMASK guard, the SysTick ticker | `util/` (and the including family's device header) |
 | `samc21/` | everything that knows `sam.h` (Cortex-M0+): clock tree, pins, SERCOM UART, `SamPlatform`; its NVIC and ticker are `armv6m/`'s | `kernel/`, `util/`, `armv6m/` |
 | `stm32g0/` | everything that knows `stm32g0xx.h` (Cortex-M0+): RCC/PLL, GPIO, USART, `Stm32g0Platform`; its NVIC and ticker are `armv6m/`'s | `kernel/`, `util/`, `armv6m/` |
+| `stm32f4/` | everything that knows `stm32f4xx.h` (Cortex-M4F, brio's first ARMv7-M): RCC/PLL with the regulator scale and over-drive, GPIO, USART, `Stm32f4Platform`; its NVIC and ticker are `armv6m/`'s | `kernel/`, `util/`, `armv6m/` |
 | `ch32v00x/` | everything that knows the CH32V00x (QingKe V2C, RV32EC - the smallest core brio runs on): its own register map (no vendor header), the clock, the pads and their remaps, USART, SPI, I2C, DMA, the timers, the ADC and the OPA, flash and the two watchdogs, sleep, the PFIC guard, the STK ticker, `Ch32v00xPlatform` | `kernel/`, `util/` |
 | `host/` | `HostPlatform`: the native test "target" (virtual clock, recording idle/break) | `kernel/` |
 
@@ -122,12 +123,13 @@ where it can, its exceptions where a reader looks").
 | STM32G0 (`stm32g0/`) | supported | STM32G0B1RE, STM32G071RB, STM32G031K8 | arm-none-eabi-gcc 16.2, HSI16 x PLL at 64 MHz, the third clock model (shared bus prescalers + per-peripheral enables) and a tickless timebase option; see [docs/stm32g0/README.md](docs/stm32g0/README.md) |
 | CH32V00x (`ch32v00x/`) | supported | CH32V006K8U6 | WCH's riscv32 gcc 15.2 with its `xw` extension, RV32EC (sixteen registers, 8 KB of RAM - the smallest core brio runs on), HSI x2 at 48 MHz, its own register map with no vendor header, the console on the WCH-Link's own serial; the CH32V003F4P6 (16 KB, 2 KB, no multiplier) is the family's second and last part, supported on the same stratum with its own part table, presets and ISA - every chapter tiered for it, its suites green on the board as group images, the buses on the wire against a peer, the smallest silicon brio runs on; see [docs/ch32v00x/README.md](docs/ch32v00x/README.md) |
 | RP2040 (`rp2040/`) | supported | RP2040 (a Raspberry Pi Pico, a WeAct board) | arm-none-eabi-gcc 16.2, the third Cortex-M0+ family on `armv6m/` - two cores, a kernel on each with the inbox bridge between them, or one kernel on core 0; the USB device stack with a CDC console on the chip's own connector; the 12 MHz crystal through the PLL at 125 MHz, the fourth clock model (a generator per clock domain, a separate peripheral clock, no bus prescaler); the pico-sdk's device description vendored, its own crt and boot stage; see [docs/rp2040/README.md](docs/rp2040/README.md) |
+| STM32F4 (`stm32f4/`) | in bring-up | STM32F429ZI, STM32F446RE, STM32F411CE | arm-none-eabi-gcc 16.2 with the hard-float ABI, brio's first ARMv7-M family on the same `armv6m/` core files; the PLL at 180 MHz in over-drive on two boards and 100 MHz on the third, the APB prescalers unpinned (a rate per bus); the platform, the clock, the pins and the USART with their documents, the kernel console and the platform suite green on the three boards; every other chapter open; see [docs/stm32f4/README.md](docs/stm32f4/README.md) |
 | host (`host/`) | supported | - | doctest suites, `cd test && ctest --preset host`, see [docs/host/README.md](docs/host/README.md) |
 
 ## Building and testing
 
 The framework in `brio/` is header-only, included directly. The
-builds are six sibling CMake projects, one per toolchain, all peers
+builds are seven sibling CMake projects, one per toolchain, all peers
 (the repo root is not a CMake project): `avrdx/`, `samc21/`,
 `stm32g0/`, `ch32v00x/` and `rp2040/` each auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
 - an app may pin build options such as its console baud with

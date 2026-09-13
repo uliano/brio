@@ -81,8 +81,8 @@
 
 #include <array>
 
-#if !defined(__CM0PLUS_REV) && !defined(__CM0_REV)
-#error "armv6m/delay.hpp: include the family's device header first (samc21/delay.hpp and stm32g0/delay.hpp do)"
+#if !defined(__CM0PLUS_REV) && !defined(__CM0_REV) && !defined(__CM4_REV)
+#error "armv6m/delay.hpp: include the family's device header first (samc21/delay.hpp, stm32g0/delay.hpp, rp2040/delay.hpp and stm32f4/delay.hpp do)"
 #endif
 
 #include "util/clock.hpp"
