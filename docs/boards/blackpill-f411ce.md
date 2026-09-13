@@ -27,7 +27,8 @@ STLINK-V3 on its four-pin SWD header.
   sleep with debug off; a program that does either needs the NRST wire
   and a connect under reset - [../probes/st-link.md](../probes/st-link.md).
 - **USB**: the USB-C connector is the F411's OTG FS port, CABLED to the
-  host on the bench for the day the USB device controller lands.
+  host on the bench; the kernel console runs over it as a CDC ACM device
+  ([../stm32f4/usb.md](../stm32f4/usb.md)).
 - **Identity**: DBGMCU_IDCODE 0x10006431 (DEV_ID 0x431 = STM32F411,
   REV_ID 0x1000 = silicon markings A, 1 and 2 in ES0287's table 2), the
   flash size register reads 512 KB.
