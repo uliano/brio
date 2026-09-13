@@ -34,7 +34,9 @@ ST-LINK/V2-B on board with a virtual COM port; the older
 - **What else is on the board**, each a chapter's peer when that
   chapter comes: the ILI9341 LCD (SPI5 for commands, LTDC for pixels),
   the STMPE811 touch controller (I2C3), the L3GD20 gyroscope (SPI5), the
-  IS42S16400J 64 Mbit SDRAM (FMC), a USB OTG HS connector.
+  IS42S16400J 64 Mbit SDRAM on FMC SDRAM bank 2 (SDNE1/SDCKE1,
+  0xD0000000; 38 pads at AF12 across ports B, C, D, E, F and G), a USB
+  OTG HS connector.
 - **Pads the board owns**: PA4 is the display's VSYNC and something on
   the board pulls it HIGH (an unbuffered DAC output there reads 2906 of
   4095 at code 0); PA5 is free. The rail is 2.93 V (VDDA measured through

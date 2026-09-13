@@ -3150,4 +3150,162 @@ constexpr bool fmpi2c_dma_placement_valid(bool transmit, uint8_t controller, uin
     return false;
 }
 
+// ---- the external memory controller --------------------------------------------
+//
+// WHAT THE HEADER ANSWERS, for RM0090 ch. 37 (RM0390 ch. 11):
+//  - WHICH BLOCK THE PART CARRIES. There are two, and they are NOT the
+//    same peripheral: the FSMC (a static controller: NOR/PSRAM, NAND,
+//    PC Card, no SDRAM) and the FMC (the FSMC's register set plus an
+//    SDRAM controller in banks 5 and 6, and a handful of fields the
+//    FSMC has not - CCLKEN, CPSIZE, CBURSTRW). ST gives each its own
+//    struct names and its own base macros, so FMC_Bank1_R_BASE and
+//    FSMC_Bank1_R_BASE are the two questions. The IRQn is the one thing
+//    the two share: every header aliases the name it lacks to the name
+//    it has, so FMC_IRQn resolves on an FSMC part too and cannot be the
+//    presence probe.
+//  - WHICH BANKS. NOR/PSRAM's four sub-banks and the SDRAM's two come
+//    with the block; the NAND and PC Card halves do not. The F427/F429/
+//    F437/F439 carry NAND banks 2 and 3 and a PC Card bank 4
+//    (FMC_Bank2_3_R_BASE, FMC_Bank4_R_BASE); the F446/F469/F479 carry
+//    NAND bank 3 alone under a struct of its own (FMC_Bank3_R_BASE) and
+//    no PC Card at all.
+//  - THE GATE AND THE RESET LINE: RCC_AHB3ENR.FMCEN and
+//    RCC_AHB3RSTR.FMCRST, bit 0 of the one AHB3 register this family
+//    populates.
+//
+// WHAT IT DOES NOT ANSWER: which pads carry the address, data and
+// control lines (a datasheet table, AF12 throughout, and which of them a
+// BOARD wires is the board's own fact), and the memory windows of
+// figure 457 - fixed by the architecture, identical on every part that
+// has the block, and stated in stm32f4/fmc.hpp where they are used.
+
+/// Whether this part carries the FMC - the controller with an SDRAM half.
+constexpr bool fmc_present() {
+#if defined(FMC_Bank1_R_BASE)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// Whether this part carries the FSMC instead: the same static banks
+/// under other register names and NO SDRAM controller. A part with this
+/// and not the FMC has no driver in this stratum, and fmc.hpp says so by
+/// name rather than reporting "no external memory".
+constexpr bool fsmc_present() {
+#if defined(FSMC_Bank1_R_BASE)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// Register-block bases, 0 where the part has none. Bank 1 is the
+/// NOR/PSRAM control and read-timing pair, bank 1E its write-timing
+/// twin, bank 5/6 the SDRAM controller.
+constexpr uint32_t fmc_bank1_base() {
+#if defined(FMC_Bank1_R_BASE)
+    return FMC_Bank1_R_BASE;
+#else
+    return 0u;
+#endif
+}
+
+constexpr uint32_t fmc_bank1e_base() {
+#if defined(FMC_Bank1E_R_BASE)
+    return FMC_Bank1E_R_BASE;
+#else
+    return 0u;
+#endif
+}
+
+constexpr uint32_t fmc_sdram_base() {
+#if defined(FMC_Bank5_6_R_BASE)
+    return FMC_Bank5_6_R_BASE;
+#else
+    return 0u;
+#endif
+}
+
+/// The NAND half, asked bank by bank. Bank 2 exists on the F42x/F43x
+/// alone; bank 3 wherever the block does. The two live in different
+/// structs (FMC_Bank2_3_TypeDef against FMC_Bank3_TypeDef), which is
+/// why this answers a BASE and not a struct.
+constexpr uint32_t fmc_nand_base(uint8_t bank) {
+    switch (bank) {
+#if defined(FMC_Bank2_3_R_BASE)
+        case 2: return FMC_Bank2_3_R_BASE;
+        case 3: return FMC_Bank2_3_R_BASE + 0x20u;
+#elif defined(FMC_Bank3_R_BASE)
+        case 3: return FMC_Bank3_R_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool fmc_nand_bank_present(uint8_t bank) { return fmc_nand_base(bank) != 0u; }
+
+constexpr uint8_t fmc_nand_banks() {
+    return static_cast<uint8_t>((fmc_nand_bank_present(2) ? 1 : 0) +
+                                (fmc_nand_bank_present(3) ? 1 : 0));
+}
+
+/// The PC Card half - bank 4, the F42x/F43x's alone.
+constexpr uint32_t fmc_pccard_base() {
+#if defined(FMC_Bank4_R_BASE)
+    return FMC_Bank4_R_BASE;
+#else
+    return 0u;
+#endif
+}
+
+constexpr bool fmc_pccard_present() { return fmc_pccard_base() != 0u; }
+
+/// How many banks each half has where the block exists: four NOR/PSRAM
+/// sub-banks under one chip select each, two SDRAM banks.
+constexpr uint8_t fmc_static_banks() { return fmc_present() ? 4u : 0u; }
+constexpr uint8_t fmc_sdram_banks() { return fmc_sdram_base() != 0u ? 2u : 0u; }
+
+/// RCC_AHB3ENR.FMCEN and RCC_AHB3RSTR.FMCRST, both bit 0.
+constexpr uint32_t fmc_clock_mask() {
+#if defined(RCC_AHB3ENR_FMCEN)
+    return RCC_AHB3ENR_FMCEN;
+#else
+    return 0u;
+#endif
+}
+
+constexpr uint32_t fmc_reset_mask() {
+#if defined(RCC_AHB3RSTR_FMCRST)
+    return RCC_AHB3RSTR_FMCRST;
+#else
+    return 0u;
+#endif
+}
+
+/// BCRx.WRAPMOD, the one field of the static half that is not on every
+/// FMC part: RM0090 37.5.6 has it (and says it does nothing, because no
+/// master of this family emits a wrapping burst), RM0390 11.6.6 leaves
+/// bit 10 reserved and the F446/F469/F479 headers declare no mask for
+/// it. Zero where the field does not exist.
+constexpr uint32_t fmc_wrapped_burst_mask() {
+#if defined(FMC_BCR1_WRAPMOD)
+    return FMC_BCR1_WRAPMOD;
+#else
+    return 0u;
+#endif
+}
+
+/// The one vector the whole controller shares (the NAND banks' FIFO
+/// interrupts and the SDRAM's refresh error). Guarded by the block's own
+/// base macro, because every header aliases the OTHER block's IRQn name
+/// to this one and the enumerator alone proves nothing.
+constexpr IRQn_Type fmc_irq() {
+#if defined(FMC_Bank1_R_BASE)
+    return FMC_IRQn;
+#else
+    return NonMaskableInt_IRQn;
+#endif
+}
+
 } // namespace brio
