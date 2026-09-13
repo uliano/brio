@@ -96,7 +96,8 @@ A one-shot alarm matches every field; the century year 2100 wants
 
 ## Bench findings
 
-The reference suite is `test_rp2040_rtc`, green on the WeAct board,
+The reference suite is `test_rp2040_rtc`, green on the Pico and the
+WeAct board,
 every letter wireless: clk_rtc counted by the frequency counter, the
 calendar's second and the alarm's latency timed on the system timer,
 the boundaries crossed one second at a time.

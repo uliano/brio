@@ -115,10 +115,10 @@ are the last it moves at the old rate.
 
 ## Bench findings
 
-The reference suite is `test_rp2040_sleep`, green on the WeAct board
-(52 verdicts in the all-key), every letter wireless: the system timer
-as the ruler, a PWM slice with its gate pruned as the instrument that
-says whether the SLEEP state was reached.
+The reference suite is `test_rp2040_sleep`, green on the Pico and the
+WeAct board (52 verdicts in the all-key), every letter wireless: the
+system timer as the ruler, a PWM slice with its gate pruned as the
+instrument that says whether the SLEEP state was reached.
 
 - AS FOUND: both masks all open, ENABLED the wake set less clk_usb
   (no USB PLL), SLEEPDEEP clear, no dormant wake, the hook empty; the
@@ -189,4 +189,3 @@ Implemented but not bench-verified, each with what would measure it:
 - The timed site's dormant over a day boundary of the calendar and
   its refusal a day or more out: pinned by the arithmetic, a wake at
   23:59:59 plus two seconds would measure the carry.
-- The Pico's own numbers: the same suite on a Pico.

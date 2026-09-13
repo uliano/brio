@@ -139,7 +139,8 @@ Sm::enable(true);
 
 ## Bench findings
 
-The reference suite is `test_rp2040_pio`, green on the WeAct board:
+The reference suite is `test_rp2040_pio`, green on the Pico and the
+WeAct board:
 one letter wireless, six on two of the standing wires (GP13 into
 GP15, GP17 into GP9) with the PWM block's counters at the far ends.
 

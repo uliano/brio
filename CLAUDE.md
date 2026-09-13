@@ -303,11 +303,10 @@ gets its home in `docs/design/` when taken.
   the bootrom's protocol - design/kernel.md section 12 and
   docs/rp2040/multicore.md, measured by test_rp2040_multicore. What
   remains: a console on core 1, the Pico H as the reference board,
-  the suites re-run on a Pico (every chapter is written and measured
-  on the WeAct board - the DMA, the SPI, the I2C, the PWM, the ADC,
-  the RTC, the PIO, the flash with the heap and the journal at the
-  top of the QSPI chip, the power chapter with its SLEEP state and
-  DORMANT).
+  the `supported` call (every chapter is written and measured on both
+  boards - the DMA, the SPI, the I2C, the PWM, the ADC, the RTC, the
+  PIO, the flash with the heap and the journal at the top of the QSPI
+  chip, the power chapter with its SLEEP state and DORMANT).
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the

@@ -83,8 +83,8 @@ the crystal and the PLL locked at 125 MHz, the pin-check wave on
 GP2..GP29 read back through SIO, the console over the probe's UART
 bridge in both directions (the kernel console answers HELP, LED,
 UPTIME and ERR at 115200 with every error counter at zero), the LED
-on GP25 under the console's heartbeat, and the platform, clock,
-serial, multicore, DMA and SPI suites green on both boards (their documents'
+on GP25 under the console's heartbeat, and every suite of the
+document map green on both boards (their documents'
 findings; the clock link between the two boards counts one crystal
 against the other, the UART cross link carries the serial suite's
 peer letters both ways). NOT yet verified: the user button on GP23.

@@ -101,20 +101,23 @@ never erases.
 
 ## Bench findings
 
-The reference suite is `test_rp2040_flash`, green on the WeAct board
-(the Zetta ZD25Q16), every letter wireless, the system timer around
-every window.
+The reference suite is `test_rp2040_flash`, green on the Pico (a
+Winbond W25Q16JV) and on the WeAct board (a Zetta ZD25Q16), every
+letter wireless, the system timer around every window. The two chips
+answer the same commands with the same result and differ in nothing
+but their timings, which is the point of the bootrom's engine.
 
 - THE ENGINE: the bootrom's table is found (version 1) with all six
   functions; the stage's CRC computed as 2.8.1 says is the word stored
-  (0xD58F0B07 for the Winbond-class stage); 9Fh answers BA 60 15 -
-  Zetta, 2 MB, the build's size -, 4Bh a unique id the same on every
-  read, 05h a status register at zero; XIP serves after every
+  (0xD58F0B07 for the Winbond-class stage); 9Fh answers EF 40 15 on
+  the Pico and BA 60 15 on the WeAct board - Winbond and Zetta, 2 MB,
+  the build's size -, 4Bh a unique id the same on every read, 05h a
+  status register at zero; XIP serves after every
   exchange; the linker stops at the storage floor, the zones are the
   48 KB and the 16 KB of the partition.
-- ONE SECTOR, ONE PAGE: a sector erase takes 5.2 ms and a page program
-  1.3 ms on this chip (the window included; the status register reads
-  idle when the window closes); the page reads back exact through the
+- ONE SECTOR, ONE PAGE: a sector erase takes 29 ms on the Winbond and
+  5.2 ms on the Zetta, a page program 0.6 ms and 1.3 ms (the window
+  included; the status register reads idle when the window closes); the page reads back exact through the
   cache and past it, the rest of the sector untouched; the refusals - a
   misaligned address, a short span, a source in the window, a page
   past the chip, a run of no sectors or past the end, an exchange of
@@ -137,8 +140,9 @@ every window.
   `save_reserved()` in 1.4 ms with no erase, and re-mounts with three
   live values and nothing torn.
 - THE WIPE (outside the all-key): the 64 KB partition erased in one
-  run of 5.2 to 5.5 ms through the 64 KB block command, the chip idle
-  when the window closes.
+  run through the 64 KB block command - 226 ms on the Winbond, 5.2 to
+  5.5 ms on the Zetta, whose block costs what its sector costs - the
+  chip idle when the window closes.
 
 ## Not covered yet
 
@@ -165,8 +169,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The Pico's Winbond W25Q16JV: the same suite on a Pico, its JEDEC id
-  EF 40 15, its erase and program timings.
 - `Xip::power_down` and `fault_on_bad_write`: a write to a non-cached
   alias with the fault armed, caught by the HardFault handler.
 - An erase that spans the 64 KB block boundary inside the partition:

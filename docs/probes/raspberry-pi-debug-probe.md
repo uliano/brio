@@ -61,6 +61,16 @@ any RP2040 board (SWD on GP2/GP3, the UART on GP4/GP5).
   such a session left halted (DHCSR reads 0x00030003) is released
   once with both cores configured: `reset run`, then `mww 0xE000EDF0
   0xA05F0000` on `rp2040.core1` and on `rp2040.core0`.
+- **A chip whose bus is wedged answers the DP and not the AP** - "Could
+  not find MEM-AP to control the core" with DPIDR read fine, the
+  console mute - after a fault on a bus that never completes (a read
+  of a peripheral whose clock is stopped did it). No SWD reset reaches
+  it and the probe carries no RUN line; what does is the RP2040's
+  RESCUE DEBUG PORT (datasheet 2.3.4.2), DP instance 0xf, whose
+  CDBGPWRUPREQ resets the chip: the OpenOCD built from git runs it
+  with `-c "set RESCUE 1"` before `target/rp2040.cfg` (the 0.12.0
+  release's script has no rescue branch), after which an ordinary
+  `brio flash` programs the board again. Measured on a Pico.
 - **Debugging**: cortex-debug over the same OpenOCD; not yet exercised
   on this desk.
 

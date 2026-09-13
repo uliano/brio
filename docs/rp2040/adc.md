@@ -126,7 +126,8 @@ with the FIFO at threshold 1 and its interrupt posting
 
 ## Bench findings
 
-The reference suite is `test_rp2040_adc`, green on the WeAct board,
+The reference suite is `test_rp2040_adc`, green on the Pico and the
+WeAct board,
 every letter wireless: the clocks counted by the frequency counter,
 the rates timed on the system timer, the sensor and the pads' pulls
 as the known voltages, the DMA as the reader.
@@ -143,8 +144,9 @@ as the known voltages, the DMA as the reader.
   their pull-downs 66..68; the bus keeper is NO KEEPER on an analog
   pad: it latches through the digital input buffer, which the analog
   claim turns off, and reads as the pull-down whatever the pad had.
-  GPIO 29 is printed for the record (a Pico's VSYS / 3, a WeAct
-  board's bare header pin).
+  GPIO 29 is printed for the record: a Pico's VSYS / 3 reads 1767
+  counts, 1424 mV (a supply of 4.27 V through the probe's power), a
+  WeAct board's bare header pin whatever it floats to.
 - THE RATE, 256 conversions into a DMA block: 2.003 us each at DIV 0
   (the chapter's 96 cycles), 100 ksps, 10 ksps and a fractional 44.1
   ksps each within a tenth of a per cent of the timer; 8.0 us each on
@@ -192,5 +194,3 @@ Implemented but not bench-verified, each with what would measure it:
   ramp across a full scale with the flags counted.
 - The FIFO underflow flag: a pop of an empty FIFO, staged on purpose.
 - `Adc::force`: the interrupt raised by software, read in the status.
-- The suite on a Raspberry Pi Pico: the same image, its GPIO 29
-  reading VSYS / 3.
