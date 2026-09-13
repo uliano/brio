@@ -14,7 +14,7 @@
  *  - `queue`: a static EventQueue<Event, depth, P> - the ONE place where
  *    events for this AO wait. Depth is the AO's own sizing decision,
  *    which is why the base class cannot declare it for you;
- *  - `init()`: called once by Kernel::init_all() in pack order, before
+ *  - `init()`: called once by Tenuto::init_all() in pack order, before
  *    the first event is served. An Fsm-based AO calls start(&initial)
  *    here, so its first state is entered before anything can be posted;
  *  - `dispatch(const Event&)`: run ONE event to completion. Called from
@@ -28,7 +28,7 @@
  * signatures, that pop() yields optional<Event> and empty() a bool. It
  * does NOT check that dispatch is run-to-completion, that init() calls
  * start(), or that the queue is really an EventQueue: those are the
- * rules of the model, and Kernel/Fsm/post are written assuming them.
+ * rules of the model, and Tenuto/Fsm/post are written assuming them.
  *
  * Fsm is one way to satisfy the contract (Event + dispatch for free),
  * not the contract itself: an AO with a plain switch and its own Event
@@ -44,7 +44,7 @@
 
 namespace brio {
 
-/// What Kernel<P, Aos...> requires of every AO in its pack.
+/// What Tenuto<P, Aos...> requires of every AO in its pack.
 template <typename A>
 concept ActiveObject = requires(const typename A::Event& e) {
     A::init();
@@ -55,7 +55,7 @@ concept ActiveObject = requires(const typename A::Event& e) {
 
 /// The platform an AO's queue is guarded by, when the queue names it
 /// (EventQueue does): on a chip with more than one core this is the
-/// AO's core. Kernel and TimeEvent check it against their own P, so an
+/// AO's core. Tenuto and TimeEvent check it against their own P, so an
 /// AO sits in the pack of its own core's kernel and a timer posts to an
 /// AO of its own core - or does not compile. A queue that names no
 /// platform (a hand-rolled one in a test) is trusted.

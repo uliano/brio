@@ -86,7 +86,7 @@
 #include "samc21/ticker.hpp"
 #include "samc21/platform.hpp"
 #include "samc21/tsens.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "util/block_stream.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
@@ -1965,7 +1965,7 @@ struct StreamSink : Fsm<StreamSink, BlockReady<uint16_t>> {
 };
 
 using Relay = BlockRelay<SamPlatform, Subscribers<StreamSink>, AdcStream>;
-using StreamKernel = Kernel<SamPlatform, StreamSink, Relay>;
+using StreamKernel = Tenuto<SamPlatform, StreamSink, Relay>;
 
 void tk_relay() {
     if (!calibrated && !calibrate()) {

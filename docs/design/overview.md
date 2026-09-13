@@ -40,7 +40,7 @@ the stack, not just the layer being added.
   `static inline` members** (a ring, a queue, the dynamic clock's rate:
   per type, in .bss, no constructor, no init order). Monostate is not
   stateless: the wiring is compile time, the state is static. AOs, the
-  Kernel, clocks and tasks over resources are the same sentence. No
+  kernel, clocks and tasks over resources are the same sentence. No
   virtual interfaces, no runtime singletons; the empty tag object
   (`constexpr Serial serial;`, `constexpr SysClock clock;`) is how a
   type travels as an argument. The one deliberate return to run time

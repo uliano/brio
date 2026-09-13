@@ -49,7 +49,7 @@
 
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "rp2040/adc.hpp"
@@ -533,7 +533,7 @@ public:
 };
 
 using Sampler = AnalogSampler<Adc, P, Subscribers<Probe>, AdcInput::temperature, In0{}>;
-using SamplerKernel = Kernel<P, Probe, Sampler>;
+using SamplerKernel = Tenuto<P, Probe, Sampler>;
 
 void pump() {
     TimeEvents<P>::process();

@@ -27,7 +27,7 @@
 #include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
@@ -153,5 +153,5 @@ int main() {
                 "SPI loopback tester: jumper PA4(MOSI) -> PA5(MISO)",
                 brio::crlf);
 
-    brio::Kernel<P, Tester, Bus>::run();
+    brio::Tenuto<P, Tester, Bus>::run();
 }

@@ -23,7 +23,7 @@
 
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "stm32g0/clock.hpp"
@@ -123,5 +123,5 @@ int main()
     brio::Ticker::init(clock);    // SysTick timebase (runs through WFI sleep)
     brio::enable_interrupts();
 
-    brio::Kernel<P, Blinker, Supervisor>::run();  // never returns
+    brio::Tenuto<P, Blinker, Supervisor>::run();  // never returns
 }

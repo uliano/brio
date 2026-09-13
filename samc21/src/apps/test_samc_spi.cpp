@@ -78,7 +78,7 @@
 #include "samc21/spi.hpp"
 #include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
@@ -1559,7 +1559,7 @@ private:
     }
 };
 
-using BusKernel = Kernel<P, Driver, SpiArb>;
+using BusKernel = Tenuto<P, Driver, SpiArb>;
 
 }   // namespace kl
 

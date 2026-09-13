@@ -8,7 +8,7 @@
 //   Blinker  owns the LED: heartbeat time event at 1 Hz, manual
 //              LED ON|OFF|TOG commands arrive as posted SetLed events
 //
-// Kernel pack order is a CONTRACT here: Console (line consumer) must
+// Tenuto pack order is a CONTRACT here: Console (line consumer) must
 // precede SerialPort (line producer) so the ping-pong buffers are always
 // free when SerialPort runs - see the scheduling contract in serial_port.hpp.
 //
@@ -30,7 +30,7 @@
 #include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
@@ -214,5 +214,5 @@ int main() {
 
     // Pack order = priority AND correctness: the line CONSUMER (Console)
     // must precede the PRODUCER (SerialLines) - scheduling contract.
-    brio::Kernel<P, Console, SerialLines, Blinker>::run();
+    brio::Tenuto<P, Console, SerialLines, Blinker>::run();
 }

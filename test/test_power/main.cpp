@@ -1,6 +1,6 @@
 // Host tests for util/power.hpp: the sleep-depth ladder, the vote round,
 // standing restrictions, the deadline guard and the first-event-after-
-// wake contract - driven through a real Kernel pack, so the AO contract
+// wake contract - driven through a real Tenuto pack, so the AO contract
 // is exercised and not simulated.
 // Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
@@ -14,7 +14,7 @@
 #include "host/platform.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time_event.hpp"
 #include "util/power.hpp"
 
@@ -151,12 +151,12 @@ private:
 };
 
 using Pm = brio::PowerManager<HostPlatform, Site, PowerConfig{}, VoterA, VoterB>;
-using K = brio::Kernel<HostPlatform, Asker, VoterA, VoterB, Pm>;
+using K = brio::Tenuto<HostPlatform, Asker, VoterA, VoterB, Pm>;
 
 /// A manager with no voters at all: the degenerate pack must still work.
 using SoloSite = FakeSite<3>;
 using Solo = brio::PowerManager<HostPlatform, SoloSite>;
-using SoloK = brio::Kernel<HostPlatform, Solo>;
+using SoloK = brio::Tenuto<HostPlatform, Solo>;
 
 /// Serve events until every queue is empty (the loop, minus the sleep).
 void pump() {

@@ -7,7 +7,7 @@
  *
  * ONE PLATFORM TYPE PER CORE. The first template parameter is the core,
  * 0 or 1: the kernel's statics are keyed by the platform type, so
- * `Kernel<Rp2040Platform<0>, ...>` and `Kernel<Rp2040Platform<1>, ...>`
+ * `Tenuto<Rp2040Platform<0>, ...>` and `Tenuto<Rp2040Platform<1>, ...>`
  * are two kernels with two packs, two timebases (the second parameter,
  * the core's own SysTick ticker by default) and two breadcrumbs, and
  * the type IS the core identity everywhere the kernel asks P (the

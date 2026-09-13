@@ -18,7 +18,7 @@
 // vector bindings (the one SysTick vector ticks the ticker of the core
 // that took it; UART1's line is enabled by core 1's init, in ITS NVIC).
 //
-// Kernel pack order is a CONTRACT: a Console (line consumer) precedes
+// Tenuto pack order is a CONTRACT: a Console (line consumer) precedes
 // its SerialPort (line producer) on both cores.
 //
 // build: boards = pico,weact2040
@@ -28,7 +28,7 @@
 
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "rp2040/clock.hpp"
@@ -204,8 +204,8 @@ using Console1 = ConsoleOn<Serial1, P1, 1>;
 using Lines0 = Console0::Lines;
 using Lines1 = Console1::Lines;
 
-using K0 = brio::Kernel<P0, Console0, Lines0, Blinker>;
-using K1 = brio::Kernel<P1, Console1, Lines1>;
+using K0 = brio::Tenuto<P0, Console0, Lines0, Blinker>;
+using K1 = brio::Tenuto<P1, Console1, Lines1>;
 using Drain0 = brio::Inboxes<Blinker>;   // what core 1 sends to core 0
 
 /// Core 1's whole life: its ticker, its UART (the line enabled in its

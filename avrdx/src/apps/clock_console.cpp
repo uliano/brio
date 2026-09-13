@@ -38,7 +38,7 @@
 #include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
@@ -278,5 +278,5 @@ int main() {
 
     // Pack order = priority AND correctness: the line CONSUMER (Console)
     // must precede the PRODUCER (SerialLines) - scheduling contract.
-    brio::Kernel<P, Console, SerialLines, Blinker>::run();
+    brio::Tenuto<P, Console, SerialLines, Blinker>::run();
 }

@@ -119,7 +119,7 @@
 
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time_event.hpp"
 #include "stm32g0/adc.hpp"
@@ -2192,7 +2192,7 @@ struct Collector {
     }
 };
 
-using AnalogKernel = Kernel<Stm32g0Platform<>, Collector, Sampler>;
+using AnalogKernel = Tenuto<Stm32g0Platform<>, Collector, Sampler>;
 
 void tj_sampler_ao() {
     if (!analog_up(cfg_internal)) {
@@ -2214,8 +2214,8 @@ void tj_sampler_ao() {
     kernel_mode = true;
     Sampler::start_every(2);   // one conversion every 2 ms
 
-    // Kernel::step() serves ONE queued event and nothing else - only
-    // Kernel::run() matures time events, and this loop is not run(). The
+    // Tenuto::step() serves ONE queued event and nothing else - only
+    // Tenuto::run() matures time events, and this loop is not run(). The
     // sampler's software pace IS a time event, so the pump has to do
     // both halves by hand.
     const uint32_t deadline = Ticker::ticks() + 400u;

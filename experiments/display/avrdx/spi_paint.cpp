@@ -36,7 +36,7 @@
 #include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
@@ -535,5 +535,5 @@ int main() {
                 "spi_paint: draw on the ILI9481 with the XPT2046 pen",
                 brio::crlf);
 
-    brio::Kernel<P, Bus, Touch, Painter>::run();
+    brio::Tenuto<P, Bus, Touch, Painter>::run();
 }

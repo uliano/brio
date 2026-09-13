@@ -7,7 +7,7 @@
 // two; 1024 at the default), the concept (an LptimTicker is Tickless
 // and the SysTick Ticker is not), the platform on it (Platform, with
 // idle_until, at 1024 ticks per second where the kernel's ms
-// conversions stop folding to the identity), a Kernel plus a
+// conversions stop folding to the identity), a Tenuto plus a
 // PowerManager over the plain site on that platform (the tickless
 // branch of idle_if_empty and the pause-less site, instantiated), and
 // every verb of the ticker on both instances.
@@ -17,7 +17,7 @@
 #include <optional>
 
 #include "kernel/event_queue.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "stm32g0/clock.hpp"
@@ -113,7 +113,7 @@ struct Probe : Fsm<Probe, PrepareSleep, SleepVote, WakeReport> {
     }
 };
 using Manager = PowerManager<P, Site, PowerConfig{}, Probe>;
-using K = Kernel<P, Probe, Manager>;
+using K = Tenuto<P, Probe, Manager>;
 
 void tickless_kernel() {
     K::init_all();

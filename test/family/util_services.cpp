@@ -15,7 +15,7 @@
 #include "avrdx/pin.hpp"
 #include "avrdx/platform.hpp"
 #include "avrdx/tcb.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "util/bus_master.hpp"
 #include "util/input_scanner.hpp"
 #include "util/meter_sampler.hpp"
@@ -125,7 +125,7 @@ static_assert(ActiveObject<Buttons>);
 static_assert(ActiveObject<PlainBus>);
 static_assert(ActiveObject<RetryBus>);
 
-using System = Kernel<P, Watcher, Meters, Buttons, PlainBus, RetryBus>;
+using System = Tenuto<P, Watcher, Meters, Buttons, PlainBus, RetryBus>;
 
 // ---- the ISR glue an app would write --------------------------------------------
 // The drivers stay untouched: the meter's ISR body returns the reading

@@ -121,7 +121,7 @@ int main() {
     SysClock::init();
     brio::Ticker::init(clock);
     brio::enable_interrupts();
-    brio::Kernel<P, ...>::run();
+    brio::Tenuto<P, ...>::run();
 }
 ```
 

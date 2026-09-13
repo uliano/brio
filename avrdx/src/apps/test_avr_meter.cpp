@@ -13,8 +13,8 @@
 //
 // THIS SUITE RUNS THE KERNEL: the object under test
 // is an active object, so the samples travel through a real queue, a
-// real dispatch and a real Kernel pack (Sink, Sampler). Only the LOOP is
-// the suite's - run_ticks() pumps TimeEvents and Kernel::step() for a
+// real dispatch and a real Tenuto pack (Sink, Sampler). Only the LOOP is
+// the suite's - run_ticks() pumps TimeEvents and Tenuto::step() for a
 // measured number of kernel ticks.
 //
 // PINS IT CLAIMS: PD0 (TCA0 WO0) and the console (USART2 ALT1, PF4/PF5,
@@ -39,7 +39,7 @@
 #include "avrdx/ticker.hpp"
 #include "avrdx/usart.hpp"
 #include "avrdx/userrow.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "util/meter_sampler.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
@@ -104,7 +104,7 @@ struct Sink : Fsm<Sink, MeterSample> {
 };
 
 using Sampler = MeterSampler<P, Subscribers<Sink>, PeriodLatch, WidthLatch>;
-using K = Kernel<P, Sink, Sampler>;
+using K = Tenuto<P, Sink, Sampler>;
 
 // ---- what the ISRs hand over -------------------------------------------------------
 // The drivers are untouched: the meter's ISR BODY returns the reading and

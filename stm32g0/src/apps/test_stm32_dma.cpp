@@ -98,7 +98,7 @@
 
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "stm32g0/clock.hpp"
 #include "stm32g0/delay.hpp"
@@ -1890,7 +1890,7 @@ private:
 
 class Relay : public BlockRelay<Stm32g0Platform<>, Subs, Pong> {};
 
-using DmaKernel = Kernel<Stm32g0Platform<>, Consumer, Relay>;
+using DmaKernel = Tenuto<Stm32g0Platform<>, Consumer, Relay>;
 
 void tj_relay() {
     constexpr uint32_t hz = 2'000;

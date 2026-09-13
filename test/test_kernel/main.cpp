@@ -1,4 +1,4 @@
-// Host tests for kernel/kernel.hpp (+ active_object.hpp, post.hpp): priority order,
+// Host tests for kernel/tenuto.hpp (+ active_object.hpp, post.hpp): priority order,
 // one-event-per-step, init ordering, idle gating, post/publish.
 // Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
@@ -14,7 +14,7 @@
 #include "host/platform.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time_event.hpp"
 
 namespace {
@@ -52,7 +52,7 @@ struct Low : brio::Fsm<Low, Hit, Note> {
     }
 };
 
-using K = brio::Kernel<HostPlatform, High, Low>;
+using K = brio::Tenuto<HostPlatform, High, Low>;
 using Trace = std::vector<std::string>;
 
 struct PingPong : brio::Fsm<PingPong, Hit> {
@@ -125,7 +125,7 @@ struct Sleeper : brio::Fsm<Sleeper, Hit> {
     }
 };
 
-using TK = brio::Kernel<TicklessPlatform, Sleeper>;
+using TK = brio::Tenuto<TicklessPlatform, Sleeper>;
 
 void reset() {
     trace.clear();
@@ -160,7 +160,7 @@ TEST_CASE("step serves ONE event, highest priority first, rescan from top") {
 }
 
 TEST_CASE("an event posted DURING a dispatch is served on the next step") {
-    using K2 = brio::Kernel<HostPlatform, PingPong>;
+    using K2 = brio::Tenuto<HostPlatform, PingPong>;
 
     reset();
     while (PingPong::queue.pop().has_value()) {}
@@ -246,8 +246,8 @@ TEST_CASE("Pack answers ordering questions; a lender's borrowers must precede it
     static_assert(Ok::lends_ok<Lender>());
     static_assert(Ok::lends_ok<High>());           // no LendsTo: trivially ok
     static_assert(!brio::Pack<Lender, Borrower>::lends_ok<Lender>());
-    // Kernel<HostPlatform, Lender, Borrower> would fail its static_assert.
-    using K = brio::Kernel<HostPlatform, Borrower, Lender>;
+    // Tenuto<HostPlatform, Lender, Borrower> would fail its static_assert.
+    using K = brio::Tenuto<HostPlatform, Borrower, Lender>;
     K::init_all();
     CHECK(true);
 }

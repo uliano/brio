@@ -8,7 +8,7 @@
 #include "ch32v00x/dma.hpp"
 #include "ch32v00x/i2c.hpp"
 #include "ch32v00x/platform.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "util/i2c_bus.hpp"
 
 using namespace brio;
@@ -105,8 +105,8 @@ void client_verbs() {
     Client::release();
 }
 
-using Loop = Kernel<P, PlainBus>;
-using TimedLoop = Kernel<P, TimedBus>;
+using Loop = Tenuto<P, PlainBus>;
+using TimedLoop = Tenuto<P, TimedBus>;
 
 void arbiters() {
     Loop::init_all();

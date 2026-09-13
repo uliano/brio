@@ -6,7 +6,7 @@
  *
  * Mechanics: the tick ISR only advances the counter and, by firing,
  * wakes the CPU from idle; expiry runs in the KERNEL LOOP -
- * Kernel::run() calls TimeEvents<P>::process() once per turn, which
+ * Tenuto::run() calls TimeEvents<P>::process() once per turn, which
  * compares P::now() against the armed deadlines and posts the matured
  * events in main context. Wrap-safe comparison via signed
  * difference: (int32_t)(now - deadline) >= 0 works across the 32-bit
@@ -139,7 +139,7 @@ public:
      *
      * ticks_to_next()'s sibling, for the other consumer: the loop hands
      * this to a platform that can sleep TO an instant rather than FOR a
-     * span (kernel.hpp's idle_if_empty, kernel/platform.hpp's optional
+     * span (tenuto.hpp's idle_if_empty, kernel/platform.hpp's optional
      * idle_until). The distance would drift by up to one tick between
      * this read of now() and the platform's own; the deadline does not.
      * A question, not a decision; main-loop context only.

@@ -27,7 +27,7 @@
 #include "ch32v00x/ticker.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 
@@ -118,5 +118,5 @@ int main()
     brio::Ticker::init(clock);    // the STK timebase
     brio::enable_interrupts();
 
-    brio::Kernel<P, Blinker, Supervisor>::run();  // never returns
+    brio::Tenuto<P, Blinker, Supervisor>::run();  // never returns
 }

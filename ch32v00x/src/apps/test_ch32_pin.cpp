@@ -55,7 +55,7 @@
 #include "ch32v00x/ticker.hpp"
 #include "ch32v00x/tim.hpp"
 #include "ch32v00x/usart.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "util/input_scanner.hpp"
 #include "util/print.hpp"
@@ -465,7 +465,7 @@ public:
 };
 
 using Scanner = InputScanner<P, Subscribers<Probe>, ScanConfig{.stable_samples = 3}, SensorInput>;
-using Loop = Kernel<P, Probe, Scanner>;
+using Loop = Tenuto<P, Probe, Scanner>;
 
 void pump_ms(uint32_t ms) {
     const uint32_t t0 = Ticker::ticks();

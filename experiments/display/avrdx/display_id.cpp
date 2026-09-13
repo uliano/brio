@@ -33,7 +33,7 @@
 #include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
@@ -225,5 +225,5 @@ int main() {
                 "display ID probe: needs module SDO wired to PA5",
                 brio::crlf);
 
-    brio::Kernel<P, Prober, Bus>::run();
+    brio::Tenuto<P, Prober, Bus>::run();
 }

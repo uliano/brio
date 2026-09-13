@@ -74,7 +74,7 @@
 
 #include <optional>
 
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time_event.hpp"
 #include "stm32g0/clock.hpp"
@@ -732,8 +732,8 @@ struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip, Woke> {
 
 using PlainManager = PowerManager<P, Site, PowerConfig{}, Probe>;
 using TimedManager = PowerManager<P, TimedSite, PowerConfig{}, Probe>;
-using PlainKernel = Kernel<P, Probe, PlainManager>;
-using TimedKernel = Kernel<P, Probe, TimedManager>;
+using PlainKernel = Tenuto<P, Probe, PlainManager>;
+using TimedKernel = Tenuto<P, Probe, TimedManager>;
 
 
 Probe::Status Probe::only(const Event& e) {

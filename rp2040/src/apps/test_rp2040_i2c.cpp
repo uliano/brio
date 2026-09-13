@@ -66,7 +66,7 @@
 
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "rp2040/clock.hpp"
@@ -826,7 +826,7 @@ public:
     }
 };
 
-using BusKernel = Kernel<P, Probe, I2cArb>;
+using BusKernel = Tenuto<P, Probe, I2cArb>;
 
 void pump() {
     TimeEvents<P>::process();

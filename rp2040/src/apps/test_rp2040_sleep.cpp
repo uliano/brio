@@ -63,7 +63,7 @@
 
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
@@ -562,7 +562,7 @@ struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip> {
 };
 
 using Pm_ = PowerManager<P, Timed, PowerConfig{}, Probe>;
-using K = Kernel<P, Probe, Pm_>;
+using K = Tenuto<P, Probe, Pm_>;
 
 void pump() {
     for (uint16_t i = 0; i < 500u; ++i) {

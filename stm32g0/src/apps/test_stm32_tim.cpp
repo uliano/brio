@@ -104,7 +104,7 @@
 
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "stm32g0/clock.hpp"
 #include "stm32g0/delay.hpp"
@@ -1765,7 +1765,7 @@ struct Collector {
     }
 };
 
-using MeterKernel = Kernel<Stm32g0Platform<>, Collector, Sampler>;
+using MeterKernel = Tenuto<Stm32g0Platform<>, Collector, Sampler>;
 
 volatile bool kernel_mode = false;
 

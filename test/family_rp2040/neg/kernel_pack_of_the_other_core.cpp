@@ -2,7 +2,7 @@
 // in the pack of core 0's kernel (kernel/active_object.hpp's queue_on).
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "rp2040/platform.hpp"
 
 struct Tick {};
@@ -12,4 +12,4 @@ struct Remote : brio::Fsm<Remote, Tick> {
     static Status only(const Event&) { return handled(); }
 };
 
-void wrong_pack() { brio::Kernel<brio::Rp2040Platform<0>, Remote>::init_all(); }
+void wrong_pack() { brio::Tenuto<brio::Rp2040Platform<0>, Remote>::init_all(); }

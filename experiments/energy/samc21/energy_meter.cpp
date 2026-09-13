@@ -41,7 +41,7 @@
 #include "../energy_link.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "samc21/ac.hpp"
@@ -998,5 +998,5 @@ int main()
                     "), type HELP", brio::crlf, "> ");
     }
 
-    brio::Kernel<P, Console, SerialLines, Stim, Heart>::run();
+    brio::Tenuto<P, Console, SerialLines, Stim, Heart>::run();
 }

@@ -252,7 +252,7 @@ int main() {
     SysClock::init();
     brio::Ticker::init(clock);
     brio::enable_interrupts();
-    brio::Kernel<P, /* AOs */>::run();
+    brio::Tenuto<P, /* AOs */>::run();
 }
 ```
 
@@ -262,7 +262,7 @@ rule to respect:
 ```cpp
 using Pm = brio::PowerManager<P, brio::SamSleepSite, brio::PowerConfig{},
                               /* voters */>;
-using K = brio::Kernel<P, /* AOs */, Pm>;
+using K = brio::Tenuto<P, /* AOs */, Pm>;
 
 // Somewhere that decides the program has nothing to do. THE RULE OF
 // THIS TARGET: kernel time stops in standby, so ask for it only when

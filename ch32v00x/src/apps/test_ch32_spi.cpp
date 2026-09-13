@@ -81,7 +81,7 @@
 #include "ch32v00x/spi.hpp"
 #include "ch32v00x/ticker.hpp"
 #include "ch32v00x/usart.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time.hpp"
 #include "util/power.hpp"
@@ -1015,7 +1015,7 @@ public:
     }
 };
 
-using BusKernel = Kernel<P, Probe, SpiArb>;
+using BusKernel = Tenuto<P, Probe, SpiArb>;
 
 void pump() {
     TimeEvents<P>::process();

@@ -17,9 +17,9 @@
 // carried by an event that crossed.
 //
 // THE PROGRAM. Core 0 runs the console loop and, letter by letter, one
-// kernel of its own (`Kernel<P0, Origin>` stepped by hand: init_all()
+// kernel of its own (`Tenuto<P0, Origin>` stepped by hand: init_all()
 // and step(), the host tests' way). Core 1 is launched at boot into a
-// real `Kernel<P1, Echo, Beat>::run()`: Echo answers every Ping it is
+// real `Tenuto<P1, Echo, Beat>::run()`: Echo answers every Ping it is
 // sent with a Pong sent back, halts on a Halt (a panic on core 1), Beat
 // sends one Tick per millisecond of ITS ticker while told to. The two
 // SIO vectors are bound to the two drains, the one SysTick vector ticks
@@ -56,7 +56,7 @@
 
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/panic.hpp"
 #include "kernel/time_event.hpp"
 #include "rp2040/clock.hpp"
@@ -170,8 +170,8 @@ struct Beat : Fsm<Beat, Beating, Tick> {
     }
 };
 
-using K0 = Kernel<P0, Origin>;
-using K1 = Kernel<P1, Echo, Beat>;
+using K0 = Tenuto<P0, Origin>;
+using K1 = Tenuto<P1, Echo, Beat>;
 using Drain0 = Inboxes<Origin>;
 using Drain1 = Inboxes<Echo, Beat>;
 

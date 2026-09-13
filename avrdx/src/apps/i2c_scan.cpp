@@ -26,7 +26,7 @@
 #include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/i2c_bus.hpp"
@@ -141,5 +141,5 @@ int main() {
                 "I2C scanner: TWI0 on PA2(SDA)/PA3(SCL), 100 kHz",
                 brio::crlf);
 
-    brio::Kernel<P, Scanner, I2c>::run();
+    brio::Tenuto<P, Scanner, I2c>::run();
 }

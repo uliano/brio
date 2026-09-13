@@ -12,7 +12,7 @@
 
 #include "avrdx/platform.hpp"
 #include "avrdx/sleep.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "util/bus_master.hpp"
 #include "util/power.hpp"
 
@@ -66,7 +66,7 @@ using Impatient = PowerManager<P, AvrSleepSite, PowerConfig{.min_deep_ticks = 64
 static_assert(ActiveObject<Manager>);
 static_assert(ActiveObject<Impatient>);
 
-using System = Kernel<P, Bus, Watcher, Manager>;
+using System = Tenuto<P, Bus, Watcher, Manager>;
 
 void power_verbs() {
     System::init_all();

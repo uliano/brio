@@ -89,7 +89,7 @@
 #include "ch32v00x/platform.hpp"
 #include "ch32v00x/ticker.hpp"
 #include "ch32v00x/usart.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
@@ -968,7 +968,7 @@ public:
     }
 };
 
-using BusKernel = Kernel<P, Probe, I2cArb>;
+using BusKernel = Tenuto<P, Probe, I2cArb>;
 
 void pump() {
     TimeEvents<P>::process();

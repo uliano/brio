@@ -38,7 +38,7 @@
 #include "samc21/ticker.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time.hpp"
 #include "util/i2c_bus.hpp"
@@ -1317,7 +1317,7 @@ private:
     }
 };
 
-using BusKernel = Kernel<P, Driver, I2cArb>;
+using BusKernel = Tenuto<P, Driver, I2cArb>;
 
 } // namespace kl
 
@@ -1500,10 +1500,10 @@ private:
     }
 };
 
-using TimedKernel = Kernel<P, Driver, TimedBus>;
+using TimedKernel = Tenuto<P, Driver, TimedBus>;
 
 /// The kernel loop's turn, faithfully: the timeout matures in
-/// TimeEvents<P>::process(), exactly where Kernel::run() has it.
+/// TimeEvents<P>::process(), exactly where Tenuto::run() has it.
 void pump_until(uint8_t replies, uint32_t deadline_ms) {
     const uint32_t t0 = Ticker::millis();
     while (Ticker::millis() - t0 < deadline_ms) {

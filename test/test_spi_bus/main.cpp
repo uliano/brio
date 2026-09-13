@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "host/platform.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "util/spi_bus.hpp"
 
 namespace {
@@ -57,7 +57,7 @@ struct Client : brio::Fsm<Client, SpiDone> {
     }
 };
 
-using K = brio::Kernel<HostPlatform, Client, Spi>;
+using K = brio::Tenuto<HostPlatform, Client, Spi>;
 
 void reset() {
     HostPlatform::reset();

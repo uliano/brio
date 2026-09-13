@@ -154,7 +154,7 @@ public:
     static inline EventQueue<Event, source_count + 2, P> queue;
 
     /// BlockReady is a Lease::dispatch loan: every subscriber must
-    /// precede this AO in the pack (kernel.hpp refuses otherwise).
+    /// precede this AO in the pack (tenuto.hpp refuses otherwise).
     using LendsTo = Subs;
 
     static void init() {

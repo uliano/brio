@@ -335,9 +335,10 @@ gets its home in `docs/design/` when taken.
   `Lease::reply` loans ordering-independent. What would change: `post()`
   triggering the scheduler when it readies a higher AO, an ISR-exit
   hook on the Platform (PendSV-like, irreducibly target-specific), the
-  loop as the idle context, time-event maturation revisited. The
-  discipline kept NOW so the door stays open: AOs share nothing but
-  events.
+  loop as the idle context, time-event maturation revisited. It would
+  be a SECOND kernel type beside `Tenuto`, named `Rubato`, chosen per
+  board file. The discipline kept NOW so the door stays open: AOs
+  share nothing but events.
 - **C++ modules: considered, not now.** The prize would be macro
   isolation (`import brio.avrdx` would not leak `avr/io.h` above the
   target stratum), not build speed; the blocker is the language server.
@@ -582,7 +583,7 @@ brio/                    the framework, four strata:
                            panic_record) + PanicRecord (hosted by the platform)
                            + the OPTIONAL idle_until(deadline) a platform on a
                            timebase that counts through sleep may offer
-    active_object.hpp      ActiveObject concept: what Kernel requires of an
+    active_object.hpp      ActiveObject concept: what Tenuto requires of an
                            AO (Event, queue, init, dispatch) + the informal
                            half of the contract
     event_queue.hpp        EventQueue<E, depth, P>: per-AO MPSC queue,
@@ -601,7 +602,9 @@ brio/                    the framework, four strata:
                            deadline, the power model's one kernel question;
                            next_deadline() = its absolute tick, the loop's
                            question for a tickless platform
-    kernel.hpp             Pack<Aos...> (index, lends_ok) + Kernel<P, Aos...>:
+    tenuto.hpp             Pack<Aos...> (index, lends_ok) + Tenuto<P, Aos...>:
+                           the cooperative run-to-completion kernel (a note
+                           held for its full value) -
                            init_all/step/idle_if_empty/run, static_asserts
                            borrowers before lenders; idle_if_empty takes the
                            optional idle_until branch by requires

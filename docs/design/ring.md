@@ -73,7 +73,7 @@ the one constant it reads and therefore the path a given size takes.
 | host | 4, and a second test platform stating 1 | both paths run under the same suite (`test_ring`), the guarded one on the platform that states 1 |
 
 The extra template parameter is the honest price, and it is the same
-price `EventQueue`, `SerialPort`, `SpiBus` and `Kernel` already pay:
+price `EventQueue`, `SerialPort`, `SpiBus` and `Tenuto` already pay:
 the app names its platform once (`using P = AvrPlatform;`) and every
 service reads it from there.
 

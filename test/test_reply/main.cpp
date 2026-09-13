@@ -11,7 +11,7 @@
 #include "host/platform.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 
 namespace {
 
@@ -71,7 +71,7 @@ struct Beta : brio::Fsm<Beta, Done> {
     }
 };
 
-using K = brio::Kernel<HostPlatform, Alpha, Beta, Service>;
+using K = brio::Tenuto<HostPlatform, Alpha, Beta, Service>;
 
 void reset() {
     HostPlatform::reset();

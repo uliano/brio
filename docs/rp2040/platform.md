@@ -92,7 +92,7 @@ int main() {
     SysClock::init();
     brio::Ticker::init(clock);
     brio::enable_interrupts();
-    brio::Kernel<P, Console, SerialLines, Blinker>::run();
+    brio::Tenuto<P, Console, SerialLines, Blinker>::run();
 }
 ```
 

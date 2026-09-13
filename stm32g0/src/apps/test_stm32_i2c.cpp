@@ -123,7 +123,7 @@
 #include <optional>
 #include <type_traits>
 
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
@@ -2495,9 +2495,9 @@ public:
     }
 };
 
-using BusKernel = Kernel<P, Probe, I2cArb>;
+using BusKernel = Tenuto<P, Probe, I2cArb>;
 
-/// The kernel's own loop, minus the sleep. Kernel::run() matures the
+/// The kernel's own loop, minus the sleep. Tenuto::run() matures the
 /// TIME EVENTS before every step, and the per-bus timeout IS a time
 /// event - a pump that only called step() would wait for a deadline
 /// nothing was advancing.

@@ -40,7 +40,7 @@ struct Blinker : brio::Fsm<Blinker, Toggle, SetPeriod> {
 
 int main() {
     /* clock, timebase, sei() - target glue */
-    brio::Kernel<P, Blinker, Supervisor>::run();   // priority = pack order
+    brio::Tenuto<P, Blinker, Supervisor>::run();   // priority = pack order
 }
 ```
 

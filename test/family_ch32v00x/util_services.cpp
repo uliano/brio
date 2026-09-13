@@ -9,7 +9,7 @@
 #include "ch32v00x/clock.hpp"
 #include "ch32v00x/pin.hpp"
 #include "ch32v00x/platform.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "util/bus_master.hpp"
 #include "util/input_scanner.hpp"
 #include "util/meter_sampler.hpp"
@@ -108,7 +108,7 @@ static_assert(ActiveObject<Buttons>);
 static_assert(ActiveObject<PlainBus>);
 static_assert(ActiveObject<RetryBus>);
 
-using System = Kernel<P, Watcher, Meters, Buttons, PlainBus, RetryBus>;
+using System = Tenuto<P, Watcher, Meters, Buttons, PlainBus, RetryBus>;
 
 // The ISR glue an app would write, with a reading of its own making.
 void capture_isr() {

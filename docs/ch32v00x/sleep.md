@@ -80,7 +80,7 @@ using Site = brio::Ch32TimedSleepSite<P, SysClock>;
 using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
 
 Site::init();                       // the LSI on and measured
-brio::Kernel<P, Power, ...>::run(); // the manager arms, the loop's idle path sleeps
+brio::Tenuto<P, Power, ...>::run(); // the manager arms, the loop's idle path sleeps
 ```
 
 A program that wants a Standby lets the kernel loop idle: a stale

@@ -100,7 +100,7 @@ Site::init();                            // the timer's alarm line
 brio::Rtc::init(clock); brio::Rtc::set(now);   // a dormant with a deadline wants the calendar
 extern "C" void isr_timer_3() { Site::isr(); }
 extern "C" void isr_rtc() { (void)Site::rtc_isr(); }
-brio::Kernel<P, Power, ...>::run();      // the manager arms, the loop's idle path sleeps
+brio::Tenuto<P, Power, ...>::run();      // the manager arms, the loop's idle path sleeps
 ```
 
 A standby is a WFI whose SLEEP_ENx masks prune what the program

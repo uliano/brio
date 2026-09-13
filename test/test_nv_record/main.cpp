@@ -290,7 +290,7 @@ struct Requester {
     }
 };
 
-/// Drain both queues the way Kernel::run would, standing in for the ISR
+/// Drain both queues the way Tenuto::run would, standing in for the ISR
 /// by settling the store and posting NvReady whenever a write is in
 /// flight. Returns the number of dispatches, so a test can prove the
 /// transfer really was spread over many of them.

@@ -123,7 +123,7 @@ lives in a register and the CPU stops when the idle path executes its
 stop instruction. So the manager arms and returns; its dispatch ends;
 the kernel loop finds every queue empty and calls the platform's
 `idle()`; and THAT is the sleep. The power model needs no kernel hook
-of its own, `Kernel::run()` is untouched, and an application without a
+of its own, `Tenuto::run()` is untouched, and an application without a
 power manager pays nothing.
 
 The kernel's one optional idle hook is the TIMEBASE's, not the

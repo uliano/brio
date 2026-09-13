@@ -87,7 +87,7 @@ extern "C" void isr_sio_proc1() { brio::Inboxes<Echo>::isr(); }
     brio::CoreTicker<1>::init(clock);
     brio::Inboxes<Echo>::enable();
     brio::enable_interrupts();
-    brio::Kernel<P1, Echo>::run();
+    brio::Tenuto<P1, Echo>::run();
 }
 
 int main() {
@@ -97,7 +97,7 @@ int main() {
     brio::Inboxes<Origin>::enable();
     brio::enable_interrupts();
     brio::send<Echo>(Ping{1});                // crosses; post<Echo> would be refused
-    brio::Kernel<P0, Origin>::run();
+    brio::Tenuto<P0, Origin>::run();
 }
 ```
 

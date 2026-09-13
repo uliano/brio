@@ -103,7 +103,7 @@ where "how long is too long" is known.
   the usual one; a peripheral with a readable register satisfies the
   concept with a three-line adapter and no interrupt at all.
 - **`init(period)` is defaulted to no pace** because the kernel's AO
-  contract calls `init()` with no arguments: `Kernel::init_all()`
+  contract calls `init()` with no arguments: `Tenuto::init_all()`
   leaves the sampler quiet and the application arms it right after,
   where it configures the hardware the sources read.
 - **`missed(index)`** passes a source's own overwrite count through for

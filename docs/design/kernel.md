@@ -71,7 +71,7 @@ one where every data member is `static inline` (C++17): the variable
 is defined in the header, once per program, with no .cpp file and no
 initialization-order problem. `Fsm() = delete;` on the constructor
 makes "no instances" explicit. Choosing a monostate by *type* is what
-lets `Kernel<P, Traffic, Buttons>` visit the AOs with a fold
+lets `Tenuto<P, Traffic, Buttons>` visit the AOs with a fold
 expression instead of walking a table of pointers at run time.
 
 ## 2. The AO contract (`kernel/active_object.hpp`)
@@ -83,13 +83,13 @@ It states what it needs as a **concept**, `ActiveObject`:
 - a nested type `Event` - the AO's own event variant;
 - a static member `queue` whose `pop()` yields `std::optional<Event>`
   and whose `empty()` yields `bool` (an `EventQueue`);
-- static `init()` - called once by `Kernel::init_all()` in pack order,
+- static `init()` - called once by `Tenuto::init_all()` in pack order,
   before the first event is served; an Fsm-based AO calls
   `start(&initial)` here;
 - static `dispatch(const Event&)` - run ONE event to completion.
 
 That is the **formal half**: names, signatures, return types, checked
-by the compiler where an AO enters `Kernel<...>`. The **informal
+by the compiler where an AO enters `Tenuto<...>`. The **informal
 half** is the set of rules the compiler cannot see and that the
 kernel is written assuming: dispatch is RTC and is only ever called
 from the loop, interrupts enabled, never re-entered; the AO's static
@@ -109,7 +109,7 @@ itself: its depth is that AO's sizing decision.
 **C++ note - concepts and `requires`.** A `concept` (C++20) is a
 named compile-time predicate on types. `ActiveObject<Buttons>` is
 just `true` or `false`; nothing happens until a template *applies*
-it: `template <Platform P, ActiveObject... Aos> class Kernel` (the
+it: `template <Platform P, ActiveObject... Aos> class Tenuto` (the
 short form: the concept name replaces `typename`), or a trailing
 `requires ActiveObject<Ao>` clause, or a `static_assert`. When a
 constrained template is instantiated with a type that fails, the
@@ -196,7 +196,7 @@ in three lines:
    reference, and every borrow is one of exactly two leases:
    - `Lease::dispatch` - valid during the receiving dispatch only;
      correct by construction when the borrower PRECEDES the lender in
-     the Kernel pack;
+     the Tenuto pack;
    - `Lease::reply` - valid until the borrower posts the agreed
      completion event; the reply IS the return of the loan.
 3. **Published payloads travel by value** (or by const reference at
@@ -223,7 +223,7 @@ with the lease in its type: zero cost, trivially copyable, and the
 contract becomes readable at the field (`struct LineReceived {
 Borrowed<char, Lease::dispatch> line; }`). The lender of a `dispatch`
 loan declares its borrowers - `using LendsTo = Subscribers<Sink>;` -
-and `Kernel` static_asserts that each precedes it in the pack: the
+and `Tenuto` static_asserts that each precedes it in the pack: the
 scheduling contract of the serial stack is a compile-time fact, not a
 comment. What C++ cannot do is stop a receiver from stashing the raw
 pointer past its window; the planned debug-build addition is a lender
@@ -377,7 +377,7 @@ crosses, whose reply crosses back the same way.
 **C++ note - fold expressions and thunks.** `publish` is one line:
 `(post<Aos>(e), ...);` - a C++17 fold over the parameter pack with
 the comma operator, expanding to `post<A>(e), post<B>(e), ...` at
-compile time; there is no loop and no table. `Kernel::step()` uses
+compile time; there is no loop and no table. `Tenuto::step()` uses
 the same device with `||` (`(try_one<Aos>() || ...)`), which is what
 makes priority = pack order: the fold short-circuits at the first
 non-empty queue. `ReplyTo` stores a pointer to a *thunk* - a static
@@ -391,12 +391,16 @@ on `post` is a *trailing requires-clause* constraining a single
 function template rather than a named concept - used when the
 requirement is local to one function.
 
-## 8. Scheduler (`kernel/kernel.hpp`)
+## 8. Scheduler (`kernel/tenuto.hpp`)
 
-`Kernel<P, Ao1, Ao2, ...>`: AOs are the pack, **priority IS the pack
+The cooperative kernel is `Tenuto`, the type in `kernel/tenuto.hpp`:
+the musical marking for a note held for its full value, which is
+run-to-completion said in one word.
+
+`Tenuto<P, Ao1, Ao2, ...>`: AOs are the pack, **priority IS the pack
 order**, first = highest; no separate priority table to keep coherent.
 Because the order is a type, the pack answers ordering questions at
-compile time (`Pack<Aos...>::index<Ao>()`), and Kernel uses that to
+compile time (`Pack<Aos...>::index<Ao>()`), and Tenuto uses that to
 enforce the one ordering fact the payload rule needs: every
 `Lease::dispatch` borrower precedes its lender (section 4).
 The loop (`run()`), one turn:
@@ -660,8 +664,8 @@ compile error instead of a template failure.
 
 ## 12. Two cores: two kernels and a bridge (`util/inbox.hpp`)
 
-A chip with two cores runs **two kernels**, `Kernel<P0, ...>` and
-`Kernel<P1, ...>`, over two DISJOINT packs, one platform type per core
+A chip with two cores runs **two kernels**, `Tenuto<P0, ...>` and
+`Tenuto<P1, ...>`, over two DISJOINT packs, one platform type per core
 (section 11): each core is exactly the model of section 1, every
 invariant stated per core - run-to-completion, no nesting, pack-order
 priority, the critical section, `TimeEvents<P>`, the queue typed by
@@ -675,7 +679,7 @@ balancing - is what a static system does not want.
 The rules, each enforced where the compiler can see it:
 
 1. **Every AO lives on one core**: its queue's platform says which,
-   and `Kernel` refuses an AO whose queue is another platform's;
+   and `Tenuto` refuses an AO whose queue is another platform's;
    `TimeEvent<P, Ao, Ev>` refuses an AO of another core (a timer posts
    locally: two SysTicks have two phases and a tick count means
    nothing across). Both through `queue_on<Ao, P>()`.
@@ -742,13 +746,13 @@ two `HostCore` platforms stepped by hand).
 
 | Entity | Header | Role |
 |--------|--------|------|
-| `ActiveObject` (concept), `queue_on<Ao, P>` | `active_object.hpp` | what Kernel requires of an AO; whether an AO's queue is P's (its core) |
+| `ActiveObject` (concept), `queue_on<Ao, P>` | `active_object.hpp` | what Tenuto requires of an AO; whether an AO's queue is P's (its core) |
 | `Platform` (concept), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (+ the optional `idle_until`, `on_own_core`, `Doorbell`) |
 | `EventQueue<E, depth, P>`, `CoreAware` | `event_queue.hpp` | per-AO MPSC queue, overflow counter, the mispost check of a core-aware platform |
 | `Overloaded`, `match`, `Entry`, `Exit`, `Fsm<Derived, Alts...>` | `fsm.hpp` | variant dispatch helpers, state machine base, Event, Status |
 | `post`, `Subscribers`, `publish`, `ReplyTo` (incl. `through`), `reply_to` | `post.hpp` | delivery primitives (the crossing `send` is util/inbox.hpp's, section 12) |
 | `Borrowed<T, Lease>`, `Lease` | `borrowed.hpp` | pointer payloads with their lease in the type |
-| `Pack<Aos...>`, `Kernel<P, Aos...>` | `kernel.hpp` | pack ordering questions (index, lends_ok); the loop: init_all/step/idle_if_empty/run |
+| `Pack<Aos...>`, `Tenuto<P, Aos...>` | `tenuto.hpp` | pack ordering questions (index, lends_ok); the loop: init_all/step/idle_if_empty/run |
 | `TimeEvents<P>` (incl. `ticks_to_next`, `next_deadline`), `TimeEvent<P, Ao, Ev>` | `time_event.hpp` | armed list + owned time events |
 | `ticks_from_ms`, `ticks_from_secs` | `time.hpp` | constexpr tick conversions |
 | `PanicCode`, `panic_magic`, `HaltReporter`, `panic`, `take_panic_record` | `panic.hpp` | unrecoverable failures |
@@ -757,12 +761,12 @@ Include graph (arrows = includes; nothing here includes anything
 outside `kernel/` and the standard freestanding library):
 
     platform.hpp        <- event_queue.hpp, time.hpp, panic.hpp,
-                           time_event.hpp, kernel.hpp
+                           time_event.hpp, tenuto.hpp
     fsm.hpp             <- post.hpp
-    active_object.hpp   <- time_event.hpp, kernel.hpp
-    post.hpp            <- time_event.hpp, kernel.hpp
-    time_event.hpp      <- kernel.hpp
+    active_object.hpp   <- time_event.hpp, tenuto.hpp
+    post.hpp            <- time_event.hpp, tenuto.hpp
+    time_event.hpp      <- tenuto.hpp
     borrowed.hpp        <- (util/ producers of loans; nothing in kernel/)
 
 An app that only posts includes `kernel/post.hpp`; an app that runs
-includes `kernel/kernel.hpp` and gets the contract with it.
+includes `kernel/tenuto.hpp` and gets the contract with it.

@@ -316,7 +316,7 @@ one type name in the declaration and one branch in `idle()`:
 ```cpp
 using Pm = brio::PowerManager<brio::AvrPlatform, brio::AvrSleepSite,
                               brio::PowerConfig{}, Bus, Sensors>;
-using K = brio::Kernel<brio::AvrPlatform, Sensors, Bus, Pm>;
+using K = brio::Tenuto<brio::AvrPlatform, Sensors, Bus, Pm>;
 ...
 brio::post<Pm>(brio::SleepRequested{brio::SleepDepth::standby,
                                     brio::reply_to<Supervisor, brio::SleepVote>()});
@@ -596,7 +596,7 @@ dispatch, and only the loop is the suite's.
   this family has every rung, so the model's map-it-shallower rule is
   the identity here.
 - **The kernel's own idle hook takes the armed mode.** With `standby`
-  armed by the manager and nothing else changed, `Kernel::idle_if_empty()`
+  armed by the manager and nothing else changed, `Tenuto::idle_if_empty()`
   stops the CPU for real: over 32 ticks a counter that only turns while
   the CPU runs turns ~13500 times awake and **exactly 32 times asleep**,
   one per PIT wake. The mode STAYS armed across a wake that says nothing

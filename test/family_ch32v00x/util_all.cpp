@@ -29,7 +29,7 @@
 #include "kernel/borrowed.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/panic.hpp"
 #include "kernel/platform.hpp"
 #include "kernel/post.hpp"
@@ -195,7 +195,7 @@ static_assert(ActiveObject<Lines>);
 static_assert(ActiveObject<Writer>);
 
 // Borrowers before lenders: the kernel checks the loan direction.
-using System = Kernel<P, Listener, Sampler, Relay, Power, Lines, Writer>;
+using System = Tenuto<P, Listener, Sampler, Relay, Power, Lines, Writer>;
 
 // ---- the pure arithmetic, at compile time ---------------------------------------
 static_assert(adc_mv(2048, 4096, 3300) == 1650);

@@ -45,7 +45,7 @@
 //
 // UNLIKE THE OTHER SUITES IN THIS STRATUM, LETTERS g AND h RUN THE
 // KERNEL: the object under test there is an active object, so the rounds
-// go through real queues, real dispatch and the real Kernel pack (Probe,
+// go through real queues, real dispatch and the real Tenuto pack (Probe,
 // Bus, Pm) - only the LOOP is the suite's.
 //
 // THE ANTI-WEDGE RULE. A board asleep with its console SERCOM stopped
@@ -82,7 +82,7 @@
 
 #include <stdint.h>
 
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "samc21/clock.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/osc32kctrl.hpp"
@@ -249,7 +249,7 @@ struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip> {
 };
 
 using Pm_ = PowerManager<P, SamSleepSite, PowerConfig{}, Bus, Probe>;
-using K = Kernel<P, Probe, Bus, Pm_>;
+using K = Tenuto<P, Probe, Bus, Pm_>;
 
 // ---------------------------------------------------------------------------
 // Helpers

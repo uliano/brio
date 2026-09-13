@@ -71,7 +71,7 @@
 
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "stm32g0/clock.hpp"
 #include "stm32g0/delay.hpp"
@@ -1000,7 +1000,7 @@ struct Counter {
     }
 };
 
-using EdgeKernel = Kernel<Stm32g0Platform<>, Counter>;
+using EdgeKernel = Tenuto<Stm32g0Platform<>, Counter>;
 
 /// Raised only while letter h runs: the shared EXTI4_15 handler posts
 /// to the kernel instead of counting, and every other letter would be

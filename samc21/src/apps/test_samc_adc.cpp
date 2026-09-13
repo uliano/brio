@@ -44,7 +44,7 @@
 #include <stdint.h>
 #include <variant>
 
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time_event.hpp"
 #include "samc21/adc.hpp"
@@ -1315,7 +1315,7 @@ struct Collector {
     }
 };
 
-using SamplerKernel = Kernel<SamPlatform, Collector, Sampler>;
+using SamplerKernel = Tenuto<SamPlatform, Collector, Sampler>;
 
 volatile uint16_t adc_interrupts = 0;
 

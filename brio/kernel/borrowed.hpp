@@ -13,12 +13,12 @@
  *  - Lease::dispatch: valid only during the receiving AO's dispatch of
  *    that event. The lender may reuse the storage as soon as it runs
  *    again. Correct by construction when the borrower PRECEDES the
- *    lender in the Kernel pack (the kernel then serves the borrower
+ *    lender in the Tenuto pack (the kernel then serves the borrower
  *    before the lender is dispatched again - under a preemptive kernel
  *    the same ordering makes the borrower preempt the lender right at
  *    the post). The lender declares its borrowers with
- *    `using LendsTo = Subscribers<...>` and Kernel static_asserts the
- *    order (kernel.hpp).
+ *    `using LendsTo = Subscribers<...>` and Tenuto static_asserts the
+ *    order (tenuto.hpp).
  *  - Lease::reply: valid until the borrower sends back the completion
  *    event agreed by the protocol (BusDone for bus buffers). The lender
  *    keeps the storage alive and untouched until then. Ordering-

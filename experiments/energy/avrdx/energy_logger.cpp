@@ -56,7 +56,7 @@
 #include "avrdx/vref.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/crc.hpp"
@@ -406,5 +406,5 @@ int main() {
                 "energy_logger (24 MHz OSCHF, strategies), type HELP",
                 brio::crlf, "> ");
 
-    brio::Kernel<P, Console, SerialLines>::run();
+    brio::Tenuto<P, Console, SerialLines>::run();
 }

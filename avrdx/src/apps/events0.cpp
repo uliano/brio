@@ -42,7 +42,7 @@
 #include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
@@ -148,5 +148,5 @@ int main() {
                 "LED PF2 <- PIT/8192 (4 Hz, no CPU); PD2 <- channel 1, rewired every 10 s",
                 brio::crlf);
 
-    brio::Kernel<P, Cycler>::run();
+    brio::Tenuto<P, Cycler>::run();
 }

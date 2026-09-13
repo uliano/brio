@@ -326,7 +326,7 @@ int main() {
     brio::Ticker::init(clock);
     Site::init();                       // owns the RTC, whole
     brio::enable_interrupts();
-    brio::Kernel<brio::Stm32g0Platform<>, Blinker, Manager>::run();
+    brio::Tenuto<brio::Stm32g0Platform<>, Blinker, Manager>::run();
 }
 
 // ...and somewhere in an AO:

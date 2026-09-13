@@ -44,7 +44,7 @@
 
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time_event.hpp"
 #include "samc21/clock.hpp"
@@ -730,7 +730,7 @@ struct Collector {
     }
 };
 
-using MeterKernel = Kernel<SamPlatform, Collector, Sampler>;
+using MeterKernel = Tenuto<SamPlatform, Collector, Sampler>;
 
 void tf_meter_ao() {
     // The hardware first: the same EIC-to-EVSYS-to-TC2 chain letter e

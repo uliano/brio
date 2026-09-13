@@ -196,7 +196,7 @@ int main() {
     SysClock::init();
     brio::Ticker::init(clock);
     brio::enable_interrupts();
-    brio::Kernel<P, Blinker, Supervisor>::run();
+    brio::Tenuto<P, Blinker, Supervisor>::run();
 }
 ```
 
@@ -214,7 +214,7 @@ int main() {
     SysClock::init();
     const bool tick_ok = Tb::init(clock);        // false: no crystal
     brio::enable_interrupts();
-    brio::Kernel<P, Blinker, Supervisor>::run(); // sleeps TO each deadline
+    brio::Tenuto<P, Blinker, Supervisor>::run(); // sleeps TO each deadline
 }
 ```
 

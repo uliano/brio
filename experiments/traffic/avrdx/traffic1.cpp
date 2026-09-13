@@ -39,7 +39,7 @@
 #include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
@@ -432,5 +432,5 @@ int main() {
 
     brio::print(serial, brio::crlf, "traffic1: the light, with pedestrian call", brio::crlf);
 
-    brio::Kernel<P, Intersection, Buttons>::run();
+    brio::Tenuto<P, Intersection, Buttons>::run();
 }

@@ -12,7 +12,7 @@
   <text x="52.8" y="116" font-size="11" fill="#333333">Fsm-based, own queues</text>
   <rect x="240" y="80" width="180" height="50" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="249.6" y="99" fill="#111111">wiring as types</text>
-  <text x="249.6" y="116" font-size="11" fill="#333333">Kernel&lt;P, A, B&gt;, Subscribers</text>
+  <text x="249.6" y="116" font-size="11" fill="#333333">Tenuto&lt;P, A, B&gt;, Subscribers</text>
   <rect x="436.8" y="80" width="180" height="50" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="446.4" y="99" fill="#111111">named resources</text>
   <text x="446.4" y="116" font-size="11" fill="#333333">Uart&lt;2,alt1&gt;, TcaPwm&lt;0,'C'&gt;</text>
@@ -46,7 +46,7 @@
   <text x="36" y="308" font-size="15" font-weight="bold" fill="#111111">kernel/</text>
   <text x="120" y="308" font-size="11" fill="#333333">pure logic, includes nothing of brio, host-testable</text>
   <rect x="43.2" y="320" width="180" height="50" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
-  <text x="52.8" y="339" fill="#111111">Kernel</text>
+  <text x="52.8" y="339" fill="#111111">Tenuto</text>
   <text x="52.8" y="356" font-size="11" fill="#333333">QV loop, priority = pack</text>
   <rect x="240" y="320" width="180" height="50" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="249.6" y="339" fill="#111111">EventQueue</text>
@@ -149,5 +149,5 @@
   <text x="936" y="610" font-size="11.5" fill="#333333">the requirement.</text>
 
   <text x="24" y="742" font-size="11" fill="#333333">Everything is a monostate type: identity and invariants in template parameters, what changes as run-time arguments, state in static inline members.</text>
-  <text x="24" y="758" font-size="11" fill="#333333">Priority = pack order. Loans: Lease::dispatch (borrower precedes lender, checked by Kernel) or Lease::reply (returned by an event). No F_CPU: Clock::hz.</text>
+  <text x="24" y="758" font-size="11" fill="#333333">Priority = pack order. Loans: Lease::dispatch (borrower precedes lender, checked by Tenuto) or Lease::reply (returned by an event). No F_CPU: Clock::hz.</text>
 </svg>

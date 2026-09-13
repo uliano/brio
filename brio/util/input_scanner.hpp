@@ -114,7 +114,7 @@ public:
      * stable_samples readings establish its state silently.
      *
      * The period is DEFAULTED because the kernel's AO contract calls
-     * init() with no arguments: Kernel::init_all() leaves the scanner
+     * init() with no arguments: Tenuto::init_all() leaves the scanner
      * quiet and the application arms it right after with init(period)
      * or start_every(period).
      */

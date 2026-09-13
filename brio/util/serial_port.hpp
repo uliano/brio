@@ -22,14 +22,14 @@
  * RxActivity to ITSELF: "leftover work, reschedule me".
  *
  * SCHEDULING CONTRACT - consumer above producer: LineSink MUST precede
- * SerialPort in the Kernel pack. The kernel then serves every posted
+ * SerialPort in the Tenuto pack. The kernel then serves every posted
  * LineReceived before SerialPort runs again, so when a SerialPort dispatch
  * starts, all its previously posted lines have been consumed and both
  * buffers are free (in_flight resets). The line is a Lease::dispatch loan
  * (kernel/borrowed.hpp): the sink may read AND mutate it (in-place
  * tokenization) during its dispatch only; keeping the pointer across
  * dispatches is a bug. SerialPort declares `LendsTo = Subscribers<
- * LineSink>` and Kernel refuses a pack that violates the order.
+ * LineSink>` and Tenuto refuses a pack that violates the order.
  *
  * TX has no AO: print() goes straight to the transport's blocking
  * push path - bounded by the wire rate (~2 ms worst case at 460800),
@@ -78,7 +78,7 @@ public:
     // ones already guarantee the drain will happen).
     static inline EventQueue<Event, 2, P> queue;
 
-    /// LineReceived is a Lease::dispatch loan: Kernel checks LineSink
+    /// LineReceived is a Lease::dispatch loan: Tenuto checks LineSink
     /// precedes this AO in the pack.
     using LendsTo = Subscribers<LineSink>;
 

@@ -266,8 +266,8 @@ sensor and a DAC-driven pad: 60 samples, 20 on each input, zero
 mislabelled, zero queue overflows, and the values right for their
 labels. The shape survives a converter with a hardware sequencer and
 DMA - both of which this one has - because the sampler uses neither.
-One method note: `Kernel::step()` serves a queued event and nothing
-else, so a pump that is not `Kernel::run()` must call
+One method note: `Tenuto::step()` serves a queued event and nothing
+else, so a pump that is not `Tenuto::run()` must call
 `TimeEvents<P>::process()` itself or a software pace never matures.
 
 **One trigger, both converters, no CPU.** TIM6's TRGO is `dac_ch1_trg5`

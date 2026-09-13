@@ -49,7 +49,7 @@
 #include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/i2c_bus.hpp"
@@ -332,5 +332,5 @@ int main() {
                 "DAC -> ADC loop: MCP47CVB22 VOUT0 (I2C 0x60) into MCP3550 (SPI, CS PB0)",
                 brio::crlf);
 
-    brio::Kernel<P, Loop, I2c, Spi>::run();
+    brio::Tenuto<P, Loop, I2c, Spi>::run();
 }

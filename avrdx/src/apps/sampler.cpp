@@ -42,7 +42,7 @@
 #include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/analog.hpp"
@@ -339,5 +339,5 @@ int main() {
 
     // Consumers before producers: Console before SerialLines (line loans);
     // the sampler publishes by value, its position is free.
-    brio::Kernel<P, Console, SerialLines, Monitor, Alarm, Sampler>::run();
+    brio::Tenuto<P, Console, SerialLines, Monitor, Alarm, Sampler>::run();
 }

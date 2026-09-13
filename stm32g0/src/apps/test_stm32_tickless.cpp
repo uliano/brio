@@ -65,7 +65,7 @@
 
 #include <optional>
 
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time_event.hpp"
 #include "stm32g0/clock.hpp"
@@ -433,7 +433,7 @@ struct Metronome : Fsm<Metronome, Fast, Mid, Slow> {
             [](Slow) { ts.hit(t2()); return handled(); });
     }
 };
-using MetroKernel = Kernel<P, Metronome>;
+using MetroKernel = Tenuto<P, Metronome>;
 
 struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip, Woke> {
     static inline EventQueue<Event, 8, P> queue;
@@ -460,7 +460,7 @@ struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip, Woke> {
 };
 
 using Manager = PowerManager<P, Site, PowerConfig{}, Probe>;
-using K = Kernel<P, Probe, Manager>;
+using K = Tenuto<P, Probe, Manager>;
 
 Probe::Status Probe::only(const Event& e) {
     return match(e,

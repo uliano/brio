@@ -8,7 +8,7 @@
 #include "ch32v00x/dma.hpp"
 #include "ch32v00x/platform.hpp"
 #include "ch32v00x/spi.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "util/spi_bus.hpp"
 
 using namespace brio;
@@ -117,8 +117,8 @@ void client_verbs() {
 
 // The arbiter over both hosts: the kernel accepts them as active
 // objects, which is the util contract's whole claim.
-using Loop = Kernel<P, PlainBus>;
-using DmaLoop = Kernel<P, DmaBus>;
+using Loop = Tenuto<P, PlainBus>;
+using DmaLoop = Tenuto<P, DmaBus>;
 
 void arbiters() {
     Loop::init_all();

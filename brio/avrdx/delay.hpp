@@ -10,7 +10,7 @@
  * double-digit microseconds. What it is NOT for: waiting in an active
  * object. Anything long enough to be measured in milliseconds is a time
  * event (kernel/time_event.hpp): the loop keeps serving other AOs and
- * the CPU may sleep. Only pre-kernel init code (before Kernel::run) may
+ * the CPU may sleep. Only pre-kernel init code (before Tenuto::run) may
  * legitimately wait milliseconds here.
  *
  * NO DIVISION EVER RUNS AT WAIT TIME. The rate is compile-time

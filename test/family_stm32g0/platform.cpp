@@ -12,7 +12,7 @@
 #include <optional>
 
 #include "kernel/event_queue.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/panic.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
@@ -72,9 +72,9 @@ struct Ao {
 
 void tickless_kernel() {
     // The kernel's idle_if_empty takes the idle_until branch here.
-    Kernel<TicklessPlatform, Ao>::init_all();
+    Tenuto<TicklessPlatform, Ao>::init_all();
     Ao::alarm.arm(10);
-    Kernel<TicklessPlatform, Ao>::idle_if_empty();
+    Tenuto<TicklessPlatform, Ao>::idle_if_empty();
     (void)TimeEvents<TicklessPlatform>::next_deadline();
     TicklessPlatform::idle_until(std::nullopt);
     TicklessPlatform::idle_until(std::optional<uint32_t>{42});

@@ -3,7 +3,7 @@
 // platforms - a send, a drain, a crossing reply.
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "rp2040/multicore.hpp"
 #include "rp2040/platform.hpp"
 #include "util/inbox.hpp"
@@ -36,8 +36,8 @@ struct Local : Fsm<Local, Pong> {
 static_assert(Inbox<Remote>::capacity() == 16 && Inbox<Local>::capacity() == 8);
 static_assert(queue_on<Remote, P1>() && !queue_on<Remote, P0>());
 
-using K0 = Kernel<P0, Local>;
-using K1 = Kernel<P1, Remote>;
+using K0 = Tenuto<P0, Local>;
+using K1 = Tenuto<P1, Remote>;
 
 [[noreturn]] void core1_entry() {
     Inboxes<Remote>::enable();

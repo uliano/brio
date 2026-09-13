@@ -17,9 +17,9 @@
 //
 // THIS SUITE RUNS THE KERNEL. The object under test is an active
 // object, so the rounds go through real queues, real dispatch and the
-// real Kernel pack (Probe, Bus, Pm) - only the LOOP is the suite's:
-// each test pumps Kernel::step() itself, and where a sleep is the point
-// it calls Kernel::idle_if_empty(), which is the same hook run() would
+// real Tenuto pack (Probe, Bus, Pm) - only the LOOP is the suite's:
+// each test pumps Tenuto::step() itself, and where a sleep is the point
+// it calls Tenuto::idle_if_empty(), which is the same hook run() would
 // call. The console loop between tests is the usual polled one and
 // never sleeps, so a mode left armed by a test is inert until the next
 // quiesce() clears it.
@@ -46,7 +46,7 @@
 #include "avrdx/ticker.hpp"
 #include "avrdx/usart.hpp"
 #include "avrdx/userrow.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "util/bus_master.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
@@ -160,7 +160,7 @@ struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip> {
 };
 
 using Pm = PowerManager<P, AvrSleepSite, PowerConfig{}, Bus, Probe>;
-using K = Kernel<P, Probe, Bus, Pm>;
+using K = Tenuto<P, Probe, Bus, Pm>;
 
 // ---- the test harness -------------------------------------------------------------
 TestBench<Serial> bench;

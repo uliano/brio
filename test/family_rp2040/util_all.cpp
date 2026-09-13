@@ -9,7 +9,7 @@
 #include "kernel/borrowed.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/panic.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time.hpp"
@@ -54,7 +54,7 @@ struct Echo : Fsm<Echo, Ping> {
     }
 };
 
-using Loop = Kernel<P, Echo>;
+using Loop = Tenuto<P, Echo>;
 using Log = Ring<uint8_t, 64, P>;
 using Latch = MeterLatch<uint16_t, P, 0>;
 

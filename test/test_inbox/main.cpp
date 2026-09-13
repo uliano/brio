@@ -13,7 +13,7 @@
 #include "host/platform.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time_event.hpp"
 #include "util/inbox.hpp"
 
@@ -64,8 +64,8 @@ Echo::Status Echo::only(const Event& e) {
         [](auto) { return unhandled(); });
 }
 
-using K0 = brio::Kernel<P0, Origin>;
-using K1 = brio::Kernel<P1, Echo>;
+using K0 = brio::Tenuto<P0, Origin>;
+using K1 = brio::Tenuto<P1, Echo>;
 using Drain0 = brio::Inboxes<Origin>;
 using Drain1 = brio::Inboxes<Echo>;
 

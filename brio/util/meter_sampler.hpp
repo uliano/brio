@@ -196,7 +196,7 @@ public:
      *
      * The period is an argument because a sampler without a pace does
      * nothing, and it is DEFAULTED because the kernel's AO contract
-     * calls init() with none: Kernel::init_all() therefore leaves the
+     * calls init() with none: Tenuto::init_all() therefore leaves the
      * sampler quiet, and the application arms it right after with
      * init(period) or start_every(period) - the same order in which it
      * configures the hardware the sources read.

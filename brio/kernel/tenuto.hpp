@@ -1,10 +1,14 @@
 /*
- * kernel.hpp
+ * tenuto.hpp
  *
- * The brio cooperative kernel ("QV-style"): active objects known at
- * compile time, priority = position in the pack (first = highest), one
- * event per iteration always rescanning from the top, run-to-completion
- * dispatch, IDLE sleep when nothing is pending.
+ * Tenuto, the brio cooperative kernel ("QV-style"): active objects
+ * known at compile time, priority = position in the pack (first =
+ * highest), one event per iteration always rescanning from the top,
+ * run-to-completion dispatch, IDLE sleep when nothing is pending.
+ *
+ * The name is the musical marking for a note held for its full value,
+ * which is run-to-completion said in one word: every dispatch runs to
+ * its end, one after another, and nothing preempts an active object.
  *
  * The loop, in words: process matured time events; pop ONE event from
  * the highest-priority non-empty queue and dispatch it; if every queue
@@ -30,7 +34,7 @@
  * the Platform contract (kernel/platform.hpp). Because priority IS the
  * pack order, the pack also carries the one ordering fact the payload
  * rule needs: an AO lending Lease::dispatch payloads (kernel/
- * borrowed.hpp) declares `using LendsTo = Subscribers<...>` and Kernel
+ * borrowed.hpp) declares `using LendsTo = Subscribers<...>` and Tenuto
  * static_asserts that every borrower precedes it.
  *
  * Host tests drive init_all()/step() directly (run() never returns).
@@ -82,17 +86,17 @@ struct Pack {
 
 template <Platform P, ActiveObject... Aos>
     requires (sizeof...(Aos) > 0)
-class Kernel {
+class Tenuto {
     static_assert((Pack<Aos...>::template lends_ok<Aos>() && ...),
                   "a Lease::dispatch borrower must precede its lender in "
-                  "the Kernel pack (see kernel/borrowed.hpp)");
+                  "the Tenuto pack (see kernel/borrowed.hpp)");
     static_assert((queue_on<Aos, P>() && ...),
-                  "every AO in a Kernel's pack lives on the kernel's platform: its "
+                  "every AO in a Tenuto's pack lives on the kernel's platform: its "
                   "queue is guarded by that platform's critical section, and on a "
                   "chip with two cores the platform IS the core (kernel/active_object.hpp)");
 
 public:
-    Kernel() = delete;
+    Tenuto() = delete;
 
     /// Start every AO (in pack order) before the first event is served.
     static void init_all() {

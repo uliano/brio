@@ -93,7 +93,7 @@
 #include <optional>
 #include <type_traits>
 
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time_event.hpp"
 #include "stm32g0/adc.hpp"
@@ -653,7 +653,7 @@ struct Walker : Fsm<Walker, Step> {
             });
     }
 };
-using WalkKernel = Kernel<P, Metronome, Walker>;
+using WalkKernel = Tenuto<P, Metronome, Walker>;
 
 struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip, Woke> {
     static inline EventQueue<Event, 8, P> queue;
@@ -674,7 +674,7 @@ struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip, Woke> {
 };
 
 using Manager = PowerManager<P, Site, PowerConfig{}, Probe>;
-using K = Kernel<P, Probe, Manager>;
+using K = Tenuto<P, Probe, Manager>;
 
 Probe::Status Probe::only(const Event& e) {
     return match(e,

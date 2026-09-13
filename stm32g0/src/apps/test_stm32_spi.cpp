@@ -130,7 +130,7 @@
 #include <optional>
 #include <type_traits>
 
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time_event.hpp"
 #include "stm32g0/clock.hpp"
@@ -2697,9 +2697,9 @@ private:
     }
 };
 
-using BusKernel = Kernel<P, Driver, SpiArb>;
+using BusKernel = Tenuto<P, Driver, SpiArb>;
 
-/// The kernel's own loop, minus the sleep: Kernel::run() matures the
+/// The kernel's own loop, minus the sleep: Tenuto::run() matures the
 /// TIME EVENTS before every step, and the per-bus timeout IS a time
 /// event - a pump that only called step() would wait for a deadline
 /// nothing was advancing (measured: a step()-only pump leaves the

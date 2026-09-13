@@ -68,7 +68,7 @@
 #include "ch32v00x/ticker.hpp"
 #include "ch32v00x/tim.hpp"
 #include "ch32v00x/usart.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "util/analog_sampler.hpp"
 #include "util/print.hpp"
@@ -839,7 +839,7 @@ public:
 };
 
 using Sampler = AnalogSampler<Adc, P, Subscribers<Probe>, AdcInput::vrefint, In3{}>;
-using Loop = Kernel<P, Probe, Sampler>;
+using Loop = Tenuto<P, Probe, Sampler>;
 
 void pump() {
     TimeEvents<P>::process();

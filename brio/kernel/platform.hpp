@@ -47,7 +47,7 @@
  * Optional member, NOT part of the concept - a platform whose timebase
  * keeps counting while the core sleeps (a low-power timer, not a tick
  * interrupt) may provide it, and the kernel loop detects it by requires
- * (kernel.hpp's idle_if_empty; a platform without it gets idle() exactly
+ * (tenuto.hpp's idle_if_empty; a platform without it gets idle() exactly
  * as before):
  *  - idle_until(std::optional<uint32_t> deadline): called INSTEAD of
  *    idle(), with interrupts MASKED, with the ABSOLUTE tick of the

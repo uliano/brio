@@ -55,7 +55,7 @@
 #include "samc21/sleep.hpp"
 #include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time_event.hpp"
 #include "util/power.hpp"
@@ -153,7 +153,7 @@ struct Probe : Fsm<Probe, SleepVote, PrepareSleep, WakeReport, Blip, Foreign> {
 };
 
 using Pm_ = PowerManager<P, TimedSite, PowerConfig{}, Probe>;
-using K = Kernel<P, Probe, Pm_>;
+using K = Tenuto<P, Probe, Pm_>;
 
 void request_standby() {
     post<Pm_>(SleepRequested{SleepDepth::standby, reply_to<Probe, SleepVote>()});
@@ -198,7 +198,7 @@ Probe::Status Probe::only(const Event& e) {
         });
 }
 
-/// One kernel turn, exactly as Kernel::run() spells it, with an exit.
+/// One kernel turn, exactly as Tenuto::run() spells it, with an exit.
 void pump_until_blips(uint16_t want, uint32_t guard_ms) {
     const uint32_t t0 = wall();
     while (Probe::blips < want &&

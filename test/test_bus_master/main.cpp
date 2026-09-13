@@ -19,7 +19,7 @@
 #include <vector>
 
 #include "host/platform.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "util/bus_master.hpp"
 #include "util/power.hpp"
 
@@ -143,13 +143,13 @@ struct RecoverableBus {
 using PlainEngine = FakeBus<0>;
 using PlainClient = Client<0>;
 using Plain = brio::BusMaster<PlainEngine, HostPlatform, 2>;   // depth 2 FIFO
-using PlainSystem = brio::Kernel<HostPlatform, PlainClient, Plain>;
+using PlainSystem = brio::Tenuto<HostPlatform, PlainClient, Plain>;
 
 using RetryEngine = FakeBus<1>;
 using RetryClient = Client<1>;
 using Policy2 = RetryUpTo<2>;
 using Retrying = brio::BusMaster<RetryEngine, HostPlatform, 4, Policy2>;
-using RetrySystem = brio::Kernel<HostPlatform, RetryClient, Retrying>;
+using RetrySystem = brio::Tenuto<HostPlatform, RetryClient, Retrying>;
 
 // 50 ticks at the host's 1000 Hz: small enough to walk past in a test,
 // and every deadline arithmetic below is relative to it.
@@ -159,12 +159,12 @@ using TimedEngine = RecoverableBus<2>;
 using TimedClient = Client<2>;
 using Timed = brio::BusMaster<TimedEngine, HostPlatform, 2,
                               brio::BusPassThrough, timeout_ticks>;
-using TimedSystem = brio::Kernel<HostPlatform, TimedClient, Timed>;
+using TimedSystem = brio::Tenuto<HostPlatform, TimedClient, Timed>;
 
 using TrEngine = RecoverableBus<3>;
 using TrClient = Client<3>;
 using TimedRetrying = brio::BusMaster<TrEngine, HostPlatform, 4, Policy2, timeout_ticks>;
-using TrSystem = brio::Kernel<HostPlatform, TrClient, TimedRetrying>;
+using TrSystem = brio::Tenuto<HostPlatform, TrClient, TimedRetrying>;
 
 void pump(bool retrying) {
     for (uint16_t i = 0; i < 200; ++i) {
@@ -220,7 +220,7 @@ void reset_retry() {
 // ---- the timed systems' plumbing --------------------------------------------
 
 /// The kernel loop's turn, faithfully: matured time events fire between
-/// dispatches exactly as Kernel::run() has them.
+/// dispatches exactly as Tenuto::run() has them.
 template <typename System>
 void pump_timed() {
     for (uint16_t i = 0; i < 200; ++i) {

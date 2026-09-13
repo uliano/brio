@@ -1,7 +1,7 @@
 // Sleep family smoke TU: the dormant-wake logic, the two sites over
 // util/power.hpp's contract, the clock gates, the manager over the
 // timed site.
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "rp2040/clock.hpp"
 #include "rp2040/platform.hpp"
 #include "rp2040/sleep.hpp"
@@ -33,7 +33,7 @@ struct Voter : Fsm<Voter, SleepVote, PrepareSleep, WakeReport> {
     }
 };
 using Manager = PowerManager<P, Timed, PowerConfig{}, Voter>;
-using K = Kernel<P, Voter, Manager>;
+using K = Tenuto<P, Voter, Manager>;
 
 void sleep_verbs() {
     (void)DormantWake::enable(1, DormantWakeEvent::edge_low | DormantWakeEvent::level_low, true);

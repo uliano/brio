@@ -42,7 +42,7 @@
 #include "avrdx/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
@@ -276,11 +276,11 @@ int main() {
 
     brio::print(serial, brio::crlf, "traffic0: buttons -> lamps", brio::crlf);
 
-    // Kernel<P, Aos...>::run(): calls init() on every AO (in order),
+    // Tenuto<P, Aos...>::run(): calls init() on every AO (in order),
     // then loops forever: pop the highest-priority non-empty queue,
     // dispatch one event, rescan from the top; all empty -> idle sleep
     // until the next interrupt. Priority IS the order written here:
     // Demo before Buttons means a pending ButtonPressed is served before
     // the next sampling Tick. Never returns.
-    brio::Kernel<P, Demo, Buttons>::run();
+    brio::Tenuto<P, Demo, Buttons>::run();
 }

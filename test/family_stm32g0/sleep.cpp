@@ -5,7 +5,7 @@
 // bonding, both answered by the reserve - so this TU also proves that a
 // verb handed a pin or a port the part has not got refuses instead of
 // writing a bit that is not there.
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "stm32g0/platform.hpp"
 #include "stm32g0/pwr.hpp"
 #include "stm32g0/sleep.hpp"
@@ -274,7 +274,7 @@ struct Voter : Fsm<Voter, PrepareSleep, SleepVote, WakeReport> {
     }
 };
 using Manager = PowerManager<Stm32g0Platform<>, TimedSite, PowerConfig{}, Voter>;
-using K = Kernel<Stm32g0Platform<>, Voter, Manager>;
+using K = Tenuto<Stm32g0Platform<>, Voter, Manager>;
 
 void kernel_over_the_site() {
     K::init_all();
@@ -283,7 +283,7 @@ void kernel_over_the_site() {
 
 #if defined(LPTIM1_BASE)
 using LptimManager = PowerManager<Stm32g0Platform<>, LptimSite, PowerConfig{}, Voter>;
-using LptimK = Kernel<Stm32g0Platform<>, Voter, LptimManager>;
+using LptimK = Tenuto<Stm32g0Platform<>, Voter, LptimManager>;
 
 void kernel_over_the_lptim_site() {
     LptimK::init_all();

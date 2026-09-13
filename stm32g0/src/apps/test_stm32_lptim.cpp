@@ -92,7 +92,7 @@
 
 #include <optional>
 
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
 #include "kernel/time_event.hpp"
 #include "stm32g0/clock.hpp"
@@ -662,7 +662,7 @@ constexpr LptimTimedSleepConfig site_cfg{.instance = 1,
 using Site = Stm32g0LptimTimedSleepSite<P, SysClock, site_cfg>;
 using PlainSite = Stm32g0SleepSite<SysClock>;
 using Manager = PowerManager<P, Site, PowerConfig{}, Probe>;
-using K = Kernel<P, Probe, Manager>;
+using K = Tenuto<P, Probe, Manager>;
 
 /// The WALL span a deadline of `ms` kernel milliseconds is expected to
 /// take. The site places its alarm with the STATED rate and the wall

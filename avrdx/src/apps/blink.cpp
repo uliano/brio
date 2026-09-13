@@ -22,7 +22,7 @@
 #include "avrdx/ticker.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 
@@ -113,5 +113,5 @@ int main() {
     brio::Ticker::init();       // RTC/PIT timebase (runs in IDLE sleep)
     sei();
 
-    brio::Kernel<P, Blinker, Supervisor>::run();  // never returns
+    brio::Tenuto<P, Blinker, Supervisor>::run();  // never returns
 }

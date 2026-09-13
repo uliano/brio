@@ -10,7 +10,7 @@
 #include "ch32v00x/platform.hpp"
 #include "ch32v00x/ticker.hpp"
 #include "kernel/event_queue.hpp"
-#include "kernel/kernel.hpp"
+#include "kernel/tenuto.hpp"
 #include "kernel/panic.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
@@ -50,10 +50,10 @@ struct Ao {
 };
 
 void kernel_paths() {
-    Kernel<P, Ao>::init_all();
+    Tenuto<P, Ao>::init_all();
     Ao::alarm.arm(10);
-    (void)Kernel<P, Ao>::step();
-    Kernel<P, Ao>::idle_if_empty();
+    (void)Tenuto<P, Ao>::step();
+    Tenuto<P, Ao>::idle_if_empty();
 }
 
 void platform_verbs() {
