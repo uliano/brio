@@ -132,7 +132,9 @@ the host end) through a hub.
   the second half, the frame per NAK behind the hub.
 - THE CONSOLE over the port (the USB console app): HELP, UPTIME, LED,
   ERR and USB answered on /dev/ttyACM with no driver installed, the
-  banner held until the host raises DTR.
+  banner held until the host raises DTR - on the WeAct board and on
+  the Pico at once, two ports on one host, each enumerated in two
+  resets and sixteen setup packets.
 
 ## Not covered yet
 
@@ -158,4 +160,6 @@ Implemented but not bench-verified, each with what would measure it:
 - Two ports in one device (a second `UsbCdcAcm` on interfaces 2 and
   3, endpoints 3 and 4): the descriptors glue, the host shows two
   ttyACM.
-- The Pico: the same suite on a Pico's connector.
+- The reference suite on a Pico: the console app enumerates and
+  answers there; the suite's letters want the probe's console, which
+  the Pico lends to the WeAct board's second core meanwhile.
