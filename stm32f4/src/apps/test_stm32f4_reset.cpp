@@ -613,13 +613,17 @@ void tc_wwdg() {
     // handler does with it is the same code either way, and letter i's
     // last leg is where the hardware request itself is proven (with the
     // watchdog activated, on the reset it was going to cause anyway).
+    // The counter free-runs below 0x40 and wraps, raising EWIF again every
+    // 128 steps (5 ms at /1): the flag is read RIGHT after the handler,
+    // with the counter just refreshed so no new raise lands in between.
+    Wwdg::refresh(0x7Fu);
     Nvic::set_pending(Wwdg::irq());
     const uint32_t c3 = cycles_now();
     while (ewi_count == 0u && cycles_now() - c3 < SysClock::hz / 100u) {
     }
+    const bool flag_after_isr = Wwdg::flag();
     bench.verdict("pending the line by hand runs the bound handler", ewi_count != 0u);
-    bench.verdict("and the ISR body acknowledged the flag (EWIF is down)",
-                  !Wwdg::flag());
+    bench.verdict("and the ISR body acknowledged the flag (EWIF is down)", !flag_after_isr);
     Nvic::disable(Wwdg::irq());
     Nvic::clear_pending(Wwdg::irq());
 

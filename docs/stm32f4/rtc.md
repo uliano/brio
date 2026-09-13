@@ -395,9 +395,15 @@ a polling loop locates to a few hundred nanoseconds.
   (letter `n`). With no RTC input enabled the core drives PC13 both ways
   and reads it back; with the timestamp enabled the pad reads high
   whatever the core writes, which is table 25's "input floating" on
-  silicon. So an edge is made by driving the pad low with the timestamp
-  off and enabling it: the release floats up through the board's LED in
-  18 to 29 ms and TSF stands. The frozen registers then carry the
+  silicon - and the GPIO's pull resistors do not reach the pad either
+  (a pull-up set in PUPDR leaves the input reading low). So an edge is
+  made by driving the pad low with the timestamp off and enabling it,
+  and what lifts the released pad is THE BOARD'S: the Nucleo-F446RE's
+  button pull-up on PC13 makes a clean edge; the black pill hangs only
+  its LED there - a diode's forward drop from the rail - and the pad
+  crossed the threshold in 18 to 29 ms on one run and never on others.
+  The suite reports which and judges the data path only when the edge
+  came. Where it did, TSF stands, the frozen registers carry the
   calendar's own second - and reading them AFTER the flag is cleared
   gives all zeros, which is why the suite's handler reads them first.
 - **A tamper needs no wire either, and it costs the twenty registers**
