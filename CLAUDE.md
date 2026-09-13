@@ -311,7 +311,7 @@ gets its home in `docs/design/` when taken.
   ALONE - no FlashMedia here: the family's uneven sectors sit low in the
   bank where the vector table lives, so a fixed NV zone would partition
   every image's linker script, and the NV stack is deferred to its own
-  review, below -, ADC/DAC, PWR's
+  review, below -, PWR's
   Stop modes with a dynamic clock's way down, SPI/I2S, I2C, the
   DWC2 OTG FS controller for util/usb - both OTG connectors are cabled
   -, and on the F429 alone FMC + LTDC + DMA2D, the memory-mapped display
@@ -1409,6 +1409,33 @@ brio/                    the framework, four strata:
                            the nine tasks (TimPwm, TimPairPwm, TimPeriodMeter,
                            TimIntervalMeter, TimEventCounter, TimGatedCounter,
                            TimPeriodicTick, TimOnePulse, TimEncoder)
+    adc.hpp                ADC: AdcCommon (the block up to three converters
+                           share: the PCLK2 prescaler with its 36 MHz ceiling,
+                           TSVREFE and VBATE, the multi-ADC modes and their
+                           DMA modes, the ONE reset line) + Adc<1..3> (the
+                           regular sequence of sixteen and the INJECTED four
+                           that preempt it with a signed offset, the four
+                           resolutions, per-channel sampling times, scan and
+                           discontinuous, the analog watchdog, the timer and
+                           EXTI triggers, the rc_w0 status register whose
+                           result() acknowledges STRT too - there is no busy
+                           bit - the ISR body, the DMA cell check) +
+                           AnalogIn<Pin, channel> (the channel from the
+                           family's own pad map by default) + AdcInput (the
+                           three internal sources as TAGS: the sensor sits on
+                           channel 16 or 18 by part class) + AdcFactory
+                           (VREFINT_CAL and the two temperature points) +
+                           Ref/ref_mv (a PAD: no buffer, no selector)
+    dac.hpp                DAC: Dac, a MONOSTATE with two 12-bit channels
+                           whose only route out is a PAD (no MCR, no internal
+                           path - so the ADC reads it back through the bond
+                           pad they share), the three data formats and the
+                           three dual ones, the buffer DISABLED by a one, the
+                           eight triggers gated on timer presence, the noise
+                           and triangle generators, the DMA request only a
+                           HARDWARE trigger raises and the underrun it leaves,
+                           and the ISR body on TIM6's vector; absent where the
+                           header declares no DAC_BASE
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)

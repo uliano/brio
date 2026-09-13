@@ -1349,4 +1349,322 @@ constexpr bool rcc_has_timpre() {
 #endif
 }
 
+// ---- the analog converters ----------------------------------------------------
+//
+// WHAT DIFFERS ACROSS THE FAMILY HERE, and where each difference is read
+// from:
+//  - How many ADCs: one on the F401, F410, F411, F412 and F413/F423,
+//    three on the F405 class, the F42x/F43x, the F446 and the F469/F479.
+//    The header says it (ADC2_BASE, ADC3_BASE) and so does the name of
+//    the COMMON block, which the pack spells ADC1_COMMON_BASE on a
+//    one-converter part and ADC123_COMMON_BASE on a three-converter one.
+//  - Whether there is a DAC at all: DAC_BASE. The F401, F411 and F412
+//    have none.
+//  - Which TIMERS exist, which is what decides how many of the sixteen
+//    EXTSEL / JEXTSEL codes and the eight TSEL codes carry anything: the
+//    F410 has TIM1, TIM5, TIM6 and TIM9 alone, so most of the trigger
+//    space is dead silicon there. The base-address macro of each timer
+//    is the probe.
+//
+// AND WHAT THE HEADER CANNOT BE ASKED, keyed on the device-select define
+// like the frequency ladders above: which channel the temperature sensor
+// is on, what the VBAT bridge divides by, and how many channels the DAC
+// really has. ST declares ONE set of bit names for the whole family - the
+// F410's header carries DAC_CR_EN2 though RM0401 gives that part one
+// output - exactly as it declares the RTC's second tamper input
+// everywhere. So these are the reference manual's numbers, stated only
+// for the classes whose manual is on the desk, and a class outside them
+// gets `known == false` and the conservative answer rather than a guess:
+// a temperature read on the wrong channel is a wrong number in silence,
+// and a second DAC channel that does not exist drives nothing.
+
+/// Register block base of ADC instance n (1..3), 0 when this device does
+/// not have it.
+constexpr uint32_t adc_base(uint8_t n) {
+    switch (n) {
+#if defined(ADC1_BASE)
+        case 1: return ADC1_BASE;
+#endif
+#if defined(ADC2_BASE)
+        case 2: return ADC2_BASE;
+#endif
+#if defined(ADC3_BASE)
+        case 3: return ADC3_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool adc_present(uint8_t n) { return adc_base(n) != 0u; }
+
+/// How many converters this device bonds - 1 or 3; the multi-ADC modes
+/// need at least two and the triple ones all three.
+constexpr uint8_t adc_instances() {
+    uint8_t n = 0;
+    for (uint8_t i = 1; i <= 3; ++i) {
+        if (adc_present(i)) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+/// The COMMON block (CSR, CCR, CDR) - one per device, shared by every
+/// converter, at ADC1's base + 0x300. The pack names the macro after the
+/// converters that share it, so both spellings are probed.
+constexpr uint32_t adc_common_base() {
+#if defined(ADC123_COMMON_BASE)
+    return ADC123_COMMON_BASE;
+#elif defined(ADC1_COMMON_BASE)
+    return ADC1_COMMON_BASE;
+#else
+    return 0;
+#endif
+}
+
+/// Instance n's enable bit in RCC_APB2ENR (one per converter, 7.3.14);
+/// 0 when absent.
+constexpr uint32_t adc_clock_mask(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APB2ENR_ADC1EN)
+        case 1: return RCC_APB2ENR_ADC1EN;
+#endif
+#if defined(RCC_APB2ENR_ADC2EN)
+        case 2: return RCC_APB2ENR_ADC2EN;
+#endif
+#if defined(RCC_APB2ENR_ADC3EN)
+        case 3: return RCC_APB2ENR_ADC3EN;
+#endif
+        default: return 0;
+    }
+}
+
+/// The reset line, in RCC_APB2RSTR - ONE bit for every converter and the
+/// common block together (7.3.7: there is no per-instance ADC reset on
+/// this family), which is why the reset verb belongs to the block.
+inline constexpr uint32_t adc_reset_mask = RCC_APB2RSTR_ADCRST;
+
+/// The NVIC line, SHARED BY EVERY CONVERTER (one "ADC global interrupt"
+/// on every part of the family), so a handler bound to it is a
+/// dispatcher.
+constexpr IRQn_Type adc_irq() { return ADC_IRQn; }
+
+/// The channel numbers this converter's fields hold: 0..18, the range
+/// AWDCH[4:0] and the SQx/JSQx fields document (13.13.2's own note).
+inline constexpr uint8_t adc_channel_count = 19;
+
+/**
+ * The internal channels' numbers and the battery bridge's ratio - the
+ * REFERENCE MANUAL'S, keyed on the part class (see the note above).
+ *
+ * RM0090 13.3.4 and 13.11: the F405 class puts the temperature sensor on
+ * ADC1_IN16 and divides VBAT by two; the F42x/F43x move the sensor onto
+ * ADC1_IN18, where it SHARES the channel with VBAT, and divide by four.
+ * RM0390 13.3.4 and RM0383 11.3.4 give the F446 and the F411 the
+ * F42x/F43x's arrangement. VREFINT is ADC1_IN17 on every one of them, and
+ * all three internal channels are the MASTER converter's alone.
+ */
+struct AdcInternalFacts {
+    bool known = false;
+    uint8_t vrefint_channel = 0xFFu;
+    uint8_t temperature_channel = 0xFFu;
+    uint8_t vbat_channel = 0xFFu;
+    uint8_t vbat_divider = 0;      ///< VBAT / this reaches the channel
+    /// Whether the sensor and the battery share one channel, which makes
+    /// TSVREFE and VBATE mutually exclusive (VBAT wins where both are set).
+    bool sensor_shares_vbat = false;
+};
+
+constexpr AdcInternalFacts adc_internal_facts() {
+    AdcInternalFacts f{};
+#if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx)
+    f.known = true;
+    f.vrefint_channel = 17;
+    f.temperature_channel = 16;
+    f.vbat_channel = 18;
+    f.vbat_divider = 2;
+#elif defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx) || \
+    defined(STM32F446xx) || defined(STM32F411xE)
+    f.known = true;
+    f.vrefint_channel = 17;
+    f.temperature_channel = 18;
+    f.vbat_channel = 18;
+    f.vbat_divider = 4;
+    f.sensor_shares_vbat = true;
+#endif
+    return f;
+}
+
+/**
+ * How many output channels the DAC really has, and whether that is known.
+ *
+ * RM0090 14.1, RM0390 14.1: two on the F405 class, the F42x/F43x and the
+ * F446. The F411 (RM0383) has no DAC at all and its header says so.
+ * Everywhere else the header declares a DAC and both channels' bits and
+ * the manual has not been read, so one channel is offered and the second
+ * is refused - the RTC's second tamper input, again.
+ */
+struct DacChannelFacts {
+    bool known = false;
+    uint8_t channels = 1;
+};
+
+constexpr DacChannelFacts dac_channel_facts() {
+    DacChannelFacts f{};
+#if defined(DAC_BASE)
+#if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx) || \
+    defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx) || \
+    defined(STM32F446xx)
+    f.known = true;
+    f.channels = 2;
+#endif
+#else
+    f.channels = 0;
+#endif
+    return f;
+}
+
+/// Whether this device has the DAC block at all (the F401, F411 and F412
+/// have none, and their headers declare no DAC_BASE).
+constexpr bool dac_present() {
+#if defined(DAC_BASE)
+    return true;
+#else
+    return false;
+#endif
+}
+
+constexpr uint32_t dac_base() {
+#if defined(DAC_BASE)
+    return DAC_BASE;
+#else
+    return 0;
+#endif
+}
+
+/// The DAC's enable and reset bits in RCC_APB1ENR / RCC_APB1RSTR
+/// (7.3.13, 7.3.6); 0 on a part with no DAC.
+constexpr uint32_t dac_clock_mask() {
+#if defined(RCC_APB1ENR_DACEN)
+    return RCC_APB1ENR_DACEN;
+#else
+    return 0;
+#endif
+}
+
+constexpr uint32_t dac_reset_mask() {
+#if defined(RCC_APB1RSTR_DACRST)
+    return RCC_APB1RSTR_DACRST;
+#else
+    return 0;
+#endif
+}
+
+/// The DAC's underrun interrupt line - TIM6's vector, which the pack
+/// spells TIM6_DAC_IRQn on exactly the parts that have a DAC and TIM6_IRQn
+/// on the rest. A handler bound here answers for both peripherals.
+constexpr IRQn_Type dac_irq() {
+#if defined(DAC_BASE)
+    return TIM6_DAC_IRQn;
+#else
+    return NonMaskableInt_IRQn;   // unreachable: callers check dac_present first
+#endif
+}
+
+
+/**
+ * WHERE A CONVERTER'S DMA REQUEST SITS IN THE FABRIC - the ANALOG slice
+ * of the request mapping tables, in the shape and for the reason the
+ * serial slice above states: no device header carries a request mapping
+ * and the tables are the reference manual's, keyed per part class.
+ *
+ * RM0090 table 44, RM0390 table 29 and RM0383 table 28 agree on every
+ * converter they share: ADC1 is DMA2's stream 0 and stream 4 on channel
+ * 0, ADC2 is stream 2 and stream 3 on channel 1, ADC3 is stream 0 and
+ * stream 1 on channel 2 - so ADC1 and ADC3 CONTEND for stream 0 with two
+ * different channels, which is what makes a placement a cell and not a
+ * number. Every ADC request is DMA2's; none of them is DMA1's.
+ */
+constexpr DmaPlacements adc_dma_placements(uint8_t instance) {
+    DmaPlacements p{};
+#if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || \
+    defined(STM32F417xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
+    defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx) || \
+    defined(STM32F411xE)
+    p.known = true;
+    if (!adc_present(instance)) {
+        return p;   // the class's table is read, this part has no such converter
+    }
+    switch (instance) {
+        case 1: p.count = 2; p.at[0] = {2, 0, 0}; p.at[1] = {2, 4, 0}; break;
+        case 2: p.count = 2; p.at[0] = {2, 2, 1}; p.at[1] = {2, 3, 1}; break;
+        case 3: p.count = 2; p.at[0] = {2, 0, 2}; p.at[1] = {2, 1, 2}; break;
+        default: break;
+    }
+#else
+    (void)instance;
+#endif
+    return p;
+}
+
+/**
+ * The DAC's two channels (RM0090 table 43, RM0390 table 28): DAC1 on
+ * DMA1's stream 5 and DAC2 on stream 6, channel 7 both, one cell each.
+ * The channel index here is this stratum's 0-based one, as everywhere
+ * else in stm32f4/dac.hpp.
+ */
+constexpr DmaPlacements dac_dma_placements(uint8_t channel) {
+    DmaPlacements p{};
+#if defined(DAC_BASE)
+#if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || \
+    defined(STM32F417xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
+    defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx)
+    p.known = true;
+    if (channel >= dac_channel_facts().channels) {
+        return p;
+    }
+    p.count = 1;
+    p.at[0] = channel == 0u ? DmaPlacement{1, 5, 7} : DmaPlacement{1, 6, 7};
+#else
+    (void)channel;
+#endif
+#else
+    (void)channel;
+#endif
+    return p;
+}
+
+/// Whether (controller, stream, channel) is a cell converter `instance`'s
+/// request is wired to. False on a part whose table was not read - a
+/// refusal and never a guess, as with the serial instances.
+constexpr bool adc_dma_placement_valid(uint8_t instance, uint8_t controller, uint8_t stream,
+                                       uint8_t channel) {
+    const DmaPlacements p = adc_dma_placements(instance);
+    if (!p.known) {
+        return false;
+    }
+    for (uint8_t i = 0; i < p.count; ++i) {
+        if (p.at[i].controller == controller && p.at[i].stream == stream &&
+            p.at[i].channel == channel) {
+            return true;
+        }
+    }
+    return false;
+}
+
+constexpr bool dac_dma_placement_valid(uint8_t dac_channel, uint8_t controller, uint8_t stream,
+                                       uint8_t channel) {
+    const DmaPlacements p = dac_dma_placements(dac_channel);
+    if (!p.known) {
+        return false;
+    }
+    for (uint8_t i = 0; i < p.count; ++i) {
+        if (p.at[i].controller == controller && p.at[i].stream == stream &&
+            p.at[i].channel == channel) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace brio
