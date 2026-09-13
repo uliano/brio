@@ -692,4 +692,257 @@ constexpr IRQn_Type rtc_alarm_irq() { return RTC_Alarm_IRQn; }
 constexpr IRQn_Type rtc_wakeup_irq() { return RTC_WKUP_IRQn; }
 constexpr IRQn_Type rtc_tamper_stamp_irq() { return TAMP_STAMP_IRQn; }
 
+// ---- DMA ----------------------------------------------------------------------
+
+/// Register block base of DMA controller `n` (1 or 2), 0 when the device
+/// header does not declare it. Every part of this pack has both.
+constexpr uint32_t dma_base(uint8_t n) {
+    switch (n) {
+#if defined(DMA1_BASE)
+        case 1: return DMA1_BASE;
+#endif
+#if defined(DMA2_BASE)
+        case 2: return DMA2_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool dma_present(uint8_t n) { return dma_base(n) != 0u; }
+
+/// Streams per controller, and the depth of a stream's FIFO in words -
+/// the same on both controllers and on every part (RM0090 10.2).
+inline constexpr uint8_t dma_streams = 8;
+inline constexpr uint8_t dma_fifo_words = 4;
+/// Channels (request lines) a stream chooses between with CHSEL (10.3.3).
+inline constexpr uint8_t dma_channels = 8;
+
+/// Register block base of stream `s` of controller `n`. The header spells
+/// one macro per stream, so each is probed by name rather than computed
+/// from an offset.
+constexpr uint32_t dma_stream_base(uint8_t n, uint8_t s) {
+    if (n == 1) {
+        switch (s) {
+#if defined(DMA1_Stream0_BASE)
+            case 0: return DMA1_Stream0_BASE;
+            case 1: return DMA1_Stream1_BASE;
+            case 2: return DMA1_Stream2_BASE;
+            case 3: return DMA1_Stream3_BASE;
+            case 4: return DMA1_Stream4_BASE;
+            case 5: return DMA1_Stream5_BASE;
+            case 6: return DMA1_Stream6_BASE;
+            case 7: return DMA1_Stream7_BASE;
+#endif
+            default: return 0;
+        }
+    }
+    if (n == 2) {
+        switch (s) {
+#if defined(DMA2_Stream0_BASE)
+            case 0: return DMA2_Stream0_BASE;
+            case 1: return DMA2_Stream1_BASE;
+            case 2: return DMA2_Stream2_BASE;
+            case 3: return DMA2_Stream3_BASE;
+            case 4: return DMA2_Stream4_BASE;
+            case 5: return DMA2_Stream5_BASE;
+            case 6: return DMA2_Stream6_BASE;
+            case 7: return DMA2_Stream7_BASE;
+#endif
+            default: return 0;
+        }
+    }
+    return 0;
+}
+
+constexpr bool dma_stream_present(uint8_t n, uint8_t s) {
+    return dma_stream_base(n, s) != 0u;
+}
+
+/// The controller's enable bit in RCC_AHB1ENR; the same position resets
+/// it in RCC_AHB1RSTR.
+constexpr uint32_t dma_clock_mask(uint8_t n) {
+    switch (n) {
+#if defined(RCC_AHB1ENR_DMA1EN)
+        case 1: return RCC_AHB1ENR_DMA1EN;
+#endif
+#if defined(RCC_AHB1ENR_DMA2EN)
+        case 2: return RCC_AHB1ENR_DMA2EN;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr uint32_t dma_reset_mask(uint8_t n) {
+    switch (n) {
+#if defined(RCC_AHB1RSTR_DMA1RST)
+        case 1: return RCC_AHB1RSTR_DMA1RST;
+#endif
+#if defined(RCC_AHB1RSTR_DMA2RST)
+        case 2: return RCC_AHB1RSTR_DMA2RST;
+#endif
+        default: return 0;
+    }
+}
+
+/// ONE VECTOR PER STREAM - sixteen lines, no sharing at all on this
+/// family (RM0090 table 61). An IRQn is an enumerator the preprocessor
+/// cannot probe, so each is guarded by its controller's base macro, as
+/// every vector verb here is.
+constexpr IRQn_Type dma_stream_irq(uint8_t n, uint8_t s) {
+    if (n == 1) {
+        switch (s) {
+#if defined(DMA1_BASE)
+            case 0: return DMA1_Stream0_IRQn;
+            case 1: return DMA1_Stream1_IRQn;
+            case 2: return DMA1_Stream2_IRQn;
+            case 3: return DMA1_Stream3_IRQn;
+            case 4: return DMA1_Stream4_IRQn;
+            case 5: return DMA1_Stream5_IRQn;
+            case 6: return DMA1_Stream6_IRQn;
+            case 7: return DMA1_Stream7_IRQn;
+#endif
+            default: return NonMaskableInt_IRQn;
+        }
+    }
+    if (n == 2) {
+        switch (s) {
+#if defined(DMA2_BASE)
+            case 0: return DMA2_Stream0_IRQn;
+            case 1: return DMA2_Stream1_IRQn;
+            case 2: return DMA2_Stream2_IRQn;
+            case 3: return DMA2_Stream3_IRQn;
+            case 4: return DMA2_Stream4_IRQn;
+            case 5: return DMA2_Stream5_IRQn;
+            case 6: return DMA2_Stream6_IRQn;
+            case 7: return DMA2_Stream7_IRQn;
+#endif
+            default: return NonMaskableInt_IRQn;
+        }
+    }
+    return NonMaskableInt_IRQn;
+}
+
+/// ONLY DMA2 CAN MOVE MEMORY TO MEMORY, and it is a wiring fact and not a
+/// register one: DMA1's AHB peripheral port is not connected to the bus
+/// matrix (RM0090 figures 33 and 34, note 1 under each), so its peripheral
+/// port cannot read a memory. Nothing in the header says so and nothing in
+/// DMA1's registers refuses it - the stream would simply take a bus error -
+/// which is why this is stated here and enforced by the driver.
+constexpr bool dma_memory_to_memory_capable(uint8_t n) { return n == 2; }
+
+/**
+ * WHERE A SERIAL INSTANCE'S DMA REQUEST SITS IN THE FABRIC - the serial
+ * slice of the request mapping tables, keyed on the device-select define
+ * for the reason the frequency ladders are: no device header of this pack
+ * carries a request mapping, and the tables DIFFER BY PART (RM0090
+ * tables 43 and 44, RM0390 tables 28 and 29, RM0383 tables 27 and 28).
+ *
+ * A request is a CELL of those tables, not a number: a controller, a
+ * stream and the channel that stream must select for the peripheral to
+ * reach it. Several cells may carry the same request (USART1_RX is on two
+ * streams of DMA2), so a placement list is up to two entries long - the
+ * most any serial row of the three manuals has.
+ *
+ * Filled for the four part classes whose manual was read; on every other
+ * header `known` is false and stm32f4/usart.hpp REFUSES a DMA engine
+ * rather than run a stream on a guessed channel. The class boundary is
+ * NOT the ladder's: the F42x/F43x carry UART7 and UART8 rows that the
+ * F405 class has not, and the F411's USART2_RX has a second placement
+ * (DMA1 stream 7, channel 6) that no other manual shows.
+ */
+struct DmaPlacement {
+    uint8_t controller = 0;   ///< 1 or 2
+    uint8_t stream = 0;       ///< 0..7
+    uint8_t channel = 0;      ///< CHSEL, 0..7
+};
+
+struct DmaPlacements {
+    bool known = false;       ///< false: this part class's table was not read
+    uint8_t count = 0;
+    DmaPlacement at[2] = {};
+};
+
+constexpr DmaPlacements usart_dma_placements(uint8_t n, bool transmit) {
+    DmaPlacements p{};
+#if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || \
+    defined(STM32F417xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
+    defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx) || \
+    defined(STM32F411xE)
+    p.known = true;
+    if (!usart_present(n)) {
+        return p;   // the class's table is read, this part has no such instance
+    }
+    switch (n) {
+        case 1:
+            if (transmit) { p.count = 1; p.at[0] = {2, 7, 4}; }
+            else          { p.count = 2; p.at[0] = {2, 2, 4}; p.at[1] = {2, 5, 4}; }
+            break;
+        case 2:
+            if (transmit) { p.count = 1; p.at[0] = {1, 6, 4}; }
+            else {
+                p.count = 1;
+                p.at[0] = {1, 5, 4};
+#if defined(STM32F411xE)
+                // RM0383 table 27, channel 6 stream 7 - the F411's alone.
+                p.count = 2;
+                p.at[1] = {1, 7, 6};
+#endif
+            }
+            break;
+        case 3:
+            if (transmit) { p.count = 2; p.at[0] = {1, 3, 4}; p.at[1] = {1, 4, 7}; }
+            else          { p.count = 1; p.at[0] = {1, 1, 4}; }
+            break;
+        case 4:
+            if (transmit) { p.count = 1; p.at[0] = {1, 4, 4}; }
+            else          { p.count = 1; p.at[0] = {1, 2, 4}; }
+            break;
+        case 5:
+            if (transmit) { p.count = 1; p.at[0] = {1, 7, 4}; }
+            else          { p.count = 1; p.at[0] = {1, 0, 4}; }
+            break;
+        case 6:
+            if (transmit) { p.count = 2; p.at[0] = {2, 6, 5}; p.at[1] = {2, 7, 5}; }
+            else          { p.count = 2; p.at[0] = {2, 1, 5}; p.at[1] = {2, 2, 5}; }
+            break;
+#if defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx)
+        // RM0090 table 43's channel 5, marked "available on STM32F42xxx and
+        // STM32F43xxx only" - and the instances themselves are that class's.
+        case 7:
+            if (transmit) { p.count = 1; p.at[0] = {1, 1, 5}; }
+            else          { p.count = 1; p.at[0] = {1, 3, 5}; }
+            break;
+        case 8:
+            if (transmit) { p.count = 1; p.at[0] = {1, 0, 5}; }
+            else          { p.count = 1; p.at[0] = {1, 6, 5}; }
+            break;
+#endif
+        default: break;   // an instance this class's table has no row for
+    }
+#else
+    (void)n;
+    (void)transmit;
+#endif
+    return p;
+}
+
+/// Whether (controller, stream, channel) is one of the cells instance `n`
+/// can be served on. False on a part whose table was not read, and false
+/// for an instance the read table has no row for - both refusals, never a
+/// guess.
+constexpr bool usart_dma_placement_valid(uint8_t n, bool transmit, uint8_t controller,
+                                         uint8_t stream, uint8_t channel) {
+    const DmaPlacements p = usart_dma_placements(n, transmit);
+    if (!p.known) {
+        return false;
+    }
+    for (uint8_t i = 0; i < p.count; ++i) {
+        if (p.at[i].controller == controller && p.at[i].stream == stream &&
+            p.at[i].channel == channel) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace brio

@@ -335,13 +335,13 @@ cites another stratum's.
 | panic, reset, watchdog | [kernel.md](kernel.md), section 10 | the record's survival (EEPROM, RWWEE journal, bank 2); the fault body as the panic path on the ARM strata; the watchdog kick under two names and three contracts |
 | the ring | [ring.md](ring.md) | the atomic width alone |
 | the clock | [clock.md](clock.md) | prescalers (AVR), no dynamic clock by position (SAM), a pack of rate tuples with a regime (G0), one divider under one root (CH32V00x); `delay_us` capped on the 32-bit strata |
-| the Uart | [serial.md](serial.md) | seventeen verbs in common; four ways to name pins, one or three vectors, DMA slots on three strata and bulk verbs on two |
+| the Uart | [serial.md](serial.md) | seventeen verbs in common; four ways to name pins, one or three vectors, DMA slots on four strata and bulk verbs on two |
 | the SPI bus | [spi-bus.md](spi-bus.md) | the rate's unit (an enum or a divisor), a frame size on the G0 and the CH32V00x, the client four surfaces by position with one published integer in common |
 | the I2C bus | [i2c-bus.md](i2c-bus.md) | the rate arithmetic's shape; `actual_scl_hz`/`scl_hz` and `bus_state`/`idle` are NOT one function under two names |
 | the power model | [power.md](power.md) | each family's ladder mapping; where the tick stops and which site resyncs it |
 | the USB device stack | [usb.md](usb.md) | each family's endpoint controller behind the packet contract, and what its RAM or FIFO adds |
 | flash storage | [nv-heap.md](nv-heap.md), [nv-journal.md](nv-journal.md) | the geometries; the AVR keeps its small values in the EEPROM |
-| block streams | [block-stream.md](block-stream.md) | the engine names identical on the two strata that have block engines, the CH32V00x's transfer engines waiting for a block user; the circular mode serves a player and not a source |
+| block streams | [block-stream.md](block-stream.md) | the engine names identical on the two strata that have block engines, the CH32V00x's and the STM32F4's transfer engines waiting for a block user; the circular mode serves a player and not a source |
 | meters | [meters.md](meters.md) | `TimIntervalMeter` is not a pulse-width meter |
 | analog | [analog.md](analog.md) | `Ref` is four vocabularies because a reference is four different things, one of them the rail alone; `set`/`write` on the DAC |
 | pins and PWM channels | below | - |

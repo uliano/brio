@@ -72,12 +72,28 @@
  * refuses instead of storing a combination the chapter declares
  * undefined.
  *
- * TWO OPTIONAL DMA ENGINE SLOTS, the shape every brio Uart has: named
- * today by stm32f4/dma_engine.hpp's NoDmaEngine alone, because this
- * family's stream-and-FIFO DMA controller (RM0090 ch. 10) is the DMA
- * chapter's; the slots exist so the day it lands changes no
- * application's spelling. A slot that names anything else is refused
- * here until then.
+ * TWO OPTIONAL DMA ENGINE SLOTS, the shape every brio Uart has: name a
+ * stm32f4/dma.hpp DmaTxEngine and/or DmaRxEngine and the bytes move
+ * without the CPU; name neither (the default, stm32f4/dma_engine.hpp's
+ * NoDmaEngine) and every engine branch below disappears - `if constexpr`
+ * throughout, so an engineless image carries no DMA code at all and is
+ * byte-identical to the one built before the slots were filled.
+ *
+ * A STREAM AND A CHANNEL ARE NOT FREE HERE. On this family's controller
+ * a peripheral reaches exactly the one or two (controller, stream,
+ * channel) cells the request mapping gives it (RM0090 tables 43 and 44,
+ * RM0390 tables 28 and 29, RM0383 tables 27 and 28 - they differ by
+ * part), so an engine slot is checked against the reserve's serial
+ * slice of those tables at compile time. A part class whose manual was
+ * not read has no table, and an engine on it is REFUSED rather than run
+ * on a guessed channel.
+ *
+ * CLEARING A RECEIVE ERROR COSTS A BYTE in DMA reception, and that is
+ * this block's lineage speaking: ORE, FE, NE and PE are cleared by
+ * reading SR and then DR (30.6.1), and under DMAR the stream is what
+ * normally reads DR. harvest() therefore clears only when a flag really
+ * stands, and counts the byte the clearing read takes out of the
+ * stream's reach.
  *
  * THE PADS ARE THE APPLICATION'S: TX and RX as PinSel with the AF the
  * datasheet gives them (AF7 for USART1..3, AF8 for the rest), CTS and
@@ -648,6 +664,35 @@ constexpr bool uart_pins_valid(const UartPins& p) {
 }
 constexpr bool uart_pins_valid_single(const UartPins& p) { return p.tx.valid(); }
 
+/// Two engines on one transport must not name the same STREAM: a stream
+/// moves data one way and has one FIFO, and pointing both directions at
+/// it would have each re-programming the other's block. Generic over any
+/// engine that says `present`, `controller` and `stream` - `if constexpr`
+/// keeps those from being looked up on an absent engine, which is what
+/// lets NoDmaEngine stay a two-line tag.
+template <typename Tx, typename Rx>
+constexpr bool uart_engines_distinct() {
+    if constexpr (Tx::present && Rx::present) {
+        return Tx::controller != Rx::controller || Tx::stream != Rx::stream;
+    } else {
+        return true;
+    }
+}
+
+/// Whether an engine sits on a cell of the request mapping that really
+/// carries instance `n`'s transmit (or receive) request. True for an
+/// absent engine - there is nothing to place - and FALSE on a part class
+/// whose request table was not read, where the reserve refuses rather
+/// than guesses (stm32f4/device_tables.hpp).
+template <uint8_t n, typename E, bool transmit>
+constexpr bool uart_engine_placed() {
+    if constexpr (!E::present) {
+        return true;
+    } else {
+        return usart_dma_placement_valid(n, transmit, E::controller, E::stream, E::channel);
+    }
+}
+
 /// What a Uart may be told beyond its rings and engines, as one trailing
 /// template parameter. The defaults are the console's personality and
 /// compile to exactly the code they did before this struct existed.
@@ -698,9 +743,26 @@ class Uart {
     static_assert(opts.half_duplex ? uart_pins_valid_single(pins) : uart_pins_valid(pins),
                   "brio Uart: the two pads must be real pins of present ports, and TX "
                   "and RX cannot be the same pad (in half duplex only TX is claimed)");
-    static_assert(!TxEngine::present && !RxEngine::present,
-                  "brio Uart: this stratum's DMA engines are not built yet - the slots "
-                  "take NoDmaEngine (stm32f4/dma_engine.hpp) until stm32f4/dma.hpp exists");
+    // The slots must name a COMPLETE type: naming it in a sizeof
+    // instantiates the engine here, at the template argument the
+    // application typed, so an engine's own static_asserts are reported
+    // against the line that named it.
+    static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
+                  "the engine slots must name a complete type: a DmaTxEngine / "
+                  "DmaRxEngine from stm32f4/dma.hpp, or NoDmaEngine (the default)");
+    static_assert(uart_engines_distinct<TxEngine, RxEngine>(),
+                  "brio Uart: the transmit and receive engines must use DIFFERENT DMA "
+                  "streams - a stream carries one direction and has one FIFO");
+    static_assert(uart_engine_placed<instance, TxEngine, true>(),
+                  "brio Uart: the transmit engine's (controller, stream, channel) is not "
+                  "a cell this instance's transmit request is wired to - RM0090 tables 43 "
+                  "and 44 and their RM0390 / RM0383 twins, keyed per part class in "
+                  "stm32f4/device_tables.hpp (a part class whose manual was not read has "
+                  "no table, and an engine is refused there rather than guessed)");
+    static_assert(uart_engine_placed<instance, RxEngine, false>(),
+                  "brio Uart: the receive engine's (controller, stream, channel) is not a "
+                  "cell this instance's receive request is wired to - see the transmit "
+                  "engine's message");
     static_assert(!opts.rts || opts.rts_pin.valid(), "brio Uart: RTS flow control needs the RTS pad");
     static_assert(!opts.cts || opts.cts_pin.valid(), "brio Uart: CTS flow control needs the CTS pad");
     static_assert(!(opts.rts || opts.cts) || S::is_full,
@@ -718,6 +780,7 @@ class Uart {
     static inline volatile uint8_t m_parity_errors = 0; // PE: byte dropped
     static inline volatile uint8_t m_noise_errors = 0;  // NE: byte kept, line suspect
     static inline volatile uint8_t m_hw_overruns = 0;   // ORE: a byte lost in silicon
+    static inline volatile uint8_t m_dma_faults = 0;    // blocks a dead stream lost
     static inline uint32_t m_baud = 0;                  // for rebase()
 
 public:
@@ -725,8 +788,11 @@ public:
 
     using Resource = S;
 
-    static constexpr bool has_tx_engine = false;
-    static constexpr bool has_rx_engine = false;
+    /// Whether this instantiation carries an engine at all. Every engine
+    /// branch below is behind one of these, so an engineless image has
+    /// no DMA code in it.
+    static constexpr bool has_tx_engine = TxEngine::present;
+    static constexpr bool has_rx_engine = RxEngine::present;
     static constexpr UartOptions options = opts;
 
     /// The rate the baud divisor really divides, for the app's clock:
@@ -803,15 +869,143 @@ public:
             Pin<opts.cts_pin.port, opts.cts_pin.pin>::function(opts.cts_pin.function, {.pull = PinPull::up});
         }
 
+        // CR3's two request bits before the enable, so the peripheral is
+        // asking for a stream from its very first byte.
+        if constexpr (has_tx_engine) {
+            S::dma_transmit(true);
+        }
+        if constexpr (has_rx_engine) {
+            S::dma_receive(true);
+        }
+
         S::transmitter(true);
         S::receiver(true);
         S::enable(true);
         S::clear_by_read();
-        S::rxne_interrupt(true);
-        // TXE is armed on demand by write_byte().
+        if constexpr (has_rx_engine) {
+            // NOT S::rxne_interrupt(true): the stream consumes RXNE, and a
+            // handler that also read DR would race it for the byte.
+            RxEngine::arm(S::data_address());
+            rearm_rx();
+        } else {
+            S::rxne_interrupt(true);
+        }
+        if constexpr (has_tx_engine) {
+            TxEngine::arm(S::data_address());
+        }
+        // TXE is armed on demand by write_byte() when there is no engine.
 
         Nvic::enable(S::irq);
         return true;
+    }
+
+    /// The ISR body of WHICHEVER DMA stream this transport owns - call it
+    /// from the vector of each engine's stream (one vector per stream on
+    /// this family, shared with nothing):
+    ///
+    ///     extern "C" void DMA2_Stream7_IRQHandler() { (void)Serial::dma_isr(); }
+    ///
+    /// On the transmit stream a completion means the block has left the
+    /// ring, so exactly that many bytes are released and the next
+    /// contiguous run started. On the receive stream nothing is published
+    /// here - only harvest() knows how much of the run the consumer has
+    /// been told about, and the pacing of that is the owner's.
+    ///
+    /// Returns true when something belonging to this transport was served.
+    [[gnu::always_inline]] static bool dma_isr() {
+        bool mine = false;
+        if constexpr (has_tx_engine) {
+            const uint8_t f = TxEngine::service();
+            if ((f & TxEngine::flag_error) != 0u) {
+                (void)TxEngine::abandon();
+                m_dma_faults = m_dma_faults + 1;
+                mine = true;
+            } else if ((f & TxEngine::flag_complete) != 0u) {
+                m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
+                pump_tx();
+                mine = true;
+            }
+        }
+        if constexpr (has_rx_engine) {
+            const uint8_t f = RxEngine::service();
+            if ((f & RxEngine::flag_error) != 0u) {
+                (void)RxEngine::abandon();
+                m_dma_faults = m_dma_faults + 1;
+                mine = true;
+            } else if ((f & RxEngine::flag_complete) != 0u) {
+                // The run filled up. harvest() publishes and re-arms.
+                mine = true;
+            }
+        }
+        return mine;
+    }
+
+    /**
+     * Ask the receive engine what has arrived, and publish it.
+     *
+     * WHY THIS IS A VERB AND NOT AN INTERRUPT. A receive block completes
+     * only when the buffer fills, which on an idle line may be never, so
+     * there is no event to wait for. WHOEVER OWNS THE PORT DECIDES HOW
+     * OFTEN TO ASK and pays the latency it chose; a kernel TimeEvent
+     * every few ticks is the shape brio expects. The asking itself is one
+     * SxNDTR read.
+     *
+     * THE ERRORS ARE READ AT HARVEST GRANULARITY, and clearing one costs
+     * a byte: on this block ORE, FE, NE and PE go away only when SR is
+     * read and then DR (30.6.1), and DR is what the stream reads. So the
+     * clearing sequence runs only when a flag really stands, and the byte
+     * it takes is counted as the loss it is.
+     *
+     * Returns true when the receive ring went from empty to non-empty -
+     * the same edge contract isr() has, so the same kernel glue works.
+     * False, and free, without an engine.
+     */
+    static bool harvest() {
+        if constexpr (!has_rx_engine) {
+            return false;
+        } else {
+            const uint32_t errors = S::status() & UsartFlag::receive_errors;
+            if (errors != 0u) {
+                if ((errors & UsartFlag::ore) != 0u) {
+                    m_hw_overruns = m_hw_overruns + 1;
+                }
+                if ((errors & UsartFlag::fe) != 0u) {
+                    m_frame_errors = m_frame_errors + 1;
+                }
+                if ((errors & UsartFlag::pe) != 0u) {
+                    m_parity_errors = m_parity_errors + 1;
+                }
+                if ((errors & UsartFlag::ne) != 0u) {
+                    m_noise_errors = m_noise_errors + 1;
+                }
+                S::clear_by_read();
+            }
+
+            const bool was_empty = m_rx.empty();
+            const uint16_t fresh = RxEngine::take();
+            if (fresh != 0u) {
+                m_rx.publish(static_cast<typename decltype(m_rx)::index_t>(fresh));
+            }
+            // THE SILICON IS ASKED FIRST AND THE ARITHMETIC SECOND: a
+            // stream that is not running gets a new run whatever the count
+            // says. The opposite rule - trust the count and leave a stopped
+            // stream alone - leaves a receive stream dead.
+            if (RxEngine::idle() || RxEngine::full() || RxEngine::capacity() == 0u) {
+                rearm_rx();
+            }
+            return was_empty && !m_rx.empty();
+        }
+    }
+
+    /// DMA blocks this transport threw away because the controller had
+    /// stopped running them (a transfer error clears EN in hardware,
+    /// RM0090 10.3.18). Always 0, and free, without an engine.
+    static uint8_t dma_faults() {
+        if constexpr (has_tx_engine || has_rx_engine) {
+            return m_dma_faults;
+        } else {
+            return 0;
+        }
     }
 
     /// The core clock changed (DynamicClock fan-out): keep the same bit
@@ -888,7 +1082,12 @@ public:
         const uint32_t st = r.SR;   // ONE read; the DR read below completes the clears
         bool edge = false;
 
-        if ((st & UsartFlag::rxne) != 0u || (st & UsartFlag::ore) != 0u) {
+        // With a receive engine the stream owns DR and RXNEIE is never
+        // armed, so this branch must not exist: a handler that read DR
+        // would take a byte out of the stream's hands.
+        if constexpr (has_rx_engine) {
+            (void)edge;
+        } else if ((st & UsartFlag::rxne) != 0u || (st & UsartFlag::ore) != 0u) {
             // The DR read clears RXNE and, after the SR read above, ORE,
             // NE, FE, PE and IDLE (30.6.1). An overrun without RXNE is
             // the case where the byte was already taken but ORE stands:
@@ -930,14 +1129,30 @@ public:
         return edge;
     }
 
-    /// Queue one byte; false when the ring is full (print() retries).
-    /// A push that filled the ring already armed TXE, and TXE is a
-    /// condition that cannot be missed, so a refused byte needs no nudge.
+    /**
+     * Queue one byte; false when the ring is full (print() retries).
+     *
+     * WITH AN ENGINE, A REFUSED BYTE STILL NUDGES. print() answers a
+     * false by trying again for ever, so a path that can leave the
+     * transport unpoked stops the program - and the ring is full
+     * precisely when nothing is draining it. The plain transport does not
+     * need it (a push that filled the ring already armed TXE, and TXE is
+     * a condition that cannot be missed), which is also why the
+     * engineless image is byte-identical to the one built before these
+     * slots were filled.
+     */
     static bool write_byte(uint8_t b) {
         if (!m_tx.push(b)) {
+            if constexpr (has_tx_engine) {
+                pump_tx();
+            }
             return false;
         }
-        S::txe_interrupt(true);
+        if constexpr (has_tx_engine) {
+            pump_tx();
+        } else {
+            S::txe_interrupt(true);
+        }
         return true;
     }
 
@@ -978,7 +1193,10 @@ public:
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(chunk));
             queued += chunk;
         }
-        if (queued != 0u) {
+        // ONE nudge for the whole run - the entire point of the verb.
+        if constexpr (has_tx_engine) {
+            pump_tx();
+        } else if (queued != 0u) {
             S::txe_interrupt(true);
         }
         return queued;
@@ -1019,12 +1237,24 @@ public:
         m_parity_errors = 0;
         m_noise_errors = 0;
         m_hw_overruns = 0;
+        if constexpr (has_tx_engine || has_rx_engine) {
+            m_dma_faults = 0;
+        }
     }
 
     /// Stop the port and park its pads: interrupts off, UE clear, the
-    /// bus clock closed, the pins released.
+    /// bus clock closed, the pins released. The engines' streams are
+    /// stopped first, because 10.3.17's warning is explicit - switch the
+    /// stream off and wait for EN to read 0 BEFORE the peripheral it
+    /// serves.
     static void release() {
         Nvic::disable(S::irq);
+        if constexpr (has_tx_engine) {
+            TxEngine::stop();
+        }
+        if constexpr (has_rx_engine) {
+            RxEngine::stop();
+        }
         S::rxne_interrupt(false);
         S::txe_interrupt(false);
         S::enable(false);
@@ -1032,6 +1262,44 @@ public:
         TxPin::release();
         if constexpr (!opts.half_duplex) {
             RxPin::release();
+        }
+    }
+
+private:
+    /**
+     * Hand the transmit engine the ring's next contiguous run, if it is
+     * free to take one.
+     *
+     * NOTHING KICKS THE FIRST BEAT, AND THAT IS THIS CONTROLLER'S OWN
+     * FACT. 10.3.2's handshake is level-driven: the stream is enabled, it
+     * sees TXE asserted, it writes DR. Measured rather than assumed,
+     * because a wrong answer is a transmitter that never starts.
+     */
+    static void pump_tx() {
+        if constexpr (has_tx_engine) {
+            typename Stm32f4Platform<>::CriticalSection cs;
+            if (TxEngine::busy()) {
+                return;
+            }
+            const auto run = m_tx.read_span();
+            if (run.empty()) {
+                return;
+            }
+            (void)TxEngine::start(run.data(), static_cast<uint16_t>(run.size()));
+        }
+    }
+
+    /// Point the receive engine at the ring's next free run. A ring with
+    /// no room at all is a byte lost before it arrives, and it is counted
+    /// as the software overrun it is.
+    static void rearm_rx() {
+        if constexpr (has_rx_engine) {
+            const auto room = m_rx.write_span();
+            if (room.empty()) {
+                m_rx_overruns = m_rx_overruns + 1;
+                return;
+            }
+            (void)RxEngine::start(room.data(), static_cast<uint16_t>(room.size()));
         }
     }
 };

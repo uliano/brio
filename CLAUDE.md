@@ -311,7 +311,7 @@ gets its home in `docs/design/` when taken.
   ALONE - no FlashMedia here: the family's uneven sectors sit low in the
   bank where the vector table lives, so a fixed NV zone would partition
   every image's linker script, and the NV stack is deferred to its own
-  review, below -, the stream-and-FIFO DMA, the timers, ADC/DAC, PWR's
+  review, below -, the timers, ADC/DAC, PWR's
   Stop modes with a dynamic clock's way down, SPI/I2S, I2C, the
   DWC2 OTG FS controller for util/usb - both OTG connectors are cabled
   -, and on the F429 alone FMC + LTDC + DMA2D, the memory-mapped display
@@ -1359,6 +1359,19 @@ brio/                    the framework, four strata:
                            the override) + ExtiLine<n> (a wake-up named as a
                            constant, refused where the part has none)
     dma_engine.hpp         NoDmaEngine, the empty slot's tag
+    dma.hpp                the two DMA controllers (ch. 10): Dma<1|2> (the AHB1
+                           gate, the flag banks decoded per stream, the
+                           write-one clears) + DmaStream<n, 0..7> - a STREAM is
+                           the unit and CHSEL only picks one of its eight
+                           request lines: the enable discipline of 10.3.17 with
+                           the read-back slack measured, table 49's burst and
+                           threshold arithmetic refused BEFORE the enable,
+                           direct mode, the double buffer with its
+                           current-target readback, circular, the peripheral
+                           flow controller, five flags and one ISR body -
+                           + DmaTxEngine/DmaRxEngine<n, stream, channel, Elem>
+                           for the transports' slots, checked against the
+                           request mapping the reserve keys per part class
     usart.hpp              Usart<n> resource over the classic SR/DR/BRR chapter
                            (mute, LIN, IrDA, smartcard, synchronous, flow
                            control, DMA requests, every flag) + Uart<n, pins,
