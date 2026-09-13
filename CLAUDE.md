@@ -313,8 +313,9 @@ gets its home in `docs/design/` when taken.
   USB OTG core for util/usb (the console on the black pill's own
   connector), PWR with the sleep sites and the dynamic clock, and the
   flash interface as the ENGINE alone (no FlashMedia, by the NV review's
-  decision below). What remains: the small blocks (CRC, RNG, bxCAN in
-  loopback), the FMPI2C1 of the F410/F412/F413/F446 as a chapter of its
+  decision below), the CRC unit, the RNG (written for the parts that
+  have one, unmeasured) and the bxCAN in loopback. What remains: the
+  FMPI2C1 of the F410/F412/F413/F446 as a chapter of its
   own, and on the F429 alone FMC + SDRAM, then LTDC + DMA2D, the
   memory-mapped display tier; the frequency ladders of the five part
   classes whose manuals are not on the desk; the debuggers (cortex-debug
@@ -1525,6 +1526,37 @@ brio/                    the framework, four strata:
                            and not chapter 9 is what the silicon obeys, and
                            the two device-mode errata as code (the guarded
                            FIFO write, the address never read back)
+    crc.hpp                CRC: `Crc`, a monostate over three registers - the
+                           CRC-32 Ethernet polynomial wired in (no polynomial,
+                           no initial value, no reversal: the function IS
+                           CRC-32/MPEG-2), a WORD the only grain the register
+                           takes, the reset that lands a read late and
+                           swallows a word written behind it, and CRC_IDR the
+                           one piece of state a reset spares + the same
+                           polynomial in constexpr C++ (crc32_ethernet*),
+                           which is what the silicon is judged against
+    rng.hpp                RNG: `Rng`, a monostate where the part has one (not
+                           the F401, F411 or F446) - the 48 MHz domain checked
+                           against the chapter's RATIO and not against 48 MHz,
+                           the FIPS first-value discard and the continuous
+                           comparison inside read(), the seed error whose
+                           recovery is a sequence and the clock error that is
+                           not, two latched flags that are rc_w0, and one
+                           vector under two names
+    can.hpp                bxCAN: `Can<1|2|3>` over the whole chapter - the
+                           three modes with their acknowledges, the bit timing
+                           searched EXACTLY at compile time from PCLK1 with
+                           its sample point, three transmit mailboxes ordered
+                           by identifier or by request, two receive FIFOs of
+                           three with the overrun policy RFLM chooses, the 28
+                           filter banks of a block CAN1 owns and CAN2 shares at
+                           CAN2SB (refused on CAN3, whose count RM0430 states
+                           and this project has not read), the error counters
+                           and LEC, four vectors and three ISR bodies, and the
+                           TTCM the errata forbid REFUSED by part class +
+                           CanFrame/CanTiming/CanFilter, a vocabulary of this
+                           stratum's own: there is no util CAN contract until
+                           a second family brings one
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)

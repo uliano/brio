@@ -2835,4 +2835,239 @@ constexpr IRQn_Type flash_irq() {
 #endif
 }
 
+// ---- CRC, RNG and bxCAN ---------------------------------------------------------
+//
+// Three small blocks, three different KINDS of per-part fact. The CRC
+// calculation unit is on every part of the family under one name and one
+// gate, so it has nothing here at all - stm32f4/crc.hpp names
+// RCC_AHB1ENR_CRCEN itself. The other two are optional blocks, and each
+// asks the header a different question.
+
+/// Does this part carry the random number generator? The F401, F411 and
+/// F446 do not, and their header says so by declaring no RNG_BASE.
+constexpr bool rng_present() {
+#if defined(RNG_BASE)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// WHICH BUS CARRIES THE RNG'S CLOCK GATE. AHB2 on every part that has
+/// both the generator and that bus, where RNGEN is bit 6; AHB1 on the
+/// F410, which has no AHB2 at all and puts RNGEN at the TOP of
+/// RCC_AHB1ENR, bit 31. Neither the register nor the bit is the same, so
+/// stm32f4/rng.hpp selects the store with the header's own symbol and this
+/// fact is here for the fixture and the document to state.
+constexpr bool rng_clock_on_ahb1() {
+#if defined(RCC_AHB1ENR_RNGEN)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// The RNG's clock-enable bit, whichever register holds it; 0 where the
+/// part has no generator.
+constexpr uint32_t rng_clock_mask() {
+#if defined(RCC_AHB1ENR_RNGEN)
+    return RCC_AHB1ENR_RNGEN;
+#elif defined(RCC_AHB2ENR_RNGEN)
+    return RCC_AHB2ENR_RNGEN;
+#else
+    return 0u;
+#endif
+}
+
+/// Its reset line, in the reset register of the same bus.
+constexpr uint32_t rng_reset_mask() {
+#if defined(RCC_AHB1RSTR_RNGRST)
+    return RCC_AHB1RSTR_RNGRST;
+#elif defined(RCC_AHB2RSTR_RNGRST)
+    return RCC_AHB2RSTR_RNGRST;
+#else
+    return 0u;
+#endif
+}
+
+#if defined(RNG_BASE)
+/**
+ * THE RNG'S VECTOR WEARS TWO NAMES, and which one a header declares is not
+ * a question the preprocessor can put to an enumerator. The large-line
+ * parts (the F405 class, the F42x/F43x, the F469/F479) spell it
+ * HASH_RNG_IRQn - the slot is shared with the hash processor whether or not
+ * the part has one, and on the F405 class the header adds it as a MACRO
+ * alias for its own RNG_IRQn; the small parts that have a generator (the
+ * F410, the F412, the F413/F423) spell it RNG_IRQn and declare no other
+ * name. The two sets are told apart by the BACKUP SRAM, which exactly the
+ * large-line parts carry: the correlation is not a law, it is a reading of
+ * the twenty-three headers, and `brio check stm32f4` is what keeps it true
+ * (a header on the wrong side of it does not compile).
+ */
+constexpr IRQn_Type rng_irq() {
+#if defined(RCC_AHB1ENR_BKPSRAMEN)
+    return HASH_RNG_IRQn;
+#else
+    return RNG_IRQn;
+#endif
+}
+#endif
+
+/// Register block base of bxCAN instance `n` (1..3), 0 where the part has
+/// no such instance. CAN1 and CAN2 come as a PAIR (the F405 class and up,
+/// less the F401/F410/F411); CAN3 is the F413/F423's alone.
+constexpr uint32_t can_base(uint8_t n) {
+    switch (n) {
+#if defined(CAN1_BASE)
+        case 1: return CAN1_BASE;
+#endif
+#if defined(CAN2_BASE)
+        case 2: return CAN2_BASE;
+#endif
+#if defined(CAN3_BASE)
+        case 3: return CAN3_BASE;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr bool can_present(uint8_t n) { return can_base(n) != 0u; }
+
+/// Every bxCAN of this family sits on APB1: the enable bit in
+/// RCC_APB1ENR, the reset line in RCC_APB1RSTR, and the bit time counted
+/// in PCLK1 periods.
+constexpr uint32_t can_clock_mask(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APB1ENR_CAN1EN)
+        case 1: return RCC_APB1ENR_CAN1EN;
+#endif
+#if defined(RCC_APB1ENR_CAN2EN)
+        case 2: return RCC_APB1ENR_CAN2EN;
+#endif
+#if defined(RCC_APB1ENR_CAN3EN)
+        case 3: return RCC_APB1ENR_CAN3EN;
+#endif
+        default: return 0;
+    }
+}
+
+constexpr uint32_t can_reset_mask(uint8_t n) {
+    switch (n) {
+#if defined(RCC_APB1RSTR_CAN1RST)
+        case 1: return RCC_APB1RSTR_CAN1RST;
+#endif
+#if defined(RCC_APB1RSTR_CAN2RST)
+        case 2: return RCC_APB1RSTR_CAN2RST;
+#endif
+#if defined(RCC_APB1RSTR_CAN3RST)
+        case 3: return RCC_APB1RSTR_CAN3RST;
+#endif
+        default: return 0;
+    }
+}
+
+/**
+ * WHICH INSTANCE OWNS THE FILTER BANKS `n` FILTERS THROUGH. The filter
+ * block is not per instance: CAN1 is the MASTER and its registers
+ * (CAN_FMR, CAN_FM1R, CAN_FS1R, CAN_FFA1R, CAN_FA1R and the bank pairs)
+ * serve CAN2 as well, split at CAN_FMR.CAN2SB - so a program that filters
+ * on CAN2 writes CAN1's registers and needs CAN1's CLOCK on. CAN3, where
+ * it exists, is a master of its own with a filter block of its own.
+ * 0 where the instance is absent.
+ */
+constexpr uint8_t can_filter_master(uint8_t n) {
+    if (!can_present(n)) {
+        return 0;
+    }
+    return n == 3u ? 3u : 1u;
+}
+
+/**
+ * HOW MANY FILTER BANKS THAT BLOCK HAS. Twenty-eight for the CAN1/CAN2
+ * pair: RM0090 32.7.4 and RM0390 30.7.4 both say so, and the device
+ * header's own `sFilterRegister[28]` agrees. ZERO - meaning NOT READ - for
+ * CAN3: ST's header gives all three instances the same struct, so its array
+ * says nothing about a block this project has no manual for (RM0430, the
+ * F413/F423's, is not on the desk), and stm32f4/can.hpp refuses every
+ * filter verb there rather than write a bank that may not exist.
+ */
+constexpr uint8_t can_filter_banks(uint8_t n) {
+    if (!can_present(n)) {
+        return 0;
+    }
+    return n == 3u ? 0u : 28u;
+}
+
+/// Is the filter block shared - that is, does this part carry CAN2 beside
+/// CAN1, so that CAN_FMR.CAN2SB decides where one instance's banks end and
+/// the other's begin?
+constexpr bool can_dual() { return can_present(2); }
+
+#if defined(CAN1_BASE)
+/// The four vectors an instance has (30.8): the three transmit mailboxes
+/// share one, each receive FIFO has its own, and the error, wake-up and
+/// sleep events share the fourth. None of them is shared with another
+/// peripheral on any header of this family.
+constexpr IRQn_Type can_tx_irq(uint8_t n) {
+    switch (n) {
+        case 1: return CAN1_TX_IRQn;
+#if defined(CAN2_BASE)
+        case 2: return CAN2_TX_IRQn;
+#endif
+#if defined(CAN3_BASE)
+        case 3: return CAN3_TX_IRQn;
+#endif
+        default: return NonMaskableInt_IRQn;
+    }
+}
+
+/// The vector receive FIFO `fifo` (0 or 1) of instance `n` raises.
+constexpr IRQn_Type can_rx_irq(uint8_t n, uint8_t fifo) {
+    switch (n) {
+        case 1: return fifo == 0u ? CAN1_RX0_IRQn : CAN1_RX1_IRQn;
+#if defined(CAN2_BASE)
+        case 2: return fifo == 0u ? CAN2_RX0_IRQn : CAN2_RX1_IRQn;
+#endif
+#if defined(CAN3_BASE)
+        case 3: return fifo == 0u ? CAN3_RX0_IRQn : CAN3_RX1_IRQn;
+#endif
+        default: return NonMaskableInt_IRQn;
+    }
+}
+
+/// The status-change and error vector of instance `n`.
+constexpr IRQn_Type can_sce_irq(uint8_t n) {
+    switch (n) {
+        case 1: return CAN1_SCE_IRQn;
+#if defined(CAN2_BASE)
+        case 2: return CAN2_SCE_IRQn;
+#endif
+#if defined(CAN3_BASE)
+        case 3: return CAN3_SCE_IRQn;
+#endif
+        default: return NonMaskableInt_IRQn;
+    }
+}
+#endif
+
+/**
+ * IS THE TIME-TRIGGERED COMMUNICATION ERRATUM LIVE ON THIS PART CLASS?
+ * ES0206 2.13.1 (every revision of the F427/F437/F429/F439) and ES0298
+ * 2.15.1 (every revision of the F446) say the same thing in the same
+ * words: the mode "is not supported", no time stamp is available, and
+ * CAN_MCR.TTCM "must be kept cleared" - with no workaround. Keyed on the
+ * part class because an erratum is a document and not a register, and
+ * TRUE only for the classes whose errata sheet was read: on the others
+ * stm32f4/can.hpp lets the bit be written and the document says which
+ * sheets were not read.
+ */
+constexpr bool can_ttcm_erratum() {
+#if defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || \
+    defined(STM32F439xx) || defined(STM32F446xx)
+    return true;
+#else
+    return false;
+#endif
+}
+
 } // namespace brio

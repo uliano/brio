@@ -12,6 +12,9 @@ manual UM1724.
   over-drive**, PCLK1 45 MHz, PCLK2 90 MHz. No HSE crystal is fitted
   (X3 not provided); the LSE crystal X2 IS fitted and runs (32769.3 Hz,
   +40 ppm against the core clock, ready 280 ms after LSEON - measured).
+  PA11 and PB5 are free and serve the CAN suite as CAN1_RX and CAN2_RX
+  (inputs pulled up, never driven: a loopback node still wants eleven
+  recessive bits on its receive pad).
 - **Supply**: 3.3 V (the target rail reads about 3.26 V).
 - **LED** LD2 on PA5; **button** B1 on PC13.
 - **Console**: the on-board ST-LINK's virtual COM port on USART2, PA2
