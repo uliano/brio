@@ -76,7 +76,7 @@ oscillators are unreliable; E10: ROSC's BADWRITE is.
   stop-select-start as clk_peri, generators with an aux mux alone;
   the top-level gates `sleep_enables` / `wake_enables` / `enabled` on
   a `SleepClocks` and the named sets, [sleep.md](sleep.md)) with
-  `RefSource`, `SysAux`, `PeriAux`, `AdcAux`, `RtcAux`.
+  `RefSource`, `SysAux`, `PeriAux`, `AdcAux`, `RtcAux`, `UsbAux`.
 - `FreqCounter::count_hz(source, ref_hz, interval = 15)` - a
   `CountSource` (every root and generator) counted against clk_ref
   over 2^interval microseconds, in hertz; nullopt when the source

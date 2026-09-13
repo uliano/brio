@@ -452,6 +452,17 @@ inline constexpr SleepClocks sleep_clocks_rtc{CLOCKS_SLEEP_EN0_CLK_SYS_RTC_BITS 
 inline constexpr SleepClocks sleep_clocks_dma{CLOCKS_SLEEP_EN0_CLK_SYS_DMA_BITS, 0u};
 inline constexpr SleepClocks sleep_clocks_pwm{CLOCKS_SLEEP_EN0_CLK_SYS_PWM_BITS, 0u};
 
+/// clk_usb's aux sources (CLK_USB_CTRL.AUXSRC): the controller wants
+/// 48 MHz, the USB PLL's own rate.
+enum class UsbAux : uint8_t {
+    pll_usb = CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+    pll_sys = CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+    rosc = CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_ROSC_CLKSRC_PH,
+    xosc = CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,
+    gpin0 = CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_GPIN0,
+    gpin1 = CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_GPIN1,
+};
+
 struct Clocks {
     Clocks() = delete;
 
@@ -534,6 +545,26 @@ struct Clocks {
         hw_set(CLOCKS->CLK_ADC_CTRL, CLOCKS_CLK_ADC_CTRL_ENABLE_BITS);
     }
     static void adc_stop() { hw_clear(CLOCKS->CLK_ADC_CTRL, CLOCKS_CLK_ADC_CTRL_ENABLE_BITS); }
+
+    /// clk_usb onto `aux` through its two-bit integer divider (1..3),
+    /// the same stop-select-start: the controller wants 48 MHz, the
+    /// USB PLL undivided.
+    static void usb_select(UsbAux aux, uint8_t div = 1) {
+        hw_clear(CLOCKS->CLK_USB_CTRL, CLOCKS_CLK_USB_CTRL_ENABLE_BITS);
+        for (uint32_t spins = 64u; spins != 0u; --spins) {
+            __NOP();
+        }
+        CLOCKS->CLK_USB_DIV = (static_cast<uint32_t>(div) << CLOCKS_CLK_USB_DIV_INT_LSB) & CLOCKS_CLK_USB_DIV_INT_BITS;
+        hw_write_masked(CLOCKS->CLK_USB_CTRL,
+                        static_cast<uint32_t>(aux) << CLOCKS_CLK_USB_CTRL_AUXSRC_LSB,
+                        CLOCKS_CLK_USB_CTRL_AUXSRC_BITS);
+        hw_set(CLOCKS->CLK_USB_CTRL, CLOCKS_CLK_USB_CTRL_ENABLE_BITS);
+    }
+    static void usb_stop() { hw_clear(CLOCKS->CLK_USB_CTRL, CLOCKS_CLK_USB_CTRL_ENABLE_BITS); }
+    static bool usb_enabled() { return (CLOCKS->CLK_USB_CTRL & CLOCKS_CLK_USB_CTRL_ENABLE_BITS) != 0u; }
+    static UsbAux usb_source() {
+        return static_cast<UsbAux>((CLOCKS->CLK_USB_CTRL & CLOCKS_CLK_USB_CTRL_AUXSRC_BITS) >> CLOCKS_CLK_USB_CTRL_AUXSRC_LSB);
+    }
 
     /// clk_rtc onto `aux` through its 24.8 divider (`div_int` 1..2^24 - 1
     /// and `div_frac` in 256ths; the crystal over 256 is 46875 Hz, the

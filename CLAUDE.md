@@ -35,6 +35,9 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   guard, the first-event-after-wake contract), `meters.md` (the
   MeterLatch bridge out of a capture ISR and the MeterSampler that
   paces publication, not capture - a stale source publishes nothing),
+  `usb.md` (the USB device side: the controller contract drawn at
+  the packet, the control-endpoint machine written once, the class
+  contract, CDC ACM as a byte transport; no host side),
   `block-stream.md` (block streams: BlockSource/BlockPlayer concepts
   over caller-owned buffers - blocks, not DMA - and the BlockRelay AO
   lending each filled block for one dispatch; built BEFORE its second
@@ -303,8 +306,9 @@ gets its home in `docs/design/` when taken.
   vendored, the boot stage checked in as bytes, the crt its own; the
   WeAct board's Zetta flash wants the OpenOCD built from git. What
   remains is in the documents' gap lists (a power vote across the
-  cores, the bus fabric's counters, the USB controller with the
-  device stack of the roadmap).
+  cores, the bus fabric's counters). The USB device stack
+  (util/usb/) was born here, with its CDC console on the chip's own
+  connector.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -693,6 +697,23 @@ brio/                    the framework, four strata:
                            into local posts), send_reply_to<Ao, Payload>();
                            nothing here is instantiated on a single-core
                            target
+    usb/device.hpp         the USB device stack: UsbSetup and chapter 9's
+                           codes, the descriptors as constexpr bytes
+                           (usb_device_descriptor, usb_configuration_head,
+                           usb_interface/endpoint/string_descriptor,
+                           usb_concat), the UsbController and UsbClass
+                           contracts, UsbDevice<Controller, Descriptors,
+                           Classes...> - the control-endpoint machine as
+                           an ISR body (the stages, the address after its
+                           status, the configuration claiming the classes'
+                           endpoints, the routing by interface and endpoint)
+    usb/cdc.hpp            UsbCdcAcm<Controller, P, interface, ep_notify,
+                           ep_data, rx, tx>: the serial-port class as a
+                           ByteTransport (write_byte / write / read_byte /
+                           tx_idle, the rings, the OUT endpoint armed only
+                           while a packet fits - USB's NAK as flow control -,
+                           the zero-length packet closing a full run), the
+                           line coding and DTR reported, not obeyed
     testbench.hpp          TestBench<Sink, max_letters>: the bench suite
                            grammar in one place - letter registry, verdict
                            lines, per-letter tally and the ALL: total
@@ -1347,6 +1368,13 @@ brio/                    the framework, four strata:
                            flash region stops short of) + QspiFlash and
                            QspiFlashJournalZone, the two FlashMedia
                            (4096 / 256)
+    usb.hpp                Usb: the chip's device controller as the stack's
+                           endpoint controller - the dual-port RAM's endpoint
+                           and buffer control words, the two-step offer, the
+                           bulk OUT double buffered with the halves completing
+                           in turn, the PIDs per endpoint and direction, the
+                           events from BUFF_STATUS and the SIE, clk_usb from
+                           the USB PLL
     uart.hpp               Pl011<n> resource (the FIFOs, the divisor and its
                            latching write, the loop-back, the interrupt trio
                            through the aliases) + Uart<n, pins, rx, tx, engines>:
@@ -1360,6 +1388,9 @@ brio/                    the framework, four strata:
                            + HostCore<n> (the two-core host: the same platform
                            by type, a test-set current core, a counting
                            doorbell) for test_inbox
+    sim_usb.hpp            SimUsb: a UsbController the host tests play the
+                           host against, one packet at a time (NAKs, stalls
+                           and refusals counted)
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests
                            (configurable geometry, power-cut injection,
                            simulated reflash, wear counters)
