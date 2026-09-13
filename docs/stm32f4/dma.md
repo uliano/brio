@@ -318,12 +318,27 @@ are refused before the enable, and every accepted one moves its block
 byte-exact with no FIFO error.
 
 **Priority arbitration, measured**: a 512-byte memory-to-memory block takes
-2337 cycles with the controller to itself. Two of them started together
-finish in 2475 and 4300 cycles when one stream is `very_high` and the other
-`low` - and the order follows the PRIORITY and not the stream index,
-because reversing the two reverses the result (2408 against 4323). So the
-loser pays 1.8x for the company and the winner about 6 per cent, which is
-what sharing two AHB ports costs.
+2337 cycles with the controller to itself (2321 at 100 MHz on the
+STM32F411 - the DMA's clock is HCLK). Two of them started a few cycles
+apart finish in 2475 and 4300 cycles when one stream is `very_high` and the
+other `low` - and the order follows the PRIORITY and not the stream index,
+because reversing the two reverses the result (2408 against 4323; on the
+STM32F411 2726 against 4312 and 4299 against 3059). So the loser pays 1.8x
+for the company - what sharing two AHB ports costs - and what the winner
+pays is within the measurement (2626 and 2285 against 2340 alone, the
+second figure for the stream enabled first).
+
+**Two enables back to back can STALL the second stream.** On the STM32F411,
+a `low` memory-to-memory stream whose EN was stored right after a
+`very_high` stream's EN on the same controller started - its FIFO filled,
+SxNDTR dropped by 16 - and then never moved again, no flag raised, EN still
+set, long after the winner had completed: deterministic over five runs of
+two builds with that spacing, gone with eight NOPs between the two stores,
+and gone again with a not-taken branch between them - a window a few cycles
+wide, which is why the suite's back-to-back probe reports what it sees and
+judges nothing. The STM32F429 did not show it at 180 MHz. `stop()` recovers
+such a stream like any other. A program that starts two streams of one
+controller together gives the second enable a few cycles.
 
 **The abort's wait is real and short**: EN comes down in 33 core cycles on
 an idle stream and 74 on one in the middle of a memory-to-memory block -
@@ -348,10 +363,12 @@ the core-coupled memory is on the CPU's own D-bus and no DMA master reaches
 it (and on the parts without a CCM nothing is mapped there at all). A
 memory-to-memory block writing there raises TEIF alone - no FIFO error, no
 direct-mode error - the hardware clears EN, and SxNDTR says where the block
-died (47 of 64 items left: the FIFO had already absorbed the rest). The
-enable's answer is `false` there, because the stream is dead before the
-read-back poll ends; the stream takes the next block once the flags are
-cleared.
+died (47 of 64 items left: the FIFO had already absorbed the rest). What
+the enable ANSWERS there is a race the core clock decides - `false` on the
+STM32F429 at 180 MHz, where the stream is dead before the read-back poll
+ends, `true` on the STM32F411 at 100 MHz - so a caller judges an error by
+the flags, never by the enable; the stream takes the next block once the
+flags are cleared.
 
 **The console's own transmitter is a DMA console**: 575 bytes through the
 transmit stream in 50 ms, which is the LINE's time and not the CPU's (a
@@ -367,9 +384,10 @@ back in through the receive stream, byte for byte, on one pad and no wire.
 run that fills stops the stream, and the byte that arrives before
 `harvest()` has started the next run can be lost - SILENTLY, with no
 overrun flag, because nothing overran: the receiver was simply not being
-served. Measured on the half-duplex echo it is one byte, exactly at the
-boundary where the first full run is swapped for the next, and nothing
-after it; on other runs of the same block it is none at all. That is the
+served. Measured on the half-duplex echo it is at most one byte, and WHERE
+it falls is the harvest's timing against the line: at the boundary where
+the first full run is swapped for the next in one build, two bytes from the
+end in another, none at all on other runs of the same block. That is the
 price of the non-circular receive stream, and it is why an owner that stops
 harvesting while the line is busy loses more: the suite harvests inside the
 sending loop, and without that it loses everything past the first run.
@@ -440,6 +458,6 @@ Implemented but not bench-verified, each with what would measure it:
 - **ES0287 2.2.11** (the F411's DMA2 corruption on concurrent AHB and APB2
   requests) is stated as a caller obligation and not measured: it wants a
   QUADSPI, an FSMC or a GPIO register as a DMA destination on that part.
-- **The other two parts.** The suite builds for the STM32F446 and the
-  STM32F411 with their own console cells; the numbers above are the
-  STM32F429's.
+- **The STM32F446.** The suite builds for it with its own console cells
+  and has run on the STM32F429 and the STM32F411; the numbers above are
+  the STM32F429's unless a part is named.
