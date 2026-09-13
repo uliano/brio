@@ -328,8 +328,15 @@ void tb_rng() {
                   "even when it had not failed",
                   Rng::recover());
 
+    // A word already computed stays in RNG_DR with DRDY up when RNGEN goes
+    // down (measured: the first read after the disable still answers), so
+    // the disable is judged on what follows that word, not on it.
     Rng::enable(false);
-    bench.verdict("disabled, the generator stops offering words",
+    const bool pending_survives = Rng::read().has_value();
+    (void)delay_us(clock, 100);
+    print(serial, "  after the disable the word already in RNG_DR ", pending_survives ? "is still handed out" : "is gone",
+          "; 100 us later a new one ", Rng::ready() ? "STANDS" : "does not come", crlf);
+    bench.verdict("disabled, the generator computes no new word",
                   !Rng::enabled() && !Rng::read().has_value());
     Rng::release();
     bench.verdict("released, the clock gate is shut", !Rng::clock());

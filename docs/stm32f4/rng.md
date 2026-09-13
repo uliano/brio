@@ -10,8 +10,8 @@ filed against it. Driver: `stm32f4/rng.hpp` (`Rng`, `RngError`,
 (`stm32f4/device_tables.hpp`). The family fixture is
 `test/family_stm32f4/rng.cpp` with the negatives that refuse the type on
 a part with no generator and refuse a clock with no PLL. Bench:
-`test_stm32f4_misc`, letter `b` - **which no board on this desk can
-run**: see "Not covered yet".
+`test_stm32f4_misc`, letter `b`, run on the STM32F429 (the one part of
+the three on the desk that carries the block).
 
 ## What the silicon does
 
@@ -157,12 +157,22 @@ else if (e.ready)  { queue(brio::Rng::value()); }
 
 ## Bench findings
 
-None. No board on this desk carries a part with a random number
-generator: the three are an STM32F429ZI, an STM32F446RE and an
-STM32F411CE, and of those only the F429 has the block - see "Not covered
-yet".
+`test_stm32f4_misc`, letter `b`, on an STM32F429 at 180 MHz with the
+PLL's Q output at 45 MHz (the 48 MHz domain is not 48 here: HCLK/16 is
+11.25 MHz, and 24.4.2's ratio is what the chapter asks, so no CECS).
 
-What IS established without a board: the driver and its letter compile
+**Ten thousand words in 10 ms** - 1000 words a millisecond, against the
+1125 the chapter's 40 RNG_CLK periods a word would allow at this rate;
+the ones 499 per mille of 320000 bits, the sixteen low-nibble buckets
+577..676 for 625 expected, no two consecutive words equal; the last word
+different every run. **DRDY goes down with the read and is back within
+the next read** (0 us); the two latched flags clear on a write of zero;
+the recovery sequence run on a healthy generator hands out words again.
+**A word already computed survives the disable**: with RNGEN cleared the
+first read still answers (DRDY was up), and no new word comes after it -
+the disable is judged on what follows that word.
+
+What is established without a board: the driver and its letter compile
 for every one of the twenty-three device headers (`brio check stm32f4`),
 the type does not exist on the three parts without the block
 (`neg/rng_absent_block.cpp`), a clock with no PLL is refused where the
@@ -176,15 +186,10 @@ Driver gaps:
 - Nothing of the chapter. Three registers, seven fields, and every one
   of them has a verb.
 
-Implemented, not bench-verified - ALL OF IT, for want of a part:
-- The whole of letter `b` (the clock domain against 24.4.2's ratio, the
-  first-value discard, ten thousand words with their bit balance and
-  low-nibble spread, the throughput in words a millisecond, DRDY going
-  down with the read and coming back, the two rc_w0 flags clearing, the
-  seed-error recovery sequence, the disable). It is written, it builds
-  for the STM32F429 and it is registered only where the header declares
-  the block - what it needs is a board with an STM32F429 (or any part of
-  the F405, F410, F412, F413 or F469 classes) to run on.
+Implemented, not bench-verified:
+- The interrupt path: one vector for DRDY, SEIS and CEIS, its body
+  compiled and never entered - the letter polls; what would measure it
+  is a letter arming IE over the generator and counting entries.
 - The seed error itself and its recovery under a REAL fault: SECS is
   raised by the analog part and there is no way to provoke it from
   software, so even on a board with the generator the recovery path is

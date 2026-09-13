@@ -314,11 +314,12 @@ gets its home in `docs/design/` when taken.
   connector), PWR with the sleep sites and the dynamic clock, and the
   flash interface as the ENGINE alone (no FlashMedia, by the NV review's
   decision below), the CRC unit, the RNG (written for the parts that
-  have one, unmeasured), the bxCAN in loopback and the FMPI2C1 of the
+  have one, measured on the STM32F429), the bxCAN in loopback and the FMPI2C1 of the
   F410/F412/F413/F446 - the STM32G0's I2C under another name, measured
-  on a bus with no device on it. What remains: on the F429 alone FMC +
-  SDRAM, then LTDC + DMA2D, the
-  memory-mapped display tier; the frequency ladders of the five part
+  on a bus with no device on it, and the FMC with the SDRAM a board
+  carries (8 MB byte-exact, the two traps against the manual). What
+  remains: on the F429 alone LTDC + DMA2D, the memory-mapped display
+  tier over that SDRAM; the frequency ladders of the five part
   classes whose manuals are not on the desk; the debuggers (cortex-debug
   entries written, not driven). Tenuto only, the equal-priority
   promise kept; Rubato and BASEPRI are another type and another day.
@@ -1573,6 +1574,27 @@ brio/                    the framework, four strata:
                            CanFrame/CanTiming/CanFilter, a vocabulary of this
                            stratum's own: there is no util CAN contract until
                            a second family brings one
+    fmc.hpp                the FLEXIBLE MEMORY CONTROLLER (ch. 37 / 11), the
+                           one peripheral that adds ADDRESS SPACE instead of
+                           driving a wire - and the one chapter with two
+                           different blocks in it, the FMC here and the FSMC
+                           (the static banks alone, other register names) on
+                           the F405 class, the F412 and the F413/F423, where
+                           nothing of this file exists: Fmc (the AHB3 gate and
+                           the reset that is the ONLY thing stopping the
+                           memory clock, the six windows of figure 457, the
+                           one shared vector, what this part has) +
+                           FmcSdram<1|2> (the geometry and the seven delays in
+                           the chapter's words, 37.7.3's sequence as ONE verb
+                           because a read of a bank that has not run it HANGS
+                           THE MACHINE with no fault, the refresh counter's
+                           arithmetic and the two places the manual is wrong
+                           about stopping it, self-refresh and power-down, the
+                           status flags and the refresh-error ISR body) +
+                           FmcNorPsram<1..4> (four sub-banks with a chip
+                           select each, BCR/BTR/BWTR whole, the extended mode)
+                           and the tasks FmcSram<n> / FmcNor<n>; the NAND and
+                           PC Card halves are presence facts and no verbs
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)
