@@ -169,9 +169,10 @@ for every USART register, values those addresses cannot hold, while
 the same reads after `halt` were exact (halt first, read, resume). And
 `target/stm32f4x.cfg`'s examine-end hook writes `DBGMCU_CR.DBG_SLEEP |
 DBG_STOP | DBG_STANDBY` and freezes both watchdogs under halt
-(DBGMCU_APB1_FZ), bits that survive every reset but a power-on; the
-power chapter's suite is where their effect on a Stop will be measured
-and `bin/brio` will take them down as it does on the G0.
+(DBGMCU_APB1_FZ), bits that survive every reset but a power-on; a
+program that measures a sleep takes them down itself at boot
+(`Pwr::debug_low_power(false)`, [pwr.md](pwr.md)) - `bin/brio` does
+not.
 
 The black pill is reached by SWD alone (attach without reset works on
 a firmware that leaves the debug pads and never sleeps with debug off);
@@ -180,14 +181,94 @@ reset.
 
 ## Debugging (cortex-debug + OpenOCD)
 
-Not yet exercised on this target: one launch config per part in
-`.vscode/launch.json` ("Debug STM32F429ZI (OpenOCD, STM32F429I-DISC1)"
-and its F446RE and F411CE siblings), the G0 entries' shape with the two
-ST config files and the part's own SVD from `stm32f4/svd/` for the
-Peripheral Viewer; no probe named, so the one ST-LINK attached is the
-one used - with three attached, the entry needs an `adapter serial`
-line. Halt-and-dump through OpenOCD's own console is what this
-stratum's findings were taken with.
+One launch entry per part in `.vscode/launch.json` ("Debug STM32F429ZI
+(OpenOCD, STM32F429I-DISC1)" and its F446RE and F411CE siblings), the G0
+entries' shape: cortex-debug launches `/sw/openocd/bin/openocd` itself
+with the two ST config files, puts `arm-none-eabi-gdb` in front of it and
+hands the part's own SVD from `stm32f4/svd/` to the Peripheral Viewer.
+CMake Tools' Active Folder must be `stm32f4/`, its configure preset the
+part's `-debug` one (`-Og -g3 -ggdb3 -fno-inline`) and its launch target
+the app; `runToEntryPoint` lands on `main`.
+
+The same thing from a shell, which is what the entry does - the server,
+then gdb against the DEBUG build of a real app:
+
+```bash
+/sw/openocd/bin/openocd -f interface/stlink.cfg -f target/stm32f4x.cfg \
+    -c "adapter serial <the probe's serial>"       # gdb server on 3333
+/sw/arm-none-eabi/bin/arm-none-eabi-gdb ../build-cmake/stm32f411ce-debug/console.elf
+  (gdb) target extended-remote localhost:3333
+  (gdb) monitor reset halt
+  (gdb) load
+  (gdb) break console.cpp:217        # a line inside a command handler
+  (gdb) continue                     # then type UPTIME on the console
+  (gdb) bt                           # the whole AO chain, kernel included
+  (gdb) print ts                     # $1 = {seconds = 2, millis = 300}
+  (gdb) finish
+  (gdb) monitor mdw 0x40023808       # a register at the SVD's own address
+  (gdb) monitor resume
+  (gdb) detach
+```
+
+NAME THE PROBE. With more than one ST-LINK attached and no `adapter
+serial`, OpenOCD takes the first one it enumerates, which is another
+board; the entries carry no serial, so one needs
+`"openOCDPreConfigLaunchCommands": ["adapter serial <s>"]`. Either
+ordering selects it - before the config files, after them, or between
+the two, where `brio flash` puts it.
+
+What a session does, what it costs and what it leaves behind, measured
+on the black pill:
+
+- **The cost.** OpenOCD from launch to "Listening on port 3333" 0.12 s;
+  gdb's connect to it 0.02..0.05 s; `monitor reset halt` 0.03 s; `load`
+  of a 14696-byte image 0.56 s at 25 KB/s. A whole launch - server,
+  connect, reset halt, load, run to `main` - is under a second. The
+  debug preset costs 2.7x the image: `console` is 14672 bytes of text
+  against 5472 at `-Os`, and 584 of bss against 576.
+- **`monitor reset halt` needs no NRST wire.** Under the HLA transport
+  `target/stm32f4x.cfg` selects `cortex_m reset_config sysresetreq`, so
+  the core resets itself: the halt lands at `Reset_Handler` with xPSR
+  0x01000000 and MSP at the top of SRAM even where the probe has only
+  the four SWD wires and cannot pull the reset pin.
+- **Connecting halts the running program**, which is what makes a debug
+  session's memory reads exact where a poking one's are not (the HLA
+  trap above). A kernel that idles in WFI is caught in the same place
+  every time: the `__enable_irq()` after the `__WFI()` of
+  `Stm32f4Platform::idle()`.
+- **Six hardware breakpoints, and the refusal comes at the RESUME.**
+  Flash is read-only to gdb, so every breakpoint is a hardware one - no
+  flash wear, and no software-breakpoint escape either. gdb accepts a
+  seventh and an eighth `break` without a word; the following `continue`
+  answers `Cannot insert hardware breakpoint N: Remote failure reply:
+  0E`, aborts, and leaves the core halted.
+- **The kernel survives a halt, the clock does not.** After a `continue`
+  the console answers the next line and the suites run to their usual
+  verdict. But SysTick is the core's own counter and a halted core does
+  not count it: `UPTIME` under-reports the wall by the time spent
+  halted - 11.3 s lost across a halt held 10 s. Time events do not
+  mature during a halt, so a deadline under a debugger is the
+  debugger's and not the wall's.
+- **`detach` does not resume.** Detaching from a halted core leaves it
+  halted and the board silent; `monitor resume` (or `monitor reset run`)
+  before the detach is what leaves it running, and the console answers
+  again at once.
+- **The Peripheral Viewer's read path** is `monitor mdw` at the SVD's
+  own base addresses, and it agrees with what the firmware prints. With
+  the console's `CLK` line reading sysclk 100 MHz, pclk1 50 MHz, pclk2
+  100 MHz, SWS 2, the PLL locked, HSE a crystal, scale 1, no over-drive
+  and 3 wait states: RCC_CFGR reads 0x0000100A (SW and SWS both the PLL,
+  PPRE1 /2, PPRE2 /1), RCC_CR 0x03036F83 (HSE on, ready and not
+  bypassed; the PLL locked), PWR_CR 0x0000C000 (VOS scale 1), FLASH_ACR
+  0x00000703 (three wait states, the prefetch and both caches) and
+  USART1_BRR 0x00000364 = 868, which is 115207 baud off a 100 MHz APB2.
+  DBGMCU_IDCODE reads 0x10006431, the part's DEV_ID and REV_ID.
+- **What it leaves behind**: DBGMCU_CR 0x00000007 and DBGMCU_APB1_FZ
+  0x00001800 - the target script's examine-end hook, DBG_SLEEP |
+  DBG_STOP | DBG_STANDBY and both watchdogs frozen under halt. They
+  survive every reset but a power-on, and a `brio flash` sets them
+  again; a Stop measured just after a session is measuring them and not
+  the silicon.
 
 ## Editor (clangd)
 

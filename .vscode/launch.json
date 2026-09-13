@@ -1,6 +1,5 @@
 {
-    // Hand-authored (PlatformIO used to auto-generate this file per active
-    // env; that's gone). ONE generic entry serves every AVR app: CMake
+    // Hand-authored. ONE generic entry serves every AVR app: CMake
     // Tools' launch-target dropdown picks which built ELF
     // ${command:cmake.launchTargetPath} resolves to, and the *-debug
     // configurePreset (avr128db48-debug/avr128db28-debug/avr128db32-debug)
@@ -175,11 +174,13 @@
             // The STM32F4 boards: cortex-debug over OpenOCD, the G0 entries'
             // shape with the stm32f4x target script and the part's own SVD.
             // CMake Tools' Active Folder must be stm32f4/, its configure
-            // preset the part's -debug one, its launch target the app. No
-            // probe named: with more than one ST-LINK attached, add
-            // "openOCDLaunchCommands": ["adapter serial <s>"]. NOT YET
-            // DRIVEN from the editor: halt-and-dump through OpenOCD's own
-            // console is what the bring-up used (docs/stm32f4/README.md).
+            // preset the part's -debug one, its launch target the app. NAME
+            // THE PROBE: no serial is set here, so OpenOCD takes the FIRST
+            // ST-LINK it enumerates - another board as soon as a second one
+            // is attached. Add
+            //   "openOCDPreConfigLaunchCommands": ["adapter serial <s>"]
+            // as the SAM and G0 entries say. What a session does, what it
+            // costs and what it leaves behind: docs/stm32f4/README.md.
             "type": "cortex-debug",
             "request": "launch",
             "name": "Debug STM32F429ZI (OpenOCD, STM32F429I-DISC1)",
@@ -200,11 +201,13 @@
             // The STM32F4 boards: cortex-debug over OpenOCD, the G0 entries'
             // shape with the stm32f4x target script and the part's own SVD.
             // CMake Tools' Active Folder must be stm32f4/, its configure
-            // preset the part's -debug one, its launch target the app. No
-            // probe named: with more than one ST-LINK attached, add
-            // "openOCDLaunchCommands": ["adapter serial <s>"]. NOT YET
-            // DRIVEN from the editor: halt-and-dump through OpenOCD's own
-            // console is what the bring-up used (docs/stm32f4/README.md).
+            // preset the part's -debug one, its launch target the app. NAME
+            // THE PROBE: no serial is set here, so OpenOCD takes the FIRST
+            // ST-LINK it enumerates - another board as soon as a second one
+            // is attached. Add
+            //   "openOCDPreConfigLaunchCommands": ["adapter serial <s>"]
+            // as the SAM and G0 entries say. What a session does, what it
+            // costs and what it leaves behind: docs/stm32f4/README.md.
             "type": "cortex-debug",
             "request": "launch",
             "name": "Debug STM32F446RE (OpenOCD, Nucleo-F446RE)",
@@ -225,11 +228,13 @@
             // The STM32F4 boards: cortex-debug over OpenOCD, the G0 entries'
             // shape with the stm32f4x target script and the part's own SVD.
             // CMake Tools' Active Folder must be stm32f4/, its configure
-            // preset the part's -debug one, its launch target the app. No
-            // probe named: with more than one ST-LINK attached, add
-            // "openOCDLaunchCommands": ["adapter serial <s>"]. NOT YET
-            // DRIVEN from the editor: halt-and-dump through OpenOCD's own
-            // console is what the bring-up used (docs/stm32f4/README.md).
+            // preset the part's -debug one, its launch target the app. NAME
+            // THE PROBE: no serial is set here, so OpenOCD takes the FIRST
+            // ST-LINK it enumerates - another board as soon as a second one
+            // is attached. Add
+            //   "openOCDPreConfigLaunchCommands": ["adapter serial <s>"]
+            // as the SAM and G0 entries say. What a session does, what it
+            // costs and what it leaves behind: docs/stm32f4/README.md.
             "type": "cortex-debug",
             "request": "launch",
             "name": "Debug STM32F411CE (OpenOCD, black pill, STLINK-V3)",
