@@ -307,7 +307,7 @@ int main(int argc, char** argv) {
     // are doing.
     panel.name_button(0, "V / A");
     panel.name_button(1, "Digit");
-    panel.name_shaft(0, "Adjust");
+    panel.name_shaft(0, "Adjust", 1, Decoder::counts_per_detent);
 
     display.set_palette(col_bg, 0x10, 0x14, 0x1C);
     display.set_palette(col_frame, 0x50, 0x58, 0x60);

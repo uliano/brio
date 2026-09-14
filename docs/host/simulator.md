@@ -122,6 +122,8 @@ Name `/brio-in-<name>`, 512 bytes.
 | shaft | 4 x 4 | viewer | absolute quadrature counts, signed |
 | button_name | 8 x 16 | program | what each contact IS |
 | shaft_name | 4 x 16 | program | what each shaft IS |
+| shaft_switch | 4 | program | the contact under that knob, or none |
+| shaft_detent | 4 | program | quadrature counts the part gives per detent |
 
 **Two writers, and they never overlap.** The viewer owns what the world
 is DOING and the program owns what the panel IS, so there is nothing to
@@ -129,6 +131,15 @@ arbitrate. The names are the program's because WHICH CONTACT IS WHICH IS
 A FACT ABOUT THE PANEL, and facts about the panel belong in the board
 file that describes it - a viewer showing a grid of "button 3" and
 "shaft 1" is unusable past two controls.
+
+**A CONTROL EXISTS WHEN IT IS NAMED.** The slots are fixed, so naming
+one is how a program declares it and an unnamed slot is simply one it
+does not use. Two more facts about a knob are declared beside its name,
+and both were learned by getting them wrong first: WHICH CONTACT sits
+under it, because a viewer that decided for itself which button belonged
+to which knob would be inventing a fact about the panel; and HOW MANY
+COUNTS make one of its detents, because a notch of a wheel is a click of
+a knob and a viewer has to know how far that is.
 
 **A contact is a level and a shaft is an ABSOLUTE count**, both for the
 same reason: a snapshot that is lost costs nothing, because the next one
@@ -153,16 +164,25 @@ program does it in its idle path - which is where the world turns.
 A contact is a button under the pointer: **left click presses it**, and
 releasing the mouse releases it.
 
-A shaft is a knob: **the wheel over it turns it**, one quadrature count
-a notch, and it needs no selecting first - the wheel goes to the widget
+A shaft is a knob: **the wheel over it turns it, one DETENT a notch**,
+and it needs no selecting first - the wheel goes to the widget
 under the pointer, which is Qt's own behaviour and is also how a hand
 reaches for a knob on a real panel. Whichever knob will turn is shown
 highlighted, so it is never in doubt. **The middle button presses the
 knob's own switch**, with the right button accepted as well so that a
 machine without a middle button can still work one.
 
+A notch is not delivered at once. The counts of a detent are QUEUED AND
+WALKED, one every few milliseconds, the way a shaft passes through every
+state on its way round - and this is not decoration. A whole detent
+handed over in one step is a turn no hand could make, and a decoder
+sampling once a tick would credit a quarter of it or, at four counts a
+detent, nothing at all: the contacts would be back where they started.
+The viewer's job here is to be a hand, and a hand takes time.
+
 The controls are laid out as a grid below the screen, labelled with the
-names the program gave them. Their ARRANGEMENT is the viewer's and not
+names the program gave them, and a contact that is a knob's own switch
+is drawn as part of that knob rather than again on its own. Their ARRANGEMENT is the viewer's and not
 the program's: reproducing a panel's real geometry is a great deal of
 machinery and buys none of the verification this exists for.
 

@@ -56,6 +56,9 @@ inline constexpr uint8_t sim_panel_buttons = 8;
 inline constexpr uint8_t sim_panel_shafts = 4;
 inline constexpr uint8_t sim_panel_name_max = 16;
 
+/// A shaft with no switch under it.
+inline constexpr uint8_t sim_panel_no_switch = 0xFF;
+
 /**
  * What sits in the segment. Fixed layout, little-endian, self-describing.
  *
@@ -88,6 +91,20 @@ struct SimPanelState {
     /// at most the whole field.
     char button_name[sim_panel_buttons][sim_panel_name_max];
     char shaft_name[sim_panel_shafts][sim_panel_name_max];
+
+    /// Which contact is a shaft's OWN switch, since these parts carry
+    /// one under the knob - or `sim_panel_no_switch` where the shaft has
+    /// none. Declared rather than guessed: a viewer that decided for
+    /// itself which button belonged to which knob would be inventing a
+    /// fact about the panel, which is the program's to state.
+    uint8_t shaft_switch[sim_panel_shafts];
+
+    /// Quadrature counts the part gives per detent. Declared for the
+    /// same reason as the switch: it is a fact about the PART, the
+    /// program configures its decoder with it, and a viewer pretending
+    /// to be a hand has to turn the shaft by whole detents - one notch
+    /// of a wheel is one click of a knob, not a quarter of one.
+    uint8_t shaft_detent[sim_panel_shafts];
 };
 
 /// Where the state begins, whatever the structure grows to inside it.
@@ -116,6 +133,10 @@ public:
         s->buttons = sim_panel_buttons;
         s->shafts = sim_panel_shafts;
         s->seq = 0;
+        for (uint8_t i = 0; i < sim_panel_shafts; ++i) {
+            s->shaft_switch[i] = sim_panel_no_switch;
+            s->shaft_detent[i] = 4;
+        }
     }
 
     /// Is contact `i` held down? Out of range reads as released, which
@@ -137,9 +158,28 @@ public:
         write_name(i < sim_panel_buttons ? state()->button_name[i] : nullptr,
                    label);
     }
-    void name_shaft(uint8_t i, const std::string& label) {
+    /// Name a shaft, and say which contact is the switch under its knob
+    /// if it has one.
+    void name_shaft(uint8_t i, const std::string& label,
+                    uint8_t switch_button = sim_panel_no_switch,
+                    uint8_t counts_per_detent = 4) {
         write_name(i < sim_panel_shafts ? state()->shaft_name[i] : nullptr,
                    label);
+        if (i < sim_panel_shafts) {
+            state()->shaft_switch[i] = switch_button;
+            state()->shaft_detent[i] = counts_per_detent;
+        }
+    }
+
+    /// How many quadrature counts this shaft gives per detent.
+    uint8_t shaft_detent(uint8_t i) const {
+        return i < sim_panel_shafts ? state()->shaft_detent[i] : 4;
+    }
+
+    /// Which contact is shaft `i`'s own switch, or sim_panel_no_switch.
+    uint8_t shaft_switch(uint8_t i) const {
+        return i < sim_panel_shafts ? state()->shaft_switch[i]
+                                    : sim_panel_no_switch;
     }
 
     /// What a control was called, as a string a viewer can show.

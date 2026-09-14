@@ -440,3 +440,23 @@ TEST_CASE("a control carries the name its board file gave it") {
     panel.name_button(brio::sim_panel_buttons, "nowhere");
     panel.name_shaft(brio::sim_panel_shafts, "nowhere");
 }
+
+TEST_CASE("a knob declares its switch and its detent, rather than being guessed") {
+    brio::SimPanel panel("qtest4");
+    // Unsaid, a knob has no switch under it - a viewer must not invent one.
+    CHECK(panel.shaft_switch(0) == brio::sim_panel_no_switch);
+    CHECK(panel.shaft_detent(0) == 4); // the common part, until told otherwise
+
+    panel.name_shaft(0, "Adjust", 1, 2);
+    CHECK(panel.shaft_name(0) == "Adjust");
+    CHECK(panel.shaft_switch(0) == 1);
+    CHECK(panel.shaft_detent(0) == 2);
+
+    // Naming without saying takes it back to having neither, which is
+    // honest: a control is described by one call, not by accumulation.
+    panel.name_shaft(0, "Coarse");
+    CHECK(panel.shaft_switch(0) == brio::sim_panel_no_switch);
+    CHECK(panel.shaft_detent(0) == 4);
+
+    CHECK(panel.shaft_switch(brio::sim_panel_shafts) == brio::sim_panel_no_switch);
+}
