@@ -483,7 +483,12 @@ Implemented but not bench-verified, each with what would measure it:
   requests) is stated as a caller obligation and not measured: it wants a
   QUADSPI, an FSMC or a GPIO register as a DMA destination on that part.
 - **The cause of the STM32F446's stuck stream.** Measured and worked
-  around above, not explained: what would explain it is a register-level
-  comparison against a sequence known to work on that part (ST's own
-  library's memory-to-memory path, run on the same board), or an errata
-  item ST has not published.
+  around above, not explained - and narrowed: the second block hangs
+  whatever the register sequence (ST's own library's Init and Start
+  orders reproduced store for store hang the same), the memories
+  (flash, SRAM1, SRAM2 in every pairing), the width and burst, the
+  stream, the core clock (16 MHz on the HSI as at 180 MHz in over-drive),
+  the reset (none, a short RCC pulse, a long one), the interrupts
+  (masked or not) or a clock-gate cycle in between. What remains is a
+  program built on ST's library itself on that board, or an answer from
+  ST; no errata sheet has an item.
