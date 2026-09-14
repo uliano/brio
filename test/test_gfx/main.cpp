@@ -305,6 +305,198 @@ TEST_CASE("a segment is one pixel thick and as long as its major axis") {
     }
 }
 
+TEST_CASE("isqrt is exact where a primitive uses it") {
+    for (uint32_t n = 0; n < 4096; ++n) {
+        const uint32_t r = brio::isqrt(n);
+        REQUIRE(r * r <= n);
+        REQUIRE((r + 1) * (r + 1) > n);
+    }
+    // The largest argument isqrt can be given. The literals carry their
+    // width on purpose: where `unsigned int` is sixteen bits - it is, on
+    // the AVR strata - 65535u * 65535u is 1, and this reads as passing
+    // while testing nothing.
+    CHECK(brio::isqrt(65535UL * 65535UL) == 65535u);
+}
+
+TEST_CASE("the circle's ring matches the definition at every radius") {
+    constexpr Extent W = 45;
+    constexpr Extent H = 45;
+    Canvas<Mono, W, H> c;
+
+    for (Extent r = 0; r <= 22; ++r) {
+        c.wipe();
+        brio::circle(c.fb, 22, 22, r, 1);
+
+        RefCanvas ref(W, H);
+        ref.circle(22, 22, r, 1);
+
+        const GfxDiff d = brio::compare(c.fb, ref);
+        INFO("radius " << r << "\n" << d.map);
+        REQUIRE(d.agree());
+    }
+}
+
+TEST_CASE("a circle half off the surface is trimmed, not deformed") {
+    constexpr Extent W = 16;
+    constexpr Extent H = 16;
+    Canvas<Mono, W, H> c;
+
+    for (Coord cx = -6; cx <= Coord(W + 5); cx += 3) {
+        for (Coord cy = -6; cy <= Coord(H + 5); cy += 3) {
+            for (Extent r = 0; r <= 9; ++r) {
+                c.wipe();
+                brio::circle(c.fb, cx, cy, r, 1);
+
+                RefCanvas ref(W, H);
+                ref.circle(cx, cy, r, 1);
+
+                const GfxDiff d = brio::compare(c.fb, ref);
+                INFO("centre (" << cx << "," << cy << ") r=" << r << "\n"
+                                << d.map);
+                REQUIRE(d.agree());
+            }
+        }
+    }
+}
+
+TEST_CASE("the disc matches the inequality that defines it") {
+    constexpr Extent W = 45;
+    constexpr Extent H = 45;
+    Canvas<Mono, W, H> c;
+
+    for (Extent r = 0; r <= 22; ++r) {
+        c.wipe();
+        brio::fill_circle(c.fb, 22, 22, r, 1);
+
+        RefCanvas ref(W, H);
+        ref.fill_circle(22, 22, r, 1);
+
+        const GfxDiff d = brio::compare(c.fb, ref);
+        INFO("radius " << r << "\n" << d.map);
+        REQUIRE(d.agree());
+    }
+}
+
+TEST_CASE("a disc half off the surface is trimmed, not deformed") {
+    constexpr Extent W = 16;
+    constexpr Extent H = 16;
+    Canvas<Mono, W, H> c;
+
+    for (Coord cx = -6; cx <= Coord(W + 5); cx += 3) {
+        for (Coord cy = -6; cy <= Coord(H + 5); cy += 3) {
+            for (Extent r = 0; r <= 9; ++r) {
+                c.wipe();
+                brio::fill_circle(c.fb, cx, cy, r, 1);
+
+                RefCanvas ref(W, H);
+                ref.fill_circle(cx, cy, r, 1);
+
+                INFO("centre (" << cx << "," << cy << ") r=" << r);
+                REQUIRE(brio::compare(c.fb, ref).agree());
+            }
+        }
+    }
+}
+
+TEST_CASE("the rounded rectangle's outline matches the definition") {
+    constexpr Extent W = 24;
+    constexpr Extent H = 24;
+    Canvas<Mono, W, H> c;
+
+    for (Extent w = 1; w <= 18; ++w) {
+        for (Extent h = 1; h <= 18; ++h) {
+            for (Extent r = 0; r <= 10; ++r) {
+                c.wipe();
+                brio::round_rect(c.fb, 3, 3, w, h, r, 1);
+
+                RefCanvas ref(W, H);
+                ref.round_rect(3, 3, w, h, r, 1);
+
+                const GfxDiff d = brio::compare(c.fb, ref);
+                INFO("w=" << w << " h=" << h << " r=" << r << "\n" << d.map);
+                REQUIRE(d.agree());
+            }
+        }
+    }
+}
+
+TEST_CASE("the filled rounded rectangle matches the definition") {
+    constexpr Extent W = 24;
+    constexpr Extent H = 24;
+    Canvas<Mono, W, H> c;
+
+    for (Extent w = 1; w <= 18; ++w) {
+        for (Extent h = 1; h <= 18; ++h) {
+            for (Extent r = 0; r <= 10; ++r) {
+                c.wipe();
+                brio::fill_round_rect(c.fb, 3, 3, w, h, r, 1);
+
+                RefCanvas ref(W, H);
+                ref.fill_round_rect(3, 3, w, h, r, 1);
+
+                const GfxDiff d = brio::compare(c.fb, ref);
+                INFO("w=" << w << " h=" << h << " r=" << r << "\n" << d.map);
+                REQUIRE(d.agree());
+            }
+        }
+    }
+}
+
+TEST_CASE("a rounded rectangle clipped at the surface edge still agrees") {
+    constexpr Extent W = 14;
+    constexpr Extent H = 14;
+    Canvas<Mono, W, H> c;
+
+    for (Coord x = -5; x <= Coord(W + 2); x += 2) {
+        for (Coord y = -5; y <= Coord(H + 2); y += 2) {
+            for (Extent e = 1; e <= 14; e += 2) {
+                for (Extent r = 0; r <= 6; ++r) {
+                    c.wipe();
+                    brio::round_rect(c.fb, x, y, e, e, r, 1);
+                    RefCanvas ro(W, H);
+                    ro.round_rect(x, y, e, e, r, 1);
+                    INFO("outline at (" << x << "," << y << ") e=" << e
+                                        << " r=" << r);
+                    REQUIRE(brio::compare(c.fb, ro).agree());
+
+                    c.wipe();
+                    brio::fill_round_rect(c.fb, x, y, e, e, r, 1);
+                    RefCanvas rf(W, H);
+                    rf.fill_round_rect(x, y, e, e, r, 1);
+                    INFO("fill at (" << x << "," << y << ") e=" << e
+                                     << " r=" << r);
+                    REQUIRE(brio::compare(c.fb, rf).agree());
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("the radius clamp makes a square rounded rectangle a circle") {
+    constexpr Extent W = 21;
+    constexpr Extent H = 21;
+    Canvas<Mono, W, H> rounded;
+    Canvas<Mono, W, H> round_one;
+
+    for (Extent side = 1; side <= 21; side += 2) { // odd: a true centre
+        const Extent r = Extent((side - 1) / 2);
+        rounded.wipe();
+        round_one.wipe();
+        // Asking for a radius far beyond the clamp must give the same
+        // shape as asking for exactly the clamp.
+        brio::round_rect(rounded.fb, 0, 0, side, side, 200, 1);
+        brio::circle(round_one.fb, Coord(r), Coord(r), r, 1);
+
+        for (Extent y = 0; y < H; ++y) {
+            for (Extent x = 0; x < W; ++x) {
+                INFO("side=" << side << " at (" << x << "," << y << ")");
+                REQUIRE(rounded.fb.get_pixel(Coord(x), Coord(y)) ==
+                        round_one.fb.get_pixel(Coord(x), Coord(y)));
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // The surface verbs themselves.
 // ---------------------------------------------------------------------

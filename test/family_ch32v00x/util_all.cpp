@@ -300,4 +300,9 @@ void gfx_verbs() {
     fill_rect(window, -5, -5, 100, 100, 1);
     const std::array<GfxPanel::Color, 4> run{1, 0, 1, 0};
     window.write_run(46, 3, run);
+    circle(gfx_panel, 64, 32, 30, 1);
+    fill_circle(gfx_panel, 64, 32, 20, 1);
+    round_rect(gfx_panel, 2, 2, 124, 60, 12, 1);
+    fill_round_rect(gfx_panel, 20, 20, 40, 24, 200, 1);
+    static_assert(isqrt(65535UL * 65535UL) == 65535u);
 }

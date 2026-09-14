@@ -29,6 +29,27 @@
 
 namespace brio {
 
+/// Exact integer square root, digit by digit - no floating point
+/// anywhere in a primitive, since the smallest targets have none and
+/// the answer has to be the same on all of them. floor(sqrt(n)).
+constexpr uint16_t isqrt(uint32_t n) {
+    uint32_t res = 0;
+    uint32_t bit = uint32_t(1) << 30;
+    while (bit > n) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (n >= res + bit) {
+            n -= res + bit;
+            res = (res >> 1) + bit;
+        } else {
+            res >>= 1;
+        }
+        bit >>= 2;
+    }
+    return uint16_t(res);
+}
+
 /// The whole surface, one colour.
 template <Surface S>
 void clear(S& s, typename S::Color c) {
@@ -140,6 +161,189 @@ void line(S& s, Coord x0, Coord y0, Coord x1, Coord y1, typename S::Color c) {
             err += dx;
             y += sy;
         }
+    }
+}
+
+/// The eight mirrors of one octant point about a centre. A circle is
+/// computed for an eighth of its circumference and reflected; this is
+/// where the reflection lives, so the two round primitives share it
+/// without sharing anything else.
+template <Surface S>
+void octant_points(S& s, Coord cx, Coord cy, int32_t x, int32_t y,
+                   typename S::Color c) {
+    const int32_t ox = int32_t(cx);
+    const int32_t oy = int32_t(cy);
+    s.fill_rect(Coord(ox + x), Coord(oy + y), 1, 1, c);
+    s.fill_rect(Coord(ox - x), Coord(oy + y), 1, 1, c);
+    s.fill_rect(Coord(ox + x), Coord(oy - y), 1, 1, c);
+    s.fill_rect(Coord(ox - x), Coord(oy - y), 1, 1, c);
+    s.fill_rect(Coord(ox + y), Coord(oy + x), 1, 1, c);
+    s.fill_rect(Coord(ox - y), Coord(oy + x), 1, 1, c);
+    s.fill_rect(Coord(ox + y), Coord(oy - x), 1, 1, c);
+    s.fill_rect(Coord(ox - y), Coord(oy - x), 1, 1, c);
+}
+
+/// The same reflection for a rounded rectangle, where the four arcs have
+/// four different centres and each keeps only its outward quadrant.
+template <Surface S>
+void corner_points(S& s, int32_t ax0, int32_t ay0, int32_t ax1, int32_t ay1,
+                   int32_t px, int32_t py, typename S::Color c) {
+    s.fill_rect(Coord(ax0 - px), Coord(ay0 - py), 1, 1, c);
+    s.fill_rect(Coord(ax1 + px), Coord(ay0 - py), 1, 1, c);
+    s.fill_rect(Coord(ax0 - px), Coord(ay1 + py), 1, 1, c);
+    s.fill_rect(Coord(ax1 + px), Coord(ay1 + py), 1, 1, c);
+}
+
+/**
+ * A circle's OUTLINE, one pixel thick.
+ *
+ * THE SPECIFICATION: the ring holds, for every column within the
+ * radius, the row nearest the ideal circle there - and, for every row,
+ * the column nearest it. The UNION of those two families is what makes
+ * the ring connected: stepping columns alone leaves gaps where the
+ * circle runs steep, stepping rows alone leaves them where it runs
+ * shallow. A radius of zero is the single pixel at the centre, the
+ * circle of no extent being the point.
+ *
+ * Below is the integer midpoint form, which carries no square root; the
+ * reference computes the same set from the definition and the two are
+ * compared over every radius a test surface holds.
+ */
+template <Surface S>
+void circle(S& s, Coord cx, Coord cy, Extent r, typename S::Color c) {
+    if (r == 0) {
+        s.fill_rect(cx, cy, 1, 1, c);
+        return;
+    }
+    int32_t x = int32_t(r);
+    int32_t y = 0;
+    int32_t err = 1 - int32_t(r);
+    while (x >= y) {
+        octant_points(s, cx, cy, x, y, c);
+        ++y;
+        if (err < 0) {
+            err += 2 * y + 1;
+        } else {
+            --x;
+            err += 2 * (y - x) + 1;
+        }
+    }
+}
+
+/**
+ * A filled disc: every pixel whose centre lies within the radius, which
+ * is a DIFFERENT SET from circle()'s ring and deliberately so - the ring
+ * is the nearest pixels to a curve, the disc is an inequality. One run
+ * per row, because a row of one colour is what a panel is fast at.
+ */
+template <Surface S>
+void fill_circle(S& s, Coord cx, Coord cy, Extent r, typename S::Color c) {
+    const int32_t rr = int32_t(r) * int32_t(r);
+    for (int32_t dy = -int32_t(r); dy <= int32_t(r); ++dy) {
+        const int32_t half = int32_t(isqrt(uint32_t(rr - dy * dy)));
+        s.fill_rect(Coord(int32_t(cx) - half), Coord(int32_t(cy) + dy),
+                    Extent(2 * half + 1), 1, c);
+    }
+}
+
+/**
+ * A rectangle with quarter-circle corners, outline only.
+ *
+ * THE SPECIFICATION: the shape is the set of points within `r` of the
+ * rectangle inset by `r` on every side - a Minkowski sum, which is what
+ * makes "rounded rectangle" mean one thing and not four. Its outline is
+ * then four straight runs and four quarter rings, each ring obeying
+ * circle()'s rule above.
+ *
+ * THE RADIUS IS CLAMPED to (min(w, h) - 1) / 2, the largest that leaves
+ * the inset rectangle non-empty; at exactly that value on a square the
+ * shape IS a circle. A radius of zero is a plain rectangle, with no
+ * special case needed anywhere else.
+ */
+template <Surface S>
+void round_rect(S& s, Coord x, Coord y, Extent w, Extent h, Extent r,
+                typename S::Color c) {
+    if (w == 0 || h == 0) {
+        return;
+    }
+    const Extent limit = Extent(((w < h ? w : h) - 1) / 2);
+    if (r > limit) {
+        r = limit;
+    }
+    if (r == 0) {
+        rect(s, x, y, w, h, c);
+        return;
+    }
+
+    const int32_t x0 = int32_t(x);
+    const int32_t y0 = int32_t(y);
+    const int32_t x1 = x0 + int32_t(w) - 1;
+    const int32_t y1 = y0 + int32_t(h) - 1;
+    const Extent straight_w = Extent(int32_t(w) - 2 * int32_t(r));
+    const Extent straight_h = Extent(int32_t(h) - 2 * int32_t(r));
+
+    s.fill_rect(Coord(x0 + r), Coord(y0), straight_w, 1, c);
+    s.fill_rect(Coord(x0 + r), Coord(y1), straight_w, 1, c);
+    s.fill_rect(Coord(x0), Coord(y0 + r), 1, straight_h, c);
+    s.fill_rect(Coord(x1), Coord(y0 + r), 1, straight_h, c);
+
+    // The four arc centres, each inset by the radius.
+    const int32_t ax0 = x0 + int32_t(r);
+    const int32_t ax1 = x1 - int32_t(r);
+    const int32_t ay0 = y0 + int32_t(r);
+    const int32_t ay1 = y1 - int32_t(r);
+
+    int32_t px = int32_t(r);
+    int32_t py = 0;
+    int32_t err = 1 - int32_t(r);
+    while (px >= py) {
+        corner_points(s, ax0, ay0, ax1, ay1, px, py, c);
+        corner_points(s, ax0, ay0, ax1, ay1, py, px, c);
+        ++py;
+        if (err < 0) {
+            err += 2 * py + 1;
+        } else {
+            --px;
+            err += 2 * (py - px) + 1;
+        }
+    }
+}
+
+/**
+ * The filled rounded rectangle: every pixel within `r` of the inset
+ * rectangle, one run per row - the same set the outline bounds, by the
+ * same definition, with the same clamp.
+ */
+template <Surface S>
+void fill_round_rect(S& s, Coord x, Coord y, Extent w, Extent h, Extent r,
+                     typename S::Color c) {
+    if (w == 0 || h == 0) {
+        return;
+    }
+    const Extent limit = Extent(((w < h ? w : h) - 1) / 2);
+    if (r > limit) {
+        r = limit;
+    }
+    if (r == 0) {
+        s.fill_rect(x, y, w, h, c);
+        return;
+    }
+
+    const int32_t y0i = int32_t(y) + int32_t(r);
+    const int32_t y1i = int32_t(y) + int32_t(h) - 1 - int32_t(r);
+    const int32_t rr = int32_t(r) * int32_t(r);
+
+    for (int32_t py = int32_t(y); py <= int32_t(y) + int32_t(h) - 1; ++py) {
+        int32_t dy = 0;
+        if (py < y0i) {
+            dy = y0i - py;
+        } else if (py > y1i) {
+            dy = py - y1i;
+        }
+        const int32_t grow = int32_t(isqrt(uint32_t(rr - dy * dy)));
+        const int32_t from = int32_t(x) + int32_t(r) - grow;
+        const int32_t span = int32_t(w) - 2 * int32_t(r) + 2 * grow;
+        s.fill_rect(Coord(from), Coord(py), Extent(span), 1, c);
     }
 }
 

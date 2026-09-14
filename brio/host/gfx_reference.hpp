@@ -127,6 +127,130 @@ public:
         }, c);
     }
 
+    /**
+     * The circle's ring, from the definition in gfx/draw.hpp: for every
+     * column within the radius the nearest row, and for every row the
+     * nearest column, UNIONED. Asked of each pixel at once - is my row
+     * the nearest one for my column, or my column the nearest for my
+     * row? - with no octant, no reflection and no error term.
+     */
+    void circle(Coord cx, Coord cy, Extent r, uint8_t c) {
+        if (r == 0) {
+            each([&](int32_t px, int32_t py) {
+                return px == int32_t(cx) && py == int32_t(cy);
+            }, c);
+            return;
+        }
+        each([&](int32_t px, int32_t py) {
+            const int32_t dx = std::abs(px - int32_t(cx));
+            const int32_t dy = std::abs(py - int32_t(cy));
+            if (dx > int32_t(r) || dy > int32_t(r)) {
+                return false;
+            }
+            return dy == nearest_on_circle(dx, r) ||
+                   dx == nearest_on_circle(dy, r);
+        }, c);
+    }
+
+    /// The disc: an inequality, and nothing more.
+    void fill_circle(Coord cx, Coord cy, Extent r, uint8_t c) {
+        const int32_t rr = int32_t(r) * int32_t(r);
+        each([&](int32_t px, int32_t py) {
+            const int32_t dx = px - int32_t(cx);
+            const int32_t dy = py - int32_t(cy);
+            return dx * dx + dy * dy <= rr;
+        }, c);
+    }
+
+    /**
+     * The rounded rectangle's outline: a pixel belongs if it is on one
+     * of the four straight runs, or on one of the four quarter rings -
+     * each ring judged by the circle rule above, about its own corner
+     * centre, and only in the quadrant that faces outwards.
+     *
+     * This oracle tests the ARITHMETIC and not the decomposition into
+     * runs and arcs, because that decomposition IS the specification.
+     */
+    void round_rect(Coord x, Coord y, Extent w, Extent h, Extent r, uint8_t c) {
+        if (w == 0 || h == 0) {
+            return;
+        }
+        const Extent limit = Extent(((w < h ? w : h) - 1) / 2);
+        if (r > limit) {
+            r = limit;
+        }
+        if (r == 0) {
+            rect(x, y, w, h, c);
+            return;
+        }
+        const int32_t x0 = int32_t(x);
+        const int32_t y0 = int32_t(y);
+        const int32_t x1 = x0 + int32_t(w) - 1;
+        const int32_t y1 = y0 + int32_t(h) - 1;
+        const int32_t ax0 = x0 + int32_t(r);
+        const int32_t ax1 = x1 - int32_t(r);
+        const int32_t ay0 = y0 + int32_t(r);
+        const int32_t ay1 = y1 - int32_t(r);
+
+        each([&](int32_t px, int32_t py) {
+            const bool in_cols = px >= ax0 && px <= ax1;
+            const bool in_rows = py >= ay0 && py <= ay1;
+            if (in_cols && (py == y0 || py == y1)) {
+                return true;
+            }
+            if (in_rows && (px == x0 || px == x1)) {
+                return true;
+            }
+            // Outside both straight bands: the quadrant of the nearest
+            // corner, judged as a ring about that corner's centre.
+            if (in_cols || in_rows) {
+                return false;
+            }
+            const int32_t cx = px < ax0 ? ax0 : ax1;
+            const int32_t cy = py < ay0 ? ay0 : ay1;
+            const int32_t dx = std::abs(px - cx);
+            const int32_t dy = std::abs(py - cy);
+            if (dx > int32_t(r) || dy > int32_t(r)) {
+                return false;
+            }
+            return dy == nearest_on_circle(dx, r) ||
+                   dx == nearest_on_circle(dy, r);
+        }, c);
+    }
+
+    /// The filled rounded rectangle: within `r` of the inset rectangle -
+    /// the Minkowski sum written as the distance it is.
+    void fill_round_rect(Coord x, Coord y, Extent w, Extent h, Extent r,
+                         uint8_t c) {
+        if (w == 0 || h == 0) {
+            return;
+        }
+        const Extent limit = Extent(((w < h ? w : h) - 1) / 2);
+        if (r > limit) {
+            r = limit;
+        }
+        const int32_t x0i = int32_t(x) + int32_t(r);
+        const int32_t x1i = int32_t(x) + int32_t(w) - 1 - int32_t(r);
+        const int32_t y0i = int32_t(y) + int32_t(r);
+        const int32_t y1i = int32_t(y) + int32_t(h) - 1 - int32_t(r);
+        const int32_t rr = int32_t(r) * int32_t(r);
+        each([&](int32_t px, int32_t py) {
+            int32_t dx = 0;
+            int32_t dy = 0;
+            if (px < x0i) {
+                dx = x0i - px;
+            } else if (px > x1i) {
+                dx = px - x1i;
+            }
+            if (py < y0i) {
+                dy = y0i - py;
+            } else if (py > y1i) {
+                dy = py - y1i;
+            }
+            return dx * dx + dy * dy <= rr;
+        }, c);
+    }
+
     /// '#' where lit, '.' where not; one line per row, a header naming
     /// the geometry. ASCII because this is what gets checked in beside a
     /// test and read by a human when one fails.
@@ -149,6 +273,16 @@ private:
 
     size_t index(Coord x, Coord y) const {
         return size_t(uint16_t(y)) * w_ + size_t(uint16_t(x));
+    }
+
+    /// How far from the centre line the ideal circle stands at offset
+    /// `a`: the definition itself, in floating point, rounded to the
+    /// nearest whole pixel and away from zero at a tie. This file is
+    /// allowed to be slow and is required to be obvious.
+    static int32_t nearest_on_circle(int32_t a, Extent r) {
+        const double rr =
+            double(r) * double(r) - double(a) * double(a);
+        return int32_t(std::llround(std::sqrt(rr < 0.0 ? 0.0 : rr)));
     }
 
     static bool in_rect(int32_t px, int32_t py, Coord x, Coord y, Extent w,

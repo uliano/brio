@@ -93,6 +93,18 @@ work is mostly axis-aligned and that path is the one panels are fast at.
   colour and a background, and forwards to the stateless verbs. The base
   stays explicit, so primitives are order-independent and a golden image
   cannot depend on state nobody can see.
+- **A ring and a disc of the same radius are different sets, and
+  deliberately.** An outline holds the pixel NEAREST the ideal curve at
+  each step - a rounding - while a filled shape holds every pixel whose
+  centre lies INSIDE it - a truncation. Measured, the ring falls partly
+  outside the disc and does not cover all of the disc's edge, at every
+  radius; no adjustment of one radius aligns them, because the two
+  discretizations differ in kind. Each is right for its own job: at a
+  radius of nine the ring's apex is five pixels wide and reads as round,
+  where the disc's edge there is a single pixel and would read as a
+  point. So an outline is not a filled shape's border: a filled shape
+  with a border of another colour is TWO FILLED SHAPES, the larger drawn
+  first - which is also the only form no-compositing allows.
 - **One bit per pixel is packed row-major, most significant bit
   leftmost, each row a whole number of bytes.** This is the layout of a
   framebuffer in memory, and it is deliberately not any panel's native

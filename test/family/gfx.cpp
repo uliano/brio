@@ -49,9 +49,21 @@ void gfx_verbs() {
     vline(panel, 64, -5, 200, 1);
     line(panel, 0, 0, 127, 63, 1);
 
+    circle(panel, 64, 32, 30, 1);
+    fill_circle(panel, 64, 32, 20, 1);
+    round_rect(panel, 2, 2, 124, 60, 12, 1);
+    fill_round_rect(panel, 20, 20, 40, 24, 200, 1); // radius past the clamp
+
     // Coordinates far outside a 16-bit sum, which must clip and not wrap.
     fill_rect(panel, -30000, -30000, 60000, 60000, 1);
     line(panel, -20000, -20000, 20000, 20000, 1);
+    circle(panel, -300, -300, 600, 1);
+
+    // The square root the filled round shapes lean on, at the largest
+    // argument it can be given. The literals carry their width: on this
+    // family `unsigned int` is SIXTEEN BITS, so 65535u * 65535u is 1.
+    static_assert(isqrt(65535UL * 65535UL) == 65535u);
+    static_assert(isqrt(0u) == 0u);
 
     Viewport<Panel> window(panel, 8, 8, 48, 24);
     clear(window, 0);
