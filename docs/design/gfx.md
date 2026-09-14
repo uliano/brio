@@ -227,6 +227,31 @@ Neither is urgent: the wide arithmetic here runs once per pixel of a
 segment and not once per primitive, and a segment lying mostly outside
 the surface - the only case that wastes much - is rare in an interface.
 
+### What an update costs, and what found it
+
+The other half of "pays nothing it is not asked for" is what a PANEL
+pays, which is not the same question: on a framebuffer a call is a store,
+and behind a bus it is a window command and a burst of bytes. A surface
+that forwards and counts (`brio/gfx/counting.hpp`) is how that stops
+being a claim - the same idea as a flash simulation's wear counters.
+
+Measured on a front panel of two framed setpoints: a full repaint is 227
+windows, changing one digit is 8, a digit change that carries is 16, and
+moving a highlight is 16. That is the write-only economy working - a cell
+rewritten opaque needs no erase and no read-back, so a change touches
+only what changed, and the difference between 8 and 227 is the
+difference between an interface that answers and one that crawls.
+
+The first use of that counter also found something about THIS library:
+of a repaint's 227 windows, 107 are single-pixel rectangles, nearly all
+of them the ARCS of two rounded frames - because a circle's mirrors are
+drawn a pixel at a time. In memory that is free. Behind a bus it is a
+hundred window commands for one frame, which is precisely what the base
+verbs were chosen to avoid. Coalescing an arc's shallow runs is the
+answer, and it is not built: the counter is what makes the case for it,
+and the case should be made with a measurement of the fix and not with
+an assumption.
+
 ## The three planes of truth
 
 An oracle is worth exactly its independence from the thing it judges.

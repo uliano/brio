@@ -41,6 +41,7 @@
 #include "util/trace.hpp"
 #include "util/wire.hpp"
 
+#include "gfx/counting.hpp"
 #include "gfx/draw.hpp"
 #include "gfx/font_5x7.hpp"
 #include "gfx/pen.hpp"

@@ -107,8 +107,12 @@ This file has no decision log any more: the former log was migrated to
 `brio` (`brio/`) is a header-only C++23 (gnu++23) framework for
 bare-metal MCUs built around a cooperative active-object kernel,
 written clean-room after Samek's book (never the QP source). One flat
-namespace `brio`; ten strata under `brio/` - `kernel/` (pure
+namespace `brio`; eleven strata under `brio/` - `kernel/` (pure
 logic, includes nothing of brio), `util/` (services over the kernel),
+`gfx/` (drawing: pure, target-independent, and needing nothing of the
+kernel - three kinds of surface told apart by where a pixel's truth
+lives, and a library that draws through the write-only base whatever
+lies beneath, design/gfx.md),
 `cortexm/` (the CORE stratum the three Cortex-M0+ families - and the
 Cortex-M4 one, the same programmer's model - include after their device
 header: NVIC + PRIMASK guard, the SysTick ticker),
@@ -127,13 +131,15 @@ built with the hard-float ABI, the FPU enabled by the crt; bench chips
 STM32F429ZI on an STM32F429I-DISC1, STM32F446RE on a Nucleo-64,
 STM32F411CE on a WeAct black pill), `host/` (the native test
 target). Includes carry the stratum prefix
-(`#include "avrdx/usart.hpp"`). The builds are seven sibling CMake
+(`#include "avrdx/usart.hpp"`). The builds are eight sibling CMake
 projects, PEERS - the repo root is not a CMake project: `avrdx/`,
 `samc21/`, `stm32g0/`, `ch32v00x/`, `rp2040/` and `stm32f4/` (each with its own toolchain file
 and presets, Ninja, emitting into the shared `build-cmake/`)
 auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
 from its own `// build:` header comment; host tests in `test/` are the
-seventh project (host g++, no cross toolchain), run via `ctest`. ONE NAME PER ARCHITECTURE,
+seventh project (host g++, no cross toolchain), run via `ctest`, and
+`host/` the eighth - the host's own apps, which RUN rather than run and
+exit, and which ctest never sees. ONE NAME PER ARCHITECTURE,
 the same key on three axes: `brio/<arch>/` (stratum),
 `docs/<arch>/` (docs), `<arch>/` (build project); chip precision
 lives in preset names, per-chip ld/svd files and the `*_MCU` cache
@@ -587,6 +593,18 @@ stm32f4/                 the STM32F4 build project, the sixth of the shape: a
                          {29,46,11}.cpp - ST's handler names, the FPU's CPACR
                          enabled before .data, holes where another part has a
                          peripheral; svd/ with ST's SVD per part
+host/                    the HOST build project - programs that RUN, as
+                         opposed to the suites in test/ which run and exit.
+                         The three axes finally agree (brio/host/, docs/host/,
+                         host/); one main() per src/apps/<app>.cpp, the same
+                         "// build:" grammar as the cross projects, and
+                         NOTHING registered with ctest - an interactive
+                         program cannot be a test. Flags identical to test/'s
+                         so a program and the suites cannot disagree about the
+                         language. First app: supply_panel, the front panel of
+                         a bench supply, which is where the drawing library,
+                         the published framebuffer, the panel a viewer writes
+                         and the quadrature decoder first meet
 test/CMakeLists.txt      the host test project (independent - one CMake
                          configure has exactly one compiler):
                          one executable + ctest entry per test_*/main.cpp
@@ -1817,6 +1835,35 @@ brio/                    the framework, four strata:
                            transition; with engines, dma_isr() and harvest()
                            (the RX pad before the receiver, the FIFO emptied
                            and the credits cleared before a run)
+  gfx/                   drawing, pure and target-independent
+    surface.hpp            Coord/Extent/Rect + clip() (16 bits over the WHOLE
+                           domain, because the far edge is never formed) +
+                           coord_max, the formats Mono and Indexed8, the
+                           Surface concept (two verbs: a filled rectangle and
+                           a run) and its ReadableSurface refinement NO
+                           PRIMITIVE TAKES, Framebuffer over caller-owned
+                           storage, Viewport as a view and not a mode
+    draw.hpp               the primitives as free functions over the
+                           write-only base: clear, set_pixel, fill_rect,
+                           hline/vline, line, rect, circle, round_rect and the
+                           filled forms, plus isqrt
+    font.hpp               the Font concept: a font is a TYPE, so the cell is
+                           a constant and the linker drops what is unnamed
+    font_5x7.hpp           the whole printable ASCII in a six-by-eight cell,
+                           stored BY ROWS (text is drawn as runs), a hollow
+                           box outside the range
+    text.hpp               text and text_field - opaque glyphs, a field padded
+                           to a fixed width so "the old value is gone" is a
+                           verb; generated a row at a time into a bounded
+                           buffer and flushed as runs
+    pen.hpp                Pen<S>: a cursor for TRACING (move_to/line_to, the
+                           text run) and the colours; the shapes take their
+                           own coordinates and leave it alone
+    counting.hpp           Counting<S>: a Surface that forwards and counts
+                           rectangles, runs and pixels. What an update costs
+                           on a PANEL is a different question from what it
+                           costs in memory, and this makes the answer a
+                           measurement (design/gfx.md's cost section)
   host/                  the test target
     platform.hpp           HostPlatform (virtual clock, recording idle/break)
                            + HostCore<n> (the two-core host: the same platform

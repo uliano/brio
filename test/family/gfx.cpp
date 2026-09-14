@@ -12,6 +12,7 @@
 
 #include <array>
 
+#include "gfx/counting.hpp"
 #include "gfx/draw.hpp"
 #include "gfx/font_5x7.hpp"
 #include "gfx/pen.hpp"
@@ -76,6 +77,13 @@ void gfx_verbs() {
     text<Font5x7>(panel, 2, 2, "brio", 1, 0);
     text_field<Font5x7>(panel, 2, 12, "3.30", 8, 1, 0);
     text<Font5x7>(panel, -20, 40, "clipped at both ends of the panel", 1, 0);
+
+    // The counting decorator is a Surface like any other.
+    Counting<Panel> counted(panel);
+    static_assert(Surface<Counting<Panel>>);
+    rect(counted, 0, 0, 40, 20, 1);
+    (void)counted.tally().windows();
+    counted.reset();
 
     Pen<Panel> pen(panel, 1, 0);
     pen.move_to(4, 30);

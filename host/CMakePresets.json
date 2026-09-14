@@ -1,0 +1,21 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "apps",
+            "displayName": "Host apps (native g++, UBSan) - programs that run",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/host-apps",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_CXX_COMPILER": "/sw/gcc/bin/g++"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "apps",
+            "configurePreset": "apps"
+        }
+    ]
+}
