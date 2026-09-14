@@ -17,7 +17,7 @@
     ],
     "C_Cpp.intelliSenseEngine": "disabled",
 
-    // --- CMake Tools: seven independent CMake projects share this workspace
+    // --- CMake Tools: eight independent CMake projects share this workspace
     //     folder - avrdx/ (avr-g++), test/ (host g++), samc21/, stm32g0/,
     //     rp2040/ and stm32f4/ (arm-none-eabi-g++), ch32v00x/ (riscv32-wch-elf-g++),
     //     each with its own toolchain since
@@ -32,6 +32,7 @@
     "cmake.sourceDirectory": [
         "${workspaceFolder}/avrdx",
         "${workspaceFolder}/test",
+        "${workspaceFolder}/host",
         "${workspaceFolder}/samc21",
         "${workspaceFolder}/stm32g0",
         "${workspaceFolder}/ch32v00x",

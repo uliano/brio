@@ -1,6 +1,7 @@
-# clangd config for the framework strata. Default: kernel/, util/ and
-# host/ are target-independent and parse against the HOST project's
-# database (fast native flags, exactly what test/ compiles them with).
+# clangd config for the framework strata. Default: kernel/, util/, gfx/
+# and host/ are target-independent and parse against the host TEST
+# project's database (fast native flags, exactly what test/ compiles them
+# with; host/'s own app database would do as well).
 # The target strata override this with their own fragment (avrdx/.clangd,
 # samc21/.clangd), so a header always parses with its OWN architecture -
 # regardless of which project CMake Tools happens to have active. Paths

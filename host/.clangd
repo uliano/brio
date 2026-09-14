@@ -1,0 +1,10 @@
+# clangd config for the host apps: host/ is its OWN CMake project
+# (host/CMakeLists.txt), with its own compile_commands.json emitted at
+# ../build-cmake/host-apps - point clangd straight at it, the way
+# test/.clangd points at the suites' database.
+#
+# Both are native and both compile the same headers with the same flags,
+# so either would parse an app correctly; using its own keeps the two
+# projects independent, which is the whole reason they are two.
+CompileFlags:
+  CompilationDatabase: ../build-cmake/host-apps

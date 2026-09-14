@@ -689,8 +689,13 @@ brio/.clangd             per-stratum clangd routing: the framework default is
                          (in brio/ AND in each project dir) override with
                          their own architecture's database, so a header always
                          parses with its own compiler regardless of CMake
-                         Tools' active project
-brio/                    the framework, four strata:
+                         Tools' active project. Each CMake project carries its
+                         own fragment too - test/.clangd on build-cmake/host,
+                         host/.clangd on build-cmake/host-apps - and every
+                         project is listed in .vscode/settings.json's
+                         cmake.sourceDirectory array, which is what the status
+                         bar's project picker offers
+brio/                    the framework, eleven strata:
   kernel/                pure kernel logic - includes NOTHING of brio
     platform.hpp           Platform concept (CriticalSection, idle,
                            break_here, now, ticks_per_second, atomic_width,
