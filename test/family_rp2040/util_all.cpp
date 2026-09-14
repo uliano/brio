@@ -40,6 +40,8 @@
 #include "util/trace.hpp"
 #include "util/wire.hpp"
 
+#include "gfx/draw.hpp"
+
 using namespace brio;
 using P = Rp2040Platform<>;
 
@@ -71,4 +73,25 @@ void util_all_verbs() {
     (void)ticks_from_ms<P>(5);
     TimeEvents<P>::process();
     (void)TimeEvents<P>::next_deadline();
+}
+
+// gfx/ is target-independent, so what this adds is the COMPILER's
+// verdict: every C++23 construct the surfaces and the primitives are
+// written with, accepted here too.
+namespace {
+using GfxPanel = Framebuffer<Mono, 128, 64>;
+std::array<uint8_t, GfxPanel::bytes> gfx_bits;
+GfxPanel gfx_panel{gfx_bits};
+static_assert(Surface<GfxPanel> && ReadableSurface<GfxPanel>);
+static_assert(Surface<Viewport<GfxPanel>> && !ReadableSurface<Viewport<GfxPanel>>);
+} // namespace
+
+void gfx_verbs() {
+    clear(gfx_panel, 0);
+    rect(gfx_panel, 0, 0, 128, 64, 1);
+    line(gfx_panel, -20000, -20000, 20000, 20000, 1);
+    Viewport<GfxPanel> window(gfx_panel, 8, 8, 48, 24);
+    fill_rect(window, -5, -5, 100, 100, 1);
+    const std::array<GfxPanel::Color, 4> run{1, 0, 1, 0};
+    window.write_run(46, 3, run);
 }

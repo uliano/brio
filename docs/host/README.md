@@ -43,3 +43,23 @@ ctest --preset host -R test_fsm     # one suite
   of a probe here in the first place.
 - No hardware needed; the host compiler must speak gnu++23 (the same
   standard as the cross builds - the code is identical).
+
+## Simulated devices, and what they are allowed
+
+Beside the platform, this stratum carries simulations of things a test
+cannot otherwise provoke: flash with its wear, its power cuts and its
+reflash; a USB controller answering scripted control transfers; the
+reference implementations a test compares a real one against.
+
+**The whole standard library is allowed inside them, heap included.**
+Above the concept, host code is brio code and pays what brio pays; below
+it, in a simulation's own guts, modelling a constraint faithfully is
+worth more than modelling it cheaply, and none of that code is going
+anywhere near a silicon. What brio sees is the CONCEPT the simulation
+satisfies, and nothing above that concept can tell how it was reached.
+
+The same reasoning puts a JUDGE here rather than beside the code it
+judges - a reference renderer, a reference decoder, anything a test
+measures an optimized implementation against. From this stratum it
+cannot be linked into a target image even by accident, which is a
+stronger guarantee than remembering not to.
