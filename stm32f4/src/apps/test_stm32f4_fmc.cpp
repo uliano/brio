@@ -957,9 +957,7 @@ bool wait_complete(uint32_t spins = 4'000'000u) {
     return true;
 }
 
-/// One memory-to-memory block on a FRESH controller: the F446's stall
-/// rule (docs/stm32f4/dma.md) costs nothing here and keeps the numbers
-/// about the memory rather than about the stream's history.
+/// One memory-to-memory block through DMA2, timed by the core's counter.
 uint32_t timed_dma(volatile void* from, volatile void* to, uint16_t count32) {
     DmaTransfer t{};
     t.peripheral = from;
@@ -973,7 +971,6 @@ uint32_t timed_dma(volatile void* from, volatile void* to, uint16_t count32) {
     t.config.use_fifo = true;
     t.config.fifo_threshold = DmaFifoThreshold::full;
     t.config.memory_burst = DmaBurst::incr4;
-    DmaBlock::init();
     if (!DmaWork::prepare(t)) {
         return 0;
     }
@@ -985,6 +982,7 @@ uint32_t timed_dma(volatile void* from, volatile void* to, uint16_t count32) {
 }
 
 void tk_dma() {
+    DmaBlock::init();
     constexpr uint16_t count32 = bench_bytes / 4u;
     for (uint32_t i = 0; i < bench_bytes; ++i) {
         sram_a[i] = static_cast<uint8_t>(i * 13u + 5u);
