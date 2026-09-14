@@ -215,6 +215,21 @@ restrictions. The antidote, in practice:
   implemented-but-not-bench-verified), nothing listed that the
   document's own findings cover; doc and code move in the same
   change.
+- **When every variant of OUR code fails on the bench, consult the
+  vendor's reference implementation - as an ORACLE, never as a source.**
+  The trigger is a written list of measured variants (sequence, memory,
+  width, instance, clock, reset, interrupts...) all failing the same way,
+  not an impression. Then, in order: read the vendor's sequence and
+  compare it register for register with ours; if reading does not
+  discriminate, build a test on the vendor's library ALONE and run it on
+  the SAME board doing the SAME operation; if it passes, bisect between
+  the two sequences down to the ONE difference and record that fact
+  (with its reason) in the driver and the document - never the vendor's
+  code or its shape; if it fails too, it is the silicon or the board, and
+  worth a question to the vendor. The corollary that makes this a rule: a
+  behaviour the reference implementation never triggers never reaches an
+  errata sheet, so the absence of an erratum is evidence of nothing.
+  (The STM32F4 DMA's read-back wedge is the case that taught it.)
 - **When the user refines the method, write it to memory in the same
   session** - the next context must start from the agreed method, not
   regress to the instinctive minimum.
