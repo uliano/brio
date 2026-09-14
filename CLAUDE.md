@@ -313,10 +313,11 @@ gets its home in `docs/design/` when taken.
   its suites are shaped by the smallest-chip rule (design/overview.md,
   "A suite's image fits the family's smallest chip"). A `qingke/` core
   stratum only at a second QingKe family.
-- **The STM32F4 stratum, in bring-up.** `brio/stm32f4/` and `stm32f4/`
-  run the kernel console and the platform suite on three boards
-  (STM32F429I-DISC1, Nucleo-F446RE, an STM32F411CE black pill on a
-  standalone STLINK-V3) with kernel/ and util/ untouched - the platform,
+- **The STM32F4 stratum.** `brio/stm32f4/` and `stm32f4/` are
+  `supported` on the STM32F429ZI, the STM32F446RE and the STM32F411CE
+  (README.md's table) on three boards (STM32F429I-DISC1, Nucleo-F446RE,
+  an STM32F411CE black pill on a standalone STLINK-V3) with kernel/ and
+  util/ untouched - the platform,
   the clock (the regulator scale and over-drive sequenced, the APB
   prescalers unpinned), the pins and the USART with their documents,
   the family check over all twenty-three headers; then chapter by
@@ -336,11 +337,15 @@ gets its home in `docs/design/` when taken.
   the F429 alone the LTDC and the DMA2D - the memory-mapped display
   tier over that SDRAM, the panel driven in its RGB mode and the
   bandwidth the tier lives on measured (two layers of 32-bit pixels at
-  65 Hz plus the accelerator, some 160 MB/s over one bus). What remains:
-  the frequency ladders of the five part
-  classes whose manuals are not on the desk; the debuggers (cortex-debug
-  entries written, not driven). Tenuto only, the equal-priority
-  promise kept; Rubato and BASEPRI are another type and another day.
+  65 Hz plus the accelerator, some 160 MB/s over one bus). What remains
+  is in the documents' gap lists, and three things outside them: the
+  OTG HS core in full-speed mode on the STM32F429 (UsbHs compiled, its
+  connector cabled, never enumerated); the frequency ladders of the five
+  part classes whose manuals are not on the desk (a rate above 16 MHz
+  refused there); the debugger driven from the command line as
+  cortex-debug would (docs/stm32f4/README.md) and not yet from the
+  editor. Tenuto only, the equal-priority promise kept; Rubato and
+  BASEPRI are another type and another day.
 - **The RP2040 stratum.** `brio/rp2040/` and `rp2040/` are
   `supported` on the RP2040 (README.md's table) on a Raspberry Pi
   Pico and a WeAct board: every chapter of the datasheet's plan has
