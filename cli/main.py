@@ -10,6 +10,7 @@
     brio stress ...                the host end of the UART suites
     brio check [avrdx|samc21|stm32g0|all] [filter]   the family compile fixtures
     brio prose [paths...]          the prose net (comments and documents)
+    brio view <name>               watch a framebuffer a host program publishes
     brio gate [--against REF] [--preset P]...   images byte-identical to REF? (movers named)
     brio gate --tokens [--strings] FILE...      sources token-identical to REF?
 
@@ -37,6 +38,9 @@ def main(argv):
     if verb == "gate":
         from cli import gate
         return gate.main([prog] + rest)
+    if verb == "view":
+        from cli import gfxview
+        return gfxview.main([prog] + rest)
     if verb == "check":
         from cli import check
         return check.main([prog] + rest)
