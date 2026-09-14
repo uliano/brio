@@ -108,19 +108,27 @@ viewer already written.
 
 ## Input in
 
-Name `/brio-in-<name>`, 128 bytes, written by the VIEWER and read by the
-program.
+Name `/brio-in-<name>`, 512 bytes.
 
-| field | width | meaning |
-|---|---|---|
-| magic | 4 | `BRIP` |
-| version | 2 | of this layout |
-| header_bytes | 2 | the whole size |
-| boot_id | 8 | drawn afresh at every creation |
-| buttons, shafts | 1 each | slots that mean anything |
-| seq | 4 | bumped by the viewer when it changes anything |
-| pressed | 8 | one byte a contact, non-zero for ACTIVE |
-| shaft | 4 x 4 | absolute quadrature counts, signed |
+| field | width | written by | meaning |
+|---|---|---|---|
+| magic | 4 | program | `BRIP` |
+| version | 2 | program | of this layout |
+| header_bytes | 2 | program | the whole size |
+| boot_id | 8 | program | drawn afresh at every creation |
+| buttons, shafts | 1 each | program | slots that mean anything |
+| seq | 4 | viewer | bumped when it changes anything |
+| pressed | 8 | viewer | one byte a contact, non-zero for ACTIVE |
+| shaft | 4 x 4 | viewer | absolute quadrature counts, signed |
+| button_name | 8 x 16 | program | what each contact IS |
+| shaft_name | 4 x 16 | program | what each shaft IS |
+
+**Two writers, and they never overlap.** The viewer owns what the world
+is DOING and the program owns what the panel IS, so there is nothing to
+arbitrate. The names are the program's because WHICH CONTACT IS WHICH IS
+A FACT ABOUT THE PANEL, and facts about the panel belong in the board
+file that describes it - a viewer showing a grid of "button 3" and
+"shaft 1" is unusable past two controls.
 
 **A contact is a level and a shaft is an ABSOLUTE count**, both for the
 same reason: a snapshot that is lost costs nothing, because the next one
@@ -135,11 +143,36 @@ samples reads as one count backwards on real hardware too, and a
 simulator that walked the pads to hide it would be hiding the one
 failure a quadrature decoder has.
 
-**Which contact is which button is not here.** That is a fact about the
-panel and belongs where the panel is described: a board file wires
-`pressed(0)` to its own `SimButton` and `shaft(0)` to its own
-`SimEncoder`, exactly as a target's board file wires a pin. The program
-does that in its idle path, which is where the world turns.
+**Which contact drives which device is not here either.** A board file
+wires `pressed(0)` to its own `SimButton` and `shaft(0)` to its own
+`SimEncoder`, exactly as a target's board file wires a pin, and the
+program does it in its idle path - which is where the world turns.
+
+## What the viewer's controls do
+
+A contact is a button under the pointer: **left click presses it**, and
+releasing the mouse releases it.
+
+A shaft is a knob: **the wheel over it turns it**, one quadrature count
+a notch, and it needs no selecting first - the wheel goes to the widget
+under the pointer, which is Qt's own behaviour and is also how a hand
+reaches for a knob on a real panel. Whichever knob will turn is shown
+highlighted, so it is never in doubt. **The middle button presses the
+knob's own switch**, with the right button accepted as well so that a
+machine without a middle button can still work one.
+
+The controls are laid out as a grid below the screen, labelled with the
+names the program gave them. Their ARRANGEMENT is the viewer's and not
+the program's: reproducing a panel's real geometry is a great deal of
+machinery and buys none of the verification this exists for.
+
+There is no menu and no keyboard control of the widgets. Almost anything
+a menu would offer - reset, pause, restart - is the PROGRAM's business
+rather than the viewer's, and a viewer commanding a program would need a
+third channel, which would reopen every question the snapshot design
+just closed: what a lost command means, how a command is told from a
+state. The rule that keeps this simple is worth keeping: **what travels
+is the state of the world, and nothing else.**
 
 ## Not covered yet
 
@@ -158,3 +191,14 @@ Driver gaps:
 - **Double buffering.** The fields are reserved and the mechanism is not
   built, because tearing is what the hardware being modelled does and
   hiding it would be a worse simulation, not a better one.
+- **A bouncing contact.** DECLINED, not deferred, and the reason is test
+  economy rather than effort: absorbing a bounce is `InputScanner`'s
+  property and is proven where it lives, so simulating one here would
+  prove the same thing again by a longer road. A press is a clean level.
+  What the bench still owes is not behaviour but a NUMBER - whether the
+  chosen count of stable samples suits a real contact - and no simulator
+  can answer that.
+- **Commanding the program from the viewer.** No channel carries
+  anything but the state of the world, by decision, and a command is an
+  event rather than a state. If one is ever wanted it is a separate
+  mechanism with a reason of its own, not a field borrowed here.

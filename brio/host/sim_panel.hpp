@@ -49,14 +49,20 @@
 
 namespace brio {
 
-/// How many of each a panel may carry. Fixed, so the segment is one
-/// size and a viewer needs no arithmetic to find the second array.
+/// How many of each a panel may carry, and how long a name may be.
+/// Fixed, so the segment is one size and a viewer needs no arithmetic to
+/// find any of the arrays.
 inline constexpr uint8_t sim_panel_buttons = 8;
 inline constexpr uint8_t sim_panel_shafts = 4;
+inline constexpr uint8_t sim_panel_name_max = 16;
 
 /**
- * What sits in the segment. Fixed layout, little-endian, self-
- * describing, and written by the VIEWER - the program only reads it.
+ * What sits in the segment. Fixed layout, little-endian, self-describing.
+ *
+ * TWO WRITERS, AND THEY NEVER OVERLAP. The viewer owns what the world is
+ * DOING - the contacts and the shafts - and the program owns what the
+ * panel IS, which is the names. Neither ever writes the other's fields,
+ * so there is nothing to arbitrate.
  *
  * `seq` is the viewer's to bump when it changes anything; a program that
  * wants to know whether the world moved at all can watch it instead of
@@ -73,10 +79,19 @@ struct SimPanelState {
     uint32_t seq;                          ///< bumped by the viewer
     uint8_t pressed[sim_panel_buttons];    ///< 0 or 1, ACTIVE-true
     int32_t shaft[sim_panel_shafts];       ///< absolute quadrature counts
+
+    /// What each control IS, written by the program. A viewer showing a
+    /// grid of "button 3" and "shaft 1" is unusable past two controls,
+    /// and WHICH CONTACT IS WHICH IS A FACT ABOUT THE PANEL - so it
+    /// comes from the board file that describes the panel, like every
+    /// other such fact. Not null-terminated of necessity: a reader takes
+    /// at most the whole field.
+    char button_name[sim_panel_buttons][sim_panel_name_max];
+    char shaft_name[sim_panel_shafts][sim_panel_name_max];
 };
 
 /// Where the state begins, whatever the structure grows to inside it.
-inline constexpr size_t sim_panel_bytes = 128;
+inline constexpr size_t sim_panel_bytes = 512;
 
 static_assert(sizeof(SimPanelState) <= sim_panel_bytes);
 
@@ -115,6 +130,28 @@ public:
         return i < sim_panel_shafts ? state()->shaft[i] : 0;
     }
 
+    /// Say what a control is. The viewer shows it; nothing else reads
+    /// it. A name longer than the field is cut rather than refused -
+    /// this is a label and not an identifier.
+    void name_button(uint8_t i, const std::string& label) {
+        write_name(i < sim_panel_buttons ? state()->button_name[i] : nullptr,
+                   label);
+    }
+    void name_shaft(uint8_t i, const std::string& label) {
+        write_name(i < sim_panel_shafts ? state()->shaft_name[i] : nullptr,
+                   label);
+    }
+
+    /// What a control was called, as a string a viewer can show.
+    std::string button_name(uint8_t i) const {
+        return i < sim_panel_buttons ? read_name(state()->button_name[i])
+                                     : std::string();
+    }
+    std::string shaft_name(uint8_t i) const {
+        return i < sim_panel_shafts ? read_name(state()->shaft_name[i])
+                                    : std::string();
+    }
+
     /// What the viewer has changed since the program started. A reader
     /// that has seen this number has seen everything.
     uint32_t seq() const { return state()->seq; }
@@ -123,6 +160,25 @@ public:
     const std::string& name() const { return seg_.name(); }
 
 private:
+    static void write_name(char* field, const std::string& label) {
+        if (field == nullptr) {
+            return;
+        }
+        memset(field, 0, sim_panel_name_max);
+        const size_t n = label.size() < sim_panel_name_max
+                             ? label.size()
+                             : static_cast<size_t>(sim_panel_name_max);
+        memcpy(field, label.data(), n);
+    }
+
+    static std::string read_name(const char* field) {
+        size_t n = 0;
+        while (n < sim_panel_name_max && field[n] != '\0') {
+            ++n;
+        }
+        return std::string(field, n);
+    }
+
     SimPanelState* state() {
         return reinterpret_cast<SimPanelState*>(seg_.base());
     }

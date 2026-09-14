@@ -412,3 +412,31 @@ TEST_CASE("what a viewer writes is what the program reads") {
 TEST_CASE("a panel name too long is refused rather than truncated") {
     CHECK_THROWS_AS(brio::SimPanel(std::string(40, 'x')), std::runtime_error);
 }
+
+TEST_CASE("a control carries the name its board file gave it") {
+    brio::SimPanel panel("qtest3");
+    // Unnamed reads as empty rather than as rubbish.
+    CHECK(panel.button_name(0).empty());
+    CHECK(panel.shaft_name(0).empty());
+
+    panel.name_button(0, "Menu");
+    panel.name_shaft(1, "Volume");
+    CHECK(panel.button_name(0) == "Menu");
+    CHECK(panel.shaft_name(1) == "Volume");
+    CHECK(panel.button_name(1).empty());
+
+    // A label is a label: too long is cut, not refused.
+    panel.name_button(2, "a name far longer than the field allows");
+    CHECK(panel.button_name(2).size() == brio::sim_panel_name_max);
+    CHECK(panel.button_name(2) == "a name far longe");
+
+    // Renaming clears what was there, rather than leaving a tail.
+    panel.name_shaft(1, "Gain");
+    CHECK(panel.shaft_name(1) == "Gain");
+
+    // Out of range answers without reading past the arrays.
+    CHECK(panel.button_name(brio::sim_panel_buttons).empty());
+    CHECK(panel.shaft_name(brio::sim_panel_shafts).empty());
+    panel.name_button(brio::sim_panel_buttons, "nowhere");
+    panel.name_shaft(brio::sim_panel_shafts, "nowhere");
+}
