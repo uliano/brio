@@ -16,41 +16,25 @@
  * shared memory, and the same library code runs against a plain array in
  * a test and against a viewer's window here.
  *
- * THE NAME IS THE CONTRACT, NEVER A PATH. Linux exposes these objects
- * under /dev/shm and macOS exposes them nowhere at all, so a viewer
- * attaches with shm_open by the same name and the path is a debugging
- * convenience on one platform only. Two more rules come from the same
- * place: a name is short (macOS caps it at 31 characters), and a segment
- * is SIZED ONCE at creation - a second ftruncate fails there - so a
- * change of geometry is a new segment and never a resize.
+ * The naming, the sizing and the boot id are host/shared_segment.hpp's,
+ * because the inputs travel the same way in the other direction and the
+ * rules that make both portable belong in one place.
  *
- * THE BOOT ID IS LOAD-BEARING. After a segment is unlinked and remade
- * under the same name, a viewer's old mapping still points at the old
- * object, which is alive as long as it holds a reference: a counter
- * INSIDE that object could never tell it anything had changed. So the
- * header carries an id drawn afresh at every creation, and a viewer that
- * re-opens by name and finds a different one knows to remap.
- *
- * Host only, and free with the whole standard library (docs/host/
- * README.md): failures here throw, because a bench tool that cannot map
- * its own memory has nothing useful left to do.
+ * Host only, and free with the whole standard library: failures throw,
+ * because a bench tool that cannot map its own memory has nothing useful
+ * left to do (docs/host/simulator.md).
  */
 
 #pragma once
 
-#include <fcntl.h>
 #include <stdint.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
-#include <random>
 #include <span>
-#include <stdexcept>
 #include <string>
 
 #include "gfx/surface.hpp"
+#include "host/shared_segment.hpp"
 
 namespace brio {
 
@@ -121,44 +105,9 @@ public:
     /// `name` is the whole contract between the two processes. It is
     /// prefixed and length-checked so that what works here works where
     /// the cap is 31 characters.
-    explicit SimDisplay(const std::string& name) : name_("/brio-gfx-" + name) {
-        if (name_.size() > 31) {
-            throw std::runtime_error("sim display name too long: " + name_);
-        }
-        // A stale segment from a crash would refuse the one ftruncate
-        // macOS allows, so start from nothing every time.
-        ::shm_unlink(name_.c_str());
-        fd_ = ::shm_open(name_.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
-        if (fd_ < 0) {
-            throw std::runtime_error("shm_open failed for " + name_);
-        }
-        if (::ftruncate(fd_, static_cast<off_t>(total_bytes)) != 0) {
-            ::close(fd_);
-            ::shm_unlink(name_.c_str());
-            throw std::runtime_error("ftruncate failed for " + name_);
-        }
-        void* base = ::mmap(nullptr, total_bytes, PROT_READ | PROT_WRITE,
-                            MAP_SHARED, fd_, 0);
-        if (base == MAP_FAILED) {
-            ::close(fd_);
-            ::shm_unlink(name_.c_str());
-            throw std::runtime_error("mmap failed for " + name_);
-        }
-        base_ = static_cast<uint8_t*>(base);
-        memset(base_, 0, total_bytes);
+    explicit SimDisplay(const std::string& name)
+        : seg_("/brio-gfx-", name, total_bytes) {
         write_header();
-    }
-
-    ~SimDisplay() {
-        if (base_ != nullptr) {
-            ::munmap(base_, total_bytes);
-        }
-        if (fd_ >= 0) {
-            ::close(fd_);
-        }
-        if (!name_.empty()) {
-            ::shm_unlink(name_.c_str());
-        }
     }
 
     SimDisplay(const SimDisplay&) = delete;
@@ -187,18 +136,18 @@ public:
         header()->palette[index][2] = b;
     }
 
-    const std::string& name() const { return name_; }
+    const std::string& name() const { return seg_.name(); }
     uint64_t boot_id() const { return header()->boot_id; }
     uint32_t frame() const { return header()->frame; }
 
 private:
     SimDisplayHeader* header() {
-        return reinterpret_cast<SimDisplayHeader*>(base_);
+        return reinterpret_cast<SimDisplayHeader*>(seg_.base());
     }
     const SimDisplayHeader* header() const {
-        return reinterpret_cast<const SimDisplayHeader*>(base_);
+        return reinterpret_cast<const SimDisplayHeader*>(seg_.base());
     }
-    uint8_t* pixels() { return base_ + sim_display_header_bytes; }
+    uint8_t* pixels() { return seg_.base() + sim_display_header_bytes; }
 
     void write_header() {
         SimDisplayHeader* h = header();
@@ -230,14 +179,7 @@ private:
         }
     }
 
-    static uint64_t fresh_boot_id() {
-        std::random_device rd;
-        return (static_cast<uint64_t>(rd()) << 32) ^ static_cast<uint64_t>(rd());
-    }
-
-    std::string name_;
-    int fd_{-1};
-    uint8_t* base_{nullptr};
+    SharedSegment seg_;
 };
 
 } // namespace brio

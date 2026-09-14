@@ -11,7 +11,14 @@
 #include <vector>
 
 #include "host/platform.hpp"
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+#include <string>
+
 #include "host/sim_input.hpp"
+#include "host/sim_panel.hpp"
 #include "util/quadrature.hpp"
 
 namespace {
@@ -328,4 +335,80 @@ TEST_CASE("stop and start_every pace the decoder") {
     CHECK(Four::running_every());
     turn<Four, SinkFour>(4);
     CHECK(total(SinkFour::got) == 1);
+}
+
+// ---------------------------------------------------------------------
+// The panel a viewer writes and the program reads.
+// ---------------------------------------------------------------------
+
+TEST_CASE("a shaft set by absolute count walks the same states as a turn") {
+    // The viewer owns the count; the pads must land where stepping would
+    // have put them, or a snapshot and a turn would disagree.
+    Knob::reset();
+    for (int32_t n = 0; n < 16; ++n) {
+        Knob::reset();
+        for (int32_t i = 0; i < n; ++i) {
+            Knob::step(1);
+        }
+        const uint8_t stepped = Knob::state();
+        Knob::set_shaft(n);
+        INFO("count " << n);
+        CHECK(Knob::state() == stepped);
+    }
+    // and backwards, where the count goes negative
+    Knob::reset();
+    Knob::step(-1);
+    const uint8_t back = Knob::state();
+    Knob::set_shaft(-1);
+    CHECK(Knob::state() == back);
+}
+
+TEST_CASE("a panel reads as nothing pressed until a viewer writes") {
+    brio::SimPanel panel("qtest");
+    CHECK(panel.seq() == 0);
+    for (uint8_t i = 0; i < brio::sim_panel_buttons; ++i) {
+        CHECK(!panel.pressed(i));
+    }
+    for (uint8_t i = 0; i < brio::sim_panel_shafts; ++i) {
+        CHECK(panel.shaft(i) == 0);
+    }
+    // Out of range is released and nought, not a read past the end.
+    CHECK(!panel.pressed(brio::sim_panel_buttons));
+    CHECK(panel.shaft(brio::sim_panel_shafts) == 0);
+    CHECK(panel.boot_id() != 0);
+}
+
+TEST_CASE("what a viewer writes is what the program reads") {
+    brio::SimPanel panel("qtest2");
+
+    // The viewer's end: attach by NAME, read-write, and set the world.
+    const int fd = ::shm_open(panel.name().c_str(), O_RDWR, 0);
+    REQUIRE(fd >= 0);
+    void* p = ::mmap(nullptr, brio::sim_panel_bytes, PROT_READ | PROT_WRITE,
+                     MAP_SHARED, fd, 0);
+    REQUIRE(p != MAP_FAILED);
+    ::close(fd);
+    auto* w = static_cast<brio::SimPanelState*>(p);
+    CHECK(std::string(w->magic, 4) == "BRIP");
+    CHECK(w->buttons == brio::sim_panel_buttons);
+
+    w->pressed[2] = 1;
+    w->shaft[1] = -7;
+    ++w->seq;
+
+    CHECK(panel.pressed(2));
+    CHECK(!panel.pressed(1));
+    CHECK(panel.shaft(1) == -7);
+    CHECK(panel.seq() == 1);
+
+    // And the program mirrors it into its devices, the way a board file
+    // would in the idle path.
+    brio::SimButton<3>::set(panel.pressed(2));
+    Knob::set_shaft(panel.shaft(1));
+    CHECK(brio::SimButton<3>::read());
+    ::munmap(p, brio::sim_panel_bytes);
+}
+
+TEST_CASE("a panel name too long is refused rather than truncated") {
+    CHECK_THROWS_AS(brio::SimPanel(std::string(40, 'x')), std::runtime_error);
 }

@@ -1828,6 +1828,19 @@ brio/                    the framework, four strata:
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests
                            (configurable geometry, power-cut injection,
                            simulated reflash, wear counters)
+    shared_segment.hpp     SharedSegment: a named region two processes
+                           reach, OWNED BY THE PROGRAM - the name is the
+                           contract and never a path (macOS has no
+                           /dev/shm), at most 31 characters, sized ONCE at
+                           creation, and carrying a boot id because after
+                           an unlink a viewer's old mapping still points
+                           at the old object (docs/host/simulator.md)
+    sim_panel.hpp          SimPanel: the other direction - the contacts and
+                           shafts a VIEWER writes and the program reads in
+                           its idle path. A snapshot and not a stream, which
+                           is why it is a region and not a socket: nothing
+                           to frame, latest-wins by construction, and no
+                           question about an absent viewer
     sim_display.hpp        SimDisplay: a framebuffer published into POSIX
                            shared memory for a viewer in another process to
                            read at its own rate - NOT a surface, it hands out

@@ -93,6 +93,16 @@ public:
     /// would not produce.
     static void force(uint8_t state) { state_ = static_cast<uint8_t>(state & 3u); }
 
+    /// Put the shaft at an absolute count - what a panel's snapshot
+    /// carries. It SNAPS rather than walking through what was passed,
+    /// because that is what a decoder sampling once a tick sees anyway,
+    /// and hiding it would hide the one failure a decoder has.
+    static void set_shaft(int32_t count) {
+        // The Gray order a turn walks: count 0, 1, 2, 3 -> 00, 01, 11, 10.
+        constexpr uint8_t cycle[4] = {0b00, 0b01, 0b11, 0b10};
+        state_ = cycle[static_cast<uint32_t>(count) & 3u];
+    }
+
     /// Where the contacts are, for a test that wants to say so.
     static uint8_t state() { return state_; }
 
