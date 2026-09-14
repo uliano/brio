@@ -42,7 +42,14 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   over caller-owned buffers - blocks, not DMA - and the BlockRelay AO
   lending each filled block for one dispatch; built BEFORE its second
   implementation as the fixed point the next platform is measured
-  against).
+  against), `gfx.md` (drawing: the three kinds of surface told apart by
+  where a pixel's truth lives, the write-only base the library draws
+  through and nothing else, the two verbs panels are good at, the
+  conventions that would otherwise become one-pixel errors, no
+  compositing, and THE THREE PLANES OF TRUTH - a reference renderer for
+  the primitives, a differential oracle for the pipeline, the bench for
+  the silicon; the contract settled before the primitives so the easy
+  case cannot shape it).
 - `docs/<target>/` - one folder per target, mirroring
   `brio/<target>/` (`avrdx/`, `samc21/`, `stm32g0/`, `ch32v00x/`,
   `host/`): `README.md` is the
