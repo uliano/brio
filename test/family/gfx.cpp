@@ -57,9 +57,12 @@ void gfx_verbs() {
     round_rect(panel, 2, 2, 124, 60, 12, 1);
     fill_round_rect(panel, 20, 20, 40, 24, 200, 1); // radius past the clamp
 
-    // Coordinates far outside a 16-bit sum, which must clip and not wrap.
-    fill_rect(panel, -30000, -30000, 60000, 60000, 1);
-    line(panel, -20000, -20000, 20000, 20000, 1);
+    // The edges of the coordinate domain (gfx/surface.hpp's coord_max):
+    // a shape placed several screens away must clip, and on this family
+    // must do so without the arithmetic wrapping in sixteen bits.
+    fill_rect(panel, -coord_max, -coord_max, 2 * coord_max, 2 * coord_max, 1);
+    line(panel, -coord_max, -coord_max, coord_max, coord_max, 1);
+    line(panel, -coord_max, coord_max, coord_max, -coord_max, 1);
     circle(panel, -300, -300, 600, 1);
 
     // The square root the filled round shapes lean on, at the largest

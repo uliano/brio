@@ -55,6 +55,22 @@ namespace brio {
 /// A position. Signed: a shape may start off-surface and still show.
 using Coord = int16_t;
 
+/// THE COORDINATE DOMAIN. A position, and a surface's own dimensions,
+/// stay within this: a panel an MCU drives is at most some hundreds of
+/// pixels a side, and this leaves room to place a shape several screens
+/// outside one and let the clipping deal with it.
+///
+/// It exists because the segment's error term is tested at twice its
+/// value and reaches three times the segment's span - measured - so a
+/// domain is what lets that stepping stay sixteen bits wide instead of
+/// thirty-two. At 4096 the widest intermediate is 24574, a quarter of
+/// the type still spare.
+///
+/// A surface's size is checked against it; a coordinate a caller
+/// computes cannot be, which is why the number is generous enough that
+/// reaching it means something has already gone wrong.
+inline constexpr Coord coord_max = 4096;
+
 /// A width or a height. Never negative, and never added to a Coord:
 /// clip() reaches the same answer without forming that sum.
 using Extent = uint16_t;
@@ -265,6 +281,9 @@ class Framebuffer {
 public:
     using Format = Fmt;
     using Color = typename Fmt::Color;
+
+    static_assert(W <= coord_max && H <= coord_max,
+                  "a surface larger than the coordinate domain");
 
     static constexpr uint16_t stride = Fmt::stride_for(W);
     static constexpr size_t bytes = static_cast<size_t>(stride) * H;

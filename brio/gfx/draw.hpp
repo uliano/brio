@@ -148,22 +148,25 @@ void line(S& s, Coord x0, Coord y0, Coord x1, Coord y1, typename S::Color c) {
         return;
     }
 
-    int32_t x = x0;
-    int32_t y = y0;
-    const int32_t dx =
-        x1 > x0 ? static_cast<int32_t>(x1) - x0 : static_cast<int32_t>(x0) - x1;
-    const int32_t dy =
-        -(y1 > y0 ? static_cast<int32_t>(y1) - y0 : static_cast<int32_t>(y0) - y1);
-    const int32_t sx = x0 < x1 ? 1 : -1;
-    const int32_t sy = y0 < y1 ? 1 : -1;
-    int32_t err = dx + dy;
+    // Sixteen bits is enough for all of this INSIDE THE COORDINATE
+    // DOMAIN, and only there: the error is tested at twice its value and
+    // reaches three times the segment's span, so at the domain's edge
+    // the widest intermediate here is 24574. gfx/surface.hpp's
+    // `coord_max` is what buys that, and a fast type is what keeps a
+    // 32-bit part from paying to narrow.
+    int_fast16_t x = x0;
+    int_fast16_t y = y0;
+    const int_fast16_t dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    const int_fast16_t dy = -(y1 > y0 ? y1 - y0 : y0 - y1);
+    const int_fast16_t sx = x0 < x1 ? 1 : -1;
+    const int_fast16_t sy = y0 < y1 ? 1 : -1;
+    int_fast16_t err = dx + dy;
     for (;;) {
-        s.fill_rect(static_cast<Coord>(x),
-                static_cast<Coord>(y), 1, 1, c);
-        if (x == static_cast<int32_t>(x1) && y == static_cast<int32_t>(y1)) {
+        s.fill_rect(static_cast<Coord>(x), static_cast<Coord>(y), 1, 1, c);
+        if (x == x1 && y == y1) {
             return;
         }
-        const int32_t e2 = 2 * err;
+        const int_fast16_t e2 = 2 * err;
         if (e2 >= dy) {
             err += dy;
             x += sx;

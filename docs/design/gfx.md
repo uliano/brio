@@ -105,6 +105,20 @@ work is mostly axis-aligned and that path is the one panels are fast at.
   point. So an outline is not a filled shape's border: a filled shape
   with a border of another colour is TWO FILLED SHAPES, the larger drawn
   first - which is also the only form no-compositing allows.
+- **A coordinate stays within 4096 of the origin, and so does a
+  surface's own size.** A panel a microcontroller drives is at most some
+  hundreds of pixels a side, so this leaves room to place a shape
+  several screens outside one and let the clipping deal with it. The
+  number is not arbitrary: the segment's error term is tested at twice
+  its value and reaches THREE TIMES the segment's span - measured, not
+  reasoned, and a good deal worse than the algebra suggests - so the
+  domain is exactly what lets that stepping stay sixteen bits wide.
+  At 4096 its widest intermediate is 24574, a quarter of the type still
+  spare. A surface's size is checked against the domain where it is
+  declared; a coordinate a caller computes cannot be, which is why the
+  bound is generous enough that reaching it means something else has
+  already gone wrong - the classic producer of a distant coordinate is
+  not a large panel but a long list scrolled by a pixel offset.
 - **One bit per pixel is packed row-major, most significant bit
   leftmost, each row a whole number of bytes.** This is the layout of a
   framebuffer in memory, and it is deliberately not any panel's native
@@ -171,9 +185,9 @@ it:
 | what a program uses | CH32V00x | AVR DA/DB |
 |---|---|---|
 | clear and a filled rectangle | 386 | 628 |
-| plus the outline and the segment | 582 | 924 |
-| plus the circle, the disc and the two rounded rectangles | 1604 | 2560 |
-| plus text and a five-by-seven font | 2833 | 4038 |
+| plus the outline and the segment | 582 | 818 |
+| plus the circle, the disc and the two rounded rectangles | 1604 | 2492 |
+| plus text and a five-by-seven font | 2833 | 3970 |
 
 Two things worth reading off it. The round shapes cost MORE than the
 whole of text apart from its glyph table - an integer square root and
@@ -183,6 +197,35 @@ for. And the glyph table is 672 bytes of that last row, so on the
 smallest part brio touches - sixteen kilobytes - a complete graphical
 program pays about a sixth of its flash, of which a quarter is the
 alphabet.
+
+### The one place that still computes wider
+
+The segment is the exception to the rule above: its stepping keeps a
+32-bit error term. That is not an oversight, and the numbers say why.
+
+The error doubles - the algorithm tests twice the error against each
+axis - and, measured rather than reasoned, it reaches THREE TIMES the
+segment's span, not once. So keeping it in sixteen bits means a
+coordinate no larger than about 5400, and a shape may legitimately be
+placed far outside a surface: the classic producer of distant
+coordinates is not a large panel but a long list scrolled by a pixel
+offset, where an item's position grows with the list and leans on
+clipping to disappear.
+
+Two ways out, when it is worth taking one. Declare a coordinate domain -
+4096 is the round number, leaving a quarter of the type spare - which
+the surface side can enforce with a static assertion on its dimensions
+and the coordinate side only in a debug build. Or CLIP THE SEGMENT
+FIRST, which bounds the span by the surface instead of by the type and
+so needs no domain at all, the same move that keeps the rectangle clip
+narrow; the cost is that clipping a segment correctly means adjusting
+its error term and not merely moving its endpoints, or the pixels shift
+by one - which the exhaustive comparison against the reference would
+catch at once.
+
+Neither is urgent: the wide arithmetic here runs once per pixel of a
+segment and not once per primitive, and a segment lying mostly outside
+the surface - the only case that wastes much - is rare in an interface.
 
 ## The three planes of truth
 
