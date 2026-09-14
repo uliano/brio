@@ -80,12 +80,16 @@
  * PLL from either root). LSI, LSE, the SAI PLL and the AHB prescaler are
  * DECLARED and refused.
  *
- * THE AUDIO PLL IS NOT A SYSCLK ROOT and is therefore not a Clock task's
- * business: PLLI2S feeds the I2S kernel clock alone, off the same root
- * the main PLL uses, so its verbs sit on `Rcc` (the block that owns
- * PLLI2SCFGR and the I2S source selector) and stm32f4/spi.hpp is what
- * calls them. Where the header declares no PLLI2SON there is no audio PLL
- * and every one of those verbs answers false.
+ * NEITHER OF THE OTHER TWO PLLS IS A SYSCLK ROOT, and neither is
+ * therefore a Clock task's business. PLLI2S feeds the I2S kernel clock
+ * alone and PLLSAI the display controller's pixel clock (and the audio
+ * interface's), both off the same root and the same PLLM the main PLL
+ * uses, so their verbs sit on `Rcc` - the block that owns PLLI2SCFGR,
+ * PLLSAICFGR and the two selectors in RCC_DCKCFGR - and stm32f4/spi.hpp
+ * and stm32f4/ltdc.hpp are what call them. Where the header declares no
+ * PLLI2SON or no PLLSAION that PLL is not there and every one of its
+ * verbs answers false; and PLLSAI's R output, the pixel clock's, exists
+ * only where a display does.
  *
  * BOARD FACTS the apps of this project state: 8 MHz from the ST-LINK's
  * MCO into HSE in bypass on the Nucleo-F446RE (UM1724 7.9.1, board
@@ -239,6 +243,96 @@ constexpr PllI2sConfig plli2s_config_for(uint32_t src_hz, uint32_t out_hz, uint8
         }
     }
     return PllI2sConfig{};
+}
+
+/// The THIRD PLL's fields (RM0090 6.3.24), the one whose R output is the
+/// display controller's pixel clock and whose Q output the audio
+/// interface's. It has NO input divider of its own on any part of this
+/// family: PLLM is the main PLL's, so the VCO input is whatever the
+/// system clock already fixed. `n` is the VCO multiplier (50..432), `r`
+/// the LCD output divider (2..7) and `q` the SAI one (2..15); `r` is
+/// written only where the part declares the field (`pllsai_has_r()`).
+struct PllSaiConfig {
+    uint16_t n = 0;
+    uint8_t q = 0;
+    uint8_t r = 0;
+};
+
+inline constexpr uint32_t pllsai_r_min = 2;
+inline constexpr uint32_t pllsai_r_max = 7;
+
+/// RCC_DCKCFGR.PLLSAIDIVR - what the R output is divided by on its way
+/// to LCD_CLK (6.3.25). The enumerator's value IS the divider, and the
+/// register code is its log2 minus one.
+enum class LcdClockDivider : uint8_t { div2 = 2, div4 = 4, div8 = 8, div16 = 16 };
+
+constexpr uint8_t lcd_divider_code(LcdClockDivider d) {
+    switch (d) {
+        case LcdClockDivider::div2: return 0;
+        case LcdClockDivider::div4: return 1;
+        case LcdClockDivider::div8: return 2;
+        default: return 3;
+    }
+}
+
+/// The R output a configuration produces from a `src_hz` root, `main_m`
+/// being the main PLL's input divider (this PLL has none of its own).
+/// 0 when the configuration is empty.
+constexpr uint32_t pllsai_r_hz(uint32_t src_hz, const PllSaiConfig& c, uint8_t main_m) {
+    if (main_m == 0u || c.n == 0u || c.r == 0u) {
+        return 0u;
+    }
+    return (src_hz / main_m) * c.n / c.r;
+}
+
+/// LCD_CLK: the R output over the DCKCFGR divider.
+constexpr uint32_t lcd_clock_hz(uint32_t pllsai_r, LcdClockDivider d) {
+    return pllsai_r / static_cast<uint32_t>(d);
+}
+
+/// A PLLSAI configuration and an LCD_CLK divider together: what a pixel
+/// clock really takes, since the same rate is reachable through several
+/// (N, R, divider) triples and only the triple is programmable.
+struct LcdClockConfig {
+    PllSaiConfig pll{};
+    LcdClockDivider divider = LcdClockDivider::div2;
+};
+
+/// The exact triple for an LCD_CLK of `lcd_hz` off a `src_hz` root under
+/// the main PLL's `main_m`, within the same VCO limits the other two
+/// PLLs obey (the input 1..2 MHz, the VCO 100..432 MHz, N 50..432).
+/// `pll.n == 0` when no exact triple exists - the caller then states a
+/// pixel clock this root cannot make, and the driver refuses it rather
+/// than running the panel a few per cent off.
+constexpr LcdClockConfig lcd_clock_config_for(uint32_t src_hz, uint32_t lcd_hz, uint8_t main_m) {
+    if (main_m == 0u || lcd_hz == 0u || src_hz % main_m != 0u) {
+        return LcdClockConfig{};
+    }
+    const uint32_t in = src_hz / main_m;
+    if (in < pll_input_min_hz || in > pll_input_max_hz) {
+        return LcdClockConfig{};
+    }
+    constexpr LcdClockDivider dividers[] = {LcdClockDivider::div2, LcdClockDivider::div4,
+                                            LcdClockDivider::div8, LcdClockDivider::div16};
+    for (LcdClockDivider d : dividers) {
+        const uint32_t r_out = lcd_hz * static_cast<uint32_t>(d);
+        for (uint8_t r = 2; r <= 7; ++r) {
+            const uint32_t vco = r_out * r;
+            if (vco < pll_vco_min_hz || vco > pll_vco_max_hz || vco % in != 0u) {
+                continue;
+            }
+            const uint32_t n = vco / in;
+            if (n < 50u || n > 432u) {
+                continue;
+            }
+            uint8_t q = 2;
+            while (q < 15 && vco / q > pll_q_domain_max_hz) {
+                ++q;
+            }
+            return LcdClockConfig{PllSaiConfig{static_cast<uint16_t>(n), q, r}, d};
+        }
+    }
+    return LcdClockConfig{};
 }
 
 /// What the I2S kernel clock may be taken from. Which of the four a part
@@ -524,6 +618,115 @@ struct Rcc {
 #else
         (void)on_apb2;
         return I2sSource::plli2s_r;
+#endif
+    }
+
+    // ---- the third PLL and the pixel clock (6.3.24, 6.3.25) --------------------------
+    //
+    // PLLSAI sits beside the audio PLL on the same root and the same
+    // PLLM, and its R output over DCKCFGR.PLLSAIDIVR is LCD_CLK - the
+    // one clock the display controller counts pixels on. The verbs sit
+    // with the block that owns the registers, as the audio PLL's do, and
+    // stm32f4/ltdc.hpp is what calls them. Absent where the header
+    // declares no PLLSAION, and the R half absent again on the part that
+    // has this PLL for its audio interface alone: every verb below then
+    // answers false and writes nothing.
+    static void pllsai_enable(bool on) {
+#if defined(RCC_CR_PLLSAION)
+        bit(RCC->CR, RCC_CR_PLLSAION, on);
+#else
+        (void)on;
+#endif
+    }
+    static bool pllsai_ready() {
+#if defined(RCC_CR_PLLSAIRDY)
+        return (RCC->CR & RCC_CR_PLLSAIRDY) != 0u;
+#else
+        return false;
+#endif
+    }
+    static bool pllsai_wait(bool ready) {
+#if defined(RCC_CR_PLLSAIRDY)
+        return wait(RCC->CR, RCC_CR_PLLSAIRDY, ready);
+#else
+        return !ready;
+#endif
+    }
+
+    /// Write PLLSAICFGR from a configuration. Refused (false, nothing
+    /// written) while the PLL is on - 6.3.24 allows the write only then -
+    /// when N is out of the chapter's 50..432, and when R is asked for on
+    /// a part whose PLL has no R output.
+    static bool pllsai_configure(const PllSaiConfig& c) {
+#if defined(RCC_CR_PLLSAION)
+        if (c.n < 50u || c.n > 432u || (RCC->CR & RCC_CR_PLLSAION) != 0u) {
+            return false;
+        }
+        if (c.r != 0u && (c.r < 2u || c.r > 7u)) {
+            return false;
+        }
+        if (c.r != 0u && !pllsai_has_r()) {
+            return false;
+        }
+        uint32_t v = static_cast<uint32_t>(c.n) << RCC_PLLSAICFGR_PLLSAIN_Pos;
+#if defined(RCC_PLLSAICFGR_PLLSAIQ_Pos)
+        v |= static_cast<uint32_t>(c.q == 0u ? 2u : c.q) << RCC_PLLSAICFGR_PLLSAIQ_Pos;
+#endif
+#if defined(RCC_PLLSAICFGR_PLLSAIR_Pos)
+        v |= static_cast<uint32_t>(c.r == 0u ? 2u : c.r) << RCC_PLLSAICFGR_PLLSAIR_Pos;
+#endif
+        RCC->PLLSAICFGR = v;
+        return true;
+#else
+        (void)c;
+        return false;
+#endif
+    }
+
+    /// What PLLSAICFGR holds now (r stays 0 where the part has no R
+    /// output).
+    static PllSaiConfig pllsai_config() {
+        PllSaiConfig c{};
+#if defined(RCC_CR_PLLSAION)
+        const uint32_t v = RCC->PLLSAICFGR;
+        c.n = static_cast<uint16_t>((v & RCC_PLLSAICFGR_PLLSAIN_Msk) >> RCC_PLLSAICFGR_PLLSAIN_Pos);
+#if defined(RCC_PLLSAICFGR_PLLSAIQ_Pos)
+        c.q = static_cast<uint8_t>((v & RCC_PLLSAICFGR_PLLSAIQ_Msk) >> RCC_PLLSAICFGR_PLLSAIQ_Pos);
+#endif
+#if defined(RCC_PLLSAICFGR_PLLSAIR_Pos)
+        c.r = static_cast<uint8_t>((v & RCC_PLLSAICFGR_PLLSAIR_Msk) >> RCC_PLLSAICFGR_PLLSAIR_Pos);
+#endif
+#endif
+        return c;
+    }
+
+    /// RCC_DCKCFGR.PLLSAIDIVR, the last division on the way to LCD_CLK.
+    /// 6.3.25 asks for it to be written with the PLL off, which is
+    /// refused here rather than trusted.
+    static bool lcd_clock_divider(LcdClockDivider d) {
+#if defined(RCC_DCKCFGR_PLLSAIDIVR)
+        if ((RCC->CR & RCC_CR_PLLSAION) != 0u) {
+            return false;
+        }
+        RCC->DCKCFGR = (RCC->DCKCFGR & ~RCC_DCKCFGR_PLLSAIDIVR_Msk) |
+                       (static_cast<uint32_t>(lcd_divider_code(d)) << RCC_DCKCFGR_PLLSAIDIVR_Pos);
+        return true;
+#else
+        (void)d;
+        return false;
+#endif
+    }
+
+    static LcdClockDivider lcd_clock_divider() {
+#if defined(RCC_DCKCFGR_PLLSAIDIVR)
+        switch ((RCC->DCKCFGR & RCC_DCKCFGR_PLLSAIDIVR_Msk) >> RCC_DCKCFGR_PLLSAIDIVR_Pos) {
+            case 0: return LcdClockDivider::div2;
+            case 1: return LcdClockDivider::div4;
+            case 2: return LcdClockDivider::div8;
+            default: return LcdClockDivider::div16;
+        }
+#else
+        return LcdClockDivider::div2;
 #endif
     }
 

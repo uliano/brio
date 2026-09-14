@@ -316,10 +316,13 @@ gets its home in `docs/design/` when taken.
   decision below), the CRC unit, the RNG (written for the parts that
   have one, measured on the STM32F429), the bxCAN in loopback and the FMPI2C1 of the
   F410/F412/F413/F446 - the STM32G0's I2C under another name, measured
-  on a bus with no device on it, and the FMC with the SDRAM a board
-  carries (8 MB byte-exact, the two traps against the manual). What
-  remains: on the F429 alone LTDC + DMA2D, the memory-mapped display
-  tier over that SDRAM; the frequency ladders of the five part
+  on a bus with no device on it, the FMC with the SDRAM a board
+  carries (8 MB byte-exact, the two traps against the manual), and on
+  the F429 alone the LTDC and the DMA2D - the memory-mapped display
+  tier over that SDRAM, the panel driven in its RGB mode and the
+  bandwidth the tier lives on measured (two layers of 32-bit pixels at
+  65 Hz plus the accelerator, some 160 MB/s over one bus). What remains:
+  the frequency ladders of the five part
   classes whose manuals are not on the desk; the debuggers (cortex-debug
   entries written, not driven). Tenuto only, the equal-priority
   promise kept; Rubato and BASEPRI are another type and another day.
@@ -1595,6 +1598,42 @@ brio/                    the framework, four strata:
                            select each, BCR/BTR/BWTR whole, the extended mode)
                            and the tasks FmcSram<n> / FmcNor<n>; the NAND and
                            PC Card halves are presence facts and no verbs
+    ltdc.hpp               the LCD-TFT DISPLAY CONTROLLER (ch. 16), on the
+                           parts with a panel interface alone: the pixel
+                           packers (argb8888/rgb888/rgb565/argb1555/argb4444,
+                           pure arithmetic, everywhere), LtdcTiming (a panel's
+                           own eight numbers, the accumulation and the minus
+                           ones this file's) with ltdc_frame_pixels /
+                           ltdc_frame_rate_mhz / ltdc_fetch_bytes_per_second,
+                           LtdcFramebuffer<Pixel> (a rectangle of memory as a
+                           typed surface, WRITTEN and never read by the CPU -
+                           ES0206 2.3.5), Ltdc (the block: the pixel clock off
+                           PLLSAI's R output, the four timing registers, the
+                           background, the dithering whose widths are READ-
+                           ONLY, the shadow-reload discipline with the domain
+                           race it covers for its caller, the four events over
+                           TWO vectors and one ISR body taking the mask of the
+                           pair its vector carries, the position counter) and
+                           LtdcLayer<1|2> (the window counted from the back
+                           porch, the eight formats, the frame buffer's three
+                           registers with 16.7.23's "+ 3", the constant alpha
+                           and the two legal blending codes of each factor, the
+                           colour key, the default colour and the CLUT - the
+                           one layer register that is not shadowed)
+    dma2d.hpp              the CHROM-ART ACCELERATOR (ch. 11), on a WIDER set
+                           of parts than the display: Dma2d over the four modes
+                           as four verbs (fill, copy, convert, blend, with copy
+                           refusing a pair of unequal WIDTH because that mode
+                           does not convert), Dma2dSource / Dma2dOutput /
+                           Dma2dArea (offsets in PIXELS, addresses in BYTES
+                           aligned to the format), the eleven input formats and
+                           five output ones, both colour tables loaded by the
+                           engine or by the CPU, the six events, the abort and
+                           the suspend, and the AHB dead time - the one knob a
+                           program has for sharing a memory with a display
+                           controller's fetch. 11.3.11's blend and the output
+                           packings are constexpr beside the registers, which
+                           is what a test judges the silicon against
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)

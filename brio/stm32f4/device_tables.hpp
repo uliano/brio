@@ -3308,4 +3308,171 @@ constexpr IRQn_Type fmc_irq() {
 #endif
 }
 
+// ---- the display controller and the accelerator ---------------------------------
+//
+// WHAT THE HEADER ANSWERS, for RM0090 ch. 16 (the LTDC) and ch. 11 (the
+// DMA2D):
+//  - WHICH OF THE TWO A PART CARRIES, and they are not the same set.
+//    The LTDC is on the parts with a display interface (LTDC_BASE); the
+//    DMA2D is on those AND on the two of the same class without a
+//    display (DMA2D_BASE), because an accelerator that fills and
+//    converts memory is useful with no panel at all. A part may
+//    therefore have the accelerator and no controller, and the two
+//    questions are asked separately.
+//  - WHETHER THE PART HAS THE SECOND PLL, and what that PLL's outputs
+//    are. PLLSAI is the LTDC's clock root, and its R output exists only
+//    where a display does: the parts with a display declare
+//    PLLSAICFGR.PLLSAIR and DCKCFGR.PLLSAIDIVR, the one without declares
+//    neither and keeps the P and Q outputs for the audio interface. So
+//    "has a second PLL" and "that PLL can make a pixel clock" are two
+//    facts, not one.
+// Nothing else here is per part: the two layers, the eight pixel
+// formats, the register offsets and the blending are the same wherever
+// the block is, and are stated in stm32f4/ltdc.hpp and
+// stm32f4/dma2d.hpp where they are used.
+
+/// Whether this part carries the LCD-TFT display controller.
+constexpr bool ltdc_present() {
+#if defined(LTDC_BASE)
+    return true;
+#else
+    return false;
+#endif
+}
+
+constexpr uint32_t ltdc_base() {
+#if defined(LTDC_BASE)
+    return LTDC_BASE;
+#else
+    return 0u;
+#endif
+}
+
+/// The base of one layer's register block. The two are 0x80 apart and
+/// the first sits 0x84 into the peripheral (16.7.14), which is why the
+/// device header declares them as two separate bases rather than as an
+/// array inside LTDC_TypeDef.
+constexpr uint32_t ltdc_layer_base(uint8_t layer) {
+#if defined(LTDC_Layer1_BASE)
+    switch (layer) {
+        case 1: return LTDC_Layer1_BASE;
+        case 2: return LTDC_Layer2_BASE;
+        default: return 0u;
+    }
+#else
+    (void)layer;
+    return 0u;
+#endif
+}
+
+/// Two layers wherever the controller exists (16.4.2); zero elsewhere.
+constexpr uint8_t ltdc_layers() { return ltdc_present() ? 2u : 0u; }
+
+/// RCC_APB2ENR.LTDCEN and RCC_APB2RSTR.LTDCRST, both bit 26. The reset
+/// line puts all three of the block's clock domains back (16.3.2).
+constexpr uint32_t ltdc_clock_mask() {
+#if defined(RCC_APB2ENR_LTDCEN)
+    return RCC_APB2ENR_LTDCEN;
+#else
+    return 0u;
+#endif
+}
+
+constexpr uint32_t ltdc_reset_mask() {
+#if defined(RCC_APB2RSTR_LTDCRST)
+    return RCC_APB2RSTR_LTDCRST;
+#else
+    return 0u;
+#endif
+}
+
+/// TWO vectors, not one (16.5, figure 85): the line and register-reload
+/// events on the global one, the FIFO underrun and the transfer error on
+/// the error one.
+constexpr IRQn_Type ltdc_irq() {
+#if defined(LTDC_BASE)
+    return LTDC_IRQn;
+#else
+    return NonMaskableInt_IRQn;
+#endif
+}
+
+constexpr IRQn_Type ltdc_error_irq() {
+#if defined(LTDC_BASE)
+    return LTDC_ER_IRQn;
+#else
+    return NonMaskableInt_IRQn;
+#endif
+}
+
+/// Whether this part carries the Chrom-Art accelerator.
+constexpr bool dma2d_present() {
+#if defined(DMA2D_BASE)
+    return true;
+#else
+    return false;
+#endif
+}
+
+constexpr uint32_t dma2d_base() {
+#if defined(DMA2D_BASE)
+    return DMA2D_BASE;
+#else
+    return 0u;
+#endif
+}
+
+/// RCC_AHB1ENR.DMA2DEN and RCC_AHB1RSTR.DMA2DRST, both bit 23.
+constexpr uint32_t dma2d_clock_mask() {
+#if defined(RCC_AHB1ENR_DMA2DEN)
+    return RCC_AHB1ENR_DMA2DEN;
+#else
+    return 0u;
+#endif
+}
+
+constexpr uint32_t dma2d_reset_mask() {
+#if defined(RCC_AHB1RSTR_DMA2DRST)
+    return RCC_AHB1RSTR_DMA2DRST;
+#else
+    return 0u;
+#endif
+}
+
+constexpr IRQn_Type dma2d_irq() {
+#if defined(DMA2D_BASE)
+    return DMA2D_IRQn;
+#else
+    return NonMaskableInt_IRQn;
+#endif
+}
+
+/// Whether the part has the SECOND PLL beside the audio one (6.3.24).
+constexpr bool pllsai_present() {
+#if defined(RCC_CR_PLLSAION)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// Whether that PLL has the R output a pixel clock comes off, and the
+/// LCD_CLK divider behind it (6.3.24, 6.3.25). Both are absent on the
+/// part that has the PLL for its audio interface alone.
+constexpr bool pllsai_has_r() {
+#if defined(RCC_PLLSAICFGR_PLLSAIR_Pos)
+    return true;
+#else
+    return false;
+#endif
+}
+
+constexpr bool pllsai_has_lcd_divider() {
+#if defined(RCC_DCKCFGR_PLLSAIDIVR)
+    return true;
+#else
+    return false;
+#endif
+}
+
 } // namespace brio

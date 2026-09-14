@@ -397,6 +397,13 @@ HDSEL the receiver listens on the transmit pad, so everything the port
 sends it also hears - 128 bytes out through the transmit stream and 128
 back in through the receive stream, byte for byte, on one pad and no wire.
 
+**A buffer a bus master writes must be `volatile`.** The compiler sees
+an address handed to a register as an integer nothing dereferences, and
+is free to keep the buffer's old bytes in a register across the
+transfer: a value that printed as zero compared equal to the pattern in
+the same function said so (measured in the accelerator's chapter, true
+of every stream here).
+
 **The re-arm gap of a non-circular receive stream, measured.** A receive
 run that fills stops the stream, and the byte that arrives before
 `harvest()` has started the next run can be lost - SILENTLY, with no
