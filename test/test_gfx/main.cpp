@@ -7,15 +7,25 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>
 
+#include <fcntl.h>
 #include <stdint.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <array>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
 #include "gfx/draw.hpp"
+#include "gfx/font_5x7.hpp"
+#include "gfx/pen.hpp"
 #include "gfx/surface.hpp"
+#include "gfx/text.hpp"
 #include "host/gfx_reference.hpp"
+#include "host/sim_display.hpp"
 
 using brio::clip;
 using brio::Coord;
@@ -547,6 +557,364 @@ TEST_CASE("clear paints the whole surface and nothing beyond it") {
     // The padding bits of the last byte of a row are not the surface's
     // and a reader must never see them as pixels.
     CHECK(c.fb.bits().size() == size_t(2) * 5);
+}
+
+// ---------------------------------------------------------------------
+// Text: the geometry against the reference, the glyphs against a golden.
+// ---------------------------------------------------------------------
+
+TEST_CASE("the font answers for everything it is asked") {
+    static_assert(brio::Font<brio::Font5x7>);
+
+    // Past the glyph is the line gap, on every character.
+    for (int ch = 0; ch < 256; ++ch) {
+        for (Extent row = brio::Font5x7::glyph_h; row < brio::Font5x7::cell_h;
+             ++row) {
+            REQUIRE(brio::Font5x7::row_bits(uint8_t(ch), row) == 0);
+        }
+    }
+
+    // The advance column is always background, so cells tile with no
+    // seam and an opaque write covers the whole of what stood there.
+    for (int ch = 0; ch < 256; ++ch) {
+        for (Extent row = 0; row < brio::Font5x7::cell_h; ++row) {
+            INFO("ch=" << ch << " row=" << row);
+            REQUIRE((brio::Font5x7::row_bits(uint8_t(ch), row) & 1u) == 0);
+        }
+    }
+
+    // Outside the range every character draws the same visible box.
+    const uint8_t box_top = brio::Font5x7::row_bits(0x1F, 0);
+    CHECK(box_top == brio::Font5x7::row_bits(0x7F, 0));
+    CHECK(box_top == brio::Font5x7::row_bits(0xFF, 0));
+    CHECK(box_top != 0);
+    // A space is inside the range and draws nothing at all.
+    for (Extent row = 0; row < brio::Font5x7::cell_h; ++row) {
+        REQUIRE(brio::Font5x7::row_bits(' ', row) == 0);
+    }
+}
+
+TEST_CASE("text lands where the reference says, wherever it is put") {
+    constexpr Extent W = 40;
+    constexpr Extent H = 20;
+    Canvas<Mono, W, H> c;
+    const char* words[] = {"", "i", "Hg", "brio", "0123456789"};
+
+    for (const char* w : words) {
+        for (Coord x = -8; x <= Coord(W + 2); x += 3) {
+            for (Coord y = -5; y <= Coord(H + 1); y += 2) {
+                c.wipe();
+                brio::text<brio::Font5x7>(c.fb, x, y, w, 1, 0);
+
+                RefCanvas ref(W, H);
+                ref.text<brio::Font5x7>(x, y, w, 1, 0);
+
+                const GfxDiff d = brio::compare(c.fb, ref);
+                INFO("\"" << w << "\" at (" << x << "," << y << ")\n" << d.map);
+                REQUIRE(d.agree());
+            }
+        }
+    }
+}
+
+TEST_CASE("text returns where the next cell would start") {
+    Canvas<Mono, 60, 10> c;
+    const Coord after = brio::text<brio::Font5x7>(c.fb, 4, 1, "abc", 1, 0);
+    CHECK(after == Coord(4 + 3 * brio::Font5x7::cell_w));
+    // An empty string draws nothing and does not move.
+    CHECK(brio::text<brio::Font5x7>(c.fb, 7, 1, "", 1, 0) == 7);
+}
+
+TEST_CASE("a field erases what it no longer holds") {
+    constexpr Extent W = 60;
+    constexpr Extent H = 10;
+    Canvas<Mono, W, H> c;
+    constexpr Extent cells = 5;
+
+    // A long value, then a short one over it: nothing of the first may
+    // survive - the write-only erase discipline, as a verb.
+    brio::text_field<brio::Font5x7>(c.fb, 2, 1, "88888", cells, 1, 0);
+    brio::text_field<brio::Font5x7>(c.fb, 2, 1, "7", cells, 1, 0);
+
+    Canvas<Mono, W, H> fresh;
+    brio::text_field<brio::Font5x7>(fresh.fb, 2, 1, "7", cells, 1, 0);
+
+    for (Extent y = 0; y < H; ++y) {
+        for (Extent x = 0; x < W; ++x) {
+            INFO("at (" << x << "," << y << ")");
+            REQUIRE(c.fb.get_pixel(Coord(x), Coord(y)) ==
+                    fresh.fb.get_pixel(Coord(x), Coord(y)));
+        }
+    }
+}
+
+TEST_CASE("a field is exactly its width, and cuts what will not fit") {
+    constexpr Extent W = 60;
+    constexpr Extent H = 10;
+    Canvas<Mono, W, H> c;
+    constexpr Extent cells = 3;
+
+    const Coord after =
+        brio::text_field<brio::Font5x7>(c.fb, 2, 1, "abcdef", cells, 1, 0);
+    CHECK(after == Coord(2 + cells * brio::Font5x7::cell_w));
+
+    // Nothing past the field's last column was touched.
+    for (Extent y = 0; y < H; ++y) {
+        for (Extent x = Extent(2 + cells * brio::Font5x7::cell_w); x < W; ++x) {
+            INFO("at (" << x << "," << y << ")");
+            REQUIRE(c.fb.get_pixel(Coord(x), Coord(y)) == 0);
+        }
+    }
+
+    // And the first three cells are the first three characters.
+    Canvas<Mono, W, H> want;
+    brio::text<brio::Font5x7>(want.fb, 2, 1, "abc", 1, 0);
+    for (Extent y = 0; y < H; ++y) {
+        for (Extent x = 0; x < W; ++x) {
+            REQUIRE(c.fb.get_pixel(Coord(x), Coord(y)) ==
+                    want.fb.get_pixel(Coord(x), Coord(y)));
+        }
+    }
+}
+
+TEST_CASE("the glyphs are the ones that were looked at") {
+    // What no reference can judge: the SHAPE of a letter. The whole
+    // printable set is rendered and frozen; a diff against this file is
+    // a human's business to approve, not a test's to explain.
+    constexpr Extent W = 16 * brio::Font5x7::cell_w;
+    constexpr Extent H = 6 * brio::Font5x7::cell_h;
+    Canvas<Mono, W, H> c;
+    for (int row = 0; row < 6; ++row) {
+        std::string line;
+        for (int i = 0; i < 16; ++i) {
+            const int ch = 0x20 + row * 16 + i;
+            line += (ch <= 0x7E) ? char(ch) : ' ';
+        }
+        brio::text<brio::Font5x7>(c.fb, 0, Coord(row * brio::Font5x7::cell_h),
+                                  line, 1, 0);
+    }
+
+    std::ifstream in(BRIO_SUITE_DIR "/golden/font_5x7.txt");
+    REQUIRE(in.good());
+    const std::string want((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+    const std::string got = brio::ascii(c.fb);
+    INFO("rendered:\n" << got);
+    CHECK(got == want);
+}
+
+// ---------------------------------------------------------------------
+// The pen.
+// ---------------------------------------------------------------------
+
+TEST_CASE("a pen is the stateless primitives with the arguments remembered") {
+    constexpr Extent W = 30;
+    constexpr Extent H = 20;
+    Canvas<Mono, W, H> pen_side;
+    Canvas<Mono, W, H> plain_side;
+
+    brio::Pen<Canvas<Mono, W, H>::Fb> p(pen_side.fb, 1, 0);
+    p.move_to(2, 3);
+    p.line_to(20, 15);
+    p.line_to(25, 2);
+    p.move_to(10, 10);
+    p.circle(4);
+
+    brio::line(plain_side.fb, 2, 3, 20, 15, 1);
+    brio::line(plain_side.fb, 20, 15, 25, 2, 1);
+    brio::circle(plain_side.fb, 10, 10, 4, 1);
+
+    for (Extent y = 0; y < H; ++y) {
+        for (Extent x = 0; x < W; ++x) {
+            INFO("at (" << x << "," << y << ")");
+            REQUIRE(pen_side.fb.get_pixel(Coord(x), Coord(y)) ==
+                    plain_side.fb.get_pixel(Coord(x), Coord(y)));
+        }
+    }
+    // The cursor is left at the end of the last segment drawn.
+    CHECK(p.x() == 10);
+    CHECK(p.y() == 10);
+}
+
+TEST_CASE("a pen carries the text cursor across calls") {
+    constexpr Extent W = 60;
+    constexpr Extent H = 20;
+    Canvas<Mono, W, H> by_pen;
+    Canvas<Mono, W, H> by_hand;
+
+    brio::Pen<Canvas<Mono, W, H>::Fb> p(by_pen.fb, 1, 0);
+    p.move_to(1, 2);
+    p.text<brio::Font5x7>("ab");
+    p.text<brio::Font5x7>("cd");
+
+    brio::text<brio::Font5x7>(by_hand.fb, 1, 2, "abcd", 1, 0);
+
+    for (Extent y = 0; y < H; ++y) {
+        for (Extent x = 0; x < W; ++x) {
+            INFO("at (" << x << "," << y << ")");
+            REQUIRE(by_pen.fb.get_pixel(Coord(x), Coord(y)) ==
+                    by_hand.fb.get_pixel(Coord(x), Coord(y)));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Publishing a framebuffer to another process.
+// ---------------------------------------------------------------------
+
+namespace {
+
+// What a viewer does: attach BY NAME - never by a path, which macOS does
+// not have - read only, and find the size from the object itself.
+struct Attached {
+    uint8_t* base{nullptr};
+    size_t bytes{0};
+
+    explicit Attached(const std::string& name) {
+        const int fd = ::shm_open(name.c_str(), O_RDONLY, 0);
+        if (fd < 0) {
+            return;
+        }
+        struct stat st {};
+        if (::fstat(fd, &st) == 0) {
+            bytes = size_t(st.st_size);
+            void* p = ::mmap(nullptr, bytes, PROT_READ, MAP_SHARED, fd, 0);
+            base = (p == MAP_FAILED) ? nullptr : static_cast<uint8_t*>(p);
+        }
+        ::close(fd);
+    }
+    ~Attached() {
+        if (base != nullptr) {
+            ::munmap(base, bytes);
+        }
+    }
+    Attached(const Attached&) = delete;
+    Attached& operator=(const Attached&) = delete;
+
+    bool ok() const { return base != nullptr; }
+    const brio::SimDisplayHeader* header() const {
+        return reinterpret_cast<const brio::SimDisplayHeader*>(base);
+    }
+    const uint8_t* pixels() const { return base + brio::sim_display_header_bytes; }
+};
+
+std::string unique_name(const char* tag) {
+    return std::string(tag) + std::to_string(::getpid() % 100000);
+}
+
+} // namespace
+
+TEST_CASE("a published framebuffer describes itself to whoever attaches") {
+    const std::string n = unique_name("hdr");
+    brio::SimDisplay<Mono, 128, 64> d(n);
+
+    Attached v(d.name());
+    REQUIRE(v.ok());
+    const auto* h = v.header();
+    CHECK(std::string(h->magic, 4) == "BRGX");
+    CHECK(h->version == 1);
+    CHECK(h->header_bytes == brio::sim_display_header_bytes);
+    CHECK(h->width == 128);
+    CHECK(h->height == 64);
+    CHECK(h->stride == 16);
+    CHECK(h->format == 1);
+    CHECK(h->buffers == 1);
+    CHECK(h->front == 0);
+    CHECK(h->palette_used == 2);
+    // A viewer needs no arguments: the size comes from the object.
+    CHECK(v.bytes == brio::SimDisplay<Mono, 128, 64>::total_bytes);
+}
+
+TEST_CASE("what is drawn is what another mapping sees, with no copy") {
+    const std::string n = unique_name("px");
+    brio::SimDisplay<Mono, 64, 32> d(n);
+    Attached v(d.name());
+    REQUIRE(v.ok());
+
+    auto fb = d.surface();
+    brio::clear(fb, 0);
+    brio::rect(fb, 0, 0, 64, 32, 1);
+    brio::line(fb, 0, 0, 63, 31, 1);
+    brio::text<brio::Font5x7>(fb, 4, 4, "hi", 1, 0);
+
+    // Read the SAME pages back the way a viewer would, and compare
+    // against the surface itself pixel by pixel.
+    for (Extent y = 0; y < 32; ++y) {
+        for (Extent x = 0; x < 64; ++x) {
+            const uint8_t* row = v.pixels() + size_t(y) * 8;
+            const uint8_t got = Mono::get(row, x);
+            INFO("at (" << x << "," << y << ")");
+            REQUIRE(got == fb.get_pixel(Coord(x), Coord(y)));
+        }
+    }
+
+    // And a later write is seen through the mapping already held.
+    brio::fill_rect(fb, 10, 10, 4, 4, 1);
+    CHECK(Mono::get(v.pixels() + size_t(11) * 8, 11) == 1);
+}
+
+TEST_CASE("publish marks the picture, for a viewer that repaints on change") {
+    const std::string n = unique_name("pub");
+    brio::SimDisplay<Indexed8, 16, 8> d(n);
+    Attached v(d.name());
+    REQUIRE(v.ok());
+
+    CHECK(v.header()->frame == 0);
+    d.publish();
+    d.publish();
+    CHECK(v.header()->frame == 2);
+    CHECK(d.frame() == 2);
+}
+
+TEST_CASE("the palette travels, because a byte alone shows nothing") {
+    const std::string n = unique_name("pal");
+    brio::SimDisplay<Indexed8, 8, 8> d(n);
+    Attached v(d.name());
+    REQUIRE(v.ok());
+
+    // An 8-bit surface defaults to a grey ramp: the identity palette.
+    CHECK(v.header()->palette_used == 256);
+    CHECK(v.header()->palette[128][0] == 128);
+    CHECK(v.header()->palette[128][1] == 128);
+
+    d.set_palette(1, 0x00, 0x40, 0xFF);
+    CHECK(v.header()->palette[1][0] == 0x00);
+    CHECK(v.header()->palette[1][1] == 0x40);
+    CHECK(v.header()->palette[1][2] == 0xFF);
+}
+
+TEST_CASE("the boot id is why a viewer cannot trust a counter inside") {
+    const std::string n = unique_name("boot");
+
+    uint64_t first_id = 0;
+    {
+        brio::SimDisplay<Mono, 16, 8> d(n);
+        first_id = d.boot_id();
+        Attached held(d.name());
+        REQUIRE(held.ok());
+        CHECK(held.header()->boot_id == first_id);
+
+        // A second display under the same name unlinks the first and
+        // makes a new object. The mapping above still points at the OLD
+        // one - alive because it is still referenced - so nothing
+        // written inside that object could ever tell the viewer.
+        brio::SimDisplay<Mono, 16, 8> again(n);
+        CHECK(again.boot_id() != first_id);
+        CHECK(held.header()->boot_id == first_id); // the stale view
+
+        // Re-opening BY NAME is what finds the change.
+        Attached fresh(again.name());
+        REQUIRE(fresh.ok());
+        CHECK(fresh.header()->boot_id == again.boot_id());
+    }
+}
+
+TEST_CASE("a name too long is refused rather than truncated") {
+    // macOS caps a shared object's name at 31 characters, so a name that
+    // works here must work there.
+    CHECK_THROWS_AS(
+        (brio::SimDisplay<Mono, 8, 8>(std::string(40, 'x'))),
+        std::runtime_error);
 }
 
 // ---------------------------------------------------------------------

@@ -53,6 +53,11 @@ foreach(_main IN LISTS SUITE_MAINS)
         ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/doctest
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
+    # Where a suite's own golden files live, for the ones that keep any:
+    # a golden is data checked in beside its test, not a string literal
+    # buried in it, so that a human can look at it and a diff can show
+    # what moved.
+    target_compile_definitions(${_suite} PRIVATE BRIO_SUITE_DIR="${_dir}")
     target_compile_options(${_suite} PRIVATE
         -std=gnu++23 -g -Wall -Wextra -Werror
         -fsanitize=${BRIO_UBSAN_CHECKS_CSV}

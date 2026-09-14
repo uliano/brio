@@ -63,3 +63,59 @@ judges - a reference renderer, a reference decoder, anything a test
 measures an optimized implementation against. From this stratum it
 cannot be linked into a target image even by accident, which is a
 stronger guarantee than remembering not to.
+
+## A framebuffer another process can watch
+
+`brio/host/sim_display.hpp` publishes a framebuffer into POSIX shared
+memory, so that a viewer in another process reads the same physical
+pages at its own rate - which is what a display controller does on a
+part that has one, scanning memory the program never waits for. It is a
+model of the memory-mapped tier rather than an imitation: the drawing
+surface is an ordinary `Framebuffer` over the mapped bytes, and nothing
+in `brio/gfx/` learns where those bytes live.
+
+**The name is the contract, never a path.** Linux exposes these objects
+under `/dev/shm` and macOS exposes them nowhere in the filesystem, so a
+viewer attaches with `shm_open` under the same name and the path is a
+debugging convenience on one platform only. Two rules follow from the
+same place: a name is short, because macOS caps it at 31 characters; and
+a segment is SIZED ONCE at creation, because a second `ftruncate` fails
+there - so a change of geometry is a new segment and never a resize.
+
+**The layout**, all little-endian, pixels beginning at a fixed offset of
+1024 bytes whatever the header grows to inside it:
+
+| field | width | meaning |
+|---|---|---|
+| magic | 4 | `BRGX` |
+| version | 2 | of this layout |
+| header_bytes | 2 | where the pixels start |
+| boot_id | 8 | drawn afresh at every creation |
+| width, height | 2 each | pixels |
+| stride | 2 | bytes per row |
+| format | 1 | 1 = one bit per pixel, row-major, most significant bit leftmost; 8 = one byte per pixel |
+| buffers, front | 1 each | 1 and 0 today |
+| frame | 4 | bumped by `publish()` |
+| palette_used | 2 | how many entries the format reads |
+| palette | 256 x 3 | red, green, blue |
+
+**Why the boot id earns its eight bytes.** After a segment is unlinked
+and remade under the same name, a viewer's existing mapping still points
+at the OLD object, which stays alive as long as it is referenced - so
+nothing written inside that object could ever tell the viewer that
+anything changed. A viewer therefore re-opens by name every so often,
+compares the id, and remaps when it differs. That is also what lets it
+stay open across rebuilds and across different programs at different
+resolutions.
+
+**The palette travels** because a byte on its own shows nothing: a
+one-bit surface carries two colours, which is what lets an observer
+render a panel as it really looks - white on blue, black on green -
+instead of an idealized black and white.
+
+**Tearing is honest.** With one buffer a viewer can read a row the
+program is part way through writing, exactly as a real memory-mapped
+panel tears unless something swaps its buffers at the right moment. The
+`buffers` and `front` fields exist for the day that stops being
+acceptable; adding them later would have changed the layout under every
+viewer already written.

@@ -30,6 +30,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "gfx/surface.hpp"
@@ -249,6 +250,52 @@ public:
             }
             return dx * dx + dy * dy <= rr;
         }, c);
+    }
+
+    /**
+     * A line of text, by asking of every pixel which cell it falls in,
+     * which row and column of that cell it is, and whether the font
+     * lights that bit. No buffer, no run, no chunking, no advance
+     * carried from one character to the next.
+     *
+     * This judges the GEOMETRY - where cells land, how they tile, what
+     * the background covers, where the edge cuts - and not the glyphs:
+     * a reference reading the same font data agrees with the same
+     * mistake. Letter shapes are a golden image looked at once.
+     */
+    template <typename F>
+    void text(Coord x, Coord y, std::string_view str, uint8_t fg, uint8_t bg) {
+        if (str.empty()) {
+            return;
+        }
+        const int32_t cells = int32_t(str.size());
+        each([&](int32_t px, int32_t py) {
+            const int32_t dx = px - int32_t(x);
+            const int32_t dy = py - int32_t(y);
+            if (dx < 0 || dy < 0 || dy >= int32_t(F::cell_h)) {
+                return false;
+            }
+            const int32_t cell = dx / int32_t(F::cell_w);
+            if (cell >= cells) {
+                return false;
+            }
+            return true;
+        }, bg);
+        each([&](int32_t px, int32_t py) {
+            const int32_t dx = px - int32_t(x);
+            const int32_t dy = py - int32_t(y);
+            if (dx < 0 || dy < 0 || dy >= int32_t(F::cell_h)) {
+                return false;
+            }
+            const int32_t cell = dx / int32_t(F::cell_w);
+            if (cell >= cells) {
+                return false;
+            }
+            const int32_t col = dx % int32_t(F::cell_w);
+            const uint8_t bits =
+                F::row_bits(uint8_t(str[size_t(cell)]), Extent(dy));
+            return ((bits >> (int32_t(F::cell_w) - 1 - col)) & 1u) != 0;
+        }, fg);
     }
 
     /// '#' where lit, '.' where not; one line per row, a header naming

@@ -145,10 +145,8 @@ is the only erasing a write-only surface has.
   background covers the whole run.
 - **A field pads to a fixed number of cells**, which turns "the previous
   value is gone" from a recommendation into a verb.
-- **Formatted text composes with the existing print vocabulary** through
-  a sink, rather than opening a second path to the screen. A program
-  that prints a measurement to a serial line and to a panel writes it
-  once.
+A field is what an interface updates, so the field verb is the one that
+matters; drawing a bare string is what it is built from.
 
 ## No compositing
 
@@ -162,6 +160,29 @@ What follows in practice: an interface is laid out so that its elements
 do not overlap, erasing is drawing again in the background colour, and
 decorations drawn once when a screen is entered are never crossed by the
 fields that update inside it.
+
+## What it costs
+
+"Pays nothing it is not asked for" is a claim, so here is what it
+actually weighs. Measured as flash, compiled for size, over a
+one-bit-per-pixel panel of 128 by 64, each row adding to the one above
+it:
+
+| what a program uses | CH32V00x | AVR DA/DB |
+|---|---|---|
+| clear and a filled rectangle | 384 | 684 |
+| plus the outline and the segment | 580 | 980 |
+| plus the circle, the disc and the two rounded rectangles | 1602 | 2616 |
+| plus text and a five-by-seven font | 2813 | 4082 |
+
+Two things worth reading off it. The round shapes cost MORE than the
+whole of text apart from its glyph table - an integer square root and
+four functions are not free, and a program that draws only frames and
+fields never pays for them, which is what the free-function layering is
+for. And the glyph table is 672 bytes of that last row, so on the
+smallest part brio touches - sixteen kilobytes - a complete graphical
+program pays about a sixth of its flash, of which a quarter is the
+alphabet.
 
 ## The three planes of truth
 
@@ -223,6 +244,31 @@ corrects the simulator, never the other way round.
   tier's problem and arrives with it. What remains here is a budget
   question rather than a design one: a full-screen fill is a long step,
   to be measured and divided if a program cannot afford it.
+- **A stroke wider than one pixel.** Not an oversight and not hard to
+  compute - it is hard to SPECIFY, which is why it waits. A thin segment
+  has one obviously right answer (the nearest pixel at each step); a
+  thick one has to say where its ends stop (cut square across the
+  segment, extended past it, or rounded) and what happens where two
+  strokes meet (mitred, bevelled, rounded), and each of those is a
+  decision no reference renderer can settle on its own. The likely
+  specification, when it comes, is the CAPSULE - every pixel within half
+  the width of the segment - which the reference computes from the
+  definition exactly as it computes the shapes here, and which is not
+  the same set as several thin segments drawn side by side. A thick
+  AXIS-ALIGNED stroke needs none of this and already exists: it is a
+  filled rectangle. Nothing in the design forecloses the general case;
+  the pen carries a width when a drawing asks for one, and the
+  primitives gain overloads rather than changing.
+- **A sink that makes formatted text reach a panel.** The intent is
+  settled - a program that prints a measurement to a serial line and to
+  a screen should write it once, through the print vocabulary that
+  already exists, rather than through a second path of the screen's own
+  - and so is the mechanism, since a byte sink is a static contract and
+  a surface is an object: the surface arrives as a reference template
+  parameter, the way a journal reaches its panic reporter. What is NOT
+  settled is what such a sink does at the end of a line and at the edge
+  of its surface, and those are the whole of its behaviour. It is built
+  when that is decided, not before.
 - **Proportional fonts** - the fixed cell is load-bearing, above.
 - **A widget and screen vocabulary** - what an interface is made of,
   as opposed to what it is drawn with. It is born with the interface

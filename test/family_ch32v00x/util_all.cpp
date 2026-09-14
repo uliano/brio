@@ -65,6 +65,9 @@
 #include "util/wire.hpp"
 
 #include "gfx/draw.hpp"
+#include "gfx/font_5x7.hpp"
+#include "gfx/pen.hpp"
+#include "gfx/text.hpp"
 
 using namespace brio;
 
@@ -305,4 +308,11 @@ void gfx_verbs() {
     round_rect(gfx_panel, 2, 2, 124, 60, 12, 1);
     fill_round_rect(gfx_panel, 20, 20, 40, 24, 200, 1);
     static_assert(isqrt(65535UL * 65535UL) == 65535u);
+    text<Font5x7>(gfx_panel, 2, 2, "brio", 1, 0);
+    text_field<Font5x7>(gfx_panel, 2, 12, "3.30", 8, 1, 0);
+    Pen<GfxPanel> pen(gfx_panel, 1, 0);
+    pen.move_to(4, 30);
+    pen.line_to(60, 44);
+    pen.text<Font5x7>("V=");
+    pen.text_field<Font5x7>("12.5", 6);
 }

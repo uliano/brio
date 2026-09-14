@@ -13,6 +13,9 @@
 #include <array>
 
 #include "gfx/draw.hpp"
+#include "gfx/font_5x7.hpp"
+#include "gfx/pen.hpp"
+#include "gfx/text.hpp"
 
 using namespace brio;
 
@@ -64,6 +67,21 @@ void gfx_verbs() {
     // family `unsigned int` is SIXTEEN BITS, so 65535u * 65535u is 1.
     static_assert(isqrt(65535UL * 65535UL) == 65535u);
     static_assert(isqrt(0u) == 0u);
+
+    // Text: the font's table is the largest datum gfx puts in an image,
+    // so it is compiled here as well as instantiated.
+    text<Font5x7>(panel, 2, 2, "brio", 1, 0);
+    text_field<Font5x7>(panel, 2, 12, "3.30", 8, 1, 0);
+    text<Font5x7>(panel, -20, 40, "clipped at both ends of the panel", 1, 0);
+
+    Pen<Panel> pen(panel, 1, 0);
+    pen.move_to(4, 30);
+    pen.line_to(60, 44);
+    pen.circle(6);
+    pen.move_to(4, 50);
+    pen.text<Font5x7>("V=");
+    pen.text_field<Font5x7>("12.5", 6);
+    pen.new_line<Font5x7>(4);
 
     Viewport<Panel> window(panel, 8, 8, 48, 24);
     clear(window, 0);
