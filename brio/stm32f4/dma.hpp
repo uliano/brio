@@ -572,31 +572,24 @@ public:
 
     /**
      * Set EN in a write of its own (10.3.17 step 10, after everything
-     * else). Returns whether the silicon TOOK the enable: it clears EN
-     * again, and raises FEIF, on a FIFO threshold the memory burst does
-     * not divide (10.3.18), which is the failure this answer is for.
-     *
-     * AND THE STORE IS NOT VISIBLE TO THE LOAD THAT FOLLOWS IT.
-     * Measured (docs/stm32f4/dma.md): EN reads back 0 in the load right
-     * after the store and 1 in the one after that - one read of slack,
-     * and EN's alone, because a store into SxNDTR is visible to the very
-     * next load. A read-back taken at once therefore reports a perfectly
-     * good stream as a refused one, so the answer is polled over a few
-     * reads.
-     *
-     * A COMPLETION IS AS GOOD AN ANSWER AS A STANDING EN, for a second
-     * measured reason: a memory-to-memory block of a few hundred bytes
-     * can be over before the poll ends (256 bytes take under two
-     * microseconds at 180 MHz).
+     * else) - AND DO NOT READ SxCR BACK. Two measured facts decide the
+     * shape (docs/stm32f4/dma.md). The store is not visible to the load
+     * that follows it: EN reads 0 in the load right after and 1 in the
+     * one after that, so a read-back taken at once would report a good
+     * stream as a refused one. And on the STM32F446 and the STM32F411 A LOAD OF SxCR IN THE
+     * CYCLES AFTER THE STORE WEDGES THE STREAM every other time - sixteen
+     * bytes into the FIFO and nothing drains, EN standing, no flag, until
+     * the controller is reset - which is what a version of this verb that
+     * polled EN did, and what ST's library, which never reads back, does
+     * not. The one refusal the silicon can make at this point - a FIFO
+     * threshold the memory burst does not divide, 10.3.18 - is caught by
+     * configure() before the store, so there is nothing left to ask here;
+     * a caller that wants to know whether the stream is running asks
+     * enabled() or the flags LATER, as a handler or a poll would anyway.
      */
     static bool enable() {
         regs().CR = regs().CR | DMA_SxCR_EN;
-        for (uint8_t read = 0; read < 4u; ++read) {
-            if (enabled() || flag(DmaFlag::complete)) {
-                return true;
-            }
-        }
-        return false;
+        return true;
     }
 
     /**

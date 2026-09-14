@@ -209,20 +209,8 @@ uint32_t val_delta(uint32_t first, uint32_t second) {
 
 /// Run one memory-to-memory transfer and report the core cycles it took,
 /// or 0 when it did not complete.
-/// A memory-to-memory block on a FRESH controller. On one part of the
-/// family a stream that has COMPLETED a memory-to-memory block hangs on
-/// its next one (letter b measures it), and the controller's reset is the
-/// one recovery found; so every letter that runs blocks in a row takes
-/// each on a controller reset first - free on the parts that do not need
-/// it, and what keeps the numbers about the arbitration and the FIFO
-/// rather than about that.
-bool fresh_prepare(const DmaTransfer& t) {
-    Block::init();
-    return Work::prepare(t);
-}
-
 uint32_t timed_block(const DmaTransfer& t) {
-    if (!fresh_prepare(t)) {
+    if (!Work::prepare(t)) {
         return 0;
     }
     const uint32_t v0 = SysTick->VAL;
@@ -340,30 +328,41 @@ void tb_memory_to_memory() {
     Work::clear(DmaFlag::all);
     bench.verdict("and the clear register takes it away", Work::flags() == 0u);
 
-    // A SECOND BLOCK ON THE SAME STREAM, with nothing reset in between:
-    // on one part of the family the stream that has just completed reads
-    // its first sixteen bytes into the FIFO and never writes them out - EN
-    // stuck, no flag, whatever the size, the threshold, the destination or
-    // the company - and only the controller's reset brings it back (an
-    // ABORTED first block leaves no such mark, nor does another stream's
-    // completion). Reported, not judged; the letters below take every
-    // block on a fresh controller.
-    Work::stop();
-    const bool again_taken = Work::prepare(t);
-    const bool again_up = again_taken && Work::trigger();
-    const bool again_done = again_up && wait_complete<Work>(200'000u);
-    print(serial, "  a second block on the same stream, nothing reset between: ",
-          again_done ? "runs" : "HANGS", " (EN=", Work::enabled() ? 1u : 0u, " NDTR=", Work::count(),
-          " of ", bytes, " FIFO=", static_cast<uint8_t>(Work::fifo_status()), " flags=",
-          hex(Work::flags()), ")", crlf);
-    if (!again_done) {
-        const bool aborted = Work::abort();
-        print(serial, "  abort() ", aborted ? "brought EN down" : "could NOT bring EN down",
-              "; the controller's reset does", crlf);
+    // THE READ-BACK THAT WEDGES: on the STM32F446 a load of SxCR in the
+    // cycles after the EN store wedges the stream every other time -
+    // sixteen bytes into the FIFO, nothing drains, EN standing, no flag,
+    // until the controller is reset. Four blocks enabled with a read of
+    // EN right after the store, reported and not judged (the F429 takes
+    // them all, the F411 wedges like the F446); then four with the store
+    // left alone, which is
+    // what enable() does, and which every part completes.
+    uint8_t wedged = 0;
+    for (uint8_t k = 0; k < 4u; ++k) {
+        Work::stop();
+        if (Work::enabled()) {
+            Block::init();
+        }
+        (void)Work::prepare(t);
+        Work::regs().CR = Work::regs().CR | DMA_SxCR_EN;
+        (void)Work::enabled();   // the load right after the store
+        if (!wait_complete<Work>(200'000u)) {
+            ++wedged;
+        }
     }
-    Block::init();
-    bench.verdict("a stuck stream is recovered by the controller's reset",
-                  !Work::enabled() && Work::fifo_status() == DmaFifoStatus::empty);
+    print(serial, "  four blocks enabled with SxCR read back right after the store: ", wedged,
+          " wedged (NDTR ", Work::count(), " of ", bytes, " on the last)", crlf);
+    if (Work::enabled()) {
+        Block::init();
+    }
+    uint8_t alone = 0;
+    for (uint8_t k = 0; k < 4u; ++k) {
+        Work::stop();
+        if (Work::prepare(t) && Work::trigger() && wait_complete<Work>(200'000u) && same(bytes)) {
+            ++alone;
+        }
+    }
+    bench.verdict("four blocks back to back with the enable's store left alone all complete",
+                  alone == 4u);
 
     // AND THE ENABLE IS THE ONE STORE THAT DOES NOT READ BACK AT ONCE.
     // A plain register - SxNDTR here, which has no side effect on a
@@ -484,7 +483,7 @@ void td_fifo() {
                 for (uint16_t i = 0; i < buffer_bytes; ++i) {
                     dst[i] = 0;
                 }
-                const bool taken = fresh_prepare(t);
+                const bool taken = Work::prepare(t);
                 if (taken != legal) {
                     continue;
                 }
@@ -603,7 +602,7 @@ void tf_counting() {
     bench.verdict("a half-word destination at an odd address is refused",
                   !Work::prepare(t));
     t.memory = &dst[2];
-    bench.verdict("and accepted two bytes along", fresh_prepare(t));
+    bench.verdict("and accepted two bytes along", Work::prepare(t));
     Work::stop();
 
     // The circular note of 10.3.8: under CIRC a memory burst must divide
@@ -901,7 +900,7 @@ void tk_priority() {
         b.peripheral = rival_src;
         b.memory = rival_dst;
         b.config.priority = rival;
-        (void)fresh_prepare(a);
+        (void)Work::prepare(a);
         (void)Rival::prepare(b);
         const uint32_t v0 = SysTick->VAL;
         (void)Work::trigger();

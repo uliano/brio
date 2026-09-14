@@ -287,8 +287,9 @@ is the finding that shaped a verb. A store into SxNDTR is visible to the
 very next load - zero stale reads, measured - but the EN bit is not: the
 load right after the store reads 0 and the one after it reads 1, so a
 read-back taken at once reports a running stream as one that refused to
-start. `DmaStream::enable()` therefore polls its answer over a few reads,
-and letter b's "it starts on the enable alone" is what stands guard over
+start - and on the STM32F446 that load WEDGES the stream (below).
+`DmaStream::enable()` therefore stores EN and reads nothing back, and
+letter b's "it starts on the enable alone" is what stands guard over
 that.
 
 **A memory-to-memory block is over in microseconds**, which is the second
@@ -340,22 +341,27 @@ judges nothing. The STM32F429 did not show it at 180 MHz. `stop()` recovers
 such a stream like any other. A program that starts two streams of one
 controller together gives the second enable a few cycles.
 
-**A completed memory-to-memory stream hangs on its next block - on the
-STM32F446.** After a memory-to-memory block has run to completion on a
-stream of that part, the next block on the SAME stream reads its first
-sixteen bytes into the FIFO and never writes them out: EN stays set, no
-flag rises, SxNDTR stops sixteen short (or at zero for a 16-byte block),
-FS reads full - whatever the size (16 to 2048 bytes), the threshold, the
-burst, the destination, the flags cleared in between, SxCR and SxFCR put
-back to their reset values, or a second stream running alongside. An
-ABORTED first block leaves no such mark, another stream's completion does
-not poison this one, peripheral streams are unaffected, and the
-controller's reset through the RCC is the one recovery found: `abort()`
-cannot bring EN down. The STM32F429 and the STM32F411 run blocks back to
-back without it. No errata sheet has an item for this. Until its cause is
-known, a program on the STM32F446 that runs memory-to-memory blocks in a
-row takes `Dma<n>::init()` (a reset) between them - which is what every
-letter of the suite does after letter b has measured the behaviour.
+**A load of SxCR in the cycles after the EN store WEDGES the stream - on
+the STM32F446 and the STM32F411, every other time.** A memory-to-memory block enabled and
+then asked at once whether EN took (a read of SxCR in the instruction
+after the store) stops sixteen bytes in on every second block: the FIFO
+full, nothing drains, EN standing, no flag, and it stays so until the
+controller is reset through the RCC - `abort()` cannot bring EN down.
+The same block with the store left alone completes, back to back, as many
+times as asked; a read of LISR at once is harmless; ST's library, which
+never reads back, never sees it. It looked like a property of the second
+block (twenty variants of register sequence, memory, width, stream, clock
+and reset all "hung"), until a program built on that library alone ran
+the blocks back to back on the same board and the one difference left
+was the read-back. The STM32F429 takes the read-back without harm (and
+the STM32F411's earlier "stall of a low-priority stream enabled right
+after a very-high one" was this: the second enable's read-back). No
+errata sheet has an item. `enable()` therefore stores
+EN and reads nothing back - the one refusal the silicon could make at
+that point, 10.3.18's burst against the threshold, is `configure()`'s
+before the store - and a program that wants to know whether a stream is
+running asks later, as a handler or a poll would anyway. `Dma<n>::init()`
+is the way back for a stream a read-back wedged.
 
 **The abort's wait is real and short**: EN comes down in 33 core cycles on
 an idle stream and 74 on one in the middle of a memory-to-memory block -
@@ -482,13 +488,8 @@ Implemented but not bench-verified, each with what would measure it:
 - **ES0287 2.2.11** (the F411's DMA2 corruption on concurrent AHB and APB2
   requests) is stated as a caller obligation and not measured: it wants a
   QUADSPI, an FSMC or a GPIO register as a DMA destination on that part.
-- **The cause of the STM32F446's stuck stream.** Measured and worked
-  around above, not explained - and narrowed: the second block hangs
-  whatever the register sequence (ST's own library's Init and Start
-  orders reproduced store for store hang the same), the memories
-  (flash, SRAM1, SRAM2 in every pairing), the width and burst, the
-  stream, the core clock (16 MHz on the HSI as at 180 MHz in over-drive),
-  the reset (none, a short RCC pulse, a long one), the interrupts
-  (masked or not) or a clock-gate cycle in between. What remains is a
-  program built on ST's library itself on that board, or an answer from
-  ST; no errata sheet has an item.
+- **The read-back wedge of the STM32F446 and the STM32F411, characterized.** It is measured,
+  reproduced at will and avoided; how many cycles after the store a load
+  of SxCR stays dangerous, and why every other block, are not measured
+  (what would: a sweep of the load's distance from the store in assembly
+  on that part), and no errata sheet has an item.
