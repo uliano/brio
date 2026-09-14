@@ -105,7 +105,7 @@ TEST_CASE("Mono fill lights exactly the asked run, at every alignment") {
             uint8_t row[4] = {0, 0, 0, 0};
             Mono::fill(row, x, n, 1);
             for (Extent i = 0; i < 32; ++i) {
-                const bool want = (i >= x && i < Extent(x + n));
+                const bool want = (i >= x && i < static_cast<Extent>(x + n));
                 REQUIRE(Mono::get(row, i) == (want ? 1 : 0));
             }
             // And clearing the same run puts it back exactly.
@@ -190,8 +190,8 @@ TEST_CASE("fill_rect matches the definition, everywhere and half off") {
     constexpr Extent H = 9;
     Canvas<Mono, W, H> c;
 
-    for (Coord x = -4; x <= Coord(W + 2); ++x) {
-        for (Coord y = -4; y <= Coord(H + 2); ++y) {
+    for (Coord x = -4; x <= static_cast<Coord>(W + 2); ++x) {
+        for (Coord y = -4; y <= static_cast<Coord>(H + 2); ++y) {
             for (Extent w = 0; w <= 6; ++w) {
                 for (Extent h = 0; h <= 6; ++h) {
                     c.wipe();
@@ -216,8 +216,8 @@ TEST_CASE("the rectangle outline matches the definition") {
     constexpr Extent H = 9;
     Canvas<Mono, W, H> c;
 
-    for (Coord x = -3; x <= Coord(W + 1); ++x) {
-        for (Coord y = -3; y <= Coord(H + 1); ++y) {
+    for (Coord x = -3; x <= static_cast<Coord>(W + 1); ++x) {
+        for (Coord y = -3; y <= static_cast<Coord>(H + 1); ++y) {
             for (Extent w = 0; w <= 8; ++w) {
                 for (Extent h = 0; h <= 8; ++h) {
                     c.wipe();
@@ -242,8 +242,8 @@ TEST_CASE("horizontal and vertical runs match the definition") {
     constexpr Extent H = 10;
     Canvas<Mono, W, H> c;
 
-    for (Coord x = -3; x <= Coord(W + 1); ++x) {
-        for (Coord y = -3; y <= Coord(H + 1); ++y) {
+    for (Coord x = -3; x <= static_cast<Coord>(W + 1); ++x) {
+        for (Coord y = -3; y <= static_cast<Coord>(H + 1); ++y) {
             for (Extent n = 0; n <= 12; ++n) {
                 c.wipe();
                 brio::hline(c.fb, x, y, n, 1);
@@ -270,10 +270,10 @@ TEST_CASE("every segment on a small canvas matches the definition") {
     Canvas<Mono, W, H> c;
 
     uint32_t compared = 0;
-    for (Coord x0 = -3; x0 <= Coord(W + 2); ++x0) {
-        for (Coord y0 = -3; y0 <= Coord(H + 2); ++y0) {
-            for (Coord x1 = -3; x1 <= Coord(W + 2); ++x1) {
-                for (Coord y1 = -3; y1 <= Coord(H + 2); ++y1) {
+    for (Coord x0 = -3; x0 <= static_cast<Coord>(W + 2); ++x0) {
+        for (Coord y0 = -3; y0 <= static_cast<Coord>(H + 2); ++y0) {
+            for (Coord x1 = -3; x1 <= static_cast<Coord>(W + 2); ++x1) {
+                for (Coord y1 = -3; y1 <= static_cast<Coord>(H + 2); ++y1) {
                     c.wipe();
                     brio::line(c.fb, x0, y0, x1, y1, 1);
 
@@ -298,19 +298,19 @@ TEST_CASE("a segment is one pixel thick and as long as its major axis") {
     constexpr Extent H = 32;
     Canvas<Mono, W, H> c;
 
-    for (Coord x1 = 0; x1 < Coord(W); ++x1) {
-        for (Coord y1 = 0; y1 < Coord(H); ++y1) {
+    for (Coord x1 = 0; x1 < static_cast<Coord>(W); ++x1) {
+        for (Coord y1 = 0; y1 < static_cast<Coord>(H); ++y1) {
             c.wipe();
             brio::line(c.fb, 0, 0, x1, y1, 1);
             uint32_t lit = 0;
             for (Extent y = 0; y < H; ++y) {
                 for (Extent x = 0; x < W; ++x) {
-                    lit += c.fb.get_pixel(Coord(x), Coord(y)) ? 1u : 0u;
+                    lit += c.fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) ? 1u : 0u;
                 }
             }
             const int32_t major = x1 > y1 ? x1 : y1;
             INFO("to (" << x1 << "," << y1 << ")");
-            REQUIRE(lit == uint32_t(major + 1));
+            REQUIRE(lit == static_cast<uint32_t>(major + 1));
         }
     }
 }
@@ -351,8 +351,8 @@ TEST_CASE("a circle half off the surface is trimmed, not deformed") {
     constexpr Extent H = 16;
     Canvas<Mono, W, H> c;
 
-    for (Coord cx = -6; cx <= Coord(W + 5); cx += 3) {
-        for (Coord cy = -6; cy <= Coord(H + 5); cy += 3) {
+    for (Coord cx = -6; cx <= static_cast<Coord>(W + 5); cx += 3) {
+        for (Coord cy = -6; cy <= static_cast<Coord>(H + 5); cy += 3) {
             for (Extent r = 0; r <= 9; ++r) {
                 c.wipe();
                 brio::circle(c.fb, cx, cy, r, 1);
@@ -392,8 +392,8 @@ TEST_CASE("a disc half off the surface is trimmed, not deformed") {
     constexpr Extent H = 16;
     Canvas<Mono, W, H> c;
 
-    for (Coord cx = -6; cx <= Coord(W + 5); cx += 3) {
-        for (Coord cy = -6; cy <= Coord(H + 5); cy += 3) {
+    for (Coord cx = -6; cx <= static_cast<Coord>(W + 5); cx += 3) {
+        for (Coord cy = -6; cy <= static_cast<Coord>(H + 5); cy += 3) {
             for (Extent r = 0; r <= 9; ++r) {
                 c.wipe();
                 brio::fill_circle(c.fb, cx, cy, r, 1);
@@ -457,8 +457,8 @@ TEST_CASE("a rounded rectangle clipped at the surface edge still agrees") {
     constexpr Extent H = 14;
     Canvas<Mono, W, H> c;
 
-    for (Coord x = -5; x <= Coord(W + 2); x += 2) {
-        for (Coord y = -5; y <= Coord(H + 2); y += 2) {
+    for (Coord x = -5; x <= static_cast<Coord>(W + 2); x += 2) {
+        for (Coord y = -5; y <= static_cast<Coord>(H + 2); y += 2) {
             for (Extent e = 1; e <= 14; e += 2) {
                 for (Extent r = 0; r <= 6; ++r) {
                     c.wipe();
@@ -489,19 +489,21 @@ TEST_CASE("the radius clamp makes a square rounded rectangle a circle") {
     Canvas<Mono, W, H> round_one;
 
     for (Extent side = 1; side <= 21; side += 2) { // odd: a true centre
-        const Extent r = Extent((side - 1) / 2);
+        const Extent r = static_cast<Extent>((side - 1) / 2);
         rounded.wipe();
         round_one.wipe();
         // Asking for a radius far beyond the clamp must give the same
         // shape as asking for exactly the clamp.
         brio::round_rect(rounded.fb, 0, 0, side, side, 200, 1);
-        brio::circle(round_one.fb, Coord(r), Coord(r), r, 1);
+        brio::circle(round_one.fb, static_cast<Coord>(r),
+                     static_cast<Coord>(r), r, 1);
 
         for (Extent y = 0; y < H; ++y) {
             for (Extent x = 0; x < W; ++x) {
                 INFO("side=" << side << " at (" << x << "," << y << ")");
-                REQUIRE(rounded.fb.get_pixel(Coord(x), Coord(y)) ==
-                        round_one.fb.get_pixel(Coord(x), Coord(y)));
+                REQUIRE(rounded.fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) ==
+                        round_one.fb.get_pixel(static_cast<Coord>(x),
+                                               static_cast<Coord>(y)));
             }
         }
     }
@@ -540,7 +542,7 @@ TEST_CASE("write_run places pixels and trims what falls outside") {
         c.fb.write_run(0, 3, run);
         for (Extent y = 0; y < 3; ++y) {
             for (Extent x = 0; x < 8; ++x) {
-                REQUIRE(c.fb.get_pixel(Coord(x), Coord(y)) == 0);
+                REQUIRE(c.fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) == 0);
             }
         }
     }
@@ -551,12 +553,12 @@ TEST_CASE("clear paints the whole surface and nothing beyond it") {
     brio::clear(c.fb, 1);
     for (Extent y = 0; y < 5; ++y) {
         for (Extent x = 0; x < 13; ++x) {
-            REQUIRE(c.fb.get_pixel(Coord(x), Coord(y)) == 1);
+            REQUIRE(c.fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) == 1);
         }
     }
     // The padding bits of the last byte of a row are not the surface's
     // and a reader must never see them as pixels.
-    CHECK(c.fb.bits().size() == size_t(2) * 5);
+    CHECK(c.fb.bits().size() == static_cast<size_t>(2) * 5);
 }
 
 // ---------------------------------------------------------------------
@@ -570,7 +572,7 @@ TEST_CASE("the font answers for everything it is asked") {
     for (int ch = 0; ch < 256; ++ch) {
         for (Extent row = brio::Font5x7::glyph_h; row < brio::Font5x7::cell_h;
              ++row) {
-            REQUIRE(brio::Font5x7::row_bits(uint8_t(ch), row) == 0);
+            REQUIRE(brio::Font5x7::row_bits(static_cast<uint8_t>(ch), row) == 0);
         }
     }
 
@@ -579,7 +581,7 @@ TEST_CASE("the font answers for everything it is asked") {
     for (int ch = 0; ch < 256; ++ch) {
         for (Extent row = 0; row < brio::Font5x7::cell_h; ++row) {
             INFO("ch=" << ch << " row=" << row);
-            REQUIRE((brio::Font5x7::row_bits(uint8_t(ch), row) & 1u) == 0);
+            REQUIRE((brio::Font5x7::row_bits(static_cast<uint8_t>(ch), row) & 1u) == 0);
         }
     }
 
@@ -601,8 +603,8 @@ TEST_CASE("text lands where the reference says, wherever it is put") {
     const char* words[] = {"", "i", "Hg", "brio", "0123456789"};
 
     for (const char* w : words) {
-        for (Coord x = -8; x <= Coord(W + 2); x += 3) {
-            for (Coord y = -5; y <= Coord(H + 1); y += 2) {
+        for (Coord x = -8; x <= static_cast<Coord>(W + 2); x += 3) {
+            for (Coord y = -5; y <= static_cast<Coord>(H + 1); y += 2) {
                 c.wipe();
                 brio::text<brio::Font5x7>(c.fb, x, y, w, 1, 0);
 
@@ -620,7 +622,7 @@ TEST_CASE("text lands where the reference says, wherever it is put") {
 TEST_CASE("text returns where the next cell would start") {
     Canvas<Mono, 60, 10> c;
     const Coord after = brio::text<brio::Font5x7>(c.fb, 4, 1, "abc", 1, 0);
-    CHECK(after == Coord(4 + 3 * brio::Font5x7::cell_w));
+    CHECK(after == static_cast<Coord>(4 + 3 * brio::Font5x7::cell_w));
     // An empty string draws nothing and does not move.
     CHECK(brio::text<brio::Font5x7>(c.fb, 7, 1, "", 1, 0) == 7);
 }
@@ -642,8 +644,9 @@ TEST_CASE("a field erases what it no longer holds") {
     for (Extent y = 0; y < H; ++y) {
         for (Extent x = 0; x < W; ++x) {
             INFO("at (" << x << "," << y << ")");
-            REQUIRE(c.fb.get_pixel(Coord(x), Coord(y)) ==
-                    fresh.fb.get_pixel(Coord(x), Coord(y)));
+            REQUIRE(c.fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) ==
+                    fresh.fb.get_pixel(static_cast<Coord>(x),
+                                       static_cast<Coord>(y)));
         }
     }
 }
@@ -656,13 +659,13 @@ TEST_CASE("a field is exactly its width, and cuts what will not fit") {
 
     const Coord after =
         brio::text_field<brio::Font5x7>(c.fb, 2, 1, "abcdef", cells, 1, 0);
-    CHECK(after == Coord(2 + cells * brio::Font5x7::cell_w));
+    CHECK(after == static_cast<Coord>(2 + cells * brio::Font5x7::cell_w));
 
     // Nothing past the field's last column was touched.
     for (Extent y = 0; y < H; ++y) {
-        for (Extent x = Extent(2 + cells * brio::Font5x7::cell_w); x < W; ++x) {
+        for (Extent x = static_cast<Extent>(2 + cells * brio::Font5x7::cell_w); x < W; ++x) {
             INFO("at (" << x << "," << y << ")");
-            REQUIRE(c.fb.get_pixel(Coord(x), Coord(y)) == 0);
+            REQUIRE(c.fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) == 0);
         }
     }
 
@@ -671,8 +674,9 @@ TEST_CASE("a field is exactly its width, and cuts what will not fit") {
     brio::text<brio::Font5x7>(want.fb, 2, 1, "abc", 1, 0);
     for (Extent y = 0; y < H; ++y) {
         for (Extent x = 0; x < W; ++x) {
-            REQUIRE(c.fb.get_pixel(Coord(x), Coord(y)) ==
-                    want.fb.get_pixel(Coord(x), Coord(y)));
+            REQUIRE(c.fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) ==
+                    want.fb.get_pixel(static_cast<Coord>(x),
+                                      static_cast<Coord>(y)));
         }
     }
 }
@@ -690,7 +694,8 @@ TEST_CASE("the glyphs are the ones that were looked at") {
             const int ch = 0x20 + row * 16 + i;
             line += (ch <= 0x7E) ? char(ch) : ' ';
         }
-        brio::text<brio::Font5x7>(c.fb, 0, Coord(row * brio::Font5x7::cell_h),
+        brio::text<brio::Font5x7>(c.fb, 0,
+                                  static_cast<Coord>(row * brio::Font5x7::cell_h),
                                   line, 1, 0);
     }
 
@@ -726,8 +731,9 @@ TEST_CASE("a pen is the stateless primitives with the arguments remembered") {
     for (Extent y = 0; y < H; ++y) {
         for (Extent x = 0; x < W; ++x) {
             INFO("at (" << x << "," << y << ")");
-            REQUIRE(pen_side.fb.get_pixel(Coord(x), Coord(y)) ==
-                    plain_side.fb.get_pixel(Coord(x), Coord(y)));
+            REQUIRE(pen_side.fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) ==
+                    plain_side.fb.get_pixel(static_cast<Coord>(x),
+                                            static_cast<Coord>(y)));
         }
     }
     // A shape does not move the cursor: it is still where the last
@@ -752,8 +758,9 @@ TEST_CASE("a pen carries the text cursor across calls") {
     for (Extent y = 0; y < H; ++y) {
         for (Extent x = 0; x < W; ++x) {
             INFO("at (" << x << "," << y << ")");
-            REQUIRE(by_pen.fb.get_pixel(Coord(x), Coord(y)) ==
-                    by_hand.fb.get_pixel(Coord(x), Coord(y)));
+            REQUIRE(by_pen.fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) ==
+                    by_hand.fb.get_pixel(static_cast<Coord>(x),
+                                         static_cast<Coord>(y)));
         }
     }
 }
@@ -777,7 +784,7 @@ struct Attached {
         }
         struct stat st {};
         if (::fstat(fd, &st) == 0) {
-            bytes = size_t(st.st_size);
+            bytes = static_cast<size_t>(st.st_size);
             void* p = ::mmap(nullptr, bytes, PROT_READ, MAP_SHARED, fd, 0);
             base = (p == MAP_FAILED) ? nullptr : static_cast<uint8_t*>(p);
         }
@@ -841,16 +848,16 @@ TEST_CASE("what is drawn is what another mapping sees, with no copy") {
     // against the surface itself pixel by pixel.
     for (Extent y = 0; y < 32; ++y) {
         for (Extent x = 0; x < 64; ++x) {
-            const uint8_t* row = v.pixels() + size_t(y) * 8;
+            const uint8_t* row = v.pixels() + static_cast<size_t>(y) * 8;
             const uint8_t got = Mono::get(row, x);
             INFO("at (" << x << "," << y << ")");
-            REQUIRE(got == fb.get_pixel(Coord(x), Coord(y)));
+            REQUIRE(got == fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)));
         }
     }
 
     // And a later write is seen through the mapping already held.
     brio::fill_rect(fb, 10, 10, 4, 4, 1);
-    CHECK(Mono::get(v.pixels() + size_t(11) * 8, 11) == 1);
+    CHECK(Mono::get(v.pixels() + static_cast<size_t>(11) * 8, 11) == 1);
 }
 
 TEST_CASE("publish marks the picture, for a viewer that repaints on change") {
@@ -940,7 +947,7 @@ TEST_CASE("a viewport translates and cannot be escaped") {
             for (Extent x = 0; x < 16; ++x) {
                 const bool in = (x >= 4 && x < 10 && y >= 3 && y < 7);
                 INFO("x=" << x << " y=" << y);
-                REQUIRE(c.fb.get_pixel(Coord(x), Coord(y)) == (in ? 7 : 0));
+                REQUIRE(c.fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) == (in ? 7 : 0));
             }
         }
     }
@@ -962,7 +969,7 @@ TEST_CASE("a viewport translates and cannot be escaped") {
             for (Extent x = 0; x < 16; ++x) {
                 const bool in = (x >= 5 && x < 7 && y >= 4 && y < 6);
                 INFO("x=" << x << " y=" << y);
-                REQUIRE(c.fb.get_pixel(Coord(x), Coord(y)) == (in ? 5 : 0));
+                REQUIRE(c.fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) == (in ? 5 : 0));
             }
         }
     }
@@ -983,7 +990,8 @@ TEST_CASE("a primitive drawn through a viewport matches the definition") {
             brio::line(v, 0, 0, x1, y1, 1);
 
             RefCanvas ref(W, H);
-            ref.line(3, 2, Coord(x1 + 3), Coord(y1 + 2), 1);
+            ref.line(3, 2, static_cast<Coord>(x1 + 3),
+                     static_cast<Coord>(y1 + 2), 1);
             // The reference draws on the whole surface; the viewport
             // trims to its window, so compare only inside the window.
             uint32_t disagreements = 0;
@@ -991,8 +999,8 @@ TEST_CASE("a primitive drawn through a viewport matches the definition") {
                 for (Extent x = 0; x < W; ++x) {
                     const bool inside =
                         (x >= 3 && x < 13 && y >= 2 && y < 10);
-                    const bool a = c.fb.get_pixel(Coord(x), Coord(y)) != 0;
-                    const bool r = inside && ref.at(Coord(x), Coord(y)) != 0;
+                    const bool a = c.fb.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) != 0;
+                    const bool r = inside && ref.at(static_cast<Coord>(x), static_cast<Coord>(y)) != 0;
                     if (a != r) {
                         ++disagreements;
                     }

@@ -27,6 +27,7 @@
 
 #include <stdint.h>
 
+#include <array>
 #include <string_view>
 
 #include "gfx/font.hpp"
@@ -37,7 +38,7 @@ namespace brio {
 /// How many pixels a text row buffers before it is flushed to the
 /// surface. Bounded on purpose: the cost of a long string is more runs,
 /// never more stack. Sized so a short field crosses in one window.
-inline constexpr unsigned text_run_max = 32;
+inline constexpr uint16_t text_run_max = 32;
 
 /**
  * One line of text at (x, y), the top-left of the first cell. Returns
@@ -51,36 +52,39 @@ template <typename F, Surface S>
 Coord text(S& s, Coord x, Coord y, std::string_view str, typename S::Color fg,
            typename S::Color bg) {
     using Color = typename S::Color;
-    const int32_t end_x = int32_t(x) + int32_t(F::cell_w) * int32_t(str.size());
+    const int32_t cell_w = F::cell_w;   // a constant; folded away
+    const int32_t end_x = x + cell_w * static_cast<int32_t>(str.size());
     if (str.empty()) {
-        return Coord(end_x);
+        return static_cast<Coord>(end_x);
     }
 
     for (Extent row = 0; row < F::cell_h; ++row) {
-        Color run[text_run_max];
-        unsigned held = 0;
-        int32_t run_x = int32_t(x);
+        std::array<Color, text_run_max> run{};
+        uint16_t held = 0;
+        int32_t run_x = static_cast<int32_t>(x);
 
         for (char ch : str) {
-            const uint8_t bits = F::row_bits(uint8_t(ch), row);
+            const uint8_t bits = F::row_bits(static_cast<uint8_t>(ch), row);
             for (Extent col = 0; col < F::cell_w; ++col) {
                 const bool on =
                     (bits >> (F::cell_w - 1 - col)) & 1u;
                 run[held++] = on ? fg : bg;
                 if (held == text_run_max) {
-                    s.write_run(Coord(run_x), Coord(int32_t(y) + row),
-                                std::span<const Color>(run, held));
-                    run_x += int32_t(held);
+                    s.write_run(static_cast<Coord>(run_x),
+                                static_cast<Coord>(static_cast<int32_t>(y) + row),
+                                std::span<const Color>(run.data(), held));
+                    run_x += static_cast<int32_t>(held);
                     held = 0;
                 }
             }
         }
         if (held != 0) {
-            s.write_run(Coord(run_x), Coord(int32_t(y) + row),
-                        std::span<const Color>(run, held));
+            s.write_run(static_cast<Coord>(run_x),
+                        static_cast<Coord>(static_cast<int32_t>(y) + row),
+                        std::span<const Color>(run.data(), held));
         }
     }
-    return Coord(end_x);
+    return static_cast<Coord>(end_x);
 }
 
 /**
@@ -98,13 +102,15 @@ Coord text_field(S& s, Coord x, Coord y, std::string_view str, Extent cells,
     if (str.size() > cells) {
         str = str.substr(0, cells);
     }
+    const int32_t cell_w = F::cell_w;
     const Coord after = text<F>(s, x, y, str, fg, bg);
-    const Extent blank = Extent(cells - Extent(str.size()));
+    const Extent blank = static_cast<Extent>(cells - static_cast<Extent>(str.size()));
     if (blank != 0) {
-        s.fill_rect(after, y, Extent(int32_t(blank) * int32_t(F::cell_w)),
+        s.fill_rect(after, y,
+                    static_cast<Extent>(static_cast<int32_t>(blank) * cell_w),
                     F::cell_h, bg);
     }
-    return Coord(int32_t(x) + int32_t(cells) * int32_t(F::cell_w));
+    return static_cast<Coord>(x + cells * cell_w);
 }
 
 } // namespace brio

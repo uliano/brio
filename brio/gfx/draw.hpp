@@ -34,7 +34,7 @@ namespace brio {
 /// the answer has to be the same on all of them. floor(sqrt(n)).
 constexpr uint16_t isqrt(uint32_t n) {
     uint32_t res = 0;
-    uint32_t bit = uint32_t(1) << 30;
+    uint32_t bit = static_cast<uint32_t>(1) << 30;
     while (bit > n) {
         bit >>= 2;
     }
@@ -47,7 +47,7 @@ constexpr uint16_t isqrt(uint32_t n) {
         }
         bit >>= 2;
     }
-    return uint16_t(res);
+    return static_cast<uint16_t>(res);
 }
 
 /// The whole surface, one colour.
@@ -94,14 +94,18 @@ void rect(S& s, Coord x, Coord y, Extent w, Extent h, typename S::Color c) {
     }
     s.fill_rect(x, y, w, 1, c);
     if (h > 1) {
-        s.fill_rect(x, Coord(int32_t(y) + int32_t(h) - 1), w, 1, c);
+        s.fill_rect(
+            x, static_cast<Coord>(static_cast<int32_t>(y) + static_cast<int32_t>(h) - 1),
+            w, 1, c);
     }
     if (h > 2) {
-        const Extent mid = Extent(h - 2);
-        s.fill_rect(x, Coord(int32_t(y) + 1), 1, mid, c);
+        const Extent mid = static_cast<Extent>(h - 2);
+        s.fill_rect(x, static_cast<Coord>(static_cast<int32_t>(y) + 1), 1, mid,
+                    c);
         if (w > 1) {
-            s.fill_rect(Coord(int32_t(x) + int32_t(w) - 1), Coord(int32_t(y) + 1),
-                        1, mid, c);
+            s.fill_rect(
+                static_cast<Coord>(static_cast<int32_t>(x) + static_cast<int32_t>(w) - 1),
+                static_cast<Coord>(static_cast<int32_t>(y) + 1), 1, mid, c);
         }
     }
 }
@@ -129,27 +133,34 @@ template <Surface S>
 void line(S& s, Coord x0, Coord y0, Coord x1, Coord y1, typename S::Color c) {
     if (y0 == y1) {
         const Coord from = x0 < x1 ? x0 : x1;
-        const int32_t len = (x0 < x1 ? int32_t(x1) - x0 : int32_t(x0) - x1) + 1;
-        s.fill_rect(from, y0, Extent(len), 1, c);
+        const int32_t len =
+            (x0 < x1 ? static_cast<int32_t>(x1) - x0
+                     : static_cast<int32_t>(x0) - x1) + 1;
+        s.fill_rect(from, y0, static_cast<Extent>(len), 1, c);
         return;
     }
     if (x0 == x1) {
         const Coord from = y0 < y1 ? y0 : y1;
-        const int32_t len = (y0 < y1 ? int32_t(y1) - y0 : int32_t(y0) - y1) + 1;
-        s.fill_rect(x0, from, 1, Extent(len), c);
+        const int32_t len =
+            (y0 < y1 ? static_cast<int32_t>(y1) - y0
+                     : static_cast<int32_t>(y0) - y1) + 1;
+        s.fill_rect(x0, from, 1, static_cast<Extent>(len), c);
         return;
     }
 
     int32_t x = x0;
     int32_t y = y0;
-    const int32_t dx = x1 > x0 ? int32_t(x1) - x0 : int32_t(x0) - x1;
-    const int32_t dy = -(y1 > y0 ? int32_t(y1) - y0 : int32_t(y0) - y1);
+    const int32_t dx =
+        x1 > x0 ? static_cast<int32_t>(x1) - x0 : static_cast<int32_t>(x0) - x1;
+    const int32_t dy =
+        -(y1 > y0 ? static_cast<int32_t>(y1) - y0 : static_cast<int32_t>(y0) - y1);
     const int32_t sx = x0 < x1 ? 1 : -1;
     const int32_t sy = y0 < y1 ? 1 : -1;
     int32_t err = dx + dy;
     for (;;) {
-        s.fill_rect(Coord(x), Coord(y), 1, 1, c);
-        if (x == int32_t(x1) && y == int32_t(y1)) {
+        s.fill_rect(static_cast<Coord>(x),
+                static_cast<Coord>(y), 1, 1, c);
+        if (x == static_cast<int32_t>(x1) && y == static_cast<int32_t>(y1)) {
             return;
         }
         const int32_t e2 = 2 * err;
@@ -171,16 +182,24 @@ void line(S& s, Coord x0, Coord y0, Coord x1, Coord y1, typename S::Color c) {
 template <Surface S>
 void octant_points(S& s, Coord cx, Coord cy, int32_t x, int32_t y,
                    typename S::Color c) {
-    const int32_t ox = int32_t(cx);
-    const int32_t oy = int32_t(cy);
-    s.fill_rect(Coord(ox + x), Coord(oy + y), 1, 1, c);
-    s.fill_rect(Coord(ox - x), Coord(oy + y), 1, 1, c);
-    s.fill_rect(Coord(ox + x), Coord(oy - y), 1, 1, c);
-    s.fill_rect(Coord(ox - x), Coord(oy - y), 1, 1, c);
-    s.fill_rect(Coord(ox + y), Coord(oy + x), 1, 1, c);
-    s.fill_rect(Coord(ox - y), Coord(oy + x), 1, 1, c);
-    s.fill_rect(Coord(ox + y), Coord(oy - x), 1, 1, c);
-    s.fill_rect(Coord(ox - y), Coord(oy - x), 1, 1, c);
+    const int32_t ox = static_cast<int32_t>(cx);
+    const int32_t oy = static_cast<int32_t>(cy);
+    s.fill_rect(static_cast<Coord>(ox + x),
+                static_cast<Coord>(oy + y), 1, 1, c);
+    s.fill_rect(static_cast<Coord>(ox - x),
+                static_cast<Coord>(oy + y), 1, 1, c);
+    s.fill_rect(static_cast<Coord>(ox + x),
+                static_cast<Coord>(oy - y), 1, 1, c);
+    s.fill_rect(static_cast<Coord>(ox - x),
+                static_cast<Coord>(oy - y), 1, 1, c);
+    s.fill_rect(static_cast<Coord>(ox + y),
+                static_cast<Coord>(oy + x), 1, 1, c);
+    s.fill_rect(static_cast<Coord>(ox - y),
+                static_cast<Coord>(oy + x), 1, 1, c);
+    s.fill_rect(static_cast<Coord>(ox + y),
+                static_cast<Coord>(oy - x), 1, 1, c);
+    s.fill_rect(static_cast<Coord>(ox - y),
+                static_cast<Coord>(oy - x), 1, 1, c);
 }
 
 /// The same reflection for a rounded rectangle, where the four arcs have
@@ -188,10 +207,14 @@ void octant_points(S& s, Coord cx, Coord cy, int32_t x, int32_t y,
 template <Surface S>
 void corner_points(S& s, int32_t ax0, int32_t ay0, int32_t ax1, int32_t ay1,
                    int32_t px, int32_t py, typename S::Color c) {
-    s.fill_rect(Coord(ax0 - px), Coord(ay0 - py), 1, 1, c);
-    s.fill_rect(Coord(ax1 + px), Coord(ay0 - py), 1, 1, c);
-    s.fill_rect(Coord(ax0 - px), Coord(ay1 + py), 1, 1, c);
-    s.fill_rect(Coord(ax1 + px), Coord(ay1 + py), 1, 1, c);
+    s.fill_rect(static_cast<Coord>(ax0 - px),
+                static_cast<Coord>(ay0 - py), 1, 1, c);
+    s.fill_rect(static_cast<Coord>(ax1 + px),
+                static_cast<Coord>(ay0 - py), 1, 1, c);
+    s.fill_rect(static_cast<Coord>(ax0 - px),
+                static_cast<Coord>(ay1 + py), 1, 1, c);
+    s.fill_rect(static_cast<Coord>(ax1 + px),
+                static_cast<Coord>(ay1 + py), 1, 1, c);
 }
 
 /**
@@ -215,9 +238,9 @@ void circle(S& s, Coord cx, Coord cy, Extent r, typename S::Color c) {
         s.fill_rect(cx, cy, 1, 1, c);
         return;
     }
-    int32_t x = int32_t(r);
+    int32_t x = static_cast<int32_t>(r);
     int32_t y = 0;
-    int32_t err = 1 - int32_t(r);
+    int32_t err = 1 - static_cast<int32_t>(r);
     while (x >= y) {
         octant_points(s, cx, cy, x, y, c);
         ++y;
@@ -238,11 +261,14 @@ void circle(S& s, Coord cx, Coord cy, Extent r, typename S::Color c) {
  */
 template <Surface S>
 void fill_circle(S& s, Coord cx, Coord cy, Extent r, typename S::Color c) {
-    const int32_t rr = int32_t(r) * int32_t(r);
-    for (int32_t dy = -int32_t(r); dy <= int32_t(r); ++dy) {
-        const int32_t half = int32_t(isqrt(uint32_t(rr - dy * dy)));
-        s.fill_rect(Coord(int32_t(cx) - half), Coord(int32_t(cy) + dy),
-                    Extent(2 * half + 1), 1, c);
+    const int32_t rr = static_cast<int32_t>(r) * static_cast<int32_t>(r);
+    for (int32_t dy = -static_cast<int32_t>(r); dy <= static_cast<int32_t>(r);
+         ++dy) {
+        const int32_t half =
+            static_cast<int32_t>(isqrt(static_cast<uint32_t>(rr - dy * dy)));
+        s.fill_rect(static_cast<Coord>(static_cast<int32_t>(cx) - half),
+                    static_cast<Coord>(static_cast<int32_t>(cy) + dy),
+                    static_cast<Extent>(2 * half + 1), 1, c);
     }
 }
 
@@ -266,7 +292,7 @@ void round_rect(S& s, Coord x, Coord y, Extent w, Extent h, Extent r,
     if (w == 0 || h == 0) {
         return;
     }
-    const Extent limit = Extent(((w < h ? w : h) - 1) / 2);
+    const Extent limit = static_cast<Extent>(((w < h ? w : h) - 1) / 2);
     if (r > limit) {
         r = limit;
     }
@@ -275,27 +301,33 @@ void round_rect(S& s, Coord x, Coord y, Extent w, Extent h, Extent r,
         return;
     }
 
-    const int32_t x0 = int32_t(x);
-    const int32_t y0 = int32_t(y);
-    const int32_t x1 = x0 + int32_t(w) - 1;
-    const int32_t y1 = y0 + int32_t(h) - 1;
-    const Extent straight_w = Extent(int32_t(w) - 2 * int32_t(r));
-    const Extent straight_h = Extent(int32_t(h) - 2 * int32_t(r));
+    const int32_t x0 = static_cast<int32_t>(x);
+    const int32_t y0 = static_cast<int32_t>(y);
+    const int32_t x1 = x0 + static_cast<int32_t>(w) - 1;
+    const int32_t y1 = y0 + static_cast<int32_t>(h) - 1;
+    const Extent straight_w =
+        static_cast<Extent>(static_cast<int32_t>(w) - 2 * static_cast<int32_t>(r));
+    const Extent straight_h =
+        static_cast<Extent>(static_cast<int32_t>(h) - 2 * static_cast<int32_t>(r));
 
-    s.fill_rect(Coord(x0 + r), Coord(y0), straight_w, 1, c);
-    s.fill_rect(Coord(x0 + r), Coord(y1), straight_w, 1, c);
-    s.fill_rect(Coord(x0), Coord(y0 + r), 1, straight_h, c);
-    s.fill_rect(Coord(x1), Coord(y0 + r), 1, straight_h, c);
+    s.fill_rect(static_cast<Coord>(x0 + r), static_cast<Coord>(y0), straight_w, 1,
+                c);
+    s.fill_rect(static_cast<Coord>(x0 + r), static_cast<Coord>(y1), straight_w, 1,
+                c);
+    s.fill_rect(static_cast<Coord>(x0), static_cast<Coord>(y0 + r), 1, straight_h,
+                c);
+    s.fill_rect(static_cast<Coord>(x1), static_cast<Coord>(y0 + r), 1, straight_h,
+                c);
 
     // The four arc centres, each inset by the radius.
-    const int32_t ax0 = x0 + int32_t(r);
-    const int32_t ax1 = x1 - int32_t(r);
-    const int32_t ay0 = y0 + int32_t(r);
-    const int32_t ay1 = y1 - int32_t(r);
+    const int32_t ax0 = x0 + static_cast<int32_t>(r);
+    const int32_t ax1 = x1 - static_cast<int32_t>(r);
+    const int32_t ay0 = y0 + static_cast<int32_t>(r);
+    const int32_t ay1 = y1 - static_cast<int32_t>(r);
 
-    int32_t px = int32_t(r);
+    int32_t px = static_cast<int32_t>(r);
     int32_t py = 0;
-    int32_t err = 1 - int32_t(r);
+    int32_t err = 1 - static_cast<int32_t>(r);
     while (px >= py) {
         corner_points(s, ax0, ay0, ax1, ay1, px, py, c);
         corner_points(s, ax0, ay0, ax1, ay1, py, px, c);
@@ -320,7 +352,7 @@ void fill_round_rect(S& s, Coord x, Coord y, Extent w, Extent h, Extent r,
     if (w == 0 || h == 0) {
         return;
     }
-    const Extent limit = Extent(((w < h ? w : h) - 1) / 2);
+    const Extent limit = static_cast<Extent>(((w < h ? w : h) - 1) / 2);
     if (r > limit) {
         r = limit;
     }
@@ -329,21 +361,27 @@ void fill_round_rect(S& s, Coord x, Coord y, Extent w, Extent h, Extent r,
         return;
     }
 
-    const int32_t y0i = int32_t(y) + int32_t(r);
-    const int32_t y1i = int32_t(y) + int32_t(h) - 1 - int32_t(r);
-    const int32_t rr = int32_t(r) * int32_t(r);
+    const int32_t y0i = static_cast<int32_t>(y) + static_cast<int32_t>(r);
+    const int32_t y1i =
+        static_cast<int32_t>(y) + static_cast<int32_t>(h) - 1 - static_cast<int32_t>(r);
+    const int32_t rr = static_cast<int32_t>(r) * static_cast<int32_t>(r);
 
-    for (int32_t py = int32_t(y); py <= int32_t(y) + int32_t(h) - 1; ++py) {
+    for (int32_t py = static_cast<int32_t>(y);
+         py <= static_cast<int32_t>(y) + static_cast<int32_t>(h) - 1; ++py) {
         int32_t dy = 0;
         if (py < y0i) {
             dy = y0i - py;
         } else if (py > y1i) {
             dy = py - y1i;
         }
-        const int32_t grow = int32_t(isqrt(uint32_t(rr - dy * dy)));
-        const int32_t from = int32_t(x) + int32_t(r) - grow;
-        const int32_t span = int32_t(w) - 2 * int32_t(r) + 2 * grow;
-        s.fill_rect(Coord(from), Coord(py), Extent(span), 1, c);
+        const int32_t grow =
+            static_cast<int32_t>(isqrt(static_cast<uint32_t>(rr - dy * dy)));
+        const int32_t from =
+            static_cast<int32_t>(x) + static_cast<int32_t>(r) - grow;
+        const int32_t span =
+            static_cast<int32_t>(w) - 2 * static_cast<int32_t>(r) + 2 * grow;
+        s.fill_rect(static_cast<Coord>(from), static_cast<Coord>(py),
+                    static_cast<Extent>(span), 1, c);
     }
 }
 

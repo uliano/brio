@@ -126,7 +126,7 @@ public:
         requires Font<F>
     void new_line(Coord left) {
         x_ = left;
-        y_ = Coord(int32_t(y_) + int32_t(F::cell_h));
+        y_ = static_cast<Coord>(static_cast<int32_t>(y_) + static_cast<int32_t>(F::cell_h));
     }
 
 private:

@@ -148,9 +148,9 @@ struct Font5x7 {
             return 0;
         }
         if (ch < first || ch > last) {
-            return uint8_t(missing[row] << 1);
+            return static_cast<uint8_t>(missing[row] << 1);
         }
-        return uint8_t(rows[(ch - first) * glyph_h + row] << 1);
+        return static_cast<uint8_t>(rows[(ch - first) * glyph_h + row] << 1);
     }
 };
 

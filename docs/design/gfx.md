@@ -170,10 +170,10 @@ it:
 
 | what a program uses | CH32V00x | AVR DA/DB |
 |---|---|---|
-| clear and a filled rectangle | 384 | 684 |
-| plus the outline and the segment | 580 | 980 |
-| plus the circle, the disc and the two rounded rectangles | 1602 | 2616 |
-| plus text and a five-by-seven font | 2813 | 4082 |
+| clear and a filled rectangle | 386 | 628 |
+| plus the outline and the segment | 582 | 924 |
+| plus the circle, the disc and the two rounded rectangles | 1604 | 2560 |
+| plus text and a five-by-seven font | 2833 | 4038 |
 
 Two things worth reading off it. The round shapes cost MORE than the
 whole of text apart from its glyph table - an integer square root and

@@ -115,7 +115,7 @@ public:
     using Surface = Framebuffer<Fmt, W, H>;
 
     static constexpr uint16_t stride = Fmt::stride_for(W);
-    static constexpr size_t pixel_bytes = size_t(stride) * H;
+    static constexpr size_t pixel_bytes = static_cast<size_t>(stride) * H;
     static constexpr size_t total_bytes = sim_display_header_bytes + pixel_bytes;
 
     /// `name` is the whole contract between the two processes. It is
@@ -132,7 +132,7 @@ public:
         if (fd_ < 0) {
             throw std::runtime_error("shm_open failed for " + name_);
         }
-        if (::ftruncate(fd_, off_t(total_bytes)) != 0) {
+        if (::ftruncate(fd_, static_cast<off_t>(total_bytes)) != 0) {
             ::close(fd_);
             ::shm_unlink(name_.c_str());
             throw std::runtime_error("ftruncate failed for " + name_);
@@ -204,7 +204,7 @@ private:
         SimDisplayHeader* h = header();
         memcpy(h->magic, "BRGX", 4);
         h->version = 1;
-        h->header_bytes = uint16_t(sim_display_header_bytes);
+        h->header_bytes = static_cast<uint16_t>(sim_display_header_bytes);
         h->boot_id = fresh_boot_id();
         h->width = W;
         h->height = H;
@@ -223,16 +223,16 @@ private:
         } else {
             h->palette_used = 256;
             for (int i = 0; i < 256; ++i) {
-                h->palette[i][0] = uint8_t(i);
-                h->palette[i][1] = uint8_t(i);
-                h->palette[i][2] = uint8_t(i);
+                h->palette[i][0] = static_cast<uint8_t>(i);
+                h->palette[i][1] = static_cast<uint8_t>(i);
+                h->palette[i][2] = static_cast<uint8_t>(i);
             }
         }
     }
 
     static uint64_t fresh_boot_id() {
         std::random_device rd;
-        return (uint64_t(rd()) << 32) ^ uint64_t(rd());
+        return (static_cast<uint64_t>(rd()) << 32) ^ static_cast<uint64_t>(rd());
     }
 
     std::string name_;

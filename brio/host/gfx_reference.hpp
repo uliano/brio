@@ -44,7 +44,7 @@ namespace brio {
  */
 class RefCanvas {
 public:
-    RefCanvas(Extent w, Extent h) : w_(w), h_(h), px_(size_t(w) * h, 0) {}
+    RefCanvas(Extent w, Extent h) : w_(w), h_(h), px_(static_cast<size_t>(w) * h, 0) {}
 
     Extent width() const { return w_; }
     Extent height() const { return h_; }
@@ -74,11 +74,13 @@ public:
         if (w == 0 || h == 0) {
             return;
         }
-        const int32_t x1 = int32_t(x) + int32_t(w) - 1;
-        const int32_t y1 = int32_t(y) + int32_t(h) - 1;
+        const int32_t x0 = x;
+        const int32_t y0 = y;
+        const int32_t x1 = x0 + w - 1;
+        const int32_t y1 = y0 + h - 1;
         each([&](int32_t px, int32_t py) {
             return in_rect(px, py, x, y, w, h) &&
-                   (px == int32_t(x) || px == x1 || py == int32_t(y) || py == y1);
+                   (px == x0 || px == x1 || py == y0 || py == y1);
         }, c);
     }
 
@@ -104,14 +106,20 @@ public:
      * do. If that claim is false the exhaustive comparison says so.
      */
     void line(Coord x0, Coord y0, Coord x1, Coord y1, uint8_t c) {
-        const int32_t dx = int32_t(x1) - int32_t(x0);
-        const int32_t dy = int32_t(y1) - int32_t(y0);
+        const int32_t dx = static_cast<int32_t>(x1) - static_cast<int32_t>(x0);
+        const int32_t dy = static_cast<int32_t>(y1) - static_cast<int32_t>(y0);
         const bool major_x = std::abs(dx) >= std::abs(dy);
         each([&](int32_t px, int32_t py) {
             const int32_t major = major_x ? px : py;
-            const int32_t a0 = major_x ? int32_t(x0) : int32_t(y0);
-            const int32_t a1 = major_x ? int32_t(x1) : int32_t(y1);
-            const int32_t b0 = major_x ? int32_t(y0) : int32_t(x0);
+            const int32_t a0 = major_x ?
+                               static_cast<int32_t>(x0)
+                               : static_cast<int32_t>(y0);
+            const int32_t a1 = major_x ?
+                               static_cast<int32_t>(x1)
+                               : static_cast<int32_t>(y1);
+            const int32_t b0 = major_x ?
+                               static_cast<int32_t>(y0)
+                               : static_cast<int32_t>(x0);
             const int32_t minor = major_x ? py : px;
             const int32_t lo = a0 < a1 ? a0 : a1;
             const int32_t hi = a0 < a1 ? a1 : a0;
@@ -123,7 +131,8 @@ public:
             }
             const double t = double(major - a0) / double(a1 - a0);
             const int32_t span = major_x ? dy : dx;
-            const int32_t want = b0 + int32_t(std::llround(t * double(span)));
+            const int32_t want =
+                b0 + static_cast<int32_t>(std::llround(t * double(span)));
             return minor == want;
         }, c);
     }
@@ -138,14 +147,14 @@ public:
     void circle(Coord cx, Coord cy, Extent r, uint8_t c) {
         if (r == 0) {
             each([&](int32_t px, int32_t py) {
-                return px == int32_t(cx) && py == int32_t(cy);
+                return px == static_cast<int32_t>(cx) && py == static_cast<int32_t>(cy);
             }, c);
             return;
         }
         each([&](int32_t px, int32_t py) {
-            const int32_t dx = std::abs(px - int32_t(cx));
-            const int32_t dy = std::abs(py - int32_t(cy));
-            if (dx > int32_t(r) || dy > int32_t(r)) {
+            const int32_t dx = std::abs(px - static_cast<int32_t>(cx));
+            const int32_t dy = std::abs(py - static_cast<int32_t>(cy));
+            if (dx > static_cast<int32_t>(r) || dy > static_cast<int32_t>(r)) {
                 return false;
             }
             return dy == nearest_on_circle(dx, r) ||
@@ -155,10 +164,10 @@ public:
 
     /// The disc: an inequality, and nothing more.
     void fill_circle(Coord cx, Coord cy, Extent r, uint8_t c) {
-        const int32_t rr = int32_t(r) * int32_t(r);
+        const int32_t rr = static_cast<int32_t>(r) * static_cast<int32_t>(r);
         each([&](int32_t px, int32_t py) {
-            const int32_t dx = px - int32_t(cx);
-            const int32_t dy = py - int32_t(cy);
+            const int32_t dx = px - static_cast<int32_t>(cx);
+            const int32_t dy = py - static_cast<int32_t>(cy);
             return dx * dx + dy * dy <= rr;
         }, c);
     }
@@ -176,7 +185,7 @@ public:
         if (w == 0 || h == 0) {
             return;
         }
-        const Extent limit = Extent(((w < h ? w : h) - 1) / 2);
+        const Extent limit = static_cast<Extent>(((w < h ? w : h) - 1) / 2);
         if (r > limit) {
             r = limit;
         }
@@ -184,14 +193,14 @@ public:
             rect(x, y, w, h, c);
             return;
         }
-        const int32_t x0 = int32_t(x);
-        const int32_t y0 = int32_t(y);
-        const int32_t x1 = x0 + int32_t(w) - 1;
-        const int32_t y1 = y0 + int32_t(h) - 1;
-        const int32_t ax0 = x0 + int32_t(r);
-        const int32_t ax1 = x1 - int32_t(r);
-        const int32_t ay0 = y0 + int32_t(r);
-        const int32_t ay1 = y1 - int32_t(r);
+        const int32_t x0 = static_cast<int32_t>(x);
+        const int32_t y0 = static_cast<int32_t>(y);
+        const int32_t x1 = x0 + static_cast<int32_t>(w) - 1;
+        const int32_t y1 = y0 + static_cast<int32_t>(h) - 1;
+        const int32_t ax0 = x0 + static_cast<int32_t>(r);
+        const int32_t ax1 = x1 - static_cast<int32_t>(r);
+        const int32_t ay0 = y0 + static_cast<int32_t>(r);
+        const int32_t ay1 = y1 - static_cast<int32_t>(r);
 
         each([&](int32_t px, int32_t py) {
             const bool in_cols = px >= ax0 && px <= ax1;
@@ -211,7 +220,7 @@ public:
             const int32_t cy = py < ay0 ? ay0 : ay1;
             const int32_t dx = std::abs(px - cx);
             const int32_t dy = std::abs(py - cy);
-            if (dx > int32_t(r) || dy > int32_t(r)) {
+            if (dx > static_cast<int32_t>(r) || dy > static_cast<int32_t>(r)) {
                 return false;
             }
             return dy == nearest_on_circle(dx, r) ||
@@ -226,15 +235,15 @@ public:
         if (w == 0 || h == 0) {
             return;
         }
-        const Extent limit = Extent(((w < h ? w : h) - 1) / 2);
+        const Extent limit = static_cast<Extent>(((w < h ? w : h) - 1) / 2);
         if (r > limit) {
             r = limit;
         }
-        const int32_t x0i = int32_t(x) + int32_t(r);
-        const int32_t x1i = int32_t(x) + int32_t(w) - 1 - int32_t(r);
-        const int32_t y0i = int32_t(y) + int32_t(r);
-        const int32_t y1i = int32_t(y) + int32_t(h) - 1 - int32_t(r);
-        const int32_t rr = int32_t(r) * int32_t(r);
+        const int32_t x0i = static_cast<int32_t>(x) + static_cast<int32_t>(r);
+        const int32_t x1i = int32_t{x} + w - 1 - r;
+        const int32_t y0i = static_cast<int32_t>(y) + static_cast<int32_t>(r);
+        const int32_t y1i = int32_t{y} + h - 1 - r;
+        const int32_t rr = static_cast<int32_t>(r) * static_cast<int32_t>(r);
         each([&](int32_t px, int32_t py) {
             int32_t dx = 0;
             int32_t dy = 0;
@@ -268,33 +277,35 @@ public:
         if (str.empty()) {
             return;
         }
-        const int32_t cells = int32_t(str.size());
+        const int32_t cells = static_cast<int32_t>(str.size());
         each([&](int32_t px, int32_t py) {
-            const int32_t dx = px - int32_t(x);
-            const int32_t dy = py - int32_t(y);
-            if (dx < 0 || dy < 0 || dy >= int32_t(F::cell_h)) {
+            const int32_t dx = px - static_cast<int32_t>(x);
+            const int32_t dy = py - static_cast<int32_t>(y);
+            if (dx < 0 || dy < 0 || dy >= static_cast<int32_t>(F::cell_h)) {
                 return false;
             }
-            const int32_t cell = dx / int32_t(F::cell_w);
+            const int32_t cell = dx / static_cast<int32_t>(F::cell_w);
             if (cell >= cells) {
                 return false;
             }
             return true;
         }, bg);
         each([&](int32_t px, int32_t py) {
-            const int32_t dx = px - int32_t(x);
-            const int32_t dy = py - int32_t(y);
-            if (dx < 0 || dy < 0 || dy >= int32_t(F::cell_h)) {
+            const int32_t dx = px - static_cast<int32_t>(x);
+            const int32_t dy = py - static_cast<int32_t>(y);
+            if (dx < 0 || dy < 0 || dy >= static_cast<int32_t>(F::cell_h)) {
                 return false;
             }
-            const int32_t cell = dx / int32_t(F::cell_w);
+            const int32_t cell = dx / static_cast<int32_t>(F::cell_w);
             if (cell >= cells) {
                 return false;
             }
-            const int32_t col = dx % int32_t(F::cell_w);
+            const int32_t col = dx % static_cast<int32_t>(F::cell_w);
             const uint8_t bits =
-                F::row_bits(uint8_t(str[size_t(cell)]), Extent(dy));
-            return ((bits >> (int32_t(F::cell_w) - 1 - col)) & 1u) != 0;
+                F::row_bits(
+                            static_cast<uint8_t>(str[static_cast<size_t>(cell)]),
+                            static_cast<Extent>(dy));
+            return ((bits >> (static_cast<int32_t>(F::cell_w) - 1 - col)) & 1u) != 0;
         }, fg);
     }
 
@@ -305,7 +316,9 @@ public:
         std::string out = "gfx " + std::to_string(w_) + " " + std::to_string(h_) + "\n";
         for (Extent y = 0; y < h_; ++y) {
             for (Extent x = 0; x < w_; ++x) {
-                out += px_[index(Coord(x), Coord(y))] ? '#' : '.';
+                out += px_[index(static_cast<Coord>(x), static_cast<Coord>(y))] ?
+                       '#'
+                       : '.';
             }
             out += '\n';
         }
@@ -314,12 +327,14 @@ public:
 
 private:
     bool inside(Coord x, Coord y) const {
-        return int32_t(x) >= 0 && int32_t(x) < int32_t(w_) && int32_t(y) >= 0 &&
-               int32_t(y) < int32_t(h_);
+        const int32_t px = x;
+        const int32_t py = y;
+        return px >= 0 && px < w_ && py >= 0 && py < h_;
     }
 
     size_t index(Coord x, Coord y) const {
-        return size_t(uint16_t(y)) * w_ + size_t(uint16_t(x));
+        return static_cast<size_t>(static_cast<uint16_t>(y)) * w_ +
+               static_cast<size_t>(static_cast<uint16_t>(x));
     }
 
     /// How far from the centre line the ideal circle stands at offset
@@ -329,13 +344,14 @@ private:
     static int32_t nearest_on_circle(int32_t a, Extent r) {
         const double rr =
             double(r) * double(r) - double(a) * double(a);
-        return int32_t(std::llround(std::sqrt(rr < 0.0 ? 0.0 : rr)));
+        return static_cast<int32_t>(std::llround(std::sqrt(rr < 0.0 ? 0.0 : rr)));
     }
 
     static bool in_rect(int32_t px, int32_t py, Coord x, Coord y, Extent w,
                         Extent h) {
-        return px >= int32_t(x) && px < int32_t(x) + int32_t(w) &&
-               py >= int32_t(y) && py < int32_t(y) + int32_t(h);
+        const int32_t x0 = x;
+        const int32_t y0 = y;
+        return px >= x0 && px < x0 + w && py >= y0 && py < y0 + h;
     }
 
     /// Ask the predicate of every pixel on the canvas, independently.
@@ -343,8 +359,8 @@ private:
     void each(F&& belongs, uint8_t c) {
         for (Extent y = 0; y < h_; ++y) {
             for (Extent x = 0; x < w_; ++x) {
-                if (belongs(int32_t(x), int32_t(y))) {
-                    px_[index(Coord(x), Coord(y))] = c;
+                if (belongs(static_cast<int32_t>(x), static_cast<int32_t>(y))) {
+                    px_[index(static_cast<Coord>(x), static_cast<Coord>(y))] = c;
                 }
             }
         }
@@ -375,8 +391,9 @@ GfxDiff compare(const S& s, const RefCanvas& ref) {
     d.map = "gfx " + std::to_string(s.width()) + " " + std::to_string(s.height()) + "\n";
     for (Extent y = 0; y < s.height(); ++y) {
         for (Extent x = 0; x < s.width(); ++x) {
-            const bool a = s.get_pixel(Coord(x), Coord(y)) != 0;
-            const bool r = ref.at(Coord(x), Coord(y)) != 0;
+            const bool a =
+                s.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) != 0;
+            const bool r = ref.at(static_cast<Coord>(x), static_cast<Coord>(y)) != 0;
             if (a && r) {
                 d.map += '#';
             } else if (a) {
@@ -397,10 +414,13 @@ GfxDiff compare(const S& s, const RefCanvas& ref) {
 /// The same picture for a surface alone, for a golden file or an eye.
 template <ReadableSurface S>
 std::string ascii(const S& s) {
-    std::string out = "gfx " + std::to_string(s.width()) + " " + std::to_string(s.height()) + "\n";
+    std::string out =
+        "gfx " + std::to_string(s.width()) + " " + std::to_string(s.height()) + "\n";
     for (Extent y = 0; y < s.height(); ++y) {
         for (Extent x = 0; x < s.width(); ++x) {
-            out += s.get_pixel(Coord(x), Coord(y)) ? '#' : '.';
+            out += s.get_pixel(static_cast<Coord>(x), static_cast<Coord>(y)) ?
+                   '#'
+                   : '.';
         }
         out += '\n';
     }

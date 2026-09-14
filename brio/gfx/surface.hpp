@@ -33,8 +33,10 @@
  *
  * COORDINATES ARE SIGNED, EXTENTS ARE NOT. A shape may begin off the
  * left or top edge and still be partly visible, so a coordinate is
- * signed; a width is not. Their sum exceeds 16 bits, so the clipping
- * arithmetic names int32_t and the API never adds the two.
+ * signed; a width is not. Their SUM would not fit either of them, which
+ * is why clip() below never forms it - and why nothing here needs to be
+ * wider than sixteen bits. On an eight-bit part that is the difference
+ * between one instruction and two on the hottest path in the library.
  *
  * (docs/design/gfx.md.)
  */
@@ -53,8 +55,8 @@ namespace brio {
 /// A position. Signed: a shape may start off-surface and still show.
 using Coord = int16_t;
 
-/// A width or a height. Never negative; never added to a Coord except
-/// through the int32_t arithmetic in clip().
+/// A width or a height. Never negative, and never added to a Coord:
+/// clip() reaches the same answer without forming that sum.
 using Extent = uint16_t;
 
 /// An axis-aligned rectangle: an ORIGIN AND AN EXTENT, never two
@@ -68,30 +70,74 @@ struct Rect {
     Extent h{};
 };
 
-/// The part of `r` that lies within a `bw` x `bh` surface, or nothing at
-/// all. The one place the coordinate and the extent meet, so the one
-/// place that names its width.
+/// How far a span starting at a negative `p` lies off the near edge.
+/// Written so that the most negative coordinate there is does not
+/// overflow on its way to becoming a magnitude: -(p + 1) is always
+/// representable, and the missing one is added afterwards.
+constexpr uint_fast16_t off_near_edge(Coord p) {
+    return static_cast<uint_fast16_t>(static_cast<uint_fast16_t>(-(p + 1)) + 1u);
+}
+
+/**
+ * The part of `r` that lies within a `bw` x `bh` surface, or nothing at
+ * all.
+ *
+ * THIS RUNS ON EVERY PRIMITIVE CALL - on every pixel of a segment, since
+ * a pixel is a one-by-one rectangle - so it is the one piece of
+ * arithmetic in the library whose width is worth arguing about. It stays
+ * in SIXTEEN BITS throughout, and does so without restricting what a
+ * caller may ask: the trick is that the far edge `p + n` is never
+ * formed. Trimming the near edge shortens the span, and trimming the far
+ * one compares against the room that is left - `bound - p`, with `p`
+ * already known non-negative and less than `bound`. Neither can leave
+ * the range of the types.
+ *
+ * Forming `p + n` was what forced a wider type, and on an eight-bit part
+ * that made the hottest path in the library twice the work for nothing.
+ */
 constexpr std::optional<Rect> clip(Rect r, Extent bw, Extent bh) {
-    int32_t x0 = r.x;
-    int32_t y0 = r.y;
-    int32_t x1 = x0 + int32_t(r.w); // exclusive
-    int32_t y1 = y0 + int32_t(r.h);
-    if (x0 < 0) {
-        x0 = 0;
+    int_fast16_t x = r.x;
+    int_fast16_t y = r.y;
+    uint_fast16_t w = r.w;
+    uint_fast16_t h = r.h;
+
+    if (x < 0) {
+        const uint_fast16_t skip = off_near_edge(x);
+        if (skip >= w) {
+            return {};
+        }
+        w -= skip;
+        x = 0;
     }
-    if (y0 < 0) {
-        y0 = 0;
+    if (y < 0) {
+        const uint_fast16_t skip = off_near_edge(y);
+        if (skip >= h) {
+            return {};
+        }
+        h -= skip;
+        y = 0;
     }
-    if (x1 > int32_t(bw)) {
-        x1 = int32_t(bw);
-    }
-    if (y1 > int32_t(bh)) {
-        y1 = int32_t(bh);
-    }
-    if (x1 <= x0 || y1 <= y0) {
+
+    // Both non-negative now, so the comparisons and the subtractions
+    // below are exact in the unsigned type.
+    const uint_fast16_t px = static_cast<uint_fast16_t>(x);
+    const uint_fast16_t py = static_cast<uint_fast16_t>(y);
+    if (px >= bw || py >= bh) {
         return {};
     }
-    return Rect{Coord(x0), Coord(y0), Extent(x1 - x0), Extent(y1 - y0)};
+    const uint_fast16_t room_w = bw - px;
+    const uint_fast16_t room_h = bh - py;
+    if (w > room_w) {
+        w = room_w;
+    }
+    if (h > room_h) {
+        h = room_h;
+    }
+    if (w == 0 || h == 0) {
+        return {};
+    }
+    return Rect{static_cast<Coord>(x), static_cast<Coord>(y),
+                static_cast<Extent>(w), static_cast<Extent>(h)};
 }
 
 /*
@@ -107,21 +153,21 @@ constexpr std::optional<Rect> clip(Rect r, Extent bw, Extent bh) {
 /// the conversion can be judged against the silicon.
 struct Mono {
     using Color = uint8_t; ///< 0 or 1
-    static constexpr unsigned bits = 1;
+    static constexpr uint8_t bits = 1;
     static constexpr Color max_color = 1;
 
     static constexpr uint16_t stride_for(Extent w) {
-        return uint16_t((uint32_t(w) + 7u) / 8u);
+        return static_cast<uint16_t>((static_cast<uint32_t>(w) + 7u) / 8u);
     }
 
     static constexpr Color get(const uint8_t* row, Extent x) {
-        return Color((row[x >> 3] >> (7u - (x & 7u))) & 1u);
+        return static_cast<Color>((row[x >> 3] >> (7u - (x & 7u))) & 1u);
     }
 
     static constexpr void put(uint8_t* row, Extent x, Color c) {
-        const uint8_t mask = uint8_t(0x80u >> (x & 7u));
-        row[x >> 3] = c ? uint8_t(row[x >> 3] | mask)
-                        : uint8_t(row[x >> 3] & uint8_t(~mask));
+        const uint8_t mask = static_cast<uint8_t>(0x80u >> (x & 7u));
+        row[x >> 3] = c ? static_cast<uint8_t>(row[x >> 3] | mask)
+                        : static_cast<uint8_t>(row[x >> 3] & static_cast<uint8_t>(~mask));
     }
 
     /// `n` pixels from `x`, one colour. Head bits, whole bytes, tail
@@ -131,21 +177,27 @@ struct Mono {
             return;
         }
         const uint32_t first = x;
-        const uint32_t last = uint32_t(x) + n - 1u; // inclusive
+        const uint32_t last = static_cast<uint32_t>(x) + n - 1u; // inclusive
         const uint32_t fb = first >> 3;
         const uint32_t lb = last >> 3;
-        const uint8_t head = uint8_t(0xFFu >> (first & 7u));
-        const uint8_t tail = uint8_t(0xFFu << (7u - (last & 7u)));
+        const uint8_t head = static_cast<uint8_t>(0xFFu >> (first & 7u));
+        const uint8_t tail = static_cast<uint8_t>(0xFFu << (7u - (last & 7u)));
         if (fb == lb) {
-            const uint8_t m = uint8_t(head & tail);
-            row[fb] = c ? uint8_t(row[fb] | m) : uint8_t(row[fb] & uint8_t(~m));
+            const uint8_t m = static_cast<uint8_t>(head & tail);
+            row[fb] = c ?
+                      static_cast<uint8_t>(row[fb] | m)
+                      : static_cast<uint8_t>(row[fb] & static_cast<uint8_t>(~m));
             return;
         }
-        row[fb] = c ? uint8_t(row[fb] | head) : uint8_t(row[fb] & uint8_t(~head));
+        row[fb] = c ?
+                  static_cast<uint8_t>(row[fb] | head)
+                  : static_cast<uint8_t>(row[fb] & static_cast<uint8_t>(~head));
         for (uint32_t b = fb + 1u; b < lb; ++b) {
-            row[b] = c ? uint8_t(0xFFu) : uint8_t(0x00u);
+            row[b] = c ? static_cast<uint8_t>(0xFFu) : static_cast<uint8_t>(0x00u);
         }
-        row[lb] = c ? uint8_t(row[lb] | tail) : uint8_t(row[lb] & uint8_t(~tail));
+        row[lb] = c ?
+                  static_cast<uint8_t>(row[lb] | tail)
+                  : static_cast<uint8_t>(row[lb] & static_cast<uint8_t>(~tail));
     }
 };
 
@@ -155,7 +207,7 @@ struct Mono {
 /// ramp is the identity palette.
 struct Indexed8 {
     using Color = uint8_t;
-    static constexpr unsigned bits = 8;
+    static constexpr uint8_t bits = 8;
     static constexpr Color max_color = 255;
 
     static constexpr uint16_t stride_for(Extent w) { return w; }
@@ -215,7 +267,7 @@ public:
     using Color = typename Fmt::Color;
 
     static constexpr uint16_t stride = Fmt::stride_for(W);
-    static constexpr size_t bytes = size_t(stride) * H;
+    static constexpr size_t bytes = static_cast<size_t>(stride) * H;
 
     explicit Framebuffer(std::span<uint8_t, bytes> storage)
         : px_(storage.data()) {}
@@ -232,30 +284,33 @@ public:
             return;
         }
         for (Extent row = 0; row < r->h; ++row) {
-            Fmt::fill(row_at(Extent(r->y + row)), Extent(r->x), r->w, c);
+            Fmt::fill(row_at(static_cast<Extent>(r->y + row)),
+                      static_cast<Extent>(r->x), r->w, c);
         }
     }
 
     void write_run(Coord x, Coord y, std::span<const Color> run) {
-        if (run.empty() || int32_t(y) < 0 || int32_t(y) >= int32_t(H)) {
+        const uint_fast16_t py = static_cast<uint_fast16_t>(y);
+        if (run.empty() || py >= H) {
             return;
         }
         int32_t x0 = x;
-        int32_t x1 = x0 + int32_t(run.size());
+        int32_t x1 = x0 + static_cast<int32_t>(run.size());
         int32_t skip = 0;
         if (x0 < 0) {
             skip = -x0;
             x0 = 0;
         }
-        if (x1 > int32_t(W)) {
-            x1 = int32_t(W);
+        if (x1 > static_cast<int32_t>(W)) {
+            x1 = static_cast<int32_t>(W);
         }
         if (x1 <= x0) {
             return;
         }
-        uint8_t* row = row_at(Extent(y));
+        uint8_t* row = row_at(static_cast<Extent>(py));
         for (int32_t i = 0; i < x1 - x0; ++i) {
-            Fmt::put(row, Extent(x0 + i), run[size_t(skip + i)]);
+            Fmt::put(row, static_cast<Extent>(x0 + i),
+                     run[static_cast<size_t>(skip + i)]);
         }
     }
 
@@ -263,15 +318,20 @@ public:
     /// about a pixel that does not exist, and there is no colour to
     /// invent for it.
     Color get_pixel(Coord x, Coord y) const {
-        if (int32_t(x) < 0 || int32_t(x) >= int32_t(W) || int32_t(y) < 0 ||
-            int32_t(y) >= int32_t(H)) {
+        // ONE comparison each: read as unsigned, a negative coordinate
+        // becomes a very large one and fails the same bound test. Half
+        // the work of asking twice, and it says the same thing.
+        const uint_fast16_t px = static_cast<uint_fast16_t>(x);
+        const uint_fast16_t py = static_cast<uint_fast16_t>(y);
+        if (px >= W || py >= H) {
             return Color{};
         }
-        return Fmt::get(row_at(Extent(y)), Extent(x));
+        return Fmt::get(row_at(static_cast<Extent>(py)),
+                        static_cast<Extent>(px));
     }
 
 private:
-    uint8_t* row_at(Extent y) const { return px_ + size_t(y) * stride; }
+    uint8_t* row_at(Extent y) const { return px_ + static_cast<size_t>(y) * stride; }
 
     uint8_t* px_;
 };
@@ -302,28 +362,31 @@ public:
         if (!r) {
             return;
         }
-        base_->fill_rect(Coord(r->x + x_), Coord(r->y + y_), r->w, r->h, c);
+        base_->fill_rect(static_cast<Coord>(r->x + x_),
+                         static_cast<Coord>(r->y + y_), r->w, r->h, c);
     }
 
     void write_run(Coord x, Coord y, std::span<const Color> run) {
-        if (run.empty() || int32_t(y) < 0 || int32_t(y) >= int32_t(h_)) {
+        const uint_fast16_t py = static_cast<uint_fast16_t>(y);
+        if (run.empty() || py >= h_) {
             return;
         }
         int32_t x0 = x;
-        int32_t x1 = x0 + int32_t(run.size());
+        int32_t x1 = x0 + static_cast<int32_t>(run.size());
         int32_t skip = 0;
         if (x0 < 0) {
             skip = -x0;
             x0 = 0;
         }
-        if (x1 > int32_t(w_)) {
-            x1 = int32_t(w_);
+        if (x1 > static_cast<int32_t>(w_)) {
+            x1 = static_cast<int32_t>(w_);
         }
         if (x1 <= x0) {
             return;
         }
-        base_->write_run(Coord(x0 + x_), Coord(y + y_),
-                         run.subspan(size_t(skip), size_t(x1 - x0)));
+        base_->write_run(static_cast<Coord>(x0 + x_), static_cast<Coord>(y + y_),
+                         run.subspan(static_cast<size_t>(skip),
+                                     static_cast<size_t>(x1 - x0)));
     }
 
 private:
