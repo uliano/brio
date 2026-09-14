@@ -54,6 +54,7 @@
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
 #include "util/pwm_channel.hpp"
+#include "util/quadrature.hpp"
 #include "util/rgb_lamp.hpp"
 #include "util/ring.hpp"
 #include "util/serial_port.hpp"
@@ -167,7 +168,7 @@ static_assert(SleepSite<FakeSite>);
 
 // ---- the subscribers ----------------------------------------------------------
 struct Listener : Fsm<Listener, AnalogSample, BlockReady<uint16_t>, PrepareSleep, WakeReport,
-                      SleepVote, LineReceived, NvDone> {
+                      SleepVote, LineReceived, NvDone, Turned> {
     static inline EventQueue<Event, 8, P> queue;
     static inline uint32_t seen = 0;
 
@@ -184,7 +185,8 @@ struct Listener : Fsm<Listener, AnalogSample, BlockReady<uint16_t>, PrepareSleep
             [](WakeReport) { return handled(); },
             [](SleepVote) { return handled(); },
             [](LineReceived l) { seen += static_cast<uint32_t>(l.line.get()[0]); return handled(); },
-            [](NvDone d) { seen += d.status; return handled(); });
+            [](NvDone d) { seen += d.status; return handled(); },
+            [](Turned t) { seen += static_cast<uint32_t>(t.detents); return handled(); });
     }
 };
 
@@ -193,6 +195,13 @@ using Relay = BlockRelay<P, Subscribers<Listener>, FakeSource>;
 using Power = PowerManager<P, FakeSite, PowerConfig{}, Listener>;
 using Lines = SerialPort<Serial, P, Listener, 48>;
 
+// Two contacts a knob would drive, and the decoder over them: pure util,
+// so what this proves is that the compiler takes it.
+struct PadA { static bool read() { return false; } };
+struct PadB { static bool read() { return true; } };
+using Knob = Quadrature<P, Subscribers<Listener>, PadA, PadB>;
+
+static_assert(ActiveObject<Knob>);
 static_assert(ActiveObject<Sampler>);
 static_assert(ActiveObject<Relay>);
 static_assert(ActiveObject<Power>);
@@ -308,6 +317,12 @@ void gfx_verbs() {
     round_rect(gfx_panel, 2, 2, 124, 60, 12, 1);
     fill_round_rect(gfx_panel, 20, 20, 40, 24, 200, 1);
     static_assert(isqrt(65535UL * 65535UL) == 65535u);
+    Knob::init(1);
+    (void)Knob::queue.pop();
+    Knob::stop();
+    (void)Knob::lost();
+    static_assert(quadrature_step(0b00, 0b01).value() == 1);
+    static_assert(!quadrature_step(0b00, 0b11).has_value());
     text<Font5x7>(gfx_panel, 2, 2, "brio", 1, 0);
     text_field<Font5x7>(gfx_panel, 2, 12, "3.30", 8, 1, 0);
     Pen<GfxPanel> pen(gfx_panel, 1, 0);

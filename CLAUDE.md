@@ -735,6 +735,15 @@ brio/                    the framework, four strata:
                            InputScanner<P, Subscribers, ScanConfig, Inputs...>:
                            periodic poll, N-sample debounce, InputEdge on each
                            flip, silent at startup; polarity is the input's
+    quadrature.hpp         quadrature_step() (the 4x4 transition table as
+                           an optional: nothing means a state was missed) +
+                           Turned{detents} + QuadratureConfig (counts per
+                           detent = a FACT OF THE PART; the lost-step policy,
+                           conservative by default) + Quadrature<P, Subs, A,
+                           B, config>: the POLLED SOFTWARE DECODER over two
+                           ScannedInputs, right on every target because a
+                           knob does not justify a timer. The button is
+                           InputScanner's; the accumulator never leaves
     trace.hpp              Trace<N, P, enabled>: ring of {t, tag, arg} stamps
                            from ISRs or the loop, overwrite-oldest, dump(sink);
                            the disabled specialization is EMPTY - no storage,
@@ -1819,6 +1828,22 @@ brio/                    the framework, four strata:
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests
                            (configurable geometry, power-cut injection,
                            simulated reflash, wear counters)
+    sim_display.hpp        SimDisplay: a framebuffer published into POSIX
+                           shared memory for a viewer in another process to
+                           read at its own rate - NOT a surface, it hands out
+                           the bytes an ordinary Framebuffer draws into; the
+                           name is the contract and never a path, and the
+                           boot id is what tells a viewer the segment was
+                           remade (docs/host/README.md)
+    sim_input.hpp          SimButton<id> and SimEncoder<id> (its two pads as
+                           ScannedInputs, the shaft turned by step()/spin(),
+                           force() the door for injecting bounce and skipped
+                           states): the world's side of a contact, whose
+                           whole interface is set()
+    gfx_reference.hpp      THE JUDGE of the drawing primitives: every shape
+                           computed from its definition, per pixel, sharing
+                           no arithmetic with what it judges; plus the ASCII
+                           dump and the diff map a failure prints
 ```
 
 ## Build artifacts

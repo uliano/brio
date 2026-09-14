@@ -30,6 +30,7 @@
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
 #include "util/pwm_channel.hpp"
+#include "util/quadrature.hpp"
 #include "util/rgb_lamp.hpp"
 #include "util/ring.hpp"
 #include "util/serial_port.hpp"
@@ -49,15 +50,24 @@ using namespace brio;
 using P = Rp2040Platform<>;
 
 struct Ping {};
-struct Echo : Fsm<Echo, Ping> {
+struct Echo : Fsm<Echo, Ping, Turned> {
     static inline EventQueue<Event, 4, P> queue;
     static inline TimeEvent<P, Echo, Ping> tick{Ping{}};
     static void init() { start(&idle); }
     static Status idle(const Event& e) {
         return match(e, [](Entry) { tick.arm_every(ticks_from_ms<P>(10)); return handled(); },
-                     [](Ping) { return handled(); }, [](auto) { return unhandled(); });
+                     [](Ping) { return handled(); },
+                     [](Turned) { return handled(); },
+                     [](auto) { return unhandled(); });
     }
 };
+
+// Two contacts a knob would drive, and the decoder over them: pure util,
+// so what this proves is that the compiler takes it.
+struct PadA { static bool read() { return false; } };
+struct PadB { static bool read() { return true; } };
+using Knob = Quadrature<P, Subscribers<Echo>, PadA, PadB>;
+static_assert(ActiveObject<Knob>);
 
 using Loop = Tenuto<P, Echo>;
 using Log = Ring<uint8_t, 64, P>;
@@ -102,6 +112,12 @@ void gfx_verbs() {
     round_rect(gfx_panel, 2, 2, 124, 60, 12, 1);
     fill_round_rect(gfx_panel, 20, 20, 40, 24, 200, 1);
     static_assert(isqrt(65535UL * 65535UL) == 65535u);
+    Knob::init(1);
+    (void)Knob::queue.pop();
+    Knob::stop();
+    (void)Knob::lost();
+    static_assert(quadrature_step(0b00, 0b01).value() == 1);
+    static_assert(!quadrature_step(0b00, 0b11).has_value());
     text<Font5x7>(gfx_panel, 2, 2, "brio", 1, 0);
     text_field<Font5x7>(gfx_panel, 2, 12, "3.30", 8, 1, 0);
     Pen<GfxPanel> pen(gfx_panel, 1, 0);
