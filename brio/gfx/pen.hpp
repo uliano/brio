@@ -2,11 +2,17 @@
  * pen.hpp (gfx)
  *
  * THE CONVENIENCE, KEPT OUT OF THE CONTRACT. A pen holds what a caller
- * would otherwise repeat - a current point, a colour, a background - and
- * forwards to the stateless primitives. It is the only stateful thing in
- * this library, and it is deliberately ABOVE the surface rather than in
- * it, because state below would make primitives order-dependent and
- * would let a golden image turn on something nobody can see.
+ * would otherwise repeat - a colour, a background, and a current point -
+ * and forwards to the stateless primitives. It is the only stateful
+ * thing in this library, and it is deliberately ABOVE the surface rather
+ * than in it, because state below would make primitives order-dependent
+ * and would let a golden image turn on something nobody can see.
+ *
+ * THE CURSOR IS FOR TRACING, and for nothing else. Sequential work - a
+ * polyline across a plot, a run of text - is where each step begins
+ * where the last one ended and repeating the coordinate would be noise.
+ * The shapes are placed rather than continued, so they take their own
+ * coordinates and the pen supplies only their colours.
  *
  * Nothing in gfx/ uses a pen internally. Every primitive keeps taking
  * all of its arguments, so a program that wants none of this pays for
@@ -57,7 +63,8 @@ public:
     Coord x() const { return x_; }
     Coord y() const { return y_; }
 
-    /// Draws from the current point to (x, y) and ends there.
+    /// Draws from the current point to (x, y) and ends there. This and
+    /// the text verbs are the WHOLE of what the cursor is for.
     void line_to(Coord x, Coord y) {
         line(*s_, x_, y_, x, y, fg_);
         x_ = x;
@@ -65,23 +72,40 @@ public:
     }
 
     void clear() { brio::clear(*s_, bg_); }
-    void set_pixel() { brio::set_pixel(*s_, x_, y_, fg_); }
 
-    void rect(Extent w, Extent h) { brio::rect(*s_, x_, y_, w, h, fg_); }
-    void fill_rect(Extent w, Extent h) {
-        brio::fill_rect(*s_, x_, y_, w, h, fg_);
-    }
-    void round_rect(Extent w, Extent h, Extent r) {
-        brio::round_rect(*s_, x_, y_, w, h, r, fg_);
-    }
-    void fill_round_rect(Extent w, Extent h, Extent r) {
-        brio::fill_round_rect(*s_, x_, y_, w, h, r, fg_);
-    }
+    /*
+     * The shapes take their own coordinates and leave the cursor alone.
+     *
+     * The cursor exists for work that is SEQUENTIAL - a polyline, a run
+     * of text - where each step begins where the last one ended and
+     * repeating the coordinate would be noise. Nothing about a rectangle
+     * or a circle is sequential: they are placed, not continued. Letting
+     * them read the cursor would also force a silent choice between an
+     * origin and a centre, which are not the same point, and a reader
+     * would have to remember which verb meant which.
+     *
+     * So here the pen supplies the COLOURS and nothing else.
+     */
+    void set_pixel(Coord x, Coord y) { brio::set_pixel(*s_, x, y, fg_); }
 
-    /// Centred on the current point, which is where a circle's centre
-    /// naturally is - unlike a rectangle, whose origin is its corner.
-    void circle(Extent r) { brio::circle(*s_, x_, y_, r, fg_); }
-    void fill_circle(Extent r) { brio::fill_circle(*s_, x_, y_, r, fg_); }
+    void rect(Coord x, Coord y, Extent w, Extent h) {
+        brio::rect(*s_, x, y, w, h, fg_);
+    }
+    void fill_rect(Coord x, Coord y, Extent w, Extent h) {
+        brio::fill_rect(*s_, x, y, w, h, fg_);
+    }
+    void round_rect(Coord x, Coord y, Extent w, Extent h, Extent r) {
+        brio::round_rect(*s_, x, y, w, h, r, fg_);
+    }
+    void fill_round_rect(Coord x, Coord y, Extent w, Extent h, Extent r) {
+        brio::fill_round_rect(*s_, x, y, w, h, r, fg_);
+    }
+    void circle(Coord cx, Coord cy, Extent r) {
+        brio::circle(*s_, cx, cy, r, fg_);
+    }
+    void fill_circle(Coord cx, Coord cy, Extent r) {
+        brio::fill_circle(*s_, cx, cy, r, fg_);
+    }
 
     /// Text in the pen's two colours, the cursor left after the last
     /// cell so successive calls run on.

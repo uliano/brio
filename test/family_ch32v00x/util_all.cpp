@@ -313,6 +313,7 @@ void gfx_verbs() {
     Pen<GfxPanel> pen(gfx_panel, 1, 0);
     pen.move_to(4, 30);
     pen.line_to(60, 44);
+    pen.circle(30, 30, 6);
     pen.text<Font5x7>("V=");
     pen.text_field<Font5x7>("12.5", 6);
 }

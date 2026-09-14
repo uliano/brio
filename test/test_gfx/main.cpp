@@ -717,8 +717,7 @@ TEST_CASE("a pen is the stateless primitives with the arguments remembered") {
     p.move_to(2, 3);
     p.line_to(20, 15);
     p.line_to(25, 2);
-    p.move_to(10, 10);
-    p.circle(4);
+    p.circle(10, 10, 4);
 
     brio::line(plain_side.fb, 2, 3, 20, 15, 1);
     brio::line(plain_side.fb, 20, 15, 25, 2, 1);
@@ -731,9 +730,10 @@ TEST_CASE("a pen is the stateless primitives with the arguments remembered") {
                     plain_side.fb.get_pixel(Coord(x), Coord(y)));
         }
     }
-    // The cursor is left at the end of the last segment drawn.
-    CHECK(p.x() == 10);
-    CHECK(p.y() == 10);
+    // A shape does not move the cursor: it is still where the last
+    // segment ended.
+    CHECK(p.x() == 25);
+    CHECK(p.y() == 2);
 }
 
 TEST_CASE("a pen carries the text cursor across calls") {
