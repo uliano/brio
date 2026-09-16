@@ -78,6 +78,12 @@ BOARD_TYPES = {
                "mcu": "ch32v006k8", "flash": "wch_openocd"},
     "v003f4": {"project": "ch32v00x", "preset": "ch32v003f4-release",
                "mcu": "ch32v003f4", "flash": "wch_openocd"},
+    # The CH32V203, the second WCH family and a bigger core (QingKe V4B,
+    # RV32IMAC): its own project and preset, the same WCH-Link and the
+    # same OpenOCD fork - but the two-wire debug port of this family,
+    # not the CH32V00x's single wire.
+    "v203c8": {"project": "ch32v203", "preset": "ch32v203c8-release",
+               "mcu": "ch32v203c8", "flash": "wch_openocd"},
     # The RP2040 boards: one chip, one preset per FLASH GEOMETRY (the
     # rp2040 project's own rule), so a Raspberry Pi Pico / Pico H and a
     # 2 MB WeAct board share rp2040-release and differ only as board

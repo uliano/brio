@@ -117,7 +117,7 @@ This file has no decision log any more: the former log was migrated to
 `brio` (`brio/`) is a header-only C++23 (gnu++23) framework for
 bare-metal MCUs built around a cooperative active-object kernel,
 written clean-room after Samek's book (never the QP source). One flat
-namespace `brio`; eleven strata under `brio/` - `kernel/` (pure
+namespace `brio`; twelve strata under `brio/` - `kernel/` (pure
 logic, includes nothing of brio), `util/` (services over the kernel),
 `gfx/` (drawing: pure, target-independent, and needing nothing of the
 kernel - three kinds of surface told apart by where a pixel's truth
@@ -132,7 +132,12 @@ Cortex-M0+, bench chip ATSAMC21J18A), `stm32g0/` (everything that
 knows `stm32g0xx.h`: STM32G0, Cortex-M0+, bench chip STM32G0B1RE on
 a Nucleo-64), `ch32v00x/` (everything that knows the CH32V00x: WCH's
 QingKe V2C, RV32EC, bench chip CH32V006K8U6 - NO vendor header, the
-register map is the stratum's own device.hpp), `rp2040/` (everything
+register map is the stratum's own device.hpp), `ch32v203/` (everything
+that knows the CH32V203: WCH's QingKe V4B, RV32IMAC with the full
+register file, bench chip CH32V203C8T6 on a WeAct core board - no
+vendor header either, and the STM32F1's peripheral generation under
+WCH's names, which is what separates it from the CH32V00x),
+`rp2040/` (everything
 that knows the RP2040: Raspberry Pi's dual Cortex-M0+, bench chip an
 RP2040 B2 on a Raspberry Pi Pico and on a WeAct board, the pico-sdk's CMSIS header and register
 definitions vendored, a kernel per core), `stm32f4/` (everything that
@@ -141,9 +146,9 @@ built with the hard-float ABI, the FPU enabled by the crt; bench chips
 STM32F429ZI on an STM32F429I-DISC1, STM32F446RE on a Nucleo-64,
 STM32F411CE on a WeAct black pill), `host/` (the native test
 target). Includes carry the stratum prefix
-(`#include "avrdx/usart.hpp"`). The builds are eight sibling CMake
+(`#include "avrdx/usart.hpp"`). The builds are nine sibling CMake
 projects, PEERS - the repo root is not a CMake project: `avrdx/`,
-`samc21/`, `stm32g0/`, `ch32v00x/`, `rp2040/` and `stm32f4/` (each with its own toolchain file
+`samc21/`, `stm32g0/`, `ch32v00x/`, `ch32v203/`, `rp2040/` and `stm32f4/` (each with its own toolchain file
 and presets, Ninja, emitting into the shared `build-cmake/`)
 auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
 from its own `// build:` header comment; host tests in `test/` are the
@@ -397,6 +402,21 @@ gets its home in `docs/design/` when taken.
   store, which need the heap's blocks against the journal's small
   values, and whether a zone at a fixed address is worth a partition
   every image pays. Until that review, no FlashMedia on the STM32F4.
+- **The CH32V203 stratum's chapters.** `brio/ch32v203/` and `ch32v203/`
+  are `in bring-up` on the CH32V203C8T6 (README.md's table): the
+  platform, the clock, the pads, the USART and THE USB DEVICE
+  CONTROLLER are measured - the kernel console runs both on the probe's
+  serial and on the chip's own USB-C, a CDC ACM port over util/usb -
+  and everything else is open: the family check fixture, the eight
+  other parts of the series, a test suite, and the chapters (DMA, the
+  timers, SPI, I2C, the ADC, flash, PWR and the sleep sites, the
+  watchdogs, CAN, the RTC and the backup domain, the OPA, CRC, TKEY,
+  EXTI and the second USB block). What the silicon taught so far is in
+  docs/ch32v203/README.md, and one finding has a design consequence:
+  the USB controller does NOT survive the core's sleep, so a USB
+  program drives the kernel with `step()` and never idles until this
+  stratum has a power model and the controller can vote in a
+  PrepareSleep round.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -470,6 +490,8 @@ brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--s
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash via OpenOCD (ST-LINK)
 (cd ch32v00x && cmake --build --preset ch32v006k8-release --target <app>)          # CH32V00x release build (WCH gcc 15)
 (cd ch32v00x && cmake --build --preset ch32v006k8-release --target <app>-upload)   # flash via WCH's OpenOCD fork (WCH-Link)
+(cd ch32v203 && cmake --build --preset ch32v203c8-release --target <app>)          # CH32V203 release build (WCH gcc 15, ilp32)
+(cd ch32v203 && cmake --build --preset ch32v203c8-release --target <app>-upload)   # flash it: `reset run` does NOT start the program here, `reset halt` + `resume` does
 (cd rp2040 && cmake --build --preset rp2040-release --target <app>)              # RP2040 release build
 (cd rp2040 && cmake --build --preset rp2040-release --target <app>-upload)       # flash via OpenOCD (the Debug Probe, CMSIS-DAP)
 (cd stm32f4 && cmake --build --preset stm32f429zi-release --target <app>)        # STM32F4 release build (hard-float)
@@ -593,6 +615,15 @@ ch32v00x/                the CH32V00x build project, the fifth of the shape
                          "// build: groups" line builds as one image per
                          group, <app>-<n>, the crt PAINTS the free RAM so a
                          suite reports how much stack it never touched
+ch32v203/                the CH32V203 build project, the seventh of the shape:
+                         cmake/toolchain-riscv.cmake on the same /sw/wch-riscv
+                         but the ilp32 ABI and the full register file, a PART
+                         TABLE (cmake/ch32v203-parts.cmake: the nine parts of
+                         the series, each with its part definition, its
+                         memories and its board type) instead of substring
+                         arithmetic, ld/<part>.ld and src/glue/startup_ch32v203.S
+                         - the table whose first word is an INSTRUCTION again,
+                         with a TAIL THAT IS THE DEVICE CLASS'S
 stm32f4/                 the STM32F4 build project, the sixth of the shape: a
                          PART TABLE (cmake/stm32f4-parts.cmake: the part number
                          -> ST's irregular device define, the crt stem, the
@@ -705,7 +736,7 @@ brio/.clangd             per-stratum clangd routing: the framework default is
                          project is listed in .vscode/settings.json's
                          cmake.sourceDirectory array, which is what the status
                          bar's project picker offers
-brio/                    the framework, eleven strata:
+brio/                    the framework, twelve strata:
   kernel/                pure kernel logic - includes NOTHING of brio
     platform.hpp           Platform concept (CriticalSection, idle,
                            break_here, now, ticks_per_second, atomic_width,

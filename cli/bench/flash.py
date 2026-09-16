@@ -157,8 +157,13 @@ def wch_openocd_args(prog, elffile):
     which lives beside the binary and not in a scripts tree. The same
     invocation ch32v00x/CMakeLists.txt's <app>-upload target uses.
 
-    `program ... verify` then `reset run` leaves the chip RUNNING, the
-    end state of every other path. No debug-enable is taken back down
+    `program ... verify` then `reset halt` AND `resume` leaves the chip
+    running, the end state of every other path. Not `reset run`: in this
+    fork that verb leaves the hart sitting at the reset vector with the
+    peripherals at their reset values - measured on a CH32V203, the
+    program counter still zero and the clock tree untouched four hundred
+    milliseconds later - so the image would be in the chip and not
+    running, and the board would look dead. No debug-enable is taken back down
     afterwards: `break_here()` on this core is an ebreak, which with no
     debugger attached escalates to the fault vector rather than halting
     the core, so a probe-less power-on and a just-flashed board behave
@@ -175,7 +180,8 @@ def wch_openocd_args(prog, elffile):
         argv += ["-c", "adapter serial %s" % prog["serial"]]
     return argv + ["-f", cfg,
                    "-c", "program %s verify" % elffile,
-                   "-c", "reset run",
+                   "-c", "reset halt",
+                   "-c", "resume",
                    "-c", "exit"]
 
 

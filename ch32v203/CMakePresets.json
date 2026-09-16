@@ -1,0 +1,29 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "ch32v203c8-release",
+            "displayName": "CH32V203C8 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v203c8-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32V203_MCU": "ch32v203c8"
+            }
+        },
+        {
+            "name": "ch32v203c8-debug",
+            "displayName": "CH32V203C8 (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v203c8-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CH32V203_MCU": "ch32v203c8"
+            }
+        }
+    ],
+    "buildPresets": [
+        { "name": "ch32v203c8-release", "configurePreset": "ch32v203c8-release" },
+        { "name": "ch32v203c8-debug", "configurePreset": "ch32v203c8-debug" }
+    ]
+}
