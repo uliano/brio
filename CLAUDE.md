@@ -49,7 +49,17 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   compositing, and THE THREE PLANES OF TRUTH - a reference renderer for
   the primitives, a differential oracle for the pipeline, the bench for
   the silicon; the contract settled before the primitives so the easy
-  case cannot shape it).
+  case cannot shape it), `simulation.md` (the world a program runs
+  against when the machine under it is the host: the world never speaks
+  to the program, so every device's seam is a LEVEL and not a gesture;
+  the channel table in both directions, whose columns are either
+  stimulated or COMPUTED - six rules that make a computed one
+  deterministic, and the closed loop they buy with no new mechanism; the
+  world as a type with two verbs; the three time policies and who may
+  join each; the scenario file, where outcomes are stimuli and the
+  degrees of freedom are declared; goldens against invariants; and what
+  the host does not tell you - written before its implementation, for
+  gfx.md's reason).
 - `docs/<target>/` - one folder per target, mirroring
   `brio/<target>/` (`avrdx/`, `samc21/`, `stm32g0/`, `ch32v00x/`,
   `host/`): `README.md` is the

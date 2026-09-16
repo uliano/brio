@@ -219,7 +219,6 @@ void draw_changed(S& s, Field& f, bool is_live) {
 // ---------------------------------------------------------------------
 
 using Canvas = Counting<Screen::Surface>;
-Screen::Surface* raw = nullptr;
 Canvas* glass = nullptr;
 
 void report(const char* what) {
@@ -316,7 +315,6 @@ int main(int argc, char** argv) {
 
     Screen::Surface surface = display.surface();
     Canvas counted(surface);
-    raw = &surface;
     glass = &counted;
 
     Loop::init_all();
