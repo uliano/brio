@@ -25,7 +25,7 @@
 // host. The clock is the board's 8 MHz crystal through the PLL at 48
 // MHz, which the USB divider then takes whole.
 //
-// build: boards = v203c8
+// build: boards = v203c6,v203c8
 // build: monitor_speed = 115200
 
 #include <stdint.h>

@@ -31,7 +31,7 @@
 // must be 48, 96 or 144 MHz for the controller to be fed its 48. The
 // LED is the board's blue one on PB2, active high.
 //
-// build: boards = v203c8
+// build: boards = v203c6,v203c8
 // build: monitor_speed = 115200
 
 #include <stdint.h>

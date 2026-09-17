@@ -399,6 +399,10 @@ struct Clock {
                   "brio Clock: the HSI has no crystal rate to name");
     static_assert((src != ClockSource::crystal && src != ClockSource::external) || xtal_hz != 0u,
                   "brio Clock: a crystal or an external clock is named with its rate, the third parameter");
+    static_assert(!uses_hse || device::has_hse_pins,
+                  "brio Clock: this part's package brings out no OSC_IN/OSC_OUT pad, so it has no "
+                  "HSE in either form - the HSI and the PLL on it are its whole tree "
+                  "(parts/<part>.hpp)");
     static_assert(!uses_hse || (xtal_hz >= device::hse_min_hz && xtal_hz <= device::hse_max_hz),
                   "brio Clock: this part's HSE oscillator takes device::hse_min_hz to hse_max_hz");
     static_assert(src != ClockSource::pll || pll_mul != 0u,

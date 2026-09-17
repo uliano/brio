@@ -49,8 +49,24 @@ inline constexpr uint32_t usbfs_base = 0x50000000UL;
 
 // ---- the part -------------------------------------------------------------
 // The one place the build's part definition is asked (the file header).
-#if defined(CH32V203C8)
+#if defined(CH32V203F6)
+#include "ch32v203/parts/ch32v203f6.hpp"
+#elif defined(CH32V203F8)
+#include "ch32v203/parts/ch32v203f8.hpp"
+#elif defined(CH32V203G6)
+#include "ch32v203/parts/ch32v203g6.hpp"
+#elif defined(CH32V203G8)
+#include "ch32v203/parts/ch32v203g8.hpp"
+#elif defined(CH32V203K6)
+#include "ch32v203/parts/ch32v203k6.hpp"
+#elif defined(CH32V203K8)
+#include "ch32v203/parts/ch32v203k8.hpp"
+#elif defined(CH32V203C6)
+#include "ch32v203/parts/ch32v203c6.hpp"
+#elif defined(CH32V203C8)
 #include "ch32v203/parts/ch32v203c8.hpp"
+#elif defined(CH32V203RB)
+#include "ch32v203/parts/ch32v203rb.hpp"
 #else
 #error "brio ch32v203: the build must define the part (ch32v203/cmake/ch32v203-parts.cmake derives it from CH32V203_MCU), and brio/ch32v203/parts/ must hold its table"
 #endif
@@ -249,8 +265,9 @@ struct UsartRegs {
 };
 
 /// The instances this family addresses. USART1 is the PB2 one and runs
-/// at PCLK2; the other three are PB1's. How many a PART carries is its
-/// own table (device::usart_count).
+/// at PCLK2; the other three are PB1's. WHICH of them a PART offers is
+/// its own table (device::has_usart), and on the smallest part that is
+/// not the first n of them.
 inline constexpr uint32_t usart_base_for(int n) {
     return n == 1 ? pb2_base + 0x3800 :
            n == 2 ? pb1_base + 0x4400 :
@@ -452,7 +469,12 @@ inline constexpr uint32_t sctlr_setevent    = 1UL << 5;   ///< write-one: latch 
 /// 59 up is the DEVICE CLASS's, not the family's - the reference
 /// manual's own table 9-2 is the union of this family with the CH32V30x
 /// and names that range after the larger one's TIM8 (see
-/// ch32v203/src/glue/startup_ch32v203.S).
+/// ch32v203/src/glue/startup_ch32v203.S). Two of the lines below
+/// therefore MOVE with the class: on the CH32V20x_D8 the Ethernet pair
+/// and two reserved words sit between the USBFS pair and them, so UART4
+/// is 66 and the eighth DMA channel 67. The D8's own extra lines (the
+/// Ethernet pair, TIM5 and the 32 kHz oscillator's two) are named here
+/// when a driver of this stratum arms one.
 enum class Irq : uint8_t {
     non_maskable     = 2,
     exception        = 3,
@@ -504,10 +526,10 @@ enum class Irq : uint8_t {
     exti15_10        = 56,
     rtc_alarm        = 57,
     usb_wakeup       = 58,
-    usbfs            = 59,   ///< the CH32V20x_D6 tail (device::vector_count)
+    usbfs            = 59,   ///< the tail proper starts here (device::vector_count)
     usbfs_wakeup     = 60,
-    uart4            = 61,
-    dma1_channel8    = 62,
+    uart4            = device::is_d8_class ? 66 : 61,
+    dma1_channel8    = device::is_d8_class ? 67 : 62,
 };
 
 } // namespace brio

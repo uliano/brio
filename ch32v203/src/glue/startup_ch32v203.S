@@ -13,11 +13,13 @@
  * index 53 is USART1: the numbers ch32v203/device.hpp's Irq enum
  * states, since on this core the interrupt number IS the table index.
  *
- * THE TAIL OF THE TABLE IS THE PART'S. Entries 59 and up belong to the
+ * THE TAIL OF THE TABLE IS THE PART'S. Entries 61 and up belong to the
  * device class: WCH's CH32V20x_D6 (every part up to the CH32V203C8)
- * ends at 62 with USBFS, its wake-up, UART4 and the eighth DMA channel,
- * while the CH32V203RB (their D8) puts the Ethernet there and runs to
- * 69. The reference manual's own vector table (9.2) is the UNION of
+ * ends at 62 with UART4 and the eighth DMA channel right after the
+ * USBFS pair, while the CH32V203RB (their D8) puts the Ethernet pair
+ * and two words of the wireless family's there, and runs to 69 with
+ * TIM5, UART4, the eighth DMA channel and the 32 kHz oscillator's two
+ * lines. The reference manual's own vector table (9.2) is the UNION of
  * this family with the CH32V30x and lists neither tail - it names TIM8
  * at 59..62, which is the larger family's - so the per-class truth is
  * stated here, from the part definition, and nowhere else.
@@ -124,20 +126,19 @@ _start:
     .word   exti15_10_handler      /* 56 */
     .word   rtc_alarm_handler      /* 57 */
     .word   usb_wakeup_handler     /* 58 USBD wake-up, through EXTI */
-#if defined(CH32V203RB)
-    .word   eth_handler            /* 59 */
-    .word   eth_wakeup_handler     /* 60 */
-    .word   0                      /* 61 */
-    .word   0                      /* 62 */
-    .word   0                      /* 63 */
-    .word   tim5_handler           /* 64 */
-    .word   uart4_handler          /* 65 */
-    .word   dma1_channel8_handler  /* 66 */
-    .word   osc32k_cal_handler     /* 67 */
-    .word   osc32k_wakeup_handler  /* 68 */
-#else
     .word   usbfs_handler          /* 59 */
     .word   usbfs_wakeup_handler   /* 60 */
+#if defined(CH32V203RB)
+    .word   eth_handler            /* 61 */
+    .word   eth_wakeup_handler     /* 62 */
+    .word   0                      /* 63 the wireless family's radio pair */
+    .word   0                      /* 64 */
+    .word   tim5_handler           /* 65 */
+    .word   uart4_handler          /* 66 */
+    .word   dma1_channel8_handler  /* 67 */
+    .word   osc32k_cal_handler     /* 68 */
+    .word   osc32k_wakeup_handler  /* 69 */
+#else
     .word   uart4_handler          /* 61 */
     .word   dma1_channel8_handler  /* 62 */
 #endif
@@ -295,13 +296,12 @@ default_handler:
     weak_vector exti15_10_handler
     weak_vector rtc_alarm_handler
     weak_vector usb_wakeup_handler
+    weak_vector usbfs_handler
+    weak_vector usbfs_wakeup_handler
 #if defined(CH32V203RB)
     weak_vector eth_handler
     weak_vector eth_wakeup_handler
     weak_vector tim5_handler
     weak_vector osc32k_cal_handler
     weak_vector osc32k_wakeup_handler
-#else
-    weak_vector usbfs_handler
-    weak_vector usbfs_wakeup_handler
 #endif

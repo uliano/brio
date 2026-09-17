@@ -37,6 +37,7 @@ page as its driver is measured.
 | [pin.hpp](../../brio/ch32v203/pin.hpp) | GPIO: the F1's four-bit nibbles over two registers, the pull that lives in the output register, the pad bonding from the part table |
 | [usart.hpp](../../brio/ch32v203/usart.hpp) | USART: the frame, the divisor, the flags and the two rings of the transport; measured: the console at 115200 with the divisor exact against PCLK2 |
 | [usb.hpp](../../brio/ch32v203/usb.hpp) | USBD: ST's device controller under WCH's names, realizing util/usb's UsbController; measured: the kernel console over a CDC ACM port on the board's own USB-C, enumerated, configured and carrying bytes with no overflow - and the core must not sleep while it does (below) |
+| [vendor/README.md](vendor/README.md) | The documents of record with their revisions - the reference manual that covers four families and the CLASS RULE that divides them, the datasheet's table 2-1 and pin tables, the QingKe V4 manual, the probe's, and the EVT as the vendor's only voice on quirks; the no-errata statement |
 
 ## Toolchain
 
@@ -179,8 +180,11 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified:
 
-- **The eight other parts of the family.** Only the CH32V203C8 has a
-  part table and a linker script; the others are named in the build's
-  table and nothing has compiled for them. The family check fixture
-  (`brio check ch32v203`) is not written.
+- **The eight parts other than the CH32V203C8.** Every one has its
+  table, its linker script and its preset, and the whole stratum
+  compiles for all nine both ways the hardware prologue can be built
+  (`brio check ch32v203`); the CH32V203C6 preset links every image
+  and is the 32 KB / 10 KB tier's guard, and the CH32V203RB's console
+  links with its seventy-word vector table. What would measure them is
+  a board: only the C8 exists on the desk.
 - **The KEY button on PA0**: the vendor's claim, and the pad is free.

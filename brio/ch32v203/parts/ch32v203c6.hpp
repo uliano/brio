@@ -1,36 +1,18 @@
 /*
- * parts/ch32v203c8.hpp
+ * parts/ch32v203c6.hpp
  *
- * The CH32V203C8 as a table of facts: 64 KB of flash, 20 KB of SRAM,
- * LQFP48 with 37 bonded pins, and WCH's CH32V20x_D6 device class.
+ * The CH32V203C6 as a table of facts: 32 KB of flash, 10 KB of SRAM,
+ * the CH32V203C8's LQFP48 pinout exactly, and WCH's CH32V20x_D6 device
+ * class. The rules this file obeys are parts/ch32v203c8.hpp's; read
+ * that one first.
  *
- * THIS FILE IS THE RESERVE OF THIS FAMILY. There is no vendor header to
- * ask (brio/ch32v203/device.hpp explains why), so every per-part fact a
- * driver needs is stated here, read off the CH32V203 datasheet V2.8
- * (table 2-1 for the resources, the pin tables of 3.2 for the bonding)
- * and the reference manual where a chapter's applicability is per
- * class. A driver reads them as `device::` constants and branches with
- * `if constexpr`; nothing else in the stratum may state a part fact.
- *
- * A COUNT IS NOT A LIST. Table 2-1 counts what a part OFFERS, and the
- * manual says why that is not the same as what the die carries: "the
- * number of some peripherals and function of the same series product
- * may be limited by the package" (RM, the note under the series
- * overview). On this package the two readings agree - four USARTs
- * counted, four with their pads bonded - but they do not on the
- * smallest parts, so the blocks a driver names by NUMBER carry a MASK
- * here and the count is stated beside it. parts/ch32v203f6.hpp is
- * where that matters.
- *
- * WHAT A SIBLING PART WOULD CHANGE. The datasheet's table 2-1 is nine
- * columns wide and the C8 is one of them: the F6 offers one USART and
- * no I2C, the parts below the C8 offer two USARTs and one SPI, the F8
- * and the G8 have no oscillator pins at all, and the RB is the other
- * device class - 128 KB and 64 KB of RAM, a 32-bit TIM5, a 10M
- * Ethernet, a vector table with a different tail and an HSE that is
- * 32 MHz rather than the 3..25 MHz of every part here. Each of those is
- * its own file beside this one, and no driver may guess one from
- * another.
+ * THE SAME PACKAGE, THE SMALLER DIE. Pin for pin this part is the C8 -
+ * one pin table (datasheet 3-1-1) covers both - so what separates them
+ * is not bonding but silicon: table 2-1 gives the C6 two USARTs where
+ * the C8 has four, one SPI where it has two and one I2C where it has
+ * two, and those pads (PB10/PB11, PB0/PB1, PB12..PB15, PB6/PB7) are all
+ * brought out here. A driver that inferred an instance from a pad would
+ * be wrong on exactly this part.
  */
 
 #pragma once
@@ -40,11 +22,11 @@
 namespace brio::device {
 
 /// The name this part answers to on a console banner.
-inline constexpr const char* part_name = "CH32V203C8";
+inline constexpr const char* part_name = "CH32V203C6";
 
 // ---- the memories (datasheet table 2-1) -----------------------------------
-inline constexpr uint32_t flash_bytes = 64UL * 1024UL;
-inline constexpr uint32_t sram_bytes  = 20UL * 1024UL;
+inline constexpr uint32_t flash_bytes = 32UL * 1024UL;
+inline constexpr uint32_t sram_bytes  = 10UL * 1024UL;
 /// The flash's grain: 256 bytes, the unit of the fast program and erase
 /// verbs (RM 32.1), with write protection in 4 KB units above it.
 inline constexpr uint32_t flash_page_bytes      = 256UL;
@@ -84,17 +66,19 @@ inline constexpr char debug_swclk_port = 'A';
 inline constexpr uint8_t debug_swclk_pin = 14;
 
 // ---- the instances (datasheet table 2-1) ----------------------------------
-/// The USARTs this part offers, one bit per instance number: all four,
-/// and this package bonds the default pads of every one of them.
-inline constexpr uint16_t usart_instances = (1U << 1) | (1U << 2) | (1U << 3) | (1U << 4);
-inline constexpr uint8_t usart_count = 4;
+/// The USARTs this part offers, one bit per instance number: two of
+/// them, and they are USART1 and USART2 - USART3's pads (PB10/PB11) and
+/// UART4's (PB0/PB1) are bonded on this package and answer nothing, so
+/// the count here is the DIE's and not the package's.
+inline constexpr uint16_t usart_instances = (1U << 1) | (1U << 2);
+inline constexpr uint8_t usart_count = 2;
 
 inline constexpr bool has_usart(uint8_t n) {
     return n < 16U && (usart_instances & static_cast<uint16_t>(1U << n)) != 0U;
 }
 
-inline constexpr uint8_t spi_count = 2;
-inline constexpr uint8_t i2c_count = 2;
+inline constexpr uint8_t spi_count = 1;
+inline constexpr uint8_t i2c_count = 1;
 inline constexpr uint8_t can_count = 1;
 /// The converters, and how many of the sixteen analog channels this
 /// package brings out to a pad (ADC_IN0..7 are PA0..PA7, 8 and 9 are
@@ -127,9 +111,7 @@ inline constexpr bool has_usbfs = true;
 
 // ---- the clock tree's edges (datasheet 2.1 and tables 4-9, 4-11) ----------
 /// The ceiling this part is rated for, whether its package brings out
-/// the oscillator pads at all, and the crystal range its HSE takes. The
-/// RB's HSE is 32 MHz and nothing else, and two packages of this series
-/// have no OSC pin, which is why all three are part facts.
+/// the oscillator pads at all, and the crystal range its HSE takes.
 inline constexpr uint32_t sysclk_max_hz = 144'000'000UL;
 inline constexpr bool has_hse_pins      = true;
 inline constexpr uint32_t hse_min_hz    = 3'000'000UL;

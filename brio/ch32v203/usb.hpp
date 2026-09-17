@@ -235,8 +235,18 @@ struct Usbd {
         // with a protocol error. WCH's own USB_Port_Set() opens the
         // port's clock and leaves the two pads FLOATING INPUTS before
         // it touches the pull-up, and so does this.
-        Pin<'A', 11>::release();   // D-, floating input; opens port A's clock
-        Pin<'A', 12>::release();   // D+
+        //
+        // The two pads are named through their PORT rather than as
+        // Pin<'A', 11> and Pin<'A', 12>, because this is a template
+        // whose body is checked where it is written: a Pin naming a pad
+        // is formed there, and two packages of this family bond neither
+        // of these (parts/ch32v203f8.hpp). What refuses the part is the
+        // static_assert on device::has_usbd above, which is the same
+        // fact - a part with this controller brings its pads out - and
+        // the header still compiles everywhere, as every header of this
+        // stratum must.
+        Port<'A'>::configure(11, pin_nibble(PinMode::input, PinDrive::push_pull, PinSpeed::fast));
+        Port<'A'>::configure(12, pin_nibble(PinMode::input, PinDrive::push_pull, PinSpeed::fast));
         Rcc::enable(Bus::pb1, rcc_pb1_usbd);
 
         regs().CNTR = usbd_fres;            // hold the module in reset, analogue on
@@ -681,6 +691,19 @@ private:
     static inline uint16_t overruns_ = 0;
 };
 
-static_assert(UsbController<Usbd<>>);
+/// The claim this driver makes - util/usb's controller contract, checked
+/// at the part that carries the block. It is made through a template
+/// because a bare `static_assert(UsbController<Usbd<>>)` would
+/// INSTANTIATE the controller in every translation unit that includes
+/// this header, and on a package that has no USBD (the CH32V203F8's
+/// TSSOP20) the first thing it would meet is the refusal above - while a
+/// header of this stratum has to compile on every part of the family.
+template <bool present>
+struct UsbdContract {
+    static_assert(!present || UsbController<Usbd<>>,
+                  "brio Usbd: this driver no longer realizes util/usb's UsbController");
+};
+
+static_assert(sizeof(UsbdContract<device::has_usbd>) > 0);
 
 } // namespace brio

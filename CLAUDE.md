@@ -469,10 +469,13 @@ brio check samc21 [name]        # same for the samc21 stratum (E/G/J 18A headers
 brio check stm32g0 [name]       # same for the stm32g0 stratum (ALL TWELVE G0 headers, x1 + x0)
 brio check ch32v00x [name]      # same for the ch32v00x stratum (one part today; util_all.cpp = the
                                 # whole of kernel/ and util/ through WCH's gcc 15.2)
+brio check ch32v203 [name]      # same for the ch32v203 stratum (ALL NINE parts of the series, both
+                                # HPE ways; util_all.cpp = the whole of kernel/ and util/ over the
+                                # ilp32 ABI)
 brio check rp2040 [name]        # same for the rp2040 stratum (one chip: every header's verbs, util_all.cpp)
 brio check stm32f4 [name]       # same for the stm32f4 stratum (ALL TWENTY-THREE F4 headers; the ladder
                                 # refused by name where no manual was read)
-brio check all                  # the six in a row
+brio check all                  # the seven in a row
 brio prose [paths...]           # the prose net: no dates/process words/Doxygen tags in
                                 # comments and docs, every cited path exists, ASCII only;
                                 # "review" lines are claims of absence to re-read, not errors
@@ -624,6 +627,11 @@ ch32v203/                the CH32V203 build project, the seventh of the shape:
                          arithmetic, ld/<part>.ld and src/glue/startup_ch32v203.S
                          - the table whose first word is an INSTRUCTION again,
                          with a TAIL THAT IS THE DEVICE CLASS'S
+                         - ld/<part>.ld and a release preset for each of the nine
+                         parts, the C8's the only debug one; the C6 preset (the
+                         F6's memories, the C8's bonding) is the 32K/10K tier's
+                         LINK GUARD, because the F6 bonds neither USART1 nor the
+                         board's LED
 stm32f4/                 the STM32F4 build project, the sixth of the shape: a
                          PART TABLE (cmake/stm32f4-parts.cmake: the part number
                          -> ST's irregular device define, the crt stem, the

@@ -1,36 +1,24 @@
 /*
- * parts/ch32v203c8.hpp
+ * parts/ch32v203k8.hpp
  *
- * The CH32V203C8 as a table of facts: 64 KB of flash, 20 KB of SRAM,
- * LQFP48 with 37 bonded pins, and WCH's CH32V20x_D6 device class.
+ * The CH32V203K8 as a table of facts: 64 KB of flash, 20 KB of SRAM,
+ * LQFP32 with 26 bonded pins, and WCH's CH32V20x_D6 device class. The
+ * rules this file obeys are parts/ch32v203c8.hpp's; read that one
+ * first.
  *
- * THIS FILE IS THE RESERVE OF THIS FAMILY. There is no vendor header to
- * ask (brio/ch32v203/device.hpp explains why), so every per-part fact a
- * driver needs is stated here, read off the CH32V203 datasheet V2.8
- * (table 2-1 for the resources, the pin tables of 3.2 for the bonding)
- * and the reference manual where a chapter's applicability is per
- * class. A driver reads them as `device::` constants and branches with
- * `if constexpr`; nothing else in the stratum may state a part fact.
+ * WHAT THIS PACKAGE DROPS. Port A is whole, port B keeps eight pins
+ * (PB0, PB1 and PB3..PB8) and port C no longer reaches a pad at all -
+ * so there is no VBAT pin, no TAMPER pad and no 32 kHz crystal on this
+ * part, which is what a backup-domain or RTC chapter must ask before it
+ * offers an LSE. PB2 is not bonded either and is pulled to ground
+ * inside (datasheet note 5), so BOOT1 is fixed here.
  *
- * A COUNT IS NOT A LIST. Table 2-1 counts what a part OFFERS, and the
- * manual says why that is not the same as what the die carries: "the
- * number of some peripherals and function of the same series product
- * may be limited by the package" (RM, the note under the series
- * overview). On this package the two readings agree - four USARTs
- * counted, four with their pads bonded - but they do not on the
- * smallest parts, so the blocks a driver names by NUMBER carry a MASK
- * here and the count is stated beside it. parts/ch32v203f6.hpp is
- * where that matters.
- *
- * WHAT A SIBLING PART WOULD CHANGE. The datasheet's table 2-1 is nine
- * columns wide and the C8 is one of them: the F6 offers one USART and
- * no I2C, the parts below the C8 offer two USARTs and one SPI, the F8
- * and the G8 have no oscillator pins at all, and the RB is the other
- * device class - 128 KB and 64 KB of RAM, a 32-bit TIM5, a 10M
- * Ethernet, a vector table with a different tail and an HSE that is
- * 32 MHz rather than the 3..25 MHz of every part here. Each of those is
- * its own file beside this one, and no driver may guess one from
- * another.
+ * WHAT IT KEEPS AND THE DATASHEET STILL REFUSES. PB6 and PB7 are
+ * brought out, which on the C8 is where the USBFS host/device
+ * controller lives - and table 2-1 gives this part no USBHD. So USBFS
+ * is absent from the die and not merely off the pads: the pinout
+ * figures agree, naming those two pins plain PB6/PB7 here and
+ * PB6/USB2DM, PB7/USB2DP on the parts that have the block.
  */
 
 #pragma once
@@ -40,7 +28,7 @@
 namespace brio::device {
 
 /// The name this part answers to on a console banner.
-inline constexpr const char* part_name = "CH32V203C8";
+inline constexpr const char* part_name = "CH32V203K8";
 
 // ---- the memories (datasheet table 2-1) -----------------------------------
 inline constexpr uint32_t flash_bytes = 64UL * 1024UL;
@@ -60,16 +48,14 @@ inline constexpr bool is_d8_class = false;
 /// last being the eighth DMA channel (startup_ch32v203.S).
 inline constexpr uint32_t vector_count = 63;
 
-// ---- the pads (datasheet 3.2, table 3-1-1's LQFP48 column) ----------------
-/// Which pins each port bonds, as a mask. Thirty-seven in all: two whole
-/// ports, three pins of port C and the two of port D that the package
-/// brings out (the same two pads the oscillator uses, which is why they
-/// are pins 5 and 6 of this package and the datasheet's note 4 is about
-/// them). Port E is not bonded on any part of this series.
+// ---- the pads (datasheet 3.2, table 3-1-1's LQFP32 column) ----------------
+/// Which pins each port bonds, as a mask. Twenty-six in all: port A
+/// whole, eight pins of port B, and the two of port D the package brings
+/// out as the oscillator's pads (pins 2 and 3 here - the datasheet's
+/// note 4). No pin of port C and none of port E.
 inline constexpr uint16_t port_pins(char port) {
     return port == 'A' ? 0xFFFFU :
-           port == 'B' ? 0xFFFFU :
-           port == 'C' ? 0xE000U :   // PC13, PC14, PC15
+           port == 'B' ? 0x01FBU :   // PB0, PB1, PB3..PB8
            port == 'D' ? 0x0003U :   // PD0, PD1
            0x0000U;
 }
@@ -84,17 +70,18 @@ inline constexpr char debug_swclk_port = 'A';
 inline constexpr uint8_t debug_swclk_pin = 14;
 
 // ---- the instances (datasheet table 2-1) ----------------------------------
-/// The USARTs this part offers, one bit per instance number: all four,
-/// and this package bonds the default pads of every one of them.
-inline constexpr uint16_t usart_instances = (1U << 1) | (1U << 2) | (1U << 3) | (1U << 4);
-inline constexpr uint8_t usart_count = 4;
+/// The USARTs this part offers, one bit per instance number: two, and
+/// they are USART1 (PA9/PA10) and USART2 (PA2/PA3), the two whose pads
+/// this package bonds.
+inline constexpr uint16_t usart_instances = (1U << 1) | (1U << 2);
+inline constexpr uint8_t usart_count = 2;
 
 inline constexpr bool has_usart(uint8_t n) {
     return n < 16U && (usart_instances & static_cast<uint16_t>(1U << n)) != 0U;
 }
 
-inline constexpr uint8_t spi_count = 2;
-inline constexpr uint8_t i2c_count = 2;
+inline constexpr uint8_t spi_count = 1;
+inline constexpr uint8_t i2c_count = 1;
 inline constexpr uint8_t can_count = 1;
 /// The converters, and how many of the sixteen analog channels this
 /// package brings out to a pad (ADC_IN0..7 are PA0..PA7, 8 and 9 are
@@ -118,18 +105,15 @@ inline constexpr uint8_t general_timer_count  = 3;
 inline constexpr bool has_tim5 = false;
 inline constexpr bool has_ethernet = false;
 
-/// Both USB blocks reach a pad here: the full-speed DEVICE controller
-/// (USBD, RM ch. 21) on PA11/PA12, and the host/device one (USBFS, ch.
-/// 23) on PB6/PB7. Which of them a BOARD wires to a connector is the
-/// board's business, not the part's.
+/// The device controller (USBD, RM ch. 21) is here on PA11/PA12; the
+/// host/device one (USBFS, ch. 23) is not on this part at all - see the
+/// file header.
 inline constexpr bool has_usbd  = true;
-inline constexpr bool has_usbfs = true;
+inline constexpr bool has_usbfs = false;
 
 // ---- the clock tree's edges (datasheet 2.1 and tables 4-9, 4-11) ----------
 /// The ceiling this part is rated for, whether its package brings out
-/// the oscillator pads at all, and the crystal range its HSE takes. The
-/// RB's HSE is 32 MHz and nothing else, and two packages of this series
-/// have no OSC pin, which is why all three are part facts.
+/// the oscillator pads at all, and the crystal range its HSE takes.
 inline constexpr uint32_t sysclk_max_hz = 144'000'000UL;
 inline constexpr bool has_hse_pins      = true;
 inline constexpr uint32_t hse_min_hz    = 3'000'000UL;

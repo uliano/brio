@@ -8,9 +8,10 @@
  * UART4 on PB1 - which on this family are both HCLK (clock.hpp), so the
  * divisor arithmetic is the same for all four today; the transport asks
  * its own bus all the same, because that is what stays right when a
- * prescaler is unpinned. How MANY instances a part carries is the part's
- * table: one on the smallest, two in the middle, four on the CH32V203C8
- * (device::usart_count).
+ * prescaler is unpinned. WHICH instances a part offers is the part's
+ * table (device::has_usart), and the list is not always the first n of
+ * them: the smallest part offers one usart and it is USART2, because
+ * its package bonds neither of USART1's pin pairs.
  *
  * THE PADS ARE PER PART AS WELL AS PER INSTANCE, and UART4 is where that
  * bites: the reference manual has TWO remap tables for it, and the one
@@ -157,8 +158,8 @@ constexpr UsartPads usart_pads_for(uint8_t n) {
 template <uint8_t n>
 struct Usart {
     static_assert(usart_base_for(n) != 0, "brio Usart: this family has USART1..3 and UART4");
-    static_assert(n <= device::usart_count,
-                  "brio Usart: this part does not carry that instance (parts/<part>.hpp)");
+    static_assert(device::has_usart(n),
+                  "brio Usart: this part does not offer that instance (parts/<part>.hpp)");
 
     Usart() = delete;
 

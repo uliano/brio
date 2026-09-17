@@ -2,6 +2,76 @@
     "version": 6,
     "configurePresets": [
         {
+            "name": "ch32v203f6-release",
+            "displayName": "CH32V203F6 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v203f6-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32V203_MCU": "ch32v203f6"
+            }
+        },
+        {
+            "name": "ch32v203f8-release",
+            "displayName": "CH32V203F8 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v203f8-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32V203_MCU": "ch32v203f8"
+            }
+        },
+        {
+            "name": "ch32v203g6-release",
+            "displayName": "CH32V203G6 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v203g6-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32V203_MCU": "ch32v203g6"
+            }
+        },
+        {
+            "name": "ch32v203g8-release",
+            "displayName": "CH32V203G8 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v203g8-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32V203_MCU": "ch32v203g8"
+            }
+        },
+        {
+            "name": "ch32v203k6-release",
+            "displayName": "CH32V203K6 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v203k6-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32V203_MCU": "ch32v203k6"
+            }
+        },
+        {
+            "name": "ch32v203k8-release",
+            "displayName": "CH32V203K8 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v203k8-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32V203_MCU": "ch32v203k8"
+            }
+        },
+        {
+            "name": "ch32v203c6-release",
+            "displayName": "CH32V203C6 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v203c6-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32V203_MCU": "ch32v203c6"
+            }
+        },
+        {
             "name": "ch32v203c8-release",
             "displayName": "CH32V203C8 (release, -Os)",
             "generator": "Ninja",
@@ -9,6 +79,16 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CH32V203_MCU": "ch32v203c8"
+            }
+        },
+        {
+            "name": "ch32v203rb-release",
+            "displayName": "CH32V203RB (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v203rb-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32V203_MCU": "ch32v203rb"
             }
         },
         {
@@ -23,7 +103,15 @@
         }
     ],
     "buildPresets": [
+        { "name": "ch32v203f6-release", "configurePreset": "ch32v203f6-release" },
+        { "name": "ch32v203f8-release", "configurePreset": "ch32v203f8-release" },
+        { "name": "ch32v203g6-release", "configurePreset": "ch32v203g6-release" },
+        { "name": "ch32v203g8-release", "configurePreset": "ch32v203g8-release" },
+        { "name": "ch32v203k6-release", "configurePreset": "ch32v203k6-release" },
+        { "name": "ch32v203k8-release", "configurePreset": "ch32v203k8-release" },
+        { "name": "ch32v203c6-release", "configurePreset": "ch32v203c6-release" },
         { "name": "ch32v203c8-release", "configurePreset": "ch32v203c8-release" },
+        { "name": "ch32v203rb-release", "configurePreset": "ch32v203rb-release" },
         { "name": "ch32v203c8-debug", "configurePreset": "ch32v203c8-debug" }
     ]
 }

@@ -32,7 +32,7 @@
 // Between keystrokes the CPU sleeps in WFI, woken by the system counter
 // or the USART. No polling anywhere.
 //
-// build: boards = v203c8
+// build: boards = v203c6,v203c8,v203rb
 // build: monitor_speed = 115200
 
 #include <stdint.h>

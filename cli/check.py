@@ -1,9 +1,9 @@
-"""brio check [avrdx|samc21|stm32g0|ch32v00x|rp2040|stm32f4|all] [filter] - the family compile
-fixtures: every smoke TU under test/family*/ compiles for every package
-or variant of the stratum, and every negative TU is REFUSED. The
-fixtures are the five shell scripts under cli/checks/ (they call the
-cross compiler directly, with no CMake in between); this module only
-picks and runs them."""
+"""brio check [avrdx|samc21|stm32g0|ch32v00x|ch32v203|rp2040|stm32f4|all] [filter] - the
+family compile fixtures: every smoke TU under test/family*/ compiles for
+every package or variant of the stratum, and every negative TU is
+REFUSED. The fixtures are the seven shell scripts under cli/checks/
+(they call the cross compiler directly, with no CMake in between); this
+module only picks and runs them."""
 
 import os
 import subprocess
@@ -15,6 +15,7 @@ SCRIPTS = {
     "samc21": "check_samc21.sh",
     "stm32g0": "check_stm32g0.sh",
     "ch32v00x": "check_ch32v00x.sh",
+    "ch32v203": "check_ch32v203.sh",
     "rp2040": "check_rp2040.sh",
     "stm32f4": "check_stm32f4.sh",
 }

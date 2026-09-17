@@ -64,7 +64,7 @@
 //      and each leaves its own index in the token, which is how the
 //      letter says WHICH of them the silicon took.
 //
-// build: boards = v203c8
+// build: boards = v203c6,v203c8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
