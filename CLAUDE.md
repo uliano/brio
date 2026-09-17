@@ -1430,11 +1430,19 @@ brio/                    the framework, twelve strata:
                            (WFITOWFE + SEVONPEND, this core's WFI wakes only
                            for a takeable interrupt), ebreak, the .noinit
                            breadcrumb, atomic_width 4
-    clock.hpp              Rcc + Clock<internal|pll, hz, hse_hz>: PARKS ON THE
-                           HSI before touching the PLL (PLLMUL/PLLSRC take a
-                           write only with the PLL off, and it will not stop
-                           while it is SYSCLK), the HSI divider in EXTEN, the
-                           USB prescaler as part of the tree
+    clock.hpp              Rcc + Clock<internal|pll|crystal|external, hz,
+                           xtal_hz> + Rates<>/DynamicClock<Rates<...>,
+                           Users...>: PARKS ON THE HSI before touching the PLL
+                           (PLLMUL/PLLSRC/PLLXTPRE take a write only with the
+                           PLL off, and it will not stop while it is SYSCLK),
+                           the HSI's PLL divider in EXTEN and the HSE's per
+                           DEVICE CLASS, the PLL's input and output ranges part
+                           facts, PB1 capped at 72 MHz with pclk1_hz_at() the
+                           arithmetic a rebased user uses, the USB and ADC
+                           dividers part of the tree, the LSI, the clock
+                           security system as the NMI's body, the ready
+                           interrupts, and Mco over the pad two packages have
+                           not got
     pin.hpp                Pin<'A',5> / Port<'A'>: the F1's two-bit MODE over
                            two registers, the pull in the output register, the
                            bonding from the part table

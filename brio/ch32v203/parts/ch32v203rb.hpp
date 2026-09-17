@@ -139,4 +139,30 @@ inline constexpr bool has_hse_pins      = true;
 inline constexpr uint32_t hse_min_hz    = 32'000'000UL;
 inline constexpr uint32_t hse_max_hz    = 32'000'000UL;
 
+/// The PLL's own edges (datasheet table 4-15): this part's input floor
+/// is 4 MHz and its output reaches 240 MHz - the rate the USB
+/// prescaler's fourth code divides by five - where every other part of
+/// the series stops at 144.
+inline constexpr uint32_t pll_in_min_hz  = 4'000'000UL;
+inline constexpr uint32_t pll_in_max_hz  = 25'000'000UL;
+inline constexpr uint32_t pll_out_min_hz = 40'000'000UL;
+inline constexpr uint32_t pll_out_max_hz = 240'000'000UL;
+
+/// What PLLXTPRE selects on the way from the HSE into the PLL, by code
+/// (RM 3.4.2): on this class the 32 MHz oscillator arrives divided by
+/// four or by eight - never whole - so the PLL's input is 8 or 4 MHz.
+inline constexpr uint8_t pll_hse_div[2] = {4, 8};
+
+/// Whether USBPRE's fourth code (the PLL divided by five, from a PLL at
+/// 240 MHz) exists here: on this class it does, for lot numbers whose
+/// penultimate digit is greater than zero (RM 3.4.2), which is a fact
+/// about the die in hand and not about the part number.
+inline constexpr bool has_usb_pre_div5 = true;
+
+/// The LSI as the datasheet measures it (table 4-14): this part's is
+/// the 32 kHz one, where the rest of the series carries the 40 kHz RC.
+inline constexpr uint32_t lsi_min_hz = 25'000UL;
+inline constexpr uint32_t lsi_typ_hz = 32'000UL;
+inline constexpr uint32_t lsi_max_hz = 45'000UL;
+
 } // namespace brio::device

@@ -33,7 +33,7 @@ page as its driver is measured.
 |--------|-------|
 | [device.hpp](../../brio/ch32v203/device.hpp) + [parts/](../../brio/ch32v203/parts/) | the register map and the part table (memories, bonded pads, instances, the device class) |
 | [platform.md](platform.md) | Platform: `Ch32v203Platform` (the csrrci critical section, the WFE-shaped `idle()`, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the core's hardware prologue MEASURED: 53 cycles of round trip against 63, 152 bytes of flash and SIXTY-FOUR BYTES OF USER STACK the internal hardware stack carries instead - which is what parts this core from the CH32V00x's), the 64-bit STK `BasicTicker` (its CNT arithmetic 1 ppm against the interrupt count over 200 reloads) and `delay_us` on that counter (100 us in 14434 cycles of 14400 asked, a tick period and above refused), corecfgr's 0x1F measured at two cycles in 36811, and the tick rate against the host's clock - the HSI half a per cent fast where the board's crystal is exact; then the failing half, [reset.hpp](../../brio/ch32v203/reset.hpp): the six flags as the history they are, `Reset::software()` through the core's keyed PFIC_CFGR reading back as SFTRSTF alone, `ResetReporter`, `fault_reset<P>()` carrying the cause the core left in mcause, and the ebreak that lands on the BREAKPOINT vector and not the exception one; three real resets in the suite |
-| [clock.hpp](../../brio/ch32v203/clock.hpp) | RCC: the HSI, a crystal, the PLL and the three prescalers, with the USB divider part of the tree; measured at 144 MHz from the HSI and 48 MHz from the board's crystal |
+| [clock.md](clock.md) | RCC and the EXTEN bits that belong to the tree: the two high-speed roots, the PLL whose input divider is per DEVICE CLASS (the HSI's in EXTEN, the HSE's dividing by one or two here and by four or eight on the CH32V203RB) and whose input and output RANGES are part facts, the whole prescaler table with PB1 capped and the timers' doubling rule stated, the USB divider written before any USB gate can open, the ADC's divider - the one place a legal rate leaves a peripheral out of specification - the LSI, the clock security system as the non-maskable interrupt's body, the ready interrupts, the output pad two packages have not got, and the peripheral gates; `Clock` static and `DynamicClock` over a pack of rate tuples, every switch parking on the HSI. Measured: ten trees entered, read back and bracketed against the host's clock (every HSI-rooted rate 0.42 to 0.46 % fast, every crystal-rooted one within 0.05 % of exact), the pack walked up and down with the tick and the console rebased at each step, the LSI ready 3.1 ms after LSION and the board's crystal 1.7 ms after HSEON with its ready interrupt reaching the RCC vector, the HSI stopped under a tree that runs off the crystal, the security system armed over a healthy crystal, and twenty-six gates opened and closed - the bits of blocks this part has not got reading back zero |
 | [pin.hpp](../../brio/ch32v203/pin.hpp) | GPIO: the F1's four-bit nibbles over two registers, the pull that lives in the output register, the pad bonding from the part table |
 | [usart.hpp](../../brio/ch32v203/usart.hpp) | USART: the frame, the divisor, the flags and the two rings of the transport; measured: the console at 115200 with the divisor exact against PCLK2 |
 | [usb.hpp](../../brio/ch32v203/usb.hpp) | USBD: ST's device controller under WCH's names, realizing util/usb's UsbController; measured: the kernel console over a CDC ACM port on the board's own USB-C, enumerated, configured and carrying bytes with no overflow - and the core must not sleep while it does (below) |
@@ -107,11 +107,14 @@ brio console P
   divisor in the program is computed for the rate it asked for.
   Measured both ways: the failure staged on purpose, and the fix
   recovering 144 MHz within a millisecond of re-entry.
-- **The PLL's input divider for the HSI is in another block.** RCC says
-  only which root feeds the PLL; whether the HSI arrives whole or
-  halved is `EXTEN_CTR.HSIPRE`, which the RCC chapter never mentions
-  and which is 0 out of reset - so a program that only wrote RCC
-  registers would find every rate half of what it asked for.
+- **The PLL's input divider is in another block - and on the other class it
+  is not even the same divider.** RCC says only which root feeds the PLL;
+  whether the HSI arrives whole or halved is `EXTEN_CTR.HSIPRE`, which the
+  RCC chapter never mentions and which is 0 out of reset - so a program that
+  only wrote RCC registers would find every rate half of what it asked for.
+  The HSE's own divider IS an RCC bit (PLLXTPRE), and what it divides BY
+  follows the device class: one or two on every part up to the CH32V203C8,
+  four or eight on the CH32V203RB, whose oscillator is 32 MHz.
 - **The USB pads are still GPIO pads.** D- and D+ are PA11 and PA12 and
   the USB device controller reaches them through port A: with that
   port's clock closed - its reset state - the pull-up still works (it

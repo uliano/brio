@@ -103,11 +103,13 @@ inline constexpr uint32_t rcc_csson        = 1UL << 19;     ///< HSE failure det
 inline constexpr uint32_t rcc_pllon        = 1UL << 24;
 inline constexpr uint32_t rcc_pllrdy       = 1UL << 25;
 
-/// The two roots this silicon carries, as rates. The HSI is the 8 MHz
-/// factory-trimmed RC every part boots on; the LSI is nominal only (its
-/// spread is wide, which is why anything timed by it is measured).
+/// The high-speed root every part boots on: the 8 MHz factory-trimmed
+/// RC. The LOW-speed one is a part fact and not a family one - the
+/// CH32V203RB's is the 32 kHz RC where the rest of the series carries
+/// the 40 kHz one - so its rate is device::lsi_min_hz / lsi_typ_hz /
+/// lsi_max_hz, nominal in all three because the spread is wide and
+/// anything timed by it is measured.
 inline constexpr uint32_t hsi_hz = 8'000'000UL;
-inline constexpr uint32_t lsi_hz = 40'000UL;
 
 /// RCC_CFGR0 (3.4.2)
 inline constexpr uint32_t rcc_sw_mask       = 0x3UL << 0;
@@ -124,18 +126,22 @@ inline constexpr uint32_t rcc_ppre1_shift   = 8;
 inline constexpr uint32_t rcc_ppre2_mask    = 0x7UL << 11;   ///< PB2, same encoding
 inline constexpr uint32_t rcc_ppre2_shift   = 11;
 inline constexpr uint32_t rcc_adcpre_mask   = 0x3UL << 14;   ///< PB2 /2 /4 /6 /8, ADC clock <= 14 MHz
+inline constexpr uint32_t rcc_adcpre_shift  = 14;
 inline constexpr uint32_t rcc_pllsrc        = 1UL << 16;     ///< 0 the HSI, 1 the HSE
 inline constexpr uint32_t rcc_pllxtpre      = 1UL << 17;     ///< the HSE halved into the PLL
 inline constexpr uint32_t rcc_pllmul_mask   = 0xFUL << 18;
 inline constexpr uint32_t rcc_pllmul_shift  = 18;
 inline constexpr uint32_t rcc_usbpre_mask   = 0x3UL << 22;   ///< the PLL /1 /2 /3 for USB's 48 MHz
 inline constexpr uint32_t rcc_usbpre_shift  = 22;
+/// The clock output's source field. WHICH codes it takes is the clock
+/// chapter's (brio::McoSource), because four of the eight belong to
+/// other device classes.
 inline constexpr uint32_t rcc_mco_mask      = 0xFUL << 24;
-inline constexpr uint32_t rcc_mco_none      = 0x0UL << 24;
-inline constexpr uint32_t rcc_mco_sysclk    = 0x4UL << 24;
-inline constexpr uint32_t rcc_mco_hsi       = 0x5UL << 24;
-inline constexpr uint32_t rcc_mco_hse       = 0x6UL << 24;
-inline constexpr uint32_t rcc_mco_pll_div2  = 0x7UL << 24;
+/// The two bits above the MCO field. ADCDUTY is every class's; ETHPRE
+/// belongs to the classes that carry an Ethernet MAC, the CH32V203RB
+/// alone here (device::has_ethernet).
+inline constexpr uint32_t rcc_ethpre        = 1UL << 28;
+inline constexpr uint32_t rcc_adcduty       = 1UL << 31;   ///< 1: the ADC clock's low level is longer
 
 /// PLLMUL codes. The ladder is x2..x16 in order and then x18 - the one
 /// code that is not its own index plus two, and the one that reaches
@@ -165,6 +171,13 @@ inline constexpr uint32_t rcc_hsirdyc  = 1UL << 18;
 inline constexpr uint32_t rcc_hserdyc  = 1UL << 19;
 inline constexpr uint32_t rcc_pllrdyc  = 1UL << 20;
 inline constexpr uint32_t rcc_cssc     = 1UL << 23;
+/// The enables as one field. The flags are read-only and the clears
+/// write-only, so a verb that clears one flag writes
+/// (INTR & rcc_intr_enables) | <the clear bit> and disarms nothing.
+inline constexpr uint32_t rcc_intr_enables = rcc_lsirdyie | rcc_lserdyie | rcc_hsirdyie |
+                                             rcc_hserdyie | rcc_pllrdyie;
+inline constexpr uint32_t rcc_intr_flags   = rcc_lsirdyf | rcc_lserdyf | rcc_hsirdyf |
+                                             rcc_hserdyf | rcc_pllrdyf | rcc_cssf;
 
 /// RCC_RSTSCKR (3.4.10): the LSI lives with the reset flags.
 inline constexpr uint32_t rcc_lsion  = 1UL << 0;
@@ -195,6 +208,7 @@ inline constexpr uint32_t rcc_pb2_usart1 = 1UL << 14;
 inline constexpr uint32_t rcc_pb1_tim2   = 1UL << 0;
 inline constexpr uint32_t rcc_pb1_tim3   = 1UL << 1;
 inline constexpr uint32_t rcc_pb1_tim4   = 1UL << 2;
+inline constexpr uint32_t rcc_pb1_tim5   = 1UL << 3;    ///< the CH32V203RB's alone (device::has_tim5)
 inline constexpr uint32_t rcc_pb1_wwdg   = 1UL << 11;
 inline constexpr uint32_t rcc_pb1_spi2   = 1UL << 14;
 inline constexpr uint32_t rcc_pb1_usart2 = 1UL << 17;
@@ -395,6 +409,7 @@ inline constexpr uint32_t exten_usbd_ls        = 1UL << 0;   ///< the device con
 inline constexpr uint32_t exten_usbd_pullup    = 1UL << 1;   ///< its internal 1.5k on D+
 inline constexpr uint32_t exten_eth_10m        = 1UL << 2;   ///< CH32V203RB alone
 inline constexpr uint32_t exten_hsipre         = 1UL << 4;   ///< 1: the HSI whole into the PLL, 0: halved
+inline constexpr uint32_t exten_hseplp        = 1UL << 12;  ///< the HSE kept oscillating in a low-power mode (D8 class)
 inline constexpr uint32_t exten_lkupen         = 1UL << 6;   ///< the lock-up monitor, ON at reset
 inline constexpr uint32_t exten_lkuprst        = 1UL << 7;   ///< write-1-clear: keep it out of a read-modify-write
 inline constexpr uint32_t exten_ulldotrim_mask = 0x3UL << 8;

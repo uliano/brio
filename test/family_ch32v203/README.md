@@ -19,13 +19,16 @@ fewer, and where the parts differ it reads the difference from
 this part offers, whether its package has oscillator pads, how many
 analog channels it bonds.
 
-WHAT THE SWEEP CATCHES that one part cannot. Three facts of this family
+WHAT THE SWEEP CATCHES that one part cannot. Four facts of this family
 are not "the first n of them": the smallest package offers ONE usart and
 it is USART2 (it bonds neither of USART1's pin pairs), two packages
-bring out no OSC_IN/OSC_OUT at all, and one part of the nine is the
-other DEVICE CLASS, whose vector table is seven entries longer and whose
-UART4 sits at a different index. Each of those is a `device::` constant
-here and a driver branch there.
+bring out no OSC_IN/OSC_OUT at all, two others do not bring out PA8 and
+so have the clock output's multiplexer without its pad, and one part of
+the nine is the other DEVICE CLASS, whose vector table is seven entries
+longer, whose UART4 sits at a different index and whose PLL divides its
+32 MHz oscillator by four or eight where every other part divides by one
+or two. Each of those is a `device::` constant here and a driver branch
+there.
 
 The other half of the check is the compiler's verdict: that WCH's gcc
 15.2 accepts every C++23 construct brio's kernel and services are

@@ -124,7 +124,10 @@ static_assert(gpio_clock_for('F') == 0);
 static_assert(usart_base_for(1) == pb2_base + 0x3800);
 static_assert(usart_base_for(4) == pb1_base + 0x4c00);
 static_assert(usart_base_for(5) == 0);
-static_assert(hsi_hz == 8'000'000UL && lsi_hz == 40'000UL);
+static_assert(hsi_hz == 8'000'000UL);
+// The low-speed RC is a PART fact: the CH32V203RB's is the 32 kHz one.
+static_assert(device::lsi_min_hz < device::lsi_typ_hz && device::lsi_typ_hz < device::lsi_max_hz);
+static_assert(device::lsi_typ_hz == (device::is_d8_class ? 32'000UL : 39'000UL));
 static_assert(flash_array_base == 0x08000000UL && flash_alias_base == 0x00000000UL);
 static_assert(flash_key1 == 0x45670123UL && flash_key2 == 0xCDEF89ABUL);
 

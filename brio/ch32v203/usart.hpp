@@ -41,6 +41,7 @@
 
 #include <stdint.h>
 
+#include "ch32v203/clock.hpp"
 #include "ch32v203/device.hpp"
 #include "ch32v203/pfic.hpp"
 #include "ch32v203/pin.hpp"
@@ -255,16 +256,26 @@ struct Usart {
 // Uart: the transport task
 // =============================================================================
 
-/// The peripheral clock an instance counts its divisor in. Both buses
-/// run at HCLK on this family, but the question is asked per bus so the
-/// answer stays right if one is ever unpinned.
+/// The peripheral clock an instance counts its divisor in: USART1 is the
+/// PB2 one and the other three are PB1's, and the two buses do NOT run
+/// at the same rate above the cap ch32v203/clock.hpp states.
 template <uint8_t instance, typename C>
 constexpr uint32_t usart_bus_hz(C clock) {
-    if constexpr (requires { C::pclk1_hz; C::pclk2_hz; }) {
+    if constexpr (C::is_static) {
+        (void)clock;
         return instance == 1u ? C::pclk2_hz : C::pclk1_hz;
     } else {
-        return clock_hz(clock);
+        (void)clock;
+        return instance == 1u ? C::pclk2_hz() : C::pclk1_hz();
     }
+}
+
+/// The same answer from an HCLK, which is what a dynamic clock hands a
+/// user it is about to rebase: the RCC still holds the prescalers of the
+/// rate being left, so the new bus rate is arithmetic and not a read.
+template <uint8_t instance>
+constexpr uint32_t usart_bus_hz_at(uint32_t hclk) {
+    return instance == 1u ? pclk2_hz_at(hclk) : pclk1_hz_at(hclk);
 }
 
 /**
@@ -439,11 +450,25 @@ struct Uart {
     static uint16_t noise_errors() { return m_noise_errors; }
     static uint16_t parity_errors() { return m_parity_errors; }
 
-    /// Follow a clock that changed rate: the divisor again from the new
-    /// one. The byte in the shift register is lost to the change, which
-    /// is why a caller waits for tx_idle() first.
+    /// Follow a clock that changed rate. The argument is HCLK - what a
+    /// dynamic clock hands every user - and this port derives its own
+    /// bus rate from it, because the two peripheral buses do not divide
+    /// the same number.
+    ///
+    /// It is called BEFORE the rate moves, with the old clock still
+    /// running, so the queue is drained here: a byte still in the shift
+    /// register when SYSCLK changes goes out at neither baud rate. The
+    /// drain is bounded - a port whose line is held off must not hang
+    /// the switch - and the divisor is written whatever the drain found.
     static void rebase(uint32_t hz) {
-        const uint32_t brr = usart_divisor(hz, m_baud);
+        constexpr uint32_t drain_spins = 2'000'000UL;
+        uint32_t spins = drain_spins;
+        while (!m_tx.empty() && spins-- != 0u) {
+        }
+        spins = drain_spins;
+        while ((regs().STATR & usart_tc) == 0u && spins-- != 0u) {
+        }
+        const uint32_t brr = usart_divisor(usart_bus_hz_at<instance>(hz), m_baud);
         if (usart_divisor_valid(brr)) {
             regs().BRR = static_cast<uint16_t>(brr);
         }

@@ -130,4 +130,29 @@ inline constexpr bool has_hse_pins      = true;
 inline constexpr uint32_t hse_min_hz    = 3'000'000UL;
 inline constexpr uint32_t hse_max_hz    = 25'000'000UL;
 
+/// The PLL's own edges (datasheet table 4-15): what its input may be,
+/// and what its output may be. Both are checked at compile time, and
+/// they are NOT the same numbers on every part of the series.
+inline constexpr uint32_t pll_in_min_hz  = 3'000'000UL;
+inline constexpr uint32_t pll_in_max_hz  = 25'000'000UL;
+inline constexpr uint32_t pll_out_min_hz = 18'000'000UL;
+inline constexpr uint32_t pll_out_max_hz = 144'000'000UL;
+
+/// What PLLXTPRE selects on the way from the HSE into the PLL, by code
+/// (RM 3.4.2): the whole clock or half of it on this class, where the
+/// CH32V203RB divides its 32 MHz oscillator by four or by eight.
+inline constexpr uint8_t pll_hse_div[2] = {1, 2};
+
+/// Whether USBPRE's fourth code (the PLL divided by five, from a PLL at
+/// 240 MHz) exists here: it is the CH32V20x_D8's and the D8W's, and
+/// even there it depends on the lot number (RM 3.4.2).
+inline constexpr bool has_usb_pre_div5 = false;
+
+/// The LSI as the datasheet measures it (table 4-14), not as the clock
+/// tree's block diagram rounds it: a wide RC, which is why anything
+/// timed by it is measured rather than computed.
+inline constexpr uint32_t lsi_min_hz = 25'000UL;
+inline constexpr uint32_t lsi_typ_hz = 39'000UL;
+inline constexpr uint32_t lsi_max_hz = 60'000UL;
+
 } // namespace brio::device
