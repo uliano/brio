@@ -53,6 +53,11 @@
  * its loop and with its own __WFE(), enumeration and bulk OUT alike,
  * while a busy-wait of the same length works - with the core woken
  * every USB frame, so the rule is not about how long a sleep lasts.
+ * Nor is it the USB's alone: in Sleep no bus master but the core gets
+ * a cycle (a DMA stalls the same way), and no mitigation short of
+ * staying awake works - the overflow interrupt wakes the core but the
+ * packet is gone, a NAK'd endpoint still overflows; dividing HCLK
+ * works down to 24 MHz, and 12 fails like the sleep.
  * So a program with USB drives the kernel with
  * step() and never idles; when this stratum has a power model, the
  * controller is a PrepareSleep voter and that is where the rule will

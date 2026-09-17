@@ -413,10 +413,13 @@ gets its home in `docs/design/` when taken.
   watchdogs, CAN, the RTC and the backup domain, the OPA, CRC, TKEY,
   EXTI and the second USB block). What the silicon taught so far is in
   docs/ch32v203/README.md, and one finding has a design consequence:
-  the USB controller does NOT survive the core's sleep, so a USB
-  program drives the kernel with `step()` and never idles until this
-  stratum has a power model and the controller can vote in a
-  PrepareSleep round.
+  the USB controller does NOT survive the core's sleep - and neither
+  does a DMA: in Sleep the bus matrix serves the core alone (measured
+  with a memory-to-memory transfer under a wfi), so a USB program
+  drives the kernel with `step()` and never idles until this stratum
+  has a power model and the controller can vote in a PrepareSleep
+  round; on this family a program that moves data through the bus
+  slows down instead of sleeping, to no less than 24 MHz of HCLK.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the

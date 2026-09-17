@@ -168,6 +168,27 @@ brio console P
   absence of an erratum is, once again, evidence of nothing. The
   debug module's keep-HCLK-in-Sleep bit could not be tried: a `csrw`
   to CSR 0x7C0 from the running program resets the part.
+- **In Sleep, no bus master but the core gets a cycle.** A memory-to-
+  memory DMA started right before a `wfi` moves nine to twelve bytes -
+  the pipeline between the enable and the sleep - and nothing more
+  until the core wakes, while a timer on the peripheral bus and the
+  core's own counter count the whole sleep; woken once a millisecond
+  it moves eleven bytes a wake. The clocks run; the bus matrix serves
+  the core alone. The USB controller's reach into its packet memory
+  is such an access, which is why a transfer with a payload fails in
+  Sleep and one without (SET_ADDRESS) passes - and why no software
+  mitigation short of staying awake works, measured on the vendor's
+  own example: unmasking the overflow interrupt wakes the core but
+  the packet is gone and the host does not retry a failed bulk burst;
+  staying awake for ten or a hundred milliseconds after the overflow
+  recovers nothing of the burst in flight; holding the endpoint at
+  NAK across the sleep still overflows; re-validating the endpoint
+  finds it valid. What does work is not sleeping and dividing HCLK
+  instead: the device enumerates and carries data with HCLK at 96, 48
+  and 24 MHz and the USB clock at 48, and fails at 12 MHz with the
+  sleeping case's own signature. So on this family a program that
+  moves data through the bus - USB, a DMA-fed transport - does not
+  sleep; it slows down, to no less than 24 MHz of HCLK.
 - **`ebreak` with no debugger goes to the BREAKPOINT vector, not the
   exception one.** The table has both - the exception entry at index 3
   and the breakpoint one at index 9 - and the silicon takes the second,
