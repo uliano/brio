@@ -403,23 +403,24 @@ gets its home in `docs/design/` when taken.
   values, and whether a zone at a fixed address is worth a partition
   every image pays. Until that review, no FlashMedia on the STM32F4.
 - **The CH32V203 stratum's chapters.** `brio/ch32v203/` and `ch32v203/`
-  are `in bring-up` on the CH32V203C8T6 (README.md's table): the
-  platform, the clock, the pads, the USART and THE USB DEVICE
-  CONTROLLER are measured - the kernel console runs both on the probe's
-  serial and on the chip's own USB-C, a CDC ACM port over util/usb -
-  and everything else is open: the family check fixture, the eight
-  other parts of the series, a test suite, and the chapters (DMA, the
-  timers, SPI, I2C, the ADC, flash, PWR and the sleep sites, the
-  watchdogs, CAN, the RTC and the backup domain, the OPA, CRC, TKEY,
-  EXTI and the second USB block). What the silicon taught so far is in
-  docs/ch32v203/README.md, and one finding has a design consequence:
-  the USB controller does NOT survive the core's sleep - and neither
-  does a DMA: in Sleep the bus matrix serves the core alone (measured
-  with a memory-to-memory transfer under a wfi), so a USB program
-  drives the kernel with `step()` and never idles until this stratum
-  has a power model and the controller can vote in a PrepareSleep
-  round; on this family a program that moves data through the bus
-  slows down instead of sleeping, to no less than 24 MHz of HCLK.
+  are `in bring-up` on the CH32V203C8T6 (README.md's table), with the
+  nine parts of the series in the part table and the family check on
+  all of them: measured on the silicon are the platform with its failing
+  half, the clock tree whole, GPIO with the remaps and the EXTI, the
+  timers and the two watchdogs, the DMA, the USART at first light and
+  THE USB DEVICE CONTROLLER - the kernel console runs both on the probe's
+  serial and on the chip's own USB-C, a CDC ACM port over util/usb.
+  Open: SPI, I2C, the ADC and the OPA, flash, PWR and the sleep sites,
+  the RTC and the backup domain, CAN, CRC, TKEY and the second USB block,
+  and the USART chapter whole. What the silicon taught so far is in
+  docs/ch32v203/README.md, and one finding shapes the power model: IN
+  SLEEP THE BUS MATRIX SERVES THE CORE ALONE - the USB controller cannot
+  reach its packet memory and a DMA stalls (measured with the vendor's
+  own example as the oracle, and no software mitigation short of staying
+  awake works), so a program that moves data through the bus never idles
+  here and slows down instead, to no less than 24 MHz of HCLK; the sleep
+  site to come refuses while a channel is enabled, and the controller
+  votes in a PrepareSleep round.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -1468,8 +1469,10 @@ brio/                    the framework, twelve strata:
                            single vectors and two shared ones with isr() +
                            served()) + ExtiLine<n> + ExtInt<Pin> (claim,
                            select refusing a line another port holds, steal)
-    usart.hpp              Usart<n> resource + Uart<n, ...> task with the other
-                           strata's surface, the divisor against PCLK2
+    usart.hpp              Usart<n> resource + Uart<n, ..., TxEngine, RxEngine>
+                           task with the other strata's surface, the divisor
+                           against PCLK2, and two OPTIONAL DMA engine slots
+                           (harvest() the verb that publishes a receive run)
     usb.hpp                Usbd: ST's device controller under WCH's names,
                            realizing util/usb's UsbController - and a program
                            using it never idles (measured: the controller does
@@ -1507,6 +1510,28 @@ brio/                    the framework, twelve strata:
                            refresh IS the reset, the early wake-up flag and
                            its vector, the block's reset line as the only way
                            back)
+    dma_engine.hpp         NoDmaEngine, the empty slot's tag - and THE REQUEST
+                           TABLE (11.2.3's tables 11-5 and 11-6): DmaRequest,
+                           one enumerator a row, dma_request_channel() folding
+                           the PART (0 where the part has not got the
+                           peripheral that raises it) and DmaRequestOf<r>
+                           refusing it at compile time, so a transport can
+                           check a named engine against the table without
+                           including the controller
+    dma.hpp                the DMA (ch. 11): Dma (the gate, the flags,
+                           stop_all() because RCC_AHBRSTR has no bit for this
+                           block, any_enabled() the power model's one
+                           question) + DmaChannel<1..8> (THE CHANNEL IS THE
+                           REQUEST: prepare/load/trigger, every store refused
+                           while EN is set - which stays set after a completed
+                           block - and every address refused unless it is
+                           aligned to its own width, because 11.3.5 would
+                           align it in silence; remaining(), the four flags
+                           and the ISR body, one vector a channel with the
+                           eighth on the device class's own tail) +
+                           DmaTxEngine/DmaRxEngine<ch, Elem> for the
+                           transports' slots, and the rule that two engines of
+                           one transport name two channels
   stm32f4/               everything that knows stm32f4xx.h (STM32F4, Cortex-M4F):
                          brio's first ARMv7-M family on the cortexm/ core files
     device_tables.hpp      THE RESERVE: GPIO ports A..K, the serial instances

@@ -1567,6 +1567,11 @@ public:
     static volatile void* chcvr_address(uint8_t ch) {
         return ch < channels ? static_cast<volatile void*>(&regs().CHCVR[ch]) : nullptr;
     }
+    /// Where a DMA channel reads this counter from. The register is
+    /// thirty-two bits wide in the map and only the low half carries a
+    /// count on every instance but the 32-bit one, so a channel that
+    /// samples it names the width the timer HAS (`counter_bits`).
+    static volatile void* cnt_address() { return static_cast<volatile void*>(&regs().CNT); }
 
 private:
     static void write_chctlr(uint8_t ch, uint16_t value) {

@@ -238,6 +238,7 @@ void exercise_resource() {
     T::dma_burst_off();
     (void)T::dmaadr_address();
     (void)T::chcvr_address(2);
+    (void)T::cnt_address();
     (void)T::channel_pad(0, 0);
     (void)T::complementary_pad(0, 0);
     (void)T::etr_pad(0);

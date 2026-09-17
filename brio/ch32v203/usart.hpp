@@ -25,6 +25,26 @@
  * and the transport with its two rings - enough for a console and for
  * the suites that run on one.
  *
+ * TWO OPTIONAL DMA ENGINE SLOTS, the shape every stratum with a
+ * controller uses: a transmit engine drains the TX ring by contiguous
+ * runs (the ring's read_span, consumed by exactly what the block
+ * carried) and a receive engine fills the RX ring's free run
+ * (write_span, published by what harvest() finds arrived). Without an
+ * engine the slot is the NoDmaEngine tag, every engine branch is
+ * compiled out and init() does not so much as touch CTLR3. With a
+ * receive engine RXNE belongs to the channel, so the error flags are
+ * read once per harvest and counted against the RUN and not the byte -
+ * a console that wants exact attribution takes no receive engine. And
+ * harvest() is a VERB, not an interrupt: a receive block completes only
+ * when its run fills, which on an idle line is never, so whoever owns
+ * the port decides how often to ask. An engine is refused on any
+ * channel but the instance's own, which the request table of
+ * ch32v203/dma_engine.hpp answers (USART1 transmits on channel 4 and
+ * receives on 5, USART2 on 7 and 6, USART3 on 2 and 3, UART4 on 1
+ * and 8) - and a program with an engine running does not sleep on this
+ * family, because in Sleep the bus matrix serves the core alone
+ * (docs/ch32v203/dma.md).
+ *
  * NOT COVERED YET, each with its reason:
  *  - the REMAPS (AFIO_PCFR1/PCFR2): every instance is on its default
  *    pads, which is where this board's console is; they arrive with
@@ -33,8 +53,6 @@
  *    flow-control pair: the chapter has them all and the CH32V00x
  *    driver spells them out; they are written here when the USART
  *    chapter of this stratum is measured, not before.
- *  - the DMA requests (CTLR3's DMAT/DMAR): the engine slots arrive with
- *    ch32v203/dma.hpp.
  */
 
 #pragma once
@@ -43,6 +61,7 @@
 
 #include "ch32v203/clock.hpp"
 #include "ch32v203/device.hpp"
+#include "ch32v203/dma_engine.hpp"
 #include "ch32v203/pfic.hpp"
 #include "ch32v203/pin.hpp"
 #include "util/clock.hpp"
@@ -147,6 +166,24 @@ constexpr UsartPads usart_pads_for(uint8_t n) {
            n == 4 ? UsartPads{{'B', 0}, {'B', 1}} : UsartPads{};
 }
 
+/// The DMA channel each direction of an instance answers on, read out
+/// of the one request table (ch32v203/dma_engine.hpp): 0 where the part
+/// has not got the instance at all. THE CHANNEL IS THE REQUEST here, so
+/// these two numbers are what an engine slot is checked against.
+constexpr uint8_t usart_dma_tx_channel(uint8_t n) {
+    return n == 1 ? dma_request_channel(DmaRequest::usart1_tx) :
+           n == 2 ? dma_request_channel(DmaRequest::usart2_tx) :
+           n == 3 ? dma_request_channel(DmaRequest::usart3_tx) :
+           n == 4 ? dma_request_channel(DmaRequest::uart4_tx) : 0;
+}
+
+constexpr uint8_t usart_dma_rx_channel(uint8_t n) {
+    return n == 1 ? dma_request_channel(DmaRequest::usart1_rx) :
+           n == 2 ? dma_request_channel(DmaRequest::usart2_rx) :
+           n == 3 ? dma_request_channel(DmaRequest::usart3_rx) :
+           n == 4 ? dma_request_channel(DmaRequest::uart4_rx) : 0;
+}
+
 // =============================================================================
 // Usart<n>: the resource
 // =============================================================================
@@ -223,6 +260,25 @@ struct Usart {
                                                : (regs().CTLR1 & ~enable_bit));
     }
 
+    /// CTLR3's two DMA request enables (18.10.6). With DMAT set, TXE
+    /// raises a request instead of feeding the interrupt; with DMAR
+    /// set, so does RXNE - which is why a receiver with an engine
+    /// leaves RXNEIE alone.
+    static void dma_transmit(bool on) {
+        regs().CTLR3 = static_cast<uint16_t>(on ? (regs().CTLR3 | usart_dmat)
+                                               : (regs().CTLR3 & ~usart_dmat));
+    }
+    static void dma_receive(bool on) {
+        regs().CTLR3 = static_cast<uint16_t>(on ? (regs().CTLR3 | usart_dmar)
+                                               : (regs().CTLR3 & ~usart_dmar));
+    }
+
+    /// Where an engine points: the one register both directions share.
+    static volatile void* data_address() { return static_cast<volatile void*>(&regs().DATAR); }
+
+    static constexpr uint8_t dma_tx_channel = usart_dma_tx_channel(n);
+    static constexpr uint8_t dma_rx_channel = usart_dma_rx_channel(n);
+
     // ---- the line ---------------------------------------------------------
 
     static uint16_t status() { return regs().STATR; }
@@ -290,13 +346,30 @@ constexpr uint32_t usart_bus_hz_at(uint32_t hclk) {
  * be shared with a handler bare (atomic_width) or wants a guard.
  */
 template <uint8_t instance, typename P, uint16_t rx_size = 64, uint16_t tx_size = 64,
-          UartFormat format = {}>
+          UartFormat format = {}, typename TxEngine = NoDmaEngine,
+          typename RxEngine = NoDmaEngine>
 struct Uart {
     static_assert(usart_base_for(instance) != 0,
                   "brio Uart: this family has USART1..3 and UART4");
     static_assert(uart_format_valid(format) && format.bits != UartBits::nine,
                   "brio Uart: the rings carry bytes - seven data bits with a parity bit, or eight, "
                   "with or without one; nine-bit words are the resource's read_word()/write_word()");
+    // An engine is checked where it is NAMED: sizeof demands a complete
+    // type, so an engine's own static_asserts fire on the line the
+    // application wrote.
+    static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
+                  "the engine slots must name a complete type: a DmaTxEngine / DmaRxEngine from "
+                  "ch32v203/dma.hpp, or NoDmaEngine (the default)");
+    static_assert(!TxEngine::present ||
+                      dma_engine_channel<TxEngine>() == usart_dma_tx_channel(instance),
+                  "brio Uart: table 11-5 - this instance transmits on its own DMA channel "
+                  "(USART1 on 4, USART2 on 7, USART3 on 2, UART4 on 1)");
+    static_assert(!RxEngine::present ||
+                      dma_engine_channel<RxEngine>() == usart_dma_rx_channel(instance),
+                  "brio Uart: table 11-5 - this instance receives on its own DMA channel "
+                  "(USART1 on 5, USART2 on 6, USART3 on 3, UART4 on 8)");
+    static_assert(dma_engines_distinct<TxEngine, RxEngine>(),
+                  "the two engines of a Uart must not share a DMA channel");
 
     Uart() = default;   // a tag instance: constexpr Uart<1, P> serial;
 
@@ -304,6 +377,8 @@ struct Uart {
 
     static constexpr uint8_t number = instance;
     static constexpr UsartPads pads = usart_pads_for(instance);
+    static constexpr bool has_tx_engine = TxEngine::present;
+    static constexpr bool has_rx_engine = RxEngine::present;
 
     using Tx = Pin<pads.tx.port, pads.tx.pin>;
     using Rx = Pin<pads.rx.port, pads.rx.pin>;
@@ -351,12 +426,112 @@ struct Uart {
         m_noise_errors = 0;
         m_parity_errors = 0;
 
+        // CTLR3 IS TOUCHED ONLY BY A PORT THAT HAS AN ENGINE: without
+        // one there is nothing of this transport's to put in it, and
+        // whatever a program stored there itself stays.
+        if constexpr (has_tx_engine || has_rx_engine) {
+            m_dma_faults = 0;
+            uint16_t ctlr3 = regs().CTLR3;
+            if constexpr (has_tx_engine) { ctlr3 = static_cast<uint16_t>(ctlr3 | usart_dmat); }
+            if constexpr (has_rx_engine) { ctlr3 = static_cast<uint16_t>(ctlr3 | usart_dmar); }
+            regs().CTLR3 = ctlr3;
+        }
+
+        // RXNE belongs to the receive channel when an engine has it, so
+        // the per-byte interrupt is armed only where no engine is.
         regs().CTLR1 = static_cast<uint16_t>(usart_ctlr1_format(format) | usart_ue | usart_te |
-                                             usart_re | usart_rxneie);
+                                             usart_re |
+                                             (has_rx_engine ? uint16_t{0} : usart_rxneie));
+
+        if constexpr (has_rx_engine) {
+            RxEngine::arm(Resource::data_address());
+            rearm_rx();
+        }
+        if constexpr (has_tx_engine) {
+            TxEngine::arm(Resource::data_address());
+        }
 
         Pfic::enable(usart_irq_for(instance));
         return true;
     }
+
+    /**
+     * The ISR body of WHICHEVER DMA channel this transport owns - bind
+     * it to the vector(s) the engines' channels report on:
+     *
+     *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Serial::dma_isr(); }
+     *
+     * Each engine reads only its own channel's flags, so this is safe
+     * on a vector another channel of the program shares nothing with.
+     * On the transmit channel a completion releases exactly the block's
+     * bytes from the ring and starts the next run; on the receive
+     * channel nothing is published here - harvest() does that.
+     */
+    [[gnu::always_inline]] static bool dma_isr() {
+        bool mine = false;
+        if constexpr (has_tx_engine) {
+            const uint8_t f = TxEngine::service();
+            if ((f & TxEngine::flag_error) != 0u) {
+                (void)TxEngine::abandon();
+                bump(m_dma_faults);
+                mine = true;
+            } else if ((f & TxEngine::flag_complete) != 0u) {
+                m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
+                pump_tx();
+                mine = true;
+            }
+        }
+        if constexpr (has_rx_engine) {
+            const uint8_t f = RxEngine::service();
+            if ((f & RxEngine::flag_error) != 0u) {
+                (void)RxEngine::abandon();
+                bump(m_dma_faults);
+                mine = true;
+            } else if ((f & RxEngine::flag_complete) != 0u) {
+                mine = true;   // the run filled: harvest() publishes and re-arms
+            }
+        }
+        return mine;
+    }
+
+    /**
+     * Ask the receive engine what has arrived, and publish it. A VERB,
+     * not an interrupt (see the file header): the owner decides how
+     * often, a kernel TimeEvent every few ticks is the shape. Returns
+     * the same edge isr() does - the ring went from empty to non-empty.
+     * False, and free, without an engine.
+     */
+    static bool harvest() {
+        if constexpr (!has_rx_engine) {
+            return false;
+        } else {
+            // The error flags once, at harvest granularity, cleared by
+            // the STATR-then-DATAR read the chapter prescribes.
+            const uint16_t status = regs().STATR;
+            if ((status & (usart_fe | usart_ne | usart_pe | usart_ore)) != 0u) {
+                if ((status & usart_fe) != 0u) { bump(m_frame_errors); }
+                if ((status & usart_ne) != 0u) { bump(m_noise_errors); }
+                if ((status & usart_pe) != 0u) { bump(m_parity_errors); }
+                if ((status & usart_ore) != 0u) { bump(m_hw_overruns); }
+                (void)regs().DATAR;
+            }
+            const bool was_empty = m_rx.empty();
+            const uint16_t fresh = RxEngine::take();
+            if (fresh != 0u) {
+                m_rx.publish(static_cast<typename decltype(m_rx)::index_t>(fresh));
+            }
+            // The silicon is asked first and the arithmetic second: a
+            // channel that is not running gets a new run whatever the
+            // count says.
+            if (RxEngine::idle() || RxEngine::full() || RxEngine::capacity() == 0u) {
+                rearm_rx();
+            }
+            return was_empty && !m_rx.empty();
+        }
+    }
+
+    /// Blocks the engines threw away. Always 0, and free, without one.
+    static uint16_t dma_faults() { return m_dma_faults; }
 
     /**
      * The port's whole interrupt body - bind this instance's vector to
@@ -409,7 +584,11 @@ struct Uart {
         if (!m_tx.push(b)) {
             return false;
         }
-        regs().CTLR1 = static_cast<uint16_t>(regs().CTLR1 | usart_txeie);
+        if constexpr (has_tx_engine) {
+            pump_tx();
+        } else {
+            regs().CTLR1 = static_cast<uint16_t>(regs().CTLR1 | usart_txeie);
+        }
         return true;
     }
 
@@ -435,6 +614,11 @@ struct Uart {
     /// Nothing queued and the shift register empty: what a program waits
     /// on before a reset or a clock change.
     static bool tx_idle() {
+        if constexpr (has_tx_engine) {
+            if (TxEngine::busy()) {
+                return false;
+            }
+        }
         return m_tx.empty() && (regs().STATR & usart_tc) != 0u;
     }
 
@@ -464,6 +648,9 @@ struct Uart {
         constexpr uint32_t drain_spins = 2'000'000UL;
         uint32_t spins = drain_spins;
         while (!m_tx.empty() && spins-- != 0u) {
+            if constexpr (has_tx_engine) {
+                pump_tx();
+            }
         }
         spins = drain_spins;
         while ((regs().STATR & usart_tc) == 0u && spins-- != 0u) {
@@ -475,6 +662,37 @@ struct Uart {
     }
 
 private:
+    /// Start the next contiguous run of the TX ring on the engine, if it
+    /// is idle and there is one. Under the guard: the completion path
+    /// runs in the channel's handler.
+    static void pump_tx() {
+        if constexpr (has_tx_engine) {
+            typename P::CriticalSection cs;
+            if (TxEngine::busy()) {
+                return;
+            }
+            const auto run = m_tx.read_span();
+            if (run.empty()) {
+                return;
+            }
+            (void)TxEngine::start(run.data(), static_cast<uint16_t>(run.size()));
+        }
+    }
+
+    /// Point the receive engine at the ring's next free run. No room is
+    /// a byte lost before it arrives, counted as the software overrun
+    /// it is.
+    static void rearm_rx() {
+        if constexpr (has_rx_engine) {
+            const auto room = m_rx.write_span();
+            if (room.empty()) {
+                bump(m_rx_overruns);
+                return;
+            }
+            (void)RxEngine::start(room.data(), static_cast<uint16_t>(room.size()));
+        }
+    }
+
     /// Saturating: a counter that wraps would report a healthy port.
     static void bump(uint16_t& counter) {
         if (counter != 0xFFFFu) {
@@ -490,6 +708,7 @@ private:
     static inline uint16_t m_frame_errors = 0;
     static inline uint16_t m_noise_errors = 0;
     static inline uint16_t m_parity_errors = 0;
+    static inline uint16_t m_dma_faults = 0;
 };
 
 } // namespace brio
