@@ -1531,7 +1531,46 @@ brio/                    the framework, twelve strata:
                            eighth on the device class's own tail) +
                            DmaTxEngine/DmaRxEngine<ch, Elem> for the
                            transports' slots, and the rule that two engines of
-                           one transport name two channels
+                           one transport name two channels; + the BLOCK ENGINES
+                           util/block_stream.hpp asks for - DmaLoopEngine (a
+                           BlockPlayer on the controller's own circular mode,
+                           the lap interrupt only counting) and
+                           DmaPingPongEngine (a BlockSource that does NOT use
+                           it: "skip rather than tear" cannot be decided on a
+                           channel that never stops, measured at three items
+                           past the edge, so it stops at every block and the
+                           handler re-arms the other buffer)
+    adc.hpp                the two converters (ch. 12): Adc<1|2> over the F1's
+                           ADC under WCH's names - the calibration run BEFORE
+                           the buffer and the internal sources (TSVREFE forces
+                           BUFEN on for good), the regular group of sixteen and
+                           the INJECTED four that preempt it with a signed
+                           offset, scan/continuous/discontinuous, the analog
+                           watchdog, the timers' triggers and AN EXTI LINE
+                           (code 110 is a line on this family; the TIM8
+                           alternative and the four AFIO bits that would select
+                           it are another class's), the DMA request handed to a
+                           block engine by claim_stream<Engine>() - refused at
+                           compile time off table 11-5's row -, the rc_w0 flags
+                           and ONE VECTOR FOR BOTH units, the DUAL modes as
+                           ADC1's verb alone (no util shape: one family does
+                           not make a contract), and WCH's own input buffer
+                           with a PGA of 1/4/16/64 + AnalogIn<Pin> from the
+                           family's pad map, AdcInput (the sensor on 16,
+                           VREFINT on 17, one bit waking both) and Ref/ref_mv -
+                           no package brings out a VREF+ pad, so the reference
+                           IS VDDA and vdda_mv() measures it
+    opa.hpp                the two amplifiers (ch. 30): Opa<1|2> over FOUR BITS
+                           EACH in one register that lives in the EXTEN block's
+                           window - an enable, one of two positive pads, one of
+                           two negative ones, one of two outputs, and nothing
+                           else: no key, no lock, no gain, no internal
+                           feedback, so with no wire strapped the block is an
+                           open-loop stage + OpaIn<n, which> / OpaOut<n, which>
+                           (the datasheet's pad map, every output pad an ADC
+                           input pad, which is this block's whole route to the
+                           converter); OPA3 and OPA4 belong to other device
+                           classes and the twenty-pin part has OPA2 alone
   stm32f4/               everything that knows stm32f4xx.h (STM32F4, Cortex-M4F):
                          brio's first ARMv7-M family on the cortexm/ core files
     device_tables.hpp      THE RESERVE: GPIO ports A..K, the serial instances

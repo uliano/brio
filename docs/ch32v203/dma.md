@@ -182,6 +182,20 @@ reaches its engine only through those.
 TWO ENGINES OF ONE TRANSPORT NAME TWO CHANNELS: a channel moves data one
 way, and the table gives each direction its own.
 
+### The block engines
+
+`DmaLoopEngine<ch, Elem>` and `DmaPingPongEngine<ch, Elem>` are this
+family's realizations of
+[util/block_stream.hpp](../../brio/util/block_stream.hpp)'s
+`BlockPlayer` and `BlockSource`, and they differ in exactly one thing:
+the player RIDES THE CONTROLLER'S CIRCULAR MODE, where CNTR reloads
+itself and the lap interrupt does nothing but count, and the source does
+NOT. The reason is the contract's and not the API's - "skip rather than
+tear" cannot be decided on a channel that never stops - and it is
+measured here, on the fastest possible reader: see
+[adc.md](adc.md), whose converter is these engines' first user and
+whose suite carries the number.
+
 ### The transport's two slots
 
 [brio/ch32v203/usart.hpp](../../brio/ch32v203/usart.hpp)'s `Uart` takes
@@ -323,25 +337,17 @@ the ruler.
 
 Driver gaps, each with its reason:
 
-- **The block engines** - `DmaLoopEngine` and `DmaPingPongEngine`, the
-  two ARMv6-M strata's realizations of
-  [util/block_stream.hpp](../../brio/util/block_stream.hpp)'s concepts.
-  This controller has a hardware circular mode, which is the player's
-  shape on the STM32G0, and the source's two halves would be the same
-  design; they are born with their first block user, the ADC, and
-  measuring them before there is a stream to judge them against would
-  fix the shape against the easy case.
 - **The engine slots of every transport but the serial one.** SPI and
   I2C have their rows in table 11-5 and their drivers do not exist on
   this stratum yet; each gets its two slots when its chapter is written.
 - **The peripherals whose requests exist and have no driver here yet**:
-  the converter's row (channel 1), SPI1's and SPI2's four, I2C1's and
-  I2C2's four. The table names them and `DmaRequestOf` will hand out
-  their channels; what is missing is the peripheral driver on the other
-  end, not the channel.
+  SPI1's and SPI2's four, I2C1's and I2C2's four. The table names them
+  and `DmaRequestOf` will hand out their channels; what is missing is
+  the peripheral driver on the other end, not the channel.
 - **Half-transfer as a verb of the engines**: the flag and its enable
   are the channel's (`DmaFlag::half`, `arm()`), and no engine acts on
-  the midpoint until a stream needs it.
+  the midpoint - the block source stops at every block instead, for the
+  reason its own section gives.
 
 Implemented but not bench-verified, each with what would measure it:
 

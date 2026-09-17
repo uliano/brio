@@ -69,10 +69,21 @@
  * owner disables before the next load. A TRANSFER ERROR is the one
  * thing that clears EN by itself (11.3.3).
  *
- * NOT COVERED YET: the loop and ping-pong engines the two ARMv6-M
- * strata keep for a block stream (util/block_stream.hpp's two
- * concepts over a circular channel and a pair of halves) - born with
- * the ADC chapter, their first block user here.
+ * THE BLOCK ENGINES beside them are util/block_stream.hpp's two
+ * concepts: `DmaLoopEngine<ch, Elem>` is a BlockPlayer, one
+ * caller-owned table poured into a peripheral for ever on THE
+ * CONTROLLER'S OWN CIRCULAR MODE, with the lap interrupt doing nothing
+ * but count; `DmaPingPongEngine<ch, Elem>` is a BlockSource, two
+ * caller-owned buffers filled in turn - and it does NOT use circular
+ * mode, which is the one place this file departs from what the
+ * controller offers. The reason is the contract's and not the API's: a
+ * circular channel never stops, so "skip rather than tear" could only
+ * be decided after the edge, with the controller already writing the
+ * buffer the caller holds (measured on the STM32G0, and again here -
+ * docs/ch32v203/adc.md). So the source stops itself at every block and
+ * the handler re-arms the other buffer, which is the SAM C21's shape
+ * and the STM32G0's; the four engine names are the same words in all
+ * three strata (docs/design/block-stream.md).
  */
 
 #pragma once
@@ -749,6 +760,369 @@ private:
     static inline uint16_t capacity_ = 0;
     static inline uint16_t taken_ = 0;
     static inline uint32_t faults_ = 0;
+};
+
+// ---- the block engines ----------------------------------------------------------
+
+/**
+ * DmaLoopEngine<ch, Elem> - "play one caller-owned table into a
+ * peripheral, for ever": util/block_stream.hpp's BlockPlayer.
+ *
+ * THIS ONE RIDES THE CONTROLLER'S CIRCULAR MODE (CFGR.CIRC, 11.2.1):
+ * CNTR reloads itself at the end of every lap and the channel never
+ * stops, so there is no re-arm window and the completion interrupt does
+ * nothing but count. A player wants exactly that - the peripheral's own
+ * request paces it, the table does not change, and `laps()` moving is
+ * the one fact that says the stream is alive.
+ *
+ * The table is the caller's and must outlive the stream. Nothing is
+ * published per lap: an owner that wants a lap as an event arms its own
+ * TimeEvent (design/block-stream.md).
+ */
+template <uint8_t ch, typename Elem = uint16_t>
+class DmaLoopEngine {
+    static_assert(ch >= 1 && ch <= dma_channel_count, "no such DMA channel for this engine");
+    static_assert(sizeof(Elem) == 1 || sizeof(Elem) == 2 || sizeof(Elem) == 4,
+                  "a DMA element is one bus access wide: 1, 2 or 4 bytes");
+    using Channel = DmaChannel<ch>;
+
+public:
+    DmaLoopEngine() = delete;
+
+    static constexpr bool present = true;
+    static constexpr uint8_t channel = ch;
+    static constexpr DmaWidth width = dma_width_of<Elem>();
+    using element = Elem;
+
+    static constexpr uint8_t flag_complete = DmaFlag::complete;
+    static constexpr uint8_t flag_half = DmaFlag::half;
+    static constexpr uint8_t flag_error = DmaFlag::error;
+
+    /// The channel's ISR body folded into the engine: the armed flags
+    /// that are up, cleared, handed back. Acts on nothing.
+    [[gnu::always_inline]] static uint8_t service() {
+        return static_cast<uint8_t>(Channel::isr());
+    }
+
+    /// Claim the channel for this peripheral; `data` is the register the
+    /// table is poured into. The PFIC line is enabled here.
+    static void arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
+        data_ = data;
+        priority_ = priority;
+        claim();
+        Pfic::enable(Channel::irq());
+    }
+
+    /// Begin playing `length` elements of `table`, over and over. The
+    /// buffer is the caller's and must outlive the stream.
+    static bool start(const Elem* table, uint16_t length) {
+        if (table == nullptr || length == 0u) {
+            return false;
+        }
+        table_ = table;
+        length_ = length;
+        laps_ = 0;
+        faults_ = 0;
+        running_ = Channel::load(DmaTransfer{
+            .peripheral = data_,
+            .memory = const_cast<Elem*>(table),
+            .count = length,
+            .config = {.direction = DmaDirection::memory_to_peripheral,
+                       .circular = true,
+                       .memory_to_memory = false,
+                       .peripheral_increment = false,
+                       .memory_increment = true,
+                       .peripheral_width = width,
+                       .memory_width = width,
+                       .priority = priority_},
+        });
+        return running_;
+    }
+
+    /// A lap ended - called from the handler on the completion flag.
+    /// The controller has already reloaded: there is nothing to do but
+    /// count, which is the whole gain of the circular mode.
+    static void lap() {
+        if (running_) {
+            laps_ = laps_ + 1u;
+        }
+    }
+    /// A transfer error - called from the handler on the error flag.
+    /// 11.3.3: the silicon drops EN by itself there.
+    static void fail() {
+        faults_ = faults_ + 1u;
+        running_ = false;
+    }
+
+    static uint32_t laps() { return laps_; }
+    static uint32_t faults() { return faults_; }
+    static void clear_faults() { faults_ = 0; }
+    static bool running() { return running_; }
+    static uint16_t length() { return length_; }
+
+    /// How far into the current lap the controller has got - one
+    /// register read, never refused.
+    static DmaProgress progress() { return Channel::progress(length_); }
+
+    /// Start the same table again from its beginning - what an owner
+    /// does when the request was armed after the channel and the first
+    /// datum never came.
+    static bool kick() {
+        Channel::enable(false);
+        running_ = false;
+        return start(table_, length_);
+    }
+
+    static void stop() {
+        Channel::stop();
+        running_ = false;
+        length_ = 0;
+    }
+
+private:
+    static void claim() {
+        Channel::stop();
+        Channel::arm(DmaFlag::complete | DmaFlag::error, true);
+    }
+
+    static inline volatile void* data_ = nullptr;
+    static inline const Elem* table_ = nullptr;
+    static inline DmaPriority priority_ = DmaPriority::low;
+    static inline uint16_t length_ = 0;
+    // Handler-written, loop-read.
+    static inline volatile uint32_t laps_ = 0;
+    static inline volatile uint32_t faults_ = 0;
+    static inline volatile bool running_ = false;
+};
+
+/**
+ * DmaPingPongEngine<ch, Elem> - "fill one caller-owned buffer while the
+ * caller drains the other": util/block_stream.hpp's BlockSource.
+ *
+ * WHY IT IS *NOT* CIRCULAR, on a controller that has a circular mode
+ * and a half-transfer flag that would seem to make two halves free. The
+ * contract's rule is SKIP RATHER THAN TEAR: a block handed over is
+ * valid until the caller releases it, and a source that cannot keep
+ * that promise must drop a lap instead of writing into a buffer
+ * somebody is reading. A circular channel never stops, so the decision
+ * could only be taken AFTER the edge - by which time the controller is
+ * already filling the half the caller holds, with nothing between the
+ * flag and the first store but the handler's own latency. That was
+ * measured on the STM32G0 (0 to 6 elements had landed before a handler
+ * whose whole body was disable-and-read could act) and it is measured
+ * again on this silicon in test_v203_adc's letter d.
+ *
+ * So each block is a PLAIN transfer: the completion handler hands the
+ * full buffer over and launches the other one, and when the caller
+ * holds both the engine counts an overrun, stalls, and is restarted by
+ * `release()`. The gap between one block and the next is the re-arm,
+ * which the accounting does not hide: a sample lost there is a sample
+ * the peripheral never delivered, and `overruns()` counts the laps the
+ * engine chose not to take.
+ *
+ * Both buffers are the caller's, both hold `length` elements, and both
+ * must outlive the stream. They are `volatile` because the controller
+ * writes them and the compiler sees nothing.
+ */
+template <uint8_t ch, typename Elem = uint16_t>
+class DmaPingPongEngine {
+    static_assert(ch >= 1 && ch <= dma_channel_count, "no such DMA channel for this engine");
+    static_assert(sizeof(Elem) == 1 || sizeof(Elem) == 2 || sizeof(Elem) == 4,
+                  "a DMA element is one bus access wide: 1, 2 or 4 bytes");
+    using Channel = DmaChannel<ch>;
+
+public:
+    DmaPingPongEngine() = delete;
+
+    static constexpr bool present = true;
+    static constexpr uint8_t channel = ch;
+    static constexpr DmaWidth width = dma_width_of<Elem>();
+    using element = Elem;
+
+    static constexpr uint8_t flag_complete = DmaFlag::complete;
+    static constexpr uint8_t flag_half = DmaFlag::half;
+    static constexpr uint8_t flag_error = DmaFlag::error;
+
+    [[gnu::always_inline]] static uint8_t service() {
+        return static_cast<uint8_t>(Channel::isr());
+    }
+
+    /// Claim the channel; `data` is the peripheral's data register.
+    static void arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
+        data_ = data;
+        priority_ = priority;
+        claim();
+        Pfic::enable(Channel::irq());
+    }
+
+    /// Begin streaming into `first`, with `second` as the buffer the
+    /// next block will use.
+    static bool start(volatile Elem* first, volatile Elem* second, uint16_t length) {
+        if (first == nullptr || second == nullptr || first == second || length == 0u) {
+            return false;
+        }
+        buffer_[0] = first;
+        buffer_[1] = second;
+        length_ = length;
+        fill_ = 0;
+        drain_ = 0;
+        pending_ = 0;
+        laps_ = 0;
+        overruns_ = 0;
+        stalled_ = false;
+        return launch();
+    }
+
+    /**
+     * The block filled - called from the channel's handler on the
+     * completion flag. Hands the buffer to the caller and starts the
+     * next block in the other one, or counts an overrun and stalls.
+     *
+     * Returns the elements the finished block carried, or zero when
+     * nothing was running.
+     */
+    static uint16_t complete() {
+        if (!running_) {
+            return 0;
+        }
+        laps_ = laps_ + 1u;
+        pending_ = static_cast<uint8_t>(pending_ + 1u);
+        fill_ = static_cast<uint8_t>(fill_ ^ 1u);
+        if (pending_ >= 2u) {
+            // The buffer the engine needs next is the one the caller has
+            // not released. Skip the lap rather than write into it.
+            overruns_ = overruns_ + 1u;
+            stalled_ = true;
+            running_ = false;
+            return length_;
+        }
+        if (!launch()) {
+            running_ = false;
+        }
+        return length_;
+    }
+
+    /// A transfer error - called from the handler on the error flag.
+    static void fail() {
+        faults_ = faults_ + 1u;
+        running_ = false;
+    }
+
+    /// The buffer that is full and waiting for the caller, or nullptr.
+    /// Valid until release() is called for it and not one element longer.
+    static volatile Elem* ready() { return pending_ != 0u ? buffer_[drain_] : nullptr; }
+    /// How many elements it holds - always the whole block, because a
+    /// buffer is handed over only when it is full.
+    static uint16_t ready_length() { return pending_ != 0u ? length_ : uint16_t{0}; }
+
+    /**
+     * Hand the ready buffer back. Restarts a stalled stream, which is
+     * the one place this verb does more than bookkeeping - and why it
+     * holds the interrupt guard: complete() runs in the DMA handler and
+     * touches the same three counters.
+     */
+    static bool release() {
+        InterruptGuard guard;
+        if (pending_ == 0u) {
+            return false;
+        }
+        pending_ = static_cast<uint8_t>(pending_ - 1u);
+        drain_ = static_cast<uint8_t>(drain_ ^ 1u);
+        if (stalled_) {
+            stalled_ = false;
+            if (!launch()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static uint32_t laps() { return laps_; }
+    /// Times the engine found both buffers held by the caller.
+    static uint32_t overruns() { return overruns_; }
+    static bool stalled() { return stalled_; }
+    static bool running() { return running_; }
+    static uint16_t length() { return length_; }
+    /// Buffers filled and not yet released: 0, 1, or 2 (2 = stalled).
+    static uint8_t pending() { return pending_; }
+
+    /// How far into the CURRENT block the controller has got.
+    static DmaProgress progress() { return Channel::progress(length_); }
+
+    /**
+     * Throw away a block the silicon has stopped running and start a
+     * fresh one in the same buffer. The partly filled buffer is NOT
+     * handed over: a torn block is what this engine exists not to
+     * produce, so the whole thing is discarded and counted.
+     *
+     * A STALLED STREAM IS NOT A DEAD ONE and this refuses it without
+     * counting anything: while the engine waits for a release there is
+     * no block in flight. release() is the verb for that state.
+     */
+    static bool abandon() {
+        if (stalled_ || !running_) {
+            return false;
+        }
+        faults_ = faults_ + 1u;
+        claim();
+        return launch();
+    }
+
+    static uint32_t faults() { return faults_; }
+    static void clear_faults() { faults_ = 0; }
+
+    static void stop() {
+        Channel::stop();
+        running_ = false;
+        stalled_ = false;
+        pending_ = 0;
+        length_ = 0;
+    }
+
+private:
+    /// EN STAYS SET WHEN A BLOCK COMPLETES on this controller (the file
+    /// header: only software clears it), and every configuring verb
+    /// refuses an enabled channel - so the re-arm drops it first. On the
+    /// first launch there is nothing to drop.
+    static bool launch() {
+        if (buffer_[fill_] == nullptr || length_ == 0u) {
+            return false;
+        }
+        Channel::enable(false);
+        running_ = Channel::load(DmaTransfer{
+            .peripheral = data_,
+            .memory = const_cast<Elem*>(buffer_[fill_]),
+            .count = length_,
+            .config = {.direction = DmaDirection::peripheral_to_memory,
+                       .circular = false,
+                       .memory_to_memory = false,
+                       .peripheral_increment = false,
+                       .memory_increment = true,
+                       .peripheral_width = width,
+                       .memory_width = width,
+                       .priority = priority_},
+        });
+        return running_;
+    }
+
+    static void claim() {
+        Channel::stop();
+        Channel::arm(DmaFlag::complete | DmaFlag::error, true);
+    }
+
+    static inline volatile void* data_ = nullptr;
+    static inline volatile Elem* buffer_[2] = {nullptr, nullptr};
+    static inline DmaPriority priority_ = DmaPriority::low;
+    static inline uint16_t length_ = 0;
+    // Handler-written and loop-read: volatile for the ticker's reason.
+    static inline volatile uint32_t laps_ = 0;
+    static inline volatile uint32_t overruns_ = 0;
+    static inline volatile uint32_t faults_ = 0;
+    static inline volatile uint8_t fill_ = 0;
+    static inline volatile uint8_t drain_ = 0;
+    static inline volatile uint8_t pending_ = 0;
+    static inline volatile bool stalled_ = false;
+    static inline volatile bool running_ = false;
 };
 
 } // namespace brio
