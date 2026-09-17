@@ -32,7 +32,7 @@ page as its driver is measured.
 | Driver | State |
 |--------|-------|
 | [device.hpp](../../brio/ch32v203/device.hpp) + [parts/](../../brio/ch32v203/parts/) | the register map and the part table (memories, bonded pads, instances, the device class) |
-| [platform.hpp](../../brio/ch32v203/platform.hpp), [pfic.hpp](../../brio/ch32v203/pfic.hpp), [ticker.hpp](../../brio/ch32v203/ticker.hpp), [delay.hpp](../../brio/ch32v203/delay.hpp) | the Platform, the interrupt guard and controller, the STK timebase at 1000 Hz, the microsecond wait; measured: the tick rate against the host's clock |
+| [platform.md](platform.md) | Platform: `Ch32v203Platform` (the csrrci critical section, the WFE-shaped `idle()`, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the core's hardware prologue MEASURED: 53 cycles of round trip against 63, 152 bytes of flash and SIXTY-FOUR BYTES OF USER STACK the internal hardware stack carries instead - which is what parts this core from the CH32V00x's), the 64-bit STK `BasicTicker` (its CNT arithmetic 1 ppm against the interrupt count over 200 reloads) and `delay_us` on that counter (100 us in 14434 cycles of 14400 asked, a tick period and above refused), corecfgr's 0x1F measured at two cycles in 36811, and the tick rate against the host's clock - the HSI half a per cent fast where the board's crystal is exact; then the failing half, [reset.hpp](../../brio/ch32v203/reset.hpp): the six flags as the history they are, `Reset::software()` through the core's keyed PFIC_CFGR reading back as SFTRSTF alone, `ResetReporter`, `fault_reset<P>()` carrying the cause the core left in mcause, and the ebreak that lands on the BREAKPOINT vector and not the exception one; three real resets in the suite |
 | [clock.hpp](../../brio/ch32v203/clock.hpp) | RCC: the HSI, a crystal, the PLL and the three prescalers, with the USB divider part of the tree; measured at 144 MHz from the HSI and 48 MHz from the board's crystal |
 | [pin.hpp](../../brio/ch32v203/pin.hpp) | GPIO: the F1's four-bit nibbles over two registers, the pull that lives in the output register, the pad bonding from the part table |
 | [usart.hpp](../../brio/ch32v203/usart.hpp) | USART: the frame, the divisor, the flags and the two rings of the transport; measured: the console at 115200 with the divisor exact against PCLK2 |
@@ -149,6 +149,12 @@ brio console P
   [usb_probe](../../ch32v203/src/apps/usb_probe.cpp) is the instrument
   that says so: it switches between SPIN, WFI and WFE from its own
   console while the host tries to enumerate.
+- **`ebreak` with no debugger goes to the BREAKPOINT vector, not the
+  exception one.** The table has both - the exception entry at index 3
+  and the breakpoint one at index 9 - and the silicon takes the second,
+  while mcause reports exception code 3, this core's number for a
+  breakpoint: the vector index and the exception code are different
+  numbers here. A program that wants a crash recorded binds both.
 - **corecfgr (CSR 0xBC0) is zero at the reset vector.** The QingKe V4
   manual says it configures the pipeline and branch prediction, gives
   no bit table, and says the products set it in their startup file;
@@ -177,13 +183,4 @@ Implemented but not bench-verified:
   part table and a linker script; the others are named in the build's
   table and nothing has compiled for them. The family check fixture
   (`brio check ch32v203`) is not written.
-- **The hardware prologue (`CH32V203_HPE`, on by default).** The crt
-  sets INTSYSCR.HWSTKEN and every handler carries WCH's fast-interrupt
-  attribute; what it costs and saves has not been measured on this core
-  (it is 83 against 92 cycles on the CH32V00x).
-- **corecfgr's 0x1F.** Written because the vendor writes it; what it
-  buys in this family is a measurement this stratum owes - a timed loop
-  with the write and without it.
-- **`delay_us`**: the microsecond wait is written and never measured
-  here.
 - **The KEY button on PA0**: the vendor's claim, and the pad is free.

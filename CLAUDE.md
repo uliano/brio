@@ -1401,6 +1401,47 @@ brio/                    the framework, twelve strata:
                            instead, and with SLEEPDEEP armed the ticker is
                            paused across the sleep; ebreak; .noinit
                            breadcrumb; atomic_width 4
+  ch32v203/              everything that knows the CH32V203 (WCH QingKe V4B,
+                         RV32IMAC, ilp32): the STM32F1's peripheral generation
+                         under WCH's names, and NO vendor header - the map is
+                         the stratum's own
+    device.hpp             the register map read off the reference manual;
+                           asks the build's part definition ONCE and includes
+                           parts/<part>.hpp - THE RESERVE of this family:
+                           memories, bonded pads, instances, the device class
+                           and its vector tail, as constexpr facts every
+                           driver branches on with if constexpr
+    pfic.hpp               InterruptGuard (csrrci on mstatus.MIE), the PFIC's
+                           per-line verbs, BRIO_CH32_INTERRUPT - the handler
+                           attribute the CH32V203_HPE option decides
+    ticker.hpp             BasicTicker over the core's 64-bit STK (Ticker =
+                           1000 Hz)
+    delay.hpp              delay_us on the STK counter: at least, never early,
+                           refused at one tick and beyond
+    platform.hpp           Ch32v203Platform<TB = Ticker>: the WFE-shaped idle
+                           (WFITOWFE + SEVONPEND, this core's WFI wakes only
+                           for a takeable interrupt), ebreak, the .noinit
+                           breadcrumb, atomic_width 4
+    clock.hpp              Rcc + Clock<internal|pll, hz, hse_hz>: PARKS ON THE
+                           HSI before touching the PLL (PLLMUL/PLLSRC take a
+                           write only with the PLL off, and it will not stop
+                           while it is SYSCLK), the HSI divider in EXTEN, the
+                           USB prescaler as part of the tree
+    pin.hpp                Pin<'A',5> / Port<'A'>: the F1's two-bit MODE over
+                           two registers, the pull in the output register, the
+                           bonding from the part table
+    usart.hpp              Usart<n> resource + Uart<n, ...> task with the other
+                           strata's surface, the divisor against PCLK2
+    usb.hpp                Usbd: ST's device controller under WCH's names,
+                           realizing util/usb's UsbController - and a program
+                           using it never idles (measured: the controller does
+                           not survive the core's sleep)
+    reset.hpp              Reset (RSTSCKR's six flags as a HISTORY, software()
+                           through the keyed PFIC_CFGR), ResetReporter,
+                           fault_reset<P>() carrying the cause byte from
+                           mcause - bound to BOTH trap entries, because an
+                           ebreak lands on the breakpoint vector and not the
+                           exception one
   stm32f4/               everything that knows stm32f4xx.h (STM32F4, Cortex-M4F):
                          brio's first ARMv7-M family on the cortexm/ core files
     device_tables.hpp      THE RESERVE: GPIO ports A..K, the serial instances
