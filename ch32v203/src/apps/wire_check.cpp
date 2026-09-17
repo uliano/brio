@@ -16,7 +16,7 @@
 // pad shorted to ground 0 then 0 - and an external pull-up on the wire
 // (the I2C pair) changes none of that, because a driven low wins.
 //
-// The pads are this campaign's bench: the four SPI2 lines, the two I2C1
+// The pads are this bench: the four SPI2 lines, the two I2C1
 // lines, USART3's pair, the KEY pad the peer drives to wake this board,
 // the crossed USART2/UART4 pair on the board itself, and the five pads
 // the optional straps use. The console's own two (PA9/PA10), the LED and
