@@ -48,7 +48,12 @@
  * transfer: the SETUP is taken and answered, the host acknowledges the
  * data, and the status stage dies with an overflow. The same image with
  * a loop that only step()s enumerates, configures and carries bytes with
- * not one overflow. So a program with USB drives the kernel with
+ * not one overflow. And the vendor's own example (the EVT's SimulateCDC,
+ * built with WCH's compiler) fails the same way with one wfi added to
+ * its loop and with its own __WFE(), enumeration and bulk OUT alike,
+ * while a busy-wait of the same length works - with the core woken
+ * every USB frame, so the rule is not about how long a sleep lasts.
+ * So a program with USB drives the kernel with
  * step() and never idles; when this stratum has a power model, the
  * controller is a PrepareSleep voter and that is where the rule will
  * live.

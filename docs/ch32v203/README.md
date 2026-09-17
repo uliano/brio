@@ -150,6 +150,21 @@ brio console P
   [usb_probe](../../ch32v203/src/apps/usb_probe.cpp) is the instrument
   that says so: it switches between SPIN, WFI and WFE from its own
   console while the host tries to enumerate.
+  WCH's own reference implementation fails the same way, which is
+  what settles whose the finding is: the EVT's SimulateCDC example,
+  built with the vendor's compiler and flags and unchanged but for
+  one `wfi` at the end of its loop, never reaches CONFIGURED -
+  SET_ADDRESS gets through, the descriptor reads do not, the overflow
+  counted 18 to 26 times - and the vendor's own `__WFE()` fails the
+  same, while a busy-wait of the same length in the same loop works;
+  a variant that sleeps only once configured loses every one of the
+  4096 bytes the host writes; and the loss happens with the core
+  woken at least once per USB frame (the frame interrupt at 1 kHz
+  and a 10 kHz timer armed), so it is neither the depth nor the
+  length of the sleep. Measured on the host-to-device direction; the
+  absence of an erratum is, once again, evidence of nothing. The
+  debug module's keep-HCLK-in-Sleep bit could not be tried: a `csrw`
+  to CSR 0x7C0 from the running program resets the part.
 - **`ebreak` with no debugger goes to the BREAKPOINT vector, not the
   exception one.** The table has both - the exception entry at index 3
   and the breakpoint one at index 9 - and the silicon takes the second,
