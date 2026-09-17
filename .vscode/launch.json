@@ -256,7 +256,9 @@
             // gdb server, the AVR entry's shape - WCH's OpenOCD fork
             // (/sw/wch-openocd, the only one that speaks the probe's SDI
             // transport) launched by cppdbg itself and listening on 3333,
-            // riscv32-wch-elf-gdb from the vendor toolchain in front of it.
+            // riscv32-wch-elf-gdb in front of it - built from source under
+            // /sw/riscv-gdb, because the vendor toolchain's own links
+            // libpython3.8 and does not start on a current distribution.
             // The ELF is loaded by gdb (`load` runs the fork's flash driver)
             // and the session lands on main(). The active configurePreset
             // must be ch32v006k8-debug for -Og -g3 -fno-inline debug info.
@@ -273,7 +275,7 @@
             "program": "${command:cmake.launchTargetPath}",
             "stopAtEntry": true,
             "miMode": "gdb",
-            "miDebuggerPath": "/sw/wch-riscv/bin/riscv32-wch-elf-gdb",
+            "miDebuggerPath": "/sw/riscv-gdb/bin/riscv32-wch-elf-gdb",
             "debugServerPath": "/sw/wch-openocd/bin/openocd",
             "debugServerArgs": "-f /sw/wch-openocd/bin/wch-riscv.cfg",
             "serverLaunchTimeout": 10000,

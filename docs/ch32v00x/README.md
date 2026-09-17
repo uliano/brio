@@ -209,8 +209,11 @@ probe-less power-on behave the same way.
 ## Debugging
 
 The fork starts a gdb server on port 3333 (`Info : starting gdb server
-for wch_riscv.cpu.0 on 3333`), and the toolchain carries
-`riscv32-wch-elf-gdb`. What the bring-up used, and is enough for one,
+for wch_riscv.cpu.0 on 3333`). The toolchain carries a
+`riscv32-wch-elf-gdb` that links libpython3.8 and does not start on a
+current distribution; the debugger is a stock gdb built from source for
+the same target under `/sw/riscv-gdb` (WCH's gcc stays, only the
+debugger is replaced). What the bring-up used, and is enough for one,
 is OpenOCD's own console: `halt`, `reg pc`, `reg mstatus`, `reg
 mcause`, `mdw`, `step`, `resume`. `.vscode/launch.json` carries a
 cppdbg entry over the same server ("Debug CH32V006K8"), the AVR entry's
