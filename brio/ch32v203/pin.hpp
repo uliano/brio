@@ -37,13 +37,23 @@
  * strata do it: a Pin that is configured works, with no separate step
  * for the caller to forget. Nothing here turns a clock back OFF - that
  * would be a decision about the whole port, and this file only speaks
- * about pins.
+ * about pins. The gate is written through RCC's own register rather
+ * than through clock.hpp's `Rcc::enable`, which is the one place this
+ * stratum reaches another chapter's register directly: clock.hpp
+ * INCLUDES this file (its clock-output pad is a Pin), so a dependency
+ * the other way would be a cycle. device.hpp publishes the bit.
  *
- * NOT COVERED YET: the alternate-function REMAPS (AFIO_PCFR1 and
- * PCFR2), so a peripheral is reachable on its default pads only - they
- * arrive with the first driver that needs a remapped one; the
- * configuration LOCK (LCKR); the external interrupt lines, which are
- * exti.hpp's.
+ * THE CONFIGURATION LOCK IS A ONE-WAY DOOR (RM 10.2.5, 10.3.1.7). A key
+ * sequence in LCKR freezes the nibbles of the pins named in its low half
+ * "until the next reset" - not until an unlock verb, because there is
+ * none. `Port::lock()` is spelled at the PORT because the register is,
+ * and `Pin::lock()` is the one-pin case; both refuse a pad this package
+ * does not bond, since locking a pin that is not there says nothing.
+ *
+ * NOT COVERED YET: the external interrupt lines, which are exti.hpp's,
+ * and the alternate-function REMAPS, which are afio.hpp's - a pin is
+ * handed to "its" peripheral here and WHICH peripheral that is is the
+ * remap register's business.
  */
 
 #pragma once
@@ -79,6 +89,15 @@ struct Pad {
     constexpr bool operator==(const Pad&) const = default;
 };
 
+/// Does THIS package bring that pad out? A table of pads is the
+/// manual's, the same on every part of the series; which of them reach
+/// a pin of the package is the part's (parts/<part>.hpp), and this is
+/// the one question afio.hpp's remap columns are judged by.
+constexpr bool pad_bonded(Pad pad) {
+    return pad.valid() && pad.pin < 16u &&
+           (device::port_pins(pad.port) & static_cast<uint16_t>(1U << pad.pin)) != 0u;
+}
+
 /// A pin as a RUNTIME value: the port's registers and the mask. What a
 /// bus request carries for its chip select, so the bus AO can drive a
 /// pin it does not know the type of. The stores are BSHR/BCR, atomic
@@ -96,6 +115,25 @@ struct PinRef {
     void clear() const {
         if (port != nullptr) {
             port->BCR = mask & 0xFFFFu;
+        }
+    }
+    void write(bool level) const {
+        if (level) {
+            set();
+        } else {
+            clear();
+        }
+    }
+    /// The pad's own level, which is INDR's bit in every mode but analog
+    /// - an output reads back what the pad is actually at, not what was
+    /// asked for.
+    bool read() const { return port != nullptr && (port->INDR & mask) != 0u; }
+    /// One store, so a handler on another pin of the same port cannot be
+    /// caught between the read and the write (see Port::out_toggle).
+    void toggle() const {
+        if (port != nullptr) {
+            const uint32_t driven = port->OUTDR & mask;
+            port->BSHR = (driven << 16) | (mask & ~driven);
         }
     }
     constexpr bool valid() const { return port != nullptr; }
@@ -139,8 +177,16 @@ struct Port {
     /// calls it, so a configured pin works.
     static void clock_on() { rcc()->PB2PCENR |= gpio_clock_for(L); }
 
+    /// Which pins of this port the package brings out (parts/<part>.hpp).
+    static constexpr uint16_t bonded = device::port_pins(L);
+
     static uint32_t in() { return regs().INDR; }
     static uint32_t out() { return regs().OUTDR; }
+
+    /// Drive the whole port from one value. The atomic pair below is
+    /// what a program uses to change SOME pins; this is the store that
+    /// says what all sixteen are, which is what a parallel bus wants.
+    static void out_write(uint32_t value) { regs().OUTDR = value & 0xFFFFu; }
 
     /// BSHR sets from its low half and clears from its high half; BCR
     /// clears. Both are write-only and atomic against a handler that
@@ -169,6 +215,89 @@ struct Port {
         cfg |= nibble << shift;
         reg = cfg;
     }
+
+    /// What is in one pin's four bits right now - the read-back half of
+    /// configure(), and what says whether a locked pin stayed as it was.
+    static uint32_t nibble(uint8_t pin) {
+        const uint32_t reg = (pin < 8u) ? regs().CFGLR : regs().CFGHR;
+        return (reg >> (static_cast<uint32_t>(pin & 7u) * 4u)) & 0xFu;
+    }
+
+    /// The same nibble into every pin of `mask`, as ONE store per
+    /// configuration register: a port that changes mode together never
+    /// passes through the sixteen intermediate states a loop would walk.
+    static void configure_pins(uint16_t mask, uint32_t nibble_value) {
+        clock_on();
+        const uint32_t n = nibble_value & 0xFu;
+        uint32_t low_mask = 0;
+        uint32_t low_value = 0;
+        uint32_t high_mask = 0;
+        uint32_t high_value = 0;
+        for (uint8_t pin = 0; pin < 16u; ++pin) {
+            if ((mask & static_cast<uint16_t>(1U << pin)) == 0u) {
+                continue;
+            }
+            const uint32_t shift = static_cast<uint32_t>(pin & 7u) * 4u;
+            if (pin < 8u) {
+                low_mask |= 0xFUL << shift;
+                low_value |= n << shift;
+            } else {
+                high_mask |= 0xFUL << shift;
+                high_value |= n << shift;
+            }
+        }
+        if (low_mask != 0u) {
+            regs().CFGLR = (regs().CFGLR & ~low_mask) | low_value;
+        }
+        if (high_mask != 0u) {
+            regs().CFGHR = (regs().CFGHR & ~high_mask) | high_value;
+        }
+    }
+
+    // ---- the configuration lock (RM 10.2.5, 10.3.1.7) ---------------------
+    //
+    // ONE WAY. The key sequence freezes the nibbles of the pins in the
+    // mask; there is no unlock, only a reset. The sequence is write
+    // LCKK|mask, write mask, write LCKK|mask, then read - the manual's
+    // last two steps ("read 0, read 1") are a CHECK and not part of the
+    // activation, and both reads are here because the check costs two
+    // loads and tells a program whether the key took.
+
+    /// Freeze the configuration of the pins in `mask` until the next
+    /// reset. False when the mask names a pad this package does not bond
+    /// (nothing is written), or when the key did not take.
+    static bool lock(uint16_t mask) {
+        if ((mask & bonded) != mask) {
+            return false;
+        }
+        clock_on();
+        const uint32_t key = 1UL << 16;
+        const uint32_t pins = static_cast<uint32_t>(mask);
+        regs().LCKR = key | pins;
+        regs().LCKR = pins;
+        regs().LCKR = key | pins;
+        (void)regs().LCKR;
+        (void)regs().LCKR;
+        return locked();
+    }
+
+    /// The same, checked where the mask is a constant: a pad this part
+    /// has not got is a compile error rather than a false at run time.
+    template <uint16_t Mask>
+    static bool lock() {
+        static_assert((Mask & device::port_pins(L)) == Mask,
+                      "brio Port::lock: the mask names a pad this part's package does not "
+                      "bond, and locking a pin that is not there says nothing "
+                      "(parts/<part>.hpp)");
+        return lock(Mask);
+    }
+
+    /// LCKK: has a key sequence taken on this port? Once it has, it
+    /// stands until the next reset.
+    static bool locked() { return (regs().LCKR & (1UL << 16)) != 0u; }
+
+    /// Which pins the standing lock covers (LCK[15:0]).
+    static uint16_t locked_pins() { return static_cast<uint16_t>(regs().LCKR & 0xFFFFu); }
 };
 
 /**
@@ -251,6 +380,15 @@ struct Pin {
     static void release() {
         P::configure(N, pin_nibble(PinMode::input, PinDrive::push_pull, PinSpeed::fast));
     }
+
+    /// What the four bits hold now, for a read-back.
+    static uint32_t nibble() { return P::nibble(N); }
+
+    /// Freeze THIS pin's configuration until the next reset (see
+    /// Port::lock - there is no unlock). The port's other pins are
+    /// untouched: the mask carries this pin alone.
+    static bool lock() { return P::lock(static_cast<uint16_t>(mask)); }
+    static bool locked() { return P::locked() && (P::locked_pins() & mask) != 0u; }
 };
 
 } // namespace brio

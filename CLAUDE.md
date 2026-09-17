@@ -1445,7 +1445,26 @@ brio/                    the framework, twelve strata:
                            not got
     pin.hpp                Pin<'A',5> / Port<'A'>: the F1's two-bit MODE over
                            two registers, the pull in the output register, the
-                           bonding from the part table
+                           bonding from the part table, the whole-port verbs
+                           (a mask configured in one store per register, the
+                           port written whole) and LCKR - the configuration
+                           lock whose only way back is a reset
+    afio.hpp               the remap columns of AFIO_PCFR1/PCFR2 as constexpr
+                           pad tables (the manual's, one per peripheral), with
+                           Remap + afio_remap_has_code() judging a column by
+                           the DEVICE CLASS and by the part's own bonding -
+                           refused by static_assert where the code is a
+                           constant, by false where it is not; AFIO_EXTICR for
+                           exti.hpp, the event output, and SW_CFG read but
+                           never written: the debug port is the probe's
+    exti.hpp               Exti (twenty-two lines: sixteen by PIN NUMBER with
+                           the port chosen per line, the PVD's, the RTC
+                           alarm's and the two USB wake-ups; edges, the two
+                           enables, the software trigger whose bit stands
+                           until the flag is cleared, write-one flags, five
+                           single vectors and two shared ones with isr() +
+                           served()) + ExtiLine<n> + ExtInt<Pin> (claim,
+                           select refusing a line another port holds, steal)
     usart.hpp              Usart<n> resource + Uart<n, ...> task with the other
                            strata's surface, the divisor against PCLK2
     usb.hpp                Usbd: ST's device controller under WCH's names,

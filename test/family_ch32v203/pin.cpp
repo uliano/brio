@@ -42,6 +42,15 @@ constexpr uint8_t first_pin(char port) {
 
 static_assert(device::has_port('A') && device::has_port('B'));
 
+// The bonding as a question about ONE pad, which is what the remap
+// columns of afio.hpp are judged by: the lowest pin of a port this part
+// bonds is bonded, a port this part has not got bonds nothing, and a
+// pad number beyond the sixteen is not a pad.
+static_assert(pad_bonded(Pad{'A', first_pin('A')}));
+static_assert(!pad_bonded(Pad{}));
+static_assert(!pad_bonded(Pad{'E', 0}));
+static_assert(pad_bonded(Pad{'C', 13}) == device::has_port('C'));
+
 using Led = Pin<'A', first_pin('A')>;
 using Sw = Pin<'B', first_pin('B')>;
 
@@ -62,13 +71,29 @@ void port_verbs() {
     using P = Port<L>;
     using Pad0 = Pin<L, first_pin(L)>;
 
+    static_assert(P::bonded == device::port_pins(L));
+
     P::clock_on();
     (void)P::in();
     (void)P::out();
     P::out_set(Pad0::mask);
     P::out_clear(Pad0::mask);
     P::out_toggle(Pad0::mask);
+    P::out_write(0);
     P::configure(first_pin(L), pin_nibble(PinMode::input, PinDrive::push_pull, PinSpeed::fast));
+    P::configure_pins(P::bonded, pin_nibble(PinMode::input, PinDrive::push_pull, PinSpeed::fast));
+    (void)P::nibble(first_pin(L));
+    // The lock, in both faces - the mask checked at compile time and the
+    // one checked at run time - and its two read-backs. This TU is
+    // compiled and never run, which is the only reason a one-way verb
+    // can be named here at all.
+    (void)P::template lock<Pad0::mask>();
+    (void)P::lock(Pad0::mask);
+    (void)P::locked();
+    (void)P::locked_pins();
+    (void)Pad0::lock();
+    (void)Pad0::locked();
+    (void)Pad0::nibble();
 
     Pad0::output();
     Pad0::output(true);
@@ -91,6 +116,9 @@ void port_verbs() {
     const PinRef ref = Pad0::ref();
     ref.set();
     ref.clear();
+    ref.write(true);
+    ref.toggle();
+    (void)ref.read();
     (void)ref.valid();
 }
 
@@ -105,8 +133,11 @@ void pin_verbs() {
     Lamp::show(Rgb{255, 0, 255});
     Lamp::off();
 
-    // A null reference drives nothing.
+    // A null reference drives nothing and reads low.
     const PinRef none;
     none.set();
     none.clear();
+    none.write(true);
+    none.toggle();
+    (void)none.read();
 }
