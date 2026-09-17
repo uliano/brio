@@ -407,12 +407,14 @@ gets its home in `docs/design/` when taken.
   nine parts of the series in the part table and the family check on
   all of them: measured on the silicon are the platform with its failing
   half, the clock tree whole, GPIO with the remaps and the EXTI, the
-  timers and the two watchdogs, the DMA, the USART at first light and
-  THE USB DEVICE CONTROLLER - the kernel console runs both on the probe's
-  serial and on the chip's own USB-C, a CDC ACM port over util/usb.
-  Open: SPI, I2C, the ADC and the OPA, flash, PWR and the sleep sites,
-  the RTC and the backup domain, CAN, CRC, TKEY and the second USB block,
-  and the USART chapter whole. What the silicon taught so far is in
+  timers and the two watchdogs, the DMA, the two converters and the two
+  amplifiers, the USART chapter whole (the frame, both buses' divisors,
+  mute mode, LIN, half duplex, IrDA, the smartcard and the synchronous
+  clock) and THE USB DEVICE CONTROLLER - the kernel console runs both on
+  the probe's serial and on the chip's own USB-C, a CDC ACM port over
+  util/usb.
+  Open: SPI, I2C, flash, PWR and the sleep sites, the RTC and the backup
+  domain, CAN, CRC, TKEY and the second USB block. What the silicon taught so far is in
   docs/ch32v203/README.md, and one finding shapes the power model: IN
   SLEEP THE BUS MATRIX SERVES THE CORE ALONE - the USB controller cannot
   reach its packet memory and a DMA stalls (measured with the vendor's
@@ -1469,10 +1471,26 @@ brio/                    the framework, twelve strata:
                            single vectors and two shared ones with isr() +
                            served()) + ExtiLine<n> + ExtInt<Pin> (claim,
                            select refusing a line another port holds, steal)
-    usart.hpp              Usart<n> resource + Uart<n, ..., TxEngine, RxEngine>
-                           task with the other strata's surface, the divisor
-                           against PCLK2, and two OPTIONAL DMA engine slots
-                           (harvest() the verb that publishes a receive run)
+    usart.hpp              the serial ports (ch. 18): Usart<n> the resource
+                           over the whole chapter - four instances on two
+                           buses with every divisor asked of the instance's
+                           OWN bus, and WHICH instances a part offers taken
+                           from the datasheet's table; the frame in every
+                           shape M and STOP allow, mute mode with both wakes,
+                           LIN's break, single-wire half duplex, IrDA, and
+                           THE SMARTCARD AND THE SYNCHRONOUS CLOCK, which
+                           exist because the fourth port of this part is a
+                           USART4 and not a UART4; the flow-control pair, the
+                           two DMA requests, every flag with the sequence
+                           that clears it and both interrupt sources; the
+                           pads are afio.hpp's COLUMNS and a remap code of 0
+                           writes no register at all - + Uart<n, P, rx_size,
+                           tx_size, format, TxEngine, RxEngine, remap, opts>:
+                           the interrupt-driven transport with the other
+                           strata's surface, the frame as a template
+                           parameter of its own and two OPTIONAL DMA engine
+                           slots (harvest() the verb that publishes a receive
+                           run)
     usb.hpp                Usbd: ST's device controller under WCH's names,
                            realizing util/usb's UsbController - and a program
                            using it never idles (measured: the controller does

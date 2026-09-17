@@ -1,29 +1,85 @@
 /*
  * usart.hpp
  *
- * The CH32V203's serial ports (RM ch. 18): the RESOURCE, register by
- * register, and the interrupt-driven byte TRANSPORT written on it.
+ * The CH32V203's serial ports (RM ch. 18) in the two strata every brio
+ * serial driver has (docs/design/serial.md):
+ *
+ *  Usart<n>              the RESOURCE: which instance, where its
+ *                        registers are, its bus gate and its reset, its
+ *                        vector, its DMA channels, and the whole
+ *                        register description of chapter 18 as verbs -
+ *                        the frame, the divisor, mute mode with both
+ *                        wakes, LIN's break, single-wire half duplex,
+ *                        IrDA, the smartcard, the synchronous clock,
+ *                        the flow-control pair, the DMA requests, every
+ *                        flag and every interrupt enable;
+ *  Uart<n, P, ...>       the TASK: the interrupt-driven byte transport
+ *                        with two rings and one ISR body - every
+ *                        console's personality, a ByteTransport for
+ *                        print() and SerialPort, the same surface the
+ *                        other five targets expose.
  *
  * FOUR INSTANCES, TWO BUSES. USART1 sits on PB2 and USART2, USART3 and
- * UART4 on PB1 - which on this family are both HCLK (clock.hpp), so the
- * divisor arithmetic is the same for all four today; the transport asks
- * its own bus all the same, because that is what stays right when a
- * prescaler is unpinned. WHICH instances a part offers is the part's
- * table (device::has_usart), and the list is not always the first n of
- * them: the smallest part offers one usart and it is USART2, because
- * its package bonds neither of USART1's pin pairs.
+ * UART4 on PB1 - which on this family do NOT run at the same rate above
+ * 72 MHz (clock.hpp caps PB1 there), so the transport asks its own bus
+ * for the clock its divisor counts. WHICH instances a part offers is the
+ * part's table (device::has_usart), and the list is not always the first
+ * n of them: the smallest part offers one usart and it is USART2,
+ * because its package bonds neither of USART1's pin pairs.
  *
- * THE PADS ARE PER PART AS WELL AS PER INSTANCE, and UART4 is where that
- * bites: the reference manual has TWO remap tables for it, and the one
- * that starts at PC10/PC11 belongs to the bigger classes - the CH32V203C8
- * is named explicitly in the other (table 10-27), whose default pads are
- * PB0 and PB1. A driver that carried the first table over would drive
- * two pads this package does not bond.
+ * THE FOURTH PORT IS A USART ON THIS CLASS. Chapter 18's opening counts
+ * three USARTs and five UARTs for the whole family and then names the
+ * exception: on the CH32V203C8 the fourth serial port is a USART4 - the
+ * datasheet's pin table agrees, giving it a CK, a CTS and an RTS pad -
+ * while on the CH32V203RB (the other device class) it is a UART4 with
+ * TX and RX alone. So `is_full` - the synchronous clock, the smartcard
+ * and the flow-control pair - is a PART fact here (device::usart_full)
+ * and not a number's parity, and the verbs behind it refuse rather than
+ * write bits an instance has not got.
  *
- * WHAT IS HERE TODAY. The frame, the baud generator, the enables, the
- * status flags with the sequences that clear them, the two ISR bodies,
- * and the transport with its two rings - enough for a console and for
- * the suites that run on one.
+ * THE PADS ARE THE REMAP TABLES' (afio.hpp, tables 10-23..10-27): the
+ * `remap` template parameter names a COLUMN and the TX, RX, CK, CTS and
+ * RTS pads follow from the same table that programs AFIO_PCFR1/PCFR2.
+ * A code of 0 writes nothing at all - the reset column is already
+ * there, and USART1 carries the probe's console on this board, which is
+ * a pair of pads no init() may move behind the program's back. UART4 is
+ * where the table matters most: the manual has two of them and the one
+ * that starts at PC10/PC11 belongs to the bigger class, the CH32V203C8
+ * being named in the other, whose default pads are PB0 and PB1.
+ *
+ * TWO RINGS AND TWO FLAGS. Bytes leave through a TX ring drained by the
+ * TXE interrupt (write_byte() arms TXEIE; the ISR disarms it when the
+ * ring runs dry, because TXE stands for ever while the transmitter is
+ * idle and would re-enter the handler without end), and arrive into an
+ * RX ring filled by RXNE. isr() returns the "RX went non-empty" EDGE
+ * that util/serial_port.hpp posts on - one event per idle-to-busy
+ * transition, not one per byte.
+ *
+ * THE BAUD DIVISOR IS THE WHOLE REGISTER. BRR counts the peripheral
+ * clock's periods per bit in sixteenths (18.3: a 12-bit mantissa and a
+ * 4-bit fraction), so the value to store is simply pclk / baud - no
+ * field arithmetic - and actual_baud() inverts it, which is how a
+ * program reports the rate it is really running at. Below 16 the
+ * generator has nothing to divide by: refused.
+ *
+ * ERRORS ARE READ THEN CLEARED. Parity, framing, noise, overrun and the
+ * idle line stand in STATR and go away when STATR is read and then
+ * DATAR, in that order (18.10.1); RXNE, TC, LBD and CTS also clear by
+ * writing a zero over them. The handler therefore reads the status
+ * ONCE, decides from that copy, and lets the DATAR read do the
+ * clearing. A byte that arrived with an error is DROPPED rather than
+ * pushed - a corrupted byte in a line assembler is worse than a gap -
+ * and the counter says it happened.
+ *
+ * THE MODES EXCLUDE EACH OTHER THE WAY 18.4 .. 18.7 SAY, and the
+ * exclusions are NOT symmetrical: the synchronous clock wants SCEN,
+ * HDSEL and IREN clear; half duplex wants SCEN, CLKEN and IREN clear;
+ * the smartcard wants LINEN, HDSEL and IREN clear and KEEPS CLKEN,
+ * which is where its card clock comes from - so smartcard() writes that
+ * bit itself, there being no other verb the exclusions would let reach
+ * it under SCEN; IrDA wants LINEN, STOP, CLKEN, SCEN and HDSEL clear.
+ * Each verb refuses instead of storing a combination the chapter
+ * declares undefined.
  *
  * TWO OPTIONAL DMA ENGINE SLOTS, the shape every stratum with a
  * controller uses: a transmit engine drains the TX ring by contiguous
@@ -45,20 +101,19 @@
  * family, because in Sleep the bus matrix serves the core alone
  * (docs/ch32v203/dma.md).
  *
- * NOT COVERED YET, each with its reason:
- *  - the REMAPS (AFIO_PCFR1/PCFR2): every instance is on its default
- *    pads, which is where this board's console is; they arrive with
- *    afio.hpp and the first program that needs a moved pad.
- *  - mute mode, LIN, IrDA, smartcard, the synchronous mode and the
- *    flow-control pair: the chapter has them all and the CH32V00x
- *    driver spells them out; they are written here when the USART
- *    chapter of this stratum is measured, not before.
+ * WHAT THE REGISTER FILE HAS NOT GOT. CTLR4 - the MARK and SPACE parity
+ * of the bigger classes - is not this family's (18.10.8's note), and
+ * neither are CTLR1's M_EXT (five, six and seven-bit words) nor STATR's
+ * MS_ERR and RX_BUSY: every one of them carries the same note naming
+ * the CH32F20x_D8, the CH32V30x and the CH32V31x. device.hpp's register
+ * view stops at GPR for that reason, and nothing here reaches past it.
  */
 
 #pragma once
 
 #include <stdint.h>
 
+#include "ch32v203/afio.hpp"
 #include "ch32v203/clock.hpp"
 #include "ch32v203/device.hpp"
 #include "ch32v203/dma_engine.hpp"
@@ -66,8 +121,13 @@
 #include "ch32v203/pin.hpp"
 #include "util/clock.hpp"
 #include "util/ring.hpp"
+#include "util/stream.hpp"
 
 namespace brio {
+
+// =============================================================================
+// The chapter's vocabulary
+// =============================================================================
 
 /// DATA bits of a frame. The register speaks in WORD length (M: 8 or 9
 /// bits including the parity bit when there is one), so seven data bits
@@ -124,6 +184,67 @@ constexpr uint16_t uart_data_mask(const UartFormat& f) {
     return f.bits == UartBits::nine ? 0x1FFu : f.bits == UartBits::eight ? 0xFFu : 0x7Fu;
 }
 
+/// Mute mode (18.10.4's RWU and WAKE, 18.10.5's ADD): the receiver
+/// asleep until the line goes idle, or until a frame whose MSB is set
+/// carries this node's 4-bit address.
+enum class MuteWake : uint8_t { idle_line, address_mark };
+
+struct MuteConfig {
+    MuteWake wake = MuteWake::idle_line;
+    uint8_t address = 0;   ///< 0..15, for address_mark
+};
+
+constexpr bool mute_valid(const MuteConfig& c) { return c.address <= 15u; }
+
+/// LIN mode (18.10.5's LINEN): the break SBK sends, and its detection at
+/// ten or eleven bits with its own flag and interrupt.
+struct LinConfig {
+    bool break_11bit = false;   ///< LBDL: 11-bit detection instead of 10
+    bool break_interrupt = false;
+};
+
+/// IrDA (18.7, 18.10.7): the SIR encoder on TX and decoder on RX, normal
+/// mode at the bit rate (a 3/16 pulse) or low-power mode on the
+/// prescaled clock. GPR.PSC is all eight bits in low-power mode and
+/// must be 1 in normal mode; a prescaler of 0 "means reservation" and is
+/// refused.
+struct IrdaConfig {
+    bool low_power = false;
+    uint8_t prescaler = 1;   ///< GPR.PSC
+};
+
+constexpr bool irda_valid(const IrdaConfig& c) {
+    return c.prescaler != 0u && (c.low_power || c.prescaler == 1u);
+}
+
+/// The synchronous mode's three choices (18.4, figure 18-2): the clock's
+/// idle level (CPOL), the capture edge (CPHA) and whether the last data
+/// bit gets a clock pulse too (LBCL). THE SENSE OF LBCL IS THIS
+/// MANUAL'S, and it is the opposite of the F1 family's: 18.10.5 reads
+/// "0: the clock pulse of the last bit of data is output from CK; 1: ...
+/// is not output". `last_bit_clock` names the BIT and not a promise -
+/// what the pad does is docs/ch32v203/usart.md's measurement.
+struct UsartSyncConfig {
+    bool clock_idle_high = false;      ///< CPOL
+    bool capture_second_edge = false;  ///< CPHA
+    bool last_bit_clock = false;       ///< LBCL, as the register spells it
+};
+
+/// The smartcard (18.6): ISO 7816-3 on a single wire with the card's
+/// clock on CK - a NACK on a parity error, the guard time in bit times
+/// (GPR.GT) and the clock prescaler (GPR.PSC, the low FIVE bits, the
+/// source divided by twice the value, so 31 is the deepest division and
+/// 0 is reserved).
+struct SmartcardConfig {
+    bool nack = true;
+    uint8_t guard_time = 0;
+    uint8_t clock_prescaler = 1;
+};
+
+constexpr bool smartcard_valid(const SmartcardConfig& c) {
+    return c.clock_prescaler != 0u && c.clock_prescaler <= 31u;
+}
+
 /// The divisor this clock and baud ask for: pclk/baud in sixteenths,
 /// rounded to nearest so the error is halved. Below 16 there is no whole
 /// clock period per sixteenth of a bit and the generator has nothing to
@@ -133,6 +254,13 @@ constexpr uint32_t usart_divisor(uint32_t pclk, uint32_t baud) {
 }
 
 constexpr bool usart_divisor_valid(uint32_t brr) { return brr >= 16u && brr <= 0xFFFFu; }
+
+/// The rate a divisor really gives at this clock, and the smallest clock
+/// that can produce a rate at all (sixteen periods a bit).
+constexpr uint32_t usart_actual_baud(uint32_t pclk, uint32_t brr) {
+    return brr == 0u ? 0u : pclk / brr;
+}
+constexpr uint32_t usart_min_hz(uint32_t baud) { return baud * 16u; }
 
 /// Which bus an instance answers on, and therefore which gate opens it
 /// and which clock its divisor counts.
@@ -151,19 +279,35 @@ constexpr Irq usart_irq_for(uint8_t n) {
            n == 3 ? Irq::usart3 : Irq::uart4;
 }
 
-/// The two pads of an instance in its DEFAULT mapping (RM tables 10-23
-/// to 10-27). UART4's row is the CH32V203C8's own table, not the one
-/// the bigger classes use - see the file header.
+/// The AFIO field an instance's column is selected by.
+constexpr Remap usart_remap_of(uint8_t n) {
+    return n == 1 ? Remap::usart1 :
+           n == 2 ? Remap::usart2 :
+           n == 3 ? Remap::usart3 : Remap::uart4;
+}
+
+/// Whether a column exists for this instance ON THIS PART - the device
+/// class has it and the package bonds at least one of its pads, which is
+/// afio.hpp's one judgement and not a second table here.
+constexpr bool usart_remap_valid(uint8_t n, uint8_t code) {
+    return afio_remap_has_code(usart_remap_of(n), code);
+}
+
+/// The two pads a transport claims, out of the five a column carries.
 struct UsartPads {
     Pad tx;
     Pad rx;
 };
 
-constexpr UsartPads usart_pads_for(uint8_t n) {
-    return n == 1 ? UsartPads{{'A', 9}, {'A', 10}} :
-           n == 2 ? UsartPads{{'A', 2}, {'A', 3}} :
-           n == 3 ? UsartPads{{'B', 10}, {'B', 11}} :
-           n == 4 ? UsartPads{{'B', 0}, {'B', 1}} : UsartPads{};
+/// The whole column - TX, RX, CK, CTS, RTS - under a remap code. ONE
+/// table answers, afio.hpp's, which is also what writes the register.
+constexpr UsartPadSet usart_column_for(uint8_t n, uint8_t code = 0) {
+    return afio_usart_pads(n, code);
+}
+
+constexpr UsartPads usart_pads_for(uint8_t n, uint8_t code = 0) {
+    const UsartPadSet p = usart_column_for(n, code);
+    return UsartPads{p.tx, p.rx};
 }
 
 /// The DMA channel each direction of an instance answers on, read out
@@ -190,8 +334,11 @@ constexpr uint8_t usart_dma_rx_channel(uint8_t n) {
 
 /**
  * One USART instance, register by register. Every verb stores what it
- * names and nothing else. The task below is written on these verbs; a
- * program that wants the chapter beyond the transport reaches them here.
+ * names and nothing else; a verb whose combination the chapter declares
+ * undefined refuses (false, nothing written). The task below is written
+ * on these verbs; a program that wants the chapter beyond the transport
+ * - a break on a LIN line, a muted receiver, a clocked frame - reaches
+ * them here.
  */
 template <uint8_t n>
 struct Usart {
@@ -204,6 +351,15 @@ struct Usart {
     static constexpr uint8_t number = n;
     static constexpr Bus bus = usart_bus_for(n);
     static constexpr UsartPads pads = usart_pads_for(n);
+    static constexpr Irq irq = usart_irq_for(n);
+    static constexpr uint8_t dma_tx_channel = usart_dma_tx_channel(n);
+    static constexpr uint8_t dma_rx_channel = usart_dma_rx_channel(n);
+
+    /// Whether this instance is a full USART - the synchronous clock,
+    /// the smartcard and the flow-control pair - or an asynchronous
+    /// receiver alone. A PART fact (the file header): the fourth port is
+    /// a USART4 on the CH32V203C8 and a UART4 on the other class.
+    static constexpr bool is_full = device::usart_full(n);
 
     static UsartRegs& regs() { return *reinterpret_cast<UsartRegs*>(usart_base_for(n)); }
 
@@ -220,12 +376,23 @@ struct Usart {
     /// Put the block back to its reset state, gate left as it is.
     static void reset() { Rcc::reset(bus, usart_gate_for(n)); }
 
+    /// Select the instance's column (afio.hpp). False - and nothing
+    /// written - for a column this part has not got. Code 0 is the reset
+    /// column and writing it is still a write, which is why the
+    /// transport skips the call entirely at that code.
+    static bool remap(uint8_t code) {
+        Afio::clock_on();
+        return Afio::remap(usart_remap_of(n), code);
+    }
+
     // ---- configuration ----------------------------------------------------
 
     /// The frame and the divisor, with the port DISABLED: CTLR1's frame
     /// bits and CTLR2's stop bits may only be trusted while UE is clear
     /// or the transmitter idle, and a divisor written under traffic
-    /// lands mid-frame.
+    /// lands mid-frame. The two registers are written WHOLE - this is
+    /// the from-scratch verb, and the modes below are what a program
+    /// adds to it afterwards.
     static bool configure(const UartFormat& f, uint32_t brr) {
         if (!uart_format_valid(f) || !usart_divisor_valid(brr)) {
             return false;
@@ -235,6 +402,26 @@ struct Usart {
         regs().BRR = static_cast<uint16_t>(brr);
         return true;
     }
+
+    /// The stop bits alone. Refused under IrDA, which 18.7 wants at one.
+    static bool stop_bits(UartStop s) {
+        if ((regs().CTLR3 & usart_iren) != 0u && s != UartStop::one) {
+            return false;
+        }
+        regs().CTLR2 = static_cast<uint16_t>((regs().CTLR2 & ~usart_stop_mask) | usart_ctlr2_stop(s));
+        return true;
+    }
+
+    static bool set_brr(uint32_t v) {
+        if (!usart_divisor_valid(v)) {
+            return false;
+        }
+        regs().BRR = static_cast<uint16_t>(v);
+        return true;
+    }
+    static uint16_t brr() { return regs().BRR; }
+
+    static bool enabled() { return (regs().CTLR1 & usart_ue) != 0u; }
 
     static void enable(bool on) {
         if (on) {
@@ -254,11 +441,217 @@ struct Usart {
                                                : (regs().CTLR1 & ~usart_re));
     }
 
-    /// Arm or disarm one of the interrupt sources of CTLR1.
-    static void interrupt(uint16_t enable_bit, bool on) {
-        regs().CTLR1 = static_cast<uint16_t>(on ? (regs().CTLR1 | enable_bit)
-                                               : (regs().CTLR1 & ~enable_bit));
+    // ---- the receiver's modes ---------------------------------------------
+
+    /// Mute mode: WAKE and ADD written, RWU left to mute()/unmute()
+    /// because 18.10.4's note 1 says the receiver must have taken a byte
+    /// before an idle-line wake can work.
+    static bool mute_mode(const MuteConfig& c) {
+        if (!mute_valid(c)) {
+            return false;
+        }
+        bit(regs().CTLR1, usart_wake, c.wake == MuteWake::address_mark);
+        regs().CTLR2 = static_cast<uint16_t>((regs().CTLR2 & ~usart_add_mask) | c.address);
+        return true;
     }
+    /// Put the receiver to sleep. 18.10.4's note 2: under an address-mark
+    /// wake RWU cannot be written while RXNE stands - refused then.
+    static bool mute() {
+        if ((regs().CTLR1 & usart_wake) != 0u && (regs().STATR & usart_rxne) != 0u) {
+            return false;
+        }
+        regs().CTLR1 = static_cast<uint16_t>(regs().CTLR1 | usart_rwu);
+        return true;
+    }
+    static void unmute() { regs().CTLR1 = static_cast<uint16_t>(regs().CTLR1 & ~usart_rwu); }
+    static bool muted() { return (regs().CTLR1 & usart_rwu) != 0u; }
+
+    // ---- the line's modes -------------------------------------------------
+
+    /// LIN mode. Refused while half duplex, IrDA, the smartcard or the
+    /// clock is on - a break is a line's whole frame time and none of
+    /// those shapes has room for it.
+    static bool lin(const LinConfig& c) {
+        if ((regs().CTLR2 & usart_clken) != 0u ||
+            (regs().CTLR3 & (usart_hdsel | usart_iren | usart_scen)) != 0u) {
+            return false;
+        }
+        uint16_t v = static_cast<uint16_t>(regs().CTLR2 & ~(usart_lbdl | usart_lbdie));
+        v |= usart_linen;
+        if (c.break_11bit) { v |= usart_lbdl; }
+        if (c.break_interrupt) { v |= usart_lbdie; }
+        regs().CTLR2 = v;
+        return true;
+    }
+    static void lin_off() {
+        regs().CTLR2 = static_cast<uint16_t>(regs().CTLR2 & ~(usart_linen | usart_lbdl | usart_lbdie));
+    }
+    static bool lin_enabled() { return (regs().CTLR2 & usart_linen) != 0u; }
+
+    /// SBK: one break frame after the current one; the bit clears itself
+    /// when the break's stop bit is out (18.10.4). Ten or eleven bits of
+    /// low outside LIN mode, thirteen inside it.
+    static void send_break() { regs().CTLR1 = static_cast<uint16_t>(regs().CTLR1 | usart_sbk); }
+    static bool break_pending() { return (regs().CTLR1 & usart_sbk) != 0u; }
+
+    /// Single-wire half duplex (18.5): the TX pad alone carries both
+    /// directions and the chapter asks for it as an OPEN-DRAIN output,
+    /// because the bus has more than one talker on it. Refused while
+    /// LIN, IrDA, the smartcard or the clock is on.
+    static bool half_duplex(bool on) {
+        if (on && ((regs().CTLR2 & (usart_linen | usart_clken)) != 0u ||
+                   (regs().CTLR3 & (usart_iren | usart_scen)) != 0u)) {
+            return false;
+        }
+        bit(regs().CTLR3, usart_hdsel, on);
+        return true;
+    }
+    static bool half_duplex() { return (regs().CTLR3 & usart_hdsel) != 0u; }
+
+    /// IrDA (18.7): refused while LIN, half duplex, the smartcard or the
+    /// clock is on, with stop bits other than one, and with a prescaler
+    /// the register description calls reserved.
+    static bool irda(const IrdaConfig& c) {
+        if (!irda_valid(c)) {
+            return false;
+        }
+        if ((regs().CTLR2 & (usart_linen | usart_clken)) != 0u ||
+            (regs().CTLR3 & (usart_hdsel | usart_scen)) != 0u) {
+            return false;
+        }
+        if ((regs().CTLR2 & usart_stop_mask) != 0u) {
+            return false;
+        }
+        regs().GPR = static_cast<uint16_t>((regs().GPR & ~usart_psc_mask) | c.prescaler);
+        uint16_t v = static_cast<uint16_t>(regs().CTLR3 & ~usart_irlp);
+        if (c.low_power) { v |= usart_irlp; }
+        v |= usart_iren;
+        regs().CTLR3 = v;
+        return true;
+    }
+    static void irda_off() { regs().CTLR3 = static_cast<uint16_t>(regs().CTLR3 & ~(usart_iren | usart_irlp)); }
+    static bool irda_enabled() { return (regs().CTLR3 & usart_iren) != 0u; }
+
+    /// GPR's two fields as they stand: the prescaler both IrDA and the
+    /// smartcard use, and the guard time the smartcard alone does.
+    static uint8_t prescaler() { return static_cast<uint8_t>(regs().GPR & usart_psc_mask); }
+    static uint8_t guard_time() { return static_cast<uint8_t>((regs().GPR & usart_gt_mask) >> 8); }
+
+    /// The smartcard (18.6), a FULL instance's. Sets the guard time and
+    /// the card-clock prescaler, 1.5 stop bits, CLKEN and SCEN: the
+    /// clock is the CARD'S and belongs to the mode, which is why this
+    /// verb writes it rather than leaving it to a synchronous() the
+    /// chapter's own exclusions would refuse under SCEN. What is not
+    /// written is the CK pad - the caller hands that over
+    /// (usart_column_for(n, code).ck) - and CPOL, CPHA and LBCL, which
+    /// keep whatever a program chose. Refused while LIN, half duplex or
+    /// IrDA is on.
+    static bool smartcard(const SmartcardConfig& c) {
+        if constexpr (!is_full) {
+            (void)c;
+            return false;
+        } else {
+            if (!smartcard_valid(c)) {
+                return false;
+            }
+            if ((regs().CTLR2 & usart_linen) != 0u ||
+                (regs().CTLR3 & (usart_hdsel | usart_iren)) != 0u) {
+                return false;
+            }
+            regs().GPR = static_cast<uint16_t>((static_cast<uint16_t>(c.guard_time) << 8) |
+                                               c.clock_prescaler);
+            regs().CTLR2 = static_cast<uint16_t>((regs().CTLR2 & ~usart_stop_mask) |
+                                                 usart_ctlr2_stop(UartStop::one_and_half) |
+                                                 usart_clken);
+            uint16_t v = static_cast<uint16_t>(regs().CTLR3 & ~usart_nack);
+            if (c.nack) { v |= usart_nack; }
+            v |= usart_scen;
+            regs().CTLR3 = v;
+            return true;
+        }
+    }
+    /// SCEN and its NACK dropped. The CARD CLOCK IS LEFT RUNNING: CLKEN
+    /// is the synchronous half's bit and synchronous_off() is what stops
+    /// it, under its own TE/RE rule.
+    static void smartcard_off() {
+        if constexpr (is_full) {
+            regs().CTLR3 = static_cast<uint16_t>(regs().CTLR3 & ~(usart_scen | usart_nack));
+        }
+    }
+    static bool smartcard_enabled() {
+        if constexpr (!is_full) {
+            return false;
+        } else {
+            return (regs().CTLR3 & usart_scen) != 0u;
+        }
+    }
+
+    /// THE SYNCHRONOUS MODE (18.4), a FULL instance's: the column's CK
+    /// pad carries a clock while the TRANSMITTER shifts and at no other
+    /// time, and the receiver samples on it - this side is the master
+    /// and CK is an output only. Refused while LIN, half duplex, IrDA or
+    /// the smartcard is on, and while the transmitter or the receiver is
+    /// enabled, because CPOL, CPHA and LBCL "need to be set when TE and
+    /// RE are not enabled". The CK pad itself is the caller's to hand to
+    /// the peripheral (usart_column_for(n, code).ck).
+    static bool synchronous(const UsartSyncConfig& c) {
+        if constexpr (!is_full) {
+            (void)c;
+            return false;
+        } else {
+            if ((regs().CTLR2 & usart_linen) != 0u ||
+                (regs().CTLR3 & (usart_hdsel | usart_iren | usart_scen)) != 0u) {
+                return false;
+            }
+            if ((regs().CTLR1 & (usart_te | usart_re)) != 0u) {
+                return false;
+            }
+            uint16_t v = static_cast<uint16_t>(regs().CTLR2 & ~(usart_cpol | usart_cpha | usart_lbcl));
+            if (c.clock_idle_high) { v |= usart_cpol; }
+            if (c.capture_second_edge) { v |= usart_cpha; }
+            if (c.last_bit_clock) { v |= usart_lbcl; }
+            v |= usart_clken;
+            regs().CTLR2 = v;
+            return true;
+        }
+    }
+    /// CLKEN and its three companions dropped; the same TE/RE rule.
+    static bool synchronous_off() {
+        if constexpr (!is_full) {
+            return false;
+        } else {
+            if ((regs().CTLR1 & (usart_te | usart_re)) != 0u) {
+                return false;
+            }
+            regs().CTLR2 = static_cast<uint16_t>(regs().CTLR2 &
+                                                 ~(usart_clken | usart_cpol | usart_cpha | usart_lbcl));
+            return true;
+        }
+    }
+    static bool synchronous_enabled() {
+        if constexpr (!is_full) {
+            return false;
+        } else {
+            return (regs().CTLR2 & usart_clken) != 0u;
+        }
+    }
+
+    /// The hardware flow-control pair (18.10.6), a FULL instance's: RTS
+    /// driven low while the receiver can take a frame, CTS sampled
+    /// before each frame goes out.
+    static bool flow_control(bool rts, bool cts) {
+        if constexpr (!is_full) {
+            (void)rts;
+            (void)cts;
+            return false;
+        } else {
+            bit(regs().CTLR3, usart_rtse, rts);
+            bit(regs().CTLR3, usart_ctse, cts);
+            return true;
+        }
+    }
+    static bool rts_enabled() { return (regs().CTLR3 & usart_rtse) != 0u; }
+    static bool cts_enabled() { return (regs().CTLR3 & usart_ctse) != 0u; }
 
     /// CTLR3's two DMA request enables (18.10.6). With DMAT set, TXE
     /// raises a request instead of feeding the interrupt; with DMAR
@@ -276,18 +669,49 @@ struct Usart {
     /// Where an engine points: the one register both directions share.
     static volatile void* data_address() { return static_cast<volatile void*>(&regs().DATAR); }
 
-    static constexpr uint8_t dma_tx_channel = usart_dma_tx_channel(n);
-    static constexpr uint8_t dma_rx_channel = usart_dma_rx_channel(n);
+    // ---- interrupts and flags ---------------------------------------------
+
+    /// CTLR1's five enables by mask: usart_peie, usart_txeie, usart_tcie,
+    /// usart_rxneie (ORE rides it), usart_idleie.
+    static void interrupts(uint16_t ctlr1_mask, bool on) { bit(regs().CTLR1, ctlr1_mask, on); }
+    static void rxne_interrupt(bool on) { bit(regs().CTLR1, usart_rxneie, on); }
+    static void txe_interrupt(bool on) { bit(regs().CTLR1, usart_txeie, on); }
+    static bool txe_interrupt() { return (regs().CTLR1 & usart_txeie) != 0u; }
+    static void tc_interrupt(bool on) { bit(regs().CTLR1, usart_tcie, on); }
+    static void idle_interrupt(bool on) { bit(regs().CTLR1, usart_idleie, on); }
+    static void parity_interrupt(bool on) { bit(regs().CTLR1, usart_peie, on); }
+    static void break_interrupt(bool on) { bit(regs().CTLR2, usart_lbdie, on); }
+    static void cts_interrupt(bool on) { bit(regs().CTLR3, usart_ctsie, on); }
+    /// EIE: FE, ORE and NE raise the vector - under DMAR only (18.10.6).
+    static void error_interrupt(bool on) { bit(regs().CTLR3, usart_eie, on); }
+
+    static uint16_t status() { return regs().STATR; }
+    static bool flag(uint16_t mask) { return (regs().STATR & mask) != 0u; }
+    /// The write-zero-to-clear flags (RXNE, TC, LBD, CTS); any other bit
+    /// in the mask is ignored, because writing it does nothing.
+    static void clear_flags(uint16_t mask) {
+        regs().STATR = static_cast<uint16_t>(~(mask & usart_statr_rw0));
+    }
+    /// The read-sequence clear of IDLE, ORE, NE, FE and PE (and of RXNE,
+    /// whose byte this discards).
+    static void clear_by_read() {
+        (void)regs().STATR;
+        (void)regs().DATAR;
+    }
 
     // ---- the line ---------------------------------------------------------
 
-    static uint16_t status() { return regs().STATR; }
+    static bool tx_empty() { return (regs().STATR & usart_txe) != 0u; }
+    static bool tx_complete() { return (regs().STATR & usart_tc) != 0u; }
+    static bool rx_ready() { return (regs().STATR & usart_rxne) != 0u; }
 
     /// The word as the receiver has it - nine bits when the frame is
     /// nine bits wide. Reading DATAR is what clears RXNE, and the
     /// STATR-then-DATAR pair is what clears the error flags.
     static uint16_t read_word() { return static_cast<uint16_t>(regs().DATAR); }
     static void write_word(uint16_t w) { regs().DATAR = w; }
+    static uint8_t read_data() { return static_cast<uint8_t>(regs().DATAR & 0xFFu); }
+    static void write_data(uint8_t b) { regs().DATAR = b; }
 
     /// Read the errors and clear them, the sequence the chapter
     /// prescribes (18.10.1): the status register, then the data one.
@@ -305,6 +729,11 @@ struct Usart {
     static uint32_t actual_baud(uint32_t pclk) {
         const uint32_t brr = regs().BRR;
         return brr == 0u ? 0u : pclk / brr;
+    }
+
+private:
+    static void bit(volatile uint16_t& r, uint16_t mask, bool on) {
+        r = static_cast<uint16_t>(on ? (r | mask) : (r & ~mask));
     }
 };
 
@@ -335,6 +764,27 @@ constexpr uint32_t usart_bus_hz_at(uint32_t hclk) {
 }
 
 /**
+ * What a Uart may be told beyond its frame, its rings and its engines,
+ * as one trailing template parameter. The FRAME IS NOT IN HERE on this
+ * family - it has a parameter of its own, ahead of the engine slots -
+ * which is this stratum's spelling of the CH32V00x's UartOptions
+ * (docs/design/serial.md's realizations table records it). The defaults
+ * are the console's personality and compile to exactly the code they
+ * did before this struct existed.
+ */
+struct UartOptions {
+    /// Single-wire half duplex (18.5): one pad, the TX pad, as an
+    /// alternate-function OPEN DRAIN against an external pull-up; the RX
+    /// pad is left alone. What the instance's own receiver hears of what
+    /// it sends is docs/ch32v203/usart.md's measurement.
+    bool half_duplex = false;
+    /// The flow-control pair on the column's CTS and RTS pads, on a full
+    /// instance (Usart<n>::is_full).
+    bool rts = false;
+    bool cts = false;
+};
+
+/**
  * The interrupt-driven serial port.
  *
  *   using Serial = brio::Uart<1, Platform>;
@@ -347,13 +797,30 @@ constexpr uint32_t usart_bus_hz_at(uint32_t hclk) {
  */
 template <uint8_t instance, typename P, uint16_t rx_size = 64, uint16_t tx_size = 64,
           UartFormat format = {}, typename TxEngine = NoDmaEngine,
-          typename RxEngine = NoDmaEngine>
+          typename RxEngine = NoDmaEngine, uint8_t remap = 0, UartOptions opts = {}>
 struct Uart {
     static_assert(usart_base_for(instance) != 0,
                   "brio Uart: this family has USART1..3 and UART4");
+    static_assert(device::has_usart(instance),
+                  "brio Uart: this part does not offer that instance (parts/<part>.hpp)");
     static_assert(uart_format_valid(format) && format.bits != UartBits::nine,
                   "brio Uart: the rings carry bytes - seven data bits with a parity bit, or eight, "
                   "with or without one; nine-bit words are the resource's read_word()/write_word()");
+    static_assert(usart_remap_valid(instance, remap),
+                  "brio Uart: no such column for this instance on this part (afio.hpp's tables "
+                  "10-23 to 10-27 - the device class has it and the package bonds its pads)");
+    static_assert(!opts.rts || device::usart_full(instance),
+                  "brio Uart: the flow-control pair is a full USART's - the fourth port has it on "
+                  "the CH32V203C8 and not on the other class (18.10.6)");
+    static_assert(!opts.cts || device::usart_full(instance),
+                  "brio Uart: the flow-control pair is a full USART's - the fourth port has it on "
+                  "the CH32V203C8 and not on the other class (18.10.6)");
+    static_assert(!opts.rts || pad_bonded(usart_column_for(instance, remap).rts),
+                  "brio Uart: this package does not bond this column's RTS pad - the signal exists "
+                  "and the pin does not (parts/<part>.hpp)");
+    static_assert(!opts.cts || pad_bonded(usart_column_for(instance, remap).cts),
+                  "brio Uart: this package does not bond this column's CTS pad - the signal exists "
+                  "and the pin does not (parts/<part>.hpp)");
     // An engine is checked where it is NAMED: sizeof demands a complete
     // type, so an engine's own static_asserts fire on the line the
     // application wrote.
@@ -376,7 +843,10 @@ struct Uart {
     using Resource = Usart<instance>;
 
     static constexpr uint8_t number = instance;
-    static constexpr UsartPads pads = usart_pads_for(instance);
+    static constexpr uint8_t remap_code = remap;
+    static constexpr UsartPads pads = usart_pads_for(instance, remap);
+    static constexpr UsartPadSet column = usart_column_for(instance, remap);
+    static constexpr UartOptions options = opts;
     static constexpr bool has_tx_engine = TxEngine::present;
     static constexpr bool has_rx_engine = RxEngine::present;
 
@@ -408,10 +878,27 @@ struct Uart {
 
         Resource::bus_clock(true);
 
+        // The column, only where it is not the reset one: AFIO's reset
+        // value already selects code 0, and USART1 carries this board's
+        // console - a write there would move the console's pads.
+        if constexpr (remap != 0u) {
+            (void)Resource::remap(remap);
+        }
+
         // Pads before the enable: TE's idle frame must land on a pad the
         // peripheral already owns.
-        Tx::function();                  // alternate function, push-pull
-        Rx::input();                     // floating: the peer drives it
+        if constexpr (opts.half_duplex) {
+            Tx::function(PinDrive::open_drain);   // the one wire; RX is left alone
+        } else {
+            Tx::function();                  // alternate function, push-pull
+            Rx::input();                     // floating: the peer drives it
+        }
+        if constexpr (opts.rts) {
+            Rts::function();
+        }
+        if constexpr (opts.cts) {
+            Cts::input(PinPull::up);         // unconnected reads "not clear to send"
+        }
 
         if (!Resource::configure(format, brr)) {
             return false;
@@ -426,14 +913,17 @@ struct Uart {
         m_noise_errors = 0;
         m_parity_errors = 0;
 
-        // CTLR3 IS TOUCHED ONLY BY A PORT THAT HAS AN ENGINE: without
-        // one there is nothing of this transport's to put in it, and
-        // whatever a program stored there itself stays.
-        if constexpr (has_tx_engine || has_rx_engine) {
+        // CTLR3 IS TOUCHED ONLY BY A PORT THAT HAS SOMETHING TO PUT IN
+        // IT: with no engine and no option there is nothing of this
+        // transport's there, and whatever a program stored itself stays.
+        if constexpr (has_tx_engine || has_rx_engine || opts.half_duplex || opts.rts || opts.cts) {
             m_dma_faults = 0;
             uint16_t ctlr3 = regs().CTLR3;
             if constexpr (has_tx_engine) { ctlr3 = static_cast<uint16_t>(ctlr3 | usart_dmat); }
             if constexpr (has_rx_engine) { ctlr3 = static_cast<uint16_t>(ctlr3 | usart_dmar); }
+            if constexpr (opts.half_duplex) { ctlr3 = static_cast<uint16_t>(ctlr3 | usart_hdsel); }
+            if constexpr (opts.rts) { ctlr3 = static_cast<uint16_t>(ctlr3 | usart_rtse); }
+            if constexpr (opts.cts) { ctlr3 = static_cast<uint16_t>(ctlr3 | usart_ctse); }
             regs().CTLR3 = ctlr3;
         }
 
@@ -602,13 +1092,13 @@ struct Uart {
         return true;
     }
 
-    /// Every byte or nothing: spins while the ring is full, which is
-    /// what a console wants and what an ISR must never call.
-    static void write(const uint8_t* data, uint16_t len) {
-        for (uint16_t i = 0; i < len; ++i) {
-            while (!write_byte(data[i])) {
-            }
+    /// Queue as much of the buffer as fits; returns the number queued.
+    static uint8_t write(const uint8_t* buffer, uint8_t len) {
+        uint8_t written = 0;
+        while (written < len && write_byte(buffer[written])) {
+            ++written;
         }
+        return written;
     }
 
     /// Nothing queued and the shift register empty: what a program waits
@@ -622,9 +1112,9 @@ struct Uart {
         return m_tx.empty() && (regs().STATR & usart_tc) != 0u;
     }
 
-    static bool rx_available() { return !m_rx.empty(); }
-
     // ---- introspection ----------------------------------------------------
+
+    static auto rx_pending() { return m_rx.count(); }
 
     static uint32_t baud() { return m_baud; }
     static uint32_t actual_baud(uint32_t pclk) { return Resource::actual_baud(pclk); }
@@ -633,6 +1123,25 @@ struct Uart {
     static uint16_t frame_errors() { return m_frame_errors; }
     static uint16_t noise_errors() { return m_noise_errors; }
     static uint16_t parity_errors() { return m_parity_errors; }
+
+    static void clear_errors() {
+        m_rx_overruns = 0;
+        m_hw_overruns = 0;
+        m_frame_errors = 0;
+        m_noise_errors = 0;
+        m_parity_errors = 0;
+        m_dma_faults = 0;
+    }
+
+    /// The divisor this bus clock and baud ask for, and the two
+    /// questions a program asks before it moves a rate.
+    static constexpr uint32_t divisor_for(uint32_t pclk, uint32_t baud) {
+        return usart_divisor(pclk, baud);
+    }
+    static constexpr uint32_t min_hz_for(uint32_t baud) { return usart_min_hz(baud); }
+    static constexpr bool can_baud(uint32_t pclk, uint32_t baud) {
+        return usart_divisor_valid(usart_divisor(pclk, baud));
+    }
 
     /// Follow a clock that changed rate. The argument is HCLK - what a
     /// dynamic clock hands every user - and this port derives its own
@@ -661,7 +1170,62 @@ struct Uart {
         }
     }
 
+    /// Move the LINK to a different bit rate, the clock staying put -
+    /// the mirror of rebase(), and `hz` is HCLK exactly as rebase()
+    /// takes it, this port deriving its own bus rate from it. False,
+    /// and nothing written, when the rate is unreachable.
+    static bool set_baud(uint32_t hz, uint32_t baud) {
+        const uint32_t brr = usart_divisor(usart_bus_hz_at<instance>(hz), baud);
+        if (!usart_divisor_valid(brr)) {
+            return false;
+        }
+        constexpr uint32_t drain_spins = 2'000'000UL;
+        uint32_t spins = drain_spins;
+        while (!m_tx.empty() && spins-- != 0u) {
+            if constexpr (has_tx_engine) {
+                pump_tx();
+            }
+        }
+        spins = drain_spins;
+        while ((regs().STATR & usart_tc) == 0u && spins-- != 0u) {
+        }
+        regs().BRR = static_cast<uint16_t>(brr);
+        m_baud = baud;
+        return true;
+    }
+
+    /// Stop the port and park its pads: the vector off, the engines
+    /// stopped, UE clear, the bus clock closed, the pins released.
+    static void release() {
+        Pfic::disable(usart_irq_for(instance));
+        if constexpr (has_tx_engine) {
+            TxEngine::stop();
+        }
+        if constexpr (has_rx_engine) {
+            RxEngine::stop();
+        }
+        Resource::enable(false);
+        Resource::bus_clock(false);
+        Tx::release();
+        if constexpr (!opts.half_duplex) {
+            Rx::release();
+        }
+        if constexpr (opts.rts) {
+            Rts::release();
+        }
+        if constexpr (opts.cts) {
+            Cts::release();
+        }
+    }
+
 private:
+    /// The flow-control pads, formed only where the options ask for them
+    /// - a column that has no such pad would not make a Pin at all.
+    using Cts = Pin<opts.cts ? column.cts.port : pads.tx.port,
+                    opts.cts ? column.cts.pin : pads.tx.pin>;
+    using Rts = Pin<opts.rts ? column.rts.port : pads.tx.port,
+                    opts.rts ? column.rts.pin : pads.tx.pin>;
+
     /// Start the next contiguous run of the TX ring on the engine, if it
     /// is idle and there is one. Under the guard: the completion path
     /// runs in the channel's handler.

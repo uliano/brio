@@ -86,6 +86,17 @@ inline constexpr bool has_usart(uint8_t n) {
     return n < 16U && (usart_instances & static_cast<uint16_t>(1U << n)) != 0U;
 }
 
+/// Which of those instances are FULL USARTs - the synchronous clock on
+/// a CK pad, the smartcard and the flow-control pair - rather than
+/// asynchronous receivers alone (RM 18, its opening note). Every
+/// instance this part offers is one: the family's UART4 is the only
+/// serial port that is not, and this package has not got it.
+inline constexpr uint16_t usart_full_instances = usart_instances;
+
+inline constexpr bool usart_full(uint8_t n) {
+    return n < 16U && (usart_full_instances & static_cast<uint16_t>(1U << n)) != 0U;
+}
+
 inline constexpr uint8_t spi_count = 1;
 inline constexpr uint8_t i2c_count = 0;
 inline constexpr uint8_t can_count = 1;

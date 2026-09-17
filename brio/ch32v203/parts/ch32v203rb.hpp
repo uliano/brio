@@ -97,6 +97,20 @@ inline constexpr bool has_usart(uint8_t n) {
     return n < 16U && (usart_instances & static_cast<uint16_t>(1U << n)) != 0U;
 }
 
+/// Which of those instances are FULL USARTs - the synchronous clock on
+/// a CK pad, the smartcard and the flow-control pair - rather than
+/// asynchronous receivers alone. THE FOURTH IS NOT ONE HERE: chapter
+/// 18's opening gives this class a UART4, the remap table that starts
+/// at PC10/PC11 carries TX and RX and nothing else, and the datasheet's
+/// block diagram names "UART4 RX, TX" beside the three USARTs' five
+/// signals.
+inline constexpr uint16_t usart_full_instances =
+    static_cast<uint16_t>(usart_instances & ~static_cast<uint16_t>(1U << 4));
+
+inline constexpr bool usart_full(uint8_t n) {
+    return n < 16U && (usart_full_instances & static_cast<uint16_t>(1U << n)) != 0U;
+}
+
 inline constexpr uint8_t spi_count = 2;
 inline constexpr uint8_t i2c_count = 2;
 inline constexpr uint8_t can_count = 1;

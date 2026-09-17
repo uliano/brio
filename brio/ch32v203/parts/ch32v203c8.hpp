@@ -93,6 +93,21 @@ inline constexpr bool has_usart(uint8_t n) {
     return n < 16U && (usart_instances & static_cast<uint16_t>(1U << n)) != 0U;
 }
 
+/// Which of those instances are FULL USARTs - the synchronous clock on
+/// a CK pad, the smartcard and the flow-control pair - rather than
+/// asynchronous receivers alone. ALL FOUR ARE, ON THIS PART ALONE:
+/// chapter 18's opening counts three USARTs and five UARTs for the
+/// family and then names the exception, "for CH32V203C8 the serial
+/// port 4 is a universal synchronous asynchronous receiver
+/// transmitter", and the datasheet's pin table agrees - USART4_CK,
+/// USART4_CTS and USART4_RTS are bonded here where the other class
+/// brings out a UART4 with TX and RX alone.
+inline constexpr uint16_t usart_full_instances = usart_instances;
+
+inline constexpr bool usart_full(uint8_t n) {
+    return n < 16U && (usart_full_instances & static_cast<uint16_t>(1U << n)) != 0U;
+}
+
 inline constexpr uint8_t spi_count = 2;
 inline constexpr uint8_t i2c_count = 2;
 inline constexpr uint8_t can_count = 1;
