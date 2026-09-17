@@ -1480,6 +1480,33 @@ brio/                    the framework, twelve strata:
                            mcause - bound to BOTH trap entries, because an
                            ebreak lands on the breakpoint vector and not the
                            exception one
+    tim.hpp                the timers (ch. 14, 15): Tim<1..4> over the F1's
+                           blocks under WCH's names - the time base with its
+                           two shadow registers, the channels in both faces
+                           (CCyS writable only with the channel off), the
+                           slave controller and the master TRGO, the internal
+                           trigger table folded through what the PART has,
+                           the repetition counter, complementary outputs,
+                           dead time and break of TIM1 alone, the DMA burst
+                           engine, the rc_w0 flags and TIM1's FOUR UNSHARED
+                           vectors + TimPad from afio.hpp's remap columns and
+                           the nine tasks (TimPwm/TimPairPwm, TimPeriodMeter/
+                           TimIntervalMeter, TimEventCounter/TimGatedCounter,
+                           TimPeriodicTick, TimOnePulse, TimEncoder); no
+                           basic timer exists on this series and the 32-bit
+                           TIM5 is the 128 KB part's
+    watchdog.hpp           IWDG + WWDG (ch. 7, 8), a file of their own beside
+                           reset.hpp's flags: Iwdg (the three keys, the
+                           prescaler and reload that take a write only while
+                           the LSI RUNS - so arm() starts the watchdog first
+                           and ends with the refresh that re-locks them -,
+                           running() read off the forced oscillator, the
+                           time-out arithmetic taking the LSI rate as an
+                           argument) and Wwdg (PCLK1/4096/2^WDGTB, the counter
+                           that does NOT run unarmed, the window whose early
+                           refresh IS the reset, the early wake-up flag and
+                           its vector, the block's reset line as the only way
+                           back)
   stm32f4/               everything that knows stm32f4xx.h (STM32F4, Cortex-M4F):
                          brio's first ARMv7-M family on the cortexm/ core files
     device_tables.hpp      THE RESERVE: GPIO ports A..K, the serial instances

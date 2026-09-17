@@ -481,6 +481,11 @@ struct Rcc {
     }
     static void lsi_stop() { lsi_enable(false); }
     static bool lsi_ready() { return (rcc()->RSTSCKR & rcc_lsirdy) != 0u; }
+    /// LSION as it stands - what the PROGRAM asked for, as against what
+    /// the LSI is doing: the independent watchdog forces the oscillator
+    /// on without this bit (3.3.5.4), so the pair of readers is how a
+    /// caller tells one from the other.
+    static bool lsi_enabled() { return (rcc()->RSTSCKR & rcc_lsion) != 0u; }
 
     // ---- the PLL ----------------------------------------------------------
     /// Configure and start the PLL: `from_hse` picks the root, `divided`

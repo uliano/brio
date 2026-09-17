@@ -54,8 +54,9 @@
  * anything.
  *
  * Not here: the two watchdogs (RM ch. 7 and 8), which reset the chip
- * too and arrive with their own chapter, and the reset-related option
- * bytes, which are the flash chapter's.
+ * too and are watchdog.hpp's - this file reads their flags and knows
+ * nothing else about them - and the reset-related option bytes, which
+ * are the flash chapter's.
  */
 
 #pragma once

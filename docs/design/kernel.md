@@ -555,7 +555,7 @@ The reset cause the boot cross-checks is spelled by the register's
 own nature: `Reset::take_flags()` on avrdx, stm32g0, ch32v00x and stm32f4 (a
 history that ACCUMULATES until read and cleared) and `Reset::cause()`
 on samc21 (RCAUSE, one exclusive cause). And the watchdog a program
-keeps alive is five strata's resources under two names - not one verb,
+keeps alive is six strata's resources under two names - not one verb,
 because the contracts differ and the name each carries is its
 chapter's:
 
@@ -565,6 +565,7 @@ chapter's:
 | samc21 | `Watchdog::clear()` = key 0xA5 into CLEAR (`samc21/reset.hpp`) | a posted write, `sync()` to know it landed; any other key is a reset, which `force_reset()` spells on purpose |
 | stm32g0 | `Iwdg::refresh()` = 0xAAAA into KR, `Wwdg::refresh(counter)` = T[6:0] (`stm32g0/reset.hpp`) | the IWDG refresh RE-LOCKS PR/RLR/WINR; a refresh above the window value is a reset; the WWDG's takes the value to reload |
 | ch32v00x | `Iwdg::refresh()` = 0xAAAA into CTLR, `Wwdg::refresh(counter)` = T[6:0] (`ch32v00x/reset.hpp`) | the same two dogs minus the IWDG window; the WWDG's counter does not run until armed, so nothing about it can be timed unarmed and only the RCC pulse puts an armed one back |
+| ch32v203 | `Iwdg::refresh()` = 0xAAAA into CTLR, `Wwdg::refresh(counter)` = T[6:0] (`ch32v203/watchdog.hpp`) | the same two dogs minus the IWDG window, in a file of their own; the IWDG's two setting registers take a write only while the LSI RUNS, so `arm()` starts the watchdog first and ends with the refresh that re-locks them; the WWDG's counter does not run until armed (as on the sister family, against its own chapter) and its clock gate holds the counter while the registers still read and answer |
 | stm32f4 | `Iwdg::refresh()` = 0xAAAA into KR, `Wwdg::refresh(counter)` = T[6:0] (`stm32f4/reset.hpp`) | the same two dogs minus the IWDG window; the IWDG's keyed registers do not update until the start key, so `arm()` starts before it configures, and the reset the watchdog causes really does stop it; the WWDG's counter free-runs unarmed and `in_window()` says when a refresh is legal |
 
 A portable program that keeps a watchdog alive is not written yet; the

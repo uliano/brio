@@ -20,7 +20,7 @@ hardware or names a timer.
 
 Common to all: the `MeterSource` concept is satisfied by the
 `MeterLatch` itself, and `MeterSampler` walks latches - so the target's
-meters are all of one shape on the four strata: a task over a timer
+meters are all of one shape on the seven strata: a task over a timer
 in a capture mode whose reading verbs a capture ISR calls to fill the
 latch (`period_ticks()`, `width_ticks()`). What differs is which
 timers offer which capture, and one meter that measures a different
@@ -32,6 +32,7 @@ thing under a similar name.
 | samc21 | `TcPeriodMeter<Tc>` (period AND width, EVACT = PPW), `TcPulseWidthMeter<Tc>` (the HIGH time alone, EVACT = PW) (`samc21/tc.hpp`) | the input reaches the capture through the event system (an EIC line or a CCL LUT as generator), never a pad directly |
 | stm32g0 | `TimPeriodMeter<Tim>` (period and width, PWM input mode - a slave controller and two channels) and `TimIntervalMeter<Tim, ch>` (`stm32g0/tim.hpp`) | `TimIntervalMeter` is NOT a pulse-width meter: it measures the INTERVAL between consecutive edges on ONE channel of a free-running counter, by subtraction, which is what a single-channel timer can offer (`interval()`, one value of state, for the capture handler alone) |
 | ch32v00x | `TimPeriodMeter<Tim>` (period and width, the PWM input mode on TI1 costing both channels) and `TimIntervalMeter<Tim, ch>` (`ch32v00x/tim.hpp`) | the G0's two names on the F1's timers, `TimIntervalMeter` the same interval-between-edges meter and not a pulse-width one; the capture can carry the captured LEVEL in bit 16 of the channel register (CAPLVL) and reads 0xFFFF after an overflow (CAPOV), two facts the F1 never had ([the target's document](../ch32v00x/tim.md)) |
+| ch32v203 | `TimPeriodMeter<Tim>` (period and width, PWM input mode on TI1, both channels) and `TimIntervalMeter<Tim, ch>` (`ch32v203/tim.hpp`) | the G0's two names on the F1's timers again, with NONE of the sister family's additions - no CAPLVL, no CAPOV, no dual-edge capture (that register is another device class's); what this family offers a meter with nothing attached is a pad the PORT can drive, the alternate-function input being the pad's own input buffer, so the CPU makes the edges a capture measures ([the target's document](../ch32v203/tim.md)) |
 | stm32f4 | `TimPeriodMeter<Tim>` (period and width, PWM input mode - a slave controller and two channels) and `TimIntervalMeter<Tim, ch>` (`stm32f4/tim.hpp`) | the G0's two names again, `TimIntervalMeter` the same interval-between-edges meter; what this family adds is a capture input that needs no pad at all - TIM5's option register puts the LSI, the LSE or the RTC wake-up on its channel 4 and TIM11's puts HSE_RTC on its channel 1, so an oscillator is weighed against the core clock with nothing attached ([the target's document](../stm32f4/tim.md)) |
 | host | a scripted latch (`test_meter_sampler`) | the sampler's discard-stale and labelling tested to the tick |
 
