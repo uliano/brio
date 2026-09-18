@@ -28,6 +28,7 @@ below; the documents of record are in
 | [watchdog.md](watchdog.md) | The countdown and the four scratch registers a program may use: the tick that now comes from the TICKS block, the RP2040's double decrement that is not this chip's, the three WDSEL registers in their three tiers, and erratum RP2350-E19's guard before every reboot |
 | [reset.md](reset.md) | Chapter 7 whole: the three tiers, the causes recorded in the always-on power manager beside the watchdog's REASON, the power-on state machine, the subsystem controller, the reboot both architectures have and the processor reset only one of them has |
 | [dma.md](dma.md) | The DMA: sixteen channels and four interrupt lines, a MODE in the top nibble of the transfer count that makes a channel re-arm itself or run forever, an address step that can go backward or by twos, the abort that answers erratum RP2350-E5, a security level on every resource - and the two engines a transport names in its slots |
+| [pwm.md](pwm.md) | The PWM: twelve slices where the RP2040 had eight, the pin map's second half on GPIO 32..47 and what the four highest slices are in the package that bonds none of those pads, a second shared interrupt line with a register set of its own, and a fractional divider whose last step is a whole 256 |
 
 ## The two architectures, and what decides between them
 
@@ -261,7 +262,7 @@ difference in the sleeping.
 
 Driver gaps, each with its reason:
 
-- **Most of the chip.** The SPI, the I2C, the PWM, the ADC, the
+- **Most of the chip.** The SPI, the I2C, the ADC, the
   PIO, the flash and the QMI, the USB, POWMAN with its always-on timer
   and the sleep states, the second core, and the blocks the RP2040 never
   had (TRNG, SHA-256, OTP, HSTX, the M33's coprocessors, the bootrom API)
