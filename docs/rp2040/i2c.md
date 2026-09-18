@@ -10,11 +10,19 @@ procedure, the abort -, 4.3.11 the spike filter, 4.3.12 fast-mode-plus,
 4.3.15 the DMA interface, 4.3.16 the interrupt table, 4.3.17 the
 registers), 2.19.2 (table 279: the pins), 2.1.4 (narrow writes
 replicated across a register); docs/design/i2c-bus.md for the Request
-and the vocabulary. The driver: `brio/rp2040/i2c.hpp` (`DwApbI2c<n>`
-the resource, `I2cHost` the engine `I2cBus` drives, `I2cClient` the
-other end) over `pin.hpp`, `resets.hpp`, `dma_engine.hpp` and
-`util/i2c_bus.hpp`. The reference suite: `test_rp2040_i2c`, on two
-wires between the chip's two instances.
+and the vocabulary. The driver is Synopsys's and not this chip's, so it
+lives in the IP stratum: `brio/dw_apb_i2c/i2c.hpp` holds the resource,
+the host engine and the client
+([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)), and
+`brio/rp2040/i2c.hpp` holds what this chip owes it - the pin table of
+table 279 with its pad configuration, the `I2cPad` type that adds the
+two open-drain verbs to a `Pin`, the `Rp2040DwApbI2c` chip traits over
+`pin.hpp`, `resets.hpp`, `nvic.hpp`, `delay.hpp` and `dma_engine.hpp`,
+this chip's device description held against the bits the IP file spells
+itself, and the PUBLIC NAMES `DwApbI2c<n>` (the resource), `I2cHost`
+(the engine `I2cBus` drives) and `I2cClient` (the other end), this
+chip's aliases of the three templates there. The reference suite:
+`test_rp2040_i2c`, on two wires between the chip's two instances.
 
 ## What the silicon does
 
@@ -94,7 +102,10 @@ enable in this chip's IC_CON: the unstick is by hand.
   full) with `i2c_con_of`, `I2cCmd` (restart, stop) with
   `i2c_write_entry` / `i2c_read_entry`, `I2cFlag`, `I2cInterrupt`,
   `I2cAbort` (the abort sources grouped) with `i2c_status_of_abort`
-  (the vocabulary's code for a source).
+  (the vocabulary's code for a source). Of that list only `I2cPins`,
+  `i2c_sda_pin` / `i2c_scl_pin`, `i2c_pins_valid` and `i2c_pad_config`
+  are this chip's; every other name is the IP stratum's, spelled the
+  same on every family that carries the block.
 - `DwApbI2c<n>`: `reset` / `hold` / `released`, `enable`, `disable`
   (bounded on IC_ENABLE_STATUS), `running`, `abort`, the two facts a
   disable reports about a cut client tenure, `configure`, `timing`
