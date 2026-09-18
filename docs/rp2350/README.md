@@ -40,6 +40,7 @@ below; the documents of record are in
 | [otp.md](otp.md) | The one-time programmable array, READ SIDE ONLY and deliberately so: four read windows of which two fault instead of lying, page locks that only climb, the error correction decoded in software with the one sentence of the chapter that must be read carefully, and the flags a program must never set - printed, not written |
 | [bootrom.md](bootrom.md) | The mask ROM's public function table: two sets of well-known words, one per architecture, and two different lookups over them; what is wrapped, and the three entry points that deliberately are not |
 | [usb.md](usb.md) | The USB device controller: the RP2040's block with one new duty - the PHY's isolation latch, set at reset and lifted last of all - three reset values moved under it, two pads that are bank 1's and could be GPIO, an erratum that makes the system clock's rate part of the contract, and a shelf of diagnostics that are a report and never a path |
+| [flash.md](flash.md) | The external quad-SPI chip and the two blocks between it and the bus: a memory interface with two windows, a transfer described phase by phase, four translation panes a window and a direct mode that disconnects them all; a cache whose flush is an address and not a register, with one erratum in its clean sweep; and an engine whose way back into execute-in-place is the bootrom's own function out of boot RAM, where its predecessor had a second stage |
 
 ## The two architectures, and what decides between them
 
@@ -125,12 +126,15 @@ package and refuses the extra pads at run time against SYSINFO's
 PACKAGE_SEL.
 
 THERE IS NO SECOND-STAGE BOOTLOADER, unlike the RP2040: the bootrom sets
-the XIP interface up itself while scanning the flash (03h serial reads
-at CLKDIV 12, 5.1.4), so an image begins with its own first byte - a
+the XIP interface up itself while scanning the flash - it tries EBh, BBh,
+0Bh and 03h reads at SCK divisors 3, 6, 12 and 24 - sixteen attempts,
+5.2.7's table 452 - and keeps the first that works, so an image begins
+with its own first byte - a
 vector table on Arm, one jump instruction on RISC-V - and what marks it
 an image is the twenty-byte IMAGE_DEF block the crt places right behind
-that, well inside the first 4 kB the bootrom reads. A program that wants
-the flash faster reprograms the QMI itself, which is a later chapter.
+that, well inside the first 4 kB the bootrom reads. Which mode that
+turned out to be, and how a program keeps it across a flash operation,
+is [flash.md](flash.md).
 
 Build outputs land in `build-cmake/rp2350-{arm,riscv}-{release,debug}`:
 `<app>.elf/.bin/.hex`, `firmware-<app>.map`, `<app>.lst`.
@@ -273,11 +277,11 @@ difference in the sleeping.
 
 Driver gaps, each with its reason:
 
-- **Most of the chip.** The flash and the QMI, POWMAN with its always-on
-  timer and the sleep states, the second core, and two of the blocks the
-  RP2040 never had - the HSTX and the M33's coprocessors - have no driver
-  here yet. Each arrives with its chapter, its suite on both
-  architectures and its document.
+- **Most of the chip.** POWMAN with its always-on timer and the sleep
+  states, the second core, and two of the blocks the RP2040 never had -
+  the HSTX and the M33's coprocessors - have no driver here yet. Each
+  arrives with its chapter, its suite on both architectures and its
+  document.
 - **The programming side of OTP**, in any form: declined permanently
   ([otp.md](otp.md)), and the absence is asserted by the family check
   rather than promised.
