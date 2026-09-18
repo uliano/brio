@@ -23,6 +23,8 @@ below; the documents of record are in
 |----------|---------|
 | [vendor/README.md](vendor/README.md) | The RP2350 datasheet by build, the hardware design guide, the vendored pico-sdk subset and the SVD, the bench chip's identity, the errata this stratum answers |
 | [platform.md](platform.md) | The platform on two instruction sets: one platform type per core and one for both architectures, the idle path and the lost-wakeup window it does not have (two rules, one promise), the microsecond ruler that is also the Hazard3 half's timebase, the subsystem reset controller, the atomic register aliases, the panic breadcrumb across a processor reset, erratum RP2350-E9 shown on a pad, and the two registers called PLATFORM |
+| [clock.md](clock.md) | The clock tree: four roots where the RP2040 had three (the low-power oscillator joins clk_ref), a generator more and none for an RTC, the 16.16 dividers, the tick generators as a block of their own, the ring oscillator's randomiser, the PLLs' lost lock, the resus circuit - and two CTRL registers that are passwords, where a masked write is a refused write |
+| [pin.md](pin.md) | GPIO: the pads that come up isolated and the latch that holds them, the four overrides and the STATUS behind them, the pin interrupts with their summary registers and the forced event that bypasses the enable, and erratum RP2350-E9 measured four ways |
 | [uart.md](uart.md) | The UART: what this chip owes the PL011 that its predecessor did not - a SECOND FUNCTION COLUMN that makes every group's flow-control pads a second data pair, pads that come up isolated, a DREQ table with not one row in the old place, and one interrupt name bound on both architectures |
 | [timer.md](timer.md) | The two system timers: a 64-bit counter of microseconds each, four alarms with an interrupt line apiece, the tick generator of 8.5 behind each one, and the two registers this chip added - the counter taken off the tick and onto clk_sys, and a lock that refuses every write until the block is reset |
 | [watchdog.md](watchdog.md) | The countdown and the four scratch registers a program may use: the tick that now comes from the TICKS block, the RP2040's double decrement that is not this chip's, the three WDSEL registers in their three tiers, and erratum RP2350-E19's guard before every reboot |
@@ -268,15 +270,6 @@ Driver gaps, each with its reason:
   had (TRNG, SHA-256, OTP, HSTX, the M33's coprocessors, the bootrom API)
   have no driver here yet. Each arrives with its chapter, its suite on
   both architectures and its document.
-- **`delay_us`.** The microsecond busy-wait wants a measured fact per
-  family and a ruler that both halves share; the ruler exists
-  (`mtime.hpp`), the fact does not, and nothing yet needs the verb -
-  every wait on this target is a spin on `Mtime::micros()`.
-- **The clock chapter's own surface**: the low-power oscillator, the
-  resus circuit, the PLL's lock-loss interrupt, the top-level clock
-  gates and a dynamic rate switch are declared nowhere in this file.
-  They belong to the clock document, and to the chapter that measures
-  them from the console this target now has.
 - **The QFN-60 package.** The stratum compiles for it and refuses its
   absent pads, but no QFN-60 part is on the bench: everything below the
   compile check is untested there.

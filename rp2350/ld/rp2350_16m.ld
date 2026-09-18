@@ -71,6 +71,15 @@ SECTIONS
         KEEP(*(SORT(.init_array.*)))
         KEEP(*(.init_array))
         __init_array_end = .;
+
+        /* THE LOAD ADDRESS OF .data IS WHATEVER FLASH CURSOR IS HERE,
+           and the crt copies .data to SRAM with WORD loads: on Hazard3 a
+           misaligned load is a trap and not a slow access, so a .text
+           that happens to end on a half-word (compressed instructions
+           make that the usual case) would fault the image before main().
+           ALIGN(4) at the end of every flash-resident section is what
+           keeps that address a word. */
+        . = ALIGN(4);
     } > flash
     ASSERT(ADDR(.text) == ORIGIN(flash),
            "the image must begin at the first flash byte: the bootrom enters an Arm image through the vector table it finds there, and a RISC-V image at its lowest address")
@@ -78,6 +87,7 @@ SECTIONS
     .ARM.exidx :
     {
         *(.ARM.exidx* .gnu.linkonce.armexidx.*)
+        . = ALIGN(4);
     } > flash
 
     .data :
