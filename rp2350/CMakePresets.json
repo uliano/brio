@@ -1,0 +1,75 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "rp2350-arm-release",
+            "displayName": "RP2350 on its Cortex-M33 pair, 16 MB flash, QFN-80 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/rp2350-arm-release",
+            "toolchainFile": "${sourceDir}/cmake/toolchain-arm.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "RP2350_ARCH": "arm",
+                "RP2350_FLASH_KB": "16384",
+                "RP2350_PACKAGE": "b"
+            }
+        },
+        {
+            "name": "rp2350-arm-debug",
+            "displayName": "RP2350 on its Cortex-M33 pair, 16 MB flash, QFN-80 (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/rp2350-arm-debug",
+            "toolchainFile": "${sourceDir}/cmake/toolchain-arm.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "RP2350_ARCH": "arm",
+                "RP2350_FLASH_KB": "16384",
+                "RP2350_PACKAGE": "b"
+            }
+        },
+        {
+            "name": "rp2350-riscv-release",
+            "displayName": "RP2350 on its Hazard3 pair, 16 MB flash, QFN-80 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/rp2350-riscv-release",
+            "toolchainFile": "${sourceDir}/cmake/toolchain-riscv.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "RP2350_ARCH": "riscv",
+                "RP2350_FLASH_KB": "16384",
+                "RP2350_PACKAGE": "b"
+            }
+        },
+        {
+            "name": "rp2350-riscv-debug",
+            "displayName": "RP2350 on its Hazard3 pair, 16 MB flash, QFN-80 (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/rp2350-riscv-debug",
+            "toolchainFile": "${sourceDir}/cmake/toolchain-riscv.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "RP2350_ARCH": "riscv",
+                "RP2350_FLASH_KB": "16384",
+                "RP2350_PACKAGE": "b"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "rp2350-arm-release",
+            "configurePreset": "rp2350-arm-release"
+        },
+        {
+            "name": "rp2350-arm-debug",
+            "configurePreset": "rp2350-arm-debug"
+        },
+        {
+            "name": "rp2350-riscv-release",
+            "configurePreset": "rp2350-riscv-release"
+        },
+        {
+            "name": "rp2350-riscv-debug",
+            "configurePreset": "rp2350-riscv-debug"
+        }
+    ]
+}

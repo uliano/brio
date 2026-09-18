@@ -185,6 +185,67 @@ def wch_openocd_args(prog, elffile):
                    "-c", "exit"]
 
 
+def rp2350_openocd_argvs(prog, elffile, arm):
+    """THE STATE-INDEPENDENT FLASH VERB of the RP2350, as two OpenOCD
+    invocations run in order. It is state-independent in two senses: it
+    does not care what the image already in the flash was doing (a sleep
+    with no wake source, a wedged clock tree, a program that stopped the
+    oscillator), and it does not care which ARCHITECTURE that image ran.
+
+    (1) THE RESCUE, over the debug port and nothing else. The chip's
+        rescue reset (datasheet 3.5.8) lives in the RP-AP's control
+        register and works "even when system clocks are stopped and the
+        switched core power domain is powered down"; it leaves the chip
+        halted in the bootrom, in the Arm architecture, with the clock
+        tree at its reset state. The configuration built here has a DAP
+        and NO TARGET behind it on purpose: the target script's own
+        rescue path examines a core first, and a core that cannot be
+        examined is exactly the case a rescue is for. Measured: from a
+        chip made dormant with no wake source, `set RESCUE 1` with the
+        target script fails and this succeeds.
+
+    (2) THE PROGRAMMING, as core 0 of the Arm pair - which after the
+        rescue is what is running, whatever the new image names - then
+        `reset run`, which hands the chip back to the bootrom and so to
+        the architecture the new image's IMAGE_DEF asks for.
+
+    On an Arm image the session ends by taking halting debug back down
+    (DHCSR with its key and every control bit clear), the samc21 lesson:
+    a core with C_DEBUGEN set HALTS on a breakpoint instead of faulting,
+    and break_here() is where every panic ends. There is no such write
+    after a RISC-V image: that register belongs to a core which is not
+    the one running.
+
+    The binary is Raspberry Pi's OpenOCD fork (the manifest's
+    RPI_OPENOCD, or the programmer entry's own "openocd"): the release
+    0.12.0 does not know this chip at all, and the git build of it
+    cannot debug Hazard3."""
+    openocd = prog.get("openocd") or getattr(
+        manifest, "RPI_OPENOCD", "/sw/openocd-rpi-acff23f/bin/openocd")
+    head = [openocd] + openocd_interface(prog)
+    rescue = head + [
+        "-c", "adapter speed 1000",
+        "-c", "transport select swd",
+        "-c", "swd newdap rp2350 cpu -expected-id 0x00040927",
+        "-c", "dap create rp2350.dap -adiv6 -chain-position rp2350.cpu",
+        "-c", "init",
+        "-c", "rp2350.dap apreg 0x80000 0 0x80000000",
+        "-c", "rp2350.dap apreg 0x80000 0 0",
+        "-c", "shutdown",
+    ]
+    program = head + [
+        "-c", "set USE_CORE cm0",
+        "-c", "adapter speed 5000",
+        "-f", "target/rp2350.cfg",
+        "-c", "program %s verify" % elffile,
+        "-c", "reset run",
+    ]
+    if arm:
+        program += ["-c", "mww 0xE000EDF0 0xA05F0000"]
+    program += ["-c", "exit"]
+    return [rescue, program]
+
+
 def openocd_interface(prog):
     """The `-f interface/... -c adapter serial ...` half of an OpenOCD
     command line, from the manifest's programmer entry. The HID backend
@@ -344,6 +405,18 @@ def cmd_flash(args):
         rc = msd_flash(prog, binfile, args.app)
         if rc == 0:
             state_write(args.name, args.app)
+        return rc
+    if spec["flash"] == "rp2350_openocd":
+        elffile = os.path.join("build-cmake", preset, args.app + ".elf")
+        if not os.path.isfile(os.path.join(ROOT, elffile)):
+            die("no %s after the build" % elffile)
+        rc = 0
+        for step in rp2350_openocd_argvs(prog, elffile, arm=btype == "weact2350b"):
+            print("bench: " + " ".join(step))
+            rc = subprocess.call(step, cwd=ROOT)
+            if rc != 0:
+                return rc
+        state_write(args.name, args.app)
         return rc
     if spec["flash"] == "openocd":
         elffile = os.path.join("build-cmake", preset, args.app + ".elf")

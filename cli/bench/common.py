@@ -106,6 +106,25 @@ BOARD_TYPES = {
     "picow": {"project": "rp2040", "preset": "rp2040-release",
               "mcu": "rp2040", "flash": "openocd",
               "target_cfg": "target/rp2040.cfg"},
+    # THE RP2350 BOARDS: ONE PHYSICAL BOARD UNDER TWO TYPES, because on
+    # this chip the ARCHITECTURE is a build axis - the same silicon runs
+    # a Cortex-M33 pair or a Hazard3 RISC-V pair, and which one is
+    # decided by the IMAGE_DEF in the image that is flashed (rp2350/
+    # CMakeLists.txt). So a board type here names a board AND an
+    # architecture: weact2350b is the WeAct RP2350B core board built for
+    # Arm, weact2350b-rv the same board built for RISC-V, the way K and
+    # K1 are one board under two consoles. Both are written by the SAME
+    # verb: a rescue through the debug port alone, then programming as
+    # core 0 of the Arm pair, then a reset - which works whatever the
+    # image already in the flash was doing (flash.py's
+    # rp2350_openocd_argvs), through Raspberry Pi's OpenOCD fork, the
+    # only build that examines this chip's four cores.
+    "weact2350b": {"project": "rp2350", "preset": "rp2350-arm-release",
+                   "mcu": "rp2350", "flash": "rp2350_openocd",
+                   "target_cfg": "target/rp2350.cfg"},
+    "weact2350b-rv": {"project": "rp2350", "preset": "rp2350-riscv-release",
+                      "mcu": "rp2350", "flash": "rp2350_openocd",
+                      "target_cfg": "target/rp2350.cfg"},
 }
 
 

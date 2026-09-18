@@ -19,6 +19,12 @@
  * refuses to be included first. That is the one include-order contract
  * of the cortexm stratum, and every file here states it.
  *
+ * ONE FAMILY REACHES THIS FILE UNDER A CONDITION: the RP2350 carries a
+ * Cortex-M33 pair AND a RISC-V pair over one set of peripherals, so the
+ * file that includes this one (rp2350/core_m33.hpp) is itself the Arm
+ * half of that stratum's one architecture question. Nothing changes
+ * here for it but the core revision the guard below accepts.
+ *
  * PRIMASK and nothing else: ARMv6-M has no BASEPRI, so masking there is
  * all-or-nothing - there is no "mask everything below priority N" - and
  * where the core has one (ARMv7-M) brio does not use it, so that the
@@ -36,8 +42,8 @@
 
 #include <stdint.h>
 
-#if !defined(__CM0PLUS_REV) && !defined(__CM0_REV) && !defined(__CM4_REV)
-#error "cortexm/nvic.hpp: include the family's device header first (samc21/nvic.hpp, stm32g0/nvic.hpp, rp2040/nvic.hpp and stm32f4/nvic.hpp do) - the CMSIS core header it brings is what this file is written against"
+#if !defined(__CM0PLUS_REV) && !defined(__CM0_REV) && !defined(__CM4_REV) && !defined(__CM33_REV)
+#error "cortexm/nvic.hpp: include the family's device header first (samc21/nvic.hpp, stm32g0/nvic.hpp, rp2040/nvic.hpp, stm32f4/nvic.hpp and rp2350/core_m33.hpp do) - the CMSIS core header it brings is what this file is written against"
 #endif
 
 namespace brio {

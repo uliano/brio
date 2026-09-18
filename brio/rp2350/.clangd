@@ -1,0 +1,13 @@
+# The rp2350 stratum parses against the RP2350 project's ARM database:
+# headers here include "RP2350.h" and need a cross driver and the
+# vendored pico-sdk include paths. Overrides the framework default
+# (brio/.clangd, host flags), as brio/rp2040/.clangd does for its chip.
+#
+# ONE OF THE TWO ARCHITECTURES HAS TO BE THE EDITOR'S, and it is the Arm
+# one: its database carries the real core_cm33.h, so the whole of a file
+# parses. The RISC-V build's own database is
+# ../../build-cmake/rp2350-riscv-release, and a reader working on
+# core_hazard3.hpp points this at it - the only file of the stratum whose
+# body the Arm database does not reach. Path relative to this file.
+CompileFlags:
+  CompilationDatabase: ../../build-cmake/rp2350-arm-release

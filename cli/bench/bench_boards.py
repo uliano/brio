@@ -148,3 +148,8 @@ OPENOCD = "/sw/openocd/bin/openocd"
 # WCH's OpenOCD fork for the WCH-Link (docs/ch32v00x/README.md): a
 # different program from the one above, kept apart under /sw.
 WCH_OPENOCD = "/sw/wch-openocd/bin/openocd"
+# Raspberry Pi's OpenOCD fork (docs/rp2350/README.md): the only one that
+# examines an RP2350's four cores - two Cortex-M33 and two Hazard3 - and
+# flashes from either architecture, so it is the RP2350 boards' and
+# nobody else's.
+RPI_OPENOCD = "/sw/openocd-rpi-acff23f/bin/openocd"

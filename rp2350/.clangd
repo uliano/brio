@@ -1,0 +1,8 @@
+# clangd config for the RP2350 project: rp2350/ is its OWN CMake project
+# (rp2350/CMakeLists.txt) with a compile_commands.json per preset - and
+# this chip has FOUR of them, two architectures times two build types.
+# The editor is pointed at the Arm release one, which is the database
+# whose core header exists as a real file; an app under src/apps/ parses
+# the same either way, since an app names no architecture.
+CompileFlags:
+  CompilationDatabase: ../build-cmake/rp2350-arm-release

@@ -81,8 +81,8 @@
 
 #include <stdint.h>
 
-#if !defined(__CM0PLUS_REV) && !defined(__CM0_REV) && !defined(__CM4_REV)
-#error "cortexm/ticker.hpp: include the family's device header first (samc21/ticker.hpp, stm32g0/ticker.hpp, rp2040/ticker.hpp and stm32f4/ticker.hpp do)"
+#if !defined(__CM0PLUS_REV) && !defined(__CM0_REV) && !defined(__CM4_REV) && !defined(__CM33_REV)
+#error "cortexm/ticker.hpp: include the family's device header first (samc21/ticker.hpp, stm32g0/ticker.hpp, rp2040/ticker.hpp, stm32f4/ticker.hpp and rp2350/ticker.hpp do)"
 #endif
 
 #include "cortexm/nvic.hpp"
