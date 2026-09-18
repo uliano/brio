@@ -31,6 +31,7 @@ below; the documents of record are in
 | [reset.md](reset.md) | Chapter 7 whole: the three tiers, the causes recorded in the always-on power manager beside the watchdog's REASON, the power-on state machine, the subsystem controller, the reboot both architectures have and the processor reset only one of them has |
 | [dma.md](dma.md) | The DMA: sixteen channels and four interrupt lines, a MODE in the top nibble of the transfer count that makes a channel re-arm itself or run forever, an address step that can go backward or by twos, the abort that answers erratum RP2350-E5, a security level on every resource - and the two engines a transport names in its slots |
 | [pwm.md](pwm.md) | The PWM: twelve slices where the RP2040 had eight, the pin map's second half on GPIO 32..47 and what the four highest slices are in the package that bonds none of those pads, a second shared interrupt line with a register set of its own, and a fractional divider whose last step is a whole 256 |
+| [pio.md](pio.md) | The programmable I/O, chapter 11: three blocks of four machines over one instruction set, and the six things this chip added to it - a version field, a window that says which thirty-two pads a block can see, a CTRL write that reaches the blocks either side of it, all eight flags on the interrupt lines, a masked input count, and a receive FIFO that can be four registers instead of a queue |
 
 ## The two architectures, and what decides between them
 
@@ -264,12 +265,12 @@ difference in the sleeping.
 
 Driver gaps, each with its reason:
 
-- **Most of the chip.** The SPI, the I2C, the ADC, the
-  PIO, the flash and the QMI, the USB, POWMAN with its always-on timer
-  and the sleep states, the second core, and the blocks the RP2040 never
-  had (TRNG, SHA-256, OTP, HSTX, the M33's coprocessors, the bootrom API)
-  have no driver here yet. Each arrives with its chapter, its suite on
-  both architectures and its document.
+- **Most of the chip.** The SPI, the I2C, the ADC, the flash and the QMI,
+  the USB, POWMAN with its always-on timer and the sleep states, the
+  second core, and the blocks the RP2040 never had (TRNG, SHA-256, OTP,
+  HSTX, the M33's coprocessors, the bootrom API) have no driver here yet.
+  Each arrives with its chapter, its suite on both architectures and its
+  document.
 - **The QFN-60 package.** The stratum compiles for it and refuses its
   absent pads, but no QFN-60 part is on the bench: everything below the
   compile check is untested there.
