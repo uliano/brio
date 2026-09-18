@@ -14,13 +14,19 @@
  * table whose entry 0 is the instruction, because entry 0 is not a
  * vector on either core.
  *
- * THE LINKER GETS THE WHOLE ARRAY. No storage classes are carved out of
- * flash on this target: whether this family wants an NvHeap and an
- * NvJournal at all is the open NV review (docs/design/nv-heap.md's
- * question, not this script's), and a partition every image pays for is
- * a decision, not a default. `__brio_rom_end` is therefore the end of
- * the array, and it is here so that the day a medium is written it has
- * a floor to compare itself against.
+ * THE LAST 4 KB OF THE ARRAY ARE NOT THE LINKER'S. The flash medium
+ * (brio/ch32v203/nvm_flash.hpp) lives in the top sixteen pages of 256
+ * bytes - 4 KB, which is this silicon's write-protection unit and its
+ * standard erase grain - so the `rom` region stops that far short of the
+ * array and `__brio_rom_end` is where it stops. Nothing the compiler
+ * emits can land in the zone, which is what lets the medium's floor be a
+ * constant rather than a symbol that moves with every build, and what
+ * keeps an image from growing into its own storage; the medium reads
+ * `__brio_rom_end` back as the proof, and closes itself instead of
+ * writing over code if this script is ever edited past the line. NO
+ * HEAP AND NO JOURNAL STAND ON THAT MEDIUM on this family
+ * (docs/design/nv-heap.md's question, answered here): the zone is the
+ * medium's whole business.
  *
  * .noinit is NOLOAD and the crt neither loads nor zeroes it, which is
  * what lets the kernel's PanicRecord breadcrumb survive a warm reset.
@@ -28,7 +34,7 @@
 
 MEMORY
 {
-    rom (rx)  : ORIGIN = 0x00000000, LENGTH = 64K
+    rom (rx)  : ORIGIN = 0x00000000, LENGTH = 60K
     ram (rwx) : ORIGIN = 0x20000000, LENGTH = 20K
 }
 

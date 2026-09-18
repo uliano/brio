@@ -42,6 +42,23 @@ inline constexpr bool is_d8_class = false;
 /// last being the eighth DMA channel (startup_ch32v203.S).
 inline constexpr uint32_t vector_count = 63;
 
+/// The backup domain's DATA registers, which the DEVICE CLASS decides:
+/// ten here - BKP_DATAR1..BKP_DATAR10, twenty bytes - where the
+/// CH32V20x_D8 carries forty-two (RM 4.3's note under table 4-1). The
+/// block's other registers (the calibration, the tamper pair) are every
+/// class's.
+inline constexpr uint8_t bkp_data_registers = 10;
+
+/// What RTCSEL's third choice divides the HSE by on the way to the RTC
+/// (RM 3.4.9). On this device class it is ONE OF TWO NUMBERS and the
+/// register description keys them on the LOT: 512 where the penultimate
+/// fifth digit of the lot number is less than one, 128 otherwise. Both
+/// are stated because neither is knowable from the part number, and a
+/// program that clocks the RTC from the crystal measures which of them
+/// this die has; where the manual states a single value, the two
+/// entries are equal.
+inline constexpr uint32_t rtc_hse_div[2] = {512, 128};
+
 // ---- the pads (datasheet 3.2, table 3-1-1's LQFP48 column) ----------------
 /// Which pins each port bonds, as a mask. Thirty-seven in all: two whole
 /// ports, three pins of port C and the two of port D that the package

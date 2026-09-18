@@ -1443,7 +1443,9 @@ brio/                    the framework, twelve strata:
                          RV32IMAC, ilp32): the STM32F1's peripheral generation
                          under WCH's names, and NO vendor header - the map is
                          the stratum's own
-    device.hpp             the register map read off the reference manual;
+    device.hpp             the register map read off the reference manual -
+                           the blocks more than one chapter reaches, RCC and
+                           PWR among them, live here and nowhere twice;
                            asks the build's part definition ONCE and includes
                            parts/<part>.hpp - THE RESERVE of this family:
                            memories, bonded pads, instances, the device class
@@ -1655,6 +1657,80 @@ brio/                    the framework, twelve strata:
                            counting the clocks a stuck target took + I2cClient<n,
                            pins> with a POLLED option and flush(), the PE cycle
                            that drops a byte the controller never clocked
+    nvm.hpp                the flash memory and the user option bytes (ch. 32)
+                           with the electronic signature beside them (ch. 31):
+                           Flash, the engine - TWO programming methods (a
+                           half-word behind PG, a whole 256-byte page behind
+                           FTPG) and FOUR erase grains (the page, the 4 KB
+                           sector that is also the write-protection unit, a
+                           32 KB block, the chip behind a policy argument no
+                           suite passes), three locks each wanting its own key
+                           pair with a wrong one holding until the next system
+                           reset and raising no bus error (measured), AN ERASED
+                           PATTERN THAT IS NOT ALL ONES (0xE339E339) over cells
+                           that take pass after pass between erases, the
+                           enhanced read mode that would fail an erase in
+                           silence and that does not engage on this class, the
+                           status flags and the one error this family carries,
+                           the interrupt - and THE RATE AS PART OF THE CONTRACT:
+                           the access clock may not exceed 60 MHz and SCKMOD
+                           already halves the system clock, so above 120 MHz an
+                           erase or a program wants HCLK divided around it,
+                           which the engine REFUSES instead of doing behind its
+                           caller's back, at compile time under a static Clock
+                           and with a code under a dynamic one + FlashOptions
+                           and FlashOptionArea, every option byte decoded
+                           READ-ONLY with RDP written by no verb, and DeviceUid
+                           / flash_size_kbytes
+    nvm_flash.hpp          MainFlashPartition (the LAST 4 KB of every part's
+                           array - sixteen pages, one write-protection unit -
+                           with all nine linker scripts stopping that far short)
+                           + MainFlash<Clock>, the FlashMedia over it with THE
+                           PAGE AS THE CELL (256 B) and THE CLOCK IN THE
+                           MEDIUM'S TYPE, because the contract's program() and
+                           erase() take an address and nothing else while an
+                           erase above 120 MHz is illegal; no heap and no
+                           journal stand on it here, by decision - and the
+                           journal could not without being taught an erased
+                           pattern that is not 0xFF. A write is a WAIT and not a
+                           stall: the core goes on running out of the array
+                           while the engine works
+    crc.hpp                CRC (ch. 5): Crc, a monostate over three registers -
+                           the Ethernet polynomial wired in (no polynomial, no
+                           initial value, no reversal: the function IS
+                           CRC-32/MPEG-2), a WORD the only grain and a byte run
+                           that is not whole words a compile error, the reset
+                           that lands before the next instruction can look
+                           (measured, where the STM32F4's same block does not),
+                           and the eight-bit scratch that RST spares and only a
+                           SYSTEM reset clears, this block having no line in
+                           RCC_AHBRSTR; word_be is the packing, spelled as the
+                           STM32F4 stratum spells it, and util/crc.hpp's
+                           crc32_ethernet* is what the silicon is judged
+                           against. No interrupt, no DMA row, no per-part fact
+    rtc.hpp                the real-time clock and the backup domain (ch. 6, 4,
+                           with 3.4.9's clock select and 2.4.1's write enable):
+                           RtcDomain (PWR_CTLR's DBP read back, the whole of
+                           RCC_BDCTLR - the LSE with its bypass, RTCSEL one-way
+                           with BDRST the way back, RTCEN - and the HSE division
+                           that is 512 OR 128 BY LOT NUMBER, so the part table
+                           states the pair and a program measures which it has),
+                           Rtc (a NUMBER and not a calendar: a 32-bit counter
+                           behind a 20-bit prescaler, the CNF write window and
+                           the RSF read synchronization on every access, a
+                           prescaler reload and an alarm that cannot be read
+                           back, the counter's two halves read against a carry
+                           the chapter is silent about - and which the bus can
+                           answer with a copy up to three ticks stale - the
+                           second, alarm and overflow on one vector and the
+                           ALARM AGAIN on EXTI line 17, which fires with this
+                           block's own interrupt enable clear) and Bkp (the data
+                           registers, ten on this device class and forty-two on
+                           the other, wiped by a domain reset or a tamper and
+                           NOT by the block's own reset line, which moves
+                           nothing at all; the tamper input that REMEMBERS an
+                           edge it was not watching for and that no pad of this
+                           board can raise; and the three things PC13 can carry)
   stm32f4/               everything that knows stm32f4xx.h (STM32F4, Cortex-M4F):
                          brio's first ARMv7-M family on the cortexm/ core files
     device_tables.hpp      THE RESERVE: GPIO ports A..K, the serial instances

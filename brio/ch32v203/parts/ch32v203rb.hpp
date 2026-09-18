@@ -63,6 +63,18 @@ inline constexpr bool is_d8_class = true;
 /// last being the 32 kHz oscillator's wake-up (startup_ch32v203.S).
 inline constexpr uint32_t vector_count = 70;
 
+/// The backup domain's DATA registers, which the DEVICE CLASS decides:
+/// forty-two here - BKP_DATAR1..BKP_DATAR10 and BKP_DATAR11..BKP_DATAR42
+/// in a second block above the tamper registers, eighty-four bytes -
+/// where the CH32V20x_D6 carries ten (RM 4.3's note under table 4-1).
+inline constexpr uint8_t bkp_data_registers = 42;
+
+/// What RTCSEL's third choice divides the HSE by on the way to the RTC
+/// (RM 3.4.9). The register description names this device class among
+/// those that divide by 512 and says nothing about the lot, so the two
+/// entries are equal - the CH32V20x_D6's are not.
+inline constexpr uint32_t rtc_hse_div[2] = {512, 512};
+
 // ---- the pads (datasheet 3.2, table 3-1-4) --------------------------------
 /// Which pins each port bonds, as a mask. Three whole ports and one pin
 /// of port D: PD2 is pin 54, and PD0/PD1 do NOT exist on this part -

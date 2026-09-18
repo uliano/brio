@@ -351,6 +351,23 @@ inline constexpr uint16_t usart_ctsie  = 1U << 10;
 inline constexpr uint16_t usart_psc_mask = 0x00FFU;
 inline constexpr uint16_t usart_gt_mask  = 0xFF00U;
 
+// ---- PWR (RM ch. 2) -------------------------------------------------------
+// The power controller, declared here because TWO chapters reach it:
+// the backup domain's door is PWR_CTLR.DBP (2.4.1, rtc.hpp) and the
+// sleep modes are the rest of the same register (sleep.hpp). What each
+// bit MEANS stays with its chapter - this is the map and nothing more.
+struct PwrRegs {
+    volatile uint32_t CTLR;   ///< 0x00 power control
+    volatile uint32_t CSR;    ///< 0x04 power control/status
+};
+
+inline PwrRegs* pwr() { return reinterpret_cast<PwrRegs*>(pb1_base + 0x7000); }
+
+/// PWR_CTLR.DBP: "Access to RTC and backup registers disabled / enabled"
+/// (2.4.1). With it clear, every register of the RTC and of the BKP
+/// block and the four backup-domain bits of RCC_BDCTLR ignore a write.
+inline constexpr uint32_t pwr_dbp = 1UL << 8;
+
 // ---- FLASH (RM ch. 32) ----------------------------------------------------
 // The engine, for the chapter that will use it. There is no wait-state
 // field on this family: the array is split into a zero-wait and a
