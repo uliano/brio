@@ -401,9 +401,20 @@ Driver gaps:
 - TI frame format: the configuration is written and refused where the
   chapter says it must be, but nothing on this board frames its
   transactions that way. Born with its first device.
-- `SpiClient` on this family is compiled on every header and driven
-  nowhere: a client needs a host at the other end of a wire, and the
-  boards of this stratum have none between them.
+- **`SpiClient` is driven on SPI2 against a second board.** The peer
+  instrument this stratum carries answers a far board's host ONE FRAME
+  AHEAD over PB12..PB15 at 281.25 kHz of SCK: a dark client that drives
+  MISO only inside an answer window, the four transfer modes and both
+  bit orders byte-exact in both directions, a client that never drains
+  keeping ONE frame and raising the overrun, the roles inverted with
+  this board clocking the far one as host, and a ten-second stress of
+  23 exchanges with no error at either end. ES0206 2.12.5's BSY is
+  never looked at on this side - RXNE is the witness. And THE ANSWER
+  LINE'S SLEW CLASS IS A CORRECTNESS PARAMETER: at the driver's
+  `very_high` the far board's falling-edge modes slip and an engined
+  exchange comes back nine bytes of sixteen wrong; at `low`, with the
+  far board's own pads left at its driver's fastest, everything is
+  byte-exact and the rate ladder is unchanged.
 - The DMA engines on 16-bit frames: the engines carry bytes, and a
   16-bit request falls back to the pump - the other strata's rule, and
   the transfer-granularity question the first portable example is meant
@@ -422,9 +433,9 @@ Driver gaps:
   chapter's.
 
 Implemented, not bench-verified (each with what would measure it):
-- The instances other than SPI5 (SPI1, SPI2, SPI3, SPI4, SPI6 - compiled
-  on every header that has them, none driven): a wire between two of
-  them, or a device on one.
+- The instances other than SPI5 and SPI2 (SPI1, SPI3, SPI4, SPI6 -
+  compiled on every header that has them, none driven): a wire between
+  two of them, or a device on one.
 - The receive-only and half-duplex-in configurations as a Request's
   `direction`: the engine's transactions are full duplex by
   construction, and the resource's simplex modes were driven by hand in

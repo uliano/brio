@@ -278,7 +278,8 @@ pad (USART2's TX is TIM2's channel 3, the fourth port's remapped CK is
 TIM3's channel 1), and the fourth serial port is a USART whose clock pad
 can be counted. Every fact above with a number is this suite's
 measurement. Two letters want a strap and detect its absence: the
-loopback PA2 to PA3, and the crossed pair PA2-PB1 with PB0-PA3.
+loopback PA2 to PA3, and the crossed pair PA2-PB1 with PB0-PA3 - the
+second is measured below.
 
 - **The baud table**, printed by the suite: twenty-eight rows, every
   standard rate from 1200 to 3 Mbaud against both peripheral clocks,
@@ -297,6 +298,11 @@ loopback PA2 to PA3, and the crossed pair PA2-PB1 with PB0-PA3.
   as it does for TXE and each change is armed on its own. Whether the
   flag's source stands or the line bounced under its own pull is not
   separable from this measurement.
+- **The crossed pair**, USART2's TX strapped to the fourth port's RX and
+  the fourth port's TX to USART2's RX: the two instances talk to each
+  other in both directions at 8N1 and 115200 baud and at 8E2 and 19200,
+  sixty-four xorshift bytes each way with every byte arriving in order
+  and no error flag on either side.
 
 ## Not covered yet
 
@@ -328,9 +334,8 @@ Implemented but not bench-verified, each with what would measure it:
   engine draining the ring and the receive engine filling it, published
   by `harvest()` - is the loopback letter's, and the strap PA2 to PA3
   was not on the board.
-- **Four kilobytes at 921600 baud** and **two instances at two formats
-  with a stress pattern each way**: the same two letters, waiting on the
-  same two straps.
+- **Four kilobytes at 921600 baud**: the loopback letter's, waiting on
+  the same strap.
 - **`error_interrupt()` (EIE, the FE/ORE/NE vector under DMAR)**: an
   error provoked on a line a receive engine is draining is what would
   raise it.

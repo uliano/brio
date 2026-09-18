@@ -1607,6 +1607,27 @@ brio/                    the framework, twelve strata:
                            input pad, which is this block's whole route to the
                            converter); OPA3 and OPA4 belong to other device
                            classes and the twenty-pin part has OPA2 alone
+    spi.hpp                the two synchronous ports (ch. 20): Spi<1|2> the resource
+                           over the whole chapter - TWO INSTANCES ON TWO BUSES, so one
+                           BR code is two frequencies (SPI1 divides PB2, SPI2 PB1) and
+                           a program asks the INSTANCE; no FIFO at all, which is what
+                           makes a host's pump run on RXNE and a client answer ONE
+                           FRAME AHEAD; the four modes, both widths, both bit orders,
+                           the three NSS arrangements, the simplex and one-wire line
+                           modes, the hardware CRC, every flag with the sequence that
+                           clears it - and MODF with the measured fact that 20.2.7's
+                           recipe does NOT clear it here, the block's reset line being
+                           the way back - the high-speed read mode confined to BR = /2
+                           on this device class, and NO I2S (the datasheet gives this
+                           series none, and the register is only asked whether it
+                           answers) + SpiPins carrying afio.hpp's COLUMN (SPI1 has two,
+                           SPI2 no remap field at all), SpiRateOf<pclk, hz> the
+                           compile-time rate chooser, and SpiHost<n, pins, TxEngine,
+                           RxEngine> with the other strata's Request VERBATIM, its
+                           engines fixed to the channels table 11-5 wires to the
+                           instance + SpiClient<n, pins>, one frame ahead, the dark
+                           listener releasing MISO - and pad_speed() on both, the slew
+                           class of the pads a task drives
   stm32f4/               everything that knows stm32f4xx.h (STM32F4, Cortex-M4F):
                          brio's first ARMv7-M family on the cortexm/ core files
     device_tables.hpp      THE RESERVE: GPIO ports A..K, the serial instances
