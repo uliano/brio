@@ -19,15 +19,18 @@
  * the record outlives a power-down of the core.
  *
  * AND THE WORD IS NOT A CAUSE. WATCHDOG.REASON names the LAST watchdog
- * event, TIMER or FORCE, each replacing the other. What CHIP_RESET's
- * HAD_* half is exactly, the datasheet says two ways: 7.3.3 calls it "the
- * source of the last chip-level reset", which would make it one cause at
- * a time, while the bit names are latches and the RP2040's equivalent
- * word was measured to stand for the life of the supply. EITHER WAY a
- * program answers "what caused THIS boot" by comparing the word with the
- * one the previous life saw rather than by reading it, which is what the
- * bench suite does; the two readings differ only in what it expects to
- * find, and the suite reports which this silicon is.
+ * event, TIMER or FORCE, each replacing the other. CHIP_RESET's HAD_*
+ * half is the other question, and the bench answers it: A REBOOT DOES
+ * NOT APPEAR THERE AT ALL. Measured across a `software()` reboot, a
+ * watchdog time-out, a panic and a fault, the chip-level word comes out
+ * of every one of them bit for bit as it went in, still naming the last
+ * CHIP-level reset - because a watchdog event that runs the power-on
+ * state machine is a SYSTEM reset and not a chip-level one. What would
+ * make it chip-level is POWMAN's own WDSEL (6.4, RESET_PSM and the three
+ * bits under it), whose reset value is zero and which nothing in brio
+ * writes. So HAD_WATCHDOG_RESET_PSM stands for a reset this framework
+ * never asks for, and a program answers "what caused THIS boot" from
+ * REASON and its own survivors, never from the chip-level half.
  *
  * ONE MORE THING CLEARS REASON HERE, AND NOT ON THE RP2040 (12.9's own
  * note): a DEBUGGER WARM RESET of either core - the Arm SYSRESETREQ or
@@ -99,8 +102,11 @@ struct ResetCause {
     /// The RISC-V debug module's non-debug-module reset: both harts, no
     /// other hardware, and it is recorded here all the same.
     static constexpr uint32_t hazard3_sys_reset = 1u << 10;
-    /// A watchdog event that ran the power-on state machine: THE ONE
-    /// `software()` MAKES.
+    /// A watchdog event that ran the power-on state machine AND was
+    /// selected in POWMAN's own WDSEL. NOT the one `software()` makes:
+    /// with that register at its reset value - and nothing here writes
+    /// POWMAN - a reboot leaves this bit and the whole chip-level half
+    /// untouched (measured; the file header).
     static constexpr uint32_t watchdog_psm = 1u << 11;
 
     static constexpr uint32_t watchdog_timer = 1u << 12;  ///< WATCHDOG.REASON.TIMER

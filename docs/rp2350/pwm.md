@@ -164,6 +164,78 @@ A level table streamed on the wrap wants a DMA channel armed on
 `PwmSlice<n>::cc_address()` with `PwmSlice<n>::dreq`, one word of both
 levels per period.
 
+## Bench findings
+
+All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
+at 150 MHz, over the board's own wires GP13 -> GP15, GP17 -> GP9 and
+GP12 <-> GP14, and all of them on BOTH architectures: `test_rp2350_pwm`
+reports **41 pass, 0 fail** on the Cortex-M33 pair and **41 pass, 0
+fail** on the Hazard3 pair, from one source. NOTHING IN THIS CHAPTER
+DIFFERS BETWEEN THE TWO HALVES - the block is one, its two interrupt
+lines are two system lines under one numbering, and the handler names are
+the same on both.
+
+- **Twelve slices.** The global enable reads 0xFFF with every slice
+  started and zero with every slice stopped. A slice out of reset reads
+  CSR 0, DIV 0x10 (one), TOP 0xFFFF, CC 0 and its counter 0; a
+  configuration written comes back field by field. The counter at
+  divider 2 advances about 7650 counts in 100 us and stands still when
+  the slice is disabled.
+- **The lockstep start is exact.** Two slices of equal configuration
+  started by one write of the global enable read the SAME counter - lag
+  **0** at divider 2, and 0 again at divider 100 after 100, 200 and 300
+  ms on the second wire's pair. One phase advance puts one of them
+  exactly one count ahead and one retard brings it back. (The lag is
+  measured by reading the two counters in both orders and averaging, and
+  the pass must be a WARM one: run cold, straight out of the XIP cache,
+  the same code reports tens of counts of a lag that is not there.)
+- **THE TWO INTERRUPT LINES, this chapter's own addition.** A slice's
+  wrap on IRQ0 and another's on IRQ1 at 1 kHz give **200 wraps each in
+  200 ms**, each in 200 entries of its own handler, with no slice
+  appearing in the other line's status; at 100 kHz, **1000 interrupts in
+  10 ms**. The two enables are separate registers (INTE0 0x008, INTE1
+  0x010), a force on one line shows in that line's masked status alone
+  and raises no raw flag, and a slice moved to the other line is served
+  there and nowhere else - 50 wraps on line 1 and 0 on line 0.
+- **The frequency on the wire**, counted by the far slice's edge
+  counter: **1000 Hz, 100 000 Hz and 999 980 Hz** for the three asked
+  for, each inside one per cent. **The duty**, counted by level: 0, 250,
+  500, 750 and 1000 per mille for the five levels asked - the two ends
+  glitch-free and exact.
+- **The divider ladder, on the wire**: 750 000 Hz at one, 300 000 at two
+  and a half, 75 000 at ten, 2930 at 255 and 15/16 and 2927 at 256 -
+  each within a count of the arithmetic's own answer. A fraction on top
+  of DIV_INT 0 is refused before any register moves, which 12.5.2.6
+  forbids in so many words, so the top of the range is a whole 256.
+- **Phase-correct halves the rate** (5000 Hz where the same divider gave
+  10 000), **inversion complements the duty** (750 per mille at level
+  250), and a level written mid-period is taken AT THE WRAP and not
+  before - 8 of 8 trials showed the old duty until the wrap.
+- **The pair and its dead time.** At level 400 with 100 counts of dead
+  time B's level reads 500 and B is high 500 per mille of the period.
+  With A on GP12 -> GP14 and B on GP13 -> GP15 sampled in ONE word read
+  through the single-cycle IO, 739 313 samples show A high 388 per
+  mille, **both high in 0 samples** and both low in 107 per mille - the
+  dead time, as arithmetic and not as a hardware unit.
+- **`util/rgb_lamp.hpp` over three outputs**: {255, 128, 64} measures
+  1000, 502 and 251 per mille on the three pads.
+- **THE FOUR SLICES THIS CHIP ADDED.** Slices 8..11 run as repeating
+  timers, two on each interrupt line, **200 wraps each in 200 ms**. Their
+  pads are on the half of the map the RP2040 had not: slice 8's A output
+  reads 242, 490 and 742 per mille on **GP32 and GP40 alike** for levels
+  of 250, 500 and 750 of 1000, and slice 11's the same on **GP38 and
+  GP46** - the two pads that carry ONE output never disagreeing in a
+  single word read, over some 420 000 samples each.
+- **A LEVEL TABLE STREAMED INTO CC, PACED BY THE WRAP.** A DMA channel
+  armed on a slice's wrap request moves NOTHING while that slice is
+  stopped - the request is the wrap, and there is no wrap. Once the slice
+  runs, 64 CC words go in at one word a period: **6405 us for 64 periods
+  of 100 us, with 64 wraps counted** and the processor doing nothing
+  between them. CC is one register and both levels, so the last word
+  stands in A and in B together. And the stream reaches the pad: the same
+  table into slice 6 leaves the far end of GP13 -> GP15 reading **839 to
+  840 per mille against the 840 the table's last word asks for**.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -171,49 +243,21 @@ Driver gaps, each with its reason:
 - A meter task over `util/meter_sampler.hpp`'s MeterSource: the edge and
   level counters need a window the caller times, and the task that owns
   the window is born with a program that samples.
-- A DMA stream into CC or TOP as a task: both addresses and the request
-  are exposed, and the engines that would drive them belong to this
-  target's DMA chapter; the suite's own streaming letter is listed below.
+- A DMA stream into CC or TOP AS A TASK: the suite's own letter drives
+  one with a `DmaTxEngine` by hand (above), and what is not here is the
+  task that would own the table and the re-arm - born with the program
+  that wants a waveform rather than a level.
 - Two B pins of one slice selected at once (their OR): a fact of the
   chapter with no use here, and no wire of this desk puts two signals on
   one slice.
 - The portable side of "one dimmable output" past `PwmChannel`: a servo
   or a dimmer AO sits above this file and is born with its program.
 
-Implemented but not bench-verified, each with the letter of
-`test_rp2350_pwm` that will measure it:
+Implemented but not bench-verified, each with what would measure it:
 
-- The period arithmetic at this clk_sys, the reset state, a
-  configuration read back, the two dividers the driver refuses, the
-  counter at a divider, the twelve-bit global enable, the lockstep start
-  and the phase nudges (letter a).
-- THE SECOND INTERRUPT LINE, which is this chapter's own addition: a
-  slice's wrap counted on IRQ0 and another's on IRQ1 at once, the two
-  masked statuses apart, the force on each line, and a slice moved from
-  one line to the other (letter b).
-- The frequency and the duty on the wire between slice 6's B output and
-  slice 7's B input, at 1 kHz, 100 kHz and 1 MHz and at five levels
-  including the two glitch-free ends (letter c).
-- Phase-correct mode halving the frequency, the inverted output
-  complementing the duty, and a level written mid-period taken at the
-  wrap and not before (letter d).
-- The complementary pair, its B measured on the wire, AND THE DEAD TIME
-  ITSELF - the two outputs sampled in one word read, never high at the
-  same sample, both low for the dead time's share of the period (letter
-  e).
-- The second wire, slice 0's B output measured by slice 4, and two
-  outputs started by the global enable keeping a fixed phase
-  relationship (letter f).
-- The divider ladder to both ends of the range, and the refusal of a
-  fraction on top of 256 (letter g).
-- `util/rgb_lamp.hpp` over three outputs, all three measured (letter h).
-- THE FOUR SLICES THIS CHIP ADDED: 8..11 as repeating timers on both
-  interrupt lines, their pads on GPIO 32..47 driven and read back
-  through the single-cycle IO, and the two pads that carry ONE output
-  never disagreeing in a word read (letter j).
-- A level table streamed into CC by a DMA channel paced by the wrap
-  request: the driver exposes the address and `dreq`, and the letter
-  that measures it is born with this target's DMA chapter.
+- A stream into TOP rather than into CC: `top_address()` is exposed and
+  the pace would be the same request, but nothing has asked for a
+  frequency sweep yet.
 - `PwmEdgeCounter` in falling-edge mode, and `pwm_config_for` with
   phase-correct: the arithmetic of both is pinned at compile time, and
   what is missing is an edge count on the wire at the solved divider -

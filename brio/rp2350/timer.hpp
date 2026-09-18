@@ -45,10 +45,17 @@
  *    cycles. It is not a timebase then - it moves with every rate change
  *    - but it is the finest counter this chip offers a program, and what
  *    a cycle-level measurement wants.
- *  - LOCKED disables every write to the block, and IT CANNOT BE CLEARED.
- *    The way back is the subsystem reset controller (rp2350/resets.hpp):
- *    `Resets::cycle(ResetBlock::timer1)` gives an unlocked block with its
- *    counter at zero, and re-running `init` starts it again.
+ *  - LOCKED, which 12.8 describes as disabling write access to the block.
+ *    ON THIS SILICON IT DISABLES NOTHING: with the bit set and reading
+ *    back set, a plain alarm register, the PAUSE and SOURCE registers
+ *    that change the counting, and a register written through an atomic
+ *    alias all take their writes (measured, stepping A2). So `lock()` is
+ *    the write and `locked()` the read-back, and NEITHER IS A GUARD: no
+ *    verb of this file relies on the bit, and a program must not either.
+ *    The bit still survives a write of any value, so the way out is the
+ *    subsystem reset controller (rp2350/resets.hpp) - which is why `init`
+ *    CYCLES this block's reset line instead of merely releasing it, and
+ *    comes back with the counter at zero on its microsecond tick.
  *
  * DBGPAUSE's two bits, SET AT RESET, stop the count while a debugger has
  * a core halted - and this chip has two cores per architecture: with the
@@ -273,12 +280,15 @@ struct Timer {
                                                           : TimerSource::tick;
     }
 
-    /// Whether writes to this block are refused (LOCKED).
+    /// LOCKED, read back. The register 12.8 says disables write access to
+    /// the block - and which on this silicon disables none (the file
+    /// header): a true answer here is not a promise that a write will be
+    /// refused, only that the bit is set.
     static bool locked() { return (block().LOCKED & TIMER_LOCKED_BITS) != 0u; }
-    /// REFUSE EVERY FURTHER WRITE TO THIS TIMER, FOR GOOD. Reads go on
-    /// working; no write does, the lock's own included. The one way back
-    /// is the subsystem reset controller - `Resets::cycle(reset_block)`
-    /// and `init` again - which costs the counter's value.
+    /// Set LOCKED. Nothing in this file is gated on it, because MEASURED
+    /// ON STEPPING A2 the block goes on taking every write with it set;
+    /// what stands is that the bit itself only goes away with the block's
+    /// reset line, which `init` cycles at the cost of the counter's value.
     static void lock() { block().LOCKED = TIMER_LOCKED_BITS; }
 
 private:

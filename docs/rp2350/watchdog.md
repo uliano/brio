@@ -22,7 +22,8 @@ chip's**: there the counter decremented twice per tick, so every LOAD was
 doubled and the reach halved; here LOAD is microseconds as written and
 the register's 0xffffff is about 16.8 s, which is what 12.9's LOAD
 description states. The suite measures the decrement rate against the
-system timer rather than trusting either sentence.
+system timer rather than trusting either sentence, and MEASURES ONE
+DECREMENT PER MICROSECOND (below).
 
 THE TICK IS NOT THIS BLOCK'S ANY MORE (12.9.2). Every consumer of a
 timebase has its own generator in the TICKS block of 8.5, and this one's
@@ -60,7 +61,9 @@ driver writes one of them:
 The third is new on this chip and the difference matters to a program and
 not only to a driver: a CHIP-level watchdog reset also clears the scratch
 registers, where the system-level one this driver takes is documented not
-to.
+to - and, MEASURED, does not even reach the power manager's record of
+chip-level resets, because POWMAN_WDSEL is what would carry it there
+([reset.md](reset.md)).
 
 **Erratum RP2350-E19 is live on stepping A2**: a reboot hangs in the boot
 path if any bit but FRCE_OFF.PROC1 is set in the power-on state machine's
@@ -104,6 +107,43 @@ brio::Scratch<0>::write(state);          // meant to cross the reboot below
 brio::Watchdog::force_reset();           // never returns
 ```
 
+## Bench findings
+
+On an RP2350 in the QFN-80 package, **stepping A2**, clk_ref on the
+board's 12 MHz crystal, and on BOTH architectures: the letters below are
+part of `test_rp2350_timer`'s **93 pass, 0 fail** on the Cortex-M33 pair
+and **93 pass, 0 fail** on the Hazard3 pair, with the reboot letter run
+by name at **28 pass, 0 fail** on the Arm half and **24 pass, 0 fail** on
+the RISC-V one (four legs there against five, for the reason
+[reset.md](reset.md) gives).
+
+- **IT DECREMENTS ONCE PER MICROSECOND, NOT TWICE.** Measured against the
+  system timer over 200 ms: **200 000 counts in 200 000 us**, which is
+  1000 per 1000 us on both architectures. The RP2040's erratum E1 is not
+  this chip's, so LOAD is microseconds as written, the clamp stands at
+  the counter's own reach, and a time-out asked for beyond it is clamped
+  rather than wrapped.
+- **The tick is the TICKS block's.** Stop this watchdog's generator and
+  the countdown stands still - 0 counts over 5 ms - which is the
+  mechanical proof that the block no longer owns a tick of its own. A
+  kick reloads exactly the time-out that was asked for (8 000 000 of
+  8 000 000 us read back).
+- **ENABLE clears.** The countdown starts and stops under software,
+  unlike the one-way watchdogs of the other families.
+- **What a time-out selects.** After `start()` the power-on state
+  machine's selection reads **0x1FFFFF3** - every stage the reboot needs,
+  the two oscillators left alone - and it is ORed in, so a program may
+  widen it and never narrows it by accident.
+- **The scratch registers cross a watchdog reboot**, and so does the
+  `.noinit` SRAM. Measured on every leg of the reboot letter - five on
+  the Arm half, four on the RISC-V one: 7.2's note is what this silicon
+  does and 7.3.1's table is not, for the system-level reset this driver
+  takes. The two survivors carry the same token every time.
+- **Erratum RP2350-E19's condition never arose** and the guard costs one
+  store: the power-on state machine's hold register reads clear before
+  every reboot, and every reboot of the letter completed through the
+  bootrom on both architectures.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -123,22 +163,15 @@ Driver gaps, each with its reason:
   spelling is `kick()` and its contract is "LOAD reloads, ENABLE clears";
   the keeper sits above it.
 
-Implemented but not bench-verified, each with the letter of
-`test_rp2350_timer` that will measure it:
+Implemented but not bench-verified, each with what would measure it:
 
-- The decrement rate against the system timer, which is what answers
-  "does this chip double like the RP2040" with a number; the countdown
-  standing still while its generator is stopped; the kick; the clamp at
-  the counter's reach (letter j).
-- A time-out at 100 ms reaching zero and rebooting the board, naming
-  itself REASON.TIMER at the next boot (letter i, leg 2).
-- `force_reset()` as the reboot, naming itself REASON.FORCE (letter i,
-  leg 1).
-- WHICH SURVIVOR CROSSES A WATCHDOG REBOOT - the scratch registers, the
-  `.noinit` SRAM, or both - which is where the two sentences of 7.2 and
-  7.3.1 are settled (letter i, every leg).
-- The erratum RP2350-E19 guard: the hold register read as clear before a
-  reboot (letter a), and the reboots themselves completing (letter i).
-- `pause_on_debug`: letter j measures with the bits OFF on purpose, so
-  that the rate is the silicon's and not the probe's; what the bits do
-  with a debugger touching the bus fabric is unmeasured.
+- `pause_on_debug`: the rate above is measured with the three pause bits
+  OFF on purpose, so that it is the silicon's and not the probe's. What
+  the bits do while a debugger is halted on a core or driving the bus
+  fabric would take a suite that runs under a probe and reports to it,
+  which no letter of this target does yet.
+- The countdown against a clk_ref that is not 12 MHz: the tick generator
+  is set from the clock task's own rate and only the board's crystal has
+  been on the wire.
+- A time-out taken while the countdown is at its clamp - 16.8 s of
+  waiting for one verdict, which no suite spends.

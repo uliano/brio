@@ -305,7 +305,9 @@ Implemented but not bench-verified:
   crt's third trap): the doorbell a second kernel will ring, bound and
   never raised. The external and the timer traps beside it are both
   proven on the bench.
-- **The Arm crt's fault vectors.** The four configurable faults have
-  their names in the table and their weak spins. `isr_hardfault` and the
-  RISC-V crt's `isr_riscv_exception` are what `fault_reset()` binds to
-  ([reset.md](reset.md)); nothing has faulted on purpose yet.
+- **The Arm crt's four configurable fault vectors.** They have their
+  names in the table and their weak spins, and nothing has raised one of
+  those four. The entry `fault_reset()` binds to IS measured on both
+  halves - `isr_hardfault` on one and `isr_riscv_exception` on the other,
+  reached by a breakpoint instruction with no debugger attached
+  ([reset.md](reset.md)).

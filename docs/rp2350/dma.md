@@ -228,6 +228,82 @@ closing advice and RP2350-E5's other half:
 brio::Dma::abort(brio::DmaChannel<4>::bit | brio::DmaChannel<5>::bit);
 ```
 
+## Bench findings
+
+All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
+at 150 MHz, and all of them on BOTH architectures: `test_rp2350_dma`
+reports **40 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
+pair, from one source - and every verdict of it was printed THROUGH a
+DMA engine, the console's transport naming one in its transmit slot.
+One letter of it is not reliably green on the Hazard3 half, and the
+finding below says what it loses and why.
+
+- **Sixteen channels and four lines, as the silicon says.** N_CHANNELS
+  reads 16, a channel out of reset reads its reset word, and a
+  completion routed to each of the four lines in turn is counted in that
+  line's handler and in no other.
+- **THE ABORT ANSWERS ERRATUM RP2350-E5.** A channel stalled on a pacing
+  timer that never requests stands BUSY with its count untouched and
+  refuses every configuring verb; the abort's sequence takes it down with
+  **the ABORT register polling to zero in 12 to 13 us**, BUSY down,
+  nothing raised, no line left routed, and the channel usable again.
+- **IRQ_QUIET, AND THE NULL TRIGGER UNDER IT.** A completion under
+  IRQ_QUIET raises **no** interrupt, and a null trigger written after it
+  raises **exactly one** - so the null trigger STILL REPORTS through
+  CTRL_TRIG on this silicon, which is what makes IRQ_QUIET usable as
+  "tell me at the end of the list and not at the end of each block".
+- **THE COUNT MODES, which the RP2040 had not.** In TRIGGER_SELF a
+  channel re-arms itself at every zero: four laps of 64 bytes paced at
+  10 kHz ran in 25 588 us with the processor only counting them, the
+  count reloading to 0x10000040 - the mode in the top nibble beside the
+  64 - and the destination holding the source four times over. In
+  ENDLESS the count never moves at all: after 5 ms of one transfer a
+  microsecond it still reads 8, BUSY stands, **zero** interrupts have
+  been raised, and an abort is the only thing that ends it.
+- **The four address steps.** A sixteen-byte ring read into sixty-four
+  bytes lays the pattern down four times; read backward from the last
+  byte the copy is the source reversed; read by twos it is every other
+  byte.
+- **Memory to memory.** Byte, half-word and word runs all copy exactly
+  and leave TRANS_COUNT at zero with the raw status raised and cleared by
+  writing one. **4096 bytes as 1024 words take 11 us on the Arm half and
+  13 us on the RISC-V one** against the 6.8 us one transfer a cycle would
+  be - the read and the write masters share the SRAM with a core that is
+  polling BUSY over the same bus.
+- **A pacing timer** at one request a microsecond delivers a thousand
+  bytes in **1004 us**, its X/Y reading back as written.
+- **The sniffer** agrees with `util/crc.hpp` on all four functions it was
+  asked for: the sum, CRC-16, CRC-32 and the reversed-and-inverted
+  CRC-32.
+- **A bus error is a bus error.** A word block reading the single-cycle
+  IO window stops with ERRORS reading **0xC0000000** - AHB_ERROR and
+  READ_ERROR both, WRITE_ERROR clear - its line's handler entered once
+  and nothing written to the destination.
+- **THE ENGINES ON A TRANSPORT.** 4096 bytes through UART1's own
+  loop-back at 3 Mbaud, one engine in each slot, arrive **exact in 13 697
+  to 13 702 us** on both halves - the wire's own time for 4096 bytes of
+  10 bits at 3 Mbaud is 13.65 ms - with **18 to 22** line-0 interrupts
+  for the whole of it, the console's own blocks among them; the same run
+  carried on the transport's own interrupt is one interrupt a byte by
+  construction, its write_byte pending the line. No framing or overrun
+  error, no ring overflow.
+- **Byte-exact on every one of sixteen flash-and-run cycles** (ten on
+  the Hazard3 half, six on the Cortex-M33 one), the first run after a
+  flash included - which is the run that matters: code running cold out
+  of the flash widens every window between two register reads. That is
+  how this letter found the one rule a receive engine's user must keep,
+  and it is the transport's (`brio/pl011/uart.hpp`, harvest()): WHETHER
+  A RUN HAS ENDED IS ASKED BEFORE ITS COUNT IS READ. Asked after, a run
+  whose last byte lands between the two reads is seen ended with that
+  byte uncounted and is re-armed over it - one byte of 4096 gone at the
+  end of a short run by the ring's wrap, with no fault, no overrun and no
+  ring overflow to show for it (measured, about one cold run in five
+  before the rule). The letter reports itself: on a mismatch it names the
+  byte it wanted, the byte it got and how far ahead of the stream that
+  byte is; on a time-out how many are short and what the engine holds.
+- **The console's engine under a burst**: 2064 bytes of it went out in 46
+  blocks, no fault, the engine idle after the drain.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -248,32 +324,22 @@ Driver gaps, each with its reason:
 - The loop and ping-pong engines the other strata keep for a block
   stream (util/block_stream.hpp): born with the ADC chapter, their first
   user here. TRIGGER_SELF is what a loop engine would be built on.
-- The engines on the SPI, the I2C, the PWM and the PIO: with their
-  chapters; the requests are named already in `dma_engine.hpp`.
+- The engines on the SPI, the I2C and the PIO: with their chapters; the
+  requests are named already in `dma_engine.hpp`. The PWM's is measured -
+  a transmit engine paced by a slice's wrap, in [pwm.md](pwm.md)'s own
+  findings.
 - The HIGH_PRIORITY arbitration between channels: the suite runs one
   channel at a time, so the field is written and never contended.
 
-Implemented but not bench-verified, each with the letter that will
-measure it:
+Implemented but not bench-verified, each with what would measure it:
 
-- The whole chapter: `test_rp2350_dma` is written and builds for both
-  architectures, and no letter of it has run on silicon. Letter by
-  letter - `a` the channel count, the refusals, the security read-back
-  and an abort of a stalled channel (RP2350-E5's sequence and the
-  ABORT register's poll); `b` memory to memory at three widths and its
-  throughput; `c` all four interrupt lines, IRQ_QUIET and the null
-  trigger; `d` chaining; `e` the ring and the backward and by-two
-  address steps; `f` a pacing timer at one request a microsecond; `g`
-  the sniffer's sum, CRC-16 and CRC-32 against util/crc.hpp; `h` a bus
-  error from an address the DMA's ports cannot decode; `i` TRIGGER_SELF
-  and ENDLESS; `j` the two engines on the UART's loop-back at 3 Mbaud;
-  `k` the console's own transmit engine under a burst.
 - A WRITE bus error (WRITE_ERROR): letter `h` provokes a read error; a
   block writing into an address the fabric cannot decode would be the
   other half.
-- `DmaSniffCalc::crc32_reversed`, `crc16_reversed` and `even_parity`,
-  and the sniffer's BSWAP option: written from 12.6.8.2 and not
-  measured; a letter with their software twins.
+- `DmaSniffCalc::crc16_reversed` and `even_parity`, and the sniffer's
+  BSWAP option: written from 12.6.8.2 and not measured; a letter with
+  their software twins. The sum, the two CRCs and the reversed-and-
+  inverted CRC-32 are measured above.
 - An engine on line 1 served by core 1, and the two spare lines used as
   the convention above allows: the multicore chapter, with a transport
   on the second core - the routing is the same verb.

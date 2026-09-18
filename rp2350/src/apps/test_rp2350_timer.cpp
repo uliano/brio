@@ -47,8 +47,9 @@
 //      decrement rate as a NUMBER, which is what answers "does this
 //      chip have the RP2040's double decrement" - the kick, the
 //      remaining time, the tick generator behind it
-//   k  LOCKED on TIMER1: a block that refuses every write, and the
-//      subsystem reset controller as the one way back
+//   k  LOCKED on TIMER1: the bit 12.8 calls a write guard, tried against
+//      four kinds of write, and the subsystem reset controller that is
+//      the only thing which takes it down again
 //   m  the scratch registers and the atomic register aliases on one
 //   n  the panic breadcrumb without a reset
 //
@@ -484,13 +485,24 @@ void tg_source() {
     const uint32_t ds = Spare::now_low() - s0;
     const uint32_t dt = us_now() - t0;
     Spare::source(TimerSource::tick);
-    const uint32_t per_us = dt != 0u ? ds / dt : 0u;
-    print(serial, "  TIMER1 on clk_sys: ", ds, " counts in ", dt, " us = ", per_us,
-          " per microsecond (clk_sys is ", SysClock::hz / 1'000'000u, " MHz)", crlf);
+    // Per MILLISECOND, not per microsecond: the ratio is 150 here and a
+    // truncating division of the raw counts would hide a whole per cent
+    // of error inside it. The two spans are read one after the other and
+    // not at the same instant, so the ceiling is the slack of those four
+    // reads - a tenth of a per cent is far wider than any of them.
+    const uint32_t per_ms =
+        dt != 0u ? static_cast<uint32_t>(static_cast<uint64_t>(ds) * 1000u / dt) : 0u;
+    const uint32_t nominal_per_ms = SysClock::hz / 1000u;
+    print(serial, "  TIMER1 on clk_sys: ", ds, " counts in ", dt, " us = ", per_ms,
+          " per millisecond against ", nominal_per_ms, " nominal (clk_sys is ",
+          SysClock::hz / 1'000'000u, " MHz)", crlf);
     bench.verdict("SOURCE reads back and takes effect", took);
     bench.verdict("a counter on clk_sys counts one per system clock cycle, so its unit "
-                  "is the cycle and it moves with every rate change",
-                  per_us == SysClock::hz / 1'000'000u);
+                  "is the cycle and it moves with every rate change - measured against "
+                  "the microsecond ruler to a tenth of a per cent, which is the slack of "
+                  "reading the two spans one after the other",
+                  per_ms + nominal_per_ms / 1000u >= nominal_per_ms &&
+                      per_ms <= nominal_per_ms + nominal_per_ms / 1000u);
     bench.verdict("and the tick is one write away again",
                   Spare::source() == TimerSource::tick);
     const uint32_t back0 = Spare::now_low();
@@ -618,24 +630,37 @@ void tk_lock() {
     const bool refused_alarm = Spare::alarm_at<0>() == 0xAAAA5555u;
     Spare::pause(true);
     const bool refused_pause = !Spare::paused();
+    Spare::source(TimerSource::sysclk);
+    const bool refused_source = Spare::source() == TimerSource::tick;
+    Spare::force<1>(true);
+    const bool refused_alias = !Spare::pending<1>();
+    Spare::force<1>(false);
+    Spare::source(TimerSource::tick);
+    Spare::pause(false);
     const uint32_t c0 = Spare::now_low();
     wait_us(5000u);
     const uint32_t still_counting = Spare::now_low() - c0;
-    print(serial, "  TIMER1 locked: ALARM0 reads ", hex(Spare::alarm_at<0>()),
-          " after a write of 5555AAAA, PAUSE reads ", Spare::paused() ? 1 : 0,
-          ", and the counter advanced ", still_counting, " us over 5 ms", crlf);
-    bench.verdict("LOCKED refuses every write to the block", locked && refused_alarm &&
-                                                                 refused_pause);
-    bench.verdict("and refuses them in silence: the counter goes on running, the reads "
-                  "go on answering",
+    print(serial, "  TIMER1 locked: LOCKED reads ", locked ? 1 : 0,
+          "; ALARM0 ", refused_alarm ? "refused" : "TOOK the write",
+          ", PAUSE ", refused_pause ? "refused" : "TOOK the write",
+          ", SOURCE ", refused_source ? "refused" : "TOOK the write",
+          ", INTF through the atomic alias ", refused_alias ? "refused" : "TOOK the write",
+          crlf);
+    print(serial, "  and the counter advanced ", still_counting, " us over 5 ms", crlf);
+    bench.verdict("LOCKED takes its write and reads back set", locked);
+    bench.verdict("BUT ON THIS STEPPING IT REFUSES NOTHING - a plain register, a register "
+                  "that changes the counting, and one written through an atomic alias all "
+                  "take their writes with LOCKED set, so a program may not treat the bit "
+                  "as a guard: what 12.8 says of it is not what the silicon does",
+                  !refused_alarm && !refused_pause && !refused_source && !refused_alias);
+    bench.verdict("and the counter goes on running under it, the reads going on answering",
                   still_counting >= 4990u && still_counting < 5100u);
 
     // The one way back: the subsystem reset controller, which init()
     // cycles for exactly this reason.
     const bool back = Spare::init(clock);
-    bench.verdict("init() is the way back, because it CYCLES this block's reset line "
-                  "instead of merely releasing it - LOCKED cannot be cleared any other "
-                  "way",
+    bench.verdict("init() is the way out, because it CYCLES this block's reset line "
+                  "instead of merely releasing it - which is what takes LOCKED down",
                   back && !Spare::locked());
     const uint32_t d0 = Spare::now_low();
     wait_us(5000u);
@@ -797,33 +822,36 @@ void ti_resume() {
                       (boot_causes & ResetCause::watchdog_force) != 0u);
         bench.verdict("REASON holds the LAST watchdog event: TIMER, if it stood, is gone",
                       (boot_causes & ResetCause::watchdog_timer) == 0u);
-        bench.verdict("and the power manager records the tier it took: a watchdog event "
-                      "that ran the power-on state machine",
-                      (boot_causes & ResetCause::watchdog_psm) != 0u);
-
-        // WHICH READING OF CHIP_RESET IS TRUE. 7.3.3 calls it the source
-        // of the LAST chip-level reset; the bit names are latches and the
-        // RP2040's word stood for the life of the supply. The printed
-        // pair says which this silicon is; the verdict asserts only that
-        // it is one of the two and not something else.
+        // WHAT CHIP_RESET DOES ACROSS A REBOOT. The bit names read like
+        // latches and 7.3.3 calls the word the source of the last
+        // CHIP-level reset - and this reboot is not one: a watchdog event
+        // reaches the chip level only when POWMAN's own WDSEL selects it
+        // (6.4, RESET_PSM), a register at its reset value here because
+        // nothing in brio writes POWMAN. So the word should come through
+        // untouched, and the printed pair is the proof.
         const uint32_t chip_now = boot_causes & ResetCause::chip_level;
         const uint32_t chip_before = before & ResetCause::chip_level;
         print(serial, "  CHIP_RESET before ", hex(chip_before), " after ", hex(chip_now),
               crlf);
-        bench.verdict("the chip-level half either KEPT its old bits and added this "
-                      "reset's (a word that accumulates) or holds this reset's ALONE "
-                      "(the source of the last chip-level reset)",
-                      chip_now == (chip_before | ResetCause::watchdog_psm) ||
-                          chip_now == ResetCause::watchdog_psm);
+        bench.verdict("the power manager does NOT record a reboot: a watchdog event that "
+                      "runs the power-on state machine is a SYSTEM reset, and only "
+                      "POWMAN's own WDSEL - untouched here - would make it reach the "
+                      "chip-level record",
+                      (boot_causes & ResetCause::watchdog_psm) == 0u);
+        bench.verdict("so the chip-level half crosses the reboot bit for bit, still "
+                      "naming the last chip-level reset",
+                      chip_now == chip_before);
         leg_timeout();
     }
     if (leg == 2) {
         bench.verdict("a watchdog time-out names itself: REASON.TIMER, FORCE gone",
                       (boot_causes & ResetCause::watchdog_timer) != 0u &&
                           (boot_causes & ResetCause::watchdog_force) == 0u);
-        bench.verdict("the time-out took the same tier as the trigger: the power-on "
-                      "state machine",
-                      (boot_causes & ResetCause::watchdog_psm) != 0u);
+        bench.verdict("and it took the same tier as the trigger: a system reset, absent "
+                      "from the power manager's chip-level record like that one",
+                      (boot_causes & ResetCause::watchdog_psm) == 0u &&
+                          (boot_causes & ResetCause::chip_level) ==
+                              (before & ResetCause::chip_level));
         leg_panic();
     }
     if (leg == 3) {

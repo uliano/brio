@@ -57,6 +57,10 @@
 //   j  THE FOUR SLICES THIS CHIP ADDED: 8..11 as repeating timers on both
 //      lines, and slice 8's and slice 11's outputs on GPIO 32..47 sampled
 //      through SIO - including the two pads that carry ONE output
+//   k  THE LEVEL TABLE STREAMED INTO CC by a DMA channel paced by a
+//      slice's own wrap request: silent while the slice is stopped, one
+//      word a period once it runs, both levels in the one word - and the
+//      far end of the wire carrying the table's LAST duty
 //   y  (outside z) THE INSTRUMENTS: a pad sampled through a period, the
 //      counter read at a growing delay after a nudge, the level written
 //      mid-period followed on the pad
@@ -68,6 +72,7 @@
 
 #include "rp2350/clock.hpp"
 #include "rp2350/core.hpp"
+#include "rp2350/dma.hpp"
 #include "rp2350/pin.hpp"
 #include "rp2350/platform.hpp"
 #include "rp2350/pwm.hpp"
@@ -119,6 +124,14 @@ using Tick9 = PwmPeriodicTick<9, 1>;
 using Tick10 = PwmPeriodicTick<10, 0>;
 using Tick11 = PwmPeriodicTick<11, 1>;
 
+// THE STREAM (letter k): one DMA channel pouring CC words into a slice,
+// paced by that slice's own wrap request. Channel 6 on DMA line 0, which
+// nothing else of this suite uses.
+using Stream = DmaTxEngine<6, uint32_t, 0>;
+constexpr uint32_t stream_levels = 64;
+uint32_t level_table[stream_levels];
+volatile bool stream_done = false;
+
 volatile uint32_t wraps0[pwm_slice_count];
 volatile uint32_t wraps1[pwm_slice_count];
 volatile uint32_t entries0 = 0;
@@ -146,6 +159,10 @@ constexpr PwmDivider khz1_div{24, 0};
 constexpr uint16_t khz1_top = 6249;
 constexpr PwmDivider khz100_div{1, 0};
 constexpr uint16_t khz100_top = 1499;
+/// And an exact 10 kHz, which is the pace the streamed level table runs
+/// at: 15000 counts of the undivided 150 MHz is 100 microseconds.
+constexpr PwmDivider khz10_div{1, 0};
+constexpr uint16_t khz10_top = 14999;
 
 /// The level counter's full scale over a window: clk_sys / 256 cycles per
 /// second, times the window.
@@ -403,10 +420,9 @@ void ta_block() {
     (void)T::configure({.divider = {2, 0}, .top = 0xFFFF});
     S::counter(0);
     T::counter(0);
-    Pwm::start(S::bit | T::bit);
-    spin_us(50);
     // The lag between the two counters, free of the read's own delay: two
-    // pairs in either order, averaged.
+    // pairs in either order, averaged, so that a read gap which is the
+    // same in both directions cancels out.
     auto lag_now = [] {
         const uint16_t a1 = S::counter();
         const uint16_t b1 = T::counter();
@@ -415,6 +431,15 @@ void ta_block() {
         return (static_cast<int32_t>(b1) - static_cast<int32_t>(a1) + static_cast<int32_t>(b2) -
                 static_cast<int32_t>(a2)) / 2;
     };
+    // AND THE CANCELLING ONLY WORKS WARM. The program runs from flash
+    // through the XIP cache, so the FIRST pass over this lambda fetches
+    // its instructions as it goes and the four reads are not evenly
+    // spaced: measured cold it reports tens of counts of lag at this
+    // divider, and the same lambda a moment later reports none. So it is
+    // run once here, over the stopped counters, and measured only after.
+    (void)lag_now();
+    Pwm::start(S::bit | T::bit);
+    spin_us(50);
     const int32_t lag = lag_now();
     print(serial, "  slices 3 and 5 started together: lag ", lag, " counts after 50 us", crlf);
     bench.verdict("two slices started by the global enable run in lockstep: their counters agree "
@@ -958,6 +983,103 @@ void tj_new_slices() {
 }
 
 // =============================================================================
+// k - THE LEVEL TABLE STREAMED INTO CC, PACED BY THE WRAP
+// =============================================================================
+void tk_stream() {
+    Pwm::stop(Pwm::all_slices);
+    Pwm::clear_pending(Pwm::all_slices);
+    clear_wraps();
+
+    // (1) THE PACE IS THE SLICE'S OWN. A channel armed on slice 3's wrap
+    // request with the slice STOPPED must not move a single word: a DREQ
+    // is a request and not a permission, and this is the verdict that
+    // tells a paced run from a free-running one.
+    using S = PwmSlice<3>;
+    (void)S::configure({.divider = khz10_div, .top = khz10_top});
+    S::levels(0, 0);
+    S::counter(0);
+    S::clear_pending();
+    Stream::arm(S::cc_address(), S::dreq);
+    stream_done = false;
+    const bool started = Stream::start(level_table, stream_levels);
+    spin_us(2000);
+    const bool silent_while_stopped = !stream_done && S::level(0) == 0u;
+
+    // (2) The run: one word a period at 10 kHz, the slice started.
+    S::interrupt<0>(true);
+    const uint32_t t0 = us_now();
+    S::enable(true);
+    while (!stream_done && us_now() - t0 < 40'000u) {
+    }
+    const uint32_t took = us_now() - t0;
+    // COUNTED BEFORE THE SLICE IS STOPPED AND WITH NO SETTLE IN BETWEEN:
+    // the wraps are the pace itself, and every microsecond spent here is
+    // another hundredth of one.
+    const uint32_t wraps_seen = wraps0[3];
+    S::enable(false);
+    S::interrupt<0>(false);
+    const uint16_t last_a = S::level(0);
+    const uint16_t last_b = S::level(1);
+    Stream::stop();
+    print(serial, "  ", stream_levels, " CC words streamed on slice 3's wrap request at 10 kHz: ",
+          stream_done ? "done" : "NOT done", " in ", took, " us, wraps ", wraps_seen,
+          ", the last levels A ", last_a, " B ", last_b, " (the table's last word is A ",
+          level_table[stream_levels - 1u] & 0xFFFFu, " B ",
+          level_table[stream_levels - 1u] >> 16, ")", crlf);
+    bench.verdict("a channel armed on a slice's wrap request moves NOTHING while that slice is "
+                  "stopped: the request is the wrap and there is no wrap",
+                  started && silent_while_stopped);
+    bench.verdict("and once the slice runs the table goes in at ONE WORD A PERIOD - sixty-four "
+                  "periods of 100 us is 6.4 ms, one CC word each, the processor asleep to it",
+                  stream_done && within(took, 6400u, 40u) && wraps_seen >= stream_levels - 1u &&
+                      wraps_seen <= stream_levels + 2u);
+    bench.verdict("CC IS ONE REGISTER AND BOTH LEVELS: the last word of the table stands in A and "
+                  "in B together, so a stereo pair is one transfer and not two",
+                  last_a == (level_table[stream_levels - 1u] & 0xFFFFu) &&
+                      last_b == (level_table[stream_levels - 1u] >> 16));
+
+    // (3) ON THE WIRE. The same stream into slice 6, whose B output is
+    // GP13 and lands on GP15: when the block has run, the duty the level
+    // counter reads on the far end is the table's last word and not the
+    // first, which is what makes this a stream and not a single write.
+    Pwm::stop(Pwm::all_slices);
+    clear_wraps();
+    if (!wire_6b_7b()) {
+        return;
+    }
+    using W = PwmSlice<6>;
+    Out6B::attach();
+    (void)Level7::setup(level_div);
+    (void)W::configure({.divider = khz10_div, .top = khz10_top});
+    W::levels(0, 0);
+    W::counter(0);
+    Stream::arm(W::cc_address(), W::dreq);
+    stream_done = false;
+    const bool started_wire = Stream::start(level_table, stream_levels);
+    const uint32_t t1 = us_now();
+    W::enable(true);
+    while (!stream_done && us_now() - t1 < 40'000u) {
+    }
+    const uint32_t took_wire = us_now() - t1;
+    const uint32_t duty_pm = measure_duty_pm<Level7>();
+    const uint16_t held_b = W::level(1);
+    W::enable(false);
+    Stream::stop();
+    const uint32_t want_pm =
+        static_cast<uint32_t>(level_table[stream_levels - 1u] >> 16) * 1000u / (khz10_top + 1u);
+    print(serial, "  the same table into slice 6 (GP13 -> GP15): done in ", took_wire,
+          " us, B holds ", held_b, ", the far end reads ", duty_pm, " per mille against ", want_pm,
+          " asked", crlf);
+    bench.verdict("THE STREAM REACHES THE PAD: after the block the far end of the wire carries the "
+                  "duty of the table's LAST word, not its first - the levels went through the "
+                  "output and not merely through the register",
+                  started_wire && stream_done && within(duty_pm, want_pm, 30u));
+    Pwm::stop(Pwm::all_slices);
+    Level7::release();
+    Out6B::release();
+}
+
+// =============================================================================
 // y - the instruments (diagnostics, outside z)
 // =============================================================================
 void ty_probe() {
@@ -1106,13 +1228,27 @@ extern "C" void isr_pwm_wrap_1() {
 extern "C" void isr_uart0() { (void)Serial::isr(); }
 extern "C" void isr_systick() { brio::Ticker::tick(); }
 
+/// The stream's completion, on DMA line 0.
+extern "C" void isr_dma_0() {
+    if ((Stream::service() & Stream::flag_complete) != 0u) {
+        (void)Stream::complete();
+        stream_done = true;
+    }
+}
+
 int main() {
     const bool clock_ok = SysClock::init();
     const bool timer_ok = brio::Timer<0>::init(clock);
     const bool pwm_ok = brio::Pwm::reset();
+    const bool dma_ok = brio::Dma::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     (void)Led::output(false);
+    // A ramp in BOTH halves of every CC word: A rises by 100 a period and
+    // B by 200, so the pad measured on the wire ends at 12600 of 15000.
+    for (uint32_t i = 0; i < stream_levels; ++i) {
+        level_table[i] = (i * 200u) << 16 | (i * 100u);
+    }
     brio::Irq::enable(brio::Pwm::irq<0>());
     brio::Irq::enable(brio::Pwm::irq<1>());
     brio::enable_interrupts();
@@ -1126,12 +1262,14 @@ int main() {
     bench.letter('g', "the divider ladder", tg_ladder);
     bench.letter('h', "the lamp over three outputs", th_lamp);
     bench.letter('j', "the four slices this chip added", tj_new_slices);
+    bench.letter('k', "the level table streamed into CC, paced by the wrap", tk_stream);
     bench.letter('y', "the instruments (diagnostics, outside z)", ty_probe, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED",
                     " timer0=", timer_ok ? "1us" : "FAILED", " pwm=",
-                    pwm_ok ? "released" : "FAILED", " tick=", tick_ok ? "on" : "FAILED",
+                    pwm_ok ? "released" : "FAILED", " dma=",
+                    dma_ok ? "released" : "FAILED", " tick=", tick_ok ? "on" : "FAILED",
                     brio::crlf);
         banner();
         bench.prompt();

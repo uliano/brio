@@ -116,7 +116,8 @@ constexpr UartPins instrument_pins{
     .tx = {4, PinFunction::uart},
     .rx = {5, PinFunction::uart},
 };
-using Instrument = Uart<1, instrument_pins, 1024, 1024, DmaTxEngine<2>, DmaRxEngine<3>>;
+using InstrumentRx = DmaRxEngine<3>;
+using Instrument = Uart<1, instrument_pins, 1024, 1024, DmaTxEngine<2>, InstrumentRx>;
 
 using Led = Pin<25>;
 
@@ -639,6 +640,12 @@ void tj_instrument() {
     uint32_t sent = 0;
     uint32_t good = 0;
     bool wrong = false;
+    uint8_t bad_got = 0;
+    uint8_t bad_want = 0;
+    bool bad_tx_idle = false;
+    uint32_t bad_taken = 0;
+    uint32_t bad_capacity = 0;
+    uint32_t bad_gap = 0;
     const uint32_t t0 = us_now();
     while (good < 4096u && !wrong && us_now() - t0 < 500'000u) {
         while (sent < 4096u) {
@@ -661,8 +668,23 @@ void tj_instrument() {
         uint8_t got[128];
         const uint32_t n = Instrument::read_bulk(got);
         for (uint32_t i = 0; i < n && !wrong; ++i) {
-            if (got[i] != next(rx_state)) {
+            const uint8_t want = next(rx_state);
+            if (got[i] != want) {
                 wrong = true;
+                bad_got = got[i];
+                bad_want = want;
+                bad_tx_idle = Instrument::tx_idle();
+                bad_taken = InstrumentRx::taken();
+                bad_capacity = InstrumentRx::capacity();
+                // WHICH byte of the stream did arrive? Stepping the same
+                // generator forward from here names a GAP (bytes lost) and
+                // its size; nothing found in 256 steps is not a gap.
+                uint32_t look = rx_state;
+                for (uint32_t k = 1; k <= 256u && bad_gap == 0u; ++k) {
+                    if (next(look) == got[i]) {
+                        bad_gap = k;
+                    }
+                }
             } else {
                 ++good;
             }
@@ -670,12 +692,30 @@ void tj_instrument() {
     }
     const uint32_t took = us_now() - t0;
     const uint32_t irqs = line_irqs[0] - irqs0;
+    if (good != 4096u && !wrong) {
+        // WHERE IS THE MISSING BYTE? The engine's own count says whether
+        // the DMA ever took it out of the FIFO; one more harvest says
+        // whether it was in memory and merely unpublished.
+        const bool idle_now = InstrumentRx::idle();
+        const uint32_t taken_now = InstrumentRx::taken();
+        const uint32_t cap_now = InstrumentRx::capacity();
+        const bool tx_done = Instrument::tx_idle();
+        (void)Instrument::harvest();
+        uint8_t late[4] = {};
+        const uint32_t late_n = Instrument::read_bulk(late);
+        print(serial, "  SHORT by ", 4096u - good, ": tx_idle ", tx_done ? 1 : 0,
+              ", engine idle ", idle_now ? 1 : 0, " taken ", taken_now, " of ", cap_now,
+              "; one more harvest yielded ", late_n, " byte(s) ", hex(late[0]), crlf);
+    }
     if (wrong) {
         uint8_t got[8] = {};
-        (void)Instrument::read_bulk(got);
-        print(serial, "  MISMATCH after ", good, " good bytes: sent ", sent,
-              ", the next received ", hex(got[0]), " ", hex(got[1]), " ", hex(got[2]), " ",
-              hex(got[3]), crlf);
+        const uint32_t more = Instrument::read_bulk(got);
+        print(serial, "  MISMATCH after ", good, " good bytes: sent ", sent, ", got ",
+              hex(bad_got), " wanted ", hex(bad_want), " (the byte ", bad_gap,
+              " ahead, 0 = not within 256); tx_idle ", bad_tx_idle ? 1 : 0,
+              ", engine taken ", bad_taken, " of ", bad_capacity, "; ", more,
+              " more byte(s) behind it: ", hex(got[0]), " ", hex(got[1]), " ", hex(got[2]),
+              " ", hex(got[3]), crlf);
     }
     print(serial, "  4096 bytes through UART1's loop-back on two engines at 3 Mbaud: ", good,
           " exact in ", took, " us, ", irqs,
