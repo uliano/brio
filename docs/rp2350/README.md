@@ -39,6 +39,7 @@ below; the documents of record are in
 | [trng.md](trng.md) | The true random number generator: a ring oscillator with no tie to the clock tree, three entropy checks of which one is fatal until the block is reset, a generation time that is not deterministic, and the raw-sample path the bootrom takes instead |
 | [otp.md](otp.md) | The one-time programmable array, READ SIDE ONLY and deliberately so: four read windows of which two fault instead of lying, page locks that only climb, the error correction decoded in software with the one sentence of the chapter that must be read carefully, and the flags a program must never set - printed, not written |
 | [bootrom.md](bootrom.md) | The mask ROM's public function table: two sets of well-known words, one per architecture, and two different lookups over them; what is wrapped, and the three entry points that deliberately are not |
+| [usb.md](usb.md) | The USB device controller: the RP2040's block with one new duty - the PHY's isolation latch, set at reset and lifted last of all - three reset values moved under it, two pads that are bank 1's and could be GPIO, an erratum that makes the system clock's rate part of the contract, and a shelf of diagnostics that are a report and never a path |
 
 ## The two architectures, and what decides between them
 
@@ -272,11 +273,11 @@ difference in the sleeping.
 
 Driver gaps, each with its reason:
 
-- **Most of the chip.** The flash and the QMI,
-  the USB, POWMAN with its always-on timer and the sleep states, the
-  second core, and two of the blocks the RP2040 never had - the HSTX and
-  the M33's coprocessors - have no driver here yet. Each arrives with its
-  chapter, its suite on both architectures and its document.
+- **Most of the chip.** The flash and the QMI, POWMAN with its always-on
+  timer and the sleep states, the second core, and two of the blocks the
+  RP2040 never had - the HSTX and the M33's coprocessors - have no driver
+  here yet. Each arrives with its chapter, its suite on both
+  architectures and its document.
 - **The programming side of OTP**, in any form: declined permanently
   ([otp.md](otp.md)), and the absence is asserted by the family check
   rather than promised.
