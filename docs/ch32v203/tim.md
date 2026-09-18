@@ -227,8 +227,8 @@ has not got returns false and writes nothing.
   serves only what is ENABLED and leaves a polled flag standing.
 - **The DMA burst engine**: `dma_burst(base, length)`, `burst_base()`,
   `burst_length()`, `dma_burst_off()`, `dmaadr_address()` and
-  `chcvr_address(ch)` - the addresses a DMA channel is pointed at, for
-  the chapter that will use them.
+  `chcvr_address(ch)` - the addresses a DMA channel is pointed at
+  ([dma.md](dma.md), where they are driven).
 
 The configuration structs are `TimConfig` (prescaler, period,
 direction, alignment, clock division, the two update controls, the
@@ -400,11 +400,15 @@ encoder mode.
 
 Driver gaps, each with its reason:
 
-- **The DMA requests are data and not yet a user.** The enables, the
-  burst engine's registers and the two addresses a controller would be
-  pointed at are implemented and read back, but no task here drives a
-  DMA channel: the DMA chapter is where a timer's request meets an
-  engine, and that is the chapter that will use them.
+- **A task of this chapter that owns a DMA channel.** The enables, the
+  burst engine's registers and the two addresses a controller is
+  pointed at are implemented, and the DMA chapter drives them on the
+  silicon - an update request pouring compares into a channel lap
+  after lap, another sampling a second timer's counter, and the burst
+  engine walking four registers per request
+  ([dma.md](dma.md)). What no task here does is OWN the channel: which
+  one to spend is the program's choice on a family where the channel
+  IS the request, so the arrangement stays the caller's.
 - **The 32-bit TIM5 is compiled and not driven.** It exists on the
   128 KB part alone, which no board here carries; the family fixture
   instantiates every verb of it and the bench has never seen one.

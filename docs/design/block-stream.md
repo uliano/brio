@@ -22,9 +22,10 @@ then, it moves in the open.
 ## The two concepts
 
 The contract is about BLOCKS, not about DMA. Nothing below asks how a
-buffer gets full or drained; on the two ARMv6-M strata both concepts
-are satisfied by DMA engines, and a machine with no DMA can satisfy
-them from an interrupt handler filling the same buffers.
+buffer gets full or drained; on the three strata that have block
+engines both concepts are satisfied by DMA engines, and a machine with
+no DMA can satisfy them from an interrupt handler filling the same
+buffers.
 
 - **`BlockSource`** - the capture shape: `element` (the sample type),
   `ready()` (the filled block, or null - pointer-to-volatile, because

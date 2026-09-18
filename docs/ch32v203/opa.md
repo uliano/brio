@@ -192,8 +192,11 @@ Driver gaps, each with its reason:
   input channel of TIMx"; no register of this chapter selects such a
   route, and the timer chapter's own input tables do not name the
   amplifier. What the sentence means on this family is not established
-  here, and the pad path - the output pad IS a timer channel pad on some
-  of these pins - is the timer chapter's to measure.
+  here; what a suite could show is the PAD PATH - the output pad IS a
+  timer channel pad on some of these pins, and a pad driven by one
+  peripheral reaches another's input on this family
+  ([tim.md](tim.md)) - which would prove a route through the pin and
+  not the internal one the datasheet's sentence claims.
 
 Implemented but not bench-verified, each with what would measure it:
 

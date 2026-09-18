@@ -76,12 +76,13 @@ the two every part has.
 | stm32f4 | `Clock<src, hz, hse_hz, hse_mode>` and `DynamicClock<Rates<R0, R1, ...>, Users...>` (`stm32f4/clock.hpp`) | the STM32G0's model with the APB prescalers UNPINNED: `pclk1_hz`/`pclk2_hz` beside `hz` (45 and 90 MHz at 180) and `apb_hz(clock, bus)` for a peripheral's own rate, `clock_hz` still HCLK; the sources spell the root (`hsi`, `hse`, `pll_hsi`, `pll_hse` with the HSE's rate and mode); a rate is a TUPLE OF FIVE - root, regulator scale, over-drive, flash latency, both APB prescalers - and the frequency LADDERS are keyed on the part class in the reserve, a rate refused where no manual was read; the dynamic switch is NOT direction-aware because it cannot be: neither the PLL nor the scale nor the over-drive bits may be written while the PLL is SYSCLK, so every switch PARKS ON THE HSI and everything after the park is a rise; `restore()` after a Stop re-runs the rate in force with no fan-out |
 | host | none | the host tests run on the virtual clock of `HostPlatform`; nothing there has a rate |
 
-`delay_us` is one name with one difference of contract: on the two
-ARMv6-M strata and on the QingKe one it is capped below one kernel
-tick and REFUSES (a `bool`, nothing spent) a wait that long - a tick
-or more is `TimeEvent` territory - where the AVR's has no cap and
-returns nothing (`avrdx/delay.hpp`, `cortexm/delay.hpp`,
-`ch32v00x/delay.hpp`).
+`delay_us` is one name with one difference of contract: on every target
+but the AVR it is capped below one kernel tick and REFUSES (a `bool`,
+nothing spent) a wait that long - a tick or more is `TimeEvent`
+territory - where the AVR's has no cap and
+returns nothing (`avrdx/delay.hpp`, `cortexm/delay.hpp` for the
+Cortex-M families, `ch32v00x/delay.hpp` and `ch32v203/delay.hpp` for
+the two QingKe ones).
 
 ## A rate change is a synchronous fan-out, not an event
 

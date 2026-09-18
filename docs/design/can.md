@@ -135,7 +135,7 @@ its own AO, as the suites do.
 
 ### Realizations
 
-Common to the three: `CanError` as the last-error code, the natural
+Common to the two: `CanError` as the last-error code, the natural
 identifier and the length in bytes on whatever frame the stratum
 speaks, the sample point in per mille. What differs is the frame's
 reach, the timing's units and the search's rule, and how the error

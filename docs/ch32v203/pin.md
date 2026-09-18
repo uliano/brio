@@ -331,17 +331,18 @@ Driver gaps, each with its reason:
   wants a finger on the board; with nobody pressing, the pad read low a
   thousand times in a row, which is consistent with the vendor's
   "active high, no external resistor" and proves none of it.
-- **A pad as a wake source out of a real sleep.** The lines are
-  measured against the platform's WFE idle, which is the CPU's own
-  wait; what a Sleep or a Stop costs and how the clocks come back is
-  the power chapter's, and this stratum has no sleep site yet.
 - **PC14/PC15 as GPIO** (10.2.11.1: the LSE's pads are port C's pins
-  with LSEON clear): the backup domain belongs to the RTC chapter, and
-  this board's 32 kHz crystal sits on them.
-- **The remap columns of the chapters that do not exist yet** (the
-  timers, SPI, I2C, CAN, the fourth USART): the tables are data here and
-  the fields are verbs, but no signal has been followed onto a remapped
-  pad, which is what each of those chapters will do with its own pads.
+  with LSEON clear): this board's 32 kHz crystal sits on them and the
+  backup domain's own chapter runs on it ([rtc.md](rtc.md)), so
+  stopping that oscillator to take the two pads would cost that
+  chapter its clock.
+- **The remap columns no chapter has followed a signal onto**: CAN's
+  two, which have no driver here, and I2C1's second, whose pads carry
+  no bus on this board ([i2c.md](i2c.md)). The tables are data here
+  and the fields are verbs; where a chapter uses a column it measures
+  the signal on the pad - the fourth serial port's second column
+  ([usart.md](usart.md)), SPI1's second and TIM2's partial remap under
+  it ([spi.md](spi.md)).
 - **The fields of other classes and absent blocks**: the ADC's four
   trigger remaps, the Ethernet's two, CAN2's, SPI3's, the FSMC's and
   PCFR2's TIM8/TIM9/TIM10 fields. Each belongs to a device class this
@@ -366,10 +367,13 @@ Implemented but not bench-verified, each with what would measure it:
   measure the rest is a board. Three answers are the CH32V203RB's
   alone: UART4's other table, USART3's two columns, and EXTI lines 19
   and 21.
-- **The four peripheral wake-up lines** (the PVD's, the RTC alarm's and
-  the two USB ones). `ExtiLine<n>` reaches each, and each is measured
-  by the chapter that owns its source - PWR, the RTC and the sleep
-  sites.
+- **The two USB wake-up lines.** `ExtiLine<n>` reaches each of the four
+  peripheral lines, and two of them are measured by the chapter that
+  owns the source - the PVD's through its software trigger
+  ([sleep.md](sleep.md)) and the RTC alarm's as an interrupt, as an
+  event and as a Stop's end ([rtc.md](rtc.md), [sleep.md](sleep.md)).
+  What would measure the other two is the USB chapter, whose controller
+  raises them.
 - **The configuration lock on a whole mask**, and what a peripheral
   reset pulse does to a standing lock: the suite locks one pin of one
   port, which is all a board with one free port-C pad allows.

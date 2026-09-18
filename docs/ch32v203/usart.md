@@ -320,20 +320,23 @@ Driver gaps, each with its reason:
 - **The synchronous mode against a peer**: this side is the master and
   its CK pad is counted, so what a slave puts on RX in step with that
   clock is a second board's answer.
-- **USART3**: the instance is on the part and its default pads are free,
-  but nothing on this board speaks to it; it arrives with the first
-  program that needs a third port.
+- **USART3**: the instance is on the part, and its default column is
+  PB10 and PB11 - the same two pads I2C2 answers on
+  ([i2c.md](i2c.md)). Nothing on this board speaks to a third serial
+  port; it arrives with the first program that needs one.
 - **CTLR4, M_EXT, MS_ERR and RX_BUSY**: another device class's, by their
   own notes; nothing here reaches them.
 
 Implemented but not bench-verified, each with what would measure it:
 
 - **The two DMA engine slots on this chapter**: the request table is
-  checked at compile time and the DMA document measures the channels
-  themselves, but a round trip through the transport - the transmit
-  engine draining the ring and the receive engine filling it, published
-  by `harvest()` - is the loopback letter's, and the strap PA2 to PA3
-  was not on the board.
+  checked at compile time, the DMA document measures the channels
+  themselves and the two bus chapters measure the same engine types on
+  a wire ([dma.md](dma.md), [spi.md](spi.md)), but a round trip
+  through THIS transport - the transmit engine draining the ring and
+  the receive engine filling it, published by `harvest()` - is the
+  loopback letter's, and PA2 to PA3 is the one of the two straps above
+  that the board does not carry.
 - **Four kilobytes at 921600 baud**: the loopback letter's, waiting on
   the same strap.
 - **`error_interrupt()` (EIE, the FE/ORE/NE vector under DMAR)**: an

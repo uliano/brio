@@ -358,8 +358,10 @@ Driver gaps:
 - **The collision case, two targets sharing one address.** An instance
   is a host or a target and never both, so two boards can only ever be
   one of each: the case needs a third party on the wire.
-- **A wake from a sleep on an address match.** This family's power
-  chapter does not offer one.
+- **A wake from a sleep on an address match.** The peripheral wake-up
+  lines of this family are the PVD's, the RTC alarm's and the USB's
+  ([pin.md](pin.md)), and what ends a Stop is one of those or a pad's
+  ([sleep.md](sleep.md)): no register of this block asks to be one.
 
 Implemented, not bench-verified (each with what would measure it):
 

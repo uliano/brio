@@ -440,7 +440,10 @@ Driver gaps, each with its reason:
 - **`NvHeap` and `NvJournal` over the medium**, by decision: what a
   program on this family gets is the band and its bounds. The journal
   would in any case need to be taught an erased pattern that is not
-  0xFF before it could stand here.
+  0xFF before it could stand here: a fresh zone reads 0xE339E339 word
+  after word (measured below), where the format finds the end of a half
+  by looking for a cell of 0xFF bytes
+  ([../design/nv-journal.md](../design/nv-journal.md)).
 - **A two-byte cell for the medium.** The chapter's standard
   programming writes a half-word and the bench measured that such a
   cell takes pass after pass between erases, so the grain a small-value

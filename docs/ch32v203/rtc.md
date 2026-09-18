@@ -104,9 +104,10 @@ Per the manual (table 9-2 and 9.4.2's line list): the second, the alarm
 and the overflow share the RTC's own line; the ALARM ALONE also reaches
 EXTI line 17 and its own line. The second path is what survives a
 low-power mode, because an EXTI line is asynchronous and needs no
-clock - which is what the power chapter will arm. A handler on that
-line clears TWO flags, the EXTI line's and the RTC's ALRF, because
-either one left standing re-enters the handler for ever.
+clock - which is the line the power chapter's timed sleep site arms,
+and its alarm is what ends a Stop there ([sleep.md](sleep.md)). A
+handler on that line clears TWO flags, the EXTI line's and the RTC's
+ALRF, because either one left standing re-enters the handler for ever.
 
 MEASURED, AND NEITHER CHAPTER SAYS IT: the line fires with RTC_CTLRH's
 own alarm enable CLEAR. The event leaves the peripheral by itself, so
@@ -391,7 +392,9 @@ Driver gaps, each with its reason:
   of VDD on a battery, and the bench board has no VBAT cell fitted and
   no way to cut VDD under program control. What the suite reaches is a
   software reset, which is a weaker claim; a Standby wake is a weaker
-  one still and belongs to the power chapter.
+  one still, and that one the power chapter measures - the domain's
+  own crystal still running the alarm that ended it
+  ([sleep.md](sleep.md)).
 - **The calibration trimmed against a reference.** CAL is written and
   read back, and it can only SLOW the clock - so trimming it means
   measuring a crystal that is already 63 ppm slow against something

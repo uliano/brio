@@ -155,9 +155,10 @@ answer false instead of refusing to compile.
 
 What is NOT in this file: RCC_BDCTLR - the LSE, the RTC's clock select
 and RTCEN - because the whole register is write-protected by PWR's DBP
-bit and belongs with the backup domain, and RCC_RSTSCKR's reset flags,
-which are [reset.hpp](../../brio/ch32v203/reset.hpp)'s; this file owns
-only the two LSI bits that share that register.
+bit and belongs with the backup domain, where `RtcDomain` owns it
+([rtc.md](rtc.md)), and RCC_RSTSCKR's reset flags, which are
+[reset.hpp](../../brio/ch32v203/reset.hpp)'s; this file owns only the
+two LSI bits that share that register.
 
 ## How to use it
 
@@ -283,11 +284,6 @@ HALVED input, which is what exercises the EXTEN bit.
 
 Driver gaps, each with its reason:
 
-- **The LSE, RCC_BDCTLR and the RTC's clock select.** The whole
-  register is in the backup domain, write-protected by PWR_CTLR's DBP
-  bit, and its three fields are the RTC's to sequence: they arrive with
-  that chapter, the way the STM32F4 stratum keeps them in `RtcDomain`
-  and leaves the LSI in the clock file.
 - **RCC_CFGR2.** Its PLL2, PLL3, PREDIV and I2S/RNG selectors belong to
   the D8C classes of other families; the one field of it a part of this
   series could use is the USBFS clock source, which belongs with that
@@ -295,11 +291,14 @@ Driver gaps, each with its reason:
 - **The oscillator calibration registers of table 3-2** (HSE_CAL_CTRL,
   the five LSI32K ones): the table's own note applies them to the
   CH32V20x_D8W, which is another family.
-- **PB1 above 72 MHz.** The bus is capped there and the datasheet says
-  144; where the real ceiling lies is open. What would answer it is a
-  peripheral ON PB1 measured at 96 and 144 MHz - a USART's divisor
-  accuracy against a known sender, or a timer's rate against the
-  crystal - which wants the timers this stratum does not yet carry.
+- **PB1 above 72 MHz.** The bus is capped there - `pclk1_hz` halves
+  HCLK above it - and the datasheet says 144; where the real ceiling
+  lies is open, and the one measurement that bears on it is the USB
+  controller's, which lives on PB1 and lost every packet of an
+  enumeration with the bus undivided. The instruments to answer it are
+  now on the chip (a timer on PB1 counted against the crystal, a
+  USART's divisor against a known sender); what is missing is a build
+  with the cap lifted, which this driver does not offer.
 - **The Ethernet prescaler's effect.** `eth_prescaler()` writes the
   field on the one part of the family with a MAC, and the block itself
   is another chapter's.
@@ -316,14 +315,19 @@ Implemented but not bench-verified:
   firing it wants the crystal killed on a running board, which is a
   wire cut or a shorted pad and not something a suite can stage.
 - **The clock output's FREQUENCY.** The multiplexer is read back but
-  nothing counts what leaves the pad; what would measure it is a
-  capture timer, on this chip or on a peer board.
+  nothing counts what leaves the pad. The instrument is on the chip -
+  a timer meter ([tim.md](tim.md)) - and what it wants is a WIRE, PA8
+  being TIM1's own channel 1 pad and so unable to count what it
+  carries.
 - **The USB divider at 48 and 96 MHz.** The /3 code is what the USB
   console runs on; the other two are arithmetic this suite reads back
   but no enumeration has used.
 - **`hse_in_low_power()` and `adc_duty_extended()`**: one is the
-  CH32V203RB's bit, the other wants the converter. Both are written and
-  read back nowhere but a family compile.
+  CH32V203RB's bit; the other writes the duty-cycle bit beside the
+  converter's prescaler, which no letter of that chapter's suite turns
+  on ([adc.md](adc.md)) - what would measure it is a conversion timed
+  with the bit both ways. Both are written and read back nowhere but a
+  family compile.
 - **Every part but the CH32V203C8.** The whole chapter compiles for all
   nine both ways the hardware prologue can be built (`brio check
   ch32v203`), including the CH32V203RB's own PLL arithmetic - its

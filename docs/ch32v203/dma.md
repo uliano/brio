@@ -201,10 +201,13 @@ whose suite carries the number.
 ### The transport's two slots
 
 [brio/ch32v203/usart.hpp](../../brio/ch32v203/usart.hpp)'s `Uart` takes
-a transmit engine and a receive engine as its last two template
+a transmit engine and a receive engine as two of its template
 parameters, `NoDmaEngine` by default: the transmit engine drains the TX
 ring by contiguous runs and the receive engine fills the RX ring's free
-run. `harvest()` publishes what arrived and `dma_isr()` is the ISR body
+run. The two bus engines take the same pair in the same place -
+`SpiHost` carries a block's data phase on them ([spi.md](spi.md)) and
+`I2cHost` a tenure's ([i2c.md](i2c.md)).
+`harvest()` publishes what arrived and `dma_isr()` is the ISR body
 of whichever channels the transport owns; `dma_faults()` counts the
 blocks thrown away. An engine is REFUSED on any channel but the
 instance's own, which the request table answers. Without an engine every
@@ -339,13 +342,6 @@ the ruler.
 
 Driver gaps, each with its reason:
 
-- **The engine slots of every transport but the serial one.** SPI and
-  I2C have their rows in table 11-5 and their drivers do not exist on
-  this stratum yet; each gets its two slots when its chapter is written.
-- **The peripherals whose requests exist and have no driver here yet**:
-  SPI1's and SPI2's four, I2C1's and I2C2's four. The table names them
-  and `DmaRequestOf` will hand out their channels; what is missing is
-  the peripheral driver on the other end, not the channel.
 - **Half-transfer as a verb of the engines**: the flag and its enable
   are the channel's (`DmaFlag::half`, `arm()`), and no engine acts on
   the midpoint - the block source stops at every block instead, for the
@@ -358,11 +354,15 @@ Implemented but not bench-verified, each with what would measure it:
   by none of the five addresses the suite reads from. A peripheral that
   raises it, or a write into flash (which 11.1 lists as a legal
   destination and the bench has not tried), would measure it.
-- **The receive engine on a wire.** The transmit half of the transport
-  and the standing-run half of the receive one are measured with the
-  board bare; what has no listener is the round trip. A strap between
-  PA2 and PA3 - USART2's own two pads - is what the suite's letter g
-  detects and what would close it in one run.
+- **The SERIAL transport's round trip on a wire.** The engines
+  themselves carry a wire's data in the two bus chapters - sixteen
+  bytes each way through SPI2's pair and a tenure's shapes through
+  I2C1's, byte-exact against a peer board ([spi.md](spi.md),
+  [i2c.md](i2c.md)) - and this suite measures the transmit half and the
+  standing receive run with the board bare. What has no listener is the
+  serial pair's round trip: a strap between PA2 and PA3, USART2's own
+  two pads, is what the suite's letter g detects and what would close
+  it in one run.
 - **Widening and truncation between unequal widths** (table 11-1): the
   channel takes two widths and every transfer above sets them equal. A
   copy with PSIZE and MSIZE apart, compared against the table's rows,

@@ -249,14 +249,17 @@ board had survived its ten refreshes before that.
 Driver gaps, each with its reason:
 
 - **The option byte that starts the independent watchdog at every boot**
-  (IWDG_SW). The option bytes are the flash chapter's, and nothing here
-  writes them; what this driver states is that a hardware-started
-  watchdog needs no start key, which is the chapter's own sentence.
+  (IWDG_SW). The option bytes are the flash chapter's and are decoded
+  read-only there, by that chapter's own decision
+  ([nvm.md](nvm.md)); what this driver states is that a
+  hardware-started watchdog needs no start key, which is the chapter's
+  own sentence.
 - **The debug module's freeze bits** (chapter 34), which hold either
-  counter while a probe has the core halted. They belong to the debug
-  chapter, which this stratum has not written; every measurement above
-  was taken with the program running free, so none of them depends on
-  which way those bits stand.
+  counter while a probe has the core halted. That register is a core
+  CSR the power chapter READS and never writes, because a `csrw` to it
+  resets the part on this silicon ([sleep.md](sleep.md)), so no verb
+  here sets them; every measurement above was taken with the program
+  running free, so none of them depends on which way they stand.
 - **The window watchdog through a low-power mode.** Its counter runs on
   the peripheral bus clock, which a Stop takes away, and what it does
   across one is untested; the independent one IS measured there and the

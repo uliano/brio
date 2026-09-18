@@ -332,19 +332,19 @@ cites another stratum's.
 
 | contract | its table | the exception in one phrase |
 |---|---|---|
-| the platform | [kernel.md](kernel.md), section 11 | `atomic_width` 1 on the AVR; `idle()` takes the armed mode three different ways; a breakpoint is a NOP or a HardFault; `idle_until` on the tickless G0 alone |
+| the platform | [kernel.md](kernel.md), section 11 | `atomic_width` 1 on the AVR; `idle()` takes the armed mode three different ways, and is a WFE on the two QingKe cores; a breakpoint is a NOP, a HardFault or an `ebreak`; `idle_until` on the tickless G0 alone |
 | the timebase | [kernel.md](kernel.md), section 9 | the AVR's tick runs through every sleep; SysTick stops in standby and a Stop; the LPTIM one counts through and is tickless |
 | panic, reset, watchdog | [kernel.md](kernel.md), section 10 | the record's survival (EEPROM, RWWEE journal, bank 2); the fault body as the panic path on the ARM strata; the watchdog kick under two names and three contracts |
 | the ring | [ring.md](ring.md) | the atomic width alone |
 | the clock | [clock.md](clock.md) | prescalers (AVR), no dynamic clock by position (SAM), a pack of rate tuples with a regime (G0), one divider under one root (CH32V00x); `delay_us` capped on the 32-bit strata |
-| the Uart | [serial.md](serial.md) | seventeen verbs in common; four ways to name pins, one or three vectors, DMA slots on four strata and bulk verbs on two |
+| the Uart | [serial.md](serial.md) | seventeen verbs in common; four ways to name pins, one or three vectors, DMA slots on six strata and bulk verbs on four |
 | the SPI bus | [spi-bus.md](spi-bus.md) | the rate's unit (an enum or a divisor), a frame size on the G0 and the CH32V00x, the client four surfaces by position with one published integer in common |
 | the I2C bus | [i2c-bus.md](i2c-bus.md) | the rate arithmetic's shape; `actual_scl_hz`/`scl_hz` and `bus_state`/`idle` are NOT one function under two names |
 | CAN | [can.md](can.md) | the frame's reach (classic against the FD superset), the timing's units and the search's rule, the error state as three flags or as one observable |
 | the power model | [power.md](power.md) | each family's ladder mapping; where the tick stops and which site resyncs it |
 | the USB device stack | [usb.md](usb.md) | each family's endpoint controller behind the packet contract, and what its RAM or FIFO adds |
 | flash storage | [nv-heap.md](nv-heap.md), [nv-journal.md](nv-journal.md) | the geometries; the AVR keeps its small values in the EEPROM |
-| block streams | [block-stream.md](block-stream.md) | the engine names identical on the two strata that have block engines, the CH32V00x's and the STM32F4's transfer engines waiting for a block user; the circular mode serves a player and not a source |
+| block streams | [block-stream.md](block-stream.md) | the engine names identical on the three strata that have block engines, the CH32V00x's and the STM32F4's transfer engines waiting for a block user; the circular mode serves a player and not a source |
 | meters | [meters.md](meters.md) | `TimIntervalMeter` is not a pulse-width meter |
 | analog | [analog.md](analog.md) | `Ref` is four vocabularies because a reference is four different things, one of them the rail alone; `set`/`write` on the DAC |
 | pins and PWM channels | below | - |
@@ -354,8 +354,8 @@ here.
 
 **Pins.** Common to all: `Pin<'A', 5>` and `PinRef`, `set` /
 `clear` / `toggle` / `read` / `output` / `input(PinPull)` / `port` /
-`ref`, and `duty()` (a `Pin` is a `PwmChannel` of one step); the three
-platforms marked supported add `pull(PinPull)` / `is_output` /
+`ref`, and `duty()` (a `Pin` is a `PwmChannel` of one step); avrdx,
+samc21 and stm32g0 add `pull(PinPull)` / `is_output` /
 `configure(PinConfig)`. What differs is what a pad can be told to do,
 and how it is handed to a peripheral.
 
@@ -380,6 +380,7 @@ their timer, and an application picks one in its board file:
 | stm32g0 | `TimPwm`, `TimPairPwm` (the complementary pair, on the timers with a break and dead-time unit), `LptimPwm` (on a timer that keeps counting in Stop) | the timers refuse a dynamic clock: their periods are PCLK cycles and no rebase can keep them |
 | ch32v00x | `TimPwm<Tim, ch, top>`, `TimPairPwm<Tim, ch, top>` (the complementary pair: under TIM1's break unit as OCx/OCxN, or on TIM2 as channel ch with channel ch + 2 under DTCR, the dead time in each block's own unit) (`ch32v00x/tim.hpp`) | the G0's two names on the F1's timers; a TIM2 pair costs two channels where a TIM1 pair costs one; the timers take a static clock alone, as on the G0 |
 | ch32v203 | `TimPwm<Tim, ch, top>`, `TimPairPwm<Tim, ch, top>` (the complementary pair with dead time, on TIM1 alone - the general-purpose timers of this family have no break unit and no complementary output) (`ch32v203/tim.hpp`) | the G0's two names on the F1's timers; the dead time is counted in tDTS - TIMxCLK divided by CTLR1.CKD and NOT by the counter's prescaler - so a pair holds the same absolute dead band at every PWM frequency; the timers take a static clock alone, as on the G0, and what they count is HCLK at every rate this stratum makes |
+| rp2040 | `PwmOutput<pin, top>`, `PwmPair<pin_a, pin_b, top>` (a slice's A output and its complement on B) (`rp2040/pwm.hpp`); `PioPwm<n, sm, pin, period>` (`rp2040/pio.hpp`) | the channel is named by its PAD and not by a timer - eight slices of two outputs, GPIO n belonging to slice (n / 2) mod 8 - and `max` is TOP + 1; the pair's DEAD TIME IS ARITHMETIC, two levels and an inversion, because no dead-time unit exists here, so it lands on one edge in the plain mode and on both in the phase-correct one; and the second realization is not a timer at all but a state machine counting the period, the only stratum where a PWM channel is a program |
 | stm32f4 | `TimPwm<Tim, ch, top>`, `TimPairPwm<Tim, ch, top>` (the complementary pair with dead time, on TIM1 and TIM8 alone) (`stm32f4/tim.hpp`) | the G0's two names on this family's timers; the dead time is counted in tDTS - the timer clock divided by CR1.CKD and NOT by the counter's prescaler - so a pair holds the same absolute dead time at every PWM frequency; the timers take a static clock alone, as on the G0, and what they count is HCLK or twice their APB clock (RCC_DCKCFGR's TIMPRE), never the bus rate |
 | host | none | - |
 

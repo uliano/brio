@@ -59,17 +59,18 @@ silicon's own resource. The app's ISR binds the vector.
 
 ### Realizations
 
-Common to the seven: the Request field for field (`addr`, `tx`,
+Common to the eight: the Request field for field (`addr`, `tx`,
 `tx_len`, `rx`, `rx_len`, `reply`, `speed`), `I2cSpeed` word for word
-(the CH32V00x's and the STM32F4's stop at `fast_400k`: their peripherals
-have no Fm+), the
+(the CH32V00x's, the CH32V203's and the STM32F4's first block stop at
+`fast_400k`: those peripherals have no Fm+), the
 engine verbs `init`, `start`, `isr`, `status`, `rebase`, `recover`,
 `release`, `unstick`, the empty probe (both lengths zero) served by
-all six - on the RP2040 as a one-byte read, its command FIFO having
+all eight - on the RP2040 as a one-byte read, its command FIFO having
 no address-only entry -, and the vocabulary `I2cDone` / `i2c_*`
-produced ON THE WIRE by each - measured against a second chip on five,
-against the chip's other instance on the RP2040 and against the touch
-controller its board carries on the STM32F4. What differs is
+produced ON THE WIRE - measured against a second chip on five,
+against the chip's other instance on the RP2040, against the touch
+controller its board carries on the STM32F4 and, on the second design
+of that family, against a bus with nobody on it. What differs is
 the resource under the task and the shape of the rate arithmetic each
 chapter imposes.
 
