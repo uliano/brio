@@ -5,8 +5,9 @@
  * other families' tag verbatim (samc21/sercom.hpp is where its reasoning
  * is written): `present` is the only thing a transport asks of an engine,
  * with `if constexpr`, so every engine branch disappears from a Uart that
- * names none. The real engines will live in rp2350/dma.hpp, so that a
- * program with a serial port and no DMA never sees the block.
+ * names none. The real engines live in rp2350/dma.hpp (sixteen channels,
+ * four interrupt lines, 12.6), so that a program with a serial port and
+ * no DMA never sees the block.
  *
  * The REQUEST NUMBERS live here too (datasheet 12.6.4.1, the system DREQ
  * table): on this chip a request is a field any channel takes, so a

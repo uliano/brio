@@ -54,10 +54,10 @@ DOWN and a receiver enabled over a low line takes a break.
 
 **THE DREQ NUMBERS ARE NOT THE RP2040'S** - not one row of the table is.
 A third PIO and twelve PWM slices against eight move everything above the
-first PIO's rows: the UARTs sit at 28..31 where they sat at 20..23. The
-engine slots of the transport are empty here until the DMA chapter, and
+first PIO's rows: the UARTs sit at 28..31 where they sat at 20..23.
 `rp2350/dma_engine.hpp` carries the table so that a transport can name a
-request without including a controller.
+request without including a controller, and the engines that take those
+requests are [dma.md](dma.md)'s.
 
 **THE INTERRUPT NUMBERING IS SHARED BETWEEN THE ARCHITECTURES** (3.8.4.2),
 so UART0_IRQ is line 33 and UART1_IRQ line 34 whichever processor pair is
@@ -223,9 +223,6 @@ rather than to this chip - hardware flow control, IrDA, the modem status
 signals, the stick-parity bit - are in
 [../pl011/README.md](../pl011/README.md) and are not repeated here.
 
-- The DMA engine slots: they exist and are empty, because this chip's DMA
-  has no driver yet. The request numbers they will be handed are already
-  in `rp2350/dma_engine.hpp`.
 - Hardware flow control has a second cost here that it has nowhere else:
   claiming a group's CTS and RTS pads for flow control is claiming the
   same two pads that are the instance's SECOND data pair, so a program
@@ -233,6 +230,10 @@ signals, the stick-parity bit - are in
 
 Implemented but not bench-verified, each with what would measure it:
 
+- THE TWO DMA ENGINE SLOTS, now that there is a controller to fill them
+  ([dma.md](dma.md)): `test_rp2350_dma`'s letter j puts an engine in each
+  slot of the second instance under the loop-back, and its letter k runs
+  the console's own transmitter on one.
 - THE RECEIVE HALF OF THE SECOND COLUMN. The transmitter is proven on its
   alternate pad by watching the pad itself; the receiver on an alternate
   pad is proven only as far as the pad register - no wire of this bench
