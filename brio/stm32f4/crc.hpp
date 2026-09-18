@@ -11,9 +11,11 @@
  * version of this peripheral grew. What it computes is therefore exactly
  * one function, the one catalogued as CRC-32/MPEG-2: initial value
  * 0xFFFFFFFF, most significant bit first, no reflection of input or
- * output, no final inversion. `crc32_ethernet()` below is that same
- * function in constexpr C++, and the two agreeing is what the bench suite
- * measures.
+ * output, no final inversion. `crc32_ethernet()` is that same function in
+ * constexpr C++ and lives in util/crc.hpp, beside the CRC-16 the records
+ * use, because it is not this family's: more than one target carries a
+ * block with this one polynomial wired in. The two agreeing is what the
+ * bench suite measures.
  *
  * FIVE FACTS THAT SHAPE THE FILE.
  *
@@ -80,6 +82,7 @@
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/device_tables.hpp"
+#include "util/crc.hpp"
 
 namespace brio {
 
@@ -87,62 +90,16 @@ namespace brio {
 // The polynomial, in software
 // =============================================================================
 
-/// The generator this block has wired in (4.2): x^32 + x^26 + x^23 + x^22
-/// + x^16 + x^12 + x^11 + x^10 + x^8 + x^7 + x^5 + x^4 + x^2 + x + 1.
-inline constexpr uint32_t crc32_ethernet_poly = 0x04C11DB7u;
-
-/// What CRC_DR holds after a reset, and the initial value every software
-/// computation below starts from (4.4.1's reset value).
-inline constexpr uint32_t crc32_ethernet_init = 0xFFFFFFFFu;
-
-/**
- * One byte into a running CRC-32, most significant bit first, no
- * reflection - the primitive the hardware's word-wise operation is built
- * out of. Bitwise and table-free: eight shifts a byte, which is what the
- * kernel's crc16 does too (util/crc.hpp) and for the same reason - a
- * 1 KB table would cost more than it saves in a program that has a
- * hardware unit for the bulk of it.
- */
-constexpr uint32_t crc32_ethernet_byte(uint32_t crc, uint8_t byte) {
-    crc ^= static_cast<uint32_t>(byte) << 24;
-    for (uint8_t i = 0; i < 8; ++i) {
-        crc = (crc & 0x80000000u) != 0u ? ((crc << 1) ^ crc32_ethernet_poly) : (crc << 1);
-    }
-    return crc;
-}
-
-/// One 32-bit word into a running CRC, in the order the silicon takes it:
-/// the word's most significant byte first. Feeding `w` here and writing
-/// `w` to CRC_DR are the same operation.
-constexpr uint32_t crc32_ethernet_word(uint32_t crc, uint32_t word) {
-    crc = crc32_ethernet_byte(crc, static_cast<uint8_t>(word >> 24));
-    crc = crc32_ethernet_byte(crc, static_cast<uint8_t>(word >> 16));
-    crc = crc32_ethernet_byte(crc, static_cast<uint8_t>(word >> 8));
-    return crc32_ethernet_byte(crc, static_cast<uint8_t>(word));
-}
-
-/// A run of words from the initial value - the whole checksum in software,
-/// for a constant known at compile time, for a program whose block is busy
-/// with something else, and for the bench suite to judge the silicon
-/// against.
-constexpr uint32_t crc32_ethernet(const uint32_t* words, size_t count) {
-    uint32_t crc = crc32_ethernet_init;
-    for (size_t i = 0; i < count; ++i) {
-        crc = crc32_ethernet_word(crc, words[i]);
-    }
-    return crc;
-}
-
-/// A run of BYTES in software, for the length this unit cannot take
-/// (anything that is not a whole number of words) and for the published
-/// check value the family fixture pins the implementation to.
-constexpr uint32_t crc32_ethernet_bytes(const uint8_t* bytes, size_t count) {
-    uint32_t crc = crc32_ethernet_init;
-    for (size_t i = 0; i < count; ++i) {
-        crc = crc32_ethernet_byte(crc, bytes[i]);
-    }
-    return crc;
-}
+// THE FUNCTION IS NOT THIS FAMILY'S, so it does not live here.
+// `crc32_ethernet_poly`, `crc32_ethernet_init`, `crc32_ethernet_byte`,
+// `crc32_ethernet_word`, `crc32_ethernet` and `crc32_ethernet_bytes` are
+// util/crc.hpp's, beside the CRC-16 the stored records carry: more than
+// one target has a block with this one polynomial wired in and no knob
+// to change it, so one function keeps one home and every such block is
+// judged against the same model.
+//
+// What stays here is the PACKING, which is the block's own: how a byte
+// stream becomes the words this data register takes.
 
 /// Four bytes as the word that makes the unit's answer the byte stream's:
 /// `b0` is the first byte of the stream and the word's most significant.

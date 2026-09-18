@@ -1,6 +1,7 @@
 // Host tests for the nonvolatile-storage services: the record layout
 // and its only-changed-bytes write policy (util/nv_record.hpp), the
-// checksum they rest on (util/crc.hpp), the interrupt-paced writer AO
+// checksum they rest on and the CRC-32 that lives beside it
+// (util/crc.hpp), the interrupt-paced writer AO
 // (util/nv_writer.hpp) and the persistent panic record
 // (util/persistent_panic.hpp).
 //
@@ -126,6 +127,47 @@ TEST_CASE("crc16 is CCITT-FALSE and notices every single-byte change") {
         data[i] = static_cast<uint8_t>(data[i] ^ 0x01u);
     }
     CHECK(crc16(data, sizeof data) == base);
+}
+
+TEST_CASE("crc32_ethernet is CRC-32/MPEG-2, and one word is its four bytes") {
+    // THE PUBLISHED CHECK VALUE. Every catalogue gives CRC-32/MPEG-2 -
+    // polynomial 0x04C11DB7, initial value 0xFFFFFFFF, no reflection, no
+    // final XOR - a check value of 0x0376E6E7 over the nine ASCII bytes
+    // "123456789". That is what pins this model to something outside the
+    // repository; a silicon block with the polynomial wired in is then
+    // pinned to the model by its own bench suite.
+    static constexpr uint8_t check[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+    static_assert(crc32_ethernet_poly == 0x04C11DB7u);
+    static_assert(crc32_ethernet_bytes(check, sizeof check) == 0x0376E6E7u);
+    CHECK(crc32_ethernet_bytes(check, sizeof check) == 0x0376E6E7u);
+
+    // An empty message is the initial value: nothing fed, nothing
+    // changed - which is what makes reset-then-read a meaningful answer.
+    CHECK(crc32_ethernet(nullptr, 0) == crc32_ethernet_init);
+    CHECK(crc32_ethernet_bytes(nullptr, 0) == crc32_ethernet_init);
+
+    // A WORD IS FOUR BYTES, MOST SIGNIFICANT FIRST: the property that
+    // lets a program checksum a byte stream on hardware that takes only
+    // words, and the reason the word form can be trusted at all.
+    static constexpr uint32_t words[] = {0x31323334u, 0x35363738u};
+    CHECK(crc32_ethernet(words, 2) == crc32_ethernet_bytes(check, 8));
+
+    // Taken in pieces, the running value continues: two bytes fed one at
+    // a time from the initial value equal the pair fed together.
+    uint32_t running = crc32_ethernet_init;
+    running = crc32_ethernet_byte(running, '1');
+    running = crc32_ethernet_byte(running, '2');
+    CHECK(running == crc32_ethernet_bytes(check, 2));
+
+    // Every single-byte change is noticed.
+    uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const uint32_t base32 = crc32_ethernet_bytes(data, sizeof data);
+    for (uint8_t i = 0; i < sizeof data; ++i) {
+        data[i] = static_cast<uint8_t>(data[i] ^ 0x01u);
+        CHECK(crc32_ethernet_bytes(data, sizeof data) != base32);
+        data[i] = static_cast<uint8_t>(data[i] ^ 0x01u);
+    }
+    CHECK(crc32_ethernet_bytes(data, sizeof data) == base32);
 }
 
 TEST_CASE("an erased store holds no record") {

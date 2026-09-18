@@ -3,10 +3,13 @@
 Documents of record: RM0390 Rev 6 ch. 4 (RM0090 Rev 22 ch. 4 and RM0383
 Rev 4 ch. 3 are the same three registers under the same names); no item
 of ES0206 Rev 24, ES0298 Rev 8 or ES0287 Rev 6 is filed against this
-block. Driver: `stm32f4/crc.hpp` (`Crc`, and beside it the same
+block. Driver: `stm32f4/crc.hpp` (`Crc`, and `word_be`, the packing
+that turns a byte stream into the words this register takes). The same
 polynomial in software - `crc32_ethernet_byte`, `crc32_ethernet_word`,
-`crc32_ethernet`, `crc32_ethernet_bytes`, `word_be`). The family fixture
-is `test/family_stm32f4/crc.cpp`, which pins the software model to the
+`crc32_ethernet`, `crc32_ethernet_bytes` - is `util/crc.hpp`'s, beside
+the CRC-16 the stored records carry, because more than one target has a
+block computing exactly this function. The family fixture is
+`test/family_stm32f4/crc.cpp`, which pins the software model to the
 published check value of CRC-32/MPEG-2. Bench: `test_stm32f4_misc`,
 letter `a`.
 
@@ -18,8 +21,9 @@ value to choose, no bit or byte reversal and no final XOR - the four
 knobs the same peripheral grew on the STM32L4 and F7 do not exist here.
 What this unit computes is therefore exactly the function catalogued as
 **CRC-32/MPEG-2**: initial value 0xFFFFFFFF, most significant bit first,
-no reflection, no final inversion. `crc32_ethernet()` is that function
-in constexpr C++ and the bench letter is the two agreeing.
+no reflection, no final inversion. `crc32_ethernet()` (`util/crc.hpp`)
+is that function in constexpr C++ and the bench letter is the two
+agreeing.
 
 **The data register IS the operation.** A write to CRC_DR feeds a 32-bit
 word into the calculator; a read returns the running result. There is no
@@ -70,7 +74,9 @@ reserve.
 
 ## Types and verbs
 
-The polynomial, in software (constexpr, usable at compile time):
+The polynomial, in software (constexpr, usable at compile time). It is
+`util/crc.hpp`'s and not this chapter's, because the function belongs to
+every block that has it wired in; `word_be` is this driver's own:
 
 | Name | Meaning |
 |------|---------|
@@ -181,8 +187,8 @@ Driver gaps:
 - A byte-stream entry point that packs and pads: the packing rule is
   part of what a checksum MEANS (little-endian words, big-endian words,
   a padded tail), so it belongs to the format above this driver and not
-  to the block; `word_be` and `crc32_ethernet_bytes` are what a format
-  is built out of.
+  to the block; `word_be` and `util/crc.hpp`'s `crc32_ethernet_bytes`
+  are what a format is built out of.
 - Feeding CRC_DR from a DMA stream (memory-to-memory with the
   destination address fixed): `stm32f4/dma.hpp` has every verb it needs
   and no program here checksums enough to want it - born with its first

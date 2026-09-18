@@ -842,8 +842,11 @@ brio/                    the framework, twelve strata:
                            "one dimmable output" (Pin satisfies it, max 1)
     rgb_lamp.hpp           RgbLamp<R, G, B> over three PwmChannels, levels
                            scaled per channel max; Rgb triple
-    crc.hpp                crc16_byte/crc16: the record checksum (bitwise,
-                           no table)
+    crc.hpp                crc16_byte/crc16 (the record checksum) and
+                           crc32_ethernet* (CRC-32/MPEG-2: the one function
+                           a hardware block with the Ethernet polynomial
+                           wired in computes, and what its bench suite
+                           judges it against) - both bitwise, no table
     nv_record.hpp          NvStore/NvPacedStore concepts + NvRecord<T, S>
                            (magic+version+CRC-16 header, store() writes
                            only changed bytes)
@@ -1855,9 +1858,11 @@ brio/                    the framework, twelve strata:
                            CRC-32/MPEG-2), a WORD the only grain the register
                            takes, the reset that lands a read late and
                            swallows a word written behind it, and CRC_IDR the
-                           one piece of state a reset spares + the same
-                           polynomial in constexpr C++ (crc32_ethernet*),
-                           which is what the silicon is judged against
+                           one piece of state a reset spares + `word_be`, the
+                           packing that turns a byte stream into the words this
+                           register takes; the polynomial in constexpr C++
+                           (util/crc.hpp's crc32_ethernet*) is what the
+                           silicon is judged against
     rng.hpp                RNG: `Rng`, a monostate where the part has one (not
                            the F401, F411 or F446) - the 48 MHz domain checked
                            against the chapter's RATIO and not against 48 MHz,
