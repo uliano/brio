@@ -257,10 +257,11 @@ Driver gaps, each with its reason:
   chapter, which this stratum has not written; every measurement above
   was taken with the program running free, so none of them depends on
   which way those bits stand.
-- **Either watchdog through a low-power mode.** The independent one is
-  meant to keep counting in Stop and Standby; the power chapter is where
-  a sleep site and a watchdog meet, and there is no sleep site on this
-  stratum yet.
+- **The window watchdog through a low-power mode.** Its counter runs on
+  the peripheral bus clock, which a Stop takes away, and what it does
+  across one is untested; the independent one IS measured there and the
+  answer is in [sleep.md](sleep.md) - it does NOT count through a Stop,
+  so it is no way back out of one.
 
 Implemented but not bench-verified:
 

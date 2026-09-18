@@ -45,9 +45,14 @@
  * the pipeline and then nothing until the core wakes, while the timers
  * and the core's counter count the whole sleep (measured -
  * docs/ch32v203/dma.md, and it is the same starvation that kills the
- * USB controller in Sleep). `Dma::any_enabled()` is what the power
- * chapter asks so its sleep site can refuse while a channel is up; a
- * program with an engine running holds itself awake.
+ * USB controller in Sleep). SO A CHANNEL COUNTS ITSELF: the EN
+ * transition is one bus master entering and leaving
+ * (ch32v203/bus_activity.hpp), the kernel's idle path does not sleep
+ * while the count stands, and a sleep site refuses to arm over it -
+ * a program with an engine running holds itself awake without having
+ * to know that it does. `Dma::any_enabled()` is the same question
+ * asked of the registers instead, for a caller that wants the
+ * silicon's own answer.
  *
  * THE ENGINES. `DmaTxEngine<ch, Elem>` and `DmaRxEngine<ch, Elem>` are
  * the CH32V00x stratum's: a transmit engine pours a caller-owned run
@@ -90,6 +95,7 @@
 
 #include <stdint.h>
 
+#include "ch32v203/bus_activity.hpp"
 #include "ch32v203/clock.hpp"
 #include "ch32v203/device.hpp"
 #include "ch32v203/dma_engine.hpp"
@@ -248,7 +254,11 @@ struct Dma {
     static void stop_all() {
         open();
         for (uint8_t ch = 0; ch < dma_channel_count; ++ch) {
+            const bool was = (dma()->channel[ch].CFGR & dma_cfgr_en) != 0u;
             dma()->channel[ch].CFGR = 0;
+            if (was) {
+                BusActivity::left();
+            }
             dma()->channel[ch].CNTR = 0;
             dma()->channel[ch].PADDR = 0;
             dma()->channel[ch].MADDR = 0;
@@ -303,12 +313,27 @@ public:
 
     /// Enable or disable. Disabling a running channel abandons the block
     /// where it stands; CNTR then holds what was left.
+    ///
+    /// AND THIS IS WHERE THE FAMILY'S BUS ACTIVITY IS COUNTED. EN is the
+    /// bit that makes this channel a bus master, and a master that is up
+    /// forbids a sleep of any depth here (ch32v203/bus_activity.hpp), so
+    /// the TRANSITION is counted in the one verb every engine and every
+    /// task goes through - never the enable itself, which would count an
+    /// idempotent store twice.
     static void enable(bool on) {
         Dma::open();
+        const bool was = enabled();
         if (on) {
             regs().CFGR |= dma_cfgr_en;
         } else {
             regs().CFGR &= ~dma_cfgr_en;
+        }
+        if (on != was) {
+            if (on) {
+                BusActivity::entered();
+            } else {
+                BusActivity::left();
+            }
         }
     }
 
@@ -470,7 +495,11 @@ public:
     /// zeroed, the flags cleared.
     static void stop() {
         Dma::open();
+        const bool was = enabled();
         regs().CFGR = 0;
+        if (was) {
+            BusActivity::left();
+        }
         clear(DmaFlag::all);
     }
 };

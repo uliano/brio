@@ -58,10 +58,13 @@
  * staying awake works - the overflow interrupt wakes the core but the
  * packet is gone, a NAK'd endpoint still overflows; dividing HCLK
  * works down to 24 MHz, and 12 fails like the sleep.
- * So a program with USB drives the kernel with
- * step() and never idles; when this stratum has a power model, the
- * controller is a PrepareSleep voter and that is where the rule will
- * live.
+ * SO THE RULE IS A MECHANISM AND NOT AN INSTRUCTION TO THE
+ * PROGRAMMER: an attached controller counts itself as a bus master
+ * (ch32v203/bus_activity.hpp), idle() DOES NOT SLEEP while it is
+ * attached, and a sleep site refuses to arm over it - so a program
+ * with USB may drive the kernel any way it likes, the loop included,
+ * and what decides is the silicon's own state. `connect()` is where
+ * the count is held and released.
  *
  * WHAT IS NOT COVERED YET, each with its reason:
  *  - the DOUBLE BUFFER (EP_KIND on a bulk endpoint) and the
@@ -69,8 +72,11 @@
  *    double buffer changes the meaning of DTOG on every access - it is
  *    written when a program needs the bandwidth and can measure it.
  *  - SUSPEND's low-power half: the suspend and wake-up EVENTS are
- *    reported, but LPMODE and the regulator are not touched, because
- *    this stratum has no sleep site yet to agree with.
+ *    reported, but LPMODE and the regulator are not touched. What a
+ *    suspended controller would let the program sleep through is a
+ *    question for a meter, and the count above is deliberately held
+ *    from the pull-up to the detach and not from the first packet to
+ *    the suspend.
  *  - the USBFS host/device controller (ch. 23) on PB6/PB7, which is a
  *    DIFFERENT peripheral with its own registers, and the 1-wire mode
  *    of CNTR, which the manual gives to another family's lot numbers.
@@ -83,6 +89,7 @@
 
 #include <span>
 
+#include "ch32v203/bus_activity.hpp"
 #include "ch32v203/clock.hpp"
 #include "ch32v203/device.hpp"
 #include "ch32v203/pfic.hpp"
@@ -291,9 +298,24 @@ struct Usbd {
     /// full-speed device is there. It lives in EXTEN and not in this
     /// block (RM 33.2.1), so the store masks the lock-up flag out - that
     /// bit is write-one-to-clear and is not this driver's to take.
+    ///
+    /// AND IT IS WHERE THIS CONTROLLER COUNTS ITSELF AS A BUS MASTER.
+    /// From the pull-up to the detach the block reaches its packet
+    /// memory whenever the host speaks, and in a sleep of any depth it
+    /// cannot (the file header); so an attached controller holds one
+    /// count in ch32v203/bus_activity.hpp, which is what keeps the
+    /// kernel's idle path from sleeping and a sleep site from arming.
     static void connect(bool on) {
+        const bool was = pulled_up();
         const uint32_t ctr = exten()->CTR & ~exten_lkuprst;
         exten()->CTR = on ? (ctr | exten_usbd_pullup) : (ctr & ~exten_usbd_pullup);
+        if (on != was) {
+            if (on) {
+                BusActivity::entered();
+            } else {
+                BusActivity::left();
+            }
+        }
     }
 
     static void set_address(uint8_t address) {

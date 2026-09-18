@@ -19,17 +19,27 @@
  * interrupt nesting, and brio uses neither: an ISR body runs to
  * completion here as everywhere (docs/design/kernel.md section 1).
  *
+ * IDLE() ON THIS FAMILY ASKS THE BUS FIRST, and that is this target's
+ * one departure from the others. In a sleep of any depth here no bus
+ * master but the core gets a cycle (ch32v203/bus_activity.hpp carries
+ * the measurements and the reasoning), so a sleep taken while a DMA
+ * channel or the USB controller is working does not slow the program
+ * down - it loses the transfer. The platform therefore reads the count
+ * of active masters and SLEEPS ONLY AT ZERO; above zero it returns at
+ * once with interrupts enabled, which the Platform contract allows (the
+ * host's idle() returns at once too) and which leaves the loop
+ * spinning and the bus served.
+ *
  * WHAT IS NOT HERE YET, and is deliberate rather than forgotten: no
- * sleep site (the Sleep, Stop and Standby of RM ch. 2 have no user), no
- * reset.hpp to say WHICH reset happened, and no idle_until() - this
- * platform is not tickless, its timebase is the core counter and stops
- * with the core. Each arrives with the driver that needs it.
+ * idle_until() - this platform is not tickless, its timebase is the
+ * core counter and stops with the core.
  */
 
 #pragma once
 
 #include <stdint.h>
 
+#include "ch32v203/bus_activity.hpp"
 #include "ch32v203/device.hpp"
 #include "ch32v203/pfic.hpp"
 #include "ch32v203/ticker.hpp"
@@ -43,6 +53,14 @@ struct Ch32v203Platform {
 
     /// The kernel timebase this program runs on.
     using Timebase = TB;
+
+    /// Whether that timebase has a periodic interrupt to pause across a
+    /// deep sleep. True of the STK ticker; a timebase that keeps time
+    /// through a Stop would not need it and would not offer the verbs.
+    static constexpr bool pauses_tick = requires {
+        TB::pause();
+        TB::resume();
+    };
 
     /**
      * Entered with interrupts MASKED and nothing to do: sleep until the
@@ -71,19 +89,58 @@ struct Ch32v203Platform {
      * subsequent WFI; SEVONPEND is sticky but costs nothing to
      * re-assert in the same store.
      *
+     * AND IT SLEEPS ONLY WHILE THE CORE OWNS THE BUS. In a sleep of any
+     * depth on this family no other master gets a cycle, so a DMA
+     * channel or the USB controller that is working would not be slowed
+     * by the sleep but broken by it (ch32v203/bus_activity.hpp). With
+     * masters active this hook therefore returns AT ONCE, interrupts
+     * enabled, and the loop spins - a legal idle() under the Platform
+     * contract, and the honest one here.
+     *
      * WHAT DEPTH. SLEEPDEEP as found: out of reset it is clear, so this
-     * is the plain Sleep of RM 2.4 - the core clock gated, the counter
-     * and the wake logic alive. When a sleep site of this stratum
-     * exists, this hook grows the step the other strata have: with a
-     * deep mode armed the timebase is paused and its pending bit
-     * cleared before the sleep, or the millisecond tick ends the sleep
-     * before it begins.
+     * is the plain Sleep of RM 2.3.2 - the core clock gated, the
+     * counter and the wake logic alive. With a DEEP mode armed by a
+     * sleep site (ch32v203/sleep.hpp) the timebase is paused and its
+     * pending bit cleared first, because the STK stops with HCLK in a
+     * Stop and because SEVONPEND makes a tick that is merely PENDING
+     * end the sleep before it begins.
+     *
+     * AND THAT COSTS ONE TICK, KNOWINGLY. A tick that had already
+     * fired when the deep sleep begins is dropped instead of served,
+     * so kernel time is one tick short of the wall. A TIMED site
+     * repairs it for free - its witness measures the wall and
+     * subtracts the ticks the counter itself served, so one that was
+     * not served is advanced instead - and without one a deep sleep is
+     * legal only with no deadline armed, which is the model's own
+     * restriction.
      */
     static void idle() {
+        if (BusActivity::active() != 0u) {
+            enable_interrupts();
+            return;
+        }
+        const bool deep = (pfic_sctlr() & sctlr_sleepdeep) != 0u;
+        if (deep) {
+            if constexpr (pauses_tick) {
+                TB::pause();
+            }
+            stk()->SR = 0;
+            Pfic::clear_pending(Irq::systick);
+        }
         pfic_sctlr() = (pfic_sctlr() | sctlr_wfitowfe | sctlr_sevonpend) & ~sctlr_setevent;
         __asm__ volatile("wfi" ::: "memory");
+        if (deep) {
+            if constexpr (pauses_tick) {
+                TB::resume();
+            }
+        }
         enable_interrupts();
     }
+
+    /// How many bus masters other than the core are working - the
+    /// number idle() reads, published here so a program (and a suite)
+    /// can ask the same question the sleep path asks.
+    static uint8_t bus_masters_active() { return BusActivity::active(); }
 
     /// mstatus.MIE readback: the one bit CriticalSection saves.
     static bool interrupts_enabled() { return brio::interrupts_enabled(); }

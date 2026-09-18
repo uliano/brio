@@ -17,8 +17,12 @@
 //           answers with a fresh enumeration, on demand
 //   IDLE    what the loop does when it has nothing to do: SPIN, WFI
 //           (the bare instruction with interrupts enabled) or WFE (the
-//           platform's own idle, event-latched and entered masked) -
-//           the question being which of them the USB engine survives
+//           platform's own idle path) - the question being which of
+//           them the USB engine survives. WFE now measures the
+//           MECHANISM rather than the failure: that path counts the
+//           attached controller as a bus master and does not sleep
+//           while it is there (ch32v203/bus_activity.hpp), so what
+//           still puts the core to sleep under a host is WFI alone
 //
 // Wiring: a WeAct CH32V203C8T6 core board, the probe's TX/RX on
 // PA9/PA10 and its debug port on PA13/PA14, the board's USB-C in the
@@ -282,6 +286,9 @@ int main()
                 __asm__ volatile("wfi" ::: "memory");
                 break;
             case IdleMode::wfe:
+                // The kernel's own idle path, which does not sleep
+                // while the controller is attached: this mode is the
+                // mechanism under test and no longer a sleep.
                 Kernel::idle_if_empty();
                 break;
         }

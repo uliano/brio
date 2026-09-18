@@ -82,7 +82,9 @@ entries this document keeps in its place.
 is the concept member for member: `CriticalSection` is pfic.hpp's
 `InterruptGuard` (one `csrrci` reads and clears mstatus.MIE, the
 destructor restores only what it found set), `idle()` is the
-WFITOWFE/SEVONPEND sequence above followed by the unmask, `break_here()`
+WFITOWFE/SEVONPEND sequence above followed by the unmask - guarded by
+the count of active bus masters and, with a deep mode armed, by a pause
+of the timebase ([sleep.md](sleep.md)) - `break_here()`
 is `ebreak`, `atomic_width` 4, `now()` the timebase's tick count, and
 the breadcrumb a `PanicRecord` in `.noinit`. The interrupt verbs and the
 per-line enables are [brio/ch32v203/pfic.hpp](../../brio/ch32v203/pfic.hpp):
@@ -252,9 +254,10 @@ Implemented but not bench-verified, each with what would measure it:
 - **PORRSTF and PINRSTF as flags of an event**, rather than as the
   register's documented reset value: a supply cycled and the NRST pin
   pulled low by hand, with the flags read at the boot that follows.
-- **LPWRRSTF, IWDGRSTF and WWDGRSTF**: nothing here can raise them
-  until the power chapter and the watchdogs exist; each is one letter
-  of their suites.
+- **LPWRRSTF**: nothing raises it. The two watchdog flags are measured
+  in [watchdog.md](watchdog.md), and a Standby wake - the one event
+  that might have been a "low-power reset" - leaves PORRSTF instead
+  ([sleep.md](sleep.md)), so what sets this flag is still unknown.
 - **The idle hook's POWER.** `idle()` is proven to sleep and wake, not
   to sleep cheaply: whether the latched event is consumed by the `wfi`
   or leaves the loop spinning is a current measurement with the probe
@@ -264,6 +267,7 @@ Implemented but not bench-verified, each with what would measure it:
   of the specification - so the question stands open; a letter that
   sleeps with the global mask clear over a pending tick, with an
   independent watchdog armed as the way back, would answer it.
-- **`Ticker::advance()`, `pause()` and `resume()`**: compiled and
-  exercised in the family fixture, with no user until this stratum has
-  a sleep site to freeze time across.
+- Nothing else: the timebase's `advance()`, `pause()` and `resume()`
+  now have their user and their measurement in [sleep.md](sleep.md) -
+  the idle path pauses the tick across a deep sleep and the timed site
+  hands the frozen span back.

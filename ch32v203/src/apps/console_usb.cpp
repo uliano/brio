@@ -13,16 +13,16 @@
 // The identity is the pid.codes test pair 1209:0001, meant for exactly
 // this.
 //
-// THE LOOP DOES NOT SLEEP, and on this family that is not a choice.
-// Measured on the bench (ch32v203/src/apps/usb_probe.cpp is the
-// instrument): with the core in WFI or WFE the USB controller cannot
-// reach its packet memory - an armed bulk endpoint receives NOTHING and
-// the packet-memory overflow counts up, and an enumeration never gets
-// past the first control transfer - while the same program with a
-// spinning loop enumerates, configures and carries data with not one
-// overflow. The reference manual says Sleep stops the core clock and
-// leaves every other running; this contradicts it. So the kernel is
-// driven by step() here and never idles.
+// THE LOOP IS THE ORDINARY ONE, AND IT DOES NOT SLEEP HERE - which is
+// no longer a rule this program keeps but a fact of the machine it runs
+// on. With the core stopped the USB controller cannot reach its packet
+// memory (measured: an armed bulk endpoint receives nothing, the
+// packet-memory overflow counts up, and an enumeration never gets past
+// its first control transfer), so an attached controller counts itself
+// a bus master and the platform's idle path does not sleep while the
+// count stands (ch32v203/bus_activity.hpp). The kernel therefore runs
+// its normal loop, idle path and all, and the silicon's own state is
+// what decides.
 //
 // Wiring: on a WeAct CH32V203C8T6 core board the USB-C connector is on
 // PA11/PA12, which is the USBD block's pair (the USBFS one on PB6/PB7
@@ -258,18 +258,14 @@ int main()
     }
 
     // The banner waits for a terminal: the first line goes out once the
-    // host has configured the port and raised DTR. A SPIN and not an
-    // idle, for the reason in the file header - this wait covers the
-    // enumeration itself, which a sleeping core does not survive here.
+    // host has configured the port and raised DTR. A spin, because
+    // there is no kernel yet to idle in - and the controller's own
+    // count would keep that idle awake anyway.
     while (!Serial::configured() || !Serial::dtr()) {
     }
     brio::print(serial, brio::crlf, brio::device::part_name, " brio console over USB (clk=",
                 clock_ok ? "XT48" : "FAILED", ", usb=", usb_ok ? "48MHz" : "FAILED",
                 ", tick=", tick_ok ? "STK" : "FAILED", "), type HELP", brio::crlf, "> ");
 
-    using Kernel = brio::Tenuto<P, Console, SerialLines, Blinker>;
-    Kernel::init_all();
-    for (;;) {
-        Kernel::step();   // never idle_if_empty(): see the file header
-    }
+    brio::Tenuto<P, Console, SerialLines, Blinker>::run();
 }

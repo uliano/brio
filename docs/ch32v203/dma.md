@@ -112,13 +112,15 @@ bus and the core's own counter count the whole sleep. The same starvation
 is what kills the USB controller's reach into its packet memory in Sleep
 ([README.md](README.md)).
 
-So on this family A DMA-FED TRANSPORT DOES NOT SLEEP. The driver states
-it and gives the power chapter the question it will have to ask:
-`Dma::any_enabled()` is true while any channel has EN set, and a sleep
-site is expected to refuse a mode while it is - or the transport that
-owns the engine holds a standing lock. The alternative the same
-measurements opened is to slow down instead: the chip carries data with
-HCLK as low as 24 MHz.
+So on this family A DMA-FED TRANSPORT DOES NOT SLEEP, and that is now a
+MECHANISM and not a rule the programmer keeps: `DmaChannel::enable()`
+counts the EN transition as one active bus master
+([sleep.md](sleep.md)), the kernel's idle path does not sleep while the
+count stands and a sleep site refuses to arm over it. `Dma::any_enabled()`
+is the same question asked of the registers instead, true while any
+channel has EN set, for a caller that wants the silicon's own answer.
+The alternative the same measurements opened is to slow down instead:
+the chip carries data with HCLK as low as 24 MHz.
 
 ## Types and verbs
 

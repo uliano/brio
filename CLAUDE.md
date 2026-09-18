@@ -417,16 +417,17 @@ gets its home in `docs/design/` when taken.
   clock) and THE USB DEVICE CONTROLLER - the kernel console runs both on
   the probe's serial and on the chip's own USB-C, a CDC ACM port over
   util/usb.
-  Open: SPI, I2C, flash, PWR and the sleep sites, the RTC and the backup
-  domain, CAN, CRC, TKEY and the second USB block. What the silicon taught so far is in
-  docs/ch32v203/README.md, and one finding shapes the power model: IN
-  SLEEP THE BUS MATRIX SERVES THE CORE ALONE - the USB controller cannot
-  reach its packet memory and a DMA stalls (measured with the vendor's
-  own example as the oracle, and no software mitigation short of staying
-  awake works), so a program that moves data through the bus never idles
-  here and slows down instead, to no less than 24 MHz of HCLK; the sleep
-  site to come refuses while a channel is enabled, and the controller
-  votes in a PrepareSleep round.
+  Open: CAN (its driver written against the manual and kept for a pass
+  across every platform), TKEY and the second USB block. What the
+  silicon taught is in docs/ch32v203/README.md, and one finding shapes
+  the power model: IN SLEEP THE BUS MATRIX SERVES THE CORE ALONE - the
+  USB controller cannot reach its packet memory and a DMA stalls
+  (measured with the vendor's own example as the oracle, and no software
+  mitigation short of staying awake works), so a program that moves data
+  through the bus does not SLEEP here and slows down instead, to no less
+  than 24 MHz of HCLK; the sleep sites and the platform's idle path both
+  read a COUNT of active bus masters - a DMA channel while its EN is up,
+  the USB controller from its pull-up - and neither sleeps above zero.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -1731,6 +1732,46 @@ brio/                    the framework, twelve strata:
                            nothing at all; the tamper input that REMEMBERS an
                            edge it was not watching for and that no pad of this
                            board can raise; and the three things PC13 can carry)
+    bus_activity.hpp       the count of BUS MASTERS OTHER THAN THE CORE, kept
+                           by the drivers that make one work and read by the
+                           idle path and by the sleep sites: in a sleep of any
+                           depth here no other master gets a cycle (measured),
+                           so a DMA channel while EN is up and the USB
+                           controller from its pull-up to its detach each hold
+                           one count, idle() sleeps only at zero and a site
+                           refuses to arm above it - the old rule "a program
+                           with USB never idles" as a mechanism
+    pwr.hpp                the power controller (ch. 2): Pwr, the three modes
+                           behind SLEEPDEEP and PDDS (the core's bit and this
+                           block's, written and read as ONE PAIR), the Stop
+                           that is one mode with TWO PRICES (LPDS and the RAM's
+                           low-voltage mode, whose interlock the chapter
+                           states), the two flags a boot reads and their
+                           write-one clears - WUF being the WAKE's flag and not
+                           the event's, measured - the WKUP pad PA0, the supply
+                           monitor whose eight thresholds are worth TWO
+                           DIFFERENT TABLES of millivolts by a bit of the DIE
+                           and not of the part (FEATURE_SIGN.VLEVEL, read at
+                           run time and believed only if it inverts), what a
+                           Standby keeps of the RAM per device class - the
+                           manual's "20K" being the class's largest array and
+                           not every part's - the regulator's two trims that
+                           live in EXTEN, and the debug module's three
+                           low-power bits READ AND NEVER WRITTEN, because a
+                           csrw to that CSR resets the part
+    sleep.hpp              Ch32v203SleepSite (light -> Sleep, standby -> a Stop
+                           on the main regulator, deep -> the same on the
+                           low-power one, STANDBY OFF THE LADDER with
+                           enter_standby() the deliberate door - every exit
+                           measured here being a reset, an ordinary EXTI line
+                           among them - the clock tree restored after a Stop)
+                           and Ch32v203TimedSleepSite (the RTC's alarm on EXTI
+                           line 17 as the wake and its counter as the WITNESS,
+                           a 1024 Hz tick out of the crystal, the counts
+                           rounded up and the span down so a wake is late and a
+                           resync short, the four-act ISR) - both REFUSING
+                           every rung but none while a bus master other than
+                           the core is working
   stm32f4/               everything that knows stm32f4xx.h (STM32F4, Cortex-M4F):
                          brio's first ARMv7-M family on the cortexm/ core files
     device_tables.hpp      THE RESERVE: GPIO ports A..K, the serial instances
