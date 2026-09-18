@@ -1,7 +1,7 @@
 /*
  * sysinfo.hpp
  *
- * SYSINFO (datasheet 12.13): what the chip says about itself. Three
+ * SYSINFO (datasheet 12.15.1): what the chip says about itself. Three
  * facts, and one of them is load-bearing for every later chapter:
  *
  *  - CHIP_ID, the JEDEC JEP-106 identifier: a manufacturer, a part
@@ -16,9 +16,14 @@
  *    PAD is absent - so this bit is how a program that was not told at
  *    build time finds out (device.hpp's `package` is the other half of
  *    that story).
- *  - PLATFORM, which says whether this is silicon at all (ASIC) or an
- *    FPGA or a simulation - the chip's own answer to "am I real", and
- *    the reason a suite can state it rather than assume it.
+ *  - "am I real" - silicon (ASIC), an FPGA or a simulation - which a
+ *    suite can then state rather than assume. THE ANSWER IS NOT THIS
+ *    BLOCK'S: the chip has TWO registers called PLATFORM, and SYSINFO's
+ *    (12.15.1, offset 0x08) is the PRE-PRODUCTION indicator - it reads
+ *    all-zero on a production part, ASIC bit included (measured on
+ *    stepping A2). The one that answers is the testbench manager's,
+ *    TBMAN PLATFORM, whose ASIC bit resets to 1 and reads 1 on the same
+ *    part; asic() reads that one, and releases that block.
  *
  * GITREF_RP2350 is the git hash of the chip's source, for the record.
  * There is no per-die serial number here: a board's identity is its
@@ -78,10 +83,12 @@ struct ChipId {
                                                                        : Package::qfn80;
     }
 
-    /// True on real silicon (as against an FPGA or a simulation).
+    /// True on real silicon (as against an FPGA or a simulation): the
+    /// testbench manager's PLATFORM.ASIC, never SYSINFO's register of the
+    /// same name (the header comment says why).
     static bool asic() {
-        (void)Resets::release(ResetBlock::sysinfo);
-        return (SYSINFO->PLATFORM & SYSINFO_PLATFORM_ASIC_BITS) != 0u;
+        (void)Resets::release(ResetBlock::tbman);
+        return (TBMAN->PLATFORM & TBMAN_PLATFORM_ASIC_BITS) != 0u;
     }
 
     /// The chip's source git hash, for the record.

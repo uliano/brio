@@ -88,7 +88,7 @@ enum class PinFunction : uint8_t {
     pio2 = 8,     ///< the third PIO, which the RP2040 had not
     gpck = 9,     ///< the clock inputs and outputs, on the pins that carry them
     usb = 10,     ///< the USB muxing signals, on the pins that carry them
-    uart_alt = 11, ///< the second UART route of GP22..GP27
+    uart_alt = 11, ///< the second UART route: every group's CTS/RTS pads
     none = IO_BANK0_GPIO0_CTRL_FUNCSEL_VALUE_NULL,   ///< no owner (the reset state)
 };
 
