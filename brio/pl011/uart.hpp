@@ -772,7 +772,9 @@ public:
      * Each engine reads only its own channel's status, so a line other
      * channels of the program report on is shared safely. A transmit
      * completion releases exactly the block's bytes from the ring and
-     * starts the next run; a receive completion is left to harvest().
+     * starts the next run; a receive completion publishes and re-arms
+     * here - unless harvest() met it first, under its guard, and served
+     * it there: a completion is acted on ONCE.
      * Returns true when something of this transport's was served.
      */
     [[gnu::always_inline]] static bool dma_isr() {
@@ -829,8 +831,30 @@ public:
             // (a completion publishes and re-arms there): under the guard.
             typename Chip::Guard guard;
             const bool was_empty = m_rx.empty();
+            // WHETHER THE RUN HAS ENDED IS ASKED BEFORE ITS COUNT IS READ,
+            // and the answer is used as it stood. Asked after, a run whose
+            // last byte lands between the two reads is seen ended with
+            // that byte uncounted: it is re-armed over, the new run's
+            // first byte lands on the old run's last, and ONE BYTE OF THE
+            // STREAM IS GONE (measured: one of 4096 at 3 Mbaud, at the
+            // end of a short run by the ring's wrap, one run in five when
+            // this code runs cold out of the flash). Asked before, an
+            // ended run has its final count, and a run that ends after
+            // the question is simply left to the line's handler.
+            const bool ended = RxEngine::idle();
+            if (ended) {
+                // A completion the masked line still owes is served HERE:
+                // this verb is about to publish and re-arm that run, and a
+                // completion is acted on ONCE - left standing, its flag
+                // would send the handler to re-arm over the run just begun.
+                const uint8_t owed = RxEngine::service();
+                if ((owed & RxEngine::flag_error) != 0u) {
+                    (void)RxEngine::abandon();
+                    m_dma_faults = m_dma_faults + 1u;
+                }
+            }
             publish_rx();
-            if (RxEngine::idle() || RxEngine::full() || RxEngine::capacity() == 0u) {
+            if (ended || RxEngine::capacity() == 0u) {
                 rearm_rx();
             }
             return was_empty && !m_rx.empty();

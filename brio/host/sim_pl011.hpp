@@ -285,6 +285,10 @@ struct SimPl011Engine {
     static constexpr uint8_t flag_error = 1u << 1;
 
     static inline uint8_t next_flags = 0;   ///< what the next service() reports
+    /// Stage the race a real controller offers: the run's last element
+    /// lands right AFTER take() has read the count, so the next idle()
+    /// answers true over a run one element short of counted.
+    static inline bool ends_under_take = false;
     static inline uint32_t armed = 0;
     static inline uint32_t blocks = 0;
     static inline uint32_t faults = 0;
@@ -316,6 +320,11 @@ struct SimPl011Engine {
         return length;
     }
     static uint32_t take() {
+        if (ends_under_take && running && length != 0u) {
+            ends_under_take = false;
+            running = false;
+            return length - 1u;
+        }
         const uint32_t n = running ? length : 0u;
         running = false;
         length = 0;
@@ -334,6 +343,7 @@ struct SimPl011Engine {
 
     static void reset() {
         next_flags = 0;
+        ends_under_take = false;
         armed = 0;
         blocks = 0;
         faults = 0;

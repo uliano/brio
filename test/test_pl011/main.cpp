@@ -315,6 +315,46 @@ TEST_CASE("the engine slots carry the requests and the blocks") {
     CHECK(Streamed::hw_overruns() == 1u);
     CHECK(Streamed::frame_errors() == 1u);
 
+    // A COMPLETION IS ACTED ON ONCE. A run fills while harvest() holds
+    // the guard: harvest() serves the completion the masked line owes
+    // and publishes the run - so the handler that runs when the guard
+    // opens finds nothing of this transport's, and begins no second run
+    // over the first (on silicon the second begin aborts a busy channel
+    // and loses the byte it had already fetched).
+    uint8_t sink = 0;
+    while (Streamed::read_byte(sink)) {
+    }
+    RxEngine::next_flags = RxEngine::flag_complete;
+    (void)Streamed::harvest();
+    while (Streamed::read_byte(sink)) {
+    }
+    const uint32_t runs = RxEngine::blocks;
+    CHECK_FALSE(Streamed::dma_isr());
+    CHECK(RxEngine::blocks == runs);
+
+    // And a bus error met on an ENDED run is thrown away and counted
+    // there; on a run still going the flag is the handler's.
+    const uint16_t faults = Streamed::dma_faults();
+    RxEngine::stop();
+    RxEngine::next_flags = RxEngine::flag_complete | RxEngine::flag_error;
+    (void)Streamed::harvest();
+    CHECK(Streamed::dma_faults() == faults + 1u);
+    CHECK_FALSE(Streamed::dma_isr());
+
+    // THE END OF A RUN IS ASKED BEFORE ITS COUNT. The last element lands
+    // right after the count was read: asked afterwards, the run would be
+    // seen ended one element short and re-armed OVER that element - one
+    // byte of the stream gone, which is what the silicon showed. Asked
+    // before, the run is simply not ended yet and is left alone.
+    while (Streamed::read_byte(sink)) {
+    }
+    (void)Streamed::harvest();
+    REQUIRE(RxEngine::busy());
+    const uint32_t before_the_race = RxEngine::blocks;
+    RxEngine::ends_under_take = true;
+    (void)Streamed::harvest();
+    CHECK(RxEngine::blocks == before_the_race);
+
     Streamed::release();
     CHECK(SimPl011::regs<1>().UARTDMACR == 0u);
 }
