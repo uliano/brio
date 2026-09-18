@@ -34,6 +34,7 @@ below; the documents of record are in
 | [dma.md](dma.md) | The DMA: sixteen channels and four interrupt lines, a MODE in the top nibble of the transfer count that makes a channel re-arm itself or run forever, an address step that can go backward or by twos, the abort that answers erratum RP2350-E5, a security level on every resource - and the two engines a transport names in its slots |
 | [pwm.md](pwm.md) | The PWM: twelve slices where the RP2040 had eight, the pin map's second half on GPIO 32..47 and what the four highest slices are in the package that bonds none of those pads, a second shared interrupt line with a register set of its own, and a fractional divider whose last step is a whole 256 |
 | [pio.md](pio.md) | The programmable I/O, chapter 11: three blocks of four machines over one instruction set, and the six things this chip added to it - a version field, a window that says which thirty-two pads a block can see, a CTRL write that reaches the blocks either side of it, all eight flags on the interrupt lines, a masked input count, and a receive FIFO that can be four registers instead of a queue |
+| [adc.md](adc.md) | The ADC: one converter over five channels or nine, because THE PACKAGE DECIDES THE INPUT MAP and the temperature sensor's channel number with it; a four-bit AINSEL and a nine-bit round-robin where the RP2040 had three and five; no ADC_VREF pin, the converter's own supply being its full scale; the RP2040's differential-nonlinearity spikes gone; and an analog claim that must drop the pad's isolation latch for its pull to exist at all - which is also the one configuration erratum RP2350-E9 does not bite |
 | [sha256.md](sha256.md) | The SHA-256 accelerator: the compression function in hardware and nothing else, the padding software owes it, the byte swap that reconciles a little-endian bus with a big-endian standard, the handshake and the flag that catches a missed one - and the constexpr twin the silicon is judged against |
 | [trng.md](trng.md) | The true random number generator: a ring oscillator with no tie to the clock tree, three entropy checks of which one is fatal until the block is reset, a generation time that is not deterministic, and the raw-sample path the bootrom takes instead |
 | [otp.md](otp.md) | The one-time programmable array, READ SIDE ONLY and deliberately so: four read windows of which two fault instead of lying, page locks that only climb, the error correction decoded in software with the one sentence of the chapter that must be read carefully, and the flags a program must never set - printed, not written |
@@ -271,7 +272,7 @@ difference in the sleeping.
 
 Driver gaps, each with its reason:
 
-- **Most of the chip.** The ADC, the flash and the QMI,
+- **Most of the chip.** The flash and the QMI,
   the USB, POWMAN with its always-on timer and the sleep states, the
   second core, and two of the blocks the RP2040 never had - the HSTX and
   the M33's coprocessors - have no driver here yet. Each arrives with its
