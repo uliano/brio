@@ -4,13 +4,17 @@ Documents of record: the RP2040 datasheet (build 3184e62), 4.2
 (UART: the ARM PL011 - 4.2.2 functional description, 4.2.3 operation,
 4.2.6 interrupts, 4.2.7 the programmer's model and the baud
 calculation of 4.2.7.1, 4.2.8 the registers), 2.19.2 (table 279: the
-pins), 2.15.3.1 (clk_peri). The driver: `brio/rp2040/uart.hpp`
-(`Pl011<n>` the resource, `Uart<n, pins, ...>` the task) over
-`pin.hpp`, `resets.hpp`, `clock.hpp` and `util/ring.hpp`. The
-reference suite: `test_rp2040_serial` (the second instance under the
-loop-back for the formats, the ladder, the FIFOs, a break, an overrun
-and bulk traffic; a peer board on the cross link; the host at the
-console's other end).
+pins), 2.15.3.1 (clk_peri). The driver is ARM's and not this chip's, so
+it lives in the IP stratum: `brio/pl011/uart.hpp` holds the resource and
+the byte transport ([../pl011/README.md](../pl011/README.md)), and
+`brio/rp2040/uart.hpp` holds what this chip owes it - the pin table of
+table 279, the `Rp2040Pl011` chip traits over `pin.hpp`, `resets.hpp`,
+`clock.hpp`, `nvic.hpp` and `dma_engine.hpp`, and the PUBLIC NAMES
+`Pl011<n>` (the resource) and `Uart<n, pins, ...>` (the task), this
+chip's aliases of the two templates there. The reference suite:
+`test_rp2040_serial` (the second instance under the loop-back for the
+formats, the ladder, the FIFOs, a break, an overrun and bulk traffic; a
+peer board on the cross link; the host at the console's other end).
 
 ## What the silicon does
 
@@ -48,8 +52,11 @@ function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
 - `UartDivisor` (integer, fraction), `uart_divisor(hz, baud)` (nothing
   when out of reach), `uart_actual_baud(hz, d)`, `uart_min_hz(baud)`.
 - `UartFlag` (UARTFR), `UartInterrupt` (one layout for IMSC/RIS/MIS/
-  ICR), `UartDataError` (UARTDR's flags), `UartFifoLevel` (the
-  trigger levels in eighths).
+  ICR), `UartDataError` (UARTDR's flags), `UartReceiveStatus`
+  (UARTRSR's sticky four), `UartControl` (UARTCR), `UartLineControl`
+  (UARTLCR_H), `UartTriggerField` (UARTIFLS), `UartBaudField` (the two
+  divisor registers' masks), `UartDmaControl` (UARTDMACR),
+  `UartFifoLevel` (the trigger levels in eighths).
 - `Pl011<n>` - the resource: `reset`/`hold`/`released` (through the
   reset controller), `enable(on)` (UARTEN with TXE and RXE),
   `line_control(format, fifos)`, `divisor(d)` and `loopback(on)`
