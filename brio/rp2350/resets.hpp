@@ -24,6 +24,19 @@
  * separate JTAG line in the same position, and it adds TIMER1, PIO2,
  * HSTX, SHA256 and TRNG. Every constant below is the device header's
  * own name, so the map is read and never retyped.
+ *
+ * AND BESIDE IT, THE POWER-ON STATE MACHINE (7.4), which is chapter 7's
+ * MIDDLE tier: the SYSTEM resets, the ones a processor cannot run
+ * without - the oscillators, the clock generators, the bus fabric, the
+ * memories, SIO, the access controller, the processors themselves - each
+ * released in sequence by hardware, every stage waiting for the one
+ * before it. Software never drives that sequence; what software does
+ * touch is WDSEL, the stage a watchdog event restarts from, and FRCE_OFF,
+ * which holds a stage down. Both are read by `Psm` here rather than
+ * spelled again in the two chapters that need them (the watchdog's
+ * selection, and erratum RP2350-E19's guard before a reboot), and
+ * FRCE_ON is deliberately absent: 7.4.2 calls it a development feature
+ * that does nothing on a production device.
  */
 
 #pragma once
@@ -118,6 +131,74 @@ private:
         }
         return false;
     }
+};
+
+// ---- the power-on state machine (7.4) ------------------------------------
+
+/// The stages of the sequence, in the order hardware releases them
+/// (figure 27), as WDSEL / FRCE_OFF / DONE bit masks.
+struct PsmStage {
+    static constexpr uint32_t proc_cold = PSM_WDSEL_PROC_COLD_BITS;
+    static constexpr uint32_t otp = PSM_WDSEL_OTP_BITS;
+    static constexpr uint32_t rosc = PSM_WDSEL_ROSC_BITS;
+    static constexpr uint32_t xosc = PSM_WDSEL_XOSC_BITS;
+    static constexpr uint32_t resets = PSM_WDSEL_RESETS_BITS;
+    static constexpr uint32_t clocks = PSM_WDSEL_CLOCKS_BITS;
+    static constexpr uint32_t psm_ready = PSM_WDSEL_PSM_READY_BITS;
+    static constexpr uint32_t busfabric = PSM_WDSEL_BUSFABRIC_BITS;
+    static constexpr uint32_t rom = PSM_WDSEL_ROM_BITS;
+    static constexpr uint32_t bootram = PSM_WDSEL_BOOTRAM_BITS;
+    static constexpr uint32_t sram0 = PSM_WDSEL_SRAM0_BITS;
+    static constexpr uint32_t sram1 = PSM_WDSEL_SRAM1_BITS;
+    static constexpr uint32_t sram2 = PSM_WDSEL_SRAM2_BITS;
+    static constexpr uint32_t sram3 = PSM_WDSEL_SRAM3_BITS;
+    static constexpr uint32_t sram4 = PSM_WDSEL_SRAM4_BITS;
+    static constexpr uint32_t sram5 = PSM_WDSEL_SRAM5_BITS;
+    static constexpr uint32_t sram6 = PSM_WDSEL_SRAM6_BITS;
+    static constexpr uint32_t sram7 = PSM_WDSEL_SRAM7_BITS;
+    static constexpr uint32_t sram8 = PSM_WDSEL_SRAM8_BITS;
+    static constexpr uint32_t sram9 = PSM_WDSEL_SRAM9_BITS;
+    static constexpr uint32_t xip = PSM_WDSEL_XIP_BITS;
+    static constexpr uint32_t sio = PSM_WDSEL_SIO_BITS;
+    static constexpr uint32_t accessctrl = PSM_WDSEL_ACCESSCTRL_BITS;
+    static constexpr uint32_t proc0 = PSM_WDSEL_PROC0_BITS;
+    static constexpr uint32_t proc1 = PSM_WDSEL_PROC1_BITS;
+
+    /// Every stage the sequencer governs.
+    static constexpr uint32_t all = PSM_WDSEL_BITS;
+    /// The two oscillators, which a reboot keeps running: a watchdog
+    /// selection that included them would drop the crystal and make the
+    /// reboot pay for its startup all over again.
+    static constexpr uint32_t oscillators = rosc | xosc;
+    /// What a watchdog event restarts by default here and in the SDK:
+    /// the whole sequence but the oscillators, so the chip comes back
+    /// through the bootrom as a power-on would.
+    static constexpr uint32_t reboot = all & ~oscillators;
+};
+
+/// The sequencer, a monostate. It has no init: hardware ran it before
+/// the first instruction of this image existed.
+struct Psm {
+    Psm() = delete;
+
+    /// Which stage a watchdog event restarts the sequence from (WDSEL),
+    /// as a whole word - the register has no read-modify-write hazard
+    /// worth an alias here, one selection standing at a time.
+    static void watchdog_resets(uint32_t stages) { PSM->WDSEL = stages & PsmStage::all; }
+    static uint32_t watchdog_resets() { return PSM->WDSEL & PsmStage::all; }
+
+    /// Which stages are DONE - the whole sequence, once the program is
+    /// running, minus anything hold() is keeping down.
+    static uint32_t done() { return PSM->DONE & PsmStage::all; }
+
+    /// Hold `stages` in reset (FRCE_OFF). A stage below the one this
+    /// program runs on stops the machine: the verb exists because
+    /// erratum RP2350-E19 is about the register's CONTENTS at a reboot,
+    /// and a driver that must guarantee them must be able to read and
+    /// write them.
+    static void hold(uint32_t stages) { hw_set(PSM->FRCE_OFF, stages & PsmStage::all); }
+    static void release(uint32_t stages) { hw_clear(PSM->FRCE_OFF, stages & PsmStage::all); }
+    static uint32_t held() { return PSM->FRCE_OFF & PsmStage::all; }
 };
 
 } // namespace brio

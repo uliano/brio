@@ -248,12 +248,12 @@ Driver gaps, each with its reason:
   and a ruler both halves share; the ruler exists and the fact does not,
   and nothing yet needs the verb - every wait in the suite is a spin on
   `Mtime::micros()`.
-- A RESET DRIVER. Nothing in an image of this target can reboot it: the
-  causes of a boot, the software reset, the watchdog and its scratch
-  registers belong to a chapter not yet written, which is why the
-  breadcrumb letter is driven by a reset from the debug port and is
-  outside `z`. The `.noinit` survival of a watchdog reset and of a rescue
-  is that chapter's to measure.
+- The reboot and the causes of a boot: they belong to another chapter -
+  [reset.md](reset.md) for the causes and the two reset verbs,
+  [watchdog.md](watchdog.md) for the countdown and the scratch registers
+  - which is why the breadcrumb letter HERE is driven by a reset from the
+  debug port and is outside `z`. The `.noinit` survival of a watchdog
+  reset and of a rescue is that chapter's to measure.
 - Interrupt priorities. Both halves have sixteen levels and neither uses
   them: the kernel's promise is that no interrupt nests over another, and
   it is kept structurally here (every line at the reset priority on the
@@ -268,9 +268,9 @@ Driver gaps, each with its reason:
   the bootrom hands over, and nothing has needed one.
 - Which architecture is running, asked of the CHIP rather than of the
   build. The suite reports `core_kind`, which is the image's own claim,
-  and the chip's ARCHSEL_STATUS lives in POWMAN, a block no driver of
-  this stratum reaches yet; read over the debug port it is 0 after an
-  Arm image and 3 after a RISC-V one.
+  and the chip's ARCHSEL_STATUS lives in the OTP block's register window,
+  which no driver of this stratum reaches yet; read over the debug port
+  it is 0 after an Arm image and 3 after a RISC-V one.
 
 Implemented but not bench-verified, each with what would measure it:
 

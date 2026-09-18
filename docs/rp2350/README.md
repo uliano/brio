@@ -24,6 +24,9 @@ below; the documents of record are in
 | [vendor/README.md](vendor/README.md) | The RP2350 datasheet by build, the hardware design guide, the vendored pico-sdk subset and the SVD, the bench chip's identity, the errata this stratum answers |
 | [platform.md](platform.md) | The platform on two instruction sets: one platform type per core and one for both architectures, the idle path and the lost-wakeup window it does not have (two rules, one promise), the microsecond ruler that is also the Hazard3 half's timebase, the subsystem reset controller, the atomic register aliases, the panic breadcrumb across a processor reset, erratum RP2350-E9 shown on a pad, and the two registers called PLATFORM |
 | [uart.md](uart.md) | The UART: what this chip owes the PL011 that its predecessor did not - a SECOND FUNCTION COLUMN that makes every group's flow-control pads a second data pair, pads that come up isolated, a DREQ table with not one row in the old place, and one interrupt name bound on both architectures |
+| [timer.md](timer.md) | The two system timers: a 64-bit counter of microseconds each, four alarms with an interrupt line apiece, the tick generator of 8.5 behind each one, and the two registers this chip added - the counter taken off the tick and onto clk_sys, and a lock that refuses every write until the block is reset |
+| [watchdog.md](watchdog.md) | The countdown and the four scratch registers a program may use: the tick that now comes from the TICKS block, the RP2040's double decrement that is not this chip's, the three WDSEL registers in their three tiers, and erratum RP2350-E19's guard before every reboot |
+| [reset.md](reset.md) | Chapter 7 whole: the three tiers, the causes recorded in the always-on power manager beside the watchdog's REASON, the power-on state machine, the subsystem controller, the reboot both architectures have and the processor reset only one of them has |
 
 ## The two architectures, and what decides between them
 
@@ -257,14 +260,12 @@ difference in the sleeping.
 
 Driver gaps, each with its reason:
 
-- **Everything but the platform, the clock's core, the pins and the
-  UART.** The timers, the DMA, the SPI, the I2C, the PWM, the ADC, the
-  PIO, the flash and the QMI, the USB, POWMAN and its always-on timer,
-  the reset controller's own chapter with the watchdog, the second core,
-  and the blocks the RP2040 never had (TRNG, SHA-256, OTP, HSTX, the
-  M33's coprocessors, the bootrom API) have no driver here yet. Each
-  arrives with its chapter, its suite on both architectures and its
-  document.
+- **Most of the chip.** The DMA, the SPI, the I2C, the PWM, the ADC, the
+  PIO, the flash and the QMI, the USB, POWMAN with its always-on timer
+  and the sleep states, the second core, and the blocks the RP2040 never
+  had (TRNG, SHA-256, OTP, HSTX, the M33's coprocessors, the bootrom API)
+  have no driver here yet. Each arrives with its chapter, its suite on
+  both architectures and its document.
 - **`delay_us`.** The microsecond busy-wait wants a measured fact per
   family and a ruler that both halves share; the ruler exists
   (`mtime.hpp`), the fact does not, and nothing yet needs the verb -
@@ -300,5 +301,6 @@ Implemented but not bench-verified:
   never raised. The external and the timer traps beside it are both
   proven on the bench.
 - **The Arm crt's fault vectors.** The four configurable faults have
-  their names in the table and their weak spins; nothing has faulted on
-  purpose yet, which is the reset chapter's work.
+  their names in the table and their weak spins. `isr_hardfault` and the
+  RISC-V crt's `isr_riscv_exception` are what `fault_reset()` binds to
+  ([reset.md](reset.md)); nothing has faulted on purpose yet.
