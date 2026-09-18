@@ -57,7 +57,8 @@
  * a cycle (a DMA stalls the same way), and no mitigation short of
  * staying awake works - the overflow interrupt wakes the core but the
  * packet is gone, a NAK'd endpoint still overflows; dividing HCLK
- * works down to 24 MHz, and 12 fails like the sleep.
+ * works down to 24 MHz, and 12 fails like the sleep - which is why
+ * init() refuses a tree below `usbd_min_hclk_hz`.
  * SO THE RULE IS A MECHANISM AND NOT AN INSTRUCTION TO THE
  * PROGRAMMER: an attached controller counts itself as a bus master
  * (ch32v203/bus_activity.hpp), idle() DOES NOT SLEEP while it is
@@ -66,13 +67,24 @@
  * and what decides is the silicon's own state. `connect()` is where
  * the count is held and released.
  *
+ * AND AN OVERFLOW IS NOT SOMETHING A RECEIVER SURVIVES BY ITSELF. The
+ * lost packet leaves its COUNT in the halfword that carries the
+ * buffer's SIZE, and raises no completion - so an endpoint left alone
+ * after one overflow reads as a buffer of zero blocks and loses every
+ * packet after it, for ever. take_events() therefore writes that
+ * encoding back for every armed receiver whenever the flag stands
+ * (restore_rx_buffers): the counter still climbs for as long as the
+ * cause lasts, and the port carries bytes again the moment it stops.
+ *
  * WHAT IS NOT COVERED YET, each with its reason:
  *  - the DOUBLE BUFFER (EP_KIND on a bulk endpoint) and the
  *    isochronous endpoints: a CDC console needs neither, and the
  *    double buffer changes the meaning of DTOG on every access - it is
  *    written when a program needs the bandwidth and can measure it.
- *  - SUSPEND's low-power half: the suspend and wake-up EVENTS are
- *    reported, but LPMODE and the regulator are not touched. What a
+ *  - SUSPEND's low-power half: the handshake of 21.2.4 is kept as far
+ *    as FSUSP, because that is what arms the wake-up (a module left
+ *    running through a host's suspend never reports the resume -
+ *    measured), but LPMODE and the regulator are not touched. What a
  *    suspended controller would let the program sleep through is a
  *    question for a meter, and the count above is deliberately held
  *    from the pull-up to the detach and not from the first packet to
@@ -186,6 +198,16 @@ inline constexpr uint16_t ep_stat_valid    = 0x3U;
 /// toggles, which a one would invert.
 inline constexpr uint16_t ep_keep = ep_ea_mask | ep_kind | ep_type_mask | ep_setup;
 
+/// THE BUS HAS A FLOOR, AND IT IS THE SLEEP FINDING BY ANOTHER ROUTE.
+/// What this controller needs of the bus matrix is CYCLES: with the
+/// core awake and HCLK divided down it enumerates and carries its four
+/// kilobytes at 96, at 48 and at 24 MHz, and at 12 it fails exactly as
+/// a sleeping core makes it fail - the packets lost and the overflow
+/// counting up. 24 MHz is therefore the lowest rate this driver will be
+/// run at, and init() refuses a slower tree where the rate is a
+/// constant.
+inline constexpr uint32_t usbd_min_hclk_hz = 24'000'000UL;
+
 /// COUNTn_RX carries the buffer's SIZE as blocks, not as bytes: up to
 /// 62 bytes in blocks of two, 64 and above in blocks of thirty-two
 /// (21.3.10). The received count comes back in the low ten bits.
@@ -229,15 +251,22 @@ struct Usbd {
      * connect() is the stack's, and the host must not see a device
      * until the program is ready to answer it.
      *
-     * The clock is checked at COMPILE time: this peripheral wants 48
-     * MHz exactly and the tree's USBPRE is what makes it (clock.hpp), so
-     * a program whose rate cannot feed it does not build.
+     * The clock is checked at COMPILE time, and TWICE: this peripheral
+     * wants 48 MHz exactly and the tree's USBPRE is what makes it
+     * (clock.hpp), so a program whose rate cannot feed it does not
+     * build; and the BUS has its own floor, measured, so neither does a
+     * program that would run the core below usbd_min_hclk_hz while the
+     * controller is attached to it.
      */
     template <typename C>
     static bool init(C clock) {
         static_assert(C::usb_hz == usb_required_hz,
                       "brio Usbd: this controller must be fed 48 MHz, and only a PLL rate of 48, "
                       "96 or 144 MHz divides to it (clock.hpp's USBPRE)");
+        static_assert(C::hz >= usbd_min_hclk_hz,
+                      "brio Usbd: this controller loses packets with HCLK below 24 MHz - "
+                      "measured, and the same finding as the sleep: what it needs on the bus "
+                      "matrix is cycles (96, 48 and 24 MHz carry data, 12 does not)");
         (void)clock;
 
         // THE PADS ARE STILL GPIO PADS, AND THIS IS THE STEP THAT IS
@@ -271,6 +300,12 @@ struct Usbd {
         regs().ISTR = 0;                    // nothing pending from before
 
         next_buffer_ = buffer_floor;
+        // The two counters belong to the ATTACHMENT and not to the
+        // program: they say what this bring-up of the block has seen,
+        // so a program that gives the block back and takes it again
+        // reads its own attempt and not the last one's.
+        errors_ = 0;
+        overruns_ = 0;
         regs().BTABLE = btable_offset;
         if (!claim_control_endpoint()) {
             return false;
@@ -459,11 +494,26 @@ struct Usbd {
                 continue;
             }
             if ((istr & istr_susp) != 0u) {
+                // THE SUSPEND IS A HANDSHAKE AND NOT A NOTIFICATION
+                // (21.2.4): the program answers the bus going idle by
+                // putting the module in suspend itself, with FSUSP. That
+                // is what shields the detector - the flag is the bus
+                // STATE and the hardware raises it again while the bus
+                // stays idle - and it is also what arms the wake-up:
+                // measured, a module left running through a host's
+                // suspend never reports the resume, because the
+                // condition for WKUP is a wake-up signal reaching a
+                // SUSPENDED module. LPMODE, the low-power half of the
+                // same paragraph, is not touched here (the file header).
+                force_suspend(true);
                 clear_istr(istr_susp);
                 ev.suspend = true;
                 continue;
             }
             if ((istr & istr_wkup) != 0u) {
+                // The way back, in the manual's order: the detector
+                // restarted first, the flag cleared after.
+                force_suspend(false);
                 clear_istr(istr_wkup);
                 ev.resume = true;
                 continue;
@@ -475,6 +525,7 @@ struct Usbd {
             }
             if ((istr & istr_pmaovr) != 0u) {
                 clear_istr(istr_pmaovr);
+                restore_rx_buffers();
                 bump(overruns_);
                 continue;
             }
@@ -501,6 +552,8 @@ struct Usbd {
     static bool pulled_up() { return (exten()->CTR & exten_usbd_pullup) != 0u; }
     static uint16_t buffer_used() { return next_buffer_; }
     static uint16_t buffer_free() { return static_cast<uint16_t>(pma_bytes - next_buffer_); }
+    /// Both counters saturate and both count from init(): what THIS
+    /// bring-up of the block has seen.
     static uint16_t errors() { return errors_; }
     static uint16_t overruns() { return overruns_; }
 
@@ -557,6 +610,48 @@ private:
     /// a zero in one bit and ones everywhere else clears exactly it.
     static void clear_istr(uint16_t flag) {
         regs().ISTR = static_cast<uint16_t>(~flag);
+    }
+
+    /**
+     * THE REPAIR AFTER A LOST PACKET, and the same halfword's trap for
+     * the third time. An ordinary reception writes its length into the
+     * low ten bits of COUNTn_RX and leaves the SIZE above them standing
+     * (0x8440 for a 64-byte packet in a 64-byte buffer, measured). An
+     * overflow does not: the size field comes back ZERO, the halfword
+     * reading as the bare count (0x0040, measured over the debug port
+     * on a wedged endpoint) - and because the packet never completed
+     * there is no CTR_RX, so no layer above ever arms that endpoint
+     * again. It stays VALID over a buffer that now reads as ZERO
+     * BLOCKS, and every packet after it overflows too: measured, an
+     * endpoint left alone after one overflow takes 64 bytes in 200 ms
+     * where a healthy one takes ninety thousand, and the counter climbs
+     * for as long as the host keeps sending.
+     *
+     * So the size encoding is written back for every endpoint that is
+     * still armed. An endpoint the class holds at NAK is left alone
+     * (submit_out writes the field when it arms it), and so is one with
+     * a reception STANDING, whose length is that same halfword and is
+     * the stack's to read.
+     */
+    static void restore_rx_buffers() {
+        for (uint8_t n = 0; n < 8u; ++n) {
+            if (rx_size_[n] == 0u) {
+                continue;
+            }
+            const uint16_t epr = regs().EPR[n].R;
+            if (((epr & ep_stat_rx) >> 12) != ep_stat_valid || (epr & ep_ctr_rx) != 0u) {
+                continue;
+            }
+            pma(entry(n) + 6u) = usbd_count_rx_for(rx_size_[n]);
+        }
+    }
+
+    /// The module's own suspend, in the control register the interrupt
+    /// masks live in - so it is read, changed and written whole.
+    static void force_suspend(bool on) {
+        const uint16_t cntr = regs().CNTR;
+        regs().CNTR = on ? static_cast<uint16_t>(cntr | usbd_fsusp)
+                         : static_cast<uint16_t>(cntr & ~usbd_fsusp);
     }
 
     static void pma_write(uint16_t offset, std::span<const uint8_t> data) {
@@ -630,6 +725,11 @@ private:
      * the host's first SETUP - which follows within microseconds.
      */
     static void on_bus_reset() {
+        // A RESET ENDS ANY SUSPEND, and a host may drive one straight
+        // out of it (21.2.4 asks a suspended device to take the reset
+        // as an ordinary one): the module is put back to work before
+        // its endpoints are laid out again.
+        force_suspend(false);
         for (uint8_t n = 1; n < 8u; ++n) {
             tx_addr_[n] = 0;
             rx_addr_[n] = 0;

@@ -99,12 +99,13 @@ not obeyed: a virtual port has no baud rate.
 
 | stratum | controller | beyond the contract |
 |---|---|---|
+| ch32v203 | `Usbd<pma_bytes>` (`ch32v203/usb.hpp`), ST's F1/F0 device peripheral under WCH's names, over a packet memory the program lays out itself | 512 bytes of shared memory seen through a 32-bit window (one halfword every four bytes) whose top 128 the CAN's filter table takes, so the budget is a TEMPLATE PARAMETER and an endpoint past it is refused; every endpoint register written by XOR, its status and toggle fields inverting on a one while the two completion flags in the same word clear on a zero; COUNTn_RX both the buffer size the program writes and the count the hardware writes back, so arming a reception rewrites it, the control endpoint is laid out again inside the bus reset and guarded against a reception already standing, and a PACKET-MEMORY OVERFLOW IS REPAIRED and not merely counted - it leaves that size field zero and raises no completion, so the endpoint would lose every packet after it; the host's suspend answered with FSUSP, which is the condition for the wake-up event to arrive at all; the 48 MHz the tree's own USBPRE makes, asserted at compile time - and, this family's alone, A MEASURED FLOOR ON HCLK (24 MHz) and A BUS-MASTER COUNT held from the pull-up to the detach, because in a sleep of any depth here the controller cannot reach its packet memory at all |
 | rp2040 | `Usb` (`rp2040/usb.hpp`), the chip's own controller over its dual-port RAM | 64-byte buffers handed out in the order the classes claim endpoints; the two-step buffer control write the clock ratio demands; endpoint zero's stall armed in a second register; the data PIDs kept per endpoint and direction, endpoint zero's restarted at DATA1 by a setup packet; clk_usb at 48 MHz from the USB PLL the converter shares |
 | stm32f4 | `UsbOtg<core>` (`stm32f4/usb.hpp`), the Synopsys DWC2 core through push and pop registers - `UsbFs`, and `UsbHs` through its own full-speed PHY | no buffer to address: one shared receive FIFO for every OUT endpoint with a status entry per packet, and a slice of RAM per IN endpoint the program maps by hand; the address written BEFORE the status stage of SET_ADDRESS, which is what RM0383 22.17.5 and not chapter 9 asks; an OUT transfer of several packets in place of a double buffer, `out_slots` deep; the 48 MHz taken from the main PLL's Q output and asserted at compile time |
 | host | `SimUsb` (`host/sim_usb.hpp`) | the scripted controller the stack's tests play the host against: one packet per endpoint and direction, NAKs and stalls counted, a controller that refuses to configure |
 
-Every other family with a controller (STM32 G0B1 and G4, the
-CH32V203's) is a chapter of its own; the ones without
+Every other family with a controller (STM32 G0B1 and G4) is a
+chapter of its own; the ones without
 (AVR DA/DB, SAM C21, CH32V006) keep their console on a probe's bridge.
 
 ## Not covered yet

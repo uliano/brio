@@ -416,7 +416,7 @@ gets its home in `docs/design/` when taken.
   mute mode, LIN, half duplex, IrDA, the smartcard and the synchronous
   clock) and THE USB DEVICE CONTROLLER - the kernel console runs both on
   the probe's serial and on the chip's own USB-C, a CDC ACM port over
-  util/usb.
+  util/usb, and the chapter has its document and its suite.
   Open: CAN (its driver written against the manual and kept for a pass
   across every platform), TKEY and the second USB block. What the
   silicon taught is in docs/ch32v203/README.md, and one finding shapes
@@ -1518,10 +1518,31 @@ brio/                    the framework, twelve strata:
                            parameter of its own and two OPTIONAL DMA engine
                            slots (harvest() the verb that publishes a receive
                            run)
-    usb.hpp                Usbd: ST's device controller under WCH's names,
-                           realizing util/usb's UsbController - and a program
-                           using it never idles (measured: the controller does
-                           not survive the core's sleep)
+    usb.hpp                the USB DEVICE controller (ch. 21): Usbd<pma_bytes>,
+                           ST's F1/F0 device peripheral under WCH's names,
+                           realizing util/usb's UsbController at the packet -
+                           eight endpoint registers whose status and toggle
+                           fields are WRITTEN BY XOR while the two completion
+                           flags in the same word clear on a zero, a packet
+                           memory of 512 bytes seen through a 32-bit window
+                           whose top 128 the CAN's filter table takes (so the
+                           budget is a template parameter and an endpoint past
+                           it is refused), COUNTn_RX both the size the program
+                           writes and the count the hardware writes back over
+                           it - which is why a reception rewrites it, why the
+                           bus reset guards against one already standing, and
+                           why an OVERFLOW IS REPAIRED and not only counted (it
+                           leaves that field zero and raises no completion, so
+                           the endpoint would lose every packet after it) - the
+                           host's suspend answered with FSUSP, which is what
+                           arms the wake-up at all, the pads that are port A's
+                           GPIO pads and the pull-up that lives in EXTEN - and
+                           TWO COMPILE-TIME REFUSALS: the 48 MHz the tree's
+                           USBPRE must make, and usbd_min_hclk_hz, the measured
+                           floor of the bus (96, 48 and 24 MHz carry data, 12
+                           does not). An attached controller holds one count in
+                           bus_activity.hpp from its pull-up to its detach,
+                           which is what keeps the core awake for it
     reset.hpp              Reset (RSTSCKR's six flags as a HISTORY, software()
                            through the keyed PFIC_CFGR), ResetReporter,
                            fault_reset<P>() carrying the cause byte from

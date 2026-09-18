@@ -35,6 +35,10 @@ static_assert(ByteSink<Serial> && ByteSource<Serial>);
 static_assert(Usb::max_packet == 64);
 static_assert(Usb::btable_offset == 0 && Usb::buffer_floor == 64);
 
+// The bus has a measured floor of its own, and this tree clears it; a
+// neg TU proves the refusal below it.
+static_assert(SysClock::hz >= usbd_min_hclk_hz);
+
 struct Descriptors {
     static constexpr auto device =
         usb_device_descriptor({.vendor_id = 0x1209, .product_id = 0x0001, .device_class = 2});
