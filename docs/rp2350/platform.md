@@ -91,9 +91,10 @@ larger package and refuses at RUN time against SYSINFO's PACKAGE_SEL.
   `sleep_hook` when a low-power state that is not a sleep instruction has
   armed one), `sleep_hook` (null until the power chapter), `break_here()`,
   `now()`, `ticks_per_second`, `atomic_width` (4), `core_id()`,
-  `on_own_core()` (what `EventQueue::push` checks before it copies), and
-  `panic_record()` - one `.noinit` record per core, a static of the
-  template.
+  `on_own_core()` (what `EventQueue::push` checks before it copies),
+  `Doorbell` (the bell a send to an AO of this core rings -
+  [multicore.md](multicore.md)), and `panic_record()` - one `.noinit`
+  record per core, a static of the template.
 - `core.hpp`'s names, the same on both halves: `InterruptGuard`,
   `enable_interrupts()`, `disable_interrupts()`, `interrupts_enabled()`,
   `Irq` (the per-line controller over the device header's `IRQn_Type`:
@@ -277,8 +278,9 @@ Implemented but not bench-verified, each with what would measure it:
 - CORE 1, on either architecture. The platform is per core and the
   tickers are per core by construction, and the suite proves that
   `on_own_core()` agrees with CPUID on core 0; nothing has launched a
-  second core here. That is the multicore chapter, with the bootrom's
-  launch protocol and the inbox bridge.
+  second core here. The launch, the bell and the bridge are
+  [multicore.md](multicore.md)'s, whose own list names the letter that
+  will measure each.
 - The QFN-60's run-time refusals: the stratum compiles for that package
   and the suite checks the die's own PACKAGE_SEL against the build's, but
   no QFN-60 part is on the bench.

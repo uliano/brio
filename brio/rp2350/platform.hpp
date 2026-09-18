@@ -12,7 +12,11 @@
  * timebases (the second parameter, the core's own ticker by default) and
  * two breadcrumbs, and the type IS the core identity everywhere the
  * kernel asks P. `Rp2350Platform<>` is core 0's, what a single-core
- * program names.
+ * program names. The two optional members of a platform that is one core
+ * of several (kernel/platform.hpp) are here: `on_own_core()` reads SIO's
+ * CPUID, so a post to the other core's queue is refused and counted;
+ * `Doorbell` is the SIO doorbell towards this core
+ * (rp2350/multicore.hpp), what a send to an AO of this core rings.
  *
  * AND ONE PLATFORM TYPE FOR TWO ARCHITECTURES. Everything
  * architecture-specific here is a name from rp2350/core.hpp - the
@@ -53,6 +57,7 @@
 #include "rp2350/core.hpp"
 
 #include "kernel/platform.hpp"
+#include "rp2350/multicore.hpp"
 #include "rp2350/ticker.hpp"
 
 namespace brio {
@@ -69,6 +74,9 @@ struct Rp2350Platform {
 
     /// The kernel timebase this program runs on - this core's.
     using Timebase = TB;
+
+    /// The bell a send to an AO of this core rings (util/inbox.hpp).
+    using Doorbell = SioDoorbell<core_index>;
 
     /// Whether the calling core is this one: SIO's CPUID against `core`.
     /// What EventQueue::push checks before it copies.

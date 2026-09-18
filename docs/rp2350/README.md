@@ -41,6 +41,7 @@ below; the documents of record are in
 | [bootrom.md](bootrom.md) | The mask ROM's public function table: two sets of well-known words, one per architecture, and two different lookups over them; what is wrapped, and the three entry points that deliberately are not |
 | [usb.md](usb.md) | The USB device controller: the RP2040's block with one new duty - the PHY's isolation latch, set at reset and lifted last of all - three reset values moved under it, two pads that are bank 1's and could be GPIO, an erratum that makes the system clock's rate part of the contract, and a shelf of diagnostics that are a report and never a path |
 | [flash.md](flash.md) | The external quad-SPI chip and the two blocks between it and the bus: a memory interface with two windows, a transfer described phase by phase, four translation panes a window and a direct mode that disconnects them all; a cache whose flush is an address and not a register, with one erratum in its clean sweep; and an engine whose way back into execute-in-place is the bootrom's own function out of boot RAM, where its predecessor had a second stage |
+| [multicore.md](multicore.md) | The second core: a kernel of its own on either instruction set - the doorbell registers this chip has and its predecessor had not, which free the mailbox FIFO for the launch alone, one bell line with one number for both cores, the bootrom's six-word protocol and the entry shim that gives core 1 what the ROM does not hand it |
 
 ## The two architectures, and what decides between them
 
@@ -278,10 +279,9 @@ difference in the sleeping.
 Driver gaps, each with its reason:
 
 - **Most of the chip.** POWMAN with its always-on timer and the sleep
-  states, the second core, and two of the blocks the RP2040 never had -
-  the HSTX and the M33's coprocessors - have no driver here yet. Each
-  arrives with its chapter, its suite on both architectures and its
-  document.
+  states, and two of the blocks the RP2040 never had - the HSTX and the
+  M33's coprocessors - have no driver here yet. Each arrives with its
+  chapter, its suite on both architectures and its document.
 - **The programming side of OTP**, in any form: declined permanently
   ([otp.md](otp.md)), and the absence is asserted by the family check
   rather than promised.
@@ -299,17 +299,20 @@ Driver gaps, each with its reason:
 Implemented but not bench-verified:
 
 - **The QFN-60's compile-time refusals**, above.
-- **Core 1, on either architecture.** The platform is per core and the
-  tickers are per core by construction, but nothing has launched a
-  second core here: that is the multicore chapter, with the bootrom's
-  protocol and the inbox bridge.
+- **Core 1, on either architecture.** The platform, the tickers, the
+  doorbell, the launch and the inbox bridge are all written
+  ([multicore.md](multicore.md)); nothing has run on a second core here
+  yet, and that document's own list names the letter of
+  `test_rp2350_multicore` that will measure each part.
 - **`Mtime` and the tick generators under a clk_ref that is not 12 MHz.**
   The arithmetic refuses a clk_ref that is not a whole number of
   megahertz, and only the 12 MHz crystal has been on the wire.
 - **The machine software interrupt** (`isr_riscv_softirq`, the RISC-V
-  crt's third trap): the doorbell a second kernel will ring, bound and
-  never raised. The external and the timer traps beside it are both
-  proven on the bench.
+  crt's third trap): bound and never raised, and now deliberately so -
+  the second kernel's bell is the SIO doorbell, one line and one vector
+  name on both architectures, and a second channel on one half only
+  would be worth less ([multicore.md](multicore.md)). The external and
+  the timer traps beside it are both proven on the bench.
 - **The Arm crt's four configurable fault vectors.** They have their
   names in the table and their weak spins, and nothing has raised one of
   those four. The entry `fault_reset()` binds to IS measured on both
