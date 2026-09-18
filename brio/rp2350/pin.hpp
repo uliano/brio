@@ -24,7 +24,7 @@
  *    pull-down (both together = the bus keeper), the input buffer
  *    enable, an output DISABLE that overrides whoever owns the pad - AND
  *    THE ISOLATION LATCH, which is this chip's own;
- *  - SIO (3.1.2): the processors' own path, one cycle per access, with
+ *  - SIO (3.1.3): the processors' own path, one cycle per access, with
  *    the whole bank in TWO words: GPIO_OUT and GPIO_HI_OUT, their
  *    SET/CLR/XOR twins, GPIO_OE and GPIO_HI_OE, GPIO_IN and GPIO_HI_IN.
  *    A pin under FUNCSEL = SIO follows these; a pin under any other

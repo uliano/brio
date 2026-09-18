@@ -26,6 +26,7 @@ below; the documents of record are in
 | [clock.md](clock.md) | The clock tree: four roots where the RP2040 had three (the low-power oscillator joins clk_ref), a generator more and none for an RTC, the 16.16 dividers, the tick generators as a block of their own, the ring oscillator's randomiser, the PLLs' lost lock, the resus circuit - and two CTRL registers that are passwords, where a masked write is a refused write |
 | [pin.md](pin.md) | GPIO: the pads that come up isolated and the latch that holds them, the four overrides and the STATUS behind them, the pin interrupts with their summary registers and the forced event that bypasses the enable, and erratum RP2350-E9 measured four ways |
 | [uart.md](uart.md) | The UART: what this chip owes the PL011 that its predecessor did not - a SECOND FUNCTION COLUMN that makes every group's flow-control pads a second data pair, pads that come up isolated, a DREQ table with not one row in the old place, and one interrupt name bound on both architectures |
+| [i2c.md](i2c.md) | The I2C: the Synopsys block this chip carries unchanged, register for register, and the five things around it that are not - one function column over forty-eight pads where the UART has two, pads that come up isolated, a bank of two words that an open-drain drive by hand must tell apart, a DREQ table and a reset controller whose bits have all moved, and a bus clear by hand paced by the one ruler both architectures have |
 | [timer.md](timer.md) | The two system timers: a 64-bit counter of microseconds each, four alarms with an interrupt line apiece, the tick generator of 8.5 behind each one, and the two registers this chip added - the counter taken off the tick and onto clk_sys, and a lock that refuses every write until the block is reset |
 | [watchdog.md](watchdog.md) | The countdown and the four scratch registers a program may use: the tick that now comes from the TICKS block, the RP2040's double decrement that is not this chip's, the three WDSEL registers in their three tiers, and erratum RP2350-E19's guard before every reboot |
 | [reset.md](reset.md) | Chapter 7 whole: the three tiers, the causes recorded in the always-on power manager beside the watchdog's REASON, the power-on state machine, the subsystem controller, the reboot both architectures have and the processor reset only one of them has |
@@ -269,7 +270,7 @@ difference in the sleeping.
 
 Driver gaps, each with its reason:
 
-- **Most of the chip.** The SPI, the I2C, the ADC, the flash and the QMI,
+- **Most of the chip.** The SPI, the ADC, the flash and the QMI,
   the USB, POWMAN with its always-on timer and the sleep states, the
   second core, and two of the blocks the RP2040 never had - the HSTX and
   the M33's coprocessors - have no driver here yet. Each arrives with its
