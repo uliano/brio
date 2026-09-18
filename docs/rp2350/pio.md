@@ -15,7 +15,9 @@ assembler, `Pio<n>` the block, `PioSm<n, sm>` the machine, the four
 tasks) over `pin.hpp`, `resets.hpp`, `core.hpp` and `dma_engine.hpp`; and
 `util/pwm_channel.hpp` for the PwmChannel the PIO PWM satisfies. The
 reference suite: `test_rp2350_pio` - letters a, b, h and j wireless, c,
-d, e, g and k on two of the standing wires, and f on both.
+d, e, g, i, k and l on two of the standing wires, and f on both. Two of
+those letters put a [dma.md](dma.md) engine on a machine's FIFO, which is
+what the request numbers here are for.
 
 ## What the silicon does
 
@@ -226,15 +228,89 @@ brio::Pio<0>::restart_clocks_across(0x1, {.next = 0x8});
 brio::Pio<0>::enable_across(0x1, {.next = 0x8});
 ```
 
+## Bench findings
+
+All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
+at 150 MHz, and all of them on BOTH architectures: `test_rp2350_pio`
+reports **30 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
+pair, from one source, each on three flash-and-run cycles. No verdict of
+this chapter reads differently between the halves.
+
+- **VERSION 1 ON ALL THREE BLOCKS**, with thirty-two instructions, four
+  machines and FIFOs four deep, which is the whole of DBG_CFGINFO; PIO0
+  out of reset reads CTRL 0, FSTAT 0x0F000F00 (both FIFOs empty on every
+  machine) and GPIOBASE 0. The instruction encodings are held against the
+  vendor assembler's own words at compile time, the four forms this chip
+  added among them, and a program loaded at an offset runs with its JMPs
+  relocated: the probe pushes 5, ~3, 3 reversed and the value its
+  countdown ended at, and parks.
+- **GPIOBASE TAKES 0 AND 16 AND NOTHING ELSE.** With the window at 0 a
+  free pad at GP22 is index 22 and GP40 is outside; with it at 16 that
+  same pad is index 6, GP13 falls outside and GP47 is index 31. The same
+  machine driving that one pad from each window shows it in DBG_PADOE at
+  **bit 6 with the window at 16 and bit 22 with it at 0** - the register
+  being the BLOCK's view and not the system's.
+- **THE FOUR TASKS ON THE WIRE.** The square wave asks for 1 MHz, 100 kHz
+  and 10 kHz and a second machine counts **1000050 / 999950 Hz, 100000 Hz
+  and 10000 Hz** at the far end. The serial port carries 64 bytes exact
+  at 115200, 1 Mbaud and 3 Mbaud in **5566, 641 and 213 us** against the
+  wire's own 5555, 640 and 213; a 200 us break raises the receiver's frame
+  flag, delivers nothing, and the receiver takes the next byte once the
+  line is idle. The PIO PWM at 250, 500 and 750 of 999 is counted at
+  **250-251, 500-501 and 749-750 per mille** by a machine at the other end
+  of GP17 -> GP9.
+- **ALL EIGHT FLAGS REACH A LINE, which four could not on the RP2040.**
+  Flag 7 forced alone raises INTS 0x8000 and gives **exactly one**
+  interrupt entry - so the clear inside the ISR body is seen before the
+  handler returns, and no posted write lands late here; all eight
+  together read INTS 0xFF00 and the ISR leaves the flags at zero. An IRQ
+  WAIT holds its machine at the instruction after the IRQ until the
+  system clears the flag, and the receive FIFO's not-empty source
+  delivers 32 bytes in 32 entries.
+- **THE RING AND THE NEIGHBOUR MASKS.** PIO0's `irq next 3` lands on PIO1,
+  PIO2's on PIO0 - the wrap from the last block to the first - and PIO1's
+  `irq prev 5` on PIO0. One write to PIO0's CTRL with a neighbour mask
+  starts PIO0's machine 0 and PIO1's machine 3 together (SM_ENABLE 0x1 and
+  0x8), and one more stops both.
+- **A SAMPLER'S RATE IS ITS OWN, ITS DUTY IS THE WIRE'S.** One instruction
+  with autopush fills the joined receive FIFO with eight words - 256
+  samples at clk_sys - of a 37.5 MHz square wave: **127 to 128 transitions
+  and 37.35 to 37.65 MHz read back**, within one per cent. The ONES are
+  192 of 256 and not 128, the words reading 0x77777777 or 0xBBBBBBBB: with
+  only four samples to a period, the pad that drives, the jumper and the
+  pad that reads do not carry a rise and a fall in the same time, and 6.7
+  ns of difference IS a whole sample. The same sampler on a 2.34 MHz wave
+  - 64 samples to a period - reads **132 ones of 256**, half of them
+  within two per cent, which is what places the distortion on the wire and
+  not on the program.
+- **THE RECEIVE FIFO AS FOUR REGISTERS.** Under FJOIN_RX_PUT a machine
+  writes cell 2 and cell 0 and the system reads back 21 and 6 at
+  RXFn_PUTGETm with nothing blocking; under FJOIN_RX_GET the system writes
+  0x12345678 and 0x0BADC0DE into cells 1 and 3 and the machine reads them
+  out through GET.
+- **THE MASKED INPUT AND THE NEW PIN FORMS.** With IN_BASE at GP13,
+  SHIFTCTRL's IN_COUNT set to 1 makes `MOV X, PINS` read 0x1 with the pad
+  high and 0x0 with it low, and IN_COUNT 3 reads 0x5 - the three pads from
+  the base, and the two above GP13 are pads ANOTHER function is driving,
+  so a block does read a pad it does not own. `mov pindirs, ~null` turns
+  every OUT-mapped pin into an output in one instruction (DBG_PADOE 0 ->
+  0x2000) and `mov pindirs, null` back. A WAIT on the machine's own branch
+  pin holds while GP15 is low and goes on the moment the wire pulls it
+  high.
+- **A FIFO IS A DMA REQUEST, which is what makes a PIO program a
+  peripheral.** 256 bytes at 1 Mbaud from one machine's transmit FIFO to
+  another's receive FIFO, a byte engine at each end and the processor
+  touching neither, arrive byte-exact in **2572 to 2573 us** against the
+  wire's 2560. And the sampler with a WORD engine on its joined receive
+  FIFO collects **8192 samples in 8197 us** at one a microsecond - the
+  capture as long as the buffer instead of as long as four entries -
+  reading **4096 ones of 8192, 500 per mille exactly**, of a 31.25 kHz
+  square wave.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
 
-- The DMA on a machine's FIFOs. The request numbers are here
-  (`Pio<n>::dreq_tx` / `dreq_rx`, and `tx_address` /
-  `rx_top_byte_address` are the addresses an engine wants), but the
-  engines themselves are the DMA chapter's and no letter of this suite
-  uses one; born with that chapter.
 - The chapter's other examples (the duplex SPI, WS2812, Manchester,
   differential Manchester, I2C, addition): programs an application writes
   with the encoders; the four here are the ones the suite can measure
@@ -249,47 +325,13 @@ Driver gaps, each with its reason:
   accessibility: everything this stratum runs is Secure, as the bootrom
   hands over, so ACCESSCTRL is read by no driver of this target.
 
-Implemented but not bench-verified, each with the letter of
-`test_rp2350_pio` that will measure it:
+Implemented but not bench-verified, each with what would measure it:
 
-- The encodings against the vendor's assembled words - the nine
-  instructions and the forms this chip added - DBG_CFGINFO's VERSION on all three
-  blocks, the reset state, a program loaded and run, an instruction
-  executed on the side of a disabled machine, the FIFO flags and the
-  eight-entry join (letter a).
-- GPIOBASE refusing every value but 0 and 16, the index each window
-  gives, and one free pad driven from both windows by the same machine
-  with DBG_PADOE watched (letter b).
-- The four-cycle square wave at 1 MHz, 100 kHz and 10 kHz, counted period
-  by period on the far end of a wire by a three-instruction machine
-  (letter c).
-- The serial port both ways on one wire at 115200, 1 Mbaud and 3 Mbaud,
-  and the frame flag raised by a line held low past a frame (letter d).
-- The PIO PWM as a PwmChannel at 250, 500 and 750 of 999, its duty
-  counted by a machine that samples its branch pin every three cycles for
-  a window of its own counting (letter e).
-- All eight flags on an interrupt line, a program raising flag 6 - one of
-  the four the RP2040 could not route - IRQ WAIT holding a machine until
-  the system clears the flag, and the receive FIFO's not-empty source
-  (letter f).
-- A one-instruction sampler with autopush filling the joined receive FIFO
-  with 256 samples of a 37.5 MHz wave at clk_sys, the ones and the
-  transitions counted (letter g).
-- An IRQ aimed at the next and at the previous block, the ring's wrap
-  from the last block to the first, and CTRL's neighbour masks starting
-  and stopping a machine of another block from one write (letter h).
-  THE SIMULTANEITY those masks exist for is not measured even there: two
-  outputs of two blocks compared edge by edge would want a wire pair this
-  desk has not got, and the letter proves the effect and not the cycle.
-- The receive FIFO as four registers, written by the machine and read by
-  the system (PUT) and the other way about (GET), including the scratch
-  registers surviving the change of join (letter j).
-- IN_COUNT masking `MOV X, PINS` to one pad and then to three, `MOV
-  PINDIRS` turning an OUT-mapped pin around in one instruction, and a
-  WAIT on the machine's own branch pin (letter k). That letter also
-  settles, in passing, whether a block reads a pad it does not own: the
-  masked reads are of a pad another function is driving, and 11.5.6.2
-  says only that the LSB is the GPIO named by IN_BASE.
+- THE SIMULTANEITY CTRL's neighbour masks exist for. The masks are
+  measured - one write starts a machine of each of two blocks - but that
+  the two start on the SAME CYCLE is not: two outputs of two blocks
+  compared edge by edge would want a wire pair this desk has not got, so
+  the letter proves the effect and not the cycle.
 - `rx_putget`, both join bits at once: the four cells become the
   machine's private scratch and the system is shut out. A program that
   wants four more registers is its first user, and what would measure it

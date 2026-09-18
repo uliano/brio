@@ -101,9 +101,10 @@
  * THE DARK LISTENER IS THE PAD AND NOT SOD. `Pl022Client::drive_output`
  * hands the transmit pad to the peripheral or takes it back as an
  * undriven input, because what SOD does to the PAD is a fact of the chip
- * around the block and not of the block: one silicon leaves the pad
- * driven under SOD, another follows nSSPOE with the pad's output enable.
- * Releasing the pad is right on both, so that is what this file does;
+ * around the block and not of the block: the block's pad-enable output
+ * nSSPOE reaches no pad on either silicon this file has met, so both
+ * leave the pad driven under SOD, and a chip that wired it would release
+ * it. Releasing the pad is right either way, so that is what this file does;
  * `sod()` stays a bit of the resource, for a program that wants to see
  * what its own silicon does with it.
  *

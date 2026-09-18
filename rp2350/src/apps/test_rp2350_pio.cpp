@@ -59,12 +59,18 @@
 //   h  THE THREE BLOCKS: an IRQ aimed at the NEXT and the PREVIOUS block
 //      (and the ring's wrap from the last to the first), and CTRL's
 //      neighbour masks starting and stopping a machine of another block
+//   i  THE SERIAL PORT ON TWO DMA ENGINES: 256 bytes poured into one
+//      machine's transmit FIFO and collected from another's receive FIFO
+//      with the processor touching neither
 //   j  THE RECEIVE FIFO AS FOUR REGISTERS: PUT written by the machine
 //      and read by the system, GET written by the system and read by the
 //      machine
 //   k  THE MASKED INPUT AND THE NEW PIN FORMS: SHIFTCTRL's IN_COUNT
 //      masking MOV X, PINS, MOV PINDIRS turning an OUT-mapped pin around
 //      in one instruction, and a WAIT on the machine's own branch pin
+//   l  THE LOGIC ANALYSER ON A DMA ENGINE: 8192 samples of a square wave
+//      pushed a word at a time and taken by a word-wide engine, so the
+//      capture is as long as the buffer and not as the FIFO
 //
 // build: boards = weact2350b,weact2350b-rv
 // build: monitor_speed = 115200
@@ -73,6 +79,7 @@
 
 #include "rp2350/clock.hpp"
 #include "rp2350/core.hpp"
+#include "rp2350/dma.hpp"
 #include "rp2350/mtime.hpp"
 #include "rp2350/pin.hpp"
 #include "rp2350/pio.hpp"
@@ -113,6 +120,14 @@ using Pwm17 = PioPwm<1, 0, 17, 999>;
 using Levels = PioSm<1, 1>;         ///< the duty counter on GP9
 using Window = PioSm<2, 0>;         ///< the machine letter b drives GP22 with
 
+// The DMA engines of letters i and l, on three channels of the sixteen
+// and all on line 0 (rp2350/dma.hpp). A FIFO is a request, which is what
+// lets a PIO program be a peripheral rather than a loop the processor
+// feeds; the sampler's is a WORD engine, the serial port's two are bytes.
+using TxEngine = DmaTxEngine<9, uint8_t>;
+using RxEngine = DmaRxEngine<10, uint8_t>;
+using WordEngine = DmaRxEngine<11, uint32_t>;
+
 /// The free pad letter b drives: GP22 is in BOTH windows (index 22 with
 /// GPIOBASE 0, index 6 with GPIOBASE 16), which is what makes it the one
 /// pad that can show the relocation with no wire.
@@ -125,10 +140,13 @@ volatile uint32_t line1_last = 0;
 volatile bool rx_to_buffer = false;
 uint8_t isr_rx[64];
 volatile uint8_t isr_rx_count = 0;
+volatile bool dma_tx_done = false;
+volatile bool dma_rx_done = false;
 
 uint8_t tx_buf[256];
 uint8_t rx_buf[256];
 uint32_t words[8];
+uint32_t dma_words[256];   ///< letter l's capture, a kilobyte a DMA engine fills
 
 uint32_t us_now() { return Mtime::micros(); }
 void spin_us(uint32_t us) {
@@ -806,11 +824,54 @@ void tg_sampler() {
     (void)Pin<15>::release();
     print(serial, "  ", got, " words of 32 samples at clk_sys: ", ones, " ones, ", transitions, " transitions, first ",
           hex(words[0]), " ", hex(words[1]), "; the wave reads ", hz, " Hz", crlf);
+    // THE RATE IS THE SAMPLER'S CLAIM, THE DUTY IS THE WIRE'S. With four
+    // samples to a period the ones are 3 of 4 and not 2: the two pads and
+    // the jumper between them do not carry a rise and a fall in the same
+    // time, and 6.7 ns of difference is a whole sample here. The
+    // transitions - and so the frequency - are untouched by that, which
+    // is why they are what this verdict weighs; the second round below
+    // is what says the 3-of-4 belongs to the wire.
     bench.verdict("a one-instruction sampler with autopush fills the joined receive FIFO with eight words - 256 "
-                  "samples at clk_sys - of a 37.5 MHz wave: half of them ones, a transition every other sample, and "
-                  "the rate read back within five per cent",
-                  wave_up && up && got == 8u && within(ones, 128u, 50) && within(transitions, 127u, 50) &&
+                  "samples at clk_sys - of a 37.5 MHz wave: a transition every other sample, and the rate read "
+                  "back within five per cent",
+                  wave_up && up && got == 8u && within(transitions, 127u, 50) &&
                       within(hz, 37'500'000u, 50));
+
+    // THE SAME SAMPLER ON A SLOWER WAVE: 64 samples to a period instead
+    // of four, so one sample of edge skew is under two per cent and the
+    // DUTY becomes measurable. If this reads half and the round above
+    // reads three quarters, the difference is the wire's edges and not
+    // the program's.
+    pio_fresh();
+    const bool slow_up = Wave::init(clock, 2'343'750);   // clk_sys / 64
+    (void)Pin<15>::function(PinFunction::pio0);
+    const auto slow_at = P0::add(sample_program);
+    const bool slow_sm = slow_at && Sampler::init(sample_program, *slow_at, c);
+    for (uint8_t i = 0; i < 8u; ++i) {
+        words[i] = 0;
+    }
+    Sampler::enable(true);
+    spin_us(50);
+    Sampler::enable(false);
+    uint8_t slow_got = 0;
+    while (slow_got < 8u && !Sampler::rx_empty()) {
+        words[slow_got++] = Sampler::pop();
+    }
+    uint32_t slow_ones = 0;
+    for (uint8_t w = 0; w < slow_got; ++w) {
+        slow_ones += static_cast<uint32_t>(__builtin_popcount(words[w]));
+    }
+    Wave::release();
+    if (slow_at) {
+        P0::unload(*slow_at, sample_program.length);
+    }
+    (void)Pin<15>::release();
+    print(serial, "  the same sampler on a 2.34 MHz wave (64 samples a period): ", slow_ones,
+          " ones of ", 32u * slow_got, ", first ", hex(words[0]), " ", hex(words[1]), crlf);
+    bench.verdict("... and at 64 samples to a period the ones are half of them, within five per cent - so the "
+                  "three quarters read above is the asymmetry of two pads and a jumper at 6.7 ns a sample, not "
+                  "the wave and not the sampler",
+                  slow_up && slow_sm && slow_got == 8u && within(slow_ones, 128u, 50));
 }
 
 // =============================================================================
@@ -894,6 +955,49 @@ void th_blocks() {
         P1::unload(*at_park1, park_program.length);
     }
     pio_fresh();
+}
+
+// =============================================================================
+// i - the serial port on two DMA engines
+// =============================================================================
+//
+// A machine's FIFO is a DMA request, which is what makes a PIO program a
+// peripheral and not a loop the processor has to feed. Both engines ring
+// on line 0; the transmit one pours bytes into TXF and the receive one
+// collects them from the top byte of RXF - the address a byte-wide
+// engine wants of a machine that pushes a left-shifted register.
+void ti_serial_dma() {
+    if (!wire_13_15()) {
+        return;
+    }
+    pio_fresh();
+    const bool up = Tx::init(clock, 1'000'000) && Rx::init(clock, 1'000'000);
+    fill_pattern(tx_buf, 256, 0x40);
+    for (uint16_t i = 0; i < 256; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    dma_tx_done = false;
+    dma_rx_done = false;
+    RxEngine::arm(Rx::rx_top_byte_address(), Rx::Sm::dreq_rx);
+    TxEngine::arm(Tx::tx_address(), Tx::Sm::dreq_tx);
+    (void)RxEngine::start(rx_buf, 256);
+    const uint32_t t0 = us_now();
+    (void)TxEngine::start(tx_buf, 256);
+    while (!dma_rx_done && us_now() - t0 < 100'000u) {
+    }
+    const uint32_t took = us_now() - t0;
+    const bool exact = same(tx_buf, rx_buf, 256);
+    TxEngine::stop();
+    RxEngine::stop();
+    Tx::release();
+    Rx::release();
+    print(serial, "  256 bytes at 1 Mbaud through two engines: tx ", dma_tx_done ? "done" : "NOT done",
+          ", rx ", dma_rx_done ? "done" : "NOT done", " in ", took, " us (2560 on the wire), ",
+          exact ? "byte-exact" : "MISMATCH", crlf);
+    bench.verdict("256 bytes poured into a machine's transmit FIFO by a byte engine and collected from "
+                  "another machine's receive FIFO by a second, byte-exact, in the wire's own time - the "
+                  "processor touching neither byte",
+                  up && dma_tx_done && dma_rx_done && exact && within(took, 2560, 100));
 }
 
 // =============================================================================
@@ -1034,6 +1138,64 @@ void tk_pins() {
                   up && waiting && seven && *seven == 7u);
 }
 
+// =============================================================================
+// l - the logic analyser on a DMA engine
+// =============================================================================
+//
+// Letter g's sampler with nothing between it and memory: the machine
+// pushes a word every 32 samples and a WORD-WIDE engine takes it, so the
+// run is as long as the buffer and not as long as the four-entry FIFO.
+// The wave is slow enough (32 samples to a period) for the duty to be a
+// measurement and not the edges of two pads, which is letter g's finding.
+void tl_sampler_dma() {
+    if (!wire_13_15()) {
+        return;
+    }
+    pio_fresh();
+    const bool wave_up = Wave::init(clock, 31'250);          // 32 samples a period at 1 MHz
+    (void)Pin<15>::function(PinFunction::pio0);
+    const auto at = P0::add(sample_program);
+    PioSmConfig c{};
+    c.clock = *pio_clock_div_for(SysClock::hz, 1'000'000);   // one sample a microsecond
+    c.in_base = 15;
+    c.in_shift_right = false;
+    c.autopush = true;
+    c.push_threshold = 32;
+    c.fifo_join = PioFifoJoin::rx;
+    const bool up = at && Sampler::init(sample_program, *at, c);
+    for (uint16_t i = 0; i < 256u; ++i) {
+        dma_words[i] = 0;
+    }
+    dma_rx_done = false;
+    WordEngine::arm(Sampler::rx_address(), Sampler::dreq_rx);
+    (void)WordEngine::start(dma_words, 256);
+    const uint32_t t0 = us_now();
+    Sampler::enable(true);
+    while (!dma_rx_done && us_now() - t0 < 100'000u) {
+    }
+    const uint32_t took = us_now() - t0;
+    Sampler::enable(false);
+    uint32_t ones = 0;
+    for (uint16_t i = 0; i < 256u; ++i) {
+        ones += static_cast<uint32_t>(__builtin_popcount(dma_words[i]));
+    }
+    const uint32_t pm = ones * 1000u / 8192u;
+    WordEngine::stop();
+    Wave::release();
+    if (at) {
+        P0::unload(*at, sample_program.length);
+    }
+    (void)Pin<15>::release();
+    print(serial, "  256 words of 32 samples at 1 MHz: ", dma_rx_done ? "collected" : "NOT collected",
+          " in ", took, " us, ", ones, " ones of 8192 = ", pm,
+          " per mille (a 31.25 kHz square wave); the first words ", hex(dma_words[0]), " ",
+          hex(dma_words[1]), crlf);
+    bench.verdict("a one-instruction sampler with autopush, its joined receive FIFO drained by a WORD "
+                  "engine: 8192 samples of a 31.25 kHz wave at one a microsecond collected in 8 ms, "
+                  "half of them ones within one per cent",
+                  wave_up && up && dma_rx_done && within(took, 8192, 50) && within(pm, 500, 10));
+}
+
 void banner() {
     print(serial, crlf,
           "test_rp2350_pio - the RP2350 PIO (datasheet chapter 11), three blocks: GP13 -> GP15 and GP17 -> GP9; "
@@ -1065,10 +1227,25 @@ extern "C" void isr_pio0_1() {
     line1_entries = line1_entries + 1u;
     line1_last = P0::isr(1);
 }
+/// The three engines of letters i and l share DMA line 0, so the one
+/// handler asks each of them whether the completion was its own.
+extern "C" void isr_dma_0() {
+    if ((TxEngine::service() & TxEngine::flag_complete) != 0u) {
+        (void)TxEngine::complete();
+        dma_tx_done = true;
+    }
+    if ((RxEngine::service() & RxEngine::flag_complete) != 0u) {
+        dma_rx_done = true;
+    }
+    if ((WordEngine::service() & WordEngine::flag_complete) != 0u) {
+        dma_rx_done = true;
+    }
+}
 
 int main() {
     const bool clock_ok = SysClock::init();
     const bool mtime_ok = brio::Mtime::start(clock);
+    const bool dma_ok = brio::Dma::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     (void)Led::output(false);
@@ -1082,12 +1259,15 @@ int main() {
     bench.letter('f', "the interrupts and all eight flags", tf_interrupts);
     bench.letter('g', "the sampler at clk_sys", tg_sampler);
     bench.letter('h', "the three blocks: the ring and the neighbour masks", th_blocks);
+    bench.letter('i', "the serial port on two DMA engines", ti_serial_dma);
     bench.letter('j', "the receive FIFO as four registers", tj_putget);
     bench.letter('k', "the masked input and the new pin forms", tk_pins);
+    bench.letter('l', "the logic analyser on a DMA engine", tl_sampler_dma);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED", " mtime=",
-                    mtime_ok ? "1us" : "FAILED", " tick=", tick_ok ? "on" : "FAILED", brio::crlf);
+                    mtime_ok ? "1us" : "FAILED", " dma=", dma_ok ? "released" : "FAILED", " tick=",
+                    tick_ok ? "on" : "FAILED", brio::crlf);
         banner();
         bench.prompt();
     }

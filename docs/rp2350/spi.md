@@ -67,21 +67,25 @@ the peak at a clk_peri of 150 MHz with exactly those register values; the
 equation printed two paragraphs earlier gives clk_peri / 2, and that is
 what the driver's chooser computes.
 
-**WHAT 12.3.1 CHANGED, AND WHAT IT LEADS THIS PAGE TO EXPECT.** On the
-RP2040 the block's pad-enable output nSSPOE was not connected to the pad,
-so SOD stopped the block driving and left the pad driving whatever it
-held - measured there ([../rp2040/spi.md](../rp2040/spi.md)). On this chip
-12.3.1 says the output enable of the SSPTXD data output IS controlled by
-nSSPOE, and that the peripheral tristates its output when deselected in
-client mode, which it offers as the reason software need not manage the
-output enable even where several clients share the data lines. Two things
-follow from that sentence, and NEITHER IS MEASURED ON THIS SILICON YET:
-a client's transmit pad should be undriven while its select is high, and
-SOD should release that pad rather than freeze it. The driver depends on
-neither - `SpiClient::drive_output(false)` makes the dark listener by
-releasing the PAD, which is right on both silicons and is why the IP file
-made the pad the lever - and `sod()` stays a bit of the resource, which is
-what a suite points at the question.
+**THE CHAPTER SAYS TWO DIFFERENT THINGS ABOUT nSSPOE, AND THE PADS ANSWER
+ONE OF THEM.** 12.3.1 says the output enable of the SSPTXD data output IS
+controlled by nSSPOE on this chip, and that the peripheral tristates its
+output when deselected in client mode, which it offers as the reason
+software need not manage the output enable even where several clients
+share the data lines. The idle-level list printed under each of the four
+Motorola modes and under Microwire (12.3.4.10 to 12.3.4.14) says the
+opposite, in the same words all five times: the nSSPOE pad enable signal
+is forced high, "this is not connected to the pad in RP2350". MEASURED ON
+STEPPING A2 IT IS THE SECOND THAT HOLDS. A deselected client and a client
+with SOD set both leave their transmit pad DRIVEN, and driven HIGH - the
+same arrangement as the RP2040 ([../rp2040/spi.md](../rp2040/spi.md)),
+where nSSPOE reached no pad either. What SOD does do is keep the block's
+answers off the wire: the host clocks a steady 0xFF out of a client whose
+FIFO is full of frames. The driver depends on none of it -
+`SpiClient::drive_output(false)` makes the dark listener by releasing the
+PAD, which is right on both silicons and is why the IP file made the pad
+the lever - and `sod()` stays a bit of the resource, which is what the
+suite points at the question.
 
 **THE PADS COME UP ISOLATED** (9.11, and [README.md](README.md)): a pad
 answers nothing until the isolation latch is cleared, which every
@@ -200,6 +204,87 @@ extern "C" void isr_spi1() {
 }
 ```
 
+## Bench findings
+
+All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
+and clk_peri at 150 MHz, and all of them on BOTH architectures:
+`test_rp2350_spi` reports **41 pass, 0 fail** on the Cortex-M33 pair and
+on the Hazard3 pair, from one source, each on three flash-and-run cycles.
+Where a number differs between the halves both are given; every verdict
+reads the same.
+
+- **THE BLOCK IS THE RP2040'S, AND SAYS SO.** SSPPERIPHID 0..3 read 0x22,
+  0x10, 0x34, 0x00 - the revision field 3, which is r1p4 - and SSPPCELLID
+  the PrimeCell's own 0xB105F00D, on both instances; out of reset SSPSR
+  reads 0x03 (both FIFOs empty, the transmit one not full) with the block
+  disabled.
+- **THE RATE CHOOSER AT THIS clk_peri.** The fastest setting under 75 MHz
+  is CPSDVSR 2 with SCR 0, which is **75 MHz exactly** - clk_peri / 2, and
+  not the 70.5 Mbit/s 12.3.4.4's worked example names for the same
+  register values; 12.5 MHz and 1 MHz come out exact, and 2306 Hz (254 x
+  256) is refused as below the pair's reach.
+- **cs_setup_us, FOR THE FIRST TIME ON ANY TARGET.** 200 us asked for
+  between the select and the first clock, served on the platform timer and
+  measured on the system timer - two counters of the same microsecond with
+  unrelated phases - lengthens an otherwise identical transaction by
+  **203 us on both halves**: sixteen frames at 9.4 MHz cost 21 us bare on
+  the Cortex-M33 half and 24 on the Hazard3 one, 224 and 227 with the wait.
+  The two transactions have to be told apart from the XIP cache's own
+  first-run cost, which is worth some six microseconds on the Hazard3 half
+  and under one on the other, so the letter warms the polled path before
+  it weighs it.
+- **THE PUMP BATCHES.** Sixteen frames on the loop-back cost **three to
+  four interrupt entries**, not sixteen: the eight-deep FIFOs are what the
+  engine is counting on.
+- **THE POLLED LADDER, WHERE THE TWO HALVES DIFFER MOST.** 64 frames on
+  the loop-back, Cortex-M33 then Hazard3: div2 55 / 61 us, div4 46 / 49,
+  div8 44 / 49, div16 70 / 75, div32 134 / 141, div64 263 / 269, div128
+  521 / 529, div256 1039 / 1046. Below div8 the WIRE sets the pace and the
+  two halves converge; at and above it the polling loop does, and **the
+  floor is 44 us on the Cortex-M33 half and 49 on the Hazard3 one - some
+  690 and 765 ns a frame** where the wire alone would want 213 and 106.
+  Every rate is byte-exact.
+- **THE ENGINES ON THE LOOP-BACK.** 128 bytes at 37.5 MHz, ISR-completed,
+  take **126 us on the Cortex-M33 half and 113 on the Hazard3 one** where
+  the wire alone is 27; a polled request on the engines completes inside
+  `start()` in 28 us at 75 MHz. A command frame on the pump then data on
+  the engines, 16-bit frames falling back to the pump, and a read with no
+  out buffer through the transmit engine's fixed 0xFF cell are all exact.
+- **THE CLIENT KEEPS UP ONE RUNG ABOVE THE CHAPTER'S CEILING.** On the
+  four wires, the host polled and the client served from its own
+  interrupt, 32 frames are exact both ways at **clk_peri / 8, 18.75 MHz**,
+  and wrong at 37.5 and 75 - where 12.3.4.4 puts a client's limit at
+  clk_peri / 12, 12.5 MHz. That is the same generosity the RP2040 showed.
+  The frame period on those rounds is 1125 to 1218 ns whatever the rate,
+  because one core is serving both ends and the client's interrupt, not
+  the clock, is the pace.
+- **WITH SPH = 0 THE PL022 CLIENT TAKES ONE FRAME PER SELECT WINDOW.**
+  Sixteen frames clocked under one held select in modes 0 and 2 are heard
+  as **one**; in modes 1 and 3 all sixteen arrive. It is the fact a
+  multi-frame transaction under a GPIO select must know, and it is the
+  block's and not this chip's.
+- **THE TRANSMIT PAD'S OUTPUT ENABLE - the one verdict that was expected
+  to differ from the RP2040's, and does not.** The instrument is proved
+  both ways first on the GP11 -> GP16 wire: a pad driven low reads not
+  floating and low, the same pad released reads floating. Then a
+  DESELECTED client reads **not floating, level high**, and a client with
+  SOD set reads **not floating, level high** while the host clocks
+  **0xFF** out of it with 0x80, 0x85, 0x8A waiting in its FIFO. So nSSPOE
+  reaches no pad on this stepping, as the modes' own idle lists say and
+  12.3.1's paragraph denies; SOD keeps the answers off the wire without
+  releasing the line. A dark client - the pad released - reads 0xFF at the
+  host and still hears all sixteen frames, and a client nobody reads
+  raises its overrun, which clears by writing one.
+- **THE ARBITER IS UNTOUCHED.** `util/spi_bus.hpp` and
+  `util/bus_master.hpp` carry four transactions with pumped and polled
+  interleaved, reject the fifth of a four-deep queue while answering all
+  six exactly once, and vote for a sleep when idle and against one when
+  busy - on both architectures, with no line changed for either.
+- **THE ROLES INVERT** on the same four wires, SPI1 hosting on GP9's
+  select and SPI0 listening on GP17, sixteen frames exact both ways; and
+  the two engines on the wire carry 64 bytes each way at 2.3 MHz exact
+  with the client on its own interrupt.
+
 ## Not covered yet
 
 Driver gaps, each with its reason. The ones that belong to the block
@@ -224,58 +309,9 @@ Request, a client on the DMA engines - are in
   target has no dynamic clock yet, so nothing changes clk_sys under a
   running bus.
 
-Implemented but not bench-verified, each with the letter of
-`test_rp2350_spi` that will measure it, on both architectures:
+Implemented but not bench-verified, each with what would measure it:
 
-- Table 645 as the driver states it, the rate chooser at this clk_peri
-  (75 MHz at the top, 12.5 MHz and 1 MHz exact, nothing under 2306 Hz),
-  the PrimeCell identification registers against the reset values this
-  chip's own description states for them, the block's reset state, the
-  four refusals, and the loop-back proven on the pump (letter a).
-- The four Motorola modes at 8 and 16 bits on the loop-back, a command
-  phase then a data phase, a read with no out buffer, the select released
-  after every transaction, an empty request completing on the spot - and
-  `cs_setup_us` MEASURED, 200 us asked for between the select and the
-  first clock and the two transactions differenced on the system timer
-  (letter b). It is the first bench to answer that one on any target.
-- The polled path at all eight named rates, div2 to div256, 64 frames
-  each, timed, with the per-frame cost beside the wire's own (letter c).
-- THE DMA ENGINES on the loop-back: a 128-byte block ISR-completed, a
-  command frame on the pump then data on the engines, a polled request
-  completing inside `start()`, the 16-bit fallback to the pump, and a
-  read with no out buffer through the transmit engine's fixed cell
-  (letter d). This letter and letter i are the only two that need
-  [dma.md](dma.md)'s engines, and they are apart from the bus verdicts on
-  purpose.
-- `SpiBus` over `SpiHost` with `util/bus_master.hpp` unchanged: four
-  transactions and four replies with pumped and polled interleaved, the
-  rejection when the queue is full, and both sleep votes (letter e).
-- ON THE WIRE between the two instances: sixteen frames both ways in
-  modes 1 and 3 pumped and polled, sixteen 16-bit frames, four frames
-  delivered by the receive timeout, the client's select pad reading
-  not-selected between transactions, and the PL022 client's one frame per
-  select window in modes 0 and 2 (letter f).
-- The rate ladder on the wire from div2 down: where the client's
-  clk_peri / 12 ceiling really lies on this silicon, which on the RP2040
-  turned out to be one rung more generous than the chapter's number
-  (letter g).
-- THE TRANSMIT PAD'S OUTPUT ENABLE, which is the one verdict this chapter
-  expects to differ from the RP2040's: an instrument that calls a line
-  floating when a pull-down and a pull-up read it differently - proved
-  both ways on a pad driven low and then released, which is also what
-  makes it E9-proof - then the same instrument on a client that is
-  deselected and on a client with SOD set. 12.3.1 says both should be
-  undriven here; on the RP2040 the second was measured DRIVEN. Beside
-  them, a dark client answering nothing and hearing everything, and a
-  client that does not read overrunning its eight-deep FIFO (letter h).
-- The two engines on the wire with the client on its own interrupt, 64
-  bytes each way (letter i).
-- The roles inverted on the same four wires, SPI1 hosting and SPI0
-  listening on its select pad (letter j).
-- What one core serving both ends costs: the suite runs its pumped wire
-  rounds slower than its polled ones for that reason, and the rung at
-  which the client's interrupt stops keeping up is a number letters f and
-  g will give.
 - The QFN-60's pin table and its compile-time refusals: the stratum
   compiles for that package and refuses the pads it has not got, and no
-  QFN-60 part is on the bench.
+  QFN-60 part is on the bench. A board carrying one, running the suite's
+  letter a against a pin table of thirty pads.

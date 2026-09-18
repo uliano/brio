@@ -210,6 +210,96 @@ extern "C" void isr_i2c1() {
 }
 ```
 
+## Bench findings
+
+All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
+at 150 MHz, on two wires between the chip's own instances with a 4.7 kOhm
+pull-up on each, and all of them on BOTH architectures:
+`test_rp2350_i2c` reports **44 pass, 0 fail** on the Cortex-M33 pair and
+on the Hazard3 pair, from one source, each on three flash-and-run cycles.
+Nothing in this chapter reads differently between the halves, which is
+what a block outside the processor should look like.
+
+- **THE COUNTS AT THIS clk_sys.** 100 kHz solves to HCNT 585 and LCNT 899,
+  400 kHz to 135 and 224, 1 MHz to 45 and 89 - each with SPKLEN 8 - and
+  each gives its asked rate exactly on an ideal wire once the SPKLEN + 8
+  cycles the block adds are taken out of the counts. Table 1053's floors
+  come back as the chapter states them: fast mode at 12 MHz is (LCNT 15,
+  HCNT 6), standard mode at 2.7 MHz is (12, 6), fast-mode-plus needs 32
+  MHz, and a hertz below each is refused.
+- **THE RESET STATE.** IC_CON reads **0x65** - a host with its client half
+  disabled, the fast speed code, restarts enabled - with the spike filter
+  at 7, the hold at 1, both FIFOs empty and the block disabled.
+  **IC_COMP_PARAM_1 reads zero**, as it does on the RP2040: the FIFO
+  depths are the chapter's word and not the register's. The transmit FIFO
+  is **sixteen** entries deep, measured under TX_CMD_BLOCK - full at
+  sixteen, TX_OVER on the seventeenth, flushed by the disable - and the
+  disable of an idle block is reported by IC_ENABLE_STATUS in **1 us**.
+  The interrupt lines are **36 and 37**, not the RP2040's 23 and 24.
+- **THE PULL-UPS PROVEN THE WAY E9 FORCES.** A pad of this stepping left
+  to its own pull-down reads HIGH, so the idle level says nothing: each
+  line is driven low, released onto that pull-down, and read back - and
+  all four come back HIGH, which only the board's 4.7 kOhm can do. The
+  letter prints both readings side by side, and the bare one is the
+  reminder that a program cannot ask this chip whether a pull-up is
+  fitted.
+- **THE SCAN AND THE PROBE.** 0x08..0x77 at 400 kHz finds exactly one
+  device, at 0x42, answering in **88 us**; nobody home is `i2c_nack_addr`
+  in **28 us**. The probe is served as ONE READ REQUEST and one STOP on
+  this silicon - a one-byte read and not an address-only tenure - which is
+  what a client's event count has to expect.
+- **THE FOUR TENURE SHAPES.** A write of eight is heard byte-exact with
+  one STOP; a read of eight is byte-exact with eight read requests, the
+  host's NACK seen once and one STOP; a write-then-read shows **exactly
+  one repeated START from the far end**; and a 200-byte write goes out in
+  ONE tenure in **4570 us** with **28 host interrupts** for 200 bytes -
+  the FIFO refilled at its half - and no overrun at the client.
+- **THE VOCABULARY IS THE WIRE'S.** A deaf client is `i2c_nack_addr` on a
+  write, a probe and a read alike; a client holding IC_SLV_DATA_NACK_ONLY
+  answers `i2c_nack_data` on the first byte and does not store it, and
+  takes the whole write once it acknowledges again; bytes queued beyond
+  what a host takes are flushed at its NACK with the client told
+  (ABRT_SLVFLUSH_TXFIFO) and the next read starts clean. **The client's
+  clock stretch is priced:** an eight-byte read costs 220 us plain and
+  **1013 us** with the client holding SCL 100 us before each byte.
+- **THE RATE MEASURED AGAINST THE RATE ASKED.** A 64-byte tenure is 9 x 65
+  SCL periods, and on this wire it comes to **99 kHz, 393 kHz and 970
+  kHz** for the three speeds - never above the asked rate, and the
+  shortfall is the pull-ups' rise time on a jumper.
+- **THE ENGINES.** A 64-byte read on the two engines takes 1527 us at 400
+  kHz with **two host interrupts for the whole tenure** - the commands
+  poured from a fixed cell, the bytes collected, byte-exact - and a
+  write-then-read puts the write on the pump, the repeated START and 32
+  bytes back on the engines. A two-byte read and a probe stay on the pump;
+  a deaf client on an engined read is `i2c_nack_addr` with the engines put
+  away, and the next engined read is clean. **Eight 255-byte reads at 1
+  MHz are exact with TX_OVER never raised**, which is what says the
+  engine's bursts do not overrun a sixteen-deep FIFO.
+- **THE TIMED BUS.** A client that never answers a read request holds SCL
+  for ever - no silicon of this chip ends that - and the arbiter's own
+  20 ms timeout is what answers: `i2c_timeout` **after 20 ms** with SCL
+  still low, and the `recover()`ed engine carries the next two tenures
+  clean. `util/i2c_bus.hpp` and `util/bus_master.hpp` are unchanged for
+  either architecture: four tenures answered in order, a NACK delivered in
+  its place with the tenures around it untouched, the fifth of a four-deep
+  queue rejected while all six are still answered exactly once, and both
+  sleep votes.
+- **THE UNSTICK, AND WHICH RULER IT GOT.** On a healthy wire it reads the
+  lines and returns 0 without clocking; with SDA held low by a GPIO it
+  clocks nine times and STOPs, returns 0xFF, and **the pulse train takes
+  128 us** - so every one of the twenty half-bit waits was served by the
+  platform timer, which a program on the Cortex-M33 half has to start
+  itself (`Mtime::start`). The bus works after it.
+- **THE PADS AND THE ISOLATION LATCH.** After the hand-over both pads read
+  **0x5A** - exactly what 12.2.1.3 asks for: the pull-up, the slew limit,
+  the Schmitt trigger, ISO clear, the input buffer on - with FUNCSEL 3,
+  and a tenure lands on them. The unstick takes them to SIO and hands them
+  back with **the same 0x5A**, the next tenure unchanged. `release()`
+  leaves them at 9.11's reset value **0x116**, isolated with the input
+  buffer off and a pull-down, and FUNCSEL at none.
+- **THE ROLES INVERT** on the same two wires, I2C1 hosting on GP15/GP14
+  and I2C0 listening on GP13/GP12, sixteen bytes exact both ways.
+
 ## Not covered yet
 
 Driver gaps, each with its reason. The ones that belong to the block
@@ -229,56 +319,8 @@ here.
 - The general call and the START byte as host verbs: `target(addr,
   general_call)` is in the resource; no tenure shape asks for either.
 
-Implemented but not bench-verified, each with the letter of
-`test_rp2350_i2c` that will measure it. Nothing in this chapter is
-expected to differ between the two architectures - the block is the same
-block whichever processor pair is running - so every letter is run twice
-and the two transcripts are compared; only the interrupt counts and the
-service latencies are printed rather than judged tightly.
+Implemented but not bench-verified, each with what would measure it:
 
-- The pin table over the whole bank, the timing arithmetic at this
-  clk_sys, table 1053's floors reproduced, the reset state (IC_CON 0x65,
-  the spike filter, the hold, the component parameter register at zero),
-  the transmit FIFO's depth measured under TX_CMD_BLOCK, the refusals
-  while enabled, the disable of an idle block timed, and the two
-  interrupt lines being 36 and 37 (letter a).
-- THE PULL-UPS PROVEN THE WAY E9 FORCES - each line driven low, released
-  onto the pad's own pull-down and read back high - and the two readings
-  printed side by side, the bare pad's and the pulled-up one's; then the
-  scan of 0x08..0x77 finding the one client, nobody home as
-  `i2c_nack_addr` and timed, and the probe served as one read request
-  (letter b).
-- The four tenure shapes - a write, a read, a write-then-read with the
-  repeated START counted from the far end, the probe - and a 200-byte
-  write in one tenure through the pump (letter c).
-- The vocabulary on the wire: `i2c_nack_addr` from a deaf client on all
-  three shapes, `i2c_nack_data` from a client refusing data,
-  the client's clock stretch priced, and the bytes queued beyond what a
-  host takes flushed at its NACK (letter d).
-- The three speeds byte-exact both ways and the SCL rate MEASURED on the
-  ruler against what the counts should give on an ideal wire (letter e).
-- THE TWO DMA ENGINE SLOTS over this chip's controller ([dma.md](dma.md)),
-  kept apart from every bus verdict so that a fault in the newer chapter
-  cannot mask one here: a 64-byte read, a write-then-read, the short
-  reads that stay on the pump, and eight 255-byte reads at 1 MHz with
-  TX_OVER never raised (letter f).
-- `util/i2c_bus.hpp`'s arbiter over the engine with nothing changed: four
-  tenures answered, a NACK in its place, the rejection when the queue is
-  full, both sleep votes, and THE TIMED BUS - a client holding SCL
-  answered `i2c_timeout` at the arbiter's 20 ms, with the `recover()`ed
-  engine carrying the next tenures (letter g).
-- `unstick()` on a healthy wire, on one with SDA held low by a GPIO, and
-  on a healthy one again - AND ITS HALF-BIT, the nine clocks and the STOP
-  timed on the system timer, which is what states whether the platform
-  timer was running under them (letter h).
-- The roles inverted on the same two wires, I2C1 hosting and I2C0
-  listening (letter i).
-- THE PADS AND THE ISOLATION LATCH, which is where this chip differs
-  most: the whole pad register read back after the hand-over against
-  12.2.1.3, a tenure carried on pads so configured, the pads taken by
-  hand for an unstick and given back unchanged, and `release()` leaving
-  them at 9.11's reset value - isolated, the input buffer off, a
-  pull-down (letter j).
 - `rebase()`: this stratum has no dynamic clock yet; measured when the
   clock chapter grows one, a tenure exact after a switch.
 - The client's general call (IC_ACK_GENERAL_CALL, the `general_call`

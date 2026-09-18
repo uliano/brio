@@ -44,19 +44,19 @@
  * handed over with a pull-UP so an answer line nothing drives reads as
  * the idle ones a bus expects.
  *
- * WHAT 12.3.1 CHANGED, AND WHY IT IS A PREDICTION AND NOT A FACT HERE.
- * On the RP2040 the block's pad-enable output nSSPOE was NOT connected
- * to the pad, so SOD stopped the block driving and left the pad driving
- * whatever it held (measured there, docs/rp2040/spi.md). On this chip
- * 12.3.1 says the output enable of the SSPTXD data output IS controlled
- * by nSSPOE and that the peripheral tristates its output when deselected
- * in client mode. Two consequences follow from that sentence and NEITHER
- * IS MEASURED YET: a client's transmit pad should float between select
- * windows, and SOD should release it rather than freeze it. The driver
- * does not depend on either - `Pl022Client::drive_output(false)` makes
- * the dark listener by releasing the PAD, which is right on both silicons
- * and is why the IP file made the pad the lever - and `sod()` stays a bit
- * of the resource, which is what a suite points at the question.
+ * WHAT 12.3.1 SAYS, AND WHAT THE PADS DO. The chapter says two different
+ * things about the block's pad-enable output nSSPOE: 12.3.1 ("Changes
+ * from RP2040") has it control the output enable of the SSPTXD pad, the
+ * peripheral tristating its output when deselected in client mode; the
+ * idle-level lists of 12.3.4.10 to 12.3.4.14 say, five times in the same
+ * words, that the signal "is not connected to the pad in RP2350". THE
+ * PADS ANSWER THE SECOND (measured, on stepping A2, by an instrument
+ * proven both ways in the same letter): a deselected client and a client
+ * with SOD set both leave the transmit pad DRIVEN, as on the RP2040. What
+ * SOD does do is keep the answers off the wire - the host clocks a steady
+ * 0xFF with frames waiting in the client's FIFO. The driver depends on
+ * neither reading: `Pl022Client::drive_output(false)` makes the dark
+ * listener by releasing the PAD, and `sod()` stays a bit of the resource.
  *
  * THE LINE. The four maskable sources of an instance combine into ONE
  * interrupt line (SPI0_IRQ = 31, SPI1_IRQ = 32, datasheet 3.2); the app

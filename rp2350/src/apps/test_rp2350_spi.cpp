@@ -34,14 +34,17 @@
 // timer (rp2350/mtime.hpp) is started too, because it is what
 // rp2350/delay.hpp counts a Request's `cs_setup_us` on.
 //
-// THE QUESTION THIS CHAPTER OWES THE OTHER CHIP. 12.3.1 says the output
-// enable of SSPTXD is controlled by the block's nSSPOE here, where on the
-// RP2040 nSSPOE reached no pad (4.4.3.14 there, measured: SOD left the
-// transmit pad DRIVEN). Letter h points an instrument at exactly that -
-// a line is called FLOATING when a pull-down and a pull-up read it
-// differently, which is the only E9-proof way to tell a released pad from
-// a driven one on this stepping - and its verdicts state what 12.3.1
-// leads this chapter to expect.
+// THE QUESTION THIS CHAPTER OWES THE OTHER CHIP, AND THE ONE PLACE THE
+// CHAPTER ANSWERS ITSELF TWICE. 12.3.1 says the output enable of SSPTXD
+// is controlled by the block's nSSPOE here, and that the block tristates
+// its output when deselected in client mode; the idle-level list printed
+// under every Motorola mode and under Microwire (12.3.4.10 to 12.3.4.14)
+// says instead, in the same words each time, that nSSPOE "is not
+// connected to the pad in RP2350" - which is what the RP2040 did too
+// (4.4.3.14 there). Letter h points an instrument at exactly that: a line
+// is called FLOATING when a pull-down and a pull-up read it differently,
+// which is the only E9-proof way to tell a released pad from a driven one
+// on this stepping - and its verdicts state what the pads answered.
 //
 // THE DMA LETTERS ARE APART ON PURPOSE (d and i): rp2350/dma.hpp is
 // itself young, so a fault in an engine must not be able to fail a
@@ -71,7 +74,7 @@
 //   g  the rate ladder on the wire, div2 downwards: where the client
 //      (clk_peri / 12 at most, 12.5 MHz here) keeps up and where it
 //      does not
-//   h  THE TRANSMIT PAD'S OUTPUT ENABLE, which is what 12.3.1 changed:
+//   h  THE TRANSMIT PAD'S OUTPUT ENABLE, which 12.3.1 claims changed:
 //      the floating instrument proved both ways, a released pad, a
 //      client deselected, SOD - and the overrun beside them
 //   i  THE DMA ENGINES ON THE WIRE: 64 bytes each way through the host's
@@ -433,6 +436,15 @@ void tb_pump() {
     // sixteen frames twice, once with 200 us of settling asked for before
     // the first clock.
     fill_pattern(tx_buf, 16, 0x55);
+    // THE MEASUREMENT IS A DIFFERENCE BETWEEN TWO TRANSACTIONS, so the
+    // two must cost the same but for the wait - and the FIRST polled
+    // transaction of a cold image does not: it pays the XIP cache's fill
+    // for the polled path, which no letter before this one has walked.
+    // Measured, that fill is worth some six microseconds on the Hazard3
+    // half and under one on the Cortex-M33 one, which is three per cent
+    // of the 200 us being weighed. One unjudged round warms it.
+    (void)xfer<Host>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0, SpiClocks::div16,
+                     SpiDataSize::bits8, true);
     uint32_t t0 = us_now();
     const uint8_t bare = xfer<Host>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
                                     SpiClocks::div16, SpiDataSize::bits8, true);
@@ -873,19 +885,23 @@ void th_output_enable() {
                   "everything",
                   st == spi_ok && ff && client_count == 16u);
 
-    // THE PAD ON THE PERIPHERAL, THE CLIENT DESELECTED. 12.3.1 says the
-    // output enable of SSPTXD follows nSSPOE here, and that the block
-    // tristates its output when deselected in client mode - which on the
-    // RP2040 it did not do, nSSPOE reaching no pad there.
+    // THE PAD ON THE PERIPHERAL, THE CLIENT DESELECTED. THE CHAPTER SAYS
+    // BOTH THINGS: 12.3.1 has the output enable of SSPTXD controlled by
+    // nSSPOE and the block tristating when deselected in client mode,
+    // while the idle-level list under every one of the four Motorola
+    // modes (12.3.4.10 to 12.3.4.14) says in the same words each time
+    // that nSSPOE "is not connected to the pad in RP2350". The pads
+    // decide.
     Client::drive_output(true);
     spin_us(200);
     const bool idle_floating = line_floating<HostRxPad>();
+    const bool idle_level = line_level<HostRxPad>();
     print(serial, "  the client's pad on the peripheral and its select high: the line reads "
-                  "floating=", idle_floating, crlf);
-    bench.verdict("a DESELECTED client leaves its transmit pad undriven (12.3.1: the pad's output "
-                  "enable follows nSSPOE here, where on the RP2040 nSSPOE reached no pad and the "
-                  "line stayed driven)",
-                  idle_floating);
+                  "floating=", idle_floating, " level=", idle_level, crlf);
+    bench.verdict("a DESELECTED client leaves its transmit pad DRIVEN: 12.3.1 promises a tristate, "
+                  "and the idle list of each Motorola mode says nSSPOE is not connected to the pad "
+                  "on this chip - the pads agree with the second, as they do on the RP2040",
+                  !idle_floating);
 
     // SOD, the block's own slave-output-disable bit, with the pad on the
     // peripheral: the same question asked of the bit rather than of the
@@ -893,6 +909,7 @@ void th_output_enable() {
     Client::sod(true);
     spin_us(200);
     const bool sod_floating = line_floating<HostRxPad>();
+    const bool sod_level = line_level<HostRxPad>();
     client_count = 0;
     client_next = 0;
     client_serve<Client>();
@@ -906,13 +923,13 @@ void th_output_enable() {
         sod_ff = sod_ff && rx_buf[i] == 0xFFu;
     }
     print(serial, "  SOD set with the pad on the peripheral: the line reads floating=", sod_floating,
-          ", the host read ", hex(rx_buf[0]), " ", hex(rx_buf[1]), " ", hex(rx_buf[2]),
-          " (the answers would be ", hex(client_answers[0]), " ", hex(client_answers[1]), " ",
-          hex(client_answers[2]), ")", crlf);
-    bench.verdict("SOD leaves the transmit pad UNDRIVEN on this chip, so the host reads its own "
-                  "pull-up - the same 12.3.1 change, and the opposite of the RP2040, where SOD "
-                  "left the pad driving what it held",
-                  sod_floating && sod_ff);
+          " level=", sod_level, ", the host read ", hex(rx_buf[0]), " ", hex(rx_buf[1]), " ",
+          hex(rx_buf[2]), " (the answers would be ", hex(client_answers[0]), " ",
+          hex(client_answers[1]), " ", hex(client_answers[2]), ")", crlf);
+    bench.verdict("SOD leaves the transmit pad DRIVEN too - nSSPOE reaches no pad here either - but "
+                  "it does keep the block's answers off the wire: the host clocks a steady HIGH "
+                  "(0xFF) and not the frames waiting in the client's FIFO",
+                  !sod_floating && sod_level && sod_ff);
 
     // Under SOD the transmit FIFO is not consumed on the RP2040; the
     // client comes up again either way for the round that judges it.
