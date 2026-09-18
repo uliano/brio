@@ -86,14 +86,16 @@
 // `--timeout 400`.
 //
 // THE 32 KB TIER CANNOT HOLD THIS CHAPTER WHOLE. Built for the
-// CH32V203C6 (the family's small-part link guard) this image is some
-// seven kilobytes over that part's flash, and the letters' prose is not
-// for shortening: the chapter's own surface - two speeds with two duty
-// shapes, four receive procedures, two DMA engines, the arbiter, both
-// roles and the arbitration - is simply bigger than the tier. So the
-// suite names the CH32V203C8 alone and the smaller part runs the
-// chapters that fit it.
-// build: boards = v203c8
+// CH32V203C6 (the family's small-part link guard) the whole suite is
+// some seven kilobytes over that part's flash, and the letters' prose
+// is not for shortening: the chapter's own surface - two speeds with
+// two duty shapes, four receive procedures, two DMA engines, the
+// arbiter, both roles and the arbitration - is simply bigger than the
+// tier. So the four 32 KB parts build it as one image per GROUP of
+// letters (the groups line below; design/overview.md, "A suite's image
+// fits the family's smallest chip") and every other part as one image.
+// build: boards = v203c6,v203c8
+// build: groups = abcd,efgh,ijk
 // build: monitor_speed = 115200
 
 #include <stdint.h>

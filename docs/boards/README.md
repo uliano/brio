@@ -34,9 +34,10 @@ Three concerns, deliberately kept apart:
    the board. Never a target per physical board. A suite whose whole
    image does not fit a part of its family declares its GROUPS of
    letters (`// build: groups = abg,cdf,e`): on a board type the
-   project lists as splitting (the CH32V00x's `v003f4`) the suite
-   builds as one image per group - `<app>-1`, `<app>-2`, ... - each
-   carrying the letters its group names and registering those alone
+   project lists as splitting (the CH32V00x's `v003f4`, the CH32V203's
+   `v203c6`, `v203f6`, `v203g6` and `v203k6`) the suite builds as one
+   image per group - `<app>-1`, `<app>-2`, ... - each carrying the
+   letters its group names and registering those alone
    (`util/testbench.hpp`'s selection), while on every other board the
    suite is one image with every letter (design/overview.md, "A
    suite's image fits the family's smallest chip").

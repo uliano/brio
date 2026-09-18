@@ -8,6 +8,17 @@
 #  main() is discovered at configure time (CONFIGURE_DEPENDS) from its own
 #  "// build:" header comment, the same grammar as every other project.
 #
+#  ONE APP IS NOT ALWAYS ONE IMAGE. A suite whose image does not fit the
+#  family's smallest parts declares its GROUPS of letters in that same
+#  header ("// build: groups = abc,de"), and those parts - the 32 KB tier
+#  here - build it as one image per group, <app>-1, <app>-2, ..., each
+#  carrying its group's letters and the prose that judges them; every
+#  other part builds the same source as ONE image with every letter. What
+#  bounds a group is the smallest chip's memory, and the linker script is
+#  the guard (design/overview.md, "A suite's image fits the family's
+#  smallest chip"; the mechanism is util/testbench.hpp and the discovery
+#  loop below).
+#
 #  WHAT THIS PROJECT HAS NOT GOT, and the ST ones have: a device header.
 #  WCH ships its register definitions inside the EVT package, whose licence
 #  is written for software running on WCH parts, so this target compiles
@@ -187,6 +198,35 @@ endfunction()
 #     ../experiments/*/ch32v203/<app>.cpp - becomes a target, gated by its
 #     own "// build: boards = ..." header comment (default: the board type
 #     of the part this configure targets).
+#
+#     The GROUP axis (design/overview.md, "A suite's image fits the
+#     family's smallest chip"): a suite whose whole image does not fit the
+#     family's 32 KB tier declares its groups of letters in the same
+#     header ("// build: groups = abc,de"). On a board of
+#     CH32V203_SPLIT_BOARDS the app then builds as one image PER GROUP -
+#     <app>-1, <app>-2, ... - each compiled with BRIO_TEST_LETTERS set to
+#     its group's keys, which util/testbench.hpp reads to register those
+#     letters alone; on every other board the app is ONE image carrying
+#     every letter, and a groups line changes nothing there. The roster
+#     names the split boards and each app's groups, so bin/brio can
+#     resolve "<app>-<n>" and refuse the bare name where it is not an
+#     image.
+#
+#     WHICH BOARDS SPLIT IS READ OFF THE PART TABLE, not listed a second
+#     time: every part of 32 KB or less - the C6, the F6, the G6 and the
+#     K6. A part added to cmake/ch32v203-parts.cmake is placed by the
+#     same memories that give it its linker script, and a part smaller
+#     still would join that tier rather than replace it.
+set(CH32V203_SPLIT_FLASH_KB 32)
+set(CH32V203_SPLIT_BOARDS "")
+foreach(_row IN LISTS CH32V203_PARTS)
+    string(REGEX REPLACE "=.*$" "" _part "${_row}")
+    ch32v203_part_facts("${_part}" _split_define _split_flash _split_ram _split_board)
+    if(_split_flash LESS_EQUAL CH32V203_SPLIT_FLASH_KB)
+        list(APPEND CH32V203_SPLIT_BOARDS "${_split_board}")
+    endif()
+endforeach()
+
 file(GLOB APP_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/src/apps/*.cpp"
     "${CMAKE_SOURCE_DIR}/../experiments/*/ch32v203/*.cpp")
@@ -197,6 +237,7 @@ foreach(_app_path IN LISTS APP_SOURCES)
     get_filename_component(_app "${_app_path}" NAME_WE)
 
     set(_boards v203c8)
+    set(_groups "")
     set(_monitor_speed "")
 
     file(STRINGS "${_app_path}" _build_lines REGEX "^// build:")
@@ -210,6 +251,13 @@ foreach(_app_path IN LISTS APP_SOURCES)
                 foreach(_b IN LISTS _boards_raw)
                     string(STRIP "${_b}" _b)
                     list(APPEND _boards "${_b}")
+                endforeach()
+            elseif(_key STREQUAL "groups")
+                string(REPLACE "," ";" _groups_raw "${_value}")
+                set(_groups "")
+                foreach(_g IN LISTS _groups_raw)
+                    string(STRIP "${_g}" _g)
+                    list(APPEND _groups "${_g}")
                 endforeach()
             elseif(_key STREQUAL "monitor_speed")
                 set(_monitor_speed "${_value}")
@@ -230,7 +278,20 @@ foreach(_app_path IN LISTS APP_SOURCES)
             set(_boards_json "${_boards_json},\"${_b}\"")
         endif()
     endforeach()
-    set(_entry "\"${_app}\":{\"boards\":[${_boards_json}],\"groups\":null,\"monitor_speed\":${_speed_json}}")
+    if(_groups STREQUAL "")
+        set(_groups_json "null")
+    else()
+        set(_groups_json "")
+        foreach(_g IN LISTS _groups)
+            if(_groups_json STREQUAL "")
+                set(_groups_json "\"${_g}\"")
+            else()
+                set(_groups_json "${_groups_json},\"${_g}\"")
+            endif()
+        endforeach()
+        set(_groups_json "[${_groups_json}]")
+    endif()
+    set(_entry "\"${_app}\":{\"boards\":[${_boards_json}],\"groups\":${_groups_json},\"monitor_speed\":${_speed_json}}")
     if(_manifest_entries STREQUAL "")
         set(_manifest_entries "${_entry}")
     else()
@@ -238,11 +299,30 @@ foreach(_app_path IN LISTS APP_SOURCES)
     endif()
 
     if(CH32V203_BOARD IN_LIST _boards)
-        ch32v203_add_app(${_app} ${_app_path})
+        if(CH32V203_BOARD IN_LIST CH32V203_SPLIT_BOARDS AND NOT _groups STREQUAL "")
+            set(_i 0)
+            foreach(_g IN LISTS _groups)
+                math(EXPR _i "${_i} + 1")
+                ch32v203_add_app(${_app}-${_i} ${_app_path})
+                target_compile_definitions(${_app}-${_i} PRIVATE "BRIO_TEST_LETTERS=\"${_g}\"")
+            endforeach()
+        else()
+            ch32v203_add_app(${_app} ${_app_path})
+        endif()
     endif()
 endforeach()
 
 # This project's app roster for bin/brio (apps_ch32v203.json): a separate
-# file because app names collide across the trees.
+# file because app names collide across the trees. It names the boards
+# that split a suite into its group images, so the verbs can resolve
+# "<app>-<n>" there and refuse the bare name.
+set(_split_json "")
+foreach(_b IN LISTS CH32V203_SPLIT_BOARDS)
+    if(_split_json STREQUAL "")
+        set(_split_json "\"${_b}\"")
+    else()
+        set(_split_json "${_split_json},\"${_b}\"")
+    endif()
+endforeach()
 file(WRITE "${CMAKE_SOURCE_DIR}/../build-cmake/apps_ch32v203.json"
-    "{\n  \"split_boards\": [],\n  \"apps\": {\n    ${_manifest_entries}\n  }\n}\n")
+    "{\n  \"split_boards\": [${_split_json}],\n  \"apps\": {\n    ${_manifest_entries}\n  }\n}\n")

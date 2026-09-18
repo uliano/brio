@@ -79,6 +79,14 @@ linker script and the board type, from one table
 the nine parts of the series are named there whether or not a board
 exists for them, because the table is a statement about the family.
 
+The four **32 KB parts** split a suite too big for them: a suite that
+declares its groups of letters (`// build: groups = abc,de`) builds
+there as one image per group - `<app>-1`, `<app>-2`, ... - each
+registering its own letters and carrying only their verdict prose,
+while every other part builds the same source as one image with every
+letter (design/overview.md, "A suite's image fits the family's
+smallest chip").
+
 ## The probe and the upload
 
 A WCH-LinkE (firmware 2.16) over the **two-wire** debug port this

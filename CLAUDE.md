@@ -537,8 +537,9 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   default when the line is absent; a configure targets exactly one
   package, so switching `configurePreset` switches which apps' targets
   exist; `// build: groups = abg,cdf` splits a suite into one image per
-  group on a board type its project lists as splitting - the CH32V003 -
-  and changes nothing elsewhere), IDENTITY = the manifest `cli/bench/bench_boards.py` (which board
+  group on a board type its project lists as splitting - the CH32V003,
+  and the CH32V203's four 32 KB parts - and changes nothing elsewhere),
+  IDENTITY = the manifest `cli/bench/bench_boards.py` (which board
   sits where, its console by `/dev/serial/by-path` because the CH340s
   have no USB serial, its programmer), ORCHESTRATION = `bin/brio`.
   Never a target per physical board. `family_probe` carries the matrix
@@ -642,7 +643,12 @@ ch32v203/                the CH32V203 build project, the seventh of the shape:
                          parts, the C8's the only debug one; the C6 preset (the
                          F6's memories, the C8's bonding) is the 32K/10K tier's
                          LINK GUARD, because the F6 bonds neither USART1 nor the
-                         board's LED
+                         board's LED; the GROUP axis, as on the CH32V00x:
+                         the four 32 KB parts (the C6, F6, G6 and K6,
+                         read off the part table by their memories and
+                         never listed twice) build a suite with a
+                         "// build: groups" line as one image per group,
+                         <app>-<n>, and every other part builds it whole
 stm32f4/                 the STM32F4 build project, the sixth of the shape: a
                          PART TABLE (cmake/stm32f4-parts.cmake: the part number
                          -> ST's irregular device define, the crt stem, the

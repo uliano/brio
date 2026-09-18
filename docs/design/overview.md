@@ -294,8 +294,10 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   their prose), and every other part's build emits the whole suite
   as one image. On the CH32V00x, whose smallest part has 16 KB of
   flash and 2 KB of RAM, this rule is what decides the shape of every
-  suite; on the other three families the bench chip is not the
-  family's smallest and the rule costs nothing yet.
+  suite, and on the CH32V203 it is the 32 KB tier - four parts with no
+  board, whose preset is the link guard every suite passes - that a
+  suite is grouped for; on the other families the bench chip is not
+  the family's smallest and the rule costs nothing yet.
 - **Package variability, the pattern.** The device header is the
   authority, at three granularities. A missing INSTANCE is compiled
   out in tiers on its header symbol (`#if defined(TCB4)`). An instance

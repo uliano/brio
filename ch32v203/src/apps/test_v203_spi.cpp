@@ -73,6 +73,7 @@
 //      series has no I2S for
 //
 // build: boards = v203c6,v203c8
+// build: groups = abe,cd
 // build: monitor_speed = 115200
 
 #include <stdint.h>
