@@ -364,6 +364,26 @@ board's STMPE811 touch controller. `z` is 63 verdicts.
   after. `unstick()` on a healthy wire returns 0 and drives nothing,
   and the pads come back to the peripheral.
 - **No bus error was seen** in the whole suite, spurious or otherwise.
+- **The client half, against a controller on another board.** As the
+  instrument of another target's I2C suite, `I2cClient<1>` on PB8/PB9
+  answered a foreign controller at two own addresses and the general
+  call over tens of thousands of tenures in both directions - 25100
+  tenures of sixteen bytes in ten seconds at fast mode with no error at
+  either end - and 27.3.3's BTF stretch was shown to fall AFTER the
+  ninth pulse: a twenty-byte read closes on the controller's NACK, which
+  it could not if the target held the clock before it. Two things a
+  program over this half must know. A BYTE WRITTEN INTO DR OUTSIDE A
+  READ TENURE WEDGES THE NEXT ONE: the target holds SCL low for ever
+  with SR1 reading zero, SR2 showing BUSY and TRA and DR full, and
+  nothing short of the block's RCC reset lets the line go - so a give
+  pump must follow the DIRECTION of the last address match and not TxE,
+  which stands between tenures too. And the byte the shifter is asked
+  for one ahead survives a tenure even when TxE stands, so the PE cycle
+  that drops it (27.6.1, the address and the timing surviving - measured)
+  belongs at the end of EVERY read, with PE held down for a few bus
+  cycles and no longer: two adjacent stores are one bus cycle, and a
+  microsecond-wide window makes the target deaf to a controller that
+  opens its next tenure at once.
 
 ## Not covered yet
 
@@ -392,10 +412,10 @@ Driver gaps, each with its reason:
   as on every other stratum.
 
 Implemented, not bench-verified (each with what would measure it):
-- `I2cClient` is compiled on every header and driven nowhere: a client
-  needs a controller at the other end of a wire, and the boards of this
-  stratum have none between them. A peer board, or a wire between two
-  instances of one part.
+- The client's SECOND own address (ENDUAL) and its 10-bit matching: the
+  instrument above uses one 7-bit address and the general call, so the
+  dual address and ADDMODE are written, read back and never matched on
+  the wire. A controller that addresses both would close it.
 - The instances other than I2C3 (I2C1 and I2C2, compiled everywhere and
   driven nowhere): a device on one of them, or a wire between two.
 - A NACK on a DATA byte (`i2c_nack_data`): the device on this bus

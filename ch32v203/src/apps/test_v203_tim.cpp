@@ -1045,6 +1045,27 @@ void tg_break() {
     // reaches a peripheral's input is the question letter j asks of a
     // capture; here it is asked of the break input, which is the same
     // multiplexer.
+    //
+    // FIRST, WHETHER THE PAD IS THIS BOARD'S TO DRIVE: the break input
+    // is PB12, which is also a select line the moment a second board is
+    // strapped to it, and a peer holding it high would break the outputs
+    // before this test wrote a bit. An input with its own pull-down that
+    // still reads high is a pad something else owns, and the measurement
+    // is declined rather than claimed.
+    using BkinProbe = Pin<adv_bkin.port, adv_bkin.pin>;
+    BkinProbe::input(PinPull::down);
+    wait_us(20);
+    const bool bkin_held = BkinProbe::read();
+    BkinProbe::release();
+    if (bkin_held) {
+        print(serial, "  SKIPPED, no verdict claimed: the break pad PB12 reads HIGH against "
+                      "its own pull-down, so something outside this board holds it - a "
+                      "link's select line, today. The software break above is what this "
+                      "board can measure alone.",
+              crlf);
+        all_off();
+        return;
+    }
     (void)Adv::break_dead_time({.main_output_enable = true,
                                 .break_enable = true,
                                 .break_active_high = true});

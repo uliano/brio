@@ -1628,6 +1628,27 @@ brio/                    the framework, twelve strata:
                            instance + SpiClient<n, pins>, one frame ahead, the dark
                            listener releasing MISO - and pad_speed() on both, the slew
                            class of the pads a task drives
+    i2c.hpp                the two-wire ports (ch. 19): I2c<1|2> the resource over
+                           the whole chapter - the F1's event machine under WCH's
+                           names WITH the rise-time register the CH32V00x has not,
+                           so the SCL timing is THREE registers and FREQ's six bits
+                           are the chapter's own ceiling (4..60 MHz of PB1: the one
+                           peripheral this family cannot run at the top of its
+                           tree); the receive procedure by count, 7- and 10-bit own
+                           addresses with the dual address and the general call,
+                           SMBus and PEC as bits, the two DMA rows with LAST, two
+                           vectors an instance, and BUSY as the WIRE (a START set
+                           into a busy bus is held by the hardware, and a tenure
+                           that ends with no STOP seen leaves BUSY standing over an
+                           idle wire - 19.12.1's own case, taken out of the way by
+                           SWRST and only when both lines read high) + I2cPins
+                           carrying afio.hpp's COLUMN (I2C1 has two, I2C2 none) and
+                           I2cHost<n, pins, TxEngine, RxEngine> with the other
+                           strata's Request VERBATIM, its engines fixed to the
+                           channels table 11-5 wires to the instance, unstick()
+                           counting the clocks a stuck target took + I2cClient<n,
+                           pins> with a POLLED option and flush(), the PE cycle
+                           that drops a byte the controller never clocked
   stm32f4/               everything that knows stm32f4xx.h (STM32F4, Cortex-M4F):
                          brio's first ARMv7-M family on the cortexm/ core files
     device_tables.hpp      THE RESERVE: GPIO ports A..K, the serial instances

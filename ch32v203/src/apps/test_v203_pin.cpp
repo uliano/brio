@@ -99,6 +99,8 @@ using PadA3 = Pin<'A', 3>;
 using PadA4 = Pin<'A', 4>;
 using PadB = Pin<'B', 12>;    ///< the high configuration register, EXTI line 12
 using PadB13 = Pin<'B', 13>;
+using PadB1 = Pin<'B', 1>;    ///< line 1's other port, held while the steal is measured
+using PadB4 = Pin<'B', 4>;    ///< the pulls letter's fourth pad: no link reaches it
 using PadB5 = Pin<'B', 5>;
 using PadB6 = Pin<'B', 6>;
 using LockPad = Pin<'C', 13>;
@@ -302,14 +304,19 @@ void tb_pulls() {
     print(serial, "/", PadA3::read());
     right = static_cast<uint8_t>(right + (pull_reads<PadA3>(PinPull::up, true) &&
                                           pull_reads<PadA3>(PinPull::down, false)));
-    PadB::input(PinPull::up);
+    // THE FOURTH PAD IS PB4 AND NOT PB12 ON PURPOSE: a pull is tens of
+    // kiloohms and ANY wire beats it, so this letter measures on pads no
+    // link of this desk can reach. PB12 is a select line the moment a
+    // second board is strapped to it, and a peer's pull-up would read
+    // back as a pull-down that does not work.
+    PadB4::input(PinPull::up);
     (void)delay_us(clock, 1);
-    print(serial, " PB12=", PadB::read());
-    PadB::input(PinPull::down);
+    print(serial, " PB4=", PadB4::read());
+    PadB4::input(PinPull::down);
     (void)delay_us(clock, 1);
-    print(serial, "/", PadB::read(), crlf);
-    right = static_cast<uint8_t>(right + (pull_reads<PadB>(PinPull::up, true) &&
-                                          pull_reads<PadB>(PinPull::down, false)));
+    print(serial, "/", PadB4::read(), crlf);
+    right = static_cast<uint8_t>(right + (pull_reads<PadB4>(PinPull::up, true) &&
+                                          pull_reads<PadB4>(PinPull::down, false)));
     bench.verdict("four floating pads read high through their pull-up and low through their "
                   "pull-down, a microsecond after each switch",
                   right == 4u);
@@ -726,7 +733,23 @@ void tg_edges() {
     Pfic::clear_pending(Irq::exti1);
     edges_line1 = 0;
     Pfic::enable(Irq::exti1);
+    // THE LINE'S NEW PAD IS HELD WHILE THE OLD ONE IS TOGGLED: PB1 is a
+    // free pad on a bare board and a strapped one on a desk that has
+    // wired it somewhere, and an EXTI line watches a LEVEL - a pad left
+    // floating can be coupled into by its neighbour and answer for an
+    // edge nobody drove. Its own pull-up settles that without a wire.
+    PadB1::input(PinPull::up);
     const bool stolen = Exti::steal(1, 'B');
+    // THE SWITCH ITSELF IS AN EDGE: the line's input jumps from the old
+    // pad's level to the new one's the moment EXTICR is written, and an
+    // edge detector cannot tell that from a pin that moved. So the flag
+    // the change leaves is cleared before the count begins - it is the
+    // OLD PAD's edges the verdict is about (measured: exactly one edge
+    // otherwise, whatever PB1 is held at).
+    (void)delay_us(clock, 2);
+    Exti::clear_lines(1u << 1);
+    Pfic::clear_pending(Irq::exti1);
+    edges_line1 = 0;
     for (uint8_t i = 0; i < 4u; ++i) {
         PadA::toggle();
         (void)delay_us(clock, 2);
@@ -734,8 +757,10 @@ void tg_edges() {
     const uint32_t after_steal = edges_line1;
     Pfic::disable(Irq::exti1);
     (void)Exti::steal(1, 'A');
+    PadB1::release();
     print(serial, "  line 1 claimed by PA1: a second port refused ", refused, ", stolen ", stolen,
-          ", then PA1's four toggles counted ", after_steal, crlf);
+          ", then PA1's four toggles counted ", after_steal,
+          " on a line now watching PB1, held by its own pull-up", crlf);
     bench.verdict("a line is ONE pin of ONE port: select() refuses a line another port holds, "
                   "steal() takes it, and the old pad's edges stop arriving",
                   refused && still_a && stolen && after_steal == 0u);

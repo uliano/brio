@@ -51,16 +51,22 @@
 //    machines are reset and the communication control bits as well as the
 //    status bits come back to their reset value", while CR2, OAR1, OAR2,
 //    CCR and TRISE are untouched - so the address and the timing survive),
-//    and the tally gives the byte back.
-//    WHAT A BENCH CONFIRMS FIRST, in both halves: 27.3.3 says BTF is set
-//    and SCL stretched when a data transmission ends with nothing written
-//    into DR, and the chapter does not say whether that stretch falls
-//    before or after the ninth pulse. Before it, a controller could not
-//    deliver the closing NACK at all and the command channel would wedge
-//    on its twentieth byte; after it, the command channel is clean and it
-//    is the PE cycle that must be watched instead - that the address and
-//    the timing really do survive it, which is a second read answered
-//    correctly.
+//    and the tally gives the byte back. BOTH HALVES ARE MEASURED NOW: the
+//    command channel's twenty-byte read closes cleanly on the
+//    controller's NACK, so 27.3.3's BTF stretch falls AFTER the ninth
+//    pulse; and a controller at the far end reads the same answer twice
+//    running across the PE cycle, so the address and the timing really do
+//    survive it. The console's `i` counts the drops as `dropped=`.
+//  - AND THE GIVE PUMP IS GATED ON A READ TENURE, not on the flag alone.
+//    TxE stands between tenures too, and a pump that only looks at it
+//    writes a byte into DR while the bus is idle - after which THE NEXT
+//    READ WEDGES: the target holds SCL low for ever with SR1 reading
+//    zero, SR2 showing BUSY and TRA, and DR full, and nothing short of
+//    the block's own RCC reset lets the line go (measured from both ends,
+//    with the controller's trail showing the clock stopping right after
+//    the address acknowledge). So `serving_` follows the direction of the
+//    last address match and is cleared at every NACK and every Stop, and
+//    only inside a read tenure is DR ever written.
 //  - flag_stop_interrupt maps to nothing: STOPF is a polled flag here and
 //    the Stop count is kept whenever the action loop sees it.
 //  - THE TARGET'S TIMING IS FREQ AND NOT A RATE. `I2cClient::init()`
@@ -89,9 +95,6 @@
 // resource and is not what the `coll` action means: that case is two
 // boards answering ONE address, so the peer simply takes `shared_addr` in
 // OAR1 and the wired-AND on the wire is the experiment.
-//
-// THIS FILE HAS NOT BEEN DRIVEN ON A WIRE: it is compiled, and the DUT at
-// the other end is what will first measure it.
 //
 // Bus: I2C1 at AF4, open drain, the pads a Nucleo-64 carries on its
 // Arduino header -
@@ -171,6 +174,11 @@ uint8_t resp_[twilink::response_bytes];
 uint8_t resp_len_ = 0;
 uint8_t resp_pos_ = 0;
 uint8_t given_ = 0;          ///< bytes handed to DR in the tenure under way
+/// IS A READ TENURE UNDER WAY? The give pump is gated on it, because a
+/// byte written into DR with no controller reading WEDGES THE NEXT READ
+/// (the header's finding): TxE stands between tenures too, and a pump
+/// that only looks at the flag fills DR while the bus is idle.
+bool serving_ = false;
 uint8_t own_addr_ = twilink::command_addr;
 bool read_done_ = false;
 Op pending_ = Op::ping;
@@ -241,6 +249,7 @@ bool bring_up_client(uint8_t addr, bool general_call) {
     mute_client_vectors();
     hold_bus_up();
     given_ = 0;
+    serving_ = false;
     return ok;
 }
 
@@ -273,17 +282,33 @@ uint8_t matched_address() {
 }
 
 /// The byte a target transmitter was asked for and the controller never
-/// took - see the header. True when there was one and the PE cycle threw
-/// it away; false when DR was already empty, which is the common path.
+/// took - see the header. TAKEN AT THE END OF EVERY READ TENURE, not
+/// only when TxE says DR is full: the flag cannot see the SHIFTER, and a
+/// tenure closed with TxE standing has been measured to leave a byte
+/// inside anyway - after which the next read HANGS, this end holding SCL
+/// with no flag raised at either end.
+///
+/// PE IS DOWN FOR A FEW BUS READS AND NOT ONE INSTRUCTION LONGER. The
+/// block wants the LEVEL - two adjacent stores are one bus cycle and the
+/// state machine does not always see them - but a controller that puts
+/// its next START on the wire microseconds after the one it just closed
+/// finds a deaf target if the window is a microsecond wide (measured:
+/// the next tenure's address matched and the clock then stopped). Three
+/// reads of the register are the shortest window that is still a level.
+/// True when DR was visibly full, which is what the console counts as
+/// `dropped=`.
 bool drop_unclocked_byte() {
-    if (Client::data_wanted()) {
-        return false;   // TxE: nothing was left behind
-    }
+    const bool had_one = !Client::data_wanted();
     Raw::disable();
+    (void)Raw::enabled();
+    (void)Raw::enabled();
+    (void)Raw::enabled();
     Raw::enable();
     Raw::ack(true);   // a control bit, so the PE cycle took it down
-    ++flushes;
-    return true;
+    if (had_one) {
+        ++flushes;
+    }
+    return had_one;
 }
 
 // ---- the command channel --------------------------------------------------------
@@ -304,8 +329,10 @@ void service_command() {
         if (Client::answer_address()) {
             resp_pos_ = 0;   // a read: the prepared answer, from its first byte
             given_ = 0;
+            serving_ = true;
         } else {
             decoder.reset();   // a write: one tenure is exactly one frame
+            serving_ = false;
         }
         return;
     }
@@ -328,6 +355,7 @@ void service_command() {
     // at TxE first would feed a tenure that is already over.
     if (Client::host_nacked()) {
         Client::clear_nack();
+        serving_ = false;
         (void)drop_unclocked_byte();
         read_done_ = true;
         return;
@@ -335,19 +363,31 @@ void service_command() {
     // EXACTLY `response_bytes` ARE GIVEN AND NO MORE: the protocol's read
     // is that long, and the byte after the last one would be loaded into
     // DR and never clocked out (see the header).
-    if (Client::data_wanted() && given_ < twilink::response_bytes) {
+    if (serving_ && Client::data_wanted() && given_ < twilink::response_bytes) {
         Client::give(resp_pos_ < resp_len_ ? resp_[resp_pos_++] : 0x00u);
         ++given_;
         return;
     }
     if (Client::stop_seen()) {
+        serving_ = false;
         Client::clear_stop();
         return;
     }
     // Every error flag is a LEVEL: clear it, or a pump that merely looks
-    // at it comes back to the same one for ever.
-    if ((Raw::status1() & I2cFlag::errors) != 0u) {
-        Raw::clear_errors(I2cFlag::errors);
+    // at it comes back to the same one for ever. THE CLOSING NACK IS ONE
+    // OF THEM, and it may rise in the microseconds between the check
+    // above and this one: swallowed here it would cost a whole command,
+    // because the action starts on it (measured: two commands in six
+    // acknowledged and never run). So the NACK is answered wherever it
+    // is found, and only the rest is merely cleared.
+    const uint32_t errs = Raw::status1() & I2cFlag::errors;
+    if (errs != 0u) {
+        if ((errs & I2cFlag::ack_failure) != 0u) {
+            serving_ = false;
+            (void)drop_unclocked_byte();
+            read_done_ = true;
+        }
+        Raw::clear_errors(errs);
     }
 }
 
@@ -433,6 +473,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             // falls after the controller's own tenure is over.
             if (a.hold_us) hold_us(a.hold_us);
             const bool reads = Client::answer_address();
+            serving_ = reads;
             r.last_addr = matched_address();
             // The refusal is a RECEIVER's: arming it on a read tenure
             // would refuse the next address and report a NACK that never
@@ -457,6 +498,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             // NACK - a copy taken when the action ends carries whatever
             // the last tenure left behind.
             r.mstatus = status_byte();
+            serving_ = false;
             Client::clear_nack();
             // AND THE TALLY GIVES ONE BYTE BACK when there was one to
             // drop: it was loaded into DR and never clocked out.
@@ -465,7 +507,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             }
             continue;
         }
-        if (Client::data_wanted()) {
+        if (serving_ && Client::data_wanted()) {
             if (a.hold_us) hold_us(a.hold_us);
             Client::give(fixed_byte ? a.seed : twilink::pattern_value(a.pattern, a.seed, tx));
             ++tx;
@@ -473,6 +515,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
         }
         if (Client::stop_seen()) {
             if (r.stops < 255) ++r.stops;
+            serving_ = false;
             Client::clear_stop();
             // ACK BACK UP, or an address would be refused as well and the
             // instrument would go deaf for the rest of the action.

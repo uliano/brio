@@ -204,9 +204,34 @@ void ta_comparator() {
 // ===========================================================================
 // b - OPA2's other pads
 // ===========================================================================
+/// Drive one pad and read the other against the OPPOSITE pull: a
+/// floating neighbour that merely follows is not taken for a strap, and
+/// both pads are left as they were found.
+template <class Driver, class Reader>
+bool pad_strapped() {
+    Reader::input(PinPull::down);
+    Driver::output(true);
+    wait_us(20);
+    const bool high = Reader::read();
+    Reader::input(PinPull::up);
+    Driver::clear();
+    wait_us(20);
+    const bool low = !Reader::read();
+    Driver::release();
+    Reader::release();
+    return high && low;
+}
+
 void tb_selections() {
     all_off();
     bring_up();
+
+    // THE OTHER OUTPUT PAD IS ONLY THIS BOARD'S IF NOTHING IS STRAPPED
+    // TO IT: PA4 is OPA2's OUT1 and a bus select on another desk, and a
+    // push-pull neighbour on the same node would answer for the
+    // amplifier. The strap is probed HERE, before anything is driven,
+    // and never cached - a wire can leave the desk between two letters.
+    const bool out1_strapped = pad_strapped<O2b::pin, N2b::pin>();
 
     // Both input pairs are driven, one pair at each rail, so that
     // SELECTING the other pair is what changes the output.
@@ -229,7 +254,17 @@ void tb_selections() {
     wait_us(1000);
     const uint16_t pair1 = read_channel(O2a::adc_channel);
 
-    // The other output pad, with the inputs left where they are.
+    if (out1_strapped) {
+        print(serial, "  SKIPPED, no verdict claimed for the output move: PA4 (OPA2's OUT1) "
+                      "is strapped to PA5, which this letter drives - a wire beats an "
+                      "amplifier, and the pad would answer for the strap and not for the "
+                      "selection.",
+              crlf);
+        bench.verdict("the driver says which channel the selected output lands on",
+                      Opa<2>::adc_channel() == O2a::adc_channel);
+        all_off();
+        return;
+    }
     const uint16_t other_before = read_channel(O2b::adc_channel);
     (void)Opa<2>::output(OpaPin::out1);
     wait_us(1000);
