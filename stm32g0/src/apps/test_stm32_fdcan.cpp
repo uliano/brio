@@ -2277,7 +2277,7 @@ void ti_errors() {
                   "flag it answers with is six more dominant bits that fail "
                   "the same way, which is why the ladder is walked faster "
                   "than a 64 MHz CPU can read every rung of it",
-                  all_octets && first_code == FdcanError::bit0);
+                  all_octets && first_code == FdcanError::bit_dominant);
     print(serial, "  EW first seen at TEC ", ew_at, ", EP at TEC ", ep_at,
           ", bus-off after ", to_bus_off, " us; IR ", hex(ir), ", INIT ",
           init_set ? "set BY HARDWARE" : "clear", crlf);

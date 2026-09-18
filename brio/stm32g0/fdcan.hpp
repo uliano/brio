@@ -132,6 +132,7 @@
 #include "stm32g0/device_tables.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/pin.hpp"
+#include "util/can.hpp"
 #include "util/clock.hpp"
 
 namespace brio {
@@ -253,18 +254,12 @@ enum class FdcanActivity : uint8_t {
     transmitter = 3,
 };
 
-/// PSR.LEC / PSR.DLEC (36.4.13). `none` is what a successful transfer
-/// leaves; `no_change` is 7, which every READ of PSR writes back.
-enum class FdcanError : uint8_t {
-    none = 0,
-    stuff = 1,
-    form = 2,
-    ack = 3,
-    bit1 = 4,   ///< wanted recessive, monitored dominant
-    bit0 = 5,   ///< wanted dominant, monitored recessive - and the bus-off recovery marker
-    crc = 6,
-    no_change = 7,
-};
+/// PSR.LEC / PSR.DLEC (36.4.13): the protocol's eight codes, the shared
+/// vocabulary's `CanError` under this chapter's name. `none` is what a
+/// successful transfer leaves; `no_change` is 7, which every READ of PSR
+/// writes back; the chapter's BIT1 is `bit_recessive` and its BIT0
+/// `bit_dominant` - which is also the bus-off recovery marker.
+using FdcanError = CanError;
 
 /// HPMS.MSI: where a high-priority match put the frame.
 enum class FdcanHighPriorityStorage : uint8_t {
@@ -570,12 +565,11 @@ constexpr std::optional<FdcanBitTiming> fdcan_data_timing_for(
 /**
  * One CAN frame as this driver speaks it.
  *
- * DELIBERATELY TARGET-LOCAL. A `brio::CanFrame` every controller shares,
- * with a bus AO over it, is a util design decision, and a decision taken
- * from ONE implementation is a decision taken from the M_CAN's element
- * layout - which is not a neutral shape. Until a second controller is
- * there to design the vocabulary against, this struct is the STM32G0's
- * and the doc says so.
+ * THE FD SUPERSET, THIS STRATUM'S. The classic frame every controller
+ * shares is util/can.hpp's `CanFrame` (docs/design/can.md); this one is
+ * what the M_CAN adds to it - sixty-four bytes, the FD flags, the
+ * marker, the non-matching flag - and it stays here until a second FD
+ * controller exists to write the shared FD frame against.
  *
  * `id` IS THE NATURAL IDENTIFIER, right aligned: 0..0x7FF for a standard
  * frame and 0..0x1FFF_FFFF for an extended one. The element's own ID

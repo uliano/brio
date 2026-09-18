@@ -338,6 +338,7 @@ cites another stratum's.
 | the Uart | [serial.md](serial.md) | seventeen verbs in common; four ways to name pins, one or three vectors, DMA slots on four strata and bulk verbs on two |
 | the SPI bus | [spi-bus.md](spi-bus.md) | the rate's unit (an enum or a divisor), a frame size on the G0 and the CH32V00x, the client four surfaces by position with one published integer in common |
 | the I2C bus | [i2c-bus.md](i2c-bus.md) | the rate arithmetic's shape; `actual_scl_hz`/`scl_hz` and `bus_state`/`idle` are NOT one function under two names |
+| CAN | [can.md](can.md) | the frame's reach (classic against the FD superset), the timing's units and the search's rule, the error state as three flags or as one observable |
 | the power model | [power.md](power.md) | each family's ladder mapping; where the tick stops and which site resyncs it |
 | the USB device stack | [usb.md](usb.md) | each family's endpoint controller behind the packet contract, and what its RAM or FIFO adds |
 | flash storage | [nv-heap.md](nv-heap.md), [nv-journal.md](nv-journal.md) | the geometries; the AVR keeps its small values in the EEPROM |

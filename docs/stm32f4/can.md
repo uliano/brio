@@ -17,18 +17,17 @@ F427/F437/F429/F439, with no workaround. Driver: `stm32f4/can.hpp`
 `test_stm32f4_misc`, letters `c` to `k`, on an STM32F446 with no
 transceiver and no peer.
 
-## No util vocabulary, on purpose
+## The shared vocabulary, and the AO that is not there
 
-brio has a shared vocabulary for SPI and for I2C because two strata
-implement each of them; it has none for CAN, and the design note that
-says so is the open item "the SAM's CAN (two transceivers and the util
-vocabulary a shared frame type must carry)". A vocabulary invented from
-one realization is a vocabulary shaped by one silicon's accidents - a
-bxCAN frame carries a filter match index and a 16-bit time stamp, an
-M_CAN frame carries neither and carries a message-RAM element index
-instead. So `CanFrame` is a plain struct of this stratum's, there is no
-AO, no `BusMaster` policy and no concept, and the shared type gets
-written when a second family brings CAN.
+`CanFrame`, `CanTiming` and `CanError` are the CAN vocabulary every
+controller in brio shares ([design/can.md](../design/can.md)): the
+natural identifier, the length in bytes, the timing in human units, the
+protocol's error codes and the error state as one observable. This
+stratum binds CAN_BTR's field widths into the shared timing search and
+keeps what is the bxCAN's alone - the filter banks with their four
+shapes and the mailbox's outcome. There is no AO, no `BusMaster` policy
+and no concept, for the reasons that page gives: a transmission's
+completion is not a reply, and reception is routing.
 
 ## What the silicon does
 
@@ -126,10 +125,10 @@ rate anywhere:
 
 | Name | Meaning |
 |------|---------|
-| `CanFrame` | a message: id, extended, remote, dlc, data, and on reception the filter index and the time stamp |
+| `CanFrame` | the shared classic message: id, extended, remote, the length in bytes, data, and on reception the filter index and the time stamp |
 | `can_frame_valid` | eleven or twenty-nine bits of identifier, at most eight bytes |
-| `CanTiming` | the bit time in human units: brp 1..1024, ts1 1..16, ts2 1..8, sjw 1..4 |
-| `can_timing_valid`, `can_timing_quanta`, `can_bitrate_of`, `can_sample_point_of` | what a timing is and what it produces |
+| `CanTiming` | the shared bit time in human units; `can_timing_limits` is what CAN_BTR allows of it - brp 1..1024, ts1 1..16, ts2 1..8, sjw 1..4 - bound into `can_timing_for` and `can_timing_valid`, this block's two verbs over the shared search |
+| `can_timing_quanta`, `can_bitrate_of`, `can_sample_point_of` | what a timing is and what it produces - the vocabulary's arithmetic |
 | `can_timing_for` | the compile-time search: an EXACT rate, the sample point as asked |
 | `can_frame_bits` | 44 + 8N standard, 64 + 8N extended, before stuffing (figure 396) |
 | `CanFilterScale`, `CanFilterMode`, `CanFilter` | a bank's shape and its two registers |
@@ -153,7 +152,7 @@ The resource `Can<n>`:
 | the bit time | `timing(CanTiming, loopback, silent)`, `timing()`, `loopback()`, `silent()` |
 | transmitting | `transmit(frame)`, `abort(mb)`, `mailbox_empty(mb)`, `next_mailbox()`, `free_mailboxes()`, `lowest_priority(mb)`, `result(mb)`, `clear_result(mb)` |
 | receiving | `pending(fifo)`, `full(fifo)`, `overrun(fifo)`, `clear_full`, `clear_overrun`, `peek(fifo)`, `receive(fifo)`, `release(fifo)` |
-| the errors | `tec()`, `rec()`, `error_warning()`, `error_passive()`, `bus_off()`, `last_error()`, `mark_error()`, `request_bus_off_recovery()` |
+| the errors | `tec()`, `rec()`, `error_warning()`, `error_passive()`, `bus_off()` - and `error_state()`, `error_counters()`, the same facts folded into the vocabulary's `CanErrorState` and `CanErrorCounters` -, `last_error()`, `mark_error()`, `request_bus_off_recovery()` |
 | the status register | `rx_level()`, `last_sample()`, `receiving()`, `transmitting()`, and the three rc_w1 flags with their clears |
 | the interrupts | `interrupt(CanInterrupt, bool)`, `interrupt(CanInterrupt)`, `interrupts_off()` |
 | the filters | `filter_init(bool)`, `filter_initializing()`, `start_bank(n)`, `start_bank()`, `first_bank()`, `bank_limit()`, `bank_ok(n)`, `filter(CanFilter)`, `filter(n)`, `filter_active(n, bool)`, `filter_active(n)`, `filters_off()` |
@@ -194,7 +193,7 @@ if (!Bus::start()) {
 Sending and receiving:
 
 ```cpp
-brio::CanFrame out{.id = 0x123, .dlc = 2};
+brio::CanFrame out{.id = 0x123, .length = 2};
 out.data[0] = 0xA5;
 out.data[1] = 0x5A;
 if (const auto mb = Bus::transmit(out)) {
@@ -359,8 +358,10 @@ Driver gaps:
   classes whose errata sheet forbids it, and not built for the others -
   no program here needs it, and the classes where it might work are the
   ones whose errata were not read.
-- **A util-level CAN vocabulary, an AO, a `BusMaster` policy**: declined
-  until a second family brings CAN (see "No util vocabulary" above).
+- **A bus AO, a `BusMaster` policy**: absent by decision - a
+  transmission's completion is not a reply and reception is routing
+  ([design/can.md](../design/can.md)); written when a program needs one,
+  over the shared vocabulary.
 - **The debug freeze in practice** (MCR.DBF and DBGMCU's per-instance
   bits): the bit is written and read back, but what a halted core does
   to a live bus is a debugger session's question, not a suite's.

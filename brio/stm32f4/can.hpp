@@ -5,17 +5,14 @@
  * ch. 30): `Can<1|2|3>`, the RESOURCE over the whole chapter, with
  * `CanFrame`, `CanTiming` and `CanFilter` as its vocabulary.
  *
- * NO util CONTRACT, ON PURPOSE. brio has a shared vocabulary for SPI and
- * for I2C (util/spi_bus.hpp, util/i2c_bus.hpp) because two strata
- * implement each of them; it has none for CAN, and the design note that
- * says so is the open item "the SAM's CAN (two transceivers and the util
- * vocabulary a shared frame type must carry)". A vocabulary invented from
- * one realization is a vocabulary shaped by one silicon's accidents - a
- * bxCAN frame carries a filter match index and a 16-bit time stamp, an
- * M_CAN frame carries neither and carries a message-RAM element index
- * instead - so this file keeps `CanFrame` as a PLAIN STRUCT of its own in
- * the stratum and offers no AO, no BusMaster policy and no concept. When a
- * second family brings CAN, the shared type is written against both.
+ * THE VOCABULARY IS SHARED, THE BUS AO IS NOT. `CanFrame`, `CanTiming`
+ * and `CanError` are util/can.hpp's, written against this block, the
+ * CH32V203's twin of it and the STM32G0's M_CAN (docs/design/can.md);
+ * this file binds CAN_BTR's field widths into the shared search and
+ * keeps what is the bxCAN's alone - the filter banks with their four
+ * shapes, the mailbox's outcome - and offers no AO, no BusMaster policy
+ * and no concept, for the reasons that page gives: a transmission's
+ * completion is not a reply, and reception is routing.
  *
  * THREE INSTANCES, ONE FILTER BLOCK. CAN1 and CAN2 come as a pair on every
  * part that has CAN at all except the F413/F423, which add a third; the
@@ -120,6 +117,7 @@
 #include "stm32f4/device_tables.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
+#include "util/can.hpp"
 
 namespace brio {
 
@@ -127,130 +125,33 @@ namespace brio {
 // Vocabulary
 // =============================================================================
 
-/// The widest identifier each format carries (30.9.3): eleven bits
-/// standard, twenty-nine extended.
-inline constexpr uint32_t can_std_id_max = 0x7FFu;
-inline constexpr uint32_t can_ext_id_max = 0x1FFFFFFFu;
+// The frame, the timing and the error codes are the shared CAN vocabulary
+// (util/can.hpp, docs/design/can.md); what follows binds this block's
+// register widths into it and adds what is the bxCAN's alone - the
+// filter banks and the mailbox's outcome.
 
-/// A CAN message, in or out. `filter_index` and `timestamp` are filled on
-/// RECEPTION only (the FMI and TIME fields of CAN_RDTxR) and ignored on
-/// transmission; the time stamp needs the time-triggered mode, which the
-/// errata forbid on two part classes.
-struct CanFrame {
-    uint32_t id = 0;
-    bool extended = false;
-    bool remote = false;
-    uint8_t dlc = 0;
-    uint8_t data[8] = {};
-    uint8_t filter_index = 0;
-    uint16_t timestamp = 0;
-};
-
-constexpr bool can_frame_valid(const CanFrame& f) {
-    return f.dlc <= 8u && f.id <= (f.extended ? can_ext_id_max : can_std_id_max);
-}
+/// What CAN_BTR holds of a timing (30.9.7): a ten-bit BRP, TS1 four
+/// bits, TS2 three, SJW two - a bit of three to twenty-five quanta.
+inline constexpr CanTimingLimits can_timing_limits{1024, 16, 8, 4, 3, 25};
 
 /**
- * The bit time, in the units a human states it in and not in the register's
- * off-by-ones: `brp` is the prescaler as a DIVIDER (1..1024, written as
- * BRP = brp - 1), `ts1` and `ts2` are quanta counts (1..16 and 1..8,
- * written one less), `sjw` is the resynchronization jump width in quanta
- * (1..4). `brp == 0` means "no timing" - what the search returns when the
- * APB clock cannot make the rate exactly.
- */
-struct CanTiming {
-    uint16_t brp = 0;
-    uint8_t ts1 = 0;
-    uint8_t ts2 = 0;
-    uint8_t sjw = 1;
-};
-
-constexpr bool can_timing_valid(const CanTiming& t) {
-    return t.brp >= 1u && t.brp <= 1024u && t.ts1 >= 1u && t.ts1 <= 16u && t.ts2 >= 1u &&
-           t.ts2 <= 8u && t.sjw >= 1u && t.sjw <= 4u && t.sjw <= t.ts2;
-}
-
-/// Time quanta in one bit: the synchronization segment plus the two bit
-/// segments (30.7.7).
-constexpr uint16_t can_timing_quanta(const CanTiming& t) {
-    return static_cast<uint16_t>(1u + t.ts1 + t.ts2);
-}
-
-/// The bit rate a timing produces from an APB1 clock of `pclk_hz`.
-constexpr uint32_t can_bitrate_of(uint32_t pclk_hz, const CanTiming& t) {
-    const uint32_t div = static_cast<uint32_t>(t.brp) * can_timing_quanta(t);
-    return div == 0u ? 0u : pclk_hz / div;
-}
-
-/// Where in the bit the sample point falls, in per mille - the number a
-/// CAN bus is designed around (87.5% is the CiA recommendation for the
-/// rates below 800 kbit/s and what most tools default to).
-constexpr uint16_t can_sample_point_of(const CanTiming& t) {
-    const uint16_t n = can_timing_quanta(t);
-    return n == 0u ? 0u : static_cast<uint16_t>((1000u * (1u + t.ts1)) / n);
-}
-
-/**
- * THE TIMING SEARCH, at compile time: the EXACT `bitrate_hz` from
- * `pclk_hz`, with the sample point as close to `sample_permille` as the
- * segment limits allow.
+ * THE TIMING SEARCH for this block, at compile time: the EXACT
+ * `bitrate_hz` from `pclk_hz` (CAN_BTR counts PCLK1 periods, 30.7.7),
+ * with the sample point as close to `sample_permille` as the segment
+ * limits allow - util/can.hpp's search under this block's limits, and an
+ * empty timing when the APB clock cannot divide into the rate exactly.
  *
  *   constexpr auto t = brio::can_timing_for(brio::apb_hz(clock, false), 500'000);
  *   static_assert(brio::can_timing_valid(t), "no exact 500 kbit/s from this PCLK1");
- *
- * Only exact divisions are considered - a bit rate that is 0.4% off is a
- * bus that works between two nodes of the same crystal and fails on the
- * third - so an empty timing comes back when `pclk_hz` is not a whole
- * multiple of `bitrate_hz` times some legal quanta count. Quanta counts
- * are tried from the widest down (a wider bit resolves the sample point
- * more finely), and the first count whose best sample point beats every
- * wider one's wins.
  */
 constexpr CanTiming can_timing_for(uint32_t pclk_hz, uint32_t bitrate_hz,
                                    uint16_t sample_permille = 875) {
-    CanTiming best{};
-    if (pclk_hz == 0u || bitrate_hz == 0u) {
-        return best;
-    }
-    uint32_t best_err = 0xFFFFFFFFu;
-    for (uint8_t n = 25; n >= 3; --n) {
-        const uint32_t denom = bitrate_hz * n;
-        if (denom == 0u || pclk_hz % denom != 0u) {
-            continue;
-        }
-        const uint32_t brp = pclk_hz / denom;
-        if (brp < 1u || brp > 1024u) {
-            continue;
-        }
-        for (uint8_t ts1 = 1; ts1 <= 16u; ++ts1) {
-            if (ts1 + 1u > n) {
-                break;
-            }
-            const uint32_t ts2 = n - 1u - ts1;
-            if (ts2 < 1u || ts2 > 8u) {
-                continue;
-            }
-            const uint32_t sp = (1000u * (1u + ts1)) / n;
-            const uint32_t err = sp > sample_permille ? sp - sample_permille : sample_permille - sp;
-            if (err < best_err) {
-                best_err = err;
-                best.brp = static_cast<uint16_t>(brp);
-                best.ts1 = ts1;
-                best.ts2 = static_cast<uint8_t>(ts2);
-                best.sjw = static_cast<uint8_t>(ts2 < 4u ? ts2 : 4u);
-            }
-        }
-    }
-    return best;
+    return can_timing_search(pclk_hz, bitrate_hz, can_timing_limits, sample_permille);
 }
 
-/// How many BIT TIMES a data frame of `dlc` bytes occupies on the wire
-/// before stuffing, from figure 396: 44 + 8N for a standard identifier,
-/// 64 + 8N for an extended one, end of frame included and the three-bit
-/// inter-frame space not. Bit stuffing adds up to one bit in five to the
-/// stuffable part, so a measured frame is always this long or longer.
-constexpr uint16_t can_frame_bits(uint8_t dlc, bool extended) {
-    return static_cast<uint16_t>((extended ? 64u : 44u) + 8u * dlc);
+/// Whether a timing fits CAN_BTR.
+constexpr bool can_timing_valid(const CanTiming& t) {
+    return can_timing_fits(t, can_timing_limits);
 }
 
 // ---- filters -----------------------------------------------------------------
@@ -323,20 +224,6 @@ constexpr CanFilter can_filter_accept_all(uint8_t bank, uint8_t fifo = 0) {
 }
 
 // ---- the rest of the vocabulary ------------------------------------------------
-
-/// CAN_ESR.LEC[2:0] (30.9.2), the last error the core saw on the bus. The
-/// seventh code is the one SOFTWARE writes, to tell a later read that
-/// nothing has happened since.
-enum class CanError : uint8_t {
-    none = 0,
-    stuff = 1,
-    form = 2,
-    acknowledge = 3,
-    bit_recessive = 4,
-    bit_dominant = 5,
-    crc = 6,
-    set_by_software = 7,
-};
 
 /// What a transmit mailbox's flags say once RQCP stands (30.9.2).
 struct CanTxResult {
@@ -674,7 +561,7 @@ struct Can {
             return std::nullopt;
         }
         CAN_TxMailBox_TypeDef& box = regs().sTxMailBox[mb];
-        box.TDTR = (box.TDTR & ~static_cast<uint32_t>(CAN_TDT0R_DLC)) | f.dlc;
+        box.TDTR = (box.TDTR & ~static_cast<uint32_t>(CAN_TDT0R_DLC)) | f.length;
         box.TDLR = static_cast<uint32_t>(f.data[0]) | (static_cast<uint32_t>(f.data[1]) << 8) |
                    (static_cast<uint32_t>(f.data[2]) << 16) |
                    (static_cast<uint32_t>(f.data[3]) << 24);
@@ -748,7 +635,7 @@ struct Can {
         f.extended = (rir & CAN_RI0R_IDE) != 0u;
         f.id = f.extended ? (rir >> 3) : (rir >> 21);
         f.remote = (rir & CAN_RI0R_RTR) != 0u;
-        f.dlc = static_cast<uint8_t>(rdtr & CAN_RDT0R_DLC);
+        f.length = static_cast<uint8_t>(rdtr & CAN_RDT0R_DLC);
         f.filter_index = static_cast<uint8_t>((rdtr & CAN_RDT0R_FMI) >> CAN_RDT0R_FMI_Pos);
         f.timestamp = static_cast<uint16_t>((rdtr & CAN_RDT0R_TIME) >> CAN_RDT0R_TIME_Pos);
         const uint32_t low = box.RDLR;
@@ -802,6 +689,19 @@ struct Can {
     static bool error_passive() { return (regs().ESR & CAN_ESR_EPVF) != 0u; }
     static bool bus_off() { return (regs().ESR & CAN_ESR_BOFF) != 0u; }
 
+    /// The three flags folded into the vocabulary's one observable, and
+    /// the two counters as its pair - one read of CAN_ESR each.
+    static CanErrorState error_state() {
+        const uint32_t esr = regs().ESR;
+        return can_error_state((esr & CAN_ESR_EWGF) != 0u, (esr & CAN_ESR_EPVF) != 0u,
+                               (esr & CAN_ESR_BOFF) != 0u);
+    }
+    static CanErrorCounters error_counters() {
+        const uint32_t esr = regs().ESR;
+        return CanErrorCounters{static_cast<uint8_t>((esr & CAN_ESR_TEC) >> CAN_ESR_TEC_Pos),
+                                static_cast<uint8_t>((esr & CAN_ESR_REC) >> CAN_ESR_REC_Pos)};
+    }
+
     static CanError last_error() {
         return static_cast<CanError>((regs().ESR & CAN_ESR_LEC) >> CAN_ESR_LEC_Pos);
     }
@@ -810,7 +710,7 @@ struct Can {
     /// CAN_ESR.
     static void mark_error() {
         regs().ESR = (regs().ESR & ~static_cast<uint32_t>(CAN_ESR_LEC)) |
-                     (static_cast<uint32_t>(CanError::set_by_software) << CAN_ESR_LEC_Pos);
+                     (static_cast<uint32_t>(CanError::no_change) << CAN_ESR_LEC_Pos);
     }
 
     /**

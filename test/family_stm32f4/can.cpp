@@ -165,7 +165,7 @@ void can_block_verbs() {
 void can_transfer_verbs() {
     CanFrame f{};
     f.id = 0x123;
-    f.dlc = 8;
+    f.length = 8;
     (void)Bus::transmit(f);
     (void)Bus::mailbox_empty(0);
     (void)Bus::next_mailbox();

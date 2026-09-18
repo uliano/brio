@@ -24,6 +24,10 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   `kernel.md` (the AO kernel: model, contract, events, payloads,
   queues, FSM, delivery, scheduler, time, panic, platform, index),
   `clock.md` (the clock model), `serial.md`, `spi-bus.md`, `i2c-bus.md`,
+  `can.md` (the CAN vocabulary three controllers share: the classic
+  frame, the timing in human units with a controller's limits as a
+  value and the exact search, the error codes and the error state as
+  one observable; no bus AO, for reasons the page gives),
   `ring.md`, `analog.md` (the sampler usage type + arithmetic),
   `nv-heap.md` (the flash block allocator: FlashMedia contract, map
   pair, survival-aware mount), `nv-journal.md` (the small-value store
@@ -429,8 +433,9 @@ gets its home in `docs/design/` when taken.
   group being the unit an image carries, sized by the family's
   smallest chip (the rule in design/overview.md; the CH32V00x is where
   it bites first).
-- **Queued**: the SAM's CAN (two transceivers and the util vocabulary a
-  shared frame type must carry), the energy experiment's G0 instance,
+- **Queued**: the SAM's CAN (two transceivers; its M_CAN would be the
+  second FD controller design/can.md's shared FD frame waits for), the
+  energy experiment's G0 instance,
   Multislope (an application), avrdx -> avrxt when a part proves it.
 - **Borrowed, phase 2 (debug epoch).** `Borrowed<T, Lease::dispatch>`
   is a plain pointer today. Planned: in debug builds an 8-bit lender
@@ -907,6 +912,16 @@ brio/                    the framework, twelve strata:
                            the opt-out that makes the hook cost zero)
     spi_bus.hpp            SPI vocabulary: SpiBus/SpiDone/spi_*
     i2c_bus.hpp            I2C vocabulary: I2cBus/I2cDone/i2c_* + outcomes
+    can.hpp                the CAN vocabulary three controllers share:
+                           CanFrame (classic: the natural id, the length in
+                           bytes, the receive-side filter index and stamp),
+                           CanTiming in human units + CanTimingLimits (a
+                           controller's register widths as a VALUE) +
+                           can_timing_search (exact, never rounded; a
+                           stratum binds its limits into its own
+                           can_timing_for), CanError (the LEC codes),
+                           CanErrorState/can_error_state, CanErrorCounters;
+                           no filters and no bus AO (design/can.md)
     proto/line_parser.hpp  LineAssembler + console/SCPI parsers +
                            CommandRouter<Sink>
   avrdx/                 everything that knows avr/io.h (AVR DA/DB)
@@ -1861,10 +1876,12 @@ brio/                    the framework, twelve strata:
                            CAN2SB (refused on CAN3, whose count RM0430 states
                            and this project has not read), the error counters
                            and LEC, four vectors and three ISR bodies, and the
-                           TTCM the errata forbid REFUSED by part class +
-                           CanFrame/CanTiming/CanFilter, a vocabulary of this
-                           stratum's own: there is no util CAN contract until
-                           a second family brings one
+                           TTCM the errata forbid REFUSED by part class -
+                           over util/can.hpp's shared frame, timing and error
+                           codes, with can_timing_limits binding CAN_BTR's
+                           widths into the shared search, and CanFilter /
+                           CanTxResult the bxCAN's own; no bus AO
+                           (design/can.md)
     fmc.hpp                the FLEXIBLE MEMORY CONTROLLER (ch. 37 / 11), the
                            one peripheral that adds ADDRESS SPACE instead of
                            driving a wire - and the one chapter with two

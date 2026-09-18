@@ -138,12 +138,14 @@ and `error_counters()` read each of them EXACTLY ONCE per call and hand
 back the whole decoded picture. There is no per-field accessor for
 either, on purpose.
 
-**No task is built.** A CAN bus AO, a frame type shared with another
-architecture's controller and the policy that goes with them are a util
-design question, and a decision taken from ONE implementation is a
-decision taken from the M_CAN's element layout. `FdcanFrame` is this
-target's until another architecture's CAN arrives: a task is born with
-its first user.
+**No task is built.** A CAN bus AO is absent for the reasons
+[design/can.md](../design/can.md) gives - a transmission's completion
+is not a reply, reception is routing - and a task is born with its
+first user. The shared vocabulary holds the classic frame and the
+protocol's error codes (`FdcanError` is its `CanError` under this
+chapter's name); `FdcanFrame` is this stratum's FD superset of that
+frame, and stays so until a second FD controller exists to write a
+shared one against.
 
 ## How to use it
 
@@ -529,8 +531,9 @@ part is the second witness for the second half.
 
 Driver gaps - nothing in `fdcan.hpp` reaches these:
 
-- **No task and no util vocabulary.** A CAN bus AO and a shared frame
-  type are deliberately not designed from one implementation (above).
+- **No task.** A CAN bus AO is absent by decision
+  ([design/can.md](../design/can.md)); the FD frame stays this stratum's
+  until a second FD controller exists (above).
 - **The PLLQ and HSE kernel clocks** (CCIPR2 codes 01 and 10) are named
   and REFUSED, because `clock.hpp` builds neither the PLL's Q output nor
   HSE on this board.

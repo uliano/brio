@@ -412,13 +412,13 @@ std::optional<CanFrame> can_round_trip(const CanFrame& out, uint32_t timeout_ms 
 }
 
 bool frames_equal(const CanFrame& a, const CanFrame& b) {
-    if (a.id != b.id || a.extended != b.extended || a.remote != b.remote || a.dlc != b.dlc) {
+    if (a.id != b.id || a.extended != b.extended || a.remote != b.remote || a.length != b.length) {
         return false;
     }
     if (a.remote) {
         return true;   // a remote frame carries no data
     }
-    for (uint8_t i = 0; i < a.dlc; ++i) {
+    for (uint8_t i = 0; i < a.length; ++i) {
         if (a.data[i] != b.data[i]) {
             return false;
         }
@@ -592,7 +592,7 @@ void te_can_loopback() {
     for (uint8_t dlc = 0; dlc <= 8u; ++dlc) {
         CanFrame out{};
         out.id = 0x100u + dlc;
-        out.dlc = dlc;
+        out.length = dlc;
         for (uint8_t i = 0; i < dlc; ++i) {
             out.data[i] = static_cast<uint8_t>(0xA0u + i + dlc);
         }
@@ -608,7 +608,7 @@ void te_can_loopback() {
     CanFrame ext{};
     ext.id = 0x1ABCDEF1u;
     ext.extended = true;
-    ext.dlc = 8;
+    ext.length = 8;
     for (uint8_t i = 0; i < 8u; ++i) {
         ext.data[i] = static_cast<uint8_t>(i * 17u);
     }
@@ -622,7 +622,7 @@ void te_can_loopback() {
     // The widest and the narrowest identifiers of each format.
     CanFrame edge{};
     edge.id = can_std_id_max;
-    edge.dlc = 1;
+    edge.length = 1;
     edge.data[0] = 0x5A;
     const auto edge_in = can_round_trip(edge);
     bench.verdict("the highest standard identifier round-trips",
@@ -635,12 +635,12 @@ void te_can_loopback() {
     CanFrame rtr{};
     rtr.id = 0x321;
     rtr.remote = true;
-    rtr.dlc = 4;
+    rtr.length = 4;
     const auto rtr_in = can_round_trip(rtr);
     print(serial, "  remote frame: ", rtr_in ? "received" : "none", " RTR ",
-          rtr_in && rtr_in->remote ? "set" : "clear", " DLC ", rtr_in ? rtr_in->dlc : 0u, crlf);
+          rtr_in && rtr_in->remote ? "set" : "clear", " DLC ", rtr_in ? rtr_in->length : 0u, crlf);
     bench.verdict("a remote frame arrives with RTR set and its length intact",
-                  rtr_in && rtr_in->remote && rtr_in->dlc == 4u && rtr_in->id == 0x321u);
+                  rtr_in && rtr_in->remote && rtr_in->length == 4u && rtr_in->id == 0x321u);
 
     // A frame the vocabulary refuses never reaches a mailbox.
     CanFrame bad{};
@@ -649,7 +649,7 @@ void te_can_loopback() {
                   "refused before the mailbox",
                   !Bus::transmit(bad).has_value());
     bad.id = 0;
-    bad.dlc = 9;
+    bad.length = 9;
     bench.verdict("and one with more than eight bytes", !Bus::transmit(bad).has_value());
     Bus::master_reset();
 }
@@ -670,7 +670,7 @@ Admitted try_id(uint32_t id, bool extended = false, bool remote = false) {
     out.id = id;
     out.extended = extended;
     out.remote = remote;
-    out.dlc = 1;
+    out.length = 1;
     out.data[0] = 0x11;
     const auto mb = Bus::transmit(out);
     Admitted a{};
@@ -791,7 +791,7 @@ void tf_can_filters() {
     (void)Bus::filter_init(false);
     CanFrame f1{};
     f1.id = 0x77;
-    f1.dlc = 2;
+    f1.length = 2;
     const auto mb = Bus::transmit(f1);
     const bool sent = mb && timed_wait([&] { return Bus::result(*mb).completed; }, 20u).has_value();
     if (mb) {
@@ -849,7 +849,7 @@ bool load_three(bool by_request_order) {
     for (uint8_t i = 0; i < 3u; ++i) {
         CanFrame f{};
         f.id = ids[i];
-        f.dlc = 1;
+        f.length = 1;
         f.data[0] = static_cast<uint8_t>(i);
         if (!Bus::transmit(f)) {
             return false;
@@ -925,7 +925,7 @@ bool fill_fifo(uint8_t n) {
     for (uint8_t i = 1; i <= n; ++i) {
         CanFrame f{};
         f.id = i;
-        f.dlc = 1;
+        f.length = 1;
         f.data[0] = i;
         const auto mb = Bus::transmit(f);
         if (!mb) {
@@ -1001,7 +1001,7 @@ void ti_can_rates() {
         }
         CanFrame f{};
         f.id = 0x123;
-        f.dlc = 8;
+        f.length = 8;
         for (uint8_t k = 0; k < 8u; ++k) {
             f.data[k] = static_cast<uint8_t>(0x5Au ^ k);   // some stuffing, not the worst case
         }
@@ -1073,7 +1073,7 @@ void tj_can_errors() {
 
     CanFrame f{};
     f.id = 0x123;
-    f.dlc = 1;
+    f.length = 1;
     f.data[0] = 0x5A;
     const auto mb = Bus::transmit(f);
     const bool stuck = mb && !timed_wait([&] { return Bus::result(*mb).completed; }, 20u);
@@ -1170,7 +1170,7 @@ void tj_can_errors() {
     Bus::mark_error();
     bench.verdict("the last-error field takes the software code that says "
                   "'nothing since'",
-                  Bus::last_error() == CanError::set_by_software);
+                  Bus::last_error() == CanError::no_change);
 
     Bus::master_reset();
 }
@@ -1230,7 +1230,7 @@ void tk_can2() {
 
     CanFrame out{};
     out.id = 0x2C2;
-    out.dlc = 3;
+    out.length = 3;
     out.data[0] = 0xC2;
     out.data[1] = 0x55;
     out.data[2] = 0xAA;
@@ -1246,7 +1246,7 @@ void tk_can2() {
           hex(in ? in->id : 0u), " FMI ", in ? in->filter_index : 0u, crlf);
     bench.verdict("a frame round-trips on CAN2 through a bank of the shared "
                   "block",
-                  ok && in && in->id == out.id && in->dlc == out.dlc &&
+                  ok && in && in->id == out.id && in->length == out.length &&
                       in->data[2] == out.data[2]);
     print(serial, "  the filter match index CAN2 reports for the FIRST bank of "
                   "its own range is ", in ? in->filter_index : 0u, crlf);
