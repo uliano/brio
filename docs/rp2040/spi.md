@@ -6,11 +6,16 @@ FIFOs, the DMA interface -, 4.4.3 the operation - the clock ratios
 of 4.4.3.4, the bit rate of 4.4.3.6.1, the frame formats of 4.4.3.7
 -, 4.4.4 the registers), 2.19.2 (table 279: the pins), 2.15.3.1
 (clk_peri); docs/design/spi-bus.md for the Request and the two
-completion styles. The driver: `brio/rp2040/spi.hpp` (`Pl022<n>` the
-resource, `SpiHost` the engine `SpiBus` drives, `SpiClient` the other
-end) over `pin.hpp`, `resets.hpp`, `dma_engine.hpp` and
-`util/spi_bus.hpp`. The reference suite: `test_rp2040_spi`, on the
-loop-back and on four wires between the chip's two instances.
+completion styles. The driver is ARM's and not this chip's, so it lives
+in the IP stratum: `brio/pl022/spi.hpp` holds the resource, the host
+engine and the client ([../pl022/README.md](../pl022/README.md)), and
+`brio/rp2040/spi.hpp` holds what this chip owes it - the pin table of
+table 279, the `Rp2040Pl022` chip traits over `pin.hpp`, `resets.hpp`,
+`delay.hpp`, `nvic.hpp` and `dma_engine.hpp`, and the PUBLIC NAMES
+`Pl022<n>` (the resource), `SpiHost<n, pins, ...>` (the engine `SpiBus`
+drives) and `SpiClient<n, pins>` (the other end), this chip's aliases of
+the three templates there. The reference suite: `test_rp2040_spi`, on
+the loop-back and on four wires between the chip's two instances.
 
 ## What the silicon does
 
@@ -40,7 +45,11 @@ and 2) the slave takes ONE frame per select window and ignores the
 rest while the select stays low, so a host holding a GPIO select for
 a whole transaction reaches it for more than one frame only in modes
 1 and 3; and SOD does not release the transmit pad on this chip - the
-line reads as a driven level, not as the host's pull-up.
+line reads as a driven level, not as the host's pull-up. The datasheet
+says why in passing, in 4.4.3.14's list of idle levels: the block's
+pad-enable output nSSPOE is NOT CONNECTED TO THE PAD here, so SOD stops
+the block driving and leaves the pad driving what it held. The dark
+listener is therefore the pad, released.
 
 ## Types and verbs
 
@@ -54,8 +63,13 @@ line reads as a driven level, not as the host's pull-up.
   `cs`, each the instance's own or none) with `spi_sck_pin` and the
   three others as table 279 and `spi_pins_valid`, `SpiConfig` (role,
   mode, format, bits, clock, loop-back, output disabled) with
-  `spi_config_valid`, `spi_cr0_of` / `spi_cr1_of`, `SpiFlag`,
-  `SpiInterrupt`.
+  `spi_config_valid`, `spi_cr0_of` / `spi_cr1_of`, `SpiControl0`
+  (SSPCR0), `SpiControl1` (SSPCR1, with the enable and the two live
+  bits), `SpiDataField` (the prescaler's and the data register's
+  masks), `SpiFlag` (SSPSR), `SpiInterrupt` (one layout for IMSC/RIS/
+  MIS/ICR), `SpiDmaControl` (SSPDMACR). `SpiPins` and its four pin
+  predicates are this chip's; everything else on this list is the
+  PL022's and lives in the IP stratum.
 - `Pl022<n>`: `reset` / `hold` / `released`, `enable(on)`, `configure`
   (refused while enabled), `loopback` and `output_disabled` live, the
   rate and width read back, the flags, `write_data` / `read_data` /
