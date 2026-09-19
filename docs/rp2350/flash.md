@@ -107,7 +107,12 @@ Here the bootrom does the setup itself while scanning the flash: it
 tries sixteen combinations in turn - EBh, BBh, 0Bh and 03h reads at SCK
 divisors 3, 6, 12 and 24 (5.2.7's table 452) - keeps the first that
 works, and writes a position-independent XIP SETUP FUNCTION into the
-first 256 bytes of BOOT RAM that restores it. Boot RAM is 1 kB on the APB and is physically not
+first 256 bytes of BOOT RAM that restores it. **On the bench board that
+is the FIRST of the sixteen, EBh quad-I/O at CLKDIV 3**, and what that
+costs is a fact of the program and not of the boot: the divisor divides
+clk_sys, so the same register that is 3.7 MHz of SCK while the bootrom
+runs on the ring oscillator is 50 MHz once a program has raised clk_sys
+to 150 MHz. Boot RAM is 1 kB on the APB and is physically not
 executable, so a program that wants that function must COPY IT INTO SRAM
 and call the copy. THE DATASHEET GIVES TWO ROUTES TO THAT ONE ADDRESS -
 the ROM data entry 'X','F' names it, and 4.3 and 5.2.7 say it is at the
@@ -342,6 +347,126 @@ brio::Flash::read_sfdp(0, sfdp);                        // 5Ah
 brio::Flash::command<0x02>({}, sfdp);                   // COMPILE ERROR: 02h writes
 ```
 
+## Bench findings
+
+All of them on an RP2350 in the QFN-80 package, **stepping A2**, at
+3.3 V, behind a 16 MB QSPI flash, clk_sys on the PLL at
+150 MHz and clk_ref on the board's 12 MHz crystal, and all of them on
+BOTH architectures: `test_rp2350_flash` reports **57 pass, 0 fail** on
+the Cortex-M33 pair and **57 pass, 0 fail** on the Hazard3 pair, from
+one source. Three more letters are asked for by name, because they spend
+flash endurance: `h`, `i` and `w`.
+
+- **The way back is the bootrom's own setup function, and the ROM NAMES
+  it.** The six flash functions are found on both architectures; the ROM
+  data entry 'X','F' points into boot RAM, so the documented base of 4.3
+  and 5.2.7 never has to serve as the fallback, and the copy validates.
+  THE FUNCTION IS WRITTEN IN THE ARCHITECTURE THE IMAGE RUNS IN: its
+  first two words are `6850A201 88526891` under the Cortex-M33 pair and
+  `00000617 4A4C4A08` under the Hazard3 one - Thumb in the one, RISC-V
+  in the other, from one boot RAM address.
+- **What the bootrom left the QMI in**, read off the live registers and
+  identical on both architectures: window 0 at **CLKDIV 3, RXDELAY 2**,
+  cooldown 1, MAX_SELECT 0, MIN_DESELECT 7, select setup and hold 0;
+  a read format of an eight-bit SERIAL prefix, then a QUAD address, a
+  quad eight-bit suffix, 16 quad dummy bits and quad data; and a read
+  command of **EBh** with a zero suffix. That is table 452's first
+  attempt, so the scan stopped at once. The write format beside it is
+  serial throughout with command 02h and suffix A0h - the ROM writes it
+  and nothing here uses it. WINDOW 1 CARRIES THE SAME TRIO although
+  nothing is attached to it, which is why a window saves and restores it.
+  Direct mode's own divisor is 3 as well, its RXDELAY 0, and its enable
+  clear while a program executes.
+- **The SCK the divisor buys.** CLKDIV 3 against the clk_sys a program
+  has set: 50 MHz at 150 MHz of clk_sys, and about 3.7 MHz while the
+  bootrom itself runs, the ring oscillator being 11.15 to 11.17 MHz on
+  this board ([clock.md](clock.md)). Nothing in brio rewrites it.
+- **The chip answers every read the allow-list carries**: 9Fh gives
+  `EF 40 18` - a capacity code of 0x18, which is the 16 MB the image was
+  built for - 4Bh a unique id that is neither all zeros nor all ones,
+  05h 0x00 (idle, with no write enabled), 35h 0x02, 15h 0x60, and 5Ah
+  the signature `SFDP` followed by `05 01 00 FF` at address zero. The
+  three status registers are READ and no verb here can write one; that
+  the chip is already in whatever state the bootrom's EBh mode needs is
+  the boot's doing and not this driver's.
+- **The runtime FLASH_DEVINFO is 0x0C00**: 16 MB on chip select 0,
+  NOTHING on chip select 1, its pad field 0, and **the D8h block erase
+  NOT declared** - the ROM's own default on a board that has programmed
+  no OTP.
+- **A window puts the QMI back exactly as it found it**: window 0's read
+  command, read format and divisor, window 1's timing, and the six QSPI
+  pad controls all read identical across a raw id command. That is the
+  measurement the whole chapter stands on, and it says the copied setup
+  function works.
+- **The four aliases agree** byte for byte on the identity map, the
+  cache is enabled for Secure accesses and not powered down, and neither
+  memory window is writable.
+- **The cache.** A 4 kB walk read twice: 10260 accesses and 9746 hits
+  (94 per cent) on the Cortex-M33 half, 8203 and 7690 (93 per cent) on
+  the Hazard3 one - the difference is the instruction fetches, which the
+  counters count too. One line read eight times by one function costs
+  exactly ONE HIT MORE than the same eight reads after an invalidate by
+  address, on both halves. The full sweeps over 2048 lines: **invalidate
+  64 to 66 us, clean 64 to 77 us**; and the program that issued the
+  clean goes on reading the flash's first word, which is erratum
+  RP2350-E11 answered - the sweep driven from the top of the maintenance
+  window leaves its rewritten tags naming the reserved half of the
+  downstream space.
+- **The translation, and WHICH BASE the ROM answers in.** Both windows
+  are the identity map. Asked for 0x1000_1000 the ROM's own
+  `flash_runtime_to_storage_addr` answers 0x1000_1000 - **from the
+  window's base**, which settles what 5.4.8.13's "storage address" and
+  5.4.8.9's window-based addresses leave open between them. Against that
+  base, a hundred addresses through this file's arithmetic and through
+  the ROM's disagree NOWHERE. A pane the image does not use, rolled to a
+  base of 5 MB, reads back at 5 MB with its size still 4 MB, and comes
+  back to the identity.
+- **The streaming interface** delivers all 32 words asked for, in 10 to
+  11 us on the Cortex-M33 half and 13 to 14 us on the Hazard3 one, every
+  word equal to the same address read through the window, and leaves the
+  count spent and the FIFO drained.
+- **What a window costs with nothing written**: a 9Fh command is
+  **123 us on the Cortex-M33 half and 164 us on the Hazard3 one**, a 05h
+  one 120 us, and the console loses no byte across either - its ring is
+  in SRAM and its interrupt merely late.
+- **Erase and program** (letter `h`). A 4 kB sector erase takes
+  **44080 us** on the Cortex-M33 half and **45418 us** on the Hazard3
+  one; a 256-byte page program **660 us** and **707 us**. A marker in
+  the NEXT sector survives the erase, so the default grain really issues
+  the 4 kB command and nothing wider. The page reads back byte for byte
+  through the cached alias AND past it, so the engine's own invalidate
+  left the cache coherent with the chip, and the page after it is still
+  erased.
+- **THE KERNEL'S TICK ACROSS A WINDOW IS THE ONE PLACE THE TWO HALVES
+  DIFFER**, and it is the timebase and not the flash. Across the same
+  44 to 45 ms erase the Cortex-M33 half's kernel advances **1 tick** and
+  the Hazard3 half's **45**. SysTick's pending bit holds ONE missed tick
+  however long the mask stands, so the Arm half loses the rest; the
+  Hazard3 ticker steps its comparator on from the LAST deadline and not
+  from now, so once the mask lifts its handler runs once per period it
+  missed and the count catches up. Neither GAINS time, which is what the
+  verdict asks - and a program that needs a span across a window reads
+  the platform timer, which no mask stops.
+- **A page programmed twice between erases holds the AND of the two**,
+  every byte: 0xF0 then 0xCC reads back 0xC0. Programming clears ones
+  and never sets them, which the chapter does not state.
+- **The 64 kB block command is worth its parameter, and the ROM takes it
+  from the CALLER** (letter `w`). The whole 64 kB partition erased by
+  sixteen 4 kB commands takes **725802 us** (Cortex-M33) and
+  **754998 us** (Hazard3); with the block command offered, **243389 us**
+  and **241844 us** - three times faster. The markers written at each
+  end beforehand are gone afterwards, so D8h really reached the chip -
+  ALTHOUGH FLASH_DEVINFO DOES NOT DECLARE IT. What that field governs is
+  the ROM's higher-level entry points, not the block command an explicit
+  `flash_range_erase` is handed.
+- **Every refusal refuses without reaching the chip**: an erase that is
+  not a sector boundary, shorter than a sector, of zero bytes, past the
+  end or running past it; a program that is not a page boundary, shorter
+  than a page, or whose source lies in any of the four XIP aliases; a
+  02h, 06h, 01h or C7h opcode through the run-time face of the
+  allow-list; an answer buffer in the XIP space; and the medium's own
+  floor, ceiling and cell alignment.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -380,59 +505,24 @@ Driver gaps, each with its reason:
   - the QSPI pads are not bank 0's - but no QFN-60 part is on the bench,
   so the statement is a compile check and not a measurement.
 
-Implemented but not bench-verified - the whole of this chapter, which
-was written ahead of the bench; each item names the letter of
-`test_rp2350_flash` that will measure it:
+Implemented but not bench-verified, each with what would measure it:
 
-- **The bootrom's six flash functions found on both architectures**, and
-  which way back into execute-in-place an image gets - letter **a**,
-  which also reads the chip's identity, its three status registers, the
-  SFDP signature and the runtime FLASH_DEVINFO.
-- **That a window leaves the QMI where it found it** - letter **b**,
-  which reads both windows' whole configuration, runs a window that
-  writes nothing, and reads them again, the QSPI pad control included.
-  It is the measurement that decides whether the copied setup function
-  works at all.
-- **The four aliases, the cache's counters and its maintenance** -
-  letter **c**: the same bytes through three aliases, the hit ratio of a
-  sector read twice, one line invalidated by address and the miss that
-  follows, and both full sweeps timed. The clean sweep is also E11's own
-  test: the program that issued it must still be able to read the
-  flash's first word.
-- **The translation arithmetic against the bootrom's own translator** -
-  letter **d**, over a hundred addresses on the identity map, then a
-  pane the image does not use given a rolling map and restored. It also
-  settles one thing the chapter leaves open: WHICH BASE the ROM's
-  translator answers in. 5.4.8.13 says "the storage address", which
-  reads like an offset in the chip, while 5.4.8.9 expresses every flash
-  address from the window's base - so the letter asks for an address it
-  knows the answer to, prints which of the two came back, and judges
-  everything after it against that.
-- **The streaming interface** - letter **e**, whose words are judged
-  against the same addresses read through the window. Streaming into a
-  DMA channel on `Dreq::xip_stream` is not measured: that wants the DMA
-  chapter's engine slots and a second suite's worth of wiring.
-- **What a window costs with nothing written** - letter **f**: a raw id
-  command timed, the kernel ticks it eats, and a console line written
-  across one.
-- **Every refusal** - letter **g**: the alignment and bounds checks, a
-  source in the XIP space, a write opcode through the run-time face of
-  the allow-list, and the medium's own floor and ceiling. Nothing in it
-  reaches the chip.
-- **A sector erase and a page program, with their durations and the
-  ticks they cost** - letter **h**, outside `z` because it spends three
-  erase cycles across two sectors. It also proves the cache coherent
-  with the chip after a program, and - with a marker in the NEXT sector
-  - that the default erase grain really issues the 4 kB command and
-  nothing wider, which is the one thing about the block size this driver
-  hands the bootrom that reading the datasheet cannot settle.
-- **What a page holds when it is programmed twice between erases** -
-  letter **i**, outside `z`, one erase cycle. The expectation is the AND
-  of the two programs, which is the physics the chapter does not state.
-- **Whether the 64 kB block command is worth offering** - letter **w**,
-  outside `z`, two erase cycles: the partition erased once with the 4 kB
-  command alone and once with the block command offered, both timed,
-  with a marker page written at each end between the two. The markers
-  are what make the second verdict mean something: a chip with no D8h
-  command would ignore it in silence, and an already-erased partition
-  would read all ones either way.
+- **Streaming into a DMA channel on `Dreq::xip_stream`.** The FIFO's two
+  addresses are there and the processor's own pops are measured; a
+  channel paced by that DREQ is not. It wants the DMA chapter's engine
+  slots pointed at the auxiliary AHB port and a letter that judges the
+  block it lands.
+- **The performance counters over a program's own work.** They are read
+  and reset in a letter that makes its own locality; what a real
+  program's hit ratio is, and what the nine-cycle cooldown after a miss
+  costs it, wants a program worth profiling.
+- **`pin_address()` on the silicon.** It is one maintenance write and it
+  is issued nowhere: the cache-as-SRAM gap above is what would exercise
+  it, and a letter that pins a line, fills it through the uncached alias
+  and proves it survives an eviction sweep would measure it.
+- **The two alias refusals and the split ways.** `refuse_uncached`,
+  `refuse_untranslated` and `set_split_ways` are compiled and never set:
+  each turns an access this suite depends on into a bus error or halves
+  the cache, so measuring them wants a letter that arms the bit, takes
+  the fault deliberately and puts it back - which is the fault chapter's
+  machinery and not this one's.

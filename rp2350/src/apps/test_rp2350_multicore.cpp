@@ -50,9 +50,11 @@
 //      ruler, beside core 0's, each on its own counter
 //   c  the round trip: 64 Pings one at a time, each Pong back in order,
 //      the latency of a crossing and its return on the ruler
-//   d  a burst past the inbox: 200 Pings in a row into an inbox of 16,
-//      the overflow counted by the sender, every ACCEPTED one answered
-//      in order, no Pong lost on the way back
+//   d  a burst at the inbox: 200 Pings in a row into an inbox of 16,
+//      whatever a full one drops counted by the sender, every ACCEPTED
+//      one answered in order, no Pong lost on the way back - and the
+//      account that says where the rest went, which on this chip is the
+//      receiving AO's own QUEUE and not the ring
 //   e  both directions at once: core 1's Beat at 1 kHz on its own time
 //      events into core 0's inbox while core 0 pumps Pings for a second
 //      - the counts consistent, no mispost, no overflow on the return
@@ -63,7 +65,10 @@
 //      back into the ROM through the power-on state machine and
 //      launched again, answering Pings as before
 //   h  saturation: as fast as the inbox takes them, the losses counted
-//      where they happen and the two accounts balancing
+//      where they happen and the two accounts balancing - a run bounded
+//      by a COUNT, because an overflow counter is sixteen bits and
+//      saturates, and a loss it could not count is a loss the account
+//      cannot see
 //   j  THE TWO CHANNELS ARE TWO: the bell's eight flags and their
 //      acknowledge, the mailbox FIFO's depth MEASURED (the datasheet
 //      says four in one place and eight in another), the launch refused
@@ -440,7 +445,7 @@ void tc_round_trip() {
 }
 
 // =============================================================================
-// d - a burst past the inbox
+// d - a burst at the inbox
 // =============================================================================
 void td_burst() {
     Origin::reset_counts();
@@ -592,10 +597,22 @@ void tg_panic_and_relaunch() {
 // h - saturation
 // =============================================================================
 void th_saturation() {
-    // AS FAST AS THE INBOX TAKES THEM, for 100 ms, the metronome running:
-    // what saturation does is a fact to state - losses, each counted where
-    // it happens, the lower-priority AO of core 1 starved by pack order -
+    // AS FAST AS THE INBOX TAKES THEM, the metronome running: what
+    // saturation does is a fact to state - losses, each counted where it
+    // happens, the lower-priority AO of core 1 starved by pack order -
     // and the one verdict is the account.
+    //
+    // THE RUN IS BOUNDED BY A COUNT AND NOT BY A TIME, because an
+    // overflow counter is sixteen bits and SATURATES rather than wrap
+    // (kernel/event_queue.hpp): a loss it could not count would make the
+    // account below false for a reason that is not a fault. Flat out,
+    // core 0 offers some forty Pings for every one core 1 dispatches, so
+    // this many leaves the drop counts a comfortable margin under
+    // 65535 - and the last verdict checks that margin held rather than
+    // assuming it. The counters are monotone, so this letter is a
+    // measurement ONCE PER BOOT: asked twice it spends the margin, and
+    // then says so instead of pretending.
+    constexpr uint32_t offered = 40'000;
     Origin::reset_counts();
     const Counts c0 = Counts::now();
     const uint32_t beat_before = Beat::sent;
@@ -603,13 +620,14 @@ void th_saturation() {
     const uint32_t t0 = us_now();
     uint32_t sent = 0;
     uint16_t n = 0;
-    while (us_now() - t0 < 100'000u) {
+    while (sent < offered && us_now() - t0 < 500'000u) {
         if (Inbox<Echo>::send(Ping{static_cast<uint16_t>(n + 1u)})) {
             ++n;
             ++sent;
         }
         (void)K0::step();
     }
+    const uint32_t flat_out_us = us_now() - t0;
     send<Beat>(Beating{false});
     (void)serve_until(sent, 50'000u);
     const uint32_t t1 = us_now();
@@ -618,13 +636,12 @@ void th_saturation() {
     }
     const Counts d = Counts::now().since(c0);
     const uint32_t fired = Beat::sent - beat_before;
-    print(serial, "  100 ms flat out: ", sent, " Pings accepted (", d.echo_in_over,
-          " refused), Echo dispatched ", d.echo_seen, ", ", Origin::pongs,
-          " Pongs back; lost at Echo's queue ", d.echo_q_over, ", at the return inbox ",
-          d.origin_in_over, ", at Origin's queue ", d.origin_q_over,
-          " (Pongs and Ticks alike); the metronome fired ", fired, " times in 100 ms, ",
-          d.beat_q_over, " of its Ticks starved by pack order, ", Origin::ticks_seen, " seen",
-          crlf);
+    print(serial, "  ", offered, " Pings offered flat out in ", flat_out_us, " us: ", sent,
+          " accepted (", d.echo_in_over, " refused), Echo dispatched ", d.echo_seen, ", ",
+          Origin::pongs, " Pongs back; lost at Echo's queue ", d.echo_q_over,
+          ", at the return inbox ", d.origin_in_over, ", at Origin's queue ", d.origin_q_over,
+          " (Pongs and Ticks alike); Beat dispatched ", fired, " Ticks, ", d.beat_q_over,
+          " starved by pack order, ", Origin::ticks_seen, " seen", crlf);
     // Two accounts: what core 0 accepted is what Echo dispatched plus what
     // Echo's queue dropped; what core 1 sent (Pongs and Ticks) is what
     // Origin dispatched plus what the return inbox and Origin's queue
@@ -636,6 +653,12 @@ void th_saturation() {
                       d.echo_seen + fired ==
                           Origin::pongs + Origin::ticks_seen + d.origin_in_over + d.origin_q_over);
     bench.verdict("no mispost under saturation", d.echo_q_mis == 0u && d.origin_q_mis == 0u);
+    bench.verdict("and no counter saturated, so the account above counted every loss there was "
+                  "- an overflow counter stops at 65535 rather than wrap",
+                  Echo::queue.overflows() != UINT16_MAX && Beat::queue.overflows() != UINT16_MAX &&
+                      Origin::queue.overflows() != UINT16_MAX &&
+                      Inbox<Echo>::overflows() != UINT16_MAX &&
+                      Inbox<Origin>::overflows() != UINT16_MAX);
 }
 
 // =============================================================================
@@ -773,7 +796,7 @@ int main() {
     bench.letter('a', "the launch of core 1, and a second one refused", ta_launch);
     bench.letter('b', "two tickers, one per core", tb_tickers);
     bench.letter('c', "the round trip, 64 Pings one at a time", tc_round_trip);
-    bench.letter('d', "a burst past the inbox", td_burst);
+    bench.letter('d', "a burst at the inbox, and where the losses land", td_burst);
     bench.letter('e', "both directions at once for a second", te_both_ways);
     bench.letter('f', "a post to the other core's queue: refused", tf_mispost);
     bench.letter('g', "core 1 halts on a panic, is reset and launched again",

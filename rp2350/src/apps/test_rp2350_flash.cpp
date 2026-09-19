@@ -166,6 +166,32 @@ void print_bytes(const uint8_t* p, uint32_t n) {
     }
 }
 
+/// Letter c's cache probe: a flash offset FAR FROM THE IMAGE - 8 MB in,
+/// where no code, no constant and no storage of this program lives - so
+/// that invalidating its line cannot drop a line the probe itself
+/// fetches. At offset 0x200, which looks harmless, both builds put
+/// executable code.
+constexpr uint32_t probe_line = 8u * 1024u * 1024u;
+constexpr uint32_t probe_reads = 8;
+
+/**
+ * The same line read `probe_reads` times, and the cache hits that cost.
+ *
+ * THE COUNTERS COUNT INSTRUCTION FETCHES TOO, so the only honest way to
+ * compare two readings is to make them THE SAME INSTRUCTIONS AT THE SAME
+ * ADDRESSES: one function, called twice, with the counters reset inside
+ * it. Then the whole difference between the two answers is the data
+ * access the caller changed - and the first call, whose own code is
+ * still cold, is thrown away.
+ */
+[[gnu::noinline]] uint32_t hits_over_reads(uint32_t offset) {
+    Xip::reset_counters();
+    for (uint32_t i = 0; i < probe_reads; ++i) {
+        (void)*reinterpret_cast<const volatile uint32_t*>(Flash::address(offset));
+    }
+    return Xip::hits();
+}
+
 const char* width_name(QmiWidth w) {
     return w == QmiWidth::quad ? "quad" : (w == QmiWidth::dual ? "dual" : "serial");
 }
@@ -396,28 +422,18 @@ void tc_aliases() {
                   acc != 0u && hit * 2u > acc);
 
     // One line invalidated by address: the next read of it must miss.
-    // THE COUNTERS COUNT INSTRUCTION FETCHES TOO, and this code's own
-    // fetches would miss the first time through - so the probe runs
-    // twice and only the second round is read, by which time the
-    // surrounding instructions are cached and the DIFFERENCE between the
-    // two readings is the one data access.
-    const uint32_t line = 0x0000'0200u;
-    uint32_t warm_hits = 0;
-    uint32_t cold_hits = 0;
-    for (uint32_t round = 0; round < 2u; ++round) {
-        (void)*reinterpret_cast<const volatile uint32_t*>(Flash::address(line));
-        Xip::reset_counters();
-        (void)*reinterpret_cast<const volatile uint32_t*>(Flash::address(line));
-        warm_hits = Xip::hits();
-        Xip::invalidate_address(line);
-        Xip::reset_counters();
-        (void)*reinterpret_cast<const volatile uint32_t*>(Flash::address(line));
-        cold_hits = Xip::hits();
-    }
-    print(serial, "  one line, the surrounding code cached: ", warm_hits,
-          " hits with it allocated, ", cold_hits, " after an invalidate by address", crlf);
+    // `hits_over_reads` above is why this is a fair comparison.
+    const uint32_t line = probe_line;
+    (void)hits_over_reads(line);        // the probe's own code into the cache
+    const uint32_t warm_hits = hits_over_reads(line);
+    Xip::invalidate_address(line);
+    const uint32_t cold_hits = hits_over_reads(line);
+    print(serial, "  one line at ", hex(line), " read ", probe_reads, " times by one function: ",
+          warm_hits, " hits with it allocated, ", cold_hits, " after an invalidate by address",
+          crlf);
     bench.verdict("an invalidate by address turns the next read of that line into a miss - one "
-                  "hit fewer, the loop's own fetches being equal on both sides",
+                  "hit fewer over a run of reads whose instructions are the same instructions "
+                  "twice over",
                   warm_hits == cold_hits + 1u);
 
     const uint32_t t_inv0 = us_now();
@@ -797,6 +813,13 @@ void banner() {
 }
 
 } // namespace
+
+// ---- target glue ------------------------------------------------------------
+//
+// ONE NAME, BOTH ARCHITECTURES: a Cortex-M vector-table slot on one half,
+// an entry of Hazard3's own dispatch on the other.
+extern "C" void isr_uart0() { (void)Serial::isr(); }
+extern "C" void isr_systick() { brio::Ticker::tick(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

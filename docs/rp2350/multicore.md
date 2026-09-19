@@ -105,8 +105,10 @@ stay safe.
 - The RP2040's memory-mapped divider is gone (3.1.7) and the doorbells,
   the RISC-V soft interrupt and the platform timer stand in that address
   space instead - which is what RP2350-E2 is about.
-- The mailbox FIFO's documented depth differs from the RP2040's eight
-  in one of the two places this datasheet states it.
+- The mailbox FIFO is FOUR words deep here against the RP2040's eight -
+  measured, which also settles the two places this datasheet states it
+  differently: 3.1.5 is right and the FIFO_ST register description's
+  "8 words deep" is not.
 
 ## Types and verbs
 
@@ -220,6 +222,97 @@ Nothing in brio enables SIO_IRQ_FIFO, and a launch refuses while it is
 on. A program that enables it owns the launch's channel and must disable
 it around `Core1::launch()`.
 
+## Bench findings
+
+All of them on an RP2350 in the QFN-80 package, **stepping A2**, at
+3.3 V, clk_sys on the PLL at 150 MHz, the ruler the SIO's platform timer,
+and all of them on BOTH architectures: `test_rp2350_multicore` reports
+**39 pass, 0 fail** on the Cortex-M33 pair and **39 pass, 0 fail** on the
+Hazard3 pair, from one source. Core 1 has no console: every fact below
+about it was carried by an event that crossed.
+
+- **The launch is microseconds.** From a core 1 left in the ROM by the
+  probe's `reset run`, `Core1::launch()` - the power-on state machine's
+  hold and release, then the six-word protocol - completes in **34 to
+  35 us** on the Cortex-M33 pair and **25 us** on the Hazard3 one; a
+  RELAUNCH of a core 1 already known to the program takes 5 to 16 us.
+  Core 1's entry writes CPUID 1, and the vector base it adopted is core
+  0's: 0x1000_0000 on the Arm half (VTOR) and 0x1000_0041 on the RISC-V
+  one (mtvec, mode bit and all).
+- **AFTER THE FLASH VERB, CORE 1 IS IN THE BOOTROM.** Read through the
+  debug port with no program's help, core 1 sits at 0x0000_00DA on the
+  Arm pair and 0x0000_76DE on the RISC-V one, both inside the ROM, with
+  its stack pointer at its reset value - the wait state of 5.2's table
+  451, reached because the chip-level rescue reset precedes the
+  programming. That is the state a launch has to work from, and it does,
+  flash after flash.
+- **A RUNNING core 1 does not answer the protocol.** With no reset
+  first, `protocol()` gets no echo at all and gives up after its bounded
+  wait - **53396 us** on the Arm half, 53419 us on the RISC-V one - and
+  core 1's entry stamp and run count are unchanged, so nothing of its
+  life was disturbed. This is why `launch()` resets first.
+- **Two tickers, and they are two.** Over 500 ms of the ruler each
+  advances 500 ticks on both halves. With core 0's PAUSED for 100 ms it
+  advances 0 and core 1's advances 100; resumed, core 0's takes up again
+  at 20 ticks in 20 ms. On the Arm pair those are two SysTicks counting
+  each core's own clk_sys; on the RISC-V pair two comparators against
+  the ONE shared microsecond counter - and the pause is still per core,
+  because what it masks is that core's own enable.
+- **A crossing and its return cost single-digit microseconds**: 64 Pings
+  one at a time come back as 64 Pongs in order, round trip **min 3, mean
+  4, max 17 us** on the Cortex-M33 half and **min 4, mean 4, max 14 us**
+  on the Hazard3 one - the maximum being the first, with both caches
+  cold.
+- **A burst finds the QUEUE before it finds the inbox.** 200 Pings
+  written back to back into an inbox of 16 are ALL accepted on both
+  halves: the bell's handler on core 1 drains the ring faster than core 0
+  can fill it. What overflows is Echo's own event queue, 32 deep -
+  168 Pings dropped and counted there, 32 dispatched and 32 Pongs back
+  in order. The account balances exactly, which is the point: every loss
+  is counted where it happened.
+- **Both directions at once, paced, lose nothing.** One second with a
+  Ping every 20 us while core 1's metronome runs on its own time events:
+  **50000 Pings, 50000 Pongs in order**, and 999 to 1000 Ticks across the
+  bridge on either half - no inbox overflow, no queue overflow, no
+  mispost, in either direction.
+- **A `post` to the other core's queue is refused and counted**, and the
+  AO never sees it: the next Ping's Pong is the first.
+- **Core 1 dies alone.** A panic on core 1 writes CORE 1'S breadcrumb -
+  code 2, context 0x11 - which core 0 reads through
+  `take_panic_record<P1>()`, and core 0's own record stays untouched. A
+  halted core 1 then answers no Ping. `Core1::reset()` puts it back in
+  the ROM in **3 to 6 us** (Arm) and **2 us** (RISC-V), leaves FRCE_OFF
+  holding nothing at all - which is what erratum RP2350-E19 wants of a
+  reboot - and the relaunch answers Pings again.
+- **Under saturation the two accounts balance.** 40000 Pings offered
+  flat out take 53370 us on the Arm half and 48977 us on the RISC-V one;
+  all 40000 are accepted by the inbox, Echo dispatches **14920** (Arm)
+  and **9172** (RISC-V), the rest - 25080 and 30828 - are dropped at
+  Echo's queue and counted there, and every Pong comes back. The run is
+  bounded by a COUNT and not by a time because an overflow counter is
+  sixteen bits and saturates: at 100 ms flat out the Arm half offers some
+  122000 Pings and loses 118807, which 65535 cannot say, and the letter
+  now checks that no counter reached that ceiling.
+- **The lower-priority AO of core 1 is starved by pack order, visibly.**
+  Under that load Beat's metronome gets 78 of its Ticks dispatched and
+  39 or 40 dropped at its own queue, on either half - the kernel serving
+  Echo first, exactly as `Tenuto<P1, Echo, Beat>` promises.
+- **The bell and the mailbox are two channels.** A ring raises exactly
+  one of the eight flags and `pop_all()` acknowledges exactly it;
+  `SioDoorbell<1>::enable()` refuses from core 0, one line number serving
+  both cores; core 1 acknowledges its own bell, so nothing stands in the
+  outbound register's read-back after a round trip.
+- **THE MAILBOX IS FOUR WORDS DEEP.** It takes four pushes and refuses
+  the fifth, with the sticky write-on-full flag still clear - so 3.1.5's
+  "four entries deep" is the truth and the FIFO_ST register
+  description's "8 words deep" is not.
+- **A launch runs with the bell interrupt ENABLED** - 16 us (Arm) and
+  12 us (RISC-V) with it on throughout, and core 1 answering afterwards.
+  That is the whole gain of the doorbell over the RP2040's FIFO bell.
+  The launch still refuses while the MAILBOX interrupt is enabled, whose
+  handler would eat the protocol's echoes, and the refusal costs nothing:
+  the check is the first thing `protocol()` does.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -251,41 +344,23 @@ Driver gaps, each with its reason:
   cores executing from one XIP cache, born with the first program whose
   timing asks.
 
-Implemented but not bench-verified, each with the letter of
-`test_rp2350_multicore` that will measure it:
+Implemented but not bench-verified, each with what would measure it:
 
-- The launch itself: core 1 reset into the ROM and the six-word protocol
-  answered, its entry shim reached (`entered()`), its CPUID and vector
-  base written from core 1, and the time all of it took - on both
-  architectures, where the Arm half's shim also has MSPLIM and the FPU to
-  set and the RISC-V half's has the global pointer (letter a).
-- The protocol alone at a RUNNING core 1, refused within its bounded wait
-  (letter a).
-- Two tickers side by side at 1000 Hz against the shared microsecond
-  ruler - two SysTicks on one half, two comparators against one counter
-  on the other (letter b).
-- A crossing and its return, sixty-four times one at a time, with the
-  round trip measured; and the same in both directions at once, core 1's
-  time events feeding the bridge while core 0 pumps (letters c and e).
-- The inbox's accounting: a burst past its depth counted by the sender,
-  and under saturation every loss counted where it happened, with the two
-  accounts balancing (letters d and h).
-- A `post` to the other core's queue refused and counted as a mispost
-  (letter f).
-- A panic on core 1 writing core 1's breadcrumb, a halted core 1
-  answering nothing, `Core1::reset()` putting it back into the ROM with
-  FRCE_OFF left clear, and a relaunch answering as before (letter g).
-- THE BELL AND THE MAILBOX AS TWO CHANNELS (letter j): a ring raising
-  exactly one flag and `pop_all()` acknowledging exactly it, the other
-  core's bell read through the outbound register's read-back, the
-  mailbox's DEPTH MEASURED against the datasheet's two different
-  statements of it, `push()` refusing instead of leaving the sticky
-  write-on-full flag, the launch refused while the mailbox interrupt is
-  enabled, and a whole relaunch with the bell interrupt left ON.
-- A `Lease::reply` buffer crossing inside a request and back inside the
-  reply: no letter yet - the fences are the inbox's and the host test
-  covers the capsule (`test_inbox`), so what is missing is a letter with
-  a buffer-carrying request.
-- A second console for core 1. The board has one probe and one UART
+- **A `Lease::reply` buffer crossing inside a request and back inside
+  the reply.** The fences are the inbox's and the host test covers the
+  capsule (`test_inbox`); what is missing is a letter with a
+  buffer-carrying request, which wants an AO on core 1 that owns a
+  buffer worth lending.
+- **A second console for core 1.** The board has one probe and one UART
   bridge, so core 1 speaks only through the bridge here; the chip's own
-  USB CDC port is the second console, and that chapter is not written.
+  USB CDC port is the second console, and a letter that runs one would
+  have to give core 1 the USB controller's interrupt line.
+- **`SioMailbox` as a program's own channel.** Its depth, its refusal
+  and its two sticky flags are measured; what is not is a program using
+  it under load beside the bell - two channels carrying traffic at once,
+  which wants a program that wants an ordered channel at all.
+- **`SioDoorbell::ring()` called FROM CORE 1 towards core 1.** Both
+  directions of the CPUID choice are exercised by the bridge - core 0
+  ringing core 1 and core 1 ringing core 0 - and core 0 ringing its own
+  bell is letter j's; the fourth case, core 1 ringing its own, has no
+  caller and would want an AO on core 1 that posts to itself.

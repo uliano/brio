@@ -133,9 +133,10 @@ the XIP interface up itself while scanning the flash - it tries EBh, BBh,
 with its own first byte - a
 vector table on Arm, one jump instruction on RISC-V - and what marks it
 an image is the twenty-byte IMAGE_DEF block the crt places right behind
-that, well inside the first 4 kB the bootrom reads. Which mode that
-turned out to be, and how a program keeps it across a flash operation,
-is [flash.md](flash.md).
+that, well inside the first 4 kB the bootrom reads. On the bench board
+that is the FIRST of the sixteen, EBh quad-I/O at CLKDIV 3 - 50 MHz of
+SCK once a program has raised clk_sys to 150 MHz - and how a program
+keeps it across a flash operation is [flash.md](flash.md).
 
 Build outputs land in `build-cmake/rp2350-{arm,riscv}-{release,debug}`:
 `<app>.elf/.bin/.hex`, `firmware-<app>.map`, `<app>.lst`.
@@ -299,11 +300,11 @@ Driver gaps, each with its reason:
 Implemented but not bench-verified:
 
 - **The QFN-60's compile-time refusals**, above.
-- **Core 1, on either architecture.** The platform, the tickers, the
-  doorbell, the launch and the inbox bridge are all written
-  ([multicore.md](multicore.md)); nothing has run on a second core here
-  yet, and that document's own list names the letter of
-  `test_rp2350_multicore` that will measure each part.
+- **A second console for core 1.** Core 1 itself is measured on both
+  architectures - the launch, the two tickers, the bridge, the panic and
+  the relaunch ([multicore.md](multicore.md)) - but it speaks only
+  through the bridge, there being one probe and one UART on this board;
+  the chip's own USB CDC port would be the second console.
 - **`Mtime` and the tick generators under a clk_ref that is not 12 MHz.**
   The arithmetic refuses a clk_ref that is not a whole number of
   megahertz, and only the 12 MHz crystal has been on the wire.

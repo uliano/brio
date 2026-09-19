@@ -180,7 +180,8 @@ same on both architectures unless a number is given for each.
 - BULK TRAFFIC, 4096 bytes round the loop, byte-exact with nothing
   overrun at every rung tried - 460800, 921600, 1 M, 2 M and 3 Mbaud -
   with the code running out of the flash through the interface the
-  bootrom leaves set up (03h serial reads at CLKDIV 12; there is no
+  bootrom leaves set up (EBh quad-I/O reads at CLKDIV 3, which is 50 MHz
+  of SCK at this clk_sys - [flash.md](flash.md); there is no
   second-stage bootloader on this chip and no chapter reprograms the QMI
   yet). At 3 Mbaud: 13675 us and 1044 interrupts on the Cortex-M33 half,
   13686 us and 978 on the Hazard3 half - 25 and 23 interrupts per hundred

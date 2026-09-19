@@ -8,7 +8,8 @@
  * NO SECOND-STAGE BOOTLOADER (datasheet 5.9.5). The RP2040's first 256
  * flash bytes were a checksummed stage that set the flash interface up;
  * here the bootrom does a best-effort XIP setup itself while scanning the
- * flash (03h serial reads at CLKDIV 12, 5.1.4) and a flash-resident
+ * flash - the first of 5.2.7's sixteen combinations that works, which on
+ * the bench board is EBh quad-I/O at CLKDIV 3 - and a flash-resident
  * program runs in that state until it chooses to reprogram the QMI. So
  * flash begins with the image, and what makes the image an image is the
  * IMAGE_DEF block the crt places inside the first 4 kB, right behind the

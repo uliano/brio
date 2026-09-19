@@ -43,7 +43,10 @@
  * position-independent XIP SETUP FUNCTION in the first 256 bytes of boot
  * RAM (4.3, 5.2.7) that restores the mode and divisor it found. Boot RAM
  * is on the APB and is never executable, so `init()` copies those 256
- * bytes into SRAM once and the window calls the copy.
+ * bytes into SRAM once and the window calls the copy. What the mode
+ * turns out to be is the board's, not this file's: on the bench board it
+ * is the FIRST of 5.2.7's sixteen combinations, EBh quad-I/O at CLKDIV 3
+ * (docs/rp2350/flash.md), and no verb here rewrites it.
  *
  * AND THE WAY BACK IS NOT LOAD-BEARING FOR CORRECTNESS, which is the
  * other half of the difference. 5.4.8.6 states it plainly: the ROM's
@@ -483,7 +486,7 @@ struct Qmi {
  *
  *   using Chip = brio::QmiWindow<0>;
  *   const auto t = Chip::timing();          // what the bootrom chose
- *   const auto f = Chip::read_format();     // 03h serial, or EBh quad
+ *   const auto f = Chip::read_format();     // EBh quad on the bench board
  *
  * EVERY WRITE HERE IS A WINDOW OF ITS OWN. Changing the format or the
  * command of the window the program executes from breaks the very
