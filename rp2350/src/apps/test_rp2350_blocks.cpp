@@ -411,11 +411,13 @@ void td_edges() {
     Sha256::clear_write_error();
     bench.verdict("and the flag is write-one-to-clear", !Sha256::write_error());
 
-    // BSWAP both ways over the same bytes. With it set, a word loaded
-    // little-endian from the message is the standard's big-endian
-    // message word; with it clear, the SAME word enters byte-reversed,
-    // so the digest must differ - and must equal the digest of the
-    // byte-reversed message.
+    // BSWAP both ways over the SAME SIXTEEN WORDS, written by hand and
+    // with no padding after them, so that the digest taken is one
+    // compression of one block and the definition can be applied to it
+    // directly. The padding is left out on purpose: hash() builds it as
+    // BYTES, so with BSWAP clear the padding words enter reversed too
+    // and the result is not the digest of any message - which is why
+    // this question is asked at the block and not at the message.
     std::array<uint8_t, 64> one_block{};
     for (uint32_t i = 0; i < one_block.size(); ++i) {
         one_block[i] = static_cast<uint8_t>(i);
@@ -427,19 +429,44 @@ void td_edges() {
         reversed_words[i + 2] = one_block[i + 1];
         reversed_words[i + 3] = one_block[i + 0];
     }
-    const auto with = Sha256::hash(std::span<const uint8_t>{one_block});
-    Sha256::byte_swap(false);
-    const auto without = Sha256::hash(std::span<const uint8_t>{one_block});
-    Sha256::byte_swap(true);
-    bench.verdict("BSWAP set is what makes a word loaded little-endian the standard's "
-                  "message word",
-                  with.has_value() && *with == sha256(std::span<const uint8_t>{one_block}));
-    bench.verdict("BSWAP clear digests the same buffer with every message word reversed, "
-                  "which is the byte-reversed message's own digest",
-                  without.has_value() &&
-                      *without == sha256(std::span<const uint8_t>{reversed_words}));
+    const auto raw_block = [&](bool swap) {
+        Sha256::byte_swap(swap);
+        Sha256::start();
+        for (uint32_t i = 0; i < 16; ++i) {
+            Sha256::write_word(static_cast<uint32_t>(one_block[4 * i + 0]) |
+                               (static_cast<uint32_t>(one_block[4 * i + 1]) << 8) |
+                               (static_cast<uint32_t>(one_block[4 * i + 2]) << 16) |
+                               (static_cast<uint32_t>(one_block[4 * i + 3]) << 24));
+        }
+        const auto d = Sha256::digest();
+        Sha256::byte_swap(true);
+        return d;
+    };
+    const auto compressed = [](std::span<const uint8_t> block) {
+        auto state = sha256_initial_state;
+        sha256_compress(state, block);
+        return state;
+    };
+    const auto with = raw_block(true);
+    const auto without = raw_block(false);
+    const auto expect_with = compressed(std::span<const uint8_t>{one_block});
+    const auto expect_without = compressed(std::span<const uint8_t>{reversed_words});
+    bench.verdict("BSWAP set makes a word loaded little-endian the standard's big-endian "
+                  "message word: one block of sixteen is the definition's own compression",
+                  with.has_value() && with->words == expect_with);
+    bench.verdict("BSWAP clear passes the word through as written, so the SAME sixteen "
+                  "words are the byte-reversed block's compression",
+                  without.has_value() && without->words == expect_without);
     bench.verdict("and the two are not the same digest",
                   with.has_value() && without.has_value() && !(*with == *without));
+    // The whole-message path is the one a program uses, and the padding
+    // it builds is only right with BSWAP set - which is why init() sets
+    // it and no verb here leaves it clear.
+    bench.verdict("and hash(), which builds the padding, agrees with the standard over the "
+                  "same sixty-four bytes",
+                  Sha256::byte_swap() &&
+                      Sha256::hash(std::span<const uint8_t>{one_block}) ==
+                          sha256(std::span<const uint8_t>{one_block}));
 
     print(serial, "  DMA request ", static_cast<uint32_t>(Sha256::dreq),
           " (12.6.4.1's table), DMA_SIZE ", static_cast<uint32_t>(Sha256::dma_size()), crlf);
@@ -562,6 +589,40 @@ void tf_quality() {
 void tg_recovery() {
     const uint32_t before_chain = Trng::chain();
     const uint32_t before_sample = Trng::sample_cycles();
+
+    // THE FATAL CHECK, RAISED ON PURPOSE. A sampling interval under the
+    // floor makes the autocorrelation test fail four times in a row
+    // within microseconds, and the block then hands out nothing until it
+    // is reset. It is the one error of this chapter a program cannot
+    // wait out, so the branch that reports it and the verb that cures it
+    // are exercised here rather than left to a board that misbehaves.
+    Trng::init({.sample_cycles = 25});
+    Trng::clear_autocorr_stats();
+    Trng::start();
+    const auto starved = Trng::read_blocking();
+    const Trng::AutocorrStats fatal = Trng::autocorr_stats();
+    const bool named = !starved.has_value() &&
+                       Trng::last_error() == TrngError::autocorrelation;
+    print(serial, "  at 25 cycles between samples: autocorrelation ", fatal.tries,
+          " started, ", static_cast<uint32_t>(fatal.failures), " failed; read_blocking says ",
+          named ? "autocorrelation" : "something else", crlf);
+    bench.verdict("a sampling interval far under the measured floor stops the block on "
+                  "AUTOCORR_ERR, and read_blocking names that error rather than timing out",
+                  named && fatal.failures >= 4u);
+    Trng::clear(TrngFlag::all);
+    const bool sticks = (Trng::status() & TrngFlag::autocorr_error) != 0u;
+    bench.verdict("and the flag stands through a write to RNG_ICR, which is why the soft "
+                  "reset is the only cure",
+                  sticks);
+    // Back to the settings the rest of this letter measures with.
+    Trng::recover();
+    Trng::start();
+    const auto after_fatal = Trng::read_blocking();
+    Trng::stop();
+    bench.verdict("recover() is the way back from it: entropy again, with the block's "
+                  "fatal flag gone",
+                  after_fatal.has_value() &&
+                      (Trng::status() & TrngFlag::autocorr_error) == 0u);
 
     // The internal soft reset returns every setting to its reset value:
     // that is what makes it the only cure for AUTOCORR_ERR and what
@@ -708,9 +769,16 @@ void th_otp_record() {
                   c1.has_value() &&
                       (((*c1 & OtpCrit1::secure_boot_enable) != 0u) ==
                        ((Otp::critical() & OtpCritical::secure_boot_enable) != 0u)));
-    bench.verdict("no hardware access key is enrolled, so nothing of this array is hidden "
-                  "behind one",
-                  Otp::key_valid() == 0u);
+    // 13.5.2 numbers the OTP access keys 1..6 (index 7 never matches,
+    // index 0 means "no key"), and KEY_VALID reports which were enrolled
+    // at boot. Its reset value is 0 and this board reads 1 with every
+    // KEYn_VALID row unprogrammed, so BIT 0 IS THE NULL KEY - always
+    // satisfied - and the six that can be enrolled are bits 1..6. The
+    // question worth asking is about those.
+    bench.verdict("no enrollable hardware access key is registered, so nothing of this "
+                  "array is hidden behind one: only bit 0, the null key index 13.5.2 "
+                  "names, stands",
+                  (Otp::key_valid() & otp_access_key_mask) == 0u);
 
     static const char* const bf0_names[] = {
         "DISABLE_BOOTSEL_UART_BOOT", "DISABLE_BOOTSEL_USB_PICOBOOT_IFC",
@@ -907,16 +975,30 @@ void tk_bootrom() {
                       (info->boot_random[0] | info->boot_random[1] | info->boot_random[2] |
                        info->boot_random[3]) != 0u);
 
-    // The partition table: this image carries none, so the chapter's own
-    // answer is a precondition error - which is a MEASUREMENT of the
-    // wrapper's error path and not a failure.
+    // The partition table. This image carries none - but a flash boot
+    // still leaves the ROM's resident view loaded, so the call is SERVED
+    // and reports a table that is not present, rather than refusing with
+    // 5.4.8.16's precondition code. The count of words is the return
+    // value; word 0 is the subset of the asked flags the API supports,
+    // and 5.4.8.16 says to check it before reading the rest.
     std::array<uint32_t, 8> out{};
     const int32_t rc = Bootrom::get_partition_table_info(
         out.data(), static_cast<uint32_t>(out.size()), PartitionInfoFlag::pt_info);
-    print(serial, "  get_partition_table_info -> ", rc, crlf);
-    bench.verdict("the partition table call answers the code 5.4.8.16 names when no table "
-                  "has been loaded, or reports one if a table is there",
-                  rc == BootromError::precondition_not_met || rc > 0);
+    print(serial, "  get_partition_table_info -> ", rc);
+    for (int32_t i = 0; i < rc && i < static_cast<int32_t>(out.size()); ++i) {
+        print(serial, " ", hex(out[static_cast<uint32_t>(i)]));
+    }
+    print(serial, crlf);
+    bench.verdict("the partition table call is served on an image booted from flash: it "
+                  "answers with a word count and not with the precondition code 5.4.8.16 "
+                  "names for a table the ROM never loaded",
+                  rc > 0);
+    bench.verdict("and the first word it fills is the subset of the asked flags the API "
+                  "supports, which 5.4.8.16 says to check before reading the rest",
+                  rc >= 1 && out[0] == PartitionInfoFlag::pt_info);
+    bench.verdict("and it reports NO partition table on this image, which is what an "
+                  "unsigned image built with none should say",
+                  rc >= 2 && (out[1] & 0x1FFu) == 0u);
 }
 
 void banner() {

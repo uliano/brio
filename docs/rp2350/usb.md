@@ -59,6 +59,17 @@ which is 12.7.2.2.1's "remove isolation once software has configured the
 controller", and which leaves the chapter's register order otherwise
 exactly as it stands.
 
+**AND IT IS NOT A DISCONNECT.** Isolating the PHY cuts it from the
+switched core domain; it does not take the pull-up off the wire, and the
+host is told nothing. Measured: with PHY_ISO set for half a second and
+the whole bring-up run afterwards, **no bus reset arrives in six
+seconds** - the host goes on addressing the address it assigned, while
+the device's own stack has been reset to DEFAULT and answers at none.
+A program coming back from a power-down must therefore FORCE the
+reconnect: drop the pull-up long enough for the host to run its
+disconnect debounce, then raise it. `Device::stop()`, half a second,
+`Device::start()` is that, and it is the only way back.
+
 **Three reset values moved**, and all three are answered by writing the
 register WHOLE rather than setting bits into it:
 
@@ -229,6 +240,87 @@ brio::print(s, "phy_isolated=", brio::Usb::phy_isolated(),
                " sm=", brio::hex(brio::Usb::sm_state()), brio::crlf);
 ```
 
+## Bench findings
+
+On an RP2350 in the QFN-80 package, **stepping A2**, clk_sys at 150 MHz
+and clk_usb at 48 MHz off the USB PLL, the board's own USB-C into a Linux
+host, on BOTH architectures: `test_rp2350_usb` reports **29 pass, 0 fail**
+on the Cortex-M33 pair and on the Hazard3 pair, from one source, each on
+three flash-and-run cycles, with the three host-assisted letters run
+beside them. Every verdict reads the same on the two halves.
+
+- **THE CONTROLLER COMES UP IN ABOUT 130 MICROSECONDS**: 133 to 135 us on
+  the Cortex-M33 half and 108 to 110 us on the Hazard3 one, with clk_usb
+  counted at **48 000 000 Hz** (48 000 062 once) and clk_sys at
+  150 000 000 - well over erratum RP2350-E12's edge, which is 52.8 MHz.
+  After `init()` MAIN_CTRL reads **0x1** (the isolation lifted, the
+  controller enabled in device mode), USB_MUXING **0x9** (TO_PHY and
+  SOFTCON, USBPHY_AS_GPIO clear) and SIE_CTRL **0x20000000** - the host's
+  pull-downs, which reset SET on this chip, gone.
+- **A LINUX HOST ENUMERATES THE DEVICE IN HALF A SECOND TO THREE
+  QUARTERS**: 508 to 739 ms from `start()` to CONFIGURED, in **2 bus
+  resets and 13 setup packets**, with **3 stalls** - the device qualifier
+  and the strings a full-speed device has not, refused by the rules. The
+  descriptors are 18 bytes for the device and 67 for the configuration
+  (two interfaces, three endpoints) with four strings; the class's four
+  buffers are handed out past endpoint zero's; the start-of-frame counter
+  advances exactly **10 frames in 10 ms**; and the SIE error word is
+  **0x0** through the whole of it.
+- **THE TWO FREE-RUNNING 48 MHz TIMESTAMPS.** The raw counter advances
+  **14 429 to 14 477 cycles over 300 us** - 48 MHz within half a per cent
+  - and `since_sof` reads **18 024 to 40 002 cycles** on a live bus,
+  always under the 48 000 that would be a millisecond. SM_STATE reads
+  **0x100** and nothing above its three fields: main 0, bus control 0,
+  receive deserialiser 1.
+- **THE PER-ENDPOINT ERROR COUNTERS ARE CLEAR** after a clean
+  enumeration, on endpoint zero and on the bulk pair alike, and
+  ENDPOINT_ERROR reads 0; the write-to-clear pair reads back clear.
+  LINESTATE_TUNING stands at its reset value **0xF8** - the
+  buffer-control double read and wake-on-any-bus-activity fixes both on -
+  and no verb here writes it.
+- **THE DEVICE STATE-MACHINE WATCHDOG DOES NOT FIRE ON A QUIET MACHINE,
+  which the register description leaves open.** Armed at its widest
+  18-bit limit it reads back **262 143** and stands; over 20 ms it fires
+  **0 times**, and **0 times** again at a millisecond's worth of cycles
+  (48 000). So the counter is held while the machine is idle, and a limit
+  past eighteen bits is refused instead of truncated.
+- **THE ENDPOINT ABORT WORKS, WHICH IS THE RP2040'S ERRATUM E2 FIXED.**
+  An idle endpoint's abort completes after **0 or 1 status reads** and
+  LIFTS - on the other chip it stood for ever - and the port is still
+  configured with its bulk OUT armed afterwards.
+- **A RECONNECT THROUGH THE PULL-UP** takes **528 to 553 ms** from the
+  raise to CONFIGURED, with the host's bus reset counted (2 -> 5: three
+  more) and a fresh address.
+- **A RECONNECT THROUGH THE PHY'S ISOLATION DOES NOT HAPPEN.** With
+  PHY_ISO set for half a second and the whole bring-up run afterwards,
+  the pull-up bit still reading 1 while the isolation stood: **no bus
+  reset in six seconds**, resets 5 -> 5, the device left in DEFAULT while
+  the host goes on addressing what it assigned. The way back is the
+  device's own pull-up, dropped for half a second: **652 to 681 ms** to
+  CONFIGURED, three more bus resets, a new address. The isolation raises
+  **no SIE error** either way.
+- **THE PORT AS A BYTE TRANSPORT, AGAINST A LINUX HOST.** Echo, in chunks
+  of 1 to 300 bytes for six seconds: **2 463 024 bytes byte-exact on the
+  Cortex-M33 half and 2 470 356 on the Hazard3 one**, no overrun, no SIE
+  error, no endpoint error - **410.5 and 411.7 KB/s round trip**.
+  Throughput: **675 KB/s device to host on the Cortex-M33 half and
+  673 KB/s on the Hazard3 one** (2.03 and 2.02 MB in three seconds), and
+  **906 and 905 KB/s host to device** (1.81 MB in two seconds) with no
+  overrun. The other Raspberry Pi controller with the same class
+  measured 559 KB/s out and 907 KB/s in: **the double-buffered bulk OUT
+  is the same, and the single-buffered IN is some twenty per cent
+  faster here.**
+- **THE CLASS REQUESTS ARRIVE THROUGH THE CONTROL DATA STAGE.** A host
+  opening the port at 19200 7E2 with DTR and RTS up is read back as
+  **19200/7/2/2 dtr=1 rts=1**, the coding-change and line-state counters
+  each advancing by one.
+- **THE KERNEL CONSOLE RUNS ON THE CHIP'S OWN CONNECTOR, on both
+  architectures**, and the serial string names the half: a host that has
+  seen both images tells them apart by the device's name alone. Its own
+  USB report on a live port reads state 3, an address the host assigned,
+  2 bus resets, 16 setups, 3 stalls, the isolation lifted and the last
+  start of frame a few thousand 48 MHz cycles old.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -266,55 +358,24 @@ Driver gaps, each with its reason:
   counted and `remote_wakeup()` exists, but the current a suspended
   device draws, and the sleep site that would let the chip sleep with
   the controller armed, belong to the power chapter.
-Implemented but not bench-verified, each with the letter of
-`test_rp2350_usb` that will measure it:
+Implemented but not bench-verified, each with what would measure it:
 
-- The controller coming up: clk_usb counted at 48 MHz off the USB PLL,
-  clk_sys counted above E12's margin, VBUS forced and seen, the pull-up
-  down until the stack raises it, MAIN_CTRL.PHY_ISO lifted by `init()`,
-  USB_MUXING reading exactly TO_PHY plus SOFTCON with USBPHY_AS_GPIO
-  clear, and SIE_CTRL with the host's pull-downs dropped (letter a).
-- A real host enumerating the device: the bus reset, the descriptors,
-  the address, the configuration reached inside a second and a half, the
-  four buffers the CDC port claims, the start-of-frame counter advancing
-  a frame a millisecond, and no SIE error (letter a).
-- The two free-running 48 MHz timestamps and `since_sof` under a
-  millisecond's worth of cycles on a live bus, SM_STATE inside its three
-  fields, the per-endpoint error counters clear after a clean
-  enumeration and clear again after the write-to-clear pair,
-  LINESTATE_TUNING standing at 0x0f8, the device state-machine watchdog
-  taking its 18-bit limit and reading it back (with a longer limit
-  refused), and an idle endpoint's abort completing and LIFTING - which
-  is the RP2040's erratum E2 fixed (letter b).
-- **Whether the device state-machine watchdog's counter is held reset
-  while the machine is idle.** The register description says only that
-  the counter is reset on every state transition, which leaves open
-  whether a quiet bus makes it fire. Letter b arms it WITHOUT the forced
-  reset - so that a spurious fire cannot disturb the bus the suite is
-  talking over - and prints whether it fired at the widest limit and at
-  a millisecond's worth of cycles; those two numbers are the answer, and
-  no verdict assumes one.
-- A reconnect through the pull-up: dropped for half a second, raised,
-  the host's bus reset counted and the device enumerated afresh
-  (letter c).
-- A reconnect through the PHY's isolation, which is this chip's own way
-  and the shape a power-down leaves behind: PHY_ISO set for half a
-  second, then the whole bring-up again (letter d).
-- The port as a byte transport against a Linux host: the echo byte-exact
-  over ten seconds, the line coding and DTR arriving through the control
-  data stage, and the throughput both ways - the RP2040's numbers with
-  the same class over a double-buffered bulk OUT are the thing to
-  compare against (letters y, w and v, host-assisted and outside the
-  all-key).
-- The kernel console over the chip's own connector, on both
-  architectures, with the serial string naming the half that is running.
-- `take_errors` reporting a real error: a cable pulled mid-packet, which
-  12.7.3.5 says raises them. No letter provokes it.
-- `ep0_stop_on_short_packet`, `take_short_packet`, `stall_nak_status` /
-  `ep0_report` and `remote_wakeup`: written, and no letter drives them -
-  the stack's control machine ends its own data stage and reads the
+- **`take_errors` reporting a real error**: a cable pulled mid-packet,
+  which 12.7.3.5 says raises them. Every letter above leaves the SIE
+  error word at zero, which is the right answer on a clean bus and no
+  proof that the wrong one would be reported. It wants a hand on the
+  cable.
+- **`ep0_stop_on_short_packet`, `take_short_packet`, `stall_nak_status` /
+  `ep0_report` and `remote_wakeup`**: written, and no letter drives them
+  - the stack's control machine ends its own data stage and reads the
   length rather than the flag, nothing here wants an interrupt per NAK,
-  and a remote wakeup needs a host that has armed it.
-- Two ports in one device (a second `UsbCdcAcm` on interfaces 2 and 3):
-  the descriptors glue and the controller has buffers to spare, and
+  and a remote wakeup needs a host that has armed it, which this one
+  does not.
+- **Two ports in one device** (a second `UsbCdcAcm` on interfaces 2 and
+  3): the descriptors glue and the controller has buffers to spare, and
   nothing has asked for it.
+- **The suspend and resume counters against a host that really
+  suspends.** They advance here - the console's own report shows one
+  suspend on a live port - but nothing arms an autosuspend on purpose or
+  measures what the device draws in it; that pair belongs to the power
+  chapter.

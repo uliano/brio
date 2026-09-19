@@ -103,6 +103,14 @@ inline constexpr uint32_t otp_ecc_bytes = 8192;
 /// 13.3: the OTP may not be accessed with clk_ref above this.
 inline constexpr uint32_t otp_clk_ref_max_hz = 25'000'000;
 
+/// The hardware access keys of 13.5.2: six of them, at the indices a
+/// page's lock config names. `otp_access_key_mask` selects their bits in
+/// the KEY_VALID register - index 0 (no key) and index 7 (which never
+/// matches) are left out, and bit 0 of that register is measured to
+/// stand on a part with no key programmed at all.
+inline constexpr uint8_t otp_access_key_count = 6;
+inline constexpr uint8_t otp_access_key_mask = 0x7Eu;
+
 /// The four read windows. The bases the device header names are the two
 /// unguarded ones; 13.1 says bit 15 of the address selects guarded, so
 /// the other two are derived rather than spelled.
@@ -628,8 +636,18 @@ struct Otp {
     /// positions, which is why both are offered.
     static uint32_t critical() { return regs().CRITICAL; }
 
-    /// KEY_VALID: which of the eight hardware access keys were enrolled
-    /// at boot. A one means the key exists and is therefore unreadable.
+    /// KEY_VALID: which hardware access keys were enrolled at boot, one
+    /// bit per key INDEX as 13.5.2 numbers them. A one means the key
+    /// exists and its rows are therefore unreadable.
+    ///
+    /// Bit 0 is not one of them. 13.5.2 gives a page's lock config a read
+    /// key index and a write key index of 1..7, "or 0 if there is no
+    /// key", and index 7 is guaranteed never to match - so six keys can
+    /// be enrolled and index 0 is the null one. The register's reset
+    /// value is 0, but MEASURED on a part with every KEYn_VALID row
+    /// unprogrammed it reads 1: bit 0 stands for the null key, which is
+    /// always satisfied. `otp_access_key_mask` is what a program that
+    /// wants "is any real key registered" asks with.
     static uint8_t key_valid() { return static_cast<uint8_t>(regs().KEY_VALID & 0xFFu); }
 
     /// DEBUGEN and DEBUGEN_LOCK: which debug features have been re-enabled

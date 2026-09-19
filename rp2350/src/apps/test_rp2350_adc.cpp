@@ -670,21 +670,70 @@ void th_leakage() {
     (void)adc_up();
     using Pad = In2::pin;                     // input 2's pad, free like the rest
     constexpr uint8_t pin = Pad::number;
+    // A plain digital pad of the same bank, free and floating, to set the
+    // converter's pads against: the erratum names pads 0 through 47, and
+    // the two kinds have to be asked separately.
+    using Digital = Pin<22>;
+    // RP2350-E9 says a Bank 0 pad configured as an input, with its
+    // voltage in the undefined logic region, sources some 120 uA and is
+    // held around 2.2 V by it - too strongly for the pad's own pull-down
+    // to bring down. The converter taps the bond pad, so it can put that
+    // claim in MILLIVOLTS where a digital read can only say high or low.
+    //
+    // THE CONTRAST IS THE MEASUREMENT: the same four conditions are set
+    // up on a converter pad and on a plain digital pad of the same bank,
+    // because a converter pad that does not leak and a test that does not
+    // provoke the leak look identical from one pad alone.
+    //
+    // AND THE PAD HAS TO BE PUT IN THAT REGION FIRST. Every pad of this
+    // chip comes out of reset with its own pull-down on and its buffer
+    // off, so a pad that is merely released and then given an input
+    // buffer is AT GROUND when the buffer is enabled: condition one is
+    // not met, the leak never starts, and it drifts up by ordinary
+    // leakage instead. The way in with no wire is the pull-UP: it takes
+    // the pad to the supply, and removing it drops the pad into the
+    // undefined region with the buffer already on.
+    //
+    // First the digital pad, read by its own buffer.
+    (void)Digital::input({.pull = PinPull::none, .input_enable = true});
+    spin_us(5000);
+    const bool dig_from_ground = Digital::read();
+    Digital::pull(PinPull::up);
+    spin_us(5000);
+    Digital::pull(PinPull::none);
+    spin_us(5000);
+    const bool dig_floating = Digital::read();
+    Digital::pull(PinPull::down);
+    spin_us(5000);
+    const bool dig_pulled = Digital::read();
+    (void)Digital::input({.pull = PinPull::down, .input_enable = false});
+    spin_us(5000);
+    const bool dig_workaround = Digital::read_pulsed();
+    (void)Digital::release();
+
+    // Then the converter pad, in volts, through the same door. The
+    // digital read is taken with the converter pointed elsewhere, so
+    // that the converter's own input - a switched sampling capacitor,
+    // and a load - is not part of the pad's state when it is judged.
+    Adc::select(AdcInput::temperature);
+    (void)Pad::input({.pull = PinPull::up, .input_enable = true});
+    spin_us(5000);
+    Pad::pull(PinPull::none);
+    spin_us(5000);
+    const bool adc_pad_high = Pad::read();
     Adc::select(In2{});
-    // The erratum's own four conditions on a pad that nothing drives: the
-    // input buffer enabled, the output buffer disabled (SIO with its
-    // output enable clear), the isolation clear, the pull-down on. The
-    // converter taps the bond pad and not the digital buffer, so it can
-    // read what the leakage does to the pad - which no digital read can
-    // tell from a normal high.
-    (void)Pad::input({.pull = PinPull::down, .input_enable = true});
-    spin_us(2000);
+    spin_us(5000);
+    const Stat floating = sample(16);
+    const uint16_t mv_floating = adc_mv(static_cast<uint16_t>(floating.mean), adc_steps, vref);
+    // The pull-down turned on with the buffer still enabled.
+    Pad::pull(PinPull::down);
+    spin_us(5000);
     const Stat leaking = sample(16);
     const uint16_t mv_leaking = adc_mv(static_cast<uint16_t>(leaking.mean), adc_steps, vref);
-    // 12.4's own instruction for an ADC pad - IE low, OD high - IS the
-    // erratum's workaround.
+    // The buffer cleared - 12.4's own instruction for an ADC pad, IE low,
+    // which is the erratum's workaround by the same store.
     (void)Pad::analog(PinPull::down);
-    spin_us(2000);
+    spin_us(5000);
     const Stat held = sample(16);
     const uint16_t mv_held = adc_mv(static_cast<uint16_t>(held.mean), adc_steps, vref);
     (void)Pad::analog(PinPull::up);
@@ -692,17 +741,39 @@ void th_leakage() {
     const Stat pulled_up = sample(16);
     const uint16_t mv_up = adc_mv(static_cast<uint16_t>(pulled_up.mean), adc_steps, vref);
     (void)Pad::release();
-    print(serial, "  GP", pin, " with its pull-down on: the digital input buffer ENABLED reads ", leaking.mean,
-          " counts = ", mv_leaking, " mV; the buffer DISABLED (an analog claim) reads ", held.mean, " counts = ",
-          mv_held, " mV; pulled up with the buffer disabled ", pulled_up.mean, " counts = ", mv_up, " mV", crlf);
-    bench.verdict("erratum RP2350-E9 seen as a VOLTAGE: with the pad's digital input buffer enabled its pull-down "
-                  "does not hold it, and the leakage parks it well above ground (over 1200 mV; the errata sheet says "
-                  "about 2.2 V at a 3.3 V supply)",
+
+    print(serial, "  the digital pad GP", Digital::number, ", read by its own buffer: the buffer enabled over a pad "
+          "AT GROUND reads ", dig_from_ground ? "HIGH" : "LOW", "; pulled up then released into the undefined "
+          "region ", dig_floating ? "HIGH" : "LOW", "; pull-down added under that ",
+          dig_pulled ? "HIGH" : "LOW", "; buffer off and pulsed for the read ",
+          dig_workaround ? "HIGH" : "LOW", crlf);
+    print(serial, "  the converter pad GP", pin, ", in millivolts, through the same door: released into the "
+          "undefined region ", floating.mean, " counts = ", mv_floating, " mV (its own buffer reads it ",
+          adc_pad_high ? "HIGH" : "LOW", "); pull-down added under that ", leaking.mean, " = ", mv_leaking,
+          " mV; buffer off ", held.mean, " = ", mv_held, " mV; pulled up ", pulled_up.mean, " = ", mv_up,
+          " mV", crlf);
+
+    bench.verdict("ERRATUM RP2350-E9 IS LIVE ON THIS PART: a pad taken to the supply and released with its input "
+                  "buffer enabled STAYS HIGH, and its own pull-down turned on under the leak does NOT bring it "
+                  "down - which is the errata sheet's sentence about the pull being far weaker than the leakage",
+                  dig_floating && dig_pulled);
+    bench.verdict("... AND IT HAS TO BE ENTERED THROUGH THE UNDEFINED REGION: the same pad with its buffer enabled "
+                  "over a pad the reset pull-down is already holding AT GROUND reads LOW and stays there, which is "
+                  "the erratum's own first condition and what makes every pulled-down reading of this suite sound",
+                  !dig_from_ground);
+    bench.verdict("... and the workaround works: with the input buffer off the same pull-down holds the same pad, "
+                  "and a read that pulses the buffer for its own duration sees LOW",
+                  !dig_workaround);
+    bench.verdict("... AND IN MILLIVOLTS, ON A CONVERTER PAD TAKEN IN THE SAME WAY: the leak parks the pad well "
+                  "above ground, near the 2.2 V the errata sheet names as its effective source voltage, where an "
+                  "unleaking pad would be at whatever it drifted to",
+                  mv_floating > 1200u && adc_pad_high);
+    bench.verdict("... and the pad's own pull-down cannot bring THAT down either, with the buffer still enabled",
                   mv_leaking > 1200u);
-    bench.verdict("... and the erratum's workaround is what the ADC chapter asks for anyway: with the input buffer "
-                  "off the same pull-down holds the same pad at ground (under 300 mV)",
+    bench.verdict("... while clearing the input buffer - what 12.4 asks for anyway, and what every other letter of "
+                  "this suite uses - removes the leak and lets the same pull-down hold the same pad at ground",
                   mv_held < 300u);
-    bench.verdict("... while the pull-up reaches the supply either way (over 3000 mV)", mv_up > 3000u);
+    bench.verdict("... and the pull-up reaches the supply either way (over 3000 mV)", mv_up > 3000u);
     Adc::release();
 }
 

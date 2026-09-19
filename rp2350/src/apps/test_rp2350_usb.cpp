@@ -389,23 +389,47 @@ void td_isolation() {
     const uint32_t resets = Device::resets();
     Usb::phy_isolate(true);
     const bool isolated = Usb::phy_isolated();
+    const bool pulled_while_isolated = Usb::pulled_up();
     wait_us(500'000u);
-    print(serial, "  PHY isolated for 500 ms (MAIN_CTRL=", hex(Usb::regs().MAIN_CTRL),
-          "): this is what a power-down of the switched core domain leaves behind", crlf);
+    print(serial, "  PHY isolated for 500 ms (MAIN_CTRL=", hex(Usb::regs().MAIN_CTRL), ", pull-up bit still ",
+          pulled_while_isolated, "): this is what a power-down of the switched core domain leaves behind", crlf);
     // The way back is the whole of init(), which is what the datasheet
     // asks for after a power-down event: the isolation lifted last, once
     // the controller is configured again.
     Device::stop();
     const bool up = Usb::init(clock);
     Device::start();
-    const uint32_t took = wait_configured(2'000'000u);
+    // AND THE HOST IS NOT TOLD. Six seconds, not two, and the answer is
+    // the same: no bus reset arrives. The isolation cuts the PHY from
+    // the switched core domain, it does not take the pull-up off the
+    // wire, so from the host's side nothing happened and there is
+    // nothing to enumerate - while the device's own stack has been
+    // reset to DEFAULT and no longer answers at the address the host is
+    // still using. That silent half-open state is the finding, and the
+    // reason a program coming back from a power-down must force the
+    // reconnect itself.
+    const uint32_t took = wait_configured(6'000'000u);
     print(serial, "  re-init=", up, ", PHY isolated=", Usb::phy_isolated(), ", resets ", resets, " -> ",
           Device::resets(), ", address=", Device::address(), ", configured in ", took, " us, state=",
           state_name(Device::state()), crlf);
     bench.verdict("MAIN_CTRL.PHY_ISO reads back set while it stands, and the bring-up sequence lifts it again",
                   isolated && up && !Usb::phy_isolated());
-    bench.verdict("the host saw the device go and come back: another bus reset, and CONFIGURED again",
-                  Device::resets() > resets && took != 0u && Port::configured());
+    bench.verdict("BUT THE ISOLATION IS INVISIBLE TO THE HOST: no bus reset arrives in six seconds and the device "
+                  "is left in DEFAULT while the host goes on addressing the address it assigned, because isolating "
+                  "the PHY does not take the pull-up off the wire",
+                  Device::resets() == resets && took == 0u && !Port::configured());
+    // The way back, and the only one: the device's own pull-up, down
+    // long enough for the host to run its disconnect debounce.
+    Device::stop();
+    wait_us(500'000u);
+    Device::start();
+    const uint32_t back = wait_configured(4'000'000u);
+    print(serial, "  the device forcing the reconnect afterwards: resets ", resets, " -> ", Device::resets(),
+          ", address=", Device::address(), ", configured in ", back, " us, state=", state_name(Device::state()),
+          crlf);
+    bench.verdict("and the way back is the device's own pull-up, dropped long enough for the host to see it: a bus "
+                  "reset, a new address and CONFIGURED again",
+                  Device::resets() > resets && back != 0u && Port::configured() && Port::out_armed());
     const uint32_t errors = Usb::take_errors();
     const uint32_t again = Usb::take_errors();
     print(serial, "  SIE errors over the isolation round trip: ", hex(errors), ", and on a second read ", hex(again),

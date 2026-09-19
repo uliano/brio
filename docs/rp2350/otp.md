@@ -189,6 +189,59 @@ if (brio::Otp::readable(brio::Otp::page_of(row))) {
 }
 ```
 
+## Bench findings
+
+On an RP2350 in the QFN-80 package, **stepping A2**, clk_sys at 150 MHz,
+on BOTH architectures: `test_rp2350_blocks` reports **71 pass, 0 fail**
+on the Cortex-M33 pair and on the Hazard3 pair, from one source, each on
+three flash-and-run cycles. Every verdict of this chapter reads the same
+on the two halves except ARCHSEL_STATUS, which is the one that must not.
+
+- **ARCHSEL_STATUS IS THE REGISTER THAT ANSWERS DIFFERENTLY, AND THAT IS
+  THE POINT.** It reads **0x0 under an image whose IMAGE_DEF names Arm**
+  (both cores Arm - the reset state, never written) and **0x3 under one
+  that names RISC-V** (both cores switched). No button, no OTP, no
+  external signal: the bootrom switches on the image it finds, and the
+  same source built twice reports its own half from silicon.
+- **AN UNPROGRAMMED OTP CELL READS ZERO**, the opposite of every flash
+  array in this tree: the first user row (0x0c0) reads 0x0 through the
+  ECC window and 0x0 raw. A cell starts at zero and goes to one, once.
+- **THE THREE READ PATHS AGREE OVER ALL OF PAGE 0.** Sixty-four rows read
+  through the hardware's ECC window and through this driver's software
+  decode of the raw window: **zero disagreements, zero rows needing a bit
+  repaired, zero beyond repair**. The guarded window returns the same
+  data as the unguarded one on a row the first two have just agreed about
+  (CHIPID0: ECC 0x24A1, guarded 0x24A1, raw 0x1924A1, raw guarded
+  0x1924A1) - its extra checks are about failure, not about value.
+- **THE IDENTITY ROWS AGREE WITH SYSINFO.** The array's NUM_GPIOS row
+  reads **48** and SYSINFO's package bit says the 80-pin package: the two
+  halves of the same fact, from different blocks. The ROM's
+  `get_sys_info` device id is the same CHIPID rows read the other way
+  round.
+- **THE FACTORY'S CALIBRATION ROWS**, on this part: ROSC_CALIB
+  **11199 kHz**, LPOSC_CALIB **27557 Hz** (a low-power oscillator some
+  sixteen per cent under its nominal 32 kHz, which is why anything timed
+  by it is calibrated and not assumed), INFO_CRC 0x2C377790,
+  FLASH_DEVINFO 0x0 - the last unwritten, so the flash geometry is not
+  declared in OTP on this board and the ROM reports its own 0xC00.
+- **KEY_VALID'S BIT 0 IS NOT AN ENROLLED KEY.** 13.5.2 numbers the access
+  keys 1..6 (index 7 never matches, index 0 means "no key") and the
+  register's reset value is 0x00, but on a part with **every KEY1..KEY6
+  _VALID row unprogrammed** - read back over the debug port to be sure -
+  the register reads **0x1**. Bit 0 is the null key, always satisfied. A
+  program asking "is any real key registered" masks it out, which is what
+  `otp_access_key_mask` is for.
+- **WHAT A FACTORY-FRESH PART LOOKS LIKE**, printed whole by letter h:
+  CRIT0 0x0 and CRIT1 0x0 (neither architecture disabled, no secure boot,
+  no debug disable, no glitch detector), the hardware's own CRITICAL latch
+  0x0 agreeing with them, DEBUGEN 0x0, DEBUGEN_LOCK 0x0, BOOTDIS 0x0,
+  BOOT_FLAGS0 0x0, BOOT_FLAGS1 0x0, USB_BOOT_FLAGS 0x0, the
+  decommissioning flag clear, USR.DCTRL standing and DBG 0xF7. **Of the
+  sixty-four pages exactly one is secure read-only - page 0 - and none is
+  inaccessible**, which is 13.5.5's blank-device expectation exactly: the
+  factory locks the chip information page after writing it and leaves the
+  rest open.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -199,8 +252,9 @@ Driver gaps, each with its reason:
   rather than promised here.
 - **The OTP access keys** (13.5.2): a page that needs a key is opened by
   writing the key into a write-only register, which is a provisioning
-  act. `key_valid()` reports which keys are enrolled, and no board here
-  has one.
+  act. `key_valid()` reports which keys are enrolled, and the part
+  measured has none - so the guarded-read refusal a key would cause has
+  no way to be provoked here either.
 - **The interrupt** (13.3.2's five sources: a Secure read refused, a
   Non-secure read refused, a write refused, the programming bridge's
   completion, and a data-port access made while the bridge owns the
@@ -226,26 +280,19 @@ Driver gaps, each with its reason:
   permissions. Neither is a thing a read-only driver acts on, and the
   bench part is an A2.
 
-Implemented but not bench-verified, each with the letter of
-`test_rp2350_blocks` that will measure it:
+Implemented but not bench-verified, each with what would measure it:
 
-- The identity rows read and cross-checked against SYSINFO: the chip id,
-  and NUM_GPIOS against the package bit (letter a).
-- ARCHSEL_STATUS, whose verdict DIFFERS between the two halves - 0 under
-  an Arm image, 3 under a RISC-V one, because the bootrom switches both
-  cores into the architecture the image named (letter a).
-- This board's whole record printed: the random id, the two calibration
-  rows, INFO_CRC, FLASH_DEVINFO, CRIT0 and CRIT1 decoded bit by bit with
-  the hardware's own CRITICAL latch beside them, the boot flags, the
-  enrolled keys, the debug enables, the decommissioning flag, and the
-  lock state of all sixty-four pages against 13.5.5's blank-device
-  expectation (letter h).
-- The three read paths against each other over page 0: the ECC window
-  against the raw window decoded in software, the guarded window on a row
-  the first two have just agreed about, and the count of rows that needed
-  a bit repaired or were beyond repair (letter j).
-- That an unprogrammed user row reads ZERO - an OTP cell starts at zero
-  and goes to one, the opposite of every flash array in this tree
-  (letter j).
-- `data_window_enabled()`, `rma_flag()` and the interrupt registers: read
-  and printed, never seen in any state but the quiet one.
+- **The ECC decoder's repair and its refusal.** Its agreement with the
+  hardware window is measured over every row of page 0, but that page is
+  clean: **no row needed a bit repaired and none was beyond repair**, so
+  the correcting branch and the `otp_ecc_refused` answer are written and
+  never taken. Only a row with a real bit error would take them, and
+  making one means programming - which this driver does not do. A host
+  test over the decoder with injected errors would close it away from the
+  board.
+- **`rma_flag()` and the interrupt registers in any state but the quiet
+  one.** They are read and printed - the flag clear, the flags idle - and
+  the other states belong to a programming path that does not exist here.
+- **The page-lock refusals.** Every page of this part is readable by
+  Secure code, so `read()`'s lock check has never had to say no. A part
+  with a locked page would measure it.

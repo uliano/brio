@@ -25,10 +25,25 @@ static_assert(Trng::irq == TRNG_IRQ_IRQn);
 static_assert(Trng::entropy_bits == 192);
 static_assert(Trng::min_sample_cycles_no_von_neumann == 17);
 
-// The chapter's own working range (12.12.2) is what the defaults are.
+// THE DEFAULT SAMPLING INTERVAL IS A TIME, NOT A CYCLE COUNT. 12.12.2's
+// "sample count settings of 20-25" is written with no clock rate beside
+// it, and measured on this silicon an interval under about 800 ns stops
+// the block on AUTOCORR_ERR - so the default is `trng_default_sample_ns`
+// at the family's highest clk_sys, which is at or over the floor at
+// every rate below it.
 static_assert(TrngConfig{}.chain <= 1u);
-static_assert(TrngConfig{}.sample_cycles >= 20u && TrngConfig{}.sample_cycles <= 25u);
+static_assert(trng_min_sample_ns == 800u);
+static_assert(trng_default_sample_ns >= 2u * trng_min_sample_ns);
+static_assert(TrngConfig{}.sample_cycles == trng_sample_cycles_for(clk_sys_max_hz));
+static_assert(TrngConfig{}.sample_cycles == 300u);
 static_assert(TrngConfig{}.autocorrelation && TrngConfig{}.crngt && TrngConfig{}.von_neumann);
+
+// The arithmetic rounds UP, because the floor is a minimum, and never
+// answers zero.
+static_assert(trng_sample_cycles_for(150'000'000u, 2'000u) == 300u);
+static_assert(trng_sample_cycles_for(12'000'000u, 2'000u) == 24u);
+static_assert(trng_sample_cycles_for(150'000'000u, trng_min_sample_ns) == 120u);
+static_assert(trng_sample_cycles_for(1u, 1u) == 1u);
 
 // What the settings check admits and what it refuses.
 static_assert(trng_config_legal(TrngConfig{}));

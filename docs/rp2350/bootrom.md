@@ -66,7 +66,11 @@ on this silicon.
 
 **`get_partition_table_info`** (5.4.8.16) reports
 `BOOTROM_ERROR_PRECONDITION_NOT_MET` when no partition table has been
-loaded, which is the ordinary answer on a board whose image carries none.
+loaded - which, measured, is NOT what an image that simply carries no
+table gets: a flash boot leaves the ROM's resident view loaded whether
+there is anything in it or not, so the call is served and answers with a
+table that is not present. The precondition code belongs to the boot
+paths that skip that step, a watchdog boot or a RAM boot.
 
 **The boot locks are off by default** (5.4.4). The ROM checks them only
 when boot lock 7 has been claimed to turn checking on; the SDK claims it,
@@ -140,6 +144,52 @@ if (auto* p = brio::Bootrom::lookup_function(brio::bootrom_code('G', 'B'))) {
 }
 ```
 
+## Bench findings
+
+On an RP2350 in the QFN-80 package, **stepping A2**, clk_sys at 150 MHz,
+on BOTH architectures: `test_rp2350_blocks` reports **71 pass, 0 fail**
+on the Cortex-M33 pair and on the Hazard3 pair, from one source, each on
+three flash-and-run cycles. Two numbers of this chapter differ between
+the halves, and both must.
+
+- **THE TABLE IS AT 0x7CD4 ON BOTH HALVES, AND EVERY ADDRESS IN IT
+  DIFFERS.** The three magic bytes stand at 0x10, the version byte reads
+  **2** (A2 silicon) and the git revision word is present and not blank.
+  The two lookup helpers and the two functions resolve out of the
+  architecture's OWN entry: on the Cortex-M33 half `lookup_val` 0x75,
+  `lookup_entry` 0x35, `get_sys_info` 0x9C1, `get_partition_table_info`
+  0xACD; on the Hazard3 half 0x75FE, 0x75C2, 0x7CE0 and 0x7CFC. Both sets
+  are inside the 32 kB ROM, and no address is shared between them - one
+  table, an entry per architecture, and the driver asks with the flag of
+  the half it is running on.
+- **CPU_INFO READS 0 UNDER AN ARM IMAGE AND 1 UNDER A RISC-V ONE.** It is
+  the ROM's own answer to the question [otp.md](otp.md)'s ARCHSEL_STATUS
+  answers from the other side, and the two agree on every run.
+- **`get_sys_info` SERVES EVERY FLAG THIS DRIVER ASKS FOR**, returning
+  0x5F - the chip info, the critical word, the per-boot random, the boot
+  info, the flash device info. Cross-checked against two other blocks:
+  the device id it reports IS OTP's CHIPID rows (0x9026BDD4 0xF5D324A1),
+  and the critical word IS the OTP block's own CRITICAL register (0x0).
+  `package_sel` reads 0 and `flash_devinfo` 0xC00 - the ROM's own default,
+  OTP's FLASH_DEVINFO row being unwritten on this part.
+- **THE PER-BOOT RANDOM NUMBER IS PRESENT AND CHANGES EVERY BOOT**: four
+  different words on each of the six runs (0xF895BF1B..., 0x6440418E...,
+  0x9D902B09..., 0xF3505A1C..., and so on). It is the TRNG's raw samples
+  through the SHA-256 accelerator, both of which this suite also drives
+  directly - so the cheap seed and the expensive one come from the same
+  silicon.
+- **`get_partition_table_info` IS SERVED, NOT REFUSED, ON AN IMAGE WITH
+  NO PARTITION TABLE.** 5.4.8.16 says a call made before the table has
+  been loaded answers `BOOTROM_ERROR_PRECONDITION_NOT_MET`; asked for
+  PT_INFO after an ordinary flash boot it returns **4** - the count of
+  words it filled - with the words **0x1, 0x0, 0xFFFFE000, 0xFC078000**.
+  Word 0 is the subset of the asked flags the API supports (PT_INFO), and
+  word 1 is zero: no partition table present, no partitions. A flash boot
+  therefore leaves the ROM's resident view loaded even when there is
+  nothing in it, and the precondition code belongs to the boot paths that
+  do not load it - a watchdog or a RAM boot. The boot info words read
+  0xFE00FE and 0x500D.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -162,22 +212,13 @@ Driver gaps, each with its reason:
   `lookup_data()` reaches any of them by code; only the git revision has
   a named verb, because only it is meaningful with no partition table.
 
-Implemented but not bench-verified, each with the letter of
-`test_rp2350_blocks` that will measure it:
+Implemented but not bench-verified, each with what would measure it:
 
-- The magic, the version byte and the git revision word (letter a).
-- The table found from the well-known words, the two lookup helpers, and
-  BOTH functions resolved on the half that is running - which is the
-  whole architecture story, since the addresses come from different fixed
-  words and a different flag on each (letter k).
-- `get_sys_info` decoded and cross-checked against two other sources: the
-  device id against OTP's CHIPID rows, the critical word against the OTP
-  block's own register (letter k).
-- CPU_INFO, whose verdict DIFFERS between the halves - 0 under an Arm
-  image and 1 under a RISC-V one - and is the ROM's own answer to the
-  question ARCHSEL_STATUS answers from the other side (letter k).
-- The per-boot random number being present and not blank (letter k).
-- `get_partition_table_info` answering the precondition code on an image
-  that carries no partition table (letter k).
-- `BootromError::not_found`, this wrapper's own answer when a lookup
-  fails: nothing has yet asked for a code the table does not carry.
+- **`BootromError::not_found`**, this wrapper's own answer when a lookup
+  fails: nothing has yet asked for a code the table does not carry. A
+  letter asking for a made-up two-byte code would close it.
+- **The precondition path of `get_partition_table_info`.** It is reached
+  by a boot that does NOT load the partition table - a watchdog boot or a
+  RAM boot - and every image here is a flash boot, where the call is
+  served. A letter that rebooted through the watchdog and asked again
+  would measure it, and belongs with the reset chapter rather than here.

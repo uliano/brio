@@ -40,14 +40,21 @@
  * and says so when it runs out, and no verb of this file is safe to call
  * from an interrupt handler with a deadline behind it.
  *
- * THE SETTINGS, AND WHY THE DEFAULTS ARE WHAT THEY ARE. 12.12.2: "For
- * acceptable results with an average generation time of about 2
- * milliseconds, use ROSC chain length settings of 0 or 1 and sample
- * count settings of 20-25." Longer sample counts trade time for quality.
- * A LOW sample count is not merely slower to succeed, it is wrong: with
- * the von Neumann decorrelator bypassed the count "must not be less than
- * seventeen" (SAMPLE_CNT1's own description), and `init()` refuses that
- * combination rather than letting it produce plausible rubbish.
+ * THE SETTINGS, AND WHY THE DEFAULTS ARE WHAT THEY ARE. 12.12.2 advises
+ * "ROSC chain length settings of 0 or 1 and sample count settings of
+ * 20-25" - with no clock rate beside it, and SAMPLE_CNT1 counts CLK_SYS
+ * CYCLES. Measured here, a sampling interval under about 800 ns makes
+ * the autocorrelation test fail four times in a row and STOP THE BLOCK,
+ * so the default is stated as a TIME (`trng_default_sample_ns`) and
+ * turned into a count for the family's highest clk_sys, which is safe at
+ * every rate under it. `trng_sample_cycles_for()` is the same arithmetic
+ * for a program that knows its own rate. The full measurement is beside
+ * those constants.
+ *
+ * A LOW sample count is also wrong for a second, independent reason:
+ * with the von Neumann decorrelator bypassed the count "must not be less
+ * than seventeen" (SAMPLE_CNT1's own description), and `init()` refuses
+ * that combination rather than letting it produce plausible rubbish.
  *
  * WHAT THE BOOTROM DOES INSTEAD, and why this driver does not. The ROM
  * streams RAW ROSC samples past every check straight into the SHA-256
@@ -76,6 +83,7 @@
 #include <array>
 #include <optional>
 
+#include "rp2350/clock.hpp"
 #include "rp2350/core.hpp"
 #include "rp2350/device.hpp"
 #include "rp2350/resets.hpp"
@@ -94,14 +102,57 @@ struct TrngFlag {
     static constexpr uint32_t recoverable = crngt_error | von_neumann_error;
 };
 
+/**
+ * THE SAMPLING INTERVAL IS A TIME, AND SAMPLE_CNT1 IS THAT TIME IN
+ * CLK_SYS CYCLES - which is why no constant count is right at two clock
+ * rates. Measured on RP2350 A2 with clk_sys at 150 MHz: at 100 cycles
+ * between samples and below, EVERY collection ends in AUTOCORR_ERR
+ * (four autocorrelation failures in a row, inside a few microseconds,
+ * and the block then stops until it is reset); at 110 cycles seven runs
+ * in ten still do; from 120 cycles up none of ten does, at any of the
+ * four chain lengths. 120 cycles at 150 MHz is 800 ns, and it is the
+ * INTERVAL that is the floor, not the number.
+ *
+ * That reconciles 12.12.2's "sample count settings of 20-25", which is
+ * written with no clock rate beside it but with a time: "about 2
+ * milliseconds" a result. A collection is measured here at some 680
+ * samples, and 680 samples of 25 cycles in 2 ms is a clk_sys near
+ * 8.5 MHz - the order of the ring oscillator this chip boots on, and
+ * 2.9 us a sample. At 150 MHz the same 25 cycles are 167 ns, far under
+ * the floor.
+ */
+inline constexpr uint32_t trng_min_sample_ns = 800;
+
+/// The interval this driver samples at unless a program says otherwise:
+/// 2.5 times the measured floor, and the same 2 us the chapter's own
+/// advice comes to at the rate it was written for. Longer is slower and
+/// never wrong; shorter is where the block stops.
+inline constexpr uint32_t trng_default_sample_ns = 2'000;
+
+/// SAMPLE_CNT1 for an interval of `ns` at `sys_hz`, rounded UP because
+/// the floor is a minimum. A program with a clock of its own asks this;
+/// `TrngConfig`'s default is this at the family's ceiling, so it is safe
+/// at every rate below.
+constexpr uint32_t trng_sample_cycles_for(uint32_t sys_hz,
+                                          uint32_t ns = trng_default_sample_ns) {
+    const uint64_t cycles = (static_cast<uint64_t>(sys_hz) * ns + 999'999'999ULL) / 1'000'000'000ULL;
+    return cycles == 0u ? 1u : static_cast<uint32_t>(cycles);
+}
+
 /// How the entropy source is set up (12.12.2).
 struct TrngConfig {
     /// TRNG_CONFIG.RND_SRC_SEL, 0..3: which of the four inverter-chain
     /// lengths the ring oscillator runs. Higher is longer and slower.
+    /// It is NOT what decides whether the autocorrelation test passes:
+    /// all four fail together under the interval floor above, and all
+    /// four pass together over it.
     uint8_t chain = 1;
-    /// SAMPLE_CNT1: system clock cycles between two samples of the ring
-    /// oscillator. The chapter's own working range is 20..25.
-    uint32_t sample_cycles = 25;
+    /// SAMPLE_CNT1: clk_sys cycles between two samples of the ring
+    /// oscillator. The default is `trng_default_sample_ns` at the
+    /// family's highest clk_sys, so it is at or over the measured floor
+    /// whatever the program's own rate; a program that wants the fastest
+    /// legal setting at ITS rate passes `trng_sample_cycles_for(hz)`.
+    uint32_t sample_cycles = trng_sample_cycles_for(clk_sys_max_hz);
     /// The three checks. All three run at reset, and a program that
     /// turns one off is asking for raw samples on purpose.
     bool autocorrelation = true;

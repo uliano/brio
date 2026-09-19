@@ -48,15 +48,31 @@ Every wait in this driver is therefore bounded and says so when it runs
 out, and no verb of it belongs in an interrupt handler with a deadline
 behind it.
 
-**The settings, and the one combination that is wrong rather than slow**
-(12.12.2). TRNG_CONFIG picks one of four inverter-chain lengths and
-SAMPLE_CNT1 the cycles between samples. The chapter's worked values are
-"ROSC chain length settings of 0 or 1 and sample count settings of 20-25"
-for an average generation time of about 2 ms; larger counts trade time
-for quality. But with the von Neumann decorrelator BYPASSED, SAMPLE_CNT1
-"must not be less than seventeen" - which is a rule and not a preference,
-and this driver refuses that combination at compile time when the
-settings are constant and at run time when they are not.
+**THE SAMPLING INTERVAL IS A TIME, AND THE CHAPTER'S ADVICE IS A CYCLE
+COUNT - which is why a program that takes 12.12.2 literally at 150 MHz
+stops the block.** TRNG_CONFIG picks one of four inverter-chain lengths
+and SAMPLE_CNT1 the clk_sys cycles between two samples. The chapter's
+worked values are "ROSC chain length settings of 0 or 1 and sample count
+settings of 20-25" for an average generation time of about 2 ms, with no
+clock rate stated beside them. Measured here (below), an interval under
+about 800 ns makes the autocorrelation test fail four times in a row
+within microseconds and the block ceases functioning. The chapter's two
+figures together name their own clock: a collection takes some 680
+samples (below), and 680 samples of 25 cycles in 2 ms is a clk_sys near
+8.5 MHz, the order of the ring oscillator this chip boots on. **25 cycles
+is 2.9 us there and 167 ns at 150 MHz**, and only the first of those
+works. So this driver states the
+setting as a TIME - `trng_default_sample_ns`, 2 us - and turns it into a
+count for the family's highest clk_sys, which is at or over the floor at
+every rate below it; `trng_sample_cycles_for(hz)` is the same arithmetic
+for a program that knows its own rate and wants the fastest legal
+setting. Longer is slower and never wrong.
+
+**The one combination that is wrong rather than slow.** With the von
+Neumann decorrelator BYPASSED, SAMPLE_CNT1 "must not be less than
+seventeen" - a rule and not a preference, and independent of the
+interval above. This driver refuses that combination at compile time
+when the settings are constant and at run time when they are not.
 
 **The internal soft reset needs a delay.** 12.12.4.1's listing writes
 TRNG_SW_RESET and then reads the register twice, with the comment that a
@@ -84,10 +100,14 @@ a ONE masks).
 
 ## Types and verbs
 
-- `TrngConfig` - the chain length, the sample count and the three checks,
-  with the chapter's own working values as defaults.
+- `TrngConfig` - the chain length, the sample count and the three checks.
+  The sample count defaults to the measured-safe INTERVAL at the family's
+  highest clk_sys, not to the chapter's cycle count.
   `trng_config_legal(cfg)` is the rule both the compile-time and the
   run-time entry points judge by, written once.
+- `trng_min_sample_ns`, `trng_default_sample_ns` and
+  `trng_sample_cycles_for(sys_hz, ns)` - the floor, the default and the
+  arithmetic between a sampling interval and SAMPLE_CNT1, rounded up.
 - `Trng::init(cfg)` / `Trng::init<cfg>()` - the block cycled through its
   subsystem reset, the IP's soft reset with its delay, the settings, every
   interrupt masked. The source is left STOPPED. The templated form
@@ -134,11 +154,81 @@ if (auto e = brio::Trng::read_blocking()) {
 brio::Trng::stop();                       // it is a waste of power idle
 ```
 
+A program that knows its own clock and wants the shortest legal
+interval asks for it in nanoseconds rather than in cycles:
+
+```cpp
+brio::Trng::init({.sample_cycles = brio::trng_sample_cycles_for(brio::clock_hz(clock))});
+```
+
 With the settings a constant, so a mistake is a compile error:
 
 ```cpp
-brio::Trng::init<brio::TrngConfig{.chain = 0, .sample_cycles = 20}>();
+brio::Trng::init<brio::TrngConfig{.chain = 0,
+                                  .sample_cycles = brio::trng_sample_cycles_for(150'000'000)}>();
 ```
+
+## Bench findings
+
+On an RP2350 in the QFN-80 package, **stepping A2**, clk_sys at 150 MHz,
+on BOTH architectures: `test_rp2350_blocks` reports **71 pass, 0 fail**
+on the Cortex-M33 pair and on the Hazard3 pair, from one source, each on
+three flash-and-run cycles. Every verdict of this chapter reads the same
+on the two halves; where a number differs, both are given.
+
+- **THE SAMPLING INTERVAL, AND WHERE THE DATASHEET'S ADVICE BREAKS.**
+  With clk_sys at 150 MHz, SAMPLE_CNT1 swept from 25 to 65535 at each of
+  the four chain lengths, ten runs a point: at **25, 50 and 100 cycles
+  every run ends in AUTOCORR_ERR** - AUTOCORR_STATISTIC reads four tries
+  and four failures, inside a few microseconds, and the block then hands
+  out nothing until it is reset. At **110 cycles seven runs in ten** do.
+  From **120 cycles up, none of ten** does, at chain 0, 1 and 3 alike.
+  120 cycles at 150 MHz is **800 ns**, and the chain length moves the
+  boundary not at all: it is the INTERVAL that matters. 12.12.2's "sample
+  count settings of 20-25" is therefore right only at the clock its own
+  "about 2 milliseconds" implies - near 8.5 MHz, 2.9 us a sample - and
+  wrong by an order of magnitude at this one. The default here is 2 us
+  (300 cycles at 150 MHz), two and a half times the floor.
+- **WHAT 192 BITS COST at that default.** A collection takes **1360 to
+  1427 us on the Cortex-M33 half and 1351 to 1379 us on the Hazard3
+  one** - some 680 samples of 300 cycles each, three and a half for every
+  bit the decorrelator keeps -, sixteen of them in 21.6 to 22.8 ms -
+  **133 to 140 kbit/s**,
+  which is some eighteen times the 7.5 kb/s 12.12.1 states and slightly
+  under 12.12.2's "about 2 milliseconds". Not one run in the six
+  three-cycle passes was discarded on a CRNGT or von Neumann check
+  (`recoverable_failures()` is 0 every time), and the autocorrelation
+  counters read **16 tries 0 failures** in five of the six passes and
+  17/1 in one: the test does still fire occasionally at 2 us, four in a
+  row is what would be fatal, and nothing came near it.
+- **A CRUDE QUALITY MEASUREMENT on 3072 bits** - a stuck-source check and
+  not a certification. The monobit fraction lands between **48.9 and 51.1
+  per cent** across the six passes, the sixteen nibble values all occur
+  (counts 31..64 against an even 48), no word is zero and no word repeats
+  the one before it.
+- **THE FATAL CHECK, RAISED ON PURPOSE AND CURED.** The suite sets
+  SAMPLE_CNT1 to 25 for one collection: AUTOCORR_STATISTIC reads **four
+  tries and four failures**, `read_blocking()` answers
+  `TrngError::autocorrelation` rather than running out its budget, and a
+  write of every bit to RNG_ICR **leaves the flag standing** - which is
+  the register description's own sentence, measured. `recover()` is the
+  way back: entropy again, the flag gone.
+- **THE SOFT RESET AND THE WAY BACK.** TRNG_SW_RESET returns SAMPLE_CNT1
+  to 0xffff and TRNG_CONFIG to 0, as the register descriptions say;
+  `recover()` puts both back, and the first collection after it arrives
+  in **1473 to 1860 us** - the ordinary time, so nothing of the source is
+  left disturbed. RST_BITS_COUNTER refuses while the source is enabled
+  and takes the write when it is stopped, which is 12.12.5's own
+  condition.
+- **RNG_VERSION reads 0xF**: the 192-bit entropy holding register, the
+  autocorrelation unit and the CRNGT both present. TRNG_DEBUG_CONTROL and
+  RNG_DEBUG_EN_INPUT read zero after `init()`, so no check is bypassed
+  and the IP's debug mode is off. The three BIST counters read **0x2, 0x0
+  and 0x0** and do not move.
+- **TRNG_BUSY IS TWO BITS WIDE HERE**, where 12.12.5 declares 31:1
+  reserved: with a collection under way at SAMPLE_CNT1 = 65535 the
+  register reads **0x3**, not 0x1. The driver masks the documented bit,
+  so nothing depends on the other one.
 
 ## Not covered yet
 
@@ -164,28 +254,10 @@ Driver gaps, each with its reason:
   questions (one word against 192 bits, a continuous test against three
   checks). It would be born at a third.
 
-Implemented but not bench-verified, each with the letter of
-`test_rp2350_blocks` that will measure it:
+Implemented but not bench-verified, each with what would measure it:
 
-- What the block says about itself (RNG_VERSION's width and check bits,
-  the settings read back, the debug controls clear), the time a 192-bit
-  collection takes, the rate in bits per second, how many runs the
-  silicon discards on its own checks, and the autocorrelation statistics
-  (letter e).
-- A crude quality measurement on 3072 bits - the monobit fraction, the
-  spread over the sixteen nibble values, no zero word, no word repeating
-  the one before it. A MEASUREMENT AND NOT A CERTIFICATION: it would pass
-  for a counter, and it is there to catch a source that is not running
-  (letter f).
-- The soft reset returning SAMPLE_CNT1 to 0xffff, `recover()` putting the
-  settings back, entropy again afterwards, and RST_BITS_COUNTER refusing
-  while the source is enabled (letter g).
-- The compile-time and run-time refusals of an illegal setting: the
-  family check refuses them, no board has answered `false` from
-  `init(cfg)`.
-- `AUTOCORR_ERR` itself. Nothing here can provoke the fatal check - it
-  wants four consecutive autocorrelation failures from a physical source
-  - so the branch that reports it and the recovery it demands are written
-  and untested against the real flag. The autocorrelation statistics
-  letter e prints are the nearest thing: a board that fails the test
-  often would show it there first.
+- **The run-time refusal of an illegal setting.** The family check
+  refuses every one of them at compile time; `init(cfg)` returning
+  `false` with `TrngError::misconfigured` has no letter, because the only
+  way to reach it is a setting a suite would have to build on purpose out
+  of a run-time value. A letter that fed it one would close this.

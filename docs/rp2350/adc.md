@@ -98,7 +98,18 @@ chapter's instruction and the erratum's workaround are the same write.
 The converse is worth stating too: this converter is the only
 instrument on the chip that can see the leakage as a VOLTAGE rather than
 as a logic level, because the analogue mux taps the bond pad while the
-digital buffer is what leaks.
+digital buffer is what leaks - and it does, measured, at the millivolt
+the errata sheet names (below).
+
+**AND THE ERRATUM HAS TO BE ENTERED, WHICH IS WHY EVERY PULLED-DOWN
+READING OF THIS CHAPTER IS SOUND.** Its first condition is that the pad
+voltage ALREADY be in the undefined logic region when the input buffer is
+enabled. Every pad of this chip comes out of reset with its own pull-down
+on and its buffer off, so a pad that is merely released and then given an
+input buffer is at ground when the buffer is enabled: the leak never
+starts, and the pull-down goes on holding it even with the buffer on.
+Measured both ways, and it is the difference between a test that provokes
+the erratum and one that only thinks it has.
 
 ONE SENTENCE OF THE CHAPTER IS STALE. 12.4.3.3 says each RROBIN bit
 "corresponds to one of the five possible values of CS.AINSEL", which is
@@ -206,6 +217,89 @@ with the FIFO at threshold 1 and its interrupt posting
 `Sampled{Adc::entry_value(Adc::pop()), Adc::selected_input()}`. The
 handler's name is `isr_adc_fifo` on both architectures.
 
+## Bench findings
+
+On an RP2350 in the QFN-80 package, **stepping A2**, clk_sys at 150 MHz
+and clk_adc at 48 MHz off the USB PLL unless another rate is named, on
+BOTH architectures: `test_rp2350_adc` reports **32 pass, 0 fail** on the
+Cortex-M33 pair and on the Hazard3 pair, from one source, each on three
+flash-and-run cycles. Every verdict reads the same on the two halves.
+
+- **THE BLOCK'S RESET DOES NOT COMPLETE WITH clk_adc STOPPED**, which is
+  why `init()` takes the clock first: asked to cycle the block with no
+  clock on it, RESET_DONE never comes up; with the crystal routed to
+  clk_adc the same cycle completes. The reset state it lands in is
+  CS 0x0, FCS 0x100, DIV 0x0 - disabled, not ready, the FIFO off.
+- **clk_adc COUNTED, not assumed.** The frequency counter reads
+  **48 000 000 Hz** with the USB PLL locked and **12 000 000 Hz** on the
+  crystal, each within a tenth of a per cent of what `init()` states, and
+  CS.READY comes up on both.
+- **NINE CHANNELS, AND THE NINTH IS THE SENSOR.** All nine select and
+  read back in AINSEL; a select of 9 is refused with AINSEL left at 8;
+  `AdcInput::temperature` names 8. The round-robin mask is nine bits wide
+  where the RP2040's was five, and 12.4.3.3's sentence about "five
+  possible values of CS.AINSEL" is stale on this chip: the mask 0x1FF
+  walks every channel, 72 entries of 72 landing where their input's level
+  says they should, and a mask naming a tenth channel is refused.
+- **THE DIVIDER BOUNDARY THE CHAPTER DOES NOT STATE, SETTLED.** A start
+  that arrives while the converter is busy is ignored, so a divider
+  period at or below the conversion's own 96 clk_adc cycles stretches to
+  a multiple of itself. Measured over a fixed window: **DIV 0 gives 508
+  to 512 ksps** (the free run), **DIV 95 - a period of exactly 96 cycles
+  - gives 255 ksps, HALF**, and **DIV 96 - 97 cycles - gives 495 to 500
+  ksps**. So the period must be strictly GREATER than the conversion, the
+  driver's `adc_rate_hz` predicting 250 000 and 494 845 for those two, and
+  its `<=` stands as written. DIV 99 gives 480 to 485 against 480 000
+  predicted and DIV 119 gives 400 000 exactly.
+- **THE RATES INTO A DMA BLOCK.** 256 conversions free-running: **513 to
+  514 us at DIV 0** (512 expected), **2556 to 2559 us at 100 ksps**
+  (2560), **25 594 to 25 600 us at 10 ksps** (25 600) and **5802 to
+  5804 us at a fractional 44.1 ksps**, DIV 1087 + 111/256 (5804) - every
+  one inside four per cent of the system timer, none with an overflow.
+  On the crystal at DIV 0 a conversion is 96 of its 12 MHz cycles:
+  **2050 to 2055 us for 256**, 125 ksps.
+- **THE TEMPERATURE SENSOR, ON BOTH CLOCKS.** 64 reads give a mean of
+  **866 to 869 counts** - 30.4 to 31.8 C at a stated 3.3 V by 12.4.6's
+  line - with a spread of **under eight counts**, and the crystal's
+  12 MHz gives the same mean within one count: the clock is the
+  conversion's pace and not its result. With the bias off the same input
+  reads **705 to 708**, some 160 counts away, so the diode is what the
+  bias connects.
+- **EVERY PAD THE PACKAGE GIVES THE CONVERTER**, GP40..GP47, read through
+  its own pulls with the digital input buffer off: **3894 to 3899 counts
+  (3137 to 3141 mV) pulled up, 58 to 60 counts (47 to 48 mV) pulled
+  down**, and **397 to 434 counts (320 to 350 mV) floating** - the last
+  a number and not a level, and well clear of both pulls.
+- **ERRATUM RP2350-E9 IN MILLIVOLTS, WHICH IS WHAT THIS CONVERTER IS FOR.**
+  A pad taken to the supply by its own pull-up and then released with its
+  input buffer still enabled falls into the undefined region and is held
+  there: the converter reads **2348 to 2361 mV**, against the errata
+  sheet's "around 2.2 V", and the pad's own digital buffer reads it HIGH.
+  Turning the pad's PULL-DOWN on under that leak moves it to **2142 to
+  2144 mV** and no further - the internal pull is far weaker than the
+  ~120 uA the leak sources, exactly as the sheet says, and 8.2 kOhm is
+  the impedance that would win. Clearing the input buffer removes the
+  leak and the same pull-down then holds the same pad at **48 mV**. The
+  same walk on a plain digital pad of the same bank reads HIGH, HIGH,
+  then LOW through a buffer pulsed for the read alone. **And the door
+  matters**: the buffer enabled over a pad the reset pull-down is already
+  holding at ground reads LOW and stays there, on both kinds of pad.
+- **THE FIFO.** A threshold of four drains **200 entries in 50 interrupts
+  over 20 ms at 10 ksps**, the level never past four; a threshold past the
+  depth of eight is refused instead of written. Fifty conversions into an
+  undrained FIFO leave **level 8, FULL set and the sticky overflow set**.
+  **THE ATOMIC SET ALIAS DOES NOT CLEAR A WRITE-ONE-TO-CLEAR FLAG HERE**,
+  as on the RP2040: after the drain, a set-alias write leaves the overflow
+  standing and the driver's plain write-back clears it. FCS.SHIFT into a
+  byte block through an eight-bit DMA engine gives a byte mean of **54**
+  against a word mean of 866 to 869 - the word over sixteen, within one.
+  Of 256 entries at 500 ksps **none** is flagged as a failed conversion
+  and CS.ERR_STICKY stays clear.
+- **THE SAMPLER.** `AnalogSampler` over the sensor and two pads on a 5 ms
+  software pace gives **39 to 40 samples in 200 ms, 13 or 14 of each
+  input**, the sensor's near its own count, the pulled-up pad's at 3895
+  and the pulled-down one's at 58 to 59, and **none mislabelled**.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -226,57 +320,20 @@ Driver gaps, each with its reason:
   directly; the task that owns a block belongs to a program that
   streams.
 
-Implemented but not bench-verified, each with the letter of
-`test_rp2350_adc` that will measure it:
+Implemented but not bench-verified, each with what would measure it:
 
-- The rate arithmetic and the temperature line at the chapter's own
-  examples, the package the silicon reports against the one the image
-  was built for, the reset state after a cycle, every channel selected
-  and read back in AINSEL with the one past the last refused, and
-  clk_adc COUNTED by the frequency counter at 48 MHz on the USB PLL and
-  at 12 MHz on the crystal (letter a).
-- That the block's reset does not complete with clk_adc stopped, which
-  is why this driver takes the clock first: measured on the other chip,
-  carried here as a prediction and printed either way (letter a).
-- The temperature sensor: a room temperature with a narrow spread, the
-  SAME reading on both clocks - the clock's rate being the conversion's
-  pace and not its result - and a different one with the bias off
-  (letter b).
-- EVERY PAD THE PACKAGE GIVES THE CONVERTER read through its pull-up
-  and its pull-down with the digital input buffer off, which is the
-  configuration 12.4 asks for and the one erratum RP2350-E9 does not
-  bite; the floating reading printed beside them (letter c).
-- The free run into a DMA block at 500, 100 and 10 ksps and at a
-  fractional divider, timed against the system timer; and THE DIVIDERS
-  AROUND THE CONVERSION'S OWN 96 CYCLES - a period at or below it
-  stretches to a multiple of itself, and whether the trigger at the
-  conversion's LAST cycle counts is the boundary the chapter does not
-  state and the one the driver's `adc_rate_hz` predicts (letter d).
-- A conversion of 96 crystal cycles when clk_adc is the crystal: 125
-  ksps (letter d).
-- THE ROUND-ROBIN OVER ALL NINE CHANNELS of the larger package, the
-  eight pads carrying alternating pulls and the sensor ninth, every
-  entry of the block where its input's level says it should be; and a
-  mask naming a channel the package has not got refused (letter e).
-- The FIFO: the threshold interrupt draining at four, an undrained FIFO
-  filling at eight with its sticky overflow, a threshold past the depth
-  refused, FCS.SHIFT into a byte block through an eight-bit DMA engine,
-  and no entry of 256 flagged as failed on a steady input (letter f).
-- WHAT THE ATOMIC SET ALIAS DOES to a write-one-to-clear flag of this
-  block - on the other chip it did not clear one - printed beside the
-  plain write-back the driver uses (letter f).
-- `AnalogSampler` over three inputs on a software pace, the samples
-  counted per input and none of them mislabelled (letter g).
-- ERRATUM RP2350-E9 AS A VOLTAGE: the same pulled-down pad read by the
-  converter with its digital input buffer enabled and then disabled -
-  the errata sheet says the leakage parks a floating pad at about 2.2 V
-  at a 3.3 V supply, and nothing on this bench has yet measured that
-  number rather than a logic level (letter h).
-- `Adc::force` (the interrupt raised by software), the FIFO underflow
-  flag (a pop of an empty FIFO staged on purpose) and a failed
-  conversion's own flag (CS.ERR needs an input held at a code's
-  threshold): the verbs are there and no letter stages them.
-- EVERYTHING ABOUT THE QFN-60: four inputs on GPIO 26..29 with the
+- **`Adc::force`** (the interrupt raised by software), **the FIFO
+  underflow flag** (a pop of an empty FIFO staged on purpose) and **a
+  failed conversion's own flag** (CS.ERR wants an input held right at a
+  code's threshold, which needs a source this bench has not got). The
+  verbs are there and no letter stages them; the first two are a letter's
+  worth of work and the third wants a precision source.
+- **The converter read against a KNOWN voltage.** Everything above is
+  read against the pad's own pulls, the supply and the sensor's line; no
+  reference on this bench says what a code is worth, so the millivolt
+  figures carry the ADC's own linearity and the supply's own accuracy. A
+  calibrator on an input would close it.
+- **EVERYTHING ABOUT THE QFN-60**: four inputs on GPIO 26..29 with the
   sensor on AINSEL 4 and a five-bit round-robin. The stratum compiles
   for that package, refuses the other one's pads and would refuse the
   other one's mask, and the suite's letters are written to walk
