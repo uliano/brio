@@ -39,16 +39,18 @@
  * convention and of the SDK's own irq_set_priority(). That is exactly
  * why `Irq` carries no priority verb.
  *
- * MSLEEP IS NEVER WRITTEN. Hazard3's Xh3power extension can make a WFI
- * gate the core's clock (MSLEEP.DEEPSLEEP) or drop its power
- * (POWERDOWN); erratum RP2350-E4 makes the first of those a trap on core
- * 1 - with DEEPSLEEP set, a debugger's system-bus reads stall until that
- * core wakes - and the datasheet's own note is that the saving over a
- * plain WFI is minimal. So `wait_for_interrupt()` is a bare wfi, and the
- * power chapter is where anything deeper gets argued.
+ * MSLEEP.DEEPSLEEP IS NEVER WRITTEN. Hazard3's Xh3power extension can
+ * make a WFI gate the core's clock (MSLEEP.DEEPSLEEP) or release its
+ * power request (MSLEEP.POWERDOWN); erratum RP2350-E4 makes the first of
+ * those a trap on core 1 - with DEEPSLEEP set, a debugger's system-bus
+ * reads stall until that core wakes - and the datasheet's own note is
+ * that the saving over a plain WFI is minimal. So `wait_for_interrupt()`
+ * is a bare wfi. The SECOND bit is the sleep chapter's and has a verb of
+ * its own below: without it this half never reaches the chip's SLEEP
+ * state at all, where a Cortex-M33 reaches it on any WFI.
  *
  * WFI HERE IS NOT THE QingKe's WFI (the trap the ch32v00x stratum
- * carries): 3.8.5 states that wfi IGNORES mstatus.MIE and respects every
+ * carries): 3.8.1.23 states that wfi IGNORES mstatus.MIE and respects every
  * other interrupt control, so a wfi executed with interrupts masked and
  * a pending enabled line falls through immediately. That is what makes
  * the kernel's idle path - mask, look at the queues, sleep, unmask -
@@ -252,11 +254,42 @@ private:
 };
 
 /// Sleep until an interrupt is pending. mstatus.MIE is ignored by this
-/// instruction and every other interrupt control is respected (3.8.5),
+/// instruction and every other interrupt control is respected (3.8.1.23),
 /// so a wake that is already pending does not sleep at all - the
 /// lost-wakeup window the kernel's idle path would otherwise have.
 [[gnu::always_inline]] inline void wait_for_interrupt() {
     __asm__ volatile("wfi" ::: "memory");
+}
+
+/**
+ * WHETHER A SLEEPING CORE RELEASES ITS POWER REQUEST, which is half of
+ * datasheet 6.5.2's condition for the chip's SLEEP state.
+ *
+ * MSLEEP.POWERDOWN, and this half of the chip HAS TO BE ASKED. 3.8.9's
+ * description of the bit is "release the external power request when
+ * going to sleep - the function of this is platform-defined"; on this
+ * platform it is what tells the clock controller a processor is asleep,
+ * and MEASURED (docs/rp2350/sleep.md) a wfi WITHOUT it leaves the chip
+ * out of the SLEEP state altogether, the SLEEP_ENx masks never applied.
+ * A Cortex-M33 asserts the same signal by itself, which is why its half
+ * of this pair is empty.
+ *
+ * It is NOT MSLEEP.DEEPSLEEP, the bit erratum RP2350-E4 makes a trap on
+ * core 1 and which this stratum never sets: that one gates the core's
+ * own clock and saves little over a plain wfi. The price of POWERDOWN is
+ * in the same entry of 3.8.9 - the core reasserts its power-up
+ * request on the way out and fetches nothing until it is acknowledged,
+ * which is latency and not a hazard.
+ */
+[[gnu::always_inline]] inline void sleep_releases_power_request(bool on) {
+    if (on) {
+        csr_set<RVCSR_MSLEEP_OFFSET>(RVCSR_MSLEEP_POWERDOWN_BITS);
+    } else {
+        csr_clear<RVCSR_MSLEEP_OFFSET>(RVCSR_MSLEEP_POWERDOWN_BITS);
+    }
+}
+[[gnu::always_inline]] inline bool sleep_releases_power_request() {
+    return (csr_read<RVCSR_MSLEEP_OFFSET>() & RVCSR_MSLEEP_POWERDOWN_BITS) != 0u;
 }
 
 /// Halt in the debugger. With no debugger attached this raises a

@@ -26,11 +26,11 @@
  *
  * and is bound whichever processor the image was built for.
  *
- * THE ONLY PREPROCESSOR QUESTION ABOVE core.hpp IS ASKED IN THIS FILE,
- * twice, and both times about BRIO_RP2350_CORE_M33 - a macro this
- * stratum defines in core.hpp, never about the compiler's `__riscv`. It
- * is asked at all because an #include cannot be selected by a constant:
- * the two timebases live in different files, one of which is ARM's.
+ * A PREPROCESSOR QUESTION ABOVE core.hpp IS ALWAYS ABOUT
+ * BRIO_RP2350_CORE_M33 - a macro this stratum defines in core.hpp -
+ * and never about the compiler's `__riscv`. This file asks it because
+ * an #include cannot be selected by a constant: the two timebases live
+ * in different files, one of which is ARM's.
  *
  * TWO CORES, TWO TICKERS. The counters are statics keyed by the template
  * arguments, so `CoreTicker<0>` and `CoreTicker<1>` are two timebases

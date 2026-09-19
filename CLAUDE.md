@@ -446,16 +446,20 @@ gets its home in `docs/design/` when taken.
   on both halves. `core.hpp` is the one file that asks `__riscv`;
   `core_m33.hpp` is the device header plus `cortexm/nvic.hpp` as the
   other ARM families' are, `core_hazard3.hpp` is this stratum's own.
-  Which chapters have their document and their suite is
-  docs/rp2350/README.md's document map, and what each still owes is
-  its own gap list. What remains as whole chapters: THE POWER CHAPTER
-  (POWMAN with its always-on timer and the sleep states) is not
-  written, and the HSTX and the M33's coprocessors - the other two
-  blocks the RP2040 never had - are declared gaps. The bench verb here
-  is STATE-INDEPENDENT by construction (a rescue through the RP-AP over
-  the debug port alone, then programming as core 0 of the Arm pair,
-  then a reset), which is what will make the sleep chapters safe to
-  write; Raspberry Pi's OpenOCD fork is the only build that reaches
+  Every chapter of the datasheet's plan has its document and its suite
+  green on both halves (docs/rp2350/README.md's document map), the
+  power chapter included: POWMAN with its always-on timer, the sleep
+  sites over the SLEEP state and DORMANT, and the P1 power-down states
+  kept OFF the ladder because leaving one is a boot. What remains is in
+  the documents' gap lists, and two declared gaps stand above them: the
+  HSTX, born with its first user, and the M33's coprocessors, declined
+  because only one of the two architectures has them. The bench verb
+  here is STATE-INDEPENDENT by construction (a rescue through the RP-AP
+  over the debug port alone, then programming as core 0 of the Arm
+  pair, then a reset), which reaches a dormant chip - and, measured,
+  does NOT reach one whose switched core is powered down, so a
+  power-down is refused without an armed wake
+  (docs/rp2350/powman.md); Raspberry Pi's OpenOCD fork is the only build that reaches
   this chip, upstream's RISC-V target driver taking no DAP. The three
   IP strata were born with this family, at the second chip that carries
   each block.
@@ -2528,7 +2532,7 @@ brio/                    the framework, one directory per stratum:
                            reset because no interrupt nests, MSLEEP never
                            written (erratum RP2350-E4), and the fact the
                            idle path rests on - wfi IGNORES mstatus.MIE
-                           (3.8.5), which is NOT the QingKe cores' wfi
+                           (3.8.1.23), which is NOT the QingKe cores' wfi
     mtime.hpp              Mtime: the RISC-V platform timer (3.1.8), a 64-bit
                            counter in the SIO with a comparator per core that
                            the datasheet calls usable equally by either
@@ -2813,6 +2817,45 @@ brio/                    the framework, one directory per stratum:
                            UARTCLK, so the divisor comes from Clock::pclk_hz
                            and never from a second statement of the rate -
                            + the PUBLIC NAMES Pl011<n> and Uart<n, pins, ...>
+    powman.hpp             THE ALWAYS-ON BLOCK (ch. 6, 12.10): Powman - five
+                           power domains and the twelve states of table 475 as
+                           a four-bit code, 6.2.3's legality as arithmetic (the
+                           register's three rules, not the prose's four, which
+                           its own table contradicts), the state machine's
+                           flags, the four GPIO power-up slots, the debugger's
+                           standing power-up request and DBG_PWRCFG.IGNORE (the
+                           probe leaves CSYSPWRUPREQ asserted and every
+                           power-down is refused until it is masked), the
+                           sequencer, the eight scratch words that are the only
+                           state a power-down keeps, and the core regulator and
+                           the brown-out detector DECODED AND NEVER WRITTEN -
+                           a wrong VSEL is a voltage on the one core supply and
+                           UNLOCK is a one-way door; THE PASSWORD is one private
+                           verb nothing bypasses, and probe_password() the one
+                           write in the tree that carries none, aimed at
+                           BADPASSWD's own bit so the answer costs nothing
+                           + AonTimer (12.10), 64 bits of MILLISECONDS on the
+                           only counter that runs in every power state: the
+                           three tick sources, the alarm in both its duties -
+                           an interrupt and a POWER-UP REQUEST - and the divisor
+                           that is A NUMBER SOFTWARE WRITES, so init() MEASURES
+                           the low-power oscillator against the crystal and
+                           writes what it found (this die's runs fifteen per
+                           cent slow)
+    sleep.hpp              the gate sets a sleeping program composes, DormantWake
+                           (the IO bank's wake destination, which is pin.hpp's
+                           own four event bits) + Rp2350SleepSite (light = a
+                           sleep instruction, standby = the SLEEP state, which
+                           on this chip IS the pruning set plus the core's own
+                           power-request release - no SLEEPDEEP anywhere - deep
+                           = DORMANT through the platform's hook, refused with
+                           no way back) and Rp2350TimedSleepSite (the always-on
+                           timer as alarm AND witness on every rung). THE
+                           DORMANT'S ALARM NEEDS clk_ref ALIVE, measured, so
+                           go_dormant() moves clk_sys to the oscillator it
+                           stops through that oscillator's own aux mux and
+                           leaves clk_ref on one that keeps running. The P1.m
+                           states are OFF this ladder - leaving one is a boot
   gfx/                   drawing, pure and target-independent
     surface.hpp            Coord/Extent/Rect + clip() (16 bits over the WHOLE
                            domain, because the far edge is never formed) +

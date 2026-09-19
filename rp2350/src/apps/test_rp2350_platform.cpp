@@ -12,7 +12,7 @@
 // text says it - which happens twice here: the timebase (SysTick under
 // the Cortex-M33, the platform timer's comparator under Hazard3) and the
 // rule that keeps the idle path free of a lost wakeup (ARM's, that a
-// pending interrupt wakes WFI through PRIMASK; datasheet 3.8.5's, that
+// pending interrupt wakes WFI through PRIMASK; datasheet 3.8.1.23's, that
 // wfi ignores mstatus.MIE).
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
@@ -486,7 +486,7 @@ void tj_lost_wakeup() {
     print(serial, "  a line pended with interrupts masked, then idle(): back in ", took,
           " us, the handler ran ", spare_served, " time(s) - ",
           core_kind == CoreKind::hazard3
-              ? "datasheet 3.8.5: wfi ignores mstatus.MIE"
+              ? "datasheet 3.8.1.23: wfi ignores mstatus.MIE"
               : "ARM's rule: a pending interrupt wakes WFI through PRIMASK",
           crlf);
     bench.verdict("idle() comes straight back from a wakeup raised INSIDE the mask, in "

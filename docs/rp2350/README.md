@@ -42,6 +42,8 @@ below; the documents of record are in
 | [usb.md](usb.md) | The USB device controller: the RP2040's block with one new duty - the PHY's isolation latch, set at reset and lifted last of all - three reset values moved under it, two pads that are bank 1's and could be GPIO, an erratum that makes the system clock's rate part of the contract, and a shelf of diagnostics that are a report and never a path |
 | [flash.md](flash.md) | The external quad-SPI chip and the two blocks between it and the bus: a memory interface with two windows, a transfer described phase by phase, four translation panes a window and a direct mode that disconnects them all; a cache whose flush is an address and not a register, with one erratum in its clean sweep; and an engine whose way back into execute-in-place is the bootrom's own function out of boot RAM, where its predecessor had a second stage |
 | [multicore.md](multicore.md) | The second core: a kernel of its own on either instruction set - the doorbell registers this chip has and its predecessor had not, which free the mailbox FIFO for the launch alone, one bell line with one number for both cores, the bootrom's six-word protocol and the entry shim that gives core 1 what the ROM does not hand it |
+| [powman.md](powman.md) | The always-on block: five power domains and twelve states of which eight have no processor in them, a password on every register and a read of it that does not return the password, the core regulator and the brown-out detector decoded and never written, the eight scratch words that are the only state a power-down keeps - and the millisecond timer in the same block, whose divisor is a number software writes and which therefore has to be told what the low-power oscillator really runs at |
+| [sleep.md](sleep.md) | The three depths a program can arm: a plain sleep instruction, the SLEEP state that IS the program's pruning set and no processor bit at all, and DORMANT - whose alarm needs the reference clock left running, which is what makes both sites move clk_sys and clk_ref apart before the keyword; the always-on timer as alarm and witness on every rung, and the memory power-down states kept off the ladder because leaving one is a boot |
 
 ## The two architectures, and what decides between them
 
@@ -228,7 +230,7 @@ measured on the bench chip:
 
 And two more the RISC-V half adds:
 
-- **`wfi` ignores mstatus.MIE** (3.8.5) and respects every other
+- **`wfi` ignores mstatus.MIE** (3.8.1.23) and respects every other
   interrupt control, so the kernel's idle path - mask, look at the
   queues, sleep, unmask - has no lost-wakeup window here, exactly as on
   the Arm half. This is NOT the QingKe cores' behaviour, where the same
@@ -279,10 +281,23 @@ difference in the sleeping.
 
 Driver gaps, each with its reason:
 
-- **Most of the chip.** POWMAN with its always-on timer and the sleep
-  states, and two of the blocks the RP2040 never had - the HSTX and the
-  M33's coprocessors - have no driver here yet. Each arrives with its
-  chapter, its suite on both architectures and its document.
+- **The HSTX** (12.11), born with its first user. It is an output-only
+  streaming serialiser for a display or a fast link - eight pads, a
+  command expander and a bit crossbar behind one FIFO a DMA channel
+  feeds - and the display link that would use it is not in this project
+  yet. No instrument is missing: a PIO block reads a pad another
+  function drives ([pio.md](pio.md)), so its suite can sample the
+  block's own pads with no wire.
+- **The Cortex-M33's coprocessors** (3.6), declined as drivers. They
+  exist on ONE of this chip's two processor architectures, and this
+  stratum is written once for both. The GPIO coprocessor (3.6.1) is a
+  shorter road to the same bank verbs SIO gives both halves; the
+  double-precision one (3.6.2) belongs under the compiler's arithmetic
+  routines and not in a peripheral driver, and would come with a program
+  that measures double arithmetic as its bottleneck; the redundancy
+  coprocessor (3.6.3) is the bootrom's own hardening against fault
+  injection, whose failed assertion halts the processor - nothing a
+  framework hands out as a verb.
 - **The programming side of OTP**, in any form: declined permanently
   ([otp.md](otp.md)), and the absence is asserted by the family check
   rather than promised.

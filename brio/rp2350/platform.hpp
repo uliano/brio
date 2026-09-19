@@ -30,7 +30,7 @@
  * lost-wakeup window: an interrupt that becomes pending between the
  * caller's queue check and the sleep instruction does not put the core
  * to sleep at all. On the M33 that is ARM's rule (a pending interrupt
- * wakes WFI even with PRIMASK set); on Hazard3 it is datasheet 3.8.5's
+ * wakes WFI even with PRIMASK set); on Hazard3 it is datasheet 3.8.1.23's
  * (wfi ignores mstatus.MIE and respects every other interrupt control).
  * The two are the same promise in two spellings, which is why the
  * kernel's loop needs no target knowledge.

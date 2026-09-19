@@ -58,6 +58,17 @@ using Irq = Nvic;
     __WFI();
 }
 
+/// WHETHER A SLEEPING CORE RELEASES ITS POWER REQUEST, which is half of
+/// datasheet 6.5.2's condition for the chip's SLEEP state.
+///
+/// A Cortex-M33 does it by itself: its SLEEPING output is asserted for
+/// the duration of a WFI and the clock controller reads that, so there
+/// is nothing here to arm and this verb is empty. It exists because the
+/// OTHER half of this chip has to be asked (rp2350/core_hazard3.hpp),
+/// and the sleep sites are written once for both.
+[[gnu::always_inline]] inline void sleep_releases_power_request(bool) {}
+[[gnu::always_inline]] inline bool sleep_releases_power_request() { return true; }
+
 /// Halt in the debugger. With no debugger attached this escalates to a
 /// fault, which is the legible wreck a panic wants.
 [[gnu::always_inline]] inline void debug_break() { __BKPT(0); }

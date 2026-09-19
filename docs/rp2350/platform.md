@@ -3,7 +3,7 @@
 Documents of record: the RP2350 datasheet (build d126e9e), 3.1 (the
 processor subsystem and SIO, with 3.1.2's CPUID and 3.1.8's platform
 timer), 3.2 (the interrupt lines, the six spare ones among them), 3.8
-(Hazard3: the CSRs, the interrupt controller, and 3.8.5 on `wfi`),
+(Hazard3: the CSRs, the interrupt controller, and 3.8.1.23 on `wfi`),
 3.8.4.2 (the interrupt numbering the two architectures share), 7.5 (the
 subsystem reset controller), 9.11 (the pad registers and their isolation
 latch), 12.15.1 (SYSINFO) and 12.15.3 (TBMAN), 2.1.3 (the atomic register aliases), appendix C
@@ -34,7 +34,7 @@ DIFFERENT REASONS.** The kernel's loop masks interrupts, looks at its
 queues, sleeps and unmasks; an interrupt that becomes pending between the
 look and the sleep must not put the core to sleep. On the Cortex-M33 that
 is ARM's rule, that a pending interrupt wakes WFI even through PRIMASK;
-on Hazard3 it is 3.8.5's, that `wfi` ignores mstatus.MIE and respects
+on Hazard3 it is 3.8.1.23's, that `wfi` ignores mstatus.MIE and respects
 every other interrupt control. The two are the same promise in two
 spellings, which is why the kernel needs no target knowledge - and it is
 NOT the behaviour of the QingKe cores brio's other RISC-V strata run on,

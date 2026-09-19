@@ -283,6 +283,20 @@ struct Xosc {
     /// The range field as CTRL holds it (twelve bits, one of the four
     /// codes) - as opposed to range(), which is STATUS's two-bit report.
     static uint32_t range_code() { return XOSC->CTRL & XOSC_CTRL_FREQ_RANGE_BITS; }
+
+    /// DORMANT (8.2.6, 6.5.3): the keyword that stops this oscillator
+    /// and with it every clock derived from it - the core's included
+    /// when clk_sys runs on it, so this call returns only once a
+    /// configured wake (a GPIO event the IO bank's dormant-wake logic
+    /// detects, or the always-on timer's alarm) has restarted it and it
+    /// is STABLE again. WITH NO WAKE CONFIGURED IT NEVER RETURNS;
+    /// rp2350/sleep.hpp's site refuses to arm that. The PLLs are not
+    /// stopped by the silicon: stop them first.
+    static void dormant() {
+        XOSC->DORMANT = XOSC_DORMANT_VALUE_DORMANT;
+        while (!stable()) {
+        }
+    }
 };
 
 // ---- the ring oscillator (8.3) -------------------------------------------------
@@ -459,6 +473,16 @@ struct Rosc {
     /// A write the block refused for a wrong password. Write-to-clear.
     static bool badwrite() { return (ROSC->STATUS & ROSC_STATUS_BADWRITE_BITS) != 0u; }
     static void clear_badwrite() { ROSC->STATUS = ROSC_STATUS_BADWRITE_BITS; }
+
+    /// DORMANT (8.3.10, 6.5.3): the same keyword as the crystal's, the
+    /// same contract - it returns once a configured wake has restarted
+    /// the oscillator, this one in about a microsecond against the
+    /// crystal's milliseconds.
+    static void dormant() {
+        ROSC->DORMANT = ROSC_DORMANT_VALUE_DORMANT;
+        while (!stable()) {
+        }
+    }
 
 private:
     static constexpr uint32_t freq_password = ROSC_FREQA_PASSWD_VALUE_PASS
