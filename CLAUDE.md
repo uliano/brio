@@ -65,8 +65,11 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   the host does not tell you - written before its implementation, for
   gfx.md's reason).
 - `docs/<target>/` - one folder per target, mirroring
-  `brio/<target>/` (`avrdx/`, `samc21/`, `stm32g0/`, `ch32v00x/`,
-  `host/`): `README.md` is the
+  `brio/<target>/` (`avrdx/`, `samc21/`, `stm32g0/`, `stm32f4/`,
+  `ch32v00x/`, `ch32v203/`, `rp2040/`, `rp2350/`, `host/`), plus one
+  per stratum that sits between `util/` and the targets (`cortexm/`,
+  and the IP strata `pl011/`, `pl022/`, `dw_apb_i2c/`): `README.md` is
+  the
   operational page (toolchain, board, probe, debugger and their
   quirks); next to it ONE document per peripheral in the shape
   docs/README.md prescribes (documents of record -> what the silicon
@@ -121,15 +124,30 @@ This file has no decision log any more: the former log was migrated to
 `brio` (`brio/`) is a header-only C++23 (gnu++23) framework for
 bare-metal MCUs built around a cooperative active-object kernel,
 written clean-room after Samek's book (never the QP source). One flat
-namespace `brio`; twelve strata under `brio/` - `kernel/` (pure
+namespace `brio`; the strata under `brio/`, one directory each, are
+`kernel/` (pure
 logic, includes nothing of brio), `util/` (services over the kernel),
 `gfx/` (drawing: pure, target-independent, and needing nothing of the
 kernel - three kinds of surface told apart by where a pixel's truth
 lives, and a library that draws through the write-only base whatever
 lies beneath, design/gfx.md),
-`cortexm/` (the CORE stratum the three Cortex-M0+ families - and the
-Cortex-M4 one, the same programmer's model - include after their device
-header: NVIC + PRIMASK guard, the SysTick ticker),
+`cortexm/` (the CORE stratum every Cortex-M family includes after its
+device header - the M0+ families, the M4 one and the Arm half of the
+RP2350's M33 pair, one programmer's model for all of them: NVIC +
+PRIMASK guard, the SysTick ticker, the microsecond busy-wait on
+SysTick's counter - and the nvic/ticker guards accept the M33 core
+header where the delay one, which the RP2350 does not use, does not),
+`pl011/`, `pl022/` and `dw_apb_i2c/` (the IP STRATA: ARM's PrimeCell
+UART and SSP and Synopsys's DesignWare I2C, each a peripheral DESIGN
+written once, knowing no chip and including nothing of a family - what
+a family owes one is a TRAITS type satisfying the concept the IP file
+states, `Pl011Chip` and its two siblings: register block, reset,
+interrupt line and controller, guard, pin legality, clock, DMA
+requests - while the family's own header keeps the PUBLIC NAMES the
+apps write. Born under the core stratum's rule, at the SECOND family
+that carries the block, gated by the images; what earns one is that
+the register description is not similar between the chips but
+IDENTICAL),
 `avrdx/` (everything that knows `avr/io.h`: AVR DA/DB, bench chip
 AVR128DB48), `samc21/` (everything that knows `sam.h`: SAM C21,
 Cortex-M0+, bench chip ATSAMC21J18A), `stm32g0/` (everything that
@@ -144,21 +162,36 @@ WCH's names, which is what separates it from the CH32V00x),
 `rp2040/` (everything
 that knows the RP2040: Raspberry Pi's dual Cortex-M0+, bench chip an
 RP2040 B2 on a Raspberry Pi Pico and on a WeAct board, the pico-sdk's CMSIS header and register
-definitions vendored, a kernel per core), `stm32f4/` (everything that
+definitions vendored, a kernel per core), `rp2350/` (everything that
+knows the RP2350: Raspberry Pi's silicon with TWO PROCESSOR
+ARCHITECTURES over one set of peripherals - a Cortex-M33 pair and a
+Hazard3 RISC-V pair, of which exactly one runs, chosen by the
+IMAGE_DEF block in the image the bootrom finds and by nothing else, so
+the architecture is an axis of the build and every suite is written
+once and run twice; bench chip an RP2350 in the QFN-80 package,
+stepping A2, on a WeAct RP2350B core board; `core.hpp` is THE ONE FILE
+of the stratum that asks `__riscv`, and both halves export the same
+names; the pico-sdk's rp2350 device description vendored in an include
+root of its own, with a stub for the core header the RISC-V build must
+not take; no second-stage bootloader - the bootrom sets the XIP
+interface up itself), `stm32f4/` (everything that
 knows `stm32f4xx.h`: STM32F4, Cortex-M4F - brio's first ARMv7-M family,
 built with the hard-float ABI, the FPU enabled by the crt; bench chips
 STM32F429ZI on an STM32F429I-DISC1, STM32F446RE on a Nucleo-64,
 STM32F411CE on a WeAct black pill), `host/` (the native test
 target). Includes carry the stratum prefix
-(`#include "avrdx/usart.hpp"`). The builds are nine sibling CMake
-projects, PEERS - the repo root is not a CMake project: `avrdx/`,
-`samc21/`, `stm32g0/`, `ch32v00x/`, `ch32v203/`, `rp2040/` and `stm32f4/` (each with its own toolchain file
+(`#include "avrdx/usart.hpp"`). The builds are sibling CMake
+projects, PEERS - the repo root is not a CMake project: the CROSS ones
+`avrdx/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32v203/`,
+`rp2040/` and `rp2350/` (each with its own toolchain file
 and presets, Ninja, emitting into the shared `build-cmake/`)
 auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
-from its own `// build:` header comment; host tests in `test/` are the
-seventh project (host g++, no cross toolchain), run via `ctest`, and
-`host/` the eighth - the host's own apps, which RUN rather than run and
-exit, and which ctest never sees. ONE NAME PER ARCHITECTURE,
+from its own `// build:` header comment; host tests in `test/` are a
+project of their own (host g++, no cross toolchain), run via `ctest`,
+and `host/` another - the host's own apps, which RUN rather than run
+and exit, and which ctest never sees. The `rp2350/` project is the
+only one with a second axis besides the chip: the ARCHITECTURE, two
+toolchain files and two presets per build type. ONE NAME PER ARCHITECTURE,
 the same key on three axes: `brio/<arch>/` (stratum),
 `docs/<arch>/` (docs), `<arch>/` (build project); chip precision
 lives in preset names, per-chip ld/svd files and the `*_MCU` cache
@@ -174,12 +207,16 @@ of its x1 twin: the same IP under the same register names) - the
 stratum compiles on all twelve G0 headers of the pack with the reserve
 deriving every vector from PERIPHERAL PRESENCE and no device name
 spelled anywhere, the bench proof on x0 silicon pending a board. The
-`cortexm/` core stratum (nvic, ticker, delay) is what the four Cortex-M
-families share - three M0+ and the M4, the same programmer's model for
+`cortexm/` core stratum (nvic, ticker, delay) is what the Cortex-M
+families share whatever the vendor and whatever the profile - the same
+programmer's model for
 SysTick, the NVIC's enables and PRIMASK - factored with the first two in
 hand and every image byte-identical before and after, renamed from its
-architecture to its core family when the M4 joined, under the same gate; a RISC-V core stratum would be
-factored the same way, at its second family, never earlier.
+architecture to its core family when the M4 joined, under the same
+gate; a RISC-V core stratum would be
+factored the same way, at its second family, never earlier - and
+Hazard3 is not a QingKe, so `rp2350/core_hazard3.hpp` stays this
+stratum's own until a second RISC-V family of that shape earns one.
 
 ## Governing rule and stability hierarchy
 
@@ -395,7 +432,33 @@ gets its home in `docs/design/` when taken.
   remains is in the documents' gap lists (a power vote across the
   cores, the bus fabric's counters). The USB device stack
   (util/usb/) was born here, with its CDC console on the chip's own
-  connector.
+  connector. Its PL011, PL022 and DW_apb_i2c drivers live in the IP
+  strata now (`brio/pl011/`, `brio/pl022/`, `brio/dw_apb_i2c/`), the
+  family header holding the traits and the public names.
+- **The RP2350 stratum.** `brio/rp2350/` and `rp2350/` are
+  `in bring-up` on an RP2350 in the QFN-80 package (README.md's table)
+  on a WeAct RP2350B core board, and the whole of it is written ONCE
+  and run TWICE: a Cortex-M33 pair and a Hazard3 RISC-V pair over one
+  set of peripherals, the architecture chosen by the IMAGE_DEF block in
+  the image the bootrom finds - no button, no fuse, no second stage -
+  so it is an axis of the build, `rp2350/` carries two toolchain files
+  and two presets per build type, and a suite is green when it is green
+  on both halves. `core.hpp` is the one file that asks `__riscv`;
+  `core_m33.hpp` is the device header plus `cortexm/nvic.hpp` as the
+  other ARM families' are, `core_hazard3.hpp` is this stratum's own.
+  Which chapters have their document and their suite is
+  docs/rp2350/README.md's document map, and what each still owes is
+  its own gap list. What remains as whole chapters: THE POWER CHAPTER
+  (POWMAN with its always-on timer and the sleep states) is not
+  written, and the HSTX and the M33's coprocessors - the other two
+  blocks the RP2040 never had - are declared gaps. The bench verb here
+  is STATE-INDEPENDENT by construction (a rescue through the RP-AP over
+  the debug port alone, then programming as core 0 of the Arm pair,
+  then a reset), which is what will make the sleep chapters safe to
+  write; Raspberry Pi's OpenOCD fork is the only build that reaches
+  this chip, upstream's RISC-V target driver taking no DAP. The three
+  IP strata were born with this family, at the second chip that carries
+  each block.
 - **The NV stack reviewed as a whole.** The flash heap and the journal
   were born where flash was cheap to partition (a zone off the end of
   the image on the AVR, the top of the array elsewhere) and carried to
@@ -471,8 +534,8 @@ gets its home in `docs/design/` when taken.
 ## Build, test, debug (the must-knows)
 
 ```bash
-# Three sibling CMake projects, PEERS (none is the repo root): avrdx/,
-# samc21/, test/. cmake presets resolve against their own project dir -
+# Sibling CMake projects, PEERS (none is the repo root): one per target
+# plus test/. cmake presets resolve against their own project dir -
 # run cmake FROM that dir (or let bin/brio do it).
 (cd test  && ctest --preset host)                                  # host tests (doctest); no hardware needed
 brio check avrdx [name]         # every avrdx smoke TU compiles for all 8 DA/DB packages;
@@ -487,13 +550,18 @@ brio check ch32v203 [name]      # same for the ch32v203 stratum (ALL NINE parts 
 brio check rp2040 [name]        # same for the rp2040 stratum (one chip: every header's verbs, util_all.cpp)
 brio check stm32f4 [name]       # same for the stm32f4 stratum (ALL TWENTY-THREE F4 headers; the ladder
                                 # refused by name where no manual was read)
-brio check all                  # the seven in a row
+brio check rp2350 [name]        # same for the rp2350 stratum - the one fixture that crosses TWO
+                                # COMPILERS: every TU built four times (Cortex-M33 and Hazard3, each
+                                # for the QFN-80 and the QFN-60), util_all.cpp through both
+brio check all                  # every stratum above, in a row
 brio prose [paths...]           # the prose net: no dates/process words/Doxygen tags in
                                 # comments and docs, every cited path exists, ASCII only;
                                 # "review" lines are claims of absence to re-read, not errors
 brio gate [--against REF]       # THE BYTE-IDENTITY GATE: reference and working tree each built
                                 # with mtimes pinned and build dirs wiped, images compared per
-                                # preset, movers named (the four release presets, ~40 s)
+                                # preset, movers named (the release presets cli/gate.py's
+                                # DEFAULT_PRESETS names: every build project, two of them on the
+                                # ch32v00x - one per part - and two on the rp2350, one per architecture)
 brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--strings: ignoring
                                 # what string literals say) - the gate for a comments-only claim
 (cd avrdx && cmake --build --preset avr128db48-release --target <app>)         # AVR release build (-Os)
@@ -511,6 +579,12 @@ brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--s
 (cd rp2040 && cmake --build --preset rp2040-release --target <app>-upload)       # flash via OpenOCD (the Debug Probe, CMSIS-DAP)
 (cd stm32f4 && cmake --build --preset stm32f429zi-release --target <app>)        # STM32F4 release build (hard-float)
 (cd stm32f4 && cmake --build --preset stm32f429zi-release --target <app>-upload) # flash via OpenOCD (the board's ST-LINK)
+(cd rp2350 && cmake --preset rp2350-arm-release)                                 # configure (once, or after adding an app)
+(cd rp2350 && cmake --build --preset rp2350-arm-release --target <app>)          # RP2350 release build, Cortex-M33
+(cd rp2350 && cmake --build --preset rp2350-riscv-release --target <app>)        # the SAME source, Hazard3 RISC-V
+(cd rp2350 && cmake --build --preset rp2350-arm-release --target <app>-upload)   # flash via Raspberry Pi's OpenOCD fork: a
+                                                                                 # rescue over the debug port, then program as
+                                                                                 # core 0 of the Arm pair, then reset run
 # apps are auto-discovered from <project>/src/apps/*.cpp - plus
 # experiments/*/{avrdx,samc21}/*.cpp, each experiment's per-arch app
 # halves - at every configure; no generation step; a new/removed app
@@ -556,7 +630,19 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   A second OpenOCD built from git at a pinned commit
   (`/sw/openocd-git-bedefa2`, `/sw/src/build-openocd-git.sh`) writes the
   RP2040 boards whose flash chip the release does not know, named per
-  programmer in the manifest; the release build stays everyone else's. Never add
+  programmer in the manifest; and a THIRD, Raspberry Pi's own fork
+  (`/sw/openocd-rpi-acff23f`, `/sw/src/build-openocd-rpi.sh`, the
+  manifest's `RPI_OPENOCD`), is the RP2350's and nobody else's: the
+  release does not know that chip at all and the git build cannot debug
+  Hazard3, its RISC-V target driver taking no DAP, so the fork is the
+  one build that examines all four cores and flashes from either side.
+  The RP2350's Hazard3 half is built by a self-built upstream
+  riscv32-unknown-elf-gcc 16.2 at `/sw/riscv32-unknown-elf`
+  (`/sw/src/build-riscv32-elf.sh`, `rp2350/cmake/toolchain-riscv.cmake`)
+  - NOT WCH's compiler, which the two QingKe families use and which
+  carries a vendor extension this core has not; its Arm half takes the
+  same arm-none-eabi-gcc as the other ARM targets, with the hard-float
+  ABI. The release build stays everyone else's. Never add
   `-mrelax` on AVR (PyAvrOCD refuses the ELF).
   No `-flto` (never added, so nothing to strip) and no `-DF_CPU` (never
   added either: the clock rate has one truth, `Clock::hz`; avr-libc's
@@ -660,6 +746,30 @@ stm32f4/                 the STM32F4 build project, the sixth of the shape: a
                          {29,46,11}.cpp - ST's handler names, the FPU's CPACR
                          enabled before .data, holes where another part has a
                          peripheral; svd/ with ST's SVD per part
+rp2350/                  the RP2350 build project, and THE ONLY ONE WHOSE AXIS
+                         IS THE COMPILER: one chip, two processor architectures,
+                         so cmake/toolchain-arm.cmake (arm-none-eabi, hard float,
+                         a Cortex-M33) and cmake/toolchain-riscv.cmake (upstream
+                         riscv32-unknown-elf on /sw/riscv32-unknown-elf, ilp32,
+                         the -march string a cache variable) are two configures
+                         of the SAME sources, each setting RP2350_ARCH, from
+                         which the flags, the crt, the include roots and the
+                         family check follow - four presets, arm and riscv x
+                         release and debug. Besides the architecture a configure
+                         targets a FLASH GEOMETRY (RP2350_FLASH_KB -> ld/) and a
+                         PACKAGE (RP2350_PACKAGE, a for the QFN-60 and b for the
+                         QFN-80, handed to the stratum as the pin count, so a pad
+                         the package has not got is a COMPILE error and an image
+                         built without it refuses the extra pads at run time
+                         against SYSINFO.PACKAGE_SEL); src/glue/startup_rp2350
+                         _arm.cpp and _riscv.S - two crts binding THE SAME
+                         handler names, one through a Cortex-M vector table and
+                         one through Hazard3's own dispatch, each placing the
+                         twenty-byte IMAGE_DEF block that tells the bootrom which
+                         architecture to enter, THERE BEING NO SECOND STAGE;
+                         svd/RP2350.svd; and an -upload target that is the
+                         STATE-INDEPENDENT VERB - a rescue, then programming as
+                         core 0 of the Arm pair, then a reset
 host/                    the HOST build project - programs that RUN, as
                          opposed to the suites in test/ which run and exit.
                          The three axes finally agree (brio/host/, docs/host/,
@@ -689,12 +799,34 @@ test/family_rp2040/      rp2040 family smoke TUs + neg/, brio check rp2040 (one
 test/family_stm32f4/     stm32f4 family smoke TUs + neg/, brio check stm32f4 (ALL
                          TWENTY-THREE F4 headers; the reset rate everywhere, the
                          ladder-dependent rates where the reserve knows the ladder)
+test/family_ch32v203/    ch32v203 family smoke TUs + neg/, brio check ch32v203
+                         (every part of the series, both HPE ways; util_all.cpp)
+test/family_rp2350/      rp2350 family smoke TUs + neg/, brio check rp2350 - the
+                         one fixture that crosses TWO COMPILERS: every TU built
+                         four times (Cortex-M33 and Hazard3 x the two packages),
+                         a negative built for the package its refusal is about
+                         (the `qfn60_` prefix names the smaller one), and
+                         util_all.cpp through both compilers
+test/test_pl011/, test/test_pl022/, test/test_dw_apb_i2c/
+                         the IP strata's host suites: each driver against its
+                         simulated chip (brio/host/sim_pl011.hpp and its two
+                         siblings), so the block's own logic is judged off the
+                         silicon it was extracted from
+test/test_sha256/        util/sha256.hpp against FIPS 180-4's own vectors, at
+                         compile time and at run time, plus the tail the
+                         hardware accelerators are owed
 third_party/cmsis-device-f4/  vendored ST cmsis-device-f4 v2.6.9 Include/ (Apache-2.0):
                          every F4 part's header, the umbrella stm32f4xx.h
-third_party/cmsis-core/  vendored ARM CMSIS-Core headers (Apache-2.0)
-third_party/pico-sdk/    vendored pico-sdk 2.3.1 subset (BSD-3): the CMSIS device
-                         header RP2040.h and the hardware/regs bit-field headers,
-                         the two halves of the SVD; never the SDK runtime
+third_party/cmsis-core/  vendored ARM CMSIS-Core headers (Apache-2.0), core_cm33.h
+                         among them - the RP2350's Arm half reads it
+third_party/pico-sdk/    vendored pico-sdk 2.3.1 subset (BSD-3), TWO include roots
+                         because the two chips' files have the same names: the
+                         RP2040's CMSIS device header and hardware/regs bit-field
+                         headers at the top, the RP2350's under rp2350/ - plus
+                         rp2350/no_core/core_cm33.h, this project's own stub for
+                         the header the RISC-V build must not take. Never the SDK
+                         runtime; each chip's SVD is its build project's (rp2040/
+                         svd/, rp2350/svd/)
 bin/brio                 THE ONE COMMAND of the bench, dispatching on its first
                          argument; put bin/ on the PATH
 cli/                     its guts, a Python package: main.py dispatches on the
@@ -713,11 +845,16 @@ cli/                     its guts, a Python package: main.py dispatches on the
                          (a board type -> its project, preset, mcu and flash
                          mechanism: db* -> avrdx/avrdude/UPDI, c21j ->
                          samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/ST-LINK,
-                         v006k8 -> ch32v00x/WCH's OpenOCD fork/WCH-Link,
-                         pico/picow/weact2040 -> rp2040/OpenOCD/the Debug Probe,
-                         f429zi/f446re/f411ce -> stm32f4/OpenOCD/an ST-LINK),
-                         the per-project app rosters build-cmake/apps_{avrdx,
-                         samc21,stm32g0}.json (each project writes its own at
+                         v006k8/v003f4 -> ch32v00x/WCH's OpenOCD fork/WCH-Link,
+                         v203c8 -> ch32v203/the same fork/the same probe on two
+                         wires, pico/picow/weact2040 -> rp2040/OpenOCD/the Debug
+                         Probe, f429zi/f446re/f411ce -> stm32f4/OpenOCD/an
+                         ST-LINK, and weact2350b + weact2350b-rv -> rp2350/
+                         Raspberry Pi's OpenOCD fork/the Debug Probe: ONE BOARD
+                         UNDER TWO TYPES, because the type carries the preset
+                         and on this chip the preset carries the ARCHITECTURE),
+                         the per-project app rosters build-cmake/apps_<project>
+                         .json (each project writes its own at
                          every configure - separate files because app NAMES
                          COLLIDE across the trees), the console paths
     manifest.py          loads the bench MANIFEST from private/bench_boards.py
@@ -728,7 +865,14 @@ cli/                     its guts, a Python package: main.py dispatches on the
     bench_boards.py      the manifest in the repository
     flash.py             `brio flash`: build, then avrdude / OpenOCD / the
                          ST-LINK's mass-storage flasher by board type, with
-                         the flash-heap preflight on the AVR
+                         the flash-heap preflight on the AVR - and the
+                         RP2350's own mechanism, TWO OpenOCD sessions in
+                         order: a DAP with no target behind it setting and
+                         clearing the RP-AP's rescue-restart bit (the one
+                         reset that works with the clocks stopped and the
+                         core domain down), then the programming as core 0
+                         of the Arm pair and a reset run that hands the chip
+                         to whatever architecture the new image names
     fuses.py             `brio fuses`: the AVR FUSE bytes over UPDI, the SAM
                          user row over SWD; refuses what a type cannot do
     console.py           the suites' console protocol and `brio run`,
@@ -749,20 +893,24 @@ experiments/             one SELF-CONTAINED directory per cross-cutting bench
                          energy/ = the clock-strategy energy experiment
                          (DynamicClock-deferral verdict; the SAM as
                          stimulus + judge + meter for an AVR DUT)
-docs/                    README (map + rules), design/, <target>/ (avrdx/, samc21/,
-                         host/), boards/, probes/
+docs/                    README (map + rules), design/, one folder per target
+                         (avrdx/, samc21/, stm32g0/, stm32f4/, ch32v00x/,
+                         ch32v203/, rp2040/, rp2350/, host/), one per shared
+                         stratum (cortexm/, pl011/, pl022/, dw_apb_i2c/),
+                         boards/, probes/
 brio/.clangd             per-stratum clangd routing: the framework default is
-                         the host database; avrdx/.clangd and samc21/.clangd
-                         (in brio/ AND in each project dir) override with
-                         their own architecture's database, so a header always
+                         the host database; a target stratum carries a fragment
+                         of its own (brio/<arch>/.clangd, and one in the project
+                         dir beside it) pointing at that architecture's own
+                         database, so a header always
                          parses with its own compiler regardless of CMake
                          Tools' active project. Each CMake project carries its
                          own fragment too - test/.clangd on build-cmake/host,
-                         host/.clangd on build-cmake/host-apps - and every
-                         project is listed in .vscode/settings.json's
-                         cmake.sourceDirectory array, which is what the status
+                         host/.clangd on build-cmake/host-apps - and a project
+                         listed in .vscode/settings.json's
+                         cmake.sourceDirectory array is what the status
                          bar's project picker offers
-brio/                    the framework, twelve strata:
+brio/                    the framework, one directory per stratum:
   kernel/                pure kernel logic - includes NOTHING of brio
     platform.hpp           Platform concept (CriticalSection, idle,
                            break_here, now, ticks_per_second, atomic_width,
@@ -854,6 +1002,16 @@ brio/                    the framework, twelve strata:
                            a hardware block with the Ethernet polynomial
                            wired in computes, and what its bench suite
                            judges it against) - both bitwise, no table
+    sha256.hpp             SHA-256 in constexpr C++ (FIPS 180-4), here for
+                           crc.hpp's reason: an accelerator for this function
+                           has nothing to configure, so what it computes has
+                           one home. sha256() over a message, and
+                           sha256_tail() - the padding an accelerator that
+                           digests whole blocks and pads nothing is owed, so
+                           the arithmetic that decides where a message ends is
+                           written once and shared by both paths. No HMAC, no
+                           key derivation: they are built ON this and are not
+                           here
     nv_record.hpp          NvStore/NvPacedStore concepts + NvRecord<T, S>
                            (magic+version+CRC-16 header, store() writes
                            only changed bytes)
@@ -1262,10 +1420,13 @@ brio/                    the framework, twelve strata:
                            SIBLING of the kernel's PanicRecord and not an
                            extension of it - a hardware trace is silicon
                            this stratum happens to have
-  cortexm/               the CORE stratum: what the four Cortex-M families share
+  cortexm/               the CORE stratum: what the Cortex-M families share,
+                         whatever the vendor and whatever the profile
     nvic.hpp               InterruptGuard (PRIMASK) + Nvic + irq_priority_levels
                            - reads CMSIS-Core only, #errors if included before
-                           a device header (the family's nvic.hpp does both)
+                           a device header (the family's nvic.hpp does both);
+                           the guard accepts the M0, M0+, M4 and M33 core
+                           headers
     ticker.hpp             BasicTicker<tps> over SysTick with advance/pause/
                            resume; each family's ticker.hpp adds its alias
                            and its own guards; SysTickCounter = SysTick as a
@@ -1275,7 +1436,43 @@ brio/                    the framework, twelve strata:
                            busy-wait on SysTick's VAL - at least, never early,
                            capped below one millisecond, no division at wait
                            time; each family's delay.hpp is the device include
-                           plus this file plus its measured facts
+                           plus this file plus its measured facts - the RP2350
+                           is the one Cortex-M family that does NOT take it,
+                           its ruler being a timer both its architectures read
+  pl011/                 IP STRATUM: ARM's PrimeCell UART, written once for
+                         every family that carries it - a directory named for
+                         a peripheral DESIGN and not for a silicon, sitting
+                         where a core stratum sits
+    uart.hpp               the frame vocabulary, the fractional divider as pure
+                           arithmetic, every register's bits as constants,
+                           Pl011Uart<Chip, n> the resource and
+                           Pl011Transport<Chip, n, pins, ...> the byte
+                           transport (two rings, the error counters, two
+                           optional DMA engine slots, the ISR bodies) - and
+                           `Pl011Chip`, the concept the family's traits type
+                           satisfies: where the registers are, the reset, the
+                           interrupt line, the guard, the platform, the pads
+                           and which rate is UARTCLK. The pad's function code
+                           stays OPAQUE here, because a family may have more
+                           than one column for it
+  pl022/                 IP STRATUM: ARM's PrimeCell SSP (the SPI block), the
+                         same arrangement
+    spi.hpp                the resource, the host engine util/spi_bus.hpp's
+                           SpiBus drives with the other strata's Request
+                           verbatim, and the client - over `Pl022Chip`, which
+                           adds to the UART's list the run-time select pin, the
+                           busy-wait a select setup is spent on and the PAD as
+                           the lever a dark listener releases, because a
+                           silicon may leave the block's own pad-enable output
+                           unconnected
+  dw_apb_i2c/            IP STRATUM: Synopsys's DesignWare I2C, the same
+                         arrangement
+    i2c.hpp                the resource over a COMMAND FIFO whose entries carry
+                           their own RESTART and STOP, the host engine
+                           util/i2c_bus.hpp's I2cBus drives, and the client -
+                           over `DwApbI2cChip`, which adds the open-drain verbs
+                           a bus clear drives a line with, the microsecond
+                           ruler it paces itself by and which rate is ic_clk
   stm32g0/               everything that knows stm32g0xx.h (STM32G0, Cortex-M0+)
     device_tables.hpp      THE RESERVE: GPIO ports, USART instances, APB
                            enables, CCIPR multiplexers and the SHARED
@@ -1364,15 +1561,9 @@ brio/                    the framework, twelve strata:
                            two OPTIONAL DMA engine slots (harvest() the verb
                            that publishes a receive run) and trailing
                            options that cost nothing; USART2 on columns 1..6
-    dma_engine.hpp         NoDmaEngine, the empty slot's tag, and the request
-                           numbers (Dreq, table 119) a transport names
-    dma.hpp                the DMA (2.5): Dma (the block), DmaChannel<0..11>
-                           (prepare/load/trigger, the abort with E13's
-                           workaround, progress from TRANS_COUNT per E12),
-                           DmaLine<0|1> (one per core by convention),
-                           DmaTimer<n>, DmaSniffer, and DmaTxEngine/DmaRxEngine
-                           <ch, Elem, line> for the transports' slots, and the rule
-                           that two engines of one transport name two channels
+    dma_engine.hpp         NoDmaEngine, the empty slot's tag and nothing else -
+                           the STM32G0's arrangement, so a driver with an engine
+                           slot never includes the controller
     dma.hpp                Dma + DmaChannel<1..7> (THE CHANNEL IS THE
                            REQUEST: no multiplexer, table 8-2 names the
                            channel; every store refused while EN is set,
@@ -2195,25 +2386,29 @@ brio/                    the framework, twelve strata:
                            a dormant on the ring oscillator)
                            + PinRef (a pin named at run time: a bus request's
                            select)
-    spi.hpp                the PL022 (4.4): Pl022<n> resource (the prescaler
-                           pair, 4..16-bit frames, the three framings, LBM,
-                           the interrupt trio) + SpiHost<n, pins, engines>
-                           (the other strata's Request verbatim, the pump
-                           keeping eight frames in flight, loopback() as the
-                           wireless instrument, the engines on any two
-                           channels) + SpiClient<n, pins> (framing on its
-                           select pad, eight answers ahead, the dark listener
-                           by releasing the pad - SOD does not; ONE frame per
-                           select window in modes 0 and 2)
-    i2c.hpp                the DW_apb_i2c (4.3): DwApbI2c<n> resource (a COMMAND
-                           FIFO whose entries carry RESTART and STOP, the counts
-                           per speed with the cycles the block adds subtracted,
-                           one TX_ABRT with its source decoded, the read-to-clear
-                           sources) + I2cHost<n, pins, engines> (the other
-                           strata's Request verbatim, the probe as a one-byte
-                           read, the engines serving a read phase from a fixed
-                           command cell) + I2cClient<n, pins> (RD_REQ holds SCL,
-                           one I2cClientEvent per service())
+    spi.hpp                the SPI (4.4): TWO ARM PL022s, and THE DRIVER IS NOT
+                           HERE either - brio/pl022/spi.hpp holds the resource,
+                           the host engine and the client. Here: the pin table
+                           of table 279 with its function code, Rp2040Pl022 the
+                           CHIP TRAITS (register block, reset bits, NVIC lines,
+                           atomic aliases, DREQs, the pad setup, the run-time
+                           select pin a Request carries, the busy-wait
+                           cs_setup_us is spent on, and clk_peri as SSPCLK) -
+                           and the PUBLIC NAMES Pl022<n>, SpiHost<n, pins, ...>
+                           and SpiClient<n, pins>. The measured fact this chip
+                           adds: SOD DOES NOT RELEASE THE PAD, the block's
+                           pad-enable output reaching no pad, which is why the
+                           dark listener releases the PAD instead
+    i2c.hpp                the I2C (4.3): TWO Synopsys DW_apb_i2c controllers,
+                           the driver written once in brio/dw_apb_i2c/i2c.hpp.
+                           Here: the pin table of table 279 with its function
+                           code and the pad setup 4.3.1.3 asks for, and
+                           Rp2040DwApbI2c the CHIP TRAITS - register block,
+                           reset bits, NVIC lines, atomic aliases, DREQs, the
+                           five open-drain verbs the unstick drives a line
+                           with, the microsecond ruler it paces itself by, and
+                           clk_sys as ic_clk - + the PUBLIC NAMES DwApbI2c<n>,
+                           I2cHost<n, pins, ...> and I2cClient<n, pins>
     adc.hpp                the ADC (4.9): Adc, a monostate (its own clock from
                            the USB PLL or the crystal, the one-shot and the
                            free run paced by the 16.8 divider under the
@@ -2250,7 +2445,17 @@ brio/                    the framework, twelve strata:
                            by arithmetic), PwmEdgeCounter / PwmLevelCounter
                            (a frequency and a duty with no capture unit),
                            PwmPeriodicTick
-    dma_engine.hpp         NoDmaEngine, the empty slot's tag
+    dma_engine.hpp         NoDmaEngine, the empty slot's tag, and the request
+                           numbers (Dreq, table 119) a transport names - a
+                           request being a FIELD any channel takes here, so a
+                           transport names its own without including the block
+    dma.hpp                the DMA (2.5): Dma (the block), DmaChannel<0..11>
+                           (prepare/load/trigger, the abort with E13's
+                           workaround, progress from TRANS_COUNT per E12),
+                           DmaLine<0|1> (one per core by convention),
+                           DmaTimer<n>, DmaSniffer, and DmaTxEngine/DmaRxEngine
+                           <ch, Elem, line> for the transports' slots, and the rule
+                           that two engines of one transport name two channels
     flash.hpp              the external QSPI chip: Flash (the bootrom's
                            six functions found by code, every erase /
                            program / raw command a WINDOW with the flash
@@ -2269,14 +2474,345 @@ brio/                    the framework, twelve strata:
                            in turn, the PIDs per endpoint and direction, the
                            events from BUFF_STATUS and the SIE, clk_usb from
                            the USB PLL
-    uart.hpp               Pl011<n> resource (the FIFOs, the divisor and its
-                           latching write, the loop-back, the interrupt trio
-                           through the aliases) + Uart<n, pins, rx, tx, engines>:
-                           the byte transport whose write_byte PENDS THE LINE,
-                           because the PL011's transmit interrupt is a
-                           transition; with engines, dma_isr() and harvest()
-                           (the RX pad before the receiver, the FIFO emptied
-                           and the credits cleared before a run)
+    uart.hpp               the UART (4.2): TWO ARM PL011s, and THE DRIVER IS
+                           NOT HERE - it is written once in brio/pl011/uart.hpp.
+                           This file is what that file asks of a family: the
+                           pin table of table 279 with its function code,
+                           Rp2040Pl011 the CHIP TRAITS (register block, reset
+                           bits, NVIC lines, guard, platform, the atomic
+                           aliases, the DREQs, the pad setup, and clk_peri as
+                           UARTCLK so the divisor comes from Clock::pclk_hz and
+                           never from a second statement of the rate) - and
+                           the PUBLIC NAMES Pl011<n> and Uart<n, pins, ...>
+  rp2350/                everything that knows the RP2350 (Raspberry Pi's
+                         dual Cortex-M33 AND dual Hazard3 RISC-V over one
+                         set of peripherals, exactly one pair running at
+                         a time): the pico-sdk's rp2350 device description
+                         vendored in an include root of its own, the
+                         ARCHITECTURE an axis of the build, and no second
+                         stage - the bootrom sets the XIP interface up
+                         itself while it scans the flash
+    device.hpp             the CMSIS header generated from the SVD + every
+                           hardware/regs bit-field header but addressmap.h,
+                           the atomic register aliases of 2.1.3 as hw_set/
+                           hw_clear/hw_xor/hw_write_masked, and THE PACKAGE
+                           as a build fact
+                           and a silicon fact at once (QFN-60 = 30 GPIO and
+                           four ADC inputs, QFN-80 = 48 and eight). The SAME
+                           FILE ON BOTH ARCHITECTURES: the IRQ numbering is
+                           shared (3.8.4.2), and the RISC-V build resolves
+                           the header's core_cm33.h to a stub of this
+                           project's own
+    core.hpp               THE ONE FILE OF THE STRATUM THAT ASKS WHICH
+                           PROCESSOR IS IN THE SOCKET. It asks `__riscv`
+                           once, includes one of the two halves below, and
+                           both export the same names - InterruptGuard, the
+                           global mask verbs, Irq over the device header's
+                           IRQn_Type, wait_for_interrupt, debug_break,
+                           core_id - so no driver, no header above it and no
+                           app ever knows; it also defines the macro
+                           (BRIO_RP2350_CORE_M33 / _HAZARD3) that the two
+                           files which cannot choose an #include by a
+                           constant ask instead of the compiler
+    core_m33.hpp           the Arm half: the device header + cortexm/nvic.hpp
+                           as samc21/nvic.hpp and stm32f4/nvic.hpp are, plus
+                           this core's instruction verbs. Everything runs
+                           Secure, as the bootrom hands over; the MPU, the
+                           SAU and TrustZone, MSPLIM, BASEPRI and the
+                           coprocessor ports are deliberately untouched
+    core_hazard3.hpp       the RISC-V half, this stratum's own until a second
+                           family of the shape earns a core stratum: the
+                           Xh3irq controller over the ARM interrupt numbers,
+                           its ARRAY CSR idiom (a 16-bit window selected by
+                           the low half of the value written), MEIPRA left at
+                           reset because no interrupt nests, MSLEEP never
+                           written (erratum RP2350-E4), and the fact the
+                           idle path rests on - wfi IGNORES mstatus.MIE
+                           (3.8.5), which is NOT the QingKe cores' wfi
+    mtime.hpp              Mtime: the RISC-V platform timer (3.1.8), a 64-bit
+                           counter in the SIO with a comparator per core that
+                           the datasheet calls usable equally by either
+                           architecture; counting the TICK and not cycles, so
+                           it is a microsecond ruler a rate change cannot
+                           move; DBGPAUSE cleared for both cores, and the
+                           read and the comparator write as 3.1.8's own
+                           sequences
+    ticker.hpp             ONE SURFACE OVER TWO CLOCKS: cortexm/ticker.hpp's
+                           BasicTicker on SysTick for the Arm half,
+                           MtimeTicker on the platform timer for the RISC-V
+                           one, written to the same verbs; CoreTicker<core>
+                           (1000 Hz, one per core) and Ticker = core 0's, and
+                           the vector name isr_systick bound on both halves
+    delay.hpp              delay_us(clock, us) on the PLATFORM TIMER and not
+                           on a core counter, so one implementation serves
+                           both instruction sets: at least, never early,
+                           no arithmetic on clk_sys at all, one microsecond
+                           of resolution as the price, capped below one
+                           kernel tick and REFUSED beyond it + DelayRate /
+                           delay_rate, the pair the IP strata ask for
+    platform.hpp           Rp2350Platform<core = 0, TB = CoreTicker<core>>:
+                           ONE PLATFORM TYPE PER CORE and ONE FOR BOTH
+                           ARCHITECTURES - everything target-specific is a
+                           name from core.hpp - the per-core critical
+                           section, the idle path free of a lost-wakeup
+                           window in both spellings, a .noinit breadcrumb
+                           per core, atomic_width 4, on_own_core() and
+                           Doorbell; no idle_until(), and sleep_hook for a
+                           low-power state that is not a sleep instruction
+    multicore.hpp          SioDoorbell<core> - THE DOORBELL REGISTERS (3.1.6)
+                           and not the mailbox FIFO, so the bell never fails,
+                           never blocks, is correct rung from either core and
+                           shares no channel with the launch - + Core1
+                           (reset through the power-on state machine's
+                           FRCE_OFF.PROC1, the bootrom's six-word protocol
+                           on both architectures, and the entry shim that
+                           gives core 1 what the ROM does not hand it: the
+                           global pointer on one half, MSPLIM and CPACR on
+                           the other); erratum RP2350-E2 costs the bridge
+                           nothing, brio taking no SIO spinlock here
+    timer.hpp              the system timers, TWO of them where the RP2040
+                           had one: Timer<n>, a 64-bit counter of the
+                           microsecond TICK its own generator in the TICKS
+                           block makes, read as a raw triple, with four
+                           alarms whose INDEX IS A TEMPLATE PARAMETER because
+                           an alarm is claimed by the app binding its vector
+                           + the two registers this chip added - SOURCE (the
+                           counter off the tick and onto clk_sys cycles) and
+                           LOCKED, which locks nothing (measured), so init()
+                           CYCLES the block's reset line; DBGPAUSE cleared,
+                           a halted core freezing no other core's ruler
+    watchdog.hpp           Watchdog: the 24-bit countdown on its OWN tick
+                           generator (the block no longer owns one), the
+                           three WDSEL registers in their three tiers with
+                           only the system one written here, REASON, and
+                           erratum RP2350-E19's guard - FRCE_OFF cleared but
+                           for PROC1 - before every reboot + Scratch<0..3>,
+                           the four the bootrom's boot redirection leaves
+                           free
+    reset.hpp              Reset: chapter 7's three tiers, the chip-level
+                           cause kept in the always-on power manager beside
+                           the watchdog's REASON - and the measured fact that
+                           a reboot does not appear in the chip-level word at
+                           all, a watchdog event through the power-on state
+                           machine being a SYSTEM reset; software() = the
+                           watchdog's trigger, core() = the processor reset
+                           the Arm half alone has, refused at compile time on
+                           the other; ResetReporter, fault_reset<P>() bound
+                           to isr_hardfault or isr_riscv_exception
+    resets.hpp             RESETS: the gate on every peripheral (held in
+                           reset at power-up, released through the SET/CLR
+                           aliases with a bounded RESET_DONE wait) -
+                           ResetBlock masks read from the device header, the
+                           map NOT the RP2040's - + Psm, the power-on state
+                           machine read for the watchdog's stage selection
+                           and for the erratum's guard, FRCE_ON deliberately
+                           absent
+    sysinfo.hpp            ChipId (manufacturer, part, the REVISION the
+                           errata are keyed by) + PACKAGE_SEL, how an image
+                           that was not told its package finds out - and
+                           asic(), which reads TBMAN's PLATFORM and not
+                           SYSINFO's, the chip having two registers of that
+                           name and SYSINFO's being the pre-production one
+    clock.hpp              the RP2040's clock model with this chip's tree:
+                           Xosc, Rosc (with the frequency randomiser),
+                           Lposc (a fourth root of clk_ref, in the always-on
+                           domain), PllSys/PllUsb over one PllBlock with the
+                           STICKY LOCK-LOSS, Clocks (the glitchless and aux
+                           muxes, 16.16 dividers, no clk_rtc), Resus,
+                           TickGenerator<consumer> (8.5 as a block of its
+                           own, one generator per timebase), FreqCounter,
+                           ClockOut<n>/ClockIn<n> + the task Clock<source,
+                           hz, crystal_hz, peri>; two CTRL registers are
+                           PASSWORDS, where a masked write is a refused write
+    pin.hpp                Gpio (SIO's word-wide verbs over TWO words, the
+                           bank being 48 pins wide) + Pin<n> (no port
+                           letter), the per-pin CTRL with its four overrides
+                           and STATUS, the pad register - and THE ISOLATION
+                           LATCH, this chip's own: PADS_BANK0 resets to 0x116
+                           with the latch set and the input buffer off, so
+                           every configuring verb writes the pad whole with
+                           ISO CLEAR or the pad answers nothing. The pin
+                           interrupts of 9.5, and erratum RP2350-E9's own
+                           workaround as a verb pair (the buffer kept off,
+                           read_pulsed() enabling it for the read alone)
+    spi.hpp                the SPI (12.3): TWO ARM PrimeCell SSPs, and THE
+                           DRIVER IS NOT HERE - the PL022 is written once in
+                           brio/pl022/spi.hpp. This file is what that file
+                           asks of a family: the pin table of 9.4 with its
+                           ONE function column (unlike the UART, this chapter
+                           gained no second), Rp2350Pl022 the CHIP TRAITS
+                           (register block, reset bits, interrupt lines, the
+                           atomic aliases, the DREQs, the pad setup, the
+                           run-time select pin, the busy-wait, and clk_peri
+                           as SSPCLK) - and the PUBLIC NAMES Pl022<n>,
+                           SpiHost<n, pins, ...>, SpiClient<n, pins>
+    i2c.hpp                the I2C (12.2): TWO Synopsys DW_apb_i2c
+                           controllers, the driver written once in
+                           brio/dw_apb_i2c/i2c.hpp. Here: the pin table's one
+                           function code over forty-eight pads, and
+                           Rp2350DwApbI2c the CHIP TRAITS - register block,
+                           reset bits, interrupt lines, atomic aliases,
+                           DREQs, the pad setup 12.2.1.3 asks for, the five
+                           open-drain verbs the unstick drives a line with
+                           over a BANK THAT IS TWO WORDS, the microsecond
+                           ruler it paces itself by, and clk_sys as ic_clk -
+                           + the PUBLIC NAMES DwApbI2c<n>, I2cHost<n, pins,
+                           ...>, I2cClient<n, pins>
+    adc.hpp                the ADC (12.4): Adc, a monostate - the package
+                           decides the input map, so FIVE INPUTS OR NINE, a
+                           four-bit AINSEL and a nine-bit round-robin where
+                           the RP2040 had three and five, and init() reads
+                           SYSINFO.PACKAGE_SEL and refuses when the silicon
+                           disagrees with the build; the 16.8 divider under
+                           the 96-cycle conversion, the eight-entry FIFO as
+                           interrupt and DMA request, the sampler's converter
+                           surface + AnalogIn<Pin> (whose claim DROPS THE
+                           ISOLATION LATCH, the one configuration erratum
+                           RP2350-E9 does not bite) + AdcInput (the sensor
+                           LAST, its number the package's) + Ref::avdd_pin,
+                           there being no ADC_VREF pin: the converter's own
+                           supply is the full scale
+    pio.hpp                the PIO (chapter 11): the nine instructions as
+                           constexpr encoders with this chip's pio_put /
+                           pio_get, PioProgram<N>, Pio<n> over THREE blocks
+                           that form a ring, PioSm<n, sm> + the chapter's
+                           programs as tasks (PioUartTx / PioUartRx,
+                           PioSquareWave, PioPwm). What this chip added and
+                           every item of it a verb: a VERSION field, GPIOBASE
+                           - the window that says which thirty-two pads a
+                           block sees, and which changes the meaning of every
+                           pin number - a CTRL write reaching the blocks
+                           either side, all eight flags on the lines, a
+                           masked input count, and a receive FIFO that can be
+                           four random-access registers instead of a queue
+    pwm.hpp                the PWM (12.5): Pwm the block, PwmSlice<n> over
+                           TWELVE slices where the RP2040 had eight - the
+                           four highest reaching a pad on the QFN-80 alone
+                           and being repeating timers on the QFN-60 - a
+                           SECOND shared interrupt line with a register set
+                           of its own (the line a template parameter, an app
+                           binding isr_pwm_wrap_0 or _1), and a divider whose
+                           last step is a whole 256, 12.5.2.6 forbidding a
+                           fraction there + the tasks PwmOutput (PwmChannel,
+                           max = TOP + 1), PwmPair, PwmEdgeCounter /
+                           PwmLevelCounter, PwmPeriodicTick<n, line>
+    dma_engine.hpp         NoDmaEngine, the empty slot's tag - and THE
+                           REQUEST NUMBERS (12.6.4.1), which on this chip is
+                           a FIELD any channel takes, so a transport names
+                           its peripheral's request without including the
+                           controller; not one row of the table is the
+                           RP2040's
+    dma.hpp                the DMA (12.6): Dma (the block, the security
+                           assignment read back) + DmaChannel<0..15> (the
+                           four aliases of which any may be the TRIGGER, the
+                           MODE in the top nibble of the count that makes a
+                           channel re-arm itself or run forever, an address
+                           step backward or by twos, the abort with erratum
+                           RP2350-E5's workaround) + DmaLine<0..3> (a line
+                           belongs to the core whose kernel serves it) +
+                           DmaTimer<n>, DmaSniffer, DmaMpu (read-only) +
+                           DmaTxEngine/DmaRxEngine<ch, Elem, line> for the
+                           transports' slots
+    bootrom.hpp            the mask ROM's public function table (5.4): two
+                           sets of well-known words, one per architecture,
+                           and TWO DIFFERENT LOOKUPS over them - a pointer
+                           on the Arm half, a jump instruction on the other,
+                           chosen by core_kind and not by the preprocessor.
+                           get_sys_info, the partition table and the ROM's
+                           own revision are wrapped; the flash functions
+                           belong beside the flash driver, reboot() would be
+                           a second spelling of the reset chapter's, and
+                           otp_access() is the OTP PROGRAMMING entry point
+                           and so is not here at all
+    flash.hpp              the external quad-SPI chip and the two blocks
+                           between it and the bus: Qmi + QmiWindow<0|1> (the
+                           SSI's replacement and not its rename - two 16 MB
+                           windows, a transfer described phase by phase, four
+                           translation panes a window, and a DIRECT MODE that
+                           disconnects them all), Xip (the cache whose flush
+                           is a MAINTENANCE ADDRESS and not a register, with
+                           erratum RP2350-E11 answered in clean_all()) and
+                           Flash, the engine over the bootrom's own functions
+                           - every erase, program and raw command a WINDOW
+                           with the memory interface disconnected. THERE IS
+                           NO SECOND STAGE: the way back is the ROM's own XIP
+                           setup function, copied out of boot RAM into SRAM
+    nvm_flash.hpp          QspiFlashPartition (the top 64 KB the linker's
+                           flash region stops short of, a CONSTANT floor
+                           read back against __brio_flash_end) + QspiFlash,
+                           the FlashMedia over it with THE PAGE AS THE CELL
+                           (256 under an erase of 4096, the bootrom's
+                           program function taking whole pages). A MEDIUM
+                           AND NOTHING ABOVE IT: neither the heap nor the
+                           journal is instantiated on this family, by the NV
+                           stack review's decision, so a program gets a band
+                           of flash and whatever it keeps there is its own
+                           structure. A write is a HOLE IN THE PROGRAM and
+                           not a wait
+    sha256.hpp             Sha256, a monostate: the compression function of
+                           FIPS 180-4 IN HARDWARE AND NOTHING ELSE - no
+                           length register, no padding, no context to save -
+                           so the padding is software's and hash() builds it
+                           with util/sha256.hpp's own tail, the two unable to
+                           drift apart; BSWAP left set and every word loaded
+                           little-endian, which reconciles a little-endian
+                           bus with a big-endian standard and makes a word
+                           write and four byte writes one operation; the
+                           WDATA_RDY handshake polled before every write with
+                           ERR_WDATA_NOT_RDY a first-class verb, because a
+                           suite that does not read it cannot tell a lost
+                           word from a wrong answer; the DMA request is for a
+                           WHOLE BLOCK, there being no FIFO
+    trng.hpp               Trng, a monostate: a ring oscillator with no tie
+                           to the clock tree, sampled every SAMPLE_CNT1
+                           system cycles, three entropy checks of which
+                           AUTOCORR_ERR is FATAL until the block is reset
+                           (recover() the only way back) and two are the
+                           block refusing entropy it does not trust, so
+                           read_blocking() goes round again and COUNTS; a
+                           generation time that is not deterministic, so
+                           every wait is bounded and says when it ran out;
+                           the sample interval stated as a TIME and turned
+                           into cycles, a shorter one having been measured to
+                           stop the block
+    otp.hpp                Otp, THE READ SIDE ONLY AND DELIBERATELY SO: no
+                           SBPI, no bootrom otp_access, not even a soft lock
+                           written, because every bit of this array climbs
+                           once and among them are the ones that remove a
+                           debug port, a processor architecture or unsigned
+                           code for ever. The four read windows of 13.1, two
+                           of which FAULT instead of lying, with read()
+                           asking the page's lock first so a caller gets an
+                           empty optional and never a fault; the ECC of 13.6
+                           decoded in software off the raw row, the hardware
+                           correcting transparently and telling nobody; the
+                           critical flags printed and never written
+    usb.hpp                Usb: the chip's device controller as the stack's
+                           endpoint controller - the RP2040's block with one
+                           new duty, MAIN_CTRL.PHY_ISO, lifted LAST OF ALL
+                           after everything else is configured - the
+                           dual-port RAM's endpoint and buffer control words
+                           with the two-step store 12.7.3.7.1 prescribes,
+                           three reset values moved (so the registers are
+                           written WHOLE), DP and DM as bank 1 pads that
+                           could be GPIO and are kept from it by two facts,
+                           erratum RP2350-E12 making CLK_SYS AT LEAST TEN PER
+                           CENT ABOVE CLK_USB a compile-time assertion, and a
+                           shelf of diagnostics that are a report and never a
+                           path
+    uart.hpp               the UART (12.1): TWO ARM PL011s, and THE DRIVER IS
+                           NOT HERE - it is written once in
+                           brio/pl011/uart.hpp. Here: the pin table of 9.4
+                           with its TWO FUNCTION COLUMNS, every group's
+                           flow-control pads being a second data pair (which
+                           is why the IP file keeps the pad's function code
+                           OPAQUE and this file makes it a TYPE),
+                           Rp2350Pl011 the CHIP TRAITS - register block,
+                           reset bits, interrupt lines, guard, platform,
+                           atomic aliases, DREQs, pad setup, and clk_peri as
+                           UARTCLK, so the divisor comes from Clock::pclk_hz
+                           and never from a second statement of the rate -
+                           + the PUBLIC NAMES Pl011<n> and Uart<n, pins, ...>
   gfx/                   drawing, pure and target-independent
     surface.hpp            Coord/Extent/Rect + clip() (16 bits over the WHOLE
                            domain, because the far edge is never formed) +
@@ -2317,6 +2853,22 @@ brio/                    the framework, twelve strata:
     sim_flash.hpp          SimFlash: FlashMedia over RAM for the host tests
                            (configurable geometry, power-cut injection,
                            simulated reflash, wear counters)
+    sim_pl011.hpp          THE IP STRATA'S SECOND REALIZATION, one file each
+    sim_pl022.hpp          (sim_dw_apb_i2c.hpp beside them): a PL011, a PL022
+    sim_dw_apb_i2c.hpp     and a DW_apb_i2c MADE OF RAM, each with the chip
+                           traits its IP file asks of a family answered by NO
+                           FAMILY AT ALL - the register block an array at the
+                           block's own offsets with the block's own reset
+                           values, a reset that memsets it, an interrupt
+                           controller that counts, pads that remember what
+                           they were handed to, a busy-wait that counts
+                           microseconds instead of spending them. That is what
+                           proves the claim "this driver knows no chip", and
+                           each header is compiled twice - by the host suite
+                           and by a family's compile check - so the proof is
+                           made once per compiler. What is NOT modelled is the
+                           wire: a test that wants a received byte wants
+                           silicon
     shared_segment.hpp     SharedSegment: a named region two processes
                            reach, OWNED BY THE PROGRAM - the name is the
                            contract and never a path (macOS has no

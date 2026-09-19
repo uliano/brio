@@ -37,6 +37,33 @@ any RP2040 board (SWD on GP2/GP3, the UART on GP4/GP5).
   0x001560ba)"); a build from OpenOCD's git identifies both - so a
   programmer entry may name its own `"openocd"` and the shared one
   stays the release ([../rp2040/README.md](../rp2040/README.md)).
+- **And on the RP2350 the ARCHITECTURE decides it.** That chip carries
+  a Cortex-M33 pair and a Hazard3 RISC-V pair, and the same probe
+  reaches both - but only through Raspberry Pi's own OpenOCD fork, the
+  third build on this bench. The 0.12.0 release does not know the chip
+  at all; the git build attaches to its Arm cores and cannot debug
+  Hazard3, because its RISC-V target driver takes no `-dap` and this
+  chip's debug module is reached through one. The fork examines all
+  four cores, serves gdb on either architecture and flashes from either
+  side ([../rp2350/README.md](../rp2350/README.md) carries the table and
+  the core selection).
+- **The state-independent flash verb**, the RP2350's and no other
+  target's: `brio flash` runs TWO sessions there. The first is a DAP
+  with NO TARGET behind it, which sets and clears the rescue-restart
+  bit in the RP-AP's control register - the one reset that works with
+  the clocks stopped and the core power domain down, and the reason it
+  cannot be the target script's own rescue path is that the script
+  examines a core first, which is exactly what a rescue is for. The
+  second programs as core 0 of the Arm pair - after the rescue that is
+  what is running, whatever the image in the flash named - and ends in
+  a reset that hands the chip back to the bootrom and so to the new
+  image's own architecture. So a board is recoverable from any state a
+  program can put it in, with no button and no replug, and an image of
+  the other architecture is no obstacle: neither could be halted first.
+  The sequences are `cli/bench/flash.py`'s and are not repeated here.
+- **The probe's firmware is old enough to be nagged about**: the fork
+  reports it and falls back to a "low-performance workaround". That is
+  cosmetic, and no probe is updated for it.
 - **udev**: no rule for the Raspberry Pi vendor id (2e8a) ships with
   OpenOCD's contrib rules or probe-rs's; one line by vendor id
   (`SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", MODE="0660",
@@ -75,5 +102,5 @@ any RP2040 board (SWD on GP2/GP3, the UART on GP4/GP5).
   on this desk.
 
 Not yet driven by brio through this probe: any target but the RP2040
-(it would drive the SAM C21 at 3.3 V and the STM32G0 Nucleos as any
-CMSIS-DAP probe would).
+and the RP2350 (it would drive the SAM C21 at 3.3 V and the STM32G0
+Nucleos as any CMSIS-DAP probe would).

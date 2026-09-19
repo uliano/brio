@@ -33,6 +33,21 @@
 #                       Pico W, a WeAct board), written by OpenOCD over
 #                       multidrop SWD through a CMSIS-DAP probe - the
 #                       Raspberry Pi Debug Probe
+#      f429zi f446re f411ce   STM32F4 boards, written by OpenOCD over SWD
+#                       through an ST-LINK (a board's own, or a standalone V3)
+#      v203c8           CH32V203C8, written by WCH's OpenOCD fork through a
+#                       WCH-Link over this family's two-wire debug port
+#      weact2350b weact2350b-rv   ONE RP2350 board under TWO TYPES, because
+#                       on this chip the ARCHITECTURE is a build axis: the
+#                       same silicon runs a Cortex-M33 pair or a Hazard3
+#                       RISC-V pair and the image in the flash decides which,
+#                       so the type carries the preset and therefore the
+#                       architecture. Written by RPI_OPENOCD below (the only
+#                       build that reaches this chip) through the same
+#                       Raspberry Pi Debug Probe, by a verb that is
+#                       STATE-INDEPENDENT: a rescue over the debug port
+#                       alone, then the programming as core 0 of the Arm
+#                       pair, then a reset (flash.py)
 #
 #  CONSOLES. A board with a serial-less USB bridge (a CH340 has no unique
 #  serial: two of them collide in /dev/serial/by-id) is addressed by
@@ -121,6 +136,26 @@ BOARDS = {
         "id": None,
         "console": "/dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__E666666666666666-if01",
         "programmer": {"type": "openocd_cmsisdap", "serial": "E666666666666666",
+                       "backend": "usb_bulk"},
+    },
+    "R": {
+        # A WeAct RP2350B core board on a second Raspberry Pi Debug Probe,
+        # wired exactly as the RP2040 one above. THE ARM HALF.
+        "board": "weact2350b",
+        "id": None,
+        "console": "/dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__E777777777777777-if01",
+        "programmer": {"type": "openocd_cmsisdap", "serial": "E777777777777777",
+                       "backend": "usb_bulk"},
+    },
+    "R-rv": {
+        # THE SAME PIECE OF HARDWARE, built for the RISC-V pair: one
+        # physical board, two entries, because the board TYPE carries the
+        # preset and the preset carries the architecture. Same console,
+        # same probe, same serial - only "board" differs.
+        "board": "weact2350b-rv",
+        "id": None,
+        "console": "/dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__E777777777777777-if01",
+        "programmer": {"type": "openocd_cmsisdap", "serial": "E777777777777777",
                        "backend": "usb_bulk"},
     },
     "I": {

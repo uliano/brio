@@ -60,6 +60,7 @@
 #include "util/rgb_lamp.hpp"
 #include "util/ring.hpp"
 #include "util/serial_port.hpp"
+#include "util/sha256.hpp"
 #include "util/spi_bus.hpp"
 #include "util/stream.hpp"
 #include "util/testbench.hpp"

@@ -22,7 +22,7 @@ then, it moves in the open.
 ## The two concepts
 
 The contract is about BLOCKS, not about DMA. Nothing below asks how a
-buffer gets full or drained; on the three strata that have block
+buffer gets full or drained; on every stratum that has block
 engines both concepts are satisfied by DMA engines, and a machine with
 no DMA can satisfy them from an interrupt handler filling the same
 buffers.
@@ -48,7 +48,7 @@ buffers.
 ### Realizations
 
 Common to all: the two concepts, `BlockRelay`, and the engine NAMES -
-the three strata that have block engines spell all four identically
+every stratum that has block engines spells all four identically
 (`DmaTxEngine`, `DmaRxEngine`, `DmaLoopEngine`, `DmaPingPongEngine`),
 with the element type as the beat and the same
 `kick`/`abandon`/`faults`/`harvest` hardening. What differs is what the
@@ -62,6 +62,8 @@ controller under them can do.
 | ch32v00x | none yet: `DmaTxEngine` and `DmaRxEngine` alone in `ch32v00x/dma.hpp` | the controller has a circular mode (CFGR.CIRC) and no multiplexer - the channel is the request - so the two block engines would be the G0's shape on seven fixed channels; born with their first block user on this family, a source the ADC's stall makes worth measuring first ([the target's document](../ch32v00x/dma.md)) |
 | ch32v203 | the same two names in `ch32v203/dma.hpp` | the player rides the controller's HARDWARE CIRCULAR MODE as on the STM32G0; the source does not, for the same doctrine, and this stratum measured it again - a handler whose whole body is read-CNTR-and-disable found THREE of the next thirty-two items already written at the controller's own speed - so the source stops itself at every block and re-arms the other buffer from the completion. One family fact holds above both: in Sleep no bus master but the core gets a cycle, so a stream here holds the program awake or it stops ([the target's document](../ch32v203/adc.md), whose converter is these engines' first user) |
 | stm32f4 | none yet: `DmaTxEngine` and `DmaRxEngine` alone in `stm32f4/dma.hpp` | this controller's DOUBLE BUFFER is a better BlockSource than either shape above - the hardware swaps the memory pointer at every end of transaction, so there is no re-arm window and no race between a handler and a running stream, and CT names the half the caller may hold - while the player is plain circular mode as on the G0; born with their first block user, and the re-arm gap the transfer engines pay for meanwhile is measured ([the target's document](../stm32f4/dma.md)) |
+| rp2040 | none yet: `DmaTxEngine` and `DmaRxEngine` alone in `rp2040/dma.hpp` | this controller reaches the two shapes by a road none of the others has - a channel may CHAIN TO another at completion, and an address may WRAP at a power-of-two boundary - so a player is a pair of channels chained to each other, or one channel with a ring on its read side, and a ping-pong source is two channels chained the same way with no handler in the loop at all; born with their first block user on this family |
+| rp2350 | none yet: the same two engine names in `rp2350/dma.hpp` | the RP2040's chaining and its address wrap, plus a MODE in the top nibble of the transfer count that makes a channel re-arm ITSELF or run forever, which is the first hardware circular mode on this lineage and would carry a player with no second channel and no handler; two of the chapter's errata bear on exactly that road (a chain fired by an abort, a chain lost after a zero-length transfer) and are answered in the driver, so a block user here starts from the engines and not from the controller |
 | host | a scripted ping-pong source (`test_block_stream`) | honest to the engines' contract - overrun skips the lap, release restarts - so the relay's loan timing and stall drain are tested to the dispatch |
 
 ## BlockRelay

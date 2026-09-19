@@ -318,7 +318,7 @@ def _sam_bit_map_is_complete():
 
 
 assert _sam_bit_map_is_complete(), \
-    "cli/cli/bench/fuses.py: SAM_FUSES + SAM_PRESERVED must tile bits 0..63 of table 9-4"
+    "cli/bench/fuses.py: SAM_FUSES + SAM_PRESERVED must tile bits 0..63 of table 9-4"
 
 
 def sam_bit_span(first, width):

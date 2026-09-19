@@ -2,7 +2,10 @@
 
 WeAct Studio's RP2350B core board: an **RP2350** in the QFN-80 package
 (48 GPIO, eight ADC inputs; stepping A2 on the one at the bench) behind
-a **16 MB Winbond W25Q128** quad-SPI flash, a 12 MHz crystal, USB-C, and
+a **16 MB Winbond W25Q128** quad-SPI flash (its JEDEC id reads EF 40 18,
+and the bootrom finds it in quad-I/O mode - EBh at clock divisor 3, the
+first combination it tries - with no status write by anybody,
+[../rp2350/flash.md](../rp2350/flash.md)), a 12 MHz crystal, USB-C, and
 every user GPIO on its header rows. Design files: WeAct's own repository
 (WeActStudio.RP2350BCoreBoard on GitHub, schematic and pinout).
 
@@ -29,8 +32,8 @@ every user GPIO on its header rows. Design files: WeAct's own repository
   GP0 (TX) / GP1 (RX)**, crossed, is the console
   ([../probes/raspberry-pi-debug-probe.md](../probes/raspberry-pi-debug-probe.md)),
   addressed by `/dev/serial/by-id` under the probe's serial. The board's
-  own USB-C is a second console's road, through the chip's USB
-  controller, when that chapter arrives.
+  own USB-C is a second console's road, through the chip's own USB
+  device controller ([../rp2350/usb.md](../rp2350/usb.md)).
 - **Probe**: the 4-pad header - 3V3, SWDIO, SWCLK, GND - takes the Debug
   Probe's port D on three wires; THE 3V3 PAD STAYS UNCONNECTED (each
   board on its own USB, two regulators never in parallel). No reset
@@ -39,8 +42,10 @@ every user GPIO on its header rows. Design files: WeAct's own repository
 - **The package is a build fact here**: `RP2350_PACKAGE=b` is what makes
   GP30..GP47 legal and puts the ADC's inputs on GP40..GP47 rather than
   on GP26..GP29.
-- **Identity**: no die serial; the flash chip's unique id is the board's,
-  when the flash chapter exists to read it. The manifest's `id` is empty.
+- **Identity**: no die serial; the flash chip's 64-bit unique id is the
+  board's, read through the flash chapter
+  ([../rp2350/flash.md](../rp2350/flash.md)). The manifest's `id` is
+  empty.
 - Manifest types `weact2350b` and `weact2350b-rv`; the 16 MB flash and
   the QFN-80 package are what the `rp2350-*` presets are configured for.
 

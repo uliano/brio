@@ -19,12 +19,13 @@ hardware or names a timer.
 ### Realizations
 
 Common to all: the `MeterSource` concept is satisfied by the
-`MeterLatch` itself, and `MeterSampler` walks latches - so the target's
-meters are all of one shape on the seven strata: a task over a timer
+`MeterLatch` itself, and `MeterSampler` walks latches - so where a
+target has meters at all they are of one shape: a task over a timer
 in a capture mode whose reading verbs a capture ISR calls to fill the
 latch (`period_ticks()`, `width_ticks()`). What differs is which
-timers offer which capture, and one meter that measures a different
-thing under a similar name.
+timers offer which capture, one meter that measures a different
+thing under a similar name, and whether the silicon has a capture unit
+in the first place.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
@@ -34,6 +35,8 @@ thing under a similar name.
 | ch32v00x | `TimPeriodMeter<Tim>` (period and width, the PWM input mode on TI1 costing both channels) and `TimIntervalMeter<Tim, ch>` (`ch32v00x/tim.hpp`) | the G0's two names on the F1's timers, `TimIntervalMeter` the same interval-between-edges meter and not a pulse-width one; the capture can carry the captured LEVEL in bit 16 of the channel register (CAPLVL) and reads 0xFFFF after an overflow (CAPOV), two facts the F1 never had ([the target's document](../ch32v00x/tim.md)) |
 | ch32v203 | `TimPeriodMeter<Tim>` (period and width, PWM input mode on TI1, both channels) and `TimIntervalMeter<Tim, ch>` (`ch32v203/tim.hpp`) | the G0's two names on the F1's timers again, with NONE of the sister family's additions - no CAPLVL, no CAPOV, no dual-edge capture (that register is another device class's); what this family offers a meter with nothing attached is a pad the PORT can drive, the alternate-function input being the pad's own input buffer, so the CPU makes the edges a capture measures ([the target's document](../ch32v203/tim.md)) |
 | stm32f4 | `TimPeriodMeter<Tim>` (period and width, PWM input mode - a slave controller and two channels) and `TimIntervalMeter<Tim, ch>` (`stm32f4/tim.hpp`) | the G0's two names again, `TimIntervalMeter` the same interval-between-edges meter; what this family adds is a capture input that needs no pad at all - TIM5's option register puts the LSI, the LSE or the RTC wake-up on its channel 4 and TIM11's puts HSE_RTC on its channel 1, so an oscillator is weighed against the core clock with nothing attached ([the target's document](../stm32f4/tim.md)) |
+| rp2040 | none | THIS SILICON HAS NO CAPTURE UNIT: the PWM block's counter can be clocked or gated by its own B pin but nothing latches it on an edge, so there is nothing for a capture ISR to read and a `MeterSource` over it would be a fiction. What this family offers instead is `PwmEdgeCounter` / `PwmLevelCounter` - a frequency and a duty obtained by COUNTING over a known window and read by the loop, not by the wire's own edges ([the target's document](../rp2040/pwm.md)) |
+| rp2350 | none | the same absence for the same reason, over twelve slices instead of eight ([the target's document](../rp2350/pwm.md)) |
 | host | a scripted latch (`test_meter_sampler`) | the sampler's discard-stale and labelling tested to the tick |
 
 ```

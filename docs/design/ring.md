@@ -72,6 +72,7 @@ the one constant it reads and therefore the path a given size takes.
 | ch32v00x | 4 | the same - a 32-bit index is one access on this core too |
 | ch32v203 | 4 | the same on the bigger QingKe core (`ch32v203/platform.hpp`), whose guard is a `csrrci` on mstatus.MIE |
 | rp2040 | 4 | the same - but the guard is PRIMASK, which is PER CORE, so a ring shared BETWEEN the two cores is `util/inbox.hpp`'s and not this one ([kernel.md](kernel.md), section 12) |
+| rp2350 | 4 | the same, whichever of this chip's two processor architectures the image is built for - the guard is PRIMASK on the Cortex-M33 half and `mstatus.MIE` on the Hazard3 one, and PER CORE in both spellings, so a ring shared BETWEEN the cores is `util/inbox.hpp`'s and not this one |
 | stm32f4 | 4 | the same |
 | host | 4, and a second test platform stating 1 | both paths run under the same suite (`test_ring`), the guarded one on the platform that states 1 |
 

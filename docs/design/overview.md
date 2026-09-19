@@ -250,6 +250,27 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   errata stay per family, because that is where they differ. A RISC-V
   family would get its own core stratum the same way, at its second
   member, never earlier.
+- **An IP stratum sits in the same place, for a peripheral.** A block
+  licensed by more than one vendor and dropped into their chips
+  REGISTER FOR REGISTER earns a directory of its own named for the
+  design and not for a silicon (`pl011/`, `pl022/`, `dw_apb_i2c/`),
+  above `util/` and below the families, under the core stratum's rule
+  exactly: born at the SECOND family that carries it, with both copies
+  in hand, gated by the images. What earns one is that the register
+  description is not merely SIMILAR between the chips but IDENTICAL -
+  the same names, the same offsets, the same bits - so there is nothing
+  to reconcile and nothing to gain by writing it twice; a peripheral
+  that is only a relative (the F1's event machine under two vendors'
+  names, say) does not qualify and stays one file per family. An IP
+  file knows no chip and includes nothing of a family: what a family
+  owes it is stated as a CONCEPT and satisfied by a TRAITS type of the
+  family's own - where the registers are, the reset, the interrupt line
+  and its controller, the critical section, which pads are legal, which
+  rate clocks it, which DMA requests it raises - while the family's own
+  header keeps the PUBLIC NAMES an application writes. The claim "this
+  driver knows no chip" is itself proved by a second realization with
+  no silicon under it, a block made of RAM in `host/` that the host
+  suite and a family's compile check both build.
 - **Board facts vs device facts.** Which timer reaches which port,
   which USART sits on which pins per route, are facts of the DEVICE:
   on the AVR tables inside `tca.hpp`, `usart.hpp`, on the two ARMv6-M
@@ -332,21 +353,21 @@ cites another stratum's.
 
 | contract | its table | the exception in one phrase |
 |---|---|---|
-| the platform | [kernel.md](kernel.md), section 11 | `atomic_width` 1 on the AVR; `idle()` takes the armed mode three different ways, and is a WFE on the two QingKe cores; a breakpoint is a NOP, a HardFault or an `ebreak`; `idle_until` on the tickless G0 alone |
-| the timebase | [kernel.md](kernel.md), section 9 | the AVR's tick runs through every sleep; SysTick stops in standby and a Stop; the LPTIM one counts through and is tickless |
-| panic, reset, watchdog | [kernel.md](kernel.md), section 10 | the record's survival (EEPROM, RWWEE journal, bank 2); the fault body as the panic path on the ARM strata; the watchdog kick under two names and three contracts |
+| the platform | [kernel.md](kernel.md), section 11 | `atomic_width` 1 on the AVR; `idle()` takes the armed mode three different ways, and is a WFE on the two QingKe cores; a breakpoint is a NOP, a HardFault or an `ebreak`; `idle_until` on the tickless G0 alone; one platform type PER CORE on the two RP families, and on the RP2350 one type for both processor architectures |
+| the timebase | [kernel.md](kernel.md), section 9 | the AVR's tick runs through every sleep; SysTick stops in standby and a Stop; the LPTIM one counts through and is tickless; the RP2350's is SysTick or a platform timer by architecture, under one surface and one vector name |
+| panic, reset, watchdog | [kernel.md](kernel.md), section 10 | the record's survival (EEPROM, RWWEE journal, bank 2); the fault body as the panic path on the ARM strata; the watchdog kick under three names and as many contracts |
 | the ring | [ring.md](ring.md) | the atomic width alone |
-| the clock | [clock.md](clock.md) | prescalers (AVR), no dynamic clock by position (SAM), a pack of rate tuples with a regime (G0), one divider under one root (CH32V00x); `delay_us` capped on the 32-bit strata |
-| the Uart | [serial.md](serial.md) | seventeen verbs in common; four ways to name pins, one or three vectors, DMA slots on six strata and bulk verbs on four |
-| the SPI bus | [spi-bus.md](spi-bus.md) | the rate's unit (an enum or a divisor), a frame size on the G0 and the CH32V00x, the client four surfaces by position with one published integer in common |
-| the I2C bus | [i2c-bus.md](i2c-bus.md) | the rate arithmetic's shape; `actual_scl_hz`/`scl_hz` and `bus_state`/`idle` are NOT one function under two names |
+| the clock | [clock.md](clock.md) | prescalers (AVR), no dynamic clock by position (SAM), a pack of rate tuples with a regime (G0), one divider under one root (CH32V00x), a generator per clock domain and no bus prescaler at all (the RP families); `delay_us` capped on the 32-bit strata, and on a timer that is neither core's on the RP2350 |
+| the Uart | [serial.md](serial.md) | seventeen verbs in common; four ways to name pins, one or three vectors, DMA slots on most strata and bulk verbs on some - and on the two RP families the DRIVER ITSELF is shared, being the PL011's IP stratum |
+| the SPI bus | [spi-bus.md](spi-bus.md) | the rate's unit (an enum or a divisor), a frame size on the G0 and the CH32V00x, the client a surface per position with one published integer in common, and the PL022's driver shared by the two RP families |
+| the I2C bus | [i2c-bus.md](i2c-bus.md) | the rate arithmetic's shape; `actual_scl_hz`/`scl_hz` and `bus_state`/`idle` are NOT one function under two names; the DesignWare block's driver shared by the two RP families |
 | CAN | [can.md](can.md) | the frame's reach (classic against the FD superset), the timing's units and the search's rule, the error state as three flags or as one observable |
 | the power model | [power.md](power.md) | each family's ladder mapping; where the tick stops and which site resyncs it |
 | the USB device stack | [usb.md](usb.md) | each family's endpoint controller behind the packet contract, and what its RAM or FIFO adds |
-| flash storage | [nv-heap.md](nv-heap.md), [nv-journal.md](nv-journal.md) | the geometries; the AVR keeps its small values in the EEPROM |
-| block streams | [block-stream.md](block-stream.md) | the engine names identical on the three strata that have block engines, the CH32V00x's and the STM32F4's transfer engines waiting for a block user; the circular mode serves a player and not a source |
-| meters | [meters.md](meters.md) | `TimIntervalMeter` is not a pulse-width meter |
-| analog | [analog.md](analog.md) | `Ref` is four vocabularies because a reference is four different things, one of them the rail alone; `set`/`write` on the DAC |
+| flash storage | [nv-heap.md](nv-heap.md), [nv-journal.md](nv-journal.md) | the geometries; the AVR keeps its small values in the EEPROM; a family may have the medium and mount NOTHING on it, by the NV review's decision |
+| block streams | [block-stream.md](block-stream.md) | the engine names identical wherever block engines exist, and several strata's transfer engines waiting for a block user; the circular mode serves a player and not a source |
+| meters | [meters.md](meters.md) | `TimIntervalMeter` is not a pulse-width meter; a family with no capture unit has no meter at all |
+| analog | [analog.md](analog.md) | `Ref` is several vocabularies because a reference is several different things, one of them the rail alone; `set`/`write` on the DAC |
 | pins and PWM channels | below | - |
 
 Two contracts have no design page of their own and keep their tables
@@ -354,9 +375,14 @@ here.
 
 **Pins.** Common to all: `Pin<'A', 5>` and `PinRef`, `set` /
 `clear` / `toggle` / `read` / `output` / `input(PinPull)` / `port` /
-`ref`, and `duty()` (a `Pin` is a `PwmChannel` of one step); avrdx,
-samc21 and stm32g0 add `pull(PinPull)` / `is_output` /
-`configure(PinConfig)`. What differs is what a pad can be told to do,
+`ref`, and `duty()` (a `Pin` is a `PwmChannel` of one step). Beyond
+that, `pull(PinPull)` and `is_output` are on every stratum whose pad
+carries its pull in a register of its own - the two QingKe families put
+it in the OUTPUT register and have neither - and a `PinConfig` carries
+whatever else a pad can be told, as a `configure(...)` verb on the AVR,
+the SAM and the two ST families and as an argument to every configuring
+verb on the two RP ones, where the pad register is written whole.
+What differs is what a pad can be told to do,
 and how it is handed to a peripheral.
 
 | stratum | realization | beyond the contract |
@@ -364,11 +390,14 @@ and how it is handed to a peripheral.
 | avrdx | `Pin` in `avrdx/pin.hpp` | `pull(PinPull)` and `input(PinPull)` as on the other two, with a `PinPull` that has no `down` - the family has no pull-down, and the missing enumerator is the refusal; `sense()`, `flag()`, `clear_flag()` (the pin interrupts are the PORT's here), `invert()`, `input_enable(bool)` (the input buffer, in a field shared with the sense: it leaves an armed sense at INTDISABLE); no `function()`/`release()` - a pad is handed to a peripheral by that peripheral's PORTMUX route; `PinSet` |
 | samc21 | `Pin` in `samc21/pin.hpp` | `function(PinFunction)` hands the pad to a peripheral function letter and `release()` takes PMUXEN off - the pin back to PORT as it was; `input_enable(bool)` (INEN, the same buffer with no sense beside it); `strong_drive()`; the WRCONFIG multi-pin engine (`configure_mask`); no `PinSet` |
 | stm32g0 | `Pin` in `stm32g0/pin.hpp` | `function(PinFunction)` with the AF number, and `release()` = `analog()`, the reset state - THE SAME NAME AS THE SAM'S WITH A DIFFERENT LANDING; `output(level)` before the mode (the port-clock rule); `analog()` is a MODE, not the input buffer alone; `read_out()`; speed and open drain in `PinConfig`; `PinSet` |
+| stm32f4 | `Pin` in `stm32f4/pin.hpp` | the STM32G0's block register for register, with three differences a caller can see: NO BRR, so `clear()` is a store into the upper half of BSRR - still one store; the port clock is on AHB1 and every configuring verb opens it; and THE RESET STATE IS INPUT FLOATING, so `release()` = `analog()` parks a pad in a state that is NOT the one it was born in - said in the header, because the G0's equation of the two does not hold here either; `function(PinFunction)` with the AF number, whose meaning on a pad is the DATASHEET's table and not a header symbol; `output(level)`, `read_out()`, `pull(PinPull)`, `is_output`, `has_function`; speed and open drain in `PinConfig`; `PinSet` |
 | ch32v00x | `Pin` in `ch32v00x/pin.hpp` | `function(PinDrive)` takes NO selector: a pad has one default alternate function on this family and the remaps that move it are AFIO's (`ch32v00x/afio.hpp`, a verb of the resource that owns the pad); `release()` is the reset state, a FLOATING INPUT, and `analog()` a separate landing - the G0's equation of the two does not hold here; `input(PinPull)` pulls through the output register (the one-bit mode of this family); no `pull()`, `is_output` or `PinConfig` |
 | ch32v203 | `Pin` in `ch32v203/pin.hpp` | `function(PinDrive, PinSpeed)` takes NO selector, as on the sister family - which peripheral a pad carries is the remap register's (`ch32v203/afio.hpp`); the MODE field IS the speed, so every output verb takes one (50 MHz by default); `input(PinPull)` pulls through the output register; `release()` is the reset state, a FLOATING INPUT, and `analog()` a separate landing; `nibble()` reads a pin's four bits back; the whole-port `out_write` and `configure_pins(mask, nibble)`; the CONFIGURATION LOCK no other stratum has (`lock<Mask>()` / `lock(mask)` / `locked()` / `locked_pins()`, one way until a reset); `PinRef` with `read`/`write`/`toggle` beside `set`/`clear`; no `pull()`, `is_output` or `PinConfig` |
+| rp2040 | `Pin` in `rp2040/pin.hpp` | THERE IS NO PORT LETTER: the bank is one flat numbering, `Pin<25>`, and `Gpio` beside it offers the word-wide verbs SIO gives the whole bank at once; `function(PinFunction)` hands the pad to a peripheral by the function column the pad table names and `release()` takes it back to SIO, `analog()` is a landing of its own (the digital input buffer off, the output driver off) for an ADC pad, `pull(PinPull)`, `input(PinPull)`, `is_output`; every configuring verb RELEASES THE TWO PAD BLOCKS FROM RESET first, because on this chip they come up held there; no `PinSet` |
+| rp2350 | `Pin` in `rp2350/pin.hpp` | the RP2040's flat numbering over a bank that may be 48 pins wide, so `Gpio`'s word-wide verbs speak TWO words; `PinConfig` carries the pad whole and every configuring verb writes it - AND THE ISOLATION LATCH IS WHAT MAKES THAT NECESSARY: the pad comes up isolated (9.7), the latch freezing the output enable, the level AND the pulls, so a pad configured the RP2040's way would do nothing at all and "writing the pad IS taking it out of isolation" is this file's rule; `isolate(bool)` / `isolated()` are the latch as a verb, and `input_enable(bool)` with `read_pulsed()` are THE FLOATING-PAD ERRATUM AS A PAIR - the input buffer kept off and enabled for the length of one read, because a pad nothing drives leaks high against its own pull-down on this stepping |
 | host | none | - |
 
-**PWM channels.** Common to the seven: the `PwmChannel` concept
+**PWM channels.** Common to all: the `PwmChannel` concept
 (`max` + `duty(v)`, `util/pwm_channel.hpp`), `RgbLamp` over any three,
 and `Pin` as the one-step channel. The realizations are named for
 their timer, and an application picks one in its board file:
@@ -381,6 +410,7 @@ their timer, and an application picks one in its board file:
 | ch32v00x | `TimPwm<Tim, ch, top>`, `TimPairPwm<Tim, ch, top>` (the complementary pair: under TIM1's break unit as OCx/OCxN, or on TIM2 as channel ch with channel ch + 2 under DTCR, the dead time in each block's own unit) (`ch32v00x/tim.hpp`) | the G0's two names on the F1's timers; a TIM2 pair costs two channels where a TIM1 pair costs one; the timers take a static clock alone, as on the G0 |
 | ch32v203 | `TimPwm<Tim, ch, top>`, `TimPairPwm<Tim, ch, top>` (the complementary pair with dead time, on TIM1 alone - the general-purpose timers of this family have no break unit and no complementary output) (`ch32v203/tim.hpp`) | the G0's two names on the F1's timers; the dead time is counted in tDTS - TIMxCLK divided by CTLR1.CKD and NOT by the counter's prescaler - so a pair holds the same absolute dead band at every PWM frequency; the timers take a static clock alone, as on the G0, and what they count is HCLK at every rate this stratum makes |
 | rp2040 | `PwmOutput<pin, top>`, `PwmPair<pin_a, pin_b, top>` (a slice's A output and its complement on B) (`rp2040/pwm.hpp`); `PioPwm<n, sm, pin, period>` (`rp2040/pio.hpp`) | the channel is named by its PAD and not by a timer - eight slices of two outputs, GPIO n belonging to slice (n / 2) mod 8 - and `max` is TOP + 1; the pair's DEAD TIME IS ARITHMETIC, two levels and an inversion, because no dead-time unit exists here, so it lands on one edge in the plain mode and on both in the phase-correct one; and the second realization is not a timer at all but a state machine counting the period, the only stratum where a PWM channel is a program |
+| rp2350 | `PwmOutput<pin, top>`, `PwmPair<pin_a, pin_b, top>` (`rp2350/pwm.hpp`); `PioPwm<n, sm, pin, period>` (`rp2350/pio.hpp`) | the RP2040's two realizations over TWELVE slices instead of eight, the pad still naming the channel and `max` still TOP + 1 - with the four highest slices reaching a pad only in the package that bonds the upper pads and being repeating timers in the other; the dead time is arithmetic here too; and the divider's last step is A WHOLE 256, the chapter forbidding a fraction there, which is the one arithmetic difference a caller can see |
 | stm32f4 | `TimPwm<Tim, ch, top>`, `TimPairPwm<Tim, ch, top>` (the complementary pair with dead time, on TIM1 and TIM8 alone) (`stm32f4/tim.hpp`) | the G0's two names on this family's timers; the dead time is counted in tDTS - the timer clock divided by CR1.CKD and NOT by the counter's prescaler - so a pair holds the same absolute dead time at every PWM frequency; the timers take a static clock alone, as on the G0, and what they count is HCLK or twice their APB clock (RCC_DCKCFGR's TIMPRE), never the bus rate |
 | host | none | - |
 

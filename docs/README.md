@@ -8,9 +8,14 @@ rationale and the contracts between layers, as they are today.
 
 The directory mirrors the strata of `brio/`: `design/` is the
 target-independent framework (kernel, services, the models every
-target realizes); one folder per target (`avrdx/`, `samc21/`, `stm32g0/`, `ch32v00x/`, `ch32v203/`, `rp2040/`, `stm32f4/`, `host/`) holds
+target realizes); one folder per target (`avrdx/`, `samc21/`,
+`stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32v203/`, `rp2040/`,
+`rp2350/`, `host/`) holds
 that target's operational page (`README.md`), one document per
-peripheral driver, and its vendor documents. Within each, ordered by
+peripheral driver, and its vendor documents; and one folder per
+stratum that sits between `util/` and the targets - the core stratum
+`cortexm/` and the IP strata `pl011/`, `pl022/`, `dw_apb_i2c/` - each
+with a page of its own. Within each, ordered by
 stability - the kernel's ideas are settled enough to build on, the
 services and drivers are here to stay but will change as targets are
 added, the bench is disposable.
@@ -40,7 +45,9 @@ Target-independent design:
 
 The targets, each with its front page - the operational side
 (toolchain, board, probe, debugger and their quirks) and the map of
-that target's own documents, one per peripheral driver:
+that target's own documents, one per peripheral driver - and among
+them the strata that sit between `util/` and the families, whose
+pages say what is theirs and what a family owes them:
 
 | Target | Front page |
 |--------|------------|
@@ -49,9 +56,13 @@ that target's own documents, one per peripheral driver:
 | STM32G0 (`brio/stm32g0/`) | [stm32g0/README.md](stm32g0/README.md) - Toolchain, the three Nucleo boards, ST-LINK upload and debug, the SWD-under-WFI caveat, and FAMILY COVERAGE: both the x1 line and the x0 value line, the stratum compiling on all twelve headers of the pack with every vector derived from peripheral presence; then its documents |
 | CH32V00x (`brio/ch32v00x/`) | [ch32v00x/README.md](ch32v00x/README.md) - Toolchain (WCH's gcc 15 with its xw extension, each part's full ISA), the two boards and the part table the build states, the WCH-Link and WCH's OpenOCD fork, the console on the probe's own serial, and what the QingKe V2 core taught the stratum (a WFI that wakes only for an interrupt it can take, the MIE not cleared on entry); then its documents - one per chapter of the reference manual, each with what the CH32V006K8 measured with no wire and what waits for a jumper or a peer |
 | CH32V203 (`brio/ch32v203/`) | [ch32v203/README.md](ch32v203/README.md) - Toolchain (WCH's gcc 15 again, but the full register file and the ilp32 ABI), the WeAct core board and the nine parts of the series in one table the build states, the two-wire debug port of this family and the reset verb that does NOT start the program, the console on the probe's own serial and on the chip's own USB, and what the silicon taught the stratum - the clock task parking on the HSI, the PLL divider that lives in another block, the USB pads that are still GPIO pads, the bus matrix that serves the core alone in a sleep of any depth; then its documents - one per chapter of the reference manual, each with what the CH32V203C8 measured on the board and what waits for a wire, a peer board or another part |
-| RP2040 (`brio/rp2040/`) | [rp2040/README.md](rp2040/README.md) - Toolchain (the pico-sdk's CMSIS header and register definitions vendored, no SDK runtime, the boot stage checked in as bytes), the WeAct board, the Debug Probe and which OpenOCD the flash chip demands, the two cores and the one brio runs on today; then its documents |
+| RP2040 (`brio/rp2040/`) | [rp2040/README.md](rp2040/README.md) - Toolchain (the pico-sdk's CMSIS header and register definitions vendored, no SDK runtime, the boot stage checked in as bytes), the WeAct board, the Debug Probe and which OpenOCD the flash chip demands, and the two cores with a kernel on each; then its documents |
+| RP2350 (`brio/rp2350/`) | [rp2350/README.md](rp2350/README.md) - TWO PROCESSOR ARCHITECTURES OVER ONE SET OF PERIPHERALS and what that costs a build: the two toolchains (arm-none-eabi for the Cortex-M33 pair, an upstream riscv32-unknown-elf for the Hazard3 one), the four presets, the IMAGE_DEF block in the image as the only thing that decides which pair runs, the WeAct core board, the Debug Probe and the third OpenOCD - Raspberry Pi's fork, the only build that examines all four cores - the state-independent flash verb built on the rescue reset, and the four facts of this silicon that shape every chapter (a processor reset that leaves the clock tree standing, pads that come up isolated, bit maps that are not the RP2040's, erratum RP2350-E9); then its documents |
 | STM32F4 (`brio/stm32f4/`) | [stm32f4/README.md](stm32f4/README.md) - Toolchain (the hard-float ABI, the FPU enabled by the crt), the three boards (an STM32F429I-DISC1, a Nucleo-F446RE, an STM32F411CE black pill on a standalone STLINK-V3), ST-LINK upload, the HLA caveat, and FAMILY COVERAGE: twenty-three headers, the frequency ladders keyed on the part class and refused where no manual was read; then its documents |
-| the Cortex-M core stratum (`brio/cortexm/`) | [cortexm/README.md](cortexm/README.md) - what the three Cortex-M0+ families and the Cortex-M4 one share: NVIC + PRIMASK, the SysTick ticker and the microsecond busy-wait on SysTick's counter, the include-order contract, what stays per family |
+| the Cortex-M core stratum (`brio/cortexm/`) | [cortexm/README.md](cortexm/README.md) - what the Cortex-M families share whatever the vendor: NVIC + PRIMASK, the SysTick ticker and the microsecond busy-wait on SysTick's counter, the include-order contract, what stays per family and which families take which of the three files |
+| the PL011 IP stratum (`brio/pl011/`) | [pl011/README.md](pl011/README.md) - ARM's PrimeCell UART written once for every family that carries it: what is ARM's (the frame, the divisor arithmetic, the registers, the resource and the transport) and what a family owes it (the `Pl011Chip` traits - registers, reset, interrupt line, clock, pads), and the rule that births an IP stratum |
+| the PL022 IP stratum (`brio/pl022/`) | [pl022/README.md](pl022/README.md) - ARM's PrimeCell SSP the same way: the host engine `util/spi_bus.hpp` drives, the client, the framings and the prescaler pair, with the chip's half behind a concept |
+| the DesignWare I2C IP stratum (`brio/dw_apb_i2c/`) | [dw_apb_i2c/README.md](dw_apb_i2c/README.md) - Synopsys's DW_apb_i2c the same way: the command FIFO whose entries carry the bus conditions, the host engine, the client, and what a family states about pads, requests and its reset controller |
 | host (`brio/host/`) | [host/README.md](host/README.md) - The native test target: HostPlatform, doctest suites, what a simulation is allowed (the whole standard library, heap included), and the simulator's own page - [host/simulator.md](host/simulator.md), the contract between a host program and a viewer watching it: one shared region in each direction, why input is a snapshot and not a socket, and the three rules that keep it portable |
 | the boards | [boards/README.md](boards/README.md) - how a board joins the bench (build by type, the manifest, `bin/brio`), then one page per board brio is tested on |
 | the probes | [probes/README.md](probes/README.md) - the flash mechanisms `bin/brio` knows, then one page per probe |
@@ -120,9 +131,9 @@ that target's own documents, one per peripheral driver:
 - **A contract with more than one realization carries a realizations
   table.** In the design page that owns the contract, `### Realizations`
   right after the contract's statement: one sentence for what is
-  common, then one row per stratum in a fixed order (avrdx, samc21,
-  stm32g0, host) - the realization (header and type) and ONLY what
-  lies beyond the contract there, `-` for nothing, an absent
+  common, then one row per stratum in a fixed order with `host` last -
+  the realization (header and type) and
+  ONLY what lies beyond the contract there, `-` for nothing, an absent
   realization a row too, with its reason. Names are strata, never
   boards. A spelling of the same function is recorded as a spelling;
   a different function under a shared name as a trap. The index of

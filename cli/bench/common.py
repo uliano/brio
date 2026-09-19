@@ -132,7 +132,7 @@ def board_type(btype):
     spec = BOARD_TYPES.get(btype)
     if spec is None:
         die("unknown board type '%s' (known: %s) - a new type needs an entry "
-            "in cli/cli/bench/common.py's BOARD_TYPES" % (btype, ", ".join(sorted(BOARD_TYPES))))
+            "in cli/bench/common.py's BOARD_TYPES" % (btype, ", ".join(sorted(BOARD_TYPES))))
     return spec
 
 PROMPT = "> "

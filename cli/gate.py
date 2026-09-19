@@ -7,7 +7,7 @@ carry is the newest source mtime) and the build directories wiped
 (ninja relinks stale objects otherwise), and the images are compared
 by md5 - per preset, identical count and movers by name.
 
-    brio gate                          HEAD vs the working tree, the five release presets
+    brio gate                          HEAD vs the working tree, the release presets of DEFAULT_PRESETS
     brio gate --against <ref>          another reference commit
     brio gate --preset avr128db48-release --preset samc21j-release
     brio gate --keep                   leave the two trees in place for a look
@@ -215,7 +215,8 @@ def main(argv):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--against", default="HEAD", metavar="REF", help="the reference commit (default HEAD)")
     ap.add_argument("--preset", action="append", metavar="PRESET",
-                    help="a preset to build and compare (repeatable; default: the five release presets)")
+                    help="a preset to build and compare (repeatable; default: the release presets "
+                         "DEFAULT_PRESETS names, at least one per build project)")
     ap.add_argument("--keep", action="store_true", help="keep the two built trees")
     ap.add_argument("--tokens", action="store_true", help="token-identity of FILES instead of images")
     ap.add_argument("--strings", action="store_true", help="with --tokens: blank string literal contents")

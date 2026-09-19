@@ -17,6 +17,7 @@ the user's own manifest, below.
 | WCH's CH32V003F4P6 evaluation board | `v003f4` | [ch32v003f4.md](ch32v003f4.md) |
 | Raspberry Pi Pico | `pico` | [pico.md](pico.md) |
 | a WeAct RP2040 board | `weact2040` | [weact-rp2040.md](weact-rp2040.md) |
+| a WeAct RP2350B core board | `weact2350b`, `weact2350b-rv` | [weact-rp2350b.md](weact-rp2350b.md) |
 | ST STM32F429I-DISC1 | `f429zi` | [stm32f429i-disc1.md](stm32f429i-disc1.md) |
 | ST Nucleo-F446RE | `f446re` | [nucleo-f446re.md](nucleo-f446re.md) |
 | a WeAct STM32F411CE black pill | `f411ce` | [blackpill-f411ce.md](blackpill-f411ce.md) |
@@ -69,6 +70,20 @@ CMSIS-DAP probe, the Raspberry Pi Debug Probe; `f429zi`/`f446re`/
 `f411ce` the STM32F4 boards built by `stm32f4/` and written by OpenOCD
 through an ST-LINK (the boards' own, or a standalone V3). The table of types is
 `BOARD_TYPES` in `cli/bench/common.py`.
+
+**And on one chip the type carries the ARCHITECTURE too.** The RP2350
+runs a pair of Cortex-M33 or a pair of Hazard3 RISC-V cores over one
+set of peripherals, and which pair runs is decided by the image in the
+flash - so ONE PHYSICAL BOARD WEARS TWO TYPES: `weact2350b` builds it
+for Arm and `weact2350b-rv` for RISC-V, the same hardware and the same
+probe, differing only in the preset the type names. Both are written
+by the same verb, which is state-independent by construction - a
+rescue over the debug port alone, then programming as core 0 of the
+Arm pair, then a reset that hands the chip to whatever the new image
+asks for - so the board is recoverable from any state a program can
+put it in, whichever architecture was running before
+([../probes/raspberry-pi-debug-probe.md](../probes/raspberry-pi-debug-probe.md),
+`cli/bench/flash.py`).
 
 **Consoles** are observability only - firmware never goes in through
 them. A bridge with no USB serial (a CH340) is addressed by

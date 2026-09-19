@@ -58,7 +58,7 @@ adds one function - `rebase(hz)` - to serve the dynamic one.
 
 ### Realizations
 
-Common to all six: `Clock<ClockSource::internal, hz>` and
+Common to all: `Clock<ClockSource::internal, hz>` and
 `Clock<ClockSource::crystal, hz>` spelled identically, `Clock::hz` as
 the one rate truth, `clock_hz(clock)` and the `ClockUser` contract
 (`util/clock.hpp`), and `delay_us(clock, us)` reading its budget from
@@ -73,6 +73,8 @@ the two every part has.
 | stm32g0 | `Clock<src, hz, regime>` and `DynamicClock<Rates<R0, R1, ...>, Users...>` (`stm32g0/clock.hpp`) | a rate is a TUPLE (root, VCORE range, regulator) and the dynamic set an EXPLICIT PACK of such tuples, R0 the boot rate; `PowerRegime` sequences table 13's latency and the range around a switch; `restore()` after a Stop; `ClockSource` adds `pll`, `lsi`, `lse` (the 32 kHz roots under ST's names) |
 | ch32v00x | `Clock<src, hz>` and `DynamicClock<Boot, Users...>` (`ch32v00x/clock.hpp`) | the AVR's shape, the simplest of the four: one root (the HSI, or `ClockSource::pll` - the PLL is a fixed doubler of it) and one divider, HPRE, so the dynamic set is the boot rate over the divider's ladder; `set<hz>()`/`set(hz)` fan `rebase` out then move the divider, the flash wait states raised before a rise and lowered after a fall; `restore()` puts the rate back after a Standby, from which the core wakes on the HSI; `crystal` is named and refused until a board carries one; `delay_us` on the STK counter, refused at a tick period or more |
 | ch32v203 | `Clock<src, hz, xtal_hz>` and `DynamicClock<Rates<R0, R1, ...>, Users...>` (`ch32v203/clock.hpp`) | the STM32F4's model - a rate is a TUPLE and every switch PARKS ON THE HSI, here for the family's own reason (PLLMUL, PLLSRC and PLLXTPRE take a write only with the PLL off, and the PLL will not stop while it is SYSCLK), so the static task's `init()` IS the dynamic switch and one order serves both directions; the peripheral prescalers are pinned by a CAP rather than a ladder - `pclk1_hz`/`pclk2_hz` beside `hz` (PB1 halved above 72 MHz, PB2 never) with `pclk1_hz_at(hclk)` the arithmetic a rebased user derives its own bus rate from, and `timclk1_hz`/`timclk2_hz` for the doubling a divided bus gives its timers; the tuple carries two members the F4's has not - the USB divider (48 MHz or nothing) and the ADC's, the one that can be out of specification at a legal rate; `ClockSource` adds `pll` and `external`, and the PLL's input divider, its input and output RANGES and the USB prescaler's fourth code are DEVICE-CLASS facts read from the part table, not constants of the file; `restore()` after a wake that dropped the tree to the HSI; `delay_us` on the STK counter, refused at a tick period or more |
+| rp2040 | `Clock<src, hz, crystal_hz, peri>` alone (`rp2040/clock.hpp`) | NO dynamic clock yet, and a tree of a shape none of the others has: not one root feeding prescaled buses but A GENERATOR PER CLOCK DOMAIN, each with its own mux and its own fractional divider, so clk_sys, clk_peri, clk_adc, clk_usb and clk_rtc are five independent rates and there is no bus prescaler at all. The task therefore states TWO numbers - `hz` is clk_sys and `pclk_hz` is clk_peri - and the fourth template parameter picks which of them clk_peri follows: clk_sys undivided by default, or THE CRYSTAL, under which the serial ports keep their rate through every change of clk_sys, which is the shape a dynamic clock would be built on here; `ClockSource` is `crystal` and `pll` only (the ring oscillator has no exact rate to be a truth, and `internal` is not declared), the PLL ratio searched EXACTLY at compile time from the crystal; `delay_us` is `cortexm/delay.hpp`'s on clk_sys |
+| rp2350 | `Clock<src, hz, crystal_hz, peri>` alone (`rp2350/clock.hpp`) | the RP2040's model with this chip's tree: a generator per domain again, with a fourth root under clk_ref (a low-power oscillator in the always-on domain), one generator more, NO clk_rtc at all, and dividers of 16.16 where the RP2040's were 24.8 - so the task states THREE numbers, `hz` for clk_sys, `pclk_hz` for clk_peri and `ref_hz` for clk_ref, that last one being what the TICK GENERATORS divide; the tick generators are a block of their own here, one per consumer, and what they hand out is the microsecond the timers, the watchdog and the RISC-V platform timer all count, which is why `delay_us` is NOT `cortexm/delay.hpp`'s on this family but a wait on that counter - one implementation for both instruction sets, immune to a clk_sys switch under it, one microsecond of resolution as the price; two CTRL registers of this tree are PASSWORDS, where a masked write is a refused write |
 | stm32f4 | `Clock<src, hz, hse_hz, hse_mode>` and `DynamicClock<Rates<R0, R1, ...>, Users...>` (`stm32f4/clock.hpp`) | the STM32G0's model with the APB prescalers UNPINNED: `pclk1_hz`/`pclk2_hz` beside `hz` (45 and 90 MHz at 180) and `apb_hz(clock, bus)` for a peripheral's own rate, `clock_hz` still HCLK; the sources spell the root (`hsi`, `hse`, `pll_hsi`, `pll_hse` with the HSE's rate and mode); a rate is a TUPLE OF FIVE - root, regulator scale, over-drive, flash latency, both APB prescalers - and the frequency LADDERS are keyed on the part class in the reserve, a rate refused where no manual was read; the dynamic switch is NOT direction-aware because it cannot be: neither the PLL nor the scale nor the over-drive bits may be written while the PLL is SYSCLK, so every switch PARKS ON THE HSI and everything after the park is a rise; `restore()` after a Stop re-runs the rate in force with no fan-out |
 | host | none | the host tests run on the virtual clock of `HostPlatform`; nothing there has a rate |
 
@@ -80,9 +82,11 @@ the two every part has.
 but the AVR it is capped below one kernel tick and REFUSES (a `bool`,
 nothing spent) a wait that long - a tick or more is `TimeEvent`
 territory - where the AVR's has no cap and
-returns nothing (`avrdx/delay.hpp`, `cortexm/delay.hpp` for the
-Cortex-M families, `ch32v00x/delay.hpp` and `ch32v203/delay.hpp` for
-the two QingKe ones).
+returns nothing (`avrdx/delay.hpp`; `cortexm/delay.hpp` for the
+Cortex-M families that ride SysTick's counter; `ch32v00x/delay.hpp` and
+`ch32v203/delay.hpp` on the two QingKe cores' STK; `rp2350/delay.hpp`
+on a timer that is neither core's, because that chip's two
+architectures do not share one).
 
 ## A rate change is a synchronous fan-out, not an event
 

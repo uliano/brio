@@ -3,7 +3,7 @@ which programmer. It is the user's own desk, so it is loaded from the
 first of these that exists:
 
   private/bench_boards.py   the desk that is really there (not published)
-  cli/cli/bench/bench_boards.py the one in the repository
+  cli/bench/bench_boards.py the one in the repository
 
 Every verb reaches the manifest through load(); nothing imports the file
 by name."""

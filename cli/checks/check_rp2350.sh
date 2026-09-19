@@ -2,7 +2,7 @@
 # Family compile check for the RP2350 stratum - and the first fixture of
 # this project that crosses TWO COMPILERS, because this chip has two
 # processor architectures over one set of peripherals and every header of
-# the stratum must compile for both (the campaign's rule: one source, two
+# the stratum must compile for both (this stratum's rule: one source, two
 # ISAs, and a suite is green when it is green on both).
 #
 # THE SWEEP is therefore four builds of every TU: the Cortex-M33 and the
