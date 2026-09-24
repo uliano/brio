@@ -1,7 +1,7 @@
 // wire_check - the peer half of the connection matrix.
 //
 // The same instrument and the same four-line protocol as the CH32V203's
-// wire_check (ch32v203/src/apps/wire_check.cpp): one pad driven at a
+// wire_check (ch32vx03/src/apps/wire_check.cpp): one pad driven at a
 // time, every pad reported, the reader always pulling up. Built for the
 // Nucleo-F446RE alone, because the pads below are that board's bench:
 // the four SPI2 lines, I2C1's pair, USART1's pair and the one pad that

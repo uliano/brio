@@ -41,12 +41,24 @@ DEFAULT_PRESETS = ("avr128db48-release", "samc21j-release", "stm32g0b1re-release
                    "ch32v203c8-release", "ch32v303vc-release", "rp2350-arm-release", "rp2350-riscv-release")
 
 
-def project_of(preset):
-    for prefix, project in (("avr", "avrdx"), ("samc21", "samc21"), ("stm32g0", "stm32g0"), ("stm32f4", "stm32f4"),
-                            ("ch32v203", "ch32v203"), ("ch32v303", "ch32v203"), ("ch32v0", "ch32v00x"), ("rp2040", "rp2040"),
-                            ("rp2350", "rp2350")):
+def project_of(preset, tree=ROOT):
+    """The project directory a preset belongs to, IN THAT TREE: presets are
+    named after parts and never move, but a stratum's directory may be
+    renamed, so the reference tree of a rename commit is asked with the
+    old name and the working tree with the new one."""
+    for prefix, projects in (("avr", ("avrdx",)),
+                             ("samc21", ("samc21",)),
+                             ("stm32g0", ("stm32g0",)),
+                             ("stm32f4", ("stm32f4",)),
+                             ("ch32v203", ("ch32vx03", "ch32v203")), ("ch32v303", ("ch32vx03", "ch32v203")),
+                             ("ch32v0", ("ch32v00x",)),
+                             ("rp2040", ("rp2040",)),
+                             ("rp2350", ("rp2350",))):
         if preset.startswith(prefix):
-            return project
+            for project in projects:
+                if os.path.isdir(os.path.join(tree, project)):
+                    return project
+            return projects[0]
     raise SystemExit("brio gate: no project for preset %r" % preset)
 
 
@@ -102,7 +114,7 @@ def preset_exists(tree, preset):
     """Whether a tree's project knows the preset at all - a preset born
     in the working tree has no images in the reference, which is a state
     to report (every image new), not a build failure."""
-    path = os.path.join(tree, project_of(preset), "CMakePresets.json")
+    path = os.path.join(tree, project_of(preset, tree), "CMakePresets.json")
     try:
         with open(path, encoding="ascii") as f:
             return any(p.get("name") == preset for p in json.load(f).get("configurePresets", []))
@@ -111,7 +123,7 @@ def preset_exists(tree, preset):
 
 
 def build(tree, preset):
-    project = project_of(preset)
+    project = project_of(preset, tree)
     cwd = os.path.join(tree, project)
     if run(["cmake", "--preset", preset], cwd=cwd).returncode != 0:
         return None

@@ -3,11 +3,11 @@
 WCH's own evaluation board for the **CH32V303VCT6** (LQFP100, 256 KB
 of zero-wait code flash of a 480 KB array and 64 KB SRAM as the factory
 splits them, the QingKe V4F core - RV32IMAFC, a single-precision FPU),
-silkscreen `CH32xx0xV-R0-1v0`: the CH32V303 part of the `ch32v203/`
+silkscreen `CH32xx0xV-R0-1v0`: the CH32V303 part of the `ch32vx03/`
 stratum, whose device class is the reference manual's CH32V30x_D8.
 Documents of record: the CH32V303/305/307/317 datasheet V3.5 and the
 CH32F/V20x_V30x_V31x reference manual V2.3
-([../ch32v203/vendor/README.md](../ch32v203/vendor/README.md)); the
+([../ch32vx03/vendor/README.md](../ch32vx03/vendor/README.md)); the
 board itself is the sheet `CH32xx0xV_EVT` of `CH32V30xSCH.pdf` in WCH's
 CH32V307EVT package, whose `SCHPCB/CH32V303VCT6-R0` holds its sources.
 Silicon identity, read over the debug port: the chip id at 0x1FFFF704
@@ -38,7 +38,7 @@ WCH's own extension), the flash-capacity signature 288 KB.
   USBFS and the datasheet's alternate-function table gives the OTG_FS
   pair - the host/device controller of RM ch. 23. The CH32V303 has no
   USB device controller of ch. 21 (its clock gate is not there,
-  [../ch32v203/clock.md](../ch32v203/clock.md)), so the CH32V203's USB
+  [../ch32vx03/clock.md](../ch32vx03/clock.md)), so the CH32V203's USB
   console does not build for this board.
 - **LEDs and the KEY**: the row **P1** carries LED1 (blue), LED2 (red)
   and KEY, and a jumper takes each to a pad. Both LEDs hang from 3.3 V
@@ -57,7 +57,7 @@ WCH's own extension), the flash-capacity signature 288 KB.
   flash and SRAM (RM table 32-4's note).
 - **Storage**: the image gets the zero-wait window less its top 4 KB,
   which are the flash medium's zone
-  ([../ch32v203/nvm.md](../ch32v203/nvm.md)); the 224 KB tail above the
+  ([../ch32vx03/nvm.md](../ch32vx03/nvm.md)); the 224 KB tail above the
   window is named in the linker script and holds nothing.
 - **The jumpers the suites want**, every one on the board itself - SPI2
   against SPI3 (PB12-PA15, PB13-PB3, PB14-PB4, PB15-PB5, the same four
@@ -67,5 +67,5 @@ WCH's own extension), the flash-capacity signature 288 KB.
   into TIM4's channel 3 (PC6 to PB8), and I2C1 against I2C2 (PB6-PB10
   and PB7-PB11, each pair with a 4.7 kOhm pull-up to 3.3 V). `wire_check`
   finds exactly these ten over the twenty pads, and no stray.
-- Manifest type `v303vc`; the project is `ch32v203/`, preset
-  `ch32v303vc-release` ([../ch32v203/README.md](../ch32v203/README.md)).
+- Manifest type `v303vc`; the project is `ch32vx03/`, preset
+  `ch32v303vc-release` ([../ch32vx03/README.md](../ch32vx03/README.md)).

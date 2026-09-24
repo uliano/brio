@@ -299,7 +299,7 @@
             //   -c "adapter serial <serial>"
             // before the -f in debugServerArgs (bin/brio list prints the
             // serials). The fork's `reset run` does not start the program
-            // on this family (docs/ch32v203/README.md); a session is
+            // on this family (docs/ch32vx03/README.md); a session is
             // `reset halt` and then gdb's own continue. UNTESTED from the
             // editor yet.
             "type": "cppdbg",

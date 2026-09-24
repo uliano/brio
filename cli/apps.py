@@ -11,7 +11,7 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECTS = ("avrdx", "samc21", "stm32g0", "ch32v00x", "ch32v203", "rp2040", "stm32f4", "host")
+PROJECTS = ("avrdx", "samc21", "stm32g0", "ch32v00x", "ch32vx03", "rp2040", "stm32f4", "host")
 
 
 def head_line(path):

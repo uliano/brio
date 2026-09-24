@@ -66,7 +66,7 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   gfx.md's reason).
 - `docs/<target>/` - one folder per target, mirroring
   `brio/<target>/` (`avrdx/`, `samc21/`, `stm32g0/`, `stm32f4/`,
-  `ch32v00x/`, `ch32v203/`, `rp2040/`, `rp2350/`, `host/`), plus one
+  `ch32v00x/`, `ch32vx03/`, `rp2040/`, `rp2350/`, `host/`), plus one
   per stratum that sits between `util/` and the targets (`cortexm/`,
   and the IP strata `pl011/`, `pl022/`, `dw_apb_i2c/`): `README.md` is
   the
@@ -154,11 +154,15 @@ Cortex-M0+, bench chip ATSAMC21J18A), `stm32g0/` (everything that
 knows `stm32g0xx.h`: STM32G0, Cortex-M0+, bench chip STM32G0B1RE on
 a Nucleo-64), `ch32v00x/` (everything that knows the CH32V00x: WCH's
 QingKe V2C, RV32EC, bench chip CH32V006K8U6 - NO vendor header, the
-register map is the stratum's own device.hpp), `ch32v203/` (everything
-that knows the CH32V203: WCH's QingKe V4B, RV32IMAC with the full
-register file, bench chip CH32V203C8T6 on a WeAct core board - no
-vendor header either, and the STM32F1's peripheral generation under
-WCH's names, which is what separates it from the CH32V00x),
+register map is the stratum's own device.hpp), `ch32vx03/` (everything
+that knows the CH32V203 and the CH32V303: WCH's QingKe V4B and V4F,
+RV32IMAC and RV32IMAFC with the full register file, bench chips
+CH32V203C8T6 on a WeAct core board and CH32V303VCT6 on WCH's own
+evaluation board - no vendor header either, and the STM32F1's
+peripheral generation under WCH's names, which is what separates it
+from the CH32V00x; ONE stratum for the two series because one
+reference manual covers both and keys its differences by DEVICE CLASS,
+which the stratum's part reserve states),
 `rp2040/` (everything
 that knows the RP2040: Raspberry Pi's dual Cortex-M0+, bench chip an
 RP2040 B2 on a Raspberry Pi Pico and on a WeAct board, the pico-sdk's CMSIS header and register
@@ -182,7 +186,7 @@ STM32F411CE on a WeAct black pill), `host/` (the native test
 target). Includes carry the stratum prefix
 (`#include "avrdx/usart.hpp"`). The builds are sibling CMake
 projects, PEERS - the repo root is not a CMake project: the CROSS ones
-`avrdx/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32v203/`,
+`avrdx/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`,
 `rp2040/` and `rp2350/` (each with its own toolchain file
 and presets, Ninja, emitting into the shared `build-cmake/`)
 auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
@@ -473,28 +477,34 @@ gets its home in `docs/design/` when taken.
   store, which need the heap's blocks against the journal's small
   values, and whether a zone at a fixed address is worth a partition
   every image pays. Until that review, no FlashMedia on the STM32F4.
-- **The CH32V203 stratum's chapters.** `brio/ch32v203/` and `ch32v203/`
-  are `in bring-up` on the CH32V203C8T6 (README.md's table), with the
-  nine parts of the series in the part table and the family check on
-  all of them: measured on the silicon are the platform with its failing
-  half, the clock tree whole, GPIO with the remaps and the EXTI, the
-  timers and the two watchdogs, the DMA, the two converters and the two
-  amplifiers, the USART chapter whole (the frame, both buses' divisors,
-  mute mode, LIN, half duplex, IrDA, the smartcard and the synchronous
-  clock) and THE USB DEVICE CONTROLLER - the kernel console runs both on
-  the probe's serial and on the chip's own USB-C, a CDC ACM port over
-  util/usb, and the chapter has its document and its suite.
-  Open: CAN (its driver written against the manual and kept for a pass
-  across every platform), TKEY and the second USB block. What the
-  silicon taught is in docs/ch32v203/README.md, and one finding shapes
-  the power model: IN SLEEP THE BUS MATRIX SERVES THE CORE ALONE - the
-  USB controller cannot reach its packet memory and a DMA stalls
-  (measured with the vendor's own example as the oracle, and no software
-  mitigation short of staying awake works), so a program that moves data
-  through the bus does not SLEEP here and slows down instead, to no less
-  than 24 MHz of HCLK; the sleep sites and the platform's idle path both
-  read a COUNT of active bus masters - a DMA channel while its EN is up,
-  the USB controller from its pull-up - and neither sleeps above zero.
+- **The CH32V203/CH32V303 stratum.** `brio/ch32vx03/` and `ch32vx03/`
+  are `supported` on the CH32V203C8T6 (README.md's table: every chapter
+  of the reference manual's plan has its document and its suite green,
+  the two buses on the wire against a peer board; open there: CAN - its
+  driver written against the manual and kept for a pass across every
+  platform -, TKEY and the second USB block) and carry the CH32V303 as
+  their THIRD DEVICE CLASS, CH32V30x_D8: the QingKe V4F with its FPU
+  (rv32imafc_xw, ilp32f - the part table states each part's ISA and ABI,
+  thirteen parts under two), the class's vector table of 104 entries and
+  its own blocks (DMA2, TIM5..10, UART4..8, SPI3 with the I2S face, the
+  DAC, the RNG, four amplifiers). What the CH32V303VCT6 has proven on
+  WCH's evaluation board is in docs/ch32vx03/README.md's document map,
+  chapter by chapter, each closing on the silicon in the V203's order;
+  measured there so far: the bus stalls in Sleep as on the CH32V203 (a
+  memory-to-memory DMA moves 37 words across 1.9 ms of idle()), the part
+  has NO USB device controller - its one full-speed controller is
+  chapter 23's host/device block, on the board's own connector, whose
+  driver is the next USB chapter's -, and a handler that calls out pays
+  twenty f-register saves. What the V203's silicon taught is in the same
+  README, and one finding shapes the power model: IN SLEEP THE BUS
+  MATRIX SERVES THE CORE ALONE - the USB controller cannot reach its
+  packet memory and a DMA stalls (measured with the vendor's own example
+  as the oracle, and no software mitigation short of staying awake
+  works), so a program that moves data through the bus does not SLEEP
+  here and slows down instead, to no less than 24 MHz of HCLK; the sleep
+  sites and the platform's idle path both read a COUNT of active bus
+  masters - a DMA channel while its EN is up, the USB controller from
+  its pull-up - and neither sleeps above zero.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -548,7 +558,8 @@ brio check samc21 [name]        # same for the samc21 stratum (E/G/J 18A headers
 brio check stm32g0 [name]       # same for the stm32g0 stratum (ALL TWELVE G0 headers, x1 + x0)
 brio check ch32v00x [name]      # same for the ch32v00x stratum (one part today; util_all.cpp = the
                                 # whole of kernel/ and util/ through WCH's gcc 15.2)
-brio check ch32v203 [name]      # same for the ch32v203 stratum (ALL NINE parts of the series, both
+brio check ch32vx03 [name]      # same for the ch32vx03 stratum (the thirteen parts of the two
+                                # series under TWO ISAs - the V4B's and the V4F's -, both
                                 # HPE ways; util_all.cpp = the whole of kernel/ and util/ over the
                                 # ilp32 ABI)
 brio check rp2040 [name]        # same for the rp2040 stratum (one chip: every header's verbs, util_all.cpp)
@@ -577,8 +588,9 @@ brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--s
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash via OpenOCD (ST-LINK)
 (cd ch32v00x && cmake --build --preset ch32v006k8-release --target <app>)          # CH32V00x release build (WCH gcc 15)
 (cd ch32v00x && cmake --build --preset ch32v006k8-release --target <app>-upload)   # flash via WCH's OpenOCD fork (WCH-Link)
-(cd ch32v203 && cmake --build --preset ch32v203c8-release --target <app>)          # CH32V203 release build (WCH gcc 15, ilp32)
-(cd ch32v203 && cmake --build --preset ch32v203c8-release --target <app>-upload)   # flash it: `reset run` does NOT start the program here, `reset halt` + `resume` does
+(cd ch32vx03 && cmake --build --preset ch32v203c8-release --target <app>)          # CH32V203 release build (WCH gcc 15, ilp32)
+(cd ch32vx03 && cmake --build --preset ch32v203c8-release --target <app>-upload)   # flash it: `reset run` does NOT start the program here, `reset halt` + `resume` does
+(cd ch32vx03 && cmake --build --preset ch32v303vc-release --target <app>)          # CH32V303 release build (the V4F: rv32imafc_xw, ilp32f)
 (cd rp2040 && cmake --build --preset rp2040-release --target <app>)              # RP2040 release build
 (cd rp2040 && cmake --build --preset rp2040-release --target <app>-upload)       # flash via OpenOCD (the Debug Probe, CMSIS-DAP)
 (cd stm32f4 && cmake --build --preset stm32f429zi-release --target <app>)        # STM32F4 release build (hard-float)
@@ -721,15 +733,20 @@ ch32v00x/                the CH32V00x build project, the fifth of the shape
                          "// build: groups" line builds as one image per
                          group, <app>-<n>, the crt PAINTS the free RAM so a
                          suite reports how much stack it never touched
-ch32v203/                the CH32V203 build project, the seventh of the shape:
-                         cmake/toolchain-riscv.cmake on the same /sw/wch-riscv
-                         but the ilp32 ABI and the full register file, a PART
-                         TABLE (cmake/ch32v203-parts.cmake: the nine parts of
-                         the series, each with its part definition, its
-                         memories and its board type) instead of substring
-                         arithmetic, ld/<part>.ld and src/glue/startup_ch32v203.S
-                         - the table whose first word is an INSTRUCTION again,
-                         with a TAIL THAT IS THE DEVICE CLASS'S
+ch32vx03/                the CH32V203 and CH32V303 build project, the seventh
+                         of the shape: cmake/toolchain-riscv.cmake on the same
+                         /sw/wch-riscv but the full register file, a PART TABLE
+                         (cmake/ch32vx03-parts.cmake: the nine parts of the V203
+                         series and the four of the V303, each with its part
+                         definition, its memories, its board type and ITS OWN
+                         ISA AND ABI - rv32imac_xw/ilp32 on the V4B parts,
+                         rv32imafc_xw/ilp32f on the V4F ones) instead of
+                         substring arithmetic, ld/<part>.ld and
+                         src/glue/startup_ch32vx03.S - the table whose first
+                         word is an INSTRUCTION again, with a TAIL THAT IS THE
+                         DEVICE CLASS'S (three tails: the V20x_D6's of 63
+                         words, the V20x_D8's of 70, the V30x_D8's of 104) and
+                         the FPU enabled where the image is built with F
                          - ld/<part>.ld and a release preset for each of the nine
                          parts, the C8's the only debug one; the C6 preset (the
                          F6's memories, the C8's bonding) is the 32K/10K tier's
@@ -803,7 +820,7 @@ test/family_rp2040/      rp2040 family smoke TUs + neg/, brio check rp2040 (one
 test/family_stm32f4/     stm32f4 family smoke TUs + neg/, brio check stm32f4 (ALL
                          TWENTY-THREE F4 headers; the reset rate everywhere, the
                          ladder-dependent rates where the reserve knows the ladder)
-test/family_ch32v203/    ch32v203 family smoke TUs + neg/, brio check ch32v203
+test/family_ch32vx03/    ch32vx03 family smoke TUs + neg/, brio check ch32vx03
                          (every part of the series, both HPE ways; util_all.cpp)
 test/family_rp2350/      rp2350 family smoke TUs + neg/, brio check rp2350 - the
                          one fixture that crosses TWO COMPILERS: every TU built
@@ -850,7 +867,7 @@ cli/                     its guts, a Python package: main.py dispatches on the
                          mechanism: db* -> avrdx/avrdude/UPDI, c21j ->
                          samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/ST-LINK,
                          v006k8/v003f4 -> ch32v00x/WCH's OpenOCD fork/WCH-Link,
-                         v203c8 -> ch32v203/the same fork/the same probe on two
+                         v203c8 -> ch32vx03/the same fork/the same probe on two
                          wires, pico/picow/weact2040 -> rp2040/OpenOCD/the Debug
                          Probe, f429zi/f446re/f411ce -> stm32f4/OpenOCD/an
                          ST-LINK, and weact2350b + weact2350b-rv -> rp2350/
@@ -899,7 +916,7 @@ experiments/             one SELF-CONTAINED directory per cross-cutting bench
                          stimulus + judge + meter for an AVR DUT)
 docs/                    README (map + rules), design/, one folder per target
                          (avrdx/, samc21/, stm32g0/, stm32f4/, ch32v00x/,
-                         ch32v203/, rp2040/, rp2350/, host/), one per shared
+                         ch32vx03/, rp2040/, rp2350/, host/), one per shared
                          stratum (cortexm/, pl011/, pl022/, dw_apb_i2c/),
                          boards/, probes/
 brio/.clangd             per-stratum clangd routing: the framework default is
@@ -1635,10 +1652,11 @@ brio/                    the framework, one directory per stratum:
                            instead, and with SLEEPDEEP armed the ticker is
                            paused across the sleep; ebreak; .noinit
                            breadcrumb; atomic_width 4
-  ch32v203/              everything that knows the CH32V203 (WCH QingKe V4B,
-                         RV32IMAC, ilp32): the STM32F1's peripheral generation
+  ch32vx03/              everything that knows the CH32V203 and the CH32V303
+                         (WCH QingKe V4B and V4F, RV32IMAC/ilp32 and
+                         RV32IMAFC/ilp32f): the STM32F1's peripheral generation
                          under WCH's names, and NO vendor header - the map is
-                         the stratum's own
+                         the stratum's own; three device classes in one reserve
     device.hpp             the register map read off the reference manual -
                            the blocks more than one chapter reaches, RCC and
                            PWR among them, live here and nowhere twice;
@@ -1649,12 +1667,12 @@ brio/                    the framework, one directory per stratum:
                            driver branches on with if constexpr
     pfic.hpp               InterruptGuard (csrrci on mstatus.MIE), the PFIC's
                            per-line verbs, BRIO_CH32_INTERRUPT - the handler
-                           attribute the CH32V203_HPE option decides
+                           attribute the CH32VX03_HPE option decides
     ticker.hpp             BasicTicker over the core's 64-bit STK (Ticker =
                            1000 Hz)
     delay.hpp              delay_us on the STK counter: at least, never early,
                            refused at one tick and beyond
-    platform.hpp           Ch32v203Platform<TB = Ticker>: the WFE-shaped idle
+    platform.hpp           Ch32vx03Platform<TB = Ticker>: the WFE-shaped idle
                            (WFITOWFE + SEVONPEND, this core's WFI wakes only
                            for a takeable interrupt), ebreak, the .noinit
                            breadcrumb, atomic_width 4
@@ -1975,13 +1993,13 @@ brio/                    the framework, one directory per stratum:
                            live in EXTEN, and the debug module's three
                            low-power bits READ AND NEVER WRITTEN, because a
                            csrw to that CSR resets the part
-    sleep.hpp              Ch32v203SleepSite (light -> Sleep, standby -> a Stop
+    sleep.hpp              Ch32vx03SleepSite (light -> Sleep, standby -> a Stop
                            on the main regulator, deep -> the same on the
                            low-power one, STANDBY OFF THE LADDER with
                            enter_standby() the deliberate door - every exit
                            measured here being a reset, an ordinary EXTI line
                            among them - the clock tree restored after a Stop)
-                           and Ch32v203TimedSleepSite (the RTC's alarm on EXTI
+                           and Ch32vx03TimedSleepSite (the RTC's alarm on EXTI
                            line 17 as the wake and its counter as the WITNESS,
                            a 1024 Hz tick out of the crystal, the counts
                            rounded up and the span down so a wake is late and a
