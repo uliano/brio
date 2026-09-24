@@ -38,8 +38,15 @@ connector CN10.
   on FMC SDRAM bank 1 (SDNE0/SDCKE0, 0xC0000000) over 54 pads at AF12
   across ports C, D, E, F, G, H and I (the FMC suite's board block lists
   them from the MB1189's MCU sheet); the 4" 800x480 DSI panel of the
-  MB1166 with its capacitive touch controller on I2C1 (PB8/PB9, the
-  board's 1.5 k pull-ups), reset on PH7 and tearing effect on PJ2; a
+  MB1166 - its controller a Novatek **NT35510**, read over the link
+  (RDID1..3 00h 80h 00h; the module's revision is not readable, the
+  display board being captive over the main one), driven in DSI video
+  mode at 496 Mbit/s on two lanes by the DSI suite, its backlight
+  switched by the panel's own CABC output (UM1932 4.14: R117 fitted,
+  the PA3 option R119 not) so WRCTRLD's BL bit is the switch - with its
+  capacitive touch controller on I2C1 (PB8/PB9, the board's 1.5 k
+  pull-ups), the reset of both on PH7 and the tearing effect on PJ2
+  (AF13 to the DSI wrapper, EXTI line 2 to the core); a
   128 Mbit Micron Quad-SPI NOR flash (UM1932 names the N25Q128A13; the
   JEDEC id 0x20BA18 it answers with is the MT25QL128's, its successor,
   and the MB1189's QSPI sheet names the MT25QL128ABA) on PF6..PF10 with
@@ -61,4 +68,6 @@ Documents: RM0386, DS11189 and ES0321 by revision in
 target's page [../stm32f4/README.md](../stm32f4/README.md). The two
 memories' own datasheets, kept beside the board's documents: ISSI's
 IS42S32400F Rev. D1 (the -6 grade's AC table is where the FMC suite's
-timing comes from) and Micron's MT25QL128ABA Rev. K.
+timing comes from) and Micron's MT25QL128ABA Rev. K; and the two panel controllers'
+datasheets, Novatek's NT35510 (the one this unit carries) and Orise's
+OTM8009A (preliminary 0.92), kept for the display.

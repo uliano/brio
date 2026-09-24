@@ -372,7 +372,11 @@ gets its home in `docs/design/` when taken.
   bandwidth the tier lives on measured (two layers of 32-bit pixels at
   65 Hz plus the accelerator, some 160 MB/s over one bus), and on the
   F469 the QUADSPI against the board's 16 MB flash (indirect, status
-  polling and memory-mapped; the window at 44.5 MB/s). What remains
+  polling and memory-mapped; the window at 44.5 MB/s) and the DSI HOST
+  in front of that part's LTDC - the panel's controller read over the
+  link (an NT35510), every DCS register written and read back, 60
+  frames a second out of the 16 MB SDRAM, the tearing effect counted on
+  the pin. What remains
   is in the documents' gap lists, and three things outside them: the
   OTG HS core in full-speed mode on the STM32F429 (UsbHs compiled, its
   connector cabled, never enumerated); the frequency ladders of the four
@@ -2150,6 +2154,24 @@ brio/                    the framework, twelve strata:
                            verbs completing on BUSY because TCF is the
                            handler's flag; the device's opcodes stay with
                            the device, in the suite
+    dsi.hpp                the DSI HOST (RM0386 ch. 18), on the F469/F479
+                           class alone: Dsi, a monostate over the wrapper
+                           (the regulator, the PLL solved exactly on the
+                           intersection of the manual's and the data
+                           sheet's ranges, the tearing effect from the pin),
+                           the D-PHY (the unit interval in quarter
+                           nanoseconds, the lane transition times from the
+                           data sheet's maxima, 2.8.2's equal clock-lane
+                           times) and the host (video mode from the LTDC's
+                           timing converted into lane byte clocks, the
+                           pattern generator, the generic interface as
+                           short/long writes and the two-packet read behind
+                           dcs_write/dcs_read, the error registers that clear
+                           on the read); every configuring verb refused
+                           while enabled; the panel's command set stays with
+                           the panel, in the suite. THE TRAP: in video mode
+                           a command is sent inside the stream, so the LTDC
+                           runs before the panel is spoken to
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)

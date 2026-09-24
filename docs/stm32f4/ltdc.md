@@ -500,9 +500,9 @@ Implemented but not bench-verified:
   stated and not enforced: what a second panel would measure is whether
   a fast pixel clock changes the register stall of 16.3.2, which at 6
   MHz is nearly all of a read's cost.
-- **The parts with a display interface other than the one on this
-  desk** - the family fixture compiles the whole driver on each of
-  them and the reserve's presence facts are asserted class by class;
-  the 32F469IDISCOVERY's panel hangs off a DSI host, a chapter this
-  stratum has not got, so its LTDC has not driven a pixel and the suite
-  stays the DISC1's.
+- **The F469/F479's LTDC on its own pads** - on the 32F469IDISCOVERY
+  the controller's output goes to the DSI host and not to a pad, and
+  [dsi.md](dsi.md)'s suite is where it drives pixels (60 frames a
+  second of 16- and 32-bit pixels out of that board's SDRAM, the pixel
+  clock at 26.4 MHz); this suite stays the DISC1's, and the RGB pads of
+  that class would need a board that wires them.

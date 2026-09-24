@@ -3597,4 +3597,60 @@ constexpr bool quadspi_dma_placement_valid(uint8_t controller, uint8_t stream, u
     return false;
 }
 
+// ---- DSI --------------------------------------------------------------------------
+//
+// The DSI Host (RM0386 ch. 18) - the MIPI Display Serial Interface in
+// front of the LTDC, on the F469/F479 class alone: the header says so
+// with DSI_BASE, and every other header of the pack declares no block.
+// What the block's PLL and D-PHY may run at is the class's own data
+// sheet (DS11189 5.3.13 .. 5.3.15) and lives in stm32f4/dsi.hpp beside
+// the arithmetic that uses it: one class, one set of limits.
+
+/// Whether this part has the DSI Host (DSI_BASE in the device header).
+constexpr bool dsi_present() {
+#if defined(DSI_BASE)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// RCC_APB2ENR.DSIEN - the gate sits on APB2 beside the LTDC's; 0 where
+/// there is no block.
+constexpr uint32_t dsi_clock_mask() {
+#if defined(RCC_APB2ENR_DSIEN)
+    return RCC_APB2ENR_DSIEN;
+#else
+    return 0u;
+#endif
+}
+
+/// RCC_APB2RSTR.DSIRST, the block's reset line (the wrapper and the host
+/// together); 0 where there is no block.
+constexpr uint32_t dsi_reset_mask() {
+#if defined(RCC_APB2RSTR_DSIRST)
+    return RCC_APB2RSTR_DSIRST;
+#else
+    return 0u;
+#endif
+}
+
+/// RCC_DCKCFGR.DSISEL - the lane byte clock's source: the D-PHY's own
+/// (0, the usual case) or the main PLL's R output (1, for a program with
+/// the DSI PLL off). 0 where there is no block.
+constexpr uint32_t dsi_byte_clock_select_mask() {
+#if defined(RCC_DCKCFGR_DSISEL)
+    return RCC_DCKCFGR_DSISEL;
+#else
+    return 0u;
+#endif
+}
+
+#if defined(DSI_BASE)
+/// The one vector of the wrapper and the host together - position 92,
+/// the last of this class's table: the header's enumerator, never a
+/// number.
+constexpr IRQn_Type dsi_irq() { return DSI_IRQn; }
+#endif
+
 } // namespace brio
