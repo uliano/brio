@@ -443,11 +443,12 @@ bool ltdc_start() {
     return ok;
 }
 
-/// The LTDC stopped AT THE FRAME BOUNDARY: a frame cut in the middle of a
-/// line leaves a pixel packet short, and the panel reports it as an
-/// invalid transmission length (AE13) at the next bus turnaround -
-/// measured. The line event is armed on the first blanking line, so the
-/// disable right after it lands inside the vertical front porch.
+/// The LTDC stopped AT THE FRAME BOUNDARY, so that no pixel packet is cut
+/// short: the line event is armed on the first blanking line, and the
+/// disable right after it lands inside the vertical front porch. A
+/// precaution and not a measured need - the invalid transmission length
+/// the panel reports (letter d) comes from the host's disable with no
+/// stream, and stopping mid-frame was not tried.
 void ltdc_stop() {
     if (Ltdc::enabled()) {
         const uint32_t target = line_events + 1u;
