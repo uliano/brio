@@ -41,9 +41,9 @@
 //                  D30 PI9   D31 PI10
 //                  SDCKE0 PH2    SDNE0 PH3
 //                  NBL2 PI4      NBL3 PI5
-//                the device's own datasheet is not on this desk: the
-//                timing below is the IS42S16400J's, and letter m is
-//                what says how much margin it has on this part
+//                its -6 grade (IS42S32400F Rev. D1, the AC table) asks
+//                the same seven cycle counts at 90 MHz as the DISC1's
+//                device - see the timing below
 //
 // None of those pads is the display's, the gyroscope's or the touch
 // controller's, so this suite and the SPI and I2C ones share a board
@@ -146,11 +146,14 @@ constexpr SdramConfig geometry{.columns = SdramColumns::eight,
                                .read_burst = true,
                                .read_pipe = SdramPipe::none};
 
-/// The device's nanoseconds at 90 MHz (11.2 ns a cycle), rounded up:
-/// tRCD 15 ns and tRP 15 ns -> 2, tRAS 42 ns -> 4, tRC 60 ns -> 6,
-/// tXSR 70 ns -> 7, tMRD 2 cycles, tWR 2 cycles (which is also the
-/// least the chapter's two inequalities allow beside these). Letter m
-/// is what says how much of this is margin.
+/// The devices' nanoseconds at 90 MHz (11.1 ns a cycle), rounded up.
+/// The IS42S16400J: tRCD 15 ns and tRP 15 ns -> 2, tRAS 42 ns -> 4,
+/// tRC 60 ns -> 6, tXSR 70 ns -> 7, tMRD 2 cycles, tWR 2 cycles (which
+/// is also the least the chapter's two inequalities allow beside
+/// these). The IS42S32400F-6 (Rev. D1's AC table): tRCD 18 and tRP 18
+/// -> 2, tRAS 42 -> 4, tRC 60 -> 6, tXSR 70 -> 7, tMRD 12 ns -> 2, tDPL
+/// 12 ns -> 2 - the same seven numbers, so one table serves both
+/// boards. Letter m is what says how much of this is margin.
 constexpr SdramTiming timing{.load_mode_to_active = 2,
                              .exit_self_refresh = 7,
                              .self_refresh = 4,

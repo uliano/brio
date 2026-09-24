@@ -56,4 +56,7 @@ connector CN10.
 
 Documents: RM0386, DS11189 and ES0321 by revision in
 [../stm32f4/vendor/README.md](../stm32f4/vendor/README.md); the
-target's page [../stm32f4/README.md](../stm32f4/README.md).
+target's page [../stm32f4/README.md](../stm32f4/README.md). The two
+memories' own datasheets, kept beside the board's documents: ISSI's
+IS42S32400F Rev. D1 (the -6 grade's AC table is where the FMC suite's
+timing comes from) and Micron's MT25QL128ABA Rev. K.
