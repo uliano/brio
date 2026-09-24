@@ -30,6 +30,14 @@
  * meaning "no channel" everywhere in this stratum, and
  * `DmaRequestOf<r>` turns that into a compile error on the line that
  * asked.
+ *
+ * THE THIRD CLASS HAS A SECOND CONTROLLER, AND THIS TABLE IS DMA1'S. On
+ * the CH32V303 (CH32V30x_D8) DMA1's seven channels carry the same rows
+ * as table 11-5 but for UART4's two, which table 11-2 does not list:
+ * UART4 and TIM5 raise their requests on DMA2 there (table 11-3), with
+ * UART5..8, SPI3, TIM6..TIM10, the SDIO host, the DACs and ADC2. So on
+ * a part with a second controller those rows answer 0 here - a request
+ * this table does not speak for - and DMA2's rows are not written yet.
  */
 
 #pragma once
@@ -99,6 +107,9 @@ enum class DmaRequest : uint8_t {
     tim5_ch1, tim5_ch2, tim5_ch3, tim5_ch4, tim5_trig, tim5_up,
 };
 
+/// TIM5's requests are DMA1's on a part with one controller and TIM5.
+constexpr bool tim5_on_dma1() { return device::has_tim5 && device::dma_controller_count == 1u; }
+
 /**
  * The channel that serves a request on THIS PART, or 0 when the part
  * has not got the peripheral that raises it.
@@ -106,7 +117,8 @@ enum class DmaRequest : uint8_t {
  * The rows are tables 11-5 and 11-6 read column by column. The two
  * tables are the same map: the D8 class adds TIM5's six events and
  * changes nothing else, so one function serves both classes and the
- * part's own table decides which rows exist.
+ * part's own table decides which rows exist - and on the CH32V303 it is
+ * DMA1's table 11-2, the same rows without UART4's.
  */
 constexpr uint8_t dma_request_channel(DmaRequest r) {
     switch (r) {
@@ -128,8 +140,11 @@ constexpr uint8_t dma_request_channel(DmaRequest r) {
         case DmaRequest::usart2_tx: return device::has_usart(2) ? 7 : 0;
         case DmaRequest::usart3_tx: return device::has_usart(3) ? 2 : 0;
         case DmaRequest::usart3_rx: return device::has_usart(3) ? 3 : 0;
-        case DmaRequest::uart4_tx:  return device::has_usart(4) ? 1 : 0;
-        case DmaRequest::uart4_rx:  return device::has_usart(4) ? 8 : 0;
+        // UART4 is DMA1's only where there is no DMA2 (the file header).
+        case DmaRequest::uart4_tx:
+            return device::has_usart(4) && device::dma_controller_count == 1u ? 1 : 0;
+        case DmaRequest::uart4_rx:
+            return device::has_usart(4) && device::dma_controller_count == 1u ? 8 : 0;
 
         // I2C1 and I2C2. One package of the nine has no I2C at all.
         case DmaRequest::i2c1_tx:   return device::i2c_count >= 1u ? 6 : 0;
@@ -167,14 +182,14 @@ constexpr uint8_t dma_request_channel(DmaRequest r) {
         case DmaRequest::tim4_ch3:  return device::general_timer_count >= 3u ? 5 : 0;
         case DmaRequest::tim4_up:   return device::general_timer_count >= 3u ? 7 : 0;
 
-        // Table 11-6's own six rows: the 32-bit timer of the other
-        // device class, and of no part below it.
-        case DmaRequest::tim5_ch2:  return device::has_tim5 ? 1 : 0;
-        case DmaRequest::tim5_ch3:  return device::has_tim5 ? 3 : 0;
-        case DmaRequest::tim5_ch4:  return device::has_tim5 ? 6 : 0;
+        // Table 11-6's own six rows: the 32-bit timer of the CH32V20x_D8,
+        // and of no part below it. The CH32V303's TIM5 is DMA2's.
+        case DmaRequest::tim5_ch2:  return tim5_on_dma1() ? 1 : 0;
+        case DmaRequest::tim5_ch3:  return tim5_on_dma1() ? 3 : 0;
+        case DmaRequest::tim5_ch4:  return tim5_on_dma1() ? 6 : 0;
         case DmaRequest::tim5_ch1:
-        case DmaRequest::tim5_trig: return device::has_tim5 ? 7 : 0;
-        case DmaRequest::tim5_up:   return device::has_tim5 ? 8 : 0;
+        case DmaRequest::tim5_trig: return tim5_on_dma1() ? 7 : 0;
+        case DmaRequest::tim5_up:   return tim5_on_dma1() ? 8 : 0;
     }
     return 0;
 }

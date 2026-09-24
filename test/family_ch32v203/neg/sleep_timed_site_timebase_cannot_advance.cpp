@@ -1,4 +1,4 @@
-// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb
+// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb ch32v303cb ch32v303rb ch32v303rc ch32v303vc
 // A TIMED SITE OVER A TIMEBASE THAT CANNOT BE RESYNCHRONIZED. What the
 // timed site is FOR is repairing kernel time after a Stop that froze
 // it, and the repair is one verb: advance(). A timebase without it

@@ -1,9 +1,10 @@
-// test_v203_clock - the reference bench suite for the CH32V203's CLOCK
-// TREE (RM ch. 3 with the EXTEN bits that belong to it): the roots, the
-// PLL and its two input dividers, the switch, the four prescalers, the
-// clock output, the security system, the peripheral gates - and the
-// dynamic regime over all of it, with the kernel tick and the console
-// itself rebased at every step.
+// test_v203_clock - the reference bench suite for the CLOCK TREE of the
+// CH32V203 and the CH32V303 (RM ch. 3 with the EXTEN bits that belong to
+// it - the one simple tree the manual gives both device classes): the
+// roots, the PLL and its two input dividers, the switch, the four
+// prescalers, the clock output, the security system, the peripheral
+// gates - and the dynamic regime over all of it, with the kernel tick
+// and the console itself rebased at every step.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -12,9 +13,9 @@
 // under it.
 //
 // NOTHING TO WIRE. Every clock this suite touches is inside the chip or
-// on the board's own 8 MHz crystal, the console is the probe's serial
-// (USART1 on PA9/PA10) and the clock output takes a pad nothing else on
-// the board uses.
+// on the board's own 8 MHz crystal (both boards carry one, on PD0/PD1),
+// the console is the probe's serial (USART1 on PA9/PA10) and the clock
+// output takes a pad nothing else on the board uses.
 //
 // THE CONSOLE IS THE INSTRUMENT AND THE SUBJECT AT ONCE. Every letter
 // that moves the rate moves it through a DynamicClock whose users are
@@ -54,11 +55,12 @@
 //      never fires
 //   g  the clock output on PA8: every source this class has, set and
 //      read back, and the pad claimed and released
-//   h  the peripheral gates: every enable the chapter lists opened and
-//      closed with the register read back, and what the register does
-//      with the gates of blocks this package has not got
+//   h  the peripheral gates: every enable the chapter lists for a block
+//      THIS PART has (the part table says which) opened and closed with
+//      the register read back, and what the register does with the
+//      gates of the blocks it has not got - reported, not judged
 //
-// build: boards = v203c6,v203c8
+// build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -197,6 +199,15 @@ void bracket(uint8_t i, uint32_t span) {
     while (Ticker::ticks() - t0 < span) {
     }
     print(serial, "  rate ", i, " done", crlf);
+    // The closing line alone on the wire for a few ticks, as the opening
+    // one is: a console bridge that forwards in blocks and flushes when
+    // the line goes idle would otherwise hold it until the verdict after
+    // it had gone out too, and whoever times the two lines would time
+    // that verdict's length as well.
+    console_drain();
+    const uint32_t t1 = Ticker::ticks();
+    while (Ticker::ticks() - t1 < 5u) {
+    }
 }
 
 /// What a rate must be able to say about itself after a switch.
@@ -376,7 +387,10 @@ void te_hse() {
     Rcc::hse_enable(false);
     const uint32_t rise = wait_us([] { return Rcc::hse_ready(); }, 100'000);
     print(serial, "  HSERDY rose ", rise, " us after HSEON was set (the "
-                  "datasheet's figure for an 8 MHz crystal is 2.5 ms)", crlf);
+                  "datasheet's figure for an 8 MHz crystal is ",
+          device::device_class == DeviceClass::v30x_d8 ? "1.5 ms typical and 4 at most"
+                                                       : "2.5 ms",
+          ")", crlf);
     bench.verdict("the board's crystal starts and HSERDY reads back",
                   Rcc::hse_ready());
 
@@ -477,50 +491,66 @@ struct Gate {
     const char* name;
     Bus bus;
     uint32_t mask;
+    bool present;   ///< the part table's word for the block behind it
 };
 
+/// Every gate the chapter lists for a block of this stratum's classes,
+/// each with the part's own answer. The two the console runs on,
+/// USART1's and GPIOA's, are not here.
 constexpr Gate gates[] = {
-    {"HB DMA1", Bus::hb, rcc_hb_dma1},
-    {"HB SRAM", Bus::hb, rcc_hb_sram},
-    {"HB CRC", Bus::hb, rcc_hb_crc},
-    {"HB USBFS", Bus::hb, rcc_hb_usbfs},
-    {"PB2 AFIO", Bus::pb2, rcc_pb2_afio},
-    {"PB2 GPIOB", Bus::pb2, rcc_pb2_gpiob},
-    {"PB2 GPIOC", Bus::pb2, rcc_pb2_gpioc},
-    {"PB2 GPIOD", Bus::pb2, rcc_pb2_gpiod},
-    {"PB2 ADC1", Bus::pb2, rcc_pb2_adc1},
-    {"PB2 ADC2", Bus::pb2, rcc_pb2_adc2},
-    {"PB2 TIM1", Bus::pb2, rcc_pb2_tim1},
-    {"PB2 SPI1", Bus::pb2, rcc_pb2_spi1},
-    {"PB1 TIM2", Bus::pb1, rcc_pb1_tim2},
-    {"PB1 TIM3", Bus::pb1, rcc_pb1_tim3},
-    {"PB1 TIM4", Bus::pb1, rcc_pb1_tim4},
-    {"PB1 WWDG", Bus::pb1, rcc_pb1_wwdg},
-    {"PB1 SPI2", Bus::pb1, rcc_pb1_spi2},
-    {"PB1 USART2", Bus::pb1, rcc_pb1_usart2},
-    {"PB1 USART3", Bus::pb1, rcc_pb1_usart3},
-    {"PB1 UART4", Bus::pb1, rcc_pb1_uart4},
-    {"PB1 I2C1", Bus::pb1, rcc_pb1_i2c1},
-    {"PB1 I2C2", Bus::pb1, rcc_pb1_i2c2},
-    {"PB1 USBD", Bus::pb1, rcc_pb1_usbd},
-    {"PB1 CAN1", Bus::pb1, rcc_pb1_can1},
-    {"PB1 BKP", Bus::pb1, rcc_pb1_bkp},
-    {"PB1 PWR", Bus::pb1, rcc_pb1_pwr},
-};
-
-/// The gates of blocks this package has NOT got. Nothing says what a
-/// gate does there, so the letter reports what it found instead of
-/// judging it.
-constexpr Gate absent_gates[] = {
-    {"HB DMA2 (no such block on this family)", Bus::hb, rcc_hb_dma2},
-    {"PB2 GPIOE (no such port on this series)", Bus::pb2, rcc_pb2_gpioe},
-    {"PB1 TIM5 (the CH32V203RB's alone)", Bus::pb1, rcc_pb1_tim5},
+    {"HB DMA1", Bus::hb, rcc_hb_dma1, true},
+    {"HB DMA2", Bus::hb, rcc_hb_dma2, device::dma_controller_count >= 2u},
+    {"HB SRAM", Bus::hb, rcc_hb_sram, true},
+    {"HB CRC", Bus::hb, rcc_hb_crc, true},
+    {"HB FSMC", Bus::hb, rcc_hb_fsmc, device::has_fsmc},
+    {"HB RNG", Bus::hb, rcc_hb_rng, device::has_rng},
+    {"HB SDIO", Bus::hb, rcc_hb_sdio, device::has_sdio},
+    {"HB USBFS", Bus::hb, rcc_hb_usbfs, device::has_usbfs},
+    {"PB2 AFIO", Bus::pb2, rcc_pb2_afio, true},
+    {"PB2 GPIOB", Bus::pb2, rcc_pb2_gpiob, true},
+    {"PB2 GPIOC", Bus::pb2, rcc_pb2_gpioc, true},
+    {"PB2 GPIOD", Bus::pb2, rcc_pb2_gpiod, true},
+    {"PB2 GPIOE", Bus::pb2, rcc_pb2_gpioe, device::has_port('E')},
+    {"PB2 ADC1", Bus::pb2, rcc_pb2_adc1, true},
+    {"PB2 ADC2", Bus::pb2, rcc_pb2_adc2, device::adc_count >= 2u},
+    {"PB2 TIM1", Bus::pb2, rcc_pb2_tim1, true},
+    {"PB2 SPI1", Bus::pb2, rcc_pb2_spi1, true},
+    {"PB2 TIM8", Bus::pb2, rcc_pb2_tim8, (device::advanced_timer_instances & (1U << 8)) != 0u},
+    {"PB2 TIM9", Bus::pb2, rcc_pb2_tim9, (device::advanced_timer_instances & (1U << 9)) != 0u},
+    {"PB2 TIM10", Bus::pb2, rcc_pb2_tim10,
+     (device::advanced_timer_instances & (1U << 10)) != 0u},
+    {"PB1 TIM2", Bus::pb1, rcc_pb1_tim2, true},
+    {"PB1 TIM3", Bus::pb1, rcc_pb1_tim3, true},
+    {"PB1 TIM4", Bus::pb1, rcc_pb1_tim4, true},
+    {"PB1 TIM5", Bus::pb1, rcc_pb1_tim5, device::has_tim5},
+    {"PB1 TIM6", Bus::pb1, rcc_pb1_tim6, (device::basic_timer_instances & (1U << 6)) != 0u},
+    {"PB1 TIM7", Bus::pb1, rcc_pb1_tim7, (device::basic_timer_instances & (1U << 7)) != 0u},
+    {"PB1 WWDG", Bus::pb1, rcc_pb1_wwdg, true},
+    {"PB1 SPI2", Bus::pb1, rcc_pb1_spi2, (device::spi_instances & (1U << 2)) != 0u},
+    {"PB1 SPI3", Bus::pb1, rcc_pb1_spi3, (device::spi_instances & (1U << 3)) != 0u},
+    {"PB1 USART2", Bus::pb1, rcc_pb1_usart2, device::has_usart(2)},
+    {"PB1 USART3", Bus::pb1, rcc_pb1_usart3, device::has_usart(3)},
+    {"PB1 UART4", Bus::pb1, rcc_pb1_uart4, device::has_usart(4)},
+    {"PB1 UART5", Bus::pb1, rcc_pb1_uart5, device::has_usart(5)},
+    {"PB1 UART6", Bus::pb1, rcc_pb1_uart6, device::has_usart(6)},
+    {"PB1 UART7", Bus::pb1, rcc_pb1_uart7, device::has_usart(7)},
+    {"PB1 UART8", Bus::pb1, rcc_pb1_uart8, device::has_usart(8)},
+    {"PB1 I2C1", Bus::pb1, rcc_pb1_i2c1, true},
+    {"PB1 I2C2", Bus::pb1, rcc_pb1_i2c2, device::i2c_count >= 2u},
+    {"PB1 USBD", Bus::pb1, rcc_pb1_usbd, device::has_usbd},
+    {"PB1 CAN1", Bus::pb1, rcc_pb1_can1, device::can_count >= 1u},
+    {"PB1 BKP", Bus::pb1, rcc_pb1_bkp, true},
+    {"PB1 PWR", Bus::pb1, rcc_pb1_pwr, true},
+    {"PB1 DAC", Bus::pb1, rcc_pb1_dac, device::has_dac},
 };
 
 void th_gates() {
     bool all_ok = true;
     uint32_t tried = 0;
     for (const Gate& g : gates) {
+        if (!g.present) {
+            continue;
+        }
         const bool was = Rcc::enabled(g.bus, g.mask);
         Rcc::enable(g.bus, g.mask);
         const bool on = Rcc::enabled(g.bus, g.mask);
@@ -542,7 +572,10 @@ void th_gates() {
     print(serial, "  USART1's and GPIOA's gates are the two left alone: this "
                   "console runs on them", crlf);
 
-    for (const Gate& g : absent_gates) {
+    for (const Gate& g : gates) {
+        if (g.present) {
+            continue;
+        }
         const bool was = Rcc::enabled(g.bus, g.mask);
         Rcc::enable(g.bus, g.mask);
         const bool on = Rcc::enabled(g.bus, g.mask);
@@ -550,7 +583,7 @@ void th_gates() {
         if (was) {
             Rcc::enable(g.bus, g.mask);
         }
-        print(serial, "  ", g.name, ": the bit holds a one: ", on, crlf);
+        print(serial, "  ", g.name, " (not on this part): the bit holds a one: ", on, crlf);
     }
     // The two resets of a block that is not in use: pulsing them proves
     // the verb reaches the register, and CRC has nothing to lose.

@@ -3,6 +3,8 @@ avrdude over UPDI, OpenOCD over SWD or an ST-LINK, or the ST-LINK's own
 mass-storage flasher - with the flash-heap preflight on the AVR."""
 
 import argparse
+import fcntl
+import glob
 import json
 import os
 import re
@@ -246,6 +248,50 @@ def rp2350_openocd_argvs(prog, elffile, arm):
     return [rescue, program]
 
 
+def wch_probe_reset(prog, console):
+    """USBDEVFS_RESET on the WCH-Link once the programming session has
+    closed - the hands-free replug (docs/probes/wch-link.md). Two probe
+    kinds want it: the CH549 kind's serial bridge keeps the tail of a
+    burst sent into a CLOSED port - the banner an image prints the moment
+    `resume` starts it, before anyone opens the console - and then serves
+    every later burst that many bytes late, so a suite's `ALL:` line
+    would sit behind a banner nobody read; and a LinkE's bulk transport
+    wedges after a suite that slept the core. The reset re-enumerates the
+    probe, which takes about a second, so the console's by-id node is
+    waited for before returning and `brio run` right after finds it. A
+    probe with no serial in the manifest is left alone."""
+    serial = prog.get("serial")
+    if not serial:
+        return
+    node = None
+    for d in glob.glob("/sys/bus/usb/devices/*"):
+        try:
+            with open(os.path.join(d, "serial")) as f:
+                if f.read().strip() != serial:
+                    continue
+            with open(os.path.join(d, "busnum")) as f:
+                bus = int(f.read())
+            with open(os.path.join(d, "devnum")) as f:
+                dev = int(f.read())
+            node = "/dev/bus/usb/%03d/%03d" % (bus, dev)
+        except OSError:
+            continue
+    if node is None:
+        print("bench: WCH-Link %s not found on the bus, no reset" % serial)
+        return
+    fd = os.open(node, os.O_WRONLY)
+    try:
+        fcntl.ioctl(fd, 0x5514)   # USBDEVFS_RESET
+    finally:
+        os.close(fd)
+    deadline = time.time() + 6.0
+    while console and time.time() < deadline:
+        if os.path.exists(console):
+            return
+        time.sleep(0.1)
+    if console and not os.path.exists(console):
+        print("bench: %s did not come back after the probe's reset" % console)
+
 def openocd_interface(prog):
     """The `-f interface/... -c adapter serial ...` half of an OpenOCD
     command line, from the manifest's programmer entry. The HID backend
@@ -439,6 +485,10 @@ def cmd_flash(args):
     rc = subprocess.call(argv, cwd=ROOT)
     if rc == 0:
         state_write(args.name, args.app)
+    if spec["flash"] == "wch_openocd":
+        # The image is already running and may have printed into a port
+        # nobody holds open: clear the probe's bridge before anyone does.
+        wch_probe_reset(prog, board_entry(args.name).get("console"))
     return rc
 
 

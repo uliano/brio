@@ -68,9 +68,9 @@ static_assert(!device::has_usart(1) ||
 static_assert(!device::has_usart(2) ||
               (usart_pads_for(2).tx == Pad{'A', 2} && usart_pads_for(2).rx == Pad{'A', 3}));
 static_assert(!device::has_usart(3) || usart_pads_for(3).tx == Pad{'B', 10});
-static_assert(!device::has_usart(4) || device::is_d8_class ||
+static_assert(!device::has_usart(4) || device::device_class != DeviceClass::v20x_d6 ||
               (usart_pads_for(4).tx == Pad{'B', 0} && usart_pads_for(4).rx == Pad{'B', 1}));
-static_assert(!device::has_usart(4) || !device::is_d8_class ||
+static_assert(!device::has_usart(4) || device::device_class == DeviceClass::v20x_d6 ||
               (usart_pads_for(4).tx == Pad{'C', 10} && usart_pads_for(4).rx == Pad{'C', 11}));
 // The column carries five pads, and the remapped one is another five.
 static_assert(!device::has_usart(1) || usart_column_for(1, 0).ck == Pad{'A', 8});
@@ -80,13 +80,14 @@ static_assert(!device::has_usart(2) || usart_column_for(2, 0).rts == Pad{'A', 1}
 // A column exists where the device class has it and the package bonds a
 // pad of it: USART2's second column is the other class's.
 static_assert(!device::has_usart(console_instance) || usart_remap_valid(console_instance, 0));
-static_assert(!usart_remap_valid(2, 1) || device::is_d8_class);
+static_assert(!usart_remap_valid(2, 1) || device::device_class != DeviceClass::v20x_d6);
 
 // The fourth port is a full USART on the CH32V203C8 and a UART4 on the
-// other class, which is what decides the clock, the smartcard and the
-// pair.
+// other two classes, which is what decides the clock, the smartcard and
+// the pair.
 static_assert(Console::is_full);
-static_assert(!device::has_usart(4) || device::usart_full(4) != device::is_d8_class);
+static_assert(!device::has_usart(4) ||
+              device::usart_full(4) == (device::device_class == DeviceClass::v20x_d6));
 
 // The frame: seven data bits exist only with a parity bit and nine only
 // without, because the register counts the WORD.

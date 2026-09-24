@@ -25,14 +25,18 @@
 // PB2 driven ACTIVE HIGH and a KEY button on PA0. Wiring on this bench:
 // a WCH-Link's own serial pins are wired to PA9 (USART1_TX) and PA10
 // (USART1_RX), the instance's default pads, and the same probe drives
-// the two-wire debug port on PA13/PA14, so one cable carries both.
+// the two-wire debug port on PA13/PA14, so one cable carries both. WCH's
+// CH32V303 evaluation board is wired the same way, with its LED jumpered
+// to PB2 and its KEY to PA0, so the same image source serves it - but
+// that board's LED hangs from 3.3 V and lights with the pad LOW, so
+// there `LED ON` darkens it.
 // Connect at 115200 8N1 and type:
 //   HELP | LED ON|OFF|TOG | UPTIME | BEATS | ERR
 //
 // Between keystrokes the CPU sleeps in WFI, woken by the system counter
 // or the USART. No polling anywhere.
 //
-// build: boards = v203c6,v203c8,v203rb
+// build: boards = v203c6,v203c8,v203rb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>

@@ -1,4 +1,4 @@
-// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb
+// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb ch32v303cb ch32v303rb ch32v303rc ch32v303vc
 // IWDG_PSCR is three bits and the driver names the seven dividers it
 // encodes (RM 7.3.2); a code past them is refused where the setting is
 // a constant.

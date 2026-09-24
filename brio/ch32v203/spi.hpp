@@ -144,8 +144,11 @@ constexpr uint32_t spi_gate_for(uint8_t n) {
 
 constexpr Irq spi_irq_for(uint8_t n) { return n == 1 ? Irq::spi1 : Irq::spi2; }
 
-/// Does THIS PART have that instance (datasheet table 2-1)?
-constexpr bool spi_present(uint8_t n) { return n >= 1u && n <= device::spi_count; }
+/// Does THIS PART have that instance (datasheet table 2-1) - and is it
+/// one this driver reaches? SPI3, the CH32V303RC's and VC's, is not.
+constexpr bool spi_present(uint8_t n) {
+    return n >= 1u && n <= 2u && n <= device::spi_count;
+}
 
 /// Table 11-5's two rows per instance, read through dma_engine.hpp so
 /// that the channel numbers live in exactly one place.

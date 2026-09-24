@@ -31,7 +31,7 @@ static_assert(bkp_tef == (1u << 8) && bkp_tif == (1u << 9));
 
 // ---- how many registers, and what that is worth in bytes --------------------
 static_assert(Bkp::count == device::bkp_data_registers);
-static_assert(Bkp::count == (device::is_d8_class ? 42u : 10u));
+static_assert(Bkp::count == (device::device_class == DeviceClass::v20x_d6 ? 10u : 42u));
 static_assert(Bkp::count * 2u >= 20u);
 
 // ---- the pad ----------------------------------------------------------------

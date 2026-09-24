@@ -1,4 +1,4 @@
-// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb
+// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb ch32v303cb ch32v303rb ch32v303rc ch32v303vc
 // A RESCALING CLOCK UNDER THE CONVERTER. Every sampling time this
 // driver programs and every conversion it reports is in ADCCLK cycles,
 // and ADCCLK follows PCLK2: a DynamicClock would move them all at once

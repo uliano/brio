@@ -1,4 +1,4 @@
-// mcu: ch32v203f6 ch32v203g6 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb
+// mcu: ch32v203f6 ch32v203g6 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb ch32v303cb ch32v303rb ch32v303rc ch32v303vc
 // The HSE half of the clock chapter, on the seven parts whose package
 // brings out OSC_IN and OSC_OUT. The crystal's rate is read from the
 // part's own table rather than written here, because it is not the same
@@ -31,7 +31,7 @@ static_assert(Crystal::usb_divider == 0u);
 /// A crystal the PLL can reach the family ceiling from, which is not the
 /// same part number on both classes: 8 MHz where PLLXTPRE divides by one
 /// or two, 32 MHz where it divides by four or eight.
-inline constexpr uint32_t pll_xtal_hz = device::is_d8_class ? 32'000'000UL : 8'000'000UL;
+inline constexpr uint32_t pll_xtal_hz = 8'000'000UL * device::pll_hse_div[0];
 
 using PllXtal = Clock<ClockSource::pll, 144'000'000, pll_xtal_hz>;
 /// A rate only the SECOND divider reaches: 4 MHz into the PLL times

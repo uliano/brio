@@ -86,16 +86,16 @@ static_assert(Exti::implemented(Pwr::pvd_exti_line));
 static_assert(Pwr::wakeup_port == 'A' && Pwr::wakeup_pin_number == 0);
 static_assert(Pwr::wakeup_pad_bonded);
 
-// The retention bits, per class: one bank on the D6, two on the D8.
-// AND THE MANUAL'S NUMBER IS THE CLASS'S LARGEST ARRAY: the D6's note
-// names "the 20K RAM" while four parts of this series carry ten, so
-// what the bit covers is stated bounded by what the part HAS and can
-// never exceed it.
-static_assert(Pwr::has_upper_ram_retention == device::is_d8_class);
+// The retention bits, per class: one bank on the D6, two on the
+// CH32V20x_D8 and the CH32V30x_D8. AND THE MANUAL'S NUMBER IS THE
+// CLASS'S LARGEST ARRAY: the D6's note names "the 20K RAM" while four
+// parts of this series carry ten, so what the bit covers is stated
+// bounded by what the part HAS and can never exceed it.
+inline constexpr bool d6 = device::device_class == DeviceClass::v20x_d6;
+static_assert(Pwr::has_upper_ram_retention == !d6);
 static_assert(Pwr::ram_retention_bytes <= device::sram_bytes);
 static_assert(Pwr::ram_retention_bytes ==
-              (device::is_d8_class ? 2048u
-                                   : (device::sram_bytes < 20480u ? device::sram_bytes : 20480u)));
+              (!d6 ? 2048u : (device::sram_bytes < 20480u ? device::sram_bytes : 20480u)));
 
 // ---- every verb ------------------------------------------------------------
 void pwr_verbs() {

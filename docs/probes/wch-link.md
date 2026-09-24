@@ -40,6 +40,24 @@ attached is untested).
   to work with the part BEFORE re-checking pins. MounRiver ships
   `libmcuupdate.so`, so the older probe can be brought up to date
   rather than retired.
+- **The CH549 kind** - the probe a WeAct-branded WCH-Link is, its
+  banner `WCH-Link-CH549 mode:RV version 2.12`, the same `1a86:8010` -
+  attaches a CH32V303 over the two-wire port and programs it through
+  the fork at that firmware. Its serial bridge is not the LinkE's in
+  two ways. It refuses a CDC break (the ioctl answers EOPNOTSUPP). And
+  it forwards the target's bytes in BLOCKS of 128, a partial block some
+  two milliseconds after the line goes idle - measured: a 495-byte
+  answer arriving as 128, 128, 128 and 111 bytes at 11.4, 22.5, 33.6
+  and 45.5 ms after the key that asked for it - which is harmless
+  until the target talks while nobody has the port open: once the port
+  has been opened and closed since the probe enumerated, a burst sent
+  into the closed port leaves its last bytes in the probe (41 of them,
+  both times measured), and from then on EVERY later burst arrives that
+  many bytes late, its own tail coming out only when more bytes push
+  it. A suite flashed and then run can therefore hold its `ALL:` line
+  behind a boot banner nobody read. A reset of the probe over USB
+  (`USBDEVFS_RESET` on its device node) clears the state and drops the
+  held bytes.
 - **A core in debug mode never sleeps** (QingKe V2 manual 5.1), so
   nothing about the idle path's power is measurable with the probe
   halted on it; and the debugger's `step` does not take pending

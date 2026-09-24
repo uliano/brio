@@ -131,8 +131,10 @@ public:
 
     /// The lines above them, by what is wired to each (table 9-3). Which
     /// of them this part HAS follows the peripheral: the two USB
-    /// controllers and the Ethernet are per part, and line 21 is the
-    /// other device class's 32 kHz calibration.
+    /// controllers and the Ethernet are per part, line 21 is the
+    /// CH32V20x_D8's 32 kHz calibration, and on the CH32V30x_D8, which
+    /// has no USBD, the table gives line 18 to the USBFS/OTG controller
+    /// as well as line 20.
     static constexpr uint8_t line_pvd = 16;
     static constexpr uint8_t line_rtc_alarm = 17;
     static constexpr uint8_t line_usbd_wakeup = 18;
@@ -147,10 +149,11 @@ public:
     /// and the sixteen pin lines exist everywhere.
     static constexpr bool implemented(uint8_t line) {
         return line < gpio_lines || line == line_pvd || line == line_rtc_alarm ||
-               (line == line_usbd_wakeup && device::has_usbd) ||
+               (line == line_usbd_wakeup &&
+                (device::has_usbd || device::device_class == DeviceClass::v30x_d8)) ||
                (line == line_eth_wakeup && device::has_ethernet) ||
                (line == line_usbfs_wakeup && device::has_usbfs) ||
-               (line == line_osc32k_wakeup && device::is_d8_class);
+               (line == line_osc32k_wakeup && device::device_class == DeviceClass::v20x_d8);
     }
 
     /// Every line this part has, as a mask.
@@ -167,6 +170,12 @@ public:
     /// Is it one of the pin lines - the only ones with a multiplexer?
     static constexpr bool gpio(uint8_t line) { return line < gpio_lines; }
 
+    /// A vector as an optional: nothing where this part's device class
+    /// has no such line (device.hpp's irq_none).
+    static constexpr std::optional<Irq> vector_if_any(Irq v) {
+        return irq_exists(v) ? std::optional<Irq>(v) : std::nullopt;
+    }
+
     /**
      * The vector this line interrupts on: the first five lines have one
      * each, then two shared vectors carry 9..5 and 15..10, and the
@@ -175,9 +184,9 @@ public:
      *
      * Nothing for a line this part has not got - and nothing for the two
      * the CH32V203RB adds, the Ethernet's wake-up and the 32 kHz
-     * calibration's, whose table entries device.hpp's Irq enum does not
-     * name: it names the D8 class's extra vectors when a driver of this
-     * stratum arms one, and no driver here does.
+     * calibration's, which this driver does not arm. On the CH32V303 the
+     * two USB wake-ups interrupt on 58 and 84 (device.hpp's Irq table:
+     * measured, where WCH's own startup file for the class has zeros).
      */
     static constexpr std::optional<Irq> irq(uint8_t line) {
         if (!implemented(line)) {
@@ -191,8 +200,8 @@ public:
             case 4:  return Irq::exti4;
             case line_pvd: return Irq::pvd;
             case line_rtc_alarm: return Irq::rtc_alarm;
-            case line_usbd_wakeup: return Irq::usb_wakeup;
-            case line_usbfs_wakeup: return Irq::usbfs_wakeup;
+            case line_usbd_wakeup: return vector_if_any(Irq::usb_wakeup);
+            case line_usbfs_wakeup: return vector_if_any(Irq::usbfs_wakeup);
             default: break;
         }
         if (line <= 9u) {
@@ -206,7 +215,9 @@ public:
 
     /// The lines one vector answers for - what a shared handler passes to
     /// isr() so it can neither consume nor be confused by another
-    /// vector's flags.
+    /// vector's flags. The two USB wake-ups are asked apart from the
+    /// switch because a class without one of them states it as irq_none,
+    /// and a switch cannot hold one value twice.
     static constexpr uint32_t vector_lines(Irq vector) {
         switch (vector) {
             case Irq::exti0: return 1UL << 0;
@@ -218,10 +229,15 @@ public:
             case Irq::exti15_10: return 0xFC00UL;   // 15..10
             case Irq::pvd: return 1UL << line_pvd;
             case Irq::rtc_alarm: return 1UL << line_rtc_alarm;
-            case Irq::usb_wakeup: return 1UL << line_usbd_wakeup;
-            case Irq::usbfs_wakeup: return 1UL << line_usbfs_wakeup;
-            default: return 0;
+            default: break;
         }
+        if (irq_exists(vector) && vector == Irq::usb_wakeup) {
+            return 1UL << line_usbd_wakeup;
+        }
+        if (irq_exists(vector) && vector == Irq::usbfs_wakeup) {
+            return 1UL << line_usbfs_wakeup;
+        }
+        return 0;
     }
 
     // ---- the senses (9.5.1.3, 9.5.1.4) -------------------------------------

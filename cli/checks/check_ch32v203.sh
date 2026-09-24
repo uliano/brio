@@ -4,12 +4,14 @@
 #
 # Positive: every test/family_ch32v203/*.cpp must COMPILE for every part
 # in PARTS with the project's own flags - the part's definition
-# (CH32V203C8 and the like, what device.hpp asks for its table) - or,
-# when the TU carries a "// mcu: <list>" line, for those parts alone: a
-# TU that names a USART, a pad or a block some package has not got says
-# so there. Nine parts, one ISA: unlike the CH32V00x family every part
-# of this one is the same QingKe V4B core, so what varies is the part
-# definition and nothing else.
+# (CH32V203C8 and the like, what device.hpp asks for its table) and the
+# part's own ISA and ABI - or, when the TU carries a "// mcu: <list>"
+# line, for those parts alone: a TU that names a USART, a pad or a block
+# some package has not got says so there. Thirteen parts, two ISAs: the
+# nine CH32V203 are the QingKe V4B (rv32imac_xw, ilp32) and the four
+# CH32V303 the V4F (rv32imafc_xw, ilp32f - the same core with a
+# single-precision FPU), each compiled with the pair the part table
+# (ch32v203/cmake/ch32v203-parts.cmake) gives it.
 # Every positive is compiled BOTH WAYS the project can build an image:
 # with the core's hardware prologue/epilogue (-DBRIO_CH32_HPE=1, the
 # CH32V203_HPE option, WCH's interrupt attribute) and without it (gcc's
@@ -27,25 +29,33 @@ set -u
 cd "$(dirname "$0")/../.."
 
 CXX=/sw/wch-riscv/bin/riscv32-wch-elf-g++
-COMMON="-march=rv32imac_xw -mabi=ilp32 -std=gnu++23 -Os -Wall -Wextra -Werror -fno-exceptions -fno-rtti -c -Ibrio"
-PARTS="ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb"
+COMMON="-std=gnu++23 -Os -Wall -Wextra -Werror -fno-exceptions -fno-rtti -c -Ibrio"
+V4B="-march=rv32imac_xw -mabi=ilp32"
+V4F="-march=rv32imafc_xw -mabi=ilp32f"
+PARTS="ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb
+       ch32v303cb ch32v303rb ch32v303rc ch32v303vc"
 FILTER="${1:-}"
 fail=0
 
-# The part's own flag: the part DEFINITION, which is the one thing
-# ch32v203/CMakeLists.txt derives from CH32V203_MCU that the code sees
-# (cmake/ch32v203-parts.cmake is the table).
+# The part's own flags: the part DEFINITION, which is what device.hpp
+# asks for its table, and the ISA and ABI - the three things
+# ch32v203/CMakeLists.txt derives from CH32V203_MCU that the compiler
+# sees (cmake/ch32v203-parts.cmake is the table).
 part_flags() {
     case "$1" in
-        ch32v203f6) echo "-DCH32V203F6 $COMMON" ;;
-        ch32v203f8) echo "-DCH32V203F8 $COMMON" ;;
-        ch32v203g6) echo "-DCH32V203G6 $COMMON" ;;
-        ch32v203g8) echo "-DCH32V203G8 $COMMON" ;;
-        ch32v203k6) echo "-DCH32V203K6 $COMMON" ;;
-        ch32v203k8) echo "-DCH32V203K8 $COMMON" ;;
-        ch32v203c6) echo "-DCH32V203C6 $COMMON" ;;
-        ch32v203c8) echo "-DCH32V203C8 $COMMON" ;;
-        ch32v203rb) echo "-DCH32V203RB $COMMON" ;;
+        ch32v203f6) echo "-DCH32V203F6 $V4B $COMMON" ;;
+        ch32v203f8) echo "-DCH32V203F8 $V4B $COMMON" ;;
+        ch32v203g6) echo "-DCH32V203G6 $V4B $COMMON" ;;
+        ch32v203g8) echo "-DCH32V203G8 $V4B $COMMON" ;;
+        ch32v203k6) echo "-DCH32V203K6 $V4B $COMMON" ;;
+        ch32v203k8) echo "-DCH32V203K8 $V4B $COMMON" ;;
+        ch32v203c6) echo "-DCH32V203C6 $V4B $COMMON" ;;
+        ch32v203c8) echo "-DCH32V203C8 $V4B $COMMON" ;;
+        ch32v203rb) echo "-DCH32V203RB $V4B $COMMON" ;;
+        ch32v303cb) echo "-DCH32V303CB $V4F $COMMON" ;;
+        ch32v303rb) echo "-DCH32V303RB $V4F $COMMON" ;;
+        ch32v303rc) echo "-DCH32V303RC $V4F $COMMON" ;;
+        ch32v303vc) echo "-DCH32V303VC $V4F $COMMON" ;;
         *) echo "unknown part $1" >&2; exit 2 ;;
     esac
 }

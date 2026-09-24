@@ -3,9 +3,10 @@
 // UsbController, the whole stack composed over it - the control-endpoint
 // machine and a CDC ACM port - and every verb of the driver.
 //
-// Eight parts of the nine: the CH32V203F8's package bonds neither PA11
-// nor PA12, so the datasheet gives it no USB device controller at all
-// and a neg TU proves the refusal.
+// Eight CH32V203 of the nine: the CH32V203F8's package bonds neither
+// PA11 nor PA12, so the datasheet gives it no USB device controller at
+// all, and the CH32V303 has none either (its one full-speed controller
+// is RM ch. 23's USBFS) - a neg TU proves the refusal on both.
 #include "ch32v203/clock.hpp"
 #include "ch32v203/platform.hpp"
 #include "ch32v203/usb.hpp"

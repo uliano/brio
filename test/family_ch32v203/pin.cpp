@@ -48,7 +48,7 @@ static_assert(device::has_port('A') && device::has_port('B'));
 // pad number beyond the sixteen is not a pad.
 static_assert(pad_bonded(Pad{'A', first_pin('A')}));
 static_assert(!pad_bonded(Pad{}));
-static_assert(!pad_bonded(Pad{'E', 0}));
+static_assert(pad_bonded(Pad{'E', 0}) == device::has_port('E'));
 static_assert(pad_bonded(Pad{'C', 13}) == device::has_port('C'));
 
 using Led = Pin<'A', first_pin('A')>;

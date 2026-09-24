@@ -1,11 +1,12 @@
 // mcu: ch32v203rb
-// The 32-BIT TIMER, which one part of the series has: chapter 15's own
+// The 32-BIT TIMER, which one part of the family has: chapter 15's own
 // opening note gives TIM5 thirty-two bits on the CH32V20x_D8 device
-// class, and the datasheet's table 2-1 gives the block itself to the
-// 128 KB part alone. So this TU is the one place Tim<5> is
-// instantiated, and what it is about is the width: a period, a compare
-// and a capture that do not fit sixteen bits, and a counter that reads
-// back whole.
+// class, and the CH32V203 datasheet's table 2-1 gives the block itself
+// to the 128 KB part alone. The CH32V303RC's and VC's TIM5 is sixteen
+// bits wide by the same note, and is not this TU's subject. So this TU
+// is the one place the 32-bit Tim<5> is instantiated, and what it is
+// about is the width: a period, a compare and a capture that do not fit
+// sixteen bits, and a counter that reads back whole.
 //
 // TIM5 has no remap COLUMN either - the AFIO field that names it moves
 // its channel 4 to the LSI instead of a pad (afio.hpp's
@@ -17,7 +18,8 @@ using namespace brio;
 
 using T5 = Tim<5>;
 
-static_assert(tim_present(5) && device::has_tim5 && device::is_d8_class);
+static_assert(tim_present(5) && device::has_tim5 &&
+              device::device_class == DeviceClass::v20x_d8);
 static_assert(T5::counter_bits == 32 && T5::max_period == 0xFFFFFFFFu);
 static_assert(T5::channels == 4 && T5::complementary_channels == 0);
 static_assert(!T5::has_break && !T5::has_repetition);

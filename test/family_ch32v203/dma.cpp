@@ -1,15 +1,18 @@
-// DMA family smoke TU: the block, all eight channels, the request table
-// of RM tables 11-5 and 11-6, the two engines, and the transport slots
-// they fill.
+// DMA family smoke TU: the block, all of DMA1's channels, the request
+// table of RM tables 11-5 and 11-6 (11-2 on the CH32V303), the two
+// engines, and the transport slots they fill.
 //
-// EIGHT CHANNELS ON EVERY PART of this series - the register notes of
-// 11.3.1..11.3.6 name both device classes among the five that have
-// channel 8 - so no channel is per-part here. WHAT IS per-part is which
+// EIGHT CHANNELS ON EVERY CH32V203 - the register notes of 11.3.1..11.3.6
+// name both of its device classes among the five that have channel 8 -
+// and SEVEN on the CH32V303, whose class they do not name, beside a
+// second controller this driver does not reach. So the eighth channel is
+// exercised where the part has it. WHAT IS per-part besides is which
 // peripheral can raise a request at all: the smallest package offers one
-// usart (and it is USART2), one SPI and no I2C, and the 128 KB part is
-// the only one with TIM5. So this TU names no instance as a literal
-// where the part decides: it asks the table, and a neg TU proves that a
-// request the part cannot raise is refused on the line that asked.
+// usart (and it is USART2), one SPI and no I2C, and the 128 KB CH32V203
+// is the only one whose TIM5 and UART4 put their requests on this
+// controller. So this TU names no instance as a literal where the part
+// decides: it asks the table, and a neg TU proves that a request the
+// part cannot raise is refused on the line that asked.
 #include "ch32v203/dma.hpp"
 #include "ch32v203/platform.hpp"
 #include "ch32v203/usart.hpp"
@@ -40,14 +43,16 @@ static_assert(!dma_transfer_valid(DmaTransfer{.peripheral = nullptr, .memory = n
                                               .count = 4, .config = {}}));
 
 // ---- the vectors ----------------------------------------------------------
-// Seven consecutive from the table's entry 27, and the eighth on the
-// tail this DEVICE CLASS has.
+// Seven consecutive from the table's entry 27, and the eighth, where
+// there is one, on the tail this DEVICE CLASS has.
 static_assert(dma_channel_irq(1) == Irq::dma1_channel1);
 static_assert(dma_channel_irq(7) == Irq::dma1_channel7);
 static_assert(dma_channel_irq(8) == Irq::dma1_channel8);
-static_assert(static_cast<uint8_t>(Irq::dma1_channel8) == (device::is_d8_class ? 67 : 62));
-static_assert(DmaChannel<1>::flag_shift == 0 && DmaChannel<8>::flag_shift == 28);
-static_assert(dma_channel_count == 8);
+static_assert(static_cast<uint8_t>(Irq::dma1_channel8) ==
+              irq_by_class(62, 67, irq_none));
+static_assert(DmaChannel<1>::flag_shift == 0 && DmaChannel<7>::flag_shift == 24);
+static_assert(dma_channel_count == device::dma1_channel_count);
+static_assert(dma_channel_count == (device::dma_controller_count == 2u ? 7 : 8));
 
 // ---- the request table (11-5 for our class, 11-6 for the other) -----------
 // The rows a part cannot change: one converter, four timers of the F1
@@ -87,8 +92,11 @@ static_assert(dma_request_channel(DmaRequest::usart1_tx) == (device::has_usart(1
 static_assert(dma_request_channel(DmaRequest::usart1_rx) == (device::has_usart(1) ? 5 : 0));
 static_assert(dma_request_channel(DmaRequest::usart3_tx) == (device::has_usart(3) ? 2 : 0));
 static_assert(dma_request_channel(DmaRequest::usart3_rx) == (device::has_usart(3) ? 3 : 0));
-static_assert(dma_request_channel(DmaRequest::uart4_tx) == (device::has_usart(4) ? 1 : 0));
-static_assert(dma_request_channel(DmaRequest::uart4_rx) == (device::has_usart(4) ? 8 : 0));
+// UART4 is DMA1's where there is no DMA2: on the CH32V303 its requests
+// are the second controller's (table 11-3).
+inline constexpr bool uart4_on_dma1 = device::has_usart(4) && device::dma_controller_count == 1u;
+static_assert(dma_request_channel(DmaRequest::uart4_tx) == (uart4_on_dma1 ? 1 : 0));
+static_assert(dma_request_channel(DmaRequest::uart4_rx) == (uart4_on_dma1 ? 8 : 0));
 static_assert(dma_request_channel(DmaRequest::spi1_rx) == (device::spi_count >= 1u ? 2 : 0));
 static_assert(dma_request_channel(DmaRequest::spi1_tx) == (device::spi_count >= 1u ? 3 : 0));
 static_assert(dma_request_channel(DmaRequest::spi2_rx) == (device::spi_count >= 2u ? 4 : 0));
@@ -97,14 +105,16 @@ static_assert(dma_request_channel(DmaRequest::i2c1_tx) == (device::i2c_count >= 
 static_assert(dma_request_channel(DmaRequest::i2c1_rx) == (device::i2c_count >= 1u ? 7 : 0));
 static_assert(dma_request_channel(DmaRequest::i2c2_tx) == (device::i2c_count >= 2u ? 4 : 0));
 static_assert(dma_request_channel(DmaRequest::i2c2_rx) == (device::i2c_count >= 2u ? 5 : 0));
-// Table 11-6's own six rows.
-static_assert(dma_request_channel(DmaRequest::tim5_ch2) == (device::has_tim5 ? 1 : 0));
-static_assert(dma_request_channel(DmaRequest::tim5_ch3) == (device::has_tim5 ? 3 : 0));
-static_assert(dma_request_channel(DmaRequest::tim5_ch4) == (device::has_tim5 ? 6 : 0));
-static_assert(dma_request_channel(DmaRequest::tim5_ch1) == (device::has_tim5 ? 7 : 0));
-static_assert(dma_request_channel(DmaRequest::tim5_trig) == (device::has_tim5 ? 7 : 0));
-static_assert(dma_request_channel(DmaRequest::tim5_up) == (device::has_tim5 ? 8 : 0));
-static_assert(dma_request_present(DmaRequest::tim5_up) == device::has_tim5);
+// Table 11-6's own six rows - the CH32V203RB's; the CH32V303's TIM5 is
+// DMA2's.
+static_assert(tim5_on_dma1() == (device::has_tim5 && device::dma_controller_count == 1u));
+static_assert(dma_request_channel(DmaRequest::tim5_ch2) == (tim5_on_dma1() ? 1 : 0));
+static_assert(dma_request_channel(DmaRequest::tim5_ch3) == (tim5_on_dma1() ? 3 : 0));
+static_assert(dma_request_channel(DmaRequest::tim5_ch4) == (tim5_on_dma1() ? 6 : 0));
+static_assert(dma_request_channel(DmaRequest::tim5_ch1) == (tim5_on_dma1() ? 7 : 0));
+static_assert(dma_request_channel(DmaRequest::tim5_trig) == (tim5_on_dma1() ? 7 : 0));
+static_assert(dma_request_channel(DmaRequest::tim5_up) == (tim5_on_dma1() ? 8 : 0));
+static_assert(dma_request_present(DmaRequest::tim5_up) == tim5_on_dma1());
 
 // The compile-time form: the channel of a request, refused where the
 // part has not got the peripheral (neg/dma_request_absent_*.cpp).
@@ -178,6 +188,15 @@ void channel_verbs() {
     C::stop();
 }
 
+/// The eighth channel, exercised on the parts that have one: a template,
+/// so the branch a part without it discards is never instantiated.
+template <uint8_t ch>
+void channel_verbs_if_present() {
+    if constexpr (ch <= dma_channel_count) {
+        channel_verbs<ch>();
+    }
+}
+
 void dma_verbs() {
     Dma::open();
     (void)Dma::opened();
@@ -193,7 +212,7 @@ void dma_verbs() {
     channel_verbs<5>();
     channel_verbs<6>();
     channel_verbs<7>();
-    channel_verbs<8>();
+    channel_verbs_if_present<8>();
 
     // The alignment rule: the same buffer refused at its odd byte.
     (void)dma_transfer_aligned(DmaTransfer{.peripheral = src,
@@ -259,4 +278,12 @@ void transport_verbs() {
 // flags. The two the transport owns, bound the way an application does.
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Fed::dma_isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)Fed::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() { (void)DmaChannel<8>::isr(); }
+// The eighth channel's vector is bound where the part has the channel; on
+// the CH32V303 the crt carries no such entry and the body is empty.
+template <uint8_t ch>
+void channel_isr_if_present() {
+    if constexpr (ch <= dma_channel_count) {
+        (void)DmaChannel<ch>::isr();
+    }
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() { channel_isr_if_present<8>(); }

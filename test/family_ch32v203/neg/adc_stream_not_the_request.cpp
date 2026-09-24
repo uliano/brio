@@ -1,4 +1,4 @@
-// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb
+// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb ch32v303cb ch32v303rb ch32v303rc ch32v303vc
 // A BLOCK ENGINE ON A CHANNEL THAT IS NOT THE ADC's. There is no
 // request multiplexer here: RM table 11-5 wires the regular group's
 // request to DMA channel 1 and to no other, so an engine named on

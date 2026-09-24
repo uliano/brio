@@ -1,7 +1,8 @@
-// mcu: ch32v203rb
-// THE FLOW-CONTROL PAIR IS A FULL USART'S. On this device class the
-// fourth serial port is a UART4 - TX and RX alone, table 10-26 - so RTS
-// and CTS are not its to enable, whatever CTLR3's bits read.
+// mcu: ch32v203rb ch32v303rc ch32v303vc
+// THE FLOW-CONTROL PAIR IS A FULL USART'S. On the CH32V20x_D8 and the
+// CH32V30x_D8 the fourth serial port is a UART4 - TX and RX alone, table
+// 10-26 - so RTS and CTS are not its to enable, whatever CTLR3's bits
+// read.
 #include "ch32v203/platform.hpp"
 #include "ch32v203/usart.hpp"
 

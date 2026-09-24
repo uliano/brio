@@ -369,19 +369,19 @@ struct Rcc {
 
     /// Whether the HSE keeps oscillating in a low-power mode
     /// (EXTEN_CTR.HSEPLP, RM 33.2.1). The bit belongs to the
-    /// CH32V20x_D8 class; on every other part of this family the verb
-    /// writes nothing and the getter answers false, because a register
-    /// with other live bits in it must not be stirred for a bit that is
-    /// not there.
+    /// CH32V20x_D8 class - the note names no other of this stratum's; on
+    /// every other part of this family the verb writes nothing and the
+    /// getter answers false, because a register with other live bits in
+    /// it must not be stirred for a bit that is not there.
     static void hse_in_low_power(bool keep) {
-        if constexpr (device::is_d8_class) {
+        if constexpr (device::device_class == DeviceClass::v20x_d8) {
             exten_update(keep ? exten_hseplp : 0u, exten_hseplp);
         } else {
             (void)keep;
         }
     }
     static bool hse_in_low_power() {
-        if constexpr (device::is_d8_class) {
+        if constexpr (device::device_class == DeviceClass::v20x_d8) {
             return (exten()->CTR & exten_hseplp) != 0u;
         } else {
             return false;
@@ -580,8 +580,9 @@ struct Rcc {
     /// The ADC's own divider off PCLK2 (2, 4, 6 or 8 by code), and the
     /// duty-cycle bit beside it: with ADCDUTY set the converter's clock
     /// spends longer low, which is a knob for a slow sample and not a
-    /// rate. The second duty bit of that register belongs to other
-    /// classes and is not spelled here.
+    /// rate. The second duty bit of that register, ADC_DUTY_SEL, is the
+    /// CH32V30x_D8's and even there only by lot number (3.4.2's note);
+    /// it is not spelled here.
     static void adc_prescaler(uint8_t code) {
         rcc()->CFGR0 = (rcc()->CFGR0 & ~rcc_adcpre_mask) |
                        ((static_cast<uint32_t>(code) & 0x3u) << rcc_adcpre_shift);

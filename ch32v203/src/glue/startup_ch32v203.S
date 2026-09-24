@@ -1,7 +1,7 @@
 /*
- * startup_ch32v203.S - vector table + reset path for the CH32V203,
- * compiled into EVERY image of this project (ch32v203_add_app() lists it
- * alongside the app's own source). No WCH startup template, no
+ * startup_ch32v203.S - vector table + reset path for the CH32V203 and the
+ * CH32V303, compiled into EVERY image of this project (ch32v203_add_app()
+ * lists it alongside the app's own source). No WCH startup template, no
  * SystemInit, no SystemCoreClock: this file and ld/<part>.ld are the
  * whole crt.
  *
@@ -13,16 +13,29 @@
  * index 53 is USART1: the numbers ch32v203/device.hpp's Irq enum
  * states, since on this core the interrupt number IS the table index.
  *
- * THE TAIL OF THE TABLE IS THE PART'S. Entries 61 and up belong to the
- * device class: WCH's CH32V20x_D6 (every part up to the CH32V203C8)
- * ends at 62 with UART4 and the eighth DMA channel right after the
- * USBFS pair, while the CH32V203RB (their D8) puts the Ethernet pair
- * and two words of the wireless family's there, and runs to 69 with
- * TIM5, UART4, the eighth DMA channel and the 32 kHz oscillator's two
- * lines. The reference manual's own vector table (9.2) is the UNION of
- * this family with the CH32V30x and lists neither tail - it names TIM8
- * at 59..62, which is the larger family's - so the per-class truth is
- * stated here, from the part definition, and nowhere else.
+ * THE TAIL OF THE TABLE IS THE PART'S. Entries 58 and up belong to the
+ * device class, and there are three of them. WCH's CH32V20x_D6 (every
+ * CH32V203 up to the C8) ends at 62 with the USBD wake-up, the USBFS
+ * pair, UART4 and the eighth DMA channel; the CH32V203RB (their
+ * CH32V20x_D8) puts the Ethernet pair and two words of the wireless
+ * family's after the USBFS pair, and runs to 69 with TIM5, UART4, the
+ * eighth DMA channel and the 32 kHz oscillator's two lines; and the
+ * CH32V303 (their CH32V30x_D8) runs to 103 - TIM8's four lines at
+ * 59..62, the RNG, SDIO, TIM5, SPI3, UART4 and UART5, the two basic
+ * timers, DMA2's eleven channels split 72..76 and 98..103, the USBFS
+ * controller at 83, UART6..8 and TIM9's and TIM10's four lines each -
+ * with the USB wake-up at 58 and the USBFS wake-up at 84, no eighth
+ * DMA1 channel, and zeros where the connectivity class (their D8C) has
+ * its Ethernet, CAN2, USBHS and DVP lines. The reference manual's own
+ * vector table (9.2) is the UNION of the four families and lists none
+ * of the three tails as such - it names USBWakeUp at 58 for every class
+ * and TIM8 at 59..62, which the CH32V203 has not got - so the per-class
+ * truth is stated here, from the part definition, and nowhere else;
+ * for the CH32V303 it is WCH's own startup file for the class
+ * (startup_ch32v30x_D8.S in their EVT package) in every number but two:
+ * that file leaves 58 and 84 zero, and the silicon raises both - EXTI
+ * line 18's software trigger pends PFIC line 58 and line 20's pends 84,
+ * read over the debug port on a CH32V303VC.
  *
  * THE APP BINDS THE VECTOR, RISC-V edition: every handler below is a
  * WEAK alias for default_handler (a spin), and an app binds one by
@@ -55,12 +68,39 @@
  * and the cost of not writing it is a measurement this stratum owes
  * (docs/ch32v203/README.md's gap list).
  *
+ * THE FPU IS SWITCHED ON HERE, OR THE FIRST FLOAT INSTRUCTION TRAPS.
+ * The CH32V303's core is the QingKe V4F, and mstatus.FS (bits 14:13)
+ * is the floating-point unit's state: 00 is Off, and in that state any
+ * FP instruction raises an exception (QingKe V4 manual 8.2); 01 Initial,
+ * 10 Clean and 11 Dirty are all on, the core moving 01 or 10 to 11 at
+ * the first FP instruction. The reset value is 00. So an image built
+ * with the F extension - which the compiler says by defining
+ * __riscv_flen, exactly when the part table's ISA carries F - writes FS
+ * = 01 beside the machine-mode MPP and MPIE bits (0x3880 where the
+ * CH32V203 writes 0x1880), and only then clears fcsr, the rounding mode
+ * and the five sticky flags, because fcsr is an FP register and
+ * unreachable with FS Off. That write is itself a change of FP state,
+ * so main() finds FS = 11, Dirty (measured: a write to fcsr alone moves
+ * Initial to Dirty); nothing here reads the state, which is only on or
+ * off to a program with no context switch. The enable is tied to the
+ * ABI the image was compiled for, never to a part name: a V4F part built
+ * without F keeps the unit off. What the hardware prologue does NOT do
+ * is save an FP register: it pushes the sixteen integer caller-saved
+ * ones (3.4, note 3), and a handler that touches the FPU pays for its
+ * f-registers in software (docs/ch32v203/platform.md measures the
+ * price).
+ *
  * reset_handler does the minimum an image needs: the global pointer and
  * the stack, copy .data from flash, zero .bss, paint the free RAM, walk
  * .preinit_array and .init_array, then main(). It does NOT touch the
  * clock: Clock::init() in main() owns the tree, the way it does on every
  * other target.
  */
+
+/* The third device class, named once for the table and the FPU below. */
+#if defined(CH32V303CB) || defined(CH32V303RB) || defined(CH32V303RC) || defined(CH32V303VC)
+#define BRIO_CH32_V30X_D8 1
+#endif
 
     .section .vectors, "ax", @progbits
     .globl _start
@@ -125,6 +165,54 @@ _start:
     .word   usart3_handler         /* 55 */
     .word   exti15_10_handler      /* 56 */
     .word   rtc_alarm_handler      /* 57 */
+#if defined(BRIO_CH32_V30X_D8)
+    .word   usb_wakeup_handler     /* 58 the USB wake-up, EXTI line 18 */
+    .word   tim8_brk_handler       /* 59 */
+    .word   tim8_up_handler        /* 60 */
+    .word   tim8_trg_com_handler   /* 61 */
+    .word   tim8_cc_handler        /* 62 */
+    .word   rng_handler            /* 63 */
+    .word   0                      /* 64 */
+    .word   sdio_handler           /* 65 */
+    .word   tim5_handler           /* 66 */
+    .word   spi3_handler           /* 67 */
+    .word   uart4_handler          /* 68 */
+    .word   uart5_handler          /* 69 */
+    .word   tim6_handler           /* 70 */
+    .word   tim7_handler           /* 71 */
+    .word   dma2_channel1_handler  /* 72 */
+    .word   dma2_channel2_handler  /* 73 */
+    .word   dma2_channel3_handler  /* 74 */
+    .word   dma2_channel4_handler  /* 75 */
+    .word   dma2_channel5_handler  /* 76 */
+    .word   0                      /* 77 the connectivity class's Ethernet pair */
+    .word   0                      /* 78 */
+    .word   0                      /* 79 and its CAN2's four lines */
+    .word   0                      /* 80 */
+    .word   0                      /* 81 */
+    .word   0                      /* 82 */
+    .word   usbfs_handler          /* 83 */
+    .word   usbfs_wakeup_handler   /* 84 the USBFS wake-up, EXTI line 20 */
+    .word   0                      /* 85 the connectivity class's USBHS */
+    .word   0                      /* 86 and its DVP */
+    .word   uart6_handler          /* 87 */
+    .word   uart7_handler          /* 88 */
+    .word   uart8_handler          /* 89 */
+    .word   tim9_brk_handler       /* 90 */
+    .word   tim9_up_handler        /* 91 */
+    .word   tim9_trg_com_handler   /* 92 */
+    .word   tim9_cc_handler        /* 93 */
+    .word   tim10_brk_handler      /* 94 */
+    .word   tim10_up_handler       /* 95 */
+    .word   tim10_trg_com_handler  /* 96 */
+    .word   tim10_cc_handler       /* 97 */
+    .word   dma2_channel6_handler  /* 98 */
+    .word   dma2_channel7_handler  /* 99 */
+    .word   dma2_channel8_handler  /* 100 */
+    .word   dma2_channel9_handler  /* 101 */
+    .word   dma2_channel10_handler /* 102 */
+    .word   dma2_channel11_handler /* 103 */
+#else
     .word   usb_wakeup_handler     /* 58 USBD wake-up, through EXTI */
     .word   usbfs_handler          /* 59 */
     .word   usbfs_wakeup_handler   /* 60 */
@@ -141,6 +229,7 @@ _start:
 #else
     .word   uart4_handler          /* 61 */
     .word   dma1_channel8_handler  /* 62 */
+#endif
 #endif
     .option rvc
 
@@ -193,9 +282,18 @@ reset_handler:
     /* mstatus: machine mode, interrupts still masked - main() enables
        them when its drivers are up. mtvec: this table, vectored, with
        absolute addresses. INTSYSCR: the hardware stack if the image was
-       built for it, nesting never. */
+       built for it, nesting never. On an image built with the F
+       extension, FS = 01 as well - the unit on - and then fcsr
+       cleared, which is legal only once FS is not Off and which leaves
+       FS at 11. */
+#if defined(__riscv_flen) && __riscv_flen >= 32
+    li      t0, 0x3880
+    csrw    mstatus, t0
+    csrw    fcsr, zero
+#else
     li      t0, 0x1880
     csrw    mstatus, t0
+#endif
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
     li      t0, 0x1
     csrw    0x804, t0
@@ -269,7 +367,9 @@ default_handler:
     weak_vector dma1_channel5_handler
     weak_vector dma1_channel6_handler
     weak_vector dma1_channel7_handler
+#if !defined(BRIO_CH32_V30X_D8)
     weak_vector dma1_channel8_handler
+#endif
     weak_vector adc1_2_handler
     weak_vector usb_hp_can1_tx_handler
     weak_vector usb_lp_can1_rx0_handler
@@ -295,8 +395,43 @@ default_handler:
     weak_vector uart4_handler
     weak_vector exti15_10_handler
     weak_vector rtc_alarm_handler
-    weak_vector usb_wakeup_handler
     weak_vector usbfs_handler
+#if defined(BRIO_CH32_V30X_D8)
+    weak_vector tim8_brk_handler
+    weak_vector tim8_up_handler
+    weak_vector tim8_trg_com_handler
+    weak_vector tim8_cc_handler
+    weak_vector rng_handler
+    weak_vector sdio_handler
+    weak_vector tim5_handler
+    weak_vector spi3_handler
+    weak_vector uart5_handler
+    weak_vector tim6_handler
+    weak_vector tim7_handler
+    weak_vector dma2_channel1_handler
+    weak_vector dma2_channel2_handler
+    weak_vector dma2_channel3_handler
+    weak_vector dma2_channel4_handler
+    weak_vector dma2_channel5_handler
+    weak_vector uart6_handler
+    weak_vector uart7_handler
+    weak_vector uart8_handler
+    weak_vector tim9_brk_handler
+    weak_vector tim9_up_handler
+    weak_vector tim9_trg_com_handler
+    weak_vector tim9_cc_handler
+    weak_vector tim10_brk_handler
+    weak_vector tim10_up_handler
+    weak_vector tim10_trg_com_handler
+    weak_vector tim10_cc_handler
+    weak_vector dma2_channel6_handler
+    weak_vector dma2_channel7_handler
+    weak_vector dma2_channel8_handler
+    weak_vector dma2_channel9_handler
+    weak_vector dma2_channel10_handler
+    weak_vector dma2_channel11_handler
+#endif
+    weak_vector usb_wakeup_handler
     weak_vector usbfs_wakeup_handler
 #if defined(CH32V203RB)
     weak_vector eth_handler

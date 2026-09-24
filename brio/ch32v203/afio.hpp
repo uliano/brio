@@ -19,16 +19,20 @@
  *
  *  1. THE DEVICE CLASS. This manual covers four families and nearly
  *     every field carries a note naming the classes it applies to. Ours
- *     is CH32V20x_D6 (every part up to the CH32V203C8) and CH32V20x_D8
- *     (the CH32V203RB). So USART1 has the two columns of table 10-23 and
- *     not its four - the high bit of its code is AFIO_PCFR2 bit 26, which
- *     10.3.2.2's note excludes for the D6, the D8 and the D8W alike;
- *     USART2's remap (10-24) is not the D6's; UART4 reads a DIFFERENT
- *     TABLE per class (10-26 for the D8, 10-27 for the CH32V203C8, whose
- *     default pads are PB0/PB1 and not PC10/PC11); the ADC's four
- *     trigger remaps (bits 17..20), SPI3's (28), CAN2's (22) and the
- *     Ethernet's (21, 23) belong to classes or blocks this series has
- *     not got, so no verb here reaches them.
+ *     are CH32V20x_D6 (every part up to the CH32V203C8), CH32V20x_D8
+ *     (the CH32V203RB) and CH32V30x_D8 (the four CH32V303). So USART1
+ *     has the two columns of table 10-23 here and not its four - the
+ *     high bit of its code is AFIO_PCFR2 bit 26, which 10.3.2.2's note
+ *     excludes for the D6, the D8 and the D8W alike and grants the
+ *     CH32V30x_D8, whose two further columns this driver does not
+ *     reach; USART2's remap (10-24) is not the D6's; UART4 reads a
+ *     DIFFERENT TABLE per class (10-26 for every class but the D6,
+ *     10-27 for the CH32V203C8, whose default pads are PB0/PB1 and not
+ *     PC10/PC11); the ADC's four trigger remaps (bits 17..20), SPI3's
+ *     (28), CAN2's (22), the Ethernet's (21, 23), and PCFR2's TIM8..10,
+ *     UART5..8 and FSMC fields belong to classes or blocks this driver
+ *     does not reach - the CH32V303's among them - so no verb here
+ *     writes them.
  *     TWO OF THOSE CLASS NOTES ARE MEASURED and not taken on trust,
  *     because the field is READ-ONLY AT ZERO on the CH32V203C8 where the
  *     note is easy to read the other way: USART3's two bits (its note
@@ -346,10 +350,13 @@ constexpr UsartPadSet afio_usart2_pads(uint8_t code) {
 constexpr UsartPadSet afio_usart3_pads(uint8_t code) {
     return afio_usart3_table[code < afio_usart3_codes ? code : 0u];
 }
-/// UART4's column, from the table its DEVICE CLASS reads.
+/// UART4's column, from the table its DEVICE CLASS reads: table 10-27 is
+/// the CH32V20x_D6's, and table 10-26's note names every other class this
+/// stratum serves.
 constexpr UsartPadSet afio_uart4_pads(uint8_t code) {
     const uint8_t c = code < afio_uart4_codes ? code : 0u;
-    return device::is_d8_class ? afio_uart4_table_d8[c] : afio_uart4_table_d6[c];
+    return device::device_class != DeviceClass::v20x_d6 ? afio_uart4_table_d8[c]
+                                                        : afio_uart4_table_d6[c];
 }
 constexpr SpiPadSet afio_spi1_pads(uint8_t code) {
     return afio_spi1_table[code < afio_spi1_codes ? code : 0u];
@@ -401,7 +408,8 @@ constexpr bool afio_remap_has_code(Remap r, uint8_t code) {
         // 10.3.2.2's note: the D6 has the default mapping alone.
         case Remap::usart2:
             return device::has_usart(2) && code < afio_usart2_codes &&
-                   (code == 0 || device::is_d8_class) && afio_usart2_pads(code).any_bonded();
+                   (code == 0 || device::device_class != DeviceClass::v20x_d6) &&
+                   afio_usart2_pads(code).any_bonded();
         // MEASURED on the CH32V203C8: the field is tied to zero on this
         // class - a write of 01 reads back 00 - which is what
         // 10.3.2.2's note (4) means by "default mapping (00b) only
@@ -409,7 +417,8 @@ constexpr bool afio_remap_has_code(Remap r, uint8_t code) {
         // the manual's word alone, and no board of that part is here.
         case Remap::usart3:
             return device::has_usart(3) && code < afio_usart3_codes &&
-                   (code == 0 || device::is_d8_class) && afio_usart3_pads(code).any_bonded();
+                   (code == 0 || device::device_class != DeviceClass::v20x_d6) &&
+                   afio_usart3_pads(code).any_bonded();
         case Remap::uart4:
             return device::has_usart(4) && code < afio_uart4_codes &&
                    afio_uart4_pads(code).any_bonded();
@@ -440,7 +449,8 @@ constexpr bool afio_remap_has_code(Remap r, uint8_t code) {
         // the choice belongs to the class that has an Ethernet PTP to
         // choose against, whatever 10.3.2.2's note says about the series.
         case Remap::tim2_itr1:
-            return device::general_timer_count >= 1 && device::is_d8_class && code < 2;
+            return device::general_timer_count >= 1 &&
+                   device::device_class != DeviceClass::v20x_d6 && code < 2;
         // The Ethernet's pulse-per-second on PB5, and only where there
         // is an Ethernet to make one.
         case Remap::ptp_pps:
@@ -713,13 +723,18 @@ static_assert(afio_i2c1_pads(0).scl == Pad{'B', 6} && afio_i2c1_pads(1).sda == P
               afio_i2c1_pads(1).smba == Pad{'B', 5} && afio_i2c2_pad_set.scl == Pad{'B', 10});
 static_assert(afio_can1_pads(0).rx == Pad{'A', 11} && afio_can1_pads(2).tx == Pad{'B', 9} &&
               afio_can1_pads(3).tx == Pad{'D', 1});
-static_assert(afio_uart4_pads(0).tx == (device::is_d8_class ? Pad{'C', 10} : Pad{'B', 0}) &&
-              afio_uart4_pads(1).tx == (device::is_d8_class ? Pad{'B', 0} : Pad{'A', 5}));
+static_assert(afio_uart4_pads(0).tx == (device::device_class != DeviceClass::v20x_d6
+                                            ? Pad{'C', 10} : Pad{'B', 0}) &&
+              afio_uart4_pads(1).tx == (device::device_class != DeviceClass::v20x_d6
+                                            ? Pad{'B', 0} : Pad{'A', 5}));
 
-// The two codes no part of this series has, whatever its package: TIM1's
-// full column is port E, and USART2's remap is another class's.
-static_assert(!afio_remap_has_code(Remap::tim1, 2) && !afio_remap_has_code(Remap::tim1, 3));
-static_assert(!afio_remap_has_code(Remap::usart2, 1) || device::is_d8_class);
+// The codes a package decides: TIM1's full column is port E, which only
+// the LQFP100 bonds, and TIM1's code 10 is reserved everywhere; USART2's
+// remap is not the D6's.
+static_assert(!afio_remap_has_code(Remap::tim1, 2));
+static_assert(afio_remap_has_code(Remap::tim1, 3) == device::has_port('E'));
+static_assert(!afio_remap_has_code(Remap::usart2, 1) ||
+              device::device_class != DeviceClass::v20x_d6);
 static_assert(!afio_remap_has_code(Remap::tim3, 1) && !afio_remap_has_code(Remap::can1, 1));
 
 // The multiplexer's codes are the chapter's.

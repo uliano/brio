@@ -120,11 +120,15 @@ static_assert(Adc<1>::has_dma && Adc<1>::has_internal_sources);
 static_assert(Adc<1>::dma_channel == dma_request_channel(DmaRequest::adc1));
 static_assert(Adc<1>::irq() == Irq::adc1_2);
 static_assert(Adc<1>::has_dual_mode == (device::adc_count >= 2u));
-// Datasheet table 2-1 read back: nine, ten or sixteen bonded channels,
-// and the sixteen-channel part is the one with a single converter.
+// The datasheets' tables read back: nine, ten or sixteen bonded
+// channels. On the CH32V203 the sixteen-channel part is the one with a
+// single converter; every CH32V303 has two, with sixteen channels on
+// every package but the LQFP48.
 static_assert(device::adc_channel_count == 9u || device::adc_channel_count == 10u ||
               device::adc_channel_count == 16u);
-static_assert((device::adc_channel_count == 16u) == (device::adc_count == 1u));
+static_assert(device::device_class == DeviceClass::v30x_d8 ||
+              (device::adc_channel_count == 16u) == (device::adc_count == 1u));
+static_assert(device::device_class != DeviceClass::v30x_d8 || device::adc_count == 2u);
 
 // ---- the inputs the sampler walks ------------------------------------------
 // PA1 is ADC_IN1 and every package of the series bonds it (the smallest

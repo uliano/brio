@@ -1,4 +1,4 @@
-// mcu: ch32v203g6 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb
+// mcu: ch32v203g6 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb ch32v303cb ch32v303rb ch32v303rc ch32v303vc
 // SPI1's SECOND COLUMN (table 10-32, AFIO_PCFR1's SPI1 bit): the one
 // remap this family's SPI has, on the parts whose package brings out
 // every pad of it - PA15, PB3, PB4, PB5. The other three parts of the

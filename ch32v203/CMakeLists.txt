@@ -2,7 +2,8 @@
 #  ch32v203/CMakeLists.txt - the CH32V203 build: brio's second WCH target
 #  and its second RISC-V one, a SIBLING CMake project (own toolchain file,
 #  own presets) exactly like the six before it - nothing shared, one
-#  configure = one compiler.
+#  configure = one compiler. The CH32V303 is built here too, as the third
+#  device class of one reference manual (cmake/ch32v203-parts.cmake).
 #
 #  One executable target per app: every ch32v203/src/apps/*.cpp with a
 #  main() is discovered at configure time (CONFIGURE_DEPENDS) from its own
@@ -27,14 +28,18 @@
 #  making (cmake/ch32v203-parts.cmake), asked once in device.hpp, which
 #  includes the part's own table.
 #
-#  THE ARCHITECTURE STRING IS THE PART'S FULL ISA UNDER WCH'S GCC. The
-#  core is the QingKe V4B: misa reads 0x40901105 - RV32 with I, M, A, C,
-#  user mode and one non-standard extension, which is WCH's "xw" set. The
-#  default below asks for all of it, rv32imac_xw, which their gcc resolves
-#  to the rv32imac_zaamo_zalrsc_xw/ilp32 multilib. This is the same
+#  THE ARCHITECTURE STRING IS THE PART'S FULL ISA UNDER WCH'S GCC, and
+#  the part table states it. The CH32V203's core is the QingKe V4B: misa
+#  reads 0x40901105 - RV32 with I, M, A, C, user mode and one non-standard
+#  extension, which is WCH's "xw" set - so its parts ask for rv32imac_xw,
+#  which their gcc resolves to the rv32imac_zaamo_zalrsc_xw/ilp32
+#  multilib. The CH32V303's is the V4F: misa 0x40901125, the same plus F,
+#  single-precision floating point - so its parts ask for rv32imafc_xw
+#  with the ilp32f ABI (the rv32imafc_zaamo_zalrsc_xw/ilp32f multilib),
+#  and the crt enables the FPU before anything runs. This is the same
 #  argument the CH32V00x project makes and the same compiler; what is NOT
-#  shared is the ABI - ilp32 here against that family's ilp32e, because
-#  this core has the full thirty-two registers.
+#  shared is the ABI - ilp32 or ilp32f here against that family's ilp32e,
+#  because these cores have the full thirty-two registers.
 #
 #  Flash/debug: WCH's OpenOCD fork at /sw/wch-openocd, the only OpenOCD
 #  that speaks the WCH-Link's SDI transport, over the two-wire debug port
@@ -63,12 +68,16 @@ endforeach()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ch32v203-parts.cmake)
 
-set(CH32V203_MCU "ch32v203c8" CACHE STRING "target CH32V203 part (cmake/ch32v203-parts.cmake)")
+set(CH32V203_MCU "ch32v203c8" CACHE STRING "target CH32V203/CH32V303 part (cmake/ch32v203-parts.cmake)")
 ch32v203_part_facts("${CH32V203_MCU}"
-    CH32V203_PART_DEFINE CH32V203_FLASH_KB CH32V203_RAM_KB CH32V203_BOARD)
+    CH32V203_PART_DEFINE CH32V203_FLASH_KB CH32V203_RAM_KB CH32V203_BOARD
+    CH32V203_PART_ARCH CH32V203_PART_ABI)
 
-set(CH32V203_ARCH "rv32imac_xw" CACHE STRING "-march for this family: its full ISA under WCH's gcc (xw is theirs alone)")
-set(CH32V203_ABI "ilp32" CACHE STRING "-mabi for this family")
+# The part's own ISA and ABI are the defaults (the table's two last
+# columns); a cache entry still overrides them, for an experiment that
+# builds a V4F part without its FPU.
+set(CH32V203_ARCH "${CH32V203_PART_ARCH}" CACHE STRING "-march for this part: its full ISA under WCH's gcc (xw is theirs alone)")
+set(CH32V203_ABI "${CH32V203_PART_ABI}" CACHE STRING "-mabi for this part")
 
 # --- The core's hardware prologue/epilogue (HPE): with it on, the crt
 #     sets INTSYSCR.HWSTKEN and every handler is declared with WCH's
@@ -221,7 +230,8 @@ set(CH32V203_SPLIT_FLASH_KB 32)
 set(CH32V203_SPLIT_BOARDS "")
 foreach(_row IN LISTS CH32V203_PARTS)
     string(REGEX REPLACE "=.*$" "" _part "${_row}")
-    ch32v203_part_facts("${_part}" _split_define _split_flash _split_ram _split_board)
+    ch32v203_part_facts("${_part}" _split_define _split_flash _split_ram _split_board
+        _split_arch _split_abi)
     if(_split_flash LESS_EQUAL CH32V203_SPLIT_FLASH_KB)
         list(APPEND CH32V203_SPLIT_BOARDS "${_split_board}")
     endif()

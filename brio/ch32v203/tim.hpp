@@ -336,9 +336,12 @@ constexpr bool tim_has_break(uint8_t n) { return n == 1u && tim_present(n); }
 constexpr bool tim_has_repetition(uint8_t n) { return n == 1u && tim_present(n); }
 
 /// The counter's width. Sixteen bits everywhere but the CH32V203RB's
-/// TIM5, which chapter 15's own opening note gives thirty-two to.
+/// TIM5: chapter 15's opening note gives thirty-two to the TIM5 of the
+/// CH32V20x_D8 (and of two classes this stratum does not serve) and
+/// sixteen to every other's - the CH32V303's included.
 constexpr uint8_t tim_counter_bits(uint8_t n) {
-    return (n == 5u && device::has_tim5 && device::is_d8_class) ? 32u : 16u;
+    return (n == 5u && device::has_tim5 && device::device_class == DeviceClass::v20x_d8) ? 32u
+                                                                                        : 16u;
 }
 constexpr uint32_t tim_max_period(uint8_t n) {
     return tim_counter_bits(n) == 32u ? 0xFFFFFFFFUL : 0xFFFFUL;

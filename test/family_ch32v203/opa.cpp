@@ -47,7 +47,8 @@ static_assert(opa_pad(2, OpaPin::negative0) == Pad{'B', 10});
 static_assert(opa_pad(2, OpaPin::negative1) == Pad{'A', 5});
 static_assert(opa_pad(2, OpaPin::out0) == Pad{'A', 2});
 static_assert(opa_pad(2, OpaPin::out1) == Pad{'A', 4});
-// OPA3 and OPA4 are the other device classes' (RM 30.3.1's own notes).
+// OPA3 and OPA4 are the CH32V303's (RM 30.3.1's notes name its class),
+// and this driver maps no pad of theirs.
 static_assert(!opa_pad(3, OpaPin::out0).valid());
 static_assert(!opa_pad(0, OpaPin::out0).valid());
 
@@ -71,7 +72,7 @@ static_assert(opa_config_bits(OpaConfig{.output = OpaPin::out1}) == opa_mode_bit
 
 // ---- the amplifier every package of the series carries ---------------------
 static_assert(device::has_opa(2));
-static_assert(device::opa_count == (device::has_opa(1) ? 2u : 1u));
+static_assert(device::opa_count == (device::has_opa(3) ? 4u : device::has_opa(1) ? 2u : 1u));
 static_assert(Opa<2>::instance == 2);
 static_assert(Opa<2>::shift == 4u);
 

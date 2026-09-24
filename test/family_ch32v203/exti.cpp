@@ -20,10 +20,12 @@ static_assert(Exti::gpio_lines == 16 && Exti::line_count == 22);
 static_assert(Exti::implemented(0) && Exti::implemented(15) && Exti::gpio(15));
 static_assert(!Exti::gpio(Exti::line_pvd));
 static_assert(Exti::implemented(Exti::line_pvd) && Exti::implemented(Exti::line_rtc_alarm));
-static_assert(Exti::implemented(Exti::line_usbd_wakeup) == device::has_usbd);
+static_assert(Exti::implemented(Exti::line_usbd_wakeup) ==
+              (device::has_usbd || device::device_class == DeviceClass::v30x_d8));
 static_assert(Exti::implemented(Exti::line_eth_wakeup) == device::has_ethernet);
 static_assert(Exti::implemented(Exti::line_usbfs_wakeup) == device::has_usbfs);
-static_assert(Exti::implemented(Exti::line_osc32k_wakeup) == device::is_d8_class);
+static_assert(Exti::implemented(Exti::line_osc32k_wakeup) ==
+              (device::device_class == DeviceClass::v20x_d8));
 static_assert(!Exti::implemented(22) && !Exti::implemented(31));
 static_assert((Exti::implemented_mask() & 0xFFFFu) == 0xFFFFu);
 static_assert((Exti::implemented_mask() & (1UL << 22)) == 0u);

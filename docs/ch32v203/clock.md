@@ -1,4 +1,4 @@
-# RCC (CH32V203)
+# RCC (CH32V203 and CH32V303)
 
 The clock tree of RM ch. 3 as this stratum drives it: the static
 `Clock` every driver derives its rate from, the `DynamicClock` that
@@ -11,9 +11,13 @@ the rate above which the flash chapter asks for HCLK halved around an
 erase (RM 32.1). Documents of record: the CH32F/V20x_V30x_V31x
 reference manual V2.3 (3.3 for the tree, 3.4 for the registers, 33.2
 for EXTEN) read under the **CH32V20x_D6** class note for every part up
-to the CH32V203C8 and **CH32V20x_D8** for the CH32V203RB, and the
-CH32V203 datasheet V2.8 (tables 4-11 and 4-13 to 4-15 for the
-oscillators and the PLL). Driver:
+to the CH32V203C8, **CH32V20x_D8** for the CH32V203RB and
+**CH32V30x_D8** for the four CH32V303 parts - the chapter's simple
+tree, which it gives the D6 and the V30x_D8 alike, the PLL2, PLL3 and
+PREDIV of the D8C classes being another family's - the CH32V203
+datasheet V2.8 (tables 4-11 and 4-13 to 4-15 for the oscillators and
+the PLL) and the CH32V303/305/307/317 datasheet V3.5 (tables 4-12 and
+4-14 to 4-16). Driver:
 [brio/ch32v203/clock.hpp](../../brio/ch32v203/clock.hpp). Reference
 suite: `test_v203_clock`.
 
@@ -26,15 +30,16 @@ suite: `test_v203_clock`.
   HSEON is clear, an external clock. The PLL multiplies its input by
   x2..x16 or x18 - the last code is x18 and not x17, which is the one
   trap in PLLMUL - and **its input divider is per device class**:
-  PLLXTPRE divides the HSE by one or two on the CH32V20x_D6 and by
-  four or eight on the CH32V203RB, whose oscillator is 32 MHz and
-  nothing else. The HSI's own divider is not an RCC bit at all: it is
+  PLLXTPRE divides the HSE by one or two on the CH32V20x_D6 and the
+  CH32V30x_D8 and by four or eight on the CH32V203RB, whose oscillator
+  is 32 MHz and nothing else. The HSI's own divider is not an RCC bit at all: it is
   EXTEN_CTR.HSIPRE, which is 0 out of reset - the PLL sees 4 MHz, not
   8 - and whose sense is the opposite of PLLXTPRE's, the bit SET being
   the whole clock.
-- **The PLL's own range is not the multiplier's.** The datasheet rates
+- **The PLL's own range is not the multiplier's.** The datasheets rate
   the input at 3..25 MHz (4..25 on the CH32V203RB) and the output at
-  18..144 MHz (40..240 there), so a rate the ladder can make is not
+  18..144 MHz (40..240 there), the CH32V303's the same as the
+  CH32V203C8's, so a rate the ladder can make is not
   always a rate the PLL may run at; both edges are part facts and both
   are checked at compile time.
 - **PLLMUL, PLLSRC and PLLXTPRE take a write only while the PLL is
@@ -52,13 +57,17 @@ suite: `test_v203_clock`.
 - **The ADC has a prescaler of its own** off PCLK2 (/2 /4 /6 /8) and a
   rating of 14 MHz, so a PCLK2 above eight times that has no code that
   keeps the converter in range. The duty-cycle bit beside the field
-  (ADCDUTY) belongs to every class; the second one does not, and is
-  not implemented.
-- **The USB device controller wants exactly 48 MHz** from the PLL
-  through USBPRE, and 3.4.2 asks for the divider to be written BEFORE
-  the USB clock gates are opened. The codes are /1, /2 and /3 on this
-  class; the fourth code, /5 from a 240 MHz PLL, is the CH32V20x_D8's
-  and even there it depends on the lot number.
+  (ADCDUTY) belongs to every class; the second one (ADC_DUTY_SEL) is
+  the CH32V30x_D8's alone and even there only by lot number, and is not
+  implemented.
+- **The USB controllers want exactly 48 MHz** from the PLL through
+  USBPRE, and 3.4.2 asks for the divider to be written BEFORE the USB
+  clock gates are opened. The codes are /1, /2 and /3 on the
+  CH32V20x_D6 and the CH32V30x_D8; the fourth code, /5 from a 240 MHz
+  PLL, is the CH32V20x_D8's and even there it depends on the lot
+  number. On the CH32V303 the 48 MHz feeds the host/device controller
+  alone, the full-speed device controller not being on that part
+  (below).
 - **There is no flash wait-state field.** The flash chapter's register
   table (32.4) has no latency at all: the array is split into a
   zero-wait region and a non-zero-wait one by the part, and
@@ -83,8 +92,9 @@ suite: `test_v203_clock`.
   are two questions.
 - **The LSI is a wide RC**, the watchdog's and the RTC's root, with its
   two bits (LSION, LSIRDY) in RCC_RSTSCKR beside the reset flags. The
-  datasheet gives 25..60 kHz for it, typically 39 (25..45, typically
-  32, on the CH32V203RB): a nominal rate, never a computed one.
+  datasheets give 25..60 kHz for it, typically 39, on the CH32V203C8
+  and the CH32V303 alike (25..45, typically 32, on the CH32V203RB): a
+  nominal rate, never a computed one.
 - **The peripheral gates are the whole of 3.4.6 to 3.4.8**, one bit per
   block on each of the three buses, with a reset line beside each -
   and a bit for a block the part has not got reads back zero (below).
@@ -226,10 +236,11 @@ brio::Rcc::clock_monitor(true);
 
 ## Bench findings
 
-The reference suite is `test_v203_clock` (49 verdicts in `z` on the
-CH32V203C8T6, nothing wired). Its rate pack is the ten trees this board
-can make: the bare HSI, the PLL on the HSI at 48, 52, 96 and 144 MHz,
-the bare 8 MHz crystal, and the PLL on that crystal at 48, 72, 96 and
+The reference suite is `test_v203_clock` (49 verdicts in `z`, nothing
+wired, on the CH32V203C8T6 and on the CH32V303VCT6 - both boards carry
+an 8 MHz crystal). Its rate pack is the ten trees those boards can
+make: the bare HSI, the PLL on the HSI at 48, 52, 96 and 144 MHz, the
+bare 8 MHz crystal, and the PLL on that crystal at 48, 72, 96 and
 144 MHz - 52 MHz being the one rate the PLL can only reach through the
 HALVED input, which is what exercises the EXTEN bit.
 
@@ -248,16 +259,27 @@ HALVED input, which is what exercises the EXTEN bit.
   this die around half a per cent fast and the crystal's rates within a
   few hundredths of exact. That the five rates on each root agree with
   each other to within 0.03 % is the PLL's and the prescalers'
-  arithmetic being exact: the whole error is the root's.
+  arithmetic being exact: the whole error is the root's. On the
+  CH32V303VCT6, with the closing line alone on the wire for five ticks
+  as the opening one is: every HSI-rooted rate **+0.26 to +0.38 %** and
+  every crystal-rooted one **-0.00 to -0.11 %**, over two passes. The
+  spread is that board's probe: its serial bridge forwards in 128-byte
+  blocks and flushes a partial one some two milliseconds after the line
+  goes idle, and not always the same two, so the bracket resolves about
+  a tenth of a per cent there - the crystal exact within it, the HSI of
+  that die a third of a per cent fast, and the halved input again
+  indistinguishable from the whole one.
 - **The LSI takes about 3.1 ms to LSIRDY** from a cleared LSION (3100
   to 3200 us over several runs, measured in 50 us steps), with the
   backup domain untouched - between the datasheet's two figures, 230 us
-  with the LSE running and 5 ms without. LSIRDY falls in under one
-  50 us step. Its RATE is not measured here: nothing in this chapter can
-  count it.
+  with the LSE running and 5 ms without - and 4.35 to 4.40 ms on the
+  CH32V303VCT6. LSIRDY falls in under one 50 us step on both. Its RATE
+  is not measured here: nothing in this chapter can count it.
 - **The board's 8 MHz crystal reaches HSERDY in 1.7 ms** (repeatable to
   the 50 us step), against the datasheet's 2.5 ms typical for an 8 MHz
-  crystal; HSERDY falls in under one step.
+  crystal; the CH32V303 board's reaches it in 1.05 ms, against its
+  datasheet's 1.5 typical and 4 at most. HSERDY falls in under one step
+  on both.
 - **The ready interrupt reaches the RCC vector.** With HSERDYIE armed
   over that same ramp, the vector runs exactly once, its body finds
   HSERDYF - and only that flag - standing, and leaves none behind, so
@@ -265,20 +287,29 @@ HALVED input, which is what exercises the EXTEN bit.
 - **The HSI can be stopped.** With SYSCLK on the PLL fed by the
   crystal, clearing HSION drops HSIRDY and the program runs on -
   measured because the chapter recommends against stopping it and says
-  nothing about refusing.
+  nothing about refusing - on both parts; the CH32V303VCT6's factory
+  calibration reads 0x70.
 - **The clock security system arms over a healthy crystal**: CSSON
   reads back, CSSF stays clear and the non-maskable interrupt does not
   fire in 100 ms of monitoring; CSSON clears again on demand.
 - **The clock output takes all four sources of this class** - SYSCLK,
   the HSI, the HSE and the PLL halved - each read back through the
   multiplexer, with the pad claimed and released.
-- **Every peripheral gate this part has opens and closes**, twenty-six
-  of them on the three buses, each read back one at a time (USART1's
-  and GPIOA's are the two the suite leaves alone: the console runs on
-  them), and a reset pulse leaves a gate where it was. **A gate bit for
-  a block this part has not got reads back zero**: DMA2's, port E's and
-  TIM5's stay clear when written, so the enable registers implement the
-  bits of the die and not of the family.
+- **Every peripheral gate this part has opens and closes**, each read
+  back one at a time - twenty-six on the three buses of the
+  CH32V203C8T6, forty-two on the CH32V303VCT6 (DMA2, the FSMC, the RNG,
+  SDIO, port E, TIM5 to TIM10, SPI3, UART5 to UART8 and the DAC beside
+  the CH32V203C8's gates, and not its USB device controller's) -
+  USART1's and GPIOA's being the two the suite leaves alone, the console
+  running on them, and a reset pulse leaves a gate where it was. **A
+  gate bit for a block this part has not got reads back zero**: DMA2's,
+  port E's and TIM5's stay clear when written on the CH32V203C8T6, so
+  the enable registers implement the bits of the die and not of the
+  family - and on the CH32V303VCT6 THE USB DEVICE CONTROLLER'S bit
+  (RCC_APB1PCENR bit 23) is such a bit, against RM ch. 21's own opening,
+  which says that controller applies to the whole family: the one
+  full-speed controller that part has is the host/device one of ch. 23,
+  on the HB gate.
 
 ## Not covered yet
 
@@ -286,8 +317,12 @@ Driver gaps, each with its reason:
 
 - **RCC_CFGR2.** Its PLL2, PLL3, PREDIV and I2S/RNG selectors belong to
   the D8C classes of other families; the one field of it a part of this
-  series could use is the USBFS clock source, which belongs with that
+  stratum could use is the USBFS clock source, which belongs with that
   block.
+- **ADC_DUTY_SEL**, the second duty-cycle bit: the CH32V30x_D8's by lot
+  number (3.4.2's note), so whether a given CH32V303 has it is a
+  measurement of that die; it arrives with the converter chapter's
+  pass over the CH32V303.
 - **The oscillator calibration registers of table 3-2** (HSE_CAL_CTRL,
   the five LSI32K ones): the table's own note applies them to the
   CH32V20x_D8W, which is another family.
@@ -328,9 +363,9 @@ Implemented but not bench-verified:
   on ([adc.md](adc.md)) - what would measure it is a conversion timed
   with the bit both ways. Both are written and read back nowhere but a
   family compile.
-- **Every part but the CH32V203C8.** The whole chapter compiles for all
-  nine both ways the hardware prologue can be built (`brio check
-  ch32v203`), including the CH32V203RB's own PLL arithmetic - its
-  32 MHz oscillator divided by four or eight - and the two packages
-  with no oscillator pad, which the family fixture refuses a crystal
-  on. What would measure them is a board.
+- **Every part but the CH32V203C8 and the CH32V303VC.** The whole
+  chapter compiles for all thirteen both ways the hardware prologue can
+  be built (`brio check ch32v203`), including the CH32V203RB's own PLL
+  arithmetic - its 32 MHz oscillator divided by four or eight - and the
+  two packages with no oscillator pad, which the family fixture refuses
+  a crystal on. What would measure them is a board.

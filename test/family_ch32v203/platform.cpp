@@ -40,14 +40,17 @@ constexpr bool has_idle_until = requires { Pl::idle_until(std::optional<uint32_t
 static_assert(!has_idle_until<P>);
 
 // The interrupt numbers ARE the vector table's word indices, and the
-// tail from 59 up is the DEVICE CLASS's.
+// tail from 58 up is the DEVICE CLASS's.
 static_assert(static_cast<uint8_t>(Irq::breakpoint) == 9);
 static_assert(static_cast<uint8_t>(Irq::systick) == 12);
 static_assert(static_cast<uint8_t>(Irq::software) == 14);
 static_assert(static_cast<uint8_t>(Irq::usart1) == 53);
-static_assert(device::is_d8_class ||
+static_assert(device::device_class != DeviceClass::v20x_d6 ||
                   static_cast<uint8_t>(Irq::dma1_channel8) + 1u == device::vector_count,
               "the CH32V20x_D6 table ends at the eighth DMA channel");
+static_assert(device::device_class != DeviceClass::v30x_d8 ||
+                  static_cast<uint8_t>(Irq::dma2_channel11) + 1u == device::vector_count,
+              "the CH32V30x_D8 table ends at DMA2's eleventh channel");
 
 // The wait's factor is a ceiling: late, never early.
 static_assert(delay_rate(144'000'000).cycles_per_us == 144);

@@ -1,4 +1,4 @@
-// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb
+// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb ch32v303cb ch32v303rb ch32v303rc ch32v303vc
 // A RUN THAT IS NOT WHOLE CELLS. The cell of this medium IS the page -
 // 256 bytes, the only grain the fast program writes (RM 32.5.6) - so a
 // run of sixty-four bytes is not something program() can put down, and

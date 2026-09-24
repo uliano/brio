@@ -342,7 +342,9 @@ constexpr uint8_t usart_dma_rx_channel(uint8_t n) {
  */
 template <uint8_t n>
 struct Usart {
-    static_assert(usart_base_for(n) != 0, "brio Usart: this family has USART1..3 and UART4");
+    static_assert(n >= 1u && n <= 4u && usart_base_for(n) != 0,
+                  "brio Usart: this driver reaches USART1..3 and UART4 - UART5..8, the "
+                  "CH32V303RC's and VC's, are not among them");
     static_assert(device::has_usart(n),
                   "brio Usart: this part does not offer that instance (parts/<part>.hpp)");
 
@@ -799,8 +801,9 @@ template <uint8_t instance, typename P, uint16_t rx_size = 64, uint16_t tx_size 
           UartFormat format = {}, typename TxEngine = NoDmaEngine,
           typename RxEngine = NoDmaEngine, uint8_t remap = 0, UartOptions opts = {}>
 struct Uart {
-    static_assert(usart_base_for(instance) != 0,
-                  "brio Uart: this family has USART1..3 and UART4");
+    static_assert(instance >= 1u && instance <= 4u && usart_base_for(instance) != 0,
+                  "brio Uart: this driver reaches USART1..3 and UART4 - UART5..8, the "
+                  "CH32V303RC's and VC's, are not among them");
     static_assert(device::has_usart(instance),
                   "brio Uart: this part does not offer that instance (parts/<part>.hpp)");
     static_assert(uart_format_valid(format) && format.bits != UartBits::nine,

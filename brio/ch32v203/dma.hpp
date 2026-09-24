@@ -5,7 +5,11 @@
  * wired to a fixed handful of peripheral requests, an arbiter over four
  * software priorities with the channel index deciding ties, and four
  * flag bits a channel - the STM32F1's DMA1 under WCH's names, with one
- * channel more than the ancestor and than the CH32V00x's seven.
+ * channel more than the ancestor and than the CH32V00x's seven. On the
+ * CH32V303 the same block is DMA1 with SEVEN channels and a second
+ * controller of eleven beside it (device::dma1_channel_count,
+ * dma2_channel_count); this file drives DMA1 on every part, and DMA2 is
+ * not reached by it.
  *
  * THE CHANNEL IS THE REQUEST. There is no request multiplexer: table
  * 11-5 (our class) and table 11-6 (the other one) wire each peripheral
@@ -219,14 +223,15 @@ inline constexpr uint32_t dma_cfgr_msize_shift = 10;
 inline constexpr uint32_t dma_cfgr_pl_shift    = 12;
 inline constexpr uint32_t dma_cfgr_mem2mem = 1UL << 14;
 
-/// Eight on every part of this series: the register notes of 11.3.1 to
-/// 11.3.6 name our class and the other one among the five that have
-/// channel 8, and there is no part of the family in the third group.
-inline constexpr uint8_t dma_channel_count = 8;
+/// DMA1's channels on THIS part: eight on every CH32V203, whose two
+/// classes the register notes of 11.3.1 to 11.3.6 name among the five
+/// that have channel 8, and seven on the CH32V303, whose class they do
+/// not (device::dma1_channel_count).
+inline constexpr uint8_t dma_channel_count = device::dma1_channel_count;
 
 /// The line a channel reports on. Seven of them are consecutive from
-/// the table's entry 27; the eighth sits on the class's own tail, which
-/// device.hpp's Irq enum already places.
+/// the table's entry 27; the eighth, where there is one, sits on the
+/// class's own tail, which device.hpp's Irq table places.
 constexpr Irq dma_channel_irq(uint8_t ch) {
     return ch == 8u ? Irq::dma1_channel8
                     : static_cast<Irq>(static_cast<uint8_t>(Irq::dma1_channel1) + (ch - 1u));
@@ -298,7 +303,8 @@ struct Dma {
 template <uint8_t ch>
 class DmaChannel {
     static_assert(ch >= 1 && ch <= dma_channel_count,
-                  "the CH32V203's one DMA controller has channels 1..8");
+                  "DMA1 has channels 1..8 on the CH32V203 and 1..7 on the CH32V303 "
+                  "(device::dma1_channel_count)");
 
 public:
     DmaChannel() = delete;

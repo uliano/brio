@@ -1,15 +1,16 @@
-// mcu: ch32v203rb
-// THE SIX CHANNELS ABOVE NINE, on the one part that bonds them. The pad
-// map is the family's - ADC_IN10..15 are PC0..PC5 - but only the 64-pin
-// package brings port C's low pins out, which is why this TU is its own
-// and why `AnalogIn<Pin<'C', 0>>` on any other part is a compile error
-// (the neg TU beside it).
+// mcu: ch32v203rb ch32v303rb ch32v303rc ch32v303vc
+// THE SIX CHANNELS ABOVE NINE, on the parts that bond them. The pad map
+// is the family's - ADC_IN10..15 are PC0..PC5 - but only the 64-pin and
+// 100-pin packages bring port C's low pins out, which is why this TU is
+// its own and why `AnalogIn<Pin<'C', 0>>` on any other part is a compile
+// error (the neg TU beside it).
 //
-// The channels are the second half of what datasheet table 2-1's
-// "16@1" says: sixteen channels on ONE converter, where every part
-// below has nine or ten on two. So this is also where the sample-time
-// register a smaller part never touches gets written - SAMPTR1 holds
-// SMP10 upward, SAMPTR2 the rest.
+// On the CH32V203RB the channels are the second half of what datasheet
+// table 2-1's "16@1" says: sixteen channels on ONE converter, where
+// every CH32V203 below has nine or ten on two; the CH32V303RB, RC and
+// VC have the sixteen on each of two. So this is also where the
+// sample-time register a smaller part never touches gets written -
+// SAMPTR1 holds SMP10 upward, SAMPTR2 the rest.
 #include "ch32v203/adc.hpp"
 #include "ch32v203/platform.hpp"
 
@@ -18,7 +19,7 @@ using namespace brio;
 using SysClock = Clock<ClockSource::pll, 96'000'000>;
 
 static_assert(device::adc_channel_count == 16u);
-static_assert(device::adc_count == 1u);
+static_assert(device::adc_count == (device::device_class == DeviceClass::v30x_d8 ? 2u : 1u));
 
 using In10 = AnalogIn<Pin<'C', 0>>;
 using In15 = AnalogIn<Pin<'C', 5>>;

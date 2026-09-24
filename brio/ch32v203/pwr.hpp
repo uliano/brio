@@ -579,19 +579,22 @@ struct Pwr {
     // ---- what a Standby keeps (2.3.4) ---------------------------------------
 
     /// Whether this part has the SECOND retention bank at all: the
-    /// 30 KB one is the CH32V20x_D8's, and on the D6 the first bit
-    /// governs the whole array.
-    static constexpr bool has_upper_ram_retention = device::is_d8_class;
+    /// 30 KB one is the CH32V20x_D8's and the CH32V30x_D8's (2.4.1's
+    /// notes list both), and on the D6 the first bit governs the whole
+    /// array.
+    static constexpr bool has_upper_ram_retention =
+        device::device_class != DeviceClass::v20x_d6;
 
     /// How many bytes the FIRST retention bit covers on this part.
-    /// 2.4.1 states it per class: the low 2 KB on the CH32V20x_D8, and
-    /// "the 20K RAM" on the D6 - WHICH IS THAT CLASS'S LARGEST ARRAY,
-    /// while four parts of this series carry ten. The constant is
-    /// therefore the manual's number bounded by what the part has, and
-    /// whether the bit really reaches the whole array of a smaller part
-    /// is a question docs/ch32v203/sleep.md's gap list carries.
+    /// 2.4.1 states it per class: the low 2 KB on the CH32V20x_D8 and the
+    /// CH32V30x_D8, and "the 20K RAM" on the D6 - WHICH IS THAT CLASS'S
+    /// LARGEST ARRAY, while four parts of this series carry ten. The
+    /// constant is therefore the manual's number bounded by what the part
+    /// has, and whether the bit really reaches the whole array of a
+    /// smaller part is a question docs/ch32v203/sleep.md's gap list
+    /// carries.
     static constexpr uint32_t ram_retention_bytes =
-        device::is_d8_class
+        device::device_class != DeviceClass::v20x_d6
             ? 2UL * 1024UL
             : (device::sram_bytes < 20UL * 1024UL ? device::sram_bytes : 20UL * 1024UL);
 

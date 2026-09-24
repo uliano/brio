@@ -16,13 +16,17 @@
 // pad shorted to ground 0 then 0 - and an external pull-up on the wire
 // (the I2C pair) changes none of that, because a driven low wins.
 //
-// The pads are this bench: the four SPI2 lines, the two I2C1
-// lines, USART3's pair, the KEY pad the peer drives to wake this board,
-// the crossed USART2/UART4 pair on the board itself, and the five pads
-// the optional straps use. The console's own two (PA9/PA10), the LED and
-// the two crystals are not here and are never touched.
+// The pads are this bench's. On the CH32V203 board: the four SPI2 lines,
+// the two I2C1 lines, USART3's pair, the KEY pad the peer drives to wake
+// this board, the crossed USART2/UART4 pair on the board itself, and the
+// five pads the optional straps use. On the CH32V303 board, every wire
+// ends on the board itself: SPI2 against SPI3 (four lines), the crossed
+// USART2/UART4 pair on UART4's default PC10/PC11, TIM3's channel 1 into
+// PA1, TIM8's channel 1 into PB8, and I2C1 against I2C2 - twenty pads.
+// The console's own two (PA9/PA10), the debug port, the USB pads, the
+// LED, the KEY and the two crystals are not here and are never touched.
 //
-// build: boards = v203c6,v203c8
+// build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -60,6 +64,15 @@ constexpr Pad pad(const char* name)
                [] { return Pn::read(); }};
 }
 
+#if defined(CH32V303VC)
+constexpr Pad pads[] = {
+    pad<'A', 1>("PA1"), pad<'A', 2>("PA2"), pad<'A', 3>("PA3"), pad<'A', 6>("PA6"),
+    pad<'A', 15>("PA15"), pad<'B', 3>("PB3"), pad<'B', 4>("PB4"), pad<'B', 5>("PB5"),
+    pad<'B', 6>("PB6"), pad<'B', 7>("PB7"), pad<'B', 8>("PB8"), pad<'B', 10>("PB10"),
+    pad<'B', 11>("PB11"), pad<'B', 12>("PB12"), pad<'B', 13>("PB13"), pad<'B', 14>("PB14"),
+    pad<'B', 15>("PB15"), pad<'C', 6>("PC6"), pad<'C', 10>("PC10"), pad<'C', 11>("PC11"),
+};
+#else
 constexpr Pad pads[] = {
     pad<'A', 0>("PA0"), pad<'A', 1>("PA1"), pad<'A', 2>("PA2"), pad<'A', 3>("PA3"),
     pad<'A', 4>("PA4"), pad<'A', 5>("PA5"), pad<'A', 6>("PA6"), pad<'A', 7>("PA7"),
@@ -70,6 +83,7 @@ constexpr Pad pads[] = {
     pad<'B', 12>("PB12"), pad<'B', 13>("PB13"), pad<'B', 14>("PB14"), pad<'B', 15>("PB15"),
     pad<'C', 13>("PC13"), pad<'D', 0>("PD0"), pad<'D', 1>("PD1"),
 };
+#endif
 constexpr uint8_t pad_count = sizeof(pads) / sizeof(pads[0]);
 
 void all_idle()

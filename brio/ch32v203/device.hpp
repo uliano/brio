@@ -6,24 +6,31 @@
  * compiles with NO VENDOR HEADER: WCH ships its register definitions
  * inside the EVT package, whose licence is written for software running
  * on WCH parts, so the map lives here, read off the documents of record
- * (CH32F/V20x_V30x_V31x reference manual V2.3, CH32V203 datasheet V2.8
- * and the QingKe V4 microprocessor manual V1.1) and answerable to them.
+ * (CH32F/V20x_V30x_V31x reference manual V2.3, the CH32V203 datasheet
+ * V2.8, the CH32V303/305/307/317 datasheet V3.5 and the QingKe V4
+ * microprocessor manual V1.1) and answerable to them.
  *
  * WHAT THAT COSTS. There is no device header to ask which instances
  * exist, so per-part variability has to be STATED: the build names the
  * part (cmake/ch32v203-parts.cmake), this file asks that definition ONCE
  * and includes the part's own table from parts/, and every driver reads
  * the facts as `device::` constexpr values - the memories, the bonded
- * pins of each port, the instances, the device class. Nine parts are the
- * family the reference manual and the datasheet describe.
+ * pins of each port, the instances, the device class. Thirteen parts
+ * are the family: the nine CH32V203 of their datasheet and the four
+ * CH32V303 of theirs.
  *
  * THE MANUAL IS FOUR FAMILIES WIDE. Its chapters cover the CH32F20x, the
  * CH32V20x, the CH32V30x and the CH32V31x together, and a register
  * description that names a class (their D6, D8, D8C, D8W) is making a
- * statement about SOME of them: the CH32V203 is CH32V20x_D6 for every
- * part up to the C8, and CH32V20x_D8 for the RB. Where a field belongs
- * to another class it is not spelled here at all; where it belongs to
- * one of ours, the comment says which.
+ * statement about SOME of them. Three of those classes are this
+ * stratum's: the CH32V203 is CH32V20x_D6 for every part up to the C8
+ * and CH32V20x_D8 for the RB, and the CH32V303 is CH32V30x_D8 (the
+ * manual's "Specific classification abbreviations"). Where a field
+ * belongs to another class it is not spelled here at all; where it
+ * belongs to one of ours, the comment says which. A driver asks a FACT
+ * of the part - how many channels, whether a block exists - and asks
+ * the class itself only where the manual's note is a list of classes
+ * and nothing else answers.
  *
  * Register STRUCTS mirror the chapter's own field names and order, so a
  * reader can hold the manual beside the code. They are the only place in
@@ -44,6 +51,16 @@ inline constexpr uint32_t pb1_base   = 0x40000000UL;
 inline constexpr uint32_t pb2_base   = 0x40010000UL;
 inline constexpr uint32_t hb_base    = 0x40020000UL;
 inline constexpr uint32_t usbfs_base = 0x50000000UL;
+
+/// WCH's own division of the family, which the reference manual keys its
+/// chapters and many of its registers by ("Specific classification
+/// abbreviations"). Every part file states which one it is; the CH32V20x_D8W,
+/// the CH32V30x_D8C and the CH32V31x_D8C are other silicon and not here.
+enum class DeviceClass : uint8_t {
+    v20x_d6,   ///< CH32V20x_D6: the CH32V203F6/F8/G6/G8/K6/K8/C6/C8
+    v20x_d8,   ///< CH32V20x_D8: the CH32V203RB
+    v30x_d8,   ///< CH32V30x_D8: the CH32V303CB/RB/RC/VC
+};
 
 } // namespace brio
 
@@ -67,6 +84,14 @@ inline constexpr uint32_t usbfs_base = 0x50000000UL;
 #include "ch32v203/parts/ch32v203c8.hpp"
 #elif defined(CH32V203RB)
 #include "ch32v203/parts/ch32v203rb.hpp"
+#elif defined(CH32V303CB)
+#include "ch32v203/parts/ch32v303cb.hpp"
+#elif defined(CH32V303RB)
+#include "ch32v203/parts/ch32v303rb.hpp"
+#elif defined(CH32V303RC)
+#include "ch32v203/parts/ch32v303rc.hpp"
+#elif defined(CH32V303VC)
+#include "ch32v203/parts/ch32v303vc.hpp"
 #else
 #error "brio ch32v203: the build must define the part (ch32v203/cmake/ch32v203-parts.cmake derives it from CH32V203_MCU), and brio/ch32v203/parts/ must hold its table"
 #endif
@@ -183,12 +208,18 @@ inline constexpr uint32_t rcc_intr_flags   = rcc_lsirdyf | rcc_lserdyf | rcc_hsi
 inline constexpr uint32_t rcc_lsion  = 1UL << 0;
 inline constexpr uint32_t rcc_lsirdy = 1UL << 1;
 
-/// RCC_HBPCENR (3.4.6)
+/// RCC_HBPCENR (3.4.6). The second DMA controller, the FSMC, the RNG and
+/// the SDIO host are the CH32V303's (device::dma_controller_count,
+/// has_fsmc, has_rng, has_sdio); on a part without the block the bit is
+/// a gate to nothing.
 inline constexpr uint32_t rcc_hb_dma1  = 1UL << 0;
-inline constexpr uint32_t rcc_hb_dma2  = 1UL << 1;    ///< not on this family's parts
+inline constexpr uint32_t rcc_hb_dma2  = 1UL << 1;
 inline constexpr uint32_t rcc_hb_sram  = 1UL << 2;
 inline constexpr uint32_t rcc_hb_crc   = 1UL << 6;
-inline constexpr uint32_t rcc_hb_usbfs = 1UL << 12;   ///< the host/device controller
+inline constexpr uint32_t rcc_hb_fsmc  = 1UL << 8;
+inline constexpr uint32_t rcc_hb_rng   = 1UL << 9;
+inline constexpr uint32_t rcc_hb_sdio  = 1UL << 10;
+inline constexpr uint32_t rcc_hb_usbfs = 1UL << 12;   ///< the host/device controller (OTG_FS)
 
 /// RCC_PB2PCENR (3.4.7): one bit per peripheral on the PB2 bus.
 inline constexpr uint32_t rcc_pb2_afio   = 1UL << 0;
@@ -201,25 +232,57 @@ inline constexpr uint32_t rcc_pb2_adc1   = 1UL << 9;
 inline constexpr uint32_t rcc_pb2_adc2   = 1UL << 10;
 inline constexpr uint32_t rcc_pb2_tim1   = 1UL << 11;
 inline constexpr uint32_t rcc_pb2_spi1   = 1UL << 12;
+inline constexpr uint32_t rcc_pb2_tim8   = 1UL << 13;   ///< TIM8..TIM10: the CH32V303RC and VC
 inline constexpr uint32_t rcc_pb2_usart1 = 1UL << 14;
+inline constexpr uint32_t rcc_pb2_tim9   = 1UL << 19;
+inline constexpr uint32_t rcc_pb2_tim10  = 1UL << 20;
 
 /// RCC_PB1PCENR (3.4.8). PWR and BKP are two of them: their registers
 /// answer rubbish until their gates are open.
 inline constexpr uint32_t rcc_pb1_tim2   = 1UL << 0;
 inline constexpr uint32_t rcc_pb1_tim3   = 1UL << 1;
 inline constexpr uint32_t rcc_pb1_tim4   = 1UL << 2;
-inline constexpr uint32_t rcc_pb1_tim5   = 1UL << 3;    ///< the CH32V203RB's alone (device::has_tim5)
+inline constexpr uint32_t rcc_pb1_tim5   = 1UL << 3;    ///< where device::has_tim5
+inline constexpr uint32_t rcc_pb1_tim6   = 1UL << 4;    ///< the two basic timers
+inline constexpr uint32_t rcc_pb1_tim7   = 1UL << 5;    ///< (device::basic_timer_instances)
+inline constexpr uint32_t rcc_pb1_uart6  = 1UL << 6;    ///< UART5..8: the CH32V303RC and VC
+inline constexpr uint32_t rcc_pb1_uart7  = 1UL << 7;
+inline constexpr uint32_t rcc_pb1_uart8  = 1UL << 8;
 inline constexpr uint32_t rcc_pb1_wwdg   = 1UL << 11;
 inline constexpr uint32_t rcc_pb1_spi2   = 1UL << 14;
+inline constexpr uint32_t rcc_pb1_spi3   = 1UL << 15;   ///< the CH32V303RC and VC
 inline constexpr uint32_t rcc_pb1_usart2 = 1UL << 17;
 inline constexpr uint32_t rcc_pb1_usart3 = 1UL << 18;
 inline constexpr uint32_t rcc_pb1_uart4  = 1UL << 19;
+inline constexpr uint32_t rcc_pb1_uart5  = 1UL << 20;
 inline constexpr uint32_t rcc_pb1_i2c1   = 1UL << 21;
 inline constexpr uint32_t rcc_pb1_i2c2   = 1UL << 22;
 inline constexpr uint32_t rcc_pb1_usbd   = 1UL << 23;   ///< the full-speed device controller
 inline constexpr uint32_t rcc_pb1_can1   = 1UL << 25;
 inline constexpr uint32_t rcc_pb1_bkp    = 1UL << 27;
 inline constexpr uint32_t rcc_pb1_pwr    = 1UL << 28;
+inline constexpr uint32_t rcc_pb1_dac    = 1UL << 29;   ///< every CH32V303 (device::has_dac)
+
+// ---- the blocks the CH32V303 adds (RM 1.2, figure 1-13) -------------------
+// Where they answer, for the chapters that will drive them. A block this
+// part has not got is a fact of parts/<part>.hpp; its address is still an
+// address and nothing here reaches it. TIM5 is tim.hpp's (tim5_base), the
+// four serial ports above UART4 are usart_base_for()'s, and the
+// operational amplifiers' one register is opa.hpp's (opa_base), the same
+// word on every class.
+inline constexpr uint32_t dma2_base       = hb_base + 0x0400;    ///< 0x40020400
+inline constexpr uint32_t rng_base        = hb_base + 0x3C00;    ///< 0x40023C00
+inline constexpr uint32_t tim6_base       = pb1_base + 0x1000;
+inline constexpr uint32_t tim7_base       = pb1_base + 0x1400;
+inline constexpr uint32_t spi3_base       = pb1_base + 0x3C00;   ///< SPI3/I2S3
+inline constexpr uint32_t dac_base        = pb1_base + 0x7400;
+inline constexpr uint32_t tim8_base       = pb2_base + 0x3400;
+inline constexpr uint32_t tim9_base       = pb2_base + 0x4C00;
+inline constexpr uint32_t tim10_base      = pb2_base + 0x5000;
+inline constexpr uint32_t sdio_base       = pb2_base + 0x8000;   ///< 0x40018000
+inline constexpr uint32_t fsmc_bank1_base = 0x60000000UL;        ///< NOR/PSRAM, four sub-banks
+inline constexpr uint32_t fsmc_bank2_base = 0x70000000UL;        ///< NAND
+inline constexpr uint32_t fsmc_regs_base  = 0xA0000000UL;        ///< the controller's registers
 
 // ---- GPIO (RM ch. 10) -----------------------------------------------------
 // The F1 shape whole: sixteen pins a port, four configuration bits each
@@ -279,14 +342,19 @@ struct UsartRegs {
 };
 
 /// The instances this family addresses. USART1 is the PB2 one and runs
-/// at PCLK2; the other three are PB1's. WHICH of them a PART offers is
-/// its own table (device::has_usart), and on the smallest part that is
-/// not the first n of them.
+/// at PCLK2; the other seven are PB1's, UART5..8 the CH32V303RC's and
+/// VC's alone. WHICH of them a PART offers is its own table
+/// (device::has_usart), and on the smallest part that is not the first
+/// n of them.
 inline constexpr uint32_t usart_base_for(int n) {
     return n == 1 ? pb2_base + 0x3800 :
            n == 2 ? pb1_base + 0x4400 :
            n == 3 ? pb1_base + 0x4800 :
-           n == 4 ? pb1_base + 0x4c00 : 0;
+           n == 4 ? pb1_base + 0x4c00 :
+           n == 5 ? pb1_base + 0x5000 :
+           n == 6 ? pb1_base + 0x1800 :
+           n == 7 ? pb1_base + 0x1c00 :
+           n == 8 ? pb1_base + 0x2000 : 0;
 }
 
 /// USART_STATR (18.10.1). PE, FE, NE, ORE and IDLE are read-only and
@@ -426,11 +494,17 @@ inline constexpr uint32_t exten_usbd_ls        = 1UL << 0;   ///< the device con
 inline constexpr uint32_t exten_usbd_pullup    = 1UL << 1;   ///< its internal 1.5k on D+
 inline constexpr uint32_t exten_eth_10m        = 1UL << 2;   ///< CH32V203RB alone
 inline constexpr uint32_t exten_hsipre         = 1UL << 4;   ///< 1: the HSI whole into the PLL, 0: halved
-inline constexpr uint32_t exten_hseplp        = 1UL << 12;  ///< the HSE kept oscillating in a low-power mode (D8 class)
+inline constexpr uint32_t exten_hseplp        = 1UL << 12;  ///< the HSE kept oscillating in a low-power mode (CH32V20x_D8)
 inline constexpr uint32_t exten_lkupen         = 1UL << 6;   ///< the lock-up monitor, ON at reset
 inline constexpr uint32_t exten_lkuprst        = 1UL << 7;   ///< write-1-clear: keep it out of a read-modify-write
 inline constexpr uint32_t exten_ulldotrim_mask = 0x3UL << 8;
 inline constexpr uint32_t exten_ldotrim_mask   = 0x3UL << 10;  ///< the core voltage, 10b = 1.1 V at reset
+
+/// EXTEN_CTR2 (33.2.2): the four operational amplifiers' high-speed modes,
+/// OPAn_HSMD at bit n - 1. The register is the CH32V30x_D8's and not the
+/// CH32V203's, and on a lot whose sixth digit from the end is zero it is
+/// not there at all.
+constexpr uint32_t exten2_opa_hsmd(uint8_t n) { return 1UL << (n - 1u); }
 
 // ---- the core's own two blocks (QingKe V4 manual ch. 3 and 5) -------------
 /// The system timer, which on this core is SIXTY-FOUR bits wide in two
@@ -495,18 +569,44 @@ inline constexpr uint32_t sctlr_wfitowfe    = 1UL << 3;   ///< the NEXT wfi acts
 inline constexpr uint32_t sctlr_sevonpend   = 1UL << 4;   ///< any interrupt turning pending is a wake event
 inline constexpr uint32_t sctlr_setevent    = 1UL << 5;   ///< write-one: latch an event by hand
 
+/// The number no line has. Entry 0 of the vector table is the reset JUMP
+/// (startup_ch32v203.S), never a vector, so a line a device class has not
+/// got is stated as 0 in the table below - and irq_present<>() is how a
+/// driver names such a line: a compile error on the part without it,
+/// where a bare enumerator would be a silent zero.
+inline constexpr uint8_t irq_none = 0;
+
+/// One line's number on THIS part's device class: the CH32V20x_D6's, the
+/// CH32V20x_D8's and the CH32V30x_D8's, in that order, irq_none where the
+/// class has not got the line. The three tails are the crt's (see the
+/// Irq table's comment).
+constexpr uint8_t irq_by_class(uint8_t v20x_d6, uint8_t v20x_d8, uint8_t v30x_d8) {
+    return device::device_class == DeviceClass::v20x_d6   ? v20x_d6
+           : device::device_class == DeviceClass::v20x_d8 ? v20x_d8
+                                                          : v30x_d8;
+}
+
 /// Interrupt numbers, which on this core ARE the vector table's word
 /// indices (QingKe V4 manual 3.2): the word at address 0 is an
-/// instruction, the words after it are handler addresses. The tail from
-/// 59 up is the DEVICE CLASS's, not the family's - the reference
-/// manual's own table 9-2 is the union of this family with the CH32V30x
-/// and names that range after the larger one's TIM8 (see
-/// ch32v203/src/glue/startup_ch32v203.S). Two of the lines below
-/// therefore MOVE with the class: on the CH32V20x_D8 the Ethernet pair
-/// and two reserved words sit between the USBFS pair and them, so UART4
-/// is 66 and the eighth DMA channel 67. The D8's own extra lines (the
-/// Ethernet pair, TIM5 and the 32 kHz oscillator's two) are named here
-/// when a driver of this stratum arms one.
+/// instruction, the words after it are handler addresses.
+///
+/// A TABLE PER DEVICE CLASS. Entries up to 57 are every class's; from 58
+/// the tail is the CLASS's, not the family's - the reference manual's
+/// own table 9-2 is the union of four families (it names USBWakeUp at 58
+/// for every class and TIM8 at 59..62, which the CH32V203 has not got),
+/// so each tail is stated from the part definition, in the crt
+/// (ch32v203/src/glue/startup_ch32v203.S) and here, and the two agree
+/// word for word. The CH32V20x_D6 ends at 62; the CH32V20x_D8 puts the
+/// Ethernet pair between the USBFS pair and UART4 and runs to 69; the
+/// CH32V30x_D8 - the CH32V303, whose numbers are WCH's own startup file
+/// for the class but for its two wake-ups - moves UART4 to 68, the USBFS
+/// controller to 83 and its wake-up to 84, adds TIM5..TIM10, UART5..8,
+/// SPI3, the RNG, the SDIO host and DMA2's eleven channels, and has no
+/// eighth DMA1 channel. The USB wake-up at 58 and the USBFS one at 84
+/// are the silicon's and not that file's, which leaves both words zero:
+/// EXTI line 18's software trigger pends PFIC line 58 and line 20's
+/// pends 84 (measured on a CH32V303VC). A line a class has not got is
+/// irq_none.
 enum class Irq : uint8_t {
     non_maskable     = 2,
     exception        = 3,
@@ -557,11 +657,64 @@ enum class Irq : uint8_t {
     usart3           = 55,
     exti15_10        = 56,
     rtc_alarm        = 57,
-    usb_wakeup       = 58,
-    usbfs            = 59,   ///< the tail proper starts here (device::vector_count)
-    usbfs_wakeup     = 60,
-    uart4            = device::is_d8_class ? 66 : 61,
-    dma1_channel8    = device::is_d8_class ? 67 : 62,
+    // ---- the tails (device::vector_count) -------------------------------
+    //                               D6        D8        V30x_D8
+    usb_wakeup       = irq_by_class(58,       58,       58),
+    usbfs            = irq_by_class(59,       59,       83),
+    usbfs_wakeup     = irq_by_class(60,       60,       84),
+    eth              = irq_by_class(irq_none, 61,       irq_none),
+    eth_wakeup       = irq_by_class(irq_none, 62,       irq_none),
+    tim5             = irq_by_class(irq_none, 65,       66),
+    uart4            = irq_by_class(61,       66,       68),
+    dma1_channel8    = irq_by_class(62,       67,       irq_none),
+    osc32k_cal       = irq_by_class(irq_none, 68,       irq_none),
+    osc32k_wakeup    = irq_by_class(irq_none, 69,       irq_none),
+    tim8_brk         = irq_by_class(irq_none, irq_none, 59),
+    tim8_up          = irq_by_class(irq_none, irq_none, 60),
+    tim8_trg_com     = irq_by_class(irq_none, irq_none, 61),
+    tim8_cc          = irq_by_class(irq_none, irq_none, 62),
+    rng              = irq_by_class(irq_none, irq_none, 63),
+    sdio             = irq_by_class(irq_none, irq_none, 65),
+    spi3             = irq_by_class(irq_none, irq_none, 67),
+    uart5            = irq_by_class(irq_none, irq_none, 69),
+    tim6             = irq_by_class(irq_none, irq_none, 70),
+    tim7             = irq_by_class(irq_none, irq_none, 71),
+    dma2_channel1    = irq_by_class(irq_none, irq_none, 72),
+    dma2_channel2    = irq_by_class(irq_none, irq_none, 73),
+    dma2_channel3    = irq_by_class(irq_none, irq_none, 74),
+    dma2_channel4    = irq_by_class(irq_none, irq_none, 75),
+    dma2_channel5    = irq_by_class(irq_none, irq_none, 76),
+    uart6            = irq_by_class(irq_none, irq_none, 87),
+    uart7            = irq_by_class(irq_none, irq_none, 88),
+    uart8            = irq_by_class(irq_none, irq_none, 89),
+    tim9_brk         = irq_by_class(irq_none, irq_none, 90),
+    tim9_up          = irq_by_class(irq_none, irq_none, 91),
+    tim9_trg_com     = irq_by_class(irq_none, irq_none, 92),
+    tim9_cc          = irq_by_class(irq_none, irq_none, 93),
+    tim10_brk        = irq_by_class(irq_none, irq_none, 94),
+    tim10_up         = irq_by_class(irq_none, irq_none, 95),
+    tim10_trg_com    = irq_by_class(irq_none, irq_none, 96),
+    tim10_cc         = irq_by_class(irq_none, irq_none, 97),
+    dma2_channel6    = irq_by_class(irq_none, irq_none, 98),
+    dma2_channel7    = irq_by_class(irq_none, irq_none, 99),
+    dma2_channel8    = irq_by_class(irq_none, irq_none, 100),
+    dma2_channel9    = irq_by_class(irq_none, irq_none, 101),
+    dma2_channel10   = irq_by_class(irq_none, irq_none, 102),
+    dma2_channel11   = irq_by_class(irq_none, irq_none, 103),
 };
+
+/// Whether this part's vector table has the line at all.
+constexpr bool irq_exists(Irq line) { return static_cast<uint8_t>(line) != irq_none; }
+
+/// A line named where it is USED: the same Irq back, and a compile error
+/// on a part whose device class has no such vector - the static_assert
+/// at the use that a silent zero would not be.
+template <Irq line>
+constexpr Irq irq_present() {
+    static_assert(irq_exists(line),
+                  "brio ch32v203: this part's device class has no such interrupt line "
+                  "(device.hpp's Irq table, startup_ch32v203.S's tail)");
+    return line;
+}
 
 } // namespace brio

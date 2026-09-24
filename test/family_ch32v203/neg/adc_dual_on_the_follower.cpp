@@ -1,4 +1,4 @@
-// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8
+// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v303cb ch32v303rb ch32v303rc ch32v303vc
 // A DUAL MODE ON THE FOLLOWER. CTLR1's DUALMOD is the master's field
 // and 12.3.2 says so in as many words - "these bits in ADC2 are
 // reserved" - so a dual mode is ADC1's verb and not a spelling the two

@@ -1,4 +1,4 @@
-// mcu: ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb
+// mcu: ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb ch32v303cb ch32v303rb ch32v303rc ch32v303vc
 // I2C family smoke TU: the resource's verbs over the whole of RM
 // chapter 19, the clock arithmetic in its three registers, the columns
 // table 10-34 gives I2C1 and the single one I2C2 has, the host engine

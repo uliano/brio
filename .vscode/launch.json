@@ -288,6 +288,70 @@
                 { "text": "set breakpoint always-inserted off" }
             ],
             "internalConsoleOptions": "openOnSessionStart"
+        },
+        {
+            // The CH32V203C8 board over its WCH-LinkE: the CH32V006 entry's
+            // shape - WCH's OpenOCD fork launched by cppdbg, listening on
+            // 3333, the gdb built from source under /sw/riscv-gdb in front
+            // of it - on the two-wire port this family has (PA13/PA14).
+            // The active configurePreset must be ch32v203c8-debug. With
+            // more than one WCH-Link attached, put
+            //   -c "adapter serial <serial>"
+            // before the -f in debugServerArgs (bin/brio list prints the
+            // serials). The fork's `reset run` does not start the program
+            // on this family (docs/ch32v203/README.md); a session is
+            // `reset halt` and then gdb's own continue. UNTESTED from the
+            // editor yet.
+            "type": "cppdbg",
+            "request": "launch",
+            "name": "Debug CH32V203C8 (WCH OpenOCD, WCH-Link)",
+            "cwd": "${workspaceFolder}",
+            "program": "${command:cmake.launchTargetPath}",
+            "stopAtEntry": true,
+            "miMode": "gdb",
+            "miDebuggerPath": "/sw/riscv-gdb/bin/riscv32-wch-elf-gdb",
+            "debugServerPath": "/sw/wch-openocd/bin/openocd",
+            "debugServerArgs": "-f /sw/wch-openocd/bin/wch-riscv.cfg",
+            "serverLaunchTimeout": 10000,
+            "serverStarted": "Listening on port 3333",
+            "setupCommands": [
+                { "text": "file ${command:cmake.launchTargetPath}" },
+                { "text": "target remote localhost:3333" },
+                { "text": "monitor reset halt" },
+                { "text": "load" },
+                { "text": "set breakpoint always-inserted off" }
+            ],
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+        {
+            // WCH's CH32V303 evaluation board over its WCH-Link (the CH549
+            // kind): the CH32V203C8 entry above with the CH32V303's
+            // preset - the active configurePreset must be
+            // ch32v303vc-debug, which builds for the V4F with the F
+            // extension and the ilp32f ABI, so gdb shows the f-registers
+            // and fcsr beside the integer file. The same `adapter serial`
+            // note applies with two links attached. UNTESTED from the
+            // editor yet.
+            "type": "cppdbg",
+            "request": "launch",
+            "name": "Debug CH32V303VC (WCH OpenOCD, WCH-Link)",
+            "cwd": "${workspaceFolder}",
+            "program": "${command:cmake.launchTargetPath}",
+            "stopAtEntry": true,
+            "miMode": "gdb",
+            "miDebuggerPath": "/sw/riscv-gdb/bin/riscv32-wch-elf-gdb",
+            "debugServerPath": "/sw/wch-openocd/bin/openocd",
+            "debugServerArgs": "-f /sw/wch-openocd/bin/wch-riscv.cfg",
+            "serverLaunchTimeout": 10000,
+            "serverStarted": "Listening on port 3333",
+            "setupCommands": [
+                { "text": "file ${command:cmake.launchTargetPath}" },
+                { "text": "target remote localhost:3333" },
+                { "text": "monitor reset halt" },
+                { "text": "load" },
+                { "text": "set breakpoint always-inserted off" }
+            ],
+            "internalConsoleOptions": "openOnSessionStart"
         }
     ]
 }

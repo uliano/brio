@@ -1,19 +1,20 @@
 # ============================================================================
 #  toolchain-riscv.cmake - cross toolchain for the CH32V203 family
-#  (QingKe V4B, RV32IMAC).
+#  (QingKe V4B, RV32IMAC) and the CH32V303 (QingKe V4F, RV32IMAFC).
 #
 #  WCH's own riscv32-wch-elf gcc 15.2.0 at /sw/wch-riscv, the same
 #  compiler the ch32v00x project uses and for the same reason: it is the
 #  only one that emits WCH's proprietary "xw" compressed extension, which
-#  this core carries too (misa reads 0x40901105 - I, M, A, C, U and one
-#  non-standard extension). Pointed at by absolute path like every other
-#  toolchain here.
+#  these cores carry too (misa reads 0x40901105 on the V4B - I, M, A, C,
+#  U and one non-standard extension - and 0x40901125 on the V4F, the same
+#  plus F). Pointed at by absolute path like every other toolchain here.
 #
-#  THE ABI IS ilp32 AND THE ISA HAS THE FULL REGISTER SET, which is what
-#  separates this family from the CH32V00x: that core is RV32EC (sixteen
-#  registers, ilp32e), this one is RV32IMAC with the standard thirty-two
-#  and an atomic extension. One compiler, two worlds; the project's own
-#  -march/-mabi (CMakeLists.txt) state which.
+#  THE ISA HAS THE FULL REGISTER SET, which is what separates this family
+#  from the CH32V00x: that core is RV32EC (sixteen registers, ilp32e),
+#  these are RV32IMAC with the standard thirty-two and an atomic
+#  extension, and RV32IMAFC with a single-precision FPU beside them. One
+#  compiler, three worlds; the part table (cmake/ch32v203-parts.cmake)
+#  states which -march/-mabi a part is built for.
 #
 #  CMAKE_SYSTEM_NAME Generic + STATIC_LIBRARY try_compile: freestanding
 #  target, no OS, and no working default executable until a linker script

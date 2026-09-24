@@ -4,9 +4,14 @@ The operational page for the CH32V203 target: WCH's QingKe V4B, a
 RISC-V core with the **RV32IMAC** instruction set - thirty-two
 registers, a multiplier and a divider, the atomic extension, user mode
 and a 64-bit system counter - on the CH32V203C8T6 of the bench (64 KB
-flash, 20 KB SRAM, 144 MHz). brio's second WCH family and its second
-RISC-V one, and the fact this target exists to keep true is the same as
-every other: the kernel and util strata compile here unchanged.
+flash, 20 KB SRAM, 144 MHz), and the **QingKe V4F** of the CH32V303,
+the same core with a single-precision floating-point unit
+(**RV32IMAFC**), on the CH32V303VCT6 (256 KB of zero-wait flash, 64 KB
+SRAM, 144 MHz) - the reference manual's CH32V30x_D8, the third device
+class of this stratum beside the CH32V203's two. brio's second WCH
+family and its second RISC-V one, and the fact this target exists to
+keep true is the same as every other: the kernel and util strata
+compile here unchanged.
 
 Two things shape the stratum and are stated up front. **There is no
 vendor header in the build**: WCH ships its register definitions inside
@@ -31,8 +36,8 @@ stratum across the chapters.
 | Driver | State |
 |--------|-------|
 | [device.hpp](../../brio/ch32v203/device.hpp) + [parts/](../../brio/ch32v203/parts/) | the register map and the part table (memories, bonded pads, instances, the device class) |
-| [platform.md](platform.md) | Platform: `Ch32v203Platform` (the csrrci critical section, the WFE-shaped `idle()`, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the core's hardware prologue MEASURED: 53 cycles of round trip against 63, 152 bytes of flash and SIXTY-FOUR BYTES OF USER STACK the internal hardware stack carries instead - which is what parts this core from the CH32V00x's), the 64-bit STK `BasicTicker` (its CNT arithmetic 1 ppm against the interrupt count over 200 reloads) and `delay_us` on that counter (100 us in 14434 cycles of 14400 asked, a tick period and above refused), corecfgr's 0x1F measured at two cycles in 36811, and the tick rate against the host's clock - the HSI half a per cent fast where the board's crystal is exact; then the failing half, [reset.hpp](../../brio/ch32v203/reset.hpp): the six flags as the history they are, `Reset::software()` through the core's keyed PFIC_CFGR reading back as SFTRSTF alone, `ResetReporter`, `fault_reset<P>()` carrying the cause the core left in mcause, and the ebreak that lands on the BREAKPOINT vector and not the exception one; three real resets in the suite |
-| [clock.md](clock.md) | RCC and the EXTEN bits that belong to the tree: the two high-speed roots, the PLL whose input divider is per DEVICE CLASS (the HSI's in EXTEN, the HSE's dividing by one or two here and by four or eight on the CH32V203RB) and whose input and output RANGES are part facts, the whole prescaler table with PB1 capped and the timers' doubling rule stated, the USB divider written before any USB gate can open, the ADC's divider - the one place a legal rate leaves a peripheral out of specification - the LSI, the clock security system as the non-maskable interrupt's body, the ready interrupts, the output pad two packages have not got, and the peripheral gates; `Clock` static and `DynamicClock` over a pack of rate tuples, every switch parking on the HSI. Measured: ten trees entered, read back and bracketed against the host's clock (every HSI-rooted rate 0.42 to 0.46 % fast, every crystal-rooted one within 0.05 % of exact), the pack walked up and down with the tick and the console rebased at each step, the LSI ready 3.1 ms after LSION and the board's crystal 1.7 ms after HSEON with its ready interrupt reaching the RCC vector, the HSI stopped under a tree that runs off the crystal, the security system armed over a healthy crystal, and twenty-six gates opened and closed - the bits of blocks this part has not got reading back zero |
+| [platform.md](platform.md) | Platform: `Ch32v203Platform` (the csrrci critical section, the WFE-shaped `idle()`, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the core's hardware prologue MEASURED: 53 cycles of round trip against 63, 152 bytes of flash and SIXTY-FOUR BYTES OF USER STACK the internal hardware stack carries instead - which is what parts this core from the CH32V00x's), the 64-bit STK `BasicTicker` (its CNT arithmetic 1 ppm against the interrupt count over 200 reloads) and `delay_us` on that counter (100 us in 14434 cycles of 14400 asked, a tick period and above refused), corecfgr's 0x1F measured at two cycles in 36811, and the tick rate against the host's clock - the HSI half a per cent fast where the board's crystal is exact; then the failing half, [reset.hpp](../../brio/ch32v203/reset.hpp): the six flags as the history they are, `Reset::software()` through the core's keyed PFIC_CFGR reading back as SFTRSTF alone, `ResetReporter`, `fault_reset<P>()` carrying the cause the core left in mcause, and the ebreak that lands on the BREAKPOINT vector and not the exception one; three real resets in the suite. On the CH32V303VCT6 the same letters (a round trip of 50 to 66 cycles, corecfgr's bits SLOWER there by half to eight tenths of a per cent) and the V4F's FLOATING-POINT UNIT: off at reset and switched on by the crt of an image built with F, left Dirty by the crt's own fcsr write, recording its exceptions and never trapping on them, twenty float accumulators exact through 19671 interrupts whose handler does float work of its own, and a round trip of 56, 67 and 101 cycles for a handler with no f-register, with float work, and calling out - the hardware prologue saving integers only and the compiler all twenty caller-saved f-registers once a handler calls a function; and THE BUS IN SLEEP asked again of that die, a DMA block moving 37 words across 1.9 ms of idle() against 48010 awake |
+| [clock.md](clock.md) | RCC and the EXTEN bits that belong to the tree: the two high-speed roots, the PLL whose input divider is per DEVICE CLASS (the HSI's in EXTEN, the HSE's dividing by one or two here and by four or eight on the CH32V203RB) and whose input and output RANGES are part facts, the whole prescaler table with PB1 capped and the timers' doubling rule stated, the USB divider written before any USB gate can open, the ADC's divider - the one place a legal rate leaves a peripheral out of specification - the LSI, the clock security system as the non-maskable interrupt's body, the ready interrupts, the output pad two packages have not got, and the peripheral gates; `Clock` static and `DynamicClock` over a pack of rate tuples, every switch parking on the HSI. Measured: ten trees entered, read back and bracketed against the host's clock (every HSI-rooted rate 0.42 to 0.46 % fast, every crystal-rooted one within 0.05 % of exact), the pack walked up and down with the tick and the console rebased at each step, the LSI ready 3.1 ms after LSION and the board's crystal 1.7 ms after HSEON with its ready interrupt reaching the RCC vector, the HSI stopped under a tree that runs off the crystal, the security system armed over a healthy crystal, and twenty-six gates opened and closed - the bits of blocks this part has not got reading back zero. On the CH32V303VCT6 the same ten trees and 49 verdicts: the HSI-rooted rates a third of a per cent fast and the crystal's within a tenth, the LSI ready 4.4 ms after LSION, the board's crystal 1.05 ms after HSEON, and forty-two gates - with the USB DEVICE CONTROLLER'S bit among those that read back zero, that part having no such controller |
 | [pin.md](pin.md) | GPIO, the remaps and the EXTI: the F1's four-bit nibble over two registers with a MODE that carries a speed, the pull that lives in the output register and belongs to input mode alone, the whole-port verbs and the one-way configuration lock; the remap columns of AFIO_PCFR1/PCFR2 as constexpr pad tables judged by the DEVICE CLASS and by this package's bonding, the debug port's own field read and never written, the event output whose source no document of this family names; and the twenty-two EXTI lines - sixteen pin lines through AFIO_EXTICR with the one-pad-per-line rule refused by `select()` and overridden by `steal()`, the PVD's, the RTC alarm's and the two USB wake-ups, the senses, the two enables, the software trigger and the write-one flags over five single vectors and two shared ones. Measured: all fifteen configurations read back in both registers, a reset port's unbonded nibbles reading ZERO, an open-drain output that drives nothing high, nine remap columns written and restored and two the silicon holds at zero against the manual's own notes, five/five/ten edges of a pad on its own line, and a line event ending idle() in 15 core cycles |
 | [tim.md](tim.md) | The timers: one advanced-control block and three general-purpose ones (the 32-bit TIM5 the 128 KB part's alone, no basic timer anywhere in the series), the F1's register file under WCH's names - the two shadow registers, the four channels in both faces with CCyS writable only off, the slave controller with its three encoder modes and the master TRGO, the internal trigger table folded through what the part HAS, TIM1's repetition counter, complementary outputs, dead-time generator and break input, the DMA burst engine as data for the chapter that will use it, and TIM1's FOUR unshared vectors against one line for every other timer; the pads taken from afio.hpp's remap columns, and the nine tasks. Measured: the counter and both shadows against the core's counter, a PWM captured by its own timer to the microsecond at four duties, a dead band of 27.9 us against 28 asked, the interval and period meters behind a MeterLatch, two timers counting each other over an internal trigger (201 updates, a 25 % duty gated to 5000 us), a one pulse 501 us wide for 500 asked, forty encoder counts for ten quadrature cycles - and two facts the relatives do not share: a pad in PLAIN OUTPUT mode reaches a timer's capture input, and in an encoder mode a channel's output stage does not reach its pad |
 | [watchdog.md](watchdog.md) | The two watchdogs: the independent one on the LSI (three keys, no way back but a reset, the oscillator forced on - and its two registers taking a write only while that oscillator RUNS, which is why arm() starts before it configures and ends with the refresh that re-locks them) and the window one on PCLK1/4096/2^WDGTB (the counter that does not run unarmed against its own chapter, the clock gate that holds the counter while the registers still read, the window whose early refresh IS the reset, the early wake-up one tick before it, the block's reset line as the only way back). Measured: the tick at three prescalers to the microsecond (2628/5346/21389 us for 47 ticks), EWIF at 28671 us of 28672, three real WWDG resets (29 ms, 0 ms for an early refresh, 29 ms with the interrupt having run once) and the IWDG's own at 206 and 207 ms - which puts this die's LSI at 38.8 kHz |
@@ -59,7 +64,14 @@ and one non-standard extension). What is NOT shared with that family is
 the ABI: **ilp32** here against its ilp32e, because this core has the
 full thirty-two registers. The project's `-march` is `rv32imac_xw`,
 which their gcc resolves to the `rv32imac_zaamo_zalrsc_xw/ilp32`
-multilib.
+multilib. The ISA and the ABI are two columns of each part's row in the
+part table, and the CH32V303's are its V4F's own: `rv32imafc_xw` with
+**ilp32f** - float arguments and results in the single-precision
+registers - which the same gcc resolves to the
+`rv32imafc_zaamo_zalrsc_xw/ilp32f` multilib (misa reads `0x40901125`
+there, F beside the rest). One project and one crt serve both: the crt
+switches the unit on exactly when the compiler says the image was
+built with F (`__riscv_flen`), never by a part name.
 
 ## Board and build
 
@@ -70,6 +82,14 @@ vendor's page; the pad carries no external resistor, so a press is what
 would prove it), and a USB-C connector wired to the chip's own USBD
 pads.
 
+And **WCH's CH32V303 evaluation board**
+([../boards/ch32v303-evt.md](../boards/ch32v303-evt.md)) for the
+CH32V303VCT6: an 8 MHz crystal on PD0/PD1 and a 32.768 kHz one, two LEDs
+and a KEY on a row of pins that a jumper takes to a pad - PB2 and PA0,
+as on the WeAct board, though these LEDs hang from 3.3 V and light with
+the pad LOW - and two USB connectors on PA11/PA12, which on this part
+belong to the host/device controller: it has no device one.
+
 ```bash
 (cd ch32v203 && cmake --build --preset ch32v203c8-release --target console)
 (cd ch32v203 && cmake --build --preset ch32v203c8-release --target console-upload)
@@ -77,10 +97,11 @@ brio flash P console        # the same thing through the bench's one command
 ```
 
 The part number selects the part definition `device.hpp` asks for, the
-linker script and the board type, from one table
+linker script, the board type, the ISA and the ABI, from one table
 ([cmake/ch32v203-parts.cmake](../../ch32v203/cmake/ch32v203-parts.cmake)):
-the nine parts of the series are named there whether or not a board
-exists for them, because the table is a statement about the family.
+the thirteen parts - the CH32V203's nine and the CH32V303's four - are
+named there whether or not a board exists for them, because the table
+is a statement about the family.
 
 The four **32 KB parts** split a suite too big for them: a suite that
 declares its groups of letters (`// build: groups = abc,de`) builds
@@ -94,8 +115,12 @@ smallest chip").
 
 A WCH-LinkE (firmware 2.16) over the **two-wire** debug port this
 family has - PA13 = SWDIO, PA14 = SWCLK - not the CH32V00x's single
-wire. WCH's OpenOCD fork at `/sw/wch-openocd` is the only OpenOCD that
-speaks the probe's SDI transport.
+wire; on the CH32V303 board, a WCH-Link of the CH549 kind at firmware
+2.12 on the same two pads, whose serial bridge forwards in blocks and
+can fall behind after a burst sent into a closed port
+([../probes/wch-link.md](../probes/wch-link.md)). WCH's OpenOCD fork at
+`/sw/wch-openocd` is the only OpenOCD that speaks the probes' SDI
+transport.
 
 **`reset run` does not start the program.** In that fork the verb
 leaves the hart sitting at the reset vector with every peripheral at
@@ -156,7 +181,12 @@ counter in `default_handler` and the interrupt number in mcause.
   to the CH32V30x; the CH32V203's tail is USBFS, its wake-up, UART4 and
   the eighth DMA channel, and the CH32V203RB's is different again. The
   crt states the per-class truth
-  ([startup_ch32v203.S](../../ch32v203/src/glue/startup_ch32v203.S)).
+  ([startup_ch32v203.S](../../ch32v203/src/glue/startup_ch32v203.S)) -
+  and for the CH32V303 it is WCH's own startup file for the class in
+  every number but two: that file leaves entries 58 and 84 zero, and the
+  silicon raises both. EXTI line 18's software trigger pends PFIC line
+  58 and line 20's pends 84, read over the debug port with the core
+  halted, where line 17's pends the RTC alarm's 57 as the table says.
 - **UART4's pads are the part's, not the family's.** The manual has two
   remap tables for it; the one that starts at PC10/PC11 belongs to the
   bigger classes, and the CH32V203C8 is named explicitly in the other,
@@ -240,6 +270,39 @@ counter in `default_handler` and the interrupt number in mcause.
   manual says it configures the pipeline and branch prediction, gives
   no bit table, and says the products set it in their startup file;
   WCH's own writes 0x1F, and so does this crt.
+- **The CH32V303 has no USB device controller**, against RM ch. 21's
+  opening, which applies that controller to the whole family. Its
+  clock gate, bit 23 of RCC_APB1PCENR, is not there: that register
+  written with all ones reads back 0x3A7EC9FF, every gate the manual
+  names for this part answering and bit 23 alone of them silent, and the
+  block's registers read zero. The part's one full-speed controller is
+  the host/device one of ch. 23 (its control register reads its reset
+  value, 0x06), on PA11/PA12 - which the datasheet's alternate-function
+  table gives the OTG_FS pair and WCH's own board labels USBFS. So the
+  CH32V203's USB console is not this part's, and `has_usbd` is false in
+  its part table.
+- **The V4F's floating-point unit is off out of reset, and an interrupt
+  pays for it in software.** mstatus.FS is 00 at the reset vector and
+  every FP instruction traps in that state, so the crt of an image built
+  with F switches it on - and its own write to fcsr leaves the unit
+  Dirty, which is what main() finds. The hardware prologue saves the
+  sixteen integer caller-saved registers and nothing else (the V4
+  manual's 3.4, note 3): under the ilp32f ABI the compiler saves the
+  f-registers a handler clobbers in the handler's own code, and ALL
+  TWENTY of them as soon as the handler calls a function it cannot see
+  into. Measured on the CH32V303VCT6: a round trip of 56 cycles with no
+  f-register, 67 with a float multiply-add in the body, 101 for a
+  handler that calls out - and the USART transport's own handler, which
+  calls its ring's functions out of line, carries the twenty saves in
+  the platform suite's image for that part. A handler that must stay
+  cheap there stays a leaf, or its callees inline.
+- **The CH32V303's bus in Sleep is the CH32V203's.** A memory-to-memory
+  DMA block moves 48010 words in 2 ms with the core spinning and 37
+  across 1.9 ms of the platform's idle() with the bus-master count set
+  aside - six of them before the core slept - so on that part too no
+  master but the core gets a cycle while it sleeps, and the count that
+  keeps idle() awake over a working channel serves both
+  ([sleep.md](sleep.md)).
 
 ## Not covered yet
 
@@ -256,13 +319,13 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified:
 
-- **The eight parts other than the CH32V203C8.** Every one has its
-  table, its linker script and its preset, and the whole stratum
-  compiles for all nine both ways the hardware prologue can be built
-  (`brio check ch32v203`); the CH32V203C6 preset links every image
-  and is the 32 KB / 10 KB tier's guard, and the CH32V203RB's console
-  links with its seventy-word vector table. What would measure them is
-  a board: only the C8 exists on the desk.
+- **The eleven parts other than the CH32V203C8 and the CH32V303VC.**
+  Every one has its table, its linker script and its preset, and the
+  whole stratum compiles for all thirteen both ways the hardware
+  prologue can be built (`brio check ch32v203`); the CH32V203C6 preset
+  links every image and is the 32 KB / 10 KB tier's guard, and the
+  CH32V203RB's console links with its seventy-word vector table. What
+  would measure them is a board.
 - **The KEY button on PA0**: the vendor's claim, and no program has
   pressed it. That pad is USART2's CTS and carries the wake edge of
   [sleep.md](sleep.md)'s suite when a second board drives it, so what

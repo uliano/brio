@@ -1,4 +1,4 @@
-// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8
+// mcu: ch32v203f6 ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v303cb ch32v303rb ch32v303rc ch32v303vc
 // THE SECOND CONVERTER, and with it the dual modes - on the eight parts
 // that have two. Datasheet table 2-1 counts the converters beside the
 // channels ("9@2", "10@2", "16@1"): the 128 KB part trades ADC2 for six

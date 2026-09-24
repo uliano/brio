@@ -1,5 +1,5 @@
-// mcu: ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb
-// THE FIRST AMPLIFIER, on the eight parts that have it. Datasheet table
+// mcu: ch32v203f8 ch32v203g6 ch32v203g8 ch32v203k6 ch32v203k8 ch32v203c6 ch32v203c8 ch32v203rb ch32v303cb ch32v303rb ch32v303rc ch32v303vc
+// THE FIRST AMPLIFIER, on the twelve parts that have it. Datasheet table
 // 2-1 gives the twenty-pin CH32V203F6 ONE operational amplifier, and
 // which one it is is in the pin table rather than the count: that
 // package bonds neither PB15 nor PB0, which are OPA1's two positive
@@ -11,7 +11,7 @@
 using namespace brio;
 
 static_assert(device::has_opa(1) && device::has_opa(2));
-static_assert(device::opa_count == 2u);
+static_assert(device::opa_count == (device::has_opa(3) ? 4u : 2u));
 static_assert(Opa<1>::shift == 0u);
 
 // PB11 and PB15 are OPA1's CHN0 and CHP0 and the smaller packages do

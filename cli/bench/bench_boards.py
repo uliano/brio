@@ -35,8 +35,9 @@
 #                       Raspberry Pi Debug Probe
 #      f429zi f446re f411ce   STM32F4 boards, written by OpenOCD over SWD
 #                       through an ST-LINK (a board's own, or a standalone V3)
-#      v203c8           CH32V203C8, written by WCH's OpenOCD fork through a
-#                       WCH-Link over this family's two-wire debug port
+#      v203c8 v303vc    CH32V203C8 / CH32V303VC, written by WCH's OpenOCD
+#                       fork through a WCH-Link over this family's two-wire
+#                       debug port
 #      weact2350b weact2350b-rv   ONE RP2350 board under TWO TYPES, because
 #                       on this chip the ARCHITECTURE is a build axis: the
 #                       same silicon runs a Cortex-M33 pair or a Hazard3

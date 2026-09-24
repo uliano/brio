@@ -36,13 +36,24 @@ inline constexpr uint32_t sram_bytes  = 10UL * 1024UL;
 /// verbs (RM 32.1), with write protection in 4 KB units above it.
 inline constexpr uint32_t flash_page_bytes      = 256UL;
 inline constexpr uint32_t flash_protect_bytes   = 4096UL;
+/// The code flash is one array of 224 KB on every part of this series,
+/// and flash_bytes above is only its ZERO-WAIT WINDOW: the datasheet's
+/// note 1 to table 2-1 counts "Flash bytes" as the zero-wait run area
+/// and gives the V203 series a non-zero-wait area of (224K - R0WAIT)
+/// above it. The tail is stated and nothing uses it: no linker script
+/// places a byte there and what an access there costs is not measured.
+inline constexpr uint32_t flash_tail_bytes  = 192UL * 1024UL;
+inline constexpr uint32_t flash_array_bytes = 224UL * 1024UL;
 
 // ---- the device class -----------------------------------------------------
 /// WCH's own family division, which several chapters are keyed by: this
 /// part is CH32V20x_D6 (RM, "Specific classification abbreviations").
-/// The register descriptions that name D8, D8C or D8W are about other
-/// silicon and are not implemented here.
-inline constexpr bool is_d8_class = false;
+/// A register description that names another class is about other
+/// silicon; a driver asks the facts below and names the class only
+/// where the manual's note is a list of classes.
+inline constexpr DeviceClass device_class = DeviceClass::v20x_d6;
+/// The core: the QingKe V4B, RV32IMAC with no floating-point unit.
+inline constexpr bool has_fpu = false;
 /// The vector table's length, which follows the class: 63 entries, the
 /// last being the eighth DMA channel (startup_ch32v203.S).
 inline constexpr uint32_t vector_count = 63;
@@ -63,6 +74,13 @@ inline constexpr uint8_t bkp_data_registers = 10;
 /// this die has; where the manual states a single value, the two
 /// entries are equal.
 inline constexpr uint32_t rtc_hse_div[2] = {512, 128};
+
+// ---- the DMA controllers (RM 11.3's register notes) -----------------------
+/// One controller here, with EIGHT channels: RM 11.3.1's notes give the
+/// eighth to this device class among the five that have it.
+inline constexpr uint8_t dma_controller_count = 1;
+inline constexpr uint8_t dma1_channel_count   = 8;
+inline constexpr uint8_t dma2_channel_count   = 0;
 
 // ---- the pads (datasheet 3.2, table 3-1-3's QFN28 column) ----------------
 /// Which pins each port bonds, as a mask - twenty-five port bits over
@@ -109,6 +127,11 @@ inline constexpr bool usart_full(uint8_t n) {
 }
 
 inline constexpr uint8_t spi_count = 1;
+/// The synchronous ports as a mask, one bit per instance number: SPI1 alone
+/// here. The I2S face of SPI2 and SPI3 is the CH32V303RC's and VC's;
+/// this series has none (datasheet table 2-1 has no I2S row).
+inline constexpr uint16_t spi_instances = (1U << 1);
+inline constexpr bool has_i2s = false;
 inline constexpr uint8_t i2c_count = 1;
 inline constexpr uint8_t can_count = 1;
 /// The converters, and how many of the sixteen analog channels this
@@ -131,6 +154,18 @@ inline constexpr bool has_opa(uint8_t n) {
 inline constexpr uint8_t advanced_timer_count = 1;
 inline constexpr uint8_t general_timer_count  = 3;
 inline constexpr bool has_tim5 = false;
+/// The timers as masks, one bit per instance number: TIM1 the advanced
+/// one, TIM2..TIM4 the general-purpose ones, and no basic timer
+/// (chapter 16's TIM6 and TIM7 are the CH32V303RC's and VC's).
+inline constexpr uint16_t advanced_timer_instances = (1U << 1);
+inline constexpr uint16_t general_timer_instances  = (1U << 2) | (1U << 3) | (1U << 4);
+inline constexpr uint16_t basic_timer_instances    = 0;
+/// The CH32V303's blocks, none of which this series carries (datasheet
+/// table 2-1): the DAC, the RNG, the SDIO host and the FSMC.
+inline constexpr bool has_dac  = false;
+inline constexpr bool has_rng  = false;
+inline constexpr bool has_sdio = false;
+inline constexpr bool has_fsmc = false;
 inline constexpr bool has_ethernet = false;
 
 /// The device controller (USBD, RM ch. 21) is here, on the PA11 that
