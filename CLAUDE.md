@@ -2175,8 +2175,10 @@ brio/                    the framework, twelve strata:
                            between video mode and the adapted command mode
                            (an LTDC frame as DCS memory writes, one refresh
                            per frame, launched by a bit or by the tearing
-                           effect pulse), and in video mode a command is sent
-                           inside the stream
+                           effect pulse); in video mode a command is sent
+                           inside the stream; and the clock lane goes to
+                           high speed only AFTER the panel's reset, because
+                           its receiver locks onto that entry
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)

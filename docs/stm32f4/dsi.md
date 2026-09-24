@@ -77,6 +77,18 @@ from the short commands' eleven, and a refresh at 496 Mbit/s takes
 exactly the LTDC's 16.6 ms frame - the link is faster than the pixel
 clock and the wrapper's flow control keeps them in step.
 
+**The panel's receiver locks onto the clock lane's entry into high
+speed.** Measured: a panel reset with the clock lane already running in
+high speed took no high-speed packet afterwards - every frame refreshed
+into it was lost while every low-power command and read went through,
+and neither side counted an error - until the host was disabled and
+enabled again, which restarts the clock lane. So the bring-up keeps the
+clock lane in low power (`DsiPhyConfig::clock_lane_hs` false) through
+the panel's reset and its low-power configuration and brings it to high
+speed after (`clock_lane(true)`); with that order the first frame lands
+and the re-enables that follow report nothing at the panel's next
+turnaround.
+
 **The PLL's ranges are stated twice, and not the same way.** RM0386
 18.12.5: CLKIN 4..100 MHz, the input after IDF 8..50 MHz, the VCO
 500..1000 MHz, the output 31.25..500 MHz, NDIV 10..125, IDF 1..7, ODF 1,
@@ -226,7 +238,8 @@ DSI_ISR a moment later, not on the read straight after it.
   `pll_locked`, `pll_config`; `phy(c, bit_rate)` (UIX4, the lanes and
   the stop wait, the clock lane's mode, the transition times with 2.8.2
   applied), `uix4`, `lanes`, `phy_timing`, `lane_status`,
-  `ulps(clock, data, enter)`; `host(c)`, `escape_divider`,
+  `ulps(clock, data, enter)`, `clock_lane(high_speed)` (CLCR.DPCC alone,
+  live) and its readback; `host(c)`, `escape_divider`,
   `commands_low_power`, `long_writes_low_power`, `virtual_channel`;
   `colour(c, ltdc_timing, loosely)` (LCOLCR and WCFGR.COLMUX together,
   LPCR's polarities from the LTDC's own words), `te_source(from_pin,
@@ -273,6 +286,7 @@ constexpr LtdcTiming panel{.hsync = 2, .hbp = 20, .width = 800, .hfp = 20,
 constexpr DsiConfig link = [] {                                   // off the 8 MHz crystal
     DsiConfig c = dsi_config_for(8'000'000u, 496'000'000u);
     c.host.long_writes_low_power = false;                         // the frame in high speed
+    c.phy.clock_lane_hs = false;                                  // low power until the panel is up
     return c;
 }();
 
@@ -297,6 +311,7 @@ Dsi::dcs_write(0x29);                      // DISPON
 uint8_t id[3];
 Dsi::dcs_read(0xDA, &id[0], 1);            // RDID1: the controller answers
 (void)Dsi::errors0();                      // the first turnaround's report, read once
+Dsi::clock_lane(true);                     // THEN the clock lane into high speed
 
 // a frame: paint the surface, launch, wait for the end of refresh
 Dsi::clear_wrapper_flags(DSI_WISR_ERIF);
@@ -321,7 +336,8 @@ flags and reads both error registers.
 PCLK2 90 MHz, the IS42S32400F on FMC bank 1 at 90 MHz holding the frame
 buffers, the LTDC at a 26.4 MHz pixel clock, the link at 496 Mbit/s on
 two lanes) against the MB1166 panel, reset on PH7, tearing effect on
-PJ2: **ALL: 92 pass, 0 fail**, twice.
+PJ2: **ALL: 92 pass, 0 fail**, twice - and two letters by name that want
+a human, one of them with the module's touch controller on I2C1.
 
 - **The module's controller is Novatek's NT35510**: RDID1 00h, RDID2
   80h, RDID3 00h over the link, the same three bytes sixteen times
@@ -344,6 +360,21 @@ PJ2: **ALL: 92 pass, 0 fail**, twice.
   the LTDC's expansion replicating the high bits. A human sees the eight
   bars, and a bar sliding along the bottom at one refresh a step, 179
   steps in three seconds.
+- **The first frame after the bring-up**: with the clock lane brought to
+  high speed only after the panel's reset and configuration, the frame
+  refreshed at boot is in the panel's memory before any letter runs
+  (sixteen pixels read back right after boot); with the clock lane in
+  high speed through the panel's reset, the same frame was lost with no
+  error anywhere and came back only after the host's disable and enable.
+- **The module's touch frame on its display** (the letter by name that
+  wants a finger, with the FocalTech controller read over I2C1 as the
+  I2C suite reads it): a white square refreshed into the panel at ten
+  random places, each tap's raw coordinates recorded against the
+  square's centre, and the orientation solved from them - of the eight
+  axis swaps and mirrors, x = ty and y = 479 - tx fits, the controller's
+  frame being the module's portrait one; 21..24 px rms over ten taps and
+  40..43 px at worst, a fingertip's width on this glass, with the red
+  cross drawn where each tap was understood landing under the finger.
 - **This panel's DSI is a command interface**: the 16-bit bars streamed
   in video mode for a second (60 frames, no payload error, no underrun,
   a DCS read answered in a blanking period, the panel's error count 0)
@@ -380,9 +411,9 @@ PJ2: **ALL: 92 pass, 0 fail**, twice.
   stop state, neither in ULPS, the direction ours, the clock lane NOT in
   stop state (DPCC keeps it in high speed); the three FIFOs empty, no
   read and no refresh in flight; no acknowledge error along the
-  bring-up (the panel reset and spoken to with no stream on the lanes),
-  and AE6 at the first read after each of the suite's re-enables of the
-  host.
+  bring-up nor at the first read after the suite's re-enables of the
+  host - the AE6 those reads found under the earlier order, with the
+  clock lane in high speed through the panel's reset, is gone with it.
 - **The panel's registers**, each through its read-back command: COLMOD
   55h and 77h read 5 and 7 (RDDCOLMOD's low three bits); MADCTR 00h and
   60h read back as written; TEON and TEOFF in RDDSM's bit 7; WRDISBV

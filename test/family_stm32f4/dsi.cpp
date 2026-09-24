@@ -158,6 +158,8 @@ void every_verb(uint8_t* buf) {
     (void)Dsi::pll_locked();
     (void)Dsi::pll_config();
     (void)Dsi::phy(cfg.phy, cfg.bit_rate_hz);
+    Dsi::clock_lane(true);
+    (void)Dsi::clock_lane();
     (void)Dsi::uix4();
     (void)Dsi::lanes();
     (void)Dsi::phy_timing();

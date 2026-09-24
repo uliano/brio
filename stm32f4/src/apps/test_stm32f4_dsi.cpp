@@ -91,6 +91,13 @@
 //      power mode
 //   l  the ultra-low-power state on the data lanes, entered and left
 //   m  colour bars and a moving bar, for a human to look at
+//   n  (by name only) A FINGER CHASES A SQUARE: the module's touch
+//      controller read over I2C1 while a white square is refreshed into
+//      the panel at ten random places and a human taps it - the raw touch
+//      coordinates against the square's, the orientation of the touch
+//      frame relative to the display frame solved from them (which of
+//      the eight axis swaps and mirrors fits), a red cross drawn where
+//      each tap was understood to be, the error in pixels
 //
 // build: boards = f469ni
 // build: monitor_speed = 115200
@@ -102,12 +109,15 @@
 #include "stm32f4/dsi.hpp"
 #include "stm32f4/exti.hpp"
 #include "stm32f4/fmc.hpp"
+#include "stm32f4/i2c.hpp"
 #include "stm32f4/ltdc.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
 #include "stm32f4/platform.hpp"
 #include "stm32f4/ticker.hpp"
 #include "stm32f4/usart.hpp"
+#include "kernel/borrowed.hpp"
+#include "util/i2c_bus.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
@@ -211,6 +221,7 @@ constexpr uint32_t bit_rate_hz = 496'000'000u;
 constexpr DsiConfig dsi_cfg = [] {
     DsiConfig c = dsi_config_for(SysClock::root_hz, bit_rate_hz);
     c.host.long_writes_low_power = false;
+    c.phy.clock_lane_hs = false;   // low power until the panel has been reset and spoken to
     return c;
 }();
 static_assert(dsi_cfg.pll.ndiv == 62 && dsi_cfg.pll.idf == 1 && dsi_cfg.pll.odf == 1);
@@ -224,6 +235,17 @@ constexpr DsiVideoConfig video_cfg{};   // non-burst, sync pulses, every return 
 using PanelReset = Pin<'H', 7>;   // shared with the touch controller (UM1932 4.14)
 using PanelTe = Pin<'J', 2>;      // DSIHOST_TE on AF13 (DS11189 table 12), EXTI line 2
 using TeInt = ExtInt<PanelTe>;
+
+// ---- the module's touch controller, for the letter that wants a finger -----------------
+
+/// I2C1 on PB8/PB9 under the board's 1.5 k pull-ups, the FocalTech
+/// controller at 0x38 (the I2C suite's peer): its touch data block,
+/// TD_STATUS then the first point's XH/XL/YH/YL, five bytes from 0x02.
+constexpr I2cPins touch_pins{.scl = {'B', 8, PinFunction::af4}, .sda = {'B', 9, PinFunction::af4}};
+using Touch = I2cHost<1, touch_pins>;
+constexpr uint8_t touch_addr = 0x38;
+constexpr uint8_t touch_td_status = 0x02;
+volatile bool touch_done = false;
 
 // ---- the frame buffers --------------------------------------------------------------
 
@@ -1431,6 +1453,232 @@ void tm_picture() {
 }
 
 // =============================================================================
+// n - a finger chases a square (by name only)
+// =============================================================================
+
+/// One write-then-read tenure against the touch controller, driven by
+/// hand as the I2C suite drives its peer: the status the engine ended
+/// with, or 0xFF when it never answered.
+uint8_t touch_read(uint8_t reg, uint8_t* into, uint8_t n) {
+    const uint8_t cmd[1] = {reg};
+    Touch::Request r{};
+    r.addr = touch_addr;
+    r.tx = lend<Lease::reply>(cmd);
+    r.tx_len = 1;
+    r.rx = lend<Lease::reply>(into);
+    r.rx_len = n;
+    r.speed = I2cSpeed::standard_100k;
+    touch_done = false;
+    if (Touch::start(r)) {
+        return Touch::status();
+    }
+    for (uint32_t spins = 8'000'000u; spins != 0u; --spins) {
+        if (touch_done) {
+            return Touch::status();
+        }
+    }
+    return 0xFF;
+}
+
+/// A rectangle of the 16-bit surface, by the accelerator.
+void fill16(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint32_t argb) {
+    const Dma2dOutput out{.address = sdram_base + fb16_offset + 2u * (static_cast<uint32_t>(y) * panel_width + x),
+                          .line_offset = static_cast<uint16_t>(panel_width - w),
+                          .format = Dma2dOutputColor::rgb565};
+    (void)Dma2d::fill(out, argb, Dma2dArea{.pixels = w, .lines = h});
+    (void)Dma2d::wait();
+}
+
+/// The eight ways a 480x800 touch frame can sit on an 800x480 display:
+/// the axes swapped or not, each mirrored or not. A raw point mapped by
+/// candidate `m`.
+struct Mapped {
+    int32_t x, y;
+};
+Mapped map_touch(uint8_t m, uint16_t tx, uint16_t ty) {
+    const bool swap = (m & 4u) != 0u;
+    const bool flip_x = (m & 2u) != 0u;
+    const bool flip_y = (m & 1u) != 0u;
+    int32_t x = swap ? ty : tx;
+    int32_t y = swap ? tx : ty;
+    if (flip_x) {
+        x = static_cast<int32_t>(panel_width) - 1 - x;
+    }
+    if (flip_y) {
+        y = static_cast<int32_t>(panel_height) - 1 - y;
+    }
+    return Mapped{x, y};
+}
+const char* mapping_name(uint8_t m) {
+    static const char* const names[8] = {"x = tx, y = ty",             "x = tx, y = 479 - ty",
+                                         "x = 799 - tx, y = ty",       "x = 799 - tx, y = 479 - ty",
+                                         "x = ty, y = tx",             "x = ty, y = 479 - tx",
+                                         "x = 799 - ty, y = tx",       "x = 799 - ty, y = 479 - tx"};
+    return names[m & 7u];
+}
+
+struct Tap {
+    uint16_t tx, ty;   // the controller's own coordinates
+    uint16_t sx, sy;   // the square's centre on the display
+};
+
+/// The candidate with the least squared error over the taps so far, and
+/// that error.
+uint8_t best_mapping(const Tap* taps, uint8_t n, uint32_t& error) {
+    uint8_t best = 0;
+    error = 0xFFFFFFFFu;
+    for (uint8_t m = 0; m < 8u; ++m) {
+        uint32_t e = 0;
+        for (uint8_t i = 0; i < n; ++i) {
+            const Mapped p = map_touch(m, taps[i].tx, taps[i].ty);
+            const int32_t dx = p.x - taps[i].sx;
+            const int32_t dy = p.y - taps[i].sy;
+            e += static_cast<uint32_t>(dx * dx + dy * dy);
+        }
+        if (e < error) {
+            error = e;
+            best = m;
+        }
+    }
+    return best;
+}
+
+uint32_t isqrt32(uint32_t v) {
+    uint32_t r = 0;
+    for (uint32_t bit = 1u << 15; bit != 0u; bit >>= 1) {
+        const uint32_t t = r | bit;
+        if (t * t <= v) {
+            r = t;
+        }
+    }
+    return r;
+}
+
+void tn_finger_square() {
+    if (!Touch::init(clock, I2cHostConfig{})) {
+        bench.verdict("I2C1 comes up for the touch controller", false);
+        return;
+    }
+    uint8_t td[5] = {0, 0, 0, 0, 0};
+    const uint8_t probe = touch_read(touch_td_status, td, 5);
+    bench.verdict("the touch controller answers at 0x38 on I2C1", probe == i2c_ok);
+    if (probe != i2c_ok) {
+        return;
+    }
+
+    constexpr uint16_t side = 60;
+    constexpr uint8_t targets = 10;
+    Tap taps[targets];
+    uint8_t n = 0;
+    uint32_t seed = 0x2545F491u ^ millis();
+    const auto rnd = [&seed](uint32_t m) {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        return seed % m;
+    };
+    uint16_t sx = static_cast<uint16_t>(side / 2u + rnd(panel_width - side));
+    uint16_t sy = static_cast<uint16_t>(side / 2u + rnd(panel_height - side));
+    (void)ltdc_show16();
+    const auto draw = [&](bool cross, int32_t cx, int32_t cy) {
+        fill16(0, 0, panel_width, panel_height, argb8888(255, 0, 0, 0));
+        fill16(static_cast<uint16_t>(sx - side / 2u), static_cast<uint16_t>(sy - side / 2u), side, side,
+               argb8888(255, 255, 255, 255));
+        const int32_t w = panel_width;
+        const int32_t h = panel_height;
+        if (cross && cx >= 12 && cx < w - 12 && cy >= 12 && cy < h - 12) {
+            fill16(static_cast<uint16_t>(cx - 12), static_cast<uint16_t>(cy - 1), 25, 3, argb8888(255, 255, 0, 0));
+            fill16(static_cast<uint16_t>(cx - 1), static_cast<uint16_t>(cy - 12), 3, 25, argb8888(255, 255, 0, 0));
+        }
+        (void)refresh();
+    };
+    draw(false, 0, 0);
+    print(serial, "  TAP THE WHITE SQUARE, ten times - up to 90 s; from the fourth tap a red cross marks "
+                  "where the tap was understood to be",
+          crlf);
+
+    uint32_t errors = 0, samples = 0;
+    uint8_t idle_run = 0;
+    bool down = false;
+    uint8_t best = 0;
+    const uint32_t start = millis();
+    while (n < targets && millis() - start < 90'000u) {
+        const uint32_t t = millis();
+        const uint8_t st = touch_read(touch_td_status, td, 5);
+        if (st != i2c_ok) {
+            ++errors;
+        } else {
+            ++samples;
+            const uint8_t points = td[0] & 0x0Fu;
+            if (points == 0u) {
+                if (idle_run < 255u) {
+                    ++idle_run;
+                }
+                down = false;
+            } else if (!down && idle_run >= 3u) {
+                // A tap: the first sample with a point after three without.
+                down = true;
+                idle_run = 0;
+                const uint16_t tx = static_cast<uint16_t>(((td[1] & 0x0Fu) << 8) | td[2]);
+                const uint16_t ty = static_cast<uint16_t>(((td[3] & 0x0Fu) << 8) | td[4]);
+                taps[n] = Tap{tx, ty, sx, sy};
+                ++n;
+                uint32_t err = 0;
+                Mapped p{0, 0};
+                if (n >= 3u) {
+                    best = best_mapping(taps, n, err);
+                    p = map_touch(best, tx, ty);
+                }
+                if (n >= 3u) {
+                    print(serial, "  tap ", n, ": raw (", tx, ", ", ty, ") for the square at (", sx, ", ", sy,
+                          ") -> understood at (", p.x, ", ", p.y, ")", crlf);
+                } else {
+                    print(serial, "  tap ", n, ": raw (", tx, ", ", ty, ") for the square at (", sx, ", ", sy, ")", crlf);
+                }
+                if (n < targets) {
+                    uint16_t nx, ny;
+                    do {
+                        nx = static_cast<uint16_t>(side / 2u + rnd(panel_width - side));
+                        ny = static_cast<uint16_t>(side / 2u + rnd(panel_height - side));
+                    } while (static_cast<uint16_t>(nx > sx ? nx - sx : sx - nx) < 150u &&
+                             static_cast<uint16_t>(ny > sy ? ny - sy : sy - ny) < 150u);
+                    sx = nx;
+                    sy = ny;
+                    draw(n >= 3u, p.x, p.y);
+                }
+            } else {
+                idle_run = 0;
+            }
+        }
+        while (millis() - t < 10u) {
+        }
+    }
+
+    uint32_t err = 0;
+    best = best_mapping(taps, n, err);
+    uint32_t worst = 0;
+    for (uint8_t i = 0; i < n; ++i) {
+        const Mapped p = map_touch(best, taps[i].tx, taps[i].ty);
+        const int32_t dx = p.x - taps[i].sx;
+        const int32_t dy = p.y - taps[i].sy;
+        const uint32_t d = isqrt32(static_cast<uint32_t>(dx * dx + dy * dy));
+        worst = d > worst ? d : worst;
+    }
+    const uint32_t mean = n != 0u ? isqrt32(err / n) : 0u;
+    print(serial, "  ", n, " taps in ", samples, " samples, ", errors, " bus errors; the touch frame on the display: ",
+          mapping_name(best), " (mapping ", best, "), error ", mean, " px rms, ", worst, " px at worst", crlf);
+    bench.verdict("ten taps arrived", n == targets);
+    // A fingertip is some 60 px wide on this glass and the square 60: a
+    // tap understood within 60 px of the centre is a tap on the square.
+    bench.verdict("one orientation of the touch frame puts every tap on its square: within 60 px of the centre",
+                  n == targets && worst <= 60u);
+    bench.verdict("no bus error over the polling", errors == 0u);
+    fill16(0, 0, panel_width, panel_height, argb8888(255, 0, 0, 0));
+    (void)paint_bars16();
+    (void)refresh();
+}
+
+// =============================================================================
 // the menu
 // =============================================================================
 
@@ -1474,6 +1722,17 @@ extern "C" void DSI_IRQHandler() {
         w |= DSI_WISR_ERIF;
     }
     dsi_irq_wrapper = dsi_irq_wrapper | w;
+}
+
+extern "C" void I2C1_EV_IRQHandler() {
+    if (Touch::isr()) {
+        touch_done = true;
+    }
+}
+extern "C" void I2C1_ER_IRQHandler() {
+    if (Touch::error_isr()) {
+        touch_done = true;
+    }
 }
 
 extern "C" void EXTI2_IRQHandler() {
@@ -1533,6 +1792,12 @@ int main() {
     boot.e0_ids = brio::Dsi::errors0();
     const DsiStatus panel_st = panel_init();
     boot.e0_init = brio::Dsi::errors0();
+    // THE CLOCK LANE INTO HIGH SPEED ONLY NOW: the panel's receiver locks
+    // onto the clock lane's LP-to-HS entry, and a panel reset under a clock
+    // lane already in high speed takes no high-speed packet afterwards -
+    // measured: every frame refreshed into it was lost, with no error on
+    // either side, until the host was disabled and enabled again.
+    brio::Dsi::clock_lane(true);
     if (boot.sdram_up) {
         (void)paint_bars16();
         boot.first_refresh_us = refresh();
@@ -1552,6 +1817,7 @@ int main() {
     bench.letter('k', "the wrapper's shutdown and colour mode packets", tk_wrapper_packets);
     bench.letter('l', "the ultra-low-power state on the data lanes", tl_ulps);
     bench.letter('m', "colour bars and a moving bar, for a human to look at", tm_picture);
+    bench.letter('n', "a finger chases a square: the touch frame on the display", tn_finger_square, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=", tick_ok ? "SysTick" : "FAILED",

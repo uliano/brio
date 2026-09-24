@@ -130,6 +130,15 @@
  *    not. One report each, nothing follows, and the registers clear on
  *    the read that shows them: a program that re-enables the host reads
  *    them once after its first exchange.
+ * 11. THE PANEL'S RECEIVER LOCKS ONTO THE CLOCK LANE'S ENTRY INTO HIGH
+ *    SPEED. Measured: a panel reset with the clock lane already running
+ *    in high speed took no high-speed packet afterwards - every frame
+ *    refreshed into it was lost, every low-power command and read went
+ *    through, and neither side counted an error - until the host was
+ *    disabled and enabled again, which restarts the clock lane. So a
+ *    program brings the clock lane to high speed (`clock_lane(true)`)
+ *    after the panel's reset and its low-power bring-up, or keeps
+ *    `DsiPhyConfig::clock_lane_hs` false until then.
  *
  * THE ERRATA (ES0321 Rev 14, 2.8.1 .. 2.8.3), two of them code here:
  *  - 2.8.2, "incorrect calculation of the time to activate the clock
@@ -730,6 +739,14 @@ struct Dsi {
                        (static_cast<uint32_t>(c.timing.max_read_time) << DSI_DLTCR_MRD_TIME_Pos);
         return true;
     }
+
+    /// CLCR.DPCC alone, live: the clock lane into high speed or back to
+    /// low power with everything else in place - a panel's receiver locks
+    /// onto the clock lane's LP-to-HS entry, so a panel reset under a
+    /// clock lane already in high speed takes no high-speed packet until
+    /// it sees one (measured; item 11 in the file's head).
+    static void clock_lane(bool high_speed) { bit(regs().CLCR, DSI_CLCR_DPCC, high_speed); }
+    static bool clock_lane() { return (regs().CLCR & DSI_CLCR_DPCC) != 0u; }
 
     static uint8_t uix4() {
         return static_cast<uint8_t>((regs().WPCR[0] & DSI_WPCR0_UIX4_Msk) >> DSI_WPCR0_UIX4_Pos);

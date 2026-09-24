@@ -52,7 +52,9 @@ connector CN10.
   pull-ups), its INT on PJ5 (EXTI line 5), the reset of both on PH7 and
   the tearing effect on PJ2 (AF13 to the DSI wrapper, EXTI line 2 to the
   core) - the I2C suite's peer, a finger's coordinates read in the
-  module's portrait frame; a
+  module's portrait frame, which sits on the display as x = ty and
+  y = 479 - tx (the DSI suite's square letter, 21..24 px rms over ten
+  taps); a
   128 Mbit Micron Quad-SPI NOR flash (UM1932 names the N25Q128A13; the
   JEDEC id 0x20BA18 it answers with is the MT25QL128's, its successor,
   and the MB1189's QSPI sheet names the MT25QL128ABA) on PF6..PF10 with
