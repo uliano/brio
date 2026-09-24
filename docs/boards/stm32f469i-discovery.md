@@ -41,8 +41,10 @@ connector CN10.
   MB1166 with its capacitive touch controller on I2C1 (PB8/PB9, the
   board's 1.5 k pull-ups), reset on PH7 and tearing effect on PJ2; a
   128 Mbit Micron Quad-SPI NOR flash (UM1932 names the N25Q128A13; the
-  JEDEC id 0x20BA18 it answers with is the MT25QL128's, its successor)
-  on PF6..PF10 with PB6 as its select, found blank; the CS43L22 audio
+  JEDEC id 0x20BA18 it answers with is the MT25QL128's, its successor,
+  and the MB1189's QSPI sheet names the MT25QL128ABA) on PF6..PF10 with
+  PB6 as its select - the QUADSPI suite's instrument, found blank and
+  carrying the suite's pattern in its last 4 KB since; the CS43L22 audio
   DAC on I2C2 (PH4/PH5) and SAI1; two
   MP34DT05 MEMS microphones; a microSD socket on SDIO with its detect
   on PG2; Arduino Uno headers and the 16-pin extension connector CN12.

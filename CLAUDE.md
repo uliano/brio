@@ -370,7 +370,9 @@ gets its home in `docs/design/` when taken.
   the F429 alone the LTDC and the DMA2D - the memory-mapped display
   tier over that SDRAM, the panel driven in its RGB mode and the
   bandwidth the tier lives on measured (two layers of 32-bit pixels at
-  65 Hz plus the accelerator, some 160 MB/s over one bus). What remains
+  65 Hz plus the accelerator, some 160 MB/s over one bus), and on the
+  F469 the QUADSPI against the board's 16 MB flash (indirect, status
+  polling and memory-mapped; the window at 44.5 MB/s). What remains
   is in the documents' gap lists, and three things outside them: the
   OTG HS core in full-speed mode on the STM32F429 (UsbHs compiled, its
   connector cabled, never enumerated); the frequency ladders of the four
@@ -2131,6 +2133,23 @@ brio/                    the framework, twelve strata:
                            controller's fetch. 11.3.11's blend and the output
                            packings are constexpr beside the registers, which
                            is what a test judges the silicon against
+    quadspi.hpp            the QUAD-SPI MEMORY INTERFACE (ch. 13): Quadspi, a
+                           monostate where the header declares the block -
+                           QspiCommand as the chapter's five phases on one,
+                           two or four lines, QspiConfig with the flash's
+                           size and NCS's high time as fields of the
+                           contract, the three faces as verbs (command/
+                           write/read pumping the FIFO, poll() on the
+                           automatic status-polling mode with its stop on
+                           match, map()/unmap()/window() over the
+                           0x9000 0000 the MANUAL gives and the header does
+                           not), four of the five errata as code (a write
+                           with dummy cycles refused, the AR cleared behind
+                           an abort before the window, no timeout counter,
+                           the FIFO drained after a read) and the blocking
+                           verbs completing on BUSY because TCF is the
+                           handler's flag; the device's opcodes stay with
+                           the device, in the suite
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)

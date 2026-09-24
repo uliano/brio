@@ -3497,4 +3497,104 @@ constexpr bool pllsai_has_lcd_divider() {
 #endif
 }
 
+// ---- QUADSPI --------------------------------------------------------------------
+//
+// The Quad-SPI memory interface (RM0386 ch. 13, RM0390 ch. 12) - the
+// F412, F413/F423, F446 and F469/F479 carry one, and the header says so
+// with QSPI_R_BASE, its REGISTER block: the memory-mapped WINDOW the
+// controller adds to the address space is a fact of the manual and no
+// header of this pack declares it.
+
+/// Whether this part has the block (QSPI_R_BASE in the device header).
+constexpr bool quadspi_present() {
+#if defined(QSPI_R_BASE)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// RCC_AHB3ENR.QSPIEN - the gate sits on AHB3 beside the FMC's; 0 where
+/// there is no block.
+constexpr uint32_t quadspi_clock_mask() {
+#if defined(RCC_AHB3ENR_QSPIEN)
+    return RCC_AHB3ENR_QSPIEN;
+#else
+    return 0u;
+#endif
+}
+
+/// RCC_AHB3RSTR.QSPIRST, the block's reset line; 0 where there is no block.
+constexpr uint32_t quadspi_reset_mask() {
+#if defined(RCC_AHB3RSTR_QSPIRST)
+    return RCC_AHB3RSTR_QSPIRST;
+#else
+    return 0u;
+#endif
+}
+
+#if defined(QSPI_R_BASE)
+/// The one vector of the block - position 91 on the F446 and the F469,
+/// 92 on the F412/F413: the header's enumerator, never a number.
+constexpr IRQn_Type quadspi_irq() { return QUADSPI_IRQn; }
+#endif
+
+/**
+ * WHERE THE MEMORY-MAPPED WINDOW IS. The flash reached through the
+ * controller in memory-mapped mode is read at an address of the
+ * Cortex's own map (13.3.7), and that address is the MANUAL's, not the
+ * header's: RM0386 2.3 (the F469/F479) and RM0390 2.3 (the F446) both put
+ * the "QUADSPI bank" at 0x9000 0000, 256 Mbytes of it. The F412 and
+ * F413/F423 classes have the block and their manuals (RM0402, RM0430)
+ * are not on the desk, so there the window is unknown and
+ * stm32f4/quadspi.hpp refuses to map rather than guess; the indirect and
+ * status-polling modes need no window and work there.
+ */
+struct QuadspiWindow {
+    bool known = false;
+    uint32_t base = 0;
+    uint32_t bytes = 0;
+};
+
+constexpr QuadspiWindow quadspi_window() {
+    QuadspiWindow w{};
+#if defined(STM32F446xx) || defined(STM32F469xx) || defined(STM32F479xx)
+    w.known = true;
+    w.base = 0x9000'0000u;
+    w.bytes = 256u * 1024u * 1024u;
+#endif
+    return w;
+}
+
+/**
+ * The QUADSPI slice of the DMA request mapping: ONE cell, DMA2 stream 7
+ * channel 3, on the F446 (RM0390 table 29) and on the F469/F479 (RM0386
+ * table 30) alike. The F412 and F413/F423 have the block and no table on
+ * this desk, so an engine there is refused rather than run on a guessed
+ * stream - the rule every other slice keeps.
+ */
+constexpr DmaPlacements quadspi_dma_placements() {
+    DmaPlacements p{};
+#if defined(STM32F446xx) || defined(STM32F469xx) || defined(STM32F479xx)
+    p.known = true;
+    p.count = 1;
+    p.at[0] = {2, 7, 3};
+#endif
+    return p;
+}
+
+/// Whether (controller, stream, channel) is the cell this block's request
+/// is wired to. False on a part whose table was not read - a refusal, never
+/// a guess.
+constexpr bool quadspi_dma_placement_valid(uint8_t controller, uint8_t stream, uint8_t channel) {
+    const DmaPlacements p = quadspi_dma_placements();
+    for (uint8_t i = 0; i < p.count; ++i) {
+        if (p.at[i].controller == controller && p.at[i].stream == stream &&
+            p.at[i].channel == channel) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace brio
