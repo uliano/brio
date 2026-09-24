@@ -70,6 +70,9 @@ BOARD_TYPES = {
     "f411ce": {"project": "stm32f4", "preset": "stm32f411ce-release",
                "mcu": "stm32f411ce", "flash": "openocd",
                "target_cfg": "target/stm32f4x.cfg"},
+    "f469ni": {"project": "stm32f4", "preset": "stm32f469ni-release",
+               "mcu": "stm32f469ni", "flash": "openocd",
+               "target_cfg": "target/stm32f4x.cfg"},
     # The CH32V006K8 (QingKe V2C, RV32EC): the RISC-V target, written by
     # WCH's OpenOCD fork through a WCH-Link - a different program from
     # the SWD paths' OpenOCD, hence its own mechanism (flash.py's

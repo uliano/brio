@@ -285,7 +285,13 @@ extern "C" void FLASH_IRQHandler() { const uint32_t flags = Flash::isr(); ... }
 512 Kbytes, 100 MHz from a 25 MHz crystal, 3 wait states, the ART fully
 on, a 3.27 V rail). Its `z` set - the letters that cost the board
 nothing - is 47 verdicts; the four that erase and the one that locks the
-engine are asked for by name.
+engine are asked for by name. On the STM32F469NI (2 Mbytes in two
+banks, 180 MHz, 5 wait states) the same 47, and letters e and g by name:
+sector 23 erases in 898 ms and a 1024-byte block programs at 13.7 us a
+word; a 16 / 64 / 128 KB sector of bank 1 erases in 230 / 479 / 887 ms
+with the test zone in the OTHER bank, so the core polls throughout
+(13458 turns on the 128 KB one) instead of freezing - the read-while-
+write the dual-bank parts have and the single-bank ones have not.
 
 **The map is the rule, and the rule is right.** Eight sectors in one
 bank - 0x0800_0000, 0x0800_4000, 0x0800_8000, 0x0800_C000 of 16 Kbytes,
@@ -415,11 +421,10 @@ Driver gaps, each with its reason:
   in, and leaving it is bound to an RDP 1 -> 0 transition that mass
   erases the part (3.6.5).
 - **The sector map of the part classes whose chapter 3 is not on the
-  desk** - the F401, F410, F412, F413/F423 and F469/F479. There
+  desk** - the F401, F410, F412 and F413/F423. There
   `flash_facts().known` is false and every erase is refused rather than
   aimed at a guessed SNB; programming, which needs no map, works. RM0368,
-  RM0401, RM0402, RM0430 and RM0386 would each add one row to the
-  reserve.
+  RM0401, RM0402 and RM0430 would each add one row to the reserve.
 - **x64 programming.** It needs 8..9 V on the VPP pad, which no board
   here has, and the datasheet forbids leaving that supply applied for
   more than an hour. Refused at compile time.

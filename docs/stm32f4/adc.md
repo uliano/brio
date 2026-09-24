@@ -8,8 +8,9 @@ and how many of the trigger codes carry a signal. The electrical numbers
 calibration values with their addresses - are the datasheets': DS10693
 Rev 11, the F429 datasheet (DocID024030 Rev 10) and DS10314 Rev 8, which
 agree on all of them. Errata: ES0206 Rev 24 2.5.1 and 2.2.8, ES0298 Rev 8
-2.6.1 and 2.2.8, ES0287 Rev 6 2.4.1 and 2.2.8 - two items under three
-numbers, on every silicon revision of all three parts; both are quoted
+2.6.1 and 2.2.8, ES0287 Rev 6 2.4.1 and 2.2.8, ES0321 Rev 14 2.6.1 and
+2.2.8 - two items under four numbers, on every silicon revision of all
+four parts; both are quoted
 below. Driver: `stm32f4/adc.hpp`, with the per-part facts in
 `stm32f4/device_tables.hpp`. Bench suite: `test_stm32f4_analog` (one
 suite with the DAC, because the DAC's only route to this converter is a
@@ -93,14 +94,14 @@ rail through VREFINT rather than believing them.
 ### The errata, and how they are answered
 
 - **ADC sequencer modification during conversion** (ES0206 2.5.1,
-  ES0298 2.6.1, ES0287 2.4.1, every revision): with a SOFTWARE start, a
+  ES0298 2.6.1, ES0287 2.4.1, ES0321 2.6.1, every revision): with a SOFTWARE start, a
   write to ADC_SQRx or ADC_JSQR during a conversion resets that
   conversion and the converter does not restart by itself. The hardware
   trigger is spared. ANSWERED STRUCTURALLY: every sequence verb refuses
   while a conversion is in flight, and a deliberately named unchecked
   verb exists so a suite can stage the item. Both halves are measured
   below.
-- **Internal noise impacting the ADC accuracy** (2.2.8 in all three,
+- **Internal noise impacting the ADC accuracy** (2.2.8 in all four,
   every revision): noise on VDD propagates inside whatever the power
   mode. The workaround is a SYSTEM one - the flash accelerator's prefetch
   OFF with both caches on, plus averaging - so it is not the driver's to
@@ -338,7 +339,9 @@ extern "C" void ADC_IRQHandler() {
 
 `test_stm32f4_analog`, on an STM32F446 at 180 MHz with PCLK2 at 90 MHz -
 so ADCCLK at PCLK2/4 = 22.5 MHz throughout - reading a DAC output through
-the pad the two converters share.
+the pad the two converters share; 106 verdicts green on the STM32F469 at
+the same rates, where neither DAC pad carries a load and letter d says
+so instead of judging the buffer.
 
 **The clock.** `init()` picks PCLK2/4: half the bus is 45 MHz, past the
 36 MHz ceiling, and the next division is the first that fits. fADC
@@ -530,11 +533,11 @@ Driver gaps:
   refused where the chapter refuses them, and nothing here splits a
   sequence into subgroups and counts the triggers it then takes: it wants
   a repeating trigger, which is the timer chapter's.
-- **`AdcInput` on the F401, F410, F412, F413/F423 and F469/F479
-  classes**: the reserve does not know which channel the sensor is on
-  there and the driver refuses all three internal sources rather than
-  guess. RM0368, RM0401, RM0402, RM0430 and RM0386 would each add one row
-  to `stm32f4/device_tables.hpp`.
+- **`AdcInput` on the F401, F410, F412 and F413/F423 classes**: the
+  reserve does not know which channel the sensor is on there and the
+  driver refuses all three internal sources rather than guess. RM0368,
+  RM0401, RM0402 and RM0430 would each add one row to
+  `stm32f4/device_tables.hpp`.
 
 Implemented, not bench-verified:
 

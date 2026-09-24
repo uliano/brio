@@ -13,7 +13,7 @@ of the F411 no verb here can guard. Driver: `stm32f4/pin.hpp` (`Port<L>`,
 (`stm32f4/device_tables.hpp`). The family fixture is
 `test/family_stm32f4/pin.cpp` with the negatives that refuse a port the
 header has not got and a seventeenth pin. Bench: the LED and console
-pads of the three boards under the blink, console and platform apps.
+pads of the four boards under the blink, console and platform apps.
 
 ## What the silicon does
 

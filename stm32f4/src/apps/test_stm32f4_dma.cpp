@@ -42,7 +42,7 @@
 //   r  (not in z) the receive engine, harvesting a line the host sends:
 //      brio run <board> "rhello dma"
 //
-// build: boards = f429zi,f446re,f411ce
+// build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -59,7 +59,7 @@
 
 #if defined(STM32F411xE)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 100'000'000, 25'000'000>;
-#elif defined(STM32F429xx)
+#elif defined(STM32F429xx) || defined(STM32F469xx)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
 #else
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000, brio::HseMode::bypass>;
@@ -75,15 +75,22 @@ using namespace brio;
 // The board's console instance decides which (controller, stream,
 // channel) the two engines take: USART1 is DMA2's stream 7 channel 4 out
 // and stream 2 channel 4 in; USART2 is DMA1's stream 6 and stream 5, both
-// channel 4 (RM0090 tables 43 and 44, and their RM0390 / RM0383 twins).
-// The Uart checks the cells at compile time - these lines only have to
-// name the right ones.
+// channel 4 (RM0090 tables 43 and 44, and their RM0390 / RM0383 twins);
+// USART3 is DMA1's stream 3 channel 4 out and stream 1 channel 4 in
+// (RM0386 table 29). The Uart checks the cells at compile time - these
+// lines only have to name the right ones.
 #if defined(STM32F446xx)
 constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3, PinFunction::af7}};
 constexpr uint8_t console_instance = 2;
 using ConsoleTxStream = DmaStream<1, 6>;
 using ConsoleTxEngine = DmaTxEngine<1, 6, 4>;
 using ConsoleRxEngine = DmaRxEngine<1, 5, 4>;
+#elif defined(STM32F469xx)
+constexpr UartPins console_pins{.tx = {'B', 10, PinFunction::af7}, .rx = {'B', 11, PinFunction::af7}};
+constexpr uint8_t console_instance = 3;
+using ConsoleTxStream = DmaStream<1, 3>;
+using ConsoleTxEngine = DmaTxEngine<1, 3, 4>;
+using ConsoleRxEngine = DmaRxEngine<1, 1, 4>;
 #else
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
@@ -1166,6 +1173,14 @@ namespace {
 extern "C" void DMA1_Stream6_IRQHandler() { serve_engined(); }
 extern "C" void DMA1_Stream5_IRQHandler() { serve_engined(); }
 extern "C" void USART2_IRQHandler() {
+    if (engined_console == 0u) {
+        (void)Serial::isr();
+    }
+}
+#elif defined(STM32F469xx)
+extern "C" void DMA1_Stream3_IRQHandler() { serve_engined(); }
+extern "C" void DMA1_Stream1_IRQHandler() { serve_engined(); }
+extern "C" void USART3_IRQHandler() {
     if (engined_console == 0u) {
         (void)Serial::isr();
     }

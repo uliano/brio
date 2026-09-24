@@ -56,7 +56,8 @@
  * class. They are keyed here on the device-select macro - the one
  * thing about the part the preprocessor can know - and stated ONLY for
  * the classes whose manual was read for them (RM0090 for the F405/F407
- * and F42x/F43x classes, RM0390 for the F446, RM0383 for the F411). A
+ * and F42x/F43x classes, RM0390 for the F446, RM0383 for the F411,
+ * RM0386 for the F469/F479). A
  * header outside those classes gets `sysclk_ladder().known == false`,
  * and stm32f4/clock.hpp refuses any rate above the reset one there
  * rather than run a part on a ladder nobody read. The voltage range
@@ -343,10 +344,13 @@ constexpr SysclkLadder sysclk_ladder() {
     l.ws_bands = 6;
     l.ws_ceiling_hz[0] = 30'000'000u;  l.ws_ceiling_hz[1] = 60'000'000u;  l.ws_ceiling_hz[2] = 90'000'000u;
     l.ws_ceiling_hz[3] = 120'000'000u; l.ws_ceiling_hz[4] = 150'000'000u; l.ws_ceiling_hz[5] = 168'000'000u;
-#elif defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx)
-    // RM0090 5.1.4 / RM0390 5.1.4 (scale 3 up to 120, scale 2 up to
-    // 144 - 168 in over-drive -, scale 1 up to 168 - 180 in over-drive),
-    // 7.3.3 (PPRE1 45 MHz, PPRE2 90 MHz), 3.5.1 table 12 / RM0390 table 5.
+#elif defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx) || \
+    defined(STM32F446xx) || defined(STM32F469xx) || defined(STM32F479xx)
+    // RM0090 5.1.4 / RM0390 5.1.4 / RM0386 3.3.2's note (scale 3 up to
+    // 120, scale 2 up to 144 - 168 in over-drive -, scale 1 up to 168 -
+    // 180 in over-drive), 7.3.3 / RM0386 6.3.3 (PPRE1 45 MHz, PPRE2
+    // 90 MHz), 3.5.1 table 12 / RM0390 table 5 / RM0386 table 9: the
+    // F469/F479 ladder is the F42x/F43x's row for row.
     l.known = true;
     l.scale3_hz = 120'000'000u;
     l.scale2_hz = 144'000'000u;
@@ -644,14 +648,17 @@ struct RtcPadFacts {
     bool known = false;
     uint8_t tamper_inputs = 1;   ///< TAMPER1 on RTC_AF1 everywhere; 2 where AF2 exists
     bool has_af2 = false;        ///< the second RTC pad, TSINSEL/TAMP1INSEL's 1
-    char af2_port = 0;           ///< 'I' on the F42x/F43x (PI8), 'A' on the F446 (PA0)
+    char af2_port = 0;           ///< 'I' on the F42x/F43x and the F469/F479 (PI8), 'A' on the F446 (PA0)
     uint8_t af2_pin = 0;
 };
 
 constexpr RtcPadFacts rtc_pad_facts() {
     RtcPadFacts f{};
 #if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx) || \
-    defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx)
+    defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx) || \
+    defined(STM32F469xx) || defined(STM32F479xx)
+    // RM0090 26.6.16's TAMP1INSEL and RM0386 28.3.13: RTC_AF1 PC13 and
+    // RTC_AF2 PI8 on both classes.
     f.known = true;
     f.tamper_inputs = 2;
     f.has_af2 = true;
@@ -671,8 +678,9 @@ constexpr RtcPadFacts rtc_pad_facts() {
 }
 
 /// RTC_AF1, the pad every manual read puts the tamper, the timestamp and
-/// RTC_OUT on: PC13 on the F405 class, the F42x/F43x, the F446 and the
-/// F411 alike (RM0090 8.3.15, RM0390 7.3.15, RM0383 figure 159's note).
+/// RTC_OUT on: PC13 on the F405 class, the F42x/F43x, the F446, the F411
+/// and the F469/F479 alike (RM0090 8.3.15, RM0390 7.3.15, RM0383 figure
+/// 159's note, RM0386 28.3.13).
 inline constexpr char rtc_af1_port = 'C';
 inline constexpr uint8_t rtc_af1_pin = 13;
 
@@ -867,7 +875,7 @@ constexpr DmaPlacements usart_dma_placements(uint8_t n, bool transmit) {
 #if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || \
     defined(STM32F417xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
     defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx) || \
-    defined(STM32F411xE)
+    defined(STM32F411xE) || defined(STM32F469xx) || defined(STM32F479xx)
     p.known = true;
     if (!usart_present(n)) {
         return p;   // the class's table is read, this part has no such instance
@@ -905,9 +913,11 @@ constexpr DmaPlacements usart_dma_placements(uint8_t n, bool transmit) {
             if (transmit) { p.count = 2; p.at[0] = {2, 6, 5}; p.at[1] = {2, 7, 5}; }
             else          { p.count = 2; p.at[0] = {2, 1, 5}; p.at[1] = {2, 2, 5}; }
             break;
-#if defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx)
+#if defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx) || \
+    defined(STM32F469xx) || defined(STM32F479xx)
         // RM0090 table 43's channel 5, marked "available on STM32F42xxx and
-        // STM32F43xxx only" - and the instances themselves are that class's.
+        // STM32F43xxx only" - and the instances themselves are that class's;
+        // RM0386 table 29 gives the F469/F479 the same four cells.
         case 7:
             if (transmit) { p.count = 1; p.at[0] = {1, 1, 5}; }
             else          { p.count = 1; p.at[0] = {1, 3, 5}; }
@@ -1484,7 +1494,9 @@ constexpr AdcInternalFacts adc_internal_facts() {
     f.vbat_channel = 18;
     f.vbat_divider = 2;
 #elif defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx) || \
-    defined(STM32F446xx) || defined(STM32F411xE)
+    defined(STM32F446xx) || defined(STM32F411xE) || defined(STM32F469xx) || defined(STM32F479xx)
+    // RM0090 13.10, RM0390 13.10, RM0383 11.10 and RM0386 14.10 / 14.11:
+    // the sensor on ADC1_IN18, shared with VBAT/4.
     f.known = true;
     f.vrefint_channel = 17;
     f.temperature_channel = 18;
@@ -1498,8 +1510,9 @@ constexpr AdcInternalFacts adc_internal_facts() {
 /**
  * How many output channels the DAC really has, and whether that is known.
  *
- * RM0090 14.1, RM0390 14.1: two on the F405 class, the F42x/F43x and the
- * F446. The F411 (RM0383) has no DAC at all and its header says so.
+ * RM0090 14.1, RM0390 14.1, RM0386 15.1: two on the F405 class, the
+ * F42x/F43x, the F446 and the F469/F479. The F411 (RM0383) has no DAC at
+ * all and its header says so.
  * Everywhere else the header declares a DAC and both channels' bits and
  * the manual has not been read, so one channel is offered and the second
  * is refused - the RTC's second tamper input, again.
@@ -1514,7 +1527,7 @@ constexpr DacChannelFacts dac_channel_facts() {
 #if defined(DAC_BASE)
 #if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx) || \
     defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx) || \
-    defined(STM32F446xx)
+    defined(STM32F446xx) || defined(STM32F469xx) || defined(STM32F479xx)
     f.known = true;
     f.channels = 2;
 #endif
@@ -1590,7 +1603,7 @@ constexpr DmaPlacements adc_dma_placements(uint8_t instance) {
 #if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || \
     defined(STM32F417xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
     defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx) || \
-    defined(STM32F411xE)
+    defined(STM32F411xE) || defined(STM32F469xx) || defined(STM32F479xx)
     p.known = true;
     if (!adc_present(instance)) {
         return p;   // the class's table is read, this part has no such converter
@@ -1608,8 +1621,9 @@ constexpr DmaPlacements adc_dma_placements(uint8_t instance) {
 }
 
 /**
- * The DAC's two channels (RM0090 table 43, RM0390 table 28): DAC1 on
- * DMA1's stream 5 and DAC2 on stream 6, channel 7 both, one cell each.
+ * The DAC's two channels (RM0090 table 43, RM0390 table 28, RM0386 table
+ * 29): DAC1 on DMA1's stream 5 and DAC2 on stream 6, channel 7 both, one
+ * cell each.
  * The channel index here is this stratum's 0-based one, as everywhere
  * else in stm32f4/dac.hpp.
  */
@@ -1618,7 +1632,8 @@ constexpr DmaPlacements dac_dma_placements(uint8_t channel) {
 #if defined(DAC_BASE)
 #if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || \
     defined(STM32F417xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
-    defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx)
+    defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx) || \
+    defined(STM32F469xx) || defined(STM32F479xx)
     p.known = true;
     if (channel >= dac_channel_facts().channels) {
         return p;
@@ -1867,8 +1882,9 @@ struct SpiI2sFacts {
 
 constexpr SpiI2sFacts spi_i2s_facts() {
 #if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx) || \
-    defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx)
-    return SpiI2sFacts{true, 0x06u, true};    // SPI2, SPI3
+    defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx) || \
+    defined(STM32F469xx) || defined(STM32F479xx)
+    return SpiI2sFacts{true, 0x06u, true};    // SPI2, SPI3 (RM0386 31.6.2: I2S2ext and I2S3ext too)
 #elif defined(STM32F411xE)
     return SpiI2sFacts{true, 0x1Fu, true};    // SPI1..SPI5
 #elif defined(STM32F446xx)
@@ -1886,9 +1902,9 @@ constexpr bool spi_i2s_capable(uint8_t n) {
 /**
  * WHERE AN SPI INSTANCE'S DMA REQUESTS SIT - the SPI slice of the request
  * mapping (RM0090 tables 43 and 44, RM0390 tables 28 and 29, RM0383
- * tables 27 and 28), keyed on the part class for the reason the serial
- * slice is: no device header carries a request mapping, and the tables
- * differ by part.
+ * tables 27 and 28, RM0386 tables 29 and 30), keyed on the part class for
+ * the reason the serial slice is: no device header carries a request
+ * mapping, and the tables differ by part.
  *
  * UP TO THREE CELLS, where the serial and analog slices need two: the
  * F411's table gives SPI1_TX, SPI4_RX and SPI5_TX three cells each (DMA2
@@ -1902,7 +1918,7 @@ constexpr DmaPlacements spi_dma_placements(uint8_t n, bool transmit) {
 #if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || \
     defined(STM32F417xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
     defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx) || \
-    defined(STM32F411xE)
+    defined(STM32F411xE) || defined(STM32F469xx) || defined(STM32F479xx)
     p.known = true;
     if (!spi_present(n)) {
         return p;   // the class's table is read, this part has no such instance
@@ -2358,9 +2374,9 @@ constexpr PwrWakeupPad pwr_wakeup_pad(uint8_t n) {
 /**
  * The eight PVD thresholds PLS[2:0] selects, in MILLIVOLTS - the
  * reference manual's table and not the header's, and it differs by part
- * class: RM0090 5.4.1 and 5.5.1 and RM0390 5.4.1 give 2.0, 2.1, 2.3, 2.5,
- * 2.6, 2.7, 2.8 and 2.9 V; RM0383 5.4.1 gives 2.2, 2.3, 2.4, 2.5, 2.6,
- * 2.7, 2.8 and 2.9 V. A class whose manual is not on the desk gets
+ * class: RM0090 5.4.1 and 5.5.1, RM0390 5.4.1 and RM0386 5.6.1 give 2.0,
+ * 2.1, 2.3, 2.5, 2.6, 2.7, 2.8 and 2.9 V; RM0383 5.4.1 gives 2.2, 2.3, 2.4,
+ * 2.5, 2.6, 2.7, 2.8 and 2.9 V. A class whose manual is not on the desk gets
  * `known == false` and no millivolts: the CODE is still writable there
  * (the field is the same three bits on every part), but what it means in
  * volts is refused rather than guessed.
@@ -2374,7 +2390,7 @@ constexpr PvdLevels pwr_pvd_levels() {
     PvdLevels l{};
 #if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx) || \
     defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx) || \
-    defined(STM32F446xx)
+    defined(STM32F446xx) || defined(STM32F469xx) || defined(STM32F479xx)
     l.known = true;
     l.mv[0] = 2000; l.mv[1] = 2100; l.mv[2] = 2300; l.mv[3] = 2500;
     l.mv[4] = 2600; l.mv[5] = 2700; l.mv[6] = 2800; l.mv[7] = 2900;
@@ -2524,7 +2540,8 @@ constexpr bool i2c_has_filter() {
  * 28, RM0383 table 27) - every cell is on DMA1, this block having no
  * request on the other controller. Keyed per part class like every other
  * chapter's slice, and the three classes DISAGREE:
- *  - the F405 class and the F42x/F43x have one cell for I2C3_RX;
+ *  - the F405 class, the F42x/F43x and the F469/F479 (RM0386 table 29)
+ *    have one cell for I2C3_RX;
  *  - the F446 adds a second (DMA1 stream 1, channel 1);
  *  - the F411 has that one too, AND a third cell for I2C1_TX (stream 1,
  *    channel 0) and a second for I2C3_TX (stream 5, channel 6).
@@ -2534,7 +2551,7 @@ constexpr DmaPlacements i2c_dma_placements(uint8_t n, bool transmit) {
 #if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || \
     defined(STM32F417xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
     defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx) || \
-    defined(STM32F411xE)
+    defined(STM32F411xE) || defined(STM32F469xx) || defined(STM32F479xx)
     p.known = true;
     if (!i2c_present(n)) {
         return p;   // the class's table is read, this part has no such instance
@@ -2718,10 +2735,13 @@ constexpr FlashFacts flash_facts() {
     f.known = true;
     f.max_sectors_per_bank = 12;
     f.wrp_bits = 12;
-#elif defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx)
-    // RM0090 3.4, 3.9.8, 3.9.10 and 3.9.11: two banks of twelve sectors,
-    // SNB five bits (sectors 12..23 encoded 16..27), nWRP twelve bits in
-    // each of OPTCR and OPTCR1, PCROP, RDERR, DB1M and BFB2.
+#elif defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || defined(STM32F439xx) || \
+    defined(STM32F469xx) || defined(STM32F479xx)
+    // RM0090 3.4, 3.9.8, 3.9.10 and 3.9.11 - and RM0386 3.3.1 (table 4),
+    // 3.7.5, 3.7.6 and 3.7.7, the same organization on the F469/F479: two
+    // banks of twelve sectors, SNB five bits (sectors 12..23 encoded
+    // 16..27), nWRP twelve bits in each of OPTCR and OPTCR1, PCROP, RDERR,
+    // DB1M and BFB2.
     f.known = true;
     f.max_sectors_per_bank = 12;
     f.snb_bits = 5;
@@ -3052,18 +3072,20 @@ constexpr IRQn_Type can_sce_irq(uint8_t n) {
 
 /**
  * IS THE TIME-TRIGGERED COMMUNICATION ERRATUM LIVE ON THIS PART CLASS?
- * ES0206 2.13.1 (every revision of the F427/F437/F429/F439) and ES0298
- * 2.15.1 (every revision of the F446) say the same thing in the same
- * words: the mode "is not supported", no time stamp is available, and
- * CAN_MCR.TTCM "must be kept cleared" - with no workaround. Keyed on the
- * part class because an erratum is a document and not a register, and
- * TRUE only for the classes whose errata sheet was read: on the others
- * stm32f4/can.hpp lets the bit be written and the document says which
- * sheets were not read.
+ * ES0206 2.13.1 (every revision of the F427/F437/F429/F439), ES0298
+ * 2.15.1 (every revision of the F446) and ES0321 2.15.1 (every revision
+ * of the F469/F479) say the same thing in the same words: the mode "is
+ * not supported", no time stamp is available, and CAN_MCR.TTCM "must be
+ * kept cleared" - with no workaround. Keyed on the part class because an
+ * erratum is a document and not a register, and TRUE only for the
+ * classes whose errata sheet was read: on the others stm32f4/can.hpp
+ * lets the bit be written and the document says which sheets were not
+ * read.
  */
 constexpr bool can_ttcm_erratum() {
 #if defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F429xx) || \
-    defined(STM32F439xx) || defined(STM32F446xx)
+    defined(STM32F439xx) || defined(STM32F446xx) || defined(STM32F469xx) || \
+    defined(STM32F479xx)
     return true;
 #else
     return false;

@@ -37,7 +37,7 @@
 //      constant
 //   g  the panic breadcrumb WITHOUT a reset: written, taken once, gone
 //
-// build: boards = f429zi,f446re,f411ce
+// build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -59,7 +59,7 @@
 
 #if defined(STM32F411xE)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 100'000'000, 25'000'000>;
-#elif defined(STM32F429xx)
+#elif defined(STM32F429xx) || defined(STM32F469xx)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
 #else
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000, brio::HseMode::bypass>;
@@ -76,6 +76,10 @@ using P = Stm32f4Platform<>;
 using Led = Pin<'G', 13>;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
+#elif defined(STM32F469xx)
+using Led = Pin<'G', 6>;   // LD1, lit when low
+constexpr UartPins console_pins{.tx = {'B', 10, PinFunction::af7}, .rx = {'B', 11, PinFunction::af7}};
+constexpr uint8_t console_instance = 3;
 #elif defined(STM32F411xE)
 using Led = Pin<'C', 13>;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
@@ -119,6 +123,9 @@ void ta_boot() {
 #elif defined(STM32F411xE)
     bench.verdict("DEV_ID 0x431: an STM32F411", id.dev_id == 0x431u);
     bench.verdict("the flash size register says 512 KB", flash_size_kbytes() == 512u);
+#elif defined(STM32F469xx)
+    bench.verdict("DEV_ID 0x434: an STM32F469/F479", id.dev_id == 0x434u);
+    bench.verdict("the flash size register says 2048 KB", flash_size_kbytes() == 2048u);
 #endif
     bench.verdict("the unique id is not blank", (uid.word[0] | uid.word[1] | uid.word[2]) != 0u);
     bench.verdict("no breadcrumb is pending on a clean start", !boot_record);
@@ -354,6 +361,8 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 #if defined(STM32F446xx)
 extern "C" void USART2_IRQHandler() { (void)Serial::isr(); }
+#elif defined(STM32F469xx)
+extern "C" void USART3_IRQHandler() { (void)Serial::isr(); }
 #else
 extern "C" void USART1_IRQHandler() { (void)Serial::isr(); }
 #endif

@@ -4,9 +4,9 @@ Documents of record: RM0090 Rev 22, the EXTI ch. 12 and SYSCFG ch. 9 (the
 vector tables are 62 and 63, one per part class); their twins RM0390 Rev 6
 (ch. 10 and 8) and RM0383 Rev 4 (ch. 10 and 7), which differ in exactly one
 thing - which peripheral wake-up lines the part has. Errata: no item of ES0206 Rev 24,
-ES0298 Rev 8 or ES0287 Rev 6 is filed against either block, and the one
+ES0298 Rev 8, ES0287 Rev 6 or ES0321 Rev 14 is filed against either block, and the one
 item that is about them all the same is filed under the RTC - ES0206 2.9.3,
-ES0298 2.10.3, ES0287 2.8.3, every revision of all three parts - and is
+ES0298 2.10.3, ES0287 2.8.3, ES0321 2.11.3, every revision of all four parts - and is
 quoted under "what the silicon does" below. Drivers: `stm32f4/exti.hpp` and
 `stm32f4/syscfg.hpp`; the per-part line facts come from
 `stm32f4/device_tables.hpp`. Bench suite: `test_stm32f4_exti`. Family
@@ -124,7 +124,7 @@ Stop and Standby are the power chapter's.
 
 **THE ERRATA ITEM THAT IS FILED SOMEWHERE ELSE.** "RTC interrupt can be
 masked by another RTC interrupt" (ES0206 2.9.3, ES0298 2.10.3, ES0287
-2.8.3) is an RTC item whose mechanism is this peripheral's: **the effective
+2.8.3, ES0321 2.11.3) is an RTC item whose mechanism is this peripheral's: **the effective
 clear of an EXTI pending bit is delayed with respect to the store that asks
 for it**, so a handler that checks a peripheral's own flags *before*
 clearing the EXTI line can lose an event that arrives in between, and a
@@ -242,7 +242,9 @@ while (!brio::Syscfg::compensation_ready()) { }
 
 `test_stm32f4_exti`, 12 letters in `z` (plus `p`, which waits for a press
 and is not part of `z`), 65 verdicts, WIRELESS - on the Nucleo-F446RE
-(DEV_ID 0x421, REV_ID 0x1000) at 180 MHz. Two stimuli, both inside the
+(DEV_ID 0x421, REV_ID 0x1000) at 180 MHz, and the same 65 on the
+32F469IDISCOVERY (DEV_ID 0x434, LD1 on PG6 as the pad the program
+drives, the blue button on PA0 reading 1 when pressed). Two stimuli, both inside the
 chip: the software trigger, which needs no pad and reaches the peripheral
 lines too, and **a pad the program drives itself** - the board's LED - since
 a GPIO in output mode still feeds its input buffer (8.3.10). The pads

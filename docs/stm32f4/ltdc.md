@@ -503,4 +503,6 @@ Implemented but not bench-verified:
 - **The parts with a display interface other than the one on this
   desk** - the family fixture compiles the whole driver on each of
   them and the reserve's presence facts are asserted class by class;
-  no second board carries a panel.
+  the 32F469IDISCOVERY's panel hangs off a DSI host, a chapter this
+  stratum has not got, so its LTDC has not driven a pixel and the suite
+  stays the DISC1's.

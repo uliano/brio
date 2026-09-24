@@ -96,7 +96,7 @@
 //   r  the DAC's DMA: a table played by a hardware trigger, and the
 //      underrun a spent stream leaves behind
 //
-// build: boards = f429zi,f446re,f411ce
+// build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -126,7 +126,7 @@
 
 #if defined(STM32F411xE)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 100'000'000, 25'000'000>;
-#elif defined(STM32F429xx)
+#elif defined(STM32F429xx) || defined(STM32F469xx)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
 #else
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000, brio::HseMode::bypass>;
@@ -143,6 +143,11 @@ using P = Stm32f4Platform<>;
 using Led = Pin<'G', 13>;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
+constexpr bool led_is_dac_pad = false;
+#elif defined(STM32F469xx)
+using Led = Pin<'G', 6>;   // LD1, lit when low
+constexpr UartPins console_pins{.tx = {'B', 10, PinFunction::af7}, .rx = {'B', 11, PinFunction::af7}};
+constexpr uint8_t console_instance = 3;
 constexpr bool led_is_dac_pad = false;
 #elif defined(STM32F411xE)
 using Led = Pin<'C', 13>;
@@ -177,7 +182,10 @@ constexpr uint8_t dac_ch_pa5 = 1;
 // the board: on the Nucleo-64 PA5 is the LED's pad (a resistor and a
 // diode to ground) and PA4 is free; on the STM32F429I-DISC1 PA4 belongs
 // to the display's VSYNC and something pulls it high, PA5 is the free
-// one. The transfer curve wants the free pad; letter d wants both.
+// one; on the 32F469IDISCOVERY NEITHER carries a load (PA4 goes to the
+// Arduino header's A5 through SB12, PA5 to CN12's pin 7), so letter d has
+// nothing to weigh the buffer against there and says so. The transfer
+// curve wants the free pad; letter d wants both.
 #if defined(STM32F429xx)
 constexpr uint8_t free_ch = dac_ch_pa5;
 constexpr uint8_t loaded_ch = dac_ch_pa4;
@@ -185,6 +193,15 @@ using FreeIn = In5;
 using LoadedIn = In4;
 constexpr const char* free_pad_name = "PA5";
 constexpr const char* loaded_pad_name = "PA4 (the display's VSYNC)";
+constexpr bool loaded_pad_has_load = true;
+#elif defined(STM32F469xx)
+constexpr uint8_t free_ch = dac_ch_pa4;
+constexpr uint8_t loaded_ch = dac_ch_pa5;
+using FreeIn = In4;
+using LoadedIn = In5;
+constexpr const char* free_pad_name = "PA4 (CN8's A5)";
+constexpr const char* loaded_pad_name = "PA5 (CN12's pin 7, nothing on it)";
+constexpr bool loaded_pad_has_load = false;
 #else
 constexpr uint8_t free_ch = dac_ch_pa4;
 constexpr uint8_t loaded_ch = dac_ch_pa5;
@@ -192,6 +209,7 @@ using FreeIn = In4;
 using LoadedIn = In5;
 constexpr const char* free_pad_name = "PA4";
 constexpr const char* loaded_pad_name = "PA5 (the LED's)";
+constexpr bool loaded_pad_has_load = true;
 #endif
 
 constexpr bool have_dac = dac_present();
@@ -763,10 +781,15 @@ void td_buffer() {
             }
             print(serial, "  the load moves the unbuffered output ", raw_stray,
                   " LSB from the free pad's at the rail it fights, the buffered one ", buf_stray, crlf);
-            bench.verdict("A LOAD IS WHAT THE BUFFER IS FOR: the load pulls the UNBUFFERED "
-                          "output far from the code it was given at one rail, while the "
-                          "buffered one holds",
-                          raw_stray > buf_stray + 200u);
+            if constexpr (loaded_pad_has_load) {
+                bench.verdict("A LOAD IS WHAT THE BUFFER IS FOR: the load pulls the UNBUFFERED "
+                              "output far from the code it was given at one rail, while the "
+                              "buffered one holds",
+                              raw_stray > buf_stray + 200u);
+            } else {
+                print(serial, "  no load on either DAC pad of this board: the buffer's job is "
+                              "not measurable here (declined by name)", crlf);
+            }
         }
         analog_down();
     }
@@ -2133,6 +2156,8 @@ void banner() {
 // ---- target glue --------------------------------------------------------------
 #if defined(STM32F446xx)
 extern "C" void USART2_IRQHandler() { (void)Serial::isr(); }
+#elif defined(STM32F469xx)
+extern "C" void USART3_IRQHandler() { (void)Serial::isr(); }
 #else
 extern "C" void USART1_IRQHandler() { (void)Serial::isr(); }
 #endif

@@ -9,8 +9,9 @@
 #  "// build:" header comment, the same grammar as the other projects. One
 #  configure targets exactly ONE part (STM32F4_MCU cache var, one value per
 #  configurePreset): the F429ZI (the STM32F429I-DISC1), the F446RE (the
-#  Nucleo-F446RE) and the F411CE (a WeAct black pill) have presets; every
-#  other header of the pack is compile-checked by brio check stm32f4. What
+#  Nucleo-F446RE), the F411CE (a WeAct black pill) and the F469NI (the
+#  32F469IDISCOVERY) have presets; every other header of the pack is
+#  compile-checked by brio check stm32f4. What
 #  the part decides - the device define, the crt, the linker script, the
 #  board type - is cmake/stm32f4-parts.cmake's table.
 #

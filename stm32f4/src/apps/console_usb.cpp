@@ -14,15 +14,17 @@
 // controller's interrupt. The identity is the pid.codes test pair
 // 1209:0001, meant for exactly this.
 //
-// THE CLOCK IS 96 MHz AND NOT THE PART'S CEILING: the controller wants
-// 48 MHz exactly on its own domain, which is the main PLL's Q output,
-// and from a 25 MHz crystal 96 MHz is the rate whose ratio gives it
-// (the 100 MHz the other apps run gives 40 MHz there, which is not a
-// USB clock). Nothing else on the board is a data pin: the two USB
-// lines are the connector's own, and the console USART keeps PA9/PA10
-// because device mode is forced and the VBUS pad given away.
+// THE CLOCK IS NOT THE PART'S CEILING: the controller wants 48 MHz
+// exactly on its own domain, which is the main PLL's Q output, and only
+// some rates of a ladder divide to it - 96 MHz and not 100 from the
+// black pill's 25 MHz crystal (100 MHz gives 40 there, which is not a
+// USB clock), 168 MHz and not 180 from the 32F469IDISCOVERY's 8 MHz one.
+// Nothing else on either board is a data pin: the two USB lines are the
+// connector's own (the black pill's USB-C, the Discovery's micro-AB
+// CN13), and no console USART is claimed because device mode is forced
+// and the VBUS pad given away.
 //
-// build: boards = f411ce
+// build: boards = f411ce,f469ni
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -45,13 +47,23 @@
 #include "util/usb/device.hpp"
 
 using P = brio::Stm32f4Platform<>;
+#if defined(STM32F469xx)
+// 168 MHz from the 8 MHz crystal, the F469 ladder's rate whose VCO divides
+// to the controller's 48 MHz exactly (180 MHz would give it 45).
+using SysClock = brio::Clock<brio::ClockSource::pll_hse, 168'000'000, 8'000'000>;
+#else
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 96'000'000, 25'000'000>;
+#endif
 constexpr SysClock clock;
 static_assert(SysClock::usb_hz == brio::otg_clock_hz, "this rate must give the controller 48 MHz");
 
 namespace {
 
+#if defined(STM32F469xx)
+using Led = brio::Pin<'G', 6>;    // LD1 on the 32F469IDISCOVERY, lit when low
+#else
 using Led = brio::Pin<'C', 13>;   // the black pill's LED, lit when low
+#endif
 using Usb = brio::UsbFs;
 
 using Serial = brio::UsbCdcAcm<Usb, P>;   // interface 0, endpoints 1 (notification) and 2 (bulk)

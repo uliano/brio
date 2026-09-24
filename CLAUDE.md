@@ -148,7 +148,8 @@ definitions vendored, a kernel per core), `stm32f4/` (everything that
 knows `stm32f4xx.h`: STM32F4, Cortex-M4F - brio's first ARMv7-M family,
 built with the hard-float ABI, the FPU enabled by the crt; bench chips
 STM32F429ZI on an STM32F429I-DISC1, STM32F446RE on a Nucleo-64,
-STM32F411CE on a WeAct black pill), `host/` (the native test
+STM32F411CE on a WeAct black pill, STM32F469NI on a 32F469IDISCOVERY),
+`host/` (the native test
 target). Includes carry the stratum prefix
 (`#include "avrdx/usart.hpp"`). The builds are nine sibling CMake
 projects, PEERS - the repo root is not a CMake project: `avrdx/`,
@@ -346,10 +347,10 @@ gets its home in `docs/design/` when taken.
   "A suite's image fits the family's smallest chip"). A `qingke/` core
   stratum only at a second QingKe family.
 - **The STM32F4 stratum.** `brio/stm32f4/` and `stm32f4/` are
-  `supported` on the STM32F429ZI, the STM32F446RE and the STM32F411CE
-  (README.md's table) on three boards (STM32F429I-DISC1, Nucleo-F446RE,
-  an STM32F411CE black pill on a standalone STLINK-V3) with kernel/ and
-  util/ untouched - the platform,
+  `supported` on the STM32F429ZI, the STM32F446RE, the STM32F411CE and
+  the STM32F469NI (README.md's table) on four boards (STM32F429I-DISC1,
+  Nucleo-F446RE, an STM32F411CE black pill on a standalone STLINK-V3,
+  a 32F469IDISCOVERY) with kernel/ and util/ untouched - the platform,
   the clock (the regulator scale and over-drive sequenced, the APB
   prescalers unpinned), the pins and the USART with their documents,
   the family check over all twenty-three headers; then chapter by
@@ -358,11 +359,11 @@ gets its home in `docs/design/` when taken.
   backup domain, the DMA (the Uart's engine slots filled), the timers,
   the ADC and the DAC (read back on the pad they share), SPI/I2S and I2C
   (against the gyroscope and the touch controller a board carries), the
-  USB OTG core for util/usb (the console on the black pill's own
-  connector), PWR with the sleep sites and the dynamic clock, and the
+  USB OTG core for util/usb (the console on the black pill's and the
+  32F469IDISCOVERY's own connectors), PWR with the sleep sites and the dynamic clock, and the
   flash interface as the ENGINE alone (no FlashMedia, by the NV review's
   decision below), the CRC unit, the RNG (written for the parts that
-  have one, measured on the STM32F429), the bxCAN in loopback and the FMPI2C1 of the
+  have one, measured on the STM32F429 and the STM32F469), the bxCAN in loopback and the FMPI2C1 of the
   F410/F412/F413/F446 - the STM32G0's I2C under another name, measured
   on a bus with no device on it, the FMC with the SDRAM a board
   carries (8 MB byte-exact, the two traps against the manual), and on
@@ -372,7 +373,7 @@ gets its home in `docs/design/` when taken.
   65 Hz plus the accelerator, some 160 MB/s over one bus). What remains
   is in the documents' gap lists, and three things outside them: the
   OTG HS core in full-speed mode on the STM32F429 (UsbHs compiled, its
-  connector cabled, never enumerated); the frequency ladders of the five
+  connector cabled, never enumerated); the frequency ladders of the four
   part classes whose manuals are not on the desk (a rate above 16 MHz
   refused there); the debugger driven from the command line as
   cortex-debug would (docs/stm32f4/README.md) and not yet from the
@@ -654,8 +655,8 @@ stm32f4/                 the STM32F4 build project, the sixth of the shape: a
                          PART TABLE (cmake/stm32f4-parts.cmake: the part number
                          -> ST's irregular device define, the crt stem, the
                          board type) instead of substring arithmetic; presets
-                         for the F429ZI, the F446RE and the F411CE; the hard-
-                         float flags; ld/<part>.ld (the F429's CCM a named
+                         for the F429ZI, the F446RE, the F411CE and the F469NI;
+                         the hard-float flags; ld/<part>.ld (the F429's CCM a named
                          region nothing is placed in); src/glue/startup_stm32f4
                          {29,46,11}.cpp - ST's handler names, the FPU's CPACR
                          enabled before .data, holes where another part has a
@@ -715,7 +716,7 @@ cli/                     its guts, a Python package: main.py dispatches on the
                          samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/ST-LINK,
                          v006k8 -> ch32v00x/WCH's OpenOCD fork/WCH-Link,
                          pico/picow/weact2040 -> rp2040/OpenOCD/the Debug Probe,
-                         f429zi/f446re/f411ce -> stm32f4/OpenOCD/an ST-LINK),
+                         f429zi/f446re/f411ce/f469ni -> stm32f4/OpenOCD/an ST-LINK),
                          the per-project app rosters build-cmake/apps_{avrdx,
                          samc21,stm32g0}.json (each project writes its own at
                          every configure - separate files because app NAMES
@@ -1799,8 +1800,8 @@ brio/                    the framework, twelve strata:
                            1..10 (bus, gate, vector, FULL by the U(S)ART name),
                            the regulator's VOS width and over-drive pair, and
                            THE FREQUENCY LADDERS keyed on the device-select
-                           define - known for the F405, F42x/F43x, F446 and
-                           F411 classes, refused elsewhere; the watchdogs'
+                           define - known for the F405, F42x/F43x, F446, F411
+                           and F469/F479 classes, refused elsewhere; the watchdogs'
                            and the EXTI's per-part facts (implemented lines,
                            port codes, per-line vectors) appended by chapter;
                            the backup-register count read off RTC_TypeDef

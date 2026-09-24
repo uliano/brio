@@ -17,8 +17,8 @@
 #     and RAM): ld/<part>.ld.
 #
 #  THE BOARD TYPE an app's "// build: boards =" line names is the part
-#  number's last six characters (f446re, f429zi, f411ce): one board per part
-#  on this desk, so the part IS the board - the G0 project's rule.
+#  number's last six characters (f446re, f429zi, f411ce, f469ni): one board
+#  per part on this desk, so the part IS the board - the G0 project's rule.
 #
 #  A part that is not in this table is refused at configure time with the
 #  three names it would need; the family's OTHER headers are compile-checked
@@ -32,6 +32,7 @@ set(STM32F4_PARTS
     "stm32f429zi=STM32F429xx:stm32f429"
     "stm32f446re=STM32F446xx:stm32f446"
     "stm32f411ce=STM32F411xE:stm32f411"
+    "stm32f469ni=STM32F469xx:stm32f469"
 )
 
 # stm32f4_part_facts(<part> OUT_DEFINE OUT_STARTUP OUT_BOARD)

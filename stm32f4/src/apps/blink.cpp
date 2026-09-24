@@ -18,7 +18,7 @@
 // part (stm32f4/CMakeLists.txt); a board file would own this line where
 // two boards carry the same part.
 //
-// build: boards = f429zi,f446re,f411ce
+// build: boards = f429zi,f446re,f411ce,f469ni
 
 #include <stdint.h>
 
@@ -38,12 +38,13 @@ using P = brio::Stm32f4Platform<>;
 // The clock: the ONE truth about SYSCLK for every driver of this target
 // (stm32f4/clock.hpp). The Nucleo-F446RE feeds 8 MHz from its ST-LINK's
 // MCO into HSE in bypass, the STM32F429I-DISC1 has an 8 MHz crystal X3 on
-// HSE (its MCO route is a solder bridge left open), both run the PLL to
-// 180 MHz in over-drive; the black pill has a 25 MHz crystal and the
-// F411's 100 MHz ceiling.
+// HSE (its MCO route is a solder bridge left open) and the
+// 32F469IDISCOVERY an 8 MHz crystal X2 (UM1932 4.3.1); all three run the
+// PLL to 180 MHz in over-drive. The black pill has a 25 MHz crystal and
+// the F411's 100 MHz ceiling.
 #if defined(STM32F411xE)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 100'000'000, 25'000'000>;
-#elif defined(STM32F429xx)
+#elif defined(STM32F429xx) || defined(STM32F469xx)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
 #else
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000, brio::HseMode::bypass>;
@@ -54,6 +55,8 @@ namespace {
 
 #if defined(STM32F429xx)
 using Led = brio::Pin<'G', 13>;  // PG13 = LD3 on the STM32F429I-DISC1
+#elif defined(STM32F469xx)
+using Led = brio::Pin<'G', 6>;   // PG6 = LD1 on the 32F469IDISCOVERY, lit when low
 #elif defined(STM32F411xE)
 using Led = brio::Pin<'C', 13>;  // PC13 = the black pill's LED, lit when low
 #else

@@ -156,7 +156,8 @@ const uint8_t back = brio::Crc::idr();
 
 ## Bench findings
 
-From `test_stm32f4_misc` letter `a` on an STM32F446 at 180 MHz:
+From `test_stm32f4_misc` letter `a` on an STM32F446 at 180 MHz (the same
+letter green on the STM32F429 and the STM32F469):
 
 - **The silicon is CRC-32/MPEG-2, to the bit.** One word 0x12345678 from
   the initial value gives 0xDF8A8A2B; sixteen assorted words give

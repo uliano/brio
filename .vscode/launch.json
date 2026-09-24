@@ -252,6 +252,33 @@
             "runToEntryPoint": "main"
         },
         {
+            // The STM32F4 boards: cortex-debug over OpenOCD, the G0 entries'
+            // shape with the stm32f4x target script and the part's own SVD.
+            // CMake Tools' Active Folder must be stm32f4/, its configure
+            // preset the part's -debug one, its launch target the app. NAME
+            // THE PROBE: no serial is set here, so OpenOCD takes the FIRST
+            // ST-LINK it enumerates - another board as soon as a second one
+            // is attached. Add
+            //   "openOCDPreConfigLaunchCommands": ["adapter serial <s>"]
+            // as the SAM and G0 entries say. What a session does, what it
+            // costs and what it leaves behind: docs/stm32f4/README.md.
+            "type": "cortex-debug",
+            "request": "launch",
+            "name": "Debug STM32F469NI (OpenOCD, 32F469IDISCOVERY)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${command:cmake.launchTargetPath}",
+            "servertype": "openocd",
+            "serverpath": "/sw/openocd/bin/openocd",
+            "gdbPath": "/sw/arm-none-eabi/bin/arm-none-eabi-gdb",
+            "objdumpPath": "/sw/arm-none-eabi/bin/arm-none-eabi-objdump",
+            "configFiles": [
+                "interface/stlink.cfg",
+                "target/stm32f4x.cfg"
+            ],
+            "svdPath": "${workspaceFolder}/stm32f4/svd/STM32F469.svd",
+            "runToEntryPoint": "main"
+        },
+        {
             // The CH32V006 module over a WCH-Link: RISC-V, so cppdbg over a
             // gdb server, the AVR entry's shape - WCH's OpenOCD fork
             // (/sw/wch-openocd, the only one that speaks the probe's SDI

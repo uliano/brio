@@ -37,7 +37,8 @@ opens it. BASEPRI is the preemptive kernel's tool and waits for it.
 Core exceptions (SysTick among them) have no NVIC enable bit.
 
 **The vector table is 16 + 91 entries on the F429, 97 on the F446, 86
-on the F411, and on this family a line is mostly ONE peripheral's.**
+on the F411, 93 on the F469 (QUADSPI and the DSI host after the DMA2D),
+and on this family a line is mostly ONE peripheral's.**
 The sharing the table shows is the advanced timers' (TIM1_BRK_TIM9,
 TIM1_UP_TIM10, TIM1_TRG_COM_TIM11, TIM8's with TIM12/13/14), TIM6 with
 the DAC, the EXTI lines 5..9 and 10..15 grouped, the I2C's two vectors
@@ -155,12 +156,12 @@ dispatch: `brio::delay_us(clock, 20);` - a millisecond or more is a
 ## Bench findings
 
 `test_stm32f4_platform`, letters a..e and g, 36 verdicts on each of the
-three boards:
+four boards:
 
 - **a**: DEV_ID 0x419 REV_ID 0x2003 with 2048 KB on the DISC1, 0x421 /
   0x1000 / 512 KB on the Nucleo-F446RE, 0x431 / 0x1000 / 512 KB on the
-  black pill; the unique ids read; no breadcrumb pending on a clean
-  boot.
+  black pill, 0x434 / 0x1000 / 2048 KB on the 32F469IDISCOVERY; the
+  unique ids read; no breadcrumb pending on a clean boot.
 - **b**: the guard masks, nests and restores (an inner scope's exit
   leaves the mask on); five SysTick periods under the mask advance the
   tick by ONE, read after an ISB (0 read before it - the finding above);
@@ -172,16 +173,17 @@ three boards:
   count within 6, 62 and 51 cycles of 36 000 000 / 20 000 000 - the
   arithmetic `delay_us` is built on holds across 200 wraps.
 - **d**: `delay_us` of 5, 30, 100, 500 and 900 us at least on its own
-  counter on all three (1057 / 5450 / 18054 / 90058 / 162059 cycles at
-  180 MHz); a thousand 100 us waits are 101 ms of kernel tick; a wait
-  of one period or of 65536 us is refused.
-- **e**: on all three SWS reads PLL, the PLL is locked, the HSE is
+  counter on all four (1057 / 5450 / 18054 / 90058 / 162059 cycles at
+  180 MHz on the DISC1, 968 / 5450 / 18054 / 90055 / 162061 on the
+  32F469IDISCOVERY); a thousand 100 us waits are 100..101 ms of kernel
+  tick; a wait of one period or of 65536 us is refused.
+- **e**: on all four SWS reads PLL, the PLL is locked, the HSE is
   ready in the board file's mode (bypass on the Nucleo, crystal on the
-  other two), VOS is scale 1, over-drive on where the rate needs it
-  (the two 180 MHz boards) and off on the F411, the latency 5 / 5 / 3,
-  the accelerator on, PPRE1 /4 /4 /2 and PPRE2 /2 /2 /1, HPRE 1,
-  PLLCFGR holding M 4 N 180 P 2 Q 8 (8 MHz roots), M 16 N 128 P 2 Q 5
-  (25 MHz) - every register the task's constant.
+  other three), VOS is scale 1, over-drive on where the rate needs it
+  (the three 180 MHz boards) and off on the F411, the latency 5 / 5 /
+  3 / 5, the accelerator on, PPRE1 /4 /4 /2 /4 and PPRE2 /2 /2 /1 /2,
+  HPRE 1, PLLCFGR holding M 4 N 180 P 2 Q 8 (8 MHz roots), M 16 N 128
+  P 2 Q 5 (25 MHz) - every register the task's constant.
 - **g**: the record at 0x200002E8 in the main SRAM; nothing pending; a
   written record taken once with its code and context, then gone.
 

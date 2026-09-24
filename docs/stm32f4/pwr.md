@@ -7,7 +7,8 @@ is the F42x/F43x's; RM0383 Rev 4 ch. 5 for the F411; DS10693 Rev 11
 table 36 (the low-power wake-up timings the bench compares against);
 the errata sheets' 2.2.1 ("Debugging Stop mode and SysTick timer") and
 2.2.4 ("Wake-up sequence from Standby mode when using more than one
-wake-up source"), both live on every revision of all three parts.
+wake-up source"), both live on every revision of all four parts (the
+same two numbers in ES0321).
 Drivers: `stm32f4/pwr.hpp` (`Pwr`, `PwrMode`, `StopConfig`,
 `VoltageScale`) and `stm32f4/sleep.hpp` (`Stm32f4SleepSite`,
 `Stm32f4TimedSleepSite`), over `util/power.hpp`'s model
@@ -339,7 +340,10 @@ On an STM32F446RE (DEV_ID 0x421, REV_ID 0x1000) at 3.3 V, the PLL at
 180 MHz in over-drive from the ST-LINK's 8 MHz MCO in bypass, the LSE
 crystal fitted and the RTC split PREDIV_A 0 / PREDIV_S 32767 so the
 sub-second counter is a 30.5 us stopwatch. `test_stm32f4_power`, 81
-verdicts in `z` plus the Standby letter by name.
+verdicts in `z` plus the Standby letter by name. On the 32F469IDISCOVERY
+(180 MHz from its 8 MHz crystal, the LSE fitted) the same `z` is 80
+verdicts green and the Standby letter comes back through the reset
+vector with SBF set and its backup token intact.
 
 **The block at 180 MHz in over-drive** reads PWR_CR 0x3C100 (DBP, VOS
 11, ODEN, ODSWEN) and PWR_CSR 0x34000 (VOSRDY, ODRDY, ODSWRDY). Two
@@ -374,8 +378,9 @@ PLL restart hides inside the number), the alarm 4394 us apart:
 | low-power + FPDS + under-drive | 4638 us | 93 us | 101 us |
 
 The FLASH's own wake is the step that shows on the STM32F446: 92 us
-measured against the datasheet's 92 us typical - and NO step at all on
-the STM32F411, where every variant leaves at the same 4545 us lap (a
+measured against the datasheet's 92 us typical, and 91 us on the
+STM32F469 (laps of 4546 and 4637 us, the low-voltage and under-drive
+variants at 4638) - and NO step at all on the STM32F411, where every variant leaves at the same 4545 us lap (a
 fact of the part: the suite prints the step and judges its direction
 only). THE REGULATOR'S IS NOT: the eight
 microseconds table 36 puts between the main and the low-power regulator
@@ -483,9 +488,10 @@ Driver gaps:
 Implemented, not bench-verified:
 - The under-drive variant's own wake cost as a NUMBER: it engaged
   (UDRDY) and cost the same as the plain low-power Stop to within a
-  microsecond, where the datasheet promises one more. A colder or hotter
-  part, or a second board, would say whether the table's typical is
-  conservative or this one is fast.
+  microsecond, where the datasheet promises one more - on the STM32F446
+  and again on the STM32F469 (92 us over the main regulator against the
+  91 of the flash in power-down alone). A colder or hotter part would
+  say whether the table's typical is conservative or both parts are fast.
 - `Pwr::enter(mode, use_wfe = true)` - the WFE path. Every sleep here is
   a WFI, which is what the kernel's idle hook executes; the WFE entry
   and its SEVONPEND interaction (5.3.3) would want an EXTI line in event

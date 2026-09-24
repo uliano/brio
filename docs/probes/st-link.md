@@ -1,8 +1,8 @@
 # ST-LINK
 
-The ST-LINK/V2.1 every Nucleo carries on board, the V2-B of the
-STM32F429I-DISC1, and the standalone STLINK-V3 (its own UART bridge as
-the console): probe and console in ONE USB device with a real serial,
+The ST-LINK/V2.1 every Nucleo and the 32F469IDISCOVERY carry on board,
+the V2-B of the STM32F429I-DISC1, and the standalone STLINK-V3 (its own
+UART bridge as the console): probe and console in ONE USB device with a real serial,
 so the bench manifest addresses both by it - the console as
 `/dev/serial/by-id/...<serial>-if02`, the probe as `adapter serial
 <serial>`.

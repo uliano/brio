@@ -224,7 +224,7 @@ the users already hold the divisors for it.
 ## Bench findings
 
 `test_stm32f4_platform` letter e and the console's `CLK` verb, on the
-three boards:
+four boards:
 
 - **180 MHz in over-drive on the Nucleo-F446RE** from the ST-LINK's
   MCO in bypass: CR reads HSEON | HSERDY | HSEBYP | PLLON | PLLRDY,
@@ -242,6 +242,14 @@ three boards:
   false at the first wait, and the program that ignores the false runs
   on HSI at 16 MHz with a console divisor meant for 90 MHz - the noise
   on the host that led to UM1670 7.12.1.
+- **180 MHz in over-drive on the 32F469IDISCOVERY** from its 8 MHz
+  crystal X2: the DISC1's registers again (`CLK` reads sysclk 180 MHz,
+  pclk1 45, pclk2 90, usb 45, SWS 2, the PLL locked, HSE a crystal, VOS
+  scale 1, over-drive on, 5 wait states, PPRE1 /4, PPRE2 /2), the
+  F469/F479 ladder being the F42x/F43x's row for row (RM0386 3.3.2's
+  note and table 9, 6.3.3); the console's baud 115089 on the 45 MHz
+  PCLK1 its USART3 divides. The USB apps run this board at 168 MHz,
+  the rate of the ladder whose VCO (336 MHz) divides to 48 MHz exactly.
 - **100 MHz on the black pill** from its 25 MHz crystal: PLLCFGR
   0x25402010 (M 16, N 128, P 2, Q 5, HSE), CFGR 0x100A (PPRE1 /2,
   PPRE2 /1), FLASH_ACR 0x703 (latency 3), VOS 11 with no over-drive
@@ -251,9 +259,9 @@ three boards:
   BRR 781), 115207 on the 100 MHz PCLK2 (BRR 868) - the three within
   0.2 % of nominal and byte-exact on the wire.
 - The 16 MHz reset rate on every one of the twenty-three headers, and
-  the ladder-dependent rates on the four known classes, compile
-  (`brio check stm32f4`); the F401, F410, F412, F413 and F469 headers
-  refuse 84 MHz by name.
+  the ladder-dependent rates on the five known classes, compile
+  (`brio check stm32f4`); the F401, F410, F412 and F413 headers refuse
+  84 MHz by name.
 
 **The dynamic clock, walked** (`test_stm32f4_power` letter f, on the
 Nucleo-F446RE): a pack of six rates from the top down to the HSI, the

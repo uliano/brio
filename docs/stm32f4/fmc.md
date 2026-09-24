@@ -315,7 +315,14 @@ if (Ram::init(brio::StaticWidth::bits16, reads, writes)) {
 (4096 rows x 256 columns x 4 internal banks x 16 bits = 8 MB) sits on
 bank 2 with the core at 180 MHz and the memory clock at HCLK/2 = 90 MHz.
 Every number below is that board's; the marches are byte-exact
-everywhere. `ALL: 102 pass, 0 fail`.
+everywhere. `ALL: 102 pass, 0 fail`. The same 102 on the
+32F469IDISCOVERY, whose 128-Mbit IS42S32400F (the same rows, columns and
+internal banks, 32 bits wide, 16 MB) sits on BANK 1 at 0xC0000000 with
+SDNE0/SDCKE0 on PH3/PH2 and its upper sixteen data lines on ports H and
+I: thirty-two data lines walk clean, the whole 16 MB marches byte-exact
+in words, halfwords (373 ms written, 885 read) and bytes (560 / 1462),
+and the controller of that part has one NAND bank and no PC Card
+(RM0386 12.1), which letter a checks against the reserve.
 
 **What the block holds at reset**, read with the gate opened and nothing
 else touched: the AHB3 gate itself is CLOSED; SDCR1 = SDCR2 =
@@ -509,18 +516,17 @@ Implemented but not bench-verified:
   bus master saturating the controller while the counter is at its
   floor, or a device whose row cycle does not fit the interval, would
   raise it.
-- **SDRAM bank 1 (SDNE0, 0xC000 0000)** - configured and read back by
-  the family fixture and by the suite's shared-field checks, but no
-  device is wired to it on this board, so nothing was ever read through
-  its window. A second SDRAM, or the same one on the other chip select,
-  would measure it - and would also measure `both_banks`, the CTB1|CTB2
-  command the two-device sequence needs.
-- **The 8-bit and 32-bit SDRAM widths, the 11- and 13-bit row counts,
-  the 9..11-bit column counts, CAS 1 and 2, HCLK/3, and the read
-  pipe** - the whole option space of SDCRx compiles and is refused where
-  the chapter reserves a code, but only this device's geometry (16-bit,
-  12 rows, 8 columns, 4 banks, CAS 3, HCLK/2, no pipe) has been read
-  through. Another device on the same board's pads would measure them.
+- **`both_banks`, the CTB1|CTB2 command of a two-device sequence** -
+  each board carries one SDRAM (the DISC1's on bank 2, the
+  32F469IDISCOVERY's on bank 1), so the two-bank form of every command
+  is compiled and never issued; a board with a device on each chip
+  select would measure it.
+- **The 8-bit SDRAM width, the 11- and 13-bit row counts, the 9..11-bit
+  column counts, CAS 1 and 2, HCLK/3, and the read pipe** - the whole
+  option space of SDCRx compiles and is refused where the chapter
+  reserves a code, but only the two boards' geometries (16 and 32 bits
+  wide, 12 rows, 8 columns, 4 banks, CAS 3, HCLK/2, no pipe) have been
+  read through. Another device on either board's pads would measure them.
   `memory_clock()` is exercised as a STOP and a restart at the same
   rate; a change from HCLK/2 to HCLK/3 on a live device - the field's
   actual purpose - would need the seven delays recomputed for the new

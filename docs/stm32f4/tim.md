@@ -136,7 +136,8 @@ follows, and TI1/TI2 see it, because the timer's input path is live for a
 channel whether CCyS calls it an input or not. That is how a capture and a
 quadrature interface are exercised on a board with no wire.
 
-**The errata, four items, the same on all three sheets.**
+**The errata, four items, the same on all four sheets** (ES0321's
+2.9.1..2.9.4 for the F469/F479, in the same order).
 
 - *PWM re-enabled in automatic output enable mode despite of system break*
   (ES0287 2.6.1). With BDTR.AOE set the outputs come back at the next
@@ -361,7 +362,10 @@ in `z` and 5 more in `h`, WIRELESS - on an STM32F411CE (DEV_ID 0x431,
 REV_ID 0x1000) at 100 MHz from its 25 MHz crystal, with an LSE fitted. The
 pads driven are PA6 (TIM3_CH1), PA8 and PB13 (TIM1_CH1 and CH1N) and
 PB6/PB7 (TIM4_CH1 and CH2); the console (PA9/PA10) and the SWD pads are
-avoided, and nothing is attached to any of them.
+avoided, and nothing is attached to any of them. The same 68 on the
+32F469IDISCOVERY at 180 MHz, with the quadrature pair on PD12/PD13 (PB6
+and PB7 being the QSPI flash's select and the USB power switch's
+over-current flag there).
 
 **The reset state.** Every timer's bus clock is CLOSED out of reset, and
 behind a closed gate every register of the block - ARR included, which is

@@ -348,7 +348,9 @@ brio::Rtc::calibration_output(true, brio::RtcCalibOutput::hz1);   // false: the 
 `test_stm32f4_rtc` on an STM32F411CE black pill with a 32.768 kHz
 crystal, the core at 100 MHz from the board's 25 MHz HSE crystal through
 the PLL: **131 pass, 0 fail** over letters `a` to `n`, plus `v`, `w` and
-`x` by name. Every frequency below is a ratio against that core clock,
+`x` by name; 125 in `z` on the 32F469IDISCOVERY, whose crystal X3 is
+fitted (UM1932 4.3.2) and whose PC13 sits on the extension connector
+with nothing on it. Every frequency below is a ratio against that core clock,
 so a crystal weighs a crystal; the instrument is RTC_SSR's reload, which
 a polling loop locates to a few hundred nanoseconds.
 

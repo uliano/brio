@@ -5,7 +5,7 @@ RM0383 Rev 4 ch. 18 are its twins: one register description, three
 manuals), the datasheets' alternate-function tables for the pads,
 RM0090 table 43 with its RM0390 and RM0383 twins for the DMA request
 mapping, and the errata's I2C items - ES0206 2.10, ES0298 2.11,
-ES0287 2.9, the same six on all three parts: "spurious bus error
+ES0287 2.9, ES0321 2.12, the same six on all four parts: "spurious bus error
 detection in controller mode", "SMBus standard not fully supported",
 "start cannot be generated after a misplaced Stop", "mismatch on the
 setup time for a repeated Start condition", "data valid time violated
