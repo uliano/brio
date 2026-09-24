@@ -33,12 +33,20 @@
 //          R140/R142); the panel and its touch controller share the
 //          reset line PH7 (UM1932 4.14), which this suite pulses before
 //          the scan and again to leave the device where its reset puts it
-//   the touch controller   the capacitive controller of the MB1166
-//                          display board, whose identity registers are
-//                          read from its own datasheet - until that is on
-//                          the desk the letters that need them decline by
-//                          name, and the bus is measured on the registers
-//                          the device answers
+//   the touch controller   the FocalTech capacitive controller of the
+//                          MB1166 display board, found by the scan at
+//                          the 7-bit address 0x38, tearing its INT line
+//                          on PJ5: its register map is FocalTech's
+//                          "Application Note for FT6x06 CTPM" (v1.0,
+//                          bound into the FT6236/FT6336/FT6436 series
+//                          datasheet v0.3), its pins and timings the
+//                          FT6x06 datasheet v0.1 and that series
+//                          datasheet - FOCALTECH_ID at 0xA8 (0x11 by the
+//                          note), CIPHER at 0xA3, FIRMID at 0xA6, LIB_VER
+//                          at 0xA1/0xA2, RELEASE_CODE_ID at 0xAF; TH_GROUP
+//                          at 0x80 is the touch threshold, written and
+//                          read back here; the reset is the shared line's
+//                          pulse, 300 ms before the first report
 //
 // and the parts of the chapter that need no device are measured anyway:
 // the timing arithmetic against the registers in force, the address scan
@@ -63,6 +71,10 @@
 //   i  THE KERNEL: I2cBus over I2cHost, the rejection, the sleep votes
 //   j  the same tenures through the two DMA engines
 //   k  the recovery verbs: SWRST, recover() and unstick()
+//   l  (the 32F469IDISCOVERY, by name only) A FINGER ON THE GLASS: the
+//      touch controller in interrupt trigger mode, its INT counted on
+//      EXTI line 5 and its touch data polled for eight seconds while a
+//      human touches the panel - coordinates, event flags, touch ids
 //
 // build: boards = f429zi,f469ni
 // build: monitor_speed = 115200
@@ -73,6 +85,7 @@
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/dma.hpp"
+#include "stm32f4/exti.hpp"
 #include "stm32f4/i2c.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/ticker.hpp"
@@ -133,17 +146,34 @@ using TxEngine = DmaTxEngine<1, 6, 1>;
 using RxEngine = DmaRxEngine<1, 0, 1>;
 /// The line the panel and the touch controller are reset by (UM1932 4.14).
 using ResetLine = Pin<'H', 7>;
+/// FocalTech's application note for the FT6x06 CTPM: FOCALTECH_ID at
+/// 0xA8 (0x11), FIRMID at 0xA6, TH_GROUP at 0x80 - the threshold for
+/// touch detection, a plain read/write register that moves no pin.
 constexpr PeerFacts peer{.name = "the MB1166's touch controller",
-                         .addr = 0,   // found by the scan; the datasheet is not on the desk
-                         .id_reg = 0x00,
-                         .id_len = 0,
-                         .id_bytes = {0, 0},
-                         .id_name = "register 0x00",
-                         .ver_reg = 0x01,
-                         .ver_name = "register 0x01",
-                         .scratch_reg = 0,
-                         .scratch_name = "(no register is written: the datasheet is not on the desk)",
-                         .scratch_patterns = {0, 0, 0}};
+                         .addr = 0,   // found by the scan
+                         .id_reg = 0xA8,
+                         .id_len = 1,
+                         .id_bytes = {0x11, 0},
+                         .id_name = "FOCALTECH_ID (0xA8)",
+                         .ver_reg = 0xA6,
+                         .ver_name = "FIRMID (0xA6)",
+                         .scratch_reg = 0x80,
+                         .scratch_name = "TH_GROUP (0x80)",
+                         .scratch_patterns = {0x14, 0x40, 0x22}};
+/// The rest of the note's map the finger letter reads: the touch data
+/// block (TD_STATUS then the first point's XH/XL/YH/YL), the interrupt
+/// mode, the versions.
+constexpr uint8_t reg_td_status = 0x02;
+constexpr uint8_t reg_g_mode = 0xA4;
+constexpr uint8_t reg_lib_ver_h = 0xA1;
+constexpr uint8_t reg_cipher = 0xA3;
+constexpr uint8_t reg_release_code = 0xAF;
+constexpr uint8_t reg_ctrl = 0x86;
+constexpr uint8_t reg_period_active = 0x88;
+/// LCD_INT on PJ5 (UM1932 4.14): the controller's INT line, EXTI line 5.
+using TouchInt = Pin<'J', 5>;
+using TouchIrq = ExtInt<TouchInt>;
+volatile uint32_t touch_int_edges = 0;
 #else
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
@@ -1170,6 +1200,105 @@ void tk_recovery() {
 // the menu
 // =============================================================================
 
+#if defined(STM32F469xx)
+// =============================================================================
+// l - a finger on the glass (by name only)
+// =============================================================================
+
+void tl_finger() {
+    if (!host_ready() || peer_addr == 0u) {
+        bench.verdict("the host came up and a device answered", false);
+        return;
+    }
+    // The versions, for the record.
+    uint8_t lib[2] = {0, 0};
+    (void)read_regs(reg_lib_ver_h, lib, 2);
+    print(serial, "  LIB_VER ", hex(lib[0]), " ", hex(lib[1]), ", CIPHER ", hex(read_reg(reg_cipher)), ", FIRMID ",
+          hex(read_reg(peer.ver_reg)), ", RELEASE_CODE_ID ", hex(read_reg(reg_release_code)), ", CTRL ",
+          hex(read_reg(reg_ctrl)), ", PERIODACTIVE ", hex(read_reg(reg_period_active)), ", G_MODE ",
+          hex(read_reg(reg_g_mode)), crlf);
+
+    // Interrupt trigger mode: a pulse on INT per report while a finger is
+    // down (the note's 1.2), counted on EXTI line 5.
+    const uint8_t g_before = read_reg(reg_g_mode);
+    (void)write_reg(reg_g_mode, 0x01);
+    const uint8_t g_trigger = read_reg(reg_g_mode);
+    bench.verdict("G_MODE takes the interrupt trigger mode and reads it back", g_trigger == 0x01u);
+    (void)TouchIrq::claim(PinPull::up);
+    (void)TouchIrq::configure(ExtiSense::falling);
+    (void)TouchIrq::clear();
+    touch_int_edges = 0;
+    (void)TouchIrq::arm(true);
+    Nvic::enable(TouchIrq::irq());
+    const bool int_idle_high = TouchInt::read();
+
+    // Up to twenty-five seconds for a finger to arrive, then eight
+    // seconds of it, the touch data polled every 10 ms.
+    print(serial, "  TOUCH THE GLASS - waiting up to 25 s for a finger, then eight seconds of it", crlf);
+    uint32_t samples = 0, touched = 0, twos = 0, errors = 0;
+    uint16_t x_min = 0xFFFF, x_max = 0, y_min = 0xFFFF, y_max = 0;
+    uint8_t flags_seen = 0, ids_seen = 0;
+    bool first_printed = false;
+    uint32_t start = Ticker::ticks();
+    uint32_t window = 25000u;
+    bool arrived = false;
+    while (Ticker::ticks() - start < window) {
+        if (!arrived && touched != 0u) {
+            arrived = true;
+            start = Ticker::ticks();
+            window = 8000u;
+            print(serial, "  a finger: eight seconds from now", crlf);
+        }
+        uint8_t td[5] = {0, 0, 0, 0, 0};
+        if (read_regs(reg_td_status, td, 5) != i2c_ok) {
+            ++errors;
+        } else {
+            ++samples;
+            const uint8_t points = td[0] & 0x0Fu;
+            if (points == 1u || points == 2u) {
+                ++touched;
+                if (points == 2u) {
+                    ++twos;
+                }
+                const uint8_t flag = static_cast<uint8_t>(td[1] >> 6);
+                const uint16_t x = static_cast<uint16_t>(((td[1] & 0x0Fu) << 8) | td[2]);
+                const uint16_t y = static_cast<uint16_t>(((td[3] & 0x0Fu) << 8) | td[4]);
+                const uint8_t id = static_cast<uint8_t>(td[3] >> 4);
+                flags_seen = static_cast<uint8_t>(flags_seen | (1u << flag));
+                ids_seen = static_cast<uint8_t>(ids_seen | (id < 8u ? (1u << id) : 0x80u));
+                x_min = x < x_min ? x : x_min;
+                x_max = x > x_max ? x : x_max;
+                y_min = y < y_min ? y : y_min;
+                y_max = y > y_max ? y : y_max;
+                if (!first_printed) {
+                    print(serial, "  first report: TD_STATUS ", hex(td[0]), ", event flag ", flag, ", id ", id, ", x ", x,
+                          ", y ", y, crlf);
+                    first_printed = true;
+                }
+            }
+        }
+        const uint32_t t = Ticker::ticks();
+        while (Ticker::ticks() - t < 10u) {
+        }
+    }
+    Nvic::disable(TouchIrq::irq());
+    (void)TouchIrq::arm(false);
+    const uint32_t edges = touch_int_edges;
+    (void)write_reg(reg_g_mode, g_before);
+    print(serial, "  ", samples, " samples, ", touched, " with a finger (", twos, " with two), ", errors, " bus errors; x ",
+          x_min, "..", x_max, ", y ", y_min, "..", y_max, "; event flags seen ", hex(flags_seen), " (bit 0 press, 1 lift, 2 contact, 3 none), ids ",
+          hex(ids_seen), "; INT idle ", int_idle_high ? "high" : "LOW", ", ", edges, " falling edges", crlf);
+    bench.verdict("a finger was reported: TD_STATUS counted one or two points", touched != 0u);
+    bench.verdict("the coordinates stayed inside a 800x800 frame (12 bits each, the panel 800 by 480)",
+                  touched != 0u && x_max < 800u && y_max < 800u);
+    bench.verdict("the contact event (10b) was among the flags seen", (flags_seen & 0x04u) != 0u);
+    bench.verdict("INT idles high with no finger and pulsed on the reports in trigger mode",
+                  int_idle_high && edges != 0u);
+    bench.verdict("no bus error over the polling", errors == 0u);
+    bench.verdict("G_MODE put back to what it was", read_reg(reg_g_mode) == g_before);
+}
+#endif
+
 void banner() {
     print(serial, crlf, "test_stm32f4_i2c - I2C", bus_instance,
           " with the board's own touch controller", crlf);
@@ -1212,6 +1341,12 @@ void board_prepare() {
 
 #if defined(STM32F469xx)
 extern "C" void USART3_IRQHandler() { (void)Serial::isr(); }
+extern "C" void EXTI9_5_IRQHandler() {
+    const uint32_t fired = brio::Exti::isr(TouchIrq::mask);
+    if (TouchIrq::served(fired)) {
+        touch_int_edges = touch_int_edges + 1u;
+    }
+}
 #define BRIO_I2C_EV_HANDLER I2C1_EV_IRQHandler
 #define BRIO_I2C_ER_HANDLER I2C1_ER_IRQHandler
 #define BRIO_I2C_TX_DMA_HANDLER DMA1_Stream6_IRQHandler
@@ -1310,6 +1445,9 @@ int main() {
     bench.letter('i', "THE KERNEL: I2cBus over I2cHost", ti_kernel);
     bench.letter('j', "the same tenures through the DMA engines", tj_engines);
     bench.letter('k', "the recovery verbs", tk_recovery);
+#if defined(STM32F469xx)
+    bench.letter('l', "a finger on the glass: the touch controller reporting", tl_finger, false);
+#endif
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED",

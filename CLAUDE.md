@@ -358,7 +358,7 @@ gets its home in `docs/design/` when taken.
   builds for: reset and the watchdogs, EXTI + SYSCFG, the RTC and the
   backup domain, the DMA (the Uart's engine slots filled), the timers,
   the ADC and the DAC (read back on the pad they share), SPI/I2S and I2C
-  (against the gyroscope and the touch controller a board carries), the
+  (against the gyroscope and the touch controllers two boards carry), the
   USB OTG core for util/usb (the console on the black pill's and the
   32F469IDISCOVERY's own connectors), PWR with the sleep sites and the dynamic clock, and the
   flash interface as the ENGINE alone (no FlashMedia, by the NV review's

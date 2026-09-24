@@ -47,9 +47,12 @@ connector CN10.
   the picture read back out of its memory - its backlight
   switched by the panel's own CABC output (UM1932 4.14: R117 fitted,
   the PA3 option R119 not) so WRCTRLD's BL bit is the switch - with its
-  capacitive touch controller on I2C1 (PB8/PB9, the board's 1.5 k
-  pull-ups), the reset of both on PH7 and the tearing effect on PJ2
-  (AF13 to the DSI wrapper, EXTI line 2 to the core); a
+  FocalTech capacitive touch controller (FOCALTECH_ID 0x11, the FT6x06
+  family, FIRMID 0x13) on I2C1 at 0x38 (PB8/PB9, the board's 1.5 k
+  pull-ups), its INT on PJ5 (EXTI line 5), the reset of both on PH7 and
+  the tearing effect on PJ2 (AF13 to the DSI wrapper, EXTI line 2 to the
+  core) - the I2C suite's peer, a finger's coordinates read in the
+  module's portrait frame; a
   128 Mbit Micron Quad-SPI NOR flash (UM1932 names the N25Q128A13; the
   JEDEC id 0x20BA18 it answers with is the MT25QL128's, its successor,
   and the MB1189's QSPI sheet names the MT25QL128ABA) on PF6..PF10 with
@@ -73,4 +76,9 @@ memories' own datasheets, kept beside the board's documents: ISSI's
 IS42S32400F Rev. D1 (the -6 grade's AC table is where the FMC suite's
 timing comes from) and Micron's MT25QL128ABA Rev. K; and the two panel controllers'
 datasheets, Novatek's NT35510 (the one this unit carries) and Orise's
-OTM8009A (preliminary 0.92), kept for the display.
+OTM8009A (preliminary 0.92), kept for the display; and for its touch
+controller FocalTech's FT6x06 datasheet v0.1 (pins, timings, the I2C
+format), the FT6236/FT6336/FT6436 series datasheet v0.3 and the
+"Application Note for FT6x06 CTPM" v1.0 bound into it (the register
+map). The CS43L22 audio DAC's datasheet is kept too, for the day its
+bus is measured.
