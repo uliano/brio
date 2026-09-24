@@ -139,6 +139,9 @@ static_assert(Dsi::irq == dsi_irq());
 static_assert(Dsi::odf_code(1) == 0 && Dsi::odf_code(2) == 1 && Dsi::odf_code(4) == 2 && Dsi::odf_code(8) == 3);
 static_assert(Dsi::command_type_bits == 0x010F7F00u,
               "GSW0..2TX, GSR0..2TX, GLWTX (8..14), DSW0..1TX, DSR0TX, DLWTX (16..19), MRDPS (24)");
+static_assert(Dsi::long_type_bits == (DSI_CMCR_GLWTX | DSI_CMCR_DLWTX) && Dsi::long_type_bits == 0x00084000u);
+static_assert((Dsi::short_type_bits & Dsi::long_type_bits) == 0u &&
+              (Dsi::short_type_bits | Dsi::long_type_bits) == Dsi::command_type_bits);
 
 // ---- every verb, once ---------------------------------------------------------------
 
@@ -163,6 +166,7 @@ void every_verb(uint8_t* buf) {
     (void)Dsi::host(cfg.host);
     (void)Dsi::escape_divider();
     (void)Dsi::commands_low_power();
+    (void)Dsi::long_writes_low_power();
     (void)Dsi::virtual_channel();
     (void)Dsi::colour(DsiColor::rgb888, panel);
     (void)Dsi::colour();

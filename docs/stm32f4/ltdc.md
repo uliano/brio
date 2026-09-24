@@ -502,7 +502,8 @@ Implemented but not bench-verified:
   MHz is nearly all of a read's cost.
 - **The F469/F479's LTDC on its own pads** - on the 32F469IDISCOVERY
   the controller's output goes to the DSI host and not to a pad, and
-  [dsi.md](dsi.md)'s suite is where it drives pixels (60 frames a
-  second of 16- and 32-bit pixels out of that board's SDRAM, the pixel
-  clock at 26.4 MHz); this suite stays the DISC1's, and the RGB pads of
-  that class would need a board that wires them.
+  [dsi.md](dsi.md)'s suite is where it drives pixels (a frame of 16- or
+  32-bit pixels out of that board's SDRAM per refresh of the host's
+  adapted command mode, the pixel clock at 26.4 MHz, 61 frames a
+  second); this suite stays the DISC1's, and the RGB pads of that class
+  would need a board that wires them.

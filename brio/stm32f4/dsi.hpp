@@ -95,27 +95,41 @@
  *    the processor-to-peripheral types), and a program never needs to
  *    know them for a DCS command: `dcs_write()` and `dcs_read()` choose
  *    the short or long form from the parameter count.
- * 8. IN VIDEO MODE THE GENERIC INTERFACE LIVES INSIDE THE STREAM. The
+ * 8. TWO WAYS TO A PANEL, AND THE PANEL DECIDES. Video mode streams
+ *    pixel packets; the adapted command mode (18.6) turns each LTDC
+ *    frame into DCS memory writes - write_memory_start then
+ *    write_memory_continue, LCCR.CMDSIZE pixels a packet - launched by
+ *    WCR.LTDCEN (or by a tearing effect pulse with WCFGR.AR) and closed
+ *    by the wrapper with ERIF, the LTDC halted on the VSync edge WCFGR.
+ *    VSPOL names. A panel whose DSI is a command interface, like the
+ *    32F469IDISCOVERY's NT35510 (its datasheet documents RAMWR/RAMWRC
+ *    and nothing of a video stream), shows nothing of video mode and
+ *    everything of a refresh: measured, a second of video frames leaves
+ *    its memory untouched and one refresh puts the frame there, read
+ *    back pixel for pixel through RAMRD. The memory writes of a refresh
+ *    are DCS long writes and want high speed, so `DsiHostConfig` keeps
+ *    the long writes' CMCR bits apart from the short commands'.
+ * 9. IN VIDEO MODE THE GENERIC INTERFACE LIVES INSIDE THE STREAM. The
  *    manual's procedure (18.14.1) lists the DCS commands before the
  *    LTDC's enable; measured, a read issued in video mode with the LTDC
  *    stopped never completes - the request leaves the command FIFO,
  *    GPSR.RCB stands, and the answer arrives with the first frame after
- *    the LTDC starts. A program that talks to its panel in video mode
- *    starts the stream first (a black frame costs nothing), or talks in
- *    command mode, where the same read is answered with no stream at all.
- *    Nothing in this file can hide that: the mode is the program's.
- * 9. WHAT THE PANEL REPORTS IS THE PANEL'S. The acknowledge-with-error
+ *    the LTDC starts. In command mode the same read is answered with
+ *    nothing else on the link. Nothing in this file can hide that: the
+ *    mode is the program's.
+ * 10. WHAT THE PANEL REPORTS IS THE PANEL'S. The acknowledge-with-error
  *    bits of DSI_ISR0 are a panel's opinion of the packets it received,
  *    delivered at the next bus turnaround - so a read is what makes them
  *    appear, and they describe what happened SINCE the previous read.
- *    Measured on the 32F469IDISCOVERY's NT35510: the first turnaround
- *    after the panel's reset, or after the host's disable and enable
- *    with the stream running, carries AE6 (a false control error: the
- *    lanes moved while its receiver watched); the same after a disable
- *    with no stream carries AE13 (an invalid transmission length). Both
- *    are one report each and nothing follows. The error registers clear
- *    on the read that shows them; a program that re-enables the host
- *    reads them once after its first exchange.
+ *    Measured on the NT35510: the first turnaround after the host's
+ *    disable and enable carries AE6 (a false control error: the lanes
+ *    moved while its receiver watched) in command mode and with a video
+ *    stream running, AE13 (an invalid transmission length) in video
+ *    mode with the LTDC stopped; the first after the panel's own reset
+ *    carries AE6 when the host was streaming and nothing when it was
+ *    not. One report each, nothing follows, and the registers clear on
+ *    the read that shows them: a program that re-enables the host reads
+ *    them once after its first exchange.
  *
  * THE ERRATA (ES0321 Rev 14, 2.8.1 .. 2.8.3), two of them code here:
  *  - 2.8.2, "incorrect calculation of the time to activate the clock
@@ -141,9 +155,9 @@
  *
  * NOT HERE, BY DESIGN: the panel's own command set beyond the DCS
  * spelling of a write and a read. Which command wakes a panel, sets its
- * pixel format or turns its backlight on is the panel datasheet's
- * business, spelled where the panel is (the bench suite for the
- * 32F469IDISCOVERY's module). The LTDC's side - the pixel clock, the
+ * pixel format, its write window or its backlight is the panel
+ * datasheet's business, spelled where the panel is (the bench suite for
+ * the 32F469IDISCOVERY's module). The LTDC's side - the pixel clock, the
  * timing, the layers - is stm32f4/ltdc.hpp's, and this file only reads
  * `LtdcTiming` to convert it.
  *
@@ -423,7 +437,8 @@ struct DsiHostConfig {
     bool bus_turn_around = true;        ///< PCR.BTAE - a read needs it
     bool ecc_receive = true;            ///< PCR.ECCRXE
     bool crc_receive = true;            ///< PCR.CRCRXE
-    bool commands_low_power = true;     ///< CMCR's thirteen transmission-type bits
+    bool commands_low_power = true;     ///< CMCR's eleven short-packet and read-size bits
+    bool long_writes_low_power = true;  ///< CMCR's GLWTX and DLWTX - the LTDC's memory writes are DCS long writes
     bool acknowledge_request = false;   ///< CMCR.ARE
     bool te_acknowledge = false;        ///< CMCR.TEARE
     uint8_t virtual_channel = 0;        ///< GVCIDR and LVCIDR, 0..3
@@ -779,7 +794,7 @@ struct Dsi {
                      (c.crc_receive ? DSI_PCR_CRCRXE : 0u);
         regs().GVCIDR = c.virtual_channel;
         regs().LVCIDR = c.virtual_channel;
-        regs().CMCR = (c.commands_low_power ? command_type_bits : 0u) |
+        regs().CMCR = (c.commands_low_power ? short_type_bits : 0u) | (c.long_writes_low_power ? long_type_bits : 0u) |
                       (c.acknowledge_request ? DSI_CMCR_ARE : 0u) | (c.te_acknowledge ? DSI_CMCR_TEARE : 0u);
         regs().TCCR[0] = (static_cast<uint32_t>(c.hs_tx_timeout) << DSI_TCCR0_HSTX_TOCNT_Pos) |
                          (static_cast<uint32_t>(c.lp_rx_timeout) << DSI_TCCR0_LPRX_TOCNT_Pos);
@@ -796,7 +811,8 @@ struct Dsi {
     static uint8_t escape_divider() {
         return static_cast<uint8_t>((regs().CCR & DSI_CCR_TXECKDIV_Msk) >> DSI_CCR_TXECKDIV_Pos);
     }
-    static bool commands_low_power() { return (regs().CMCR & command_type_bits) == command_type_bits; }
+    static bool commands_low_power() { return (regs().CMCR & short_type_bits) == short_type_bits; }
+    static bool long_writes_low_power() { return (regs().CMCR & long_type_bits) == long_type_bits; }
     static uint8_t virtual_channel() { return static_cast<uint8_t>(regs().GVCIDR & DSI_GVCIDR_VCID_Msk); }
 
     // ---- the LTDC interface (18.14.5) -------------------------------------------
@@ -1232,11 +1248,16 @@ struct Dsi {
                (static_cast<uint32_t>(p0) << DSI_GHCR_WCLSB_Pos) | (static_cast<uint32_t>(p1) << DSI_GHCR_WCMSB_Pos);
     }
 
-    /// The thirteen transmission-type bits of CMCR, all of them "low
-    /// power" when set.
-    static constexpr uint32_t command_type_bits =
+    /// The thirteen transmission-type bits of CMCR, "low power" when set:
+    /// the eleven of the short packets and the maximum read size, and the
+    /// two of the long writes - apart, because the frame of the adapted
+    /// command mode goes out as DCS long writes and wants high speed
+    /// while a panel's configuration may stay in low power.
+    static constexpr uint32_t short_type_bits =
         DSI_CMCR_GSW0TX | DSI_CMCR_GSW1TX | DSI_CMCR_GSW2TX | DSI_CMCR_GSR0TX | DSI_CMCR_GSR1TX | DSI_CMCR_GSR2TX |
-        DSI_CMCR_GLWTX | DSI_CMCR_DSW0TX | DSI_CMCR_DSW1TX | DSI_CMCR_DSR0TX | DSI_CMCR_DLWTX | DSI_CMCR_MRDPS;
+        DSI_CMCR_DSW0TX | DSI_CMCR_DSW1TX | DSI_CMCR_DSR0TX | DSI_CMCR_MRDPS;
+    static constexpr uint32_t long_type_bits = DSI_CMCR_GLWTX | DSI_CMCR_DLWTX;
+    static constexpr uint32_t command_type_bits = short_type_bits | long_type_bits;
 
     /// ODF's code: log2 of the divisor (18.16.11).
     static constexpr uint8_t odf_code(uint8_t odf) {

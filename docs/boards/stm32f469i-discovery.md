@@ -40,8 +40,11 @@ connector CN10.
   them from the MB1189's MCU sheet); the 4" 800x480 DSI panel of the
   MB1166 - its controller a Novatek **NT35510**, read over the link
   (RDID1..3 00h 80h 00h; the module's revision is not readable, the
-  display board being captive over the main one), driven in DSI video
-  mode at 496 Mbit/s on two lanes by the DSI suite, its backlight
+  display board being captive over the main one), a COMMAND interface
+  by its datasheet and by measurement (video-mode frames leave its
+  memory untouched), driven through the DSI host's adapted command mode
+  at 496 Mbit/s on two lanes by the DSI suite - a frame per refresh,
+  the picture read back out of its memory - its backlight
   switched by the panel's own CABC output (UM1932 4.14: R117 fitted,
   the PA3 option R119 not) so WRCTRLD's BL bit is the switch - with its
   capacitive touch controller on I2C1 (PB8/PB9, the board's 1.5 k

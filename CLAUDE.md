@@ -374,9 +374,11 @@ gets its home in `docs/design/` when taken.
   F469 the QUADSPI against the board's 16 MB flash (indirect, status
   polling and memory-mapped; the window at 44.5 MB/s) and the DSI HOST
   in front of that part's LTDC - the panel's controller read over the
-  link (an NT35510), every DCS register written and read back, 60
-  frames a second out of the 16 MB SDRAM, the tearing effect counted on
-  the pin. What remains
+  link (an NT35510, a command interface), every DCS register written and
+  read back, the frame refreshed into the panel's memory in one LTDC
+  frame through the adapted command mode and READ BACK pixel for pixel,
+  the tearing effect counted on the pin and pacing the refresh. What
+  remains
   is in the documents' gap lists, and three things outside them: the
   OTG HS core in full-speed mode on the STM32F429 (UsbHs compiled, its
   connector cabled, never enumerated); the frequency ladders of the four
@@ -2169,9 +2171,12 @@ brio/                    the framework, twelve strata:
                            dcs_write/dcs_read, the error registers that clear
                            on the read); every configuring verb refused
                            while enabled; the panel's command set stays with
-                           the panel, in the suite. THE TRAP: in video mode
-                           a command is sent inside the stream, so the LTDC
-                           runs before the panel is spoken to
+                           the panel, in the suite. THE PANEL DECIDES
+                           between video mode and the adapted command mode
+                           (an LTDC frame as DCS memory writes, one refresh
+                           per frame, launched by a bit or by the tearing
+                           effect pulse), and in video mode a command is sent
+                           inside the stream
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)
@@ -2330,9 +2335,14 @@ brio/                    the framework, twelve strata:
     draw.hpp               the primitives as free functions over the
                            write-only base: clear, set_pixel, fill_rect,
                            hline/vline, line, rect, circle, round_rect and the
-                           filled forms, plus isqrt
+                           filled forms, plus isqrt; rect, hline and vline
+                           also in a THICK form (a thickness argument: the
+                           outline grows inward, a line down or right, t = 1
+                           is the thin one, and all of it is fill_rect)
     font.hpp               the Font concept: a font is a TYPE, so the cell is
-                           a constant and the linker drops what is unnamed
+                           a constant and the linker drops what is unnamed; a
+                           glyph row in the font's own Row type; Scaled<F, n>,
+                           the size adapter that is a type and adds no data
     font_5x7.hpp           the whole printable ASCII in a six-by-eight cell,
                            stored BY ROWS (text is drawn as runs), a hollow
                            box outside the range

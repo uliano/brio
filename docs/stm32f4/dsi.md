@@ -1,35 +1,38 @@
 # DSI Host (STM32F4)
 
 Documents of record: RM0386 Rev 6 ch. 18 (the F469/F479's, the only
-class of the family with the block - 18.4 the host, 18.11 the pattern
-generator, 18.12 the D-PHY, its PLL and its regulator, 18.13 the
-interrupts and the error table, 18.14 the programming procedure, 18.15
-and 18.16 the host's and the wrapper's registers); its RCC chapter for
-the clock tree (figure 17: the PLL off HSE, the lane byte clock an
-eighth of the bit rate, DCKCFGR's DSISEL); DS11189 Rev 8 5.3.13 .. 5.3.15
-(tables 45 .. 48: the unit interval, the LP/HS transition times, the
-PLL's and the regulator's ranges) and its table 12 for the tearing
-effect pad; ES0321 Rev 14 2.8.1 .. 2.8.3; UM1932 Rev 5 4.14 for what the
-board wires around its panel. For the panel the bench suite is measured
-against, the two controllers the MB1166 was built with: Novatek's
-NT35510 (the one this unit answers as; its DCS command list and its
-RDID1 .. 3 values) and Orise's OTM8009A (preliminary 0.92: the same DCS
-set, its ID bytes, and table 6.4.2.1 for the porches the frame uses).
-The packet data types are the MIPI DSI specification's, which is not on
-the desk: the codes in `DsiDataType` are its table 16 as every DSI
-peripheral shares them, and both panel datasheets draw that table as a
-picture. Driver: `stm32f4/dsi.hpp` (`Dsi`, `DsiConfig` and its parts
-`DsiPllConfig`, `DsiPhyConfig`, `DsiPhyTiming`, `DsiHostConfig`,
-`DsiVideoConfig`, `DsiVideoTiming`, `DsiColor`, `DsiLanes`,
-`DsiVideoType`, `DsiPattern`, `DsiDataType`, `DsiStatus`, `DsiEvents`,
-`DsiLaneStatus`, and the arithmetic `dsi_pll_for`, `dsi_config_for`,
-`dsi_uix4`, `dsi_lane_byte_hz`, `dsi_escape_divider`,
-`dsi_phy_timing_for`, `dsi_video_timing`, `dsi_line_fits`), over the
-reserve's `dsi_present`, `dsi_clock_mask`, `dsi_reset_mask`,
-`dsi_byte_clock_select_mask` and `dsi_irq` (`stm32f4/device_tables.hpp`).
-The family fixture is `test/family_stm32f4/dsi.cpp` with the negatives
-that refuse the type on a part with no block and a PLL triple outside
-the ranges. Bench: `test_stm32f4_dsi` on the 32F469IDISCOVERY.
+class of the family with the block - 18.4 the host, 18.6 the adapted
+command mode, 18.11 the pattern generator, 18.12 the D-PHY, its PLL and
+its regulator, 18.13 the interrupts and the error table, 18.14 the
+programming procedure, 18.15 and 18.16 the host's and the wrapper's
+registers); its RCC chapter for the clock tree (figure 17: the PLL off
+HSE, the lane byte clock an eighth of the bit rate, DCKCFGR's DSISEL);
+DS11189 Rev 8 5.3.13 .. 5.3.15 (tables 45 .. 48: the unit interval, the
+LP/HS transition times, the PLL's and the regulator's ranges) and its
+table 12 for the tearing effect pad; ES0321 Rev 14 2.8.1 .. 2.8.3; UM1932
+Rev 5 4.14 for what the board wires around its panel. For the panel the
+bench suite is measured against, the two controllers the MB1166 was
+built with: Novatek's NT35510 (the one this unit answers as: its
+datasheet documents the DSI as a command interface - the frame memory
+written by RAMWR/RAMWRC and read by RAMRD/RAMRDC, the standard DCS set,
+RDID1 .. 3 - and names a Manufacture Command Set it does not describe)
+and Orise's OTM8009A (preliminary 0.92: the same DCS set, its ID bytes,
+and table 6.4.2.1 for the porches the frame uses). The packet data types
+are the MIPI DSI specification's, which is not on the desk: the codes in
+`DsiDataType` are its table 16 as every DSI peripheral shares them, and
+both panel datasheets draw that table as a picture. Driver:
+`stm32f4/dsi.hpp` (`Dsi`, `DsiConfig` and its parts `DsiPllConfig`,
+`DsiPhyConfig`, `DsiPhyTiming`, `DsiHostConfig`, `DsiVideoConfig`,
+`DsiVideoTiming`, `DsiColor`, `DsiLanes`, `DsiVideoType`, `DsiPattern`,
+`DsiDataType`, `DsiStatus`, `DsiEvents`, `DsiLaneStatus`, and the
+arithmetic `dsi_pll_for`, `dsi_config_for`, `dsi_uix4`,
+`dsi_lane_byte_hz`, `dsi_escape_divider`, `dsi_phy_timing_for`,
+`dsi_video_timing`, `dsi_line_fits`), over the reserve's `dsi_present`,
+`dsi_clock_mask`, `dsi_reset_mask`, `dsi_byte_clock_select_mask` and
+`dsi_irq` (`stm32f4/device_tables.hpp`). The family fixture is
+`test/family_stm32f4/dsi.cpp` with the negatives that refuse the type on
+a part with no block and a PLL triple outside the ranges. Bench:
+`test_stm32f4_dsi` on the 32F469IDISCOVERY.
 
 ## What the silicon does
 
@@ -42,13 +45,37 @@ program writes packets through and the error registers; the D-PHY is
 one clock lane and two data lanes on dedicated pads, each in high-speed
 differential signalling or low-power single-ended signalling. Two ways
 to a panel: VIDEO MODE, where the LTDC's frame is packed into pixel
-packets and streamed at the panel's timing; and ADAPTED COMMAND MODE,
-where an LTDC frame becomes DCS memory-write packets a panel with a
-frame memory takes at its own pace. The generic interface works beside
-either: a DCS command goes out in low-power signalling, a read turns the
-bus around and the panel's answer comes back on data lane 0. Two of the
-pack's twenty-three headers declare the block; the F469 and the F479
-have it and the rest have nothing.
+packets and streamed at the panel's timing; and the ADAPTED COMMAND
+MODE (18.6), where each LTDC frame becomes DCS memory writes - a
+write_memory_start then write_memory_continue packets of LCCR.CMDSIZE
+pixels each - that a panel with a frame memory takes at its own pace.
+The generic interface works beside either: a DCS command goes out in
+low-power signalling, a read turns the bus around and the panel's
+answer comes back on data lane 0. Two of the pack's twenty-three headers
+declare the block; the F469 and the F479 have it and the rest have
+nothing.
+
+**The panel decides between the two ways.** A DSI panel whose interface
+is a command one - the 32F469IDISCOVERY's NT35510, whose datasheet
+documents RAMWR/RAMWRC and RAMRD/RAMRDC and nothing of a video stream -
+shows nothing of video mode: measured, a second of video-mode frames and
+the pattern generator's bars leave its frame memory untouched (a pixel
+read back before and after is the same) while its power mode and its
+error count stay clean, and one refresh of the adapted command mode puts
+the frame there. What the panel then holds can be READ over the same
+link: RAMRD answers three bytes a pixel in the 24-bit format, the pixel
+first with no leading byte, at the column and row CASET and RASET
+point to - which is what makes the picture a measurement.
+
+**A refresh is one LTDC frame** (18.6): WCR.LTDCEN lets the LTDC run,
+the wrapper packs its lines into DCS long writes, halts it on the VSync
+edge WCFGR.VSPOL names, clears LTDCEN and raises ERIF; WCFGR.AR launches
+one per tearing effect pulse instead. The memory writes are DCS long
+writes, so the CMCR bit that decides their signalling (DLWTX) is the
+frame's speed: `DsiHostConfig` keeps the long writes' two bits apart
+from the short commands' eleven, and a refresh at 496 Mbit/s takes
+exactly the LTDC's 16.6 ms frame - the link is faster than the pixel
+clock and the wrapper's flow control keeps them in step.
 
 **The PLL's ranges are stated twice, and not the same way.** RM0386
 18.12.5: CLKIN 4..100 MHz, the input after IDF 8..50 MHz, the VCO
@@ -84,12 +111,13 @@ margin: clock lane LP to HS 50 + 300 + 8 UI ns, HS to LP 62 + 52 UI +
 
 **Configuration happens with the host disabled.** DSI_CR.EN = 0 holds
 the host "under reset" (18.15.2) - and measured, its registers keep
-their values through it: the same PCONFR, CMCR, PCR, LCOLCR, VLCR and
+their values through it: the same PCONFR, CMCR, PCR, LCOLCR, LCCR and
 CLTCR after a disable, a PLL and regulator cycle and an enable. WCFGR's
 fields and WPCR1 .. 4 are documented as writable only with both
 DSI_CR.EN and DSI_WCR.DSIEN clear, and the programming procedure of
 18.14.1 writes everything first and enables last. Every configuring
-verb refuses while enabled, and writes nothing then.
+verb refuses while enabled, and writes nothing then; a program changes
+mode with the host disabled around the change.
 
 **In video mode the generic interface lives inside the stream.** The
 procedure of 18.14.1 lists the DCS commands (step 16) before the LTDC's
@@ -97,11 +125,9 @@ enable (step 17); measured, a read issued in video mode with the LTDC
 stopped never completes: the request leaves the command FIFO, GPSR.RCB
 stands, and the answer arrives with the first frame after the LTDC
 starts (the same read, issued then, is answered). In command mode the
-same read is answered with no stream at all. So a program that talks to
-its panel in video mode starts the stream first - a black frame costs
-nothing - or talks in command mode and switches; the bench suite streams
-a black frame before the panel's reset and its first command, and
-nothing in the driver hides the rule.
+same read is answered with nothing else on the link - no stream, no
+refresh in flight - which is what makes a panel's bring-up in that mode
+the plain one.
 
 **A read is two packets and a turn-around** (18.15.24 .. 18.15.26). The
 host has no read verb: the program sets the maximum return packet size
@@ -117,13 +143,14 @@ to the next read, so `read()` drains the FIFO before it starts.
 (18.13.2), and the acknowledge-with-error bits are the PANEL'S report,
 delivered at the next bus turnaround - so a read is what makes them
 appear, and they describe what happened since the previous read.
-Measured on the NT35510: the first turnaround after the panel's reset,
-or after the host's disable and enable with the stream running, carries
-AE6 (a false control error: the lanes moved while its receiver watched);
-the same after a disable with no stream carries AE13 (an invalid
-transmission length). One report each, nothing follows, and nothing of
-it is a link that failed: a program that re-enables the host reads the
-registers once after its first exchange.
+Measured on the NT35510: the first turnaround after the host's disable
+and enable carries AE6 (a false control error: the lanes moved while its
+receiver watched) in command mode and under a running video stream, and
+AE13 (an invalid transmission length) in video mode with the LTDC
+stopped; the first after the panel's own reset carries AE6 when the host
+was streaming and nothing when it was not. One report each, nothing
+follows, and nothing of it is a link that failed: a program that
+re-enables the host reads the registers once after its first exchange.
 
 **Three errata, two of them code** (ES0321 Rev 14):
 - *2.8.2, incorrect calculation of the time to activate the clock
@@ -138,7 +165,7 @@ registers once after its first exchange.
   the LINK raises TEIF on every acknowledge trigger. Not code:
   `te_source()` offers the dedicated pin, and the suite measures the
   wrapper's flag from PJ2 pulse for pulse against the EXTI's count of the
-  same edges.
+  same edges, and the automatic refresh paced by it.
 
 **Three small facts the registers taught**, none of them a workaround:
 DSI_PSR wakes as 0x1400 and not the manual's 0x1528 (its defined bits
@@ -168,10 +195,12 @@ DSI_ISR a moment later, not on the read straight after it.
   `DsiPhyConfig` (`lanes`, `clock_lane_hs`, `automatic_clock_lane`,
   `timing`).
 - `DsiHostConfig`: the escape and timeout dividers, the five flow
-  control bits (`bus_turn_around` on by default - a read needs it), one
-  `commands_low_power` for all thirteen transmission-type bits, the two
-  acknowledge requests, the virtual channel, the seven timeout counters
-  (0 = none), the two largest-LP-packet sizes; `dsi_host_config_ok`.
+  control bits (`bus_turn_around` on by default - a read needs it),
+  `commands_low_power` for the eleven short-packet bits and
+  `long_writes_low_power` for the two long-write ones (a refresh's
+  memory writes go in high speed), the two acknowledge requests, the
+  virtual channel, the seven timeout counters (0 = none), the two
+  largest-LP-packet sizes; `dsi_host_config_ok`.
 - `DsiColor` (the six codes of LCOLCR.COLC and WCFGR.COLMUX),
   `DsiVideoType` (sync pulses, sync events, burst), `DsiVideoConfig`
   (the type, the six low-power returns, `lp_commands`, `frame_bta_ack`,
@@ -198,18 +227,21 @@ DSI_ISR a moment later, not on the read straight after it.
   the stop wait, the clock lane's mode, the transition times with 2.8.2
   applied), `uix4`, `lanes`, `phy_timing`, `lane_status`,
   `ulps(clock, data, enter)`; `host(c)`, `escape_divider`,
-  `commands_low_power`, `virtual_channel`; `colour(c, ltdc_timing,
-  loosely)` (LCOLCR and WCFGR.COLMUX together, LPCR's polarities from the
-  LTDC's own words), `te_source(from_pin, falling)`, `adapted_refresh`;
-  `command_mode(pixels)` and `video(cfg, timing)` (refused while
-  enabled, outside the fields, or when a line's pixels do not fit its
-  lane byte clocks on the lanes configured), `in_command_mode`,
-  `video_timing`, `pattern(p)`, `pattern_on`, `shadow_update` (2.8.3),
-  `shadow`, `shadowed`; `init<cfg, clkin>()` (static_assert) and
-  `init(clkin, cfg)` - the gate, the host disabled, the regulator, the
-  PLL, the D-PHY, the host's timings - then `enable()` (DEN, CKE, EN,
-  DSIEN in the procedure's order), `disable()`, `enabled()`, `release()`;
-  the wrapper's `ltdc_flow`, `shutdown`, `eight_colours`, `busy`; the
+  `commands_low_power`, `long_writes_low_power`, `virtual_channel`;
+  `colour(c, ltdc_timing, loosely)` (LCOLCR and WCFGR.COLMUX together,
+  LPCR's polarities from the LTDC's own words), `te_source(from_pin,
+  falling)`, `adapted_refresh(automatic, halt_on_rising)`;
+  `command_mode(pixels)` (MCR.CMDM, WCFGR.DSIM and LCCR.CMDSIZE) and
+  `video(cfg, timing)` (refused while enabled, outside the fields, or
+  when a line's pixels do not fit its lane byte clocks on the lanes
+  configured), `in_command_mode`, `video_timing`, `pattern(p)`,
+  `pattern_on`, `shadow_update` (2.8.3), `shadow`, `shadowed`;
+  `init<cfg, clkin>()` (static_assert) and `init(clkin, cfg)` - the gate,
+  the host disabled, the regulator, the PLL, the D-PHY, the host's
+  timings - then `enable()` (DEN, CKE, EN, DSIEN in the procedure's
+  order), `disable()`, `enabled()`, `release()`; the wrapper's
+  `ltdc_flow` (a refresh's trigger in the adapted command mode, cleared
+  by the wrapper at its end), `shutdown`, `eight_colours`, `busy`; the
   generic interface `short_write(dt, p0, p1)`, `long_write(dt, payload,
   len)`, `read(dt, p0, p1, buf, len)`, and over them `dcs_write(cmd)`,
   `dcs_write(cmd, param)`, `dcs_write(cmd, params, n)`, `dcs_read(cmd,
@@ -218,17 +250,18 @@ DSI_ISR a moment later, not on the read straight after it.
   `read_busy`; `errors0`/`errors1` (read-and-clear by the silicon's
   design), `error_interrupts`, `force_errors`, `wrapper_interrupts`,
   `wrapper_flags`, `clear_wrapper_flags`, the ISR body `isr()`,
-  `enable_interrupt`/`disable_interrupt`; `header(dt, p0, p1)` and
-  `command_type_bits` for a test to check against the manual.
+  `enable_interrupt`/`disable_interrupt`; `header(dt, p0, p1)`,
+  `short_type_bits`, `long_type_bits` and `command_type_bits` for a
+  test to check against the manual.
 - The reserve's facts: `dsi_present()`, the APB2 gate and reset masks,
   `dsi_byte_clock_select_mask()`, `dsi_irq()`.
 
 ## How to use it
 
 The panel's words stay with the panel: which command wakes it, sets its
-format or lights its backlight is its datasheet's, spelled beside the
-program that talks to it. The link's numbers are the program's choice
-of bit rate and the LTDC's timing, converted here.
+format, its write window or its backlight is its datasheet's, spelled
+beside the program that talks to it. The link's numbers are the
+program's choice of bit rate and the LTDC's timing.
 
 ```cpp
 #include "stm32f4/dsi.hpp"
@@ -237,42 +270,58 @@ using namespace brio;
 
 constexpr LtdcTiming panel{.hsync = 2, .hbp = 20, .width = 800, .hfp = 20,
                            .vsync = 10, .vbp = 15, .height = 480, .vfp = 16};
-constexpr uint32_t pixel_hz = 26'400'000u;                          // PLLSAI: N 132, R 5, /2
-constexpr DsiConfig link = dsi_config_for(8'000'000u, 496'000'000u);   // off the 8 MHz crystal
-constexpr DsiVideoTiming frame = dsi_video_timing(panel, pixel_hz, dsi_lane_byte_hz(496'000'000u));
-static_assert(dsi_line_fits(frame, DsiColor::rgb888, DsiLanes::two));
+constexpr DsiConfig link = [] {                                   // off the 8 MHz crystal
+    DsiConfig c = dsi_config_for(8'000'000u, 496'000'000u);
+    c.host.long_writes_low_power = false;                         // the frame in high speed
+    return c;
+}();
 
 // the memory and the LTDC first (fmc.md, ltdc.md): the pixel clock, the
-// timing, a layer over a frame buffer - nothing enabled yet
+// timing, a layer over a frame buffer, the controller enabled - the
+// wrapper holds it until a refresh
 Dsi::init<link, 8'000'000u>();             // regulator, PLL, D-PHY, host
 Dsi::colour(DsiColor::rgb888, panel);      // the LTDC interface
-Dsi::video(DsiVideoConfig{}, frame);       // non-burst, sync pulses, LP returns
+Dsi::command_mode(800);                    // a line per memory write
 Dsi::te_source(true);                      // the tearing effect from the pin
+Dsi::adapted_refresh(false, false);        // manual refreshes, the LTDC halted on VSYNC's fall
 Dsi::enable();
-Ltdc::enable();                            // THE STREAM FIRST: a black frame
 
 // the panel, in its own words - a reset on the board's pad, then DCS
 Dsi::dcs_write(0x11);                      // SLPOUT
 // ... 120 ms ...
 Dsi::dcs_write(0x3A, 0x77);                // COLMOD, 24 bits
+Dsi::dcs_write(0x36, 0x60);                // MADCTL, landscape
+Dsi::dcs_write(0x2A, columns, 4);          // CASET, 0..799
+Dsi::dcs_write(0x2B, rows, 4);             // RASET, 0..479
 Dsi::dcs_write(0x29);                      // DISPON
 uint8_t id[3];
 Dsi::dcs_read(0xDA, &id[0], 1);            // RDID1: the controller answers
 (void)Dsi::errors0();                      // the first turnaround's report, read once
+
+// a frame: paint the surface, launch, wait for the end of refresh
+Dsi::clear_wrapper_flags(DSI_WISR_ERIF);
+Dsi::ltdc_flow(true);
+while ((Dsi::wrapper_flags() & DSI_WISR_ERIF) == 0u) {
+}
 ```
 
-An interrupt-driven program binds `DSI_IRQHandler` to a body that calls
-`Dsi::isr()`, arms `wrapper_interrupts()` for the five wrapper events
-and `error_interrupts()` for the error bits it wants the vector on; the
-body clears the wrapper's flags and reads both error registers.
+A program that streams to a panel whose DSI takes video packets
+configures `video(cfg, dsi_video_timing(panel, pixel_hz,
+dsi_lane_byte_hz(bit_rate)))` instead of `command_mode()`, starts the
+LTDC and then talks to the panel - in video mode a command is sent
+inside the stream. An interrupt-driven program binds `DSI_IRQHandler` to
+a body that calls `Dsi::isr()`, arms `wrapper_interrupts()` for the five
+wrapper events (the end of refresh among them) and `error_interrupts()`
+for the error bits it wants the vector on; the body clears the wrapper's
+flags and reads both error registers.
 
 ## Bench findings
 
 `test_stm32f4_dsi` on the 32F469IDISCOVERY (STM32F469NI at 180 MHz,
 PCLK2 90 MHz, the IS42S32400F on FMC bank 1 at 90 MHz holding the frame
-buffer, the LTDC at a 26.4 MHz pixel clock, the link at 496 Mbit/s on two
-lanes) against the MB1166 panel, reset on PH7, tearing effect on PJ2:
-**ALL: 80 pass, 0 fail**, twice.
+buffers, the LTDC at a 26.4 MHz pixel clock, the link at 496 Mbit/s on
+two lanes) against the MB1166 panel, reset on PH7, tearing effect on
+PJ2: **ALL: 92 pass, 0 fail**, twice.
 
 - **The module's controller is Novatek's NT35510**: RDID1 00h, RDID2
   80h, RDID3 00h over the link, the same three bytes sixteen times
@@ -282,6 +331,33 @@ lanes) against the MB1166 panel, reset on PH7, tearing effect on PJ2:
   controllers it carries. Its power mode reads 9Ch out of the bring-up
   (booster on, sleep out, normal, display on), its own count of DSI
   errors 0 after every letter.
+- **The picture is in the panel, and read back**: in the adapted
+  command mode one refresh of 800x480 32-bit pixels takes 16617 us -
+  the LTDC's frame is 16616 - and ends with ERIF, LTDCEN cleared by the
+  wrapper and BUSY down; refreshes back to back make 61 frames a second
+  with no payload write error, no FIFO underrun and the panel's error
+  count at 0; sixteen pixels read back through RAMRD at the corners, the
+  middle and inside every bar are the bars the accelerator painted, 24
+  bits each, the answer starting with the pixel (no leading byte); a run
+  of sixteen across the white/yellow boundary reads back in one packet;
+  the 16-bit surface's yellow (565 FFE0h) reaches the panel as FFFF00h,
+  the LTDC's expansion replicating the high bits. A human sees the eight
+  bars, and a bar sliding along the bottom at one refresh a step, 179
+  steps in three seconds.
+- **This panel's DSI is a command interface**: the 16-bit bars streamed
+  in video mode for a second (60 frames, no payload error, no underrun,
+  a DCS read answered in a blanking period, the panel's error count 0)
+  and the pattern generator's bars after them leave the panel's pixel
+  (0, 0) exactly as the refresh before had written it. In video mode
+  with the LTDC stopped RDID1 runs out - GPSR 0x55, RCB standing with
+  the command FIFO empty - and the answer comes with the first frame
+  after the LTDC starts (GPSR 0x05, the read FIFO holding it); in command
+  mode the same read is answered with nothing else on the link.
+- **The tearing effect line and the automatic refresh**: with TEON 30
+  rising edges on PJ2 in half a second on EXTI line 2, and 30 TEIF flags
+  in the wrapper from the same pin (WCFGR.TESRC); with WCFGR.AR set the
+  wrapper made 59 refreshes in a second against 59 TE edges, no error; 0
+  edges after TEOFF.
 - **The block at reset**: the APB2 gate closed; VR 0x3133302A, CR 0, MCR
   1 (command mode), PCONFR 1 (two lanes), GPSR 0x15 (every FIFO empty),
   PSR 0x1400 (not the manual's 0x1528: the defined bits clear with the
@@ -291,25 +367,22 @@ lanes) against the MB1166 panel, reset on PH7, tearing effect on PJ2:
   PLLEN cleared drops PLLLS and raises no PLLUIF; a triple with a 4 MHz
   PFD is refused with PLLEN left clear; REGEN cleared takes RRS down and
   set brings it back with RRIF; the host's six configuration registers
-  read the same after the whole excursion, and the panel answers its
-  identity again.
-- **What the driver refuses**: the six configuring verbs while enabled,
-  none of them writing a register; a line that holds no pixels, one the
-  pixels do not fit (1200 lane byte clocks for 1203 of payload a lane
-  plus 52 of sync and porch), a field past its bits, a chunk count past
-  thirteen bits, an escape divider that stops the clock; a write and a
-  read while disabled, a read of zero bytes.
-- **The D-PHY at rest**: with no stream both data lanes in stop state,
-  neither in ULPS, the direction ours, the clock lane NOT in stop state
-  (DPCC keeps it in high speed); the three FIFOs empty, no read in
-  flight; with the stream, no error after three frames.
-- **The stream and the generic interface**: in video mode with the LTDC
-  stopped RDID1 runs out - GPSR 0x55, RCB standing with the command FIFO
-  empty - and the answer comes with the first frame after the LTDC
-  starts (GPSR 0x05, the read FIFO holding it); in command mode the same
-  read is answered with no stream. The first turnaround after the
-  panel's reset carries AE6 and nothing else along the bring-up; the
-  first after a disable with no stream carries AE13.
+  read the same after the whole excursion, the panel answers its
+  identity again and takes a frame.
+- **What the driver refuses**: the seven configuring verbs while
+  enabled, none of them writing a register; a line that holds no pixels,
+  one the pixels do not fit (1200 lane byte clocks for 1203 of payload a
+  lane plus 52 of sync and porch), a field past its bits, a chunk count
+  past thirteen bits, an escape divider that stops the clock; a write
+  and a read while disabled, a read of zero bytes; and both modes taken
+  again with the host disabled.
+- **The D-PHY at rest**: with no refresh in flight both data lanes in
+  stop state, neither in ULPS, the direction ours, the clock lane NOT in
+  stop state (DPCC keeps it in high speed); the three FIFOs empty, no
+  read and no refresh in flight; no acknowledge error along the
+  bring-up (the panel reset and spoken to with no stream on the lanes),
+  and AE6 at the first read after each of the suite's re-enables of the
+  host.
 - **The panel's registers**, each through its read-back command: COLMOD
   55h and 77h read 5 and 7 (RDDCOLMOD's low three bits); MADCTR 00h and
   60h read back as written; TEON and TEOFF in RDDSM's bit 7; WRDISBV
@@ -321,41 +394,29 @@ lanes) against the MB1166 panel, reset on PH7, tearing effect on PJ2:
   after the store and the read that shows it clears it, the same in ISR1;
   AE1 enabled and forced enters the vector once with the body reporting
   it, AE2 forced unmasked enters nothing and stands until read; WIFCR
-  clears the lock and unlock flags, and the PLL's relock enters the
-  vector with PLLLIF.
-- **The pattern generator**: vertical and horizontal bars 1.5 s each
-  with the LTDC stopped, no error on the host, the panel on and counting
-  none - and the bars on the glass.
-- **Video mode out of the external memory**: 60 frames in a second
-  (60.18 by the arithmetic) of 16-bit pixels, no LTDC payload write error
-  and no FIFO underrun; a DCS read answered while the video streams; the
-  panel's error count 0 over it; a 32-bit frame buffer out of the same
-  memory streams as well.
-- **The tearing effect line**: with TEON 29 rising edges on PJ2 in half a
-  second on EXTI line 2, and 29 TEIF flags in the wrapper from the same
-  pin (WCFGR.TESRC); 0 edges after TEOFF.
+  clears the lock and unlock flags, the PLL's relock enters the vector
+  with PLLLIF, and the end of a refresh with ERIF, once.
 - **The wrapper's packets**: WCR.SHTDN and its clear go out with no
   error on either side, and this controller does not act on them (RDDPM
   9Ch throughout); WCR.COLM the same.
 - **ULPS**: PUCR.URDL takes both data lanes into the ultra-low-power
   state (UAN0 and UAN1 fall, stop state left), UEDL brings them back to
-  stop state, and the panel answers after it.
-- **For a human**: eight colour bars and a bar sliding along the bottom
-  at one step a frame, 181 steps in three seconds.
+  stop state, the panel answers after it and takes a frame.
 
 ## Not covered yet
 
 Driver gaps:
-- **Adapted command mode as a stream** (18.14.7, DSI_LCCR, WCR.LTDCEN as
-  a frame trigger, WCFGR.AR, the end-of-refresh flag): `command_mode()`
-  writes the size and the wrapper's bits, and the generic interface is
-  measured in that mode; a frame through it is not - declined for this
-  round: the panel has a frame memory and would take it, and the
-  tearing effect over the link is ES0321 2.8.1's, so the pin (measured)
-  is what would pace it.
+- **Video mode into a panel that takes it**: the host's side is measured
+  (the frame at the pixel clock's rate, the pattern generator, the
+  errors) and the panel's is not - this module's controller is a
+  command interface, and a video-mode panel, or this one's Manufacture
+  Command Set (a document not on the desk, which the NT35510's datasheet
+  names and does not describe), would measure the picture that way.
 - **Burst mode and the chunked line** (VMT 1x, NUMC, NPSIZE): the fields
   are written and checked and no burst frame was streamed; a panel that
   wants its line compressed would measure it.
+- **The tearing effect over the link** (WCFGR.TESRC = 0, CMCR.TEARE):
+  declined, ES0321 2.8.1 - the pin is measured, pulse for pulse.
 - **The lane byte clock off the main PLL's R output** (DCKCFGR.DSISEL):
   the clock task fixes PLLR at 2, whose output is above 62.5 MHz at every
   rate this stratum runs, so the selector is read and never written.
@@ -366,6 +427,10 @@ Driver gaps:
   this panel; a link with a marginal layout would want them exposed.
 - **One data lane** (PCONFR.NL = 0): the enumerator exists and the board
   wires two.
+- **A partial refresh** (a window smaller than the frame through CASET,
+  RASET and the LTDC's layer window): the whole frame is what the suite
+  refreshes; a program updating a region would measure the wrapper's
+  packing of a shorter line.
 - **The panel's own controller beyond DCS**: the NT35510's manufacturer
   command pages and the OTM8009A's CMD2 registers are the panels', not
   this chapter's; the suite drives the module with the standard set
@@ -379,9 +444,9 @@ Implemented, not bench-verified:
   rule is applied in either case, and the link ran with the clock lane
   continuous; the power it would save is what a meter on VDD12DSI would
   measure.
-- `adapted_refresh`, `shadow_update` and `shadow`: the verbs write their
-  registers; the shadow copies serve a frame in flight, and no
-  configuration was changed under one.
+- `shadow_update` and `shadow`: the verbs write their registers; the
+  shadow copies serve a video frame in flight, and no configuration was
+  changed under one.
 - `frame_bta_ack`, `acknowledge_request` and `te_acknowledge`: the bits
   are written and never set - the panel's acknowledges arrived on the
   reads' own turnarounds.
@@ -392,3 +457,5 @@ Implemented, not bench-verified:
   panel that takes 18 bits, would.
 - The clock lane's ULPS (PUCR.URCL/UECL): the data lanes were measured;
   the clock lane runs continuously here.
+- `WCFGR.VSPOL` on its rising edge: the LTDC was halted on the falling
+  edge of its active-low VSYNC throughout.

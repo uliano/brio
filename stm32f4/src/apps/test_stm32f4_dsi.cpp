@@ -1,7 +1,8 @@
 // test_stm32f4_dsi - the reference bench suite for the STM32F4's DSI Host:
 // the MIPI Display Serial Interface in front of the LTDC, its regulator,
-// PLL and D-PHY, the generic interface a panel is spoken to through, and
-// video mode out of the external memory - stm32f4/dsi.hpp, with
+// PLL and D-PHY, the generic interface a panel is spoken to through, the
+// adapted command mode that turns an LTDC frame into memory writes, and
+// video mode as the host streams it - stm32f4/dsi.hpp, with
 // stm32f4/ltdc.hpp, stm32f4/dma2d.hpp and stm32f4/fmc.hpp under it.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
@@ -13,47 +14,57 @@
 // THE INSTRUMENT IS A PANEL THAT ANSWERS, which is why this suite builds
 // for the 32F469IDISCOVERY alone: its 4" 800x480 module (the MB1166) sits
 // on the DSI host's two lanes, and a DSI panel can be READ - its
-// controller reports its identity, its power mode, its pixel format and
-// its own count of link errors over the same link that drives it. That
-// is what makes most of this suite a measurement with no eyes: the
-// verdicts are the panel's answers, and the picture is for a human only
-// in the last letter.
+// controller reports its identity, its power mode, its pixel format, its
+// own count of link errors, and THE CONTENT OF ITS FRAME MEMORY, over the
+// same link that drives it. That is what makes this suite a measurement
+// with no eyes: the verdicts are the panel's answers, the picture itself
+// is read back pixel for pixel, and a human is asked to look only in the
+// last letter.
 //
 //   the panel   the MB1166's controller, identified at boot by RDID1/2/3
 //               (DAh, DBh, DCh) against the two the module was built
 //               with - Orise's OTM8009A (ID1 40h, ID2 00h, ID3 00h) and
-//               Novatek's NT35510 (00h, 80h, 00h) - and driven in DSI
-//               video mode with the standard DCS set alone (SLPOUT,
-//               COLMOD, MADCTR, CASET/PASET, DISPON, the brightness pair,
-//               RAMWR, TEON); reset on PH7 (shared with the touch
-//               controller), tearing effect on PJ2 (AF13 to the wrapper,
-//               EXTI line 2 to the core), the backlight's boost converter
-//               enabled by the panel's own CABC output, so WRCTRLD's BL
-//               bit is the backlight switch (UM1932 4.14, R117 fitted)
+//               Novatek's NT35510 (00h, 80h, 00h); reset on PH7 (shared
+//               with the touch controller), tearing effect on PJ2 (AF13 to
+//               the wrapper, EXTI line 2 to the core), the backlight's boost
+//               converter enabled by the panel's own CABC output, so
+//               WRCTRLD's BL bit is the backlight switch (UM1932 4.14, R117
+//               fitted). The NT35510's datasheet documents its DSI as a
+//               COMMAND interface: the frame memory written by RAMWR/RAMWRC
+//               (2Ch/3Ch) and read by RAMRD/RAMRDC (2Eh/3Eh), the standard
+//               DCS set for everything else - and that is how the suite
+//               drives it: the host's ADAPTED COMMAND MODE, one refresh per
+//               frame, the tearing effect from the pin
 //   the link    two lanes at 496 Mbit/s: the DSI PLL off the 8 MHz crystal
 //               with IDF 1, NDIV 62, ODF 1 (the VCO at 992 MHz - 500 is not
 //               exact with the PFD held inside both documents' ranges),
 //               the lane byte clock at 62 MHz, the TX escape clock at
-//               15.5 MHz, the D-PHY timings from DS11189 table 46
+//               15.5 MHz, the D-PHY timings from DS11189 table 46; the
+//               memory writes in high speed, every other command in low
+//               power
 //   the frame   800x480 at a 26.4 MHz pixel clock (PLLSAI N 132, R 5, the
 //               LCD divider 2 over the main PLL's M of 4): HSA 2, HBP 20,
-//               HFP 20 pixels, VSA 10, VBP 15, VFP 16 lines - the panel
-//               datasheet's typical porches - 60.2 frames a second,
-//               non-burst with sync pulses, 24-bit pixels on the link
+//               HFP 20 pixels, VSA 10, VBP 15, VFP 16 lines, a 16.6 ms
+//               frame the wrapper lets the LTDC run once per refresh, cut
+//               into DCS long writes of one line each (CMDSIZE 800); the
+//               same numbers converted into lane byte clocks for the video
+//               mode letter, non-burst with sync pulses, 24-bit pixels
 //   the memory  the 128-Mbit SDRAM on FMC bank 1 at 0xC0000000, 32 bits
 //               wide, brought up by stm32f4/fmc.hpp before a pixel is
-//               fetched; the frame buffer 16-bit pixels
+//               fetched; a 16-bit and a 32-bit frame buffer in it, both
+//               painted by the accelerator and never read by the CPU
 //   the clocks  the core at 180 MHz, the memory at 90 MHz, PCLK2 at 90 MHz
 //
 // What is exercised, letter by letter:
 //   a  the block: the gate closed at reset and the registers behind it,
 //      the configuration read back, the vector, the lane byte clock's source
 //   b  the regulator and the PLL: the PLL dropped and relocked with its lock
-//      time, its unlock flag, the regulator dropped and back, the panel
-//      still answering after the link came back
+//      time, its unlock flag, the regulator dropped and back, the host's
+//      registers through it, the panel still answering after
 //   c  what the driver refuses, and that a refusal writes nothing
 //   d  the D-PHY and the host at rest: the lanes in their stop state, the
-//      FIFOs empty, no error standing after the boot's traffic
+//      FIFOs empty, no error standing, a read answered with nothing else
+//      on the link
 //   e  THE PANEL'S IDENTITY OVER THE LINK: the three ID bytes, the
 //      controller named, the reads repeatable, the panel's own DSI error
 //      count at zero
@@ -61,14 +72,21 @@
 //      mode, tearing effect, brightness, the backlight control, display on
 //      and off, sleep in and out - each through its read-back command
 //   g  the errors and the interrupt: a forced error read and cleared by the
-//      read, the vector entered once, the wrapper's flags
-//   h  the pattern generator: the host's own colour bars with the LTDC
-//      stopped, judged by the error registers and the panel
-//   i  VIDEO MODE OUT OF THE EXTERNAL MEMORY: the LTDC's frame over the
-//      link, the frame rate measured, no payload write error, the panel's
-//      error count still zero, a read answered while the video runs
+//      read, the vector entered once, the wrapper's flags, the end of a
+//      refresh
+//   h  VIDEO MODE, AS THE HOST STREAMS IT: the frame out of the memory and
+//      the pattern generator, judged by the error registers - and the
+//      panel's memory read back unchanged, because this panel's DSI takes
+//      commands and not a stream; the read that runs out in video mode
+//      with the LTDC stopped
+//   i  THE ADAPTED COMMAND MODE: one LTDC frame as memory writes, the
+//      refresh timed, the refresh rate over a second, no error on either
+//      side - and THE FRAME READ BACK out of the panel's memory, pixel for
+//      pixel at sixteen points and along a run, against what the
+//      accelerator painted
 //   j  the tearing effect line: the panel's pulses counted on EXTI line 2
-//      and by the wrapper from the pin
+//      and by the wrapper from the pin, and the automatic refresh paced by
+//      them
 //   k  the wrapper's shutdown and colour mode packets, against the panel's
 //      power mode
 //   l  the ultra-low-power state on the data lanes, entered and left
@@ -163,8 +181,9 @@ constexpr uint16_t panel_height = 480;
 /// The OTM8009A datasheet's typical porches (table 6.4.2.1: HS 2, HBP and
 /// HFP 20 pixel clocks, VS 10, VBP 15, VFP 16 lines), which the NT35510's
 /// minima (VBP 5, VFP 2, HBP 5, HFP 2) sit under. The polarities are the
-/// LTDC's business only: on this board they never reach a pad, and the
-/// wrapper is told the same values.
+/// LTDC's business only: on this board they never reach a pad, the
+/// wrapper is told the same values, and its halt of the LTDC in the
+/// adapted command mode lands on the VSYNC's assertion, the falling edge.
 constexpr LtdcTiming panel_timing{.hsync = 2,
                                   .hbp = 20,
                                   .width = panel_width,
@@ -187,7 +206,13 @@ constexpr uint32_t frame_period_us = static_cast<uint32_t>((static_cast<uint64_t
 static_assert(frame_rate_mhz > 59'000u && frame_rate_mhz < 61'000u);
 
 constexpr uint32_t bit_rate_hz = 496'000'000u;
-constexpr DsiConfig dsi_cfg = dsi_config_for(SysClock::root_hz, bit_rate_hz);
+/// The link's configuration: the memory writes of a refresh are DCS long
+/// writes and go in high speed; every other command stays in low power.
+constexpr DsiConfig dsi_cfg = [] {
+    DsiConfig c = dsi_config_for(SysClock::root_hz, bit_rate_hz);
+    c.host.long_writes_low_power = false;
+    return c;
+}();
 static_assert(dsi_cfg.pll.ndiv == 62 && dsi_cfg.pll.idf == 1 && dsi_cfg.pll.odf == 1);
 constexpr uint32_t lane_byte_hz = dsi_lane_byte_hz(bit_rate_hz);
 constexpr DsiVideoTiming link_timing = dsi_video_timing(panel_timing, pixel_hz, lane_byte_hz);
@@ -206,11 +231,9 @@ constexpr uint32_t sdram_base = Sdram::base;
 constexpr uint32_t fb16_offset = 0x0000'0000u;   // 768 KB
 constexpr uint32_t fb32_offset = 0x0010'0000u;   // 1.5 MB
 const LtdcFramebuffer<uint16_t> fb16{Sdram::at<uint16_t>(fb16_offset), panel_width, panel_height, 0};
-const LtdcFramebuffer<uint32_t> fb32{Sdram::at<uint32_t>(fb32_offset), panel_width, panel_height, 0};
 
 // ---- the panel's command set: DCS, as both datasheets spell it ------------------------
 
-constexpr uint8_t dcs_swreset = 0x01;
 constexpr uint8_t dcs_rdnumed = 0x05;    // the panel's count of DSI errors
 constexpr uint8_t dcs_rddpm = 0x0A;      // power mode: bit 4 SLPOUT, bit 2 DISON
 constexpr uint8_t dcs_rddmadctr = 0x0B;
@@ -221,8 +244,8 @@ constexpr uint8_t dcs_slpout = 0x11;
 constexpr uint8_t dcs_dispoff = 0x28;
 constexpr uint8_t dcs_dispon = 0x29;
 constexpr uint8_t dcs_caset = 0x2A;
-constexpr uint8_t dcs_paset = 0x2B;
-constexpr uint8_t dcs_ramwr = 0x2C;
+constexpr uint8_t dcs_paset = 0x2B;      // the NT35510 spells it RASET
+constexpr uint8_t dcs_ramrd = 0x2E;      // the frame memory read back
 constexpr uint8_t dcs_teoff = 0x34;
 constexpr uint8_t dcs_teon = 0x35;
 constexpr uint8_t dcs_madctr = 0x36;
@@ -304,12 +327,13 @@ struct BootState {
     bool sdram_up = false;
     bool pixel_clock_up = false;
     bool dsi_up = false;
-    bool colour_ok = false, video_ok = false;
+    bool colour_ok = false, mode_ok = false;
     uint32_t regulator_us = 0, lock_us = 0;
-    uint32_t e0_link = 0, e0_reset = 0, e0_ids = 0, e0_init = 0, e0_paint = 0;
+    uint32_t e0_link = 0, e0_reset = 0, e0_ids = 0, e0_init = 0, e0_frame = 0;
     uint8_t panel = unknown_panel;
     uint8_t id[3] = {0, 0, 0};
     DsiStatus id_status = DsiStatus::refused;
+    uint32_t first_refresh_us = 0;
 };
 BootState boot;
 
@@ -321,6 +345,10 @@ volatile uint32_t dsi_irq_errors0 = 0;
 volatile uint32_t dsi_irq_errors1 = 0;
 volatile uint32_t dsi_irq_wrapper = 0;
 volatile uint32_t te_edges = 0;
+/// What the first read after each re-enable of the host found in ISR0,
+/// ORed over the suite: the panel's acknowledge for the lanes' move.
+uint32_t settled_errors = 0;
+uint32_t settles = 0;
 
 // =============================================================================
 // The panel
@@ -373,10 +401,26 @@ const char* panel_name(uint8_t index) {
     return index == unknown_panel ? "an unknown controller" : known_panels[index].name;
 }
 
+/// The write window: the columns and the rows the next memory write or
+/// read covers (CASET, RASET/PASET), four bytes each, big-endian.
+DsiStatus panel_window(uint16_t x0, uint16_t x1, uint16_t y0, uint16_t y1) {
+    const uint8_t columns[4] = {static_cast<uint8_t>(x0 >> 8), static_cast<uint8_t>(x0 & 0xFFu),
+                                static_cast<uint8_t>(x1 >> 8), static_cast<uint8_t>(x1 & 0xFFu)};
+    const uint8_t rows[4] = {static_cast<uint8_t>(y0 >> 8), static_cast<uint8_t>(y0 & 0xFFu),
+                             static_cast<uint8_t>(y1 >> 8), static_cast<uint8_t>(y1 & 0xFFu)};
+    DsiStatus st = Dsi::dcs_write(dcs_caset, columns, 4);
+    if (st == DsiStatus::ok) {
+        st = Dsi::dcs_write(dcs_paset, rows, 4);
+    }
+    return st;
+}
+
+DsiStatus panel_whole_window() { return panel_window(0, panel_width - 1u, 0, panel_height - 1u); }
+
 /// The standard DCS bring-up, the same for both controllers: out of
 /// sleep, the pixel format, the landscape address mode over the whole
 /// 800x480 window, the display on, the backlight through the brightness
-/// block, and the memory write that video mode's pixels land in.
+/// block. The memory writes themselves are the adapted command mode's.
 DsiStatus panel_init() {
     DsiStatus st = Dsi::dcs_write(dcs_slpout);
     wait_ms(120);
@@ -387,14 +431,7 @@ DsiStatus panel_init() {
         st = Dsi::dcs_write(dcs_madctr, madctr_landscape);
     }
     if (st == DsiStatus::ok) {
-        const uint8_t columns[4] = {0x00, 0x00, static_cast<uint8_t>((panel_width - 1u) >> 8),
-                                    static_cast<uint8_t>((panel_width - 1u) & 0xFFu)};
-        st = Dsi::dcs_write(dcs_caset, columns, 4);
-    }
-    if (st == DsiStatus::ok) {
-        const uint8_t pages[4] = {0x00, 0x00, static_cast<uint8_t>((panel_height - 1u) >> 8),
-                                  static_cast<uint8_t>((panel_height - 1u) & 0xFFu)};
-        st = Dsi::dcs_write(dcs_paset, pages, 4);
+        st = panel_whole_window();
     }
     if (st == DsiStatus::ok) {
         st = Dsi::dcs_write(dcs_dispon);
@@ -405,10 +442,20 @@ DsiStatus panel_init() {
     if (st == DsiStatus::ok) {
         st = Dsi::dcs_write(dcs_wrdisbv, 0xFF);
     }
-    if (st == DsiStatus::ok) {
-        st = Dsi::dcs_write(dcs_ramwr);
-    }
     wait_ms(20);
+    return st;
+}
+
+/// `n` pixels of the panel's frame memory from (x, y) along a row, as the
+/// panel returns them (three bytes a pixel in the 24-bit format, and one
+/// more byte read in case the answer leads with one), the whole window
+/// put back afterwards.
+DsiStatus panel_read_pixels(uint16_t x, uint16_t y, uint16_t n, uint8_t* bytes) {
+    DsiStatus st = panel_window(x, static_cast<uint16_t>(x + n - 1u), y, y);
+    if (st == DsiStatus::ok) {
+        st = Dsi::dcs_read(dcs_ramrd, bytes, static_cast<uint16_t>(3u * n + 1u));
+    }
+    (void)panel_whole_window();
     return st;
 }
 
@@ -416,11 +463,11 @@ DsiStatus panel_init() {
 // The display tier, brought up in 18.14.1's order
 // =============================================================================
 
-LtdcLayerConfig one_layer() {
+LtdcLayerConfig one_layer(LtdcPixelFormat format, uint32_t framebuffer) {
     LtdcLayerConfig c{};
     c.window = LtdcWindow{0, 0, panel_width, panel_height};
-    c.format = LtdcPixelFormat::rgb565;
-    c.framebuffer = sdram_base + fb16_offset;
+    c.format = format;
+    c.framebuffer = framebuffer;
     c.constant_alpha = 255;
     c.blend_source = LtdcBlend1::constant_alpha;
     c.blend_below = LtdcBlend2::one_minus_constant_alpha;
@@ -429,11 +476,12 @@ LtdcLayerConfig one_layer() {
 
 constexpr uint16_t blanking_line = static_cast<uint16_t>(panel_timing.vsync + panel_timing.vbp + panel_timing.height);
 
-/// The LTDC showing the 16-bit surface, its line event armed on the first
-/// blanking line, running.
-bool ltdc_start() {
+/// The LTDC showing a surface, its line event armed on the first blanking
+/// line, enabled - and, in the adapted command mode, held by the wrapper
+/// until a refresh lets it run one frame.
+bool ltdc_show(LtdcPixelFormat format, uint32_t framebuffer) {
     LtdcLayer<2>::disable();
-    const bool ok = LtdcLayer<1>::configure(one_layer(), panel_timing);
+    const bool ok = LtdcLayer<1>::configure(one_layer(format, framebuffer), panel_timing);
     LtdcLayer<1>::enable();
     (void)Ltdc::line_interrupt(blanking_line);
     Ltdc::reload(LtdcReload::immediate);
@@ -443,14 +491,14 @@ bool ltdc_start() {
     return ok;
 }
 
-/// The LTDC stopped AT THE FRAME BOUNDARY, so that no pixel packet is cut
+bool ltdc_show16() { return ltdc_show(LtdcPixelFormat::rgb565, sdram_base + fb16_offset); }
+bool ltdc_show32() { return ltdc_show(LtdcPixelFormat::argb8888, sdram_base + fb32_offset); }
+
+/// The LTDC stopped at the frame boundary, so that no pixel packet is cut
 /// short: the line event is armed on the first blanking line, and the
-/// disable right after it lands inside the vertical front porch. A
-/// precaution and not a measured need - the invalid transmission length
-/// the panel reports (letter d) comes from the host's disable with no
-/// stream, and stopping mid-frame was not tried.
+/// disable right after it lands inside the vertical front porch.
 void ltdc_stop() {
-    if (Ltdc::enabled()) {
+    if (Ltdc::enabled() && !Dsi::in_command_mode()) {
         const uint32_t target = line_events + 1u;
         const uint32_t deadline = millis() + 60u;
         while (line_events < target && static_cast<int32_t>(millis() - deadline) < 0) {
@@ -461,53 +509,67 @@ void ltdc_stop() {
     Ltdc::disable_interrupt();
 }
 
-/// After the host's enable: two frames for the stream, then the first
-/// read, which carries the acknowledge the panel sends for the lanes'
-/// transition (AE6, a false control error, at the first bus turnaround
-/// after a reset on either side - measured), and the error register
-/// read clear.
+/// One refresh of the adapted command mode: the wrapper lets the LTDC run
+/// a frame, the host turns it into memory writes, ERIF closes it. The
+/// time it took, or 0 when the end of refresh never came.
+uint32_t refresh(uint32_t timeout_ms = 100) {
+    Dsi::clear_wrapper_flags(DSI_WISR_ERIF);
+    const uint32_t t0 = micros();
+    const uint32_t deadline = millis() + timeout_ms;
+    Dsi::ltdc_flow(true);
+    while ((Dsi::wrapper_flags() & DSI_WISR_ERIF) == 0u) {
+        if (static_cast<int32_t>(millis() - deadline) > 0) {
+            return 0u;
+        }
+    }
+    const uint32_t took = micros() - t0;
+    return took == 0u ? 1u : took;
+}
+
+/// After the host's enable: the first read, which carries the
+/// acknowledge the panel sends for the lanes' transition (AE6, a false
+/// control error, at the first bus turnaround after a reset on either
+/// side - measured), and the error registers read clear.
 void link_settle() {
-    wait_ms(40);
+    wait_ms(20);
     uint8_t b = 0;
     (void)Dsi::dcs_read(dcs_rdid1, &b, 1);
-    (void)Dsi::errors0();
+    settled_errors |= Dsi::errors0();
+    settles = settles + 1u;
     (void)Dsi::errors1();
 }
 
-/// Wait for `frames` line events; false if none come.
-bool wait_frames(uint32_t frames) {
-    const uint32_t target = line_events + frames;
-    const uint32_t deadline = millis() + frames * (frame_period_us / 1000u + 2u) + 50u;
-    while (line_events < target) {
-        if (static_cast<int32_t>(millis() - deadline) > 0) {
-            return false;
-        }
-    }
-    return true;
-}
+/// Eight vertical bars into a surface, by the accelerator: white, yellow,
+/// cyan, green, magenta, red, blue, black - the pattern generator's own
+/// order (RM0386 18.11.2). The bar a column falls in is what a pixel read
+/// back out of the panel is judged against: the CPU never reads the
+/// surface (ES0206 2.3.5).
+constexpr uint32_t bar_colours[8] = {argb8888(255, 255, 255, 255), argb8888(255, 255, 255, 0),
+                                     argb8888(255, 0, 255, 255),   argb8888(255, 0, 255, 0),
+                                     argb8888(255, 255, 0, 255),   argb8888(255, 255, 0, 0),
+                                     argb8888(255, 0, 0, 255),     argb8888(255, 0, 0, 0)};
+constexpr uint16_t bar_width = panel_width / 8u;
 
-/// Eight vertical bars of the primaries into the 16-bit surface, by the
-/// accelerator.
-bool paint_bars() {
-    constexpr uint32_t bars[8] = {argb8888(255, 255, 255, 255), argb8888(255, 255, 255, 0),
-                                  argb8888(255, 0, 255, 255),   argb8888(255, 0, 255, 0),
-                                  argb8888(255, 255, 0, 255),   argb8888(255, 255, 0, 0),
-                                  argb8888(255, 0, 0, 255),     argb8888(255, 0, 0, 0)};
-    const uint16_t bar_width = panel_width / 8u;
+constexpr uint32_t bar_colour_at(uint16_t x) { return bar_colours[x / bar_width] & 0x00FFFFFFu; }
+
+bool paint_bars(uint32_t base, Dma2dOutputColor format, uint8_t bytes_per_pixel) {
     bool painted = true;
     for (uint32_t i = 0; i < 8u; ++i) {
-        const Dma2dOutput out{.address = sdram_base + fb16_offset + 2u * (i * bar_width),
+        const Dma2dOutput out{.address = base + bytes_per_pixel * (i * bar_width),
                               .line_offset = static_cast<uint16_t>(panel_width - bar_width),
-                              .format = Dma2dOutputColor::rgb565};
-        painted = painted && Dma2d::fill(out, bars[i], Dma2dArea{.pixels = bar_width, .lines = panel_height}) &&
+                              .format = format};
+        painted = painted && Dma2d::fill(out, bar_colours[i], Dma2dArea{.pixels = bar_width, .lines = panel_height}) &&
                   Dma2d::wait();
     }
     return painted;
 }
+bool paint_bars16() { return paint_bars(sdram_base + fb16_offset, Dma2dOutputColor::rgb565, 2); }
+bool paint_bars32() { return paint_bars(sdram_base + fb32_offset, Dma2dOutputColor::argb8888, 4); }
 
 /// The link brought up: the regulator, the PLL, the D-PHY, the host, the
-/// LTDC interface in 24 bits, video mode with the frame above, the
-/// tearing effect from the pin, the host enabled. Times the two waits.
+/// LTDC interface in 24 bits, the adapted command mode with a line per
+/// packet, the tearing effect from the pin, the LTDC halted on the
+/// VSYNC's falling edge, the host enabled. Times the two waits.
 bool link_up() {
     Dsi::clock(true);
     Dsi::disable();
@@ -525,10 +587,24 @@ bool link_up() {
         return false;
     }
     boot.colour_ok = Dsi::colour(DsiColor::rgb888, panel_timing);
-    boot.video_ok = Dsi::video(video_cfg, link_timing);
+    boot.mode_ok = Dsi::command_mode(panel_width);
     (void)Dsi::te_source(true, false);
+    (void)Dsi::adapted_refresh(false, false);
     Dsi::enable();
-    return boot.colour_ok && boot.video_ok;
+    return boot.colour_ok && boot.mode_ok;
+}
+
+/// Into video mode and back: the host disabled around the mode change,
+/// the registers of the other mode untouched.
+void enter_video_mode() {
+    Dsi::disable();
+    (void)Dsi::video(video_cfg, link_timing);
+    Dsi::enable();
+}
+void enter_command_mode() {
+    Dsi::disable();
+    (void)Dsi::command_mode(panel_width);
+    Dsi::enable();
 }
 
 // =============================================================================
@@ -562,8 +638,8 @@ void ta_block() {
     print(serial, "  after init: PLL NDIV ", pll.ndiv, " IDF ", pll.idf, " ODF ", pll.odf, " (", bit_rate_hz / 1'000'000u,
           " Mbit/s a lane, the lane byte clock ", lane_byte_hz / 1'000'000u, " MHz), UIX4 ", Dsi::uix4(), ", ",
           Dsi::lanes() == DsiLanes::two ? "two lanes" : "one lane", ", escape divider ", Dsi::escape_divider(),
-          ", commands in ", Dsi::commands_low_power() ? "low power" : "high speed", ", channel ",
-          Dsi::virtual_channel(), crlf);
+          ", short commands in ", Dsi::commands_low_power() ? "low power" : "high speed", ", long writes in ",
+          Dsi::long_writes_low_power() ? "low power" : "high speed", ", channel ", Dsi::virtual_channel(), crlf);
     print(serial, "  lane timings: clock HS2LP ", t.clock_hs2lp, " LP2HS ", t.clock_lp2hs, " data HS2LP ",
           t.data_hs2lp, " LP2HS ", t.data_lp2hs, " stop wait ", t.stop_wait, " max read ", t.max_read_time,
           " (lane byte clocks)", crlf);
@@ -574,12 +650,18 @@ void ta_block() {
                   t.clock_hs2lp == t.clock_lp2hs && t.clock_hs2lp == 35u);
     bench.verdict("the data lane's times and the escape divider are the arithmetic's",
                   t.data_lp2hs == 21u && t.data_hs2lp == 17u && Dsi::escape_divider() == 4u);
-    const DsiVideoTiming v = Dsi::video_timing();
-    print(serial, "  the frame on the link: HSA ", v.hsa, " HBP ", v.hbp, " line ", v.hline, " lane byte clocks, VSA ",
-          v.vsa, " VBP ", v.vbp, " VFP ", v.vfp, " VA ", v.va, " lines, ", v.width, " pixels a packet", crlf);
-    bench.verdict("the video registers hold the converted frame (HSA 5, HBP 47, line 1977, 480 lines)",
-                  v.hsa == link_timing.hsa && v.hbp == link_timing.hbp && v.hline == link_timing.hline &&
-                      v.va == panel_height && v.width == panel_width);
+    bench.verdict("the short commands go in low power and the long writes in high speed, as configured",
+                  Dsi::commands_low_power() && !Dsi::long_writes_low_power());
+    print(serial, "  the mode: ", Dsi::in_command_mode() ? "command" : "video", ", WCFGR ", hex(Dsi::regs().WCFGR),
+          " (DSIM ", (Dsi::regs().WCFGR & DSI_WCFGR_DSIM) != 0u ? "1" : "0", ", TESRC ",
+          (Dsi::regs().WCFGR & DSI_WCFGR_TESRC) != 0u ? "pin" : "link", ", AR ",
+          (Dsi::regs().WCFGR & DSI_WCFGR_AR) != 0u ? "1" : "0", "), LCCR ", Dsi::regs().LCCR, " pixels a command",
+          crlf);
+    bench.verdict("the adapted command mode reads back: MCR.CMDM and WCFGR.DSIM set, the tearing effect from the "
+                  "pin, no automatic refresh, 800 pixels a memory write",
+                  Dsi::in_command_mode() && (Dsi::regs().WCFGR & (DSI_WCFGR_DSIM | DSI_WCFGR_TESRC | DSI_WCFGR_AR)) ==
+                                                (DSI_WCFGR_DSIM | DSI_WCFGR_TESRC) &&
+                      Dsi::regs().LCCR == panel_width);
     bench.verdict("the lane byte clock comes from the D-PHY (DCKCFGR.DSISEL clear), as at reset",
                   !boot.byte_clock_pllr && !Dsi::byte_clock_from_pllr());
     bench.verdict("the colour coding reads back 24-bit in the host and the wrapper alike",
@@ -597,14 +679,14 @@ void tb_regulator_pll() {
     bench.verdict("the regulator came ready and the PLL locked at boot", boot.dsi_up);
     bench.verdict("the lock took under 200 us", boot.lock_us <= 200u);
 
-    // The host quiet (the LTDC keeps streaming into a wrapper that forwards
-    // nothing), the PLL dropped: PLLLS falls. PLLUIF does NOT rise for a
-    // stop the program asked for - measured, the flag is a lost lock's.
+    // The host quiet, the PLL dropped: PLLLS falls. PLLUIF does NOT rise
+    // for a stop the program asked for - measured, the flag is a lost
+    // lock's.
     const uint32_t pconfr = Dsi::regs().PCONFR;
     const uint32_t cmcr = Dsi::regs().CMCR;
     const uint32_t pcr = Dsi::regs().PCR;
     const uint32_t lcolcr = Dsi::regs().LCOLCR;
-    const uint32_t vlcr = Dsi::regs().VLCR;
+    const uint32_t lccr = Dsi::regs().LCCR;
     const uint32_t cltcr = Dsi::regs().CLTCR;
     Dsi::disable();
     Dsi::clear_wrapper_flags(DSI_WISR_PLLUIF | DSI_WISR_PLLLIF);
@@ -651,7 +733,7 @@ void tb_regulator_pll() {
     const bool lock_again = Dsi::pll(SysClock::root_hz, dsi_cfg.pll);
     Dsi::enable();
     const bool kept = Dsi::regs().PCONFR == pconfr && Dsi::regs().CMCR == cmcr && Dsi::regs().PCR == pcr &&
-                      Dsi::regs().LCOLCR == lcolcr && Dsi::regs().VLCR == vlcr && Dsi::regs().CLTCR == cltcr;
+                      Dsi::regs().LCOLCR == lcolcr && Dsi::regs().LCCR == lccr && Dsi::regs().CLTCR == cltcr;
     bench.verdict("the host's configuration survives its disable (CR.EN = 0 holds it under reset, the "
                   "registers keep their values)", kept);
     link_settle();
@@ -662,6 +744,8 @@ void tb_regulator_pll() {
           status_name(st), "), ", panel_name(which), crlf);
     bench.verdict("with the PLL relocked and the host re-enabled the panel answers its identity again",
                   lock_again && st == DsiStatus::ok && which == boot.panel);
+    const uint32_t took = refresh();
+    bench.verdict("... and takes a frame", took != 0u);
 }
 
 // =============================================================================
@@ -675,17 +759,20 @@ void tc_refusals() {
     const uint32_t ccr = Dsi::regs().CCR;
     const uint32_t vlcr = Dsi::regs().VLCR;
     const uint32_t lcolcr = Dsi::regs().LCOLCR;
+    const uint32_t lccr = Dsi::regs().LCCR;
     const bool phy_r = !Dsi::phy(dsi_cfg.phy, dsi_cfg.bit_rate_hz);
     const bool host_r = !Dsi::host(dsi_cfg.host);
     const bool video_r = !Dsi::video(video_cfg, link_timing);
     const bool colour_r = !Dsi::colour(DsiColor::rgb565_1, panel_timing);
-    const bool cmd_r = !Dsi::command_mode(panel_width);
+    const bool cmd_r = !Dsi::command_mode(16);
     const bool te_r = !Dsi::te_source(false);
-    bench.verdict("phy, host, video, colour, command_mode and te_source all refuse while the host is enabled",
-                  Dsi::enabled() && phy_r && host_r && video_r && colour_r && cmd_r && te_r);
+    const bool ar_r = !Dsi::adapted_refresh(true, true);
+    bench.verdict("phy, host, video, colour, command_mode, te_source and adapted_refresh all refuse while the host "
+                  "is enabled",
+                  Dsi::enabled() && phy_r && host_r && video_r && colour_r && cmd_r && te_r && ar_r);
     bench.verdict("... and none of them wrote a register",
                   Dsi::regs().PCONFR == pconfr && Dsi::regs().CCR == ccr && Dsi::regs().VLCR == vlcr &&
-                      Dsi::regs().LCOLCR == lcolcr);
+                      Dsi::regs().LCOLCR == lcolcr && Dsi::regs().LCCR == lccr);
 
     // With the host disabled the same verbs take, and the frame's rules
     // still refuse: a line shorter than its sync and porch, a line the
@@ -708,6 +795,8 @@ void tc_refusals() {
     bench.verdict("a chunk count past NUMC's thirteen bits is refused", !Dsi::video(vc, link_timing));
     const bool good = Dsi::video(video_cfg, link_timing);
     bench.verdict("the frame itself takes again with the host disabled", good);
+    const bool back = Dsi::command_mode(panel_width);
+    bench.verdict("... and so does the command mode", back && Dsi::in_command_mode());
 
     // The generic interface refuses while disabled.
     uint8_t b = 0;
@@ -728,83 +817,40 @@ void tc_refusals() {
 // =============================================================================
 
 void td_phy() {
-    ltdc_stop();
     wait_ms(30);
     const DsiLaneStatus s = Dsi::lane_status();
-    print(serial, "  lanes with no video: clock stop ", s.clock_stop ? "1" : "0", " ulps ", s.clock_ulps ? "1" : "0",
-          "; data0 stop ", s.data0_stop ? "1" : "0", " ulps ", s.data0_ulps ? "1" : "0", " rx-ulps ",
-          s.data0_rx_ulps ? "1" : "0", "; data1 stop ", s.data1_stop ? "1" : "0", " ulps ", s.data1_ulps ? "1" : "0",
-          "; direction ", s.direction_rx ? "rx" : "tx", crlf);
+    print(serial, "  lanes with no refresh in flight: clock stop ", s.clock_stop ? "1" : "0", " ulps ",
+          s.clock_ulps ? "1" : "0", "; data0 stop ", s.data0_stop ? "1" : "0", " ulps ", s.data0_ulps ? "1" : "0",
+          " rx-ulps ", s.data0_rx_ulps ? "1" : "0", "; data1 stop ", s.data1_stop ? "1" : "0", " ulps ",
+          s.data1_ulps ? "1" : "0", "; direction ", s.direction_rx ? "rx" : "tx", crlf);
     bench.verdict("both data lanes sit in their stop state, in ULPS neither, the bus ours",
                   s.data0_stop && s.data1_stop && !s.data0_ulps && !s.data1_ulps && !s.direction_rx);
     bench.verdict("the clock lane is NOT in stop state: DPCC keeps it in high speed", !s.clock_stop);
     print(serial, "  FIFOs: command ", Dsi::command_fifo_empty() ? "empty" : "NOT EMPTY", ", write ",
           Dsi::write_fifo_empty() ? "empty" : "NOT EMPTY", ", read ", Dsi::read_fifo_empty() ? "empty" : "NOT EMPTY",
-          ", read busy ", Dsi::read_busy() ? "YES" : "no", crlf);
-    bench.verdict("the three FIFOs are empty and no read is in flight",
-                  Dsi::command_fifo_empty() && Dsi::write_fifo_empty() && Dsi::read_fifo_empty() && !Dsi::read_busy());
+          ", read busy ", Dsi::read_busy() ? "YES" : "no", ", refresh busy ", Dsi::busy() ? "YES" : "no", crlf);
+    bench.verdict("the three FIFOs are empty, no read and no refresh in flight",
+                  Dsi::command_fifo_empty() && Dsi::write_fifo_empty() && Dsi::read_fifo_empty() && !Dsi::read_busy() &&
+                      !Dsi::busy());
     const uint32_t e0 = Dsi::errors0();
     const uint32_t e1 = Dsi::errors1();
     print(serial, "  ISR0 along the bring-up: after the link ", hex(boot.e0_link), ", the panel's reset ", hex(boot.e0_reset),
-          ", the identity ", hex(boot.e0_ids), ", the init ", hex(boot.e0_init), ", the first frames ", hex(boot.e0_paint),
-          "; now ISR0 ", hex(e0), " ISR1 ", hex(e1), crlf);
-    bench.verdict("the first bus turnaround after the panel's reset carries AE6, a false control error the "
-                  "panel logged while the lanes moved, and nothing else does",
-                  boot.e0_link == 0u && boot.e0_reset == 0u && boot.e0_ids == DSI_ISR0_AE6 && boot.e0_init == 0u &&
-                      boot.e0_paint == 0u);
+          ", the identity ", hex(boot.e0_ids), ", the init ", hex(boot.e0_init), ", the first frame ", hex(boot.e0_frame),
+          "; now ISR0 ", hex(e0), " ISR1 ", hex(e1), "; the first read after each of the ", settles,
+          " re-enables so far found ", hex(settled_errors), crlf);
+    bench.verdict("no acknowledge error along the bring-up: the panel reset and spoken to with no stream on the "
+                  "lanes reports nothing at its first turnaround",
+                  boot.e0_link == 0u && boot.e0_reset == 0u && boot.e0_ids == 0u && boot.e0_init == 0u &&
+                      boot.e0_frame == 0u);
     bench.verdict("no error stands now, after the letters so far", e0 == 0u && e1 == 0u);
 
-    // THE GENERIC INTERFACE IN VIDEO MODE WAITS FOR THE STREAM: with the
-    // LTDC stopped a read runs out and its command sits in the FIFO;
-    // started again, the command goes out with the first frame and is
-    // answered. In command mode the same read needs no stream at all.
+    // In command mode a read is answered with nothing else on the link:
+    // no stream, no refresh.
     uint8_t id = 0xEE;
-    const DsiStatus stopped = Dsi::dcs_read(dcs_rdid1, &id, 1);
-    const uint32_t gpsr_after = Dsi::regs().GPSR;
-    wait_ms(40);
-    const uint32_t gpsr_later = Dsi::regs().GPSR;
-    (void)ltdc_start();
-    wait_ms(40);
-    const uint32_t gpsr_running = Dsi::regs().GPSR;
-    id = 0xEE;
-    const DsiStatus running = Dsi::dcs_read(dcs_rdid1, &id, 1);
-    print(serial, "  video mode, LTDC stopped: RDID1 ", status_name(stopped), ", GPSR ", hex(gpsr_after), " then ",
-          hex(gpsr_later), "; LTDC started: GPSR ", hex(gpsr_running), ", RDID1 ", hex(id), " (", status_name(running),
-          ")", crlf);
-    bench.verdict("in video mode with the LTDC stopped a read runs out unanswered", stopped == DsiStatus::timeout);
-    bench.verdict("with the stream back the same read is answered", running == DsiStatus::ok && id == boot.id[0]);
-    ltdc_stop();
-    wait_ms(30);
-    Dsi::disable();
-    (void)Dsi::command_mode(panel_width);
-    Dsi::enable();
-    id = 0xEE;
-    const DsiStatus in_command = Dsi::dcs_read(dcs_rdid1, &id, 1);
-    const uint32_t e0_cmd = Dsi::errors0();
-    Dsi::disable();
-    (void)Dsi::video(video_cfg, link_timing);
-    Dsi::enable();
-    print(serial, "  command mode, LTDC stopped: RDID1 ", hex(id), " (", status_name(in_command), "), ISR0 after it ",
-          hex(e0_cmd), crlf);
-    bench.verdict("in command mode the read is answered with no stream at all",
-                  in_command == DsiStatus::ok && id == boot.id[0]);
-    bench.verdict("the host's disable with no stream running is what the panel reports at that turnaround: an "
-                  "invalid transmission length (AE13), and nothing else",
-                  e0_cmd == DSI_ISR0_AE13);
-
-    // With the video running the clock lane is in high speed as well, and
-    // the data lanes leave stop state for each burst - a snapshot may
-    // catch either, so only the errors are judged.
-    (void)ltdc_start();
-    link_settle();
-    (void)wait_frames(3);
-    const DsiLaneStatus v = Dsi::lane_status();
-    print(serial, "  lanes with video: clock stop ", v.clock_stop ? "1" : "0", ", data0 stop ", v.data0_stop ? "1" : "0",
-          ", data1 stop ", v.data1_stop ? "1" : "0", crlf);
-    const uint32_t e0v = Dsi::errors0();
-    const uint32_t e1v = Dsi::errors1();
-    print(serial, "  ISR0 ", hex(e0v), " ISR1 ", hex(e1v), crlf);
-    bench.verdict("three frames in, no error stands either", e0v == 0u && e1v == 0u);
+    const DsiStatus st = Dsi::dcs_read(dcs_rdid1, &id, 1);
+    print(serial, "  command mode, the LTDC held: RDID1 ", hex(id), " (", status_name(st), ")", crlf);
+    bench.verdict("in command mode a read is answered with no stream and no refresh in flight",
+                  st == DsiStatus::ok && id == boot.id[0]);
 }
 
 // =============================================================================
@@ -876,7 +922,8 @@ void tf_registers() {
     print(serial, "  TEON -> RDDSM ", hex(sm_on), "; TEOFF -> ", hex(sm_off), crlf);
     bench.verdict("TEON and TEOFF show in the signal mode's bit 7", (sm_on & rddsm_teon) != 0u && (sm_off & rddsm_teon) == 0u);
 
-    // The brightness and the control block.
+    // The brightness and the control block. RDDISBV answers the PREVIOUS
+    // value straight after a write and the new one a frame later.
     (void)Dsi::dcs_write(dcs_wrdisbv, 0x80);
     const uint8_t bv80_now = panel_read(dcs_rddisbv);
     wait_ms(40);
@@ -913,10 +960,10 @@ void tf_registers() {
     print(serial, "  SLPIN -> RDDPM ", hex(pm_sleep), "; SLPOUT -> ", hex(pm_awake), crlf);
     bench.verdict("SLPIN and SLPOUT show in the power mode's SLPOUT bit, 120 ms apart",
                   (pm_sleep & rddpm_slpout) == 0u && (pm_awake & rddpm_slpout) != 0u);
-    // A sleep may take the display with it: the bring-up's tail again.
+    // A sleep may take the display with it: the bring-up's tail again,
+    // and a frame.
     (void)Dsi::dcs_write(dcs_dispon);
-    (void)Dsi::dcs_write(dcs_ramwr);
-    wait_ms(20);
+    (void)refresh();
     const uint8_t errors = panel_read(dcs_rdnumed);
     bench.verdict("after all of the above the panel's DSI error count is still zero", errors == 0u);
     bench.verdict("... and the host's error registers too", Dsi::errors0() == 0u && Dsi::errors1() == 0u);
@@ -928,9 +975,7 @@ void tf_registers() {
 
 void tg_errors() {
     // A forced acknowledge error stands in ISR0, and the read that shows it
-    // clears it (18.13.2).
-    // (The store into FIR takes a moment to show in ISR: read straight
-    // after it, ISR0 was still 0 and the bit came with the next read.)
+    // clears it (18.13.2). The store into FIR takes a moment to show.
     Dsi::force_errors(DSI_FIR0_FAE0, 0u);
     wait_us(20);
     const uint32_t first = Dsi::errors0();
@@ -990,42 +1035,46 @@ void tg_errors() {
     bench.verdict("WIFCR clears the lock and unlock flags", cleared == 0u);
     bench.verdict("the lock enters the vector and the body reports it",
                   (after_on & DSI_WISR_PLLLIF) != 0u && dsi_irq_entries >= 1u);
-}
 
-// =============================================================================
-// h - the pattern generator
-// =============================================================================
-
-void th_pattern() {
-    ltdc_stop();
-    wait_ms(30);
-    (void)Dsi::errors1();
-    Dsi::pattern(DsiPattern::vertical_bars);
-    wait_ms(1500);
-    const uint32_t e1v = Dsi::errors1();
-    const uint8_t pm_v = panel_read(dcs_rddpm);
-    Dsi::pattern(DsiPattern::horizontal_bars);
-    wait_ms(1500);
-    const uint32_t e1h = Dsi::errors1();
-    Dsi::pattern(DsiPattern::off);
-    (void)ltdc_start();
+    // The end-of-refresh flag through the vector too.
+    dsi_irq_entries = 0;
+    dsi_irq_wrapper = 0;
+    Dsi::clear_wrapper_flags(DSI_WISR_ERIF);
+    Dsi::wrapper_interrupts(DSI_WISR_ERIF);
+    Dsi::enable_interrupt();
+    Dsi::ltdc_flow(true);
     wait_ms(40);
-    const uint8_t errors = panel_read(dcs_rdnumed);
-    print(serial, "  vertical bars 1.5 s: ISR1 ", hex(e1v), ", panel power mode ", hex(pm_v), "; horizontal bars 1.5 s: ISR1 ",
-          hex(e1h), "; the panel's DSI error count after ", errors, crlf);
-    bench.verdict("the host streams its own colour bars with the LTDC stopped and raises no error",
-                  Dsi::pattern_on() == false && e1v == 0u && e1h == 0u);
-    bench.verdict("the panel stays on through both patterns and counts no link error",
-                  (pm_v & rddpm_dison) != 0u && errors == 0u);
+    Dsi::wrapper_interrupts(0u);
+    Dsi::disable_interrupt();
+    print(serial, "  a refresh with ERIE: ", dsi_irq_entries, " entr", dsi_irq_entries == 1u ? "y" : "ies", ", the body saw ",
+          hex(dsi_irq_wrapper), crlf);
+    bench.verdict("the end of a refresh enters the vector once and the body reports it",
+                  dsi_irq_entries == 1u && (dsi_irq_wrapper & DSI_WISR_ERIF) != 0u);
 }
 
 // =============================================================================
-// i - video mode out of the external memory
+// h - video mode, as the host streams it
 // =============================================================================
 
-void ti_video() {
-    (void)paint_bars();
-    (void)ltdc_start();
+/// One pixel of the panel's memory, decoded from what RAMRD answers; the
+/// alignment (a leading byte or none) is `offset`.
+uint32_t pixel_at(const uint8_t* bytes, uint16_t i, uint8_t offset) {
+    const uint8_t* p = bytes + offset + 3u * i;
+    return (static_cast<uint32_t>(p[0]) << 16) | (static_cast<uint32_t>(p[1]) << 8) | p[2];
+}
+
+void th_video_mode() {
+    // A pixel of the panel's memory before: the 16-bit bars refreshed.
+    (void)paint_bars16();
+    (void)ltdc_show16();
+    (void)refresh();
+    uint8_t before[4] = {0, 0, 0, 0};
+    const DsiStatus s_before = panel_read_pixels(0, 0, 1, before);
+
+    // The 16-bit bars streamed in video mode for a second: no error on
+    // the host, the panel's own count still zero - and its memory where
+    // it was, because this panel's DSI takes commands, not a stream.
+    enter_video_mode();
     (void)Dsi::errors1();
     Ltdc::clear(ltdc_error_events);
     line_events = 0;
@@ -1035,56 +1084,191 @@ void ti_video() {
     const uint32_t frames = line_events;
     const uint32_t e1 = Dsi::errors1();
     const bool underrun = Ltdc::flag(LtdcEvent::fifo_underrun);
-    print(serial, "  one second of video: ", frames, " frames (", frame_rate_mhz / 1000u, ".", (frame_rate_mhz / 100u) % 10u,
-          " expected), ISR1 ", hex(e1), ", LTDC underrun ", underrun ? "YES" : "no", crlf);
-    bench.verdict("the frame rate over the link is the pixel clock's: 60 frames a second, within one",
-                  frames + 1u >= frame_rate_mhz / 1000u && frames <= frame_rate_mhz / 1000u + 1u);
-    bench.verdict("no LTDC payload write error and no FIFO underrun over a second of frames",
-                  (e1 & DSI_ISR1_LPWRE) == 0u && !underrun);
-
-    // A read while the video runs: the command goes out in low power in a
-    // blanking period (VMCR.LPCE), and the answer comes back the same way.
     uint8_t id = 0;
     const DsiStatus st = Dsi::dcs_read(dcs_rdid1, &id, 1);
     DsiStatus s_err = DsiStatus::ok;
     const uint8_t errors = panel_read(dcs_rdnumed, s_err);
-    print(serial, "  during the video: RDID1 ", hex(id), " (", status_name(st), "), the panel's DSI error count ", errors, " (",
-          status_name(s_err), ")", crlf);
-    bench.verdict("a DCS read is answered while the video streams", st == DsiStatus::ok && id == boot.id[0]);
+    print(serial, "  video mode, one second: ", frames, " frames (", frame_rate_mhz / 1000u, ".", (frame_rate_mhz / 100u) % 10u,
+          " expected), ISR1 ", hex(e1), ", LTDC underrun ", underrun ? "YES" : "no", "; RDID1 ", hex(id), " (", status_name(st),
+          "), the panel's DSI error count ", errors, " (", status_name(s_err), ")", crlf);
+    bench.verdict("the host streams the LTDC's frame at the pixel clock's rate: 60 frames a second, within one",
+                  frames + 1u >= frame_rate_mhz / 1000u && frames <= frame_rate_mhz / 1000u + 1u);
+    bench.verdict("no LTDC payload write error and no FIFO underrun over a second of frames",
+                  (e1 & DSI_ISR1_LPWRE) == 0u && !underrun);
+    bench.verdict("a DCS read is answered while the video streams, in a blanking period",
+                  st == DsiStatus::ok && id == boot.id[0]);
     bench.verdict("the panel counted no link error over the video", s_err == DsiStatus::ok && errors == 0u);
-    bench.verdict("the host's error registers are clear after it", Dsi::errors0() == 0u && Dsi::errors1() == 0u);
 
-    // Thirty-two bits a pixel from the same memory: twice the fetch, the
-    // same link.
-    fb32.fill(argb8888(255, 0, 96, 160));
-    LtdcLayerConfig c = one_layer();
-    c.format = LtdcPixelFormat::argb8888;
-    c.framebuffer = sdram_base + fb32_offset;
-    (void)LtdcLayer<1>::configure(c, panel_timing);
-    Ltdc::reload(LtdcReload::vertical_blanking);
-    (void)wait_frames(3);
-    Ltdc::clear(ltdc_error_events);
+    // The read that runs out: the LTDC stopped in video mode.
+    ltdc_stop();
+    wait_ms(30);
+    uint8_t id2 = 0xEE;
+    const DsiStatus stopped = Dsi::dcs_read(dcs_rdid1, &id2, 1);
+    const uint32_t gpsr_after = Dsi::regs().GPSR;
+    (void)ltdc_show16();
+    wait_ms(40);
+    const uint32_t gpsr_running = Dsi::regs().GPSR;
+    id2 = 0xEE;
+    const DsiStatus running = Dsi::dcs_read(dcs_rdid1, &id2, 1);
+    print(serial, "  video mode, LTDC stopped: RDID1 ", status_name(stopped), ", GPSR ", hex(gpsr_after),
+          "; LTDC started: GPSR ", hex(gpsr_running), ", RDID1 ", hex(id2), " (", status_name(running), ")", crlf);
+    bench.verdict("in video mode with the LTDC stopped a read runs out unanswered (RCB standing)",
+                  stopped == DsiStatus::timeout && (gpsr_after & DSI_GPSR_RCB) != 0u);
+    bench.verdict("with the stream back the same read is answered", running == DsiStatus::ok && id2 == boot.id[0]);
+
+    // The pattern generator: the host's own bars with the LTDC stopped.
+    ltdc_stop();
+    wait_ms(30);
     (void)Dsi::errors1();
-    line_events = 0;
-    (void)wait_frames(60);
-    const uint32_t frames32 = line_events;
-    const bool underrun32 = Ltdc::flag(LtdcEvent::fifo_underrun);
-    const uint32_t e132 = Dsi::errors1();
-    print(serial, "  32-bit pixels: ", frames32, " frames, ISR1 ", hex(e132), ", underrun ", underrun32 ? "YES" : "no", crlf);
-    bench.verdict("a 32-bit frame buffer out of the same memory streams as well, no underrun, no payload error",
-                  frames32 >= 60u && !underrun32 && (e132 & DSI_ISR1_LPWRE) == 0u);
-    (void)LtdcLayer<1>::configure(one_layer(), panel_timing);
-    Ltdc::reload(LtdcReload::vertical_blanking);
-    (void)wait_frames(2);
+    Dsi::pattern(DsiPattern::vertical_bars);
+    wait_ms(500);
+    const uint32_t e1v = Dsi::errors1();
+    Dsi::pattern(DsiPattern::horizontal_bars);
+    wait_ms(500);
+    const uint32_t e1h = Dsi::errors1();
+    Dsi::pattern(DsiPattern::off);
+    print(serial, "  the pattern generator, vertical then horizontal bars, half a second each: ISR1 ", hex(e1v), " then ",
+          hex(e1h), crlf);
+    bench.verdict("the host streams its own colour bars with the LTDC stopped and raises no error",
+                  !Dsi::pattern_on() && e1v == 0u && e1h == 0u);
+
+    // Back in command mode: the panel's memory as it was before a second
+    // of video and the patterns.
+    enter_command_mode();
+    link_settle();
+    (void)ltdc_show16();
+    uint8_t after[4] = {0, 0, 0, 0};
+    const DsiStatus s_after = panel_read_pixels(0, 0, 1, after);
+    const uint8_t errors_after = panel_read(dcs_rdnumed);
+    print(serial, "  the panel's pixel (0, 0): ", hex(before[0]), " ", hex(before[1]), " ", hex(before[2]), " ", hex(before[3]),
+          " before, ", hex(after[0]), " ", hex(after[1]), " ", hex(after[2]), " ", hex(after[3]), " after (",
+          status_name(s_before), ", ", status_name(s_after), "); the panel's error count ", errors_after, crlf);
+    bench.verdict("THIS PANEL'S DSI IS A COMMAND INTERFACE: a second of video-mode frames and the patterns leave "
+                  "its memory untouched, and it counts no error for them",
+                  s_before == DsiStatus::ok && s_after == DsiStatus::ok && before[0] == after[0] && before[1] == after[1] &&
+                      before[2] == after[2] && before[3] == after[3] && errors_after == 0u);
+    bench.verdict("the host's error registers are clear after it", Dsi::errors0() == 0u && Dsi::errors1() == 0u);
 }
 
 // =============================================================================
-// j - the tearing effect line
+// i - the adapted command mode, and the frame read back
+// =============================================================================
+
+/// The sixteen sample points: the four corners, the middle, and a point
+/// inside each of the eight bars near the top and near the bottom, and
+/// the two sides of the first bar boundary.
+struct Sample {
+    uint16_t x, y;
+};
+constexpr Sample samples[16] = {{0, 0},   {799, 0},  {0, 479},  {799, 479}, {400, 240}, {50, 10},   {150, 10},  {250, 10},
+                                {350, 10}, {450, 470}, {550, 470}, {650, 470}, {750, 470}, {99, 240}, {100, 240}, {700, 300}};
+
+void ti_adapted_command_mode() {
+    // The 32-bit bars into the panel, one refresh, timed.
+    (void)paint_bars32();
+    (void)ltdc_show32();
+    (void)Dsi::errors1();
+    Ltdc::clear(ltdc_error_events);
+    const uint32_t took = refresh();
+    const bool busy_after = Dsi::busy();
+    const bool flow_after = Dsi::ltdc_flow();
+    print(serial, "  one refresh of 800x480 32-bit pixels: ", took, " us (the LTDC frame is ", frame_period_us,
+          " us), then BUSY ", busy_after ? "1" : "0", ", LTDCEN ", flow_after ? "1" : "0", crlf);
+    bench.verdict("a refresh ends with the end-of-refresh flag, LTDCEN cleared by the wrapper and BUSY down",
+                  took != 0u && !busy_after && !flow_after);
+    bench.verdict("... in about one LTDC frame: the memory writes keep up with the pixel clock",
+                  took != 0u && took >= frame_period_us - 2000u && took <= frame_period_us + 4000u);
+
+    // A second of refreshes back to back.
+    uint32_t count = 0;
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 1000u) {
+        if (refresh() != 0u) {
+            ++count;
+        }
+    }
+    const uint32_t e1 = Dsi::errors1();
+    const bool underrun = Ltdc::flag(LtdcEvent::fifo_underrun);
+    DsiStatus s_err = DsiStatus::ok;
+    const uint8_t errors = panel_read(dcs_rdnumed, s_err);
+    print(serial, "  a second of refreshes: ", count, " frames, ISR1 ", hex(e1), ", LTDC underrun ", underrun ? "YES" : "no",
+          ", the panel's DSI error count ", errors, " (", status_name(s_err), ")", crlf);
+    bench.verdict("refreshes back to back reach 50 frames a second and more", count >= 50u);
+    bench.verdict("no payload write error, no FIFO underrun, no error counted by the panel over them",
+                  e1 == 0u && !underrun && s_err == DsiStatus::ok && errors == 0u);
+
+    // THE FRAME READ BACK. Each sample point read as one pixel of the
+    // panel's memory and compared with the bar the accelerator painted
+    // there: three bytes a pixel, and the alignment - whether the answer
+    // leads with a byte - decided by the first point and held for the
+    // rest.
+    uint8_t bytes[4] = {0, 0, 0, 0};
+    uint8_t offset = 0xFF;
+    uint32_t matched = 0;
+    for (uint32_t i = 0; i < 16u; ++i) {
+        for (uint8_t& b : bytes) {
+            b = 0xEE;
+        }
+        const DsiStatus st = panel_read_pixels(samples[i].x, samples[i].y, 1, bytes);
+        const uint32_t want = bar_colour_at(samples[i].x);
+        if (offset == 0xFFu && st == DsiStatus::ok) {
+            offset = pixel_at(bytes, 0, 0) == want ? 0u : pixel_at(bytes, 0, 1) == want ? 1u : 0xFFu;
+        }
+        const bool ok = st == DsiStatus::ok && offset != 0xFFu && pixel_at(bytes, 0, offset) == want;
+        if (ok) {
+            ++matched;
+        }
+        if (i < 5u || !ok) {
+            print(serial, "  (", samples[i].x, ", ", samples[i].y, "): the panel answers ", hex(bytes[0]), " ", hex(bytes[1]),
+                  " ", hex(bytes[2]), " ", hex(bytes[3]), " (", status_name(st), "), painted ", hex(want), ok ? "" : " MISMATCH",
+                  crlf);
+        }
+    }
+    print(serial, "  ", matched, " of 16 sample points match, the answer ",
+          offset == 0u ? "starting with the pixel" : offset == 1u ? "leading with one byte" : "in neither alignment", crlf);
+    bench.verdict("THE PICTURE IS IN THE PANEL: sixteen pixels read back out of its memory are the bars the "
+                  "accelerator painted, 24 bits each", matched == 16u);
+
+    // A run of sixteen pixels across a bar boundary, in one packet.
+    uint8_t run[16 * 3 + 1];
+    for (uint8_t& b : run) {
+        b = 0xEE;
+    }
+    const uint16_t x0 = static_cast<uint16_t>(bar_width - 8u);
+    const DsiStatus s_run = panel_read_pixels(x0, 100, 16, run);
+    uint32_t run_ok = 0;
+    const uint8_t off = offset == 0xFFu ? 0u : offset;
+    for (uint16_t i = 0; i < 16u; ++i) {
+        if (pixel_at(run, i, off) == bar_colour_at(static_cast<uint16_t>(x0 + i))) {
+            ++run_ok;
+        }
+    }
+    print(serial, "  sixteen pixels from (", x0, ", 100) in one read (", status_name(s_run), "): ", run_ok, " match - the first ",
+          hex(pixel_at(run, 0, off)), ", the ninth ", hex(pixel_at(run, 8, off)), crlf);
+    bench.verdict("a run of sixteen pixels across the white/yellow boundary reads back in one packet, every pixel right",
+                  s_run == DsiStatus::ok && run_ok == 16u);
+
+    // The same through the 16-bit surface: the LTDC's expansion of 565 to
+    // 888 as the panel stores it, printed and judged on the pure colours.
+    (void)paint_bars16();
+    (void)ltdc_show16();
+    (void)refresh();
+    uint8_t px[4] = {0, 0, 0, 0};
+    const DsiStatus s16 = panel_read_pixels(150, 10, 1, px);   // the yellow bar
+    const uint32_t yellow = pixel_at(px, 0, off);
+    print(serial, "  the 16-bit surface's yellow (565 FFE0h) reaches the panel as ", hex(yellow), crlf);
+    bench.verdict("the 16-bit surface's yellow reads back as full red and green and no blue",
+                  s16 == DsiStatus::ok && (yellow & 0xF8F800u) == 0xF8F800u && (yellow & 0x0000FFu) == 0u);
+    bench.verdict("the host's error registers are clear after the reads", Dsi::errors0() == 0u && Dsi::errors1() == 0u);
+}
+
+// =============================================================================
+// j - the tearing effect line and the automatic refresh
 // =============================================================================
 
 void tj_tearing() {
     // The panel's TE output on PJ2: counted on EXTI line 2 for half a
-    // second with the video running, and by the wrapper from the same pin.
+    // second, and by the wrapper from the same pin.
     (void)Dsi::dcs_write(dcs_teon, 0x00);
     wait_ms(30);
     (void)TeInt::select();
@@ -1095,22 +1279,51 @@ void tj_tearing() {
     Nvic::enable(TeInt::irq());
     Dsi::clear_wrapper_flags(DSI_WISR_TEIF);
     uint32_t te_flags = 0;
-    const uint32_t t0 = millis();
+    uint32_t t0 = millis();
     while (millis() - t0 < 500u) {
         if ((Dsi::wrapper_flags() & DSI_WISR_TEIF) != 0u) {
             te_flags = te_flags + 1u;
             Dsi::clear_wrapper_flags(DSI_WISR_TEIF);
         }
     }
-    Nvic::disable(TeInt::irq());
-    (void)TeInt::arm(false);
     const uint32_t edges = te_edges;
     print(serial, "  TEON, half a second: ", edges, " rising edges on PJ2 (EXTI line 2), ", te_flags,
           " tearing effect flags in the wrapper from the pin", crlf);
-    bench.verdict("the panel pulses its TE line once a frame: 25..35 edges in half a second", edges >= 25u && edges <= 35u);
+    bench.verdict("the panel pulses its TE line once a frame of its own scan: 25..35 edges in half a second",
+                  edges >= 25u && edges <= 35u);
     bench.verdict("the wrapper sees the same pulses from the pin (WCFGR.TESRC), within two",
                   te_flags + 2u >= edges && te_flags <= edges + 2u);
 
+    // The automatic refresh: every TE edge launches a frame, so the
+    // refresh rate is the panel's scan rate.
+    Dsi::disable();
+    (void)Dsi::adapted_refresh(true, false);
+    Dsi::enable();
+    link_settle();
+    Dsi::clear_wrapper_flags(DSI_WISR_ERIF);
+    uint32_t refreshes = 0;
+    te_edges = 0;
+    t0 = millis();
+    while (millis() - t0 < 1000u) {
+        if ((Dsi::wrapper_flags() & DSI_WISR_ERIF) != 0u) {
+            refreshes = refreshes + 1u;
+            Dsi::clear_wrapper_flags(DSI_WISR_ERIF);
+        }
+    }
+    const uint32_t edges_1s = te_edges;
+    Dsi::disable();
+    (void)Dsi::adapted_refresh(false, false);
+    Dsi::enable();
+    link_settle();
+    const uint32_t e1 = Dsi::errors1();
+    print(serial, "  automatic refresh on TE for a second: ", refreshes, " end-of-refresh flags against ", edges_1s,
+          " TE edges, ISR1 ", hex(e1), crlf);
+    bench.verdict("with WCFGR.AR the wrapper refreshes once per tearing effect pulse, within two of the edges counted",
+                  refreshes + 2u >= edges_1s && refreshes <= edges_1s + 2u && refreshes >= 50u);
+    bench.verdict("... with no payload write error", e1 == 0u);
+
+    Nvic::disable(TeInt::irq());
+    (void)TeInt::arm(false);
     (void)Dsi::dcs_write(dcs_teoff);
     wait_ms(30);
     te_edges = 0;
@@ -1160,7 +1373,6 @@ void tk_wrapper_packets() {
 // =============================================================================
 
 void tl_ulps() {
-    ltdc_stop();
     wait_ms(30);
     Dsi::ulps(false, true, true);
     wait_us(200);
@@ -1175,11 +1387,11 @@ void tl_ulps() {
     bench.verdict("PUCR.URDL takes both data lanes into ULPS (UAN0/UAN1 fall) and out of stop state",
                   in.data0_ulps && in.data1_ulps && !in.data0_stop);
     bench.verdict("PUCR.UEDL brings them back to stop state", !out.data0_ulps && !out.data1_ulps && out.data0_stop && out.data1_stop);
-    (void)ltdc_start();
-    wait_ms(40);
     uint8_t id = 0;
     const DsiStatus st = Dsi::dcs_read(dcs_rdid1, &id, 1);
     bench.verdict("the panel answers after the excursion", st == DsiStatus::ok && id == boot.id[0]);
+    const uint32_t took = refresh();
+    bench.verdict("... and takes a frame", took != 0u);
 }
 
 // =============================================================================
@@ -1187,23 +1399,19 @@ void tl_ulps() {
 // =============================================================================
 
 void tm_picture() {
-    const bool painted = paint_bars();
-    (void)ltdc_start();
-    bench.verdict("eight colour bars painted by the accelerator", painted);
-    print(serial, "  eight bars, white to black, for three seconds; then a bar slides along the bottom", crlf);
-    wait_ms(1500);
+    const bool painted = paint_bars16();
+    (void)ltdc_show16();
+    const bool shown = refresh() != 0u;
+    bench.verdict("eight colour bars painted by the accelerator and refreshed into the panel", painted && shown);
+    print(serial, "  eight bars, white to black, for two seconds; then a bar slides along the bottom", crlf);
+    wait_ms(2000);
     const uint16_t strip_y = static_cast<uint16_t>(panel_height - 40u);
     const Dma2dOutput strip{.address = sdram_base + fb16_offset + 2u * strip_y * panel_width,
                             .line_offset = 0,
                             .format = Dma2dOutputColor::rgb565};
     uint32_t steps = 0;
     const uint32_t start = millis();
-    uint32_t previous = line_events;
     while (millis() - start < 3000u) {
-        if (line_events == previous) {
-            continue;
-        }
-        previous = line_events;
         const uint16_t x = static_cast<uint16_t>((steps * 4u) % (panel_width - 40u));
         (void)Dma2d::fill(strip, argb8888(255, 0, 0, 0), Dma2dArea{.pixels = panel_width, .lines = 40});
         (void)Dma2d::wait();
@@ -1212,11 +1420,14 @@ void tm_picture() {
                               .format = Dma2dOutputColor::rgb565};
         (void)Dma2d::fill(bar, argb8888(255, 255, 255, 255), Dma2dArea{.pixels = 40, .lines = 40});
         (void)Dma2d::wait();
-        ++steps;
+        if (refresh() != 0u) {
+            ++steps;
+        }
     }
-    print(serial, "  ", steps, " steps in three seconds", crlf);
-    bench.verdict("the bar moved once a frame for three seconds", steps >= 150u);
-    (void)paint_bars();
+    print(serial, "  ", steps, " steps in three seconds, one refresh each", crlf);
+    bench.verdict("the bar moved at the refresh rate for three seconds: 120 steps or more", steps >= 120u);
+    (void)paint_bars16();
+    (void)refresh();
 }
 
 // =============================================================================
@@ -1259,6 +1470,9 @@ extern "C" void DSI_IRQHandler() {
     if (e.tearing_effect) {
         w |= DSI_WISR_TEIF;
     }
+    if (e.end_of_refresh) {
+        w |= DSI_WISR_ERIF;
+    }
     dsi_irq_wrapper = dsi_irq_wrapper | w;
 }
 
@@ -1296,8 +1510,9 @@ int main() {
 
     // 18.14.1's order: the memory first (a fetch from a bank that never ran
     // its sequence hangs the machine), the LTDC's clock and timing, the
-    // layer described but nothing enabled, then the link, then the panel,
-    // and the LTDC last.
+    // layer described and the controller enabled - held by the wrapper in
+    // the adapted command mode until a refresh - then the link, then the
+    // panel, then the first frame.
     claim_sdram_pads();
     boot.sdram_up = Sdram::initialize(clock, sdram_geometry, sdram_timing, sdram_boot);
     brio::Ltdc::clock(true);
@@ -1307,13 +1522,9 @@ int main() {
     brio::Dma2d::init();
     PanelTe::function(brio::PinFunction::af13);
     boot.dsi_up = link_up();
-    // THE STREAM FIRST. In video mode the generic interface sends its
-    // packets in the blanking periods of a frame, and with the LTDC stopped
-    // a command waits in the FIFO for a frame that never comes (letter d
-    // measures it): a black frame streams before the panel is spoken to.
     if (boot.sdram_up) {
         fb16.fill(0);
-        (void)ltdc_start();
+        (void)ltdc_show16();
     }
     boot.e0_link = brio::Dsi::errors0();
     panel_reset();
@@ -1323,9 +1534,10 @@ int main() {
     const DsiStatus panel_st = panel_init();
     boot.e0_init = brio::Dsi::errors0();
     if (boot.sdram_up) {
-        (void)paint_bars();
+        (void)paint_bars16();
+        boot.first_refresh_us = refresh();
     }
-    boot.e0_paint = brio::Dsi::errors0();
+    boot.e0_frame = brio::Dsi::errors0();
 
     bench.letter('a', "the block", ta_block);
     bench.letter('b', "the regulator and the PLL", tb_regulator_pll);
@@ -1334,9 +1546,9 @@ int main() {
     bench.letter('e', "the panel's identity over the link", te_identity);
     bench.letter('f', "the panel's registers written and read back", tf_registers);
     bench.letter('g', "the errors and the interrupt", tg_errors);
-    bench.letter('h', "the pattern generator", th_pattern);
-    bench.letter('i', "video mode out of the external memory", ti_video);
-    bench.letter('j', "the tearing effect line", tj_tearing);
+    bench.letter('h', "video mode, as the host streams it", th_video_mode);
+    bench.letter('i', "the adapted command mode, and the frame read back", ti_adapted_command_mode);
+    bench.letter('j', "the tearing effect line and the automatic refresh", tj_tearing);
     bench.letter('k', "the wrapper's shutdown and colour mode packets", tk_wrapper_packets);
     bench.letter('l', "the ultra-low-power state on the data lanes", tl_ulps);
     bench.letter('m', "colour bars and a moving bar, for a human to look at", tm_picture);
@@ -1346,7 +1558,8 @@ int main() {
                     " sdram=", boot.sdram_up ? "up" : "FAILED", " lcdclk=", boot.pixel_clock_up ? "locked" : "FAILED",
                     " dsi=", boot.dsi_up ? "up" : "FAILED", " panel=", panel_name(boot.panel), " (", brio::hex(boot.id[0]),
                     " ", brio::hex(boot.id[1]), " ", brio::hex(boot.id[2]), ", ids ", status_name(boot.id_status), ", init ",
-                    status_name(panel_st), ")", brio::crlf);
+                    status_name(panel_st), ") first refresh=", boot.first_refresh_us, " us",
+                    boot.first_refresh_us == 0u ? " (NO END OF REFRESH)" : "", brio::crlf);
         banner();
         bench.prompt();
     }
