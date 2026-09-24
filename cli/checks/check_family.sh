@@ -14,6 +14,11 @@ set -u
 cd "$(dirname "$0")/../.."
 
 CXX=/sw/avr/bin/avr-g++
+# A compiler that is not installed must not pass for a refusal: a
+# command that cannot start fails like a TU that failed to compile, so
+# every negative would read "refused" and every positive would fail
+# for a reason that is not the code's. Say so and stop.
+[ -x "$CXX" ] || { echo "$(basename "$0"): the compiler $CXX is not installed - nothing checked" >&2; exit 2; }
 FLAGS="-std=gnu++23 -Os -Wall -Wextra -Werror -c -Ibrio"
 MCUS="avr128db28 avr128db32 avr128db48 avr128db64 \
       avr128da28 avr128da32 avr128da48 avr128da64"

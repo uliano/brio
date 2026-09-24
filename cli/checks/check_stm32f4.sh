@@ -23,6 +23,11 @@ set -u
 cd "$(dirname "$0")/../.."
 
 CXX=/sw/arm-none-eabi/bin/arm-none-eabi-g++
+# A compiler that is not installed must not pass for a refusal: a
+# command that cannot start fails like a TU that failed to compile, so
+# every negative would read "refused" and every positive would fail
+# for a reason that is not the code's. Say so and stop.
+[ -x "$CXX" ] || { echo "$(basename "$0"): the compiler $CXX is not installed - nothing checked" >&2; exit 2; }
 FLAGS="-mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard -std=gnu++23 -Os \
        -Wall -Wextra -Werror -fno-exceptions -fno-rtti -c \
        -Ibrio -Ithird_party/cmsis-device-f4/Include -Ithird_party/cmsis-core"

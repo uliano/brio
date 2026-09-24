@@ -31,6 +31,13 @@ cd "$(dirname "$0")/../.."
 
 ARM_CXX=/sw/arm-none-eabi/bin/arm-none-eabi-g++
 RV_CXX=/sw/riscv32-unknown-elf/bin/riscv32-unknown-elf-g++
+# A compiler that is not installed must not pass for a refusal (a
+# command that cannot start fails like a TU that did not compile). The
+# Arm half stands on its own toolchain, so a missing RISC-V one is
+# reported, counted as a failure, and its half left unchecked.
+[ -x "$ARM_CXX" ] || { echo "$(basename "$0"): the compiler $ARM_CXX is not installed - nothing checked" >&2; exit 2; }
+RV_MISSING=0
+[ -x "$RV_CXX" ] || { echo "$(basename "$0"): the compiler $RV_CXX is not installed - the RISC-V half is NOT checked" >&2; RV_MISSING=1; }
 
 COMMON="-std=gnu++23 -Os -Wall -Wextra -Werror -fno-exceptions -fno-rtti -c \
         -DBRIO_RP2350_FLASH_KB=16384 \
@@ -41,7 +48,7 @@ RV_FLAGS="-march=rv32ima_zicsr_zifencei_zba_zbb_zbs_zbkb_zca_zcb_zcmp -mabi=ilp3
           -Ithird_party/pico-sdk/rp2350/no_core"
 
 FILTER="${1:-}"
-fail=0
+fail=$RV_MISSING
 
 # compile <tu> <arch> <pins> -> 0 when it compiled
 compile() {
@@ -56,6 +63,7 @@ for tu in test/family_rp2350/*.cpp; do
     case "$tu" in *"$FILTER"*) ;; *) continue ;; esac
     line="$(basename "$tu" .cpp):"
     for arch in arm riscv; do
+        [ "$arch" = riscv ] && [ "$RV_MISSING" = 1 ] && continue
         for pins in 80 60; do
             if compile "$tu" "$arch" "$pins"; then
                 line="$line $arch/$pins"
@@ -76,6 +84,7 @@ for tu in test/family_rp2350/neg/*.cpp; do
     case "$base" in qfn60_*) pins=60 ;; *) pins=80 ;; esac
     line="$base:"
     for arch in arm riscv; do
+        [ "$arch" = riscv ] && [ "$RV_MISSING" = 1 ] && continue
         if compile "$tu" "$arch" "$pins"; then
             line="$line $arch/$pins:COMPILED(BAD)"
             fail=1
