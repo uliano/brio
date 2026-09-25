@@ -1695,22 +1695,35 @@ brio/                    the framework, one directory per stratum:
                            (a mask configured in one store per register, the
                            port written whole) and LCKR - the configuration
                            lock whose only way back is a reset
-    afio.hpp               the remap columns of AFIO_PCFR1/PCFR2 as constexpr
-                           pad tables (the manual's, one per peripheral), with
-                           Remap + afio_remap_has_code() judging a column by
-                           the DEVICE CLASS and by the part's own bonding -
-                           refused by static_assert where the code is a
-                           constant, by false where it is not; AFIO_EXTICR for
-                           exti.hpp, the event output, and SW_CFG read but
-                           never written: the debug port is the probe's
-    exti.hpp               Exti (twenty-two lines: sixteen by PIN NUMBER with
-                           the port chosen per line, the PVD's, the RTC
-                           alarm's and the two USB wake-ups; edges, the two
-                           enables, the software trigger whose bit stands
-                           until the flag is cleared, write-one flags, five
-                           single vectors and two shared ones with isr() +
-                           served()) + ExtiLine<n> + ExtInt<Pin> (claim,
-                           select refusing a line another port holds, steal)
+     afio.hpp               the remap columns of AFIO_PCFR1/PCFR2 as constexpr
+                            pad tables (the manual's, one per peripheral - the
+                            CH32V303's own among them: USART1's four columns,
+                            UART4's other table with its PC10/PC11 default,
+                            TIM8/TIM9/TIM10, UART5..UART8, SPI3 with I2S3, the
+                            ADC trigger remaps, FSMC_NADV; CAN2's and the
+                            Ethernet's refused), with Remap +
+                            afio_remap_has_code() judging a column by the
+                            DEVICE CLASS and by the part's own bonding -
+                            refused by static_assert where the code is a
+                            constant, by false where it is not; two fields the
+                            manual gives the whole family that the CH32V203
+                            holds at zero and the CH32V303 takes (USART3's
+                            remap, TIM2's internal-trigger bit); AFIO_EXTICR
+                            for exti.hpp, the event output, and SW_CFG read but
+                            never written: the debug port is the probe's
+     exti.hpp               Exti (the lines each part's table states -
+                            sixteen by PIN NUMBER with the port chosen per
+                            line, the PVD's, the RTC alarm's and the peripheral
+                            wake-ups, line 20 the USBFS controller's on every
+                            class and 19 and 21 refused on the CH32V303;
+                            edges, the two enables, the software trigger whose
+                            bit stands until the flag is cleared, write-one
+                            flags, five single vectors and two shared ones
+                            with isr() + served()) + ExtiLine<n> + ExtInt<Pin>
+                            (claim, select refusing a line another port holds,
+                            steal); an edge over a wire reaches its handler in
+                            17 to 20 cycles, a line event ends idle() in 15
+                            (V4B) and 34 (V4F) core cycles
     usart.hpp              the serial ports (ch. 18): Usart<n> the resource
                            over the whole chapter - four instances on two
                            buses with every divisor asked of the instance's
@@ -1762,21 +1775,31 @@ brio/                    the framework, one directory per stratum:
                            mcause - bound to BOTH trap entries, because an
                            ebreak lands on the breakpoint vector and not the
                            exception one
-    tim.hpp                the timers (ch. 14, 15): Tim<1..4> over the F1's
-                           blocks under WCH's names - the time base with its
-                           two shadow registers, the channels in both faces
-                           (CCyS writable only with the channel off), the
-                           slave controller and the master TRGO, the internal
-                           trigger table folded through what the PART has,
-                           the repetition counter, complementary outputs,
-                           dead time and break of TIM1 alone, the DMA burst
-                           engine, the rc_w0 flags and TIM1's FOUR UNSHARED
-                           vectors + TimPad from afio.hpp's remap columns and
-                           the nine tasks (TimPwm/TimPairPwm, TimPeriodMeter/
-                           TimIntervalMeter, TimEventCounter/TimGatedCounter,
-                           TimPeriodicTick, TimOnePulse, TimEncoder); no
-                           basic timer exists on this series and the 32-bit
-                           TIM5 is the 128 KB part's
+     tim.hpp                the timers (ch. 14, 15, 16): Tim<n> over the F1's
+                            blocks under WCH's names, every timer the part
+                            HAS - TIM1 and TIM2..TIM4 everywhere, a 32-bit TIM5
+                            on the CH32V203RB, and on the CH32V303RC and VC the
+                            whole set: TIM8, TIM9 and TIM10 as advanced timers
+                            with TIM1's shape and four unshared vectors each, a
+                            sixteen-bit TIM5, TIM6 and TIM7 as BASIC timers on
+                            which a channel verb does not compile - the time
+                            base with its two shadow registers, the channels
+                            in both faces (CCyS writable only with the channel
+                            off), the slave controller and the master TRGO,
+                            the internal trigger table folded through what the
+                            part has, the repetition counter, complementary
+                            outputs, dead time and break of the advanced
+                            timers (a break input held at its level re-raises
+                            its flag at once: the program's handler masks it),
+                            the DMA burst engine with the class's DMA2
+                            requests as data, the rc_w0 flags, and the
+                            CH32V30x_D8's dual-edge capture as a verb that
+                            asks the die (a lot's register, absent on the
+                            bench part) + TimPad from afio.hpp's remap columns
+                            and the nine tasks (TimPwm/TimPairPwm,
+                            TimPeriodMeter/TimIntervalMeter, TimEventCounter/
+                            TimGatedCounter, TimPeriodicTick, TimOnePulse,
+                            TimEncoder)
     watchdog.hpp           IWDG + WWDG (ch. 7, 8), a file of their own beside
                            reset.hpp's flags: Iwdg (the three keys, the
                            prescaler and reload that take a write only while
