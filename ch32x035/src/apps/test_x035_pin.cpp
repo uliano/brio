@@ -187,7 +187,6 @@ void tc_pulls() {
     settle();
     const bool pb3_up = NoDown::read();
     const bool nodown_down = NoDown::input(PinPull::down);
-    NoDown::release();
     bench.verdict("PB3 takes the pull-up and reads high", nodown_up && pb3_up);
     bench.verdict("and refuses a pull-down it has not got, writing nothing",
                   !nodown_down && NoDown::nibble() == pin_nibble_pulled);
