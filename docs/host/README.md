@@ -78,6 +78,41 @@ the same table on the same mistake: what it judges is whether the driver
 does what the part was MEASURED to do, never whether that belief is
 right.
 
+`sim_spi_host.hpp` is what drives that panel: a SPI HOST MADE OF RAM
+whose seam is the REQUEST, offering the arbiter and a device driver the
+same static surface a family's `SpiHost<n>` does with no register block
+behind it. It is not the same kind of object as `sim_pl022.hpp`, and the
+difference is the question each answers. A simulated PL022 has to BE the
+chip - the registers at their offsets, their reset values, the order of
+the acts of a bring-up - because what it proves is that one driver knows
+no chip. This one proves nothing about a driver of the silicon: it is
+the WORLD on the other side of a bus, so that a device driver can be
+judged against a device made of RAM -
+[../design/simulation.md](../design/simulation.md) places it: a device
+the program reaches through its own driver, never a channel into the
+kernel. It models the two phases of the descriptor in
+one select window with the D/C flipping between them, the select active
+low, a null `tx` clocking 0xFF and a null `rx` discarding, a frame of
+two bytes where the request asks for one, and a select line with nothing
+on it reading 0xFF - a bus with no device on it, counted and not an
+error. Devices are attached to a select pin by `attach()` and held in a
+small type-erased table, so a panel's framing adapter and a counting
+stub can sit on one bus. Both completion styles of the contract are
+there, because the arbiter distinguishes them: in `immediate` mode every
+request completes inside `start()`, and in `deferred` mode an unpolled
+one is HELD - `start()` returns false, `finish()` performs it and hands
+back the status the app's ISR glue would post, which is the shape a
+test of an asynchronous transfer needs. A byte-level TRACE ring records
+what the wires carried, which is how a test asserts a D/C choreography,
+and each pin remembers when it was last driven on the same ruler the
+bytes are stamped with, which is how it asserts that the select fell
+before the first byte. What it does NOT model is the wire and the time
+on it: no clock rate, no mode, no bit - the `cs_setup_us` is COUNTED and
+never spent, and a mode the device disagrees with changes nothing. A
+test that wants those wants silicon. `test/test_dcs_link` is its suite,
+and the one that drives the DCS link
+([../devices/dcs_link.md](../devices/dcs_link.md)) over it.
+
 ## The simulator
 
 A host program can put its pixels on a screen and take its input from a

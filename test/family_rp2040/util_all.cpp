@@ -49,6 +49,7 @@
 #include "gfx/text.hpp"
 
 #include "devices/dcs.hpp"
+#include "devices/dcs_link.hpp"
 #include "devices/ili9481.hpp"
 
 using namespace brio;

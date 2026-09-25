@@ -111,8 +111,11 @@ const auto columns = brio::dcs_window(x0, x1);       // CASET's four bytes
 const auto pages = brio::dcs_window(y0, y1);         // PASET's four bytes
 link.command(brio::Dcs::caset, columns);
 link.command(brio::Dcs::paset, pages);
-link.command(brio::Dcs::ramwr, pixel_bytes);
+link.write(brio::Dcs::ramwr, pixel_bytes);   // the memory verb, not the command one
 ```
+
+`link` there is a `DcsLink` ([dcs_link.md](dcs_link.md)); this file
+contributes the bytes and knows nothing of how they travel.
 
 A run of pixels packed for an eighteen-bit interface:
 
@@ -155,12 +158,6 @@ findings.
 
 Driver gaps:
 
-- **The link concept itself** (`DcsLink`: a command with its parameters,
-  a write of pixel bytes, a read of a run, synchronous or answered
-  later). Born with the first driver that takes one, because a concept
-  written before its second realization states what one implementation
-  happens to do; the shapes it must serve are named in
-  [../design/gfx.md](../design/gfx.md).
 - **The commands with parameters this file only names**: `gamset`,
   `ptlar`, `teon` and the brightness group have codes here and no
   packers, because what their parameters mean differs between

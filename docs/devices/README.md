@@ -18,13 +18,13 @@ CONCEPT, and the board file is where a family's SPI host meets it.
 The command tier of [../design/gfx.md](../design/gfx.md) - a panel that
 holds its own pixels behind a link, spoken to in MIPI's Display Command
 Set. That page holds the WHY; what lives here is the four layers it
-names, of which this stratum carries two:
+names, of which this stratum carries three:
 
 | Layer | Where it lives |
 |-------|----------------|
 | The VOCABULARY - the commands, the address mode's bits, the pixel format, the packers | `devices/dcs.hpp`, target-free and controller-free |
 | A CONTROLLER - what one silicon makes of those words | `devices/ili9481.hpp`, a traits type of constexpr facts |
-| The LINK - a command with its parameters, a write of pixel bytes, a read of a run | a concept, realized over a family's own bus |
+| The LINK - a command with its parameters, a write of pixel bytes, a read of a run | `devices/dcs_link.hpp`: the `DcsLink` concept, and the four-wire serial realization over ANY stratum's `SpiHost` |
 | The DRIVER - the vocabulary over a traits type over a link | this stratum, with the rotation map and the surface shapes |
 
 ## Document map
@@ -33,6 +33,7 @@ names, of which this stratum carries two:
 |----------|----------------|
 | [dcs.md](dcs.md) | The DCS vocabulary: the codes, MADCTL's bits and what they mean to a WALK, COLMOD's two fields, the window packer, the three pixel packers, and the read framings a link has to know about |
 | [ili9481.md](ili9481.md) | The ILI9481: its frame memory and the walk its address mode selects, the three read framings of its four-wire serial interface, its clock limits against the bench's own numbers, the wake sequence, and the module facts that are a board's and not the controller's |
+| [dcs_link.md](dcs_link.md) | The link: the `DcsLink` concept a panel driver is written over - three synchronous verbs, a read that comes back RAW - and `DcsSerialLink<Host>`, the four-wire serial realization whose configuration is TWO PROTOTYPE REQUESTS of the application's own bus, so that one file serves every stratum's `SpiHost` verbatim |
 
 ## How a driver here is tested
 
@@ -46,7 +47,11 @@ in front of it - and `test/test_dcs` and `test/test_ili9481` are its
 conformance suites, run by `ctest --preset host` with no hardware. Every
 expectation in them is a number the bench measured, so the suite is the
 bench's own list transcribed: the framing cases prove the adapter, the
-memory cases prove the core.
+memory cases prove the core. One level up,
+`brio/host/sim_spi_host.hpp` is a SPI host made of RAM whose seam is the
+Request, so the code a driver actually calls - the link, and above it
+the driver - is judged against that panel with no silicon anywhere:
+`test/test_dcs_link` is that suite.
 
 **The bench** answers "is what we believe true". A driver and a
 simulator written from one reading of a command table agree on the same

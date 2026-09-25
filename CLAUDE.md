@@ -384,8 +384,11 @@ gets its home in `docs/design/` when taken.
   its every fact is measured (experiments/display/README.md): the
   vocabulary, the controller's traits and the simulated panel with
   their host suites are code (brio/devices/, brio/host/sim_dcs_panel.hpp,
-  test/test_dcs, test/test_ili9481); the link, the driver with its
-  surfaces, the touch and the viewer's mouse are next, then the black
+  test/test_dcs, test/test_ili9481), and so are the link concept with
+  its serial realization over any SpiHost and the simulated SPI host at
+  the request level (brio/devices/dcs_link.hpp, brio/host/sim_spi_host.hpp,
+  test/test_dcs_link); the driver with its surfaces, the touch and the
+  viewer's mouse are next, then the black
   pill against the glass, then the F469's DSI link as a DcsLink over
   stm32f4/dsi.hpp and the NT35510 as a second traits type, its memory
   read back over that link already measured (docs/stm32f4/dsi.md).
@@ -911,11 +914,16 @@ test/test_pl011/, test/test_pl022/, test/test_dw_apb_i2c/
                          simulated chip (brio/host/sim_pl011.hpp and its two
                          siblings), so the block's own logic is judged off the
                          silicon it was extracted from
-test/test_dcs/, test/test_ili9481/
+test/test_dcs/, test/test_ili9481/, test/test_dcs_link/
                          the devices stratum's host suites: the DCS packers'
-                         round trips, and the simulated ILI9481's conformance
-                         to the bench's numbers - the probe's letters
-                         transcribed, framing and memory cases apart
+                         round trips, the simulated ILI9481's conformance to
+                         the bench's numbers - the probe's letters
+                         transcribed, framing and memory cases apart - and
+                         the serial link over the simulated SPI host against
+                         that panel (the arbiter over the simulated host
+                         among them); every family fixture dir carries a
+                         devices_link.cpp compiling the link over that
+                         family's own SpiHost
 test/test_sha256/        util/sha256.hpp against FIPS 180-4's own vectors, at
                          compile time and at run time, plus the tail the
                          hardware accelerators are owed
@@ -3166,6 +3174,17 @@ brio/                    the framework, one directory per stratum:
                            under B5, BGR on writes alone, the read pointer
                            counting bytes clocked), the clock ceilings against
                            the measured rates, the wake times
+    dcs_link.hpp           DcsLink, the concept a panel driver is written over
+                           (three synchronous verbs - a command with its
+                           parameters, a memory write, a RAW read - the
+                           asynchronous face born with the tiled pipeline), and
+                           DcsSerialLink<Host>, the four-wire realization over
+                           ANY stratum's SpiHost: its configuration is TWO
+                           PROTOTYPE REQUESTS the application fills as it fills
+                           any request of that bus, the link supplying only
+                           the command byte (a member, lent under Lease::reply),
+                           the spans, the length and polled; a frame wider than
+                           a byte refused at construction
   gfx/                   drawing, pure and target-independent
     surface.hpp            Coord/Extent/Rect + clip() (16 bits over the WHOLE
                            domain, because the far edge is never formed) +
@@ -3264,6 +3283,19 @@ brio/                    the framework, one directory per stratum:
                            answer as a query and tells the core the true count
                            at the close. test/test_ili9481 is the bench's own
                            letters transcribed
+    sim_spi_host.hpp       A SPI HOST MADE OF RAM AT THE LEVEL OF THE REQUEST:
+                           SimSpiHost<n>, the static surface a family's SpiHost
+                           offers to the arbiter and to a device driver, with a
+                           table of type-erased DEVICES attached by select pin
+                           (SimDcsSerial the first), the select and D/C
+                           choreography stamped so a test can order it, the
+                           setup counted and never spent, a select with no
+                           device reading 0xFF, both completion styles of the
+                           arbiter's contract (immediate, or an unpolled request
+                           HELD until finish() - the test being the ISR glue),
+                           and a byte-level trace ring. Not the PL022's kind of
+                           object: that one proves a driver knows no chip, this
+                           one is the WORLD beyond the bus
     gfx_reference.hpp      THE JUDGE of the drawing primitives: every shape
                            computed from its definition, per pixel, sharing
                            no arithmetic with what it judges; plus the ASCII
