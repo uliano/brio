@@ -427,15 +427,17 @@ counter in `default_handler` and the interrupt number in mcause.
   ([watchdog.md](watchdog.md), [sleep.md](sleep.md)).
 - **gcc folds two identical interrupt handlers into one that CALLS the
   other.** Two bindings with one body - a transport's two DMA channels,
-  each vector calling the same dma_isr() - are merged by WCH's gcc into
-  a handler that saves what a caller saves and calls the first; the
-  first ends in MRET, so the call never returns and the caller's frame
-  stays on the stack. On the V4B with the hardware prologue that frame
-  is empty and the merge is harmless by luck; on the V4F it is twenty
-  f-registers, and the interrupted program resumed eighty bytes below
-  its frame (measured on the CH32V303VCT6: its next return jumped to a
-  saved float). BRIO_CH32_INTERRUPT carries no_icf
-  ([platform.md](platform.md)).
+  each vector calling the same dma_isr() - are merged by gcc's identical
+  code folding - upstream 16.2 and WCH's 15.2 alike, at -Os and not at
+  -O2, with the fast attribute or the plain one, where clang folds the
+  same only with its merging pass switched on - into a handler that
+  saves what a caller saves and calls the first; the first ends in MRET,
+  so the call never returns and the caller's frame stays on the stack.
+  On the V4B with the hardware prologue that frame is empty and the
+  merge is harmless by luck; on the V4F it is twenty f-registers, and
+  the interrupted program resumed eighty bytes below its frame (measured
+  on the CH32V303VCT6: its next return jumped to a saved float).
+  BRIO_CH32_INTERRUPT carries no_icf ([platform.md](platform.md)).
 - **A CH32 I2C target loses the last byte before a late repeated
   START.** With the host's START requested after BTF - the last written
   byte acknowledged and SCL held low - the target never raised RxNE for
