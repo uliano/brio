@@ -7,13 +7,17 @@ oscillator): the bench part of the `ch32x035/` stratum. Documents of
 record: the CH32X035 evaluation board reference V1.3 (its QFN20 page)
 and the schematic `CH32X035SCH.pdf` in WCH's CH32X035EVT package - the
 QFN20 edition's sheet, its sources under `SCHPCB/CH32X035F8U6-R0`, the
-PCB `CH32X035F8U-R0-1v1` - with the CH32X035/X033 datasheet V1.7 for
-the pins ([../ch32x035/vendor/README.md](../ch32x035/vendor/README.md)).
-Nothing on this page has been read off the board itself: it is the
-schematic's and the reference's, and the platform suite's first letter
-prints the chip's own identity (the flash capacity, the unique
-identifier, and the word WCH's library reads as the chip identifier,
-0x035E06x1 for this part by the library's own list).
+PCB `CH32X035F8U-R0-1v1` - with the CH32X035/X033 datasheet V1.7 for the
+pins ([../ch32x035/vendor/README.md](../ch32x035/vendor/README.md)). The
+chip's own identity is the platform suite's first letter's: 62 KB of
+code flash, the unique identifier, and the word WCH's library reads as
+the chip identifier - 0x035E0611 on the board's CH32X035F8U6, the
+library's 0x035E06x1 for this part
+([../ch32x035/platform.md](../ch32x035/platform.md)). The rest of the
+page is the schematic's and the reference's, with what the suites
+confirmed on the board: the debug port and the console on the pads
+below, PC14 reading low under its pull-up against the CC1 line's 5.1
+kOhm, and the two jumpers the pin and USART suites detect.
 
 - **Clock**: no crystal - the series has no oscillator for one - so the
   apps run the 48 MHz HSI undivided

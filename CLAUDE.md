@@ -584,29 +584,37 @@ gets its home in `docs/design/` when taken.
   datasheet's V3.9 and the QingKe manual's V1.5.
 - **The CH32X035 stratum.** `brio/ch32x035/` and `ch32x035/` are `in
   bring-up` on the CH32X035F8U6 (README.md's table), WCH's evaluation
-  board in its QFN20 edition on a WCH-LinkE, and NOTHING OF IT HAS RUN
-  ON THE SILICON: the register map, the seven parts of the series in one
-  part table (each package's bonding and the pads it shorts together,
-  the USARTs each offers), the platform, the one-root clock, the pins
-  with AFIO's remaps and the four USARTs are written from the reference
-  manual V1.8 and cross-checked against the EVT's header (the
-  disagreements in docs/ch32x035/vendor/README.md), the family check
-  green on all seven parts both HPE ways, the console and four suites
-  (`test_x035_platform`, `test_x035_clock`, `test_x035_pin`,
-  `test_x035_usart`) built and never flashed. First on the bench:
-  whether WCH's OpenOCD fork programs the part at all, then the four
-  suites' `z` - the CFGHR copy against the register, a divided HCLK
-  under the prefetch note that has no bit, the WFE idle and the hardware
-  prologue on the V4C, the manual's two reset values of RCC_RSTSCKR.
-  Then, by the user's pick, one chapter new to brio: the USB PD
-  controller as a sink, or the USB host/device controller as the console
-  - the CH32V303's block, so `usbfs.hpp` factored into an IP stratum at
-  its second family. The PIOC is out (its own assembler); DMA, EXTI, the
-  watchdogs with the failing half of the platform, the power chapter
-  (the AWU is the only wake: no RTC), ADC/TKEY, the timers, I2C, SPI and
-  OPA/CMP are born with their first user. And the `qingke/` core stratum
-  is due: pfic/ticker/platform/delay exist three times, the X035's kept
-  a diff of facts from the CH32V203's.
+  board in its QFN20 edition on a WCH-LinkE: the register map, the seven
+  parts of the series in one part table (each package's bonding and the
+  pads it shorts together, the USARTs each offers), the platform, the
+  one-root clock, the pins with AFIO's remaps and the four USARTs,
+  written from the reference manual V1.8 and cross-checked against the
+  EVT's header (the disagreements in docs/ch32x035/vendor/README.md),
+  the family check green on all seven parts both HPE ways, and the four
+  suites green on the silicon (`test_x035_platform` 42 verdicts,
+  `test_x035_clock` 21, `test_x035_pin` 21 and `test_x035_usart` 27, the
+  last two across their jumpers), every image written by WCH's OpenOCD
+  fork through the LinkE. What the silicon taught is in
+  docs/ch32x035/README.md: RMVF a LEVEL (the clear writes it and clears
+  it again), a reset pulse on the power controller's line that cut the
+  part off its debug port until the supply was cycled (the driver
+  refuses that line), a port read through its shut gate answering with
+  the last word the bus carried, 3.4.8's reset value of RCC_RSTSCKR the
+  QFN20's, 1 in the chip identifier's bits 7:4 (the vendor's CFGHR
+  caution not this die's), a divided HCLK needing nothing but HPRE, and
+  corecfgr's 0x1F costing the V4C some 7 per cent of a timed loop. Owed
+  on the silicon: the hardware prologue's pair (the platform suite in an
+  image built without it), the HSI's accuracy (the brackets timed by a
+  host), the lock, and every part but the F8U6. Then, by the user's
+  pick, one chapter new to brio: the USB PD controller as a sink, or the
+  USB host/device controller as the console - the CH32V303's block, so
+  `usbfs.hpp` factored into an IP stratum at its second family. The PIOC
+  is out (its own assembler); DMA, EXTI, the watchdogs with the failing
+  half of the platform, the power chapter (the AWU is the only wake: no
+  RTC), ADC/TKEY, the timers, I2C, SPI and OPA/CMP are born with their
+  first user. And the `qingke/` core stratum is due:
+  pfic/ticker/platform/delay exist three times, the X035's kept a diff
+  of facts from the CH32V203's.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the

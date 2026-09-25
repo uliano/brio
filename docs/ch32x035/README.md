@@ -26,10 +26,12 @@ prescaler, and beside the CH32V303's USB host/device controller the
 series carries two blocks no other stratum drives - a USB PD controller
 and the PIOC co-processor.
 
-Every statement of behaviour in this folder is the reference manual's,
-the datasheet's, the vendor library's, or a sibling stratum's
-measurement named as such - none is this silicon's - and each
-document's last list names the suite letter that would make it one.
+A statement of behaviour in this folder is the reference manual's, the
+datasheet's, the vendor library's, or a sibling stratum's measurement
+named as such, unless it is marked measured: what is measured is the
+CH32X035F8U6's, with its numbers in each document's bench findings, and
+each document's last list names what is still owed and what would
+measure it.
 
 ## The documents
 
@@ -39,11 +41,11 @@ One document per peripheral driver is the shape
 | Driver | State |
 |--------|-------|
 | [device.hpp](../../brio/ch32x035/device.hpp) + [parts/](../../brio/ch32x035/parts/) | the register map and the part table: the seven parts, each with its memories, its package, the pads it bonds and the pads it SHORTS together inside (the datasheet's notes 4 to 7), the USARTs it offers beside the model table's count, and what else it carries; RCC, GPIO, AFIO, the USART and the core's STK and PFIC mapped for the drivers, the EXTI and PWR mapped for the reader, the flash interface's option bytes and the electronic signature decoded READ-ONLY; the interrupt numbers are the vector table's word indices |
-| [platform.md](platform.md) | Platform: `Ch32x035Platform` (the `csrrci` critical section, the WFE-shaped `idle()`, `ebreak`, the `.noinit` breadcrumb, the stack ledger), `Pfic` and `BRIO_CH32_INTERRUPT` with `no_icf`, the 64-bit STK `Ticker`, `delay_us`, and what the crt writes into the core; implemented, not bench-verified (`test_x035_platform`) |
-| [clock.md](clock.md) | RCC: ONE root (the 48 MHz HSI) and ONE divider (HPRE, /6 out of reset), the user trim, the flash's wait states sequenced around every change, the clock output on PB9 where the package bonds it, the gates, the resets and the reset flags; `Clock<internal, hz>` and `DynamicClock<Boot, Users...>`; implemented, not bench-verified (`test_x035_clock`) |
-| [pin.md](pin.md) | GPIO and AFIO: the F1's nibble with NO speed and NO open-drain output, 24 pins a port over THREE configuration registers, CFGHR written whole from a RAM copy as WCH's library does it, BSHR and BSXR for the two halves of a port, the pull in the output register and a pull-down on PA0..PA15, PC16 and PC17 alone, the bonding and the shorted pads refused at compile time, the one-way lock; the remap fields of AFIO_PCFR1 with the USARTs' columns as data, the debug port's field read and written only by a verb nobody reaches by accident, the EXTI port multiplexer; implemented, not bench-verified (`test_x035_pin`) |
-| [usart.md](usart.md) | The four USARTs: every one a full USART counting its divisor in HCLK, and which of them a part offers read off its pins (the QFN20 offers USART2, USART3 and USART4, and no USART1); the frame, mute, LIN, half duplex, IrDA, the smartcard, the synchronous clock and the flow-control pair as the resource's verbs, the chapter's exclusions refused; the `Uart` transport with the sibling strata's surface, its engine slots taking the empty tag alone; implemented, not bench-verified (`test_x035_usart`) |
-| [vendor/README.md](vendor/README.md) | The documents of record with their revisions - the reference manual V1.8, the datasheet V1.7, the QingKe V4 manual, the probe's manual, and the EVT package as the vendor's only voice on quirks; the no-errata statement |
+| [platform.md](platform.md) | Platform: `Ch32x035Platform` (the `csrrci` critical section, the WFE-shaped `idle()`, `ebreak`, the `.noinit` breadcrumb, the stack ledger), `Pfic` and `BRIO_CH32_INTERRUPT` with `no_icf`, the 64-bit STK `Ticker`, `delay_us`, and what the crt writes into the core - measured on the CH32X035F8U6 by `test_x035_platform` (42 verdicts): the WFE idle, called masked, waking on the tick, the STK's compare and its CNT arithmetic within 30 ppm of the interrupt count over 200 reloads, `delay_us` 112 to 124 cycles late and never early, an interrupt round trip of 100 to 104 cycles at 48 MHz with the hardware prologue, corecfgr's 0x1F making a timed loop 7.3 per cent SLOWER, INTSYSCR and mtvec as the crt wrote them and an MPP no MRET changes, and the reset flags, the signature and the chip-identifier word read at boot |
+| [clock.md](clock.md) | RCC: ONE root (the 48 MHz HSI) and ONE divider (HPRE, /6 out of reset), the user trim, the flash's wait states sequenced around every change, the clock output on PB9 where the package bonds it, the gates, the resets and the reset flags; `Clock<internal, hz>` and `DynamicClock<Boot, Users...>` - measured on the CH32X035F8U6 by `test_x035_clock` (21 verdicts): the whole HPRE ladder from 48 MHz down to 3 MHz and back with the tick, a busy-wait and the console exact at every rung and nothing of the tree written but HPRE and the wait states, the trim a step each way, RCC_AHBPCENR's reset value, fifteen gates opened and closed; RMVF a LEVEL, and the power controller's reset line refused after a pulse on it cut the part off its debug port |
+| [pin.md](pin.md) | GPIO and AFIO: the F1's nibble with NO speed and NO open-drain output, 24 pins a port over THREE configuration registers, CFGHR written whole from a RAM copy as WCH's library does it, BSHR and BSXR for the two halves of a port, the pull in the output register and a pull-down on PA0..PA15, PC16 and PC17 alone, the bonding and the shorted pads refused at compile time, the one-way lock; the remap fields of AFIO_PCFR1 with the USARTs' columns as data, the debug port's field read and written only by a verb nobody reaches by accident, the EXTI port multiplexer - measured on the CH32X035F8U6 by `test_x035_pin` (21 verdicts): every nibble in each of the three registers, CFGHR reading back what its copy wrote on a die the vendor's caution is not for, the levels, BSXR on PC14, the pulls, a remap field, the debug port's field and the EXTI multiplexer's three codes, and the levels across a jumper; a port read through its shut gate answering with the last word the bus carried |
+| [usart.md](usart.md) | The four USARTs: every one a full USART counting its divisor in HCLK, and which of them a part offers read off its pins (the QFN20 offers USART2, USART3 and USART4, and no USART1); the frame, mute, LIN, half duplex, IrDA, the smartcard, the synchronous clock and the flow-control pair as the resource's verbs, the chapter's exclusions refused; the `Uart` transport with the sibling strata's surface, its engine slots taking the empty tag alone - measured on the CH32X035F8U6 by `test_x035_usart` (27 verdicts): the divisor in HCLK, every frame and mode register by register with the chapter's exclusions refused, a frame's length and the break's timed, the debug port's column refused, and USART4 across a jumper at 115200, 1 Mbaud and 3 Mbaud with 8E1, 7O1 and 9N1 frames and a LIN break detected |
+| [vendor/README.md](vendor/README.md) | The documents of record with their revisions - the reference manual V1.8, the datasheet V1.7, the QingKe V4 manual, the probe's manual, and the EVT package as the vendor's only voice on quirks; the no-errata statement; where the documents disagree, and which of those items the CH32X035F8U6 has answered |
 
 [afio.hpp](../../brio/ch32x035/afio.hpp) and
 [dma_engine.hpp](../../brio/ch32x035/dma_engine.hpp) have no document
@@ -111,18 +113,18 @@ that speaks the probe's SDI transport. Its `wch-riscv.cfg` selects the
 `wlinke` adapter at 6000 kHz, the `sdi` transport, a `wch_riscv` target
 and a flash bank at address 0 whose size is 0 - found by probing the
 chip - and its binary carries a `ch32x` flash driver and the names
-CH32X033, CH32X034 and CH32X035. Whether it programs this part is not
-measured; it is the first thing the bench does (the list at the end of
-this page).
+CH32X033, CH32X034 and CH32X035. It programs and verifies the
+CH32X035F8U6 through a WCH-LinkE: every image the four suites ran from
+was written that way.
 
 The upload target and `brio flash` both write the image with
 `program ... verify` and start it with `reset halt` followed by
 `resume`: on the CH32V203 the fork's `reset run` leaves the hart at the
 reset vector ([../ch32vx03/README.md](../ch32vx03/README.md)), and the
-pair that starts the program there is the one used here, whether or not
-this part needs it. `brio flash` names the probe by the USB serial the
-manifest gives; the CMake upload target, as on the sibling projects,
-takes the one probe attached.
+pair that starts the program there starts it here too - whether
+`reset run` would on this part is not measured. `brio flash` names the
+probe by the USB serial the manifest gives; the CMake upload target, as
+on the sibling projects, takes the one probe attached.
 
 ## Serial console
 
@@ -150,8 +152,8 @@ exception code.
 ## What the documents say that shapes the stratum
 
 What the reference manual, the datasheet and the vendor's library say
-that the stratum is built around; each is a measurement the bench owes,
-and the list at the end of this page says which suite takes it.
+that the stratum is built around; what the CH32X035F8U6 answered is the
+next section, and what is still owed the list at the end of this page.
 
 - **One root and no bus prescaler.** SYSCLK is the 48 MHz HSI and
   nothing else (RM 3.3); HCLK is SYSCLK through HPRE, which resets to
@@ -212,6 +214,69 @@ and the list at the end of this page says which suite takes it.
   AFIO_EXTICR's two bits a line are 00 port A, 10 port B and 11 port C,
   with 01 reserved (8.3.2.2).
 
+## What the silicon taught the stratum
+
+What the CH32X035F8U6 answered on WCH's evaluation board - the four
+suites' `z`, each green whole, and a read over the debug port; the
+numbers are each document's bench findings.
+
+- **RMVF is a level, not a pulse.** Written 1 it reads back 1 -
+  RCC_RSTSCKR read 0x01000000 once the flags had cleared - where the
+  CH32V203's bit clears itself; `Rcc::clear_reset_flags()` writes it and
+  then clears it, and after that the register reads zero
+  ([clock.md](clock.md)).
+- **A reset pulse on the power controller's line cut the part off its
+  debug port.** Pulsed through RCC_APB1PRSTR.PWRRST after every gate of
+  the chapter had opened and closed, it silenced the console before the
+  next line drained, and the debug port answered "failed to connect"
+  until the supply was cycled - on a package with no reset pin, where a
+  hand on the supply is the only way back. Observed once and not
+  repeated on purpose: `Rcc::reset()` refuses that line and answers
+  false ([clock.md](clock.md)).
+- **A port read through its shut gate answers with the last word the bus
+  carried.** Port A's clock gate is closed out of reset, and its INDR,
+  read over the debug port while the gate was shut, returned the last
+  word the bus had moved and not the pads' levels. A pad is read after
+  its port is configured: every configuring verb of `Pin` and `Port`
+  opens the gate first, and a read does not ([pin.md](pin.md)).
+- **Of the manual's two reset values for RCC_RSTSCKR, 3.4.8's is the
+  QFN20's.** The boots measured read SFTRSTF and PORRSTF, a power-on and
+  the probe's resets behind them, and never PINRSTF: the register
+  table's 0x0C000000, with PINRSTF beside PORRSTF, is not this
+  package's, which has no reset pin ([clock.md](clock.md)).
+- **The vendor library's CFGHR caution is not this die's.** The word at
+  0x1FFFF704 reads 0x035E0611 - the library's 0x035E06x1 for the
+  CH32X035F8U6, with 1 in bits 7:4 - so WCH's own `GPIO_Init` reads
+  CFGHR here, and the register reads back what the stratum's copy wrote
+  for every nibble of the series. The stratum configures CFGHR from its
+  copy on every die regardless, for the dies with zero there
+  ([pin.md](pin.md)).
+- **A divided HCLK needs nothing but HPRE.** With nothing of the tree
+  written but HPRE and the flash's wait states - no prefetch buffer, the
+  bit 3.4.2 asks for being in no register - the clock suite's ladder ran
+  the tick, a busy-wait and the console exact at every rung from 48 MHz
+  down to 3 MHz and back, the console's divisor recomputed as HCLK /
+  baud at each: no bus prescaler stands between the clock and a USART
+  ([clock.md](clock.md)).
+- **corecfgr's 0x1F makes this core slower.** The crt writes WCH's
+  value, and a timed loop with a load and a data-dependent branch runs
+  7.3 to 7.4 per cent slower with it than with the register cleared,
+  where the CH32V203's V4B gained two cycles in 36811 from the same bits
+  and the CH32V303's V4F lost half to eight tenths of a per cent
+  ([platform.md](platform.md)).
+- **The WFE idle wakes on the V4C.** `idle()`, called with interrupts
+  masked as the kernel calls it, returns on the next tick with them
+  enabled - the form the sibling strata use because the CH32V00x's WFI
+  does not wake for an interrupt its core cannot take
+  ([platform.md](platform.md)).
+- **Where the suites reached it, the documents' word held**: the USB
+  blocks' gates open out of reset (RCC_AHBPCENR 0x00021004), the three
+  configuration registers and BSXR, the EXTI multiplexer's 00, 10 and
+  11, the debug port's field at 0 and the transport's refusal of the
+  columns on its pads, INTSYSCR and mtvec as the crt writes them and
+  main() in machine mode, and the vector table's entries for the STK
+  (12), the software interrupt (14), USART2 (39) and USART4 (43).
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -269,15 +334,15 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The upload.** Whether WCH's OpenOCD fork programs and verifies this
-  part through a WCH-LinkE, and whether `reset halt` + `resume` starts
-  the image: `brio flash` of the console, whose banner is the proof.
-- **Everything on this page and in the four documents**, each with its
-  letters: the platform (`test_x035_platform` a..h), the clock tree
-  (`test_x035_clock` a..f), the pins and AFIO (`test_x035_pin` a..e,
-  `w` across a jumper PA4-PA5, and `l` by name), the USARTs
-  (`test_x035_usart` a..f, and `w` across a jumper PB0-PB1). Each
-  document's own list says what each letter decides.
+- **What the four suites have not measured**, each in its document's
+  list with what would measure it: what the hardware prologue buys (the
+  platform suite's letter `e` in an image built without it), the HSI's
+  accuracy (a host that time-stamps the brackets of the platform suite's
+  `g` and the clock suite's `d`), the trim's step in hertz and the clock
+  output's waveform (a package that bonds PB9, and a counter), the reset
+  flags one event at a time, the idle hook's power, the lock (the pin
+  suite's `l`, by name), half a stop bit, and what the USART's modes do
+  on a wire (a logic analyser, or a letter across the jumper).
 - **The six parts other than the CH32X035F8U6.** Every one has its
   table, its linker script and its preset, and the whole stratum
   compiles for all seven both ways the hardware prologue can be built

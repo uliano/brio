@@ -515,9 +515,10 @@ void th_core() {
     // The PRIVILEGE is proven by the read itself: mstatus is a machine-mode
     // CSR, and from user mode the csrr above would have trapped instead of
     // arriving here. MPP is printed and not judged - it is the mode an MRET
-    // returns to, and the privileged specification has MRET leave it at the
-    // least-privileged mode the core implements, so after the first
-    // interrupt of the program it may well read 00 in machine mode.
+    // returns to: the privileged specification has MRET leave it at the
+    // least-privileged mode the core implements, while the QingKe V4 manual
+    // (8.2) keeps it at machine mode, which is what the silicon does -
+    // MPP reads 3 after thousands of MRETs (measured on the CH32X035F8U6).
     print(serial, "  mstatus.MPP=", (mstatus >> 11) & 0x3u, " (what the next MRET returns to)",
           crlf);
     bench.verdict("mstatus reads at all - machine mode, a user-mode read traps - with MIE set "

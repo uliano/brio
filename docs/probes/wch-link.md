@@ -67,6 +67,10 @@ attached is untested).
   after every programming, and a tool that closes the port on a timer
   rather than on the prompt should send it too before the next capture
   is trusted.
+- **A WCH-LinkE cannot be opened by WCH's OpenOCD fork while its serial
+  port is held open** by another program (the CH549 kind can), so a
+  letter cannot stream on the console while the debug port reads the
+  chip, and a console left open blocks an upload.
 - **A core in debug mode never sleeps** (QingKe V2 manual 5.1), so
   nothing about the idle path's power is measurable with the probe
   halted on it; and the debugger's `step` does not take pending

@@ -177,8 +177,10 @@ constexpr bool afio_remap_has_code(Remap r, uint8_t code) {
 /**
  * AFIO, monostate: the remaps, the EXTI multiplexer and the debug port's
  * own field. Every verb opens the block's clock gate first -
- * RCC_APB2PCENR bit 0, closed out of reset - because these registers
- * answer nothing without it and write nothing either.
+ * RCC_APB2PCENR bit 0, closed out of reset - because a register behind a
+ * shut gate is not there: a read of it answers with the last word the bus
+ * carried (measured on port A's INDR, whose gate is a bit of the same
+ * register) and a write into it lands nowhere.
  */
 struct Afio {
     Afio() = delete;

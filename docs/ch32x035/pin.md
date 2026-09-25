@@ -42,7 +42,9 @@ suite is `test_x035_pin`.
   chip-identifier word at 0x1FFFF704 has zero in bits 7:4, its GPIO
   initialization keeps a copy of each port's CFGHR in RAM, starting from
   the reset value, and writes the register WHOLE from the copy - never a
-  read-modify-write. The reference manual says nothing of it.
+  read-modify-write. The reference manual says nothing of it. The
+  CH32X035F8U6 has 1 there, and its CFGHR reads back what is written
+  (measured).
 - **The pull is the output register's.** An input with CNF 10 is
   pulled, and that pin's OUTDR bit says which way: 1 up, 0 down. Every
   pad has the pull-up; ONLY PA0..PA15, PC16 and PC17 have the pull-down
@@ -99,13 +101,16 @@ suite is `test_x035_pin`.
 - **The EXTI multiplexer** (8.3.2.2, 8.3.2.3): two bits a line in
   AFIO_EXTICR1 (lines 0..15) and AFIO_EXTICR2 (16..23) say which port's
   pin of the same number feeds the line - 00 port A, 10 port B, 11 port
-  C, 01 reserved, which is NOT the sibling families' order.
+  C, 01 reserved, which is NOT the sibling families' order; the three
+  codes are measured, read back on lines 5 and 19.
 - **AFIO_CTLR** (8.3.2.4) is the USB and USB PD pads' register - their
   pull-up modes, the PHYs' 3.3 V selection, the BC protocol's sources
   and comparators - with four pads' 10 us input filters (PA3, PA4, PB5,
   PB6).
-- **AFIO's clock gate is closed out of reset** (RCC_APB2PCENR bit 0),
-  and its registers answer nothing until it opens.
+- **AFIO's clock gate is closed out of reset** (RCC_APB2PCENR bit 0,
+  3.4.6), and every `Afio` verb opens it before it touches a register. A
+  read through a shut gate is not the register's: through a port's, it
+  returns the last word the bus carried (measured, below).
 
 ## Types and verbs
 
@@ -199,6 +204,48 @@ A configuration frozen for good (until the next reset):
 brio::Pin<'B', 12>::lock();
 ```
 
+## Bench findings
+
+The reference suite is `test_x035_pin` (21 verdicts in `z`, letter `w`
+with its jumper PA4-PA5 in place) on a CH32X035F8U6 - WCH's evaluation
+board in its QFN20 edition, over a WCH-LinkE - beside one read over the
+debug port. What they measured:
+
+- **CFGHR reads back what its copy wrote** (letter `a`): PB11 taken
+  through the five nibbles of the series, the copy and the register
+  agreeing at every one - 0x44440444, 0x44444444, 0x44448444, 0x44441444
+  and 0x44449444, the other seven nibbles at 4, the floating input of
+  reset - on a die whose chip-identifier word reads 0x035E0611, with 1
+  in bits 7:4: a die WCH's library reads CFGHR on, and not the one its
+  caution is for. The five nibbles land in CFGLR too (PA6), the three inputs in
+  CFGXR (PC14), and every pad released reads the floating input again.
+- **The levels** (letter `b`): PA6 driven high and low reads each back
+  through INDR and OUTDR, and one BSHR store toggles it; the run-time
+  `PinRef` clears, toggles and reads the same pad; PA5, PA6 and PA7 are
+  set in one BSHR store and toggled in another, and the whole-port write
+  drives what it names.
+- **The pulls** (letter `c`): PA7, free, reads 1 pulled up and 0 pulled
+  down; PB3 reads high on its pull-up, and the pull-down it has not got
+  is refused with nothing written.
+- **The high byte** (letter `d`): PC14's output data bit is set through
+  BSXR and cleared through BCR; pulled up, the pad reads 0 - the board
+  ties that line, CC1, to ground through 5.1 kOhm at its connector.
+- **AFIO** (letter `e`): TIM3's remap field takes code 1, reads it back
+  and takes its reset code again; SW_CFG reads 0 with the whole of
+  PCFR1 at zero, the debug port the probe's; EXTI line 5 starts on port
+  A, takes port B with code 10 and line 19 port C with code 11 in
+  EXTICR2, each read back, and both go back to port A with the two
+  registers at zero.
+- **Across a wire** (letter `w`), the jumper PA4-PA5 found at both
+  levels before the letter judged: PA5 follows PA4 over eight edges, and
+  PA4 driven low holds PA5 low against its pull-up.
+- **A port read through its shut gate answers with the last word the
+  bus carried**, not with the pads: port A's gate is closed out of
+  reset, and its INDR, read over the debug port while the gate was shut,
+  returned the last word the bus had moved. A pad is read after its port
+  is configured - every configuring verb of `Pin` and `Port` opens the
+  gate, and `read()` and `in()` do not.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -221,25 +268,10 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The nibbles in the three registers**: every mode of the series into
-  PA6 (CFGLR) and PB11 (CFGHR), the inputs into PC14 (CFGXR), each read
-  back - and CFGHR's RAM copy against what the register reads, with the
-  chip-identifier word's bits 7:4 printed beside them, which is what
-  says whether the vendor's caution is this die's: `test_x035_pin`
-  letter a (the word itself, `test_x035_platform` letter a).
-- **The levels**: a driven pad read back through INDR, the set/reset
-  halves and the toggle on one pin and on three, the `PinRef`, the
-  whole-port write: letter b.
-- **The pulls**: up and down on a pad that has both, up on pads that
-  have no pull-down and the refusal of the down there: letter c.
-- **The high byte**: PC14's output bit set and cleared through BSXR and
-  BCR while it is a pulled input, and the level the board's CC
-  pull-down leaves it at: letter d.
-- **AFIO**: a remap field written and read back, the debug port's field
-  as it stands, and the EXTI multiplexer's three codes written and read
-  back: letter e.
-- **The levels across a wire and a pull against a driver**: letter `w`,
-  with a jumper PA4-PA5 that the letter detects before it judges.
+- **What the CFGHR copy guards against**: the CH32X035F8U6's register
+  reads back right (letter `a`); a die with zero in the chip-identifier
+  word's bits 7:4 - another part or another lot - is what would show the
+  case WCH's library keeps the copy for.
 - **The lock**: PB12's configuration frozen, a reconfiguration left
   without effect, the copy unchanged: letter `l`, by name only, because
   nothing but a reset undoes it.

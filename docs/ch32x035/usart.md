@@ -67,7 +67,8 @@ reference suite is `test_x035_usart`.
   value to store is simply HCLK / baud, rounded - 417 for 115200 at 48
   MHz, which gives 115108 baud, and exactly 16 for 3 Mbaud. Below 16
   there is nothing to divide by. The receiver's tolerance is "not less
-  than 3%" (14.3).
+  than 3%" (14.3). A divisor of 16 carries bytes on a wire (measured,
+  below).
 - **The word is M: eight or nine bits, the parity bit included**
   (14.10.4), so seven data bits exist only with parity and nine only
   without; PCE and PS choose none, even or odd; STOP gives 1, 0.5, 2 or
@@ -85,7 +86,8 @@ reference suite is `test_x035_usart`.
   while RXNE stands.
 - **LIN** (LINEN): SBK sends a break, which the hardware clears on the
   break's stop bit; a break of 10 or 11 bits (LBDL) is detected into
-  LBD, with its own interrupt enable.
+  LBD, with its own interrupt enable. Both are measured, the detection
+  on a wire (below).
 - **Single-wire half duplex** (14.5, HDSEL): TX alone, the pad "in
   output mode plus pull" - an alternate PUSH-PULL output with an
   external pull, the only alternate output this series has - with LIN,
@@ -209,6 +211,63 @@ brio::Usart<4>::lin({.break_11bit = false, .break_interrupt = true});
 brio::Usart<4>::send_break();
 ```
 
+## Bench findings
+
+The reference suite is `test_x035_usart` (27 verdicts in `z`, letter `w`
+with its jumper PB0-PB1 in place) on a CH32X035F8U6 - WCH's evaluation
+board in its QFN20 edition, over a WCH-LinkE - at 48 MHz, the console on
+USART2 and the instance under test USART4 on its default column, PB0
+and PB1. What it measured:
+
+- **The divisor counts HCLK** (letter `a`): the console's BRR is 417 at
+  48 MHz - 26 and 1/16 - which `actual_baud()` puts at 115107 baud, 0.08
+  per cent under 115200; 3 Mbaud is a divisor of exactly 16, and 3.2
+  Mbaud has none. Down the clock suite's ladder the same port's divisor
+  is HCLK / baud at every rung, from 417 at 48 MHz to 26 at 3 MHz, and
+  the console reads clean at each ([clock.md](clock.md)).
+- **Every frame lands as the chapter spells it** (letter `b`), register
+  by register on USART4 with the port disabled and BRR holding 417
+  through each:
+
+  | frame | CTLR1 | CTLR2 |
+  |---|---|---|
+  | 8N1 | 0x0000 | 0x0000 |
+  | 8E1 | 0x1400: M and PCE, the parity bit the word's ninth | 0x0000 |
+  | 7O2 | 0x0600: PCE and PS, a word of eight | 0x2000: STOP = 10 |
+  | 9N1.5 | 0x1000: M | 0x3000: STOP = 11 |
+
+  Seven data bits with no parity bit are refused, and so is a divisor
+  below 16, BRR keeping 417.
+- **The modes' bits and their exclusions** (letter `c`), each written,
+  read back and refused where 14.4 to 14.7 say: LIN takes LINEN and the
+  11-bit detection, with half duplex and IrDA refused under it; half
+  duplex takes HDSEL, with LIN and the smartcard refused under it; IrDA
+  refuses two stop bits, takes the low-power mode with a prescaler of 7
+  and holds the stop bits at one while it is on; the smartcard takes a
+  guard time of 12, a prescaler of 5, 1.5 stop bits, CLKEN and NACK, and
+  `smartcard_off()` leaves CLKEN to `synchronous_off()`; the synchronous
+  clock is refused while TE is set and takes CPOL, CPHA and LBCL with the
+  port disabled; the flow-control pair takes RTSE and CTSE; mute mode
+  takes the address-mark wake, the address 9 and RWU.
+- **A frame's length** (letter `d`): one 8N1 byte of the console timed
+  from the DATAR write to TC took 4440 HCLK cycles, against 4170 for ten
+  bit times of the divisor - 10.65 bit times.
+- **The break** (letter `e`): SBK set on USART4 at 115200 cleared itself
+  4581 HCLK cycles later, 10.99 bit times of the 417-cycle divisor.
+- **The debug port's column is refused** (letter `f`): with SW_CFG at 0,
+  `init()` of USART3 on its code 1 - PC18 and PC19 - answers false,
+  USART3's gate is as it was and its remap field at the reset code.
+- **USART4 talking to itself** (letter `w`), the jumper found at both
+  levels before the letter judged: eight bytes - 0x00, 0xFF, 0x55, 0xAA,
+  0x01, 0x80, 0x7E and 0x81 - loop back whole through the
+  interrupt-driven transport at 115200, at 1 Mbaud and at 3 Mbaud, a
+  divisor of 16, with the frame, noise, parity and overrun counters all
+  zero; polled on the resource, an 8E1 frame (0xA5) and a 7O1 one (0x5A)
+  arrive with no error and a 9N1 frame carries its ninth bit (0x1C3); in
+  LIN mode the receiver raises LBD on the break its own transmitter
+  sends. The two transports ran on their own vectors, USART2's 39 and
+  USART4's 43.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -223,30 +282,16 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The divisor**: the console's BRR for 115200 at 48 MHz, the rate it
-  gives, and the arithmetic at 3 Mbaud: `test_x035_usart` letter a.
-- **The frame, register by register** on USART4 with the port disabled
-  (8N1, 8E1, 7O1, 9N1, the four stop codes) and the refusals: letter b.
-- **The modes and their exclusions**, register by register - LIN, half
-  duplex, IrDA, the smartcard and the synchronous clock each refused
-  where 14.4 to 14.7 say and read back where not: letter c. What the
-  modes do on a wire - the IrDA pulse, the smartcard's guard time and
-  NACK, the clock on CK and the SENSE OF LBCL - wants a logic analyser
-  on the pads, which no letter has.
-- **A frame's length on the wire**: one console byte timed from the
-  DATAR write to TC, against ten bit times of the divisor: letter d.
-- **The break**: SBK set on USART4 and the time until the hardware
-  clears it: letter e.
-- **The debug port's refusal**: `init()` of USART3's column 1 answering
-  false and touching nothing: letter f.
-- **Bytes across a wire**: USART4 talking to itself through a jumper
-  PB0-PB1 at 115200, 1 Mbaud and 3 Mbaud through the transport, 8E1, 7O1
-  and 9N1 polled on the resource, and a LIN break detected: letter `w`,
-  which detects the jumper before it judges.
-- **The HSI's accuracy as a UART's**: a console that reads clean at
-  every rung of the clock ladder is the proof that HCLK lands within the
-  receiver's tolerance ([clock.md](clock.md), `test_x035_clock` letter
-  b).
-- **USART1 and the other packages' columns**: USART1 has no usable
-  column on the QFN20; a board of another package would measure it and the
-  columns this one does not bring out.
+- **Half a stop bit**: STOP = 01 is written by `stop_bits()` and
+  `configure()` and by no letter - letter `b` takes the other three
+  codes, and a fifth case there would measure it.
+- **What the modes do on a wire**: letter `c` reads every mode's bits
+  back and letter `w` measures LIN's break on the wire; the IrDA pulse,
+  the smartcard's guard time and NACK, the clock on CK and the SENSE OF
+  LBCL want a logic analyser on the pads, and mute mode's wake and the
+  flow-control pair's handshake a letter that drives them across a
+  wire, none of which this suite has.
+- **USART1 and USART3, and the other packages' columns**: USART1 has no
+  usable column on the QFN20 and USART3's only one is the debug port's,
+  so neither has carried a byte here; a board of another package would
+  measure them and the columns this one does not bring out.
