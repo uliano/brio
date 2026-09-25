@@ -30,11 +30,12 @@
 //    external clock mode 1 the same channel COUNTS SCL edges, which is
 //    what prices an unstick().
 //
-//  - A PEER BOARD running `twi_peer` (a Nucleo-F446RE; the peer's
-//    ident says which), commanded IN BAND over the bus under test
-//    through avrdx/src/apps/twi_link.hpp, included by relative path:
-//    one source of truth for the wire format on every architecture.
-//    Three wires, both boards at 3.3 V:
+//  - A PEER BOARD running `twi_peer` (a Nucleo-F446RE, or a board of
+//    the other series of this stratum running this project's own port
+//    of it; the peer's ident says which), commanded IN BAND over the
+//    bus under test through avrdx/src/apps/twi_link.hpp, included by
+//    relative path: one source of truth for the wire format on every
+//    architecture. Three wires, both boards at 3.3 V:
 //
 //      PB6 (SCL)  <->  the peer's SCL
 //      PB7 (SDA)  <->  the peer's SDA
@@ -42,11 +43,12 @@
 //
 //    THE PULL-UPS ARE NOT THIS BOARD'S. An open-drain pad has no pull
 //    in any output mode on this family (the pin chapter), so nothing
-//    here holds the bus up: the peer's two pads do, and letter a
-//    measures what they are worth in nanoseconds of rise. The peer's
-//    command-mode client answers ONE address (0x6B) with no general
-//    call and no second address, which is why every wireless letter
-//    can run with it attached.
+//    here holds the bus up - and nothing on a CH32 peer does either,
+//    for the same reason: the wire wants resistors, or a peer whose
+//    pads pull, and letter a measures what they are worth in
+//    nanoseconds of rise. The peer's command-mode client answers ONE
+//    address (0x6B) with no general call and no second address, which
+//    is why every wireless letter can run with it attached.
 //
 //    Every peer letter asks for a ping first and SKIPS (with no
 //    verdict claimed) when three command retries fail: a suite that
@@ -106,6 +108,15 @@
 //   n  A TARGET STUCK MID-BYTE: the chip's own target left holding SDA
 //      low by a host taken off the bus through its reset line, and
 //      unstick()'s clocks counted on the pad by the timer
+// and by name only, not in z, against the peer:
+//   r  THE LATE REPEATED START: a write of one to four bytes and a
+//      one-byte read with the repeated START requested AFTER BTF, the
+//      order the engine does not use, driven through the resource by
+//      hand - once as soon as BTF is seen and once with SCL held 20 us
+//      past it - and the engine's own order beside each as the control;
+//      the peer's tally says how many of the written bytes its target
+//      received. It names a target as losing the last byte or not and
+//      judges neither answer: it passes when the peer answered
 //
 // With the peer attached `z` outlasts `brio run`'s default 60 s (the
 // peer's command windows are hundreds of milliseconds each): pass
@@ -121,7 +132,7 @@
 // letters (the groups line below; design/overview.md, "A suite's image
 // fits the family's smallest chip") and every other part as one image.
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = abcd,efgh,ijk
+// build: groups = abcd,efgh,ijkr
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -1901,6 +1912,203 @@ void tk_stress() {
 }
 
 // ===========================================================================
+// r - the late repeated START, by name
+// ===========================================================================
+//
+// THE ENGINE REQUESTS A WRITE-THEN-READ'S REPEATED START WHILE THE LAST
+// WRITTEN BYTE STILL SHIFTS (ch32vx03/i2c.hpp's header), because a CH32
+// target was measured losing that byte when the START came after BTF.
+// This letter drives the OTHER order on purpose - the engine keeps no
+// hook for it, so the tenure runs through the resource by hand, every
+// flag polled - and asks the far end how many of the written bytes it
+// received. The bytes written are 0x01, 0x02, 0x04 and 0x08, so the
+// peer's running sum of what it received is also the SET of what it
+// received. What a target does with the late START is the measurement:
+// the letter judges nothing about it.
+
+/// Poll STAR1 until a flag of `want` or an error flag rises: the word
+/// seen, or zero when the bound ran out.
+uint16_t await_star1(uint16_t want) {
+    for (uint32_t i = 0; i < 400'000UL; ++i) {
+        const uint16_t s1 = H::status1();
+        if ((s1 & (want | i2c_errors)) != 0u) {
+            return s1;
+        }
+    }
+    return 0;
+}
+
+/// A hand-driven tenure's failure in i2c_bus.hpp's words: the error flags
+/// cleared and the STOP issued where the chapter leaves it to the host
+/// (19.5) - an arbitration loss has released the bus already.
+uint8_t by_hand_failed(uint16_t s1, bool on_address) {
+    if (s1 == 0u) {
+        return no_answer;
+    }
+    H::clear_errors(s1);
+    if ((s1 & i2c_arlo) != 0u) {
+        return i2c_arb_lost;
+    }
+    H::stop();
+    if ((s1 & i2c_af) != 0u) {
+        return on_address ? i2c_nack_addr : i2c_nack_data;
+    }
+    return i2c_bus_error;
+}
+
+/// Whether a polled wait ended on the flag it waited for, and not on an
+/// error or on its bound.
+bool arrived(uint16_t s1, uint16_t want) {
+    return (s1 & i2c_errors) == 0u && (s1 & want) != 0u;
+}
+
+/**
+ * ONE WRITE-THEN-READ IN THE ORDER THE ENGINE DOES NOT USE: the address
+ * and every written byte on their flags (EVT5, EVT6, EVT8), then BTF
+ * waited for - the last byte and its acknowledge done, this end holding
+ * SCL low - and `hold_us` more, and only then the repeated START; behind
+ * it a ONE-byte read by 19.3's procedure for one (ACK clear before ADDR is
+ * cleared, STOP right after). The engine's two vectors are silenced for
+ * the tenure, and host_ready() gives them back.
+ */
+uint8_t late_start_tenure(uint8_t addr, const uint8_t* w, uint8_t n, uint16_t hold_us,
+                          uint8_t& got) {
+    Pfic::disable(H::event_irq());
+    Pfic::disable(H::error_irq());
+    H::event_interrupt(false);
+    H::buffer_interrupt(false);
+    H::error_interrupt(false);
+    H::clear_errors(i2c_all_errors);
+    H::pos(false);
+    H::ack(false);
+    H::start();
+    uint16_t s1 = await_star1(i2c_sb);
+    if (!arrived(s1, i2c_sb)) {
+        return by_hand_failed(s1, true);
+    }
+    H::data(static_cast<uint8_t>(addr << 1));
+    s1 = await_star1(i2c_addr);
+    if (!arrived(s1, i2c_addr)) {
+        return by_hand_failed(s1, true);
+    }
+    (void)H::clear_addr();
+    for (uint8_t i = 0; i < n; ++i) {
+        s1 = await_star1(i2c_txe);
+        if (!arrived(s1, i2c_txe)) {
+            return by_hand_failed(s1, false);
+        }
+        H::data(w[i]);
+    }
+    // EVT8_2 - TxE and BTF, the last byte out and acknowledged - and only
+    // now the repeated START.
+    s1 = await_star1(i2c_btf);
+    if (!arrived(s1, i2c_btf)) {
+        return by_hand_failed(s1, false);
+    }
+    if (hold_us != 0u) {
+        (void)delay_us(clock, hold_us);
+    }
+    H::start();
+    s1 = await_star1(i2c_sb);
+    if (!arrived(s1, i2c_sb)) {
+        return by_hand_failed(s1, true);
+    }
+    H::data(static_cast<uint8_t>((addr << 1) | 1u));
+    s1 = await_star1(i2c_addr);
+    if (!arrived(s1, i2c_addr)) {
+        return by_hand_failed(s1, true);
+    }
+    (void)H::clear_addr();
+    H::stop();
+    s1 = await_star1(i2c_rxne);
+    if (!arrived(s1, i2c_rxne)) {
+        return by_hand_failed(s1, false);
+    }
+    got = H::data();
+    return i2c_ok;
+}
+
+void tr_late_start() {
+    if (!need_peer()) {
+        return;
+    }
+    // WHICH TARGET this is, in its own words: the high byte of the firmware
+    // version names the peer's port (twi_link.hpp), the label the board.
+    twilink::Frame f;
+    if (query(Op::ident, f) && f.op == Op::ident_data && f.len == twilink::ident_size) {
+        const auto id = twilink::get_ident(f.data);
+        char label[9] = {};
+        for (uint8_t i = 0; i < 8; ++i) {
+            label[i] = id.label[i];
+        }
+        print(serial, "  the target: label '", label, "', fw ", hex(id.version),
+              " (the high byte names the peer's port, twi_link.hpp)", crlf);
+    }
+
+    struct Order {
+        bool by_hand;
+        uint16_t hold_us;
+        const char* name;
+    };
+    const Order orders[3] = {{true, 0, "the START after BTF, at once "},
+                             {true, 20, "the START after BTF, +20 us  "},
+                             {false, 0, "the engine's order (control) "}};
+    const uint8_t w[4] = {0x01, 0x02, 0x04, 0x08};
+    uint8_t reports = 0;
+    uint8_t last_in[3] = {};
+    uint8_t last_out[3] = {};
+    for (uint8_t n = 1; n <= 4u; ++n) {
+        for (uint8_t k = 0; k < 3u; ++k) {
+            const Order& o = orders[k];
+            host_ready();
+            const PeerServe s = arm_serve(static_cast<uint8_t>(0x40u + 0x10u * k + n));
+            uint8_t got = 0xEE;
+            uint8_t st = no_answer;
+            if (s.armed) {
+                if (o.by_hand) {
+                    st = late_start_tenure(twilink::dut_addr, w, n, o.hold_us, got);
+                    for (uint16_t t = 0; t < 1000u && H::stopping(); ++t) {
+                        (void)delay_us(clock, 1);
+                    }
+                    host_ready();
+                } else {
+                    rx_buf[0] = 0xEE;
+                    st = host_tenure(twilink::dut_addr, w, n, rx_buf, 1, link_speed);
+                    got = rx_buf[0];
+                }
+            }
+            settle_ms(350);   // past the serve's own deadline: the peer is back
+            twilink::Report r{};
+            const bool rep = s.armed && peer_report(r);
+            print(serial, "  ", n, n == 1u ? " byte,  " : " bytes, ", o.name, ": status ", st,
+                  ", read ", hex(got));
+            if (!rep) {
+                print(serial, "; no report from the peer", crlf);
+                continue;
+            }
+            ++reports;
+            const bool last = (r.sum & (1u << (n - 1u))) != 0u;
+            if (last) {
+                ++last_in[k];
+            } else {
+                ++last_out[k];
+            }
+            print(serial, "; the target took ", r.aux0, " of ", n, " (the set ", hex(r.sum),
+                  ", the last byte ", last ? "in" : "MISSING", "), ", r.addr_hits,
+                  " address matches", crlf);
+        }
+    }
+    for (uint8_t k = 0; k < 3u; ++k) {
+        print(serial, "  ", orders[k].name, ": the last byte in ", last_in[k], " and MISSING ",
+              last_out[k], " of the four counts", crlf);
+    }
+    bench.verdict("the peer answered - the counts above name its target as losing the last "
+                  "written byte before a late repeated START or not, and neither answer is "
+                  "judged",
+                  reports != 0u);
+}
+
+// ===========================================================================
 // The CH32V303's self-link: the chip's two controllers on one bus (l..n)
 // ===========================================================================
 //
@@ -2639,6 +2847,9 @@ int main() {
     bench.letter('k', "a ten-second stress at fast mode with the counters at both ends",
                  tk_stress);
     register_self_link_letters();
+    bench.letter('r', "THE LATE REPEATED START against the peer: the START after BTF by hand, "
+                      "the target's tally printed and nothing judged",
+                 tr_late_start, false);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL96" : "FAILED",

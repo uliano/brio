@@ -339,7 +339,7 @@ struct Ident {
     /// IMPLEMENTATION and is allocated here, once, for every
     /// architecture that speaks this protocol: 0x01 the avrdx peer,
     /// 0x02 the samc21 peer, 0x03 the stm32g0 peer, 0x04 the stm32f4
-    /// peer. The low byte is
+    /// peer, 0x05 the ch32vx03 peer. The low byte is
     /// that peer's own revision. A host may use the high byte to
     /// expect a capability, never to decide correctness: what a peer
     /// can do it answers with, and what it cannot it refuses.

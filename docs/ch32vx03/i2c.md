@@ -441,6 +441,21 @@ Implemented, not bench-verified (each with what would measure it):
   now that it is requested before BTF: measured against the CH32V303's
   own two controllers; the CH32V203C8T6's peer board running the tenure
   shapes again is what would measure it there.
+- **A CH32V203 target, and the two parts on one bus.** That a CH32 target
+  loses the last written byte before a late repeated START (above) was
+  measured on the CH32V303VCT6's own two controllers; whether a CH32V203
+  target does the same is not measured, and neither is either part as the
+  far end of the other's peer letters - the peer program the suite talks
+  to builds for the CH32V203C8 and the CH32V303VC too. What would measure
+  both is a CH32V203C8T6 and a CH32V303VCT6 with I2C1 on I2C1, a common
+  ground and one board's resistors on the wire, the suite on one part and
+  the peer on the other and then the roles swapped: letters c to k against
+  a CH32 target, and the suite's by-name letter `r`, which writes one to
+  four bytes and reads one with the repeated START requested after BTF -
+  as soon as BTF is seen and 20 us past it - and in the engine's own order
+  beside them, and prints how many of the written bytes the target took
+  and whether the last was among them. It judges nothing: the counts name
+  the target.
 - **NOSTRETCH, and the overrun it admits.** The option is written and
   read back; measuring it wants a controller that will not wait, which
   the peer's engine is not.
