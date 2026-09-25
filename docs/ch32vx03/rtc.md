@@ -117,10 +117,14 @@ of this family's other finding about this fabric, that an EXTI line
 INTO a peripheral reaches it through that peripheral's EVENT enable and
 not its interrupt enable.
 
-AND THE ALARM FIRES AS THE COUNTER LEAVES THE VALUE IT WAS ARMED AT:
-the count a handler reads is ALR + 1, not ALR. A program that wants
-something done AT a count arms the alarm at that count and finds the
-counter one further on.
+AND THE ALARM FIRES AS THE COUNTER LEAVES THE VALUE IT WAS ARMED AT,
+on both parts - five ticks after a count set to zero and an alarm at
+four. What the handler then READS is the part's: ALR + 1 on the
+CH32V203C8T6, ALR itself on the CH32V303VCT6, where the flag reaches
+the bus before the count does - as the overflow flag does on both. A
+program that wants something done AT a count arms the alarm at that
+count and takes the count it reads in the handler for what the part
+makes it, one further on or not yet.
 
 ### RTCCLK, and the one number that is not knowable from the part number
 
@@ -346,10 +350,12 @@ board.
   1 000 063 us - which puts the low-speed crystal at **32 765.9 Hz,
   63 parts per million slow** of its nominal 32.768 kHz.
 - **The alarm, on both paths.** On the RTC's own vector the handler
-  read CNT = ALR + 1, four to five ticks of a 64 Hz counter after
-  arming (78 ms measured against 62.5 nominal, the arm falling inside a
-  tick). On EXTI line 17 the handler ran with ALRIE CLEAR, 71 ms after
-  arming.
+  ran 78 ms after a count of zero with the alarm at four - five ticks
+  of a 64 Hz counter, the arm falling inside a tick - on both parts,
+  and read CNT = ALR + 1 on the CH32V203C8T6, CNT = ALR on the
+  CH32V303VCT6 (78091 us and the armed value, five runs of five, with
+  the second flag standing beside the alarm's). On EXTI line 17 the
+  handler ran with ALRIE CLEAR, 71 ms after arming.
 - **The overflow.** Set two ticks short of 0xFFFFFFFF at 64 Hz, OWF
   stood 31.3 ms later - two ticks exactly - with the counter still
   reading 0xFFFFFFFF at that instant and the wrapped value appearing

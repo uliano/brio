@@ -227,8 +227,15 @@ void ta_block() {
     bench.verdict("the HB gate opens and closes the block, and with RNGEN set a first word "
                   "stands in RNG_DR",
                   gate_shut && gate_open && first);
-    bench.verdict("the enable's first word is ZERO - the word FIPS PUB 140-2's discard exists "
-                  "for", first && first_word == 0u);
+    // The WORD is printed and not judged: a re-enable's first word is
+    // the zero letter j measures 256 times over, but the first enable
+    // after a reset gave zero at every boot of one day and a nonzero
+    // word at every boot after a power cycle - which is why a restart
+    // discards two words whatever the first one is.
+    bench.verdict("the enable's first word stands - zero or not: a re-enable's is the zero "
+                  "of letter j, the first after a reset has been both, and a restart "
+                  "discards it either way",
+                  first);
 
     // The driver's own bring-up over it: the discard, the statuses.
     const bool started = Rng::init();

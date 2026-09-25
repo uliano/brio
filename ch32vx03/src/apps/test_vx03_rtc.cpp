@@ -343,11 +343,17 @@ void tc_select() {
           " Hz nominal, the HSE over ", device::rtc_hse_div[0], " = ",
           rtc_hse_clock_hz(xtal_hz, 0), " Hz or over ", device::rtc_hse_div[1], " = ",
           rtc_hse_clock_hz(xtal_hz, 1), " Hz", crlf);
-    bench.verdict("the HSE division is not a single number on this device class - 3.4.9 "
-                  "gives 512 or 128 BY LOT NUMBER - so the part table states the pair and "
-                  "a program that needs the rate measures which it has",
-                  !rtc_hse_divider_known && device::rtc_hse_div[0] == 512u &&
-                      device::rtc_hse_div[1] == 128u);
+    if constexpr (rtc_hse_divider_known) {
+        bench.verdict("the HSE division is ONE number on this part - 3.4.9 names every "
+                      "CH32V303 among the parts that divide by 128, with no lot rule - so "
+                      "the part table states it twice and the driver knows it",
+                      device::rtc_hse_div[0] == 128u && device::rtc_hse_div[1] == 128u);
+    } else {
+        bench.verdict("the HSE division is not a single number on this device class - 3.4.9 "
+                      "gives 512 or 128 BY LOT NUMBER - so the part table states the pair "
+                      "and a program that needs the rate measures which it has",
+                      device::rtc_hse_div[0] == 512u && device::rtc_hse_div[1] == 128u);
+    }
 }
 
 // ===========================================================================
@@ -549,11 +555,23 @@ void tf_alarm() {
     print(serial, "  the RTC's own vector: alarm armed at ", hex(target), ", the handler "
           "ran ", rtc_irqs, " time(s) after ", own_us, " us with CNT=", hex(rtc_irq_count),
           " and flags ", hex(rtc_irq_flags), crlf);
-    bench.verdict("the alarm reaches the RTC's own vector, and the counter the handler "
-                  "reads is the armed value PLUS ONE: the event is raised as the counter "
-                  "LEAVES the number it was armed at, so a program that wants an alarm AT "
-                  "a count arms it at that count and reads one more",
-                  armed && ints && rtc_irqs >= 1u && rtc_irq_count == target + 1u);
+    // Five ticks after the count was set to zero, on both parts: the
+    // event is raised as the counter LEAVES the armed value. What the
+    // handler then reads differs by part - the new count on the
+    // CH32V203C8T6, the old one on the CH32V303VCT6, where the flag
+    // reaches the bus before the count does, as the overflow's does on
+    // both (letter g).
+    constexpr uint32_t read_at_alarm = device::device_class == DeviceClass::v30x_d8 ? 0u : 1u;
+    bench.verdict(read_at_alarm == 1u
+                      ? "the alarm reaches the RTC's own vector, and the counter the handler "
+                        "reads is the armed value PLUS ONE: the event is raised as the counter "
+                        "LEAVES the number it was armed at, and this part's bus reads the new "
+                        "count by then"
+                      : "the alarm reaches the RTC's own vector, and the counter the handler "
+                        "reads is the armed value ITSELF: the event is raised as the counter "
+                        "LEAVES the number it was armed at (five ticks after a count of zero), "
+                        "and on this part the flag reaches the bus before the count does",
+                  armed && ints && rtc_irqs >= 1u && rtc_irq_count == target + read_at_alarm);
     bench.verdict("and RTC_CTLRH takes its write OUTSIDE the configuration window - "
                   "`interrupts()` waits for RTOFF and stores, with no CNF around it - "
                   "which is 6.2.2's list of the four backup-domain registers read for "

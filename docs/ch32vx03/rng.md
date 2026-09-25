@@ -58,10 +58,12 @@ RNGEN cleared and set.
 after an enable be kept for comparison and not used, and that every word
 after it be compared with the one before, a repeat failing the test.
 Chapter 29 does not ask it; this silicon does. Measured: the first word
-after RNGEN is set is 0x00000000 on every enable, some sixty core cycles
-after it, at every rate; and RNGEN cleared freezes the block - the word
-that stood across the disable stays readable and no other lands behind
-it. So a RESTART - `init()` of a generator that is off, and `recover()` -
+after RNGEN is set is 0x00000000 on every enable that follows a disable,
+some sixty core cycles after it, at every rate - while the FIRST enable
+after a reset gave that zero at every boot of one day and a nonzero
+word at every boot after a power cycle, a difference the bench has not
+explained; and RNGEN cleared freezes the block - the word that stood
+across the disable stays readable and no other lands behind it. So a RESTART - `init()` of a generator that is off, and `recover()` -
 takes the standing word between the disable and the enable and
 discards TWO words after it, the zero and the one that follows: a
 restart that discarded one handed the zero out once in some thirteen
@@ -194,8 +196,15 @@ c moves the clock tree and puts it back.
 
 - **The block** (letter `a`): the gate shut after `release()` and open
   after `clock(true)`; with RNGEN set the first word stood 62 to 70 core
-  cycles later and read 0x00000000; `init()` left no error standing,
-  current or latched; the vector is line 63.
+  cycles later - 0x00000000 at every boot of one day, 0x8FC7E5B0,
+  0xE31CEF9D and 0xE2AA5943 at three boots after a power cycle (the
+  zero of a re-enable is letter `j`'s, 256 of 256); `init()` left no
+  error standing, current or latched; the vector is line 63. At the
+  first boot after that power cycle RNG_SR read 0x40 BEFORE anything was
+  enabled: a seed error latched by the supply's excursion and kept
+  across the reflash's system reset, which no reset line exists to
+  clear - the recovery letter's `recover()` took it down, and a boot
+  path that finds SEIS standing does the same.
 - **The word** (letter `b`, at 144 MHz): DRDY down right after a read
   of RNG_DR and up again 9 to 55 core cycles later, 20 on average;
   2.5 to 2.6 million words a second through `read()`, some seven
